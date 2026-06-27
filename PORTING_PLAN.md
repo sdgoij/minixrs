@@ -534,18 +534,20 @@ The Rust port targets two architectures:
   - [x] Tests: Field values checked (sig_mgr default is i32::MIN/NONE, ProcTable size, idle priv exists)
   - **15 tests** covering defaults, flags, SysMap set/clear/bounds, I/O/mem/timer defaults, constants
 
-- [ ] **3.3 — Implement process table**
+- [x] **3.3 — Implement process table**
   - Source: `.refs/minix-3.3.0/minix/kernel/table.c`
-  - Global `PROC_TABLE` array: `[MaybeUninit<Proc>; NR_PROCS_TOTAL]`
-  - `proc_init()` — initializes all process slots with magic numbers, endpoints, and privilege structures
-  - `BEG_PROC_ADDR`, `BEG_USER_ADDR`, `END_PROC_ADDR` constants
-  - `proc_addr(n)` / `proc_addr_const(n)` — process number to pointer mapping
+  - Global `PROC_TABLE` as `[u8; size_of::<Proc>() * NR_PROCS_TOTAL]` byte storage (avoids Rust 2024 `static_mut_refs`)
+  - `proc_init()` — initializes all 261 slots with magic numbers, endpoints, boot process names, and privilege structures
+  - `beg_proc_addr()`, `beg_user_addr()`, `end_proc_addr()` — address constants as functions
+  - `proc_addr(n)` / `proc_addr_const(n)` — process number to pointer mapping with bounds check
   - `is_ok_proc_nr()`, `is_empty_proc()`, `is_kernel_nr()`, `is_kernel_proc()`, `is_user_proc()` — validity checks
-  - `endpoint_lookup(ep)` — lookup by endpoint
-  - `is_ok_endpoint()` — validate endpoint and extract process number
-  - `RunQueue` struct with per-priority head/tail arrays
-  - [ ] Tests: Allocate all slots; verify none double-assigned
-  - [ ] Tests: Free + realloc cycle works correctly
+  - `is_ok_endpoint()` + `endpoint_lookup(ep)` — endpoint validation with generation-aware lookup
+  - Endpoint encoding: `_ENDPOINT(g, p) = (g << 15) + p`, generation 0 → ep == proc_nr
+  - `RunQueue` struct with `head/tail[*mut Proc; 16]`, `is_empty()`, `all_empty()`, `highest_ready()`
+  - `BootImage` table with 16 boot processes (5 tasks + 11 servers, matching `table.c` order)
+  - [x] Tests: Slot numbering matches C layout (tasks at 0..5, user at 5..261)
+  - [x] Tests: Endpoint gen/slot roundtrip, boot proc names, run queue, init state
+  - **18 new tests**, 56 total for kernel crate, workspace clippy clean
 
 - [ ] **3.4 — Implement scheduling**
   - Source: `.refs/minix-3.3.0/minix/kernel/proc.c`

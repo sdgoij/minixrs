@@ -4,6 +4,7 @@
 
 pub mod r#priv;
 pub mod proc;
+pub mod table;
 
 /// Kernel initialization.
 pub fn init() {
