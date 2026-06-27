@@ -244,7 +244,7 @@ The Rust port targets two architectures:
   - Tests: `assert_eq!(SEND, 1); assert_eq!(RECEIVE, 2); ...`
   - Tests: `IPC_STATUS_CALL(IPC_STATUS_CALL_TO(5)) == 5`
 
-- [x] **1.4 — Port `minix/com.h` — the single most important header**
+- [ ] **1.4 — Port `minix/com.h` — the single most important header**
   - Source: `.refs/minix-3.3.0/minix/include/minix/com.h`
   - Subsystem process endpoints: `IDLE`, `CLOCK`, `SYSTEM`, `KERNEL`, `HARDWARE`, `MAX_NR_TASKS`, `NR_TASKS`
   - Special process numbers: `PM_PROC_NR`, `VFS_PROC_NR`, `RS_PROC_NR`, `MEM_PROC_NR`, `SCHED_PROC_NR`, `TTY_PROC_NR`, `DS_PROC_NR`, `MFS_PROC_NR`, `VM_PROC_NR`, `PFS_PROC_NR`, `LAST_SPECIAL_PROC_NR`
@@ -294,7 +294,7 @@ The Rust port targets two architectures:
   - Tests: `size_of::<Message>() >= 64` (platform-dependent alignment)
   - Tests: All 62 union variants present and match C layout
 
-- [ ] **1.7 — Port `minix/sys_config.h`**
+- [x] **1.7 — Port `minix/sys_config.h`**
   - Source: `.refs/minix-3.3.0/minix/include/minix/sys_config.h`
   - `config.rs`: FP_FORMAT, FP_NONE, FP_IEEE, DEBUG_LOCK_CHECK, DEFAULT_STACK_LIMIT
   - `NR_PROCS`, `NR_SYS_PROCS` in `endpoint.rs` (used by endpoint calculations)
@@ -302,7 +302,7 @@ The Rust port targets two architectures:
   - `CLICK_SIZE`, `NR_MEMS`, `MAX_INODE_NR`, `MAX_FILE_POS`, `UMAX_FILE_POS`, `MAX_SYM_LOOPS` in `consts.rs` (task 1.2)
   - Tests: Unit tests for each type/function; compile-time size/offset assertions where applicable
 
-- [ ] **1.8 — Port `minix/safecopies.h`**
+- [x] **1.8 — Port `minix/safecopies.h`**
   - Source: `.refs/minix-3.3.0/minix/include/minix/safecopies.h`
   - `safecopies.rs`: CpGrant (cp_grant_t), CpUnion with 3 variants (direct/indirect/magic)
   - `VscpVec` struct (32 bytes) for vectored safecopy descriptors
@@ -311,7 +311,7 @@ The Rust port targets two architectures:
   - Compile-time size checks: `size_of::<CpGrant>() >= 36`, `size_of::<VscpVec>() >= 32`
   - Tests: Unit tests for each type/function; compile-time size/offset assertions where applicable
 
-- [ ] **1.9 — Port `minix/vm.h`**
+- [x] **1.9 — Port `minix/vm.h`**
   - Source: `.refs/minix-3.3.0/minix/include/minix/vm.h`
   - `vm.rs`: VmStatsInfo, VmUsageInfo, VmRegionInfo structs
   - Constants: `MVM_WRITABLE`, `VMPTYPE_NONE`, `VMPTYPE_CHECK`, `MAX_VRI_COUNT`, VMMC_* flags, `VMC_NO_INODE`
@@ -323,7 +323,7 @@ The Rust port targets two architectures:
   - `vm_procctl_clear`, `vm_procctl_handlemem`, `vm_set_cacheblock`, `vm_map_cacheblock`, `vm_clear_cache`
   - Tests: Unit tests for each type/function; compile-time size/offset assertions where applicable
 
-- [ ] **1.10 — Port `minix/dmap.h`**
+- [x] **1.10 — Port `minix/dmap.h`**
   - Source: `.refs/minix-3.3.0/minix/include/minix/dmap.h`
   - `dmap.rs`: 67+ major device numbers, 8 memory driver minors, special device IDs
   - `NR_DEVICES` (134), `USB_BASE_MAJOR` (65)
@@ -332,7 +332,7 @@ The Rust port targets two architectures:
   - Memory minors: `RAM_DEV_OLD`, `MEM_DEV`, `KMEM_DEV`, `NULL_DEV`, `BOOT_DEV`, `ZERO_DEV`, `IMGRD_DEV`, `RAM_DEV_FIRST`
   - Tests: Unit tests for each type/function; compile-time size/offset assertions where applicable
 
-- [ ] **1.11 — Port `minix/devio.h`**
+- [x] **1.11 — Port `minix/devio.h`**
   - Source: `.refs/minix-3.3.0/minix/include/minix/devio.h`
   - `devio.rs`: `port_t` type, `PvbPair`/`PvwPair`/`PvlPair` structs (packed)
   - Deprecated constants: `MASK_GRANULARITY`, `PVB_FLAG`, `PVW_FLAG`, `PVL_FLAG`

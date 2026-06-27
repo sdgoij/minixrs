@@ -5,10 +5,15 @@
 #![no_std]
 
 pub mod consts;
+pub mod devio;
+pub mod dmap;
 pub mod endpoint;
 pub mod ipc;
 pub mod ipcconst;
+pub mod safecopies;
+pub mod sys_config;
 pub mod types;
+pub mod vm;
 
 /// Initialize arch-common subsystem.
 pub fn init() {}

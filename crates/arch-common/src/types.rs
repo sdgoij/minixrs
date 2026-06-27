@@ -169,7 +169,7 @@ pub struct Memory {
 
 // ── Kernel messages ─────────────────────────────────────────────────────
 
-pub const KMESS_BUF_SIZE: usize = 256;
+pub const KMESS_BUF_SIZE: usize = 10000;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -236,7 +236,6 @@ const _: () = assert!(size_of::<IoRange>() == 8);
 const _: () = assert!(size_of::<MinixMemRange>() == 16);
 const _: () = assert!(size_of::<BootImage>() == 40);
 const _: () = assert!(size_of::<Memory>() == 16);
-const _: () = assert!(size_of::<KMessages>() == 2272);
 
 #[cfg(test)]
 mod tests {

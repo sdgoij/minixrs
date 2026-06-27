@@ -6,19 +6,17 @@ use crate::consts::{NR_PROCS, NR_SYS_PROCS, NR_TASKS};
 pub const NR_PROCS_TOTAL: usize = NR_TASKS + NR_SYS_PROCS + NR_PROCS;
 
 /// Generate an endpoint value from process number and generation.
-pub fn endpoint(proc_nr: i32, generation: i32) -> i32 {
+pub const fn endpoint(proc_nr: i32, generation: i32) -> i32 {
     (generation << 16) | (proc_nr & 0xffff)
 }
 
-/// Extract process number from an endpoint.
-pub fn proc_nr_from_ep(endpoint: i32) -> i32 {
-    // Sign-extend if the process number is negative
-    let nr = endpoint << 16 >> 16;
-    nr
+/// Extract process number from an endpoint (sign-extending for negative numbers).
+pub const fn proc_nr_from_ep(endpoint: i32) -> i32 {
+    endpoint << 16 >> 16
 }
 
 /// Extract generation from an endpoint.
-pub fn generation_from_ep(endpoint: i32) -> i32 {
+pub const fn generation_from_ep(endpoint: i32) -> i32 {
     endpoint >> 16
 }
 
@@ -28,7 +26,7 @@ pub const NONE: i32 = 0x0000fffe;
 pub const SELF: i32 = 0x0000fffd;
 
 /// Check if an endpoint is valid.
-pub fn is_valid_endpoint(ep: i32) -> bool {
+pub const fn is_valid_endpoint(ep: i32) -> bool {
     ep != NONE
 }
 

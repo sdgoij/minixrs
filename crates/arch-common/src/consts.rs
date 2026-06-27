@@ -9,7 +9,7 @@ pub const NR_PROCS: usize = 256;
 pub const NR_TASKS: usize = 8;
 
 /// Maximum number of system processes.
-pub const NR_SYS_PROCS: usize = 32;
+pub const NR_SYS_PROCS: usize = 64;
 
 /// Number of memory chunks.
 pub const NR_MEMS: usize = 16;
@@ -112,7 +112,7 @@ mod tests {
     fn test_process_limits() {
         assert_eq!(NR_PROCS, 256);
         assert_eq!(NR_TASKS, 8);
-        assert_eq!(NR_SYS_PROCS, 32);
+        assert_eq!(NR_SYS_PROCS, 64);
         assert_eq!(NR_MEMS, 16);
     }
 

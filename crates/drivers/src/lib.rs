@@ -8,6 +8,7 @@ pub mod prelude {
 }
 
 /// Driver trait — every driver must implement this.
+#[allow(clippy::result_unit_err)]
 pub trait Driver {
     fn init(&mut self) -> Result<(), ()>;
     fn shutdown(&mut self);
