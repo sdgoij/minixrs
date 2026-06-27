@@ -390,7 +390,7 @@ The Rust port targets two architectures:
   - **118 tests** across all modules (117 passed, 1 ignored due to sanitizer)
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
-- [ ] **2.3 — Implement raw hardware operations**
+- [x] **2.3 — Implement raw hardware operations**
   - Created `crates/arch-x86_64/src/hw.rs` (881 lines)
   - **I/O port operations** (re-exported from `asm` module): `inb`, `outb`, `inw`, `outw`, `inl`, `outl`
   - **CR register access**: `read_cr0`, `write_cr0`, `read_cr2`, `read_cr3`, `write_cr3`, `read_cr4`, `write_cr4`
@@ -407,6 +407,29 @@ The Rust port targets two architectures:
   - **TSC reading**: `read_tsc`, `read_tsc_serialized`, `read_apic_tsc`
   - **Memory barriers/atomic primitives**: `atomic_fence`, `atomic_load_acquire`, `atomic_store_release`,
     `atomic_cas_64/32`, `atomic_exchange_64/32`, `atomic_add_64/32`
+  - **CPUID with push/pop rbx workaround**:
+    - **Problem**: `cpuid` writes `eax`, `ebx`, `ecx`, `edx`. On Windows x86_64,
+      LLVM reserves `rbx` internally. Declaring `out("rbx")` as an asm operand
+      produces: *"rbx is used internally by LLVM and cannot be used as an operand
+      for inline asm"* -- a compile-time error.
+    - This is a *host-compiler constraint*, not a target constraint. The bare-metal
+      target (`x86_64-unknown-none`) would accept `out("rbx")` fine, but tests
+      run on the Windows host where LLVM rejects it.
+    - **Fix**: Don't declare `rbx` as an operand. Route around it:
+      ```
+      push rbx          ; save rbx (raw text, LLVM doesn't track it)
+      mov eax, ecx      ; leaf value into eax
+      cpuid             ; writes eax, ebx, ecx, edx
+      mov esi, ebx      ; capture ebx into esi (LLVM-allowed output reg)
+      pop rbx           ; restore original rbx
+      mov edi, edx      ; capture edx into edi (LLVM-allowed output reg)
+      ```
+      Outputs declared as `out("eax")`, `out("esi")`, `lateout("ecx")`, `out("edi")`.
+    - `esi`/`edi` are caller-saved scratch registers on all x86_64 ABIs (SysV,
+      Windows x64), so the compiler never depends on their value across the asm.
+    - **Why no `#[cfg]`**: The push/pop overhead is negligible (cpuid itself takes
+      hundreds of cycles). A single code path avoids maintenance burden with no
+      real performance downside.
   - **Clippy suppressions** (module-level `#![allow(...)]`):
     - `missing_safety_doc` — obvious for hardware operations
     - `too_many_arguments` — necessary for flexible gate construction

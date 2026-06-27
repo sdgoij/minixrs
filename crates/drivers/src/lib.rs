@@ -7,17 +7,41 @@ pub mod prelude {
     pub use core::ops::DerefMut;
 }
 
+/// Driver error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverError {
+    /// Device not found.
+    NotFound,
+    /// Device is busy.
+    Busy,
+    /// I/O error during operation.
+    Io,
+    /// Operation not supported by this device.
+    Unsupported,
+    /// Unknown or unexpected error.
+    Unknown,
+}
+
 /// Driver trait — every driver must implement this.
-#[allow(clippy::result_unit_err)]
 pub trait Driver {
-    fn init(&mut self) -> Result<(), ()>;
+    /// Initialize the driver.
+    fn init(&mut self) -> Result<(), DriverError>;
+    /// Shut down the driver and release resources.
     fn shutdown(&mut self);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn it_works() {
         assert!(true);
+    }
+
+    #[test]
+    fn driver_error_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<DriverError>();
     }
 }

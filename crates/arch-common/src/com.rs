@@ -4,7 +4,6 @@
 //! it defines all process endpoints, subsystem message bases, system
 //! call numbers, and IPC message field names. ABI-critical: every
 //! constant must match the C `#define` value exactly.
-#![allow(clippy::identity_op)]
 use crate::types::Endpoint;
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -68,7 +67,7 @@ pub fn is_ipc_asynch(ipc_status: i32) -> bool {
 pub const BUSC_RQ_BASE: u32 = 0x300;
 pub const BUSC_RS_BASE: u32 = 0x380;
 
-pub const BUSC_PCI_INIT: u32 = BUSC_RQ_BASE + 0;
+pub const BUSC_PCI_INIT: u32 = BUSC_RQ_BASE;
 pub const BUSC_PCI_FIRST_DEV: u32 = BUSC_RQ_BASE + 1;
 pub const BUSC_PCI_NEXT_DEV: u32 = BUSC_RQ_BASE + 2;
 pub const BUSC_PCI_FIND_DEV: u32 = BUSC_RQ_BASE + 3;
@@ -105,12 +104,12 @@ pub fn is_dl_rs(typ: u32) -> bool {
     (typ & !0x7f) == DL_RS_BASE
 }
 
-pub const DL_CONF: u32 = DL_RQ_BASE + 0;
+pub const DL_CONF: u32 = DL_RQ_BASE;
 pub const DL_GETSTAT_S: u32 = DL_RQ_BASE + 1;
 pub const DL_WRITEV_S: u32 = DL_RQ_BASE + 2;
 pub const DL_READV_S: u32 = DL_RQ_BASE + 3;
 
-pub const DL_CONF_REPLY: u32 = DL_RS_BASE + 0;
+pub const DL_CONF_REPLY: u32 = DL_RS_BASE;
 pub const DL_STAT_REPLY: u32 = DL_RS_BASE + 1;
 pub const DL_TASK_REPLY: u32 = DL_RS_BASE + 2;
 
@@ -133,7 +132,7 @@ pub const KERNEL_CALL: u32 = 0x600;
 pub mod sys {
     use super::KERNEL_CALL;
 
-    pub const FORK: u32 = KERNEL_CALL + 0;
+    pub const FORK: u32 = KERNEL_CALL;
     pub const EXEC: u32 = KERNEL_CALL + 1;
     pub const CLEAR: u32 = KERNEL_CALL + 2;
     pub const SCHEDULE: u32 = KERNEL_CALL + 3;
@@ -349,7 +348,7 @@ pub const SCHEDCTL_FLAG_KERNEL: u32 = 1;
 
 pub const RS_RQ_BASE: u32 = 0x700;
 
-pub const RS_UP: u32 = RS_RQ_BASE + 0;
+pub const RS_UP: u32 = RS_RQ_BASE;
 pub const RS_DOWN: u32 = RS_RQ_BASE + 1;
 pub const RS_REFRESH: u32 = RS_RQ_BASE + 2;
 pub const RS_RESTART: u32 = RS_RQ_BASE + 3;
@@ -368,7 +367,7 @@ pub const RS_LU_PREPARE: u32 = RS_RQ_BASE + 21;
 
 pub const DS_RQ_BASE: u32 = 0x800;
 
-pub const DS_PUBLISH: u32 = DS_RQ_BASE + 0;
+pub const DS_PUBLISH: u32 = DS_RQ_BASE;
 pub const DS_RETRIEVE: u32 = DS_RQ_BASE + 1;
 pub const DS_SUBSCRIBE: u32 = DS_RQ_BASE + 2;
 pub const DS_CHECK: u32 = DS_RQ_BASE + 3;
@@ -392,7 +391,7 @@ pub fn is_vfs_pm_rs(typ: u32) -> bool {
 }
 
 // Requests
-pub const VFS_PM_INIT: u32 = VFS_PM_RQ_BASE + 0;
+pub const VFS_PM_INIT: u32 = VFS_PM_RQ_BASE;
 pub const VFS_PM_SETUID: u32 = VFS_PM_RQ_BASE + 1;
 pub const VFS_PM_SETGID: u32 = VFS_PM_RQ_BASE + 2;
 pub const VFS_PM_SETSID: u32 = VFS_PM_RQ_BASE + 3;
@@ -453,7 +452,7 @@ pub mod vfs_pm {
 
 pub const COMMON_RQ_BASE: u32 = 0xE00;
 
-pub const SIGS_SIGNAL_RECEIVED: u32 = COMMON_RQ_BASE + 0;
+pub const SIGS_SIGNAL_RECEIVED: u32 = COMMON_RQ_BASE;
 pub const COMMON_REQ_GCOV_DATA: u32 = COMMON_RQ_BASE + 1;
 pub const COMMON_REQ_FI_CTL: u32 = COMMON_RQ_BASE + 2;
 
@@ -463,7 +462,7 @@ pub const COMMON_REQ_FI_CTL: u32 = COMMON_RQ_BASE + 2;
 
 pub const VM_RQ_BASE: u32 = 0xC00;
 
-pub const VM_EXIT: u32 = VM_RQ_BASE + 0;
+pub const VM_EXIT: u32 = VM_RQ_BASE;
 pub const VM_FORK: u32 = VM_RQ_BASE + 1;
 pub const VM_BRK: u32 = VM_RQ_BASE + 2;
 pub const VM_EXEC_NEWMEM: u32 = VM_RQ_BASE + 3;
@@ -558,7 +557,7 @@ pub const SCHEDULING_INHERIT: u32 = SCHEDULING_BASE + 5;
 
 pub const USB_BASE: u32 = 0x1100;
 
-pub const USB_RQ_INIT: u32 = USB_BASE + 0;
+pub const USB_RQ_INIT: u32 = USB_BASE;
 pub const USB_RQ_DEINIT: u32 = USB_BASE + 1;
 pub const USB_RQ_SEND_URB: u32 = USB_BASE + 2;
 pub const USB_RQ_CANCEL_URB: u32 = USB_BASE + 3;
@@ -575,7 +574,7 @@ pub const USB_WITHDRAW_DEV: u32 = USB_BASE + 8;
 
 pub const DEVMAN_BASE: u32 = 0x1200;
 
-pub const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE + 0;
+pub const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE;
 pub const DEVMAN_DEL_DEV: u32 = DEVMAN_BASE + 1;
 pub const DEVMAN_ADD_BUS: u32 = DEVMAN_BASE + 2;
 pub const DEVMAN_DEL_BUS: u32 = DEVMAN_BASE + 3;
@@ -607,9 +606,9 @@ pub const TTY_INPUT_EVENT: u32 = TTY_RQ_BASE + 3;
 pub const INPUT_RQ_BASE: u32 = 0x1500;
 pub const INPUT_RS_BASE: u32 = 0x1580;
 
-pub const INPUT_CONF: u32 = INPUT_RQ_BASE + 0;
+pub const INPUT_CONF: u32 = INPUT_RQ_BASE;
 pub const INPUT_SETLEDS: u32 = INPUT_RQ_BASE + 1;
-pub const INPUT_EVENT: u32 = INPUT_RS_BASE + 0;
+pub const INPUT_EVENT: u32 = INPUT_RS_BASE;
 
 // ═════════════════════════════════════════════════════════════════════════
 // Chapter 25: VFS-FS Transaction IDs
@@ -637,7 +636,7 @@ pub fn is_cdev_rs(typ: u32) -> bool {
     (typ & !0x7f) == CDEV_RS_BASE
 }
 
-pub const CDEV_OPEN: u32 = CDEV_RQ_BASE + 0;
+pub const CDEV_OPEN: u32 = CDEV_RQ_BASE;
 pub const CDEV_CLOSE: u32 = CDEV_RQ_BASE + 1;
 pub const CDEV_READ: u32 = CDEV_RQ_BASE + 2;
 pub const CDEV_WRITE: u32 = CDEV_RQ_BASE + 3;
@@ -645,7 +644,7 @@ pub const CDEV_IOCTL: u32 = CDEV_RQ_BASE + 4;
 pub const CDEV_CANCEL: u32 = CDEV_RQ_BASE + 5;
 pub const CDEV_SELECT: u32 = CDEV_RQ_BASE + 6;
 
-pub const CDEV_REPLY: u32 = CDEV_RS_BASE + 0;
+pub const CDEV_REPLY: u32 = CDEV_RS_BASE;
 pub const CDEV_SEL1_REPLY: u32 = CDEV_RS_BASE + 1;
 pub const CDEV_SEL2_REPLY: u32 = CDEV_RS_BASE + 2;
 
@@ -678,7 +677,7 @@ pub fn is_bdev_rs(typ: u32) -> bool {
     (typ & !0x7f) == BDEV_RS_BASE
 }
 
-pub const BDEV_OPEN: u32 = BDEV_RQ_BASE + 0;
+pub const BDEV_OPEN: u32 = BDEV_RQ_BASE;
 pub const BDEV_CLOSE: u32 = BDEV_RQ_BASE + 1;
 pub const BDEV_READ: u32 = BDEV_RQ_BASE + 2;
 pub const BDEV_WRITE: u32 = BDEV_RQ_BASE + 3;
@@ -686,7 +685,7 @@ pub const BDEV_GATHER: u32 = BDEV_RQ_BASE + 4;
 pub const BDEV_SCATTER: u32 = BDEV_RQ_BASE + 5;
 pub const BDEV_IOCTL: u32 = BDEV_RQ_BASE + 6;
 
-pub const BDEV_REPLY: u32 = BDEV_RS_BASE + 0;
+pub const BDEV_REPLY: u32 = BDEV_RS_BASE;
 
 pub const BDEV_R_BIT: u32 = 0x01;
 pub const BDEV_W_BIT: u32 = 0x02;
@@ -709,13 +708,13 @@ pub fn is_rtcdev_rs(typ: u32) -> bool {
     (typ & !0x7f) == RTCDEV_RS_BASE
 }
 
-pub const RTCDEV_GET_TIME: u32 = RTCDEV_RQ_BASE + 0;
+pub const RTCDEV_GET_TIME: u32 = RTCDEV_RQ_BASE;
 pub const RTCDEV_SET_TIME: u32 = RTCDEV_RQ_BASE + 1;
 pub const RTCDEV_PWR_OFF: u32 = RTCDEV_RQ_BASE + 2;
 pub const RTCDEV_GET_TIME_G: u32 = RTCDEV_RQ_BASE + 3;
 pub const RTCDEV_SET_TIME_G: u32 = RTCDEV_RQ_BASE + 4;
 
-pub const RTCDEV_REPLY: u32 = RTCDEV_RS_BASE + 0;
+pub const RTCDEV_REPLY: u32 = RTCDEV_RS_BASE;
 
 pub const RTCDEV_NOFLAGS: u32 = 0x00;
 pub const RTCDEV_Y2KBUG: u32 = 0x01;

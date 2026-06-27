@@ -10,8 +10,6 @@
 //! - `rep movsb` uses 64-bit rcx/rdi/rsi
 //! - I/O instructions use the same encoding with 64-bit register addressing
 
-#![allow(clippy::missing_safety_doc)]
-
 use core::arch::asm;
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -19,6 +17,10 @@ use core::arch::asm;
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Read a byte from an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let value: u8;
@@ -29,6 +31,10 @@ pub unsafe fn inb(port: u16) -> u8 {
 }
 
 /// Read a word (16-bit) from an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn inw(port: u16) -> u16 {
     let value: u16;
@@ -39,6 +45,10 @@ pub unsafe fn inw(port: u16) -> u16 {
 }
 
 /// Read a dword (32-bit) from an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn inl(port: u16) -> u32 {
     let value: u32;
@@ -49,6 +59,10 @@ pub unsafe fn inl(port: u16) -> u32 {
 }
 
 /// Write a byte to an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn outb(port: u16, value: u8) {
     unsafe {
@@ -57,6 +71,10 @@ pub unsafe fn outb(port: u16, value: u8) {
 }
 
 /// Write a word (16-bit) to an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn outw(port: u16, value: u16) {
     unsafe {
@@ -65,6 +83,10 @@ pub unsafe fn outw(port: u16, value: u16) {
 }
 
 /// Write a dword (32-bit) to an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn outl(port: u16, value: u32) {
     unsafe {
@@ -77,6 +99,10 @@ pub unsafe fn outl(port: u16, value: u32) {
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Disable interrupts (clear IF flag).
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn intr_disable() {
     unsafe {
@@ -85,6 +111,10 @@ pub unsafe fn intr_disable() {
 }
 
 /// Enable interrupts (set IF flag).
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn intr_enable() {
     unsafe {
@@ -97,6 +127,10 @@ pub unsafe fn intr_enable() {
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Read a debug register (DR0–DR3, DR6, DR7).
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn ld_dr(reg: u32) -> u64 {
     let value: u64;
@@ -115,6 +149,10 @@ pub unsafe fn ld_dr(reg: u32) -> u64 {
 }
 
 /// Write a debug register (DR0–DR3, DR6, DR7).
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn st_dr(reg: u32, value: u64) {
     unsafe {
@@ -139,6 +177,10 @@ pub unsafe fn st_dr(reg: u32, value: u64) {
 /// # Safety
 /// - `src` and `dst` must point to valid, mapped memory.
 /// - The regions must not overlap.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn phys_copy(src: u64, dst: u64, count: usize) {
     unsafe {
@@ -158,6 +200,10 @@ pub unsafe fn phys_copy(src: u64, dst: u64, count: usize) {
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Input an array of bytes from an I/O port to memory.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn phys_insb(port: u16, buf: u64, count: usize) {
     unsafe {
@@ -173,6 +219,10 @@ pub unsafe fn phys_insb(port: u16, buf: u64, count: usize) {
 }
 
 /// Input an array of words from an I/O port to memory.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn phys_insw(port: u16, buf: u64, count: usize) {
     let words = count / 2;
@@ -189,6 +239,10 @@ pub unsafe fn phys_insw(port: u16, buf: u64, count: usize) {
 }
 
 /// Output an array of bytes from memory to an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn phys_outsb(port: u16, buf: u64, count: usize) {
     unsafe {
@@ -204,6 +258,10 @@ pub unsafe fn phys_outsb(port: u16, buf: u64, count: usize) {
 }
 
 /// Output an array of words from memory to an I/O port.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     let words = count / 2;
@@ -224,6 +282,10 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Read an MSR.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
@@ -241,6 +303,10 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 }
 
 /// Write an MSR.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
@@ -297,6 +363,10 @@ pub unsafe extern "C" fn switch_to(_new_rsp: u64) {
 // CR register access
 // ═════════════════════════════════════════════════════════════════════════
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn read_cr0() -> u64 {
     let value: u64;
@@ -306,6 +376,10 @@ pub unsafe fn read_cr0() -> u64 {
     value
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn write_cr0(value: u64) {
     unsafe {
@@ -313,6 +387,10 @@ pub unsafe fn write_cr0(value: u64) {
     }
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn read_cr2() -> u64 {
     let value: u64;
@@ -322,6 +400,10 @@ pub unsafe fn read_cr2() -> u64 {
     value
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn read_cr3() -> u64 {
     let value: u64;
@@ -331,6 +413,10 @@ pub unsafe fn read_cr3() -> u64 {
     value
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn write_cr3(value: u64) {
     unsafe {
@@ -338,6 +424,10 @@ pub unsafe fn write_cr3(value: u64) {
     }
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn read_cr4() -> u64 {
     let value: u64;
@@ -347,6 +437,10 @@ pub unsafe fn read_cr4() -> u64 {
     value
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn write_cr4(value: u64) {
     unsafe {
@@ -358,6 +452,10 @@ pub unsafe fn write_cr4(value: u64) {
 // GDT/IDT load
 // ═════════════════════════════════════════════════════════════════════════
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn lgdt(gdtr: &[u8; 10]) {
     unsafe {
@@ -365,6 +463,10 @@ pub unsafe fn lgdt(gdtr: &[u8; 10]) {
     }
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn lidt(idtr: &[u8; 10]) {
     unsafe {
@@ -372,6 +474,10 @@ pub unsafe fn lidt(idtr: &[u8; 10]) {
     }
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn ltr(selector: u16) {
     unsafe {
@@ -383,6 +489,10 @@ pub unsafe fn ltr(selector: u16) {
 // TLB management
 // ═════════════════════════════════════════════════════════════════════════
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn invlpg(addr: u64) {
     unsafe {
@@ -390,6 +500,10 @@ pub unsafe fn invlpg(addr: u64) {
     }
 }
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn tlb_flush() {
     unsafe {
@@ -402,11 +516,154 @@ pub unsafe fn tlb_flush() {
 // Halt
 // ═════════════════════════════════════════════════════════════════════════
 
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
 #[inline]
 pub unsafe fn hlt() {
     unsafe {
         asm!("hlt", options(nomem, nostack));
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// SGDT / SIDT / STR
+// ═════════════════════════════════════════════════════════════════════════
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn sgdt(desc: &mut [u8; 10]) {
+    unsafe {
+        asm!("sgdt [{}]", in(reg) desc.as_mut_ptr(), options(nostack));
+    }
+}
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn sidt(desc: &mut [u8; 10]) {
+    unsafe {
+        asm!("sidt [{}]", in(reg) desc.as_mut_ptr(), options(nostack));
+    }
+}
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn str_sel() -> u16 {
+    let sel: u16;
+    unsafe {
+        asm!("str {:x}", out(reg) sel, options(nomem, nostack));
+    }
+    sel
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// FPU: FXSAVE, FXRSTOR, FNINIT, FNCLEX
+// ═════════════════════════════════════════════════════════════════════════
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn fxsave(buf: &mut [u8; 512]) {
+    unsafe {
+        asm!("fxsave [{}]", in(reg) buf.as_mut_ptr(), options(nostack));
+    }
+}
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn fxrstor(buf: &[u8; 512]) {
+    unsafe {
+        asm!("fxrstor [{}]", in(reg) buf.as_ptr(), options(nostack));
+    }
+}
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn fninit() {
+    unsafe {
+        asm!("fninit", options(nomem, nostack));
+    }
+}
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn fnclex() {
+    unsafe {
+        asm!("fnclex", options(nomem, nostack));
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// TSC / CPUID
+// ═════════════════════════════════════════════════════════════════════════
+
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+#[inline]
+pub unsafe fn rdtsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        asm!(
+            "rdtsc",
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack),
+        );
+    }
+    (low as u64) | ((high as u64) << 32)
+}
+
+/// Execute the CPUID instruction.
+///
+/// # Safety
+///
+/// Executes a privileged instruction. Caller must be in ring 0.
+pub unsafe fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
+    let a: u32;
+    let b: u32;
+    let c: u32;
+    let d: u32;
+    unsafe {
+        asm!(
+            "push rbx",
+            "mov eax, ecx",
+            "cpuid",
+            "mov esi, ebx",
+            "pop rbx",
+            "mov edi, edx",
+            out("eax") a,
+            out("esi") b,
+            lateout("ecx") c,
+            out("edi") d,
+            in("ecx") leaf,
+            options(preserves_flags, nomem, nostack),
+        );
+    }
+    (a, b, c, d)
 }
 
 // ═════════════════════════════════════════════════════════════════════════
