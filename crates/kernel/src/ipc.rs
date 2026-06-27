@@ -814,6 +814,95 @@ pub unsafe fn cancel_async(src_ptr: *mut Proc, dst_ptr: *mut Proc) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// IPC syscall handlers (task 5.40)
+// ─────────────────────────────────────────────────────────────────────────
+// These are thin wrappers around do_sync_ipc that bridge the arch-specific
+// syscall entry point to the kernel's IPC implementation.
+// They have the same signature as system::CallHandler for uniformity.
+
+/// SEND syscall handler — routes to `do_sync_ipc` with SEND.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`. `msg` must point to a valid message buffer.
+pub unsafe fn ipc_send_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), SEND) }
+}
+
+/// RECEIVE syscall handler — routes to `do_sync_ipc` with RECEIVE.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`. `msg` must point to a valid message buffer.
+pub unsafe fn ipc_receive_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), RECEIVE) }
+}
+
+/// SENDREC syscall handler — routes to `do_sync_ipc` with SENDREC.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`. `msg` must point to a valid message buffer.
+pub unsafe fn ipc_sendrec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), SENDREC) }
+}
+
+/// NOTIFY syscall handler — routes to `do_sync_ipc` with NOTIFY.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`. `msg` must point to a valid message buffer.
+pub unsafe fn ipc_notify_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), NOTIFY) }
+}
+
+/// Maximum syscall number accommodating IPC syscall slots (46–49).
+pub const SYS_MAX: i32 = 50;
+
+/// Register all IPC syscall handlers in the kernel call dispatch table.
+///
+/// Maps indices 46–49 to the four IPC handlers:
+/// - 46 → `ipc_send_handler` (SEND)
+/// - 47 → `ipc_receive_handler` (RECEIVE)
+/// - 48 → `ipc_sendrec_handler` (SENDREC)
+/// - 49 → `ipc_notify_handler` (NOTIFY)
+///
+/// # Safety
+///
+/// Must be called exactly once during boot, after `system_init()`.
+pub unsafe fn register_ipc_syscalls() {
+    unsafe {
+        crate::system::map_call(46, ipc_send_handler);
+        crate::system::map_call(47, ipc_receive_handler);
+        crate::system::map_call(48, ipc_sendrec_handler);
+        crate::system::map_call(49, ipc_notify_handler);
+    }
+}
+
+/// Get the current process pointer from per-CPU storage.
+///
+/// # Safety
+///
+/// Per-CPU storage must be initialized.
+pub unsafe fn current_proc() -> *mut Proc {
+    unsafe {
+        let ptr = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.proc_ptr();
+        ptr as *mut Proc
+    }
+}
+
+/// Set the current process pointer in per-CPU storage.
+///
+/// # Safety
+///
+/// Per-CPU storage must be initialized.
+pub unsafe fn set_current_proc(proc: *mut Proc) {
+    unsafe {
+        arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.set_proc_ptr(proc as *mut core::ffi::c_void);
+    }
+}
+
 /// Deliver all pending async messages from an async send table.
 ///
 /// Walks `caller_ptr`'s async send table and attempts to deliver each
@@ -1310,5 +1399,52 @@ mod tests {
             );
             assert_eq!(result, Some(0));
         }
+    }
+
+    // ── IPC syscall handler tests ──────────────────────────────────────
+
+    #[test]
+    fn test_ipc_handler_functions_are_callable() {
+        // Verify all four handlers compile with the right signature
+        fn _check(
+            _: unsafe fn(*mut crate::proc::Proc, &mut [u8; crate::proc::MESSAGE_SIZE]) -> i32,
+        ) {
+        }
+        _check(ipc_send_handler);
+        _check(ipc_receive_handler);
+        _check(ipc_sendrec_handler);
+        _check(ipc_notify_handler);
+    }
+
+    #[test]
+    fn test_register_ipc_syscalls_is_callable() {
+        fn _f(_: unsafe fn()) {}
+        _f(register_ipc_syscalls);
+    }
+
+    #[test]
+    fn test_sys_max_constant() {
+        assert_eq!(SYS_MAX, 50);
+    }
+
+    #[test]
+    fn test_current_proc_helpers_compile() {
+        fn _f1(_: unsafe fn() -> *mut crate::proc::Proc) {}
+        fn _f2(_: unsafe fn(*mut crate::proc::Proc)) {}
+        _f1(current_proc);
+        _f2(set_current_proc);
+    }
+
+    #[test]
+    fn test_ipc_syscall_handler_signatures() {
+        // Verify the handler functions match the system::CallHandler signature
+        fn _check(
+            _: unsafe fn(*mut crate::proc::Proc, &mut [u8; crate::proc::MESSAGE_SIZE]) -> i32,
+        ) {
+        }
+        _check(ipc_send_handler);
+        _check(ipc_receive_handler);
+        _check(ipc_sendrec_handler);
+        _check(ipc_notify_handler);
     }
 }

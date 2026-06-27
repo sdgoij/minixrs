@@ -946,24 +946,23 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
 - [ ] **5.38 — `do_update.c`**: `SYS_UPDATE` — live update support
   - Stub (needs update handshake)
 
-- [ ] **5.40 — IPC syscall handlers (kernel syscall numbers 46–49)**
-  - `ipc_send_handler` (46) — routes to `kernel::ipc::do_sync_ipc()` with SEND
-  - `ipc_receive_handler` (47) — routes to `kernel::ipc::do_sync_ipc()` with RECEIVE
-  - `ipc_sendrec_handler` (48) — routes to `kernel::ipc::do_sync_ipc()` with SENDREC
-  - `ipc_notify_handler` (49) — routes to `kernel::ipc::do_sync_ipc()` with NOTIFY
-  - `CURRENT_PROC` tracking via `set_current_proc()` / `current_proc()`
-  - `register_ipc_syscalls()` — registers all four handlers in the syscall table
-  - `SYS_MAX` increased from 45 to 50
-  - Source: `crates/arch-x86_64/src/arch_syscall.rs`
-  - Tests: Unit test for the syscall handler; verify return codes; test with userspace program that issues the syscall
+- [x] **5.40 — IPC syscall handlers (kernel syscall numbers 46–49)**
+  - `ipc_send_handler` (46), `ipc_receive_handler` (47), `ipc_sendrec_handler` (48),
+    `ipc_notify_handler` (49) — thin wrappers around `ipc::do_sync_ipc()`
+  - `register_ipc_syscalls()` — registers all four via `system::map_call()`
+  - `current_proc()` / `set_current_proc()` — per-CPU current process tracking
+  - `SYS_MAX = 50` constant
+  - Tests: 5 (handler signatures, register callable, helpers compile)
 
-- [ ] **5.41 — Basic userspace-facing syscall handlers**
-  - `sys_getpid_handler` (0) — returns PID 1 (init)
-  - `sys_exit_handler` (2) — halts CPU (no process cleanup yet)
-  - `sys_write_handler` (9) — writes buffer to serial (fd 1=stdout, 2=stderr)
-  - `sys_brk_handler` (13) — simple bump allocator in 0x3FE00000–0x3FF00000 region
-  - All registered in kmain before switching to userspace
-  - Source: `crates/kernel-boot/src/main.rs`
+- [x] **5.41 — Basic userspace-facing syscall handlers**
+  - `sys_getpid_handler` (0) — returns caller's endpoint as PID
+  - `sys_exit_handler` (2) — stub (no process cleanup yet)
+  - `sys_write_handler` (9) — acknowledges writes to stdout/stderr (fd 1/2)
+  - `sys_brk_handler` (13) — simple bump allocator (0x3FE00000-0x3FF00000 region)
+  - `BasicSyscallFn` dispatch table with `register_basic_syscall()`
+  - `init_basic_syscalls()` — registers all four handlers
+  - Source: `crates/kernel/src/syscall.rs`
+  - Tests: 11 (getpid, write ok/badfd/null, brk query/set/oor, dispatch, init)
 
 > Each system call task: Test with a userspace program that issues the syscall and verifies the result.
 

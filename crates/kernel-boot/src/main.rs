@@ -19,6 +19,11 @@ pub extern "C" fn kmain() -> ! {
     // Initialize subsystems
     kernel::init();
 
+    // Initialize basic userspace syscall handlers
+    unsafe {
+        kernel::syscall::init_basic_syscalls();
+    }
+
     // Print banner via serial
     init_serial();
     serial_write(b"Hello MINIX!\r\n");
