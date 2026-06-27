@@ -67,6 +67,11 @@ pub fn proc_addr(n: i32) -> *mut Proc {
     }
 }
 
+/// Return a pointer to the start of the process table.
+pub fn proc_table_base() -> *mut Proc {
+    unsafe { proc_index(0) }
+}
+
 /// Constant version of `proc_addr` (const fn, but returns a raw pointer).
 /// Only valid for compile-time-known process numbers.
 pub fn proc_addr_const(n: i32) -> *const Proc {

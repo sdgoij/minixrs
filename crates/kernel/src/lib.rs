@@ -5,6 +5,7 @@
 pub mod r#priv;
 pub mod proc;
 pub mod sched;
+pub mod system;
 pub mod table;
 
 /// Kernel initialization.
