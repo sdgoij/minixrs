@@ -8,7 +8,6 @@
 /// Maximum number of CPUs.
 const MAXCPUS: u32 = 32;
 
-
 /// Per-CPU information structure.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,12 +41,14 @@ pub struct CpuInfo {
     pub _reserved: [u64; 8],
 }
 
-
 // ── CPU roles ───────────────────────────────────────────────────────────
 
-pub const CPU_ROLE_BOOT: u32 = 0;
-pub const CPU_ROLE_AP: u32 = 1;
-pub const CPU_ROLE_BP: u32 = 2;
+/// CPU role: service processor (BSP bootstrap).
+pub const CPU_ROLE_SP: u32 = 0;
+/// CPU role: boot processor (primary).
+pub const CPU_ROLE_BP: u32 = 1;
+/// CPU role: application processor (secondary).
+pub const CPU_ROLE_AP: u32 = 2;
 
 // ── Global CPU info array ───────────────────────────────────────────────
 
@@ -92,9 +93,9 @@ mod tests {
 
     #[test]
     fn test_cpu_roles() {
-        assert_eq!(CPU_ROLE_BOOT, 0);
-        assert_eq!(CPU_ROLE_AP, 1);
-        assert_eq!(CPU_ROLE_BP, 2);
+        assert_eq!(CPU_ROLE_SP, 0);
+        assert_eq!(CPU_ROLE_BP, 1);
+        assert_eq!(CPU_ROLE_AP, 2);
     }
 
     #[test]

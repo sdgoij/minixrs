@@ -155,4 +155,113 @@ mod tests {
         assert_eq!(MULTIBOOT_BOOTLOADER_MAGIC, 0x2BADB002);
         assert_eq!(MULTIBOOT_INFO_MEM_MAP, 0x00000040);
     }
+
+    #[test]
+    fn test_all_header_constants() {
+        assert_eq!(MULTIBOOT_MOD_ALIGN, 0x00001000);
+        assert_eq!(MULTIBOOT_INFO_ALIGN, 0x00000004);
+    }
+
+    #[test]
+    fn test_all_header_flags() {
+        assert_eq!(MULTIBOOT_PAGE_ALIGN, 0x00000001);
+        assert_eq!(MULTIBOOT_MEMORY_INFO, 0x00000002);
+        assert_eq!(MULTIBOOT_VIDEO_MODE, 0x00000004);
+        assert_eq!(MULTIBOOT_AOUT_KLUDGE, 0x00010000);
+    }
+
+    #[test]
+    fn test_all_info_flags() {
+        assert_eq!(MULTIBOOT_INFO_MEMORY, 0x00000001);
+        assert_eq!(MULTIBOOT_INFO_BOOTDEV, 0x00000002);
+        assert_eq!(MULTIBOOT_INFO_CMDLINE, 0x00000004);
+        assert_eq!(MULTIBOOT_INFO_MODS, 0x00000008);
+        assert_eq!(MULTIBOOT_INFO_AOUT_SYMS, 0x00000010);
+        assert_eq!(MULTIBOOT_INFO_ELF_SHDR, 0x00000020);
+        assert_eq!(MULTIBOOT_INFO_MEM_MAP, 0x00000040);
+        assert_eq!(MULTIBOOT_INFO_DRIVE_INFO, 0x00000080);
+        assert_eq!(MULTIBOOT_INFO_CONFIG_TABLE, 0x00000100);
+        assert_eq!(MULTIBOOT_INFO_BOOT_LOADER_NAME, 0x00000200);
+        assert_eq!(MULTIBOOT_INFO_APM_TABLE, 0x00000400);
+        assert_eq!(MULTIBOOT_INFO_VBE_INFO, 0x00000800);
+        assert_eq!(MULTIBOOT_INFO_FRAMEBUFFER_INFO, 0x00001000);
+    }
+
+    #[test]
+    fn test_all_memory_types() {
+        assert_eq!(MULTIBOOT_MEMORY_AVAILABLE, 1);
+        assert_eq!(MULTIBOOT_MEMORY_RESERVED, 2);
+        assert_eq!(MULTIBOOT_MEMORY_ACPI_RECLAIMABLE, 3);
+        assert_eq!(MULTIBOOT_MEMORY_NVS, 4);
+        assert_eq!(MULTIBOOT_MEMORY_BADRAM, 5);
+    }
+
+    #[test]
+    fn test_multiboot_mmap_entry_exact_size() {
+        // size(4) + pad(4) + addr(8) + len(8) + typ(4) + pad(4) = 32.
+        // The u64 fields require 8-byte alignment, adding padding.
+        assert_eq!(size_of::<MultibootMmapEntry>(), 32);
+    }
+
+    #[test]
+    fn test_multiboot_mod_info_size() {
+        // mod_start(4) + mod_end(4) + cmdline(4) + pad(4) = 16.
+        assert_eq!(size_of::<MultibootModInfo>(), 16);
+    }
+
+    // ── Field offset tests using offset_of! ────────────────────────────────
+
+    #[test]
+    fn test_multiboot_header_offsets() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(MultibootHeader, magic), 0);
+        assert_eq!(offset_of!(MultibootHeader, flags), 4);
+        assert_eq!(offset_of!(MultibootHeader, checksum), 8);
+        assert_eq!(offset_of!(MultibootHeader, header_addr), 12);
+        assert_eq!(offset_of!(MultibootHeader, load_addr), 16);
+        assert_eq!(offset_of!(MultibootHeader, load_end_addr), 20);
+        assert_eq!(offset_of!(MultibootHeader, bss_end_addr), 24);
+        assert_eq!(offset_of!(MultibootHeader, entry_addr), 28);
+        assert_eq!(offset_of!(MultibootHeader, mode_type), 32);
+        assert_eq!(offset_of!(MultibootHeader, width), 36);
+        assert_eq!(offset_of!(MultibootHeader, height), 40);
+        assert_eq!(offset_of!(MultibootHeader, depth), 44);
+    }
+
+    #[test]
+    fn test_multiboot_info_offsets() {
+        use core::mem::offset_of;
+        // First few fields (up to the variable-length section).
+        assert_eq!(offset_of!(MultibootInfo, flags), 0);
+        assert_eq!(offset_of!(MultibootInfo, mem_lower), 4);
+        assert_eq!(offset_of!(MultibootInfo, mem_upper), 8);
+        assert_eq!(offset_of!(MultibootInfo, boot_device), 12);
+        assert_eq!(offset_of!(MultibootInfo, cmdline), 16);
+        assert_eq!(offset_of!(MultibootInfo, mods_count), 20);
+        assert_eq!(offset_of!(MultibootInfo, mods_addr), 24);
+        // syms is [u32; 4] at offset 28.
+        assert_eq!(offset_of!(MultibootInfo, syms), 28);
+        // mmap fields.
+        assert_eq!(offset_of!(MultibootInfo, mmap_length), 44);
+        assert_eq!(offset_of!(MultibootInfo, mmap_addr), 48);
+    }
+
+    #[test]
+    fn test_multiboot_mmap_entry_offsets() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(MultibootMmapEntry, size), 0);
+        // addr is u64, so it's 8-byte aligned (offset 8, not 4).
+        assert_eq!(offset_of!(MultibootMmapEntry, addr), 8);
+        assert_eq!(offset_of!(MultibootMmapEntry, len), 16);
+        assert_eq!(offset_of!(MultibootMmapEntry, typ), 24);
+    }
+
+    #[test]
+    fn test_multiboot_mod_info_offsets() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(MultibootModInfo, mod_start), 0);
+        assert_eq!(offset_of!(MultibootModInfo, mod_end), 4);
+        assert_eq!(offset_of!(MultibootModInfo, cmdline), 8);
+        assert_eq!(offset_of!(MultibootModInfo, pad), 12);
+    }
 }

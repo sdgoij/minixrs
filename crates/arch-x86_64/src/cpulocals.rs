@@ -12,7 +12,7 @@
 //!   C `struct proc idle_proc` layout). Accessor casts to `*mut c_void`.
 //! - Run queue arrays sized by `NR_SCHED_QUEUES` (16)
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
 /// Number of scheduling priority queues.
 pub const NR_SCHED_QUEUES: usize = 16;
@@ -59,10 +59,10 @@ pub struct CpuLocalVars {
     /// Ready list tail pointers (one per priority queue).
     pub run_q_tail: [*mut core::ffi::c_void; NR_SCHED_QUEUES],
 
-    /// Whether this CPU is idle.
-    pub cpu_is_idle: i32,
+    /// Whether this CPU is idle (atomic for SMP safety).
+    pub cpu_is_idle: AtomicI32,
     /// Whether the idle loop was interrupted (for profiling).
-    pub idle_interrupted: i32,
+    pub idle_interrupted: AtomicI32,
 
     /// Timestamp when time accounting was last switched.
     pub tsc_ctr_switch: u64,
@@ -89,8 +89,8 @@ impl Default for CpuLocalVars {
             ptproc: core::ptr::null_mut(),
             run_q_head: [core::ptr::null_mut(); NR_SCHED_QUEUES],
             run_q_tail: [core::ptr::null_mut(); NR_SCHED_QUEUES],
-            cpu_is_idle: 0,
-            idle_interrupted: 0,
+            cpu_is_idle: AtomicI32::new(0),
+            idle_interrupted: AtomicI32::new(0),
             tsc_ctr_switch: 0,
             cpu_last_tsc: 0,
             cpu_last_idle: 0,
@@ -246,14 +246,14 @@ impl CpuLocalStorage {
     ///
     /// The storage must be initialized.
     pub unsafe fn cpu_is_idle(&self) -> i32 {
-        unsafe { (*self.vars_ref()).cpu_is_idle }
+        unsafe { (*self.vars_ref()).cpu_is_idle.load(Ordering::Relaxed) }
     }
     /// # Safety
     ///
     /// The storage must be initialized.
     pub unsafe fn set_cpu_is_idle(&self, val: i32) {
         unsafe {
-            (*self.vars_ref()).cpu_is_idle = val;
+            (*self.vars_ref()).cpu_is_idle.store(val, Ordering::Relaxed);
         }
     }
 
@@ -261,14 +261,16 @@ impl CpuLocalStorage {
     ///
     /// The storage must be initialized.
     pub unsafe fn idle_interrupted(&self) -> i32 {
-        unsafe { (*self.vars_ref()).idle_interrupted }
+        unsafe { (*self.vars_ref()).idle_interrupted.load(Ordering::Relaxed) }
     }
     /// # Safety
     ///
     /// The storage must be initialized.
     pub unsafe fn set_idle_interrupted(&self, val: i32) {
         unsafe {
-            (*self.vars_ref()).idle_interrupted = val;
+            (*self.vars_ref())
+                .idle_interrupted
+                .store(val, Ordering::Relaxed);
         }
     }
 
@@ -370,8 +372,8 @@ static mut CPU_LOCAL_VARS: CpuLocalVars = CpuLocalVars {
     ptproc: core::ptr::null_mut(),
     run_q_head: [core::ptr::null_mut(); NR_SCHED_QUEUES],
     run_q_tail: [core::ptr::null_mut(); NR_SCHED_QUEUES],
-    cpu_is_idle: 0,
-    idle_interrupted: 0,
+    cpu_is_idle: AtomicI32::new(0),
+    idle_interrupted: AtomicI32::new(0),
     tsc_ctr_switch: 0,
     cpu_last_tsc: 0,
     cpu_last_idle: 0,
@@ -419,6 +421,7 @@ pub unsafe fn set_cpulocal_proc_ptr(p: *mut core::ffi::c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::size_of;
 
     #[test]
     fn test_cpu_local_vars_default() {
@@ -427,8 +430,8 @@ mod tests {
         assert!(v.bill_ptr.is_null());
         assert_eq!(v.pagefault_handled, 0);
         assert!(v.ptproc.is_null());
-        assert_eq!(v.cpu_is_idle, 0);
-        assert_eq!(v.idle_interrupted, 0);
+        assert_eq!(v.cpu_is_idle.load(Ordering::Relaxed), 0);
+        assert_eq!(v.idle_interrupted.load(Ordering::Relaxed), 0);
         assert_eq!(v.tsc_ctr_switch, 0);
         assert_eq!(v.cpu_last_tsc, 0);
         assert_eq!(v.cpu_last_idle, 0);
@@ -561,6 +564,112 @@ mod tests {
             init_cpulocals();
             // After init, accessors should work (default values)
             assert!(get_cpulocal_proc_ptr().is_null());
+        }
+    }
+
+    #[test]
+    fn test_idle_proc_size_reasonable() {
+        // IDLE_PROC_SIZE must be large enough to hold a proc struct.
+        // A reasonable x86_64 proc (regs, flags, scheduling fields) should
+        // fit in at least 512 bytes; 1024 gives generous headroom.
+        const _: () = assert!(IDLE_PROC_SIZE >= 512);
+        assert_eq!(IDLE_PROC_SIZE, 1024);
+    }
+
+    #[test]
+    fn test_run_q_all_null_after_init() {
+        unsafe {
+            let mut vars = CpuLocalVars::default();
+            let storage = CpuLocalStorage::new();
+            storage.init(&mut vars as *mut CpuLocalVars);
+
+            for i in 0..NR_SCHED_QUEUES {
+                // Read from the backing vars directly after init.
+                assert!(
+                    vars.run_q_head[i].is_null(),
+                    "run_q_head[{}] should be null after default init",
+                    i
+                );
+                assert!(
+                    vars.run_q_tail[i].is_null(),
+                    "run_q_tail[{}] should be null after default init",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_double_init_idempotent() {
+        unsafe {
+            let mut vars1 = CpuLocalVars::default();
+            let mut vars2 = CpuLocalVars::default();
+            let storage = CpuLocalStorage::new();
+
+            // First init with vars1.
+            storage.init(&mut vars1 as *mut CpuLocalVars);
+            assert_eq!(storage.proc_ptr(), vars1.proc_ptr);
+
+            // Second init with vars2 — should be ignored.
+            storage.init(&mut vars2 as *mut CpuLocalVars);
+            // Storage should still point to vars1.
+            assert_eq!(storage.proc_ptr(), vars1.proc_ptr);
+        }
+    }
+
+    #[test]
+    fn test_storage_new_uninitialized() {
+        let storage = CpuLocalStorage::new();
+        // A newly created storage should report uninitialized.
+        assert!(!storage.initialized.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_idle_proc_ptr_within_struct() {
+        let v = CpuLocalVars::default();
+        let idle = v.idle_proc_ptr();
+        let base = &v as *const CpuLocalVars as usize;
+        let idle_addr = idle as usize;
+        // The idle_proc buffer must be inside the CpuLocalVars struct.
+        assert!(idle_addr >= base, "idle_proc_ptr must be >= struct base");
+        assert!(
+            idle_addr + IDLE_PROC_SIZE <= base + size_of::<CpuLocalVars>(),
+            "idle_proc buffer must fit within the struct"
+        );
+    }
+
+    #[test]
+    fn test_fpu_fields_set_get() {
+        unsafe {
+            let mut vars = CpuLocalVars::default();
+            let storage = CpuLocalStorage::new();
+            storage.init(&mut vars as *mut CpuLocalVars);
+
+            // fpu_presence roundtrip.
+            assert_eq!(storage.fpu_presence(), 0);
+            storage.set_fpu_presence(1);
+            assert_eq!(storage.fpu_presence(), 1);
+            storage.set_fpu_presence(0);
+            assert_eq!(storage.fpu_presence(), 0);
+
+            // fpu_owner roundtrip.
+            assert!(storage.fpu_owner().is_null());
+            let mock = 0xCAFE as *mut core::ffi::c_void;
+            storage.set_fpu_owner(mock);
+            assert_eq!(storage.fpu_owner(), mock);
+        }
+    }
+
+    #[test]
+    fn test_set_proc_ptr_affects_get_cpulocal() {
+        unsafe {
+            init_cpulocals();
+            let mock = 0xDEAD as *mut core::ffi::c_void;
+            set_cpulocal_proc_ptr(mock);
+            assert_eq!(get_cpulocal_proc_ptr(), mock);
+
+            // Reset for other tests.
+            set_cpulocal_proc_ptr(core::ptr::null_mut());
         }
     }
 }

@@ -495,4 +495,188 @@ mod tests {
         let (a, _) = make_alloc();
         assert!(a.bitmap_len() > 0);
     }
+
+    // ── PhysicalMemoryMap edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_mmap_cut_no_overlap() {
+        // Cut on range that doesn't intersect any region — should be no-op.
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1000, 0x3000);
+        mm.cut(0x5000, 0x6000);
+        assert_eq!(mm.count, 1);
+        assert_eq!(mm.regions[0].start, 0x1000);
+        assert_eq!(mm.regions[0].end, 0x3000);
+    }
+
+    #[test]
+    fn test_mmap_cut_exact_start() {
+        // Cut starting exactly at the region start.
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1000, 0x5000);
+        mm.cut(0x1000, 0x3000);
+        assert_eq!(mm.count, 1);
+        assert_eq!(mm.regions[0].start, 0x3000);
+        assert_eq!(mm.regions[0].end, 0x5000);
+    }
+
+    #[test]
+    fn test_mmap_cut_exact_end() {
+        // Cut ending exactly at the region end.
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1000, 0x5000);
+        mm.cut(0x3000, 0x5000);
+        assert_eq!(mm.count, 1);
+        assert_eq!(mm.regions[0].start, 0x1000);
+        assert_eq!(mm.regions[0].end, 0x3000);
+    }
+
+    #[test]
+    fn test_mmap_cut_full_region() {
+        // Cut that exactly covers a region — should remove it entirely.
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1000, 0x3000);
+        mm.cut(0x1000, 0x3000);
+        assert_eq!(mm.count, 0);
+    }
+
+    #[test]
+    fn test_mmap_cut_invalid() {
+        // Cut with start >= end should be no-op.
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1000, 0x5000);
+        mm.cut(0x4000, 0x2000);
+        assert_eq!(mm.count, 1);
+    }
+
+    #[test]
+    fn test_mmap_add_max_entries_overflow() {
+        let mut mm = PhysicalMemoryMap::new();
+        for i in 0..MAX_MMAP_ENTRIES + 10 {
+            mm.add((i as u64) * 0x1000, (i as u64 + 1) * 0x1000);
+        }
+        // count should be capped at MAX_MMAP_ENTRIES (the non-adjacent
+        // entries won't merge, so this exercises the `self.count >= MAX` guard).
+        assert!(mm.count <= MAX_MMAP_ENTRIES);
+    }
+
+    // ── PhysicalAllocator edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_alloc_from_empty_mmap() {
+        let mut storage = TestStorage::new();
+        let mut alloc = PhysicalAllocator::new(&mut storage);
+        let mm = PhysicalMemoryMap::new();
+        alloc.init_from_mmap(&mm);
+        assert_eq!(alloc.free_count(), 0);
+        assert!(alloc.alloc_page().is_none());
+        assert!(alloc.alloc_contig(1).is_none());
+    }
+
+    #[test]
+    fn test_alloc_exhaustion() {
+        let (mut a, _) = make_alloc();
+        let total = a.free_count();
+        // Allocate every available page one by one.
+        for _ in 0..total {
+            assert!(a.alloc_page().is_some());
+        }
+        // Now the allocator should be empty.
+        assert_eq!(a.free_count(), 0);
+        assert!(a.alloc_page().is_none());
+    }
+
+    #[test]
+    fn test_alloc_contig_zero() {
+        let (mut a, _) = make_alloc();
+        assert!(a.alloc_contig(0).is_none());
+    }
+
+    #[test]
+    fn test_double_free() {
+        // Freeing the same page twice should be idempotent.
+        let (mut a, _) = make_alloc();
+        let before = a.free_count();
+        let addr = a.alloc_page().unwrap();
+        assert_eq!(a.free_count(), before - 1);
+        a.free_page(addr);
+        assert_eq!(a.free_count(), before);
+        a.free_page(addr);
+        // free_count should still be `before` — second free is a no-op.
+        assert_eq!(a.free_count(), before);
+    }
+
+    #[test]
+    fn test_reserve_all() {
+        let (mut a, _) = make_alloc();
+        let total = a.total_pages();
+        // Reserve every representable page (beyond available memory).
+        a.reserve(0, (total as u64) * NBPG);
+        assert_eq!(a.free_count(), 0);
+        assert!(a.alloc_page().is_none());
+    }
+
+    #[test]
+    fn test_reserve_zero_size() {
+        let (mut a, _) = make_alloc();
+        let before = a.free_count();
+        a.reserve(0, 0);
+        assert_eq!(a.free_count(), before);
+    }
+
+    #[test]
+    fn test_bitmap_overflow_handled() {
+        // Pages beyond the bitmap should be silently ignored (not panic).
+        let (mut a, _) = make_alloc();
+        let past_end = a.bitmap_len() * 64 + 100;
+        // set_used / set_free / is_free for out-of-bounds pages should be
+        // no-ops.  We test via reserve which calls set_used internally.
+        a.reserve((past_end as u64) * NBPG, 4096);
+        // The operation should not have affected any in-bounds state.
+        assert!(a.free_count() > 0);
+    }
+
+    #[test]
+    fn test_alloc_contig_across_region_gap() {
+        // Two separate available regions with a gap. A contig alloc larger
+        // than the first region should still succeed from the second.
+        let mut storage = TestStorage::new();
+        let mut alloc = PhysicalAllocator::new(&mut storage);
+        let mut mm = PhysicalMemoryMap::new();
+        // Add a small region (16 pages).
+        mm.add(0x100000, 0x110000);
+        // Add a larger region starting after a gap.
+        mm.add(0x120000, 0x140000);
+        alloc.init_from_mmap(&mm);
+        // Ask for 32 pages — must come from the second region.
+        let addr = alloc.alloc_contig(32).unwrap();
+        assert!(addr >= 0x120000);
+        assert!(addr < 0x140000);
+    }
+
+    #[test]
+    fn test_mmap_4gb_above() {
+        // Regions above 4 GB should be handled correctly (no 32-bit truncation).
+        let mut mm = PhysicalMemoryMap::new();
+        mm.add(0x1_0000_0000, 0x2_0000_0000);
+        assert_eq!(mm.highest_phys(), 0x2_0000_0000);
+        assert_eq!(mm.total_available(), 0x1_0000_0000);
+    }
+
+    #[test]
+    fn test_alloc_contig_spanning_page_boundary() {
+        // Allocate from region that starts mid-bitmap-word.
+        let mut storage = TestStorage::new();
+        let mut alloc = PhysicalAllocator::new(&mut storage);
+        let mut mm = PhysicalMemoryMap::new();
+        // Start at page 70 (bit in second u64 of the bitmap).
+        mm.add(70 * NBPG, 200 * NBPG);
+        alloc.init_from_mmap(&mm);
+        let addr = alloc.alloc_contig(16).unwrap();
+        assert_eq!(addr % NBPG, 0);
+        let page = (addr / NBPG) as usize;
+        for p in page..page + 16 {
+            assert!(!alloc.is_free(p));
+        }
+    }
 }

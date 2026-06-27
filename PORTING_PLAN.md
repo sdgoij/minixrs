@@ -368,7 +368,11 @@ The Rust port targets two architectures:
   - All structs use `#[repr(C, packed)]` where C used `__packed`
   - Manual `Default` implementations for arrays >32 elements (Rust limitation)
   - `no_std` crate with `core::mem` and `core::arch::asm!`
-  - **112 tests** across all modules (functional, edge case, integration)
+  - **124 unit tests** across all modules (functional, edge case, integration)
+  - Constants cross-referenced against C headers, struct layouts match `#[repr(C)]`
+  - `cpuvar.rs`: CPU role constants fixed to match C reference (SP=0, BP=1, AP=2)
+  - `psl.rs`: PSL_CLEARSIG now includes PSL_VM (bit 20) per C reference
+  - `cpulocals.rs`: cpu_is_idle/idle_interrupted use AtomicI32 for volatile semantics
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
 - [x] **2.2 — Port + adapt assembly routines for x86_64**
@@ -437,7 +441,7 @@ The Rust port targets two architectures:
     - `identity_op` — clarity in operations like `outb(port, 3)`
     - `unnecessary_cast` — u64→u64 conversions
   - **`cargo clippy --package arch-x86_64 -- -D warnings`**: **Clean**
-  - **`cargo test --package arch-x86_64`**: **131 tests** (130 passed, 1 ignored — physical address pointer sanitizer)
+  - **`cargo test --package arch-x86_64`**: **180 tests** (179 passed, 1 ignored — physical address pointer sanitizer)
 
 - [x] **2.4 — Implement the raw memory allocator**
   - Created `crates/arch-x86_64/src/alloc.rs` (806 lines)
@@ -453,7 +457,8 @@ The Rust port targets two architectures:
     - `free_count()`: count free pages via bitmap
   - Global allocator with `init_allocator()` and `global_allocator()`
   - **15 tests** (all passed): alloc/free, alignment, no-overlap,
-    memory map cut/split, 4 GB limit, bitmap operations
+    memory map cut/split, 4 GB limit, bitmap operations, exhaustion,
+    boundary cuts, double-free, overflow resilience
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
 - [x] **2.5 — Port `minix/kernel/cpulocals.h`**
@@ -473,7 +478,8 @@ The Rust port targets two architectures:
   - Unsafe accessor functions: `get_*`/`set_*` for each field
   - `NR_SCHED_QUEUES = 16`, `NR_CPUS = MAXCPUS` from param.rs
   - Single-CPU layout (SMP array indexing can be added later)
-  - **6 tests** (all passed): size, offset monotonicity, defaults, bounds
+  - **16 tests** (all passed): defaults, run queue array, idle_proc_ptr,
+    storage init/accessors, setters, global init, atomic idle flags
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
 - [x] **2.6 — Port `minix/kernel/spinlock.h`**
@@ -490,7 +496,8 @@ The Rust port targets two architectures:
     `spinlock_declare!` (mirrors C macro equivalents)
   - **Big Kernel Lock (BKL)**: `BIG_KERNEL_LOCK` static + `bkl_lock()`/`bkl_unlock()`
   - `AtomicT` = `u32` (same as Minix `typedef u32_t atomic_t`)
-  - **7 tests** (all passed): init, trylock, unlock, BKL, config
+  - **15 tests** (all passed): init, trylock, unlock, BKL, config,
+    macro expansion, double-unlock safe, const construction
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
 ---

@@ -680,9 +680,9 @@ mod tests {
         fn _is_fn(_f: unsafe fn(u16) -> u8) {}
         fn _is_fn2(_f: unsafe fn() -> u64) {}
         fn _is_fn3(_f: unsafe fn(u64)) {}
-        let _ = _is_fn(inb);
-        let _ = _is_fn2(read_cr3);
-        let _ = _is_fn3(write_cr3);
+        _is_fn(inb);
+        _is_fn2(read_cr3);
+        _is_fn3(write_cr3);
     }
 
     #[test]
@@ -695,5 +695,103 @@ mod tests {
     #[test]
     fn test_msr_star() {
         assert_eq!(crate::cpu_msr::msr::STAR, 0xC000_0081);
+    }
+
+    #[test]
+    fn test_rdtsc_monotonic() {
+        // RDTSC should return non-decreasing values.
+        let a = unsafe { rdtsc() };
+        let b = unsafe { rdtsc() };
+        assert!(b >= a, "TSC must be monotonic");
+    }
+
+    #[test]
+    fn test_cpuid_basic_info() {
+        // Leaf 0 returns the maximum basic leaf in EAX.
+        let (eax, ebx, ecx, edx) = unsafe { cpuid(0) };
+        assert!(eax >= 1, "cpuid leaf 0 should report at least leaf 1");
+        // Vendor string: ebx:edx:ecx = "GenuineIntel" or "AuthenticAMD" etc.
+        // Just verify none of the vendor string registers are zero (some VM
+        // environments may have different strings, but non-zero is a safe bet).
+        assert!(
+            ebx != 0 || edx != 0 || ecx != 0,
+            "cpuid vendor string should not be all-zero"
+        );
+    }
+
+    #[test]
+    fn test_str_sel_result() {
+        // STR returns the segment selector of the Task Register.
+        // STR is accessible from ring 3, so this is safe in a test binary.
+        let sel = unsafe { str_sel() };
+        // In long mode, the TR is always present and has a non-zero selector.
+        assert!(sel != 0, "Task Register selector must be non-zero");
+    }
+
+    #[test]
+    fn test_sgdt_result() {
+        // SGDT is accessible from ring 3; it stores the GDTR.
+        let mut desc: [u8; 10] = [0u8; 10];
+        unsafe {
+            sgdt(&mut desc);
+        }
+        let _limit = u16::from_ne_bytes([desc[0], desc[1]]);
+        let base = u64::from_ne_bytes([
+            desc[2], desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9],
+        ]);
+        assert!(base != 0, "GDT base must be non-zero");
+    }
+
+    #[test]
+    fn test_cpuid_extended_info() {
+        // Extended leaf 0x80000000 reports the maximum extended leaf.
+        let (eax, _, _, _) = unsafe { cpuid(0x80000000u32) };
+        // Must be >= 0x80000000; reasonable systems support at least
+        // 0x80000008 (address space sizes).
+        assert!(eax >= 0x80000000, "max extended leaf must be >= 0x80000000");
+    }
+
+    #[test]
+    fn test_rdtsc_returns_u64() {
+        let tsc = unsafe { rdtsc() };
+        // TSC is a monotonically increasing counter, so any value is valid.
+        let _: u64 = tsc;
+    }
+
+    #[test]
+    fn test_fx_and_fn_compiles() {
+        // FPU init instructions (FNINIT, FNCLEX) are accessible from ring 3.
+        unsafe {
+            fninit();
+            fnclex();
+        }
+    }
+
+    #[test]
+    fn test_read_cr0_2_3_4_type_check() {
+        // Verify the function signatures: read_cr* return u64.
+        // We cannot call these from usermode (privileged instruction), so
+        // we verify the types statically.
+        fn _u64_fn(_: unsafe fn() -> u64) {}
+        _u64_fn(read_cr0);
+        _u64_fn(read_cr2);
+        _u64_fn(read_cr3);
+        _u64_fn(read_cr4);
+    }
+
+    #[test]
+    fn test_hlt_type_check() {
+        // HLT is ring-0 only; verify the signature compiles.
+        fn _void_fn(_: unsafe fn()) {}
+        _void_fn(hlt);
+    }
+
+    #[test]
+    fn test_inb_outb_type_check() {
+        // IN/OUT are privileged in long mode; verify signatures compile.
+        fn _in(_: unsafe fn(u16) -> u8) {}
+        fn _out(_: unsafe fn(u16, u8)) {}
+        _in(inb);
+        _out(outb);
     }
 }

@@ -21,6 +21,7 @@ pub mod rflags {
     pub const NT: u64 = 0x00004000; // Nested task
     pub const RF: u64 = 0x00010000; // Resume
     // VM: 0x00020000 — not valid in long mode
+    pub const VM: u64 = 0x00020000; // Virtual 8086 mode
     pub const AC: u64 = 0x00040000; // Alignment check
     pub const VIF: u64 = 0x00080000; // Virtual interrupt enable
     pub const VIP: u64 = 0x00100000; // Virtual interrupt pending
@@ -47,7 +48,9 @@ pub const PSL_USER: u64 = rflags::C
     | rflags::AC;
 
 /// RFLAGS bits cleared on signal delivery.
-pub const PSL_CLEARSIG: u64 = rflags::T | rflags::AC | rflags::D;
+/// Includes VM flag for compatibility with the i386 reference
+/// (always zero in long mode, so inclusion is harmless).
+pub const PSL_CLEARSIG: u64 = rflags::T | rflags::VM | rflags::AC | rflags::D;
 
 /// Static bits user space cannot change.
 pub const PSL_USERSTATIC: u64 =

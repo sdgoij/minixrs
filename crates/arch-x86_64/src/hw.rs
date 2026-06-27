@@ -351,4 +351,173 @@ mod tests {
     fn test_tsc_compiles() {
         let _ = read_tsc();
     }
+
+    // ── IDT gate edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn test_idt_gate_selector_zero() {
+        let (lo, hi) = idt_int_gate_64(0x1000, 0x00, 0);
+        // Selector field is bits 16-31.
+        assert_eq!((lo >> 16) & 0xFFFF, 0x00);
+        // Offset at bits 0-15 should still be set.
+        assert_eq!(lo & 0xFFFF, 0x1000);
+        assert_eq!(hi, 0);
+    }
+
+    #[test]
+    fn test_idt_gate_max_offset() {
+        // Maximum usable 48-bit offset (bits 0-47 set).
+        let offset = 0xFFFF_FFFF_FFFFu64;
+        let (lo, hi) = idt_int_gate_64(offset, 0x08, 0);
+        // bits 0-15 in low.
+        assert_eq!(lo & 0xFFFF, 0xFFFF);
+        // bits 48-63 in low (offset >> 16) << 48.
+        assert_eq!((lo >> 48) & 0xFFFF, 0xFFFF);
+        // bits 32-47 in high.
+        assert_eq!(hi & 0xFFFFFFFF, 0xFFFF);
+    }
+
+    #[test]
+    fn test_idt_gate_full_64bit_offset() {
+        // A full 64-bit offset — high qword should hold bits 32-63.
+        let offset = 0xDEAD_BEEF_CAFE_F000u64;
+        let (lo, hi) = idt_int_gate_64(offset, 0x08, 0);
+        // Low qword should hold bits 0-15 (offset_low) and 48-63 (offset_mid).
+        assert_eq!(lo & 0xFFFF, 0xF000);
+        assert_eq!((lo >> 48) & 0xFFFF, 0xCAFE);
+        // High qword should hold bits 32-63.
+        assert_eq!(hi, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn test_idt_gate_dpl_0() {
+        // DPL=0: kernel-only interrupt gate.
+        let (lo, _) = idt_int_gate_64(0x1000, 0x08, 0);
+        // Type/DPL/P byte at bits 40-47: typ(14) | dpl(0)<<5 | P(1) = 0x8E.
+        assert_eq!((lo >> 40) & 0xFF, 0x8E);
+    }
+
+    #[test]
+    fn test_idt_gate_dpl_3() {
+        // DPL=3: user-callable interrupt gate (e.g., int 0x80).
+        let (lo, _) = idt_int_gate_64(0x1000, 0x08, 3);
+        // typ(14) | dpl(3)<<5(0x60) | P(1) = 0x8E | 0x60 = 0xEE.
+        assert_eq!((lo >> 40) & 0xFF, 0xEE);
+    }
+
+    #[test]
+    fn test_idt_trap_gate_dpl_3() {
+        let (lo, _) = idt_trap_gate_64(0x1000, 0x08, 3);
+        // typ(15) | dpl(3)<<5(0x60) | P(1) = 0x8F | 0x60 = 0xEF.
+        assert_eq!((lo >> 40) & 0xFF, 0xEF);
+    }
+
+    #[test]
+    fn test_idt_gate_not_present() {
+        // Cannot test directly via convenience fns which hardcode present=true.
+        // Use idt_gate_descriptor directly with present=false.
+        let (lo, _) = idt_gate_descriptor(0x1000, 0x08, 0, 14, 0, false);
+        // Without P bit: typ(14) | dpl(0)<<5 = 0x0E.
+        assert_eq!((lo >> 40) & 0xFF, 0x0E);
+    }
+
+    #[test]
+    fn test_idt_gate_descriptor_roundtrip() {
+        // Build a descriptor and verify the offset can be reconstructed.
+        let offset = 0xFFFF800010002000u64;
+        let (lo, hi) = idt_int_gate_64(offset, 0x08, 0);
+        let reconstructed = (lo & 0xFFFF) | (((lo >> 48) & 0xFFFF) << 16) | (hi << 32);
+        assert_eq!(reconstructed, offset);
+    }
+
+    #[test]
+    fn test_idt_gate_ist_zero() {
+        let (lo, _) = idt_int_gate_64(0x1000, 0x08, 0);
+        // IST field at bits 32-34 should be 0.
+        assert_eq!((lo >> 32) & 0x07, 0);
+    }
+
+    #[test]
+    fn test_idt_trap_gate_not_present() {
+        let (lo, _) = idt_gate_descriptor(0x1000, 0x08, 0, 15, 0, false);
+        // typ(15) | dpl(0)<<5 = 0x0F.
+        assert_eq!((lo >> 40) & 0xFF, 0x0F);
+    }
+
+    // ── Atomic operation edge cases ────────────────────────────────────────
+
+    #[test]
+    fn test_atomic_cas_64_fail() {
+        let x = AtomicU64::new(42);
+        // Expected doesn't match — should return current value without changing.
+        assert_eq!(atomic_cas_64(&x, 99, 100), 42);
+        assert_eq!(x.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn test_atomic_cas_32_fail() {
+        let x = AtomicU32::new(10);
+        assert_eq!(atomic_cas_32(&x, 99, 20), 10);
+        assert_eq!(x.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_atomic_exchange_32() {
+        let x = AtomicU32::new(7);
+        assert_eq!(atomic_exchange_32(&x, 8), 7);
+        assert_eq!(x.load(Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn test_atomic_add_32() {
+        let x = AtomicU32::new(3);
+        assert_eq!(atomic_add_32(&x, 2), 3);
+        assert_eq!(x.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_atomic_fence_compiles() {
+        atomic_fence();
+    }
+
+    #[test]
+    fn test_atomic_load_acquire() {
+        let x = AtomicU64::new(0xABCD);
+        assert_eq!(atomic_load_acquire(&x), 0xABCD);
+    }
+
+    #[test]
+    fn test_atomic_store_release() {
+        let x = AtomicU64::new(0);
+        atomic_store_release(&x, 0x1234);
+        assert_eq!(x.load(Ordering::Relaxed), 0x1234);
+    }
+
+    // ── TLB flush type-check tests ─────────────────────────────────────────
+    //
+    // TLB flush functions call privileged instructions (write_cr3, write_cr4,
+    // invlpg).  These cannot be executed from usermode test binaries.  We
+    // verify the function signatures compile instead.
+
+    #[test]
+    fn test_tlb_flush_type_check() {
+        fn _is_fn(_: fn()) {}
+        _is_fn(tlb_flush_current);
+        _is_fn(tlb_flush_global);
+        fn _is_fn1(_: fn(u64)) {}
+        _is_fn1(tlb_flush_page);
+    }
+
+    // ── SGDT / SIDT / STR tests (ring-3-safe) ──────────────────────────────
+    //
+    // SGDT, SIDT, and STR are all accessible from ring 3, so executing them
+    // in a test binary is safe.
+
+    #[test]
+    fn test_sgdt_sidt_str_compiles() {
+        let (_limit, base) = sgdt();
+        assert!(base != 0, "GDT base should be non-zero");
+        let sel = str();
+        assert!(sel != 0, "TR selector should be non-zero");
+    }
 }

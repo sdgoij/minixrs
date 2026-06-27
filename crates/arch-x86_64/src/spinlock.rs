@@ -234,9 +234,9 @@ mod tests {
 
     #[test]
     fn test_config_constants() {
-        assert!(!CONFIG_SMP);
-        assert_eq!(CONFIG_MAX_CPUS, 1);
-        assert!(!SPINLOCKS_ACTIVE);
+        const _: () = assert!(!CONFIG_SMP);
+        const _: () = assert!(CONFIG_MAX_CPUS == 1);
+        const _: () = assert!(!SPINLOCKS_ACTIVE);
     }
 
     #[test]
@@ -245,5 +245,80 @@ mod tests {
         unsafe {
             assert!(lock.try_lock());
         }
+    }
+
+    #[test]
+    fn test_spinlock_double_unlock() {
+        // Unlocking an already unlocked spinlock must not panic.
+        unsafe {
+            let lock = Spinlock::new();
+            lock.unlock();
+            lock.unlock();
+            // After double unlock, lock should still be acquirable.
+            assert!(lock.try_lock());
+        }
+    }
+
+    #[test]
+    fn test_spinlock_const_new() {
+        // Verify Spinlock::new() can be used in const context.
+        #[allow(clippy::declare_interior_mutable_const)]
+        const _LOCK: Spinlock = Spinlock::new();
+    }
+
+    #[test]
+    fn test_spinlock_define_macro() {
+        // Verify the spinlock_define! macro compiles.
+        spinlock_define!(TEST_LOCK);
+        unsafe {
+            assert!(TEST_LOCK.try_lock());
+        }
+    }
+
+    #[test]
+    fn test_private_spinlock_define_macro() {
+        private_spinlock_define!(_PRIVATE_LOCK);
+        unsafe {
+            assert!(_PRIVATE_LOCK.try_lock());
+        }
+    }
+
+    #[test]
+    fn test_bkl_roundtrip() {
+        // BKL lock/unlock roundtrip should not panic.
+        unsafe {
+            bkl_lock();
+            bkl_unlock();
+        }
+    }
+
+    #[test]
+    fn test_spinlock_trylock_after_lock() {
+        unsafe {
+            let lock = Spinlock::new();
+            lock.lock();
+            // After lock(), unlock(), the lock should be free.
+            lock.unlock();
+            assert!(lock.try_lock());
+        }
+    }
+
+    #[test]
+    fn test_spinlock_init_unlocks() {
+        unsafe {
+            let mut lock = Spinlock::new();
+            lock.lock();
+            // Re-init resets to unlocked.
+            lock.init();
+            assert!(lock.try_lock());
+        }
+    }
+
+    #[test]
+    fn test_big_kernel_lock_const() {
+        // BIG_KERNEL_LOCK is a static, verify it's constructible as const.
+        const _CHECK: () = {
+            let _: Spinlock = Spinlock::new();
+        };
     }
 }
