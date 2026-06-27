@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod debug;
 pub mod glo;
 pub mod r#priv;
 pub mod proc;

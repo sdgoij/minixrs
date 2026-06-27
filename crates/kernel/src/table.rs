@@ -33,16 +33,26 @@ const EP_MAX_GENERATION: i32 = i32::MAX / EP_GENERATION_SIZE - 1;
 // Process Table
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Raw process table storage (BSS, zero-initialized).
+/// Aligned byte array for process table storage.
+#[repr(C, align(64))]
+struct AlignedTable {
+    data: [u8; PROC_TABLE_SIZE],
+}
+
+/// Raw process table storage (BSS, cache-line aligned).
 ///
 /// Accessed through `proc_addr()` which maps process numbers to slots.
 /// Layout: tasks occupy indices [0, NR_TASKS), user procs occupy
 /// indices [NR_TASKS, NR_PROCS_TOTAL).
-static mut PROC_TABLE_BYTES: [u8; PROC_TABLE_SIZE] = [0u8; PROC_TABLE_SIZE];
+static mut PROC_TABLE_ALIGNED: AlignedTable = AlignedTable {
+    data: [0u8; PROC_TABLE_SIZE],
+};
 
 /// Return a raw pointer to the process table as `[Proc]` (unsized slice).
 fn proc_table_ptr() -> *mut Proc {
-    core::ptr::addr_of_mut!(PROC_TABLE_BYTES).cast::<Proc>()
+    core::ptr::addr_of_mut!(PROC_TABLE_ALIGNED)
+        .cast::<u8>()
+        .cast::<Proc>()
 }
 
 /// Get a pointer to the process at index `i` in the table.

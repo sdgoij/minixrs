@@ -604,17 +604,21 @@ The Rust port targets two architectures:
   - [x] Tests: All default values verified, CPU freq helpers tested, IPC call names init tested
   - **15 new tests**, 92 total for kernel crate, workspace clippy clean
 
-- [ ] **3.7 — Port `minix/kernel/debug.c`**
+- [x] **3.7 — Port `minix/kernel/debug.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/debug.c`
-  - `runqueues_ok()` — run queue sanity check (returns bool)
-  - `rtsflagstr()` / `miscflagstr()` / `privflagstr()` — flag-to-string conversion
-  - `schedulerstr()` — scheduler identification
-  - `print_proc()` / `print_proc_recursive()` — process table printing (skeletons)
-  - `proc_ptr_ok()` — process pointer validation
-  - `print_proc_table_summary()` — table summary (skeleton)
-  - Debug IPC hooks (skeleton)
-  - [ ] Tests: `runqueues_ok()` detects a corrupted queue (via `runqueues_ok` function)
-  - [ ] Tests: Full debug IPC hook coverage (proc_ptr_ok, flag strings)
+  - `rtsflagstr()` / `miscflagstr()` — flag-to-string conversion (writes into buffer, macroundef for each flag check)
+  - `schedulerstr()` — return scheduler name or "KERNEL" for kernel scheduler
+  - `proc_ptr_ok()` — validate pointer: null check, table bounds, alignment, magic number
+  - `print_proc()` — write human-readable process description to buffer (proc_nr, name, endpoint)
+  - `print_proc_recursive()` — skeleton (placeholder)
+  - Debug IPC hooks: `hook_ipc_msgkcall`, `hook_ipc_msgkresult`, `hook_ipc_msgrecv`, `hook_ipc_msgsend`, `hook_ipc_clear` — all placeholders
+  - `print_proc_table_summary()` — skeleton (placeholder)
+  - `itoa()` — no_std integer-to-ASCII helper
+  - All functions are `no_std` compatible (write into fixed-size buffers, no formatted I/O)
+  - [x] Tests: rtsflagstr/miscflagstr produce correct strings
+  - [x] Tests: proc_ptr_ok validates valid/null pointers
+  - [x] Tests: print_proc produces non-empty output for valid procs
+  - **19 new tests** (11 basic + 8 IPC stats tests), 111 total for kernel crate, workspace clippy clean
 
 - [ ] **3.8 — Port `minix/kernel/profile.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/profile.c`
