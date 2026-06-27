@@ -24,8 +24,12 @@ pub const SYS_CALL_MASK_SIZE: usize = NR_SYS_CALLS.div_ceil(32); // BITMAP_CHUNK
 pub const NR_STATIC_PRIV_IDS: usize = NR_TASKS + LAST_SPECIAL_PROC_NR + 1;
 
 /// Internal constants needed before NR_TASKS/NR_PROCS are available.
-const NR_TASKS: usize = 5;
-const LAST_SPECIAL_PROC_NR: usize = 10;
+pub const NR_TASKS: usize = 5;
+pub const LAST_SPECIAL_PROC_NR: usize = 10;
+
+/// Privilege ID for unprivileged user processes.
+/// C: `USER_PRIV_ID = static_priv_id(ROOT_USR_PROC_NR) = NR_TASKS + INIT_PROC_NR`
+pub const USER_PRIV_ID: usize = NR_TASKS + LAST_SPECIAL_PROC_NR;
 
 /// Stack guard value for x86_64 (sizeof(reg_t) == 8).
 pub const STACK_GUARD: u64 = 0xDEAD_BEEF;

@@ -27,7 +27,7 @@ const EP_GENERATION_SIZE: i32 = 1 << EP_GENERATION_SHIFT;
 const MAX_NR_TASKS: i32 = 1023;
 
 /// Maximum generation number.
-const EP_MAX_GENERATION: i32 = i32::MAX / EP_GENERATION_SIZE - 1;
+pub const EP_MAX_GENERATION: i32 = i32::MAX / EP_GENERATION_SIZE - 1;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Process Table
