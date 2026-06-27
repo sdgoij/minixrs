@@ -200,7 +200,7 @@ impl Machine {
 pub struct KMessages {
     pub km_next: i32,
     pub km_size: i32,
-    pub km_buf: [u8; 2048],
+    pub km_buf: [u8; 10000],
     pub kmess_buf: [u8; 80 * 25],
     pub blpos: i32,
 }
@@ -216,7 +216,7 @@ impl KMessages {
         Self {
             km_next: 0,
             km_size: 0,
-            km_buf: [0u8; 2048],
+            km_buf: [0u8; 10000],
             kmess_buf: [0u8; 80 * 25],
             blpos: 0,
         }
@@ -299,7 +299,7 @@ impl KRandomnessBin {
 
 /// Minix kernel info (ABI structure for userspace).
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
+#[repr(C, packed)]
 pub struct MinixKernInfo {
     pub magic: u32,
     pub feature_flags: u32,
@@ -410,7 +410,7 @@ mod tests {
     fn test_kmessages_layout() {
         let km = KMessages::new();
         assert_eq!(km.km_next, 0);
-        assert_eq!(km.km_buf.len(), 2048);
+        assert_eq!(km.km_buf.len(), 10000);
     }
 
     #[test]
@@ -428,7 +428,8 @@ mod tests {
     #[test]
     fn test_minix_kerninfo_magic() {
         let ki = MinixKernInfo::new();
-        assert_eq!(ki.magic, 0xfc3b84bf);
+        let magic = unsafe { core::ptr::addr_of!(ki.magic).read_unaligned() };
+        assert_eq!(magic, 0xfc3b84bf);
     }
 
     #[test]

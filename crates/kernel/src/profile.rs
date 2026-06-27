@@ -15,7 +15,7 @@ use crate::proc::*;
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Sample buffer size for statistical profiling.
-pub const SAMPLE_BUFFER_SIZE: usize = 256 * 1024; // 256 KB
+pub const SAMPLE_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64 MB — matches C (64 << 20)
 
 /// Call profiling table sizes.
 pub const CPROF_TABLE_SIZE_OTHER: usize = 3000;

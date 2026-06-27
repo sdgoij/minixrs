@@ -523,13 +523,10 @@ The Rust port targets two architectures:
 
 - [x] **3.2 — Port `minix/kernel/priv.h` → Rust**
   - Source: `.refs/minix-3.3.0/minix/kernel/priv.h`
-  - `struct Priv` ported with all 20+ fields (proc_nr, id, flags, async tab, trap mask, IPC map, kcall mask, sig mgr, alarm timer, I/O ranges, memory ranges, IRQs, grants)
-  - Privilege flags: `PREEMPTIBLE`, `BILLABLE`, `DYN_PRIV_ID`, `SYS_PROC`, `CHECK_IO_PORT`, `CHECK_IRQ`, `CHECK_MEM`, `ROOT_SYS_PROC`, `VM_SYS_PROC`, `LU_SYS_PROC`, `RST_SYS_PROC`
-  - `PrivFlags` bitflags type
-  - Global `PRIV`, `PPRIV_ADDR` arrays, and `IDLE_PRIV` shared structure declared
-  - Accessors: `priv_addr()`, `priv_id()`, `id_to_nr()`, `may_send_to()`, `beg_priv_addr()`, `end_priv_addr()`, `beg/end_static/dyn_priv_addr()`
-  - Supporting types: `SysMap`, `IoRange`, `MemRange`, `MinixTimer`
-  - `NR_IO_RANGE=64`, `NR_MEM_RANGE=20`, `NR_IRQ=16`, `NR_SYS_CALLS=58`, `NR_STATIC_PRIV_IDS=16`, `STACK_GUARD=0xDEAD_BEEF`
+  - `struct Priv` ported with all 20+ fields
+  - **QA fix**: `PrivFlags` bit values corrected — ALL 11 values were off by one bit
+    (e.g. `PREEMPTIBLE` was `0x001`, corrected to `0x002` matching C's `#define PREEMPTIBLE 0x002`)
+  - Cross-referenced against C: `priv.h` line 21-60, `const.h` priv flags, `type.h` IoRange/MemRange
   - [x] Tests: `size_of::<Priv>()` matches expected layout
   - [x] Tests: Field values checked (sig_mgr default is i32::MIN/NONE, ProcTable size, idle priv exists)
   - **15 tests** covering defaults, flags, SysMap set/clear/bounds, I/O/mem/timer defaults, constants
@@ -579,7 +576,8 @@ The Rust port targets two architectures:
   - `set_sendto_bit()` / `unset_sendto_bit()` / `fill_sendto_mask()` — IPC capability manipulation
   - `send_sig()` / `cause_sig()` / `sig_delay_done()` — signal delivery skeletons (set SIGNALED+SIG_PENDING, dequeue)
   - `sched_proc()` — set process priority (skeleton)
-  - `clear_ipc()` / `clear_endpoint()` / `clear_ipc_refs()` — IPC cleanup (clear flags, walk table for refs)
+  - `clear_ipc()` / `clear_endpoint()` / `clear_ipc_refs()` — IPC cleanup (walk caller queue,
+    clear notify/asyn pending bits, clear blocked-on dependencies)
   - `KBILL_KCALL` / `KBILL_IPC` — kernel call billing statics
   - `IrqHook` struct + `IRQ_HOOKS[16]` table (matches kernel/type.h)
   - All x86_64-specific syscalls excluded; all `unsafe` ops wrapped in `unsafe {}` blocks
@@ -618,7 +616,17 @@ The Rust port targets two architectures:
   - [x] Tests: rtsflagstr/miscflagstr produce correct strings
   - [x] Tests: proc_ptr_ok validates valid/null pointers
   - [x] Tests: print_proc produces non-empty output for valid procs
-  - **19 new tests** (11 basic + 8 IPC stats tests), 111 total for kernel crate, workspace clippy clean
+  - **19 new tests** (11 basic + 8 IPC stats), 121 total for kernel crate, workspace clippy clean
+  - **Known limitations** (deferred to Phase 4 IPC system):
+    - `cause_sig()` stores sig_nr in p_pending and sets RTS flags, but does not notify
+      signal manager (`send_sig(sig_mgr, SIGKSIG)`) — needs `mini_send`
+    - `notify_scheduler()` sets RTS_NO_QUANTUM but doesn't build/send
+      `SCHEDULING_NO_QUANTUM` message — needs `mini_send`
+    - `send_sig()` routes through `cause_sig()` instead of C's `priv->s_sig_pending`
+      notification path — needs `mini_notify`
+  - **Fixed in QA**: `clear_ipc()`, `clear_endpoint()`, `clear_ipc_refs()` now match C
+    semantics (caller queue walk, notify/asyn pending clear, clear_ipc chain).
+    `NONE` constant corrected from `i32::MIN` to `31743` (C `_ENDPOINT_SLOT_TOP - 2`).
 
 - [x] **3.8 — Port `minix/kernel/profile.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/profile.c`
@@ -638,7 +646,7 @@ The Rust port targets two architectures:
 
 ---
 
-**Phase 3 Status**: TODO (0%) — no tasks implemented yet.
+**Phase 3 Status**: COMPLETE (121 tests, workspace clippy clean)
 
 ## Phase 4: IPC System — Message Passing
 
@@ -743,6 +751,22 @@ The Rust port targets two architectures:
   - `set_exec_target()` — set RIP/RSP for syscall return to a new binary
   - Source: `crates/kernel/src/ipc.rs`
   - Tests: Round-trip IPC send/receive cycle; deadlock detection; grant verification; address space switch validation
+
+- [ ] **4.5 — Complete Phase 3 deferred: signal & scheduler notification**
+    Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy)
+  - `cause_sig()` in `system.rs`: after storing sig_nr in p_pending and setting RTS flags,
+    notify the signal manager via `send_sig(sig_mgr, SIGKSIG)` — the notification path
+    is currently stubbed
+  - `notify_scheduler()` in `sched.rs`: after setting RTS_NO_QUANTUM, build and send
+    the `SCHEDULING_NO_QUANTUM` message to `p->p_scheduler->p_endpoint` via
+    `mini_send(p, p->p_scheduler->p_endpoint, &m_no_quantum, FROM_KERNEL)` — the
+    message is currently not built or sent
+  - `send_sig()` in `system.rs`: implement the C path using `priv->s_sig_pending` +
+    `increase_proc_signals()` + `mini_notify(proc_addr(SYSTEM), rp->p_endpoint)`
+    instead of routing through `cause_sig()`
+  - Tests: Signal delivery reaches target process via signal manager notification
+  - Tests: Scheduler receives SCHEDULING_NO_QUANTUM message on quantum expiry
+  - Tests: `send_sig` adds to private signal pending and notifies SYSTEM
 
 ---
 

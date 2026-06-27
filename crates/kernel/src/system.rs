@@ -33,8 +33,8 @@ pub const ECALLDENIED: i32 = -210;
 /// IRQ hook count (single-CPU).
 pub const NR_IRQ_HOOKS: usize = 16;
 
-/// NONE endpoint constant.
-pub const NONE: i32 = i32::MIN;
+/// NONE endpoint constant — matches C `_ENDPOINT_SLOT_TOP - 2` (31743).
+pub const NONE: i32 = 31743;
 pub const OK: i32 = 0;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -440,61 +440,118 @@ pub unsafe fn sig_delay_done(rp: *mut Proc) -> bool {
 
 /// Clear IPC state for a process.
 ///
+/// If the process is blocked on SENDING, unlink it from the target's
+/// caller queue. Always clears SENDING and RECEIVING flags.
+///
 /// # Safety
 ///
 /// Process must be valid.
 pub unsafe fn clear_ipc(rp: *mut Proc) {
     unsafe {
-        (*rp).p_rts_flags.fetch_and(
-            !(RtsFlags::SENDING.bits() | RtsFlags::RECEIVING.bits()),
-            Ordering::Relaxed,
-        );
-        (*rp).p_getfrom_e = NONE;
-        (*rp).p_sendto_e = NONE;
-        (*rp).p_caller_q = core::ptr::null_mut();
-        (*rp).p_q_link = core::ptr::null_mut();
+        let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+
+        if rts & RtsFlags::SENDING.bits() != 0 {
+            // Walk the target's caller queue to unlink this process
+            let target_ep = (*rp).p_sendto_e;
+            if crate::table::is_ok_endpoint(target_ep) {
+                let target_slot = crate::table::endpoint_slot(target_ep);
+                let target = crate::table::proc_addr(target_slot);
+                if !target.is_null() {
+                    let mut xpp = &mut (*target).p_caller_q as *mut *mut Proc;
+                    while !(*xpp).is_null() {
+                        if *xpp == rp {
+                            *xpp = (*rp).p_q_link;
+                            break;
+                        }
+                        xpp = &mut (**xpp).p_q_link as *mut *mut Proc;
+                    }
+                }
+            }
+            (*rp)
+                .p_rts_flags
+                .fetch_and(!RtsFlags::SENDING.bits(), Ordering::Relaxed);
+        }
+
+        (*rp)
+            .p_rts_flags
+            .fetch_and(!RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*rp).p_getfrom_e = crate::system::NONE;
+        (*rp).p_sendto_e = crate::system::NONE;
     }
 }
 
 /// Clear a process's endpoint.
+///
+/// Marks the process with RTS_NO_ENDPOINT, clears async size for
+/// system processes, calls clear_ipc() and clear_ipc_refs().
 ///
 /// # Safety
 ///
 /// Process must be valid.
 pub unsafe fn clear_endpoint(rp: *mut Proc) {
     unsafe {
-        (*rp).p_endpoint = NONE;
+        // Mark as having no endpoint
+        let rts_flags = RtsFlags::NO_ENDPOINT;
+        let old_flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
         (*rp)
             .p_rts_flags
-            .fetch_or(RtsFlags::NO_ENDPOINT.bits(), Ordering::Relaxed);
+            .store(old_flags | rts_flags.bits(), Ordering::Relaxed);
+
+        // Clear async size for system processes
+        if !(*rp).p_priv.is_null() {
+            let flags = (*(*rp).p_priv).s_flags;
+            if flags.contains(crate::r#priv::PrivFlags::SYS_PROC) {
+                (*(*rp).p_priv).s_asynsize = 0;
+            }
+        }
+
+        // Clear IPC state
+        clear_ipc(rp);
+
+        // Clear IPC references from other processes
+        clear_ipc_refs(rp);
     }
 }
 
 /// Clear IPC references to/from a process.
+///
+/// Walks the process table clearing notify pending, asyn pending,
+/// and send/receive references to the given process.
 ///
 /// # Safety
 ///
 /// Process must be valid; process table must be accessible.
 pub unsafe fn clear_ipc_refs(rp: *mut Proc) {
     unsafe {
-        // Walk the entire process table looking for processes
-        // that reference this one in their IPC queues
         let base = crate::table::proc_table_base();
+        let rp_endpoint = (*rp).p_endpoint;
+
         for i in 0..NR_PROCS_TOTAL {
             let p = base.add(i);
             if p == rp || (*p).is_empty() {
                 continue;
             }
-            // Remove from caller_q chain
-            if (*p).p_caller_q == rp {
-                (*p).p_caller_q = (*rp).p_q_link;
+
+            // Clear notify and asyn pending if privilege structure exists
+            if !(*p).p_priv.is_null() && !(*rp).p_priv.is_null() {
+                let rc_id = (*(*rp).p_priv).s_id;
+                if rc_id >= 0 {
+                    (*(*p).p_priv).s_notify_pending.clear(rc_id as usize);
+                    (*(*p).p_priv).s_asyn_pending.clear(rc_id as usize);
+                }
             }
+
+            // Check if this process is blocked on the target
+            if (*p).blocked_on() == rp_endpoint {
+                clear_ipc(p);
+            }
+
             // Clear send/receive if targeting this process
-            if (*p).p_sendto_e == (*rp).p_endpoint {
-                (*p).p_sendto_e = NONE;
+            if (*p).p_sendto_e == rp_endpoint {
+                (*p).p_sendto_e = crate::system::NONE;
             }
-            if (*p).p_getfrom_e == (*rp).p_endpoint {
-                (*p).p_getfrom_e = NONE;
+            if (*p).p_getfrom_e == rp_endpoint {
+                (*p).p_getfrom_e = crate::system::NONE;
             }
         }
     }
@@ -773,9 +830,13 @@ mod tests {
 
             clear_endpoint(rp);
 
-            assert_eq!((*rp).p_endpoint, NONE);
+            // C semantics: endpoint value is NOT cleared, but RTS_NO_ENDPOINT is set
+            // to prevent further use. The endpoint remains for reference cleanup.
             let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
-            assert!(flags & RtsFlags::NO_ENDPOINT.bits() != 0);
+            assert!(
+                flags & RtsFlags::NO_ENDPOINT.bits() != 0,
+                "RTS_NO_ENDPOINT should be set"
+            );
         }
     }
 

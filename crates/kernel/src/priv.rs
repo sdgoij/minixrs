@@ -39,27 +39,27 @@ bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct PrivFlags: i16 {
         /// Process is preemptible.
-        const PREEMPTIBLE     = 0x001;
+        const PREEMPTIBLE     = 0x002;
         /// Process is billable.
-        const BILLABLE        = 0x002;
+        const BILLABLE        = 0x004;
         /// Dynamic privilege ID.
-        const DYN_PRIV_ID     = 0x004;
+        const DYN_PRIV_ID     = 0x008;
         /// System process.
-        const SYS_PROC        = 0x008;
+        const SYS_PROC        = 0x010;
         /// Check I/O port access.
-        const CHECK_IO_PORT   = 0x010;
+        const CHECK_IO_PORT   = 0x020;
         /// Check IRQ access.
-        const CHECK_IRQ       = 0x020;
+        const CHECK_IRQ       = 0x040;
         /// Check memory access.
-        const CHECK_MEM       = 0x040;
+        const CHECK_MEM       = 0x080;
         /// Root system process.
-        const ROOT_SYS_PROC   = 0x080;
+        const ROOT_SYS_PROC   = 0x100;
         /// VM system process.
-        const VM_SYS_PROC     = 0x100;
+        const VM_SYS_PROC     = 0x200;
         /// Live update system process.
-        const LU_SYS_PROC     = 0x200;
+        const LU_SYS_PROC     = 0x400;
         /// Restartable system process.
-        const RST_SYS_PROC    = 0x400;
+        const RST_SYS_PROC    = 0x800;
     }
 }
 
@@ -480,16 +480,16 @@ mod tests {
 
     #[test]
     fn test_priv_flags_values() {
-        assert_eq!(PrivFlags::PREEMPTIBLE.bits(), 0x001);
-        assert_eq!(PrivFlags::BILLABLE.bits(), 0x002);
-        assert_eq!(PrivFlags::SYS_PROC.bits(), 0x008);
-        assert_eq!(PrivFlags::CHECK_IO_PORT.bits(), 0x010);
-        assert_eq!(PrivFlags::CHECK_IRQ.bits(), 0x020);
-        assert_eq!(PrivFlags::CHECK_MEM.bits(), 0x040);
-        assert_eq!(PrivFlags::ROOT_SYS_PROC.bits(), 0x080);
-        assert_eq!(PrivFlags::VM_SYS_PROC.bits(), 0x100);
-        assert_eq!(PrivFlags::LU_SYS_PROC.bits(), 0x200);
-        assert_eq!(PrivFlags::RST_SYS_PROC.bits(), 0x400);
+        assert_eq!(PrivFlags::PREEMPTIBLE.bits(), 0x002);
+        assert_eq!(PrivFlags::BILLABLE.bits(), 0x004);
+        assert_eq!(PrivFlags::SYS_PROC.bits(), 0x010);
+        assert_eq!(PrivFlags::CHECK_IO_PORT.bits(), 0x020);
+        assert_eq!(PrivFlags::CHECK_IRQ.bits(), 0x040);
+        assert_eq!(PrivFlags::CHECK_MEM.bits(), 0x080);
+        assert_eq!(PrivFlags::ROOT_SYS_PROC.bits(), 0x100);
+        assert_eq!(PrivFlags::VM_SYS_PROC.bits(), 0x200);
+        assert_eq!(PrivFlags::LU_SYS_PROC.bits(), 0x400);
+        assert_eq!(PrivFlags::RST_SYS_PROC.bits(), 0x800);
     }
 
     #[test]
