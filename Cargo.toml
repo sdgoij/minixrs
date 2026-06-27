@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+
+members = [
+    "crates/arch-common",
+    "crates/arch-x86_64",
+    "crates/arch-riscv64",
+    "crates/drivers",
+    "crates/fs",
+    "crates/kernel",
+    "crates/kernel-boot",
+    "crates/libs",
+    "crates/net",
+    "crates/servers",
+    "crates/userland",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "BSD-3-Clause"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

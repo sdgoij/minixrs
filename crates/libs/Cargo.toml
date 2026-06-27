@@ -1,0 +1,15 @@
+[package]
+name = "libs"
+version = "0.1.0"
+description = "libc, libm, libutil re-implementation"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]

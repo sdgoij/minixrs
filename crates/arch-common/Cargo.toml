@@ -1,0 +1,15 @@
+[package]
+name = "arch-common"
+version = "0.1.0"
+description = "Architecture-independent kernel primitives"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]

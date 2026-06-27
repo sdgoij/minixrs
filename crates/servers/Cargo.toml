@@ -1,0 +1,16 @@
+[package]
+name = "servers"
+version = "0.1.0"
+description = "System server crates (SEF, syslib for user-space servers)"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+kernel = { path = "../kernel" }

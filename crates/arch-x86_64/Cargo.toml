@@ -1,0 +1,16 @@
+[package]
+name = "arch-x86_64"
+version = "0.1.0"
+description = "x86_64-specific kernel code (registers, interrupts, page tables)"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }

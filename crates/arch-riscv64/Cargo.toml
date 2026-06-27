@@ -1,0 +1,16 @@
+[package]
+name = "arch-riscv64"
+version = "0.1.0"
+description = "RISC-V64-specific kernel code (bonus architecture)"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }

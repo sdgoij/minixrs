@@ -1,0 +1,17 @@
+[package]
+name = "kernel-boot"
+version = "0.1.0"
+description = "Boot binary crate (breaks circular dep between kernel and arch-x86_64)"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-x86_64 = { path = "../arch-x86_64" }
+kernel = { path = "../kernel" }

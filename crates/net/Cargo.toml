@@ -1,0 +1,15 @@
+[package]
+name = "net"
+version = "0.1.0"
+description = "Networking stack"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]

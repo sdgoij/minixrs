@@ -1,0 +1,17 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+description = "Core kernel: processes, scheduling, IPC, VM"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }
+arch-x86_64 = { path = "../arch-x86_64" }

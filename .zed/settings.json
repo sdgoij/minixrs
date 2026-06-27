@@ -1,0 +1,10 @@
+{
+  "languages": {
+    "C++": {
+      "enable_language_server": false,
+    },
+    "C": {
+      "enable_language_server": false,
+    },
+  },
+}
