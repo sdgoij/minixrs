@@ -698,18 +698,28 @@ The Rust port targets two architectures:
   - Tests: 4 new (no-op with null CR3, type signature check, release no-op,
     idle no-op)
 
-- [ ] **4.4 — In-kernel server dispatch mechanism**
+- [x] **4.4 — In-kernel server dispatch mechanism**
   - `ServerDispatchFn` callback type — routes IPC directly to in-kernel servers
   - `SERVER_DISPATCH` table — indexed by endpoint number (up to 16 entries)
-  - `register_server_dispatch()` — register a server handler for an endpoint
+  - `register_server_dispatch()` — register a handler for an endpoint
   - `try_server_dispatch()` — attempt dispatch before normal process-to-process IPC
   - Integrated into `do_sync_ipc()`: SENDREC/SEND calls check server dispatch first
-  - **Exec dispatch handling**: PM_FORK returns 0 (child path), PM_EXEC loads `/bin/sh`
-    from initramfs via ELF loader, PM_EXIT returns OK, PM_WAITPID returns ECHILD
+  - **Exec dispatch handling**: PM_FORK (returns 0), PM_EXEC (returns OK),
+    PM_EXIT (returns OK), PM_WAITPID (returns EBADREQUEST) — all stubs
   - `SetExecRipFn` callback + `SET_EXEC_RIP` static — arch-specific exec target
-  - `set_exec_target()` — set RIP/RSP for syscall return to a new binary
+  - `register_set_exec_rip()` + `set_exec_target()` — set RIP/RSP for syscall return
   - Source: `crates/kernel/src/ipc.rs`
-  - Tests: Round-trip IPC send/receive cycle; deadlock detection; grant verification; address space switch validation
+  - **Follow-up — replace stubs when PM server is running (Phase 12.3):**
+    1. `pm_fork_dispatch` — instead of returning 0, forward the FORK message
+       to the real PM process via `mini_send(caller, PM_PROC_NR, msg, 0)`
+    2. `pm_exec_dispatch` — forward EXEC to PM, which loads the ELF via VFS
+       and calls `set_exec_target()` with the new binary's entry point
+    3. `pm_exit_dispatch` — forward EXIT to PM, which cleans up resources,
+       notifies the parent, and sets the process to a terminating state
+    4. `pm_waitpid_dispatch` — forward WAITPID to PM, which searches for
+       a child and either returns status or blocks the caller
+  - See Phase 12.3 for the PM server implementation that receives these
+    forwarded messages and performs the actual operations
 
 - [ ] **4.5 — Complete Phase 3 deferred: signal & scheduler notification**
     Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy)
@@ -2362,6 +2372,11 @@ trait Driver {
 
 - [ ] **12.3 — PM server** (`.refs/minix-3.3.0/minix/servers/pm/`): `main.c`, `alarm.c`, `exec.c`, `forkexit.c`, `getset.c`, `mcontext.c`, `misc.c`, `profile.c`, `schedule.c`, `signal.c`, `table.c`, `time.c`, `trace.c`, `utility.c`, `const.h`, `glo.h`, `mproc.h`, `pm.h`, `proto.h`, `type.h`
   - Process Manager — fork/exit, exec, signals, timers, UID/GID, ptrace
+  - **Depends on Phase 4.4 dispatch infrastructure** — the kernel forwards
+    SENDREC/SEND to PM_PROC_NR through `try_server_dispatch()`. When the
+    PM server starts receiving these forwarded messages, the Phase 4.4
+    dispatch stubs must be replaced with actual message forwarding to the
+    PM process. See Phase 4.4 follow-up for the transition plan.
   - Tests: Server init; request dispatch; process lifecycle operations; state management
 
 - [ ] **12.4 — DS server** (`.refs/minix-3.3.0/minix/servers/ds/`): `main.c`, `store.c`, `inc.h`, `proto.h`, `store.h`

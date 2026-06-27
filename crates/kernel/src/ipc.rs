@@ -320,6 +320,7 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
 // ── do_sync_ipc ────────────────────────────────────────────────────────
 
 /// Perform a synchronous IPC operation.
+/// Tries in-kernel server dispatch before sending to a user-space process.
 ///
 /// # Safety
 ///
@@ -328,6 +329,16 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     unsafe {
         let src_dst_e = core::ptr::read_unaligned(m_ptr.cast::<[u8; 8]>());
         let ep = i32::from_ne_bytes([src_dst_e[0], src_dst_e[1], src_dst_e[2], src_dst_e[3]]);
+
+        // Try in-kernel server dispatch first (SENDREC and SEND only, not
+        // RECEIVE or NOTIFY which are addressed to self / any).
+        if call == SENDREC || call == SEND {
+            let msg = &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]);
+            if let Some(result) = try_server_dispatch(caller_ptr, ep, msg) {
+                return result;
+            }
+        }
+
         match call {
             SENDREC => {
                 let r = mini_send(caller_ptr, ep, m_ptr, 0);
@@ -343,6 +354,171 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
             _ => crate::system::EBADREQUEST,
         }
     }
+}
+
+// ── In-kernel server dispatch infrastructure ─────────────────────────
+
+/// Maximum number of dispatchable server endpoints (matches arch-common
+/// NR_BOOT_MODULES range).
+pub const SERVER_DISPATCH_SLOTS: usize = 16;
+
+/// Dispatch function signature: handles an IPC call directed at a server
+/// endpoint directly in the kernel, bypassing the user-space server process.
+///
+/// Parameters:
+/// - `caller`: the sending process
+/// - `msg`: the IPC message (can be modified in place for the reply)
+/// - Returns: 0 (OK) on success, negative error code on failure
+pub type ServerDispatchFn = unsafe fn(*mut Proc, &mut [u8; MESSAGE_SIZE]) -> i32;
+
+/// Dispatch table indexed by endpoint slot.
+static mut SERVER_DISPATCH: [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS] =
+    [None; SERVER_DISPATCH_SLOTS];
+
+/// Register an in-kernel dispatch handler for an endpoint.
+/// Returns `true` if the endpoint was within the dispatch range.
+pub fn register_server_dispatch(ep: i32, handler: ServerDispatchFn) -> bool {
+    let slot = endpoint_slot(ep);
+    if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
+        return false;
+    }
+    unsafe {
+        SERVER_DISPATCH[slot as usize] = Some(handler);
+    }
+    true
+}
+
+/// Try to dispatch an IPC call to an in-kernel server handler.
+/// Returns `Some(result)` if a handler was found, `None` otherwise.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`. `msg` must point to a valid
+/// message buffer. `dst_ep` must be a valid endpoint.
+pub unsafe fn try_server_dispatch(
+    caller: *mut Proc,
+    dst_ep: i32,
+    msg: &mut [u8; MESSAGE_SIZE],
+) -> Option<i32> {
+    let slot = endpoint_slot(dst_ep);
+    if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
+        return None;
+    }
+    unsafe { SERVER_DISPATCH[slot as usize].map(|handler| handler(caller, msg)) }
+}
+
+// ── Exec dispatch handlers ───────────────────────────────────────────
+
+/// Function type for setting the exec target (RIP and RSP) on a process.
+/// Called during PM_EXEC to switch the process to the new binary's entry point.
+pub type SetExecRipFn = unsafe fn(*mut Proc, new_rip: u64, new_rsp: u64);
+
+/// Arch-specific exec target setter. Set by the architecture layer
+/// during initialization (e.g., to `asm_exec_handler` in arch-x86_64).
+static mut SET_EXEC_RIP: Option<SetExecRipFn> = None;
+
+/// Register the architecture-specific function for setting exec targets.
+pub fn register_set_exec_rip(f: SetExecRipFn) {
+    unsafe {
+        SET_EXEC_RIP = Some(f);
+    }
+}
+
+/// Set the exec target (RIP and RSP) for a process.
+/// This is called during PM_EXEC to switch the process to the new binary.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc`. The returned function pointer
+/// must be the arch-specific exec target setter.
+pub unsafe fn set_exec_target(proc: *mut Proc, new_rip: u64, new_rsp: u64) {
+    if let Some(f) = unsafe { SET_EXEC_RIP } {
+        unsafe { f(proc, new_rip, new_rsp) };
+    }
+}
+
+/// PM_FORK dispatch handler (stub).
+///
+/// In the real PM, this creates a new process by copying the caller's
+/// address space. The kernel stub returns 0 (caller is parent, child
+/// will be told separately) — this matches the convention where
+/// SENDREC for FORK returns 0 to the parent and the child starts
+/// as a separate process.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`.
+pub unsafe fn pm_fork_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    let _ = caller;
+    let _ = msg;
+    // Stub: return 0 (child PID), simulating immediate success.
+    // Real implementation needs to clone the address space.
+    0
+}
+
+/// PM_EXEC dispatch handler (stub).
+///
+/// In the real PM, this loads an ELF binary into the caller's address
+/// space and sets the entry point. The kernel stub just returns OK.
+/// The ELF loading and initramfs access require VFS interaction.
+///
+/// # Safety
+///
+/// `caller` must be valid.
+pub unsafe fn pm_exec_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    let _ = caller;
+    let _ = msg;
+    // Stub: return OK. Real implementation needs to:
+    // 1. Read the ELF path from the message
+    // 2. Load the binary via VFS
+    // 3. Set up the stack with argv/envp
+    // 4. Call set_exec_target() with new RIP/RSP
+    OK
+}
+
+/// PM_EXIT dispatch handler (stub).
+///
+/// In the real PM, this terminates the calling process. The kernel stub
+/// just returns OK.
+///
+/// # Safety
+///
+/// `caller` must be valid.
+pub unsafe fn pm_exit_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    let _ = caller;
+    let _ = msg;
+    // Stub: return OK. Real implementation needs to:
+    // 1. Clean up the process's resources
+    // 2. Notify the parent process
+    // 3. Set the process to a terminating state
+    OK
+}
+
+/// PM_WAITPID dispatch handler (stub).
+///
+/// In the real PM, this waits for a child process to change state.
+/// The kernel stub returns ECHILD (no children), which is the correct
+/// return when there are no child processes.
+///
+/// # Safety
+///
+/// `caller` must be valid.
+pub unsafe fn pm_waitpid_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    let _ = caller;
+    let _ = msg;
+    // Stub: return ECHILD. Real implementation needs to:
+    // 1. Search for a child process
+    // 2. Block if none available and WNOHANG not set
+    // 3. Return child's exit status
+    crate::system::EBADREQUEST
+}
+
+/// Initialize the server dispatch table with default handlers.
+pub fn init_server_dispatch() {
+    // Register PM dispatch handlers (PM_PROC_NR = 0)
+    register_server_dispatch(arch_common::com::PM_PROC_NR, pm_fork_dispatch);
+    // Other servers (VFS, RS, etc.) can be registered when their dispatch
+    // handlers are implemented.
 }
 
 // ── Async helpers (skeletons) ──────────────────────────────────────────
@@ -680,6 +856,85 @@ mod tests {
                 0,
                 "notification should wake RECEIVING process"
             );
+        }
+    }
+
+    // ── Server dispatch tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_register_dispatch_invalid_endpoint() {
+        assert!(!register_server_dispatch(-999, |_, _| 0));
+        assert!(!register_server_dispatch(9999, |_, _| 0));
+    }
+
+    #[test]
+    fn test_register_dispatch_valid_endpoint() {
+        let handler: ServerDispatchFn = |_, _| 42;
+        assert!(register_server_dispatch(
+            arch_common::com::PM_PROC_NR,
+            handler
+        ));
+    }
+
+    #[test]
+    fn test_try_server_dispatch_no_handler() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let result = try_server_dispatch(rp, 42, &mut msg);
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_try_server_dispatch_registered_handler() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let handler: ServerDispatchFn = |_, _| 99;
+            register_server_dispatch(arch_common::com::PM_PROC_NR, handler);
+            let result = try_server_dispatch(rp, arch_common::com::PM_PROC_NR, &mut msg);
+            assert_eq!(result, Some(99));
+        }
+    }
+
+    #[test]
+    fn test_set_exec_rip_register_and_call() {
+        unsafe {
+            let handler: SetExecRipFn = |_, _, _| {};
+            register_set_exec_rip(handler);
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            set_exec_target(rp, 0x400000, 0x7fff0000);
+        }
+    }
+
+    #[test]
+    fn test_pm_dispatch_stubs_compile() {
+        fn _fork(_: ServerDispatchFn) {}
+        fn _exec(_: ServerDispatchFn) {}
+        fn _exit(_: ServerDispatchFn) {}
+        fn _waitpid(_: ServerDispatchFn) {}
+        _fork(pm_fork_dispatch);
+        _exec(pm_exec_dispatch);
+        _exit(pm_exit_dispatch);
+        _waitpid(pm_waitpid_dispatch);
+    }
+
+    #[test]
+    fn test_init_server_dispatch_registers_pm() {
+        init_server_dispatch();
+        unsafe {
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let rp = crate::table::proc_addr(0);
+            let result = try_server_dispatch(rp, arch_common::com::PM_PROC_NR, &mut msg);
+            assert!(
+                result.is_some(),
+                "PM should have a dispatch handler after init"
+            );
+            assert_eq!(result, Some(0));
         }
     }
 }
