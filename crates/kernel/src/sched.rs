@@ -258,6 +258,16 @@ pub unsafe fn notify_scheduler(p: *mut Proc) {
             dequeue(p);
         }
 
+        // Build and send SCHEDULING_NO_QUANTUM message
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        let mtype = arch_common::com::SCHEDULING_NO_QUANTUM as i32;
+        msg[0..4].copy_from_slice(&mtype.to_ne_bytes());
+        // The scheduler endpoint is at p->p_scheduler->p_endpoint
+        let sched_ep = (*(*p).p_scheduler).p_endpoint;
+        let result = crate::ipc::mini_send(p, sched_ep, msg.as_mut_ptr(), crate::ipc::FROM_KERNEL);
+        // If the send fails, the scheduler will pick it up later
+        let _ = result;
+
         // Reset accounting
         reset_proc_accounting(p);
     }
@@ -636,6 +646,33 @@ mod tests {
             let idle_rp = crate::table::proc_addr(-4);
             assert!(!idle_rp.is_null());
             assert!(is_idle_proc(idle_rp));
+        }
+    }
+
+    // ── notify_scheduler tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_notify_scheduler_sends_message() {
+        unsafe {
+            proc_init();
+            let rp = make_test_proc(0, 0);
+            let sched_rp = make_test_proc(1, 0);
+            (*sched_rp).p_endpoint = crate::table::make_endpoint(0, 1);
+            (*rp).p_scheduler = sched_rp;
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*sched_rp)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*sched_rp).p_getfrom_e = crate::system::NONE;
+
+            notify_scheduler(rp);
+
+            let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert!(
+                rts & RtsFlags::NO_QUANTUM.bits() != 0,
+                "RTS_NO_QUANTUM should be set"
+            );
+            assert_eq!((*rp).p_accounting.dequeues, 0);
         }
     }
 }

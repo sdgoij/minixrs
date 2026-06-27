@@ -374,9 +374,11 @@ pub unsafe fn fill_sendto_mask(rc: &Proc, map: &SysMap) {
 // Signal delivery (skeletons)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Send a signal to a process.
+/// Send a signal to a process using the C path: set `s_sig_pending` in
+/// the priv structure and notify SYSTEM if the process is not a system process.
 ///
-/// Returns OK if the signal was delivered.
+/// Returns `OK` if the signal was registered, `EBADREQUEST` if the process
+/// is invalid, `EPERM` if the process has no priv structure.
 ///
 /// # Safety
 ///
@@ -387,12 +389,41 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
         if rp.is_null() || (*rp).is_empty() {
             return EBADREQUEST;
         }
-        cause_sig(proc_nr, sig_nr);
+        if !(0..32).contains(&sig_nr) {
+            return crate::ipc::EFAULT;
+        }
+
+        let priv_data = (*rp).p_priv;
+        if priv_data.is_null() {
+            return EBADREQUEST;
+        }
+
+        // Set the signal bit in the priv structure's pending signals
+        (*priv_data).s_sig_pending |= 1u32 << sig_nr;
+
+        // Set RTS_SIGNALED | RTS_SIG_PENDING, dequeue if was runnable
+        let sig_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
+        let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        (*rp)
+            .p_rts_flags
+            .store(old | sig_flags.bits(), Ordering::Relaxed);
+        if old == 0 {
+            dequeue(rp);
+        }
+
+        // For non-system processes, notify SYSTEM so it dispatches the signal
+        if (*priv_data).s_flags & PrivFlags::SYS_PROC == PrivFlags::empty() {
+            crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
+        }
+
         OK
     }
 }
 
 /// Cause a signal to be delivered to a process.
+///
+/// Sets `p_pending`, sets RTS_SIGNALED | RTS_SIG_PENDING, dequeues if
+/// was runnable, and notifies the signal manager.
 ///
 /// # Safety
 ///
@@ -418,6 +449,15 @@ pub unsafe fn cause_sig(proc_nr: i32, sig_nr: i32) {
 
         if old == 0 {
             dequeue(rp);
+        }
+
+        // Notify the signal manager (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
+        // where rp is the signal manager process.
+        if !(*rp).p_priv.is_null() {
+            let sig_mgr = (*(*rp).p_priv).s_sig_mgr;
+            if sig_mgr != crate::system::NONE && sig_mgr != i32::MIN {
+                crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr);
+            }
         }
     }
 }
@@ -899,7 +939,151 @@ mod tests {
         }
     }
 
-    // ── Address space switching ───────────────────────────────────────────
+    // ── Signal delivery tests ────────────────────────────────────────────
+    //
+    // Tests for cause_sig (signal manager notification) and send_sig
+    // (C path with priv->s_sig_pending + SYSTEM notification).
+
+    #[test]
+    fn test_cause_sig_notifies_signal_manager() {
+        unsafe {
+            proc_init();
+            // Set up proc 0 with a signal manager (proc 1)
+            let rp = crate::table::proc_addr(0);
+            let mgr = crate::table::proc_addr(1);
+            (*mgr).p_endpoint = crate::table::make_endpoint(0, 1);
+            // Set up a proper priv structure with sig_mgr
+            let mut test_priv = crate::r#priv::Priv::default();
+            test_priv.s_sig_mgr = (*mgr).p_endpoint;
+            (*rp).p_priv = &mut test_priv;
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+            // Set mgr as RECEIVING from ANY so mini_notify will wake it
+            (*mgr)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*mgr).p_getfrom_e = crate::system::NONE;
+
+            cause_sig(0, 1);
+
+            // mgr should have been notified (RECEIVING flag cleared)
+            let mgr_rts = (*mgr).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                mgr_rts & RtsFlags::RECEIVING.bits(),
+                0,
+                "signal manager should be woken by cause_sig notification"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cause_sig_skips_notify_when_no_sig_mgr() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_priv = core::ptr::null_mut();
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+            // Should not crash when p_priv is null
+            cause_sig(0, 1);
+
+            let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert!(
+                flags & RtsFlags::SIGNALED.bits() != 0,
+                "SIGNALED should be set even without priv"
+            );
+        }
+    }
+
+    #[test]
+    fn test_send_sig_returns_error_for_invalid_proc() {
+        unsafe {
+            assert_eq!(send_sig(-999, 1), EBADREQUEST);
+        }
+    }
+
+    #[test]
+    fn test_send_sig_uses_priv_pending_not_pending() {
+        unsafe {
+            proc_init();
+            // Set up proc 0 with a priv structure
+            let rp = crate::table::proc_addr(0);
+            let mut test_priv = crate::r#priv::Priv::default();
+            test_priv.s_flags = PrivFlags::SYS_PROC; // system proc, no mini_notify
+            test_priv.s_sig_pending = 0;
+            (*rp).p_priv = &mut test_priv;
+            (*rp).p_pending = 0;
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+            let result = send_sig(0, 3);
+            assert_eq!(result, OK);
+
+            // s_sig_pending should have bit 3 set
+            assert!(
+                (*rp).p_priv.as_ref().unwrap().s_sig_pending & (1u32 << 3) != 0,
+                "send_sig should set s_sig_pending, not p_pending"
+            );
+            // p_pending should NOT be set (send_sig uses priv path)
+            assert_eq!((*rp).p_pending, 0, "send_sig should NOT modify p_pending");
+        }
+    }
+
+    #[test]
+    fn test_send_sig_dequeues_runnable_proc() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut test_priv = crate::r#priv::Priv::default();
+            test_priv.s_flags = PrivFlags::SYS_PROC;
+            test_priv.s_sig_pending = 0;
+            (*rp).p_priv = &mut test_priv;
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            // Set run queue so dequeue has something to work with
+            crate::sched::enqueue(rp);
+
+            send_sig(0, 3);
+
+            // Process should be dequeued (SIGNALED | SIG_PENDING set)
+            let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert!(
+                flags & (RtsFlags::SIGNALED | RtsFlags::SIG_PENDING).bits() != 0,
+                "send_sig should set SIGNALED and SIG_PENDING"
+            );
+        }
+    }
+
+    #[test]
+    fn test_send_sig_notifies_system_for_user_proc() {
+        unsafe {
+            proc_init();
+            // Set up proc 0 as a user process (no SYS_PROC flag)
+            let rp = crate::table::proc_addr(0);
+            let mut test_priv = crate::r#priv::Priv::default();
+            test_priv.s_flags = PrivFlags::empty(); // not SYS_PROC
+            test_priv.s_sig_pending = 0;
+            (*rp).p_priv = &mut test_priv;
+            (*rp).p_endpoint = crate::table::make_endpoint(0, 0);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+            // The notification goes FROM SYSTEM TO the target process (proc 0).
+            // Set proc 0 as RECEIVING from SYSTEM to verify wake-up.
+            let sys_ep = arch_common::com::SYSTEM;
+            (*rp)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*rp).p_getfrom_e = sys_ep;
+
+            send_sig(0, 3);
+
+            // Proc 0 should have been woken by mini_notify
+            let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                rts & RtsFlags::RECEIVING.bits(),
+                0,
+                "send_sig should notify the target process via SYSTEM"
+            );
+        }
+    }
     //
     // These functions call privileged instructions (write_cr3) that cannot
     // be executed from usermode test binaries. We verify:

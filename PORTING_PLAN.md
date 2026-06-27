@@ -721,21 +721,17 @@ The Rust port targets two architectures:
   - See Phase 12.3 for the PM server implementation that receives these
     forwarded messages and performs the actual operations
 
-- [ ] **4.5 — Complete Phase 3 deferred: signal & scheduler notification**
+- [x] **4.5 — Complete Phase 3 deferred: signal & scheduler notification**
     Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy)
   - `cause_sig()` in `system.rs`: after storing sig_nr in p_pending and setting RTS flags,
-    notify the signal manager via `send_sig(sig_mgr, SIGKSIG)` — the notification path
-    is currently stubbed
-  - `notify_scheduler()` in `sched.rs`: after setting RTS_NO_QUANTUM, build and send
-    the `SCHEDULING_NO_QUANTUM` message to `p->p_scheduler->p_endpoint` via
-    `mini_send(p, p->p_scheduler->p_endpoint, &m_no_quantum, FROM_KERNEL)` — the
-    message is currently not built or sent
-  - `send_sig()` in `system.rs`: implement the C path using `priv->s_sig_pending` +
-    `increase_proc_signals()` + `mini_notify(proc_addr(SYSTEM), rp->p_endpoint)`
-    instead of routing through `cause_sig()`
-  - Tests: Signal delivery reaches target process via signal manager notification
-  - Tests: Scheduler receives SCHEDULING_NO_QUANTUM message on quantum expiry
-  - Tests: `send_sig` adds to private signal pending and notifies SYSTEM
+    also notifies the signal manager via `mini_notify(sig_mgr, rp->p_endpoint)` — the
+    signal manager is read from `priv->s_sig_mgr` (skipped if NONE)
+  - `notify_scheduler()` in `sched.rs`: after setting RTS_NO_QUANTUM, builds and sends
+    the `SCHEDULING_NO_QUANTUM` message (`m_type = 0xF01`) to `p->p_scheduler->p_endpoint`
+    via `mini_send(p, sched_ep, &msg, FROM_KERNEL)`
+  - `send_sig()` in `system.rs`: rewritten to use the C path — sets `priv->s_sig_pending`
+    (not `rp->p_pending`), sets RTS_SIGNALED|RTS_SIG_PENDING, dequeues if was runnable,
+    and `mini_notify(SYSTEM, rp->p_endpoint)` for non-system processes
 
 - [ ] **4.6 — Implement async messaging (`mini_senda`, `try_one`, etc.)**
     Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy / grant infrastructure)
