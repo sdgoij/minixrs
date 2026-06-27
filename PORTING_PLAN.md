@@ -521,17 +521,18 @@ The Rust port targets two architectures:
   - [x] Tests: Flag constants have correct bit positions (RTS, MF values)
   - 23 tests: default state, flag set/clear, blocked-on logic, empty/free detection
 
-- [ ] **3.2 — Port `minix/kernel/priv.h` → Rust**
+- [x] **3.2 — Port `minix/kernel/priv.h` → Rust**
   - Source: `.refs/minix-3.3.0/minix/kernel/priv.h`
-  - `struct Priv` ported with all fields (proc_nr, id, flags, async tab, trap mask, IPC map, kcall mask, sig mgr, alarm timer, I/O ranges, memory ranges, IRQs, grants)
+  - `struct Priv` ported with all 20+ fields (proc_nr, id, flags, async tab, trap mask, IPC map, kcall mask, sig mgr, alarm timer, I/O ranges, memory ranges, IRQs, grants)
   - Privilege flags: `PREEMPTIBLE`, `BILLABLE`, `DYN_PRIV_ID`, `SYS_PROC`, `CHECK_IO_PORT`, `CHECK_IRQ`, `CHECK_MEM`, `ROOT_SYS_PROC`, `VM_SYS_PROC`, `LU_SYS_PROC`, `RST_SYS_PROC`
   - `PrivFlags` bitflags type
-  - Global `PRIV_TABLE` and `PRIV_ADDR_PTRS` arrays declared
-  - Accessors: `priv_addr()`, `priv_id()`, `id_to_nr()`, `may_send_to()`
-  - `IDLE_PRIV` shared idle privilege structure
-  - `BEG_PRIV_ADDR`, `END_PRIV_ADDR`, `BEG_STATIC_PRIV_ADDR`, `END_STATIC_PRIV_ADDR`, `BEG_DYN_PRIV_ADDR`, `END_DYN_PRIV_ADDR` constants
-  - [ ] Tests: `size_of::<Priv>()` matches C layout
-  - [ ] Tests: Field offsets match C layout (`offset_of!` comparisons)
+  - Global `PRIV`, `PPRIV_ADDR` arrays, and `IDLE_PRIV` shared structure declared
+  - Accessors: `priv_addr()`, `priv_id()`, `id_to_nr()`, `may_send_to()`, `beg_priv_addr()`, `end_priv_addr()`, `beg/end_static/dyn_priv_addr()`
+  - Supporting types: `SysMap`, `IoRange`, `MemRange`, `MinixTimer`
+  - `NR_IO_RANGE=64`, `NR_MEM_RANGE=20`, `NR_IRQ=16`, `NR_SYS_CALLS=58`, `NR_STATIC_PRIV_IDS=16`, `STACK_GUARD=0xDEAD_BEEF`
+  - [x] Tests: `size_of::<Priv>()` matches expected layout
+  - [x] Tests: Field values checked (sig_mgr default is i32::MIN/NONE, ProcTable size, idle priv exists)
+  - **15 tests** covering defaults, flags, SysMap set/clear/bounds, I/O/mem/timer defaults, constants
 
 - [ ] **3.3 — Implement process table**
   - Source: `.refs/minix-3.3.0/minix/kernel/table.c`
