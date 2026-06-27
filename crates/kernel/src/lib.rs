@@ -2,6 +2,9 @@
 
 #![no_std]
 
+pub mod r#priv;
+pub mod proc;
+
 /// Kernel initialization.
 pub fn init() {
     arch_x86_64::init();

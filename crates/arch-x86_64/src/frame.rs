@@ -12,7 +12,7 @@ use core::fmt;
 /// This is the register state pushed by the `syscall` entry
 /// or interrupt handler.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct TrapFrame {
     /// General purpose registers.
     pub rax: u64,

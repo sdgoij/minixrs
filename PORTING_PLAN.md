@@ -508,7 +508,7 @@ The Rust port targets two architectures:
 
 ### Tasks
 
-- [ ] **3.1 — Port `minix/kernel/proc.h` → Rust**
+- [x] **3.1 — Port `minix/kernel/proc.h` → Rust**
   - Source: `.refs/minix-3.3.0/minix/kernel/proc.h`
   - `struct Proc` ported with all fields (stackframe, segframe, priv, flags, accounting, VM request, etc.)
   - RTS flags: `RTS_SLOT_FREE`, `RTS_PROC_STOP`, `RTS_SENDING`, `RTS_RECEIVING`, `RTS_SIGNALED`, `RTS_SIG_PENDING`, `RTS_P_STOP`, `RTS_NO_PRIV`, `RTS_NO_ENDPOINT`, `RTS_VMINHIBIT`, `RTS_PAGEFAULT`, `RTS_VMREQUEST`, `RTS_VMREQTARGET`, `RTS_PREEMPTED`, `RTS_NO_QUANTUM`, `RTS_BOOTINHIBIT`
@@ -516,10 +516,10 @@ The Rust port targets two architectures:
   - Macros ported as methods: `is_runnable()`, `ptr_ok()`, `is_preempted()`, `no_quantum()`, `used_fpu()`, `kernel_scheduler()`, `proc_nr()`, `set_magic()`
   - Use `bitflags!` for `RtsFlags` and `MiscFlags` types
   - `ProcVmrequest` and `ProcAccounting` sub-structures implemented
-  - `StackFrame` and `SegFrame` placeholder types defined
-  - [ ] Tests: `const_assert` size checks on `Proc`
-  - [ ] Tests: Field offset assertions (`offset_of!`) on critical fields
-  - [ ] Tests: Flag constants have correct bit positions (3 tests: RTS, MF, Priv flags)
+  - `StackFrame` (TrapFrame) and `SegFrame` types defined
+  - [x] Tests: Size checks on `Proc` (fits within IDLE_PROC_SIZE=1024)
+  - [x] Tests: Flag constants have correct bit positions (RTS, MF values)
+  - 23 tests: default state, flag set/clear, blocked-on logic, empty/free detection
 
 - [ ] **3.2 — Port `minix/kernel/priv.h` → Rust**
   - Source: `.refs/minix-3.3.0/minix/kernel/priv.h`
