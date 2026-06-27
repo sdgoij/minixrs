@@ -439,7 +439,7 @@ The Rust port targets two architectures:
   - **`cargo clippy --package arch-x86_64 -- -D warnings`**: **Clean**
   - **`cargo test --package arch-x86_64`**: **131 tests** (130 passed, 1 ignored — physical address pointer sanitizer)
 
-- [ ] **2.4 — Implement the raw memory allocator**
+- [x] **2.4 — Implement the raw memory allocator**
   - Created `crates/arch-x86_64/src/alloc.rs` (806 lines)
   - **`PhysicalMemoryMap`**: multiboot memory map management
     - `add()`: add regions with 4 GB truncation
