@@ -620,18 +620,21 @@ The Rust port targets two architectures:
   - [x] Tests: print_proc produces non-empty output for valid procs
   - **19 new tests** (11 basic + 8 IPC stats tests), 111 total for kernel crate, workspace clippy clean
 
-- [ ] **3.8 — Port `minix/kernel/profile.c`**
+- [x] **3.8 — Port `minix/kernel/profile.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/profile.c`
-  - Configuration: `SPROFILE`, `CPROFILE`, `SAMPLE_BUFFER_SIZE`, `CPROF_TABLE_SIZE_KERNEL`
-  - `init_profile_clock()` / `stop_profile_clock()` — profile clock (skeletons)
-  - `sprof_save_sample()` / `sprof_save_proc()` — sample storage (skeletons)
-  - `profile_sample()` — statistical sampling
-  - `nmi_sprofile_handler()` — NMI profiling handler (skeleton)
-  - Call profiling: `CPROF_TBL`, `CPROF_PROCS_NO`, `CPROF_PROC_INFO`
-  - `profile_get_tbl_size()` / `profile_get_announce()` / `profile_register()`
-  - `SPROFILING`, `SPROF_INFO`, `SPROF_MEM_SIZE` — profiling state
-  - [ ] Tests: Profile constants and skeleton functions work
-  - [ ] Tests: SprofInfo layout verified
+  - **Statistical profiling** (SPROFILE): `SPROF_INFO` (5-field control struct), `SPROF_SAMPLE_BUFFER` (256 KB), `SPROFILING` flag, `SPROF_MEM_SIZE`
+  - `sprofile()` — start/stop profiling, reset state, arch stubs for clock init/stop
+  - `profile_sample()` — classify sample: IDLE/idle, SYS_PROC/system, or user; save to buffer
+  - `sprof_save_sample/sprof_save_proc()` — write SprofSample (16 B) / SprofProc (20 B) to buffer
+  - `SprofSample` (endpoint + pc), `SprofProc` (endpoint + name) — #[repr(C)] matches C
+  - `init_profile_clock/stop_profile_clock/nmi_sprofile_handler` — stubs pending interrupt subsystem
+  - **Call profiling** (CPROFILE): `CPROF_TBL[1500]` kernel table, `CPROF_PROC_INFO[64]` registration array
+  - `profile_get_tbl_size/profile_get_announce/profile_register` — kernel table management
+  - `CprofInfo/CprofCtl/CprofTbl/CprofProcInfo` — #[repr(C)] matching minix/profile.h
+  - Constants: all CPROF sizes, PROF_START/STOP/GET/RESET, PROF_RTC/PROF_NMI
+  - [x] Tests: SprofInfo/SprofSample/SprofProc layout verified, sprofile start/stop/invalid action
+  - [x] Tests: profile_get_tbl_size/announce, CprofTbl defaults, CprofProcInfo defaults
+  - **10 new tests**, 121 total for kernel crate, workspace clippy clean
 
 ---
 

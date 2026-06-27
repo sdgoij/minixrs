@@ -6,6 +6,7 @@ pub mod debug;
 pub mod glo;
 pub mod r#priv;
 pub mod proc;
+pub mod profile;
 pub mod sched;
 pub mod system;
 pub mod table;
