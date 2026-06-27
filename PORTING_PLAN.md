@@ -456,7 +456,7 @@ The Rust port targets two architectures:
     memory map cut/split, 4 GB limit, bitmap operations
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
-- [ ] **2.5 — Port `minix/kernel/cpulocals.h`**
+- [x] **2.5 — Port `minix/kernel/cpulocals.h`**
   - Created `crates/arch-x86_64/src/cpulocals.rs` (412 lines)
   - **`CpuLocalVars`**: per-CPU local variables mirroring Minix's C struct
     - `proc_ptr`: currently running process

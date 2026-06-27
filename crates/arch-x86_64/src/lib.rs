@@ -17,6 +17,7 @@
 pub mod alloc;
 pub mod asm;
 pub mod cpu_msr;
+pub mod cpulocals;
 pub mod cpuvar;
 pub mod frame;
 pub mod hw;
