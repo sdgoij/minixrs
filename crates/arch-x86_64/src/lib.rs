@@ -14,6 +14,7 @@
 
 #![no_std]
 
+pub mod asm;
 pub mod cpu_msr;
 pub mod cpuvar;
 pub mod frame;

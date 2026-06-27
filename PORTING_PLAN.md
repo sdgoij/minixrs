@@ -371,7 +371,7 @@ The Rust port targets two architectures:
   - **112 tests** across all modules (functional, edge case, integration)
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
-- [ ] **2.2 — Port + adapt assembly routines for x86_64**
+- [x] **2.2 — Port + adapt assembly routines for x86_64**
   - Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/` (i386 reference)
   - Ported into `crates/arch-x86_64/src/asm.rs` using `#[naked]` + `naked_asm!`:
   - `io_inb.S` → `inb`: Read byte from I/O port
