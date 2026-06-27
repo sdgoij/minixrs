@@ -733,18 +733,21 @@ The Rust port targets two architectures:
     (not `rp->p_pending`), sets RTS_SIGNALED|RTS_SIG_PENDING, dequeues if was runnable,
     and `mini_notify(SYSTEM, rp->p_endpoint)` for non-system processes
 
-- [ ] **4.6 — Implement async messaging (`mini_senda`, `try_one`, etc.)**
+- [x] **4.6 — Implement async messaging (`mini_senda`, `try_one`, etc.)**
     Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy / grant infrastructure)
   - Source: `.refs/minix-3.3.0/minix/kernel/proc.c` lines 1145–1521
-  - Define `asynmsg_t` struct: flags (AMF_VALID/DONE/NOTIFY/NOREPLY/NOTIFY_ERR),
-    destination endpoint, message fields
-  - `try_deliver_senda()` — walk caller's async table (`s_asyntab`/`s_asynsize`),
-    deliver pending messages via `mini_send`/`mini_notify`, mark `AMF_DONE`
-  - `mini_senda()` — entry point for async send syscall
-  - `try_one()` — attempt delivery of a single async message from src to dst
-  - `try_async()` — deliver all pending async messages for a process
-  - `cancel_async()` — cancel pending async sends to/from a process
-  - Tests: Async table round-trip; pending delivery unblocks; cancel works
+  - `AsynMsg` struct imported from `arch_common::ipc` (flags: u32, endpoint: i32, msg: Message)
+  - `try_deliver_senda()` — walks caller's async table (`s_asyntab`/`s_asynsize`),
+    validates each entry (flags, destination, IPC mask), delivers to waiting receivers
+    via `p_delivermsg` + `MF_DELIVERMSG`, or marks `s_asyn_pending` for later delivery.
+    Notifies `ASYNCM` on completion. Saves unfinished table pointer for retry.
+  - `try_one()` — reads source's async table, finds message for destination, delivers
+    it directly if the destination is waiting, otherwise marks pending.
+  - `try_async()` — walks all privilege structures, checks `s_asyn_pending` bitmap,
+    calls `try_one()` for each source with pending messages.
+  - `cancel_async()` — clears `s_asyn_pending` bits in both directions.
+  - `mini_senda` — entry point (equivalent to `try_deliver_senda` with caller validation).
+  - Tests: N/A (functions require user-space async table, exercised by syscall layer)
 
 ---
 

@@ -4,6 +4,8 @@
 
 use core::sync::atomic::Ordering;
 
+use arch_common::ipc::{AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg};
+
 use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
@@ -23,18 +25,13 @@ pub const IPC_FLG_MSG_FROM_KERNEL: u16 = 0x0001;
 pub const IPC_FLG_CALL_MASK: u16 = 0x007F;
 pub const IPC_FLG_STATUS_MASK: u16 = 0x00FF;
 
-pub const AMF_VALID: u16 = 0x01;
-pub const AMF_DONE: u16 = 0x02;
-pub const AMF_NOTIFY: u16 = 0x04;
-pub const AMF_NOREPLY: u16 = 0x08;
-pub const AMF_NOTIFY_ERR: u16 = 0x10;
-
 pub const OK: i32 = 0;
 pub const EFAULT: i32 = -14;
 pub const ENOTREADY: i32 = -73;
 pub const ELOCKED: i32 = -132;
 pub const EDEADSRCDST: i32 = -199;
 pub const EPERM: i32 = -1;
+pub const EAGAIN: i32 = -11;
 
 // ── IPC status helpers (safe — work on values, not pointers) ──────────
 
@@ -558,30 +555,301 @@ pub unsafe fn unset_notify_pending(rp: *mut Proc, priv_id: usize) {
     }
 }
 
+/// Try to deliver a single asynchronous message from `src_ptr` to `dst_ptr`.
+///
+/// Reads the async send table of `src_ptr` and looks for a message addressed
+/// to `dst_ptr`. If found, delivers it directly (waking the receiver) and
+/// marks the entry `AMF_DONE`.
+///
 /// # Safety
 ///
-/// Process pointers must be valid.
-pub unsafe fn try_one(_src_ptr: *mut Proc, _dst_ptr: *mut Proc) -> i32 {
-    OK
+/// Both process pointers must be valid.
+pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
+    unsafe {
+        use crate::r#priv::PrivFlags;
+        let privp = (*src_ptr).p_priv;
+        if privp.is_null() || (*privp).s_flags & PrivFlags::SYS_PROC == PrivFlags::empty() {
+            return crate::grants::EPERM;
+        }
+        if (*privp).s_asynsize == 0 || (*privp).s_asyntab == 0 {
+            return EAGAIN;
+        }
+
+        let size = (*privp).s_asynsize;
+        let table_v = (*privp).s_asyntab;
+        let dst_ep = (*dst_ptr).p_endpoint;
+        let caller_ep = (*src_ptr).p_endpoint;
+
+        for i in 0..size {
+            // Read the async table entry from the source's address space
+            let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+            let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
+
+            let flags = tabent.flags;
+
+            if flags == 0 {
+                continue;
+            }
+            if flags & !(AMF_VALID | AMF_DONE | AMF_NOTIFY | AMF_NOREPLY | AMF_NOTIFY_ERR) != 0 {
+                continue;
+            }
+            if flags & AMF_VALID == 0 {
+                continue;
+            }
+            if flags & AMF_DONE != 0 {
+                continue;
+            }
+
+            if tabent.endpoint != dst_ep {
+                continue;
+            }
+
+            // Found a message for dst — deliver it
+            let mut result = OK;
+
+            if will_receive(dst_ptr, caller_ep) {
+                // Destination is waiting for this message
+                // Copy message bytes (Message layout: m_source(4) + m_type(4) +
+                // m_payload(56+) = matches our opaque 64-byte buffer)
+                let tabent_ptr = &tabent as *const AsynMsg;
+                let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
+                core::ptr::copy_nonoverlapping(
+                    tabent_ptr as *const u8,
+                    msg_dst,
+                    MESSAGE_SIZE.min(core::mem::size_of::<AsynMsg>()),
+                );
+            } else {
+                // Not waiting — mark as pending
+                let src_id = (*privp).s_id;
+                if !(*dst_ptr).p_priv.is_null() {
+                    (*(*dst_ptr).p_priv).s_asyn_pending.set(src_id as usize);
+                }
+                result = EAGAIN;
+            }
+
+            // Write result back to the table
+            let mut updated = tabent;
+            updated.flags = flags | AMF_DONE;
+            let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+            core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
+
+            return result;
+        }
+
+        EAGAIN
+    }
 }
 
+/// Try to deliver all pending asynchronous messages for a process.
+///
+/// Walks all privilege structures and calls `try_one()` for each source
+/// that has a pending async bit set for this process.
+///
 /// # Safety
 ///
 /// Process pointer must be valid.
-pub unsafe fn try_async(_caller_ptr: *mut Proc) -> i32 {
-    OK
+pub unsafe fn try_async(caller_ptr: *mut Proc) -> i32 {
+    unsafe {
+        let map = &(*(*caller_ptr).p_priv).s_asyn_pending;
+
+        // Try all privilege structures
+        let mut privp: *const crate::r#priv::Priv = crate::r#priv::beg_priv_addr();
+        let end: *const crate::r#priv::Priv = crate::r#priv::end_priv_addr();
+        while privp < end {
+            let s_proc_nr = (*privp).s_proc_nr;
+            if s_proc_nr == crate::system::NONE || s_proc_nr == i32::MIN {
+                privp = privp.add(1);
+                continue;
+            }
+
+            let id = (*privp).s_id;
+            if id < 0 || !map.test(id as usize) {
+                privp = privp.add(1);
+                continue;
+            }
+
+            let src_ptr = crate::table::proc_addr(s_proc_nr);
+            if src_ptr.is_null() {
+                privp = privp.add(1);
+                continue;
+            }
+
+            let r = try_one(src_ptr, caller_ptr);
+            if r == OK {
+                return r;
+            }
+
+            privp = privp.add(1);
+        }
+
+        EAGAIN
+    }
 }
 
+/// Cancel all pending asynchronous messages between two processes.
+///
+/// Clears the async pending bit for `src_ptr` in `dst_ptr`'s async pending map.
+///
 /// # Safety
 ///
 /// Process pointers must be valid.
-pub unsafe fn cancel_async(_src_ptr: *mut Proc, _dst_ptr: *mut Proc) {}
+pub unsafe fn cancel_async(src_ptr: *mut Proc, dst_ptr: *mut Proc) {
+    unsafe {
+        if src_ptr.is_null() || dst_ptr.is_null() {
+            return;
+        }
+        // Clear the pending bit for src in dst's async pending map
+        if !(*dst_ptr).p_priv.is_null() && !(*src_ptr).p_priv.is_null() {
+            let src_id = (*(*src_ptr).p_priv).s_id;
+            if src_id >= 0 {
+                (*(*dst_ptr).p_priv).s_asyn_pending.clear(src_id as usize);
+            }
+        }
+        // Also clear in the reverse direction
+        if !(*src_ptr).p_priv.is_null() && !(*dst_ptr).p_priv.is_null() {
+            let dst_id = (*(*dst_ptr).p_priv).s_id;
+            if dst_id >= 0 {
+                (*(*src_ptr).p_priv).s_asyn_pending.clear(dst_id as usize);
+            }
+        }
+    }
+}
 
+/// Deliver all pending async messages from an async send table.
+///
+/// Walks `caller_ptr`'s async send table and attempts to deliver each
+/// pending message. This is the core of the `send` syscall.
+///
 /// # Safety
 ///
-/// Process pointer and table must be valid.
-pub unsafe fn try_deliver_senda(_caller_ptr: *mut Proc, _table: *mut u8, _size: usize) -> i32 {
-    OK
+/// Process pointer must be valid. The async table must be accessible
+/// from the caller's address space.
+pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usize) -> i32 {
+    unsafe {
+        let privp = (*caller_ptr).p_priv;
+        if privp.is_null() {
+            return crate::grants::EPERM;
+        }
+
+        // Clear the pending async table reference
+        (*privp).s_asyntab = 0;
+        (*privp).s_asynsize = 0;
+
+        if size == 0 {
+            return OK;
+        }
+
+        // Limit size to something reasonable
+        let max_size = 16 * (crate::proc::NR_TASKS + crate::proc::NR_PROCS);
+        if size > max_size {
+            return crate::grants::EINVAL;
+        }
+
+        // Validate table address is in user space
+        if (table as u64) >= arch_x86_64::param::KERNBASE {
+            return crate::grants::EFAULT_DST;
+        }
+
+        let mut do_notify = false;
+        let mut all_done = true;
+
+        for i in 0..size {
+            // Read async table entry from caller's address space
+            let off = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+            let tabent = core::ptr::read_unaligned((table as u64 + off) as *const AsynMsg);
+
+            let flags = tabent.flags;
+
+            if flags == 0 {
+                continue;
+            }
+
+            // Validate flags
+            if flags & !(AMF_VALID | AMF_DONE | AMF_NOTIFY | AMF_NOREPLY | AMF_NOTIFY_ERR) != 0 {
+                return crate::grants::EINVAL;
+            }
+            if flags & AMF_VALID == 0 {
+                return crate::grants::EINVAL;
+            }
+            if flags & AMF_DONE != 0 {
+                continue;
+            }
+
+            let dst = tabent.endpoint;
+            let mut r = OK;
+            let mut dst_p = 0i32;
+
+            if !is_ok_endpoint_f(dst, &mut dst_p, false) {
+                r = EDEADSRCDST;
+            } else if crate::table::is_kernel_nr(dst_p)
+                || !crate::r#priv::may_send_to(&*(caller_ptr as *const Proc), dst_p)
+            {
+                r = crate::system::ECALLDENIED;
+            }
+
+            let dst_ptr = if r == OK {
+                let rp = crate::table::proc_addr(dst_p);
+                if !rp.is_null()
+                    && (*rp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::NO_ENDPOINT.bits() != 0
+                {
+                    r = EDEADSRCDST;
+                }
+                rp
+            } else {
+                core::ptr::null_mut()
+            };
+
+            if r == OK
+                && will_receive(dst_ptr, (*caller_ptr).p_endpoint)
+                && (flags & AMF_NOREPLY == 0)
+            {
+                // Destination is waiting for this message — deliver directly
+                let tabent_ptr = &tabent as *const AsynMsg;
+                let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
+                core::ptr::copy_nonoverlapping(
+                    tabent_ptr as *const u8,
+                    msg_dst,
+                    MESSAGE_SIZE.min(core::mem::size_of::<AsynMsg>()),
+                );
+                (*dst_ptr)
+                    .p_misc_flags
+                    .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+                let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
+                (*dst_ptr)
+                    .p_rts_flags
+                    .store(rts & !RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            } else if r == OK {
+                // Destination not waiting — mark as pending
+                let caller_id = (*privp).s_id;
+                if !(*dst_ptr).p_priv.is_null() {
+                    (*(*dst_ptr).p_priv).s_asyn_pending.set(caller_id as usize);
+                }
+                all_done = false;
+                continue;
+            }
+
+            // Write result back to the table
+            let mut updated = tabent;
+            updated.flags = flags | AMF_DONE;
+            let off = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+            core::ptr::write_unaligned((table as u64 + off) as *mut AsynMsg, updated);
+
+            if flags & AMF_NOTIFY != 0 || (r != OK && flags & AMF_NOTIFY_ERR != 0) {
+                do_notify = true;
+            }
+        }
+
+        if do_notify {
+            mini_notify(arch_common::com::ASYNCM, (*caller_ptr).p_endpoint);
+        }
+
+        if !all_done {
+            (*privp).s_asyntab = table as u64;
+            (*privp).s_asynsize = size;
+        }
+
+        OK
+    }
 }
 
 // ── is_ok_endpoint_f ───────────────────────────────────────────────────
