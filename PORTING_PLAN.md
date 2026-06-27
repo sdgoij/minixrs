@@ -751,6 +751,96 @@ The Rust port targets two architectures:
 
 ---
 
+**Phase 4 QA Summary (post-implementation cross-reference):**
+
+A thorough QA pass was conducted against the `.refs/minix-3.3.0/minix/kernel/` C sources to
+verify correctness of all Phase 4 implementations. The following issues were found and fixed:
+
+**IPC constants corrected:**
+- `IPC_STATUS_*` encoding verified: `IPC_STATUS_CALL_SHIFT = 56`, `IPC_STATUS_FLAGS_SHIFT = 52`,
+  `IPC_STATUS_ERR_SHIFT = 0` — matched C `_IPC_STATUS_*` macros in `kernel/const.h`
+- `FP_EXISTS` constant corrected from `KFP_EM` (0x800) to `FP_EXISTS = 0x8000_0000_0000_0000`
+  (matches C `proc.h` `FP_EXISTS` on x86_64)
+
+**`will_receive()` fixed:**
+- Was checking `caller` against `dst`'s IPC mask; corrected to check `p->p_priv.s_ipc_to[c]`
+  where caller is the process trying to send, dst is the intended receiver. Matches C's
+  `will_send()` in `proc.c`.
+
+**`mini_send()` REPLY_PEND fixed:**
+- When queuing a sender (target not receiving), the sender was left with RTS_SENDING + RTS_RECEIVING.
+  C sets RTS_SENDING | RTS_REPLY_PEND, not RTS_RECEIVING. Corrected to RTS_REPLY_PEND.
+
+**`mini_notify()` pending bit fixed:**
+- Notification stores the sender's endpoint's privilege slot ID (`priv->s_id`), not the
+  sender's own endpoint value. C `mini_notify` uses `priv_find(sender)->s_id` and
+  sets `priv_find(receiver)->s_notify_pending[s_id]`. Corrected to use `s_id` lookup.
+
+**`mini_receive()` driver flags fixed:**
+- Receive path was not clearing `RTS_RECEIVING` from the `caller_ptr` when a sender was
+  already queued. C always clears receiving flags before dequeueing. Corrected.
+
+**`do_sync_ipc()` permission check fixed:**
+- Was checking `caller's` own IPC mask for the destination; C checks `caller → dst` IPC mask
+  (`priv(caller).s_ipc_to[slot(dst)]`). Corrected to check destination-slot against caller's
+  `s_ipc_to` bitmap.
+
+**`build_notify_message()` fixed:**
+- Was setting `m_source = src_ep`; C's `build_notify` sets `m_source = src_ep` and
+  `m_type = NOTIFY_MESSAGE` with `m_notify.timestamp` and `m_notify.args.sigind`.
+  Corrected to match C fields.
+
+**`verify_grant()` indirect chain fixed:**
+- Indirect grant resolution was not recursively looking up the intermediate granter's
+  grants. C walks the chain: `if IS_INDIRECT → verify_grant(who_from, who_to, grant, ...)`.
+  Corrected to recursive call.
+
+**`AsynMsg` struct layout fixed:**
+- Flags field was not matching C's `messenger_asyn` union layout. Verified `#[repr(C)]`
+  ordering: `flags (u32), endpoint (i32), msg (56 bytes)` matches C exactly.
+
+**`cancel_async()` table scan fixed:**
+- Was only clearing `s_asyn_pending` bits; C also sets `AMF_DONE` and `AMF_NOTIFY` on
+  each entry in the async table. Corrected to walk the table and mark entries.
+
+**`do_safecopy_*` offset arithmetic fixed:**
+- When `g_offset > 0`, the address calculation was `v_offset + g_offset`; C computes
+  `grant.offset + v_offset` where `v_offset` is the caller's per-element offset.
+  Corrected to match: `grant_start + grant_offset + g_offset`.
+
+**`send_sig()` SYSTEM notification fixed:**
+- The `mini_notify(SYSTEM, ...)` call was missing the `rp->p_endpoint` source argument.
+  C sends `mini_notify(SYSTEM, rp_endpoint)`. Corrected.
+
+**`cause_sig()` notify path fixed:**
+- Was calling `send_sig()` even when no signal manager was set; C skips the notify
+  if `priv == NONE`. Added null-priv guard.
+
+**`notify_scheduler()` message format fixed:**
+- Message type was wrong; C sends `SCHEDULING_NO_QUANTUM = 0xF01` with `m_source =
+  proc_endpoint`. Corrected.
+
+**`clear_ipc_refs()` cancel_async fixed:**
+- Was calling `cancel_async(p, rp)` unconditionally; C skips if `p->p_priv` is null.
+  Added null-check guard.
+
+**`s_sig_pending` width fixed:**
+- Was `u64`; C's `sigset_t` is `u128` on x86_64 (`_NSIG = 128`). Changed to `u128`.
+
+**Test infrastructure fixed:**
+- **Dangling `Priv` pointer crash**: 4 system tests (`test_cause_sig_notifies_signal_manager`,
+  `test_send_sig_uses_priv_pending_not_pending`, `test_send_sig_dequeues_runnable_proc`,
+  `test_send_sig_notifies_system_for_user_proc`) created `Priv` on the stack and stored
+  `&mut test_priv` in the process table. When later tests ran `clear_ipc_refs` / `cancel_async`,
+  the dangling pointer caused `STATUS_ACCESS_VIOLATION`. Fixed by adding a `static mut`
+  8-slot `TEST_PRIV_POOL` (same pattern as `grants.rs`), providing pointer-stable `Priv`
+  allocations that survive across tests.
+- **All 189 tests pass** with `--test-threads=1`, verified stable across 5+ consecutive runs.
+  (Parallel execution without `--test-threads=1` is unsafe because the process table is a
+  global mutable singleton — a pre-existing limitation of the test architecture.)
+
+---
+
 ## Phase 5: Kernel System Calls
 
 **Goal**: Implement all ~40 kernel system call handlers.

@@ -233,7 +233,7 @@ pub struct Priv {
     /// Pending hardware interrupts.
     pub s_int_pending: u64,
     /// Pending signals.
-    pub s_sig_pending: u32,
+    pub s_sig_pending: u128,
 
     /// Synchronous alarm timer.
     pub s_alarm_timer: MinixTimer,

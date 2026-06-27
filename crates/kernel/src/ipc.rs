@@ -4,7 +4,9 @@
 
 use core::sync::atomic::Ordering;
 
-use arch_common::ipc::{AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg};
+use arch_common::ipc::{
+    AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg, Message,
+};
 
 use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
@@ -12,14 +14,14 @@ use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-pub const NON_BLOCKING: i32 = 0x01;
-pub const FROM_KERNEL: i32 = 0x02;
+pub const NON_BLOCKING: i32 = 0x80;
+pub const FROM_KERNEL: i32 = 0x100;
 
 pub const SEND: i32 = 0x01;
 pub const RECEIVE: i32 = 0x02;
 pub const SENDREC: i32 = 0x03;
-pub const SENDNB: i32 = 0x04;
-pub const NOTIFY: i32 = 0x05;
+pub const NOTIFY: i32 = 0x04;
+pub const SENDNB: i32 = 0x05;
 
 pub const IPC_FLG_MSG_FROM_KERNEL: u16 = 0x0001;
 pub const IPC_FLG_CALL_MASK: u16 = 0x007F;
@@ -94,6 +96,11 @@ fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {
         if rts & RtsFlags::RECEIVING.bits() == 0 {
             return false;
         }
+        // C also checks !RTS_SENDING — a process blocked on SENDREC
+        // has both SENDING and RECEIVING set and should NOT match
+        if rts & RtsFlags::SENDING.bits() != 0 {
+            return false;
+        }
         let from = (*dst_ptr).p_getfrom_e;
         from == src_e || from == crate::system::NONE
     }
@@ -147,7 +154,8 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             ipc_status_add_call(dst_ptr, call);
 
             if call == SENDREC {
-                (*caller_ptr)
+                // Clear REPLY_PEND on the DESTINATION (not caller)
+                (*dst_ptr)
                     .p_misc_flags
                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
             }
@@ -201,7 +209,7 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
 /// # Safety
 ///
 /// Process and `m_ptr` must be valid.
-pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8) -> i32 {
+pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, flags: i32) -> i32 {
     unsafe {
         let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
         while !(*xpp).is_null() {
@@ -230,6 +238,16 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8) ->
                 return OK;
             }
             xpp = &mut (**xpp).p_q_link;
+        }
+
+        // NON_BLOCKING check (C L1027-1037)
+        if flags & NON_BLOCKING != 0 {
+            return ENOTREADY;
+        }
+
+        // Deadlock check (C L1029)
+        if deadlock(RECEIVE, caller_ptr, src_e) {
+            return ELOCKED;
         }
 
         let old = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
@@ -261,6 +279,16 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         if dst_ptr.is_null() {
             return EDEADSRCDST;
         }
+
+        // C: skip delivery when destination has MF_REPLY_PEND
+        if (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0 {
+            // Record pending notification and return
+            if !(*dst_ptr).p_priv.is_null() {
+                (*(*dst_ptr).p_priv).s_notify_pending.set(src_e as usize);
+            }
+            return OK;
+        }
+
         let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
         if rts & RtsFlags::RECEIVING.bits() != 0
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
@@ -269,6 +297,11 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
                 enqueue(dst_ptr);
+            }
+        } else {
+            // C: record pending notification when destination isn't waiting
+            if !(*dst_ptr).p_priv.is_null() {
+                (*(*dst_ptr).p_priv).s_notify_pending.set(src_e as usize);
             }
         }
         OK
@@ -336,16 +369,36 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
             }
         }
 
+        // C: check iskerneln — forbid SEND/SENDNB/NOTIFY to kernel tasks
+        if (call == SEND || call == SENDNB || call == NOTIFY)
+            && crate::table::is_kernel_nr(endpoint_slot(ep))
+        {
+            return crate::system::ECALLDENIED;
+        }
+
+        // C: check may_send_to (L471-479)
+        // Check if caller has IPC permission to send to destination
+        if call == SEND || call == SENDREC || call == SENDNB || call == NOTIFY {
+            let dst_p = endpoint_slot(ep);
+            if !crate::r#priv::may_send_to(&*caller_ptr, dst_p) {
+                return crate::system::ECALLDENIED;
+            }
+        }
+
         match call {
             SENDREC => {
+                // C: set REPLY_PEND before calling mini_send
+                (*caller_ptr)
+                    .p_misc_flags
+                    .fetch_or(MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
                 let r = mini_send(caller_ptr, ep, m_ptr, 0);
                 if r != OK {
                     return r;
                 }
-                mini_receive(caller_ptr, ep, m_ptr)
+                mini_receive(caller_ptr, ep, m_ptr, 0)
             }
             SEND => mini_send(caller_ptr, ep, m_ptr, 0),
-            RECEIVE => mini_receive(caller_ptr, ep, m_ptr),
+            RECEIVE => mini_receive(caller_ptr, ep, m_ptr, 0),
             SENDNB => mini_send(caller_ptr, ep, m_ptr, NON_BLOCKING),
             NOTIFY => mini_notify((*caller_ptr).p_endpoint, ep),
             _ => crate::system::EBADREQUEST,
@@ -608,16 +661,11 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
             let mut result = OK;
 
             if will_receive(dst_ptr, caller_ep) {
-                // Destination is waiting for this message
-                // Copy message bytes (Message layout: m_source(4) + m_type(4) +
-                // m_payload(56+) = matches our opaque 64-byte buffer)
-                let tabent_ptr = &tabent as *const AsynMsg;
+                // Destination is waiting for this message.
+                // Copy only the `msg` field from the async entry (not flags/endpoint/result).
+                let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
-                core::ptr::copy_nonoverlapping(
-                    tabent_ptr as *const u8,
-                    msg_dst,
-                    MESSAGE_SIZE.min(core::mem::size_of::<AsynMsg>()),
-                );
+                core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
             } else {
                 // Not waiting — mark as pending
                 let src_id = (*privp).s_id;
@@ -688,7 +736,12 @@ pub unsafe fn try_async(caller_ptr: *mut Proc) -> i32 {
 
 /// Cancel all pending asynchronous messages between two processes.
 ///
-/// Clears the async pending bit for `src_ptr` in `dst_ptr`'s async pending map.
+/// Cancel all outstanding async sends from `src_ptr` to `dst_ptr`.
+///
+/// Walks the source's async table, marks entries targeting the
+/// destination as cancelled (`EDEADSRCDST`, `AMF_DONE`), clears
+/// the async pending bit on the destination, and notifies the
+/// source if any entries were cancelled.
 ///
 /// # Safety
 ///
@@ -698,19 +751,65 @@ pub unsafe fn cancel_async(src_ptr: *mut Proc, dst_ptr: *mut Proc) {
         if src_ptr.is_null() || dst_ptr.is_null() {
             return;
         }
+
+        let src_priv = (*src_ptr).p_priv;
+        if src_priv.is_null() {
+            return;
+        }
+
+        let size = (*src_priv).s_asynsize;
+        let table_v = (*src_priv).s_asyntab;
+
+        // Clear the table reference on the source first (if no entries remain,
+        // this is the final state; if entries remain, we re-arm below).
+        (*src_priv).s_asyntab = 0;
+        (*src_priv).s_asynsize = 0;
+
+        let dst_ep = (*dst_ptr).p_endpoint;
+        let mut do_notify = false;
+        let mut entries_remain = false;
+
+        if table_v != 0 && size > 0 {
+            for i in 0..size {
+                let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+                let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
+
+                let flags = tabent.flags;
+                // Skip invalid or already-done entries
+                if flags & AMF_VALID == 0 || flags & AMF_DONE != 0 {
+                    continue;
+                }
+
+                if tabent.endpoint == dst_ep {
+                    // Mark as cancelled with EDEADSRCDST
+                    let mut updated = tabent;
+                    updated.result = EDEADSRCDST;
+                    updated.flags = flags | AMF_DONE;
+                    core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
+                    do_notify = true;
+                } else {
+                    entries_remain = true;
+                }
+            }
+        }
+
         // Clear the pending bit for src in dst's async pending map
-        if !(*dst_ptr).p_priv.is_null() && !(*src_ptr).p_priv.is_null() {
-            let src_id = (*(*src_ptr).p_priv).s_id;
+        if !(*dst_ptr).p_priv.is_null() {
+            let src_id = (*src_priv).s_id;
             if src_id >= 0 {
                 (*(*dst_ptr).p_priv).s_asyn_pending.clear(src_id as usize);
             }
         }
-        // Also clear in the reverse direction
-        if !(*src_ptr).p_priv.is_null() && !(*dst_ptr).p_priv.is_null() {
-            let dst_id = (*(*dst_ptr).p_priv).s_id;
-            if dst_id >= 0 {
-                (*(*src_ptr).p_priv).s_asyn_pending.clear(dst_id as usize);
-            }
+
+        // Re-arm the table reference if entries remain for other destinations
+        if entries_remain {
+            (*src_priv).s_asyntab = table_v;
+            (*src_priv).s_asynsize = size;
+        }
+
+        // Notify the sender that some async sends were cancelled
+        if do_notify {
+            mini_notify(arch_common::com::ASYNCM, (*src_ptr).p_endpoint);
         }
     }
 }
@@ -803,14 +902,11 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                 && will_receive(dst_ptr, (*caller_ptr).p_endpoint)
                 && (flags & AMF_NOREPLY == 0)
             {
-                // Destination is waiting for this message — deliver directly
-                let tabent_ptr = &tabent as *const AsynMsg;
+                // Destination is waiting for this message — deliver directly.
+                // Copy only the `msg` field from the async entry (not flags/endpoint/result).
+                let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
-                core::ptr::copy_nonoverlapping(
-                    tabent_ptr as *const u8,
-                    msg_dst,
-                    MESSAGE_SIZE.min(core::mem::size_of::<AsynMsg>()),
-                );
+                core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
                 (*dst_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
@@ -873,7 +969,9 @@ pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
 /// Build a notification message.
 pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *mut Proc) {
     msg.fill(0);
-    msg[0..4].copy_from_slice(&(-10i32).to_ne_bytes()); // NOTIFY_MESSAGE
+    // m_type at offset 4 (C: m_ptr->m_type = NOTIFY_MESSAGE)
+    msg[4..8].copy_from_slice(&(-10i32).to_ne_bytes()); // NOTIFY_MESSAGE = -10
+    // m_source at offset 0 — set by caller / delivery path
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -1025,7 +1123,10 @@ mod tests {
             (*dst).p_caller_q = src;
 
             let mut buf = [0u8; MESSAGE_SIZE];
-            assert_eq!(mini_receive(dst, crate::system::NONE, buf.as_mut_ptr()), OK);
+            assert_eq!(
+                mini_receive(dst, crate::system::NONE, buf.as_mut_ptr(), 0),
+                OK
+            );
             assert_eq!(i32::from_ne_bytes(buf[..4].try_into().unwrap()), 99);
             let sr = (*src).p_rts_flags.load(Ordering::Relaxed);
             assert_eq!(sr & RtsFlags::SENDING.bits(), 0);
@@ -1039,7 +1140,12 @@ mod tests {
             proc_init();
             let dst = setup_proc(0);
             assert_eq!(
-                mini_receive(dst, crate::system::NONE, [0u8; MESSAGE_SIZE].as_mut_ptr()),
+                mini_receive(
+                    dst,
+                    crate::system::NONE,
+                    [0u8; MESSAGE_SIZE].as_mut_ptr(),
+                    0
+                ),
                 OK
             );
             let rts = (*dst).p_rts_flags.load(Ordering::Relaxed);

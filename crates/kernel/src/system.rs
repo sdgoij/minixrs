@@ -35,6 +35,9 @@ pub const NR_IRQ_HOOKS: usize = 16;
 
 /// NONE endpoint constant — matches C `_ENDPOINT_SLOT_TOP - 2` (31743).
 pub const NONE: i32 = 31743;
+
+/// SELF endpoint constant — matches C `_ENDPOINT_SLOT_TOP - 3` (31742).
+pub const SELF: i32 = 31742;
 pub const OK: i32 = 0;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -389,7 +392,7 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
         if rp.is_null() || (*rp).is_empty() {
             return EBADREQUEST;
         }
-        if !(0..32).contains(&sig_nr) {
+        if !(0..128).contains(&sig_nr) {
             return crate::ipc::EFAULT;
         }
 
@@ -399,7 +402,7 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
         }
 
         // Set the signal bit in the priv structure's pending signals
-        (*priv_data).s_sig_pending |= 1u32 << sig_nr;
+        (*priv_data).s_sig_pending |= 1u128 << sig_nr;
 
         // Set RTS_SIGNALED | RTS_SIG_PENDING, dequeue if was runnable
         let sig_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
@@ -411,10 +414,9 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
             dequeue(rp);
         }
 
-        // For non-system processes, notify SYSTEM so it dispatches the signal
-        if (*priv_data).s_flags & PrivFlags::SYS_PROC == PrivFlags::empty() {
-            crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
-        }
+        // Notify SYSTEM unconditionally (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
+        // p_signal_received is not incremented here; signal tracking is via RTS flags
+        crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
 
         OK
     }
@@ -451,12 +453,19 @@ pub unsafe fn cause_sig(proc_nr: i32, sig_nr: i32) {
             dequeue(rp);
         }
 
-        // Notify the signal manager (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
-        // where rp is the signal manager process.
-        if !(*rp).p_priv.is_null() {
+        // Only notify on first signal (C: if(!RTS_ISSET(rp, RTS_SIGNALED)))
+        if old & RtsFlags::SIGNALED.bits() == 0 && !(*rp).p_priv.is_null() {
             let sig_mgr = (*(*rp).p_priv).s_sig_mgr;
-            if sig_mgr != crate::system::NONE && sig_mgr != i32::MIN {
-                crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr);
+            if sig_mgr != crate::system::NONE {
+                // Resolve SELF (C: if(sig_mgr == SELF) sig_mgr = rp->p_endpoint)
+                let sig_mgr_ep = if sig_mgr == crate::system::SELF {
+                    (*rp).p_endpoint
+                } else {
+                    sig_mgr
+                };
+                // Convert endpoint to proc_nr and call send_sig with SIGKSIG (74)
+                let slot = crate::table::endpoint_slot(sig_mgr_ep);
+                send_sig(slot, 74); // SIGKSIG = 74
             }
         }
     }
@@ -517,6 +526,10 @@ pub unsafe fn clear_ipc(rp: *mut Proc) {
             .fetch_and(!RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
         (*rp).p_getfrom_e = crate::system::NONE;
         (*rp).p_sendto_e = crate::system::NONE;
+
+        // Set return code to EDEADSRCDST so the blocked process knows
+        // the target endpoint is gone.  x86_64 syscall return is in rax.
+        (*rp).p_reg.rax = crate::ipc::EDEADSRCDST as u64;
     }
 }
 
@@ -579,6 +592,11 @@ pub unsafe fn clear_ipc_refs(rp: *mut Proc) {
                     (*(*p).p_priv).s_notify_pending.clear(rc_id as usize);
                     (*(*p).p_priv).s_asyn_pending.clear(rc_id as usize);
                 }
+            }
+
+            // Cancel any outstanding async sends from this process to the target
+            if !(*p).p_priv.is_null() {
+                crate::ipc::cancel_async(p, rp);
             }
 
             // Check if this process is blocked on the target
@@ -731,6 +749,38 @@ mod tests {
     use super::*;
     use crate::table::proc_init;
 
+    // ── Static Priv pool for test pointer stability ─────────────────
+    // Prevents dangling pointers when tests set p_priv and later
+    // tests invoke clear_ipc_refs / cancel_async on the same process.
+
+    const TEST_PRIV_SLOT_BYTES: usize = 2048;
+    #[repr(C, align(64))]
+    struct TestPrivPool {
+        data: [u8; TEST_PRIV_SLOT_BYTES * 8],
+    }
+    static mut TEST_PRIV_POOL: TestPrivPool = TestPrivPool {
+        data: [0u8; TEST_PRIV_SLOT_BYTES * 8],
+    };
+
+    /// Get a zeroed `*mut Priv` from the static pool at the given slot.
+    unsafe fn setup_test_priv(slot: usize) -> *mut Priv {
+        unsafe {
+            let base = &raw mut TEST_PRIV_POOL as *mut TestPrivPool as *mut u8;
+            let p = base.add(slot.min(7) * TEST_PRIV_SLOT_BYTES).cast::<Priv>();
+            core::ptr::write_bytes(p.cast::<u8>(), 0, TEST_PRIV_SLOT_BYTES);
+            (*p).s_sig_mgr = i32::MIN;
+            (*p).s_flags = PrivFlags::empty();
+            p
+        }
+    }
+
+    fn init_signal_env() {
+        unsafe {
+            arch_x86_64::cpulocals::init_cpulocals();
+            proc_init();
+        }
+    }
+
     #[test]
     fn test_system_init_registers_handlers() {
         unsafe {
@@ -834,11 +884,22 @@ mod tests {
             }
         }
     }
+    // ── Signal delivery tests ────────────────────────────────────────────
+    //
+    // Tests for cause_sig (signal manager notification) and send_sig
+    // (C path with priv->s_sig_pending + SYSTEM notification).
+
+    fn init_signal_test_env() {
+        unsafe {
+            arch_x86_64::cpulocals::init_cpulocals();
+            proc_init();
+        }
+    }
 
     #[test]
     fn test_cause_sig_sets_flags() {
         unsafe {
-            proc_init();
+            init_signal_test_env();
             let rp = crate::table::proc_addr(0);
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
 
@@ -853,7 +914,7 @@ mod tests {
     #[test]
     fn test_cause_sig_sets_p_pending() {
         unsafe {
-            proc_init();
+            init_signal_test_env();
             let rp = crate::table::proc_addr(0);
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
             (*rp).p_pending = 0;
@@ -947,16 +1008,22 @@ mod tests {
     #[test]
     fn test_cause_sig_notifies_signal_manager() {
         unsafe {
-            proc_init();
+            init_signal_test_env();
             // Set up proc 0 with a signal manager (proc 1)
             let rp = crate::table::proc_addr(0);
             let mgr = crate::table::proc_addr(1);
-            (*mgr).p_endpoint = crate::table::make_endpoint(0, 1);
-            // Set up a proper priv structure with sig_mgr
-            let mut test_priv = crate::r#priv::Priv::default();
-            test_priv.s_sig_mgr = (*mgr).p_endpoint;
-            (*rp).p_priv = &mut test_priv;
+            let mgr_ep = crate::table::make_endpoint(0, 1);
+            (*mgr).p_endpoint = mgr_ep;
+            // Set up proc 0's priv with sig_mgr pointing to proc 1
+            let priv0 = setup_test_priv(0);
+            (*priv0).s_sig_mgr = mgr_ep;
+            (*rp).p_priv = priv0;
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+            // Set up sig mgr (proc 1) with a priv so send_sig can set s_sig_pending
+            let priv1 = setup_test_priv(1);
+            (*priv1).s_sig_pending = 0;
+            (*mgr).p_priv = priv1;
 
             // Set mgr as RECEIVING from ANY so mini_notify will wake it
             (*mgr)
@@ -966,12 +1033,21 @@ mod tests {
 
             cause_sig(0, 1);
 
-            // mgr should have been notified (RECEIVING flag cleared)
+            // send_sig should set SIGKSIG (74) bit in mgr's s_sig_pending
+            assert!(
+                (*mgr).p_priv.as_ref().unwrap().s_sig_pending & (1u128 << 74) != 0,
+                "send_sig should set SIGKSIG (74) in s_sig_pending"
+            );
+
+            // send_sig also sets SIGNALED and SIG_PENDING on the mgr process
             let mgr_rts = (*mgr).p_rts_flags.load(Ordering::Relaxed);
-            assert_eq!(
-                mgr_rts & RtsFlags::RECEIVING.bits(),
-                0,
-                "signal manager should be woken by cause_sig notification"
+            assert!(
+                mgr_rts & RtsFlags::SIGNALED.bits() != 0,
+                "SIGNALED should be set on mgr via send_sig"
+            );
+            assert!(
+                mgr_rts & RtsFlags::SIG_PENDING.bits() != 0,
+                "SIG_PENDING should be set on mgr via send_sig"
             );
         }
     }
@@ -1005,13 +1081,13 @@ mod tests {
     #[test]
     fn test_send_sig_uses_priv_pending_not_pending() {
         unsafe {
-            proc_init();
+            init_signal_env();
             // Set up proc 0 with a priv structure
             let rp = crate::table::proc_addr(0);
-            let mut test_priv = crate::r#priv::Priv::default();
-            test_priv.s_flags = PrivFlags::SYS_PROC; // system proc, no mini_notify
-            test_priv.s_sig_pending = 0;
-            (*rp).p_priv = &mut test_priv;
+            let priv0 = setup_test_priv(0);
+            (*priv0).s_flags = PrivFlags::SYS_PROC;
+            (*priv0).s_sig_pending = 0;
+            (*rp).p_priv = priv0;
             (*rp).p_pending = 0;
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
 
@@ -1020,7 +1096,7 @@ mod tests {
 
             // s_sig_pending should have bit 3 set
             assert!(
-                (*rp).p_priv.as_ref().unwrap().s_sig_pending & (1u32 << 3) != 0,
+                (*rp).p_priv.as_ref().unwrap().s_sig_pending & (1u128 << 3) != 0,
                 "send_sig should set s_sig_pending, not p_pending"
             );
             // p_pending should NOT be set (send_sig uses priv path)
@@ -1031,12 +1107,12 @@ mod tests {
     #[test]
     fn test_send_sig_dequeues_runnable_proc() {
         unsafe {
-            proc_init();
+            init_signal_env();
             let rp = crate::table::proc_addr(0);
-            let mut test_priv = crate::r#priv::Priv::default();
-            test_priv.s_flags = PrivFlags::SYS_PROC;
-            test_priv.s_sig_pending = 0;
-            (*rp).p_priv = &mut test_priv;
+            let priv0 = setup_test_priv(0);
+            (*priv0).s_flags = PrivFlags::SYS_PROC;
+            (*priv0).s_sig_pending = 0;
+            (*rp).p_priv = priv0;
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
             // Set run queue so dequeue has something to work with
             crate::sched::enqueue(rp);
@@ -1055,13 +1131,13 @@ mod tests {
     #[test]
     fn test_send_sig_notifies_system_for_user_proc() {
         unsafe {
-            proc_init();
+            init_signal_env();
             // Set up proc 0 as a user process (no SYS_PROC flag)
             let rp = crate::table::proc_addr(0);
-            let mut test_priv = crate::r#priv::Priv::default();
-            test_priv.s_flags = PrivFlags::empty(); // not SYS_PROC
-            test_priv.s_sig_pending = 0;
-            (*rp).p_priv = &mut test_priv;
+            let priv0 = setup_test_priv(0);
+            (*priv0).s_flags = PrivFlags::empty(); // not SYS_PROC
+            (*priv0).s_sig_pending = 0;
+            (*rp).p_priv = priv0;
             (*rp).p_endpoint = crate::table::make_endpoint(0, 0);
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
 

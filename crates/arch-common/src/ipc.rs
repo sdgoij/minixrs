@@ -153,15 +153,16 @@ pub union DsVal {
 
 pub const AMF_VALID: u32 = 0x01;
 pub const AMF_DONE: u32 = 0x02;
-pub const AMF_NOTIFY: u32 = 0x80;
+pub const AMF_NOTIFY: u32 = 0x04;
 pub const AMF_NOREPLY: u32 = 0x08;
-pub const AMF_NOTIFY_ERR: u32 = 0x04;
+pub const AMF_NOTIFY_ERR: u32 = 0x10;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct AsynMsg {
     pub flags: u32,
     pub endpoint: i32,
+    pub result: i32,
     pub msg: Message,
 }
 
@@ -224,6 +225,17 @@ mod tests {
         unsafe {
             assert_eq!(m.m_payload.m1.m1i1, 10);
         }
+    }
+
+    #[test]
+    fn test_asynmsg_offsets() {
+        assert_eq!(offset_of!(AsynMsg, flags), 0);
+        assert_eq!(offset_of!(AsynMsg, endpoint), 4);
+        assert_eq!(offset_of!(AsynMsg, result), 8);
+        // msg is at offset 16 rather than 12 because Message has alignment 8
+        // (i64 fields in Payload). On i386 C this would be offset 12.
+        // This is the pre-existing size mismatch the user noted.
+        assert_eq!(offset_of!(AsynMsg, msg), 16);
     }
 
     #[test]

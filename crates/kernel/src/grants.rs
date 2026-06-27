@@ -18,9 +18,9 @@ pub use arch_common::safecopies::*;
 /// Maximum depth for following indirect grant chains.
 pub const MAX_INDIRECT_DEPTH: usize = 5;
 
-/// Top of user-accessible memory (u64::MAX disables the 32-bit
-/// wrapping check; Minix 3.3.0's i386 code uses 0xFFFFFFFF).
-const MEM_TOP: u64 = u64::MAX;
+/// Top of user-accessible memory (32-bit limit for grant arithmetic;
+/// matches C `MEM_TOP = 0xFFFFFFFFUL`).
+const MEM_TOP: u64 = 0xFFFFFFFF;
 
 /// Maximum number of vectored safecopy elements.
 pub const SCPVEC_NR: usize = 64;
@@ -61,7 +61,7 @@ pub unsafe fn verify_grant(
 ) -> Result<(u64, i32, i32), i32> {
     unsafe {
         let mut cur_granter = granter;
-        let cur_grantee = grantee;
+        let mut cur_grantee = grantee;
         let mut cur_grant = grant_id;
         let mut depth = 0;
 
@@ -121,10 +121,8 @@ pub unsafe fn verify_grant(
                     return Err(EPERM);
                 }
 
-                // Follow the chain (cur_grantee stays fixed — the original
-                // caller's grantee must be allowed at every step by the C
-                // semantics). The next iteration validates
-                // indirect.cp_who_to against the original cur_grantee.
+                // Follow the chain (C: grantee = granter)
+                cur_grantee = cur_granter;
                 cur_granter = indirect.cp_who_from;
                 cur_grant = indirect.cp_grant;
                 continue;
@@ -139,8 +137,11 @@ pub unsafe fn verify_grant(
             if flags & CPF_DIRECT != 0 {
                 let direct = g.cp_u.cp_direct;
 
-                // Check for wrapping
-                if MEM_TOP - direct.cp_len as u64 + 1 < direct.cp_start {
+                // Check for wrapping — only meaningful for addresses within the
+                // 32-bit range where arithmetic can wrap around MEM_TOP.
+                if direct.cp_start <= MEM_TOP
+                    && MEM_TOP - direct.cp_len as u64 + 1 < direct.cp_start
+                {
                     return Err(EPERM);
                 }
 
@@ -163,6 +164,11 @@ pub unsafe fn verify_grant(
             }
 
             if flags & CPF_MAGIC != 0 {
+                // Only VFS may do magic grants (C: if(granter != VFS_PROC_NR))
+                // Compare process slots (endpoints encode slot + generation).
+                if endpoint_slot(cur_granter) != arch_common::com::VFS_PROC_NR {
+                    return Err(EPERM);
+                }
                 let magic = g.cp_u.cp_magic;
 
                 // Verify grantee
@@ -364,9 +370,9 @@ pub unsafe fn do_vsafecopy(caller: *mut Proc, msg: &[u8; MESSAGE_SIZE]) -> i32 {
 
         // Process each element
         for item in vec.iter().take(els) {
-            let (access, granter) = if item.v_from == crate::system::NONE {
+            let (access, granter) = if item.v_from == crate::system::SELF {
                 (CPF_WRITE, item.v_to)
-            } else if item.v_to == crate::system::NONE {
+            } else if item.v_to == crate::system::SELF {
                 (CPF_READ, item.v_from)
             } else {
                 return EINVAL; // each element must have exactly one SELF
@@ -822,8 +828,10 @@ mod tests {
                 (*rp).p_rts_flags = AtomicU32::new(RtsFlags::empty().bits());
             }
 
+            // A[0]: indirect — original grantee (ep_b) may traverse to B's grant #2
             *base.add(0) = make_indirect_grant(ep_b, ep_b, 2);
-            *base.add(16 + 2) = make_direct_grant(CPF_READ, ep_b, 0x2000, 1024);
+            // B[2]: direct — after chain, grantee becomes the old granter (ep_a)
+            *base.add(16 + 2) = make_direct_grant(CPF_READ, ep_a, 0x2000, 1024);
 
             let r = verify_grant(ep_a, ep_b, 0, 64, CPF_READ, 0);
             assert_eq!(
@@ -850,11 +858,13 @@ mod tests {
                 setup_with_buf(i as i32, eps[i], base.add(i * 16), 16);
             }
 
-            // Each indirect grant allows original grantee (ep6) to traverse.
+            // Each indirect grant's who_to follows C semantics:
+            // after the chain, grantee becomes the old granter.
             for i in 0..6 {
-                *base.add(i * 16) = make_indirect_grant(ep6, eps[i + 1], 0);
+                let allowed = if i == 0 { ep6 } else { eps[i - 1] };
+                *base.add(i * 16) = make_indirect_grant(allowed, eps[i + 1], 0);
             }
-            *base.add(6 * 16) = make_direct_grant(CPF_READ, ep6, 0x3000, 512);
+            *base.add(6 * 16) = make_direct_grant(CPF_READ, eps[5], 0x3000, 512);
 
             let r = verify_grant(ep0, ep6, 0, 64, CPF_READ, 0);
             assert_eq!(
@@ -889,9 +899,9 @@ mod tests {
     #[test]
     fn test_magic_grant_valid() {
         unsafe {
-            let ep = make_endpoint(0, 0);
+            let ep = make_endpoint(0, 1); // VFS (slot 1, gen 0)
             grant_buf!(_gb, grant_ptr, 16);
-            setup_with_buf(0, ep, grant_ptr, 16);
+            setup_with_buf(1, ep, grant_ptr, 16);
             *grant_ptr.add(0) = make_magic_grant(CPF_READ, ep, ep, 0x5000, 2048);
             let r = verify_grant(ep, ep, 0, 128, CPF_READ, 0);
             assert_eq!(
@@ -904,10 +914,10 @@ mod tests {
     #[test]
     fn test_magic_grant_any_grantee() {
         unsafe {
-            let ep = make_endpoint(0, 0);
+            let ep = make_endpoint(0, 1); // VFS (slot 1, gen 0)
             let any_ep = crate::system::NONE;
             grant_buf!(_gb, grant_ptr, 16);
-            setup_with_buf(0, ep, grant_ptr, 16);
+            setup_with_buf(1, ep, grant_ptr, 16);
             *grant_ptr.add(0) = make_magic_grant(CPF_READ, ep, any_ep, 0x5000, 2048);
             let r = verify_grant(ep, any_ep, 0, 128, CPF_READ, 0);
             assert!(r.is_ok(), "ANY grantee on magic grant should pass");
@@ -917,9 +927,9 @@ mod tests {
     #[test]
     fn test_magic_grant_wrong_grantee() {
         unsafe {
-            let ep = make_endpoint(0, 0);
+            let ep = make_endpoint(0, 1); // VFS (slot 1, gen 0)
             grant_buf!(_gb, grant_ptr, 16);
-            setup_with_buf(0, ep, grant_ptr, 16);
+            setup_with_buf(1, ep, grant_ptr, 16);
             *grant_ptr.add(0) = make_magic_grant(CPF_READ, ep, 42, 0x5000, 2048);
             let r = verify_grant(ep, ep, 0, 128, CPF_READ, 0);
             assert!(r.is_err(), "wrong grantee on magic grant should fail");
@@ -929,11 +939,11 @@ mod tests {
     #[test]
     fn test_magic_grant_returns_who_from() {
         unsafe {
-            let ep_a = make_endpoint(0, 0);
-            let ep_b = make_endpoint(1, 1);
+            let ep_a = make_endpoint(0, 1); // VFS slot 1 (must own the magic grant)
+            let ep_b = make_endpoint(0, 2); // Other process at slot 2 (the "real" memory owner)
             grant_buf!(_gb, base, 32);
-            setup_with_buf(0, ep_a, base, 16);
-            setup_with_buf(1, ep_b, base.add(16), 16);
+            setup_with_buf(1, ep_a, base, 16);
+            setup_with_buf(2, ep_b, base.add(16), 16);
 
             // Magic grant where cp_who_from = ep_b (identity is ep_b, not ep_a)
             *base.add(0) = make_magic_grant(CPF_READ, ep_b, ep_a, 0x5000, 2048);
@@ -1100,7 +1110,7 @@ mod tests {
 
             let vec = [VscpVec {
                 v_from: ep,
-                v_to: crate::system::NONE,
+                v_to: crate::system::SELF,
                 v_gid: 0,
                 v_offset: 0,
                 v_addr: base + copy_off + 128,
@@ -1127,14 +1137,14 @@ mod tests {
             let vec = [
                 VscpVec {
                     v_from: ep,
-                    v_to: crate::system::NONE,
+                    v_to: crate::system::SELF,
                     v_gid: 0,
                     v_offset: 0,
                     v_addr: base + copy_off + 64,
                     v_bytes: 64,
                 },
                 VscpVec {
-                    v_from: crate::system::NONE,
+                    v_from: crate::system::SELF,
                     v_to: ep,
                     v_gid: 1,
                     v_offset: 0,
@@ -1163,7 +1173,7 @@ mod tests {
             let vec = [
                 VscpVec {
                     v_from: ep,
-                    v_to: crate::system::NONE,
+                    v_to: crate::system::SELF,
                     v_gid: 0,
                     v_offset: 0,
                     v_addr: base + copy_off + 128,
@@ -1171,7 +1181,7 @@ mod tests {
                 },
                 VscpVec {
                     v_from: ep,
-                    v_to: crate::system::NONE,
+                    v_to: crate::system::SELF,
                     v_gid: 1,
                     v_offset: 256,
                     v_addr: base + copy_off + 512,

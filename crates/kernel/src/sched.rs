@@ -260,8 +260,11 @@ pub unsafe fn notify_scheduler(p: *mut Proc) {
 
         // Build and send SCHEDULING_NO_QUANTUM message
         let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        // m_type at offset 4 (C: m_no_quantum.m_type = SCHEDULING_NO_QUANTUM)
         let mtype = arch_common::com::SCHEDULING_NO_QUANTUM as i32;
-        msg[0..4].copy_from_slice(&mtype.to_ne_bytes());
+        msg[4..8].copy_from_slice(&mtype.to_ne_bytes());
+        // m_source at offset 0 (C: m_no_quantum.m_source = p->p_endpoint)
+        msg[0..4].copy_from_slice(&(*p).p_endpoint.to_ne_bytes());
         // The scheduler endpoint is at p->p_scheduler->p_endpoint
         let sched_ep = (*(*p).p_scheduler).p_endpoint;
         let result = crate::ipc::mini_send(p, sched_ep, msg.as_mut_ptr(), crate::ipc::FROM_KERNEL);
