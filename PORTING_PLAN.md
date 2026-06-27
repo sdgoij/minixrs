@@ -244,7 +244,7 @@ The Rust port targets two architectures:
   - Tests: `assert_eq!(SEND, 1); assert_eq!(RECEIVE, 2); ...`
   - Tests: `IPC_STATUS_CALL(IPC_STATUS_CALL_TO(5)) == 5`
 
-- [ ] **1.4 — Port `minix/com.h` — the single most important header**
+- [x] **1.4 — Port `minix/com.h` — the single most important header**
   - Source: `.refs/minix-3.3.0/minix/include/minix/com.h`
   - Subsystem process endpoints: `IDLE`, `CLOCK`, `SYSTEM`, `KERNEL`, `HARDWARE`, `MAX_NR_TASKS`, `NR_TASKS`
   - Special process numbers: `PM_PROC_NR`, `VFS_PROC_NR`, `RS_PROC_NR`, `MEM_PROC_NR`, `SCHED_PROC_NR`, `TTY_PROC_NR`, `DS_PROC_NR`, `MFS_PROC_NR`, `VM_PROC_NR`, `PFS_PROC_NR`, `LAST_SPECIAL_PROC_NR`

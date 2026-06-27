@@ -4,6 +4,7 @@
 
 #![no_std]
 
+pub mod com;
 pub mod consts;
 pub mod devio;
 pub mod dmap;
