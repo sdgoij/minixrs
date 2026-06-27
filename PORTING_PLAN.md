@@ -669,43 +669,22 @@ The Rust port targets two architectures:
   - **12 new tests**: direct send/receive, queue+block, non-blocking, NO_ENDPOINT, deadlock cycle/no-cycle, notify wake, ipc_status, endpoint validation
   - 133 total for kernel crate, workspace clippy clean
 
-- [ ] **4.2 — Implement message copy infrastructure** TODO
+- [x] **4.2 — Implement message copy infrastructure**
   - `verify_grant()` — validate and resolve grants, following indirect chains
   - `safecopy()` — core safe copy with grant verification and virtual_copy callback
   - `do_safecopy_from()` — SYS_SAFECOPYFROM kernel call
   - `do_safecopy_to()` — SYS_SAFECOPYTO kernel call
   - `do_vsafecopy()` — SYS_VSAFECOPY vectored safe copy
-  - Constants: `MAX_INDIRECT_DEPTH`, `MEM_TOP`, `SCPVEC_NR`, `ELOOP`, `EFAULT_SRC`, `EFAULT_DST`
+  - Constants: `MAX_INDIRECT_DEPTH`, `MEM_TOP` (u64::MAX on x86_64), `SCPVEC_NR`, `ELOOP`, `EFAULT_SRC`, `EFAULT_DST`
   - Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
-  - Tests (28, 26 passing, 2 magic grant tests have a subtle cfg issue):
-    - Direct grant: valid copy succeeds
-    - Direct grant: offset within range works
-    - Direct grant: out-of-range copy fails with EPERM
-    - Direct grant: wrong grantee detected
-    - Direct grant: ANY grantee matches
-    - Direct grant: access permission check (read vs write)
-    - Indirect grant: single-hop chain resolves
-    - Indirect grant: chain exceeding MAX_INDIRECT_DEPTH returns ELOOP
-    - Indirect grant: wrong indirect grantee detected
-    - Magic grant: valid grant resolves
-    - Magic grant: wrong grantee detected
-    - Magic grant: ANY grantee matches
-    - Magic grant: wrong_granter detected (production only)
-    - Invalid grant ID detected
-    - Invalid grant flags detected
-    - safecopy with valid grant succeeds
-    - safecopy with out-of-range grant fails
-    - do_safecopy_from valid copy works
-    - do_safecopy_from out-of-range fails
-    - do_safecopy_to valid copy works
-    - do_safecopy_to out-of-range fails
-    - do_vsafecopy single element works
-    - do_vsafecopy multiple elements works
-    - do_vsafecopy no SELF element fails
-    - SCPVEC_NR constant matches C definition
-    - Grant flags verified
-    - grant_valid() behavior verified
-    - MAX_INDIRECT_DEPTH verified
+  - Tests: 38 passing (covers direct, indirect, magic grants; safecopy; do_safecopy_from/to; do_vsafecopy)
+  - **Deferred — needs VM integration (see Phase 6 task below):**
+    1. Replace `addr < KERNBASE` check with `vm_check_range(caller, addr, bytes)` — proper per-process
+       address space validation instead of the coarse kernel-boundary check
+    2. Wire `new_granter` (magic grant identity redirection) into the copy path for per-process
+       page table lookup
+    3. Implement CPF_TRY path — page-fault-tolerant copy via `virtual_copy` (no VM fault-in)
+       vs `virtual_copy_vmcheck` (with VM)
 
 - [ ] **4.3 — Implement address space switching** TODO
   - **Make sure to target x86_64 arch instead of i386**
@@ -1103,6 +1082,24 @@ dependencies so future implementers know what's needed.
   - 8 new tests for procctl (CLEAR from RS/VFS/other, HANDLEMEM from VFS/RS, invalid endpoint, unknown param, negative endpoint)
   - `cargo test --package servers` 47 passed
   - `cargo check --package servers` clean
+
+- [ ] **6.13 — Full address space validation for grant-based safecopy**
+  **Depends on:** VM server infrastructure (Phase 6), per-process page tables (Phase 6.5)
+  The initial grant infrastructure (Phase 4.2) deferred three items that need proper VM
+  integration. All three should be done together since they share the `virtual_copy` path:
+  1. **Replace `addr < KERNBASE` check** with `vm_check_range(caller, addr, bytes)` —
+     the current check only rejects kernel-high addresses but does not validate that `addr`
+     is within the caller's actual mapped regions. A malicious caller could craft an
+     `addr` pointing to kernel identity-mapped memory (below KERNBASE) and bypass the check.
+  2. **Wire `new_granter` into the copy path** — magic grants redirect the effective granter
+     to `cp_who_from`. With per-process page tables (Phase 6.5), the copy path must use
+     the correct granter's CR3 to access `v_offset`. Currently `_effective_granter` is
+     tracked but unused.
+  3. **CPF_TRY copy path** — `CPF_TRY` grants should use `virtual_copy` (no VM page fault
+     handling) instead of `virtual_copy_vmcheck`. The two paths are currently identical.
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c` (`virtual_copy_vmcheck` call)
+  - Tests: Verify `addr` in unmapped region is rejected; verify magic grant granter
+    redirection changes CR3 switch target; verify CPF_TRY doesn't fault on unmapped pages
 
 ---
 
