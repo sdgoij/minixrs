@@ -1065,12 +1065,16 @@ Phase 8.8 for I/O port-dependent).
 
 ### Tasks
 
-- [ ] **6.1 — Implement physical memory manager**
-  - Memory hole detection (from multiboot info in `.refs/minix-3.3.0/minix/kernel/main.c` `kmain()`)
-  - Free list / buddy allocator
-  - Page frame allocation/deallocation
-  - Physical memory map (`phys_map` array)
-  - Tests: Allocate all available pages; free them all
+- [x] **6.1 — Implement physical memory manager**
+  - Bitmap-based physical page allocator in `kernel::vm`
+  - `mem_init()` — initialize from boot memory chunks
+  - `alloc_mem()` / `free_mem()` — allocate/free contiguous physical pages
+  - Page cache for fast single-page allocation
+  - Scan-based allocation with last-scan optimization
+  - `PAF_ALIGN64K`, `PAF_ALIGN16K`, `PAF_LOWER16MB`, `PAF_LOWER1MB` flags
+  - `mem_stats()` — returns node count, free pages, largest free run
+  - Tests: 2 test functions covering all operations (init, alloc, free, reuse,
+    flags, exhaustion). 218 tests total for kernel crate, clippy clean.
 
 - [ ] **6.2 — Implement page table management**
   - Page directory allocation

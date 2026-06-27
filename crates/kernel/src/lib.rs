@@ -13,6 +13,7 @@ pub mod sched;
 pub mod syscall;
 pub mod system;
 pub mod table;
+pub mod vm;
 
 /// Kernel initialization.
 pub fn init() {
