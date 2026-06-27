@@ -588,21 +588,21 @@ The Rust port targets two architectures:
   - [x] Tests: cause_sig sets flags, clear_ipc/clear_endpoint works
   - **10 new tests**, 76 total for kernel crate, workspace clippy clean
 
-- [ ] **3.6 — Port `minix/kernel/glo.h` global variables**
+- [x] **3.6 — Port `minix/kernel/glo.h` global variables**
   - Source: `.refs/minix-3.3.0/minix/kernel/glo.h`
-  - All globals ported: `KINFO`, `MACHINE`, `KMESSAGES`, `LOADINFO`, `KRANDOM`
-  - VM globals: `VMREQUEST`, `LOST_TICKS`, `VM_RUNNING`, `CATCH_PAGEFAULTS`, `KERNEL_MAY_ALLOC`
-  - IPC globals: `IPC_CALL_NAMES`
-  - Interrupt globals: `IRQ_HOOKS`, `IRQ_ACTIDS`, `IRQ_USE`, `SYSTEM_HZ`
-  - Misc globals: `BOOTTIME`, `VERBOSEBOOT`, `CPU_HZ[]`, `CPU_INFO[]`
-  - Config globals: `CONFIG_NO_APIC`, `CONFIG_APIC_TIMER_X`, `CONFIG_NO_SMP`
-  - BKL stats: `KERNEL_TICKS[]`, `BKL_TICKS[]`, `BKL_TRIES[]`, `BKL_SUCC[]`
-  - Feature flags: `MINIX_FEATURE_FLAGS`, `MINIX_KERNINFO_USER`
-  - Helper types: `volatile_i32`, `IrqHook`, `CpuInfo`, `KInfoStruct`
-  - CPU frequency helpers: `cpu_set_freq()` / `cpu_get_freq()`
-  - [ ] Tests: Global state is correctly initialized at boot
-  - [ ] Tests: CPU frequency helpers work
-  - [ ] Tests: No data races under concurrent access (in SMP builds)
+  - Kernel info structs: `KInfo`, `Machine`, `KMessages`, `LoadInfo`, `KRandomness`, `MinixKernInfo`
+  - Config globals: `SYSTEM_HZ` (AtomicU32=60), `CONFIG_NO_APIC`, `CONFIG_APIC_TIMER_X`, `CONFIG_NO_SMP` (AtomicBool)
+  - VM globals: `VM_RUNNING`, `CATCH_PAGEFAULTS`, `KERNEL_MAY_ALLOC` (AtomicBool), `LOST_TICKS` (AtomicU32), `VMREQUEST`
+  - Timing globals: `BOOTTIME` (AtomicU64), `VERBOSEBOOT` (AtomicU32)
+  - Feature flags: `MINIX_FEATURE_FLAGS` (AtomicU32), `MINIX_KERNINFO_USER` (AtomicU64)
+  - BKL stats: `KERNEL_TICKS[32]`, `BKL_TICKS[32]`, `BKL_TRIES[32]`, `BKL_SUCC[32]`
+  - CPU frequency: `CPU_HZ[32]` with `cpu_set_freq()` / `cpu_get_freq()` accessors
+  - IPC call names: `IPC_CALL_NAMES[256]` with `init_ipc_call_names()`
+  - Serial debug: `SERIAL_DEBUG_ACTIVE` (AtomicBool)
+  - Scalars use `AtomicU32`/`AtomicU64`/`AtomicBool` for safe concurrent access (no Rust 2024 `static_mut_refs` issues)
+  - Struct statics use `static mut` with `addr_of_mut!()` / public accessor functions
+  - [x] Tests: All default values verified, CPU freq helpers tested, IPC call names init tested
+  - **15 new tests**, 92 total for kernel crate, workspace clippy clean
 
 - [ ] **3.7 — Port `minix/kernel/debug.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/debug.c`

@@ -405,7 +405,7 @@ pub unsafe fn cause_sig(proc_nr: i32, sig_nr: i32) {
         }
 
         // Set the signal bit in p_pending
-        if sig_nr >= 0 && sig_nr < 32 {
+        if (0..32).contains(&sig_nr) {
             (*rp).p_pending |= 1u32 << sig_nr;
         }
 
