@@ -686,13 +686,17 @@ The Rust port targets two architectures:
     3. Implement CPF_TRY path — page-fault-tolerant copy via `virtual_copy` (no VM fault-in)
        vs `virtual_copy_vmcheck` (with VM)
 
-- [ ] **4.3 — Implement address space switching** TODO
+- [x] **4.3 — Implement address space switching**
   - **Make sure to target x86_64 arch instead of i386**
-  - `switch_address_space()` — switch page directory
-  - `release_address_space()` — free page tables
-  - `switch_address_space_idle()` — special idle case
-  - Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/` (arch-specific)
-  - Tests: Address space switch changes visible memory
+  - `switch_address_space(proc)` — if `proc.p_seg.p_cr3 != 0`, load it via
+    `write_cr3()`, otherwise no-op (kernel identity map / BOOT_CR3)
+  - `release_address_space(proc)` — no-op; page table deallocation deferred to
+    VM server (Phase 6)
+  - `switch_address_space_idle()` — no-op on UP; on SMP would switch to
+    VM_PROC_NR's address space
+  - Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/memory.c` (i386 impl)
+  - Tests: 4 new (no-op with null CR3, type signature check, release no-op,
+    idle no-op)
 
 - [ ] **4.4 — In-kernel server dispatch mechanism**
   - `ServerDispatchFn` callback type — routes IPC directly to in-kernel servers
@@ -1101,9 +1105,19 @@ dependencies so future implementers know what's needed.
   - Tests: Verify `addr` in unmapped region is rejected; verify magic grant granter
     redirection changes CR3 switch target; verify CPF_TRY doesn't fault on unmapped pages
 
----
-
-## Phase 6.5 — Per-Process Page Tables
+- [ ] **6.14 — Wire `release_address_space` to VM page table deallocation**
+  **Depends on:** VM server page table management (Phase 6), per-process page tables (Phase 6.5)
+  `release_address_space(proc)` in `kernel/src/system.rs` is currently a no-op. In the C
+  code, it is called when a process exits to free its page table pages. The kernel function
+  needs to call into the VM server to:
+  1. Unmap all pages belonging to the process (page table walk via `p_cr3`)
+  2. Free the physical frames allocated for code, stack, and page table hierarchy
+     (PML4, PDP, PD, PT pages)
+  3. Call `pt_free()` or equivalent to release the VM-side bookkeeping
+  - Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/memory.c` (`__switch_address_space`
+    and related page table management)
+  - Tests: After `release_address_space()`, the process's CR3 is no longer valid;
+    verify that attempting to switch to the freed address space is handled safely
 
 **Goal**: Give each process its own address space with private physical copies of code
 and stack pages, preventing one process from reading or writing another's memory.

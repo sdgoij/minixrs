@@ -635,6 +635,54 @@ stub_handler!(do_statectl_stub, "SYS_STATECTL");
 stub_handler!(do_safememset_stub, "SYS_SAFEMEMSET");
 
 // ─────────────────────────────────────────────────────────────────────────
+// Address space switching
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Switch to a process's address space by loading its per-process page
+/// table root (CR3). If the process has no private page table
+/// (`p_cr3 == 0`), this is a no-op — execution continues in the kernel's
+/// identity-mapped address space (BOOT_CR3).
+///
+/// Called from the scheduler (`switch_to_user`), device I/O handlers
+/// (`do_sdevio`), and the idle loop (`switch_address_space_idle`).
+///
+/// # Safety
+///
+/// `proc` must point to a valid, fully initialized `Proc`.
+pub unsafe fn switch_address_space(proc: *const Proc) {
+    unsafe {
+        let cr3 = (*proc).p_seg.p_cr3;
+        if cr3 != 0 {
+            arch_x86_64::asm::write_cr3(cr3);
+        }
+    }
+}
+
+/// Release a process's address space. Currently a no-op — page table
+/// deallocation is managed by the VM server (Phase 6+). In the C code,
+/// this frees the page table pages allocated for the process.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc`.
+pub unsafe fn release_address_space(_proc: *mut Proc) {
+    // No-op: page table freeing deferred to VM server.
+    // When VM is available, this should call into the VM to free
+    // the page table pages referenced by (*proc).p_seg.p_cr3.
+}
+
+/// Switch to the idle process's address space. On a uniprocessor
+/// system, the idle process runs in the kernel's address space, so
+/// this is a no-op. On SMP, the C code switches to VM_PROC_NR's
+/// address space to ensure kernel pages are accessible on all CPUs.
+///
+/// Currently a no-op (no SMP support).
+pub fn switch_address_space_idle() {
+    // No-op on UP. On SMP, switch to VM_PROC_NR's address space:
+    //     switch_address_space(proc_addr(VM_PROC_NR));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -849,5 +897,51 @@ mod tests {
             assert_eq!(result, OK);
             assert_eq!((*rp).p_priority, 7);
         }
+    }
+
+    // ── Address space switching ───────────────────────────────────────────
+    //
+    // These functions call privileged instructions (write_cr3) that cannot
+    // be executed from usermode test binaries. We verify:
+    // - No-op behavior when p_cr3 == 0 (doesn't touch CR3)
+    // - Function signatures compile and are callable
+    // - No panics / crashes on valid inputs
+
+    #[test]
+    fn test_switch_address_space_null_cr3_noop() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // Process with p_cr3 == 0 (default) should be a no-op
+            (*rp).p_seg.p_cr3 = 0;
+            // Should not crash or change anything visible
+            switch_address_space(rp);
+        }
+    }
+
+    #[test]
+    fn test_switch_address_space_nonzero_cr3_type_check() {
+        // Verify the function signature compiles.
+        // We cannot actually call write_cr3 with a fake value from
+        // usermode (privileged instruction), but the function
+        // is callable with a valid proc pointer.
+        fn _fn(_f: unsafe fn(*const Proc)) {}
+        _fn(switch_address_space);
+    }
+
+    #[test]
+    fn test_release_address_space_noop() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // Should not crash on a valid proc
+            release_address_space(rp);
+        }
+    }
+
+    #[test]
+    fn test_switch_address_space_idle_noop() {
+        // Should not crash or panic
+        switch_address_space_idle();
     }
 }
