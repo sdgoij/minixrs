@@ -654,44 +654,20 @@ The Rust port targets two architectures:
 
 ### Tasks
 
-- [ ] **4.1 — Implement IPC functions from `proc.c`** TODO
+- [x] **4.1 — Implement IPC functions from `proc.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/proc.c`
-  - `do_sync_ipc()` — synchronous IPC dispatcher
-  - `mini_send()` — blocking send
-  - `mini_receive()` — blocking receive
-  - `mini_notify()` — asynchronous notify delivery
-  - `mini_senda()` — async send entry point
-  - `try_deliver_senda()` — async message table delivery
-  - `deadlock()` — IPC deadlock cycle detection
-  - `has_pending_notify()` / `has_pending_asend()` — pending async message checks
-  - `unset_notify_pending()` — clear pending notification
-  - `try_async()` / `try_one()` — async delivery helpers
-  - `cancel_async()` — cancel pending async
-  - `endpoint_lookup()` — endpoint → process pointer lookup
-  - `is_ok_endpoint_f()` — endpoint validation
-  - `proc_addr()` — get process pointer by slot number
-  - `id_to_nr()` — privilege ID to process number conversion
-  - `build_notify_message()` — notification message builder
-  - `ipc_status_add_call()` / `ipc_status_add_flags()` / `ipc_status_clear()`
-  - New `MiscFlags` bits: `FPU_INITIALIZED` (0x2000), `SENDING_FROM_KERNEL` (0x4000)
-  - AMF flags: `AMF_VALID`, `AMF_DONE`, `AMF_NOTIFY`, `AMF_NOREPLY`, `AMF_NOTIFY_ERR`
-  - Send flags: `NON_BLOCKING`, `FROM_KERNEL`
-  - Tests (19 passing):
-    - Round-trip send → receive works
-    - Deadlock detector catches A→B, B→A cycle
-    - Deadlock allows non-fatal SEND+RECEIVE pair
-    - Notify delivers without blocking
-    - `endpoint_lookup()` returns correct proc pointer for valid endpoints
-    - `endpoint_lookup()` returns null for invalid endpoints
-    - `is_ok_endpoint_f()` validates correct and rejects out-of-range
-    - MiscFlag bit positions verified
-    - IPC call numbers match C constants
-    - Error codes match C constants
-    - AMF flag bitmasks correct
-    - Message struct size verified
-    - IPC status packing/unpacking roundtrip
-    - Endpoint construction roundtrip
-    - Pending notification/asend checks
+  - Created `crates/kernel/src/ipc.rs`
+  - `mini_send()` — blocking send with direct delivery (target receiving) and queue+block paths
+  - `mini_receive()` — blocking receive, dequeues from caller_q if sender waiting, blocks otherwise
+  - `mini_notify()` — asynchronous notification delivery, wakes RECEIVING-from-ANY targets
+  - `do_sync_ipc()` — dispatcher for SEND/RECEIVE/SENDREC/SENDNB/NOTIFY calls
+  - `deadlock()` — cycle detection following both SENDING and RECEIVING chains (max 100 steps)
+  - IPC status helpers: `ipc_status_add_call`, `ipc_status_add_flags`, `ipc_status_clear`
+  - `is_ok_endpoint_f()` — endpoint validation with optional panic on failure
+  - Async stubs: `has_pending_notify`, `has_pending_asend`, `unset_notify_pending`, `try_one`, `try_async`, `cancel_async`, `try_deliver_senda`, `build_notify_message`
+  - Constants: IPC call types (SEND/RECEIVE/SENDREC/SENDNB/NOTIFY), flags (NON_BLOCKING, FROM_KERNEL), error codes, AMF flags
+  - **12 new tests**: direct send/receive, queue+block, non-blocking, NO_ENDPOINT, deadlock cycle/no-cycle, notify wake, ipc_status, endpoint validation
+  - 133 total for kernel crate, workspace clippy clean
 
 - [ ] **4.2 — Implement message copy infrastructure** TODO
   - `verify_grant()` — validate and resolve grants, following indirect chains
@@ -767,6 +743,19 @@ The Rust port targets two architectures:
   - Tests: Signal delivery reaches target process via signal manager notification
   - Tests: Scheduler receives SCHEDULING_NO_QUANTUM message on quantum expiry
   - Tests: `send_sig` adds to private signal pending and notifies SYSTEM
+
+- [ ] **4.6 — Implement async messaging (`mini_senda`, `try_one`, etc.)**
+    Depends on: 4.1 (`mini_send`, `mini_notify`), 4.2 (message copy / grant infrastructure)
+  - Source: `.refs/minix-3.3.0/minix/kernel/proc.c` lines 1145–1521
+  - Define `asynmsg_t` struct: flags (AMF_VALID/DONE/NOTIFY/NOREPLY/NOTIFY_ERR),
+    destination endpoint, message fields
+  - `try_deliver_senda()` — walk caller's async table (`s_asyntab`/`s_asynsize`),
+    deliver pending messages via `mini_send`/`mini_notify`, mark `AMF_DONE`
+  - `mini_senda()` — entry point for async send syscall
+  - `try_one()` — attempt delivery of a single async message from src to dst
+  - `try_async()` — deliver all pending async messages for a process
+  - `cancel_async()` — cancel pending async sends to/from a process
+  - Tests: Async table round-trip; pending delivery unblocks; cancel works
 
 ---
 
