@@ -1,0 +1,106 @@
+//! Per-CPU information — adapted from `cpuvar.h`
+//!
+//! **x86_64 differences from i386:**
+//! - CPU info struct uses 64-bit fields for address storage
+//! - Per-CPU data accessed via `swapgs` + GS segment
+//! - Larger kernel stack sizes (16 KB vs 8 KB)
+
+/// Maximum number of CPUs.
+const MAXCPUS: u32 = 32;
+
+
+/// Per-CPU information structure.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CpuInfo {
+    /// CPU ID (0-indexed).
+    pub ci_cpunumber: u32,
+    /// Whether this CPU is the BSP.
+    pub ci_is_bsp: u32,
+    /// CPU role (boot, app, etc.).
+    pub ci_role: u32,
+    /// Padding.
+    pub _pad: u32,
+    /// Kernel stack pointer for this CPU.
+    pub ci_kstack: u64,
+    /// Current process pointer.
+    pub ci_curproc: u64,
+    /// Idle process pointer.
+    pub ci_idleproc: u64,
+    /// CPU frequency in Hz.
+    pub ci_freq_hz: u64,
+    /// TSC frequency in Hz.
+    pub ci_tsc_freq: u64,
+    /// Whether TSC is invariant.
+    pub ci_tsc_invariant: u32,
+    /// CPU family/model/stepping.
+    pub ci_family: u8,
+    pub ci_model: u8,
+    pub ci_stepping: u8,
+    pub _pad2: u8,
+    /// Reserved for future use.
+    pub _reserved: [u64; 8],
+}
+
+
+// ── CPU roles ───────────────────────────────────────────────────────────
+
+pub const CPU_ROLE_BOOT: u32 = 0;
+pub const CPU_ROLE_AP: u32 = 1;
+pub const CPU_ROLE_BP: u32 = 2;
+
+// ── Global CPU info array ───────────────────────────────────────────────
+
+pub static mut CPU_INFO: [CpuInfo; MAXCPUS as usize] = [CpuInfo {
+    ci_cpunumber: 0,
+    ci_is_bsp: 0,
+    ci_role: 0,
+    _pad: 0,
+    ci_kstack: 0,
+    ci_curproc: 0,
+    ci_idleproc: 0,
+    ci_freq_hz: 0,
+    ci_tsc_freq: 0,
+    ci_tsc_invariant: 0,
+    ci_family: 0,
+    ci_model: 0,
+    ci_stepping: 0,
+    _pad2: 0,
+    _reserved: [0u64; 8],
+}; MAXCPUS as usize];
+
+// ── Helper functions ────────────────────────────────────────────────────
+
+/// Get CPU info for a given CPU number.
+pub fn cpu_info(cpu: u32) -> &'static CpuInfo {
+    unsafe { &CPU_INFO[cpu as usize] }
+}
+
+/// Get mutable CPU info for a given CPU number.
+pub fn cpu_info_mut(cpu: u32) -> &'static mut CpuInfo {
+    unsafe { &mut CPU_INFO[cpu as usize] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_info_size() {
+        assert!(size_of::<CpuInfo>() >= 64);
+    }
+
+    #[test]
+    fn test_cpu_roles() {
+        assert_eq!(CPU_ROLE_BOOT, 0);
+        assert_eq!(CPU_ROLE_AP, 1);
+        assert_eq!(CPU_ROLE_BP, 2);
+    }
+
+    #[test]
+    fn test_cpu_info_default() {
+        let ci = CpuInfo::default();
+        assert_eq!(ci.ci_cpunumber, 0);
+        assert_eq!(ci.ci_freq_hz, 0);
+    }
+}

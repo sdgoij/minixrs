@@ -348,7 +348,7 @@ The Rust port targets two architectures:
 
 ### Tasks
 
-- [ ] **2.1 — Arch-specific crate: x86_64 headers**
+- [x] **2.1 — Arch-specific crate: x86_64 headers**
   - Source: `.refs/minix-3.3.0/sys/arch/i386/include/` (base), `.refs/minix-3.3.0/sys/arch/x86/include/` (common x86)
   - Adapt headers for x86_64 ABI:
   - `param.h` → `param.rs`: Page size (4KB), KERNBASE, conversion macros, paging level constants
