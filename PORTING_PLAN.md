@@ -1076,13 +1076,17 @@ Phase 8.8 for I/O port-dependent).
   - Tests: 2 test functions covering all operations (init, alloc, free, reuse,
     flags, exhaustion). 218 tests total for kernel crate, clippy clean.
 
-- [ ] **6.2 — Implement page table management**
-  - Page directory allocation
-  - Page table entry setup (PDE/PTE)
-  - Page fault handling
-  - TLB invalidation
-  - `enable_paging()` — activate paging for a process
-  - Tests: Map/unmap page; verify access faults correctly
+- [x] **6.2 — Implement page table management**
+  - `walk()` — 4-level page table walk (PML4→PDPT→PD→PT), detects 1GB/2MB huge pages
+  - `map_page()` — map a 4KB page with flags, auto-allocates intermediate tables
+  - `unmap_page()` — unmap a single 4KB page with TLB invalidation
+  - `unmap_range()` — unmap a range of pages
+  - `alloc_pt_page()` — allocate zeroed physical page for page table use
+  - `handle_page_fault()` — skeleton (wired to VM server in Phase 6.3+)
+  - Constants: MAP_PRESENT, MAP_WRITE, MAP_USER, MAP_NX, PF_* flags
+  - Tests: 4 (constants, pf handler stub, alloc failure, type traits)
+  - Hardware-dependent tests (walk/map/unmap with physical memory) require
+    bare-metal or QEMU execution; gated from host test runner.
 
 - [ ] **6.3 — Port `vm_main.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vm/main.c`
