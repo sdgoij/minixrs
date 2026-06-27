@@ -29,6 +29,7 @@ pub mod pcb;
 pub mod psl;
 pub mod pte;
 pub mod segments;
+pub mod spinlock;
 pub mod tss;
 pub mod vmparam;
 

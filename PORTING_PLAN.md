@@ -476,7 +476,7 @@ The Rust port targets two architectures:
   - **6 tests** (all passed): size, offset monotonicity, defaults, bounds
   - `cargo clippy --package arch-x86_64 -- -D warnings`: **Clean**
 
-- [ ] **2.6 — Port `minix/kernel/spinlock.h`**
+- [x] **2.6 — Port `minix/kernel/spinlock.h`**
   - Created `crates/arch-x86_64/src/spinlock.rs` (224 lines)
   - **`Spinlock` struct**: wraps `AtomicT` (u32) lock flag
   - **SMP mode**: real spinlock using `hw::atomic_cas_32` (cmpxchg)
