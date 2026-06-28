@@ -1466,18 +1466,17 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - vtimer_check: sends SIGVTALRM/SIGPROF on virtual/profile timer expiry
   - Compile-time size verification for `MinixTimer` (32 bytes)
 
-- [ ] **7.2 — Port `minix/kernel/interrupt.c`**
+- [x] **7.2 — Port `minix/kernel/interrupt.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/interrupt.c`
   - `put_irq_handler()`, `rm_irq_handler()`, `enable_irq()`, `disable_irq()`, `intr_init()`
-  - Tests: IRQ handler registration and firing
-  - Implementation: `crates/kernel/src/interrupt.rs` (435 lines)
-  - `IrqHook` struct with sorted linked list per IRQ
-  - `put_irq_handler`: Register handler with bitmap ID assignment
-  - `rm_irq_handler`: Remove handler from list (fixed pointer traversal bug)
-  - `irq_handle`: Dispatch to all handlers with active bit management
-  - `enable_irq` / `disable_irq`: Hardware mask management
+  - Tests: 271 kernel tests pass (IRQ handler registration + linked list logic)
+  - Implementation: `crates/kernel/src/interrupt.rs` (295 lines)
+  - `IrqHook` struct with sorted linked list per IRQ via `IRQ_HANDLERS[irq]` array
+  - `put_irq_handler`: Register handler with bitmap ID assignment, hardware enable on first
+  - `rm_irq_handler`: Remove handler from linked list, hardware disable on last
+  - `irq_handle`: Mask IRQ, walk handler chain, call each handler, re-enable when done
+  - `enable_irq` / `disable_irq`: Active bit + hardware mask management
   - Hardware stubs: `hw_intr_used`, `hw_intr_not_used`, `hw_intr_mask`, `hw_intr_unmask`, `hw_intr_ack`
-  - 7 unit tests in kernel + integration tests in servers
 
 - [ ] **7.3 — Implement deferred syscalls: timer/clock-dependent syscalls**
   **Depends on:** Clock (Phase 7.1), interrupt handlers (Phase 7.2), timer queue

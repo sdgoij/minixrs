@@ -7,6 +7,7 @@ pub mod debug;
 pub mod exec;
 pub mod glo;
 pub mod grants;
+pub mod interrupt;
 pub mod ipc;
 pub mod pagetable;
 pub mod r#priv;
