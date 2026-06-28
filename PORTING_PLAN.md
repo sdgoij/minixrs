@@ -1837,25 +1837,28 @@ _not_ being used — its ISR reads back 0x00.
     `.refs/minix-3.3.0/minix/kernel/arch/i386/exception.c` (proc_stacktrace)
   - Gated on BOOT_CR3 (no-op in host test mode). All 312 kernel tests pass.
 
-- [ ] **8.10 — Implement deferred arch-dependent syscalls: do_exec, do_getmcontext/setmcontext**
-  **Depends on:** arch_proc_init (Phase 8.1), data_copy (Phase 6.13)
-  These syscalls were deferred from Phase 6.13 because they need architecture-specific
-  process initialization or context save/restore:
-  1. **`do_exec_handler`** (SYS_EXEC, 5.2) — reads program name from caller address
-     space via `virtual_copy()`, then calls `arch_proc_init()` to set the exec target's
-     instruction pointer, stack pointer, ps_strings pointer, and process name. The exec
-     target is returned via `set_exec_target(rip, rsp)` so the next syscall return
-     switches to the new binary.
+- [x] **8.10 — Implement deferred arch-dependent syscalls: do_exec, do_getmcontext/setmcontext**
+  **Depends on:** arch_proc_init (Phase 8.1), data_copy (Phase 6.13 via CR3 switching)
+  All three handlers implemented in `crates/kernel/src/system.rs`, replacing stubs:
+  1. **`do_exec_handler`** (SYS_EXEC, call index 1) — reads program name from caller's
+     address space via CR3 switching + `copy_nonoverlapping`, calls `arch_proc_init()`
+     to set RIP/RCX, RSP, ps_str, and process name on the target process. Clears
+     MF_DELIVERMSG, MF_FPU_INITIALIZED, RTS_RECEIVING. Calls `set_exec_target()` so
+     the next syscall return switches to the new binary. Returns `EDONTREPLY`.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_exec.c`
-  2. **`do_getmcontext`** (SYS_GETMCONTEXT, 5.35) — saves the current machine context
-     (registers, flags, stack pointer) from a process's `TrapFrame` into a user-space
-     buffer via `virtual_copy()`. Used by checkpoint/restart and live update.
+  2. **`do_getmcontext_handler`** (SYS_GETMCONTEXT, call index 50) — builds an
+     `Mcontext` struct from the target process's `TrapFrame` (all 14 GPRs, RIP, RSP,
+     RFLAGS, segment registers), copies it to caller address space via CR3 switching.
+     FPU state not yet dumped (no save_fpu available). Rejects kernel endpoints.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_mcontext.c`
-  3. **`do_setmcontext`** (SYS_SETMCONTEXT, 5.35) — restores a machine context from a
-     user-space buffer into a process's `TrapFrame`. Validates the context before
-     applying.
+  3. **`do_setmcontext_handler`** (SYS_SETMCONTEXT, call index 51) — reads an `Mcontext`
+     from caller address space via CR3 switching, applies all register values to the
+     target process's `TrapFrame`. Restores FPU state if any fpstate bytes are non-zero
+     and `fpu_state` pointer is valid.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_mcontext.c`
-  - Tests: exec round-trip loads new binary; mcontext save/restore preserves all regs
+  - Tests: 4 new tests (exec bad endpoint → EINVAL, getmcontext bad endpoint → EINVAL,
+    setmcontext bad endpoint → EINVAL, registration verified). All 316 kernel tests
+    pass, clippy clean.
 
 ---
 

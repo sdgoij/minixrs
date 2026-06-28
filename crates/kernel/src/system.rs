@@ -197,6 +197,30 @@ const SAFEMEMSET_GRANT_ID_OFF: usize = 4;
 const SAFEMEMSET_OFFSET_OFF: usize = 8;
 const SAFEMEMSET_PATTERN_OFF: usize = 16;
 const SAFEMEMSET_BYTES_OFF: usize = 24;
+// ── Exec message offsets (Phase 8.10) ──────────────────────────────────
+//
+// mess_lsys_krn_sys_exec:
+//   offset  0: endpt   (endpoint_t / i32, 4 bytes)
+//   offset  4: _pad    (4 bytes)
+//   offset  8: ip      (vir_bytes / u64)
+//   offset 16: stack   (vir_bytes / u64)
+//   offset 24: name    (vir_bytes / u64) — pointer to program name in caller
+//   offset 32: ps_str  (vir_bytes / u64)
+const EXEC_ENDPT_OFF: usize = 0;
+const EXEC_IP_OFF: usize = 8;
+const EXEC_STACK_OFF: usize = 16;
+const EXEC_NAME_OFF: usize = 24;
+const EXEC_PS_STR_OFF: usize = 32;
+
+// ── Mcontext message offsets (Phase 8.10) ─────────────────────────────
+//
+// mess_lsys_krn_sys_{get,set}mcontext:
+//   offset  0: endpt    (endpoint_t / i32, 4 bytes)
+//   offset  4: _pad     (4 bytes)
+//   offset  8: ctx_ptr  (vir_bytes / u64)
+const MCONTEXT_ENDPT_OFF: usize = 0;
+const MCONTEXT_CTX_PTR_OFF: usize = 8;
+
 const M1_P1_OFF: usize = 24;
 // M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
 
@@ -1033,7 +1057,7 @@ pub unsafe fn system_init() {
         // Initialize call vector — map known calls
         // Process management (call indices)
         map_call(0, do_fork_handler); // SYS_FORK
-        map_call(1, do_exec_stub); // SYS_EXEC — needs data_copy + arch_proc_init, deferred
+        map_call(1, do_exec_handler); // SYS_EXEC — Phase 8.10
         map_call(2, do_clear_handler); // SYS_CLEAR
         map_call(3, do_schedule_handler); // SYS_SCHEDULE
         map_call(4, do_privctl_stub); // SYS_PRIVCTL
@@ -1071,8 +1095,8 @@ pub unsafe fn system_init() {
         map_call(44, do_diagctl_handler); // SYS_DIAGCTL
         map_call(45, do_vtimer_handler); // SYS_VTIMER
         map_call(46, do_runctl_handler); // SYS_RUNCTL
-        map_call(50, do_getmcontext_stub); // SYS_GETMCONTEXT
-        map_call(51, do_setmcontext_stub); // SYS_SETMCONTEXT
+        map_call(50, do_getmcontext_handler); // SYS_GETMCONTEXT — Phase 8.10
+        map_call(51, do_setmcontext_handler); // SYS_SETMCONTEXT — Phase 8.10
         map_call(52, do_update_stub); // SYS_UPDATE
         map_call(53, do_exit_handler); // SYS_EXIT
         map_call(54, do_schedctl_handler); // SYS_SCHEDCTL
@@ -1536,7 +1560,7 @@ macro_rules! stub_handler {
 }
 
 // Deferred stubs — need VM/data_copy infrastructure:
-stub_handler!(do_exec_stub, "SYS_EXEC");
+// SYS_EXEC: implemented in Phase 8.10 (replaced stub)
 stub_handler!(do_privctl_stub, "SYS_PRIVCTL");
 stub_handler!(do_trace_stub, "SYS_TRACE");
 stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
@@ -2136,10 +2160,274 @@ pub unsafe fn do_vtimer_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 stub_handler!(do_sprofile_stub, "SYS_SPROF");
 stub_handler!(do_cprofile_stub, "SYS_CPROF");
 stub_handler!(do_profbuf_stub, "SYS_PROFBUF");
-stub_handler!(do_getmcontext_stub, "SYS_GETMCONTEXT");
-stub_handler!(do_setmcontext_stub, "SYS_SETMCONTEXT");
 stub_handler!(do_update_stub, "SYS_UPDATE");
 // ── Real implementations ───────────────────────────────────────────────
+
+/// Handle SYS_EXEC (Phase 8.10): set up a process after a successful exec.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_exec.c`
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`.
+pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, EXEC_ENDPT_OFF);
+        let ip = msg_read_u64(msg, EXEC_IP_OFF);
+        let stack = msg_read_u64(msg, EXEC_STACK_OFF);
+        let name_ptr = msg_read_u64(msg, EXEC_NAME_OFF);
+        let ps_str = msg_read_u64(msg, EXEC_PS_STR_OFF);
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        // Clear MF_DELIVERMSG if set (C: rp->p_misc_flags &= ~MF_DELIVERMSG)
+        let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        (*rp)
+            .p_misc_flags
+            .store(old_mf & !0x0004, Ordering::Relaxed);
+
+        // Copy program name from caller's address space
+        // use a stack buffer and CR3 switching like VDEVIO
+        let mut name_buf = [0u8; arch_common::types::PROC_NAME_LEN];
+        let copy_len = name_buf.len() - 1;
+        {
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 != 0 {
+                let caller_cr3 = (*caller).p_seg.p_cr3;
+                if caller_cr3 != 0 {
+                    arch_x86_64::asm::write_cr3(caller_cr3);
+                }
+            }
+            core::ptr::copy_nonoverlapping(name_ptr as *const u8, name_buf.as_mut_ptr(), copy_len);
+            if boot_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(boot_cr3);
+            }
+        }
+        name_buf[copy_len] = 0; // null-terminate
+
+        // Find actual string length (stop at null)
+        let name_len = name_buf.iter().position(|&c| c == 0).unwrap_or(copy_len);
+        let name_slice = &name_buf[..name_len];
+
+        // Set process name on the target proc
+        for (i, &b) in name_slice.iter().enumerate() {
+            if i >= arch_common::types::PROC_NAME_LEN - 1 {
+                break;
+            }
+            (*rp).p_name[i] = b as i8;
+        }
+        (*rp).p_name[name_len.min(arch_common::types::PROC_NAME_LEN - 1)] = 0i8;
+
+        // Call arch_proc_init to set up TrapFrame
+        arch_x86_64::arch_proc::arch_proc_init(&raw mut (*rp).p_reg, ip, stack, name_slice, ps_str);
+
+        // No reply to EXEC call: clear RTS_RECEIVING
+        // The target will start executing at the new entry point on return
+        let old_rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        (*rp)
+            .p_rts_flags
+            .store(old_rts & !0x4000_0000, Ordering::Relaxed); // clear RECEIVING
+
+        // Mark FPU regs as not significant
+        let old_mf2 = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        (*rp)
+            .p_misc_flags
+            .store(old_mf2 & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
+
+        // set_exec_target to switch to new binary on return
+        crate::ipc::set_exec_target(rp, ip, stack);
+
+        EDONTREPLY
+    }
+}
+
+// ── do_getmcontext / do_setmcontext — machine context (Phase 8.10) ────
+// Source: .refs/minix-3.3.0/minix/kernel/system/do_mcontext.c
+
+/// Handle SYS_GETMCONTEXT: save a process's machine context.
+///
+/// Reads the TrapFrame from the target process and copies it into an
+/// Mcontext struct in the caller's address space.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`.
+pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
+        let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        if crate::table::is_kernel_nr(proc_nr) {
+            return crate::ipc::EPERM;
+        }
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        // Build Mcontext from the process's TrapFrame
+        let reg = &(*rp).p_reg;
+        use arch_x86_64::mcontext::Mcontext;
+        let mc = Mcontext {
+            mc_rax: reg.rax,
+            mc_rbx: reg.rbx,
+            mc_rcx: reg.rcx,
+            mc_rdx: reg.rdx,
+            mc_rsi: reg.rsi,
+            mc_rdi: reg.rdi,
+            mc_rbp: 0, // not saved in TrapFrame
+            mc_r8: reg.r8,
+            mc_r9: reg.r9,
+            mc_r10: reg.r10,
+            mc_r11: reg.r11,
+            mc_r12: reg.r12,
+            mc_r13: reg.r13,
+            mc_r14: reg.r14,
+            mc_r15: reg.r15,
+            mc_rip: reg.rip,
+            mc_rsp: reg.rsp,
+            mc_rflags: reg.rflags,
+            mc_cs: reg.cs,
+            mc_ss: reg.ss,
+            mc_ds: reg.ds,
+            mc_es: reg.es,
+            mc_fs: reg.fs,
+            mc_gs: reg.gs,
+            mc_fpstate: [0u8; 512], // FPU state not saved yet
+        };
+
+        // Copy the Mcontext to the caller's address space via CR3 switching
+        let mc_bytes = &mc as *const Mcontext as *const u8;
+        let copy_sz = core::mem::size_of::<Mcontext>();
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 != 0 {
+            let caller_cr3 = (*caller).p_seg.p_cr3;
+            if caller_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(caller_cr3);
+            }
+        }
+        core::ptr::copy_nonoverlapping(mc_bytes, ctx_ptr as *mut u8, copy_sz);
+        if boot_cr3 != 0 {
+            arch_x86_64::asm::write_cr3(boot_cr3);
+        }
+
+        OK
+    }
+}
+
+/// Handle SYS_SETMCONTEXT: restore a process's machine context.
+///
+/// Reads an Mcontext struct from the caller's address space and applies
+/// it to the target process's TrapFrame.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`.
+pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
+        let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        // Copy Mcontext from the caller's address space
+        use arch_x86_64::mcontext::Mcontext;
+        let copy_sz = core::mem::size_of::<Mcontext>();
+        let mut mc = Mcontext {
+            mc_rax: 0,
+            mc_rbx: 0,
+            mc_rcx: 0,
+            mc_rdx: 0,
+            mc_rsi: 0,
+            mc_rdi: 0,
+            mc_rbp: 0,
+            mc_r8: 0,
+            mc_r9: 0,
+            mc_r10: 0,
+            mc_r11: 0,
+            mc_r12: 0,
+            mc_r13: 0,
+            mc_r14: 0,
+            mc_r15: 0,
+            mc_rip: 0,
+            mc_rsp: 0,
+            mc_rflags: 0,
+            mc_cs: 0,
+            mc_ss: 0,
+            mc_ds: 0,
+            mc_es: 0,
+            mc_fs: 0,
+            mc_gs: 0,
+            mc_fpstate: [0u8; 512],
+        };
+        let mc_bytes = &raw mut mc as *mut u8;
+
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 != 0 {
+            let caller_cr3 = (*caller).p_seg.p_cr3;
+            if caller_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(caller_cr3);
+            }
+        }
+        core::ptr::copy_nonoverlapping(ctx_ptr as *const u8, mc_bytes, copy_sz);
+        if boot_cr3 != 0 {
+            arch_x86_64::asm::write_cr3(boot_cr3);
+        }
+
+        // Apply the saved context to the target process's TrapFrame
+        let reg = &mut (*rp).p_reg;
+        reg.rax = mc.mc_rax;
+        reg.rbx = mc.mc_rbx;
+        reg.rcx = mc.mc_rcx;
+        reg.rdx = mc.mc_rdx;
+        reg.rsi = mc.mc_rsi;
+        reg.rdi = mc.mc_rdi;
+        reg.r8 = mc.mc_r8;
+        reg.r9 = mc.mc_r9;
+        reg.r10 = mc.mc_r10;
+        reg.r11 = mc.mc_r11;
+        reg.r12 = mc.mc_r12;
+        reg.r13 = mc.mc_r13;
+        reg.r14 = mc.mc_r14;
+        reg.r15 = mc.mc_r15;
+        reg.rip = mc.mc_rip;
+        reg.rsp = mc.mc_rsp;
+        reg.rflags = mc.mc_rflags;
+        reg.cs = mc.mc_cs;
+        reg.ss = mc.mc_ss;
+        reg.ds = mc.mc_ds;
+        reg.es = mc.mc_es;
+        reg.fs = mc.mc_fs;
+        reg.gs = mc.mc_gs;
+
+        // Restore FPU state if saved
+        let fpu_initialized = mc.mc_fpstate.iter().any(|&b| b != 0);
+        if fpu_initialized && !(*rp).p_seg.fpu_state.is_null() {
+            core::ptr::copy_nonoverlapping(mc.mc_fpstate.as_ptr(), (*rp).p_seg.fpu_state, 512);
+            let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            (*rp).p_misc_flags.store(old_mf | 0x1000, Ordering::Relaxed); // set FPU_INITIALIZED
+        }
+
+        OK
+    }
+}
 
 /// Handle SYS_EXIT: cause SIGABRT, don't reply.
 ///
@@ -4503,6 +4791,54 @@ mod tests {
             assert!(CALL_VEC[21].is_some()); // SYS_DEVIO
             assert!(CALL_VEC[22].is_some()); // SYS_SDEVIO
             assert!(CALL_VEC[23].is_some()); // SYS_VDEVIO
+        }
+    }
+
+    // ── Phase 8.10: EXEC / mcontext tests ──────────────────────────────
+
+    #[test]
+    fn test_exec_bad_endpoint_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, EXEC_ENDPT_OFF, 99999); // bad endpoint
+            let result = do_exec_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_getmcontext_bad_endpoint_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, MCONTEXT_ENDPT_OFF, 99999);
+            let result = do_getmcontext_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_setmcontext_bad_endpoint_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, MCONTEXT_ENDPT_OFF, 99999);
+            let result = do_setmcontext_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_exec_and_mcontext_registered() {
+        unsafe {
+            system_init();
+            assert!(CALL_VEC[1].is_some()); // SYS_EXEC
+            assert!(CALL_VEC[50].is_some()); // SYS_GETMCONTEXT
+            assert!(CALL_VEC[51].is_some()); // SYS_SETMCONTEXT
         }
     }
 }
