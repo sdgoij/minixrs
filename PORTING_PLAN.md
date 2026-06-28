@@ -1478,7 +1478,7 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - `enable_irq` / `disable_irq`: Active bit + hardware mask management
   - Hardware stubs: `hw_intr_used`, `hw_intr_not_used`, `hw_intr_mask`, `hw_intr_unmask`, `hw_intr_ack`
 
-- [ ] **7.3 — Implement deferred syscalls: timer/clock-dependent syscalls**
+- [x] **7.3 — Implement deferred syscalls: timer/clock-dependent syscalls**
   **Depends on:** Clock (Phase 7.1), interrupt handlers (Phase 7.2), timer queue
   These syscalls were deferred from Phase 5 because they need clock task and interrupt
   infrastructure:
@@ -1498,18 +1498,8 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
      ITIMER_VIRTUAL and ITIMER_PROF timers using MF_VIRT_TIMER/MF_PROF_TIMER flags
      and p_virt_left/p_prof_left tick fields.
      Source: `do_vtimer.c`
-  - Tests: Each handler has unit tests for valid/invalid inputs
-  - Source: `.refs/minix-3.3.0/minix/kernel/interrupt.c`
-  - `put_irq_handler()`, `rm_irq_handler()`, `enable_irq()`, `disable_irq()`, `intr_init()`
-  - Tests: IRQ handler registration and firing
-  - Implementation: `crates/kernel/src/interrupt.rs` (435 lines)
-  - `IrqHook` struct with sorted linked list per IRQ
-  - `put_irq_handler`: Register handler with bitmap ID assignment
-  - `rm_irq_handler`: Remove handler from list (fixed pointer traversal bug)
-  - `irq_handle`: Dispatch to all handlers with active bit management
-  - `enable_irq` / `disable_irq`: Hardware mask management
-  - Hardware stubs: `hw_intr_used`, `hw_intr_not_used`, `hw_intr_mask`, `hw_intr_unmask`, `hw_intr_ack`
-  - 7 unit tests in kernel + integration tests in servers
+  - Bugfix: `tmrs_settimer` was incorrectly clearing `tmr_arg`, breaking do_setalarm
+  - Tests: 279 kernel tests pass (all handlers replaced stubs)
 
 - [ ] **7.3 — Port `minix/kernel/smp.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/smp.c`

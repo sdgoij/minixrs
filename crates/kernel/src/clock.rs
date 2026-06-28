@@ -4,7 +4,7 @@
 //! virtual timers, and load-average accounting. The timer interrupt handler
 //! (`timer_int_handler`) is called on every clock tick on the BSP.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use crate::glo::LOADINFO;
 use crate::glo::SYSTEM_HZ;
@@ -44,6 +44,9 @@ static REALTIME: AtomicU64 = AtomicU64::new(0);
 /// Number of ticks to adjust realtime by (positive = speed up, negative = slow down).
 static ADJTIME_DELTA: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
+/// System boot time in seconds since epoch (for SYS_STIME/SYS_SETTIME).
+static BOOTTIME: AtomicI64 = AtomicI64::new(0);
+
 /// Queue of CLOCK timers.
 static mut CLOCK_TIMERS: *mut MinixTimer = core::ptr::null_mut();
 
@@ -70,7 +73,6 @@ pub unsafe fn tmrs_settimer(
     unsafe {
         (*tp).tmr_exp_time = exp_time;
         (*tp).tmr_func = watchdog;
-        (*tp).tmr_arg = 0;
 
         let mut prev: *mut MinixTimer = core::ptr::null_mut();
         let mut cur = *timers;
@@ -161,6 +163,16 @@ pub fn set_realtime(val: u64) {
 }
 
 /// Set the adjtime delta.
+/// Get the system boot time (seconds since epoch).
+pub fn get_boottime() -> i64 {
+    BOOTTIME.load(Ordering::Relaxed)
+}
+
+/// Set the system boot time (seconds since epoch).
+pub fn set_boottime(val: i64) {
+    BOOTTIME.store(val, Ordering::Relaxed);
+}
+
 pub fn set_adjtime_delta(ticks: i32) {
     ADJTIME_DELTA.store(ticks, Ordering::Relaxed);
 }
