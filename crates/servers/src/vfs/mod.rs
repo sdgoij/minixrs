@@ -32,6 +32,7 @@ pub mod glo;
 pub mod main;
 pub mod mmap;
 pub mod request;
+pub mod stadir;
 pub mod table;
 pub mod types;
 pub mod worker;

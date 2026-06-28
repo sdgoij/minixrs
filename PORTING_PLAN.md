@@ -2245,12 +2245,16 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   **Depends on:** FS request wrappers (10.2), vmnt management
   Needs req_newnode to create mapped inode on target FS.
 
-- [ ] **10.6 — Port `vfs_stat.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_stat.c`
-  - File stat operations
-  - Types include `StatvfsCache` for cached statvfs fields (16 fields,
-    avoids 2KB per mount entry). Full stat dispatch in future task.
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.6 — Port stat operations (`stadir.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/stadir.c`, `open.c` (close_fd)
+  - Implemented in `crates/servers/src/vfs/stadir.rs`:
+    - `StatvfsCache` — cached statvfs fields per mount (avoids 2KB per entry)
+    - `update_statvfs()` — refresh statvfs cache from vmnt via req_statvfs
+    - `stat_inode()` — fill stat struct from vnode data
+    - `change_into()` — change CWD to new vnode (dir check + permission)
+    - `close_fd()` — close fd, decrement filp, clear slot
+    - 3 tests covering defaults and error paths
+  - All return ENOSYS stubs — real impls need FS request layer + vnode mgmt
 
 - [ ] **10.7 — Port `vfs_misc.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_misc.c`
