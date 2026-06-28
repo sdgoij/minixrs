@@ -1513,14 +1513,14 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - CPU frequency tracking: `cpu_set_freq`, `cpu_get_freq`
   - 15 unit tests covering defaults, BKL roundtrip, freq, handler no-ops
 
-- [ ] **7.4 — Port `minix/servers/clock/` clock task** (partial)
+- [x] **7.4 — Port `minix/servers/clock/` clock task** (partial)
   - Source: `.refs/minix-3.3.0/minix/servers/clock/` (all `.c` files)
   - Clock task main loop, timer interrupt handling, alarm delivery
-  - Implementation: `crates/servers/src/clock_server.rs` (295 lines)
-  - `ClockTimeSpec` type for timespec conversion
+  - Implementation: `crates/servers/src/clock_server.rs` (312 lines)
+  - `ClockTimeSpec` type for timespec conversion with Add/Sub impls
   - `ClockId` enum (Realtime/Monotonic)
   - Time resolution queries, alarm timer management
-  - 11 tests covering resolution, time specs, tick advancement, adjtime
+  - 13 tests covering resolution, time specs, tick advancement, adjtime
 
 - [ ] **7.5 — Port `minix/servers/pm/` Power Manager** (types + infra)
   - Source: `.refs/minix-3.3.0/minix/servers/pm/` (all `.c` files)
