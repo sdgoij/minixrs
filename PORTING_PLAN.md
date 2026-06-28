@@ -2620,9 +2620,12 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Open/close tracking and init/reset
   - `/dev/mem` and `/dev/kmem` deferred (need `vm_map_phys`; see 12.18)
 
-- [ ] **11b.10 — `minix/drivers/storage/fbd/`**
+- [x] **11b.10 — `minix/drivers/storage/fbd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/fbd/`
-  - Framebuffer disk driver — stub ported (8/8 passed)
+  - Faulty Block Device in `crates/drivers/src/storage/fbd.rs` (~140 lines, 9 tests)
+  - All types and constants: `FbdRule`, `FbdConfig`, `FbdAction` enum, hooks/flags
+  - IOCTL codes (FBDCADDRULE/FBDCDELRULE/FBDCGETRULE)
+  - All operations deferred (depend on IPC + rule engine; see 12.19)
 
 - [ ] **11b.13 — Stub fixes: vnd, at_wini, floppy**
   - Source: `crates/drivers/src/storage/{vnd,at_wini,floppy}.rs`
@@ -3111,6 +3114,28 @@ be replaced with real implementations.
     dispatch with scatter-gather I/O, error handling
   - Slot management: card detect interrupt handling, card insertion/removal
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/mmc/mmcblk.c`
+
+- [ ] **12.18 — Wire /dev/mem and /dev/kmem** (`crates/drivers/src/storage/memory.rs`)
+  **Depends on:** `vm_map_phys` (Phase 6), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4),
+  kernel `kinfo` retrieval, `MAP_FAILED` / `PAGE_SIZE` constants from arch
+  Replace `todo!()` in:
+  - `mem_open(MEM_DEV)` / `mem_open(KMEM_DEV)` — validate access, set up VM mappings
+  - `mem_read(MEM_DEV)` — `vm_map_phys` page window, `sys_safecopyto` to caller
+  - `mem_write(MEM_DEV)` — `vm_map_phys` page window, `sys_safecopyfrom` from caller
+  - `mem_read(KMEM_DEV)` — read from pre-mapped kernel virtual address range
+  - `mem_write(KMEM_DEV)` — write to pre-mapped kernel virtual address range
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/memory/memory.c`
+
+- [ ] **12.19 — Wire FBD IPC and rule engine** (`crates/drivers/src/storage/fbd.rs`)
+  **Depends on:** IPC sendrec (Phase 4), grant table management (Phase 4),
+  DS endpoint lookup (Phase 12.4), `alloc_contig`/`free_contig`, block driver protocol
+  Replace `todo!()` in:
+  - `fbd_open()` / `fbd_close()` — forward BDEV_OPEN/BDEV_CLOSE via IPC to real driver
+  - `fbd_transfer()` — forward BDEV_GATHER/BDEV_SCATTER with optional fault injection
+  - `fbd_ioctl()` — rule management (FBDCADDRULE/FBDCDELRULE/FBDCGETRULE)
+  - Rule engine: `rule_find()`, `rule_pre_hook()`, `rule_io_hook()`, `rule_post_hook()`
+  - Fault actions: delay, corrupt, drop, misplace, reorder, stale
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/fbd/`
 
 ---
 
