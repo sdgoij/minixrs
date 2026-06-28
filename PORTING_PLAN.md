@@ -1982,12 +1982,18 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     path lookup edge cases, byte swapping, dispatch table routing, init, and error paths
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.2 — Port `minix/fs/vbfs/` — Virtual Block File System**
+- [x] **9.2 — Port `minix/fs/vbfs/` — Virtual Block File System**
   - Source: `.refs/minix-3.3.0/minix/fs/vbfs/vbfs.c` (1 file, ~140 lines)
-  - Implemented in `crates/fs/src/vbfs/` (config.rs, server.rs)
-  - Thin wrapper around libsffs/libvboxfs; parses CLI options (share, prefix, uid, gid, masks)
-  - `#![no_std]` compatible with `extern crate alloc`
-  - Tests: Filesystem operation round-trips; inode/block bitmap allocation; read/write verification
+  - Implemented in `crates/fs/src/vbfs/` (config.rs, server.rs):
+    - `config.rs` — `SffsParams` struct, `OptSetEntry`/`OptType`/`OptTarget` option parsing
+      types, `optset_parse()` function with string and int option targets
+    - `server.rs` — global `SHARE` and `PARAMS` state, `vbfs_init()` with share validation,
+      `vbfs_run()` main loop; external library calls (vboxfs_init, sffs_init, sffs_loop)
+      stubbed with `todo!()` since libsffs and libvboxfs are not yet ported
+  - `#![no_std]` compatible throughout
+  - Tests: 5 tests covering default params, unknown option key, int/string option parsing,
+    and init validation (no share → EINVAL)
+  - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [ ] **9.3 — Port `minix/fs/procfs/` — Process File System**
   - Source: `.refs/minix-3.3.0/minix/fs/procfs/` (12 files: buf.c, cpuinfo.c, main.c, pid.c, root.c, tree.c, util.c, const.h, cpuinfo.h, glo.h, inc.h, proto.h, type.h)
