@@ -2095,16 +2095,24 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     + 16 ext2 + 75 PFS)
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.7 — Port `minix/lib/libminixfs/` — MINIX native filesystem library**
+- [x] **9.7 — Port `minix/lib/libminixfs/` — MINIX native filesystem library**
   - Source: `.refs/minix-3.3.0/minix/lib/libminixfs/` (cache.c, minixfs.h, fetch_credentials.c)
-  - Implemented in `crates/libs/src/libminixfs/` (6 modules: buf, cache, constants, errors, inode_bitmaps, superblock)
-  - Block cache with LRU eviction, hash table lookup, dirty tracking
-  - BlockDevice trait for pluggable I/O
-  - Inode/block bitmap allocation (find_first_clear, find_first_set)
-  - Superblock read/write, on-disk format types
-  - FsError enum with all Minix errno values + Display impl
-  - 18 unit tests, all passing
-  - `#![no_std]` compatible with `extern crate alloc`
+  - Implemented in `crates/libs/src/libminixfs/` (6 modules):
+    - `constants.rs` — Block flags (VMMC_BLOCK_LOCKED, VMMC_DIRTY, VMMC_EVICTED),
+      lookup modes (NORMAL, NO_READ, PREFETCH), sentinel values (NO_DEV, NO_BLOCK, VMC_NO_INODE)
+    - `types.rs` — Buf struct (#[repr(C)]) with hash/LRU chain pointers, flags, inode tracking
+    - `cache.rs` (~950 lines) — Full block cache: hash table lookup, LRU lists with
+      front/rear, get_block_ino with hit/miss/evict paths, put_block with LRU insertion,
+      markdirty/markclean/isclean, flushall, invalidate, set_blocksize, buf_pool init,
+      blockschange accounting, rdwt_err tracking, vmcache support, cache_heuristic_check,
+      cache_resize, rw_scattered
+    - `credentials.rs` — fetch_credentials stub (VFS protocol not yet wired)
+    - `errors.rs` — FsError enum with Display impl, errno constants
+    - `mod.rs` — Module declarations and re-exports
+  - Block device read/write stub (todo! — needs block device driver layer Phase 11)
+  - Tests: 16 tests covering buffer pool init, hash function, LRU order, get/put
+    roundtrip, markdirty/isclean, invalidate, NO_READ/PREFETCH modes, bufs_in_use
+  - `cargo clippy -p libs --tests -- -D warnings` passes
 
 ---
 
