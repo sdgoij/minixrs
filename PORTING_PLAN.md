@@ -2600,9 +2600,17 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - All types, enums, configuration from `inc.h`, `crc.h`, `md5.h`
   - Filter transfer, driver lifecycle, and IPC communication deferred (Phase 12.15)
 
-- [ ] **11b.8 — `minix/drivers/storage/mmc/`**
+- [x] **11b.8 — `minix/drivers/storage/mmc/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/mmc/`
-  - MMC driver — 25/25 passed (added `Disconnect` card state, fixed default block_size to 512)
+  - MMC/SD card driver in `crates/drivers/src/storage/mmc.rs` (~600 lines, 27 tests)
+  - All SD/MMC protocol constants from `sdmmcreg.h` and `sdhcreg.h`: commands, OCR,
+    R1/R2/R3/R6 decode, CSD capacity, EXT_CSD fields, SCR decode, SDHCI registers
+  - Bitfield extractor `mmc_rsp_bits` for 128-bit R2 response decoding
+  - Host controller trait `MmcHost` with read/write/reset/card_detect/intr API
+  - Card/slot structures: `SdCardRegs`, `MmcCommand`, `SdCard`, `SdSlot`
+  - Dummy host implementation for testing (512 MB simulated card)
+  - Block driver API stubs (open/close/transfer)
+  - Real SDHCI host controller implementation deferred (x86_64 MMIO driver needed)
 
 - [ ] **11b.9 — `minix/drivers/storage/memory/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/memory/`
@@ -3087,6 +3095,18 @@ be replaced with real implementations.
   - `flt_malloc` / `flt_free` for dynamic buffer allocation via `alloc_contig`
   - `flt_alarm` via `sys_setalarm` for driver timeout management
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/filter/` (driver.c, sum.c, util.c)
+
+- [ ] **12.17 — Wire MMC block driver with SDHCI host** (`crates/drivers/src/storage/mmc.rs`)
+  **Depends on:** PCI device enumeration (Phase 11a), SDHCI host MMIO driver,
+  slot/card state machine, partition table parsing
+  Replace `todo!()` in:
+  - `mmc_open()` — slot lookup, card initialization, open count tracking,
+    partition table parse on first open (match C `block_open`)
+  - `mmc_close()` — decrement open count, release card when fully closed
+  - `mmc_transfer()` — block address translation, `MmcHost::read`/`write`
+    dispatch with scatter-gather I/O, error handling
+  - Slot management: card detect interrupt handling, card insertion/removal
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/mmc/mmcblk.c`
 
 ---
 
