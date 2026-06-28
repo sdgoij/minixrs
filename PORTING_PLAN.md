@@ -2493,32 +2493,34 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
     - `EepromBus` trait for pluggable I2C backend
     - `I2cExec` ioctl structure matching MINIX `minix_i2c_ioctl_exec_t`
 
-- [ ] **11a.4 — Bus drivers** (`crates/drivers/src/bus/`)
-  - [ ] **I2C driver** (`i2c.rs`, ~370 lines)
+- [x] **11a.4 — Bus drivers** (`crates/drivers/src/bus/`)
+  - [x] **I2C driver** (`i2c.rs`, ~280 lines, 15 tests)
     - 10-bit addressing (1024 devices)
-    - Device reservation table with endpoint tracking
-    - Hardware-specific process callback framework
-    - Reservation validation and conflict detection
-  - [ ] **PCI driver** (`pci.rs`, ~612 lines)
-    - PCI configuration space access (extern "C" I/O ops)
-    - Device enumeration (vendor/device IDs, BARs)
+    - Device reservation table with endpoint tracking and label keys
+    - Hardware-specific process callback framework (`I2cProcessFn`)
+    - Reservation validation, conflict detection, and release
+    - Re-exports `I2cExec` from eeprom module
+  - [x] **PCI driver** (`pci.rs`, ~360 lines, 10 tests)
+    - PCI configuration space access via inline asm (0xCF8/0xCFC)
+    - Device enumeration (vendor/device IDs, class codes, header type)
     - BAR resource management (6 BARs per device)
-    - ACL entries for driver access control
-    - `PciState` with 32 ACLs and device array
-  - [ ] **PCI config-space access** (`crates/arch-x86_64/src/pci.rs`, ~114 lines)
+    - ACL entries for driver access control (32 slots)
+    - `PciDev` and `PciBus` type definitions
+  - [x] **PCI config-space access** (`crates/arch-x86_64/src/pci.rs`, ~200 lines, 15 tests)
     - Standard x86 PCI config mechanism (0xCF8/0xCFC ports)
-    - 8/16/32-bit read/write via port I/O (`inl`/`outl` from asm.rs)
-    - Byte-aligned reads/writes within 32-bit config registers
-    - 2 tests covering port constants and address encoding
-  - [ ] **TI1225 CardBus driver** (`ti1225.rs`, ~440 lines)
-    - TI1225 PCI-to-PCI bridge driver
-    - CSR (Control Status Register) handling
-    - Card detection, power management, hot-plug events
-    - Voltage detection, bridge reset, bus rescanning
+    - 8/16/32-bit read/write via port IOOO with inline asm
+    - Byte-aligned reads within 32-bit config registers
+    - Address encoding and alignment helpers
+  - [x] **TI1225 CardBus driver** (`ti1225.rs`, ~370 lines, 14 tests)
+    - TI1225 PCI-to-PCI bridge driver (vendor 0x104C, device 0xAC1E)
+    - CSR (Control Status Register) handling via PCI config
+    - Card detection with voltage sense (3.3V/5V)
+    - Power management, bridge reset, socket reset/release
+    - `CardState` enum with `Empty`/`PoweringUp`/`Ready`/`Resetting`
 
-- [ ] **11a.5 — Architecture support** (`crates/arch-x86_64/`)
-  - [ ] I/O port access (`inb`/`outb`)
-  - [ ] Interrupt enable/disable (`intr_enable`/`intr_disable`)
+- [x] **11a.5 — Architecture support** (`crates/arch-x86_64/`)
+  - [x] I/O port access (`inb`/`outb`/`inw`/`outw`/`inl`/`outl`)
+  - [x] Interrupt enable/disable (`intr_enable`/`intr_disable`)
 
 ### Phase 11b: Storage drivers
 

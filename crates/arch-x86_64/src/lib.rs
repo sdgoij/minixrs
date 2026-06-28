@@ -32,6 +32,7 @@ pub mod mcontext;
 pub mod multiboot;
 pub mod param;
 pub mod pcb;
+pub mod pci;
 pub mod psl;
 pub mod pte;
 pub mod segments;

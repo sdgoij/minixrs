@@ -7,6 +7,7 @@ pub mod prelude {
     pub use core::ops::DerefMut;
 }
 
+pub mod bus;
 pub mod clock;
 pub mod eeprom;
 pub mod system;
