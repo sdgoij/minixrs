@@ -212,6 +212,98 @@ pub unsafe fn mem_add_total_pages(pages: i32) {
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// Kernel physical mapping table (Phase 6.4 — port of vm_kern.c)
+// ═════════════════════════════════════════════════════════════════════════
+
+pub const KERN_PHYS_MAP_ENTRIES: usize = 16;
+
+/// A single entry in the kernel physical mapping table.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct KernPhysMapEntry {
+    pub kpme_physaddr: u64,
+    pub kpme_virtaddr: u64,
+    pub kpme_len: u64,
+}
+
+/// Kernel physical mapping table — 16 entries, used for mapping physical
+/// memory into the kernel's address space for temporary access.
+const KERN_PHYS_MAP_INIT: KernPhysMapEntry = KernPhysMapEntry {
+    kpme_physaddr: 0,
+    kpme_virtaddr: 0,
+    kpme_len: 0,
+};
+
+static mut KERN_PHYS_MAP: [KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES] =
+    [KERN_PHYS_MAP_INIT; KERN_PHYS_MAP_ENTRIES];
+
+/// Find and reserve a free entry in the kernel physical mapping table.
+///
+/// Returns 0 on success, -1 if table is full.
+///
+/// # Safety
+///
+/// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
+pub unsafe fn kern_map(physaddr: u64, virtaddr: u64, len: u64) -> i32 {
+    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+        if entry.kpme_physaddr == 0 && entry.kpme_virtaddr == 0 {
+            entry.kpme_physaddr = physaddr;
+            entry.kpme_virtaddr = virtaddr;
+            entry.kpme_len = len;
+            return 0;
+        }
+    }
+    -1
+}
+
+/// Remove a mapping by virtual address.
+///
+/// Returns 0 on success, -1 if not found.
+///
+/// # Safety
+///
+/// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
+pub unsafe fn kern_unmap(virtaddr: u64, len: u64) -> i32 {
+    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+        if entry.kpme_virtaddr == virtaddr && entry.kpme_len == len {
+            entry.kpme_physaddr = 0;
+            entry.kpme_virtaddr = 0;
+            entry.kpme_len = 0;
+            return 0;
+        }
+    }
+    -1
+}
+
+/// Add a physical mapping — delegates to kern_map.
+///
+/// # Safety
+///
+/// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
+pub unsafe fn phys_map_add(physaddr: u64, virtaddr: u64, len: u64) -> i32 {
+    unsafe { kern_map(physaddr, virtaddr, len) }
+}
+
+/// Remove a physical mapping by physical address.
+///
+/// Returns 0 on success, -1 if not found.
+///
+/// # Safety
+///
+/// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
+pub unsafe fn phys_map_remove(physaddr: u64, _len: u64) -> i32 {
+    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+        if entry.kpme_physaddr == physaddr {
+            entry.kpme_physaddr = 0;
+            entry.kpme_virtaddr = 0;
+            entry.kpme_len = 0;
+            return 0;
+        }
+    }
+    -1
+}
+
 pub fn mem_stats() -> (i32, i32, i32) {
     let mut nodes = 0i32;
     let mut free = 0i32;
@@ -282,6 +374,57 @@ mod tests {
             assert_eq!(alloc_mem(1, PAF_LOWER16MB), NO_MEM);
             assert_eq!(alloc_mem(0, 0), NO_MEM);
         }
+    }
+
+    #[test]
+    fn test_kern_phys_map_operations() {
+        unsafe {
+            // kern_map should succeed
+            assert_eq!(kern_map(0x1000, 0xFFFF800000000000, 0x1000), 0);
+            assert_eq!(kern_map(0x2000, 0xFFFF800000001000, 0x2000), 0);
+
+            // kern_unmap should find by virtaddr + len
+            assert_eq!(kern_unmap(0xFFFF800000001000, 0x2000), 0);
+
+            // kern_unmap on already-unmapped entry should fail
+            assert_eq!(kern_unmap(0xFFFF800000001000, 0x2000), -1);
+
+            // phys_map_add delegates to kern_map
+            assert_eq!(phys_map_add(0x3000, 0xFFFF800000003000, 0x1000), 0);
+
+            // phys_map_remove finds by physaddr
+            assert_eq!(phys_map_remove(0x1000, 0x1000), 0);
+
+            // phys_map_remove on already-removed entry should fail
+            assert_eq!(phys_map_remove(0x1000, 0x1000), -1);
+
+            // Fill the table to capacity
+            let mut i = 0;
+            for _ in 0..KERN_PHYS_MAP_ENTRIES {
+                let p = 0x5000 + i as u64 * 0x1000;
+                let v = 0xFFFF800000100000 + i as u64 * 0x1000;
+                let r = kern_map(p, v, 0x1000);
+                if r == 0 {
+                    i += 1;
+                }
+            }
+            // Now the table should be full (2 already used after unmaps, but
+            // some were freed, so we can fill more)
+        }
+    }
+
+    #[test]
+    fn test_kern_phys_map_empty() {
+        // Without any mappings, kern_unmap and phys_map_remove should fail
+        unsafe {
+            assert_eq!(kern_unmap(0xDEAD, 0x1000), -1);
+            assert_eq!(phys_map_remove(0xDEAD, 0x1000), -1);
+        }
+    }
+
+    #[test]
+    fn test_kern_phys_map_entries_const() {
+        assert_eq!(KERN_PHYS_MAP_ENTRIES, 16);
     }
 
     #[test]

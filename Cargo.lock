@@ -66,6 +66,7 @@ version = "0.1.0"
 name = "servers"
 version = "0.1.0"
 dependencies = [
+ "arch-common",
  "kernel",
 ]
 

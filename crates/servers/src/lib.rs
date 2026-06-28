@@ -2,6 +2,8 @@
 
 #![no_std]
 
+pub mod vm;
+
 #[cfg(test)]
 mod tests {
     #[test]
