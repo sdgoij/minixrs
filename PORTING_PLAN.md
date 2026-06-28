@@ -2846,12 +2846,14 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - First-class Colemak keyboard layout support
   - Mouse parser with resynchronization (bit 3 validity check)
 
-- [ ] **11d.2 — `minix/drivers/video/fb/`**
+- [x] **11d.2 — `minix/drivers/video/fb/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/`
-  - VESA framebuffer driver
-  - `crates/drivers/src/video/fb.rs` — FramebufferDriver with open, close, read, write, ioctl
+  - Framebuffer driver in `crates/drivers/src/video/fb.rs` (~200 lines, 7 tests)
   - `#[repr(C)]` types: `FbVarScreeninfo`, `FbFixScreeninfo`, `FbBitfield`, `FbDevice`
-  - 28 unit tests
+  - IOCTL constants: FBIOGET_VSCREENINFO, FBIOPUT_VSCREENINFO, FBIOGET_FSCREENINFO, FBIOPAN_DISPLAY
+  - `FbArch` trait for architecture-specific operations
+  - `Framebuffer` driver struct with open/close/read/write/ioctl
+  - Real implementation depends on arch-specific VESA/PCI MMIO backend (see 12.22)
 
 - [ ] **11d.3 — `minix/drivers/video/tda19988/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/video/tda19988/`
@@ -3150,6 +3152,17 @@ be replaced with real implementations.
   6. Execute `sti` (enable interrupts)
   After this, the timer fires at 100 Hz, `timer_int_handler` runs, and `MONOTONIC`
   increments each tick.  Verify with a heartbeat dot via serial every 100 ticks.
+
+- [ ] **12.22 — Wire framebuffer arch backend** (`crates/drivers/src/video/fb.rs`)
+  **Depends on:** VESA BIOS or PCI BAR MMIO framebuffer discovery (Phase 11a/arch),
+  `sys_safecopyto`/`sys_safecopyfrom` (Phase 4), vm_map_phys for MMIO mapping
+  Replace `todo!()` in `Framebuffer` driver:
+  - `open()` — call `arch_fb_init` equivalent: EDID read, VESA mode set, MMIO mapping
+  - `read()` — `sys_safecopyto` from framebuffer memory to caller grant
+  - `write()` — `sys_safecopyfrom` from caller grant to framebuffer memory
+  - `ioctl()` — dispatch via `arch_*` functions with safecopy for struct transfer
+  - Implement `FbArch` trait for target platform (VESA BIOS or PCI MMIO)
+  - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/fb.c`
 
 ## Phase 13: Rust `std` for Minix
 
