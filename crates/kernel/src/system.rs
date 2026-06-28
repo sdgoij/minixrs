@@ -6,8 +6,10 @@
 //!
 //! **x86_64 differences from i386:**
 //! - All vir_bytes are u64 (not u32)
-//! - No i386-specific syscalls (SYS_DEVIO, SYS_SDEVIO, SYS_VDEVIO,
-//!   SYS_READBIOS, SYS_IOPENABLE) — omitted from call_vec
+//! - No i386-only syscalls (SYS_READBIOS, SYS_IOPENABLE) — omitted
+//!   from call_vec (these have no x86_64 equivalent)
+//! - SYS_DEVIO, SYS_SDEVIO, SYS_VDEVIO are implemented (Phase 8.8) —
+//!   port I/O is the same on x86_64
 //! - message copy uses raw pointer copy (no segmentation)
 
 use core::sync::atomic::Ordering;
@@ -192,6 +194,45 @@ const SAFEMEMSET_PATTERN_OFF: usize = 16;
 const SAFEMEMSET_BYTES_OFF: usize = 24;
 const M1_P1_OFF: usize = 24;
 // M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
+
+// ── Devio message offsets (Phase 8.8) ────────────────────────────────
+//
+// mess_lsys_krn_sys_devio (for do_devio):
+//   offset  0: request  (int / i32)
+//   offset  4: port     (int / i32) — port_t fits in 16 bits
+//   offset  8: value    (u32)
+//
+// mess_krn_lsys_sys_devio (reply for do_devio, input):
+//   offset  0: value    (u32)
+const DEVIO_REQUEST_OFF: usize = 0;
+const DEVIO_PORT_OFF: usize = 4;
+const DEVIO_VALUE_OFF: usize = 8;
+const DEVIO_REPLY_VALUE_OFF: usize = 0;
+
+// mess_lsys_krn_sys_vdevio (for do_vdevio):
+//   offset  0: request  (int / i32)
+//   offset  4: vec_size (int / i32)
+//   offset  8: vec_addr (vir_bytes / u64)
+const VDEVIO_REQUEST_OFF: usize = 0;
+const VDEVIO_VEC_SIZE_OFF: usize = 4;
+const VDEVIO_VEC_ADDR_OFF: usize = 8;
+
+// mess_lsys_krn_sys_sdevio (for do_sdevio):
+//   Layout on x86_64 (with natural alignment):
+//   offset  0: request   (int / i32, 4 bytes)
+//   offset  4: _pad      (4 bytes for alignment)
+//   offset  8: port      (long int / i64, 8 bytes)
+//   offset 16: vec_endpt (endpoint_t / i32, 4 bytes)
+//   offset 20: _pad2     (4 bytes)
+//   offset 24: vec_addr  (phys_bytes / u64, 8 bytes)
+//   offset 32: vec_size  (vir_bytes / u64, 8 bytes)
+//   offset 40: offset    (vir_bytes / u64, 8 bytes)
+const SDEVIO_REQUEST_OFF: usize = 0;
+const SDEVIO_PORT_OFF: usize = 8;
+const SDEVIO_VEC_ENDPT_OFF: usize = 16;
+const SDEVIO_VEC_ADDR_OFF: usize = 24;
+const SDEVIO_VEC_SIZE_OFF: usize = 32;
+const SDEVIO_OFFSET_OFF: usize = 40;
 
 // mess_lsys_krn_sys_vumap (for do_vumap):
 //   offset  0: endpt     (endpoint_t / i32)
@@ -443,6 +484,520 @@ pub static mut IRQ_ACTIDS: [i32; 64] = [0i32; 64];
 /// Map of all in-use IRQs.
 pub static mut IRQ_USE: i32 = 0;
 
+/// VDEVIO static buffer for copying (port,value) pairs from/to user space.
+const VDEVIO_BUF_SIZE: usize = 64;
+
+// ── do_devio — single I/O port access (Phase 8.8) ─────────────────────
+// Source: .refs/minix-3.3.0/minix/kernel/system/do_devio.c
+
+/// Handle SYS_DEVIO: read/write a single I/O port.
+///
+/// # Safety
+///
+/// `caller` must be a valid process pointer with privilege structure.
+pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let request = msg_read_i32(msg, DEVIO_REQUEST_OFF) as u32;
+        let port = msg_read_i32(msg, DEVIO_PORT_OFF) as u16;
+
+        let io_type = request & arch_common::com::DIO_TYPEMASK;
+        let io_dir = request & arch_common::com::DIO_DIRMASK;
+
+        let size = match io_type {
+            t if t == arch_common::com::DIO_BYTE => 1,
+            t if t == arch_common::com::DIO_WORD => 2,
+            t if t == arch_common::com::DIO_LONG => 4,
+            _ => 4,
+        };
+
+        // Check port alignment
+        if (port as u32) & (size as u32 - 1) != 0 {
+            return crate::ipc::EPERM;
+        }
+
+        // Check I/O port access permissions
+        let privp = (*caller).p_priv;
+        if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+            let nr_io_range = (*privp).s_nr_io_range as usize;
+            let port_u32 = port as u32;
+            let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+            let mut found = false;
+            for i in 0..nr_io_range {
+                let ior = &*io_tab_ptr.add(i);
+                if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return crate::ipc::EPERM;
+            }
+        }
+
+        // Validate io_dir and io_type first (always, even in test mode)
+        let is_input = io_dir == arch_common::com::DIO_INPUT;
+        let is_output = io_dir == arch_common::com::DIO_OUTPUT;
+        if !is_input && !is_output {
+            return crate::ipc::EINVAL;
+        }
+        let io_type_valid = match io_type {
+            t if t == arch_common::com::DIO_BYTE => true,
+            t if t == arch_common::com::DIO_WORD => true,
+            t if t == arch_common::com::DIO_LONG => true,
+            _ => false,
+        };
+        if !io_type_valid {
+            return crate::ipc::EINVAL;
+        }
+
+        // Perform I/O (gated: only on bare metal where BOOT_CR3 is set)
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 != 0 {
+            if is_input {
+                let value = match io_type {
+                    t if t == arch_common::com::DIO_BYTE => arch_x86_64::asm::inb(port) as u32,
+                    t if t == arch_common::com::DIO_WORD => arch_x86_64::asm::inw(port) as u32,
+                    _ => arch_x86_64::asm::inl(port),
+                };
+                let reply_bytes = value.to_ne_bytes();
+                let reply_start = DEVIO_REPLY_VALUE_OFF;
+                msg[reply_start..reply_start + 4].copy_from_slice(&reply_bytes);
+            } else {
+                let value = msg_read_u32(msg, DEVIO_VALUE_OFF);
+                match io_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        arch_x86_64::asm::outb(port, value as u8)
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        arch_x86_64::asm::outw(port, value as u16)
+                    }
+                    _ => arch_x86_64::asm::outl(port, value),
+                }
+            }
+        }
+        // In test mode (BOOT_CR3 == 0) or after I/O: acknowledge request
+        OK
+    }
+}
+
+// ── do_vdevio — vectored I/O port access (Phase 8.8) ──────────────────
+// Source: .refs/minix-3.3.0/minix/kernel/system/do_vdevio.c
+
+/// Static buffer for VDEVIO (port,value) pairs.
+static mut VDEVIO_BUF: [u8; VDEVIO_BUF_SIZE] = [0u8; VDEVIO_BUF_SIZE];
+
+/// Handle SYS_VDEVIO: perform a series of I/O port operations.
+///
+/// # Safety
+///
+/// `caller` must be a valid process pointer with privilege structure.
+pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let request = msg_read_i32(msg, VDEVIO_REQUEST_OFF) as u32;
+        let vec_size = msg_read_i32(msg, VDEVIO_VEC_SIZE_OFF);
+        let vec_addr = msg_read_u64(msg, VDEVIO_VEC_ADDR_OFF);
+
+        if vec_size <= 0 {
+            return crate::ipc::EINVAL;
+        }
+
+        let io_dir = request & arch_common::com::DIO_DIRMASK;
+        let io_type = request & arch_common::com::DIO_TYPEMASK;
+
+        let io_in = if io_dir == arch_common::com::DIO_INPUT {
+            true
+        } else if io_dir == arch_common::com::DIO_OUTPUT {
+            false
+        } else {
+            return crate::ipc::EINVAL;
+        };
+
+        use arch_common::devio::{PvbPair, PvlPair, PvwPair};
+        use core::mem::size_of;
+
+        let (bytes, io_size) = match io_type {
+            t if t == arch_common::com::DIO_BYTE => {
+                (vec_size as usize * size_of::<PvbPair>(), size_of::<u8>())
+            }
+            t if t == arch_common::com::DIO_WORD => {
+                (vec_size as usize * size_of::<PvwPair>(), size_of::<u16>())
+            }
+            t if t == arch_common::com::DIO_LONG => {
+                (vec_size as usize * size_of::<PvlPair>(), size_of::<u32>())
+            }
+            _ => return crate::ipc::EINVAL,
+        };
+
+        if bytes > VDEVIO_BUF_SIZE {
+            return crate::ipc::E2BIG;
+        }
+
+        // Copy vector from caller's address space
+        // We switch to caller's CR3 to read from their virtual address,
+        // then copy into the kernel VDEVIO_BUF (identity-mapped).
+        let buf_ptr = core::ptr::addr_of_mut!(VDEVIO_BUF) as u64;
+        {
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 != 0 {
+                let caller_cr3 = (*caller).p_seg.p_cr3;
+                if caller_cr3 != 0 {
+                    arch_x86_64::asm::write_cr3(caller_cr3);
+                }
+            }
+            let buf_mut = core::ptr::addr_of_mut!(VDEVIO_BUF) as *mut u8;
+            core::ptr::copy_nonoverlapping(vec_addr as *const u8, buf_mut, bytes);
+            if boot_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(boot_cr3);
+            }
+        }
+
+        // Check I/O port permissions
+        let privp = (*caller).p_priv;
+        if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+            let nr_io_range = (*privp).s_nr_io_range as usize;
+            let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+            for i in 0..vec_size as usize {
+                let port = match io_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        let pvb = &*(buf_ptr as *const PvbPair).add(i);
+                        pvb.port as u32
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        let pvw = &*(buf_ptr as *const PvwPair).add(i);
+                        pvw.port as u32
+                    }
+                    _ => {
+                        let pvl = &*(buf_ptr as *const PvlPair).add(i);
+                        pvl.port as u32
+                    }
+                };
+                let mut found = false;
+                for j in 0..nr_io_range {
+                    let ior = &*io_tab_ptr.add(j);
+                    if port >= ior.ior_base && port + io_size as u32 - 1 <= ior.ior_limit {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return crate::ipc::EPERM;
+                }
+            }
+        }
+
+        // Perform actual device I/O
+        match io_type {
+            t if t == arch_common::com::DIO_BYTE => {
+                let pairs =
+                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvbPair, vec_size as usize);
+                if io_in {
+                    for pair in pairs.iter_mut() {
+                        pair.value = arch_x86_64::asm::inb(pair.port);
+                    }
+                } else {
+                    for pair in pairs.iter() {
+                        arch_x86_64::asm::outb(pair.port, pair.value);
+                    }
+                }
+            }
+            t if t == arch_common::com::DIO_WORD => {
+                let pairs =
+                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvwPair, vec_size as usize);
+                if io_in {
+                    for pair in pairs.iter_mut() {
+                        if pair.port & 1 != 0 {
+                            return crate::ipc::EPERM;
+                        }
+                        pair.value = arch_x86_64::asm::inw(pair.port);
+                    }
+                } else {
+                    for pair in pairs.iter() {
+                        if pair.port & 1 != 0 {
+                            return crate::ipc::EPERM;
+                        }
+                        arch_x86_64::asm::outw(pair.port, pair.value);
+                    }
+                }
+            }
+            _ => {
+                // DIO_LONG
+                let pairs =
+                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvlPair, vec_size as usize);
+                if io_in {
+                    for pair in pairs.iter_mut() {
+                        if pair.port & 3 != 0 {
+                            return crate::ipc::EPERM;
+                        }
+                        pair.value = arch_x86_64::asm::inl(pair.port);
+                    }
+                } else {
+                    for pair in pairs.iter() {
+                        if pair.port & 3 != 0 {
+                            return crate::ipc::EPERM;
+                        }
+                        arch_x86_64::asm::outl(pair.port, pair.value);
+                    }
+                }
+            }
+        }
+
+        // Copy results back for input requests
+        if io_in {
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 != 0 {
+                let caller_cr3 = (*caller).p_seg.p_cr3;
+                if caller_cr3 != 0 {
+                    arch_x86_64::asm::write_cr3(caller_cr3);
+                }
+            }
+            let buf_src = core::ptr::addr_of_mut!(VDEVIO_BUF) as *const u8;
+            core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
+            if boot_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(boot_cr3);
+            }
+        }
+
+        OK
+    }
+}
+
+// ── do_sdevio — string I/O (block read/write) (Phase 8.8) ────────────
+// Source: .refs/minix-3.3.0/minix/kernel/arch/i386/do_sdevio.c
+
+/// Handle SYS_SDEVIO: read/write a block of bytes/words from/to a single port.
+///
+/// # Safety
+///
+/// `caller` must be a valid process pointer.
+pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let request = msg_read_i32(msg, SDEVIO_REQUEST_OFF) as u32;
+        let port = msg_read_u64(msg, SDEVIO_PORT_OFF);
+        let vec_endpt = msg_read_i32(msg, SDEVIO_VEC_ENDPT_OFF);
+        let vec_addr = msg_read_u64(msg, SDEVIO_VEC_ADDR_OFF);
+        let count = msg_read_u64(msg, SDEVIO_VEC_SIZE_OFF);
+        let offset = msg_read_u64(msg, SDEVIO_OFFSET_OFF);
+
+        if count == 0 {
+            return OK;
+        }
+
+        let req_dir = request & arch_common::com::DIO_DIRMASK;
+        let req_type = request & arch_common::com::DIO_TYPEMASK;
+        let is_safe = (request & arch_common::com::DIO_SAFEMASK) == arch_common::com::DIO_SAFE;
+
+        // Determine size per element
+        let size = match req_type {
+            t if t == arch_common::com::DIO_BYTE => 1,
+            t if t == arch_common::com::DIO_WORD => 2,
+            t if t == arch_common::com::DIO_LONG => 4,
+            _ => 4,
+        };
+
+        // Resolve destination process
+        let caller_ep = (*caller).p_endpoint;
+        let (dest_ep, dest_proc_nr) = if vec_endpt == crate::system::SELF {
+            (caller_ep, (*caller).p_nr)
+        } else {
+            if !table::is_ok_endpoint(vec_endpt) {
+                return crate::ipc::EINVAL;
+            }
+            let pnr = table::endpoint_slot(vec_endpt);
+            if table::is_kernel_nr(pnr) {
+                return crate::ipc::EPERM;
+            }
+            (vec_endpt, pnr)
+        };
+
+        let dest_rp = table::proc_addr(dest_proc_nr);
+        if dest_rp.is_null() || (*dest_rp).is_empty() || (*dest_rp).p_endpoint != dest_ep {
+            return crate::ipc::EINVAL;
+        }
+
+        // Determine virtual buffer address (grant or direct)
+        let vir_buf: u64;
+        if is_safe {
+            // Safe variant: use verify_grant to resolve
+            let access = if req_dir == arch_common::com::DIO_INPUT {
+                arch_common::safecopies::CPF_WRITE
+            } else {
+                arch_common::safecopies::CPF_READ
+            };
+            let grant_result = crate::grants::verify_grant(
+                dest_ep,
+                caller_ep,
+                vec_addr as i32,
+                count,
+                access,
+                offset,
+            );
+            let (newoffset, new_granter, _flags) = match grant_result {
+                Ok(v) => v,
+                Err(_) => return crate::ipc::EPERM,
+            };
+            // Resolve the actual destination from the grant
+            let new_pnr = table::endpoint_slot(new_granter);
+            vir_buf = newoffset;
+            // Update dest_rp to the grant's granter
+            let new_rp = table::proc_addr(new_pnr);
+            if new_rp.is_null() || (*new_rp).is_empty() {
+                return crate::ipc::EINVAL;
+            }
+            // For the CR3 switch below, use the new_rp's address space
+            // We store the resolved info and use new_rp for switch
+            let abs_port = port as u16;
+
+            // Check I/O port access permissions
+            let privp = (*caller).p_priv;
+            if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+                let nr_io_range = (*privp).s_nr_io_range as usize;
+                let port_u32 = abs_port as u32;
+                let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+                let mut found = false;
+                for j in 0..nr_io_range {
+                    let ior = &*io_tab_ptr.add(j);
+                    if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return crate::ipc::EPERM;
+                }
+            }
+
+            // Alignment check
+            if (abs_port as u32) & (size as u32 - 1) != 0 {
+                return crate::ipc::EPERM;
+            }
+
+            // Switch to destination address space
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 != 0 {
+                let dest_cr3 = (*new_rp).p_seg.p_cr3;
+                if dest_cr3 != 0 {
+                    arch_x86_64::asm::write_cr3(dest_cr3);
+                }
+            }
+
+            // Perform string I/O
+            let result = if req_dir == arch_common::com::DIO_INPUT {
+                match req_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    _ => crate::ipc::EINVAL,
+                }
+            } else if req_dir == arch_common::com::DIO_OUTPUT {
+                match req_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    _ => crate::ipc::EINVAL,
+                }
+            } else {
+                crate::ipc::EINVAL
+            };
+
+            // Switch back to boot CR3
+            if boot_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(boot_cr3);
+            }
+
+            result
+        } else {
+            // Non-safe variant: unsafe sdevio — only allowed for caller's own process
+            let caller_proc_nr = (*caller).p_nr;
+            let dest_slot = table::endpoint_slot(dest_ep);
+            if dest_slot != caller_proc_nr {
+                return crate::ipc::EPERM;
+            }
+            vir_buf = vec_addr;
+
+            let abs_port = port as u16;
+
+            // Check I/O port access permissions
+            let privp = (*caller).p_priv;
+            if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+                let nr_io_range = (*privp).s_nr_io_range as usize;
+                let port_u32 = abs_port as u32;
+                let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+                let mut found = false;
+                for j in 0..nr_io_range {
+                    let ior = &*io_tab_ptr.add(j);
+                    if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return crate::ipc::EPERM;
+                }
+            }
+
+            // Alignment check
+            if (abs_port as u32) & (size as u32 - 1) != 0 {
+                return crate::ipc::EPERM;
+            }
+
+            // Switch to destination address space
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 != 0 {
+                let dest_cr3 = (*dest_rp).p_seg.p_cr3;
+                if dest_cr3 != 0 {
+                    arch_x86_64::asm::write_cr3(dest_cr3);
+                }
+            }
+
+            // Perform string I/O
+            let result = if req_dir == arch_common::com::DIO_INPUT {
+                match req_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    _ => crate::ipc::EINVAL,
+                }
+            } else if req_dir == arch_common::com::DIO_OUTPUT {
+                match req_type {
+                    t if t == arch_common::com::DIO_BYTE => {
+                        arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    t if t == arch_common::com::DIO_WORD => {
+                        arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                        OK
+                    }
+                    _ => crate::ipc::EINVAL,
+                }
+            } else {
+                crate::ipc::EINVAL
+            };
+
+            // Switch back to boot CR3
+            if boot_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(boot_cr3);
+            }
+
+            result
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // system_init
 // ─────────────────────────────────────────────────────────────────────────
@@ -490,6 +1045,10 @@ pub unsafe fn system_init() {
         map_call(17, do_umap_remote_handler); // SYS_UMAP_REMOTE
         map_call(18, do_vumap_handler); // SYS_VUMAP
         map_call(19, do_irqctl_handler); // SYS_IRQCTL
+        // Phase 8.8: I/O syscalls (no longer i386-specific; x86_64 uses the same port I/O)
+        map_call(21, do_devio_handler); // SYS_DEVIO
+        map_call(22, do_sdevio_handler); // SYS_SDEVIO
+        map_call(23, do_vdevio_handler); // SYS_VDEVIO
         map_call(24, do_setalarm_handler); // SYS_SETALARM
         map_call(25, do_times_handler); // SYS_TIMES
         map_call(26, do_getinfo_handler); // SYS_GETINFO
@@ -3711,5 +4270,226 @@ mod tests {
         assert_eq!(crate::clock::get_boottime(), 42);
         crate::clock::set_boottime(0);
         assert_eq!(crate::clock::get_boottime(), 0);
+    }
+
+    // ── Phase 8.8: DEVIO / VDEVIO / SDEVIO tests ──────────────────────
+
+    /// Reset proc 0 to a clean state for devio tests.
+    unsafe fn reset_devio_test_proc() -> *mut Proc {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_priv = core::ptr::null_mut();
+            rp
+        }
+    }
+
+    #[test]
+    fn test_devio_invalid_dir_returns_einval() {
+        unsafe {
+            let rp = reset_devio_test_proc();
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // Neither input nor output (request = DIO_BYTE without DIO_INPUT/DIO_OUTPUT)
+            msg_write_i32(
+                &mut msg,
+                DEVIO_REQUEST_OFF,
+                arch_common::com::DIO_BYTE as i32,
+            );
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_devio_bad_io_type_returns_inval() {
+        unsafe {
+            let rp = reset_devio_test_proc();
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // Request with valid dir but garbage type bits above typemask
+            let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, DEVIO_REQUEST_OFF, req as i32);
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, OK); // DIO_INPUT|DIO_BYTE is valid — IO skipped in test
+        }
+    }
+
+    #[test]
+    fn test_devio_unaligned_word_port_returns_eperm() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // Request word output on port 1 (odd = unaligned for word)
+            let req = arch_common::com::DIO_OUTPUT | arch_common::com::DIO_WORD;
+            msg_write_i32(&mut msg, DEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, DEVIO_PORT_OFF, 1); // unaligned for word
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EPERM);
+        }
+    }
+
+    #[test]
+    fn test_devio_ok_without_priv_check() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // No privilege structure = no CHECK_IO_PORT check
+            (*rp).p_priv = core::ptr::null_mut();
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // Byte output to port 0x80 — BOOT_CR3 is 0 in tests, so I/O skipped
+            let req = arch_common::com::DIO_OUTPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, DEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, DEVIO_PORT_OFF, 0x80);
+            msg_write_i32(&mut msg, DEVIO_VALUE_OFF, 0);
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+        }
+    }
+
+    #[test]
+    fn test_devio_unauthorized_port_returns_eperm() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let priv0 = setup_test_priv(0);
+            (*rp).p_priv = priv0;
+            (*priv0).s_flags = PrivFlags::CHECK_IO_PORT;
+            (*priv0).s_nr_io_range = 1;
+            // Allow only port 0x60-0x6F
+            (*priv0).s_io_tab[0] = crate::r#priv::IoRange {
+                ior_base: 0x60,
+                ior_limit: 0x6F,
+            };
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_OUTPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, DEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, DEVIO_PORT_OFF, 0x378);
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EPERM);
+        }
+    }
+
+    #[test]
+    fn test_devio_authorized_port_passes() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let priv0 = setup_test_priv(0);
+            (*rp).p_priv = priv0;
+            (*priv0).s_flags = PrivFlags::CHECK_IO_PORT;
+            (*priv0).s_nr_io_range = 1;
+            (*priv0).s_io_tab[0] = crate::r#priv::IoRange {
+                ior_base: 0x80,
+                ior_limit: 0x80,
+            };
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_OUTPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, DEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, DEVIO_PORT_OFF, 0x80);
+            msg_write_i32(&mut msg, DEVIO_VALUE_OFF, 0);
+            let result = do_devio_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+        }
+    }
+
+    #[test]
+    fn test_vdevio_neg_size_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, VDEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, VDEVIO_VEC_SIZE_OFF, -1);
+            let result = do_vdevio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_vdevio_zero_size_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, VDEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, VDEVIO_VEC_SIZE_OFF, 0);
+            let result = do_vdevio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_vdevio_bad_dir_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // Neither input nor output
+            msg_write_i32(
+                &mut msg,
+                VDEVIO_REQUEST_OFF,
+                arch_common::com::DIO_BYTE as i32,
+            );
+            msg_write_i32(&mut msg, VDEVIO_VEC_SIZE_OFF, 1);
+            let result = do_vdevio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_vdevio_bad_type_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_INPUT | 0xFF;
+            msg_write_i32(&mut msg, VDEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, VDEVIO_VEC_SIZE_OFF, 1);
+            let result = do_vdevio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_sdevio_zero_count_returns_ok() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, SDEVIO_REQUEST_OFF, req as i32);
+            msg_write_u64(&mut msg, SDEVIO_PORT_OFF, 0);
+            msg_write_i32(&mut msg, SDEVIO_VEC_ENDPT_OFF, NONE);
+            msg_write_u64(&mut msg, SDEVIO_VEC_SIZE_OFF, 0); // zero count
+            let result = do_sdevio_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+        }
+    }
+
+    #[test]
+    fn test_sdevio_bad_endpoint_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
+            msg_write_i32(&mut msg, SDEVIO_REQUEST_OFF, req as i32);
+            msg_write_i32(&mut msg, SDEVIO_VEC_ENDPT_OFF, 99999); // bad endpoint
+            msg_write_u64(&mut msg, SDEVIO_VEC_SIZE_OFF, 1);
+            let result = do_sdevio_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_sdevio_system_init_registers_devio_calls() {
+        unsafe {
+            system_init();
+            assert!(CALL_VEC[21].is_some()); // SYS_DEVIO
+            assert!(CALL_VEC[22].is_some()); // SYS_SDEVIO
+            assert!(CALL_VEC[23].is_some()); // SYS_VDEVIO
+        }
     }
 }

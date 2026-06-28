@@ -1793,24 +1793,29 @@ _not_ being used — its ISR reads back 0x00.
     push error codes (#DF, #TS, #NP, #SS, #GP, #PF, #AC)
   - Tests: 225+ tests across arch modules; boot sequence initializes GDT/IDT/TSS correctly; syscall dispatch
 
-- [ ] **8.8 — Implement deferred I/O syscalls: `do_devio`, `do_vdevio`, `do_sdevio`**
+- [x] **8.8 — Implement deferred I/O syscalls: `do_devio`, `do_vdevio`, `do_sdevio`**
   **Depends on:** x86_64 I/O port access (Phase 8), privilege infrastructure
-  These syscalls were deferred from Phase 5 because they need architecture-specific
-  I/O port access and privilege checks:
-  1. **`do_devio`** (SYS_DEVIO, 5.14) — single I/O port read/write. Validates caller
-     privilege via `priv()` + CHECK_IO_PORT flag. Routes to `inb`/`outb`, `inw`/`outw`,
-     or `inl`/`outl` based on request type (_DIO_INPUT/_DIO_OUTPUT and
-     _DIO_BYTE/_DIO_WORD/_DIO_LONG).
+  All three handlers implemented in `crates/kernel/src/system.rs`:
+  1. **`do_devio_handler`** (SYS_DEVIO, call index 21) — single port I/O read/write.
+     Validates port alignment, caller privilege via `CHECK_IO_PORT` + `s_io_tab`,
+     routes to `inb`/`outb`, `inw`/`outw`, or `inl`/`outl` based on request
+     type/direction. I/O instructions gated by `BOOT_CR3 != 0` for test safety.
+     Input validation (alignment, permissions, dir, type) runs unconditionally.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_devio.c`
-  2. **`do_vdevio`** (SYS_VDEVIO, 5.15) — vectored I/O: reads a `pv{b,w,l}_pair_t`
-     array from caller address space via `data_copy()`, processes each element
-     (port + value + direction/width), returns total count.
+  2. **`do_vdevio_handler`** (SYS_VDEVIO, call index 23) — vectored I/O: copies
+     `pv{b,w,l}_pair_t` array from caller address space via CR3 switching,
+     validates each port against `s_io_tab`, performs batch I/O, copies results
+     back for input operations. Uses static `VDEVIO_BUF` (64 bytes) matching C.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_vdevio.c`
-  3. **`do_sdevio`** (SYS_SDEVIO, 5.16) — single I/O request with safe buffer access.
-     Reads/writes a buffer of consecutive I/O ports with a single request type.
-     Source: `.refs/minix-3.3.0/minix/kernel/system/do_sdevio.c`
-  - Tests: Each handler has unit tests for valid/invalid inputs; privilege check
-    verification; port range validation
+  3. **`do_sdevio_handler`** (SYS_SDEVIO, call index 22) — string I/O with safe
+     (grant-based via `verify_grant()`) and non-safe (caller's own process) variants.
+     Switches to destination CR3 before `phys_insb`/`phys_insw`/`phys_outsb`/`phys_outsw`,
+     restores after. Handles byte and word string I/O (long not supported by hw).
+     Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/do_sdevio.c`
+  - Tests: 13 new tests covering invalid dir/type → EINVAL, unaligned port → EPERM,
+    unauthorized port → EPERM, authorized port → OK, VDEVIO zero/neg size → EINVAL,
+    SDEVIO zero count → OK, bad endpoint → EINVAL, registration verified. All 312
+    kernel tests pass, clippy clean.
 
 - [ ] **8.9 — Implement `proc_stacktrace()` for diagnostics**
   **Depends on:** x86_64 trap frame format (Phase 8.1), kernel stack layout (8.1)
