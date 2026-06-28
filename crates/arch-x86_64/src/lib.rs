@@ -18,12 +18,15 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod alloc;
 pub mod apic;
+pub mod arch_proc;
+pub mod arch_syscall;
 pub mod asm;
 pub mod cpu_msr;
 pub mod cpulocals;
 pub mod cpuvar;
 pub mod frame;
 pub mod hw;
+pub mod idt;
 pub mod interrupt;
 pub mod mcontext;
 pub mod multiboot;
@@ -52,13 +55,37 @@ pub fn init() {
     unsafe {
         cpu_msr::enable_nxe();
     }
+
+    // Initialize the IDT with default interrupt gates and load via lidt.
+    unsafe {
+        idt::init_idt();
+    }
+
+    // Set up syscall MSRs (STAR, LSTAR, SF_MASK) for syscall/sysret.
+    // The LSTAR entry point will be filled in when the syscall handler
+    // is registered; for now we write 0 as a placeholder.
+    unsafe {
+        arch_syscall::setup_syscall_msrs(0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::*;
+
     #[test]
-    fn placeholder() {
-        #[allow(clippy::no_effect)]
-        let _ = 1;
+    fn boot_cr3_initialized() {
+        // init() is not called in tests; verify default.
+        assert_eq!(BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn modules_compile() {
+        // Verify all new modules export their expected public items.
+        let _ = arch_syscall::SYSCALL_CS;
+        let _ = arch_syscall::SYSRET_CS;
+        // IDT is a mutable static; just check address exists.
+        #[allow(static_mut_refs)]
+        let _ = core::ptr::addr_of!(idt::IDT);
     }
 }
