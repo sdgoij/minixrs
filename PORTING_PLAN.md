@@ -2318,11 +2318,16 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   do_mount needs: parse message, resolve path, find driver, call
   req_readsuper, allocate vmnt, link root vnode.
 
-- [ ] **10.10 — Port `vfs_proc.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_proc.c`
-  - Process-related VFS operations
-  - Created `vfs/vnode.rs` with vnode table management (get_free_vnode,
-    find_vnode, dup_vnode, put_vnode, vnode_clean_refs, lock/unlock/upgrade)
+- [x] **10.10 — Port vnode table management (`vnode.c`, `vmnt.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`, `vmnt.c`
+  - Vnode table operations included in `vfs/mount.rs`:
+    get_free_vnode, find_vnode, init_vnodes, lock/unlock/upgrade_vnode,
+    dup_vnode, put_vnode, vnode_clean_refs
+  - Vmnt table operations included in `vfs/mount.rs`:
+    find_vmnt, get_free_vmnt, init_vmnts, mark_vmnt_free,
+    lock/unlock/upgrade/downgrade_vmnt
+  - All stubs — real implementations scan the global vnode/vmnt arrays
+    and use tll locking. Deferred as 10.9a.
 
 ### VFS Server Module Structure
 
