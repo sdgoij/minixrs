@@ -17,6 +17,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod alloc;
+pub mod apic;
 pub mod asm;
 pub mod cpu_msr;
 pub mod cpulocals;

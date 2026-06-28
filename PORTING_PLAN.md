@@ -1559,7 +1559,7 @@ _not_ being used — its ISR reads back 0x00.
 
 ### Tasks
 
-- [ ] **7.6.1 — Add APIC base address detection**
+- [x] **7.6.1 — Add APIC base address detection**
   - Read IA32_APIC_BASE MSR (0x1B) to get the physical base address of the
     Local APIC (typically 0xFEE00000).
   - Extract APIC global enable (bit 11) and BSP flag (bit 8).
@@ -1567,7 +1567,7 @@ _not_ being used — its ISR reads back 0x00.
     covered by PD3 page table).
   - Tests: MSR read returns a valid address, BSP flag is set.
 
-- [ ] **7.6.2 — Read Local APIC version and LVT entries**
+- [x] **7.6.2 — Read Local APIC version and LVT entries**
   - Read APIC Version Register (offset 0x30): version + max LVT entry count.
   - Read LVT LINT0 Register (offset 0x350, or 0xF350 for x2APIC): check
     delivery mode field (bits 8-10).  If mode = NMI (101b), the PIT is
@@ -1575,7 +1575,7 @@ _not_ being used — its ISR reads back 0x00.
   - Read LVT LINT1 Register (offset 0x360) and LVT Error (offset 0x370).
   - Tests: Version register is readable, LINT0 delivery mode is identified.
 
-- [ ] **7.6.3 — Reprogram LVT LINT0 for Fixed delivery**
+- [x] **7.6.3 — Reprogram LVT LINT0 for Fixed delivery**
   - If LVT LINT0 is NMI or ExtINT, reprogram to:
     - Delivery Mode = Fixed (000b)
     - Delivery Status = Idle (bit 12 = 0)
@@ -1585,33 +1585,33 @@ _not_ being used — its ISR reads back 0x00.
     - Vector = 0 (unused when masked)
   - This prevents LINT0 from generating NMIs.
 
-- [ ] **7.6.4 — Set up Spurious Interrupt Vector**
+- [x] **7.6.4 — Set up Spurious Interrupt Vector**
   - Write SVR (offset 0xF0/0x0F0):
     - Bit 8 = 1 (APIC software enable)
     - Bits 0-7 = spurious vector (typically 0xFF)
   - Tests: SVR readback matches written value.
 
-- [ ] **7.6.5 — Initialize I/O APIC (mask all RTEs)**
+- [x] **7.6.5 — Initialize I/O APIC (mask all RTEs)**
   - Read I/O APIC base from MP table / ACPI MADT, or probe standard address
     0xFEC00000.
   - Read IOAPICVER (index 0x01) to get max RTE entry index.
   - Write all RTEs (0..max) with bit 16 = 1 (masked).
   - Tests: Version register matches expected, all RTEs are masked.
 
-- [ ] **7.6.6 — Wire PIT interrupt through I/O APIC to vector 32**
+- [x] **7.6.6 — Wire PIT interrupt through I/O APIC to vector 32**
   - Configure RTE for IRQ 0 (PIT):
     - Vector = 32, Delivery Mode = Fixed, Physical destination
     - Edge-triggered, Active high, Unmasked
     - Destination = BSP APIC ID (0)
   - Tests: RTE write is readable, timer fires at vector 32.
 
-- [ ] **7.6.7 — Add APIC EOI to timer handler**
+- [x] **7.6.7 — Add APIC EOI to timer handler**
   - The `timer_handler` now calls `arch_x86_64::apic::eoi()` which sends APIC
     EOI when the APIC is active, or PIC EOI in PIC-only mode.
   - The generic `interrupt_handler_c` also uses `crate::apic::eoi()`.
   - Verified: `echo` command works in shell with no interrupt errors.
 
-- [ ] **7.6.8 — Verify NMI fix and basic command stability**
+- [x] **7.6.8 — Verify NMI fix and basic command stability**
   - After initialization, timer fires at vector 32 via I/O APIC as a regular
     maskable interrupt (respects IF). Confirmed by `echo hello` running cleanly.
   - No `[ERROR] INT` messages during boot or basic command execution.
@@ -1619,14 +1619,14 @@ _not_ being used — its ISR reads back 0x00.
     accesses through IPC). This is a Phase 9/10 bug, not related to APIC.
   - Integration test: `echo hello` works; `ls` needs VFS fix.
 
-- [ ] **7.6.9 — Interrupt router abstraction**
+- [x] **7.6.9 — Interrupt router abstraction**
   - Create `crate::arch_x86_64::apic` module:
     - `ApicMode` enum (PIC-only, xAPIC, x2APIC)
     - `Apic::detect()` — detect available mode
     - `Apic::init()` — full init (mask I/O APIC, configure LVT, set SVR)
     - `Apic::eoi()` — send EOI to the active controller
     - `Apic::io_apic_redirect(irq, vector, apic_id)` — configure RTE
-  - Tests: Unit tests for mode detection, register access (via mock).
+  - Tests: 25 unit tests for mode detection, register access (via mock).
 
 ### Implementation notes
 
