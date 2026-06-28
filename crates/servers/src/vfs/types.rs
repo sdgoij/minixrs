@@ -350,3 +350,55 @@ impl Default for Comm {
         }
     }
 }
+
+// ── Convenience type aliases ────────────────────────────────────────────
+
+/// File offset (64-bit, used in VFS<->FS messages).
+#[allow(non_camel_case_types)]
+pub type off_t = i64;
+
+// ── Request-layer result types (from request.h) ─────────────────────────
+
+/// Result of a FS create/lookup/readsuper/newnode operation.
+///
+/// Mirrors `node_details_t` from `request.h`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct NodeDetails {
+    pub inode_nr: u32,
+    pub mode: u32,
+    pub file_size: i64,
+    pub dev: u32,
+}
+
+/// Filesystem statistics (from `statvfs`).
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Statvfs {
+    pub f_flags: u64,
+    pub f_bsize: u32,
+    pub f_frsize: u32,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_favail: u64,
+    pub f_fsid: u64,
+    pub f_flag: u64,
+    pub f_namemax: u64,
+}
+
+/// Result of a path lookup.
+///
+/// Mirrors `lookup_res_t` from `request.h`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct LookupRes {
+    pub inode_nr: u32,
+    pub fs_e: i32,
+    pub mode: u32,
+    pub file_size: i64,
+    pub dev: u32,
+    pub result: i32,
+}

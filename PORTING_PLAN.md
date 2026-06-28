@@ -2145,12 +2145,16 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - All handler stubs return ENOSYS — to be implemented in tasks 10.2-10.9
   - `cargo check --package servers` passes
 
-- [ ] **10.2 — Port `vfs_kern.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_kern.c`
-  - Kernel-facing VFS operations
-  - Created `vfs/fproc.rs` with per-process VFS state management, credential
-    helpers (`get_fproc()`, `isokendpt()`, `in_group()`)
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.2 — Port FS request layer (`request.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/request.c` (~800 lines)
+  - Implemented in `crates/servers/src/vfs/request.rs` (438 lines):
+    - 30 FS request wrapper functions (req_breadwrite, req_chmod, req_create,
+      req_flush, req_lookup, req_readsuper, req_putnode, etc.)
+    - `fs_sendrec()` — low-level IPC send/receive with FS servers (stub)
+    - Added `NodeDetails`, `Statvfs`, `LookupRes` types to `types.rs`
+  - All functions return ENOSYS stubs — real implementations need IPC message
+    building + grant infrastructure (Phase 13)
+  - `cargo check --package servers` passes
 
 - [ ] **10.3 — Port `vfs_call.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_call.c`
@@ -3006,6 +3010,21 @@ userspace crate
   - Character device I/O client
   - Data store client (DS publish/retrieve helpers)
   - Tests: each client against the corresponding server mock
+
+### Deferred VFS Request Stubs (from Phase 10.2)
+
+- [ ] **13.10 — Wire VFS FS request wrappers** (`servers/src/vfs/request.rs`)
+  **Depends on:** IPC send/recv primitives (Phase 13.2), grant table (Phase 13.2),
+  VFS message type definitions
+  All 30 `req_*` functions in request.rs currently return ENOSYS. Each needs to:
+  1. Build the appropriate FS request message (REQ_READSUPER, REQ_LOOKUP, etc.)
+     using message struct fields matching the FS server protocol
+  2. Call `fs_sendrec(fs_e, &msg)` to IPC the request to the FS server
+  3. Parse the response and return results
+  - `fs_sendrec()` itself needs: IPC send/receive (Phase 13.2), endpoint resolution
+  - `req_breadwrite`/`req_statvfs`/`req_rdlink`/`req_getdents` also need grant
+    table operations (`cpf_grant_magic`, `cpf_revoke`) from Phase 13.2
+  - `req_lookup` needs the lookup struct with path resolution (Phase 10 path.c)
 
 ---
 

@@ -15,6 +15,7 @@
 //! | `table`      | Dispatch table mapping call numbers to handlers    |
 //! | `main`       | Entry point, main loop, SEF callbacks              |
 //! | `filedes`    | File descriptor and filp operations                |
+//! | `request`    | FS communication wrappers (grant/IPC building)     |
 //! | `worker`     | Worker thread pool management                      |
 
 // System-level code ported from C — all functions are inherently unsafe.
@@ -24,6 +25,7 @@ pub mod consts;
 pub mod filedes;
 pub mod glo;
 pub mod main;
+pub mod request;
 pub mod table;
 pub mod types;
 pub mod worker;
