@@ -1163,18 +1163,24 @@ pub unsafe fn do_runctl_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                         .p_misc_flags
                         .fetch_or(MiscFlags::SIG_DELAY.bits(), Ordering::Relaxed);
                 }
+                let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+                if mf & MiscFlags::SC_DEFER.bits() != 0 {
+                    (*rp)
+                        .p_misc_flags
+                        .fetch_or(MiscFlags::SIG_DELAY.bits(), Ordering::Relaxed);
+                }
                 if (*rp).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::SIG_DELAY.bits() != 0 {
                     return arch_common::ipc::EBUSY;
                 }
             }
             (*rp)
                 .p_rts_flags
-                .fetch_or(RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                .fetch_or(RtsFlags::PROC_STOP.bits(), Ordering::Relaxed);
             OK
         } else if action == arch_common::com::RC_RESUME as i32 {
             (*rp)
                 .p_rts_flags
-                .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                .fetch_and(!RtsFlags::PROC_STOP.bits(), Ordering::Relaxed);
             OK
         } else {
             crate::ipc::EFAULT
@@ -1298,6 +1304,11 @@ pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
             arch_common::com::DIAGCTL_CODE_DIAG => {
                 // Simplified: data_copy_vmcheck not available, skip copy
                 // TODO: add data_copy when VM is available
+                OK
+            }
+            arch_common::com::DIAGCTL_CODE_STACKTRACE => {
+                // Stub: proc_stacktrace not yet implemented
+                // TODO: call proc_stacktrace(proc_addr(..)) when available
                 OK
             }
             arch_common::com::DIAGCTL_CODE_REGISTER => {

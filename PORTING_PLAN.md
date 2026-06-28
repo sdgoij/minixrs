@@ -1039,6 +1039,8 @@ and only the runtime call path fails when invoked.
 - `do_settime` / `do_stime` — time of day, needs clock time update
 - `do_getmcontext` / `do_setmcontext` — machine context, needs proc_addr + copy
 - `do_diagctl` — diagnostic control, needs DIAGCTL_CODE dispatch + buffer
+  - `DIAGCTL_CODE_STACKTRACE` deferred to Phase 8.9 when `proc_stacktrace()` is
+    available (arch-specific stack frame walk)
 - `do_cprofile` / `do_profbuf` — call profiling, needs profile buffer control
 - `do_update` — live update, needs update handshake
 - `do_safememset` — grant-based memset, needs verify_grant + vm_memset
@@ -1259,7 +1261,7 @@ Phase 8.8 for I/O port-dependent).
   - Tests: Verify `addr` in unmapped region is rejected; verify magic grant granter
     redirection changes CR3 switch target; verify CPF_TRY doesn't fault on unmapped pages
 
-- [ ] **6.14 — Wire `release_address_space` to VM page table deallocation**
+- [ ] **6.15 — Wire `release_address_space` to VM page table deallocation**
   **Depends on:** VM server page table management (Phase 6), per-process page tables (Phase 6.5)
   `release_address_space(proc)` in `kernel/src/system.rs` is currently a no-op. In the C
   code, it is called when a process exits to free its page table pages. The kernel function
@@ -1795,6 +1797,19 @@ _not_ being used — its ISR reads back 0x00.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_sdevio.c`
   - Tests: Each handler has unit tests for valid/invalid inputs; privilege check
     verification; port range validation
+
+- [ ] **8.9 — Implement `proc_stacktrace()` for diagnostics**
+  **Depends on:** x86_64 trap frame format (Phase 8.1), kernel stack layout (8.1)
+  `proc_stacktrace()` dumps the current call stack of a process for diagnostic
+  purposes (called from `DIAGCTL_CODE_STACKTRACE` in `do_diagctl`):
+  - Walks the process's kernel stack using the saved RBP frame pointers
+  - For each frame, reads RIP and RBP from the stack
+  - Outputs via `kputc()` or serial (up to `DIAG_BUFSIZE` limit)
+  - Handles edge cases: empty stack, corrupted frame pointers, kernel vs user frames
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_diagctl.c` (DIAGCTL_CODE_STACKTRACE)
+  - Tests: Can be partially tested with a known call chain; full test requires QEMU
+  - **Also**: update `do_diagctl_handler` in `crates/kernel/src/system.rs` to call
+    `proc_stacktrace()` instead of returning OK stub
 
 ---
 
