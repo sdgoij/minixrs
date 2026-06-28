@@ -21,6 +21,7 @@
 // System-level code ported from C — all functions are inherently unsafe.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod call;
 pub mod consts;
 pub mod filedes;
 pub mod glo;

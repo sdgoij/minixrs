@@ -1,8 +1,10 @@
 //! VFS system call dispatch table — adapted from `minix/servers/vfs/table.c`
 //!
-//! Maps VFS call numbers to handler functions. All handlers are stubs
-//! that return `ENOSYS` — they will be implemented in later tasks.
+//! Maps VFS call numbers to handler functions defined in the `call` module.
+//! All handlers currently return `ENOSYS` — they will be implemented in
+//! later tasks when the FS request layer is wired in.
 
+use crate::vfs::call::*;
 use crate::vfs::consts::*;
 
 // ── Dispatch table ───────────────────────────────────────────────────────────
@@ -20,55 +22,55 @@ const fn call_index(n: i32) -> usize {
 /// Maps each `VFS_*` call number to its handler function.
 static CALL_VEC: [VfsHandler; NR_VFS_CALLS] = {
     let mut table: [VfsHandler; NR_VFS_CALLS] = [no_sys; NR_VFS_CALLS];
-    table[call_index(VFS_READ)] = no_sys;
-    table[call_index(VFS_WRITE)] = no_sys;
-    table[call_index(VFS_LSEEK)] = no_sys;
-    table[call_index(VFS_OPEN)] = no_sys;
-    table[call_index(VFS_CREAT)] = no_sys;
-    table[call_index(VFS_CLOSE)] = no_sys;
-    table[call_index(VFS_LINK)] = no_sys;
-    table[call_index(VFS_UNLINK)] = no_sys;
-    table[call_index(VFS_CHDIR)] = no_sys;
-    table[call_index(VFS_MKDIR)] = no_sys;
-    table[call_index(VFS_MKNOD)] = no_sys;
-    table[call_index(VFS_CHMOD)] = no_sys;
-    table[call_index(VFS_CHOWN)] = no_sys;
-    table[call_index(VFS_MOUNT)] = no_sys;
-    table[call_index(VFS_UMOUNT)] = no_sys;
-    table[call_index(VFS_ACCESS)] = no_sys;
-    table[call_index(VFS_SYNC)] = no_sys;
-    table[call_index(VFS_RENAME)] = no_sys;
-    table[call_index(VFS_RMDIR)] = no_sys;
-    table[call_index(VFS_SYMLINK)] = no_sys;
-    table[call_index(VFS_READLINK)] = no_sys;
-    table[call_index(VFS_STAT)] = no_sys;
-    table[call_index(VFS_FSTAT)] = no_sys;
-    table[call_index(VFS_LSTAT)] = no_sys;
-    table[call_index(VFS_IOCTL)] = no_sys;
-    table[call_index(VFS_FCNTL)] = no_sys;
-    table[call_index(VFS_PIPE2)] = no_sys;
-    table[call_index(VFS_UMASK)] = no_sys;
-    table[call_index(VFS_CHROOT)] = no_sys;
-    table[call_index(VFS_GETDENTS)] = no_sys;
-    table[call_index(VFS_SELECT)] = no_sys;
-    table[call_index(VFS_FCHDIR)] = no_sys;
-    table[call_index(VFS_FSYNC)] = no_sys;
-    table[call_index(VFS_TRUNCATE)] = no_sys;
-    table[call_index(VFS_FTRUNCATE)] = no_sys;
-    table[call_index(VFS_FCHMOD)] = no_sys;
-    table[call_index(VFS_FCHOWN)] = no_sys;
-    table[call_index(VFS_UTIMENS)] = no_sys;
-    table[call_index(VFS_VMCALL)] = no_sys;
-    table[call_index(VFS_GETVFSSTAT)] = no_sys;
-    table[call_index(VFS_STATVFS1)] = no_sys;
-    table[call_index(VFS_FSTATVFS1)] = no_sys;
-    table[call_index(VFS_GETRUSAGE)] = no_sys;
-    table[call_index(VFS_SVRCTL)] = no_sys;
-    table[call_index(VFS_GCOV_FLUSH)] = no_sys;
-    table[call_index(VFS_MAPDRIVER)] = no_sys;
-    table[call_index(VFS_COPYFD)] = no_sys;
-    table[call_index(VFS_CHECKPERMS)] = no_sys;
-    table[call_index(VFS_GETSYSINFO)] = no_sys;
+    table[call_index(VFS_READ)] = do_read;
+    table[call_index(VFS_WRITE)] = do_write;
+    table[call_index(VFS_LSEEK)] = do_lseek;
+    table[call_index(VFS_OPEN)] = do_open;
+    table[call_index(VFS_CREAT)] = do_creat;
+    table[call_index(VFS_CLOSE)] = do_close;
+    table[call_index(VFS_LINK)] = do_link;
+    table[call_index(VFS_UNLINK)] = do_unlink;
+    table[call_index(VFS_CHDIR)] = do_chdir;
+    table[call_index(VFS_MKDIR)] = do_mkdir;
+    table[call_index(VFS_MKNOD)] = do_mknod;
+    table[call_index(VFS_CHMOD)] = do_chmod;
+    table[call_index(VFS_CHOWN)] = do_chown;
+    table[call_index(VFS_MOUNT)] = do_mount;
+    table[call_index(VFS_UMOUNT)] = do_umount;
+    table[call_index(VFS_ACCESS)] = do_access;
+    table[call_index(VFS_SYNC)] = do_sync;
+    table[call_index(VFS_RENAME)] = do_rename;
+    table[call_index(VFS_RMDIR)] = do_rmdir;
+    table[call_index(VFS_SYMLINK)] = do_slink;
+    table[call_index(VFS_READLINK)] = do_rdlink;
+    table[call_index(VFS_STAT)] = do_stat;
+    table[call_index(VFS_FSTAT)] = do_fstat;
+    table[call_index(VFS_LSTAT)] = do_lstat;
+    table[call_index(VFS_IOCTL)] = do_ioctl;
+    table[call_index(VFS_FCNTL)] = do_fcntl;
+    table[call_index(VFS_PIPE2)] = do_pipe2;
+    table[call_index(VFS_UMASK)] = do_umask;
+    table[call_index(VFS_CHROOT)] = do_chroot;
+    table[call_index(VFS_GETDENTS)] = do_getdents;
+    table[call_index(VFS_SELECT)] = do_select;
+    table[call_index(VFS_FCHDIR)] = do_fchdir;
+    table[call_index(VFS_FSYNC)] = do_fsync;
+    table[call_index(VFS_TRUNCATE)] = do_truncate;
+    table[call_index(VFS_FTRUNCATE)] = do_ftruncate;
+    table[call_index(VFS_FCHMOD)] = do_chmod; // same handler as chmod(2)
+    table[call_index(VFS_FCHOWN)] = do_chown; // same handler as chown(2)
+    table[call_index(VFS_UTIMENS)] = do_utimens;
+    table[call_index(VFS_VMCALL)] = do_vm_call;
+    table[call_index(VFS_GETVFSSTAT)] = do_getvfsstat;
+    table[call_index(VFS_STATVFS1)] = do_statvfs;
+    table[call_index(VFS_FSTATVFS1)] = do_fstatvfs;
+    table[call_index(VFS_GETRUSAGE)] = do_getrusage;
+    table[call_index(VFS_SVRCTL)] = do_svrctl;
+    table[call_index(VFS_GCOV_FLUSH)] = do_gcov_flush;
+    table[call_index(VFS_MAPDRIVER)] = do_mapdriver;
+    table[call_index(VFS_COPYFD)] = do_copyfd;
+    table[call_index(VFS_CHECKPERMS)] = do_checkperms;
+    table[call_index(VFS_GETSYSINFO)] = do_getsysinfo;
     table
 };
 
@@ -87,79 +89,9 @@ pub fn dispatch(call_nr: i32) -> i32 {
     }
 }
 
-// ── Stub handler ─────────────────────────────────────────────────────────────
+// ── Default stub ─────────────────────────────────────────────────────────────
 
-/// Default stub: all unimplemented handlers return `ENOSYS`.
+/// Default stub: all unimplemented table slots return `ENOSYS`.
 pub fn no_sys() -> i32 {
     ENOSYS
 }
-
-// ── Trait-based decl macro ───────────────────────────────────────────────────
-
-/// Macro to declare a VFS handler stub with a doc comment.
-///
-/// Usage:
-/// ```ignore
-/// vfs_handler!(do_read, "read(2)");
-/// ```
-#[macro_export]
-macro_rules! vfs_handler {
-    ($name:ident, $doc:expr) => {
-        #[doc = $doc]
-        pub fn $name() -> i32 {
-            $crate::vfs::table::no_sys()
-        }
-    };
-}
-
-// ── Handler stubs ────────────────────────────────────────────────────────────
-// These will be replaced with real implementations in later tasks.
-// They are defined here so the dispatch table compiles and each
-// handler name is a first-class function item.
-
-vfs_handler!(do_read, "read(2)");
-vfs_handler!(do_write, "write(2)");
-vfs_handler!(do_lseek, "lseek(2)");
-vfs_handler!(do_open, "open(2)");
-vfs_handler!(do_creat, "creat(2)");
-vfs_handler!(do_close, "close(2)");
-vfs_handler!(do_link, "link(2)");
-vfs_handler!(do_unlink, "unlink(2) / rmdir(2)");
-vfs_handler!(do_chdir, "chdir(2)");
-vfs_handler!(do_mkdir, "mkdir(2)");
-vfs_handler!(do_mknod, "mknod(2)");
-vfs_handler!(do_chmod, "chmod(2) / fchmod(2)");
-vfs_handler!(do_chown, "chown(2) / fchown(2)");
-vfs_handler!(do_mount, "mount(2)");
-vfs_handler!(do_umount, "umount(2)");
-vfs_handler!(do_access, "access(2)");
-vfs_handler!(do_sync, "sync(2)");
-vfs_handler!(do_rename, "rename(2)");
-vfs_handler!(do_slink, "symlink(2)");
-vfs_handler!(do_rdlink, "readlink(2)");
-vfs_handler!(do_stat, "stat(2)");
-vfs_handler!(do_fstat, "fstat(2)");
-vfs_handler!(do_lstat, "lstat(2)");
-vfs_handler!(do_ioctl, "ioctl(2)");
-vfs_handler!(do_fcntl, "fcntl(2)");
-vfs_handler!(do_pipe2, "pipe2(2)");
-vfs_handler!(do_umask, "umask(2)");
-vfs_handler!(do_chroot, "chroot(2)");
-vfs_handler!(do_getdents, "getdents(2)");
-vfs_handler!(do_select, "select(2)");
-vfs_handler!(do_fchdir, "fchdir(2)");
-vfs_handler!(do_fsync, "fsync(2)");
-vfs_handler!(do_truncate, "truncate(2)");
-vfs_handler!(do_ftruncate, "ftruncate(2)");
-vfs_handler!(do_utimens, "utimens(2)");
-vfs_handler!(do_vm_call, "vm_call");
-vfs_handler!(do_getvfsstat, "getvfsstat(2)");
-vfs_handler!(do_statvfs, "statvfs(2)");
-vfs_handler!(do_fstatvfs, "fstatvfs(2)");
-vfs_handler!(do_getrusage, "getrusage(2)");
-vfs_handler!(do_svrctl, "svrctl(2)");
-vfs_handler!(do_gcov_flush, "gcov_flush(2)");
-vfs_handler!(do_mapdriver, "mapdriver(2)");
-vfs_handler!(do_copyfd, "copyfd(2)");
-vfs_handler!(do_checkperms, "checkperms(2)");
-vfs_handler!(do_getsysinfo, "getsysinfo(2)");

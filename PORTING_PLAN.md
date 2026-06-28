@@ -2156,12 +2156,47 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     building + grant infrastructure (Phase 13)
   - `cargo check --package servers` passes
 
-- [ ] **10.3 — Port `vfs_call.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_call.c`
-  - VFS call dispatch (open, close, read, write, ioctl, etc.)
-  - Created `vfs/call.rs` with VfsCallTable dispatch mechanism, 40+ message
-    type constants (VFS_OPEN through VFS_FSTATFS), handler stubs
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.3 — Port VFS call handlers (`call.rs`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/` (open.c, read.c, write.c, link.c,
+    pipe.c, select.c, stadir.c, protect.c, misc.c, mount.c, device.c, time.c, lock.c)
+  - Implemented in `crates/servers/src/vfs/call.rs`:
+    - 38 POSIX VFS call handler stubs grouped by category:
+    - **File ops**: do_open/creat/close/lseek/read/write/getdents/pipe2/ioctl/fcntl/
+      copyfd/truncate/ftruncate/sync/fsync/select
+    - **Directory ops**: do_chdir/fchdir/chroot/stat/fstat/lstat/statvfs/fstatvfs/
+      getvfsstat/rdlink/link/unlink/rename/mkdir/mknod/slink/rmdir
+    - **Permission ops**: do_access/chmod/chown/umask
+    - **Mount ops**: do_mount/umount/mapdriver
+    - **Time**: do_utimens
+    - **Misc**: do_svrctl/getsysinfo/vm_call/getrusage/gcov_flush/checkperms
+    - **Lock**: lock_op (file locking)
+  - Updated `table.rs`: replaced inline vfs_handler! macro with proper imports
+    from call.rs module
+  - All 38 handlers return ENOSYS stubs — real implementations depend on:
+    FS request layer (Phase 10.2), vnode/vmnt management, path resolution
+
+### Deferred VFS Call Handler Stubs
+
+- [ ] **10.3a — Wire file operation handlers** (`servers/src/vfs/call.rs`)
+  **Depends on:** FS request wrappers (10.2), filedes (10.1), vnode (10.10),
+  path resolution, device operations (10.4)
+  do_open/creat/close/lseek/read/write/getdents/pipe2/truncate/ftruncate.
+  Each needs to: parse message from scratchpad, resolve path via eat_path/
+  last_dir, get filp via get_fd/get_filp, call FS request wrappers.
+
+- [ ] **10.3b — Wire directory/link operation handlers** (`servers/src/vfs/call.rs`)
+  **Depends on:** FS request wrappers (10.2), path resolution, vnode (10.10)
+  do_chdir/fchdir/chroot/stat/fstat/lstat/statvfs/rdlink/link/unlink/rename/
+  mkdir/mknod/slink/rmdir. Each resolves paths via advance/eat_path/last_dir
+  and calls the appropriate req_* function.
+
+- [ ] **10.3c — Wire permission/time handlers** (`servers/src/vfs/call.rs`)
+  **Depends on:** FS request wrappers (10.2), vnode protection
+  do_access/chmod/chown/umask/utimens. Need forbidden() check plus req_*.
+
+- [ ] **10.3d — Wire mount/device handlers** (`servers/src/vfs/call.rs`)
+  **Depends on:** mount.c (Phase 10.6), dmap (10.4), FS request (10.2)
+  do_mount/umount/mapdriver/ioctl. Need vmnt management + driver mapping.
 
 - [ ] **10.4 — Port `vfs_dev.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_dev.c`
