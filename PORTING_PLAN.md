@@ -1501,16 +1501,17 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - Bugfix: `tmrs_settimer` was incorrectly clearing `tmr_arg`, breaking do_setalarm
   - Tests: 279 kernel tests pass (all handlers replaced stubs)
 
-- [ ] **7.3 — Port `minix/kernel/smp.c`**
+- [x] **7.3 — Port `minix/kernel/smp.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/smp.c`
   - SMP boot, IPI handling, per-CPU lock management
-  - Implementation: `crates/kernel/src/smp.rs` (365 lines)
-  - CPU state: `NCPUS`, `BSP_CPU_ID`, `CpuInfo` with flag management
-  - IPI infrastructure: `SchedIpiData`, handler registration, invocation
-  - Big Kernel Lock: `bkl_lock`, `bkl_unlock`, `bkl_is_held`
+  - Implementation: `crates/kernel/src/smp.rs` (340 lines)
+  - CPU state: `NCPUS` (AtomicU32), `BSP_CPU_ID`, `CpuInfo` with flag/freq management
+  - IPI infrastructure: `SchedIpiData` per-CPU array, `smp_sched_handler`,
+    `smp_schedule_stop_proc`, `smp_schedule_vminhibit`, `smp_schedule_migrate_proc`
+  - Big Kernel Lock: using `arch_x86_64::spinlock::{bkl_lock, bkl_unlock}`
   - AP boot management: `wait_for_aps_to_finish_booting`, `ap_boot_finished`
   - CPU frequency tracking: `cpu_set_freq`, `cpu_get_freq`
-  - 8 unit tests + integration test coverage
+  - 15 unit tests covering defaults, BKL roundtrip, freq, handler no-ops
 
 - [ ] **7.4 — Port `minix/servers/clock/` clock task** (partial)
   - Source: `.refs/minix-3.3.0/minix/servers/clock/` (all `.c` files)
