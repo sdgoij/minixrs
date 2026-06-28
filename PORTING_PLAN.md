@@ -2307,10 +2307,13 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - All stubs — real impls need FS request layer (10.2) + IPC
 
 ### Deferred mount stubs
-- [ ] **10.9a — Wire vmnt/vnode table operations** (`servers/src/vfs/mount.rs`)
+- [x] **10.9a — Wire vmnt/vnode table operations** (`servers/src/vfs/mount.rs`)
   **Depends on:** VFS global tables initialized (10.1)
-  find_vmnt/get_free_vmnt need to scan the vmnt table. vnode helpers
-  need to scan the vnode table. Lock/unlock need tll infrastructure.
+  find_vmnt/get_free_vmnt now scan the vmnt table (17 tests). vnode
+  helpers (find/get_free/dup/put/clean) scan/update the vnode table
+  with reference counting. put_vnode calls req_putnode when refcount
+  reaches 0. Lock/unlock need tll infrastructure (Vnode/Vmnt structs
+  need Tll fields integrated).
 
 - [ ] **10.9b — Wire mount/unmount operations** (`servers/src/vfs/mount.rs`)
   **Depends on:** FS request wrappers (10.2), device operations (10.4),
