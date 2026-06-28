@@ -28,12 +28,21 @@ pub const IPC_FLG_CALL_MASK: u16 = 0x007F;
 pub const IPC_FLG_STATUS_MASK: u16 = 0x00FF;
 
 pub const OK: i32 = 0;
+pub const EPERM: i32 = -1;
+pub const EAGAIN: i32 = -11;
+pub const ENOMEM: i32 = -12;
+pub const EACCES: i32 = -13;
 pub const EFAULT: i32 = -14;
+pub const ENOENT: i32 = -2;
+pub const ESRCH: i32 = -3;
+pub const EINTR: i32 = -4;
+pub const E2BIG: i32 = -7;
+pub const ENOMSG: i32 = -42;
 pub const ENOTREADY: i32 = -73;
 pub const ELOCKED: i32 = -132;
 pub const EDEADSRCDST: i32 = -199;
-pub const EPERM: i32 = -1;
-pub const EAGAIN: i32 = -11;
+pub const ENOSYS: i32 = -72;
+pub const EINVAL: i32 = -22;
 
 // ── IPC status helpers (safe — work on values, not pointers) ──────────
 

@@ -304,6 +304,119 @@ pub unsafe fn phys_map_remove(physaddr: u64, _len: u64) -> i32 {
     -1
 }
 
+/// Translate a virtual address to a physical address for a given process.
+///
+/// Walks the process's page table to translate `virtaddr` to its physical
+/// frame. Returns the physical address on success, `NO_MEM` on failure.
+///
+/// # Safety
+///
+/// The process must have a valid page table (`p_cr3 != 0`). This function
+/// reads another process's `p_seg.p_cr3`, which is only valid on bare metal
+/// (it is a physical address). In test mode, accessing it would read garbage.
+pub unsafe fn vm_lookup(proc_nr: i32, virtaddr: u64) -> u64 {
+    unsafe {
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() {
+            return NO_MEM;
+        }
+        let cr3 = (*rp).p_seg.p_cr3;
+        if cr3 == 0 {
+            return NO_MEM;
+        }
+        match crate::pagetable::walk(cr3, virtaddr) {
+            Ok(result) => {
+                let offset = virtaddr & 0xFFF;
+                (result.pte_value & arch_x86_64::pte::PG_FRAME) + offset
+            }
+            Err(_) => NO_MEM,
+        }
+    }
+}
+
+/// Write a pattern byte to a range of physical memory.
+///
+/// # Safety
+///
+/// The physical address range must be valid and identity-mapped.
+pub unsafe fn vm_memset(physaddr: u64, c: u8, count: usize) -> i32 {
+    unsafe {
+        if count == 0 {
+            return 0;
+        }
+        core::ptr::write_bytes(physaddr as *mut u8, c, count);
+        0
+    }
+}
+
+/// Copy data between two address spaces using CR3 switching.
+///
+/// Copies `bytes` from `src_proc`'s virtual address `src_addr` to
+/// `dst_proc`'s virtual address `dst_addr` by temporarily switching
+/// CR3 to each process's page table.
+///
+/// # Safety
+///
+/// Both processes must have valid page tables. Addresses must be valid
+/// mapped regions in their respective address spaces.
+pub unsafe fn virtual_copy(
+    src_proc: i32,
+    src_addr: u64,
+    dst_proc: i32,
+    dst_addr: u64,
+    bytes: usize,
+) -> i32 {
+    unsafe {
+        if bytes == 0 {
+            return 0;
+        }
+        let src_rp = crate::table::proc_addr(src_proc);
+        let dst_rp = crate::table::proc_addr(dst_proc);
+        if src_rp.is_null() || dst_rp.is_null() {
+            return -1;
+        }
+
+        let src_cr3 = (*src_rp).p_seg.p_cr3;
+        let dst_cr3 = (*dst_rp).p_seg.p_cr3;
+
+        if src_cr3 == 0 || dst_cr3 == 0 {
+            return -1;
+        }
+
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 == 0 {
+            return -1;
+        }
+
+        // Use a small stack buffer for the bounce
+        let mut buf = [0u8; 256];
+        let mut remaining = bytes;
+        let mut src_va = src_addr;
+        let mut dst_va = dst_addr;
+
+        while remaining > 0 {
+            let chunk = core::cmp::min(remaining, buf.len());
+
+            // Switch to source, read
+            arch_x86_64::asm::write_cr3(src_cr3);
+            core::ptr::copy_nonoverlapping(src_va as *const u8, buf.as_mut_ptr(), chunk);
+
+            // Switch to destination, write
+            arch_x86_64::asm::write_cr3(dst_cr3);
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
+
+            // Restore boot CR3
+            arch_x86_64::asm::write_cr3(boot_cr3);
+
+            remaining -= chunk;
+            src_va += chunk as u64;
+            dst_va += chunk as u64;
+        }
+
+        0
+    }
+}
+
 pub fn mem_stats() -> (i32, i32, i32) {
     let mut nodes = 0i32;
     let mut free = 0i32;
@@ -425,6 +538,58 @@ mod tests {
     #[test]
     fn test_kern_phys_map_entries_const() {
         assert_eq!(KERN_PHYS_MAP_ENTRIES, 16);
+    }
+
+    // ── Phase 6.13 VM helper tests ─────────────────────────────────
+
+    #[test]
+    fn test_vm_lookup_invalid_proc_returns_no_mem() {
+        unsafe {
+            let r = vm_lookup(9999, 0x1000);
+            assert_eq!(r, NO_MEM);
+        }
+    }
+
+    #[test]
+    fn test_vm_lookup_zero_cr3_returns_no_mem() {
+        unsafe {
+            crate::table::proc_init();
+            let r = vm_lookup(0, 0x1000);
+            assert_eq!(r, NO_MEM, "zero CR3 should fail");
+        }
+    }
+
+    #[test]
+    fn test_vm_memset_zero_count() {
+        unsafe {
+            assert_eq!(vm_memset(0x1000, 0xAA, 0), 0);
+        }
+    }
+
+    #[test]
+    fn test_vm_memset_writes_pattern() {
+        unsafe {
+            let mut buf = [0u8; 64];
+            let addr = buf.as_mut_ptr() as u64;
+            assert_eq!(vm_memset(addr, 0xAB, 64), 0);
+            for i in 0..64 {
+                assert_eq!(buf[i], 0xAB, "byte {} mismatch", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_virtual_copy_zero_bytes() {
+        unsafe {
+            assert_eq!(virtual_copy(0, 0, 0, 0, 0), 0);
+        }
+    }
+
+    #[test]
+    fn test_virtual_copy_null_procs() {
+        unsafe {
+            assert_eq!(virtual_copy(9999, 0x1000, 9998, 0x2000, 16), -1);
+        }
     }
 
     #[test]

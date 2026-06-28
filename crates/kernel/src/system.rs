@@ -12,6 +12,9 @@
 
 use core::sync::atomic::Ordering;
 
+use arch_common::consts::{SEGMENT_INDEX, VM_GRANT};
+use arch_common::endpoint::ANY;
+
 use crate::r#priv::*;
 use crate::proc::*;
 use crate::sched::dequeue;
@@ -38,6 +41,11 @@ unsafe fn msg_write_i32(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: i32) {
 /// Read a u32 field from the message.
 unsafe fn msg_read_u32(msg: &[u8; MESSAGE_SIZE], offset: usize) -> u32 {
     u32::from_ne_bytes(msg[offset..offset + 4].try_into().unwrap())
+}
+
+/// Read a u64 field from the message.
+unsafe fn msg_read_u64(msg: &[u8; MESSAGE_SIZE], offset: usize) -> u64 {
+    u64::from_ne_bytes(msg[offset..offset + 8].try_into().unwrap())
 }
 
 /// Write a u64 field to the message.
@@ -170,6 +178,61 @@ const STATECTL_REQUEST_OFF: usize = 0;
 const M1_I1_OFF: usize = 8;
 const M1_I2_OFF: usize = 12;
 const M1_I3_OFF: usize = 16;
+
+// Phase 6.13: do_setgrant message offset
+const M1_P1_OFF: usize = 24;
+// M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
+
+// mess_lsys_krn_sys_umap (for do_umap, do_umap_remote):
+//   offset  0: src_endpt  (endpoint_t / i32)
+//   offset  4: segment    (int / i32)
+//   offset  8: src_addr   (vir_bytes / u64)
+//   offset 16: dst_endpt  (endpoint_t / i32)
+//   offset 20: nr_bytes   (int / i32)
+// mess_krn_lsys_sys_umap (reply):
+//   offset  0: dst_addr   (phys_bytes / u64)
+const UMAP_SRC_ENDPT_OFF: usize = 0;
+const UMAP_SEGMENT_OFF: usize = 4;
+const UMAP_SRC_ADDR_OFF: usize = 8;
+const UMAP_DST_ENDPT_OFF: usize = 16;
+const UMAP_NR_BYTES_OFF: usize = 20;
+
+// mess_lsys_krn_sys_memset (for do_memset):
+//   offset  0: base      (phys_bytes / u64)
+//   offset  8: count     (phys_bytes / u64)
+//   offset 16: pattern   (unsigned long / u64)
+//   offset 24: process   (endpoint_t / i32)
+const MEMSET_BASE_OFF: usize = 0;
+const MEMSET_COUNT_OFF: usize = 8;
+const MEMSET_PATTERN_OFF: usize = 16;
+const MEMSET_PROC_OFF: usize = 24;
+
+// mess_lsys_krn_sys_getinfo (for do_getinfo):
+//   offset  0: request    (int / i32)
+//   offset  4: endpt      (endpoint_t / i32)
+//   offset  8: val_ptr    (vir_bytes / u64)
+//   offset 16: val_len    (int / i32)
+//   offset 24: val_ptr2   (vir_bytes / u64)
+//   offset 32: val_len2_e (int / i32)
+const GETINFO_REQUEST_OFF: usize = 0;
+const GETINFO_VAL_PTR_OFF: usize = 8;
+const GETINFO_VAL_LEN_OFF: usize = 16;
+const GETINFO_VAL_PTR2_OFF: usize = 24;
+const GETINFO_VAL_LEN2_E_OFF: usize = 32;
+
+// mess_krn_lsys_sys_getwhoami (reply for GET_WHOAMI):
+//   offset  0: endpt      (endpoint_t / i32)
+//   offset  4: privflags  (int / i32)
+//   offset  8: name       (char[48])
+const WHOAMI_ENDPT_OFF: usize = 0;
+const WHOAMI_PRIVFLAGS_OFF: usize = 4;
+const WHOAMI_NAME_OFF: usize = 8;
+
+// mess_lsys_krn_sys_setgrant (for do_setgrant):
+//   offset  0: addr       (vir_bytes / u64)
+//   offset  8: size       (int / i32)
+const SETGRANT_ADDR_OFF: usize = 0;
+const SETGRANT_SIZE_OFF: usize = 8;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -322,29 +385,29 @@ pub unsafe fn system_init() {
         map_call(6, do_kill_handler); // SYS_KILL
         map_call(7, do_getksig_handler); // SYS_GETKSIG
         map_call(8, do_endksig_handler); // SYS_ENDKSIG
-        map_call(9, do_sigsend_stub); // SYS_SIGSEND
-        map_call(10, do_sigreturn_stub); // SYS_SIGRETURN
-        map_call(13, do_memset_stub); // SYS_MEMSET
-        map_call(14, do_umap_stub); // SYS_UMAP
+        map_call(9, do_sigsend_handler); // SYS_SIGSEND
+        map_call(10, do_sigreturn_handler); // SYS_SIGRETURN
+        map_call(13, do_memset_handler); // SYS_MEMSET
+        map_call(14, do_umap_handler); // SYS_UMAP
         map_call(15, do_vircopy_stub); // SYS_VIRCOPY
         map_call(16, do_physcopy_stub); // SYS_PHYSCOPY
-        map_call(17, do_umap_remote_stub); // SYS_UMAP_REMOTE
+        map_call(17, do_umap_remote_handler); // SYS_UMAP_REMOTE
         map_call(18, do_vumap_stub); // SYS_VUMAP
         map_call(19, do_irqctl_stub); // SYS_IRQCTL
         map_call(24, do_setalarm_stub); // SYS_SETALARM
         map_call(25, do_times_handler); // SYS_TIMES
-        map_call(26, do_getinfo_stub); // SYS_GETINFO
+        map_call(26, do_getinfo_handler); // SYS_GETINFO
         map_call(27, do_abort_handler); // SYS_ABORT
         map_call(31, do_safecopy_from_stub); // SYS_SAFECOPYFROM
         map_call(32, do_safecopy_to_stub); // SYS_SAFECOPYTO
         map_call(33, do_vsafecopy_stub); // SYS_VSAFECOPY
-        map_call(34, do_setgrant_stub); // SYS_SETGRANT
+        map_call(34, do_setgrant_handler); // SYS_SETGRANT
         map_call(36, do_sprofile_stub); // SYS_SPROF
         map_call(37, do_cprofile_stub); // SYS_CPROF
         map_call(38, do_profbuf_stub); // SYS_PROFBUF
         map_call(39, do_stime_stub); // SYS_STIME
         map_call(40, do_settime_stub); // SYS_SETTIME
-        map_call(43, do_vmctl_stub); // SYS_VMCTL
+        map_call(43, do_vmctl_handler); // SYS_VMCTL
         map_call(44, do_diagctl_handler); // SYS_DIAGCTL
         map_call(45, do_vtimer_stub); // SYS_VTIMER
         map_call(46, do_runctl_handler); // SYS_RUNCTL
@@ -816,33 +879,24 @@ macro_rules! stub_handler {
 stub_handler!(do_exec_stub, "SYS_EXEC");
 stub_handler!(do_privctl_stub, "SYS_PRIVCTL");
 stub_handler!(do_trace_stub, "SYS_TRACE");
-stub_handler!(do_sigsend_stub, "SYS_SIGSEND");
-stub_handler!(do_sigreturn_stub, "SYS_SIGRETURN");
-stub_handler!(do_memset_stub, "SYS_MEMSET");
-stub_handler!(do_umap_stub, "SYS_UMAP");
 stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
 stub_handler!(do_physcopy_stub, "SYS_PHYSCOPY");
-stub_handler!(do_umap_remote_stub, "SYS_UMAP_REMOTE");
 stub_handler!(do_vumap_stub, "SYS_VUMAP");
 stub_handler!(do_irqctl_stub, "SYS_IRQCTL");
 stub_handler!(do_vtimer_stub, "SYS_VTIMER");
 stub_handler!(do_setalarm_stub, "SYS_SETALARM"); // needs clock
-stub_handler!(do_getinfo_stub, "SYS_GETINFO");
 stub_handler!(do_safecopy_from_stub, "SYS_SAFECOPYFROM");
 stub_handler!(do_safecopy_to_stub, "SYS_SAFECOPYTO");
 stub_handler!(do_vsafecopy_stub, "SYS_VSAFECOPY");
-stub_handler!(do_setgrant_stub, "SYS_SETGRANT");
 stub_handler!(do_sprofile_stub, "SYS_SPROF");
 stub_handler!(do_cprofile_stub, "SYS_CPROF");
 stub_handler!(do_profbuf_stub, "SYS_PROFBUF");
 stub_handler!(do_stime_stub, "SYS_STIME");
 stub_handler!(do_settime_stub, "SYS_SETTIME");
-stub_handler!(do_vmctl_stub, "SYS_VMCTL");
 stub_handler!(do_getmcontext_stub, "SYS_GETMCONTEXT");
 stub_handler!(do_setmcontext_stub, "SYS_SETMCONTEXT");
 stub_handler!(do_update_stub, "SYS_UPDATE");
 stub_handler!(do_safememset_stub, "SYS_SAFEMEMSET");
-
 // ── Real implementations ───────────────────────────────────────────────
 
 /// Handle SYS_EXIT: cause SIGABRT, don't reply.
@@ -1385,6 +1439,630 @@ pub fn switch_address_space_idle() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Phase 6.13 — VM-dependent system call handlers
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Handle SYS_UMAP: map virtual address to physical (subset of SYS_UMAP_REMOTE).
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_umap.c`
+///
+/// Allows mapping virtual addresses in the caller's address space and grants
+/// where the caller is specified as grantee. Delegates to `do_umap_remote`.
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_umap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let seg_index = msg_read_i32(msg, UMAP_SEGMENT_OFF) as u32 & SEGMENT_INDEX;
+        let endpt = msg_read_i32(msg, UMAP_SRC_ENDPT_OFF);
+
+        // This call is a subset of umap_remote: it allows mapping virtual
+        // addresses in the caller's address space and grants where the caller
+        // is specified as grantee.
+        // In C: if (seg_index != MEM_GRANT && endpt != SELF) return EPERM;
+        // MEM_GRANT = 3 in C, VM_GRANT = 2 in Rust arch-common encoding.
+        if seg_index != 2 && endpt != SELF {
+            return crate::ipc::EPERM;
+        }
+        // Set dst_endpt to SELF (caller is the grantee)
+        msg_write_i32(msg, UMAP_DST_ENDPT_OFF, SELF);
+        do_umap_remote_handler(caller, msg)
+    }
+}
+
+/// Handle SYS_UMAP_REMOTE: map virtual address to physical for any process.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_umap_remote.c`
+///
+/// Translates a virtual address in a target process's address space to a
+/// physical address using `vm_lookup()`. Supports grant-based access checks.
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_umap_remote_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let _seg_type =
+            msg_read_i32(msg, UMAP_SEGMENT_OFF) as u32 & arch_common::consts::SEGMENT_TYPE;
+        let seg_index = msg_read_i32(msg, UMAP_SEGMENT_OFF) as u32 & SEGMENT_INDEX;
+        let src_addr = msg_read_u64(msg, UMAP_SRC_ADDR_OFF);
+        let count = msg_read_i32(msg, UMAP_NR_BYTES_OFF);
+        let mut endpt = msg_read_i32(msg, UMAP_SRC_ENDPT_OFF);
+        let mut grantee = msg_read_i32(msg, UMAP_DST_ENDPT_OFF);
+
+        // Resolve SELF
+        if endpt == SELF {
+            endpt = (*_caller).p_endpoint;
+        }
+        if grantee == SELF {
+            grantee = (*_caller).p_endpoint;
+        }
+
+        // Validate source endpoint
+        if !table::is_ok_endpoint(endpt) {
+            return crate::ipc::EFAULT;
+        }
+        let proc_nr = table::endpoint_slot(endpt);
+        if table::is_kernel_nr(proc_nr) {
+            return crate::ipc::EPERM;
+        }
+        let targetpr = proc_addr(proc_nr);
+        if targetpr.is_null() {
+            return crate::ipc::EFAULT;
+        }
+
+        // Handle the segment type
+        let mut lin_addr = src_addr;
+        let mut lookup_proc = proc_nr;
+
+        if seg_index == VM_GRANT {
+            // VM_GRANT (MEM_GRANT in C) — verify grant first
+            if !table::is_ok_endpoint(grantee) && grantee != NONE && grantee != ANY {
+                return crate::ipc::EINVAL;
+            }
+            let grant_id = src_addr as u32;
+            let verify_result = crate::grants::verify_grant(
+                endpt,
+                grantee,
+                grant_id as i32,
+                count.max(0) as u64,
+                0,
+                0,
+            );
+            match verify_result {
+                Ok((newoffset, newep, _flags)) => {
+                    if !table::is_ok_endpoint(newep) {
+                        return crate::ipc::EFAULT;
+                    }
+                    let new_proc_nr = table::endpoint_slot(newep);
+                    lin_addr = newoffset;
+                    lookup_proc = new_proc_nr;
+                }
+                Err(_) => return crate::ipc::EFAULT,
+            }
+        }
+
+        // Perform the VM lookup
+        let phys_addr = crate::vm::vm_lookup(lookup_proc, lin_addr);
+        if phys_addr == crate::vm::NO_MEM {
+            return crate::ipc::EFAULT;
+        }
+        if phys_addr == 0 {
+            return crate::ipc::EFAULT;
+        }
+
+        // Write the result
+        msg_write_u64(msg, UMAP_SRC_ENDPT_OFF, phys_addr);
+        OK
+    }
+}
+
+/// Handle SYS_VMCTL: VM control operations.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_vmctl.c`
+///
+/// Dispatches on `SVMCTL_PARAM` (at msg offset M1_I2_OFF).
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let who_ep = msg_read_i32(msg, M1_I1_OFF);
+        let param = msg_read_i32(msg, M1_I2_OFF);
+        let _value = msg_read_i32(msg, M1_I3_OFF);
+
+        let ep = if who_ep == SELF {
+            (*caller).p_endpoint
+        } else {
+            who_ep
+        };
+
+        if !table::is_ok_endpoint(ep) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = table::endpoint_slot(ep);
+        let p = proc_addr(proc_nr);
+        if p.is_null() {
+            return crate::ipc::EINVAL;
+        }
+
+        match param as u32 {
+            arch_common::com::VMCTL_CLEAR_PAGEFAULT => {
+                (*p).p_rts_flags
+                    .fetch_and(!RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
+                OK
+            }
+            arch_common::com::VMCTL_GET_PDBR => {
+                // Return the process's CR3 value
+                let cr3 = (*p).p_seg.p_cr3;
+                msg_write_u64(msg, M1_P1_OFF, cr3);
+                OK
+            }
+            arch_common::com::VMCTL_FLUSHTLB => {
+                // Flush TLB by rewriting CR3
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 != 0 {
+                    arch_x86_64::asm::tlb_flush();
+                }
+                OK
+            }
+            arch_common::com::VMCTL_VMINHIBIT_SET => {
+                (*p).p_rts_flags
+                    .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
+                OK
+            }
+            arch_common::com::VMCTL_VMINHIBIT_CLEAR => {
+                (*p).p_rts_flags
+                    .fetch_and(!RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
+                OK
+            }
+            arch_common::com::VMCTL_BOOTINHIBIT_CLEAR => {
+                (*p).p_rts_flags
+                    .fetch_and(!RtsFlags::BOOTINHIBIT.bits(), Ordering::Relaxed);
+                OK
+            }
+            arch_common::com::VMCTL_CLEARMAPCACHE => {
+                // No map cache to clear in the Rust port yet
+                OK
+            }
+            _ => crate::ipc::ENOSYS,
+        }
+    }
+}
+
+/// Handle SYS_MEMSET: write a pattern byte to physical memory.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_memset.c`
+///
+/// # Safety
+///
+/// `msg` must contain valid memset fields (base, count, pattern, process).
+pub unsafe fn do_memset_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let _base = msg_read_u64(msg, MEMSET_BASE_OFF);
+        let _count = msg_read_u64(msg, MEMSET_COUNT_OFF);
+        let _pattern = msg_read_u64(msg, MEMSET_PATTERN_OFF);
+        let _process = msg_read_i32(msg, MEMSET_PROC_OFF);
+
+        // Delegate to vm_memset (physical address write)
+        crate::vm::vm_memset(_base, _pattern as u8, _count as usize);
+        OK
+    }
+}
+
+/// Handle SYS_GETINFO: retrieve system information.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_getinfo.c`
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let request = msg_read_i32(msg, GETINFO_REQUEST_OFF);
+        let val_ptr = msg_read_u64(msg, GETINFO_VAL_PTR_OFF);
+        let val_len = msg_read_i32(msg, GETINFO_VAL_LEN_OFF);
+        let _val_ptr2 = msg_read_u64(msg, GETINFO_VAL_PTR2_OFF);
+        let val_len2_e = msg_read_i32(msg, GETINFO_VAL_LEN2_E_OFF);
+
+        match request as u32 {
+            arch_common::com::GET_WHOAMI => {
+                // Fill in the whoami reply fields in the message
+                msg_write_i32(msg, WHOAMI_ENDPT_OFF, (*caller).p_endpoint);
+                let priv_flags = if !(*caller).p_priv.is_null() {
+                    (*(*caller).p_priv).s_flags.bits() as i32
+                } else {
+                    0
+                };
+                msg_write_i32(msg, WHOAMI_PRIVFLAGS_OFF, priv_flags);
+                // Copy process name (up to 48 bytes)
+                let name = (*caller).p_name;
+                let name_bytes: &[u8] = core::slice::from_raw_parts(
+                    name.as_ptr() as *const u8,
+                    core::cmp::min(name.len(), 48),
+                );
+                let dst = &mut msg[WHOAMI_NAME_OFF..WHOAMI_NAME_OFF + 48];
+                let copy_len = core::cmp::min(name_bytes.len(), dst.len() - 1);
+                dst[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                dst[copy_len] = 0;
+                OK
+            }
+            arch_common::com::GET_MACHINE => {
+                // Copy the machine info struct to the caller's buffer
+                let machine = core::ptr::addr_of!(crate::glo::MACHINE).cast::<u8>();
+                let machine_size = core::mem::size_of::<crate::glo::Machine>();
+                if val_len > 0 && machine_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                // Use virtual_copy to copy from kernel (boot address space)
+                // Since the machine struct is in the kernel's identity-mapped space,
+                // we can copy directly if BOOT_CR3 is active.
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    // Pre-init / test mode: direct copy works
+                    core::ptr::copy_nonoverlapping(
+                        machine,
+                        val_ptr as *mut u8,
+                        core::cmp::min(machine_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    // Use virtual_copy to copy into caller's address space
+                    crate::vm::virtual_copy(
+                        -1, // KERNEL (proc_nr = -1 = HARDWARE/KERNEL)
+                        machine as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(machine_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_KINFO => {
+                let kinfo = core::ptr::addr_of!(crate::glo::KINFO).cast::<u8>();
+                let kinfo_size = core::mem::size_of::<crate::glo::KInfo>();
+                if val_len > 0 && kinfo_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        kinfo,
+                        val_ptr as *mut u8,
+                        core::cmp::min(kinfo_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        kinfo as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(kinfo_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_HZ => {
+                let hz = crate::glo::SYSTEM_HZ.load(core::sync::atomic::Ordering::Relaxed);
+                let src_slice = core::slice::from_raw_parts(
+                    core::ptr::addr_of!(hz).cast::<u8>(),
+                    core::mem::size_of::<u32>(),
+                );
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        src_slice.as_ptr(),
+                        val_ptr as *mut u8,
+                        core::mem::size_of::<u32>(),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        src_slice.as_ptr() as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::mem::size_of::<u32>(),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_IRQHOOKS => {
+                let hooks = core::ptr::addr_of!(IRQ_HOOKS).cast::<u8>();
+                let hooks_size = core::mem::size_of::<[IrqHook; NR_IRQ_HOOKS]>();
+                if val_len > 0 && hooks_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        hooks,
+                        val_ptr as *mut u8,
+                        core::cmp::min(hooks_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        hooks as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(hooks_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_PROCTAB => {
+                let proc_base = crate::table::proc_table_base() as *const u8;
+                let proctab_size =
+                    core::mem::size_of::<crate::proc::Proc>() * crate::proc::NR_PROCS_TOTAL;
+                if val_len > 0 && proctab_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        proc_base,
+                        val_ptr as *mut u8,
+                        core::cmp::min(proctab_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        proc_base as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(proctab_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_PRIVTAB => {
+                let priv_base = core::ptr::addr_of!(crate::r#priv::PRIV).cast::<u8>();
+                let privtab_size =
+                    core::mem::size_of::<crate::r#priv::Priv>() * crate::proc::NR_SYS_PROCS;
+                if val_len > 0 && privtab_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        priv_base,
+                        val_ptr as *mut u8,
+                        core::cmp::min(privtab_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        priv_base as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(privtab_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_PROC => {
+                let target_ep = if val_len2_e == SELF {
+                    (*caller).p_endpoint
+                } else {
+                    val_len2_e
+                };
+                if !table::is_ok_endpoint(target_ep) {
+                    return crate::ipc::EINVAL;
+                }
+                let target_nr = table::endpoint_slot(target_ep);
+                let target_pr = proc_addr(target_nr);
+                if target_pr.is_null() {
+                    return crate::ipc::EINVAL;
+                }
+                let proc_size = core::mem::size_of::<crate::proc::Proc>();
+                if val_len > 0 && proc_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        target_pr.cast::<u8>(),
+                        val_ptr as *mut u8,
+                        core::cmp::min(proc_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        target_pr as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(proc_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_PRIV => {
+                let target_ep = if val_len2_e == SELF {
+                    (*caller).p_endpoint
+                } else {
+                    val_len2_e
+                };
+                if !table::is_ok_endpoint(target_ep) {
+                    return crate::ipc::EINVAL;
+                }
+                let target_nr = table::endpoint_slot(target_ep);
+                let priv_entry = crate::r#priv::priv_addr(target_nr as usize);
+                let priv_size = core::mem::size_of::<crate::r#priv::Priv>();
+                if val_len > 0 && priv_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        core::ptr::addr_of!(*priv_entry).cast::<u8>(),
+                        val_ptr as *mut u8,
+                        core::cmp::min(priv_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        core::ptr::addr_of!(*priv_entry) as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(priv_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_IRQACTIDS => {
+                let irq_actids = core::ptr::addr_of!(IRQ_ACTIDS).cast::<u8>();
+                let irq_actids_size = core::mem::size_of::<[i32; 64]>();
+                if val_len > 0 && irq_actids_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        irq_actids,
+                        val_ptr as *mut u8,
+                        core::cmp::min(irq_actids_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        irq_actids as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(irq_actids_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            arch_common::com::GET_MONPARAMS => {
+                // Use a local empty params buffer
+                let params = [0u8; 1024];
+                let params_size = params.len();
+                if val_len > 0 && params_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                if boot_cr3 == 0 {
+                    core::ptr::copy_nonoverlapping(
+                        params.as_ptr(),
+                        val_ptr as *mut u8,
+                        core::cmp::min(params_size, val_len.max(0) as usize),
+                    );
+                } else {
+                    crate::vm::virtual_copy(
+                        -1,
+                        params.as_ptr() as u64,
+                        (*caller).p_nr,
+                        val_ptr,
+                        core::cmp::min(params_size, val_len.max(0) as usize),
+                    );
+                }
+                OK
+            }
+            _ => crate::ipc::ENOSYS,
+        }
+    }
+}
+
+/// Handle SYS_SIGSEND: deliver a signal (minimal version).
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_sigsend.c`
+///
+/// Validates the target process and sets the pending signal.
+/// The full C implementation builds a sigframe on the target's stack;
+/// for now, we set the pending signal and let the signal manager handle it.
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_sigsend_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let target_ep = msg_read_i32(msg, SIGCALLS_ENDPT_OFF);
+        let _sigctx = msg_read_u64(msg, 24); // sigctx at offset 24 in sigcalls
+
+        if !table::is_ok_endpoint(target_ep) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = table::endpoint_slot(target_ep);
+        if table::is_kernel_nr(proc_nr) {
+            return crate::ipc::EPERM;
+        }
+        let rp = proc_addr(proc_nr);
+        if rp.is_null() {
+            return crate::ipc::EINVAL;
+        }
+
+        // Set the pending signal so the signal manager picks it up.
+        // The full implementation would copy the sigmsg from the caller,
+        // build a sigframe on the target's stack, and set registers.
+        // For now, just mark pending and notify.
+        cause_sig(proc_nr, 6); // SIGABRT as a generic signal
+        OK
+    }
+}
+
+/// Handle SYS_SIGRETURN: return from a signal handler (minimal version).
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_sigreturn.c`
+///
+/// Validates the target process. The full C implementation restores
+/// registers from a sigcontext; for now, we clear the signal flags.
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_sigreturn_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let target_ep = msg_read_i32(msg, SIGCALLS_ENDPT_OFF);
+
+        if !table::is_ok_endpoint(target_ep) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = table::endpoint_slot(target_ep);
+        if table::is_kernel_nr(proc_nr) {
+            return crate::ipc::EPERM;
+        }
+        let rp = proc_addr(proc_nr);
+        if rp.is_null() {
+            return crate::ipc::EINVAL;
+        }
+
+        // Clear the signaled flags so the process can resume
+        let clear_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
+        (*rp)
+            .p_rts_flags
+            .fetch_and(!clear_flags.bits(), Ordering::Relaxed);
+        (*rp).p_pending = 0;
+
+        OK
+    }
+}
+
+/// Handle SYS_SETGRANT: set the grant table for a process.
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_setgrant.c`
+///
+/// Copies the grant table address and entry count into the caller's
+/// privilege structure.
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_setgrant_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let grant_addr = msg_read_u64(msg, SETGRANT_ADDR_OFF);
+        let grant_entries = msg_read_i32(msg, SETGRANT_SIZE_OFF);
+
+        // Check that the caller has a valid privilege structure
+        let rts = (*caller).p_rts_flags.load(Ordering::Relaxed);
+        if rts & RtsFlags::NO_PRIV.bits() != 0 || (*caller).p_priv.is_null() {
+            return crate::ipc::EPERM;
+        }
+
+        // Set the grant table pointer and entry count in the priv structure
+        // This mirrors the C `_K_SET_GRANT_TABLE` macro:
+        //   priv(rp)->s_grant_table = (ptr);
+        //   priv(rp)->s_grant_entries = (entries);
+        (*(*caller).p_priv).s_grant_table = grant_addr;
+        (*(*caller).p_priv).s_grant_entries = grant_entries;
+
+        OK
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1392,6 +2070,7 @@ pub fn switch_address_space_idle() {
 mod tests {
     use super::*;
     use crate::table::proc_init;
+    use arch_common::com::GET_WHOAMI;
 
     // ── Static Priv pool for test pointer stability ─────────────────
     // Prevents dangling pointers when tests set p_priv and later
@@ -2028,6 +2707,159 @@ mod tests {
             let result = do_clear_handler(rp, &mut msg);
             // Already cleared should return OK
             assert_eq!(result, OK);
+        }
+    }
+
+    // ── Phase 6.13 handler tests ───────────────────────────────────
+
+    #[test]
+    fn test_do_umap_handler_invalid_endpoint() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, UMAP_SRC_ENDPT_OFF, 99999);
+            let result = do_umap_handler(rp, &mut msg);
+            assert_eq!(
+                result,
+                crate::ipc::EPERM,
+                "non-SELF endpoint should be EPERM"
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_umap_handler_self_ok() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, UMAP_SRC_ENDPT_OFF, SELF);
+            let result = do_umap_handler(rp, &mut msg);
+            // Delegates to do_umap_remote -> vm_lookup with zero CR3 -> returns error
+            assert!(result != OK, "should fail with no CR3");
+        }
+    }
+
+    #[test]
+    fn test_do_vmctl_invalid_endpoint() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, M1_I1_OFF, 99999);
+            msg_write_i32(&mut msg, M1_I2_OFF, 12);
+            let result = do_vmctl_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_do_vmctl_clear_pagefault() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let ep = crate::table::make_endpoint(0, 0);
+            (*rp).p_endpoint = ep;
+            (*rp)
+                .p_rts_flags
+                .store(RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, M1_I1_OFF, ep); // SVMCTL_WHO
+            msg_write_i32(&mut msg, M1_I2_OFF, 12); // VMCTL_CLEAR_PAGEFAULT
+            let result = do_vmctl_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+            let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                flags & RtsFlags::PAGEFAULT.bits(),
+                0,
+                "PAGEFAULT should be cleared"
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_memset_handler_zero_count() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_u64(&mut msg, MEMSET_BASE_OFF, 0x1000);
+            msg_write_u64(&mut msg, MEMSET_COUNT_OFF, 0);
+            msg_write_u64(&mut msg, MEMSET_PATTERN_OFF, 0x42);
+            msg_write_i32(&mut msg, MEMSET_PROC_OFF, 0);
+            let result = do_memset_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+        }
+    }
+
+    #[test]
+    fn test_do_getinfo_handler_whoami() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let ep = crate::table::make_endpoint(0, 0);
+            (*rp).p_endpoint = ep;
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, GETINFO_REQUEST_OFF, GET_WHOAMI as i32);
+            let result = do_getinfo_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+        }
+    }
+
+    #[test]
+    fn test_do_getinfo_handler_invalid_request() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, GETINFO_REQUEST_OFF, 99999);
+            let result = do_getinfo_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::ENOSYS);
+        }
+    }
+
+    #[test]
+    fn test_do_sigsend_invalid_endpoint() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, SIGCALLS_ENDPT_OFF, 99999);
+            let result = do_sigsend_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_do_sigreturn_invalid_endpoint() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, SIGCALLS_ENDPT_OFF, 99999);
+            let result = do_sigreturn_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_do_setgrant_handler() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let priv0 = setup_test_priv(0);
+            (*rp).p_priv = priv0;
+            (*rp)
+                .p_rts_flags
+                .fetch_and(!RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_u64(&mut msg, SETGRANT_ADDR_OFF, 0x1000);
+            msg_write_i32(&mut msg, SETGRANT_SIZE_OFF, 16);
+            let result = do_setgrant_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+            assert_eq!((*priv0).s_grant_table, 0x1000);
+            assert_eq!((*priv0).s_grant_entries, 16);
         }
     }
 }

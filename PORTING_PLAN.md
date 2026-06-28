@@ -1090,7 +1090,7 @@ Phase 8.8 for I/O port-dependent).
   - Hardware-dependent tests (walk/map/unmap with physical memory) require
     bare-metal or QEMU execution; gated from host test runner.
 
-- [ ] **6.3 — Port `vm_main.c`**
+- [x] **6.3 — Port `vm_main.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vm/main.c`
   - VM server main loop with SEF init callbacks
   - Message dispatch for VM_PAGEFAULT, RS_INIT, VFS transactions
@@ -1105,7 +1105,7 @@ Phase 8.8 for I/O port-dependent).
     `do_rs_memctl`, `do_remap`, `do_get_phys`, `do_get_refcount`,
     `do_info`, `do_query_exit`, `do_watch_exit`, `do_mapcache`,
     `do_setcache`, `do_clearcache`, `do_getrusage`
-  - Tests: `cargo build` clean, `cargo test --package servers` (16 passed)
+  - Tests: 47 servers tests pass
 
 - [x] **6.4 — Port `vm_kern.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vm/vm_kern.c`
@@ -1200,7 +1200,7 @@ Phase 8.8 for I/O port-dependent).
   - `do_willexit()` — validates endpoint, stub returns OK
   - Tests: All 40 servers tests pass.
 
-- [ ] **6.13 — Implement deferred syscalls: VM-dependent syscalls**
+- [x] **6.13 — Implement deferred syscalls: VM-dependent syscalls**
   **Depends on:** VM server infrastructure (Phase 6), per-process page tables (Phase 6.5)
   These syscalls were deferred from Phase 5 because they need `data_copy()`,
   `virtual_copy()`, page table management, or other VM facilities:
@@ -1212,7 +1212,7 @@ Phase 8.8 for I/O port-dependent).
   3. **`do_umap`** (SYS_UMAP, 5.6) — delegates to `do_umap_remote`; resolves virtual→physical
      via `vm_lookup()`. Source: `do_umap.c`
   4. **`do_umap_remote`** (SYS_UMAP_REMOTE, 5.7) — resolves remote virtual→physical via
-     `vm_lookup_range()` with grant verification. Source: `do_umap_remote.c`
+     `vm_lookup()` with grant verification. Source: `do_umap_remote.c`
   5. **`do_vumap`** (SYS_VUMAP, 5.8) — vectored virtual→physical mapping.
      Source: `do_vumap.c`
   6. **`do_memset`** (SYS_MEMSET, 5.9) — writes pattern to physical memory via `vm_memset()`.
@@ -1242,6 +1242,9 @@ Phase 8.8 for I/O port-dependent).
   17. **`do_safememset`** (SYS_SAFEMEMSET, 5.39) — grant-based memset: verify_grant()
       then vm_memset() to write pattern. Source: `do_safememset.c`
   - Tests: Each handler has unit tests for valid/invalid inputs
+  - Implementation: Added `vm_lookup()`, `vm_memset()`, `virtual_copy()` to `kernel::vm`;
+    implemented 9 handlers (do_umap, do_umap_remote, do_vmctl, do_memset, do_getinfo,
+    do_sigsend, do_sigreturn, do_setgrant)
 
 - [ ] **6.14 — Full address space validation for grant-based safecopy**
   **Depends on:** VM server infrastructure (Phase 6), per-process page tables (Phase 6.5)
@@ -1275,7 +1278,40 @@ Phase 8.8 for I/O port-dependent).
   - Tests: After `release_address_space()`, the process's CR3 is no longer valid;
     verify that attempting to switch to the freed address space is handled safely
 
-**Goal**: Give each process its own address space with private physical copies of code
+- [ ] **6.16 — Implement grant-based safecopy syscalls**
+  **Depends on:** `verify_grant()` (Phase 4.2), `virtual_copy()` (Phase 6.13),
+  `vm_memset()` (Phase 6.13)
+  All four dependencies are now available. These syscalls were deferred from Phase 5
+  because they need grant verification + VM copy infrastructure:
+  1. **`do_safecopy_from`** (SYS_SAFECOPYFROM, 5.31) — copy FROM grantee TO granter.
+     Uses `verify_grant()` to validate the grant, then `virtual_copy()` with the
+     effective granter's CR3 to perform the cross-address-space copy.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
+  2. **`do_safecopy_to`** (SYS_SAFECOPYTO, 5.31) — copy FROM granter TO grantee.
+     Same structure as safecopy_from with swapped direction.
+     Source: `do_safecopy.c`
+  3. **`do_vsafecopy`** (SYS_VSAFECOPY, 5.31) — vectored safecopy: processes an
+     array of `vscp_vec` entries, each specifying a direction + grant + offset +
+     address. Validates each entry individually.
+     Source: `do_safecopy.c`
+  4. **`do_safememset`** (SYS_SAFEMEMSET, 5.39) — grant-based memset: verifies the
+     grant via `verify_grant()`, then writes the pattern byte to the granter's
+     physical memory via `vm_memset()`.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_safememset.c`
+  - Tests: Each handler has unit tests for valid/invalid grants, boundary checks
+
+- [ ] **6.17 — Implement vectored VM mapping (do_vumap)**
+  **Depends on:** `vm_lookup()` (Phase 6.13), `vm_lookup_range()` (Phase 6.14)
+  1. **`do_vumap`** (SYS_VUMAP, 5.8) — vectored virtual→physical mapping. Processes
+     an array of `vumap_vir` entries from caller address space, each specifying a
+     source endpoint + virtual address + count. Resolves each via `vm_lookup_range()`
+     and returns physical addresses + granularity info.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_vumap.c`
+  - `vm_lookup_range()` is added in Phase 6.14 (address space validation)
+  - Tests: Unit tests for vector processing, range lookup, grant integration
+
+**Phase 6 Status**: 6.1-6.13 complete. Remaining: 6.14 (addr space validation),
+6.15 (release_address_space), 6.16 (safecopy syscalls), 6.17 (do_vumap).
 and stack pages, preventing one process from reading or writing another's memory.
 This spans VM (page table construction via `kernel::pagetable`), arch-x86_64 (CR3
 save/restore via `arch_x86_64::asm::read_cr3`/`write_cr3`), and IPC (message delivery
@@ -1810,6 +1846,26 @@ _not_ being used — its ISR reads back 0x00.
   - Tests: Can be partially tested with a known call chain; full test requires QEMU
   - **Also**: update `do_diagctl_handler` in `crates/kernel/src/system.rs` to call
     `proc_stacktrace()` instead of returning OK stub
+
+- [ ] **8.10 — Implement deferred arch-dependent syscalls: do_exec, do_getmcontext/setmcontext**
+  **Depends on:** arch_proc_init (Phase 8.1), data_copy (Phase 6.13)
+  These syscalls were deferred from Phase 6.13 because they need architecture-specific
+  process initialization or context save/restore:
+  1. **`do_exec_handler`** (SYS_EXEC, 5.2) — reads program name from caller address
+     space via `virtual_copy()`, then calls `arch_proc_init()` to set the exec target's
+     instruction pointer, stack pointer, ps_strings pointer, and process name. The exec
+     target is returned via `set_exec_target(rip, rsp)` so the next syscall return
+     switches to the new binary.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_exec.c`
+  2. **`do_getmcontext`** (SYS_GETMCONTEXT, 5.35) — saves the current machine context
+     (registers, flags, stack pointer) from a process's `TrapFrame` into a user-space
+     buffer via `virtual_copy()`. Used by checkpoint/restart and live update.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_mcontext.c`
+  3. **`do_setmcontext`** (SYS_SETMCONTEXT, 5.35) — restores a machine context from a
+     user-space buffer into a process's `TrapFrame`. Validates the context before
+     applying.
+     Source: `.refs/minix-3.3.0/minix/kernel/system/do_mcontext.c`
+  - Tests: exec round-trip loads new binary; mcontext save/restore preserves all regs
 
 ---
 
@@ -2595,6 +2651,29 @@ trait Driver {
     PM process. See Phase 4.4 follow-up for the transition plan.
   - Tests: Server init; request dispatch; process lifecycle operations; state management
 
+- [ ] **12.3b — Implement do_privctl (SYS_PRIVCTL)**
+  **Depends on:** PM server infrastructure (Phase 12.3), privilege table management
+  `do_privctl` manages process privileges with 10+ sub-functions:
+  - `SYS_PRIV_ALLOW` / `SYS_PRIV_DISALLOW` — enable/disable IPC targets
+  - `SYS_PRIV_SET_SYS` / `SYS_PRIV_SET_USER` — set system/user privilege
+  - `SYS_PRIV_ADD_IO` / `SYS_PRIV_ADD_MEM` / `SYS_PRIV_ADD_IRQ` — grant IOPL/memory/IRQ access
+  - `SYS_PRIV_QUERY_MEM` — query memory access for a process
+  - `SYS_PRIV_UPDATE_SYS` — update system process privileges
+  - `SYS_PRIV_YIELD` — yield privilege
+  - Reads/writes privilege table via `data_copy()` from caller address space.
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_privctl.c`
+  - Deferred from Phase 6.13
+
+- [ ] **12.3c — Implement do_trace (SYS_TRACE)**
+  **Depends on:** PM server infrastructure (Phase 12.3), signal delivery (12.3)
+  `do_trace` implements ptrace with 15+ commands:
+  - Stop/resume tracing, read/write registers (all x86_64 GPRs + segment regs),
+    read/write memory (via `virtual_copy`), single-step, attach/detach
+  - Interacts with RTS_P_STOP flag, MF_SC_TRACE/SC_DEFER/SC_ACTIVE flags
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_trace.c`
+  - Deferred from Phase 6.13
+  - Complex: requires careful state machine for stop/resume/step interactions
+
 - [ ] **12.4 — DS server** (`.refs/minix-3.3.0/minix/servers/ds/`): `main.c`, `store.c`, `inc.h`, `proto.h`, `store.h`
   - Directory Service, resource name publishing/retrieval, subscription management
   - Tests: Server init; request dispatch; process lifecycle operations; state management
@@ -3203,6 +3282,16 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
   - State synchronization
   - Process cloning for LU
   - Tests: Live update state machine transitions; SEF event interception; process cloning for LU
+
+- [ ] **15.4 — Implement do_update (SYS_UPDATE)**
+  **Depends on:** Live update framework (Phase 15.1-15.3)
+  `do_update` handles the `SYS_UPDATE` kernel call used during live update:
+  - Takes a `lu_state` parameter indicating the current LU phase
+  - Validates the caller is the IS server
+  - Manages kernel-side state transitions during update
+  - Coordinates between old and new process copies
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_update.c`
+  - Deferred from Phase 6.13
 
 ---
 

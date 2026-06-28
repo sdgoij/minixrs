@@ -60,6 +60,19 @@ fn some_method(&self) {
 
 **Rule of thumb:** if the code compiles but the behavior is a no-op, it's a stub. Stubs are only allowed when explicitly marked with `todo!()` + a new task reference.
 
+## Stub Deferral — Must Create Concrete Task
+
+When you defer an implementation (write a `stub_handler!` or `todo!()` because
+dependencies aren't available), you MUST create a new concrete task in the
+PORTING_PLAN.md under the Phase where those dependencies become available.
+
+For example, if you stub `do_privctl` because `data_copy()` doesn't exist yet,
+and `data_copy()` is planned for Phase 12, add a new task `do_privctl` under
+Phase 12 with `**Depends on:**` listing the prerequisite.
+
+Do NOT leave vague notes like "deferred to later phase" — every stub must
+have a traceable task that future agents will find and implement.
+
 ---
 
 ## Testing Requirement (MANDATORY)
