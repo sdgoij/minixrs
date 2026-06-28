@@ -7,7 +7,7 @@
 
 use crate::vm::{self, NO_MEM};
 use arch_x86_64::pte::{
-    self, PG_FRAME, PG_P, PG_PTEMASK, PtEntry, pd_index, pdpt_index, pml4_index, pt_index,
+    self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, pd_index, pdpt_index, pml4_index, pt_index,
 };
 use arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
 
@@ -15,6 +15,22 @@ pub const MAP_PRESENT: u64 = pte::PG_P;
 pub const MAP_WRITE: u64 = pte::PG_RW;
 pub const MAP_USER: u64 = pte::PG_U;
 pub const MAP_NX: u64 = pte::PG_NX;
+
+// Mock definitions for `__bss_start`/`__bss_end` used by `pt_mapkernel`.
+// On Windows (where the kernel linker script is not available), these
+// prevent unresolved symbol errors in any binary that links the kernel
+// crate.  When building with a real linker script (Linux), duplicate
+// strong symbols would conflict, so this is only active on Windows.
+//
+// `#[used]` ensures the symbols survive dead-code elimination.
+#[cfg(target_os = "windows")]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_start: u8 = 0;
+#[cfg(target_os = "windows")]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_end: u8 = 0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageWalkResult {
@@ -232,6 +248,87 @@ pub fn decode_page_fault(va: u64, err: u32) -> PageFaultInfo {
     }
 }
 
+/// Apply NX permissions to kernel BSS pages in a per-process page table.
+///
+/// The kernel is identity-mapped at virtual address 0x200000 as a single 2MB
+/// huge page. This function splits that 2MB PDE into 512 × 4KB PTEs so that
+/// per-page attributes can be applied, then:
+///   - Sets `PG_NX` on BSS pages (preventing code execution from BSS)
+///   - Clears `PG_G` on BSS entries (so TLB entries are flushed on CR3 switch)
+///
+/// # Safety
+///
+/// `cr3` must point to a valid, identity-mapped PML4.
+pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
+    if cr3 == 0 {
+        return Err(PageTableError::InvalidArgument);
+    }
+    unsafe {
+        const KERNEL_START: u64 = 0x200000;
+
+        // Walk to find the PDE for the kernel 2MB identity mapping
+        let result = walk(cr3, KERNEL_START)?;
+
+        if result.level != 2 {
+            return Err(PageTableError::InvalidArgument);
+        }
+        if result.pte_value & pte::PG_PS == 0 {
+            return Err(PageTableError::InvalidArgument);
+        }
+
+        let base_pa = result.pte_value & PG_FRAME;
+
+        // Attributes to propagate to each 4KB PTE (exclude frame, PS, and G)
+        let attrs = result.pte_value & !(PG_FRAME | pte::PG_PS | pte::PG_G);
+
+        // Allocate a 4KB page table to hold the split PTEs
+        let pt_phys = alloc_pt_page()?;
+        let pt = pt_phys as *mut PtEntry;
+
+        // Populate the new page table with 512 × 4KB entries
+        for i in 0..512 {
+            let pa = base_pa + (i as u64) * 0x1000;
+            let pte_val = (pa & PG_FRAME) | attrs;
+            write_pte(pt.add(i), pte_val);
+        }
+
+        // Replace the PDE to point to the new page table (clear PS, G)
+        let pde_flags = (result.pte_value & PG_PTEMASK) & !(pte::PG_PS | pte::PG_G);
+        let new_pde = (pt_phys & PG_FRAME) | pde_flags;
+        write_pte(result.pte_virt, new_pde);
+
+        // ── Set NX on BSS pages ──────────────────────────────────────
+
+        unsafe extern "C" {
+            static __bss_start: u8;
+            static __bss_end: u8;
+        }
+
+        let bss_start = core::ptr::addr_of!(__bss_start) as u64;
+        let bss_end = core::ptr::addr_of!(__bss_end) as u64;
+
+        // BSS must be within the kernel 2MB region
+        if bss_start < KERNEL_START || bss_end > KERNEL_START + (512 * 0x1000) {
+            return Err(PageTableError::InvalidArgument);
+        }
+
+        let bss_start_offset = bss_start - KERNEL_START;
+        let bss_end_offset = bss_end - KERNEL_START;
+
+        let first_bss_page = (bss_start_offset / 0x1000) as usize;
+        let last_bss_page = bss_end_offset.div_ceil(0x1000) as usize;
+
+        for i in first_bss_page..last_bss_page {
+            let mut pte_val = read_pte(pt.add(i));
+            pte_val |= PG_NX;
+            pte_val &= !pte::PG_G;
+            write_pte(pt.add(i), pte_val);
+        }
+
+        Ok(())
+    }
+}
+
 /// Handle a page fault. Routes to the VM server for resolution.
 ///
 /// Currently returns `false` (unhandled), which causes the kernel to send
@@ -252,6 +349,8 @@ pub unsafe fn handle_page_fault(va: u64, err: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "none")]
+    use arch_x86_64::pte::PG_FRAME;
 
     /// Initialize the VM allocator with a test memory chunk.
     unsafe fn init_vm() {
@@ -333,5 +432,69 @@ mod tests {
     fn test_types_are_send() {
         fn _assert_send<T: Send>() {}
         _assert_send::<PageTableError>();
+    }
+
+    // ── pt_mapkernel tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_pt_mapkernel_invalid_cr3_returns_err() {
+        // A CR3 of 0 (no page table) should fail
+        unsafe {
+            let r = pt_mapkernel(0);
+            assert!(r.is_err(), "CR3=0 should be invalid");
+        }
+    }
+
+    // Hardware-dependent tests: require bare metal (identity-mapped physical
+    // memory) or QEMU. Gated to prevent crash on host test binaries.
+    // See PORTING_PLAN.md Phase 6.2: "Hardware-dependent tests require
+    // bare-metal or QEMU execution; gated from host test runner."
+
+    #[test]
+    #[cfg(target_os = "none")]
+    fn test_pt_mapkernel_unmapped_address() {
+        unsafe {
+            init_vm();
+            let cr3_page = vm::alloc_mem(1, 0);
+            assert!(cr3_page != NO_MEM);
+            let cr3_phys = cr3_page * 4096;
+            core::ptr::write_bytes(cr3_phys as *mut u8, 0, 4096);
+            let r = pt_mapkernel(cr3_phys);
+            assert!(r.is_err(), "unmapped kernel range should fail");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "none")]
+    fn test_pt_mapkernel_splits_hugepage() {
+        unsafe {
+            init_vm();
+            let cr3_page = vm::alloc_mem(1, 0);
+            assert!(cr3_page != NO_MEM);
+            let cr3_phys = cr3_page * 4096;
+            core::ptr::write_bytes(cr3_phys as *mut u8, 0, 4096);
+
+            let pdpt_page = vm::alloc_mem(1, 0);
+            let pdpt_phys = pdpt_page * 4096;
+            core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
+            let pml4 = cr3_phys as *mut u64;
+            core::ptr::write(pml4, pdpt_phys | PG_P | PG_RW | PG_U);
+
+            let pd_page = vm::alloc_mem(1, 0);
+            let pd_phys = pd_page * 4096;
+            core::ptr::write_bytes(pd_phys as *mut u8, 0, 4096);
+            let pdpt = pdpt_phys as *mut u64;
+            core::ptr::write(pdpt, pd_phys | PG_P | PG_RW | PG_U);
+
+            let pd = pd_phys as *mut u64;
+            let pde_val = (0x200000u64 & PG_FRAME) | PG_P | PG_RW | PG_PS | PG_G;
+            core::ptr::write(pd, pde_val);
+
+            let r = pt_mapkernel(cr3_phys);
+            assert!(r.is_ok(), "pt_mapkernel should succeed on valid PD");
+
+            let updated_pde = core::ptr::read(pd);
+            assert_eq!(updated_pde & PG_PS, 0, "PG_PS should be cleared");
+        }
     }
 }

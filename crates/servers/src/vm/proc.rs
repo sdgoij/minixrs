@@ -4,6 +4,24 @@
 //! creation, destruction, cloning, and address space queries.
 
 use arch_common::types::Endpoint;
+use kernel::pagetable;
+use kernel::vm::{self, NO_MEM};
+
+// ── x86_64 page table constants ────────────────────────────────────────
+// These mirror arch_x86_64::pte values for use in raw page table walks.
+// They are architecture-specific constants, not magic numbers.
+
+const PG_P: u64 = 0x001;
+const PG_U: u64 = 0x004;
+const PG_PS: u64 = 0x080;
+const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+const PG_PTEMASK: u64 = 0xFFF; // Low 12 bits
+
+// Page table entry type (8 bytes on x86_64)
+type PtEntry = u64;
+
+const USER_PML4_ENTRIES: usize = 256;
+const NENTRIES: usize = 512;
 
 // ── Page table management ───────────────────────────────────────────────
 
@@ -75,6 +93,153 @@ pub unsafe fn vm_clone(_parent_ep: Endpoint, _child_ep: Endpoint) -> i32 {
     //       allocate new physical frames for each user page, copy data,
     //       build new page table hierarchy for child, bind it.
     0
+}
+
+/// Create a child page table with private copies of parent's user pages.
+///
+/// Walks the parent's page table (via identity map), allocates new physical
+/// frames for each user page, copies data, and builds the child's page table.
+///
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+///
+/// Both endpoints must be valid and the parent's address space must not be
+/// concurrently modified.
+pub unsafe fn pt_new_for_fork(child_ep: Endpoint, parent_ep: Endpoint) -> i32 {
+    // SAFETY: the function-level safety invariant requires the caller to ensure
+    // valid endpoints and no concurrent address space modification. Within the
+    // body, all unsafe pointer operations are justified by this invariant.
+    unsafe {
+        // 1. Get parent's CR3 (physical address of the PML4)
+        let parent_cr3 = vm_get_addrspace(parent_ep);
+        if parent_cr3 == 0 {
+            return -1;
+        }
+
+        // 2. Allocate a new PML4 for the child
+        let child_pml4_pg = vm::alloc_mem(1, 0);
+        if child_pml4_pg == NO_MEM {
+            return -1;
+        }
+        let child_cr3 = child_pml4_pg * vm::VM_PAGE_SIZE as u64;
+
+        // 3. Copy kernel entries from parent (upper 256 PML4 slots,
+        //    indices 256-511). Kernel entries are shared between
+        //    parent and child.
+        let parent_pml4 = parent_cr3 as *const PtEntry;
+        let child_pml4 = child_cr3 as *mut PtEntry;
+        core::ptr::copy_nonoverlapping(
+            parent_pml4.add(USER_PML4_ENTRIES),
+            child_pml4.add(USER_PML4_ENTRIES),
+            USER_PML4_ENTRIES,
+        );
+
+        // 4. Walk each user PML4 entry (0..USER_PML4_ENTRIES)
+        //    and private-copy user-accessible 4KB pages.
+        for pml4_idx in 0..USER_PML4_ENTRIES {
+            let pml4e = core::ptr::read(parent_pml4.add(pml4_idx));
+            if pml4e & PG_P == 0 {
+                continue;
+            }
+
+            let pdpt_phys = pml4e & PG_FRAME;
+            let pdpt = pdpt_phys as *const PtEntry;
+
+            for pdpt_idx in 0..NENTRIES {
+                let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
+                if pdpte & PG_P == 0 {
+                    continue;
+                }
+
+                let va_l3 = (pml4_idx as u64) << 39 | (pdpt_idx as u64) << 30;
+
+                if pdpte & PG_PS != 0 {
+                    // 1GB huge page — shared identity mapping,
+                    // skip private copy.
+                    continue;
+                }
+
+                let pd_phys = pdpte & PG_FRAME;
+                let pd = pd_phys as *const PtEntry;
+
+                for pd_idx in 0..NENTRIES {
+                    let pde = core::ptr::read(pd.add(pd_idx));
+                    if pde & PG_P == 0 {
+                        continue;
+                    }
+
+                    let va_l2 = va_l3 | (pd_idx as u64) << 21;
+
+                    if pde & PG_PS != 0 {
+                        // 2MB huge page — shared identity mapping.
+                        // Each 4KB sub-page within the 2MB range
+                        // shares the parent's physical frame.
+                        let pa_base = pde & PG_FRAME;
+                        let pte_flags = (pde & PG_PTEMASK) & !PG_PS;
+
+                        for sub in 0..NENTRIES {
+                            let va = va_l2 | (sub as u64) << 12;
+                            let pa = pa_base + ((sub as u64) << 12);
+                            if pagetable::map_page(
+                                child_cr3,
+                                va,
+                                pa,
+                                pte_flags | pagetable::MAP_PRESENT,
+                            )
+                            .is_err()
+                            {
+                                return -1;
+                            }
+                        }
+                        continue;
+                    }
+
+                    let pt_phys = pde & PG_FRAME;
+                    let pt = pt_phys as *const PtEntry;
+
+                    for pt_idx in 0..NENTRIES {
+                        let pte_val = core::ptr::read(pt.add(pt_idx));
+                        if pte_val & PG_P == 0 || pte_val & PG_U == 0 {
+                            continue;
+                        }
+
+                        let va = va_l2 | (pt_idx as u64) << 12;
+                        let parent_pa = pte_val & PG_FRAME;
+
+                        // Allocate a new physical frame for the child
+                        let child_pg = vm::alloc_mem(1, 0);
+                        if child_pg == NO_MEM {
+                            return -1;
+                        }
+                        let child_pa = child_pg * vm::VM_PAGE_SIZE as u64;
+
+                        // Copy data from parent's physical page to
+                        // child's (identity-mapped: physical == virtual).
+                        core::ptr::copy_nonoverlapping(
+                            parent_pa as *const u8,
+                            child_pa as *mut u8,
+                            vm::VM_PAGE_SIZE,
+                        );
+
+                        // Map the child's page at the same virtual
+                        // address, preserving parent's PTE flags (minus
+                        // PG_PS since this is now a 4KB entry).
+                        let map_flags = pte_val & !PG_PS;
+                        if pagetable::map_page(child_cr3, va, child_pa, map_flags).is_err() {
+                            return -1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Bind the child's page table (currently a stub — will
+        //    write p_cr3 when kernel process table integration is done).
+        pt_bind(child_ep);
+
+        0
+    }
 }
 
 // ── Address space queries ───────────────────────────────────────────────
@@ -249,5 +414,14 @@ mod tests {
         clear_proc(0);
         clear_proc(100);
         clear_proc(-1);
+    }
+
+    #[test]
+    fn test_pt_new_for_fork_fails_with_no_addrspace() {
+        // When vm_get_addrspace returns 0 (no address space),
+        // pt_new_for_fork should fail with -1.
+        unsafe {
+            assert_eq!(pt_new_for_fork(1, 0), -1);
+        }
     }
 }

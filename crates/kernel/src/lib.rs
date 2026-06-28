@@ -3,6 +3,7 @@
 #![no_std]
 
 pub mod debug;
+pub mod exec;
 pub mod glo;
 pub mod grants;
 pub mod ipc;

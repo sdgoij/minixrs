@@ -14,6 +14,8 @@
 
 #![no_std]
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 pub mod alloc;
 pub mod asm;
 pub mod cpu_msr;
@@ -33,8 +35,23 @@ pub mod spinlock;
 pub mod tss;
 pub mod vmparam;
 
+/// The CR3 value used during boot (identity-mapped page table).
+/// Set during `init()` to the current CR3 value.
+/// Used by syscall dispatch to switch between per-process and kernel
+/// page tables.
+pub static BOOT_CR3: AtomicU64 = AtomicU64::new(0);
+
 /// Initialize x86_64 architecture subsystem.
-pub fn init() {}
+pub fn init() {
+    // Save the boot CR3 value for per-process page table management
+    let cr3 = unsafe { asm::read_cr3() };
+    BOOT_CR3.store(cr3, Ordering::Relaxed);
+
+    // Enable NX (No-Execute) bit so PG_NX in PTEs is honored
+    unsafe {
+        cpu_msr::enable_nxe();
+    }
+}
 
 #[cfg(test)]
 mod tests {

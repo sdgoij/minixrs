@@ -47,6 +47,14 @@ pub unsafe fn register_basic_syscall(nr: usize, handler: BasicSyscallFn) {
 
 /// Dispatch a basic syscall. Returns the value to place in RAX.
 ///
+/// Saves the per-process CR3 before dispatching, loads BOOT_CR3 so the
+/// kernel has access to identity-mapped data, then restores the per-process
+/// CR3 after the handler returns.
+///
+/// When BOOT_CR3 is still 0 (pre-init / test mode) the CR3 save/restore
+/// is skipped entirely, since the privileged instructions would crash in
+/// a host test binary.
+///
 /// # Safety
 ///
 /// `caller` must point to a valid Proc.
@@ -55,7 +63,23 @@ pub unsafe fn dispatch_basic_syscall(
     nr: usize,
     args: &[u64; 6],
 ) -> i64 {
-    unsafe {
+    // Phase 6.5.1: CR3 save/restore.
+    // Only do CR3 ops when BOOT_CR3 is non-zero (kernel has been
+    // initialized).  In test mode BOOT_CR3 stays 0 and CR3 instructions
+    // would crash because they are privileged.
+    let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+    let saved_cr3 = if boot_cr3 != 0 && !caller.is_null() {
+        unsafe {
+            let cr3 = arch_x86_64::asm::read_cr3();
+            (*caller).p_cr3_saved = cr3;
+            arch_x86_64::asm::write_cr3(boot_cr3);
+            Some(cr3)
+        }
+    } else {
+        None
+    };
+
+    let result = unsafe {
         let table = syscall_table_ptr() as *const Option<BasicSyscallFn>;
         if nr < NR_BASIC_SYSCALLS {
             let entry = core::ptr::read(table.add(nr));
@@ -66,7 +90,16 @@ pub unsafe fn dispatch_basic_syscall(
         } else {
             -38
         }
+    };
+
+    // Restore per-process CR3 so the process resumes in its own address space
+    if let Some(cr3) = saved_cr3 {
+        unsafe {
+            arch_x86_64::asm::write_cr3(cr3);
+        }
     }
+
+    result
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────

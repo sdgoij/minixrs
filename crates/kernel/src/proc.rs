@@ -348,6 +348,13 @@ pub struct Proc {
 
     /// Signal received bitmap.
     pub p_signal_received: u64,
+
+    /// Saved per-process CR3 value (Phase 6.5.1).
+    /// Set by the arch-level trap handler on syscall entry, before loading
+    /// BOOT_CR3. Restored on syscall return so the process runs in its
+    /// private address space.
+    /// Zero means the process has no per-process page table (uses BOOT_CR3).
+    pub p_cr3_saved: u64,
 }
 
 impl Default for Proc {
@@ -392,6 +399,7 @@ impl Default for Proc {
             p_defer_r2: 0,
             p_defer_r3: 0,
             p_signal_received: 0,
+            p_cr3_saved: 0,
         }
     }
 }
@@ -530,6 +538,12 @@ mod tests {
     fn test_proc_nr() {
         let p = Proc::default();
         assert_eq!(p.proc_nr(), 0);
+    }
+
+    #[test]
+    fn test_default_proc_cr3_saved_is_zero() {
+        let p = Proc::default();
+        assert_eq!(p.p_cr3_saved, 0, "p_cr3_saved should init to 0");
     }
 
     #[test]

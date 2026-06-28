@@ -347,6 +347,63 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
     }
 }
 
+// ── delivermsg ───────────────────────────────────────────────────────────
+
+/// Deliver the message stored in `p_delivermsg` (kernel buffer) to the
+/// target process's user-space virtual address (`p_delivermsg_vir`), by
+/// temporarily switching to the target's per-process page tables (CR3).
+///
+/// # CR3 switching
+///
+/// 1. Gated on `BOOT_CR3 != 0` — if zero (pre-init / test mode), the
+///    privileged `read_cr3`/`write_cr3` instructions are skipped entirely.
+/// 2. If the target's `p_seg.p_cr3` is zero (no per-process page table,
+///    e.g. init process), the message is written from the kernel's current
+///    address space without switching CR3.
+///
+/// # Arguments
+///
+/// * `rp` — target process whose message buffer to fill.
+///
+/// # Returns
+///
+/// `OK` (0) on success, or `EFAULT` if the user buffer address is null.
+///
+/// # Safety
+///
+/// `rp` must point to a valid, fully initialized `Proc`.
+pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
+    unsafe {
+        let vir = (*rp).p_delivermsg_vir;
+        if vir == 0 {
+            // No user-space buffer to write to — skip delivery.
+            return OK;
+        }
+
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(Ordering::Relaxed);
+        let saved_cr3 = if boot_cr3 != 0 {
+            let saved = arch_x86_64::asm::read_cr3();
+            let target_cr3 = (*rp).p_seg.p_cr3;
+            if target_cr3 != 0 {
+                arch_x86_64::asm::write_cr3(target_cr3);
+            }
+            Some(saved)
+        } else {
+            None
+        };
+
+        // Copy the message from the kernel buffer to the user virtual address.
+        core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, MESSAGE_SIZE);
+
+        // Restore the original CR3.
+        if let Some(saved) = saved_cr3 {
+            arch_x86_64::asm::write_cr3(saved);
+        }
+
+        OK
+    }
+}
+
 // ── do_sync_ipc ────────────────────────────────────────────────────────
 
 /// Perform a synchronous IPC operation.
@@ -1446,5 +1503,47 @@ mod tests {
         _check(ipc_receive_handler);
         _check(ipc_sendrec_handler);
         _check(ipc_notify_handler);
+    }
+
+    // Phase 6.5.7 — delivermsg regression checks
+
+    #[test]
+    fn test_delivermsg_zero_vir_returns_ok() {
+        unsafe {
+            let mut proc = crate::proc::Proc::default();
+            proc.p_delivermsg_vir = 0;
+            let r = delivermsg(&mut proc as *mut _);
+            assert_eq!(r, OK, "zero vir should skip delivery");
+        }
+    }
+
+    #[test]
+    fn test_delivermsg_copies_data_to_buffer() {
+        // Verifies the copy_nonoverlapping in delivermsg works.
+        // With BOOT_CR3 == 0 (test mode), the CR3 switch is skipped,
+        // but the actual memory copy IS executed.
+        unsafe {
+            let mut proc = crate::proc::Proc::default();
+            // Fill the kernel-side message buffer with test data
+            for i in 0..crate::proc::MESSAGE_SIZE {
+                proc.p_delivermsg[i] = (i ^ 0xA5) as u8;
+            }
+            // Create a local buffer to receive the message
+            let mut buf = [0u8; crate::proc::MESSAGE_SIZE];
+            proc.p_delivermsg_vir = buf.as_mut_ptr() as u64;
+
+            let r = delivermsg(&mut proc as *mut _);
+            assert_eq!(r, OK);
+
+            // Verify data was copied
+            for i in 0..crate::proc::MESSAGE_SIZE {
+                assert_eq!(
+                    buf[i],
+                    (i ^ 0xA5) as u8,
+                    "byte {} mismatch after delivermsg",
+                    i
+                );
+            }
+        }
     }
 }

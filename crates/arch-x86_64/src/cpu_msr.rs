@@ -106,6 +106,21 @@ pub const fn make_star(syscall_cs: u16, sysret_cs: u16) -> u64 {
     (sysret_cs as u64) << 32 | (syscall_cs as u64) << 48
 }
 
+/// Enable the NX (No-Execute) bit in the EFER MSR.
+///
+/// Sets EFER.NXE (bit 11) so that the PG_NX page table bit is honored
+/// by the MMU for instruction fetches.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn enable_nxe() {
+    unsafe {
+        let efer = crate::asm::rdmsr(msr::EFER);
+        crate::asm::wrmsr(msr::EFER, efer | efer::NXE);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
