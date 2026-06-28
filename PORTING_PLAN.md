@@ -2558,9 +2558,12 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Drive state tracking (calibrated, density, cylinder, sector, motor)
   - 19 tests covering constants, density table, drive API
 
-- [ ] **11b.4 — `minix/drivers/storage/ramdisk/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/storage/ramdisk/`
-  - RAM disk driver — stub ported (28/28 passed)
+- [x] **11b.4 — `minix/drivers/storage/ramdisk/`**
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/memory/memory.c`
+  - RAM disk driver in `crates/drivers/src/storage/ramdisk.rs` (~250 lines)
+  - 6 RAM disk devices, 4 MB default buffer (static allocation)
+  - Block device interface: open/close/read/write with geometry
+  - 16 tests covering init, open/close tracking, read/write, offset, EOF
 
 - [ ] **11b.5 — `minix/drivers/storage/virtio_blk/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/virtio_blk/`
