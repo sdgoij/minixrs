@@ -2122,14 +2122,28 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
 
 ### Tasks
 
-- [ ] **10.1 — Port `vfs_main.c`**
+- [x] **10.1 — Port `vfs_main.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_main.c`
   - VFS server main loop, request dispatching
-  - Created `vfs/mod.rs` with global tables (FPROC, VNODE_TABLE, VMNT_TABLE,
-    FILP_TABLE, FILE_LOCK_TABLE, DMAP_TABLE, WORKER_TABLE, SCRATCHPAD_TABLE),
-    VFS initialization (`vfs_init()`), and helper functions (`super_user()`,
-    `fproc_addr()`, `scratch()`)
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+  - Implemented in `crates/servers/src/vfs/` (8 modules):
+    - `consts.rs` — NR_VNODES, NR_VMNT, NR_FILPS, VFS_BASE call numbers
+      (VFS_READ=1 through VFS_GETSYSINFO=52), FP_BLOCKED_ON constants,
+      filp/vmnt/vnode flags, errno values, PATH_MAX
+    - `types.rs` — Fproc (per-process VFS state), Filp (open file descriptor),
+      Vnode (virtual inode), Vmnt (mount point), Dmap (device map),
+      FileLock, WorkerThread, Scratchpad — all #[repr(C)] with Default
+    - `glo.rs` — VfsGlobal singleton with all tables accessed via addr_of_mut!:
+      fproc[NR_PROCS], filp[NR_FILPS], vnode[NR_VNODES], vmnt[NR_VMNT],
+      dmap[NR_DEVICES], worker threads, scratchpad, caller_uid/gid, req_nr
+    - `table.rs` — 49-entry CALL_VEC dispatch table with all handler stubs
+      via vfs_handler! macro (return ENOSYS pending later tasks)
+    - `main.rs` — vfs_main() entry point, get_work/handle_work/reply cycle,
+      lock/unlock_proc, SEF init stubs
+    - `filedes.rs` — init_filps, get_fd, get_filp, find_filp, alloc_filp,
+      close_filp with filp reference counting and fd table management
+    - `worker.rs` — worker_init/start/stop/available stubs
+  - All handler stubs return ENOSYS — to be implemented in tasks 10.2-10.9
+  - `cargo check --package servers` passes
 
 - [ ] **10.2 — Port `vfs_kern.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_kern.c`

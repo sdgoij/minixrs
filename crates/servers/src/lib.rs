@@ -4,6 +4,7 @@
 
 pub mod clock_server;
 pub mod pm;
+pub mod vfs;
 pub mod vm;
 
 #[cfg(test)]
