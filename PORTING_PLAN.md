@@ -2538,9 +2538,16 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - AtaCmdFis for building command FIS (set_lba, set_sector_count)
   - port_probe(), map_minor_to_port(), ahci_port_count()
 
-- [ ] **11b.2 — `minix/drivers/storage/at_wini/`**
+- [x] **11b.2 — `minix/drivers/storage/at_wini/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/at_wini/`
-  - IDE/PATA driver (major driver, heavily tested) — stub ported (1/1 ignored for zeroed defaults)
+  - IDE/PATA driver in `crates/drivers/src/storage/at_wini.rs` (~450 lines)
+  - Legacy I/O port registers (0x1F0/0x170 primary/secondary), ATA command block
+  - Drive probing with signature check, ATA IDENTIFY command execution
+  - LBA28 and LBA48 addressing (set_lba28, set_lba48 helpers)
+  - PIO data-in read transfer protocol
+  - DMA support detection, PRD table entries
+  - Drive state flags (INITIALIZED, DEAF, SMART, ATAPI, IDENTIFIED)
+  - 17 tests covering register constants, command layout, LBA addressing
 
 - [ ] **11b.3 — `minix/drivers/storage/floppy/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/floppy/`
