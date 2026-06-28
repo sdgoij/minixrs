@@ -2239,6 +2239,8 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         (*rp)
             .p_misc_flags
             .store(old_mf2 & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
+        // Force reloading FPU if current process owns it
+        arch_x86_64::hw::release_fpu(rp as *mut core::ffi::c_void);
 
         // set_exec_target to switch to new binary on return
         crate::ipc::set_exec_target(rp, ip, stack);
@@ -2278,32 +2280,45 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         // Build Mcontext from the process's TrapFrame
         let reg = &(*rp).p_reg;
         use arch_x86_64::mcontext::Mcontext;
-        let mc = Mcontext {
-            mc_rax: reg.rax,
-            mc_rbx: reg.rbx,
-            mc_rcx: reg.rcx,
-            mc_rdx: reg.rdx,
-            mc_rsi: reg.rsi,
-            mc_rdi: reg.rdi,
-            mc_rbp: 0, // not saved in TrapFrame
-            mc_r8: reg.r8,
-            mc_r9: reg.r9,
-            mc_r10: reg.r10,
-            mc_r11: reg.r11,
-            mc_r12: reg.r12,
-            mc_r13: reg.r13,
-            mc_r14: reg.r14,
-            mc_r15: reg.r15,
-            mc_rip: reg.rip,
-            mc_rsp: reg.rsp,
-            mc_rflags: reg.rflags,
-            mc_cs: reg.cs,
-            mc_ss: reg.ss,
-            mc_ds: reg.ds,
-            mc_es: reg.es,
-            mc_fs: reg.fs,
-            mc_gs: reg.gs,
-            mc_fpstate: [0u8; 512], // FPU state not saved yet
+        let mc = {
+            // Save FPU state if the process has used the FPU
+            let mut fpstate = [0u8; 512];
+            let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            if mf & 0x1000 != 0 && !(*rp).p_seg.fpu_state.is_null() {
+                // Save FPU state from the process's save area
+                core::ptr::copy_nonoverlapping(
+                    (*rp).p_seg.fpu_state as *const u8,
+                    fpstate.as_mut_ptr(),
+                    512,
+                );
+            }
+            Mcontext {
+                mc_rax: reg.rax,
+                mc_rbx: reg.rbx,
+                mc_rcx: reg.rcx,
+                mc_rdx: reg.rdx,
+                mc_rsi: reg.rsi,
+                mc_rdi: reg.rdi,
+                mc_rbp: 0,
+                mc_r8: reg.r8,
+                mc_r9: reg.r9,
+                mc_r10: reg.r10,
+                mc_r11: reg.r11,
+                mc_r12: reg.r12,
+                mc_r13: reg.r13,
+                mc_r14: reg.r14,
+                mc_r15: reg.r15,
+                mc_rip: reg.rip,
+                mc_rsp: reg.rsp,
+                mc_rflags: reg.rflags,
+                mc_cs: reg.cs,
+                mc_ss: reg.ss,
+                mc_ds: reg.ds,
+                mc_es: reg.es,
+                mc_fs: reg.fs,
+                mc_gs: reg.gs,
+                mc_fpstate: fpstate,
+            }
         };
 
         // Copy the Mcontext to the caller's address space via CR3 switching
@@ -2423,7 +2438,14 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
             core::ptr::copy_nonoverlapping(mc.mc_fpstate.as_ptr(), (*rp).p_seg.fpu_state, 512);
             let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
             (*rp).p_misc_flags.store(old_mf | 0x1000, Ordering::Relaxed); // set FPU_INITIALIZED
+        } else {
+            let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            (*rp)
+                .p_misc_flags
+                .store(old_mf & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
         }
+        // Force reloading FPU in either case
+        arch_x86_64::hw::release_fpu(rp as *mut core::ffi::c_void);
 
         OK
     }

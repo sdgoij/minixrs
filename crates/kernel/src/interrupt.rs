@@ -217,7 +217,9 @@ pub unsafe fn enable_irq(hook: *const IrqHook) {
     unsafe {
         irq = (*hook).irq;
         id = (*hook).id;
-        IRQ_ACTIDS[irq as usize] |= id;
+        // Clear the disabled bit for this handler. If no handlers are
+        // disabled after this, unmask the IRQ at the hardware level.
+        IRQ_ACTIDS[irq as usize] &= !id;
         if IRQ_ACTIDS[irq as usize] == 0 {
             hw_intr_unmask(irq);
         }
@@ -239,15 +241,13 @@ pub unsafe fn disable_irq(hook: *const IrqHook) -> bool {
         irq = (*hook).irq;
         id = (*hook).id;
 
-        if IRQ_ACTIDS[irq as usize] & id == 0 {
+        if IRQ_ACTIDS[irq as usize] & id != 0 {
             return false; // already disabled
         }
 
-        IRQ_ACTIDS[irq as usize] &= !id;
+        IRQ_ACTIDS[irq as usize] |= id;
 
-        if IRQ_ACTIDS[irq as usize] == 0 {
-            hw_intr_mask(irq);
-        }
+        hw_intr_mask(irq);
     }
     true
 }
@@ -400,11 +400,13 @@ mod tests {
             let hook_ptr = &mut hook as *mut IrqHook;
             put_irq_handler(hook_ptr, 4, dummy_handler);
             let id = (*hook_ptr).id;
-            assert!(IRQ_ACTIDS[4] & id != 0, "should be active after put");
+            // put_irq_handler does not touch IRQ_ACTIDS (starts at 0).
+            // disable_irq sets the disabled bit.
             disable_irq(hook_ptr as *const IrqHook);
-            assert!(IRQ_ACTIDS[4] & id == 0, "should be inactive after disable");
+            assert!(IRQ_ACTIDS[4] & id != 0, "should be disabled after disable");
+            // enable_irq clears the disabled bit.
             enable_irq(hook_ptr as *const IrqHook);
-            assert!(IRQ_ACTIDS[4] & id != 0, "should be active after enable");
+            assert!(IRQ_ACTIDS[4] & id == 0, "should be enabled after enable");
         }
     }
 

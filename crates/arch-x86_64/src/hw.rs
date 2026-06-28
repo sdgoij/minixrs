@@ -90,6 +90,24 @@ pub fn fpu_init() {
     }
 }
 
+/// Release the FPU if it is owned by `proc`. Forces reload on next use.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` with a valid `p_cpu` field.
+/// Release the FPU if it is owned by `proc`. Forces reload on next use.
+///
+/// Delegates to `cpulocals::release_fpu` for the actual per-CPU owner check.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be null.
+pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
+    unsafe {
+        crate::cpulocals::release_fpu(proc);
+    }
+}
+
 // ── IDT gate builders ─────────────────────────────────────
 
 /// 16-byte x86_64 IDT gate descriptor as (low_qword, high_qword).

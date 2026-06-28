@@ -398,6 +398,20 @@ pub unsafe fn init_cpulocals() {
     }
 }
 
+/// Release the FPU if it is owned by `proc`. Forces reload on next use.
+///
+/// # Safety
+///
+/// `proc` should point to a valid `Proc` or be null.
+pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
+    unsafe {
+        let owner = (*core::ptr::addr_of_mut!(CPU_LOCAL_VARS)).fpu_owner;
+        if owner == proc {
+            (*core::ptr::addr_of_mut!(CPU_LOCAL_VARS)).fpu_owner = core::ptr::null_mut();
+        }
+    }
+}
+
 /// # Safety
 ///
 /// `CPU_LOCAL_STORAGE` must be initialized.
