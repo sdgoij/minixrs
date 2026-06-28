@@ -8,6 +8,7 @@ pub mod prelude {
 }
 
 pub mod clock;
+pub mod eeprom;
 pub mod system;
 
 /// Driver error type.
@@ -19,6 +20,8 @@ pub enum DriverError {
     Busy,
     /// I/O error during operation.
     Io,
+    /// Invalid argument.
+    InvalidArgument,
     /// Operation not supported by this device.
     Unsupported,
     /// Unknown or unexpected error.

@@ -2484,13 +2484,14 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
     - Power-off via keyboard controller port 0x64
     - Raw register read/write for diagnostics
 
-- [ ] **11a.3 — EEPROM drivers** (`crates/drivers/src/eeprom/`)
-  - [ ] **CAT24C256 driver** (`cat24c256.rs`, ~480 lines)
-    - 256K-bit (32KB) I2C EEPROM support
-    - Valid I2C addresses: 0x50-0x57
-    - Page-aligned writes (16 bytes/page)
-    - Chunked reads (128 bytes/chunk)
-    - I2C ioctl execution structure
+- [x] **11a.3 — EEPROM drivers** (`crates/drivers/src/eeprom/`)
+  - [x] **CAT24C256 driver** (`cat24c256.rs`, ~420 lines, 17 tests)
+    - 256K-bit (32KB) I2C EEPROM support with mock bus testing
+    - Valid I2C addresses: 0x50-0x57 with `is_valid_address()`
+    - Page-aligned writes (16 bytes/page) with overflow-safe chunking
+    - Chunked reads (128 bytes/chunk) with full EEPROM read support
+    - `EepromBus` trait for pluggable I2C backend
+    - `I2cExec` ioctl structure matching MINIX `minix_i2c_ioctl_exec_t`
 
 - [ ] **11a.4 — Bus drivers** (`crates/drivers/src/bus/`)
   - [ ] **I2C driver** (`i2c.rs`, ~370 lines)
