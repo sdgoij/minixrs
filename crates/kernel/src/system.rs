@@ -188,6 +188,34 @@ const SAFEMEMSET_BYTES_OFF: usize = 24;
 const M1_P1_OFF: usize = 24;
 // M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
 
+// mess_lsys_krn_sys_vumap (for do_vumap):
+//   offset  0: endpt     (endpoint_t / i32)
+//   offset  8: vaddr     (vir_bytes / u64)
+//   offset 16: vcount    (int / i32)
+//   offset 20: _pad      (int / i32)
+//   offset 24: offset    (vir_bytes / u64)
+//   offset 32: access    (int / i32)
+//   offset 36: _pad2     (int / i32)
+//   offset 40: paddr     (vir_bytes / u64)
+//   offset 48: pmax      (int / i32)
+// mess_krn_lsys_sys_vumap (reply):
+//   offset  0: pcount    (int / i32)
+const VUMAP_ENDPT_OFF: usize = 0;
+const VUMAP_VADDR_OFF: usize = 8;
+const VUMAP_VCOUNT_OFF: usize = 16;
+const VUMAP_OFFSET_OFF: usize = 24;
+const VUMAP_ACCESS_OFF: usize = 32;
+const VUMAP_PADDR_OFF: usize = 40;
+const VUMAP_PMAX_OFF: usize = 48;
+const VUMAP_REPLY_PCOUNT_OFF: usize = 0;
+
+/// Maximum number of vectored map elements.
+const MAPVEC_NR: usize = 64;
+
+/// User virtual address access flags (converted to CPF_*).
+const VUA_READ: i32 = 0x0001;
+const VUA_WRITE: i32 = 0x0002;
+
 // mess_lsys_krn_sys_umap (for do_umap, do_umap_remote):
 //   offset  0: src_endpt  (endpoint_t / i32)
 //   offset  4: segment    (int / i32)
@@ -397,7 +425,7 @@ pub unsafe fn system_init() {
         map_call(15, do_vircopy_stub); // SYS_VIRCOPY
         map_call(16, do_physcopy_stub); // SYS_PHYSCOPY
         map_call(17, do_umap_remote_handler); // SYS_UMAP_REMOTE
-        map_call(18, do_vumap_stub); // SYS_VUMAP
+        map_call(18, do_vumap_handler); // SYS_VUMAP
         map_call(19, do_irqctl_stub); // SYS_IRQCTL
         map_call(24, do_setalarm_stub); // SYS_SETALARM
         map_call(25, do_times_handler); // SYS_TIMES
@@ -886,24 +914,39 @@ stub_handler!(do_privctl_stub, "SYS_PRIVCTL");
 stub_handler!(do_trace_stub, "SYS_TRACE");
 stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
 stub_handler!(do_physcopy_stub, "SYS_PHYSCOPY");
-stub_handler!(do_vumap_stub, "SYS_VUMAP");
 stub_handler!(do_irqctl_stub, "SYS_IRQCTL");
 stub_handler!(do_vtimer_stub, "SYS_VTIMER");
 stub_handler!(do_setalarm_stub, "SYS_SETALARM"); // needs clock
 
 // SAFECOPYFROM, SAFECOPYTO, VSAFECOPY — thin wrappers around grants module
+
+/// Handle SYS_SAFECOPYFROM: grant-based copy from remote process.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
 pub unsafe fn do_safecopy_from_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         crate::grants::do_safecopy_from(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
     }
 }
 
+/// Handle SYS_SAFECOPYTO: grant-based copy to remote process.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
 pub unsafe fn do_safecopy_to_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         crate::grants::do_safecopy_to(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
     }
 }
 
+/// Handle SYS_VSAFECOPY: vectored grant-based safe copy.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
 pub unsafe fn do_vsafecopy_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         crate::grants::do_vsafecopy(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
@@ -911,6 +954,10 @@ pub unsafe fn do_vsafecopy_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
 }
 
 /// SAFEMEMSET — grant-based memset
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
 pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let granter = msg_read_i32(msg, SAFEMEMSET_GRANTER_OFF);
@@ -940,6 +987,169 @@ pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
         // Write pattern via vm_memset
         crate::vm::vm_memset(phys_addr, pattern as u8, bytes as usize);
         crate::ipc::OK
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// do_vumap — vectored virtual-to-physical mapping (Phase 6.17)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Handle SYS_VUMAP: map a vector of grants or local virtual addresses to
+/// physical addresses.
+///
+/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_vumap.c`
+///
+/// # Safety
+///
+/// `caller` and `msg` must be valid.
+pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = (*caller).p_endpoint;
+        let source = msg_read_i32(msg, VUMAP_ENDPT_OFF);
+        let vaddr = msg_read_u64(msg, VUMAP_VADDR_OFF);
+        let mut vcount = msg_read_i32(msg, VUMAP_VCOUNT_OFF);
+        let offset = msg_read_u64(msg, VUMAP_OFFSET_OFF);
+        let mut access = msg_read_i32(msg, VUMAP_ACCESS_OFF);
+        let paddr = msg_read_u64(msg, VUMAP_PADDR_OFF);
+        let mut pmax = msg_read_i32(msg, VUMAP_PMAX_OFF);
+
+        // Validate bounds
+        if vcount <= 0 || pmax <= 0 {
+            return crate::ipc::EINVAL;
+        }
+        if vcount > MAPVEC_NR as i32 {
+            vcount = MAPVEC_NR as i32;
+        }
+        if pmax > MAPVEC_NR as i32 {
+            pmax = MAPVEC_NR as i32;
+        }
+
+        // Convert access flags to CPF_* flags
+        access = match access {
+            VUA_READ => crate::grants::CPF_READ,
+            VUA_WRITE => crate::grants::CPF_WRITE,
+            a if a == (VUA_READ | VUA_WRITE) => crate::grants::CPF_READ | crate::grants::CPF_WRITE,
+            _ => return crate::ipc::EINVAL,
+        };
+
+        // Resolve the source endpoint
+        let source_e = if source == SELF { endpt } else { source };
+
+        // Get source process info for CR3 switching
+        if !table::is_ok_endpoint(source_e) {
+            return crate::ipc::EFAULT;
+        }
+        let source_proc_nr = table::endpoint_slot(source_e);
+        let source_rp = proc_addr(source_proc_nr);
+        if source_rp.is_null() {
+            return crate::ipc::EFAULT;
+        }
+        let source_cr3 = (*source_rp).p_seg.p_cr3;
+        if source_cr3 == 0 {
+            return crate::ipc::EFAULT;
+        }
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 == 0 {
+            return crate::ipc::EFAULT;
+        }
+
+        // Allocate kernel-local vectors on the stack
+        let mut vvec: [arch_common::types::VumapVir; MAPVEC_NR] = [core::mem::zeroed(); MAPVEC_NR];
+        let mut pvec: [arch_common::types::VumapPhys; MAPVEC_NR] = [core::mem::zeroed(); MAPVEC_NR];
+
+        // Copy input vector from caller's address space
+        let _size = vcount as usize * size_of::<arch_common::types::VumapVir>();
+        arch_x86_64::asm::write_cr3(source_cr3);
+        core::ptr::copy_nonoverlapping(
+            vaddr as *const arch_common::types::VumapVir,
+            vvec.as_mut_ptr(),
+            vcount as usize,
+        );
+        arch_x86_64::asm::write_cr3(boot_cr3);
+
+        let mut pcount: i32 = 0;
+
+        // Process each input entry
+        for entry in vvec.iter().take(vcount as usize) {
+            if pcount >= pmax {
+                break;
+            }
+
+            let mut entry_size = entry.vv_size as u64;
+            if entry_size <= offset {
+                return crate::ipc::EINVAL;
+            }
+            entry_size -= offset;
+
+            let (mut vir_addr, granter_e) = if source != SELF {
+                // Grant-based resolution
+                let grant_id = entry.vv_u.u_grant;
+                match crate::grants::verify_grant(
+                    source_e, endpt, grant_id, entry_size, access, offset,
+                ) {
+                    Ok((newoffset, newep, _flags)) => (newoffset, newep),
+                    Err(e) => return e,
+                }
+            } else {
+                // Direct virtual address
+                let addr = entry.vv_u.u_addr + offset;
+                (addr, endpt)
+            };
+
+            // Validate granter endpoint
+            if !table::is_ok_endpoint(granter_e) {
+                return crate::ipc::EFAULT;
+            }
+            let granter_nr = table::endpoint_slot(granter_e);
+            let granter_rp = proc_addr(granter_nr);
+            if granter_rp.is_null() {
+                return crate::ipc::EFAULT;
+            }
+
+            // Walk the granter's page table for contiguous physical ranges
+            while entry_size > 0 && pcount < pmax {
+                let mut phys_addr: u64 = 0;
+                let chunk =
+                    crate::vm::vm_lookup_range(granter_rp, vir_addr, &mut phys_addr, entry_size);
+
+                if chunk == 0 {
+                    // Page not mapped
+                    if access & crate::grants::CPF_READ != 0 {
+                        return crate::ipc::EFAULT;
+                    }
+                    // Write to unmapped memory — check range (may allocate)
+                    if !crate::vm::vm_check_range(granter_rp, vir_addr, entry_size) {
+                        return crate::ipc::EFAULT;
+                    }
+                    return crate::ipc::EFAULT;
+                }
+
+                pvec[pcount as usize].vp_addr = phys_addr;
+                pvec[pcount as usize].vp_size = chunk as usize;
+                pcount += 1;
+
+                vir_addr += chunk;
+                entry_size -= chunk;
+            }
+        }
+
+        // Copy output vector back to caller's address space
+        if pcount > 0 {
+            let _psize = pcount as usize * size_of::<arch_common::types::VumapPhys>();
+            arch_x86_64::asm::write_cr3(source_cr3);
+            core::ptr::copy_nonoverlapping(
+                pvec.as_ptr(),
+                paddr as *mut arch_common::types::VumapPhys,
+                pcount as usize,
+            );
+            arch_x86_64::asm::write_cr3(boot_cr3);
+
+            // Write back pcount
+            msg_write_i32(msg, VUMAP_REPLY_PCOUNT_OFF, pcount);
+            OK
+        } else {
+            crate::ipc::EFAULT
+        }
     }
 }
 

@@ -454,6 +454,64 @@ pub unsafe fn virtual_copy(
     }
 }
 
+/// Look up a contiguous physical region starting at a virtual address.
+///
+/// Walks the process's page table at `vaddr` and returns the size of the
+/// contiguous physical mapping (up to `max_size`). Stores the physical
+/// address in `phys_addr`.
+///
+/// Returns the contiguous chunk size in bytes, or 0 if the page is not mapped.
+///
+/// # Safety
+///
+/// `proc` must point to a valid Proc with a page table.
+pub unsafe fn vm_lookup_range(
+    proc: *mut crate::proc::Proc,
+    vaddr: u64,
+    phys_addr: &mut u64,
+    max_size: u64,
+) -> u64 {
+    unsafe {
+        if proc.is_null() {
+            return 0;
+        }
+        let cr3 = (*proc).p_seg.p_cr3;
+        if cr3 == 0 {
+            return 0;
+        }
+
+        let result = match crate::pagetable::walk(cr3, vaddr) {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+
+        let frame = result.pte_value & arch_x86_64::pte::PG_FRAME;
+        let offset = vaddr & 0xFFF;
+        *phys_addr = frame + offset;
+
+        match result.level {
+            1 => {
+                // 4KB page — can map up to 4KB
+                let remaining_in_page = 0x1000 - offset;
+                remaining_in_page.min(max_size)
+            }
+            2 => {
+                // 2MB huge page — can map up to 2MB
+                let base = vaddr & !((1 << 21) - 1);
+                let remaining = (1 << 21) - (vaddr - base);
+                remaining.min(max_size)
+            }
+            3 => {
+                // 1GB huge page — can map up to 1GB
+                let base = vaddr & !((1 << 30) - 1);
+                let remaining = (1 << 30) - (vaddr - base);
+                remaining.min(max_size)
+            }
+            _ => 0,
+        }
+    }
+}
+
 pub fn mem_stats() -> (i32, i32, i32) {
     let mut nodes = 0i32;
     let mut free = 0i32;

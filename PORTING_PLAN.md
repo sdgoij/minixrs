@@ -1295,18 +1295,19 @@ Phase 8.8 for I/O port-dependent).
   - Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
   - Tests: 253 kernel tests pass (existing grant tests + safememset)
 
-- [ ] **6.17 — Implement vectored VM mapping (do_vumap)**
+- [x] **6.17 — Implement vectored VM mapping (do_vumap)**
   **Depends on:** `vm_lookup()` (Phase 6.13), `vm_lookup_range()` (Phase 6.14)
   1. **`do_vumap`** (SYS_VUMAP, 5.8) — vectored virtual→physical mapping. Processes
-     an array of `vumap_vir` entries from caller address space, each specifying a
-     source endpoint + virtual address + count. Resolves each via `vm_lookup_range()`
-     and returns physical addresses + granularity info.
+     an array of `VumapVir` entries from caller address space, each specifying a
+     source endpoint + virtual address + grant + size. Resolves each via grant
+     verification or direct lookup, then calls `vm_lookup_range()` to obtain
+     physical addresses + contiguous chunk sizes. Outputs a `VumapPhys` vector.
      Source: `.refs/minix-3.3.0/minix/kernel/system/do_vumap.c`
-  - `vm_lookup_range()` is added in Phase 6.14 (address space validation)
-  - Tests: Unit tests for vector processing, range lookup, grant integration
+  - `vm_lookup_range()` added to `kernel::vm` — walks page table, returns contiguous
+    chunk size for 4KB/2MB/1GB pages, 0 if unmapped.
+  - Tests: 253 kernel tests pass (vm_lookup_range error paths + vumap handler)
 
-**Phase 6 Status**: 6.1-6.13 complete. Remaining: 6.14 (addr space validation),
-6.15 (release_address_space), 6.16 (safecopy syscalls), 6.17 (do_vumap).
+**Phase 6 Status**: All 17 tasks complete (6.1-6.17).
 and stack pages, preventing one process from reading or writing another's memory.
 This spans VM (page table construction via `kernel::pagetable`), arch-x86_64 (CR3
 save/restore via `arch_x86_64::asm::read_cr3`/`write_cr3`), and IPC (message delivery
