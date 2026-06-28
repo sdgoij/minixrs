@@ -1522,16 +1522,18 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - Time resolution queries, alarm timer management
   - 13 tests covering resolution, time specs, tick advancement, adjtime
 
-- [ ] **7.5 — Port `minix/servers/pm/` Power Manager** (types + infra)
+- [x] **7.5 — Port `minix/servers/pm/` Power Manager** (types + infra)
   - Source: `.refs/minix-3.3.0/minix/servers/pm/` (all `.c` files)
   - Power management protocol, ACPI integration
-  - Implementation: `crates/servers/src/pm.rs` (543 lines)
-  - `SigSet` for signal masks, `Itimerval`/`TimeVal` for interval timers
-  - `MProc` process manager slot with compile-time offset verification
-  - Process table: `MPROC` array, `alloc_proc`, `free_proc`, `init_proc`
-  - Alarm management: `set_alarm`, `alarm_is_active`
-  - Bug fix: `free_proc` now correctly decrements `PROCS_IN_USE`
-  - 9 tests covering sigset ops, process allocation, alarm lifecycle
+  - Implementation: `crates/servers/src/pm.rs` (480 lines)
+  - `SigSet` for signal masks (128-bit, 6 operations)
+  - `Itimerval`/`TimeVal` for interval timers with ITIMER_REAL/VIRTUAL/PROF
+  - `MProc` process manager slot with 40 fields matching `mproc.h` layout
+  - Compile-time offset verification via `offset_of!` assertions
+  - Process table: `MPROC` array, `alloc_proc`, `free_proc`, `init_proc`, `PROCS_IN_USE`
+  - Alarm management: `set_alarm`, `alarm_is_active`, `cancel_alarm`
+  - Bug fix: `free_proc` correctly decrements `PROCS_IN_USE`
+  - 22 tests covering sigset ops, process allocation, alarm lifecycle
 
 ---
 
