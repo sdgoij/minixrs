@@ -2612,9 +2612,13 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Block driver API stubs (open/close/transfer)
   - Real SDHCI host controller implementation deferred (x86_64 MMIO driver needed)
 
-- [ ] **11b.9 — `minix/drivers/storage/memory/`**
+- [x] **11b.9 — `minix/drivers/storage/memory/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/memory/`
-  - Memory storage driver — stub ported (12/12 passed)
+  - Memory device driver in `crates/drivers/src/storage/memory.rs` (~180 lines, 14 tests)
+  - `/dev/null`: read returns EOF, write discards all data
+  - `/dev/zero`: read returns zeros, write discards all data
+  - Open/close tracking and init/reset
+  - `/dev/mem` and `/dev/kmem` deferred (need `vm_map_phys`; see 12.18)
 
 - [ ] **11b.10 — `minix/drivers/storage/fbd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/fbd/`

@@ -6,6 +6,7 @@ pub mod ahci;
 pub mod at_wini;
 pub mod filter;
 pub mod floppy;
+pub mod memory;
 pub mod mmc;
 pub mod ramdisk;
 pub mod virtio_blk;
