@@ -7,6 +7,7 @@ pub mod prelude {
     pub use core::ops::DerefMut;
 }
 
+pub mod clock;
 pub mod system;
 
 /// Driver error type.

@@ -2474,13 +2474,15 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
     - Minimum 256 samples before reseed
     - External entropy injection via `random_putbytes()`
 
-- [ ] **11a.2 — Clock drivers** (`crates/drivers/src/clock/`)
-  - [ ] **CMOS/RTC driver** (`rtc.rs`, ~415 lines)
-    - CMOS I/O port access (0x70/0x71)
-    - BCD/binary conversion, update-in-progress sync
-    - Time get/set with consistency checking
-    - Power-off via keyboard controller (port 0xB2)
-    - `RtcTime` struct with year conversion (2000 + year field)
+- [x] **11a.2 — Clock drivers** (`crates/drivers/src/clock/`)
+  - [x] **CMOS/RTC driver** (`rtc.rs`, ~350 lines, 12 tests)
+    - CMOS I/O port access via inline asm (0x70/0x71)
+    - BCD/binary conversion with roundtrip verification
+    - Update-in-progress sync with double-read consistency check
+    - `rtc_get_time()` with year conversion (2000/1900 base)
+    - `rtc_set_time()` with update inhibit and divider stop/start
+    - Power-off via keyboard controller port 0x64
+    - Raw register read/write for diagnostics
 
 - [ ] **11a.3 — EEPROM drivers** (`crates/drivers/src/eeprom/`)
   - [ ] **CAT24C256 driver** (`cat24c256.rs`, ~480 lines)
