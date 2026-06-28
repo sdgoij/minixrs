@@ -5,3 +5,4 @@
 pub mod i2c;
 pub mod pci;
 pub mod ti1225;
+pub mod virtio;

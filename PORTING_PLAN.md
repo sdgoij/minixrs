@@ -2565,9 +2565,17 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Block device interface: open/close/read/write with geometry
   - 16 tests covering init, open/close tracking, read/write, offset, EOF
 
-- [ ] **11b.5 — `minix/drivers/storage/virtio_blk/`**
+- [x] **11b.5 — `minix/drivers/storage/virtio_blk/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/virtio_blk/`
-  - Virtio block driver — stub ported (15/15 passed)
+  - Virtio block driver in `crates/drivers/src/storage/virtio_blk.rs` (~370 lines, 29 tests)
+  - Virtio PCI transport layer in `crates/drivers/src/bus/virtio.rs` (~580 lines, 13 tests)
+  - PCI probe for virtio device (vendor 0x1AF4, sub-device ID 0x0002), I/O port BAR0
+  - Device lifecycle: reset, ACK, DRV, feature exchange, DRV_OK
+  - Single virtqueue allocation, vring management from static storage
+  - Scatter-gather I/O: header + data + status descriptor chain submission
+  - Poll-based synchronous transfer (spin-wait with bounded iterations)
+  - Cache flush with barrier support
+  - Interrupt handling: ISR read, descriptor reap, IRQ re-enable
 
 - [ ] **11b.6 — `minix/drivers/storage/vnd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/`

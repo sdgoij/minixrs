@@ -6,3 +6,4 @@ pub mod ahci;
 pub mod at_wini;
 pub mod floppy;
 pub mod ramdisk;
+pub mod virtio_blk;
