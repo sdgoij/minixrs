@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod clock;
 pub mod debug;
 pub mod exec;
 pub mod glo;

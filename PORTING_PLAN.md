@@ -1452,16 +1452,19 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
 
 ### Tasks
 
-- [ ] **7.1 — Port `minix/kernel/clock.c`**
+- [x] **7.1 — Port `minix/kernel/clock.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/clock.c`
   - `get_realtime()` / `set_realtime()`, `get_monotonic()`, `set_kernel_timer()`, `cycles_accounting_init()`, `context_stop()` / `context_stop_idle()`
-  - Tests: Timer fires at correct interval
-  - Implementation: `crates/kernel/src/clock.rs` (371 lines)
-  - Timer queue: `MinixTimer` struct, `TimerArg` union, `tmrs_settimer`/`tmrs_clrtimer`/`tmrs_exptimers`
+  - Tests: 18 new timer tests (271 kernel tests total)
+  - Implementation: `crates/kernel/src/clock.rs` (430+ lines)
+  - Timer queue: `MinixTimer` struct, `tmrs_settimer`/`tmrs_clrtimer`/`tmrs_exptimers` with sorted linked list
   - Clock accessors: `get_monotonic`, `set_monotonic`, `get_realtime`, `set_realtime`, `tick`
+  - `timer_int_handler`: monotonic/realtime update, process accounting, virtual timer decrement,
+    vtimer_check for expired timers, load average update, watchdog timer expiration
   - Time conversion: `ms_2_cpu_time`, `cpu_time_2_ms`, `set_system_hz`
   - Adjtime support: `set_adjtime_delta`, `get_adjtime_delta`
-  - Compile-time size verification for `MinixTimer` (32 bytes) and `TimerArg` (8 bytes)
+  - vtimer_check: sends SIGVTALRM/SIGPROF on virtual/profile timer expiry
+  - Compile-time size verification for `MinixTimer` (32 bytes)
 
 - [ ] **7.2 — Port `minix/kernel/interrupt.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/interrupt.c`
