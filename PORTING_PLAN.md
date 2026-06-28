@@ -2295,12 +2295,28 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   service_pm_postponed handles PM_EXEC phase 2 (apply new binary) and
   PM_DUMPCORE (write core file). Need req_readwrite for data I/O.
 
-- [ ] **10.9 — Port `vfs_fs.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_fs.c`
-  - Filesystem mount operations
-  - Created `vfs/mount.rs` with get_free_vmnt(), find_vmnt(),
-    lock_vmnt(), unlock_vmnt(), upgrade/downgrade helpers, do_mount/umount stubs
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.9 — Port mount/vmnt/vnode operations (`mount.c`, `vmnt.c`, `vnode.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c`, `vmnt.c`, `vnode.c`
+  - Implemented in `crates/servers/src/vfs/mount.rs`:
+    - **Vmnt table**: find_vmnt, get_free_vmnt, init_vmnts, mark_vmnt_free,
+      lock/unlock/upgrade/downgrade_vmnt
+    - **Vnode table**: get_free_vnode, find_vnode, init_vnodes,
+      lock/unlock_vnode, dup_vnode, put_vnode, vnode_clean_refs
+    - **Mount operations**: do_mount, do_umount, mount_fs, unmount,
+      mount_pfs, is_nonedev, unmount_all
+  - All stubs — real impls need FS request layer (10.2) + IPC
+
+### Deferred mount stubs
+- [ ] **10.9a — Wire vmnt/vnode table operations** (`servers/src/vfs/mount.rs`)
+  **Depends on:** VFS global tables initialized (10.1)
+  find_vmnt/get_free_vmnt need to scan the vmnt table. vnode helpers
+  need to scan the vnode table. Lock/unlock need tll infrastructure.
+
+- [ ] **10.9b — Wire mount/unmount operations** (`servers/src/vfs/mount.rs`)
+  **Depends on:** FS request wrappers (10.2), device operations (10.4),
+  driver mapping (10.4 dmap), root FS bootstrap
+  do_mount needs: parse message, resolve path, find driver, call
+  req_readsuper, allocate vmnt, link root vnode.
 
 - [ ] **10.10 — Port `vfs_proc.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_proc.c`
