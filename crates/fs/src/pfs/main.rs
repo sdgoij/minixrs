@@ -95,10 +95,10 @@ mod tests {
     fn test_signal_handler_ignores_non_sigterm() {
         unsafe {
             glo::pfs_init_globals();
-        }
-        signal_handler(10); // Not SIGTERM
-        unsafe {
-            assert_eq!((*glo::pfs_ptr()).exitsignaled, 0);
+            signal_handler(10); // Not SIGTERM
+            let pfs = glo::pfs_ptr();
+            let flags = core::ptr::addr_of_mut!((*pfs).exitsignaled);
+            assert_eq!(flags.read(), 0);
         }
     }
 
@@ -106,10 +106,10 @@ mod tests {
     fn test_signal_handler_sigterm() {
         unsafe {
             glo::pfs_init_globals();
-        }
-        signal_handler(15); // SIGTERM
-        unsafe {
-            assert_eq!((*glo::pfs_ptr()).exitsignaled, 1);
+            signal_handler(15); // SIGTERM
+            let pfs = glo::pfs_ptr();
+            let flags = core::ptr::addr_of_mut!((*pfs).exitsignaled);
+            assert_eq!(flags.read(), 1);
         }
     }
 }

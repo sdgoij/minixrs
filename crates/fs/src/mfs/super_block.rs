@@ -5,9 +5,6 @@ use crate::mfs::glo;
 use crate::mfs::types::*;
 use crate::mfs::utility::*;
 
-static mut USED_BLOCKS: u32 = 0;
-static mut BLOCKS_KNOWN: i32 = 0;
-
 // Reference: super.c read_super()
 pub fn read_super(sp: &mut SuperBlock) -> i32 {
     if rw_super(sp, false) != OK {
@@ -153,13 +150,12 @@ pub fn free_bit(sp: &mut SuperBlock, _map: i32, _bit_returned: u32) {
 }
 
 // Reference: super.c get_used_blocks()
+// Returns the number of used blocks. For MFS this requires bitmap scanning
+// which needs the buffer cache. Returns 0 for now (TODO: implement when
+// buffer cache is available). The C code computes this from superblock fields.
 pub fn get_used_blocks(_sp: &mut SuperBlock) -> u32 {
-    unsafe {
-        if BLOCKS_KNOWN == 0 {
-            BLOCKS_KNOWN = 1;
-        }
-        USED_BLOCKS
-    }
+    // TODO: compute from bitmap when buffer cache is wired
+    0
 }
 
 #[cfg(test)]
@@ -179,7 +175,6 @@ mod tests {
     #[test]
     fn test_get_used_blocks_starts_at_zero() {
         let mut sp = SuperBlock::default();
-        // get_used_blocks reads static USED_BLOCKS (initially 0).
         assert_eq!(get_used_blocks(&mut sp), 0);
     }
 

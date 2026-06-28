@@ -33,19 +33,15 @@ pub unsafe fn fs_sync() -> i32 {
     OK
 }
 
-/// fs_flush — flush blocks of a device.
+/// fs_flush — flush blocks of all devices.
+///
+/// TODO: parse VFS message for target device, then call
+/// lmfs_flushall() / lmfs_invalidate(dev) for non-self devices.
+/// Currently a no-op (IPC message parsing not wired).
 pub unsafe fn fs_flush() -> i32 {
-    let ext2 = glo::ext2_ptr();
-    // TODO: parse message for device
-    let dev = (*ext2).fs_dev;
-
-    if dev == (*ext2).fs_dev {
-        return EBUSY;
-    }
-
-    // TODO: lmfs_flushall();
-    // TODO: lmfs_invalidate(dev);
-
+    // TODO: read target device from fs_m_in IPC message
+    // If target == fs_dev, return EBUSY (can't flush ourselves).
+    // Otherwise: lmfs_flushall(); lmfs_invalidate(dev);
     OK
 }
 

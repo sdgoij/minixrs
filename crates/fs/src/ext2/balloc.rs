@@ -104,15 +104,22 @@ pub fn alloc_block(rip: &mut Inode, block: u32) -> u32 {
     b
 }
 
-fn alloc_block_bit(rip: &mut Inode, _goal: u32) -> u32 {
+fn alloc_block_bit(rip: &mut Inode, goal: u32) -> u32 {
     let sp = match rip.i_sp.as_mut() {
         Some(sp) => *sp as *mut SuperBlock,
         None => return NO_BLOCK,
     };
 
     // TODO: Implement actual block bitmap allocation via buffer cache
-    // See C source balloc.c alloc_block_bit()
-    let _ = sp;
+    // In C balloc.c, `goal` seeds the bitmap search position:
+    //   1. Compute block group from goal via group = (goal - s_first_data_block) / s_blocks_per_group
+    //   2. Load the group's block bitmap via get_block
+    //   3. Search forward from bit = (goal - s_first_data_block) % s_blocks_per_group
+    //   4. Fall back to linear search across all groups if not found in goal group
+    //   5. Update sp.s_bsearch on success, set bitmap bit, mark buffer dirty
+    //   6. Update s_free_blocks_count and group's free_blocks_count
+    // When implementing, DO NOT use _goal prefix — goal MUST be used for search.
+    let _ = (sp, goal);
     NO_BLOCK
 }
 

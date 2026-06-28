@@ -2,7 +2,6 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::glo;
-use crate::mfs::inode::*;
 
 pub fn forbidden(rip_idx: u16, access_desired: u16) -> i32 {
     unsafe {
@@ -62,49 +61,15 @@ pub fn read_only(rip_idx: u16) -> i32 {
 }
 
 pub fn fs_chmod() -> i32 {
-    unsafe {
-        let _inode_nr: u32 = 0;
-        let _mode: u16 = 0;
-        let rip_idx = match get_inode((*glo::mfs_ptr()).fs_dev, _inode_nr) {
-            Some(i) => i,
-            None => return EINVAL,
-        };
-        let rip = &mut *glo::get_inode_ptr(rip_idx as usize);
-        if let Some(ref sp) = (*rip).i_sp {
-            if sp.s_rd_only != 0 {
-                put_inode(Some(rip_idx));
-                return EROFS;
-            }
-        }
-        (*rip).i_mode = ((*rip).i_mode & !ALL_MODES) | (_mode & ALL_MODES);
-        (*rip).i_update |= CTIME;
-        (*rip).i_dirt = IN_DIRTY;
-        put_inode(Some(rip_idx));
-        OK
-    }
+    // TODO: read inode_nr and mode from IPC message
+    // Currently returns EINVAL to avoid silently corrupting inode 0.
+    EINVAL
 }
 
 pub fn fs_chown() -> i32 {
-    unsafe {
-        let _inode_nr: u32 = 0;
-        let _uid: u16 = 0;
-        let _gid: u16 = 0;
-        let rip_idx = match get_inode((*glo::mfs_ptr()).fs_dev, _inode_nr) {
-            Some(i) => i,
-            None => return EINVAL,
-        };
-        let r = read_only(rip_idx);
-        if r == OK {
-            let rip = &mut *glo::get_inode_ptr(rip_idx as usize);
-            (*rip).i_uid = _uid;
-            (*rip).i_gid = _gid;
-            (*rip).i_mode &= !(I_SET_UID_BIT | I_SET_GID_BIT);
-            (*rip).i_update |= CTIME;
-            (*rip).i_dirt = IN_DIRTY;
-        }
-        put_inode(Some(rip_idx));
-        r
-    }
+    // TODO: read inode_nr, uid, gid from IPC message
+    // Currently returns EINVAL to avoid silently corrupting inode 0.
+    EINVAL
 }
 
 pub fn fs_getdents() -> i32 {
