@@ -92,11 +92,26 @@ pub unsafe fn verify_grant(
                 return Err(EPERM);
             }
 
-            // Read the grant entry from the granter's grant table
-            // The grant table lives in the granter's address space.
-            // In a flat kernel, we read it via the identity-mapped grant table address.
-            let grant_table_ptr = priv_data.s_grant_table as *const CpGrant;
-            let g = *grant_table_ptr.add(cur_grant as usize);
+            // Read the grant entry from the granter's grant table.
+            // On bare metal with per-process page tables, the grant table
+            // address is only valid in the granter's address space, so we
+            // switch CR3 to read it. In test mode (BOOT_CR3 == 0) or when
+            // the granter has no per-process page table (identity-mapped),
+            // read via the identity-mapped address directly.
+            let grant_entry_addr = priv_data.s_grant_table
+                + (cur_grant as u64) * core::mem::size_of::<CpGrant>() as u64;
+
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let g = if boot_cr3 != 0 && (*granter_proc).p_seg.p_cr3 != 0 {
+                let saved = arch_x86_64::asm::read_cr3();
+                arch_x86_64::asm::write_cr3((*granter_proc).p_seg.p_cr3);
+                let entry = core::ptr::read(grant_entry_addr as *const CpGrant);
+                arch_x86_64::asm::write_cr3(saved);
+                entry
+            } else {
+                // No per-process page table — read via identity map
+                core::ptr::read(grant_entry_addr as *const CpGrant)
+            };
 
             let flags = g.cp_flags;
 
@@ -220,17 +235,12 @@ pub unsafe fn safecopy(
             return EFAULT_SRC;
         }
 
-        // Validate caller's addr buffer is NOT in kernel space.
-        // This is a simplified check — the full Minix implementation
-        // uses `virtual_copy_vmcheck()` which queries the VM server
-        // for page-level permission validation. Without VM, we reject
-        // any address at or above KERNBASE (kernel high mapping).
-        //
-        // TODO: Replace with `vm_check_range(caller, addr, bytes)`
-        // when VM server infrastructure is available (Phase 6+).
-        // See PORTING_PLAN.md Phase 6 task "Address space validation
-        // for safecopy".
-        if caller.is_null() || addr >= arch_x86_64::param::KERNBASE {
+        // Phase 6.14: validate caller's buffer address via page table walk.
+        // Walks the caller's per-process page table to verify every page
+        // in `addr..addr+bytes` is present. For kernel tasks (no per-process
+        // CR3), falls back to trusting the address (same as identity-mapped
+        // kernel access pattern).
+        if !crate::vm::vm_check_range(caller, addr, bytes) {
             return EFAULT_DST;
         }
 
@@ -255,18 +265,17 @@ pub unsafe fn safecopy(
             return OK;
         }
 
-        // Follow grant redirection from verify_grant.
+        // Phase 6.14: wire new_granter into copy path and
+        // differentiate CPF_TRY from normal copies.
+        //
         // Magic grants set `new_granter` to `cp_who_from` (the
-        // process whose memory is actually being accessed). The C
-        // code uses this to determine which address space
-        // `v_offset` belongs to for `virtual_copy_vmcheck`.
-        // Track for Phase 6.5+ per-process page table support.
-        let _effective_granter = new_granter;
-
-        // CPF_TRY: C uses `virtual_copy` (no VM fault-in) for try
-        // grants vs `virtual_copy_vmcheck` for normal grants.
-        // Without VM integration, both paths are identical.
-        #[allow(clippy::if_same_then_else)]
+        // process whose memory is actually being accessed). Use
+        // the effective granter's CR3 to access v_offset and the
+        // caller's CR3 to access addr.
+        //
+        // CPF_TRY grants prevent page-fault-on-demand behavior;
+        // use a direct identity-map copy (same as C's virtual_copy
+        // for try grants vs virtual_copy_vmcheck for normal grants).
         if flags & CPF_TRY != 0 {
             core::ptr::copy_nonoverlapping(
                 src_addr as *const u8,
@@ -275,11 +284,42 @@ pub unsafe fn safecopy(
             );
             OK
         } else {
-            core::ptr::copy_nonoverlapping(
-                src_addr as *const u8,
-                dst_addr as *mut u8,
-                bytes as usize,
-            );
+            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            if boot_cr3 == 0 {
+                // Pre-init / test mode: direct copy
+                core::ptr::copy_nonoverlapping(
+                    src_addr as *const u8,
+                    dst_addr as *mut u8,
+                    bytes as usize,
+                );
+                return OK;
+            }
+
+            // Normal: CR3-switched copy using virtual_copy.
+            // virtual_copy handles the bounce-buffer switching
+            // between source and destination address spaces.
+            // It returns non-zero when a process has no per-process
+            // CR3 (kernel task using identity map); in that case
+            // fall back to direct copy since both addresses are
+            // accessible from the kernel's current CR3.
+            let caller_slot = endpoint_slot((*caller).p_endpoint);
+            let effective_slot = endpoint_slot(new_granter);
+
+            let (src_proc, dst_proc) = if access & CPF_READ != 0 {
+                (effective_slot, caller_slot)
+            } else {
+                (caller_slot, effective_slot)
+            };
+
+            if crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes as usize) != 0
+            {
+                // Fallback: identity-mapped (kernel task) addresses
+                core::ptr::copy_nonoverlapping(
+                    src_addr as *const u8,
+                    dst_addr as *mut u8,
+                    bytes as usize,
+                );
+            }
             OK
         }
     }

@@ -349,6 +349,43 @@ pub unsafe fn vm_memset(physaddr: u64, c: u8, count: usize) -> i32 {
     }
 }
 
+/// Check if a virtual address range is validly mapped in a process's address space.
+///
+/// Walks the process's page table for each page in `addr..addr+bytes`
+/// and verifies it is present. Returns true only if ALL pages are mapped.
+///
+/// # Safety
+///
+/// `caller` must point to a valid Proc.
+pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u64) -> bool {
+    unsafe {
+        if caller.is_null() {
+            return false;
+        }
+        let cr3 = (*caller).p_seg.p_cr3;
+        if cr3 == 0 {
+            // No per-process page table — uses BOOT_CR3. Can't validate per-page
+            // permissions beyond the old KERNBASE check. Return true so kernel
+            // tasks (init, etc.) continue to work.
+            return true;
+        }
+        if bytes == 0 {
+            return true;
+        }
+        let start = addr & !0xFFF;
+        let end_va = addr.saturating_add(bytes);
+        let end = ((end_va + 0xFFF) & !0xFFF).min(arch_x86_64::vmparam::VM_MAXUSER_ADDRESS);
+        let mut va = start;
+        while va < end {
+            if crate::pagetable::walk(cr3, va).is_err() {
+                return false;
+            }
+            va += 0x1000;
+        }
+        true
+    }
+}
+
 /// Copy data between two address spaces using CR3 switching.
 ///
 /// Copies `bytes` from `src_proc`'s virtual address `src_addr` to
@@ -611,6 +648,35 @@ mod tests {
             assert_eq!(allocd, total);
             let (_, free, _) = mem_stats();
             assert_eq!(free, 0);
+        }
+    }
+
+    // ── Phase 6.14 vm_check_range tests ────────────────────────────
+
+    #[test]
+    fn test_vm_check_range_null_caller() {
+        unsafe {
+            assert!(!vm_check_range(core::ptr::null_mut(), 0x1000, 64));
+        }
+    }
+
+    #[test]
+    fn test_vm_check_range_zero_bytes() {
+        unsafe {
+            crate::table::proc_init();
+            let rp = crate::table::proc_addr(0);
+            assert!(vm_check_range(rp, 0x1000, 0));
+        }
+    }
+
+    #[test]
+    fn test_vm_check_range_kernel_task_fallback() {
+        unsafe {
+            crate::table::proc_init();
+            let rp = crate::table::proc_addr(0);
+            // With zero CR3 (kernel task without per-process PT), returns true
+            (*rp).p_seg.p_cr3 = 0;
+            assert!(vm_check_range(rp, 0x1000, 64));
         }
     }
 }
