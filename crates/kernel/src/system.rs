@@ -168,6 +168,11 @@ const TIMES_REPLY_SYSTEM_OFF: usize = 32;
 const ABORT_HOW_OFF: usize = 0;
 
 const DIAGCTL_CODE_OFF: usize = 0;
+#[allow(dead_code)]
+const DIAGCTL_BUF_OFF: usize = 8;
+#[allow(dead_code)]
+const DIAGCTL_LEN_OFF: usize = 16;
+const DIAGCTL_ENDPT_OFF: usize = 20;
 
 const SCHEDULE_ENDPT_OFF: usize = 0;
 const SCHEDULE_QUANTUM_OFF: usize = 4;
@@ -2598,8 +2603,16 @@ pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 OK
             }
             arch_common::com::DIAGCTL_CODE_STACKTRACE => {
-                // Stub: proc_stacktrace not yet implemented
-                // TODO: call proc_stacktrace(proc_addr(..)) when available
+                let endpt = msg_read_i32(msg, DIAGCTL_ENDPT_OFF);
+                if !crate::table::is_ok_endpoint(endpt) {
+                    return crate::ipc::EINVAL;
+                }
+                let proc_nr = crate::table::endpoint_slot(endpt);
+                let rp = crate::table::proc_addr(proc_nr);
+                if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+                    return crate::ipc::EINVAL;
+                }
+                crate::debug::proc_stacktrace(rp);
                 OK
             }
             arch_common::com::DIAGCTL_CODE_REGISTER => {

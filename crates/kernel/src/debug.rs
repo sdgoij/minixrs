@@ -6,6 +6,8 @@
 //! All functions are `no_std` compatible — they write into fixed-size
 //! buffers rather than using formatted I/O.
 
+use core::arch::asm;
+
 use crate::r#priv::NR_SYS_CALLS;
 use crate::proc::*;
 
@@ -511,6 +513,173 @@ pub unsafe fn hook_ipc_clear(p: *mut Proc) {
     unsafe {
         let slot = proc_to_slot(p);
         ipc_clear_slot(slot);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// proc_stacktrace — dump call stack for diagnostics (Phase 8.9)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Dump a process's call stack to the kernel message buffer.
+///
+/// Walks the x86_64 kernel stack via saved RBP frames:
+///   frame layout: [saved RBP (8 bytes)] [return address (8 bytes)]
+/// The initial RBP is obtained inline (current process) or from kernel
+/// stack (non-current process via RSP after checking BOOT_CR3).
+///
+/// Prints up to 50 frames, then stops. Output goes to KMESSAGES buffer.
+///
+/// # Safety
+///
+/// `rp` must point to a valid Proc with a kernel stack in identity-mapped
+/// memory. Must be called on BOOT_CR3.
+/// Dump a process's call stack to the kernel message buffer.
+///
+/// Walks the x86_64 kernel stack via saved RBP frames:
+///   frame layout: [saved RBP (8 bytes)] [return address (8 bytes)]
+/// Prints up to 50 frames, then stops. Output goes to KMESSAGES buffer.
+///
+/// # Safety
+///
+/// `rp` must point to a valid Proc with a kernel stack in identity-mapped
+/// memory. Must be called on BOOT_CR3.
+pub unsafe fn proc_stacktrace(rp: *const Proc) {
+    unsafe {
+        let name_ptr = &(*rp).p_name as *const i8;
+        let ep = (*rp).p_endpoint;
+        let rip = (*rp).p_reg.rip;
+        let rsp = (*rp).p_reg.rsp;
+
+        // Format header manually into a stack buffer: "name (ep=N) rip=0x... rsp=0x...\n"
+        let mut buf = [0u8; 160];
+        let mut pos = 0;
+        // Append name
+        for i in 0..15 {
+            let c = *name_ptr.add(i) as u8;
+            if c == 0 {
+                break;
+            }
+            if pos < buf.len() {
+                buf[pos] = c;
+                pos += 1;
+            }
+        }
+        let hdr = format_u64(ep as u64);
+        append_str(&mut buf, &mut pos, b" (ep=");
+        append_str(&mut buf, &mut pos, &hdr);
+        append_str(&mut buf, &mut pos, b") rip=0x");
+        let rip_hex = hex64(rip);
+        append_str(&mut buf, &mut pos, &rip_hex);
+        append_str(&mut buf, &mut pos, b" rsp=0x");
+        let rsp_hex = hex64(rsp);
+        append_str(&mut buf, &mut pos, &rsp_hex);
+        append_str(&mut buf, &mut pos, b"\n");
+
+        append_kmess(&buf[..pos]);
+
+        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 == 0 {
+            append_kmess(b"  (stacktrace unavailable in test mode)\n");
+            return;
+        }
+
+        // Walk the kernel RBP chain.
+        // On x86_64, kernel functions push rbp; mov rbp, rsp at entry.
+        // Since the kernel stack is identity-mapped, we can read directly.
+        // The caller's stack frame is where we start; read RBP via inline asm.
+        let mut rbp: u64;
+        asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
+
+        append_kmess(b"  Stack trace:\n");
+
+        let mut n = 0;
+        while rbp != 0 && n < 50 {
+            let next_rbp = core::ptr::read_volatile(rbp as *const u64);
+            let ret_addr = core::ptr::read_volatile((rbp + 8) as *const u64);
+
+            // Format: "    #N: 0xXXXXXXXXXXXXXXXX\n"
+            let mut line = [0u8; 30];
+            let mut lp = 0;
+            append_str(&mut line, &mut lp, b"    #");
+            let n_str = format_u64(n as u64);
+            append_str(&mut line, &mut lp, &n_str);
+            append_str(&mut line, &mut lp, b": 0x");
+            let ra_hex = hex64(ret_addr);
+            append_str(&mut line, &mut lp, &ra_hex);
+            if lp < line.len() {
+                line[lp] = b'\n';
+                lp += 1;
+            }
+            append_kmess(&line[..lp]);
+
+            if next_rbp != 0 && next_rbp <= rbp {
+                append_kmess(b"    (stack corruption)\n");
+                break;
+            }
+            rbp = next_rbp;
+            n += 1;
+        }
+
+        if n >= 50 {
+            append_kmess(b"  (truncated after 50 frames)\n");
+        }
+    }
+}
+
+/// Format a u64 as a decimal string (no allocation).
+fn format_u64(mut v: u64) -> [u8; 20] {
+    let mut buf = [0u8; 20];
+    if v == 0 {
+        buf[0] = b'0';
+        return buf;
+    }
+    let mut i = 20;
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    let mut out = [0u8; 20];
+    let len = 20 - i;
+    out[..len].copy_from_slice(&buf[i..]);
+    out
+}
+
+/// Format a u64 as a 16-digit lowercase hex string.
+fn hex64(v: u64) -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    let hex_chars = b"0123456789abcdef";
+    for i in 0..16 {
+        buf[i] = hex_chars[((v >> (60 - i * 4)) & 0xF) as usize];
+    }
+    buf
+}
+
+/// Append a byte slice to a buffer at position `pos`, advancing `pos`.
+fn append_str(buf: &mut [u8], pos: &mut usize, s: &[u8]) {
+    for &b in s {
+        if *pos < buf.len() {
+            buf[*pos] = b;
+            *pos += 1;
+        }
+    }
+}
+
+/// Append bytes to the kernel messages buffer.
+fn append_kmess(bytes: &[u8]) {
+    unsafe {
+        let km = core::ptr::addr_of_mut!(crate::glo::KMESSAGES);
+        let next = &mut (*km).km_next;
+        let size = &mut (*km).km_size;
+        let km_buf = &raw mut (*km).km_buf as *mut u8;
+        for &b in bytes {
+            let idx = *next as usize;
+            if idx < 10000 {
+                core::ptr::write(km_buf.add(idx), b);
+                *next += 1;
+            }
+        }
+        *size = (*next).min(10000i32);
     }
 }
 

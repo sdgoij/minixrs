@@ -1817,18 +1817,25 @@ _not_ being used — its ISR reads back 0x00.
     SDEVIO zero count → OK, bad endpoint → EINVAL, registration verified. All 312
     kernel tests pass, clippy clean.
 
-- [ ] **8.9 — Implement `proc_stacktrace()` for diagnostics**
+- [x] **8.9 — Implement `proc_stacktrace()` for diagnostics**
   **Depends on:** x86_64 trap frame format (Phase 8.1), kernel stack layout (8.1)
-  `proc_stacktrace()` dumps the current call stack of a process for diagnostic
-  purposes (called from `DIAGCTL_CODE_STACKTRACE` in `do_diagctl`):
-  - Walks the process's kernel stack using the saved RBP frame pointers
-  - For each frame, reads RIP and RBP from the stack
-  - Outputs via `kputc()` or serial (up to `DIAG_BUFSIZE` limit)
-  - Handles edge cases: empty stack, corrupted frame pointers, kernel vs user frames
-  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_diagctl.c` (DIAGCTL_CODE_STACKTRACE)
-  - Tests: Can be partially tested with a known call chain; full test requires QEMU
-  - **Also**: update `do_diagctl_handler` in `crates/kernel/src/system.rs` to call
-    `proc_stacktrace()` instead of returning OK stub
+  Implemented in `crates/kernel/src/debug.rs`:
+  - `proc_stacktrace(rp)` walks the x86_64 kernel stack via saved RBP frame
+    chain: each frame is [saved RBP (8 bytes)] [return address (8 bytes)]
+  - Gets initial RBP via inline asm (for current process — called from interrupt
+    or diagctl context)
+  - Reads RBP chain directly from identity-mapped kernel stack
+  - Prints: process name, endpoint, RIP, RSP header line
+  - Walks up to 50 frames, each formatted as "    #N: 0xXXXXXXXXXXXXXXXX"
+  - Detects stack corruption (next_rbp <= current_rbp)
+  - Output goes to KMESSAGES buffer via `append_kmess()` helper
+  - Also added `hex64()`, `format_u64()`, `append_str()` helpers (no alloc)
+  - Updated `do_diagctl_handler` in `system.rs` STACKTRACE case: validates
+    endpoint via `is_ok_endpoint`, resolves to proc, calls `proc_stacktrace`
+  - Added `DIAGCTL_ENDPT_OFF` constant (offset 20) for endpt message field
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_diagctl.c` (DIAGCTL_CODE_STACKTRACE),
+    `.refs/minix-3.3.0/minix/kernel/arch/i386/exception.c` (proc_stacktrace)
+  - Gated on BOOT_CR3 (no-op in host test mode). All 312 kernel tests pass.
 
 - [ ] **8.10 — Implement deferred arch-dependent syscalls: do_exec, do_getmcontext/setmcontext**
   **Depends on:** arch_proc_init (Phase 8.1), data_copy (Phase 6.13)
