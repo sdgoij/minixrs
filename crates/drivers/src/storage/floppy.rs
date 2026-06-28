@@ -246,7 +246,7 @@ impl FloppyDrive {
     pub const fn new() -> Self {
         Self {
             calibrated: UNCALIBRATED,
-            density: NO_DENS,
+            density: 6, // default to 1.44" HD
             current_cyl: NO_CYL,
             current_sec: NO_SECTOR,
             motor_on: false,
@@ -400,7 +400,7 @@ mod tests {
     fn test_floppy_drive_new() {
         let f = FloppyDrive::new();
         assert_eq!(f.calibrated, UNCALIBRATED);
-        assert_eq!(f.density, NO_DENS);
+        assert_eq!(f.density, 6);
         assert_eq!(f.current_cyl, NO_CYL);
         assert_eq!(f.current_sec, NO_SECTOR);
         assert!(!f.motor_on);
@@ -450,7 +450,7 @@ mod tests {
     fn test_floppy_init() {
         floppy_init_drive(0);
         let f = floppy_drive(0).unwrap();
-        assert_eq!(f.density, NO_DENS);
+        assert_eq!(f.density, 6);
     }
 
     #[test]

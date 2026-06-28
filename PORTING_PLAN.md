@@ -2627,13 +2627,14 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - IOCTL codes (FBDCADDRULE/FBDCDELRULE/FBDCGETRULE)
   - All operations deferred (depend on IPC + rule engine; see 12.19)
 
-- [ ] **11b.13 — Stub fixes: vnd, at_wini, floppy**
+- [x] **11b.13 — Stub fixes: vnd, at_wini, floppy**
   - Source: `crates/drivers/src/storage/{vnd,at_wini,floppy}.rs`
   - vnd: Fixed `set_fd()` ENODEV — removed too-strict `open_count` guard for unconfigured devices
   - at_wini: Fixed `Default` impl — set `max_count` to `AT_WINI_MAX_SECS` (256) instead of zeroed
-  - floppy: Fixed `Default` impl — set `density_index` to 3 (1.44" HD) instead of zeroed
+  - floppy: Fixed `Default` impl — set `density` to 6 (1.44" HD) instead of `NO_DENS`
   - klog: Fixed `vec![]` shadowing by adding `use self::alloc::vec` in x86 test module
   - pci: Fixed `test_stubs` module guard (`#[cfg(not(feature = "x86"))]`) to avoid symbol conflicts
+  - Tests: 19 floppy, 17 at_wini, 25 vnd — all pass
 
 - [x] **11b.11 — PIC (8259A) wiring**
   - Source: `crates/arch-x86_64/src/apic.rs`
