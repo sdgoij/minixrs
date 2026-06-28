@@ -3,6 +3,7 @@
 #![no_std]
 
 pub mod mfs;
+pub mod procfs;
 pub mod vbfs;
 
 #[cfg(test)]

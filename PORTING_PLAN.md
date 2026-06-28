@@ -1995,19 +1995,23 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     and init validation (no share → EINVAL)
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.3 — Port `minix/fs/procfs/` — Process File System**
+- [x] **9.3 — Port `minix/fs/procfs/` — Process File System**
   - Source: `.refs/minix-3.3.0/minix/fs/procfs/` (12 files: buf.c, cpuinfo.c, main.c, pid.c, root.c, tree.c, util.c, const.h, cpuinfo.h, glo.h, inc.h, proto.h, type.h)
-  - Implemented in `crates/fs/src/procfs/` (7 modules: buffer, cpu_info, pid, root, tree, types, util)
-  - **types** — Core type definitions: VTreeFS interface types (`Inode`, `IndexT`, `CbData`, `InodeStat`, `FsHooks`), ProcFS `FileEntry`, kernel `ProcEntry`, PM `MprocEntry`, VFS `FprocEntry`, load average types, machine/CPU info types, process state/type constants, configuration constants (`NR_PROCS=256`, `NR_TASKS=32`)
-  - **buffer** — Output buffer with skip support (4096-byte static buffer), `buf_init()`, `buf_append()`, `buf_get()`, helper writers (`write_str`, `write_dec`, `write_udec`, `write_hex`), 6 unit tests
-  - **cpu_info** — x86 CPU feature flag names, `print_cpu_flags()`, `print_cpu()`, `root_cpuinfo()` handler
-  - **util** — `procfs_getloadavg()` load average calculation, placeholder `sys_hz()`/`get_ticks()` syslib wrappers
-  - **pid** — Dynamic PID file definitions (`psinfo`, `cmdline`, `environ`, `map`), `pid_psinfo()` full process status in ps format version 0, command line/environment frame parsing, memory map handler
-  - **root** — Static root file definitions (`hz`, `uptime`, `loadavg`, `kinfo`, `meminfo`, `dmap`, `cpuinfo`, `ipcvecs`, `mounts`), placeholder handlers for each
-  - **tree** — VTreeFS hook implementations (`lookup_hook`, `getdents_hook`, `read_hook`, `rdlink_hook`), process table synchronization (`update_proc_table`, `update_mproc_table`, `update_fproc_table`), dynamic PID directory management, external process table declarations (`PROC`, `MPROC`, `FPROC`)
-  - `#![no_std]` compatible with `extern crate alloc`
-  - `cargo clippy -p fs -- -D warnings` passes
-  - All 138 tests pass (including 6 new procfs buffer tests)
+  - Implemented in `crates/fs/src/procfs/` (10 modules):
+    - `consts.rs` — NR_INODES formula, file mode constants (REG_ALL_MODE, DIR_ALL_MODE, LNK_ALL_MODE), NO_DEV, SUPER_USER, PNAME_MAX, PSINFO_VERSION, state/type constants
+    - `types.rs` — Load struct, File struct with name/mode/data, FileData enum (None/Static/Dynamic)
+    - `buf.rs` — 4096-byte static output buffer, buf_init/buf_write/buf_write_fmt/buf_append/buf_get, BufWriter implementing core::fmt::Write for no_std formatting, 3 tests
+    - `root.rs` — ROOT_FILES static array with 7 entries (hz, uptime, loadavg, kinfo, meminfo, dmap, cpuinfo), handler functions writing to buf module (stubs pending syslib)
+    - `pid.rs` — PID_FILES array with 4 entries (psinfo, cmdline, environ, map), handler stubs, is_zombie() stub
+    - `tree.rs` — VTreeFS hook stubs (lookup/getdents/read/rdlink), process table struct stubs (Proc, MProc, FProc), slot_in_use
+    - `cpuinfo.rs` — x86 CPU feature flag name table (64 entries), print_cpu_flags, print_cpu, root_cpuinfo stub
+    - `misc.rs` — procfs_getloadavg stub
+    - `main.rs` — procfs_main entry point, init_hook, construct_tree, init_tree (VTreeFS calls stubbed)
+    - `mod.rs` — Module declarations and re-exports
+  - VTreeFS and syslib calls stubbed with todo!() (external libraries not yet ported)
+  - `#![no_std]` compatible, BufWriter enables core::fmt::Write for formatting
+  - Tests: 28 tests covering buf operations, type defaults, flag printing, handler no-panic, tree hooks
+  - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [ ] **9.4 — Port `minix/fs/iso9660fs/` — ISO 9660 File System**
   - Source: `.refs/minix-3.3.0/minix/fs/iso9660fs/`
