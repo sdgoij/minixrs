@@ -5,6 +5,7 @@
 pub mod ext2;
 pub mod iso9660;
 pub mod mfs;
+pub mod pfs;
 pub mod procfs;
 pub mod vbfs;
 
@@ -61,5 +62,55 @@ mod tests {
         assert_eq!(NO_ZONE, 0xFFFFFFFF);
         assert_eq!(NO_BLOCK, 0xFFFFFFFF);
         assert_eq!(NO_BIT, 0);
+    }
+
+    // ── PFS tests ──
+    mod pfs {
+        use crate::pfs::consts::*;
+
+        #[test]
+        fn pfs_ok_is_zero() {
+            assert_eq!(OK, 0);
+        }
+
+        #[test]
+        fn pfs_errno_values_are_distinct() {
+            let errnos = [EINVAL, EPERM, ENOSPC, EFBIG, ENFILE, EIO, EBUSY, ENOSYS];
+            for i in 0..errnos.len() {
+                for j in (i + 1)..errnos.len() {
+                    assert_ne!(
+                        errnos[i], errnos[j],
+                        "duplicate PFS errno {} at positions {} and {}",
+                        errnos[i], i, j,
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn pfs_nr_inodes_is_512() {
+            assert_eq!(PFS_NR_INODES, 512);
+        }
+
+        #[test]
+        fn pfs_pipe_buf_is_4096() {
+            assert_eq!(PIPE_BUF, 4096);
+        }
+
+        #[test]
+        fn pfs_inode_hash_constants() {
+            assert_eq!(INODE_HASH_SIZE, 128);
+            assert_eq!(INODE_HASH_MASK, 127);
+        }
+
+        #[test]
+        fn pfs_no_bit_is_zero() {
+            assert_eq!(NO_BIT, 0);
+        }
+
+        #[test]
+        fn pfs_fs_base() {
+            assert_eq!(FS_BASE, 0x1000);
+        }
     }
 }

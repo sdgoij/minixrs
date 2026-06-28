@@ -2064,15 +2064,36 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - Tests: 157 pass across all FS modules (62 MFS + 5 VBFS + 28 ProcFS + 46 ISO + 16 ext2)
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.6 — Port `minix/fs/pfs/` — Pipe File System**
-  - Source: `.refs/minix-3.3.0/minix/fs/pfs/`
-  - Implemented in `crates/fs/src/pfs/` (14 modules: bitmap, buffer, consts, dispatch, inode, link_ops, misc_ops, mod, mount_ops, open_ops, read_ops, stat_ops, types, utility)
-  - Inode cache with hash-based lookup, LRU-free list, and bitmap-backed allocation
-  - Buffer pool for per-pipe data blocks (4096 bytes each)
-  - Dispatch table mapping VFS/FS call numbers to handlers
-  - `#![no_std]` compatible with `extern crate alloc`
-  - `cargo clippy -p fs -- -D warnings` passes
-  - 160 total tests pass (including 13 new pfs tests)
+- [x] **9.6 — Port `minix/fs/pfs/` — Pipe File System**
+  - Source: `.refs/minix-3.3.0/minix/fs/pfs/` (19 files)
+  - Implemented in `crates/fs/src/pfs/` (18 modules):
+    - `consts.rs` — PFS_NR_INODES, INODE_HASH constants, PIPE_BUF=4096, errno values, mode bits
+    - `types.rs` — Inode, Buf (pipe data block) structs with Default impls
+    - `glo.rs` — PfsGlobal with inode table, buffer pool (64×4096), hash/free list heads
+    - `bitmap.rs` — alloc_bit/free_bit on a static inode bitmap array
+    - `buffer.rs` — Pipe data buffer pool: init_buffer_pool, get_block, put_block
+      with LRU free list (64 buffers, each 4096 bytes = 256KB total)
+    - `inode.rs` — Inode cache: init, get/find/put/alloc/free/dup, truncate_inode,
+      wipe_inode, update_times; no disk I/O needed (in-memory only)
+    - `path.rs` — fs_lookup returns ENOSYS (PFS has no directory structure)
+    - `read.rs` — pipe_read/pipe_write with real data movement via copy_nonoverlapping
+      and shift; fs_readwrite stub for IPC dispatch
+    - `link.rs` — fs_link/unlink/rename/rdlink return ENOSYS (pipes don't support these)
+    - `open.rs` — pfs_create_pipe allocates inode + buffer; fs_mknod/slink stubs
+    - `mount.rs` — fs_readsuper/unmount/mountpoint
+    - `misc.rs` — fs_sync/flush/new_driver all return OK (no disk I/O)
+    - `stadir.rs` — stat_inode helper, fs_stat stub, fs_statvfs
+    - `time.rs` — pfs_set_atime/mtime/ctime helpers, fs_utime stub
+    - `utility.rs` — no_sys, clock_time stub
+    - `table.rs` — 33-entry dispatch table
+    - `main.rs` — pfs_init, pfs_main, signal_handler server lifecycle
+  - Unlike MFS/ext2, PFS has NO on-disk format — everything is in-memory pipe
+    buffers. No libminixfs dependency needed. Pipe read/write have real data
+    movement (copy + shift), not stubs.
+  - `#![no_std]` compatible
+  - Tests: 232 pass across all FS modules (62 MFS + 5 VBFS + 28 ProcFS + 46 ISO
+    + 16 ext2 + 75 PFS)
+  - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [ ] **9.7 — Port `minix/lib/libminixfs/` — MINIX native filesystem library**
   - Source: `.refs/minix-3.3.0/minix/lib/libminixfs/` (cache.c, minixfs.h, fetch_credentials.c)
