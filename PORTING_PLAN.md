@@ -2643,15 +2643,15 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - `enable_apic()` — public alias for `detect_and_init()`
   - Tests: 254 passed, 0 failed, 2 ignored (arch-x86_64 crate)
 
-- [ ] **11b.12 — Storage DMA API**
+- [x] **11b.12 — Storage DMA API**
   - Source: `crates/drivers/src/storage/dma.rs`
-  - `alloc_dma_buf(n)` — wraps `PhysicalAllocator::alloc_contig()` for PRD tables
-  - `free_dma_buf(buf)` — delegates to `free_contig()`
+  - `DmaBuffer` — RAII wrapper with `Drop` auto-free (virt addr, phys addr, page count)
+  - `alloc_dma_buf(n)` / `free_dma_buf(buf)` — convenience helpers
   - `dma_buf_phys()`, `dma_buf_page_count()`, `dma_buf_size()` — accessors
-  - `DmaBuffer` — RAII wrapper with `Drop` auto-free
-  - Stub impl for non-x86 builds (returns `None`/zero)
+  - Pluggable allocator backend via `register_allocator(alloc_fn, free_fn)`
+  - Stub on non-x86 or before registration (returns `None`)
   - Added `dma` module to storage `mod.rs`
-  - Tests: 3 passed (page size, max pages, stub behavior)
+  - Tests: 2 passed (constants, full lifecycle)
 
 - [ ] **11b.13 — PIT timer + PIC remap + timer ISR** (kernel-boot)
   - PIT channel 0 programmed at 100 Hz (mode 3, square wave)
@@ -3136,6 +3136,13 @@ be replaced with real implementations.
   - Rule engine: `rule_find()`, `rule_pre_hook()`, `rule_io_hook()`, `rule_post_hook()`
   - Fault actions: delay, corrupt, drop, misplace, reorder, stale
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/fbd/`
+
+- [ ] **12.20 — Wire PhysicalAllocator to DMA buffer API** (`crates/drivers/src/storage/dma.rs`, `kernel/src/main.rs`)
+  **Depends on:** PhysicalAllocator init (Phase 6), `DmaBuffer` module (Phase 11b.12)
+  Call `dma::register_allocator(alloc_fn, free_fn)` during boot where:
+  - `alloc_fn` wraps `PhysicalAllocator::alloc_contig()` converting pages to `(*mut u8, u64)`
+  - `free_fn` wraps `PhysicalAllocator::free_contig()`
+  - Without this call, all DMA allocations return `None` (stub mode)
 
 ---
 

@@ -4,6 +4,7 @@
 
 pub mod ahci;
 pub mod at_wini;
+pub mod dma;
 pub mod fbd;
 pub mod filter;
 pub mod floppy;
