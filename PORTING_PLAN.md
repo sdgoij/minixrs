@@ -2276,13 +2276,24 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   **Depends on:** PM server protocol (Phase 12.3)
   pm_setgid/uid/groups/setsid update Fproc credential fields.
 
-- [ ] **10.8 — Port `vfs_pm.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_pm.c`
-  - VFS permission management
-  - Permission flags in `vfs/types.rs` (SU_UID, SYS_UID, SYS_GID),
-    credential fields in `Fproc` (fp_realuid, fp_effuid, fp_realgid,
-    fp_effgid, fp_ngroups, fp_sgroups, fp_umask)
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.8 — Port VFS↔PM protocol (`main.c` service_pm)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/main.c` (service_pm, service_pm_postponed)
+  - Implemented in `crates/servers/src/vfs/pm.rs`:
+    - `service_pm()` — dispatch PM messages (fork/exit/exec/setuid/etc.)
+    - `service_pm_postponed()` — handle postponed PM exec/dumpcore
+  - All stubs — real impls need PM server protocol (Phase 12.3)
+
+### Deferred PM protocol stubs
+- [ ] **10.8a — Wire PM message dispatch** (`servers/src/vfs/pm.rs`)
+  **Depends on:** PM server running (Phase 12.3), VFS message loop
+  service_pm needs to: read message type from scratchpad, call pm_fork/
+  pm_exit/pm_exec/pm_setuid/pm_setgid/pm_setsid/pm_reboot as appropriate,
+  reply to PM with result.
+
+- [ ] **10.8b — Wire postponed PM operations** (`servers/src/vfs/pm.rs`)
+  **Depends on:** FS request layer (10.2), vnode mgmt (10.10), exec.c
+  service_pm_postponed handles PM_EXEC phase 2 (apply new binary) and
+  PM_DUMPCORE (write core file). Need req_readwrite for data I/O.
 
 - [ ] **10.9 — Port `vfs_fs.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_fs.c`
