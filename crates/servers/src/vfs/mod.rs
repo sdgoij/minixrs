@@ -10,6 +10,8 @@
 //! | Module       | Description                                      |
 //! |--------------|--------------------------------------------------|
 //! | `consts`     | Constants: table sizes, call numbers, flags       |
+//! | `device`     | Character and block device I/O operations          |
+//! | `dmap`       | Device driver mapping table management             |
 //! | `types`      | Core data structures: Fproc, Filp, Vnode, Vmnt…   |
 //! | `glo`        | Global singleton `VfsGlobal`                      |
 //! | `table`      | Dispatch table mapping call numbers to handlers    |
@@ -23,6 +25,8 @@
 
 pub mod call;
 pub mod consts;
+pub mod device;
+pub mod dmap;
 pub mod filedes;
 pub mod glo;
 pub mod main;

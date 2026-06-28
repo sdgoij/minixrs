@@ -2198,13 +2198,33 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   **Depends on:** mount.c (Phase 10.6), dmap (10.4), FS request (10.2)
   do_mount/umount/mapdriver/ioctl. Need vmnt management + driver mapping.
 
-- [ ] **10.4 — Port `vfs_dev.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_dev.c`
-  - Device file handling
-  - Created `vfs/dev.rs` with character device stubs (cdev_open, cdev_close,
-    cdev_io, cdev_map, cdev_select, cdev_cancel) and block device stubs
-    (bdev_open, bdev_close, bdev_reply, bdev_up, do_ioctl)
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.4 — Port device operations (`device.c`, `dmap.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/device.c`, `dmap.c`, `dmap.h`
+  - Implemented in `crates/servers/src/vfs/`:
+    - `device.rs` — Character device operations: cdev_open/close/io/map/select/
+      cancel/reply; Block device operations: bdev_open/close/reply/up (11 functions)
+    - `dmap.rs` — Device driver mapping: lock/unlock_dmap, init_dmap,
+      dmap_driver_match, dmap_endpt_up, get_dmap, get_dmap_by_major,
+      dmap_unmap_by_endpt, map_service (9 functions)
+  - All return ENOSYS stubs — real impls need IPC to device drivers (Phase 11)
+
+### Deferred Device Layer Stubs
+
+- [ ] **10.4a — Wire character device operations** (`servers/src/vfs/device.rs`)
+  **Depends on:** IPC send/recv (Phase 13.2), device driver endpoints (Phase 11)
+  cdev_open/close/io/select/cancel need to: build CDEV_* messages, send to
+  driver via drv_sendrec, handle suspend/revive for blocking I/O. cdev_reply
+  needs to dispatch CDEV_REPLY/SEL1_REPLY/SEL2_REPLY to waiting workers.
+
+- [ ] **10.4b — Wire block device operations** (`servers/src/vfs/device.rs`)
+  **Depends on:** IPC send/recv (Phase 13.2), block driver endpoints (Phase 11)
+  bdev_open/close need BDEV_OPEN/CLOSE messages. bdev_reply needs to wake
+  blocked worker. bdev_up needs to reissue BDEV_OPEN to affected files.
+
+- [ ] **10.4c — Wire device driver mapping** (`servers/src/vfs/dmap.rs`)
+  **Depends on:** RS server (Phase 12.2), IPC
+  map_service receives rprocpub from RS, sets up dmap entries. init_dmap
+  initializes the table. dmap_endpt_up handles driver restart.
 
 - [ ] **10.5 — Port `vfs_mmap.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_mmap.c`
