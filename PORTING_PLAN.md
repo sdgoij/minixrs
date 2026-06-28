@@ -2590,9 +2590,15 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - IOCTL dispatch with busy/configured state checks
   - Real implementation depends on VFS server (Phase 12) for file descriptor ops
 
-- [ ] **11b.7 — `minix/drivers/storage/filter/`**
+- [x] **11b.7 — `minix/drivers/storage/filter/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/filter/`
-  - Storage filter driver — 18/18 passed (fixed CRC32 final XOR, MD5 copy slice length, filter driver retry defaults)
+  - Storage filter driver in `crates/drivers/src/storage/filter.rs` (~630 lines, 32 tests)
+  - CRC32: generated lookup table with `0x7fffffff` zero-substitute (257 entries)
+  - MD5: RFC 1321-compliant context with update/finalize (verified against all RFC test vectors)
+  - `calc_sum_into()`: Nil/XOR/CRC/MD5 checksum computation per sector
+  - Layout math: `log2phys`, `sec2sum_nr`, `expand`/`collapse`, `expand_sizes`/`collapse_size`, `convert`
+  - All types, enums, configuration from `inc.h`, `crc.h`, `md5.h`
+  - Filter transfer, driver lifecycle, and IPC communication deferred (Phase 12.15)
 
 - [ ] **11b.8 — `minix/drivers/storage/mmc/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/mmc/`
@@ -3062,18 +3068,25 @@ be replaced with real implementations.
   - `VNDIOCGET`: copy out `VndUser` via `sys_safecopyto` (unit number, device, inode)
   - All three IOCTLs also depend on `DIOCOPENCT` and `DIOCFLUSH` which need `sys_safecopyto` and `fsync` respectively
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/vnd.c`
-  `smp_schedule`. Implement `arch_send_smp_schedule_ipi(cpu)` in
-  arch-x86_64 APIC module.
 
-- [ ] **12.14 — Wire profiling clock and NMI** (`kernel/src/profile.rs`)
+- [ ] **12.14 — Wire profiling clock and NMI** (or `kernel/src/profile.rs`)
   **Depends on:** Architecture profile clock driver
   Replace TODO at lines 218/223/334: `arch_init_profile_clock`,
   `arch_stop_profile_clock`, NMI-based profiling.
 
-- [ ] **12.15 — Wire deferred profiling syscalls** (`kernel/src/system.rs`)
-  **Depends on:** Profiling infrastructure (12.14)
-  Replace stubs for `do_sprofile` (SYS_SPROF), `do_cprofile` (SYS_CPROF),
-  `do_profbuf` (SYS_PROFBUF). All need profiling clock + buffer management.
+- [ ] **12.16 — Wire filter transfer and driver IPC** (`crates/drivers/src/storage/filter.rs`)
+  **Depends on:** `read_write` IPC to underlying disk drivers, DS events, RS restart,
+  `alloc_contig`/`free_contig` for buffer allocation, `sys_setalarm` for timeouts
+  Replace `todo!()` in:
+  - `filter_transfer()` — full checksummed I/O: expand, `make_sum`, `read_write`,
+    `check_write` (on write) or `check_sum` then `collapse` (on read)
+  - `make_sum()` / `check_sum()` / `check_write()` — depend on `read_sectors()` which
+    calls `read_write()` for IPC to underlying block driver
+  - Driver lifecycle: `driver_init` (DS subscribe), `driver_shutdown`, `check_driver`
+    (RS interaction), `bad_driver`, `ds_event`
+  - `flt_malloc` / `flt_free` for dynamic buffer allocation via `alloc_contig`
+  - `flt_alarm` via `sys_setalarm` for driver timeout management
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/filter/` (driver.c, sum.c, util.c)
 
 ---
 
