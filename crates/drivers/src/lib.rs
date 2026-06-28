@@ -10,6 +10,7 @@ pub mod prelude {
 pub mod bus;
 pub mod clock;
 pub mod eeprom;
+pub mod storage;
 pub mod system;
 
 /// Driver error type.

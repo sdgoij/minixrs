@@ -2526,11 +2526,17 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
 
 **Dependencies**: Requires PCI driver (11a.4) and I2C driver (11a.4) for storage controller enumeration.
 
-- [ ] **11b.1 — `minix/drivers/storage/ahci/`**
+- [x] **11b.1 — `minix/drivers/storage/ahci/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/ahci/`
-  - AHCI driver — real PCI wiring (MMIO BAR5, `init_with_pci()`, `read_cap()`, DMA buffer allocation)
-  - Fixed: `is_atapi()`, `is_ata()`, `ncq_depth()`, `long_logical_sectors()`, `probe()`, `map_minor_to_port()`
-  - 14/14 tests passed (previously 7/14; fixed `is_atapi()`/`is_ata()` GCAP encoding, NCQ depth extraction, MMIO probe, device mapping)
+  - AHCI driver in `crates/drivers/src/storage/ahci.rs` (~500 lines, 20 tests)
+  - PCI bus 0 scan for AHCI controller (class 0x01, subclass 0x06)
+  - MMIO BAR5 mapping, HBA capabilities read (ports, cmd slots, NCQ, CLO)
+  - Port state machine (NoPort, SpinUp, NoDev, WaitDev, WaitId, BadDev, GoodDev)
+  - Device detection via signature (ATA 0x00000101, ATAPI 0xEB140101)
+  - IDENTIFY data parsing: is_atapi(), is_ata(), ncq_depth(), lba_count()
+  - Logical sector size detection (long_logical_sectors, logical_sector_size)
+  - AtaCmdFis for building command FIS (set_lba, set_sector_count)
+  - port_probe(), map_minor_to_port(), ahci_port_count()
 
 - [ ] **11b.2 — `minix/drivers/storage/at_wini/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/at_wini/`
