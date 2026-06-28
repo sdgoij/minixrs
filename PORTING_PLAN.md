@@ -2256,12 +2256,25 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     - 3 tests covering defaults and error paths
   - All return ENOSYS stubs — real impls need FS request layer + vnode mgmt
 
-- [ ] **10.7 — Port `vfs_misc.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_misc.c`
-  - Miscellaneous VFS operations
-  - Included in `vfs/types.rs` and `vfs/mod.rs` constants (LABEL_MAX,
-    PATH_MAX, FSTYPE_MAX, SYMLOOP) and helper functions
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.7 — Port misc operations (`misc.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c`
+  - Implemented in `crates/servers/src/vfs/misc.rs`:
+    - pm_exit/fork/exec/setgid/setuid/setgroups/setsid/reboot/dumpcore
+    - do_getsysinfo, do_getrusage, dupvm
+  - All stubs — real impls need PM IPC (Phase 12.3) and FS request layer
+
+### Deferred misc stubs
+- [ ] **10.7a — Wire process lifecycle hooks** (`servers/src/vfs/misc.rs`)
+  **Depends on:** PM server protocol (Phase 12.3), fd table, vnode mgmt
+  pm_exit/fork/exec need to manage fp_filp, close-on-exec, vnode refcounts.
+
+- [ ] **10.7b — Wire system info queries** (`servers/src/vfs/misc.rs`)
+  **Depends on:** IPC data copy (Phase 13.2)
+  do_getsysinfo needs sys_datacopy_wrapper to copy tables to userspace.
+
+- [ ] **10.7c — Wire PM credential hooks** (`servers/src/vfs/misc.rs`)
+  **Depends on:** PM server protocol (Phase 12.3)
+  pm_setgid/uid/groups/setsid update Fproc credential fields.
 
 - [ ] **10.8 — Port `vfs_pm.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_pm.c`
