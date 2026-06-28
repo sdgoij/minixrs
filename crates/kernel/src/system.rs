@@ -179,7 +179,12 @@ const M1_I1_OFF: usize = 8;
 const M1_I2_OFF: usize = 12;
 const M1_I3_OFF: usize = 16;
 
-// Phase 6.13: do_setgrant message offset
+// Phase 6.16: do_safememset message offsets
+const SAFEMEMSET_GRANTER_OFF: usize = 0;
+const SAFEMEMSET_GRANT_ID_OFF: usize = 4;
+const SAFEMEMSET_OFFSET_OFF: usize = 8;
+const SAFEMEMSET_PATTERN_OFF: usize = 16;
+const SAFEMEMSET_BYTES_OFF: usize = 24;
 const M1_P1_OFF: usize = 24;
 // M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
 
@@ -398,9 +403,9 @@ pub unsafe fn system_init() {
         map_call(25, do_times_handler); // SYS_TIMES
         map_call(26, do_getinfo_handler); // SYS_GETINFO
         map_call(27, do_abort_handler); // SYS_ABORT
-        map_call(31, do_safecopy_from_stub); // SYS_SAFECOPYFROM
-        map_call(32, do_safecopy_to_stub); // SYS_SAFECOPYTO
-        map_call(33, do_vsafecopy_stub); // SYS_VSAFECOPY
+        map_call(31, do_safecopy_from_handler); // SYS_SAFECOPYFROM
+        map_call(32, do_safecopy_to_handler); // SYS_SAFECOPYTO
+        map_call(33, do_vsafecopy_handler); // SYS_VSAFECOPY
         map_call(34, do_setgrant_handler); // SYS_SETGRANT
         map_call(36, do_sprofile_stub); // SYS_SPROF
         map_call(37, do_cprofile_stub); // SYS_CPROF
@@ -417,7 +422,7 @@ pub unsafe fn system_init() {
         map_call(53, do_exit_handler); // SYS_EXIT
         map_call(54, do_schedctl_handler); // SYS_SCHEDCTL
         map_call(55, do_statectl_handler); // SYS_STATECTL
-        map_call(56, do_safememset_stub); // SYS_SAFEMEMSET
+        map_call(56, do_safememset_handler); // SYS_SAFEMEMSET
     }
 }
 
@@ -885,9 +890,61 @@ stub_handler!(do_vumap_stub, "SYS_VUMAP");
 stub_handler!(do_irqctl_stub, "SYS_IRQCTL");
 stub_handler!(do_vtimer_stub, "SYS_VTIMER");
 stub_handler!(do_setalarm_stub, "SYS_SETALARM"); // needs clock
-stub_handler!(do_safecopy_from_stub, "SYS_SAFECOPYFROM");
-stub_handler!(do_safecopy_to_stub, "SYS_SAFECOPYTO");
-stub_handler!(do_vsafecopy_stub, "SYS_VSAFECOPY");
+
+// SAFECOPYFROM, SAFECOPYTO, VSAFECOPY — thin wrappers around grants module
+pub unsafe fn do_safecopy_from_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        crate::grants::do_safecopy_from(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
+    }
+}
+
+pub unsafe fn do_safecopy_to_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        crate::grants::do_safecopy_to(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
+    }
+}
+
+pub unsafe fn do_vsafecopy_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        crate::grants::do_vsafecopy(caller, &*core::ptr::addr_of!(*msg) as &[u8; MESSAGE_SIZE])
+    }
+}
+
+/// SAFEMEMSET — grant-based memset
+pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let granter = msg_read_i32(msg, SAFEMEMSET_GRANTER_OFF);
+        let grant_id = msg_read_i32(msg, SAFEMEMSET_GRANT_ID_OFF);
+        let offset = msg_read_u64(msg, SAFEMEMSET_OFFSET_OFF);
+        let pattern = msg_read_u64(msg, SAFEMEMSET_PATTERN_OFF);
+        let bytes = msg_read_u64(msg, SAFEMEMSET_BYTES_OFF);
+
+        if granter == crate::system::NONE {
+            return crate::grants::EFAULT_SRC;
+        }
+
+        // Verify the grant for write access
+        let r = crate::grants::verify_grant(
+            granter,
+            (*caller).p_endpoint,
+            grant_id,
+            bytes,
+            crate::grants::CPF_WRITE,
+            offset,
+        );
+        let (phys_addr, _new_granter, _flags) = match r {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+        // Write pattern via vm_memset
+        crate::vm::vm_memset(phys_addr, pattern as u8, bytes as usize);
+        crate::ipc::OK
+    }
+}
+
+// Remaining stubs
+// Remaining stubs (deferred to later phases)
 stub_handler!(do_sprofile_stub, "SYS_SPROF");
 stub_handler!(do_cprofile_stub, "SYS_CPROF");
 stub_handler!(do_profbuf_stub, "SYS_PROFBUF");
@@ -896,7 +953,6 @@ stub_handler!(do_settime_stub, "SYS_SETTIME");
 stub_handler!(do_getmcontext_stub, "SYS_GETMCONTEXT");
 stub_handler!(do_setmcontext_stub, "SYS_SETMCONTEXT");
 stub_handler!(do_update_stub, "SYS_UPDATE");
-stub_handler!(do_safememset_stub, "SYS_SAFEMEMSET");
 // ── Real implementations ───────────────────────────────────────────────
 
 /// Handle SYS_EXIT: cause SIGABRT, don't reply.

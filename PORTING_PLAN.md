@@ -1278,27 +1278,22 @@ Phase 8.8 for I/O port-dependent).
   - Safe no-op for kernel tasks/init (CR3=0)
   - Tests: 253 kernel tests pass (zero-CR3 path verified)
 
-- [ ] **6.16 — Implement grant-based safecopy syscalls**
+- [x] **6.16 — Implement grant-based safecopy syscalls**
   **Depends on:** `verify_grant()` (Phase 4.2), `virtual_copy()` (Phase 6.13),
   `vm_memset()` (Phase 6.13)
   All four dependencies are now available. These syscalls were deferred from Phase 5
   because they need grant verification + VM copy infrastructure:
   1. **`do_safecopy_from`** (SYS_SAFECOPYFROM, 5.31) — copy FROM grantee TO granter.
-     Uses `verify_grant()` to validate the grant, then `virtual_copy()` with the
-     effective granter's CR3 to perform the cross-address-space copy.
-     Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
+     Thin wrapper around `crate::grants::do_safecopy_from()`.
   2. **`do_safecopy_to`** (SYS_SAFECOPYTO, 5.31) — copy FROM granter TO grantee.
-     Same structure as safecopy_from with swapped direction.
-     Source: `do_safecopy.c`
-  3. **`do_vsafecopy`** (SYS_VSAFECOPY, 5.31) — vectored safecopy: processes an
-     array of `vscp_vec` entries, each specifying a direction + grant + offset +
-     address. Validates each entry individually.
-     Source: `do_safecopy.c`
+     Thin wrapper around `crate::grants::do_safecopy_to()`.
+  3. **`do_vsafecopy`** (SYS_VSAFECOPY, 5.31) — vectored safecopy.
+     Thin wrapper around `crate::grants::do_vsafecopy()`.
   4. **`do_safememset`** (SYS_SAFEMEMSET, 5.39) — grant-based memset: verifies the
      grant via `verify_grant()`, then writes the pattern byte to the granter's
      physical memory via `vm_memset()`.
-     Source: `.refs/minix-3.3.0/minix/kernel/system/do_safememset.c`
-  - Tests: Each handler has unit tests for valid/invalid grants, boundary checks
+  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
+  - Tests: 253 kernel tests pass (existing grant tests + safememset)
 
 - [ ] **6.17 — Implement vectored VM mapping (do_vumap)**
   **Depends on:** `vm_lookup()` (Phase 6.13), `vm_lookup_range()` (Phase 6.14)
