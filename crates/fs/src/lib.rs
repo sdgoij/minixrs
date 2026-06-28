@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod iso9660;
 pub mod mfs;
 pub mod procfs;
 pub mod vbfs;

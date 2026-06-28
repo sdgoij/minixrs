@@ -2013,20 +2013,28 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - Tests: 28 tests covering buf operations, type defaults, flag printing, handler no-panic, tree hooks
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.4 — Port `minix/fs/iso9660fs/` — ISO 9660 File System**
-  - Source: `.refs/minix-3.3.0/minix/fs/iso9660fs/`
-  - Implemented in `crates/fs/src/iso9660/` (10 modules: consts, dispatch, inode, misc_ops, mount, path, read_ops, stadir, super_block, types)
-  - Core types: `DirRecord` (inode), `ExtAttrRec` (extended attributes), `Iso9660VdPri` (primary volume descriptor), `Dirent` (directory entry)
-  - Inode cache with `DIR_RECORDS` (256 entries) and `EXT_ATTR_RECS` (256 entries) static arrays
-  - Volume descriptor parsing from ISO 9660 CD medium (sector 16)
-  - Path lookup with component-by-component directory traversal
-  - Read operations for files and directory entry listing (getdents)
-  - Dispatch table mapping VFS/FS call numbers to handlers
-  - ISO 9660 date parsing (YYYYMMDDHHMMSS.HH format)
-  - File name normalization (version separator `;` trimming, trailing dot removal)
-  - 5 unit tests passing (dir record parsing, file name handling, date parsing)
-  - `#![no_std]` compatible with `extern crate alloc`
-  - `cargo clippy -p fs -- -D warnings` passes
+- [x] **9.4 — Port `minix/fs/iso9660fs/` — ISO 9660 File System**
+  - Source: `.refs/minix-3.3.0/minix/fs/iso9660fs/` (18 files)
+  - Implemented in `crates/fs/src/iso9660/` (14 modules):
+    - `consts.rs` — All ISO 9660 constants (magic, sizes, block/record counts, errno values)
+    - `types.rs` — Core types: `DirRecord`, `ExtAttrRec`, `Iso9660VdPri`, VD type constants
+    - `glo.rs` — Global state via `Iso9660Global` struct with dir_records[256], ext_attr_recs[256], v_pri
+    - `utility.rs` — `iso_date_to_unix()` date parsing, `no_sys()`, `do_noop()`, byte read helpers
+    - `super.rs` (as `super_block`) — `read_vds()` volume descriptor scanning, `create_v_pri()`, validation
+    - `inode.rs` — Directory record cache (get/put/free/load), ext attr cache, block I/O stubs
+    - `mount.rs` — fs_readsuper, fs_unmount, fs_mountpoint
+    - `path.rs` — fs_lookup, parse_path, advance, search_dir, get_name
+    - `read.rs` — fs_readwrite (read-only), read_chunk with multi-extent support, fs_getdents
+    - `stadir.rs` — fs_stat, stat_dir_record, fs_statvfs, fs_blockstats
+    - `misc.rs` — fs_sync, fs_flush, fs_new_driver (all no-ops for read-only FS)
+    - `table.rs` — 34-entry dispatch table, dispatch_call
+    - `main.rs` — main_loop, sef_local_startup stubs
+    - `mod.rs` — Module declarations (super aliased to super_block)
+  - Block I/O (get_block/put_block) stubbed — needs external buffer cache
+  - `#![no_std]` compatible
+  - Tests: 46 tests covering date parsing, byte read helpers, dispatch routing,
+    inode cache init, super block validation, path lookup stubs, read stubs
+  - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [ ] **9.5 — Port `minix/fs/ext2/` — ext2 File System**
   - Source: `.refs/minix-3.3.0/minix/fs/ext2/`
