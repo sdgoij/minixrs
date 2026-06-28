@@ -2653,25 +2653,17 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Added `dma` module to storage `mod.rs`
   - Tests: 2 passed (constants, full lifecycle)
 
-- [ ] **11b.13 — PIT timer + PIC remap + timer ISR** (kernel-boot)
-  - PIT channel 0 programmed at 100 Hz (mode 3, square wave)
-  - PIC remapped via inline asm with I/O delays (not naked `outb`)
-  - Timer ISR: full register save/restore, calls `timer_handler`, EOI, `iretq`
-  - `TICK_COUNT` incremented in handler, polled by main loop
-  - Fixed `lidt()` — removed `options(nomem)` so descriptor buffer flush works
-  - Fixed `hlt` — removed `options(nomem)` so `TICK_COUNT` read isn't hoisted
-  - Fixed CS selector — read dynamically via `mov cs` (0x08 for trampoline, 0x18 for stage2)
-  - Skipped broken kernel GDT reload in `boot_setup()` (struct layout bug)
-  - Heartbeat dot every 100 ticks via `hlt` loop
-  - Works with both `just run` (SeabIOS `-kernel`) and `just run-img` (disk image)
-  - Source: `crates/drivers/src/storage/ahci.rs`
-  - `is_atapi()`: Fixed GCAP matching (0x4000|0xC000) for ATAPI types
-  - `is_ata()`: Fixed to reject zeroed config, accept pure-ATA (GCAP=0x0) and ATA-bit-only (0x8000)
-  - `ncq_depth()`: Fixed to use lower 5 bits (not shifted upper bits)
-  - `long_logical_sectors()`: Already correct (no change needed)
-  - `probe()`: Now correctly reads HBA Cap via MMIO and populates has_ncq/has_clo
-  - `map_minor_to_port()`: Fixed fallback to default port mapping when no devices detected
-  - 14/14 ATA IDENTIFY tests now pass
+- [x] **11b.13 — PIT timer + PIC remap + timer ISR** (arch-x86_64)
+  - Source: `crates/arch-x86_64/src/apic.rs`
+  - `init_pit(freq)` — program PIT channel 0 at given Hz (mode 3, square wave)
+  - `timer_isr_entry()` — naked asm trampoline: save regs, call handler, EOI, `iretq`
+  - `set_timer_isr_handler(fn)` — register function pointer for ISR to call
+  - `unmask_timer_irq()` / `mask_timer_irq()` — PIC IMR bit 0 control
+  - `remap_pic()` — full ICW1-4 programming (from 11b.11)
+  - PIT constants: `PIT_DATA0` (0x40), `PIT_CMD` (0x43), `PIT_BASE_FREQ` (1,193,182 Hz)
+  - Tests: 254 passed, 0 failed, 2 ignored (arch-x86_64 crate)
+  - Wiring in `kmain()`: call `remap_pic`, `init_pit`, `set_timer_isr_handler`,
+    IDT entry setup, `unmask_timer_irq`, `sti` (see kernel-boot follow-up)
 
 - [ ] **11b.15 — MMC/SD card detection** (hardware-dependent)
 
@@ -3144,7 +3136,20 @@ be replaced with real implementations.
   - `free_fn` wraps `PhysicalAllocator::free_contig()`
   - Without this call, all DMA allocations return `None` (stub mode)
 
----
+- [ ] **12.21 — Wire PIT timer ISR into kernel-boot** (`crates/kernel-boot/src/main.rs`, `crates/kernel/src/clock.rs`)
+  **Depends on:** `init_pit()` and `timer_isr_entry()` (Phase 11b.13), `remap_pic()` (11b.11),
+  IDT entry setup (arch-x86_64), PIC IRQ 0 unmask
+  In `kmain()`, add the boot timer init sequence:
+  1. `arch_x86_64::apic::remap_pic(0x20, 0x28)` — relocate PIC vectors away from CPU exception range
+  2. `arch_x86_64::apic::init_pit(100)` — program PIT at 100 Hz, mode 3
+  3. Register an `extern "C" fn()` via `set_timer_isr_handler()` that calls
+     `kernel::clock::timer_int_handler()`
+  4. `arch_x86_64::idt::IDT.set_handler(VECTOR_TIMER, timer_isr_entry as u64, 0, 0)` —
+     install the asm trampoline at vector 0x20
+  5. `arch_x86_64::apic::unmask_timer_irq()` — clear IMR bit 0 on master PIC
+  6. Execute `sti` (enable interrupts)
+  After this, the timer fires at 100 Hz, `timer_int_handler` runs, and `MONOTONIC`
+  increments each tick.  Verify with a heartbeat dot via serial every 100 ticks.
 
 ## Phase 13: Rust `std` for Minix
 

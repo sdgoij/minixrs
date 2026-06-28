@@ -552,6 +552,134 @@ pub fn is_apic_enabled() -> bool {
     unsafe { APIC_ENABLED }
 }
 
+// ── 11b.13: PIT timer programming ──────────────────────────────────────
+
+/// PIT I/O ports.
+pub const PIT_DATA0: u16 = 0x40;
+pub const PIT_CMD: u16 = 0x43;
+
+/// PIT base frequency (1.19318 MHz).
+pub const PIT_BASE_FREQ: u32 = 1_193_182;
+
+/// Program PIT channel 0 in mode 3 (square wave) at the given frequency.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn init_pit(freq: u32) {
+    use crate::asm;
+    unsafe {
+        let divisor = (PIT_BASE_FREQ / freq) as u16;
+        // Mode 3 (square wave), channel 0, lo/hi access
+        asm::outb(PIT_CMD, 0x36);
+        asm::outb(PIT_DATA0, (divisor & 0xFF) as u8);
+        asm::outb(PIT_DATA0, (divisor >> 8) as u8);
+    }
+}
+
+// ── 11b.13: Timer ISR trampoline ───────────────────────────────────────
+
+/// Function pointer type for the timer interrupt handler.
+pub type TimerIsrFn = unsafe extern "C" fn();
+
+/// Registered timer ISR handler.  Called by the assembly trampoline.
+static mut TIMER_ISR_HANDLER: Option<TimerIsrFn> = None;
+
+/// Register the function to call on each timer tick.
+///
+/// # Safety
+///
+/// Must be called once during boot.  The function is called from
+/// interrupt context and must be re-entrant safe.
+pub unsafe fn set_timer_isr_handler(handler: TimerIsrFn) {
+    unsafe {
+        TIMER_ISR_HANDLER = Some(handler);
+    }
+}
+
+/// Timer interrupt trampoline address — set this in the IDT entry.
+///
+/// This naked asm trampoline:
+/// 1. Calls the registered `TIMER_ISR_HANDLER`
+/// 2. Sends EOI to the master PIC (port 0x20)
+/// 3. Returns via iretq
+///
+/// # Safety
+///
+/// Must be set as an interrupt gate in the IDT.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn timer_isr_entry() {
+    // SAFETY: naked asm — no prologue/epilogue.
+    core::arch::naked_asm!(
+        // Save caller-saved registers (scratch registers).
+        // The CPU already pushed SS, RSP, RFLAGS, CS, RIP.
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+
+        // Call the registered handler.
+        // Load TIMER_ISR_HANDLER via RIP-relative addressing.
+        "lea rax, [rip + {timer}]",
+        "mov rax, [rax]",
+        "test rax, rax",
+        "jz 2f",
+        "call rax",
+        "2:",
+
+        // Send EOI to master PIC (IRQ 0-7).
+        "mov al, 0x20",
+        "out 0x20, al",
+
+        // Restore caller-saved registers.
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+
+        // Return from interrupt.
+        "iretq",
+        timer = sym TIMER_ISR_HANDLER,
+    )
+}
+
+/// Unmask IRQ 0 at the PIC master.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn unmask_timer_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
+        asm::outb(crate::interrupt::PIC_MASTER_DATA, mask & !0x01);
+    }
+}
+
+/// Mask IRQ 0 at the PIC master.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn mask_timer_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
+        asm::outb(crate::interrupt::PIC_MASTER_DATA, mask | 0x01);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
