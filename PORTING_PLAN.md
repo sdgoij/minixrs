@@ -2635,13 +2635,13 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - klog: Fixed `vec![]` shadowing by adding `use self::alloc::vec` in x86 test module
   - pci: Fixed `test_stubs` module guard (`#[cfg(not(feature = "x86"))]`) to avoid symbol conflicts
 
-- [ ] **11b.11 — PIC (8259A) wiring**
-  - Source: `crates/arch-x86_64/src/hw_intr.rs`
-  - `remap_pic()` — full ICW1–4 programming: vector base (0x20 master / 0x28 slave), cascade config, 8086 mode
-  - `set_irq_vector()` — xAPIC/x2APIC-aware IRQ vector assignment
-  - `mask_irq()` / `unmask_irq()` — APIC LVT mask bit (x2APIC) or PIC IMR bit (xAPIC)
-  - `enable_apic()` made public
-  - Tests: 232 passed, 0 failed, 5 ignored (arch-x86_64 crate)
+- [x] **11b.11 — PIC (8259A) wiring**
+  - Source: `crates/arch-x86_64/src/apic.rs`
+  - `remap_pic()` — full ICW1–4 programming: vector base, cascade config, 8086 mode
+  - `set_irq_vector()` — xAPIC/x2APIC-aware IRQ vector via I/O APIC RTE
+  - `mask_irq()` / `unmask_irq()` — APIC LVT mask bit or PIC IMR bit
+  - `enable_apic()` — public alias for `detect_and_init()`
+  - Tests: 254 passed, 0 failed, 2 ignored (arch-x86_64 crate)
 
 - [ ] **11b.12 — Storage DMA API**
   - Source: `crates/drivers/src/storage/dma.rs`
