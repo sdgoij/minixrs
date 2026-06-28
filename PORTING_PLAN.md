@@ -2226,11 +2226,24 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   map_service receives rprocpub from RS, sets up dmap entries. init_dmap
   initializes the table. dmap_endpt_up handles driver restart.
 
-- [ ] **10.5 — Port `vfs_mmap.c`**
-  - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_mmap.c`
-  - Memory-mapped file support
-  - Created `vfs/mmap.rs` with VM_MMAP request handler stub and map_vnode()
-  - Tests: VFS server initialization; device/file operation stubs return expected codes; call dispatch table routing
+- [x] **10.5 — Port mmap operations (`misc.c`, `pipe.c`, `exec.c`)**
+  - Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (do_vm_call),
+    `pipe.c` (map_vnode), `exec.c` (vfs_memmap)
+  - Implemented in `crates/servers/src/vfs/mmap.rs`:
+    - `do_vm_call()` — handle VM↔VFS calls (fd lookup/close/io for mmap)
+    - `map_vnode()` — map a vnode to a specific FS endpoint (named pipes)
+    - `vfs_memmap()` — create grant-based mmap region for ELF loading
+  - All return ENOSYS stubs — real impls need FS request layer + VM IPC
+
+### Deferred mmap stubs
+- [ ] **10.5a — Wire VM call handler** (`servers/src/vfs/mmap.rs`)
+  **Depends on:** scratchpad message access, filp table, IPC reply
+  do_vm_call needs to parse VMVFSREQ_FDLOOKUP/CLOSE/IO requests,
+  resolve fds to vnode (dev, inode), and reply with VM_VFS_REPLY.
+
+- [ ] **10.5b — Wire map_vnode** (`servers/src/vfs/mmap.rs`)
+  **Depends on:** FS request wrappers (10.2), vmnt management
+  Needs req_newnode to create mapped inode on target FS.
 
 - [ ] **10.6 — Port `vfs_stat.c`**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/vfs_stat.c`

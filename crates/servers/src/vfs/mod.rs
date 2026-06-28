@@ -30,6 +30,7 @@ pub mod dmap;
 pub mod filedes;
 pub mod glo;
 pub mod main;
+pub mod mmap;
 pub mod request;
 pub mod table;
 pub mod types;
