@@ -7,6 +7,8 @@ pub mod prelude {
     pub use core::ops::DerefMut;
 }
 
+pub mod system;
+
 /// Driver error type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverError {

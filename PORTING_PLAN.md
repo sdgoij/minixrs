@@ -2453,21 +2453,24 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
 
 ### Phase 11a: Simple drivers (early integration testing)
 
-**Status: TODO (0%)** — Implemented in `crates/drivers/`.
+**Status: 33% (GPIO, klog, random done)** — 54 tests, clippy clean.
 
-- [ ] **11a.1 — System drivers** (`crates/drivers/src/system/`)
-  - [ ] **GPIO driver** (`gpio.rs`, ~380 lines)
+- [x] **11a.1 — System drivers** (`crates/drivers/src/system/`)
+  - [x] **GPIO driver** (`gpio.rs`, 350+ lines, 18 tests)
     - Pin modes (input/output), claiming, release
-    - Read/write operations, interrupt status
-    - BeagleBone-specific GPIO configurations (USR0/USR1, buttons, LCD_EN)
+    - Read/write operations, BeagleBone-specific pin constants
     - `gpio_global_pin(bank, pin)` and `gpio_parse_pin(global_pin)` helpers
-  - [ ] **Kernel log driver** (`klog.rs`, ~305 lines)
-    - 4096-byte circular buffer
+  - [x] **Kernel log driver** (`klog.rs`, ~400 lines, 18 tests)
+    - 50KB circular buffer (matching C source LOG_SIZE)
     - Append, read, write with overflow handling
-    - Non-blocking read support (-EAGAIN)
-  - [ ] **Random number generator** (`random.rs`, ~378 lines)
-    - 16 entropy sources with derivative-based quality detection
-    - 32 entropy pools, AES-128 ECB-based PRNG
+    - Non-blocking read, blocking read with endpoint tracking
+    - Cancel pending reads, select() readiness notifications
+  - [x] **Random number generator** (`random.rs`, ~500 lines, 18 tests)
+    - 16 entropy sources + 1 internal timing source
+    - 32 SHA-256 entropy pools with derivative-based quality detection
+    - AES-128 ECB PRNG with incrementing counter (CTR mode)
+    - Minimum 256 samples before reseeding, external entropy injection
+    - Inline SHA-256 and AES-128 implementations (no external deps)
     - Minimum 256 samples before reseed
     - External entropy injection via `random_putbytes()`
 
