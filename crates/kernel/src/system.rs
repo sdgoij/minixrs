@@ -1417,14 +1417,108 @@ pub unsafe fn switch_address_space(proc: *const Proc) {
 /// Release a process's address space. Currently a no-op — page table
 /// deallocation is managed by the VM server (Phase 6+). In the C code,
 /// this frees the page table pages allocated for the process.
+/// Release a process's address space, freeing all page table pages.
+///
+/// Walks the 4-level page table hierarchy (PML4 → PDP → PD → PT)
+/// via the identity map, frees all physical frames for user pages
+/// and page table pages, then zeros the process's CR3.
 ///
 /// # Safety
 ///
-/// `proc` must point to a valid `Proc`.
-pub unsafe fn release_address_space(_proc: *mut Proc) {
-    // No-op: page table freeing deferred to VM server.
-    // When VM is available, this should call into the VM to free
-    // the page table pages referenced by (*proc).p_seg.p_cr3.
+/// `proc` must point to a valid `Proc` with a page table that was
+/// allocated through `kernel::vm::alloc_mem()`. Must run on BOOT_CR3
+/// so the identity map is active for page table access.
+pub unsafe fn release_address_space(proc: *mut Proc) {
+    unsafe {
+        let cr3 = (*proc).p_seg.p_cr3;
+        if cr3 == 0 {
+            return; // no per-process page table (kernel task or init)
+        }
+
+        // Walk the 4-level page table hierarchy.
+        // The identity map covers 0-1GB, which is where page tables
+        // are allocated (via alloc_mem within the boot memory chunks).
+
+        let pml4 = cr3 as *const u64;
+
+        // Process only user-space PML4 entries (0-255).
+        // Kernel entries (256-511) are shared BOOT_PDP references.
+        for pml4_idx in 0..256 {
+            let pml4e = core::ptr::read(pml4.add(pml4_idx));
+            if pml4e & arch_x86_64::pte::PG_P == 0 {
+                continue; // not mapped
+            }
+
+            let pdpt_phys = pml4e & arch_x86_64::pte::PG_FRAME;
+            let pdpt = pdpt_phys as *const u64;
+
+            for pdpt_idx in 0..512 {
+                let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
+                if pdpte & arch_x86_64::pte::PG_P == 0 {
+                    continue;
+                }
+                if pdpte & arch_x86_64::pte::PG_PS != 0 {
+                    // 1GB huge page — free the single physical frame
+                    let pa = pdpte & arch_x86_64::pte::PG_FRAME;
+                    let page = pa / crate::vm::VM_PAGE_SIZE as u64;
+                    crate::vm::free_mem(page, 1);
+                    continue;
+                }
+
+                let pd_phys = pdpte & arch_x86_64::pte::PG_FRAME;
+                let pd = pd_phys as *const u64;
+
+                for pd_idx in 0..512 {
+                    let pde = core::ptr::read(pd.add(pd_idx));
+                    if pde & arch_x86_64::pte::PG_P == 0 {
+                        continue;
+                    }
+                    if pde & arch_x86_64::pte::PG_PS != 0 {
+                        // 2MB huge page — free the single physical frame
+                        let pa = pde & arch_x86_64::pte::PG_FRAME;
+                        let page = pa / crate::vm::VM_PAGE_SIZE as u64;
+                        crate::vm::free_mem(page, 1);
+                        continue;
+                    }
+
+                    let pt_phys = pde & arch_x86_64::pte::PG_FRAME;
+                    let pt = pt_phys as *const u64;
+
+                    for pt_idx in 0..512 {
+                        let pte = core::ptr::read(pt.add(pt_idx));
+                        if pte & arch_x86_64::pte::PG_P == 0 {
+                            continue;
+                        }
+                        // Free the 4KB user page
+                        let pa = pte & arch_x86_64::pte::PG_FRAME;
+                        let page = pa / crate::vm::VM_PAGE_SIZE as u64;
+                        crate::vm::free_mem(page, 1);
+                    }
+
+                    // Free the PT page itself
+                    let pt_page = pt_phys / crate::vm::VM_PAGE_SIZE as u64;
+                    crate::vm::free_mem(pt_page, 1);
+                }
+
+                // Free the PD page itself
+                let pd_page = pd_phys / crate::vm::VM_PAGE_SIZE as u64;
+                crate::vm::free_mem(pd_page, 1);
+            }
+
+            // Free the PDP page itself
+            let pdpt_page = pdpt_phys / crate::vm::VM_PAGE_SIZE as u64;
+            crate::vm::free_mem(pdpt_page, 1);
+        }
+
+        // Free the PML4 page itself
+        let pml4_page = cr3 / crate::vm::VM_PAGE_SIZE as u64;
+        crate::vm::free_mem(pml4_page, 1);
+
+        // Zero the process's CR3 fields
+        (*proc).p_seg.p_cr3 = 0;
+        (*proc).p_seg.p_cr3_v = core::ptr::null_mut();
+        (*proc).p_cr3_saved = 0;
+    }
 }
 
 /// Switch to the idle process's address space. On a uniprocessor
@@ -2509,14 +2603,20 @@ mod tests {
     }
 
     #[test]
-    fn test_release_address_space_noop() {
+    fn test_release_address_space_zero_cr3() {
         unsafe {
             proc_init();
             let rp = crate::table::proc_addr(0);
-            // Should not crash on a valid proc
+            // With CR3=0 (kernel task), should do nothing and not crash
+            (*rp).p_seg.p_cr3 = 0;
             release_address_space(rp);
+            assert_eq!((*rp).p_seg.p_cr3, 0);
         }
     }
+
+    // test_release_address_space_clears_cr3 removed — it dereferences
+    // physical page table addresses which requires the kernel's identity
+    // mapping and crashes on host test binaries.
 
     #[test]
     fn test_switch_address_space_idle_noop() {

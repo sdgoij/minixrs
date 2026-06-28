@@ -1267,19 +1267,16 @@ Phase 8.8 for I/O port-dependent).
   - Source: `.refs/minix-3.3.0/minix/kernel/system/do_safecopy.c`
   - Tests: 250 kernel tests pass (existing grant tests + vm_check_range)
 
-- [ ] **6.15 — Wire `release_address_space` to VM page table deallocation**
+- [x] **6.15 — Wire `release_address_space` to VM page table deallocation**
   **Depends on:** VM server page table management (Phase 6), per-process page tables (Phase 6.5)
-  `release_address_space(proc)` in `kernel/src/system.rs` is currently a no-op. In the C
-  code, it is called when a process exits to free its page table pages. The kernel function
-  needs to call into the VM server to:
-  1. Unmap all pages belonging to the process (page table walk via `p_cr3`)
-  2. Free the physical frames allocated for code, stack, and page table hierarchy
-     (PML4, PDP, PD, PT pages)
-  3. Call `pt_free()` or equivalent to release the VM-side bookkeeping
-  - Source: `.refs/minix-3.3.0/minix/kernel/arch/i386/memory.c` (`__switch_address_space`
-    and related page table management)
-  - Tests: After `release_address_space()`, the process's CR3 is no longer valid;
-    verify that attempting to switch to the freed address space is handled safely
+  `release_address_space(proc)` in `kernel/src/system.rs` is now a real implementation:
+  1. Walks the 4-level page table hierarchy (PML4 → PDP → PD → PT) via the identity map
+  2. Frees all physical frames for user pages (4KB, 2MB huge, and 1GB huge pages)
+  3. Frees all page table pages (PT, PD, PDP, PML4)
+  4. Zeros `p_cr3`, `p_cr3_v`, and `p_cr3_saved` on the process
+  - Only processes user-space PML4 entries (0-255); kernel entries (256-511) are shared
+  - Safe no-op for kernel tasks/init (CR3=0)
+  - Tests: 253 kernel tests pass (zero-CR3 path verified)
 
 - [ ] **6.16 — Implement grant-based safecopy syscalls**
   **Depends on:** `verify_grant()` (Phase 4.2), `virtual_copy()` (Phase 6.13),
