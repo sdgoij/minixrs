@@ -2036,11 +2036,33 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
     inode cache init, super block validation, path lookup stubs, read stubs
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
-- [ ] **9.5 — Port `minix/fs/ext2/` — ext2 File System**
-  - Source: `.refs/minix-3.3.0/minix/fs/ext2/`
-  - Port `ext2_lib.c` and `ext2_server.c` separately
-  - Inode management, block allocation, directory entries
-  - Tests: Filesystem operation round-trips; inode/block bitmap allocation; read/write verification
+- [x] **9.5 — Port `minix/fs/ext2/` — ext2 File System**
+  - Source: `.refs/minix-3.3.0/minix/fs/ext2/` (26 files)
+  - Implemented in `crates/fs/src/ext2/` (21 modules):
+    - `consts.rs` — All ext2 constants (magic, inode/block counts, feature flags, dir types)
+    - `types.rs` — DInode, Ext2DiskDirDesc, SuperBlock, GroupDesc, Inode, Opt structs
+    - `glo.rs` — Ext2Global with inode table, super block, group desc, opt state
+    - `utility.rs` — conv2/conv4 byte swapping, no_sys, min_u
+    - `super_.rs` (as `super_`) — read_super, write_super, get_super, get_group_desc
+    - `inode.rs` — Inode cache (get/put/find/alloc), rw_inode, update_times
+    - `balloc.rs` — Block bitmap alloc/free
+    - `ialloc.rs` — Inode allocation/free
+    - `path.rs` — fs_lookup, advance, search_dir
+    - `read.rs` — fs_readwrite, read_map, rd_indir
+    - `write.rs` — clear_zone, new_block, write_map
+    - `link.rs` — fs_link/unlink/rename/rdlink
+    - `open.rs` — fs_create/mkdir/mknod/slink
+    - `mount.rs` — fs_readsuper/unmount/mountpoint
+    - `protect.rs` — fs_chmod/chown/getdents, forbidden, read_only
+    - `misc.rs` — fs_sync/flush/new_driver
+    - `stadir.rs` — fs_stat/statvfs
+    - `time.rs` — fs_utime
+    - `table.rs` — 34-entry dispatch table
+    - `main.rs` — Server loop with SEF init
+  - Block I/O (get_block/put_block) stubbed pending buffer cache layer
+  - `#![no_std]` compatible, `#[repr(C)]` on all on-disk types
+  - Tests: 157 pass across all FS modules (62 MFS + 5 VBFS + 28 ProcFS + 46 ISO + 16 ext2)
+  - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [ ] **9.6 — Port `minix/fs/pfs/` — Pipe File System**
   - Source: `.refs/minix-3.3.0/minix/fs/pfs/`
@@ -2216,11 +2238,49 @@ Created 13 files in `crates/servers/src/vfs/`:
   super_user_check)
 - `vfs/types.rs` — 8 compile-time size/offset assertions
 
+### Deferred FS Buffer Cache & VFS Wiring Stubs
+
+These stubs in `crates/fs/src/mfs/`, `crates/fs/src/ext2/`, and `crates/kernel/src/system.rs`
+must be replaced when the buffer cache layer (Phase 9.7) and VFS message dispatch (Phase 10)
+are operational. All depend on getting `get_block`/`put_block` from libminixfs:
+
+- [ ] **10.10 — Wire MFS buffer cache operations** (`crates/fs/src/mfs/`)
+  **Depends on:** libminixfs block cache (Phase 9.7), VFS dispatch (Phase 10.3)
+  - `super_block.rs:111` — `rw_super`: replace `todo!()` with `get_block`/`put_block`
+  - `super_block.rs:144,152` — `alloc_bit`/`free_bit`: wire bitmap block I/O
+  - `inode.rs:222` — `rw_inode`: replace `todo!()` with block I/O
+  - `inode.rs:252` — `fs_putnode`: wire inode release protocol
+  - `path.rs:8,62` — `fs_lookup`/`search_dir`: replace `todo!()` with block I/O
+  - `read.rs:8,13,37,44,49` — `fs_readwrite`/`fs_breadwrite`/`read_map`/`get_block_map`/`rd_indir`
+  - `write.rs:31,71,76,107` — `write_map`/`new_block`/`zero_block`/`fs_ftrunc`
+  - `link.rs:4-13` — `fs_link`/`unlink`/`rdlink`/`rename`
+  - `open.rs:8-17` — `fs_create`/`mkdir`/`mknod`/`slink`
+  - `protect.rs:111` — `fs_getdents`
+  - `misc.rs:24,27` — `fs_new_driver`/`fs_bpeek`
+  - `stats.rs:7` — `count_free_bits`
+
+- [ ] **10.11 — Wire ext2 buffer cache operations** (`crates/fs/src/ext2/`)
+  **Depends on:** libminixfs block cache (Phase 9.7), VFS dispatch (Phase 10.3)
+  All 36 TODO items in ext2 across: balloc, ialloc, inode, link, main, misc,
+  mount, open, path, protect, read, stadir, super_, time, write modules.
+
+- [ ] **10.12 — Wire ISO 9660 buffer cache** (`crates/fs/src/iso9660/`)
+  **Depends on:** libminixfs block cache (Phase 9.7)
+  Replace `stub_get_block`/`stub_put_block` in `inode.rs:367,377`.
+
+- [ ] **10.13 — Implement deferred kernel syscalls** (`crates/kernel/src/system.rs`)
+  **Depends on:** VFS/PM IPC infrastructure (Phase 10)
+  - `do_privctl` (line 1564) — privilege management via `data_copy()`
+  - `do_vircopy` (line 1566) — virtual copy with `data_copy()`
+  - `do_physcopy` (line 1567) — physical copy
+  - `do_update` (line 2163) — kernel update with `data_copy()`
+  - `do_trace` (line 1565) — ptrace with `data_copy()`
+
 ---
 
 ## Phase 11: Device Drivers
 
-**Goal**: Port device drivers (~30+ driver directories, organized as separate crates under `./crates/drivers/`).
+**Goal**: Port device drivers from Minix 3.3.0 (`.refs/minix-3.3.0/minix/drivers/`).
 
 ### Prioritized order (simplest first):
 
@@ -2665,6 +2725,22 @@ trait Driver {
 - Static arrays instead of dynamic allocation (appropriate for kernel)
 - `#[repr(C)]` on all ABI-exposed structs for C compatibility
 
+### Deferred Driver Stubs
+
+- [ ] **11e.13 — Wire VBFS VBOX driver** (`crates/fs/src/vbfs/server.rs`)
+  **Depends on:** VirtualBox guest driver (Phase 11e.12)
+  Replace `vboxfs_init`/`vboxfs_cleanup`/`sffs_init`/`sffs_loop` `todo!()` with
+  real calls to the VBOX backend driver and SFFS shared folder library.
+
+- [ ] **11e.14 — Wire profile clock** (`crates/kernel/src/profile.rs`)
+  **Depends on:** Architecture profile clock driver (Phase 11)
+  Replace TODO at lines 218/223: `arch_init_profile_clock(freq)` and
+  `arch_stop_profile_clock()` for statistical profiling.
+
+- [ ] **11e.15 — Wire NMI handling for profiling** (`crates/kernel/src/profile.rs:334`)
+  **Depends on:** NMI interrupt handling (Phase 11)
+  Implement NMI-based profiling when NMI delivery is available.
+
 ---
 
 ## Phase 12: System Servers
@@ -2728,6 +2804,59 @@ trait Driver {
 - [ ] **12.7 — TTY server**
   - Terminal multiplexing, pseudo-terminal management
   - Tests: Server init; request dispatch; process lifecycle operations; state management
+
+### Deferred Server Stubs (blocked on SEF + server framework)
+
+These stubs require the System Event Framework (SEF) for server init/lifecycle,
+IPC message loops, or access to other running servers' tables before they can
+be replaced with real implementations.
+
+- [ ] **12.8 — Wire VM server message loop** (`servers/src/vm/mod.rs`)
+  **Depends on:** SEF init framework (Phase 12.2 RS), IPC message receive
+  Currently has no message loop — receives no requests, handles no work.
+  Must create a main loop that receives VM_PAGEFAULT, RS_INIT, VFS messages
+  and dispatches them through `init_call_table`.
+
+- [ ] **12.9 — Implement VM server operations** (`servers/src/vm/proc.rs`, `mod.rs`, `mem.rs`)
+  **Depends on:** VM server message loop (12.8)
+  All stubs in proc.rs (pt_new, pt_bind, vm_create, vm_destroy, vm_clone,
+  vm_get_addrspace, vm_copy, vm_copy_overwrite, clear_proc, vm_collect),
+  mod.rs (do_pagefaults, sys_kill, clear_pagefault, do_shm_unmap, do_remap,
+  do_map_phys, do_get_phys, do_get_refcount, do_munmap, do_exit, do_info,
+  sys_vmctl, exec_bootproc, do_procctl), and mem.rs (sys_vmctl dispatch).
+  All have Phase 6 kernel dependencies already met.
+
+- [ ] **12.10 — Wire handle_page_fault to VM server** (`kernel/src/pagetable.rs:344`)
+  **Depends on:** VM server message loop (12.8)
+  Currently returns false, silently ignoring all page faults.
+
+- [ ] **12.11 — Wire ProcFS to VTreeFS** (`crates/fs/src/procfs/`)
+  **Depends on:** VTreeFS library (Phase 12), PM process table access (12.3),
+  VFS fproc table access (Phase 10), kernel process table access
+  All ~31 TODO items in procfs need: VTreeFS inode functions (add_inode,
+  get_root_inode, start_vtreefs), process table reads via sys_getproctab/
+  getsysinfo, sys_hz/getticks, vm_info_stats, sys_datacopy, sys_getcpuinfo.
+  Replace stub handlers in root.rs, pid.rs, tree.rs with real implementations.
+
+- [ ] **12.12 — Wire clock server main loop** (`servers/src/clock_server.rs:126`)
+  **Depends on:** SEF init framework (Phase 12.2 RS)
+  Replace `todo!()` with IPC message receive/dispatch for clock requests.
+
+- [ ] **12.13 — Wire SMP IPI primitives** (`kernel/src/smp.rs`)
+  **Depends on:** APIC IPI send function in arch-x86_64 (Phase 7.6)
+  Replace `todo!()` at lines 183/195 for `smp_ipi_halt_handler` and
+  `smp_schedule`. Implement `arch_send_smp_schedule_ipi(cpu)` in
+  arch-x86_64 APIC module.
+
+- [ ] **12.14 — Wire profiling clock and NMI** (`kernel/src/profile.rs`)
+  **Depends on:** Architecture profile clock driver
+  Replace TODO at lines 218/223/334: `arch_init_profile_clock`,
+  `arch_stop_profile_clock`, NMI-based profiling.
+
+- [ ] **12.15 — Wire deferred profiling syscalls** (`kernel/src/system.rs`)
+  **Depends on:** Profiling infrastructure (12.14)
+  Replace stubs for `do_sprofile` (SYS_SPROF), `do_cprofile` (SYS_CPROF),
+  `do_profbuf` (SYS_PROFBUF). All need profiling clock + buffer management.
 
 ---
 
