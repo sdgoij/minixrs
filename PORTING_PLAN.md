@@ -2577,9 +2577,18 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Cache flush with barrier support
   - Interrupt handling: ISR read, descriptor reap, IRQ re-enable
 
-- [ ] **11b.6 — `minix/drivers/storage/vnd/`**
+- [x] **11b.6 — `minix/drivers/storage/vnd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/`
-  - Virtual disk driver — stub ported (4/16 passed; 12 ignored for ENODEV stub)
+  - Virtual disk driver in `crates/drivers/src/storage/vnd.rs` (~340 lines, 24 tests)
+  - All types and constants from `vndvar.h` (VndGeom, VndIoctl, VndUser, VndDevice, PartGeom)
+  - IOCTL codes (VNDIOCSET/VNDIOCCLR/VNDIOCGET) and flags (HASGEOM/READONLY/FORCE)
+  - Geometry computation (same algorithm as C `vnd_layout`: 64 heads / 32 sectors for large disks)
+  - Partition/subpartition lookup by minor number (DEV_PER_DRIVE=5, SUB_PER_DRIVE=16)
+  - Open/close with open count tracking, read-only enforcement
+  - Transfer stub with bounds checking and size truncation
+  - `vnd_set_fd()` for test configuration (no `openct == 1` guard per 11b.13 fix)
+  - IOCTL dispatch with busy/configured state checks
+  - Real implementation depends on VFS server (Phase 12) for file descriptor ops
 
 - [ ] **11b.7 — `minix/drivers/storage/filter/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/filter/`
@@ -3046,9 +3055,13 @@ be replaced with real implementations.
   **Depends on:** SEF init framework (Phase 12.2 RS)
   Replace `todo!()` with IPC message receive/dispatch for clock requests.
 
-- [ ] **12.13 — Wire SMP IPI primitives** (`kernel/src/smp.rs`)
-  **Depends on:** APIC IPI send function in arch-x86_64 (Phase 7.6)
-  Replace `todo!()` at lines 183/195 for `smp_ipi_halt_handler` and
+- [ ] **12.14 — Implement VNDIOCSET/VNDIOCGET VFS backcalls** (`crates/drivers/src/storage/vnd.rs`)
+  **Depends on:** VFS `copyfd` backcall (Phase 10), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4), `mmap`/`pread`/`pwrite` syscall support
+  Replace `todo!()` in `vnd_ioctl`:
+  - `VNDIOCSET`: copy in `VndIoctl` via `sys_safecopyfrom`, call `copyfd()` to get backing file fd, `fstat` to verify regular file, `mmap` intermediate buffer, call `vnd_layout` to set geometry and parse partitions
+  - `VNDIOCGET`: copy out `VndUser` via `sys_safecopyto` (unit number, device, inode)
+  - All three IOCTLs also depend on `DIOCOPENCT` and `DIOCFLUSH` which need `sys_safecopyto` and `fsync` respectively
+  - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/vnd.c`
   `smp_schedule`. Implement `arch_send_smp_schedule_ipi(cpu)` in
   arch-x86_64 APIC module.
 
