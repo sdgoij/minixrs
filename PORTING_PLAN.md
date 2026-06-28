@@ -2549,9 +2549,14 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Drive state flags (INITIALIZED, DEAF, SMART, ATAPI, IDENTIFIED)
   - 17 tests covering register constants, command layout, LBA addressing
 
-- [ ] **11b.3 — `minix/drivers/storage/floppy/`**
+- [x] **11b.3 — `minix/drivers/storage/floppy/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/floppy/`
-  - Floppy driver — stub ported (1/1 ignored for density table defaults)
+  - Floppy driver in `crates/drivers/src/storage/floppy.rs` (~300 lines)
+  - NEC PD765 FDC I/O ports (0x3F2–0x3F7), DMA ports
+  - 7-entry density table (360K, 720K, 1.2M, 1.44M) with test order
+  - FDC command set: SEEK, READ, WRITE, SENSE, RECALIBRATE, SPECIFY
+  - Drive state tracking (calibrated, density, cylinder, sector, motor)
+  - 19 tests covering constants, density table, drive API
 
 - [ ] **11b.4 — `minix/drivers/storage/ramdisk/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/ramdisk/`
