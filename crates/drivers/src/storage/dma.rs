@@ -199,12 +199,12 @@ mod tests {
 
     /// Register the test allocator.
     unsafe fn use_test_alloc() {
-        register_allocator(test_alloc, test_free);
+        unsafe { register_allocator(test_alloc, test_free) };
     }
 
     /// Reset the allocator to the default stub.
     unsafe fn reset_allocator() {
-        register_allocator(stub_alloc, stub_free);
+        unsafe { register_allocator(stub_alloc, stub_free) };
     }
 
     #[test]
