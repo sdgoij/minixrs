@@ -10,6 +10,7 @@ pub mod prelude {
 pub mod bus;
 pub mod clock;
 pub mod eeprom;
+pub mod input;
 pub mod storage;
 pub mod system;
 

@@ -2832,20 +2832,19 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
 
 **Dependencies**: Requires GPIO driver (11a.1) for keyboard/mouse hardware interface.
 
-- [ ] **11d.1 — `minix/drivers/input/`**
+- [x] **11d.1 — `minix/drivers/input/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/hid/pckbd/`
   - Keyboard driver (PS/2), mouse driver (PS/2)
-  - `crates/drivers/src/input/` — PS/2 keyboard & mouse driver
+  - `crates/drivers/src/input/` — PS/2 keyboard & mouse driver (7 files, 74 tests)
     - `keyboard.rs` — Scancode translation, shift/Caps Lock tracking, Colemak layout
     - `mouse.rs` — PS/2 3-byte packet processing, button state, signed delta
-    - `controller.rs` — Keyboard controller I/O (ports 0x60/0x64)
-    - `driver.rs` — `InputDriver` struct unifying keyboard + mouse
-    - `scanmap.rs` — `SCANMAP_NORMAL`, `SCANMAP_COLEMAK`, `SCANMAP_ESCAPED`
-    - `constants.rs` — All PS/2 constants from `pckbd.h` + `input.h`
+    - `controller.rs` — Keyboard controller I/O via `IoBackend` trait (ports 0x60/0x64)
+    - `driver.rs` — `InputDriver` struct unifying keyboard + mouse with callbacks
+    - `scanmap.rs` — `SCANMAP_NORMAL`, `SCANMAP_ESCAPED`, Colemak letter remapping
+    - `constants.rs` — All PS/2 constants from `pckbd.h` + HID usage tables from `input.h`
   - Shift modifier tracking (left/right shift press/release)
   - First-class Colemak keyboard layout support
-  - `should_shift()` helper for console character generation
-  - 532 tests passing across the entire crate (input subsystem covered)
+  - Mouse parser with resynchronization (bit 3 validity check)
 
 - [ ] **11d.2 — `minix/drivers/video/fb/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/`
