@@ -2855,12 +2855,13 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - `Framebuffer` driver struct with open/close/read/write/ioctl
   - Real implementation depends on arch-specific VESA/PCI MMIO backend (see 12.22)
 
-- [ ] **11d.3 — `minix/drivers/video/tda19988/`**
+- [x] **11d.3 — `minix/drivers/video/tda19988/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/video/tda19988/`
-  - TDA19988 video driver
-  - `crates/drivers/src/video/tda19988.rs` — Tda19988Driver<B: I2cBus>
-  - I2C abstraction via `I2cBus` trait with mock
-  - 35 unit tests
+  - TDA19988 HDMI encoder driver in `crates/drivers/src/video/tda19988.rs` (~260 lines, 21 tests)
+  - `I2cBus` trait with `MockI2c` for testing
+  - All HDMI/CEC register constants (pages, control, EDID, HDCP)
+  - `Tda19988Driver<B: I2cBus>` with `hdmi_read/write/set/clear`, `set_page`, `check_revision`, `hdmi_init`, `read_edid`, `is_display_connected`
+  - EDID reading via page-based register access
 
 ### Phase 11e: Audio & peripheral drivers
 
