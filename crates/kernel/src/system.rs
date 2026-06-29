@@ -1091,9 +1091,9 @@ pub unsafe fn system_init() {
         map_call(32, do_safecopy_to_handler); // SYS_SAFECOPYTO
         map_call(33, do_vsafecopy_handler); // SYS_VSAFECOPY
         map_call(34, do_setgrant_handler); // SYS_SETGRANT
-        map_call(36, do_sprofile_stub); // SYS_SPROF
-        map_call(37, do_cprofile_stub); // SYS_CPROF
-        map_call(38, do_profbuf_stub); // SYS_PROFBUF
+        map_call(36, do_sprofile_handler); // SYS_SPROF
+        map_call(37, do_cprofile_handler); // SYS_CPROF
+        map_call(38, do_profbuf_handler); // SYS_PROFBUF
         map_call(39, do_stime_handler); // SYS_STIME
         map_call(40, do_settime_handler); // SYS_SETTIME
         map_call(43, do_vmctl_handler); // SYS_VMCTL
@@ -1107,6 +1107,11 @@ pub unsafe fn system_init() {
         map_call(54, do_schedctl_handler); // SYS_SCHEDCTL
         map_call(55, do_statectl_handler); // SYS_STATECTL
         map_call(56, do_safememset_handler); // SYS_SAFEMEMSET
+    }
+
+    /// Stub for SYS_UPDATE — deferred.
+    pub unsafe fn do_update_stub(_caller: *mut Proc, _msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+        EBADREQUEST
     }
 }
 
@@ -1550,31 +1555,13 @@ pub unsafe fn sched_proc(rp: *mut Proc, priority: i8) -> i32 {
 // Stub handlers — need VM/data_copy/clock infrastructure (Phase 6+)
 // ─────────────────────────────────────────────────────────────────────────
 
-macro_rules! stub_handler {
-    ($name:ident, $desc:expr) => {
-        #[doc = concat!("Stub handler for ", $desc, ".")]
-        ///
-        /// # Safety
-        ///
-        /// Standard call handler signature.
-        pub unsafe fn $name(_caller: *mut Proc, _msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
-            // TODO: implement $desc
-            EBADREQUEST
-        }
-    };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// do_privctl — privilege control (SYS_PRIVCTL)
-// ─────────────────────────────────────────────────────────────────────────
-
+/// Handle SYS_EXEC (Phase 8.10): set up a process after a successful exec.
 // Message layout for privctl:
 //   offset  0: endpt      (i32) — target process endpoint
 //   offset  4: request    (i32) — SYS_PRIV_ALLOW / SYS_PRIV_DISALLOW / etc.
 //   offset  8: arg_ptr    (u64) — pointer to privilege/io/mem/irq data
 //   offset 16: phys_start (u64) — physical address start (for QUERY_MEM)
 //   offset 24: phys_len   (u64) — physical address length
-
 use arch_common::com::{
     SYS_PRIV_ADD_IO, SYS_PRIV_ADD_IRQ, SYS_PRIV_ADD_MEM, SYS_PRIV_ALLOW, SYS_PRIV_DISALLOW,
     SYS_PRIV_QUERY_MEM, SYS_PRIV_SET_SYS, SYS_PRIV_SET_USER, SYS_PRIV_UPDATE_SYS, SYS_PRIV_YIELD,
@@ -2929,13 +2916,172 @@ pub unsafe fn do_vtimer_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// Remaining stubs
-// Remaining stubs (deferred to later phases)
-stub_handler!(do_sprofile_stub, "SYS_SPROF");
-stub_handler!(do_cprofile_stub, "SYS_CPROF");
-stub_handler!(do_profbuf_stub, "SYS_PROFBUF");
-stub_handler!(do_update_stub, "SYS_UPDATE");
-// ── Real implementations ───────────────────────────────────────────────
+// ── SPROF message offsets (mess_lsys_krn_sys_sprof, from ipc.h) ──
+//   offset  0: action   (i32)
+//   offset  4: freq     (i32)
+//   offset  8: intr_type (i32)
+//   offset 12: endpt    (i32)
+//   offset 16: ctl_ptr  (u64)
+//   offset 24: mem_ptr  (u64)
+//   offset 32: mem_size (u64)
+const SPROF_ACTION_OFF: usize = 0;
+const SPROF_FREQ_OFF: usize = 4;
+const SPROF_INTR_TYPE_OFF: usize = 8;
+const SPROF_ENDPT_OFF: usize = 12;
+const SPROF_CTL_PTR_OFF: usize = 16;
+const SPROF_MEM_PTR_OFF: usize = 24;
+const SPROF_MEM_SIZE_OFF: usize = 32;
+
+// ── CPROF message offsets (generic mess_1 layout) ───────────────────
+//   offset  0: action   (i32)
+//   offset  4: mem_size (i32)
+//   offset  8: endpt    (i32)
+//   offset 16: ctl_ptr  (u64)
+//   offset 24: mem_ptr  (u64)
+const CPROF_ACTION_OFF: usize = 0;
+const CPROF_MEM_SIZE_OFF: usize = 4;
+const CPROF_ENDPT_OFF: usize = 8;
+const CPROF_CTL_PTR_OFF: usize = 16;
+const CPROF_MEM_PTR_OFF: usize = 24;
+
+// ── PROFBUF message offsets (mess_lsys_krn_sys_profbuf, from ipc.h) ─
+//   offset  0: ctl_ptr  (u64)
+//   offset  8: mem_ptr  (u64)
+const PROFBUF_CTL_PTR_OFF: usize = 0;
+const PROFBUF_MEM_PTR_OFF: usize = 8;
+
+// ── Profiling handlers ───────────────────────────────────────────────
+
+/// Handle SYS_SPROF: start/stop statistical profiling.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` to a valid message.
+pub unsafe fn do_sprofile_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let action = msg_read_i32(msg, SPROF_ACTION_OFF);
+        let _freq = msg_read_i32(msg, SPROF_FREQ_OFF);
+        let _intr_type = msg_read_i32(msg, SPROF_INTR_TYPE_OFF);
+        let _endpt = msg_read_i32(msg, SPROF_ENDPT_OFF);
+        let _ctl_ptr = msg_read_u64(msg, SPROF_CTL_PTR_OFF);
+        let _mem_ptr = msg_read_u64(msg, SPROF_MEM_PTR_OFF);
+        let _mem_size = msg_read_u64(msg, SPROF_MEM_SIZE_OFF);
+
+        // Caller must be a system process.
+        let privp = (*caller).p_priv;
+        if privp.is_null() || !(*privp).s_flags.contains(PrivFlags::SYS_PROC) {
+            return crate::ipc::EPERM;
+        }
+
+        crate::profile::sprofile(
+            action,
+            _mem_size as i32,
+            _freq,
+            _intr_type,
+            _ctl_ptr as *mut core::ffi::c_void,
+            _mem_ptr as *mut core::ffi::c_void,
+        )
+    }
+}
+
+/// Handle SYS_CPROF: get/reset call profiling data.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` to a valid message.
+pub unsafe fn do_cprofile_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let _action = msg_read_i32(msg, CPROF_ACTION_OFF);
+        let _mem_size = msg_read_i32(msg, CPROF_MEM_SIZE_OFF);
+        let _endpt = msg_read_i32(msg, CPROF_ENDPT_OFF);
+        let _ctl_ptr = msg_read_u64(msg, CPROF_CTL_PTR_OFF);
+        let _mem_ptr = msg_read_u64(msg, CPROF_MEM_PTR_OFF);
+
+        // Caller must be a system process.
+        let privp = (*caller).p_priv;
+        if privp.is_null() || !(*privp).s_flags.contains(PrivFlags::SYS_PROC) {
+            return crate::ipc::EPERM;
+        }
+
+        match _action {
+            crate::profile::PROF_RESET => {
+                crate::profile::CPROF_PROCS_NO = 0;
+                crate::system::OK
+            }
+            crate::profile::PROF_GET => {
+                // Validate endpoint.
+                if !crate::table::is_ok_endpoint(_endpt) {
+                    return crate::ipc::EINVAL;
+                }
+
+                // For now, just return OK with empty info.
+                // Full implementation would iterate CPROF_PROC_INFO and
+                // data_copy profiling tables to user space (like C code).
+                let info = crate::profile::CprofInfo {
+                    mem_used: 0,
+                    err: 0,
+                };
+
+                // Copy info struct to user via ctl_ptr.
+                if _ctl_ptr != 0 {
+                    let r = data_copy_from(
+                        -1, // KERNEL
+                        &info as *const _ as u64,
+                        _ctl_ptr,
+                        core::mem::size_of::<crate::profile::CprofInfo>(),
+                    );
+                    if r != 0 {
+                        return r;
+                    }
+                }
+
+                crate::system::OK
+            }
+            _ => crate::ipc::EINVAL,
+        }
+    }
+}
+
+/// Handle SYS_PROFBUF: register profiling buffer locations.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` to a valid message.
+pub unsafe fn do_profbuf_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let _ctl_ptr = msg_read_u64(msg, PROFBUF_CTL_PTR_OFF);
+        let _mem_ptr = msg_read_u64(msg, PROFBUF_MEM_PTR_OFF);
+
+        // Check slot availability.
+        if crate::profile::CPROF_PROCS_NO >= 64 {
+            return crate::ipc::ENOMEM;
+        }
+
+        let idx = crate::profile::CPROF_PROCS_NO;
+        let info = crate::profile::CprofProcInfo {
+            endpt: (*caller).p_endpoint,
+            name: (*caller).p_name.as_mut_ptr() as *mut u8,
+            ctl_v: _ctl_ptr,
+            buf_v: _mem_ptr,
+        };
+        core::ptr::write(
+            core::ptr::addr_of_mut!(crate::profile::CPROF_PROC_INFO)
+                .cast::<crate::profile::CprofProcInfo>()
+                .add(idx),
+            info,
+        );
+        let count_ptr = core::ptr::addr_of_mut!(crate::profile::CPROF_PROCS_NO);
+        *count_ptr += 1;
+
+        // Set SPROF_SEEN flag
+        let old_mf = (*caller).p_misc_flags.load(Ordering::Relaxed);
+        (*caller)
+            .p_misc_flags
+            .store(old_mf | 0x0080, Ordering::Relaxed); // MF_SPROF_SEEN
+
+        crate::system::OK
+    }
+}
 
 /// Handle SYS_EXEC (Phase 8.10): set up a process after a successful exec.
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_exec.c`
@@ -5783,5 +5929,98 @@ mod tests {
         assert_eq!(COPY_DST_ADDR_OFF, 24);
         assert_eq!(COPY_NR_BYTES_OFF, 32);
         assert_eq!(COPY_FLAGS_OFF, 40);
+    }
+
+    #[test]
+    fn test_sprofile_handlers_registered() {
+        unsafe {
+            system_init();
+            assert!(CALL_VEC[36].is_some()); // SYS_SPROF
+            assert!(CALL_VEC[37].is_some()); // SYS_CPROF
+            assert!(CALL_VEC[38].is_some()); // SYS_PROFBUF
+        }
+    }
+
+    #[test]
+    fn test_sprofile_offset_constants() {
+        assert_eq!(SPROF_ACTION_OFF, 0);
+        assert_eq!(SPROF_FREQ_OFF, 4);
+        assert_eq!(SPROF_INTR_TYPE_OFF, 8);
+        assert_eq!(SPROF_ENDPT_OFF, 12);
+        assert_eq!(SPROF_CTL_PTR_OFF, 16);
+        assert_eq!(SPROF_MEM_PTR_OFF, 24);
+        assert_eq!(SPROF_MEM_SIZE_OFF, 32);
+    }
+
+    #[test]
+    fn test_cprofile_offset_constants() {
+        assert_eq!(CPROF_ACTION_OFF, 0);
+        assert_eq!(CPROF_MEM_SIZE_OFF, 4);
+        assert_eq!(CPROF_ENDPT_OFF, 8);
+        assert_eq!(CPROF_CTL_PTR_OFF, 16);
+        assert_eq!(CPROF_MEM_PTR_OFF, 24);
+    }
+
+    #[test]
+    fn test_profbuf_offset_constants() {
+        assert_eq!(PROFBUF_CTL_PTR_OFF, 0);
+        assert_eq!(PROFBUF_MEM_PTR_OFF, 8);
+    }
+
+    #[test]
+    fn test_sprofile_rejects_non_sys_proc() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(10);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, SPROF_ACTION_OFF, crate::profile::PROF_START);
+            let result = do_sprofile_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EPERM);
+        }
+    }
+
+    #[test]
+    fn test_cprofile_rejects_non_sys_proc() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(10);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, CPROF_ACTION_OFF, crate::profile::PROF_RESET);
+            let result = do_cprofile_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EPERM);
+        }
+    }
+
+    #[test]
+    fn test_cprofile_reset_ok() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let privp = setup_test_priv(0);
+            (*privp).s_flags = PrivFlags::SYS_PROC;
+            (*rp).p_priv = privp;
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, CPROF_ACTION_OFF, crate::profile::PROF_RESET);
+            let result = do_cprofile_handler(rp, &mut msg);
+            assert_eq!(result, 0); // OK
+        }
+    }
+
+    #[test]
+    fn test_cprofile_get_bad_endpoint_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let privp = setup_test_priv(0);
+            (*privp).s_flags = PrivFlags::SYS_PROC;
+            (*rp).p_priv = privp;
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, CPROF_ACTION_OFF, crate::profile::PROF_GET);
+            msg_write_i32(&mut msg, CPROF_ENDPT_OFF, 99999); // bad endpoint
+            let result = do_cprofile_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
     }
 }

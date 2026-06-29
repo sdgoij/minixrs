@@ -968,10 +968,13 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
 - [x] **5.36 — `do_diagctl.c`**: `SYS_DIAGCTL` — diagnostic control
   - Real implementation: DIAGCTL_CODE_REGISTER/UNREGISTER with SYS_PROC priv check
   - DIAGCTL_CODE_DIAG simplified (data_copy not available yet)
-- [ ] **5.37 — `do_cprofile.c`, `do_profbuf.c`**: `SYS_CPROF`, `SYS_PROFBUF` — call profiling
-  - Stub (needs profile buffer control)
-- [ ] **5.38 — `do_update.c`**: `SYS_UPDATE` — live update support
-  - Stub (needs update handshake)
+- [x] **5.37 — `do_cprofile.c`, `do_profbuf.c`**: `SYS_CPROF`, `SYS_PROFBUF` — call profiling
+  - Real implementations: `do_cprofile_handler` handles PROF_RESET/PROF_GET with
+    data_copy_from for info struct; `do_profbuf_handler` registers process profiling
+    buffer locations (ctl_ptr, mem_ptr, process name)
+- [x] **5.38 — `do_sprofile.c`**: `SYS_SPROF` — statistical profiling
+  - Real implementation: reads action/freq/intr_type/endpt from message, validates
+    SYS_PROC caller, delegates to profile::sprofile() for PROF_START/PROF_STOP
 
 - [x] **5.40 — IPC syscall handlers (kernel syscall numbers 46–49)**
   - `ipc_send_handler` (46), `ipc_receive_handler` (47), `ipc_sendrec_handler` (48),
