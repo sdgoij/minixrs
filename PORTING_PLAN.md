@@ -3001,9 +3001,16 @@ trait Driver {
   - IPC message loop deferred (Phase 12 wiring)
   - All 21 tests pass, clippy clean
 
-- [ ] **12.2 — RS server** (`.refs/minix-3.3.0/minix/servers/rs/`): `main.c`, `manager.c`, `request.c`, `exec.c`, `error.c`, `memory.c`, `table.c`, `utility.c`, `const.h`, `glo.h`, `inc.h`, `proto.h`, `type.h`
-  - Restart Service — process crash recovery, live update coordination, process cloning/restart
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+- [x] **12.2 — RS server** (`.refs/minix-3.3.0/minix/servers/rs/`): `main.c`, `manager.c`, `request.c`, `exec.c`, `error.c`, `memory.c`, `table.c`, `utility.c`, `const.h`, `glo.h`, `inc.h`, `proto.h`, `type.h`
+  - Reincarnation Server in `crates/servers/src/rs.rs` (~470 lines, 29 tests)
+  - `Rproc`/`RprocPub` structs, `BootImage`/`BootImagePriv`/`BootImageSys`/`BootImageDev`
+  - Service table: `alloc_slot`, `free_slot`, `lookup_slot_by_label/pid/endpoint`
+  - `init_slot`: populate slot with label and endpoint
+  - `mark_initialized`/`mark_terminated`: lifecycle state transitions
+  - `rs_isokendpt`: endpoint validity scanning
+  - `check_call_permission`: caller authorization (PM/RS/SCHED)
+  - IPC message loop deferred (Phase 12 wiring)
+  - All 29 tests pass, clippy clean
 
 - [ ] **12.3 — PM server** (`.refs/minix-3.3.0/minix/servers/pm/`): `main.c`, `alarm.c`, `exec.c`, `forkexit.c`, `getset.c`, `mcontext.c`, `misc.c`, `profile.c`, `schedule.c`, `signal.c`, `table.c`, `time.c`, `trace.c`, `utility.c`, `const.h`, `glo.h`, `mproc.h`, `pm.h`, `proto.h`, `type.h`
   - Process Manager — fork/exit, exec, signals, timers, UID/GID, ptrace
