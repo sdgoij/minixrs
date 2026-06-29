@@ -3029,9 +3029,18 @@ trait Driver {
   - Deferred from Phase 6.13
   - Complex: requires careful state machine for stop/resume/step interactions
 
-- [ ] **12.4 — DS server** (`.refs/minix-3.3.0/minix/servers/ds/`): `main.c`, `store.c`, `inc.h`, `proto.h`, `store.h`
+- [x] **12.4 — DS server** (`.refs/minix-3.3.0/minix/servers/ds/`): `main.c`, `store.c`, `inc.h`, `proto.h`, `store.h`
   - Directory Service, resource name publishing/retrieval, subscription management
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+  - Ported to `crates/servers/src/ds.rs` (~870 lines, 29 tests)
+  - Full data store with 64 entry slots, 128 subscription slots
+  - Publish/retrieve U32 and LABEL types; STR/MEM deferred (needs heap)
+  - Simple pattern matching (^...$ with * trailing wildcard) replaces POSIX regex
+  - Subscribe with change tracking via bitmap, check for updates
+  - Delete with subscriber notification
+  - Test spinlock serializes concurrent access to shared static tables
+  - 29 tests pass, clippy clean
+  - IPC message loop deferred (see Phase 12 wiring)
+  - Source: `.refs/minix-3.3.0/minix/servers/ds/`
 
 - [ ] **12.5 — IPC server** (`.refs/minix-3.3.0/minix/servers/ipc/`): `main.c`, `sem.c`, `shm.c`, `utility.c`, `inc.h`, `ipc.conf`, `proto.h`
   - IPC endpoint management, semaphore support, shared memory

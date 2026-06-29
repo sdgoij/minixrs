@@ -53,6 +53,7 @@ pub fn map_vnode(vp: *mut Vnode, map_to_fs_e: i32) -> i32 {
 /// TODO: call minix_vfs_mmap(...) with grant region setup.
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/exec.c` (vfs_memmap)
+#[allow(clippy::too_many_arguments)]
 pub fn vfs_memmap(
     proc_e: i32,
     foffset: i64,
