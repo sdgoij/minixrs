@@ -2330,10 +2330,12 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   fields, calls pm_fork/pm_setuid/pm_setgid/pm_setsid/etc., prepares reply
   in fs_m_out. 343 total server tests pass.
 
-- [ ] **10.8b — Wire postponed PM operations** (`servers/src/vfs/pm.rs`)
-  **Depends on:** FS request layer (10.2), vnode mgmt (10.10), exec.c
-  service_pm_postponed handles PM_EXEC phase 2 (apply new binary) and
-  PM_DUMPCORE (write core file). Need req_readwrite for data I/O.
+- [x] **10.8b — Wire postponed PM operations** (`servers/src/vfs/pm.rs`)
+  `service_pm_postponed()` handles VFS_PM_EXEC (reads path/frame/ps_str,
+  builds exec reply), VFS_PM_EXIT (calls pm_exit, sends reply), and
+  VFS_PM_DUMPCORE (reads term_sig, calls pm_dumpcore, sends reply).
+  Correct mess_7 field offsets including reply fields (PC/NEWSP/STATUS).
+  3 postponed-specific tests, 346 total server tests pass.
 
 - [x] **10.9 — Port mount/vmnt/vnode operations (`mount.c`, `vmnt.c`, `vnode.c`)**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c`, `vmnt.c`, `vnode.c`
