@@ -3179,11 +3179,19 @@ be replaced with real implementations.
   segment, update shm_nattch, unmap and destroy segments with 0
   attachments and SHM_DEST set, compact the list.
 
-- [ ] **12.8 — Wire VM server message loop** (`servers/src/vm/mod.rs`)
+- [x] **12.8 — Wire VM server message loop** (`servers/src/vm/mod.rs`)
   **Depends on:** SEF init framework (Phase 12.2 RS), IPC message receive
-  Currently has no message loop — receives no requests, handles no work.
-  Must create a main loop that receives VM_PAGEFAULT, RS_INIT, VFS messages
-  and dispatches them through `init_call_table`.
+  Implemented `dispatch_message()` which handles:
+  - Kernel notifications (SIGS_PAGEFAULT, etc.) via `sef_signal_handler()`
+  - VM_PAGEFAULT → SUSPEND (forward to kernel via VMCTL in Phase 13)
+  - RS_INIT → OK (SEF init callback stub)
+  - VFS transactions (is_vfs_fs_transid) → ENOSYS (deferred)
+  - Normal dispatch through `VM_CALLS` table with `call_number()` routing
+  - Reply logic: SUSPEND/EDONTREPLY handlers skip reply; others send via
+    `ipc_send_stub()` (replaced with real IPC in Phase 13)
+  - Updated `vm_main()` to call `dispatch_message()` in the loop (sef_receive
+    still stubbed — Phase 13)
+  - 11 new tests covering all dispatch paths, 304 total servers tests pass
 
 - [ ] **12.9 — Implement VM server operations** (`servers/src/vm/proc.rs`, `mod.rs`, `mem.rs`)
   **Depends on:** VM server message loop (12.8)

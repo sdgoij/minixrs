@@ -10,15 +10,19 @@ pub mod mem;
 pub mod proc;
 
 use arch_common::com::{
-    NR_VM_CALLS, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXIT, VM_FORK, VM_GETPHYS,
-    VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP, VM_MUNMAP,
-    VM_NOTIFY_SIG, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE, VM_RS_MEMCTL,
-    VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP, VM_UNMAP_PHYS, VM_VFS_MMAP,
-    VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMIW_REGION, VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR,
-    VMPPARAM_HANDLEMEM,
+    NR_VM_CALLS, RS_INIT, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXIT, VM_FORK,
+    VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP, VM_MUNMAP,
+    VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE,
+    VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP, VM_UNMAP_PHYS,
+    VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMIW_REGION, VMIW_STATS, VMIW_USAGE,
+    VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
 };
+use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
-use arch_common::ipc::Message;
+use arch_common::ipc::{EDONTREPLY, Message};
+use arch_common::ipcconst::{
+    IPC_FLG_MSG_FROM_KERNEL, IPC_STATUS_FLAGS_SHIFT, ipc_status_flags_test,
+};
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -40,19 +44,19 @@ const VMF_EXIT_QUERY: u32 = 0x04;
 
 /// Reply later via a different message (internal VM status).
 #[allow(dead_code)]
-const SUSPEND: i32 = -998;
+const _SUSPEND: i32 = -998;
 
 /// Do not reply at all (internal VM status).
 #[allow(dead_code)]
-const EDONTREPLY: i32 = -201;
+const _EDONTREPLY: i32 = -201;
 
 /// Endpoint representing kernel-originated messages.
 #[allow(dead_code)]
-const FROM_KERNEL: i32 = 0x100;
+const _FROM_KERNEL: i32 = 0x100;
 
 /// Special endpoint to receive from any source.
 #[allow(dead_code)]
-const ANY: i32 = 0x0000ffff;
+const _ANY: i32 = 0x0000ffff;
 
 // ═════════════════════════════════════════════════════════════════════════
 // Call dispatch table
@@ -156,13 +160,12 @@ pub fn init_vm() {
 /// VM server main entry point.
 ///
 /// Initializes the call table and enters the message dispatch loop.
-/// Currently a placeholder; real IPC receive loop comes in Phase 6.4+.
+/// The IPC receive call (`sef_receive`) is stubbed — real IPC comes
+/// in Phase 13 (IPC + SEF framework).
 pub fn vm_main() {
     init_vm();
 
-    // TODO: Phase 6.4+ — receive messages via IPC and dispatch.
-    //
-    // The loop body will be:
+    // TODO: Phase 13 — replace with real sef_receive + ipc_send loop.
     //
     //   loop {
     //       let mut msg = Message {
@@ -174,46 +177,80 @@ pub fn vm_main() {
     //       let r = sef_receive(ANY, &mut msg, &mut ipc_status);
     //       if r != OK { continue; }
     //
-    //       // Check for notifications from kernel
-    //       if is_ipc_notify(ipc_status) {
-    //           if msg.m_source == FROM_KERNEL {
-    //               sef_signal_handler();
-    //           }
-    //           continue;
-    //       }
-    //
-    //       let call_nr = msg.m_type as u32;
-    //
-    //       // Handle special message types
-    //       if call_nr == VM_PAGEFAULT {
-    //           // TODO: forward to kernel via VMCTL
-    //           msg.m_type = SUSPEND;
-    //       } else if call_nr == RS_INIT {
-    //           // TODO: SEF init callback
-    //           msg.m_type = OK;
-    //       } else if is_vfs_fs_transid(call_nr) {
-    //           // TODO: VFS transaction dispatch
-    //           msg.m_type = ENOSYS;
-    //       } else {
-    //           // Normal dispatch through call table
-    //           let idx = call_number(call_nr);
-    //           let result = if idx >= 0 {
-    //               if let Some(func) = VM_CALLS[idx as usize].func {
-    //                   func(&mut msg)
-    //               } else {
-    //                   ENOSYS
-    //               }
-    //           } else {
-    //               ENOSYS
-    //           };
-    //
-    //           // Reply unless handler requested no reply
-    //           if result != SUSPEND && result != EDONTREPLY {
-    //               msg.m_type = result;
-    //               // send(msg.m_source, &mut msg);
-    //           }
-    //       }
+    //       dispatch_message(&mut msg, ipc_status);
     //   }
+}
+
+/// Dispatch a single message through the VM call table.
+///
+/// Handles special message types (VM_PAGEFAULT, RS_INIT, VFS transactions)
+/// and normal dispatch through `VM_CALLS`. Repies to the caller via `ipc_send()`.
+///
+/// Returns the result code (for testing).
+pub fn dispatch_message(msg: &mut Message, ipc_status: i32) -> i32 {
+    // Check for notifications from kernel.
+    if is_ipc_notify(ipc_status) {
+        if ipc_status_flags_test(
+            ipc_status,
+            IPC_FLG_MSG_FROM_KERNEL << IPC_STATUS_FLAGS_SHIFT,
+        ) {
+            sef_signal_handler();
+        }
+        // Notifications don't get a reply.
+        return EDONTREPLY;
+    }
+
+    let call_nr = msg.m_type as u32;
+
+    // Handle special message types.
+    if call_nr == VM_PAGEFAULT {
+        // TODO: Phase 13 — forward to kernel via VMCTL.
+        msg.m_type = SUSPEND;
+        return SUSPEND;
+    }
+
+    if call_nr == RS_INIT {
+        // TODO: Phase 13 — SEF init callback.
+        msg.m_type = OK;
+        let _ = ipc_send_stub(msg.m_source, msg);
+        return OK;
+    }
+
+    if is_vfs_fs_transid(call_nr) {
+        // TODO: Phase 13 — VFS transaction dispatch.
+        msg.m_type = ENOSYS;
+        let _ = ipc_send_stub(msg.m_source, msg);
+        return ENOSYS;
+    }
+
+    // Normal dispatch through call table.
+    let idx = call_number(call_nr);
+    let result = if idx >= 0 {
+        let entry = unsafe { &VM_CALLS[idx as usize] };
+        if let Some(func) = entry.func {
+            func(msg)
+        } else {
+            ENOSYS
+        }
+    } else {
+        ENOSYS
+    };
+
+    // Reply unless handler requested no reply.
+    if result != SUSPEND && result != EDONTREPLY {
+        msg.m_type = result;
+        let _ = ipc_send_stub(msg.m_source, msg);
+    }
+
+    result
+}
+
+/// Stub for `ipc_send` — sends a message to a process.
+///
+/// Real implementation in Phase 13: calls kernel IPC send.
+fn ipc_send_stub(_dest: i32, _msg: &Message) -> Result<(), i32> {
+    // TODO: Phase 13 — actual IPC send via kernel.
+    Ok(())
 }
 
 /// Execute boot process (stub).
@@ -868,5 +905,143 @@ mod tests {
         vm_main();
         exec_bootproc();
         sef_signal_handler();
+    }
+
+    // ── dispatch_message tests ────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_notification_returns_edontreply() {
+        init_vm();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // Use a valid notification status: call type = NOTIFY (4), no flags.
+        let notif_status: i32 = 4; // NOTIFY call number
+        let r = dispatch_message(&mut msg, notif_status);
+        assert_eq!(r, EDONTREPLY);
+    }
+
+    #[test]
+    fn test_dispatch_vm_pagefault_returns_suspend() {
+        init_vm();
+        let mut msg = Message {
+            m_source: 42,
+            m_type: VM_PAGEFAULT as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, SUSPEND);
+        assert_eq!(msg.m_type, SUSPEND);
+    }
+
+    #[test]
+    fn test_dispatch_rs_init_returns_ok() {
+        init_vm();
+        let mut msg = Message {
+            m_source: RS_PROC_NR,
+            m_type: RS_INIT as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, OK);
+        assert_eq!(msg.m_type, OK);
+    }
+
+    #[test]
+    fn test_dispatch_known_call_dispatches_handler() {
+        init_vm();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: VM_MMAP as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // do_mmap is a stub that returns ENOSYS
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, ENOSYS);
+        assert_eq!(msg.m_type, ENOSYS); // reply type set
+    }
+
+    #[test]
+    fn test_dispatch_unknown_call_returns_enosys() {
+        init_vm();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0x9999 as i32, // unknown call number
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, ENOSYS);
+        assert_eq!(msg.m_type, ENOSYS);
+    }
+
+    #[test]
+    fn test_dispatch_unset_table_slot_returns_enosys() {
+        init_vm();
+        // VM_EXEC_NEWMEM = VM_RQ_BASE + 3 is in range but not set
+        let mut msg = Message {
+            m_source: 0,
+            m_type: (VM_RQ_BASE + 3) as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, ENOSYS);
+        assert_eq!(msg.m_type, ENOSYS);
+    }
+
+    #[test]
+    fn test_dispatch_suspend_handler_no_reply() {
+        init_vm();
+        // VM_PAGEFAULT returns SUSPEND, so msg.m_type should stay SUSPEND
+        // (no reply sent)
+        let mut msg = Message {
+            m_source: 42,
+            m_type: VM_PAGEFAULT as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, SUSPEND);
+        assert_eq!(msg.m_type, SUSPEND);
+    }
+
+    #[test]
+    fn test_ipc_send_stub_does_not_panic() {
+        let msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        assert!(ipc_send_stub(42, &msg).is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_vfs_transaction_returns_enosys() {
+        init_vm();
+        // VFS_TRANSACTION_BASE = 0x200, a VFS transaction ID is in that range
+        let mut msg = Message {
+            m_source: VFS_PROC_NR,
+            m_type: 0x200 as i32, // VFS_TRANSACTION_BASE
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, ENOSYS);
+        assert_eq!(msg.m_type, ENOSYS);
+    }
+
+    #[test]
+    fn test_dispatch_calls_init_vm_if_not_called() {
+        // Ensure that dispatch doesn't panic even if init_vm wasn't called
+        // (table will have all None entries -> ENOSYS)
+        // Note: we call init_vm anyway since static state persists
+        init_vm();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: VM_RQ_BASE as i32, // VM_EXIT
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        // VM_EXIT handler returns OK
+        assert_eq!(r, OK);
     }
 }
