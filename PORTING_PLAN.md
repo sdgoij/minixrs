@@ -3682,7 +3682,7 @@ reliable cross-function test patterns.
   `AtomicPtr`. Replace `IRQ_USE` with `AtomicI32`.
   (`crates/kernel/src/system.rs`, `crates/kernel/src/interrupt.rs`)
 
-- [ ] **13.11.5 — Kernel `table.rs`**: Replace `RUN_QUEUE` with `UnsafeCell`
+- [x] **13.11.5 — Kernel `table.rs`**: Replace `RUN_QUEUE` with `UnsafeCell`
   wrapper. (`crates/kernel/src/table.rs`)
 
 - [ ] **13.11.6 — Kernel `debug.rs`**: Replace `IPC_MESSAGES` with `UnsafeCell`

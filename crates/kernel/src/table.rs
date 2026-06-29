@@ -9,6 +9,7 @@
 //! - Process table is byte storage reinterpreted as `Proc` (avoids Rust
 //!   2024 `static_mut_refs` issues with large arrays of complex types)
 
+use core::cell::UnsafeCell;
 use core::mem::size_of;
 
 use crate::r#priv::{PPRIV_ADDR, PRIV, Priv, PrivFlags};
@@ -335,8 +336,20 @@ impl Default for RunQueue {
     }
 }
 
+/// Wrapper for `RunQueue`.
+pub struct RunQueueCell(UnsafeCell<RunQueue>);
+unsafe impl Sync for RunQueueCell {}
+impl RunQueueCell {
+    pub const fn new(val: RunQueue) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut RunQueue {
+        self.0.get()
+    }
+}
+
 /// Global run queue.
-pub static mut RUN_QUEUE: RunQueue = RunQueue::new();
+pub static RUN_QUEUE: RunQueueCell = RunQueueCell::new(RunQueue::new());
 
 // ─────────────────────────────────────────────────────────────────────────
 // proc_init
