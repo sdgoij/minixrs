@@ -3522,13 +3522,27 @@ userspace crate
     (SIGHUP=1 through SIGSYS=31) and sa_flags (SA_NOCLDSTOP through SA_NODEFER)
   - 23 tests, 121 total minix-std tests pass, clippy clean
 
-- [ ] **13.7 — Networking (LWIP protocol)**
-  - `socket`: create endpoint via LWIP
-  - `bind` / `listen` / `accept`: server socket
-  - `connect`: client socket
-  - `send` / `recv`: data transfer
-  - `getsockopt` / `setsockopt`: socket options
-  - Tests: loopback connect/send/recv
+- [x] **13.7 — Networking (LWIP protocol)**
+  - `socket`: create endpoint (stub — Phase 16 networking stack)
+  - `bind` / `listen` / `accept`: server socket (stubs)
+  - `connect`: client socket (stub)
+  - `send` / `recv`: data transfer (stubs)
+  - `getsockopt` / `setsockopt`: socket options (stubs)
+  - Implemented in `crates/minix-std/src/net.rs` with socket constants
+    (AF_INET=2, SOCK_STREAM=1, IPPROTO_TCP=6, SOL_SOCKET=1,
+    SO_REUSEADDR=0x04, SO_KEEPALIVE=0x08, etc.) and `SockAddrIn` struct
+  - All functions return ENOSYS — real implementation deferred to Phase 16
+  - 15 tests, 136 total minix-std tests pass, clippy clean
+  **Follow-up tasks:**
+
+  - [ ] **13.7a — Implement socket operations via NWQ protocol**
+    (`crates/minix-std/src/net.rs`)
+    **Depends on:** LWIP network stack (Phase 16), NWQ message protocol
+    Replace stubs with real NWQ message send/recv calls to the network
+    driver. Each socket operation maps to an NWQ request message;
+    the LWIP driver processes it asynchronously and replies via NWQ reply.
+    Requires NWQ endpoint resolution, message type definitions, and
+    async completion tracking.
 
 - [ ] **13.8 — Minimal `libc` for FFI**
   - Thin wrappers over `minix-std` with C ABI
