@@ -1,0 +1,13 @@
+[package]
+name = "minix-libc"
+version = "0.1.0"
+description = "Minimal libc for FFI: C ABI wrappers over minix-std primitives"
+
+[package.edition]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+minix-std = { path = "../minix-std" }

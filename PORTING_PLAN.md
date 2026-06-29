@@ -3544,7 +3544,7 @@ userspace crate
     Requires NWQ endpoint resolution, message type definitions, and
     async completion tracking.
 
-- [ ] **13.8 — Minimal `libc` for FFI**
+- [x] **13.8 — Minimal `libc` for FFI**
   - Thin wrappers over `minix-std` with C ABI
   - `open`, `read`, `write`, `close`, `lseek`
   - `fork`, `exit`, `waitpid`, `execve`
