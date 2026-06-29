@@ -3117,9 +3117,22 @@ trait Driver {
     sys_safecopyfrom for device info grant copy, IPC send/recv for bind/unbind
     forwarding, event queue allocation, buffer formatting
 
-- [ ] **12.7 — TTY server**
+- [x] **12.7 — TTY server**
   - Terminal multiplexing, pseudo-terminal management
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+  - Implemented in `crates/servers/src/tty.rs`:
+    - Full `Tty` struct with input/output queues, grant tracking, termios, winsize
+    - Complete `in_process` line discipline: 160-line pipeline with canonical/raw
+      mode, ISTRIP, IEXTEN (LNEXT, REPRINT), CR/LF mapping, VERASE/VKILL/VEOF,
+      IXON flow control, ISIG signal generation, echo, VTIME/MIN timer
+    - `out_process`: tab expansion (OXTABS), `\n→\r\n` (ONLCR), position tracking
+    - `sigchar`: signal delivery with optional input/output flush
+    - `handle_events` / `in_transfer`: event-driven batch delivery to readers
+    - `line2tty`: minor-to-line mapping (console, log redirect, RS-232)
+    - Echo functions: tty_echo (^X display), rawecho, back_over, reprint
+    - Character driver stubs: do_open/close/read/write/ioctl/cancel/select
+    - 54 tests covering line discipline, echo, signal, select, timer, clippy clean
+  - **Deferred stubs:** chardriver framework integration, grant-based I/O
+    (sys_safecopyfrom/to), IPC timer infrastructure, termios kernel notification
 
 ### Deferred Server Stubs (blocked on SEF + server framework)
 

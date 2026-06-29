@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod pm;
 pub mod rs;
 pub mod sched;
+pub mod tty;
 pub mod vfs;
 pub mod vm;
 
