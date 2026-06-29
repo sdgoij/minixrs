@@ -1,0 +1,13 @@
+[package]
+name = "minix-util"
+version = "0.1.0"
+description = "Minix utility crate: client wrappers for DS, DEVMAN, BDEV, CDEV"
+
+[package.edition]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+minix-std = { path = "../minix-std" }

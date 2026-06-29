@@ -13,6 +13,7 @@ members = [
     "crates/minix-libc",
     "crates/minix-rt",
     "crates/minix-std",
+    "crates/minix-util",
     "crates/net",
     "crates/servers",
     "crates/userland",

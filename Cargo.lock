@@ -80,6 +80,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "minix-util"
+version = "0.1.0"
+dependencies = [
+ "minix-std",
+]
+
+[[package]]
 name = "net"
 version = "0.1.0"
 

@@ -3554,12 +3554,13 @@ userspace crate
   - `getpid`, `getuid`, `getgid`
   - Tests: each function called from Rust `extern "C"` wrappers
 
-- [ ] **13.9 — `crates/minix-util` utility crate**
-  - Device manager client (DEVMAN protocol helpers)
-  - Block device I/O client
-  - Character device I/O client
-  - Data store client (DS publish/retrieve helpers)
-  - Tests: each client against the corresponding server mock
+- [x] **13.9 — `crates/minix-util` utility crate** (`crates/minix-util/`)
+  - Device manager client (`devman.rs`): add/del/bind/unbind devices, add devfiles
+  - Block device I/O client (`bdev.rs`): open/close/read/write/ioctl
+  - Character device I/O client (`cdev.rs`): open/close/read/write/ioctl/cancel/select
+  - Data store client (`ds.rs`): publish/retrieve/subscribe/delete u32 and label entries
+  - All functions return `Err(MinixErr(71))` on host, use `sendrec` on `target_os = "none"`
+  - 38 tests, clippy clean
 
 ### Deferred VFS Request Stubs (from Phase 10.2)
 
