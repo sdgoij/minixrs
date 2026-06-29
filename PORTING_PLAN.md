@@ -3564,18 +3564,45 @@ userspace crate
 
 ### Deferred VFS Request Stubs (from Phase 10.2)
 
-- [ ] **13.10 — Wire VFS FS request wrappers** (`servers/src/vfs/request.rs`)
-  **Depends on:** IPC send/recv primitives (Phase 13.2), grant table (Phase 13.2),
-  VFS message type definitions
-  All 30 `req_*` functions in request.rs currently return ENOSYS. Each needs to:
-  1. Build the appropriate FS request message (REQ_READSUPER, REQ_LOOKUP, etc.)
-     using message struct fields matching the FS server protocol
-  2. Call `fs_sendrec(fs_e, &msg)` to IPC the request to the FS server
-  3. Parse the response and return results
-  - `fs_sendrec()` itself needs: IPC send/receive (Phase 13.2), endpoint resolution
-  - `req_breadwrite`/`req_statvfs`/`req_rdlink`/`req_getdents` also need grant
-    table operations (`cpf_grant_magic`, `cpf_revoke`) from Phase 13.2
-  - `req_lookup` needs the lookup struct with path resolution (Phase 10 path.c)
+- [x] **13.10 — Wire VFS FS request wrappers** (`servers/src/vfs/request.rs`)
+  Added FS_BASE (0xA00) and all 33 REQ_* constants from vfsif.h.
+  Implemented `fs_sendrec` using `minix_std::sendrec` (target_os = "none").
+  Implemented all 29 `req_*` functions with proper message building and
+  response parsing for every FS message type (breadwrite, lookup, create,
+  readsuper, statvfs, readwrite, getdents, chmod, chown, utime, slink,
+  rdlink, mkdir, mknod, ftrunc, link, rename, newnode, putnode, inhibread,
+  mountpoint, unlink, flush, newdriver, sync, unmount, bpeek, stat).
+  Grant-dependent operations use `-1` grant placeholders.
+  8 new tests (314 total servers), clippy clean.
+
+  **Deferred grant sub-tasks:**
+  
+  - [ ] **13.10a — Wire `cpf_grant_magic`/`cpf_grant_direct` for path grants**
+      (`crates/minix-std/src/lib.rs` — new public helpers)
+    **Depends on:** `do_setgrant` (Phase 5.29) to register grant table with kernel
+    Implement userspace grant allocation helpers (`cpf_grant_magic` and
+    `cpf_grant_direct`) in minix-std that wrap `GrantTable::alloc()` and fill
+    in the caller/callee/grant fields. `GrantTable` already exists in minix-std
+    but lacks convenience wrappers for the VFS→FS grant pattern (granter=VFS,
+    callee=FS, buffer=user_addr). Once available, update `req_create`,
+    `req_mkdir`, `req_mknod`, `req_slink`, `req_link`, `req_unlink`,
+    `req_rmdir`, `req_rename`, `req_newdriver`, `req_readsuper` to use
+    real grants instead of `-1`.
+  
+  - [ ] **13.10b — Wire `cpf_grant_magic`/`cpf_revoke` for data transfer**
+      (`crates/minix-std/src/lib.rs` — new public helpers)
+    **Depends on:** `do_setgrant` (Phase 5.29), `cpf_grant_magic` from 13.10a
+    Same as 13.10a but for data buffers (not path strings). Update
+    `req_breadwrite`, `req_statvfs`, `req_rdlink`, `req_getdents`, `req_stat`,
+    `req_write`, `req_lookup` to use real grants. These need `CPF_READ`/`CPF_WRITE`
+    access flags matching the transfer direction, and `cpf_revoke` after the
+    `fs_sendrec` completes.
+  
+  - [ ] **13.10c — Resolve FS endpoint from Vmnt struct**
+      (`servers/src/vfs/request.rs:req_readsuper`)
+    **Depends on:** Vmnt infrastructure (Phase 10 mount.c)
+    `req_readsuper` currently passes `fs_e = 0` as placeholder. Extract the
+    FS endpoint from the `Vmnt` struct passed via `_vmp` parameter.
 
 ---
 
