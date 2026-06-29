@@ -597,6 +597,185 @@ pub unsafe fn set_timer_isr_handler(handler: TimerIsrFn) {
     }
 }
 
+// ── RTC (CMOS) profile clock constants ────────────────────────────────
+
+/// CMOS I/O index port.
+const RTC_INDEX_PORT: u16 = 0x70;
+/// CMOS I/O data port.
+const RTC_DATA_PORT: u16 = 0x71;
+
+/// RTC register A address.
+const RTC_REGA_ADDR: u8 = 0x0A;
+/// RTC register B address.
+const RTC_REGB_ADDR: u8 = 0x0B;
+/// RTC register C address.
+const RTC_REGC_ADDR: u8 = 0x0C;
+
+/// RTC rate select mask.
+const RTC_A_RS: u8 = 0x0F;
+/// Normal divider value.
+const RTC_A_DV_OK: u8 = 0x20;
+/// Periodic interrupt enable.
+const RTC_B_PIE: u8 = 0x40;
+
+/// RTC IRQ number.
+const RTC_IRQ: u32 = 8;
+
+/// Initialize the profiling clock using the RTC (CMOS) periodic interrupt.
+///
+/// Programs the RTC to generate periodic interrupts at `freq` rate.
+/// `freq` is an RTC rate select code (see RTC_A_RS).
+/// Returns the IRQ number (typically 8) on success, or a negative error.
+///
+/// # Safety
+///
+/// Must be called after interrupt system initialization, with interrupts disabled.
+pub unsafe fn arch_init_profile_clock(freq: u8) -> i32 {
+    unsafe {
+        // Read current RTC register A.
+        asm::outb(RTC_INDEX_PORT, RTC_REGA_ADDR);
+        let _reg_a = asm::inb(RTC_DATA_PORT);
+
+        // Set rate select bits in register A.
+        asm::outb(RTC_INDEX_PORT, RTC_REGA_ADDR);
+        asm::outb(RTC_DATA_PORT, RTC_A_DV_OK | (freq & RTC_A_RS));
+
+        // Enable periodic interrupt in register B.
+        asm::outb(RTC_INDEX_PORT, RTC_REGB_ADDR);
+        let reg_b = asm::inb(RTC_DATA_PORT);
+        asm::outb(RTC_INDEX_PORT, RTC_REGB_ADDR);
+        asm::outb(RTC_DATA_PORT, reg_b | RTC_B_PIE);
+
+        // Read register C to clear any pending interrupt.
+        asm::outb(RTC_INDEX_PORT, RTC_REGC_ADDR);
+        let _reg_c = asm::inb(RTC_DATA_PORT);
+        let _ = _reg_c;
+
+        RTC_IRQ as i32
+    }
+}
+
+/// Stop the profiling clock — disable RTC periodic interrupts.
+///
+/// # Safety
+///
+/// Must be called with interrupts disabled.
+pub unsafe fn arch_stop_profile_clock() {
+    unsafe {
+        // Disable periodic interrupt in register B.
+        asm::outb(RTC_INDEX_PORT, RTC_REGB_ADDR);
+        let reg_b = asm::inb(RTC_DATA_PORT);
+        asm::outb(RTC_INDEX_PORT, RTC_REGB_ADDR);
+        asm::outb(RTC_DATA_PORT, reg_b & !RTC_B_PIE);
+    }
+}
+
+/// Acknowledge the profile clock interrupt — read RTC register C.
+///
+/// # Safety
+///
+/// Must be called from the profile clock interrupt handler.
+pub unsafe fn arch_ack_profile_clock() {
+    unsafe {
+        asm::outb(RTC_INDEX_PORT, RTC_REGC_ADDR);
+        let _reg_c = asm::inb(RTC_DATA_PORT);
+        let _ = _reg_c;
+    }
+}
+
+// ── Profile clock handler ──────────────────────────────────────────────
+
+/// Function pointer type for the profile clock interrupt handler.
+pub type ProfileClockFn = unsafe extern "C" fn();
+
+/// Registered profile clock ISR handler.
+static mut PROFILE_CLOCK_HANDLER: Option<ProfileClockFn> = None;
+
+/// Register the function to call on each profile clock tick.
+///
+/// # Safety
+///
+/// Must be called once during boot.
+pub unsafe fn set_profile_clock_handler(handler: ProfileClockFn) {
+    unsafe {
+        PROFILE_CLOCK_HANDLER = Some(handler);
+    }
+}
+
+/// Profile clock interrupt trampoline.
+///
+/// 1. Calls the registered `PROFILE_CLOCK_HANDLER`
+/// 2. Acknowledges the RTC interrupt (reads reg C)
+/// 3. Sends EOI to the slave PIC (IRQ 8 is on slave)
+/// 4. Returns via iretq
+///
+/// # Safety
+///
+/// Must be set as an interrupt gate in the IDT at vector 0x28 (IRQ 8).
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn profile_clock_isr_entry() {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+
+        // Call the registered handler.
+        "lea rax, [rip + {handler}]",
+        "mov rax, [rax]",
+        "test rax, rax",
+        "jz 2f",
+        "call rax",
+        "2:",
+
+        // Acknowledge RTC interrupt (read register C).
+        "mov al, 0x0C",
+        "out 0x70, al",
+        "in al, 0x71",
+
+        // Send EOI to slave PIC (IRQ 8-15).
+        "mov al, 0x20",
+        "out 0xA0, al",
+        // Also send EOI to master PIC (cascade).
+        "out 0x20, al",
+
+        // Restore caller-saved registers.
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+
+        "iretq",
+        handler = sym PROFILE_CLOCK_HANDLER,
+    );
+}
+
+/// NMI statistical profiling handler trampoline.
+///
+/// Called when the APIC LVT timer is configured in NMI delivery mode.
+/// Currently a stub — see PORTING_PLAN.md 12.15 follow-up.
+///
+/// # Safety
+///
+/// Must be called from NMI context.
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmi_profile_entry() {
+    // Stub: just return from NMI.
+    core::arch::naked_asm!("iretq",);
+}
+
 /// Timer interrupt trampoline address — set this in the IDT entry.
 ///
 /// This naked asm trampoline:

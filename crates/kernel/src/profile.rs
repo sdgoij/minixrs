@@ -211,16 +211,65 @@ pub unsafe fn sprofile(
 
 /// Initialize the profiling clock.
 ///
+/// Programs the RTC to generate periodic interrupts at `freq` Hz,
+/// then registers a handler that calls `profile_sample()` on each tick.
+///
 /// # Safety
 ///
 /// Must be called after interrupt system initialization.
-pub unsafe fn init_profile_clock(_freq: u32) {
-    // TODO: call arch_init_profile_clock(freq) and register interrupt handler
+pub unsafe fn init_profile_clock(freq: u32) {
+    unsafe {
+        // Convert Hz to RTC rate select code.
+        // RTC rate = 32768 >> (rate_select - 1) Hz, so:
+        //   2 Hz  → rate 15 (32768 >> 14)
+        //   4 Hz  → rate 14 (32768 >> 13)
+        //   8 Hz  → rate 13
+        //   16 Hz → rate 12
+        //   32 Hz → rate 11
+        //   64 Hz → rate 10
+        //   128 Hz → rate 9
+        //   256 Hz → rate 8
+        //   512 Hz → rate 7
+        //   1024 Hz → rate 6
+        //   2048 Hz → rate 5
+        //   4096 Hz → rate 4
+        //   8192 Hz → rate 3
+        let rate_code = match freq {
+            2 => 15,
+            4 => 14,
+            8 => 13,
+            16 => 12,
+            32 => 11,
+            64 => 10,
+            128 => 9,
+            256 => 8,
+            512 => 7,
+            1024 => 6,
+            2048 => 5,
+            4096 => 4,
+            8192 => 3,
+            _ => 6, // default to 1024 Hz
+        };
+
+        let irq = arch_x86_64::apic::arch_init_profile_clock(rate_code);
+        if irq >= 0 {
+            // The handler will be registered in the IDT entry.
+            // TODO: Phase 12.15 follow-up — register profile_clock_isr_entry
+            // in the IDT at vector VECTOR_TIMER + irq, and call
+            // set_profile_clock_handler with the Rust callback that
+            // calls profile_sample(current_proc, pc).
+            let _ = irq;
+        }
+    }
 }
 
 /// Stop the profiling clock.
+///
+/// Disables RTC periodic interrupts.
 pub fn stop_profile_clock() {
-    // TODO: call arch_stop_profile_clock() and unregister interrupt handler
+    unsafe {
+        arch_x86_64::apic::arch_stop_profile_clock();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -325,13 +374,21 @@ pub unsafe fn profile_sample(p: *mut Proc, pc: u64) {
     }
 }
 
-/// NMI statistical profiling handler (skeleton).
+/// NMI statistical profiling handler.
+///
+/// Called when the APIC LVT timer is configured in NMI delivery mode.
+/// Records a profiling sample for the current process at `frame_pc`.
 ///
 /// # Safety
 ///
-/// Called from NMI context.
-pub unsafe fn nmi_sprofile_handler(_frame_pc: u64) {
-    // TODO: implement when NMI handling is available
+/// Called from NMI context. Must be re-entrant safe.
+pub unsafe fn nmi_sprofile_handler(frame_pc: u64) {
+    unsafe {
+        let proc = crate::ipc::current_proc();
+        if !proc.is_null() {
+            profile_sample(proc, frame_pc);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

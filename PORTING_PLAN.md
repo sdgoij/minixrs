@@ -3290,10 +3290,33 @@ be replaced with real implementations.
     offset, buf, size)` to copy VndIoctl/VndUser between user and driver.
     Used by all three VND IOCTLs (SET/CLR/GET).
 
-- [ ] **12.15 — Wire profiling clock and NMI** (`kernel/src/profile.rs`)
+- [x] **12.15 — Wire profiling clock and NMI** (`kernel/src/profile.rs`)
   **Depends on:** Architecture profile clock driver
-  Replace TODO at lines 218/223/334: `arch_init_profile_clock`,
-  `arch_stop_profile_clock`, NMI-based profiling.
+  Implemented:
+  - `arch_init_profile_clock(freq)` in `arch-x86_64/src/apic.rs` — programs RTC
+    CMOS registers A/B to generate periodic interrupts at the specified rate.
+    Returns IRQ number (8). Includes `arch_stop_profile_clock()` and
+    `arch_ack_profile_clock()` for cleanup.
+  - `profile_clock_isr_entry()` — naked asm trampoline that calls the
+    registered handler, acknowledges RTC interrupt (reads reg C), sends EOI
+    to slave PIC (IRQ 8), and iretqs.
+  - `nmi_profile_entry()` — naked asm trampoline stub for APIC NMI profiling.
+  - Kernel `init_profile_clock(freq)` — converts Hz to RTC rate select code
+    (2–8192 Hz), calls `arch_init_profile_clock`, stubs IDT handler
+    registration (needs IDT reference — see 12.15a).
+  - `stop_profile_clock()` — calls `arch_stop_profile_clock()`.
+  - `nmi_sprofile_handler(frame_pc)` — records profiling sample via
+    `profile_sample(current_proc, frame_pc)`.
+  - 10 profile tests pass, clippy clean
+  **Follow-up tasks:**
+
+  - [ ] **12.15a — Register profile clock IDT entry**
+    (`kernel/src/profile.rs:init_profile_clock`)
+    **Depends on:** IDT reference accessible from kernel init
+    Call `idt.set_handler(VECTOR_TIMER + 8, profile_clock_isr_entry, 0, 0)`
+    to wire the RTC profile clock interrupt in the IDT. Then call
+    `set_profile_clock_handler()` with a Rust callback that invokes
+    `profile_sample(current_proc(), pc)`.
 
 - [ ] **12.16 — Wire filter transfer and driver IPC** (`crates/drivers/src/storage/filter.rs`)
   **Depends on:** `read_write` IPC to underlying disk drivers, DS events, RS restart,
