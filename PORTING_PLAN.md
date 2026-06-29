@@ -3704,9 +3704,10 @@ reliable cross-function test patterns.
 
 #### Priority 2 — Verify no regressions
 
-- [ ] **13.11.11 — Run full test suite**: `cargo test --workspace -- --test-threads=1`
-  All tests must pass without `static_mut_refs` warnings.
-- [ ] **13.11.12 — Clippy sweep**: `cargo clippy --workspace -- --deny warnings`
+- [x] **13.11.11 — Run full test suite**: `cargo test --workspace -- --test-threads=1`
+  All tests pass (1911 total, 0 failures).
+- [x] **13.11.12 — Clippy sweep**: `cargo clippy --workspace -- --deny warnings`
+  Clean.
 
 **Goal**: Port userland commands. These are pure C with no kernel dependencies beyond libc.
 
