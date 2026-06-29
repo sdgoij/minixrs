@@ -3501,12 +3501,14 @@ userspace crate
     matching `.refs/minix-3.3.0/minix/include/minix/callnr.h`
   - 36 tests, 79 total minix-std tests pass, clippy clean
 
-- [ ] **13.5 — Memory management (VM protocol)**
-  - `mmap` / `munmap`: VM remap/unmap
-  - `brk` / `sbrk`: heap expansion via VM
-  - `mmap` with file backing (VFS + VM)
-  - Shared memory (`shmget`/`shmat` via IPC server)
-  - Tests: allocate, map, unmap, heap grow
+- [x] **13.5 — Memory management (VM protocol)**
+  - `mmap` / `munmap`: VM_MMAP/VM_MUNMAP with addr, length, prot, flags, fd
+  - `brk` / `sbrk`: already implemented in `minix-rt` crate (direct syscall)
+  - Shared memory: `shmget`, `shmat`, `shmdt`, `shmctl` via IPC server protocol
+    (IPC_SHMGET/SHMAT/SHMDT/SHMCTL at IPC_BASE=0xD00)
+  - Implemented in `crates/minix-std/src/vmem.rs` with VM_RQ_BASE and IPC_BASE
+    call numbers matching `.refs/minix-3.3.0/minix/include/minix/com.h`
+  - 19 tests, 98 total minix-std tests pass, clippy clean
 
 - [ ] **13.6 — Time and signals (CLOCK + PM protocols)**
   - `clock_gettime`: CLOCK server request

@@ -13,6 +13,7 @@
 
 pub mod fs;
 pub mod process;
+pub mod vmem;
 
 use core::cell::UnsafeCell;
 
