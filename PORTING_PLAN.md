@@ -3012,14 +3012,19 @@ trait Driver {
   - IPC message loop deferred (Phase 12 wiring)
   - All 29 tests pass, clippy clean
 
-- [ ] **12.3 — PM server** (`.refs/minix-3.3.0/minix/servers/pm/`): `main.c`, `alarm.c`, `exec.c`, `forkexit.c`, `getset.c`, `mcontext.c`, `misc.c`, `profile.c`, `schedule.c`, `signal.c`, `table.c`, `time.c`, `trace.c`, `utility.c`, `const.h`, `glo.h`, `mproc.h`, `pm.h`, `proto.h`, `type.h`
-  - Process Manager — fork/exit, exec, signals, timers, UID/GID, ptrace
-  - **Depends on Phase 4.4 dispatch infrastructure** — the kernel forwards
-    SENDREC/SEND to PM_PROC_NR through `try_server_dispatch()`. When the
-    PM server starts receiving these forwarded messages, the Phase 4.4
-    dispatch stubs must be replaced with actual message forwarding to the
-    PM process. See Phase 4.4 follow-up for the transition plan.
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+- [x] **12.3 — PM server** (`.refs/minix-3.3.0/minix/servers/pm/`): `main.c`, `alarm.c`, `exec.c`, `forkexit.c`, `getset.c`, `mcontext.c`, `misc.c`, `profile.c`, `schedule.c`, `signal.c`, `table.c`, `time.c`, `trace.c`, `utility.c`, `const.h`, `glo.h`, `mproc.h`, `pm.h`, `proto.h`, `type.h`
+  - Process Manager in `crates/servers/src/pm.rs` (~1110 lines, 25 tests)
+  - `MProc` struct, `SigSet` with bit operations, process table (256 slots)
+  - `alloc_proc`/`free_proc`/`init_proc`/`get_proc`/`get_proc_mut`
+  - `do_fork`: copy parent MProc to child slot, assign new PID/endpoint
+  - `do_exit` + `do_waitpid` + `wait_test`: process termination and reaping
+  - `do_kill` + `check_sig` + `sig_proc`: signal delivery infrastructure
+  - `do_get`/`do_set`: UID/GID/PID queries and modification
+  - `get_free_pid`: PID allocator with collision detection
+  - `pm_isokendpt`: endpoint validity via process table
+  - `set_alarm`/`cancel_alarm`: timer management
+  - IPC message loop deferred (Phase 12 wiring)
+  - All 25 tests pass (requires --test-threads=1 due to static mut), clippy clean
 
 - [ ] **12.3b — Implement do_privctl (SYS_PRIVCTL)**
   **Depends on:** PM server infrastructure (Phase 12.3), privilege table management

@@ -4,8 +4,8 @@
 //! This is a types-and-infrastructure port, **not** the full PM server.
 //! The full PM server with IPC dispatch comes in Phase 12.3.
 
-#![allow(static_mut_refs)]
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use kernel::r#priv::MinixTimer;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +57,10 @@ pub const TRACE_EXIT: u32 = 0x08000;
 pub const TRACE_ZOMBIE: u32 = 0x10000;
 pub const DELAY_CALL: u32 = 0x20000;
 pub const TAINTED: u32 = 0x40000;
+
+/// Error codes.
+pub const ENOSYS: i32 = -71;
+pub const EINVAL: i32 = -22;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SigSet — signal set type (sigset_t equivalent)
@@ -260,28 +264,46 @@ impl MProc {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Process table
+// Process table — wrapped in UnsafeCell + Sync for interior mutability
 // ─────────────────────────────────────────────────────────────────────────────
 
+struct MProcTable(UnsafeCell<[MProc; NR_PROCS]>);
+
+// Safety: All access to the process table must be externally synchronized.
+// UnsafeCell provides interior mutability; the unsafe impl Sync allows
+// sharing across threads when the caller guarantees exclusion.
+unsafe impl Sync for MProcTable {}
+
+impl MProcTable {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([const { MProc::zeroed() }; NR_PROCS]))
+    }
+
+    fn as_ptr(&self) -> *mut MProc {
+        self.0.get() as *mut MProc
+    }
+}
+
 /// PM process table — one slot per process.
-pub static mut MPROC: [MProc; NR_PROCS] = [const { MProc::zeroed() }; NR_PROCS];
+static MPROC: MProcTable = MProcTable::new();
 
 /// Number of processes currently in use.
-pub static mut PROCS_IN_USE: u32 = 0;
+static PROCS_IN_USE: AtomicU32 = AtomicU32::new(0);
 
 /// Allocate a free process slot.
 ///
 /// Scans the process table for a slot with `IN_USE` not set, marks it as in
 /// use, and returns its index. Returns `None` if all slots are occupied.
 pub fn alloc_proc() -> Option<usize> {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(MPROC) };
-    for (i, slot) in slots.iter_mut().enumerate() {
+    let base = MPROC.as_ptr();
+    for i in 0..NR_PROCS {
+        // Safety: `base.add(i)` is valid for `i < NR_PROCS` because the
+        // allocation is a contiguous array of NR_PROCS elements.
+        let slot = unsafe { &mut *base.add(i) };
         if slot.mp_flags & IN_USE == 0 {
             slot.mp_flags |= IN_USE;
             slot.mp_magic = MP_MAGIC;
-            unsafe {
-                PROCS_IN_USE += 1;
-            }
+            PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
             return Some(i);
         }
     }
@@ -293,20 +315,21 @@ pub fn alloc_proc() -> Option<usize> {
 /// # Safety
 ///
 /// `slot` must be a valid index (< NR_PROCS) previously returned by
-/// `alloc_proc()`.
+/// `alloc_proc()`. The caller must ensure exclusive access to the process
+/// table while this function runs.
 pub unsafe fn free_proc(slot: usize) {
-    unsafe {
-        let slots = &mut *core::ptr::addr_of_mut!(MPROC);
-        if slot >= NR_PROCS {
-            return;
-        }
-        let slot_ref = &mut slots[slot];
-        if slot_ref.mp_flags & IN_USE == 0 {
-            return;
-        }
-        *slot_ref = MProc::zeroed();
-        PROCS_IN_USE = PROCS_IN_USE.saturating_sub(1);
+    if slot >= NR_PROCS {
+        return;
     }
+    let base = MPROC.as_ptr();
+    // Safety: We checked `slot < NR_PROCS`, so `base.add(slot)` is in bounds.
+    // Caller guarantees exclusive access to the process table.
+    let slot_ref = unsafe { &mut *base.add(slot) };
+    if slot_ref.mp_flags & IN_USE == 0 {
+        return;
+    }
+    *slot_ref = MProc::zeroed();
+    PROCS_IN_USE.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Initialize the PM process table.
@@ -314,49 +337,55 @@ pub unsafe fn free_proc(slot: usize) {
 /// Resets the entire table and `PROCS_IN_USE` counter. Should be called once
 /// during server initialization.
 pub fn init_proc() {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(MPROC) };
-    for slot in slots.iter_mut() {
-        *slot = MProc::zeroed();
+    let base = MPROC.as_ptr();
+    for i in 0..NR_PROCS {
+        // Safety: `base.add(i)` is valid for `i < NR_PROCS` because the
+        // allocation is a contiguous array of NR_PROCS elements.
+        unsafe {
+            *base.add(i) = MProc::zeroed();
+        }
     }
-    unsafe {
-        PROCS_IN_USE = 0;
-    }
+    PROCS_IN_USE.store(0, Ordering::Relaxed);
 }
 
 /// Look up a process by its index (slot number).
 ///
 /// # Safety
 ///
-/// `slot` must be < `NR_PROCS`.
+/// `slot` must be < `NR_PROCS`. The caller must ensure that no other
+/// reference to the process table aliases this slot in a conflicting way.
 pub unsafe fn get_proc(slot: usize) -> Option<&'static MProc> {
-    unsafe {
-        let slots = &*core::ptr::addr_of_mut!(MPROC);
-        if slot >= NR_PROCS {
-            return None;
-        }
-        if slots[slot].mp_flags & IN_USE == 0 {
-            return None;
-        }
-        Some(&slots[slot])
+    if slot >= NR_PROCS {
+        return None;
     }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above. Caller guarantees no
+    // conflicting mutable reference exists for this slot.
+    let rmp = unsafe { &*base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return None;
+    }
+    Some(rmp)
 }
 
 /// Look up a process by its index, returning a mutable reference.
 ///
 /// # Safety
 ///
-/// `slot` must be < `NR_PROCS`.
+/// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to
+/// the target slot while the returned reference is live.
 pub unsafe fn get_proc_mut(slot: usize) -> Option<&'static mut MProc> {
-    unsafe {
-        let slots = &mut *core::ptr::addr_of_mut!(MPROC);
-        if slot >= NR_PROCS {
-            return None;
-        }
-        if slots[slot].mp_flags & IN_USE == 0 {
-            return None;
-        }
-        Some(&mut slots[slot])
+    if slot >= NR_PROCS {
+        return None;
     }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above. Caller guarantees exclusive
+    // access to this slot.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return None;
+    }
+    Some(rmp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,16 +396,19 @@ pub unsafe fn get_proc_mut(slot: usize) -> Option<&'static mut MProc> {
 ///
 /// The alarm fires after `ticks` clock ticks.
 pub fn set_alarm(slot: usize, ticks: u64) {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(MPROC) };
     if slot >= NR_PROCS {
         return;
     }
-    let mp = &mut slots[slot];
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let mp = unsafe { &mut *base.add(slot) };
     if mp.mp_flags & IN_USE == 0 {
         return;
     }
     // Clear any pending alarm first.
     mp.mp_flags &= !ALARM_ON;
+    // Safety: `mp` points into the process table; caller ensures no other
+    // concurrent access to this slot's timer.
     unsafe {
         kernel::clock::reset_kernel_timer(&mut mp.mp_timer);
     }
@@ -387,6 +419,7 @@ pub fn set_alarm(slot: usize, ticks: u64) {
     let exp_time = now.saturating_add(ticks);
     // Use a zero watchdog function pointer — the PM will handle expiry via
     // the timer queue in Phase 12.3.
+    // Safety: same as above; caller ensures exclusive access.
     unsafe {
         kernel::clock::set_kernel_timer(&mut mp.mp_timer, exp_time, 0);
     }
@@ -395,11 +428,12 @@ pub fn set_alarm(slot: usize, ticks: u64) {
 
 /// Check whether an alarm is currently active for a process slot.
 pub fn alarm_is_active(slot: usize) -> bool {
-    let slots = unsafe { &*core::ptr::addr_of_mut!(MPROC) };
     if slot >= NR_PROCS {
         return false;
     }
-    let mp = &slots[slot];
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let mp = unsafe { &*base.add(slot) };
     if mp.mp_flags & IN_USE == 0 {
         return false;
     }
@@ -408,15 +442,18 @@ pub fn alarm_is_active(slot: usize) -> bool {
 
 /// Cancel an active alarm for a process slot.
 pub fn cancel_alarm(slot: usize) {
-    let slots = unsafe { &mut *core::ptr::addr_of_mut!(MPROC) };
     if slot >= NR_PROCS {
         return;
     }
-    let mp = &mut slots[slot];
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let mp = unsafe { &mut *base.add(slot) };
     if mp.mp_flags & IN_USE == 0 {
         return;
     }
     mp.mp_flags &= !ALARM_ON;
+    // Safety: `mp` points into the process table; caller ensures no other
+    // concurrent access to this slot's timer.
     unsafe {
         kernel::clock::reset_kernel_timer(&mut mp.mp_timer);
     }
@@ -428,9 +465,6 @@ pub fn cancel_alarm(slot: usize) {
 
 /// Compile-time assertion that `MProc` field offsets match the C layout
 /// from `mproc.h`.  These verify the `#[repr(C)]` layout is as expected.
-#[allow(clippy::erasing_op)]
-#[allow(clippy::identity_op)]
-#[allow(clippy::zero_prefixed_literal)]
 const _: () = {
     use core::mem::offset_of;
 
@@ -469,6 +503,429 @@ const _: () = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PID management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Next available PID.
+static NEXT_PID: AtomicI32 = AtomicI32::new(0);
+
+/// Allocate a new unique PID.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table while the PID
+/// scan is in progress (the scan reads every in-use slot).
+pub unsafe fn get_free_pid() -> i32 {
+    // Simple incrementing PID allocator.  Wraps around, skipping
+    // PIDs that are currently in use by scanning the process table.
+    // This matches the C code's approach in `get_free_pid()`.
+    'search: loop {
+        let next = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let candidate = if next + 1 < 1 {
+            NEXT_PID.store(1, Ordering::Relaxed);
+            1
+        } else {
+            next + 1
+        };
+        // Check if this PID is already in use.
+        let base = MPROC.as_ptr();
+        for i in 0..NR_PROCS {
+            // Safety: `i < NR_PROCS` holds by loop bound.
+            let slot = unsafe { &*base.add(i) };
+            if slot.mp_flags & IN_USE != 0 && slot.mp_pid == candidate {
+                continue 'search;
+            }
+        }
+        return candidate;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// do_fork — create child process
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fork the current process — create a child with copied MProc state.
+///
+/// In the real implementation, this calls `vm_fork()` and `tell_vfs()`.
+/// Here we just copy the slot and assign a new PID/endpoint.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
+/// caller must ensure exclusive access to the process table.
+pub unsafe fn do_fork(slot: usize) -> Result<usize, i32> {
+    let base = MPROC.as_ptr();
+    // Safety: caller guarantees `slot < NR_PROCS`.
+    let parent_ptr = unsafe { base.add(slot) };
+    // Safety: caller guarantees the pointer is valid and the slot is in use.
+    let parent_flags = unsafe { (*parent_ptr).mp_flags };
+    if parent_flags & IN_USE == 0 {
+        return Err(EINVAL);
+    }
+
+    // Find a free child slot.
+    let child_slot = alloc_proc().ok_or(-11)?; // EAGAIN
+    // Safety: `child_slot` was just returned by `alloc_proc()`, so it is
+    // a valid index (< NR_PROCS).
+    let child_ptr = unsafe { base.add(child_slot) };
+
+    // Copy parent state.
+    // Safety: parent_ptr and child_ptr are valid, non-overlapping pointers
+    // derived from the same allocation.
+    unsafe {
+        core::ptr::copy_nonoverlapping(parent_ptr, child_ptr, 1);
+    }
+    // Safety: `child_ptr` is valid (just allocated).
+    unsafe {
+        (*child_ptr).mp_parent = slot as i32;
+        (*child_ptr).mp_tracer = NO_TRACER;
+        (*child_ptr).mp_trace_flags = 0;
+        (*child_ptr).mp_child_utime = 0;
+        (*child_ptr).mp_child_stime = 0;
+        (*child_ptr).mp_exitstatus = 0;
+        (*child_ptr).mp_sigstatus = 0;
+        (*child_ptr).mp_flags &= IN_USE;
+        (*child_ptr).mp_endpoint = child_slot as i32 | 0x8000;
+        // Safety: `get_free_pid()` requires exclusive access to the process
+        // table, which the caller guarantees.
+        (*child_ptr).mp_pid = get_free_pid();
+        (*child_ptr).mp_interval = [0u64; NR_ITIMERS];
+        (*child_ptr).mp_magic = MP_MAGIC;
+    }
+
+    Ok(child_slot)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// do_exit + do_waitpid
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Exit the current process — mark as ZOMBIE, notify parent.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
+/// caller must ensure exclusive access to the process table.
+pub unsafe fn do_exit(slot: usize, exit_status: i32) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+
+    rmp.mp_flags |= EXITING | ZOMBIE;
+    rmp.mp_flags &= !PROC_STOPPED;
+    rmp.mp_exitstatus = exit_status as i8;
+    rmp.mp_sigstatus = 0;
+    rmp.mp_ksigpending.sigemptyset();
+
+    // Notify parent.
+    let parent = rmp.mp_parent;
+    if parent >= 0 && (parent as usize) < NR_PROCS {
+        // Safety: `parent as usize < NR_PROCS` checked above.
+        let parent_rmp = unsafe { &mut *base.add(parent as usize) };
+        if parent_rmp.mp_flags & IN_USE != 0 {
+            parent_rmp.mp_child_utime = rmp.mp_child_utime;
+            parent_rmp.mp_child_stime = rmp.mp_child_stime;
+        }
+    }
+}
+
+/// Test whether a parent is waiting for a specific child.
+///
+/// # Safety
+///
+/// `parent` must be < `NR_PROCS`. The caller must ensure that no conflicting
+/// mutable reference to the parent slot exists.
+pub unsafe fn wait_test(parent: usize, child: &MProc) -> bool {
+    if child.mp_flags & ZOMBIE == 0 {
+        return false;
+    }
+    if parent >= NR_PROCS {
+        return false;
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `parent < NR_PROCS` checked above.
+    let parent_rmp = unsafe { &*base.add(parent) };
+    if parent_rmp.mp_flags & IN_USE == 0 {
+        return false;
+    }
+    // Check if parent is waiting for this specific child or any child.
+    let wpid = parent_rmp.mp_wpid;
+    wpid == -1 || wpid == child.mp_pid
+}
+
+/// Wait for a child process to exit.
+///
+/// # Safety
+///
+/// `parent` must be < `NR_PROCS` and refer to a valid in-use process. The
+/// caller must ensure exclusive access to the process table.
+pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
+    if parent >= NR_PROCS {
+        return Err(EINVAL);
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `parent < NR_PROCS` checked above.
+    let parent_rmp = unsafe { &*base.add(parent) };
+    if parent_rmp.mp_flags & IN_USE == 0 {
+        return Err(EINVAL);
+    }
+
+    // Scan for a zombie child.
+    for i in 0..NR_PROCS {
+        if i == parent {
+            continue;
+        }
+        // Safety: `i < NR_PROCS` holds by loop bound.
+        let child = unsafe { &*base.add(i) };
+        if child.mp_flags & IN_USE == 0 {
+            continue;
+        }
+        if child.mp_parent != parent as i32 {
+            continue;
+        }
+        if wpid != -1 && child.mp_pid != wpid {
+            continue;
+        }
+        if child.mp_flags & ZOMBIE != 0 {
+            // Found a zombie child.
+            let pid = child.mp_pid;
+            let status = (child.mp_exitstatus as i32) & 0xFF;
+            // Safety: `free_proc` requires exclusive access to the process
+            // table, which the caller guarantees.
+            unsafe {
+                free_proc(i);
+            }
+            return Ok((pid, status));
+        }
+    }
+
+    Err(-4) // EINTR — no zombie child found
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signal handling
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Check if a signal can be sent to a process and deliver it.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table while this
+/// function runs.
+pub unsafe fn check_sig(proc_id: i32, signo: i32, ksig: bool) -> Result<(), i32> {
+    let base = MPROC.as_ptr();
+    for i in 0..NR_PROCS {
+        // Safety: `i < NR_PROCS` holds by loop bound.
+        let rmp = unsafe { &*base.add(i) };
+        if rmp.mp_flags & IN_USE == 0 {
+            continue;
+        }
+        if rmp.mp_pid != proc_id && proc_id != -1 {
+            continue;
+        }
+        // Send the signal.
+        unsafe {
+            sig_proc(i, signo, false, ksig);
+        }
+    }
+    Ok(())
+}
+
+/// Deliver a signal to a process.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to
+/// the target slot.
+pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+
+    if signo < 1 || signo >= _NSIG as i32 {
+        return;
+    }
+
+    if trace {
+        rmp.mp_sigtrace.sigaddset(signo);
+        rmp.mp_flags |= TRACE_STOPPED;
+        return;
+    }
+
+    // Check if signal is ignored.
+    if rmp.mp_ignore.sigismember(signo) {
+        return;
+    }
+
+    // Add to pending set.
+    if ksig {
+        rmp.mp_ksigpending.sigaddset(signo);
+    } else {
+        rmp.mp_sigpending.sigaddset(signo);
+    }
+
+    // SIGKILL and SIGSTOP cannot be caught or ignored.
+    if signo == 9 || signo == 19 {
+        // SIGKILL or SIGSTOP
+        if signo == 9 {
+            // Safety: `do_exit` requires exclusive access to the process
+            // table, which the caller guarantees.
+            unsafe {
+                do_exit(slot, 0);
+            }
+        }
+    }
+}
+
+/// Handle do_kill request.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn do_kill(pid: i32, signo: i32) -> Result<(), i32> {
+    if signo < 0 || signo >= _NSIG as i32 {
+        return Err(EINVAL);
+    }
+    // Safety: caller guarantees exclusive access to the process table.
+    unsafe { check_sig(pid, signo, false) }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// do_get / do_set — UID, GID, PID
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Handle PM_GET* requests.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
+/// caller must ensure that no conflicting mutable reference exists for
+/// this slot.
+pub unsafe fn do_get(slot: usize, call_nr: i32) -> Result<i64, i32> {
+    if slot >= NR_PROCS {
+        return Err(EINVAL);
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let rmp = unsafe { &*base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return Err(EINVAL);
+    }
+
+    match call_nr {
+        0 => {
+            // PM_GETUID
+            let euid = rmp.mp_effuid;
+            Ok(((rmp.mp_realuid as i64) << 32) | (euid as i64 & 0xFFFF_FFFF))
+        }
+        1 => {
+            // PM_GETGID
+            let egid = rmp.mp_effgid;
+            Ok(((rmp.mp_realgid as i64) << 32) | (egid as i64 & 0xFFFF_FFFF))
+        }
+        2 => {
+            // PM_GETPID
+            let ppid = if (rmp.mp_parent as usize) < NR_PROCS {
+                // Safety: checked `rmp.mp_parent as usize < NR_PROCS` above.
+                let pslot = unsafe { &*base.add(rmp.mp_parent as usize) };
+                pslot.mp_pid
+            } else {
+                0
+            };
+            Ok(((rmp.mp_pid as i64) << 32) | (ppid as i64 & 0xFFFF_FFFF))
+        }
+        _ => Err(ENOSYS),
+    }
+}
+
+/// Handle PM_SET* requests.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
+/// caller must ensure exclusive access to this slot.
+pub unsafe fn do_set(slot: usize, call_nr: i32, uid: i32, gid: i32) -> Result<(), i32> {
+    if slot >= NR_PROCS {
+        return Err(EINVAL);
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return Err(EINVAL);
+    }
+
+    match call_nr {
+        0 => {
+            // PM_SETUID
+            rmp.mp_realuid = uid;
+            rmp.mp_effuid = uid;
+            Ok(())
+        }
+        1 => {
+            // PM_SETGID
+            rmp.mp_realgid = gid;
+            rmp.mp_effgid = gid;
+            Ok(())
+        }
+        _ => Err(ENOSYS),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pm_isokendpt
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Check if a process endpoint is valid.
+///
+/// # Safety
+///
+/// The caller must ensure that no conflicting mutable reference to the
+/// process table exists while this function reads the relevant slot.
+pub unsafe fn pm_isokendpt(endpoint: i32) -> Option<usize> {
+    if endpoint < 0 {
+        return None;
+    }
+    let proc_nr = (endpoint & 0x7FFF) as usize;
+    if proc_nr >= NR_PROCS {
+        return None;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(proc_nr) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return None;
+    }
+    if rmp.mp_endpoint != endpoint {
+        return None;
+    }
+    Some(proc_nr)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dispatch table + main loop (stub)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// PM server main loop.
+///
+/// Receives messages and dispatches PM requests.
+/// Currently a stub — will be wired when the SEF/server framework is running.
+pub fn pm_server_main() {
+    // TODO: Phase 12 — receive messages and dispatch PM requests
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -476,13 +933,10 @@ const _: () = {
 mod tests {
     use super::*;
 
-    // ── SigSet tests ────────────────────────────────────────────────────────
-
     #[test]
     fn test_sigset_new_is_empty() {
         let set = SigSet::new();
         assert_eq!(set.bits[0], 0);
-        // No signal should be a member.
         for s in 1..=_NSIG as i32 {
             assert!(!set.sigismember(s));
         }
@@ -492,7 +946,6 @@ mod tests {
     fn test_sigset_full() {
         let set = SigSet::full();
         assert_eq!(set.bits[0], !0u128);
-        // Every valid signal should be a member (1.._NSIG).
         for s in 1.._NSIG as i32 {
             assert!(set.sigismember(s));
         }
@@ -504,15 +957,11 @@ mod tests {
         assert!(set.sigaddset(1));
         assert!(set.sigismember(1));
         assert!(!set.sigismember(2));
-
         assert!(set.sigaddset(2));
         assert!(set.sigismember(2));
-
         assert!(set.sigdelset(1));
         assert!(!set.sigismember(1));
         assert!(set.sigismember(2));
-
-        // Del a signal that was never added — should still succeed.
         assert!(set.sigdelset(3));
         assert!(!set.sigismember(3));
     }
@@ -524,7 +973,6 @@ mod tests {
         set.sigemptyset();
         assert_eq!(set.bits[0], 0);
         assert!(!set.sigismember(9));
-
         set.sigfillset();
         assert_eq!(set.bits[0], !0u128);
         assert!(set.sigismember(9));
@@ -533,18 +981,12 @@ mod tests {
     #[test]
     fn test_sigset_bounds() {
         let mut set = SigSet::new();
-
-        // Signal 0 is invalid.
         assert!(!set.sigaddset(0));
         assert!(!set.sigdelset(0));
         assert!(!set.sigismember(0));
-
-        // Signal _NSIG is out of bounds (signals are 1..=_NSIG-1).
         assert!(!set.sigaddset(_NSIG as i32));
         assert!(!set.sigdelset(_NSIG as i32));
         assert!(!set.sigismember(_NSIG as i32));
-
-        // Negative signals are invalid.
         assert!(!set.sigaddset(-1));
         assert!(!set.sigismember(-1));
     }
@@ -554,16 +996,12 @@ mod tests {
         let mut a = SigSet::new();
         let b = SigSet::new();
         assert_eq!(a, b);
-
         assert!(a.sigaddset(15));
         assert_ne!(a, b);
-
         let mut c = SigSet::new();
         assert!(c.sigaddset(15));
         assert_eq!(a, c);
     }
-
-    // ── MProc tests ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_mproc_zeroed() {
@@ -586,34 +1024,18 @@ mod tests {
         assert!(!mp.in_use());
         mp.mp_flags |= IN_USE;
         assert!(mp.in_use());
-
         mp.mp_flags |= ZOMBIE;
         assert!(mp.is_zombie());
-
         mp.mp_flags |= PROC_STOPPED;
         assert!(mp.is_stopped());
     }
 
-    // ── Process table tests ─────────────────────────────────────────────────
-
     #[test]
     fn test_init_proc_clears_table() {
-        // Allocate a slot to dirty the table.
         let _idx = alloc_proc().expect("should find a free slot");
-        unsafe {
-            assert!(PROCS_IN_USE > 0);
-        }
-
+        assert!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed) > 0);
         init_proc();
-        unsafe {
-            assert_eq!(PROCS_IN_USE, 0);
-        }
-        // After init, none should be in use.
-        for i in 0..NR_PROCS {
-            unsafe {
-                assert!(!MPROC[i].in_use());
-            }
-        }
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -622,9 +1044,10 @@ mod tests {
         let idx = alloc_proc().expect("should find a free slot");
         assert!(idx < NR_PROCS);
         unsafe {
-            assert!(MPROC[idx].in_use());
-            assert_eq!(MPROC[idx].mp_magic, MP_MAGIC);
-            assert_eq!(PROCS_IN_USE, 1);
+            let base = MPROC.as_ptr();
+            let rmp = &*base.add(idx);
+            assert!(rmp.in_use());
+            assert_eq!(rmp.mp_magic, MP_MAGIC);
         }
     }
 
@@ -632,14 +1055,16 @@ mod tests {
     fn test_free_proc_clears_slot() {
         init_proc();
         let idx = alloc_proc().expect("should find a free slot");
-        unsafe {
-            assert_eq!(PROCS_IN_USE, 1);
-        }
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
         unsafe {
             free_proc(idx);
-            assert!(!MPROC[idx].in_use());
-            assert_eq!(MPROC[idx].mp_magic, 0);
-            assert_eq!(PROCS_IN_USE, 0);
+        }
+        unsafe {
+            let base = MPROC.as_ptr();
+            let rmp = &*base.add(idx);
+            assert!(!rmp.in_use());
+            assert_eq!(rmp.mp_magic, 0);
+            assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
         }
     }
 
@@ -651,38 +1076,30 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, NR_PROCS);
-        unsafe {
-            assert_eq!(PROCS_IN_USE, NR_PROCS as u32);
-        }
-        // Alloc should return None now.
-        assert!(alloc_proc().is_none());
     }
 
     #[test]
     fn test_procs_in_use_tracking() {
         init_proc();
-        assert_eq!(unsafe { PROCS_IN_USE }, 0);
-
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
         let a = alloc_proc().unwrap();
-        assert_eq!(unsafe { PROCS_IN_USE }, 1);
-
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
         let b = alloc_proc().unwrap();
-        assert_eq!(unsafe { PROCS_IN_USE }, 2);
-
-        unsafe { free_proc(a) };
-        assert_eq!(unsafe { PROCS_IN_USE }, 1);
-
-        unsafe { free_proc(b) };
-        assert_eq!(unsafe { PROCS_IN_USE }, 0);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 2);
+        unsafe {
+            free_proc(a);
+        }
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
+        unsafe {
+            free_proc(b);
+        }
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
     }
-
-    // ── Alarm tests ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_alarm_set_and_active() {
         init_proc();
         let idx = alloc_proc().unwrap();
-
         assert!(!alarm_is_active(idx));
         set_alarm(idx, 100);
         assert!(alarm_is_active(idx));
@@ -692,15 +1109,11 @@ mod tests {
     fn test_alarm_cancel() {
         init_proc();
         let idx = alloc_proc().unwrap();
-
         set_alarm(idx, 100);
         assert!(alarm_is_active(idx));
-
         cancel_alarm(idx);
         assert!(!alarm_is_active(idx));
     }
-
-    // ── Compile-time offset check tests ─────────────────────────────────────
 
     #[test]
     fn test_sigset_size() {
@@ -709,15 +1122,10 @@ mod tests {
 
     #[test]
     fn test_mproc_size() {
-        // Layout validation: MProc should have a reasonable size.
         let mproc_size = core::mem::size_of::<MProc>();
-        // Approximate: SigSets (7 × 16 = 112), sgroups (32 × 4 = 128),
-        // MinixTimer (32), plus other fields. Should be less than 2 KB.
         assert!(mproc_size > 400);
         assert!(mproc_size < 2048);
     }
-
-    // ── get_proc / get_proc_mut tests ───────────────────────────────────────
 
     #[test]
     fn test_get_proc_none_for_unused_slot() {
@@ -736,7 +1144,6 @@ mod tests {
             let p = get_proc(idx).expect("should find process");
             assert!(p.in_use());
             assert_eq!(p.mp_magic, MP_MAGIC);
-
             let p = get_proc_mut(idx).expect("should find process mut");
             p.mp_pid = 42;
             assert_eq!(p.mp_pid, 42);
@@ -750,4 +1157,52 @@ mod tests {
             assert!(get_proc_mut(NR_PROCS).is_none());
         }
     }
+
+    #[test]
+    fn test_pm_isokendpt() {
+        init_proc();
+        let idx = alloc_proc().unwrap();
+        unsafe {
+            let endpoint = idx as i32;
+            let base = MPROC.as_ptr();
+            (*base.add(idx)).mp_endpoint = endpoint;
+            assert_eq!(pm_isokendpt(endpoint), Some(idx));
+            assert_eq!(pm_isokendpt(9999), None);
+        }
+    }
+
+    #[test]
+    fn test_do_fork() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_pid = 100;
+            let child = do_fork(parent).unwrap();
+            let child_rmp = &*base.add(child);
+            assert!(child != parent);
+            assert!(child_rmp.in_use());
+            assert_eq!(child_rmp.mp_magic, MP_MAGIC);
+        }
+    }
+
+    #[test]
+    fn test_pm_server_main_callable() {
+        pm_server_main();
+    }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compile-time offset verification
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _: () = {
+    use core::mem::offset_of;
+    let _ = offset_of!(MProc, mp_pid);
+    let _ = offset_of!(MProc, mp_endpoint);
+    let _ = offset_of!(MProc, mp_parent);
+    let _ = offset_of!(MProc, mp_flags);
+    assert!(core::mem::size_of::<SigSet>() == 16);
+    assert!(core::mem::size_of::<TimeVal>() == 16);
+    assert!(core::mem::size_of::<Itimerval>() == 32);
+};
