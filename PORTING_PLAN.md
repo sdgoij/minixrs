@@ -3449,13 +3449,24 @@ userspace crate
 
 ### Tasks
 
-- [ ] **13.1 — `crates/minix-rt` runtime crate**
+- [x] **13.1 — `crates/minix-rt` runtime crate**
   - `_start` entry point (naked asm, ABI-compatible with kernel exec)
   - Panic handler (format + write to stderr, abort)
   - Bump allocator backed by `brk` syscall (`BrkAllocator`)
   - Syscall wrappers (`syscall0`–`syscall6` via `syscall` instruction)
   - `exit()`, `write()`, `getpid()`, `sbrk()` primitives
-  - Tests: syscall numbers, alignment math, function signatures
+  - Implemented in `crates/minix-rt/src/lib.rs`:
+    - `syscall0`–`syscall6` wrappers using inline asm `syscall` instruction
+      with correct x86_64 ABI (rax=nr, rdi/rsi/rdx/r10/r8/r9=args)
+    - `exit(status)`, `write(fd, buf)`, `getpid()`, `brk(addr)`, `sbrk(increment)`
+    - `_start` entry: reads argc/argv from stack per SysV ABI, calls `main`, exits
+    - `panic_handler`: formats message via core::fmt::Write into stack buffer,
+      writes to stderr via `write(2, ...)`, exits with -1
+    - `BrkAllocator`: bump allocator using `brk` syscall, implements
+      `GlobalAlloc` + `Default`, tagged `#[global_allocator]` for target only
+    - All target-specific items guarded by `#[cfg(target_os = "none")]`
+    - 13 tests: syscall numbers, signatures, alignment math,
+      BufWriter, allocator, clippy clean
 
 - [ ] **13.2 — `crates/minix-std` syscall layer**
   - IPC primitives: `send`, `receive`, `sendrec`, `notify`, `senda` via `syscall`

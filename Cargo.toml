@@ -10,6 +10,7 @@ members = [
     "crates/kernel",
     "crates/kernel-boot",
     "crates/libs",
+    "crates/minix-rt",
     "crates/net",
     "crates/servers",
     "crates/userland",

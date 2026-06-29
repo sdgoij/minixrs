@@ -1,0 +1,18 @@
+[package]
+name = "minix-rt"
+version = "0.1.0"
+description = "Minix userspace runtime: _start entry, panic handler, bump allocator, syscall wrappers"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
