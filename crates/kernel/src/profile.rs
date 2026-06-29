@@ -7,6 +7,9 @@
 //! The arch-specific parts (clock init/stop, interrupt handler
 //! registration, NMI handling) are stubs pending the interrupt subsystem.
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use crate::r#priv::PrivFlags;
 use crate::proc::*;
 
@@ -45,11 +48,63 @@ pub const PROF_RTC: i32 = 0;
 pub const PROF_NMI: i32 = 1;
 
 // ─────────────────────────────────────────────────────────────────────────
+// Wrapper types for static mut elimination
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Wrapper for `SprofInfo`.
+pub struct SprofInfoCell(UnsafeCell<SprofInfo>);
+unsafe impl Sync for SprofInfoCell {}
+impl SprofInfoCell {
+    pub const fn new(val: SprofInfo) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut SprofInfo {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[u8; SAMPLE_BUFFER_SIZE]` — the sample buffer.
+pub struct SprofSampleBufferCell(UnsafeCell<[u8; SAMPLE_BUFFER_SIZE]>);
+unsafe impl Sync for SprofSampleBufferCell {}
+impl SprofSampleBufferCell {
+    pub const fn new(val: [u8; SAMPLE_BUFFER_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [u8; SAMPLE_BUFFER_SIZE] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[CprofTbl; CPROF_TABLE_SIZE_KERNEL]` — the call profiling table.
+pub struct CprofTblCell(UnsafeCell<[CprofTbl; CPROF_TABLE_SIZE_KERNEL]>);
+unsafe impl Sync for CprofTblCell {}
+impl CprofTblCell {
+    pub const fn new(val: [CprofTbl; CPROF_TABLE_SIZE_KERNEL]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [CprofTbl; CPROF_TABLE_SIZE_KERNEL] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[CprofProcInfo; 64]` — registered profiling processes.
+pub struct CprofProcInfoCell(UnsafeCell<[CprofProcInfo; 64]>);
+unsafe impl Sync for CprofProcInfoCell {}
+impl CprofProcInfoCell {
+    pub const fn new(val: [CprofProcInfo; 64]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [CprofProcInfo; 64] {
+        self.0.get()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Statistical profiling state
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Whether statistical profiling is active.
-pub static mut SPROFILING: bool = false;
+pub static SPROFILING: AtomicBool = AtomicBool::new(false);
 
 /// Statistical profiling info.
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,19 +118,20 @@ pub struct SprofInfo {
 }
 
 /// Global profiling info.
-pub static mut SPROF_INFO: SprofInfo = SprofInfo {
+pub static SPROF_INFO: SprofInfoCell = SprofInfoCell::new(SprofInfo {
     mem_used: 0,
     total_samples: 0,
     idle_samples: 0,
     system_samples: 0,
     user_samples: 0,
-};
+});
 
 /// Sample buffer for statistical profiling.
-pub static mut SPROF_SAMPLE_BUFFER: [u8; SAMPLE_BUFFER_SIZE] = [0u8; SAMPLE_BUFFER_SIZE];
+pub static SPROF_SAMPLE_BUFFER: SprofSampleBufferCell =
+    SprofSampleBufferCell::new([0u8; SAMPLE_BUFFER_SIZE]);
 
 /// Profiling memory size (set by userspace via sys_sprofile).
-pub static mut SPROF_MEM_SIZE: usize = 0;
+pub static SPROF_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 // ─────────────────────────────────────────────────────────────────────────
 // Statistical profiling data types
@@ -102,7 +158,7 @@ pub struct SprofProc {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Number of call profiling processes registered.
-pub static mut CPROF_PROCS_NO: usize = 0;
+pub static CPROF_PROCS_NO: AtomicUsize = AtomicUsize::new(0);
 
 // ─────────────────────────────────────────────────────────────────────────
 // Call profiling data types
@@ -147,12 +203,14 @@ impl Default for CprofTbl {
 }
 
 /// Kernel call profiling table.
-pub static mut CPROF_TBL: [CprofTbl; CPROF_TABLE_SIZE_KERNEL] = [CprofTbl {
-    next: core::ptr::null_mut(),
-    cpath: [0u8; CPROF_CPATH_MAX_LEN],
-    calls: 0,
-    cycles: 0,
-}; CPROF_TABLE_SIZE_KERNEL];
+pub static CPROF_TBL: CprofTblCell = CprofTblCell::new(
+    [CprofTbl {
+        next: core::ptr::null_mut(),
+        cpath: [0u8; CPROF_CPATH_MAX_LEN],
+        calls: 0,
+        cycles: 0,
+    }; CPROF_TABLE_SIZE_KERNEL],
+);
 
 /// Per-process profiling info entry.
 #[derive(Debug, Clone, Copy, Default)]
@@ -165,12 +223,14 @@ pub struct CprofProcInfo {
 }
 
 /// Array of registered profiling processes.
-pub static mut CPROF_PROC_INFO: [CprofProcInfo; 64] = [CprofProcInfo {
-    endpt: 0,
-    name: core::ptr::null_mut(),
-    ctl_v: 0,
-    buf_v: 0,
-}; 64];
+pub static CPROF_PROC_INFO: CprofProcInfoCell = CprofProcInfoCell::new(
+    [CprofProcInfo {
+        endpt: 0,
+        name: core::ptr::null_mut(),
+        ctl_v: 0,
+        buf_v: 0,
+    }; 64],
+);
 
 // ─────────────────────────────────────────────────────────────────────────
 // sprofile — start/stop statistical profiling
@@ -189,19 +249,18 @@ pub unsafe fn sprofile(
     _ctl_ptr: *mut core::ffi::c_void,
     _mem_ptr: *mut core::ffi::c_void,
 ) -> i32 {
-    unsafe {
-        match action {
-            PROF_START => {
-                SPROF_INFO = SprofInfo::default();
-                SPROFILING = true;
-                crate::system::OK
-            }
-            PROF_STOP => {
-                SPROFILING = false;
-                crate::system::OK
-            }
-            _ => crate::system::EBADREQUEST,
+    match action {
+        PROF_START => {
+            // SAFETY: safe context guaranteed by caller.
+            unsafe { core::ptr::write(SPROF_INFO.get(), SprofInfo::default()) };
+            SPROFILING.store(true, Ordering::Relaxed);
+            crate::system::OK
         }
+        PROF_STOP => {
+            SPROFILING.store(false, Ordering::Relaxed);
+            crate::system::OK
+        }
+        _ => crate::system::EBADREQUEST,
     }
 }
 
@@ -283,18 +342,17 @@ pub fn stop_profile_clock() {
 /// Buffer must have space for the sample.
 unsafe fn sprof_save_sample(p: *mut Proc, pc: u64) {
     unsafe {
-        let offset = SPROF_INFO.mem_used as usize;
+        let info = &mut *SPROF_INFO.get();
+        let offset = info.mem_used as usize;
         if offset + size_of::<SprofSample>() > SAMPLE_BUFFER_SIZE {
-            SPROF_INFO.mem_used = -1;
+            info.mem_used = -1;
             return;
         }
-        let buf = core::ptr::addr_of_mut!(SPROF_SAMPLE_BUFFER).cast::<u8>();
+        let buf = SPROF_SAMPLE_BUFFER.get() as *mut u8;
         let sample_ptr = buf.add(offset).cast::<SprofSample>();
         (*sample_ptr).proc_ = (*p).p_endpoint;
         (*sample_ptr).pc = pc;
-        SPROF_INFO.mem_used = SPROF_INFO
-            .mem_used
-            .wrapping_add(size_of::<SprofSample>() as i32);
+        info.mem_used = info.mem_used.wrapping_add(size_of::<SprofSample>() as i32);
     }
 }
 
@@ -305,12 +363,13 @@ unsafe fn sprof_save_sample(p: *mut Proc, pc: u64) {
 /// Buffer must have space for the record.
 unsafe fn sprof_save_proc(p: *mut Proc) {
     unsafe {
-        let offset = SPROF_INFO.mem_used as usize;
+        let info = &mut *SPROF_INFO.get();
+        let offset = info.mem_used as usize;
         if offset + size_of::<SprofProc>() > SAMPLE_BUFFER_SIZE {
-            SPROF_INFO.mem_used = -1;
+            info.mem_used = -1;
             return;
         }
-        let buf = core::ptr::addr_of_mut!(SPROF_SAMPLE_BUFFER).cast::<u8>();
+        let buf = SPROF_SAMPLE_BUFFER.get() as *mut u8;
         let proc_ptr = buf.add(offset).cast::<SprofProc>();
         (*proc_ptr).proc_ = (*p).p_endpoint;
         // Copy name
@@ -320,9 +379,7 @@ unsafe fn sprof_save_proc(p: *mut Proc) {
             }
             (*proc_ptr).name[i] = c as u8;
         }
-        SPROF_INFO.mem_used = SPROF_INFO
-            .mem_used
-            .wrapping_add(size_of::<SprofProc>() as i32);
+        info.mem_used = info.mem_used.wrapping_add(size_of::<SprofProc>() as i32);
     }
 }
 
@@ -333,15 +390,16 @@ unsafe fn sprof_save_proc(p: *mut Proc) {
 /// `p` must point to a valid `Proc`.
 pub unsafe fn profile_sample(p: *mut Proc, pc: u64) {
     unsafe {
-        if !SPROFILING || SPROF_INFO.mem_used == -1 {
+        let info = &mut *SPROF_INFO.get();
+        if !SPROFILING.load(Ordering::Relaxed) || info.mem_used == -1 {
             return;
         }
 
         // Check memory space
         let needed =
             size_of::<SprofInfo>() + 2 * size_of::<SprofSample>() + 2 * size_of::<SprofSample>();
-        if (SPROF_INFO.mem_used as usize) + needed > SPROF_MEM_SIZE {
-            SPROF_INFO.mem_used = -1;
+        if (info.mem_used as usize) + needed > SPROF_MEM_SIZE.load(Ordering::Relaxed) {
+            info.mem_used = -1;
             return;
         }
 
@@ -349,7 +407,7 @@ pub unsafe fn profile_sample(p: *mut Proc, pc: u64) {
 
         if ep == -4 {
             // IDLE
-            SPROF_INFO.idle_samples = SPROF_INFO.idle_samples.wrapping_add(1);
+            info.idle_samples = info.idle_samples.wrapping_add(1);
         } else if ep == -2 || {
             // KERNEL or system process
             let is_sys =
@@ -357,20 +415,18 @@ pub unsafe fn profile_sample(p: *mut Proc, pc: u64) {
             is_sys && (*p).is_runnable()
         } {
             if !(*p).mf_isset(MiscFlags::SPROF_SEEN) {
-                (*p).p_misc_flags.fetch_or(
-                    MiscFlags::SPROF_SEEN.bits(),
-                    core::sync::atomic::Ordering::Relaxed,
-                );
+                (*p).p_misc_flags
+                    .fetch_or(MiscFlags::SPROF_SEEN.bits(), Ordering::Relaxed);
                 sprof_save_proc(p);
             }
             sprof_save_sample(p, pc);
-            SPROF_INFO.system_samples = SPROF_INFO.system_samples.wrapping_add(1);
+            info.system_samples = info.system_samples.wrapping_add(1);
         } else {
             // User process
-            SPROF_INFO.user_samples = SPROF_INFO.user_samples.wrapping_add(1);
+            info.user_samples = info.user_samples.wrapping_add(1);
         }
 
-        SPROF_INFO.total_samples = SPROF_INFO.total_samples.wrapping_add(1);
+        info.total_samples = info.total_samples.wrapping_add(1);
     }
 }
 
@@ -412,8 +468,7 @@ pub fn profile_get_announce() -> i32 {
 /// Pointers must be valid and remain valid while profiling is active.
 pub unsafe fn profile_register(ctl_ptr: *mut core::ffi::c_void, tbl_ptr: *mut core::ffi::c_void) {
     unsafe {
-        let count = core::ptr::addr_of_mut!(CPROF_PROCS_NO);
-        let idx = *count;
+        let idx = CPROF_PROCS_NO.load(Ordering::Relaxed);
         if idx >= 64 {
             return;
         }
@@ -422,12 +477,12 @@ pub unsafe fn profile_register(ctl_ptr: *mut core::ffi::c_void, tbl_ptr: *mut co
         if rp.is_null() {
             return;
         }
-        let info = core::ptr::addr_of_mut!(CPROF_PROC_INFO).cast::<CprofProcInfo>();
+        let info = CPROF_PROC_INFO.get() as *mut CprofProcInfo;
         (*info.add(idx)).endpt = (*rp).p_endpoint;
         (*info.add(idx)).name = (*rp).p_name.as_mut_ptr().cast::<u8>();
         (*info.add(idx)).ctl_v = ctl_ptr as u64;
         (*info.add(idx)).buf_v = tbl_ptr as u64;
-        *count += 1;
+        CPROF_PROCS_NO.store(idx + 1, Ordering::Relaxed);
     }
 }
 
@@ -497,7 +552,7 @@ mod tests {
                 ),
                 0
             );
-            assert!(SPROFILING);
+            assert!(SPROFILING.load(Ordering::Relaxed));
             assert_eq!(
                 sprofile(
                     PROF_STOP,
@@ -509,7 +564,7 @@ mod tests {
                 ),
                 0
             );
-            assert!(!SPROFILING);
+            assert!(!SPROFILING.load(Ordering::Relaxed));
         }
     }
 

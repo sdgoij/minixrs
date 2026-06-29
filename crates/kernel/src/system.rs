@@ -3005,7 +3005,7 @@ pub unsafe fn do_cprofile_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
 
         match _action {
             crate::profile::PROF_RESET => {
-                crate::profile::CPROF_PROCS_NO = 0;
+                crate::profile::CPROF_PROCS_NO.store(0, Ordering::Relaxed);
                 crate::system::OK
             }
             crate::profile::PROF_GET => {
@@ -3053,11 +3053,11 @@ pub unsafe fn do_profbuf_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         let _mem_ptr = msg_read_u64(msg, PROFBUF_MEM_PTR_OFF);
 
         // Check slot availability.
-        if crate::profile::CPROF_PROCS_NO >= 64 {
+        if crate::profile::CPROF_PROCS_NO.load(Ordering::Relaxed) >= 64 {
             return crate::ipc::ENOMEM;
         }
 
-        let idx = crate::profile::CPROF_PROCS_NO;
+        let idx = crate::profile::CPROF_PROCS_NO.load(Ordering::Relaxed);
         let info = crate::profile::CprofProcInfo {
             endpt: (*caller).p_endpoint,
             name: (*caller).p_name.as_mut_ptr() as *mut u8,
@@ -3065,13 +3065,10 @@ pub unsafe fn do_profbuf_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
             buf_v: _mem_ptr,
         };
         core::ptr::write(
-            core::ptr::addr_of_mut!(crate::profile::CPROF_PROC_INFO)
-                .cast::<crate::profile::CprofProcInfo>()
-                .add(idx),
+            (crate::profile::CPROF_PROC_INFO.get() as *mut crate::profile::CprofProcInfo).add(idx),
             info,
         );
-        let count_ptr = core::ptr::addr_of_mut!(crate::profile::CPROF_PROCS_NO);
-        *count_ptr += 1;
+        crate::profile::CPROF_PROCS_NO.store(idx + 1, Ordering::Relaxed);
 
         // Set SPROF_SEEN flag
         let old_mf = (*caller).p_misc_flags.load(Ordering::Relaxed);

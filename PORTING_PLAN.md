@@ -3672,7 +3672,7 @@ reliable cross-function test patterns.
 - [x] **13.11.2 — Kernel `priv.rs`**: Replace `PRIV`, `IDLE_PRIV`, `PPRIV_ADDR`
   with `UnsafeCell` wrappers. (`crates/kernel/src/priv.rs`)
 
-- [ ] **13.11.3 — Kernel `profile.rs`**: Replace `SPROFILING` → `AtomicBool`,
+- [x] **13.11.3 — Kernel `profile.rs`**: Replace `SPROFILING` → `AtomicBool`,
   `SPROF_MEM_SIZE` → `AtomicUsize`, `CPROF_PROCS_NO` → `AtomicUsize`.
   Replace `SPROF_INFO`, `SPROF_SAMPLE_BUFFER`, `CPROF_TBL`, `CPROF_PROC_INFO`
   with `UnsafeCell` wrappers. (`crates/kernel/src/profile.rs`)
