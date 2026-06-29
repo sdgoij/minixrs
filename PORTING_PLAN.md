@@ -3510,14 +3510,17 @@ userspace crate
     call numbers matching `.refs/minix-3.3.0/minix/include/minix/com.h`
   - 19 tests, 98 total minix-std tests pass, clippy clean
 
-- [ ] **13.6 — Time and signals (CLOCK + PM protocols)**
-  - `clock_gettime`: CLOCK server request
-  - `nanosleep`: timer via CLOCK
-  - `signal` / `sigaction`: PM signal handlers
-  - `sigprocmask`: PM signal mask
-  - `kill`: PM signal send
-  - `alarm` / `setitimer`: timer-based signals
-  - Tests: time monotonicity, signal delivery
+- [x] **13.6 — Time and signals (CLOCK + PM protocols)**
+  - `clock_gettime` / `clock_getres` / `clock_settime`: PM_CLOCK_GETTIME/GETRES/SETTIME
+    calls with CLOCK_REALTIME/CLOCK_MONOTONIC, returns TimeSpec (tv_sec, tv_nsec)
+  - `nanosleep`: stub via PM_ITIMER (deferred — needs timer infrastructure)
+  - `signal` / `sigaction`: PM_SIGACTION with SigAction struct (handler, mask, flags)
+  - `sigprocmask`: PM_SIGPROCMASK with SIG_BLOCK/UNBLOCK/SETMASK
+  - `kill`: PM_KILL with pid and signal number
+  - `alarm` / `setitimer`: PM_ITIMER with ITIMER_REAL/VIRTUAL/PROF
+  - Implemented in `crates/minix-std/src/time.rs` with all signal numbers
+    (SIGHUP=1 through SIGSYS=31) and sa_flags (SA_NOCLDSTOP through SA_NODEFER)
+  - 23 tests, 121 total minix-std tests pass, clippy clean
 
 - [ ] **13.7 — Networking (LWIP protocol)**
   - `socket`: create endpoint via LWIP
