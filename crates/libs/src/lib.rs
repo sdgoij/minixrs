@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod libminixfs;
+pub mod vtreefs;
 
 #[cfg(test)]
 mod tests {

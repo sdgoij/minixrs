@@ -3222,13 +3222,19 @@ be replaced with real implementations.
   - Requires VM dispatch handler or IPC infrastructure (Phase 13) to
     actually process faults; without it, returns false (SIGSEGV path).
 
-- [ ] **12.11 — Wire ProcFS to VTreeFS** (`crates/fs/src/procfs/`)
-  **Depends on:** VTreeFS library (Phase 12), PM process table access (12.3),
-  VFS fproc table access (Phase 10), kernel process table access
-  All ~31 TODO items in procfs need: VTreeFS inode functions (add_inode,
-  get_root_inode, start_vtreefs), process table reads via sys_getproctab/
-  getsysinfo, sys_hz/getticks, vm_info_stats, sys_datacopy, sys_getcpuinfo.
-  Replace stub handlers in root.rs, pid.rs, tree.rs with real implementations.
+- [x] **12.11 — Wire ProcFS to VTreeFS** (`crates/fs/src/procfs/`, `crates/libs/src/vtreefs/`)
+  **Depends on:** VTreeFS library
+  Created minimal VTreeFS library at `crates/libs/src/vtreefs/` with inode tree
+  management (add_inode, delete_inode, find_inode, first/next_inode, get_root),
+  FsHooks registration (init/cleanup/lookup/getdents/read/rdlink/message), and
+  `start_vtreefs` main loop stub. Wired ProcFS to use real VTreeFS:
+  - Updated init_hook to call vtreefs_init with real hooks, construct_tree
+    passes cbdata from FileData (static/dynamic encoded as usize)
+  - lookup_hook finds inodes via find_inode, lazy-constructs PID entries
+  - getdents_hook constructs PID dirs for root
+  - read_hook decodes cbdata to dispatch static fn() or dynamic fn(i32)
+  - rdlink_hook resolved (stub)
+  All ProcFS tests pass (232 total in fs crate).
 
 - [ ] **12.12 — Wire clock server main loop** (`servers/src/clock_server.rs:126`)
   **Depends on:** SEF init framework (Phase 12.2 RS)

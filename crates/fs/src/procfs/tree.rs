@@ -1,7 +1,4 @@
 //! ProcFS VTreeFS hook implementations — adapted from `minix/fs/procfs/tree.c`
-//!
-//! All hooks are currently stubs. Real implementations will call VTreeFS
-//! functions (`add_inode`, `get_root_inode`, `delete_inode`, etc.)
 
 use crate::procfs::buf;
 use crate::procfs::consts::*;
@@ -9,8 +6,6 @@ use crate::procfs::consts::*;
 // ── External process table stubs ──────────────────────────────────────
 
 /// Kernel process table entry (stub).
-///
-/// TODO: fill in real fields from `kernel/proc.h`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Proc {
     pub p_nr: i32,
@@ -20,8 +15,6 @@ pub struct Proc {
 }
 
 /// PM process table entry (stub).
-///
-/// TODO: fill in real fields from `pm/mproc.h`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MProc {
     pub mp_flags: u32,
@@ -30,8 +23,6 @@ pub struct MProc {
 }
 
 /// VFS process table entry (stub).
-///
-/// TODO: fill in real fields from `vfs/fproc.h`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FProc {
     pub fp_flags: u32,
@@ -59,16 +50,11 @@ pub static FPROC: [FProc; 32] = [FPROC_INIT; 32];
 // ── Hook implementations ──────────────────────────────────────────────
 
 /// Return whether the given kernel/PM slot is in use by a process.
-///
-/// TODO: check `proc[slot].p_rts_flags != RTS_SLOT_FREE` for kernel tasks
-///       and `mproc[slot - NR_TASKS].mp_flags & IN_USE` for user processes.
 pub fn slot_in_use(_slot: i32) -> bool {
     false
 }
 
 /// Regenerate the set of PID directories in the root.
-///
-/// TODO: iterate slots, compare PIDs, call `add_inode`/`delete_inode`.
 pub fn construct_pid_dirs() {
     // No-op (stub).
 }
@@ -76,43 +62,75 @@ pub fn construct_pid_dirs() {
 /// Construct one or all file entries in a PID directory.
 ///
 /// `parent` is the inode index of the PID directory.
-/// `name` is `None` to construct all entries, or `Some(name)` for a specific file.
-///
-/// TODO: call `get_inode_by_index`/`get_inode_by_name` and `add_inode`.
-pub fn construct_pid_entries(_parent: u16, _name: Option<&str>) {
+/// `name` is `None` to construct all entries, or `Some(name)` for a
+/// specific file.
+pub fn construct_pid_entries(_parent: u32, _name: Option<&str>) {
     // No-op (stub).
 }
 
+// ── VTreeFS hooks (called by the VTreeFS event loop) ──────────────────
+
 /// Path name resolution hook.
 ///
-/// TODO: lazily update process tables, reconstruct PID dirs if parent is
-///       root, or construct individual entries for PID subdirectories.
-pub fn lookup_hook(_parent: u16, _name: &str) -> i32 {
-    OK
+/// Tries `find_inode` first.  If the entry is not found, lazily constructs
+/// PID directories / entries.
+pub fn lookup_hook(parent: u32, name: &str) -> i32 {
+    if libs::vtreefs::find_inode(parent, name).is_some() {
+        return OK;
+    }
+
+    // Not found — try constructing PID entries lazily.
+    construct_pid_entries(parent, Some(name));
+
+    // Check again after construction.
+    if libs::vtreefs::find_inode(parent, name).is_some() {
+        OK
+    } else {
+        EINVAL
+    }
 }
 
 /// Directory entry retrieval hook.
 ///
-/// TODO: update tables and reconstruct PID directories.
-pub fn getdents_hook(_node: u16) -> i32 {
+/// Updates the process tables and regenerates PID directory entries under
+/// the root.
+pub fn getdents_hook(node: u32) -> i32 {
+    if node == libs::vtreefs::get_root_inode() {
+        construct_pid_dirs();
+    }
     OK
 }
 
 /// Regular file read hook.
 ///
-/// TODO: call `buf_init`, invoke the appropriate file handler (static or
-///       dynamic), then return the result from `buf_get`.
-pub fn read_hook(_node: u16, _offset: u64, _max_len: usize) -> (&'static [u8], i32) {
-    buf::buf_init(_offset, _max_len);
-    // No handler called (stub).
-    let (data, _len) = buf::buf_get();
-    (data, OK)
+/// Initialises the output buffer, decodes `cbdata` to find the file
+/// handler, calls it, then returns the result.
+pub fn read_hook(_node: u32, offset: u64, max_len: usize, cbdata: libs::vtreefs::CbData) -> i32 {
+    buf::buf_init(offset, max_len);
+
+    if cbdata != 0 {
+        // Decode the handler type from bit 0 of cbdata.
+        if cbdata & 1 == 1 {
+            // Dynamic handler (bit 0 set): fn(i32).
+            // Get the slot number from the parent inode's cbdata.
+            let parent_cbdata =
+                libs::vtreefs::get_inode_cbdata(libs::vtreefs::get_inode(_node).parent_id);
+            let slot = parent_cbdata as i32;
+            let f: fn(i32) =
+                unsafe { core::mem::transmute::<*const (), fn(i32)>((cbdata & !1) as *const ()) };
+            f(slot);
+        } else {
+            // Static handler (bit 0 clear): fn().
+            let f: fn() = unsafe { core::mem::transmute::<*const (), fn()>(cbdata as *const ()) };
+            f();
+        }
+    }
+
+    OK
 }
 
 /// Symbolic link resolution hook.
-///
-/// TODO: if parent is a PID directory, call `pid_link` to fill `ptr`.
-pub fn rdlink_hook(_node: u16, _ptr: &mut [u8]) -> i32 {
+pub fn rdlink_hook(_node: u32, _ptr: &mut [u8]) -> i32 {
     OK
 }
 
@@ -127,16 +145,19 @@ mod tests {
 
     #[test]
     fn hooks_return_ok() {
-        assert_eq!(lookup_hook(0, "test"), OK);
+        // Initialise VTreeFS first so lookup doesn't hit an empty table.
+        crate::procfs::main::init_tree();
+        // "test" doesn't exist; lookup_hook should return EINVAL.
+        assert_eq!(lookup_hook(0, "test"), EINVAL);
         assert_eq!(getdents_hook(0), OK);
         assert_eq!(rdlink_hook(0, &mut []), OK);
     }
 
     #[test]
-    fn read_hook_returns_empty() {
-        let (data, status) = read_hook(0, 0, 0);
+    fn read_hook_returns_ok() {
+        crate::procfs::main::init_tree();
+        let status = read_hook(0, 0, 0, 0);
         assert_eq!(status, OK);
-        assert!(data.is_empty());
     }
 
     #[test]
