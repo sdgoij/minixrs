@@ -11,8 +11,16 @@
 //! - SYS_DEVIO, SYS_SDEVIO, SYS_VDEVIO are implemented (Phase 8.8) —
 //!   port I/O is the same on x86_64
 //! - message copy uses raw pointer copy (no segmentation)
+//!
+//! Rust 2024 note: Many `unsafe fn` bodies wrap in `unsafe {}` for
+//! `unsafe_op_in_unsafe_fn` granularity. Clippy's `unnecessary_unsafe`
+//! fires when those are nested under outer function-level `unsafe {}`
+//! blocks — these are harmless and suppressed.
 
-use core::sync::atomic::Ordering;
+#![allow(unused_unsafe)]
+
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use arch_common::consts::{SEGMENT_INDEX, VM_GRANT};
 use arch_common::endpoint::ANY;
@@ -438,13 +446,65 @@ pub const PFF_VMINHIBIT: u32 = 0x01;
 pub const FORK_STR: &str = "*F";
 
 // ─────────────────────────────────────────────────────────────────────────
+// Wrapper types for static mut elimination
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Wrapper for `[IrqHook; NR_IRQ_HOOKS]` — the IRQ hook table.
+pub struct IrqHooksCell(UnsafeCell<[IrqHook; NR_IRQ_HOOKS]>);
+unsafe impl Sync for IrqHooksCell {}
+impl IrqHooksCell {
+    pub const fn new(val: [IrqHook; NR_IRQ_HOOKS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [IrqHook; NR_IRQ_HOOKS] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[i32; 64]` — active IRQ IDs.
+pub struct IrqActidsCell(UnsafeCell<[i32; 64]>);
+unsafe impl Sync for IrqActidsCell {}
+impl IrqActidsCell {
+    pub const fn new(val: [i32; 64]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [i32; 64] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[Option<CallHandler>; NR_SYS_CALLS]` — the call dispatch table.
+pub struct CallVecCell(UnsafeCell<[Option<CallHandler>; NR_SYS_CALLS]>);
+unsafe impl Sync for CallVecCell {}
+impl CallVecCell {
+    pub const fn new(val: [Option<CallHandler>; NR_SYS_CALLS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [Option<CallHandler>; NR_SYS_CALLS] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[u8; VDEVIO_BUF_SIZE]` — the VDEVIO buffer.
+pub struct VdevioBufCell(UnsafeCell<[u8; VDEVIO_BUF_SIZE]>);
+unsafe impl Sync for VdevioBufCell {}
+impl VdevioBufCell {
+    pub const fn new(val: [u8; VDEVIO_BUF_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [u8; VDEVIO_BUF_SIZE] {
+        self.0.get()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Kernel call billing
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Process currently being billed for kernel calls.
-pub static mut KBILL_KCALL: *mut Proc = core::ptr::null_mut();
+pub static KBILL_KCALL: AtomicPtr<Proc> = AtomicPtr::new(core::ptr::null_mut());
 /// Process currently being billed for IPC.
-pub static mut KBILL_IPC: *mut Proc = core::ptr::null_mut();
+pub static KBILL_IPC: AtomicPtr<Proc> = AtomicPtr::new(core::ptr::null_mut());
 
 // ─────────────────────────────────────────────────────────────────────────
 // Call table
@@ -454,7 +514,7 @@ pub static mut KBILL_IPC: *mut Proc = core::ptr::null_mut();
 pub type CallHandler = unsafe fn(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32;
 
 /// Kernel call dispatch table.
-static mut CALL_VEC: [Option<CallHandler>; NR_SYS_CALLS] = [None; NR_SYS_CALLS];
+static CALL_VEC: CallVecCell = CallVecCell::new([None; NR_SYS_CALLS]);
 
 /// Map a kernel call number to a handler.
 ///
@@ -462,11 +522,9 @@ static mut CALL_VEC: [Option<CallHandler>; NR_SYS_CALLS] = [None; NR_SYS_CALLS];
 ///
 /// Must be called during system_init(), before any concurrent access.
 pub unsafe fn map_call(call_nr: i32, handler: CallHandler) {
-    unsafe {
-        let idx = call_nr as usize;
-        if idx < NR_SYS_CALLS {
-            CALL_VEC[idx] = Some(handler);
-        }
+    let idx = call_nr as usize;
+    if idx < NR_SYS_CALLS {
+        unsafe { (*CALL_VEC.get())[idx] = Some(handler) };
     }
 }
 
@@ -502,21 +560,23 @@ impl Default for IrqHook {
 }
 
 /// Global IRQ hook table.
-pub static mut IRQ_HOOKS: [IrqHook; NR_IRQ_HOOKS] = [IrqHook {
-    next: core::ptr::null_mut(),
-    handler: None,
-    irq: 0,
-    id: 0,
-    proc_nr_e: NONE,
-    notify_id: 0,
-    policy: 0,
-}; NR_IRQ_HOOKS];
+pub static IRQ_HOOKS: IrqHooksCell = IrqHooksCell::new(
+    [IrqHook {
+        next: core::ptr::null_mut(),
+        handler: None,
+        irq: 0,
+        id: 0,
+        proc_nr_e: NONE,
+        notify_id: 0,
+        policy: 0,
+    }; NR_IRQ_HOOKS],
+);
 
 /// Active IRQ IDs.
-pub static mut IRQ_ACTIDS: [i32; 64] = [0i32; 64];
+pub static IRQ_ACTIDS: IrqActidsCell = IrqActidsCell::new([0i32; 64]);
 
 /// Map of all in-use IRQs.
-pub static mut IRQ_USE: i32 = 0;
+pub static IRQ_USE: AtomicI32 = AtomicI32::new(0);
 
 /// VDEVIO static buffer for copying (port,value) pairs from/to user space.
 const VDEVIO_BUF_SIZE: usize = 64;
@@ -618,7 +678,7 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 // Source: .refs/minix-3.3.0/minix/kernel/system/do_vdevio.c
 
 /// Static buffer for VDEVIO (port,value) pairs.
-static mut VDEVIO_BUF: [u8; VDEVIO_BUF_SIZE] = [0u8; VDEVIO_BUF_SIZE];
+static VDEVIO_BUF: VdevioBufCell = VdevioBufCell::new([0u8; VDEVIO_BUF_SIZE]);
 
 /// Handle SYS_VDEVIO: perform a series of I/O port operations.
 ///
@@ -669,7 +729,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
         // Copy vector from caller's address space
         // We switch to caller's CR3 to read from their virtual address,
         // then copy into the kernel VDEVIO_BUF (identity-mapped).
-        let buf_ptr = core::ptr::addr_of_mut!(VDEVIO_BUF) as u64;
+        let buf_ptr = VDEVIO_BUF.get() as u64;
         {
             let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
             if boot_cr3 != 0 {
@@ -678,7 +738,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     arch_x86_64::asm::write_cr3(caller_cr3);
                 }
             }
-            let buf_mut = core::ptr::addr_of_mut!(VDEVIO_BUF) as *mut u8;
+            let buf_mut = VDEVIO_BUF.get() as *mut u8;
             core::ptr::copy_nonoverlapping(vec_addr as *const u8, buf_mut, bytes);
             if boot_cr3 != 0 {
                 arch_x86_64::asm::write_cr3(boot_cr3);
@@ -784,7 +844,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     arch_x86_64::asm::write_cr3(caller_cr3);
                 }
             }
-            let buf_src = core::ptr::addr_of_mut!(VDEVIO_BUF) as *const u8;
+            let buf_src = VDEVIO_BUF.get() as *const u8;
             core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
             if boot_cr3 != 0 {
                 arch_x86_64::asm::write_cr3(boot_cr3);
@@ -1047,7 +1107,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 pub unsafe fn system_init() {
     unsafe {
         // Initialize IRQ hooks using raw pointer
-        let hooks = core::ptr::addr_of_mut!(IRQ_HOOKS);
+        let hooks = IRQ_HOOKS.get();
         for i in 0..NR_IRQ_HOOKS {
             (*hooks)[i].proc_nr_e = NONE;
         }
@@ -1143,7 +1203,7 @@ pub unsafe fn kernel_call(m_user: *mut u8, caller: *mut Proc) {
         let result = kernel_call_dispatch(caller, &mut msg);
 
         // Remember who invoked the kcall for billing
-        KBILL_KCALL = caller;
+        KBILL_KCALL.store(caller, Ordering::Relaxed);
 
         kernel_call_finish(caller, &mut msg, result);
     }
@@ -1174,7 +1234,8 @@ pub unsafe fn kernel_call_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         }
 
         // Dispatch
-        match CALL_VEC[idx] {
+        let call_vec = CALL_VEC.get();
+        match unsafe { (*call_vec)[idx] } {
             Some(handler) => handler(caller, msg),
             None => EBADREQUEST,
         }
@@ -2613,14 +2674,16 @@ pub unsafe fn do_irqctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             IRQ_ENABLE | IRQ_DISABLE => {
                 if irq_hook_id < 0
                     || irq_hook_id as usize >= NR_IRQ_HOOKS
-                    || IRQ_HOOKS[irq_hook_id as usize].proc_nr_e == NONE
+                    || unsafe { (*IRQ_HOOKS.get())[irq_hook_id as usize].proc_nr_e } == NONE
                 {
                     return crate::ipc::EINVAL;
                 }
-                if IRQ_HOOKS[irq_hook_id as usize].proc_nr_e != (*caller).p_endpoint {
+                if unsafe { (*IRQ_HOOKS.get())[irq_hook_id as usize].proc_nr_e }
+                    != (*caller).p_endpoint
+                {
                     return crate::ipc::EPERM;
                 }
-                let hook = &IRQ_HOOKS[irq_hook_id as usize] as *const IrqHook;
+                let hook = unsafe { &(*IRQ_HOOKS.get())[irq_hook_id as usize] } as *const IrqHook;
                 if request == IRQ_ENABLE {
                     crate::interrupt::enable_irq(hook);
                 } else {
@@ -2660,7 +2723,7 @@ pub unsafe fn do_irqctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
 
                 // Try to find an existing mapping to override.
-                let hooks_base = core::ptr::addr_of_mut!(IRQ_HOOKS);
+                let hooks_base = IRQ_HOOKS.get();
                 let mut hook_ptr: *mut IrqHook = core::ptr::null_mut();
                 let mut found_idx: i32 = -1;
                 let mut i = 0usize;
@@ -2676,7 +2739,6 @@ pub unsafe fn do_irqctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     i += 1;
                 }
 
-                // If no existing mapping, find a free hook slot.
                 if hook_ptr.is_null() {
                     i = 0;
                     while i < NR_IRQ_HOOKS {
@@ -2709,16 +2771,18 @@ pub unsafe fn do_irqctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             IRQ_RMPOLICY => {
                 if irq_hook_id < 0
                     || irq_hook_id as usize >= NR_IRQ_HOOKS
-                    || IRQ_HOOKS[irq_hook_id as usize].proc_nr_e == NONE
+                    || unsafe { (*IRQ_HOOKS.get())[irq_hook_id as usize].proc_nr_e } == NONE
                 {
                     return crate::ipc::EINVAL;
                 }
-                if (*caller).p_endpoint != IRQ_HOOKS[irq_hook_id as usize].proc_nr_e {
+                if (*caller).p_endpoint
+                    != unsafe { (*IRQ_HOOKS.get())[irq_hook_id as usize].proc_nr_e }
+                {
                     return crate::ipc::EPERM;
                 }
-                let hook = &IRQ_HOOKS[irq_hook_id as usize] as *const IrqHook;
+                let hook = unsafe { &(*IRQ_HOOKS.get())[irq_hook_id as usize] } as *const IrqHook;
                 crate::interrupt::rm_irq_handler(hook);
-                IRQ_HOOKS[irq_hook_id as usize].proc_nr_e = NONE;
+                unsafe { (*IRQ_HOOKS.get())[irq_hook_id as usize].proc_nr_e = NONE };
                 crate::ipc::OK
             }
 
@@ -3588,7 +3652,7 @@ pub unsafe fn do_clear_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
         if table::is_empty_proc(rc) {
             return OK;
         }
-        let hooks = core::ptr::addr_of_mut!(IRQ_HOOKS);
+        let hooks = IRQ_HOOKS.get();
         for i in 0..NR_IRQ_HOOKS {
             if (*rc).p_endpoint == (*hooks)[i].proc_nr_e {
                 (*hooks)[i].proc_nr_e = NONE;
@@ -4334,7 +4398,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 OK
             }
             arch_common::com::GET_IRQHOOKS => {
-                let hooks = core::ptr::addr_of!(IRQ_HOOKS).cast::<u8>();
+                let hooks = IRQ_HOOKS.get() as *const u8;
                 let hooks_size = core::mem::size_of::<[IrqHook; NR_IRQ_HOOKS]>();
                 if val_len > 0 && hooks_size > val_len as usize {
                     return crate::ipc::E2BIG;
@@ -4477,7 +4541,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 OK
             }
             arch_common::com::GET_IRQACTIDS => {
-                let irq_actids = core::ptr::addr_of!(IRQ_ACTIDS).cast::<u8>();
+                let irq_actids = IRQ_ACTIDS.get() as *const u8;
                 let irq_actids_size = core::mem::size_of::<[i32; 64]>();
                 if val_len > 0 && irq_actids_size > val_len as usize {
                     return crate::ipc::E2BIG;
@@ -4680,9 +4744,9 @@ mod tests {
         unsafe {
             system_init();
             // Check that some handlers are registered
-            assert!(CALL_VEC[0].is_some()); // SYS_FORK = KERNEL_CALL + 0
-            assert!(CALL_VEC[3].is_some()); // SYS_SCHEDULE = KERNEL_CALL + 3
-            assert!(CALL_VEC[56].is_some()); // SYS_SAFEMEMSET = KERNEL_CALL + 56
+            assert!((*CALL_VEC.get())[0].is_some()); // SYS_FORK = KERNEL_CALL + 0
+            assert!((*CALL_VEC.get())[3].is_some()); // SYS_SCHEDULE = KERNEL_CALL + 3
+            assert!((*CALL_VEC.get())[56].is_some()); // SYS_SAFEMEMSET = KERNEL_CALL + 56
         }
     }
 
@@ -5727,9 +5791,9 @@ mod tests {
     fn test_sdevio_system_init_registers_devio_calls() {
         unsafe {
             system_init();
-            assert!(CALL_VEC[21].is_some()); // SYS_DEVIO
-            assert!(CALL_VEC[22].is_some()); // SYS_SDEVIO
-            assert!(CALL_VEC[23].is_some()); // SYS_VDEVIO
+            assert!((*CALL_VEC.get())[21].is_some()); // SYS_DEVIO
+            assert!((*CALL_VEC.get())[22].is_some()); // SYS_SDEVIO
+            assert!((*CALL_VEC.get())[23].is_some()); // SYS_VDEVIO
         }
     }
 
@@ -5857,9 +5921,9 @@ mod tests {
     fn test_exec_and_mcontext_registered() {
         unsafe {
             system_init();
-            assert!(CALL_VEC[1].is_some()); // SYS_EXEC
-            assert!(CALL_VEC[50].is_some()); // SYS_GETMCONTEXT
-            assert!(CALL_VEC[51].is_some()); // SYS_SETMCONTEXT
+            assert!((*CALL_VEC.get())[1].is_some()); // SYS_EXEC
+            assert!((*CALL_VEC.get())[50].is_some()); // SYS_GETMCONTEXT
+            assert!((*CALL_VEC.get())[51].is_some()); // SYS_SETMCONTEXT
         }
     }
 
@@ -5867,8 +5931,8 @@ mod tests {
     fn test_copy_handlers_registered() {
         unsafe {
             system_init();
-            assert!(CALL_VEC[15].is_some()); // SYS_VIRCOPY
-            assert!(CALL_VEC[16].is_some()); // SYS_PHYSCOPY
+            assert!((*CALL_VEC.get())[15].is_some()); // SYS_VIRCOPY
+            assert!((*CALL_VEC.get())[16].is_some()); // SYS_PHYSCOPY
         }
     }
 
@@ -5932,9 +5996,9 @@ mod tests {
     fn test_sprofile_handlers_registered() {
         unsafe {
             system_init();
-            assert!(CALL_VEC[36].is_some()); // SYS_SPROF
-            assert!(CALL_VEC[37].is_some()); // SYS_CPROF
-            assert!(CALL_VEC[38].is_some()); // SYS_PROFBUF
+            assert!((*CALL_VEC.get())[36].is_some()); // SYS_SPROF
+            assert!((*CALL_VEC.get())[37].is_some()); // SYS_CPROF
+            assert!((*CALL_VEC.get())[38].is_some()); // SYS_PROFBUF
         }
     }
 

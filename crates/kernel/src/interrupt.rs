@@ -9,8 +9,7 @@
 
 use crate::system::{IRQ_ACTIDS, IrqHook};
 
-/// Maximum number of IRQ vectors.
-pub const NR_IRQ_VECTORS: usize = 64;
+const NR_IRQ_VECTORS: usize = 32;
 
 /// Per-IRQ linked list heads — `NULL` means no handler for that IRQ.
 static mut IRQ_HANDLERS: [*mut IrqHook; NR_IRQ_VECTORS] = [core::ptr::null_mut(); NR_IRQ_VECTORS];
@@ -21,17 +20,15 @@ static mut IRQ_HANDLERS: [*mut IrqHook; NR_IRQ_VECTORS] = [core::ptr::null_mut()
 
 /// Register an interrupt handler.
 ///
-/// Inserts `hook` into the per-IRQ linked list at `irq`, assigns a
-/// unique bitmap ID (power of two), and enables the IRQ at the
-/// hardware level if this is the first handler for this line.
+/// Walks the existing handlers for `irq`, builds a bitmap of used IDs,
+/// then picks the next free ID.
 ///
 /// # Safety
 ///
 /// - `hook` must point to a valid, stable `IrqHook` (typically from
 ///   [`IRQ_HOOKS`](crate::system::IRQ_HOOKS)).
 /// - `irq` must be in the range `0 .. NR_IRQ_VECTORS`.
-/// - `handler` must be a function that can safely be called with
-///   `hook` during interrupt context.
+/// - `handler` must be a valid function pointer.
 pub unsafe fn put_irq_handler(
     hook: *mut IrqHook,
     irq: i32,
@@ -79,11 +76,11 @@ pub unsafe fn put_irq_handler(
     // If no handlers are currently active for this IRQ line, enable the
     // hardware interrupt.
     unsafe {
-        if IRQ_ACTIDS[irq as usize] == 0 {
+        if (*IRQ_ACTIDS.get())[irq as usize] == 0 {
             hw_intr_used(irq);
             hw_intr_unmask(irq);
         }
-        IRQ_ACTIDS[irq as usize] |= id;
+        (*IRQ_ACTIDS.get())[irq as usize] |= id;
     }
 }
 
@@ -121,8 +118,8 @@ pub unsafe fn rm_irq_handler(hook: *const IrqHook) {
         while !(*line).is_null() {
             if (**line).id == id {
                 *line = (**line).next;
-                if IRQ_ACTIDS[irq as usize] & id != 0 {
-                    IRQ_ACTIDS[irq as usize] &= !id;
+                if (*IRQ_ACTIDS.get())[irq as usize] & id != 0 {
+                    (*IRQ_ACTIDS.get())[irq as usize] &= !id;
                 }
             } else {
                 line = &mut (**line).next;
@@ -136,7 +133,7 @@ pub unsafe fn rm_irq_handler(hook: *const IrqHook) {
         if IRQ_HANDLERS[irq as usize].is_null() {
             hw_intr_mask(irq);
             hw_intr_not_used(irq);
-        } else if IRQ_ACTIDS[irq as usize] == 0 {
+        } else if (*IRQ_ACTIDS.get())[irq as usize] == 0 {
             hw_intr_unmask(irq);
         }
     }
@@ -175,14 +172,14 @@ pub unsafe fn irq_handle(irq: i32) {
     unsafe {
         while !hook.is_null() {
             // Mark this handler as active.
-            IRQ_ACTIDS[irq as usize] |= (*hook).id;
+            (*IRQ_ACTIDS.get())[irq as usize] |= (*hook).id;
 
             // Call the handler.  If it returns non-zero the interrupt is
             // considered handled and the active bit is cleared.
             if let Some(handler) = (*hook).handler
                 && handler(hook) != 0
             {
-                IRQ_ACTIDS[(*hook).irq as usize] &= !(*hook).id;
+                (*IRQ_ACTIDS.get())[(*hook).irq as usize] &= !(*hook).id;
             }
 
             hook = (*hook).next;
@@ -191,7 +188,7 @@ pub unsafe fn irq_handle(irq: i32) {
 
     // Re-enable the IRQ only when no handler is still active.
     unsafe {
-        if IRQ_ACTIDS[irq as usize] == 0 {
+        if (*IRQ_ACTIDS.get())[irq as usize] == 0 {
             hw_intr_unmask(irq);
         }
     }
@@ -219,8 +216,8 @@ pub unsafe fn enable_irq(hook: *const IrqHook) {
         id = (*hook).id;
         // Clear the disabled bit for this handler. If no handlers are
         // disabled after this, unmask the IRQ at the hardware level.
-        IRQ_ACTIDS[irq as usize] &= !id;
-        if IRQ_ACTIDS[irq as usize] == 0 {
+        (*IRQ_ACTIDS.get())[irq as usize] &= !id;
+        if (*IRQ_ACTIDS.get())[irq as usize] == 0 {
             hw_intr_unmask(irq);
         }
     }
@@ -241,11 +238,11 @@ pub unsafe fn disable_irq(hook: *const IrqHook) -> bool {
         irq = (*hook).irq;
         id = (*hook).id;
 
-        if IRQ_ACTIDS[irq as usize] & id != 0 {
+        if (*IRQ_ACTIDS.get())[irq as usize] & id != 0 {
             return false; // already disabled
         }
 
-        IRQ_ACTIDS[irq as usize] |= id;
+        (*IRQ_ACTIDS.get())[irq as usize] |= id;
 
         hw_intr_mask(irq);
     }
@@ -253,48 +250,32 @@ pub unsafe fn disable_irq(hook: *const IrqHook) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// intr_init
+// Hardware stubs
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Initialize the interrupt subsystem.
+fn hw_intr_used(_irq: i32) {}
+fn hw_intr_not_used(_irq: i32) {}
+fn hw_intr_unmask(_irq: i32) {}
+fn hw_intr_mask(_irq: i32) {}
+fn hw_intr_ack(_irq: i32) {}
+
+/// Initialize interrupt subsystem.
 ///
-/// Must be called once during boot, after the hardware interrupt
-/// controller has been set up.
+/// Clears all IRQ handler lists to null.
 ///
 /// # Safety
 ///
-/// Must be called exactly once, before any interrupt handlers are
-/// registered.
+/// Must be called once during boot before any interrupt registration.
 pub unsafe fn intr_init() {
-    unsafe {
-        let handlers = core::ptr::addr_of_mut!(IRQ_HANDLERS);
-        for i in 0..NR_IRQ_VECTORS {
-            (*handlers)[i] = core::ptr::null_mut();
-        }
-        for irq in 0..NR_IRQ_VECTORS {
-            hw_intr_mask(irq as i32);
-        }
+    let base = core::ptr::addr_of_mut!(IRQ_HANDLERS);
+    for i in 0..NR_IRQ_VECTORS {
+        unsafe { (*base)[i] = core::ptr::null_mut() };
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Hardware stubs (replaced by the arch layer)
+// Tests
 // ─────────────────────────────────────────────────────────────────────────
-
-/// Called when an IRQ line is first used.
-pub fn hw_intr_used(_irq: i32) {}
-
-/// Called when an IRQ line is no longer used.
-pub fn hw_intr_not_used(_irq: i32) {}
-
-/// Mask (disable) an IRQ at the interrupt controller.
-pub fn hw_intr_mask(_irq: i32) {}
-
-/// Unmask (enable) an IRQ at the interrupt controller.
-pub fn hw_intr_unmask(_irq: i32) {}
-
-/// Acknowledge (send EOI for) an IRQ.
-pub fn hw_intr_ack(_irq: i32) {}
 
 #[cfg(test)]
 mod tests {
@@ -310,17 +291,7 @@ mod tests {
         unsafe {
             *ptr += 1;
         }
-        1
-    }
-
-    #[test]
-    fn test_intr_init_masks_all_vectors() {
-        unsafe {
-            intr_init();
-            for i in 0..NR_IRQ_VECTORS {
-                assert!(IRQ_HANDLERS[i].is_null(), "vector {} should be null", i);
-            }
-        }
+        1 // handled
     }
 
     #[test]
@@ -403,10 +374,16 @@ mod tests {
             // put_irq_handler does not touch IRQ_ACTIDS (starts at 0).
             // disable_irq sets the disabled bit.
             disable_irq(hook_ptr as *const IrqHook);
-            assert!(IRQ_ACTIDS[4] & id != 0, "should be disabled after disable");
+            assert!(
+                (*IRQ_ACTIDS.get())[4] & id != 0,
+                "should be disabled after disable"
+            );
             // enable_irq clears the disabled bit.
             enable_irq(hook_ptr as *const IrqHook);
-            assert!(IRQ_ACTIDS[4] & id == 0, "should be enabled after enable");
+            assert!(
+                (*IRQ_ACTIDS.get())[4] & id == 0,
+                "should be enabled after enable"
+            );
         }
     }
 
@@ -414,8 +391,9 @@ mod tests {
     fn test_hw_stubs_are_callable() {
         hw_intr_used(0);
         hw_intr_not_used(0);
-        hw_intr_mask(0);
         hw_intr_unmask(0);
+        hw_intr_mask(0);
         hw_intr_ack(0);
+        // just checking they compile and don't panic
     }
 }

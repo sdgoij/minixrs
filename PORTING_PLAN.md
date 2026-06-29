@@ -3677,10 +3677,10 @@ reliable cross-function test patterns.
   Replace `SPROF_INFO`, `SPROF_SAMPLE_BUFFER`, `CPROF_TBL`, `CPROF_PROC_INFO`
   with `UnsafeCell` wrappers. (`crates/kernel/src/profile.rs`)
 
-- [ ] **13.11.4 — Kernel `system.rs`**: Replace `IRQ_HOOKS`, `IRQ_ACTIDS`
+- [x] **13.11.4 — Kernel `system.rs`**: Replace `IRQ_HOOKS`, `IRQ_ACTIDS`
   with `UnsafeCell` wrappers. Replace `KBILL_KCALL`, `KBILL_IPC` with
   `AtomicPtr`. Replace `IRQ_USE` with `AtomicI32`.
-  (`crates/kernel/src/system.rs`)
+  (`crates/kernel/src/system.rs`, `crates/kernel/src/interrupt.rs`)
 
 - [ ] **13.11.5 — Kernel `table.rs`**: Replace `RUN_QUEUE` with `UnsafeCell`
   wrapper. (`crates/kernel/src/table.rs`)
