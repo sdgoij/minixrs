@@ -14,8 +14,8 @@ use crate::pfs::glo;
 // Reference: buffer.c buf_pool()
 pub fn init_buffer_pool() {
     unsafe {
-        *core::ptr::addr_of_mut!(glo::BUF_FRONT) = None;
-        *core::ptr::addr_of_mut!(glo::BUF_REAR) = None;
+        *glo::BUF_FRONT.get() = None;
+        *glo::BUF_REAR.get() = None;
 
         // Link all buffers into the free list
         for i in 0..PIPE_NR_BUFS {
@@ -27,8 +27,8 @@ pub fn init_buffer_pool() {
             (*bp).b_count = 0;
             (*bp).b_data = [0; PIPE_BUF];
 
-            let front_ptr = core::ptr::addr_of_mut!(glo::BUF_FRONT);
-            let rear_ptr = core::ptr::addr_of_mut!(glo::BUF_REAR);
+            let front_ptr = glo::BUF_FRONT.get();
+            let rear_ptr = glo::BUF_REAR.get();
 
             (*bp).b_next = None;
             (*bp).b_prev = *rear_ptr;
@@ -53,7 +53,7 @@ pub fn init_buffer_pool() {
 // Reference: buffer.c get_block()
 pub fn get_block(dev: u32, inum: u32) -> Option<u16> {
     unsafe {
-        let front_ptr = core::ptr::addr_of_mut!(glo::BUF_FRONT);
+        let front_ptr = glo::BUF_FRONT.get();
         let mut bp_idx = *front_ptr;
 
         // Search the list for an existing buffer
@@ -99,7 +99,7 @@ pub fn get_block(dev: u32, inum: u32) -> Option<u16> {
 pub fn put_block(dev: u32, inum: u32) {
     unsafe {
         // Find the buffer
-        let front_ptr = core::ptr::addr_of_mut!(glo::BUF_FRONT);
+        let front_ptr = glo::BUF_FRONT.get();
 
         let mut bp_idx = *front_ptr;
         let mut found_idx: Option<u16> = None;
@@ -148,9 +148,9 @@ mod tests {
     fn test_init_buffer_pool_creates_free_list() {
         init();
         unsafe {
-            let front = core::ptr::addr_of_mut!(glo::BUF_FRONT);
+            let front = glo::BUF_FRONT.get();
             assert!((*front).is_some());
-            let rear = core::ptr::addr_of_mut!(glo::BUF_REAR);
+            let rear = glo::BUF_REAR.get();
             assert!((*rear).is_some());
         }
     }

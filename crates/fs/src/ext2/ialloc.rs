@@ -75,7 +75,7 @@ fn alloc_inode_bit(sp: &mut SuperBlock, parent: *mut Inode, is_dir: bool) -> u32
         return NO_BIT;
     }
 
-    let opt = core::ptr::addr_of_mut!(glo::OPT);
+    let opt = glo::OPT.get();
     let group: i32;
     unsafe {
         if (*opt).mfsalloc != 0 {

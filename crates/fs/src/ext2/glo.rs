@@ -5,6 +5,9 @@
 //! `static mut` are ever created — only `addr_of_mut!` and pointer
 //! dereference are used.
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+
 use crate::ext2::consts::*;
 use crate::ext2::types::*;
 use core::mem::MaybeUninit;
@@ -37,26 +40,62 @@ pub struct Ext2Global {
 // Use ext2_ptr() helper instead of accessing this directly.
 pub(crate) static mut EXT2_STORAGE: MaybeUninit<Ext2Global> = MaybeUninit::uninit();
 
+/// Wrapper for `[Option<u16>; INODE_HASH_SIZE]`.
+pub(crate) struct HashInodesCell(UnsafeCell<[Option<u16>; INODE_HASH_SIZE]>);
+unsafe impl Sync for HashInodesCell {}
+impl HashInodesCell {
+    pub const fn new(val: [Option<u16>; INODE_HASH_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [Option<u16>; INODE_HASH_SIZE] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `Option<u16>` — the unused inodes list head.
+pub(crate) struct UnusedInodesHeadCell(UnsafeCell<Option<u16>>);
+unsafe impl Sync for UnusedInodesHeadCell {}
+impl UnusedInodesHeadCell {
+    pub const fn new(val: Option<u16>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut Option<u16> {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `Opt` — global options.
+pub(crate) struct OptCell(UnsafeCell<Opt>);
+unsafe impl Sync for OptCell {}
+impl OptCell {
+    pub const fn new(val: Opt) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut Opt {
+        self.0.get()
+    }
+}
+
 /// Hash table heads for inode lookup.
-pub static mut HASH_INODES: [Option<u16>; INODE_HASH_SIZE] = [None; INODE_HASH_SIZE];
+pub(crate) static HASH_INODES: HashInodesCell = HashInodesCell::new([None; INODE_HASH_SIZE]);
 
 /// Head of unused/free inode list.
-pub static mut UNUSED_INODES_HEAD: Option<u16> = None;
+pub(crate) static UNUSED_INODES_HEAD: UnusedInodesHeadCell = UnusedInodesHeadCell::new(None);
 
 /// Global options.
-pub static mut OPT: Opt = Opt {
+pub(crate) static OPT: OptCell = OptCell::new(Opt {
     use_orlov: TRUE,
     mfsalloc: FALSE,
     use_reserved_blocks: FALSE,
     block_with_super: 0,
     use_prealloc: FALSE,
-};
+});
 
 /// Group descriptors dirty flag.
-pub static mut GROUP_DESCRIPTORS_DIRTY: i32 = 0;
+pub(crate) static GROUP_DESCRIPTORS_DIRTY: AtomicI32 = AtomicI32::new(0);
 
 /// Super block pointer (single superblock for ext2).
-pub static mut SUPERBLOCK: *mut SuperBlock = core::ptr::null_mut();
+pub(crate) static SUPERBLOCK: AtomicPtr<SuperBlock> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Initialize globals. Must be called once before any access.
 pub unsafe fn ext2_init_globals() {

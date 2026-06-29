@@ -16,7 +16,7 @@ pub unsafe fn init_server() -> i32 {
     glo::ext2_init_globals();
 
     // Set default options
-    let opt_ptr = core::ptr::addr_of_mut!(glo::OPT);
+    let opt_ptr = glo::OPT.get();
     (*opt_ptr).use_orlov = TRUE;
     (*opt_ptr).mfsalloc = FALSE;
     (*opt_ptr).use_reserved_blocks = FALSE;

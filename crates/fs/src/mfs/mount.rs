@@ -98,8 +98,8 @@ mod tests {
             // get_inode / find_inode start from a clean slate
             // (mfs_init_globals only resets MFS_STORAGE, not these
             //  separate static mut variables).
-            crate::mfs::glo::UNUSED_INODES_HEAD = None;
-            let p = &raw mut crate::mfs::glo::HASH_INODES;
+            *crate::mfs::glo::UNUSED_INODES_HEAD.get() = None;
+            let p = crate::mfs::glo::HASH_INODES.get();
             for i in 0..crate::mfs::consts::INODE_HASH_SIZE {
                 let elem = core::ptr::addr_of_mut!((*p)[i]);
                 elem.write(None);

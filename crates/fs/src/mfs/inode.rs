@@ -21,7 +21,7 @@ fn addhash_inode(node_idx: u16) {
     let num = unsafe { (*ino_ref(node_idx)).i_num };
     let hashi = hash_inum(num);
     unsafe {
-        let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head: *mut Option<u16> = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let old_head = *head;
         *head = Some(node_idx);
         (*ino_mut(node_idx)).i_hash_next = old_head;
@@ -43,7 +43,8 @@ fn unhash_inode(node_idx: u16) {
         if let Some(p) = prev {
             (*ino_mut(p)).i_hash_next = next;
         } else {
-            let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hash_inum(num)]);
+            let head: *mut Option<u16> =
+                core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hash_inum(num)]);
             *head = next;
         }
         if let Some(n) = next {
@@ -64,7 +65,7 @@ pub fn init_inode_cache() {
         (*mfs).inode_cache_miss = 0;
 
         for h in 0..INODE_HASH_SIZE {
-            *core::ptr::addr_of_mut!(glo::HASH_INODES[h]) = None;
+            *core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[h]) = None;
         }
 
         let mut prev: Option<u16> = None;
@@ -80,7 +81,7 @@ pub fn init_inode_cache() {
             }
             prev = Some(idx);
         }
-        *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD) = Some(0);
+        *glo::UNUSED_INODES_HEAD.get() = Some(0);
     }
 }
 
@@ -88,7 +89,7 @@ pub fn init_inode_cache() {
 pub fn get_inode(dev: u32, numb: u32) -> Option<u16> {
     let hashi = hash_inum(numb);
     unsafe {
-        let head = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let mut idx = *head;
         while let Some(i) = idx {
             let inode = ino_ref(i);
@@ -132,7 +133,7 @@ pub fn get_inode(dev: u32, numb: u32) -> Option<u16> {
 pub fn find_inode(dev: u32, numb: u32) -> Option<u16> {
     let hashi = hash_inum(numb);
     unsafe {
-        let head = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let mut idx = *head;
         while let Some(i) = idx {
             let inode = ino_ref(i);
@@ -261,7 +262,7 @@ unsafe fn remove_from_unused(idx: u16) {
     if let Some(p) = prev {
         (*ino_mut(p)).i_unused_next = next;
     } else {
-        *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD) = next;
+        *glo::UNUSED_INODES_HEAD.get() = next;
     }
     if let Some(n) = next {
         (*ino_mut(n)).i_unused_prev = prev;
@@ -271,7 +272,7 @@ unsafe fn remove_from_unused(idx: u16) {
 }
 
 unsafe fn get_free_inode() -> Option<u16> {
-    let head = *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let head = *glo::UNUSED_INODES_HEAD.get();
     if head.is_none() {
         (*glo::mfs_ptr()).err_code = ENFILE;
     }
@@ -279,8 +280,8 @@ unsafe fn get_free_inode() -> Option<u16> {
 }
 
 unsafe fn add_to_unused_front(idx: u16) {
-    let old_head = *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
-    *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD) = Some(idx);
+    let old_head = *glo::UNUSED_INODES_HEAD.get();
+    *glo::UNUSED_INODES_HEAD.get() = Some(idx);
     let inode = ino_mut(idx);
     (*inode).i_unused_next = old_head;
     (*inode).i_unused_prev = None;
@@ -291,7 +292,7 @@ unsafe fn add_to_unused_front(idx: u16) {
 
 unsafe fn add_to_unused_back(idx: u16) {
     let mut tail: Option<u16> = None;
-    let mut cur = *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let mut cur = *glo::UNUSED_INODES_HEAD.get();
     while let Some(i) = cur {
         tail = Some(i);
         cur = (*ino_ref(i)).i_unused_next;
@@ -302,7 +303,7 @@ unsafe fn add_to_unused_back(idx: u16) {
     if let Some(t) = tail {
         (*ino_mut(t)).i_unused_next = Some(idx);
     } else {
-        *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD) = Some(idx);
+        *glo::UNUSED_INODES_HEAD.get() = Some(idx);
     }
 }
 

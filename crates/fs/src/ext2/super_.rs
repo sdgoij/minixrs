@@ -1,5 +1,7 @@
 //! Super block management — adapted from `minix/fs/ext2/super.c`
 
+use core::sync::atomic::Ordering;
+
 use crate::ext2::consts::*;
 use crate::ext2::glo;
 use crate::ext2::types::*;
@@ -11,7 +13,7 @@ pub fn get_super(dev: u32) -> *mut SuperBlock {
         return core::ptr::null_mut();
     }
     unsafe {
-        let sp = glo::SUPERBLOCK;
+        let sp = glo::SUPERBLOCK.load(Ordering::Relaxed);
         if !sp.is_null() && (*sp).s_dev == dev {
             return sp;
         }
@@ -96,9 +98,7 @@ pub fn write_super(sp: &mut SuperBlock) {
 
     // TODO: Write super block and group descriptors to disk
 
-    unsafe {
-        glo::GROUP_DESCRIPTORS_DIRTY = 0;
-    }
+    glo::GROUP_DESCRIPTORS_DIRTY.store(0, Ordering::Relaxed);
 }
 
 /// Get group descriptor for a given block group.

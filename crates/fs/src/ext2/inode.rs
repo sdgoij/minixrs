@@ -16,7 +16,7 @@ pub unsafe fn init_inode_cache() {
 
     // Initialize hash lists (None = empty list)
     for i in 0..INODE_HASH_SIZE {
-        core::ptr::addr_of_mut!(glo::HASH_INODES[i]).write(None);
+        core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[i]).write(None);
     }
 
     // Add inodes to unused list
@@ -24,7 +24,7 @@ pub unsafe fn init_inode_cache() {
         let rip = glo::get_inode_ptr(i);
         (*rip).i_num = NO_ENTRY;
     }
-    glo::UNUSED_INODES_HEAD = Some(0);
+    *glo::UNUSED_INODES_HEAD.get() = Some(0);
     // Link unused list sequentially
     for i in 0..(NR_INODES - 1) {
         let rip = glo::get_inode_ptr(i);
@@ -38,7 +38,7 @@ pub unsafe fn init_inode_cache() {
 
 pub unsafe fn addhash_inode(node: *mut Inode) {
     let hashi = ((*node).i_num as usize) & INODE_HASH_MASK;
-    let head = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+    let head = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
     let idx = (node as *const Inode as usize - glo::get_inode_ptr(0) as *const Inode as usize)
         / core::mem::size_of::<Inode>();
     (*node).i_hash_next = *head;
@@ -52,7 +52,7 @@ pub unsafe fn addhash_inode(node: *mut Inode) {
 
 pub unsafe fn unhash_inode(node: *mut Inode) {
     let hashi = ((*node).i_num as usize) & INODE_HASH_MASK;
-    let head = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+    let head = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
     let node_idx = (node as *const Inode as usize - glo::get_inode_ptr(0) as *const Inode as usize)
         / core::mem::size_of::<Inode>();
 
@@ -75,7 +75,7 @@ pub unsafe fn unhash_inode(node: *mut Inode) {
 /// Find inode in hash table by device and number.
 pub unsafe fn find_inode(dev: u32, numb: u32) -> *mut Inode {
     let hashi = (numb as usize) & INODE_HASH_MASK;
-    let mut idx = glo::HASH_INODES[hashi];
+    let mut idx = (*glo::HASH_INODES.get())[hashi];
     while let Some(i) = idx {
         let rip = glo::get_inode_ptr(i as usize);
         if (*rip).i_count > 0 && (*rip).i_num == numb && (*rip).i_dev == dev {
@@ -91,7 +91,7 @@ pub unsafe fn get_inode(dev: u32, numb: u32) -> *mut Inode {
     let hashi = (numb as usize) & INODE_HASH_MASK;
 
     // Search hash table
-    let mut idx = glo::HASH_INODES[hashi];
+    let mut idx = (*glo::HASH_INODES.get())[hashi];
     while let Some(i) = idx {
         let rip = glo::get_inode_ptr(i as usize);
         if (*rip).i_num == numb && (*rip).i_dev == dev {
@@ -139,7 +139,7 @@ pub unsafe fn get_inode(dev: u32, numb: u32) -> *mut Inode {
     (*rip).i_last_dentry_size = 0;
     (*rip).i_mountpoint = FALSE;
 
-    let opt = core::ptr::addr_of_mut!(glo::OPT);
+    let opt = glo::OPT.get();
     (*rip).i_preallocation = (*opt).use_prealloc;
     (*rip).i_prealloc_count = 0;
     (*rip).i_prealloc_index = 0;
@@ -287,33 +287,31 @@ unsafe fn remove_from_unused(rip: *mut Inode) {
         (*p_ptr).i_unused_next = next;
     } else {
         // rip is head
-        glo::UNUSED_INODES_HEAD = next;
+        *glo::UNUSED_INODES_HEAD.get() = next;
     }
     if let Some(n) = next {
         let n_ptr = glo::get_inode_ptr(n as usize);
         (*n_ptr).i_unused_prev = prev;
+        *glo::UNUSED_INODES_HEAD.get() = next;
     }
-    (*rip).i_unused_prev = None;
-    (*rip).i_unused_next = None;
-    let _ = idx;
 }
 
 unsafe fn add_to_unused_head(rip: *mut Inode) {
     let idx = (rip as *const Inode as usize - glo::get_inode_ptr(0) as *const Inode as usize)
         / core::mem::size_of::<Inode>();
-    (*rip).i_unused_next = glo::UNUSED_INODES_HEAD;
+    (*rip).i_unused_next = *glo::UNUSED_INODES_HEAD.get();
     (*rip).i_unused_prev = None;
-    if let Some(next) = glo::UNUSED_INODES_HEAD {
+    if let Some(next) = *glo::UNUSED_INODES_HEAD.get() {
         let next_ptr = glo::get_inode_ptr(next as usize);
         (*next_ptr).i_unused_prev = Some(idx as u16);
     }
-    glo::UNUSED_INODES_HEAD = Some(idx as u16);
+    *glo::UNUSED_INODES_HEAD.get() = Some(idx as u16);
 }
 
 unsafe fn add_to_unused_tail(rip: *mut Inode) {
     // Find tail
     let mut tail: Option<u16> = None;
-    let mut idx = glo::UNUSED_INODES_HEAD;
+    let mut idx = *glo::UNUSED_INODES_HEAD.get();
     while let Some(i) = idx {
         let p = glo::get_inode_ptr(i as usize);
         tail = idx;
@@ -327,12 +325,12 @@ unsafe fn add_to_unused_tail(rip: *mut Inode) {
         let t_ptr = glo::get_inode_ptr(t as usize);
         (*t_ptr).i_unused_next = Some(my_idx as u16);
     } else {
-        glo::UNUSED_INODES_HEAD = Some(my_idx as u16);
+        *glo::UNUSED_INODES_HEAD.get() = Some(my_idx as u16);
     }
 }
 
 unsafe fn get_free_inode() -> *mut Inode {
-    let head = glo::UNUSED_INODES_HEAD;
+    let head = *glo::UNUSED_INODES_HEAD.get();
     if let Some(idx) = head {
         let rip = glo::get_inode_ptr(idx as usize);
         rip

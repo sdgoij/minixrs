@@ -25,7 +25,7 @@ fn addhash_inode(node_idx: u16) {
     let num = unsafe { (*ino_ref(node_idx)).i_num };
     let hashi = hash_inum(num);
     unsafe {
-        let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head: *mut Option<u16> = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let old_head = *head;
         *head = Some(node_idx);
         (*ino_mut(node_idx)).i_hash_next = old_head;
@@ -38,7 +38,7 @@ fn unhash_inode(node_idx: u16) {
     unsafe {
         let num = (*ino_ref(node_idx)).i_num;
         let hashi = hash_inum(num);
-        let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head: *mut Option<u16> = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
 
         let mut cur = *head;
         let mut prev: Option<u16> = None;
@@ -63,11 +63,11 @@ pub fn init_inode_cache() {
     unsafe {
         // Initialize hash lists
         for h in 0..INODE_HASH_SIZE {
-            *core::ptr::addr_of_mut!(glo::HASH_INODES[h]) = None;
+            *core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[h]) = None;
         }
 
         // Initialize unused/free list
-        *core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD) = None;
+        *glo::UNUSED_INODES_HEAD.get() = None;
 
         // Add all inodes to the unused/free list
         for i in 0..PFS_NR_INODES {
@@ -77,7 +77,7 @@ pub fn init_inode_cache() {
             (*inode).i_count = 0;
             (*inode).i_unused_next = None;
 
-            let head_ptr = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+            let head_ptr = glo::UNUSED_INODES_HEAD.get();
             (*inode).i_unused_next = *head_ptr;
             *head_ptr = Some(idx);
         }
@@ -96,7 +96,7 @@ pub fn init_inode_cache() {
 pub fn get_inode(dev: u32, numb: u32) -> Option<u16> {
     let hashi = hash_inum(numb);
     unsafe {
-        let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head: *mut Option<u16> = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let mut idx = *head;
         while let Some(i) = idx {
             let inode = ino_ref(i);
@@ -139,7 +139,7 @@ pub fn get_inode(dev: u32, numb: u32) -> Option<u16> {
 pub fn find_inode(numb: u32) -> Option<u16> {
     let hashi = hash_inum(numb);
     unsafe {
-        let head: *mut Option<u16> = core::ptr::addr_of_mut!(glo::HASH_INODES[hashi]);
+        let head: *mut Option<u16> = core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[hashi]);
         let mut idx = *head;
         while let Some(i) = idx {
             let inode = ino_ref(i);
@@ -297,7 +297,7 @@ pub fn fs_putnode() -> i32 {
 // ── Private helpers ──
 
 unsafe fn remove_from_unused(idx: u16) {
-    let head_ptr = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let head_ptr = glo::UNUSED_INODES_HEAD.get();
     let inode = ino_mut(idx);
     let next = (*inode).i_unused_next;
 
@@ -321,7 +321,7 @@ unsafe fn remove_from_unused(idx: u16) {
 }
 
 unsafe fn get_free_inode() -> Option<u16> {
-    let head_ptr = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let head_ptr = glo::UNUSED_INODES_HEAD.get();
     let head = *head_ptr;
     if head.is_none() {
         (*glo::pfs_ptr()).err_code = ENFILE;
@@ -330,14 +330,14 @@ unsafe fn get_free_inode() -> Option<u16> {
 }
 
 unsafe fn add_to_unused_front(idx: u16) {
-    let head_ptr = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let head_ptr = glo::UNUSED_INODES_HEAD.get();
     let inode = ino_mut(idx);
     (*inode).i_unused_next = *head_ptr;
     *head_ptr = Some(idx);
 }
 
 unsafe fn add_to_unused_back(idx: u16) {
-    let head_ptr = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+    let head_ptr = glo::UNUSED_INODES_HEAD.get();
     let inode = ino_mut(idx);
     (*inode).i_unused_next = None;
 
@@ -373,12 +373,12 @@ mod tests {
         // Verify hash table is empty of valid entries
         for h in 0..INODE_HASH_SIZE {
             unsafe {
-                assert!((*core::ptr::addr_of_mut!(glo::HASH_INODES[h])).is_none());
+                assert!((*core::ptr::addr_of_mut!((*glo::HASH_INODES.get())[h])).is_none());
             }
         }
         // Verify free list has entries
         unsafe {
-            let head = core::ptr::addr_of_mut!(glo::UNUSED_INODES_HEAD);
+            let head = glo::UNUSED_INODES_HEAD.get();
             assert!((*head).is_some());
         }
     }

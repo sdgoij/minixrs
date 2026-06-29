@@ -5,12 +5,14 @@ use crate::ext2::glo;
 use crate::ext2::glo::Ext2Global;
 use crate::ext2::inode::*;
 use crate::ext2::super_::*;
+use core::sync::atomic::Ordering;
+
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
 
 /// fs_sync — flush all tables to disk.
 pub unsafe fn fs_sync() -> i32 {
-    let sp = glo::SUPERBLOCK;
+    let sp = glo::SUPERBLOCK.load(Ordering::Relaxed);
     if sp.is_null() || (*sp).s_rd_only != 0 {
         return OK;
     }

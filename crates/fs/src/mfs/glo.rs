@@ -7,6 +7,7 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::types::*;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
 /// Global MFS state.
@@ -31,11 +32,35 @@ pub struct MfsGlobal {
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
 static mut MFS_STORAGE: MaybeUninit<MfsGlobal> = MaybeUninit::uninit();
 
+/// Wrapper for `[Option<u16>; INODE_HASH_SIZE]`.
+pub(crate) struct HashInodesCell(UnsafeCell<[Option<u16>; INODE_HASH_SIZE]>);
+unsafe impl Sync for HashInodesCell {}
+impl HashInodesCell {
+    pub const fn new(val: [Option<u16>; INODE_HASH_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [Option<u16>; INODE_HASH_SIZE] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `Option<u16>` — the unused inodes list head.
+pub(crate) struct UnusedInodesHeadCell(UnsafeCell<Option<u16>>);
+unsafe impl Sync for UnusedInodesHeadCell {}
+impl UnusedInodesHeadCell {
+    pub const fn new(val: Option<u16>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut Option<u16> {
+        self.0.get()
+    }
+}
+
 /// Hash table heads for inode lookup.
-pub static mut HASH_INODES: [Option<u16>; INODE_HASH_SIZE] = [None; INODE_HASH_SIZE];
+pub(crate) static HASH_INODES: HashInodesCell = HashInodesCell::new([None; INODE_HASH_SIZE]);
 
 /// Head of unused/free inode list.
-pub static mut UNUSED_INODES_HEAD: Option<u16> = None;
+pub(crate) static UNUSED_INODES_HEAD: UnusedInodesHeadCell = UnusedInodesHeadCell::new(None);
 
 /// Initialize globals. Must be called once before any access.
 pub unsafe fn mfs_init_globals() {

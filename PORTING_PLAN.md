@@ -3697,9 +3697,9 @@ reliable cross-function test patterns.
 - [x] **13.11.9 — Server `vm/mem.rs`**: Replace `GRANT_TABLES` with `UnsafeCell`
   wrapper. (`crates/servers/src/vm/mem.rs`)
 
-- [ ] **13.11.10 — FS globals**: Replace `HASH_INODES`, `UNUSED_INODES_HEAD`,
+- [x] **13.11.10 — FS globals**: Replace `HASH_INODES`, `UNUSED_INODES_HEAD`,
   `BUF_FRONT`, `BUF_REAR`, `GROUP_DESCRIPTORS_DIRTY`, `SUPERBLOCK`, `OPT`
-  in `crates/fs/src/*/glo.rs` files with appropriate `UnsafeCell` or `Atomic*`.
+  in `crates/fs/src/*/glo.rs` files with `UnsafeCell` or `Atomic*`.
   (`crates/fs/src/{ext2,mfs,pfs}/glo.rs`)
 
 #### Priority 2 — Verify no regressions

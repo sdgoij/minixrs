@@ -50,7 +50,7 @@ pub fn alloc_block(rip: &mut Inode, block: u32) -> u32 {
         }
 
         // Check for free blocks; discard preallocations if running low
-        let opt = core::ptr::addr_of_mut!(glo::OPT);
+        let opt = glo::OPT.get();
         let low_on_blocks = if (*opt).use_reserved_blocks == 0
             && (*sp_ptr).s_free_blocks_count <= (*sp_ptr).s_r_blocks_count
         {

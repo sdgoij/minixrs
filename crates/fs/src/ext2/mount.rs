@@ -1,10 +1,12 @@
 //! Mount/unmount — adapted from `minix/fs/ext2/mount.c`
 
+use core::sync::atomic::Ordering;
+
 use crate::ext2::consts::*;
 use crate::ext2::glo;
-use crate::ext2::glo::Ext2Global;
 use crate::ext2::inode::*;
-use crate::ext2::super_::*;
+use crate::ext2::super_::write_super;
+use crate::ext2::types::*;
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
 
@@ -20,7 +22,7 @@ pub unsafe fn fs_readsuper() -> i32 {
 
 /// fs_unmount — unmount a file system.
 pub unsafe fn fs_unmount() -> i32 {
-    let sp = glo::SUPERBLOCK;
+    let sp = glo::SUPERBLOCK.load(Ordering::Relaxed);
     if sp.is_null() {
         return EINVAL;
     }
@@ -88,7 +90,7 @@ unsafe fn fs_sync_impl() {
     }
     // TODO: lmfs_flushall();
 
-    let sp = glo::SUPERBLOCK;
+    let sp = glo::SUPERBLOCK.load(Ordering::Relaxed);
     if !sp.is_null() && (*sp).s_dev != NO_DEV {
         (*sp).s_wtime = clock_time() as u32;
         write_super(&mut *sp);
