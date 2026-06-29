@@ -22,6 +22,7 @@ use crate::proc::*;
 use crate::sched::dequeue;
 use crate::table;
 use crate::table::proc_addr;
+use arch_x86_64::frame::TrapFrame;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Message field offset helpers
@@ -38,6 +39,10 @@ unsafe fn msg_read_i32(msg: &[u8; MESSAGE_SIZE], offset: usize) -> i32 {
 /// Write an i32 field to the message at a given byte offset.
 unsafe fn msg_write_i32(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: i32) {
     msg[offset..offset + 4].copy_from_slice(&val.to_ne_bytes());
+}
+
+unsafe fn msg_write_i64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: i64) {
+    msg[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
 /// Read a u32 field from the message.
@@ -1061,7 +1066,7 @@ pub unsafe fn system_init() {
         map_call(2, do_clear_handler); // SYS_CLEAR
         map_call(3, do_schedule_handler); // SYS_SCHEDULE
         map_call(4, do_privctl_handler); // SYS_PRIVCTL
-        map_call(5, do_trace_stub); // SYS_TRACE
+        map_call(5, do_trace_handler); // SYS_TRACE
         map_call(6, do_kill_handler); // SYS_KILL
         map_call(7, do_getksig_handler); // SYS_GETKSIG
         map_call(8, do_endksig_handler); // SYS_ENDKSIG
@@ -1985,7 +1990,250 @@ pub unsafe fn do_privctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         }
     }
 }
-stub_handler!(do_trace_stub, "SYS_TRACE");
+
+// ─────────────────────────────────────────────────────────────────────────
+// do_trace — ptrace kernel support (SYS_TRACE)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Internal trace request codes (matching C do_trace.c switch cases).
+const T_STOP: i32 = 0;
+const T_GETINS: i32 = 1;
+const T_GETDATA: i32 = 2;
+const T_GETUSER: i32 = 3;
+const T_SETINS: i32 = 4;
+const T_SETDATA: i32 = 5;
+const T_SETUSER: i32 = 6;
+const T_DETACH: i32 = 7;
+const T_RESUME: i32 = 8;
+const T_STEP: i32 = 9;
+const T_SYSCALL: i32 = 10;
+const T_READB_INS: i32 = 11;
+const T_WRITEB_INS: i32 = 12;
+
+// Message layout for trace:
+//   offset  0: endpt   (i32) — traced process endpoint
+//   offset  4: request (i32) — trace request (T_*)
+//   offset  8: address (u64) — address in traced process
+//   offset 16: data    (i64) — data to write / returned data
+const TRACE_ENDPT_OFF: usize = 0;
+const TRACE_REQUEST_OFF: usize = 4;
+const TRACE_ADDRESS_OFF: usize = 8;
+const TRACE_DATA_OFF: usize = 16;
+
+/// Handle SYS_TRACE — ptrace kernel operations.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
+pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let tr_endpt = msg_read_i32(msg, TRACE_ENDPT_OFF);
+        let tr_request = msg_read_i32(msg, TRACE_REQUEST_OFF);
+        let tr_addr = msg_read_u64(msg, TRACE_ADDRESS_OFF);
+        let mut tr_data = msg_read_i64(msg, TRACE_DATA_OFF);
+
+        if !table::is_ok_endpoint(tr_endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let tr_proc_nr = table::endpoint_slot(tr_endpt);
+        if table::is_kernel_nr(tr_proc_nr) {
+            return crate::ipc::EPERM;
+        }
+
+        let rp = crate::table::proc_addr(tr_proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != tr_endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        match tr_request {
+            T_STOP => {
+                // Stop the process.
+                (*rp)
+                    .p_rts_flags
+                    .fetch_or(RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                // Clear syscall trace and single step flags.
+                (*rp).p_misc_flags.fetch_and(
+                    !(MiscFlags::SC_TRACE.bits() | MiscFlags::STEP.bits()),
+                    Ordering::Relaxed,
+                );
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_GETINS | T_GETDATA => {
+                // Read a word from the traced process's address space.
+                let r = crate::vm::virtual_copy(
+                    tr_proc_nr,
+                    tr_addr,
+                    -1, // KERNEL
+                    &mut tr_data as *mut _ as u64,
+                    core::mem::size_of::<i64>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+                msg_write_i64(msg, TRACE_DATA_OFF, tr_data);
+                OK
+            }
+
+            T_GETUSER => {
+                // Read a value from the process table.
+                if tr_addr & (core::mem::size_of::<i64>() as u64 - 1) != 0 {
+                    return crate::ipc::EFAULT;
+                }
+                let proc_size = core::mem::size_of::<crate::proc::Proc>();
+                if tr_addr + core::mem::size_of::<i64>() as u64 <= proc_size as u64 {
+                    // Read from proc struct.
+                    let base = rp as *const Proc as *const u8;
+                    let src = base.add(tr_addr as usize) as *const i64;
+                    tr_data = *src;
+                } else if !(*rp).p_priv.is_null() {
+                    // Read from priv struct (after alignment).
+                    let align = core::mem::size_of::<i64>() - 1;
+                    let adjusted =
+                        tr_addr.wrapping_sub((proc_size + align) as u64) & !(align as u64);
+                    let priv_size = core::mem::size_of::<Priv>();
+                    if adjusted + core::mem::size_of::<i64>() as u64 <= priv_size as u64 {
+                        let base = (*rp).p_priv as *const u8;
+                        let src = base.add(adjusted as usize) as *const i64;
+                        tr_data = *src;
+                    } else {
+                        return crate::ipc::EFAULT;
+                    }
+                } else {
+                    return crate::ipc::EFAULT;
+                }
+                msg_write_i64(msg, TRACE_DATA_OFF, tr_data);
+                OK
+            }
+
+            T_SETINS | T_SETDATA => {
+                // Write a word to the traced process's address space.
+                let r = crate::vm::virtual_copy(
+                    -1, // KERNEL
+                    &tr_data as *const _ as u64,
+                    tr_proc_nr,
+                    tr_addr,
+                    core::mem::size_of::<i64>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_SETUSER => {
+                // Set a value in the process's stackframe.
+                if tr_addr & (core::mem::size_of::<i64>() as u64 - 1) != 0 {
+                    return crate::ipc::EFAULT;
+                }
+                let stackframe_size = core::mem::size_of::<TrapFrame>();
+                let p_reg_offset = core::mem::offset_of!(crate::proc::Proc, p_reg) as u64;
+                if tr_addr < p_reg_offset
+                    || tr_addr
+                        > p_reg_offset + stackframe_size as u64 - core::mem::size_of::<i64>() as u64
+                {
+                    return crate::ipc::EFAULT;
+                }
+
+                // On x86_64, refuse to write to segment registers (cs, ss).
+                // These are in SegFrame, not TrapFrame. Since we limit writes
+                // to the TrapFrame range, segment regs are automatically protected.
+
+                let base = rp as *const Proc as *mut u8;
+                let dst = base.add(tr_addr as usize) as *mut i64;
+                *dst = tr_data;
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_DETACH => {
+                // Detach tracer — clear syscall active flag.
+                (*rp)
+                    .p_misc_flags
+                    .fetch_and(!MiscFlags::SC_ACTIVE.bits(), Ordering::Relaxed);
+                // Fall through to T_RESUME.
+                (*rp)
+                    .p_rts_flags
+                    .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_RESUME => {
+                // Resume execution.
+                (*rp)
+                    .p_rts_flags
+                    .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_STEP => {
+                // Set trace bit (single-step) and resume.
+                (*rp)
+                    .p_misc_flags
+                    .fetch_or(MiscFlags::STEP.bits(), Ordering::Relaxed);
+                (*rp)
+                    .p_rts_flags
+                    .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_SYSCALL => {
+                // Trace system calls.
+                (*rp)
+                    .p_misc_flags
+                    .fetch_or(MiscFlags::SC_TRACE.bits(), Ordering::Relaxed);
+                (*rp)
+                    .p_rts_flags
+                    .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            T_READB_INS => {
+                // Read a byte from instruction space.
+                let mut ub: u8 = 0;
+                let r = crate::vm::virtual_copy(
+                    tr_proc_nr,
+                    tr_addr,
+                    -1, // KERNEL
+                    &mut ub as *mut _ as u64,
+                    1,
+                );
+                if r != 0 {
+                    return r;
+                }
+                msg_write_i64(msg, TRACE_DATA_OFF, ub as i64);
+                OK
+            }
+
+            T_WRITEB_INS => {
+                // Write a byte to instruction space.
+                let ub = (tr_data & 0xff) as u8;
+                let r = crate::vm::virtual_copy(
+                    -1, // KERNEL
+                    &ub as *const _ as u64,
+                    tr_proc_nr,
+                    tr_addr,
+                    1,
+                );
+                if r != 0 {
+                    return r;
+                }
+                msg_write_i64(msg, TRACE_DATA_OFF, 0);
+                OK
+            }
+
+            _ => crate::ipc::EINVAL,
+        }
+    }
+}
+
+// Deferred stubs — need VM infrastructure:
 stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
 stub_handler!(do_physcopy_stub, "SYS_PHYSCOPY");
 // SYS_IRQCTL, SYS_VTIMER, SYS_SETALARM — implemented in Phase 7.3 below

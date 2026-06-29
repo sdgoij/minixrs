@@ -3052,15 +3052,21 @@ trait Driver {
   - 62 kernel system tests pass (3 pre-existing CpuLocalStorage unrelated),
     clippy clean
 
-- [ ] **12.3c — Implement do_trace (SYS_TRACE)**
+- [x] **12.3c — Implement do_trace (SYS_TRACE)**
   **Depends on:** PM server infrastructure (Phase 12.3), signal delivery (12.3)
-  `do_trace` implements ptrace with 15+ commands:
-  - Stop/resume tracing, read/write registers (all x86_64 GPRs + segment regs),
-    read/write memory (via `virtual_copy`), single-step, attach/detach
-  - Interacts with RTS_P_STOP flag, MF_SC_TRACE/SC_DEFER/SC_ACTIVE flags
-  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_trace.c`
-  - Deferred from Phase 6.13
-  - Complex: requires careful state machine for stop/resume/step interactions
+  Implemented in `crates/kernel/src/system.rs` replacing `stub_handler!`:
+  - T_STOP: set `RTS_P_STOP`, clear `MF_SC_TRACE`/`MF_STEP`
+  - T_GETINS/T_GETDATA: read word from traced process via `virtual_copy`
+  - T_GETUSER: read from proc struct or priv struct at given offset
+  - T_SETINS/T_SETDATA: write word to traced process via `virtual_copy`
+  - T_SETUSER: write to stackframe (TrapFrame) via raw pointer, with bounds
+    check and segment register protection
+  - T_DETACH: clear `MF_SC_ACTIVE`, fall through to resume
+  - T_RESUME: clear `RTS_P_STOP`
+  - T_STEP: set `MF_STEP` and resume
+  - T_SYSCALL: set `MF_SC_TRACE` and resume
+  - T_READB_INS/T_WRITEB_INS: byte-level read/write via `virtual_copy`
+  - 63 kernel system tests pass, clippy clean
 
 - [x] **12.4 — DS server** (`.refs/minix-3.3.0/minix/servers/ds/`): `main.c`, `store.c`, `inc.h`, `proto.h`, `store.h`
   - Directory Service, resource name publishing/retrieval, subscription management
