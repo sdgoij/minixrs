@@ -15,6 +15,36 @@ pub const MAP_PRESENT: u64 = pte::PG_P;
 pub const MAP_WRITE: u64 = pte::PG_RW;
 pub const MAP_USER: u64 = pte::PG_U;
 pub const MAP_NX: u64 = pte::PG_NX;
+pub const MAX_USER_ADDRESS: u64 = arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
+
+/// Get the boot CR3 value (physical address of the boot PML4).
+///
+/// Returns 0 if the boot page table has not been initialised.
+pub fn boot_cr3() -> u64 {
+    arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Write CR3 to flush the TLB / switch to a new address space.
+///
+/// # Safety
+///
+/// `cr3` must point to a valid PML4 table.
+pub unsafe fn write_cr3(cr3: u64) {
+    unsafe {
+        arch_x86_64::asm::write_cr3(cr3);
+    }
+}
+
+/// Return the saved CR3 value for a process, or 0 if the process has no
+/// per-process page table.
+pub fn get_proc_cr3(ep: i32) -> u64 {
+    let slot = crate::table::endpoint_slot(ep);
+    let rp = crate::table::proc_addr(slot);
+    if rp.is_null() {
+        return 0;
+    }
+    unsafe { (*rp).p_seg.p_cr3 }
+}
 
 // Mock definitions for `__bss_start`/`__bss_end` used by `pt_mapkernel`.
 // On Windows (where the kernel linker script is not available), these

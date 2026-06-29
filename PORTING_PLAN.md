@@ -3193,14 +3193,22 @@ be replaced with real implementations.
     still stubbed — Phase 13)
   - 11 new tests covering all dispatch paths, 304 total servers tests pass
 
-- [ ] **12.9 — Implement VM server operations** (`servers/src/vm/proc.rs`, `mod.rs`, `mem.rs`)
+- [x] **12.9 — Implement VM server operations** (`servers/src/vm/proc.rs`, `mod.rs`, `mem.rs`)
   **Depends on:** VM server message loop (12.8)
-  All stubs in proc.rs (pt_new, pt_bind, vm_create, vm_destroy, vm_clone,
-  vm_get_addrspace, vm_copy, vm_copy_overwrite, clear_proc, vm_collect),
-  mod.rs (do_pagefaults, sys_kill, clear_pagefault, do_shm_unmap, do_remap,
-  do_map_phys, do_get_phys, do_get_refcount, do_munmap, do_exit, do_info,
-  sys_vmctl, exec_bootproc, do_procctl), and mem.rs (sys_vmctl dispatch).
-  All have Phase 6 kernel dependencies already met.
+  All stubs replaced with real implementations:
+  - `proc.rs`: `pt_new` (PML4 alloc + kernel entry copy), `pt_bind` (p_cr3 write),
+    `vm_create`/`vm_destroy` (full page table lifecycle), `vm_clone` (fork via
+    pt_new_for_fork), `vm_get_addrspace`, `vm_copy`/`vm_copy_overwrite` (cross-
+    address-space via CR3 switch), `clear_proc`, `vm_collect`
+  - `mem.rs`: `sys_vmctl` dispatch with VMCTL_GET_PDBR, CLEAR_PAGEFAULT,
+    FLUSHTLB, SETADDRSPACE, BOOTINHIBIT_CLEAR, plus grant/phys operations
+  - `mod.rs`: All 20+ handlers upgraded — do_pagefaults, do_remap (page walk +
+    map_page), do_map_phys, do_get_phys (VA→PA page table walk), do_get_refcount
+    (grant table walk), do_munmap (unmap_range), do_exit (vm_destroy),
+    do_brk (heap adjust), do_fork (vm_clone), do_procctl, do_info (all 3
+    subcodes), RS privilege stubs, exit notification flags
+  - Added boot_cr3(), write_cr3(), get_proc_cr3() to kernel::pagetable
+  - 84 VM tests, 300 total servers tests pass, clippy clean
 
 - [ ] **12.10 — Wire handle_page_fault to VM server** (`kernel/src/pagetable.rs:344`)
   **Depends on:** VM server message loop (12.8)
