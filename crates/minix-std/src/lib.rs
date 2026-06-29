@@ -5,10 +5,13 @@
 //! - Error types and conversion from syscall return values
 //! - IPC primitives: `send`, `receive`, `sendrec`, `notify`
 //! - Grant table management for safe inter-process data transfer
+//! - Process lifecycle: `fork`, `exit`, `waitpid`, `exec`, `getpid` (`process`)
 //!
 //! Built on top of `minix-rt` syscall wrappers.
 
 #![no_std]
+
+pub mod process;
 
 use core::cell::UnsafeCell;
 
@@ -149,6 +152,8 @@ pub const MESSAGE_SIZE: usize = 64;
 pub type Message = [u8; MESSAGE_SIZE];
 
 /// Send a message to `dest`.
+/// Send a message to `dest`.  Non-blocking; the target must be ready to
+/// receive or the call will fail.
 ///
 /// The destination endpoint must be placed in `msg[0..4]` (little-endian i32).
 ///
@@ -156,10 +161,17 @@ pub type Message = [u8; MESSAGE_SIZE];
 ///
 /// `msg` must point to a valid `Message`. The syscall may fail if `dest`
 /// is invalid or the target is not ready to receive.
-#[cfg(target_os = "none")]
 pub unsafe fn send(dest: i32, msg: &Message) -> Result<(), MinixErr> {
-    let ret = unsafe { minix_rt::syscall2(SEND_CALL, dest as u64, msg.as_ptr() as u64) };
-    MinixErr::from_syscall(ret as i32).map(|_| ())
+    #[cfg(target_os = "none")]
+    unsafe {
+        let ret = minix_rt::syscall2(SEND_CALL, dest as u64, msg.as_ptr() as u64);
+        return MinixErr::from_syscall(ret as i32).map(|_| ());
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (dest, msg);
+        Err(MinixErr(ENOSYS))
+    }
 }
 
 /// Receive a message from `src` (or `ANY`).
@@ -170,10 +182,17 @@ pub unsafe fn send(dest: i32, msg: &Message) -> Result<(), MinixErr> {
 /// # Safety
 ///
 /// `msg` must point to a valid, mutable `Message`.
-#[cfg(target_os = "none")]
 pub unsafe fn receive(src: i32, msg: &mut Message) -> Result<i32, MinixErr> {
-    let ret = unsafe { minix_rt::syscall2(RECEIVE_CALL, src as u64, msg.as_mut_ptr() as u64) };
-    MinixErr::from_syscall(ret as i32)
+    #[cfg(target_os = "none")]
+    unsafe {
+        let ret = minix_rt::syscall2(RECEIVE_CALL, src as u64, msg.as_mut_ptr() as u64);
+        return MinixErr::from_syscall(ret as i32);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (src, msg);
+        Err(MinixErr(ENOSYS))
+    }
 }
 
 /// Combine send and receive in one atomic operation.
@@ -185,10 +204,17 @@ pub unsafe fn receive(src: i32, msg: &mut Message) -> Result<i32, MinixErr> {
 ///
 /// `msg` must point to a valid, mutable `Message`. The destination must
 /// be placed in `msg[0..4]` before the call.
-#[cfg(target_os = "none")]
 pub unsafe fn sendrec(dest: i32, msg: &mut Message) -> Result<i32, MinixErr> {
-    let ret = unsafe { minix_rt::syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64) };
-    MinixErr::from_syscall(ret as i32)
+    #[cfg(target_os = "none")]
+    unsafe {
+        let ret = minix_rt::syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64);
+        return MinixErr::from_syscall(ret as i32);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (dest, msg);
+        Err(MinixErr(ENOSYS))
+    }
 }
 
 /// Send an asynchronous notification to `dest`.

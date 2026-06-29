@@ -3476,13 +3476,16 @@ userspace crate
   - Message type: `Message = [u8; 64]`
   - 28 tests: endpoint validation, error conversion, grant lifecycle, clippy clean
 
-- [ ] **13.3 — Process lifecycle (PM protocol)**
-  - `fork`: send PM fork request, receive child endpoint
-  - `exit`: send PM exit, cleanup
-  - `waitpid`: poll PM for child exit
-  - `exec`: send PM exec with binary path + arguments
-  - `getpid` / `getppid`
-  - Tests: fork + exit + waitpid roundtrip via mock PM
+- [x] **13.3 — Process lifecycle (PM protocol)**
+  - `fork`: send PM_FORK via sendrec to PM_PROC_NR, receive child pid
+  - `exit`: send PM_EXIT with status, fallback spin loop
+  - `waitpid`: send PM_WAITPID with pid/options, receive status
+  - `exec`: send PM_EXEC_NEW with grant data (stub — Phase 13.5 grant setup)
+  - `getpid`: send PM_GETPID, receive (pid, ppid) from message fields
+  - Implemented in `crates/minix-std/src/process.rs` with PM call numbers
+    and message formats matching `.refs/minix-3.3.0/minix/include/minix/callnr.h`
+  - All functions gated with `#[cfg(target_os = "none")]`, return ENOSYS on host
+  - 15 tests, 43 total minix-std tests pass, clippy clean
 
 - [ ] **13.4 — File I/O (VFS protocol)**
   - `open`: send VFS open request, receive fd
