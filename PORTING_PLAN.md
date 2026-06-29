@@ -860,8 +860,12 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
     - Handles PFF_VMINHIBIT flag, clears inherited SIGNALED/SIG_PENDING/P_STOP
     - Sets reply fields: child endpoint + parent's p_delivermsg_vir
   - Tests: 4 new (invalid parent, slot in use, parent not receiving)
-- [ ] **5.2 — `do_exec.c`**: `SYS_EXEC` — load ELF, set up memory map, switch address space
-  - Stub handler (deferred: needs data_copy + arch_proc_init)
+- [x] **5.2 — `do_exec.c`**: `SYS_EXEC` — load ELF, set up memory map, switch address space
+  - Real implementation: validates endpoint, clears MF_DELIVERMSG, copies program name
+    from caller's address space via CR3 switching, calls arch_proc_init to set up
+    TrapFrame, clears RTS_RECEIVING, releases FPU, returns EDONTREPLY
+  - Tests: 5 (bad endpoint, empty slot, successful exec verifies flags and name,
+    MF_DELIVERMSG clearing, registration)
 - [x] **5.3 — `do_clear.c`**: `SYS_CLEAR` — clean up after process exit
   - Real implementation in `system.rs` `do_clear_handler`:
     - Validates endpoint, calls release_address_space, checks IRQ hooks for this endpoint

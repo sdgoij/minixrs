@@ -5502,6 +5502,88 @@ mod tests {
     }
 
     #[test]
+    fn test_exec_on_empty_slot_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // Slot 1 is empty after proc_init (not in BOOT_IMAGE)
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, EXEC_ENDPT_OFF, 0x80000001u32 as i32); // valid endpoint format but empty slot
+            let result = do_exec_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_exec_returns_edontreply() {
+        unsafe {
+            proc_init();
+            // Set up proc 0 (PM) as a valid target
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_endpoint = 0;
+            (*rp)
+                .p_rts_flags
+                .store(RtsFlags::empty().bits(), Ordering::Relaxed);
+            (*rp).p_misc_flags.store(0, Ordering::Relaxed);
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, EXEC_ENDPT_OFF, 0); // target = PM
+            msg_write_u64(&mut msg, EXEC_IP_OFF, 0x1000); // new entry point
+            msg_write_u64(&mut msg, EXEC_STACK_OFF, 0x7fffe000); // new stack
+            msg_write_u64(&mut msg, EXEC_NAME_OFF, b"test_prog\0" as *const u8 as u64); // name pointer
+            msg_write_u64(&mut msg, EXEC_PS_STR_OFF, 0);
+
+            let result = do_exec_handler(rp, &mut msg);
+            assert_eq!(result, EDONTREPLY);
+
+            // RTS_RECEIVING should be cleared (process becomes runnable)
+            let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                rts & RtsFlags::RECEIVING.bits(),
+                0,
+                "RTS_RECEIVING should be cleared after exec"
+            );
+
+            // MF_DELIVERMSG should be cleared
+            let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            assert_eq!(mf & 0x0004, 0, "MF_DELIVERMSG should be cleared");
+
+            // MF_FPU_INITIALIZED should be cleared
+            assert_eq!(mf & 0x1000, 0, "MF_FPU_INITIALIZED should be cleared");
+
+            // Process name should be non-empty (may read garbage from test name_ptr)
+            let has_name = (*rp).p_name[0] != 0;
+            assert!(has_name, "process name should be set after exec");
+        }
+    }
+
+    #[test]
+    fn test_exec_clears_old_delivermsg_flag() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_endpoint = 0;
+            (*rp)
+                .p_rts_flags
+                .store(RtsFlags::empty().bits(), Ordering::Relaxed);
+            // Set MF_DELIVERMSG before exec
+            (*rp).p_misc_flags.store(0x0004, Ordering::Relaxed);
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, EXEC_ENDPT_OFF, 0);
+            msg_write_u64(&mut msg, EXEC_IP_OFF, 0x1000);
+            msg_write_u64(&mut msg, EXEC_STACK_OFF, 0x7fffe000);
+            msg_write_u64(&mut msg, EXEC_NAME_OFF, b"test\0" as *const u8 as u64);
+            msg_write_u64(&mut msg, EXEC_PS_STR_OFF, 0);
+
+            let _ = do_exec_handler(rp, &mut msg);
+
+            let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            assert_eq!(mf & 0x0004, 0, "MF_DELIVERMSG should have been cleared");
+        }
+    }
+
+    #[test]
     fn test_getmcontext_bad_endpoint_returns_einval() {
         unsafe {
             proc_init();
