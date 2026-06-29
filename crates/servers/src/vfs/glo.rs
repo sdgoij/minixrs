@@ -1,13 +1,32 @@
 //! VFS global state — adapted from `minix/servers/vfs/glo.h`
 //!
-//! Singleton `VfsGlobal` holding all VFS tables and per-request
-//! state. All access goes through `core::ptr::addr_of_mut!()` to
-//! satisfy `#[deny(static_mut_refs)]`.
+//! Singleton wrapped in `UnsafeCell` for interior mutability without
+//! `static mut`. All access goes through `vfs_global()` which returns
+//! a raw `*mut VfsGlobal`.
 
+use core::cell::UnsafeCell;
 use core::ptr::addr_of_mut;
 
 use crate::vfs::consts::*;
 use crate::vfs::types::*;
+
+/// Sync wrapper for `UnsafeCell<VfsGlobal>`.
+///
+/// # Safety
+///
+/// Single-threaded kernel — no concurrent access. All access is
+/// mediated through raw pointers and `unsafe` blocks.
+pub struct VfsGlobalCell(UnsafeCell<VfsGlobal>);
+unsafe impl Sync for VfsGlobalCell {}
+
+impl VfsGlobalCell {
+    const fn new(val: VfsGlobal) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut VfsGlobal {
+        self.0.get()
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Global state singleton
@@ -59,7 +78,7 @@ pub struct VfsGlobal {
 // Global static
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub static mut VFS_GLOBAL: VfsGlobal = VfsGlobal {
+pub static VFS_GLOBAL: VfsGlobalCell = VfsGlobalCell::new(VfsGlobal {
     fproc: new_fproc_array(),
     filp: new_filp_array(),
     vnode: new_vnode_array(),
@@ -88,7 +107,7 @@ pub static mut VFS_GLOBAL: VfsGlobal = VfsGlobal {
     root_fs_e: -1,
     system_hz: 60,
     mount_label: [0u8; LABEL_MAX],
-};
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: `const` array constructors
@@ -231,9 +250,13 @@ const fn new_scratchpad_array() -> [Scratchpad; NR_PROCS] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get a raw pointer to the VFS global state.
+///
+/// The data lives in a safe `static UnsafeCell<VfsGlobal>` (no
+/// `static mut`). `UnsafeCell::get()` returns a `*mut VfsGlobal`
+/// without creating any references, avoiding `static_mut_refs`.
 #[inline]
 pub fn vfs_global() -> *mut VfsGlobal {
-    addr_of_mut!(VFS_GLOBAL)
+    VFS_GLOBAL.get()
 }
 
 /// Get a `*mut Fproc` for a given endpoint number.
@@ -245,13 +268,11 @@ pub fn vfs_global() -> *mut VfsGlobal {
 pub unsafe fn get_fproc(ep: i32) -> *mut Fproc {
     let slot = (ep & 0xff) as usize;
     let glob = vfs_global();
-    // SAFETY: glob is valid, deref and pointer arithmetic is OK for raw ptrs.
-    let fp = unsafe { addr_of_mut!((*glob).fproc) as *mut Fproc };
+    let fp = addr_of_mut!((*glob).fproc) as *mut Fproc;
     if slot >= NR_PROCS {
         core::ptr::null_mut()
     } else {
-        // SAFETY: slot checked against array bound.
-        unsafe { fp.add(slot) }
+        fp.add(slot)
     }
 }
 
@@ -272,8 +293,7 @@ pub unsafe fn current_fp() -> *mut Fproc {
 /// Must be called exactly once during VFS initialization, before any
 /// other VFS code runs.
 pub unsafe fn vfs_init() {
-    let glob = vfs_global();
-    let g = unsafe { &mut *glob };
+    let glob = VFS_GLOBAL.get();
 
     // Zero tables
     core::ptr::write_bytes(addr_of_mut!((*glob).fproc), 0, 1);
@@ -286,6 +306,7 @@ pub unsafe fn vfs_init() {
     core::ptr::write_bytes(addr_of_mut!((*glob).scratchpad), 0, 1);
 
     // Per-request fields
+    let g = &mut *glob;
     g.caller_uid = 0;
     g.caller_gid = 0;
     g.req_nr = 0;
@@ -293,11 +314,9 @@ pub unsafe fn vfs_init() {
     g.err_code = 0;
     g.self_thread = core::ptr::null_mut();
 
-    // Message buffers
     g.fs_m_in = [0u8; 64];
     g.fs_m_out = [0u8; 64];
 
-    // Counters
     g.susp_count = 0;
     g.nr_locks = 0;
     g.reviving = 0;
@@ -313,16 +332,14 @@ pub unsafe fn vfs_init() {
     g.mount_label = [0u8; LABEL_MAX];
 
     // Initialize fproc endpoint fields
+    let fp_base = addr_of_mut!((*glob).fproc) as *mut Fproc;
     for i in 0..NR_PROCS {
-        // SAFETY: `i` is within array bounds of `fproc`.
-        let fp = unsafe { (addr_of_mut!((*glob).fproc) as *mut Fproc).add(i) };
-        unsafe {
-            (*fp).fp_endpoint = -1; // NONE
-            (*fp).fp_pid = PID_FREE;
-            (*fp).fp_filp = [-1i32; OPEN_MAX];
-            (*fp).fp_blocked_on = FP_BLOCKED_ON_NONE;
-            (*fp).fp_task = -1;
-            (*fp).fp_suspended_ep = -1;
-        }
+        let fp = fp_base.add(i);
+        (*fp).fp_endpoint = -1;
+        (*fp).fp_pid = PID_FREE;
+        (*fp).fp_filp = [-1i32; OPEN_MAX];
+        (*fp).fp_blocked_on = FP_BLOCKED_ON_NONE;
+        (*fp).fp_task = -1;
+        (*fp).fp_suspended_ep = -1;
     }
 }

@@ -6,6 +6,7 @@ pub mod clock_server;
 pub mod devman;
 pub mod ds;
 pub mod ipc;
+pub mod mutex;
 pub mod pm;
 pub mod rs;
 pub mod sched;

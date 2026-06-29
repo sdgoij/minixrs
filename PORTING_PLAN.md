@@ -3636,7 +3636,69 @@ userspace crate
 
 ---
 
-## Phase 14: Userland Commands
+## Phase 13.11 — Eliminate `static mut` (Rust 2024 Compliance)
+
+**Goal**: Replace all `static mut` instances with safe alternatives that satisfy
+Rust 2024's `deny(static_mut_refs)`. This prevents LLVM aliasing UB and enables
+reliable cross-function test patterns.
+
+**Patterns:**
+- **Structs/arrays** → `struct Wrapper(UnsafeCell<T>); unsafe impl Sync;` + `get()`
+  (see `crates/servers/src/vfs/glo.rs` — `VfsGlobalCell` for a worked example)
+- **Scalars** → `core::sync::atomic::{AtomicBool, AtomicUsize, AtomicI32, AtomicU64, AtomicPtr}`
+  (this pattern is already used throughout the codebase)
+- **If a spinlock guard is preferred** over raw pointer access, use `crate::mutex::Mutex<T>`
+  from `crates/servers/src/mutex.rs` (provides `lock()` → `MutexGuard` with `DerefMut`).
+
+### Tasks
+
+#### Priority 1 — Kernel globals (most impact, tested)
+
+- [ ] **13.11.1 — Kernel `glo.rs`**: Replace `KINFO`, `MACHINE`, `KMESSAGES`,
+  `LOADINFO`, `KRANDOM`, `MINIX_KERNINFO` with `UnsafeCell` wrappers.
+  Replace `CPU_HZ`, `KERNEL_TICKS`, `BKL_TICKS`, `BKL_TRIES`, `BKL_SUCC`
+  with `[AtomicU64; 32]` / `[AtomicU32; 32]`. Replace `IPC_CALL_NAMES`
+  with `UnsafeCell` wrapper. Replace `VMREQUEST` with `AtomicPtr`.
+  (`crates/kernel/src/glo.rs`)
+
+- [ ] **13.11.2 — Kernel `priv.rs`**: Replace `PRIV`, `IDLE_PRIV`, `PPRIV_ADDR`
+  with `UnsafeCell` wrappers. (`crates/kernel/src/priv.rs`)
+
+- [ ] **13.11.3 — Kernel `profile.rs`**: Replace `SPROFILING` → `AtomicBool`,
+  `SPROF_MEM_SIZE` → `AtomicUsize`, `CPROF_PROCS_NO` → `AtomicUsize`.
+  Replace `SPROF_INFO`, `SPROF_SAMPLE_BUFFER`, `CPROF_TBL`, `CPROF_PROC_INFO`
+  with `UnsafeCell` wrappers. (`crates/kernel/src/profile.rs`)
+
+- [ ] **13.11.4 — Kernel `system.rs`**: Replace `IRQ_HOOKS`, `IRQ_ACTIDS`
+  with `UnsafeCell` wrappers. Replace `KBILL_KCALL`, `KBILL_IPC` with
+  `AtomicPtr`. Replace `IRQ_USE` with `AtomicI32`.
+  (`crates/kernel/src/system.rs`)
+
+- [ ] **13.11.5 — Kernel `table.rs`**: Replace `RUN_QUEUE` with `UnsafeCell`
+  wrapper. (`crates/kernel/src/table.rs`)
+
+- [ ] **13.11.6 — Kernel `debug.rs`**: Replace `IPC_MESSAGES` with `UnsafeCell`
+  wrapper. (`crates/kernel/src/debug.rs`)
+
+- [ ] **13.11.7 — Arch `cpuvar.rs`**: Replace `CPU_INFO` with `UnsafeCell`
+  wrapper. (`crates/arch-x86_64/src/cpuvar.rs`)
+
+- [ ] **13.11.8 — Arch `idt.rs`**: Replace `IDT` with `UnsafeCell` wrapper.
+  (`crates/arch-x86_64/src/idt.rs`)
+
+- [ ] **13.11.9 — Server `vm/mem.rs`**: Replace `GRANT_TABLES` with `UnsafeCell`
+  wrapper. (`crates/servers/src/vm/mem.rs`)
+
+- [ ] **13.11.10 — FS globals**: Replace `HASH_INODES`, `UNUSED_INODES_HEAD`,
+  `BUF_FRONT`, `BUF_REAR`, `GROUP_DESCRIPTORS_DIRTY`, `SUPERBLOCK`, `OPT`
+  in `crates/fs/src/*/glo.rs` files with appropriate `UnsafeCell` or `Atomic*`.
+  (`crates/fs/src/{ext2,mfs,pfs}/glo.rs`)
+
+#### Priority 2 — Verify no regressions
+
+- [ ] **13.11.11 — Run full test suite**: `cargo test --workspace -- --test-threads=1`
+  All tests must pass without `static_mut_refs` warnings.
+- [ ] **13.11.12 — Clippy sweep**: `cargo clippy --workspace -- --deny warnings`
 
 **Goal**: Port userland commands. These are pure C with no kernel dependencies beyond libc.
 
