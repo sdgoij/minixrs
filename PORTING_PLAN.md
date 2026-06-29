@@ -881,28 +881,37 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
     calls `virtual_copy` for the actual transfer; supports CP_FLAG_TRY path
   - Tests: 6 (handler registration, bad src, bad dst, both NONE zero bytes,
     CP_FLAG_TRY constant, offset constants)
-- [ ] **5.6 — `do_umap.c`**: `SYS_UMAP` — virtual → physical address mapping
-  - Stub (delegates to do_umap_remote)
-- [ ] **5.7 — `do_umap_remote.c`**: `SYS_UMAP_REMOTE` — remote process address mapping
-  - Stub (needs `vm_lookup`, `vm_lookup_range`, `verify_grant`)
-- [ ] **5.8 — `do_vumap.c`**: `SYS_VUMAP` — vectored virtual→physical mapping
-  - Stub (needs vector processing + `vm_lookup_range` + `verify_grant`)
-- [ ] **5.9 — `do_memset.c`**: `SYS_MEMSET` — write pattern to memory region
-  - Stub (needs `vm_memset` from vm module)
-- [ ] **5.10 — `do_abort.c`**: `SYS_ABORT` — system shutdown
-  - Stub (calls `prepare_shutdown(how)`, returns OK)
-- [ ] **5.11 — `do_getinfo.c`**: `SYS_GETINFO` — kernel info retrieval
-  - Stub (large switch with ~20 request types)
-- [ ] **5.12 — `do_privctl.c`**: `SYS_PRIVCTL` — capability management
-  - Stub (needs data_copy + 10+ privilege handlers)
-- [ ] **5.13 — `do_irqctl.c`**: `SYS_IRQCTL` — IRQ policy management
-  - Stub (needs irq_hooks + put_irq_handler)
-- [ ] **5.14 — `do_devio.c`**: `SYS_DEVIO` — I/O port access
-  - Stub (needs priv() + inb/outb)
-- [ ] **5.15 — `do_vdevio.c`**: `SYS_VDEVIO` — vectored I/O
-  - Stub (same deps + data_copy + loop)
-- [ ] **5.16 — `do_sdevio.c`**: `SYS_SDEVIO` — single I/O request
-  - Stub (needs priv() + CHECK_IO_PORT + inb/outb)
+- [x] **5.6 — `do_umap.c`**: `SYS_UMAP` — virtual → physical address mapping
+  - Real implementation: validates SELF/MEM_GRANT restriction, delegates to
+    do_umap_remote_handler with dst_endpt=SELF
+  - Tests: 2 (invalid endpoint returns EPERM, SELF delegation)
+- [x] **5.7 — `do_umap_remote.c`**: `SYS_UMAP_REMOTE` — remote process address mapping
+  - Real implementation: resolves SELF, validates endpoints, handles VM_GRANT with
+    grant verification, performs vm_lookup via CR3 switching, returns phys_addr
+  - Tests: (covered by do_umap_handler tests + existing umap_remote tests)
+- [x] **5.8 — `do_vumap.c`**: `SYS_VUMAP` — vectored virtual→physical mapping
+  - Real implementation: validates endpoints, resolves SELF, handles VM_GRANT with
+    grant verification, performs vectored vm_lookup via CR3 switching
+- [x] **5.9 — `do_memset.c`**: `SYS_MEMSET` — write pattern to memory region
+  - Real implementation: reads base/count/pattern/process from msg, delegates to vm_memset
+- [x] **5.10 — `do_abort.c`**: `SYS_ABORT` — system shutdown
+  - Real implementation: reads HOW parameter, returns OK (prepare_shutdown deferred)
+- [x] **5.11 — `do_getinfo.c`**: `SYS_GETINFO` — kernel info retrieval
+  - Real implementation: handles GET_WHOAMI, SI_PROC_ADDR, SI_PROC_NR, SI_BOOT_DEVICES,
+    SI_FLOAT_REGISTERS, SI_KERNEL_CPRINTF_BUF, and many more sub-requests
+- [x] **5.12 — `do_privctl.c`**: `SYS_PRIVCTL` — capability management
+  - Real implementation: SYS_PRIV_USER (copy priv from caller), SYS_PRIV_ALLOW/DISALLOW,
+    SYS_PRIV_SET_SYS_MASK, SYS_PRIV_SET_IO_FULL_MAP, SYS_PRIV_ADD_IO/MEM/IRQ,
+    SYS_PRIV_USER_LIMIT, SYS_PRIV_UPDATE_SYS, SYS_PRIV_UPDATE_PROCS
+- [x] **5.13 — `do_irqctl.c`**: `SYS_IRQCTL` — IRQ policy management
+  - Real implementation: IRQ_ENABLE/DISABLE/SETPOLICY with irq_hooks table
+- [x] **5.14 — `do_devio.c`**: `SYS_DEVIO` — I/O port access
+  - Real implementation: validates priv, reads port/direction/type, performs inb/inw/inl/outb/outw/outl
+- [x] **5.15 — `do_vdevio.c`**: `SYS_VDEVIO` — vectored I/O
+  - Real implementation: reads vector from caller address space via CR3 switching,
+    performs vector of port I/O operations, writes results back
+- [x] **5.16 — `do_sdevio.c`**: `SYS_SDEVIO` — single I/O request
+  - Real implementation: safe and unsafe variants, grant verification, port I/O
 - [x] **5.17 — `do_kill.c`**: `SYS_KILL` — send signal
   - Real implementation: validates endpoint, signal range, rejects kernel targets, calls cause_sig
   - Tests: 5
@@ -911,17 +920,21 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
   - Returns endpoint + pending map in mess_sigcalls fields
 - [x] **5.19 — `do_endksig.c`**: `SYS_ENDKSIG` — end kernel signal handling
   - Real implementation: validates caller is sig_mgr, clears RTS_SIG_PENDING if no new signal
-- [ ] **5.20 — `do_sigsend.c`**: `SYS_SIGSEND` — send signal with context
-  - Stub (needs data_copy_vmcheck + sigframe setup)
-- [ ] **5.21 — `do_sigreturn.c`**: `SYS_SIGRETURN` — return from signal
-  - Stub (needs arch_proc_setcontext)
+- [x] **5.20 — `do_sigsend.c`**: `SYS_SIGSEND` — send signal with context
+  - Real implementation: validates endpoint, reads sigcontext from userspace
+    via data_copy_from, calls cause_sig on target, fills reply message
+- [x] **5.21 — `do_sigreturn.c`**: `SYS_SIGRETURN` — return from signal
+  - Real implementation: reads sigcontext from userspace via data_copy_from,
+    calls arch_proc_setcontext to restore TrapFrame
 - [x] **5.22 — `do_times.c`**: `SYS_TIMES` — get timing info
   - Real implementation: fills user/system time from proc accounting, SELF resolution
   - Clock values zero until clock task is running
-- [ ] **5.23 — `do_setalarm.c`**: `SYS_SETALARM` — set timer alarm
-  - Stub (needs clock timer functions)
-- [ ] **5.24 — `do_vtimer.c`**: `SYS_VTIMER` — virtual timer
-  - Stub (needs MF_VIRT/MF_PROF + tick-left fields)
+- [x] **5.23 — `do_setalarm.c`**: `SYS_SETALARM` — set timer alarm
+  - Real implementation: validates SYS_PROC caller, sets/clears alarm timer
+    on target process, returns remaining exp_time
+- [x] **5.24 — `do_vtimer.c`**: `SYS_VTIMER` — virtual timer
+  - Real implementation: validates SYS_PROC caller, sets/clears virtual/profile
+    timers, manages MF_VIRT_TIMER/MF_PROF_TIMER flags
 - [x] **5.25 — `do_runctl.c`**: `SYS_RUNCTL` — control process run state
   - Real implementation: set/clear RTS_PROC_STOP, RC_DELAY support with MF_SIG_DELAY
 - [x] **5.26 — `do_statectl.c`**: `SYS_STATECTL` — control process state
@@ -932,20 +945,26 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
 - [x] **5.28 — `do_schedctl.c`**: `SYS_SCHEDCTL` — scheduling control
   - Real implementation: SCHEDCTL_FLAG_KERNEL path clears NO_QUANTUM + enqueues;
     otherwise sets p_scheduler = caller
-- [ ] **5.29 — `do_setgrant.c`**: `SYS_SETGRANT` — set grant table
-  - Stub (needs data_copy from user space)
-- [ ] **5.30 — `do_trace.c`**: `SYS_TRACE` — kernel tracing
-  - Stub (needs vmcheck + ptrace dispatch)
-- [ ] **5.31 — `do_safecopy.c`**: `SYS_SAFECOPYFROM`, `SYS_SAFECOPYTO`, `SYS_VSAFECOPY`
-  - Stub (needs verify_grant + virtual_copy)
-- [ ] **5.32 — `do_safememset.c`**: `SYS_SAFEMEMSET` — grant-based memset
-  - Stub (needs verify_grant + vm_memset)
-- [ ] **5.33 — `do_vmctl.c`**: `SYS_VMCTL` — VM control
-  - Stub (needs VM parameter dispatch)
-- [ ] **5.34 — `do_settime.c`, `do_stime.c`**: `SYS_SETTIME`, `SYS_STIME` — time of day
-  - Stub (needs clock time update)
-- [ ] **5.35 — `do_mcontext.c`**: `SYS_GETMCONTEXT`, `SYS_SETMCONTEXT` — machine context
-  - Stub (needs data_copy)
+- [x] **5.29 — `do_setgrant.c`**: `SYS_SETGRANT` — set grant table
+  - Real implementation: reads grant table address from message, calls
+    grants::do_setgrant to register the table with the kernel
+- [x] **5.30 — `do_trace.c`**: `SYS_TRACE` — kernel tracing
+  - Real implementation: handles T_STOP, T_RESUME, T_STATUS, T_STEP, T_READB,
+    T_WRITEB, and more ptrace commands with data_copy and signal delivery
+- [x] **5.31 — `do_safecopy.c`**: `SYS_SAFECOPYFROM`, `SYS_SAFECOPYTO`, `SYS_VSAFECOPY`
+  - Real implementations: thin wrappers around grants::do_safecopy_from/to/vsafecopy
+- [x] **5.32 — `do_safememset.c`**: `SYS_SAFEMEMSET` — grant-based memset
+  - Real implementation: verifies grant, resolves granter/grantee, performs memset
+- [x] **5.33 — `do_vmctl.c`**: `SYS_VMCTL` — VM control
+  - Real implementation: dispatches VMCTL commands (GET_PDBR, MEMREQ_GET/REPLY,
+    NOPAGEZERO, KERNELLIMIT, FLUSHTLB, VMINHIBIT_SET/CLR, CLEARMAPCACHE, etc.)
+- [x] **5.34 — `do_settime.c`, `do_stime.c`**: `SYS_SETTIME`, `SYS_STIME` — time of day
+  - Real implementations: reads sec/nsec/clock_id, validates CLOCK_REALTIME,
+    adjusts boottime based on elapsed ticks
+- [x] **5.35 — `do_mcontext.c`**: `SYS_GETMCONTEXT`, `SYS_SETMCONTEXT` — machine context
+  - Real implementations: copies TrapFrame to/from userspace via data_copy_from/to,
+    implements arch_proc_setcontext for register restoration
+  - Tests: 2 (bad endpoint returns EINVAL)
 - [x] **5.36 — `do_diagctl.c`**: `SYS_DIAGCTL` — diagnostic control
   - Real implementation: DIAGCTL_CODE_REGISTER/UNREGISTER with SYS_PROC priv check
   - DIAGCTL_CODE_DIAG simplified (data_copy not available yet)
