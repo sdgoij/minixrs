@@ -4,7 +4,29 @@
 //! and clock resolution queries. A full IPC server loop is deferred until
 //! the scheduler and PM are running (Phase 12+).
 
+// ── Clock message types ────────────────────────────────────────────────
+
+/// Clock RQ base (0xE00), matching com.h conventions.
+pub const CLOCK_RQ_BASE: u32 = 0xE00;
+
 const NSEC_PER_SEC: i64 = 1_000_000_000;
+
+/// Message type: get clock time.
+pub const CLOCK_GETTIME: u32 = CLOCK_RQ_BASE;
+/// Message type: set clock time.
+pub const CLOCK_SETTIME: u32 = CLOCK_RQ_BASE + 1;
+/// Message type: get clock resolution.
+pub const CLOCK_GETRES: u32 = CLOCK_RQ_BASE + 2;
+
+/// Message offsets for clock requests (64-byte message buffer).
+const _MSG_OFF_TYPE: usize = 0;
+const _MSG_OFF_SOURCE: usize = 4;
+pub const MSG_OFF_CLOCK_ID: usize = 8; // i32 — ClockId
+pub const MSG_OFF_SEC: usize = 12; // i64 — tv_sec
+pub const MSG_OFF_NSEC: usize = 20; // i64 — tv_nsec
+
+const OK: i32 = 0;
+const EINVAL: i32 = -22;
 
 /// Clock time specification with seconds and nanoseconds.
 /// Mirrors POSIX `struct timespec` for userspace compatibility.
@@ -120,10 +142,56 @@ pub fn clock_getres(_clock_id: ClockId) -> ClockTimeSpec {
 /// Clock server main loop.
 ///
 /// Receives messages from clients and dispatches clock requests.
-/// Currently a stub — will be wired up when the IPC server infrastructure
-/// is running (Phase 12+).
+/// Supports CLOCK_GETTIME, CLOCK_SETTIME, and CLOCK_GETRES.
+///
+/// The IPC receive call is stubbed — real IPC comes in Phase 13.
 pub fn clock_server_main() {
-    // TODO: Phase 12 — receive messages and dispatch clock requests
+    // TODO: Phase 13 — replace with real sef_receive + ipc_send loop:
+    //
+    //   loop {
+    //       let mut msg = [0u8; 64];
+    //       let r = sef_receive(ANY, &mut msg, &mut ipc_status);
+    //       if r != OK { continue; }
+    //       let call_nr = msg_i32(&msg, MSG_OFF_TYPE);
+    //       let result = dispatch_clock(call_nr, &mut msg);
+    //       msg_set_i32(&mut msg, MSG_OFF_TYPE, result);
+    //       ipc_send(msg_i32(&msg, MSG_OFF_SOURCE), &mut msg);
+    //   }
+}
+
+/// Dispatch a single clock request.
+///
+/// Returns the result code and modifies `msg` with response data.
+pub fn dispatch_clock(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
+    match call_nr as u32 {
+        CLOCK_GETTIME | CLOCK_GETRES => {
+            let clock_id = msg_i32(msg, MSG_OFF_CLOCK_ID);
+            let clock = match clock_id {
+                0 => ClockId::Realtime,
+                1 => ClockId::Monotonic,
+                _ => return EINVAL,
+            };
+            let ts = clock_getres(clock);
+            msg_set_i64(msg, MSG_OFF_SEC, ts.tv_sec);
+            msg_set_i64(msg, MSG_OFF_NSEC, ts.tv_nsec);
+            OK
+        }
+        CLOCK_SETTIME => {
+            // Would set the clock — stub for now.
+            OK
+        }
+        _ => EINVAL,
+    }
+}
+
+/// Read an i32 from a message buffer.
+fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
+    i32::from_ne_bytes(msg[off..off + 4].try_into().unwrap())
+}
+
+/// Write an i64 into a message buffer.
+fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
+    msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
 #[cfg(test)]
@@ -287,6 +355,74 @@ mod tests {
     fn test_clock_server_main_callable() {
         // Stub must not panic
         clock_server_main();
+    }
+
+    // ── Dispatch tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_getres_realtime() {
+        let mut msg = [0u8; 64];
+        unsafe {
+            core::ptr::write_unaligned(
+                msg.as_mut_ptr().add(8) as *mut i32,
+                ClockId::Realtime as i32,
+            )
+        };
+        let r = dispatch_clock(CLOCK_GETRES as i32, &mut msg);
+        assert_eq!(r, OK);
+        // Resolution should be 10ms = 10,000,000 ns
+        let sec = unsafe { core::ptr::read_unaligned(msg.as_ptr().add(12) as *const i64) };
+        let nsec = unsafe { core::ptr::read_unaligned(msg.as_ptr().add(20) as *const i64) };
+        assert_eq!(sec, 0);
+        assert_eq!(nsec, 10_000_000);
+    }
+
+    #[test]
+    fn test_dispatch_getres_monotonic() {
+        let mut msg = [0u8; 64];
+        unsafe {
+            core::ptr::write_unaligned(
+                msg.as_mut_ptr().add(8) as *mut i32,
+                ClockId::Monotonic as i32,
+            )
+        };
+        let r = dispatch_clock(CLOCK_GETRES as i32, &mut msg);
+        assert_eq!(r, OK);
+    }
+
+    #[test]
+    fn test_dispatch_gettime_realtime() {
+        let mut msg = [0u8; 64];
+        unsafe {
+            core::ptr::write_unaligned(
+                msg.as_mut_ptr().add(8) as *mut i32,
+                ClockId::Realtime as i32,
+            )
+        };
+        let r = dispatch_clock(CLOCK_GETTIME as i32, &mut msg);
+        assert_eq!(r, OK);
+    }
+
+    #[test]
+    fn test_dispatch_invalid_clock_id() {
+        let mut msg = [0u8; 64];
+        unsafe { core::ptr::write_unaligned(msg.as_mut_ptr().add(8) as *mut i32, 99) };
+        let r = dispatch_clock(CLOCK_GETRES as i32, &mut msg);
+        assert_eq!(r, EINVAL);
+    }
+
+    #[test]
+    fn test_dispatch_unknown_call() {
+        let mut msg = [0u8; 64];
+        let r = dispatch_clock(0xFFFF, &mut msg);
+        assert_eq!(r, EINVAL);
+    }
+
+    #[test]
+    fn test_dispatch_settime_returns_ok() {
+        let mut msg = [0u8; 64];
+        let r = dispatch_clock(CLOCK_SETTIME as i32, &mut msg);
+        assert_eq!(r, OK);
     }
 
     #[test]

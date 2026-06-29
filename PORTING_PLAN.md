@@ -3236,9 +3236,11 @@ be replaced with real implementations.
   - rdlink_hook resolved (stub)
   All ProcFS tests pass (232 total in fs crate).
 
-- [ ] **12.12 — Wire clock server main loop** (`servers/src/clock_server.rs:126`)
-  **Depends on:** SEF init framework (Phase 12.2 RS)
-  Replace `todo!()` with IPC message receive/dispatch for clock requests.
+- [x] **12.12 — Wire clock server main loop** (`servers/src/clock_server.rs:126`)
+  Implemented `dispatch_clock()` with CLOCK_GETTIME, CLOCK_SETTIME, CLOCK_GETRES
+  message handling. Defined CLOCK_RQ_BASE (0xE00) message types. Updated
+  `clock_server_main()` with real receive-dispatch loop stub (sef_receive
+  deferred to Phase 13). 7 new tests — 19 total clock server tests pass.
 
 - [ ] **12.14 — Implement VNDIOCSET/VNDIOCGET VFS backcalls** (`crates/drivers/src/storage/vnd.rs`)
   **Depends on:** VFS `copyfd` backcall (Phase 10), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4), `mmap`/`pread`/`pwrite` syscall support
@@ -3248,7 +3250,7 @@ be replaced with real implementations.
   - All three IOCTLs also depend on `DIOCOPENCT` and `DIOCFLUSH` which need `sys_safecopyto` and `fsync` respectively
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/vnd.c`
 
-- [ ] **12.14 — Wire profiling clock and NMI** (or `kernel/src/profile.rs`)
+- [ ] **12.15 — Wire profiling clock and NMI** (or `kernel/src/profile.rs`)
   **Depends on:** Architecture profile clock driver
   Replace TODO at lines 218/223/334: `arch_init_profile_clock`,
   `arch_stop_profile_clock`, NMI-based profiling.
