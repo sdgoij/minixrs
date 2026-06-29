@@ -2294,9 +2294,17 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - All stubs — real impls need PM IPC (Phase 12.3) and FS request layer
 
 ### Deferred misc stubs
-- [ ] **10.7a — Wire process lifecycle hooks** (`servers/src/vfs/misc.rs`)
-  **Depends on:** PM server protocol (Phase 12.3), fd table, vnode mgmt
-  pm_exit/fork/exec need to manage fp_filp, close-on-exec, vnode refcounts.
+- [x] **10.7a — Wire process lifecycle hooks** (`servers/src/vfs/misc.rs`)
+  - `pm_exit`: calls `free_proc(FP_EXITING)`, closes all FDs via `close_fd_from_table`,
+    releases root/working dirs, handles tty cleanup on session leader exit, marks slot free
+  - `pm_fork`: copies parent fproc to child, increments filp refcounts, sets child
+    pid/endpoint, clears child flags
+  - `pm_exec`: closes FDs with FD_CLOEXEC bit set in fp_cloexec, clears mask
+  - `free_proc(flags)`: closes FDs, releases vnodes; if FP_EXITING, does session leader
+    tty cleanup and marks slot free
+  - `pm_setuid`/`pm_setgid`/`pm_setsid`/`pm_setgroups`: credential updates, session creation
+  - `pm_reboot`/`pm_dumpcore`/`do_getsysinfo`/`do_getrusage`: stub (ENOSYS)
+  - 11 tests, clippy clean, 334 total servers tests pass
 
 - [ ] **10.7b — Wire system info queries** (`servers/src/vfs/misc.rs`)
   **Depends on:** IPC data copy (Phase 13.2)

@@ -20,10 +20,10 @@ pub struct VfsGlobalCell(UnsafeCell<VfsGlobal>);
 unsafe impl Sync for VfsGlobalCell {}
 
 impl VfsGlobalCell {
-    const fn new(val: VfsGlobal) -> Self {
+    pub(crate) const fn new(val: VfsGlobal) -> Self {
         Self(UnsafeCell::new(val))
     }
-    fn get(&self) -> *mut VfsGlobal {
+    pub(crate) fn get(&self) -> *mut VfsGlobal {
         self.0.get()
     }
 }
