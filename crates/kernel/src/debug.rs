@@ -7,6 +7,7 @@
 //! buffers rather than using formatted I/O.
 
 use core::arch::asm;
+use core::cell::UnsafeCell;
 
 use crate::r#priv::NR_SYS_CALLS;
 use crate::proc::*;
@@ -28,11 +29,23 @@ const PRINTSLOTS: usize = 20;
 // IPC statistics matrix
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Wrapper for `[[u32; IPCPROCS]; IPCPROCS]` — the IPC message matrix.
+pub struct IpcMessagesCell(UnsafeCell<[[u32; IPCPROCS]; IPCPROCS]>);
+unsafe impl Sync for IpcMessagesCell {}
+impl IpcMessagesCell {
+    pub const fn new(val: [[u32; IPCPROCS]; IPCPROCS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [[u32; IPCPROCS]; IPCPROCS] {
+        self.0.get()
+    }
+}
+
 /// IPC message count matrix.
 ///
 /// `messages[src][dst]` = number of messages sent from `src` to `dst`.
 /// Slot `KERNELIPC` is used for kernel-originated messages.
-pub static mut IPC_MESSAGES: [[u32; IPCPROCS]; IPCPROCS] = [[0u32; IPCPROCS]; IPCPROCS];
+pub static IPC_MESSAGES: IpcMessagesCell = IpcMessagesCell::new([[0u32; IPCPROCS]; IPCPROCS]);
 
 /// Top-talker winners table.
 #[derive(Debug, Clone, Copy, Default)]
@@ -46,7 +59,7 @@ pub struct IpcStatsEntry {
 pub fn ipc_top_talkers() -> [IpcStatsEntry; PRINTSLOTS] {
     let mut winners = [IpcStatsEntry::default(); PRINTSLOTS];
     unsafe {
-        let matrix = core::ptr::addr_of!(IPC_MESSAGES).cast::<u32>();
+        let matrix = IPC_MESSAGES.get() as *const u32;
         for src in 0..IPCPROCS {
             for dst in 0..IPCPROCS {
                 let n = *matrix.add(src * IPCPROCS + dst);
@@ -80,7 +93,7 @@ pub fn ipc_top_talkers() -> [IpcStatsEntry; PRINTSLOTS] {
 /// Reset the IPC message matrix.
 pub fn ipc_reset_stats() {
     unsafe {
-        let matrix = core::ptr::addr_of_mut!(IPC_MESSAGES).cast::<u32>();
+        let matrix = IPC_MESSAGES.get() as *mut u32;
         for i in 0..(IPCPROCS * IPCPROCS) {
             *matrix.add(i) = 0;
         }
@@ -97,7 +110,7 @@ pub unsafe fn ipc_clear_slot(slot: usize) {
         return;
     }
     unsafe {
-        let matrix = core::ptr::addr_of_mut!(IPC_MESSAGES).cast::<u32>();
+        let matrix = IPC_MESSAGES.get() as *mut u32;
         for i in 0..IPCPROCS {
             *matrix.add(slot * IPCPROCS + i) = 0;
             *matrix.add(i * IPCPROCS + slot) = 0;
@@ -111,7 +124,7 @@ unsafe fn ipc_record(src_slot: usize, dst_slot: usize) {
         return;
     }
     unsafe {
-        let matrix = core::ptr::addr_of_mut!(IPC_MESSAGES).cast::<u32>();
+        let matrix = IPC_MESSAGES.get() as *mut u32;
         let idx = src_slot * IPCPROCS + dst_slot;
         let val = *matrix.add(idx);
         *matrix.add(idx) = val.wrapping_add(1);
@@ -792,7 +805,7 @@ mod tests {
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
             );
-            let matrix = core::ptr::addr_of!(IPC_MESSAGES).cast::<u32>();
+            let matrix = IPC_MESSAGES.get() as *const u32;
             let kernel_to_kernel = *matrix.add(KERNELIPC * IPCPROCS + KERNELIPC);
             assert!(
                 kernel_to_kernel >= 2,
@@ -816,7 +829,7 @@ mod tests {
             }
             let slot0 = proc_to_slot(rp0);
             let slot1 = proc_to_slot(rp1);
-            let matrix = core::ptr::addr_of!(IPC_MESSAGES).cast::<u32>();
+            let matrix = IPC_MESSAGES.get() as *const u32;
             let count = *matrix.add(slot0 * IPCPROCS + slot1);
             assert_eq!(
                 count, 5,
@@ -852,7 +865,7 @@ mod tests {
             hook_ipc_msgkcall(&[0u8; MESSAGE_SIZE], core::ptr::null_mut());
             hook_ipc_msgkcall(&[0u8; MESSAGE_SIZE], core::ptr::null_mut());
             ipc_reset_stats();
-            let matrix = core::ptr::addr_of!(IPC_MESSAGES).cast::<u32>();
+            let matrix = IPC_MESSAGES.get() as *const u32;
             let total: u32 = (0..IPCPROCS * IPCPROCS).map(|i| *matrix.add(i)).sum();
             assert_eq!(total, 0, "expected all zeros after reset, got {}", total);
         }
@@ -869,7 +882,7 @@ mod tests {
             hook_ipc_msgsend(&[0u8; MESSAGE_SIZE], rp0, rp1);
             let slot = proc_to_slot(rp0);
             ipc_clear_slot(slot);
-            let matrix = core::ptr::addr_of!(IPC_MESSAGES).cast::<u32>();
+            let matrix = IPC_MESSAGES.get() as *const u32;
             let total: u32 = (0..IPCPROCS)
                 .map(|i| *matrix.add(slot * IPCPROCS + i) + *matrix.add(i * IPCPROCS + slot))
                 .sum();
