@@ -1053,7 +1053,7 @@ pub unsafe fn system_init() {
         }
 
         // Initialize alarm timers for all privilege structures
-        let base = core::ptr::addr_of_mut!(PRIV).cast::<Priv>();
+        let base = crate::r#priv::PRIV.get() as *mut Priv;
         for i in 0..NR_SYS_PROCS {
             let sp = base.add(i);
             (*sp).s_alarm_timer = MinixTimer::default();
@@ -1234,7 +1234,7 @@ pub unsafe fn kernel_call_resume(caller: *mut Proc) {
 /// Must be called in a context where PRIV table access is safe.
 pub unsafe fn get_priv(rp: *mut Proc) -> Option<usize> {
     unsafe {
-        let base = core::ptr::addr_of_mut!(PRIV).cast::<Priv>();
+        let base = crate::r#priv::PRIV.get() as *mut Priv;
 
         // Try to allocate a privilege structure
         for i in 0..NR_SYS_PROCS {
@@ -3548,8 +3548,8 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         crate::sched::reset_proc_accounting(rpc);
 
         if !(*rpp).p_priv.is_null() && (*(*rpp).p_priv).s_flags.contains(PrivFlags::SYS_PROC) {
-            let priv_arr = core::ptr::addr_of_mut!(crate::r#priv::PPRIV_ADDR);
-            (*rpc).p_priv = *((priv_arr as *mut *mut Priv).add(crate::r#priv::USER_PRIV_ID));
+            let priv_arr = crate::r#priv::PPRIV_ADDR.get() as *mut *mut Priv;
+            (*rpc).p_priv = *((priv_arr).add(crate::r#priv::USER_PRIV_ID));
             (*rpc)
                 .p_rts_flags
                 .fetch_or(RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
@@ -4752,7 +4752,7 @@ mod tests {
             let rp = crate::table::proc_addr(0);
 
             // Set all proc_nr to NONE to free slots
-            let base = core::ptr::addr_of_mut!(PRIV).cast::<Priv>();
+            let base = crate::r#priv::PRIV.get() as *mut Priv;
             for i in 0..NR_SYS_PROCS {
                 (*base.add(i)).s_proc_nr = NONE;
             }

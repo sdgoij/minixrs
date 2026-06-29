@@ -9,6 +9,8 @@
 //! - `reg_t = u64` (was u32 on i386)
 //! - `irq_id_t = u64` (C `unsigned long`)
 
+use core::cell::UnsafeCell;
+
 use crate::proc::NR_SYS_PROCS;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -33,6 +35,49 @@ pub const USER_PRIV_ID: usize = NR_TASKS + LAST_SPECIAL_PROC_NR;
 
 /// Stack guard value for x86_64 (sizeof(reg_t) == 8).
 pub const STACK_GUARD: u64 = 0xDEAD_BEEF;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wrapper types for static mut elimination
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Wrapper for `[Priv; NR_SYS_PROCS]` — the privilege table.
+pub struct PrivTableCell(UnsafeCell<[Priv; NR_SYS_PROCS]>);
+unsafe impl Sync for PrivTableCell {}
+impl PrivTableCell {
+    pub const fn new(val: [Priv; NR_SYS_PROCS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    /// Get a raw pointer to the array. Valid for program lifetime.
+    pub fn get(&self) -> *mut [Priv; NR_SYS_PROCS] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for `[*mut Priv; NR_SYS_PROCS]` — direct slot pointers.
+pub struct PrivAddrCell(UnsafeCell<[*mut Priv; NR_SYS_PROCS]>);
+unsafe impl Sync for PrivAddrCell {}
+impl PrivAddrCell {
+    pub const fn new(val: [*mut Priv; NR_SYS_PROCS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    /// Get a raw pointer to the pointer array.
+    pub fn get(&self) -> *mut [*mut Priv; NR_SYS_PROCS] {
+        self.0.get()
+    }
+}
+
+/// Wrapper for the idle privilege structure.
+pub struct IdlePrivCell(UnsafeCell<Priv>);
+unsafe impl Sync for IdlePrivCell {}
+impl IdlePrivCell {
+    pub const fn new(val: Priv) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    /// Get a raw pointer to the idle Priv.
+    pub fn get(&self) -> *mut Priv {
+        self.0.get()
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Privilege Flags
@@ -304,52 +349,54 @@ impl Default for Priv {
 // Global privilege table
 // ─────────────────────────────────────────────────────────────────────────
 
-pub static mut PRIV: [Priv; NR_SYS_PROCS] = [Priv {
-    s_proc_nr: 0,
-    s_id: 0,
-    s_flags: PrivFlags::empty(),
-    s_asyntab: 0,
-    s_asynsize: 0,
-    s_trap_mask: 0,
-    _trap_pad: [0u8; 6],
-    s_ipc_to: SysMap::new(),
-    s_k_call_mask: [0u32; SYS_CALL_MASK_SIZE],
-    s_sig_mgr: i32::MIN,
-    s_bak_sig_mgr: i32::MIN,
-    s_notify_pending: SysMap::new(),
-    s_asyn_pending: SysMap::new(),
-    s_int_pending: 0,
-    s_sig_pending: 0,
-    s_alarm_timer: MinixTimer {
-        tmr_next: core::ptr::null_mut(),
-        tmr_exp_time: 0,
-        tmr_func: 0,
-        tmr_arg: 0,
-    },
-    s_stack_guard: core::ptr::null_mut(),
-    s_diag_sig: 0,
-    _diag_pad: [0u8; 7],
-    s_nr_io_range: 0,
-    s_io_tab: [IoRange {
-        ior_base: 0,
-        ior_limit: 0,
-    }; NR_IO_RANGE],
-    s_nr_mem_range: 0,
-    s_mem_tab: [MemRange {
-        mr_base: 0,
-        mr_limit: 0,
-    }; NR_MEM_RANGE],
-    s_nr_irq: 0,
-    s_irq_tab: [0i32; NR_IRQ],
-    s_grant_table: 0,
-    s_grant_entries: 0,
-}; NR_SYS_PROCS];
+pub static PRIV: PrivTableCell = PrivTableCell::new(
+    [Priv {
+        s_proc_nr: 0,
+        s_id: 0,
+        s_flags: PrivFlags::empty(),
+        s_asyntab: 0,
+        s_asynsize: 0,
+        s_trap_mask: 0,
+        _trap_pad: [0u8; 6],
+        s_ipc_to: SysMap::new(),
+        s_k_call_mask: [0u32; SYS_CALL_MASK_SIZE],
+        s_sig_mgr: i32::MIN,
+        s_bak_sig_mgr: i32::MIN,
+        s_notify_pending: SysMap::new(),
+        s_asyn_pending: SysMap::new(),
+        s_int_pending: 0,
+        s_sig_pending: 0,
+        s_alarm_timer: MinixTimer {
+            tmr_next: core::ptr::null_mut(),
+            tmr_exp_time: 0,
+            tmr_func: 0,
+            tmr_arg: 0,
+        },
+        s_stack_guard: core::ptr::null_mut(),
+        s_diag_sig: 0,
+        _diag_pad: [0u8; 7],
+        s_nr_io_range: 0,
+        s_io_tab: [IoRange {
+            ior_base: 0,
+            ior_limit: 0,
+        }; NR_IO_RANGE],
+        s_nr_mem_range: 0,
+        s_mem_tab: [MemRange {
+            mr_base: 0,
+            mr_limit: 0,
+        }; NR_MEM_RANGE],
+        s_nr_irq: 0,
+        s_irq_tab: [0i32; NR_IRQ],
+        s_grant_table: 0,
+        s_grant_entries: 0,
+    }; NR_SYS_PROCS],
+);
 
 /// Direct slot pointers for fast access.
-pub static mut PPRIV_ADDR: [*mut Priv; NR_SYS_PROCS] = [core::ptr::null_mut(); NR_SYS_PROCS];
+pub static PPRIV_ADDR: PrivAddrCell = PrivAddrCell::new([core::ptr::null_mut(); NR_SYS_PROCS]);
 
 /// Idle privilege structure (shared).
-pub static mut IDLE_PRIV: Priv = Priv {
+pub static IDLE_PRIV: IdlePrivCell = IdlePrivCell::new(Priv {
     s_proc_nr: 0,
     s_id: 0,
     s_flags: PrivFlags::empty(),
@@ -388,7 +435,7 @@ pub static mut IDLE_PRIV: Priv = Priv {
     s_irq_tab: [0i32; NR_IRQ],
     s_grant_table: 0,
     s_grant_entries: 0,
-};
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // Accessors
@@ -396,12 +443,12 @@ pub static mut IDLE_PRIV: Priv = Priv {
 
 /// Get privilege structure for a given index.
 pub fn priv_addr(i: usize) -> &'static Priv {
-    unsafe { &*PPRIV_ADDR[i] }
+    unsafe { &*(*PPRIV_ADDR.get())[i] }
 }
 
 /// Get mutable privilege structure for a given index.
 pub fn priv_addr_mut(i: usize) -> &'static mut Priv {
-    unsafe { &mut *PPRIV_ADDR[i] }
+    unsafe { &mut *(*PPRIV_ADDR.get())[i] }
 }
 
 /// Get the privilege ID of a process from its Proc's p_priv pointer.
@@ -428,12 +475,12 @@ pub fn may_send_to(rp: &crate::proc::Proc, _proc_nr_e: i32) -> bool {
 // ─────────────────────────────────────────────────────────────────────────
 
 pub fn beg_priv_addr() -> *const Priv {
-    core::ptr::addr_of!(PRIV).cast::<Priv>()
+    PRIV.get() as *const Priv
 }
 
 pub fn end_priv_addr() -> *const Priv {
     // SAFETY: PRIV has NR_SYS_PROCS elements; .add(NR_SYS_PROCS) is one past the end, valid for pointer arithmetic.
-    unsafe { core::ptr::addr_of!(PRIV).cast::<Priv>().add(NR_SYS_PROCS) }
+    unsafe { (PRIV.get() as *mut Priv).add(NR_SYS_PROCS) as *const Priv }
 }
 
 pub fn beg_static_priv_addr() -> *const Priv {
@@ -442,20 +489,12 @@ pub fn beg_static_priv_addr() -> *const Priv {
 
 pub fn end_static_priv_addr() -> *const Priv {
     // SAFETY: NR_STATIC_PRIV_IDS <= NR_SYS_PROCS (both are compile-time consts).
-    unsafe {
-        core::ptr::addr_of!(PRIV)
-            .cast::<Priv>()
-            .add(NR_STATIC_PRIV_IDS)
-    }
+    unsafe { (PRIV.get() as *mut Priv).add(NR_STATIC_PRIV_IDS) as *const Priv }
 }
 
 pub fn beg_dyn_priv_addr() -> *const Priv {
     // SAFETY: same as end_static_priv_addr.
-    unsafe {
-        core::ptr::addr_of!(PRIV)
-            .cast::<Priv>()
-            .add(NR_STATIC_PRIV_IDS)
-    }
+    unsafe { (PRIV.get() as *mut Priv).add(NR_STATIC_PRIV_IDS) as *const Priv }
 }
 
 pub fn end_dyn_priv_addr() -> *const Priv {
@@ -565,16 +604,15 @@ mod tests {
     #[test]
     fn test_idle_priv_exists() {
         unsafe {
-            assert_eq!(core::ptr::addr_of!(IDLE_PRIV).read().s_proc_nr, 0);
+            assert_eq!((*IDLE_PRIV.get()).s_proc_nr, 0);
         }
     }
 
     #[test]
     fn test_priv_table_size() {
-        // PRIV should have NR_SYS_PROCS = 64 entries
         unsafe {
-            assert_eq!((*core::ptr::addr_of!(PRIV)).len(), NR_SYS_PROCS);
-            assert_eq!((*core::ptr::addr_of!(PPRIV_ADDR)).len(), NR_SYS_PROCS);
+            assert_eq!((*PRIV.get()).len(), NR_SYS_PROCS);
+            assert_eq!((*PPRIV_ADDR.get()).len(), NR_SYS_PROCS);
         }
     }
 

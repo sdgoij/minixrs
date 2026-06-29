@@ -394,8 +394,8 @@ pub unsafe fn proc_init() {
 
     // Initialize privilege table pointers
     unsafe {
-        let base = core::ptr::addr_of_mut!(PRIV).cast::<Priv>();
-        let ptrs_base: *mut *mut Priv = core::ptr::addr_of_mut!(PPRIV_ADDR).cast();
+        let base = PRIV.get() as *mut Priv;
+        let ptrs_base = PPRIV_ADDR.get() as *mut *mut Priv;
         for i in 0..NR_SYS_PROCS {
             // SAFETY: i < NR_SYS_PROCS, the array is exactly that size.
             *ptrs_base.add(i) = base.add(i);
@@ -407,7 +407,7 @@ pub unsafe fn proc_init() {
             if i >= NR_SYS_PROCS {
                 break;
             }
-            let priv_ptr = PPRIV_ADDR[i];
+            let priv_ptr = (*PPRIV_ADDR.get())[i];
             if priv_ptr.is_null() {
                 continue;
             }

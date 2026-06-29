@@ -3669,7 +3669,7 @@ reliable cross-function test patterns.
   with `UnsafeCell` wrapper. Replace `VMREQUEST` with `AtomicPtr`.
   (`crates/kernel/src/glo.rs`)
 
-- [ ] **13.11.2 — Kernel `priv.rs`**: Replace `PRIV`, `IDLE_PRIV`, `PPRIV_ADDR`
+- [x] **13.11.2 — Kernel `priv.rs`**: Replace `PRIV`, `IDLE_PRIV`, `PPRIV_ADDR`
   with `UnsafeCell` wrappers. (`crates/kernel/src/priv.rs`)
 
 - [ ] **13.11.3 — Kernel `profile.rs`**: Replace `SPROFILING` → `AtomicBool`,
