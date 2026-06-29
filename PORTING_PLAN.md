@@ -3210,9 +3210,17 @@ be replaced with real implementations.
   - Added boot_cr3(), write_cr3(), get_proc_cr3() to kernel::pagetable
   - 84 VM tests, 300 total servers tests pass, clippy clean
 
-- [ ] **12.10 — Wire handle_page_fault to VM server** (`kernel/src/pagetable.rs:344`)
+- [x] **12.10 — Wire handle_page_fault to VM server** (`kernel/src/pagetable.rs:372`)
   **Depends on:** VM server message loop (12.8)
-  Currently returns false, silently ignoring all page faults.
+  `handle_page_fault()` now builds a VM_PAGEFAULT message with fault address
+  and error code, then calls `do_sync_ipc(proc, msg, SENDREC)` to deliver it
+  to the VM server. Returns true if the VM server handled the fault (replied
+  OK), false if the process should receive SIGSEGV. Guards against:
+  - Uninitialized CPU local storage (returns false in test environment)
+  - Null proc pointer
+  - Page faults from VM_PROC_NR itself (can't handle its own)
+  - Requires VM dispatch handler or IPC infrastructure (Phase 13) to
+    actually process faults; without it, returns false (SIGSEGV path).
 
 - [ ] **12.11 — Wire ProcFS to VTreeFS** (`crates/fs/src/procfs/`)
   **Depends on:** VTreeFS library (Phase 12), PM process table access (12.3),

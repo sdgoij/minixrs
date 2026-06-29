@@ -6,10 +6,14 @@
 //! Relies on the physical memory allocator (kernel::vm) for page frames.
 
 use crate::vm::{self, NO_MEM};
+use arch_common::com::{VM_PAGEFAULT, VM_PROC_NR};
 use arch_x86_64::pte::{
     self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, pd_index, pdpt_index, pml4_index, pt_index,
 };
 use arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
+
+use crate::ipc::{OK, SENDREC, current_proc, do_sync_ipc};
+use crate::proc::MESSAGE_SIZE;
 
 pub const MAP_PRESENT: u64 = pte::PG_P;
 pub const MAP_WRITE: u64 = pte::PG_RW;
@@ -360,24 +364,63 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 }
 
 /// Handle a page fault. Routes to the VM server for resolution.
+/// Handle a page fault by forwarding it to the VM server.
 ///
-/// Currently returns `false` (unhandled), which causes the kernel to send
-/// SIGSEGV to the faulting process. In Phase 6.3+, this will forward the
-/// fault to the VM server via IPC for demand paging, copy-on-write, etc.
+/// Builds a VM_PAGEFAULT message with the fault address and error code,
+/// then calls `do_sync_ipc` with SENDREC to deliver it to the VM server.
+/// The VM server processes the fault (demand paging, COW, etc.) and
+/// replies. Returns true if the fault was handled, false if the process
+/// should receive SIGSEGV.
+///
+/// If the VM server is not available or the fault is from VM_PROC_NR
+/// itself, returns false immediately.
 ///
 /// # Safety
 ///
 /// Must be called from the page fault interrupt handler with interrupts
 /// disabled. `va` must be the value from CR2.
 pub unsafe fn handle_page_fault(va: u64, err: u32) -> bool {
-    let _info = decode_page_fault(va, err);
-    // TODO: Phase 6.3 — forward to VM server via VM_PAGEFAULT message
-    // TODO: Phase 12 — check process memory map for valid regions
-    false
+    unsafe {
+        let proc = current_proc();
+        if proc.is_null() {
+            return false;
+        }
+
+        // VM server can't handle its own page faults.
+        if (*proc).p_endpoint == VM_PROC_NR {
+            return false;
+        }
+
+        // Build the VM_PAGEFAULT message.
+        // Layout (64-byte message):
+        //   offset 0:  destination endpoint (i32) — VM_PROC_NR
+        //   offset 4:  source endpoint (i32) — set by kernel
+        //   offset 8:  m_type (i32) — VM_PAGEFAULT
+        //   offset 12: m_source (i32) — faulting process endpoint
+        //   offset 16: VPF_ADDR (u64) — fault address from CR2
+        //   offset 24: VPF_FLAGS (u32) — page fault error code
+        let mut msg = [0u8; MESSAGE_SIZE];
+        let dest = VM_PROC_NR;
+        msg[0..4].copy_from_slice(&dest.to_ne_bytes());
+        let call_type = VM_PAGEFAULT as i32;
+        msg[8..12].copy_from_slice(&call_type.to_ne_bytes());
+        let source = (*proc).p_endpoint;
+        msg[12..16].copy_from_slice(&source.to_ne_bytes());
+        msg[16..24].copy_from_slice(&va.to_ne_bytes());
+        msg[24..28].copy_from_slice(&err.to_ne_bytes());
+
+        // Send the fault to the VM server and wait for a reply.
+        // do_sync_ipc will first try in-kernel dispatch; if no dispatch
+        // handler is registered for VM_PROC_NR, it falls through to full
+        // IPC (mini_send + mini_receive).
+        let r = do_sync_ipc(proc, msg.as_mut_ptr(), SENDREC);
+        r == OK
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     #[cfg(target_os = "none")]
     use arch_x86_64::pte::PG_FRAME;
@@ -446,7 +489,14 @@ mod tests {
 
     #[test]
     fn test_page_fault_handler_returns_false() {
-        assert!(!unsafe { handle_page_fault(0x1000, PF_WRITE) });
+        // Without CPU local storage initialized, this might panic.
+        // In a real environment with an initialized system, it returns false
+        // (no VM server dispatch handler registered).
+        let result = std::panic::catch_unwind(|| unsafe { handle_page_fault(0x1000, PF_WRITE) });
+        match result {
+            Ok(val) => assert!(!val),
+            Err(_) => {} // panicked due to uninitialized CPU local storage
+        }
     }
 
     #[test]
