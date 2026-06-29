@@ -2306,9 +2306,11 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - `pm_reboot`/`pm_dumpcore`/`do_getsysinfo`/`do_getrusage`: stub (ENOSYS)
   - 11 tests, clippy clean, 334 total servers tests pass
 
-- [ ] **10.7b — Wire system info queries** (`servers/src/vfs/misc.rs`)
-  **Depends on:** IPC data copy (Phase 13.2)
-  do_getsysinfo needs sys_datacopy_wrapper to copy tables to userspace.
+- [x] **10.7b — Wire system info queries** (`servers/src/vfs/misc.rs`)
+  Implemented `do_getsysinfo` supporting SI_PROC_TAB and SI_DMAP_TAB.
+  Uses `kernel::vm::virtual_copy` to copy tables to userspace.
+  Validates superuser, exact buffer size, and unknown request values.
+  5 tests.
 
 - [ ] **10.7c — Wire PM credential hooks** (`servers/src/vfs/misc.rs`)
   **Depends on:** PM server protocol (Phase 12.3)

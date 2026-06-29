@@ -7,6 +7,11 @@ use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
 use crate::vfs::types::*;
 
+/// System info query: copy the process table.
+const SI_PROC_TAB: i32 = 2;
+/// System info query: copy the device mapping table.
+const SI_DMAP_TAB: i32 = 3;
+
 /// Get the current fproc pointer from global state.
 fn fp() -> *mut Fproc {
     unsafe { (*vfs_global()).fp }
@@ -273,10 +278,48 @@ pub fn pm_dumpcore(_sig: i32, _exe_name: u64) -> i32 {
 
 /// Get system info: copy a VFS data structure to userspace.
 ///
+/// Reads the request from `fs_m_in`, validates the caller is superuser,
+/// then uses `virtual_copy` to copy the requested table to the caller's
+/// address space.
+///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (do_getsysinfo)
 pub fn do_getsysinfo() -> i32 {
-    // TODO: implement getsysinfo
-    ENOSYS
+    let glob = unsafe { &*vfs_global() };
+
+    // Read message fields from fs_m_in (mess_lsys_getsysinfo layout)
+    let what = i32::from_le_bytes(glob.fs_m_in[0..4].try_into().unwrap_or([0; 4]));
+    let dst_addr = u64::from_le_bytes(glob.fs_m_in[4..12].try_into().unwrap_or([0; 8]));
+    let buf_size = usize::from_le_bytes(glob.fs_m_in[12..20].try_into().unwrap_or([0; 8]));
+
+    // Only superuser may call do_getsysinfo (leaks sensitive data).
+    let fp = unsafe { &*glob.fp };
+    if fp.fp_effuid != SU_UID {
+        return EPERM;
+    }
+    let who_e = fp.fp_endpoint;
+    if who_e == -1 {
+        return EINVAL;
+    }
+
+    let (src_addr, len) = match what {
+        SI_PROC_TAB => {
+            let fproc_addr = unsafe { core::ptr::addr_of!((*vfs_global()).fproc) as u64 };
+            (fproc_addr, core::mem::size_of::<[Fproc; 256]>())
+        }
+        SI_DMAP_TAB => {
+            let dmap_addr = unsafe { core::ptr::addr_of!((*vfs_global()).dmap) as u64 };
+            (dmap_addr, core::mem::size_of::<[Dmap; 64]>())
+        }
+        _ => return EINVAL,
+    };
+
+    // Buffer size must match exactly.
+    if len != buf_size {
+        return EINVAL;
+    }
+
+    // Copy FROM kernel (-1) TO the requesting process.
+    unsafe { kernel::vm::virtual_copy(-1, src_addr, who_e, dst_addr, len) }
 }
 
 /// Get resource usage for a process.
@@ -524,5 +567,88 @@ mod tests {
             assert_eq!((*fp_slot(0)).fp_endpoint, 10);
             assert_eq!((*fp_slot(0)).fp_pid, 100);
         }
+    }
+
+    // ── do_getsysinfo ────────────────────────────────────────────
+
+    #[test]
+    fn test_getsysinfo_rejects_non_superuser() {
+        unsafe {
+            reset_globals();
+            let glob = vfs_global();
+            (*glob).fp = fp_slot(0);
+            (*fp_slot(0)).fp_endpoint = 0;
+            (*fp_slot(0)).fp_effuid = 1000; // not superuser
+        }
+        assert_eq!(do_getsysinfo(), EPERM);
+    }
+
+    #[test]
+    fn test_getsysinfo_invalid_what() {
+        unsafe {
+            reset_globals();
+            let glob = vfs_global();
+            (*glob).fp = fp_slot(0);
+            (*fp_slot(0)).fp_endpoint = 1;
+            (*fp_slot(0)).fp_effuid = 0; // superuser
+            // Set what = 999 (unknown), dst_addr = 0, size = 0
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[0..4].copy_from_slice(&999i32.to_le_bytes());
+        }
+        assert_eq!(do_getsysinfo(), EINVAL);
+    }
+
+    #[test]
+    fn test_getsysinfo_size_mismatch() {
+        unsafe {
+            reset_globals();
+            let glob = vfs_global();
+            (*glob).fp = fp_slot(0);
+            (*fp_slot(0)).fp_endpoint = 1;
+            (*fp_slot(0)).fp_effuid = 0; // superuser
+            // Set what = SI_PROC_TAB, dst_addr = 0, size = wrong_size
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            fs_m_in[12..20].copy_from_slice(&42usize.to_le_bytes()); // wrong size
+        }
+        assert_eq!(do_getsysinfo(), EINVAL);
+    }
+
+    #[test]
+    fn test_getsysinfo_valid_si_proc_tab() {
+        unsafe {
+            reset_globals();
+            let glob = vfs_global();
+            (*glob).fp = fp_slot(0);
+            (*fp_slot(0)).fp_endpoint = 1;
+            (*fp_slot(0)).fp_effuid = 0; // superuser
+            // Set what = SI_PROC_TAB, dst_addr = some buffer, size = correct
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes()); // dst
+            fs_m_in[12..20].copy_from_slice(&core::mem::size_of::<[Fproc; 256]>().to_le_bytes());
+        }
+        // virtual_copy will fail (no VM init), but we check it doesn't crash
+        // and returns a negative error code (not success/0).
+        let result = do_getsysinfo();
+        assert_ne!(result, 0, "virtual_copy should fail without VM init");
+    }
+
+    #[test]
+    fn test_getsysinfo_valid_si_dmap_tab() {
+        unsafe {
+            reset_globals();
+            let glob = vfs_global();
+            (*glob).fp = fp_slot(0);
+            (*fp_slot(0)).fp_endpoint = 1;
+            (*fp_slot(0)).fp_effuid = 0; // superuser
+            // Set what = SI_DMAP_TAB, dst_addr = some buffer, size = correct
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[0..4].copy_from_slice(&(SI_DMAP_TAB as i32).to_le_bytes());
+            fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes()); // dst
+            fs_m_in[12..20].copy_from_slice(&core::mem::size_of::<[Dmap; 64]>().to_le_bytes());
+        }
+        let result = do_getsysinfo();
+        assert_ne!(result, 0, "virtual_copy should fail without VM init");
     }
 }
