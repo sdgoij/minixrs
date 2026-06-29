@@ -5,6 +5,8 @@
 //! - Per-CPU data accessed via `swapgs` + GS segment
 //! - Larger kernel stack sizes (16 KB vs 8 KB)
 
+use core::cell::UnsafeCell;
+
 /// Maximum number of CPUs.
 const MAXCPUS: u32 = 32;
 
@@ -50,36 +52,50 @@ pub const CPU_ROLE_BP: u32 = 1;
 /// CPU role: application processor (secondary).
 pub const CPU_ROLE_AP: u32 = 2;
 
+/// Wrapper for `[CpuInfo; MAXCPUS as usize]`.
+pub struct CpuInfoCell(UnsafeCell<[CpuInfo; MAXCPUS as usize]>);
+unsafe impl Sync for CpuInfoCell {}
+impl CpuInfoCell {
+    pub const fn new(val: [CpuInfo; MAXCPUS as usize]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [CpuInfo; MAXCPUS as usize] {
+        self.0.get()
+    }
+}
+
 // ── Global CPU info array ───────────────────────────────────────────────
 
-pub static mut CPU_INFO: [CpuInfo; MAXCPUS as usize] = [CpuInfo {
-    ci_cpunumber: 0,
-    ci_is_bsp: 0,
-    ci_role: 0,
-    _pad: 0,
-    ci_kstack: 0,
-    ci_curproc: 0,
-    ci_idleproc: 0,
-    ci_freq_hz: 0,
-    ci_tsc_freq: 0,
-    ci_tsc_invariant: 0,
-    ci_family: 0,
-    ci_model: 0,
-    ci_stepping: 0,
-    _pad2: 0,
-    _reserved: [0u64; 8],
-}; MAXCPUS as usize];
+pub static CPU_INFO: CpuInfoCell = CpuInfoCell::new(
+    [CpuInfo {
+        ci_cpunumber: 0,
+        ci_is_bsp: 0,
+        ci_role: 0,
+        _pad: 0,
+        ci_kstack: 0,
+        ci_curproc: 0,
+        ci_idleproc: 0,
+        ci_freq_hz: 0,
+        ci_tsc_freq: 0,
+        ci_tsc_invariant: 0,
+        ci_family: 0,
+        ci_model: 0,
+        ci_stepping: 0,
+        _pad2: 0,
+        _reserved: [0u64; 8],
+    }; MAXCPUS as usize],
+);
 
 // ── Helper functions ────────────────────────────────────────────────────
 
 /// Get CPU info for a given CPU number.
 pub fn cpu_info(cpu: u32) -> &'static CpuInfo {
-    unsafe { &CPU_INFO[cpu as usize] }
+    unsafe { &(*CPU_INFO.get())[cpu as usize] }
 }
 
 /// Get mutable CPU info for a given CPU number.
 pub fn cpu_info_mut(cpu: u32) -> &'static mut CpuInfo {
-    unsafe { &mut CPU_INFO[cpu as usize] }
+    unsafe { &mut (*CPU_INFO.get())[cpu as usize] }
 }
 
 #[cfg(test)]
