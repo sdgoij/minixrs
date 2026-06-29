@@ -2906,15 +2906,20 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
     - `tty_serial_input()` / `tty_serial_output_pending()` helpers
     - `rs232_minor_to_index()` / `serial_idx_to_tty_idx()` minor↔index helpers
 
-- [ ] **11e.6 — `minix/drivers/tty/pty/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/tty/pty/`
-  - Pseudo-terminal driver
-  - Integrated into `crates/servers/src/tty.rs` (42 tests passing)
-  - `Pty` struct with state management, `pty_master_open/close/read/write`,
-    `pty_slave_open/close/write`, PTY data transfer via circular buffer
-  - TTY lines initialized in `tty_init()` with PTY pairs at minors 128-131
-    (TTYPX) and 192-195 (PTYPX)
-  - 7 PTY-specific tests: master/slave open/close, data transfer roundtrip
+- [x] **11e.6 — `minix/drivers/tty/pty/`**
+  - Source: `.refs/minix-3.3.0/minix/drivers/tty/pty/pty.c`
+  - Pseudo-terminal driver in `crates/drivers/src/tty/pty.rs` (~740 lines, 28 tests)
+  - `Pty` struct with state machine (TTY_ACTIVE/PTY_ACTIVE/TTY_CLOSED/PTY_CLOSED)
+  - Master-side ops: `master_open/close/read/write/cancel/select`
+  - Slave-side ops: `slave_open/close/read/write/echo/icancel/ocancel`
+  - Circular output buffer (2048 bytes) with head/tail management
+  - `PtyHost` trait for TTY server callbacks (`in_process`, `out_process`,
+    `sigchar`, `handle_events`) with `NoopHost` default
+  - `PtyCell` wrapper for static PTY table (up to 4 pairs)
+  - `minor_to_pty()` maps minors 128-131 (slave) and 192-195 (master)
+  - All 28 tests pass, clippy clean
+  - Slave-side I/O (`slave_read`/`slave_write`/`slave_echo`) requires TTY
+    server `in_process`/`out_process` via `PtyHost` (Phase 12.7)
 
 - [ ] **11e.7 — `minix/drivers/hid/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/hid/`
@@ -3170,6 +3175,29 @@ be replaced with real implementations.
   - `ioctl()` — dispatch via `arch_*` functions with safecopy for struct transfer
   - Implement `FbArch` trait for target platform (VESA BIOS or PCI MMIO)
   - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/fb.c`
+
+- [ ] **12.23 — Wire PtyHost::in_process in PTY slave_read** (`crates/drivers/src/tty/pty.rs`)
+  **Depends on:** `sys_safecopyfrom` (Phase 4), PTY driver module (Phase 11e.6)
+  Currently `slave_read()` advances bookkeeping (wrleft/wrcum) but never calls
+  `host.in_process()` because the actual byte can't be read from the writer's
+  grant without `sys_safecopyfrom`.  Once grants are available:
+  1. In `slave_read()`, call `sys_safecopyfrom(wrcaller, wrgrant, wrcum, &c, 1)`
+     to read one byte from the master writer
+  2. Feed it to `host.in_process(&[c])` for TTY input processing
+  3. Only advance bookkeeping if `in_process` consumed the byte
+  4. Reply to writer when `wrleft == 0`
+  Remove the doc note about deferred wiring once implemented.
+
+- [ ] **12.24 — Wire chardriver_reply_select in PTY select_retry** (`crates/drivers/src/tty/pty.rs`)
+  **Depends on:** Character driver framework / `chardriver_reply_select` (Phase 12.7 TTY server),
+  PTY driver module (Phase 11e.6)
+  `select_retry()` currently computes ready ops but never notifies the waiting
+  process because `chardriver_reply_select` doesn't exist yet.  Once available:
+  1. In `select_retry()`, after computing `r = select_try(self.select_ops)`:
+     `chardriver_reply_select(self.select_proc, minor, r)`
+  2. Only clear `self.select_ops &= !r` after successful notification
+  3. The `_minor` parameter is the device minor for the reply
+  Remove the `_` prefix from `minor` once implemented.
 
 ## Phase 13: Rust `std` for Minix
 
