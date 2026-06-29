@@ -3468,13 +3468,13 @@ userspace crate
     - 13 tests: syscall numbers, signatures, alignment math,
       BufWriter, allocator, clippy clean
 
-- [ ] **13.2 — `crates/minix-std` syscall layer**
-  - IPC primitives: `send`, `receive`, `sendrec`, `notify`, `senda` via `syscall`
-  - Endpoint constants: all well-known system server endpoints, `ANY`/`NONE`/`SELF`
-  - Error types: `MinixErr` with Display, `from_syscall()`, 20+ error constants
-  - Grant table: `GrantTable` with alloc/free/get/clear, 64 slots
-  - Message types: re-exports `kernel::msg::Message`
-  - 35 tests: IPC error handling, grant lifecycle, endpoint validation
+- [x] **13.2 — `crates/minix-std` syscall layer**
+  - IPC primitives: `send`, `receive`, `sendrec`, `notify` via `syscall` (syscalls 46-49)
+  - Endpoint constants: all well-known server/kernel endpoints, `ANY`/`NONE`/`SELF`
+  - Error types: `MinixErr` with `from_syscall()`, 23 error constants
+  - Grant table: `GrantTable` with `alloc`/`free`/`get`/`clear`, 64 slots, `UnsafeCell` + `Sync`
+  - Message type: `Message = [u8; 64]`
+  - 28 tests: endpoint validation, error conversion, grant lifecycle, clippy clean
 
 - [ ] **13.3 — Process lifecycle (PM protocol)**
   - `fork`: send PM fork request, receive child endpoint

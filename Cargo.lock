@@ -66,6 +66,13 @@ name = "minix-rt"
 version = "0.1.0"
 
 [[package]]
+name = "minix-std"
+version = "0.1.0"
+dependencies = [
+ "minix-rt",
+]
+
+[[package]]
 name = "net"
 version = "0.1.0"
 

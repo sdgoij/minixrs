@@ -1,0 +1,16 @@
+[package]
+name = "minix-std"
+version = "0.1.0"
+description = "Minix userspace syscall layer: IPC, endpoints, errors, grants"
+
+[package.edition]
+workspace = true
+
+[package.license]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+minix-rt = { path = "../minix-rt" }
