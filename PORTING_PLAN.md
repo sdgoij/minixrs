@@ -3081,9 +3081,25 @@ trait Driver {
   - IPC message loop deferred (see Phase 12 wiring)
   - Source: `.refs/minix-3.3.0/minix/servers/ds/`
 
-- [ ] **12.5 — IPC server** (`.refs/minix-3.3.0/minix/servers/ipc/`): `main.c`, `sem.c`, `shm.c`, `utility.c`, `inc.h`, `ipc.conf`, `proto.h`
-  - IPC endpoint management, semaphore support, shared memory
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+- [x] **12.5 — IPC server** (`.refs/minix-3.3.0/minix/servers/ipc/`): `main.c`, `sem.c`, `shm.c`, `utility.c`, `inc.h`, `ipc.conf`, `proto.h`
+  - System V IPC: semaphores (semget, semctl, semop) and shared memory (shmget,
+    shmat, shmdt, shmctl)
+  - Implemented in `crates/servers/src/ipc.rs`:
+    - Semaphore operations: do_semget (create/find with IPC_CREAT/EXCL), do_semctl
+      (14 commands: GETALL, GETNCNT, GETPID, GETVAL, GETZCNT, SETALL, SETVAL,
+      IPC_STAT/SET/RMID/INFO, SEM_INFO/STAT), do_semop (atomic ops with wait
+      queues for zero/increment conditions)
+    - Shared memory operations: do_shmget (create/find with page-aligned size),
+      do_shmat (stub — needs vm_remap), do_shmdt (stub — needs vm_unmap),
+      do_shmctl (IPC_STAT/SET/RMID/INFO, SHM_INFO/STAT)
+    - Permission checking via check_perm() (root-grant until PM integration)
+    - VM dependency stubs: vm_watch/query_exit, vm_remap/unmap, vm_getphys,
+      vm_getrefcount — concrete tasks in deferred section
+    - 49 tests covering all semaphore and SHM operations, clippy clean
+  - **Stubs (deferred):** do_shmat (needs vm_remap), do_shmdt (needs vm_unmap),
+    do_semop sembuf array copy (needs sys_datacopy), check_perm UID lookup
+    (needs PM getnuid), IPC_SET tmp_ds copy (needs sys_datacopy), message
+    loop (needs SEF framework)
 
 - [ ] **12.6 — DEVMAN server** (`.refs/minix-3.3.0/minix/servers/devman/`): `main.c`, `bind.c`, `buf.c`, `device.c`, `devinfo.h`, `devman.h`, `proto.h`
   - Device Manager, device binding/unbinding, device enumeration
@@ -3098,6 +3114,45 @@ trait Driver {
 These stubs require the System Event Framework (SEF) for server init/lifecycle,
 IPC message loops, or access to other running servers' tables before they can
 be replaced with real implementations.
+
+- [ ] **12.5a — Wire IPC server message loop** (`servers/src/ipc.rs:ipc_server_main`)
+  **Depends on:** SEF init framework (Phase 12.2 RS), IPC message receive
+  Currently an empty stub. Must create a main loop that receives IPC_SHMGET,
+  IPC_SHMAT, IPC_SHMDT, IPC_SHMCTL, IPC_SEMGET, IPC_SEMCTL, IPC_SEMOP messages
+  and dispatches them through the ipc_calls table, handling VM exit notifications
+  and periodic refcount updates.
+
+- [ ] **12.5b — Implement do_shmat with VM remap** (`servers/src/ipc.rs:do_shmat`)
+  **Depends on:** VM server remap infrastructure (Phase 12.9)
+  Currently returns ENOSYS. Must call vm_remap to map shm.page into caller's
+  address space, set shm_atime/shm_lpid, and return mapped address.
+
+- [ ] **12.5c — Implement do_shmdt with VM unmap** (`servers/src/ipc.rs:do_shmdt`)
+  **Depends on:** VM server getphys + unmap infrastructure (Phase 12.9)
+  Currently returns OK without doing anything. Must lookup segment by
+  physical address via vm_getphys, call vm_unmap on caller, update times.
+
+- [ ] **12.5d — Implement do_semop sembuf copy from userspace**
+    (`servers/src/ipc.rs:do_semop`)
+  **Depends on:** sys_datacopy / virtual_copy (Phase 13)
+  Currently validates ID/permissions but doesn't copy the sembuf array
+  from user space. Must copy nops × sizeof(sembuf) bytes, validate
+  sem_num bounds, check for IPC_NOWAIT conditions, apply sem_op or
+  enqueue waiters on zero/increment lists, and call update_semaphores().
+
+- [ ] **12.5e — Implement check_perm with real UID/GID lookup**
+    (`servers/src/ipc.rs:check_perm`)
+  **Depends on:** PM server getnuid/getngid (Phase 12.3)
+  Currently hardcoded to uid=0 (root), grants all permissions.
+  Must query PM server for caller's UID/GID and check against the
+  IPC permission structure's uid/cuid/gid/cgid and mode bits.
+
+- [ ] **12.5f — Implement update_refcount_and_destroy**
+    (`servers/src/ipc.rs:update_refcount_and_destroy_stub`)
+  **Depends on:** VM server getrefcount + munmap (Phase 12.9)
+  Currently a no-op. Must walk SHM list, call vm_getrefcount for each
+  segment, update shm_nattch, unmap and destroy segments with 0
+  attachments and SHM_DEST set, compact the list.
 
 - [ ] **12.8 — Wire VM server message loop** (`servers/src/vm/mod.rs`)
   **Depends on:** SEF init framework (Phase 12.2 RS), IPC message receive

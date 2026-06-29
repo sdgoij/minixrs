@@ -4,6 +4,7 @@
 
 pub mod clock_server;
 pub mod ds;
+pub mod ipc;
 pub mod pm;
 pub mod rs;
 pub mod sched;
