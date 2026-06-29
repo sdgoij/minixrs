@@ -3101,9 +3101,21 @@ trait Driver {
     (needs PM getnuid), IPC_SET tmp_ds copy (needs sys_datacopy), message
     loop (needs SEF framework)
 
-- [ ] **12.6 — DEVMAN server** (`.refs/minix-3.3.0/minix/servers/devman/`): `main.c`, `bind.c`, `buf.c`, `device.c`, `devinfo.h`, `devman.h`, `proto.h`
+- [x] **12.6 — DEVMAN server** (`.refs/minix-3.3.0/minix/servers/devman/`): `main.c`, `bind.c`, `buf.c`, `device.c`, `devinfo.h`, `devman.h`, `proto.h`
   - Device Manager, device binding/unbinding, device enumeration
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+  - Implemented in `crates/servers/src/devman.rs`:
+    - Device tree with recursive find, add_child, del_device with compaction
+    - Reference-counted device lifecycle (get/put, auto-delete at ref_count==0)
+    - Static info inodes with read function table
+    - Message handlers (stubs): do_add_device, do_del_device, do_bind_device,
+      do_unbind_device — validate source, manage device state
+    - Device state machine: UNBOUND → BOUND → ZOMBIE/UNBOUND
+    - Event queue (stub) for device add/remove notifications
+    - Server main loop stub (needs VTreeFS + SEF framework)
+    - 23 tests covering all device tree operations, clippy clean
+  - **Stubs (deferred):** VTreeFS integration (init_hook/read_hook/message_hook),
+    sys_safecopyfrom for device info grant copy, IPC send/recv for bind/unbind
+    forwarding, event queue allocation, buffer formatting
 
 - [ ] **12.7 — TTY server**
   - Terminal multiplexing, pseudo-terminal management

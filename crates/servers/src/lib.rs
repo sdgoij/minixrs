@@ -3,6 +3,7 @@
 #![no_std]
 
 pub mod clock_server;
+pub mod devman;
 pub mod ds;
 pub mod ipc;
 pub mod pm;
