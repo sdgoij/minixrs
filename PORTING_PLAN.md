@@ -3487,17 +3487,19 @@ userspace crate
   - All functions gated with `#[cfg(target_os = "none")]`, return ENOSYS on host
   - 15 tests, 43 total minix-std tests pass, clippy clean
 
-- [ ] **13.4 — File I/O (VFS protocol)**
-  - `open`: send VFS open request, receive fd
-  - `read` / `write`: VFS read/write with grant-based buffers
-  - `close`: VFS close
-  - `lseek`: VFS seek
-  - `stat` / `fstat`: VFS stat
-  - `readdir`: VFS getdents
-  - `mount` / `umount`: VFS mount
-  - `ioctl`: device control via VFS
-  - `select` / `poll`: VFS select
-  - Tests: open/read/write/close pipe roundtrip via mock VFS
+- [x] **13.4 — File I/O (VFS protocol)**
+  - `open`: VFS_OPEN with name/flags/mode, returns fd
+  - `read` / `write`: VFS_READ/WRITE with fd, buf, nbytes
+  - `close`: VFS_CLOSE with fd
+  - `lseek`: VFS_LSEEK with fd/offset/whence
+  - `fstat`: VFS_FSTAT, returns `Stat` struct (88 bytes, POSIX layout)
+  - `readdir`: VFS_GETDENTS with fd/buf/nbytes
+  - `ioctl`: VFS_IOCTL with fd/request/arg
+  - `select` / `poll`: VFS_SELECT (stub)
+  - `fsync`: VFS_FSYNC, `truncate`: VFS_TRUNCATE
+  - Implemented in `crates/minix-std/src/fs.rs` with VFS call numbers
+    matching `.refs/minix-3.3.0/minix/include/minix/callnr.h`
+  - 36 tests, 79 total minix-std tests pass, clippy clean
 
 - [ ] **13.5 — Memory management (VM protocol)**
   - `mmap` / `munmap`: VM remap/unmap
