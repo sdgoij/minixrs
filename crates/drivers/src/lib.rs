@@ -13,6 +13,7 @@ pub mod eeprom;
 pub mod input;
 pub mod storage;
 pub mod system;
+pub mod tty;
 pub mod video;
 
 /// Driver error type.

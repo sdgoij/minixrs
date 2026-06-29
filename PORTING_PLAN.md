@@ -2653,6 +2653,9 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Stub on non-x86 or before registration (returns `None`)
   - Added `dma` module to storage `mod.rs`
   - Tests: 2 passed (constants, full lifecycle)
+  - **Wiring:** `register_allocator()` must be called during boot to connect
+    `PhysicalAllocator` backend; see task 12.20. Without it, all DMA
+    allocations silently return `None` (stub mode).
 
 - [x] **11b.13 — PIT timer + PIC remap + timer ISR** (arch-x86_64)
   - Source: `crates/arch-x86_64/src/apic.rs`
@@ -2663,8 +2666,9 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - `remap_pic()` — full ICW1-4 programming (from 11b.11)
   - PIT constants: `PIT_DATA0` (0x40), `PIT_CMD` (0x43), `PIT_BASE_FREQ` (1,193,182 Hz)
   - Tests: 254 passed, 0 failed, 2 ignored (arch-x86_64 crate)
-  - Wiring in `kmain()`: call `remap_pic`, `init_pit`, `set_timer_isr_handler`,
-    IDT entry setup, `unmask_timer_irq`, `sti` (see kernel-boot follow-up)
+  - **Wiring in `kmain()`:** call `remap_pic`, `init_pit`, `set_timer_isr_handler`,
+    IDT entry setup, `unmask_timer_irq`, `sti`; see task 12.21 for kernel-boot
+    integration details.
 
 - [ ] **11b.15 — MMC/SD card detection** (hardware-dependent)
 
@@ -2883,22 +2887,24 @@ are operational. All depend on getting `get_block`/`put_block` from libminixfs:
   - Source: `.refs/minix-3.3.0/minix/drivers/printer/`
   - Parallel port printer driver
 
-- [ ] **11e.5 — `minix/drivers/tty/tty/`**
+- [x] **11e.5 — `minix/drivers/tty/tty/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/tty/tty/`
   - Serial port (UART 16550) driver
-  - `crates/drivers/src/tty/rs232.rs` (1290+ lines, 24 tests)
+  - `crates/drivers/src/tty/rs232.rs` (~764 lines, 28 tests)
   - Full UART 16550 register definitions, baud rate config, 5/6/7/8 data bits,
     parity (None/Odd/Even/Mark/Space), stop bits, FIFO control, interrupt
-    management, modem control (DTR/RTS/CTS/DCD), circular input buffer,
+    management, modem control (DTR/RTS/CTS/DCD), circular input buffer (256B),
     error statistics, break control
-  - Wired as `crates/drivers::tty::rs232` behind `x86` feature
-  - **Integration with TTY server**:
-    - `NR_RS_LINES` changed from 0 → 2 (COM1, COM2)
+  - Wired as `crates/drivers::tty::rs232` via `pub mod tty` in lib.rs
+  - Includes `RealIo` (x86 `in`/`out` instructions), `MockIo` (static port array)
+  - All 28 tests pass (fixed two hanging tests: `receive_byte()` now clears
+    LSR_DR after reading RBR to simulate real hardware behavior; `send_break()`
+    updates cached `self.lcr`)
+  - **Integration with TTY server** (deferred — see 12.7):
+    - `NR_RS_LINES` from 0 → 2 (COM1, COM2)
     - `TtyLine.serial_idx` field for RS-232 ↔ serial port association
-    - `tty_serial_input()` — feed received bytes into line discipline
-    - `tty_serial_output_pending()` — query pending serial output
-    - `rs232_minor_to_index()` / `serial_idx_to_tty_idx()` — minor↔index helpers
-    - RS-232 TTY lines initialized with `serial_idx` set during `tty_init()`
+    - `tty_serial_input()` / `tty_serial_output_pending()` helpers
+    - `rs232_minor_to_index()` / `serial_idx_to_tty_idx()` minor↔index helpers
 
 - [ ] **11e.6 — `minix/drivers/tty/pty/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/tty/pty/`
