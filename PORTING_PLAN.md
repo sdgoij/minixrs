@@ -2989,9 +2989,17 @@ trait Driver {
 
 ### Tasks
 
-- [ ] **12.1 — SCHED server** (`.refs/minix-3.3.0/minix/servers/sched/`): `main.c`, `schedule.c`, `utility.c`, `proto.h`, `sched.h`, `schedproc.h`
-  - Process scheduler server, priority queue management, time quantum enforcement, live update support
-  - Tests: Server init; request dispatch; process lifecycle operations; state management
+- [x] **12.1 — SCHED server** (`.refs/minix-3.3.0/minix/servers/sched/`): `main.c`, `schedule.c`, `utility.c`, `proto.h`, `sched.h`, `schedproc.h`
+  - Process scheduler server in `crates/servers/src/sched.rs` (~530 lines, 21 tests)
+  - `SchedProc` table (256 slots) with endpoint, priority, quantum, CPU, flags
+  - `do_start_scheduling`: populates slot, sets priority/quantum (START or INHERIT)
+  - `do_stop_scheduling`: clears slot flags
+  - `do_noquantum`: lowers priority when quantum expires
+  - `do_nice`: changes process priority with rollback on failure
+  - `balance_queues`: periodic rebalance restoring lowered priorities
+  - `sched_isokendpt`/`sched_isemtyendpt`: endpoint validity checks
+  - IPC message loop deferred (Phase 12 wiring)
+  - All 21 tests pass, clippy clean
 
 - [ ] **12.2 — RS server** (`.refs/minix-3.3.0/minix/servers/rs/`): `main.c`, `manager.c`, `request.c`, `exec.c`, `error.c`, `memory.c`, `table.c`, `utility.c`, `const.h`, `glo.h`, `inc.h`, `proto.h`, `type.h`
   - Restart Service — process crash recovery, live update coordination, process cloning/restart
