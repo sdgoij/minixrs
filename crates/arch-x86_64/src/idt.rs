@@ -8,6 +8,8 @@
 //! This module provides the IDT structure, a global static IDT, and
 //! initialization logic to load it via `lidt`.
 
+use core::cell::UnsafeCell;
+
 use crate::segments::{GateDescriptor64, NIDT, RegionDescriptor64, SDT_SYS386IGT, make_idt_gate};
 use core::mem::size_of;
 
@@ -61,6 +63,18 @@ impl Default for Idt {
     }
 }
 
+/// Wrapper for `Idt` — the IDT.
+pub struct IdtCell(UnsafeCell<Idt>);
+unsafe impl Sync for IdtCell {}
+impl IdtCell {
+    pub const fn new(val: Idt) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut Idt {
+        self.0.get()
+    }
+}
+
 /// The global IDT.
 ///
 /// Initialized with all-zeros (missing) entries. Loaded during `init_idt()`.
@@ -69,7 +83,7 @@ impl Default for Idt {
 ///
 /// Mutable access must be serialized (single CPU during boot, or with
 /// proper synchronization on SMP).
-pub static mut IDT: Idt = Idt::new();
+pub static IDT: IdtCell = IdtCell::new(Idt::new());
 
 /// Initialize the IDT with default interrupt gates and load it via `lidt`.
 ///
@@ -92,14 +106,14 @@ pub unsafe fn init_idt() {
     // SAFETY: Single-threaded during boot; no other CPU accesses IDT.
     unsafe {
         for i in 0..(NIDT as usize) {
-            IDT.entries[i] = make_idt_gate(0x0008, 0, 0, 0, SDT_SYS386IGT);
+            (*IDT.get()).entries[i] = make_idt_gate(0x0008, 0, 0, 0, SDT_SYS386IGT);
         }
     }
 
     // Build the 10-byte pseudo-descriptor for LIDT.
     let idtr = RegionDescriptor64 {
         limit: (size_of::<Idt>() - 1) as u16,
-        base: core::ptr::addr_of!(IDT) as u64,
+        base: IDT.get() as *const Idt as u64,
     };
 
     // Cast the RegionDescriptor64 to the raw byte slice that lidt expects.

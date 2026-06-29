@@ -3691,7 +3691,7 @@ reliable cross-function test patterns.
 - [x] **13.11.7 — Arch `cpuvar.rs`**: Replace `CPU_INFO` with `UnsafeCell`
   wrapper. (`crates/arch-x86_64/src/cpuvar.rs`)
 
-- [ ] **13.11.8 — Arch `idt.rs`**: Replace `IDT` with `UnsafeCell` wrapper.
+- [x] **13.11.8 — Arch `idt.rs`**: Replace `IDT` with `UnsafeCell` wrapper.
   (`crates/arch-x86_64/src/idt.rs`)
 
 - [ ] **13.11.9 — Server `vm/mem.rs`**: Replace `GRANT_TABLES` with `UnsafeCell`
