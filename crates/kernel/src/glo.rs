@@ -6,11 +6,11 @@
 //!
 //! **Rust 2024 `static_mut_refs` handling:**
 //! Simple scalars use `AtomicU32`/`AtomicBool` for safe concurrent
-//! access. Struct statics use `static mut` with `addr_of_mut!()` and
-//! public accessor functions. Compound statics are wrapped in helper
-//! types.
+//! access. Struct statics are wrapped in `UnsafeCell`-based types with
+//! `unsafe impl Sync`. Compound statics use atomics or wrapper types.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants & config
@@ -27,26 +27,97 @@ pub static CONFIG_APIC_TIMER_X: AtomicU32 = AtomicU32::new(0);
 pub static CONFIG_NO_SMP: AtomicBool = AtomicBool::new(true);
 
 // ─────────────────────────────────────────────────────────────────────────
+// Wrapper types for struct statics
+// ─────────────────────────────────────────────────────────────────────────
+
+pub struct KInfoCell(UnsafeCell<KInfo>);
+unsafe impl Sync for KInfoCell {}
+impl KInfoCell {
+    pub const fn new(val: KInfo) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    /// Get a raw pointer. Valid for the lifetime of the program (static).
+    pub fn get(&self) -> *mut KInfo {
+        self.0.get()
+    }
+}
+
+pub struct MachineCell(UnsafeCell<Machine>);
+unsafe impl Sync for MachineCell {}
+impl MachineCell {
+    pub const fn new(val: Machine) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut Machine {
+        self.0.get()
+    }
+}
+
+pub struct KMessagesCell(UnsafeCell<KMessages>);
+unsafe impl Sync for KMessagesCell {}
+impl KMessagesCell {
+    pub const fn new(val: KMessages) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut KMessages {
+        self.0.get()
+    }
+}
+
+pub struct LoadInfoCell(UnsafeCell<LoadInfo>);
+unsafe impl Sync for LoadInfoCell {}
+impl LoadInfoCell {
+    pub const fn new(val: LoadInfo) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut LoadInfo {
+        self.0.get()
+    }
+}
+
+pub struct KRandomnessCell(UnsafeCell<KRandomness>);
+unsafe impl Sync for KRandomnessCell {}
+impl KRandomnessCell {
+    pub const fn new(val: KRandomness) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut KRandomness {
+        self.0.get()
+    }
+}
+
+pub struct MinixKernInfoCell(UnsafeCell<MinixKernInfo>);
+unsafe impl Sync for MinixKernInfoCell {}
+impl MinixKernInfoCell {
+    pub const fn new(val: MinixKernInfo) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut MinixKernInfo {
+        self.0.get()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Kernel info structures
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Kernel information for userspace.
-pub static mut KINFO: KInfo = KInfo::new();
+pub static KINFO: KInfoCell = KInfoCell::new(KInfo::new());
 
 /// Machine information for userspace.
-pub static mut MACHINE: Machine = Machine::new();
+pub static MACHINE: MachineCell = MachineCell::new(Machine::new());
 
 /// Diagnostic messages buffer.
-pub static mut KMESSAGES: KMessages = KMessages::new();
+pub static KMESSAGES: KMessagesCell = KMessagesCell::new(KMessages::new());
 
 /// Load average status.
-pub static mut LOADINFO: LoadInfo = LoadInfo::new();
+pub static LOADINFO: LoadInfoCell = LoadInfoCell::new(LoadInfo::new());
 
 /// Randomness source.
-pub static mut KRANDOM: KRandomness = KRandomness::new();
+pub static KRANDOM: KRandomnessCell = KRandomnessCell::new(KRandomness::new());
 
 /// Minix kernel info struct (ABI).
-pub static mut MINIX_KERNINFO: MinixKernInfo = MinixKernInfo::new();
+pub static MINIX_KERNINFO: MinixKernInfoCell = MinixKernInfoCell::new(MinixKernInfo::new());
 
 // ─────────────────────────────────────────────────────────────────────────
 // Simple globals (atomic for Rust 2024 safety)
@@ -83,22 +154,94 @@ pub static SERIAL_DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
 // CPU frequency
 // ─────────────────────────────────────────────────────────────────────────
 
+const fn new_atomic_u64_array() -> [AtomicU64; 32] {
+    [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ]
+}
+
+const fn new_atomic_u32_array() -> [AtomicU32; 32] {
+    [
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+    ]
+}
+
 /// Per-CPU frequency in Hz.
-pub static mut CPU_HZ: [u64; 32] = [0u64; 32];
+pub static CPU_HZ: [AtomicU64; 32] = new_atomic_u64_array();
 
 /// Set the CPU frequency for a given CPU.
 pub fn cpu_set_freq(cpu: usize, freq: u64) {
     if cpu < 32 {
-        unsafe {
-            *core::ptr::addr_of_mut!(CPU_HZ).cast::<u64>().add(cpu) = freq;
-        }
+        CPU_HZ[cpu].store(freq, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
 /// Get the CPU frequency for a given CPU.
 pub fn cpu_get_freq(cpu: usize) -> u64 {
     if cpu < 32 {
-        unsafe { *core::ptr::addr_of!(CPU_HZ).cast::<u64>().add(cpu) }
+        CPU_HZ[cpu].load(core::sync::atomic::Ordering::Relaxed)
     } else {
         0
     }
@@ -109,22 +252,33 @@ pub fn cpu_get_freq(cpu: usize) -> u64 {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// BKL statistics per-CPU.
-pub static mut KERNEL_TICKS: [u64; 32] = [0u64; 32];
-pub static mut BKL_TICKS: [u64; 32] = [0u64; 32];
-pub static mut BKL_TRIES: [u32; 32] = [0u32; 32];
-pub static mut BKL_SUCC: [u32; 32] = [0u32; 32];
+pub static KERNEL_TICKS: [AtomicU64; 32] = new_atomic_u64_array();
+pub static BKL_TICKS: [AtomicU64; 32] = new_atomic_u64_array();
+pub static BKL_TRIES: [AtomicU32; 32] = new_atomic_u32_array();
+pub static BKL_SUCC: [AtomicU32; 32] = new_atomic_u32_array();
 
 // ─────────────────────────────────────────────────────────────────────────
 // IPC call names
 // ─────────────────────────────────────────────────────────────────────────
 
+pub struct IpcCallNamesCell(UnsafeCell<[Option<&'static str>; 256]>);
+unsafe impl Sync for IpcCallNamesCell {}
+impl IpcCallNamesCell {
+    pub const fn new(val: [Option<&'static str>; 256]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [Option<&'static str>; 256] {
+        self.0.get()
+    }
+}
+
 /// Human-readable IPC call names.
-pub static mut IPC_CALL_NAMES: [Option<&str>; 256] = [None; 256];
+pub static IPC_CALL_NAMES: IpcCallNamesCell = IpcCallNamesCell::new([None; 256]);
 
 /// Initialize IPC call names.
 pub fn init_ipc_call_names() {
+    let names = IPC_CALL_NAMES.get();
     unsafe {
-        let names = core::ptr::addr_of_mut!(IPC_CALL_NAMES);
         (*names)[0] = Some("SYS_FORK");
         (*names)[1] = Some("SYS_EXEC");
         (*names)[2] = Some("SYS_CLEAR");
@@ -343,7 +497,7 @@ impl MinixKernInfo {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// First process on VM request queue.
-pub static mut VMREQUEST: *mut crate::proc::Proc = core::ptr::null_mut();
+pub static VMREQUEST: AtomicPtr<crate::proc::Proc> = AtomicPtr::new(core::ptr::null_mut());
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tests
@@ -434,30 +588,20 @@ mod tests {
 
     #[test]
     fn test_bkl_stats_default() {
-        unsafe {
-            let ticks = core::ptr::addr_of!(KERNEL_TICKS).cast::<u64>();
-            assert_eq!(*ticks, 0);
-        }
+        assert_eq!(KERNEL_TICKS[0].load(Ordering::Relaxed), 0);
     }
+
     #[test]
     fn test_ipc_call_names() {
         init_ipc_call_names();
         unsafe {
-            assert_eq!(
-                core::ptr::addr_of!(IPC_CALL_NAMES).read()[0],
-                Some("SYS_FORK")
-            );
-            assert_eq!(
-                core::ptr::addr_of!(IPC_CALL_NAMES).read()[3],
-                Some("SYS_SCHEDULE")
-            );
+            assert_eq!((*IPC_CALL_NAMES.get())[0], Some("SYS_FORK"));
+            assert_eq!((*IPC_CALL_NAMES.get())[3], Some("SYS_SCHEDULE"));
         }
     }
 
     #[test]
     fn test_vmrequest_null() {
-        unsafe {
-            assert!(core::ptr::addr_of!(VMREQUEST).read().is_null());
-        }
+        assert!(VMREQUEST.load(Ordering::Relaxed).is_null());
     }
 }

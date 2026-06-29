@@ -3662,7 +3662,7 @@ reliable cross-function test patterns.
 
 #### Priority 1 — Kernel globals (most impact, tested)
 
-- [ ] **13.11.1 — Kernel `glo.rs`**: Replace `KINFO`, `MACHINE`, `KMESSAGES`,
+- [x] **13.11.1 — Kernel `glo.rs`**: Replace `KINFO`, `MACHINE`, `KMESSAGES`,
   `LOADINFO`, `KRANDOM`, `MINIX_KERNINFO` with `UnsafeCell` wrappers.
   Replace `CPU_HZ`, `KERNEL_TICKS`, `BKL_TICKS`, `BKL_TRIES`, `BKL_SUCC`
   with `[AtomicU64; 32]` / `[AtomicU32; 32]`. Replace `IPC_CALL_NAMES`

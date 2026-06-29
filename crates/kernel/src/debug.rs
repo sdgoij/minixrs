@@ -130,7 +130,7 @@ pub fn mtypename(mtype: i32) -> Option<&'static str> {
     {
         let idx = (mtype - crate::system::KERNEL_CALL) as usize;
         unsafe {
-            let names = core::ptr::addr_of!(crate::glo::IPC_CALL_NAMES);
+            let names = crate::glo::IPC_CALL_NAMES.get();
             return (*names)[idx];
         }
     }
@@ -668,7 +668,7 @@ fn append_str(buf: &mut [u8], pos: &mut usize, s: &[u8]) {
 /// Append bytes to the kernel messages buffer.
 fn append_kmess(bytes: &[u8]) {
     unsafe {
-        let km = core::ptr::addr_of_mut!(crate::glo::KMESSAGES);
+        let km = crate::glo::KMESSAGES.get();
         let next = &mut (*km).km_next;
         let size = &mut (*km).km_size;
         let km_buf = &raw mut (*km).km_buf as *mut u8;

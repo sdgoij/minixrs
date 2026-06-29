@@ -273,7 +273,7 @@ unsafe fn load_update() {
             .map(|m| (m / _LOAD_UNIT_SECS) % _LOAD_HISTORY as u64)
             .unwrap_or(0) as u16;
 
-        let loadinfo = core::ptr::addr_of_mut!(LOADINFO);
+        let loadinfo = LOADINFO.get();
         if slot != (*loadinfo).proc_last_slot {
             (*loadinfo).proc_load_history[slot as usize] = 0;
             (*loadinfo).proc_last_slot = slot;

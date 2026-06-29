@@ -4260,7 +4260,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
             }
             arch_common::com::GET_MACHINE => {
                 // Copy the machine info struct to the caller's buffer
-                let machine = core::ptr::addr_of!(crate::glo::MACHINE).cast::<u8>();
+                let machine = crate::glo::MACHINE.get().cast::<u8>();
                 let machine_size = core::mem::size_of::<crate::glo::Machine>();
                 if val_len > 0 && machine_size > val_len as usize {
                     return crate::ipc::E2BIG;
@@ -4289,7 +4289,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 OK
             }
             arch_common::com::GET_KINFO => {
-                let kinfo = core::ptr::addr_of!(crate::glo::KINFO).cast::<u8>();
+                let kinfo = crate::glo::KINFO.get().cast::<u8>();
                 let kinfo_size = core::mem::size_of::<crate::glo::KInfo>();
                 if val_len > 0 && kinfo_size > val_len as usize {
                     return crate::ipc::E2BIG;
