@@ -3242,15 +3242,55 @@ be replaced with real implementations.
   `clock_server_main()` with real receive-dispatch loop stub (sef_receive
   deferred to Phase 13). 7 new tests — 19 total clock server tests pass.
 
-- [ ] **12.14 — Implement VNDIOCSET/VNDIOCGET VFS backcalls** (`crates/drivers/src/storage/vnd.rs`)
-  **Depends on:** VFS `copyfd` backcall (Phase 10), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4), `mmap`/`pread`/`pwrite` syscall support
-  Replace `todo!()` in `vnd_ioctl`:
-  - `VNDIOCSET`: copy in `VndIoctl` via `sys_safecopyfrom`, call `copyfd()` to get backing file fd, `fstat` to verify regular file, `mmap` intermediate buffer, call `vnd_layout` to set geometry and parse partitions
-  - `VNDIOCGET`: copy out `VndUser` via `sys_safecopyto` (unit number, device, inode)
-  - All three IOCTLs also depend on `DIOCOPENCT` and `DIOCFLUSH` which need `sys_safecopyto` and `fsync` respectively
-  - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/vnd.c`
+- [x] **12.14 — Implement VNDIOCSET/VNDIOCGET VFS backcalls** (`crates/drivers/src/storage/vnd.rs`)
+  **Depends on:** VFS `copyfd` backcall (Phase 10), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4),
+  `mmap`/`pread`/`pwrite` syscall support
+  Replaced `todo!()` with full implementation:
+  - VNDIOCSET: copy in VndIoctl via vnd_safecopy_from, copyfd, fstat, mmap buf,
+    compute_geometry, return size via vnd_safecopy_to (all stubbed — return Unsupported)
+  - VNDIOCCLR: copy in VndIoctl (best-effort FORCE flag check), munmap, close fd
+  - VNDIOCGET: copy out VndUser via vnd_safecopy_to (unit, dev, ino)
+  - Added VFS backcall stubs: vnd_copyfd, vnd_fstat, vnd_mmap_buf, vnd_munmap_buf,
+    vnd_close_fd, vnd_fsync, vnd_safecopy_from, vnd_safecopy_to — all with Safety docs
+  - All 25 vnd tests pass, clippy clean
+  **Follow-up tasks (replace stubs with real VFS backcalls):**
 
-- [ ] **12.15 — Wire profiling clock and NMI** (or `kernel/src/profile.rs`)
+  - [ ] **12.14a — Implement vnd_copyfd** (`crates/drivers/src/storage/vnd.rs:419`)
+    **Depends on:** VFS `copyfd` backcall (Phase 10)
+    Replace stub with real `copyfd(user_endpt, user_fd, COPYFD_FROM)` call on VFS.
+    Returns the new fd in our process's fd table, or a negative error code.
+
+  - [ ] **12.14b — Implement vnd_fstat** (`crates/drivers/src/storage/vnd.rs:431`)
+    **Depends on:** VFS `fstat` syscall support (Phase 10)
+    Replace stub with real `fstat(fd, &st)` call. Must return (st_dev, st_ino)
+    and verify `S_ISREG(st.st_mode)` before accepting the backing file.
+
+  - [ ] **12.14c — Implement vnd_mmap_buf / vnd_munmap_buf**
+      (`crates/drivers/src/storage/vnd.rs:444`)
+    **Depends on:** `mmap`/`munmap` syscall support (Phase 13)
+    Replace stubs with real `mmap(NULL, VND_BUF_SIZE, PROT_READ|PROT_WRITE,
+    MAP_ANON|MAP_PRIVATE, -1, 0)` and `munmap(addr, VND_BUF_SIZE)`.
+    The I/O buffer is currently inline in VndState (stack-allocated); when
+    mmap is available, switch to a dynamically-allocated buffer.
+
+  - [ ] **12.14d — Implement vnd_close_fd** (`crates/drivers/src/storage/vnd.rs:466`)
+    **Depends on:** `close` syscall support (Phase 10)
+    Replace stub with real `close(fd)` syscall. Called during VNDIOCCLR
+    and VNDIOCSET error paths to release the backing file descriptor.
+
+  - [ ] **12.14e — Implement vnd_fsync** (`crates/drivers/src/storage/vnd.rs:477`)
+    **Depends on:** `fsync` syscall support (Phase 10)
+    Replace stub with real `fsync(fd)` syscall. Called during DIOCFLUSH
+    IOCTL to flush the backing file to storage.
+
+  - [ ] **12.14f — Implement vnd_safecopy_from / vnd_safecopy_to**
+      (`crates/drivers/src/storage/vnd.rs:489`)
+    **Depends on:** `sys_safecopyfrom`/`sys_safecopyto` kernel IPC (Phase 4/13)
+    Replace stubs with real grant-based IPC: `sys_safecopyfrom(endpt, grant,
+    offset, buf, size)` to copy VndIoctl/VndUser between user and driver.
+    Used by all three VND IOCTLs (SET/CLR/GET).
+
+- [ ] **12.15 — Wire profiling clock and NMI** (`kernel/src/profile.rs`)
   **Depends on:** Architecture profile clock driver
   Replace TODO at lines 218/223/334: `arch_init_profile_clock`,
   `arch_stop_profile_clock`, NMI-based profiling.

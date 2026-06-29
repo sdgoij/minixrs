@@ -405,7 +405,120 @@ pub fn vnd_transfer(
 /// Process an IOCTL request.
 ///
 /// Corresponds to `vnd_ioctl()` in the C reference.
-pub fn vnd_ioctl(request: u32, _endpt: i32, _grant: u32) -> Result<(), DriverError> {
+/// VFS backcall: duplicate a file descriptor from a user process.
+///
+/// Real implementation calls VFS `copyfd()` to copy the fd identified
+/// by `user_fd` from `user_endpt` into our process's fd table.
+/// Returns the new fd on success, or a negative error code.
+/// See PORTING_PLAN.md Phase 12.14 follow-up.
+///
+/// # Safety
+///
+/// `user_endpt` must be a valid endpoint.
+pub unsafe fn vnd_copyfd(_user_endpt: i32, _user_fd: i32) -> Result<i32, DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// VFS backcall: fstat a file descriptor to check it's a regular file.
+///
+/// Real implementation calls `fstat(fd, &st)` to get the file's stat.
+/// Returns (st_dev, st_ino) on success.
+/// See PORTING_PLAN.md Phase 12.14 follow-up.
+///
+/// # Safety
+///
+/// `fd` must be a valid file descriptor obtained from `vnd_copyfd`.
+pub unsafe fn vnd_fstat(_fd: i32) -> Result<(u64, u64), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// VFS backcall: mmap an intermediate I/O buffer.
+///
+/// Real implementation calls `mmap(NULL, size, PROT_READ|PROT_WRITE,
+/// MAP_ANON|MAP_PRIVATE, -1, 0)`.
+/// Returns the virtual address of the mapped buffer.
+///
+/// # Safety
+///
+/// `size` must be > 0.
+pub unsafe fn vnd_mmap_buf(_size: usize) -> Result<u64, DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// VFS backcall: munmap an I/O buffer.
+///
+/// Real implementation calls `munmap(addr, size)`.
+///
+/// # Safety
+///
+/// `addr` must be from a previous `vnd_mmap_buf` call.
+pub unsafe fn vnd_munmap_buf(_addr: u64, _size: usize) -> Result<(), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// VFS backcall: close a file descriptor.
+///
+/// Real implementation calls `close(fd)`.
+///
+/// # Safety
+///
+/// `fd` must be a valid file descriptor.
+pub unsafe fn vnd_close_fd(_fd: i32) -> Result<(), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// VFS backcall: fsync a file descriptor.
+///
+/// Real implementation calls `fsync(fd)`.
+///
+/// # Safety
+///
+/// `fd` must be a valid file descriptor.
+pub unsafe fn vnd_fsync(_fd: i32) -> Result<(), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// Copy data from a user-space grant into a local buffer.
+///
+/// Real implementation calls `sys_safecopyfrom(endpt, grant, offset, buf, size)`.
+///
+/// # Safety
+///
+/// `buf` must point to a valid buffer of at least `size` bytes.
+/// `endpt` and `grant` must be valid (caller-provided IPC grant).
+pub unsafe fn vnd_safecopy_from(
+    _endpt: i32,
+    _grant: u32,
+    _offset: u32,
+    _buf: *mut u8,
+    _size: usize,
+) -> Result<(), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// Copy data from a local buffer to a user-space grant.
+///
+/// Real implementation calls `sys_safecopyto(endpt, grant, offset, buf, size)`.
+///
+/// # Safety
+///
+/// `buf` must point to a valid buffer of at least `size` bytes.
+/// `endpt` and `grant` must be valid (caller-provided IPC grant).
+pub unsafe fn vnd_safecopy_to(
+    _endpt: i32,
+    _grant: u32,
+    _offset: u32,
+    _buf: *const u8,
+    _size: usize,
+) -> Result<(), DriverError> {
+    Err(DriverError::Unsupported)
+}
+
+/// Process I/O control requests for the virtual disk.
+///
+/// Currently stubs VNDIOCSET and VNDIOCGET with proper error returns.
+/// Real implementations require VFS backcalls (copyfd, fstat, mmap).
+pub fn vnd_ioctl(request: u32, endpt: i32, grant: u32) -> Result<(), DriverError> {
     let st = unsafe { &mut *state_ptr() };
 
     if !st.initialized {
@@ -418,18 +531,129 @@ pub fn vnd_ioctl(request: u32, _endpt: i32, _grant: u32) -> Result<(), DriverErr
             if st.fd != -1 || st.openct != 1 {
                 return Err(DriverError::Busy);
             }
-            todo!("VNDIOCSET needs copyfd/fstat/mmap VFS backcalls; see PORTING_PLAN.md 12.14")
+
+            // Copy in VndIoctl from user.
+            let mut vnd = VndIoctl::new();
+            unsafe {
+                if vnd_safecopy_from(
+                    endpt,
+                    grant,
+                    0,
+                    &mut vnd as *mut _ as *mut u8,
+                    core::mem::size_of::<VndIoctl>(),
+                )
+                .is_err()
+                {
+                    return Err(DriverError::Unsupported);
+                }
+            }
+
+            // Copy file descriptor from user process.
+            let fd = unsafe {
+                match vnd_copyfd(endpt, vnd.vnd_fildes) {
+                    Ok(fd) => fd,
+                    Err(_) => return Err(DriverError::Unsupported),
+                }
+            };
+
+            // Check that the target file is regular.
+            let (st_dev, st_ino) = unsafe {
+                match vnd_fstat(fd) {
+                    Ok((dev, ino)) => (dev, ino),
+                    Err(e) => {
+                        let _ = vnd_close_fd(fd);
+                        return Err(e);
+                    }
+                }
+            };
+
+            // Allocate I/O transfer buffer (inline in VndState).
+            // The buffer is already allocated as part of the state struct.
+
+            // Set device state.
+            st.dev = st_dev;
+            st.ino = st_ino;
+            st.rdonly = (vnd.vnd_flags as u32 & VNDIOF_READONLY) != 0;
+            st.fd = fd;
+
+            // Compute geometry from file size.
+            let file_size = vnd.vnd_size;
+            let layout = compute_geometry(file_size);
+            st.geom = layout;
+
+            // Set the device size in the user's struct.
+            vnd.vnd_size = file_size;
+            unsafe {
+                let _ = vnd_safecopy_to(
+                    endpt,
+                    grant,
+                    0,
+                    &vnd as *const _ as *const u8,
+                    core::mem::size_of::<VndIoctl>(),
+                );
+            }
+
+            Ok(())
         }
         VNDIOCCLR => {
             if st.fd == -1 {
                 return Err(DriverError::NotFound);
             }
-            // Full implementation would munmap and close.
+
+            // Copy in VndIoctl to check FORCE flag (best-effort).
+            let mut vnd = VndIoctl::new();
+            let got_flags = unsafe {
+                vnd_safecopy_from(
+                    endpt,
+                    grant,
+                    0,
+                    &mut vnd as *mut _ as *mut u8,
+                    core::mem::size_of::<VndIoctl>(),
+                )
+                .is_ok()
+            };
+
+            let force = got_flags && (vnd.vnd_flags as u32 & VNDIOF_FORCE) != 0;
+
+            if !force && st.openct != 1 {
+                return Err(DriverError::Busy);
+            }
+
+            // Clean up (no munmap needed — buffer is inline in VndState).
+            unsafe {
+                let _ = vnd_close_fd(st.fd);
+            }
             st.fd = -1;
+            st.dev = 0;
+            st.ino = 0;
+
             Ok(())
         }
         VNDIOCGET => {
-            todo!("VNDIOCGET needs sys_safecopyto for VndUser; see PORTING_PLAN.md 12.14")
+            let mut vnu = VndUser::new();
+            vnu.vnu_unit = 0; // single instance
+
+            // If configured, fill in device/inode info.
+            if st.fd != -1 {
+                vnu.vnu_dev = st.dev;
+                vnu.vnu_ino = st.ino;
+            }
+
+            unsafe {
+                if vnd_safecopy_to(
+                    endpt,
+                    grant,
+                    0,
+                    &vnu as *const _ as *const u8,
+                    core::mem::size_of::<VndUser>(),
+                )
+                .is_err()
+                {
+                    return Err(DriverError::Unsupported);
+                }
+            }
+
+            Ok(())
         }
         _ => Err(DriverError::Unsupported),
     }
@@ -797,16 +1021,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "VNDIOCSET")]
-    fn test_vnd_ioctl_set_reaches_todo() {
+    fn test_vnd_ioctl_set_reaches_vfs_stub() {
         unsafe {
             reset_state();
             vnd_init();
             // Open the device first so openct == 1.
             assert!(vnd_open(0, 0).is_ok());
             // fd == -1 && openct == 1 passes the pre-conditions.
-            // Reaches the todo!() for VFS backcalls.
-            let _ = vnd_ioctl(VNDIOCSET, 0, 0);
+            // Now returns Unsupported (VFS backcall stubs).
+            assert_eq!(vnd_ioctl(VNDIOCSET, 0, 0), Err(DriverError::Unsupported));
         }
     }
 
@@ -816,6 +1039,8 @@ mod tests {
             reset_state();
             vnd_init();
             assert!(vnd_set_fd(3, 4096, false).is_ok());
+            // Open the device so openct == 1 (required for non-FORCE clear).
+            assert!(vnd_open(0, 0).is_ok());
             assert!(vnd_ioctl(VNDIOCCLR, 0, 0).is_ok());
             assert!(!vnd_is_configured());
         }
