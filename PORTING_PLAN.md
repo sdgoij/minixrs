@@ -2324,11 +2324,11 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   - All stubs — real impls need PM server protocol (Phase 12.3)
 
 ### Deferred PM protocol stubs
-- [ ] **10.8a — Wire PM message dispatch** (`servers/src/vfs/pm.rs`)
-  **Depends on:** PM server running (Phase 12.3), VFS message loop
-  service_pm needs to: read message type from scratchpad, call pm_fork/
-  pm_exit/pm_exec/pm_setuid/pm_setgid/pm_setsid/pm_reboot as appropriate,
-  reply to PM with result.
+- [x] **10.8a — Wire PM message dispatch** (`servers/src/vfs/pm.rs`, `main.rs`)
+  `handle_work()` reads m_source from fs_m_in; routes to `pm::service_pm()`
+  when the sender is PM_PROC_NR (endpoint 0). `service_pm()` reads mess_7
+  fields, calls pm_fork/pm_setuid/pm_setgid/pm_setsid/etc., prepares reply
+  in fs_m_out. 343 total server tests pass.
 
 - [ ] **10.8b — Wire postponed PM operations** (`servers/src/vfs/pm.rs`)
   **Depends on:** FS request layer (10.2), vnode mgmt (10.10), exec.c

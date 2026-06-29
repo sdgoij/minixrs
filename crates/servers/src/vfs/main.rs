@@ -7,9 +7,16 @@ use core::ptr::addr_of_mut;
 
 use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
+use crate::vfs::pm;
 use crate::vfs::table;
 use crate::vfs::types::Fproc;
 use crate::vfs::worker;
+
+/// PM process endpoint.
+const PM_PROC_NR: i32 = 0;
+
+/// Offset of m_source in the message buffer (4 bytes).
+const MSG_SOURCE_OFF: usize = 0;
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
@@ -67,12 +74,33 @@ unsafe fn get_work() {
 }
 
 /// Dispatch the current request to the appropriate handler.
+///
+/// Reads the message source and type from the global message buffer.
+/// If the sender is PM_PROC_NR, routes to `service_pm()`. Otherwise
+/// dispatches through the regular VFS call table.
 unsafe fn handle_work() {
     let glob = vfs_global();
-    let call_nr = unsafe { (*glob).req_nr };
-    let result = table::dispatch(call_nr);
-    unsafe { (*glob).err_code = result };
-    unsafe { reply((*glob).fp, result) };
+
+    // Read the sender endpoint from the message (offset 0 = m_source).
+    let fs_m_in = &(*glob).fs_m_in;
+    let source = i32::from_le_bytes(
+        fs_m_in[MSG_SOURCE_OFF..MSG_SOURCE_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+
+    if source == PM_PROC_NR {
+        // PM messages are dispatched through service_pm.
+        let result = pm::service_pm();
+        (*glob).err_code = result;
+        reply((*glob).fp, result);
+    } else {
+        // Regular VFS calls are dispatched through the call table.
+        let call_nr = (*glob).req_nr;
+        let result = table::dispatch(call_nr);
+        (*glob).err_code = result;
+        reply((*glob).fp, result);
+    }
 }
 
 /// Send a reply message to a process.
