@@ -1060,7 +1060,7 @@ pub unsafe fn system_init() {
         map_call(1, do_exec_handler); // SYS_EXEC — Phase 8.10
         map_call(2, do_clear_handler); // SYS_CLEAR
         map_call(3, do_schedule_handler); // SYS_SCHEDULE
-        map_call(4, do_privctl_stub); // SYS_PRIVCTL
+        map_call(4, do_privctl_handler); // SYS_PRIVCTL
         map_call(5, do_trace_stub); // SYS_TRACE
         map_call(6, do_kill_handler); // SYS_KILL
         map_call(7, do_getksig_handler); // SYS_GETKSIG
@@ -1559,9 +1559,432 @@ macro_rules! stub_handler {
     };
 }
 
-// Deferred stubs — need VM/data_copy infrastructure:
-// SYS_EXEC: implemented in Phase 8.10 (replaced stub)
-stub_handler!(do_privctl_stub, "SYS_PRIVCTL");
+// ─────────────────────────────────────────────────────────────────────────
+// do_privctl — privilege control (SYS_PRIVCTL)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Message layout for privctl:
+//   offset  0: endpt      (i32) — target process endpoint
+//   offset  4: request    (i32) — SYS_PRIV_ALLOW / SYS_PRIV_DISALLOW / etc.
+//   offset  8: arg_ptr    (u64) — pointer to privilege/io/mem/irq data
+//   offset 16: phys_start (u64) — physical address start (for QUERY_MEM)
+//   offset 24: phys_len   (u64) — physical address length
+
+use arch_common::com::{
+    SYS_PRIV_ADD_IO, SYS_PRIV_ADD_IRQ, SYS_PRIV_ADD_MEM, SYS_PRIV_ALLOW, SYS_PRIV_DISALLOW,
+    SYS_PRIV_QUERY_MEM, SYS_PRIV_SET_SYS, SYS_PRIV_SET_USER, SYS_PRIV_UPDATE_SYS, SYS_PRIV_YIELD,
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// data_copy helper — wraps virtual_copy for common kernel→user copies
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Copy data from a user process into kernel space.
+///
+/// `src_endpt` is the endpoint of the source process.  `src_addr` is the
+/// virtual address in the source process's address space.  `dst_addr` is
+/// the kernel virtual address to copy into.  `bytes` is the number of bytes
+/// to copy.
+///
+/// # Safety
+///
+/// Both pointers must be valid and readable/writable for `bytes`.
+unsafe fn data_copy_from(src_endpt: i32, src_addr: u64, dst_addr: u64, bytes: usize) -> i32 {
+    let src_proc = table::endpoint_slot(src_endpt);
+    let kernel_proc: i32 = -1; // KERNEL process number
+    unsafe { crate::vm::virtual_copy(src_proc, src_addr, kernel_proc, dst_addr, bytes) }
+}
+
+const PRIVCTL_ENDPT_OFF: usize = 0;
+const PRIVCTL_REQUEST_OFF: usize = 4;
+const PRIVCTL_ARG_PTR_OFF: usize = 8;
+const PRIVCTL_PHYS_START_OFF: usize = 16;
+const PRIVCTL_PHYS_LEN_OFF: usize = 24;
+
+/// Handle SYS_PRIVCTL — manage process privileges.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
+pub unsafe fn do_privctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        // Caller must be a system process.
+        let caller_priv = (*caller).p_priv;
+        if caller_priv.is_null() || !(*caller_priv).s_flags.contains(PrivFlags::SYS_PROC) {
+            return crate::ipc::EPERM;
+        }
+
+        let target_endpt = msg_read_i32(msg, PRIVCTL_ENDPT_OFF);
+        let request = msg_read_i32(msg, PRIVCTL_REQUEST_OFF) as u32;
+
+        // Resolve target process.
+        let proc_nr = if target_endpt == SELF {
+            (*caller).p_nr
+        } else {
+            if !table::is_ok_endpoint(target_endpt) {
+                return crate::ipc::EINVAL;
+            }
+            table::endpoint_slot(target_endpt)
+        };
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() {
+            return crate::ipc::EINVAL;
+        }
+
+        match request {
+            SYS_PRIV_ALLOW => {
+                // Allow process to run. Must have RTS_NO_PRIV set.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() == 0 {
+                    return crate::ipc::EPERM;
+                }
+                if (*rp).p_priv.is_null() || (*(*rp).p_priv).s_proc_nr == NONE {
+                    return crate::ipc::EPERM;
+                }
+                (*rp).p_rts_flags.fetch_and(
+                    !RtsFlags::NO_PRIV.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                OK
+            }
+
+            SYS_PRIV_YIELD => {
+                // Allow target, suspend caller.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() == 0 {
+                    return crate::ipc::EPERM;
+                }
+                if (*rp).p_priv.is_null() || (*(*rp).p_priv).s_proc_nr == NONE {
+                    return crate::ipc::EPERM;
+                }
+                (*caller).p_rts_flags.fetch_or(
+                    RtsFlags::NO_PRIV.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                (*rp).p_rts_flags.fetch_and(
+                    !RtsFlags::NO_PRIV.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                OK
+            }
+
+            SYS_PRIV_DISALLOW => {
+                // Disallow process from running.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() != 0 {
+                    return crate::ipc::EPERM;
+                }
+                (*rp).p_rts_flags.fetch_or(
+                    RtsFlags::NO_PRIV.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                OK
+            }
+
+            SYS_PRIV_SET_SYS => {
+                // Set privilege structure for a blocked system process.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() == 0 {
+                    return crate::ipc::EPERM;
+                }
+
+                let arg_ptr = msg_read_u64(msg, PRIVCTL_ARG_PTR_OFF);
+                let mut priv_buf = crate::r#priv::Priv::default();
+
+                if arg_ptr != 0 {
+                    // Copy privilege structure from caller.
+                    let r = data_copy_from(
+                        (*caller).p_endpoint,
+                        arg_ptr,
+                        &mut priv_buf as *mut _ as u64,
+                        core::mem::size_of::<crate::r#priv::Priv>(),
+                    );
+                    if r != 0 {
+                        return r;
+                    }
+                }
+
+                // Allocate a privilege slot.
+                if get_priv(rp).is_none() {
+                    return crate::ipc::ENOMEM;
+                }
+
+                // If caller supplied a priv, copy its fields.
+                if arg_ptr != 0 {
+                    let rp_priv = (*rp).p_priv;
+                    if rp_priv.is_null() {
+                        return crate::ipc::ENOMEM;
+                    }
+                    let saved_id = (*rp_priv).s_id;
+                    *rp_priv = priv_buf;
+                    (*rp_priv).s_id = saved_id;
+                    (*rp_priv).s_proc_nr = (*rp).p_nr;
+
+                    // Clear pending state.
+                    for chunk in (*rp_priv).s_notify_pending.chunk.iter_mut() {
+                        *chunk = 0;
+                    }
+                    (*rp_priv).s_int_pending = 0;
+                    (*rp_priv).s_sig_pending = 0u128;
+
+                    // Set defaults for resources.
+                    (*rp_priv).s_nr_io_range = 0;
+                    (*rp_priv).s_nr_mem_range = 0;
+                    (*rp_priv).s_nr_irq = 0;
+                    (*rp_priv).s_grant_table = 0;
+                    (*rp_priv).s_grant_entries = 0;
+                }
+                OK
+            }
+
+            SYS_PRIV_SET_USER => {
+                // Link to the user privilege structure (shared by all user procs).
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() == 0 {
+                    return crate::ipc::EPERM;
+                }
+                let user_priv = crate::r#priv::priv_addr_mut(USER_PRIV_ID);
+                (*rp).p_priv = user_priv;
+                OK
+            }
+
+            SYS_PRIV_ADD_IO => {
+                // Grant I/O port range access.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() != 0 {
+                    return crate::ipc::EPERM;
+                }
+                let sp = (*rp).p_priv;
+                if sp.is_null() || !(*sp).s_flags.contains(PrivFlags::SYS_PROC) {
+                    return crate::ipc::EPERM;
+                }
+
+                let arg_ptr = msg_read_u64(msg, PRIVCTL_ARG_PTR_OFF);
+                let mut io_range = crate::r#priv::IoRange::default();
+                let r = data_copy_from(
+                    (*caller).p_endpoint,
+                    arg_ptr,
+                    &mut io_range as *mut _ as u64,
+                    core::mem::size_of::<crate::r#priv::IoRange>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+
+                // Check for duplicate.
+                for i in 0..(*sp).s_nr_io_range as usize {
+                    if i >= NR_IO_RANGE {
+                        break;
+                    }
+                    if (*sp).s_io_tab[i].ior_base == io_range.ior_base
+                        && (*sp).s_io_tab[i].ior_limit == io_range.ior_limit
+                    {
+                        return OK;
+                    }
+                }
+
+                let i = (*sp).s_nr_io_range as usize;
+                if i >= NR_IO_RANGE {
+                    return crate::ipc::ENOMEM;
+                }
+                (*sp).s_flags.insert(PrivFlags::CHECK_IO_PORT);
+                (*sp).s_io_tab[i] = io_range;
+                (*sp).s_nr_io_range += 1;
+                OK
+            }
+
+            SYS_PRIV_ADD_MEM => {
+                // Grant memory range access.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() != 0 {
+                    return crate::ipc::EPERM;
+                }
+                let sp = (*rp).p_priv;
+                if sp.is_null() || !(*sp).s_flags.contains(PrivFlags::SYS_PROC) {
+                    return crate::ipc::EPERM;
+                }
+
+                let arg_ptr = msg_read_u64(msg, PRIVCTL_ARG_PTR_OFF);
+                let mut mem_range = crate::r#priv::MemRange::default();
+                let r = data_copy_from(
+                    (*caller).p_endpoint,
+                    arg_ptr,
+                    &mut mem_range as *mut _ as u64,
+                    core::mem::size_of::<crate::r#priv::MemRange>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+
+                for i in 0..(*sp).s_nr_mem_range as usize {
+                    if i >= NR_MEM_RANGE {
+                        break;
+                    }
+                    if (*sp).s_mem_tab[i].mr_base == mem_range.mr_base
+                        && (*sp).s_mem_tab[i].mr_limit == mem_range.mr_limit
+                    {
+                        return OK;
+                    }
+                }
+
+                let i = (*sp).s_nr_mem_range as usize;
+                if i >= NR_MEM_RANGE {
+                    return crate::ipc::ENOMEM;
+                }
+                (*sp).s_flags.insert(PrivFlags::CHECK_MEM);
+                (*sp).s_mem_tab[i] = mem_range;
+                (*sp).s_nr_mem_range += 1;
+                OK
+            }
+
+            SYS_PRIV_ADD_IRQ => {
+                // Grant IRQ line access.
+                let flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                if flags & RtsFlags::NO_PRIV.bits() != 0 {
+                    return crate::ipc::EPERM;
+                }
+                let sp = (*rp).p_priv;
+                if sp.is_null() || !(*sp).s_flags.contains(PrivFlags::SYS_PROC) {
+                    return crate::ipc::EPERM;
+                }
+
+                let arg_ptr = msg_read_u64(msg, PRIVCTL_ARG_PTR_OFF);
+                let mut irq: i32 = 0;
+                let r = data_copy_from(
+                    (*caller).p_endpoint,
+                    arg_ptr,
+                    &mut irq as *mut _ as u64,
+                    core::mem::size_of::<i32>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+
+                for i in 0..(*sp).s_nr_irq as usize {
+                    if i >= NR_IRQ {
+                        break;
+                    }
+                    if (*sp).s_irq_tab[i] == irq {
+                        return OK;
+                    }
+                }
+
+                let i = (*sp).s_nr_irq as usize;
+                if i >= NR_IRQ {
+                    return crate::ipc::ENOMEM;
+                }
+                (*sp).s_flags.insert(PrivFlags::CHECK_IRQ);
+                (*sp).s_irq_tab[i] = irq;
+                (*sp).s_nr_irq += 1;
+                OK
+            }
+
+            SYS_PRIV_QUERY_MEM => {
+                // Check if a process is allowed to map certain physical memory.
+                let addr = msg_read_u64(msg, PRIVCTL_PHYS_START_OFF);
+                let len = msg_read_u64(msg, PRIVCTL_PHYS_LEN_OFF);
+                let limit = addr.wrapping_add(len).wrapping_sub(1);
+                if limit < addr {
+                    return crate::ipc::EPERM;
+                }
+                let sp = (*rp).p_priv;
+                if sp.is_null() || !(*sp).s_flags.contains(PrivFlags::SYS_PROC) {
+                    return crate::ipc::EPERM;
+                }
+                let mut found = false;
+                for i in 0..(*sp).s_nr_mem_range as usize {
+                    if i >= NR_MEM_RANGE {
+                        break;
+                    }
+                    if addr >= (*sp).s_mem_tab[i].mr_base && limit <= (*sp).s_mem_tab[i].mr_limit {
+                        found = true;
+                        break;
+                    }
+                }
+                if found { OK } else { crate::ipc::EPERM }
+            }
+
+            SYS_PRIV_UPDATE_SYS => {
+                // Update privilege structure fields.
+                let arg_ptr = msg_read_u64(msg, PRIVCTL_ARG_PTR_OFF);
+                if arg_ptr == 0 {
+                    return crate::ipc::EINVAL;
+                }
+                let mut priv_buf = crate::r#priv::Priv::default();
+                let r = data_copy_from(
+                    (*caller).p_endpoint,
+                    arg_ptr,
+                    &mut priv_buf as *mut _ as u64,
+                    core::mem::size_of::<crate::r#priv::Priv>(),
+                );
+                if r != 0 {
+                    return r;
+                }
+
+                // Update the target's privilege structure.
+                let sp = (*rp).p_priv;
+                if sp.is_null() {
+                    return crate::ipc::EPERM;
+                }
+
+                // Copy flags and signal managers.
+                (*sp).s_flags = priv_buf.s_flags;
+                (*sp).s_sig_mgr = priv_buf.s_sig_mgr;
+                (*sp).s_bak_sig_mgr = priv_buf.s_bak_sig_mgr;
+
+                // Copy IRQ table.
+                if priv_buf.s_flags.contains(PrivFlags::CHECK_IRQ) {
+                    let nr = priv_buf.s_nr_irq.max(0) as usize;
+                    let nr = nr.min(NR_IRQ);
+                    (*sp).s_nr_irq = nr as i32;
+                    for i in 0..nr {
+                        (*sp).s_irq_tab[i] = priv_buf.s_irq_tab[i];
+                    }
+                }
+
+                // Copy I/O ranges.
+                if priv_buf.s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+                    let nr = priv_buf.s_nr_io_range.max(0) as usize;
+                    let nr = nr.min(NR_IO_RANGE);
+                    (*sp).s_nr_io_range = nr as i32;
+                    for i in 0..nr {
+                        (*sp).s_io_tab[i] = priv_buf.s_io_tab[i];
+                    }
+                }
+
+                // Copy memory ranges.
+                if priv_buf.s_flags.contains(PrivFlags::CHECK_MEM) {
+                    let nr = priv_buf.s_nr_mem_range.max(0) as usize;
+                    let nr = nr.min(NR_MEM_RANGE);
+                    (*sp).s_nr_mem_range = nr as i32;
+                    for i in 0..nr {
+                        (*sp).s_mem_tab[i] = priv_buf.s_mem_tab[i];
+                    }
+                }
+
+                OK
+            }
+
+            _ => EBADREQUEST,
+        }
+    }
+}
 stub_handler!(do_trace_stub, "SYS_TRACE");
 stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
 stub_handler!(do_physcopy_stub, "SYS_PHYSCOPY");

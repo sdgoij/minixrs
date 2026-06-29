@@ -3026,18 +3026,31 @@ trait Driver {
   - IPC message loop deferred (Phase 12 wiring)
   - All 25 tests pass (requires --test-threads=1 due to static mut), clippy clean
 
-- [ ] **12.3b — Implement do_privctl (SYS_PRIVCTL)**
+- [x] **12.3b — Implement do_privctl (SYS_PRIVCTL)**
   **Depends on:** PM server infrastructure (Phase 12.3), privilege table management
-  `do_privctl` manages process privileges with 10+ sub-functions:
-  - `SYS_PRIV_ALLOW` / `SYS_PRIV_DISALLOW` — enable/disable IPC targets
-  - `SYS_PRIV_SET_SYS` / `SYS_PRIV_SET_USER` — set system/user privilege
-  - `SYS_PRIV_ADD_IO` / `SYS_PRIV_ADD_MEM` / `SYS_PRIV_ADD_IRQ` — grant IOPL/memory/IRQ access
-  - `SYS_PRIV_QUERY_MEM` — query memory access for a process
-  - `SYS_PRIV_UPDATE_SYS` — update system process privileges
-  - `SYS_PRIV_YIELD` — yield privilege
-  - Reads/writes privilege table via `data_copy()` from caller address space.
-  - Source: `.refs/minix-3.3.0/minix/kernel/system/do_privctl.c`
-  - Deferred from Phase 6.13
+  Implemented in `crates/kernel/src/system.rs`:
+  - Replaces `stub_handler!` with full `do_privctl_handler` (~230 lines)
+  - Validates caller is a system process (`SYS_PROC` flag)
+  - Resolves target process via endpoint (supports `SELF`)
+  - Uses `data_copy_from()` helper wrapping `virtual_copy` for user→kernel copies
+  - **All 10 sub-operations implemented:**
+    - `SYS_PRIV_ALLOW`: clear `RTS_NO_PRIV` on target
+    - `SYS_PRIV_DISALLOW`: set `RTS_NO_PRIV` on target
+    - `SYS_PRIV_YIELD`: clear `RTS_NO_PRIV` on target, set on caller
+    - `SYS_PRIV_SET_SYS`: copy `Priv` struct from caller, allocate priv slot,
+      set defaults (clear pending signals/notifications/interrupts)
+    - `SYS_PRIV_SET_USER`: link target to shared user privilege struct
+    - `SYS_PRIV_ADD_IO`: copy `IoRange` from caller, add to `s_io_tab`,
+      set `CHECK_IO_PORT` flag, reject duplicates
+    - `SYS_PRIV_ADD_MEM`: copy `MemRange` from caller, add to `s_mem_tab`,
+      set `CHECK_MEM` flag, reject duplicates
+    - `SYS_PRIV_ADD_IRQ`: copy IRQ number from caller, add to `s_irq_tab`,
+      set `CHECK_IRQ` flag, reject duplicates
+    - `SYS_PRIV_QUERY_MEM`: scan `s_mem_tab` for physical range match
+    - `SYS_PRIV_UPDATE_SYS`: copy `Priv` struct, update flags, signal
+      managers, IRQ table, I/O ranges, and memory ranges on existing priv
+  - 62 kernel system tests pass (3 pre-existing CpuLocalStorage unrelated),
+    clippy clean
 
 - [ ] **12.3c — Implement do_trace (SYS_TRACE)**
   **Depends on:** PM server infrastructure (Phase 12.3), signal delivery (12.3)
