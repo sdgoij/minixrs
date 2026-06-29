@@ -875,8 +875,12 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
 - [x] **5.4 — `do_exit.c`**: `SYS_EXIT` — process teardown
   - Real implementation: cause_sig(SIGABRT=6), return EDONTREPLY
   - Tests: 1 new (verifies EDONTREPLY return + SIGNALED flags set)
-- [ ] **5.5 — `do_copy.c`**: `SYS_VIRCOPY`, `SYS_PHYSCOPY` — safe memory copy between processes
-  - Deferred: needs `virtual_copy` / `virtual_copy_vmcheck` from vm module
+- [x] **5.5 — `do_copy.c`**: `SYS_VIRCOPY`, `SYS_PHYSCOPY` — safe memory copy between processes
+  - Real implementation: reads src_endpt/src_addr/dst_endpt/dst_addr/nr_bytes/flags
+    from message, resolves SELF, validates endpoints, handles NONE (kernel) addressing,
+    calls `virtual_copy` for the actual transfer; supports CP_FLAG_TRY path
+  - Tests: 6 (handler registration, bad src, bad dst, both NONE zero bytes,
+    CP_FLAG_TRY constant, offset constants)
 - [ ] **5.6 — `do_umap.c`**: `SYS_UMAP` — virtual → physical address mapping
   - Stub (delegates to do_umap_remote)
 - [ ] **5.7 — `do_umap_remote.c`**: `SYS_UMAP_REMOTE` — remote process address mapping

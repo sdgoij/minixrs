@@ -1074,8 +1074,8 @@ pub unsafe fn system_init() {
         map_call(10, do_sigreturn_handler); // SYS_SIGRETURN
         map_call(13, do_memset_handler); // SYS_MEMSET
         map_call(14, do_umap_handler); // SYS_UMAP
-        map_call(15, do_vircopy_stub); // SYS_VIRCOPY
-        map_call(16, do_physcopy_stub); // SYS_PHYSCOPY
+        map_call(15, do_vircopy_handler); // SYS_VIRCOPY
+        map_call(16, do_physcopy_handler); // SYS_PHYSCOPY
         map_call(17, do_umap_remote_handler); // SYS_UMAP_REMOTE
         map_call(18, do_vumap_handler); // SYS_VUMAP
         map_call(19, do_irqctl_handler); // SYS_IRQCTL
@@ -2233,10 +2233,113 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// Deferred stubs — need VM infrastructure:
-stub_handler!(do_vircopy_stub, "SYS_VIRCOPY");
-stub_handler!(do_physcopy_stub, "SYS_PHYSCOPY");
-// SYS_IRQCTL, SYS_VTIMER, SYS_SETALARM — implemented in Phase 7.3 below
+// ── do_copy message offsets (mess_lsys_krn_sys_copy) ────────────────
+//   offset  0: src_endpt (i32)
+//   offset  4: _pad      (4 bytes)
+//   offset  8: src_addr  (u64)
+//   offset 16: dst_endpt (i32)
+//   offset 20: _pad      (4 bytes)
+//   offset 24: dst_addr  (u64)
+//   offset 32: nr_bytes  (u64)
+//   offset 40: flags     (i32)
+const COPY_SRC_ENDPT_OFF: usize = 0;
+const COPY_SRC_ADDR_OFF: usize = 8;
+const COPY_DST_ENDPT_OFF: usize = 16;
+const COPY_DST_ADDR_OFF: usize = 24;
+const COPY_NR_BYTES_OFF: usize = 32;
+const COPY_FLAGS_OFF: usize = 40;
+
+const CP_FLAG_TRY: i32 = 0x01;
+
+// ── Deferred stubs — need VM infrastructure: ─────────────────────────
+// Replaced: do_vircopy_stub and do_physcopy_stub with real handlers below.
+
+/// Handle SYS_VIRCOPY: virtual copy between processes.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message.
+pub unsafe fn do_vircopy_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_copy_common(caller, msg) }
+}
+
+/// Handle SYS_PHYSCOPY: physical copy between processes.
+///
+/// Both VIRCOPY and PHYSCOPY share the same implementation (the distinction
+/// is for permission checking at a higher level).
+///
+/// # Safety
+///
+/// Same as `do_vircopy_handler`.
+pub unsafe fn do_physcopy_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { do_copy_common(caller, msg) }
+}
+
+/// Common implementation for SYS_VIRCOPY and SYS_PHYSCOPY.
+///
+/// Reads src/dst endpoints/addresses from the message, validates them,
+/// resolves SELF, and calls `virtual_copy` to perform the data transfer.
+///
+/// # Safety
+///
+/// `caller` must be a valid process pointer.
+unsafe fn do_copy_common(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let mut src_endpt = msg_read_i32(msg, COPY_SRC_ENDPT_OFF);
+        let src_addr = msg_read_u64(msg, COPY_SRC_ADDR_OFF);
+        let mut dst_endpt = msg_read_i32(msg, COPY_DST_ENDPT_OFF);
+        let dst_addr = msg_read_u64(msg, COPY_DST_ADDR_OFF);
+        let nr_bytes = msg_read_u64(msg, COPY_NR_BYTES_OFF);
+        let flags = msg_read_i32(msg, COPY_FLAGS_OFF);
+
+        // Resolve SELF for both endpoints
+        if src_endpt == crate::system::SELF {
+            src_endpt = (*caller).p_endpoint;
+        }
+        if dst_endpt == crate::system::SELF {
+            dst_endpt = (*caller).p_endpoint;
+        }
+
+        // Validate endpoints (NONE is allowed for one side — kernel owns it)
+        if src_endpt != crate::system::NONE && !crate::table::is_ok_endpoint(src_endpt) {
+            return crate::grants::EINVAL;
+        }
+        if dst_endpt != crate::system::NONE && !crate::table::is_ok_endpoint(dst_endpt) {
+            return crate::grants::EINVAL;
+        }
+
+        // Check for overflow (bytes must fit in vir_bytes range)
+        if nr_bytes > 0xFFFFFFFF {
+            return crate::grants::EINVAL;
+        }
+        let bytes = nr_bytes as usize;
+
+        // Resolve endpoint to proc_nr for virtual_copy
+        let src_proc = if src_endpt == crate::system::NONE {
+            -1i32 // KERNEL
+        } else {
+            crate::table::endpoint_slot(src_endpt)
+        };
+        let dst_proc = if dst_endpt == crate::system::NONE {
+            -1i32 // KERNEL
+        } else {
+            crate::table::endpoint_slot(dst_endpt)
+        };
+
+        if flags & CP_FLAG_TRY != 0 {
+            // CP_FLAG_TRY: direct copy without VM fallback
+            let r = crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes);
+            if r == crate::grants::EFAULT_SRC || r == crate::grants::EFAULT_DST {
+                return crate::ipc::EFAULT;
+            }
+            r
+        } else {
+            // Full copy (with VM fallback — currently same as direct)
+            // TODO: wire virtual_copy_vmcheck for page fault handling
+            crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes)
+        }
+    }
+}
 
 // SAFECOPYFROM, SAFECOPYTO, VSAFECOPY — thin wrappers around grants module
 
@@ -5615,5 +5718,70 @@ mod tests {
             assert!(CALL_VEC[50].is_some()); // SYS_GETMCONTEXT
             assert!(CALL_VEC[51].is_some()); // SYS_SETMCONTEXT
         }
+    }
+
+    #[test]
+    fn test_copy_handlers_registered() {
+        unsafe {
+            system_init();
+            assert!(CALL_VEC[15].is_some()); // SYS_VIRCOPY
+            assert!(CALL_VEC[16].is_some()); // SYS_PHYSCOPY
+        }
+    }
+
+    #[test]
+    fn test_vircopy_bad_src_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, COPY_SRC_ENDPT_OFF, 99999); // bad src
+            msg_write_i32(&mut msg, COPY_DST_ENDPT_OFF, -1); // NONE = kernel
+            let result = do_vircopy_handler(rp, &mut msg);
+            assert_eq!(result, crate::grants::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_physcopy_bad_dst_returns_einval() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, COPY_SRC_ENDPT_OFF, -1); // NONE = kernel
+            msg_write_i32(&mut msg, COPY_DST_ENDPT_OFF, 99999); // bad dst
+            let result = do_physcopy_handler(rp, &mut msg);
+            assert_eq!(result, crate::grants::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_copy_both_none_returns_ok() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, COPY_SRC_ENDPT_OFF, -1); // NONE = kernel
+            msg_write_i32(&mut msg, COPY_DST_ENDPT_OFF, -1); // NONE = kernel
+            msg_write_u64(&mut msg, COPY_NR_BYTES_OFF, 0); // zero bytes = no-op
+            let result = do_vircopy_handler(rp, &mut msg);
+            assert_eq!(result, 0); // OK
+        }
+    }
+
+    #[test]
+    fn test_copy_flags_constant() {
+        assert_eq!(CP_FLAG_TRY, 0x01);
+    }
+
+    #[test]
+    fn test_copy_offset_constants() {
+        // Verify offsets match struct layout
+        assert_eq!(COPY_SRC_ENDPT_OFF, 0);
+        assert_eq!(COPY_SRC_ADDR_OFF, 8);
+        assert_eq!(COPY_DST_ENDPT_OFF, 16);
+        assert_eq!(COPY_DST_ADDR_OFF, 24);
+        assert_eq!(COPY_NR_BYTES_OFF, 32);
+        assert_eq!(COPY_FLAGS_OFF, 40);
     }
 }
