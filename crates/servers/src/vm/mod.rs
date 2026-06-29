@@ -534,8 +534,9 @@ fn do_get_refcount(msg: &mut Message) -> i32 {
     // that involve the given virtual address.
     let mut refcount = 0;
     unsafe {
-        for row in mem::GRANT_TABLES.iter() {
-            for grant in row.iter() {
+        let tables = mem::GRANT_TABLES.get();
+        for i in 0..mem::MAX_ENDPOINTS {
+            for grant in (*tables)[i].iter() {
                 if grant.g_grantor == target && grant.g_vaddr == addr && grant.g_grantor != 0 {
                     refcount += 1;
                 }

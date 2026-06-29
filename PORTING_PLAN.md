@@ -3694,7 +3694,7 @@ reliable cross-function test patterns.
 - [x] **13.11.8 — Arch `idt.rs`**: Replace `IDT` with `UnsafeCell` wrapper.
   (`crates/arch-x86_64/src/idt.rs`)
 
-- [ ] **13.11.9 — Server `vm/mem.rs`**: Replace `GRANT_TABLES` with `UnsafeCell`
+- [x] **13.11.9 — Server `vm/mem.rs`**: Replace `GRANT_TABLES` with `UnsafeCell`
   wrapper. (`crates/servers/src/vm/mem.rs`)
 
 - [ ] **13.11.10 — FS globals**: Replace `HASH_INODES`, `UNUSED_INODES_HEAD`,

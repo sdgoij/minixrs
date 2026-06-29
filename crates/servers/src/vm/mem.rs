@@ -4,7 +4,7 @@
 //! endpoint to share physical memory with another endpoint via the grant
 //! table mechanism.
 
-#![allow(static_mut_refs)]
+use core::cell::UnsafeCell;
 
 use arch_common::com::{
     VMCTL_BOOTINHIBIT_CLEAR, VMCTL_CLEAR_PAGEFAULT, VMCTL_CLEARMAPCACHE, VMCTL_FLUSHTLB,
@@ -72,11 +72,22 @@ impl Grant {
 const GRANT_ZERO: Grant = Grant::zeroed();
 const GRANT_ROW: [Grant; GRANTS_PER_ENDPOINT] = [GRANT_ZERO; GRANTS_PER_ENDPOINT];
 
+/// Wrapper for `[[Grant; GRANTS_PER_ENDPOINT]; MAX_ENDPOINTS]`.
+pub struct GrantTablesCell(UnsafeCell<[[Grant; GRANTS_PER_ENDPOINT]; MAX_ENDPOINTS]>);
+unsafe impl Sync for GrantTablesCell {}
+impl GrantTablesCell {
+    pub const fn new(val: [[Grant; GRANTS_PER_ENDPOINT]; MAX_ENDPOINTS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    pub fn get(&self) -> *mut [[Grant; GRANTS_PER_ENDPOINT]; MAX_ENDPOINTS] {
+        self.0.get()
+    }
+}
+
 /// Global grant table: one row per endpoint, each row holding 16 grant slots.
 ///
 /// A slot is "free" when its `g_grantor` field is 0.
-pub static mut GRANT_TABLES: [[Grant; GRANTS_PER_ENDPOINT]; MAX_ENDPOINTS] =
-    [GRANT_ROW; MAX_ENDPOINTS];
+pub static GRANT_TABLES: GrantTablesCell = GrantTablesCell::new([GRANT_ROW; MAX_ENDPOINTS]);
 
 // ── Core grant operations ────────────────────────────────────────────────
 
@@ -98,7 +109,10 @@ pub unsafe fn find_free_grant(ep: i32) -> Option<&'static mut Grant> {
     // SAFETY: single-threaded access to GRANT_TABLES is serialised by
     // the caller. The VM server runs on a single thread and no other
     // code mutates the grant table concurrently.
-    unsafe { GRANT_TABLES[idx].iter_mut().find(|g| g.g_grantor == 0) }
+    unsafe {
+        let row = &mut (*GRANT_TABLES.get())[idx];
+        row.iter_mut().find(|g| g.g_grantor == 0)
+    }
 }
 
 /// Map a grant from source to destination address space.
@@ -372,7 +386,9 @@ pub unsafe fn grant_free(physaddr: u64, npages: u32) -> i32 {
     // SAFETY: single-threaded access to GRANT_TABLES; the VM server runs
     // on a single thread and no other code mutates the table concurrently.
     unsafe {
-        for row in GRANT_TABLES.iter_mut() {
+        let tables = GRANT_TABLES.get();
+        for i in 0..MAX_ENDPOINTS {
+            let row = &mut (*tables)[i];
             for grant in row.iter_mut() {
                 if grant.g_physaddr == physaddr && grant.g_npages == npages && grant.g_grantor != 0
                 {
@@ -422,7 +438,9 @@ mod tests {
     #[test]
     fn test_grants_table_initially_zeroed() {
         unsafe {
-            for (ep_idx, row) in GRANT_TABLES.iter().enumerate() {
+            let tables = GRANT_TABLES.get();
+            for ep_idx in 0..MAX_ENDPOINTS {
+                let row = &(*tables)[ep_idx];
                 for (slot_idx, grant) in row.iter().enumerate() {
                     assert_eq!(
                         grant.g_grantor, 0,
@@ -440,9 +458,10 @@ mod tests {
     #[test]
     fn test_table_dimensions() {
         unsafe {
-            assert_eq!(GRANT_TABLES.len(), MAX_ENDPOINTS);
-            for row in GRANT_TABLES.iter() {
-                assert_eq!(row.len(), GRANTS_PER_ENDPOINT);
+            assert_eq!((*GRANT_TABLES.get()).len(), MAX_ENDPOINTS);
+            let tables = GRANT_TABLES.get();
+            for i in 0..MAX_ENDPOINTS {
+                assert_eq!((*tables)[i].len(), GRANTS_PER_ENDPOINT);
             }
         }
     }
@@ -480,7 +499,7 @@ mod tests {
             assert!(find_free_grant(ep).is_none());
 
             // Clean up — reset all slots
-            for grant in GRANT_TABLES[ep as usize].iter_mut() {
+            for grant in (*GRANT_TABLES.get())[ep as usize].iter_mut() {
                 grant.g_grantor = 0;
             }
         }
@@ -548,7 +567,7 @@ mod tests {
             assert_eq!(rc, 0);
 
             // Verify the grant was stored
-            let g = &GRANT_TABLES[2][0];
+            let g = &(*GRANT_TABLES.get())[2][0];
             assert_eq!(g.g_grantor, 1);
             assert_eq!(g.g_endpoint, 2);
             assert_eq!(g.g_vaddr, 0x1000);
@@ -557,7 +576,7 @@ mod tests {
             assert_eq!(g.g_npages, 1);
 
             // Clean up
-            GRANT_TABLES[2][0] = Grant::zeroed();
+            (*GRANT_TABLES.get())[2][0] = Grant::zeroed();
         }
     }
 
@@ -585,14 +604,14 @@ mod tests {
             let rc = grant_physmem(1, 3, 0x2000, 2);
             assert_eq!(rc, 0);
 
-            let g = &GRANT_TABLES[3][0];
+            let g = &(*GRANT_TABLES.get())[3][0];
             assert_eq!(g.g_grantor, 1);
             assert_eq!(g.g_endpoint, 3);
             assert_eq!(g.g_grant_type, GRANT_PHYS);
             assert_eq!(g.g_physaddr, 0x2000);
             assert_eq!(g.g_npages, 2);
 
-            GRANT_TABLES[3][0] = Grant::zeroed();
+            (*GRANT_TABLES.get())[3][0] = Grant::zeroed();
         }
     }
 
@@ -613,14 +632,14 @@ mod tests {
             let rc = grant_alloc(4, 0x3000, 8);
             assert_eq!(rc, 0);
 
-            let g = &GRANT_TABLES[4][0];
+            let g = &(*GRANT_TABLES.get())[4][0];
             assert_eq!(g.g_grantor, 4);
             assert_eq!(g.g_endpoint, 4);
             assert_eq!(g.g_grant_type, GRANT_PHYS);
             assert_eq!(g.g_physaddr, 0x3000);
             assert_eq!(g.g_npages, 8);
 
-            GRANT_TABLES[4][0] = Grant::zeroed();
+            (*GRANT_TABLES.get())[4][0] = Grant::zeroed();
         }
     }
 
@@ -652,7 +671,7 @@ mod tests {
             assert_eq!(grant_free(0x4000, 4), 0);
 
             // Slot should now be zeroed
-            let g = &GRANT_TABLES[5][0];
+            let g = &(*GRANT_TABLES.get())[5][0];
             assert_eq!(g.g_grantor, 0);
             assert_eq!(g.g_endpoint, 0);
             assert_eq!(g.g_physaddr, 0);
@@ -672,7 +691,7 @@ mod tests {
     fn test_grant_free_walks_all_tables() {
         unsafe {
             // Place a grant in endpoint 10, slot 3
-            let g = &mut GRANT_TABLES[10][3];
+            let g = &mut (*GRANT_TABLES.get())[10][3];
             g.g_grantor = 10;
             g.g_endpoint = 10;
             g.g_vaddr = 0x6000;
@@ -684,9 +703,9 @@ mod tests {
             assert_eq!(grant_free(0x6000, 16), 0);
 
             // Verify cleared
-            assert_eq!(GRANT_TABLES[10][3].g_grantor, 0);
-            assert_eq!(GRANT_TABLES[10][3].g_physaddr, 0);
-            assert_eq!(GRANT_TABLES[10][3].g_npages, 0);
+            assert_eq!((*GRANT_TABLES.get())[10][3].g_grantor, 0);
+            assert_eq!((*GRANT_TABLES.get())[10][3].g_physaddr, 0);
+            assert_eq!((*GRANT_TABLES.get())[10][3].g_npages, 0);
         }
     }
 }
