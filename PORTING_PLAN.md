@@ -2312,9 +2312,9 @@ This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a si
   Validates superuser, exact buffer size, and unknown request values.
   5 tests.
 
-- [ ] **10.7c — Wire PM credential hooks** (`servers/src/vfs/misc.rs`)
-  **Depends on:** PM server protocol (Phase 12.3)
-  pm_setgid/uid/groups/setsid update Fproc credential fields.
+- [x] **10.7c — Wire PM credential hooks** (`servers/src/vfs/misc.rs`)
+  Implemented `service_pm()` dispatching VFS_PM_SETUID/SETGID/SETSID/FORK/EXEC/
+  EXIT/REBOOT. Uses correct mess_7 message offsets. 5 tests.
 
 - [x] **10.8 — Port VFS↔PM protocol (`main.c` service_pm)**
   - Source: `.refs/minix-3.3.0/minix/servers/vfs/main.c` (service_pm, service_pm_postponed)
