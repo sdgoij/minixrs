@@ -218,9 +218,73 @@ pub fn dup_inode(idx: u16) {
     }
 }
 
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+
 // Reference: inode.c rw_inode()
-pub fn rw_inode(_rip_idx: u16, _rw_flag: i32) {
-    todo!("rw_inode: buffer cache not yet wired");
+pub fn rw_inode(rip_idx: u16, rw_flag: i32) -> i32 {
+    unsafe {
+        let rip = glo::get_inode_ptr(rip_idx as usize);
+        let sp = super_block::get_super((*rip).i_dev);
+        if sp.is_null() {
+            return EINVAL;
+        }
+        (*rip).i_sp = Some(&mut *sp);
+
+        let offset = START_BLOCK + (*sp).s_imap_blocks as u32 + (*sp).s_zmap_blocks as u32;
+        let b = ((*rip).i_num - 1) / (*sp).s_inodes_per_block + offset;
+        let bp = lmfs_get_block((*rip).i_dev, b as u64);
+        if bp.is_null() {
+            return EIO;
+        }
+
+        let dip2_offset = (((*rip).i_num - 1) % (*sp).s_inodes_per_block) as usize * V2_INODE_SIZE;
+        let dip2 = (*bp).data_ptr.add(dip2_offset) as *mut D2Inode;
+
+        if rw_flag == WRITING {
+            if (*rip).i_update != 0 {
+                update_times(rip_idx);
+            }
+            if (*sp).s_rd_only == FALSE {
+                lmfs_markdirty(bp);
+            }
+        }
+
+        let norm = (*sp).s_native;
+        if rw_flag == READING {
+            // Copy on-disk inode to in-memory inode, swapping bytes if needed.
+            (*rip).i_mode = utility::conv2(norm, (*dip2).d2_mode as i32) as u16;
+            (*rip).i_uid = utility::conv2(norm, (*dip2).d2_uid as i32) as u16;
+            (*rip).i_nlinks = utility::conv2(norm, (*dip2).d2_nlinks as i32) as u16;
+            (*rip).i_gid = utility::conv2(norm, (*dip2).d2_gid as i32) as u16;
+            (*rip).i_size = utility::conv4(norm, (*dip2).d2_size as i64) as i32;
+            (*rip).i_atime = utility::conv4(norm, (*dip2).d2_atime as i64) as u32;
+            (*rip).i_ctime = utility::conv4(norm, (*dip2).d2_ctime as i64) as u32;
+            (*rip).i_mtime = utility::conv4(norm, (*dip2).d2_mtime as i64) as u32;
+            (*rip).i_ndzones = V2_NR_DZONES as u32;
+            (*rip).i_nindirs = v2_indirects((*sp).s_block_size as usize) as u32;
+            for i in 0..V2_NR_TZONES {
+                (*rip).i_zone[i] = utility::conv4(norm, (*dip2).d2_zone[i] as i64) as u32;
+            }
+        } else {
+            // Copy in-memory inode to on-disk inode, swapping bytes if needed.
+            (*dip2).d2_mode = utility::conv2(norm, (*rip).i_mode as i32) as u16;
+            (*dip2).d2_uid = utility::conv2(norm, (*rip).i_uid as i32) as i16;
+            (*dip2).d2_nlinks = utility::conv2(norm, (*rip).i_nlinks as i32) as u16;
+            (*dip2).d2_gid = utility::conv2(norm, (*rip).i_gid as i32) as u16;
+            (*dip2).d2_size = utility::conv4(norm, (*rip).i_size as i64) as i32;
+            (*dip2).d2_atime = utility::conv4(norm, (*rip).i_atime as i64) as i32;
+            (*dip2).d2_ctime = utility::conv4(norm, (*rip).i_ctime as i64) as i32;
+            (*dip2).d2_mtime = utility::conv4(norm, (*rip).i_mtime as i64) as i32;
+            for i in 0..V2_NR_TZONES {
+                (*dip2).d2_zone[i] = utility::conv4(norm, (*rip).i_zone[i] as i64) as u32;
+            }
+        }
+
+        lmfs_put_block(bp, INODE_BLOCK);
+        (*rip).i_dirt = IN_CLEAN;
+
+        OK
+    }
 }
 
 // Reference: inode.c update_times()
@@ -250,7 +314,30 @@ pub fn update_times(rip_idx: u16) {
 
 // Reference: inode.c fs_putnode()
 pub fn fs_putnode() -> i32 {
-    todo!("fs_putnode: not yet wired");
+    unsafe {
+        let ino = (*glo::mfs_ptr()).cch[0] as u32;
+        let count = (*glo::mfs_ptr()).cch[1];
+        let dev = (*glo::mfs_ptr()).fs_dev;
+
+        let rip = find_inode(dev, ino);
+        let rip = match rip {
+            Some(i) => i,
+            None => return EINVAL,
+        };
+
+        if count <= 0 || count > (*glo::get_inode_ptr(rip as usize)).i_count {
+            return EINVAL;
+        }
+
+        // Decrease refcount by (count - 1); put_inode consumes the last one.
+        {
+            let inode = &mut *glo::get_inode_ptr(rip as usize);
+            (*inode).i_count -= count - 1;
+        }
+        put_inode(Some(rip));
+
+        OK
+    }
 }
 
 // ── Private helpers ──

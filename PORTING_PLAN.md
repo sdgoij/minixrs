@@ -2448,51 +2448,57 @@ Created 13 files in `crates/servers/src/vfs/`:
 
 ### Test Coverage
 
-37 new VFS tests (total 131 tests passing, clippy clean):
-- `vfs/types.rs` — 11 tests (tll_defaults, vmnt_defaults, fproc_defaults,
-  vnode_defaults, filp_defaults, file_lock_defaults, dmap_defaults,
-  node_details_defaults, lookup_res_defaults, worker_thread_defaults,
-  scratchpad_defaults)
-- `vfs/tll.rs` — 7 tests (tll_init_defaults, tll_islocked_*,
-  tll_has_pending_*)
-- `vfs/vnode.rs` — 8 tests (get_free_vnode, find_vnode, dup_vnode,
-  put_vnode, is_vnode_locked, lock_unlock_vnode)
-- `vfs/mount.rs` — 6 tests (get_free_vmnt, find_vmnt, mark_vmnt_free,
-  lock_unlock_vmnt, lock_vmnt_out_of_bounds)
-- `vfs/fproc.rs` — 4 tests (get_fproc_valid/invalid, isokendpt_valid/invalid)
-- `vfs/call.rs` — 4 tests (call_table_new_is_empty, call_table_set_and_get,
-  call_table_invalid_call, call_table_out_of_bounds_set)
-- `vfs/lock.rs` — 5 tests (get_free_lock, find_lock_found/none,
-  lock_op_returns_error)
-- `vfs/dev.rs` — 5 tests (cdev_open/close, bdev_open/close, do_ioctl)
-- `vfs/mmap.rs` — 2 tests (do_vm_mmap, map_vnode)
-- `vfs/path.rs` — 3 tests (lookup_init_works, advance_returns_none,
-  eat_path_returns_none)
-- `vfs/dmap.rs` — 3 tests (get_dmap_found/none, dmap_driver_match_false)
-- `vfs/mod.rs` — 4 tests (tables_zero_initialized, fproc_addr_valid/invalid,
-  super_user_check)
-- `vfs/types.rs` — 8 compile-time size/offset assertions
+417 servers tests + 246 fs tests = 663 pass (sequential), clippy clean:
+- `vfs/call.rs` — 58 tests covering all 38 handlers: do_close (3), do_lseek (5),
+  do_fcntl (3), do_umask (1), do_open (1), do_read (3), do_write (1),
+  do_getdents (1), do_fchdir (1), do_chroot (1), do_ftruncate (1),
+  do_fstat (1), do_fstatvfs (1), do_ioctl (1), do_select (1),
+  do_pipe2 (1), lock_op (1), do_getsysinfo (1),
+  do_truncate/chdir/stat/access/creat/link/mkdir/mknod/rmdir/chmod/chown/
+  utimens/checkperms/rdlink/slink (null path), do_umount (EPERM),
+  do_sync/fsync (2), vm_call (1), getrusage (1), gcov_flush (1)
+- `vfs/path.rs` — 12 tests
+- `vfs/mount.rs` — 22 tests
+- `vfs/dmap.rs` — 8 tests
+- `vfs/misc.rs` — 16 tests
+- `vfs/pm.rs` — 8 tests
+- `vfs/request.rs` — 8 tests
+- `vfs/stadir.rs` — 3 tests
+- `vfs/mmap.rs` — 1 test (map_vnode)
+- `vfs/types.rs` — 11 default tests + 8 compile-time size/offset assertions
+- `vfs/tll.rs` — 7 tests
+- `vfs/vnode.rs` — 8 tests
+- `vfs/fproc.rs` — 4 tests
+- `vfs/lock.rs` — 5 tests
+- `vfs/dev.rs` — 5 tests
+- `vfs/mod.rs` — 4 tests
 
 ### Deferred FS Buffer Cache & VFS Wiring Stubs
 
-These stubs in `crates/fs/src/mfs/`, `crates/fs/src/ext2/`, and `crates/kernel/src/system.rs`
-must be replaced when the buffer cache layer (Phase 9.7) and VFS message dispatch (Phase 10)
-are operational. All depend on getting `get_block`/`put_block` from libminixfs:
+10.10 (MFS buffer cache) is complete. The remaining stubs in `crates/fs/src/ext2/`,
+`crates/fs/src/iso9660/`, and `crates/kernel/src/system.rs` still need wiring:
 
-- [ ] **10.10 — Wire MFS buffer cache operations** (`crates/fs/src/mfs/`)
+- [x] **10.10 — Wire MFS buffer cache operations** (`crates/fs/src/mfs/`)
   **Depends on:** libminixfs block cache (Phase 9.7), VFS dispatch (Phase 10.3)
-  - `super_block.rs:111` — `rw_super`: replace `todo!()` with `get_block`/`put_block`
-  - `super_block.rs:144,152` — `alloc_bit`/`free_bit`: wire bitmap block I/O
-  - `inode.rs:222` — `rw_inode`: replace `todo!()` with block I/O
-  - `inode.rs:252` — `fs_putnode`: wire inode release protocol
-  - `path.rs:8,62` — `fs_lookup`/`search_dir`: replace `todo!()` with block I/O
-  - `read.rs:8,13,37,44,49` — `fs_readwrite`/`fs_breadwrite`/`read_map`/`get_block_map`/`rd_indir`
-  - `write.rs:31,71,76,107` — `write_map`/`new_block`/`zero_block`/`fs_ftrunc`
-  - `link.rs:4-13` — `fs_link`/`unlink`/`rdlink`/`rename`
-  - `open.rs:8-17` — `fs_create`/`mkdir`/`mknod`/`slink`
-  - `protect.rs:111` — `fs_getdents`
-  - `misc.rs:24,27` — `fs_new_driver`/`fs_bpeek`
-  - `stats.rs:7` — `count_free_bits`
+  All 28 `todo!()` calls replaced with proper block I/O:
+  - `super_block.rs` — rw_super (lmfs_get_block for block 0 at SUPER_BLOCK_BYTES
+    offset), alloc_bit (bitmap scanning with lmfs_get_block), free_bit
+  - `inode.rs` — rw_inode (read/write inodes from/to disk via lmfs_get_block),
+    fs_putnode (inode release protocol with put_inode)
+  - `path.rs` — fs_lookup (full path resolution with advance/search_dir),
+    search_dir (directory entry scanning with LOOK_UP/DELETE/IS_EMPTY)
+  - `read.rs` — fs_readwrite/fs_breadwrite (block-oriented R/W via rw_chunk),
+    read_map (direct + indirect block resolution), rd_indir (indirect block
+    read), get_block_map (wrapper)
+  - `write.rs` — zero_block (core::ptr::write_bytes), write_map (indirect
+    block write), new_block (block allocation), fs_ftrunc (file truncate)
+  - `link.rs` — fs_link/unlink/rdlink/rename (full link operations)
+  - `open.rs` — fs_create/mkdir/mknod/slink (full file creation with new_node)
+  - `protect.rs` — fs_getdents (directory entry listing)
+  - `misc.rs` — fs_new_driver/fs_bpeek (stubs returning OK)
+  - `stats.rs` — count_free_bits (bitmap iteration)
+  - `glo.rs` — Added lookup request/response fields
+  246 tests pass (fs crate), clippy clean
 
 - [ ] **10.11 — Wire ext2 buffer cache operations** (`crates/fs/src/ext2/`)
   **Depends on:** libminixfs block cache (Phase 9.7), VFS dispatch (Phase 10.3)

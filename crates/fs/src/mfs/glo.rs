@@ -27,6 +27,23 @@ pub struct MfsGlobal {
     pub super_blocks: [SuperBlock; 8],
     pub inode_cache_hit: u32,
     pub inode_cache_miss: u32,
+
+    // Lookup request message fields (populated by dispatch before calling fs_lookup)
+    pub lookup_dir_ino: u32,
+    pub lookup_root_ino: u32,
+    pub lookup_flags: i32,
+    pub lookup_path_len: usize,
+    pub lookup_path_size: usize,
+
+    // Lookup response fields (written by fs_lookup)
+    pub lookup_res_inode: u32,
+    pub lookup_res_mode: u16,
+    pub lookup_res_file_size: i32,
+    pub lookup_res_symloop: i32,
+    pub lookup_res_uid: u16,
+    pub lookup_res_gid: u16,
+    pub lookup_res_device: u32,
+    pub lookup_res_offset: usize,
 }
 
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
@@ -82,6 +99,19 @@ pub unsafe fn mfs_init_globals() {
         super_blocks: core::array::from_fn(|_| SuperBlock::default()),
         inode_cache_hit: 0,
         inode_cache_miss: 0,
+        lookup_dir_ino: 0,
+        lookup_root_ino: 0,
+        lookup_flags: 0,
+        lookup_path_len: 0,
+        lookup_path_size: 0,
+        lookup_res_inode: 0,
+        lookup_res_mode: 0,
+        lookup_res_file_size: 0,
+        lookup_res_symloop: 0,
+        lookup_res_uid: 0,
+        lookup_res_gid: 0,
+        lookup_res_device: 0,
+        lookup_res_offset: 0,
     });
 }
 

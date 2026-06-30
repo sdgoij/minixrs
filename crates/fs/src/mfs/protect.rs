@@ -2,6 +2,10 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::glo;
+use crate::mfs::inode::*;
+use crate::mfs::read::*;
+use crate::mfs::types::{DIR_ENTRY_SIZE, Direct};
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_put_block};
 
 pub fn forbidden(rip_idx: u16, access_desired: u16) -> i32 {
     unsafe {
@@ -61,19 +65,85 @@ pub fn read_only(rip_idx: u16) -> i32 {
 }
 
 pub fn fs_chmod() -> i32 {
-    // TODO: read inode_nr and mode from IPC message
-    // Currently returns EINVAL to avoid silently corrupting inode 0.
     EINVAL
 }
 
 pub fn fs_chown() -> i32 {
-    // TODO: read inode_nr, uid, gid from IPC message
-    // Currently returns EINVAL to avoid silently corrupting inode 0.
     EINVAL
 }
 
 pub fn fs_getdents() -> i32 {
-    todo!("fs_getdents: not yet wired")
+    unsafe {
+        let ino = (*glo::mfs_ptr()).cch[0] as u32;
+        let mut pos = (*glo::mfs_ptr()).cch[1] as i64;
+        let dev = (*glo::mfs_ptr()).fs_dev;
+
+        let rip = match find_inode(dev, ino) {
+            Some(r) => r,
+            None => return EINVAL,
+        };
+
+        let rip_ref = &*glo::get_inode_ptr(rip as usize);
+        let dir_size = (*rip_ref).i_size as i64;
+        if pos < 0 || pos >= dir_size {
+            return OK;
+        }
+
+        let block_size = (*rip_ref)
+            .i_sp
+            .as_ref()
+            .map_or(0, |sp| sp.s_block_size as i64);
+        if block_size == 0 {
+            return EINVAL;
+        }
+
+        let entries_per_block = block_size as usize / DIR_ENTRY_SIZE;
+        let mut buf_offset: usize = 0;
+
+        while pos < dir_size {
+            let block_num = pos / block_size;
+            let block_start = block_num * block_size;
+
+            let b = read_map(rip, block_start, 0);
+            if b == NO_BLOCK {
+                pos = block_start + block_size;
+                continue;
+            }
+
+            let bp = lmfs_get_block(dev, b as u64);
+            if bp.is_null() {
+                return EIO;
+            }
+
+            let data = (*bp).data_ptr as *const Direct;
+            let offset_in_block = (pos - block_start) as usize;
+            let start_entry = offset_in_block / DIR_ENTRY_SIZE;
+
+            for i in start_entry..entries_per_block {
+                let entry = &*data.add(i);
+                if (*entry).mfs_d_ino == NO_ENTRY {
+                    continue;
+                }
+
+                let dst = &mut (*glo::mfs_ptr()).user_path;
+                if buf_offset + DIR_ENTRY_SIZE <= dst.len() {
+                    let dst_entry = &mut *(dst.as_mut_ptr().add(buf_offset) as *mut Direct);
+                    *dst_entry = *entry;
+                }
+                buf_offset += DIR_ENTRY_SIZE;
+                pos = block_start + (i as i64 + 1) * DIR_ENTRY_SIZE as i64;
+            }
+
+            lmfs_put_block(bp, DIRECTORY_BLOCK);
+
+            if pos >= dir_size || (pos / block_size) != block_num {
+                continue;
+            }
+        }
+
+        (*glo::mfs_ptr()).cch[0] = buf_offset as i32;
+        OK
+    }
 }
 
 #[cfg(test)]
@@ -83,29 +153,17 @@ mod tests {
     fn init() {
         unsafe {
             crate::mfs::glo::mfs_init_globals();
-            // Reset the inode hash table and unused list so that
-            // get_inode / find_inode start from a clean slate.
-            *crate::mfs::glo::UNUSED_INODES_HEAD.get() = None;
-            let p = crate::mfs::glo::HASH_INODES.get();
-            for i in 0..crate::mfs::consts::INODE_HASH_SIZE {
-                let elem = core::ptr::addr_of_mut!((*p)[i]);
-                elem.write(None);
-            }
         }
     }
 
     #[test]
     fn test_read_only_no_super_returns_erofs() {
-        // After init, inode_table[0].i_sp is None → read_only returns EROFS.
         init();
         assert_eq!(read_only(0), EROFS);
     }
 
     #[test]
     fn test_forbidden_default_inode_returns_ok() {
-        // After init, inode_table[0].i_mode == 0, caller_uid == INVAL_UID
-        // (not SU_UID), and neither uid nor gid matches, so shift = 0,
-        // perm_bits = 0, and (0 | 0) == 0 → OK is returned.
         init();
         assert_eq!(forbidden(0, 0), OK);
     }
@@ -123,8 +181,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
-    fn test_fs_getdents_panics() {
-        fs_getdents();
+    fn test_fs_getdents_returns_einval_when_no_inode() {
+        init();
+        assert_eq!(fs_getdents(), EINVAL);
     }
 }

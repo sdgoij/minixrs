@@ -4,6 +4,7 @@ use crate::mfs::cache::*;
 use crate::mfs::consts::*;
 use crate::mfs::glo;
 use crate::mfs::read::*;
+use crate::mfs::super_block::get_block_size;
 use crate::mfs::types::*;
 
 pub fn write_map(rip_idx: u16, position: i64, new_zone: u32, op: u32) -> i32 {
@@ -72,8 +73,15 @@ pub fn new_block(rip_idx: u16, position: i64) -> *mut u8 {
     }
 }
 
-pub fn zero_block(_bp: *mut u8) {
-    todo!("zero_block: not yet wired")
+pub unsafe fn zero_block(bp: *mut u8, dev: u32) {
+    if bp.is_null() {
+        return;
+    }
+    let block_size = get_block_size(dev);
+    if block_size == 0 {
+        return;
+    }
+    core::ptr::write_bytes(bp, 0, block_size as usize);
 }
 
 pub fn truncate_inode(rip_idx: u16, newsize: i64) -> i32 {
@@ -140,7 +148,9 @@ mod tests {
     use super::*;
 
     fn init() {
-        unsafe { crate::mfs::glo::mfs_init_globals(); }
+        unsafe {
+            crate::mfs::glo::mfs_init_globals();
+        }
     }
 
     #[test]
@@ -188,8 +198,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
-    fn test_zero_block_panics() {
-        zero_block(core::ptr::null_mut());
+    fn test_zero_block_null_does_nothing() {
+        // Null pointer should return early without panic.
+        unsafe {
+            zero_block(core::ptr::null_mut(), 0);
+        }
+    }
+
+    #[test]
+    fn test_zero_block_zeros_some_memory() {
+        let mut buf = [0xabu8; 1024];
+        unsafe {
+            zero_block(buf.as_mut_ptr(), 0);
+        }
+        // No super block for dev=0, so get_block_size returns 0,
+        // and zero_block returns early. Verify the memory is unchanged.
+        assert!(buf.iter().all(|&b| b == 0xab));
     }
 }

@@ -4,6 +4,8 @@ use crate::mfs::consts::*;
 use crate::mfs::glo;
 use crate::mfs::types::*;
 use crate::mfs::utility::*;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::constants::FULL_DATA_BLOCK;
 
 // Reference: super.c read_super()
 pub fn read_super(sp: &mut SuperBlock) -> i32 {
@@ -94,8 +96,8 @@ pub fn write_super(sp: &mut SuperBlock) -> i32 {
     rw_super(sp, true)
 }
 
-fn rw_super(sp: &mut SuperBlock, _writing: bool) -> i32 {
-    let _save_dev = sp.s_dev;
+fn rw_super(sp: &mut SuperBlock, writing: bool) -> i32 {
+    let save_dev = sp.s_dev;
     if sp.s_dev == NO_DEV {
         return EINVAL;
     }
@@ -104,8 +106,38 @@ fn rw_super(sp: &mut SuperBlock, _writing: bool) -> i32 {
         let last_field = core::ptr::addr_of!((*sp).s_disk_version) as usize;
         (last_field - base) + core::mem::size_of::<u8>()
     };
-    let _ = ondisk_bytes;
-    todo!("rw_super: get_block not yet wired");
+
+    // The superblock is stored at offset SUPER_BLOCK_BYTES within block 0
+    let bp = unsafe { lmfs_get_block(sp.s_dev, 0) };
+    if bp.is_null() {
+        return EIO;
+    }
+
+    // sbbuf points into the cached block at the superblock offset
+    let sbbuf = unsafe { (*bp).data_ptr.add(SUPER_BLOCK_BYTES as usize) };
+
+    if writing {
+        // Zero the entire block, then copy on-disk fields into position
+        unsafe {
+            core::ptr::write_bytes((*bp).data_ptr, 0, (*bp).lmfs_bytes as usize);
+            core::ptr::copy_nonoverlapping(sp as *mut SuperBlock as *const u8, sbbuf, ondisk_bytes);
+            lmfs_markdirty(bp);
+        }
+    } else {
+        // Zero the in-memory superblock, then copy on-disk fields from disk
+        unsafe {
+            core::ptr::write_bytes(
+                sp as *mut SuperBlock as *mut u8,
+                0,
+                core::mem::size_of::<SuperBlock>(),
+            );
+            core::ptr::copy_nonoverlapping(sbbuf, sp as *mut SuperBlock as *mut u8, ondisk_bytes);
+        }
+        sp.s_dev = save_dev;
+    }
+
+    unsafe { lmfs_put_block(bp, libs::libminixfs::constants::FULL_DATA_BLOCK) };
+    OK
 }
 
 // Reference: super.c get_super()
@@ -134,19 +166,144 @@ pub fn get_block_size(dev: u32) -> u32 {
 }
 
 // Reference: super.c alloc_bit()
-pub fn alloc_bit(sp: &mut SuperBlock, _map: i32, _origin: u32) -> u32 {
+pub fn alloc_bit(sp: &mut SuperBlock, map: i32, origin: u32) -> u32 {
     if sp.s_rd_only != 0 {
         return NO_BIT;
     }
-    todo!("alloc_bit: get_block not yet wired");
+
+    // Determine start_block, map_bits, bit_blocks based on map type
+    let (start_block, map_bits, bit_blocks) = if map == IMAP {
+        (START_BLOCK, sp.s_ninodes + 1, sp.s_imap_blocks as u32)
+    } else {
+        (
+            START_BLOCK + sp.s_imap_blocks as u32,
+            sp.s_zones - (sp.s_firstdatazone - 1),
+            sp.s_zmap_blocks as u32,
+        )
+    };
+
+    // Figure out where to start the bit search (depends on 'origin')
+    let mut origin = origin;
+    if origin >= map_bits {
+        origin = 0;
+    }
+
+    let bits_per_block = fs_bits_per_block(sp.s_block_size as usize) as u32;
+    let mut block = origin / bits_per_block;
+    let mut word = ((origin % bits_per_block) / FS_BITCHUNK_BITS as u32) as usize;
+
+    // Iterate over all blocks plus one, because we start in the middle
+    let mut bcount = bit_blocks + 1;
+    loop {
+        let bp = unsafe { lmfs_get_block(sp.s_dev, (start_block + block) as u64) };
+        if bp.is_null() {
+            return NO_BIT;
+        }
+
+        let data_ptr = unsafe { (*bp).data_ptr };
+        let wlim = fs_bitmap_chunks(sp.s_block_size as usize);
+
+        // Iterate over the words in this block starting from 'word'
+        for wptr_idx in word..wlim {
+            let wptr = unsafe {
+                &mut *(data_ptr.add(wptr_idx * core::mem::size_of::<BitchunkT>()) as *mut BitchunkT)
+            };
+
+            // Does this word contain a free bit?
+            if *wptr == !0 {
+                continue;
+            }
+
+            // Find and allocate the free bit
+            let mut k = conv4(sp.s_native, *wptr as i64) as BitchunkT;
+            let mut i: u32 = 0;
+            while (k & (1 << i)) != 0 {
+                i += 1;
+            }
+
+            // Bit number from the start of the bit map
+            let b = block * bits_per_block
+                + (wptr_idx as u32) * FS_BITCHUNK_BITS as u32
+                + i;
+
+            // Don't allocate bits beyond the end of the map
+            if b >= map_bits {
+                break;
+            }
+
+            // Allocate and return bit number
+            k |= 1 << i;
+            *wptr = conv4(sp.s_native, k as i64) as BitchunkT;
+            unsafe {
+                lmfs_markdirty(bp);
+                lmfs_put_block(bp, FULL_DATA_BLOCK);
+            }
+            return b;
+        }
+
+        unsafe { lmfs_put_block(bp, FULL_DATA_BLOCK) };
+
+        block += 1;
+        if block >= bit_blocks {
+            block = 0;
+        }
+        word = 0;
+
+        bcount -= 1;
+        if bcount == 0 {
+            break;
+        }
+    }
+
+    NO_BIT
 }
 
 // Reference: super.c free_bit()
-pub fn free_bit(sp: &mut SuperBlock, _map: i32, _bit_returned: u32) {
+pub fn free_bit(sp: &mut SuperBlock, map: i32, bit_returned: u32) {
     if sp.s_rd_only != 0 {
         return;
     }
-    todo!("free_bit: get_block not yet wired");
+
+    // Determine start_block based on map type
+    let start_block = if map == IMAP {
+        START_BLOCK
+    } else {
+        START_BLOCK + sp.s_imap_blocks as u32
+    };
+
+    let bits_per_block = fs_bits_per_block(sp.s_block_size as usize) as u32;
+    let block = bit_returned / bits_per_block;
+    let word = ((bit_returned % bits_per_block) / FS_BITCHUNK_BITS as u32) as usize;
+    let bit = (bit_returned % FS_BITCHUNK_BITS as u32) as usize;
+    let mask: BitchunkT = 1 << bit;
+
+    let bp = unsafe { lmfs_get_block(sp.s_dev, (start_block + block) as u64) };
+    if bp.is_null() {
+        return;
+    }
+
+    let data_ptr = unsafe { (*bp).data_ptr };
+    let wptr = unsafe {
+        &mut *(data_ptr.add(word * core::mem::size_of::<BitchunkT>()) as *mut BitchunkT)
+    };
+
+    let mut k = conv4(sp.s_native, *wptr as i64) as BitchunkT;
+
+    // The C code panics if the bit was already free; match that behavior.
+    if (k & mask) == 0 {
+        if map == IMAP {
+            panic!("tried to free unused inode");
+        } else {
+            panic!("tried to free unused block: {}", bit_returned);
+        }
+    }
+
+    k &= !mask;
+    *wptr = conv4(sp.s_native, k as i64) as BitchunkT;
+    unsafe {
+        lmfs_markdirty(bp);
+        lmfs_put_block(bp, FULL_DATA_BLOCK);
+    }
 }
 
 // Reference: super.c get_used_blocks()

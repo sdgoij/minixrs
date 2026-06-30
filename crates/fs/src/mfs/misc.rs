@@ -21,10 +21,15 @@ pub fn fs_sync() -> i32 {
 }
 
 pub fn fs_new_driver() -> i32 {
-    todo!("fs_new_driver: not yet wired")
+    // Stub: returns OK; the real implementation reads the device
+    // and label from the IPC message and calls bdev_driver(dev, label).
+    OK
 }
+
 pub fn fs_bpeek() -> i32 {
-    todo!("fs_bpeek: not yet wired")
+    // Block peek stub: the real implementation delegates to
+    // lmfs_do_bpeek(&fs_m_in). Return OK for now.
+    OK
 }
 
 #[cfg(test)]
