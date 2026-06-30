@@ -1,4 +1,4 @@
-# Minix 3.3.0 → Rust Porting Plan
+# Minix 3.3.0 → Rust Porting Plan [L1-4509]
 
 ## Executive Summary
 
@@ -4444,8 +4444,70 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 
 | Milestone | Description | Target Phase | Status |
 |-----------|-------------|-------------|--------|
-| M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ❌ |
+| M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
 | M1b | **First userspace process execution (iretq to ring-3)** | **Phase 14.B** | ❌ |
+
+### Boot Process Detail (M1)
+
+The boot flow from QEMU power-on to "Hello MINIX!" on the serial console:
+
+```
+QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel-boot
+  │
+  ├─ SeaBIOS initializes hardware, loads multiboot ROM from fw_cfg
+  │
+  ├─ Multiboot ROM loads trampoline.elf (ELF32 i386) at 0x100000
+  │   └─ trampoline.S (crates/kernel-boot/src/trampoline.S)
+  │      1. Saves multiboot args (magic in edi, info in esi)
+  │      2. Checks CPUID + long mode support
+  │      3. Sets up identity-mapped page tables:
+  │         PML4[0] → PDP[0] → PD[0..511] (512×2MB huge pages = 1GB)
+  │      4. Enables PAE (CR4.PAE + CR4.PGE)
+  │      5. Loads PML4 address into CR3
+  │      6. Enables Long Mode (EFER.LME via MSR 0xC0000080)
+  │      7. Enables paging (CR0.PG | CR0.WP)
+  │      8. Loads 64-bit GDT (user + kernel code/data segments)
+  │      9. Far-jumps (lret) to 64-bit entry point
+  │     10. Sets up temporary stack (32KB in trampoline BSS)
+  │     11. Jumps to kmain() at the address extracted by mkboot
+  │
+  ├─ QEMU -device loader loads the 64-bit kernel ELF at 0x200000
+  │   (loadable segments placed according to ELF program headers)
+  │
+  └─ kmain() (crates/kernel-boot/src/main.rs)
+      ├─ kernel::init() — arch-specific init (GDT, IDT, FPU, APIC, page allocator)
+      ├─ kernel::syscall::init_basic_syscalls() — userspace syscall handlers
+      ├─ dma::register_allocator() — wire physical allocator for DMA buffers
+      ├─ init_serial() — COM1 (0x3F8) at 115200 baud, 8N1
+      ├─ serial_write("Hello MINIX!\r\n") — first visible output
+      ├─ PIT timer init:
+      │  1. remap_pic() — relocate PIC vectors away from CPU exceptions
+      │  2. init_pit(100) — program PIT at 100 Hz, mode 3
+      │  3. set_timer_isr_handler() — register C callback
+      │  4. IDT.set_handler() — install assembly trampoline at VECTOR_TIMER
+      │  5. unmask_timer_irq() — enable IRQ 0 on master PIC
+      └─ HLT loop — idle until interrupts fire
+```
+
+**Files involved:**
+- `crates/kernel-boot/src/trampoline.S` — 32-bit multiboot ELF (entry point)
+- `crates/kernel-boot/src/main.rs` — kmain(): serial, timer, HLT
+- `crates/kernel-boot/trampoline.ld` — links trampoline at 0x100000
+- `tools/minix-raw.ld` — kernel linker script (0x200000)
+- `tools/mkboot.rs` — extracts kmain address, rebuilds trampoline with -DKMAIN
+- `Justfile` — `just build`, `just run`, `just test-qemu` commands
+
+**Build & run:**
+```bash
+# Build kernel + trampoline
+just build
+
+# Boot in QEMU
+just run
+```
+
+| Milestone | Description | Target Phase | Status |
+|-----------|-------------|-------------|--------|
 | M2 | Two processes can IPC (x86_64) | Phase 4 | ❌ |
 | M3 | Process fork + exec works (x86_64) | Phase 5 | ❌ |
 | M7b | **System boots to shell prompt (`# ` on serial)** | **Phase 14.B** | ❌ |

@@ -12,7 +12,16 @@ use core::arch::asm;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-/// Kernel main entry point — called from boot assembly.
+/// Dummy entry point to prevent --gc-sections from discarding all code.
+/// The actual entry is through the multiboot trampoline which jumps
+/// directly to kmain.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    kmain()
+}
+
+/// Kernel main entry point — called from the multiboot trampoline.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
