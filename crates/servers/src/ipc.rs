@@ -660,11 +660,14 @@ unsafe fn vm_unmap_stub(who: i32, addr: u64) -> Result<(), i32> {
 }
 
 /// Stub: get physical address of a page.
-///
-/// Real implementation would call vm_getphys() on the VM server.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+#[cfg(not(target_os = "none"))]
 unsafe fn vm_getphys_stub(_who: i32, _addr: u64) -> i32 {
     0
+}
+
+#[cfg(target_os = "none")]
+unsafe fn vm_getphys_stub(who: i32, addr: u64) -> i32 {
+    vm_getphys(who, addr)
 }
 
 /// Stub: get reference count of a physical region.
@@ -674,6 +677,29 @@ unsafe fn vm_getphys_stub(_who: i32, _addr: u64) -> i32 {
 unsafe fn vm_getrefcount_stub(_who: i32, _addr: u64) -> u8 {
     // Return 2 (self + 1 attach) to prevent premature destruction.
     2
+}
+
+/// Call the VM server to look up the physical address of a virtual address.
+///
+/// # Safety
+///
+/// `who` must be a valid process endpoint; `addr` must be a valid mapped address.
+pub unsafe fn vm_getphys(who: i32, addr: u64) -> i32 {
+    let vm_ep = 8; // VM_PROC_NR
+    let mut msg = [0u8; MESSAGE_SIZE];
+    msg_set_i32(
+        &mut msg,
+        MSG_OFF_CALLTYPE,
+        arch_common::com::VM_GETPHYS as i32,
+    );
+    msg_set_i32(&mut msg, 8, who);
+    msg_set_u64(&mut msg, 16, addr);
+
+    let r = sendrec(vm_ep, &mut msg);
+    if r != 0 {
+        return r;
+    }
+    msg_i32(&msg, 24) // Reply in m1i4
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1108,7 +1134,27 @@ pub unsafe fn do_shmat(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
 /// `msg` must be a valid message buffer.
 pub unsafe fn do_shmdt(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
-        let _addr = msg_u64(msg, MSG_OFF_D01);
+        let addr = msg_u64(msg, MSG_OFF_D01);
+        let caller = msg_i32(msg, MSG_OFF_SOURCE);
+
+        // Unmap the shared memory from the caller's address space.
+        // Non-fatal on host (no VM infrastructure).
+        let _ = vm_unmap_stub(caller, addr);
+
+        // Try to find the segment by physical address and update metadata.
+        let phys = vm_getphys_stub(caller, addr) as u64;
+        for i in 0..SHM_LIST_NR.load(Ordering::Relaxed) as usize {
+            let shm = &mut *SHM_LIST.as_ptr().add(i);
+            if shm.page == phys || phys == 0 {
+                shm.shmid_ds.shm_dtime = 0; // TODO: clock_time()
+                shm.shmid_ds.shm_lpid = caller;
+                if shm.shmid_ds.shm_nattch > 0 {
+                    shm.shmid_ds.shm_nattch -= 1;
+                }
+                break;
+            }
+        }
+
         update_refcount_and_destroy_stub();
         OK
     }

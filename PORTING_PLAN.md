@@ -3268,10 +3268,10 @@ be replaced with real implementations.
   mapped address. `vm_unmap` also wired with IPC to VM server.
   Page allocation in do_shmget still needs VM_MMAP (currently stub).
 
-- [ ] **12.5c — Implement do_shmdt with VM unmap** (`servers/src/ipc.rs:do_shmdt`)
+- [x] **12.5c — Implement do_shmdt with VM unmap** (`servers/src/ipc.rs:do_shmdt`)
   **Depends on:** VM server getphys + unmap infrastructure (Phase 12.9)
-  Currently returns OK without doing anything. Must lookup segment by
-  physical address via vm_getphys, call vm_unmap on caller, update times.
+  Now calls `vm_unmap_stub` to unmap, `vm_getphys_stub` to identify
+  segment, decrements shm_nattch, updates shm_dtime/lpid.
 
 - [ ] **12.5d — Implement do_semop sembuf copy from userspace**
     (`servers/src/ipc.rs:do_semop`)
