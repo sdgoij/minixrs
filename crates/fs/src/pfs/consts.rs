@@ -34,7 +34,7 @@ pub const fn fs_bitmap_chunks(nr_inodes: usize) -> usize {
 pub const INODEMAP_CHUNKS: usize = fs_bitmap_chunks(PFS_NR_INODES);
 
 // ── VFS call constants ──
-pub const FS_BASE: i32 = 0x1000;
+pub const FS_BASE: i32 = 0xA00;
 pub const FS_CALL_VEC_SIZE: usize = 33;
 
 // ── Request types (FS_BASE + offset) ──

@@ -20,6 +20,12 @@ pub struct PfsGlobal {
     pub fs_dev: u32,
     pub unmountdone: i32,
     pub exitsignaled: i32,
+    /// Incoming IPC message type.
+    pub m_in_type: i32,
+    /// Incoming IPC message data (48 bytes).
+    pub m_in_data: [u8; 48],
+    /// Outgoing IPC message data (48 bytes).
+    pub m_out_data: [u8; 48],
     pub inode_table: [Inode; PFS_NR_INODES],
     pub buf_pool: [Buf; PIPE_NR_BUFS],
     /// Bitmap for inode allocation.
@@ -78,6 +84,9 @@ pub unsafe fn pfs_init_globals() {
         fs_dev: NO_DEV,
         unmountdone: FALSE,
         exitsignaled: 0,
+        m_in_type: 0,
+        m_in_data: [0u8; 48],
+        m_out_data: [0u8; 48],
         inode_table: core::array::from_fn(|_| Inode::default()),
         buf_pool: core::array::from_fn(|_| Buf::default()),
         inodemap: [0; INODEMAP_CHUNKS],

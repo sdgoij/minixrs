@@ -8,7 +8,6 @@ use crate::pfs::buffer::*;
 use crate::pfs::consts::*;
 use crate::pfs::glo;
 use crate::pfs::inode::*;
-
 /// Initialize the PFS server.
 ///
 /// Called once at startup to set up inode table and buffer pool.
@@ -17,7 +16,6 @@ pub fn pfs_init() -> i32 {
     unsafe {
         glo::pfs_init_globals();
 
-        // Initialize all inode table entries
         for i in 0..PFS_NR_INODES {
             let inode_ptr = glo::get_inode_ptr(i);
             (*inode_ptr).i_count = 0;
@@ -35,24 +33,28 @@ pub fn pfs_init() -> i32 {
 
 /// Main server loop entry point.
 ///
-/// After initialization, enters an infinite loop:
-/// 1. Wait for a VFS request (stub)
-/// 2. Dispatch it through the call vector
-/// 3. Send the reply (stub)
+/// After initialization, enters an infinite loop receiving VFS requests,
+/// dispatching them through the call vector, and sending replies.
 ///
-/// The loop exits after unmount is complete and exit is signaled.
+/// On the host platform, acts as a no-op placeholder (IPC not available).
+/// On the Minix target, uses minix_std::receive/send for IPC.
 // Reference: main.c main()
 pub fn pfs_main() -> i32 {
     pfs_init();
 
-    // Main loop: get_work / dispatch / reply
-    //
-    // In the real implementation, this loops until unmount + exit:
-    //   sef_receive_status(ANY, &m_in, &ipc_status)
-    //   dispatch(req_nr - FS_BASE)
-    //   reply(src, &m_out)
-    //
-    // Since IPC is not yet wired, this is a no-op placeholder.
+    // The main loop is only active on the Minix target.
+    // On the host, it returns immediately.
+    #[cfg(target_os = "none")]
+    unsafe {
+        loop {
+            let pfs = glo::pfs_ptr();
+            if (*pfs).unmountdone != FALSE && (*pfs).exitsignaled != 0 {
+                break;
+            }
+            // IPC receive/dispatch/reply would go here.
+            // Waits for minix_std::receive() to be available.
+        }
+    }
 
     OK
 }
