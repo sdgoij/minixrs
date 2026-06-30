@@ -707,12 +707,38 @@ unsafe fn vm_getphys_stub(who: i32, addr: u64) -> i32 {
 }
 
 /// Stub: get reference count of a physical region.
-///
-/// Real implementation would call vm_getrefcount() on the VM server.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+#[cfg(not(target_os = "none"))]
 unsafe fn vm_getrefcount_stub(_who: i32, _addr: u64) -> u8 {
     // Return 2 (self + 1 attach) to prevent premature destruction.
     2
+}
+
+#[cfg(target_os = "none")]
+unsafe fn vm_getrefcount_stub(who: i32, addr: u64) -> u8 {
+    vm_getrefcount(who, addr)
+}
+
+/// Call the VM server to get the reference count of a physical region.
+///
+/// # Safety
+///
+/// `who` must be a valid process endpoint; `addr` must be a valid mapped address.
+pub unsafe fn vm_getrefcount(who: i32, addr: u64) -> u8 {
+    let vm_ep = 8; // VM_PROC_NR
+    let mut msg = [0u8; MESSAGE_SIZE];
+    msg_set_i32(
+        &mut msg,
+        MSG_OFF_CALLTYPE,
+        arch_common::com::VM_GETREF as i32,
+    );
+    msg_set_i32(&mut msg, 8, who);
+    msg_set_u64(&mut msg, 16, addr);
+
+    let r = sendrec(vm_ep, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    msg_i32(&msg, 24) as u8 // Reply in m1i4
 }
 
 /// Call the VM server to look up the physical address of a virtual address.
@@ -1369,11 +1395,43 @@ pub unsafe fn do_shmctl(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
 /// and unmaps/destroys segments that have 0 attachments and SHM_DEST set.
 /// See PORTING_PLAN.md Phase 12.5 follow-up.
 unsafe fn update_refcount_and_destroy_stub() {
-    // Without VM calls, we can't track refcounts.
-    // The real implementation in shm.c does:
-    //   1. For each segment, vm_getrefcount to get nattch
-    //   2. If nattch == 0 && SHM_DEST set: munmap and remove
-    //   3. Otherwise compact the list
+    let nr = SHM_LIST_NR.load(Ordering::Relaxed) as usize;
+    if nr == 0 {
+        return;
+    }
+    let base = SHM_LIST.as_ptr();
+    let mut write_idx = 0;
+    for read_idx in 0..nr {
+        let shm = &mut *base.add(read_idx);
+        let is_dest = (shm.shmid_ds.shm_perm.mode as i32) & SHM_DEST != 0;
+        if is_dest {
+            let mapped_addr = shm.page;
+            let refcount = vm_getrefcount_stub(caller_for_segment(shm), mapped_addr);
+            shm.shmid_ds.shm_nattch = refcount as u32;
+
+            if refcount == 0 {
+                let _ = vm_unmap_stub(caller_for_segment(shm), 0);
+                core::ptr::write_bytes(shm, 0, 1);
+                continue;
+            }
+        }
+        if write_idx != read_idx {
+            let dst = &mut *base.add(write_idx);
+            core::ptr::copy_nonoverlapping(shm, dst, 1);
+        }
+        write_idx += 1;
+    }
+    SHM_LIST_NR.store(write_idx as u32, Ordering::Relaxed);
+}
+
+unsafe fn caller_for_segment(shm: &ShmStruct) -> i32 {
+    if shm.shmid_ds.shm_lpid != 0 {
+        shm.shmid_ds.shm_lpid
+    } else if shm.shmid_ds.shm_cpid != 0 {
+        shm.shmid_ds.shm_cpid
+    } else {
+        0
+    }
 }
 
 /// Check if any shared memory segments exist.

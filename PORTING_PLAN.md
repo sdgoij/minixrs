@@ -3288,10 +3288,10 @@ be replaced with real implementations.
   IPC messages (GETUID/GETGID) to PM_PROC_NR. Falls back to uid=0
   (grants all) when PM is unavailable.
 
-- [ ] **12.5f — Implement update_refcount_and_destroy**
+- [x] **12.5f — Implement update_refcount_and_destroy**
     (`servers/src/ipc.rs:update_refcount_and_destroy_stub`)
   **Depends on:** VM server getrefcount + munmap (Phase 12.9)
-  Currently a no-op. Must walk SHM list, call vm_getrefcount for each
+  Walks SHM list, queries VM for refcounts (via vm_getrefcount_stub),
   segment, update shm_nattch, unmap and destroy segments with 0
   attachments and SHM_DEST set, compact the list.
 
