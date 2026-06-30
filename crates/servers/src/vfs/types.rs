@@ -4,7 +4,7 @@
 
 use crate::vfs::consts::*;
 
-// ── Fproc (per-process VFS state, from fproc.h) ──────────────────────────────
+// Fproc (per-process VFS state, from fproc.h)
 
 /// Per-process VFS information.
 ///
@@ -23,9 +23,13 @@ pub struct Fproc {
     pub fp_sgroups: [u16; NGROUPS_MAX],
     pub fp_endpoint: i32,
     pub fp_pid: i32,
+    pub fp_text_size: i64,
+    pub fp_data_size: i64,
     pub fp_vminode: i32,
-    pub fp_cdir: u32,
-    pub fp_rdir: u32,
+    /// Working directory vnode pointer (NULL during reboot).
+    pub fp_cdir: *mut Vnode,
+    /// Root directory vnode pointer (NULL during reboot).
+    pub fp_rdir: *mut Vnode,
     pub fp_filp: [i32; OPEN_MAX],
     pub fp_cloexec: u64,
     pub fp_blocked_on: i32,
@@ -57,9 +61,11 @@ impl Default for Fproc {
             fp_sgroups: [0; NGROUPS_MAX],
             fp_endpoint: -1, // NONE
             fp_pid: PID_FREE,
+            fp_text_size: 0,
+            fp_data_size: 0,
             fp_vminode: 0,
-            fp_cdir: 0,
-            fp_rdir: 0,
+            fp_cdir: core::ptr::null_mut(),
+            fp_rdir: core::ptr::null_mut(),
             fp_filp: [-1i32; OPEN_MAX],
             fp_cloexec: 0,
             fp_blocked_on: FP_BLOCKED_ON_NONE,
@@ -83,7 +89,7 @@ impl Default for Fproc {
 /// NO_DEV value (defined in arch-common consts).
 const NO_DEV: u32 = 0xffff;
 
-// ── Filp (open file description, from file.h) ───────────────────────────────
+// Filp (open file description, from file.h)
 
 /// Open file description (the "filp" table).
 ///
@@ -98,6 +104,8 @@ pub struct Filp {
     pub filp_state: u32,
     pub filp_ino: u32,
     pub filp_pos: i64,
+    /// Vnode this filp refers to (matches C struct filp_vno).
+    pub filp_vno: *mut Vnode,
     pub filp_selectors: u32,
     pub filp_select_ops: u32,
     pub filp_select_flags: u32,
@@ -116,6 +124,7 @@ impl Default for Filp {
             filp_state: 0,
             filp_ino: 0,
             filp_pos: 0,
+            filp_vno: core::ptr::null_mut(),
             filp_selectors: 0,
             filp_select_ops: 0,
             filp_select_flags: 0,
@@ -127,7 +136,7 @@ impl Default for Filp {
     }
 }
 
-// ── Vnode (virtual inode, from vnode.h) ─────────────────────────────────────
+// Vnode (virtual inode, from vnode.h)
 
 /// Virtual inode (vnode).
 ///
@@ -175,7 +184,7 @@ impl Default for Vnode {
     }
 }
 
-// ── Vmnt (mount point, from vmnt.h) ─────────────────────────────────────────
+// Vmnt (mount point, from vmnt.h)
 
 /// Mount point entry.
 ///
@@ -209,7 +218,7 @@ impl Default for Vmnt {
     }
 }
 
-// ── Dmap (device mapper entry, from dmap.h) ─────────────────────────────────
+// Dmap (device mapper entry, from dmap.h)
 
 /// Device <-> Driver table entry.
 ///
@@ -235,7 +244,7 @@ impl Default for Dmap {
     }
 }
 
-// ── FileLock (advisory locking, from lock.h) ─────────────────────────────────
+// FileLock (advisory locking, from lock.h)
 
 /// Advisory file lock entry.
 #[derive(Clone, Copy, Default)]
@@ -248,7 +257,7 @@ pub struct FileLock {
     pub lock_last: i64,
 }
 
-// ── WorkerThread (from threads.h) ────────────────────────────────────────────
+// WorkerThread (from threads.h)
 
 /// Worker thread state.
 ///
@@ -288,7 +297,7 @@ impl Default for WorkerThread {
     }
 }
 
-// ── Scratchpad (from scratchpad.h) ───────────────────────────────────────────
+// Scratchpad (from scratchpad.h)
 
 /// Per-process scratchpad for temporary I/O state.
 #[derive(Clone, Copy)]
@@ -401,4 +410,38 @@ pub struct LookupRes {
     pub file_size: i64,
     pub dev: u32,
     pub result: i32,
+}
+
+/// Pathname resolution parameters — passed to eat_path/last_dir/advance.
+///
+/// Mirrors `struct lookup` from `minix/servers/vfs/path.h`.
+#[derive(Debug, Clone, Copy)]
+pub struct Lookup {
+    pub l_flags: u32,
+    pub l_vnode_lock: i32,
+    pub l_vmnt_lock: i32,
+    pub l_path: [u8; PATH_MAX],
+    pub l_path_len: usize,
+    pub l_uid: u16,
+    pub l_gid: u16,
+    /// Output: pointer to resolved vnode (set by advance/lookup).
+    pub l_vnode: *mut Vnode,
+    /// Output: pointer to resolved vmnt (set by advance/lookup).
+    pub l_vmp: *mut Vmnt,
+}
+
+impl Default for Lookup {
+    fn default() -> Self {
+        Self {
+            l_flags: 0,
+            l_vnode_lock: VNODE_READ,
+            l_vmnt_lock: VMNT_READ,
+            l_path: [0u8; PATH_MAX],
+            l_path_len: 0,
+            l_uid: 0,
+            l_gid: 0,
+            l_vnode: core::ptr::null_mut(),
+            l_vmp: core::ptr::null_mut(),
+        }
+    }
 }

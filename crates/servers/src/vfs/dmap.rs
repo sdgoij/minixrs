@@ -1,6 +1,6 @@
 //! Device driver mapping table management.
 //!
-//! Adapted from \`minix/servers/vfs/dmap.c\` and \`minix/servers/vfs/dmap.h\`.
+//! Adapted from `minix/servers/vfs/dmap.c` and `minix/servers/vfs/dmap.h`.
 //!
 //! The dmap table maps major device numbers to driver process endpoints.
 //! It is indexed by major device number and provides the link between
@@ -8,218 +8,330 @@
 //! handle I/O for them.
 
 use crate::vfs::consts::*;
+use crate::vfs::glo::vfs_global;
 use crate::vfs::types::*;
 
-// =============================================================================
+use core::ptr::addr_of_mut;
+
 // Dmap entry locking
-// =============================================================================
 
 /// Lock a dmap entry.
 ///
-/// Suspends the current worker thread and acquires the per-entry mutex
-/// (\`dmap_lock\`) to synchronise access to the driver slot.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`lock_dmap()\` (line 27)
-///
-/// # Safety
-///
-/// \`dp\` must point to a valid, initialised dmap entry whose
-/// \`dmap_driver\` is not \`NONE\`.
-///
-/// # TODO
-///
-/// Wire the locking infrastructure:
-///   1. \`worker_suspend()\` to save the current thread context.
-///   2. \`mutex_lock(&dp->dmap_lock)\`.
-///   3. \`worker_resume()\` to restore the thread context.
-pub fn lock_dmap(dp: *mut Dmap) {
-    let _ = dp;
+/// NOTE: Unused in current code — all dmap operations use the caller's
+/// worker thread context and don't need explicit locking yet.
+/// When wired: needs to suspend the current worker thread and acquire
+/// the per-entry `dmap_lock` mutex, then resume on unlock.
+/// See `minix/servers/vfs/dmap.c` lines 27-45.
+pub fn lock_dmap(_dp: *mut Dmap) {
+    todo!("lock_dmap: needs worker_suspend + mutex_lock; unused in current code")
 }
 
 /// Unlock a dmap entry.
-///
-/// Releases the per-entry mutex that was acquired by \`lock_dmap()\`.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`unlock_dmap()\` (line 47)
-///
-/// # Safety
-///
-/// \`dp\` must point to a valid, locked dmap entry.
-///
-/// # TODO
-///
-/// Wire \`mutex_unlock(&dp->dmap_lock)\`.
-pub fn unlock_dmap(dp: *mut Dmap) {
-    let _ = dp;
+pub fn unlock_dmap(_dp: *mut Dmap) {
+    todo!("unlock_dmap: needs mutex_unlock + worker_resume; unused in current code")
 }
 
-// =============================================================================
 // Initialisation
-// =============================================================================
 
 /// Initialize the device mapping table.
 ///
-/// Zeroes the dmap table, sets every entry's \`dmap_driver\` to \`NONE\`,
-/// initialises each entry's mutex, and sets up the special \`CTTY_MAJOR\`
-/// entry which is handled by VFS itself.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`init_dmap()\` (line 216)
+/// Sets every entry's `dmap_driver` to `NONE` and `dmap_ep` to `NONE`.
 ///
 /// # Safety
 ///
-/// Must be called exactly once during VFS initialisation, before any
-/// driver mappings or I/O operations are attempted.
-///
-/// # TODO
-///
-/// Wire full initialisation:
-///   1. Iterate over all \`NR_DEVICES\` entries.
-///   2. Set \`dmap_driver = NONE\`, \`dmap_servicing = INVALID_THREAD\`.
-///   3. Call \`mutex_init()\` on each \`dmap_lock\`.
-///   4. Call \`map_driver("vfs", CTTY_MAJOR, VFS_PROC_NR)\` for the
-///      controlling-terminal entry.
-pub fn init_dmap() {
-    // TODO: iterate NR_DEVICES, set dmap_driver = NONE, init mutexes,
-    // then map the CTTY_MAJOR entry to VFS itself.
+/// Must be called exactly once during VFS initialisation.
+pub unsafe fn init_dmap() {
+    let glob = vfs_global();
+    let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+    for i in 0..NR_DEVICES {
+        let dp = &mut *dmap_arr.add(i);
+        dp.dmap_driver = -1; // NONE
+        dp.dmap_ep = -1; // NONE
+        dp.dmap_style = 0;
+        dp.dmap_label = [0u8; LABEL_MAX];
+    }
 }
 
-// =============================================================================
+/// Map a driver to a device slot.
+///
+/// Sets the dmap entry for `major` to the given endpoint and label.
+/// Returns OK on success, or EINVAL if `major` is out of range.
+///
+/// # Safety
+///
+/// Requires exclusive access to the dmap table.
+pub unsafe fn map_driver(label: &[u8], major: i32, endpoint: i32) -> i32 {
+    if major < 0 || major as usize >= NR_DEVICES {
+        return EINVAL;
+    }
+    let glob = vfs_global();
+    let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+    let dp = &mut *dmap_arr.add(major as usize);
+    dp.dmap_driver = endpoint;
+    dp.dmap_ep = endpoint;
+    // Copy label (up to LABEL_MAX - 1, null-terminated)
+    let copy_len = label.len().min(LABEL_MAX - 1);
+    dp.dmap_label[..copy_len].copy_from_slice(&label[..copy_len]);
+    dp.dmap_label[copy_len] = 0;
+    OK
+}
+
 // Lookup / matching
-// =============================================================================
 
 /// Check if a driver endpoint matches a major device number.
-///
-/// Returns 1 if the dmap entry for \`major\` is valid (driver not \`NONE\`)
-/// and its \`dmap_driver\` field equals \`proc\`.  Returns 0 otherwise.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`dmap_driver_match()\` (line 238)
-///
-/// # TODO
-///
-/// Implement the bounds check on \`major\` and compare the dmap entry's
-/// \`dmap_driver\` field against \`proc\`.
-pub fn dmap_driver_match(proc: i32, major: i32) -> i32 {
-    let _ = (proc, major);
-    ENOSYS
+pub fn dmap_driver_match(proc_e: i32, major: i32) -> i32 {
+    if major < 0 || major as usize >= NR_DEVICES {
+        return 0;
+    }
+    unsafe {
+        let glob = vfs_global();
+        let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+        let dp = &*dmap_arr.add(major as usize);
+        if dp.dmap_driver == proc_e && dp.dmap_driver != -1 {
+            1
+        } else {
+            0
+        }
+    }
 }
 
 /// A driver endpoint has come up.
 ///
-/// Called when a device driver with endpoint \`proc_nr\` has been restarted.
-/// For block drivers (\`is_blk != 0\`), it initiates driver recovery via
-/// \`bdev_up()\`.  For character drivers, it invalidates all open filps that
-/// reference the affected major.
+/// Called when a device driver restarts. Iterates dmap entries
+/// matching `proc_nr` and initiates recovery:
+/// - Block drivers: call `bdev_up(major)` to re-open devices
+/// - Char drivers: call `invalidate_filp_by_char_major(major)`
 ///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`dmap_endpt_up()\` (line 261)
-///
-/// # Safety
-///
-/// Requires exclusive access to the global dmap and fproc tables.
-///
-/// # TODO
-///
-/// Wire the recovery flow:
-///   1. Scan the dmap table for entries matching \`proc_e\`.
-///   2. For block drivers: stop any servicing worker, set
-///      \`dmap_recovering\`, call \`bdev_up(major)\`, clear recovering.
-///   3. For character drivers: stop servicing worker, call
-///      \`invalidate_filp_by_char_major(major)\`.
+/// Source: `.refs/minix-3.3.0/minix/servers/vfs/dmap.c` (dmap_endpt_up)
 pub fn dmap_endpt_up(proc_nr: i32, is_blk: i32) {
     let _ = (proc_nr, is_blk);
-    // TODO: iterate dmap, handle block/char driver recovery.
+    todo!("dmap_endpt_up: needs bdev_up / invalidate_filp; see PORTING_PLAN.md 10.4b")
 }
 
 /// Get the dmap entry for a driver endpoint.
 ///
-/// Searches the dmap table linearly for an entry whose \`dmap_driver\`
-/// equals \`proc_e\`.  Returns a pointer to the entry, or \`null_mut()\`
-/// if no match is found.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`get_dmap()\` (line 303)
-///
-/// # TODO
-///
-/// Implement the linear scan over \`NR_DEVICES\` using
-/// \`dmap_driver_match()\` and return a pointer to the matching entry.
+/// Searches the dmap table linearly for an entry whose `dmap_ep`
+/// equals `proc_e`. Returns a pointer to the entry, or null.
 pub fn get_dmap(proc_e: i32) -> *mut Dmap {
-    let _ = proc_e;
+    unsafe {
+        let glob = vfs_global();
+        let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+        for i in 0..NR_DEVICES {
+            let dp = &*dmap_arr.add(i);
+            if dp.dmap_ep == proc_e {
+                return dmap_arr.add(i);
+            }
+        }
+    }
     core::ptr::null_mut()
 }
 
 /// Get the dmap entry by major device number.
 ///
-/// Returns a pointer to the dmap entry for \`major\`, or \`null_mut()\` if
-/// the major is out of range or the entry has no driver (\`dmap_driver == NONE\`).
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`get_dmap_by_major()\` (line 250)
-///
-/// # TODO
-///
-/// Implement bounds check on \`major\` against \`NR_DEVICES\`, check
-/// \`dmap_driver != NONE\`, and return a pointer to the entry.
+/// Returns a pointer to the dmap entry for `major`, or null if
+/// out of range or the entry has no driver.
 pub fn get_dmap_by_major(major: i32) -> *mut Dmap {
-    let _ = major;
-    core::ptr::null_mut()
+    if major < 0 || major as usize >= NR_DEVICES {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        let glob = vfs_global();
+        let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+        let dp = &*dmap_arr.add(major as usize);
+        if dp.dmap_driver == -1 {
+            return core::ptr::null_mut();
+        }
+        dmap_arr.add(major as usize)
+    }
 }
 
-// =============================================================================
+/// Find a dmap entry by device label.
+///
+/// Scans the dmap table for an entry whose label matches `label`.
+/// Returns the major device number, or -1 if not found.
+pub fn find_dmap_by_label(label: &[u8]) -> i32 {
+    unsafe {
+        let glob = vfs_global();
+        let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+        for i in 0..NR_DEVICES {
+            let dp = &*dmap_arr.add(i);
+            if dp.dmap_driver == -1 {
+                continue;
+            }
+            // Compare labels (up to LABEL_MAX)
+            let dlabel_len = dp
+                .dmap_label
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(LABEL_MAX);
+            let dlabel = &dp.dmap_label[..dlabel_len];
+            if dlabel == label {
+                return i as i32;
+            }
+        }
+    }
+    -1
+}
+
 // Unmapping
-// =============================================================================
 
 /// Unmap all dmap entries for a given endpoint.
 ///
-/// Scans the dmap table and unmaps every entry whose \`dmap_driver\`
-/// matches \`proc_nr\`.  Used when a driver process exits.
-///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`dmap_unmap_by_endpt()\` (line 166)
-///
-/// # Safety
-///
-/// Requires exclusive access to the global dmap table.
-///
-/// # TODO
-///
-/// Wire the unmap flow:
-///   1. Iterate over \`0..NR_DEVICES\`.
-///   2. For each matching entry, call \`map_driver(label, major, NONE)\`
-///      to invalidate the slot.
-///   3. \`invalidate_filp_by_char_major(major)\` is called inside
-///      \`map_driver\` when unmapping.
+/// Iterates the dmap table and resets every entry whose `dmap_driver`
+/// matches `proc_nr`. Used when a driver process exits.
 pub fn dmap_unmap_by_endpt(proc_nr: i32) {
-    let _ = proc_nr;
-    // TODO: iterate dmap table and unmap matching entries.
+    unsafe {
+        let glob = vfs_global();
+        let dmap_arr = core::ptr::addr_of_mut!((*glob).dmap) as *mut Dmap;
+        for i in 0..NR_DEVICES {
+            let dp = &mut *dmap_arr.add(i);
+            if dp.dmap_driver == proc_nr {
+                dp.dmap_driver = -1; // NONE
+                dp.dmap_ep = -1;
+                dp.dmap_style = 0;
+                dp.dmap_label = [0u8; LABEL_MAX];
+            }
+        }
+    }
 }
 
-// =============================================================================
 // Service/driver registration
-// =============================================================================
 
 /// Map a service to a device (called by RS).
 ///
-/// Called from the Reincarnation Server (RS) when a new system service
-/// starts up.  If the service publishes a device number (\`dev_nr\`),
-/// the service is registered as the driver for that major device.
+/// When a new system service starts, RS calls this to register its
+/// device mapping. Reads the RS public entry (`RprocPub`) and calls
+/// `map_driver` if the service publishes a device number.
 ///
-/// C source: \`minix/servers/vfs/dmap.c\` — \`map_service()\` (line 186)
-///
-/// # Parameters
-///
-/// \`rpub\` — pointer to the RS public entry for the service.
-///
-/// # Safety
-///
-/// \`rpub\` must point to a valid, fully-initialised RS public entry.
-/// Requires exclusive access to the global fproc and dmap tables.
-///
-/// # TODO
-///
-/// Wire the registration flow:
-///   1. If \`IS_RPUB_BOOT_USR\`, return \`OK\` (boot-time user processes
-///      are not remapped).
-///   2. Look up the endpoint in the fproc table, set \`FP_SRV_PROC\`.
-///   3. If \`dev_nr == NO_DEV\`, it's not a driver — return \`OK\`.
-///   4. Otherwise call \`map_driver(rpub.label, rpub.dev_nr, rpub.endpoint)\`.
+/// Source: `.refs/minix-3.3.0/minix/servers/vfs/dmap.c` (map_service)
 pub fn map_service(rpub: *const core::ffi::c_void) -> i32 {
-    let _ = rpub;
-    ENOSYS
+    if rpub.is_null() {
+        return EINVAL;
+    }
+    let rpub = rpub as *const crate::rs::RprocPub;
+    unsafe {
+        let dev_nr = (*rpub).dev_nr;
+        if dev_nr < 0 {
+            // No device number — not a driver, nothing to map.
+            return OK;
+        }
+        let endpoint = (*rpub).endpoint;
+        // Extract null-terminated label.
+        let label_len = (*rpub)
+            .label
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(LABEL_MAX - 1);
+        let label = core::slice::from_raw_parts((*rpub).label.as_ptr(), label_len);
+        map_driver(label, dev_nr, endpoint)
+    }
+}
+
+// Tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn init() {
+        init_dmap();
+    }
+
+    #[test]
+    fn test_init_dmap_clears_all_entries() {
+        unsafe {
+            init();
+            let glob = vfs_global();
+            let dmap_arr = addr_of_mut!((*glob).dmap) as *mut Dmap;
+            for i in 0..NR_DEVICES {
+                assert_eq!((*dmap_arr.add(i)).dmap_driver, -1);
+                assert_eq!((*dmap_arr.add(i)).dmap_ep, -1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_map_driver_sets_entry() {
+        unsafe {
+            init();
+            let label = b"ext2";
+            assert_eq!(map_driver(label, 2, 100), OK);
+            let dp = get_dmap_by_major(2);
+            assert!(!dp.is_null());
+            assert_eq!((*dp).dmap_ep, 100);
+            assert_eq!((*dp).dmap_driver, 100);
+        }
+    }
+
+    #[test]
+    fn test_map_driver_out_of_range() {
+        unsafe {
+            init();
+            assert_eq!(map_driver(b"test", 999, 1), EINVAL);
+            assert_eq!(map_driver(b"test", -1, 1), EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_get_dmap_by_major_returns_null_for_unmapped() {
+        unsafe {
+            init();
+            assert!(get_dmap_by_major(5).is_null());
+        }
+    }
+
+    #[test]
+    fn test_get_dmap_finds_by_endpoint() {
+        unsafe {
+            init();
+            assert!(get_dmap(42).is_null());
+            map_driver(b"mfs", 3, 42);
+            let dp = get_dmap(42);
+            assert!(!dp.is_null());
+            assert_eq!((*dp).dmap_ep, 42);
+        }
+    }
+
+    #[test]
+    fn test_dmap_driver_match_checks_major() {
+        unsafe {
+            init();
+            map_driver(b"pfs", 7, 77);
+            assert_eq!(dmap_driver_match(77, 7), 1);
+            assert_eq!(dmap_driver_match(77, 8), 0);
+            assert_eq!(dmap_driver_match(99, 7), 0);
+        }
+    }
+
+    #[test]
+    fn test_find_dmap_by_label() {
+        unsafe {
+            init();
+            assert_eq!(find_dmap_by_label(b"ext2"), -1);
+            map_driver(b"ext2", 2, 100);
+            assert_eq!(find_dmap_by_label(b"ext2"), 2);
+            assert_eq!(find_dmap_by_label(b"mfs"), -1);
+        }
+    }
+
+    #[test]
+    fn test_dmap_unmap_by_endpt_clears_all_matching() {
+        unsafe {
+            init();
+            map_driver(b"ext2", 2, 100);
+            map_driver(b"mfs", 3, 100);
+            map_driver(b"pfs", 4, 200);
+            assert!(!get_dmap_by_major(2).is_null());
+            assert!(!get_dmap_by_major(3).is_null());
+            assert!(!get_dmap_by_major(4).is_null());
+
+            dmap_unmap_by_endpt(100);
+
+            // ext2 and mfs were mapped to endpoint 100 — should be cleared
+            assert!(get_dmap_by_major(2).is_null(), "ext2 should be unmapped");
+            assert!(get_dmap_by_major(3).is_null(), "mfs should be unmapped");
+            // pfs was mapped to 200 — should remain
+            assert!(!get_dmap_by_major(4).is_null(), "pfs should remain");
+        }
+    }
 }

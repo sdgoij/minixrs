@@ -7,7 +7,7 @@
 use crate::vfs::consts::*;
 use crate::vfs::types::*;
 
-// ── StatvfsCache ────────────────────────────────────────────────────────
+// StatvfsCache
 
 /// Cached statvfs fields per mount point (avoids 2KB per mount entry).
 #[repr(C)]
@@ -27,7 +27,7 @@ pub struct StatvfsCache {
     pub svc_namemax: u64,
 }
 
-// ── Stat helpers ────────────────────────────────────────────────────────
+// Stat helpers
 
 /// Fill a `statvfs` struct from `StatvfsCache` and mount flags.
 ///
@@ -53,7 +53,7 @@ pub fn stat_inode(vp: &Vnode, stat_buf: &mut [u8; 144]) -> i32 {
     ENOSYS
 }
 
-// ── Directory change helpers ────────────────────────────────────────────
+// Directory change helpers
 
 /// Change the current working directory to a new vnode.
 ///
@@ -69,19 +69,24 @@ pub fn change_into(fp_wd: &mut u32, vp: &Vnode) -> i32 {
     ENOSYS
 }
 
-// ── File descriptor ─────────────────────────────────────────────────────
+// File descriptor
 
 /// Close a file descriptor in a process's fd table.
 ///
-/// Decrements filp refcount, checks for pipe cleanup, and clears
-/// the fd slot in fp_filp and fp_cloexec.
-///
-/// TODO: implement close_fd logic.
+/// Decrements filp refcount and clears the fd slot.
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/open.c` (close_fd)
 pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
-    let _ = (rfp, fd_nr);
-    ENOSYS
+    if fd_nr < 0 || (fd_nr as usize) >= OPEN_MAX {
+        return EBADF;
+    }
+    let filp_idx = rfp.fp_filp[fd_nr as usize];
+    if filp_idx < 0 {
+        return EBADF;
+    }
+    rfp.fp_filp[fd_nr as usize] = -1;
+    rfp.fp_cloexec &= !(1u64 << fd_nr);
+    unsafe { crate::vfs::filedes::close_filp(rfp, filp_idx) }
 }
 
 #[cfg(test)]

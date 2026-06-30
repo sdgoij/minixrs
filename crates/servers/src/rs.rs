@@ -135,6 +135,7 @@ pub struct BootImageDev {
 pub struct RprocPub {
     pub in_use: bool,
     pub endpoint: i32,
+    pub dev_nr: i32,
     pub label: [u8; RS_MAX_LABEL_LEN],
     pub proc_name: [u8; RS_MAX_LABEL_LEN],
 }
@@ -144,6 +145,7 @@ impl RprocPub {
         Self {
             in_use: false,
             endpoint: 0,
+            dev_nr: -1, // NO_DEV
             label: [0u8; RS_MAX_LABEL_LEN],
             proc_name: [0u8; RS_MAX_LABEL_LEN],
         }
@@ -155,6 +157,7 @@ impl Default for RprocPub {
         Self {
             in_use: false,
             endpoint: 0,
+            dev_nr: -1,
             label: [0u8; RS_MAX_LABEL_LEN],
             proc_name: [0u8; RS_MAX_LABEL_LEN],
         }
@@ -372,7 +375,7 @@ pub unsafe fn rs_init() {
 }
 
 /// Initialize a slot with the given label and endpoint.
-pub unsafe fn init_slot(idx: usize, endpoint: i32, label: &[u8]) -> Result<(), i32> {
+pub unsafe fn init_slot(idx: usize, endpoint: i32, dev_nr: i32, label: &[u8]) -> Result<(), i32> {
     if idx >= NR_SYS_PROCS {
         return Err(EINVAL);
     }
@@ -389,6 +392,7 @@ pub unsafe fn init_slot(idx: usize, endpoint: i32, label: &[u8]) -> Result<(), i
     let rpub = unsafe { &mut *pub_base.add(idx) };
     rpub.in_use = true;
     rpub.endpoint = endpoint;
+    rpub.dev_nr = dev_nr;
     rpub.label[..label_len].copy_from_slice(&label[..label_len]);
     rpub.label[label_len] = 0;
     rpub.proc_name[..label_len].copy_from_slice(&label[..label_len]);
@@ -576,7 +580,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 100, b"test.service").unwrap();
+            init_slot(idx, 100, -1, b"test.service").unwrap();
 
             let rp = &*RPROC.as_ptr().add(idx);
             assert!(rp.flags & RS_IN_USE != 0);
@@ -593,7 +597,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 100, b"vm.service").unwrap();
+            init_slot(idx, 100, -1, b"vm.service").unwrap();
 
             let found = lookup_slot_by_label(b"vm.service");
             assert_eq!(found, Some(idx));
@@ -608,7 +612,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 42, b"my.service").unwrap();
+            init_slot(idx, 42, -1, b"my.service").unwrap();
 
             let found = lookup_slot_by_endpoint(42);
             assert_eq!(found, Some(idx));
@@ -623,7 +627,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 101, b"test").unwrap();
+            init_slot(idx, 101, -1, b"test").unwrap();
 
             mark_initialized(idx, 101).unwrap();
             let rp = &*RPROC.as_ptr().add(idx);
@@ -641,7 +645,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 7, b"proc").unwrap();
+            init_slot(idx, 7, -1, b"proc").unwrap();
 
             assert_eq!(rs_isokendpt(7), Some(idx));
             assert_eq!(rs_isokendpt(8), None); // not in use
@@ -663,7 +667,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 200, b"label.test").unwrap();
+            init_slot(idx, 200, -1, b"label.test").unwrap();
 
             let label = slot_label(idx).unwrap();
             let label_str = core::str::from_utf8(&label).unwrap();
@@ -678,7 +682,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 300, b"pid.test").unwrap();
+            init_slot(idx, 300, -1, b"pid.test").unwrap();
 
             // Set PID.
             let rp = &mut *RPROC.as_ptr().add(idx);
@@ -712,7 +716,7 @@ mod tests {
         let _g = setup();
         unsafe {
             let idx = alloc_slot().unwrap();
-            init_slot(idx, 400, b"free.test").unwrap();
+            init_slot(idx, 400, -1, b"free.test").unwrap();
             free_slot(idx);
 
             let rp = &*RPROC.as_ptr().add(idx);

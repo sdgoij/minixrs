@@ -10,7 +10,7 @@ use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
 use crate::vfs::misc::*;
 
-// ── PM↔VFS message types (from com.h) ─────────────────────────────────────
+// PM↔VFS message types (from com.h)
 
 const VFS_PM_RQ_BASE: i32 = 0x900;
 const VFS_PM_RS_BASE: i32 = 0x980;
@@ -32,7 +32,7 @@ const VFS_PM_EXEC_REPLY: i32 = VFS_PM_RS_BASE + 6;
 const VFS_PM_EXIT_REPLY: i32 = VFS_PM_RS_BASE + 4;
 const VFS_PM_CORE_REPLY: i32 = VFS_PM_RS_BASE + 5;
 
-// ── mess_7 field offsets (x86_64) ─────────────────────────────────────────
+// mess_7 field offsets (x86_64)
 // Full message: m_source(4) + m_type(4) + mess_7 payload(56)
 // mess_7 relative to payload start (= absolute offset 8):
 //   m7i1..m7i5: int (4 bytes) at rel 0, 4, 8, 12, 16
@@ -48,7 +48,7 @@ const PM_REGID_OFF: usize = 24; // m7_i5  (also PS_STR, NEWPS_STR)
 const PM_PATH_OFF: usize = 28; // m7_p1  (also PC)
 const PM_FRAME_OFF: usize = 36; // m7_p2  (also NEWSP)
 
-// ── Message field helpers ─────────────────────────────────────────────────
+// Message field helpers
 
 fn r_i32(buf: &[u8; 64], off: usize) -> i32 {
     i32::from_le_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4]))
@@ -66,7 +66,7 @@ fn w_u64(buf: &mut [u8; 64], off: usize, val: u64) {
     buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
 }
 
-// ── Dispatch ──────────────────────────────────────────────────────────────
+// Dispatch
 
 /// Dispatch a PM message to the appropriate handler.
 ///
@@ -226,7 +226,7 @@ pub fn service_pm_postponed() {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 #[cfg(test)]
 mod tests {
@@ -322,8 +322,8 @@ mod tests {
             parent.fp_filp = [-1i32; OPEN_MAX];
             parent.fp_filp[0] = 1;
             parent.fp_tty = 0;
-            parent.fp_rdir = 1;
-            parent.fp_cdir = 2;
+            parent.fp_rdir = core::ptr::null_mut();
+            parent.fp_cdir = core::ptr::null_mut();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
             (*filp_arr.add(1)).filp_count = 1;
 
@@ -340,7 +340,7 @@ mod tests {
             assert_eq!(child.fp_endpoint, 10);
             assert_eq!(child.fp_pid, 101);
             assert_eq!(child.fp_filp[0], 1);
-            assert_eq!(child.fp_cdir, 2);
+            assert_eq!(child.fp_cdir.is_null(), true);
         }
     }
 

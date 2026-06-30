@@ -7,7 +7,7 @@
 use crate::vfs::call::*;
 use crate::vfs::consts::*;
 
-// ── Dispatch table ───────────────────────────────────────────────────────────
+// Dispatch table
 
 /// Type of a VFS handler function.
 pub type VfsHandler = fn() -> i32;
@@ -74,7 +74,7 @@ static CALL_VEC: [VfsHandler; NR_VFS_CALLS] = {
     table
 };
 
-// ── Dispatch function ────────────────────────────────────────────────────────
+// Dispatch function
 
 /// Look up and call a handler for the given VFS call number.
 ///
@@ -89,7 +89,7 @@ pub fn dispatch(call_nr: i32) -> i32 {
     }
 }
 
-// ── Default stub ─────────────────────────────────────────────────────────────
+// Default stub
 
 /// Default stub: all unimplemented table slots return `ENOSYS`.
 pub fn no_sys() -> i32 {

@@ -7,7 +7,7 @@ use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
 use crate::vfs::types::*;
 
-// ── Debug: lock checking (stubs) ───────────────────────────────────────────
+// Debug: lock checking (stubs)
 
 /// Check whether any filp locks are held by any thread.
 ///
@@ -23,7 +23,7 @@ pub unsafe fn check_filp_locks() {}
 /// Requires exclusive access to the global filp table.
 pub unsafe fn check_filp_locks_by_me() {}
 
-// ── Initialization ─────────────────────────────────────────────────────────
+// Initialization
 
 /// Initialize all filp structures.
 ///
@@ -39,7 +39,7 @@ pub unsafe fn init_filps() {
     }
 }
 
-// ── get_fd ─────────────────────────────────────────────────────────────────
+// get_fd
 
 /// Look for a free file descriptor and a free filp slot.
 ///
@@ -76,6 +76,7 @@ pub unsafe fn get_fd(rfp: &mut Fproc, start: i32, k: &mut i32) -> i32 {
             f.filp_pipe_ino = 0;
             f.filp_flags = 0;
             f.filp_ino = 0;
+            f.filp_vno = core::ptr::null_mut();
             f.filp_state = 0;
             f.filp_select_ep = -1;
             rfp.fp_filp[i as usize] = j as i32;
@@ -86,7 +87,7 @@ pub unsafe fn get_fd(rfp: &mut Fproc, start: i32, k: &mut i32) -> i32 {
     ENFILE
 }
 
-// ── get_filp ───────────────────────────────────────────────────────────────
+// get_filp
 
 /// Look up the filp entry for a given file descriptor in the current
 /// process. Returns the filp index (>= 0) on success, or a negative errno.
@@ -127,7 +128,7 @@ pub unsafe fn find_filp(ino: u32, mode: u32) -> *mut Filp {
     core::ptr::null_mut()
 }
 
-// ── alloc_filp ─────────────────────────────────────────────────────────────
+// alloc_filp
 
 /// Allocate a free filp slot. Returns the index into the filp table,
 /// or `ENFILE` if the table is full.
@@ -149,7 +150,7 @@ pub unsafe fn alloc_filp() -> i32 {
     ENFILE
 }
 
-// ── close_filp ─────────────────────────────────────────────────────────────
+// close_filp
 
 /// Close a filp by index. Decrements the reference count and frees the
 /// slot if it reaches zero.

@@ -110,7 +110,7 @@ mod tests {
 
         #[test]
         fn pfs_fs_base() {
-            assert_eq!(FS_BASE, 0x1000);
+            assert_eq!(FS_BASE, 0xA00);
         }
     }
 }

@@ -1,29 +1,11 @@
-//! Memory-mapped file support — adapted from `minix/servers/vfs/misc.c` (do_vm_call)
-//! and `minix/servers/vfs/pipe.c` (map_vnode).
+//! Memory-mapped file support — adapted from `minix/servers/vfs/pipe.c` (map_vnode)
+//! and `minix/servers/vfs/exec.c` (vfs_memmap).
 //!
-//! Handles VM↔VFS communication for mmap operations: VM requests VFS to
-//! map file pages, and VFS responds with the file's backing device and inode.
+//! Vnode remapping for named pipes and mmap grant setup for ELF loading.
+//! The VM↔VFS call handler (`do_vm_call`) is in `call.rs`.
 
 use crate::vfs::consts::*;
 use crate::vfs::types::Vnode;
-
-/// Handle a VM call to VFS (SYS_VMCALL).
-///
-/// VM sends requests to VFS for operations like:
-/// - `VMVFSREQ_FDLOOKUP` — resolve an fd to (dev, inode) for mmap
-/// - `VMVFSREQ_FDCLOSE` — close an fd on behalf of VM (munmap)
-/// - `VMVFSREQ_FDIO` — perform I/O on an fd for VM pagefault handling
-///
-/// Must reply with VM_VFS_REPLY so VM can distinguish reply from request.
-///
-/// TODO: parse `job_m_in.VFS_VMCALL_*` fields, dispatch to fd_lookup/
-/// fd_close/fd_io handlers, send VM_VFS_REPLY.
-/// Real implementation needs: scratchpad message access, filp table, IPC reply.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (do_vm_call)
-pub fn do_vm_call() -> i32 {
-    ENOSYS
-}
 
 /// Map a vnode to a specific FS endpoint (e.g., PFS for named pipes).
 ///
@@ -74,11 +56,6 @@ pub fn vfs_memmap(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_do_vm_call_returns_enosys() {
-        assert_eq!(do_vm_call(), ENOSYS);
-    }
 
     #[test]
     fn test_map_vnode_returns_enosys() {

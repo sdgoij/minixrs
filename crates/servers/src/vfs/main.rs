@@ -18,7 +18,7 @@ const PM_PROC_NR: i32 = 0;
 /// Offset of m_source in the message buffer (4 bytes).
 const MSG_SOURCE_OFF: usize = 0;
 
-// ── Entry point ───────────────────────────────────────────────────────────
+// Entry point
 
 /// VFS main entry point.
 ///
@@ -34,7 +34,7 @@ pub unsafe fn vfs_main() -> i32 {
     }
 }
 
-// ── SEF callbacks (stubs) ─────────────────────────────────────────────────
+// SEF callbacks (stubs)
 
 /// Register SEF init and signal callbacks.
 unsafe fn sef_local_startup() {
@@ -66,7 +66,7 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     OK
 }
 
-// ── Work loop ─────────────────────────────────────────────────────────────
+// Work loop
 
 /// Receive a message from any source.
 unsafe fn get_work() {
@@ -111,7 +111,7 @@ unsafe fn reply(who: *mut Fproc, result: i32) {
     let _ = result;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
+// Helpers
 
 /// Send a reply code (just an errno value, no payload).
 #[allow(unused)]
@@ -119,7 +119,7 @@ unsafe fn reply_code(_whom: i32, result: i32) {
     let _ = result;
 }
 
-// ── Exported helpers ──────────────────────────────────────────────────────
+// Exported helpers
 
 /// Lock a process for exclusive access by a worker thread.
 ///

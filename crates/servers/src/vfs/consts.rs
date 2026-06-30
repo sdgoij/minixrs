@@ -1,7 +1,7 @@
 //! VFS constants — adapted from `minix/servers/vfs/const.h`
 //! and `minix/include/minix/callnr.h`.
 
-// ── Table sizes ──────────────────────────────────────────────────────────────
+// Table sizes
 
 /// Number of slots in the filp table.
 pub const NR_FILPS: usize = 1024;
@@ -21,12 +21,12 @@ pub const NR_WTHREADS: usize = 9;
 /// Number of slots in the nonedev bitmap.
 pub const NR_NONEDEVS: usize = NR_MNTS;
 
-// ── Open file limits ─────────────────────────────────────────────────────────
+// Open file limits
 
 /// Maximum number of open files per process.
 pub const OPEN_MAX: usize = 64;
 
-// ── Path limits ──────────────────────────────────────────────────────────────
+// Path limits
 
 /// Maximum path length.
 pub const PATH_MAX: usize = 1024;
@@ -37,7 +37,7 @@ pub const PNAME_MAX: usize = 255;
 /// Maximum label size (including NUL terminator).
 pub const LABEL_MAX: usize = 16;
 
-// ── Device limits ────────────────────────────────────────────────────────────
+// Device limits
 
 /// Number of devices per driver.
 pub const DEV_PER_DRIVER: usize = 256;
@@ -45,7 +45,16 @@ pub const DEV_PER_DRIVER: usize = 256;
 /// Number of device table slots.
 pub const NR_DEVICES: usize = 64;
 
-// ── Misc constants ───────────────────────────────────────────────────────────
+// Misc constants
+
+/// Vnode lock types for the three-level lock (tll).
+pub const VNODE_READ: i32 = 0;
+pub const VNODE_WRITE: i32 = 1;
+pub const VNODE_OPCL: i32 = 2;
+
+/// Vmnt lock types.
+pub const VMNT_READ: i32 = 0;
+pub const VMNT_WRITE: i32 = 1;
 
 /// Super-user UID.
 pub const SU_UID: u16 = 0;
@@ -68,7 +77,7 @@ pub const FSTYPE_MAX: usize = 16; // VFS_NAMELEN
 /// Process name length.
 pub const PROC_NAME_LEN: usize = 16;
 
-// ── FP_BLOCKED_ON constants ──────────────────────────────────────────────────
+// FP_BLOCKED_ON constants
 
 /// Not blocked.
 pub const FP_BLOCKED_ON_NONE: i32 = 0;
@@ -88,7 +97,7 @@ pub const FP_BLOCKED_ON_SELECT: i32 = 4;
 /// Blocked on other process (check fp_task).
 pub const FP_BLOCKED_ON_OTHER: i32 = 5;
 
-// ── Fproc flags (fp_flags) ───────────────────────────────────────────────────
+// Fproc flags (fp_flags)
 
 /// No flags.
 pub const FP_NOFLAGS: u32 = 0x0000;
@@ -111,7 +120,7 @@ pub const FP_EXITING: u32 = 0x0020;
 /// Set if process has a postponed PM request.
 pub const FP_PM_WORK: u32 = 0x0040;
 
-// ── Reviving constants ───────────────────────────────────────────────────────
+// Reviving constants
 
 /// Process is not being revived.
 pub const NOT_REVIVING: i32 = 0xC0FFEEE;
@@ -122,7 +131,7 @@ pub const REVIVING: i32 = 0xDEEAD;
 /// Process slot free.
 pub const PID_FREE: i32 = 0;
 
-// ── Filp constants ───────────────────────────────────────────────────────────
+// Filp constants
 
 /// filp_mode: associated device closed/gone.
 pub const FILP_CLOSED: u32 = 0;
@@ -145,7 +154,7 @@ pub const FSF_ERR_BLOCK: u32 = 0x40;
 /// Mask of all blocking flags.
 pub const FSF_BLOCKED: u32 = 0x70;
 
-// ── Vmnt flags ───────────────────────────────────────────────────────────────
+// Vmnt flags
 
 /// Device mounted readonly.
 pub const VMNT_READONLY: u32 = 0x01;
@@ -162,14 +171,14 @@ pub const VMNT_FORCEROOTBSF: u32 = 0x08;
 /// Include FS in getvfsstat output.
 pub const VMNT_CANSTAT: u32 = 0x10;
 
-// ── Select operation types ───────────────────────────────────────────────────
+// Select operation types
 
 pub const SEL_RD: u32 = 0x01;
 pub const SEL_WR: u32 = 0x02;
 pub const SEL_ERR: u32 = 0x04;
 pub const SEL_NOTIFY: u32 = 0x08;
 
-// ── Misc ─────────────────────────────────────────────────────────────────────
+// Misc
 
 /// Number of boot processes.
 pub const NR_BOOT_PROCS: usize = 32;
@@ -177,7 +186,7 @@ pub const NR_BOOT_PROCS: usize = 32;
 /// Maximum number of supplemental groups.
 pub const NGROUPS_MAX: usize = 64;
 
-// ── VFS call number constants (from callnr.h) ────────────────────────────────
+// VFS call number constants (from callnr.h)
 
 /// VFS call number base.
 pub const VFS_BASE: i32 = 0x100;
@@ -235,7 +244,14 @@ pub const VFS_COPYFD: i32 = VFS_BASE + 46;
 pub const VFS_CHECKPERMS: i32 = VFS_BASE + 47;
 pub const VFS_GETSYSINFO: i32 = VFS_BASE + 48;
 
-// ── Errno constants ──────────────────────────────────────────────────────────
+// Errno constants
+
+/// F_DUPFD = 0 — duplicate fd as lowest available >= arg.
+pub const F_DUPFD: i32 = 0;
+/// F_GETFD = 1 — get close-on-exec flag.
+pub const F_GETFD: i32 = 1;
+/// F_SETFD = 2 — set close-on-exec flag.
+pub const F_SETFD: i32 = 2;
 
 pub const OK: i32 = 0;
 pub const EPERM: i32 = -1;
@@ -278,14 +294,59 @@ pub const ELEAVEMOUNT: i32 = -107;
 pub const EDEADLK: i32 = -36;
 pub const EWOULDBLOCK: i32 = EAGAIN;
 
-// ── SUSPEND (internal code) ──────────────────────────────────────────────────
+// SUSPEND (internal code)
 
 pub const SUSPEND: i32 = -998;
 
-// ── Helper ───────────────────────────────────────────────────────────────────
+// Helper
 
 /// Test if a process is blocked on something.
 #[inline]
 pub fn fp_is_blocked(fp_flags: i32) -> bool {
     fp_flags != FP_BLOCKED_ON_NONE
 }
+
+/// PFS (Pipe File System) endpoint number.
+pub const PFS_PROC_NR: i32 = 4;
+
+/// VM (memory server) endpoint number.
+pub const VM_PROC_NR: i32 = 8;
+
+/// VM↔VFS protocol (from `<minix/com.h>`).
+pub const VMVFSREQ_FDLOOKUP: i32 = 101;
+pub const VMVFSREQ_FDCLOSE: i32 = 102;
+pub const VMVFSREQ_FDIO: i32 = 103;
+pub const VM_RQ_BASE: i32 = 0xC00;
+pub const VM_VFS_REPLY: i32 = VM_RQ_BASE + 30;
+
+/// VMCALL message field offsets (M10 layout in 64-byte fs_m_in).
+/// m10_i1 at byte 0, m10_i2 at byte 4, m10_i3 at byte 8, m10_i4 at byte 12
+/// m10_ull1 at byte 16, m10_l2 at byte 24, m10_l3 at byte 32
+pub const VMCALL_REQ_OFF: usize = 0;
+pub const VMCALL_FD_OFF: usize = 4;
+pub const VMCALL_REQID_OFF: usize = 8;
+pub const VMCALL_ENDPOINT_OFF: usize = 12;
+pub const VMCALL_OFFSET_OFF: usize = 16;
+pub const VMCALL_LENGTH_OFF: usize = 24;
+
+/// VM↔VFS reply field offsets (M10 layout in 64-byte fs_m_out).
+pub const VMV_ENDPOINT_OFF: usize = 0;
+pub const VMV_RESULT_OFF: usize = 4;
+pub const VMV_REQID_OFF: usize = 8;
+pub const VMV_DEV_OFF: usize = 12;
+pub const VMV_INO_OFF: usize = 16;
+pub const VMV_FD_OFF: usize = 24;
+pub const VMV_SIZE_PAGES_OFF: usize = 32;
+
+/// Named pipe mode for req_newnode.
+pub const I_NAMED_PIPE: u32 = 0o010000;
+
+/// CDEV message base (from `<minix/com.h>`).
+pub const CDEV_RQ_BASE: i32 = 0x400;
+pub const CDEV_OPEN: i32 = 0x400;
+pub const CDEV_CLOSE: i32 = 0x401;
+pub const CDEV_READ: i32 = 0x402;
+pub const CDEV_WRITE: i32 = 0x403;
+pub const CDEV_IOCTL: i32 = 0x404;
+pub const CDEV_CANCEL: i32 = 0x405;
+pub const CDEV_SELECT: i32 = 0x406;

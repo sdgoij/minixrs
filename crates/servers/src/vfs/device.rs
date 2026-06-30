@@ -7,6 +7,8 @@
 //! device mapping (dmap) table.
 
 use crate::vfs::consts::*;
+use crate::vfs::dmap;
+use crate::vfs::request;
 use crate::vfs::types::*;
 
 // =============================================================================
@@ -57,37 +59,36 @@ pub fn cdev_close(_dev: u32) -> i32 {
 
 /// Perform I/O on a character device.
 ///
-/// Initiates a \`CDEV_READ\`, \`CDEV_WRITE\`, or \`CDEV_IOCTL\` message to the
-/// driver and suspends the calling process until a reply arrives.
-///
-/// C source: \`minix/servers/vfs/device.c\` — \`cdev_io()\` (line 266)
-///
-/// # Parameters
-///
-/// * \`op\`   — \`CDEV_READ\`, \`CDEV_WRITE\`, or \`CDEV_IOCTL\`.
-/// * \`dev\`  — major-minor device number.
-/// * \`proc_e\` — endpoint of the process owning the buffer.
-/// * \`buf\`  — virtual address of the I/O buffer (in \`proc_e\`'s address space).
-/// * \`pos\`  — byte offset for read/write.
-/// * \`bytes\` — number of bytes (or ioctl request code).
-/// * \`flags\` — open-file flags (e.g. \`O_NONBLOCK\`).
-///
-/// # Safety
-///
-/// Requires exclusive access to the global fproc/dmap tables.
-///
-/// # TODO
-///
-/// Wire the full flow:
-///   1. Resolve dmap via \`cdev_get()\`.
-///   2. Create a grant (\`cpf_grant_magic()\`) for the user buffer.
-///   3. Build the message with minor, grant, pos/count/request, flags.
-///   4. \`asynsend3()\` with \`AMF_NOREPLY\`.
-///   5. \`wait_for()\` to suspend until the driver replies.
-///   6. Return \`SUSPEND\` — the reply will be processed by \`cdev_reply()\`.
-pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, flags: i32) -> i32 {
-    let _ = (op, dev, proc_e, buf, pos, bytes, flags);
-    ENOSYS
+/// Builds a CDEV_READ/CDEV_WRITE/CDEV_IOCTL message and sends it to the
+/// driver via synchronous sendrec. The driver endpoint is resolved from
+/// the dmap table using the device's major number.
+pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _flags: i32) -> i32 {
+    let major = (dev >> 16) as i32;
+    let minor = dev & 0xFFFF;
+    let dp = dmap::get_dmap_by_major(major);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, minor as i32); // m2_i1
+    request::w_i32(&mut msg, 8, proc_e); // m2_i2
+    request::w_i32(&mut msg, 12, -1); // m2_i3 = grant (stub)
+    request::w_i64(&mut msg, 16, pos); // m2_l1 = position
+    request::w_u64(&mut msg, 24, bytes); // m2_l2 = count/request
+    request::w_u64(&mut msg, 32, buf); // m2_l3 = user buffer
+    request::w_i32(&mut msg, 0, op); // m_type
+
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r != 0 {
+        return r;
+    }
+    // Reply status in m_type, bytes in m2_l1
+    request::r_i64(&msg, 16) as i32
 }
 
 /// Map a character device to a different device number.
@@ -114,19 +115,30 @@ pub fn cdev_map(dev: u32, rfp: *const Fproc) -> u32 {
 
 /// Initiate a select call on a character device.
 ///
-/// Sends a \`CDEV_SELECT\` message to the driver.  This function *bypasses*
-/// \`cdev_get()\` because select must NOT perform CTTY mapping (the caller
-/// has already done that, and \`fp\` may be wrong).
-///
-/// C source: \`minix/servers/vfs/device.c\` — \`cdev_select()\` (line 550)
-///
-/// # TODO
-///
-/// Wire IPC: build \`CDEV_SELECT\` message with minor and ops, then
-/// \`asynsend3()\` to the driver endpoint.
+/// Sends a CDEV_SELECT message to the driver via synchronous sendrec.
 pub fn cdev_select(dev: u32, ops: i32) -> i32 {
-    let _ = (dev, ops);
-    ENOSYS
+    let major = (dev >> 16) as i32;
+    let minor = dev & 0xFFFF;
+    let dp = dmap::get_dmap_by_major(major);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, minor as i32);
+    request::w_i32(&mut msg, 8, ops);
+    request::w_i32(&mut msg, 0, CDEV_SELECT);
+
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r != 0 {
+        return r;
+    }
+    // Reply: selected ops in m2_i1
+    request::r_i32(&msg, 4)
 }
 
 /// Cancel an I/O request on a character device.

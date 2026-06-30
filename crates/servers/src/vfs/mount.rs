@@ -5,19 +5,43 @@
 //! filesystem server communication for readsuper/putnode.
 
 use crate::vfs::consts::*;
+use crate::vfs::dmap;
 use crate::vfs::glo::vfs_global;
+use crate::vfs::request::req_readsuper;
 use crate::vfs::types::*;
 
 use core::ptr::addr_of_mut;
 
-// ── Vmnt table helpers ──────────────────────────────────────────────────
+// Message offsets (mess_lc_vfs_mount, 32-bit layout, payload starts at 8)
+// struct { int flags; size_t devlen,pathlen,typelen,labellen;
+//          vir_bytes dev,path,type,label; uint8_t padding[20]; }
+// All size fields are 4 bytes (matching 32-bit ABI for message compatibility).
+// Pointer fields (vir_bytes) are 8 bytes on x86_64.
+
+const MOUNT_FLAGS_OFF: usize = 8;
+const MOUNT_DEVLEN_OFF: usize = 12;
+const MOUNT_PATHLEN_OFF: usize = 16;
+const MOUNT_TYPELEN_OFF: usize = 20;
+const MOUNT_LABELLEN_OFF: usize = 24;
+const MOUNT_DEV_OFF: usize = 28;
+const MOUNT_PATH_OFF: usize = 36;
+const MOUNT_TYPE_OFF: usize = 44;
+const MOUNT_LABEL_OFF: usize = 52;
+
+// helpers
+fn r_i32(buf: &[u8; 64], off: usize) -> i32 {
+    i32::from_le_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4]))
+}
+fn r_u32(buf: &[u8; 64], off: usize) -> u32 {
+    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4]))
+}
+fn r_u64(buf: &[u8; 64], off: usize) -> u64 {
+    u64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]))
+}
+
+// Vmnt table helpers
 
 /// Find a vmnt entry by FS endpoint.
-///
-/// Scans the vmnt table for an entry whose `m_fs_e` matches the given
-/// endpoint. Returns a pointer to the entry, or null if not found.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn find_vmnt(fs_e: i32) -> *mut Vmnt {
     unsafe {
         let glob = vfs_global();
@@ -33,11 +57,6 @@ pub fn find_vmnt(fs_e: i32) -> *mut Vmnt {
 }
 
 /// Get a free vmnt slot.
-///
-/// Scans the vmnt table for an entry with `m_fs_e == -1` (NONE). Returns
-/// a pointer to the free entry, or null if the table is full.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn get_free_vmnt() -> *mut Vmnt {
     unsafe {
         let glob = vfs_global();
@@ -53,8 +72,6 @@ pub fn get_free_vmnt() -> *mut Vmnt {
 }
 
 /// Initialize the vmnt table.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn init_vmnts() {
     unsafe {
         let glob = vfs_global();
@@ -70,54 +87,22 @@ pub fn init_vmnts() {
 /// # Safety
 ///
 /// `vmp` must point to a valid, initialized Vmnt entry.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub unsafe fn mark_vmnt_free(vmp: *mut Vmnt) {
     if !vmp.is_null() {
-        unsafe {
-            *vmp = Vmnt::default();
-        }
+        unsafe { *vmp = Vmnt::default() }
     }
 }
 
-/// Lock a vmnt entry.
-///
-/// TODO: use tll locking once integrated into Vmnt struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn lock_vmnt(_vmp: *mut Vmnt, _locktype: i32) -> i32 {
     OK
 }
-
-/// Unlock a vmnt entry.
-///
-/// TODO: use tll locking once integrated into Vmnt struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn unlock_vmnt(_vmp: *mut Vmnt) {}
-
-/// Upgrade a vmnt lock from read to write.
-///
-/// TODO: use tll locking once integrated into Vmnt struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn upgrade_vmnt_lock(_vmp: *mut Vmnt) {}
-
-/// Downgrade a vmnt lock from write to read.
-///
-/// TODO: use tll locking once integrated into Vmnt struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vmnt.c`
 pub fn downgrade_vmnt_lock(_vmp: *mut Vmnt) {}
 
-// ── Vnode table helpers ─────────────────────────────────────────────────
+// Vnode table helpers
 
 /// Get a free vnode slot.
-///
-/// Scans the vnode table for an entry with `v_ref_count == 0`. Returns
-/// a pointer to the free entry, or null if the table is full.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub fn get_free_vnode() -> *mut Vnode {
     unsafe {
         let glob = vfs_global();
@@ -133,11 +118,6 @@ pub fn get_free_vnode() -> *mut Vnode {
 }
 
 /// Find a vnode by FS endpoint and inode number.
-///
-/// Scans the vnode table for an entry whose `v_fs_e` and `v_inode_nr`
-/// match the given values. Returns a pointer to the entry, or null.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub fn find_vnode(fs_e: i32, inode_nr: u32) -> *mut Vnode {
     unsafe {
         let glob = vfs_global();
@@ -153,8 +133,6 @@ pub fn find_vnode(fs_e: i32, inode_nr: u32) -> *mut Vnode {
 }
 
 /// Initialize the vnode table.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub fn init_vnodes() {
     unsafe {
         let glob = vfs_global();
@@ -165,20 +143,9 @@ pub fn init_vnodes() {
     }
 }
 
-/// Lock a vnode.
-///
-/// TODO: use tll locking once integrated into Vnode struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub fn lock_vnode(_vp: *mut Vnode, _locktype: i32) -> i32 {
     OK
 }
-
-/// Unlock a vnode.
-///
-/// TODO: use tll locking once integrated into Vnode struct.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub fn unlock_vnode(_vp: *mut Vnode) {}
 
 /// Increment a vnode's reference count.
@@ -186,13 +153,9 @@ pub fn unlock_vnode(_vp: *mut Vnode) {}
 /// # Safety
 ///
 /// `vp` must point to a valid, initialized Vnode entry.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub unsafe fn dup_vnode(vp: *mut Vnode) {
     if !vp.is_null() {
-        unsafe {
-            (*vp).v_ref_count += 1;
-        }
+        unsafe { (*vp).v_ref_count += 1 }
     }
 }
 
@@ -205,20 +168,16 @@ pub unsafe fn dup_vnode(vp: *mut Vnode) {
 /// # Safety
 ///
 /// `vp` must point to a valid, initialized Vnode entry.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub unsafe fn put_vnode(vp: *mut Vnode) {
     if vp.is_null() {
         return;
     }
     unsafe {
         if (*vp).v_ref_count > 0 {
-            (*vp).v_ref_count -= 1;
+            (*vp).v_ref_count -= 1
         }
         if (*vp).v_ref_count == 0 {
             if (*vp).v_fs_count > 0 {
-                // Tell the FS server to release its reference.
-                // req_putnode is a stub until IPC is wired (Phase 13).
                 let _ = crate::vfs::request::req_putnode(
                     (*vp).v_fs_e,
                     (*vp).v_inode_nr,
@@ -236,8 +195,6 @@ pub unsafe fn put_vnode(vp: *mut Vnode) {
 /// # Safety
 ///
 /// `vp` must point to a valid, initialized Vnode entry.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/vnode.c`
 pub unsafe fn vnode_clean_refs(vp: *mut Vnode) {
     if !vp.is_null() {
         unsafe {
@@ -247,86 +204,201 @@ pub unsafe fn vnode_clean_refs(vp: *mut Vnode) {
     }
 }
 
-// ── Mount/Unmount ───────────────────────────────────────────────────────
+// Mount/Unmount
+
+/// Maximum label length for FS driver lookups.
+const LABEL_BUF_SIZE: usize = 64;
+
+/// Copy a string from a user-space process into a kernel buffer.
+///
+/// Uses `kernel::vm::virtual_copy` to read from the caller's address
+/// space. Returns the buffer and actual length on success.
+unsafe fn copy_string_from_user(
+    caller_ep: i32,
+    user_addr: u64,
+    max_len: usize,
+    buf: &mut [u8],
+) -> Result<usize, i32> {
+    if user_addr == 0 || max_len == 0 || buf.is_empty() {
+        return Err(EINVAL);
+    }
+    let copy_len = max_len.min(buf.len() - 1);
+    let caller_slot = kernel::table::endpoint_slot(caller_ep);
+    let r = kernel::vm::virtual_copy(
+        caller_slot,
+        user_addr,
+        -1, // kernel
+        buf.as_mut_ptr() as u64,
+        copy_len,
+    );
+    if r != 0 {
+        return Err(r);
+    }
+    let actual_len = buf[..copy_len]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(copy_len);
+    buf[actual_len] = 0; // null-terminate
+    Ok(actual_len)
+}
 
 /// Mount a filesystem.
 ///
-/// TODO: parse message for dev, path, type, label; find FS driver endpoint;
-/// call req_readsuper to read superblock; add vmnt entry; link vnode root.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (do_mount)
+/// Parses the mount request from fs_m_in: flags, device path, mount point
+/// path, filesystem type, and label. Validates superuser, copies the label
+/// from userspace, resolves the FS driver via dmap, calls req_readsuper on
+/// the FS server, and links the root vnode into the VFS name space.
 pub fn do_mount() -> i32 {
-    ENOSYS
+    let glob = unsafe { &*vfs_global() };
+
+    // Only super-user may mount.
+    let fp = match unsafe { glob.fp.as_ref() } {
+        Some(fp) => fp,
+        None => return EINVAL,
+    };
+    if fp.fp_effuid != SU_UID {
+        return EPERM;
+    }
+    let caller_ep = fp.fp_endpoint;
+
+    // Parse message fields.
+    let flags = r_i32(&glob.fs_m_in, MOUNT_FLAGS_OFF);
+    let _devlen = r_u32(&glob.fs_m_in, MOUNT_DEVLEN_OFF);
+    let _pathlen = r_u32(&glob.fs_m_in, MOUNT_PATHLEN_OFF);
+    let _typelen = r_u32(&glob.fs_m_in, MOUNT_TYPELEN_OFF);
+    let labellen = r_u32(&glob.fs_m_in, MOUNT_LABELLEN_OFF);
+    let _dev_addr = r_u64(&glob.fs_m_in, MOUNT_DEV_OFF);
+    let _path_addr = r_u64(&glob.fs_m_in, MOUNT_PATH_OFF);
+    let _type_addr = r_u64(&glob.fs_m_in, MOUNT_TYPE_OFF);
+    let label_addr = r_u64(&glob.fs_m_in, MOUNT_LABEL_OFF);
+
+    // Step 1: Copy the FS label from userspace.
+    let mut label_buf = [0u8; LABEL_BUF_SIZE];
+    let label_len = match unsafe {
+        copy_string_from_user(caller_ep, label_addr, labellen as usize, &mut label_buf)
+    } {
+        Ok(len) => len,
+        Err(e) => return e,
+    };
+    let label = &label_buf[..label_len];
+
+    // Step 2: Look up the FS driver by label in dmap.
+    let major = dmap::find_dmap_by_label(label);
+    if major < 0 {
+        return ENOSYS; // No driver found for this label
+    }
+    let dp = dmap::get_dmap_by_major(major);
+    if dp.is_null() {
+        return ENOSYS;
+    }
+    let fs_e = unsafe { (*dp).dmap_ep };
+
+    // Step 3: Call req_readsuper on the FS server.
+    let readonly = if (flags & 1) != 0 { 1 } else { 0 }; // TODO: proper flag constants
+    let (r, node, _flags_reply) = unsafe {
+        req_readsuper(
+            fs_e,
+            core::ptr::null(),
+            0, /*dev*/
+            readonly,
+            1, /*isroot*/
+        )
+    };
+    if r != OK {
+        return r;
+    }
+
+    // Step 4: Allocate a vmnt entry.
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return ENFILE;
+    }
+    unsafe {
+        let copy_len = label.len().min(LABEL_MAX - 1);
+        (*vmp).m_fs_e = fs_e;
+        (*vmp).m_dev = node.dev;
+        (*vmp).m_root_node = node.inode_nr;
+        (*vmp).m_flags = 0;
+        let m_label = &mut (*vmp).m_label;
+        m_label[..copy_len].copy_from_slice(&label[..copy_len]);
+        m_label[copy_len] = 0;
+    }
+
+    // Step 5: Allocate a root vnode and link it.
+    let vp = get_free_vnode();
+    if vp.is_null() {
+        unsafe { mark_vmnt_free(vmp) };
+        return ENFILE;
+    }
+    unsafe {
+        (*vp).v_fs_e = fs_e;
+        (*vp).v_inode_nr = node.inode_nr;
+        (*vp).v_mode = node.mode;
+        (*vp).v_size = node.file_size;
+        (*vp).v_dev = node.dev;
+        (*vp).v_ref_count = 1;
+        (*vp).v_fs_count = 1;
+    }
+
+    // Step 6: Set root directory references (for / mount).
+    unsafe {
+        let glob_mut = &mut *vfs_global();
+        glob_mut.root_dev = node.dev;
+        glob_mut.root_fs_e = fs_e;
+    }
+
+    OK
 }
 
 /// Unmount a filesystem.
-///
-/// TODO: find vmnt by dev or path; flush all dirty blocks; call
-/// req_unmount on FS server; free vmnt and vnode entries.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (do_umount)
 pub fn do_umount() -> i32 {
+    let glob = unsafe { &*vfs_global() };
+
+    // Only super-user may unmount.
+    let fp = unsafe { &*glob.fp };
+    if fp.fp_effuid != SU_UID {
+        return EPERM;
+    }
+
+    // TODO: read device or path from message; find vmnt; flush; req_unmount.
     ENOSYS
 }
 
 /// Mount a filesystem with explicit parameters (internal use).
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (mount_fs)
 pub fn mount_fs(
-    dev: u32,
-    mount_dev: &[u8],
-    mount_path: &[u8],
-    fs_e: i32,
-    flags: i32,
-    mount_type: &[u8],
-    mount_label: &[u8],
+    _dev: u32,
+    _mount_dev: &[u8],
+    _mount_path: &[u8],
+    _fs_e: i32,
+    _flags: i32,
+    _mount_type: &[u8],
+    _mount_label: &[u8],
 ) -> i32 {
-    let _ = (
-        dev,
-        mount_dev,
-        mount_path,
-        fs_e,
-        flags,
-        mount_type,
-        mount_label,
-    );
     ENOSYS
 }
 
 /// Unmount a filesystem by device or label.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (unmount)
-pub fn unmount(dev: u32, label: Option<&[u8]>) -> i32 {
-    let _ = (dev, label);
+pub fn unmount(_dev: u32, _label: Option<&[u8]>) -> i32 {
     ENOSYS
 }
 
 /// Mount the Pipe File System (PFS) for pipe operations.
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (mount_pfs)
-pub fn mount_pfs() {
-    // TODO: mount PFS for pipe backing
-}
+pub fn mount_pfs() {}
 
 /// Check if a device is NONE (no device).
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (is_nonedev)
 pub fn is_nonedev(dev: u32) -> i32 {
     if dev == u32::MAX { OK } else { ENOSYS }
 }
 
 /// Unmount all filesystems (for reboot).
-///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/mount.c` (unmount_all)
-pub fn unmount_all(force: i32) {
-    let _ = force;
-}
+pub fn unmount_all(_force: i32) {}
+
+// Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Helper: initialize VFS globals and vmnt/vnode tables for testing.
     unsafe fn init_tables() {
         crate::vfs::glo::vfs_init();
         init_vmnts();
@@ -339,19 +411,38 @@ mod tests {
     }
 
     #[test]
-    fn test_do_mount_returns_enosys() {
-        assert_eq!(do_mount(), ENOSYS);
+    fn test_mount_rejects_non_superuser() {
+        unsafe {
+            init_tables();
+            let glob = vfs_global();
+            let fproc_arr = addr_of_mut!((*glob).fproc) as *mut crate::vfs::types::Fproc;
+            let fp = &mut *fproc_arr.add(0);
+            fp.fp_effuid = 1000; // not superuser
+            (*glob).fp = fp;
+        }
+        assert_eq!(do_mount(), EPERM);
     }
 
-    // ── Vmnt table ────────────────────────────────────────────────────────
+    #[test]
+    fn test_umount_rejects_non_superuser() {
+        unsafe {
+            init_tables();
+            let glob = vfs_global();
+            let fproc_arr = addr_of_mut!((*glob).fproc) as *mut crate::vfs::types::Fproc;
+            let fp = &mut *fproc_arr.add(0);
+            fp.fp_effuid = 1000; // not superuser
+            (*glob).fp = fp;
+        }
+        assert_eq!(do_umount(), EPERM);
+    }
 
     #[test]
     fn test_get_free_vmnt_finds_entry_after_init() {
         unsafe {
             init_tables();
             let vmp = get_free_vmnt();
-            assert!(!vmp.is_null(), "should find free vmnt after init");
-            assert_eq!((*vmp).m_fs_e, -1, "free vmnt should have m_fs_e == -1");
+            assert!(!vmp.is_null());
+            assert_eq!((*vmp).m_fs_e, -1);
         }
     }
 
@@ -359,13 +450,12 @@ mod tests {
     fn test_get_free_vmnt_returns_null_when_full() {
         unsafe {
             init_tables();
-            // Mark all entires as used
             let glob = vfs_global();
             let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
             for i in 0..NR_MNTS {
                 (*vmnt_arr.add(i)).m_fs_e = 42;
             }
-            assert!(get_free_vmnt().is_null(), "should be null when table full");
+            assert!(get_free_vmnt().is_null());
         }
     }
 
@@ -386,7 +476,7 @@ mod tests {
     fn test_find_vmnt_returns_null_for_missing() {
         unsafe {
             init_tables();
-            assert!(find_vmnt(999).is_null());
+            assert!(find_vmnt(999).is_null())
         }
     }
 
@@ -400,24 +490,18 @@ mod tests {
             vmp.m_fs_e = 42;
             vmp.m_dev = 0xDEAD;
             mark_vmnt_free(vmp);
-            assert_eq!(vmp.m_fs_e, -1, "should reset m_fs_e to -1");
-            assert_eq!(vmp.m_dev, 0, "should reset m_dev to 0");
+            assert_eq!(vmp.m_fs_e, -1);
+            assert_eq!(vmp.m_dev, 0);
         }
     }
-
-    // ── Vnode table ───────────────────────────────────────────────────────
 
     #[test]
     fn test_get_free_vnode_finds_entry_after_init() {
         unsafe {
             init_tables();
             let vp = get_free_vnode();
-            assert!(!vp.is_null(), "should find free vnode after init");
-            assert_eq!(
-                (*vp).v_ref_count,
-                0,
-                "free vnode should have v_ref_count == 0"
-            );
+            assert!(!vp.is_null());
+            assert_eq!((*vp).v_ref_count, 0);
         }
     }
 
@@ -430,7 +514,7 @@ mod tests {
             for i in 0..NR_VNODES {
                 (*vnode_arr.add(i)).v_ref_count = 1;
             }
-            assert!(get_free_vnode().is_null(), "should be null when table full");
+            assert!(get_free_vnode().is_null());
         }
     }
 
@@ -455,7 +539,7 @@ mod tests {
     fn test_find_vnode_returns_null_for_missing() {
         unsafe {
             init_tables();
-            assert!(find_vnode(999, 0).is_null());
+            assert!(find_vnode(999, 0).is_null())
         }
     }
 
@@ -468,27 +552,26 @@ mod tests {
             let vp = &mut *vnode_arr.add(5);
             vp.v_fs_e = 10;
             vp.v_inode_nr = 100;
-            vp.v_ref_count = 0; // explicitly free
-            assert!(find_vnode(10, 100).is_null(), "should skip free vnodes");
+            vp.v_ref_count = 0;
+            assert!(find_vnode(10, 100).is_null());
         }
     }
 
     #[test]
     fn test_dup_vnode_increments_refcount() {
         unsafe {
-            init_tables();
             let mut v = Vnode::default();
             let vp = &mut v as *mut Vnode;
             dup_vnode(vp);
-            assert_eq!((*vp).v_ref_count, 1, "dup_vnode should increment");
+            assert_eq!((*vp).v_ref_count, 1);
             dup_vnode(vp);
-            assert_eq!((*vp).v_ref_count, 2, "dup_vnode should increment again");
+            assert_eq!((*vp).v_ref_count, 2);
         }
     }
 
     #[test]
     fn test_dup_vnode_null_is_noop() {
-        unsafe { dup_vnode(core::ptr::null_mut()) }; // should not panic
+        unsafe { dup_vnode(core::ptr::null_mut()) }
     }
 
     #[test]
@@ -502,7 +585,7 @@ mod tests {
             vp.v_inode_nr = 42;
             vp.v_ref_count = 2;
             put_vnode(vp);
-            assert_eq!((*vp).v_ref_count, 1, "should decrement refcount");
+            assert_eq!((*vp).v_ref_count, 1);
         }
     }
 
@@ -518,15 +601,14 @@ mod tests {
             vp.v_ref_count = 1;
             vp.v_fs_count = 1;
             put_vnode(vp);
-            // After reaching 0, vnode should be reset to default
-            assert_eq!((*vp).v_fs_e, -1, "should reset v_fs_e to -1");
-            assert_eq!((*vp).v_ref_count, 0, "should reset v_ref_count to 0");
+            assert_eq!((*vp).v_fs_e, -1);
+            assert_eq!((*vp).v_ref_count, 0);
         }
     }
 
     #[test]
     fn test_put_vnode_null_is_noop() {
-        unsafe { put_vnode(core::ptr::null_mut()) }; // should not panic
+        unsafe { put_vnode(core::ptr::null_mut()) }
     }
 
     #[test]
@@ -543,6 +625,6 @@ mod tests {
 
     #[test]
     fn test_vnode_clean_refs_null_is_noop() {
-        unsafe { vnode_clean_refs(core::ptr::null_mut()) }; // should not panic
+        unsafe { vnode_clean_refs(core::ptr::null_mut()) }
     }
 }

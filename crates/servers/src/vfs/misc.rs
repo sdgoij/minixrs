@@ -18,7 +18,7 @@ fn fp() -> *mut Fproc {
 }
 
 /// Convert an endpoint to an fproc slot number.
-fn endpoint_to_slot(endpt: i32) -> Option<usize> {
+pub(crate) fn endpoint_to_slot(endpt: i32) -> Option<usize> {
     let slot = (endpt & 0xFF) as usize;
     if slot < 256 { Some(slot) } else { None }
 }
@@ -52,8 +52,8 @@ fn free_proc(rfp: &mut Fproc, flags: u32) {
     }
 
     // Release root and working directories.
-    rfp.fp_rdir = u32::MAX;
-    rfp.fp_cdir = u32::MAX;
+    rfp.fp_rdir = core::ptr::null_mut();
+    rfp.fp_cdir = core::ptr::null_mut();
 
     // If not actually exiting, stop here.
     if flags & FP_EXITING == 0 {
@@ -130,9 +130,7 @@ fn close_fd_from_table(rfp: &mut Fproc, fd_nr: i32) -> i32 {
     0
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Public API
-// ═════════════════════════════════════════════════════════════════════════
 
 /// Clean up after a process exits.
 ///
@@ -325,14 +323,61 @@ pub fn do_getsysinfo() -> i32 {
 /// Get resource usage for a process.
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (do_getrusage)
-pub fn do_getrusage() -> i32 {
-    // TODO: implement getrusage
-    ENOSYS
+/// Duplicate a file descriptor for VM (mmap support).
+///
+/// Looks up `pfd` in `rfp`'s fd table, checks the vnode is regular or
+/// block device with peek support, allocates an fd in VM's fproc,
+/// increments filp refcount, and returns the new fd via `vmfd`.
+///
+/// # Safety
+///
+/// `rfp` must point to a valid Fproc entry in the global fproc table.
+/// `vmfd` must point to a valid i32.
+///
+/// C source: `minix/servers/vfs/misc.c` — `dupvm()` (line 307)
+pub unsafe fn dupvm(rfp: &mut Fproc, pfd: i32, vmfd: &mut i32) -> i32 {
+    // Validate the fd in the target process.
+    if pfd < 0 || (pfd as usize) >= OPEN_MAX {
+        return EBADF;
+    }
+    let filp_idx = rfp.fp_filp[pfd as usize];
+    if filp_idx < 0 {
+        return EBADF;
+    }
+
+    // Get vnode from filp.
+    let glob = vfs_global();
+    let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+    let filp = &mut *filp_arr.add(filp_idx as usize);
+    let vp = filp.filp_vno;
+    if vp.is_null() {
+        return EBADF;
+    }
+
+    // Only regular files and block devices can be mmap'd.
+    let mode = (*vp).v_mode;
+    if (mode & 0o170000) != 0o100000 && (mode & 0o170000) != 0o060000 {
+        return EINVAL;
+    }
+
+    // Allocate an fd in VM's fproc.
+    let vm_slot = endpoint_to_slot(VM_PROC_NR).unwrap_or(8);
+    let fproc_arr = core::ptr::addr_of_mut!((*glob).fproc) as *mut Fproc;
+    let vmf = &mut *fproc_arr.add(vm_slot);
+    let mut procfd = 0i32;
+    let r = crate::vfs::filedes::get_fd(vmf, 0, &mut procfd);
+    if r != OK {
+        return r;
+    }
+
+    // Dup the filp and assign to VM's fd slot.
+    filp.filp_count += 1;
+    vmf.fp_filp[procfd as usize] = filp_idx;
+    *vmfd = procfd;
+    OK
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Tests
-// ═════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -368,8 +413,8 @@ mod tests {
             fp.fp_flags = FP_NOFLAGS;
             fp.fp_filp = [-1i32; OPEN_MAX];
             fp.fp_tty = 0;
-            fp.fp_rdir = u32::MAX;
-            fp.fp_cdir = u32::MAX;
+            fp.fp_rdir = core::ptr::null_mut();
+            fp.fp_cdir = core::ptr::null_mut();
             fp.fp_cloexec = 0;
             fp.fp_realuid = 0;
             fp.fp_effuid = 0;
@@ -491,10 +536,10 @@ mod tests {
         }
         unsafe {
             (*fp_slot(2)).fp_endpoint = 25;
-            (*fp_slot(2)).fp_filp[0] = 1;
-            (*fp_slot(2)).fp_filp[3] = 2;
-            (*fp_slot(2)).fp_filp[5] = 3;
-            (*fp_slot(2)).fp_cloexec = 1u64 << 3;
+            (*fp_slot(2)).fp_filp[0] = 1; // fd 0 -> filp 1 (no CLOEXEC)
+            (*fp_slot(2)).fp_filp[3] = 2; // fd 3 -> filp 2 (has CLOEXEC)
+            (*fp_slot(2)).fp_filp[5] = 3; // fd 5 -> filp 3 (no CLOEXEC)
+            (*fp_slot(2)).fp_cloexec = 1u64 << 3; // CLOEXEC on fd 3
             (*filp_slot(1)).filp_count = 1;
             (*filp_slot(2)).filp_count = 1;
             (*filp_slot(3)).filp_count = 1;
@@ -505,12 +550,15 @@ mod tests {
         pm_exec();
 
         unsafe {
+            // fd 3 closed (CLOEXEC set), fd 0 and fd 5 kept open
             assert_eq!((*fp_slot(2)).fp_filp[3], -1);
             assert_eq!((*fp_slot(2)).fp_filp[0], 1);
             assert_eq!((*fp_slot(2)).fp_filp[5], 3);
+            // filp for fd 0 (slot 1) still open, filp for fd 3 (slot 2) freed
             assert_eq!((*filp_slot(1)).filp_count, 1);
             assert_eq!((*filp_slot(2)).filp_count, 0);
             assert_eq!((*filp_slot(3)).filp_count, 1);
+            // cloexec mask cleared
             assert_eq!((*fp_slot(2)).fp_cloexec, 0);
         }
     }
@@ -563,13 +611,17 @@ mod tests {
         }
 
         unsafe {
+            // FDs are closed even without FP_EXITING
             assert_eq!((*fp_slot(0)).fp_filp[0], -1);
+            // Without FP_EXITING, endpoint and pid are preserved
             assert_eq!((*fp_slot(0)).fp_endpoint, 10);
             assert_eq!((*fp_slot(0)).fp_pid, 100);
+            // fp_flags unchanged when not exiting
+            assert_eq!((*fp_slot(0)).fp_flags, FP_NOFLAGS);
         }
     }
 
-    // ── do_getsysinfo ────────────────────────────────────────────
+    // do_getsysinfo
 
     #[test]
     fn test_getsysinfo_rejects_non_superuser() {
@@ -579,8 +631,10 @@ mod tests {
             (*glob).fp = fp_slot(0);
             (*fp_slot(0)).fp_endpoint = 0;
             (*fp_slot(0)).fp_effuid = 1000; // not superuser
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            assert_eq!(do_getsysinfo(), EPERM);
         }
-        assert_eq!(do_getsysinfo(), EPERM);
     }
 
     #[test]
@@ -590,12 +644,11 @@ mod tests {
             let glob = vfs_global();
             (*glob).fp = fp_slot(0);
             (*fp_slot(0)).fp_endpoint = 1;
-            (*fp_slot(0)).fp_effuid = 0; // superuser
-            // Set what = 999 (unknown), dst_addr = 0, size = 0
+            (*fp_slot(0)).fp_effuid = 0;
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[0..4].copy_from_slice(&999i32.to_le_bytes());
+            assert_eq!(do_getsysinfo(), EINVAL);
         }
-        assert_eq!(do_getsysinfo(), EINVAL);
     }
 
     #[test]
@@ -605,13 +658,13 @@ mod tests {
             let glob = vfs_global();
             (*glob).fp = fp_slot(0);
             (*fp_slot(0)).fp_endpoint = 1;
-            (*fp_slot(0)).fp_effuid = 0; // superuser
-            // Set what = SI_PROC_TAB, dst_addr = 0, size = wrong_size
+            (*fp_slot(0)).fp_effuid = 0;
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
-            fs_m_in[12..20].copy_from_slice(&42usize.to_le_bytes()); // wrong size
+            fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes());
+            fs_m_in[12..20].copy_from_slice(&42usize.to_le_bytes());
+            assert_eq!(do_getsysinfo(), EINVAL);
         }
-        assert_eq!(do_getsysinfo(), EINVAL);
     }
 
     #[test]
@@ -621,17 +674,15 @@ mod tests {
             let glob = vfs_global();
             (*glob).fp = fp_slot(0);
             (*fp_slot(0)).fp_endpoint = 1;
-            (*fp_slot(0)).fp_effuid = 0; // superuser
-            // Set what = SI_PROC_TAB, dst_addr = some buffer, size = correct
+            (*fp_slot(0)).fp_effuid = 0;
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
-            fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes()); // dst
+            fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes());
             fs_m_in[12..20].copy_from_slice(&core::mem::size_of::<[Fproc; 256]>().to_le_bytes());
+            // fp is already set above
         }
-        // virtual_copy will fail (no VM init), but we check it doesn't crash
-        // and returns a negative error code (not success/0).
         let result = do_getsysinfo();
-        assert_ne!(result, 0, "virtual_copy should fail without VM init");
+        assert_ne!(result, 0);
     }
 
     #[test]
@@ -642,7 +693,7 @@ mod tests {
             (*glob).fp = fp_slot(0);
             (*fp_slot(0)).fp_endpoint = 1;
             (*fp_slot(0)).fp_effuid = 0; // superuser
-            // Set what = SI_DMAP_TAB, dst_addr = some buffer, size = correct
+            // Set what (offset 0), dst_addr (offset 4), size (offset 12)
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[0..4].copy_from_slice(&(SI_DMAP_TAB as i32).to_le_bytes());
             fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes()); // dst

@@ -8,11 +8,11 @@
 //! Ported from `minix/servers/vfs/request.c`.
 
 use crate::vfs::consts::ENOSYS;
-use crate::vfs::types::{LookupRes, NodeDetails, Statvfs, off_t};
+#[cfg(target_os = "none")]
+use crate::vfs::consts::PATH_MAX;
+use crate::vfs::types::{Lookup, LookupRes, NodeDetails, Statvfs, off_t};
 
-// ═══════════════════════════════════════════════════════════════════════════
 // FS_BASE and REQ_* constants (from minix/include/minix/vfsif.h)
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
 const FS_BASE: i32 = 0xA00;
@@ -82,7 +82,7 @@ const REQ_PEEK: i32 = FS_BASE + 32;
 #[allow(dead_code)]
 const REQ_BPEEK: i32 = FS_BASE + 33;
 
-// ── VFS/FS flags (from vfsif.h) ────────────────────────────────────────────
+// VFS/FS flags (from vfsif.h)
 
 #[allow(dead_code)]
 const REQ_RDONLY: u32 = 0o01;
@@ -91,14 +91,12 @@ const REQ_ISROOT: u32 = 0o02;
 #[allow(dead_code)]
 const PATH_GET_UCRED: u32 = 0o20;
 
-// ── FS capability flags (from vfsif.h) ─────────────────────────────────────
+// FS capability flags (from vfsif.h)
 
 #[allow(dead_code)]
 const RES_64BIT: u32 = 0o04;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Message buffer helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// A 56-byte IPC message buffer (Message = m_source(4) + m_type(4) + payload(48)).
 #[allow(dead_code)]
@@ -112,16 +110,16 @@ const M_TYPE_OFF: usize = 4;
 #[allow(dead_code)]
 const PAYLOAD_OFF: usize = 8;
 
-// ── Little-endian write helpers ────────────────────────────────────────────
+// Little-endian write helpers
 
 #[allow(dead_code)]
 #[inline]
-fn w_i32(buf: &mut MsgBuf, off: usize, val: i32) {
+pub(crate) fn w_i32(buf: &mut MsgBuf, off: usize, val: i32) {
     buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
 }
 #[allow(dead_code)]
 #[inline]
-fn w_u32(buf: &mut MsgBuf, off: usize, val: u32) {
+pub(crate) fn w_u32(buf: &mut MsgBuf, off: usize, val: u32) {
     buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
 }
 #[allow(dead_code)]
@@ -131,25 +129,25 @@ fn w_u16(buf: &mut MsgBuf, off: usize, val: u16) {
 }
 #[allow(dead_code)]
 #[inline]
-fn w_i64(buf: &mut MsgBuf, off: usize, val: i64) {
+pub(crate) fn w_i64(buf: &mut MsgBuf, off: usize, val: i64) {
     buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
 }
 #[allow(dead_code)]
 #[inline]
-fn w_u64(buf: &mut MsgBuf, off: usize, val: u64) {
+pub(crate) fn w_u64(buf: &mut MsgBuf, off: usize, val: u64) {
     buf[off..off + 8].copy_from_slice(&val.to_le_bytes());
 }
 
-// ── Little-endian read helpers ─────────────────────────────────────────────
+// Little-endian read helpers
 
 #[allow(dead_code)]
 #[inline]
-fn r_i32(buf: &MsgBuf, off: usize) -> i32 {
+pub(crate) fn r_i32(buf: &MsgBuf, off: usize) -> i32 {
     i32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
 }
 #[allow(dead_code)]
 #[inline]
-fn r_u32(buf: &MsgBuf, off: usize) -> u32 {
+pub(crate) fn r_u32(buf: &MsgBuf, off: usize) -> u32 {
     u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
 }
 #[allow(dead_code)]
@@ -159,7 +157,7 @@ fn r_u16(buf: &MsgBuf, off: usize) -> u16 {
 }
 #[allow(dead_code)]
 #[inline]
-fn r_i64(buf: &MsgBuf, off: usize) -> i64 {
+pub(crate) fn r_i64(buf: &MsgBuf, off: usize) -> i64 {
     i64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
 #[allow(dead_code)]
@@ -168,9 +166,7 @@ fn r_u64(buf: &MsgBuf, off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // IPC send/recv
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Low-level IPC send/recv with a FS server.
 ///
@@ -202,9 +198,7 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Block-oriented operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Block read/write with grant-based buffers and EFAULT retry via VM handlemem.
 ///
@@ -285,9 +279,7 @@ pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Inode metadata operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Change mode of an inode.
 ///
@@ -342,9 +334,7 @@ pub unsafe fn req_chown(fs_e: i32, inode_nr: u32, newuid: u16, newgid: u16) -> (
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // File creation / destruction
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Create a file.
 ///
@@ -533,9 +523,7 @@ pub unsafe fn req_inhibread(fs_e: i32, inode_nr: u32) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Link / unlink
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Create a hard link.
 ///
@@ -565,9 +553,7 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Path lookup
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Path lookup — resolve a path relative to `dir_ino`.
 ///
@@ -583,20 +569,32 @@ pub unsafe fn req_lookup(
     root_ino: u32,
     uid: u16,
     gid: u16,
-    _resolve: *const u8,
+    resolve: &Lookup,
 ) -> (i32, LookupRes) {
     #[cfg(target_os = "none")]
     {
         // Grants stubbed — TODO: wire grant table
-        let flags: u32 = 0;
+        let flags: u32 = resolve.l_flags;
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
         w_u32(&mut msg, PAYLOAD_OFF, dir_ino); // dir_ino
         w_u32(&mut msg, PAYLOAD_OFF + 4, root_ino); // root_ino
         w_u32(&mut msg, PAYLOAD_OFF + 8, flags); // flags
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // path_len (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 24, 0); // path_size
+
+        // Copy path to message payload.
+        #[cfg(target_os = "none")]
+        let path_len = resolve.l_path_len.min(PATH_MAX - 1);
+        #[cfg(not(target_os = "none"))]
+        let path_len = resolve.l_path_len;
+        w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32);
+        if path_len > 0 {
+            let msg_path = &mut msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_len];
+            let src_path = &resolve.l_path[..path_len];
+            let copy_len = msg_path.len().min(src_path.len());
+            msg_path[..copy_len].copy_from_slice(&src_path[..copy_len]);
+        }
+
         w_u32(&mut msg, PAYLOAD_OFF + 32, 0); // ucred_size
         w_i32(&mut msg, PAYLOAD_OFF + 40, -1); // grant_path (stub)
         w_i32(&mut msg, PAYLOAD_OFF + 44, -1); // grant_ucred (stub)
@@ -611,7 +609,7 @@ pub unsafe fn req_lookup(
 
         if r == crate::vfs::consts::OK {
             res.inode_nr = r_u32(&msg, PAYLOAD_OFF + 20); // inode
-            res.mode = r_u16(&msg, PAYLOAD_OFF + 24) as u32; // mode
+            res.mode = r_u32(&msg, PAYLOAD_OFF + 24); // mode
             res.file_size = r_i64(&msg, PAYLOAD_OFF + 8); // file_size
             res.dev = r_u32(&msg, PAYLOAD_OFF + 16); // device
         }
@@ -620,14 +618,12 @@ pub unsafe fn req_lookup(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (fs_e, dir_ino, root_ino, uid, gid, _resolve);
+        let _ = (fs_e, dir_ino, root_ino, uid, gid, resolve);
         (ENOSYS, LookupRes::default())
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Directory operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Create a directory.
 ///
@@ -799,9 +795,7 @@ pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Inode ref-counting
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Release an inode reference.
 ///
@@ -824,9 +818,7 @@ pub unsafe fn req_putnode(fs_e: i32, inode_nr: u32, count: i32) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Readlink
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Read the target of a symbolic link.
 ///
@@ -867,9 +859,7 @@ pub unsafe fn req_rdlink(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Superblock
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Read the superblock of a filesystem.
 ///
@@ -881,7 +871,7 @@ pub unsafe fn req_rdlink(
 /// valid NUL-terminated string if non-null.  Caller must ensure endpoint
 /// validity.
 pub unsafe fn req_readsuper(
-    _vmp: *const u8,
+    _fs_e: i32,
     _label: *const u8,
     dev: u32,
     readonly: i32,
@@ -889,10 +879,6 @@ pub unsafe fn req_readsuper(
 ) -> (i32, NodeDetails, u32) {
     #[cfg(target_os = "none")]
     {
-        // _vmp is passed instead of fs_e — endpoint is extracted from Vmnt
-        // when VMP infrastructure is wired. For now, use 0 as placeholder.
-        let _fs_e: i32 = 0;
-
         // Grant stubbed — TODO: wire grant table
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_READSUPER);
@@ -908,7 +894,7 @@ pub unsafe fn req_readsuper(
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
         w_u64(&mut msg, PAYLOAD_OFF + 8, 0); // path_len (stub)
 
-        let r = fs_sendrec(_fs_e, &mut msg);
+        let r = fs_sendrec(fs_e, &mut msg);
         // cpf_revoke(grant_id) — stubbed
 
         if r != crate::vfs::consts::OK {
@@ -928,14 +914,12 @@ pub unsafe fn req_readsuper(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (_vmp, _label, dev, readonly, isroot);
+        let _ = (_label, dev, readonly, isroot);
         (ENOSYS, NodeDetails::default(), 0)
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Rename
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Rename a file or directory.
 ///
@@ -1000,9 +984,7 @@ pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Symlink
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Create a symbolic link.
 ///
@@ -1042,9 +1024,7 @@ pub unsafe fn req_slink(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Stat
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Stat an inode — write `struct stat` into a user-provided buffer.
 ///
@@ -1072,9 +1052,7 @@ pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _le
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Sync
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Sync a filesystem.
 ///
@@ -1095,9 +1073,7 @@ pub unsafe fn req_sync(fs_e: i32) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Unlink / unmount
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Remove a (non-directory) name from a directory.
 ///
@@ -1145,9 +1121,7 @@ pub unsafe fn req_unmount(fs_e: i32) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Timestamps
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Set access and modification times of an inode.
 ///
@@ -1172,9 +1146,77 @@ pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t)
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Read / Write (regular file oriented)
-// ═══════════════════════════════════════════════════════════════════════════
+
+/// Peek at a regular file — read data at position without advancing state.
+///
+/// Used by the VM page fault handler (VMVFSREQ_FDIO) to page in file-backed
+/// mmap regions. Does not update the file position on the FS server.
+///
+/// Returns the status code (0 = OK, negative = errno).
+///
+/// # Safety
+///
+/// Caller must ensure `fs_e` is a valid FS endpoint.
+pub unsafe fn req_peek(fs_e: i32, inode_nr: u32, pos: off_t, bytes: u32) -> i32 {
+    #[cfg(target_os = "none")]
+    {
+        let mut msg = [0u8; 56];
+        w_i32(&mut msg, M_TYPE_OFF, REQ_PEEK);
+        w_u32(&mut msg, PAYLOAD_OFF, inode_nr);
+        w_i64(&mut msg, PAYLOAD_OFF + 8, pos);
+        w_i32(&mut msg, PAYLOAD_OFF + 16, -1); // grant (stub)
+        w_u64(&mut msg, PAYLOAD_OFF + 24, bytes as u64);
+        fs_sendrec(fs_e, &mut msg)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (fs_e, inode_nr, pos, bytes);
+        ENOSYS
+    }
+}
+
+/// Read from a regular file.
+///
+/// Returns `(status, new_pos)`.
+///
+/// # Safety
+///
+/// `buf` must point to a valid buffer of at least `size` bytes.  Caller must
+/// ensure `fs_e` and `user_e` are valid endpoints.
+pub unsafe fn req_read(
+    fs_e: i32,
+    inode_nr: u32,
+    _buf: *mut u8,
+    pos: off_t,
+    size: u32,
+    _user_e: i32,
+    _direct: i32,
+) -> (i32, off_t) {
+    #[cfg(target_os = "none")]
+    {
+        let mut msg = [0u8; 56];
+        w_i32(&mut msg, M_TYPE_OFF, REQ_READ);
+        w_u32(&mut msg, PAYLOAD_OFF, inode_nr);
+        w_i64(&mut msg, PAYLOAD_OFF + 8, pos);
+        w_i32(&mut msg, PAYLOAD_OFF + 16, -1);
+        w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64);
+
+        let r = fs_sendrec(fs_e, &mut msg);
+
+        if r != crate::vfs::consts::OK {
+            return (r, 0);
+        }
+
+        let new_pos = r_i64(&msg, PAYLOAD_OFF);
+        (r, new_pos)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (fs_e, inode_nr, _buf, pos, size, _user_e, _direct);
+        (ENOSYS, 0)
+    }
+}
 
 /// Write to a regular file.
 ///
@@ -1220,9 +1262,7 @@ pub unsafe fn req_write(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -1349,8 +1389,7 @@ mod tests {
         let (s, _det) = unsafe { req_newnode(0, 0, 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
-        let (s, _det, _fl) =
-            unsafe { req_readsuper(core::ptr::null(), core::ptr::null(), 0, 0, 0) };
+        let (s, _det, _fl) = unsafe { req_readsuper(0, core::ptr::null(), 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
         let (s, _st) = unsafe { req_statvfs(0) };
@@ -1362,10 +1401,16 @@ mod tests {
         let (s, _pos) = unsafe { req_write(0, 0, core::ptr::null(), 0, 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
+        let (s, _pos) = unsafe { req_read(0, 0, core::ptr::null_mut(), 0, 0, 0, 0) };
+        assert_eq!(s, ENOSYS);
+
         let (s, _pos, _iop) = unsafe { req_breadwrite(0, 0, 0, 0, 0, core::ptr::null(), 0) };
         assert_eq!(s, ENOSYS);
 
-        let (s, _res) = unsafe { req_lookup(0, 0, 0, 0, 0, core::ptr::null()) };
+        let (s, _res) = unsafe {
+            let lookup = Lookup::default();
+            req_lookup(0, 0, 0, 0, 0, &lookup)
+        };
         assert_eq!(s, ENOSYS);
     }
 

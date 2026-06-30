@@ -28,14 +28,12 @@ impl VfsGlobalCell {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Global state singleton
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// All VFS global state in a single struct.
 #[repr(C)]
 pub struct VfsGlobal {
-    // ── Table arrays ────────────────────────────────────────────────────────
+    // Table arrays
     pub fproc: [Fproc; NR_PROCS],
     pub filp: [Filp; NR_FILPS],
     pub vnode: [Vnode; NR_VNODES],
@@ -45,7 +43,7 @@ pub struct VfsGlobal {
     pub workers: [WorkerThread; NR_WTHREADS],
     pub scratchpad: [Scratchpad; NR_PROCS],
 
-    // ── Per-request state ───────────────────────────────────────────────────
+    // Per-request state
     pub caller_uid: u16,
     pub caller_gid: u16,
     pub req_nr: i32,
@@ -53,11 +51,11 @@ pub struct VfsGlobal {
     pub err_code: i32,
     pub self_thread: *mut WorkerThread,
 
-    // ── Message buffers ─────────────────────────────────────────────────────
+    // Message buffers
     pub fs_m_in: [u8; 64],
     pub fs_m_out: [u8; 64],
 
-    // ── Flags and counters ──────────────────────────────────────────────────
+    // Flags and counters
     pub susp_count: i32,
     pub nr_locks: i32,
     pub reviving: i32,
@@ -67,16 +65,14 @@ pub struct VfsGlobal {
     pub deadlock_resolving: i32,
     pub receive_from: i32,
 
-    // ── Device & FS identifiers ─────────────────────────────────────────────
+    // Device & FS identifiers
     pub root_dev: u32,
     pub root_fs_e: i32,
     pub system_hz: u32,
     pub mount_label: [u8; LABEL_MAX],
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Global static
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub static VFS_GLOBAL: VfsGlobalCell = VfsGlobalCell::new(VfsGlobal {
     fproc: new_fproc_array(),
@@ -109,9 +105,7 @@ pub static VFS_GLOBAL: VfsGlobalCell = VfsGlobalCell::new(VfsGlobal {
     mount_label: [0u8; LABEL_MAX],
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Helper: `const` array constructors
-// ─────────────────────────────────────────────────────────────────────────────
 
 const NR_PROCS: usize = 256;
 
@@ -127,9 +121,11 @@ const fn new_fproc_array() -> [Fproc; NR_PROCS] {
         fp_sgroups: [0; NGROUPS_MAX],
         fp_endpoint: -1,
         fp_pid: 0,
+        fp_text_size: 0,
+        fp_data_size: 0,
         fp_vminode: 0,
-        fp_cdir: 0,
-        fp_rdir: 0,
+        fp_cdir: core::ptr::null_mut(),
+        fp_rdir: core::ptr::null_mut(),
         fp_filp: [-1i32; OPEN_MAX],
         fp_cloexec: 0,
         fp_blocked_on: 0,
@@ -157,6 +153,7 @@ const fn new_filp_array() -> [Filp; NR_FILPS] {
         filp_state: 0,
         filp_ino: 0,
         filp_pos: 0,
+        filp_vno: core::ptr::null_mut(),
         filp_selectors: 0,
         filp_select_ops: 0,
         filp_select_flags: 0,
@@ -245,9 +242,7 @@ const fn new_scratchpad_array() -> [Scratchpad; NR_PROCS] {
     }; NR_PROCS]
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Accessor helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Get a raw pointer to the VFS global state.
 ///
