@@ -3743,11 +3743,14 @@ userspace crate
     - `req_lookup`: magic grant for path (VFS_PROC_NR, CPF_READ), ucred kept as -1
     423 servers tests pass, clippy clean.
   
-  - [ ] **13.10c — Resolve FS endpoint from Vmnt struct**
-      (`servers/src/vfs/request.rs:req_readsuper`)
+  - [x] **13.10c — Resolve FS endpoint from Vmnt struct**
+      (`servers/src/vfs/request.rs:req_readsuper`, `mount.rs:do_mount`)
     **Depends on:** Vmnt infrastructure (Phase 10 mount.c)
-    `req_readsuper` currently passes `fs_e = 0` as placeholder. Extract the
-    FS endpoint from the `Vmnt` struct passed via `_vmp` parameter.
+    Changed `req_readsuper` signature from `_fs_e: i32` to `_vmp: *mut Vmnt`.
+    The function now extracts `fs_e` from `(*_vmp).m_fs_e`. Updated
+    `do_mount` to allocate the vmnt entry BEFORE calling req_readsuper,
+    fill in `m_fs_e` from the dmap endpoint, and pass the vmnt pointer.
+    On failure, the vmnt is freed via `mark_vmnt_free`.
 
 ---
 

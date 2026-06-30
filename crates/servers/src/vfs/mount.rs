@@ -293,11 +293,20 @@ pub fn do_mount() -> i32 {
     }
     let fs_e = unsafe { (*dp).dmap_ep };
 
-    // Step 3: Call req_readsuper on the FS server.
+    // Step 3: Allocate a vmnt entry and fill the FS endpoint.
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return ENFILE;
+    }
+    unsafe {
+        (*vmp).m_fs_e = fs_e;
+    }
+
+    // Step 4: Call req_readsuper on the FS server.
     let readonly = if (flags & 1) != 0 { 1 } else { 0 }; // TODO: proper flag constants
     let (r, node, _flags_reply) = unsafe {
         req_readsuper(
-            fs_e,
+            vmp,
             core::ptr::null(),
             0, /*dev*/
             readonly,
@@ -305,17 +314,13 @@ pub fn do_mount() -> i32 {
         )
     };
     if r != OK {
+        unsafe { mark_vmnt_free(vmp) };
         return r;
     }
 
-    // Step 4: Allocate a vmnt entry.
-    let vmp = get_free_vmnt();
-    if vmp.is_null() {
-        return ENFILE;
-    }
+    // Fill remaining vmnt fields.
     unsafe {
         let copy_len = label.len().min(LABEL_MAX - 1);
-        (*vmp).m_fs_e = fs_e;
         (*vmp).m_dev = node.dev;
         (*vmp).m_root_node = node.inode_nr;
         (*vmp).m_flags = 0;

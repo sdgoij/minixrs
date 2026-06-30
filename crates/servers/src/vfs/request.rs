@@ -938,18 +938,19 @@ pub unsafe fn req_rdlink(
 ///
 /// # Safety
 ///
-/// `vmp` must point to a valid `Vmnt` structure.  `label` must point to a
-/// valid NUL-terminated string if non-null.  Caller must ensure endpoint
-/// validity.
+/// `vmp` must point to a valid `Vmnt` structure with `m_fs_e` set to the
+/// FS server endpoint.  `label` must point to a valid NUL-terminated string
+/// if non-null.  Caller must ensure endpoint validity.
 pub unsafe fn req_readsuper(
-    _fs_e: i32,
+    _vmp: *mut crate::vfs::types::Vmnt,
     _label: *const u8,
     dev: u32,
     readonly: i32,
     isroot: i32,
-) -> (i32, NodeDetails, u32) {
+) -> (i32, crate::vfs::types::NodeDetails, u32) {
     #[cfg(target_os = "none")]
     {
+        let fs_e = (*_vmp).m_fs_e;
         let label_len = if _label.is_null() {
             0
         } else {
@@ -957,7 +958,7 @@ pub unsafe fn req_readsuper(
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
-            _fs_e,
+            fs_e,
             _label as u64,
             label_len,
         );
@@ -976,16 +977,16 @@ pub unsafe fn req_readsuper(
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
         w_u64(&mut msg, PAYLOAD_OFF + 8, label_len as u64);
 
-        let r = fs_sendrec(_fs_e, &mut msg);
+        let r = fs_sendrec(fs_e, &mut msg);
         crate::vfs::grant::cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
-            return (r, NodeDetails::default(), 0);
+            return (r, crate::vfs::types::NodeDetails::default(), 0);
         }
 
         (
             r,
-            NodeDetails {
+            crate::vfs::types::NodeDetails {
                 inode_nr: r_u32(&msg, PAYLOAD_OFF + 12),    // inode (reply)
                 mode: r_u16(&msg, PAYLOAD_OFF + 20) as u32, // mode (reply)
                 file_size: r_i64(&msg, PAYLOAD_OFF),        // file_size (reply)
@@ -996,8 +997,8 @@ pub unsafe fn req_readsuper(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (_label, dev, readonly, isroot);
-        (ENOSYS, NodeDetails::default(), 0)
+        let _ = (_vmp, _label, dev, readonly, isroot);
+        (ENOSYS, crate::vfs::types::NodeDetails::default(), 0)
     }
 }
 
@@ -1543,7 +1544,8 @@ mod tests {
         let (s, _det) = unsafe { req_newnode(0, 0, 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
-        let (s, _det, _fl) = unsafe { req_readsuper(0, core::ptr::null(), 0, 0, 0) };
+        let (s, _det, _fl) =
+            unsafe { req_readsuper(core::ptr::null_mut(), core::ptr::null(), 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
         let (s, _st) = unsafe { req_statvfs(0) };
