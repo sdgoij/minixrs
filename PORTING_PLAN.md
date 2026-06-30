@@ -4445,7 +4445,50 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 | Milestone | Description | Target Phase | Status |
 |-----------|-------------|-------------|--------|
 | M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
-| M1b | **First userspace process execution (iretq to ring-3)** | **Phase 14.B** | ❌ |
+| M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ❌ |
+
+### M1b Tasks — First Userspace Process
+
+**Goal:** After kmain finishes kernel init, load `/sbin/init` from initramfs,
+create a per-process page table with User-accessible pages, and execute
+`sysretq` to ring-3 where init runs as the first userspace process.
+
+**What exists:**
+- `crates/kernel-boot/src/boot_init.rs` — blueprint calling into kernel modules
+- `crates/tools/mkinitramfs.rs` — builds CPIO newc archive
+- `BOOT_IMAGE` in `kernel/src/table.rs` — includes init slot
+- `arch_proc_init()` — sets up TrapFrame for sysretq (RCX→RIP, R11→RFLAGS)
+- `Proc` struct with `p_reg: TrapFrame` and `p_seg.p_cr3` for per-process PT
+
+**What needs implementing:**
+
+- [x] **ELR1 — kernel/src/elf.rs: ELF64 binary loader** (19 tests, clippy clean)
+  - `parse_elf_header()`, `load_elf()`, `setup_user_stack()` all implemented
+  - Full validation: magic, 64-bit, LE, ET_EXEC, EM_X86_64
+  - PT_LOAD segment loading with BSS zero-fill
+  - System V ABI stack layout (argc, argv pointers, null envp, 16-byte aligned)
+
+- [x] **ELR2 — kernel/src/initramfs.rs: CPIO newc parser** (10 tests, clippy clean)
+  - `find_initramfs_file(path)` — walks CPIO newc archive, returns `(data, mode)`
+  - `CpioHeader` struct with magic `"070701"`, ASCII hex fields
+  - Entry traversal with 4-byte alignment, TRAILER!!! termination
+  - Embedded initramfs via `__initramfs_start`/`__initramfs_end` linker symbols
+  - 10 tests: header parsing, file lookup, missing file, multiple entries,
+    trailer, empty data, bad magic, padding, hex formatting
+
+- [ ] **ELR3 — Wire boot_init into kmain**
+  - ✅ `pub mod elf;` and `pub mod initramfs;` added to `kernel/src/lib.rs`
+  - In `kmain()` (after serial + timer init):
+    1. Call `load_and_prepare_init()` — loads ELF, creates stack, sets up
+       Proc StackFrame
+    2. Set PG_U (User) bit on init's code pages in boot page tables
+    3. Call `vm::proc::pt_new_for_init()` or equivalent — create per-process
+       page table with private copies of init's pages
+    4. Set init's `p_seg.p_cr3` to the new page table
+    5. Call `arch_proc_init(&mut init_proc.p_reg, entry, stack, ...)` — sets
+       RCX/R11 for sysretq
+    6. Call `restore(&init_proc)` or equivalent — executes `sysretq` to ring-3
+  - If any step fails, fall back to HLT loop with error message
 
 ### Boot Process Detail (M1)
 

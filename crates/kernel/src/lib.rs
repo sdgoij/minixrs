@@ -4,9 +4,11 @@
 
 pub mod clock;
 pub mod debug;
+pub mod elf;
 pub mod exec;
 pub mod glo;
 pub mod grants;
+pub mod initramfs;
 pub mod interrupt;
 pub mod ipc;
 pub mod pagetable;
