@@ -49,6 +49,36 @@ pub extern "C" fn kmain() -> ! {
     init_serial();
     serial_write(b"Hello MINIX!\r\n");
 
+    // Initialize the PIT timer interrupt.
+    unsafe {
+        // 1. Remap the PIC to avoid overlap with CPU exceptions.
+        arch_x86_64::apic::remap_pic(
+            arch_x86_64::interrupt::PIC_MASTER_BASE,
+            arch_x86_64::interrupt::PIC_SLAVE_BASE,
+        );
+
+        // 2. Program the PIT at 100 Hz, mode 3 (square wave).
+        arch_x86_64::apic::init_pit(100);
+
+        // 3. Register the timer ISR handler.
+        unsafe extern "C" fn timer_callback() {
+            unsafe { kernel::clock::timer_int_handler() };
+        }
+        arch_x86_64::apic::set_timer_isr_handler(timer_callback);
+
+        // 4. Install the assembly trampoline in the IDT.
+        let handler_addr = arch_x86_64::apic::timer_isr_entry as *const () as u64;
+        (*arch_x86_64::idt::IDT.get()).set_handler(
+            arch_x86_64::interrupt::VECTOR_TIMER as usize,
+            handler_addr,
+            0, // IST
+            0, // DPL (kernel only)
+        );
+
+        // 5. Unmask the timer IRQ on the master PIC.
+        arch_x86_64::apic::unmask_timer_irq();
+    }
+
     // Halt loop
     loop {
         unsafe {

@@ -3492,7 +3492,7 @@ be replaced with real implementations.
   - `free_fn` wraps `PhysicalAllocator::free_contig()`
   - Without this call, all DMA allocations return `None` (stub mode)
 
-- [ ] **12.21 — Wire PIT timer ISR into kernel-boot** (`crates/kernel-boot/src/main.rs`, `crates/kernel/src/clock.rs`)
+- [x] **12.21 — Wire PIT timer ISR into kernel-boot** (`crates/kernel-boot/src/main.rs`, `crates/kernel/src/clock.rs`)
   **Depends on:** `init_pit()` and `timer_isr_entry()` (Phase 11b.13), `remap_pic()` (11b.11),
   IDT entry setup (arch-x86_64), PIC IRQ 0 unmask
   In `kmain()`, add the boot timer init sequence:
