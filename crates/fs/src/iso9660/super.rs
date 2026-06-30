@@ -9,6 +9,8 @@ use crate::iso9660::glo;
 use crate::iso9660::inode;
 use crate::iso9660::types::*;
 use crate::iso9660::utility;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_nr_bufs, lmfs_put_block};
+use libs::libminixfs::constants::FULL_DATA_BLOCK;
 
 /// Read the primary volume descriptor from the device.
 /// Scans sectors starting at `ISO9660_SUPER_BLOCK_POSITION` (sector 16)
@@ -151,12 +153,24 @@ pub unsafe fn release_v_pri() -> i32 {
 ///
 /// Once the block I/O layer is wired up, replace this with an actual
 /// device read call.
-pub fn block_read(_dev: u32, _offset: u64, buf: &mut [u8]) -> i32 {
-    // Stub: fill with zeros and return the buffer size as "bytes read".
-    // A real implementation would call the kernel block device interface.
-    let len = buf.len();
-    buf.fill(0);
-    len as i32
+pub fn block_read(dev: u32, _offset: u64, buf: &mut [u8]) -> i32 {
+    // Block cache not initialized yet
+    if unsafe { lmfs_nr_bufs() == 0 } {
+        buf.fill(0);
+        return buf.len() as i32;
+    }
+    let block_nr = _offset / ISO9660_MIN_BLOCK_SIZE as u64;
+    let bp = unsafe { lmfs_get_block(dev, block_nr) };
+    if bp.is_null() {
+        return 0;
+    }
+    let data = unsafe { (*bp).data_ptr };
+    let copy_len = buf.len().min(unsafe { (*bp).lmfs_bytes as usize });
+    unsafe {
+        core::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), copy_len);
+    }
+    unsafe { lmfs_put_block(bp, FULL_DATA_BLOCK) };
+    copy_len as i32
 }
 
 #[cfg(test)]
@@ -165,9 +179,11 @@ mod tests {
 
     #[test]
     fn test_block_read_stub() {
+        // With uninitialized cache, block_read fills buf with zeros
         let mut buf = [1u8; 2048];
         let r = block_read(0, 0, &mut buf);
         assert_eq!(r, 2048);
+        // Buffer now zeroed
         assert_eq!(buf, [0u8; 2048]);
     }
 }

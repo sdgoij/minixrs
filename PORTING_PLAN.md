@@ -2522,17 +2522,29 @@ Created 13 files in `crates/servers/src/vfs/`:
   - `utility.rs` — b_data/b_ind helpers for buffer data access
   - `glo.rs` — read-ahead global state
 
-- [ ] **10.12 — Wire ISO 9660 buffer cache** (`crates/fs/src/iso9660/`)
+- [x] **10.12 — Wire ISO 9660 buffer cache** (`crates/fs/src/iso9660/`)
   **Depends on:** libminixfs block cache (Phase 9.7)
-  Replace `stub_get_block`/`stub_put_block` in `inode.rs:367,377`.
+  Replaced `stub_get_block`/`stub_put_block` and `block_read` stub with
+  real `lmfs_get_block`/`lmfs_put_block` calls. Changes:
+  - `super.rs`: `block_read` now uses lmfs_get_block (falls back to zeroed
+    buffer if cache uninitialized)
+  - `inode.rs`: Removed STUB_BUF, stub_get_block, stub_put_block.
+    `get_block`/`put_block` now delegate to lmfs_get_block/lmfs_put_block.
+    `load_dir_record_from_disk` uses real block cache.
+  - `mount.rs`: Added `lmfs_set_blocksize` call in `fs_readsuper`.
 
-- [ ] **10.13 — Implement deferred kernel syscalls** (`crates/kernel/src/system.rs`)
+- [x] **10.13 — Implement deferred kernel syscalls** (`crates/kernel/src/system.rs`)
   **Depends on:** VFS/PM IPC infrastructure (Phase 10)
-  - `do_privctl` (line 1564) — privilege management via `data_copy()`
-  - `do_vircopy` (line 1566) — virtual copy with `data_copy()`
-  - `do_physcopy` (line 1567) — physical copy
-  - `do_update` (line 2163) — kernel update with `data_copy()`
-  - `do_trace` (line 1565) — ptrace with `data_copy()`
+  4 of 5 syscalls are fully implemented:
+  - `do_privctl` — SYS_PRIVCTL handler with SYS_PRIV_ALLOW/YIELD/QUERY_MEM/
+    ADD_IO/ADD_MEM/DEL_IO/DEL_MEM/SET_SYS, uses data_copy_from for userspace
+    privilege data (368 lines)
+  - `do_vircopy` / `do_physcopy` — SYS_VIRCOPY/SYS_PHYSCOPY handlers calling
+    do_copy_common which uses virtual_copy (data_copy equivalent)
+  - `do_trace` — SYS_TRACE handler with ptrace operations (196 lines)
+  - `do_update` — **Still deferred** (stub returning EBADREQUEST). Requires
+    Phase 15 (Live Update) infrastructure: Proc::p_update field,
+    proc_is_updatable, adjust_proc_slot, adjust_priv_slot, swap_proc_slot
 
 ---
 

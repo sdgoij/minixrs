@@ -5,11 +5,25 @@
 //! physical address and looked up by inode number (which equals the physical
 //! address).
 
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_nr_bufs, lmfs_put_block};
+use libs::libminixfs::constants::FULL_DATA_BLOCK;
+use libs::libminixfs::types::Buf;
+
 use crate::iso9660::consts::*;
 use crate::iso9660::glo;
 use crate::iso9660::types::*;
 use crate::iso9660::utility;
 
+/// Helper to get the raw data pointer from a Buf.
+///
+/// # Safety
+///
+/// `bp` must point to a valid, initialized `Buf` obtained from `lmfs_get_block`.
+pub unsafe fn b_data(bp: *mut Buf) -> *mut u8 {
+    (*bp).data_ptr
+}
+
+/// Load a directory record from disk at the given physical address.
 /// Initialize the inode cache (dir records and ext attr records).
 /// Sets all entries' d_count / count to 0.
 ///
@@ -291,8 +305,15 @@ pub unsafe fn load_dir_record_from_disk(address: u32) -> *mut DirRecord {
     let block_nr = address / block_size;
     let offset = (address % block_size) as usize;
 
-    // Stub: in real implementation, use get_block(block_nr)
-    let bp_data = stub_get_block(block_nr);
+    // Use libminixfs block cache
+    if lmfs_nr_bufs() == 0 {
+        return core::ptr::null_mut();
+    }
+    let bp = lmfs_get_block((*glo::isofs_ptr()).fs_dev, block_nr as u64);
+    if bp.is_null() {
+        return core::ptr::null_mut();
+    }
+    let bp_data = core::slice::from_raw_parts((*bp).data_ptr as *const u8, block_size as usize);
 
     let dir = get_free_dir_record();
     if dir.is_null() {
@@ -350,61 +371,32 @@ pub unsafe fn load_dir_record_from_disk(address: u32) -> *mut DirRecord {
         }
     }
 
-    stub_put_block(block_nr);
+    lmfs_put_block(bp, FULL_DATA_BLOCK);
     dir
 }
 
-// ── Stubs for block I/O ──
+// ── Block I/O wrappers ──
 
-static mut STUB_BUF: [u8; ISO9660_MIN_BLOCK_SIZE] = [0; ISO9660_MIN_BLOCK_SIZE];
-
-/// Stub for `get_block()` — returns a pointer to a zeroed block buffer.
+/// Get a block from the libminixfs block cache.
 ///
 /// # Safety
 ///
-/// Returns a raw pointer to a static buffer. Replace with `lmfs_get_block()`
-/// when the block I/O layer is available.
-pub unsafe fn stub_get_block(_block_nr: u32) -> &'static [u8] {
-    // SAFETY: raw pointer to static, no mutable references exist
-    unsafe { &*core::ptr::addr_of!(STUB_BUF) }
+/// Requires exclusive access to the ISO 9660 global state for `fs_dev`.
+/// Returns null on cache miss or error.
+pub unsafe fn get_block(block_nr: u32) -> *mut Buf {
+    if lmfs_nr_bufs() == 0 {
+        return core::ptr::null_mut();
+    }
+    lmfs_get_block((*glo::isofs_ptr()).fs_dev, block_nr as u64)
 }
 
-/// Stub for `put_block()` — no-op.
+/// Release a block back to the block cache.
 ///
 /// # Safety
 ///
-/// No side effects.
-pub unsafe fn stub_put_block(_block_nr: u32) {
-    // No-op
-}
-
-/// Stub: get a block from the block cache.
-/// In Minix this is `get_block(n)` which calls `lmfs_get_block(fs_dev, n, NORMAL)`.
-///
-/// # Safety
-///
-/// Returns a pointer to a static buffer; no aliasing guarantees.
-pub unsafe fn get_block(_block_nr: u32) -> *mut u8 {
-    core::ptr::addr_of_mut!(STUB_BUF[0])
-}
-
-/// Stub: release a block back to the block cache.
-/// In Minix this is `put_block(bp)` which calls `lmfs_put_block(bp, FULL_DATA_BLOCK)`.
-///
-/// # Safety
-///
-/// The pointer must have been obtained from `get_block`.
-pub unsafe fn put_block(_bp: *mut u8) {
-    // No-op
-}
-
-/// Stub: get buffer data from a block pointer.
-///
-/// # Safety
-///
-/// `bp` must be a valid block pointer from `get_block`.
-pub unsafe fn b_data(bp: *mut u8) -> *mut u8 {
-    bp
+/// `bp` must be a valid pointer from `get_block` or `lmfs_get_block`.
+pub unsafe fn put_block(bp: *mut Buf) {
+    lmfs_put_block(bp, FULL_DATA_BLOCK);
 }
 
 #[cfg(test)]

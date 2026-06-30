@@ -1,5 +1,7 @@
 //! ISO 9660 mount/unmount — adapted from `minix/fs/iso9660fs/mount.c`
 
+use libs::libminixfs::cache::lmfs_set_blocksize;
+
 use crate::iso9660::consts::*;
 use crate::iso9660::glo;
 use crate::iso9660::inode;
@@ -43,7 +45,7 @@ pub unsafe fn fs_readsuper() -> i32 {
     if block_size < ISO9660_MIN_BLOCK_SIZE as u16 {
         return EINVAL;
     }
-    // lmfs_set_blocksize(block_size, major(fs_dev));
+    lmfs_set_blocksize(block_size as u32, 0); // major dev is 0 for ISO
 
     // Return root inode properties
     // In the real implementation these go to fs_m_out:
