@@ -7,10 +7,9 @@
 #![cfg_attr(not(test), no_main)]
 
 #[cfg(not(test))]
-use core::arch::asm;
-
-#[cfg(not(test))]
 use core::panic::PanicInfo;
+
+pub mod boot_init;
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
@@ -34,29 +33,43 @@ pub extern "C" fn kmain() -> ! {
     }
 
     // Register the physical memory allocator with the DMA buffer API.
+    fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
+        let alloc = arch_x86_64::alloc::global_allocator();
+        if alloc.is_null() {
+            return None;
+        }
+        // SAFETY: allocator was initialized, single-threaded boot
+        let phys = unsafe { (*alloc).alloc_contig(pages) }?;
+        Some((phys as *mut u8, phys))
+    }
+    fn dma_free(virt: *mut u8, pages: usize) {
+        let alloc = arch_x86_64::alloc::global_allocator();
+        if alloc.is_null() {
+            return;
+        }
+        // SAFETY: allocator was initialized, single-threaded boot
+        unsafe { (*alloc).free_contig(virt as u64, pages) };
+    }
+    // SAFETY: called once during boot, single-threaded
     unsafe {
-        fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
-            let alloc = arch_x86_64::alloc::global_allocator();
-            if alloc.is_null() {
-                return None;
-            }
-            let phys = unsafe { (*alloc).alloc_contig(pages) }?;
-            // With identity mapping, virtual address equals physical address.
-            Some((phys as *mut u8, phys))
-        }
-        fn dma_free(virt: *mut u8, pages: usize) {
-            let alloc = arch_x86_64::alloc::global_allocator();
-            if alloc.is_null() {
-                return;
-            }
-            unsafe { (*alloc).free_contig(virt as u64, pages) };
-        }
         drivers::storage::dma::register_allocator(dma_alloc, dma_free);
     }
 
+    // Initialize the physical memory allocator.
+    // The kernel binary + BSS is loaded at 0x200000 and fits within the
+    // first 3 MB.  RAM is 256 MB (0x0 - 0x0FFFFFFF) per QEMU's -m 256M.
+    // We give the allocator all RAM from 0x300000 to 0x0FFFFFFF.
+    let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
+    // Free memory from 3 MB to 256 MB (minus 1 page for the user stack top)
+    mmap.add(0x0030_0000, 0x1000_0000);
+    // Reserve the user stack region (0x0FE00000 - 0x0FF00000) so the
+    // allocator doesn't hand it out.
+    mmap.cut(0x0FE0_0000, 0x0FF0_0000);
+    arch_x86_64::alloc::init_allocator(&mmap);
+
     // Print banner via serial
     init_serial();
-    serial_write(b"Hello MINIX!\r\n");
+    serial_write("Hello MINIX!\r\n");
 
     // Initialize the PIT timer interrupt.
     unsafe {
@@ -88,10 +101,37 @@ pub extern "C" fn kmain() -> ! {
         arch_x86_64::apic::unmask_timer_irq();
     }
 
-    // Halt loop
+    // ── Boot the first userspace process ─────────────────────────────────
+    serial_write("  loading init from initramfs...\r\n");
+
+    let init_info = unsafe { boot_init::load_and_prepare_init() };
+
+    serial_write("  creating per-process page table...\r\n");
+
+    let pt_phys = unsafe { boot_init::boot_create_page_table() };
+    if pt_phys == 0 {
+        serial_write("  FAILED: page table allocation\r\n");
+        hlt_loop();
+    }
+
+    serial_write("  jumping to ring-3...\r\n");
+
+    // This never returns — jumps to userspace via sysretq
+    unsafe {
+        boot_init::boot_jump_to_user(&init_info, pt_phys);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Serial I/O — available in all build modes (no-op in test mode)
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Halt the CPU forever (fallback if boot fails).
+#[cfg(not(test))]
+fn hlt_loop() -> ! {
     loop {
         unsafe {
-            asm!("hlt", options(nomem, nostack));
+            core::arch::asm!("hlt", options(nomem, nostack));
         }
     }
 }
@@ -101,58 +141,79 @@ pub extern "C" fn kmain() -> ! {
 fn init_serial() {
     unsafe {
         let port = 0x3F8u16;
-        // Disable interrupts
-        asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
-        // Set DLAB=1 (baud rate divisor)
-        asm!("out dx, al", in("dx") port + 3, in("al") 0x80u8, options(nomem, nostack));
-        // Divisor low byte: 115200 / 115200 = 1
-        asm!("out dx, al", in("dx") port, in("al") 0x01u8, options(nomem, nostack));
-        // Divisor high byte
-        asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
-        // 8N1: 8 bits, no parity, 1 stop bit
-        asm!("out dx, al", in("dx") port + 3, in("al") 0x03u8, options(nomem, nostack));
-        // Enable FIFO, clear, 14-byte threshold
-        asm!("out dx, al", in("dx") port + 2, in("al") 0xC7u8, options(nomem, nostack));
-        // IRQs enabled, RTS/DSR set
-        asm!("out dx, al", in("dx") port + 4, in("al") 0x0Bu8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 3, in("al") 0x80u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port, in("al") 0x01u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 3, in("al") 0x03u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 2, in("al") 0xC7u8, options(nomem, nostack));
+        core::arch::asm!("out dx, al", in("dx") port + 4, in("al") 0x0Bu8, options(nomem, nostack));
     }
 }
 
-/// Write bytes to COM1 serial port.
-#[cfg(not(test))]
-fn serial_write(bytes: &[u8]) {
-    let port = 0x3F8u16;
-    for &b in bytes {
+/// Write a string to COM1 serial port.  No-op in test mode.
+pub fn serial_write(s: &str) {
+    #[cfg(not(test))]
+    {
+        let port = 0x3F8u16;
+        for &b in s.as_bytes() {
+            unsafe {
+                loop {
+                    let lsr: u8;
+                    core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
+                    if lsr & 0x20 != 0 {
+                        break;
+                    }
+                }
+                core::arch::asm!("out dx, al", in("dx") port, in("al") b, options(nomem, nostack));
+            }
+        }
+    }
+    #[cfg(test)]
+    let _ = s;
+}
+
+/// Write a single byte to COM1 serial port.  No-op in test mode.
+pub fn serial_putc(c: u8) {
+    #[cfg(not(test))]
+    {
+        let port = 0x3F8u16;
         unsafe {
-            // Wait for transmitter holding register empty
             loop {
                 let lsr: u8;
-                asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
+                core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
                 if lsr & 0x20 != 0 {
                     break;
                 }
             }
-            // Transmit byte
-            asm!("out dx, al", in("dx") port, in("al") b, options(nomem, nostack));
+            core::arch::asm!("out dx, al", in("dx") port, in("al") c, options(nomem, nostack));
         }
     }
+    #[cfg(test)]
+    let _ = c;
+}
+
+/// Print macro for boot-time serial output.
+#[macro_export]
+macro_rules! print {
+    ($s:expr) => {
+        $crate::serial_write($s);
+    };
 }
 
 /// Panic handler.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe {
-            asm!("hlt", options(nomem, nostack));
-        }
-    }
+    hlt_loop()
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn placeholder() {
-        assert!(true);
+    fn serial_write_does_not_panic_in_tests() {
+        // Verify the no-op path compiles and runs
+        crate::serial_write("test");
+        crate::serial_putc(b'x');
     }
 }

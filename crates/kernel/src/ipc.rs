@@ -1563,9 +1563,9 @@ mod tests {
             assert_eq!(r, OK);
 
             // Verify data was copied
-            for i in 0..crate::proc::MESSAGE_SIZE {
+            for (i, &byte) in buf.iter().enumerate() {
                 assert_eq!(
-                    buf[i],
+                    byte,
                     (i ^ 0xA5) as u8,
                     "byte {} mismatch after delivermsg",
                     i

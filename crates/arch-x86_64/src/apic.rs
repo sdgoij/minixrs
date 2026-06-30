@@ -1085,20 +1085,19 @@ mod tests {
         // Bit 11 indicates APIC enable.
         let bit11: u64 = 1 << 11;
         assert_eq!(bit11, 0x800);
-        assert_eq!((0u64) & bit11, 0);
         assert_eq!(bit11 & bit11, bit11);
     }
 
     #[test]
     fn test_apic_is_bsp_mask() {
         // Bit 8 indicates BSP.
-        assert!((1u64 << 8) != 0);
+        assert_eq!(1u64 << 8, 0x100);
     }
 
     #[test]
     fn test_apic_is_x2apic_mask() {
         // Bit 10 indicates x2APIC enable.
-        assert!((1u64 << 10) != 0);
+        assert_eq!(1u64 << 10, 0x400);
     }
 
     // ── ApicVersionInfo from raw register ──────────────────────────────

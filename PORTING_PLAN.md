@@ -4476,19 +4476,19 @@ create a per-process page table with User-accessible pages, and execute
   - 10 tests: header parsing, file lookup, missing file, multiple entries,
     trailer, empty data, bad magic, padding, hex formatting
 
-- [ ] **ELR3 — Wire boot_init into kmain**
+- [x] **ELR3 — Wire boot_init into kmain**
   - ✅ `pub mod elf;` and `pub mod initramfs;` added to `kernel/src/lib.rs`
-  - In `kmain()` (after serial + timer init):
-    1. Call `load_and_prepare_init()` — loads ELF, creates stack, sets up
-       Proc StackFrame
-    2. Set PG_U (User) bit on init's code pages in boot page tables
-    3. Call `vm::proc::pt_new_for_init()` or equivalent — create per-process
-       page table with private copies of init's pages
-    4. Set init's `p_seg.p_cr3` to the new page table
-    5. Call `arch_proc_init(&mut init_proc.p_reg, entry, stack, ...)` — sets
-       RCX/R11 for sysretq
-    6. Call `restore(&init_proc)` or equivalent — executes `sysretq` to ring-3
-  - If any step fails, fall back to HLT loop with error message
+  - ✅ `load_and_prepare_init()` — finds init in initramfs, loads ELF64,
+    allocates user stack, sets up TrapFrame for sysretq (rcx/r11/rsp)
+  - ✅ `boot_create_page_table()` — allocates PML4+PDP+PD from arch
+    allocator, deep-copies boot identity map, shares kernel high mappings
+  - ✅ `boot_jump_to_user()` — sets p_cr3, calls arch_proc_init, then
+    executes `sysretq` via naked assembly `sysretq_to_user()`
+  - ✅ `sysretq_to_user()` — naked asm function loads CR3, RCX, R11, RSP
+    from Proc struct and executes sysretq
+  - ✅ Arch allocator initialized in kmain (free: 0x300000-0x10000000)
+  - ✅ `serial_putc()` and `print!` macro for boot-time diagnostics
+  - ✅ Falls back to HLT loop on allocation failure
 
 ### Boot Process Detail (M1)
 

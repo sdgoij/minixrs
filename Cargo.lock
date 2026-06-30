@@ -53,6 +53,7 @@ dependencies = [
 name = "kernel-boot"
 version = "0.1.0"
 dependencies = [
+ "arch-common",
  "arch-x86_64",
  "drivers",
  "kernel",

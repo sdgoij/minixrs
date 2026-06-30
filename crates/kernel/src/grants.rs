@@ -468,10 +468,8 @@ mod tests {
     unsafe fn setup_priv(slot: i32, grant_table_ptr: u64, grant_entries: i32) -> *mut Priv {
         unsafe {
             // Use raw address of PRIV_POOL (first byte) plus slot offset
-            let base = &raw mut PRIV_POOL as *mut AlignedPool as *mut u8;
-            let p = base
-                .add((slot as usize).max(0) * PRIV_SLOT_BYTES)
-                .cast::<Priv>();
+            let base = &raw mut PRIV_POOL as *mut u8;
+            let p = base.add((slot as usize) * PRIV_SLOT_BYTES).cast::<Priv>();
             core::ptr::write_bytes(p.cast::<u8>(), 0, PRIV_SLOT_BYTES);
             (*p).s_grant_table = grant_table_ptr;
             (*p).s_grant_entries = grant_entries;
@@ -894,8 +892,8 @@ mod tests {
 
             let eps = [ep0, ep1, ep2, ep3, ep4, ep5, ep6];
             grant_buf!(_gb, base, 128);
-            for i in 0..7 {
-                setup_with_buf(i as i32, eps[i], base.add(i * 16), 16);
+            for (i, &ep) in eps.iter().enumerate() {
+                setup_with_buf(i as i32, ep, base.add(i * 16), 16);
             }
 
             // Each indirect grant's who_to follows C semantics:

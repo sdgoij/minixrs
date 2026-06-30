@@ -567,6 +567,42 @@ pub unsafe fn str_sel() -> u16 {
 }
 
 // ═════════════════════════════════════════════════════════════════════════
+// SYSRETQ to userspace
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Execute `sysretq` to jump to ring-3 — first userspace transition.
+///
+/// # Arguments
+///
+/// * `proc_ptr` — pointer to the kernel `Proc` struct. `p_reg.rcx` is
+///   loaded as RIP, `p_reg.r11` as RFLAGS, `p_reg.rsp` as RSP, and
+///   `p_seg.p_cr3` as CR3.
+///
+/// # Safety
+///
+/// `proc_ptr` must point to a valid `Proc` whose `p_seg.p_cr3` covers the
+/// entry point and stack. Must be called in ring 0 with interrupts disabled.
+/// Never returns.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn sysretq_to_user(proc_ptr: *const u8) -> ! {
+    // Offsets within `Proc` (first field is `p_reg: TrapFrame` at 0):
+    //   p_reg.rcx    = +16
+    //   p_reg.r11    = +72
+    //   p_reg.rsp    = +168
+    //   p_seg.p_cr3  = +184  (after TrapFrame's 184 bytes)
+    core::arch::naked_asm!(
+        // rdi = proc_ptr (SysV AMD64 ABI)
+        "mov    rax, [rdi + 184]", // p_seg.p_cr3
+        "mov    cr3, rax",         // load per-process page table
+        "mov    rcx, [rdi + 16]",  // p_reg.rcx → RIP via sysretq
+        "mov    r11, [rdi + 72]",  // p_reg.r11 → RFLAGS via sysretq
+        "mov    rsp, [rdi + 168]", // p_reg.rsp → user stack
+        "sysretq",
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
 // FPU: FXSAVE, FXRSTOR, FNINIT, FNCLEX
 // ═════════════════════════════════════════════════════════════════════════
 

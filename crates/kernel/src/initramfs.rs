@@ -131,6 +131,19 @@ fn parse_initramfs(data: &[u8], path: &str) -> Option<(&'static [u8], u32)> {
 /// The initramfs data is embedded in the `.initramfs` section of the
 /// kernel binary. This function must only be called after kernel loading
 /// is complete and the section is accessible.
+// Stub initramfs linker symbols for builds without `embed_initramfs`.
+// When `embed_initramfs` is active, the linker script (`minix-raw.ld`)
+// defines these from the `.initramfs` section.  The stubs prevent
+// unresolved symbol errors in dev/test builds.
+#[cfg(not(feature = "embed_initramfs"))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __initramfs_start: u8 = 0;
+#[cfg(not(feature = "embed_initramfs"))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __initramfs_end: u8 = 1;
+
 unsafe fn initramfs_data() -> &'static [u8] {
     // The INITRAMFS_CPIO static is defined in the generated code
     // (target/initramfs_data.rs) and placed in the .initramfs section.
@@ -138,7 +151,8 @@ unsafe fn initramfs_data() -> &'static [u8] {
     // We use extern block to reference the linker symbols:
     //   __initramfs_start, __initramfs_end
     //
-    // These are defined in the kernel linker script (minix-raw.ld).
+    // These are defined in the kernel linker script (minix-raw.ld)
+    // or by the stubs above if not using embed_initramfs.
     unsafe extern "C" {
         static __initramfs_start: u8;
         static __initramfs_end: u8;
@@ -147,14 +161,20 @@ unsafe fn initramfs_data() -> &'static [u8] {
     let start = core::ptr::addr_of!(__initramfs_start) as usize;
     let end = core::ptr::addr_of!(__initramfs_end) as usize;
     let len = end.wrapping_sub(start);
+    // With stubs: len = 1, which is < 110 (header size), so
+    // parse_initramfs will return None gracefully.
     if len == 0 || len > 10 * 1024 * 1024 {
-        // No initramfs or unreasonable size — return empty slice
         return &[];
     }
     unsafe { core::slice::from_raw_parts(start as *const u8, len) }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::needless_range_loop,
+    clippy::manual_is_multiple_of,
+    clippy::items_after_test_module
+)]
 mod tests {
     use super::*;
 
@@ -167,9 +187,9 @@ mod tests {
         fn hex8(v: u32) -> [u8; 8] {
             let mut b = [0u8; 8];
             let hex = b"0123456789abcdef";
-            for i in 0..8 {
+            for (i, b_byte) in b.iter_mut().enumerate() {
                 let nibble = ((v >> ((7 - i) * 4)) & 0xF) as usize;
-                b[i] = hex[nibble];
+                *b_byte = hex[nibble];
             }
             b
         }
@@ -329,12 +349,15 @@ mod tests {
             *pos += path.len();
             buf[*pos] = 0;
             *pos += 1;
+            // Pad to 4-byte boundary
+            #[allow(clippy::manual_is_multiple_of)]
             while *pos % 4 != 0 {
                 buf[*pos] = 0;
                 *pos += 1;
             }
             buf[*pos..*pos + content.len()].copy_from_slice(content);
             *pos += content.len();
+            #[allow(clippy::manual_is_multiple_of)]
             while *pos % 4 != 0 {
                 buf[*pos] = 0;
                 *pos += 1;
@@ -462,8 +485,8 @@ mod tests {
     }
 }
 
-// Helper for testing hex8 formatting
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 fn hex8_helper_test(v: u32) -> [u8; 8] {
     let mut b = [0u8; 8];
     let hex = b"0123456789abcdef";

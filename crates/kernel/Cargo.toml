@@ -12,6 +12,10 @@ workspace = true
 [package.license]
 workspace = true
 
+[features]
+default = []
+embed_initramfs = []
+
 [dependencies]
 arch-common = { path = "../arch-common" }
 arch-x86_64 = { path = "../arch-x86_64" }

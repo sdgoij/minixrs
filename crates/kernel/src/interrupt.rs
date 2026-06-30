@@ -353,9 +353,11 @@ mod tests {
         unsafe {
             intr_init();
             let mut count: u32 = 0;
-            let mut hook = IrqHook::default();
-            hook.handler = Some(call_counter_handler);
-            hook.notify_id = &mut count as *mut u32 as u64;
+            let mut hook = IrqHook {
+                handler: Some(call_counter_handler),
+                notify_id: &mut count as *mut u32 as u64,
+                ..Default::default()
+            };
             let hook_ptr = &mut hook as *mut IrqHook;
             put_irq_handler(hook_ptr, 9, call_counter_handler);
             irq_handle(9);

@@ -536,7 +536,7 @@ mod tests {
 
         unsafe {
             tmrs_settimer(
-                &mut timers as *mut _ as *mut *mut _,
+                &mut timers as *mut *mut _,
                 &mut tmr,
                 100,
                 0,
@@ -546,11 +546,7 @@ mod tests {
             assert_eq!((*timers).tmr_exp_time, 100);
             assert!((*timers).tmr_next.is_null());
 
-            tmrs_clrtimer(
-                &mut timers as *mut _ as *mut *mut _,
-                &mut tmr,
-                core::ptr::null_mut(),
-            );
+            tmrs_clrtimer(&mut timers as *mut *mut _, &mut tmr, core::ptr::null_mut());
             assert!(timers.is_null());
         }
     }
@@ -562,7 +558,7 @@ mod tests {
         let mut tmr1 = MinixTimer::default();
         let mut tmr2 = MinixTimer::default();
         let mut tmr3 = MinixTimer::default();
-        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
 
         unsafe {
             // Insert in non-sorted order
@@ -593,7 +589,7 @@ mod tests {
         }
 
         unsafe {
-            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
             let wd = watchdog as *const () as usize;
             tmrs_settimer(timers_ptr, &mut tmr, 50, wd, core::ptr::null_mut());
 
@@ -611,7 +607,7 @@ mod tests {
         let mut tmr = MinixTimer::default();
 
         unsafe {
-            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
             tmrs_settimer(timers_ptr, &mut tmr, 100, 0, core::ptr::null_mut());
             let count = tmrs_exptimers(timers_ptr, 50, core::ptr::null_mut());
             assert_eq!(count, 0);
@@ -626,7 +622,7 @@ mod tests {
         let mut tmr = MinixTimer::default();
 
         unsafe {
-            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+            let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
             // Remove a timer that was never inserted — should not crash.
             tmrs_clrtimer(timers_ptr, &mut tmr, core::ptr::null_mut());
             assert!(timers.is_null());
@@ -639,7 +635,7 @@ mod tests {
         let mut timers: *mut MinixTimer = core::ptr::null_mut();
         let mut tmr1 = MinixTimer::default();
         let mut tmr2 = MinixTimer::default();
-        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
 
         unsafe {
             tmrs_settimer(timers_ptr, &mut tmr1, 50, 0, core::ptr::null_mut());
@@ -658,7 +654,7 @@ mod tests {
         let mut tmr1 = MinixTimer::default();
         let mut tmr2 = MinixTimer::default();
         let mut tmr3 = MinixTimer::default();
-        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
 
         unsafe {
             tmrs_settimer(timers_ptr, &mut tmr3, 300, 0, core::ptr::null_mut());
@@ -680,7 +676,7 @@ mod tests {
         let mut timers: *mut MinixTimer = core::ptr::null_mut();
         let mut tmr1 = MinixTimer::default();
         let mut tmr2 = MinixTimer::default();
-        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
 
         unsafe {
             tmrs_settimer(timers_ptr, &mut tmr1, 50, 0, core::ptr::null_mut());
@@ -700,7 +696,7 @@ mod tests {
         let mut tmr1 = MinixTimer::default();
         let mut tmr2 = MinixTimer::default();
         let mut tmr3 = MinixTimer::default();
-        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _ as *mut *mut _;
+        let timers_ptr: *mut *mut MinixTimer = &mut timers as *mut _;
 
         unsafe {
             tmrs_settimer(timers_ptr, &mut tmr1, 50, 0, core::ptr::null_mut());
