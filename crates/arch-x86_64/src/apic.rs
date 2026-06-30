@@ -764,7 +764,7 @@ pub unsafe extern "C" fn profile_clock_isr_entry() {
 /// NMI statistical profiling handler trampoline.
 ///
 /// Called when the APIC LVT timer is configured in NMI delivery mode.
-/// Currently a stub — see PORTING_PLAN.md 12.15 follow-up.
+/// Saves registers, calls the registered NMI handler, and returns via iretq.
 ///
 /// # Safety
 ///
@@ -772,8 +772,56 @@ pub unsafe extern "C" fn profile_clock_isr_entry() {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmi_profile_entry() {
-    // Stub: just return from NMI.
-    core::arch::naked_asm!("iretq",);
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+
+        // Call the registered NMI handler.
+        "lea rax, [rip + {handler}]",
+        "mov rax, [rax]",
+        "test rax, rax",
+        "jz 2f",
+        "call rax",
+        "2:",
+
+        // Restore caller-saved registers.
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+
+        "iretq",
+        handler = sym NMI_PROFILE_HANDLER,
+    );
+}
+
+/// NMI profile handler function pointer type.
+pub type NmiProfileFn = unsafe extern "C" fn();
+
+/// Registered NMI profile handler.
+static mut NMI_PROFILE_HANDLER: Option<NmiProfileFn> = None;
+
+/// Register the function to call on each NMI profile tick.
+///
+/// # Safety
+///
+/// Must be called once during boot.
+pub unsafe fn set_nmi_profile_handler(handler: NmiProfileFn) {
+    unsafe {
+        NMI_PROFILE_HANDLER = Some(handler);
+    }
 }
 
 /// Timer interrupt trampoline address — set this in the IDT entry.

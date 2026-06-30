@@ -3075,14 +3075,21 @@ trait Driver {
   Replace `vboxfs_init`/`vboxfs_cleanup`/`sffs_init`/`sffs_loop` `todo!()` with
   real calls to the VBOX backend driver and SFFS shared folder library.
 
-- [ ] **11e.14 — Wire profile clock** (`crates/kernel/src/profile.rs`)
+- [x] **11e.14 — Wire profile clock** (`crates/kernel/src/profile.rs`)
   **Depends on:** Architecture profile clock driver (Phase 11)
-  Replace TODO at lines 218/223: `arch_init_profile_clock(freq)` and
-  `arch_stop_profile_clock()` for statistical profiling.
+  `arch_init_profile_clock(freq)` and `arch_stop_profile_clock()` already
+  implemented in `arch-x86_64/src/apic.rs` — programs RTC registers A/B via
+  CMOS I/O ports to enable/disable periodic interrupts for statistical
+  profiling. Only remaining TODO is IDT handler registration (Phase 12.15).
 
-- [ ] **11e.15 — Wire NMI handling for profiling** (`crates/kernel/src/profile.rs:334`)
+- [x] **11e.15 — Wire NMI handling for profiling** (`crates/kernel/src/profile.rs:334`)
   **Depends on:** NMI interrupt handling (Phase 11)
-  Implement NMI-based profiling when NMI delivery is available.
+  NMI profile entry (`nmi_profile_entry`) now has a proper register-saving
+  trampoline that calls the registered handler via `NMI_PROFILE_HANDLER`
+  function pointer. Added `set_nmi_profile_handler` registration function
+  in `arch-x86_64/src/apic.rs`. RTC profile clock handler wired:
+  IDT entry registered at `VECTOR_TIMER + irq`, `set_profile_clock_handler`
+  called with callback invoking `profile_sample(current_proc, pc)`.
 
 ---
 

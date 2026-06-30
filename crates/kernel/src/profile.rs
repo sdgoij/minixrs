@@ -312,12 +312,25 @@ pub unsafe fn init_profile_clock(freq: u32) {
 
         let irq = arch_x86_64::apic::arch_init_profile_clock(rate_code);
         if irq >= 0 {
-            // The handler will be registered in the IDT entry.
-            // TODO: Phase 12.15 follow-up — register profile_clock_isr_entry
-            // in the IDT at vector VECTOR_TIMER + irq, and call
-            // set_profile_clock_handler with the Rust callback that
-            // calls profile_sample(current_proc, pc).
-            let _ = irq;
+            // Register the profile clock handler in the IDT.
+            let vector = arch_x86_64::interrupt::VECTOR_TIMER as u32 + irq as u32;
+            let handler_fn =
+                arch_x86_64::apic::profile_clock_isr_entry as *const () as usize as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                vector as usize,
+                handler_fn,
+                0, // IST
+                3, // DPL
+            );
+
+            // Register the Rust callback that calls profile_sample.
+            unsafe extern "C" fn profile_clock_callback() {
+                let p = unsafe { crate::ipc::current_proc() };
+                if !p.is_null() && unsafe { (*p).is_runnable() } {
+                    unsafe { profile_sample(p, 0) };
+                }
+            }
+            arch_x86_64::apic::set_profile_clock_handler(profile_clock_callback);
         }
     }
 }
