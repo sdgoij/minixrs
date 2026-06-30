@@ -84,6 +84,13 @@ pub trait PtyHost {
     fn grant_read_byte(&mut self, _caller: u32, _grant: u32, _offset: u64) -> Option<u8> {
         None
     }
+
+    /// Send a select reply to a waiting process.
+    ///
+    /// On the real TTY server, this builds a `CDEV_SEL2_REPLY` message
+    /// and sends it via the kernel's SENDNB syscall to `select_proc`.
+    /// On the host (test environment), this is a no-op.
+    fn reply_select(&mut self, _minor: u32, _ops: u32) {}
 }
 
 /// No-op host implementation for use before the TTY server is wired.
@@ -604,16 +611,15 @@ impl Pty {
     /// Re-evaluate select for the slave side and notify if ready.
     ///
     /// Computes ready ops and clears them from the interest set.
-    /// The actual `chardriver_reply_select` notification is deferred
-    /// until the character driver framework is available (see 12.24).
-    pub fn select_retry(&mut self, _minor: u32) -> u32 {
+    /// Sends the select reply via `host.reply_select()`.
+    pub fn select_retry(&mut self, minor: u32, host: &mut dyn PtyHost) -> u32 {
         if self.select_ops == 0 {
             return 0;
         }
         let r = self.select_try(self.select_ops);
         if r != 0 {
             self.select_ops &= !r;
-            // In real implementation, call chardriver_reply_select
+            host.reply_select(minor, r);
         }
         r
     }
@@ -764,6 +770,9 @@ mod tests {
         grant_data: [u8; 64],
         grant_len: usize,
         grant_pos: usize,
+        reply_select_count: usize,
+        reply_select_last_ops: u32,
+        reply_select_last_minor: u32,
     }
 
     impl MockHost {
@@ -778,6 +787,9 @@ mod tests {
                 grant_data: [0u8; 64],
                 grant_len: 0,
                 grant_pos: 0,
+                reply_select_count: 0,
+                reply_select_last_ops: 0,
+                reply_select_last_minor: 0,
             }
         }
 
@@ -818,6 +830,12 @@ mod tests {
             } else {
                 None
             }
+        }
+
+        fn reply_select(&mut self, minor: u32, ops: u32) {
+            self.reply_select_count += 1;
+            self.reply_select_last_minor = minor;
+            self.reply_select_last_ops = ops;
         }
     }
 
@@ -1178,7 +1196,9 @@ mod tests {
     #[test]
     fn test_select_retry_no_ops() {
         let mut p = Pty::new();
-        assert_eq!(p.select_retry(PTYPX_MINOR), 0);
+        let mut host = MockHost::new();
+        assert_eq!(p.select_retry(PTYPX_MINOR, &mut host), 0);
+        assert_eq!(host.reply_select_count, 0);
     }
 
     #[test]
@@ -1369,5 +1389,106 @@ mod tests {
         // accepts them all, the loop processes up to 64 and stops
         assert_eq!(host.in_count, 64);
         assert_eq!(p.wrleft, 36);
+    }
+
+    #[test]
+    fn test_select_retry_sends_reply() {
+        let mut p = Pty::new();
+        let mut host = MockHost::new();
+
+        assert!(p.master_open().is_ok());
+        p.slave_open();
+
+        // Register select interest with pending ops
+        p.select_ops = 3; // RD | WR
+        p.select_proc = 100;
+
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        // WR is ready (slave active), RD is not (no data in output buffer)
+        assert_eq!(r, 2);
+        assert_eq!(host.reply_select_count, 1);
+        assert_eq!(host.reply_select_last_minor, PTYPX_MINOR);
+        assert_eq!(host.reply_select_last_ops, 2);
+        assert_eq!(p.select_ops, 1); // RD still pending
+    }
+
+    #[test]
+    fn test_select_retry_without_ops_no_reply() {
+        let mut p = Pty::new();
+        let mut host = MockHost::new();
+
+        assert!(p.master_open().is_ok());
+        p.slave_open();
+
+        // No select ops registered
+        p.select_ops = 0;
+        p.select_proc = 100;
+
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 0);
+        assert_eq!(host.reply_select_count, 0);
+    }
+
+    #[test]
+    fn test_select_retry_only_sends_ready_ops() {
+        let mut p = Pty::new();
+        let mut host = MockHost::new();
+
+        assert!(p.master_open().is_ok());
+        p.slave_open();
+
+        // Only WR is initially ready (no data for RD)
+        p.select_ops = 3; // RD | WR
+        p.select_proc = 100;
+
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 2); // only WR ready
+        assert_eq!(host.reply_select_last_ops, 2);
+        assert_eq!(p.select_ops, 1); // RD still pending
+    }
+
+    #[test]
+    fn test_select_retry_multiple_calls() {
+        let mut p = Pty::new();
+        let mut host = MockHost::new();
+
+        assert!(p.master_open().is_ok());
+        p.slave_open();
+
+        // First retry: WR is ready
+        p.select_ops = 3;
+        p.select_proc = 100;
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 2);
+        assert_eq!(host.reply_select_count, 1);
+
+        // Second retry: RD still pending (no data yet)
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 0);
+        assert_eq!(host.reply_select_count, 1); // no new reply
+
+        // Add data, now RD should be ready
+        let mut host2 = MockHost::new();
+        p.slave_write(false, b"data", &mut host2);
+        p.select_ops = 1; // RD only
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 1);
+        assert_eq!(host.reply_select_count, 2);
+        assert_eq!(host.reply_select_last_ops, 1);
+    }
+
+    #[test]
+    fn test_select_retry_noop_host() {
+        let mut p = Pty::new();
+        let mut host = NoopHost;
+
+        assert!(p.master_open().is_ok());
+        p.slave_open();
+
+        // NoopHost's reply_select is a no-op; just verify it doesn't crash
+        p.select_ops = 3;
+        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        assert_eq!(r, 2);
+        assert_eq!(p.select_ops, 1);
     }
 }

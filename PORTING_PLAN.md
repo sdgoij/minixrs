@@ -3539,16 +3539,14 @@ be replaced with real implementations.
   Updated `MockHost` with `set_grant_data()` for testing the full pipeline.
   50 PTY tests pass (8 new), clippy clean.
 
-- [ ] **12.24 — Wire chardriver_reply_select in PTY select_retry** (`crates/drivers/src/tty/pty.rs`)
-  **Depends on:** Character driver framework / `chardriver_reply_select` (Phase 12.7 TTY server),
-  PTY driver module (Phase 11e.6)
-  `select_retry()` currently computes ready ops but never notifies the waiting
-  process because `chardriver_reply_select` doesn't exist yet.  Once available:
-  1. In `select_retry()`, after computing `r = select_try(self.select_ops)`:
-     `chardriver_reply_select(self.select_proc, minor, r)`
-  2. Only clear `self.select_ops &= !r` after successful notification
-  3. The `_minor` parameter is the device minor for the reply
-  Remove the `_` prefix from `minor` once implemented.
+- [x] **12.24 — Wire chardriver_reply_select in PTY select_retry** (`crates/drivers/src/tty/pty.rs`)
+  **Depends on:** `PtyHost` trait, `reply_select` callback
+  Added `reply_select()` to `PtyHost` trait (default: no-op for host mode).
+  Changed `select_retry(&mut self, minor, host)` to take a `host: &mut dyn PtyHost`
+  parameter.  Now calls `host.reply_select(minor, r)` after computing ready ops,
+  then clears `self.select_ops &= !r`.  Updated `MockHost` with
+  `reply_select_count`/`reply_select_last_ops`/`reply_select_last_minor` for
+  testing.  55 PTY tests pass (5 new select_retry tests), clippy clean.
 
 ## Phase 13: Rust `std` for Minix
 
