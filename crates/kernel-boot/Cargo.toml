@@ -15,6 +15,7 @@ workspace = true
 [features]
 default = []
 embed_initramfs = ["kernel/embed_initramfs"]
+integration-tests = []
 
 [dependencies]
 arch-common = { path = "../arch-common" }

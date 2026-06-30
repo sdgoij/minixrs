@@ -11,6 +11,9 @@ use core::panic::PanicInfo;
 
 pub mod boot_init;
 
+#[cfg(feature = "integration-tests")]
+pub mod test_runner;
+
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
 /// directly to kmain.
@@ -101,24 +104,33 @@ pub extern "C" fn kmain() -> ! {
         arch_x86_64::apic::unmask_timer_irq();
     }
 
-    // ── Boot the first userspace process ─────────────────────────────────
-    serial_write("  loading init from initramfs...\r\n");
-
-    let init_info = unsafe { boot_init::load_and_prepare_init() };
-
-    serial_write("  creating per-process page table...\r\n");
-
-    let pt_phys = unsafe { boot_init::boot_create_page_table() };
-    if pt_phys == 0 {
-        serial_write("  FAILED: page table allocation\r\n");
-        hlt_loop();
+    // ── Integration tests or normal boot ────────────────────────────────
+    #[cfg(feature = "integration-tests")]
+    {
+        serial_write("Running integration tests...\r\n");
+        // This never returns — calls qemu_exit_success/failure
+        test_runner::run_integration_tests();
     }
 
-    serial_write("  jumping to ring-3...\r\n");
+    #[cfg(not(feature = "integration-tests"))]
+    {
+        serial_write("  loading init from initramfs...\r\n");
 
-    // This never returns — jumps to userspace via sysretq
-    unsafe {
-        boot_init::boot_jump_to_user(&init_info, pt_phys);
+        let init_info = unsafe { boot_init::load_and_prepare_init() };
+
+        serial_write("  creating per-process page table...\r\n");
+
+        let pt_phys = unsafe { boot_init::boot_create_page_table() };
+        if pt_phys == 0 {
+            serial_write("  FAILED: page table allocation\r\n");
+            hlt_loop();
+        }
+
+        serial_write("  jumping to ring-3...\r\n");
+
+        unsafe {
+            boot_init::boot_jump_to_user(&init_info, pt_phys);
+        }
     }
 }
 

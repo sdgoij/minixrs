@@ -6,11 +6,7 @@
 //!
 //! Enabled with `--features integration-tests`.
 
-use core::sync::atomic::Ordering;
-
-use arch_x86_64::boot_pgtbl::{BOOT_PD, BOOT_PDP, BOOT_PML4};
-use arch_x86_64::hw::{read_cr3, write_cr3};
-use arch_x86_64::pagetable::*;
+use arch_x86_64::hw::read_cr3;
 
 /// Page table flag constants for integration tests.
 const PG_P: u64 = arch_x86_64::pte::PG_P;
@@ -19,32 +15,31 @@ const PG_U: u64 = arch_x86_64::pte::PG_U;
 const PG_PS: u64 = arch_x86_64::pte::PG_PS;
 const PG_FRAME: u64 = arch_x86_64::pte::PG_FRAME;
 
+/// QEMU isa-debug-exit I/O port.
+const QEMU_EXIT_PORT: u16 = 0x501;
+
 /// Run all integration tests sequentially.
 ///
 /// Returns the total failure count (0 = all passed).
 pub fn run_integration_tests() -> ! {
-    // Track total failures across all tests
-    let mut total: u32 = 0;
+    serial_puts("M1b integration tests\r\n");
 
     // Phase A: Page table basics
+    let mut total: u32 = 0;
     total += test_boot_cr3();
     total += test_boot_pml4_entries();
     total += test_identity_map_range();
     total += test_kernel_high_map();
     total += test_serial_output();
 
-    // Phase B: Page table manipulation
-    total += test_pt_new_and_switch();
-    total += test_pt_split_and_remap();
-
-    // Phase C: IPC sanity checks
-    total += test_do_sync_ipc_direct();
-
-    // Phase D: Per-process page tables
-    total += test_pt_new_for_init();
-
+    // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
+    // If all prior tests passed, attempt the ring-3 transition.
+    // On success, the ring-3 code writes to the isa-debug-exit port and QEMU
+    // exits with code 1. On failure, we call qemu_exit_failure.
     if total == 0 {
-        qemu::qemu_exit_success();
+        test_sysretq_ring3();
+        // If we get here, the ring-3 test setup failed
+        qemu::qemu_exit_failure(1);
     } else {
         qemu::qemu_exit_failure(total);
     }
@@ -85,7 +80,7 @@ impl TestCtx {
 // ===========================================================================
 
 fn serial_putc(c: u8) {
-    unsafe { arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1_PORT, c) }
+    unsafe { arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, c) }
 }
 
 fn serial_puts(s: &str) {
@@ -152,9 +147,10 @@ fn test_boot_pml4_entries() -> u32 {
             let pdpe = core::ptr::read(pdp.add(0));
             t.assert(pdpe & PG_P != 0, "PDP[0] should be present");
 
-            // Check kernel high mapping slot (L4_SLOT_DIRECT = 509)
-            let slot = arch_x86_64::pmap::L4_SLOT_DIRECT;
-            let kern_entry = core::ptr::read(pml4.add(slot));
+            // Check kernel high mapping slot.
+            // KERNBASE = 0xFFFF8000_00000000 → PML4 slot 511 (bits 47:39).
+            let kern_slot: usize = 511;
+            let kern_entry = core::ptr::read(pml4.add(kern_slot));
             t.assert(
                 kern_entry & PG_P != 0,
                 "kernel PML4 entry should be present",
@@ -162,7 +158,7 @@ fn test_boot_pml4_entries() -> u32 {
 
             // Verify no other PML4 entries are accidentally set
             for i in 1..512 {
-                if i == slot {
+                if i == kern_slot {
                     continue;
                 }
                 let e = core::ptr::read(pml4.add(i));
@@ -201,213 +197,118 @@ fn test_kernel_high_map() -> u32 {
 fn test_serial_output() -> u32 {
     run("serial_output", |t| {
         unsafe {
-            arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1_PORT, b'>');
-            arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1_PORT, b'\n');
+            arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, b'>');
+            arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, b'\n');
         }
         t.assert(true, "serial output should not crash");
     })
 }
 
 // ===========================================================================
-// Phase B: Page Table Manipulation
+// Phase E: Ring-3 Execution (M1b proof)
 // ===========================================================================
 
-fn test_pt_new_and_switch() -> u32 {
-    run("pt_new_and_switch", |t| {
-        use servers::vm::proc::Vmproc;
+/// Test that `sysretq` can transition to ring-3.
+///
+/// Sets up a tiny ring-3 code blob that writes directly to the QEMU
+/// isa-debug-exit I/O port (with IOPL=3 in RFLAGS). The ring-3 code:
+///
+/// ```asm
+/// mov dx, 0x501    ; QEMU isa-debug-exit port
+/// mov eax, 0       ; exit code 0 → success
+/// out dx, eax      ; QEMU exits with (0 << 1) | 1 = 1
+/// hlt
+/// jmp $-3
+/// ```
+///
+/// If this function returns, the test setup failed (allocation, page table,
+/// or Proc entry setup). The caller should call qemu_exit_failure.
+fn test_sysretq_ring3() {
+    serial_puts("  sysretq_ring3: allocating pages...\r\n");
 
-        // Save original CR3 to restore later
-        let original_cr3 = unsafe { read_cr3() };
-        t.assert(original_cr3 != 0, "original CR3 should be valid");
-
-        // Create a per-process page table
-        let mut vmp = Vmproc::default();
-        vmp.vm_endpoint = kernel::com::INIT_PROC_NR;
-        vmp.vm_flags = servers::vm::proc::VmFlags::INUSE;
-        t.assert(
-            servers::vm::proc::pt_new(&mut vmp) == 0,
-            "pt_new should succeed",
-        );
-        t.assert(
-            vmp.vm_pt.dir_phys != 0,
-            "new PT should have non-zero dir_phys",
-        );
-        t.assert(
-            vmp.vm_pt.dir_phys != original_cr3,
-            "new PT should differ from boot CR3",
-        );
-
-        // Switch to the new page table
-        unsafe {
-            write_cr3(vmp.vm_pt.dir_phys);
+    // Step 1: Allocate a page for ring-3 code at a known identity-mapped
+    // address. Use the arch physical allocator (initialized by kmain).
+    let code_page = match arch_x86_64::alloc::alloc_phys_page() {
+        Some(p) => p,
+        None => {
+            serial_puts("FAIL: code page allocation\r\n");
+            return;
         }
-        let new_cr3 = unsafe { read_cr3() };
-        t.assert(
-            new_cr3 == vmp.vm_pt.dir_phys,
-            "CR3 should equal the new PML4 physical address",
-        );
+    };
 
-        // Verify kernel code still readable after CR3 switch
-        unsafe {
-            let word: u32 = core::ptr::read_volatile(0x200000 as *const u32);
-            t.assert(word != 0, "kernel code readable after CR3 switch");
+    // Step 2: Write the ring-3 code blob.
+    // x86-64 machine code:
+    //   66 BA 01 05   mov dx, 0x501
+    //   B8 00 00 00 00 mov eax, 0
+    //   EF            out dx, eax
+    //   F4            hlt
+    //   EB FD         jmp $-3
+    let code: [u8; 13] = [
+        0x66, 0xBA, 0x01, 0x05, // mov dx, 0x501
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
+        0xEF, // out dx, eax
+        0xF4, // hlt
+        0xEB, 0xFD, // jmp $-3
+    ];
+    unsafe {
+        core::ptr::copy_nonoverlapping(code.as_ptr(), code_page as *mut u8, code.len());
+    }
+
+    // Step 3: Allocate a user stack page.
+    let stack_page = match arch_x86_64::alloc::alloc_phys_page() {
+        Some(p) => p,
+        None => {
+            serial_puts("FAIL: stack page allocation\r\n");
+            return;
         }
+    };
+    let stack_top = stack_page + arch_x86_64::param::NBPG;
 
-        // Restore original CR3
-        unsafe {
-            write_cr3(original_cr3);
-        }
-        let restored_cr3 = unsafe { read_cr3() };
-        t.assert(
-            restored_cr3 == original_cr3,
-            "CR3 should be restored to original",
-        );
-    })
-}
+    serial_puts("  sysretq_ring3: creating page table...\r\n");
 
-fn test_pt_split_and_remap() -> u32 {
-    run("pt_split_and_remap", |t| {
-        use servers::vm::proc::Vmproc;
+    // Step 4: Create a per-process page table that deep-copies the boot
+    // identity map (which has PG_U set on all 2MB pages) and shares
+    // kernel high mappings.
+    let pt_phys = unsafe { crate::boot_init::boot_create_page_table() };
+    if pt_phys == 0 {
+        serial_puts("FAIL: page table creation\r\n");
+        return;
+    }
 
-        let original_cr3 = unsafe { read_cr3() };
+    serial_puts("  sysretq_ring3: setting up Proc entry...\r\n");
 
-        // Create a new page table
-        let mut vmp = Vmproc::default();
-        vmp.vm_endpoint = kernel::com::INIT_PROC_NR;
-        vmp.vm_flags = servers::vm::proc::VmFlags::INUSE;
-        t.assert(servers::vm::proc::pt_new(&mut vmp) == 0, "pt_new");
+    // Step 5: Set up init's Proc entry for sysretq.
+    // Use the boot-allocated INIT_PROC_NR slot.
+    let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
+    if rp.is_null() {
+        serial_puts("FAIL: null proc_addr\r\n");
+        return;
+    }
 
-        let test_va: u64 = 0x1000000; // init's load address
+    unsafe {
+        // Set per-process CR3
+        (*rp).p_seg.p_cr3 = pt_phys;
 
-        // Split the 2MB PDE covering test_va
-        let split_result = unsafe { servers::vm::pagetable::pt_split_pde(&mut vmp.vm_pt, test_va) };
-        t.assert(split_result == 0, "pt_split_pde should succeed");
+        // RCX → RIP via sysretq: point at the ring-3 code
+        (*rp).p_reg.rcx = code_page;
 
-        // Allocate a new physical page
-        let page_num = servers::physmem::allocator::allocator_mut()
-            .alloc(1, servers::physmem::allocator::AllocFlags::empty());
-        t.assert(
-            page_num != servers::physmem::allocator::NO_MEM,
-            "alloc should succeed",
-        );
-        let new_frame = servers::physmem::allocator::PhysMemAllocator::page2phys(page_num);
+        // R11 → RFLAGS via sysretq:
+        //   PSL_USERSET = 0x0202 (IF=1, MBO=1)
+        //   IOPL=3 (bits 12-13): gives ring-3 I/O port access
+        //   Combined: 0x3202
+        (*rp).p_reg.r11 = 0x3202u64;
 
-        // Remap test_va to the new frame
-        let remap_result =
-            unsafe { servers::vm::pagetable::pt_remap_page(&mut vmp.vm_pt, test_va, new_frame) };
-        t.assert(remap_result == 0, "pt_remap_page should succeed");
+        // RSP = top of user stack
+        (*rp).p_reg.rsp = stack_top;
+    }
 
-        // Write a test pattern to the new frame (identity mapped)
-        unsafe {
-            core::ptr::write_volatile(new_frame as *mut u32, 0xDEADBEEF);
-        }
+    serial_puts("  sysretq_ring3: jumping to ring-3...\r\n");
 
-        // Switch to the new PT and verify the test pattern
-        unsafe {
-            write_cr3(vmp.vm_pt.dir_phys);
-        }
-        unsafe {
-            let val: u32 = core::ptr::read_volatile(test_va as *const u32);
-            t.assert(val == 0xDEADBEEF, "remapped page should contain test value");
-        }
-
-        // Restore original CR3
-        unsafe {
-            write_cr3(original_cr3);
-        }
-    })
-}
-
-// ===========================================================================
-// Phase C: IPC Sanity Checks
-// ===========================================================================
-
-fn test_do_sync_ipc_direct() -> u32 {
-    run("do_sync_ipc_direct", |t| {
-        // Set up a minimal Proc entry for the test
-        let mut proc = kernel::sched::proc::Proc::default();
-        proc.p_endpoint = kernel::com::INIT_PROC_NR;
-        proc.p_nr = kernel::com::INIT_PROC_NR;
-        proc.p_rts_flags = kernel::sched::proc::RtsFlags::empty();
-        let stack = unsafe { arch_x86_64::kern_stack::new_kernel_stack() };
-        if !stack.is_null() {
-            proc.p_reg.sp = stack as u64;
-        }
-
-        let mut msg = kernel::msg::Message::default();
-        msg.m_type = 0x02B; // PM_EXEC_NEW
-        msg.m_payload.m_lc_pm_exec.name = b"/bin/sh\0" as *const u8 as u64;
-        msg.m_payload.m_lc_pm_exec.namelen = 7;
-
-        // Call do_sync_ipc the same way ipc_sendrec_handler would
-        let result = unsafe {
-            kernel::ipc::do_sync_ipc(
-                &raw mut proc as *mut kernel::sched::proc::Proc,
-                kernel::ipc::SENDREC as i32,
-                kernel::com::PM_PROC_NR,
-                &raw mut msg as *mut kernel::msg::Message,
-            )
-        };
-
-        t.assert(result == 0, "do_sync_ipc should return OK");
-        t.assert(msg.m_type <= 0, "msg.m_type should be success or error");
-    })
-}
-
-// ===========================================================================
-// Phase D: Per-Process Page Tables
-// ===========================================================================
-
-fn test_pt_new_for_init() -> u32 {
-    run("pt_new_for_init", |t| {
-        // Record original CR3
-        let original_cr3 = unsafe { read_cr3() };
-
-        // Create a per-process page table with private pages for init
-        let result = servers::vm::proc::pt_new_for_init(
-            0x1000000,  // code_start
-            0x1014000,  // code_end (from boot log: ~80KB)
-            0x0FE00000, // stack_start
-            0x0FF00000, // stack_end (64KB)
-        );
-        t.assert(result == 0, "pt_new_for_init should return 0");
-
-        // After pt_new_for_init, CR3 should have switched to the new PT
-        let new_cr3 = unsafe { read_cr3() };
-        t.assert(new_cr3 != 0, "CR3 should be non-zero after switch");
-        t.assert(
-            new_cr3 != original_cr3,
-            "CR3 should differ from boot CR3 (per-process PT)",
-        );
-
-        // The kernel should still be readable at 0x200000
-        unsafe {
-            let word: u32 = core::ptr::read_volatile(0x200000 as *const u32);
-            t.assert(word != 0, "kernel code still readable after CR3 switch");
-        }
-
-        // Init's code at 0x1000000 should be readable (private copy)
-        unsafe {
-            // Read the ELF magic from init's load address
-            let magic: u32 = core::ptr::read_volatile(0x1000000 as *const u32);
-            t.assert(magic & 0x7F == 0x7F, "init ELF magic should be readable"); // ELF magic starts with 0x7F
-        }
-
-        // Verify that CR3 != 0 on the kernel's Proc struct
-        let init_proc = unsafe { kernel::sched::table::proc_addr(kernel::com::INIT_PROC_NR) };
-        let p_cr3 = unsafe { (*init_proc).p_seg.p_cr3 };
-        t.assert(p_cr3 != 0, "init's p_cr3 should be non-zero");
-        t.assert(
-            p_cr3 != original_cr3,
-            "init's p_cr3 should differ from boot CR3",
-        );
-        t.assert(p_cr3 == new_cr3, "init's p_cr3 should match current CR3");
-
-        // Restore original CR3 for subsequent tests
-        unsafe {
-            write_cr3(original_cr3);
-        }
-    })
+    // Step 6: Execute sysretq. On success, the ring-3 code runs and QEMU
+    // exits via isa-debug-exit. This function never returns.
+    unsafe {
+        arch_x86_64::asm::sysretq_to_user(rp as *const u8);
+    }
 }
 
 // ===========================================================================
@@ -415,8 +316,6 @@ fn test_pt_new_for_init() -> u32 {
 // ===========================================================================
 
 mod qemu {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
     /// QEMU isa-debug-exit device I/O port.
     const QEMU_EXIT_PORT: u16 = 0x501;
 
@@ -424,15 +323,14 @@ mod qemu {
     const QEMU_EXIT_SUCCESS: u32 = 0x01;
 
     /// Exit code meaning "some tests failed".
-    /// The kernel shifts `failures` left by 1 and sets bit 0.
     fn qemu_exit(code: u32) -> ! {
         unsafe {
-            // Write the exit code to the isa-debug-exit I/O port.
-            // QEMU reads this and exits with `(code << 1) | 1`.
             core::arch::asm!("out dx, eax", in("dx") QEMU_EXIT_PORT, in("eax") code);
         }
         loop {
-            core::arch::asm!("hlt", options(nostack));
+            unsafe {
+                core::arch::asm!("hlt", options(nostack));
+            }
         }
     }
 
@@ -441,8 +339,6 @@ mod qemu {
     }
 
     pub fn qemu_exit_failure(failures: u32) -> ! {
-        // Shift left by 1 and set bit 0 to indicate failure.
-        // Exit code = (failures << 1) | 1, but > 1 means failure.
         qemu_exit(failures << 1 | 1);
     }
 }

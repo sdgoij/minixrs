@@ -4445,7 +4445,7 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 | Milestone | Description | Target Phase | Status |
 |-----------|-------------|-------------|--------|
 | M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
-| M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ❌ |
+| M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | 🟡 code + QEMU integration test, needs real QEMU run |
 
 ### M1b Tasks — First Userspace Process
 
