@@ -2500,10 +2500,27 @@ Created 13 files in `crates/servers/src/vfs/`:
   - `glo.rs` — Added lookup request/response fields
   246 tests pass (fs crate), clippy clean
 
-- [ ] **10.11 — Wire ext2 buffer cache operations** (`crates/fs/src/ext2/`)
+- [x] **10.11 — Wire ext2 buffer cache operations** (`crates/fs/src/ext2/`)
   **Depends on:** libminixfs block cache (Phase 9.7), VFS dispatch (Phase 10.3)
-  All 36 TODO items in ext2 across: balloc, ialloc, inode, link, main, misc,
-  mount, open, path, protect, read, stadir, super_, time, write modules.
+  All 16 ext2 modules wired with libminixfs block cache (246 fs tests pass):
+  - `mount.rs` — fs_readsuper (reads superblock via lmfs_get_block, validates
+    EXT2_SUPER_MAGIC), fs_unmount (lmfs_invalidate), fs_mountpoint
+  - `inode.rs` — rw_inode (read/write ext2 inodes via lmfs_get_block + icopy)
+  - `balloc.rs` — alloc_block_bit/free_block (bitmap I/O via lmfs_get_block)
+  - `ialloc.rs` — alloc_inode_bit/free_inode_bit (inode bitmap I/O)
+  - `super_.rs` — read_super (loads group descriptor table from disk)
+  - `read.rs` — fs_readwrite (full R/W loop with rw_chunk), read_map (indirect/
+    double/triple indirect block traversal), rd_indir, read_ahead, rahead
+  - `write.rs` — new_block (block allocation + zeroing), clear_zone
+  - `link.rs` — fs_link/unlink/rdlink/rename/ftrunc (dir entry ops)
+  - `open.rs` — fs_create/mkdir/mknod/slink (inode creation + new_node)
+  - `path.rs` — fs_lookup, search_dir (full dir entry LOOK_UP/ENTER/DELETE/
+    IS_EMPTY via block scanning), advance
+  - `protect.rs` — fs_chmod/chown/getdents
+  - `stadir.rs` — fs_stat/statvfs
+  - `misc.rs` — fs_sync (lmfs_flushall), fs_flush, fs_bpeek
+  - `utility.rs` — b_data/b_ind helpers for buffer data access
+  - `glo.rs` — read-ahead global state
 
 - [ ] **10.12 — Wire ISO 9660 buffer cache** (`crates/fs/src/iso9660/`)
   **Depends on:** libminixfs block cache (Phase 9.7)

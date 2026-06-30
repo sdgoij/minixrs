@@ -3,8 +3,12 @@
 use crate::ext2::consts::*;
 use crate::ext2::glo;
 use crate::ext2::super_::*;
+use crate::ext2::types::BitchunkT;
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::constants::FULL_DATA_BLOCK;
+use libs::libminixfs::types::Buf;
 
 /// Discard preallocated blocks for an inode (or all inodes if rip is None).
 pub fn discard_preallocated_blocks(rip: Option<&mut Inode>) {
@@ -104,22 +108,92 @@ pub fn alloc_block(rip: &mut Inode, block: u32) -> u32 {
     b
 }
 
+/// Allocate a block bit from the block bitmap.
 fn alloc_block_bit(rip: &mut Inode, goal: u32) -> u32 {
     let sp = match rip.i_sp.as_mut() {
         Some(sp) => *sp as *mut SuperBlock,
         None => return NO_BLOCK,
     };
 
-    // TODO: Implement actual block bitmap allocation via buffer cache
-    // In C balloc.c, `goal` seeds the bitmap search position:
-    //   1. Compute block group from goal via group = (goal - s_first_data_block) / s_blocks_per_group
-    //   2. Load the group's block bitmap via get_block
-    //   3. Search forward from bit = (goal - s_first_data_block) % s_blocks_per_group
-    //   4. Fall back to linear search across all groups if not found in goal group
-    //   5. Update sp.s_bsearch on success, set bitmap bit, mark buffer dirty
-    //   6. Update s_free_blocks_count and group's free_blocks_count
-    // When implementing, DO NOT use _goal prefix — goal MUST be used for search.
-    let _ = (sp, goal);
+    unsafe {
+        let sp = &mut *sp;
+
+        let mut goal = goal;
+        if goal >= sp.s_blocks_count || (goal < sp.s_first_data_block && goal != 0) {
+            goal = sp.s_bsearch;
+        }
+
+        let mut update_bsearch = false;
+        if goal <= sp.s_bsearch {
+            goal = sp.s_bsearch;
+            update_bsearch = true;
+        }
+
+        // Figure out where to start the bit search.
+        let mut word =
+            ((goal - sp.s_first_data_block) % sp.s_blocks_per_group) / FS_BITCHUNK_BITS as u32;
+        let mut group = (goal - sp.s_first_data_block) / sp.s_blocks_per_group;
+
+        for _ in 0..=sp.s_groups_count {
+            if group >= sp.s_groups_count {
+                group = 0;
+            }
+
+            let gd = get_group_desc(sp, group);
+            if gd.is_null() {
+                word = 0;
+                group += 1;
+                continue;
+            }
+
+            if (*gd).free_blocks_count == 0 {
+                word = 0;
+                group += 1;
+                continue;
+            }
+
+            let bp = lmfs_get_block((*sp).s_dev, (*gd).block_bitmap as u64);
+            if bp.is_null() {
+                word = 0;
+                group += 1;
+                continue;
+            }
+
+            // Convert data_ptr to bitmap slice
+            let block_size = sp.s_block_size as usize;
+            let bitmap_ptr = (*bp).data_ptr as *mut BitchunkT;
+            let bitmap_len = block_size / core::mem::size_of::<BitchunkT>();
+            let bitmap = core::slice::from_raw_parts_mut(bitmap_ptr, bitmap_len);
+
+            let bit = setbit(bitmap, sp.s_blocks_per_group, word);
+            if bit == -1 {
+                lmfs_put_block(bp, FULL_DATA_BLOCK);
+                if word == 0 {
+                    group += 1;
+                    continue;
+                } else {
+                    word = 0;
+                    group += 1;
+                    continue;
+                }
+            }
+
+            let block = sp.s_first_data_block + group * sp.s_blocks_per_group + bit as u32;
+
+            lmfs_markdirty(bp);
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+            (*gd).free_blocks_count -= 1;
+            sp.s_free_blocks_count -= 1;
+
+            if update_bsearch && block != NO_BLOCK {
+                sp.s_bsearch = block;
+            }
+
+            return block;
+        }
+    }
+
     NO_BLOCK
 }
 
@@ -141,9 +215,30 @@ pub fn free_block(sp: &mut SuperBlock, bit_returned: u32) {
         return;
     }
 
-    let _gd_ref = unsafe { &mut *gd };
-    let _bit_val = bit;
-    // TODO: Implement actual bitmap free via buffer cache
+    let bp = unsafe { lmfs_get_block(sp.s_dev, (*gd).block_bitmap as u64) };
+    if bp.is_null() {
+        return;
+    }
+
+    unsafe {
+        // Convert data_ptr to bitmap slice
+        let block_size = sp.s_block_size as usize;
+        let bitmap_ptr = (*bp).data_ptr as *mut BitchunkT;
+        let bitmap_len = block_size / core::mem::size_of::<BitchunkT>();
+        let bitmap = core::slice::from_raw_parts_mut(bitmap_ptr, bitmap_len);
+
+        if unsetbit(bitmap, bit) != 0 {
+            // Bit was already free; just put the block back
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+            return;
+        }
+
+        lmfs_markdirty(bp);
+        lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+        (*gd).free_blocks_count += 1;
+        sp.s_free_blocks_count += 1;
+    }
 
     if bit_returned < sp.s_bsearch {
         sp.s_bsearch = bit_returned;

@@ -111,6 +111,10 @@ pub struct SuperBlock {
     pub s_igsearch: i32,
     pub s_is_root: u8,
     pub s_dirs_counter: u32,
+    /// Cached group descriptor table buffer pointers (as *mut Buf cast to usize).
+    pub s_gdt_bufs: [usize; 4],
+    /// Cached group descriptor table data pointers (as *mut u8 cast to usize).
+    pub s_gdt_data: [usize; 4],
 }
 
 impl Default for SuperBlock {
@@ -180,6 +184,8 @@ impl Default for SuperBlock {
             s_igsearch: 0,
             s_is_root: 0,
             s_dirs_counter: 0,
+            s_gdt_bufs: [0; 4],
+            s_gdt_data: [0; 4],
         }
     }
 }

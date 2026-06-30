@@ -7,6 +7,9 @@ use crate::ext2::glo::Ext2Global;
 use crate::ext2::super_::*;
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::constants::INODE_BLOCK;
+use libs::libminixfs::types::Buf;
 
 /// Initialize inode cache.
 pub unsafe fn init_inode_cache() {
@@ -210,20 +213,29 @@ pub unsafe fn rw_inode(rip: *mut Inode, rw_flag: i32) {
     let inode_size = ext2_inode_size(&*sp);
     let offset = (((*rip).i_num - 1) % (*sp).s_inodes_per_group) * inode_size;
     let b = (*gd).inode_table + (offset >> (*sp).s_blocksize_bits as u32);
-    let _bp = b; // TODO: get_block
 
-    let _offset_in_block = offset & ((*sp).s_block_size as u32 - 1);
+    // Load the block containing this inode
+    let bp = lmfs_get_block((*rip).i_dev, b as u64);
+    if bp.is_null() {
+        return;
+    }
+
+    let offset_in_block = offset & ((*sp).s_block_size as u32 - 1);
 
     if rw_flag == WRITING {
         if (*rip).i_update != 0 {
             update_times(rip);
         }
+        if (*sp).s_rd_only == 0 {
+            lmfs_markdirty(bp);
+        }
     }
 
-    // TODO: icopy
-    icopy(rip, rw_flag);
+    // Copy between in-memory and on-disk inode via pointer into buffer
+    let dip = ((*bp).data_ptr as usize + offset_in_block as usize) as *mut DInode;
+    icopy(rip, dip, rw_flag);
 
-    // TODO: put_block
+    lmfs_put_block(bp, INODE_BLOCK);
     (*rip).i_dirt = IN_CLEAN;
 }
 
@@ -339,17 +351,56 @@ unsafe fn get_free_inode() -> *mut Inode {
     }
 }
 
-unsafe fn icopy(rip: *mut Inode, direction: i32) {
+/// Copy inode data between in-memory Inode and on-disk DInode.
+unsafe fn icopy(rip: *mut Inode, dip: *mut DInode, direction: i32) {
     let norm = 1; // little-endian CPU
     if direction == READING {
-        // Reading from disk: would copy from DInode
-        // For now just mark clean
+        // Copy from on-disk DInode to in-memory Inode
+        (*rip).i_mode = conv2(norm, (*dip).i_mode as u32) as u16;
+        (*rip).i_uid = conv2(norm, (*dip).i_uid as u32) as u16;
+        (*rip).i_size = conv4(norm, (*dip).i_size);
+        (*rip).i_atime = conv4(norm, (*dip).i_atime);
+        (*rip).i_ctime = conv4(norm, (*dip).i_ctime);
+        (*rip).i_mtime = conv4(norm, (*dip).i_mtime);
+        (*rip).i_dtime = conv4(norm, (*dip).i_dtime);
+        (*rip).i_gid = conv2(norm, (*dip).i_gid as u32) as u16;
+        (*rip).i_links_count = conv2(norm, (*dip).i_links_count as u32) as u16;
+        (*rip).i_blocks = conv4(norm, (*dip).i_blocks);
+        (*rip).i_flags = conv4(norm, (*dip).i_flags);
+        (*rip).osd1 = (*dip).osd1;
+        for i in 0..EXT2_N_BLOCKS {
+            (*rip).i_block[i] = conv4(norm, (*dip).i_block[i]);
+        }
+        (*rip).i_generation = conv4(norm, (*dip).i_generation);
+        (*rip).i_file_acl = conv4(norm, (*dip).i_file_acl);
+        (*rip).i_dir_acl = conv4(norm, (*dip).i_dir_acl);
+        (*rip).i_faddr = conv4(norm, (*dip).i_faddr);
+        (*rip).osd2 = (*dip).osd2;
         (*rip).i_dirt = IN_CLEAN;
     } else {
-        // Writing to disk: would copy to DInode
+        // Copy from in-memory Inode to on-disk DInode
+        (*dip).i_mode = conv2(norm, (*rip).i_mode as u32) as u16;
+        (*dip).i_uid = conv2(norm, (*rip).i_uid as u32) as u16;
+        (*dip).i_size = conv4(norm, (*rip).i_size);
+        (*dip).i_atime = conv4(norm, (*rip).i_atime);
+        (*dip).i_ctime = conv4(norm, (*rip).i_ctime);
+        (*dip).i_mtime = conv4(norm, (*rip).i_mtime);
+        (*dip).i_dtime = conv4(norm, (*rip).i_dtime);
+        (*dip).i_gid = conv2(norm, (*rip).i_gid as u32) as u16;
+        (*dip).i_links_count = conv2(norm, (*rip).i_links_count as u32) as u16;
+        (*dip).i_blocks = conv4(norm, (*rip).i_blocks);
+        (*dip).i_flags = conv4(norm, (*rip).i_flags);
+        (*dip).osd1 = (*rip).osd1;
+        for i in 0..EXT2_N_BLOCKS {
+            (*dip).i_block[i] = conv4(norm, (*rip).i_block[i]);
+        }
+        (*dip).i_generation = conv4(norm, (*rip).i_generation);
+        (*dip).i_file_acl = conv4(norm, (*rip).i_file_acl);
+        (*dip).i_dir_acl = conv4(norm, (*rip).i_dir_acl);
+        (*dip).i_faddr = conv4(norm, (*rip).i_faddr);
+        (*dip).osd2 = (*rip).osd2;
         (*rip).i_dirt = IN_CLEAN;
     }
-    let _ = norm;
 }
 
 /// Truncate inode (stub).

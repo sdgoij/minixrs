@@ -91,6 +91,10 @@ pub(crate) static OPT: OptCell = OptCell::new(Opt {
     use_prealloc: FALSE,
 });
 
+/// Read-ahead globals.
+pub(crate) static mut RDAHED_INODE: *mut crate::ext2::types::Inode = core::ptr::null_mut();
+pub(crate) static mut RDAHEDPOS: u64 = 0;
+
 /// Group descriptors dirty flag.
 pub(crate) static GROUP_DESCRIPTORS_DIRTY: AtomicI32 = AtomicI32::new(0);
 

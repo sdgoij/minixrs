@@ -1,12 +1,15 @@
 //! Miscellaneous operations — adapted from `minix/fs/ext2/misc.c`
 
+use core::sync::atomic::Ordering;
+
+use libs::libminixfs::cache::{lmfs_flushall, lmfs_get_block_ino, lmfs_invalidate, lmfs_put_block};
+use libs::libminixfs::constants::{FULL_DATA_BLOCK, NORMAL};
+
 use crate::ext2::consts::*;
 use crate::ext2::glo;
 use crate::ext2::glo::Ext2Global;
 use crate::ext2::inode::*;
 use crate::ext2::super_::*;
-use core::sync::atomic::Ordering;
-
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
 
@@ -25,7 +28,7 @@ pub unsafe fn fs_sync() -> i32 {
         }
     }
 
-    // TODO: lmfs_flushall();
+    lmfs_flushall();
 
     if (*sp).s_dev != NO_DEV {
         (*sp).s_wtime = clock_time() as u32;
@@ -36,14 +39,17 @@ pub unsafe fn fs_sync() -> i32 {
 }
 
 /// fs_flush — flush blocks of all devices.
-///
-/// TODO: parse VFS message for target device, then call
-/// lmfs_flushall() / lmfs_invalidate(dev) for non-self devices.
-/// Currently a no-op (IPC message parsing not wired).
 pub unsafe fn fs_flush() -> i32 {
-    // TODO: read target device from fs_m_in IPC message
-    // If target == fs_dev, return EBUSY (can't flush ourselves).
-    // Otherwise: lmfs_flushall(); lmfs_invalidate(dev);
+    let ext2 = glo::ext2_ptr();
+    let dev = (*ext2).fs_m_in_type as u32; // FIXME: proper message parsing
+
+    if dev == (*ext2).fs_dev {
+        return EBUSY;
+    }
+
+    lmfs_flushall();
+    lmfs_invalidate(dev);
+
     OK
 }
 
@@ -53,8 +59,28 @@ pub unsafe fn fs_new_driver() -> i32 {
     OK
 }
 
-/// fs_bpeek — block peek.
-pub fn fs_bpeek() -> i32 {
-    // TODO: lmfs_do_bpeek
-    EINVAL
+/// fs_bpeek — block peek (read without consuming).
+pub unsafe fn fs_bpeek() -> i32 {
+    let ext2 = glo::ext2_ptr();
+    // FIXME: parse (dev, start, len) from fs_m_in message
+    let dev = (*ext2).fs_dev;
+    let start: u64 = 0;
+    let len: u64 = 0;
+
+    if len == 0 {
+        return EINVAL;
+    }
+
+    let block_size = get_block_size(dev) as u64;
+    let start_block = start / block_size;
+    let num_blocks = (len + block_size - 1) / block_size;
+
+    for b in start_block..start_block + num_blocks {
+        let bp = lmfs_get_block_ino(dev, b, NORMAL, libs::libminixfs::constants::VMC_NO_INODE, 0);
+        if !bp.is_null() {
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+        }
+    }
+
+    OK
 }

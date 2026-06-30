@@ -1,7 +1,19 @@
 //! Ext2 utility functions — adapted from `minix/fs/ext2/utility.c`
 
+use libs::libminixfs::types::Buf;
+
 use crate::ext2::consts::*;
 use crate::ext2::types::{BitchunkT, FS_BITCHUNK_BITS, fs_bitmap_chunks};
+
+/// Return the data pointer from a buffer (equivalent to C `b_data(bp)`).
+pub unsafe fn b_data(bp: *mut Buf) -> *mut u8 {
+    (*bp).data_ptr
+}
+
+/// Return the indirect-block pointer from a buffer (equivalent to C `b_ind(bp)`).
+pub unsafe fn b_ind(bp: *mut Buf) -> *mut u32 {
+    (*bp).data_ptr as *mut u32
+}
 
 /// Return current time in seconds since epoch.
 pub fn clock_time() -> i64 {

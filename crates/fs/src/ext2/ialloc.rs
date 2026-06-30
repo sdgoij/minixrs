@@ -6,8 +6,12 @@ use crate::ext2::glo;
 use crate::ext2::glo::Ext2Global;
 use crate::ext2::inode::*;
 use crate::ext2::super_::*;
+use crate::ext2::types::BitchunkT;
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::constants::FULL_DATA_BLOCK;
+use libs::libminixfs::types::Buf;
 
 /// Allocate a free inode on parent's device.
 pub unsafe fn alloc_inode(parent: *mut Inode, bits: u16) -> *mut Inode {
@@ -70,6 +74,7 @@ pub unsafe fn free_inode(rip: *mut Inode) {
     (*rip).i_mode = I_NOT_ALLOC;
 }
 
+/// Allocate an inode bitmap bit.
 fn alloc_inode_bit(sp: &mut SuperBlock, parent: *mut Inode, is_dir: bool) -> u32 {
     if sp.s_rd_only != 0 {
         return NO_BIT;
@@ -102,13 +107,52 @@ fn alloc_inode_bit(sp: &mut SuperBlock, parent: *mut Inode, is_dir: bool) -> u32
         return NO_BIT;
     }
 
-    // TODO: read bitmap block, call setbit, mark dirty, update counts
-    // For now, return NO_BIT
-    let _ = gd;
-    NO_BIT
+    unsafe {
+        if (*gd).free_inodes_count == 0 {
+            return NO_BIT;
+        }
+
+        let bp = lmfs_get_block(sp.s_dev, (*gd).inode_bitmap as u64);
+        if bp.is_null() {
+            return NO_BIT;
+        }
+
+        let block_size = sp.s_block_size as usize;
+        let bitmap_ptr = (*bp).data_ptr as *mut BitchunkT;
+        let bitmap_len = block_size / core::mem::size_of::<BitchunkT>();
+        let bitmap = core::slice::from_raw_parts_mut(bitmap_ptr, bitmap_len);
+
+        let bit = setbit(bitmap, sp.s_inodes_per_group, 0);
+        if bit == -1 {
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+            return NO_BIT;
+        }
+
+        let inumber = (group as u32) * sp.s_inodes_per_group + (bit as u32) + 1;
+
+        // Extra check: inumber should be valid
+        if inumber > sp.s_inodes_count {
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+            return NO_BIT;
+        }
+
+        lmfs_markdirty(bp);
+        lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+        (*gd).free_inodes_count -= 1;
+        sp.s_free_inodes_count -= 1;
+
+        if is_dir {
+            (*gd).used_dirs_count += 1;
+            sp.s_dirs_counter += 1;
+        }
+
+        return inumber;
+    }
 }
 
-fn free_inode_bit(sp: &mut SuperBlock, bit_returned: u32, _is_dir: bool) {
+/// Free an inode bitmap bit.
+fn free_inode_bit(sp: &mut SuperBlock, bit_returned: u32, is_dir: bool) {
     if sp.s_rd_only != 0 {
         return;
     }
@@ -118,10 +162,44 @@ fn free_inode_bit(sp: &mut SuperBlock, bit_returned: u32, _is_dir: bool) {
     }
 
     let group = (bit_returned - 1) / sp.s_inodes_per_group;
-    let _bit = (bit_returned - 1) % sp.s_inodes_per_group;
+    let bit = (bit_returned - 1) % sp.s_inodes_per_group;
 
-    let _gd = get_group_desc(sp, group);
-    // TODO: read bitmap, unset bit, update counts
+    let gd = get_group_desc(sp, group);
+    if gd.is_null() {
+        return;
+    }
+
+    let bp = unsafe { lmfs_get_block(sp.s_dev, (*gd).inode_bitmap as u64) };
+    if bp.is_null() {
+        return;
+    }
+
+    unsafe {
+        let block_size = sp.s_block_size as usize;
+        let bitmap_ptr = (*bp).data_ptr as *mut BitchunkT;
+        let bitmap_len = block_size / core::mem::size_of::<BitchunkT>();
+        let bitmap = core::slice::from_raw_parts_mut(bitmap_ptr, bitmap_len);
+
+        if unsetbit(bitmap, bit) != 0 {
+            lmfs_put_block(bp, FULL_DATA_BLOCK);
+            return;
+        }
+
+        lmfs_markdirty(bp);
+        lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+        (*gd).free_inodes_count += 1;
+        sp.s_free_inodes_count += 1;
+
+        if is_dir {
+            (*gd).used_dirs_count -= 1;
+            sp.s_dirs_counter -= 1;
+        }
+    }
+
+    if group < sp.s_igsearch as u32 {
+        sp.s_igsearch = group as i32;
+    }
 }
 
 // ── Group finder functions ──
@@ -133,6 +211,7 @@ fn find_group_any(sp: &SuperBlock) -> i32 {
     while (group as u32) < ngroups {
         let gd = get_group_desc(sp, group as u32);
         if gd.is_null() {
+            group += 1;
             continue;
         }
         unsafe {
@@ -142,6 +221,7 @@ fn find_group_any(sp: &SuperBlock) -> i32 {
                 return group;
             }
         }
+        group += 1;
     }
     -1
 }
@@ -239,12 +319,13 @@ fn find_group_orlov(sp: &SuperBlock, parent: *mut Inode) -> i32 {
             let mut fallback_group = -1i32;
 
             let mut group = 0i32;
-            for i in 0..sp.s_groups_count {
+            for _ in 0..sp.s_groups_count {
                 if group as u32 >= sp.s_groups_count {
                     group = 0;
                 }
                 let gd = get_group_desc(sp, group as u32);
                 if gd.is_null() {
+                    group += 1;
                     continue;
                 }
                 if (*gd).free_inodes_count == 0 {
@@ -305,7 +386,7 @@ fn find_group_orlov(sp: &SuperBlock, parent: *mut Inode) -> i32 {
     }
 }
 
-fn wipe_inode(rip: *mut Inode) {
+unsafe fn wipe_inode(rip: *mut Inode) {
     unsafe {
         (*rip).i_size = 0;
         (*rip).i_update = ATIME | CTIME | MTIME;
