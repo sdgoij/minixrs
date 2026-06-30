@@ -12,6 +12,7 @@
 //! are stubbed with concrete task references.
 
 #![allow(dead_code)]
+//#![allow(unsafe_op_in_unsafe_fn)]
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
@@ -436,8 +437,13 @@ unsafe fn sem_find_id(id: i32) -> Option<*mut SemStruct> {
 ///
 /// `who` must be a valid endpoint.
 unsafe fn send_message_to_process(who: i32, ret: i32) {
-    // TODO: Phase 13.2 — actual IPC send/receive via kernel.
-    // Requires ipc_sendnb() or kernel IPC call infrastructure.
+    #[cfg(target_os = "none")]
+    {
+        let mut msg = [0u8; MESSAGE_SIZE];
+        msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, ret);
+        let _ = sendnb(who, &mut msg);
+    }
+    #[cfg(not(target_os = "none"))]
     let _ = (who, ret);
 }
 
@@ -1184,43 +1190,151 @@ pub fn is_shm_nil() -> bool {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Server main loop (stub)
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// IPC server main loop.
+/// Userspace kernel call — execute `syscall` to enter the kernel.
 ///
-/// Receives messages from clients and dispatches IPC requests.
-/// Currently a stub — will be wired when the IPC + SEF server framework
-/// is running (Phase 12 — SEF).
-pub fn ipc_server_main() {
-    // TODO: Phase 12 — SEF init, then:
-    //   loop {
-    //       sef_receive(ANY, &msg);
-    //       who_e = msg.m_source;
-    //       call_type = msg.m_type;
-    //
-    //       if is_notify(call_type) {
-    //           match who_e {
-    //               VM_PROC_NR => sem_process_vm_notify(),
-    //               _ => {} // ignore
-    //           }
-    //           continue;
-    //       }
-    //
-    //       let ipc_number = call_type - (IPC_BASE + 1);
-    //       if ipc_number in 0..7 {
-    //           result = ipc_calls[ipc_number](&mut msg);
-    //           if !needs_reply[ipc_number] {
-    //               msg.m_type = result;
-    //               ipc_sendnb(who_e, &msg);
-    //           }
-    //       }
-    //       update_refcount_and_destroy();
-    //   }
+/// Sets RAX = `KERNEL_CALL + call_nr`, RDI = `dest`, RSI = `msg_ptr`
+/// and executes the `syscall` instruction. The kernel dispatches to
+/// the appropriate handler via `kernel_call_dispatch`.
+///
+/// # Safety
+///
+/// `msg_ptr` must point to a valid 64-byte message buffer.
+/// The kernel syscall entry point must be configured in LSTAR MSR.
+pub unsafe fn syscall_kernel(dest: i32, call_nr: i32, msg_ptr: *mut u8) -> i32 {
+    let rax: u64 = (arch_common::com::KERNEL_CALL + call_nr as u32) as u64;
+    let rdi: u64 = dest as u64;
+    let rsi: u64 = msg_ptr as u64;
+    let result: u64;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inout("rax") rax => result,
+            in("rdi") rdi,
+            in("rsi") rsi,
+            // RCX and R11 are clobbered by syscall
+            out("rcx") _,
+            out("r11") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let result = 0u64;
+    result as i32
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═════════════════════════════════════════════════════════════════════════════
+/// Send a message and receive a reply (SENDREC).
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+pub unsafe fn sendrec(dest: i32, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { syscall_kernel(dest, 48, msg.as_mut_ptr()) }
+}
+
+/// Send a message without waiting for a reply (SENDNB).
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+pub unsafe fn sendnb(dest: i32, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { syscall_kernel(dest, 47, msg.as_mut_ptr()) }
+}
+
+/// Receive a message (RECEIVE).
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+pub unsafe fn receive(src: i32, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { syscall_kernel(src, 46, msg.as_mut_ptr()) }
+}
+
+/// Send a notification (NOTIFY).
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+pub unsafe fn notify(dest: i32, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe { syscall_kernel(dest, 49, msg.as_mut_ptr()) }
+}
+
+/// IPC_BASE from com.h (0xD00).
+const IPC_BASE: i32 = 0xD00;
+
+/// NOTIFY_MESSAGE from com.h (0x1000).
+const NOTIFY_MESSAGE: i32 = 0x1000;
+
+/// IPC call numbers (from com.h).
+const IPC_SHMGET: i32 = IPC_BASE + 1;
+const IPC_SHMAT: i32 = IPC_BASE + 2;
+const IPC_SHMDT: i32 = IPC_BASE + 3;
+const IPC_SHMCTL: i32 = IPC_BASE + 4;
+const IPC_SEMGET: i32 = IPC_BASE + 5;
+const IPC_SEMCTL: i32 = IPC_BASE + 6;
+const IPC_SEMOP: i32 = IPC_BASE + 7;
+
+/// Type of an IPC handler function.
+type IpcHandler = unsafe fn(&mut [u8; MESSAGE_SIZE]) -> i32;
+
+/// Dispatch table for IPC calls (indexed by call_nr - (IPC_BASE + 1)).
+const IPC_CALLS: [Option<IpcHandler>; 7] = [
+    Some(do_shmget),
+    Some(do_shmat),
+    Some(do_shmdt),
+    Some(do_shmctl),
+    Some(do_semget),
+    Some(do_semctl),
+    Some(do_semop),
+];
+
+/// Whether each IPC call needs a reply sent.
+const NEEDS_REPLY: [bool; 7] = [true, true, true, true, true, true, true];
+
+/// IPC server main loop.
+#[cfg(target_os = "none")]
+pub fn ipc_server_main() {
+    loop {
+        let mut msg = [0u8; MESSAGE_SIZE];
+        // Set call type to RECEIVE (kernel will fill in m_source and m_type)
+        msg[0..4].copy_from_slice(&(arch_common::com::KERNEL_CALL as i32 + 46).to_ne_bytes());
+
+        let r = unsafe { receive(!0i32, &mut msg) };
+        if r != 0 {
+            continue;
+        }
+
+        let who_e = msg_i32(&msg, MSG_OFF_SOURCE);
+        let call_type = msg_i32(&msg, MSG_OFF_CALLTYPE);
+
+        // Check if this is a notification.
+        let is_notify = (call_type as u32).wrapping_sub(NOTIFY_MESSAGE as u32) < 0x100;
+        if is_notify {
+            if who_e == 8 {
+                // VM_PROC_NR
+                unsafe { sem_process_vm_notify() };
+            }
+            continue;
+        }
+
+        let ipc_nr = (call_type - (IPC_BASE + 1)) as usize;
+        if ipc_nr < IPC_CALLS.len() {
+            if let Some(handler) = IPC_CALLS[ipc_nr] {
+                let result = unsafe { handler(&mut msg) };
+                if NEEDS_REPLY[ipc_nr] {
+                    msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, result);
+                    let _ = unsafe { sendrec(who_e, &mut msg) };
+                }
+            }
+        }
+        unsafe { update_refcount_and_destroy_stub() };
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn ipc_server_main() {
+    // No-op on host (no IPC infrastructure)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1267,8 +1381,6 @@ mod tests {
         }
         msg
     }
-
-    // ── Semaphore tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_semget_create_and_find() {
@@ -1618,8 +1730,6 @@ mod tests {
         assert!(unsafe { check_perm(&perm, 100, 0o600) });
     }
 
-    // ── Shared memory tests ────────────────────────────────────────────
-
     #[test]
     fn test_shmget_create_and_find() {
         let _lock = TestLockGuard::acquire();
@@ -1805,8 +1915,6 @@ mod tests {
         assert_eq!(r, OK);
     }
 
-    // ── Identifier tests ───────────────────────────────────────────────
-
     #[test]
     fn test_identifier_increments() {
         let _lock = TestLockGuard::acquire();
@@ -1822,8 +1930,6 @@ mod tests {
         let _ = unsafe { do_semget(&mut msg) };
         assert_eq!(unsafe { msg_i32(&msg, MSG_OFF_D04) }, 0x1235);
     }
-
-    // ── Edge case tests ────────────────────────────────────────────────
 
     #[test]
     fn test_semget_negative_nsems() {

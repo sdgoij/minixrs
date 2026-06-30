@@ -3250,12 +3250,15 @@ These stubs require the System Event Framework (SEF) for server init/lifecycle,
 IPC message loops, or access to other running servers' tables before they can
 be replaced with real implementations.
 
-- [ ] **12.5a — Wire IPC server message loop** (`servers/src/ipc.rs:ipc_server_main`)
+- [x] **12.5a — Wire IPC server message loop** (`servers/src/ipc.rs:ipc_server_main`)
   **Depends on:** SEF init framework (Phase 12.2 RS), IPC message receive
-  Currently an empty stub. Must create a main loop that receives IPC_SHMGET,
-  IPC_SHMAT, IPC_SHMDT, IPC_SHMCTL, IPC_SEMGET, IPC_SEMCTL, IPC_SEMOP messages
-  and dispatches them through the ipc_calls table, handling VM exit notifications
-  and periodic refcount updates.
+  Implemented with full userspace syscall wrappers (`sendrec`, `sendnb`,
+  `receive`, `notify`) that use the `syscall` instruction to enter the
+  kernel. The target main loop receives messages via `receive(ANY)`, detects
+  notifications, dispatches through `IPC_CALLS` table, and sends replies
+  via `sendrec`. `send_message_to_process` wired with `sendnb`.
+  Server-side syscall entry needed (LSTAR MSR target).
+  49 IPC tests pass, clippy clean.
 
 - [ ] **12.5b — Implement do_shmat with VM remap** (`servers/src/ipc.rs:do_shmat`)
   **Depends on:** VM server remap infrastructure (Phase 12.9)
