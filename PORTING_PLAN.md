@@ -3463,7 +3463,7 @@ be replaced with real implementations.
   - Slot management: card detect interrupt handling, card insertion/removal
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/mmc/mmcblk.c`
 
-- [ ] **12.18 — Wire /dev/mem and /dev/kmem** (`crates/drivers/src/storage/memory.rs`)
+- [x] **12.18 — Wire /dev/mem and /dev/kmem** (`crates/drivers/src/storage/memory.rs`)
   **Depends on:** `vm_map_phys` (Phase 6), `sys_safecopyto`/`sys_safecopyfrom` (Phase 4),
   kernel `kinfo` retrieval, `MAP_FAILED` / `PAGE_SIZE` constants from arch
   Replace `todo!()` in:

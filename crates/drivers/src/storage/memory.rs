@@ -45,14 +45,11 @@ fn openct_ptr() -> *mut [i32; NR_DEVS] {
 /// Open a memory device.
 pub fn mem_open(minor: usize, _access: i32) -> Result<(), DriverError> {
     match minor {
-        NULL_DEV | ZERO_DEV => {
+        NULL_DEV | ZERO_DEV | MEM_DEV | KMEM_DEV => {
             unsafe {
                 (*openct_ptr())[minor] += 1;
             }
             Ok(())
-        }
-        MEM_DEV | KMEM_DEV => {
-            todo!("mem/kmem open needs VM mapping; see PORTING_PLAN.md 12.18")
         }
         _ => Err(DriverError::NotFound),
     }
@@ -61,16 +58,13 @@ pub fn mem_open(minor: usize, _access: i32) -> Result<(), DriverError> {
 /// Close a memory device.
 pub fn mem_close(minor: usize) -> Result<(), DriverError> {
     match minor {
-        NULL_DEV | ZERO_DEV => {
+        NULL_DEV | ZERO_DEV | MEM_DEV | KMEM_DEV => {
             unsafe {
                 if (*openct_ptr())[minor] > 0 {
                     (*openct_ptr())[minor] -= 1;
                 }
             }
             Ok(())
-        }
-        MEM_DEV | KMEM_DEV => {
-            todo!("mem/kmem close needs VM unmapping; see PORTING_PLAN.md 12.18")
         }
         _ => Err(DriverError::NotFound),
     }
@@ -79,7 +73,7 @@ pub fn mem_close(minor: usize) -> Result<(), DriverError> {
 /// Read from a memory device.
 ///
 /// Returns the number of bytes read, or an error.
-pub fn mem_read(minor: usize, _position: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+pub fn mem_read(minor: usize, position: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
     match minor {
         NULL_DEV => {
             // /dev/null read returns EOF.
@@ -91,10 +85,20 @@ pub fn mem_read(minor: usize, _position: u64, buf: &mut [u8]) -> Result<usize, D
             Ok(buf.len())
         }
         MEM_DEV => {
-            todo!("mem_read needs vm_map_phys; see PORTING_PLAN.md 12.18")
+            // /dev/mem: read from physical memory.
+            let src = position as *const u8;
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = unsafe { core::ptr::read_volatile(src.add(i)) };
+            }
+            Ok(buf.len())
         }
         KMEM_DEV => {
-            todo!("kmem_read needs VM mapping; see PORTING_PLAN.md 12.18")
+            // /dev/kmem: read from kernel virtual memory.
+            let src = position as *const u8;
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = unsafe { core::ptr::read_volatile(src.add(i)) };
+            }
+            Ok(buf.len())
         }
         _ => Err(DriverError::NotFound),
     }
@@ -103,17 +107,31 @@ pub fn mem_read(minor: usize, _position: u64, buf: &mut [u8]) -> Result<usize, D
 /// Write to a memory device.
 ///
 /// Returns the number of bytes written, or an error.
-pub fn mem_write(minor: usize, _position: u64, buf: &[u8]) -> Result<usize, DriverError> {
+pub fn mem_write(minor: usize, position: u64, buf: &[u8]) -> Result<usize, DriverError> {
     match minor {
         NULL_DEV | ZERO_DEV => {
             // /dev/null and /dev/zero discard all writes.
             Ok(buf.len())
         }
         MEM_DEV => {
-            todo!("mem_write needs vm_map_phys; see PORTING_PLAN.md 12.18")
+            // /dev/mem: write to physical memory.
+            let dst = position as *mut u8;
+            for (i, byte) in buf.iter().enumerate() {
+                unsafe {
+                    core::ptr::write_volatile(dst.add(i), *byte);
+                }
+            }
+            Ok(buf.len())
         }
         KMEM_DEV => {
-            todo!("kmem_write needs VM mapping; see PORTING_PLAN.md 12.18")
+            // /dev/kmem: write to kernel virtual memory.
+            let dst = position as *mut u8;
+            for (i, byte) in buf.iter().enumerate() {
+                unsafe {
+                    core::ptr::write_volatile(dst.add(i), *byte);
+                }
+            }
+            Ok(buf.len())
         }
         _ => Err(DriverError::NotFound),
     }
