@@ -40,16 +40,27 @@ pub struct InitInfo {
 /// # Safety
 /// Must be called after kernel::init() and before any user code runs.
 /// Single-threaded boot context.
-pub unsafe fn load_and_prepare_init() -> InitInfo {
+pub unsafe fn load_and_prepare_init() -> Option<InitInfo> {
     // Step 1: Find /sbin/init in the initramfs
-    let (init_data, _mode) =
-        find_initramfs_file("/sbin/init").expect("initramfs must contain /sbin/init");
+    let (init_data, _mode) = find_initramfs_file("/sbin/init")?;
 
     // Step 2: Validate and load the ELF binary
-    let ehdr = parse_elf_header(init_data).expect("invalid init ELF header");
+    let ehdr = match parse_elf_header(init_data) {
+        Ok(ehdr) => ehdr,
+        Err(_) => {
+            print!("  init: invalid ELF header\r\n");
+            return None;
+        }
+    };
     print!("  init: ELF64 entry=0x");
     print_hex(ehdr.e_entry);
-    let loaded = unsafe { load_elf(init_data).expect("failed to load init ELF") };
+    let loaded = match unsafe { load_elf(init_data) } {
+        Ok(l) => l,
+        Err(_) => {
+            print!("  init: ELF load failed\r\n");
+            return None;
+        }
+    };
 
     // Step 3: Allocate a user stack at a fixed address.
     // The identity map covers 0-1GB, but RAM is only 256MB (0x0-0x0FFFFFFF),
@@ -57,9 +68,12 @@ pub unsafe fn load_and_prepare_init() -> InitInfo {
     let user_stack_base: u64 = 0x0FE00000;
     let user_stack_size: usize = 65536;
     let stack_top = user_stack_base + user_stack_size as u64;
-    let user_rsp = unsafe {
-        setup_user_stack(stack_top, user_stack_size, &["/sbin/init"])
-            .expect("failed to set up user stack")
+    let user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, &["/sbin/init"]) } {
+        Ok(rsp) => rsp,
+        Err(_) => {
+            print!("  init: stack setup failed\r\n");
+            return None;
+        }
     };
 
     // Step 4: Set up the TrapFrame for sysretq ring-3 execution.
@@ -93,13 +107,13 @@ pub unsafe fn load_and_prepare_init() -> InitInfo {
     print_hex(user_rsp);
     print!("\n");
 
-    InitInfo {
+    Some(InitInfo {
         proc_ptr: rp,
         code_start,
         code_end,
         stack_start,
         stack_end,
-    }
+    })
 }
 
 /// Create a per-process page table for the init process.
@@ -169,7 +183,7 @@ pub unsafe fn boot_create_page_table() -> u64 {
         // Share kernel high mappings (PML4 entries 256-511)
         for i in 256..512 {
             let entry = core::ptr::read(boot_pml4.add(i));
-            core::ptr::write(pml4_page as *mut u64, entry);
+            core::ptr::write((pml4_page as *mut u64).add(i), entry);
         }
     }
 

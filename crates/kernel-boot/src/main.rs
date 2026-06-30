@@ -27,6 +27,13 @@ pub extern "C" fn _start() -> ! {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
+    // Enable SSE (required by compiler_builtins memset/memcpy which use
+    // SSE instructions like movdqa). CR4.OSFXSR = bit 9, OSXMMEXCPT = bit 10.
+    unsafe {
+        let cr4 = arch_x86_64::asm::read_cr4();
+        arch_x86_64::asm::write_cr4(cr4 | (1 << 9) | (1 << 10));
+    }
+
     // Initialize subsystems
     kernel::init();
 
@@ -35,13 +42,11 @@ pub extern "C" fn kmain() -> ! {
         kernel::syscall::init_basic_syscalls();
     }
 
-    // Register the physical memory allocator with the DMA buffer API.
     fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
         let alloc = arch_x86_64::alloc::global_allocator();
         if alloc.is_null() {
             return None;
         }
-        // SAFETY: allocator was initialized, single-threaded boot
         let phys = unsafe { (*alloc).alloc_contig(pages) }?;
         Some((phys as *mut u8, phys))
     }
@@ -50,28 +55,26 @@ pub extern "C" fn kmain() -> ! {
         if alloc.is_null() {
             return;
         }
-        // SAFETY: allocator was initialized, single-threaded boot
         unsafe { (*alloc).free_contig(virt as u64, pages) };
     }
-    // SAFETY: called once during boot, single-threaded
     unsafe {
         drivers::storage::dma::register_allocator(dma_alloc, dma_free);
     }
 
+    // Initialize serial FIRST before any serial_write calls.
+    init_serial();
+
     // Initialize the physical memory allocator.
-    // The kernel binary + BSS is loaded at 0x200000 and fits within the
-    // first 3 MB.  RAM is 256 MB (0x0 - 0x0FFFFFFF) per QEMU's -m 256M.
-    // We give the allocator all RAM from 0x300000 to 0x0FFFFFFF.
-    let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-    // Free memory from 3 MB to 256 MB (minus 1 page for the user stack top)
-    mmap.add(0x0030_0000, 0x1000_0000);
-    // Reserve the user stack region (0x0FE00000 - 0x0FF00000) so the
-    // allocator doesn't hand it out.
-    mmap.cut(0x0FE0_0000, 0x0FF0_0000);
-    arch_x86_64::alloc::init_allocator(&mmap);
+    serial_write("initializing allocator...\r\n");
+    {
+        let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
+        mmap.add(0x0030_0000, 0x1000_0000);
+        mmap.cut(0x0FE0_0000, 0x0FF0_0000);
+        arch_x86_64::alloc::init_allocator(&mmap);
+    }
+    serial_write("allocator ready\r\n");
 
     // Print banner via serial
-    init_serial();
     serial_write("Hello MINIX!\r\n");
 
     // Initialize the PIT timer interrupt.
@@ -116,7 +119,13 @@ pub extern "C" fn kmain() -> ! {
     {
         serial_write("  loading init from initramfs...\r\n");
 
-        let init_info = unsafe { boot_init::load_and_prepare_init() };
+        let init_info = match unsafe { boot_init::load_and_prepare_init() } {
+            Some(info) => info,
+            None => {
+                serial_write("  FAILED: no valid init binary\r\n");
+                hlt_loop();
+            }
+        };
 
         serial_write("  creating per-process page table...\r\n");
 

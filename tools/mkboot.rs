@@ -19,7 +19,8 @@ fn main() {
         let status = Command::new("rustc")
             .args([
                 workspace.join("tools/mkinitramfs.rs").to_str().unwrap(),
-                "--edition", "2024",
+                "--edition",
+                "2024",
                 "-o",
                 &mkinitramfs.to_string_lossy(),
             ])
@@ -46,6 +47,7 @@ fn main() {
             "x86_64-pc-minix.json",
             "-Zjson-target-spec",
             "-Zbuild-std=core,alloc",
+            "-Zbuild-std-features=compiler-builtins-mem",
             "--features",
             "embed_initramfs",
             "--release",

@@ -168,13 +168,25 @@ pmode32:
     orl  $0x80000000, %eax
     movl %eax, %cr0
 
+    // Debug: print 'G' then 'J'
+    movw $0x3F8, %dx
+    movb $'G', %al
+    outb %al, %dx
     lgdt gdt64_ptr
-    ljmp $0x18, $lmode64
+    movb $'J', %al
+    outb %al, %dx
+    ljmp $0x08, $lmode64
 
 // ── 64-bit long mode ──
 .code64
 lmode64:
-    movw $0x20, %ax
+    // Debug: print 'L' to confirm 64-bit mode reached
+    movw $0x3F8, %dx
+    movb $'L', %al
+    outb %al, %dx
+    // Kernel data segment: index 2 (0x10), DPL=0
+    // (User data would be at index 4 (0x23) with DPL=3, but CPL=0 here)
+    movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %fs
@@ -230,13 +242,16 @@ gdt_ptr:
     .long gdt_start
 
 // ── 64-bit GDT ──
+// Index 1 = 64-bit kernel code (selector 0x08), used after ljmp to long mode.
+// Index 3 = user code (selector 0x1B), used by SYSRETQ.
+// Index 4 = user data (selector 0x23), used by SYSRETQ.
 .align 8
 gdt64_start:
-    .quad 0x0000000000000000
-    .quad 0x00CF9A000000FFFF
-    .quad 0x00CF92000000FFFF
-    .quad 0x00AF9A0000000000
-    .quad 0x00CF92000000FFFF
+    .quad 0x0000000000000000         // null
+    .quad 0x00AF9A0000000000         // kernel code (0x08): 64-bit, DPL=0
+    .quad 0x00CF920000000000         // kernel data (0x10): DPL=0
+    .quad 0x005FFA000000FFFF         // user code (0x1B): 64-bit, DPL=3
+    .quad 0x001FF2000000FFFF         // user data (0x23): DPL=3
 gdt64_end:
 gdt64_ptr:
     .word gdt64_end - gdt64_start - 1

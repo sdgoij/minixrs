@@ -30,7 +30,7 @@ run: build
 # Boots the kernel without userland, runs assertions, exits via isa-debug-exit.
 # Exit code 1 = all passed, exit code >1 = (failures << 1) | 1.
 test-qemu: build
-    @set RUSTFLAGS=-C link-arg=-Ttools/minix-raw.ld && {{RUSTUP}} run nightly cargo build -p kernel-boot --target {{TARGET}} -Zjson-target-spec -Zbuild-std=core,alloc --features embed_initramfs,integration-tests --release
+    @set RUSTFLAGS=-C link-arg=-Ttools/minix-raw.ld && {{RUSTUP}} run nightly cargo build -p kernel-boot --target {{TARGET}} -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --features embed_initramfs,integration-tests --release
     @{{OBJCOPY}} -O binary target\x86_64-pc-minix\release\kernel-boot target\test-kernel.bin
     @{{QEMU}} -nographic -m 256M -no-reboot -device isa-debug-exit -kernel {{TRAMP_ELF}} -device loader,file=target\test-kernel.bin,addr=0x200000 & if errorlevel 1 if not errorlevel 2 (echo QEMU_EXIT=1: all tests passed) else (echo QEMU_EXIT=%ERRORLEVEL%: some tests failed & exit /b 1)
 

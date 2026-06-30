@@ -593,6 +593,7 @@ pub unsafe extern "C" fn sysretq_to_user(proc_ptr: *const u8) -> ! {
     //   p_seg.p_cr3  = +184  (after TrapFrame's 184 bytes)
     core::arch::naked_asm!(
         // rdi = proc_ptr (SysV AMD64 ABI)
+        // Load per-process CR3, RCX, R11, RSP and execute sysretq
         "mov    rax, [rdi + 184]", // p_seg.p_cr3
         "mov    cr3, rax",         // load per-process page table
         "mov    rcx, [rdi + 16]",  // p_reg.rcx → RIP via sysretq
