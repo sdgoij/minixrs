@@ -24,6 +24,27 @@ pub extern "C" fn kmain() -> ! {
         kernel::syscall::init_basic_syscalls();
     }
 
+    // Register the physical memory allocator with the DMA buffer API.
+    unsafe {
+        fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
+            let alloc = arch_x86_64::alloc::global_allocator();
+            if alloc.is_null() {
+                return None;
+            }
+            let phys = unsafe { (*alloc).alloc_contig(pages) }?;
+            // With identity mapping, virtual address equals physical address.
+            Some((phys as *mut u8, phys))
+        }
+        fn dma_free(virt: *mut u8, pages: usize) {
+            let alloc = arch_x86_64::alloc::global_allocator();
+            if alloc.is_null() {
+                return;
+            }
+            unsafe { (*alloc).free_contig(virt as u64, pages) };
+        }
+        drivers::storage::dma::register_allocator(dma_alloc, dma_free);
+    }
+
     // Print banner via serial
     init_serial();
     serial_write(b"Hello MINIX!\r\n");

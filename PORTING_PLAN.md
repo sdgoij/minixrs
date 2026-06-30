@@ -3485,7 +3485,7 @@ be replaced with real implementations.
   - Fault actions: delay, corrupt, drop, misplace, reorder, stale
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/fbd/`
 
-- [ ] **12.20 — Wire PhysicalAllocator to DMA buffer API** (`crates/drivers/src/storage/dma.rs`, `kernel/src/main.rs`)
+- [x] **12.20 — Wire PhysicalAllocator to DMA buffer API** (`crates/drivers/src/storage/dma.rs`, `kernel/src/main.rs`)
   **Depends on:** PhysicalAllocator init (Phase 6), `DmaBuffer` module (Phase 11b.12)
   Call `dma::register_allocator(alloc_fn, free_fn)` during boot where:
   - `alloc_fn` wraps `PhysicalAllocator::alloc_contig()` converting pages to `(*mut u8, u64)`
