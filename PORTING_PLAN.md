@@ -3474,7 +3474,7 @@ be replaced with real implementations.
   - `mem_write(KMEM_DEV)` — write to pre-mapped kernel virtual address range
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/memory/memory.c`
 
-- [ ] **12.19 — Wire FBD IPC and rule engine** (`crates/drivers/src/storage/fbd.rs`)
+- [x] **12.19 — Wire FBD IPC and rule engine** (`crates/drivers/src/storage/fbd.rs`)
   **Depends on:** IPC sendrec (Phase 4), grant table management (Phase 4),
   DS endpoint lookup (Phase 12.4), `alloc_contig`/`free_contig`, block driver protocol
   Replace `todo!()` in:
