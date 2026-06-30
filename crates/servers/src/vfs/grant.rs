@@ -68,7 +68,7 @@ impl GrantTable {
     /// Returns the grant ID, or `GRANT_INVALID` if the table is full.
     pub fn cpf_grant_magic(
         &self,
-        granter: i32,
+        who_from: i32,
         callee: i32,
         addr: u64,
         len: usize,
@@ -80,7 +80,7 @@ impl GrantTable {
                 if entry.cp_flags == 0 {
                     entry.cp_flags = CPF_USED | CPF_VALID | CPF_MAGIC | access;
                     entry.cp_u.cp_magic = CpMagic {
-                        cp_who_from: granter,
+                        cp_who_from: who_from,
                         cp_who_to: callee,
                         cp_start: addr,
                         cp_len: len,
@@ -165,8 +165,17 @@ impl GrantTable {
 /// `callee` is the target FS server, `addr` is the path string
 /// address in VFS space.
 /// address in VFS space.
-pub fn cpf_grant_magic(granter: i32, callee: i32, addr: u64, len: usize) -> i32 {
-    VFS_GRANT_TABLE.cpf_grant_magic(granter, callee, addr, len, CPF_READ)
+pub fn cpf_grant_magic(who_from: i32, callee: i32, addr: u64, len: usize) -> i32 {
+    VFS_GRANT_TABLE.cpf_grant_magic(who_from, callee, addr, len, CPF_READ)
+}
+
+/// Allocate a magic grant with write access.
+///
+/// `who_from` is the endpoint of the process that owns the buffer memory,
+/// `callee` is the target FS server. Use this when the FS will write data
+/// into the buffer (e.g. FS writing to a user's stat buffer).
+pub fn cpf_grant_magic_write(who_from: i32, callee: i32, addr: u64, len: usize) -> i32 {
+    VFS_GRANT_TABLE.cpf_grant_magic(who_from, callee, addr, len, CPF_WRITE)
 }
 
 /// Allocate a direct grant for data transfer.

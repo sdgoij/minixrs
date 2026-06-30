@@ -10,7 +10,11 @@
 use crate::vfs::consts::ENOSYS;
 #[cfg(target_os = "none")]
 use crate::vfs::consts::PATH_MAX;
+#[cfg(target_os = "none")]
+use crate::vfs::grant::{cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
 use crate::vfs::types::{Lookup, LookupRes, NodeDetails, Statvfs, off_t};
+#[cfg(target_os = "none")]
+use arch_common::com::VFS_PROC_NR;
 
 // FS_BASE and REQ_* constants (from minix/include/minix/vfsif.h)
 
@@ -220,9 +224,6 @@ pub unsafe fn req_breadwrite(
 ) -> (i32, off_t, u32) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — see 13.10b: wire grant IDs for data transfer
-        let _grant_id: i32 = -1;
-
         let mut msg = [0u8; 56];
         w_i32(
             &mut msg,
@@ -235,11 +236,21 @@ pub unsafe fn req_breadwrite(
         );
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos); // seek_pos
-        w_i32(&mut msg, PAYLOAD_OFF + 16, -1); // grant (stub)
+
+        let grant_id = if rw_flag == 1
+        /* READING */
+        {
+            // FS writes data to user buffer → CPF_WRITE
+            cpf_grant_magic_write(_user_e, fs_e, _user_addr as u64, num_of_bytes as usize)
+        } else {
+            // FS reads data from user buffer → CPF_READ
+            cpf_grant_magic(_user_e, fs_e, _user_addr as u64, num_of_bytes as usize)
+        };
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, num_of_bytes as u64); // nbytes
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, 0, 0);
@@ -429,14 +440,14 @@ pub unsafe fn req_flush(fs_e: i32, dev: u32) -> i32 {
 pub unsafe fn req_statvfs(fs_e: i32) -> (i32, Statvfs) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — FS writes statvfs data via grant, so the returned
-        // Statvfs will be default-valued until grant table is wired.
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_STATVFS);
-        w_i32(&mut msg, PAYLOAD_OFF, -1); // grant (stub)
+
+        let grant_id = cpf_grant_magic_write(VFS_PROC_NR, fs_e, 0, core::mem::size_of::<Statvfs>());
+        w_i32(&mut msg, PAYLOAD_OFF, grant_id);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
 
         (r, Statvfs::default())
     }
@@ -487,16 +498,18 @@ pub unsafe fn req_getdents(
 ) -> (i32, off_t) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_GETDENTS);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos); // seek_pos
-        w_i32(&mut msg, PAYLOAD_OFF + 16, -1); // grant (stub)
+
+        // FS writes directory entries to VFS buffer → CPF_WRITE
+        let grant_id = cpf_grant_magic_write(VFS_PROC_NR, fs_e, _buf as u64, size);
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64); // mem_size
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, 0);
@@ -593,7 +606,6 @@ pub unsafe fn req_lookup(
 ) -> (i32, LookupRes) {
     #[cfg(target_os = "none")]
     {
-        // Grants stubbed — TODO: wire grant table
         let flags: u32 = resolve.l_flags;
 
         let mut msg = [0u8; 56];
@@ -616,13 +628,17 @@ pub unsafe fn req_lookup(
         }
 
         w_u32(&mut msg, PAYLOAD_OFF + 32, 0); // ucred_size
-        w_i32(&mut msg, PAYLOAD_OFF + 40, -1); // grant_path (stub)
-        w_i32(&mut msg, PAYLOAD_OFF + 44, -1); // grant_ucred (stub)
+
+        // FS reads the path from the Lookup struct (in VFS space) → CPF_READ
+        let grant_path =
+            cpf_grant_magic(VFS_PROC_NR, fs_e, resolve.l_path.as_ptr() as u64, path_len);
+        w_i32(&mut msg, PAYLOAD_OFF + 40, grant_path);
+        w_i32(&mut msg, PAYLOAD_OFF + 44, -1); // grant_ucred (stub — Phase 14+)
         w_u16(&mut msg, PAYLOAD_OFF + 48, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 50, gid); // gid
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id); cpf_revoke(grant_id2) — stubbed
+        cpf_revoke(grant_path);
 
         let mut res = LookupRes::default();
         res.fs_e = r_i32(&msg, 0); // m_source
@@ -889,15 +905,17 @@ pub unsafe fn req_rdlink(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_RDLINK);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
+
+        // FS writes symlink target to user buffer → CPF_WRITE
+        let grant_id = cpf_grant_magic_write(_proc_e, fs_e, _buf as u64, len);
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 16, len as u64); // mem_size
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
 
         if r == crate::vfs::consts::OK {
             r_u64(&msg, PAYLOAD_OFF) as i32 // nbytes (reply)
@@ -1156,14 +1174,16 @@ pub unsafe fn req_slink(
 pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _len: usize) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_STAT);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
+
+        // FS writes stat data to user buffer → CPF_WRITE
+        let grant_id = cpf_grant_magic_write(_who_e, fs_e, _buf as u64, _len);
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -1369,16 +1389,18 @@ pub unsafe fn req_write(
 ) -> (i32, off_t) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_WRITE);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos); // seek_pos
-        w_i32(&mut msg, PAYLOAD_OFF + 16, -1); // grant (stub)
+
+        // FS reads data from user buffer → CPF_READ
+        let grant_id = cpf_grant_magic(_user_e, fs_e, _buf as u64, size as usize);
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64); // nbytes
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, 0);

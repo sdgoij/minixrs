@@ -3726,14 +3726,22 @@ userspace crate
       and path length, sends via `fs_sendrec`, then revokes.
     423 servers tests pass, plus 139 minix-std tests pass, clippy clean.
   
-  - [ ] **13.10b — Wire `cpf_grant_magic`/`cpf_revoke` for data transfer**
-      (`crates/minix-std/src/lib.rs` — new public helpers)
-    **Depends on:** `do_setgrant` (Phase 5.29), `cpf_grant_magic` from 13.10a
-    Same as 13.10a but for data buffers (not path strings). Update
-    `req_breadwrite`, `req_statvfs`, `req_rdlink`, `req_getdents`, `req_stat`,
-    `req_write`, `req_lookup` to use real grants. These need `CPF_READ`/`CPF_WRITE`
-    access flags matching the transfer direction, and `cpf_revoke` after the
-    `fs_sendrec` completes.
+  - [x] **13.10b — Wire `cpf_grant_magic`/`cpf_revoke` for data transfer**
+      (`crates/servers/src/vfs/grant.rs`, `request.rs`)
+    **Depends on:** `cpf_grant_magic` from 13.10a
+    Updated 7 data-transfer `req_*` functions to use real grants:
+    - Renamed `granter` → `who_from` in `cpf_grant_magic` to clarify that
+      the parameter identifies the memory owner, not the grant table owner
+    - Added `cpf_grant_magic_write()` convenience for CPF_WRITE direction
+    - `req_breadwrite` (read): magic grant, `_user_e`, CPF_WRITE
+    - `req_breadwrite` (write): magic grant, `_user_e`, CPF_READ
+    - `req_statvfs`: magic grant, VFS_PROC_NR, CPF_WRITE (addr=0 stub)
+    - `req_rdlink`: magic grant, `_proc_e`, CPF_WRITE
+    - `req_getdents`: magic grant, VFS_PROC_NR, CPF_WRITE
+    - `req_stat`: magic grant, `_who_e`, CPF_WRITE
+    - `req_write`: magic grant, `_user_e`, CPF_READ
+    - `req_lookup`: magic grant for path (VFS_PROC_NR, CPF_READ), ucred kept as -1
+    423 servers tests pass, clippy clean.
   
   - [ ] **13.10c — Resolve FS endpoint from Vmnt struct**
       (`servers/src/vfs/request.rs:req_readsuper`)
