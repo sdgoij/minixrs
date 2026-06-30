@@ -3273,13 +3273,13 @@ be replaced with real implementations.
   Now calls `vm_unmap_stub` to unmap, `vm_getphys_stub` to identify
   segment, decrements shm_nattch, updates shm_dtime/lpid.
 
-- [ ] **12.5d — Implement do_semop sembuf copy from userspace**
+- [x] **12.5d — Implement do_semop sembuf copy from userspace**
     (`servers/src/ipc.rs:do_semop`)
   **Depends on:** sys_datacopy / virtual_copy (Phase 13)
-  Currently validates ID/permissions but doesn't copy the sembuf array
-  from user space. Must copy nops × sizeof(sembuf) bytes, validate
-  sem_num bounds, check for IPC_NOWAIT conditions, apply sem_op or
-  enqueue waiters on zero/increment lists, and call update_semaphores().
+  Copies sembuf array from userspace (via virtual_copy) or inline
+  message data. Processes each semop: wait-for-zero, increment,
+  decrement with IPC_NOWAIT handling and waiter enqueueing.
+  49 IPC tests pass.
 
 - [ ] **12.5e — Implement check_perm with real UID/GID lookup**
     (`servers/src/ipc.rs:check_perm`)

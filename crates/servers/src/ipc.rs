@@ -918,6 +918,14 @@ pub unsafe fn do_semctl(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     }
 }
 
+/// Semaphore operation buffer (matches `struct sembuf` from C).
+#[repr(C)]
+struct SemBuf {
+    sem_num: u16,
+    sem_op: i16,
+    sem_flg: i16,
+}
+
 /// Handle IPC_SEMOP — semaphore operations (atomic P/V on a set).
 ///
 /// # Safety
@@ -927,7 +935,7 @@ pub unsafe fn do_semop(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let id = msg_i32(msg, MSG_OFF_D01);
         let nsops = msg_i32(msg, MSG_OFF_D02) as usize;
-        let _sops_ptr = msg_i32(msg, MSG_OFF_D03);
+        let sops_ptr = msg_i32(msg, MSG_OFF_D03) as u64;
 
         let sem = match sem_find_id(id) {
             Some(s) => s,
@@ -944,8 +952,87 @@ pub unsafe fn do_semop(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
             return EACCES;
         }
 
-        let _who = msg_i32(msg, MSG_OFF_SOURCE);
-        let _ = vm_watch_exit_stub(_who);
+        let who = msg_i32(msg, MSG_OFF_SOURCE);
+        let _ = vm_watch_exit_stub(who);
+
+        // Copy sembuf array from userspace or inline message data.
+        let sops_size = nsops * core::mem::size_of::<SemBuf>();
+        let mut sops_buf = [0u8; SEMOPM * core::mem::size_of::<SemBuf>()];
+        if sops_ptr != 0 && sops_size > 0 && sops_size <= sops_buf.len() {
+            let caller_slot = kernel::table::endpoint_slot(who);
+            let r = kernel::vm::virtual_copy(
+                caller_slot,
+                sops_ptr,
+                -1, // kernel
+                sops_buf.as_mut_ptr() as u64,
+                sops_size,
+            );
+            if r != 0 {
+                return EINVAL;
+            }
+        } else if sops_size > 0 && sops_size <= MESSAGE_SIZE - MSG_OFF_D05 {
+            // Inline sembuf data in the message payload.
+            let src = &msg[MSG_OFF_D05..][..sops_size];
+            sops_buf[..sops_size].copy_from_slice(src);
+        } else {
+            return EINVAL;
+        }
+        let sops = &*(sops_buf.as_ptr() as *const [SemBuf; SEMOPM]);
+
+        // Process each semop.
+        for i in 0..nsops {
+            let sop = &(*sops)[i];
+            let num = sop.sem_num as usize;
+            if num >= sem.semid_ds.sem_nsems as usize {
+                return EINVAL;
+            }
+
+            let op = sop.sem_op as i32;
+            let flg = sop.sem_flg as i32;
+
+            if op == 0 {
+                // Wait until semaphore becomes 0.
+                if sem.sems[num].semval != 0 {
+                    if (flg & IPC_NOWAIT) != 0 {
+                        return EAGAIN;
+                    }
+                    // Enqueue on zero list.
+                    let zcnt = sem.sems[num].semzcnt as usize;
+                    if zcnt < SEMMSL {
+                        sem.sems[num].zlist[zcnt] = SemWaiting { who, val: 0 };
+                        sem.sems[num].semzcnt += 1;
+                        return OK;
+                    }
+                    return ENOMEM;
+                }
+            } else if op > 0 {
+                // Release resources: increment semaphore.
+                sem.sems[num].semval = (sem.sems[num].semval as i32 + op) as u16;
+                sem.sems[num].sempid = who;
+            } else {
+                // Acquire resources: decrement semaphore.
+                let neg_op = (-op) as u16;
+                if sem.sems[num].semval >= neg_op {
+                    sem.sems[num].semval -= neg_op;
+                    sem.sems[num].sempid = who;
+                } else {
+                    if (flg & IPC_NOWAIT) != 0 {
+                        return EAGAIN;
+                    }
+                    // Enqueue on increment list.
+                    let ncnt = sem.sems[num].semncnt as usize;
+                    if ncnt < SEMMSL {
+                        sem.sems[num].nlist[ncnt] = SemWaiting {
+                            who,
+                            val: (-op) as i16,
+                        };
+                        sem.sems[num].semncnt += 1;
+                        return OK;
+                    }
+                    return ENOMEM;
+                }
+            }
+        }
 
         update_semaphores();
         OK
@@ -1734,7 +1821,16 @@ mod tests {
         let _ = unsafe { do_semget(&mut msg) };
         let id = unsafe { msg_i32(&msg, MSG_OFF_D04) };
 
+        // semop: sem_num=0, sem_op=1, sem_flg=0
         let mut msg = make_msg(0xD07, 42, id, 1, 0);
+        // Inline sembuf data at MSG_OFF_D05 (offset 24):
+        // SemBuf { sem_num: 0, sem_op: 1, sem_flg: 0 } = 6 bytes
+        msg[MSG_OFF_D05] = 0; // sem_num LSB
+        msg[MSG_OFF_D05 + 1] = 0; // sem_num MSB
+        msg[MSG_OFF_D05 + 2] = 1; // sem_op LSB
+        msg[MSG_OFF_D05 + 3] = 0; // sem_op MSB
+        msg[MSG_OFF_D05 + 4] = 0; // sem_flg LSB
+        msg[MSG_OFF_D05 + 5] = 0; // sem_flg MSB
         let r = unsafe { do_semop(&mut msg) };
         assert_eq!(r, OK);
     }
