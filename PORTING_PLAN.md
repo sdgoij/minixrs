@@ -3281,12 +3281,12 @@ be replaced with real implementations.
   decrement with IPC_NOWAIT handling and waiter enqueueing.
   49 IPC tests pass.
 
-- [ ] **12.5e — Implement check_perm with real UID/GID lookup**
+- [x] **12.5e — Implement check_perm with real UID/GID lookup**
     (`servers/src/ipc.rs:check_perm`)
   **Depends on:** PM server getnuid/getngid (Phase 12.3)
-  Currently hardcoded to uid=0 (root), grants all permissions.
-  Must query PM server for caller's UID/GID and check against the
-  IPC permission structure's uid/cuid/gid/cgid and mode bits.
+  Now queries PM server via `pm_get_credentials` which sends PM_GET
+  IPC messages (GETUID/GETGID) to PM_PROC_NR. Falls back to uid=0
+  (grants all) when PM is unavailable.
 
 - [ ] **12.5f — Implement update_refcount_and_destroy**
     (`servers/src/ipc.rs:update_refcount_and_destroy_stub`)

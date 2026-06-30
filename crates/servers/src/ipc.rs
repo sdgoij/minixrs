@@ -572,13 +572,12 @@ unsafe fn update_semaphores() {
 /// # Safety
 ///
 /// `who` must be a valid endpoint.
-unsafe fn check_perm(req: &IpcPerm, _who: i32, mode: i32) -> bool {
+unsafe fn check_perm(req: &IpcPerm, who: i32, mode: i32) -> bool {
     let mode = mode & 0o666;
 
-    // TODO: Phase 13 — getnuid/getngid from PM server.
-    // For now, use 0 (root) which grants all permissions.
-    let uid: i32 = 0;
-    let gid: i32 = 0;
+    // Try to get caller's credentials from PM server.
+    // Falls back to uid=0 (grants all) if PM is unavailable.
+    let (uid, gid) = pm_get_credentials(who);
 
     // Root has all permissions.
     if uid == 0 {
@@ -601,7 +600,44 @@ unsafe fn check_perm(req: &IpcPerm, _who: i32, mode: i32) -> bool {
         mode & 0x7
     };
 
-    cur_mode != 0 && (cur_mode & req_mode) == cur_mode
+    // Check if the requested access includes the needed bits.
+    cur_mode & req_mode == req_mode
+}
+
+/// Query PM server for a process's UID and GID.
+///
+/// Returns (uid, gid). On failure (PM unavailable), returns (0, 0)
+/// which grants all permissions (safe fallback for bootstrapping).
+unsafe fn pm_get_credentials(who: i32) -> (i32, i32) {
+    let pm_ep = 0; // PM_PROC_NR
+
+    let mut msg = [0u8; MESSAGE_SIZE];
+    msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, 0x901); // PM_GET (VFS_PM_RQ_BASE + 1)
+    msg_set_i32(&mut msg, 8, who); // m1_i1 = target endpoint
+    msg_set_i32(&mut msg, 12, 0); // m1_i2 = 0 (GETUID)
+
+    let r = sendrec(pm_ep, &mut msg);
+    if r != 0 {
+        return (0, 0);
+    }
+    // Reply: high 32 bits = real uid, low 32 bits = effective uid
+    let uid_result = msg_i32(&msg, 24) as u64 | ((msg_i32(&msg, 20) as u64) << 32);
+    let euid = (uid_result & 0xFFFF_FFFF) as i32;
+
+    // Get GID
+    let mut msg = [0u8; MESSAGE_SIZE];
+    msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, 0x901); // PM_GET
+    msg_set_i32(&mut msg, 8, who);
+    msg_set_i32(&mut msg, 12, 1); // m1_i2 = 1 (GETGID)
+
+    let r = sendrec(pm_ep, &mut msg);
+    if r != 0 {
+        return (euid, 0);
+    }
+    let gid_result = msg_i32(&msg, 24) as u64 | ((msg_i32(&msg, 20) as u64) << 32);
+    let egid = (gid_result & 0xFFFF_FFFF) as i32;
+
+    (euid, egid)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
