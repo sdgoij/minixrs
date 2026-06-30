@@ -923,8 +923,24 @@ pub unsafe fn ipc_notify_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), NOTIFY) }
 }
 
-/// Maximum syscall number accommodating IPC syscall slots (46–49).
-pub const SYS_MAX: i32 = 50;
+/// SENDA syscall handler — delivers async messages to their destinations.
+///
+/// Reads the async message table pointer and size from the message buffer
+/// (offset 8: table u64, offset 16: size usize), then calls try_deliver_senda.
+///
+/// # Safety
+///
+/// `caller` must point to a valid Proc. `msg` must point to a valid message.
+pub unsafe fn ipc_senda_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let table = u64::from_le_bytes(msg[8..16].try_into().unwrap_or([0; 8])) as *mut u8;
+        let size = usize::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+        try_deliver_senda(caller, table, size)
+    }
+}
+
+/// Maximum syscall number accommodating IPC syscall slots (46–50).
+pub const SYS_MAX: i32 = 51;
 
 /// Register all IPC syscall handlers in the kernel call dispatch table.
 ///
@@ -943,6 +959,7 @@ pub unsafe fn register_ipc_syscalls() {
         crate::system::map_call(47, ipc_receive_handler);
         crate::system::map_call(48, ipc_sendrec_handler);
         crate::system::map_call(49, ipc_notify_handler);
+        crate::system::map_call(50, ipc_senda_handler);
     }
 }
 
@@ -1480,6 +1497,7 @@ mod tests {
         _check(ipc_receive_handler);
         _check(ipc_sendrec_handler);
         _check(ipc_notify_handler);
+        _check(ipc_senda_handler);
     }
 
     #[test]
@@ -1490,7 +1508,7 @@ mod tests {
 
     #[test]
     fn test_sys_max_constant() {
-        assert_eq!(SYS_MAX, 50);
+        assert_eq!(SYS_MAX, 51);
     }
 
     #[test]

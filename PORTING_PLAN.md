@@ -664,7 +664,16 @@ The Rust port targets two architectures:
   - `deadlock()` — cycle detection following both SENDING and RECEIVING chains (max 100 steps)
   - IPC status helpers: `ipc_status_add_call`, `ipc_status_add_flags`, `ipc_status_clear`
   - `is_ok_endpoint_f()` — endpoint validation with optional panic on failure
-  - Async stubs: `has_pending_notify`, `has_pending_asend`, `unset_notify_pending`, `try_one`, `try_async`, `cancel_async`, `try_deliver_senda`, `build_notify_message`
+  - Async IPC: `try_deliver_senda()` — processes async message table from userspace,
+    delivers pending messages to destinations. `try_one()` — delivers a single async
+    message. `try_async()` — walks all privilege structures calling `try_one()`.
+    `cancel_async()` — cancels pending async sends. `has_pending_notify/asend()` —
+    check for pending notifications/async sends. `unset_notify_pending()` — clears
+    a pending notification. `build_notify_message()` — constructs notification message.
+    `ipc_senda_handler` added at kernel call slot 50. Reads async message table
+    pointer and size from message buffer, calls `try_deliver_senda()`. Registered
+    in `register_ipc_syscalls()` alongside the four existing IPC handlers.
+    User-mapped IPC vectors (softint/sysenter) deferred — kernel_call path works.
   - Constants: IPC call types (SEND/RECEIVE/SENDREC/SENDNB/NOTIFY), flags (NON_BLOCKING, FROM_KERNEL), error codes, AMF flags
   - **12 new tests**: direct send/receive, queue+block, non-blocking, NO_ENDPOINT, deadlock cycle/no-cycle, notify wake, ipc_status, endpoint validation
   - 133 total for kernel crate, workspace clippy clean
