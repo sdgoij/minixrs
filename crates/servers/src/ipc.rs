@@ -12,7 +12,7 @@
 //! are stubbed with concrete task references.
 
 #![allow(dead_code)]
-//#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
@@ -636,18 +636,27 @@ unsafe fn vm_query_exit_stub() -> Option<i32> {
 
 /// Stub: remap a shared memory page into another process.
 ///
-/// Real implementation would call vm_remap() on the VM server.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+/// On target, delegates to `vm_remap` which sends IPC to VM server.
+/// On host, returns ENOSYS.
+#[cfg(not(target_os = "none"))]
 unsafe fn vm_remap_stub(_who: i32, _addr: u64, _page: u64, _size: usize) -> Result<u64, i32> {
     Err(enosys())
 }
 
+#[cfg(target_os = "none")]
+unsafe fn vm_remap_stub(who: i32, addr: u64, page: u64, size: usize) -> Result<u64, i32> {
+    vm_remap(who, addr, page, size)
+}
+
 /// Stub: unmap a shared memory page from a process.
-///
-/// Real implementation would call vm_unmap() on the VM server.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+#[cfg(not(target_os = "none"))]
 unsafe fn vm_unmap_stub(_who: i32, _addr: u64) -> Result<(), i32> {
     Err(enosys())
+}
+
+#[cfg(target_os = "none")]
+unsafe fn vm_unmap_stub(who: i32, addr: u64) -> Result<(), i32> {
+    vm_unmap(who, addr)
 }
 
 /// Stub: get physical address of a page.
@@ -1055,14 +1064,14 @@ pub unsafe fn do_shmget(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
 pub unsafe fn do_shmat(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let id = msg_i32(msg, MSG_OFF_D01);
-        let _addr = msg_u64(msg, MSG_OFF_D02);
+        let addr = msg_u64(msg, MSG_OFF_D02);
         let flag = msg_i32(msg, MSG_OFF_D03);
 
         let shm = match shm_find_id(id) {
             Some(s) => s,
             None => return EINVAL,
         };
-        let shm = &*shm;
+        let shm = &mut *shm;
 
         let perm = if (flag & SHM_RDONLY) != 0 {
             IPC_R
@@ -1073,7 +1082,22 @@ pub unsafe fn do_shmat(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
             return EACCES;
         }
 
-        enosys()
+        let caller = msg_i32(msg, MSG_OFF_SOURCE);
+        let page = shm.page;
+        let size = shm.shmid_ds.shm_segsz;
+
+        // Remap the segment's physical pages into the caller's address space.
+        let mapped = vm_remap_stub(caller, addr, page, size);
+        match mapped {
+            Ok(mapped_addr) => {
+                shm.shmid_ds.shm_atime = 0; // TODO: clock_time()
+                shm.shmid_ds.shm_lpid = caller;
+                shm.shmid_ds.shm_nattch += 1;
+                msg_set_u64(msg, MSG_OFF_D02, mapped_addr);
+                OK
+            }
+            Err(e) => e,
+        }
     }
 }
 
@@ -1190,6 +1214,61 @@ pub fn is_shm_nil() -> bool {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Server main loop (stub)
+/// Call the VM server to map physical pages into a process's address space.
+///
+/// # Safety
+///
+/// `who` must be a valid process endpoint.
+pub unsafe fn vm_remap(who: i32, _map_addr: u64, page: u64, size: usize) -> Result<u64, i32> {
+    let vm_ep = 8; // VM_PROC_NR
+    let mut msg = [0u8; MESSAGE_SIZE];
+    // Set call type to VM_REMAP
+    msg_set_i32(
+        &mut msg,
+        MSG_OFF_CALLTYPE,
+        arch_common::com::VM_REMAP as i32,
+    );
+    // m1i1 = dest endpoint (the caller)
+    msg_set_i32(&mut msg, 8, who);
+    // m1i2 = src endpoint (VM server — owns the physical pages)
+    msg_set_i32(&mut msg, 12, vm_ep);
+    // m1i3 = source address (physical page number)
+    msg_set_u64(&mut msg, 16, page);
+    // m1i4 = size
+    msg_set_i32(&mut msg, 24, size as i32);
+
+    let r = sendrec(vm_ep, &mut msg);
+    if r != 0 {
+        return Err(r);
+    }
+    // Reply: mapped address is in m1i1
+    let mapped = msg_i32(&msg, 24) as u64;
+    Ok(mapped)
+}
+
+/// Call the VM server to unmap a region from a process's address space.
+///
+/// # Safety
+///
+/// `who` must be a valid process endpoint; `addr` must be a valid mapped address.
+pub unsafe fn vm_unmap(who: i32, addr: u64) -> Result<(), i32> {
+    let vm_ep = 8; // VM_PROC_NR
+    let mut msg = [0u8; MESSAGE_SIZE];
+    msg_set_i32(
+        &mut msg,
+        MSG_OFF_CALLTYPE,
+        arch_common::com::VM_MUNMAP as i32,
+    );
+    msg_set_i32(&mut msg, 8, who);
+    msg_set_u64(&mut msg, 16, addr);
+
+    let r = sendrec(vm_ep, &mut msg);
+    if r != 0 {
+        return Err(r);
+    }
+    Ok(())
+}
+
 /// Userspace kernel call — execute `syscall` to enter the kernel.
 ///
 /// Sets RAX = `KERNEL_CALL + call_nr`, RDI = `dest`, RSI = `msg_ptr`

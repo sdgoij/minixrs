@@ -3260,10 +3260,13 @@ be replaced with real implementations.
   Server-side syscall entry needed (LSTAR MSR target).
   49 IPC tests pass, clippy clean.
 
-- [ ] **12.5b — Implement do_shmat with VM remap** (`servers/src/ipc.rs:do_shmat`)
+- [x] **12.5b — Implement do_shmat with VM remap** (`servers/src/ipc.rs:do_shmat`)
   **Depends on:** VM server remap infrastructure (Phase 12.9)
-  Currently returns ENOSYS. Must call vm_remap to map shm.page into caller's
-  address space, set shm_atime/shm_lpid, and return mapped address.
+  Now calls `vm_remap_stub` which delegates to real `vm_remap` on target
+  (sends VM_REMAP IPC message to VM server) or returns ENOSYS on host.
+  On success, sets shm_atime, shm_lpid, increments shm_nattch, returns
+  mapped address. `vm_unmap` also wired with IPC to VM server.
+  Page allocation in do_shmget still needs VM_MMAP (currently stub).
 
 - [ ] **12.5c — Implement do_shmdt with VM unmap** (`servers/src/ipc.rs:do_shmdt`)
   **Depends on:** VM server getphys + unmap infrastructure (Phase 12.9)
