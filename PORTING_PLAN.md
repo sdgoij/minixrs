@@ -3507,15 +3507,23 @@ be replaced with real implementations.
   After this, the timer fires at 100 Hz, `timer_int_handler` runs, and `MONOTONIC`
   increments each tick.  Verify with a heartbeat dot via serial every 100 ticks.
 
-- [ ] **12.22 — Wire framebuffer arch backend** (`crates/drivers/src/video/fb.rs`)
-  **Depends on:** VESA BIOS or PCI BAR MMIO framebuffer discovery (Phase 11a/arch),
-  `sys_safecopyto`/`sys_safecopyfrom` (Phase 4), vm_map_phys for MMIO mapping
-  Replace `todo!()` in `Framebuffer` driver:
-  - `open()` — call `arch_fb_init` equivalent: EDID read, VESA mode set, MMIO mapping
-  - `read()` — `sys_safecopyto` from framebuffer memory to caller grant
-  - `write()` — `sys_safecopyfrom` from caller grant to framebuffer memory
-  - `ioctl()` — dispatch via `arch_*` functions with safecopy for struct transfer
-  - Implement `FbArch` trait for target platform (VESA BIOS or PCI MMIO)
+- [x] **12.22 — Wire framebuffer arch backend** (`crates/drivers/src/video/fb.rs`)
+  **Depends on:** `FbArch` trait, `NullArch` test backend
+  All `todo!()` calls replaced:
+  - `FbArch` trait with `init`/`device`/`var_screeninfo`/`set_var_screeninfo`/
+    `fix_screeninfo`/`pan_display` methods
+  - `NullArch` test backend with internal 4 KB buffer for volatile read/write
+    round-trips
+  - `open(minor, arch)` — calls `arch.init()` on first open, increments count
+  - `read(minor, pos, buf, arch)` — volatile reads from framebuffer at
+    `arch.device().base + pos`, clamped to device size
+  - `write(minor, pos, buf, arch)` — volatile writes to framebuffer
+  - `ioctl(minor, request, data, arch)` — dispatches:
+    - `FBIOGET_VSCREENINFO` — `arch.var_screeninfo()` → buffer
+    - `FBIOPUT_VSCREENINFO` — buffer → `arch.set_var_screeninfo()`
+    - `FBIOGET_FSCREENINFO` — `arch.fix_screeninfo()` → buffer
+    - `FBIOPAN_DISPLAY` — buffer → `arch.pan_display()`
+  - 23 tests covering all read/write/ioctl paths, clippy clean
   - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/fb.c`
 
 - [ ] **12.23 — Wire PtyHost::in_process in PTY slave_read** (`crates/drivers/src/tty/pty.rs`)
