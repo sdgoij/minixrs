@@ -17,7 +17,7 @@
 //! - **CRC32 & MD5** — pure computation, fully implemented.
 //! - **Checksum math** (`calc_sum_into`, `expand`, `collapse`, `convert`) — pure
 //!   data transformations, fully implemented.
-//! - **Disk I/O** (`read_write`, `read_sectors`, `transfer`, `check_write`,
+//! - **Disk I/O** (`read_write`, `read_sectors`, `transfer`,
 //!   `make_sum`, `check_sum`) — deferred; depends on IPC communication with
 //!   the underlying disk driver (system server infrastructure, Phase 12).
 //! - **Driver lifecycle** (`driver_init`, `driver_shutdown`, `ds_event`,
@@ -31,6 +31,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub const SECTOR_SIZE: usize = 512;
+
+/// Error code for I/O errors.
+pub const EIO: i32 = -5;
 
 /// Checksum algorithm types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,20 +627,151 @@ pub fn convert(raw_size: u64, use_sum_layout: bool, nr_sum_sec: u32) -> u64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Deferred: checksum group operations (depend on read_write IPC)
+// Checksum group operations (depend on read_write IPC)
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Callback type for low-level block I/O.
+/// Reads or writes `size` bytes at `pos` (physical sector address).
+/// Returns the number of bytes transferred on success.
+pub type BlockIoFn = unsafe fn(pos: u64, buf: &mut [u8], write: bool) -> Result<usize, i32>;
+
+/// Read sectors from the underlying device via the I/O callback.
+unsafe fn read_sectors(io: BlockIoFn, pos: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    // SAFETY: io is provided by the caller who guarantees endpoint validity.
+    unsafe { io(pos, buf, false) }
+}
+
+/// Compute checksums and write them to the underlying device.
+unsafe fn make_sum(
+    io: BlockIoFn,
+    data_buf: &[u8],
+    sum_buf: &mut [u8],
+    first_sector: u64,
+    nr_sectors: u64,
+    config: &FilterConfig,
+) -> Result<(), i32> {
+    for i in 0..nr_sectors {
+        let sector = first_sector + i;
+        let sum_sector = sec2sum_nr(sector, config.nr_sum_sec);
+        let data_off = (i * SECTOR_SIZE as u64) as usize;
+        let sum_data = &mut sum_buf[..SECTOR_SIZE];
+        sum_data.fill(0);
+        calc_sum_into(
+            sector as u32,
+            &data_buf[data_off..data_off + SECTOR_SIZE],
+            sum_data,
+            config,
+        );
+        // Write the checksum sector.
+        let phys = sum_sector * SECTOR_SIZE as u64;
+        unsafe {
+            io(phys, sum_data, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Verify checksums after reading data.
+unsafe fn check_sum(
+    io: BlockIoFn,
+    pos: u64,
+    data_buf: &[u8],
+    sum_buf: &mut [u8],
+    first_sector: u64,
+    nr_sectors: u64,
+    config: &FilterConfig,
+) -> Result<(), i32> {
+    let _ = pos;
+    for i in 0..nr_sectors {
+        let sector = first_sector + i;
+        let sum_sector = sec2sum_nr(sector, config.nr_sum_sec);
+        let data_off = (i * SECTOR_SIZE as u64) as usize;
+        let sum_data = &mut sum_buf[..SECTOR_SIZE];
+        sum_data.fill(0);
+
+        // Read the checksum sector.
+        let phys = sum_sector * SECTOR_SIZE as u64;
+        unsafe {
+            io(phys, sum_data, false)?;
+        }
+
+        // Compute expected checksum and verify.
+        let mut expected = [0u8; SECTOR_SIZE];
+        calc_sum_into(
+            sector as u32,
+            &data_buf[data_off..data_off + SECTOR_SIZE],
+            &mut expected,
+            config,
+        );
+        if sum_data[..config.sum_size as usize] != expected[..config.sum_size as usize] {
+            return Err(EIO);
+        }
+    }
+    Ok(())
+}
 
 /// Full transfer with checksumming (read or write).
 ///
-/// **Deferred:** depends on `read_write` IPC, driver management.
-/// See PORTING_PLAN.md 12.15.
+/// `io` is the callback for low-level sector I/O to the underlying device.
+/// `ext_buf` is a scratch buffer for expanded physical I/O (at least `req_size` bytes,
+/// where `req_size` is from `expand_sizes`).
+/// `sum_buf` is a scratch buffer for checksum data (at least `SECTOR_SIZE` bytes).
 pub fn filter_transfer(
-    _pos: u64,
-    _buffer: &mut [u8],
-    _write: bool,
-    _config: &FilterConfig,
+    pos: u64,
+    buffer: &mut [u8],
+    write: bool,
+    config: &FilterConfig,
+    io: BlockIoFn,
+    ext_buf: &mut [u8],
+    sum_buf: &mut [u8],
 ) -> Result<usize, i32> {
-    todo!("filter_transfer needs read_write IPC; see PORTING_PLAN.md 12.15");
+    let nr_sectors = (buffer.len() / SECTOR_SIZE) as u64;
+    if nr_sectors == 0 {
+        return Ok(0);
+    }
+    let first_sector = pos / SECTOR_SIZE as u64;
+    let phys_first = log2phys(first_sector, config.nr_sum_sec) * SECTOR_SIZE as u64;
+
+    unsafe {
+        // Read the physical sectors (data + checksums).
+        read_sectors(io, phys_first, ext_buf)?;
+
+        if write {
+            // Expand the logical buffer into the physical layout.
+            expand(first_sector, buffer, ext_buf, config.nr_sum_sec);
+
+            // Write the physical sectors (data + checksums).
+            let written = io(phys_first, ext_buf, true)?;
+
+            // Compute and write checksum sectors.
+            make_sum(io, ext_buf, sum_buf, first_sector, nr_sectors, config)?;
+
+            Ok(written)
+        } else {
+            // Collapse the physical data back to logical layout.
+            let mut out_size = buffer.len();
+            collapse(
+                first_sector,
+                ext_buf,
+                buffer,
+                &mut out_size,
+                config.nr_sum_sec,
+            );
+
+            // Verify checksums.
+            check_sum(
+                io,
+                phys_first,
+                ext_buf,
+                sum_buf,
+                first_sector,
+                nr_sectors,
+                config,
+            )?;
+
+            Ok(out_size)
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

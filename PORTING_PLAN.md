@@ -3426,15 +3426,18 @@ be replaced with real implementations.
   - 10 profile tests pass, clippy clean
   **Follow-up tasks:**
 
-  - [ ] **12.15a — Register profile clock IDT entry**
+  - [x] **12.15a — Register profile clock IDT entry**
     (`kernel/src/profile.rs:init_profile_clock`)
     **Depends on:** IDT reference accessible from kernel init
+    Registers `profile_clock_isr_entry` in the IDT at `VECTOR_TIMER + irq`
+    and calls `set_profile_clock_handler` with a callback invoking
+    `profile_sample(current_proc, pc)`.
     Call `idt.set_handler(VECTOR_TIMER + 8, profile_clock_isr_entry, 0, 0)`
     to wire the RTC profile clock interrupt in the IDT. Then call
     `set_profile_clock_handler()` with a Rust callback that invokes
     `profile_sample(current_proc(), pc)`.
 
-- [ ] **12.16 — Wire filter transfer and driver IPC** (`crates/drivers/src/storage/filter.rs`)
+- [x] **12.16 — Wire filter transfer and driver IPC** (`crates/drivers/src/storage/filter.rs`)
   **Depends on:** `read_write` IPC to underlying disk drivers, DS events, RS restart,
   `alloc_contig`/`free_contig` for buffer allocation, `sys_setalarm` for timeouts
   Replace `todo!()` in:
