@@ -343,6 +343,34 @@ impl GrantTable {
             entry.g_grant = 0;
         }
     }
+
+    /// Allocate a grant for the VFS→FS pattern: VFS (caller) grants
+    /// access to FS (callee) for a user-space pathname buffer.
+    ///
+    /// Returns the grant ID, or `None` if the table is full.
+    ///
+    /// In MINIX C this calls `cpf_grant_magic()` which creates a
+    /// magic grant that the FS can use with `sys_safecopyfrom` to
+    /// read the path string from VFS's memory.
+    pub fn cpf_grant_magic(&mut self, caller: i32, callee: i32) -> Option<u32> {
+        self.alloc(caller, callee)
+    }
+
+    /// Allocate a direct grant for data transfer.
+    ///
+    /// Same as `cpf_grant_magic` but named for the direct-grant
+    /// pattern (callee reads/writes caller's buffer).
+    pub fn cpf_grant_direct(&mut self, caller: i32, callee: i32) -> Option<u32> {
+        self.alloc(caller, callee)
+    }
+
+    /// Revoke (free) a previously allocated grant.
+    ///
+    /// In MINIX C this calls `cpf_revoke()`.  Has no effect if
+    /// `grant` is out of range or already free.
+    pub fn cpf_revoke(&mut self, grant: u32) {
+        self.free(grant);
+    }
 }
 
 impl Default for GrantTable {
@@ -596,7 +624,36 @@ mod tests {
         assert_ne!(entry.g_flags, 0);
     }
 
-    // ── IPC constants & signatures ─────────────────────────────────────
+    #[test]
+    fn test_cpf_grant_magic_and_revoke() {
+        let mut table = GrantTable::new();
+        let id = table.cpf_grant_magic(10, 20);
+        assert!(id.is_some());
+        let entry = table.get(id.unwrap()).unwrap();
+        assert_eq!(entry.g_caller, 10);
+        assert_eq!(entry.g_callee, 20);
+        // Revoke and verify freed
+        table.cpf_revoke(id.unwrap());
+        assert!(table.get(id.unwrap()).is_none());
+    }
+
+    #[test]
+    fn test_cpf_grant_direct() {
+        let mut table = GrantTable::new();
+        let id = table.cpf_grant_direct(VFS_PROC_NR, VM_PROC_NR);
+        assert!(id.is_some());
+        let entry = table.get(id.unwrap()).unwrap();
+        assert_eq!(entry.g_caller, VFS_PROC_NR);
+        assert_eq!(entry.g_callee, VM_PROC_NR);
+    }
+
+    #[test]
+    fn test_cpf_revoke_out_of_range() {
+        let mut table = GrantTable::new();
+        // Should not panic
+        table.cpf_revoke(100);
+        table.cpf_revoke(u32::MAX);
+    }
 
     #[test]
     fn test_ipc_syscall_numbers() {

@@ -3703,17 +3703,28 @@ userspace crate
 
   **Deferred grant sub-tasks:**
   
-  - [ ] **13.10a — Wire `cpf_grant_magic`/`cpf_grant_direct` for path grants**
-      (`crates/minix-std/src/lib.rs` — new public helpers)
-    **Depends on:** `do_setgrant` (Phase 5.29) to register grant table with kernel
-    Implement userspace grant allocation helpers (`cpf_grant_magic` and
-    `cpf_grant_direct`) in minix-std that wrap `GrantTable::alloc()` and fill
-    in the caller/callee/grant fields. `GrantTable` already exists in minix-std
-    but lacks convenience wrappers for the VFS→FS grant pattern (granter=VFS,
-    callee=FS, buffer=user_addr). Once available, update `req_create`,
-    `req_mkdir`, `req_mknod`, `req_slink`, `req_link`, `req_unlink`,
-    `req_rmdir`, `req_rename`, `req_newdriver`, `req_readsuper` to use
-    real grants instead of `-1`.
+  - [x] **13.10a — Wire `cpf_grant_magic`/`cpf_grant_direct` for path grants**
+      (`crates/minix-std/src/lib.rs` — new public helpers,
+       `crates/servers/src/vfs/grant.rs` — VFS grant table,
+       `crates/servers/src/vfs/request.rs` — real grant IDs)
+    **Depends on:** `do_setgrant` (Phase 5.29), `CpGrant` types (arch-common)
+    Implemented userspace grant allocation helpers:
+    - `GrantTable::cpf_grant_magic()` / `cpf_grant_direct()` / `cpf_revoke()`
+      in minix-std (thin wrappers around `alloc`/`free`)
+    - `VfsGrantTable` in `crates/servers/src/vfs/grant.rs`:
+      - Static array of `CpGrant` entries (64 slots)
+      - `cpf_grant_magic()` allocates + fills magic grant (flags, granter, callee,
+        addr, len)
+      - `cpf_grant_direct()` allocates + fills direct grant
+      - `cpf_revoke()` frees entry
+      - `register_with_kernel()` stub (SYS_SETGRANT deferred to boot wiring)
+      - 12 module-level tests
+    - Updated 10 `req_*` functions to allocate real grants instead of `-1`:
+      `req_create`, `req_mkdir`, `req_mknod`, `req_slink`, `req_link`,
+      `req_unlink`, `req_rmdir`, `req_rename`, `req_newdriver`, `req_readsuper`
+      Each allocates a magic grant (path string), writes the real grant ID
+      and path length, sends via `fs_sendrec`, then revokes.
+    423 servers tests pass, plus 139 minix-std tests pass, clippy clean.
   
   - [ ] **13.10b — Wire `cpf_grant_magic`/`cpf_revoke` for data transfer**
       (`crates/minix-std/src/lib.rs` — new public helpers)

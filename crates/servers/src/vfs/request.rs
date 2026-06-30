@@ -354,8 +354,17 @@ pub unsafe fn req_create(
 ) -> (i32, NodeDetails) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
-        let _grant_id: i32 = -1;
+        let path_len = if _path.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_path).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _path as u64,
+            path_len,
+        );
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_CREATE);
@@ -363,11 +372,11 @@ pub unsafe fn req_create(
         w_u16(&mut msg, PAYLOAD_OFF + 4, omode as u16); // mode
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 12, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 20, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 12, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 20, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, NodeDetails::default());
@@ -534,16 +543,27 @@ pub unsafe fn req_inhibread(fs_e: i32, inode_nr: u32) -> i32 {
 pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_file: u32) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_LINK);
         w_u32(&mut msg, PAYLOAD_OFF, linked_file); // inode
         w_u32(&mut msg, PAYLOAD_OFF + 4, link_parent); // dir_ino
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -641,18 +661,29 @@ pub unsafe fn req_mkdir(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_MKDIR);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         w_u16(&mut msg, PAYLOAD_OFF + 4, dmode as u16); // mode
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 12, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 20, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 12, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 20, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -680,7 +711,18 @@ pub unsafe fn req_mknod(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_MKNOD);
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
@@ -688,11 +730,11 @@ pub unsafe fn req_mknod(
         w_u16(&mut msg, PAYLOAD_OFF + 8, dmode as u16); // mode
         w_u16(&mut msg, PAYLOAD_OFF + 10, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 12, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 16, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 24, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 24, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -777,15 +819,26 @@ pub unsafe fn req_newnode(
 pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _label.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_label).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _label as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_NEW_DRIVER);
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -879,7 +932,18 @@ pub unsafe fn req_readsuper(
 ) -> (i32, NodeDetails, u32) {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let label_len = if _label.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_label).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            _fs_e,
+            _label as u64,
+            label_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_READSUPER);
         let mut flags: u32 = 0;
@@ -890,12 +954,12 @@ pub unsafe fn req_readsuper(
             flags |= REQ_ISROOT;
         }
         w_u32(&mut msg, PAYLOAD_OFF + 4, flags); // flags
-        w_i32(&mut msg, PAYLOAD_OFF + 24, -1); // grant (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 24, grant_id);
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
-        w_u64(&mut msg, PAYLOAD_OFF + 8, 0); // path_len (stub)
+        w_u64(&mut msg, PAYLOAD_OFF + 8, label_len as u64);
 
-        let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        let r = fs_sendrec(_fs_e, &mut msg);
+        crate::vfs::grant::cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, NodeDetails::default(), 0);
@@ -936,18 +1000,41 @@ pub unsafe fn req_rename(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grants stubbed — TODO: wire grant table
+        let len_old = if _old_name.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_old_name).to_bytes().len() + 1
+        };
+        let len_new = if _new_name.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_new_name).to_bytes().len() + 1
+        };
+        let gid_old = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _old_name as u64,
+            len_old,
+        );
+        let gid_new = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _new_name as u64,
+            len_new,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_RENAME);
         w_u32(&mut msg, PAYLOAD_OFF, old_parent); // dir_old
         w_u32(&mut msg, PAYLOAD_OFF + 4, new_parent); // dir_new
-        w_u64(&mut msg, PAYLOAD_OFF + 8, 0); // len_old (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // len_new (stub)
-        w_i32(&mut msg, PAYLOAD_OFF + 24, -1); // grant_old (stub)
-        w_i32(&mut msg, PAYLOAD_OFF + 28, -1); // grant_new (stub)
+        w_u64(&mut msg, PAYLOAD_OFF + 8, len_old as u64);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, len_new as u64);
+        w_i32(&mut msg, PAYLOAD_OFF + 24, gid_old);
+        w_i32(&mut msg, PAYLOAD_OFF + 28, gid_new);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(gid_old); cpf_revoke(gid_new) — stubbed
+        crate::vfs::grant::cpf_revoke(gid_old);
+        crate::vfs::grant::cpf_revoke(gid_new);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -966,15 +1053,26 @@ pub unsafe fn req_rename(
 pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_RMDIR);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -1002,19 +1100,42 @@ pub unsafe fn req_slink(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grants stubbed — TODO: wire grant table
+        let len_name = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let len_buf = if _path.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_path).to_bytes().len() + 1
+        };
+        let gid_name = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            len_name,
+        );
+        let gid_buf = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _path as u64,
+            len_buf,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_SLINK);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_u64(&mut msg, PAYLOAD_OFF + 8, 0); // path_len (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // mem_size (stub)
-        w_i32(&mut msg, PAYLOAD_OFF + 24, -1); // grant_path (stub)
-        w_i32(&mut msg, PAYLOAD_OFF + 28, -1); // grant_target (stub)
+        w_u64(&mut msg, PAYLOAD_OFF + 8, len_name as u64);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, len_buf as u64);
+        w_i32(&mut msg, PAYLOAD_OFF + 24, gid_name);
+        w_i32(&mut msg, PAYLOAD_OFF + 28, gid_buf);
         w_u16(&mut msg, PAYLOAD_OFF + 32, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 34, gid); // gid
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(gid_name); cpf_revoke(gid_buf) — stubbed
+        crate::vfs::grant::cpf_revoke(gid_name);
+        crate::vfs::grant::cpf_revoke(gid_buf);
         r
     }
     #[cfg(not(target_os = "none"))]
@@ -1084,15 +1205,26 @@ pub unsafe fn req_sync(fs_e: i32) -> i32 {
 pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
     #[cfg(target_os = "none")]
     {
-        // Grant stubbed — TODO: wire grant table
+        let path_len = if _lastc.is_null() {
+            0
+        } else {
+            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+        };
+        let grant_id = crate::vfs::grant::cpf_grant_magic(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+        );
+
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_UNLINK);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_i32(&mut msg, PAYLOAD_OFF + 8, -1); // grant (stub)
-        w_u64(&mut msg, PAYLOAD_OFF + 16, 0); // path_len (stub)
+        w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
+        w_u64(&mut msg, PAYLOAD_OFF + 16, path_len as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
-        // cpf_revoke(grant_id) — stubbed
+        crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
     #[cfg(not(target_os = "none"))]
