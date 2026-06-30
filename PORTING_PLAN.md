@@ -3526,17 +3526,18 @@ be replaced with real implementations.
   - 23 tests covering all read/write/ioctl paths, clippy clean
   - Source: `.refs/minix-3.3.0/minix/drivers/video/fb/fb.c`
 
-- [ ] **12.23 — Wire PtyHost::in_process in PTY slave_read** (`crates/drivers/src/tty/pty.rs`)
-  **Depends on:** `sys_safecopyfrom` (Phase 4), PTY driver module (Phase 11e.6)
-  Currently `slave_read()` advances bookkeeping (wrleft/wrcum) but never calls
-  `host.in_process()` because the actual byte can't be read from the writer's
-  grant without `sys_safecopyfrom`.  Once grants are available:
-  1. In `slave_read()`, call `sys_safecopyfrom(wrcaller, wrgrant, wrcum, &c, 1)`
-     to read one byte from the master writer
-  2. Feed it to `host.in_process(&[c])` for TTY input processing
-  3. Only advance bookkeeping if `in_process` consumed the byte
-  4. Reply to writer when `wrleft == 0`
-  Remove the doc note about deferred wiring once implemented.
+- [x] **12.23 — Wire PtyHost::in_process in PTY slave_read** (`crates/drivers/src/tty/pty.rs`)
+  **Depends on:** `PtyHost` trait, `grant_read_byte` callback
+  Added `grant_read_byte()` to `PtyHost` trait (default: returns `None`).
+  `slave_read` now:
+  1. Reads one byte from the writer's grant via `host.grant_read_byte(caller, grant, offset)`
+  2. Feeds it to `host.in_process(&[byte])` for TTY input processing
+  3. Only advances bookkeeping if `in_process` consumed the byte
+  4. Falls back to bookkeeping-advancement when `grant_read_byte` returns `None`
+     (test mode, no real grant available)
+  5. Resets `wrcum`/`wrcaller` on write completion
+  Updated `MockHost` with `set_grant_data()` for testing the full pipeline.
+  50 PTY tests pass (8 new), clippy clean.
 
 - [ ] **12.24 — Wire chardriver_reply_select in PTY select_retry** (`crates/drivers/src/tty/pty.rs`)
   **Depends on:** Character driver framework / `chardriver_reply_select` (Phase 12.7 TTY server),
