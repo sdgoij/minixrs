@@ -3548,6 +3548,74 @@ be replaced with real implementations.
   `reply_select_count`/`reply_select_last_ops`/`reply_select_last_minor` for
   testing.  55 PTY tests pass (5 new select_retry tests), clippy clean.
 
+- [ ] **12.25 — Wire PM server message loop and dispatch** (`servers/src/pm.rs`)
+  **Depends on:** SEF init framework, IPC message receive (Phase 13)
+  `pm_server_main()` is currently an empty stub. Needs:
+  1. **Dispatch table** — map PM call numbers (PM_EXIT, PM_FORK, PM_EXEC,
+     PM_WAITPID, PM_KILL, PM_GETPID, PM_GETUID, PM_GETGID, PM_SETUID,
+     PM_SETGID, PM_GETTIMEOFDAY, PM_SYSUNAME, PM_ITIMER, PM_SIGACTION,
+     PM_SIGPROCMASK, PM_SIGPENDING, PM_REBOOT, PM_GETPRIORITY,
+     PM_SETPRIORITY, PM_SETSID, PM_GETPGRP, PM_GETSID, PM_GETSYSINFO,
+     PM_SVRCTL) to handler functions. Similar to VFS `table.rs`.
+  2. **IPC receive loop** — `pm_server_main()` must call `receive(ANY)`
+     to get incoming messages from userspace and kernel.
+  3. **Dispatch routing** — parse the message type, route to the
+     registered handler function via the dispatch table.
+  4. **Reply path** — send the reply back to the caller via `sendrec()`.
+  5. **`do_exec()`** — load and execute a new binary (PM_EXEC). This is
+     the biggest gap: needs VFS coordination for binary loading, VM
+     coordination for address space setup, and stack/environment setup.
+     Source: `.refs/minix-3.3.0/minix/servers/pm/exec.c`
+  - All existing handler functions (do_fork, do_exit, do_waitpid,
+    do_kill, do_get, do_set) are implemented and tested — they just
+    need to be connected to the dispatch loop.
+  - Kernel IPC routing: the kernel must forward userspace PM-related
+    syscalls (fork, exec, waitpid, exit, kill) to the PM server via
+    IPC rather than handling them in `dispatch_basic_syscall`.
+
+- [ ] **12.26 — Wire VFS server message loop and dispatch** (`servers/src/vfs/main.rs`)
+  **Depends on:** SEF init framework, IPC message receive (Phase 13)
+  `vfs_main()` has `get_work()`/`handle_work()`/`reply()` but all are
+  stubs. Needs:
+  1. **IPC receive** — `get_work()` must call `receive(ANY)` to get
+     incoming messages from userspace processes and PM.
+  2. **Message parsing** — `handle_work()` reads `fs_m_in` buffer but
+     needs to extract the actual message type (call number) and source
+     endpoint from the IPC message.
+  3. **PM message routing** — messages from PM_PROC_NR need to go
+     through `pm::service_pm()` (VFS-PM protocol for fork/exec/exit
+     coordination). This is currently called but `service_pm()`
+     needs implementation.
+  4. **Reply path** — `reply()` needs to send the response back
+     to the caller via `sendrec()`. Currently a no-op.
+  5. **Grant-based I/O** — `request.rs` wrappers use real grants via
+     `cpf_grant_magic` (13.10a/b) but the grant data needs to be
+     accessible from the IPC message context.
+  - All VFS call handlers (do_open, do_read, do_write, do_getdents,
+    do_mkdir, do_unlink, etc.) return ENOSYS — they need real
+    implementations that call the FS request layer (req_* functions
+    in request.rs) to talk to the underlying filesystem servers
+    (MFS, PFS, ProcFS).
+
+  - [ ] **12.27 — Route VFS syscalls from kernel to VFS server** (`kernel/src/syscall.rs`)
+  **Depends on:** VFS server message loop (12.26), IPC message send (Phase 13)
+  Syscalls 40-47 (mkdir, unlink, rmdir, link, chmod, chown, mknod, getdents)
+  currently return ENOSYS directly. These need to be forwarded to the VFS
+  server via IPC rather than handled in the kernel. For each syscall:
+  1. Build a VFS message with the appropriate call number (VFS_MKDIR = 0x109,
+     VFS_UNLINK = 0x107, VFS_RMDIR = 0x112, VFS_LINK = 0x106, VFS_CHMOD = 0x10B,
+     VFS_CHOWN = 0x10C, VFS_MKNOD = 0x10A, VFS_GETDENTS = 0x11D) and copy
+     the syscall arguments into the message fields.
+  2. Call `do_sync_ipc(caller, &msg, SENDREC)` to deliver the message to
+     `VFS_PROC_NR` and wait for the reply.
+  3. Extract the return value from the reply message and return it to the
+     caller.
+  - Also update `sys_read_handler` (2) and `sys_write_handler` (3) to route
+    through VFS instead of handling serial output directly in the kernel.
+    The direct-serial path was a temporary measure for early boot init output.
+  - `sys_open_handler` (4), `sys_close_handler` (5), and `sys_exit_handler` (0)
+    also need VFS routing: open/close go to VFS, exit needs PM coordination.
+
 ## Phase 13: Rust `std` for Minix
 
 **Goal**: Implement Rust `std` for the `x86_64-pc-minix` target. Since the system is
@@ -3585,6 +3653,10 @@ userspace crate
     - `syscall0`–`syscall6` wrappers using inline asm `syscall` instruction
       with correct x86_64 ABI (rax=nr, rdi/rsi/rdx/r10/r8/r9=args)
     - `exit(status)`, `write(fd, buf)`, `getpid()`, `brk(addr)`, `sbrk(increment)`
+    - `read(fd, buf)`, `open(path, flags)`, `close(fd)` — basic file I/O
+    - `mkdir(path, mode)`, `unlink(path)`, `rmdir(path)`, `link(old, new)`,
+      `chmod(path, mode)`, `chown(path, owner, group)`, `mknod(path, mode, dev)`
+      — VFS syscall wrappers (40-46), return ENOSYS until VFS dispatch wired
     - `_start` entry: reads argc/argv from stack per SysV ABI, calls `main`, exits
     - `panic_handler`: formats message via core::fmt::Write into stack buffer,
       writes to stderr via `write(2, ...)`, exits with -1
@@ -3980,9 +4052,19 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
     - `test_cat_no_args` ignored (MINIX `syscall` ABI)
     - `test_init_stub` ignored (infinite `loop { pause }`)
     - All 14 binary targets set `test = false` (embedded `#![no_std]` binaries)
-
-**M1b gap:** These syscall handlers enable basic init execution, but the full
-boot-to-shell path requires PM/VFS/RS server IPC dispatch running. The bare-metal
+  - ✅ All 14 userland commands implemented with proper logic:
+    - `echo`, `cat`, `cp` — use open/read/write/close syscalls
+    - `mkdir`, `rm`, `ln`, `chmod`, `chown`, `mknod` — call VFS syscalls
+      (40-46) returning ENOSYS until VFS dispatch is wired
+    - `ls` — opens directory, parses getdents (47), prints filenames
+    - `sh` — placeholder until PM server dispatch is live
+    - `sync`, `reboot`, `fsck` — simple no-ops
+    - `init` — boot banner, PID display, infinite pause loop
+    - 16 host-compatible tests (5 ignored for MINIX ABI dependency)
+  - ✅ 8 VFS kernel syscall stubs registered (40=mkdir through 47=getdents)
+    returning ENOSYS — see task 12.27 for VFS IPC routing
+  - ✅ 8 minix-rt syscall wrappers added (mkdir, unlink, rmdir, link,
+    chmod, chown, mknod, close) plus NR_* constants The bare-metal
 test suite (Phase E) proves ring-3 transition works by running a synthetic test
 that jumps to ring-3 and writes the QEMU exit port.
 
@@ -3992,6 +4074,31 @@ responds to IPC messages, enabling shell launch on `/dev/tty00`.
 ---
 
 ### Priority 2 — Essential userland
+
+The initial 14 boot-critical binaries are implemented in `crates/userland/src/`:
+
+- [x] **14.1** — `bin/echo` — print arguments to stdout
+- [x] **14.2** — `bin/cat` — concatenate files, read from stdin if no args
+- [x] **14.3** — `bin/cp` — copy file src to dst via open/read/write/close
+- [x] **14.4** — `bin/ls` — list directory via open/getdents/close (needs VFS)
+- [x] **14.5** — `bin/mkdir` — create directories via NR_MKDIR=40 (needs VFS)
+- [x] **14.6** — `bin/rm` — remove files/dirs with `-r` recursion (needs VFS)
+- [x] **14.7** — `bin/ln` — create hard links via NR_LINK=43 (needs VFS)
+- [x] **14.8** — `bin/chmod` — change file mode via NR_CHMOD=44 (needs VFS)
+- [x] **14.9** — `bin/chown` — change file owner via NR_CHOWN=45 (needs VFS)
+- [x] **14.10** — `bin/sync` — print "sync" (no-op until VFS flushing wired)
+- [x] **14.11** — `bin/mknod` — create device nodes via NR_MKNOD=46 (needs VFS)
+- [x] **14.12** — `bin/reboot` — print "reboot" (no-op until PM reboot wired)
+- [x] **14.13** — `bin/fsck` — print "fsck" (no-op until VFS wired)
+- [x] **14.14** — `bin/sh` — placeholder until PM server dispatch is live
+- [x] **14.15** — `sbin/init` — boot banner, PID display, infinite pause loop
+- [ ] **14.16** — Full `sh` with fork/exec/waitpid (blocked on PM dispatch, task 12.25)
+  - Tests: 16 unit tests in lib.rs (5 ignored for MINIX ABI), clippy clean
+  - All commands dispatch through `userland::CMD(args)` pattern for testability
+  - `errstr()` helper maps POSIX error codes to human-readable strings
+
+Remaining Priority 2 commands (not yet ported):
+  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
 
 - [ ] **14.17** — `bin/date` (`.refs/minix-3.3.0/bin/date/`)
   - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases

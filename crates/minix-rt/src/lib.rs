@@ -40,6 +40,22 @@ const NR_OPEN: u64 = 4;
 const NR_CLOSE: u64 = 5;
 /// Duplicate file descriptor.
 const NR_DUP: u64 = 32;
+/// Create a directory.
+const NR_MKDIR: u64 = 40;
+/// Remove a file.
+const NR_UNLINK: u64 = 41;
+/// Remove a directory.
+const NR_RMDIR: u64 = 42;
+/// Create a hard link.
+const NR_LINK: u64 = 43;
+/// Change file mode.
+const NR_CHMOD: u64 = 44;
+/// Change file owner.
+const NR_CHOWN: u64 = 45;
+/// Create a device node.
+const NR_MKNOD: u64 = 46;
+/// Get directory entries.
+const NR_GETDENTS: u64 = 47;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Syscall wrappers
@@ -255,6 +271,46 @@ pub fn open(path: &[u8], flags: i32) -> i64 {
             flags as u64,
         )
     }
+}
+
+/// Close a file descriptor.
+pub fn close(fd: i32) -> i64 {
+    unsafe { syscall1(NR_CLOSE, fd as u64) }
+}
+
+/// Create a directory.
+pub fn mkdir(path: &[u8], mode: u32) -> i64 {
+    unsafe { syscall2(NR_MKDIR, path.as_ptr() as u64, mode as u64) }
+}
+
+/// Remove a file.
+pub fn unlink(path: &[u8]) -> i64 {
+    unsafe { syscall1(NR_UNLINK, path.as_ptr() as u64) }
+}
+
+/// Remove a directory.
+pub fn rmdir(path: &[u8]) -> i64 {
+    unsafe { syscall1(NR_RMDIR, path.as_ptr() as u64) }
+}
+
+/// Create a hard link.
+pub fn link(old: &[u8], new: &[u8]) -> i64 {
+    unsafe { syscall2(NR_LINK, old.as_ptr() as u64, new.as_ptr() as u64) }
+}
+
+/// Change file mode.
+pub fn chmod(path: &[u8], mode: u32) -> i64 {
+    unsafe { syscall2(NR_CHMOD, path.as_ptr() as u64, mode as u64) }
+}
+
+/// Change file owner.
+pub fn chown(path: &[u8], owner: i32, group: i32) -> i64 {
+    unsafe { syscall3(NR_CHOWN, path.as_ptr() as u64, owner as u64, group as u64) }
+}
+
+/// Create a device node.
+pub fn mknod(path: &[u8], mode: u32, dev: u64) -> i64 {
+    unsafe { syscall3(NR_MKNOD, path.as_ptr() as u64, mode as u64, dev) }
 }
 
 /// Get the current process ID.

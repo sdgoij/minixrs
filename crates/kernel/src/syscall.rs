@@ -196,6 +196,46 @@ unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     }
 }
 
+/// SYS_mkdir (40) — create a directory.
+unsafe fn sys_mkdir_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS — VFS server not available yet
+}
+
+/// SYS_unlink (41) — remove a file.
+unsafe fn sys_unlink_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_rmdir (42) — remove a directory.
+unsafe fn sys_rmdir_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_link (43) — create a hard link.
+unsafe fn sys_link_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_chmod (44) — change file mode.
+unsafe fn sys_chmod_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_chown (45) — change file owner.
+unsafe fn sys_chown_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_mknod (46) — create a device node.
+unsafe fn sys_mknod_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
+/// SYS_getdents (47) — read directory entries.
+unsafe fn sys_getdents_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    -38 // ENOSYS
+}
+
 /// Initialize basic syscall handlers.
 ///
 /// # Safety
@@ -217,6 +257,14 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(5, sys_close_handler); // NR_CLOSE
         register_basic_syscall(20, sys_getpid_handler); // NR_GETPID
         register_basic_syscall(36, sys_brk_handler); // NR_BRK
+        register_basic_syscall(40, sys_mkdir_handler); // NR_MKDIR
+        register_basic_syscall(41, sys_unlink_handler); // NR_UNLINK
+        register_basic_syscall(42, sys_rmdir_handler); // NR_RMDIR
+        register_basic_syscall(43, sys_link_handler); // NR_LINK
+        register_basic_syscall(44, sys_chmod_handler); // NR_CHMOD
+        register_basic_syscall(45, sys_chown_handler); // NR_CHOWN
+        register_basic_syscall(46, sys_mknod_handler); // NR_MKNOD
+        register_basic_syscall(47, sys_getdents_handler); // NR_GETDENTS
     }
 }
 
