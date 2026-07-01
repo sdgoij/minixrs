@@ -63,6 +63,31 @@ pub fn run_integration_tests() -> ! {
     total += test_vm_alloc_free();
     total += test_vm_alloc_multi();
 
+    // Phase F: Process table — call proc_init to initialize process slots
+    // (kernel::init doesn't call proc_init, so we do it here)
+    unsafe {
+        kernel::table::proc_init();
+    }
+    total += test_proc_addr_valid();
+    total += test_proc_addr_invalid();
+    total += test_endpoint_lookup();
+    total += test_is_empty_proc();
+    total += test_is_kernel_vs_user();
+
+    // Phase G: IPC — initialize cpulocals + run queues for scheduler
+    unsafe {
+        arch_x86_64::cpulocals::init_cpulocals();
+        // Clear run queues for test isolation
+        let head = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr();
+        let tail = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_tail_ptr();
+        for q in 0..arch_x86_64::cpulocals::NR_SCHED_QUEUES {
+            (*head)[q] = core::ptr::null_mut();
+            (*tail)[q] = core::ptr::null_mut();
+        }
+    }
+    total += test_mini_notify_when_receiving();
+    total += test_mini_send_queues_when_not_receiving();
+
     // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
     // If all prior tests passed, attempt the ring-3 transition.
     // On success, the ring-3 code writes to the isa-debug-exit port and QEMU
@@ -356,7 +381,7 @@ fn test_pt_mapkernel() -> u32 {
         unsafe extern "C" {
             static __bss_end: u8;
         }
-        let bss_end_addr = unsafe { core::ptr::addr_of!(__bss_end) as u64 };
+        let bss_end_addr = core::ptr::addr_of!(__bss_end) as u64;
         if bss_end_addr > 0x400000 {
             // BSS exceeds 2MB kernel region — skip this test
             return;
@@ -488,8 +513,250 @@ fn test_vm_alloc_multi() -> u32 {
 }
 
 // ===========================================================================
-// Phase E: Ring-3 Execution (M1b proof)
+// Phase F: Process Table
 // ===========================================================================
+
+fn test_proc_addr_valid() -> u32 {
+    run("proc_addr_valid", |t| {
+        use arch_common::com::{CLOCK, INIT_PROC_NR, PM_PROC_NR, SYSTEM, VFS_PROC_NR};
+        // Kernel tasks
+        let clock_p = kernel::table::proc_addr(CLOCK);
+        t.assert(!clock_p.is_null(), "proc_addr(CLOCK) should be non-null");
+        let sys_p = kernel::table::proc_addr(SYSTEM);
+        t.assert(!sys_p.is_null(), "proc_addr(SYSTEM) should be non-null");
+
+        // User processes
+        let pm_p = kernel::table::proc_addr(PM_PROC_NR);
+        t.assert(!pm_p.is_null(), "proc_addr(PM) should be non-null");
+        let vfs_p = kernel::table::proc_addr(VFS_PROC_NR);
+        t.assert(!vfs_p.is_null(), "proc_addr(VFS) should be non-null");
+        let init_p = kernel::table::proc_addr(INIT_PROC_NR);
+        t.assert(!init_p.is_null(), "proc_addr(INIT) should be non-null");
+    })
+}
+
+fn test_proc_addr_invalid() -> u32 {
+    run("proc_addr_invalid", |t| {
+        // Out of range (beyond NR_PROCS_TOTAL)
+        let rp = kernel::table::proc_addr(300);
+        t.assert(rp.is_null(), "proc_addr(300) should be null");
+        // Very negative
+        let rp2 = kernel::table::proc_addr(-100);
+        t.assert(rp2.is_null(), "proc_addr(-100) should be null");
+    })
+}
+
+fn test_endpoint_lookup() -> u32 {
+    run("endpoint_lookup", |t| {
+        use arch_common::com::{CLOCK, PM_PROC_NR};
+
+        // Lookup by endpoint value (generation 0, so ep == proc_nr)
+        let clock_ep = kernel::table::make_endpoint(0, CLOCK);
+        let rp = kernel::table::endpoint_lookup(clock_ep);
+        t.assert(!rp.is_null(), "endpoint_lookup(CLOCK) should succeed");
+
+        let pm_ep = kernel::table::make_endpoint(0, PM_PROC_NR);
+        let pm_p = kernel::table::endpoint_lookup(pm_ep);
+        t.assert(!pm_p.is_null(), "endpoint_lookup(PM) should succeed");
+
+        // Invalid endpoint
+        let invalid = kernel::table::endpoint_lookup(99999);
+        t.assert(
+            invalid.is_null(),
+            "endpoint_lookup(99999) should return null",
+        );
+    })
+}
+
+fn test_is_empty_proc() -> u32 {
+    run("is_empty_proc", |t| {
+        use arch_common::com::{CLOCK, PM_PROC_NR};
+
+        // Boot processes should NOT be empty (SLOT_FREE cleared by proc_init)
+        let clock_p = kernel::table::proc_addr(CLOCK);
+        let empty = unsafe { kernel::table::is_empty_proc(clock_p) };
+        t.assert(!empty, "CLOCK should not be empty");
+
+        let pm_p = kernel::table::proc_addr(PM_PROC_NR);
+        let pm_empty = unsafe { kernel::table::is_empty_proc(pm_p) };
+        t.assert(!pm_empty, "PM should not be empty");
+
+        // A non-boot slot (e.g. slot 50) should be empty/SLOT_FREE
+        let free_p = kernel::table::proc_addr(50);
+        let free_empty = unsafe { kernel::table::is_empty_proc(free_p) };
+        t.assert(free_empty, "slot 50 should be empty (SLOT_FREE)");
+    })
+}
+
+fn test_is_kernel_vs_user() -> u32 {
+    run("is_kernel_vs_user", |t| {
+        use arch_common::com::{CLOCK, INIT_PROC_NR, PM_PROC_NR, SYSTEM, VFS_PROC_NR};
+
+        // Kernel tasks: CLOCK (-3), SYSTEM (-2)
+        let clock_p = kernel::table::proc_addr(CLOCK);
+        t.assert(
+            unsafe { kernel::table::is_kernel_proc(clock_p) },
+            "CLOCK should be kernel proc",
+        );
+        let sys_p = kernel::table::proc_addr(SYSTEM);
+        t.assert(
+            unsafe { kernel::table::is_kernel_proc(sys_p) },
+            "SYSTEM should be kernel proc",
+        );
+
+        // User processes: PM (0), VFS (1), INIT (10)
+        let pm_p = kernel::table::proc_addr(PM_PROC_NR);
+        t.assert(
+            unsafe { kernel::table::is_user_proc(pm_p) },
+            "PM should be user proc",
+        );
+        let vfs_p = kernel::table::proc_addr(VFS_PROC_NR);
+        t.assert(
+            unsafe { kernel::table::is_user_proc(vfs_p) },
+            "VFS should be user proc",
+        );
+        let init_p = kernel::table::proc_addr(INIT_PROC_NR);
+        t.assert(
+            unsafe { kernel::table::is_user_proc(init_p) },
+            "INIT should be user proc",
+        );
+    })
+}
+
+// ===========================================================================
+// Phase G: IPC
+// ===========================================================================
+
+/// Helper: set up a Proc slot for IPC testing.
+/// This clears SLOT_FREE, sets p_nr, p_endpoint, and p_magic.
+/// Reuses the existing slot initialized by proc_init (if a boot proc).
+unsafe fn ipc_setup_proc(nr: i32) -> *mut kernel::proc::Proc {
+    let rp = kernel::table::proc_addr(nr);
+    if rp.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        (*rp)
+            .p_rts_flags
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+        (*rp).p_nr = nr;
+        (*rp).p_endpoint = kernel::table::make_endpoint(0, nr);
+        (*rp).p_caller_q = core::ptr::null_mut();
+        (*rp).p_q_link = core::ptr::null_mut();
+        (*rp).p_getfrom_e = 0;
+        (*rp).p_sendto_e = 0;
+        (*rp).p_magic = kernel::proc::PMAGIC;
+    }
+    rp
+}
+
+fn test_mini_notify_when_receiving() -> u32 {
+    run("mini_notify_when_receiving", |t| {
+        unsafe {
+            // Use non-boot slots (50 and 51) so we don't clobber boot state
+            let dst = ipc_setup_proc(50);
+            let _src = ipc_setup_proc(51);
+            if dst.is_null() || _src.is_null() {
+                t.assert(false, "ipc_setup_proc failed");
+                return;
+            }
+
+            let src_ep = (*_src).p_endpoint;
+            let dst_ep = (*dst).p_endpoint;
+
+            // Set dst to RECEIVING from any (NONE)
+            (*dst).p_rts_flags.store(
+                kernel::proc::RtsFlags::RECEIVING.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            (*dst).p_getfrom_e = kernel::system::NONE;
+
+            // Send notification from src to dst
+            let result = kernel::ipc::mini_notify(src_ep, dst_ep);
+            t.assert(result == 0, "mini_notify should return OK");
+
+            // dst should no longer be RECEIVING
+            let rts = (*dst)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            t.assert(
+                rts & kernel::proc::RtsFlags::RECEIVING.bits() == 0,
+                "dst should have RECEIVING cleared after notify",
+            );
+
+            // Clean up: restore SLOT_FREE
+            (*dst).p_rts_flags.store(
+                kernel::proc::RtsFlags::SLOT_FREE.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            (*_src).p_rts_flags.store(
+                kernel::proc::RtsFlags::SLOT_FREE.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    })
+}
+
+fn test_mini_send_queues_when_not_receiving() -> u32 {
+    run("mini_send_queues_when_not_receiving", |t| {
+        unsafe {
+            let src = ipc_setup_proc(52);
+            let dst = ipc_setup_proc(53);
+            if src.is_null() || dst.is_null() {
+                t.assert(false, "ipc_setup_proc failed");
+                return;
+            }
+
+            let dst_ep = (*dst).p_endpoint;
+
+            // dst is NOT receiving (rts_flags = 0)
+            (*dst)
+                .p_rts_flags
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+
+            let mut msg = [0u8; kernel::proc::MESSAGE_SIZE];
+            msg[0..4].copy_from_slice(&42i32.to_ne_bytes());
+
+            let result = kernel::ipc::mini_send(
+                src,
+                dst_ep,
+                msg.as_ptr(),
+                0, // no flags
+            );
+            t.assert(result == 0, "mini_send should return OK");
+
+            // src should now have SENDING flag
+            let src_rts = (*src)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            t.assert(
+                src_rts & kernel::proc::RtsFlags::SENDING.bits() != 0,
+                "src should have SENDING flag after queued send",
+            );
+
+            // dst should have src on its caller_q
+            t.assert(
+                (*dst).p_caller_q == src,
+                "dst's caller_q should point to src",
+            );
+            t.assert(
+                (*src).p_sendto_e == dst_ep,
+                "src's p_sendto_e should be dst",
+            );
+
+            // Clean up: clear SENDING, restore SLOT_FREE
+            (*src).p_rts_flags.store(
+                kernel::proc::RtsFlags::SLOT_FREE.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            (*dst).p_rts_flags.store(
+                kernel::proc::RtsFlags::SLOT_FREE.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            (*dst).p_caller_q = core::ptr::null_mut();
+        }
+    })
+}
 
 /// Test that `sysretq` can transition to ring-3.
 ///
