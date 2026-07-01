@@ -586,21 +586,95 @@ pub unsafe fn str_sel() -> u16 {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn sysretq_to_user(proc_ptr: *const u8) -> ! {
-    // Offsets within `Proc` (first field is `p_reg: TrapFrame` at 0):
-    //   p_reg.rcx    = +16
-    //   p_reg.r11    = +72
-    //   p_reg.rsp    = +168
-    //   p_seg.p_cr3  = +184  (after TrapFrame's 184 bytes)
     core::arch::naked_asm!(
-        // rdi = proc_ptr (SysV AMD64 ABI)
-        // Load per-process CR3, RCX, R11, RSP and execute sysretq
-        "mov    rax, [rdi + 184]", // p_seg.p_cr3
-        "mov    cr3, rax",         // load per-process page table
-        "mov    rcx, [rdi + 16]",  // p_reg.rcx → RIP via sysretq
-        "mov    r11, [rdi + 72]",  // p_reg.r11 → RFLAGS via sysretq
-        "mov    rsp, [rdi + 168]", // p_reg.rsp → user stack
+        "mov    rax, [rdi + 184]",
+        "mov    cr3, rax",
+        "mov    rcx, [rdi + 16]",
+        "mov    r11, [rdi + 72]",
+        "mov    rsp, [rdi + 168]",
         "sysretq",
     );
+}
+
+/// Execute `sysretq` — assumes registers are already set by caller:
+///   rax = CR3, rcx = entry (RIP), r11 = RFLAGS, rdx = user RSP
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn sysretq_direct() -> ! {
+    core::arch::naked_asm!("mov    cr3, rax", "mov    rsp, rdx", "sysretq",);
+}
+
+// The syscall entry point and handler pointer are only available on the
+// kernel target (x86_64-pc-minix), not on the host build (Windows tests).
+#[cfg(target_os = "none")]
+pub mod syscall_abi {
+    use core::arch::naked_asm;
+    use core::sync::atomic::AtomicU64;
+
+    /// Global pointer to the syscall C handler.
+    #[unsafe(no_mangle)]
+    pub static SYSCALL_HANDLER_PTR: AtomicU64 = AtomicU64::new(0);
+
+    /// Set the syscall handler pointer.
+    pub unsafe fn set_syscall_handler(handler: unsafe extern "C" fn(*const u64)) {
+        SYSCALL_HANDLER_PTR.store(
+            handler as usize as u64,
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Load the raw handler pointer value.
+    pub fn get_syscall_handler_raw() -> u64 {
+        SYSCALL_HANDLER_PTR.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Syscall entry point — called by hardware via `syscall` instruction.
+    #[unsafe(no_mangle)]
+    #[unsafe(naked)]
+    pub unsafe extern "C" fn syscall_entry() {
+        core::arch::naked_asm!(
+            "swapgs",
+            "push   r15",
+            "push   r14",
+            "push   r13",
+            "push   r12",
+            "push   r11",
+            "push   r10",
+            "push   r9",
+            "push   r8",
+            "push   rdi",
+            "push   rsi",
+            "push   rdx",
+            "push   rcx",
+            "push   rbx",
+            "push   rax",
+            "mov    rdi, rsp",
+            "sub    rsp, 32",
+            "mov    rax, [{ptr}]",
+            "test   rax, rax",
+            "jz     1f",
+            "call   rax",
+            "1:",
+            "add    rsp, 32",
+            "pop    rax",
+            "pop    rbx",
+            "pop    rcx",
+            "pop    rdx",
+            "pop    rsi",
+            "pop    rdi",
+            "pop    r8",
+            "pop    r9",
+            "pop    r10",
+            "pop    r11",
+            "pop    r12",
+            "pop    r13",
+            "pop    r14",
+            "pop    r15",
+            "swapgs",
+            "sysretq",
+            ptr = sym SYSCALL_HANDLER_PTR,
+        );
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════

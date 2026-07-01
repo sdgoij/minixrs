@@ -778,10 +778,6 @@ fn test_mini_send_queues_when_not_receiving() -> u32 {
     })
 }
 
-// ===========================================================================
-// Phase I: Grants
-// ===========================================================================
-
 fn test_grant_direct_valid() -> u32 {
     run("grant_direct_valid", |t| {
         unsafe {
@@ -895,10 +891,6 @@ fn test_grant_invalid_id() -> u32 {
     })
 }
 
-// ===========================================================================
-// Phase J: Syscalls
-// ===========================================================================
-
 fn test_syscall_getpid() -> u32 {
     run("syscall_getpid", |t| {
         unsafe {
@@ -917,7 +909,8 @@ fn test_syscall_getpid() -> u32 {
                 .store(0, core::sync::atomic::Ordering::Relaxed);
 
             let args = [0u64; 6];
-            let result = kernel::syscall::dispatch_basic_syscall(rp, 0, &args);
+            // NR_GETPID is 20, not 0 (NR_EXIT = 0 after POSIX numbering change)
+            let result = kernel::syscall::dispatch_basic_syscall(rp, 20, &args);
             t.assert(result == 70, "getpid must return the proc's endpoint");
 
             (*rp).p_rts_flags.store(
@@ -927,9 +920,6 @@ fn test_syscall_getpid() -> u32 {
         }
     })
 }
-
-// ===========================================================================
-// Phase K: Timers
 
 /// Dummy timer callback — does nothing.
 unsafe fn dummy_timer_cb(_tp: *mut kernel::r#priv::MinixTimer) {}
@@ -1014,10 +1004,6 @@ fn test_timer_multiple() -> u32 {
         t.assert(timer_list.is_null(), "timer list should be empty");
     })
 }
-
-// ===========================================================================
-// Phase L: Interrupts
-// ===========================================================================
 
 /// Dummy IRQ handler that returns the hook's ID.
 unsafe fn test_irq_handler(hook: *mut kernel::system::IrqHook) -> i32 {

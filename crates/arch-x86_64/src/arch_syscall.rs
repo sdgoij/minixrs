@@ -17,8 +17,10 @@ use crate::cpu_msr;
 /// Kernel code segment selector (GDT index 1, RPL=0).
 pub const SYSCALL_CS: u16 = 0x0008;
 
-/// User code segment selector (GDT index 3, RPL=3).
-pub const SYSRET_CS: u16 = 0x001B;
+/// User code segment selector (GDT index 4, RPL=3).
+/// SYSRETQ computes CS = (star[47:32] + 16) | 3, SS = (star[47:32] + 8) | 3.
+/// With star[47:32] = 0x0010: CS = 0x0023 (index 4, RPL 3), SS = 0x001B (index 3, RPL 3).
+pub const SYSRET_CS: u16 = 0x0010;
 
 /// Set up the syscall MSRs for `syscall`/`sysret`.
 ///
@@ -71,8 +73,10 @@ mod tests {
 
     #[test]
     fn test_sysret_cs_value() {
-        // User CS: GDT index 3, RPL 3 => 0x001B.
-        assert_eq!(SYSRET_CS, 0x001B);
+        // SYSRET_CS is the base for the SYSRETQ CS/SS computation.
+        // SYSRETQ computes: CS = STAR[47:32] + 16 | 3, SS = STAR[47:32] + 8 | 3.
+        // With SYSRET_CS = 0x0010: CS = 0x0023 (idx 4, user code), SS = 0x001B (idx 3, user data).
+        assert_eq!(SYSRET_CS, 0x0010);
     }
 
     #[test]

@@ -200,41 +200,35 @@ pub unsafe fn boot_create_page_table() -> u64 {
 /// `init` must contain a valid Proc pointer and page table physical address.
 /// Never returns.
 pub unsafe fn boot_jump_to_user(init: &InitInfo, pt_phys: u64) -> ! {
-    // Set the per-process CR3 on init's Proc entry
-    unsafe {
-        (*init.proc_ptr).p_seg.p_cr3 = pt_phys;
-    }
+    // Read register values from the Proc struct via volatile access
+    // to prevent the compiler from hoisting fields into statics.
+    let entry = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.rcx) };
+    let rflags = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.r11) };
+    let stack = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.rsp) };
 
-    // Call arch_proc_init to finalize TrapFrame setup (rcx/r11/rsp).
-    // This is a no-op for fields already set by load_and_prepare_init,
-    // but provides a single point for any arch-specific adjustments.
-    unsafe {
-        arch_x86_64::arch_proc::arch_proc_init(
-            &raw mut (*init.proc_ptr).p_reg,
-            (*init.proc_ptr).p_reg.rcx,
-            (*init.proc_ptr).p_reg.rsp,
-            b"init",
-            0,
-        );
-    }
-
-    // Debug: print the jump address
     print!("Jumping to ring-3: entry=0x");
-    // SAFETY: init.proc_ptr is a valid Proc pointer
-    unsafe {
-        print_hex((*init.proc_ptr).p_reg.rcx);
-    }
+    print_hex(entry);
     print!(" stack=0x");
-    unsafe {
-        print_hex((*init.proc_ptr).p_reg.rsp);
-    }
+    print_hex(stack);
     print!(" cr3=0x");
     print_hex(pt_phys);
     print!("\n");
 
-    // This never returns
+    // Execute sysretq with register values loaded directly.
     unsafe {
-        arch_x86_64::asm::sysretq_to_user(init.proc_ptr as *const u8);
+        core::arch::asm!(
+            "mov    rcx, {entry}",
+            "mov    r11, {rflags}",
+            "mov    rax, {cr3}",
+            "mov    cr3, rax",
+            "mov    rsp, {stack}",
+            "sysretq",
+            entry = in(reg) entry,
+            rflags = in(reg) rflags,
+            cr3 = in(reg) pt_phys,
+            stack = in(reg) stack,
+            options(noreturn),
+        );
     }
 }
 
@@ -307,16 +301,22 @@ mod tests {
 
     #[test]
     fn sysret_cs_ss_from_star_msr() {
-        // SYSRETQ loads CS from STAR[47:32], SS = CS + 8.
-        // SYSRET_CS = 0x001B (GDT index 3, RPL 3)
-        // SS = 0x0023 (GDT index 4, RPL 3)
-        let sysret_cs: u16 = 0x001B;
-        let expected_ss: u16 = 0x0023;
-        assert_eq!(sysret_cs + 8, expected_ss);
+        // SYSRETQ (64-bit) loads CS from STAR[47:32] + 16, SS from STAR[47:32] + 8.
+        // SYSRET_CS = 0x0010 (GDT base for user segments)
+        //   CS = 0x0010 + 16 = 0x0020 | 3 = 0x0023 (GDT index 4, RPL 3)
+        //   SS = 0x0010 + 8  = 0x0018 | 3 = 0x001B (GDT index 3, RPL 3)
+        // GDT layout:
+        //   Index 0: null
+        //   Index 1: kernel code (0x08)
+        //   Index 2: kernel data (0x10)
+        //   Index 3: user data (0x1B)
+        //   Index 4: user code (0x23)
+        let sysret_cs: u16 = 0x0023;
+        let sysret_ss: u16 = 0x001B;
         assert_eq!(sysret_cs & 3, 3, "CS RPL must be 3 (user mode)");
-        assert_eq!(expected_ss & 3, 3, "SS RPL must be 3 (user mode)");
-        assert_eq!(sysret_cs >> 3, 3, "CS GDT index must be 3");
-        assert_eq!(expected_ss >> 3, 4, "SS GDT index must be 4");
+        assert_eq!(sysret_ss & 3, 3, "SS RPL must be 3 (user mode)");
+        assert_eq!(sysret_cs >> 3, 4, "CS GDT index must be 4");
+        assert_eq!(sysret_ss >> 3, 3, "SS GDT index must be 3");
     }
 
     #[test]

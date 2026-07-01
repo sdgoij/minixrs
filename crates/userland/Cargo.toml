@@ -13,3 +13,82 @@ workspace = true
 workspace = true
 
 [dependencies]
+minix-rt = { path = "../minix-rt" }
+minix-std = { path = "../minix-std" }
+
+# Binary targets — these are #![no_std] / #![no_main] embedded MINIX
+# binaries that cannot run as host-native tests. Tests live in the lib target.
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+test = false
+
+[[bin]]
+name = "echo"
+path = "src/bin/echo.rs"
+test = false
+
+[[bin]]
+name = "cp"
+path = "src/bin/cp.rs"
+test = false
+
+[[bin]]
+name = "init"
+path = "src/bin/init.rs"
+test = false
+
+[[bin]]
+name = "ls"
+path = "src/bin/ls.rs"
+test = false
+
+[[bin]]
+name = "mkdir"
+path = "src/bin/mkdir.rs"
+test = false
+
+[[bin]]
+name = "rm"
+path = "src/bin/rm.rs"
+test = false
+
+[[bin]]
+name = "ln"
+path = "src/bin/ln.rs"
+test = false
+
+[[bin]]
+name = "chmod"
+path = "src/bin/chmod.rs"
+test = false
+
+[[bin]]
+name = "chown"
+path = "src/bin/chown.rs"
+test = false
+
+[[bin]]
+name = "sync"
+path = "src/bin/sync.rs"
+test = false
+
+[[bin]]
+name = "mknod"
+path = "src/bin/mknod.rs"
+test = false
+
+[[bin]]
+name = "reboot"
+path = "src/bin/reboot.rs"
+test = false
+
+[[bin]]
+name = "fsck"
+path = "src/bin/fsck.rs"
+test = false
+
+[[bin]]
+name = "sh"
+path = "src/bin/sh.rs"
+test = false

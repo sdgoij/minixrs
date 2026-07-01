@@ -52,9 +52,9 @@ pub fn init() {
     let cr3 = unsafe { asm::read_cr3() };
     BOOT_CR3.store(cr3, Ordering::Relaxed);
 
-    // Enable NX (No-Execute) bit so PG_NX in PTEs is honored
+    // Enable NX and SCE (required for sysretq to work)
     unsafe {
-        cpu_msr::enable_nxe();
+        cpu_msr::enable_nxe_and_sce();
     }
 
     // Initialize the IDT with default interrupt gates and load via lidt.

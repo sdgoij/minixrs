@@ -103,3 +103,7 @@ dependencies = [
 [[package]]
 name = "userland"
 version = "0.1.0"
+dependencies = [
+ "minix-rt",
+ "minix-std",
+]

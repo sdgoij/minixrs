@@ -119,6 +119,10 @@ pub extern "C" fn kmain() -> ! {
     {
         serial_write("  loading init from initramfs...\r\n");
 
+        unsafe {
+            kernel::table::proc_init();
+        }
+
         let init_info = match unsafe { boot_init::load_and_prepare_init() } {
             Some(info) => info,
             None => {
@@ -138,8 +142,48 @@ pub extern "C" fn kmain() -> ! {
         serial_write("  jumping to ring-3...\r\n");
 
         unsafe {
+            arch_x86_64::apic::mask_timer_irq();
+        }
+
+        #[cfg(target_os = "none")]
+        unsafe {
+            arch_x86_64::asm::syscall_abi::set_syscall_handler(syscall_handler_c);
+            let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
+            arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
+            arch_x86_64::cpulocals::init_cpulocals();
+            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(
+                init_info.proc_ptr as *mut core::ffi::c_void,
+            );
+        }
+
+        unsafe {
             boot_init::boot_jump_to_user(&init_info, pt_phys);
         }
+    }
+}
+
+/// C handler for syscall entry — called from arch-x86_64's naked asm.
+/// Saves/restores registers, dispatches to kernel::syscall.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
+    unsafe {
+        let nr = core::ptr::read_volatile(saved) as usize;
+        let rp = arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc;
+        if rp.is_null() {
+            core::ptr::write_volatile(saved as *mut u64, 0);
+            return;
+        }
+
+        let args = [
+            core::ptr::read_volatile(saved.add(5)),
+            core::ptr::read_volatile(saved.add(4)),
+            core::ptr::read_volatile(saved.add(3)),
+            core::ptr::read_volatile(saved.add(8)),
+            core::ptr::read_volatile(saved.add(6)),
+            core::ptr::read_volatile(saved.add(7)),
+        ];
+        let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
+        core::ptr::write_volatile(saved as *mut u64, result as u64);
     }
 }
 

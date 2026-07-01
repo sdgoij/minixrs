@@ -299,35 +299,35 @@ pub unsafe fn setup_user_stack(
     // Align string_pos down to 16 bytes for the pointer array
     let base = string_pos & !15u64;
 
-    // Layout (high to low):
-    //   [string data]           (already written at top)
-    //   [padding to 16]         (if needed)
-    //   [argv[argc-1]..argv[0]] (argc * 8 bytes)
-    //   [null envp = 0]         (8 bytes)
-    //   [argc]                  (8 bytes) ← RSP, 16-byte aligned
+    // Standard SysV AMD64 ABI stack layout on process entry:
+    //   [sp + 0]:          argc
+    //   [sp + 8]:          argv[0]
+    //   [sp + 8 + argc*8]: NULL (argv terminator)
+    //   [sp + 8 + (argc+1)*8]: envp[0]
+    //   ...
     //
-    // Total size: argv_padded = align16(argv_array_size + 8 + 8) = align16((argc+2)*8)
-    // where align16(x) = (x + 15) & !15
+    // We set up: argc, argv pointers, NULL terminator (no envp).
+    //
+    // Total size = align16((argc + 2) * 8)  (argc + argv ptrs + null terminator)
 
-    let total_size = ((argc + 2) as u64 * 8 + 15) & !15u64;
-    let sp = base.wrapping_sub(total_size);
+    let argv_array_size = ((argc as u64 + 2) * 8 + 15) & !15u64; // round up to 16
+    let sp = base.wrapping_sub(argv_array_size);
     if sp < stack_top.wrapping_sub(size as u64) {
         return Err(ElfError::StackSetupFailed {
             msg: "stack too small for argv area",
         });
     }
 
-    // Write argv pointers (growing upward from sp + 16)
-    let argv_base = sp + 16;
+    // Write argv pointers at [sp+8], [sp+16], ...
     for (i, offset) in string_offsets[..argc].iter().copied().enumerate() {
-        let ptr_pos = argv_base + (i as u64) * 8;
+        let ptr_pos = sp + 8 + (i as u64) * 8;
         unsafe {
             *((ptr_pos) as *mut u64) = offset;
         }
     }
 
     // Write null terminator after the last argv pointer
-    let null_pos = argv_base + (argc as u64) * 8;
+    let null_pos = sp + 8 + (argc as u64) * 8;
     unsafe {
         *((null_pos) as *mut u64) = 0;
     }
@@ -588,8 +588,10 @@ mod tests {
         let argc = unsafe { *(rsp as *const u64) };
         assert_eq!(argc, 1);
 
-        // Read argv[0] pointer (at rsp + 16, after argc + null envp)
-        let argv0_ptr = unsafe { *((rsp + 16) as *const u64) };
+        // Read argv[0] pointer (at rsp + 8, after argc)
+        let argv0_ptr = unsafe { *((rsp + 8) as *const u64) };
+        assert!(argv0_ptr != 0, "argv[0] pointer must not be null");
+        assert!(argv0_ptr >= rsp, "argv[0] must point into the stack");
         // Verify the string at argv0_ptr
         let argv0_str = unsafe {
             let len = (0..256)
@@ -611,9 +613,9 @@ mod tests {
         let argc = unsafe { *(rsp as *const u64) };
         assert_eq!(argc, 3);
 
-        // Read argv pointers (at rsp + 16, after argc + null envp)
+        // Read argv pointers (starting at rsp + 8)
         for i in 0..3 {
-            let ptr = unsafe { *((rsp + 16 + i as u64 * 8) as *const u64) };
+            let ptr = unsafe { *((rsp + 8 + i as u64 * 8) as *const u64) };
             let s = unsafe {
                 let len = (0..256)
                     .find(|&j| *((ptr + j) as *const u8) == 0)
@@ -624,7 +626,7 @@ mod tests {
         }
 
         // Verify null terminator after argv
-        let null_val = unsafe { *((rsp + 16 + 3 * 8) as *const u64) };
+        let null_val = unsafe { *((rsp + 8 + 3 * 8) as *const u64) };
         assert_eq!(null_val, 0);
     }
 
@@ -645,7 +647,7 @@ mod tests {
         let argc = unsafe { *(rsp as *const u64) };
         assert_eq!(argc, 0);
         // Null terminator at argv[0]
-        let null_val = unsafe { *((rsp + 16) as *const u64) };
+        let null_val = unsafe { *((rsp + 8) as *const u64) };
         assert_eq!(null_val, 0);
     }
 }

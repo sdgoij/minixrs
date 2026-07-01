@@ -18,8 +18,6 @@
 #![allow(dead_code, unused_unsafe)]
 
 use core::alloc::Layout;
-#[cfg(not(test))]
-use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -235,6 +233,30 @@ pub fn write(fd: i32, buf: &[u8]) -> i64 {
     unsafe { syscall3(NR_WRITE, fd as u64, buf.as_ptr() as u64, buf.len() as u64) }
 }
 
+/// Read from a file descriptor.
+pub fn read(fd: i32, buf: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            NR_READ,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
+}
+
+/// Open a file.
+pub fn open(path: &[u8], flags: i32) -> i64 {
+    unsafe {
+        syscall3(
+            NR_OPEN,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            flags as u64,
+        )
+    }
+}
+
 /// Get the current process ID.
 pub fn getpid() -> i32 {
     unsafe { syscall0(NR_GETPID) as i32 }
@@ -303,22 +325,18 @@ unsafe extern "C" {
 /// by `argv` pointers and a null terminator.
 #[cfg(all(not(test), target_os = "none"))]
 #[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
-    unsafe {
-        // Get argc and argv from the stack.
-        let argc: u64;
-        let argv: *const *const u8;
-        core::arch::asm!(
-            "mov {argc}, [rsp]",
-            "lea {argv}, [rsp + 8]",
-            argc = out(reg) argc,
-            argv = out(reg) argv,
-        );
-
-        let exit_code = main(argc as i32, argv);
-
-        exit(exit_code);
-    }
+    // Naked asm: no prologue. On entry, [rsp] = argc, [rsp+8] = argv[0].
+    // Read argc/argv, call main, then exit with the return value.
+    core::arch::naked_asm!(
+        "mov    rdi, [rsp]",
+        "lea    rsi, [rsp + 8]",
+        "call   main",
+        "mov    rdi, rax",
+        "xor    eax, eax",
+        "syscall",
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -326,9 +344,9 @@ pub unsafe extern "C" fn _start() -> ! {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Panic handler — writes the panic message to stderr and aborts.
-#[cfg(not(test))]
+#[cfg(all(not(test), target_os = "none"))]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
     // Format panic message into a stack buffer and write to stderr.
     let mut buf = [0u8; 256];
     let payload = info.message();

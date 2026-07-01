@@ -106,18 +106,22 @@ pub const fn make_star(syscall_cs: u16, sysret_cs: u16) -> u64 {
     (sysret_cs as u64) << 32 | (syscall_cs as u64) << 48
 }
 
-/// Enable the NX (No-Execute) bit in the EFER MSR.
+/// Enable EFER bits needed for long mode operation.
 ///
-/// Sets EFER.NXE (bit 11) so that the PG_NX page table bit is honored
-/// by the MMU for instruction fetches.
+/// Sets:
+/// - EFER.NXE (bit 11): No-Execute enable — PG_NX is honored
+/// - EFER.SCE (bit  0): Syscall Enable — enables `syscall`/`sysret`
+///
+/// EFER.LME (bit 8) and EFER.LMA (bit 10) are set by the trampoline
+/// when entering long mode and should NOT be modified here.
 ///
 /// # Safety
 ///
 /// Must be called in ring 0.
-pub unsafe fn enable_nxe() {
+pub unsafe fn enable_nxe_and_sce() {
     unsafe {
         let efer = crate::asm::rdmsr(msr::EFER);
-        crate::asm::wrmsr(msr::EFER, efer | efer::NXE);
+        crate::asm::wrmsr(msr::EFER, efer | efer::NXE | efer::SCE);
     }
 }
 
