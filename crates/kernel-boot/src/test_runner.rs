@@ -15,9 +15,6 @@ const PG_U: u64 = arch_x86_64::pte::PG_U;
 const PG_PS: u64 = arch_x86_64::pte::PG_PS;
 const PG_FRAME: u64 = arch_x86_64::pte::PG_FRAME;
 
-/// QEMU isa-debug-exit I/O port.
-const QEMU_EXIT_PORT: u16 = 0x501;
-
 /// Run all integration tests sequentially.
 ///
 /// Returns the total failure count (0 = all passed).
@@ -314,16 +311,10 @@ fn test_sysretq_ring3() {
 // ===========================================================================
 
 mod qemu {
-    /// QEMU isa-debug-exit device I/O port.
-    const QEMU_EXIT_PORT: u16 = 0x501;
-
-    /// Exit code meaning "all tests passed".
-    const QEMU_EXIT_SUCCESS: u32 = 0x01;
-
-    /// Exit code meaning "some tests failed".
-    fn qemu_exit(code: u32) -> ! {
+    const PORT: u16 = 0x501;
+    fn exit(code: u32) -> ! {
         unsafe {
-            core::arch::asm!("out dx, eax", in("dx") QEMU_EXIT_PORT, in("eax") code);
+            core::arch::asm!("out dx, eax", in("dx") PORT, in("eax") code);
         }
         loop {
             unsafe {
@@ -332,11 +323,12 @@ mod qemu {
         }
     }
 
+    #[allow(dead_code)]
     pub fn qemu_exit_success() -> ! {
-        qemu_exit(QEMU_EXIT_SUCCESS);
+        exit(1);
     }
 
     pub fn qemu_exit_failure(failures: u32) -> ! {
-        qemu_exit(failures << 1 | 1);
+        exit(failures << 1 | 1);
     }
 }

@@ -12,6 +12,19 @@ use std::process::Command;
 fn main() {
     let workspace = Path::new(".");
 
+    // Parse optional --features argument (e.g. "embed_initramfs,integration-tests")
+    let extra_features: Vec<String> = std::env::args().skip(1).collect();
+    let features = if extra_features.is_empty() {
+        "embed_initramfs".to_string()
+    } else {
+        let mut all = extra_features.join(",");
+        if !all.contains("embed_initramfs") {
+            all = format!("embed_initramfs,{}", all);
+        }
+        all
+    };
+    println!("Features: {}", features);
+
     // 1. Build initramfs first (kernel build needs initramfs.cpio via include_bytes!)
     println!("Building initramfs...");
     let mkinitramfs = workspace.join("target").join("mkinitramfs.exe");
@@ -49,7 +62,7 @@ fn main() {
             "-Zbuild-std=core,alloc",
             "-Zbuild-std-features=compiler-builtins-mem",
             "--features",
-            "embed_initramfs",
+            &features,
             "--release",
         ])
         .env("RUSTFLAGS", "-C link-arg=-Ttools/minix-raw.ld")
