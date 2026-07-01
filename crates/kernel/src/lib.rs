@@ -22,6 +22,9 @@ pub mod system;
 pub mod table;
 pub mod vm;
 
+#[cfg(feature = "qemu-tests")]
+pub mod tests;
+
 /// Kernel initialization.
 pub fn init() {
     arch_x86_64::init();

@@ -88,6 +88,9 @@ pub fn run_integration_tests() -> ! {
     total += test_mini_notify_when_receiving();
     total += test_mini_send_queues_when_not_receiving();
 
+    // Phase H: Kernel unit tests (compiled for x86_64 target via qemu-tests feature)
+    total += kernel::tests::run_all();
+
     // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
     // If all prior tests passed, attempt the ring-3 transition.
     // On success, the ring-3 code writes to the isa-debug-exit port and QEMU

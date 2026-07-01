@@ -15,7 +15,7 @@ workspace = true
 [features]
 default = []
 embed_initramfs = ["kernel/embed_initramfs"]
-integration-tests = []
+integration-tests = ["kernel/qemu-tests"]
 
 [dependencies]
 arch-common = { path = "../arch-common" }
