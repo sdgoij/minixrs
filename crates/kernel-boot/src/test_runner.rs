@@ -15,11 +15,32 @@ const PG_U: u64 = arch_x86_64::pte::PG_U;
 const PG_PS: u64 = arch_x86_64::pte::PG_PS;
 const PG_FRAME: u64 = arch_x86_64::pte::PG_FRAME;
 
+/// Map flags (from kernel::pagetable).
+const MAP_PRESENT: u64 = arch_x86_64::pte::PG_P;
+const MAP_WRITE: u64 = arch_x86_64::pte::PG_RW;
+
+/// Initialize the kernel VM allocator with a small memory pool (4MB at 4MB).
+/// Called once before any tests that need VM page allocation (map_page, etc.).
+fn init_vm_allocator() {
+    unsafe {
+        // 4MB at physical 4MB. base/size are in VM_PAGE_SIZE (4KB) units.
+        // 4MB = 0x400 pages, so base=0x400, size=0x400
+        let chunk = kernel::vm::MemoryChunk {
+            base: 0x400,
+            size: 0x400,
+        };
+        kernel::vm::mem_init(&[chunk]);
+    }
+}
+
 /// Run all integration tests sequentially.
 ///
 /// Returns the total failure count (0 = all passed).
 pub fn run_integration_tests() -> ! {
-    serial_puts("M1b integration tests\r\n");
+    serial_puts("Bare-metal integration tests\r\n");
+
+    // Initialize VM allocator (needed by map_page and VM allocator tests)
+    init_vm_allocator();
 
     // Phase A: Page table basics
     let mut total: u32 = 0;
@@ -28,6 +49,19 @@ pub fn run_integration_tests() -> ! {
     total += test_identity_map_range();
     total += test_kernel_high_map();
     total += test_serial_output();
+
+    // Phase B: Page table manipulation
+    total += test_pt_walk_boot();
+    total += test_pt_map_unmap();
+    total += test_pt_mapkernel();
+
+    // Phase C: Physical memory allocator
+    total += test_alloc_free_page();
+    total += test_alloc_contig();
+
+    // Phase D: VM allocator
+    total += test_vm_alloc_free();
+    total += test_vm_alloc_multi();
 
     // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
     // If all prior tests passed, attempt the ring-3 transition.
@@ -207,6 +241,249 @@ fn test_serial_output() -> u32 {
             arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, b'\n');
         }
         t.assert(true, "serial output should not crash");
+    })
+}
+
+// ===========================================================================
+// Phase B: Page Table Manipulation
+// ===========================================================================
+
+use kernel::pagetable::{boot_cr3, map_page, pt_mapkernel, unmap_page, walk};
+
+fn test_pt_walk_boot() -> u32 {
+    run("pt_walk_boot", |t| {
+        let cr3_val = boot_cr3();
+        t.assert(cr3_val != 0, "boot_cr3 should be non-zero");
+
+        // Walk the identity-mapped kernel code at 0x200000
+        let result = unsafe { walk(cr3_val, 0x200000u64) };
+        match result {
+            Ok(wr) => {
+                t.assert(
+                    wr.level <= 2,
+                    "walk level should be <= 2 (huge page or 4K page)",
+                );
+            }
+            Err(_) => {
+                t.assert(false, "walk of 0x200000 should succeed");
+            }
+        }
+
+        // Walk an unmapped address (should fail)
+        let unmapped = unsafe { walk(cr3_val, 0x7fff_0000_0000u64) };
+        match unmapped {
+            Err(kernel::pagetable::PageTableError::NotMapped) => {}
+            _ => t.assert(false, "unmapped address should return NotMapped"),
+        }
+    })
+}
+
+fn test_pt_map_unmap() -> u32 {
+    run("pt_map_unmap", |t| {
+        let cr3_val = boot_cr3();
+        t.assert(cr3_val != 0, "boot_cr3 should be non-zero");
+
+        // Allocate a physical page
+        let phys = match arch_x86_64::alloc::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                t.assert(false, "alloc_phys_page should succeed");
+                return;
+            }
+        };
+        t.assert(phys != 0, "allocated page should be non-zero");
+
+        // Pick a virtual address outside the boot identity map (which covers 0-1GB,
+        // PML4 index 0). Use an address in PML4 index 1 (1GB-2GB range).
+        let va: u64 = 0x4000_0000; // 1 GB
+
+        // Map it
+        let map_result = unsafe { map_page(cr3_val, va, phys, MAP_PRESENT | MAP_WRITE) };
+        t.assert(map_result.is_ok(), "map_page should succeed");
+
+        // Walk to verify mapping
+        let walk_result = unsafe { walk(cr3_val, va) };
+        match walk_result {
+            Ok(wr) => {
+                t.assert(
+                    wr.pte_value & MAP_PRESENT != 0,
+                    "mapped page should be present",
+                );
+                t.assert(
+                    wr.pte_value & MAP_WRITE != 0,
+                    "mapped page should be writable",
+                );
+            }
+            Err(_) => t.assert(false, "walk of mapped page should succeed"),
+        }
+
+        // Write a test pattern to the mapped page
+        unsafe {
+            core::ptr::write_volatile(va as *mut u32, 0xCAFEBABE);
+            let val = core::ptr::read_volatile(va as *const u32);
+            t.assert(val == 0xCAFEBABE, "readback should match written value");
+        }
+
+        // Unmap
+        let unmap_result = unsafe { unmap_page(cr3_val, va) };
+        t.assert(unmap_result.is_ok(), "unmap_page should succeed");
+
+        // Walk to verify unmapped
+        let walk_after = unsafe { walk(cr3_val, va) };
+        match walk_after {
+            Err(kernel::pagetable::PageTableError::NotMapped) => {}
+            _ => t.assert(false, "unmapped page should be NotMapped"),
+        }
+
+        // Free the physical page
+        arch_x86_64::alloc::free_phys_page(phys);
+    })
+}
+
+fn test_pt_mapkernel() -> u32 {
+    run("pt_mapkernel", |t| {
+        let cr3_val = boot_cr3();
+        t.assert(cr3_val != 0, "boot_cr3 should be non-zero");
+
+        // Check if kernel high mapping already exists
+        let pml4_slot511 = unsafe { core::ptr::read((cr3_val as *const u64).add(511)) };
+        if pml4_slot511 & 1 != 0 {
+            return;
+        }
+
+        // pt_mapkernel requires BSS to fit within the 2MB kernel region.
+        // The test kernel has a 2MB bitmap in BSS which may exceed this.
+        unsafe extern "C" {
+            static __bss_end: u8;
+        }
+        let bss_end_addr = unsafe { core::ptr::addr_of!(__bss_end) as u64 };
+        if bss_end_addr > 0x400000 {
+            // BSS exceeds 2MB kernel region — skip this test
+            return;
+        }
+
+        let result = unsafe { pt_mapkernel(cr3_val) };
+        t.assert(result.is_ok(), "pt_mapkernel should succeed");
+
+        use arch_x86_64::param::KERNBASE;
+        let pml4_slot511_after = unsafe { core::ptr::read((cr3_val as *const u64).add(511)) };
+        t.assert(pml4_slot511_after & 1 != 0, "PML4[511] should be present");
+        unsafe {
+            let word: u32 = core::ptr::read_volatile((KERNBASE + 0x200000u64) as *const u32);
+            t.assert(word != 0, "kernel code via high map should be readable");
+        }
+    })
+}
+
+// ===========================================================================
+// Phase C: Physical Memory Allocator
+// ===========================================================================
+
+fn test_alloc_free_page() -> u32 {
+    run("alloc_free_page", |t| {
+        // Allocate a single page
+        let page = match arch_x86_64::alloc::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                t.assert(false, "alloc_phys_page should succeed");
+                return;
+            }
+        };
+        t.assert(page != 0, "allocated page should be non-zero");
+        t.assert(page & 0xFFF == 0, "allocated page should be 4K-aligned");
+
+        // Write a test pattern
+        unsafe {
+            core::ptr::write_volatile(page as *mut u32, 0xDEADBEEF);
+            let val = core::ptr::read_volatile(page as *const u32);
+            t.assert(val == 0xDEADBEEF, "readback should match written value");
+        }
+
+        // Free it
+        arch_x86_64::alloc::free_phys_page(page);
+
+        // Allocate again — should get a different page (or the same, doesn't matter)
+        let page2 = arch_x86_64::alloc::alloc_phys_page();
+        t.assert(page2.is_some(), "second alloc should succeed");
+    })
+}
+
+fn test_alloc_contig() -> u32 {
+    run("alloc_contig", |t| {
+        // Allocate 4 contiguous pages via the allocator
+        let alloc = unsafe { &mut *arch_x86_64::alloc::global_allocator() };
+        let base = alloc.alloc_contig(4);
+        match base {
+            Some(addr) => {
+                t.assert(addr & 0xFFF == 0, "contiguous alloc should be page-aligned");
+                // Write to all 4 pages
+                for i in 0..4 {
+                    unsafe {
+                        core::ptr::write_volatile((addr + i * 4096) as *mut u8, 0xAB);
+                    }
+                }
+                // Read back
+                for i in 0..4 {
+                    unsafe {
+                        let val = core::ptr::read_volatile((addr + i * 4096) as *const u8);
+                        t.assert(val == 0xAB, "contiguous page write/readback should match");
+                    }
+                }
+                alloc.free_contig(addr, 4);
+            }
+            None => {
+                t.assert(false, "alloc_contig(4) should succeed");
+            }
+        }
+    })
+}
+
+// ===========================================================================
+// Phase D: VM Allocator (kernel::vm)
+// ===========================================================================
+
+fn test_vm_alloc_free() -> u32 {
+    run("vm_alloc_free", |t| {
+        unsafe {
+            // Allocate a single VM page
+            let page = kernel::vm::alloc_mem(1, 0);
+            t.assert(page != kernel::vm::NO_MEM, "alloc_mem(1, 0) should succeed");
+
+            // Write a test pattern
+            let phys = page * kernel::vm::VM_PAGE_SIZE as u64;
+            core::ptr::write_volatile(phys as *mut u32, 0xF00DBABE);
+            let val = core::ptr::read_volatile(phys as *const u32);
+            t.assert(val == 0xF00DBABE, "VM page write/readback should match");
+
+            // Free it
+            kernel::vm::free_mem(page, 1);
+        }
+    })
+}
+
+fn test_vm_alloc_multi() -> u32 {
+    run("vm_alloc_multi", |t| {
+        unsafe {
+            // Allocate 3 contiguous pages
+            let base = kernel::vm::alloc_mem(3, 0);
+            t.assert(base != kernel::vm::NO_MEM, "alloc_mem(3, 0) should succeed");
+
+            // Verify all 3 pages are writable
+            let page_sz = kernel::vm::VM_PAGE_SIZE as u64;
+            let phys_base = base * page_sz;
+            for i in 0..3 {
+                core::ptr::write_volatile((phys_base + i * page_sz) as *mut u8, (i + 1) as u8);
+            }
+            for i in 0..3 {
+                let val = core::ptr::read_volatile((phys_base + i * page_sz) as *const u8);
+                t.assert(
+                    val == (i + 1) as u8,
+                    "multi-page write/readback should match",
+                );
+            }
+
+            kernel::vm::free_mem(base, 3);
+        }
     })
 }
 

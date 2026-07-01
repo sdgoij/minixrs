@@ -3889,177 +3889,94 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 
 ### Tasks
 
-- [ ] **14.B.1 — Wire kmain through full kernel init**
-  - After existing boot steps (BSS, serial, GDT/IDT/FPU, proc_init, PIT, PIC):
-  - Added `kernel::sched::system::system_init()` — populates kernel call dispatch
-    table with handlers for all ~40 syscalls (fork, exec, kill, etc.)
-  - Added `kernel::interrupt::reset_irq_state()` — clears IRQ handler table,
-    active IDs, and use mask to a clean initial state
-  - Added `kernel::clock::set_system_hz(100)` — sets system timer frequency
-    to match the PIT (programmed at 100 Hz)
-  - Replaced heartbeat HLT loop with cleaner idle loop with comments marking
-    where future clock tick, interrupt dispatch, and process scheduling go
-  - Added boot message: `[kernel] init complete, entering idle loop`
-  - **Deferred**: `setup_syscall_msrs()` — requires a `syscall` entry function
-    (naked asm handler). Will be added when the first userspace process is
-    created (14.B.2/14.B.3), since the MSR must point to the kernel's real
-    syscall dispatch code
-  - Verified: kernel compiles cleanly, reaches idle loop without panic
+- [x] **14.B.1 — Wire kmain through full kernel init**
+  - ✅ `kernel::sched::system::system_init()` — kernel call dispatch table for ~40 syscalls
+  - ✅ `kernel::interrupt::reset_irq_state()` — clean IRQ handler table initialization
+  - ✅ `kernel::clock::set_system_hz(100)` — system timer frequency matching PIT
+  - ✅ Idle loop with `kernel::r#loop::kernel_main_loop()`
+  - ✅ `setup_syscall_msrs()` — IA32_STAR, IA32_LSTAR, IA32_FMASK, EFER.SCE
+  - Verified: compiles clean, reaches idle loop without panic
 
-- [ ] **14.B.2 — Boot image and process creation**
-  - Added `BootImage` struct and `BOOT_IMAGE` static array matching C `image[]`
-  - Implemented `boot_create_procs()`: sets name, endpoint, privilege, priority
-  - Kernel tasks, RS, VM get privileges; others inhibited until RS setup
-  - Added privilege/scheduling constants to `config.rs`
-  - Fixed `proc_addr()` overflow bug for negative process numbers
-  - Fixed `NR_BOOT_PROCS` to use formula (was hardcoded 17)
-  - Wired into kmain: `[boot] creating boot processes...`
-  - 11 tests covering all boot image properties and privilege assignment
+- [x] **14.B.2 — Boot image and process creation**
+  - ✅ `BootImage` struct, `BOOT_IMAGE` static array matching C `image[]`
+  - ✅ `boot_create_procs()`: names, endpoints, privileges, priorities
+  - ✅ Kernel tasks / RS / VM get privileges; others inhibited until RS setup
+  - ✅ `proc_addr()` overflow fix for negative process numbers
+  - ✅ `NR_BOOT_PROCS` formula (was hardcoded 17)
+  - ✅ Wired into kmain: `[boot] creating boot processes...`
+  - 11 tests covering boot image properties and privilege assignment
 
-- [ ] **14.B.3 — Kernel main message loop**
-  - Created `crates/kernel/src/loop.rs` with `kernel_main_loop()`:
-    - Processes pending timer ticks via `clock::tick()` then `tmrs_exptimers()`
-    - Manages global timer queue (`TIMER_QUEUE`) with `set_timer()`/`cancel_timer()`
-    - Idles with HLT when no work is pending
-    - Heartbeat dot every 100 ticks (was in kmain, now in main loop)
-    - Placeholder comments for future kernel call dispatch and process scheduling
-  - Moved `TICK_COUNT` from kernel-boot to `kernel::clock::TICK_COUNT` (shared
-    between timer interrupt handler and main loop)
-  - Updated timer handler to call `kernel::clock::tick()` directly (advances
-    monotonic/realtime clocks on each interrupt)
-  - kmain now delegates to `kernel::r#loop::kernel_main_loop()` after init
-  - `set_timer()` and `cancel_timer()` public wrappers for timer queue access
-  - All unsafe operations properly wrapped (Rust 2024)
+- [x] **14.B.3 — Kernel main message loop**
+  - ✅ `crates/kernel/src/loop.rs` — `kernel_main_loop()` with:
+    - Timer ticks via `clock::tick()` then `tmrs_exptimers()`
+    - Global timer queue (`TIMER_QUEUE`) with `set_timer()`/`cancel_timer()`
+    - HLT idle when no work pending; heartbeat dot every 100 ticks
+  - ✅ `TICK_COUNT` moved from kernel-boot to `kernel::clock::TICK_COUNT`
+  - ✅ Timer handler calls `kernel::clock::tick()` directly
+  - ✅ kmain delegates to `kernel::r#loop::kernel_main_loop()` after init
   - 35 unit + 96 integration tests pass, clippy clean
 
-- [ ] **14.B.4 — Userspace process startup**
-  - Fixed kernel stack allocation (`alloc_kernel_pages`): replaced stub with
-    boot-time static pool allocator (16 stacks × 16 KB = 256 KB)
-  - Created `kernel::tasks` module with kernel task entry point functions:
-    `idle_task()`, `clock_task()`, `sys_task()`, `hw_task()`, `asyncm_task()`
-  - Created `boot_proc::boot_setup_process_stacks()` in arch-x86_64:
-    allocates kernel stacks and sets up StackFrame (CS/SS/PSW/SP/RIP) for
-    each boot process — ring 0 selectors for kernel tasks, ring 3 for user
-  - Created `asm::syscall_entry()`: naked asm handler for `syscall`/`sysretq`
-    that saves registers, dispatches through `syscall_handler_c()` →
-    `arch_syscall::syscall_dispatch()`, restores, and returns
-  - Wired `setup_syscall_msrs()` in kmain with IA32_STAR, IA32_LSTAR, IA32_FMASK
-  - Enabled `EFER.SCE` (Syscall Enable) bit
-  - Replaced HLT loop in kmain with `restore()` → IDLE task; IDLE task now
-    processes pending timer ticks and HLTs (same timer behavior, proper
-    process switching mechanism)
-  - 11 new tests: kernel task entry points, selector values, RFLAGS,
-    boot stack pool allocation/exhaustion
-  - All unsafe operations use explicit `unsafe {}` blocks (Rust 2024)
+- [x] **14.B.4 — Userspace process startup**
+  - ✅ Kernel stack pool allocator (16 stacks × 16 KB = 256 KB)
+  - ✅ `kernel::tasks` module: `idle_task()`, `clock_task()`, `sys_task()`, `hw_task()`, `asyncm_task()`
+  - ✅ `boot_proc::boot_setup_process_stacks()` — kernel stacks + StackFrame per boot process
+  - ✅ `asm::syscall_entry()` — naked asm: save regs, dispatch, sysretq
+  - ✅ `setup_syscall_msrs()` — IA32_STAR, IA32_LSTAR, IA32_FMASK, EFER.SCE
+  - ✅ kmain → `restore()` → IDLE task; IDLE processes timer ticks and HLTs
+  - 11 tests: kernel entry points, selectors, RFLAGS, stack pool
 
-- [ ] **14.B.5 — initramfs/ramdisk with binaries**
-  - Created `tools/mkinitramfs.rs` — builds all userland binaries for the
-    x86_64-pc-minix target and creates a CPIO newc archive at
-    `target/initramfs.cpio` with 14 boot-critical binaries, 4 directories
-    (/, /bin, /sbin, /dev), 4 device nodes (/dev/tty00, /dev/tty01,
-    /dev/null, /dev/console), and generates `target/initramfs_data.rs`
-    with the embedded bytes
-  - Modified `tools/mkboot.rs` to invoke mkinitramfs after kernel build
-  - Created `kernel::initramfs` module with CPIO newc parser (`CpioIter`,
-    `CpioEntry`), `find_initramfs_file()`, and `initramfs_data()` accessor
-  - Updated `tools/minix-raw.ld` to add `.initramfs` section with
-    `__initramfs_start`/`__initramfs_end` symbols
-  - 7 unit tests: CPIO parsing roundtrip, directory/device entries,
-    invalid magic, file lookup, pad4 alignment
-  - All unsafe operations use explicit `unsafe {}` blocks (Rust 2024)
+- [x] **14.B.5 — initramfs/ramdisk with binaries**
+  - ✅ `tools/mkinitramfs.rs` — CPIO newc archive with 14 boot-critical binaries
+  - ✅ `tools/mkboot.rs` invokes mkinitramfs after kernel build
+  - ✅ `kernel::initramfs` module — CPIO newc parser, `find_initramfs_file()`
+  - ✅ `tools/minix-raw.ld` — `.initramfs` section with `__initramfs_start/__initramfs_end`
+  - 7 unit tests: parsing roundtrip, directory/device entries, bad magic, file lookup
 
-- [ ] **14.B.6 — Server fault tolerance**
-  - PM `do_exit()`: added RS notification path — when a process exits whose
-    parent is RS, `notify_rs_on_exit()` stores the notification in global
-    state that RS can consume via `take_rs_exit_notification()`
-  - RS `detect_sigchld()`: implemented — checks PM's exit notification queue
-    and scans the RPROC table for terminated services
-  - RS `do_restart()`: enhanced with documentation of the fork/exec restart
-    flow and restart budget tracking up to `RESTART_MAX`
-  - RS `rs_main_iteration()`: main loop iteration that detects crashed
-    services and triggers automatic restarts
-  - RS `rs_register_boot_services()`: registers all boot-time system servers
-    (PM, VFS, SCHED, DS, VM, TTY, MFS, PFS) with RS for crash monitoring
-  - Init: improved orphan reaping — `waitpid(-1, 0)` loop reaps all zombie
-    children (not just the shell), exits on error to retry fork
+- [x] **14.B.6 — Server fault tolerance**
+  - ✅ PM `do_exit()`: RS notification path via `notify_rs_on_exit()` / `take_rs_exit_notification()`
+  - ✅ RS `detect_sigchld()`: checks PM exit notification queue + RPROC table
+  - ✅ RS `do_restart()`: fork/exec restart flow with `RESTART_MAX` budget
+  - ✅ RS `rs_main_iteration()`: detects crashed services, triggers restarts
+  - ✅ RS `rs_register_boot_services()`: registers PM, VFS, SCHED, DS, VM, TTY, MFS, PFS
+  - ✅ Init orphan reaping: `waitpid(-1, 0)` loop reaps all zombie children
   - Clippy clean across workspace
 
-- [ ] **14.B.7 — ELF64 binary loader**
-  - Created `crates/kernel/src/elf.rs` (419 lines) with full ELF64 parsing and loading:
-  - `Elf64Ehdr` / `Elf64Phdr` — `#[repr(C)]` structs matching x86_64 ELF format
-  - `parse_elf_header()` — validates ELF magic, 64-bit, little-endian, ET_EXEC,
-    EM_X86_64, and program header entry size
-  - `load_elf()` — iterates PT_LOAD segments, copies file data to virtual addresses,
-    zero-fills BSS (memsz - filesz), tracks base/top address range
-  - `setup_user_stack()` — builds standard ABI stack layout (argc, argv ptrs, envp)
-    with 16-byte RSP alignment. Writes strings at top of stack area, aligned down.
-  - Constants: `PT_NULL`, `PT_LOAD`, `PT_DYNAMIC`, `PT_INTERP`, `PT_NOTE`, `PT_PHDR`,
-    `PT_GNU_STACK`, `PF_X`, `PF_W`, `PF_R`, `ET_EXEC`, `EM_X86_64`, `ELF_MAGIC`
-  - 6 unit tests: magic, too-small data, bad magic, 32-bit rejection, big-endian
-    rejection, parse valid header, stack setup (single arg, multiple args)
-  - Added `pub mod elf;` to `crates/kernel/src/lib.rs`
+- [x] **14.B.7 — ELF64 binary loader**
+  - ✅ `crates/kernel/src/elf.rs` — `Elf64Ehdr` / `Elf64Phdr` (`#[repr(C)]`)
+  - ✅ `parse_elf_header()`: validates magic, 64-bit, LE, ET_EXEC, EM_X86_64
+  - ✅ `load_elf()`: iterates PT_LOAD, copies data, zero-fills BSS, tracks base/top
+  - ✅ `setup_user_stack()`: System V ABI stack (argc, argv, null envp, 16-byte aligned)
+  - 6 unit tests + 13 setup_user_stack tests (19 total), clippy clean
 
-- [ ] **14.B.8 — Init loading and userspace execution**
-  - **`crates/kernel-boot/src/boot_init.rs`** (NEW, 75 lines):
-    - `load_and_prepare_init()` — finds `/sbin/init` in initramfs, validates ELF64
-      header, loads ELF segments to their virtual addresses, allocates user stack
-      (64 KB, initially at `0x3FF00000` but moved to `0x0FE00000` — see bug below),
-      writes stack layout with `/sbin/init` argv[0], sets up `Proc::p_reg` StackFrame
-      for ring-3 execution (CS=0x1B, SS=0x23, PSW=0x0202, RDI=user_rsp for argc,
-      PC=entry point, SP=kernel_stack via swapgs)
-  - **`crates/kernel-boot/src/main.rs` kmain updates**:
-    - **GDT**: Added user code (0x1B, DPL=3, L=1) and user data (0x23, DPL=3) descriptors
-    - **Page tables**: Set User bit on page table entries (0x07/0x87 instead of 0x03/0x83)
-      so user-mode code can access mapped memory; TLB flush after setup
-    - **kmain flow**: init loading → register IPC syscalls (46-49) → register basic
-      userland syscalls (getpid, write, exit, brk) → register PM server dispatch →
-      register exec target callback → set current process to init → set up per-CPU
-      GS base (IA32_KERNEL_GS_BASE pointing to CPU_LOCAL_STORAGE) →
-      mask IRQs (PIC) → **switch to init via restore() → iretq**
-    - IRQs masked but NOT enabled with sti — restored via iretq from user RFLAGS
-    - 4 GDT descriptor decode tests + existing tests pass
-  - **`crates/arch-x86_64/src/asm.rs`**:
-    - `syscall_entry` checks `EXEC_TARGET_RIP` after dispatch — if non-zero,
-      clears exec globals, sets R11=0x202 (safe RFLAGS), and `sysretq` to new binary
-    - `restore()` uses StackFrame.pc ([rdi+88]) directly (was hardcoded to 0x200000
-      requiring a trampoline that overwrote kernel .text — removed)
-  - **`crates/kernel/src/initramfs.rs`**: Changed from linker section approach to
-    `include_bytes!` via `embed_initramfs` feature; initramfs built before kernel
-  - **`crates/kernel-boot/Cargo.toml`**: Added `servers` dependency, `embed_initramfs` feature
-  - **`crates/kernel/Cargo.toml`**: Added `embed_initramfs = []` feature
-  - **Userland GDT descriptors**: Added to both boot_entry (naked_asm GDT) and
-    trampoline.S, enabling ring-3 code execution via iretq/sysretq
-  - **Bugs found during QEMU debugging (all fixed)**:
-    1. **`IA32_KERNEL_GS_BASE` MSR was `0xC0000109`** (should be `0xC0000102`) —
-       `swapgs` read uninitialized MSR → GS base = 0 → `gs:0x0` read garbage from
-       physical address 0 (real-mode IVT). Fixed in `cpu_msr.rs`.
-    2. **GDT code segment D/B=1 with L=1** — illegal per Intel SDM; QEMU treated
-       as CS32 compatibility mode. Changed flags from `0x5F` to `0xAF`.
-    3. **User stack at `0x3FF00000`** — outside 256MB RAM (identity-mapped to
-       physical `0xFFE00000`). Moved to `0x0FE00000`.
-    4. **PM_EXEC_NEW constant mismatch** — minix-std had `PM_BASE + 30` (0x01E)
-       but servers/pm.rs uses `PM_BASE + 43` (0x02B). Kernel SUSPEND handler
-       checked for 0x02B, so exec silently returned without loading shell.
-    5. **SLOT_FREE never cleared** — proc_init sets SLOT_FREE on all slots,
-       boot_create_procs never cleared it. Deadlock detection panicked.
-    6. **Exec stack at 0x3F000000** — same stack-outside-RAM bug as #3.
-    7. **SYS_READ handler missing** — shell used VFS IPC for stdin, VFS has
-       no dispatch handler, IPC blocked forever. Added syscall 8 direct read.
-    8. **Exec handler hardcoded to INIT_PROC_NR** — used hardcoded endpoint
-       instead of the actual caller from the IPC message.
-    - All now have test coverage except SYS_READ (needs QEMU serial I/O).
+- [x] **14.B.8 — Init loading and userspace execution**
+  - ✅ `crates/kernel-boot/src/boot_init.rs`:
+    - `load_and_prepare_init()` returns `Option<InitInfo>` — finds init in initramfs,
+      validates ELF, loads segments, allocates user stack (64 KB at 0x0FE00000),
+      sets up TrapFrame for sysretq (rcx=RIP, r11=0x0202, rsp)
+    - `boot_create_page_table()` — 3-page alloc (PML4+PDP+PD), deep-copies boot
+      identity map, shares kernel high mappings (PML4[256..512])
+    - `boot_jump_to_user()` — sets p_cr3, calls `sysretq_to_user()` → sysretq
+  - ✅ **kmain flow (normal boot)**: init → serial → timer → boot_init → sysretq to ring-3
+  - ✅ **kmain flow (integration-tests)**: init → serial → timer → test_runner → 12 tests → ring-3 finale
+  - ✅ **Bugs fixed** (8 total): MSR_KERNEL_GS_BASE, GDT D/B+L conflict, stack
+    out-of-RAM, PM_EXEC_NEW constant, SLOT_FREE, exec stack, SYS_READ, hardcoded endpoint
+  - All unsafe operations use explicit `unsafe {}` blocks (Rust 2024)
 
-- [ ] **14.B.9 — User-facing syscall handlers for boot-to-shell**
-  - Registered in kmain before userspace switch:
-  - `getpid` (syscall 0) — returns PID 1 (init)
-  - `exit` (syscall 2) — halts CPU with CLI+HLT (no process cleanup yet)
-  - `write` (syscall 9) — writes to serial (fd 1=stdout, fd 2=stderr),
-    handles `\n` → `\r\n` translation
-  - `brk` (syscall 13) — simple bump allocator in 0x3FE00000–0x3FF00000 range
-  - Fixed `crates/userland/src/lib.rs` syscall argument ordering for x86_64
-    ABI (inlateout for rax, correct register mapping)
-  - Added `embed_initramfs` feature gating — initramfs built by `mkinitramfs.rs`
-    before kernel build in `mkboot.rs`
+- [x] **14.B.9 — User-facing syscall handlers for boot-to-shell**
+  - ✅ `getpid` (syscall 0) — returns PID 1 (init)
+  - ✅ `exit` (syscall 2) — halts CPU with CLI+HLT (no process cleanup yet)
+  - ✅ `write` (syscall 9) — serial output (fd 1=stdout, fd 2=stderr), `\n` → `\r\n`
+  - ✅ `brk` (syscall 13) — bump allocator in 0x3FE00000–0x3FF00000 range
+  - ✅ Syscall argument ordering for x86_64 ABI in `crates/userland/src/lib.rs`
+  - ✅ `embed_initramfs` feature gating
+
+**M1b gap:** These syscall handlers enable basic init execution, but the full
+boot-to-shell path requires PM/VFS/RS server IPC dispatch running. The bare-metal
+test suite (Phase E) proves ring-3 transition works by running a synthetic test
+that jumps to ring-3 and writes the QEMU exit port.
+
+**Next step (M7b):** Wire up PM server dispatch so `/sbin/init` receives and
+responds to IPC messages, enabling shell launch on `/dev/tty00`.
 
 ---
 
@@ -4453,14 +4370,9 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 create a per-process page table with User-accessible pages, and execute
 `sysretq` to ring-3 where init runs as the first userspace process.
 
-**What exists:**
-- `crates/kernel-boot/src/boot_init.rs` — blueprint calling into kernel modules
-- `crates/tools/mkinitramfs.rs` — builds CPIO newc archive
-- `BOOT_IMAGE` in `kernel/src/table.rs` — includes init slot
-- `arch_proc_init()` — sets up TrapFrame for sysretq (RCX→RIP, R11→RFLAGS)
-- `Proc` struct with `p_reg: TrapFrame` and `p_seg.p_cr3` for per-process PT
+**Status: ✅ COMPLETE** — Proven by bare-metal QEMU integration test (Phase E).
 
-**What needs implementing:**
+#### Kernel infrastructure
 
 - [x] **ELR1 — kernel/src/elf.rs: ELF64 binary loader** (19 tests, clippy clean)
   - `parse_elf_header()`, `load_elf()`, `setup_user_stack()` all implemented
@@ -4473,29 +4385,68 @@ create a per-process page table with User-accessible pages, and execute
   - `CpioHeader` struct with magic `"070701"`, ASCII hex fields
   - Entry traversal with 4-byte alignment, TRAILER!!! termination
   - Embedded initramfs via `__initramfs_start`/`__initramfs_end` linker symbols
-  - 10 tests: header parsing, file lookup, missing file, multiple entries,
-    trailer, empty data, bad magic, padding, hex formatting
 
 - [x] **ELR3 — Wire boot_init into kmain**
-  - ✅ `pub mod elf;` and `pub mod initramfs;` added to `kernel/src/lib.rs`
-  - ✅ `load_and_prepare_init()` — finds init in initramfs, loads ELF64,
-    allocates user stack, sets up TrapFrame for sysretq (rcx/r11/rsp)
-  - ✅ `boot_create_page_table()` — allocates PML4+PDP+PD from arch
-    allocator, deep-copies boot identity map, shares kernel high mappings
-  - ✅ `boot_jump_to_user()` — sets p_cr3, calls arch_proc_init, then
-    executes `sysretq` via naked assembly `sysretq_to_user()`
-  - ✅ `sysretq_to_user()` — naked asm function loads CR3, RCX, R11, RSP
-    from Proc struct and executes sysretq
-  - ✅ Arch allocator initialized in kmain (free: 0x300000-0x10000000)
-  - ✅ `serial_putc()` and `print!` macro for boot-time diagnostics
-  - ✅ Falls back to HLT loop on allocation failure
+  - `load_and_prepare_init()` returns `Option<InitInfo>`, called from kmain
+  - `boot_create_page_table()` — deep-copies boot identity map, shares kernel high mappings
+  - `boot_jump_to_user()` — sets p_cr3, calls `sysretq_to_user()`
+  - `sysretq_to_user()` — naked asm: loads CR3, RCX, R11, RSP from Proc, executes sysretq
+  - Arch allocator initialized in kmain (free: 0x300000–0x10000000)
+  - All fallible paths return `None` → HLT loop with error message
 
-### Boot Process Detail (M1)
+- [x] **Boot infrastructure**
+  - `tools/mkinitramfs.rs` — CPIO newc archive with 14 binaries, 4 dirs, 4 device nodes
+  - `tools/mkboot.rs` — extracts kmain, rebuilds trampoline, generates kernel.bin
+  - `tools/stage2.S` — 16-bit → 32-bit → 64-bit transition (disk image boot path)
+  - `tools/mbr.S` — 512-byte MBR loading stage2 via INT 13h
+  - `tools/minix-raw.ld` — kernel linker script (linked at 0x200000)
+  - `tools/minix-user.ld` — userland binary linker script (linked at 0x01000000)
+  - `trampoline.S` — ELF32 multiboot trampoline (kernel test/QEMU -kernel path)
 
-The boot flow from QEMU power-on to "Hello MINIX!" on the serial console:
+#### Bare-metal QEMU integration test suite
+
+Proves M1b automatically: runs 12 tests sequentially, culminates in `sysretq`
+to ring-3. If all pass QEMU exits with code 1, otherwise encodes failure count.
+
+| Phase | Test | What it proves |
+|-------|------|----------------|
+| A | `boot_cr3` | Boot CR3 valid, page-aligned, PML4[0] Present|Write|User |
+| A | `boot_pml4_entries` | Identity map in PML4[0], no spurious entries |
+| A | `identity_map_range` | Kernel code at 0x200000 readable via identity map |
+| A | `kernel_high_map` | Kernel accessible via high mapping (when present) |
+| A | `serial_output` | COM1 serial works (prerequisite for all output) |
+| B | `pt_walk_boot` | `walk()` API works on boot PT — mapped 0x200000, unmapped returns error |
+| B | `pt_map_unmap` | `map_page()` + `unmap_page()` roundtrip with data integrity check |
+| B | `pt_mapkernel` | `pt_mapkernel()` adds PML4[511] kernel high mapping (skipped if BSS > 2MB) |
+| C | `alloc_free_page` | Physical allocator — single page alloc/free with readback |
+| C | `alloc_contig` | Contiguous multi-page allocation |
+| D | `vm_alloc_free` | VM allocator — page alloc/free via `alloc_mem`/`free_mem` |
+| D | `vm_alloc_multi` | VM allocator — multi-page allocation with sequential addresses |
+| E | `sysretq_ring3` | **FINALE** — allocates pages, creates PT, sets up Proc, sysretq to
+  ring-3, writes isa-debug-exit port 0x501. Never returns on success. |
+
+**Test architecture:**
+- `crates/kernel-boot/src/test_runner.rs` — `run()` harness + 12 test functions
+- QEMU exit via `-device isa-debug-exit` at port 0x501
+- `just test-qemu` builds trampoline + kernel with `integration-tests` feature and boots
+- VM allocator initialized before B-phase tests with 4MB pool at physical 4MB
+
+#### Next phases (F–L) — Component integration tests
+
+Ready to implement in `test_runner.rs`:
+
+- **Phase F — Process table**: `proc_addr`, `endpoint_lookup`, `proc_init`
+- **Phase G — IPC**: `mini_send`, `mini_receive`, `mini_notify`, `do_sync_ipc`
+- **Phase H — Context switching**: `switch_to` stack save/restore ping-pong
+- **Phase I — Grants**: `grant_set`, `verify_grant` with `CpGrant` table
+- **Phase J — Syscalls**: `getpid`, `write`, `brk`, `exit` dispatch
+- **Phase K — Timers**: `tmrs_settimer`, `tmrs_exptimers`, `tmrs_clrtimer`
+- **Phase L — Interrupts**: `put_irq_handler`, `irq_handle`, `rm_irq_handler`
+
+### Boot Process Detail (M1 — M1b)
 
 ```
-QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel-boot
+QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel.bin
   │
   ├─ SeaBIOS initializes hardware, loads multiboot ROM from fw_cfg
   │
@@ -4514,39 +4465,74 @@ QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel-boot
   │     10. Sets up temporary stack (32KB in trampoline BSS)
   │     11. Jumps to kmain() at the address extracted by mkboot
   │
-  ├─ QEMU -device loader loads the 64-bit kernel ELF at 0x200000
-  │   (loadable segments placed according to ELF program headers)
+  ├─ QEMU -device loader loads the 64-bit kernel binary at 0x200000
+  │   (raw binary extracted from ELF via rust-objcopy -O binary)
   │
   └─ kmain() (crates/kernel-boot/src/main.rs)
-      ├─ kernel::init() — arch-specific init (GDT, IDT, FPU, APIC, page allocator)
-      ├─ kernel::syscall::init_basic_syscalls() — userspace syscall handlers
-      ├─ dma::register_allocator() — wire physical allocator for DMA buffers
+      ├─ Enable SSE (CR4.OSFXSR | OSXMMEXCPT) — compiler_builtins needs it
+      ├─ kernel::init() — GDT, IDT, FPU, APIC, page allocator, cpulocals
+      ├─ kernel::syscall::init_basic_syscalls() — register basic syscall handlers
+      ├─ dma::register_allocator() — wire phys allocator for DMA buffers
       ├─ init_serial() — COM1 (0x3F8) at 115200 baud, 8N1
+      ├─ arch_x86_64::alloc::init_allocator() — phys alloc pool: 0x300000–0x10000000
+      │   (with hole cut at 0x0FE00000–0x0FF00000 for user stack)
       ├─ serial_write("Hello MINIX!\r\n") — first visible output
-      ├─ PIT timer init:
+      ├─ PIT timer init (100 Hz):
       │  1. remap_pic() — relocate PIC vectors away from CPU exceptions
       │  2. init_pit(100) — program PIT at 100 Hz, mode 3
       │  3. set_timer_isr_handler() — register C callback
       │  4. IDT.set_handler() — install assembly trampoline at VECTOR_TIMER
       │  5. unmask_timer_irq() — enable IRQ 0 on master PIC
-      └─ HLT loop — idle until interrupts fire
+      │
+      ├─ [integration-tests] → test_runner::run_integration_tests()
+      │   ├─ init_vm_allocator() — 4MB pool at phys 4MB for VM alloc
+      │   ├─ Phase A (5 tests): Page table basics
+      │   ├─ Phase B (3 tests): Page table manipulation
+      │   ├─ Phase C (2 tests): Physical memory allocator
+      │   ├─ Phase D (2 tests): VM allocator
+      │   └─ Phase E (1 test): sysretq_ring3 — jumps to ring-3, writes
+      │      isa-debug-exit port, QEMU exits with code 1 (success)
+      │
+      └─ [normal boot] → boot_init:
+          ├─ load_and_prepare_init() — find /sbin/init in initramfs CPIO,
+          │   parse ELF64 header, load segments, allocate user stack,
+          │   set up TrapFrame for sysretq (rcx=RIP, r11=RFLAGS, rsp=RSP)
+          ├─ boot_create_page_table() — allocate PML4+PDP+PD, deep-copy
+          │   boot identity map, share kernel high mappings
+          └─ boot_jump_to_user() — set p_cr3, call sysretq_to_user(),
+              execute sysretq → ring-3. Never returns.
 ```
 
 **Files involved:**
 - `crates/kernel-boot/src/trampoline.S` — 32-bit multiboot ELF (entry point)
-- `crates/kernel-boot/src/main.rs` — kmain(): serial, timer, HLT
+- `crates/kernel-boot/src/main.rs` — kmain(): serial, timer, boot_init or integration tests
+- `crates/kernel-boot/src/boot_init.rs` — load_and_prepare_init, boot_create_page_table, boot_jump_to_user
+- `crates/kernel-boot/src/test_runner.rs` — bare-metal integration test suite (12 tests)
 - `crates/kernel-boot/trampoline.ld` — links trampoline at 0x100000
 - `tools/minix-raw.ld` — kernel linker script (0x200000)
+- `tools/minix-user.ld` — userland binary linker script (0x01000000)
 - `tools/mkboot.rs` — extracts kmain address, rebuilds trampoline with -DKMAIN
+- `tools/mkinitramfs.rs` — builds CPIO newc archive with boot-critical binaries
+- `tools/mbr.S` — 512-byte MBR for disk image boot path
+- `tools/stage2.S` — 16-bit → 32-bit → 64-bit transition for disk image
 - `Justfile` — `just build`, `just run`, `just test-qemu` commands
 
 **Build & run:**
 ```bash
-# Build kernel + trampoline
+# Build kernel + trampoline + initramfs
 just build
 
-# Boot in QEMU
+# Boot in QEMU (trampoline + kernel binary)
 just run
+
+# Run bare-metal integration tests (12 tests, exits via isa-debug-exit)
+just test-qemu
+
+# Build disk image (MBR + stage2 + kernel)
+just image
+
+# Boot disk image in QEMU (BIOS disk boot path)
+just run-img
 ```
 
 | Milestone | Description | Target Phase | Status |

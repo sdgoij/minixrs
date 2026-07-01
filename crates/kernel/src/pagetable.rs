@@ -57,11 +57,21 @@ pub fn get_proc_cr3(ep: i32) -> u64 {
 // strong symbols would conflict, so this is only active on Windows.
 //
 // `#[used]` ensures the symbols survive dead-code elimination.
-#[cfg(target_os = "windows")]
+// When linking without the kernel linker script, provide stub symbols.
+// The linker script (`minix-raw.ld`) also defines these, so we only emit
+// stubs on targets where the linker script is not used (Windows host or
+// `x86_64-unknown-none` dev builds).
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_vendor = "pc"))
+))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
-#[cfg(target_os = "windows")]
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_vendor = "pc"))
+))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_end: u8 = 0;
