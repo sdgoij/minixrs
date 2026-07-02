@@ -273,6 +273,13 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  enqueuing processes...\r\n");
 
+        // Send a boot notification to PM before starting the scheduler.
+        // This notification will be pending when PM calls RECEIVE, causing
+        // mini_receive to build a notification message and deliver it.
+        unsafe {
+            kernel::ipc::mini_notify(arch_common::com::RS_PROC_NR, arch_common::com::PM_PROC_NR);
+        }
+
         // Enqueue each process that is runnable.
         for &(_, proc_nr) in boot_procs {
             let rp = kernel::table::proc_addr(proc_nr);
@@ -296,6 +303,7 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  scheduler starting...\r\n");
 
+        // Debug: write marker before restore
         // Jump to the first process via restore().
         unsafe {
             arch_x86_64::asm::restore(first_proc as *const u8);
@@ -382,15 +390,30 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         }
 
         // Pick the next runnable process.
-        if let Some(next) = kernel::sched::pick_proc()
-            && next != rp
-        {
-            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
-            // Switch to the new process — never returns.
-            arch_x86_64::asm::restore(next as *const u8);
+        if let Some(next) = kernel::sched::pick_proc() {
+            if next != rp {
+                arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
+                // Switch to the new process — never returns.
+                arch_x86_64::asm::restore(next as *const u8);
+            }
+        } else {
+            // No runnable processes — all blocked on IPC.
+            // Send a boot notification from RS to PM to kickstart
+            // the server boot chain. Uses RS (endpoint 2) rather
+            // than SYSTEM (-2) because PM rejects negative sources.
+            let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
+            if !pm_proc.is_null() {
+                let _ = kernel::ipc::mini_notify(
+                    arch_common::com::RS_PROC_NR,
+                    arch_common::com::PM_PROC_NR,
+                );
+                if let Some(next) = kernel::sched::pick_proc() {
+                    arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
+                    arch_x86_64::asm::restore(next as *const u8);
+                }
+            }
+            // Last resort: return normally (sysretq to same process).
         }
-        // Otherwise: return normally and syscall_entry will pop the
-        // (unchanged) register save area and sysretq to the same process.
     }
 }
 

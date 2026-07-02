@@ -169,6 +169,12 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
             }
 
+            // Set the receiver's return value (RAX in p_reg) to the
+            // sender's endpoint so that when the receiver resumes from
+            // the RECEIVE syscall, it sees who sent the message.
+            let src_ep = (*caller_ptr).p_endpoint;
+            core::ptr::write_volatile(&raw mut (*dst_ptr).p_reg.rax, src_ep as u64);
+
             let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
@@ -220,11 +226,19 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
 /// Process and `m_ptr` must be valid.
 pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, flags: i32) -> i32 {
     unsafe {
+        // Servers use ANY = 0x0000ffff, kernel uses NONE = 31743.
+        // Normalize so mini_notify can wake us up.
+        let src_any = if src_e == 0x0000ffff {
+            crate::system::NONE
+        } else {
+            src_e
+        };
+
         let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
         while !(*xpp).is_null() {
             let send_ptr = *xpp;
             let send_ep = (*send_ptr).p_endpoint;
-            let matches = src_e == crate::system::NONE || src_e == send_ep;
+            let matches = src_any == crate::system::NONE || src_any == send_ep;
             let send_rts = (*send_ptr).p_rts_flags.load(Ordering::Relaxed);
 
             if matches && (send_rts & RtsFlags::SENDING.bits() != 0) {
@@ -249,13 +263,43 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
             xpp = &mut (**xpp).p_q_link;
         }
 
+        // Check for pending notifications before blocking.
+        // The source endpoint is looked up from the bit position
+        // in s_notify_pending (only works for system processes ≥ 0).
+        if has_pending_notify(caller_ptr) {
+            let priv_ptr = (*caller_ptr).p_priv;
+            if !priv_ptr.is_null() {
+                let pending = &(*priv_ptr).s_notify_pending;
+                // Find the first set bit (source privilege ID).
+                for (chunk_i, &chunk) in pending.chunk.iter().enumerate() {
+                    if chunk != 0 {
+                        let bit = chunk.trailing_zeros() as usize;
+                        let priv_id = chunk_i * 32 + bit;
+                        // Clear this notification.
+                        (*priv_ptr).s_notify_pending.clear(priv_id);
+                        // Build notification message.
+                        let notify_src = priv_id as i32; // endpoint for priv slot
+                        build_notify_message(
+                            &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]),
+                            notify_src,
+                            caller_ptr,
+                        );
+                        // Set m_source at offset 0.
+                        let ep_bytes = notify_src.to_ne_bytes();
+                        core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), m_ptr, 4);
+                        return notify_src;
+                    }
+                }
+            }
+        }
+
         // NON_BLOCKING check (C L1027-1037)
         if flags & NON_BLOCKING != 0 {
             return ENOTREADY;
         }
 
         // Deadlock check (C L1029)
-        if deadlock(RECEIVE, caller_ptr, src_e) {
+        if deadlock(RECEIVE, caller_ptr, src_any) {
             return ELOCKED;
         }
 
@@ -266,7 +310,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         if old == 0 {
             dequeue(caller_ptr);
         }
-        (*caller_ptr).p_getfrom_e = src_e;
+        (*caller_ptr).p_getfrom_e = src_any;
         OK
     }
 }
@@ -302,6 +346,8 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         if rts & RtsFlags::RECEIVING.bits() != 0
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
         {
+            // Set the receiver's RAX to the notifier's endpoint.
+            core::ptr::write_volatile(&raw mut (*dst_ptr).p_reg.rax, src_e as u64);
             let new = rts & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {

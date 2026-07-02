@@ -632,15 +632,16 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
 pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
     core::arch::naked_asm!(
         // Load the process's private page table from p_seg.p_cr3.
-        "mov    rax, [rdi + 184]",
-        "mov    cr3, rax",
+        "mov    r15, [rdi + 184]",
+        "mov    cr3, r15",
         // Load RIP (→RCX) and RFLAGS (→R11) for sysretq.
         "mov    rcx, [rdi + 16]",
         "mov    r11, [rdi + 72]",
         // Load the user stack pointer from p_reg.rsp.
         "mov    rsp, [rdi + 168]",
-        // Zero all other GPRs for safety (no leaked kernel data).
-        "xor    rax, rax",
+        // Load RAX from p_reg.rax (syscall return value).
+        "mov    rax, [rdi]",
+        // Zero remaining GPRs.
         "xor    rbx, rbx",
         "xor    rdx, rdx",
         "xor    rsi, rsi",

@@ -5,7 +5,6 @@
 //!
 //! Relies on the physical memory allocator (kernel::vm) for page frames.
 
-use crate::vm::{self, NO_MEM};
 use arch_common::com::{VM_PAGEFAULT, VM_PROC_NR};
 use arch_x86_64::pte::{
     self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, pd_index, pdpt_index, pml4_index, pt_index,
@@ -93,12 +92,9 @@ pub enum PageTableError {
 }
 
 unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
-    unsafe {
-        let page = vm::alloc_mem(1, 0);
-        if page == NO_MEM {
-            return Err(PageTableError::OutOfMemory);
-        }
-        Ok(page * vm::VM_PAGE_SIZE as u64)
+    match arch_x86_64::alloc::alloc_phys_page() {
+        Some(addr) => Ok(addr),
+        None => Err(PageTableError::OutOfMemory),
     }
 }
 
@@ -213,11 +209,17 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
             write_pte(pde_addr, p | PG_P | pte::PG_RW | pte::PG_U);
             p
         } else if pde & pte::PG_PS != 0 {
-            // Split a 2MB huge page: allocate a page table, zero it
-            // (all PTEs not-present), then replace the huge page PDE.
-            // The next call to map_page will set the specific PTE.
+            // Split a 2MB huge page into 512 × 4KB PTEs, preserving
+            // the original 2MB mapping. Then the specific PTE will be
+            // overwritten below for the per-process page.
             let pt = alloc_pt_page()?;
-            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            let base_pa = pde & pte::PG_FRAME;
+            let pte_flags = (pde & pte::PG_PTEMASK) & !pte::PG_PS;
+            let pt_virt = pt as *mut PtEntry;
+            for i in 0..512u64 {
+                let pte_pa = base_pa + i * 4096;
+                write_pte(pt_virt.add(i as usize), pte_pa | pte_flags);
+            }
             write_pte(pde_addr, pt | pte::PG_P | pte::PG_RW | pte::PG_U);
             pt
         } else {
@@ -226,9 +228,6 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
 
         let pt = pt_phys as *mut PtEntry;
         let pte_addr = pt.add(pt_index(va));
-        if read_pte(pte_addr) & PG_P != 0 {
-            return Err(PageTableError::AlreadyMapped);
-        }
         write_pte(pte_addr, pte_val);
         Ok(())
     }
@@ -440,6 +439,7 @@ pub unsafe fn handle_page_fault(va: u64, err: u32) -> bool {
 mod tests {
     extern crate std;
     use super::*;
+    use crate::vm::{self, NO_MEM};
     #[cfg(target_os = "none")]
     use arch_x86_64::pte::PG_FRAME;
 
@@ -517,11 +517,15 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_pt_page_fails_without_init() {
-        // Without VM init, alloc_pt_page should fail
+    fn test_alloc_pt_page_after_arch_init() {
+        // alloc_pt_page now uses the arch allocator (not VM).
+        // Initialize a minimal allocator, then verify allocation works.
         unsafe {
+            let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
+            mmap.add(0x100000, 0x200000);
+            arch_x86_64::alloc::init_allocator(&mmap);
             let r = alloc_pt_page();
-            assert!(r.is_err());
+            assert!(r.is_ok());
         }
     }
 
