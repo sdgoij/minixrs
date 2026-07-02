@@ -137,10 +137,12 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/init", INIT_PROC_NR),
         ];
 
-        // Load each boot process from initramfs
+        // Load each boot process from initramfs, storing InitInfo for
+        // per-process page table creation.
         serial_write("  loading boot processes...\r\n");
-        let mut init_info = None;
-        for &(path, proc_nr) in boot_procs {
+        let mut boot_infos: [core::mem::MaybeUninit<boot_init::InitInfo>; 8] =
+            unsafe { core::mem::zeroed() };
+        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe { boot_init::load_and_prepare_proc(path, proc_nr, &[path]) } {
                 Some(info) => info,
                 None => {
@@ -150,32 +152,10 @@ pub extern "C" fn kmain() -> ! {
                     hlt_loop();
                 }
             };
-            if path == "/sbin/init" {
-                init_info = Some(info);
-            }
+            boot_infos[i] = core::mem::MaybeUninit::new(info);
         }
 
-        let init_info = match init_info {
-            Some(info) => info,
-            None => {
-                serial_write("  FAILED: no valid init binary\r\n");
-                hlt_loop();
-            }
-        };
-
-        serial_write("  creating per-process page table...\r\n");
-
-        let pt_phys = unsafe { boot_init::boot_create_page_table() };
-        if pt_phys == 0 {
-            serial_write("  FAILED: page table allocation\r\n");
-            hlt_loop();
-        }
-
-        serial_write("  jumping to ring-3...\r\n");
-
-        unsafe {
-            arch_x86_64::apic::mask_timer_irq();
-        }
+        serial_write("  creating per-process page tables...\r\n");
 
         #[cfg(target_os = "none")]
         unsafe {
@@ -183,19 +163,126 @@ pub extern "C" fn kmain() -> ! {
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
             arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
             arch_x86_64::cpulocals::init_cpulocals();
-            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(
-                init_info.proc_ptr as *mut core::ffi::c_void,
-            );
         }
 
+        // Create per-process (restricted) page tables and enqueue each process.
+        let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
+        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
+            let rp = kernel::table::proc_addr(proc_nr);
+            if i == 0 {
+                first_proc = rp;
+            }
+
+            let info = unsafe { boot_infos[i].assume_init_ref() };
+
+            // Create a restricted page table that maps only this process's
+            // code and stack, not the entire identity-mapped 1GB region.
+            let pt_phys = unsafe {
+                boot_init::boot_create_restricted_page_table(
+                    info.code_start,
+                    info.code_end,
+                    info.stack_start,
+                    info.stack_end,
+                )
+            };
+            let pt_phys = match pt_phys {
+                Some(p) => p,
+                None => {
+                    serial_write("  FAILED: page table for ");
+                    serial_write(path);
+                    serial_write("\r\n");
+                    hlt_loop();
+                }
+            };
+
+            unsafe {
+                core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+                // Set scheduling parameters.
+                core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
+                core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
+                core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+            }
+        }
+
+        if first_proc.is_null() {
+            serial_write("  FAILED: no boot processes found\r\n");
+            hlt_loop();
+        }
+
+        serial_write("  enqueuing processes...\r\n");
+
+        // Enqueue each process that is runnable.
+        for &(_, proc_nr) in boot_procs {
+            let rp = kernel::table::proc_addr(proc_nr);
+            unsafe {
+                let old_flags = (*rp)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed);
+                let cleared = old_flags
+                    & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
+                        | kernel::proc::RtsFlags::SLOT_FREE.bits());
+                if cleared == 0 {
+                    kernel::sched::enqueue(rp);
+                }
+            }
+        }
+
+        // Set the current process pointer to the first one.
         unsafe {
-            boot_init::boot_jump_to_user(&init_info, pt_phys);
+            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(first_proc as *mut core::ffi::c_void);
+        }
+
+        serial_write("  scheduler starting...\r\n");
+
+        // Jump to the first process via restore().
+        unsafe {
+            arch_x86_64::asm::restore(first_proc as *const u8);
         }
     }
 }
 
+/// Save the current process's register state from the kernel-stack save
+/// area into its Proc::p_reg TrapFrame, so a later restore() can resume it.
+///
+/// The save area layout (14 × u64 pushed by syscall_entry naked asm):
+///   [0]=rax, [1]=rbx, [2]=rcx(=RIP), [3]=rdx, [4]=rsi, [5]=rdi,
+///   [6]=r8, [7]=r9, [8]=r10, [9]=r11(=RFLAGS), [10]=r12,
+///   [11]=r13, [12]=r14, [13]=r15
+///
+/// The original user RSP = saved_ptr + 112 (14 pushes × 8 bytes).
+///
+/// # Safety
+///
+/// `saved` must point to a valid kernel-stack save area pushed by
+/// `syscall_entry`. `rp` must point to a valid `Proc`.
+unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
+    unsafe {
+        (*rp).p_reg.rax = *saved.add(0);
+        (*rp).p_reg.rbx = *saved.add(1);
+        (*rp).p_reg.rcx = *saved.add(2); // return RIP
+        (*rp).p_reg.rdx = *saved.add(3);
+        (*rp).p_reg.rsi = *saved.add(4);
+        (*rp).p_reg.rdi = *saved.add(5);
+        (*rp).p_reg.r8 = *saved.add(6);
+        (*rp).p_reg.r9 = *saved.add(7);
+        (*rp).p_reg.r10 = *saved.add(8);
+        (*rp).p_reg.r11 = *saved.add(9); // return RFLAGS
+        (*rp).p_reg.r12 = *saved.add(10);
+        (*rp).p_reg.r13 = *saved.add(11);
+        (*rp).p_reg.r14 = *saved.add(12);
+        (*rp).p_reg.r15 = *saved.add(13);
+        // Recover user RSP from stack position
+        (*rp).p_reg.rsp = (saved as u64) + 112;
+        // RIP and RFLAGS are stored in rcx/r11 positions
+        (*rp).p_reg.rip = *saved.add(2);
+        (*rp).p_reg.rflags = *saved.add(9);
+    }
+}
+
 /// C handler for syscall entry — called from arch-x86_64's naked asm.
-/// Saves/restores registers, dispatches to kernel::syscall.
+/// Dispatches the syscall, then attempts round-robin context switch
+/// by saving the current process's state, re-enqueuing it, and picking
+/// the next runnable process via the scheduler.
 ///
 /// # Safety
 ///
@@ -222,6 +309,26 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         ];
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
+
+        // ── Round-robin context switch ──────────────────────────────
+        // Save the current process's register state.
+        save_proc_regs(rp, saved);
+
+        // Re-enqueue if still runnable.
+        if (*rp).is_runnable() {
+            kernel::sched::enqueue(rp);
+        }
+
+        // Pick the next runnable process.
+        if let Some(next) = kernel::sched::pick_proc()
+            && next != rp
+        {
+            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
+            // Switch to the new process — never returns.
+            arch_x86_64::asm::restore(next as *const u8);
+        }
+        // Otherwise: return normally and syscall_entry will pop the
+        // (unchanged) register save area and sysretq to the same process.
     }
 }
 

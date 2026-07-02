@@ -611,6 +611,52 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
     core::arch::naked_asm!("mov    cr3, rax", "mov    rsp, rdx", "sysretq",);
 }
 
+/// Restore a process context and jump to it via `sysretq`.
+///
+/// Takes a pointer to a `Proc` struct in `rdi` (System V AMD64 ABI),
+/// loads its CR3, RIP (via RCX), RFLAGS (via R11), and user RSP from
+/// the `p_reg` and `p_seg` fields, then zeros all other GPRs and
+/// executes `sysretq` to enter (or re-enter) the process in ring 3.
+///
+/// This is the atomic "switch to process" primitive for the scheduler.
+/// The caller MUST save the outgoing process's register state into its
+/// `p_reg` TrapFrame before calling `restore()`. Never returns.
+///
+/// # Safety
+///
+/// `proc_ptr` must point to a valid `Proc` whose `p_reg` and `p_seg`
+/// contain valid user-space register values. Must be called in ring 0
+/// with interrupts disabled. Never returns.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
+    core::arch::naked_asm!(
+        // Load the process's private page table from p_seg.p_cr3.
+        "mov    rax, [rdi + 184]",
+        "mov    cr3, rax",
+        // Load RIP (→RCX) and RFLAGS (→R11) for sysretq.
+        "mov    rcx, [rdi + 16]",
+        "mov    r11, [rdi + 72]",
+        // Load the user stack pointer from p_reg.rsp.
+        "mov    rsp, [rdi + 168]",
+        // Zero all other GPRs for safety (no leaked kernel data).
+        "xor    rax, rax",
+        "xor    rbx, rbx",
+        "xor    rdx, rdx",
+        "xor    rsi, rsi",
+        "xor    rdi, rdi",
+        "xor    r8, r8",
+        "xor    r9, r9",
+        "xor    r10, r10",
+        "xor    r12, r12",
+        "xor    r13, r13",
+        "xor    r14, r14",
+        "xor    r15, r15",
+        // Jump to ring 3.
+        "sysretq",
+    );
+}
+
 // The syscall entry point and handler pointer are only available on the
 // kernel target (x86_64-pc-minix), not on the host build (Windows tests).
 #[cfg(target_os = "none")]

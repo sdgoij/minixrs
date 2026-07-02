@@ -5,10 +5,11 @@
 
 use kernel::elf::{load_elf, parse_elf_header, setup_user_stack};
 use kernel::initramfs::find_initramfs_file;
-use kernel::pagetable::boot_cr3;
+use kernel::pagetable::{boot_cr3, map_page};
 
 use crate::print;
 
+use arch_x86_64::pte;
 /// Convenience alias for the Proc type.
 use kernel::proc::Proc;
 
@@ -192,6 +193,72 @@ pub unsafe fn boot_create_page_table() -> u64 {
     }
 
     pml4_page
+}
+
+/// Create a restricted per-process page table that maps only the pages
+/// needed by a specific process: its code segments, user stack, and the
+/// shared kernel high mappings. No identity-mapped data from other
+/// processes is accessible.
+///
+/// Uses 4KB page granularity for user mappings via `map_page()`.
+///
+/// # Safety
+///
+/// Must be called after the arch allocator and VM allocator are
+/// initialized. The physical pages for `code_start..code_end` and
+/// `stack_start..stack_end` must already be allocated and populated.
+pub unsafe fn boot_create_restricted_page_table(
+    code_start: u64,
+    code_end: u64,
+    stack_start: u64,
+    stack_end: u64,
+) -> Option<u64> {
+    // 1. Allocate a fresh PML4 page.
+    let pml4 = arch_x86_64::alloc::alloc_phys_page()?;
+    unsafe {
+        core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+    }
+
+    // 2. Share kernel high mappings (PML4[256..512]).
+    let boot_cr3_val = boot_cr3();
+    if boot_cr3_val == 0 {
+        return None;
+    }
+    let boot_pml4 = boot_cr3_val as *const u64;
+    unsafe {
+        for i in 256..512 {
+            let entry = core::ptr::read(boot_pml4.add(i));
+            core::ptr::write((pml4 as *mut u64).add(i), entry);
+        }
+    }
+
+    // Flags for user pages: Present | Read-Write | User-accessible.
+    let user_flags = pte::PG_P | pte::PG_RW | pte::PG_U;
+
+    // 3. Map code pages (identity-mapped).
+    let mut va = code_start;
+    while va < code_end {
+        unsafe {
+            if map_page(pml4, va, va, user_flags).is_err() {
+                return None;
+            }
+        }
+        va += 0x1000;
+    }
+
+    // 4. Map stack pages (identity-mapped).
+    let mut va = stack_start;
+    while va < stack_end {
+        unsafe {
+            if map_page(pml4, va, va, user_flags).is_err() {
+                return None;
+            }
+        }
+        va += 0x1000;
+    }
+
+    // If no code or stack was mapped, still valid (just kernel mappings).
+    Some(pml4)
 }
 
 /// Jump to userspace — the final step of boot.

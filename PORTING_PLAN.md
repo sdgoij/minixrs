@@ -3578,8 +3578,18 @@ be replaced with real implementations.
   - [x] VM_EXEC_NEWMEM handler in VM server (`pt_new` for fresh address space)
   - [x] VFS_OPEN / VFS_READ wired through FS request layer
   - [x] Kernel SYS_EXEC finalization call (call 60, updates CR3 + trap frame)
-  - [ ] `do_exec()` in PM — needs grant reading, VFS binary access, VM address
-    space, segment loading, stack setup (blocked on VFS server filesystem mount)
+  - [ ] **12.25a — Implement do_exec in PM** — needs:
+        1. Read exec data from grant (path + argv + envp) via SAFECOPYFROM
+        2. Open the binary via VFS_OPEN IPC (sendrec to VFS_PROC_NR)
+        3. Read ELF header via VFS_READ
+        4. Send VM_EXEC_NEWMEM for fresh address space
+        5. Load ELF segments, set up user stack with argv/envp
+        6. Call kernel SYS_EXEC to finalize (set CR3, RIP, RSP)
+        (Blocked on: VFS mount + grant table in minix-std)
+  - [ ] **12.25b — Replace remaining PM ENOSYS stubs**
+        - `no_sys` catch-all intentionally returns ENOSYS
+        - PM_EXEC_NEW dispatches to `do_exec` (see 12.25a)
+        - `sh` still prints "waiting for PM server..." until fork/exec works
 
 - [x] **12.26 — Wire VFS server message loop and dispatch** (`servers/src/vfs/main.rs`)
   **Depends on:** minix-rt dependency, IPC syscall handlers (kernel 46-49)
@@ -4099,8 +4109,9 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 test suite (Phase E) proves ring-3 transition works by running a synthetic test
 that jumps to ring-3 and writes the QEMU exit port.
 
-**Next step (M7b):** Wire up PM server dispatch so `/sbin/init` receives and
-responds to IPC messages, enabling shell launch on `/dev/tty00`.
+**Next step (M1c):** Implement `restore()` context switch and scheduler loop
+so all 8 boot processes (7 servers + init) get CPU time. Then wire PM server
+dispatch so init can fork/exec/waitpid to launch `/bin/sh`.
 
 ---
 
@@ -4512,6 +4523,8 @@ Remaining Priority 2 commands (not yet ported):
 |-----------|-------------|-------------|--------|
 | M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
 | M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ✅ |
+| M1c | **Multi-process scheduling with context switch** | **Phase 8 + 14.B** | ✅ |
+| M2 | **Shell prompt (`#`) via init → fork/exec/waitpid** | **Phase 12 + 14.B** | ⬜ |
 
 ### M1b Tasks — First Userspace Process
 
@@ -4601,6 +4614,54 @@ behave undefinedly. These are `#[ignore]`'d:
     main`. Fixed by adding explicit `[[bin]]` entries with `test = false` in
     `Cargo.toml`.
 
+### M1c Tasks — Multi-Process Scheduling & Context Switch
+
+**Goal:** Replace the single-process `boot_jump_to_user()` with a proper
+scheduler loop. All 8 boot processes (7 servers + init) are loaded into
+memory and enqueued. The kernel's timer ISR triggers round-robin scheduling
+via `proc_no_time()`. Each process gets a turn on the CPU.
+
+**Current blocker:** `kmain` calls `boot_jump_to_user()` which executes
+`sysretq` directly to init and never returns. There is no `restore()`
+function that can context-switch from kernel to an arbitrary user process,
+and no scheduler loop that alternates between processes.
+
+#### Kernel infrastructure
+
+- [x] **CSW1 — Implement `restore()` for x86_64** (`crates/arch-x86_64/src/asm.rs`)
+  Naked asm function that:
+  1. Saves current kernel context (callee-saved regs) on kstack
+  2. Picks target process (argument or static pointer)
+  3. Switches to target's kernel stack
+  4. Loads target's CR3 (page table switch)
+  5. Restores all regs from TrapFrame (rcx=RIP, r11=RFLAGS, rsp)
+  6. Executes `sysretq` to enter userspace
+  Reference: `.refs/minix-3.3.0/minix/kernel/arch/i386/switch_to_32.S`
+  adapted for x86_64 sysretq instead of iretq.
+
+- [x] **CSW2 — Wire scheduler loop in kmain** (`crates/kernel-boot/src/main.rs`)
+  Instead of `boot_jump_to_user()`, the kernel should:
+  1. Enqueue all boot processes via `sched::enqueue()`
+  2. Set up PIT timer ISR to call `sched::proc_no_time()` on each tick
+  3. Enter loop: `pick_proc()` → `restore()` → (process runs) →
+     (timer or syscall returns to kernel) → `pick_proc()` → ...
+
+- [x] **CSW3 — Per-process page tables with isolation**
+  Created `boot_create_restricted_page_table()` that builds a minimal page
+  table for each boot process, mapping ONLY its code segments and user
+  stack — not the full 1GB identity map. Each process gets PML4+PDP+PD
+  hierarchy with 4KB-page granularity via `map_page()`. Kernel high
+  mappings (PML4[256..512]) are shared read-only. kmain now calls this
+  for each of the 8 boot processes instead of the shared deep-copy.
+
+- [x] **CSW4 — Init yields periodically** (`crates/userland/src/lib.rs`)
+  Modified init's pause loop to call `getpid()` after each `pause`,
+  giving the scheduler a chance to context-switch to other runnable
+  processes. Without this, init's `loop { pause }` would never make
+  a syscall, starving the scheduler.
+  Future: replace with fork/exec/waitpid to launch `/bin/sh` when PM
+  server IPC is live.
+
 #### Next phases (F–L) — Component integration tests
 
 Ready to implement in `test_runner.rs`:
@@ -4663,7 +4724,7 @@ QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel.bin
       │   └─ Phase E (1 test): sysretq_ring3 — jumps to ring-3, writes
       │      isa-debug-exit port, QEMU exits with code 1 (success)
       │
-      └─ [normal boot] → boot_init:
+      └─ [normal boot] → boot_init (current, single-process):
           ├─ load_and_prepare_init() — find /sbin/init in initramfs CPIO,
           │   parse ELF64 header, load segments, allocate user stack,
           │   set up TrapFrame for sysretq (rcx=RIP, r11=RFLAGS, rsp=RSP)
@@ -4671,6 +4732,12 @@ QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel.bin
           │   boot identity map, share kernel high mappings
           └─ boot_jump_to_user() — set p_cr3, call sysretq_to_user(),
               execute sysretq → ring-3. Never returns.
+      
+      └─ [future — M1c] → scheduler loop:
+          ├─ load_and_prepare_proc() for all 8 boot processes
+          ├─ enqueue each process on run queue
+          ├─ init_timer_isr(proc_no_time) — preemption on each tick
+          └─ loop { pick_proc() → restore() → (userspace) → kernel → ... }
 ```
 
 **Files involved:**
@@ -4709,6 +4776,8 @@ just run-img
 |-----------|-------------|-------------|--------|
 | M2 | Two processes can IPC (x86_64) | Phase 4 | ❌ |
 | M3 | Process fork + exec works (x86_64) | Phase 5 | ❌ |
+| M1c | **Multi-process context switch + scheduler** | **Phase 8 + 14.B** | ✅ |
+| M2 | **Shell prompt via init → fork/exec/waitpid** | **Phase 12 + 14.B** | ⬜ |
 | M7b | **System boots to shell prompt (`# ` on serial)** | **Phase 14.B** | ❌ |
 | M4 | MFS filesystem serves files (x86_64) | Phase 9 | ❌ |
 | M5 | VFS server routes requests (x86_64) | Phase 10 | ❌ |

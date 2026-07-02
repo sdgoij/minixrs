@@ -536,9 +536,13 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(&[b'0' + (pid % 10) as u8]);
     write_out(b"\n");
 
-    // Loop forever — fork/exec/waitpid come when PM is live
+    // Yield periodically so the scheduler can run other processes.
+    // fork/exec/waitpid come when PM is live.
     loop {
         unsafe { core::arch::asm!("pause") };
+        // Voluntarily yield to the scheduler so other runnable processes
+        // (e.g., servers with pending work) get CPU time.
+        let _ = minix_rt::getpid();
     }
 }
 
