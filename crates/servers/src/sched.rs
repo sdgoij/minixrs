@@ -475,10 +475,10 @@ pub fn sched_server_main() {
                     match unsafe {
                         do_start_scheduling(
                             msg.m_type,
-                            unsafe { msg.m_payload.m2.m2i1 },
-                            unsafe { msg.m_payload.m2.m2i2 },
-                            unsafe { msg.m_payload.m2.m2i3 as u32 },
-                            unsafe { msg.m_payload.m2.m2l1 as u32 },
+                            msg.m_payload.m2.m2i1,
+                            msg.m_payload.m2.m2i2,
+                            msg.m_payload.m2.m2i3 as u32,
+                            msg.m_payload.m2.m2l1 as u32,
                             src_ep,
                         )
                     } {
@@ -487,18 +487,14 @@ pub fn sched_server_main() {
                     }
                 }
                 SCHEDULING_STOP => {
-                    match unsafe { do_stop_scheduling(unsafe { msg.m_payload.m2.m2i1 }, src_ep) } {
+                    match unsafe { do_stop_scheduling(msg.m_payload.m2.m2i1, src_ep) } {
                         Ok(()) => OK,
                         Err(e) => e,
                     }
                 }
                 SCHEDULING_SET_NICE => {
                     match unsafe {
-                        do_nice(
-                            unsafe { msg.m_payload.m2.m2i1 },
-                            unsafe { msg.m_payload.m2.m2i3 as u32 },
-                            src_ep,
-                        )
+                        do_nice(msg.m_payload.m2.m2i1, msg.m_payload.m2.m2i3 as u32, src_ep)
                     } {
                         Ok(()) => OK,
                         Err(e) => e,
