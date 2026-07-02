@@ -1152,7 +1152,51 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                     vfs_msg.m_type
                 }
             } else {
-                OK
+                // Step 4: Notify SCHED server to start scheduling the child.
+                // SCHEDULING_START (0xF02) message format using M2:
+                //   m2i1 = child endpoint
+                //   m2i2 = parent endpoint
+                //   m2i3 = max_priority (USER_Q = 5 for user processes)
+                //   m2l1 = quantum (DEFAULT_USER_TIME_SLICE = 200 ticks)
+                // SCHED server endpoint is 4 (SCHED_PROC_NR).
+                let mut sched_msg = Message {
+                    m_source: 0,
+                    m_type: 0xF02, // SCHEDULING_START
+                    m_payload: unsafe { core::mem::zeroed() },
+                };
+                unsafe {
+                    sched_msg.m_payload.m2.m2i1 = child_endpoint;
+                    sched_msg.m_payload.m2.m2i2 = parent_endpoint;
+                    sched_msg.m_payload.m2.m2i3 = 5; // USER_Q
+                    sched_msg.m_payload.m2.m2l1 = 200; // DEFAULT_USER_TIME_SLICE
+                }
+                let sched_reply = unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SENDREC_CALL,
+                        4u64, // SCHED_PROC_NR
+                        &mut sched_msg as *mut Message as u64,
+                    )
+                };
+                if sched_reply < 0 || sched_msg.m_type < 0 {
+                    // SCHED server failed — free the MProc and Proc slots.
+                    unsafe { free_proc(child_slot) };
+                    let mut clear_msg = Message {
+                        m_source: 0,
+                        m_type: 0,
+                        m_payload: unsafe { core::mem::zeroed() },
+                    };
+                    unsafe {
+                        clear_msg.m_payload.m1.m1i1 = child_endpoint;
+                    }
+                    let _ = send_kernel_call(2, &mut clear_msg); // SYS_CLEAR = 2
+                    if sched_reply < 0 {
+                        sched_reply as i32
+                    } else {
+                        sched_msg.m_type
+                    }
+                } else {
+                    OK
+                }
             }
         }
         Err(_) => -11,

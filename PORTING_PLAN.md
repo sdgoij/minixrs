@@ -4648,6 +4648,19 @@ parent                |                        |                  |
     `minix_rt::fork()` which now goes through PM.
   - Tests: 361 kernel tests pass, clippy clean
 
+- [x] **14C.9 — Notify SCHED server after fork**
+  - Added SCHEDULING_START notification in PM's `handle_fork` after the
+    VFS_PM_FORK step. Sends to SCHED server (endpoint 4) via SENDREC
+    with M2 message format: m2i1=child endpoint, m2i2=parent endpoint,
+    m2i3=max_priority (USER_Q=5), m2l1=quantum (200 ticks).
+  - The SCHED server's `do_start_scheduling` calls `schedule_process`
+    which sends SYS_SCHEDULE (kernel call 3) to the kernel. The
+    kernel's `do_schedule_handler` clears `NO_QUANTUM` on the child
+    and enqueues it, making the child runnable.
+  - Without this step, the child would have `NO_QUANTUM` set by
+    `do_fork_handler` and would never be scheduled.
+  - Tests: 428 server tests pass, clippy clean
+
 ### Key Architecture Decisions
 
 1. **Kernel calls vs kernel syscalls**: PM talks to the kernel via kernel
