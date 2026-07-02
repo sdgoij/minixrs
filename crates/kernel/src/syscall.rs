@@ -123,15 +123,16 @@ unsafe fn sys_getpid_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -
     unsafe { (*caller).p_endpoint as i64 }
 }
 
-/// SYS_exit (2) — terminate the current process.
-/// Causes SIGABRT on the caller via `cause_sig`. The process is
-/// marked SIGNALED|SIG_PENDING and dequeued; the signal manager
-/// (PM) handles the actual cleanup.
+/// SYS_exit (0) — terminate the current process.
+/// Frees the Proc slot so the parent's waitpid can detect the exit.
 unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
     unsafe {
-        crate::system::cause_sig((*caller).p_nr, 6); // SIGABRT
+        // Free the Proc slot so waitpid can detect the child exited.
+        (*caller).p_rts_flags.fetch_or(
+            crate::proc::RtsFlags::SLOT_FREE.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
     }
-    // Signal EDONTREPLY so the caller doesn't wait for a response
     crate::system::EDONTREPLY as i64
 }
 
@@ -543,6 +544,110 @@ unsafe fn sys_exec_target_handler(_caller: *mut crate::proc::Proc, args: &[u64; 
     }
 }
 
+/// SYS_fork (58) — create a child process.
+///
+/// Finds a free Proc slot, copies the caller's state, sets rax=0 in
+/// the child so it returns 0 from fork. Returns the child's endpoint
+/// to the parent (as a PID substitute).
+unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    unsafe {
+        // Find a free slot.
+        for slot in 0..crate::proc::NR_PROCS_TOTAL {
+            let rpc = crate::table::proc_addr(slot as i32);
+            if rpc.is_null() || rpc == caller {
+                continue;
+            }
+            if (*rpc)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed)
+                & crate::proc::RtsFlags::SLOT_FREE.bits()
+                != 0
+            {
+                // Found a free slot — clone the caller into it.
+                core::ptr::copy_nonoverlapping(caller, rpc, 1);
+                (*rpc).p_nr = slot as i32;
+                (*rpc).p_reg.rax = 0; // child returns 0
+                (*rpc).p_user_time = 0;
+                (*rpc).p_sys_time = 0;
+                let clear_mf = (crate::proc::MiscFlags::VIRT_TIMER
+                    | crate::proc::MiscFlags::PROF_TIMER
+                    | crate::proc::MiscFlags::SC_TRACE
+                    | crate::proc::MiscFlags::SPROF_SEEN
+                    | crate::proc::MiscFlags::STEP)
+                    .bits();
+                (*rpc).p_misc_flags.store(
+                    (*caller)
+                        .p_misc_flags
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                        & !clear_mf,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                (*rpc).p_virt_left = 0;
+                (*rpc).p_prof_left = 0;
+                (*rpc).p_cpu_time_left = 0;
+                (*rpc).p_cycles = 0;
+                (*rpc).p_kcall_cycles = 0;
+                (*rpc).p_kipc_cycles = 0;
+                (*rpc).p_signal_received = 0;
+
+                // Clear SLOT_FREE flag to mark slot in use.
+                (*rpc).p_rts_flags.fetch_and(
+                    !crate::proc::RtsFlags::SLOT_FREE.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+
+                // Store child endpoint in parent's deferred fields for
+                // waitpid to use.
+                let child_ep = (*rpc).p_endpoint;
+                (*caller).p_defer_r1 = child_ep as u64;
+
+                return child_ep as i64;
+            }
+        }
+        -11 // EAGAIN — no free slot
+    }
+}
+
+/// SYS_waitpid (59) — wait for a child process to exit.
+///
+/// args[0] = child endpoint (or 0 for any child, or -1 for any child).
+/// Blocks until the child exits, then frees its slot and returns 0.
+/// Returns negative error code on failure.
+unsafe fn sys_waitpid_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    unsafe {
+        let wanted_ep = args[0] as i32;
+        // Determine which child to wait for.
+        // If no specific child requested, use the one stored in defer_r1
+        // from the most recent fork in this process.
+        let child_ep = if wanted_ep == 0 || wanted_ep == -1 {
+            (*caller).p_defer_r1 as i32
+        } else {
+            wanted_ep
+        };
+        if child_ep == 0 {
+            return -10; // ECHILD
+        }
+        // Find the child's Proc.
+        let child_slot = crate::table::endpoint_slot(child_ep);
+        let child = crate::table::proc_addr(child_slot);
+        if child.is_null() || (*child).p_endpoint != child_ep {
+            return -10; // ECHILD
+        }
+        // Spin until the child's Proc slot is SLOT_FREE (child has exited).
+        loop {
+            let flags = (*child)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            if flags & crate::proc::RtsFlags::SLOT_FREE.bits() != 0 {
+                // Child has exited
+                return 0;
+            }
+            // Yield CPU so the child (or scheduler) can run.
+            core::arch::asm!("pause", options(nomem, nostack));
+        }
+    }
+}
+
 /// Initialize basic syscall handlers.
 ///
 /// # Safety
@@ -577,6 +682,8 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(47, sys_ipc_receive_handler); // RECEIVE
         register_basic_syscall(48, sys_ipc_sendrec_handler); // SENDREC
         register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
+        register_basic_syscall(58, sys_fork_handler); // NR_FORK
+        register_basic_syscall(59, sys_waitpid_handler); // NR_WAITPID
         register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE
         register_basic_syscall(62, sys_exec_target_handler); // SYS_EXEC_TARGET
     }

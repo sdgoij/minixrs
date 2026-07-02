@@ -24,10 +24,30 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 // Syscall numbers (from `.refs/minix-3.3.0/minix/include/minix/callnr.h`)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Exit process.
+/// Exit process
 const NR_EXIT: u64 = 0;
+/// Fork
+const NR_FORK: u64 = 58;
+/// Wait for child
+const NR_WAITPID: u64 = 59;
 /// Get process ID.
 const NR_GETPID: u64 = 20;
+
+/// Process Manager endpoint.
+pub const PM_PROC_NR: i32 = 0;
+/// Virtual File System endpoint.
+pub const VFS_PROC_NR: i32 = 1;
+
+/// PM message types (from callnr.h).
+pub const PM_FORK: i32 = 0x0002;
+pub const PM_WAITPID: i32 = 0x0003;
+pub const PM_EXEC_NEW: i32 = 0x002B;
+
+/// IPC syscall numbers.
+pub const SEND_CALL: u64 = 46;
+pub const RECEIVE_CALL: u64 = 47;
+pub const SENDREC_CALL: u64 = 48;
+pub const NOTIFY_CALL: u64 = 49;
 /// Write to file descriptor.
 const NR_WRITE: u64 = 3;
 /// Set program break (heap end).
@@ -56,14 +76,6 @@ const NR_CHOWN: u64 = 45;
 const NR_MKNOD: u64 = 56;
 /// Get directory entries.
 const NR_GETDENTS: u64 = 57;
-/// IPC send.
-pub const SEND_CALL: u64 = 46;
-/// IPC receive.
-pub const RECEIVE_CALL: u64 = 47;
-/// IPC sendrec.
-pub const SENDREC_CALL: u64 = 48;
-/// IPC notify.
-pub const NOTIFY_CALL: u64 = 49;
 /// Syscall to replace current process with a binary from initramfs.
 pub const NR_EXEC_REPLACE: u64 = 61;
 
@@ -345,6 +357,28 @@ pub fn getpid() -> i32 {
     unsafe { syscall0(NR_GETPID) as i32 }
 }
 
+/// Send a message to a process and wait for a reply (blocking).
+/// `msg` must be a 64-byte buffer. Returns the reply sender endpoint.
+pub fn sendrec(dest: i32, msg: &mut [u8; 64]) -> i32 {
+    unsafe { syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64) as i32 }
+}
+
+/// Fork the current process via kernel syscall.
+/// Returns 0 in the child, child's endpoint (as PID) in the parent,
+/// or negative on error.
+pub fn fork() -> i32 {
+    unsafe { syscall0(NR_FORK) as i32 }
+}
+
+/// Wait for a child process to exit.
+/// `child_ep` is the child's endpoint (returned by fork).
+/// Returns 0 on success, negative on error.
+pub fn waitpid(child_ep: i32) -> i32 {
+    unsafe { syscall1(NR_WAITPID, child_ep as u64) as i32 }
+}
+
+/// Send a message to a process and wait for a reply (blocking).
+/// `msg` must be a 64-byte buffer. Returns the reply sender endpoint.
 /// Change the program break (heap end).
 /// If `addr` is 0, returns the current break.
 /// Otherwise, sets the break to `addr` and returns the new break on success,

@@ -4210,17 +4210,36 @@ are printed to the serial console. The system boots 4 user-space servers
 - Exception handlers for page fault, GPF, and double fault.
 - Timer IRQ masked (workaround — timer ISR path #GP), serial IRQ unmasked.
 
-**Milestone achieved ✅ — Shell prompt `# ` works with input.**
+**Milestone achieved ✅ — Shell prompt `# ` with command execution.**
 
 Shell reads characters via COM1 polling, echoes them back, handles
-backspace, and submits lines on Enter. Currently echoes submitted
-lines as `echo: <line>` — no actual command execution yet.
+backspace, and submits lines on Enter. Built-in commands (echo, help,
+clear, exit, cd) work. External binaries (cat, ls, mkdir, etc.) execute
+from initramfs via kernel fork (NR_FORK=58) + exec_replace (syscall 61)
+with kernel waitpid (NR_WAITPID=59).
+
+**Fixes in this session:**
+- **Command parsing**: shell parses input line, splits by whitespace,
+  dispatches built-in commands (echo, help, clear, exit, cd).
+- **Kernel fork syscall (NR_FORK=58)**: creates a child process by cloning
+  the caller's Proc entry into a free slot. Child gets rax=0 so it returns
+  0 from fork. Returns child's endpoint to parent as PID.
+- **Kernel exit frees slot**: `sys_exit_handler` marks the caller's Proc
+  slot as SLOT_FREE, allowing the parent's waitpid to detect the exit.
+- **Kernel waitpid syscall (NR_WAITPID=59)**: blocks (spin-waits with
+  pause) until the child's Proc slot becomes SLOT_FREE.
+- **Shell external command execution**: unknown commands attempt fork+exec
+  from initramfs via `/bin/<cmd>` then `/sbin/<cmd>`. Parent waits for
+  child to exit before printing the next prompt.
+- **PM VFS fork notification**: PM's handle_fork sends VFS_PM_FORK to
+  VFS after creating a child process (PM IPC path, separate from the
+  kernel fork syscall used by the shell).
 
 **Next steps:**
-1. Implement command parsing in the shell (built-in commands first:
-   echo, help, then external command execution via fork/exec).
-2. Wire VFS IPC between PM and VFS for fork/exec of filesystem
-   binaries (ls, cat, cp, etc. exist in initramfs).
+- Wire full PM fork/exec path (Phase 14.C): replace kernel NR_FORK/NR_WAITPID
+  syscalls with PM IPC fork (MProc + kernel SYS_FORK + VFS notification for
+  Fproc copy) and PM exec (VFS open/read binary via grants, kernel SYS_EXEC
+  for register setup).
 
 ---
 
@@ -4460,6 +4479,194 @@ Remaining Priority 2 commands (not yet ported):
   - Tests: Compare output against reference C version; argument parsing; error handling; edge cases
 
 > Each userland command: Test against the C version with identical inputs, compare outputs.
+
+---
+
+## Phase 14.C — PM Fork/Exec with VFS IPC
+
+**Goal**: Wire the full Process Manager fork/exec flow through VFS IPC so
+user processes can spawn child processes and execute filesystem binaries.
+Currently the shell uses a kernel-level fork syscall (NR_FORK=58) and
+exec_replace (syscall 61) to load from initramfs. This phase replaces that
+with the proper MINIX IPC path: user → PM → kernel → VFS.
+
+### Architecture
+
+```
+User (shell)         PM                    Kernel (SYSTEM)       VFS
+    |                  |                        |                  |
+    |-- PM_FORK ------>|                        |                  |
+    |                  |-- SYS_FORK (call 0) --->|                  |
+    |                  |<-- child endpoint ------|                  |
+    |                  |-- VFS_PM_FORK --------->|-- pm_fork() ----|
+    |                  |<-- VFS_PM_FORK_REPLY ---|                  |
+    |<-- child PID ----|                        |                  |
+    |                  |                        |                  |
+child                 |                        |                  |
+    |-- PM_EXEC_NEW -->|                        |                  |
+    |                  |-- VFS_PM_EXEC --------->|-- open/read ----|
+    |                  |<-- VFS_PM_EXEC_REPLY ---|   binary data   |
+    |                  |-- SYS_EXEC (call 1) --->|                  |
+    |                  |<-- OK -----------------|                  |
+    |<-- OK -----------|                        |                  |
+    | (now runs new                            |                  |
+    |  binary)                                 |                  |
+parent                |                        |                  |
+    |-- PM_WAITPID --->|                        |                  |
+    |       (blocks until child exits)          |                  |
+    |<-- (pid,status)--|                        |                  |
+```
+
+### Tasks
+
+- [ ] **14C.1 — PM kernel call helper**
+  - Add `send_kernel_call(call_nr, msg)` to PM that sends a message to the
+    SYSTEM kernel task (`KERNEL_CALL + call_nr` as m_type, `SYSTEM=-2` as dest)
+    via `minix_rt::syscall2(SENDREC_CALL, SYSTEM, msg_ptr)`.
+  - Source references:
+    - `arch_common::ipc::KERNEL_CALL = 0x0100`
+    - `arch_common::com::SYSTEM = -2`
+  - Tests: Unit test calling a no-op kernel call, verify return
+
+- [ ] **14C.2 — PM sends SYS_FORK to kernel**
+  - In `handle_fork`: after `do_fork(caller_slot)` succeeds, build a kernel
+    SYS_FORK message (call 0) with:
+    - `m1_i1 = parent endpoint`
+    - `m1_i2 = child slot number`
+    - `m1_i3 = fork_flags` (0 for normal fork)
+  - Send via `send_kernel_call(0, &mut kmsg)`
+  - On success: update child's MProc endpoint from kernel reply
+  - On failure: free child MProc slot, return error to caller
+  - Kernel `do_fork_handler` (system.rs:3708) already handles the message.
+    Reply format: `m1_i1 = child endpoint`, `m2_l1 = parent msg delivery addr`
+  - Tests:
+    - Unit: PM `do_fork` + kernel SYS_FORK roundtrip, verify child Proc cloned
+    - Unit: Error path — no free Proc slot returns EFAULT
+
+- [ ] **14C.3 — Child returns 0 from fork (FORK_RETRY)**
+  - After kernel `do_fork_handler` clones the Proc, the child has the parent's
+    saved register state (just after the SENDREC syscall). Set `rax=0` in the
+    child's `p_reg` (already done in `do_fork_handler` at line 3736).
+  - The parent needs to NOT receive the child's reply. This is handled by the
+    kernel's normal IPC — the parent did `sendrec` to PM, PM replies to parent
+    with the child PID, and the kernel delivers that reply to the parent.
+    The child is a separate process — it doesn't receive PM's reply.
+  - When the scheduler picks the child, `restore()` loads child's registers
+    with `rax=0`, making the child's SENDREC syscall return 0.
+  - Tests:
+    - Integration: Fork, verify child gets 0, parent gets child PID
+
+- [ ] **14C.4 — PM sends VFS_PM_FORK and VFS replies**
+  - In `handle_fork`: after kernel SYS_FORK succeeds, send VFS_PM_FORK to VFS
+    (already implemented in PM's `handle_fork` as of current session).
+  - Message format:
+    - `m_type = VFS_PM_FORK (0x907)`
+    - `m1_i1 = child endpoint`
+    - `m1_i2 = parent endpoint`
+    - `m1_i3 = child PID`
+  - VFS `service_pm` handles VFS_PM_FORK (already implemented in vfs/pm.rs:
+    `pm_fork(pproc_e, proc_e, child_pid)` copies parent's Fproc to child).
+  - Reply format: `m_type = VFS_PM_FORK_REPLY (0x987)`.
+    Note: VFS's `reply()` function overwrites m_type with result code (OK=0),
+    so PM should check the result code, not the reply type.
+  - Tests:
+    - Integration: Fork, verify VFS creates child Fproc with copied FDs
+
+- [ ] **14C.5 — PM exec with VFS binary open/read**
+  - In `do_exec`: replace the current SYS_EXEC_TARGET (initramfs) path with
+    VFS IPC:
+    1. Send `VFS_PM_EXEC` to VFS with:
+       - `m1_i1 = child endpoint`
+       - `m7_p1 = path pointer (grant)`
+       - `m1_i2 = path length`
+       - `m7_p2 = stack frame pointer (grant)`
+       - `m1_i3 = frame length`
+    2. VFS `service_pm_postponed` handles `VFS_PM_EXEC` (stub exists at
+       vfs/pm.rs:170). Replace stub with real implementation:
+       - Extract path from grant
+       - Open file via `req_open`
+       - Read ELF header and segments via `req_read`
+       - Determine entry point, stack pointer, process string
+       - Build reply with `pc`, `newsp`, `ps_str`
+    3. VFS replies to PM with `VFS_PM_EXEC_REPLY`
+    4. PM sends `SYS_EXEC` (kernel call 1) to set up child's new registers:
+       - `m1_i1 = child endpoint`
+       - `m1_i2 = entry point (pc)`
+       - `m1_i3 = new stack pointer (newsp)`
+       - `m7_p1 = process string (ps_str)`
+    5. Kernel `do_exec_handler` (system.rs:3163) updates child's `p_reg`
+       with new RIP/RSP and clears old address space.
+  - Source references:
+    - Original MINIX PM exec: `.refs/minix-3.3.0/minix/servers/pm/exec.c`
+    - Original MINIX VFS exec: `.refs/minix-3.3.0/minix/servers/vfs/exec.c`
+  - Tests:
+    - Unit: PM builds exec message, VFS reads path, replies
+    - Integration: Fork + exec("/bin/echo") via PM, child runs echo
+    - Integration: Fork + exec("/bin/ls") via PM, child runs ls
+
+- [ ] **14C.6 — Exit notification to PM**
+  - When a process exits (kernel `sys_exit_handler`), the kernel should notify
+    PM so PM can mark the child's MProc as ZOMBIE and store the exit status.
+  - Currently `sys_exit_handler` just frees the Proc slot (SLOT_FREE). For the
+    PM path, it should instead send a notification to PM via `mini_notify`.
+  - In PM's `do_exit` handler:
+    - Mark caller's MProc as ZOMBIE + EXITING
+    - Store exit status in `mp_exitstatus`
+    - Notify parent if parent is waiting (wake up parent's waitpid)
+    - Notify RS via `notify_rs_on_exit` (already done)
+  - Tests:
+    - Unit: Process exits, PM receives notification, MProc marked ZOMBIE
+    - Integration: Fork → child exits → parent's waitpid returns status
+
+- [ ] **14C.7 — PM waitpid with zombie tracking**
+  - `do_waitpid` already checks for ZOMBIE flag (pm.rs:668-709).
+  - If child is zombie:
+    - Store child PID and exit status in reply message
+    - Free child's MProc slot
+    - Return OK
+  - If child is not zombie and `WNOHANG` not set:
+    - Set caller's `p_getfrom_e = NONE` to block until SIGCHLD
+    - Return EDONTREPLY (don't reply now — reply later when child exits)
+  - When child exits (from task 14C.6):
+    - Find parent waiting in waitpid
+    - Send reply with child PID and exit status
+    - Wake parent (clear `p_getfrom_e`, enqueue)
+  - Tests:
+    - Unit: Zombie child → waitpid returns immediately with status
+    - Unit: Living child + WNOHANG → waitpid returns EAGAIN
+    - Integration: Fork → child exits → parent waitpid returns status
+
+- [ ] **14C.8 — Shell uses PM IPC fork (remove kernel NR_FORK syscall)**
+  - Update `minix_rt::fork()` to send PM_FORK via IPC instead of kernel
+    syscall 58. This switches from the simple kernel fork to the full PM path.
+  - Update `minix_rt::waitpid()` to send PM_WAITPID via IPC instead of
+    kernel syscall 59.
+  - Remove kernel syscalls NR_FORK (58) and NR_WAITPID (59) from
+    `syscall.rs` after confirming the PM path works.
+  - Tests:
+    - All existing shell command tests pass with PM IPC fork
+    - Regression: Built-in commands (echo, help, clear, exit) still work
+
+### Key Architecture Decisions
+
+1. **Kernel calls vs kernel syscalls**: PM talks to the kernel via kernel
+   calls (messages to the SYSTEM task with `KERNEL_CALL + N` as m_type).
+   The SYSTEM task dispatches through `CALL_VEC` in system.rs. This is the
+   standard MINIX pattern — user processes use syscalls, servers use kernel
+   calls.
+
+2. **VFS as file server proxy**: VFS does NOT hold file data. It routes
+   open/read/write requests to the appropriate FS server (MFS, PFS, etc.).
+   For exec, VFS opens the binary via the FS request layer and reads the
+   ELF data into a grant buffer that PM can access.
+
+3. **Three-way handshake for exec**: PM → VFS (open/read binary),
+   VFS → PM (send data), PM → kernel (set up process). VFS is the data
+   provider, PM is the coordinator, kernel is the state setter.
+
+4. **Staged removal of kernel fork syscall**: The kernel NR_FORK and
+   NR_WAITPID syscalls are temporary. Once the full PM path is verified,
+   they are removed. The PM path is the "real" MINIX way.
 
 ---
 

@@ -1032,6 +1032,9 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
 
 /// Handler for PM_FORK — create a child process.
 ///
+/// Notifies VFS of the new child so VFS can copy the parent's file
+/// descriptor table (Fproc) to the child slot.
+///
 /// # Safety
 ///
 /// `caller_slot` must be a valid, in-use process slot. `msg` must point
@@ -1047,6 +1050,34 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 msg.m_payload.m1.m1i1 = child.mp_pid;
                 msg.m_payload.m1.m1i2 = child.mp_endpoint;
             }
+
+            // Notify VFS about the new child process.
+            // Message format (matches VFS pm.rs VFS_PM_FORK handler):
+            //   m_type = VFS_PM_FORK (0x907)
+            //   m1_i1 = child endpoint
+            //   m1_i2 = parent endpoint
+            //   m1_i3 = child PID
+            let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
+            let mut vfs_msg = Message {
+                m_source: 0,
+                m_type: arch_common::com::VFS_PM_FORK as i32,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+            unsafe {
+                vfs_msg.m_payload.m1.m1i1 = child.mp_endpoint;
+                vfs_msg.m_payload.m1.m1i2 = parent_endpoint;
+                vfs_msg.m_payload.m1.m1i3 = child.mp_pid;
+            }
+            // Send to VFS and wait for reply.
+            let reply = unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDREC_CALL,
+                    arch_common::com::VFS_PROC_NR as u64,
+                    &mut vfs_msg as *mut Message as u64,
+                )
+            };
+            let _ = reply; // ignore VFS reply for now
+
             OK
         }
         Err(_) => -11,

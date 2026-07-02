@@ -534,13 +534,132 @@ pub fn sh(_args: &[&str]) -> i32 {
                 write_out(&[c]);
                 pos += 1;
             }
+
+            // Parse and execute the command.
             let line_len = pos;
-            // Execute the command (for now, just echo it back).
             if line_len > 0 {
-                write_out(b"echo: ");
-                write_out(&buf[..line_len]);
-                write_out(b"\r\n");
+                // Convert the line to a &str for splitting.
+                let line_str = core::str::from_utf8(&buf[..line_len]).unwrap_or("");
+
+                // Split into tokens by whitespace.
+                let mut tokens = [""; 32];
+                let mut argc = 0usize;
+                for token in line_str.split_whitespace() {
+                    if argc < tokens.len() {
+                        tokens[argc] = token;
+                        argc += 1;
+                    }
+                }
+
+                if argc > 0 {
+                    let cmd = tokens[0];
+                    let args = &tokens[..argc];
+                    match cmd {
+                        "echo" => {
+                            let _ = echo(args);
+                        }
+                        "cat" => {
+                            let _ = cat(args);
+                        }
+                        "cp" => {
+                            let _ = cp(args);
+                        }
+                        "ls" => {
+                            let _ = ls(args);
+                        }
+                        "mkdir" => {
+                            let _ = mkdir(args);
+                        }
+                        "rm" => {
+                            let _ = rm(args);
+                        }
+                        "ln" => {
+                            let _ = ln(args);
+                        }
+                        "chmod" => {
+                            let _ = chmod(args);
+                        }
+                        "chown" => {
+                            let _ = chown(args);
+                        }
+                        "sync" => {
+                            let _ = sync(args);
+                        }
+                        "mknod" => {
+                            let _ = mknod(args);
+                        }
+                        "reboot" => {
+                            let _ = reboot(args);
+                        }
+                        "fsck" => {
+                            let _ = fsck(args);
+                        }
+                        "help" => {
+                            write_out(b"available commands: echo cat cp ls mkdir rm ln");
+                            write_out(b" chmod chown sync mknod reboot fsck help clear\r\n");
+                        }
+                        "clear" => {
+                            write_out(b"\x1b[H\x1b[2J");
+                        }
+                        "cd" => {
+                            write_err(b"sh: cd: not yet implemented\r\n");
+                        }
+                        "exit" => {
+                            write_out(b"\r\n");
+                            return 0;
+                        }
+                        _ => {
+                            // Try external command via kernel fork/exec.
+                            let cmd_bytes = cmd.as_bytes();
+                            let mut cmd_path = [0u8; 256];
+                            let path_len = if 5 + cmd_bytes.len() + 1 <= cmd_path.len() {
+                                cmd_path[..5].copy_from_slice(b"/bin/");
+                                cmd_path[5..5 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
+                                cmd_path[5 + cmd_bytes.len()] = 0;
+                                5 + cmd_bytes.len() + 1
+                            } else {
+                                0
+                            };
+                            if path_len > 0 {
+                                let pid = minix_rt::fork();
+                                if pid < 0 {
+                                    write_err(b"sh: fork failed\r\n");
+                                } else if pid == 0 {
+                                    // Child: try /bin/<cmd> first
+                                    let r =
+                                        unsafe { minix_rt::exec_replace(&cmd_path[..path_len]) };
+                                    if r < 0 && 6 + cmd_bytes.len() + 1 <= cmd_path.len() {
+                                        // Try /sbin/<cmd>
+                                        cmd_path[..6].copy_from_slice(b"/sbin/");
+                                        cmd_path[6..6 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
+                                        cmd_path[6 + cmd_bytes.len()] = 0;
+                                        let _ = unsafe {
+                                            minix_rt::exec_replace(
+                                                &cmd_path[..6 + cmd_bytes.len() + 1],
+                                            )
+                                        };
+                                    }
+                                    write_err(b"sh: ");
+                                    write_err(cmd.as_bytes());
+                                    write_err(b": not found\r\n");
+                                    minix_rt::exit(1);
+                                } else {
+                                    // Parent: wait for child
+                                    let status = minix_rt::waitpid(pid);
+                                    if status < 0 {
+                                        write_err(b"sh: waitpid failed\r\n");
+                                    }
+                                }
+                            } else {
+                                write_err(b"sh: ");
+                                write_err(cmd.as_bytes());
+                                write_err(b": not found\r\n");
+                            }
+                        }
+                    }
+                }
             }
+
             // Print the next prompt.
             write_out(b"# ");
         }
