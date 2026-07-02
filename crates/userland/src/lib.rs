@@ -502,7 +502,7 @@ pub fn sh(_args: &[&str]) -> i32 {
     #[cfg(not(target_os = "none"))]
     {
         write_out(b"sh: stub (no MINIX syscall ABI on host)\n");
-        return 0;
+        0
     }
     #[cfg(target_os = "none")]
     {
