@@ -3592,10 +3592,15 @@ be replaced with real implementations.
         - `SYS_EXEC_INITRAMFS` kernel call (index 61) added in
           kernel/src/system.rs for future SYSTEM IPC path.
         *(Grant-based exec will replace this when VFS + grants are wired.)*
-  - [ ] **12.25b — Replace remaining PM ENOSYS stubs**
-        - `no_sys` catch-all intentionally returns ENOSYS
-        - PM_EXEC_NEW dispatches to `do_exec` (see 12.25a)
-        - `sh` still prints "waiting for PM server..." until fork/exec works
+  - [x] **12.25b — Replace remaining PM ENOSYS stubs**
+        - Added all 47 PM call constants from callnr.h
+        - Added `handle_setgid` (calls `do_set` with GID subtype)
+        - Added `handle_getgid` (calls `do_get` with GID subtype)
+        - Added `handle_reboot` (calls kernel abort syscall)
+        - `no_sys` catch-all now used as the default dispatch
+        - Dispatch table covers all defined PM call numbers with
+          appropriate handlers; remaining calls map to `no_sys`
+          which returns ENOSYS
 
 - [x] **12.26 — Wire VFS server message loop and dispatch** (`servers/src/vfs/main.rs`)
   **Depends on:** minix-rt dependency, IPC syscall handlers (kernel 46-49)

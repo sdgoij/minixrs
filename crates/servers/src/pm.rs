@@ -950,13 +950,45 @@ pub const PM_WAITPID: i32 = PM_BASE + 3;
 pub const PM_GETPID: i32 = PM_BASE + 4;
 pub const PM_SETUID: i32 = PM_BASE + 5;
 pub const PM_GETUID: i32 = PM_BASE + 6;
+pub const PM_STIME: i32 = PM_BASE + 7;
+pub const PM_PTRACE: i32 = PM_BASE + 8;
+pub const PM_SETGROUPS: i32 = PM_BASE + 9;
+pub const PM_GETGROUPS: i32 = PM_BASE + 10;
 pub const PM_KILL: i32 = PM_BASE + 11;
+pub const PM_SETGID: i32 = PM_BASE + 12;
+pub const PM_GETGID: i32 = PM_BASE + 13;
 pub const PM_EXEC: i32 = PM_BASE + 14;
 pub const PM_SETSID: i32 = PM_BASE + 15;
 pub const PM_GETPGRP: i32 = PM_BASE + 16;
+pub const PM_ITIMER: i32 = PM_BASE + 17;
+pub const PM_GETMCONTEXT: i32 = PM_BASE + 18;
+pub const PM_SETMCONTEXT: i32 = PM_BASE + 19;
+pub const PM_SIGACTION: i32 = PM_BASE + 20;
+pub const PM_SIGSUSPEND: i32 = PM_BASE + 21;
+pub const PM_SIGPENDING: i32 = PM_BASE + 22;
+pub const PM_SIGPROCMASK: i32 = PM_BASE + 23;
+pub const PM_SIGRETURN: i32 = PM_BASE + 24;
 pub const PM_SYSUNAME: i32 = PM_BASE + 25;
 pub const PM_GETTIMEOFDAY: i32 = PM_BASE + 28;
+pub const PM_SETEUID: i32 = PM_BASE + 29;
+pub const PM_SETEGID: i32 = PM_BASE + 30;
+pub const PM_ISSETUGID: i32 = PM_BASE + 31;
+pub const PM_GETSID: i32 = PM_BASE + 32;
+pub const PM_CLOCK_GETRES: i32 = PM_BASE + 33;
+pub const PM_CLOCK_GETTIME: i32 = PM_BASE + 34;
+pub const PM_CLOCK_SETTIME: i32 = PM_BASE + 35;
+pub const PM_GETRUSAGE: i32 = PM_BASE + 36;
+pub const PM_REBOOT: i32 = PM_BASE + 37;
+pub const PM_SVRCTL: i32 = PM_BASE + 38;
+pub const PM_SPROF: i32 = PM_BASE + 39;
+pub const PM_CPROF: i32 = PM_BASE + 40;
+pub const PM_SRV_FORK: i32 = PM_BASE + 41;
+pub const PM_SRV_KILL: i32 = PM_BASE + 42;
 pub const PM_EXEC_NEW: i32 = PM_BASE + 43;
+pub const PM_EXEC_RESTART: i32 = PM_BASE + 44;
+pub const PM_GETEPINFO: i32 = PM_BASE + 45;
+pub const PM_GETPROCNR: i32 = PM_BASE + 46;
+pub const PM_GETSYSINFO: i32 = PM_BASE + 47;
 
 /// OK / error constants matching MINIX conventions.
 pub const OK: i32 = 0;
@@ -1071,12 +1103,47 @@ pub unsafe fn handle_getpid(caller_slot: usize, msg: &mut Message) -> i32 {
 ///
 /// `caller_slot` must be a valid, in-use process slot. `msg` must point
 /// to a valid message buffer.
-#[allow(unused_unsafe)]
 pub unsafe fn handle_setuid(caller_slot: usize, msg: &mut Message) -> i32 {
     let uid = unsafe { msg.m_payload.m1.m1i1 };
     let gid = unsafe { msg.m_payload.m1.m1i2 };
     match unsafe { do_set(caller_slot, 0, uid, gid) } {
         Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_SETGID — set real/effective group ID.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_setgid(caller_slot: usize, msg: &mut Message) -> i32 {
+    // PM_SETGID message: m1i1 = gid, m1i2 = egid
+    let gid = unsafe { msg.m_payload.m1.m1i1 };
+    let egid = unsafe { msg.m_payload.m1.m1i2 };
+    // do_set with subtype 1 for GID operations
+    match unsafe { do_set(caller_slot, 1, gid, egid) } {
+        Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_GETGID — return real/effective GID.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_getgid(caller_slot: usize, msg: &mut Message) -> i32 {
+    match unsafe { do_get(caller_slot, 1) } {
+        Ok(val) => {
+            let egid = (val & 0xFFFF_FFFF) as i32;
+            let rgid = (val >> 32) as i32;
+            msg.m_payload.m1.m1i1 = rgid;
+            msg.m_payload.m1.m1i2 = egid;
+            OK
+        }
         Err(e) => e,
     }
 }
@@ -1155,6 +1222,19 @@ pub unsafe fn handle_getpgrp(caller_slot: usize, msg: &mut Message) -> i32 {
     OK
 }
 
+/// Handler for PM_REBOOT — reboot the system.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid process slot. `_msg` must point to
+/// a valid message buffer.
+pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
+    #[cfg(target_os = "none")]
+    // syscall1(NR_ABORT=27, 1) — kernel do_abort_handler with reboot.
+    minix_rt::syscall1(27, 1);
+    OK
+}
+
 /// The PM dispatch table.
 /// Maps each PM call number to its handler function.
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
@@ -1167,12 +1247,27 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         4 => unsafe { handle_getpid(caller_slot, msg) },
         5 => unsafe { handle_setuid(caller_slot, msg) },
         6 => unsafe { handle_getuid(caller_slot, msg) },
+        7 => unsafe { no_sys(caller_slot, msg) }, // PM_STIME
+        8 => unsafe { no_sys(caller_slot, msg) }, // PM_PTRACE
+        9 => unsafe { no_sys(caller_slot, msg) }, // PM_SETGROUPS
+        10 => unsafe { no_sys(caller_slot, msg) }, // PM_GETGROUPS
         11 => unsafe { handle_kill(caller_slot, msg) },
+        12 => unsafe { handle_setgid(caller_slot, msg) }, // PM_SETGID
+        13 => unsafe { handle_getgid(caller_slot, msg) }, // PM_GETGID
         14 => unsafe { do_exec(caller_slot, msg) },
         15 => unsafe { handle_setsid(caller_slot, msg) },
         16 => unsafe { handle_getpgrp(caller_slot, msg) },
+        17 => unsafe { no_sys(caller_slot, msg) }, // PM_ITIMER
+        20 => unsafe { no_sys(caller_slot, msg) }, // PM_SIGACTION
+        21 => unsafe { no_sys(caller_slot, msg) }, // PM_SIGSUSPEND
+        25 => unsafe { no_sys(caller_slot, msg) }, // PM_SYSUNAME
+        28 => unsafe { no_sys(caller_slot, msg) }, // PM_GETTIMEOFDAY
+        29 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEUID
+        30 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEGID
+        32 => unsafe { no_sys(caller_slot, msg) }, // PM_GETSID
+        37 => unsafe { handle_reboot(caller_slot, msg) }, // PM_REBOOT
         43 => unsafe { do_exec(caller_slot, msg) }, // PM_EXEC_NEW
-        _ => ENOSYS,
+        _ => unsafe { no_sys(caller_slot, msg) },
     }
 }
 
