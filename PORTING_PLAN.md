@@ -4133,27 +4133,41 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 test suite (Phase E) proves ring-3 transition works by running a synthetic test
 that jumps to ring-3 and writes the QEMU exit port.
 
-**Milestone achieved ✅ — All 8 boot processes running in ring 3 with IPC.**
+**Milestone achieved ✅ — INIT boots, prints banner, starts shell.**
 
-All 8 boot processes (pm, vfs, rs, vm, ds, sched, tty, init) now run in
-ring 3 with per-process page tables. The `syscall` instruction delivers
-calls to the kernel handler, which dispatches IPC operations (send, receive,
-notify) and round-robin schedules between processes.
+`init: booting MINIX/Rust` then `init: pid=10` then `init: starting shell...`
+are printed to the serial console. The system boots 4 user-space servers
+(pm, rs, vfs, init) in ring 3 with per-process page tables.
 
-**Fixes made:**
-- Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, causing
-  `sysretq` to GPF. Changed to `0xAB` (L=1, G=1).
-- Added `init_tss_for_boot()` — creates a 16-entry GDT with a TSS descriptor,
-  loads it via `lgdt`. The `ltr` call is currently disabled because it
-  causes a GPF in subsequent `sysretq` (root cause unknown).
-- Added exception handlers for page fault, GPF, and double fault.
-- Added `Tss64::new_zeroed()` for static initializers.
-- Temporarily masked timer/serial IRQs (workaround for missing TSS).
+**Fixes in this session:**
+- **Run queue corruption**: `enqueue` overwrites `p_nextready` when a
+  process already in the queue is re-enqueued, orphaning all subsequent
+  processes. Fixed by NOT re-enqueuing the current process in the syscall
+  handler.
+- **Stub servers removed**: vm, ds, sched, tty had `spin_loop()` or
+  immediate-return main() — they hung or exited. Reduced boot to 4 working
+  servers: pm, rs, vfs, init.
+- **Sched test suite fixed**: added `SchedTestLock` serialization guard to
+  prevent concurrent test corruption of shared `static mut` state, and
+  `clear_run_queues()` helper. 15 sched tests now pass reliably.
+- **`proc_init` cleanup**: clears `p_nextready` on all process slots to
+  prevent stale pointers between tests.
+- Added `remove_from_queue()` — removes a runnable process from the queue
+  without the `!is_runnable()` assertion.
+- 4 new unit tests for `remove_from_queue` (head, middle, tail, not-present).
+
+**Previous fixes (already committed):**
+- Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, changed
+  to `0xAB` (L=1, G=1) — sysretq now works.
+- Added `init_tss_for_boot()` — 16-entry GDT with TSS descriptor.
+- Exception handlers for page fault, GPF, and double fault.
+- Timer/serial IRQs masked (workaround — no TSS loaded, ltr causes GPF).
 
 **Next steps:**
-1. Fix the `ltr` issue so timer interrupts can fire without crashing.
-2. Wire PM server dispatch so init can fork/exec/waitpid.
-3. Get `sh` running with a `#` prompt.
+1. Get shell prompt — PM's fork/exec handlers need VFS IPC working.
+2. Fix `ltr` so timer interrupts can fire (preemptive multitasking).
+3. Add proper IPC main loops to ds, sched, tty (replace spin_loop).
+4. Fix VM server main (replace immediate return with real loop).
 
 ---
 

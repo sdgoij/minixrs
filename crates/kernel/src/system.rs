@@ -6197,7 +6197,8 @@ mod tests {
     fn test_sprofile_rejects_non_sys_proc() {
         unsafe {
             proc_init();
-            let rp = crate::table::proc_addr(10);
+            // Use a non-boot process slot (no privileges) to test EPERM.
+            let rp = crate::table::proc_addr(255);
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
             let mut msg = [0u8; MESSAGE_SIZE];
             msg_write_i32(&mut msg, SPROF_ACTION_OFF, crate::profile::PROF_START);
@@ -6210,7 +6211,8 @@ mod tests {
     fn test_cprofile_rejects_non_sys_proc() {
         unsafe {
             proc_init();
-            let rp = crate::table::proc_addr(10);
+            // Use a non-boot process slot (no privileges) to test EPERM.
+            let rp = crate::table::proc_addr(255);
             (*rp).p_rts_flags.store(0, Ordering::Relaxed);
             let mut msg = [0u8; MESSAGE_SIZE];
             msg_write_i32(&mut msg, CPROF_ACTION_OFF, crate::profile::PROF_RESET);

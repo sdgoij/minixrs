@@ -96,6 +96,42 @@ pub unsafe fn enqueue(rp: *mut Proc) {
     }
 }
 
+/// Remove a process from the run queue without the `!is_runnable()` assertion.
+/// Used to move the current process to the tail for round-robin fairness.
+///
+/// # Safety
+///
+/// `rp` must be in the run queue.
+pub unsafe fn remove_from_queue(rp: *mut Proc) {
+    unsafe {
+        let q = (*rp).p_priority as usize;
+        assert!(q < NR_SCHED_QUEUES);
+
+        let head = run_q_head_array();
+        let tail = run_q_tail_array();
+
+        let mut prev: *mut Proc = core::ptr::null_mut();
+        let mut curr = (*head)[q];
+
+        while !curr.is_null() {
+            if curr == rp {
+                let next = (*curr).p_nextready;
+                if prev.is_null() {
+                    (*head)[q] = next;
+                } else {
+                    (*prev).p_nextready = next;
+                }
+                if rp == (*tail)[q] {
+                    (*tail)[q] = prev;
+                }
+                break;
+            }
+            prev = curr;
+            curr = (*curr).p_nextready;
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // enqueue_head
 // ─────────────────────────────────────────────────────────────────────────
@@ -426,19 +462,55 @@ fn ms_2_cpu_time(ms: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::table::proc_init;
+    use core::sync::atomic::AtomicBool;
 
-    /// Helper: create a minimal process for testing
-    unsafe fn make_test_proc(nr: i32, priority: i8) -> *mut Proc {
+    /// Serialization lock for sched tests — all share static mut state
+    /// (cpu locals, proc table) and cannot run concurrently.
+    static SCHED_TEST_LOCK: AtomicBool = AtomicBool::new(false);
+
+    /// Acquire the serialization lock.
+    struct SchedTestLock;
+    impl SchedTestLock {
+        fn acquire() -> Self {
+            while SCHED_TEST_LOCK
+                .compare_exchange(
+                    false,
+                    true,
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            Self
+        }
+    }
+    impl Drop for SchedTestLock {
+        fn drop(&mut self) {
+            SCHED_TEST_LOCK.store(false, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Helper: clear all run queues for test isolation
+    /// Must be called after init_cpulocals() (done by make_test_proc).
+    unsafe fn clear_run_queues() {
         unsafe {
-            // Initialize cpulocals if not already done
             arch_x86_64::cpulocals::init_cpulocals();
-            // Clear run queues for test isolation
             let head = run_q_head_array();
             let tail = run_q_tail_array();
             for q in 0..NR_SCHED_QUEUES {
                 (*head)[q] = core::ptr::null_mut();
                 (*tail)[q] = core::ptr::null_mut();
             }
+        }
+    }
+
+    /// Helper: create a minimal process for testing
+    unsafe fn make_test_proc(nr: i32, priority: i8) -> *mut Proc {
+        unsafe {
+            // Initialize cpulocals if not already done
+            arch_x86_64::cpulocals::init_cpulocals();
             let rp = crate::table::proc_addr(nr);
             if !rp.is_null() {
                 (*rp).p_rts_flags.store(0, Ordering::Relaxed); // runnable
@@ -455,7 +527,9 @@ mod tests {
     #[test]
     fn test_enqueue_dequeue_single() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let rp = make_test_proc(0, 0);
             assert!(runqueues_ok());
 
@@ -476,7 +550,9 @@ mod tests {
     #[test]
     fn test_enqueue_two_processes() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let rp0 = make_test_proc(0, 0);
             let rp1 = make_test_proc(1, 0);
 
@@ -494,7 +570,9 @@ mod tests {
     #[test]
     fn test_enqueue_head_inserts_at_front() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let rp0 = make_test_proc(0, 0);
             let _rp1 = make_test_proc(1, 0);
 
@@ -517,7 +595,9 @@ mod tests {
     #[test]
     fn test_pick_proc_priority_ordering() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let rp_low = make_test_proc(0, 10);
             let rp_high = make_test_proc(1, 0);
 
@@ -542,15 +622,9 @@ mod tests {
     #[test]
     fn test_pick_proc_empty_returns_none() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
-            // Ensure clean run queues from previous tests
-            arch_x86_64::cpulocals::init_cpulocals();
-            let head = run_q_head_array();
-            let tail = run_q_tail_array();
-            for q in 0..NR_SCHED_QUEUES {
-                (*head)[q] = core::ptr::null_mut();
-                (*tail)[q] = core::ptr::null_mut();
-            }
+            clear_run_queues();
             assert!(pick_proc().is_none());
         }
     }
@@ -558,7 +632,9 @@ mod tests {
     #[test]
     fn test_dequeue_middle_of_queue() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let rp0 = make_test_proc(0, 0);
             let rp1 = make_test_proc(1, 0);
             let rp2 = make_test_proc(2, 0);
@@ -581,9 +657,100 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_from_queue_head() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+
+            enqueue(rp0);
+            enqueue(rp1);
+
+            // Remove head (rp0) while still runnable
+            remove_from_queue(rp0);
+
+            let head = run_q_head_array();
+            assert_eq!((*head)[0], rp1, "head should be rp1 after removing rp0");
+            assert!((*rp1).p_nextready.is_null(), "rp1 should be tail");
+            assert!(runqueues_ok());
+        }
+    }
+
+    #[test]
+    fn test_remove_from_queue_middle() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+            let rp2 = make_test_proc(2, 0);
+
+            enqueue(rp0);
+            enqueue(rp1);
+            enqueue(rp2);
+
+            // Remove middle (rp1) while still runnable
+            remove_from_queue(rp1);
+
+            let head = run_q_head_array();
+            assert_eq!((*head)[0], rp0);
+            assert_eq!((*rp0).p_nextready, rp2);
+            assert!((*rp2).p_nextready.is_null());
+            assert!(runqueues_ok());
+        }
+    }
+
+    #[test]
+    fn test_remove_from_queue_tail() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+
+            enqueue(rp0);
+            enqueue(rp1);
+
+            // Remove tail (rp1) while still runnable
+            remove_from_queue(rp1);
+
+            let head = run_q_head_array();
+            assert_eq!((*head)[0], rp0);
+            assert!((*rp0).p_nextready.is_null());
+            assert!(runqueues_ok());
+        }
+    }
+
+    #[test]
+    fn test_remove_from_queue_not_present() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+
+            enqueue(rp0);
+
+            // Remove rp1 which is not in the queue — should not crash
+            remove_from_queue(rp1);
+
+            let head = run_q_head_array();
+            assert_eq!((*head)[0], rp0);
+            assert!(runqueues_ok());
+        }
+    }
+
+    #[test]
     fn test_enqueue_dequeue_balance() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             let ps: [*mut Proc; 4] = [
                 make_test_proc(0, 0),
                 make_test_proc(1, 1),
@@ -612,7 +779,9 @@ mod tests {
     #[test]
     fn test_runqueues_ok_detects_corrupted() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
+            clear_run_queues();
             assert!(runqueues_ok());
 
             // Corrupt: set a tail without head
@@ -629,6 +798,7 @@ mod tests {
     #[test]
     fn test_reset_proc_accounting_clears() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
             let rp = make_test_proc(0, 0);
             (*rp).p_accounting.dequeues = 5;
@@ -645,6 +815,7 @@ mod tests {
     #[test]
     fn test_is_idle_proc() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
             let idle_rp = crate::table::proc_addr(-4);
             assert!(!idle_rp.is_null());
@@ -657,6 +828,7 @@ mod tests {
     #[test]
     fn test_notify_scheduler_sends_message() {
         unsafe {
+            let _lock = SchedTestLock::acquire();
             proc_init();
             let rp = make_test_proc(0, 0);
             let sched_rp = make_test_proc(1, 0);

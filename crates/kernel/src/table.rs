@@ -371,6 +371,8 @@ pub unsafe fn proc_init() {
             let rp = proc_index(i);
             // Set magic number for pointer validation
             (*rp).p_magic = PMAGIC;
+            // Clear run queue link (prevents stale pointers between tests)
+            (*rp).p_nextready = core::ptr::null_mut();
             // Mark slot as free
             (*rp).p_rts_flags.store(
                 RtsFlags::SLOT_FREE.bits(),

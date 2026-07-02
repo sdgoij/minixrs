@@ -172,15 +172,13 @@ pub extern "C" fn kmain() -> ! {
 
         // Define all boot processes: (path, proc_nr, endpoint_name)
         let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/pm", PM_PROC_NR),
-            ("/sbin/vfs", VFS_PROC_NR),
-            ("/sbin/rs", RS_PROC_NR),
-            ("/sbin/vm", VM_PROC_NR),
-            ("/sbin/ds", DS_PROC_NR),
-            ("/sbin/sched", SCHED_PROC_NR),
-            ("/sbin/tty", TTY_PROC_NR),
-            ("/sbin/init", INIT_PROC_NR),
+            ("/sbin/pm", PM_PROC_NR),     // Process Manager
+            ("/sbin/rs", RS_PROC_NR),     // Reincarnation Server
+            ("/sbin/vfs", VFS_PROC_NR),   // Virtual File System
+            ("/sbin/init", INIT_PROC_NR), // init
         ];
+        // VM, DS, SCHED, TTY excluded — their main loops are stubs
+        // (spin_loop without IPC) which would hang the CPU.
 
         // Load each boot process from initramfs, storing InitInfo for
         // per-process page table creation.
@@ -394,14 +392,16 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
-        // ── Round-robin context switch ──────────────────────────────
+        // ── Context switch ───────────────────────────────────────────
         // Save the current process's register state.
         save_proc_regs(rp, saved);
 
-        // Re-enqueue if still runnable (moves to tail of run queue).
-        if (*rp).is_runnable() {
-            kernel::sched::enqueue(rp);
-        }
+        // If the current process is still runnable, keep it running.
+        // Do NOT re-enqueue — it's already in the run queue from boot.
+        // Re-enqueuing would overwrite p_nextready and orphan the list.
+        //
+        // TODO: Move to tail for round-robin fairness once the run queue
+        // corruption from duplicate enqueues (in IPC code paths) is fixed.
 
         // Pick the next runnable process.
         if let Some(next) = kernel::sched::pick_proc() {
@@ -412,8 +412,6 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             }
         } else {
             // No runnable processes — all blocked on IPC.
-            // Send a boot notification from RS to PM to kickstart
-            // the server boot chain.
             let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
             if !pm_proc.is_null() {
                 let _ = kernel::ipc::mini_notify(
@@ -425,8 +423,6 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                     arch_x86_64::asm::restore(next as *const u8);
                 }
             }
-            // No runnable process available — sysretq back to the
-            // current process. It will retry its IPC call.
         }
     }
 }

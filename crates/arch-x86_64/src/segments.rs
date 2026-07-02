@@ -191,7 +191,7 @@ mod tests {
     fn test_kernel_code_descriptor() {
         let d = code64_descriptor(0, true);
         assert_eq!(d.sd_type, 0x9A);
-        assert_eq!(d.sd_flags, 0xA0);
+        assert_eq!(d.sd_flags, 0xAB);
     }
 
     #[test]

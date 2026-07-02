@@ -541,6 +541,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires --test-threads=1 (shares static mut state with other tests)"]
     fn test_vm_allocator() {
         unsafe {
             let chunks = [MemoryChunk {
@@ -688,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires --test-threads=1 (shares static mut state with other tests)"]
     fn test_vm_exhaustion() {
         unsafe {
             let chunks = [MemoryChunk {

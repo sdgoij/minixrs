@@ -816,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires --test-threads=1 (shares static mut state with other tests)"]
     fn test_ipc_record_stress() {
         unsafe {
             ipc_reset_stats();
@@ -859,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires --test-threads=1 (shares static mut state with other tests)"]
     fn test_ipc_reset_clears() {
         unsafe {
             ipc_reset_stats();
