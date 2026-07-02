@@ -357,9 +357,22 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             Ok(e) => e,
             Err(_) => return -38,
         };
+
+        // Switch to BOOT_CR3 so load_elf and setup_user_stack write to the
+        // identity-mapped physical pages (0x1000000 -> phys 0x1000000),
+        // not to the current process's per-process pages (which have a
+        // different physical backing). The new page table will map
+        // va -> pa = va, so we need the data at the identity-mapped address.
+        let saved_cr3 = arch_x86_64::asm::read_cr3();
+        let boot_cr3_val = crate::pagetable::boot_cr3();
+        arch_x86_64::asm::write_cr3(boot_cr3_val);
+
         let loaded = match crate::elf::load_elf(data) {
             Ok(l) => l,
-            Err(_) => return -38,
+            Err(_) => {
+                arch_x86_64::asm::write_cr3(saved_cr3);
+                return -38;
+            }
         };
 
         let user_stack_base: u64 = 0x0FE00000;
@@ -367,8 +380,14 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let stack_top = user_stack_base + user_stack_size as u64;
         let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
             Ok(rsp) => rsp,
-            Err(_) => return -38,
+            Err(_) => {
+                arch_x86_64::asm::write_cr3(saved_cr3);
+                return -38;
+            }
         };
+
+        // Switch back to the original CR3.
+        arch_x86_64::asm::write_cr3(saved_cr3);
 
         let code_start = loaded.base & !0xFFF;
         let code_end = (loaded.top + 0xFFF) & !0xFFF;
@@ -385,8 +404,8 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
 
         // Walk the boot page table to reach the PD (512 x 2MB entries = 1GB).
-        let boot_cr3_val = crate::pagetable::boot_cr3();
-        let boot_pml4 = boot_cr3_val as *const u64;
+        let boot_cr3_val2 = crate::pagetable::boot_cr3();
+        let boot_pml4 = boot_cr3_val2 as *const u64;
         let boot_pml4e0 = core::ptr::read(boot_pml4);
         let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
         let boot_pdpt = boot_pdpt_phys as *const u64;

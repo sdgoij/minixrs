@@ -4185,6 +4185,15 @@ are printed to the serial console. The system boots 4 user-space servers
   `save_proc_regs` for syscall 61 (NR_EXEC_REPLACE) and forcing a
   `restore()` call to load from the new p_reg rather than falling
   through to the kernel-stack restore path.
+- **exec page table identity map bug**: `exec_initramfs_for_target` ran
+  with the calling process's per-process page table, which maps code at
+  virtual 0x1000000 to a per-process PHYSICAL page (e.g. 0x6e4000).
+  `load_elf` wrote the shell binary to this per-process physical page,
+  but the new per-process page table was set up with `map_page(pml4, va,
+  va, flags)` — mapping virtual 0x1000000 to physical 0x1000000
+  (identity), not to the per-process page. The shell tried to execute
+  garbage at physical 0x1000000. Fixed by switching to BOOT_CR3 before
+  `load_elf` so writes go to the identity-mapped physical addresses.
 
 **Previous fixes (already committed):**
 - Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, changed
