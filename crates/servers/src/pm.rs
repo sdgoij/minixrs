@@ -705,6 +705,8 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
         }
     }
 
+    // No zombie child found. If WNOHANG was set, return EAGAIN.
+    // For now, always return EINTR since WNOHANG isn't wired.
     Err(-4) // EINTR — no zombie child found
 }
 
@@ -1030,6 +1032,27 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     EDONTREPLY
 }
 
+/// Invoke a kernel call on the SYSTEM task.
+///
+/// `call_nr` is the kernel call number (0 = SYS_FORK, 1 = SYS_EXEC, etc.).
+/// `msg` should have payload fields set in `m_payload`.
+/// On success, `msg.m_payload` contains the kernel's reply.
+/// Returns 0 on success, negative error code on failure.
+pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
+    #[cfg(target_os = "none")]
+    unsafe {
+        minix_rt::kernel_call(
+            call_nr,
+            core::mem::transmute::<&mut Message, &mut [u8; 64]>(msg),
+        )
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (call_nr, msg);
+        -12 // ENOMEM on host builds
+    }
+}
+
 /// Handler for PM_FORK — create a child process.
 ///
 /// Notifies VFS of the new child so VFS can copy the parent's file
@@ -1046,29 +1069,63 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
         Ok(child_slot) => {
             let base = MPROC.as_ptr();
             let child = unsafe { &*base.add(child_slot) };
+            let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
+
+            // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
+            // Kernel message format (SYS_FORK, call 0):
+            //   m1_i1 = parent endpoint
+            //   m1_i2 = child slot (-1 = kernel auto-selects)
+            //   m1_i3 = fork flags (0 for normal fork)
+            // Reply: m1_i1 = child endpoint
+            let mut kmsg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
             unsafe {
-                msg.m_payload.m1.m1i1 = child.mp_pid;
-                msg.m_payload.m1.m1i2 = child.mp_endpoint;
+                kmsg.m_payload.m1.m1i1 = parent_endpoint;
+                kmsg.m_payload.m1.m1i2 = -1; // auto-select free slot
+                kmsg.m_payload.m1.m1i3 = 0; // normal fork, no flags
+            }
+            let kresult = send_kernel_call(0, &mut kmsg);
+            if kresult != OK {
+                // Kernel fork failed — free the MProc slot we allocated.
+                unsafe { free_proc(child_slot) };
+                return kresult;
+            }
+            // Read the child endpoint from the kernel reply.
+            let child_endpoint = unsafe { kmsg.m_payload.m1.m1i1 };
+            // Update the MProc entry with the kernel-assigned endpoint.
+            unsafe {
+                let child_ptr = base.add(child_slot);
+                (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Notify VFS about the new child process.
+            // Step 2: Set reply fields for the caller (the PM_FORK requester).
+            unsafe {
+                msg.m_payload.m1.m1i1 = child.mp_pid;
+                msg.m_payload.m1.m1i2 = child_endpoint;
+            }
+
+            // Step 3: Notify VFS about the new child process.
             // Message format (matches VFS pm.rs VFS_PM_FORK handler):
             //   m_type = VFS_PM_FORK (0x907)
             //   m1_i1 = child endpoint
             //   m1_i2 = parent endpoint
             //   m1_i3 = child PID
-            let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
             let mut vfs_msg = Message {
                 m_source: 0,
                 m_type: arch_common::com::VFS_PM_FORK as i32,
                 m_payload: unsafe { core::mem::zeroed() },
             };
             unsafe {
-                vfs_msg.m_payload.m1.m1i1 = child.mp_endpoint;
+                vfs_msg.m_payload.m1.m1i1 = child_endpoint;
                 vfs_msg.m_payload.m1.m1i2 = parent_endpoint;
                 vfs_msg.m_payload.m1.m1i3 = child.mp_pid;
             }
             // Send to VFS and wait for reply.
+            // VFS's reply() overwrites m_type with the result code (OK=0),
+            // so we check m_type or the syscall return value.
             let reply = unsafe {
                 minix_rt::syscall2(
                     minix_rt::SENDREC_CALL,
@@ -1076,9 +1133,27 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                     &mut vfs_msg as *mut Message as u64,
                 )
             };
-            let _ = reply; // ignore VFS reply for now
-
-            OK
+            if reply < 0 || vfs_msg.m_type < 0 {
+                // VFS fork failed — free the MProc and Proc slots.
+                unsafe { free_proc(child_slot) };
+                // Also send SYS_CLEAR to kernel to free the Proc slot.
+                let mut clear_msg = Message {
+                    m_source: 0,
+                    m_type: 0,
+                    m_payload: unsafe { core::mem::zeroed() },
+                };
+                unsafe {
+                    clear_msg.m_payload.m1.m1i1 = child_endpoint;
+                }
+                let _ = send_kernel_call(2, &mut clear_msg); // SYS_CLEAR = 2
+                if reply < 0 {
+                    reply as i32
+                } else {
+                    vfs_msg.m_type
+                }
+            } else {
+                OK
+            }
         }
         Err(_) => -11,
     }
@@ -1101,7 +1176,16 @@ pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
             }
             OK
         }
-        Err(e) => e,
+        Err(_) => {
+            // No zombie child found. Store the waitpid request and block.
+            // Set mp_wpid so do_exit can find us when a child exits.
+            let base = MPROC.as_ptr();
+            unsafe {
+                let rmp = &mut *base.add(caller_slot);
+                rmp.mp_wpid = wpid;
+            }
+            EDONTREPLY
+        }
     }
 }
 
@@ -1272,10 +1356,74 @@ pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
 /// Maps each PM call number to its handler function.
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
     // Handle notifications (m_type == NOTIFY_MESSAGE = -10).
-    // These are sent by the kernel to wake us up during boot.
-    // Fall through to no_sys so pm_server_main sends a reply
-    // back to the notifier (RS), which wakes RS up.
+    // These include kernel exit notifications.
     if msg.m_type == -10 {
+        // Check for pending process exits via SYS_GETKSIG (kernel call 7).
+        // This returns: endpoint at m1i1, exit status at m1i2.
+        // Call repeatedly until no more exits.
+        loop {
+            let mut kmsg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+            let result = send_kernel_call(7, &mut kmsg); // SYS_GETKSIG
+            if result != 0 {
+                break;
+            }
+            // SYS_GETKSIG reply: endpoint at kernel msg[16] = m1i3,
+            // exit status at kernel msg[24] = m1i5.
+            let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
+            if endpt == -1 || endpt == 0 {
+                break; // NONE sentinel — no more pending
+            }
+            let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
+            // Find the MProc slot for this endpoint.
+            if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
+                let pid = unsafe {
+                    let base = MPROC.as_ptr();
+                    (*base.add(slot)).mp_pid
+                };
+                unsafe { do_exit(slot, exit_status) };
+
+                // Check if any parent is waiting for this child (waitpid).
+                // The parent set mp_wpid in handle_waitpid when returning
+                // EDONTREPLY. If the parent is waiting for this child,
+                // send the waitpid reply now.
+                let parent_slot = unsafe {
+                    let base = MPROC.as_ptr();
+                    (*base.add(slot)).mp_parent
+                };
+                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                    unsafe {
+                        let base = MPROC.as_ptr();
+                        let parent_rmp = &*base.add(parent_slot as usize);
+                        if parent_rmp.mp_flags & IN_USE != 0 {
+                            let wp = parent_rmp.mp_wpid;
+                            if wp == -1 || wp == pid {
+                                // Parent is waiting for this child.
+                                // Send the waitpid reply via SENDREC.
+                                let mut reply_msg = Message {
+                                    m_source: 0,
+                                    m_type: OK,
+                                    m_payload: core::mem::zeroed(),
+                                };
+                                reply_msg.m_payload.m1.m1i1 = pid;
+                                reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
+                                minix_rt::syscall2(
+                                    minix_rt::SENDREC_CALL,
+                                    parent_rmp.mp_endpoint as u64,
+                                    &mut reply_msg as *mut Message as u64,
+                                );
+                                // Clear the waitpid request.
+                                let parent_ptr = base.add(parent_slot as usize);
+                                (*parent_ptr).mp_wpid = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return unsafe { no_sys(caller_slot, msg) };
     }
     let call_nr = msg.m_type;
@@ -1405,18 +1553,26 @@ pub fn pm_server_main() {
 pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     // PM_EXEC_NEW message format (from callnr.h / mproc.h):
     //   m1_i1  (payload.m1.m1i1): exec_endpt (set by kernel)
-    //   m1_i2  (payload.m1.m1i2): grant_id
-    //   m1_i3  (payload.m1.m1i3): grant_size
+    //   m1_i2  (payload.m1.m1i2): grant_id (path pointer)
+    //   m1_i3  (payload.m1.m1i3): stack_frame pointer (grant)
+    //   m1_i4  (payload.m1.m1i4): frame length
     //
     // The grant points to exec data in the caller's address space:
     //   [path\0][argv[0]\0][argv[1]\0]...[argv[n]\0][envp[0]\0]...
     //   The first null-terminated string is the executable path.
     //
-    // Until grants + VFS are fully wired, we use kernel syscall 62
-    // (SYS_EXEC_TARGET) which loads from the embedded initramfs.
+    // Full flow:
+    //   1. Send VFS_PM_EXEC to VFS → VFS opens binary, reads ELF, returns pc/newsp/ps_str
+    //   2. Send SYS_EXEC (kernel call 1) to set up the process's TrapFrame
+    //   3. Return EDONTREPLY (child already set up to run)
+    //
+    // If VFS returns ENOSYS (no FS servers available), fall back to
+    // kernel SYS_EXEC_TARGET (62) which loads from the embedded initramfs.
 
     let exec_endpt = unsafe { msg.m_payload.m1.m1i1 };
     let grant_id = unsafe { msg.m_payload.m1.m1i2 };
+    let stack_frame = unsafe { msg.m_payload.m1.m1i3 };
+    let frame_len = unsafe { msg.m_payload.m1.m1i4 };
 
     // Validate the caller slot.
     let base = MPROC.as_ptr();
@@ -1425,14 +1581,123 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // The grant_id points to exec data in the CALLER's address space:
-    //   [path\0][argv[0]\0]...[argv[n]\0][envp[0]\0]...
-    // Read the path directly (works via identity map until grants are wired).
+    // Step 1: Try VFS exec path.
+    // Send VFS_PM_EXEC to VFS with the exec parameters.
+    // Message format (matching VFS pm.rs offset constants):
+    //   m1_i1 (PM_ENDPT_OFF = 8):  exec_endpt
+    //   m7_p1 (PM_PATH_OFF = 28):  path pointer (from grant_id)
+    //   m1_i2 (PM_EID_OFF = 12):   path length (computed from path string)
+    //   m7_p2 (PM_FRAME_OFF = 36): stack frame pointer
+    //   m1_i3 (PM_RID_OFF = 16):   frame length
+    //   m1_i4 (PM_REUID_OFF = 20): ps_str pointer
+
+    // Compute path length from the path string.
     let path_ptr = grant_id as *const u8;
-    // Call kernel SYS_EXEC_TARGET (62) to load from initramfs.
-    // args[0] = target endpoint, args[1] = path pointer.
-    let result = unsafe { minix_rt::syscall2(62, exec_endpt as u64, path_ptr as u64) };
-    result as i32
+    let mut path_len = 0usize;
+    for i in 0..1023usize {
+        if unsafe { *path_ptr.add(i) } == 0 {
+            path_len = i;
+            break;
+        }
+    }
+
+    // Build VFS exec request.
+    let mut vfs_msg = Message {
+        m_source: 0,
+        m_type: arch_common::com::VFS_PM_EXEC as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    unsafe {
+        vfs_msg.m_payload.m1.m1i1 = exec_endpt; // PM_ENDPT_OFF
+        vfs_msg.m_payload.m1.m1i2 = path_len as i32; // PM_EID_OFF
+        vfs_msg.m_payload.m1.m1i3 = frame_len; // PM_RID_OFF
+        vfs_msg.m_payload.m1.m1i4 = 0; // PM_REUID_OFF — reserved
+        // m7_p1 at bytes 28-35: path pointer
+        // m7_p2 at bytes 36-43: stack frame pointer
+        // M7 layout in the union: 6 x i32 (24 bytes) followed by the raw bytes [24..48)
+        // Actually m7 is a raw [u8; 48] — we write the pointers at the right offsets.
+        // The offset constants in vfs/pm.rs use:
+        //   PM_ENDPT_OFF = 8   (m1_i1)
+        //   PM_EID_OFF = 12     (m1_i2)
+        //   PM_RID_OFF = 16     (m1_i3)
+        //   PM_REUID_OFF = 20   (m1_i4)
+        //   PM_REGID_OFF = 24   (m1_i5)
+        //   PM_PATH_OFF = 28    (m7_p1, u64)
+        //   PM_FRAME_OFF = 36   (m7_p2, u64)
+        // In the M1 struct, fields are at:
+        //   m1i1=0, m1i2=4, m1i3=8, m1i4=12, m1i5=16 (relative to m1 start)
+        //   m1 starts at payload offset 0 = absolute offset 8
+        //   So PM_ENDPT_OFF = 8 → m1i1 at abs 8 = m1 offset 0 ✓
+        // For the u64 pointers, we write to the raw payload bytes at abs offsets 28 and 36.
+        let raw = &mut vfs_msg.m_payload.raw;
+        raw[20..28].copy_from_slice(&(grant_id as u64).to_le_bytes()); // PM_PATH_OFF - 8 = 20
+        raw[28..36].copy_from_slice(&(stack_frame as u64).to_le_bytes()); // PM_FRAME_OFF - 8 = 28
+    }
+
+    // SENDREC to VFS.
+    let vfs_reply = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::VFS_PROC_NR as u64,
+            &mut vfs_msg as *mut Message as u64,
+        )
+    };
+
+    if vfs_reply >= 0 && vfs_msg.m_type >= 0 {
+        // VFS exec succeeded: read pc, newsp, ps_str from reply.
+        // Reply format (from VFS service_pm_postponed):
+        //   m_type = VFS_PM_EXEC_REPLY (overwritten with OK=0 by reply())
+        //   PM_ENDPT_OFF = 8:  exec_endpt
+        //   PM_EID_OFF = 12:   result code
+        //   PM_PATH_OFF = 28:  pc (entry point, u64)
+        //   PM_FRAME_OFF = 36: newsp (stack pointer, u64)
+        //   PM_REGID_OFF = 24: ps_str (process string pointer, i32 as u64)
+        let pc = unsafe {
+            u64::from_le_bytes(vfs_msg.m_payload.raw[20..28].try_into().unwrap_or([0u8; 8]))
+        };
+        let newsp = unsafe {
+            u64::from_le_bytes(vfs_msg.m_payload.raw[28..36].try_into().unwrap_or([0u8; 8]))
+        };
+        let ps_str = unsafe { vfs_msg.m_payload.m1.m1i5 as u64 };
+
+        // Step 2: Send SYS_EXEC to kernel.
+        // Kernel message format (SYS_EXEC, call 1):
+        //   m1_i1 (EXEC_ENDPT_OFF = 8):  exec_endpt
+        //   m1_i2 (EXEC_IP_OFF = 16):    entry point
+        //   m1_i3 (EXEC_STACK_OFF = 24): stack pointer
+        //   m1_p1 (EXEC_NAME_OFF = 32):  program name pointer
+        //   m1_p2 (EXEC_PS_STR_OFF = 40): ps_str
+        let mut kmsg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            kmsg.m_payload.m1.m1i1 = exec_endpt;
+            kmsg.m_payload.m1.m1i2 = pc as i32;
+            kmsg.m_payload.m1.m1i3 = newsp as i32;
+            let raw = &mut kmsg.m_payload.raw;
+            // EXEC_NAME_OFF = 32: name pointer at abs offset 32 = raw offset 24
+            raw[24..32].copy_from_slice(&(path_ptr as u64).to_le_bytes());
+            // EXEC_PS_STR_OFF = 40: ps_str at abs offset 40 = raw offset 32
+            raw[32..40].copy_from_slice(&(ps_str as u64).to_le_bytes());
+        }
+        let _ = send_kernel_call(1, &mut kmsg); // SYS_EXEC = 1
+
+        // Return EDONTREPLY — the exec target is set up by the kernel.
+        // pm_server_main will not send a reply (child starts running).
+        EDONTREPLY
+    } else {
+        // VFS exec failed (or not available). Fall back to initramfs path.
+        // Call kernel SYS_EXEC_TARGET (62) to load from initramfs.
+        // args[0] = target endpoint, args[1] = path pointer.
+        let result = unsafe { minix_rt::syscall2(62, exec_endpt as u64, path_ptr as u64) };
+        if result == 0 {
+            EDONTREPLY
+        } else {
+            result as i32
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1714,5 +1979,109 @@ mod tests {
     #[test]
     fn test_pm_server_main_callable() {
         pm_server_main();
+    }
+
+    #[test]
+    fn test_send_kernel_call_host_build() {
+        // On host builds (not target_os = "none"), send_kernel_call
+        // returns ENOMEM (-12) without calling the kernel.
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let result = send_kernel_call(0, &mut msg);
+        assert_eq!(result, -12); // ENOMEM on host
+    }
+
+    #[test]
+    fn test_handle_waitpid_blocks_on_no_zombie() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            // Set wpid = -1 (wait for any child)
+            msg.m_payload.m1.m1i1 = -1;
+        }
+        let result = unsafe { handle_waitpid(parent, &mut msg) };
+        // No zombie children exist, should return EDONTREPLY to block
+        assert_eq!(result, EDONTREPLY);
+        // mp_wpid should be set to -1 (wait for any child)
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(parent)).mp_wpid, -1);
+        }
+    }
+
+    #[test]
+    fn test_handle_waitpid_returns_zombie_immediately() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            (*base.add(child)).mp_flags |= IN_USE | ZOMBIE;
+            (*base.add(child)).mp_pid = 2;
+            (*base.add(child)).mp_parent = parent as i32;
+            (*base.add(child)).mp_exitstatus = 42;
+            // Set wpid = -1 (wait for any child)
+            msg.m_payload.m1.m1i1 = -1;
+        }
+        let result = unsafe { handle_waitpid(parent, &mut msg) };
+        // Zombie child exists, should return OK with pid+status
+        assert_eq!(result, OK);
+        unsafe {
+            assert_eq!(msg.m_payload.m1.m1i1, 2); // pid
+            assert_eq!(msg.m_payload.m1.m1i2, 42); // status
+        }
+    }
+
+    #[test]
+    fn test_do_waitpid_no_children() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+        }
+        let r = unsafe { do_waitpid(parent, -1) };
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_do_waitpid_finds_zombie() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            (*base.add(child)).mp_flags |= IN_USE | ZOMBIE;
+            (*base.add(child)).mp_pid = 2;
+            (*base.add(child)).mp_parent = parent as i32;
+            (*base.add(child)).mp_exitstatus = 7;
+        }
+        let r = unsafe { do_waitpid(parent, -1) };
+        assert_eq!(r, Ok((2, 7)));
+        // Child slot should be freed
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
     }
 }

@@ -123,11 +123,90 @@ unsafe fn sys_getpid_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -
     unsafe { (*caller).p_endpoint as i64 }
 }
 
-/// SYS_exit (0) — terminate the current process.
-/// Frees the Proc slot so the parent's waitpid can detect the exit.
-unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+// ── Pending exit notification queue ───────────────────────────────────
+// When a process exits via sys_exit_handler, the kernel stores the exit
+// info here and notifies PM via mini_notify. PM reads the queue to find
+// which process exited and with what status.
+
+const PENDING_EXIT_QUEUE_SIZE: usize = 16;
+
+/// A pending exit notification.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct PendingExit {
+    endpoint: i32,
+    exit_status: i32,
+}
+
+/// Circular buffer of pending exits.
+static mut PENDING_EXITS: [PendingExit; PENDING_EXIT_QUEUE_SIZE] = [PendingExit {
+    endpoint: 0,
+    exit_status: 0,
+}; PENDING_EXIT_QUEUE_SIZE];
+
+/// Head index (next slot to read).
+static mut PE_HEAD: usize = 0;
+/// Tail index (next slot to write).
+static mut PE_TAIL: usize = 0;
+/// Count of entries.
+static mut PE_COUNT: usize = 0;
+
+/// Push an exit notification. Returns true if queued, false if full.
+unsafe fn push_pending_exit(endpoint: i32, exit_status: i32) -> bool {
     unsafe {
-        // Free the Proc slot so waitpid can detect the child exited.
+        let count = PE_COUNT;
+        if count >= PENDING_EXIT_QUEUE_SIZE {
+            return false; // queue full, drop notification
+        }
+        PENDING_EXITS[PE_TAIL] = PendingExit {
+            endpoint,
+            exit_status,
+        };
+        PE_TAIL = (PE_TAIL + 1) % PENDING_EXIT_QUEUE_SIZE;
+        PE_COUNT = count + 1;
+        true
+    }
+}
+
+/// Pop an exit notification. Returns None if queue empty.
+///
+/// # Safety
+///
+/// Must be called with exclusive access to the pending exit queue.
+/// Only the PM server should call this in response to a notification.
+#[allow(unused)]
+pub unsafe fn pop_pending_exit() -> Option<(i32, i32)> {
+    unsafe {
+        let count = PE_COUNT;
+        if count == 0 {
+            return None;
+        }
+        let entry = PENDING_EXITS[PE_HEAD];
+        PE_HEAD = (PE_HEAD + 1) % PENDING_EXIT_QUEUE_SIZE;
+        PE_COUNT = count - 1;
+        Some((entry.endpoint, entry.exit_status))
+    }
+}
+
+/// SYS_exit (0) — terminate the current process.
+/// Stores the exit status, sets SIGNALED+SIG_PENDING for PM to pick up
+/// via SYS_GETKSIG, notifies PM, and frees the Proc slot.
+unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    unsafe {
+        let exit_status = args[0] as i32;
+        let endpoint = (*caller).p_endpoint;
+
+        // Store exit status in p_signal_received for PM to read via SYS_GETKSIG.
+        (*caller).p_signal_received = exit_status as u64;
+
+        // Set SIGNALED so do_getksig_handler finds this process.
+        // Set SIG_PENDING because the exit represents a on for PM.
+        push_pending_exit(endpoint, exit_status);
+
+        // Notify PM so it can mark the MProc as ZOMBIE.
+        crate::ipc::mini_notify((*caller).p_endpoint, arch_common::com::PM_PROC_NR);
+
+        // Free the Proc slot so the kernel-fork path waitpid works.
         (*caller).p_rts_flags.fetch_or(
             crate::proc::RtsFlags::SLOT_FREE.bits(),
             core::sync::atomic::Ordering::Relaxed,
@@ -334,6 +413,43 @@ unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
     // do_sync_ipc reads destination from msg[0..4]
     unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
     unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDREC) as i64 }
+}
+
+/// SYS_KERNEL_CALL (50) — invoke a kernel call on the SYSTEM task.
+///
+/// args[0] = call_nr (kernel call number, e.g. 0 for SYS_FORK)
+/// args[1] = pointer to a Message struct
+///
+/// The Message struct should have:
+///   m_source = 0 (will be overwritten with KERNEL_CALL + call_nr)
+///   m_type = 0 (will be overwritten with caller endpoint)
+///   m_payload = kernel call payload fields
+///
+/// After the call, the Message struct is updated with the kernel's reply
+/// (result code in bytes 0-3, reply fields in m_payload).
+unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let call_nr = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    unsafe {
+        // Copy user message into kernel buffer
+        let mut kbuf = [0u8; crate::proc::MESSAGE_SIZE];
+        core::ptr::copy_nonoverlapping(msg_ptr, kbuf.as_mut_ptr(), crate::proc::MESSAGE_SIZE);
+        // Set call number at bytes 0-3 (for kernel_call_dispatch)
+        let call_val = (crate::system::KERNEL_CALL as u32 + call_nr as u32) as i32;
+        kbuf[0..4].copy_from_slice(&call_val.to_ne_bytes());
+        // Set source endpoint at bytes 4-7
+        let src_ep = (*caller).p_endpoint;
+        kbuf[4..8].copy_from_slice(&src_ep.to_ne_bytes());
+        // Set delivery address for result copy-back
+        (*caller).p_delivermsg_vir = msg_ptr as u64;
+        let result = crate::system::kernel_call_dispatch(caller, &mut kbuf);
+        // Copy result back to user (handles EDONTREPLY / VMSUSPEND internally)
+        crate::system::kernel_call_finish(caller, &mut kbuf, result);
+        result as i64
+    }
 }
 
 /// SYS_IPC_NOTIFY (49) — send an asynchronous notification.
@@ -569,7 +685,8 @@ unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> 
                 (*rpc).p_reg.rax = 0; // child returns 0
                 (*rpc).p_user_time = 0;
                 (*rpc).p_sys_time = 0;
-                let clear_mf = (crate::proc::MiscFlags::VIRT_TIMER
+                let clear_mf = (crate::proc::MiscFlags::REPLY_PEND
+                    | crate::proc::MiscFlags::VIRT_TIMER
                     | crate::proc::MiscFlags::PROF_TIMER
                     | crate::proc::MiscFlags::SC_TRACE
                     | crate::proc::MiscFlags::SPROF_SEEN
@@ -605,6 +722,21 @@ unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> 
             }
         }
         -11 // EAGAIN — no free slot
+    }
+}
+
+/// NR_IS_FORK_CHILD (63) — returns 1 if this process was created by fork
+/// and hasn't yet detected it's the child. Used to distinguish parent from
+/// child in the PM IPC fork path, where both share the same page table.
+unsafe fn sys_is_fork_child_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    unsafe {
+        let r1 = (*caller).p_defer_r1;
+        if r1 == 1 {
+            (*caller).p_defer_r1 = 0;
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -682,10 +814,12 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(47, sys_ipc_receive_handler); // RECEIVE
         register_basic_syscall(48, sys_ipc_sendrec_handler); // SENDREC
         register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
+        register_basic_syscall(50, sys_kernel_call_handler); // NR_KERNEL_CALL
         register_basic_syscall(58, sys_fork_handler); // NR_FORK
         register_basic_syscall(59, sys_waitpid_handler); // NR_WAITPID
         register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE
         register_basic_syscall(62, sys_exec_target_handler); // SYS_EXEC_TARGET
+        register_basic_syscall(63, sys_is_fork_child_handler); // NR_IS_FORK_CHILD
     }
 }
 
@@ -774,27 +908,32 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_calls_cause_sig() {
+    fn test_exit_frees_slot_and_stores_status() {
         unsafe {
             proc_init();
             arch_x86_64::cpulocals::init_cpulocals();
             let rp = crate::table::proc_addr(0);
             (*rp).p_nr = 0;
+            (*rp).p_endpoint = 100;
             (*rp)
                 .p_rts_flags
                 .store(0, core::sync::atomic::Ordering::Relaxed);
-            let args = [0u64; 6];
+            let args = [42u64, 0, 0, 0, 0, 0];
             let result = sys_exit_handler(rp, &args);
             assert_eq!(result, crate::system::EDONTREPLY as i64);
+            // Should free the Proc slot
             let flags = (*rp)
                 .p_rts_flags
                 .load(core::sync::atomic::Ordering::Relaxed);
             assert!(
-                flags
-                    & (crate::proc::RtsFlags::SIGNALED | crate::proc::RtsFlags::SIG_PENDING).bits()
-                    != 0,
-                "exit should cause SIGABRT"
+                flags & crate::proc::RtsFlags::SLOT_FREE.bits() != 0,
+                "exit should free the Proc slot"
             );
+            // Should store exit status in p_signal_received
+            assert_eq!((*rp).p_signal_received, 42);
+            // Should have queued a pending exit notification
+            let pending = pop_pending_exit();
+            assert_eq!(pending, Some((100, 42)));
         }
     }
 
@@ -831,5 +970,64 @@ mod tests {
         _check(sys_exit_handler);
         _check(sys_write_handler);
         _check(sys_brk_handler);
+        _check(sys_is_fork_child_handler);
+    }
+
+    #[test]
+    fn test_pending_exit_queue_empty() {
+        unsafe {
+            // Drain any leftover from previous tests
+            while pop_pending_exit().is_some() {}
+            assert!(pop_pending_exit().is_none());
+        }
+    }
+
+    #[test]
+    fn test_pending_exit_queue_roundtrip() {
+        unsafe {
+            // Drain any leftover
+            while pop_pending_exit().is_some() {}
+            assert!(push_pending_exit(42, 7));
+            assert!(push_pending_exit(43, 8));
+            assert_eq!(pop_pending_exit(), Some((42, 7)));
+            assert_eq!(pop_pending_exit(), Some((43, 8)));
+            assert!(pop_pending_exit().is_none());
+        }
+    }
+
+    #[test]
+    fn test_pending_exit_queue_full() {
+        unsafe {
+            while pop_pending_exit().is_some() {}
+            // Fill the queue
+            for i in 0..PENDING_EXIT_QUEUE_SIZE {
+                assert!(push_pending_exit(i as i32, 0));
+            }
+            // Next push should fail
+            assert!(!push_pending_exit(999, 0));
+            // Drain
+            for _ in 0..PENDING_EXIT_QUEUE_SIZE {
+                assert!(pop_pending_exit().is_some());
+            }
+            assert!(pop_pending_exit().is_none());
+        }
+    }
+
+    #[test]
+    fn test_is_fork_child_handler() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // Without flag set, returns 0
+            (*rp).p_defer_r1 = 0;
+            let result = sys_is_fork_child_handler(rp, &[0u64; 6]);
+            assert_eq!(result, 0);
+            // With flag set, returns 1 and clears it
+            (*rp).p_defer_r1 = 1;
+            let result = sys_is_fork_child_handler(rp, &[0u64; 6]);
+            assert_eq!(result, 1);
+            // Flag should be cleared
+            assert_eq!((*rp).p_defer_r1, 0);
+        }
     }
 }

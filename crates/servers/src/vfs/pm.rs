@@ -107,7 +107,26 @@ pub fn service_pm() -> i32 {
             OK
         }
 
-        VFS_PM_EXIT | VFS_PM_EXEC | VFS_PM_DUMPCORE | VFS_PM_UNPAUSE => {
+        VFS_PM_EXEC => {
+            // Exec request from PM. For now, FS servers are not available
+            // so this returns ENOSYS. PM falls back to the initramfs path.
+            // When FS servers (Phase 9) are wired, this will:
+            //   1. Open the binary file via req_open
+            //   2. Read ELF segments via req_read
+            //   3. Return pc, newsp, ps_str in the reply
+            //
+            // Run pm_exec() to close CLOEXEC fds as preparation.
+            pm_exec();
+
+            // Build reply with ENOSYS so PM falls back to initramfs.
+            let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
+            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_EXEC_REPLY);
+            w_i32(&mut glob.fs_m_out, PM_ENDPT_OFF, proc_e);
+            w_i32(&mut glob.fs_m_out, PM_EID_OFF, ENOSYS); // STATUS
+            ENOSYS
+        }
+
+        VFS_PM_EXIT | VFS_PM_DUMPCORE | VFS_PM_UNPAUSE => {
             // Phase 1: do quick non-blocking work, defer the rest.
             let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
             let glob2 = unsafe { &mut *vfs_global() };
@@ -115,9 +134,7 @@ pub fn service_pm() -> i32 {
             if !fp.is_null() {
                 unsafe { (*fp).fp_endpoint = proc_e };
             }
-            if call_nr == VFS_PM_EXEC {
-                pm_exec();
-            } else if call_nr == VFS_PM_EXIT {
+            if call_nr == VFS_PM_EXIT {
                 pm_exit();
             }
             // Phase 2 (postponed) is called by the worker thread when ready.

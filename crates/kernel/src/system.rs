@@ -158,9 +158,9 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset 48: m1p4   (u64)
 
 // Offset constants
-const FORK_ENDPT_OFF: usize = 0;
-const FORK_SLOT_OFF: usize = 4;
-const FORK_FLAGS_OFF: usize = 8;
+const FORK_ENDPT_OFF: usize = 8;
+const FORK_SLOT_OFF: usize = 12;
+const FORK_FLAGS_OFF: usize = 16;
 
 const CLEAR_ENDPT_OFF: usize = 0;
 
@@ -168,8 +168,8 @@ const SIGCALLS_MAP_OFF: usize = 0;
 const SIGCALLS_ENDPT_OFF: usize = 16;
 const SIGCALLS_SIG_OFF: usize = 20;
 
-const FORK_REPLY_ENDPT_OFF: usize = 0;
-const FORK_REPLY_MSGADDR_OFF: usize = 8;
+const FORK_REPLY_ENDPT_OFF: usize = 8;
+const FORK_REPLY_MSGADDR_OFF: usize = 16;
 
 const TIMES_ENDPT_OFF: usize = 0;
 const TIMES_REPLY_REAL_OFF: usize = 0;
@@ -219,11 +219,11 @@ const SAFEMEMSET_BYTES_OFF: usize = 24;
 //   offset 16: stack   (vir_bytes / u64)
 //   offset 24: name    (vir_bytes / u64) — pointer to program name in caller
 //   offset 32: ps_str  (vir_bytes / u64)
-const EXEC_ENDPT_OFF: usize = 0;
-const EXEC_IP_OFF: usize = 8;
-const EXEC_STACK_OFF: usize = 16;
-const EXEC_NAME_OFF: usize = 24;
-const EXEC_PS_STR_OFF: usize = 32;
+const EXEC_ENDPT_OFF: usize = 8;
+const EXEC_IP_OFF: usize = 16;
+const EXEC_STACK_OFF: usize = 24;
+const EXEC_NAME_OFF: usize = 32;
+const EXEC_PS_STR_OFF: usize = 40;
 
 // ── Exec finalization message offsets (SYS_EXEC at call 60) ───────────
 //
@@ -234,10 +234,10 @@ const EXEC_PS_STR_OFF: usize = 32;
 //   offset  8: new_cr3 (u64) — new CR3 / PML4 physical address
 //   offset 16: entry   (u64) — entry point / RIP
 //   offset 24: stack   (u64) — user stack / RSP
-const EXEC_FINISH_ENDPT_OFF: usize = 0;
-const EXEC_FINISH_CR3_OFF: usize = 8;
-const EXEC_FINISH_IP_OFF: usize = 16;
-const EXEC_FINISH_STACK_OFF: usize = 24;
+const EXEC_FINISH_ENDPT_OFF: usize = 8;
+const EXEC_FINISH_CR3_OFF: usize = 16;
+const EXEC_FINISH_IP_OFF: usize = 24;
+const EXEC_FINISH_STACK_OFF: usize = 32;
 
 // ── Mcontext message offsets (Phase 8.10) ─────────────────────────────
 //
@@ -3653,7 +3653,10 @@ pub unsafe fn do_getksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 msg_write_i32(msg, SIGCALLS_ENDPT_OFF, (*rp).p_endpoint);
                 msg[SIGCALLS_MAP_OFF..SIGCALLS_MAP_OFF + 16]
                     .copy_from_slice(&(*rp).p_pending.to_ne_bytes());
+                // Write exit status (stored by sys_exit_handler in p_signal_received)
+                msg_write_i32(msg, 24, (*rp).p_signal_received as i32);
                 (*rp).p_pending = 0;
+                (*rp).p_signal_received = 0;
                 (*rp)
                     .p_rts_flags
                     .fetch_and(!RtsFlags::SIGNALED.bits(), Ordering::Relaxed);
@@ -3708,9 +3711,9 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
-        let child_slot = msg_read_i32(msg, FORK_SLOT_OFF);
+        let mut child_slot = msg_read_i32(msg, FORK_SLOT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
-        if !table::is_ok_endpoint(parent_ep) || child_slot < 0 {
+        if !table::is_ok_endpoint(parent_ep) {
             return crate::ipc::EFAULT;
         }
         let rpp = proc_addr(table::endpoint_slot(parent_ep));
@@ -3719,6 +3722,20 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
         if (*rpp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::RECEIVING.bits() == 0 {
             return crate::ipc::EFAULT;
+        }
+        // If child_slot < 0, search for a free Proc slot.
+        if child_slot < 0 {
+            let nr_procs = crate::proc::NR_PROCS as i32;
+            for slot in 0..nr_procs {
+                let rp = proc_addr(slot);
+                if !rp.is_null() && table::is_empty_proc(rp) {
+                    child_slot = slot;
+                    break;
+                }
+            }
+            if child_slot < 0 {
+                return crate::ipc::EAGAIN;
+            }
         }
         let rpc = proc_addr(child_slot);
         if rpc.is_null() || !table::is_empty_proc(rpc) {
@@ -3736,7 +3753,12 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_reg.rax = 0;
         (*rpc).p_user_time = 0;
         (*rpc).p_sys_time = 0;
-        let clear_mf = (MiscFlags::VIRT_TIMER
+        // Clear misc flags that should not be inherited by the child.
+        // REPLY_PEND: parent was in SENDREC waiting for PM's reply.
+        // VIRT_TIMER / PROF_TIMER / SC_TRACE / SPROF_SEEN / STEP:
+        //   per-process profiling/tracing state should start fresh.
+        let clear_mf = (MiscFlags::REPLY_PEND
+            | MiscFlags::VIRT_TIMER
             | MiscFlags::PROF_TIMER
             | MiscFlags::SC_TRACE
             | MiscFlags::SPROF_SEEN
@@ -3753,6 +3775,11 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_kcall_cycles = 0;
         (*rpc).p_kipc_cycles = 0;
         (*rpc).p_signal_received = 0;
+        // Set p_defer_r1 = 1 so the child can detect it's a fork child
+        // via NR_IS_FORK_CHILD syscall. This is needed because parent and
+        // child share the same page table after fork (no VM isolation yet),
+        // so the child sees the parent's PM_FORK reply in the shared msg buffer.
+        (*rpc).p_defer_r1 = 1;
 
         // Append "*F" to name
         let mut end = (*rpc).p_name.len();

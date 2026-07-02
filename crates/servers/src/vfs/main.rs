@@ -59,6 +59,12 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         rfp.fp_umask = 0o0022;
     }
 
+    // Set up PM's Fproc entry so VFS can reply to PM messages.
+    // PM has endpoint 0, slot 0.
+    let pm_fp = unsafe { &mut *fproc_array.add(0) };
+    pm_fp.fp_endpoint = PM_PROC_NR;
+    pm_fp.fp_pid = 1;
+
     worker::worker_init();
 
     unsafe { (*glob).system_hz = 60 };

@@ -76,6 +76,11 @@ const NR_CHOWN: u64 = 45;
 const NR_MKNOD: u64 = 56;
 /// Get directory entries.
 const NR_GETDENTS: u64 = 57;
+/// Kernel call syscall number — invoke a kernel call on the SYSTEM task.
+pub const NR_KERNEL_CALL: u64 = 50;
+/// Syscall to check if this process is a fork child (detects parent vs child
+/// after IPC-based fork when page tables are shared).
+pub const NR_IS_FORK_CHILD: u64 = 63;
 /// Syscall to replace current process with a binary from initramfs.
 pub const NR_EXEC_REPLACE: u64 = 61;
 
@@ -363,18 +368,58 @@ pub fn sendrec(dest: i32, msg: &mut [u8; 64]) -> i32 {
     unsafe { syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64) as i32 }
 }
 
-/// Fork the current process via kernel syscall.
-/// Returns 0 in the child, child's endpoint (as PID) in the parent,
-/// or negative on error.
-pub fn fork() -> i32 {
-    unsafe { syscall0(NR_FORK) as i32 }
+/// Invoke a kernel call on the SYSTEM task.
+///
+/// `call_nr` is the kernel call number (0 = SYS_FORK, 1 = SYS_EXEC, etc.).
+/// `msg` must point to a Message struct with the kernel call payload in
+/// `m_payload`. The m_source and m_type fields are ignored (overwritten).
+/// After the call, `msg.m_payload` contains the kernel's reply.
+/// Returns 0 on success, negative error code on failure.
+pub fn kernel_call(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
+    unsafe { syscall2(NR_KERNEL_CALL, call_nr as u64, msg.as_mut_ptr() as u64) as i32 }
 }
 
-/// Wait for a child process to exit.
-/// `child_ep` is the child's endpoint (returned by fork).
-/// Returns 0 on success, negative on error.
-pub fn waitpid(child_ep: i32) -> i32 {
-    unsafe { syscall1(NR_WAITPID, child_ep as u64) as i32 }
+/// Fork the current process via PM IPC.
+/// Sends PM_FORK to the Process Manager, which creates a child
+/// process via MProc allocation → SYS_FORK (kernel call 0) →
+/// VFS_PM_FORK notification.
+/// Returns 0 in the child, child's PID in the parent,
+/// or negative on error.
+pub fn fork() -> i32 {
+    let mut msg = [0u8; 64];
+    // Set m_type = PM_FORK at bytes 4-7
+    msg[4..8].copy_from_slice(&PM_FORK.to_le_bytes());
+    let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
+    if reply < 0 {
+        return reply as i32;
+    }
+    // NR_IS_FORK_CHILD returns 1 if do_fork_handler set p_defer_r1=1
+    // on this process (the child). The parent sees 0.
+    // This is needed because parent and child share the same page table
+    // (no VM isolation), so both see PM's reply in the msg buffer.
+    let is_child = unsafe { syscall0(NR_IS_FORK_CHILD) };
+    if is_child != 0 {
+        return 0;
+    }
+    // Parent: read child PID from m1i1 (bytes 8-11)
+    i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]))
+}
+
+/// Wait for a child process to exit via PM IPC.
+/// `child_pid` is the child's PID (returned by fork).
+/// Sends PM_WAITPID to the Process Manager.
+/// Returns the child's exit status on success, negative on error.
+pub fn waitpid(child_pid: i32) -> i32 {
+    let mut msg = [0u8; 64];
+    // Set m_type = PM_WAITPID at bytes 4-7, wpid at m1i1 (bytes 8-11)
+    msg[4..8].copy_from_slice(&PM_WAITPID.to_le_bytes());
+    msg[8..12].copy_from_slice(&child_pid.to_le_bytes());
+    let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
+    if reply < 0 {
+        return reply as i32;
+    }
+    // Reply has status in m1i2 (bytes 12-15)
+    i32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]))
 }
 
 /// Send a message to a process and wait for a reply (blocking).
