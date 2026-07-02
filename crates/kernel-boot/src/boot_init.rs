@@ -27,83 +27,72 @@ pub struct InitInfo {
     pub stack_end: u64,
 }
 
-/// Load /sbin/init from the embedded initramfs and set up its TrapFrame for
-/// `sysretq` ring-3 execution.
+/// Load a binary from initramfs and set up its TrapFrame for sysretq ring-3.
 ///
-/// This bypasses RS/PM/VFS for the initial boot — it directly:
-/// 1. Finds /sbin/init in the initramfs CPIO archive
-/// 2. Parses the ELF64 header and copies LOAD segments into memory
-/// 3. Allocates a user stack (identity-mapped memory)
-/// 4. Sets up the Proc entry's TrapFrame for `sysretq` (rcx=RIP, r11=RFLAGS)
-/// 5. Returns an InitInfo with the Proc pointer and memory bounds
+/// Generic version of `load_and_prepare_init` — works for any boot process.
 ///
 /// # Safety
-/// Must be called after kernel::init() and before any user code runs.
+///
+/// Must be called after kernel::init() before any user code runs.
 /// Single-threaded boot context.
-pub unsafe fn load_and_prepare_init() -> Option<InitInfo> {
-    // Step 1: Find /sbin/init in the initramfs
-    let (init_data, _mode) = find_initramfs_file("/sbin/init")?;
-
-    // Step 2: Validate and load the ELF binary
-    let ehdr = match parse_elf_header(init_data) {
+/// `path` must exist in the initramfs. `proc_nr` must be a valid process
+/// number with an initialized Proc entry.
+pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> Option<InitInfo> {
+    let (data, _mode) = find_initramfs_file(path)?;
+    let ehdr = match parse_elf_header(data) {
         Ok(ehdr) => ehdr,
         Err(_) => {
-            print!("  init: invalid ELF header\r\n");
+            print!("  ");
+            print!(path);
+            print!(": invalid ELF header\r\n");
             return None;
         }
     };
-    print!("  init: ELF64 entry=0x");
+    print!("  ");
+    print!(path);
+    print!(": ELF64 entry=0x");
     print_hex(ehdr.e_entry);
-    let loaded = match unsafe { load_elf(init_data) } {
+    let loaded = match unsafe { load_elf(data) } {
         Ok(l) => l,
         Err(_) => {
-            print!("  init: ELF load failed\r\n");
+            print!("  ");
+            print!(path);
+            print!(": ELF load failed\r\n");
             return None;
         }
     };
 
-    // Step 3: Allocate a user stack at a fixed address.
-    // The identity map covers 0-1GB, but RAM is only 256MB (0x0-0x0FFFFFFF),
-    // so place the user stack within the RAM-backed region.
     let user_stack_base: u64 = 0x0FE00000;
     let user_stack_size: usize = 65536;
     let stack_top = user_stack_base + user_stack_size as u64;
-    let user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, &["/sbin/init"]) } {
+    let user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
         Ok(rsp) => rsp,
         Err(_) => {
-            print!("  init: stack setup failed\r\n");
+            print!("  ");
+            print!(path);
+            print!(": stack setup failed\r\n");
             return None;
         }
     };
 
-    // Step 4: Set up the TrapFrame for sysretq ring-3 execution.
-    //   sysretq loads: RIP from RCX, RFLAGS from R11
-    //   RSP is loaded by the caller before executing sysretq
-    //   CS/SS come from the STAR MSR (SYSRET_CS = 0x001B, SS = 0x0023)
-    // SAFETY: single-threaded boot context, proc_addr returns valid pointer
-    let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
-    // SAFETY: rp is non-null for INIT_PROC_NR at boot time
+    let rp = kernel::table::proc_addr(proc_nr);
     unsafe {
         core::ptr::write_volatile(&raw mut (*rp).p_reg.rcx, ehdr.e_entry);
-        core::ptr::write_volatile(&raw mut (*rp).p_reg.r11, 0x0202u64); // PSL_USERSET
+        core::ptr::write_volatile(&raw mut (*rp).p_reg.r11, 0x0202u64);
         core::ptr::write_volatile(&raw mut (*rp).p_reg.rsp, user_rsp);
-        // rdi = pointer to boot args string on stack (set up by setup_user_stack)
         core::ptr::write_volatile(&raw mut (*rp).p_reg.rdi, user_rsp);
     }
 
-    // Compute page-aligned code range from the LoadedElf
     let code_start = loaded.base & !0xFFF;
     let code_end = (loaded.top + 0xFFF) & !0xFFF;
     let stack_start = user_stack_base & !0xFFF;
     let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
-    print!("  init: loaded at 0x");
+    print!("  ");
+    print!(path);
+    print!(": loaded at 0x");
     print_hex(loaded.base);
-    print!(" (code 0x");
-    print_hex(code_start);
-    print!("-0x");
-    print_hex(code_end);
-    print!(") stack=0x");
+    print!(" stack=0x");
     print_hex(user_rsp);
     print!("\n");
 
@@ -114,6 +103,21 @@ pub unsafe fn load_and_prepare_init() -> Option<InitInfo> {
         stack_start,
         stack_end,
     })
+}
+
+/// Load /sbin/init from the embedded initramfs.
+///
+/// # Safety
+///
+/// Must be called after kernel::init(). Single-threaded boot context.
+pub unsafe fn load_and_prepare_init() -> Option<InitInfo> {
+    unsafe {
+        load_and_prepare_proc(
+            "/sbin/init",
+            arch_common::com::INIT_PROC_NR,
+            &["/sbin/init"],
+        )
+    }
 }
 
 /// Create a per-process page table for the init process.

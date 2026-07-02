@@ -117,13 +117,45 @@ pub extern "C" fn kmain() -> ! {
 
     #[cfg(not(feature = "integration-tests"))]
     {
-        serial_write("  loading init from initramfs...\r\n");
+        use arch_common::com::*;
+
+        serial_write("  initializing boot processes...\r\n");
 
         unsafe {
             kernel::table::proc_init();
         }
 
-        let init_info = match unsafe { boot_init::load_and_prepare_init() } {
+        // Define all boot processes: (path, proc_nr, endpoint_name)
+        let boot_procs: &[(&str, i32)] = &[
+            ("/sbin/pm", PM_PROC_NR),
+            ("/sbin/vfs", VFS_PROC_NR),
+            ("/sbin/rs", RS_PROC_NR),
+            ("/sbin/vm", VM_PROC_NR),
+            ("/sbin/ds", DS_PROC_NR),
+            ("/sbin/sched", SCHED_PROC_NR),
+            ("/sbin/tty", TTY_PROC_NR),
+            ("/sbin/init", INIT_PROC_NR),
+        ];
+
+        // Load each boot process from initramfs
+        serial_write("  loading boot processes...\r\n");
+        let mut init_info = None;
+        for &(path, proc_nr) in boot_procs {
+            let info = match unsafe { boot_init::load_and_prepare_proc(path, proc_nr, &[path]) } {
+                Some(info) => info,
+                None => {
+                    serial_write("  FAILED: ");
+                    serial_write(path);
+                    serial_write("\r\n");
+                    hlt_loop();
+                }
+            };
+            if path == "/sbin/init" {
+                init_info = Some(info);
+            }
+        }
+
+        let init_info = match init_info {
             Some(info) => info,
             None => {
                 serial_write("  FAILED: no valid init binary\r\n");

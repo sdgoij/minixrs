@@ -4024,7 +4024,8 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
   - 11 tests: kernel entry points, selectors, RFLAGS, stack pool
 
 - [x] **14.B.5 — initramfs/ramdisk with binaries**
-  - ✅ `tools/mkinitramfs.rs` — CPIO newc archive with 14 boot-critical binaries
+  - ✅ `tools/mkinitramfs.rs` — CPIO newc archive with 21 boot-critical binaries
+    (14 userland + 7 system servers: pm, vfs, vm, rs, ds, sched, tty)
   - ✅ `tools/mkboot.rs` invokes mkinitramfs after kernel build
   - ✅ `kernel::initramfs` module — CPIO newc parser, `find_initramfs_file()`
   - ✅ `tools/minix-raw.ld` — `.initramfs` section with `__initramfs_start/__initramfs_end`
@@ -4051,10 +4052,14 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
     - `load_and_prepare_init()` returns `Option<InitInfo>` — finds init in initramfs,
       validates ELF, loads segments, allocates user stack (64 KB at 0x0FE00000),
       sets up TrapFrame for sysretq (rcx=RIP, r11=0x0202, rsp)
+    - `load_and_prepare_proc(path, proc_nr, argv)` — generalized version that
+      loads ANY binary from initramfs, not just init. Used for loading all
+      boot processes (PM, VFS, VM, RS, DS, SCHED, TTY) alongside init.
     - `boot_create_page_table()` — 3-page alloc (PML4+PDP+PD), deep-copies boot
       identity map, shares kernel high mappings (PML4[256..512])
     - `boot_jump_to_user()` — sets p_cr3, calls `sysretq_to_user()` → sysretq
-  - ✅ **kmain flow (normal boot)**: init → serial → timer → boot_init → sysretq to ring-3
+  - ✅ **kmain flow (normal boot)**: init → serial → timer → load all 8 boot
+    processes (7 servers + init) → create page table → setup syscalls → sysretq
   - ✅ **kmain flow (integration-tests)**: init → serial → timer → test_runner → 12 tests → ring-3 finale
   - ✅ **Bugs fixed** (10 total): MSR_KERNEL_GS_BASE, GDT D/B+L conflict, stack
     out-of-RAM, PM_EXEC_NEW constant, SLOT_FREE, exec stack, SYS_READ, hardcoded endpoint,
