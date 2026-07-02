@@ -99,6 +99,7 @@ dependencies = [
  "arch-common",
  "kernel",
  "minix-rt",
+ "minix-std",
 ]
 
 [[package]]

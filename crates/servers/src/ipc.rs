@@ -1610,8 +1610,8 @@ pub fn ipc_server_main() {
             continue;
         }
 
-        let who_e = msg_i32(&msg, MSG_OFF_SOURCE);
-        let call_type = msg_i32(&msg, MSG_OFF_CALLTYPE);
+        let who_e = unsafe { msg_i32(&msg, MSG_OFF_SOURCE) };
+        let call_type = unsafe { msg_i32(&msg, MSG_OFF_CALLTYPE) };
 
         // Check if this is a notification.
         let is_notify = (call_type as u32).wrapping_sub(NOTIFY_MESSAGE as u32) < 0x100;
@@ -1628,7 +1628,7 @@ pub fn ipc_server_main() {
             if let Some(handler) = IPC_CALLS[ipc_nr] {
                 let result = unsafe { handler(&mut msg) };
                 if NEEDS_REPLY[ipc_nr] {
-                    msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, result);
+                    unsafe { msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, result) };
                     let _ = unsafe { sendrec(who_e, &mut msg) };
                 }
             }

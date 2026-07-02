@@ -3,7 +3,7 @@
 //!
 //! Called from kmain after all kernel init is complete.
 
-use kernel::elf::{load_elf, parse_elf_header, setup_user_stack};
+use kernel::elf::{Elf64Phdr, ElfError, LoadedElf, parse_elf_header, setup_user_stack};
 use kernel::initramfs::find_initramfs_file;
 use kernel::pagetable::{boot_cr3, map_page};
 
@@ -53,7 +53,10 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     print!(path);
     print!(": ELF64 entry=0x");
     print_hex(ehdr.e_entry);
-    let loaded = match unsafe { load_elf(data) } {
+    print!("\r\n");
+    // Inline load_elf from kernel::elf — the crate-level function hangs
+    // due to a codegen issue in the boot context.
+    let loaded = match unsafe { load_elf_inline(data) } {
         Ok(l) => l,
         Err(_) => {
             print!("  ");
@@ -103,6 +106,87 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         code_end,
         stack_start,
         stack_end,
+    })
+}
+
+/// Inline copy of `kernel::elf::load_elf` — works around a codegen hang
+/// when calling the crate-level function from the boot context.
+///
+/// # Safety
+///
+/// Same as `kernel::elf::load_elf`.
+unsafe fn load_elf_inline(data: &[u8]) -> Result<LoadedElf, ElfError> {
+    let ehdr = parse_elf_header(data)?;
+
+    if ehdr.e_phoff == 0
+        || ehdr.e_phnum == 0
+        || ehdr.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>()
+    {
+        return Err(ElfError::NoLoadSegments);
+    }
+
+    let phoff = ehdr.e_phoff as usize;
+    let phnum = ehdr.e_phnum as usize;
+    let phentsize = ehdr.e_phentsize as usize;
+
+    let mut base = u64::MAX;
+    let mut top = 0u64;
+    let mut found_load = false;
+
+    for i in 0..phnum {
+        let phdr = unsafe { &*(data.as_ptr().add(phoff + i * phentsize) as *const Elf64Phdr) };
+
+        if phdr.p_type != 1 {
+            // PT_LOAD = 1
+            continue;
+        }
+        found_load = true;
+
+        let file_end = phdr
+            .p_offset
+            .checked_add(phdr.p_filesz)
+            .ok_or(ElfError::SegmentOutOfBounds)?;
+        if file_end > data.len() as u64 {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
+
+        if phdr.p_vaddr < base {
+            base = phdr.p_vaddr;
+        }
+        let seg_top = phdr
+            .p_vaddr
+            .checked_add(phdr.p_memsz)
+            .ok_or(ElfError::SegmentOutOfBounds)?;
+        if seg_top > top {
+            top = seg_top;
+        }
+
+        if phdr.p_filesz > 0 {
+            let src = unsafe { data.as_ptr().add(phdr.p_offset as usize) };
+            let dst = phdr.p_vaddr as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+            }
+        }
+
+        let bss_size = phdr.p_memsz.saturating_sub(phdr.p_filesz);
+        if bss_size > 0 {
+            let bss_start = phdr.p_vaddr.wrapping_add(phdr.p_filesz);
+            let dst = bss_start as *mut u8;
+            unsafe {
+                core::ptr::write_bytes(dst, 0, bss_size as usize);
+            }
+        }
+    }
+
+    if !found_load {
+        return Err(ElfError::NoLoadSegments);
+    }
+
+    Ok(LoadedElf {
+        base,
+        top,
+        entry: ehdr.e_entry,
     })
 }
 

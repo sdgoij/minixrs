@@ -1230,8 +1230,10 @@ pub unsafe fn handle_getpgrp(caller_slot: usize, msg: &mut Message) -> i32 {
 /// a valid message buffer.
 pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
     #[cfg(target_os = "none")]
-    // syscall1(NR_ABORT=27, 1) — kernel do_abort_handler with reboot.
-    minix_rt::syscall1(27, 1);
+    unsafe {
+        // syscall1(NR_ABORT=27, 1) — kernel do_abort_handler with reboot.
+        minix_rt::syscall1(27, 1);
+    }
     OK
 }
 
@@ -1311,7 +1313,7 @@ pub fn pm_server_main() {
             };
 
             // Dispatch the call.
-            let status = unsafe { pm_dispatch(slot, &mut msg) };
+            let status = pm_dispatch(slot, &mut msg);
 
             // Send the reply if the handler didn't return EDONTREPLY.
             if status != EDONTREPLY {

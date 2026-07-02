@@ -80,11 +80,11 @@ unsafe fn get_work() {
     {
         const RECEIVE_CALL: u64 = 47;
         const ANY: i32 = 0x0000ffff;
-        let src = minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf as u64);
+        let src = unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf as u64) };
         if src >= 0 {
             // Store the sender endpoint at offset 0 (m_source)
             let src_bytes = (src as i32).to_le_bytes();
-            (*buf)[..4].copy_from_slice(&src_bytes);
+            core::ptr::copy_nonoverlapping(src_bytes.as_ptr(), buf as *mut u8, 4);
         }
     }
     #[cfg(not(target_os = "none"))]

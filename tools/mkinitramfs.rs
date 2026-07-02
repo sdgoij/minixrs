@@ -15,27 +15,27 @@ use std::process::Command;
 /// List of boot-critical binaries to include in the initramfs.
 /// Maps destination path → Cargo package.binary-name.
 const BOOT_BINS: &[(&str, &str, &str)] = &[
-    ("//sbin/init", "userland", "init"),
-    ("//bin/sh", "userland", "sh"),
-    ("//bin/cat", "userland", "cat"),
-    ("//bin/echo", "userland", "echo"),
-    ("//bin/ls", "userland", "ls"),
-    ("//bin/mkdir", "userland", "mkdir"),
-    ("//bin/rm", "userland", "rm"),
-    ("//bin/cp", "userland", "cp"),
-    ("//bin/ln", "userland", "ln"),
-    ("//bin/chmod", "userland", "chmod"),
-    ("//bin/sync", "userland", "sync"),
-    ("//sbin/mknod", "userland", "mknod"),
-    ("//sbin/reboot", "userland", "reboot"),
-    ("//sbin/fsck", "userland", "fsck"),
-    ("//sbin/pm", "servers", "pm"),
-    ("//sbin/vfs", "servers", "vfs"),
-    ("//sbin/vm", "servers", "vm"),
-    ("//sbin/rs", "servers", "rs"),
-    ("//sbin/ds", "servers", "ds"),
-    ("//sbin/sched", "servers", "sched"),
-    ("//sbin/tty", "servers", "tty"),
+    ("/sbin/init", "userland", "init"),
+    ("/bin/sh", "userland", "sh"),
+    ("/bin/cat", "userland", "cat"),
+    ("/bin/echo", "userland", "echo"),
+    ("/bin/ls", "userland", "ls"),
+    ("/bin/mkdir", "userland", "mkdir"),
+    ("/bin/rm", "userland", "rm"),
+    ("/bin/cp", "userland", "cp"),
+    ("/bin/ln", "userland", "ln"),
+    ("/bin/chmod", "userland", "chmod"),
+    ("/bin/sync", "userland", "sync"),
+    ("/sbin/mknod", "userland", "mknod"),
+    ("/sbin/reboot", "userland", "reboot"),
+    ("/sbin/fsck", "userland", "fsck"),
+    ("/sbin/pm", "servers", "pm"),
+    ("/sbin/vfs", "servers", "vfs"),
+    ("/sbin/vm", "servers", "vm"),
+    ("/sbin/rs", "servers", "rs"),
+    ("/sbin/ds", "servers", "ds"),
+    ("/sbin/sched", "servers", "sched"),
+    ("/sbin/tty", "servers", "tty"),
 ];
 
 /// Device nodes to create in the initramfs.
@@ -146,35 +146,38 @@ fn main() {
     let target_dir = workspace.join("target");
     fs::create_dir_all(&target_dir).ok();
 
-    // Step 1: Build all userland binaries for the minix target
+    // Step 1a: Build all userland binaries for the minix target
     println!("Building userland binaries...");
     let bins_dir = target_dir.join("initramfs_bins");
     fs::create_dir_all(&bins_dir).ok();
 
-    let status = Command::new("rustup")
-        .args([
-            "run",
-            "nightly",
-            "cargo",
-            "build",
-            "-p",
-            "userland",
-            "--bins",
-            "--target",
-            "x86_64-pc-minix.json",
-            "-Zjson-target-spec",
-            "-Zbuild-std=core,alloc",
-            "-Zbuild-std-features=compiler-builtins-mem",
-            "--release",
-        ])
-        .env(
-            "RUSTFLAGS",
-            "-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr",
-        )
-        .status()
-        .expect("cargo build userland failed");
-    if !status.success() {
-        println!("  WARNING: userland build failed, continuing without binaries");
+    for (pkg_name, label) in [("userland", "userland"), ("servers", "servers")] {
+        println!("Building {label} binaries...");
+        let status = Command::new("rustup")
+            .args([
+                "run",
+                "nightly",
+                "cargo",
+                "build",
+                "-p",
+                pkg_name,
+                "--bins",
+                "--target",
+                "x86_64-pc-minix.json",
+                "-Zjson-target-spec",
+                "-Zbuild-std=core,alloc",
+                "-Zbuild-std-features=compiler-builtins-mem",
+                "--release",
+            ])
+            .env(
+                "RUSTFLAGS",
+                "-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr",
+            )
+            .status()
+            .expect(&format!("cargo build {} failed", pkg_name));
+        if !status.success() {
+            println!("  WARNING: {label} build failed, continuing without binaries");
+        }
     }
 
     // Copy the built ELF binaries to our staging directory

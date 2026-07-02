@@ -184,12 +184,14 @@ fn r_u64(buf: &MsgBuf, off: usize) -> u64 {
 pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
     #[cfg(target_os = "none")]
     {
-        let m = &mut *(msg.as_mut_ptr() as *mut arch_common::ipc::Message);
-        m.m_type = r_i32(msg, M_TYPE_OFF);
-        match minix_std::sendrec(fs_e, m) {
+        // MsgBuf is 56 bytes; minix_std::Message is 64 bytes.
+        // Copy into a 64-byte buffer for sendrec, then copy back.
+        let mut ipc_msg = [0u8; 64];
+        ipc_msg[..56].copy_from_slice(&msg[..]);
+        match minix_std::sendrec(fs_e, &mut ipc_msg) {
             Ok(src) => {
-                // Copy m_source back (kernel sets it on receive)
-                w_i32(msg, 0, src);
+                // Copy result back (kernel updated m_source at offset 0)
+                msg[..56].copy_from_slice(&ipc_msg[..56]);
                 crate::vfs::consts::OK
             }
             Err(e) => e.0,
@@ -198,7 +200,7 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
     #[cfg(not(target_os = "none"))]
     {
         let _ = (fs_e, msg);
-        -ENOSYS
+        -(crate::vfs::consts::ENOSYS)
     }
 }
 
@@ -368,7 +370,10 @@ pub unsafe fn req_create(
         let path_len = if _path.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_path as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -559,7 +564,10 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_lastc as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -680,7 +688,10 @@ pub unsafe fn req_mkdir(
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_lastc as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -730,7 +741,10 @@ pub unsafe fn req_mknod(
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_lastc as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -838,7 +852,10 @@ pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
         let path_len = if _label.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_label).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_label as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -954,7 +971,10 @@ pub unsafe fn req_readsuper(
         let label_len = if _label.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_label).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_label as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -1022,12 +1042,18 @@ pub unsafe fn req_rename(
         let len_old = if _old_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_old_name).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_old_name as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let len_new = if _new_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_new_name).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_new_name as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let gid_old = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -1075,7 +1101,10 @@ pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_lastc as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -1122,12 +1151,18 @@ pub unsafe fn req_slink(
         let len_name = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_path as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let len_buf = if _path.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_path as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let gid_name = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
@@ -1229,7 +1264,10 @@ pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc).to_bytes().len() + 1
+            core::ffi::CStr::from_ptr(_lastc as *const i8)
+                .to_bytes()
+                .len()
+                + 1
         };
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,

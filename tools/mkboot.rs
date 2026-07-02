@@ -28,19 +28,19 @@ fn main() {
     // 1. Build initramfs first (kernel build needs initramfs.cpio via include_bytes!)
     println!("Building initramfs...");
     let mkinitramfs = workspace.join("target").join("mkinitramfs.exe");
-    if !mkinitramfs.exists() {
-        let status = Command::new("rustc")
-            .args([
-                workspace.join("tools/mkinitramfs.rs").to_str().unwrap(),
-                "--edition",
-                "2024",
-                "-o",
-                &mkinitramfs.to_string_lossy(),
-            ])
-            .status()
-            .expect("rustc mkinitramfs failed");
-        assert!(status.success());
-    }
+    // Always rebuild mkinitramfs to pick up source changes.
+    std::fs::remove_file(&mkinitramfs).ok();
+    let status = Command::new("rustc")
+        .args([
+            workspace.join("tools/mkinitramfs.rs").to_str().unwrap(),
+            "--edition",
+            "2024",
+            "-o",
+            &mkinitramfs.to_string_lossy(),
+        ])
+        .status()
+        .expect("rustc mkinitramfs failed");
+    assert!(status.success());
     let status = Command::new(&mkinitramfs)
         .status()
         .expect("mkinitramfs failed");

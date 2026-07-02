@@ -16,6 +16,7 @@ workspace = true
 kernel = { path = "../kernel" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }
+minix-std = { path = "../minix-std" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # server binaries that cannot run as host-native tests. Tests live in the lib target.

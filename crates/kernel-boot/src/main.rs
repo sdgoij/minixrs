@@ -206,6 +206,20 @@ pub extern "C" fn kmain() -> ! {
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
             arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
             arch_x86_64::cpulocals::init_cpulocals();
+
+            // Initialize the VM page allocator (used by map_page for
+            // page table page allocations). Free memory from 0x300000
+            // (end of kernel image) to 0xFE00000 (start of user stack),
+            // and from 0xFF00000 (end of user stack) to 0x10000000.
+            let m1 = kernel::vm::MemoryChunk {
+                base: 0x300000 / kernel::vm::VM_PAGE_SIZE as u64,
+                size: (0xFE00000 - 0x300000) / kernel::vm::VM_PAGE_SIZE as u64,
+            };
+            let m2 = kernel::vm::MemoryChunk {
+                base: 0xFF00000 / kernel::vm::VM_PAGE_SIZE as u64,
+                size: (0x10000000 - 0xFF00000) / kernel::vm::VM_PAGE_SIZE as u64,
+            };
+            kernel::vm::mem_init(&[m1, m2]);
         }
 
         // Create per-process (restricted) page tables and enqueue each process.
