@@ -164,8 +164,14 @@ pub extern "C" fn kmain() -> ! {
 
 /// C handler for syscall entry — called from arch-x86_64's naked asm.
 /// Saves/restores registers, dispatches to kernel::syscall.
+///
+/// # Safety
+///
+/// `saved` must point to a valid register save area on the kernel stack.
+/// The current CPU local storage must have a valid process pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
+    #[allow(unused_unsafe)]
     unsafe {
         let nr = core::ptr::read_volatile(saved) as usize;
         let rp = arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc;

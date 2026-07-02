@@ -196,44 +196,168 @@ unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     }
 }
 
+/// VFS server endpoint.
+const VFS_PROC_NR: i32 = 1;
+
+/// Build a VFS IPC message and send it via `do_sync_ipc`.
+///
+/// `vfs_call` is the VFS call number (VFS_MKDIR = 0x109, etc.).
+/// `arg1`-`arg3` are i32 arguments placed in the m1 payload.
+/// `path_ptr` and `path_len` are used for path-based calls.
+///
+/// Returns the reply status (OK = 0, or negative errno).
+unsafe fn vfs_ipc_call(
+    caller: *mut crate::proc::Proc,
+    vfs_call: i32,
+    arg1: i32,
+    arg2: i32,
+    arg3: i32,
+) -> i64 {
+    let mut msg = [0u8; 64];
+    // Set destination endpoint (first 4 bytes)
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    // Set call number (offset 4-8)
+    msg[4..8].copy_from_slice(&vfs_call.to_le_bytes());
+    // Set payload fields
+    msg[12..16].copy_from_slice(&arg1.to_le_bytes());
+    msg[16..20].copy_from_slice(&arg2.to_le_bytes());
+    msg[20..24].copy_from_slice(&arg3.to_le_bytes());
+
+    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+    if result != 0 {
+        return result as i64;
+    }
+
+    // Read the reply status from offset 4-8 (m_type).
+    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    reply_status as i64
+}
+
 /// SYS_mkdir (40) — create a directory.
-unsafe fn sys_mkdir_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS — VFS server not available yet
+unsafe fn sys_mkdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let mode = args[2] as i32;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_MKDIR = 0x109
+    unsafe { vfs_ipc_call(caller, 0x109, mode, 0, 0) }
 }
 
 /// SYS_unlink (41) — remove a file.
-unsafe fn sys_unlink_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_unlink_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_UNLINK = 0x107
+    unsafe { vfs_ipc_call(caller, 0x107, 0, 0, 0) }
 }
 
 /// SYS_rmdir (42) — remove a directory.
-unsafe fn sys_rmdir_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_rmdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_RMDIR = 0x112
+    unsafe { vfs_ipc_call(caller, 0x112, 0, 0, 0) }
 }
 
 /// SYS_link (43) — create a hard link.
-unsafe fn sys_link_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_link_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let old_ptr = args[0] as *const u8;
+    let new_ptr = args[1] as *const u8;
+    let _ = (old_ptr, new_ptr);
+    // Route to VFS: VFS_LINK = 0x106
+    unsafe { vfs_ipc_call(caller, 0x106, 0, 0, 0) }
 }
 
 /// SYS_chmod (44) — change file mode.
-unsafe fn sys_chmod_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_chmod_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let mode = args[2] as i32;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_CHMOD = 0x10B
+    unsafe { vfs_ipc_call(caller, 0x10B, mode, 0, 0) }
 }
 
 /// SYS_chown (45) — change file owner.
-unsafe fn sys_chown_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_chown_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let owner = args[2] as i32;
+    let group = args[3] as i32;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_CHOWN = 0x10C
+    unsafe { vfs_ipc_call(caller, 0x10C, owner, group, 0) }
 }
 
 /// SYS_mknod (46) — create a device node.
-unsafe fn sys_mknod_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_mknod_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0] as *const u8;
+    let path_len = args[1] as usize;
+    let mode = args[2] as i32;
+    let dev = args[3] as i32;
+    let _ = (path_ptr, path_len);
+    // Route to VFS: VFS_MKNOD = 0x10A
+    unsafe { vfs_ipc_call(caller, 0x10A, mode, dev, 0) }
 }
 
 /// SYS_getdents (47) — read directory entries.
-unsafe fn sys_getdents_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    -38 // ENOSYS
+unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let fd = args[0] as i32;
+    let _buf = args[1] as *mut u8;
+    let count = args[2] as i32;
+    // Route to VFS: VFS_GETDENTS = 0x11D
+    unsafe { vfs_ipc_call(caller, 0x11D, fd, count, 0) }
+}
+
+// ── IPC syscall handlers (46-49) ────────────────────────────────────
+
+/// SYS_IPC_SEND (46) — send a message to a process.
+unsafe fn sys_ipc_send_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let dest = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    // do_sync_ipc reads destination from msg[0..4]
+    unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
+    unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SEND) as i64 }
+}
+
+/// SYS_IPC_RECEIVE (47) — receive a message from a process.
+/// src = ANY (0x0000ffff) to receive from anyone.
+unsafe fn sys_ipc_receive_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let src = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    // do_sync_ipc reads source from msg[0..4]
+    unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, src) };
+    unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::RECEIVE) as i64 }
+}
+
+/// SYS_IPC_SENDREC (48) — send then receive (atomic request-reply).
+unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let dest = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    // do_sync_ipc reads destination from msg[0..4]
+    unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
+    unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDREC) as i64 }
+}
+
+/// SYS_IPC_NOTIFY (49) — send an asynchronous notification.
+unsafe fn sys_ipc_notify_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let dest = args[0] as i32;
+    let mut msg_buf = [0u8; 64];
+    unsafe {
+        core::ptr::write_unaligned(msg_buf.as_mut_ptr() as *mut i32, dest);
+        crate::ipc::do_sync_ipc(caller, msg_buf.as_mut_ptr(), crate::ipc::NOTIFY) as i64
+    }
 }
 
 /// Initialize basic syscall handlers.
@@ -263,8 +387,13 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(43, sys_link_handler); // NR_LINK
         register_basic_syscall(44, sys_chmod_handler); // NR_CHMOD
         register_basic_syscall(45, sys_chown_handler); // NR_CHOWN
-        register_basic_syscall(46, sys_mknod_handler); // NR_MKNOD
-        register_basic_syscall(47, sys_getdents_handler); // NR_GETDENTS
+        register_basic_syscall(56, sys_mknod_handler); // NR_MKNOD
+        register_basic_syscall(57, sys_getdents_handler); // NR_GETDENTS
+        // IPC syscalls (from minix-std): 46=SEND, 47=RECEIVE, 48=SENDREC, 49=NOTIFY
+        register_basic_syscall(46, sys_ipc_send_handler); // SEND
+        register_basic_syscall(47, sys_ipc_receive_handler); // RECEIVE
+        register_basic_syscall(48, sys_ipc_sendrec_handler); // SENDREC
+        register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
     }
 }
 

@@ -69,8 +69,28 @@ unsafe fn sef_cb_init_fresh() -> i32 {
 // Work loop
 
 /// Receive a message from any source.
+///
+/// Uses the kernel `receive` syscall to block until a message arrives.
+/// The message is stored in `fs_m_in`.
 unsafe fn get_work() {
-    let _glob = vfs_global();
+    let glob = vfs_global();
+    let buf = &mut (*glob).fs_m_in as *mut [u8; 64];
+
+    #[cfg(target_os = "none")]
+    {
+        const RECEIVE_CALL: u64 = 47;
+        const ANY: i32 = 0x0000ffff;
+        let src = minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf as u64);
+        if src >= 0 {
+            // Store the sender endpoint at offset 0 (m_source)
+            let src_bytes = (src as i32).to_le_bytes();
+            (*buf)[..4].copy_from_slice(&src_bytes);
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = buf;
+    }
 }
 
 /// Dispatch the current request to the appropriate handler.
@@ -89,26 +109,63 @@ unsafe fn handle_work() {
             .unwrap_or([0; 4]),
     );
 
-    if source == PM_PROC_NR {
+    // Read the call number (message type) from offset 4.
+    let call_nr = i32::from_le_bytes(fs_m_in[4..8].try_into().unwrap_or([0; 4]));
+    (*glob).req_nr = call_nr;
+
+    // Look up the caller's Fproc slot from the source endpoint.
+    let fp = if source >= 0 {
+        let slot = (source & 0xff) as usize;
+        if slot < 256 {
+            let fp_base = addr_of_mut!((*glob).fproc) as *mut Fproc;
+            fp_base.add(slot)
+        } else {
+            core::ptr::null_mut()
+        }
+    } else {
+        core::ptr::null_mut()
+    };
+    (*glob).fp = fp;
+
+    let result = if source == PM_PROC_NR {
         // PM messages are dispatched through service_pm.
-        let result = pm::service_pm();
-        (*glob).err_code = result;
-        reply((*glob).fp, result);
+        pm::service_pm()
     } else {
         // Regular VFS calls are dispatched through the call table.
-        let call_nr = (*glob).req_nr;
-        let result = table::dispatch(call_nr);
-        (*glob).err_code = result;
-        reply((*glob).fp, result);
-    }
+        table::dispatch(call_nr)
+    };
+
+    (*glob).err_code = result;
+    reply(fp, result);
 }
 
 /// Send a reply message to a process.
+///
+/// Writes the result code into the outgoing message buffer and sends
+/// it via `sendrec` to the caller. The `who` pointer identifies the
+/// caller's Fproc slot; if null, the reply is skipped.
 unsafe fn reply(who: *mut Fproc, result: i32) {
     if who.is_null() {
         return;
     }
-    let _ = result;
+
+    #[cfg(target_os = "none")]
+    {
+        let glob = vfs_global();
+        let out = &mut (*glob).fs_m_out;
+        // Write the result code into the message type field (offset 4).
+        out[4..8].copy_from_slice(&result.to_le_bytes());
+
+        const SENDREC_CALL: u64 = 48;
+        let dest = (*who).fp_endpoint;
+        if dest >= 0 {
+            minix_rt::syscall2(SENDREC_CALL, dest as u64, out as *mut [u8; 64] as u64);
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = result;
+    }
 }
 
 // Helpers

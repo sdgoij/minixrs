@@ -19,18 +19,25 @@ pub fn write_err(s: &[u8]) {
 }
 
 /// Convert a null-terminated argv pointer into a slice of string slices.
-/// Returns (arg_count, arg_slices) packed into a fixed-size buffer.
-pub fn parse_args<'a>(argc: i32, argv: *const *const u8, buf: &'a mut [&str; 64]) -> &'a [&'a str] {
+///
+/// # Safety
+///
+/// `argv` must point to a valid null-terminated array of `argc` string
+/// pointers, and each string must be null-terminated.
+pub unsafe fn parse_args<'a>(
+    argc: i32,
+    argv: *const *const u8,
+    buf: &'a mut [&str; 64],
+) -> &'a [&'a str] {
     let count = (argc as usize).min(64).min(buf.len());
-    for i in 0..count {
+    for (i, slot) in buf.iter_mut().enumerate().take(count) {
         let ptr = unsafe { argv.add(i).read() };
         let mut len = 0usize;
         while unsafe { *ptr.add(len) } != 0 {
             len += 1;
         }
         let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-        // Store as &str (ASCII-safe for command names)
-        buf[i] = unsafe { core::str::from_utf8_unchecked(slice) };
+        *slot = unsafe { core::str::from_utf8_unchecked(slice) };
     }
     &buf[..count]
 }
@@ -161,7 +168,7 @@ const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 
 /// ls — list directory contents.
 pub fn ls(args: &[&str]) -> i32 {
-    let dir = if args.len() > 1 { &args[1] } else { "." };
+    let dir = if args.len() > 1 { args[1] } else { "." };
     // Open directory O_RDONLY (0)
     let fd = unsafe { minix_rt::syscall3(4, dir.as_ptr() as u64, dir.len() as u64, 0) };
     if fd < 0 {
@@ -171,7 +178,7 @@ pub fn ls(args: &[&str]) -> i32 {
         return 1;
     }
     let mut buf = [0u8; 4096];
-    let n = unsafe { minix_rt::syscall3(47, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    let n = unsafe { minix_rt::syscall3(57, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
     if n <= 0 {
         // Fallback: just print the directory name if getdents fails
         write_out(dir.as_bytes());
@@ -253,7 +260,7 @@ pub fn rm(args: &[&str]) -> i32 {
             write_err(b"rm: ");
             write_err(path.as_bytes());
             write_err(b": ");
-            write_err(errstr(-ret as i32));
+            write_err(errstr(-ret));
             write_err(b"\n");
             exit_code = 1;
         }
@@ -268,7 +275,7 @@ fn rm_single(path: &[u8]) -> i32 {
     if ret >= 0 {
         return 0;
     }
-    let err = -ret as i32;
+    let err = -ret;
     if err == 21 {
         // EISDIR — try rmdir
         let r = minix_rt::rmdir(path);
@@ -287,7 +294,7 @@ fn rm_recursive(path: &[u8]) -> i32 {
     if ret >= 0 {
         return 0;
     }
-    let err = -ret as i32;
+    let err = -ret;
     if err != 21 {
         // Not EISDIR — some other error or already removed
         return ret as i32;
@@ -303,7 +310,7 @@ fn rm_recursive(path: &[u8]) -> i32 {
     let mut buf = [0u8; 4096];
     loop {
         let n =
-            unsafe { minix_rt::syscall3(47, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+            unsafe { minix_rt::syscall3(57, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
         if n <= 0 {
             break;
         }

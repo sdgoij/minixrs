@@ -598,6 +598,13 @@ pub unsafe extern "C" fn sysretq_to_user(proc_ptr: *const u8) -> ! {
 
 /// Execute `sysretq` — assumes registers are already set by caller:
 ///   rax = CR3, rcx = entry (RIP), r11 = RFLAGS, rdx = user RSP
+///
+/// # Safety
+///
+/// All registers must contain valid values for ring-3 execution. The
+/// page table in CR3 must map the entry point and stack as user-accessible.
+/// RCX must point to valid executable code. R11 must contain valid RFLAGS.
+/// RSP must point to a valid user-accessible stack.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn sysretq_direct() -> ! {

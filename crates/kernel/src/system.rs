@@ -225,6 +225,20 @@ const EXEC_STACK_OFF: usize = 16;
 const EXEC_NAME_OFF: usize = 24;
 const EXEC_PS_STR_OFF: usize = 32;
 
+// ── Exec finalization message offsets (SYS_EXEC at call 60) ───────────
+//
+// This is a simpler finalization handler separate from the full exec
+// (call 1). Message format:
+//   offset  0: endpt   (endpoint_t / i32, 4 bytes)
+//   offset  4: _pad    (4 bytes)
+//   offset  8: new_cr3 (u64) — new CR3 / PML4 physical address
+//   offset 16: entry   (u64) — entry point / RIP
+//   offset 24: stack   (u64) — user stack / RSP
+const EXEC_FINISH_ENDPT_OFF: usize = 0;
+const EXEC_FINISH_CR3_OFF: usize = 8;
+const EXEC_FINISH_IP_OFF: usize = 16;
+const EXEC_FINISH_STACK_OFF: usize = 24;
+
 // ── Mcontext message offsets (Phase 8.10) ─────────────────────────────
 //
 // mess_lsys_krn_sys_{get,set}mcontext:
@@ -1167,6 +1181,7 @@ pub unsafe fn system_init() {
         map_call(54, do_schedctl_handler); // SYS_SCHEDCTL
         map_call(55, do_statectl_handler); // SYS_STATECTL
         map_call(56, do_safememset_handler); // SYS_SAFEMEMSET
+        map_call(60, do_exec_finish_handler); // SYS_EXEC finalization
     }
 
     /// Stub for SYS_UPDATE — deferred.
@@ -3227,6 +3242,47 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         crate::ipc::set_exec_target(rp, ip, stack);
 
         EDONTREPLY
+    }
+}
+
+/// Handle SYS_EXEC finalization (call 60): set CR3 and trap frame for a
+/// process after a successful exec, without the full exec protocol.
+///
+/// Message format:
+///   offset  0: endpt   (i32) — target process endpoint
+///   offset  8: new_cr3 (u64) — new CR3 / PML4 physical address
+///   offset 16: entry   (u64) — entry point / RIP
+///   offset 24: stack   (u64) — user stack / RSP
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
+pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, EXEC_FINISH_ENDPT_OFF);
+        let new_cr3 = msg_read_u64(msg, EXEC_FINISH_CR3_OFF);
+        let entry = msg_read_u64(msg, EXEC_FINISH_IP_OFF);
+        let user_stack = msg_read_u64(msg, EXEC_FINISH_STACK_OFF);
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        // Update the process's page table root
+        (*rp).p_seg.p_cr3 = new_cr3;
+
+        // Set up trap frame for sysretq return to userspace:
+        //   RCX → RIP, R11 → RFLAGS, RSP = user stack
+        (*rp).p_reg.rcx = entry;
+        (*rp).p_reg.r11 = 0x0202u64; // PSL_USERSET: MBO | I
+        (*rp).p_reg.rsp = user_stack;
+
+        OK
     }
 }
 

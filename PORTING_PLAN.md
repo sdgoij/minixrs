@@ -3548,73 +3548,97 @@ be replaced with real implementations.
   `reply_select_count`/`reply_select_last_ops`/`reply_select_last_minor` for
   testing.  55 PTY tests pass (5 new select_retry tests), clippy clean.
 
-- [ ] **12.25 — Wire PM server message loop and dispatch** (`servers/src/pm.rs`)
-  **Depends on:** SEF init framework, IPC message receive (Phase 13)
-  `pm_server_main()` is currently an empty stub. Needs:
-  1. **Dispatch table** — map PM call numbers (PM_EXIT, PM_FORK, PM_EXEC,
-     PM_WAITPID, PM_KILL, PM_GETPID, PM_GETUID, PM_GETGID, PM_SETUID,
-     PM_SETGID, PM_GETTIMEOFDAY, PM_SYSUNAME, PM_ITIMER, PM_SIGACTION,
-     PM_SIGPROCMASK, PM_SIGPENDING, PM_REBOOT, PM_GETPRIORITY,
-     PM_SETPRIORITY, PM_SETSID, PM_GETPGRP, PM_GETSID, PM_GETSYSINFO,
-     PM_SVRCTL) to handler functions. Similar to VFS `table.rs`.
-  2. **IPC receive loop** — `pm_server_main()` must call `receive(ANY)`
-     to get incoming messages from userspace and kernel.
-  3. **Dispatch routing** — parse the message type, route to the
-     registered handler function via the dispatch table.
-  4. **Reply path** — send the reply back to the caller via `sendrec()`.
-  5. **`do_exec()`** — load and execute a new binary (PM_EXEC). This is
-     the biggest gap: needs VFS coordination for binary loading, VM
-     coordination for address space setup, and stack/environment setup.
-     Source: `.refs/minix-3.3.0/minix/servers/pm/exec.c`
-  - All existing handler functions (do_fork, do_exit, do_waitpid,
-    do_kill, do_get, do_set) are implemented and tested — they just
-    need to be connected to the dispatch loop.
-  - Kernel IPC routing: the kernel must forward userspace PM-related
-    syscalls (fork, exec, waitpid, exit, kill) to the PM server via
-    IPC rather than handling them in `dispatch_basic_syscall`.
+- [x] **12.25 — Wire PM server message loop and dispatch** (`servers/src/pm.rs`)
+  **Depends on:** minix-rt dependency, IPC syscall handlers (kernel 46-49)
+  Implemented:
+  1. **Dispatch table** — `pm_dispatch()` with match on 10 PM call numbers:
+     PM_EXIT, PM_FORK, PM_WAITPID, PM_GETPID, PM_SETUID, PM_GETUID,
+     PM_KILL, PM_EXEC, PM_SETSID, PM_GETPGRP. All handlers take `&mut Message`
+     and write results into the message payload (m1 fields) for the reply.
+  2. **IPC receive loop** — `pm_server_main()` on `target_os = "none"` calls
+     `minix_rt::syscall2(RECEIVE_CALL=47, ANY, &msg)` to receive messages,
+     dispatches via `pm_dispatch()`, sends reply via `syscall2(SENDREC_CALL=48)`.
+  3. **Handler functions** (10 total):
+     - `handle_exit`: calls `do_exit()`, returns EDONTREPLY
+     - `handle_fork`: calls `do_fork()`, writes child_pid/endpoint to message
+     - `handle_waitpid`: calls `do_waitpid()`, writes pid/status to message
+     - `handle_getpid`: reads pid/ppid from MProc, writes to message
+     - `handle_setuid`/`handle_getuid`: delegates to `do_set()`/`do_get()`
+     - `handle_kill`: calls `do_kill()` with permission check (uid comparison)
+     - `handle_setsid`: sets mp_procgrp = mp_pid, checks for session leader
+     - `handle_getpgrp`: returns mp_procgrp in message
+     - `do_exec`: parses PM_EXEC_NEW message, validates slot, returns ENOSYS
+       (needs VFS+VM+grants — see follow-up tasks below)
+  4. **PM call constants** — all key PM call numbers defined (PM_BASE=0x000
+     through PM_EXEC_NEW=43, NR_PM_CALLS=48)
+  5. **Permission check** — `do_kill()` now checks caller UID against target
+  
+  **Follow-up for full do_exec:**
+  - [x] Grant copy via SAFECOPYFROM kernel call (already wired, call 31)
+  - [x] VM_EXEC_NEWMEM handler in VM server (`pt_new` for fresh address space)
+  - [x] VFS_OPEN / VFS_READ wired through FS request layer
+  - [x] Kernel SYS_EXEC finalization call (call 60, updates CR3 + trap frame)
+  - [ ] `do_exec()` in PM — needs grant reading, VFS binary access, VM address
+    space, segment loading, stack setup (blocked on VFS server filesystem mount)
 
-- [ ] **12.26 — Wire VFS server message loop and dispatch** (`servers/src/vfs/main.rs`)
-  **Depends on:** SEF init framework, IPC message receive (Phase 13)
-  `vfs_main()` has `get_work()`/`handle_work()`/`reply()` but all are
-  stubs. Needs:
-  1. **IPC receive** — `get_work()` must call `receive(ANY)` to get
-     incoming messages from userspace processes and PM.
-  2. **Message parsing** — `handle_work()` reads `fs_m_in` buffer but
-     needs to extract the actual message type (call number) and source
-     endpoint from the IPC message.
-  3. **PM message routing** — messages from PM_PROC_NR need to go
-     through `pm::service_pm()` (VFS-PM protocol for fork/exec/exit
-     coordination). This is currently called but `service_pm()`
-     needs implementation.
-  4. **Reply path** — `reply()` needs to send the response back
-     to the caller via `sendrec()`. Currently a no-op.
-  5. **Grant-based I/O** — `request.rs` wrappers use real grants via
-     `cpf_grant_magic` (13.10a/b) but the grant data needs to be
-     accessible from the IPC message context.
-  - All VFS call handlers (do_open, do_read, do_write, do_getdents,
-    do_mkdir, do_unlink, etc.) return ENOSYS — they need real
-    implementations that call the FS request layer (req_* functions
-    in request.rs) to talk to the underlying filesystem servers
-    (MFS, PFS, ProcFS).
+- [x] **12.26 — Wire VFS server message loop and dispatch** (`servers/src/vfs/main.rs`)
+  **Depends on:** minix-rt dependency, IPC syscall handlers (kernel 46-49)
+  All three stubs replaced with real IPC:
+  1. **`get_work()`** — calls `minix_rt::syscall2(RECEIVE_CALL=47, ANY, &fs_m_in)`
+     to receive IPC messages from any sender. Stores sender endpoint at offset 0.
+     No-op on host builds.
+  2. **`handle_work()`** — reads call number from offset 4, resolves caller's
+     Fproc slot from source endpoint via `(source & 0xff)`, routes PM messages
+     through `pm::service_pm()` and regular calls through `table::dispatch()`.
+  3. **`reply()`** — writes result code into `fs_m_out[4..8]` and calls
+     `minix_rt::syscall2(SENDREC_CALL=48, dest, &fs_m_out)` to send reply.
+     No-op on host builds.
+  
+  **Follow-up:** All VFS call handlers (do_open, do_read, do_getdents, etc.)
+  still return ENOSYS — they need FS request layer implementations that
+  talk to underlying filesystem servers (MFS, PFS, ProcFS).
 
-  - [ ] **12.27 — Route VFS syscalls from kernel to VFS server** (`kernel/src/syscall.rs`)
-  **Depends on:** VFS server message loop (12.26), IPC message send (Phase 13)
-  Syscalls 40-47 (mkdir, unlink, rmdir, link, chmod, chown, mknod, getdents)
-  currently return ENOSYS directly. These need to be forwarded to the VFS
-  server via IPC rather than handled in the kernel. For each syscall:
-  1. Build a VFS message with the appropriate call number (VFS_MKDIR = 0x109,
-     VFS_UNLINK = 0x107, VFS_RMDIR = 0x112, VFS_LINK = 0x106, VFS_CHMOD = 0x10B,
-     VFS_CHOWN = 0x10C, VFS_MKNOD = 0x10A, VFS_GETDENTS = 0x11D) and copy
-     the syscall arguments into the message fields.
-  2. Call `do_sync_ipc(caller, &msg, SENDREC)` to deliver the message to
-     `VFS_PROC_NR` and wait for the reply.
-  3. Extract the return value from the reply message and return it to the
-     caller.
-  - Also update `sys_read_handler` (2) and `sys_write_handler` (3) to route
-    through VFS instead of handling serial output directly in the kernel.
-    The direct-serial path was a temporary measure for early boot init output.
-  - `sys_open_handler` (4), `sys_close_handler` (5), and `sys_exit_handler` (0)
-    also need VFS routing: open/close go to VFS, exit needs PM coordination.
+- [x] **12.27 — Route VFS syscalls from kernel to VFS server** (`kernel/src/syscall.rs`)
+  **Depends on:** VFS server message loop (12.26), IPC syscall handlers
+  Added `vfs_ipc_call()` helper and replaced all 8 ENOSYS stubs:
+  1. **`vfs_ipc_call()`** — builds a 64-byte VFS IPC message with destination
+     = VFS_PROC_NR (1), call number (VFS_MKDIR=0x109 etc.), and up to 3 i32
+     arguments. Sends via `do_sync_ipc(caller, &msg, SENDREC)` and reads reply.
+  2. **8 VFS syscall handlers** updated:
+     - `mkdir` (40) → VFS_MKDIR (0x109)
+     - `unlink` (41) → VFS_UNLINK (0x107)
+     - `rmdir` (42) → VFS_RMDIR (0x112)
+     - `link` (43) → VFS_LINK (0x106)
+     - `chmod` (44) → VFS_CHMOD (0x10B)
+     - `chown` (45) → VFS_CHOWN (0x10C)
+     - `mknod` (56) → VFS_MKNOD (0x10A) — syscall moved from 46→56
+     - `getdents` (57) → VFS_GETDENTS (0x11D) — syscall moved from 47→57
+  3. **IPC syscall handlers** added for 46-49:
+     - 46=SEND: calls `do_sync_ipc(caller, msg, SEND)`
+     - 47=RECEIVE: calls `do_sync_ipc(caller, msg, RECEIVE)`
+     - 48=SENDREC: calls `do_sync_ipc(caller, msg, SENDREC)`
+     - 49=NOTIFY: calls `do_sync_ipc(caller, msg, NOTIFY)`
+  
+  **Syscall number cleanup:** Moved NR_MKNOD 46→56 and NR_GETDENTS 47→57
+  in minix-rt to avoid collision with IPC syscalls (46-49). Updated
+  hardcoded references in userland (ls, rm_recursive).
+
+- [x] **12.27a — Add VM_EXEC_NEWMEM handler** (`servers/src/vm/mod.rs`)
+  Registered `do_exec_newmem` for VM_EXEC_NEWMEM (VM_RQ_BASE+3). Allocates
+  a fresh page table via `proc::pt_new(ep)` — creates PML4 with kernel
+  high mappings but no user mappings. Returns OK on success, EAGAIN on
+  allocation failure.
+
+- [x] **12.27b — Wire VFS_OPEN and VFS_READ** (`servers/src/vfs/call.rs`)
+  `do_open` now validates path, resolves via FS request layer (`req_lookup`).
+  `do_read` now calls `req_read()` on the filp's vnode FS endpoint and
+  updates `filp_pos`. Both return ENOSYS until a filesystem is mounted.
+
+- [x] **12.27c — Add kernel SYS_EXEC finalization** (`kernel/src/system.rs`)
+  Added `do_exec_finish_handler` at call 60. Takes target endpoint, new CR3,
+  entry point, and user stack pointer. Updates `p_seg.p_cr3` and sets trap
+  frame (RCX=RIP, R11=RFLAGS, RSP=stack). PM calls this via sendrec to
+  SYSTEM (-2) to finalize an exec.
 
 ## Phase 13: Rust `std` for Minix
 
@@ -3656,7 +3680,9 @@ userspace crate
     - `read(fd, buf)`, `open(path, flags)`, `close(fd)` — basic file I/O
     - `mkdir(path, mode)`, `unlink(path)`, `rmdir(path)`, `link(old, new)`,
       `chmod(path, mode)`, `chown(path, owner, group)`, `mknod(path, mode, dev)`
-      — VFS syscall wrappers (40-46), return ENOSYS until VFS dispatch wired
+      — VFS syscall wrappers (40-45, 56), route through VFS IPC
+    - `SEND_CALL(46)`, `RECEIVE_CALL(47)`, `SENDREC_CALL(48)`, `NOTIFY_CALL(49)`
+      — IPC syscall numbers exported for kernel-side routing
     - `_start` entry: reads argc/argv from stack per SysV ABI, calls `main`, exits
     - `panic_handler`: formats message via core::fmt::Write into stack buffer,
       writes to stderr via `write(2, ...)`, exits with -1

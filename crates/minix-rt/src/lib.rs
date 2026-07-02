@@ -53,9 +53,17 @@ const NR_CHMOD: u64 = 44;
 /// Change file owner.
 const NR_CHOWN: u64 = 45;
 /// Create a device node.
-const NR_MKNOD: u64 = 46;
+const NR_MKNOD: u64 = 56;
 /// Get directory entries.
-const NR_GETDENTS: u64 = 47;
+const NR_GETDENTS: u64 = 57;
+/// IPC send.
+pub const SEND_CALL: u64 = 46;
+/// IPC receive.
+pub const RECEIVE_CALL: u64 = 47;
+/// IPC sendrec.
+pub const SENDREC_CALL: u64 = 48;
+/// IPC notify.
+pub const NOTIFY_CALL: u64 = 49;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Syscall wrappers

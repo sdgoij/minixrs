@@ -72,27 +72,28 @@ fn current_fp() -> Option<&'static mut Fproc> {
 ///
 /// C source: `minix/servers/vfs/open.c` — `do_open()` (line 39)
 pub fn do_open() -> i32 {
-    // Parse the path from the message.
-    let glob = unsafe { &*vfs_global() };
-    let fp = match unsafe { glob.fp.as_mut() } {
+    let fp = match current_fp() {
         Some(fp) => fp,
         None => return EINVAL,
     };
+    let glob = unsafe { &*vfs_global() };
 
     // Message layout: flags (offset 8), path_addr (offset 16), path_len (offset 24)
     let flags = r_i32(&glob.fs_m_in, 8) as u32;
     let path_addr = r_u64(&glob.fs_m_in, 16);
     let path_len = r_u32(&glob.fs_m_in, 24) as usize;
 
-    // Check O_CREAT is not set.
+    // Reject O_CREAT (use do_creat instead).
     if flags & (1 << 12) != 0 {
-        // O_CREAT
         return EINVAL;
     }
 
     // Copy path from userspace.
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
+    if path_addr == 0 || copy_len == 0 {
+        return ENOENT;
+    }
     unsafe {
         let r = kernel::vm::virtual_copy(
             kernel::table::endpoint_slot(fp.fp_endpoint),
@@ -102,68 +103,32 @@ pub fn do_open() -> i32 {
             copy_len,
         );
         if r != 0 {
-            return EBADF;
+            return ENOENT;
         }
     }
     let actual_len = path_buf[..copy_len]
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    if actual_len == 0 {
+        return ENOENT;
+    }
 
-    // Parse access mode bits.
-    let accmode = flags & 0o3;
-    let _bits = match accmode {
-        0 => 1, // O_RDONLY -> R_BIT
-        1 => 2, // O_WRONLY -> W_BIT
-        2 => 3, // O_RDWR -> R_BIT|W_BIT
-        _ => return EINVAL,
-    };
-
-    // Get a free fd and filp slot.
+    // Get a free fd slot.
     let mut fd = 0i32;
     let r = unsafe { filedes::get_fd(fp, 0, &mut fd) };
     if r != OK {
         return r;
     }
 
-    // Resolve the path.
+    // Resolve the path via the FS request layer (req_lookup inside eat_path).
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
     let vp = unsafe { path::eat_path(&resolve, fp) };
     if vp.is_null() {
-        // Clear the fd slot.
         fp.fp_filp[fd as usize] = -1;
         return ENOENT;
-    }
-
-    // Check file type.
-    let mode = unsafe { (*vp).v_mode };
-    match mode & 0o170000 {
-        // S_IFMT
-        0o100000 => { // S_IFREG - regular file
-            // Would check write permission if O_TRUNC.
-        }
-        0o040000 => {
-            // S_IFDIR
-            // Directories may be read but not written.
-            if accmode == 1 {
-                unsafe { mount::put_vnode(vp) };
-                fp.fp_filp[fd as usize] = -1;
-                return EISDIR;
-            }
-        }
-        0o020000 => { // S_IFCHR
-            // Character device — would call cdev_open.
-        }
-        0o060000 => { // S_IFBLK
-            // Block device — would call bdev_open.
-        }
-        _ => {
-            unsafe { mount::put_vnode(vp) };
-            fp.fp_filp[fd as usize] = -1;
-            return ENXIO;
-        }
     }
 
     // Allocate a filp entry.
@@ -174,6 +139,18 @@ pub fn do_open() -> i32 {
         return filp_idx;
     }
 
+    // Compute access mode bits for the filp.
+    let mode_bits = match flags & 0o3 {
+        0 => 1, // O_RDONLY -> R_BIT
+        1 => 2, // O_WRONLY -> W_BIT
+        2 => 3, // O_RDWR -> R_BIT|W_BIT
+        _ => {
+            unsafe { mount::put_vnode(vp) };
+            fp.fp_filp[fd as usize] = -1;
+            return EINVAL;
+        }
+    };
+
     // Set up the filp and fd.
     unsafe {
         let glob = vfs_global();
@@ -181,6 +158,7 @@ pub fn do_open() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_count = 1;
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
         (*filp_arr.add(filp_idx as usize)).filp_flags = flags;
+        (*filp_arr.add(filp_idx as usize)).filp_mode = mode_bits;
     }
 
     // Release the vnode reference (the filp now holds it).
@@ -321,7 +299,7 @@ pub fn do_read() -> i32 {
 
     unsafe {
         let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
-        let filp = &*filp_arr.add(filp_idx as usize);
+        let filp = &mut *filp_arr.add(filp_idx as usize);
         if (filp.filp_mode & 1) == 0 {
             return EBADF;
         }
@@ -329,8 +307,8 @@ pub fn do_read() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        // For regular files, call req_read.
-        let (r, _new_pos) = crate::vfs::request::req_read(
+        // Call the FS request layer to perform the read.
+        let (r, new_pos) = crate::vfs::request::req_read(
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
             core::ptr::null_mut(),
@@ -339,6 +317,9 @@ pub fn do_read() -> i32 {
             0,
             0,
         );
+        if r >= 0 {
+            filp.filp_pos = new_pos;
+        }
         r
     }
 }

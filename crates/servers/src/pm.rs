@@ -794,10 +794,33 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
 /// # Safety
 ///
 /// The caller must ensure exclusive access to the process table.
-pub unsafe fn do_kill(pid: i32, signo: i32) -> Result<(), i32> {
+pub unsafe fn do_kill(caller_slot: usize, pid: i32, signo: i32) -> Result<(), i32> {
     if signo < 0 || signo >= _NSIG as i32 {
         return Err(EINVAL);
     }
+
+    // Permission check: only root (uid == 0) or the target process
+    // owner may send a signal.
+    let base = MPROC.as_ptr();
+    let caller = unsafe { &*base.add(caller_slot) };
+    let caller_uid = caller.mp_effuid;
+
+    if caller_uid != 0 {
+        // Non-root: find the target's UID and compare.
+        // The target is specified by PID, not slot, so we scan.
+        let mut target_uid = -1i32;
+        for i in 0..NR_PROCS {
+            let rmp = unsafe { &*base.add(i) };
+            if rmp.mp_flags & IN_USE != 0 && rmp.mp_pid == pid {
+                target_uid = rmp.mp_effuid;
+                break;
+            }
+        }
+        if caller_uid != target_uid {
+            return Err(-1); // EPERM
+        }
+    }
+
     // Safety: caller guarantees exclusive access to the process table.
     unsafe { check_sig(pid, signo, false) }
 }
@@ -913,16 +936,362 @@ pub unsafe fn pm_isokendpt(endpoint: i32) -> Option<usize> {
     Some(proc_nr)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dispatch table + main loop (stub)
-// ─────────────────────────────────────────────────────────────────────────────
+// Dispatch table + main loop
 
-/// PM server main loop.
+use arch_common::ipc::Message;
+
+/// PM call numbers (from `.refs/minix-3.3.0/minix/include/minix/callnr.h`).
+pub const PM_BASE: i32 = 0x000;
+pub const NR_PM_CALLS: usize = 48;
+
+pub const PM_EXIT: i32 = PM_BASE + 1;
+pub const PM_FORK: i32 = PM_BASE + 2;
+pub const PM_WAITPID: i32 = PM_BASE + 3;
+pub const PM_GETPID: i32 = PM_BASE + 4;
+pub const PM_SETUID: i32 = PM_BASE + 5;
+pub const PM_GETUID: i32 = PM_BASE + 6;
+pub const PM_KILL: i32 = PM_BASE + 11;
+pub const PM_EXEC: i32 = PM_BASE + 14;
+pub const PM_SETSID: i32 = PM_BASE + 15;
+pub const PM_GETPGRP: i32 = PM_BASE + 16;
+pub const PM_SYSUNAME: i32 = PM_BASE + 25;
+pub const PM_GETTIMEOFDAY: i32 = PM_BASE + 28;
+pub const PM_EXEC_NEW: i32 = PM_BASE + 43;
+
+/// OK / error constants matching MINIX conventions.
+pub const OK: i32 = 0;
+pub const EDONTREPLY: i32 = -201;
+
+// M1 field indexes — unused but document the layout for reference
+#[allow(dead_code)]
+const M1_I1: usize = 0;
+#[allow(dead_code)]
+const M1_I2: usize = 1;
+#[allow(dead_code)]
+const M1_I3: usize = 2;
+#[allow(dead_code)]
+const M1_I4: usize = 3;
+
+/// Type of a PM handler function.
+#[allow(dead_code)]
+type PmHandler = unsafe fn(caller_slot: usize, msg: &mut Message) -> i32;
+
+/// Default stub for unimplemented PM calls.
 ///
-/// Receives messages and dispatches PM requests.
-/// Currently a stub — will be wired when the SEF/server framework is running.
+/// # Safety
+///
+/// `_caller_slot` must be a valid process slot. `_msg` must point to a
+/// valid message buffer.
+pub unsafe fn no_sys(_caller_slot: usize, _msg: &mut Message) -> i32 {
+    ENOSYS
+}
+
+/// Handler for PM_EXIT — terminate the current process.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
+    let status = unsafe { msg.m_payload.m1.m1i1 };
+    unsafe { do_exit(caller_slot, status) };
+    EDONTREPLY
+}
+
+/// Handler for PM_FORK — create a child process.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
+    let result = unsafe { do_fork(caller_slot) };
+    match result {
+        Ok(child_slot) => {
+            let base = MPROC.as_ptr();
+            let child = unsafe { &*base.add(child_slot) };
+            unsafe {
+                msg.m_payload.m1.m1i1 = child.mp_pid;
+                msg.m_payload.m1.m1i2 = child.mp_endpoint;
+            }
+            OK
+        }
+        Err(_) => -11,
+    }
+}
+
+/// Handler for PM_WAITPID — wait for a child to exit.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let wpid = unsafe { msg.m_payload.m1.m1i1 };
+    match unsafe { do_waitpid(caller_slot, wpid) } {
+        Ok((pid, status)) => {
+            unsafe {
+                msg.m_payload.m1.m1i1 = pid;
+                msg.m_payload.m1.m1i2 = status;
+            }
+            OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_GETPID — return pid via m1i1, ppid via m1i2.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_getpid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    let ppid = if (rmp.mp_parent as usize) < NR_PROCS {
+        let parent = unsafe { &*base.add(rmp.mp_parent as usize) };
+        parent.mp_pid
+    } else {
+        0
+    };
+    unsafe {
+        msg.m_payload.m1.m1i1 = rmp.mp_pid;
+        msg.m_payload.m1.m1i2 = ppid;
+    }
+    OK
+}
+
+/// Handler for PM_SETUID — set user/group IDs.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_setuid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let uid = unsafe { msg.m_payload.m1.m1i1 };
+    let gid = unsafe { msg.m_payload.m1.m1i2 };
+    match unsafe { do_set(caller_slot, 0, uid, gid) } {
+        Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_GETUID — return real/effective UID and GID.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_getuid(caller_slot: usize, msg: &mut Message) -> i32 {
+    match unsafe { do_get(caller_slot, 0) } {
+        Ok(val) => {
+            let euid = (val & 0xFFFF_FFFF) as i32;
+            let ruid = (val >> 32) as i32;
+            unsafe {
+                msg.m_payload.m1.m1i1 = ruid;
+                msg.m_payload.m1.m1i2 = euid;
+            }
+            OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_KILL — send a signal to a process.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_kill(caller_slot: usize, msg: &mut Message) -> i32 {
+    let signo = unsafe { msg.m_payload.m1.m1i1 };
+    let target_pid = unsafe { msg.m_payload.m1.m1i2 };
+    match unsafe { do_kill(caller_slot, target_pid, signo) } {
+        Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_SETSID — create a new session.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `_msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_setsid(caller_slot: usize, _msg: &mut Message) -> i32 {
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+    if rmp.mp_procgrp == rmp.mp_pid {
+        return -1;
+    }
+    rmp.mp_procgrp = rmp.mp_pid;
+    OK
+}
+
+/// Handler for PM_GETPGRP — return process group.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_getpgrp(caller_slot: usize, msg: &mut Message) -> i32 {
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    unsafe {
+        msg.m_payload.m1.m1i1 = rmp.mp_procgrp;
+    }
+    OK
+}
+
+/// The PM dispatch table.
+/// Maps each PM call number to its handler function.
+pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
+    let call_nr = msg.m_type;
+    let idx = (call_nr - PM_BASE) as usize;
+    match idx {
+        1 => unsafe { handle_exit(caller_slot, msg) },
+        2 => unsafe { handle_fork(caller_slot, msg) },
+        3 => unsafe { handle_waitpid(caller_slot, msg) },
+        4 => unsafe { handle_getpid(caller_slot, msg) },
+        5 => unsafe { handle_setuid(caller_slot, msg) },
+        6 => unsafe { handle_getuid(caller_slot, msg) },
+        11 => unsafe { handle_kill(caller_slot, msg) },
+        14 => unsafe { do_exec(caller_slot, msg) },
+        15 => unsafe { handle_setsid(caller_slot, msg) },
+        16 => unsafe { handle_getpgrp(caller_slot, msg) },
+        43 => unsafe { do_exec(caller_slot, msg) }, // PM_EXEC_NEW
+        _ => ENOSYS,
+    }
+}
+
+/// PM server main loop entry point.
+///
+/// Called once from the PM server process. Receives messages via kernel
+/// IPC syscalls, dispatches to the appropriate handler, and sends replies.
+/// On host builds (testing), this is a no-op — the dispatch logic is
+/// exercised through unit tests instead.
 pub fn pm_server_main() {
-    // TODO: Phase 12 — receive messages and dispatch PM requests
+    #[cfg(target_os = "none")]
+    {
+        // Syscall numbers for IPC (from minix-std):
+        //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
+        //   SENDREC_CALL = 48: sendrec(dest, &mut msg) → replier endpoint
+        const RECEIVE_CALL: u64 = 47;
+        const SENDREC_CALL: u64 = 48;
+        const ANY: i32 = 0x0000ffff;
+
+        loop {
+            let mut msg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+
+            // Receive a message from any sender.
+            // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
+            let src = unsafe {
+                minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
+            };
+            if src < 0 {
+                continue;
+            }
+            let src_ep = src as i32;
+
+            // Resolve the sender's process slot.
+            let slot = match unsafe { pm_isokendpt(src_ep) } {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Dispatch the call.
+            let status = unsafe { pm_dispatch(slot, &mut msg) };
+
+            // Send the reply if the handler didn't return EDONTREPLY.
+            if status != EDONTREPLY {
+                msg.m_type = status;
+                unsafe {
+                    minix_rt::syscall2(
+                        SENDREC_CALL,
+                        src_ep as u64,
+                        &mut msg as *mut Message as u64,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // No-op on host builds — dispatch is tested directly
+    }
+}
+
+/// Execute a new binary in the current process.
+///
+/// Handles PM_EXEC_NEW (call 43). The caller (libc) sends the exec
+/// data (path + argv + envp) through a grant. The PM server:
+/// 1. Reads the exec data from the grant
+/// 2. Opens the binary via VFS
+/// 3. Reads the ELF header
+/// 4. Coordinates with VM for address space setup
+/// 5. Loads segments, sets up stack
+/// 6. Finalizes the new process state
+///
+/// # Safety
+///
+/// Must be called from a valid PM dispatch context with the process
+/// table lock held.
+pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
+    // PM_EXEC_NEW message format (from callnr.h / mproc.h):
+    //   m1_i1  (payload.m1.m1i1): exec_endpt (set by kernel)
+    //   m1_i2  (payload.m1.m1i2): grant_id
+    //   m1_i3  (payload.m1.m1i3): grant_size
+    //
+    // The grant points to exec data in the caller's address space:
+    //   [path\0][argv[0]\0][argv[1]\0]...[argv[n]\0][envp[0]\0]...
+    //   The first null-terminated string is the executable path.
+
+    let _exec_endpt = unsafe { msg.m_payload.m1.m1i1 };
+    let grant_id = unsafe { msg.m_payload.m1.m1i2 };
+    let _grant_size = unsafe { msg.m_payload.m1.m1i3 };
+
+    let _ = grant_id;
+
+    // Step 1: Validate the caller slot.
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+
+    // Step 2: Open the binary file via VFS.
+    // VFS_OPEN(path, O_RDONLY) → fd.
+    // For now, VFS isn't wired, so return ENOSYS.
+    //
+    // Once VFS IPC is available:
+    //   1. Copy the path from the grant (sys_safecopyfrom)
+    //   2. Build VFS_OPEN message with path
+    //   3. sendrec(VFS_PROC_NR, &msg)
+    //   4. If fd < 0, return error
+    //
+    // Step 3: Read ELF header (VFS_READ).
+    // Step 4: Send VM_EXEC_NEWMEM to create address space.
+    // Step 5: Load segments via VFS_READ + VM operations.
+    // Step 6: Set up user stack.
+    // Step 7: Finalize via kernel SYS_EXEC call.
+
+    ENOSYS
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -10,12 +10,12 @@ pub mod mem;
 pub mod proc;
 
 use arch_common::com::{
-    NR_VM_CALLS, RS_INIT, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXIT, VM_FORK,
-    VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP, VM_MUNMAP,
-    VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE,
-    VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP, VM_UNMAP_PHYS,
-    VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMCTL_CLEAR_PAGEFAULT, VMIW_REGION,
-    VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
+    NR_VM_CALLS, RS_INIT, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT,
+    VM_FORK, VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP,
+    VM_MUNMAP, VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO,
+    VM_RQ_BASE, VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP,
+    VM_UNMAP_PHYS, VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMCTL_CLEAR_PAGEFAULT,
+    VMIW_REGION, VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
 };
 use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
@@ -33,6 +33,9 @@ const ENOSYS: i32 = -72;
 
 /// Invalid argument (EINVAL).
 const EINVAL: i32 = -5;
+
+/// Resource temporarily unavailable (EAGAIN).
+const EAGAIN: i32 = -11;
 
 /// Process flags
 #[allow(dead_code)]
@@ -124,6 +127,7 @@ pub fn init_vm() {
     set_call(VM_WILLEXIT, do_willexit, "do_willexit");
     set_call(VM_NOTIFY_SIG, do_notify_sig, "do_notify_sig");
     set_call(VM_PROCCTL, do_procctl_notrans, "do_procctl");
+    set_call(VM_EXEC_NEWMEM, do_exec_newmem, "do_exec_newmem");
 
     // ── VFS (Virtual File System) ──
     set_call(VM_VFS_REPLY, do_vfs_reply, "do_vfs_reply");
@@ -708,6 +712,26 @@ fn do_fork(msg: &mut Message) -> i32 {
     OK
 }
 
+/// Handle VM_EXEC_NEWMEM — create a new address space for exec.
+///
+/// Allocates a fresh page table for the caller (PM server endpoint).
+/// The PM server will later map segments into the new address space.
+fn do_exec_newmem(msg: &mut Message) -> i32 {
+    let ep = msg.m_source;
+    if ep < 0 || ep >= NR_PROCS as i32 {
+        return EINVAL;
+    }
+
+    unsafe {
+        if proc::pt_new(ep) != 0 {
+            // Allocation of the new page table failed
+            return EAGAIN;
+        }
+    }
+
+    OK
+}
+
 fn do_brk(msg: &mut Message) -> i32 {
     // The new heap break address comes in m1i1.
     let new_brk = unsafe { msg.m_payload.m1.m1i1 } as u64;
@@ -1057,11 +1081,8 @@ mod tests {
         init_vm();
         unsafe {
             // Slots that are not in the official call list should remain None
-            // VM_WILLEXIT is at index 5; check an empty slot like index 4 (VM_EXEC_NEWMEM)
-            assert!(
-                VM_CALLS[4].func.is_none(),
-                "slot 4 (VM_EXEC_NEWMEM) should not be set"
-            );
+            // VM_WILLEXIT is at index 5; check an empty slot like index 4 (VM_RQ_BASE + 4)
+            assert!(VM_CALLS[4].func.is_none(), "slot 4 should not be set");
         }
     }
 
@@ -1337,10 +1358,10 @@ mod tests {
     #[test]
     fn test_dispatch_unset_table_slot_returns_enosys() {
         init_vm();
-        // VM_EXEC_NEWMEM = VM_RQ_BASE + 3 is in range but not set
+        // VM_RQ_BASE + 4 is in range but not set
         let mut msg = Message {
             m_source: 0,
-            m_type: (VM_RQ_BASE + 3) as i32,
+            m_type: (VM_RQ_BASE + 4) as i32,
             m_payload: unsafe { core::mem::zeroed() },
         };
         let r = dispatch_message(&mut msg, 0);
