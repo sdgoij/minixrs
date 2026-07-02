@@ -4525,6 +4525,7 @@ Remaining Priority 2 commands (not yet ported):
 | M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ✅ |
 | M1c | **Multi-process scheduling with context switch** | **Phase 8 + 14.B** | ✅ |
 | M2 | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
+| M2-IO | **Interrupt-driven serial input** | **Phase 11 + 14.B** | ✅ |
 
 ### M1b Tasks — First Userspace Process
 
@@ -4799,6 +4800,7 @@ just run-img
 | M3 | Process fork + exec works (x86_64) | Phase 5 | ❌ |
 | M1c | **Multi-process context switch + scheduler** | **Phase 8 + 14.B** | ✅ |
 | **M2** | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
+| **M2-IO** | **Interrupt-driven serial input for shell** | **Phase 11 + 14.B** | ✅ |
 | M7b | **System boots to full shell prompt on serial** | **Phase 14.B** | 🔄 |
 | M4 | MFS filesystem serves files (x86_64) | Phase 9 | ❌ |
 | M5 | VFS server routes requests (x86_64) | Phase 10 | ❌ |

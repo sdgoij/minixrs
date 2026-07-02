@@ -112,11 +112,17 @@ pub unsafe fn dispatch_basic_syscall(
 /// SYS_read (2) — read from file descriptor.
 unsafe fn sys_read_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
-    let _buf = args[1] as *mut u8;
-    let _count = args[2] as usize;
+    let buf = args[1] as *mut u8;
+    let count = args[2] as usize;
     if fd == 0 {
-        // stdin → serial input (stub: return 0 = EOF)
-        0
+        // stdin → serial input (interrupt-driven via ser_input).
+        if buf.is_null() || count == 0 {
+            return -14; // EFAULT
+        }
+        // Read one byte (blocking).
+        let byte = crate::ser_input::read_blocking();
+        unsafe { core::ptr::write(buf, byte) };
+        1
     } else {
         -9 // EBADF
     }

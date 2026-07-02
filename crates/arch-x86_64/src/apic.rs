@@ -881,6 +881,128 @@ pub unsafe extern "C" fn timer_isr_entry() {
     )
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// Serial (COM1) interrupt handler
+// ═════════════════════════════════════════════════════════════════════
+
+/// Function pointer type for the serial interrupt handler.
+pub type SerialIsrFn = unsafe extern "C" fn();
+
+/// Registered serial ISR handler. Called by the assembly trampoline.
+static mut SERIAL_ISR_HANDLER: Option<SerialIsrFn> = None;
+
+/// Register the function to call on each serial port interrupt.
+///
+/// # Safety
+///
+/// Must be called before enabling serial interrupts.
+pub unsafe fn set_serial_isr_handler(handler: SerialIsrFn) {
+    unsafe {
+        SERIAL_ISR_HANDLER = Some(handler);
+    }
+}
+
+/// Assembly entry point for COM1 serial interrupt (IRQ 4 → vector 0x24).
+///
+/// 1. Calls the registered `SERIAL_ISR_HANDLER`
+/// 2. Sends EOI to the master PIC (port 0x20)
+/// 3. Returns via iretq
+///
+/// # Safety
+///
+/// Must be installed in the IDT at vector 0x24 with DPL 0.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn serial_isr_entry() {
+    core::arch::naked_asm!(
+        // Save caller-saved registers.
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rdi",
+        "push rsi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+
+        // Call the registered C handler.
+        "lea rax, [rip + {handler}]",
+        "mov rax, [rax]",
+        "test rax, rax",
+        "jz 2f",
+        "call rax",
+        "2:",
+
+        // Send EOI to master PIC (IRQ 0-7).
+        "mov al, 0x20",
+        "out 0x20, al",
+
+        // Restore caller-saved registers.
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rsi",
+        "pop rdi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+
+        // Return from interrupt.
+        "iretq",
+        handler = sym SERIAL_ISR_HANDLER,
+    )
+}
+
+/// Configure COM1 for interrupt-driven receive.
+/// Sets IER bit 0 (received data available interrupt) and enables
+/// the modem control register's OUT2 bit (needed for interrupt delivery
+/// on some hardware).
+///
+/// # Safety
+///
+/// Must be called in ring 0 after `init_serial()` has configured the
+/// port for 115200 8N1.
+pub unsafe fn enable_com1_interrupts() {
+    use crate::asm;
+    const COM1: u16 = 0x3F8;
+    unsafe {
+        // Enable receiver interrupt: set IER bit 0.
+        let ier = asm::inb(COM1 + 1);
+        asm::outb(COM1 + 1, ier | 0x01);
+        // Ensure OUT2 is set in MCR (required for interrupt delivery).
+        let mcr = asm::inb(COM1 + 4);
+        asm::outb(COM1 + 4, mcr | 0x08);
+    }
+}
+
+/// Unmask IRQ 4 (COM1) at the PIC master.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn unmask_serial_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
+        asm::outb(crate::interrupt::PIC_MASTER_DATA, mask & !0x10);
+    }
+}
+
+/// Mask IRQ 4 (COM1) at the PIC master.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn mask_serial_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
+        asm::outb(crate::interrupt::PIC_MASTER_DATA, mask | 0x10);
+    }
+}
+
 /// Unmask IRQ 0 at the PIC master.
 ///
 /// # Safety

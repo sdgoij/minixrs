@@ -105,6 +105,49 @@ pub extern "C" fn kmain() -> ! {
 
         // 5. Unmask the timer IRQ on the master PIC.
         arch_x86_64::apic::unmask_timer_irq();
+
+        // 6. Configure COM1 for interrupt-driven input.
+        // C callback called on every serial interrupt.
+        unsafe extern "C" fn serial_callback() {
+            const COM1_DATA: u16 = 0x3F8;
+            unsafe {
+                // Read all available bytes from the serial port.
+                loop {
+                    let lsr: u8;
+                    core::arch::asm!(
+                        "in al, dx",
+                        out("al") lsr,
+                        in("dx") COM1_DATA + 5,
+                        options(nomem, nostack)
+                    );
+                    if lsr & 0x01 == 0 {
+                        break; // no data ready
+                    }
+                    let byte: u8;
+                    core::arch::asm!(
+                        "in al, dx",
+                        out("al") byte,
+                        in("dx") COM1_DATA,
+                        options(nomem, nostack)
+                    );
+                    kernel::ser_input::push_byte(byte);
+                }
+            }
+        }
+        arch_x86_64::apic::set_serial_isr_handler(serial_callback);
+
+        // 7. Install the serial ISR in the IDT (IRQ 4 → vector 0x24).
+        let serial_handler_addr = arch_x86_64::apic::serial_isr_entry as *const () as u64;
+        (*arch_x86_64::idt::IDT.get()).set_handler(
+            arch_x86_64::interrupt::irq_vector(4) as usize,
+            serial_handler_addr,
+            0, // IST
+            0, // DPL (kernel only)
+        );
+
+        // 8. Enable COM1 receive interrupts and unmask IRQ 4.
+        arch_x86_64::apic::enable_com1_interrupts();
+        arch_x86_64::apic::unmask_serial_irq();
     }
 
     // ── Integration tests or normal boot ────────────────────────────────

@@ -16,6 +16,7 @@ pub mod r#priv;
 pub mod proc;
 pub mod profile;
 pub mod sched;
+pub mod ser_input;
 pub mod smp;
 pub mod syscall;
 pub mod system;
@@ -25,7 +26,10 @@ pub mod vm;
 // Include the generated initramfs data when embed_initramfs is active.
 // CARGO_MANIFEST_DIR = crates/kernel/, ../../target/ = target/
 #[cfg(feature = "embed_initramfs")]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/initramfs_data.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/initramfs_data.rs"
+));
 
 #[cfg(feature = "qemu-tests")]
 pub mod tests;
