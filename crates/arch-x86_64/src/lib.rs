@@ -70,6 +70,92 @@ pub fn init() {
     }
 }
 
+/// Boot-time kernel stack for ring-3→ring-0 transitions (RSP0).
+#[cfg(target_os = "none")]
+static mut BOOT_KSTACK: [u8; 4096] = [0u8; 4096];
+/// IST1 stack for page fault handler.
+#[cfg(target_os = "none")]
+static mut BOOT_IST1_STACK: [u8; 4096] = [0u8; 4096];
+/// IST2 stack for double fault handler.
+#[cfg(target_os = "none")]
+static mut BOOT_IST2_STACK: [u8; 4096] = [0u8; 4096];
+/// Boot TSS.
+#[cfg(target_os = "none")]
+static mut BOOT_TSS: crate::tss::Tss64 = crate::tss::Tss64::new_zeroed();
+/// Boot GDT (16 entries).
+#[cfg(target_os = "none")]
+static mut BOOT_GDT: [u64; segments::NGDT as usize] = [
+    0x0000000000000000,
+    0x00AF9A0000000000,
+    0x00CF920000000000,
+    0x00CFF2000000FFFF,
+    0x00AFFA000000FFFF,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
+
+/// Set up the TSS and GDT required for ring-3 interrupts.
+///
+/// Must be called once during boot, on the BSP, before entering user mode.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+#[cfg(target_os = "none")]
+pub unsafe fn init_tss_for_boot() {
+    use core::ptr;
+    use segments::GTSS_SEL;
+
+    // Wrap all unsafe operations in a single block for Rust 2024 compatibility.
+    unsafe {
+        let stack_top = ptr::addr_of_mut!(BOOT_KSTACK) as *mut u8 as u64 + 4096;
+        let ist1_top = ptr::addr_of_mut!(BOOT_IST1_STACK) as *mut u8 as u64 + 4096;
+        let ist2_top = ptr::addr_of_mut!(BOOT_IST2_STACK) as *mut u8 as u64 + 4096;
+
+        let tss_bytes = ptr::addr_of_mut!(BOOT_TSS) as *mut u8;
+        ptr::write_unaligned(tss_bytes.add(4) as *mut u32, stack_top as u32);
+        ptr::write_unaligned(tss_bytes.add(8) as *mut u32, (stack_top >> 32) as u32);
+        ptr::write_unaligned(tss_bytes.add(36) as *mut u32, ist1_top as u32);
+        ptr::write_unaligned(tss_bytes.add(40) as *mut u32, (ist1_top >> 32) as u32);
+        ptr::write_unaligned(tss_bytes.add(44) as *mut u32, ist2_top as u32);
+        ptr::write_unaligned(tss_bytes.add(48) as *mut u32, (ist2_top >> 32) as u32);
+
+        let gdt = ptr::addr_of_mut!(BOOT_GDT) as *mut u8;
+        let tss_addr = tss_bytes as u64;
+        let tss_limit = 103u32;
+        let tss_desc = gdt.add(GTSS_SEL as usize * 8);
+        let low: u64 = (tss_limit as u64 & 0xFFFF)
+            | ((tss_addr & 0xFFFF) << 16)
+            | (((tss_addr >> 16) & 0xFF) << 32)
+            | (0x89u64 << 40)
+            | ((((tss_limit >> 16) as u64) & 0x0F) << 48)
+            | (((tss_addr >> 24) & 0xFF) << 56);
+        let high: u64 = (tss_addr >> 32) & 0xFFFFFFFF;
+        ptr::write_unaligned(tss_desc as *mut u64, low);
+        ptr::write_unaligned(tss_desc.add(8) as *mut u64, high);
+
+        // Load new GDT
+        let gdt_base = gdt as u64;
+        let gdt_limit = ((segments::NGDT as usize * 8) - 1) as u16;
+        let mut gdtr = [0u8; 10];
+        ptr::write_unaligned(gdtr.as_mut_ptr() as *mut u16, gdt_limit);
+        ptr::write_unaligned(gdtr.as_mut_ptr().add(2) as *mut u64, gdt_base);
+        crate::asm::lgdt(&gdtr);
+
+        // Load task register
+        crate::asm::ltr(GTSS_SEL << 3);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::*;

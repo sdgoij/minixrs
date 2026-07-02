@@ -428,6 +428,14 @@ pub unsafe fn proc_init() {
             (*priv_ptr).s_proc_nr = bi.proc_nr;
             (*priv_ptr).s_id = i as i16;
             (*priv_ptr).s_flags = PrivFlags::SYS_PROC;
+
+            // Link the privilege structure to the process.
+            // This enables notification delivery (mini_notify stores
+            // pending notifications in s_notify_pending via p_priv).
+            let rp = proc_addr(bi.proc_nr);
+            if !rp.is_null() {
+                (*rp).p_priv = priv_ptr;
+            }
         }
     }
 }

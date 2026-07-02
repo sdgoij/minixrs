@@ -68,7 +68,9 @@ pub extern "C" fn kmain() -> ! {
     serial_write("initializing allocator...\r\n");
     {
         let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-        mmap.add(0x0030_0000, 0x1000_0000);
+        // Start after the kernel image (~3MB kernel binary + BSS at 0x200000).
+        // The kernel binary extends to roughly 0x600000.
+        mmap.add(0x0060_0000, 0x1000_0000);
         mmap.cut(0x0FE0_0000, 0x0FF0_0000);
         arch_x86_64::alloc::init_allocator(&mmap);
     }
@@ -168,23 +170,6 @@ pub extern "C" fn kmain() -> ! {
             kernel::table::proc_init();
         }
 
-        // Initialize the VM page allocator (used by map_page and
-        // per-process ELF loading). Free memory from 0x300000
-        // (end of kernel image) to 0xFE00000 (start of user stack),
-        // and from 0xFF00000 (end of user stack) to 0x10000000.
-        #[cfg(target_os = "none")]
-        unsafe {
-            let m1 = kernel::vm::MemoryChunk {
-                base: 0x300000 / kernel::vm::VM_PAGE_SIZE as u64,
-                size: (0xFE00000 - 0x300000) / kernel::vm::VM_PAGE_SIZE as u64,
-            };
-            let m2 = kernel::vm::MemoryChunk {
-                base: 0xFF00000 / kernel::vm::VM_PAGE_SIZE as u64,
-                size: (0x10000000 - 0xFF00000) / kernel::vm::VM_PAGE_SIZE as u64,
-            };
-            kernel::vm::mem_init(&[m1, m2]);
-        }
-
         // Define all boot processes: (path, proc_nr, endpoint_name)
         let boot_procs: &[(&str, i32)] = &[
             ("/sbin/pm", PM_PROC_NR),
@@ -223,6 +208,17 @@ pub extern "C" fn kmain() -> ! {
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
             arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
             arch_x86_64::cpulocals::init_cpulocals();
+            // Set up TSS and GDT for ring-3 interrupts and exception handlers.
+            arch_x86_64::init_tss_for_boot();
+
+            // Install exception handlers: page fault, GPF, double fault.
+            // These use IST stacks for reliability.
+            let pf_entry = arch_x86_64::asm::exception_page_fault_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(14, pf_entry, 1, 0);
+            let gpf_entry = arch_x86_64::asm::exception_gpf_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(13, gpf_entry, 0, 0);
+            let df_entry = arch_x86_64::asm::exception_double_fault_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(8, df_entry, 2, 0);
         }
 
         // Create per-process (restricted) page tables and enqueue each process.
@@ -303,7 +299,25 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  scheduler starting...\r\n");
 
-        // Debug: write marker before restore
+        // Mask the timer IRQ and serial IRQ to prevent ring-3→ring-0 crashes
+        // (no TSS loaded — ltr causes a GPF in sysretq, see FUCK_YOU.md).
+        unsafe {
+            // Mask IRQ 0 (timer) and IRQ 4 (serial) on master PIC (port 0x21).
+            let mask: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") mask,
+                in("dx") 0x21u16,
+                options(nomem, nostack),
+            );
+            core::arch::asm!(
+                "out dx, al",
+                in("al") mask | 0x11u8,
+                in("dx") 0x21u16,
+                options(nomem, nostack),
+            );
+        }
+
         // Jump to the first process via restore().
         unsafe {
             arch_x86_64::asm::restore(first_proc as *const u8);
@@ -384,7 +398,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         // Save the current process's register state.
         save_proc_regs(rp, saved);
 
-        // Re-enqueue if still runnable.
+        // Re-enqueue if still runnable (moves to tail of run queue).
         if (*rp).is_runnable() {
             kernel::sched::enqueue(rp);
         }
@@ -399,8 +413,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         } else {
             // No runnable processes — all blocked on IPC.
             // Send a boot notification from RS to PM to kickstart
-            // the server boot chain. Uses RS (endpoint 2) rather
-            // than SYSTEM (-2) because PM rejects negative sources.
+            // the server boot chain.
             let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
             if !pm_proc.is_null() {
                 let _ = kernel::ipc::mini_notify(
@@ -412,7 +425,8 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                     arch_x86_64::asm::restore(next as *const u8);
                 }
             }
-            // Last resort: return normally (sysretq to same process).
+            // No runnable process available — sysretq back to the
+            // current process. It will retry its IPC call.
         }
     }
 }

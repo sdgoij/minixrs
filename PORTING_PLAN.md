@@ -4133,9 +4133,27 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
 test suite (Phase E) proves ring-3 transition works by running a synthetic test
 that jumps to ring-3 and writes the QEMU exit port.
 
-**Next step (M1c):** Implement `restore()` context switch and scheduler loop
-so all 8 boot processes (7 servers + init) get CPU time. Then wire PM server
-dispatch so init can fork/exec/waitpid to launch `/bin/sh`.
+**Milestone achieved ✅ — All 8 boot processes running in ring 3 with IPC.**
+
+All 8 boot processes (pm, vfs, rs, vm, ds, sched, tty, init) now run in
+ring 3 with per-process page tables. The `syscall` instruction delivers
+calls to the kernel handler, which dispatches IPC operations (send, receive,
+notify) and round-robin schedules between processes.
+
+**Fixes made:**
+- Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, causing
+  `sysretq` to GPF. Changed to `0xAB` (L=1, G=1).
+- Added `init_tss_for_boot()` — creates a 16-entry GDT with a TSS descriptor,
+  loads it via `lgdt`. The `ltr` call is currently disabled because it
+  causes a GPF in subsequent `sysretq` (root cause unknown).
+- Added exception handlers for page fault, GPF, and double fault.
+- Added `Tss64::new_zeroed()` for static initializers.
+- Temporarily masked timer/serial IRQs (workaround for missing TSS).
+
+**Next steps:**
+1. Fix the `ltr` issue so timer interrupts can fire without crashing.
+2. Wire PM server dispatch so init can fork/exec/waitpid.
+3. Get `sh` running with a `#` prompt.
 
 ---
 

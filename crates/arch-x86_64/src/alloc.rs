@@ -378,6 +378,10 @@ pub fn alloc_phys_page() -> Option<u64> {
     unsafe { (*global_allocator()).alloc_page() }
 }
 
+pub fn alloc_phys_contig(count: usize) -> Option<u64> {
+    unsafe { (*global_allocator()).alloc_contig(count) }
+}
+
 pub fn free_phys_page(addr: u64) {
     unsafe {
         (*global_allocator()).free_page(addr);

@@ -63,23 +63,11 @@ pub unsafe fn dispatch_basic_syscall(
     nr: usize,
     args: &[u64; 6],
 ) -> i64 {
-    // Phase 6.5.1: CR3 save/restore.
-    // Only do CR3 ops when BOOT_CR3 is non-zero (kernel has been
-    // initialized).  In test mode BOOT_CR3 stays 0 and CR3 instructions
-    // would crash because they are privileged.
-    let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
-    let saved_cr3 = if boot_cr3 != 0 && !caller.is_null() {
-        unsafe {
-            let cr3 = arch_x86_64::asm::read_cr3();
-            (*caller).p_cr3_saved = cr3;
-            arch_x86_64::asm::write_cr3(boot_cr3);
-            Some(cr3)
-        }
-    } else {
-        None
-    };
+    // Per-process page tables preserve the kernel identity map via PD
+    // deep-copy, so the kernel can access its own data AND user data
+    // without switching CR3. The old CR3 save/restore is disabled.
 
-    let result = unsafe {
+    unsafe {
         let table = syscall_table_ptr() as *const Option<BasicSyscallFn>;
         if nr < NR_BASIC_SYSCALLS {
             let entry = core::ptr::read(table.add(nr));
@@ -90,21 +78,7 @@ pub unsafe fn dispatch_basic_syscall(
         } else {
             -38
         }
-    };
-
-    // Restore per-process CR3 so the process resumes in its own address space.
-    // Handlers like SYS_EXEC_REPLACE may update p_seg.p_cr3, so we read
-    // the current value rather than using the one we saved before dispatch.
-    if saved_cr3.is_some() && !caller.is_null() {
-        unsafe {
-            let restore_cr3 = (*caller).p_seg.p_cr3;
-            if restore_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(restore_cr3);
-            }
-        }
     }
-
-    result
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────

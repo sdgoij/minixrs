@@ -65,6 +65,40 @@ impl fmt::Debug for Tss64 {
     }
 }
 
+impl Tss64 {
+    /// Create a zeroed-out TSS (const-compatible for static initializers).
+    #[must_use]
+    pub const fn new_zeroed() -> Self {
+        Self {
+            _reserved1: 0,
+            rsp0_lo: 0,
+            rsp0_hi: 0,
+            rsp1_lo: 0,
+            rsp1_hi: 0,
+            rsp2_lo: 0,
+            rsp2_hi: 0,
+            _reserved2: 0,
+            ist1_lo: 0,
+            ist1_hi: 0,
+            ist2_lo: 0,
+            ist2_hi: 0,
+            ist3_lo: 0,
+            ist3_hi: 0,
+            ist4_lo: 0,
+            ist4_hi: 0,
+            ist5_lo: 0,
+            ist5_hi: 0,
+            ist6_lo: 0,
+            ist6_hi: 0,
+            ist7_lo: 0,
+            ist7_hi: 0,
+            _reserved3: 0,
+            _reserved4: 0,
+            io_map_base: 104,
+        }
+    }
+}
+
 impl Default for Tss64 {
     fn default() -> Self {
         Self {

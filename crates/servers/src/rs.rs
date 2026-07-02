@@ -489,9 +489,59 @@ pub unsafe fn slot_endpoint(idx: usize) -> Option<i32> {
 /// RS server main loop.
 ///
 /// Receives messages from clients and dispatches RS requests.
-/// Currently a stub — will be wired when the SEF/server framework is running.
 pub fn rs_server_main() {
-    // TODO: Phase 12 — receive messages and dispatch RS requests
+    #[cfg(target_os = "none")]
+    {
+        // Initialize RS's process table.
+        unsafe {
+            rs_init();
+        }
+
+        // Register boot services so PM's notifications can reach us.
+        // For now, just register PM (endpoint 0) as a known service.
+        let boot_services: &[(i32, &[u8])] = &[
+            (0, b"pm"),
+            (1, b"vfs"),
+            (2, b"rs"),
+            (8, b"vm"),
+            (4, b"sched"),
+            (5, b"tty"),
+            (6, b"ds"),
+            (10, b"init"),
+        ];
+        for &(ep, label) in boot_services {
+            if let Some(slot) = unsafe { alloc_slot() } {
+                let _ = unsafe { init_slot(slot, ep, -1, label) };
+            }
+        }
+
+        // Syscall numbers for IPC.
+        const RECEIVE_CALL: u64 = 47;
+        const SENDREC_CALL: u64 = 48;
+        const ANY: i32 = 0x0000ffff;
+
+        loop {
+            let mut buf = [0u8; 64];
+
+            // Receive from any sender.
+            let src =
+                unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf.as_mut_ptr() as u64) };
+            if src < 0 {
+                continue;
+            }
+            let sender = src as i32;
+
+            // Send a reply acknowledging receipt.
+            // This unblocks the sender's SENDREC.
+            unsafe {
+                minix_rt::syscall2(SENDREC_CALL, sender as u64, buf.as_mut_ptr() as u64);
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // No-op on host builds.
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

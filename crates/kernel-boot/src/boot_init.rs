@@ -74,15 +74,18 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     let code_end = (loaded.top + 0xFFF) & !0xFFF;
     let code_pages = ((code_end - code_start) / 4096) as usize;
 
-    // Step 2: Allocate physical pages for code.
-    let phys_code_page = unsafe { kernel::vm::alloc_mem(code_pages, 0) };
-    if phys_code_page == kernel::vm::NO_MEM {
-        print!("  ");
-        print!(path);
-        print!(": out of memory for code\r\n");
-        return None;
-    }
-    let phys_code_base = phys_code_page * kernel::vm::VM_PAGE_SIZE as u64;
+    // Step 2: Allocate contiguous physical pages for code.
+    // Use the arch allocator's contiguous allocator (bottom-up) to
+    // avoid conflicts with page table allocations (which use top-down).
+    let phys_code_base = match arch_x86_64::alloc::alloc_phys_contig(code_pages) {
+        Some(base) => base,
+        None => {
+            print!("  ");
+            print!(path);
+            print!(": out of memory for code\r\n");
+            return None;
+        }
+    };
 
     // Step 3: Load ELF data into the allocated physical pages.
     // The identity mapping covers all of 0..1GB, so writing to
@@ -98,14 +101,15 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     let user_stack_base: u64 = 0x0FE00000;
     let user_stack_size: usize = 65536;
     let stack_pages = user_stack_size / 4096;
-    let phys_stack_page = unsafe { kernel::vm::alloc_mem(stack_pages, 0) };
-    if phys_stack_page == kernel::vm::NO_MEM {
-        print!("  ");
-        print!(path);
-        print!(": out of memory for stack\r\n");
-        return None;
-    }
-    let phys_stack_base = phys_stack_page * kernel::vm::VM_PAGE_SIZE as u64;
+    let phys_stack_base = match arch_x86_64::alloc::alloc_phys_contig(stack_pages) {
+        Some(base) => base,
+        None => {
+            print!("  ");
+            print!(path);
+            print!(": out of memory for stack\r\n");
+            return None;
+        }
+    };
 
     // Step 5: Set up the user stack via identity mapping, then copy
     // the stack data to the per-process physical pages.

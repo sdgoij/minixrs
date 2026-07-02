@@ -1242,9 +1242,10 @@ pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
     // Handle notifications (m_type == NOTIFY_MESSAGE = -10).
     // These are sent by the kernel to wake us up during boot.
-    // We acknowledge and return EDONTREPLY (no reply needed).
+    // Fall through to no_sys so pm_server_main sends a reply
+    // back to the notifier (RS), which wakes RS up.
     if msg.m_type == -10 {
-        return EDONTREPLY;
+        return unsafe { no_sys(caller_slot, msg) };
     }
     let call_nr = msg.m_type;
     let idx = (call_nr - PM_BASE) as usize;
@@ -1297,8 +1298,7 @@ pub fn pm_server_main() {
         let boot_endpoints = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         for &ep in &boot_endpoints {
             if let Some(slot) = alloc_proc() {
-                let base = MPROC.as_ptr();
-                let mp = &mut *base.add(slot);
+                let mp = unsafe { &mut *MPROC.as_ptr().add(slot) };
                 mp.mp_endpoint = ep;
                 mp.mp_pid = ep + 1; // PID = slot + 1 (like real MINIX)
             }

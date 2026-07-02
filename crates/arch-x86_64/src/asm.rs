@@ -528,6 +528,108 @@ pub unsafe fn hlt() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════
+// Exception handlers (naked asm, IST-safe, use serial I/O port 0x3F8)
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Page fault handler — prints 'P', CR2 as hex nibbles, then halts.
+/// Uses IST1 (TSS.IST[1]) for a reliable stack.
+///
+/// On entry: error code is on the stack (above RIP/CS/RFLAGS/SS/RSP for ring-3 faults).
+/// CR2 holds the faulting linear address.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+pub unsafe extern "C" fn exception_page_fault_entry() {
+    // Write 'P' to serial, then write CR2 value as hex, then halt.
+    core::arch::naked_asm!(
+        // Save rax, rcx, rdx (clobbered by I/O ops).
+        "push   rax",
+        "push   rcx",
+        "push   rdx",
+        // Write 'P' (0x50) to COM1 (0x3F8).
+        "mov    dx, 0x3F8",
+        "mov    al, 0x50",
+        "out    dx, al",
+        // Read CR2 into rax, then write 16 hex nibbles to serial.
+        "mov    rax, cr2",
+        // Write CR2 hex. We'll loop over 16 nibbles (64 bits).
+        // Since we're in a naked function, we use inline labels.
+        "mov    rcx, 16",
+        "2:",
+        "rol    rax, 4",
+        "push   rax",
+        "and    al, 0x0F",
+        "cmp    al, 10",
+        "jb     3f",
+        "add    al, 0x57", // 'a' - 10
+        "jmp    4f",
+        "3:",
+        "add    al, 0x30", // '0'
+        "4:",
+        "out    dx, al",
+        "pop    rax",
+        "loop   2b",
+        // Write newline
+        "mov    al, 0x0D",
+        "out    dx, al",
+        "mov    al, 0x0A",
+        "out    dx, al",
+        // Restore and halt
+        "pop    rdx",
+        "pop    rcx",
+        "pop    rax",
+        "cli",
+        "hlt",
+    );
+}
+
+/// Double fault handler — prints 'D', then halts.
+/// Uses IST2 (TSS.IST[2]) for a reliable stack.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+pub unsafe extern "C" fn exception_double_fault_entry() {
+    core::arch::naked_asm!(
+        "mov    dx, 0x3F8",
+        "mov    al, 0x44", // 'D'
+        "out    dx, al",
+        "mov    al, 0x0D",
+        "out    dx, al",
+        "mov    al, 0x0A",
+        "out    dx, al",
+        "cli",
+        "hlt",
+    );
+}
+
+/// General protection fault handler — prints 'G', then halts.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+pub unsafe extern "C" fn exception_gpf_entry() {
+    core::arch::naked_asm!(
+        "mov    dx, 0x3F8",
+        "mov    al, 0x47", // 'G'
+        "out    dx, al",
+        "mov    al, 0x0D",
+        "out    dx, al",
+        "mov    al, 0x0A",
+        "out    dx, al",
+        "cli",
+        "hlt",
+    );
+}
+
+/// Ring-3 halt stub — a minimal user-mode program that just halts.
+/// Used for testing whether the ring-3 context switch itself works.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+pub unsafe extern "C" fn ring3_halt_stub() {
+    core::arch::naked_asm!("1:", "pause", "jmp    1b",);
+}
+
+// ═════════════════════════════════════════════════════════════════════════
 // SGDT / SIDT / STR
 // ═════════════════════════════════════════════════════════════════════════
 

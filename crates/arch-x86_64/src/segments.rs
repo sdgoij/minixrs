@@ -60,7 +60,9 @@ pub struct SegmentDescriptor {
 pub const fn code64_descriptor(dpl: u8, present: bool) -> SegmentDescriptor {
     let p = if present { 0x80u8 } else { 0x00u8 };
     let type_byte = 0x1A | (dpl << 5) | p;
-    let flags_byte = 0xA0; // G=1, D/B=0, L=1
+    // Limit[19:16]=0xA, Flags={G=1, D/B=0, L=1, AVL=0} => lower nibble=0xB
+    // The trampoline uses 0xAF (AVL=1), but 0xAB is correct for L=1,G=1,D/B=0,AVL=0.
+    let flags_byte = 0xAB;
     SegmentDescriptor {
         sd_lolimit: 0,
         sd_lobase: 0,
