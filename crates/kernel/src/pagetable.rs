@@ -503,9 +503,8 @@ mod tests {
         // In a real environment with an initialized system, it returns false
         // (no VM server dispatch handler registered).
         let result = std::panic::catch_unwind(|| unsafe { handle_page_fault(0x1000, PF_WRITE) });
-        match result {
-            Ok(val) => assert!(!val),
-            Err(_) => {} // panicked due to uninitialized CPU local storage
+        if let Ok(val) = result {
+            assert!(!val)
         }
     }
 

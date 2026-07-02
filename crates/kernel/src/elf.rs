@@ -490,16 +490,13 @@ mod tests {
         // Just enough for the header, not the phdr
         let data = [0u8; EHDR_SIZE];
         let result = parse_elf_header(&data);
-        match result {
-            Ok(ehdr) => {
-                // Header parsed, now check phdr bounds
-                let phoff = ehdr.e_phoff as usize;
-                let phnum = ehdr.e_phnum as usize;
-                let phentsize = ehdr.e_phentsize as usize;
-                let ph_end = phoff + phnum * phentsize;
-                assert!(ph_end > data.len());
-            }
-            Err(_) => {} // Also fine
+        if let Ok(ehdr) = result {
+            // Header parsed, now check phdr bounds
+            let phoff = ehdr.e_phoff as usize;
+            let phnum = ehdr.e_phnum as usize;
+            let phentsize = ehdr.e_phentsize as usize;
+            let ph_end = phoff + phnum * phentsize;
+            assert!(ph_end > data.len());
         }
     }
 

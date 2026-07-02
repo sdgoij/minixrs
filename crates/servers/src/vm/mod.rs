@@ -1347,7 +1347,7 @@ mod tests {
         init_vm();
         let mut msg = Message {
             m_source: 0,
-            m_type: 0x9999 as i32, // unknown call number
+            m_type: 0x9999, // unknown call number
             m_payload: unsafe { core::mem::zeroed() },
         };
         let r = dispatch_message(&mut msg, 0);
@@ -1400,7 +1400,7 @@ mod tests {
         // VFS_TRANSACTION_BASE = 0x200, a VFS transaction ID is in that range
         let mut msg = Message {
             m_source: VFS_PROC_NR,
-            m_type: 0x200 as i32, // VFS_TRANSACTION_BASE
+            m_type: 0x200, // VFS_TRANSACTION_BASE
             m_payload: unsafe { core::mem::zeroed() },
         };
         let r = dispatch_message(&mut msg, 0);

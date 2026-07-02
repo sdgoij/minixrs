@@ -855,11 +855,13 @@ mod tests {
 
     #[test]
     fn test_features_defined() {
-        assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_BARRIER) != 0);
-        assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_FLUSH) != 0);
-        assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_RO) != 0);
-        assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0);
-        assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_GEOMETRY) != 0);
+        const {
+            assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_BARRIER) != 0);
+            assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_FLUSH) != 0);
+            assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_RO) != 0);
+            assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0);
+            assert!(VIRTIO_BLK_FEATURES & (1 << VIRTIO_BLK_F_GEOMETRY) != 0);
+        }
     }
 
     #[test]

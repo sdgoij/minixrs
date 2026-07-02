@@ -26,7 +26,7 @@
 #![allow(dead_code)]
 
 #[cfg(target_os = "none")]
-use crate::{Message, sendrec};
+use crate::sendrec;
 use crate::{MinixErr, VFS_PROC_NR};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -251,7 +251,7 @@ fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
 /// VFS server returned a negative error code.
 #[cfg(target_os = "none")]
 unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
-    sendrec(VFS_PROC_NR, msg)?;
+    unsafe { sendrec(VFS_PROC_NR, msg)? };
     let mtype = msg_i32(msg, OFF_TYPE);
     if mtype < 0 {
         Err(MinixErr::from_i32(mtype))

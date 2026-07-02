@@ -661,7 +661,6 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
 // kernel target (x86_64-pc-minix), not on the host build (Windows tests).
 #[cfg(target_os = "none")]
 pub mod syscall_abi {
-    use core::arch::naked_asm;
     use core::sync::atomic::AtomicU64;
 
     /// Global pointer to the syscall C handler.

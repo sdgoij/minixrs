@@ -869,7 +869,7 @@ mod tests {
             // No Vmproc allocated → should return -1 or 0
             let count = vm_collect(999, 0x1000, 4);
             // The count may be 0 (no mapping) or -1 (no CR3)
-            assert!(count >= -1 && count <= 0);
+            assert!((-1..=0).contains(&count));
         }
     }
 }

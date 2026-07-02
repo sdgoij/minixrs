@@ -331,8 +331,8 @@ mod tests {
     impl MockEepromBus {
         fn new() -> Self {
             let mut storage = [0u8; EEPROM_SIZE];
-            for i in 0..EEPROM_SIZE {
-                storage[i] = (i & 0xFF) as u8;
+            for (i, byte) in storage.iter_mut().enumerate() {
+                *byte = (i & 0xFF) as u8;
             }
             Self { storage }
         }
@@ -474,8 +474,8 @@ mod tests {
             let mut bus = MockEepromBus::new();
             let mut buf = [0u8; 512];
             cat24c256_read(&mut bus, 0x50, 0, &mut buf, false).unwrap();
-            for i in 0..512 {
-                assert_eq!(buf[i], (i & 0xFF) as u8, "byte {i} mismatch");
+            for (i, &byte) in buf.iter().enumerate() {
+                assert_eq!(byte, (i & 0xFF) as u8, "byte {i} mismatch");
             }
         }
     }
@@ -486,8 +486,8 @@ mod tests {
             let mut bus = MockEepromBus::new();
             let mut buf = [0u8; 256];
             cat24c256_read(&mut bus, 0x50, 0x100, &mut buf, false).unwrap();
-            for i in 0..256 {
-                assert_eq!(buf[i], ((0x100 + i) & 0xFF) as u8, "offset byte {i}");
+            for (i, &byte) in buf.iter().enumerate() {
+                assert_eq!(byte, ((0x100 + i) & 0xFF) as u8, "offset byte {i}");
             }
         }
     }

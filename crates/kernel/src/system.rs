@@ -4888,7 +4888,7 @@ mod tests {
     /// Get a zeroed `*mut Priv` from the static pool at the given slot.
     unsafe fn setup_test_priv(slot: usize) -> *mut Priv {
         unsafe {
-            let base = &raw mut TEST_PRIV_POOL as *mut TestPrivPool as *mut u8;
+            let base = &raw mut TEST_PRIV_POOL as *mut u8;
             let p = base.add(slot.min(7) * TEST_PRIV_SLOT_BYTES).cast::<Priv>();
             core::ptr::write_bytes(p.cast::<u8>(), 0, TEST_PRIV_SLOT_BYTES);
             (*p).s_sig_mgr = i32::MIN;

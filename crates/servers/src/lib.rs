@@ -18,6 +18,6 @@ pub mod vm;
 mod tests {
     #[test]
     fn it_works() {
-        assert!(true);
+        let _ = 0;
     }
 }

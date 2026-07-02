@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn test_alignment_math() {
         // Round up to 16-byte alignment.
-        assert_eq!((0 + 15) & !15, 0);
+        assert_eq!(15 & !15, 0);
         assert_eq!((1 + 15) & !15, 16);
         assert_eq!((15 + 15) & !15, 16);
         assert_eq!((16 + 15) & !15, 16);
@@ -611,7 +611,7 @@ mod tests {
 
         // 4096-byte alignment.
         let align = 4096;
-        assert_eq!((0 + align - 1) & !(align - 1), 0);
+        assert_eq!((align - 1) & !(align - 1), 0);
         assert_eq!((1 + align - 1) & !(align - 1), 4096);
         assert_eq!((4095 + align - 1) & !(align - 1), 4096);
         assert_eq!((4096 + align - 1) & !(align - 1), 4096);

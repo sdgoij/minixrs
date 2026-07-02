@@ -499,13 +499,13 @@ mod tests {
     fn test_from_syscall_err_eperm() {
         // Syscall returns -EPERM (which is 1 negated)
         let result = MinixErr::from_syscall(EPERM);
-        assert_eq!(result, Err(MinixErr(-EPERM as i32)));
+        assert_eq!(result, Err(MinixErr(-EPERM)));
     }
 
     #[test]
     fn test_from_syscall_err_enomem() {
         let result = MinixErr::from_syscall(ENOMEM);
-        assert_eq!(result, Err(MinixErr(-ENOMEM as i32)));
+        assert_eq!(result, Err(MinixErr(-ENOMEM)));
     }
 
     #[test]

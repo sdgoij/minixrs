@@ -262,8 +262,9 @@ mod tests {
     /// Reset global state for tests.
     unsafe fn reset() {
         unsafe {
+            let rules_ptr = core::ptr::addr_of_mut!(RULES) as *mut FbdRule;
             for i in 0..MAX_RULES {
-                RULES[i] = FbdRule::new();
+                core::ptr::write(rules_ptr.add(i), FbdRule::new());
             }
         }
     }

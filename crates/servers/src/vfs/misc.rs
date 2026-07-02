@@ -632,7 +632,7 @@ mod tests {
             (*fp_slot(0)).fp_endpoint = 0;
             (*fp_slot(0)).fp_effuid = 1000; // not superuser
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            fs_m_in[0..4].copy_from_slice(&SI_PROC_TAB.to_le_bytes());
             assert_eq!(do_getsysinfo(), EPERM);
         }
     }
@@ -660,7 +660,7 @@ mod tests {
             (*fp_slot(0)).fp_endpoint = 1;
             (*fp_slot(0)).fp_effuid = 0;
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            fs_m_in[0..4].copy_from_slice(&SI_PROC_TAB.to_le_bytes());
             fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes());
             fs_m_in[12..20].copy_from_slice(&42usize.to_le_bytes());
             assert_eq!(do_getsysinfo(), EINVAL);
@@ -676,7 +676,7 @@ mod tests {
             (*fp_slot(0)).fp_endpoint = 1;
             (*fp_slot(0)).fp_effuid = 0;
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[0..4].copy_from_slice(&(SI_PROC_TAB as i32).to_le_bytes());
+            fs_m_in[0..4].copy_from_slice(&SI_PROC_TAB.to_le_bytes());
             fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes());
             fs_m_in[12..20].copy_from_slice(&core::mem::size_of::<[Fproc; 256]>().to_le_bytes());
             // fp is already set above
@@ -695,7 +695,7 @@ mod tests {
             (*fp_slot(0)).fp_effuid = 0; // superuser
             // Set what (offset 0), dst_addr (offset 4), size (offset 12)
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[0..4].copy_from_slice(&(SI_DMAP_TAB as i32).to_le_bytes());
+            fs_m_in[0..4].copy_from_slice(&SI_DMAP_TAB.to_le_bytes());
             fs_m_in[4..12].copy_from_slice(&0xdeadbeefu64.to_le_bytes()); // dst
             fs_m_in[12..20].copy_from_slice(&core::mem::size_of::<[Dmap; 64]>().to_le_bytes());
         }

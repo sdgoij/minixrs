@@ -7,6 +7,7 @@
 //!
 //! Ported from `minix/servers/vfs/request.c`.
 
+#[cfg(not(target_os = "none"))]
 use crate::vfs::consts::ENOSYS;
 #[cfg(target_os = "none")]
 use crate::vfs::consts::PATH_MAX;
@@ -189,7 +190,7 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
         let mut ipc_msg = [0u8; 64];
         ipc_msg[..56].copy_from_slice(&msg[..]);
         match minix_std::sendrec(fs_e, &mut ipc_msg) {
-            Ok(src) => {
+            Ok(_) => {
                 // Copy result back (kernel updated m_source at offset 0)
                 msg[..56].copy_from_slice(&ipc_msg[..56]);
                 crate::vfs::consts::OK

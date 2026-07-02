@@ -570,8 +570,10 @@ mod tests {
 
     #[test]
     fn test_blocked_on_sending() {
-        let mut p = Proc::default();
-        p.p_sendto_e = 7;
+        let p = Proc {
+            p_sendto_e: 7,
+            ..Default::default()
+        };
         p.p_rts_flags.store(
             RtsFlags::SENDING.bits(),
             core::sync::atomic::Ordering::Relaxed,
@@ -581,8 +583,10 @@ mod tests {
 
     #[test]
     fn test_blocked_on_receiving() {
-        let mut p = Proc::default();
-        p.p_getfrom_e = 42;
+        let p = Proc {
+            p_getfrom_e: 42,
+            ..Default::default()
+        };
         p.p_rts_flags.store(
             RtsFlags::RECEIVING.bits(),
             core::sync::atomic::Ordering::Relaxed,
@@ -672,9 +676,11 @@ mod tests {
     #[test]
     fn test_sending_overrides_receiving_blocked_on() {
         // When both SENDING and RECEIVING are set, sending takes priority
-        let mut p = Proc::default();
-        p.p_sendto_e = 10;
-        p.p_getfrom_e = 20;
+        let p = Proc {
+            p_sendto_e: 10,
+            p_getfrom_e: 20,
+            ..Default::default()
+        };
         p.p_rts_flags.store(
             RtsFlags::SENDING.bits() | RtsFlags::RECEIVING.bits(),
             core::sync::atomic::Ordering::Relaxed,

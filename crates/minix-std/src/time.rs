@@ -259,7 +259,7 @@ pub fn clock_settime(clock_id: i32, tp: &TimeSpec) -> Result<(), MinixErr> {
 /// Sleep for the specified duration.
 pub fn nanosleep(req: &TimeSpec) -> Result<TimeSpec, MinixErr> {
     #[cfg(target_os = "none")]
-    unsafe {
+    {
         // nanosleep is implemented via PM_ITIMER with a one-shot timer.
         // For now, use a busy-wait / stub approach.
         let _ = req;
@@ -401,8 +401,8 @@ pub fn setitimer(which: i32, value: Option<&ITimerVal>) -> Result<ITimerVal, Min
 /// Request SIGALRM after `seconds` seconds.
 pub fn alarm(seconds: u32) -> u32 {
     #[cfg(target_os = "none")]
-    unsafe {
-        let mut itv = ITimerVal {
+    {
+        let itv = ITimerVal {
             it_interval: TimeSpec {
                 tv_sec: 0,
                 tv_nsec: 0,
@@ -611,11 +611,12 @@ mod tests {
         assert!(r.is_err());
     }
 
+    type SignalHandler =
+        unsafe fn(i32, Option<&SigAction>, Option<&mut SigAction>) -> Result<(), MinixErr>;
+
     #[test]
     fn test_sigaction_signature() {
-        fn _check(
-            f: unsafe fn(i32, Option<&SigAction>, Option<&mut SigAction>) -> Result<(), MinixErr>,
-        ) {
+        fn _check(f: SignalHandler) {
             let _ = f;
         }
         _check(sigaction);

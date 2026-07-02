@@ -1383,6 +1383,21 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Compile-time offset verification
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _: () = {
+    use core::mem::offset_of;
+    let _ = offset_of!(MProc, mp_pid);
+    let _ = offset_of!(MProc, mp_endpoint);
+    let _ = offset_of!(MProc, mp_parent);
+    let _ = offset_of!(MProc, mp_flags);
+    assert!(core::mem::size_of::<SigSet>() == 16);
+    assert!(core::mem::size_of::<TimeVal>() == 16);
+    assert!(core::mem::size_of::<Itimerval>() == 32);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1470,9 +1485,9 @@ mod tests {
         assert!(!mp.in_use());
         assert!(!mp.is_zombie());
         assert!(!mp.is_stopped());
-        assert_eq!(mp.mp_name.iter().all(|&c| c == 0), true);
-        assert_eq!(mp.mp_sgroups.iter().all(|&g| g == 0), true);
-        assert_eq!(mp.mp_interval.iter().all(|&t| t == 0), true);
+        assert!(mp.mp_name.iter().all(|&c| c == 0));
+        assert!(mp.mp_sgroups.iter().all(|&g| g == 0));
+        assert!(mp.mp_interval.iter().all(|&t| t == 0));
     }
 
     #[test]
@@ -1529,7 +1544,7 @@ mod tests {
     fn test_alloc_proc_exhaustion() {
         init_proc();
         let mut count = 0;
-        while let Some(_) = alloc_proc() {
+        while alloc_proc().is_some() {
             count += 1;
         }
         assert_eq!(count, NR_PROCS);
@@ -1648,18 +1663,3 @@ mod tests {
         pm_server_main();
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Compile-time offset verification
-// ─────────────────────────────────────────────────────────────────────────────
-
-const _: () = {
-    use core::mem::offset_of;
-    let _ = offset_of!(MProc, mp_pid);
-    let _ = offset_of!(MProc, mp_endpoint);
-    let _ = offset_of!(MProc, mp_parent);
-    let _ = offset_of!(MProc, mp_flags);
-    assert!(core::mem::size_of::<SigSet>() == 16);
-    assert!(core::mem::size_of::<TimeVal>() == 16);
-    assert!(core::mem::size_of::<Itimerval>() == 32);
-};

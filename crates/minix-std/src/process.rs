@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 #[cfg(target_os = "none")]
-use crate::{Message, sendrec};
+use crate::sendrec;
 use crate::{MinixErr, PM_PROC_NR};
 
 // ── PM call numbers ─────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ pub unsafe fn fork() -> Result<i32, MinixErr> {
         msg_set_i32(&mut msg, OFF_TYPE, PM_FORK as i32);
         let result = sendrec(PM_PROC_NR, &mut msg);
         match result {
-            Ok(r) => {
+            Ok(_) => {
                 let mtype = msg_i32(&msg, OFF_TYPE);
                 if mtype < 0 {
                     Err(MinixErr::from_i32(mtype))
@@ -198,7 +198,7 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
         msg_set_i32(&mut msg, OFF_TYPE, PM_GETPID as i32);
         let result = sendrec(PM_PROC_NR, &mut msg);
         match result {
-            Ok(r) => {
+            Ok(_) => {
                 let mtype = msg_i32(&msg, OFF_TYPE);
                 if mtype < 0 {
                     Err(MinixErr::from_i32(mtype))

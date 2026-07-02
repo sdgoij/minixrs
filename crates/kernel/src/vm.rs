@@ -556,7 +556,7 @@ mod tests {
 
             let a = alloc_mem(1, 0);
             assert!(a != NO_MEM);
-            assert!(a >= 0x1000 && a < 0x1000 + 0x10000);
+            assert!((0x1000..0x1000 + 0x10000).contains(&a));
             let (_, f2, _) = mem_stats();
             assert_eq!(f2, total_pages() - 1);
 
@@ -667,8 +667,8 @@ mod tests {
             let mut buf = [0u8; 64];
             let addr = buf.as_mut_ptr() as u64;
             assert_eq!(vm_memset(addr, 0xAB, 64), 0);
-            for i in 0..64 {
-                assert_eq!(buf[i], 0xAB, "byte {} mismatch", i);
+            for (i, &byte) in buf.iter().enumerate() {
+                assert_eq!(byte, 0xAB, "byte {} mismatch", i);
             }
         }
     }

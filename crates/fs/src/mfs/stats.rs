@@ -81,8 +81,10 @@ mod tests {
 
     #[test]
     fn test_count_free_bits_zero_bit_blocks() {
-        let mut sp = SuperBlock::default();
-        sp.s_block_size = 1024;
+        let sp = SuperBlock {
+            s_block_size: 1024,
+            ..Default::default()
+        };
         assert_eq!(count_free_bits(&sp, IMAP), 0);
         assert_eq!(count_free_bits(&sp, ZMAP), 0);
     }

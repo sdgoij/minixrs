@@ -580,6 +580,11 @@ pub unsafe fn at_wini_pio_read(
     }
 }
 
+/// Build the LDH register value for a given drive number.
+pub fn ldh_init(drive: u8) -> u8 {
+    LDH_DEFAULT | ((drive & 1) << 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,9 +740,4 @@ mod tests {
         cmd.set_lba28(0, 0);
         assert_eq!(cmd.ldh & 0x40, 0x40); // LBA bit
     }
-}
-
-/// Build the LDH register value for a given drive number.
-pub fn ldh_init(drive: u8) -> u8 {
-    LDH_DEFAULT | ((drive & 1) << 4)
 }

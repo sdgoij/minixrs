@@ -969,7 +969,7 @@ mod tests {
         let mut sum = [0u8; 16];
         calc_sum_into(0, &[0u8; 512], &mut sum[..cfg.sum_size as usize], &cfg);
         let crc = compute_crc(&[0u8; 512]);
-        assert_eq!(sum[..4], (crc ^ 0).to_le_bytes());
+        assert_eq!(sum[..4], crc.to_le_bytes());
     }
 
     #[test]

@@ -242,6 +242,6 @@ mod tests {
         }
         // Returns an errno since no message is set up.
         let r = fs_readwrite();
-        assert!(r < 0 || r == 0);
+        assert!(r <= 0);
     }
 }

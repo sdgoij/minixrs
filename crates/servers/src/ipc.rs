@@ -2124,7 +2124,7 @@ mod tests {
         setup();
 
         for i in 0..10 {
-            let mut msg = make_msg(0xD01, 42, i as i32 + 1000, 4096, IPC_CREAT);
+            let mut msg = make_msg(0xD01, 42, i + 1000, 4096, IPC_CREAT);
             let r = unsafe { do_shmget(&mut msg) };
             assert_eq!(r, OK, "failed at index {}", i);
         }

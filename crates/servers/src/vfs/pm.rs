@@ -340,7 +340,7 @@ mod tests {
             assert_eq!(child.fp_endpoint, 10);
             assert_eq!(child.fp_pid, 101);
             assert_eq!(child.fp_filp[0], 1);
-            assert_eq!(child.fp_cdir.is_null(), true);
+            assert!(child.fp_cdir.is_null());
         }
     }
 

@@ -590,7 +590,7 @@ mod tests {
             vp.v_inode_nr = 42;
             vp.v_ref_count = 2;
             put_vnode(vp);
-            assert_eq!((*vp).v_ref_count, 1);
+            assert_eq!(vp.v_ref_count, 1);
         }
     }
 
@@ -606,8 +606,8 @@ mod tests {
             vp.v_ref_count = 1;
             vp.v_fs_count = 1;
             put_vnode(vp);
-            assert_eq!((*vp).v_fs_e, -1);
-            assert_eq!((*vp).v_ref_count, 0);
+            assert_eq!(vp.v_fs_e, -1);
+            assert_eq!(vp.v_ref_count, 0);
         }
     }
 
@@ -619,9 +619,11 @@ mod tests {
     #[test]
     fn test_vnode_clean_refs_resets_fs_count() {
         unsafe {
-            let mut v = Vnode::default();
-            v.v_fs_count = 5;
-            v.v_fs_count_check = 3;
+            let mut v = Vnode {
+                v_fs_count: 5,
+                v_fs_count_check: 3,
+                ..Default::default()
+            };
             vnode_clean_refs(&mut v as *mut Vnode);
             assert_eq!(v.v_fs_count, 0);
             assert_eq!(v.v_fs_count_check, 0);

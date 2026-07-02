@@ -453,9 +453,9 @@ mod tests {
     #[test]
     fn test_cpu_info_init() {
         // Verify CpuInfo initial state.
-        for i in 0..CONFIG_MAX_CPUS {
-            assert_eq!(CPUS[i].flags.load(Ordering::Relaxed), 0);
-            assert_eq!(CPUS[i].freq.load(Ordering::Relaxed), 0);
+        for cpu in CPUS.iter().take(CONFIG_MAX_CPUS) {
+            assert_eq!(cpu.flags.load(Ordering::Relaxed), 0);
+            assert_eq!(cpu.freq.load(Ordering::Relaxed), 0);
         }
     }
 
@@ -470,7 +470,11 @@ mod tests {
 
     #[test]
     fn test_config_max_cpus() {
-        assert!(CONFIG_MAX_CPUS >= 1);
-        assert!(CONFIG_MAX_CPUS <= 32);
+        const {
+            assert!(CONFIG_MAX_CPUS >= 1);
+        }
+        const {
+            assert!(CONFIG_MAX_CPUS <= 32);
+        }
     }
 }
