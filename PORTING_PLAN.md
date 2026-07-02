@@ -4243,6 +4243,16 @@ with kernel waitpid (NR_WAITPID=59).
 
 ---
 
+- [x] **14C.10 — Wire chdir syscall and implement shell cd**
+  - Added `sys_chdir_handler` (syscall 12) in `crates/kernel/src/syscall.rs`
+    that builds a VFS message with path_addr at offset 8 (u64) and path_len
+    at offset 16 (u32), then routes to VFS_CHDIR (0x108) via `do_sync_ipc`.
+  - Added `minix_rt::chdir()` wrapper (`NR_CHDIR = 12`) in
+    `crates/minix-rt/src/lib.rs`.
+  - Replaced shell's stub `cd` with real implementation in
+    `crates/userland/src/lib.rs`: calls `chdir(path)` and shows the error
+    string on failure. E.g. `sh: cd: /: nodev` until FS servers are wired.
+
 ### Priority 2 — Essential userland
 
 The initial 14 boot-critical binaries are implemented in `crates/userland/src/`:

@@ -602,7 +602,19 @@ pub fn sh(_args: &[&str]) -> i32 {
                             write_out(b"\x1b[H\x1b[2J");
                         }
                         "cd" => {
-                            write_err(b"sh: cd: not yet implemented\r\n");
+                            if args.len() < 2 {
+                                write_err(b"sh: cd: missing argument\r\n");
+                            } else {
+                                let path = args[1].as_bytes();
+                                let r = minix_rt::chdir(path);
+                                if r < 0 {
+                                    write_err(b"sh: cd: ");
+                                    write_err(path);
+                                    write_err(b": ");
+                                    write_err(errstr(r as i32));
+                                    write_err(b"\r\n");
+                                }
+                            }
                         }
                         "exit" => {
                             write_out(b"\r\n");

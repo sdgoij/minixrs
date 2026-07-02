@@ -54,6 +54,8 @@ const NR_WRITE: u64 = 3;
 const NR_BRK: u64 = 36; // SBRK
 /// Read from file descriptor.
 const NR_READ: u64 = 2;
+/// Change working directory.
+const NR_CHDIR: u64 = 12;
 /// Open file.
 const NR_OPEN: u64 = 4;
 /// Close file descriptor.
@@ -360,6 +362,13 @@ pub fn mknod(path: &[u8], mode: u32, dev: u64) -> i64 {
 /// Get the current process ID.
 pub fn getpid() -> i32 {
     unsafe { syscall0(NR_GETPID) as i32 }
+}
+
+/// Change the working directory.
+/// `path` must be a non-null byte slice.
+/// Returns 0 on success, negative error code on failure.
+pub fn chdir(path: &[u8]) -> i64 {
+    unsafe { syscall2(NR_CHDIR, path.as_ptr() as u64, path.len() as u64) }
 }
 
 /// Send a message to a process and wait for a reply (blocking).

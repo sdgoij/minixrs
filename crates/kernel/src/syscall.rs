@@ -298,6 +298,33 @@ unsafe fn vfs_ipc_call(
     reply_status as i64
 }
 
+/// VFS_CHDIR call number (VFS_BASE + 8 = 0x108).
+const VFS_CHDIR: i32 = 0x108;
+
+/// SYS_chdir (12) — change working directory.
+/// args[0] = path pointer, args[1] = path length.
+unsafe fn sys_chdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0];
+    let path_len = args[1] as u32;
+
+    let mut msg = [0u8; 64];
+    // Destination at bytes 0-3 (set by syscall handler, but do_sync_ipc reads it)
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    // Call number at bytes 4-7
+    msg[4..8].copy_from_slice(&VFS_CHDIR.to_le_bytes());
+    // VFS do_chdir reads: path_addr at offset 8 (u64), path_len at offset 16 (u32)
+    msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
+    msg[16..20].copy_from_slice(&path_len.to_le_bytes());
+
+    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+    if result != 0 {
+        return result as i64;
+    }
+    // Read reply status from bytes 4-7 (m_type, overwritten with result by VFS's reply())
+    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    reply_status as i64
+}
+
 /// SYS_mkdir (40) — create a directory.
 unsafe fn sys_mkdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let path_ptr = args[0] as *const u8;
@@ -799,6 +826,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(3, sys_write_handler); // NR_WRITE
         register_basic_syscall(4, sys_open_handler); // NR_OPEN
         register_basic_syscall(5, sys_close_handler); // NR_CLOSE
+        register_basic_syscall(12, sys_chdir_handler); // NR_CHDIR
         register_basic_syscall(20, sys_getpid_handler); // NR_GETPID
         register_basic_syscall(36, sys_brk_handler); // NR_BRK
         register_basic_syscall(40, sys_mkdir_handler); // NR_MKDIR
