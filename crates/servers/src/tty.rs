@@ -18,6 +18,12 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use arch_common::com::{
+    CDEV_CANCEL, CDEV_CLOSE, CDEV_IOCTL, CDEV_OPEN, CDEV_READ, CDEV_SELECT, CDEV_WRITE,
+    NOTIFY_MESSAGE, TTY_FKEY_CONTROL, TTY_INPUT_EVENT, TTY_INPUT_UP, is_cdev_rq,
+};
+use arch_common::endpoint::ANY;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Imports from kernel
 // ═══════════════════════════════════════════════════════════════════════════
@@ -299,6 +305,7 @@ pub const EINTR: i32 = -4;
 pub const ENOTTY: i32 = -25;
 pub const EBADF: i32 = -9;
 pub const BUSY: i32 = -16;
+pub const ENOSYS: i32 = -71;
 
 /// FREAD / FWRITE for TIOCFLUSH.
 pub const FREAD: i32 = 0x01;
@@ -1998,17 +2005,142 @@ pub fn do_select(minor: DevMinor, mut ops: u32, endpt: Endpoint) -> i32 {
 ///
 /// Receives messages, dispatches character driver requests, handles
 /// notifications (clock, hardware interrupts), and processes TTY events.
-///
-/// **TODO: Phase 13 — wire up with chardriver + SEF framework.**
-pub fn tty_server_main() -> ! {
-    // Stub — does nothing until the chardriver framework is available.
+pub fn tty_server_main() {
+    tty_init(100);
+
     loop {
-        // TODO: Phase 13
-        // 1. Check for events on all TTY lines.
-        // 2. Receive a message via driver_receive.
-        // 3. Handle kernel notifications (clock, hardware).
-        // 4. Dispatch character driver requests via chardriver_process.
-        core::hint::spin_loop();
+        let mut msg = arch_common::ipc::Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+
+        // Receive a message from any sender.
+        // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
+        let src = unsafe {
+            minix_rt::syscall2(
+                minix_rt::RECEIVE_CALL,
+                ANY as u64,
+                &mut msg as *mut arch_common::ipc::Message as u64,
+            )
+        };
+        if src < 0 {
+            continue;
+        }
+        let src_ep = src as i32;
+        let call_type = msg.m_type as u32;
+
+        // Check for kernel notifications.
+        // The kernel sends NOTIFY_MESSAGE (-10) as the message type.
+        let is_notify =
+            msg.m_type == -10 || (msg.m_type as u32).wrapping_sub(NOTIFY_MESSAGE) < 0x100;
+        if is_notify {
+            // Handle events on all TTY lines.
+            for i in 0..NR_CONS + NR_RS_LINES {
+                let tp = unsafe { &mut *TTY_TABLE.as_ptr().add(i) };
+                handle_events(tp);
+            }
+            continue;
+        }
+
+        // Handle CDEV requests.
+        if is_cdev_rq(call_type) {
+            let result = unsafe { handle_cdev_request(&mut msg, src_ep, call_type) };
+            if result != EDONTREPLY {
+                msg.m_type = result;
+                unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SENDREC_CALL,
+                        src_ep as u64,
+                        &mut msg as *mut arch_common::ipc::Message as u64,
+                    );
+                }
+            }
+            continue;
+        }
+
+        // Handle TTY-specific messages (reply OK).
+        if call_type == TTY_FKEY_CONTROL
+            || call_type == TTY_INPUT_UP
+            || call_type == TTY_INPUT_EVENT
+        {
+            msg.m_type = OK;
+            unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDREC_CALL,
+                    src_ep as u64,
+                    &mut msg as *mut arch_common::ipc::Message as u64,
+                );
+            }
+            continue;
+        }
+
+        // Unknown message type: reply ENOSYS.
+        msg.m_type = ENOSYS;
+        unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                src_ep as u64,
+                &mut msg as *mut arch_common::ipc::Message as u64,
+            );
+        }
+    }
+}
+
+/// Dispatch a CDEV request to the appropriate handler.
+///
+/// # Safety
+///
+/// `msg` must point to a valid received message.
+unsafe fn handle_cdev_request(
+    msg: &mut arch_common::ipc::Message,
+    who_e: i32,
+    call_type: u32,
+) -> i32 {
+    // Standard CDEV message layout (MINIX `message` m2 fields):
+    //   m2_i1 = minor   (payload offset 0)
+    //   m2_i2 = flags   (payload offset 4)
+    //   m2_i3 = grant   (payload offset 8)
+    //   m2_l1 = position (payload offset 16)
+    //   m2_l2 = count    (payload offset 24)
+    let minor = unsafe { msg.m_payload.m2.m2i1 as u32 };
+
+    match call_type {
+        CDEV_OPEN => {
+            let access = unsafe { msg.m_payload.m2.m2i2 };
+            do_open(minor, access, who_e)
+        }
+        CDEV_CLOSE => do_close(minor),
+        CDEV_READ => {
+            let flags = unsafe { msg.m_payload.m2.m2i2 };
+            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
+            let count = unsafe { msg.m_payload.m2.m2l2 as usize };
+            do_read(minor, position, who_e, grant, count, flags, 0)
+        }
+        CDEV_WRITE => {
+            let flags = unsafe { msg.m_payload.m2.m2i2 };
+            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
+            let count = unsafe { msg.m_payload.m2.m2l2 as usize };
+            do_write(minor, position, who_e, grant, count, flags, 0)
+        }
+        CDEV_IOCTL => {
+            let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
+            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            let flags = unsafe { msg.m_payload.m2.m2i2 };
+            do_ioctl(minor, request, who_e, grant, flags, who_e, 0)
+        }
+        CDEV_CANCEL => {
+            let endpt = unsafe { msg.m_payload.m2.m2i2 };
+            let id = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            do_cancel(minor, endpt, id)
+        }
+        CDEV_SELECT => {
+            let ops = unsafe { msg.m_payload.m2.m2i2 as u32 };
+            do_select(minor, ops, who_e)
+        }
+        _ => ENOSYS,
     }
 }
 

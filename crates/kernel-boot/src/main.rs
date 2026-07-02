@@ -297,8 +297,13 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  scheduler starting...\r\n");
 
-        // Mask the timer IRQ and serial IRQ to prevent ring-3→ring-0 crashes
-        // (no TSS loaded — ltr causes a GPF in sysretq, see FUCK_YOU.md).
+        // Mask the timer IRQ and serial IRQ to prevent crashes when the
+        // timer interrupt fires in ring 3. The timer ISR (IDT vector 32)
+        // and PIT init are installed above, but the ISR path causes a #GP
+        // when the timer actually fires. This is a workaround — enabling
+        // preemptive multitasking requires debugging the timer ISR path
+        // (likely a missing swapgs or GS-relative memory access issue in
+        // clock::timer_int_handler or the apic timer_isr_entry asm).
         unsafe {
             // Mask IRQ 0 (timer) and IRQ 4 (serial) on master PIC (port 0x21).
             let mask: u8;

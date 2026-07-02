@@ -169,20 +169,55 @@ pub fn init_vm() {
 pub fn vm_main() {
     init_vm();
 
-    // TODO: Phase 13 — replace with real sef_receive + ipc_send loop.
-    //
-    //   loop {
-    //       let mut msg = Message {
-    //           m_source: 0,
-    //           m_type: 0,
-    //           m_payload: unsafe { core::mem::zeroed() },
-    //       };
-    //       let mut ipc_status = 0u16;
-    //       let r = sef_receive(ANY, &mut msg, &mut ipc_status);
-    //       if r != OK { continue; }
-    //
-    //       dispatch_message(&mut msg, ipc_status);
-    //   }
+    #[cfg(target_os = "none")]
+    {
+        // Syscall numbers for IPC (from minix-std):
+        //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
+        //   SENDREC_CALL = 48: sendrec(dest, &mut msg) → replier endpoint
+        const RECEIVE_CALL: u64 = 47;
+        const SENDREC_CALL: u64 = 48;
+        const ANY: i32 = 0x0000ffff;
+
+        loop {
+            let mut msg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+
+            // Receive a message from any sender.
+            // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
+            let src = unsafe {
+                minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
+            };
+            if src < 0 {
+                continue;
+            }
+            let src_ep = src as i32;
+
+            // Write the sender endpoint into the message.
+            msg.m_source = src_ep;
+
+            // Dispatch the call.
+            let status = dispatch_message(&mut msg, 0);
+
+            // Send the reply if the handler didn't return EDONTREPLY.
+            if status != EDONTREPLY {
+                msg.m_type = status;
+                unsafe {
+                    minix_rt::syscall2(
+                        SENDREC_CALL,
+                        src_ep as u64,
+                        &mut msg as *mut Message as u64,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // No-op on host builds — dispatch is tested directly
+    }
 }
 
 /// Dispatch a single message through the VM call table.

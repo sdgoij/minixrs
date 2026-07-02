@@ -65,12 +65,13 @@ const EDEADEPT: i32 = -67;
 const ENOSYS: i32 = -71;
 
 // Message types (from com.h).
-const SCHEDULING_INHERIT: i32 = 0x300;
-const SCHEDULING_START: i32 = 0x301;
-const SCHEDULING_STOP: i32 = 0x302;
-const SCHEDULING_SET_NICE: i32 = 0x303;
-const SCHEDULING_NO_QUANTUM: i32 = 0x304;
-const SCHEDULING_NO_QUANTUM_NONBLOCK: i32 = 0x305;
+// NOTE: these match arch_common::com values: SCHEDULING_BASE = 0xF00
+const SCHEDULING_NO_QUANTUM: i32 = 0xF01;
+const SCHEDULING_START: i32 = 0xF02;
+const SCHEDULING_STOP: i32 = 0xF03;
+const SCHEDULING_SET_NICE: i32 = 0xF04;
+const SCHEDULING_INHERIT: i32 = 0xF05;
+const SCHEDULING_NO_QUANTUM_NONBLOCK: i32 = 0xF06;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -420,9 +421,110 @@ pub unsafe fn sched_proc(proc_nr: usize) -> &'static SchedProc {
 /// SCHED server main loop.
 ///
 /// Receives messages from PM/RS/kernel and dispatches scheduling requests.
-/// Currently a stub — will be wired when the SEF/server framework is running.
+/// On host builds (testing), this is a no-op — the scheduling logic is
+/// exercised through unit tests directly.
 pub fn sched_server_main() {
-    // TODO: Phase 12 — receive messages and dispatch scheduling requests
+    #[cfg(target_os = "none")]
+    {
+        // Syscall numbers for IPC.
+        const RECEIVE_CALL: u64 = 47;
+        const SENDREC_CALL: u64 = 48;
+        const ANY: i32 = 0x0000ffff;
+
+        // Notification message type (-10 in kernel's delivery format).
+        const NOTIFY_MTYPE: i32 = -10;
+
+        loop {
+            let mut msg = arch_common::ipc::Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+
+            // Receive a message from any sender.
+            // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
+            let src = unsafe {
+                minix_rt::syscall2(
+                    RECEIVE_CALL,
+                    ANY as u64,
+                    &mut msg as *mut arch_common::ipc::Message as u64,
+                )
+            };
+            if src < 0 {
+                continue;
+            }
+            let src_ep = src as i32;
+
+            // Handle notifications (m_type == NOTIFY_MESSAGE = -10).
+            // Just continue without replying — the kernel does not expect one.
+            if msg.m_type == NOTIFY_MTYPE {
+                continue;
+            }
+
+            // Dispatch the scheduling call.
+            let status = match msg.m_type {
+                SCHEDULING_NO_QUANTUM => {
+                    // Kernel sends this — the source IS the endpoint of
+                    // the process that ran out of quantum.
+                    match unsafe { do_noquantum(src_ep) } {
+                        Ok(()) => OK,
+                        Err(e) => e,
+                    }
+                }
+                SCHEDULING_START | SCHEDULING_INHERIT => {
+                    match unsafe {
+                        do_start_scheduling(
+                            msg.m_type,
+                            unsafe { msg.m_payload.m2.m2i1 },
+                            unsafe { msg.m_payload.m2.m2i2 },
+                            unsafe { msg.m_payload.m2.m2i3 as u32 },
+                            unsafe { msg.m_payload.m2.m2l1 as u32 },
+                            src_ep,
+                        )
+                    } {
+                        Ok(nr) => nr,
+                        Err(e) => e,
+                    }
+                }
+                SCHEDULING_STOP => {
+                    match unsafe { do_stop_scheduling(unsafe { msg.m_payload.m2.m2i1 }, src_ep) } {
+                        Ok(()) => OK,
+                        Err(e) => e,
+                    }
+                }
+                SCHEDULING_SET_NICE => {
+                    match unsafe {
+                        do_nice(
+                            unsafe { msg.m_payload.m2.m2i1 },
+                            unsafe { msg.m_payload.m2.m2i3 as u32 },
+                            src_ep,
+                        )
+                    } {
+                        Ok(()) => OK,
+                        Err(e) => e,
+                    }
+                }
+                _ => {
+                    // Unknown message type.
+                    ENOSYS
+                }
+            };
+
+            // Send the reply with the status code.
+            msg.m_type = status;
+            unsafe {
+                minix_rt::syscall2(
+                    SENDREC_CALL,
+                    src_ep as u64,
+                    &mut msg as *mut arch_common::ipc::Message as u64,
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // No-op on host builds — dispatch is tested directly
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

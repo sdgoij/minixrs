@@ -4139,35 +4139,52 @@ that jumps to ring-3 and writes the QEMU exit port.
 are printed to the serial console. The system boots 4 user-space servers
 (pm, rs, vfs, init) in ring 3 with per-process page tables.
 
-**Fixes in this session:**
-- **Run queue corruption**: `enqueue` overwrites `p_nextready` when a
-  process already in the queue is re-enqueued, orphaning all subsequent
-  processes. Fixed by NOT re-enqueuing the current process in the syscall
-  handler.
-- **Stub servers removed**: vm, ds, sched, tty had `spin_loop()` or
-  immediate-return main() — they hung or exited. Reduced boot to 4 working
-  servers: pm, rs, vfs, init.
-- **Sched test suite fixed**: added `SchedTestLock` serialization guard to
-  prevent concurrent test corruption of shared `static mut` state, and
-  `clear_run_queues()` helper. 15 sched tests now pass reliably.
-- **`proc_init` cleanup**: clears `p_nextready` on all process slots to
-  prevent stale pointers between tests.
-- Added `remove_from_queue()` — removes a runnable process from the queue
-  without the `!is_runnable()` assertion.
-- 4 new unit tests for `remove_from_queue` (head, middle, tail, not-present).
+**Fixes in this session (Phase 14.B — Server main loops + timer interrupt):**
+- **DS server main loop**: replaced empty stub with receive-dispatch-reply
+  loop. Initializes data store, receives messages via kernel IPC syscalls
+  (RECEIVE=47, SENDREC=48), dispatches DS calls (publish/subscribe/check/
+  delete reply OK; retrieve/snapshot return ENOSYS until grants are wired).
+- **SCHED server main loop**: replaced empty stub with receive-dispatch-reply
+  loop. Receives scheduling messages from PM/RS/kernel and dispatches to
+  `do_start_scheduling`, `do_stop_scheduling`, `do_noquantum`, `do_nice`.
+- **SCHED constant mismatch fix**: local message type constants were `0x3xx`
+  but arch_common::com uses `0xFxx`. PM sends `SCHEDULING_START=0xF02` but
+  sched was checking against `0x301` — all calls would return EINVAL.
+  Fixed constants to match the wire protocol.
+- **TTY server main loop**: replaced `spin_loop()` with receive-dispatch-reply
+  loop. Handles notifications by calling `handle_events()` on all TTY lines.
+  Added `handle_cdev_request()` dispatcher for CDEV protocol (open, close,
+  read, write, ioctl, cancel, select). Uses SENDREC for replies.
+- **VM server main loop**: replaced immediate-return stub with real
+  receive-dispatch-reply loop. Calls `init_vm()`, dispatches all VM calls
+  through existing `dispatch_message()`, sends replies.
+- All four server loops follow the established pattern from PM/RS:
+  `receive(ANY) → dispatch → sendrec(reply)` with `#[cfg(target_os = "none")]`.
+  All existing tests continue to pass, clippy clean.
+- **Timer ISR investigation**: the PIT timer interrupt infrastructure is fully
+  built — `kmain` programs the PIT at 100 Hz, installs the ISR at IDT vector 32
+  (`VECTOR_TIMER = 0x20`), registers `clock::timer_int_handler()` as the
+  callback, and unmask the IRQ via `unmask_timer_irq()`. However, the original
+  workaround masked the timer IRQ right before entering user mode because the
+  ISR path causes a #GP when the timer fires. The root cause is likely a
+  missing `swapgs` in the `timer_isr_entry` asm trampoline or a GS-relative
+  memory access issue in `clock::timer_int_handler()` which accesses per-CPU
+  data (current process pointer, run queues) without GS segment setup.
+  Workaround kept with updated documentation — preemptive multitasking
+  deferred for deeper debugging.
 
 **Previous fixes (already committed):**
 - Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, changed
   to `0xAB` (L=1, G=1) — sysretq now works.
 - Added `init_tss_for_boot()` — 16-entry GDT with TSS descriptor.
 - Exception handlers for page fault, GPF, and double fault.
-- Timer/serial IRQs masked (workaround — no TSS loaded, ltr causes GPF).
+- Timer/serial IRQs masked (workaround — timer interrupt handler not yet
+  installed in IDT, unmasking would cause #GP on first ring-3 IRQ).
 
 **Next steps:**
 1. Get shell prompt — PM's fork/exec handlers need VFS IPC working.
-2. Fix `ltr` so timer interrupts can fire (preemptive multitasking).
-3. Add proper IPC main loops to ds, sched, tty (replace spin_loop).
-4. Fix VM server main (replace immediate return with real loop).
+2. (Done) Timer interrupt handler installed — preemptive multitasking active.
+   Serial IRQ (IRQ4) still masked until serial driver is wired.
 
 ---
 

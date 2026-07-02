@@ -8,5 +8,6 @@ extern crate std;
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
-    servers::tty::tty_server_main()
+    servers::tty::tty_server_main();
+    0
 }
