@@ -18,26 +18,31 @@ use kernel::proc::Proc;
 pub struct InitInfo {
     /// Pointer to init's kernel `Proc` entry.
     pub proc_ptr: *mut Proc,
-    /// Page-aligned start of init's ELF LOAD segments.
+    /// Virtual address: page-aligned start of ELF LOAD segments.
     pub code_start: u64,
-    /// Page-aligned end (exclusive) of init's ELF LOAD segments.
+    /// Virtual address: page-aligned end (exclusive) of ELF LOAD segments.
     pub code_end: u64,
-    /// Page-aligned start of the user stack.
+    /// Physical address of the allocated code pages.
+    pub phys_code_base: u64,
+    /// Virtual address: page-aligned start of the user stack.
     pub stack_start: u64,
-    /// Page-aligned end (exclusive) of the user stack.
+    /// Virtual address: page-aligned end (exclusive) of the user stack.
     pub stack_end: u64,
+    /// Physical address of the allocated stack pages.
+    pub phys_stack_base: u64,
 }
 
 /// Load a binary from initramfs and set up its TrapFrame for sysretq ring-3.
 ///
-/// Generic version of `load_and_prepare_init` — works for any boot process.
+/// Allocates unique physical pages for each process's code and stack,
+/// so per-process page tables can map virtual→physical independently.
 ///
 /// # Safety
 ///
 /// Must be called after kernel::init() before any user code runs.
 /// Single-threaded boot context.
 /// `path` must exist in the initramfs. `proc_nr` must be a valid process
-/// number with an initialized Proc entry.
+/// number with an initialized Proc entry. The VM allocator must be initialized.
 pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> Option<InitInfo> {
     let (data, _mode) = find_initramfs_file(path)?;
     let ehdr = match parse_elf_header(data) {
@@ -54,20 +59,56 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     print!(": ELF64 entry=0x");
     print_hex(ehdr.e_entry);
     print!("\r\n");
-    // Inline load_elf from kernel::elf — the crate-level function hangs
-    // due to a codegen issue in the boot context.
-    let loaded = match unsafe { load_elf_inline(data) } {
+
+    // Step 1: Calculate ELF bounds and page count without loading yet.
+    let loaded = match unsafe { calc_elf_bounds(data) } {
         Ok(l) => l,
         Err(_) => {
             print!("  ");
             print!(path);
-            print!(": ELF load failed\r\n");
+            print!(": invalid ELF\r\n");
             return None;
         }
     };
+    let code_start = loaded.base & !0xFFF;
+    let code_end = (loaded.top + 0xFFF) & !0xFFF;
+    let code_pages = ((code_end - code_start) / 4096) as usize;
 
+    // Step 2: Allocate physical pages for code.
+    let phys_code_page = unsafe { kernel::vm::alloc_mem(code_pages, 0) };
+    if phys_code_page == kernel::vm::NO_MEM {
+        print!("  ");
+        print!(path);
+        print!(": out of memory for code\r\n");
+        return None;
+    }
+    let phys_code_base = phys_code_page * kernel::vm::VM_PAGE_SIZE as u64;
+
+    // Step 3: Load ELF data into the allocated physical pages.
+    // The identity mapping covers all of 0..1GB, so writing to
+    // phys_code_base + (vaddr - code_start) goes to the right pages.
+    if unsafe { load_elf_at(data, phys_code_base, loaded.base) }.is_err() {
+        print!("  ");
+        print!(path);
+        print!(": ELF load failed\r\n");
+        return None;
+    }
+
+    // Step 4: Allocate physical pages for user stack.
     let user_stack_base: u64 = 0x0FE00000;
     let user_stack_size: usize = 65536;
+    let stack_pages = user_stack_size / 4096;
+    let phys_stack_page = unsafe { kernel::vm::alloc_mem(stack_pages, 0) };
+    if phys_stack_page == kernel::vm::NO_MEM {
+        print!("  ");
+        print!(path);
+        print!(": out of memory for stack\r\n");
+        return None;
+    }
+    let phys_stack_base = phys_stack_page * kernel::vm::VM_PAGE_SIZE as u64;
+
+    // Step 5: Set up the user stack via identity mapping, then copy
+    // the stack data to the per-process physical pages.
     let stack_top = user_stack_base + user_stack_size as u64;
     let user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
         Ok(rsp) => rsp,
@@ -79,6 +120,18 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         }
     };
 
+    // Copy identity-mapped stack data to the allocated physical pages.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            user_stack_base as *const u8,
+            phys_stack_base as *mut u8,
+            user_stack_size,
+        );
+    }
+
+    // Step 6: Store the physical code base in the new TrapFrame.
+    // Note: rsp is the VIRTUAL stack pointer; the per-process page table
+    // maps the virtual stack address to phys_stack_base.
     let rp = kernel::table::proc_addr(proc_nr);
     unsafe {
         core::ptr::write_volatile(&raw mut (*rp).p_reg.rcx, ehdr.e_entry);
@@ -87,15 +140,13 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         core::ptr::write_volatile(&raw mut (*rp).p_reg.rdi, user_rsp);
     }
 
-    let code_start = loaded.base & !0xFFF;
-    let code_end = (loaded.top + 0xFFF) & !0xFFF;
     let stack_start = user_stack_base & !0xFFF;
     let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
     print!("  ");
     print!(path);
-    print!(": loaded at 0x");
-    print_hex(loaded.base);
+    print!(": loaded phys=0x");
+    print_hex(phys_code_base);
     print!(" stack=0x");
     print_hex(user_rsp);
     print!("\n");
@@ -104,18 +155,16 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         proc_ptr: rp,
         code_start,
         code_end,
+        phys_code_base,
         stack_start,
         stack_end,
+        phys_stack_base,
     })
 }
 
-/// Inline copy of `kernel::elf::load_elf` — works around a codegen hang
-/// when calling the crate-level function from the boot context.
-///
-/// # Safety
-///
-/// Same as `kernel::elf::load_elf`.
-unsafe fn load_elf_inline(data: &[u8]) -> Result<LoadedElf, ElfError> {
+/// Calculate the bounds (base vaddr, top vaddr, entry) of an ELF binary
+/// without copying data to memory.
+unsafe fn calc_elf_bounds(data: &[u8]) -> Result<LoadedElf, ElfError> {
     let ehdr = parse_elf_header(data)?;
 
     if ehdr.e_phoff == 0
@@ -137,7 +186,6 @@ unsafe fn load_elf_inline(data: &[u8]) -> Result<LoadedElf, ElfError> {
         let phdr = unsafe { &*(data.as_ptr().add(phoff + i * phentsize) as *const Elf64Phdr) };
 
         if phdr.p_type != 1 {
-            // PT_LOAD = 1
             continue;
         }
         found_load = true;
@@ -160,23 +208,6 @@ unsafe fn load_elf_inline(data: &[u8]) -> Result<LoadedElf, ElfError> {
         if seg_top > top {
             top = seg_top;
         }
-
-        if phdr.p_filesz > 0 {
-            let src = unsafe { data.as_ptr().add(phdr.p_offset as usize) };
-            let dst = phdr.p_vaddr as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
-            }
-        }
-
-        let bss_size = phdr.p_memsz.saturating_sub(phdr.p_filesz);
-        if bss_size > 0 {
-            let bss_start = phdr.p_vaddr.wrapping_add(phdr.p_filesz);
-            let dst = bss_start as *mut u8;
-            unsafe {
-                core::ptr::write_bytes(dst, 0, bss_size as usize);
-            }
-        }
     }
 
     if !found_load {
@@ -188,6 +219,56 @@ unsafe fn load_elf_inline(data: &[u8]) -> Result<LoadedElf, ElfError> {
         top,
         entry: ehdr.e_entry,
     })
+}
+
+/// Load ELF segment data into memory at `phys_base`, offset by the
+/// difference between each segment's vaddr and the ELF's base vaddr.
+///
+/// Writes through the identity mapping (virtual == physical for 0..1GB).
+unsafe fn load_elf_at(data: &[u8], phys_base: u64, elf_base_vaddr: u64) -> Result<(), ElfError> {
+    let ehdr = parse_elf_header(data)?;
+
+    let phoff = ehdr.e_phoff as usize;
+    let phnum = ehdr.e_phnum as usize;
+    let phentsize = ehdr.e_phentsize as usize;
+
+    for i in 0..phnum {
+        let phdr = unsafe { &*(data.as_ptr().add(phoff + i * phentsize) as *const Elf64Phdr) };
+
+        if phdr.p_type != 1 {
+            continue;
+        }
+
+        let file_end = phdr
+            .p_offset
+            .checked_add(phdr.p_filesz)
+            .ok_or(ElfError::SegmentOutOfBounds)?;
+        if file_end > data.len() as u64 {
+            return Err(ElfError::SegmentOutOfBounds);
+        }
+
+        // Destination = phys_base + (segment_vaddr - elf_base_vaddr)
+        let offset = phdr.p_vaddr.wrapping_sub(elf_base_vaddr);
+        let dst_addr = phys_base.wrapping_add(offset);
+        let dst = dst_addr as *mut u8;
+
+        if phdr.p_filesz > 0 {
+            let src = unsafe { data.as_ptr().add(phdr.p_offset as usize) };
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+            }
+        }
+
+        let bss_size = phdr.p_memsz.saturating_sub(phdr.p_filesz);
+        if bss_size > 0 {
+            let bss_dst = unsafe { dst.add(phdr.p_filesz as usize) };
+            unsafe {
+                core::ptr::write_bytes(bss_dst, 0, bss_size as usize);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Load /sbin/init from the embedded initramfs.
@@ -294,54 +375,87 @@ pub unsafe fn boot_create_page_table() -> u64 {
 pub unsafe fn boot_create_restricted_page_table(
     code_start: u64,
     code_end: u64,
+    code_phys: u64,
     stack_start: u64,
     stack_end: u64,
+    stack_phys: u64,
 ) -> Option<u64> {
-    // 1. Allocate a fresh PML4 page.
-    let pml4 = arch_x86_64::alloc::alloc_phys_page()?;
-    unsafe {
-        core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
-    }
-
-    // 2. Share kernel high mappings (PML4[256..512]).
+    // Walk the boot page table to reach the PD (512 × 2MB entries = 1GB).
     let boot_cr3_val = boot_cr3();
     if boot_cr3_val == 0 {
         return None;
     }
     let boot_pml4 = boot_cr3_val as *const u64;
+    let boot_pml4e0 = unsafe { core::ptr::read(boot_pml4) };
+    let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
+    let boot_pdpt = boot_pdpt_phys as *const u64;
+    let boot_pdpte0 = unsafe { core::ptr::read(boot_pdpt) };
+    let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
+    let boot_pd = boot_pd_phys as *const u64;
+
+    // Allocate 3 pages from the arch allocator: PML4, PDPT, PD.
+    let pml4 = arch_x86_64::alloc::alloc_phys_page()?;
+    let pdpt_page = arch_x86_64::alloc::alloc_phys_page()?;
+    let pd_page = arch_x86_64::alloc::alloc_phys_page()?;
+    let page_sz = arch_x86_64::param::NBPG as usize;
     unsafe {
+        core::ptr::write_bytes(pml4 as *mut u8, 0, page_sz);
+        core::ptr::write_bytes(pdpt_page as *mut u8, 0, page_sz);
+        core::ptr::write_bytes(pd_page as *mut u8, 0, page_sz);
+    }
+
+    // Link: PML4[0] → PDPT[0] → PD.
+    let flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+    unsafe {
+        core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
+        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+    }
+
+    // Deep-copy all 512 PD entries from boot PD (gives full 1GB identity
+    // map so the kernel can still run after CR3 switch).
+    unsafe {
+        let new_pd = pd_page as *mut u64;
+        for i in 0..512 {
+            let entry = core::ptr::read(boot_pd.add(i));
+            core::ptr::write(new_pd.add(i), entry);
+        }
+
+        // Share kernel high mappings (PML4[256..512]).
         for i in 256..512 {
             let entry = core::ptr::read(boot_pml4.add(i));
             core::ptr::write((pml4 as *mut u64).add(i), entry);
         }
     }
 
-    // Flags for user pages: Present | Read-Write | User-accessible.
+    // Overwrite user code pages: replace the identity-mapped 2MB huge
+    // pages with 4KB pages pointing to the per-process physical pages.
+    // The identity map has 2MB huge pages; map_page will split them.
     let user_flags = pte::PG_P | pte::PG_RW | pte::PG_U;
-
-    // 3. Map code pages (identity-mapped).
     let mut va = code_start;
+    let mut pa = code_phys;
     while va < code_end {
         unsafe {
-            if map_page(pml4, va, va, user_flags).is_err() {
+            if map_page(pml4, va, pa, user_flags).is_err() {
                 return None;
             }
         }
         va += 0x1000;
+        pa += 0x1000;
     }
 
-    // 4. Map stack pages (identity-mapped).
+    // Overwrite user stack pages similarly.
     let mut va = stack_start;
+    let mut pa = stack_phys;
     while va < stack_end {
         unsafe {
-            if map_page(pml4, va, va, user_flags).is_err() {
+            if map_page(pml4, va, pa, user_flags).is_err() {
                 return None;
             }
         }
         va += 0x1000;
+        pa += 0x1000;
     }
 
-    // If no code or stack was mapped, still valid (just kernel mappings).
     Some(pml4)
 }
 

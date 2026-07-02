@@ -4076,20 +4076,33 @@ console. Currently `kmain()` prints "Hello MINIX!" and enters an HLT loop.
     - `load_and_prepare_proc(path, proc_nr, argv)` — generalized version that
       loads ANY binary from initramfs, not just init. Used for loading all
       boot processes (PM, VFS, VM, RS, DS, SCHED, TTY) alongside init.
-    - `boot_create_page_table()` — 3-page alloc (PML4+PDP+PD), deep-copies boot
-      identity map, shares kernel high mappings (PML4[256..512])
-    - `boot_jump_to_user()` — sets p_cr3, calls `sysretq_to_user()` → sysretq
-  - ✅ **kmain flow (normal boot)**: init → serial → timer → load all 8 boot
-    processes (7 servers + init) → create page table → setup syscalls → sysretq
+    - **Per-process physical page allocation**: each process now loads into
+      unique physical pages (code and stack) instead of all sharing the same
+      address 0x1000000. `calc_elf_bounds()` computes page count from ELF
+      without loading; `vm::alloc_mem()` allocates per-process pages;
+      `load_elf_at()` writes to `phys_base + (vaddr - elf_base)`. Stack:
+      identity-mapped stack data copied to per-process physical pages after
+      `setup_user_stack()`.
+    - `boot_create_restricted_page_table()` — maps virtual→physical for
+      per-process code and stack; accepts `phys_code_base` and `phys_stack_base`.
+      Kernel high mappings (PML4[256..512]) shared read-only.
+  - ✅ **kmain flow (normal boot)**: init → serial → timer → `vm::mem_init()` →
+    load all 8 boot processes (7 servers + init) with per-process page
+    allocation → create per-process page tables → enqueue → `restore()` → PM
   - ✅ **kmain flow (integration-tests)**: init → serial → timer → test_runner → 12 tests → ring-3 finale
-  - ✅ **Bugs fixed** (10 total): MSR_KERNEL_GS_BASE, GDT D/B+L conflict, stack
+  - ✅ **Bugs fixed**: MSR_KERNEL_GS_BASE, GDT D/B+L conflict, stack
     out-of-RAM, PM_EXEC_NEW constant, SLOT_FREE, exec stack, SYS_READ, hardcoded endpoint,
     `enable_nxe()` → `enable_nxe_and_sce()` (EFER.SCE), `_start` `#[naked]` fix
     (compiler prologue was corrupting stack), `setup_user_stack` argv formula,
     `syscall_entry` moved into `cfg(target_os = "none")` module (Windows linker fix),
     `test_syscall_getpid` NR_GETPID=20 (not 0), `write_volatile`/`read_volatile`
     for Proc fields (prevent compiler hoisting to statics), `proc_init()` call
-    added to normal boot path
+    added to normal boot path,
+    **initramfs path fix**: `//sbin/pm` → `/sbin/pm` (double-slash in BOOT_BINS),
+    **VM allocator init**: added `vm::mem_init()` call before process loading
+    (was missing, causing `map_page` to fail with NO_MEM),
+    **load_elf codegen workaround**: crate-level `kernel::elf::load_elf()` hangs
+    in boot context; inlined as `load_elf_inline()` in boot_init.rs
   - All unsafe operations use explicit `unsafe {}` blocks (Rust 2024)
 
 - [x] **14.B.9 — User-facing syscall handlers for boot-to-shell**
@@ -4534,7 +4547,7 @@ Remaining Priority 2 commands (not yet ported):
 |-----------|-------------|-------------|--------|
 | M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
 | M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ✅ |
-| M1c | **Multi-process scheduling with context switch** | **Phase 8 + 14.B** | ✅ |
+| M1c | **Multi-process scheduling with per-process pages and context switch** | **Phase 8 + 14.B** | ✅ |
 | M2 | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
 | M2-IO | **Interrupt-driven serial input** | **Phase 11 + 14.B** | ✅ |
 
@@ -4666,6 +4679,16 @@ and no scheduler loop that alternates between processes.
   mappings (PML4[256..512]) are shared read-only. kmain now calls this
   for each of the 8 boot processes instead of the shared deep-copy.
 
+- [x] **CSW3b — Per-process physical page allocation**
+  Each boot process now loads into its OWN physical pages instead of all
+  sharing the same physical address 0x1000000. `load_and_prepare_proc()`
+  allocates unique code pages via `vm::alloc_mem()` before loading the
+  ELF into them via a new `load_elf_at()` helper that writes segment
+  data to `phys_base + (vaddr - elf_base)`. Unique stack pages are
+  allocated and populated similarly, with identity-mapped stack data
+  copied to the per-process physical pages. `boot_create_restricted_page_table()`
+  maps virtual→physical instead of identity-mapping.
+
 - [x] **CSW4 — Init yields periodically** (`crates/userland/src/lib.rs`)
   Modified init's pause loop to call `getpid()` after each `pause`,
   giving the scheduler a chance to context-switch to other runnable
@@ -4757,20 +4780,28 @@ QEMU -nographic -m 256M -kernel trampoline.elf -device loader,file=kernel.bin
       │   └─ Phase E (1 test): sysretq_ring3 — jumps to ring-3, writes
       │      isa-debug-exit port, QEMU exits with code 1 (success)
       │
-      └─ [normal boot] → boot_init (current, single-process):
-          ├─ load_and_prepare_init() — find /sbin/init in initramfs CPIO,
-          │   parse ELF64 header, load segments, allocate user stack,
-          │   set up TrapFrame for sysretq (rcx=RIP, r11=RFLAGS, rsp=RSP)
-          ├─ boot_create_page_table() — allocate PML4+PDP+PD, deep-copy
-          │   boot identity map, share kernel high mappings
-          └─ boot_jump_to_user() — set p_cr3, call sysretq_to_user(),
-              execute sysretq → ring-3. Never returns.
-      
-      └─ [future — M1c] → scheduler loop:
-          ├─ load_and_prepare_proc() for all 8 boot processes
+      └─ [normal boot] → boot_init (multi-process with per-process pages):
+          ├─ kernel::vm::mem_init() — init VM allocator (free: 0x300000–0xFE00000
+          │   + 0xFF00000–0x10000000, minus user stack region)
+          ├─ For each of 8 boot processes (pm, vfs, rs, vm, ds, sched, tty, init):
+          │   1. `find_initramfs_file()` — locate ELF binary in CPIO archive
+          │   2. `calc_elf_bounds()` — parse ELF, compute page count
+          │   3. `vm::alloc_mem(code_pages, 0)` — allocate UNIQUE physical pages
+          │   4. `load_elf_at()` — load ELF into allocated pages at
+          │      phys_base + (vaddr - elf_base) via identity mapping
+          │   5. `vm::alloc_mem(stack_pages, 0)` — allocate unique stack pages
+          │   6. `setup_user_stack()` — set up argv at identity-mapped stack
+          │   7. Copy stack data to per-process physical pages
+          │   8. Set TrapFrame (rcx=RIP, r11=RFLAGS, rsp) in Proc entry
+          ├─ For each boot process:
+          │   `boot_create_restricted_page_table(virt_start, virt_end, phys_base,
+          │    stack_start, stack_end, phys_stack_base)` — maps virtual→physical
           ├─ enqueue each process on run queue
-          ├─ init_timer_isr(proc_no_time) — preemption on each tick
-          └─ loop { pick_proc() → restore() → (userspace) → kernel → ... }
+          ├─ set_cpulocal_proc_ptr(first_proc)
+          └─ arch_x86_64::asm::restore(first_proc) — switch to PM
+              → (PM runs, invokes RECEIVE syscall)
+              → kernel blocks PM, scheduler picks next process
+              → ...
 ```
 
 **Files involved:**

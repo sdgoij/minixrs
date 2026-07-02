@@ -212,8 +212,16 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
             let p = alloc_pt_page()?;
             write_pte(pde_addr, p | PG_P | pte::PG_RW | pte::PG_U);
             p
+        } else if pde & pte::PG_PS != 0 {
+            // Split a 2MB huge page: allocate a page table, zero it
+            // (all PTEs not-present), then replace the huge page PDE.
+            // The next call to map_page will set the specific PTE.
+            let pt = alloc_pt_page()?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            write_pte(pde_addr, pt | pte::PG_P | pte::PG_RW | pte::PG_U);
+            pt
         } else {
-            pde & PG_FRAME
+            pde & pte::PG_FRAME
         };
 
         let pt = pt_phys as *mut PtEntry;

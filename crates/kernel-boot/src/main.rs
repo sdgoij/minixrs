@@ -168,6 +168,23 @@ pub extern "C" fn kmain() -> ! {
             kernel::table::proc_init();
         }
 
+        // Initialize the VM page allocator (used by map_page and
+        // per-process ELF loading). Free memory from 0x300000
+        // (end of kernel image) to 0xFE00000 (start of user stack),
+        // and from 0xFF00000 (end of user stack) to 0x10000000.
+        #[cfg(target_os = "none")]
+        unsafe {
+            let m1 = kernel::vm::MemoryChunk {
+                base: 0x300000 / kernel::vm::VM_PAGE_SIZE as u64,
+                size: (0xFE00000 - 0x300000) / kernel::vm::VM_PAGE_SIZE as u64,
+            };
+            let m2 = kernel::vm::MemoryChunk {
+                base: 0xFF00000 / kernel::vm::VM_PAGE_SIZE as u64,
+                size: (0x10000000 - 0xFF00000) / kernel::vm::VM_PAGE_SIZE as u64,
+            };
+            kernel::vm::mem_init(&[m1, m2]);
+        }
+
         // Define all boot processes: (path, proc_nr, endpoint_name)
         let boot_procs: &[(&str, i32)] = &[
             ("/sbin/pm", PM_PROC_NR),
@@ -206,20 +223,6 @@ pub extern "C" fn kmain() -> ! {
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
             arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
             arch_x86_64::cpulocals::init_cpulocals();
-
-            // Initialize the VM page allocator (used by map_page for
-            // page table page allocations). Free memory from 0x300000
-            // (end of kernel image) to 0xFE00000 (start of user stack),
-            // and from 0xFF00000 (end of user stack) to 0x10000000.
-            let m1 = kernel::vm::MemoryChunk {
-                base: 0x300000 / kernel::vm::VM_PAGE_SIZE as u64,
-                size: (0xFE00000 - 0x300000) / kernel::vm::VM_PAGE_SIZE as u64,
-            };
-            let m2 = kernel::vm::MemoryChunk {
-                base: 0xFF00000 / kernel::vm::VM_PAGE_SIZE as u64,
-                size: (0x10000000 - 0xFF00000) / kernel::vm::VM_PAGE_SIZE as u64,
-            };
-            kernel::vm::mem_init(&[m1, m2]);
         }
 
         // Create per-process (restricted) page tables and enqueue each process.
@@ -238,8 +241,10 @@ pub extern "C" fn kmain() -> ! {
                 boot_init::boot_create_restricted_page_table(
                     info.code_start,
                     info.code_end,
+                    info.phys_code_base,
                     info.stack_start,
                     info.stack_end,
+                    info.phys_stack_base,
                 )
             };
             let pt_phys = match pt_phys {
