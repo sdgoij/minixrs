@@ -398,8 +398,15 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
         // ── Context switch ───────────────────────────────────────────
-        // Save the current process's register state.
-        save_proc_regs(rp, saved);
+        // Save the current process's register state, UNLESS this was an
+        // exec_replace (syscall 61), which already set up new register
+        // state in p_reg (entry point, stack pointer, RFLAGS). Saving
+        // over it would restore the OLD process state (init) instead of
+        // the new one (shell).
+        let is_exec = nr == 61;
+        if !is_exec {
+            save_proc_regs(rp, saved);
+        }
 
         // If the current process is still runnable, keep it running.
         // Do NOT re-enqueue — it's already in the run queue from boot.
@@ -410,7 +417,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
 
         // Pick the next runnable process.
         if let Some(next) = kernel::sched::pick_proc() {
-            if next != rp {
+            if next != rp || is_exec {
                 arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
                 // Switch to the new process — never returns.
                 arch_x86_64::asm::restore(next as *const u8);

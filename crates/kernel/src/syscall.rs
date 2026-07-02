@@ -375,20 +375,57 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
+        // Build a new page table with a full identity map (deep-copied from
+        // the boot PD) so the kernel can still run after CR3 switch. Then
+        // overwrite the user code and stack ranges with per-process pages.
         let pml4 = match arch_x86_64::alloc::alloc_phys_page() {
             Some(p) => p,
             None => return -12,
         };
         core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
 
-        let boot_pml4 = crate::pagetable::boot_cr3() as *const u64;
-        for i in 256..512 {
+        // Walk the boot page table to reach the PD (512 x 2MB entries = 1GB).
+        let boot_cr3_val = crate::pagetable::boot_cr3();
+        let boot_pml4 = boot_cr3_val as *const u64;
+        let boot_pml4e0 = core::ptr::read(boot_pml4);
+        let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pdpt = boot_pdpt_phys as *const u64;
+        let boot_pdpte0 = core::ptr::read(boot_pdpt);
+        let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pd = boot_pd_phys as *const u64;
+
+        // Allocate PDPT and PD pages.
+        let pdpt_page = match arch_x86_64::alloc::alloc_phys_page() {
+            Some(p) => p,
+            None => return -12,
+        };
+        let pd_page = match arch_x86_64::alloc::alloc_phys_page() {
+            Some(p) => p,
+            None => return -12,
+        };
+        core::ptr::write_bytes(pdpt_page as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+        core::ptr::write_bytes(pd_page as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+
+        // Link: PML4[0] -> PDPT[0] -> PD.
+        let flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+        core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
+        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+
+        // Deep-copy all 512 PD entries from boot PD (full 1GB identity map).
+        let new_pd = pd_page as *mut u64;
+        for i in 0usize..512 {
+            let entry = core::ptr::read(boot_pd.add(i));
+            core::ptr::write(new_pd.add(i), entry);
+        }
+
+        // Share kernel high mappings (PML4[256..512]).
+        for i in 256usize..512 {
             let entry = core::ptr::read(boot_pml4.add(i));
             core::ptr::write((pml4 as *mut u64).add(i), entry);
         }
 
+        // Overwrite user code pages with per-process identity mappings.
         let user_flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
-
         let mut va = code_start;
         while va < code_end {
             if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
@@ -396,6 +433,8 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             }
             va += 0x1000;
         }
+
+        // Overwrite user stack pages similarly.
         let mut va = stack_start;
         while va < stack_end {
             if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {

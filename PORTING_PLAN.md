@@ -4170,21 +4170,32 @@ are printed to the serial console. The system boots 4 user-space servers
   missing `swapgs` in the `timer_isr_entry` asm trampoline or a GS-relative
   memory access issue in `clock::timer_int_handler()` which accesses per-CPU
   data (current process pointer, run queues) without GS segment setup.
-  Workaround kept with updated documentation — preemptive multitasking
-  deferred for deeper debugging.
+  Workaround kept — timer stays masked, serial unmasked for shell input.
+- **Serial IRQ unmasked for shell input**: split the PIC IMR workaround —
+  timer IRQ (bit 0) stays masked, serial IRQ (bit 4, IRQ4) is now cleared
+  so COM1 receive interrupts can deliver typed characters to the shell
+  via `ser_input::push_byte()` from the serial ISR handler.
+  The serial ISR entry and handler were already installed in kmain but
+  the workaround masked both IRQs together.
+- **exec_replace register save bug**: `syscall_handler_c` called
+  `save_proc_regs()` AFTER `exec_initramfs_for_target` set up the new
+  TrapFrame (entry point, stack, RFLAGS, CR3) in p_reg. The save
+  overwrote the shell's entry/stack with init's old register values,
+  so the shell never actually started. Fixed by skipping
+  `save_proc_regs` for syscall 61 (NR_EXEC_REPLACE) and forcing a
+  `restore()` call to load from the new p_reg rather than falling
+  through to the kernel-stack restore path.
 
 **Previous fixes (already committed):**
 - Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, changed
   to `0xAB` (L=1, G=1) — sysretq now works.
 - Added `init_tss_for_boot()` — 16-entry GDT with TSS descriptor.
 - Exception handlers for page fault, GPF, and double fault.
-- Timer/serial IRQs masked (workaround — timer interrupt handler not yet
-  installed in IDT, unmasking would cause #GP on first ring-3 IRQ).
+- Timer IRQ masked (workaround — timer ISR path #GP), serial IRQ unmasked.
 
 **Next steps:**
 1. Get shell prompt — PM's fork/exec handlers need VFS IPC working.
-2. (Done) Timer interrupt handler installed — preemptive multitasking active.
-   Serial IRQ (IRQ4) still masked until serial driver is wired.
+   (exec_replace bug fixed — shell should now start after init's replace.)
 
 ---
 
