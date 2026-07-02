@@ -496,10 +496,43 @@ pub fn fsck(_args: &[&str]) -> i32 {
     0
 }
 
-/// sh — minimal shell.
+/// sh — minimal shell that reads lines from stdin and echoes them.
+/// On host builds, just prints a stub message and returns.
 pub fn sh(_args: &[&str]) -> i32 {
-    write_out(b"sh: waiting for PM server...\n");
-    0
+    #[cfg(not(target_os = "none"))]
+    {
+        write_out(b"sh: stub (no MINIX syscall ABI on host)\n");
+        return 0;
+    }
+    #[cfg(target_os = "none")]
+    {
+        write_out(b"# ");
+        let mut buf = [0u8; 256];
+        loop {
+            // Read a line from stdin (fd 0).
+            let mut pos = 0usize;
+            while pos < buf.len() - 1 {
+                let n = minix_rt::read(0, &mut buf[pos..pos + 1]);
+                if n <= 0 {
+                    break;
+                }
+                let c = buf[pos];
+                if c == b'\r' {
+                    continue;
+                }
+                if c == b'\n' {
+                    break;
+                }
+                pos += 1;
+            }
+            buf[pos] = b'\n';
+            let line_len = pos + 1;
+            // Echo the line back.
+            write_out(&buf[..line_len]);
+            // Print the next prompt.
+            write_out(b"# ");
+        }
+    }
 }
 
 /// Return a human-readable error string for a POSIX error code.
@@ -536,12 +569,23 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(&[b'0' + (pid % 10) as u8]);
     write_out(b"\n");
 
-    // Yield periodically so the scheduler can run other processes.
-    // fork/exec/waitpid come when PM is live.
+    // Replace self with /bin/sh via kernel exec_replace syscall.
+    write_out(b"init: starting shell...\n");
+    #[cfg(target_os = "none")]
+    let ret = unsafe { minix_rt::exec_replace(b"/bin/sh\0") };
+    #[cfg(not(target_os = "none"))]
+    let ret = -38i64; // ENOSYS on host
+    // If exec fails, print error and loop.
+    write_err(b"init: exec failed: err=");
+    // Print negative error code
+    let err = -ret as i32;
+    if err >= 10 {
+        write_out(&[b'0' + (err / 10) as u8]);
+    }
+    write_out(&[b'0' + (err % 10) as u8]);
+    write_out(b"\n");
     loop {
         unsafe { core::arch::asm!("pause") };
-        // Voluntarily yield to the scheduler so other runnable processes
-        // (e.g., servers with pending work) get CPU time.
         let _ = minix_rt::getpid();
     }
 }

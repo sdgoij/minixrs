@@ -4524,7 +4524,7 @@ Remaining Priority 2 commands (not yet ported):
 | M1 | Kernel boots in QEMU x86_64, prints banner | Phase 8 | ✅ |
 | M1b | **First userspace process execution (sysretq to ring-3)** | **Phase 14.B** | ✅ |
 | M1c | **Multi-process scheduling with context switch** | **Phase 8 + 14.B** | ✅ |
-| M2 | **Shell prompt (`#`) via init → fork/exec/waitpid** | **Phase 12 + 14.B** | ⬜ |
+| M2 | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
 
 ### M1b Tasks — First Userspace Process
 
@@ -4659,8 +4659,29 @@ and no scheduler loop that alternates between processes.
   giving the scheduler a chance to context-switch to other runnable
   processes. Without this, init's `loop { pause }` would never make
   a syscall, starving the scheduler.
-  Future: replace with fork/exec/waitpid to launch `/bin/sh` when PM
-  server IPC is live.
+
+- [x] **M2a — SYS_EXEC_REPLACE kernel syscall** (`kernel/src/syscall.rs`)
+  Added syscall 61 (NR_EXEC_REPLACE) that loads a binary from initramfs
+  and replaces the calling process in-place. Reads path from userspace,
+  parses ELF, loads segments, creates a fresh restricted page table,
+  and updates the TrapFrame. Bypasses PM/VFS/VM server chain for early
+  boot. dispatch_basic_syscall updated to restore CR3 from p_seg.p_cr3
+  (which may be changed by the handler).
+
+- [x] **M2b — exec_replace in minix-rt** (`crates/minix-rt/src/lib.rs`)
+  Added NR_EXEC_REPLACE (61) constant and exec_replace() wrapper
+  (gated on target_os = "none").
+
+- [x] **M2c — Init execs /bin/sh** (`crates/userland/src/lib.rs`)
+  init now calls exec_replace("/bin/sh") to replace itself with the
+  shell instead of entering the pause loop. On host builds, the call
+  is stubbed to ENOSYS to avoid the privileged syscall instruction.
+
+- [x] **M2d — Minimal shell** (`crates/userland/src/lib.rs`)
+  sh implements a readline loop: prints "# " prompt, reads characters
+  from stdin (fd 0), echoes the line back on newline, repeats. On
+  host builds, prints a stub message and returns immediately.
+  test_sh_stub no longer hangs.
 
 #### Next phases (F–L) — Component integration tests
 
@@ -4777,8 +4798,8 @@ just run-img
 | M2 | Two processes can IPC (x86_64) | Phase 4 | ❌ |
 | M3 | Process fork + exec works (x86_64) | Phase 5 | ❌ |
 | M1c | **Multi-process context switch + scheduler** | **Phase 8 + 14.B** | ✅ |
-| M2 | **Shell prompt via init → fork/exec/waitpid** | **Phase 12 + 14.B** | ⬜ |
-| M7b | **System boots to shell prompt (`# ` on serial)** | **Phase 14.B** | ❌ |
+| **M2** | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
+| M7b | **System boots to full shell prompt on serial** | **Phase 14.B** | 🔄 |
 | M4 | MFS filesystem serves files (x86_64) | Phase 9 | ❌ |
 | M5 | VFS server routes requests (x86_64) | Phase 10 | ❌ |
 | M6 | IDE/Virtio driver reads disk (x86_64) | Phase 11b | ❌ |

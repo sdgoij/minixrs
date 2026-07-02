@@ -64,6 +64,25 @@ pub const RECEIVE_CALL: u64 = 47;
 pub const SENDREC_CALL: u64 = 48;
 /// IPC notify.
 pub const NOTIFY_CALL: u64 = 49;
+/// Syscall to replace current process with a binary from initramfs.
+pub const NR_EXEC_REPLACE: u64 = 61;
+
+/// Replace the current process with a binary from initramfs.
+///
+/// `path` must be a null-terminated string. The calling process is
+/// replaced entirely — no return on success.
+///
+/// # Safety
+///
+/// `path` must point to a valid null-terminated string in the process's
+/// address space. The binary named by `path` must exist in the embedded
+/// initramfs. On success this function never returns.
+///
+/// Only available on bare-metal; returns ENOSYS on host builds.
+#[cfg(target_os = "none")]
+pub unsafe fn exec_replace(path: &[u8]) -> i64 {
+    unsafe { syscall1(NR_EXEC_REPLACE, path.as_ptr() as u64) }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Syscall wrappers
