@@ -517,18 +517,30 @@ pub fn sh(_args: &[&str]) -> i32 {
                     break;
                 }
                 let c = buf[pos];
-                if c == b'\r' {
-                    continue;
-                }
-                if c == b'\n' {
+                // Enter (\r from QEMU terminal) ends the line.
+                if c == b'\r' || c == b'\n' {
+                    write_out(b"\r\n");
                     break;
                 }
+                // Backspace (DEL 0x7F or BS 0x08) erases previous char.
+                if c == 0x7F || c == 0x08 {
+                    if pos > 0 {
+                        pos -= 1;
+                        write_out(b"\x08 \x08");
+                    }
+                    continue;
+                }
+                // Echo printable character and store it.
+                write_out(&[c]);
                 pos += 1;
             }
-            buf[pos] = b'\n';
-            let line_len = pos + 1;
-            // Echo the line back.
-            write_out(&buf[..line_len]);
+            let line_len = pos;
+            // Execute the command (for now, just echo it back).
+            if line_len > 0 {
+                write_out(b"echo: ");
+                write_out(&buf[..line_len]);
+                write_out(b"\r\n");
+            }
             // Print the next prompt.
             write_out(b"# ");
         }

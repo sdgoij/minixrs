@@ -4194,6 +4194,14 @@ are printed to the serial console. The system boots 4 user-space servers
   (identity), not to the per-process page. The shell tried to execute
   garbage at physical 0x1000000. Fixed by switching to BOOT_CR3 before
   `load_elf` so writes go to the identity-mapped physical addresses.
+- **Serial input polling fallback**: `read_blocking()` previously only
+  checked the interrupt-driven ring buffer, which is populated by the
+  serial ISR. The serial ISR uses the same asm entry pattern as the
+  timer ISR (no `swapgs`) and likely doesn't deliver interrupts
+  correctly. Added a direct COM1 hardware poll fallback — when the
+  buffer is empty, read the LSR status register at port 0x3FD to check
+  for received data, and read the byte directly from port 0x3F8.
+  This makes input work without relying on working interrupt delivery.
 
 **Previous fixes (already committed):**
 - Fixed `code64_descriptor()` flags byte — was `0xA0` with L=0, changed
@@ -4202,9 +4210,17 @@ are printed to the serial console. The system boots 4 user-space servers
 - Exception handlers for page fault, GPF, and double fault.
 - Timer IRQ masked (workaround — timer ISR path #GP), serial IRQ unmasked.
 
+**Milestone achieved ✅ — Shell prompt `# ` works with input.**
+
+Shell reads characters via COM1 polling, echoes them back, handles
+backspace, and submits lines on Enter. Currently echoes submitted
+lines as `echo: <line>` — no actual command execution yet.
+
 **Next steps:**
-1. Get shell prompt — PM's fork/exec handlers need VFS IPC working.
-   (exec_replace bug fixed — shell should now start after init's replace.)
+1. Implement command parsing in the shell (built-in commands first:
+   echo, help, then external command execution via fork/exec).
+2. Wire VFS IPC between PM and VFS for fork/exec of filesystem
+   binaries (ls, cat, cp, etc. exist in initramfs).
 
 ---
 

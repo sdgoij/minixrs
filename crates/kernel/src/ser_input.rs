@@ -57,12 +57,37 @@ pub fn try_read() -> Option<u8> {
 }
 
 /// Block until a byte is available, then return it.
-/// Uses the `pause` instruction to spin-wait.
+/// First tries the interrupt-driven buffer; if empty, polls the COM1
+/// serial port hardware directly as a fallback. This ensures input works
+/// even when the serial ISR is not delivering interrupts.
 #[inline]
 pub fn read_blocking() -> u8 {
     loop {
+        // Try the interrupt-driven buffer first.
         if let Some(byte) = try_read() {
             return byte;
+        }
+        // Fallback: poll COM1 data-ready bit directly.
+        // This works even without serial interrupt delivery.
+        unsafe {
+            // Poll COM1 LSR (port 0x3FD) for data-ready bit (bit 0).
+            let lsr: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") lsr,
+                in("dx") 0x3FDu16,
+                options(nomem, nostack),
+            );
+            if lsr & 0x01 != 0 {
+                let byte: u8;
+                core::arch::asm!(
+                    "in al, dx",
+                    out("al") byte,
+                    in("dx") 0x3F8u16,
+                    options(nomem, nostack),
+                );
+                return byte;
+            }
         }
         unsafe {
             core::arch::asm!("pause", options(nomem, nostack));
