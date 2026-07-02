@@ -181,9 +181,10 @@ pub mod sys {
     pub const STATECTL: u32 = KERNEL_CALL + 55;
     pub const SAFEMEMSET: u32 = KERNEL_CALL + 56;
     pub const PADCONF: u32 = KERNEL_CALL + 57;
+    pub const EXEC_INITRAMFS: u32 = KERNEL_CALL + 61;
 }
 
-pub const NR_SYS_CALLS: u32 = 58;
+pub const NR_SYS_CALLS: u32 = 64;
 
 /// Basic kernel calls allowed to every system process.
 pub const SYS_BASIC_CALLS: [u32; 12] = [
@@ -782,7 +783,7 @@ mod tests {
         assert_eq!(sys::GETINFO, 0x61A);
         assert_eq!(sys::EXIT, 0x635);
         assert_eq!(sys::SAFEMEMSET, 0x638);
-        assert_eq!(NR_SYS_CALLS, 58);
+        assert_eq!(NR_SYS_CALLS, 64);
     }
 
     #[test]

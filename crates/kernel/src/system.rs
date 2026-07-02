@@ -1182,6 +1182,7 @@ pub unsafe fn system_init() {
         map_call(55, do_statectl_handler); // SYS_STATECTL
         map_call(56, do_safememset_handler); // SYS_SAFEMEMSET
         map_call(60, do_exec_finish_handler); // SYS_EXEC finalization
+        map_call(61, do_exec_initramfs_handler); // SYS_EXEC_INITRAMFS
     }
 
     /// Stub for SYS_UPDATE — deferred.
@@ -3288,6 +3289,114 @@ pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
 
 // ── do_getmcontext / do_setmcontext — machine context (Phase 8.10) ────
 // Source: .refs/minix-3.3.0/minix/kernel/system/do_mcontext.c
+
+// ── EXEC_INITRAMFS message offsets ─────────────────────────────────
+// Message format for SYS_EXEC_INITRAMFS (call 61):
+//   offset  0: target_endpt (i32, 4 bytes)
+//   offset  4: path_len     (i32, 4 bytes)
+//   offset  8: path         (up to 56 bytes, null-terminated)
+
+/// Handle SYS_EXEC_INITRAMFS (call 61): exec a process from initramfs.
+///
+/// Loads a binary from the embedded initramfs and replaces the target
+/// process's address space and entry point.  This is the kernel-side
+/// implementation used by PM's do_exec when VFS is not yet available.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`.  `msg` must contain a valid
+/// target endpoint and path.
+pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, 0);
+        let path_len = msg_read_i32(msg, 4) as usize;
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        if path_len == 0 || path_len > 56 {
+            return crate::ipc::EINVAL;
+        }
+
+        let path_bytes = &msg[8..8 + path_len];
+        let path = match core::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return crate::ipc::EINVAL,
+        };
+
+        let (data, _mode) = match crate::initramfs::find_initramfs_file(path) {
+            Some(d) => d,
+            None => return crate::ipc::ENOENT,
+        };
+
+        let ehdr = match crate::elf::parse_elf_header(data) {
+            Ok(e) => e,
+            Err(_) => return crate::ipc::ENOSYS,
+        };
+        let loaded = match crate::elf::load_elf(data) {
+            Ok(l) => l,
+            Err(_) => return crate::ipc::ENOSYS,
+        };
+
+        let user_stack_base: u64 = 0x0FE00000;
+        let user_stack_size: usize = 65536;
+        let stack_top = user_stack_base + user_stack_size as u64;
+        let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
+            Ok(rsp) => rsp,
+            Err(_) => return crate::ipc::ENOSYS,
+        };
+
+        let code_start = loaded.base & !0xFFF;
+        let code_end = (loaded.top + 0xFFF) & !0xFFF;
+        let stack_start = user_stack_base & !0xFFF;
+        let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
+
+        let pml4 = match arch_x86_64::alloc::alloc_phys_page() {
+            Some(p) => p,
+            None => return crate::ipc::ENOMEM,
+        };
+        core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+
+        let boot_pml4 = crate::pagetable::boot_cr3() as *const u64;
+        for i in 256..512 {
+            let entry = core::ptr::read(boot_pml4.add(i));
+            core::ptr::write((pml4 as *mut u64).add(i), entry);
+        }
+
+        let user_flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+
+        let mut va = code_start;
+        while va < code_end {
+            if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                return crate::ipc::ENOMEM;
+            }
+            va += 0x1000;
+        }
+        let mut va = stack_start;
+        while va < stack_end {
+            if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                return crate::ipc::ENOMEM;
+            }
+            va += 0x1000;
+        }
+
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        (*rp).p_seg.p_cr3 = pml4;
+        (*rp).p_reg.rcx = ehdr.e_entry;
+        (*rp).p_reg.r11 = 0x0202u64;
+        (*rp).p_reg.rsp = user_rsp;
+        (*rp).p_reg.rip = ehdr.e_entry;
+        (*rp).p_reg.rflags = 0x0202u64;
+        (*rp).p_reg.rdi = user_rsp;
+
+        OK
+    }
+}
 
 /// Handle SYS_GETMCONTEXT: save a process's machine context.
 ///

@@ -20,7 +20,7 @@ use crate::proc::NR_SYS_PROCS;
 pub const NR_IO_RANGE: usize = 64;
 pub const NR_MEM_RANGE: usize = 20;
 pub const NR_IRQ: usize = 16;
-pub const NR_SYS_CALLS: usize = 58;
+pub const NR_SYS_CALLS: usize = 64;
 pub const SYS_CALL_MASK_SIZE: usize = NR_SYS_CALLS.div_ceil(32); // BITMAP_CHUNKS
 
 pub const NR_STATIC_PRIV_IDS: usize = NR_TASKS + LAST_SPECIAL_PROC_NR + 1;
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(NR_IO_RANGE, 64);
         assert_eq!(NR_MEM_RANGE, 20);
         assert_eq!(NR_IRQ, 16);
-        assert_eq!(NR_SYS_CALLS, 58);
+        assert_eq!(NR_SYS_CALLS, 64);
         assert_eq!(NR_STATIC_PRIV_IDS, 16);
         assert_eq!(STACK_GUARD, 0xDEAD_BEEF);
     }

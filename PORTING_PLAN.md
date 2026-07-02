@@ -3578,14 +3578,20 @@ be replaced with real implementations.
   - [x] VM_EXEC_NEWMEM handler in VM server (`pt_new` for fresh address space)
   - [x] VFS_OPEN / VFS_READ wired through FS request layer
   - [x] Kernel SYS_EXEC finalization call (call 60, updates CR3 + trap frame)
-  - [ ] **12.25a — Implement do_exec in PM** — needs:
-        1. Read exec data from grant (path + argv + envp) via SAFECOPYFROM
-        2. Open the binary via VFS_OPEN IPC (sendrec to VFS_PROC_NR)
-        3. Read ELF header via VFS_READ
-        4. Send VM_EXEC_NEWMEM for fresh address space
-        5. Load ELF segments, set up user stack with argv/envp
-        6. Call kernel SYS_EXEC to finalize (set CR3, RIP, RSP)
-        (Blocked on: VFS mount + grant table in minix-std)
+  - [x] **12.25a — Implement do_exec in PM** — `do_exec()` now calls kernel
+        syscall 62 (SYS_EXEC_TARGET) to load a binary from initramfs and
+        apply it to the caller process. Added:
+        - `exec_initramfs_for_target()` helper in kernel/src/syscall.rs:
+          loads ELF from initramfs, creates restricted page table, sets
+          up TrapFrame for any target process.
+        - `sys_exec_target_handler` (basic syscall 62): takes target
+          endpoint + path pointer, dispatches to helper.
+        - `sys_exec_replace_handler` (basic syscall 61): refactored to
+          use the same helper.
+        - NR_SYS_CALLS increased from 58 to 64 to accommodate new calls.
+        - `SYS_EXEC_INITRAMFS` kernel call (index 61) added in
+          kernel/src/system.rs for future SYSTEM IPC path.
+        *(Grant-based exec will replace this when VFS + grants are wired.)*
   - [ ] **12.25b — Replace remaining PM ENOSYS stubs**
         - `no_sys` catch-all intentionally returns ENOSYS
         - PM_EXEC_NEW dispatches to `do_exec` (see 12.25a)

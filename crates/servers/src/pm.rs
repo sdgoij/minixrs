@@ -1261,37 +1261,28 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     // The grant points to exec data in the caller's address space:
     //   [path\0][argv[0]\0][argv[1]\0]...[argv[n]\0][envp[0]\0]...
     //   The first null-terminated string is the executable path.
+    //
+    // Until grants + VFS are fully wired, we use kernel syscall 62
+    // (SYS_EXEC_TARGET) which loads from the embedded initramfs.
 
-    let _exec_endpt = unsafe { msg.m_payload.m1.m1i1 };
+    let exec_endpt = unsafe { msg.m_payload.m1.m1i1 };
     let grant_id = unsafe { msg.m_payload.m1.m1i2 };
-    let _grant_size = unsafe { msg.m_payload.m1.m1i3 };
 
-    let _ = grant_id;
-
-    // Step 1: Validate the caller slot.
+    // Validate the caller slot.
     let base = MPROC.as_ptr();
     let rmp = unsafe { &*base.add(caller_slot) };
     if rmp.mp_flags & IN_USE == 0 {
         return EINVAL;
     }
 
-    // Step 2: Open the binary file via VFS.
-    // VFS_OPEN(path, O_RDONLY) → fd.
-    // For now, VFS isn't wired, so return ENOSYS.
-    //
-    // Once VFS IPC is available:
-    //   1. Copy the path from the grant (sys_safecopyfrom)
-    //   2. Build VFS_OPEN message with path
-    //   3. sendrec(VFS_PROC_NR, &msg)
-    //   4. If fd < 0, return error
-    //
-    // Step 3: Read ELF header (VFS_READ).
-    // Step 4: Send VM_EXEC_NEWMEM to create address space.
-    // Step 5: Load segments via VFS_READ + VM operations.
-    // Step 6: Set up user stack.
-    // Step 7: Finalize via kernel SYS_EXEC call.
-
-    ENOSYS
+    // The grant_id points to exec data in the CALLER's address space:
+    //   [path\0][argv[0]\0]...[argv[n]\0][envp[0]\0]...
+    // Read the path directly (works via identity map until grants are wired).
+    let path_ptr = grant_id as *const u8;
+    // Call kernel SYS_EXEC_TARGET (62) to load from initramfs.
+    // args[0] = target endpoint, args[1] = path pointer.
+    let result = unsafe { minix_rt::syscall2(62, exec_endpt as u64, path_ptr as u64) };
+    result as i32
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

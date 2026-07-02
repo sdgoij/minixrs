@@ -371,60 +371,23 @@ unsafe fn sys_ipc_notify_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
     }
 }
 
-/// SYS_EXEC_REPLACE (61) — replace the current process with a binary from initramfs.
-///
-/// Arguments:
-///   args[0] = pointer to null-terminated path string in user space
-///
-/// Loads the specified binary from the embedded initramfs, creates a fresh
-/// per-process page table mapping only the new binary's code and stack,
-/// and updates the calling process's TrapFrame to start at the new entry
-/// point. This bypasses the PM+VFS+VM server chain.
-///
-/// Returns 0 on success, or a negative error code.
-unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+/// Helper: load a binary from initramfs and apply it to a target process.
+/// Returns 0 on success, negative error code on failure.
+unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i64 {
     unsafe {
-        let path_ptr = args[0] as *const u8;
-        if path_ptr.is_null() {
-            return -14; // EFAULT
-        }
-
-        // Read the path string (null-terminated, bounded to 256 bytes).
-        let mut path_buf = [0u8; 256];
-        let mut path_len = 0usize;
-        for (i, slot) in path_buf.iter_mut().enumerate().take(255) {
-            let byte = core::ptr::read_volatile(path_ptr.add(i));
-            if byte == 0 {
-                break;
-            }
-            *slot = byte;
-            path_len = i + 1;
-        }
-        if path_len == 0 {
-            return -14; // EFAULT
-        }
-        let path = match core::str::from_utf8(&path_buf[..path_len]) {
-            Ok(s) => s,
-            Err(_) => return -14,
-        };
-
-        // Find the binary in initramfs.
         let (data, _mode) = match crate::initramfs::find_initramfs_file(path) {
             Some(d) => d,
-            None => return -2, // ENOENT
+            None => return -2,
         };
-
-        // Parse and load the ELF.
         let ehdr = match crate::elf::parse_elf_header(data) {
             Ok(e) => e,
-            Err(_) => return -38, // ENOSYS
+            Err(_) => return -38,
         };
         let loaded = match crate::elf::load_elf(data) {
             Ok(l) => l,
             Err(_) => return -38,
         };
 
-        // Set up user stack.
         let user_stack_base: u64 = 0x0FE00000;
         let user_stack_size: usize = 65536;
         let stack_top = user_stack_base + user_stack_size as u64;
@@ -438,14 +401,12 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
-        // Create a fresh page table.
         let pml4 = match arch_x86_64::alloc::alloc_phys_page() {
             Some(p) => p,
-            None => return -12, // ENOMEM
+            None => return -12,
         };
         core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
 
-        // Share kernel high mappings (PML4[256..512]).
         let boot_pml4 = crate::pagetable::boot_cr3() as *const u64;
         for i in 256..512 {
             let entry = core::ptr::read(boot_pml4.add(i));
@@ -454,7 +415,6 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
 
         let user_flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
 
-        // Map code pages (identity-mapped).
         let mut va = code_start;
         while va < code_end {
             if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
@@ -462,8 +422,6 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
             }
             va += 0x1000;
         }
-
-        // Map stack pages (identity-mapped).
         let mut va = stack_start;
         while va < stack_end {
             if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
@@ -472,17 +430,84 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
             va += 0x1000;
         }
 
-        // Update process state.
-        (*caller).p_seg.p_cr3 = pml4;
-        (*caller).p_reg.rcx = ehdr.e_entry;
-        (*caller).p_reg.r11 = 0x0202u64;
-        (*caller).p_reg.rsp = user_rsp;
-        (*caller).p_reg.rip = ehdr.e_entry;
-        (*caller).p_reg.rflags = 0x0202u64;
-        // rdi gets the initial stack pointer (argumen pointer for _start)
-        (*caller).p_reg.rdi = user_rsp;
+        (*rp).p_seg.p_cr3 = pml4;
+        (*rp).p_reg.rcx = ehdr.e_entry;
+        (*rp).p_reg.r11 = 0x0202u64;
+        (*rp).p_reg.rsp = user_rsp;
+        (*rp).p_reg.rip = ehdr.e_entry;
+        (*rp).p_reg.rflags = 0x0202u64;
+        (*rp).p_reg.rdi = user_rsp;
 
         0
+    }
+}
+
+/// SYS_EXEC_REPLACE (61) — replace the current process with a binary from initramfs.
+unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    unsafe {
+        let path_ptr = args[0] as *const u8;
+        if path_ptr.is_null() {
+            return -14;
+        }
+        let mut path_buf = [0u8; 256];
+        let mut path_len = 0usize;
+        for (i, slot) in path_buf.iter_mut().enumerate().take(255) {
+            let byte = core::ptr::read_volatile(path_ptr.add(i));
+            if byte == 0 {
+                break;
+            }
+            *slot = byte;
+            path_len = i + 1;
+        }
+        if path_len == 0 {
+            return -14;
+        }
+        let path = match core::str::from_utf8(&path_buf[..path_len]) {
+            Ok(s) => s,
+            Err(_) => return -14,
+        };
+        exec_initramfs_for_target(caller, path)
+    }
+}
+
+/// SYS_EXEC_TARGET (62) — exec a binary from initramfs for a specific process.
+/// args[0] = target endpoint, args[1] = path pointer in caller's space.
+unsafe fn sys_exec_target_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    unsafe {
+        let target_ep = args[0] as i32;
+        let path_ptr = args[1] as *const u8;
+        if path_ptr.is_null() {
+            return -14;
+        }
+
+        if !crate::table::is_ok_endpoint(target_ep) {
+            return -5; // EIO
+        }
+        let proc_nr = crate::table::endpoint_slot(target_ep);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != target_ep {
+            return -5;
+        }
+
+        let mut path_buf = [0u8; 256];
+        let mut path_len = 0usize;
+        for (i, slot) in path_buf.iter_mut().enumerate().take(255) {
+            let byte = core::ptr::read_volatile(path_ptr.add(i));
+            if byte == 0 {
+                break;
+            }
+            *slot = byte;
+            path_len = i + 1;
+        }
+        if path_len == 0 {
+            return -14;
+        }
+        let path = match core::str::from_utf8(&path_buf[..path_len]) {
+            Ok(s) => s,
+            Err(_) => return -14,
+        };
+
+        exec_initramfs_for_target(rp, path)
     }
 }
 
@@ -521,6 +546,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(48, sys_ipc_sendrec_handler); // SENDREC
         register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
         register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE
+        register_basic_syscall(62, sys_exec_target_handler); // SYS_EXEC_TARGET
     }
 }
 
