@@ -14,7 +14,7 @@
 use core::ffi::c_char;
 use core::sync::atomic::AtomicU32;
 
-use arch_x86_64::frame::TrapFrame;
+use crate::hal;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -261,8 +261,8 @@ impl Default for MiscFlags {
 #[derive(Debug)]
 #[repr(C)]
 pub struct Proc {
-    /// Process registers saved in stack frame.
-    pub p_reg: TrapFrame,
+    /// Process registers saved in stack frame (arch-specific layout as raw bytes).
+    pub p_reg: [u8; 256],
     /// Segment descriptors (page table root, FPU state).
     pub p_seg: SegFrame,
     /// Process number (for fast access).
@@ -360,7 +360,7 @@ pub struct Proc {
 impl Default for Proc {
     fn default() -> Self {
         Self {
-            p_reg: TrapFrame::default(),
+            p_reg: hal::frame_default(),
             p_seg: SegFrame::default(),
             p_nr: 0,
             p_priv: core::ptr::null_mut(),

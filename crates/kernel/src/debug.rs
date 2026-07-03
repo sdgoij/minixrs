@@ -560,8 +560,8 @@ pub unsafe fn proc_stacktrace(rp: *const Proc) {
     unsafe {
         let name_ptr = &(*rp).p_name as *const i8;
         let ep = (*rp).p_endpoint;
-        let rip = (*rp).p_reg.rip;
-        let rsp = (*rp).p_reg.rsp;
+        let rip = crate::hal::read_frame_field(&(*rp).p_reg, 160);
+        let rsp = crate::hal::read_frame_field(&(*rp).p_reg, 168);
 
         // Format header manually into a stack buffer: "name (ep=N) rip=0x... rsp=0x...\n"
         let mut buf = [0u8; 160];

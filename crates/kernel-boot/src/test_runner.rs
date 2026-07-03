@@ -1106,17 +1106,12 @@ fn test_sysretq_ring3() {
         // Set per-process CR3
         (*rp).p_seg.p_cr3 = pt_phys;
 
-        // RCX → RIP via sysretq: point at the ring-3 code
-        (*rp).p_reg.rcx = code_page;
-
-        // R11 → RFLAGS via sysretq:
-        //   PSL_USERSET = 0x0202 (IF=1, MBO=1)
-        //   IOPL=3 (bits 12-13): gives ring-3 I/O port access
-        //   Combined: 0x3202
-        (*rp).p_reg.r11 = 0x3202u64;
-
-        // RSP = top of user stack
-        (*rp).p_reg.rsp = stack_top;
+        // Set up initial register state via raw byte offsets.
+        // x86_64 TrapFrame: rcx=16, r11=72, rsp=168
+        let frame = &mut (*rp).p_reg;
+        frame[16..24].copy_from_slice(&code_page.to_ne_bytes()); // rcx = entry (RIP via sysretq)
+        frame[72..80].copy_from_slice(&0x3202u64.to_ne_bytes()); // r11 = RFLAGS (IOPL=3)
+        frame[168..176].copy_from_slice(&stack_top.to_ne_bytes()); // rsp
     }
 
     // Debug: print addresses

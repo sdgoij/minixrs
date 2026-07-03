@@ -343,26 +343,40 @@ pub extern "C" fn kmain() -> ! {
 /// `saved` must point to a valid kernel-stack save area pushed by
 /// `syscall_entry`. `rp` must point to a valid `Proc`.
 unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
+    // x86_64 TrapFrame byte offsets (each field is 8 bytes):
+    //   0: rax,   8: rbx,  16: rcx,  24: rdx,  32: rsi,  40: rdi
+    //  48: r8,   56: r9,   64: r10,  72: r11,  80: r12,  88: r13
+    //  96: r14, 104: r15, 160: rip, 168: rsp, 176: rflags
+    let frame = unsafe { &mut (*rp).p_reg };
     unsafe {
-        (*rp).p_reg.rax = *saved.add(0);
-        (*rp).p_reg.rbx = *saved.add(1);
-        (*rp).p_reg.rcx = *saved.add(2); // return RIP
-        (*rp).p_reg.rdx = *saved.add(3);
-        (*rp).p_reg.rsi = *saved.add(4);
-        (*rp).p_reg.rdi = *saved.add(5);
-        (*rp).p_reg.r8 = *saved.add(6);
-        (*rp).p_reg.r9 = *saved.add(7);
-        (*rp).p_reg.r10 = *saved.add(8);
-        (*rp).p_reg.r11 = *saved.add(9); // return RFLAGS
-        (*rp).p_reg.r12 = *saved.add(10);
-        (*rp).p_reg.r13 = *saved.add(11);
-        (*rp).p_reg.r14 = *saved.add(12);
-        (*rp).p_reg.r15 = *saved.add(13);
-        // Recover user RSP from stack position
-        (*rp).p_reg.rsp = (saved as u64) + 112;
-        // RIP and RFLAGS are stored in rcx/r11 positions
-        (*rp).p_reg.rip = *saved.add(2);
-        (*rp).p_reg.rflags = *saved.add(9);
+        // Write each register at its byte offset in the raw frame.
+        let regs = [
+            (0usize, *saved.add(0)),    // rax
+            (8usize, *saved.add(1)),    // rbx
+            (16usize, *saved.add(2)),   // rcx (RIP via sysretq)
+            (24usize, *saved.add(3)),   // rdx
+            (32usize, *saved.add(4)),   // rsi
+            (40usize, *saved.add(5)),   // rdi
+            (48usize, *saved.add(6)),   // r8
+            (56usize, *saved.add(7)),   // r9
+            (64usize, *saved.add(8)),   // r10 (RFLAGS via sysretq)
+            (72usize, *saved.add(9)),   // r11
+            (80usize, *saved.add(10)),  // r12
+            (88usize, *saved.add(11)),  // r13
+            (96usize, *saved.add(12)),  // r14
+            (104usize, *saved.add(13)), // r15
+        ];
+        for (offset, val) in regs {
+            frame[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
+        }
+        // RSP = saved_ptr + 112 (14 pushes × 8 bytes)
+        let rsp = (saved as u64) + 112;
+        frame[168..176].copy_from_slice(&rsp.to_ne_bytes());
+        // RIP = RCX value (pushed as arg 2), RFLAGS = R11 value (pushed as arg 9)
+        let rip = *saved.add(2);
+        let rflags = *saved.add(9);
+        frame[160..168].copy_from_slice(&rip.to_ne_bytes());
+        frame[176..184].copy_from_slice(&rflags.to_ne_bytes());
     }
 }
 

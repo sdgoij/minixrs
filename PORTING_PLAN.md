@@ -1976,100 +1976,21 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.1 — Create `kernel/src/hal.rs` — arch abstraction module**
-
-Single cfg-gated re-export file. This is THE ONLY `#[cfg(target_arch)]`
-in `kernel/src/`. Everything else calls `hal::*()` unconditionally.
-
-```rust
-// kernel/src/hal.rs — THE ONE cfg gate in kernel source
-#[cfg(target_arch = "x86_64")]
-pub use arch_x86_64::hal::*;
-#[cfg(target_arch = "riscv64")]
-pub use arch_riscv64::hal::*;
-```
-
-Then create `arch-x86_64/src/hal.rs` exposing all the functions the
-kernel needs:
-
-| Function | What it does | Replaces |
-|----------|-------------|----------|
-| `hal::init()` | Arch init (IDT, MSRs, etc.) | `arch_x86_64::init()` in `lib.rs` |
-| `hal::serial_write_byte(u8)` | Write one char to serial | `in`/`out` asm in `ser_input.rs` |
-| `hal::serial_read_byte() -> u8` | Read one char from serial | `in`/`out` asm in `ser_input.rs` |
-| `hal::serial_byte_available() -> bool` | Check if data ready | `in`/`out` asm in `ser_input.rs` |
-| `hal::read_cycles() -> u64` | Read timestamp/cycle counter | `rdtsc` in `clock.rs` |
-| `hal::halt() -> !` | Stop CPU with interrupts disabled | `cli; hlt` in `debug.rs` |
-| `hal::set_current_proc(*mut Proc)` | Set per-CPU current proc | `cpulocals::set_*` in `sched.rs` |
-| `hal::current_proc() -> *mut Proc` | Get per-CPU current proc | `cpulocals::get_*` in 6 files |
-| `hal::current_ep() -> i32` | Get current proc endpoint | `(*current_proc()).p_endpoint` in `sched.rs` |
-| `hal::cause_signal(endpoint, sig)` | Deliver kernel signal | `cause_sig()` (currently arch-free, check) |
-| `hal::spinlock_acquire(lock)`
-  `hal::spinlock_release(lock)` | Spinlock primitives | `arch_x86_64::spinlock` |
-
-**Files changed:**
-- `NEW: kernel/src/hal.rs` — cfg-gated re-export (~5 lines)
-- `NEW: arch-x86_64/src/hal.rs` — x86_64 impl (~100 lines)
-- `MOD: kernel/src/lib.rs` — add `pub mod hal;`, replace cfg-gated
-  calls with `hal::init()`
-- `MOD: kernel/src/ser_input.rs` — replace inline `in`/`out` with
-  `hal::serial_read_byte()`, `hal::serial_byte_available()`
-- `MOD: kernel/src/debug.rs` — replace `hlt` asm with `hal::halt()`
-
-**Test:** `cargo check -p kernel` passes, `just run` boots to shell
+- [x] **19.0.1 — Create `kernel/src/hal.rs` — arch abstraction module**
+  - 3 files: `NEW kernel/src/hal.rs`, `NEW arch-x86_64/src/hal.rs`,
+    `MOD kernel/src/lib.rs`, `MOD kernel/src/ser_input.rs`
+  - Hal functions: init, serial, halt, per-CPU, rdtsc, Spinlock
+  - Commit: `cbf217cc`
 
 ---
 
-**19.0.2 — TrapFrame as raw bytes (`p_reg: [u8; 256]`)**
-
-`Proc.p_reg` is currently typed as `arch_x86_64::frame::TrapFrame`
-(184 bytes). This makes `Proc` arch-dependent. Change it to a fixed-size
-byte array large enough for any target.
-
-| Arch | Register save size | Notes |
-|------|-------------------|-------|
-| x86_64 | 184 bytes | 16 GPR + 6 seg + RIP/RSP/RFLAGS |
-| RISC-V | ~272 bytes | 32 GPR + sepc + sstatus + scause |
-
-**Chosen size: 256 bytes** — sufficient for x86_64, expand to 288 if
-RISC-V needs more for S-mode CSRs.
-
-Each arch crate provides accessor functions:
-
-```rust
-// arch-x86_64/src/hal.rs (additions)
-pub unsafe fn read_syscall_arg(frame: &[u8; 256], i: usize) -> u64;
-pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64);
-pub unsafe fn read_syscall_nr(frame: &[u8; 256]) -> u64;
-pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: u64);
-pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64;
-pub unsafe fn set_frame_ip(frame: &mut [u8; 256], ip: u64);
-pub unsafe fn copy_frame(dst: &mut [u8; 256], src: &[u8; 256]);
-```
-
-All files that currently access `p_reg` fields directly must be updated
-to use these accessors.
-
-**Files changed:**
-
-| File | Change |
-|------|--------|
-| `kernel/src/proc.rs` | `p_reg: TrapFrame` → `p_reg: [u8; 256]`;
-  remove `use arch_x86_64::frame::TrapFrame`;
-  update `Default` impl (zeroed array) |
-| `kernel/src/system.rs` | `use arch_x86_64::frame::TrapFrame` →
-  `use hal;`; replace `frame.rax` → `hal::read_syscall_arg()`, etc.;
-  7 call sites accessing p_reg fields |
-| `kernel/src/exec.rs` | Replace `frame.rip = entry;
-  frame.rsp = sp; frame.rdi = arg;` → `hal::set_initial_regs()`;
-  replace `frame.rax = ...` → `hal::write_retval()` |
-| `kernel/src/syscall.rs` | Replace `frame.rax = val` →
-  `hal::write_retval()`; replace `current_proc_ptr` → `hal::current_proc()`;
-  replace inline `in`/`out` → `hal::serial_*` |
-| `kernel/src/sched.rs` | Replace `(*rp).p_reg` direct field access |
-| `kernel/src/clock.rs` | Replace `(*rp).p_reg` field access |
-
-**Test:** `cargo check -p kernel` passes, `just run` boots to shell
+- [x] **19.0.2 — TrapFrame as raw bytes (`p_reg: [u8; 256]`)**
+  - NEW accessors in `arch-x86_64/src/hal.rs`: read_syscall_arg,
+    write_retval, read_syscall_nr, set_initial_regs, copy_frame,
+    trapframe_to_mcontext, mcontext_to_trapframe, arch_proc_init
+  - MOD files: proc.rs, system.rs, syscall.rs, ipc.rs, debug.rs,
+    boot_init.rs, main.rs, test_runner.rs (9 files total)
+  - 622 tests pass, `cargo clippy -- -D warnings` clean
 
 ---
 

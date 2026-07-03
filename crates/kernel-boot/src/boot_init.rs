@@ -138,10 +138,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     // maps the virtual stack address to phys_stack_base.
     let rp = kernel::table::proc_addr(proc_nr);
     unsafe {
-        core::ptr::write_volatile(&raw mut (*rp).p_reg.rcx, ehdr.e_entry);
-        core::ptr::write_volatile(&raw mut (*rp).p_reg.r11, 0x0202u64);
-        core::ptr::write_volatile(&raw mut (*rp).p_reg.rsp, user_rsp);
-        core::ptr::write_volatile(&raw mut (*rp).p_reg.rdi, user_rsp);
+        kernel::hal::set_initial_regs(&mut (*rp).p_reg, ehdr.e_entry, user_rsp, user_rsp);
     }
 
     let stack_start = user_stack_base & !0xFFF;
@@ -473,11 +470,12 @@ pub unsafe fn boot_create_restricted_page_table(
 /// `init` must contain a valid Proc pointer and page table physical address.
 /// Never returns.
 pub unsafe fn boot_jump_to_user(init: &InitInfo, pt_phys: u64) -> ! {
-    // Read register values from the Proc struct via volatile access
-    // to prevent the compiler from hoisting fields into statics.
-    let entry = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.rcx) };
-    let rflags = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.r11) };
-    let stack = unsafe { core::ptr::read_volatile(&raw const (*init.proc_ptr).p_reg.rsp) };
+    // Read register values from the raw byte frame.
+    // x86_64 offsets: rcx=16, r11=72, rsp=168
+    let frame = unsafe { &(*init.proc_ptr).p_reg };
+    let entry = unsafe { core::ptr::read_volatile(frame.as_ptr().add(16) as *const u64) };
+    let rflags = unsafe { core::ptr::read_volatile(frame.as_ptr().add(72) as *const u64) };
+    let stack = unsafe { core::ptr::read_volatile(frame.as_ptr().add(168) as *const u64) };
 
     print!("Jumping to ring-3: entry=0x");
     print_hex(entry);

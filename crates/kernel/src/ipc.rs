@@ -173,7 +173,7 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // sender's endpoint so that when the receiver resumes from
             // the RECEIVE syscall, it sees who sent the message.
             let src_ep = (*caller_ptr).p_endpoint;
-            core::ptr::write_volatile(&raw mut (*dst_ptr).p_reg.rax, src_ep as u64);
+            core::ptr::write_volatile((*dst_ptr).p_reg.as_mut_ptr() as *mut u64, src_ep as u64);
 
             let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
@@ -347,7 +347,7 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
         {
             // Set the receiver's RAX to the notifier's endpoint.
-            core::ptr::write_volatile(&raw mut (*dst_ptr).p_reg.rax, src_e as u64);
+            core::ptr::write_volatile((*dst_ptr).p_reg.as_mut_ptr() as *mut u64, src_e as u64);
             let new = rts & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {

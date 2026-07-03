@@ -607,12 +607,7 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         }
 
         (*rp).p_seg.p_cr3 = pml4;
-        (*rp).p_reg.rcx = ehdr.e_entry;
-        (*rp).p_reg.r11 = 0x0202u64;
-        (*rp).p_reg.rsp = user_rsp;
-        (*rp).p_reg.rip = ehdr.e_entry;
-        (*rp).p_reg.rflags = 0x0202u64;
-        (*rp).p_reg.rdi = user_rsp;
+        crate::hal::set_initial_regs(&mut (*rp).p_reg, ehdr.e_entry, user_rsp, user_rsp);
 
         0
     }
@@ -709,7 +704,7 @@ unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> 
                 // Found a free slot — clone the caller into it.
                 core::ptr::copy_nonoverlapping(caller, rpc, 1);
                 (*rpc).p_nr = slot as i32;
-                (*rpc).p_reg.rax = 0; // child returns 0
+                crate::hal::write_retval(&mut (*rpc).p_reg, 0); // child returns 0
                 (*rpc).p_user_time = 0;
                 (*rpc).p_sys_time = 0;
                 let clear_mf = (crate::proc::MiscFlags::REPLY_PEND

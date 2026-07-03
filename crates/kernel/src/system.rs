@@ -1526,7 +1526,7 @@ pub unsafe fn clear_ipc(rp: *mut Proc) {
 
         // Set return code to EDEADSRCDST so the blocked process knows
         // the target endpoint is gone.  x86_64 syscall return is in rax.
-        (*rp).p_reg.rax = crate::ipc::EDEADSRCDST as u64;
+        crate::hal::write_retval(&mut (*rp).p_reg, crate::ipc::EDEADSRCDST as u64);
     }
 }
 
@@ -3222,7 +3222,7 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         (*rp).p_name[name_len.min(arch_common::types::PROC_NAME_LEN - 1)] = 0i8;
 
         // Call arch_proc_init to set up TrapFrame
-        arch_x86_64::arch_proc::arch_proc_init(&raw mut (*rp).p_reg, ip, stack, name_slice, ps_str);
+        crate::hal::arch_proc_init(&mut (*rp).p_reg, ip, stack, name_slice, ps_str);
 
         // No reply to EXEC call: clear RTS_RECEIVING
         // The target will start executing at the new entry point on return
@@ -3278,10 +3278,7 @@ pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
         (*rp).p_seg.p_cr3 = new_cr3;
 
         // Set up trap frame for sysretq return to userspace:
-        //   RCX → RIP, R11 → RFLAGS, RSP = user stack
-        (*rp).p_reg.rcx = entry;
-        (*rp).p_reg.r11 = 0x0202u64; // PSL_USERSET: MBO | I
-        (*rp).p_reg.rsp = user_stack;
+        crate::hal::set_initial_regs(&mut (*rp).p_reg, entry, user_stack, 0);
 
         OK
     }
@@ -3387,12 +3384,7 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
         }
 
         (*rp).p_seg.p_cr3 = pml4;
-        (*rp).p_reg.rcx = ehdr.e_entry;
-        (*rp).p_reg.r11 = 0x0202u64;
-        (*rp).p_reg.rsp = user_rsp;
-        (*rp).p_reg.rip = ehdr.e_entry;
-        (*rp).p_reg.rflags = 0x0202u64;
-        (*rp).p_reg.rdi = user_rsp;
+        crate::hal::set_initial_regs(&mut (*rp).p_reg, ehdr.e_entry, user_rsp, user_rsp);
 
         OK
     }
@@ -3424,48 +3416,17 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         }
 
         // Build Mcontext from the process's TrapFrame
-        let reg = &(*rp).p_reg;
         use arch_x86_64::mcontext::Mcontext;
-        let mc = {
-            // Save FPU state if the process has used the FPU
-            let mut fpstate = [0u8; 512];
-            let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
-            if mf & 0x1000 != 0 && !(*rp).p_seg.fpu_state.is_null() {
-                // Save FPU state from the process's save area
-                core::ptr::copy_nonoverlapping(
-                    (*rp).p_seg.fpu_state as *const u8,
-                    fpstate.as_mut_ptr(),
-                    512,
-                );
-            }
-            Mcontext {
-                mc_rax: reg.rax,
-                mc_rbx: reg.rbx,
-                mc_rcx: reg.rcx,
-                mc_rdx: reg.rdx,
-                mc_rsi: reg.rsi,
-                mc_rdi: reg.rdi,
-                mc_rbp: 0,
-                mc_r8: reg.r8,
-                mc_r9: reg.r9,
-                mc_r10: reg.r10,
-                mc_r11: reg.r11,
-                mc_r12: reg.r12,
-                mc_r13: reg.r13,
-                mc_r14: reg.r14,
-                mc_r15: reg.r15,
-                mc_rip: reg.rip,
-                mc_rsp: reg.rsp,
-                mc_rflags: reg.rflags,
-                mc_cs: reg.cs,
-                mc_ss: reg.ss,
-                mc_ds: reg.ds,
-                mc_es: reg.es,
-                mc_fs: reg.fs,
-                mc_gs: reg.gs,
-                mc_fpstate: fpstate,
-            }
-        };
+        let mut mc = crate::hal::trapframe_to_mcontext(&(*rp).p_reg);
+        // Overwrite FPU state with actual saved state if available
+        let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        if mf & 0x1000 != 0 && !(*rp).p_seg.fpu_state.is_null() {
+            core::ptr::copy_nonoverlapping(
+                (*rp).p_seg.fpu_state as *const u8,
+                mc.mc_fpstate.as_mut_ptr(),
+                512,
+            );
+        }
 
         // Copy the Mcontext to the caller's address space via CR3 switching
         let mc_bytes = &mc as *const Mcontext as *const u8;
@@ -3553,30 +3514,7 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         }
 
         // Apply the saved context to the target process's TrapFrame
-        let reg = &mut (*rp).p_reg;
-        reg.rax = mc.mc_rax;
-        reg.rbx = mc.mc_rbx;
-        reg.rcx = mc.mc_rcx;
-        reg.rdx = mc.mc_rdx;
-        reg.rsi = mc.mc_rsi;
-        reg.rdi = mc.mc_rdi;
-        reg.r8 = mc.mc_r8;
-        reg.r9 = mc.mc_r9;
-        reg.r10 = mc.mc_r10;
-        reg.r11 = mc.mc_r11;
-        reg.r12 = mc.mc_r12;
-        reg.r13 = mc.mc_r13;
-        reg.r14 = mc.mc_r14;
-        reg.r15 = mc.mc_r15;
-        reg.rip = mc.mc_rip;
-        reg.rsp = mc.mc_rsp;
-        reg.rflags = mc.mc_rflags;
-        reg.cs = mc.mc_cs;
-        reg.ss = mc.mc_ss;
-        reg.ds = mc.mc_ds;
-        reg.es = mc.mc_es;
-        reg.fs = mc.mc_fs;
-        reg.gs = mc.mc_gs;
+        crate::hal::mcontext_to_trapframe(&mut (*rp).p_reg, &mc);
 
         // Restore FPU state if saved
         let fpu_initialized = mc.mc_fpstate.iter().any(|&b| b != 0);
@@ -3750,7 +3688,7 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         core::ptr::copy_nonoverlapping(rpp, rpc, 1);
         (*rpc).p_nr = child_slot;
         (*rpc).p_endpoint = table::make_endpoint(new_gen, child_slot);
-        (*rpc).p_reg.rax = 0;
+        crate::hal::write_retval(&mut (*rpc).p_reg, 0);
         (*rpc).p_user_time = 0;
         (*rpc).p_sys_time = 0;
         // Clear misc flags that should not be inherited by the child.
