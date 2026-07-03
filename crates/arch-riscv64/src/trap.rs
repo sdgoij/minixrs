@@ -29,6 +29,9 @@ pub fn cause_code(scause: u64) -> u64 {
 /// Registered syscall handler (set by kernel at init).
 static mut SYSCALL_HANDLER: Option<unsafe fn(usize, &[u64; 6]) -> i64> = None;
 
+/// Registered post-syscall hook (set by kernel at init).
+static mut POST_SYSCALL_HOOK: Option<unsafe fn(&mut [u8; 296])> = None;
+
 /// Register the basic syscall dispatch function.
 ///
 /// # Safety
@@ -37,6 +40,17 @@ static mut SYSCALL_HANDLER: Option<unsafe fn(usize, &[u64; 6]) -> i64> = None;
 pub unsafe fn register_syscall_handler(handler: unsafe fn(usize, &[u64; 6]) -> i64) {
     unsafe {
         SYSCALL_HANDLER = Some(handler);
+    }
+}
+
+/// Register the post-syscall hook for process switching.
+///
+/// # Safety
+///
+/// Must be called once during kernel init, before any userspace execution.
+pub unsafe fn register_post_syscall_hook(hook: unsafe fn(&mut [u8; 296])) {
+    unsafe {
+        POST_SYSCALL_HOOK = Some(hook);
     }
 }
 
@@ -85,6 +99,10 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     None => -38,
                 };
                 frame[80..88].copy_from_slice(&ret.to_ne_bytes());
+                // Post-syscall hook: if current process blocked (IPC), switch.
+                if let Some(hook) = unsafe { POST_SYSCALL_HOOK } {
+                    unsafe { hook(frame) };
+                }
             }
             cause::INSTR_PAGE_FAULT | cause::LOAD_PAGE_FAULT | cause::STORE_PAGE_FAULT => {
                 let stval: u64;

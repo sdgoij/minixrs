@@ -69,13 +69,14 @@ fn set_tp_pointer(addr: u64) {
     }
 }
 
-/// Get the current hart's PerCpuStorage pointer from tp.
+/// Get the boot CPU's PerCpuStorage pointer.
+///
+/// WARNING: tp register may hold a user value (restored from trap frame),
+/// so we CANNOT read it from the CPU register. Always return BOOT_CPU_STORAGE
+/// directly. SMP support will need a different mechanism (e.g., a dedicated
+/// CSR or mhartid-based lookup).
 fn tp_ptr() -> *mut PerCpuStorage {
-    let ptr: u64;
-    unsafe {
-        core::arch::asm!("mv {ptr}, tp", ptr = out(reg) ptr, options(nomem, nostack));
-    }
-    ptr as *mut PerCpuStorage
+    unsafe { core::ptr::addr_of_mut!(BOOT_CPU_STORAGE) }
 }
 
 /// Set the current process pointer for this hart.
@@ -84,16 +85,21 @@ fn tp_ptr() -> *mut PerCpuStorage {
 ///
 /// `proc` must point to a valid `Proc` or be null.
 pub unsafe fn set_current_proc(proc: u64) {
-    let storage = tp_ptr();
     unsafe {
-        (*storage).current_proc = proc;
+        // SAFETY: BOOT_CPU_STORAGE is a static mut accessed directly.
+        // tp register may hold a user value (restored from trap frame),
+        // so we MUST NOT use tp_ptr() here. Access the static directly.
+        core::ptr::write_volatile(&raw mut BOOT_CPU_STORAGE.current_proc, proc);
     }
 }
 
 /// Get the current process pointer for this hart.
 pub fn current_proc() -> u64 {
-    let storage = tp_ptr();
-    unsafe { (*storage).current_proc }
+    unsafe {
+        // SAFETY: BOOT_CPU_STORAGE is a static mut accessed directly.
+        // tp register may hold a user value — do NOT use tp_ptr().
+        core::ptr::read_volatile(&raw const BOOT_CPU_STORAGE.current_proc)
+    }
 }
 
 /// Set the kernel stack top for this hart.

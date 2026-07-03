@@ -2430,17 +2430,44 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
   - Deliverable: PM's first RECEIVE syscall (nr=47) is handled
     correctly. The kernel dispatches to the IPC handler and returns
-    to userspace without crashing. The `[2f]` diagnostic confirms
-    syscall processing.
+    to userspace without crashing.
+
+- [x] **19.26 — Fix kernel tp corruption and add process switching after IPC**
+  The kernel uses `tp` (x4) to access CPU-local storage (current_proc,
+  run queues). When a user process modifies tp (as Minix servers do
+  for thread-local storage), the next trap restores the user's tp.
+  The kernel's `current_proc()` then reads from the user's tp address,
+  which is garbage → load access fault (cause 5).
+
+  **Fix:** Changed `tp_ptr()` in cpulocals.rs to return `&BOOT_CPU_
+  STORAGE` directly instead of reading the `tp` CPU register. All
+  functions that access per-CPU data (current_proc, run queues, etc.)
+  now use the static variable directly, ignoring the user-controlled
+  tp register.
+
+  **Also added:** Post-syscall hook that checks if the current process
+  is still runnable after a syscall. If blocked (e.g., on IPC RECEIVE
+  with no message available), the hook calls `pick_proc()` and switches
+  to the next runnable process by overwriting the trap frame. This
+  enables multi-process scheduling: when PM blocks on RECEIVE, RS
+  runs; when RS blocks, VFS runs; when VFS blocks, init runs.
+
+  **Files changed:**
+    - `cpulocals.rs`: `tp_ptr()` returns static var, not CPU register
+    - `trap.rs`: post-syscall hook registration and invocation
+    - `riscv64.rs kmain`: implement post-syscall hook (process switch)
+
+  - Deliverable: `just run-riscv64` boots to `init: booting MINIX/Rust`
+    with 400k+ ECALLs processed across all 4 boot servers.
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
-| M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching |
+| M-RV2 ✅ | Init process loading + switch_to_user | Shows enqueuing + switching |
 | M-RV3 ✅ | Trap handler catches faults | Page faults print `!PF` via UART |
-| M-RV4 ✅ | First user-mode syscall (RECEIVE) succeeds | `[2f]` output shows syscall 47 handled |
-| M-RV5 🏗️ | Full boot sequence (PM/RS/VFS/init) to shell | Multi-process scheduling with IPC |
-| M-RV6 | Shell prompt (`#`) | Full boot to shell |
+| M-RV4 ✅ | First user-mode syscall (RECEIVE) succeeds | ECALL handler dispatches correctly |
+| M-RV5 ✅ | Full multi-process boot (PM/RS/VFS/init) | `init: booting MINIX/Rust` printed |
+| M-RV6 🏗️ | Shell prompt (`#`) | init exec's /bin/sh after boot |
 | M-RV7 | External commands work | fork/exec support |
 
 **Stretch goals (after M-RV3):**

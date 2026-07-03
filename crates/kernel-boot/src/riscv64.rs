@@ -131,6 +131,49 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_syscall_handler(riscv_syscall_handler);
     }
+    unsafe {
+        // Post-syscall hook: if current process is blocked (e.g., on IPC),
+        // pick a new runnable process and overwrite the trap frame.
+        unsafe fn riscv_post_syscall(frame: &mut [u8; 296]) {
+            let caller = arch_riscv64::hal::current_proc() as *mut kernel::proc::Proc;
+            if caller.is_null() {
+                return;
+            }
+            let rts = unsafe {
+                (*caller)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if rts != 0 {
+                // Current process blocked — pick a new one.
+                if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
+                    unsafe {
+                        // Copy new process's p_reg into frame[0..256]
+                        core::ptr::copy_nonoverlapping(
+                            &raw const (*next_proc).p_reg as *const u8,
+                            frame.as_mut_ptr(),
+                            256,
+                        );
+                        // Copy sepc from p_reg[0..8] to frame[256..264]
+                        let p_reg = &raw const (*next_proc).p_reg;
+                        let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
+                        frame[256..264].copy_from_slice(&sepc_bytes);
+                        // Copy sstatus from p_reg[248..256] to frame[264..272]
+                        let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
+                        frame[264..272].copy_from_slice(&sst_bytes);
+                        // Load new process's page table
+                        let new_cr3 = (*next_proc).p_seg.p_cr3;
+                        if new_cr3 != 0 {
+                            kernel::hal::write_cr3(new_cr3);
+                        }
+                        // Update current process pointer
+                        arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                    }
+                }
+            }
+        }
+        arch_riscv64::trap::register_post_syscall_hook(riscv_post_syscall);
+    }
 
     // Initialize timer (100 Hz)
     unsafe {

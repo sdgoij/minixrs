@@ -13,14 +13,8 @@ global_asm!(
 
 trap_vector:
     # ALWAYS swap sp with sscratch, regardless of SPP.
-    # When OpenSBI re-injects a non-delegated exception (e.g. load/store page
-    # faults where medeleg bits 13/15 are 0), it does mret to S-mode but sp
-    # is left pointing to OpenSBI's M-mode stack. Without the swap, the
-    # subsequent sd instructions write to the wrong memory.
-    # sscratch always holds the correct kernel stack pointer (set by
-    # switch_to_user and restored by the trap return path).
     csrrw   sp, sscratch, sp
-    # Allocate trap frame (32 GPRs + sepc + sstatus + scause + kstack = 296 bytes)
+    # Allocate trap frame
     addi    sp, sp, -296
 
     # Save all 32 GPRs
