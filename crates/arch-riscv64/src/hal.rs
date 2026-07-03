@@ -57,18 +57,11 @@ pub fn halt() -> ! {
 use core::ffi::c_void;
 
 pub unsafe fn set_current_proc(proc: *mut c_void) {
-    // RISC-V: store current process pointer in tp register
-    unsafe {
-        core::arch::asm!("mv tp, {proc}", proc = in(reg) proc, options(nomem, nostack));
-    }
+    crate::cpulocals::set_current_proc(proc as u64);
 }
 
 pub fn current_proc() -> *mut c_void {
-    let ptr: *mut c_void;
-    unsafe {
-        core::arch::asm!("mv {ptr}, tp", ptr = out(reg) ptr, options(nomem, nostack));
-    }
-    ptr
+    crate::cpulocals::current_proc() as *mut c_void
 }
 
 // ── Spinlocks ─────────────────────────────────────────────────────────────

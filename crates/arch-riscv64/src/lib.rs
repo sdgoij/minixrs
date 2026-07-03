@@ -9,6 +9,8 @@ pub mod boot;
 #[cfg(target_arch = "riscv64")]
 pub mod clint;
 #[cfg(target_arch = "riscv64")]
+pub mod cpulocals;
+#[cfg(target_arch = "riscv64")]
 pub mod hal;
 pub mod mcontext;
 pub mod param;

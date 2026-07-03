@@ -2164,13 +2164,14 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Same register layout as x86_64 COM1 but via MMIO load/store
   - 3 tests for base address, register offsets, LSR bits
 
-- [ ] **19.13 — Per-CPU data (`tp` register)** (`arch-riscv64/src/cpulocals.rs`)
-  - RISC-V uses `tp` (x4) as the thread pointer, analogous to x86_64's `GS`
-  - Point `tp` at a per-CPU structure with:
-    - `current_proc: *mut Proc` (like `arch_x86_64::cpulocals::get_cpulocal_proc_ptr`)
-    - `kernel_stack_top: u64`
-    - `cpu_id: u32`
-  - **Test:** read/write tp-relative data
+- [x] **19.13 — Per-CPU data (`tp` register)** (`arch-riscv64/src/cpulocals.rs`)
+  - `PerCpuStorage` struct (64 bytes): current_proc, kernel_stack_top,
+    hart_id
+  - `init_cpulocals()`: sets tp to BOOT_CPU_STORAGE
+  - `set_current_proc()`, `current_proc()`, `set_kernel_stack_top()`,
+    `kernel_stack_top()`, `hart_id()`, `set_hart_id()`
+  - Wired into hal.rs: set/current_proc delegate to cpulocals
+  - 2 tests for storage size and boot init values
 
 - [ ] **19.14 — RISC-V kernel-boot binary** (new:
   `crates/kernel-boot-riscv64/` or `kernel-boot/src/riscv64_main.rs`)
