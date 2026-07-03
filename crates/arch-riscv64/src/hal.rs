@@ -327,6 +327,11 @@ pub const fn pte_flags_mask() -> u64 {
     pte::PTE_FLAGS_MASK
 }
 
+/// Kernel load virtual address (RISC-V: linked at 0x80200000).
+pub const fn kern_vaddr() -> u64 {
+    0x80200000
+}
+
 pub const MAP_PRESENT: u64 = pte::PTE_V;
 pub const MAP_WRITE: u64 = pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;

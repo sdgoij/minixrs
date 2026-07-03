@@ -555,6 +555,11 @@ pub const fn pte_flags_mask() -> u64 {
     0x0000000000000FFF // PG_PTEMASK
 }
 
+/// Kernel load virtual address (x86_64: identity-mapped at 0x200000).
+pub const fn kern_vaddr() -> u64 {
+    0x200000
+}
+
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
 pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW

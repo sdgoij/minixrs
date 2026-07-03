@@ -51,7 +51,8 @@ pub fn get_proc_cr3(ep: i32) -> u64 {
     unsafe { (*rp).p_seg.p_cr3 }
 }
 
-// Mock definitions for `__bss_start`/`__bss_end` used by `pt_mapkernel`.
+// Mock definitions for `__bss_start`/`__bss_end` used by `pt_mapkernel`
+// and any other kernel code that references BSS bounds.
 // On Windows (where the kernel linker script is not available), these
 // prevent unresolved symbol errors in any binary that links the kernel
 // crate.  When building with a real linker script (Linux), duplicate
@@ -307,19 +308,23 @@ pub fn decode_page_fault(va: u64, err: u32) -> PageFaultInfo {
 /// per-page attributes can be applied, then:
 ///   - Sets `PG_NX` on BSS pages (preventing code execution from BSS)
 ///   - Clears `PG_G` on BSS entries (so TLB entries are flushed on CR3 switch)
+/// Split the kernel's 2MB identity-mapped huge page into 4KB PTEs and
+/// set NX on BSS pages (if the kernel is mapped as a huge page at boot).
+///
+/// The kernel virtual address is obtained from `hal::kern_vaddr()`.
 ///
 /// # Safety
 ///
-/// `cr3` must point to a valid, identity-mapped PML4.
+/// `cr3` must point to a valid, identity-mapped root page table.
 pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
     if cr3 == 0 {
         return Err(PageTableError::InvalidArgument);
     }
     unsafe {
-        const KERNEL_START: u64 = 0x200000;
+        let kern_start = crate::hal::kern_vaddr();
 
         // Walk to find the PDE for the kernel 2MB identity mapping
-        let result = walk(cr3, KERNEL_START)?;
+        let result = walk(cr3, kern_start)?;
 
         if result.level != 2 {
             return Err(PageTableError::InvalidArgument);
@@ -360,12 +365,12 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         let bss_end = core::ptr::addr_of!(__bss_end) as u64;
 
         // BSS must be within the kernel 2MB region
-        if bss_start < KERNEL_START || bss_end > KERNEL_START + (512 * 0x1000) {
+        if bss_start < kern_start || bss_end > kern_start + (512 * 0x1000) {
             return Err(PageTableError::InvalidArgument);
         }
 
-        let bss_start_offset = bss_start - KERNEL_START;
-        let bss_end_offset = bss_end - KERNEL_START;
+        let bss_start_offset = bss_start - kern_start;
+        let bss_end_offset = bss_end - kern_start;
 
         let first_bss_page = (bss_start_offset / 0x1000) as usize;
         let last_bss_page = bss_end_offset.div_ceil(0x1000) as usize;

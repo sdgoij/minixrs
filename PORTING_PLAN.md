@@ -2356,11 +2356,13 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     splitting that works for both x86_64 and RISC-V (512 PTEs per
     level, 4KB base page size).
 
-- [ ] **19.x.5 — Abstract pt_mapkernel** (`pub unsafe fn pt_mapkernel`)
+- [x] **19.x.5 — Abstract pt_mapkernel** (`pub unsafe fn pt_mapkernel`)
   - Hardcodes kernel load address at `0x200000` and uses 2MB page splitting.
     RISC-V kernel is linked at `0x80200000`.
-  - **Fix**: Add `hal::kern_vaddr() -> u64` and `hal::map_kernel_pages(cr3)`
-    for arch-specific kernel mapping.
+  - **Fix**: Add `hal::kern_vaddr() -> u64` and update `pt_mapkernel` to
+    use it instead of a hardcoded constant. The splitting logic itself is
+    already generic (same pattern as the huge-page split in `map_page`,
+    using PG_PS/PG_FRAME/PG_PTEMASK from the HAL).
 
 - [ ] **19.x.6 — Abstract `handle_page_fault`**
   - Currently uses x86_64 CR2 register to get fault address.
