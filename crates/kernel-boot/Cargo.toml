@@ -17,6 +17,10 @@ default = []
 embed_initramfs = ["kernel/embed_initramfs"]
 integration-tests = ["kernel/qemu-tests"]
 
+[lib]
+name = "kernel_boot"
+path = "src/lib.rs"
+
 [dependencies]
 arch-common = { path = "../arch-common" }
 kernel = { path = "../kernel" }

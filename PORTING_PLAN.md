@@ -2025,25 +2025,17 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.6 — Split `kernel-boot` into shared lib + per-arch binaries**
-
-```
-crates/kernel-boot/
-  src/
-    lib.rs              ← shared: ELF loading, boot_init, process setup
-    x86_64_main.rs      ← x86_64 boot sequence: multiboot, APIC, IDT, PIT
-    riscv64_main.rs     ← RISC-V boot sequence: SBI, CLINT, PLIC, FDT
-    test_runner.rs      ← shared integration test framework
-```
-
-- `kernel-boot/Cargo.toml`: move `arch-x86_64` to
-  `[target.'cfg(target_arch = "x86_64")'.dependencies]`
-- The `kmain()` entry point becomes per-arch:
-  - x86_64 binary: `kernel-boot-x86_64` with `kmain_x86_64()`
-  - RISC-V binary: `kernel-boot-riscv64` with `kmain_riscv64()`
-- Shared logic (`load_and_prepare_proc`, page table creation helpers)
-  stays in `lib.rs`
-- **Test:** `just run` still boots x86_64 to shell prompt
+- [x] **19.0.6 — Split `kernel-boot` into shared lib + binary**
+  - Created `src/lib.rs` with shared modules: `boot_init`, `test_runner`,
+    `serial_write`, `serial_putc`, `print!` macro
+  - Added `[lib]` section to Cargo.toml (`name = "kernel_boot"`)
+  - `main.rs` imports from `kernel_boot::*` instead of declaring
+    modules directly
+  - Serial functions moved to lib to break circular dep (boot_init
+    calls print, which calls serial_write)
+  - `arch-x86_64` already gated behind `[target.'cfg(...)'.dependencies]`
+    in Cargo.toml (from 19.0a)
+  - **Test:** `just run` still boots x86_64 to shell prompt
 
 ---
 

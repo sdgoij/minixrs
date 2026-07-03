@@ -9,10 +9,7 @@
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-pub mod boot_init;
-
-#[cfg(feature = "integration-tests")]
-pub mod test_runner;
+use kernel_boot::*;
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
@@ -482,69 +479,11 @@ fn init_serial() {
     }
 }
 
-/// Write a string to COM1 serial port.  No-op in test mode.
-pub fn serial_write(s: &str) {
-    #[cfg(not(test))]
-    {
-        let port = 0x3F8u16;
-        for &b in s.as_bytes() {
-            unsafe {
-                loop {
-                    let lsr: u8;
-                    core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
-                    if lsr & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("dx") port, in("al") b, options(nomem, nostack));
-            }
-        }
-    }
-    #[cfg(test)]
-    let _ = s;
-}
-
-/// Write a single byte to COM1 serial port.  No-op in test mode.
-pub fn serial_putc(c: u8) {
-    #[cfg(not(test))]
-    {
-        let port = 0x3F8u16;
-        unsafe {
-            loop {
-                let lsr: u8;
-                core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
-                if lsr & 0x20 != 0 {
-                    break;
-                }
-            }
-            core::arch::asm!("out dx, al", in("dx") port, in("al") c, options(nomem, nostack));
-        }
-    }
-    #[cfg(test)]
-    let _ = c;
-}
-
-/// Print macro for boot-time serial output.
-#[macro_export]
-macro_rules! print {
-    ($s:expr) => {
-        $crate::serial_write($s);
-    };
-}
+// serial_write, serial_putc, and print! macro are now in kernel_boot lib crate
 
 /// Panic handler.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     hlt_loop()
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn serial_write_does_not_panic_in_tests() {
-        // Verify the no-op path compiles and runs
-        crate::serial_write("test");
-        crate::serial_putc(b'x');
-    }
 }
