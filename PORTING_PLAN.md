@@ -2007,21 +2007,11 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.4 — Segment & boot constants** (`kernel/src/table.rs`, `vm.rs`)
-
-These files use segment selectors from `arch_x86_64::segments` and
-multiboot info from `arch_x86_64::multiboot`. These are x86_64 concepts
-that don't exist on RISC-V. The relevant code paths are:
-
-- `table.rs`: segment selector initialization in `proc_init()`
-- `vm.rs`: multiboot memory map parsing, segment setup
-
-**Fix:** Gate the segment/multiboot code as x86_64-only. On RISC-V,
-these functions are either no-ops or use FDT instead of multiboot.
-
-**Files changed:**
-- `kernel/src/table.rs` — gate segment init
-- `kernel/src/vm.rs` — gate multiboot parsing
+- [x] **19.0.4 — Clean remaining PTE/CR3 refs in vm.rs**
+  - `table.rs` was already clean (no arch imports)
+  - `vm.rs`: replaced `BOOT_CR3`, `asm::write_cr3`, `pte::PG_FRAME`,
+    `vmparam::VM_MAXUSER_ADDRESS` with `hal::*` / `pagetable::*`
+  - 622 tests pass, `cargo clippy -- -D warnings` clean
 
 ---
 

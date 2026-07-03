@@ -327,7 +327,7 @@ pub unsafe fn vm_lookup(proc_nr: i32, virtaddr: u64) -> u64 {
         match crate::pagetable::walk(cr3, virtaddr) {
             Ok(result) => {
                 let offset = virtaddr & 0xFFF;
-                (result.pte_value & arch_x86_64::pte::PG_FRAME) + offset
+                (result.pte_value & crate::pagetable::PG_FRAME) + offset
             }
             Err(_) => NO_MEM,
         }
@@ -374,7 +374,7 @@ pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u
         }
         let start = addr & !0xFFF;
         let end_va = addr.saturating_add(bytes);
-        let end = ((end_va + 0xFFF) & !0xFFF).min(arch_x86_64::vmparam::VM_MAXUSER_ADDRESS);
+        let end = ((end_va + 0xFFF) & !0xFFF).min(crate::hal::MAX_USER_ADDRESS);
         let mut va = start;
         while va < end {
             if crate::pagetable::walk(cr3, va).is_err() {
@@ -420,7 +420,7 @@ pub unsafe fn virtual_copy(
             return -1;
         }
 
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             return -1;
         }
@@ -435,15 +435,15 @@ pub unsafe fn virtual_copy(
             let chunk = core::cmp::min(remaining, buf.len());
 
             // Switch to source, read
-            arch_x86_64::asm::write_cr3(src_cr3);
+            crate::hal::write_cr3(src_cr3);
             core::ptr::copy_nonoverlapping(src_va as *const u8, buf.as_mut_ptr(), chunk);
 
             // Switch to destination, write
-            arch_x86_64::asm::write_cr3(dst_cr3);
+            crate::hal::write_cr3(dst_cr3);
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
 
             // Restore boot CR3
-            arch_x86_64::asm::write_cr3(boot_cr3);
+            crate::hal::write_cr3(boot_cr3);
 
             remaining -= chunk;
             src_va += chunk as u64;
@@ -485,7 +485,7 @@ pub unsafe fn vm_lookup_range(
             Err(_) => return 0,
         };
 
-        let frame = result.pte_value & arch_x86_64::pte::PG_FRAME;
+        let frame = result.pte_value & crate::pagetable::PG_FRAME;
         let offset = vaddr & 0xFFF;
         *phys_addr = frame + offset;
 
