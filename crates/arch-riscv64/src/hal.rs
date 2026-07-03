@@ -197,10 +197,8 @@ pub unsafe fn read_syscall_nr(frame: &[u8; 256]) -> u64 {
 ///
 /// `frame` must be a valid trap frame.
 pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64 {
-    // RISC-V: sepc at offset 256 (above the 32 GPRs)
-    // But our frame is only 256 bytes, so this won't fit with all 32 regs.
-    // TODO: expand frame to 288 bytes for RISC-V full register set.
-    unsafe { read_frame_field(frame, 248) } // temporary: last 8 bytes of 256
+    // RISC-V: sepc stored at offset 0 (x0 slot, never loaded as GPR)
+    unsafe { read_frame_field(frame, 0) }
 }
 
 /// Write the faulting instruction pointer into the trap frame.
@@ -219,14 +217,16 @@ pub unsafe fn write_frame_ip(_frame: &mut [u8; 256], _ip: u64) {
 /// `frame` must be a valid, writable trap frame.
 pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg: u64) {
     // RISC-V: set up initial register state for new process.
-    // sepc = entry, sp = stack pointer, a0 = arg.
-    // sstatus = PSL_USERSET (SIE=1, SPIE=1, FS=initial)
+    // sepc = entry (stored at offset 0 = x0 slot, never loaded as GPR)
+    // sp = stack pointer (x2 at offset 16)
+    // a0 = arg (x10 at offset 80) = 0
+    // sstatus = PSL_USERSET (SIE=1, SPIE=1, FS=initial) stored at offset 248 (t6 slot)
+    //   bit 1=SIE, bit 5=SPIE => after sret: SIE=1 (ints enabled), SPP=0 (U-mode)
     unsafe {
-        write_frame_field(frame, 248, entry); // sepc (temporary location)
-        write_frame_field(frame, 8, sp); // sp (x2 at offset 8)
+        write_frame_field(frame, 0, entry); // sepc in x0 slot
+        write_frame_field(frame, 16, sp); // sp (x2 at offset 16)
         write_frame_field(frame, 80, 0); // a0 (x10) = 0
-        write_frame_field(frame, 256, 0x0000000000000222); // sstatus: SIE|SPIE|FS_INITIAL
-        // ^^ offset 256 is past our 256-byte frame — need 288 bytes for full RISC-V frame.
+        write_frame_field(frame, 248, 0x0000000000000222); // sstatus in t6 slot
     }
 }
 
@@ -327,9 +327,31 @@ pub const fn pte_flags_mask() -> u64 {
     pte::PTE_FLAGS_MASK
 }
 
+/// Build a page table entry from a physical address and flags.
+///
+/// RISC-V SV39: PTE stores PPN = pa >> 12 at bits [53:10],
+/// NOT the raw physical address (unlike x86_64 where PA is stored directly).
+/// This function correctly encodes the PPN for SV39.
+pub const fn build_pte(pa: u64, flags: u64) -> u64 {
+    // PPN = pa >> 12, stored at PTE bits [53:10]: (PPN << 10) = (pa >> 2)
+    // Mask off low 10 bits (flags) and keep just PPN field:
+    ((pa >> 2) & pte::PTE_PPN_MASK) | (flags & pte::PTE_FLAGS_MASK)
+}
+
 /// Kernel load virtual address (RISC-V: linked at 0x80200000).
 pub const fn kern_vaddr() -> u64 {
     0x80200000
+}
+
+/// User stack base virtual address (must be in RAM).
+/// On RISC-V QEMU virt, RAM starts at 0x80000000, so use 0x8FE00000.
+pub const fn user_stack_base() -> u64 {
+    0x8FE00000u64
+}
+
+/// User stack size in bytes.
+pub const fn user_stack_size() -> usize {
+    65536
 }
 
 pub const MAP_PRESENT: u64 = pte::PTE_V;
@@ -339,11 +361,14 @@ pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 pub const MAX_USER_ADDRESS: u64 = 0x0000003FFFFFFFFFFF;
 
 pub fn boot_cr3() -> u64 {
-    // Read SATP CSR (Supervisor Address Translation and Protection)
+    // Read SATP CSR and extract the physical page table address.
+    // SATP format: [63:60]=MODE, [59:44]=ASID, [43:0]=PPN (phys>>12)
+    // Return the full physical address (like x86_64 CR3).
     unsafe {
         let satp: u64;
         core::arch::asm!("csrr {satp}, satp", satp = out(reg) satp, options(nomem, nostack));
-        satp
+        // Extract PPN (bits [43:0]) and shift to get physical address
+        (satp & 0x00000FFFFFFFFFFF) << 12
     }
 }
 
@@ -523,12 +548,12 @@ pub unsafe fn init_cpulocals() {
 
 /// Get the run queue head pointer array.
 pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
-    todo!("RISC-V sched_run_q_head; see Phase 19.7");
+    crate::cpulocals::run_q_head_ptr()
 }
 
 /// Get the run queue tail pointer array.
 pub fn sched_run_q_tail() -> *mut [*mut core::ffi::c_void; 16] {
-    todo!("RISC-V sched_run_q_tail; see Phase 19.7");
+    crate::cpulocals::run_q_tail_ptr()
 }
 
 /// Number of scheduling priority queues.

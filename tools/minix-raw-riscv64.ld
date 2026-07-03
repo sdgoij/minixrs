@@ -24,13 +24,17 @@ SECTIONS
     }
 
     .bss : ALIGN(8) {
-        *(.bss .bss.*)
-        *(.sbss .sbss.*)
-    }
+            __bss_start = .;
+            *(.bss .bss.*)
+            *(.sbss .sbss.*)
+            __bss_end = .;
+        }
 
-    .initramfs : ALIGN(8) {
-        KEEP(*(.initramfs))
-    }
+        .initramfs : ALIGN(8) {
+            __initramfs_start = .;
+            KEEP(*(.initramfs))
+            __initramfs_end = .;
+        }
 
     /DISCARD/ : {
         *(.eh_frame)
@@ -38,9 +42,3 @@ SECTIONS
         *(.comment)
     }
 }
-
-/* Provide boundary symbols unconditionally (outside any section). */
-__bss_start = .;
-__bss_end = .;
-__initramfs_start = .;
-__initramfs_end = .;

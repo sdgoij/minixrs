@@ -8,7 +8,6 @@
 
 #![no_std]
 
-#[cfg(target_arch = "x86_64")]
 pub mod boot_init;
 
 #[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]

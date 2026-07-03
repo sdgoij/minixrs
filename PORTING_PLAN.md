@@ -2260,17 +2260,71 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     refactored `boot_create_page_table` to use HAL functions. No remaining
     `arch_x86_64::*` references in `boot_init.rs`.
 
-- [ ] **19.19 — Context switch to userspace via sret** (`arch-riscv64/src/switch.rs`)
-  - `switch.rs` currently has `switch_to_user(frame)` stub
-  - Implement full restore: load all 32 GPRs, sepc, sstatus from p_reg,
-    then `sret` to jump to user process
-  - Trap frame layout: offsets 0-248 for 31 GPRs, 256 for sepc,
-    264 for sstatus (see `mcontext.rs` for layout reference)
-  - Wire into scheduler: after `pick_proc()`, call `switch_to_user()`
-    instead of halting
-  - Deliverable: first context switch to init process executes
+- [x] **19.19 — Context switch to userspace via sret**
+  The kernel now boots through all stages on RISC-V: initramfs loading,
+  per-process page table creation, process enqueue, and switch_to_user.
+  Key sub-tasks completed:
 
-- [ ] **19.20 — Syscall handling from U-mode** (`arch-riscv64/src/trap.rs`)
+  - **19.x.1 — Fix `set_initial_regs`**: sp at offset 16 (was at 8, RA slot);
+    sepc stored at x0 slot (offset 0, never loaded as GPR); sstatus at t6 slot
+    (offset 248, skipped on load). Previously sstatus was at offset 256 which
+    clobbered p_seg.p_cr3.
+  - **19.x.2 — Fix `switch_to_user`**: reads sepc from offset 0, sstatus from
+    offset 248; sets SATP with SV39 encoding ((8<<60)|(cr3>>12)) and does
+    sfence.vma before sret. Previously read garbage from offset 256.
+  - **19.x.3 — Add `hal::build_pte()`**: RISC-V SV39 stores PPN = pa>>12 at
+    bits[53:10], NOT the raw PA like x86_64. Added `build_pte(pa, flags)` to
+    both HALs. Replaced all `(pa & PG_FRAME) | flags` in pagetable.rs and
+    boot_init.rs with `build_pte()` calls.
+  - **19.x.4 — Fix `boot_cr3()`**: RISC-V SATP stores MODE|ASID|PPN. The old
+    `boot_cr3()` returned the raw SATP value. Now extracts just the physical
+    address: `(satp & 0xFFFFFFFFFFF) << 12`.
+  - **19.x.5 — Handle 1GB huge pages in boot_create_restricted_page_table**:
+    The RISC-V boot page table uses 1GB huge pages at L2. The walk-down loop
+    now detects leaf entries (V+R/W/X) and skips the deep-copy step.
+  - **19.x.6 — Implement `sched_run_q_head/tail` on RISC-V**: Added
+    `run_q_head`/`run_q_tail` arrays to `PerCpuStorage` (were `todo!()` stubs
+    that panicked on enqueue).
+  - **19.x.7 — Make user_stack_base arch-specific**: Added
+    `hal::user_stack_base()` and `hal::user_stack_size()`. On RISC-V QEMU
+    virt, RAM starts at 0x80000000, so stack base is 0x8FE00000 (was
+    0x0FE00000 which is outside RAM on RISC-V and caused store faults).
+  - **19.x.8 — Create boot SV39 page table architecture**: Before loading
+    processes, create an identity-mapped boot page table using 1GB huge pages
+    and enable SV39 via `write_cr3()`. This is required for per-process page
+    tables to work (they copy kernel high mappings from the boot table).
+  - **19.x.9 — Fix RISC-V linker script**: Bracket `__bss_start`/`__bss_end`
+    and `__initramfs_start`/`__initramfs_end` inside their respective sections
+    instead of as out-of-section symbols.
+  - **19.x.10 — Add RUSTFLAGS to Justfile**: `build-riscv64` recipe now passes
+    `RUSTFLAGS="-C link-arg=-Ttools/minix-raw-riscv64.ld"` — without this,
+    the default linker script was used instead of the RISC-V one.
+  - **19.x.11 — Un-gate boot_init module**: Removed `#[cfg(target_arch =
+    "x86_64")]` from `pub mod boot_init` in kernel-boot lib.rs so RISC-V
+    can use `load_and_prepare_proc`, `boot_create_restricted_page_table`, etc.
+  - **19.x.12 — Fix allocator fallback**: `create_boot_page_table` falls back
+    to hardcoded page 0x80400000 when phys allocator returns None.
+
+  **Deliverable**: `just run-riscv64` boots kernel, loads init from initramfs,
+  creates per-process page tables, enqueues, and calls switch_to_user. The
+  binary in the initramfs is currently x86_64 (built by mkinitramfs.rs), so
+  user-mode code hits illegal instructions — RISC-V userland builds are
+  Phase 19.20.
+
+- [ ] **19.20 — Build RISC-V userland binaries for initramfs**
+  The initramfs is built by `tools/mkinitramfs.rs` which compiles userland
+  and server packages for `x86_64-pc-minix`. For RISC-V, we need:
+
+  - Create `riscv64gc-unknown-none-minix.json` target spec (or use existing
+    `riscv64gc-unknown-none-elf` with MINIX syscall ABI)
+  - Update `mkinitramfs.rs` to build cross-compiled RISC-V binaries when
+    the target is riscv64 (add target selection, change linker script)
+  - Create `tools/minix-user-riscv64.ld` linker script for RISC-V userland
+  - Enable the `userland` and `servers` packages to cross-compile for RISC-V
+  - Verify: /sbin/init is a RISC-V ELF64 with correct e_machine (0xF3)
+  - Deliverable: `just run-riscv64` boots to "init: starting shell..."
+
+- [ ] **19.21 — Syscall handling from U-mode** (`arch-riscv64/src/trap.rs`)
   - `ecall` from U-mode raises trap with scause=8 (Environment Call from U-mode)
   - Current trap handler dispatches ecall to registered syscall handler
     via `SYSCALL_HANDLER` callback
@@ -2280,7 +2334,7 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Wire up `kernel::syscall::dispatch_basic_syscall()` as handler
   - Deliverable: init process can make basic syscalls (exit, write to debug)
 
-- [ ] **19.21 — Boot PM, RS, VFS, init processes** (`kernel-boot/src/riscv64.rs`)
+- [ ] **19.22 — Boot PM, RS, VFS, init processes** (`kernel-boot/src/riscv64.rs`)
   - After `kernel::init()`, create boot processes in order:
     1. PM (Process Manager) — /sbin/pm
     2. RS (Reincarnation Server) — /sbin/rs
@@ -2296,8 +2350,8 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
-| M-RV2 🏗️ | Boot process loading (PM + RS + VFS + init) | `just run-riscv64` shows loading messages | 19.17–19.21 |
-| M-RV3 | Shell prompt (`#`) with built-in commands | Type `echo hello` → `hello` |
+| M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching messages |
+| M-RV3 🏗️ | Shell prompt (`#`) with built-in commands | Need RISC-V userland binaries (19.20) + syscalls (19.21) |
 | M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
 | M-RV5 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
 

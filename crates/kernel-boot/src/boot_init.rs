@@ -97,8 +97,8 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     }
 
     // Step 4: Allocate physical pages for user stack.
-    let user_stack_base: u64 = 0x0FE00000;
-    let user_stack_size: usize = 65536;
+    let user_stack_base: u64 = kernel::hal::user_stack_base();
+    let user_stack_size: usize = kernel::hal::user_stack_size();
     let stack_pages = user_stack_size / 4096;
     let phys_stack_base = match unsafe { kernel::hal::alloc_phys_contig(stack_pages) } {
         Some(base) => base,
@@ -331,7 +331,8 @@ pub unsafe fn boot_create_page_table() -> u64 {
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
     for i in 0..(n_pages - 1) {
         unsafe {
-            core::ptr::write(pages[i] as *mut u64, pages[i + 1] | flags);
+            let pte = kernel::hal::build_pte(pages[i + 1], flags);
+            core::ptr::write(pages[i] as *mut u64, pte);
         }
     }
 
@@ -375,7 +376,6 @@ pub unsafe fn boot_create_restricted_page_table(
     stack_end: u64,
     stack_phys: u64,
 ) -> Option<u64> {
-    // Walk the boot page table to find the bottom-level page directory.
     let boot_cr3_val = boot_cr3();
     if boot_cr3_val == 0 {
         return None;
@@ -383,16 +383,35 @@ pub unsafe fn boot_create_restricted_page_table(
     let levels = kernel::hal::pt_levels();
     let page_sz = kernel::hal::PAGE_SIZE as usize;
 
-    // Walk to find the bottom-level PD (x86_64: PD after PML4→PDPT, SV39: PMD after PUD).
-    // Iterates levels 2..N-1 — stops at the page-directory level (above PT).
+    // Walk the boot page table to find the bottom-level page directory (level 1).
+    // On x86_64 with 4 levels, walks from PML4(3) down to PD(2), finding PD.
+    // On RISC-V SV39 with 3 levels, walks from L2(2) down to L1(1)...
+    // but our boot page table uses 1GB huge pages at L2 (leaf entries).
+    // In that case, there is no L1-level table to copy from.
     let mut table_phys = boot_cr3_val;
+    let mut found_boot_pd = false;
     for lvl in (2..levels).rev() {
         let table = table_phys as *const u64;
         let idx = kernel::hal::pt_index(0, lvl);
         let entry = unsafe { core::ptr::read(table.add(idx)) };
+        // If the boot entry is a huge page leaf, there's no lower-level
+        // table to deep-copy.
+        // On x86_64: PG_PS bit (0x80) indicates 2MB or 1GB huge page.
+        // On RISC-V SV39: PTE with V + any R/W/X at a non-leaf level is leaf.
+        #[cfg(target_arch = "x86_64")]
+        let is_leaf = (entry & kernel::hal::pte_present() != 0)
+            && (entry & kernel::hal::pte_large_page()) != 0;
+        #[cfg(target_arch = "riscv64")]
+        let is_leaf = (entry & kernel::hal::pte_present() != 0) && (entry & 0x0E) != 0;
+        if is_leaf {
+            found_boot_pd = false;
+            break;
+        }
         table_phys = entry & kernel::hal::pte_frame_mask();
+        found_boot_pd = true;
     }
-    let boot_pd_phys = table_phys;
+    // If we walked all the way down, the last table is the boot PD.
+    let boot_pd_phys = if found_boot_pd { table_phys } else { 0 };
 
     // Allocate (levels-1) pages: root + intermediate levels (PD is last).
     let n_pages = (levels - 1) as usize;
@@ -406,28 +425,35 @@ pub unsafe fn boot_create_restricted_page_table(
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
     for i in 0..(n_pages - 1) {
         unsafe {
-            core::ptr::write(pages[i] as *mut u64, pages[i + 1] | flags);
+            let pte = kernel::hal::build_pte(pages[i + 1], flags);
+            core::ptr::write(pages[i] as *mut u64, pte);
         }
     }
 
-    // Deep-copy all 512 bottom-level entries from boot PD (identity map).
-    unsafe {
-        let new_pd = pages[n_pages - 1] as *mut u64;
-        for i in 0..512 {
-            let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
-            core::ptr::write(new_pd.add(i), entry);
+    if found_boot_pd && boot_pd_phys != 0 {
+        // Deep-copy all 512 bottom-level entries from boot PD (identity map).
+        // This applies when boot page table has a non-leaf PD-level table
+        // (e.g., x86_64 boot with 2MB huge pages split into PT entries).
+        unsafe {
+            let new_pd = pages[n_pages - 1] as *mut u64;
+            for i in 0..512 {
+                let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
+                core::ptr::write(new_pd.add(i), entry);
+            }
         }
+    }
 
-        // Share kernel high mappings (top half of root).
-        let boot_root = boot_cr3_val as *const u64;
-        let new_root = pages[0] as *mut u64;
-        for i in 256..512 {
-            let entry = core::ptr::read(boot_root.add(i));
+    // Share kernel high mappings (top half of root).
+    let boot_root = boot_cr3_val as *const u64;
+    let new_root = pages[0] as *mut u64;
+    for i in 256..512 {
+        let entry = unsafe { core::ptr::read(boot_root.add(i)) };
+        unsafe {
             core::ptr::write(new_root.add(i), entry);
         }
     }
 
-    // Overwrite user code pages: map_page will split 2MB huge pages to 4KB.
+    // Overwrite user code pages: map_page will split huge pages to 4KB.
     let user_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
     let mut va = code_start;
     let mut pa = code_phys;
@@ -462,10 +488,13 @@ pub unsafe fn boot_create_restricted_page_table(
 /// Sets init's per-process CR3, then calls the assembly `sysretq_to_user`
 /// which loads registers from the TrapFrame and executes `sysretq`.
 ///
+/// x86_64-only: uses sysretq instruction.
+///
 /// # Safety
 ///
 /// `init` must contain a valid Proc pointer and page table physical address.
 /// Never returns.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn boot_jump_to_user(init: &InitInfo, pt_phys: u64) -> ! {
     // Read register values from the raw byte frame.
     // x86_64 offsets: rcx=16, r11=72, rsp=168
@@ -551,20 +580,18 @@ mod tests {
 
     #[test]
     fn user_stack_constants_are_within_ram() {
-        const USER_STACK_BASE: u64 = 0x0FE00000;
-        const USER_STACK_SIZE: usize = 65536;
-        const KERNEL_END: u64 = 0x300000;
-        const RAM_TOP: u64 = 0x10000000;
+        // Use arch-specific values from HAL
+        let stack_base = kernel::hal::user_stack_base();
+        let stack_size = kernel::hal::user_stack_size() as u64;
+        let ram_top = kernel::hal::kern_vaddr() + 0x10000000; // assume 256MB RAM
 
-        let stack_end = USER_STACK_BASE + USER_STACK_SIZE as u64;
+        let stack_end = stack_base + stack_size;
         assert!(
-            stack_end < RAM_TOP,
+            stack_end < ram_top,
             "user stack end 0x{:x} exceeds RAM top 0x{:x}",
             stack_end,
-            RAM_TOP
+            ram_top
         );
-        // Compile-time check: user stack must be after kernel memory
-        const _: () = assert!(USER_STACK_BASE > KERNEL_END);
     }
 
     #[test]

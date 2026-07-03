@@ -555,9 +555,28 @@ pub const fn pte_flags_mask() -> u64 {
     0x0000000000000FFF // PG_PTEMASK
 }
 
+/// Build a page table entry from a physical address and flags.
+///
+/// x86_64: PTE stores the physical address directly in bits [51:12],
+/// so this is just (pa & frame_mask) | (flags & flags_mask).
+pub const fn build_pte(pa: u64, flags: u64) -> u64 {
+    (pa & 0x000FFFFFFFFFF000) | (flags & 0xFFF)
+}
+
 /// Kernel load virtual address (x86_64: identity-mapped at 0x200000).
 pub const fn kern_vaddr() -> u64 {
     0x200000
+}
+
+/// User stack base virtual address (must be in RAM).
+/// On x86_64 QEMU, RAM starts at 0, so 0x0FE00000 is valid.
+pub const fn user_stack_base() -> u64 {
+    0x0FE00000u64
+}
+
+/// User stack size in bytes.
+pub const fn user_stack_size() -> usize {
+    65536
 }
 
 /// Page table flags (x86_64).

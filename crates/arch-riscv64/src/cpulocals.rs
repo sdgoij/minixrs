@@ -21,8 +21,22 @@ pub struct PerCpuStorage {
     pub kernel_stack_top: u64,
     /// Hart ID (0 for BSP, 1+ for APs).
     pub hart_id: u32,
-    /// Padding to 64-byte cache line.
-    _pad: [u8; 44],
+    /// Padding.
+    _pad1: [u8; 28],
+    /// Ready list head pointers (one per priority queue, up to 16).
+    pub run_q_head: [*mut core::ffi::c_void; 16],
+    /// Ready list tail pointers (one per priority queue, up to 16).
+    pub run_q_tail: [*mut core::ffi::c_void; 16],
+}
+
+pub fn run_q_head_ptr() -> *mut [*mut core::ffi::c_void; 16] {
+    let storage = tp_ptr() as *mut PerCpuStorage;
+    unsafe { core::ptr::addr_of_mut!((*storage).run_q_head) }
+}
+
+pub fn run_q_tail_ptr() -> *mut [*mut core::ffi::c_void; 16] {
+    let storage = tp_ptr() as *mut PerCpuStorage;
+    unsafe { core::ptr::addr_of_mut!((*storage).run_q_tail) }
 }
 
 /// Static storage for the boot hart (hart 0).
@@ -31,7 +45,9 @@ pub static mut BOOT_CPU_STORAGE: PerCpuStorage = PerCpuStorage {
     current_proc: 0,
     kernel_stack_top: 0,
     hart_id: 0,
-    _pad: [0u8; 44],
+    _pad1: [0u8; 28],
+    run_q_head: [core::ptr::null_mut(); 16],
+    run_q_tail: [core::ptr::null_mut(); 16],
 };
 
 /// Initialize per-CPU storage for the boot hart.

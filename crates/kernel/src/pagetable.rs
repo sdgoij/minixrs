@@ -160,7 +160,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
     unsafe {
         let levels = crate::hal::pt_levels();
         let pte_flags = (flags & PG_PTEMASK) | PG_P;
-        let pte_val = (pa & PG_FRAME) | pte_flags;
+        let pte_val = crate::hal::build_pte(pa, pte_flags);
         let mut table_phys = cr3;
 
         // Walk from the top non-leaf level down to level 1.
@@ -173,7 +173,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
             table_phys = if pte & PG_P == 0 {
                 // No entry — allocate a new page table page.
                 let p = alloc_pt_page()?;
-                write_pte(pte_addr, p | PG_P | PG_RW | PG_U);
+                write_pte(pte_addr, crate::hal::build_pte(p, PG_P | PG_RW | PG_U));
                 p
             } else if pte & PG_PS != 0 {
                 // Huge page — split into 512 × 4KB PTEs preserving the
@@ -184,9 +184,15 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 let pt_virt = pt_phys as *mut u64;
                 for i in 0..512u64 {
                     let pte_pa = base_pa + i * 4096;
-                    write_pte(pt_virt.add(i as usize), pte_pa | pte_flags_src);
+                    write_pte(
+                        pt_virt.add(i as usize),
+                        crate::hal::build_pte(pte_pa, pte_flags_src),
+                    );
                 }
-                write_pte(pte_addr, pt_phys | PG_P | PG_RW | PG_U);
+                write_pte(
+                    pte_addr,
+                    crate::hal::build_pte(pt_phys, PG_P | PG_RW | PG_U),
+                );
                 pt_phys
             } else {
                 pte & PG_FRAME
@@ -312,13 +318,13 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         // Populate the new page table with 512 × 4KB entries
         for i in 0..512 {
             let pa = base_pa + (i as u64) * 0x1000;
-            let pte_val = (pa & PG_FRAME) | attrs;
+            let pte_val = crate::hal::build_pte(pa, attrs);
             write_pte(pt.add(i), pte_val);
         }
 
         // Replace the PDE to point to the new page table (clear PS, G)
         let pde_flags = (result.pte_value & PG_PTEMASK) & !(PG_PS | PG_G);
-        let new_pde = (pt_phys & PG_FRAME) | pde_flags;
+        let new_pde = crate::hal::build_pte(pt_phys, pde_flags);
         write_pte(result.pte_virt, new_pde);
 
         // ── Set NX on BSS pages ──────────────────────────────────────

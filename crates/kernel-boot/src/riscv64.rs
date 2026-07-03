@@ -68,20 +68,23 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     // Parse FDT for memory information
     // SAFETY: dtb_ptr points to a valid FDT provided by OpenSBI
-    if let Some((mem_base, mem_size)) =
-        unsafe { arch_riscv64::boot::parse_fdt_memory(dtb_ptr as *const u8) }
-    {
-        let mut mmap = arch_riscv64::alloc::PhysicalMemoryMap::new();
-        // Kernel is linked at 0x80200000, initramfs ends at around 0x80200000 + binary_size
-        // Use a generous 4MB estimate for the kernel binary
-        let kernel_end = 0x80200000u64 + 0x400000u64; // 4MB kernel estimate
-        if kernel_end < mem_base + mem_size {
-            mmap.add(kernel_end, mem_base + mem_size);
-        }
-        // SAFETY: Called once during early boot with valid memory info
-        unsafe {
-            arch_riscv64::alloc::init_allocator(&mmap);
-        }
+    let (mem_base, mem_size) =
+        if let Some(info) = unsafe { arch_riscv64::boot::parse_fdt_memory(dtb_ptr as *const u8) } {
+            info
+        } else {
+            // Fallback: assume standard QEMU virt layout with 256MB RAM
+            (0x80000000u64, 256 * 1024 * 1024)
+        };
+
+    let kernel_end = 0x80200000u64 + 0x800000u64; // 8MB kernel estimate
+
+    let mut mmap = arch_riscv64::alloc::PhysicalMemoryMap::new();
+    if kernel_end < mem_base + mem_size {
+        mmap.add(kernel_end, mem_base + mem_size);
+    }
+    // SAFETY: Called once during early boot with valid memory info
+    unsafe {
+        arch_riscv64::alloc::init_allocator(&mmap);
     }
 
     // Set up STVEC to point to the trap vector
@@ -138,10 +141,93 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         arch_riscv64::plic::init_plic();
     }
 
-    // TODO: Load boot processes from initramfs
-    // TODO: Create per-process SV39 page tables
-    // TODO: Set up scheduler
-    // TODO: switch_to_user(first_proc)
+    // ── Create boot SV39 page table and enable MMU ────────────────────
+    // The kernel runs in Bare mode at this point. We need virtual memory
+    // enabled (SV39) for per-process page tables to work. Create a simple
+    // identity-mapped boot page table using 1GB huge pages.
+    serial_write("  enabling SV39 paging...\r\n");
+    unsafe {
+        if let Some(boot_pt) = create_boot_page_table() {
+            // write_cr3 encodes SATP with SV39 mode
+            kernel::hal::write_cr3(boot_pt);
+            serial_write("  SV39 enabled\r\n");
+        } else {
+            serial_write("  FAILED: boot page table\r\n");
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+            }
+        }
+    }
+
+    // Load the init process from initramfs
+    fn serial_write(s: &str) {
+        for &b in s.as_bytes() {
+            arch_riscv64::sbi::console_putchar(b);
+        }
+    }
+
+    serial_write("  loading boot processes...\r\n");
+
+    let info = match kernel_boot::boot_init::load_and_prepare_proc(
+        "/sbin/init",
+        arch_common::com::INIT_PROC_NR,
+        &["/sbin/init"],
+    ) {
+        Some(info) => info,
+        None => {
+            serial_write("  FAILED: init\r\n");
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+            }
+        }
+    };
+
+    serial_write("  creating per-process page tables...\r\n");
+    let pt_phys = match kernel_boot::boot_init::boot_create_restricted_page_table(
+        info.code_start,
+        info.code_end,
+        info.phys_code_base,
+        info.stack_start,
+        info.stack_end,
+        info.phys_stack_base,
+    ) {
+        Some(p) => p,
+        None => {
+            serial_write("  FAILED: page table\r\n");
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+            }
+        }
+    };
+
+    unsafe {
+        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
+        core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+        core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
+        core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
+        core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+    }
+
+    serial_write("  enqueuing processes...\r\n");
+    unsafe {
+        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
+        let old_flags = (*rp)
+            .p_rts_flags
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let cleared = old_flags
+            & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
+                | kernel::proc::RtsFlags::SLOT_FREE.bits());
+        if cleared == 0 {
+            kernel::sched::enqueue(rp);
+        }
+        arch_riscv64::cpulocals::set_current_proc(rp as u64);
+    }
+
+    serial_write("  switching to userspace...\r\n");
+    unsafe {
+        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
+        arch_riscv64::switch::switch_to_user(rp as *const u8);
+    }
 
     for &b in b"RISC-V kernel initialized. Halting.\r\n" {
         arch_riscv64::sbi::console_putchar(b);
@@ -149,6 +235,62 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     // Shutdown via SBI
     arch_riscv64::sbi::system_reset(true);
+}
+
+/// Create an identity-mapped boot page table for SV39 paging.
+///
+/// Maps the full 4GB physical address space with 1GB huge pages.
+/// This covers kernel code at 0x80200000, device memory (UART at 0x10000000,
+/// PLIC at 0x0C000000, CLINT at 0x02000000), and all RAM.
+///
+/// Returns the physical address of the root page table.
+///
+/// # Safety
+///
+/// Must be called after the physical allocator is initialized, before any
+/// virtual memory is active. The kernel must be running in Bare mode.
+#[cfg(target_arch = "riscv64")]
+unsafe fn create_boot_page_table() -> Option<u64> {
+    unsafe {
+        // Try to allocate from the physical allocator first.
+        // If it fails (e.g., allocator not yet initialized), use a
+        // hardcoded page in the gap between kernel data end and
+        // the allocator-managed region.
+        let root_phys = match arch_riscv64::alloc::alloc_phys_page() {
+            Some(pa) => pa,
+            None => {
+                // Fallback: page at 0x80400000 is in the gap between
+                // initramfs end (~0x80330000) and allocator start (~0x80A00000)
+                0x80400000u64
+            }
+        };
+        core::ptr::write_bytes(root_phys as *mut u8, 0, 4096);
+
+        // SV39 PTE flags for supervisor identity-mapped 1GB pages:
+        // - V=1 (valid), R=1 (read), W=1 (write), X=1 (execute)
+        // - No U bit (supervisor-only), no G bit
+        let flags = arch_riscv64::pte::PTE_V
+            | arch_riscv64::pte::PTE_R
+            | arch_riscv64::pte::PTE_W
+            | arch_riscv64::pte::PTE_X;
+
+        // Map using 1GB huge pages at L2 level:
+        // - L2[0]: VA 0x00000000-0x3FFFFFFF → PA 0x00000000 (covers devices, CLINT)
+        // - L2[1]: VA 0x40000000-0x7FFFFFFF → PA 0x40000000
+        // - L2[2]: VA 0x80000000-0xBFFFFFFF → PA 0x80000000 (covers RAM, kernel)
+        // - L2[3]: VA 0xC0000000-0xFFFFFFFF → PA 0xC0000000
+        let root = root_phys as *mut u64;
+        for (i, base) in [0x00000000u64, 0x40000000, 0x80000000, 0xC0000000]
+            .iter()
+            .enumerate()
+        {
+            // build_pte encodes PPN = pa >> 12 correctly for SV39
+            let pte = arch_riscv64::hal::build_pte(*base, flags);
+            core::ptr::write(root.add(i), pte);
+        }
+
+        Some(root_phys)
+    }
 }
 
 /// Panic handler.

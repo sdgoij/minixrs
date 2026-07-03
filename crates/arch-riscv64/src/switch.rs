@@ -3,36 +3,52 @@
 //! Restores all registers from a process's trap frame and sret to userspace.
 //! Equivalent to x86_64's `restore()` in arch-x86_64/src/asm.rs.
 
-/// Switch to a user process by loading its trap frame.
+/// Switch to a user process by loading its trap frame from `p_reg`.
 ///
-/// Loads sepc, sstatus, and all 32 GPRs from `frame`, then executes
-/// `sret` to jump to userspace.
+/// Equivalent to x86_64's `restore()` in arch-x86_64/src/asm.rs.
+/// Takes a pointer to the `Proc` struct; reads sepc from offset 0
+/// (x0 slot, set by `hal::set_initial_regs`) and sstatus from offset 248
+/// (t6 slot). Also loads the per-process page table from p_seg.p_cr3
+/// (offset 256) and writes SATP with SV39 mode before sret.
 ///
-/// Trap frame layout (byte offsets):
-///   0: zero,   8: ra,   16: sp,  24: gp,  32: tp
-///  40: t0,    48: t1,   56: t2,  64: s0,  72: s1
-///  80: a0,    88: a1,   96: a2, 104: a3, 112: a4
-/// 120: a5,   128: a6,  136: a7, 144: s2, 152: s3
-/// 160: s4,   168: s5,  176: s6, 184: s7, 192: s8
+/// Trap frame layout within `p_reg` (`[u8; 256]`):
+///   0: sepc   (x0 slot, 8 bytes, never loaded as GPR)
+///   8: ra     (x1), 16: sp (x2), 24: gp (x3), 32: tp (x4)
+///  40: t0,    48: t1,  56: t2,  64: s0,  72: s1
+///  80: a0,    88: a1,  96: a2, 104: a3, 112: a4
+/// 120: a5,   128: a6, 136: a7, 144: s2, 152: s3
+/// 160: s4,   168: s5, 176: s6, 184: s7, 192: s8
 /// 200: s9,   208: s10, 216: s11, 224: t3, 232: t4
-/// 240: t5,   248: t6
-/// 256: sepc, 264: sstatus
+/// 240: t5,   248: sstatus (t6 slot, skipped in GPR loads)
 ///
 /// # Safety
 ///
-/// `frame` must point to a valid 288-byte trap frame with proper
-/// register state. This function never returns.
+/// `proc_ptr` must point to a valid `Proc` whose `p_reg` and `p_seg`
+/// contain valid user-space register values. Must be called in S-mode
+/// with interrupts disabled. Never returns.
 #[cfg(target_arch = "riscv64")]
-pub unsafe fn switch_to_user(frame: &[u8; 288]) -> ! {
-    let sepc_val = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
-    let sstatus_val = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
-
+pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
     unsafe {
         core::arch::asm!(
-            "csrw sstatus, {sstatus}",
-            "csrw sepc, {sepc}",
+            // Read sepc from offset 0 (x0 slot).
+            "ld      t0, 0(a0)",
+            "csrw    sepc, t0",
 
-            // Load all GPRs using a0 as frame pointer (set by in("a0"))
+            // Read sstatus from offset 248 (t6 slot).
+            "ld      t0, 248(a0)",
+            "csrw    sstatus, t0",
+
+            // Set SATP from p_seg.p_cr3 at offset 256.
+            // SATP = (8 << 60) | (cr3 >> 12)  [SV39 mode]
+            "ld      t0, 256(a0)",
+            "srli    t0, t0, 12",        // PPN = cr3 >> 12
+            "li      t1, 8",
+            "slli    t1, t1, 60",        // MODE = 8 (SV39)
+            "or      t0, t0, t1",
+            "csrw    satp, t0",
+            "sfence.vma",
+
+            // Load all GPRs except x0 (offset 0, holds sepc) and t6 (offset 248, holds sstatus).
             "ld      ra,   8(a0)",
             "ld      gp,   24(a0)",
             "ld      tp,   32(a0)",
@@ -61,17 +77,15 @@ pub unsafe fn switch_to_user(frame: &[u8; 288]) -> ! {
             "ld      t3,   224(a0)",
             "ld      t4,   232(a0)",
             "ld      t5,   240(a0)",
-            "ld      t6,   248(a0)",
+            // Skip t6 (offset 248) — holds sstatus.
 
-            // Load sp and a0 last (a0 is the frame pointer)
+            // Load sp and a0 last.
             "ld      sp,   16(a0)",
             "ld      a0,   80(a0)",
 
             "sret",
 
-            sepc = in(reg) sepc_val,
-            sstatus = in(reg) sstatus_val,
-            in("a0") frame.as_ptr(),
+            in("a0") proc_ptr,
             options(noreturn),
         );
     }
