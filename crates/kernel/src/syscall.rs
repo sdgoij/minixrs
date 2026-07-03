@@ -230,13 +230,9 @@ unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) ->
         for i in 0..count.min(256) {
             let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
             if c == b'\n' {
-                unsafe {
-                    arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, b'\r');
-                }
+                crate::hal::serial_write_byte(b'\r');
             }
-            unsafe {
-                arch_x86_64::hw::ser_putc(arch_x86_64::hw::COM1, c);
-            }
+            crate::hal::serial_write_byte(c);
         }
         count as i64
     } else {
@@ -507,14 +503,14 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         // not to the current process's per-process pages (which have a
         // different physical backing). The new page table will map
         // va -> pa = va, so we need the data at the identity-mapped address.
-        let saved_cr3 = arch_x86_64::asm::read_cr3();
+        let saved_cr3 = crate::hal::read_cr3();
         let boot_cr3_val = crate::pagetable::boot_cr3();
-        arch_x86_64::asm::write_cr3(boot_cr3_val);
+        crate::hal::write_cr3(boot_cr3_val);
 
         let loaded = match crate::elf::load_elf(data) {
             Ok(l) => l,
             Err(_) => {
-                arch_x86_64::asm::write_cr3(saved_cr3);
+                crate::hal::write_cr3(saved_cr3);
                 return -38;
             }
         };
@@ -525,13 +521,13 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
             Ok(rsp) => rsp,
             Err(_) => {
-                arch_x86_64::asm::write_cr3(saved_cr3);
+                crate::hal::write_cr3(saved_cr3);
                 return -38;
             }
         };
 
         // Switch back to the original CR3.
-        arch_x86_64::asm::write_cr3(saved_cr3);
+        crate::hal::write_cr3(saved_cr3);
 
         let code_start = loaded.base & !0xFFF;
         let code_end = (loaded.top + 0xFFF) & !0xFFF;
@@ -541,36 +537,36 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         // Build a new page table with a full identity map (deep-copied from
         // the boot PD) so the kernel can still run after CR3 switch. Then
         // overwrite the user code and stack ranges with per-process pages.
-        let pml4 = match arch_x86_64::alloc::alloc_phys_page() {
+        let pml4 = match crate::hal::alloc_phys_page() {
             Some(p) => p,
             None => return -12,
         };
-        core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+        core::ptr::write_bytes(pml4 as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
 
         // Walk the boot page table to reach the PD (512 x 2MB entries = 1GB).
         let boot_cr3_val2 = crate::pagetable::boot_cr3();
         let boot_pml4 = boot_cr3_val2 as *const u64;
         let boot_pml4e0 = core::ptr::read(boot_pml4);
-        let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pdpt_phys = boot_pml4e0 & crate::pagetable::PG_FRAME;
         let boot_pdpt = boot_pdpt_phys as *const u64;
         let boot_pdpte0 = core::ptr::read(boot_pdpt);
-        let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pd_phys = boot_pdpte0 & crate::pagetable::PG_FRAME;
         let boot_pd = boot_pd_phys as *const u64;
 
         // Allocate PDPT and PD pages.
-        let pdpt_page = match arch_x86_64::alloc::alloc_phys_page() {
+        let pdpt_page = match crate::hal::alloc_phys_page() {
             Some(p) => p,
             None => return -12,
         };
-        let pd_page = match arch_x86_64::alloc::alloc_phys_page() {
+        let pd_page = match crate::hal::alloc_phys_page() {
             Some(p) => p,
             None => return -12,
         };
-        core::ptr::write_bytes(pdpt_page as *mut u8, 0, arch_x86_64::param::NBPG as usize);
-        core::ptr::write_bytes(pd_page as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+        core::ptr::write_bytes(pdpt_page as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
+        core::ptr::write_bytes(pd_page as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
 
         // Link: PML4[0] -> PDPT[0] -> PD.
-        let flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+        let flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
         core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
         core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
 
@@ -588,7 +584,7 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         }
 
         // Overwrite user code pages with per-process identity mappings.
-        let user_flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+        let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
         let mut va = code_start;
         while va < code_end {
             if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
@@ -934,6 +930,7 @@ mod tests {
     fn test_exit_frees_slot_and_stores_status() {
         unsafe {
             proc_init();
+            #[cfg(target_arch = "x86_64")]
             arch_x86_64::cpulocals::init_cpulocals();
             let rp = crate::table::proc_addr(0);
             (*rp).p_nr = 0;

@@ -1,42 +1,43 @@
-//! x86_64 page table management (Phase 6.2)
+//! Page table management (x86_64: 4-level PML4→PDPT→PD→PT).
 //!
-//! Provides page table allocation, walking, mapping, and unmapping
-//! for the 4-level x86_64 paging scheme (PML4 → PDPT → PD → PT).
-//!
-//! Relies on the physical memory allocator (kernel::vm) for page frames.
+//! Provides page table allocation, walking, mapping, and unmapping.
+//! Architecture-specific constants and operations come from `crate::hal`.
 
 use arch_common::com::{VM_PAGEFAULT, VM_PROC_NR};
-use arch_x86_64::pte::{
-    self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, pd_index, pdpt_index, pml4_index, pt_index,
-};
-use arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
 
 use crate::ipc::{OK, SENDREC, current_proc, do_sync_ipc};
 use crate::proc::MESSAGE_SIZE;
 
-pub const MAP_PRESENT: u64 = pte::PG_P;
-pub const MAP_WRITE: u64 = pte::PG_RW;
-pub const MAP_USER: u64 = pte::PG_U;
-pub const MAP_NX: u64 = pte::PG_NX;
-pub const MAX_USER_ADDRESS: u64 = arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
+// Re-export page table constants and basic operations from hal
+pub use crate::hal::{
+    MAP_NX, MAP_PRESENT, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3, write_cr3,
+};
 
-/// Get the boot CR3 value (physical address of the boot PML4).
-///
-/// Returns 0 if the boot page table has not been initialised.
-pub fn boot_cr3() -> u64 {
-    arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
+/// x86_64 page table entry type (u64 — 8 bytes).
+pub type PtEntry = u64;
+
+// PTE index extraction (x86_64 4-level: 9 bits per level)
+pub const fn pml4_index(va: u64) -> usize {
+    ((va >> 39) & 0x1FF) as usize
+}
+pub const fn pdpt_index(va: u64) -> usize {
+    ((va >> 30) & 0x1FF) as usize
+}
+pub const fn pd_index(va: u64) -> usize {
+    ((va >> 21) & 0x1FF) as usize
+}
+pub const fn pt_index(va: u64) -> usize {
+    ((va >> 12) & 0x1FF) as usize
 }
 
-/// Write CR3 to flush the TLB / switch to a new address space.
-///
-/// # Safety
-///
-/// `cr3` must point to a valid PML4 table.
-pub unsafe fn write_cr3(cr3: u64) {
-    unsafe {
-        arch_x86_64::asm::write_cr3(cr3);
-    }
-}
+// PTE bit masks (x86_64)
+pub const PG_P: u64 = 0x0000000000000001;
+pub const PG_RW: u64 = 0x0000000000000002;
+pub const PG_U: u64 = 0x0000000000000004;
+pub const PG_PS: u64 = 0x0000000000000080;
+pub const PG_G: u64 = 0x0000000000000100;
+pub const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+pub const PG_PTEMASK: u64 = 0x0000000000000FFF;
 
 /// Return the saved CR3 value for a process, or 0 if the process has no
 /// per-process page table.
@@ -78,8 +79,8 @@ pub static __bss_end: u8 = 0;
 #[derive(Debug, Clone, Copy)]
 pub struct PageWalkResult {
     pub pte_phys: u64,
-    pub pte_virt: *mut PtEntry,
-    pub pte_value: PtEntry,
+    pub pte_virt: *mut u64,
+    pub pte_value: u64,
     pub level: u32,
 }
 
@@ -92,9 +93,11 @@ pub enum PageTableError {
 }
 
 unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
-    match arch_x86_64::alloc::alloc_phys_page() {
-        Some(addr) => Ok(addr),
-        None => Err(PageTableError::OutOfMemory),
+    unsafe {
+        match crate::hal::alloc_phys_page() {
+            Some(addr) => Ok(addr),
+            None => Err(PageTableError::OutOfMemory),
+        }
     }
 }
 
@@ -117,44 +120,44 @@ unsafe fn write_pte(pt_virt: *mut PtEntry, value: PtEntry) {
 /// `cr3` must point to a valid, identity-mapped PML4 table.
 pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> {
     unsafe {
-        let pml4 = cr3 as *const PtEntry;
+        let pml4 = cr3 as *const u64;
         let pml4e = read_pte(pml4.add(pml4_index(va)));
         if pml4e & PG_P == 0 {
             return Err(PageTableError::NotMapped);
         }
 
         let pdpt_phys = pml4e & PG_FRAME;
-        let pdpt = pdpt_phys as *const PtEntry;
+        let pdpt = pdpt_phys as *const u64;
         let pdpte = read_pte(pdpt.add(pdpt_index(va)));
         if pdpte & PG_P == 0 {
             return Err(PageTableError::NotMapped);
         }
-        if pdpte & pte::PG_PS != 0 {
+        if pdpte & PG_PS != 0 {
             return Ok(PageWalkResult {
                 pte_phys: pdpt_phys + (pdpt_index(va) as u64) * 8,
-                pte_virt: (pdpt_phys + (pdpt_index(va) as u64) * 8) as *mut PtEntry,
+                pte_virt: (pdpt_phys + (pdpt_index(va) as u64) * 8) as *mut u64,
                 pte_value: pdpte,
                 level: 3,
             });
         }
 
         let pd_phys = pdpte & PG_FRAME;
-        let pd = pd_phys as *const PtEntry;
+        let pd = pd_phys as *const u64;
         let pde = read_pte(pd.add(pd_index(va)));
         if pde & PG_P == 0 {
             return Err(PageTableError::NotMapped);
         }
-        if pde & pte::PG_PS != 0 {
+        if pde & PG_PS != 0 {
             return Ok(PageWalkResult {
                 pte_phys: pd_phys + (pd_index(va) as u64) * 8,
-                pte_virt: (pd_phys + (pd_index(va) as u64) * 8) as *mut PtEntry,
+                pte_virt: (pd_phys + (pd_index(va) as u64) * 8) as *mut u64,
                 pte_value: pde,
                 level: 2,
             });
         }
 
         let pt_phys = pde & PG_FRAME;
-        let pt = pt_phys as *const PtEntry;
+        let pt = pt_phys as *const u64;
         let pte = read_pte(pt.add(pt_index(va)));
         if pte & PG_P == 0 {
             return Err(PageTableError::NotMapped);
@@ -162,7 +165,7 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 
         Ok(PageWalkResult {
             pte_phys: pt_phys + (pt_index(va) as u64) * 8,
-            pte_virt: (pt_phys + (pt_index(va) as u64) * 8) as *mut PtEntry,
+            pte_virt: (pt_phys + (pt_index(va) as u64) * 8) as *mut u64,
             pte_value: pte,
             level: 1,
         })
@@ -184,7 +187,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let pml4e = read_pte(pml4e_addr);
         let pdpt_phys = if pml4e & PG_P == 0 {
             let p = alloc_pt_page()?;
-            write_pte(pml4e_addr, p | PG_P | pte::PG_RW | pte::PG_U);
+            write_pte(pml4e_addr, p | PG_P | PG_RW | PG_U);
             p
         } else {
             pml4e & PG_FRAME
@@ -195,7 +198,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let pdpte = read_pte(pdpte_addr);
         let pd_phys = if pdpte & PG_P == 0 {
             let p = alloc_pt_page()?;
-            write_pte(pdpte_addr, p | PG_P | pte::PG_RW | pte::PG_U);
+            write_pte(pdpte_addr, p | PG_P | PG_RW | PG_U);
             p
         } else {
             pdpte & PG_FRAME
@@ -206,27 +209,27 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let pde = read_pte(pde_addr);
         let pt_phys = if pde & PG_P == 0 {
             let p = alloc_pt_page()?;
-            write_pte(pde_addr, p | PG_P | pte::PG_RW | pte::PG_U);
+            write_pte(pde_addr, p | PG_P | PG_RW | PG_U);
             p
-        } else if pde & pte::PG_PS != 0 {
+        } else if pde & PG_PS != 0 {
             // Split a 2MB huge page into 512 × 4KB PTEs, preserving
             // the original 2MB mapping. Then the specific PTE will be
             // overwritten below for the per-process page.
-            let pt = alloc_pt_page()?;
-            let base_pa = pde & pte::PG_FRAME;
-            let pte_flags = (pde & pte::PG_PTEMASK) & !pte::PG_PS;
-            let pt_virt = pt as *mut PtEntry;
+            let pt_phys = alloc_pt_page()?;
+            let base_pa = pde & PG_FRAME;
+            let pte_flags = (pde & PG_PTEMASK) & !PG_PS;
+            let pt_virt = pt_phys as *mut u64;
             for i in 0..512u64 {
                 let pte_pa = base_pa + i * 4096;
                 write_pte(pt_virt.add(i as usize), pte_pa | pte_flags);
             }
-            write_pte(pde_addr, pt | pte::PG_P | pte::PG_RW | pte::PG_U);
-            pt
+            write_pte(pde_addr, pt_phys | PG_P | PG_RW | PG_U);
+            pt_phys
         } else {
-            pde & pte::PG_FRAME
+            pde & PG_FRAME
         };
 
-        let pt = pt_phys as *mut PtEntry;
+        let pt = pt_phys as *mut u64;
         let pte_addr = pt.add(pt_index(va));
         write_pte(pte_addr, pte_val);
         Ok(())
@@ -238,14 +241,14 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
 /// # Safety
 ///
 /// `cr3` must point to a valid PML4.
-pub unsafe fn unmap_page(cr3: u64, va: u64) -> Result<PtEntry, PageTableError> {
+pub unsafe fn unmap_page(cr3: u64, va: u64) -> Result<u64, PageTableError> {
     unsafe {
         let result = walk(cr3, va)?;
         if result.level != 1 {
             return Err(PageTableError::InvalidArgument);
         }
         write_pte(result.pte_virt, 0);
-        arch_x86_64::asm::invlpg(va);
+        crate::hal::tlb_flush_page(va);
         Ok(result.pte_value)
     }
 }
@@ -258,7 +261,7 @@ pub unsafe fn unmap_page(cr3: u64, va: u64) -> Result<PtEntry, PageTableError> {
 pub unsafe fn unmap_range(cr3: u64, va: u64, size: u64) -> Result<(), PageTableError> {
     unsafe {
         let start = va & !0xFFF;
-        let end = ((va + size + 0xFFF) & !0xFFF).min(VM_MAXUSER_ADDRESS);
+        let end = ((va + size + 0xFFF) & !0xFFF).min(MAX_USER_ADDRESS);
         let mut cur = start;
         while cur < end {
             let _ = unmap_page(cr3, cur);
@@ -323,14 +326,14 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         if result.level != 2 {
             return Err(PageTableError::InvalidArgument);
         }
-        if result.pte_value & pte::PG_PS == 0 {
+        if result.pte_value & PG_PS == 0 {
             return Err(PageTableError::InvalidArgument);
         }
 
         let base_pa = result.pte_value & PG_FRAME;
 
         // Attributes to propagate to each 4KB PTE (exclude frame, PS, and G)
-        let attrs = result.pte_value & !(PG_FRAME | pte::PG_PS | pte::PG_G);
+        let attrs = result.pte_value & !(PG_FRAME | PG_PS | PG_G);
 
         // Allocate a 4KB page table to hold the split PTEs
         let pt_phys = alloc_pt_page()?;
@@ -344,7 +347,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         }
 
         // Replace the PDE to point to the new page table (clear PS, G)
-        let pde_flags = (result.pte_value & PG_PTEMASK) & !(pte::PG_PS | pte::PG_G);
+        let pde_flags = (result.pte_value & PG_PTEMASK) & !(PG_PS | PG_G);
         let new_pde = (pt_phys & PG_FRAME) | pde_flags;
         write_pte(result.pte_virt, new_pde);
 
@@ -371,8 +374,8 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 
         for i in first_bss_page..last_bss_page {
             let mut pte_val = read_pte(pt.add(i));
-            pte_val |= PG_NX;
-            pte_val &= !pte::PG_G;
+            pte_val |= crate::hal::MAP_NX;
+            pte_val &= !PG_G;
             write_pte(pt.add(i), pte_val);
         }
 
@@ -440,9 +443,6 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::vm::{self, NO_MEM};
-    #[cfg(target_os = "none")]
-    use arch_x86_64::pte::PG_FRAME;
-
     /// Initialize the VM allocator with a test memory chunk.
     unsafe fn init_vm() {
         let chunks = [vm::MemoryChunk {
@@ -516,6 +516,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_alloc_pt_page_after_arch_init() {
         // alloc_pt_page now uses the arch allocator (not VM).

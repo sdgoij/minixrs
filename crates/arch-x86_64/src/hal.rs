@@ -373,12 +373,62 @@ pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext:
     }
 }
 
-// ── Page table constants (stubs until 19.0.3) ────────────────────────────
+// ── Page table constants ────────────────────────────────────────────────
 
 /// Physical memory page size.
 pub const PAGE_SIZE: u64 = 4096;
 /// Number of bits for the page offset.
 pub const PAGE_SHIFT: u64 = 12;
+
+/// Page table flags (x86_64).
+pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
+pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW
+pub const MAP_USER: u64 = 0x0000000000000004; // PG_U
+pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
+
+/// Maximum user address (48-bit VA, top half reserved for kernel).
+pub const MAX_USER_ADDRESS: u64 = 0x0000800000000000;
+
+/// Get the boot page table root physical address.
+pub fn boot_cr3() -> u64 {
+    crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Read the current CR3 value (page table root physical address).
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn read_cr3() -> u64 {
+    unsafe { crate::asm::read_cr3() }
+}
+
+/// Write CR3 to switch page tables / flush TLB.
+///
+/// # Safety
+///
+/// `cr3` must point to a valid, identity-mapped page table.
+pub unsafe fn write_cr3(cr3: u64) {
+    unsafe { crate::asm::write_cr3(cr3) }
+}
+
+/// Flush a single page from the TLB.
+///
+/// # Safety
+///
+/// `va` must be a valid mapped virtual address.
+pub unsafe fn tlb_flush_page(va: u64) {
+    unsafe { crate::asm::invlpg(va) }
+}
+
+/// Allocate a physical page for page table use.
+///
+/// # Safety
+///
+/// Must be called after the physical memory allocator is initialized.
+pub unsafe fn alloc_phys_page() -> Option<u64> {
+    crate::alloc::alloc_phys_page()
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 

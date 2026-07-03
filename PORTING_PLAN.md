@@ -1994,46 +1994,16 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.3 — Page table abstraction** (`kernel/src/pagetable.rs`)
-
-Currently directly uses x86_64 PTE constants and functions:
-
-```rust
-use arch_x86_64::pte::{self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, ...};
-use arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
-use arch_x86_64::BOOT_CR3;
-use arch_x86_64::asm::write_cr3;
-```
-
-Extract these into per-arch constants:
-
-```rust
-// kernel/src/hal.rs (additions)
-pub const PAGE_SIZE: u64 = 4096;
-pub const PAGE_SHIFT: u64 = 12;
-pub const MAX_USER_ADDRESS: u64 = /* arch-specific */;
-
-pub fn tlb_flush(cr3: u64);
-pub fn boot_page_table_root() -> u64;
-pub fn page_table_flags_present() -> u64;
-pub fn page_table_flags_write() -> u64;
-pub fn page_table_flags_user() -> u64;
-pub fn page_table_flags_nx() -> u64;
-pub fn page_table_flags_mask() -> u64;
-pub fn page_table_frame_mask() -> u64;
-```
-
-But pagetable.rs also uses PTE index functions (`pml4_index()`, `pdpt_index()`,
-etc.) and `PtEntry` struct — these are x86_64-specific. For RISC-V SV39,
-the page table walk is different (3 levels, different bit widths).
-
-The pagetable module may need to be partially arch-gated or split into
-shared + per-arch parts.
-
-**Files changed:**
-- `kernel/src/pagetable.rs` — extract all x86_64-specific constants and
-  functions behind `hal::*` calls
-- Only `pagetable.rs` — no other files use PTE constants directly
+- [x] **19.0.3 — Page table abstraction** (`kernel/src/pagetable.rs`)
+  - Added to hal: `MAP_PRESENT`, `MAP_WRITE`, `MAP_USER`, `MAP_NX`,
+    `MAX_USER_ADDRESS`, `boot_cr3()`, `write_cr3()`, `read_cr3()`,
+    `tlb_flush_page()`, `alloc_phys_page()`
+  - `pagetable.rs`: moved PTE index fns + bit masks into module;
+    all `arch_x86_64::pte::*` and `asm::*` replaced with `hal::*`
+  - Cleaned up `exec.rs`, `grants.rs`, `debug.rs`, `syscall.rs`:
+    replaced `BOOT_CR3`, `asm::read_cr3/write_cr3`, `pte::*`,
+    `ser_putc` with `hal::*` / `pagetable::*` equivalents
+  - 622 tests pass, `cargo clippy -- -D warnings` clean
 
 ---
 

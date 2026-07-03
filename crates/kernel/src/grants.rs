@@ -101,12 +101,12 @@ pub unsafe fn verify_grant(
             let grant_entry_addr = priv_data.s_grant_table
                 + (cur_grant as u64) * core::mem::size_of::<CpGrant>() as u64;
 
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             let g = if boot_cr3 != 0 && (*granter_proc).p_seg.p_cr3 != 0 {
-                let saved = arch_x86_64::asm::read_cr3();
-                arch_x86_64::asm::write_cr3((*granter_proc).p_seg.p_cr3);
+                let saved = crate::hal::read_cr3();
+                crate::hal::write_cr3((*granter_proc).p_seg.p_cr3);
                 let entry = core::ptr::read(grant_entry_addr as *const CpGrant);
-                arch_x86_64::asm::write_cr3(saved);
+                crate::hal::write_cr3(saved);
                 entry
             } else {
                 // No per-process page table — read via identity map
@@ -284,7 +284,7 @@ pub unsafe fn safecopy(
             );
             OK
         } else {
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 == 0 {
                 // Pre-init / test mode: direct copy
                 core::ptr::copy_nonoverlapping(

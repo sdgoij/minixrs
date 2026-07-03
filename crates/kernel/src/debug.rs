@@ -590,7 +590,7 @@ pub unsafe fn proc_stacktrace(rp: *const Proc) {
 
         append_kmess(&buf[..pos]);
 
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             append_kmess(b"  (stacktrace unavailable in test mode)\n");
             return;

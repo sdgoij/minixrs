@@ -3,8 +3,7 @@
 //! Builds a private page table for a newly exec'd process, with
 //! private physical copies of code and stack pages.
 
-use core::sync::atomic::Ordering;
-
+use crate::pagetable::{PG_FRAME, PG_P, PG_RW, PG_U};
 use crate::vm::{self, NO_MEM};
 
 /// Create a per-process page table for an exec'd process.
@@ -21,7 +20,7 @@ use crate::vm::{self, NO_MEM};
 /// has written the binary to identity-mapped physical pages.
 pub unsafe fn exec_setup_new_page_table() -> u64 {
     unsafe {
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             return 0; // boot not initialized
         }
@@ -29,10 +28,10 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // Walk the boot page table to find the PD and PDP physical addresses
         let boot_pml4 = boot_cr3 as *const u64;
         let boot_pml4e0 = core::ptr::read(boot_pml4);
-        let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pdpt_phys = boot_pml4e0 & PG_FRAME;
         let boot_pdpt = boot_pdpt_phys as *const u64;
         let boot_pdpte0 = core::ptr::read(boot_pdpt);
-        let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
+        let boot_pd_phys = boot_pdpte0 & PG_FRAME;
 
         // Allocate new PML4 (1 page)
         let pml4_page = vm::alloc_mem(1, 0);
@@ -62,16 +61,10 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
 
         // Link: PML4[0] → PDP, PDP[0] → PD
         let pml4_ptr = pml4_phys as *mut u64;
-        core::ptr::write(
-            pml4_ptr,
-            pdpt_phys | arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U,
-        );
+        core::ptr::write(pml4_ptr, pdpt_phys | PG_P | PG_RW | PG_U);
 
         let pdpt_ptr = pdpt_phys as *mut u64;
-        core::ptr::write(
-            pdpt_ptr,
-            pd_phys | arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U,
-        );
+        core::ptr::write(pdpt_ptr, pd_phys | PG_P | PG_RW | PG_U);
 
         // Deep-copy all 512 boot PD entries into new PD
         let boot_pd = boot_pd_phys as *const u64;
@@ -107,7 +100,7 @@ mod tests {
     #[test]
     fn test_exec_setup_new_page_table_fails_without_boot_cr3() {
         unsafe {
-            arch_x86_64::BOOT_CR3.store(0, Ordering::Relaxed);
+            // BOOT_CR3 is initially 0 before hal::init().
             let result = exec_setup_new_page_table();
             assert_eq!(result, 0, "Should fail when BOOT_CR3 is 0");
         }
@@ -115,12 +108,8 @@ mod tests {
 
     #[test]
     fn test_boot_cr3_initial_value_is_zero() {
-        // Before arch_x86_64::init() is called, BOOT_CR3 should be 0.
+        // Before hal::init() is called, boot_cr3() should be 0.
         // This verifies the static initializer works.
-        assert_eq!(
-            arch_x86_64::BOOT_CR3.load(Ordering::Relaxed),
-            0,
-            "BOOT_CR3 must start as 0 (pre-init guard)"
-        );
+        assert_eq!(crate::hal::boot_cr3(), 0);
     }
 }
