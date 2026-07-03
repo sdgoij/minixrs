@@ -45,11 +45,17 @@ unsafe fn plic_write(offset: u64, val: u32) {
 /// Must be called once during boot, before enabling external interrupts.
 pub unsafe fn init_plic() {
     // Set threshold to 0 (accept all priorities)
-    plic_write(PLIC_THRESHOLD_HART0 - PLIC_BASE, 0);
+    unsafe {
+        plic_write(PLIC_THRESHOLD_HART0 - PLIC_BASE, 0);
+    }
 
     // Disable all IRQs initially (write 0 to both enable words)
-    plic_write(PLIC_ENABLE_HART0 - PLIC_BASE, 0);
-    plic_write(PLIC_ENABLE_HART0 - PLIC_BASE + 4, 0);
+    unsafe {
+        plic_write(PLIC_ENABLE_HART0 - PLIC_BASE, 0);
+    }
+    unsafe {
+        plic_write(PLIC_ENABLE_HART0 - PLIC_BASE + 4, 0);
+    }
 }
 
 /// Enable a specific IRQ for hart 0 (S-mode).
@@ -65,16 +71,20 @@ pub unsafe fn enable_irq(irq: u32) {
     }
 
     // Set priority to 1 (non-zero = enabled; 0 = disabled)
-    plic_write((irq as u64) * 4, 1);
+    unsafe {
+        plic_write((irq as u64) * 4, 1);
+    }
 
     // Set enable bit
     let enable_reg = if irq < 32 { 0u64 } else { 4u64 };
-    let bit = (irq % 32) as u32;
-    let old = plic_read(PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg);
-    plic_write(
-        PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg,
-        old | (1u32 << bit),
-    );
+    let bit = irq % 32;
+    unsafe {
+        let old = plic_read(PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg);
+        plic_write(
+            PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg,
+            old | (1u32 << bit),
+        );
+    }
 }
 
 /// Disable a specific IRQ for hart 0 (S-mode).
@@ -87,12 +97,14 @@ pub unsafe fn disable_irq(irq: u32) {
         return;
     }
     let enable_reg = if irq < 32 { 0u64 } else { 4u64 };
-    let bit = (irq % 32) as u32;
-    let old = plic_read(PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg);
-    plic_write(
-        PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg,
-        old & !(1u32 << bit),
-    );
+    let bit = irq % 32;
+    unsafe {
+        let old = plic_read(PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg);
+        plic_write(
+            PLIC_ENABLE_HART0 - PLIC_BASE + enable_reg,
+            old & !(1u32 << bit),
+        );
+    }
 }
 
 /// Claim the highest-priority pending IRQ.
@@ -103,7 +115,7 @@ pub unsafe fn disable_irq(irq: u32) {
 ///
 /// Must be called from the external interrupt handler.
 pub unsafe fn claim_irq() -> u32 {
-    plic_read(PLIC_CLAIM_HART0 - PLIC_BASE)
+    unsafe { plic_read(PLIC_CLAIM_HART0 - PLIC_BASE) }
 }
 
 /// Complete (acknowledge) an IRQ after handling.
@@ -112,7 +124,9 @@ pub unsafe fn claim_irq() -> u32 {
 ///
 /// Must be called after handling the IRQ returned by `claim_irq()`.
 pub unsafe fn complete_irq(irq: u32) {
-    plic_write(PLIC_CLAIM_HART0 - PLIC_BASE, irq);
+    unsafe {
+        plic_write(PLIC_CLAIM_HART0 - PLIC_BASE, irq);
+    }
 }
 
 /// Check if an IRQ is pending (debug/status).
@@ -126,9 +140,11 @@ pub unsafe fn irq_pending(irq: u32) -> bool {
     }
     // Pending bits are at PLIC_BASE + 0x1000 (first pending word)
     let pending_reg = if irq < 32 { 0u64 } else { 4u64 };
-    let bit = (irq % 32) as u32;
-    let pending = plic_read(0x1000 + pending_reg);
-    (pending & (1u32 << bit)) != 0
+    let bit = irq % 32;
+    unsafe {
+        let pending = plic_read(0x1000 + pending_reg);
+        (pending & (1u32 << bit)) != 0
+    }
 }
 
 #[cfg(test)]

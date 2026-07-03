@@ -126,7 +126,7 @@ pub struct ProcAccounting {
 /// - `p_cr3_v` is `*mut u64` (page table root virtual address)
 /// - `fpu_state` is `*mut u8` (heap-allocated FXSAVE area)
 /// - `p_kern_trap_style` matches C `int`
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct SegFrame {
     /// Physical address of the per-process page table root.
@@ -137,17 +137,6 @@ pub struct SegFrame {
     pub fpu_state: *mut u8,
     /// Kernel trap style (0 = standard syscall, 1 = extended etc.).
     pub p_kern_trap_style: i32,
-}
-
-impl Default for SegFrame {
-    fn default() -> Self {
-        Self {
-            p_cr3: 0,
-            p_cr3_v: core::ptr::null_mut(),
-            fpu_state: core::ptr::null_mut(),
-            p_kern_trap_style: 0,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

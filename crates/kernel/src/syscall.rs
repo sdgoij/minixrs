@@ -793,7 +793,7 @@ unsafe fn sys_waitpid_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -
                 return 0;
             }
             // Yield CPU so the child (or scheduler) can run.
-            core::arch::asm!("pause", options(nomem, nostack));
+            crate::hal::pause();
         }
     }
 }

@@ -40,6 +40,11 @@ pub struct SbiRet {
 ///
 /// `extension` is the legacy extension ID (0-8).
 /// `arg0`-`arg2` are the arguments.
+///
+/// # Safety
+///
+/// Depends on the specific SBI extension being called; some extensions
+/// require valid pointers or specific argument values.
 #[inline]
 pub unsafe fn sbi_legacy(extension: u64, arg0: u64, arg1: u64, arg2: u64) -> SbiRet {
     let error: u64;
@@ -61,7 +66,13 @@ pub unsafe fn sbi_legacy(extension: u64, arg0: u64, arg1: u64, arg2: u64) -> Sbi
 }
 
 /// Perform an SBI 1.0 extension call (with extension ID in a7, function in a6).
+///
+/// # Safety
+///
+/// Depends on the specific SBI extension being called; some extensions
+/// require valid pointers or specific argument values.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn sbi_ecall(
     ext: u64,
     fid: u64,

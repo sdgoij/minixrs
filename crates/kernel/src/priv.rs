@@ -219,24 +219,13 @@ pub struct MemRange {
 ///   tmr_arg_t tmr_arg;
 /// };
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct MinixTimer {
     pub tmr_next: *mut MinixTimer,
     pub tmr_exp_time: u64,
     pub tmr_func: usize, // function pointer as usize
     pub tmr_arg: usize,  // opaque argument
-}
-
-impl Default for MinixTimer {
-    fn default() -> Self {
-        Self {
-            tmr_next: core::ptr::null_mut(),
-            tmr_exp_time: 0,
-            tmr_func: 0,
-            tmr_arg: 0,
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

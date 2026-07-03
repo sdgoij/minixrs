@@ -2,6 +2,8 @@
 
 #![no_std]
 
+pub mod arch_io;
+
 pub mod prelude {
     pub use core::ops::Deref;
     pub use core::ops::DerefMut;

@@ -47,8 +47,8 @@ RV_TARGET := "riscv64gc-unknown-none-elf"
 
 # Build the RISC-V64 kernel binary (requires nightly for -Zbuild-std).
 build-riscv64:
-    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target {{RV_TARGET}} -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target {{RV_TARGET}} --features embed_initramfs,riscv64 -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
 
-# Run the RISC-V64 kernel in QEMU (no OpenSBI, direct S-mode).
+# Run the RISC-V64 kernel in QEMU (uses OpenSBI built-in, or download fw_jump.bin).
 run-riscv64: build-riscv64
-    {{QEMU_RV}} -machine virt -m 256M -nographic -bios none -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+    {{QEMU_RV}} -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64

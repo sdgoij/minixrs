@@ -262,7 +262,9 @@ const M1_P1_OFF: usize = 24;
 //   offset  0: value    (u32)
 const DEVIO_REQUEST_OFF: usize = 0;
 const DEVIO_PORT_OFF: usize = 4;
+#[allow(dead_code)]
 const DEVIO_VALUE_OFF: usize = 8;
+#[allow(dead_code)]
 const DEVIO_REPLY_VALUE_OFF: usize = 0;
 
 // mess_lsys_krn_sys_vdevio (for do_vdevio):
@@ -719,7 +721,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
         let io_dir = request & arch_common::com::DIO_DIRMASK;
         let io_type = request & arch_common::com::DIO_TYPEMASK;
 
-        let io_in = if io_dir == arch_common::com::DIO_INPUT {
+        let _io_in = if io_dir == arch_common::com::DIO_INPUT {
             true
         } else if io_dir == arch_common::com::DIO_OUTPUT {
             false
@@ -807,7 +809,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 t if t == arch_common::com::DIO_BYTE => {
                     let pairs =
                         core::slice::from_raw_parts_mut(buf_ptr as *mut PvbPair, vec_size as usize);
-                    if io_in {
+                    if _io_in {
                         for pair in pairs.iter_mut() {
                             pair.value = arch_x86_64::asm::inb(pair.port);
                         }
@@ -820,7 +822,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 t if t == arch_common::com::DIO_WORD => {
                     let pairs =
                         core::slice::from_raw_parts_mut(buf_ptr as *mut PvwPair, vec_size as usize);
-                    if io_in {
+                    if _io_in {
                         for pair in pairs.iter_mut() {
                             if pair.port & 1 != 0 {
                                 return crate::ipc::EPERM;
@@ -840,7 +842,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     // DIO_LONG
                     let pairs =
                         core::slice::from_raw_parts_mut(buf_ptr as *mut PvlPair, vec_size as usize);
-                    if io_in {
+                    if _io_in {
                         for pair in pairs.iter_mut() {
                             if pair.port & 3 != 0 {
                                 return crate::ipc::EPERM;
@@ -859,7 +861,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             }
 
             // Copy results back for input requests
-            if io_in {
+            if _io_in {
                 let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 != 0 {
                     let caller_cr3 = (*caller).p_seg.p_cr3;
@@ -894,22 +896,22 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let request = msg_read_i32(msg, SDEVIO_REQUEST_OFF) as u32;
-        let port = msg_read_u64(msg, SDEVIO_PORT_OFF);
+        let _port = msg_read_u64(msg, SDEVIO_PORT_OFF);
         let vec_endpt = msg_read_i32(msg, SDEVIO_VEC_ENDPT_OFF);
-        let vec_addr = msg_read_u64(msg, SDEVIO_VEC_ADDR_OFF);
+        let _vec_addr = msg_read_u64(msg, SDEVIO_VEC_ADDR_OFF);
         let count = msg_read_u64(msg, SDEVIO_VEC_SIZE_OFF);
-        let offset = msg_read_u64(msg, SDEVIO_OFFSET_OFF);
+        let _offset = msg_read_u64(msg, SDEVIO_OFFSET_OFF);
 
         if count == 0 {
             return OK;
         }
 
-        let req_dir = request & arch_common::com::DIO_DIRMASK;
+        let _req_dir = request & arch_common::com::DIO_DIRMASK;
         let req_type = request & arch_common::com::DIO_TYPEMASK;
-        let is_safe = (request & arch_common::com::DIO_SAFEMASK) == arch_common::com::DIO_SAFE;
+        let _is_safe = (request & arch_common::com::DIO_SAFEMASK) == arch_common::com::DIO_SAFE;
 
         // Determine size per element
-        let size = match req_type {
+        let _size = match req_type {
             t if t == arch_common::com::DIO_BYTE => 1,
             t if t == arch_common::com::DIO_WORD => 2,
             t if t == arch_common::com::DIO_LONG => 4,
@@ -940,9 +942,9 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
         {
             // Determine virtual buffer address (grant or direct)
             let vir_buf: u64;
-            if is_safe {
+            if _is_safe {
                 // Safe variant: use verify_grant to resolve
-                let access = if req_dir == arch_common::com::DIO_INPUT {
+                let access = if _req_dir == arch_common::com::DIO_INPUT {
                     arch_common::safecopies::CPF_WRITE
                 } else {
                     arch_common::safecopies::CPF_READ
@@ -950,10 +952,10 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 let grant_result = crate::grants::verify_grant(
                     dest_ep,
                     caller_ep,
-                    vec_addr as i32,
+                    _vec_addr as i32,
                     count,
                     access,
-                    offset,
+                    _offset,
                 );
                 let (newoffset, new_granter, _flags) = match grant_result {
                     Ok(v) => v,
@@ -969,7 +971,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
                 // For the CR3 switch below, use the new_rp's address space
                 // We store the resolved info and use new_rp for switch
-                let abs_port = port as u16;
+                let abs_port = _port as u16;
 
                 // Check I/O port access permissions
                 let privp = (*caller).p_priv;
@@ -980,7 +982,8 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     let mut found = false;
                     for j in 0..nr_io_range {
                         let ior = &*io_tab_ptr.add(j);
-                        if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                        if port_u32 >= ior.ior_base && port_u32 + _size as u32 - 1 <= ior.ior_limit
+                        {
                             found = true;
                             break;
                         }
@@ -991,7 +994,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
 
                 // Alignment check
-                if (abs_port as u32) & (size as u32 - 1) != 0 {
+                if (abs_port as u32) & (_size as u32 - 1) != 0 {
                     return crate::ipc::EPERM;
                 }
 
@@ -1005,7 +1008,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
 
                 // Perform string I/O
-                let result = if req_dir == arch_common::com::DIO_INPUT {
+                let result = if _req_dir == arch_common::com::DIO_INPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
                             arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
@@ -1017,7 +1020,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                         }
                         _ => crate::ipc::EINVAL,
                     }
-                } else if req_dir == arch_common::com::DIO_OUTPUT {
+                } else if _req_dir == arch_common::com::DIO_OUTPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
                             arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
@@ -1046,9 +1049,9 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 if dest_slot != caller_proc_nr {
                     return crate::ipc::EPERM;
                 }
-                vir_buf = vec_addr;
+                vir_buf = _vec_addr;
 
-                let abs_port = port as u16;
+                let abs_port = _port as u16;
 
                 // Check I/O port access permissions
                 let privp = (*caller).p_priv;
@@ -1059,7 +1062,8 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     let mut found = false;
                     for j in 0..nr_io_range {
                         let ior = &*io_tab_ptr.add(j);
-                        if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                        if port_u32 >= ior.ior_base && port_u32 + _size as u32 - 1 <= ior.ior_limit
+                        {
                             found = true;
                             break;
                         }
@@ -1070,7 +1074,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
 
                 // Alignment check
-                if (abs_port as u32) & (size as u32 - 1) != 0 {
+                if (abs_port as u32) & (_size as u32 - 1) != 0 {
                     return crate::ipc::EPERM;
                 }
 
@@ -1084,7 +1088,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
 
                 // Perform string I/O
-                let result = if req_dir == arch_common::com::DIO_INPUT {
+                let result = if _req_dir == arch_common::com::DIO_INPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
                             arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
@@ -1096,7 +1100,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                         }
                         _ => crate::ipc::EINVAL,
                     }
-                } else if req_dir == arch_common::com::DIO_OUTPUT {
+                } else if _req_dir == arch_common::com::DIO_OUTPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
                             arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
@@ -3161,7 +3165,7 @@ pub unsafe fn do_profbuf_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         let idx = crate::profile::CPROF_PROCS_NO.load(Ordering::Relaxed);
         let info = crate::profile::CprofProcInfo {
             endpt: (*caller).p_endpoint,
-            name: (*caller).p_name.as_mut_ptr() as *mut u8,
+            name: (*caller).p_name.as_mut_ptr(),
             ctl_v: _ctl_ptr,
             buf_v: _mem_ptr,
         };
@@ -3476,10 +3480,10 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
 /// # Safety
 ///
 /// `caller` must point to a valid `Proc`.
-pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+pub unsafe fn do_setmcontext_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
-        let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
+        let _ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
 
         if !crate::table::is_ok_endpoint(endpt) {
             return crate::ipc::EINVAL;
@@ -3526,12 +3530,12 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
 
             let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
-                let caller_cr3 = (*caller).p_seg.p_cr3;
+                let caller_cr3 = (*_caller).p_seg.p_cr3;
                 if caller_cr3 != 0 {
                     crate::hal::write_cr3(caller_cr3);
                 }
             }
-            core::ptr::copy_nonoverlapping(ctx_ptr as *const u8, mc_bytes, copy_sz);
+            core::ptr::copy_nonoverlapping(_ctx_ptr as *const u8, mc_bytes, copy_sz);
             if boot_cr3 != 0 {
                 crate::hal::write_cr3(boot_cr3);
             }
@@ -4468,7 +4472,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 // Copy process name (up to 48 bytes)
                 let name = (*caller).p_name;
                 let name_bytes: &[u8] = core::slice::from_raw_parts(
-                    name.as_ptr() as *const u8,
+                    name.as_ptr(),
                     core::cmp::min(name.len(), 48),
                 );
                 let dst = &mut msg[WHOAMI_NAME_OFF..WHOAMI_NAME_OFF + 48];

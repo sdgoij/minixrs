@@ -156,41 +156,14 @@ impl Ti1225State {
 static mut TI1225_BRIDGES: [Ti1225State; 4] = [Ti1225State::new(); 4];
 static mut TI1225_BRIDGE_COUNT: usize = 0;
 
-// ── PCI config access (inline asm) ─────────────────────────────────────────
-
-use core::arch::asm;
-
-const PCI_ADDR: u16 = 0xCF8;
-const PCI_DATA: u16 = 0xCFC;
+// ── PCI config access ─────────────────────────────────────────────────────
 
 unsafe fn ti_pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    let addr = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | (reg as u32);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR, in("eax") addr,
-            options(nomem, nostack, preserves_flags));
-        let val: u32;
-        asm!("in eax, dx", out("eax") val, in("dx") PCI_DATA,
-            options(nomem, nostack, preserves_flags));
-        val
-    }
+    unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
 }
 
 unsafe fn ti_pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
-    let addr = 0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | (reg as u32);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR, in("eax") addr,
-            options(nomem, nostack, preserves_flags));
-        asm!("out dx, eax", in("dx") PCI_DATA, in("eax") val,
-            options(nomem, nostack, preserves_flags));
-    }
+    unsafe { crate::arch_io::pci_cfg_write32(bus, dev, func, reg, val) }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────

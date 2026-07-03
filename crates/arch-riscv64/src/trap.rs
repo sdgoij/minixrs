@@ -35,7 +35,9 @@ static mut SYSCALL_HANDLER: Option<unsafe fn(usize, &[u64; 6]) -> i64> = None;
 ///
 /// Must be called once during kernel init, before any userspace execution.
 pub unsafe fn register_syscall_handler(handler: unsafe fn(usize, &[u64; 6]) -> i64) {
-    SYSCALL_HANDLER = Some(handler);
+    unsafe {
+        SYSCALL_HANDLER = Some(handler);
+    }
 }
 
 /// The main trap handler — called from trap_asm.S.
@@ -77,8 +79,8 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 288]) {
                     u64::from_ne_bytes(frame[112..120].try_into().unwrap()),
                     u64::from_ne_bytes(frame[120..128].try_into().unwrap()),
                 ];
-                let ret = match SYSCALL_HANDLER {
-                    Some(handler) => handler(nr as usize, &args),
+                let ret = match unsafe { SYSCALL_HANDLER } {
+                    Some(handler) => unsafe { handler(nr as usize, &args) },
                     None => -38,
                 };
                 frame[80..88].copy_from_slice(&ret.to_ne_bytes());

@@ -2179,34 +2179,40 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     cpulocals, banner, kernel::init(), timer, PLIC, S-mode interrupts
   - `[[bin]]` section in Cargo.toml: `kernel-boot-riscv64` binary target
   - Gated with `#[cfg(target_arch = "riscv64")]`
-  - x86_64 build unaffected; RISC-V build blocked by remaining
-    arch_x86_64 refs in kernel crate (~112 remaining)
   - Prints "Hello MINIX/RISC-V!" banner on boot
 
 ### Build system changes
 
 - [x] **19.15 — Toolchain and build scripts**
   - Added `just run-riscv64` and `just build-riscv64` targets
-  - QEMU command:
-    ```
-    qemu-system-riscv64 -machine virt -m 256M -nographic \
-      -bios none -kernel target/riscv64_kernel.bin
-    ```
-  - Or with OpenSBI:
-    ```
-    qemu-system-riscv64 -machine virt -m 256M -nographic \
-      -bios fw_jump.bin -kernel target/riscv64_kernel.bin
-    ```
-  - Build command:
-    ```
-    cargo build -p kernel-boot --bin kernel-boot-riscv64 \
-      --target riscv64gc-unknown-none-elf -Zbuild-std=core,alloc \
-      -Zbuild-std-features=compiler-builtins-mem --release
-    ```
-  - Full boot not yet possible (kernel crate has 112 remaining
-    arch_x86_64 references blocking full RISC-V compilation)
+  - QEMU uses default OpenSBI (no `-bios none`):
+    `qemu-system-riscv64 -machine virt -m 256M -nographic -kernel ...`
+  - Custom linker script `tools/minix-raw-riscv64.ld` linked via
+    `.cargo/config.toml` (`[target.riscv64gc-unknown-none-elf].rustflags`)
+  - `just run-riscv64` boots OpenSBI, kernel prints banner, halts
 
-### New module structure for `arch-riscv64/src/`
+- [x] **19.16 — Boot hang fix and warning cleanup**
+  - Root cause: kernel linked at 0x10000 (default) instead of 0x80200000;
+    `__bss_start`/`__bss_end` were Rust `pub static` (in .rodata), so
+    assembly BSS clearing zeroed nothing, leaving kernel BSS uninitialized
+  - Fixes:
+    - `tools/minix-raw-riscv64.ld`: custom linker script at 0x80200000
+      with boundary symbols defined unconditionally (outside sections)
+      to survive `--gc-sections`
+    - `kernel-boot/src/riscv64.rs`: removed `pub static` stubs for
+      `__bss_start`/`__bss_end`/`__initramfs_start`/`__initramfs_end`
+      (now provided by linker script)
+  - All Rust 2024 `unsafe_op_in_unsafe_fn` warnings fixed across
+    `arch-riscv64`, `kernel` (system.rs, profile.rs, debug.rs), `drivers`
+    and `kernel-boot` — wrap calls in `unsafe {}` blocks, remove unused
+    imports/variables, remove unnecessary `unsafe` blocks
+  - Driver port I/O consolidated into `drivers/src/arch_io.rs` with
+    cfg-gated x86_64 assembly and compile_error! for other archs
+  - `crates/kernel-boot/src/lib.rs`: gate `boot_init` behind
+    `#[cfg(target_arch = "x86_64")]`
+  - `crates/arch-x86_64/src/hal.rs`: add missing re-exports
+    (`phys_to_virt`, `phys_copy`, `virt_to_phys`, `direct_mapped_phys`)
+  - Zero Rust compiler warnings on both x86_64 and riscv64 targets
 
 | File | What | Equivalent x86_64 module |
 |------|------|--------------------------|
@@ -2232,7 +2238,7 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
-| M-RV1 | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
+| M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
 | M-RV2 | Boot process loading (PM + RS + VFS + init) | Serial shows loading messages |
 | M-RV3 | Shell prompt (`#`) with built-in commands | Type `echo hello` → `hello` |
 | M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
@@ -5437,7 +5443,7 @@ just run-img
 
 | Milestone | Description | Target Phase |
 |-----------|-------------|-------------|
-| M1R | Kernel boots in QEMU `virt`, prints banner | Phase 19 |
+| M1R ✅ | Kernel boots in QEMU `virt`, prints banner | Phase 19 |
 | M2R | Two processes can IPC (RISC-V64) | Phase 4 (shared) |
 | M3R | Process fork + exec works (RISC-V64) | Phase 5 (shared) |
 | M4R | Virtio-blk reads disk (RISC-V64) | Phase 19 |

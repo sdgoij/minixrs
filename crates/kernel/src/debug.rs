@@ -6,7 +6,6 @@
 //! All functions are `no_std` compatible — they write into fixed-size
 //! buffers rather than using formatted I/O.
 
-use core::arch::asm;
 use core::cell::UnsafeCell;
 
 use crate::r#priv::NR_SYS_CALLS;
@@ -331,7 +330,7 @@ pub unsafe fn schedulerstr(rp: *mut Proc, buf: &mut [u8]) -> &str {
             if c == 0 || pos >= buf.len() {
                 break;
             }
-            buf[pos] = c as u8;
+            buf[pos] = c;
             pos += 1;
         }
         core::str::from_utf8(&buf[..pos]).unwrap_or("(invalid)")
@@ -407,7 +406,7 @@ pub unsafe fn print_proc(rp: *mut Proc, buf: &mut [u8]) -> &str {
             if c == 0 || pos >= buf.len() {
                 break;
             }
-            buf[pos] = c as u8;
+            buf[pos] = c;
             pos += 1;
         }
         write_str!(" ep=");
@@ -568,7 +567,7 @@ pub unsafe fn proc_stacktrace(rp: *const Proc) {
         let mut pos = 0;
         // Append name
         for i in 0..15 {
-            let c = *name_ptr.add(i) as u8;
+            let c = *name_ptr.add(i);
             if c == 0 {
                 break;
             }
@@ -601,7 +600,12 @@ pub unsafe fn proc_stacktrace(rp: *const Proc) {
         // Since the kernel stack is identity-mapped, we can read directly.
         // The caller's stack frame is where we start; read RBP via inline asm.
         let mut rbp: u64;
-        asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            rbp = 0;
+        }
 
         append_kmess(b"  Stack trace:\n");
 

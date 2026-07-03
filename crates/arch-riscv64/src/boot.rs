@@ -45,7 +45,11 @@ fn be_u64(buf: &[u8], offset: usize) -> u64 {
 
 /// Parse memory information from the FDT.
 /// Returns (base, size) of the first memory region found.
-pub fn parse_fdt_memory(dtb: *const u8) -> Option<(u64, u64)> {
+///
+/// # Safety
+///
+/// `dtb` must point to a valid, accessible FDT blob.
+pub unsafe fn parse_fdt_memory(dtb: *const u8) -> Option<(u64, u64)> {
     unsafe {
         // Read header
         let hdr = &*(dtb as *const FdtHeader);
@@ -63,7 +67,6 @@ pub fn parse_fdt_memory(dtb: *const u8) -> Option<(u64, u64)> {
         let mut in_memory_node = false;
         let mut reg_addr = 0u64;
         let mut reg_size = 0u64;
-        let mut reg_addr_len = 0;
         let mut reg_addr_cells = 2; // default: 2 cells for 64-bit address
         let mut reg_size_cells = 2; // default: 2 cells for 64-bit size
 
@@ -86,14 +89,9 @@ pub fn parse_fdt_memory(dtb: *const u8) -> Option<(u64, u64)> {
 
                     // Check if this is a memory node
                     let name = core::str::from_utf8_unchecked(&dtb_slice[name_start..pos - 1]);
-                    if name.starts_with("memory@")
+                    in_memory_node = name.starts_with("memory@")
                         || name == "memory"
-                        || depth == 1 && name.starts_with("memory")
-                    {
-                        in_memory_node = true;
-                    } else {
-                        in_memory_node = false;
-                    }
+                        || depth == 1 && name.starts_with("memory");
                 }
                 FDT_END_NODE => {
                     depth -= 1;
@@ -208,52 +206,12 @@ pub unsafe fn init_phys_allocator(info: &BootInfo) {
     if alloc_start < mem_end {
         let mut mmap = crate::alloc::PhysicalMemoryMap::new();
         mmap.add(alloc_start, mem_end);
-        crate::alloc::init_allocator(&mmap);
+        // SAFETY: Called once during early boot with valid memory info
+        unsafe {
+            crate::alloc::init_allocator(&mmap);
+        }
     }
 }
-
-// ═════════════════════════════════════════════════════════════════════════
-// _start entry point (assembly + Rust)
-// ═════════════════════════════════════════════════════════════════════════
-
-use core::arch::global_asm;
-
-global_asm!(
-    r#"
-.section .text.boot, "ax"
-.globl _start
-
-# _start entry point — called by QEMU/OpenSBI
-# a0 = hart ID
-# a1 = DTB (device tree) pointer
-_start:
-    # Set up a temporary stack (points to the end of the kernel image)
-    la      sp, _start
-    li      t0, 0x10000     # 64KB temporary stack
-    add     sp, sp, t0
-
-    # Clear BSS
-    la      t0, __bss_start
-    la      t1, __bss_end
-    bge     t0, t1, 1f
-0:
-    sd      zero, 0(t0)
-    addi    t0, t0, 8
-    blt     t0, t1, 0b
-1:
-
-    # Call Rust early_init(hart_id, dtb_ptr)
-    mv      a0, a0          # hart_id (already in a0)
-    mv      a1, a1          # dtb_ptr (already in a1)
-    call    early_init
-
-    # The Rust code should set up page tables and enable the MMU.
-    # After MMU enable, we call kmain.
-    # For now, just loop.
-    wfi
-    j      _start
-"#
-);
 
 /// Early initialization — called from _start assembly.
 ///
@@ -273,29 +231,33 @@ pub unsafe extern "C" fn early_init(hart_id: u64, dtb_ptr: u64) {
     }
 
     // Parse FDT for memory information
-    let boot_info = if let Some((mem_base, mem_size)) = parse_fdt_memory(dtb_ptr as *const u8) {
-        BootInfo {
-            mem_base,
-            mem_size,
-            kernel_base: 0x80200000, // QEMU virt loads kernel here
-            kernel_size: 0x100000,   // 1MB (approximate, will be refined)
-            hart_id,
-            dtb_ptr,
-        }
-    } else {
-        // Fallback: assume 128MB RAM starting at 0x80000000
-        BootInfo {
-            mem_base: 0x80000000,
-            mem_size: 128 * 1024 * 1024,
-            kernel_base: 0x80200000,
-            kernel_size: 0x100000,
-            hart_id,
-            dtb_ptr,
-        }
-    };
+    let boot_info =
+        if let Some((mem_base, mem_size)) = unsafe { parse_fdt_memory(dtb_ptr as *const u8) } {
+            BootInfo {
+                mem_base,
+                mem_size,
+                kernel_base: 0x80200000, // QEMU virt loads kernel here
+                kernel_size: 0x100000,   // 1MB (approximate, will be refined)
+                hart_id,
+                dtb_ptr,
+            }
+        } else {
+            // Fallback: assume 128MB RAM starting at 0x80000000
+            BootInfo {
+                mem_base: 0x80000000,
+                mem_size: 128 * 1024 * 1024,
+                kernel_base: 0x80200000,
+                kernel_size: 0x100000,
+                hart_id,
+                dtb_ptr,
+            }
+        };
 
     // Initialize physical allocator
-    init_phys_allocator(&boot_info);
+    // SAFETY: Called once during early boot with valid boot info
+    unsafe {
+        init_phys_allocator(&boot_info);
+    }
 
     // Set up STVEC to point to the trap vector
     let trap_vec = crate::trap_asm::trap_vector_addr();
@@ -316,9 +278,3 @@ pub unsafe extern "C" fn early_init(hart_id: u64, dtb_ptr: u64) {
         }
     }
 }
-
-// BSS symbols defined by linker script
-#[unsafe(no_mangle)]
-pub static __bss_start: u8 = 0;
-#[unsafe(no_mangle)]
-pub static __bss_end: u8 = 0;

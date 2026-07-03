@@ -49,15 +49,12 @@ pub trait IoBackend {
 pub struct RealIo;
 
 impl IoBackend for RealIo {
-    unsafe fn inb(_port: u16) -> u8 {
-        // Platform-specific implementation would go here.
-        // In a real kernel, this would use x86 `in` instruction.
-        0
+    unsafe fn inb(port: u16) -> u8 {
+        unsafe { crate::arch_io::inb(port) }
     }
 
-    unsafe fn outb(_port: u16, _value: u8) {
-        // Platform-specific implementation would go here.
-        // In a real kernel, this would use x86 `out` instruction.
+    unsafe fn outb(port: u16, value: u8) {
+        unsafe { crate::arch_io::outb(port, value) }
     }
 }
 

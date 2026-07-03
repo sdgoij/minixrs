@@ -8,9 +8,10 @@
 
 #![no_std]
 
+#[cfg(target_arch = "x86_64")]
 pub mod boot_init;
 
-#[cfg(feature = "integration-tests")]
+#[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]
 pub mod test_runner;
 
 // ── Boot-time serial output (x86_64 COM1 via port I/O) ────────────────

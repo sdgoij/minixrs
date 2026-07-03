@@ -9,8 +9,6 @@
 
 #![cfg(target_arch = "riscv64")]
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
 /// Per-CPU storage structure.
 ///
 /// Each hart has its own copy of this structure. The `tp` register

@@ -9,70 +9,8 @@
 
 use crate::DriverError;
 
-// ── Re-export PCI config access from arch-x86_64 ───────────────────────────
-
-// When not on x86_64, these would need an alternative implementation.
-// For now we define our own constants matching arch-x86_64::pci.
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("PCI driver currently requires x86_64 for PCI config port access");
-
-// ── Local PCI config access (inline asm, no arch-x86_64 dependency) ────────
-
-use core::arch::asm;
-
-/// PCI configuration address port.
-const PCI_ADDR_PORT: u16 = 0xCF8;
-/// PCI configuration data port.
-const PCI_DATA_PORT: u16 = 0xCFC;
-
-/// Build a PCI config address.
-fn pci_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    0x8000_0000 | ((bus as u32) << 16) | ((dev as u32) << 11) | ((func as u32) << 8) | (reg as u32)
-}
-
-/// Read 8 bits from PCI config space.
-unsafe fn pci_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
-    let addr = pci_addr(bus, dev, func, reg & 0xFC);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR_PORT, in("eax") addr,
-            options(nomem, nostack, preserves_flags));
-        let raw: u32;
-        asm!("in eax, dx", out("eax") raw, in("dx") PCI_DATA_PORT,
-            options(nomem, nostack, preserves_flags));
-        ((raw >> ((reg & 0x03) * 8)) & 0xFF) as u8
-    }
-}
-
-/// Read 16 bits from PCI config space.
-unsafe fn pci_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
-    let addr = pci_addr(bus, dev, func, reg & 0xFC);
-    unsafe {
-        asm!("out dx, eax",
-            in("dx") PCI_ADDR_PORT, in("eax") addr,
-            options(nomem, nostack, preserves_flags));
-        let val: u16;
-        asm!("in ax, dx", out("ax") val, in("dx") PCI_DATA_PORT,
-            options(nomem, nostack, preserves_flags));
-        val
-    }
-}
-
-/// Read 32 bits from PCI config space.
-unsafe fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    let addr = pci_addr(bus, dev, func, reg & 0xFC);
-    unsafe {
-        asm!("out dx, eax",
-            in("dx") PCI_ADDR_PORT, in("eax") addr,
-            options(nomem, nostack, preserves_flags));
-        let val: u32;
-        asm!("in eax, dx", out("eax") val, in("dx") PCI_DATA_PORT,
-            options(nomem, nostack, preserves_flags));
-        val
-    }
-}
-
 /// Check if a PCI device exists (vendor ID != 0xFFFF).
-fn pci_device_exists(vendor: u16) -> bool {
+pub(crate) fn pci_device_exists(vendor: u16) -> bool {
     vendor != 0xFFFF && vendor != 0
 }
 
@@ -287,15 +225,15 @@ pub unsafe fn pci_init() {
         // Scan bus 0 devices 0-31, functions 0-7.
         for dev in 0..32u8 {
             for func in 0..8u8 {
-                let vendor = pci_read16(0, dev, func, 0x00);
+                let vendor = crate::arch_io::pci_cfg_read16(0, dev, func, 0x00);
                 if pci_device_exists(vendor) {
-                    let did = pci_read16(0, dev, func, 0x02);
-                    let class_raw = pci_read32(0, dev, func, 0x08);
+                    let did = crate::arch_io::pci_cfg_read16(0, dev, func, 0x02);
+                    let class_raw = crate::arch_io::pci_cfg_read32(0, dev, func, 0x08);
                     let baseclass = ((class_raw >> 24) & 0xFF) as u8;
                     let subclass = ((class_raw >> 16) & 0xFF) as u8;
                     let infclass = ((class_raw >> 8) & 0xFF) as u8;
-                    let _header = pci_read8(0, dev, func, 0x0E);
-                    let ilr = pci_read8(0, dev, func, 0x3F);
+                    let _header = crate::arch_io::pci_cfg_read8(0, dev, func, 0x0E);
+                    let ilr = crate::arch_io::pci_cfg_read8(0, dev, func, 0x3F);
 
                     let mut pd = PciDev::new();
                     pd.busnr = 0;
@@ -314,7 +252,7 @@ pub unsafe fn pci_init() {
                 }
                 // Single-function device — skip remaining functions.
                 if func == 0 {
-                    let header = pci_read8(0, dev, 0, 0x0E);
+                    let header = crate::arch_io::pci_cfg_read8(0, dev, 0, 0x0E);
                     if header & 0x80 == 0 {
                         break;
                     }
@@ -337,7 +275,7 @@ unsafe fn pci_add_device(busnr: u8, dev: u8, func: u8, pd: &mut PciDev) {
         // Read BARs.
         for i in 0..BAR_MAX {
             let offset = 0x10 + (i as u8) * 4;
-            let bar_val = pci_read32(busnr, dev, func, offset);
+            let bar_val = crate::arch_io::pci_cfg_read32(busnr, dev, func, offset);
             if bar_val == 0 {
                 continue;
             }

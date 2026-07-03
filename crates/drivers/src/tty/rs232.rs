@@ -23,16 +23,10 @@ pub struct RealIo;
 
 impl IoPort for RealIo {
     fn inb(&self, port: u16) -> u8 {
-        let val: u8;
-        unsafe {
-            core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack));
-        }
-        val
+        unsafe { crate::arch_io::inb(port) }
     }
     fn outb(&mut self, port: u16, val: u8) {
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack));
-        }
+        unsafe { crate::arch_io::outb(port, val) }
     }
 }
 

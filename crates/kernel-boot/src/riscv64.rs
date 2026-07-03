@@ -12,8 +12,8 @@ use core::panic::PanicInfo;
 
 use core::arch::global_asm;
 
-/// _start entry point — called by QEMU/OpenSBI.
-/// a0 = hart ID, a1 = DTB pointer.
+// _start entry point — called by QEMU/OpenSBI.
+// a0 = hart ID, a1 = DTB pointer.
 global_asm!(
     r#"
 .section .text.boot, "ax"
@@ -46,11 +46,8 @@ _start:
 "#
 );
 
-/// BSS symbols defined by linker script.
-#[unsafe(no_mangle)]
-pub static __bss_start: u8 = 0;
-#[unsafe(no_mangle)]
-pub static __bss_end: u8 = 0;
+// BSS and initramfs symbols are defined by the custom linker script
+// (tools/minix-raw-riscv64.ld).
 
 /// RISC-V64 kernel main entry.
 ///
@@ -63,19 +60,28 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Only hart 0 proceeds
     if hart_id != 0 {
         loop {
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
         }
     }
 
     // Parse FDT for memory information
-    if let Some((mem_base, mem_size)) = arch_riscv64::boot::parse_fdt_memory(dtb_ptr as *const u8)
+    // SAFETY: dtb_ptr points to a valid FDT provided by OpenSBI
+    if let Some((mem_base, mem_size)) =
+        unsafe { arch_riscv64::boot::parse_fdt_memory(dtb_ptr as *const u8) }
     {
         let mut mmap = arch_riscv64::alloc::PhysicalMemoryMap::new();
-        let kernel_end = 0x80200000u64 + 0x200000u64; // 2MB kernel
+        // Kernel is linked at 0x80200000, initramfs ends at around 0x80200000 + binary_size
+        // Use a generous 4MB estimate for the kernel binary
+        let kernel_end = 0x80200000u64 + 0x400000u64; // 4MB kernel estimate
         if kernel_end < mem_base + mem_size {
             mmap.add(kernel_end, mem_base + mem_size);
         }
-        arch_riscv64::alloc::init_allocator(&mmap);
+        // SAFETY: Called once during early boot with valid memory info
+        unsafe {
+            arch_riscv64::alloc::init_allocator(&mmap);
+        }
     }
 
     // Set up STVEC to point to the trap vector
@@ -85,7 +91,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     }
 
     // Initialize per-CPU data (tp register)
-    arch_riscv64::cpulocals::init_cpulocals();
+    // SAFETY: Called once on the boot hart
+    unsafe {
+        arch_riscv64::cpulocals::init_cpulocals();
+    }
 
     // Print banner via SBI
     for &b in b"\r\nHello MINIX/RISC-V!\r\n" {
@@ -101,7 +110,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         kernel::syscall::init_basic_syscalls();
     }
     unsafe {
-        arch_riscv64::trap::register_syscall_handler(kernel::syscall::dispatch_basic_syscall);
+        // Wrap the kernel dispatcher to supply the caller from CPU locals.
+        unsafe fn riscv_syscall_handler(nr: usize, args: &[u64; 6]) -> i64 {
+            let caller = arch_riscv64::hal::current_proc();
+            unsafe {
+                kernel::syscall::dispatch_basic_syscall(caller as *mut kernel::proc::Proc, nr, args)
+            }
+        }
+        arch_riscv64::trap::register_syscall_handler(riscv_syscall_handler);
     }
 
     // Initialize timer (100 Hz)
@@ -131,9 +147,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         arch_riscv64::sbi::console_putchar(b);
     }
 
-    loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
-    }
+    // Shutdown via SBI
+    arch_riscv64::sbi::system_reset(true);
 }
 
 /// Panic handler.
@@ -141,6 +156,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
     }
 }

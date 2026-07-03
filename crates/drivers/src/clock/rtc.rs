@@ -100,40 +100,16 @@ const CS_BAD_TIME: u8 = 0x04;
 
 const KBD_CTRL_PORT_B: u16 = 0x64;
 
-// ── I/O helpers (inline asm, x86 only) ─────────────────────────────────────
+// ── I/O helpers (x86 CMOS ports) ─────────────────────────────────────────
 
 /// Read a CMOS register value.
 unsafe fn cmos_read(reg: u8) -> u8 {
-    let val: u8;
-    unsafe {
-        core::arch::asm! {
-            "out dx, al",
-            "mov dl, 0x71",
-            "in al, dx",
-            inout("dx") RTC_INDEX => _,
-            inout("al") reg => val,
-            options(nomem, nostack),
-        };
-    }
-    val
+    unsafe { crate::arch_io::cmos_read(reg) }
 }
 
 /// Write a value to a CMOS register.
 unsafe fn cmos_write(reg: u8, val: u8) {
-    unsafe {
-        // Write register address to index port, then write data to I/O port.
-        core::arch::asm! {
-            "mov dx, 0x70",
-            "mov al, {0}",
-            "out dx, al",
-            "mov dx, 0x71",
-            "mov al, {1}",
-            "out dx, al",
-            in(reg_byte) reg,
-            in(reg_byte) val,
-            options(nomem, nostack, preserves_flags),
-        };
-    }
+    unsafe { crate::arch_io::cmos_write(reg, val) }
 }
 
 // ── BCD/binary conversion ─────────────────────────────────────────────────
@@ -343,16 +319,8 @@ pub unsafe fn rtc_set_time(t: &RtcTime) -> Result<(), DriverError> {
 /// Will halt or power off the system.
 pub unsafe fn rtc_power_off() {
     unsafe {
-        // Try keyboard controller power-off (PS/2 system control port B).
-        // Write 0xFE to port 0x64 to request power-off.
-        // Note: on many systems this triggers a reset, not a power-off.
-        core::arch::asm!(
-            "mov dx, {0:x}",
-            "mov al, 0xFE",
-            "out dx, al",
-            in(reg) KBD_CTRL_PORT_B,
-            options(nomem, nostack),
-        );
+        // Try keyboard controller power-off via arch_io.
+        crate::arch_io::outb(KBD_CTRL_PORT_B, 0xFE);
     }
 }
 

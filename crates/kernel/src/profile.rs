@@ -277,67 +277,65 @@ pub unsafe fn sprofile(
 ///
 /// Must be called after interrupt system initialization.
 pub unsafe fn init_profile_clock(freq: u32) {
+    // Convert Hz to RTC rate select code.
+    // RTC rate = 32768 >> (rate_select - 1) Hz, so:
+    //   2 Hz  → rate 15 (32768 >> 14)
+    //   4 Hz  → rate 14 (32768 >> 13)
+    //   8 Hz  → rate 13
+    //   16 Hz → rate 12
+    //   32 Hz → rate 11
+    //   64 Hz → rate 10
+    //   128 Hz → rate 9
+    //   256 Hz → rate 8
+    //   512 Hz → rate 7
+    //   1024 Hz → rate 6
+    //   2048 Hz → rate 5
+    //   4096 Hz → rate 4
+    //   8192 Hz → rate 3
+    let _rate_code = match freq {
+        2 => 15,
+        4 => 14,
+        8 => 13,
+        16 => 12,
+        32 => 11,
+        64 => 10,
+        128 => 9,
+        256 => 8,
+        512 => 7,
+        1024 => 6,
+        2048 => 5,
+        4096 => 4,
+        8192 => 3,
+        _ => 6, // default to 1024 Hz
+    };
+
+    #[cfg(target_arch = "x86_64")]
     unsafe {
-        // Convert Hz to RTC rate select code.
-        // RTC rate = 32768 >> (rate_select - 1) Hz, so:
-        //   2 Hz  → rate 15 (32768 >> 14)
-        //   4 Hz  → rate 14 (32768 >> 13)
-        //   8 Hz  → rate 13
-        //   16 Hz → rate 12
-        //   32 Hz → rate 11
-        //   64 Hz → rate 10
-        //   128 Hz → rate 9
-        //   256 Hz → rate 8
-        //   512 Hz → rate 7
-        //   1024 Hz → rate 6
-        //   2048 Hz → rate 5
-        //   4096 Hz → rate 4
-        //   8192 Hz → rate 3
-        let rate_code = match freq {
-            2 => 15,
-            4 => 14,
-            8 => 13,
-            16 => 12,
-            32 => 11,
-            64 => 10,
-            128 => 9,
-            256 => 8,
-            512 => 7,
-            1024 => 6,
-            2048 => 5,
-            4096 => 4,
-            8192 => 3,
-            _ => 6, // default to 1024 Hz
-        };
+        let irq = arch_x86_64::apic::arch_init_profile_clock(_rate_code);
+        if irq >= 0 {
+            // Register the profile clock handler in the IDT.
+            let vector = arch_x86_64::interrupt::VECTOR_TIMER as u32 + irq as u32;
+            let handler_fn =
+                arch_x86_64::apic::profile_clock_isr_entry as *const () as usize as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                vector as usize,
+                handler_fn,
+                0, // IST
+                3, // DPL
+            );
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            let irq = arch_x86_64::apic::arch_init_profile_clock(rate_code);
-            if irq >= 0 {
-                // Register the profile clock handler in the IDT.
-                let vector = arch_x86_64::interrupt::VECTOR_TIMER as u32 + irq as u32;
-                let handler_fn =
-                    arch_x86_64::apic::profile_clock_isr_entry as *const () as usize as u64;
-                (*arch_x86_64::idt::IDT.get()).set_handler(
-                    vector as usize,
-                    handler_fn,
-                    0, // IST
-                    3, // DPL
-                );
-
-                // Register the Rust callback that calls profile_sample.
-                unsafe extern "C" fn profile_clock_callback() {
-                    let p = unsafe { crate::ipc::current_proc() };
-                    if !p.is_null() && unsafe { (*p).is_runnable() } {
-                        unsafe { profile_sample(p, 0) };
-                    }
+            // Register the Rust callback that calls profile_sample.
+            unsafe extern "C" fn profile_clock_callback() {
+                let p = unsafe { crate::ipc::current_proc() };
+                if !p.is_null() && unsafe { (*p).is_runnable() } {
+                    unsafe { profile_sample(p, 0) };
                 }
-                arch_x86_64::apic::set_profile_clock_handler(profile_clock_callback);
             }
+            arch_x86_64::apic::set_profile_clock_handler(profile_clock_callback);
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        {}
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    {}
 }
 
 /// Stop the profiling clock.
@@ -399,7 +397,7 @@ unsafe fn sprof_save_proc(p: *mut Proc) {
             if i >= PROC_NAME_LEN - 1 || c == 0 {
                 break;
             }
-            (*proc_ptr).name[i] = c as u8;
+            (*proc_ptr).name[i] = c;
         }
         info.mem_used = info.mem_used.wrapping_add(size_of::<SprofProc>() as i32);
     }

@@ -539,6 +539,9 @@ pub unsafe fn hlt() {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_page_fault_entry() {
     // Write 'P' to serial, then write CR2 value as hex, then halt.
     core::arch::naked_asm!(
@@ -588,6 +591,9 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_double_fault_entry() {
     core::arch::naked_asm!(
         "mov    dx, 0x3F8",
@@ -606,6 +612,9 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_gpf_entry() {
     core::arch::naked_asm!(
         "mov    dx, 0x3F8",
@@ -625,6 +634,9 @@ pub unsafe extern "C" fn exception_gpf_entry() {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn ring3_halt_stub() {
     core::arch::naked_asm!("1:", "pause", "jmp    1b",);
 }
@@ -771,6 +783,10 @@ pub mod syscall_abi {
     pub static SYSCALL_HANDLER_PTR: AtomicU64 = AtomicU64::new(0);
 
     /// Set the syscall handler pointer.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the page table is valid and the virtual address is mapped.
     pub unsafe fn set_syscall_handler(handler: unsafe extern "C" fn(*const u64)) {
         SYSCALL_HANDLER_PTR.store(
             handler as usize as u64,
@@ -784,6 +800,10 @@ pub mod syscall_abi {
     }
 
     /// Syscall entry point — called by hardware via `syscall` instruction.
+    ///
+    /// # Safety
+    ///
+    /// `entry` must point to a valid, writable page table entry.
     #[unsafe(no_mangle)]
     #[unsafe(naked)]
     pub unsafe extern "C" fn syscall_entry() {

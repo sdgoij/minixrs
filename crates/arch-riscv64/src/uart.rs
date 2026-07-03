@@ -18,12 +18,16 @@ pub const UART_BASE: u64 = 0x10000000;
 const RBR: u64 = 0; // Receive Buffer (read)
 const THR: u64 = 0; // Transmit Holding (write)
 const IER: u64 = 1; // Interrupt Enable
+#[allow(dead_code)]
 const IIR: u64 = 2; // Interrupt ID (read)
 const FCR: u64 = 2; // FIFO Control (write)
 const LCR: u64 = 3; // Line Control
+#[allow(dead_code)]
 const MCR: u64 = 4; // Modem Control
 const LSR: u64 = 5; // Line Status
+#[allow(dead_code)]
 const MSR: u64 = 6; // Modem Status
+#[allow(dead_code)]
 const SCR: u64 = 7; // Scratch
 
 // Line status register bits.
@@ -47,14 +51,24 @@ unsafe fn uart_write(reg: u64, val: u8) {
 /// Must be called once during boot.
 pub unsafe fn init_uart() {
     // Set DLAB=1 (Divisor Latch Access Bit) in LCR
-    uart_write(LCR, 0x80);
+    unsafe {
+        uart_write(LCR, 0x80);
+    }
     // Set divisor for 115200 baud (1.8432 MHz / (16 * 115200) = 1)
-    uart_write(RBR, 1); // DLL = 1
-    uart_write(IER, 0); // DLM = 0
+    unsafe {
+        uart_write(RBR, 1);
+    } // DLL = 1
+    unsafe {
+        uart_write(IER, 0);
+    } // DLM = 0
     // Set LCR: 8 data bits, 1 stop bit, no parity (DLAB=0)
-    uart_write(LCR, 0x03);
+    unsafe {
+        uart_write(LCR, 0x03);
+    }
     // Enable FIFOs, clear them, set trigger level to 1
-    uart_write(FCR, 0x07);
+    unsafe {
+        uart_write(FCR, 0x07);
+    }
 }
 
 /// Write a single byte to the UART (blocking).

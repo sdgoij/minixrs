@@ -71,9 +71,7 @@ pub fn read_blocking() -> u8 {
             return crate::hal::serial_read_byte();
         }
         // Spin-hint to yield on hypervisors.
-        unsafe {
-            core::arch::asm!("pause", options(nomem, nostack));
-        }
+        crate::hal::pause();
     }
 }
 

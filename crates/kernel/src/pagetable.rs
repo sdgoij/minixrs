@@ -63,14 +63,22 @@ pub fn get_proc_cr3(ep: i32) -> u64 {
 // `x86_64-unknown-none` dev builds).
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "none", not(target_vendor = "pc"))
+    all(
+        target_os = "none",
+        not(target_arch = "riscv64"),
+        not(target_vendor = "pc")
+    )
 ))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "none", not(target_vendor = "pc"))
+    all(
+        target_os = "none",
+        not(target_arch = "riscv64"),
+        not(target_vendor = "pc")
+    )
 ))]
 #[used]
 #[unsafe(no_mangle)]

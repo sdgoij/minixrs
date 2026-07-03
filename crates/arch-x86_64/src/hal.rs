@@ -102,6 +102,14 @@ pub fn halt() -> ! {
     }
 }
 
+/// CPU relax hint.
+#[inline]
+pub fn pause() {
+    unsafe {
+        core::arch::asm!("pause", options(nomem, nostack));
+    }
+}
+
 // ── Per-CPU current process pointer ───────────────────────────────────────
 
 use core::ffi::c_void;
@@ -315,9 +323,9 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
         );
     }
     let bytes = val.to_ne_bytes();
-    for i in 0..8 {
+    for (i, b) in bytes.iter().enumerate() {
         unsafe {
-            core::ptr::write_volatile(frame.as_mut_ptr().add(offset + i), bytes[i]);
+            core::ptr::write_volatile(frame.as_mut_ptr().add(offset + i), *b);
         }
     }
 }

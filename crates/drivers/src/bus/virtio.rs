@@ -15,7 +15,6 @@
 
 #![allow(dead_code)]
 
-use core::arch::asm;
 use core::ptr::addr_of_mut;
 
 #[cfg(test)]
@@ -60,10 +59,6 @@ pub const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 /// Virtio PCI vendor ID.
 pub const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
-
-/// PCI configuration ports.
-const PCI_ADDR_PORT: u16 = 0xCF8;
-const PCI_DATA_PORT: u16 = 0xCFC;
 
 /// Maximum number of descriptors per queue.
 const QUEUE_NUM: u16 = 256;
@@ -205,61 +200,37 @@ static mut Q0_DATA: [usize; QUEUE_NUM as usize] = [0; QUEUE_NUM as usize];
 /// Write 8 bits to an I/O port.
 #[inline]
 unsafe fn out8(port: u16, val: u8) {
-    unsafe {
-        asm!("out dx, al", in("dx") port, in("al") val,
-             options(nomem, nostack, preserves_flags));
-    }
+    unsafe { crate::arch_io::outb(port, val) }
 }
 
 /// Write 16 bits to an I/O port.
 #[inline]
 unsafe fn out16(port: u16, val: u16) {
-    unsafe {
-        asm!("out dx, ax", in("dx") port, in("ax") val,
-             options(nomem, nostack, preserves_flags));
-    }
+    unsafe { crate::arch_io::outw(port, val) }
 }
 
 /// Write 32 bits to an I/O port.
 #[inline]
 unsafe fn out32(port: u16, val: u32) {
-    unsafe {
-        asm!("out dx, eax", in("dx") port, in("eax") val,
-             options(nomem, nostack, preserves_flags));
-    }
+    unsafe { crate::arch_io::outl(port, val) }
 }
 
 /// Read 8 bits from an I/O port.
 #[inline]
 unsafe fn in8(port: u16) -> u8 {
-    let val: u8;
-    unsafe {
-        asm!("in al, dx", out("al") val, in("dx") port,
-             options(nomem, nostack, preserves_flags));
-    }
-    val
+    unsafe { crate::arch_io::inb(port) }
 }
 
 /// Read 16 bits from an I/O port.
 #[inline]
 unsafe fn in16(port: u16) -> u16 {
-    let val: u16;
-    unsafe {
-        asm!("in ax, dx", out("ax") val, in("dx") port,
-             options(nomem, nostack, preserves_flags));
-    }
-    val
+    unsafe { crate::arch_io::inw(port) }
 }
 
 /// Read 32 bits from an I/O port.
 #[inline]
 unsafe fn in32(port: u16) -> u32 {
-    let val: u32;
-    unsafe {
-        asm!("in eax, dx", out("eax") val, in("dx") port,
-             options(nomem, nostack, preserves_flags));
-    }
-    val
+    unsafe { crate::arch_io::inl(port) }
 }
 
 // ── PCI config space access ────────────────────────────────────────────────────
@@ -279,15 +250,7 @@ fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
-    let addr = pci_config_addr(bus, dev, func, reg);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR_PORT, in("eax") addr,
-             options(nomem, nostack, preserves_flags));
-        let raw: u32;
-        asm!("in eax, dx", out("eax") raw, in("dx") PCI_DATA_PORT,
-             options(nomem, nostack, preserves_flags));
-        ((raw >> ((reg as u32 & 0x03) * 8)) & 0xFF) as u8
-    }
+    unsafe { crate::arch_io::pci_cfg_read8(bus, dev, func, reg) }
 }
 
 /// Read 16 bits from PCI config space.
@@ -296,15 +259,7 @@ unsafe fn pci_cfg_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
-    let addr = pci_config_addr(bus, dev, func, reg);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR_PORT, in("eax") addr,
-             options(nomem, nostack, preserves_flags));
-        let raw: u32;
-        asm!("in eax, dx", out("eax") raw, in("dx") PCI_DATA_PORT,
-             options(nomem, nostack, preserves_flags));
-        ((raw >> ((reg as u32 & 0x02) * 8)) & 0xFFFF) as u16
-    }
+    unsafe { crate::arch_io::pci_cfg_read16(bus, dev, func, reg) }
 }
 
 /// Read 32 bits from PCI config space.
@@ -313,15 +268,7 @@ unsafe fn pci_cfg_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    let addr = pci_config_addr(bus, dev, func, reg);
-    unsafe {
-        asm!("out dx, eax", in("dx") PCI_ADDR_PORT, in("eax") addr,
-             options(nomem, nostack, preserves_flags));
-        let val: u32;
-        asm!("in eax, dx", out("eax") val, in("dx") PCI_DATA_PORT,
-             options(nomem, nostack, preserves_flags));
-        val
-    }
+    unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
 }
 
 // ── Virtio register accessors ──────────────────────────────────────────────────
@@ -588,7 +535,7 @@ pub fn virtio_to_queue(
         // Memory barrier: host must see descriptor writes before
         // the avail index update.
         unsafe {
-            asm!("mfence", options(nostack, preserves_flags));
+            crate::arch_io::mfence();
         }
 
         // Advance the avail index.
@@ -596,7 +543,7 @@ pub fn virtio_to_queue(
 
         // Memory barrier: host must see updated avail index before kick.
         unsafe {
-            asm!("mfence", options(nostack, preserves_flags));
+            crate::arch_io::mfence();
         }
 
         // Check if the host wants notification.
@@ -622,7 +569,7 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
 
     // Ensure we see the host's writes.
     unsafe {
-        asm!("mfence", options(nostack, preserves_flags));
+        crate::arch_io::mfence();
     }
 
     // All queue operations in one borrow scope.

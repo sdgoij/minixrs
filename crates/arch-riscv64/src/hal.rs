@@ -52,12 +52,25 @@ pub fn halt() -> ! {
     }
 }
 
+/// CPU relax hint.
+#[inline]
+pub fn pause() {
+    core::hint::spin_loop();
+}
+
 // ── Per-CPU current process pointer ───────────────────────────────────────
 
 use core::ffi::c_void;
 
+/// Set the current process pointer for this hart.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be null.
 pub unsafe fn set_current_proc(proc: *mut c_void) {
-    crate::cpulocals::set_current_proc(proc as u64);
+    unsafe {
+        crate::cpulocals::set_current_proc(proc as u64);
+    }
 }
 
 pub fn current_proc() -> *mut c_void {
@@ -97,10 +110,20 @@ impl Default for Spinlock {
     }
 }
 
+/// Acquire the big kernel lock.
+///
+/// # Safety
+///
+/// Must be called in a context where the lock can be safely acquired.
 pub unsafe fn bkl_lock() {
     todo!("RISC-V BKL; see Phase 19.5");
 }
 
+/// Release the big kernel lock.
+///
+/// # Safety
+///
+/// Must be called by the hart that currently holds the lock.
 pub unsafe fn bkl_unlock() {
     todo!("RISC-V BKL; see Phase 19.5");
 }
@@ -110,14 +133,29 @@ pub unsafe fn bkl_unlock() {
 // RISC-V TrapFrame layout (32 GPR + sepc + sstatus + scause = 35 × 8 = 280 bytes)
 // We use the same [u8; 256] layout as x86_64 for now. Expand to 288 if needed later.
 
+/// Read a u64 field from a trap frame at the given byte offset.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame; `offset` must be in bounds.
 pub unsafe fn read_frame_field(frame: &[u8; 256], offset: usize) -> u64 {
     u64::from_ne_bytes(frame[offset..offset + 8].try_into().unwrap())
 }
 
+/// Write a u64 field to a trap frame at the given byte offset.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame; `offset` must be in bounds.
 pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) {
     frame[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
+/// Read a syscall argument from the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame captured from a syscall entry.
 pub unsafe fn read_syscall_arg(frame: &[u8; 256], i: usize) -> u64 {
     // RISC-V syscall convention: a0-a5 for args 0-5
     // a0 = x10 at offset 80, a1 = x11 at offset 88, etc.
@@ -133,16 +171,31 @@ pub unsafe fn read_syscall_arg(frame: &[u8; 256], i: usize) -> u64 {
     unsafe { read_frame_field(frame, offset) }
 }
 
+/// Write a syscall return value into the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame.
 pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64) {
     // RISC-V: return value in a0 (x10 at offset 80)
     unsafe { write_frame_field(frame, 80, val) }
 }
 
+/// Read the syscall number from the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame captured from a syscall entry.
 pub unsafe fn read_syscall_nr(frame: &[u8; 256]) -> u64 {
     // RISC-V: syscall number in a7 (x17 at offset 136)
     unsafe { read_frame_field(frame, 136) }
 }
 
+/// Read the faulting instruction pointer (sepc) from the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame.
 pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64 {
     // RISC-V: sepc at offset 256 (above the 32 GPRs)
     // But our frame is only 256 bytes, so this won't fit with all 32 regs.
@@ -150,10 +203,20 @@ pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64 {
     unsafe { read_frame_field(frame, 248) } // temporary: last 8 bytes of 256
 }
 
+/// Write the faulting instruction pointer into the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame.
 pub unsafe fn write_frame_ip(_frame: &mut [u8; 256], _ip: u64) {
     todo!("RISC-V sepc write; see Phase 19.4");
 }
 
+/// Set initial register values in a trap frame for a new process.
+///
+/// # Safety
+///
+/// `frame` must be a valid, writable trap frame.
 pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg: u64) {
     // RISC-V: set up initial register state for new process.
     // sepc = entry, sp = stack pointer, a0 = arg.
@@ -167,6 +230,11 @@ pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg:
     }
 }
 
+/// Copy a trap frame from `src` to `dst`.
+///
+/// # Safety
+///
+/// Both `dst` and `src` must point to valid, non-overlapping trap frames.
 pub unsafe fn copy_frame(dst: &mut [u8; 256], src: &[u8; 256]) {
     unsafe {
         core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), 256);
@@ -177,6 +245,11 @@ pub fn frame_default() -> [u8; 256] {
     [0u8; 256]
 }
 
+/// Initialize architecture-specific process state in the trap frame.
+///
+/// # Safety
+///
+/// `frame` must be a valid, writable trap frame.
 pub unsafe fn arch_proc_init(
     _frame: &mut [u8; 256],
     _entry: u64,
@@ -187,10 +260,20 @@ pub unsafe fn arch_proc_init(
     todo!("RISC-V arch_proc_init; see Phase 19.4");
 }
 
+/// Convert a trap frame to a machine context (for signal handling).
+///
+/// # Safety
+///
+/// `_frame` must be a valid trap frame.
 pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 256]) -> crate::mcontext::Mcontext {
     todo!("RISC-V mcontext; see Phase 19.6");
 }
 
+/// Restore a trap frame from a machine context.
+///
+/// # Safety
+///
+/// `_frame` must be a valid, writable trap frame.
 pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontext::Mcontext) {
     todo!("RISC-V mcontext; see Phase 19.6");
 }
@@ -214,6 +297,11 @@ pub fn boot_cr3() -> u64 {
     }
 }
 
+/// Write the SATP register (RISC-V equivalent of x86 CR3).
+///
+/// # Safety
+///
+/// `cr3` must point to a valid, page-aligned root page table.
 pub unsafe fn write_cr3(cr3: u64) {
     // Write SATP CSR
     // SV39 mode = 8 (bits 60-63), ASID = 0 (bits 44-59), PPN = bits 0-43
@@ -228,10 +316,20 @@ pub unsafe fn write_cr3(cr3: u64) {
     }
 }
 
+/// Read the SATP register (RISC-V equivalent of x86 CR3).
+///
+/// # Safety
+///
+/// No special safety requirements; the SATP CSR is always readable.
 pub unsafe fn read_cr3() -> u64 {
     boot_cr3()
 }
 
+/// Flush the TLB for a single virtual address.
+///
+/// # Safety
+///
+/// Must be called after modifying a page table entry.
 pub unsafe fn tlb_flush_page(_va: u64) {
     // RISC-V sfence.vma with a single address
     unsafe {
@@ -239,6 +337,11 @@ pub unsafe fn tlb_flush_page(_va: u64) {
     }
 }
 
+/// Allocate a physical page.
+///
+/// # Safety
+///
+/// Must be called after the physical memory allocator has been initialized.
 pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
 }
@@ -247,8 +350,14 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
 pub const KERNBASE: u64 = 0xFFFFFF8000000000u64;
 
 /// Initialize per-CPU local storage.
+///
+/// # Safety
+///
+/// Must be called once during early boot on the BSP hart.
 pub unsafe fn init_cpulocals() {
-    crate::cpulocals::init_cpulocals();
+    unsafe {
+        crate::cpulocals::init_cpulocals();
+    }
 }
 
 // ── Scheduler cpulocals accessors (Phase 19.7) ──────────────────────────
@@ -270,7 +379,7 @@ pub fn sched_nr_queues() -> usize {
 
 /// Get the current process pointer (scheduler context).
 pub fn sched_current_proc() -> *mut core::ffi::c_void {
-    unsafe { crate::cpulocals::current_proc() as *mut core::ffi::c_void }
+    crate::cpulocals::current_proc() as *mut core::ffi::c_void
 }
 
 /// Get the billable process pointer.
@@ -279,18 +388,30 @@ pub fn sched_bill_proc() -> *mut core::ffi::c_void {
 }
 
 /// Set the billable process pointer.
+/// Set the billable process pointer.
+///
+/// # Safety
+///
+/// Must be called from a scheduler context where the pointer is valid.
 pub unsafe fn sched_set_bill_proc(_proc: *mut core::ffi::c_void) {
     todo!("RISC-V sched_set_bill_proc; see Phase 19.7");
 }
 
 /// Get the current process pointer (SMP context).
 pub fn smp_proc_ptr() -> *mut core::ffi::c_void {
-    unsafe { crate::cpulocals::current_proc() as *mut core::ffi::c_void }
+    crate::cpulocals::current_proc() as *mut core::ffi::c_void
 }
 
 /// Set the current process pointer (SMP context).
+/// Set the current process pointer for the current hart (SMP context).
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be null.
 pub unsafe fn smp_set_proc_ptr(proc: *mut core::ffi::c_void) {
-    crate::cpulocals::set_current_proc(proc as u64);
+    unsafe {
+        crate::cpulocals::set_current_proc(proc as u64);
+    }
 }
 
 /// Halt the CPU (single `wfi` instruction, no infinite loop).
@@ -308,9 +429,17 @@ pub fn read_tsc() -> u64 {
 }
 
 /// Release FPU state for a process (no-op on RISC-V).
+///
+/// # Safety
+///
+/// `_proc` must point to a valid process or be null.
 pub unsafe fn release_fpu(_proc: *mut core::ffi::c_void) {}
 
 /// Flush the entire TLB.
+///
+/// # Safety
+///
+/// Must be called after modifying page tables.
 pub unsafe fn tlb_flush() {
     unsafe {
         core::arch::asm!("sfence.vma", options(nomem, nostack));
