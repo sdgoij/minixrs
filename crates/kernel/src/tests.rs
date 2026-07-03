@@ -58,19 +58,11 @@ fn ser_write(s: &str) {
 }
 
 fn ser_putc(c: u8) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let port: u16 = 0x3F8;
-        loop {
-            let lsr: u8;
-            core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5, options(nomem, nostack));
-            if lsr & 0x20 != 0 {
-                break;
-            }
-        }
-        core::arch::asm!("out dx, al", in("dx") port, in("al") c, options(nomem, nostack));
+    #[cfg(not(test))]
+    {
+        crate::hal::serial_write_byte(c);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(test)]
     let _ = c;
 }
 

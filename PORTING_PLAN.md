@@ -2417,7 +2417,7 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
 ### tests.rs — Serial output (LOW priority)
 
-- [ ] **19.x.12 — Abstract test serial output**
+- [x] **19.x.12 — Abstract test serial output**
   - `ser_putc` in tests.rs uses x86_64 COM1 inline asm.
   - **Fix**: Use `hal::serial_write_byte()` (already exists) instead of
     duplicating COM1 access.
