@@ -2324,7 +2324,7 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Verify: /sbin/init is a RISC-V ELF64 with correct e_machine (0xF3)
   - Deliverable: `just run-riscv64` boots to "init: starting shell..."
 
-- [ ] **19.21 — Syscall handling from U-mode** (`arch-riscv64/src/trap.rs`)
+- [x] **19.21 — Syscall handling from U-mode** (`arch-riscv64/src/trap.rs`)
   - `ecall` from U-mode raises trap with scause=8 (Environment Call from U-mode)
   - Current trap handler dispatches ecall to registered syscall handler
     via `SYSCALL_HANDLER` callback

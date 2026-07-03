@@ -46,7 +46,7 @@ pub unsafe fn register_syscall_handler(handler: unsafe fn(usize, &[u64; 6]) -> i
 ///
 /// Must only be called from the trap vector with interrupts disabled.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 288]) {
+pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
     let scause_val = u64::from_ne_bytes(frame[272..280].try_into().unwrap());
     let code = cause_code(scause_val);
 

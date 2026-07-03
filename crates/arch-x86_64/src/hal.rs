@@ -563,6 +563,12 @@ pub const fn build_pte(pa: u64, flags: u64) -> u64 {
     (pa & 0x000FFFFFFFFFF000) | (flags & 0xFFF)
 }
 
+/// Extract physical address from a PTE.
+/// On x86_64, PTE stores the physical address directly in bits [51:12].
+pub const fn pte_to_phys(pte: u64) -> u64 {
+    pte & 0x000FFFFFFFFFF000
+}
+
 /// Kernel load virtual address (x86_64: identity-mapped at 0x200000).
 pub const fn kern_vaddr() -> u64 {
     0x200000

@@ -79,7 +79,12 @@ pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
             "ld      t5,   240(a0)",
             // Skip t6 (offset 248) — holds sstatus.
 
-            // Load sp and a0 last.
+            // Save current kernel stack pointer in sscratch for the trap handler.
+            // The trap handler swaps sp ↔ sscratch on U-mode entry.
+            "mv      t0, sp",
+            "csrw    sscratch, t0",
+
+            // Load sp (user stack) and a0 last.
             "ld      sp,   16(a0)",
             "ld      a0,   80(a0)",
 

@@ -126,7 +126,7 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
                 });
             }
 
-            table_phys = pte & PG_FRAME;
+            table_phys = crate::hal::pte_to_phys(pte);
         }
 
         // Level 0 (PT — 4KB page).
@@ -179,7 +179,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 // Huge page — split into 512 × 4KB PTEs preserving the
                 // original mapping, then overwrite the specific PTE below.
                 let pt_phys = alloc_pt_page()?;
-                let base_pa = pte & PG_FRAME;
+                let base_pa = crate::hal::pte_to_phys(pte);
                 // On x86_64: strip PG_PS (bit 7) when converting leaf to branch.
                 // On RISC-V: PG_PS = 0x0F (V|R|W|X detection), keep all flags.
                 #[cfg(target_arch = "x86_64")]
@@ -312,7 +312,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
             return Err(PageTableError::InvalidArgument);
         }
 
-        let base_pa = result.pte_value & PG_FRAME;
+        let base_pa = crate::hal::pte_to_phys(result.pte_value);
 
         // Attributes to propagate to each 4KB PTE.
         // On x86_64: exclude frame, PS, and G. On RISC-V: exclude frame and G only

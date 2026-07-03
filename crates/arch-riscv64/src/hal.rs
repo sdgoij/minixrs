@@ -338,6 +338,13 @@ pub const fn build_pte(pa: u64, flags: u64) -> u64 {
     ((pa >> 2) & pte::PTE_PPN_MASK) | (flags & pte::PTE_FLAGS_MASK)
 }
 
+/// Extract physical address from a PTE (reverse of build_pte).
+/// On RISC-V, PTE stores PPN = pa >> 12 at bits [53:10], so the physical
+/// address is ((pte & PPN_MASK) >> 10) << 12 = (pte & PPN_MASK) << 2.
+pub const fn pte_to_phys(pte: u64) -> u64 {
+    ((pte & pte::PTE_PPN_MASK) >> 10) << 12
+}
+
 /// Kernel load virtual address (RISC-V: linked at 0x80200000).
 pub const fn kern_vaddr() -> u64 {
     0x80200000

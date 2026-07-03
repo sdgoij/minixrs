@@ -12,13 +12,19 @@ global_asm!(
 .align 2
 
 trap_vector:
-    # Allocate trap frame (32 GPRs + sepc + sstatus + scause = 280 bytes)
-    addi    sp, sp, -288
+    # Check if we came from U-mode (sstatus.SPP = 0) or S-mode (SPP = 1).
+    # If from U-mode, switch to the kernel stack via sscratch.
+    csrr    t0, sstatus
+    andi    t0, t0, 0x100          # SPP bit = bit 8, 0=U-mode, 1=S-mode
+    bnez    t0, 1f                  # skip stack switch if from S-mode
+    csrrw   sp, sscratch, sp        # sp = sscratch (kernel stack), sscratch = user sp
+1:
+    # Allocate trap frame (32 GPRs + sepc + sstatus + scause + kstack = 296 bytes)
+    addi    sp, sp, -296
 
     # Save all 32 GPRs
     sd      zero, 0(sp)
     sd      ra,   8(sp)
-    sd      sp,   16(sp)      # placeholder, corrected below
     sd      gp,   24(sp)
     sd      tp,   32(sp)
     sd      t0,   40(sp)
@@ -57,9 +63,17 @@ trap_vector:
     csrr    t0, scause
     sd      t0, 272(sp)
 
-    # Save the original SP (before trap allocation)
-    addi    t0, sp, 288
+    # Save the original SP (before trap allocation).
+    # If from U-mode: user sp is in sscratch.
+    # If from S-mode: original sp = current sp + 296.
+    csrr    t0, sscratch
     sd      t0, 16(sp)
+
+    # Save the kernel stack pointer at offset 280 for restoring sscratch later.
+    # For U-mode traps: sp is the kernel stack (after swap).
+    # For S-mode traps: sp is the kernel stack (already).
+    addi    t0, sp, 296             # t0 = kernel sp BEFORE trap allocation
+    sd      t0, 280(sp)
 
     # Call trap_handler(frame)
     mv      a0, sp
@@ -70,6 +84,10 @@ trap_vector:
     csrw    sepc, t0
     ld      t0, 264(sp)
     csrw    sstatus, t0
+
+    # Restore kernel stack pointer into sscratch (for next U-mode trap)
+    ld      t0, 280(sp)
+    csrw    sscratch, t0
 
     # Restore GPRs (except sp)
     ld      ra,   8(sp)
@@ -103,7 +121,7 @@ trap_vector:
     ld      t5,   240(sp)
     ld      t6,   248(sp)
 
-    # Restore sp last
+    # Restore sp from the saved frame (user sp for U-mode, kernel sp for S-mode).
     ld      sp,   16(sp)
 
     sret
