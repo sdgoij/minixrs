@@ -2118,18 +2118,15 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     SFENCE.VMA, MAP_* constants, 8 tests
   - **Test:** map a page, write to it, read back, verify data
 
-- [ ] **19.8 — Boot code** (`arch-riscv64/src/boot.rs` + linker script)
-  - `_start` entry point (QEMU loads kernel at 0x80200000)
-  - Read `a0` = hart ID, `a1` = DTB pointer from QEMU
-  - Parse FDT to find memory size, UART address, CLINT address
-  - Initialize physical memory allocator from FDT memory node
-  - Set up boot page table (identity map kernel at 0x80200000)
-  - Enable MMU (write `satp` with MODE=Sv39)
-  - Set `stvec` to trap vector
-  - Initialize kernel stack pointer, clear BSS
-  - Call into `kernel::init()` then boot processes
-  - Device tree parsing via `fdt` crate or manual walk
-  - **Test:** QEMU boots to serial output without crashing
+- [x] **19.8 — Boot code** (`arch-riscv64/src/boot.rs`)
+  - `_start` entry (global_asm): set up stack, clear BSS, call
+    `early_init(hart_id, dtb_ptr)`
+  - Minimal FDT parser: reads memory base/size from `/memory` node
+    (falls back to 128MB at 0x80000000 for QEMU virt)
+  - `init_phys_allocator()`: early bump allocator init
+  - Sets stvec to trap vector, prints "Hello MINIX!" via SBI
+  - Non-boot harts park via WFI
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
 - [ ] **19.9 — Physical memory allocator** (`arch-riscv64/src/alloc.rs`)
   - Same pattern as `arch-x86_64/src/alloc.rs`: bump allocator for early

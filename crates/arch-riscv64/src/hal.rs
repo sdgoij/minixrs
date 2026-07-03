@@ -8,6 +8,11 @@ use core::sync::atomic::Ordering;
 
 use crate::pte;
 
+/// Boot-time bump allocator bounds (set by boot.rs).
+pub static mut BOOT_ALLOC_START: u64 = 0;
+/// Boot-time bump allocator end.
+pub static mut BOOT_ALLOC_END: u64 = 0;
+
 // ── Initialization ────────────────────────────────────────────────────────
 
 /// Initialize RISC-V64 architecture subsystem (SBI, PLIC, CLINT, etc.).
