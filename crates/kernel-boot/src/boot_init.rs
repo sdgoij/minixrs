@@ -74,9 +74,9 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     let code_pages = ((code_end - code_start) / 4096) as usize;
 
     // Step 2: Allocate contiguous physical pages for code.
-    // Use the arch allocator's contiguous allocator (bottom-up) to
-    // avoid conflicts with page table allocations (which use top-down).
-    let phys_code_base = match arch_x86_64::alloc::alloc_phys_contig(code_pages) {
+    // Use the contiguous physical allocator (bottom-up) to avoid
+    // conflicts with page table allocations (which use top-down).
+    let phys_code_base = match unsafe { kernel::hal::alloc_phys_contig(code_pages) } {
         Some(base) => base,
         None => {
             print!("  ");
@@ -100,7 +100,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     let user_stack_base: u64 = 0x0FE00000;
     let user_stack_size: usize = 65536;
     let stack_pages = user_stack_size / 4096;
-    let phys_stack_base = match arch_x86_64::alloc::alloc_phys_contig(stack_pages) {
+    let phys_stack_base = match unsafe { kernel::hal::alloc_phys_contig(stack_pages) } {
         Some(base) => base,
         None => {
             print!("  ");
@@ -303,61 +303,56 @@ pub unsafe fn boot_create_page_table() -> u64 {
     if boot_cr3_val == 0 {
         return 0;
     }
+    let levels = kernel::hal::pt_levels();
+    let page_sz = kernel::hal::PAGE_SIZE as usize;
 
-    // Walk the boot page table
-    let boot_pml4 = boot_cr3_val as *const u64;
-    let boot_pml4e0 = unsafe { core::ptr::read(boot_pml4) };
-    let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
-    let boot_pdpt = boot_pdpt_phys as *const u64;
-    let boot_pdpte0 = unsafe { core::ptr::read(boot_pdpt) };
-    let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
+    // Walk the boot page table to find the bottom-level PD.
+    let mut table_phys = boot_cr3_val;
+    for lvl in (2..levels).rev() {
+        let table = table_phys as *const u64;
+        let idx = kernel::hal::pt_index(0, lvl);
+        let entry = unsafe { core::ptr::read(table.add(idx)) };
+        table_phys = entry & kernel::hal::pte_frame_mask();
+    }
+    let boot_pd_phys = table_phys;
 
-    // Allocate 3 pages from the arch allocator: PML4, PDP, PD
-    let pml4_page = match arch_x86_64::alloc::alloc_phys_page() {
-        Some(p) => p,
-        None => return 0,
-    };
-    let pdpt_page = match arch_x86_64::alloc::alloc_phys_page() {
-        Some(p) => p,
-        None => return 0,
-    };
-    let pd_page = match arch_x86_64::alloc::alloc_phys_page() {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    // Zero all three pages (4KB each)
-    let page_sz = arch_x86_64::param::NBPG as usize;
-    unsafe {
-        core::ptr::write_bytes(pml4_page as *mut u8, 0, page_sz);
-        core::ptr::write_bytes(pdpt_page as *mut u8, 0, page_sz);
-        core::ptr::write_bytes(pd_page as *mut u8, 0, page_sz);
+    // Allocate (levels-1) pages: root + intermediate + PD.
+    let n_pages = (levels - 1) as usize;
+    let mut pages = [0u64; 4];
+    for i in 0..n_pages {
+        pages[i] = match unsafe { kernel::hal::alloc_phys_page() } {
+            Some(p) => p,
+            None => return 0,
+        };
+        unsafe { core::ptr::write_bytes(pages[i] as *mut u8, 0, page_sz) };
     }
 
-    // Link: PML4[0] → PDP[0] → PD
-    let flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
-    unsafe {
-        core::ptr::write(pml4_page as *mut u64, pdpt_page | flags);
-        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+    // Link hierarchy: root[0] → next[0] → ... → PD.
+    let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
+    for i in 0..(n_pages - 1) {
+        unsafe {
+            core::ptr::write(pages[i] as *mut u64, pages[i + 1] | flags);
+        }
     }
 
-    // Deep-copy all 512 PD entries from boot PD
-    let boot_pd = boot_pd_phys as *const u64;
-    let new_pd = pd_page as *mut u64;
+    // Deep-copy all 512 boot PD entries into new PD.
     unsafe {
+        let new_pd = pages[n_pages - 1] as *mut u64;
         for i in 0..512 {
-            let entry = core::ptr::read(boot_pd.add(i));
+            let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
             core::ptr::write(new_pd.add(i), entry);
         }
 
-        // Share kernel high mappings (PML4 entries 256-511)
+        // Share kernel high mappings (top half of root).
+        let boot_root = boot_cr3_val as *const u64;
+        let new_root = pages[0] as *mut u64;
         for i in 256..512 {
-            let entry = core::ptr::read(boot_pml4.add(i));
-            core::ptr::write((pml4_page as *mut u64).add(i), entry);
+            let entry = core::ptr::read(boot_root.add(i));
+            core::ptr::write(new_root.add(i), entry);
         }
     }
 
-    pml4_page
+    pages[0]
 }
 
 /// Create a restricted per-process page table that maps only the pages

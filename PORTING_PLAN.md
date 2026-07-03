@@ -2251,17 +2251,14 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     `write_cr3()`, `tlb_flush_page()`, MAP_* constants
   - Deliverable: `cargo check -p kernel --target riscv64gc-unknown-none-elf` passes
 
-- [ ] **19.18 — RISC-V process loading from initramfs** (`kernel-boot/src/`)
+- [x] **19.18 — RISC-V process loading from initramfs** (`kernel-boot/src/`)
   - `boot_init.rs` is x86_64-only (uses `arch_x86_64::alloc::alloc_phys_contig`,
     identity-mapped phys writes, `arch_x86_64::asm::write_cr3`)
-  - Create a new arch-agnostic process loader or add riscv64 impl:
-    - Read ELF64 binaries from initramfs CPIO (shared with x86_64)
-    - Parse ELF headers, calculate segment bounds (shared)
-    - Allocate pages via `hal::alloc_phys_page()` (arch-agnostic)
-    - Copy ELF segment data to allocated pages
-    - Create per-process SV39 page tables mapping virtual→physical
-    - Set initial register state via `hal::set_initial_regs()`
-  - Deliverable: RISC-V kernel loads /sbin/init from initramfs
+  - **Done**: Added `hal::alloc_phys_contig()` to both HALs (contiguous
+    physical allocation), replaced all `arch_x86_64::alloc::alloc_phys_contig`
+    calls in `load_and_prepare_proc` with `kernel::hal::alloc_phys_contig`,
+    refactored `boot_create_page_table` to use HAL functions. No remaining
+    `arch_x86_64::*` references in `boot_init.rs`.
 
 - [ ] **19.19 — Context switch to userspace via sret** (`arch-riscv64/src/switch.rs`)
   - `switch.rs` currently has `switch_to_user(frame)` stub

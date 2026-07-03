@@ -619,7 +619,10 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         crate::hal::write_frame_field(&mut (*rp).p_reg, 16, ehdr.e_entry);
         crate::hal::write_frame_field(&mut (*rp).p_reg, 72, 0x0202);
         crate::hal::write_frame_field(&mut (*rp).p_reg, 40, rsp_fb);
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("mfence", options(nostack, preserves_flags));
+        #[cfg(not(target_arch = "x86_64"))]
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
         0
     }

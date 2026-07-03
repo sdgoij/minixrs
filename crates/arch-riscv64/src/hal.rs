@@ -404,7 +404,7 @@ pub unsafe fn read_fault_addr() -> u64 {
 pub fn read_frame_pointer() -> u64 {
     let fp: u64;
     unsafe {
-        core::arch::asm!("mov {}, s0", out(reg) fp, options(nomem, nostack));
+        core::arch::asm!("addi {}, s0, 0", out(reg) fp, options(nomem, nostack));
     }
     fp
 }
@@ -425,6 +425,11 @@ pub fn cpu_id() -> u32 {
 /// Must be called after the physical memory allocator has been initialized.
 pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
+}
+
+/// Allocate `count` contiguous physical pages (bottom-up).
+pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
+    crate::alloc::alloc_phys_contig(count)
 }
 
 // ── Port I/O stubs (RISC-V has no port I/O; used by do_devio etc. returning ENOSYS) ──
@@ -489,7 +494,7 @@ pub fn bss_start() -> u64 {
     unsafe extern "C" {
         static __bss_start: u8;
     }
-    unsafe { core::ptr::addr_of!(__bss_start) as u64 }
+    core::ptr::addr_of!(__bss_start) as u64
 }
 
 /// Return the kernel BSS end address (linker symbol `__bss_end`).
@@ -497,7 +502,7 @@ pub fn bss_end() -> u64 {
     unsafe extern "C" {
         static __bss_end: u8;
     }
-    unsafe { core::ptr::addr_of!(__bss_end) as u64 }
+    core::ptr::addr_of!(__bss_end) as u64
 }
 
 /// Kernel base virtual address (SV39: 0xFFFFFF8000000000+).

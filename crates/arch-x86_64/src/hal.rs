@@ -736,6 +736,11 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
 }
 
+/// Allocate `count` contiguous physical pages (bottom-up).
+pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
+    crate::alloc::alloc_phys_contig(count)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
