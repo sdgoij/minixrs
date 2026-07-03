@@ -438,6 +438,16 @@ pub unsafe fn phys_insw(_port: u16, _buf: u64, _count: usize) {}
 /// String output to I/O port (word) from physical buffer (unimplemented on RISC-V).
 pub unsafe fn phys_outsw(_port: u16, _buf: u64, _count: usize) {}
 
+// ── Profile clock stubs (RISC-V: use CLINT/ACLINT if needed) ────────────
+
+/// Initialize the profiling clock (no-op on RISC-V).
+pub unsafe fn init_profile_clock(_rate_code: u32, _callback: unsafe extern "C" fn()) -> i32 {
+    -1
+}
+
+/// Stop the profiling clock (no-op on RISC-V).
+pub fn stop_profile_clock() {}
+
 // Stub linker symbols for builds without the kernel linker script.
 // The RISC-V linker script (`minix-raw-riscv64.ld`) defines these from
 // the sections. These stubs prevent unresolved symbol errors in dev/test.

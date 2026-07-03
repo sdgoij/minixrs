@@ -2394,12 +2394,11 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
 ### profile.rs — Profile clock (LOW priority)
 
-- [ ] **19.x.9 — Abstract profile clock**
+- [x] **19.x.9 — Abstract profile clock**
   - `init_profile_clock()` and `stop_profile_clock()` call
     `arch_x86_64::apic::*` directly. RISC-V would use CLINT/ACLINT.
-  - **Fix**: Add `hal::init_profile_clock(rate)` and
-    `hal::stop_profile_clock()`, implemented as no-ops on RISC-V
-    (profile clock is optional).
+  - **Fix**: Add `hal::init_profile_clock(rate, callback)` and
+    `hal::stop_profile_clock()`, implemented as no-ops on RISC-V.
 
 ### debug.rs — Stack tracing (LOW priority)
 

@@ -653,6 +653,29 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsw(port, buf, count) }
 }
 
+// ── Profile clock (RTC-based) ────────────────────────────────────────────
+
+/// Initialize the profiling clock. `rate_code` encodes the RTC divider.
+/// `callback` is invoked on each tick. Returns the IRQ number (≥0) or <0 on
+/// failure.
+pub unsafe fn init_profile_clock(rate_code: u32, callback: unsafe extern "C" fn()) -> i32 {
+    let irq = unsafe { crate::apic::arch_init_profile_clock(rate_code as u8) };
+    if irq >= 0 {
+        let vector = crate::interrupt::VECTOR_TIMER as u32 + irq as u32;
+        let handler_fn = crate::apic::profile_clock_isr_entry as *const () as u64;
+        unsafe {
+            (*crate::idt::IDT.get()).set_handler(vector as usize, handler_fn, 0, 3);
+        }
+        unsafe { crate::apic::set_profile_clock_handler(callback) };
+    }
+    irq
+}
+
+/// Stop the profiling clock.
+pub fn stop_profile_clock() {
+    unsafe { crate::apic::arch_stop_profile_clock() }
+}
+
 // Stub linker symbols for builds without the kernel linker script.
 // The linker script (`minix-raw.ld`) defines these from the sections.
 // These stubs prevent unresolved symbol errors in dev/test builds.
