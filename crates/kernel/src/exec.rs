@@ -3,7 +3,7 @@
 //! Builds a private page table for a newly exec'd process, with
 //! private physical copies of code and stack pages.
 
-use crate::pagetable::{PG_FRAME, PG_P, PG_RW, PG_U};
+use crate::pagetable::{PG_P, PG_RW, PG_U};
 use crate::vm::{self, NO_MEM};
 
 /// Create a per-process page table for an exec'd process.
@@ -33,7 +33,7 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
             let table = table_phys as *const u64;
             let idx = crate::hal::pt_index(0, level); // va=0 to get PML4[0]/PUD[0]
             let entry = core::ptr::read(table.add(idx));
-            table_phys = entry & PG_FRAME;
+            table_phys = crate::hal::pte_to_phys(entry);
         }
         let boot_pd_phys = table_phys;
 

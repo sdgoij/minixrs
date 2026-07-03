@@ -123,6 +123,8 @@ pub fn alloc_phys_page() -> Option<u64> {
 }
 
 /// Allocate contiguous physical pages.
+///
+/// Searches across bitmap chunk boundaries for runs longer than 32 pages.
 pub fn alloc_phys_contig(pages: usize) -> Option<u64> {
     if pages == 0 || !ALLOC_INIT.load(Ordering::Acquire) {
         return None;
@@ -130,34 +132,41 @@ pub fn alloc_phys_contig(pages: usize) -> Option<u64> {
     let start = ALLOC_START.load(Ordering::Relaxed);
     let end = ALLOC_END.load(Ordering::Relaxed);
     let npages = ((end - start) / 4096) as usize;
+    if pages > npages {
+        return None;
+    }
     let max_chunks = npages.div_ceil(32).min(65536);
 
-    for chunk in 0..max_chunks {
+    // Scan all pages linearly (across chunk boundaries) for a free run.
+    let mut run_start = 0usize;
+    let mut run_len = 0usize;
+    for page_idx in 0..npages {
+        let chunk = page_idx / 32;
+        if chunk >= max_chunks {
+            break;
+        }
+        let bit = page_idx % 32;
         let bits = unsafe { read_bitmap(chunk) };
-        let mut run_start = 0;
-        let mut run_len = 0;
-        for bit in 0..32 {
-            let page_idx = chunk * 32 + bit;
-            if page_idx >= npages {
-                break;
+        let is_free = (bits & (1u32 << bit)) == 0;
+
+        if is_free {
+            if run_len == 0 {
+                run_start = page_idx;
             }
-            if bits & (1u32 << bit) == 0 {
-                if run_len == 0 {
-                    run_start = bit;
+            run_len += 1;
+            if run_len >= pages {
+                // Found a run — mark all pages as allocated.
+                for idx in run_start..run_start + pages {
+                    let c = idx / 32;
+                    let b = idx % 32;
+                    let old = unsafe { read_bitmap(c) };
+                    unsafe { write_bitmap(c, old | (1u32 << b)) };
                 }
-                run_len += 1;
-                if run_len >= pages {
-                    let mut new_bits = bits;
-                    for b in run_start..run_start + pages {
-                        new_bits |= 1u32 << b;
-                    }
-                    unsafe { write_bitmap(chunk, new_bits) };
-                    let pa = start + ((chunk * 32 + run_start) as u64) * 4096;
-                    return Some(pa);
-                }
-            } else {
-                run_len = 0;
+                let pa = start + (run_start as u64) * 4096;
+                return Some(pa);
             }
+        } else {
+            run_len = 0;
         }
     }
     None

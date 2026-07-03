@@ -201,7 +201,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 );
                 pt_phys
             } else {
-                pte & PG_FRAME
+                crate::hal::pte_to_phys(pte)
             };
         }
 

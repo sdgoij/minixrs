@@ -49,6 +49,13 @@ _start:
 // BSS and initramfs symbols are defined by the custom linker script
 // (tools/minix-raw-riscv64.ld).
 
+/// Serial output helper.
+fn serial_write(s: &str) {
+    for &b in s.as_bytes() {
+        arch_riscv64::sbi::console_putchar(b);
+    }
+}
+
 /// RISC-V64 kernel main entry.
 ///
 /// # Safety
@@ -100,15 +107,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     }
 
     // Print banner via SBI
-    for &b in b"\r\nHello MINIX/RISC-V!\r\n" {
-        arch_riscv64::sbi::console_putchar(b);
-    }
+    serial_write("\r\nHello MINIX/RISC-V!\r\n");
 
     // Initialize kernel subsystems
     kernel::init();
-    arch_common::init();
 
-    // Register basic syscall handlers
+    // Initialize the process table
+    unsafe {
+        kernel::table::proc_init();
+    }
+
+    // Initialize basic userspace syscall handlers
     unsafe {
         kernel::syscall::init_basic_syscalls();
     }
@@ -154,87 +163,150 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         } else {
             serial_write("  FAILED: boot page table\r\n");
             loop {
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                core::arch::asm!("wfi", options(nomem, nostack));
             }
         }
     }
 
-    // Load the init process from initramfs
-    fn serial_write(s: &str) {
-        for &b in s.as_bytes() {
-            arch_riscv64::sbi::console_putchar(b);
-        }
-    }
+    // ── Load boot processes from initramfs ────────────────────────────
+    use arch_common::com::*;
 
     serial_write("  loading boot processes...\r\n");
 
-    let info = match kernel_boot::boot_init::load_and_prepare_proc(
-        "/sbin/init",
-        arch_common::com::INIT_PROC_NR,
-        &["/sbin/init"],
-    ) {
-        Some(info) => info,
-        None => {
-            serial_write("  FAILED: init\r\n");
-            loop {
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+    // Define all boot processes: (path, proc_nr)
+    let boot_procs: &[(&str, i32)] = &[
+        ("/sbin/pm", PM_PROC_NR),     // Process Manager
+        ("/sbin/rs", RS_PROC_NR),     // Reincarnation Server
+        ("/sbin/vfs", VFS_PROC_NR),   // Virtual File System
+        ("/sbin/init", INIT_PROC_NR), // init
+    ];
+
+    // Load each boot process from initramfs, storing InitInfo for
+    // per-process page table creation.
+    // Note: boot_init's internal error messages use `print!` which is
+    // a no-op on RISC-V (x86_64 COM1 only), so we add our own diagnostics.
+    let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 8] =
+        unsafe { core::mem::zeroed() };
+    for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
+        let info = match unsafe {
+            kernel_boot::boot_init::load_and_prepare_proc(path, proc_nr, &[path])
+        } {
+            Some(info) => info,
+            None => {
+                serial_write("  FAILED loading ");
+                serial_write(path);
+                serial_write("\r\n");
+                serial_write("  Check: initramfs contains binary? Allocator has free pages?\r\n");
+                // Dump allocator state
+                serial_write("  Allocator may be out of contiguous memory\r\n");
+                loop {
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                }
             }
-        }
-    };
+        };
+        boot_infos[i] = core::mem::MaybeUninit::new(info);
+    }
 
     serial_write("  creating per-process page tables...\r\n");
-    let pt_phys = match kernel_boot::boot_init::boot_create_restricted_page_table(
-        info.code_start,
-        info.code_end,
-        info.phys_code_base,
-        info.stack_start,
-        info.stack_end,
-        info.phys_stack_base,
-    ) {
-        Some(p) => p,
-        None => {
-            serial_write("  FAILED: page table\r\n");
-            loop {
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-            }
-        }
-    };
 
+    // Create per-process (restricted) page tables and enqueue each process.
+    let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
+    for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
+        let rp = kernel::table::proc_addr(proc_nr);
+        if i == 0 {
+            first_proc = rp;
+        }
+
+        let info = unsafe { boot_infos[i].assume_init_ref() };
+
+        // Create a restricted page table that maps only this process's
+        // code and stack, not the entire identity-mapped 1GB region.
+        let pt_phys = unsafe {
+            kernel_boot::boot_init::boot_create_restricted_page_table(
+                info.code_start,
+                info.code_end,
+                info.phys_code_base,
+                info.stack_start,
+                info.stack_end,
+                info.phys_stack_base,
+            )
+        };
+        let pt_phys = match pt_phys {
+            Some(p) => p,
+            None => {
+                serial_write("  FAILED: page table for ");
+                serial_write(path);
+                serial_write("\r\n");
+                loop {
+                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                }
+            }
+        };
+
+        unsafe {
+            core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+            // Set scheduling parameters.
+            core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
+            core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
+            core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+        }
+    }
+
+    if first_proc.is_null() {
+        serial_write("  FAILED: no boot processes found\r\n");
+        loop {
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+        }
+    }
+
+    // Send a boot notification to PM before starting the scheduler.
+    // This notification will be pending when PM calls RECEIVE, causing
+    // mini_receive to build a notification message and deliver it.
     unsafe {
-        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
-        core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-        core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
-        core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
-        core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+        kernel::ipc::mini_notify(arch_common::com::RS_PROC_NR, arch_common::com::PM_PROC_NR);
     }
 
     serial_write("  enqueuing processes...\r\n");
-    unsafe {
-        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
-        let old_flags = (*rp)
-            .p_rts_flags
-            .load(core::sync::atomic::Ordering::Relaxed);
-        let cleared = old_flags
-            & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
-                | kernel::proc::RtsFlags::SLOT_FREE.bits());
-        if cleared == 0 {
-            kernel::sched::enqueue(rp);
+
+    // Enqueue each process that is runnable.
+    for &(_, proc_nr) in boot_procs {
+        let rp = kernel::table::proc_addr(proc_nr);
+        unsafe {
+            let old_flags = (*rp)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            let cleared = old_flags
+                & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
+                    | kernel::proc::RtsFlags::SLOT_FREE.bits());
+            if cleared == 0 {
+                kernel::sched::enqueue(rp);
+            }
         }
-        arch_riscv64::cpulocals::set_current_proc(rp as u64);
     }
+
+    // Set the current process pointer to the first one.
+    unsafe {
+        arch_riscv64::cpulocals::set_current_proc(first_proc as u64);
+    }
+
+    serial_write("  scheduler starting...\r\n");
+
+    // Pick the first process and switch to userspace.
+    let next_proc = unsafe { kernel::sched::pick_proc() };
+    let next_ptr = match next_proc {
+        Some(p) => p,
+        None => {
+            serial_write("  FAILED: no runnable processes\r\n");
+            loop {
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+            }
+        }
+    };
 
     serial_write("  switching to userspace...\r\n");
     unsafe {
-        let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
-        arch_riscv64::switch::switch_to_user(rp as *const u8);
+        arch_riscv64::switch::switch_to_user(next_ptr as *const u8);
     }
-
-    for &b in b"RISC-V kernel initialized. Halting.\r\n" {
-        arch_riscv64::sbi::console_putchar(b);
-    }
-
-    // Shutdown via SBI
-    arch_riscv64::sbi::system_reset(true);
 }
 
 /// Create an identity-mapped boot page table for SV39 paging.

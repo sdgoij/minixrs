@@ -312,7 +312,7 @@ pub unsafe fn boot_create_page_table() -> u64 {
         let table = table_phys as *const u64;
         let idx = kernel::hal::pt_index(0, lvl);
         let entry = unsafe { core::ptr::read(table.add(idx)) };
-        table_phys = entry & kernel::hal::pte_frame_mask();
+        table_phys = kernel::hal::pte_to_phys(entry);
     }
     let boot_pd_phys = table_phys;
 
@@ -407,7 +407,7 @@ pub unsafe fn boot_create_restricted_page_table(
             found_boot_pd = false;
             break;
         }
-        table_phys = entry & kernel::hal::pte_frame_mask();
+        table_phys = kernel::hal::pte_to_phys(entry);
         found_boot_pd = true;
     }
     // If we walked all the way down, the last table is the boot PD.

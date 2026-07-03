@@ -677,9 +677,7 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 } else {
                     let value = msg_read_u32(msg, DEVIO_VALUE_OFF);
                     match io_type {
-                        t if t == arch_common::com::DIO_BYTE => {
-                            crate::hal::outb(port, value as u8)
-                        }
+                        t if t == arch_common::com::DIO_BYTE => crate::hal::outb(port, value as u8),
                         t if t == arch_common::com::DIO_WORD => {
                             crate::hal::outw(port, value as u16)
                         }
@@ -4153,7 +4151,7 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
                 continue; // not mapped
             }
 
-            let pdpt_phys = pml4e & crate::pagetable::PG_FRAME;
+            let pdpt_phys = crate::hal::pte_to_phys(pml4e);
             let pdpt = pdpt_phys as *const u64;
 
             for pdpt_idx in 0..512 {
@@ -4163,13 +4161,13 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
                 }
                 if pdpte & crate::pagetable::PG_PS != 0 {
                     // 1GB huge page — free the single physical frame
-                    let pa = pdpte & crate::pagetable::PG_FRAME;
+                    let pa = crate::hal::pte_to_phys(pdpte);
                     let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                     crate::vm::free_mem(page, 1);
                     continue;
                 }
 
-                let pd_phys = pdpte & crate::pagetable::PG_FRAME;
+                let pd_phys = crate::hal::pte_to_phys(pdpte);
                 let pd = pd_phys as *const u64;
 
                 for pd_idx in 0..512 {
@@ -4179,13 +4177,13 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
                     }
                     if pde & crate::pagetable::PG_PS != 0 {
                         // 2MB huge page — free the single physical frame
-                        let pa = pde & crate::pagetable::PG_FRAME;
+                        let pa = crate::hal::pte_to_phys(pde);
                         let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                         crate::vm::free_mem(page, 1);
                         continue;
                     }
 
-                    let pt_phys = pde & crate::pagetable::PG_FRAME;
+                    let pt_phys = crate::hal::pte_to_phys(pde);
                     let pt = pt_phys as *const u64;
 
                     for pt_idx in 0..512 {
@@ -4194,7 +4192,7 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
                             continue;
                         }
                         // Free the 4KB user page
-                        let pa = pte & crate::pagetable::PG_FRAME;
+                        let pa = crate::hal::pte_to_phys(pte);
                         let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                         crate::vm::free_mem(page, 1);
                     }

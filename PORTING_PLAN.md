@@ -2334,16 +2334,17 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Wire up `kernel::syscall::dispatch_basic_syscall()` as handler
   - Deliverable: init process can make basic syscalls (exit, write to debug)
 
-- [ ] **19.22 — Boot PM, RS, VFS, init processes** (`kernel-boot/src/riscv64.rs`)
-  - After `kernel::init()`, create boot processes in order:
-    1. PM (Process Manager) — /sbin/pm
-    2. RS (Reincarnation Server) — /sbin/rs
-    3. VFS (File System) — /sbin/vfs
-    4. init — /sbin/init
-  - Each: allocate Proc entry, load ELF, create page table, set regs
-  - After all loaded, switch to init (lowest priority, runs after servers block)
-  - Print progress messages: "PM loaded", "RS loaded", etc.
-  - Deliverable: `just run-riscv64` shows loading messages and boots to init
+- [x] **19.22 — Boot PM, RS, VFS, init processes** (`kernel-boot/src/riscv64.rs`)
+  - Rewrote `kmain` to boot all 4 boot processes (PM, RS, VFS, init) in order,
+    matching the x86_64 boot flow. Each process: load ELF from initramfs,
+    allocate per-process page table via `boot_create_restricted_page_table`,
+    set scheduling parameters, enqueue.
+  - Added `kernel::table::proc_init()` call before loading processes.
+  - Added PM←RS boot notification via `mini_notify` before scheduler start.
+  - Uses `kernel::sched::pick_proc()` to get the first runnable process,
+    then calls `arch_riscv64::switch::switch_to_user()` to enter userspace.
+  - Deliverable: `just run-riscv64` loads PM, RS, VFS, init, enqueues all,
+    and switches to userspace via the scheduler.
 
 ### Test milestones
 
@@ -2351,7 +2352,7 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
 | M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching messages |
-| M-RV3 🏗️ | Shell prompt (`#`) with built-in commands | Need RISC-V userland binaries (19.20) + syscalls (19.21) |
+| M-RV3 🏗️ | Shell prompt (`#`) with built-in commands | Need RISC-V userland binaries (19.20) + syscalls (19.21) + working per-process page tables (19.22 fix) |
 | M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
 | M-RV5 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
 

@@ -15,7 +15,10 @@ pub mod test_runner;
 
 // ── Boot-time serial output (x86_64 COM1 via port I/O) ────────────────
 
-/// Write a string to COM1 serial port. No-op in test mode.
+/// Write a string to the boot console.
+///
+/// On x86_64: COM1 serial port via port I/O.
+/// On RISC-V: SBI debug console.
 pub fn serial_write(s: &str) {
     #[cfg(all(not(test), target_arch = "x86_64"))]
     {
@@ -38,11 +41,20 @@ pub fn serial_write(s: &str) {
             }
         }
     }
-    #[cfg(not(all(not(test), target_arch = "x86_64")))]
+    #[cfg(all(not(test), target_arch = "riscv64"))]
+    {
+        for &b in s.as_bytes() {
+            arch_riscv64::sbi::console_putchar(b);
+        }
+    }
+    #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "riscv64"))))]
     let _ = s;
 }
 
-/// Write a single byte to COM1 serial port. No-op in test mode.
+/// Write a single byte to the boot console.
+///
+/// On x86_64: COM1 serial port via port I/O.
+/// On RISC-V: SBI debug console.
 pub fn serial_putc(c: u8) {
     #[cfg(all(not(test), target_arch = "x86_64"))]
     {
@@ -63,7 +75,11 @@ pub fn serial_putc(c: u8) {
             core::arch::asm!("out dx, al", in("dx") port, in("al") c, options(nomem, nostack));
         }
     }
-    #[cfg(not(all(not(test), target_arch = "x86_64")))]
+    #[cfg(all(not(test), target_arch = "riscv64"))]
+    {
+        arch_riscv64::sbi::console_putchar(c);
+    }
+    #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "riscv64"))))]
     let _ = c;
 }
 

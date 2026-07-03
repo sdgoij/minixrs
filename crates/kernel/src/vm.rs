@@ -327,7 +327,7 @@ pub unsafe fn vm_lookup(proc_nr: i32, virtaddr: u64) -> u64 {
         match crate::pagetable::walk(cr3, virtaddr) {
             Ok(result) => {
                 let offset = virtaddr & 0xFFF;
-                (result.pte_value & crate::pagetable::PG_FRAME) + offset
+                (crate::hal::pte_to_phys(result.pte_value)) + offset
             }
             Err(_) => NO_MEM,
         }
@@ -485,7 +485,7 @@ pub unsafe fn vm_lookup_range(
             Err(_) => return 0,
         };
 
-        let frame = result.pte_value & crate::pagetable::PG_FRAME;
+        let frame = crate::hal::pte_to_phys(result.pte_value);
         let offset = vaddr & 0xFFF;
         *phys_addr = frame + offset;
 

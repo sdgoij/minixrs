@@ -547,10 +547,10 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let boot_cr3_val2 = crate::pagetable::boot_cr3();
         let boot_pml4 = boot_cr3_val2 as *const u64;
         let boot_pml4e0 = core::ptr::read(boot_pml4);
-        let boot_pdpt_phys = boot_pml4e0 & crate::pagetable::PG_FRAME;
+        let boot_pdpt_phys = crate::hal::pte_to_phys(boot_pml4e0);
         let boot_pdpt = boot_pdpt_phys as *const u64;
         let boot_pdpte0 = core::ptr::read(boot_pdpt);
-        let boot_pd_phys = boot_pdpte0 & crate::pagetable::PG_FRAME;
+        let boot_pd_phys = crate::hal::pte_to_phys(boot_pdpte0);
         let boot_pd = boot_pd_phys as *const u64;
 
         // Allocate PDPT and PD pages.
