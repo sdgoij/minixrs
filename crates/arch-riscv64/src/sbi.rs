@@ -102,6 +102,14 @@ pub fn console_putchar(c: u8) {
     }
 }
 
+/// Set the timer (next timer interrupt) via SBI.
+/// `stime_value` is the absolute time in ticks (platform timebase).
+pub fn set_timer(stime_value: u64) {
+    unsafe {
+        sbi_legacy(SBI_SET_TIMER, stime_value, 0, 0);
+    }
+}
+
 /// Read a character from the SBI debug console.
 /// Returns `None` if no character is available, `Some(c)` otherwise.
 pub fn console_getchar() -> Option<u8> {

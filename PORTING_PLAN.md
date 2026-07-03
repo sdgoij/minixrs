@@ -2137,14 +2137,14 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Wired into hal.rs: `alloc_phys_page()` delegates to allocator
   - 5 tests: empty, add, alloc/free roundtrip, contig, exhaustion
 
-- [ ] **19.10 — CLINT timer** (`arch-riscv64/src/clint.rs`)
-  - `clint_base` from FDT (typically 0x02000000 on `virt`)
-  - `mtime` register at offset 0xBFF8 (64-bit, global free-running counter)
-  - `mtimecmp` per hart at offset 0x4000 + 8 × hart_id
-  - Timer interrupt: set `mtimecmp = mtime + interval`, enable `MTIE` in `mie`
-  - **Note:** In S-mode, we can't write `mtimecmp` directly (it's M-mode).
-    Use SBI timer extension: `sbi_set_timer(stime_value)`
-  - **Test:** set timer, verify interrupt fires
+- [x] **19.10 — CLINT timer** (`arch-riscv64/src/clint.rs`)
+  - `read_time()` via `rdtime` CSR instruction
+  - `init_timer(hz)`: programs SBI timer at given frequency
+  - `handle_timer_interrupt()`: schedules next tick via SBI
+  - `estimate_timebase()`: 10 MHz (QEMU virt default)
+  - Wired into trap.rs: `SUP_TIMER_INTR` calls `handle_timer_interrupt`
+  - Added `set_timer(stime_value)` to `sbi.rs`
+  - 1 test for CLINT constants
 
 - [ ] **19.11 — Interrupt handling (PLIC)** (`arch-riscv64/src/plic.rs`)
   - `plic_base` from FDT (typically 0x0C000000 on `virt`)

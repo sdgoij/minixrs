@@ -50,7 +50,9 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 288]) {
 
     if is_interrupt(scause_val) {
         match code {
-            cause::SUP_TIMER_INTR => {}
+            cause::SUP_TIMER_INTR => {
+                unsafe { crate::clint::handle_timer_interrupt() };
+            }
             cause::SUP_EXT_INTR => {}
             _ => {}
         }
