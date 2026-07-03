@@ -120,61 +120,59 @@ unsafe fn write_pte(pt_virt: *mut PtEntry, value: PtEntry) {
     }
 }
 
-/// Walk the 4-level page table to find the PTE for a virtual address.
+/// Walk the page table to find the PTE for a virtual address.
 ///
-/// `cr3` is the physical address of the PML4 table.
+/// Uses `hal::pt_levels()` and `hal::pt_index()` for an arch-generic walk.
+/// Returns `level` in the range 1..=N where N = `hal::pt_levels()`:
+/// - level 1 = PT (4KB page)
+/// - level 2 = PD (x86_64) / PMD (SV39) — 2MB huge page
+/// - level 3 = PDPT (x86_64) / PUD (SV39) — 1GB huge page
+///
+/// `cr3` is the physical address of the root page table.
 ///
 /// # Safety
 ///
-/// `cr3` must point to a valid, identity-mapped PML4 table.
+/// `cr3` must point to a valid, identity-mapped root page table.
 pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> {
     unsafe {
-        let pml4 = cr3 as *const u64;
-        let pml4e = read_pte(pml4.add(pml4_index(va)));
-        if pml4e & PG_P == 0 {
-            return Err(PageTableError::NotMapped);
+        let levels = crate::hal::pt_levels();
+        let mut table_phys = cr3;
+
+        // Walk from the top non-leaf level down to level 1 (just above PT).
+        for level in (1..levels).rev() {
+            let table = table_phys as *const u64;
+            let idx = crate::hal::pt_index(va, level);
+            let pte = read_pte(table.add(idx));
+
+            if pte & PG_P == 0 {
+                return Err(PageTableError::NotMapped);
+            }
+
+            // If this is a huge page (PG_PS set at a non-leaf level), return here.
+            if pte & PG_PS != 0 {
+                return Ok(PageWalkResult {
+                    pte_phys: table_phys + (idx as u64) * 8,
+                    pte_virt: (table_phys + (idx as u64) * 8) as *mut u64,
+                    pte_value: pte,
+                    level: level + 1,
+                });
+            }
+
+            table_phys = pte & PG_FRAME;
         }
 
-        let pdpt_phys = pml4e & PG_FRAME;
-        let pdpt = pdpt_phys as *const u64;
-        let pdpte = read_pte(pdpt.add(pdpt_index(va)));
-        if pdpte & PG_P == 0 {
-            return Err(PageTableError::NotMapped);
-        }
-        if pdpte & PG_PS != 0 {
-            return Ok(PageWalkResult {
-                pte_phys: pdpt_phys + (pdpt_index(va) as u64) * 8,
-                pte_virt: (pdpt_phys + (pdpt_index(va) as u64) * 8) as *mut u64,
-                pte_value: pdpte,
-                level: 3,
-            });
-        }
+        // Level 0 (PT — 4KB page).
+        let pt = table_phys as *const u64;
+        let idx = crate::hal::pt_index(va, 0);
+        let pte = read_pte(pt.add(idx));
 
-        let pd_phys = pdpte & PG_FRAME;
-        let pd = pd_phys as *const u64;
-        let pde = read_pte(pd.add(pd_index(va)));
-        if pde & PG_P == 0 {
-            return Err(PageTableError::NotMapped);
-        }
-        if pde & PG_PS != 0 {
-            return Ok(PageWalkResult {
-                pte_phys: pd_phys + (pd_index(va) as u64) * 8,
-                pte_virt: (pd_phys + (pd_index(va) as u64) * 8) as *mut u64,
-                pte_value: pde,
-                level: 2,
-            });
-        }
-
-        let pt_phys = pde & PG_FRAME;
-        let pt = pt_phys as *const u64;
-        let pte = read_pte(pt.add(pt_l0_index(va)));
         if pte & PG_P == 0 {
             return Err(PageTableError::NotMapped);
         }
 
         Ok(PageWalkResult {
-            pte_phys: pt_phys + (pt_l0_index(va) as u64) * 8,
-            pte_virt: (pt_phys + (pt_l0_index(va) as u64) * 8) as *mut u64,
+            pte_phys: table_phys + (idx as u64) * 8,
+            pte_virt: (table_phys + (idx as u64) * 8) as *mut u64,
             pte_value: pte,
             level: 1,
         })

@@ -2340,12 +2340,13 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     `hal::pte_frame_mask()`, `hal::pte_flags_mask()` functions or
     constants.
 
-- [ ] **19.x.3 — Abstract page table walk** (`pub unsafe fn walk`)
+- [x] **19.x.3 — Abstract page table walk** (`pub unsafe fn walk`)
   - The 4-level walk (PML4→PDPT→PD→PT) is hardcoded. RISC-V SV39 has
     3 levels (PUD→PMD→PT) with different page sizes.
-  - **Fix**: Add `hal::walk_pagetable(cr3: u64, va: u64)` that returns
-    the last-level PTE, or use a generic walk with `hal::pt_levels()`
-    and `hal::pt_index()`.
+  - **Fix**: Rewrite `walk()` as a generic loop using `hal::pt_levels()`
+    and `hal::pt_index()` that iterates from the top non-leaf level down
+    to PT. Consumers of the `level` field see the same values (1=PT,
+    2=PD/PMD, 3=PDPT/PUD) regardless of architecture.
 
 - [ ] **19.x.4 — Abstract map_page** (`pub unsafe fn map_page`)
   - Splits huge pages into 4KB PTEs (x86_64: 2MB page → 512 PTEs).
