@@ -2039,22 +2039,13 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.7 — `cfg`-gate inline asm in `minix-rt`** (`crates/minix-rt/src/lib.rs`)
-
-```rust
-#[cfg(target_arch = "x86_64")]
-pub unsafe fn syscall0(nr: u64) -> i64 {
-    core::arch::asm!("syscall", ...)
-}
-
-#[cfg(target_arch = "riscv64")]
-pub unsafe fn syscall0(nr: u64) -> i64 {
-    core::arch::asm!("ecall", in("a7") nr, ...)
-}
-```
-
-- Affects: `syscall0`–`syscall6`, `syscall2` with message pointer
-- **Test:** userland programs compile for riscv64 target
+- [x] **19.0.7 — `cfg`-gate inline asm in `minix-rt`** (`crates/minix-rt/src/lib.rs`)
+  - Added `#[cfg(target_arch = "x86_64")]` to all 7 x86_64 syscall
+    wrappers (syscall0–syscall6)
+  - Added RISC-V `ecall` versions with `#[cfg(target_arch = "riscv64")]`
+  - Added `_start` entry for both architectures
+  - Gated `pause`/`wfi` in `exit()` spin-loop
+  - x86_64 build unchanged; RISC-V targets can now compile minix-rt
 
 ### Implementation Plan — 19.1 onward
 

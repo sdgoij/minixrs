@@ -107,6 +107,7 @@ pub unsafe fn exec_replace(path: &[u8]) -> i64 {
 // Syscall wrappers
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 0 arguments.
 ///
 /// # Safety
@@ -128,6 +129,7 @@ pub unsafe fn syscall0(nr: u64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 1 argument.
 ///
 /// # Safety
@@ -150,6 +152,7 @@ pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 2 arguments.
 ///
 /// # Safety
@@ -173,6 +176,7 @@ pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 3 arguments.
 ///
 /// # Safety
@@ -197,6 +201,7 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 4 arguments.
 ///
 /// # Safety
@@ -222,6 +227,7 @@ pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 5 arguments.
 ///
 /// # Safety
@@ -248,6 +254,7 @@ pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 6 arguments.
 ///
 /// # Safety
@@ -275,6 +282,63 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
     ret
 }
 
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn riscv_syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") nr,
+            in("a0") a0,
+            in("a1") a1,
+            in("a2") a2,
+            in("a3") a3,
+            in("a4") a4,
+            in("a5") a5,
+            lateout("a0") ret,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall0(nr: u64) -> i64 {
+    riscv_syscall(nr, 0, 0, 0, 0, 0, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
+    riscv_syscall(nr, a1, 0, 0, 0, 0, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
+    riscv_syscall(nr, a1, a2, 0, 0, 0, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    riscv_syscall(nr, a1, a2, a3, 0, 0, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    riscv_syscall(nr, a1, a2, a3, a4, 0, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    riscv_syscall(nr, a1, a2, a3, a4, a5, 0)
+}
+#[cfg(target_arch = "riscv64")]
+#[inline]
+pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    riscv_syscall(nr, a1, a2, a3, a4, a5, a6)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // POSIX-like primitives
 // ═══════════════════════════════════════════════════════════════════════════
@@ -285,7 +349,14 @@ pub fn exit(status: i32) -> ! {
         syscall1(NR_EXIT, status as u64);
     }
     loop {
-        unsafe { core::arch::asm!("pause") };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("pause")
+        };
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!("wfi")
+        };
     }
 }
 
@@ -494,7 +565,7 @@ unsafe extern "C" {
 /// Must be called as the process entry point by the kernel exec loader.
 /// The stack must be set up per SysV ABI with `argc` at `[rsp]` followed
 /// by `argv` pointers and a null terminator.
-#[cfg(all(not(test), target_os = "none"))]
+#[cfg(all(not(test), target_os = "none", target_arch = "x86_64"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -507,6 +578,22 @@ pub unsafe extern "C" fn _start() -> ! {
         "mov    rdi, rax",
         "xor    eax, eax",
         "syscall",
+    );
+}
+
+#[cfg(all(not(test), target_os = "none", target_arch = "riscv64"))]
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn _start() -> ! {
+    // RISC-V entry: sp[0] = argc, sp[8..] = argv pointers.
+    // Call main(argc, argv), then exit with the return value.
+    core::arch::naked_asm!(
+        "ld    a0, 0(sp)",
+        "addi  a1, sp, 8",
+        "call  main",
+        "mv    a0, a0",
+        "li    a7, 0",
+        "ecall",
     );
 }
 
