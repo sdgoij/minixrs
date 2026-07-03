@@ -139,6 +139,39 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             if caller.is_null() {
                 return;
             }
+            // Check if process context was replaced (e.g., by exec).
+            let mf = unsafe {
+                (*caller)
+                    .p_misc_flags
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if mf & kernel::proc::MiscFlags::CONTEXT_SET.bits() != 0 {
+                unsafe {
+                    // Copy caller's (new) p_reg into the trap frame.
+                    core::ptr::copy_nonoverlapping(
+                        &raw const (*caller).p_reg as *const u8,
+                        frame.as_mut_ptr(),
+                        256,
+                    );
+                    let p_reg = &raw const (*caller).p_reg;
+                    let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
+                    frame[256..264].copy_from_slice(&sepc_bytes);
+                    let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
+                    frame[264..272].copy_from_slice(&sst_bytes);
+                    // Load new page table
+                    let new_cr3 = (*caller).p_seg.p_cr3;
+                    if new_cr3 != 0 {
+                        kernel::hal::write_cr3(new_cr3);
+                    }
+                    // Clear the flag
+                    (*caller).p_misc_flags.fetch_and(
+                        !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                        core::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                return;
+            }
+
             let rts = unsafe {
                 (*caller)
                     .p_rts_flags
