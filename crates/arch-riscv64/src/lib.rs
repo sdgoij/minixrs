@@ -3,6 +3,8 @@
 #![no_std]
 
 #[cfg(target_arch = "riscv64")]
+pub mod alloc;
+#[cfg(target_arch = "riscv64")]
 pub mod boot;
 #[cfg(target_arch = "riscv64")]
 pub mod hal;

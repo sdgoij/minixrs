@@ -8,11 +8,6 @@ use core::sync::atomic::Ordering;
 
 use crate::pte;
 
-/// Boot-time bump allocator bounds (set by boot.rs).
-pub static mut BOOT_ALLOC_START: u64 = 0;
-/// Boot-time bump allocator end.
-pub static mut BOOT_ALLOC_END: u64 = 0;
-
 // ── Initialization ────────────────────────────────────────────────────────
 
 /// Initialize RISC-V64 architecture subsystem (SBI, PLIC, CLINT, etc.).
@@ -252,7 +247,7 @@ pub unsafe fn tlb_flush_page(_va: u64) {
 }
 
 pub unsafe fn alloc_phys_page() -> Option<u64> {
-    todo!("RISC-V physical allocator; see Phase 19.9");
+    crate::alloc::alloc_phys_page()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

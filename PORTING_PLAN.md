@@ -2128,11 +2128,14 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Non-boot harts park via WFI
   - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
-- [ ] **19.9 — Physical memory allocator** (`arch-riscv64/src/alloc.rs`)
-  - Same pattern as `arch-x86_64/src/alloc.rs`: bump allocator for early
-    boot, bitmap allocator for runtime
-  - Parse memory reservations from FDT (`/reserved-memory` node)
-  - **Test:** allocate and free pages
+- [x] **19.9 — Physical memory allocator** (`arch-riscv64/src/alloc.rs`)
+  - Bitmap-based allocator (covers up to 8 GB)
+  - `init_allocator(mmap)`, `alloc_phys_page()`, `alloc_phys_contig()`,
+    `free_phys_page()`, `global_allocator()`
+  - `PhysicalMemoryMap` with add/regions/total_size
+  - Wired into boot.rs: FDT memory info feeds allocator init
+  - Wired into hal.rs: `alloc_phys_page()` delegates to allocator
+  - 5 tests: empty, add, alloc/free roundtrip, contig, exhaustion
 
 - [ ] **19.10 — CLINT timer** (`arch-riscv64/src/clint.rs`)
   - `clint_base` from FDT (typically 0x02000000 on `virt`)

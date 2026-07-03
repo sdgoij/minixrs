@@ -201,15 +201,14 @@ pub unsafe fn enable_mmu(root_ppn: u64) {
 ///
 /// Must be called once during early boot.
 pub unsafe fn init_phys_allocator(info: &BootInfo) {
-    let base = info.mem_base.max(info.kernel_base + info.kernel_size);
-    let end = info.mem_base + info.mem_size;
-    if base < end {
-        unsafe {
-            // Simple bump allocator for early boot: just track the available range.
-            // TODO: Replace with bitmap allocator (Phase 19.9)
-            super::hal::BOOT_ALLOC_START = base;
-            super::hal::BOOT_ALLOC_END = end;
-        }
+    let mem_end = info.mem_base + info.mem_size;
+    let kernel_end = info.kernel_base + info.kernel_size;
+    let alloc_start = kernel_end.max(info.mem_base);
+
+    if alloc_start < mem_end {
+        let mut mmap = crate::alloc::PhysicalMemoryMap::new();
+        mmap.add(alloc_start, mem_end);
+        crate::alloc::init_allocator(&mmap);
     }
 }
 
