@@ -131,6 +131,65 @@ pub unsafe fn init_cpulocals() {
     unsafe { crate::cpulocals::init_cpulocals() }
 }
 
+// ── Scheduler cpulocals accessors ──────────────────────────────────────
+
+/// Get the run queue head pointer array from per-CPU storage.
+pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr() }
+}
+
+/// Get the run queue tail pointer array from per-CPU storage.
+pub fn sched_run_q_tail() -> *mut [*mut core::ffi::c_void; 16] {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.run_q_tail_ptr() }
+}
+
+/// Number of scheduling priority queues (16).
+pub fn sched_nr_queues() -> usize {
+    crate::cpulocals::NR_SCHED_QUEUES
+}
+
+/// Get the current process pointer (scheduler context).
+pub fn sched_current_proc() -> *mut core::ffi::c_void {
+    unsafe { crate::cpulocals::get_cpulocal_proc_ptr() }
+}
+
+/// Get the billable process pointer.
+pub fn sched_bill_proc() -> *mut core::ffi::c_void {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.bill_ptr() }
+}
+
+/// Set the billable process pointer.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be null.
+pub unsafe fn sched_set_bill_proc(proc: *mut core::ffi::c_void) {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.set_bill_ptr(proc) }
+}
+
+/// Get the current process pointer (SMP context).
+pub fn smp_proc_ptr() -> *mut core::ffi::c_void {
+    unsafe { crate::cpulocals::get_cpulocal_proc_ptr() }
+}
+
+/// Set the current process pointer (SMP context).
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be null.
+pub unsafe fn smp_set_proc_ptr(proc: *mut core::ffi::c_void) {
+    unsafe { crate::cpulocals::set_cpulocal_proc_ptr(proc) }
+}
+
+/// Halt the CPU (single `hlt` instruction, no infinite loop).
+pub fn hlt() {
+    unsafe {
+        core::arch::asm!("hlt", options(nomem, nostack));
+    }
+}
+
+// ── Timestamp counter ────────────────────────────────────────────────────
+
 /// Read the timestamp counter.
 pub fn read_tsc() -> u64 {
     crate::hw::read_tsc()
@@ -249,7 +308,18 @@ pub unsafe fn read_frame_field(frame: &[u8; 256], offset: usize) -> u64 {
 /// `offset` must be < 248 (so offset + 8 <= 256). The caller must ensure
 /// that the frame is writable and contains valid register state.
 pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) {
-    frame[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
+    if offset > 248 {
+        panic!(
+            "write_frame_field: offset {} out of range (max 248)",
+            offset
+        );
+    }
+    let bytes = val.to_ne_bytes();
+    for i in 0..8 {
+        unsafe {
+            core::ptr::write_volatile(frame.as_mut_ptr().add(offset + i), bytes[i]);
+        }
+    }
 }
 
 /// Read syscall argument `i` (0-5) from a raw TrapFrame.

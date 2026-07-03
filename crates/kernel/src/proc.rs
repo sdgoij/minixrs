@@ -11,7 +11,6 @@
 //! - `message` is an opaque 64-byte buffer (C `sizeof(message)` = 56 on
 //!   i386; 64 bytes rounds up for x86_64 alignment)
 
-use core::ffi::c_char;
 use core::sync::atomic::AtomicU32;
 
 use crate::hal;
@@ -321,7 +320,7 @@ pub struct Proc {
     pub p_pending: u32,
 
     /// Process name (null-terminated).
-    pub p_name: [c_char; PROC_NAME_LEN],
+    pub p_name: [u8; PROC_NAME_LEN],
 
     /// Endpoint number (generation-aware).
     pub p_endpoint: i32,
@@ -387,7 +386,7 @@ impl Default for Proc {
             p_getfrom_e: 0,
             p_sendto_e: 0,
             p_pending: 0,
-            p_name: [0i8; PROC_NAME_LEN],
+            p_name: [0u8; PROC_NAME_LEN],
             p_endpoint: 0,
             p_sendmsg: [0u8; MESSAGE_SIZE],
             p_delivermsg: [0u8; MESSAGE_SIZE],

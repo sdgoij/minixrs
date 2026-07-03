@@ -9,8 +9,8 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::hal::hlt;
 use crate::hal::{bkl_lock, bkl_unlock};
-use arch_x86_64::hw::hlt;
 
 use crate::proc::{Proc, RtsFlags};
 
@@ -234,7 +234,7 @@ pub unsafe fn smp_sched_handler() {
 pub unsafe fn smp_ipi_sched_handler() {
     // TODO: ipi_ack() — acknowledge the IPI at the APIC level.
 
-    let curr = unsafe { arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.proc_ptr() as *mut Proc };
+    let curr = crate::hal::smp_proc_ptr() as *mut Proc;
     if !curr.is_null() && unsafe { (*curr).p_endpoint != arch_common::com::IDLE } {
         unsafe {
             (*curr)
@@ -435,10 +435,10 @@ mod tests {
         unsafe {
             // When proc_ptr is null, smp_ipi_sched_handler must not crash.
             // We save and restore the proc_ptr to be safe.
-            let saved = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.proc_ptr();
-            arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.set_proc_ptr(core::ptr::null_mut());
+            let saved = crate::hal::smp_proc_ptr();
+            crate::hal::smp_set_proc_ptr(core::ptr::null_mut());
             smp_ipi_sched_handler();
-            arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.set_proc_ptr(saved);
+            crate::hal::smp_set_proc_ptr(saved);
         }
     }
 

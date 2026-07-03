@@ -1015,10 +1015,8 @@ pub unsafe fn register_ipc_syscalls() {
 ///
 /// Per-CPU storage must be initialized.
 pub unsafe fn current_proc() -> *mut Proc {
-    unsafe {
-        let ptr = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.proc_ptr();
-        ptr as *mut Proc
-    }
+    let ptr = crate::hal::smp_proc_ptr();
+    ptr as *mut Proc
 }
 
 /// Set the current process pointer in per-CPU storage.
@@ -1028,7 +1026,7 @@ pub unsafe fn current_proc() -> *mut Proc {
 /// Per-CPU storage must be initialized.
 pub unsafe fn set_current_proc(proc: *mut Proc) {
     unsafe {
-        arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.set_proc_ptr(proc as *mut core::ffi::c_void);
+        crate::hal::smp_set_proc_ptr(proc as *mut core::ffi::c_void);
     }
 }
 

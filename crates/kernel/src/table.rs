@@ -401,7 +401,7 @@ pub unsafe fn proc_init() {
             let name_bytes = bi.name.as_bytes();
             let name_len = name_bytes.len().min(PROC_NAME_LEN - 1);
             for (j, &b) in name_bytes.iter().enumerate().take(name_len) {
-                (*rp).p_name[j] = b as i8;
+                (*rp).p_name[j] = b;
             }
             (*rp).p_name[name_len] = 0; // null-terminate
         }
@@ -612,15 +612,10 @@ mod tests {
         unsafe {
             proc_init();
             let rp = proc_addr(0); // PM
-            let name: &[i8] = &(*rp).p_name;
+            let name: &[u8] = &(*rp).p_name;
             // Find null terminator
             let len = name.iter().position(|&c| c == 0).unwrap_or(PROC_NAME_LEN);
-            // Build a stack-allocated UTF-8 string for comparison
-            let mut buf = [0u8; PROC_NAME_LEN];
-            for (j, &c) in name[..len].iter().enumerate() {
-                buf[j] = c as u8;
-            }
-            let name_str = core::str::from_utf8(&buf[..len]).unwrap_or("");
+            let name_str = core::str::from_utf8(&name[..len]).unwrap_or("");
             assert_eq!(name_str, "pm");
         }
     }

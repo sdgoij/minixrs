@@ -689,7 +689,7 @@ pub unsafe fn str_sel() -> u16 {
 #[unsafe(naked)]
 pub unsafe extern "C" fn sysretq_to_user(proc_ptr: *const u8) -> ! {
     core::arch::naked_asm!(
-        "mov    rax, [rdi + 184]",
+        "mov    rax, [rdi + 256]",
         "mov    cr3, rax",
         "mov    rcx, [rdi + 16]",
         "mov    r11, [rdi + 72]",
@@ -734,7 +734,7 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
 pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
     core::arch::naked_asm!(
         // Load the process's private page table from p_seg.p_cr3.
-        "mov    r15, [rdi + 184]",
+        "mov    r15, [rdi + 256]",
         "mov    cr3, r15",
         // Load RIP (→RCX) and RFLAGS (→R11) for sysretq.
         "mov    rcx, [rdi + 16]",

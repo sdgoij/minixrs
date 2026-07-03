@@ -558,7 +558,7 @@ pub unsafe fn hook_ipc_clear(p: *mut Proc) {
 /// memory. Must be called on BOOT_CR3.
 pub unsafe fn proc_stacktrace(rp: *const Proc) {
     unsafe {
-        let name_ptr = &(*rp).p_name as *const i8;
+        let name_ptr = &(*rp).p_name as *const u8;
         let ep = (*rp).p_endpoint;
         let rip = crate::hal::read_frame_field(&(*rp).p_reg, 160);
         let rsp = crate::hal::read_frame_field(&(*rp).p_reg, 168);

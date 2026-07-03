@@ -16,6 +16,7 @@ workspace = true
 default = []
 embed_initramfs = []
 qemu-tests = []
+riscv64 = []
 
 [dependencies]
 arch-common = { path = "../arch-common" }

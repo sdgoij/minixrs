@@ -25,12 +25,12 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use arch_common::consts::{SEGMENT_INDEX, VM_GRANT};
 use arch_common::endpoint::ANY;
 
+use crate::arch_compat::TrapFrame;
 use crate::r#priv::*;
 use crate::proc::*;
 use crate::sched::dequeue;
 use crate::table;
 use crate::table::proc_addr;
-use arch_x86_64::frame::TrapFrame;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Message field offset helpers
@@ -658,33 +658,40 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             return crate::ipc::EINVAL;
         }
 
-        // Perform I/O (gated: only on bare metal where BOOT_CR3 is set)
-        let boot_cr3 = crate::hal::boot_cr3();
-        if boot_cr3 != 0 {
-            if is_input {
-                let value = match io_type {
-                    t if t == arch_common::com::DIO_BYTE => arch_x86_64::asm::inb(port) as u32,
-                    t if t == arch_common::com::DIO_WORD => arch_x86_64::asm::inw(port) as u32,
-                    _ => arch_x86_64::asm::inl(port),
-                };
-                let reply_bytes = value.to_ne_bytes();
-                let reply_start = DEVIO_REPLY_VALUE_OFF;
-                msg[reply_start..reply_start + 4].copy_from_slice(&reply_bytes);
-            } else {
-                let value = msg_read_u32(msg, DEVIO_VALUE_OFF);
-                match io_type {
-                    t if t == arch_common::com::DIO_BYTE => {
-                        arch_x86_64::asm::outb(port, value as u8)
+        // Perform I/O (x86_64 port I/O)
+        #[cfg(target_arch = "x86_64")]
+        {
+            let boot_cr3 = crate::hal::boot_cr3();
+            if boot_cr3 != 0 {
+                if is_input {
+                    let value = match io_type {
+                        t if t == arch_common::com::DIO_BYTE => arch_x86_64::asm::inb(port) as u32,
+                        t if t == arch_common::com::DIO_WORD => arch_x86_64::asm::inw(port) as u32,
+                        _ => arch_x86_64::asm::inl(port),
+                    };
+                    let reply_bytes = value.to_ne_bytes();
+                    let reply_start = DEVIO_REPLY_VALUE_OFF;
+                    msg[reply_start..reply_start + 4].copy_from_slice(&reply_bytes);
+                } else {
+                    let value = msg_read_u32(msg, DEVIO_VALUE_OFF);
+                    match io_type {
+                        t if t == arch_common::com::DIO_BYTE => {
+                            arch_x86_64::asm::outb(port, value as u8)
+                        }
+                        t if t == arch_common::com::DIO_WORD => {
+                            arch_x86_64::asm::outw(port, value as u16)
+                        }
+                        _ => arch_x86_64::asm::outl(port, value),
                     }
-                    t if t == arch_common::com::DIO_WORD => {
-                        arch_x86_64::asm::outw(port, value as u16)
-                    }
-                    _ => arch_x86_64::asm::outl(port, value),
                 }
             }
+            // In test mode (BOOT_CR3 == 0) or after I/O: acknowledge request
+            OK
         }
-        // In test mode (BOOT_CR3 == 0) or after I/O: acknowledge request
-        OK
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::ipc::ENOSYS
+        }
     }
 }
 
@@ -793,79 +800,86 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             }
         }
 
-        // Perform actual device I/O
-        match io_type {
-            t if t == arch_common::com::DIO_BYTE => {
-                let pairs =
-                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvbPair, vec_size as usize);
-                if io_in {
-                    for pair in pairs.iter_mut() {
-                        pair.value = arch_x86_64::asm::inb(pair.port);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Perform actual device I/O
+            match io_type {
+                t if t == arch_common::com::DIO_BYTE => {
+                    let pairs =
+                        core::slice::from_raw_parts_mut(buf_ptr as *mut PvbPair, vec_size as usize);
+                    if io_in {
+                        for pair in pairs.iter_mut() {
+                            pair.value = arch_x86_64::asm::inb(pair.port);
+                        }
+                    } else {
+                        for pair in pairs.iter() {
+                            arch_x86_64::asm::outb(pair.port, pair.value);
+                        }
                     }
-                } else {
-                    for pair in pairs.iter() {
-                        arch_x86_64::asm::outb(pair.port, pair.value);
+                }
+                t if t == arch_common::com::DIO_WORD => {
+                    let pairs =
+                        core::slice::from_raw_parts_mut(buf_ptr as *mut PvwPair, vec_size as usize);
+                    if io_in {
+                        for pair in pairs.iter_mut() {
+                            if pair.port & 1 != 0 {
+                                return crate::ipc::EPERM;
+                            }
+                            pair.value = arch_x86_64::asm::inw(pair.port);
+                        }
+                    } else {
+                        for pair in pairs.iter() {
+                            if pair.port & 1 != 0 {
+                                return crate::ipc::EPERM;
+                            }
+                            arch_x86_64::asm::outw(pair.port, pair.value);
+                        }
+                    }
+                }
+                _ => {
+                    // DIO_LONG
+                    let pairs =
+                        core::slice::from_raw_parts_mut(buf_ptr as *mut PvlPair, vec_size as usize);
+                    if io_in {
+                        for pair in pairs.iter_mut() {
+                            if pair.port & 3 != 0 {
+                                return crate::ipc::EPERM;
+                            }
+                            pair.value = arch_x86_64::asm::inl(pair.port);
+                        }
+                    } else {
+                        for pair in pairs.iter() {
+                            if pair.port & 3 != 0 {
+                                return crate::ipc::EPERM;
+                            }
+                            arch_x86_64::asm::outl(pair.port, pair.value);
+                        }
                     }
                 }
             }
-            t if t == arch_common::com::DIO_WORD => {
-                let pairs =
-                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvwPair, vec_size as usize);
-                if io_in {
-                    for pair in pairs.iter_mut() {
-                        if pair.port & 1 != 0 {
-                            return crate::ipc::EPERM;
-                        }
-                        pair.value = arch_x86_64::asm::inw(pair.port);
-                    }
-                } else {
-                    for pair in pairs.iter() {
-                        if pair.port & 1 != 0 {
-                            return crate::ipc::EPERM;
-                        }
-                        arch_x86_64::asm::outw(pair.port, pair.value);
-                    }
-                }
-            }
-            _ => {
-                // DIO_LONG
-                let pairs =
-                    core::slice::from_raw_parts_mut(buf_ptr as *mut PvlPair, vec_size as usize);
-                if io_in {
-                    for pair in pairs.iter_mut() {
-                        if pair.port & 3 != 0 {
-                            return crate::ipc::EPERM;
-                        }
-                        pair.value = arch_x86_64::asm::inl(pair.port);
-                    }
-                } else {
-                    for pair in pairs.iter() {
-                        if pair.port & 3 != 0 {
-                            return crate::ipc::EPERM;
-                        }
-                        arch_x86_64::asm::outl(pair.port, pair.value);
-                    }
-                }
-            }
-        }
 
-        // Copy results back for input requests
-        if io_in {
-            let boot_cr3 = crate::hal::boot_cr3();
-            if boot_cr3 != 0 {
-                let caller_cr3 = (*caller).p_seg.p_cr3;
-                if caller_cr3 != 0 {
-                    crate::hal::write_cr3(caller_cr3);
+            // Copy results back for input requests
+            if io_in {
+                let boot_cr3 = crate::hal::boot_cr3();
+                if boot_cr3 != 0 {
+                    let caller_cr3 = (*caller).p_seg.p_cr3;
+                    if caller_cr3 != 0 {
+                        crate::hal::write_cr3(caller_cr3);
+                    }
+                }
+                let buf_src = VDEVIO_BUF.get() as *const u8;
+                core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
+                if boot_cr3 != 0 {
+                    crate::hal::write_cr3(boot_cr3);
                 }
             }
-            let buf_src = VDEVIO_BUF.get() as *const u8;
-            core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
-            if boot_cr3 != 0 {
-                crate::hal::write_cr3(boot_cr3);
-            }
-        }
 
-        OK
+            OK
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::ipc::ENOSYS
+        }
     }
 }
 
@@ -922,186 +936,193 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             return crate::ipc::EINVAL;
         }
 
-        // Determine virtual buffer address (grant or direct)
-        let vir_buf: u64;
-        if is_safe {
-            // Safe variant: use verify_grant to resolve
-            let access = if req_dir == arch_common::com::DIO_INPUT {
-                arch_common::safecopies::CPF_WRITE
-            } else {
-                arch_common::safecopies::CPF_READ
-            };
-            let grant_result = crate::grants::verify_grant(
-                dest_ep,
-                caller_ep,
-                vec_addr as i32,
-                count,
-                access,
-                offset,
-            );
-            let (newoffset, new_granter, _flags) = match grant_result {
-                Ok(v) => v,
-                Err(_) => return crate::ipc::EPERM,
-            };
-            // Resolve the actual destination from the grant
-            let new_pnr = table::endpoint_slot(new_granter);
-            vir_buf = newoffset;
-            // Update dest_rp to the grant's granter
-            let new_rp = table::proc_addr(new_pnr);
-            if new_rp.is_null() || (*new_rp).is_empty() {
-                return crate::ipc::EINVAL;
-            }
-            // For the CR3 switch below, use the new_rp's address space
-            // We store the resolved info and use new_rp for switch
-            let abs_port = port as u16;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Determine virtual buffer address (grant or direct)
+            let vir_buf: u64;
+            if is_safe {
+                // Safe variant: use verify_grant to resolve
+                let access = if req_dir == arch_common::com::DIO_INPUT {
+                    arch_common::safecopies::CPF_WRITE
+                } else {
+                    arch_common::safecopies::CPF_READ
+                };
+                let grant_result = crate::grants::verify_grant(
+                    dest_ep,
+                    caller_ep,
+                    vec_addr as i32,
+                    count,
+                    access,
+                    offset,
+                );
+                let (newoffset, new_granter, _flags) = match grant_result {
+                    Ok(v) => v,
+                    Err(_) => return crate::ipc::EPERM,
+                };
+                // Resolve the actual destination from the grant
+                let new_pnr = table::endpoint_slot(new_granter);
+                vir_buf = newoffset;
+                // Update dest_rp to the grant's granter
+                let new_rp = table::proc_addr(new_pnr);
+                if new_rp.is_null() || (*new_rp).is_empty() {
+                    return crate::ipc::EINVAL;
+                }
+                // For the CR3 switch below, use the new_rp's address space
+                // We store the resolved info and use new_rp for switch
+                let abs_port = port as u16;
 
-            // Check I/O port access permissions
-            let privp = (*caller).p_priv;
-            if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
-                let nr_io_range = (*privp).s_nr_io_range as usize;
-                let port_u32 = abs_port as u32;
-                let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
-                let mut found = false;
-                for j in 0..nr_io_range {
-                    let ior = &*io_tab_ptr.add(j);
-                    if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
-                        found = true;
-                        break;
+                // Check I/O port access permissions
+                let privp = (*caller).p_priv;
+                if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+                    let nr_io_range = (*privp).s_nr_io_range as usize;
+                    let port_u32 = abs_port as u32;
+                    let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+                    let mut found = false;
+                    for j in 0..nr_io_range {
+                        let ior = &*io_tab_ptr.add(j);
+                        if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return crate::ipc::EPERM;
                     }
                 }
-                if !found {
+
+                // Alignment check
+                if (abs_port as u32) & (size as u32 - 1) != 0 {
                     return crate::ipc::EPERM;
                 }
-            }
 
-            // Alignment check
-            if (abs_port as u32) & (size as u32 - 1) != 0 {
-                return crate::ipc::EPERM;
-            }
+                // Switch to destination address space
+                let boot_cr3 = crate::hal::boot_cr3();
+                if boot_cr3 != 0 {
+                    let dest_cr3 = (*new_rp).p_seg.p_cr3;
+                    if dest_cr3 != 0 {
+                        crate::hal::write_cr3(dest_cr3);
+                    }
+                }
 
-            // Switch to destination address space
-            let boot_cr3 = crate::hal::boot_cr3();
-            if boot_cr3 != 0 {
-                let dest_cr3 = (*new_rp).p_seg.p_cr3;
-                if dest_cr3 != 0 {
-                    crate::hal::write_cr3(dest_cr3);
-                }
-            }
+                // Perform string I/O
+                let result = if req_dir == arch_common::com::DIO_INPUT {
+                    match req_type {
+                        t if t == arch_common::com::DIO_BYTE => {
+                            arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        t if t == arch_common::com::DIO_WORD => {
+                            arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        _ => crate::ipc::EINVAL,
+                    }
+                } else if req_dir == arch_common::com::DIO_OUTPUT {
+                    match req_type {
+                        t if t == arch_common::com::DIO_BYTE => {
+                            arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        t if t == arch_common::com::DIO_WORD => {
+                            arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        _ => crate::ipc::EINVAL,
+                    }
+                } else {
+                    crate::ipc::EINVAL
+                };
 
-            // Perform string I/O
-            let result = if req_dir == arch_common::com::DIO_INPUT {
-                match req_type {
-                    t if t == arch_common::com::DIO_BYTE => {
-                        arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    t if t == arch_common::com::DIO_WORD => {
-                        arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    _ => crate::ipc::EINVAL,
+                // Switch back to boot CR3
+                if boot_cr3 != 0 {
+                    crate::hal::write_cr3(boot_cr3);
                 }
-            } else if req_dir == arch_common::com::DIO_OUTPUT {
-                match req_type {
-                    t if t == arch_common::com::DIO_BYTE => {
-                        arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    t if t == arch_common::com::DIO_WORD => {
-                        arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    _ => crate::ipc::EINVAL,
-                }
+
+                result
             } else {
-                crate::ipc::EINVAL
-            };
-
-            // Switch back to boot CR3
-            if boot_cr3 != 0 {
-                crate::hal::write_cr3(boot_cr3);
-            }
-
-            result
-        } else {
-            // Non-safe variant: unsafe sdevio — only allowed for caller's own process
-            let caller_proc_nr = (*caller).p_nr;
-            let dest_slot = table::endpoint_slot(dest_ep);
-            if dest_slot != caller_proc_nr {
-                return crate::ipc::EPERM;
-            }
-            vir_buf = vec_addr;
-
-            let abs_port = port as u16;
-
-            // Check I/O port access permissions
-            let privp = (*caller).p_priv;
-            if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
-                let nr_io_range = (*privp).s_nr_io_range as usize;
-                let port_u32 = abs_port as u32;
-                let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
-                let mut found = false;
-                for j in 0..nr_io_range {
-                    let ior = &*io_tab_ptr.add(j);
-                    if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
+                // Non-safe variant: unsafe sdevio — only allowed for caller's own process
+                let caller_proc_nr = (*caller).p_nr;
+                let dest_slot = table::endpoint_slot(dest_ep);
+                if dest_slot != caller_proc_nr {
                     return crate::ipc::EPERM;
                 }
-            }
+                vir_buf = vec_addr;
 
-            // Alignment check
-            if (abs_port as u32) & (size as u32 - 1) != 0 {
-                return crate::ipc::EPERM;
-            }
+                let abs_port = port as u16;
 
-            // Switch to destination address space
-            let boot_cr3 = crate::hal::boot_cr3();
-            if boot_cr3 != 0 {
-                let dest_cr3 = (*dest_rp).p_seg.p_cr3;
-                if dest_cr3 != 0 {
-                    crate::hal::write_cr3(dest_cr3);
+                // Check I/O port access permissions
+                let privp = (*caller).p_priv;
+                if !privp.is_null() && (*privp).s_flags.contains(PrivFlags::CHECK_IO_PORT) {
+                    let nr_io_range = (*privp).s_nr_io_range as usize;
+                    let port_u32 = abs_port as u32;
+                    let io_tab_ptr: *const crate::r#priv::IoRange = &raw const (*privp).s_io_tab[0];
+                    let mut found = false;
+                    for j in 0..nr_io_range {
+                        let ior = &*io_tab_ptr.add(j);
+                        if port_u32 >= ior.ior_base && port_u32 + size as u32 - 1 <= ior.ior_limit {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return crate::ipc::EPERM;
+                    }
                 }
-            }
 
-            // Perform string I/O
-            let result = if req_dir == arch_common::com::DIO_INPUT {
-                match req_type {
-                    t if t == arch_common::com::DIO_BYTE => {
-                        arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    t if t == arch_common::com::DIO_WORD => {
-                        arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    _ => crate::ipc::EINVAL,
+                // Alignment check
+                if (abs_port as u32) & (size as u32 - 1) != 0 {
+                    return crate::ipc::EPERM;
                 }
-            } else if req_dir == arch_common::com::DIO_OUTPUT {
-                match req_type {
-                    t if t == arch_common::com::DIO_BYTE => {
-                        arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
-                        OK
+
+                // Switch to destination address space
+                let boot_cr3 = crate::hal::boot_cr3();
+                if boot_cr3 != 0 {
+                    let dest_cr3 = (*dest_rp).p_seg.p_cr3;
+                    if dest_cr3 != 0 {
+                        crate::hal::write_cr3(dest_cr3);
                     }
-                    t if t == arch_common::com::DIO_WORD => {
-                        arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
-                        OK
-                    }
-                    _ => crate::ipc::EINVAL,
                 }
-            } else {
-                crate::ipc::EINVAL
-            };
 
-            // Switch back to boot CR3
-            if boot_cr3 != 0 {
-                crate::hal::write_cr3(boot_cr3);
+                // Perform string I/O
+                let result = if req_dir == arch_common::com::DIO_INPUT {
+                    match req_type {
+                        t if t == arch_common::com::DIO_BYTE => {
+                            arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        t if t == arch_common::com::DIO_WORD => {
+                            arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        _ => crate::ipc::EINVAL,
+                    }
+                } else if req_dir == arch_common::com::DIO_OUTPUT {
+                    match req_type {
+                        t if t == arch_common::com::DIO_BYTE => {
+                            arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        t if t == arch_common::com::DIO_WORD => {
+                            arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                            OK
+                        }
+                        _ => crate::ipc::EINVAL,
+                    }
+                } else {
+                    crate::ipc::EINVAL
+                };
+
+                // Switch back to boot CR3
+                if boot_cr3 != 0 {
+                    crate::hal::write_cr3(boot_cr3);
+                }
+
+                result
             }
-
-            result
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::ipc::ENOSYS
         }
     }
 }
@@ -3217,9 +3238,9 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
             if i >= arch_common::types::PROC_NAME_LEN - 1 {
                 break;
             }
-            (*rp).p_name[i] = b as i8;
+            (*rp).p_name[i] = b;
         }
-        (*rp).p_name[name_len.min(arch_common::types::PROC_NAME_LEN - 1)] = 0i8;
+        (*rp).p_name[name_len.min(arch_common::types::PROC_NAME_LEN - 1)] = 0u8;
 
         // Call arch_proc_init to set up TrapFrame
         crate::hal::arch_proc_init(&mut (*rp).p_reg, ip, stack, name_slice, ps_str);
@@ -3416,7 +3437,7 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         }
 
         // Build Mcontext from the process's TrapFrame
-        use arch_x86_64::mcontext::Mcontext;
+        use crate::arch_compat::Mcontext;
         let mut mc = crate::hal::trapframe_to_mcontext(&(*rp).p_reg);
         // Overwrite FPU state with actual saved state if available
         let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
@@ -3469,69 +3490,76 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
             return crate::ipc::EINVAL;
         }
 
-        // Copy Mcontext from the caller's address space
-        use arch_x86_64::mcontext::Mcontext;
-        let copy_sz = core::mem::size_of::<Mcontext>();
-        let mut mc = Mcontext {
-            mc_rax: 0,
-            mc_rbx: 0,
-            mc_rcx: 0,
-            mc_rdx: 0,
-            mc_rsi: 0,
-            mc_rdi: 0,
-            mc_rbp: 0,
-            mc_r8: 0,
-            mc_r9: 0,
-            mc_r10: 0,
-            mc_r11: 0,
-            mc_r12: 0,
-            mc_r13: 0,
-            mc_r14: 0,
-            mc_r15: 0,
-            mc_rip: 0,
-            mc_rsp: 0,
-            mc_rflags: 0,
-            mc_cs: 0,
-            mc_ss: 0,
-            mc_ds: 0,
-            mc_es: 0,
-            mc_fs: 0,
-            mc_gs: 0,
-            mc_fpstate: [0u8; 512],
-        };
-        let mc_bytes = &raw mut mc as *mut u8;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Copy Mcontext from the caller's address space
+            use crate::arch_compat::Mcontext;
+            let copy_sz = core::mem::size_of::<Mcontext>();
+            let mut mc = Mcontext {
+                mc_rax: 0,
+                mc_rbx: 0,
+                mc_rcx: 0,
+                mc_rdx: 0,
+                mc_rsi: 0,
+                mc_rdi: 0,
+                mc_rbp: 0,
+                mc_r8: 0,
+                mc_r9: 0,
+                mc_r10: 0,
+                mc_r11: 0,
+                mc_r12: 0,
+                mc_r13: 0,
+                mc_r14: 0,
+                mc_r15: 0,
+                mc_rip: 0,
+                mc_rsp: 0,
+                mc_rflags: 0,
+                mc_cs: 0,
+                mc_ss: 0,
+                mc_ds: 0,
+                mc_es: 0,
+                mc_fs: 0,
+                mc_gs: 0,
+                mc_fpstate: [0u8; 512],
+            };
+            let mc_bytes = &raw mut mc as *mut u8;
 
-        let boot_cr3 = crate::hal::boot_cr3();
-        if boot_cr3 != 0 {
-            let caller_cr3 = (*caller).p_seg.p_cr3;
-            if caller_cr3 != 0 {
-                crate::hal::write_cr3(caller_cr3);
+            let boot_cr3 = crate::hal::boot_cr3();
+            if boot_cr3 != 0 {
+                let caller_cr3 = (*caller).p_seg.p_cr3;
+                if caller_cr3 != 0 {
+                    crate::hal::write_cr3(caller_cr3);
+                }
             }
-        }
-        core::ptr::copy_nonoverlapping(ctx_ptr as *const u8, mc_bytes, copy_sz);
-        if boot_cr3 != 0 {
-            crate::hal::write_cr3(boot_cr3);
-        }
+            core::ptr::copy_nonoverlapping(ctx_ptr as *const u8, mc_bytes, copy_sz);
+            if boot_cr3 != 0 {
+                crate::hal::write_cr3(boot_cr3);
+            }
 
-        // Apply the saved context to the target process's TrapFrame
-        crate::hal::mcontext_to_trapframe(&mut (*rp).p_reg, &mc);
+            // Apply the saved context to the target process's TrapFrame
+            crate::hal::mcontext_to_trapframe(&mut (*rp).p_reg, &mc);
 
-        // Restore FPU state if saved
-        let fpu_initialized = mc.mc_fpstate.iter().any(|&b| b != 0);
-        if fpu_initialized && !(*rp).p_seg.fpu_state.is_null() {
-            core::ptr::copy_nonoverlapping(mc.mc_fpstate.as_ptr(), (*rp).p_seg.fpu_state, 512);
-            let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
-            (*rp).p_misc_flags.store(old_mf | 0x1000, Ordering::Relaxed); // set FPU_INITIALIZED
-        } else {
-            let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
-            (*rp)
-                .p_misc_flags
-                .store(old_mf & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
+            // Restore FPU state if saved
+            let fpu_initialized = mc.mc_fpstate.iter().any(|&b| b != 0);
+            if fpu_initialized && !(*rp).p_seg.fpu_state.is_null() {
+                core::ptr::copy_nonoverlapping(mc.mc_fpstate.as_ptr(), (*rp).p_seg.fpu_state, 512);
+                let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+                (*rp).p_misc_flags.store(old_mf | 0x1000, Ordering::Relaxed); // set FPU_INITIALIZED
+            } else {
+                let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+                (*rp)
+                    .p_misc_flags
+                    .store(old_mf & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
+            }
+            // Force reloading FPU in either case
+            crate::hal::release_fpu(rp as *mut core::ffi::c_void);
+
+            OK
         }
-        // Force reloading FPU in either case
-        crate::hal::release_fpu(rp as *mut core::ffi::c_void);
-
-        OK
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            crate::ipc::ENOSYS
+        }
     }
 }
 
@@ -3728,9 +3756,9 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             }
         }
         if end + 3 < (*rpc).p_name.len() {
-            (*rpc).p_name[end] = b'*' as i8;
-            (*rpc).p_name[end + 1] = b'F' as i8;
-            (*rpc).p_name[end + 2] = 0i8;
+            (*rpc).p_name[end] = b'*';
+            (*rpc).p_name[end + 1] = b'F';
+            (*rpc).p_name[end + 2] = 0u8;
         }
 
         (*rpc)

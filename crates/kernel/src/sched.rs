@@ -8,8 +8,6 @@
 
 use core::sync::atomic::Ordering;
 
-use arch_x86_64::cpulocals::CPU_LOCAL_STORAGE;
-
 use crate::proc::*;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -20,17 +18,17 @@ type RunQArray = [*mut Proc; NR_SCHED_QUEUES];
 
 /// Get a pointer to the run_q_head array as `*mut [*mut Proc; 16]`.
 unsafe fn run_q_head_array() -> *mut RunQArray {
-    unsafe { CPU_LOCAL_STORAGE.run_q_head_ptr() as *mut RunQArray }
+    crate::hal::sched_run_q_head() as *mut RunQArray
 }
 
 /// Get a pointer to the run_q_tail array as `*mut [*mut Proc; 16]`.
 unsafe fn run_q_tail_array() -> *mut RunQArray {
-    unsafe { CPU_LOCAL_STORAGE.run_q_tail_ptr() as *mut RunQArray }
+    crate::hal::sched_run_q_tail() as *mut RunQArray
 }
 
 /// Get current process pointer cast to *mut Proc.
 unsafe fn current_proc() -> *mut Proc {
-    unsafe { CPU_LOCAL_STORAGE.proc_ptr() as *mut Proc }
+    crate::hal::sched_current_proc() as *mut Proc
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -260,7 +258,7 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
             if !(*rp).p_priv.is_null() {
                 let flags = (*(*rp).p_priv).s_flags;
                 if flags.contains(crate::r#priv::PrivFlags::BILLABLE) {
-                    CPU_LOCAL_STORAGE.set_bill_ptr(rp as *mut core::ffi::c_void);
+                    crate::hal::sched_set_bill_proc(rp as *mut core::ffi::c_void);
                 }
             }
             return Some(rp);

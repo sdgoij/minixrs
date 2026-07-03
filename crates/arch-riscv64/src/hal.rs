@@ -251,6 +251,57 @@ pub unsafe fn init_cpulocals() {
     crate::cpulocals::init_cpulocals();
 }
 
+// ── Scheduler cpulocals accessors (Phase 19.7) ──────────────────────────
+
+/// Get the run queue head pointer array.
+pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
+    todo!("RISC-V sched_run_q_head; see Phase 19.7");
+}
+
+/// Get the run queue tail pointer array.
+pub fn sched_run_q_tail() -> *mut [*mut core::ffi::c_void; 16] {
+    todo!("RISC-V sched_run_q_tail; see Phase 19.7");
+}
+
+/// Number of scheduling priority queues.
+pub fn sched_nr_queues() -> usize {
+    16
+}
+
+/// Get the current process pointer (scheduler context).
+pub fn sched_current_proc() -> *mut core::ffi::c_void {
+    unsafe { crate::cpulocals::current_proc() as *mut core::ffi::c_void }
+}
+
+/// Get the billable process pointer.
+pub fn sched_bill_proc() -> *mut core::ffi::c_void {
+    todo!("RISC-V sched_bill_proc; see Phase 19.7");
+}
+
+/// Set the billable process pointer.
+pub unsafe fn sched_set_bill_proc(_proc: *mut core::ffi::c_void) {
+    todo!("RISC-V sched_set_bill_proc; see Phase 19.7");
+}
+
+/// Get the current process pointer (SMP context).
+pub fn smp_proc_ptr() -> *mut core::ffi::c_void {
+    unsafe { crate::cpulocals::current_proc() as *mut core::ffi::c_void }
+}
+
+/// Set the current process pointer (SMP context).
+pub unsafe fn smp_set_proc_ptr(proc: *mut core::ffi::c_void) {
+    crate::cpulocals::set_current_proc(proc as u64);
+}
+
+/// Halt the CPU (single `wfi` instruction, no infinite loop).
+pub fn hlt() {
+    unsafe {
+        core::arch::asm!("wfi", options(nomem, nostack));
+    }
+}
+
+// ── Timestamp counter ────────────────────────────────────────────────────
+
 /// Read the timestamp counter.
 pub fn read_tsc() -> u64 {
     crate::clint::read_time()

@@ -281,8 +281,8 @@ unsafe fn load_update() {
 
         // Count how many processes are ready across all priority queues
         let mut enqueued: u16 = 0;
-        let head_ptr = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr();
-        for q in 0..arch_x86_64::cpulocals::NR_SCHED_QUEUES {
+        let head_ptr = crate::hal::sched_run_q_head();
+        for q in 0..crate::hal::sched_nr_queues() {
             let mut p = (*head_ptr)[q];
             while !p.is_null() {
                 enqueued = enqueued.saturating_add(1);
@@ -331,8 +331,8 @@ pub unsafe fn timer_int_handler() {
         }
 
         // ── Update process accounting ─────────────────────────────────
-        let p = arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut Proc;
-        let billp = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.bill_ptr() as *mut Proc;
+        let p = crate::hal::sched_current_proc() as *mut Proc;
+        let billp = crate::hal::sched_bill_proc() as *mut Proc;
 
         if !p.is_null() {
             (*p).p_user_time += 1;

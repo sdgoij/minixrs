@@ -310,39 +310,48 @@ pub unsafe fn init_profile_clock(freq: u32) {
             _ => 6, // default to 1024 Hz
         };
 
-        let irq = arch_x86_64::apic::arch_init_profile_clock(rate_code);
-        if irq >= 0 {
-            // Register the profile clock handler in the IDT.
-            let vector = arch_x86_64::interrupt::VECTOR_TIMER as u32 + irq as u32;
-            let handler_fn =
-                arch_x86_64::apic::profile_clock_isr_entry as *const () as usize as u64;
-            (*arch_x86_64::idt::IDT.get()).set_handler(
-                vector as usize,
-                handler_fn,
-                0, // IST
-                3, // DPL
-            );
+        #[cfg(target_arch = "x86_64")]
+        {
+            let irq = arch_x86_64::apic::arch_init_profile_clock(rate_code);
+            if irq >= 0 {
+                // Register the profile clock handler in the IDT.
+                let vector = arch_x86_64::interrupt::VECTOR_TIMER as u32 + irq as u32;
+                let handler_fn =
+                    arch_x86_64::apic::profile_clock_isr_entry as *const () as usize as u64;
+                (*arch_x86_64::idt::IDT.get()).set_handler(
+                    vector as usize,
+                    handler_fn,
+                    0, // IST
+                    3, // DPL
+                );
 
-            // Register the Rust callback that calls profile_sample.
-            unsafe extern "C" fn profile_clock_callback() {
-                let p = unsafe { crate::ipc::current_proc() };
-                if !p.is_null() && unsafe { (*p).is_runnable() } {
-                    unsafe { profile_sample(p, 0) };
+                // Register the Rust callback that calls profile_sample.
+                unsafe extern "C" fn profile_clock_callback() {
+                    let p = unsafe { crate::ipc::current_proc() };
+                    if !p.is_null() && unsafe { (*p).is_runnable() } {
+                        unsafe { profile_sample(p, 0) };
+                    }
                 }
+                arch_x86_64::apic::set_profile_clock_handler(profile_clock_callback);
             }
-            arch_x86_64::apic::set_profile_clock_handler(profile_clock_callback);
         }
+        #[cfg(not(target_arch = "x86_64"))]
+        {}
     }
 }
 
 /// Stop the profiling clock.
 ///
 /// Disables RTC periodic interrupts.
+#[cfg(target_arch = "x86_64")]
 pub fn stop_profile_clock() {
     unsafe {
         arch_x86_64::apic::arch_stop_profile_clock();
     }
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn stop_profile_clock() {}
 
 // ─────────────────────────────────────────────────────────────────────────
 // sprof_save_sample / sprof_save_proc / profile_sample

@@ -369,9 +369,9 @@ fn test_tmr_never_value(ctx: &mut TestCtx) {
 unsafe fn sched_make_proc(nr: i32, priority: i8) -> *mut crate::proc::Proc {
     unsafe {
         crate::hal::init_cpulocals();
-        let head = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr();
-        let tail = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_tail_ptr();
-        for q in 0..arch_x86_64::cpulocals::NR_SCHED_QUEUES {
+        let head = crate::hal::sched_run_q_head();
+        let tail = crate::hal::sched_run_q_tail();
+        for q in 0..crate::hal::sched_nr_queues() {
             (*head)[q] = core::ptr::null_mut();
             (*tail)[q] = core::ptr::null_mut();
         }
@@ -396,7 +396,7 @@ fn test_enqueue_dequeue(ctx: &mut TestCtx) {
         (*rp).p_rts_flags.store(0, Ordering::Relaxed);
 
         crate::sched::enqueue(rp);
-        let head = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr();
+        let head = crate::hal::sched_run_q_head();
         ctx.assert(
             (*head)[0] == rp as *mut core::ffi::c_void,
             "enqueued proc must be at head of queue 0",
