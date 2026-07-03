@@ -453,6 +453,7 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     #[test]
@@ -467,8 +468,135 @@ mod tests {
     fn spinlock_exclusion() {
         let lock = Spinlock::new();
         lock.acquire();
-        // Second acquire should fail immediately with try_lock
-        // (not provided, but we can test basic mutual exclusion)
         lock.release();
+    }
+
+    #[test]
+    fn frame_default_is_zeroed() {
+        let f = frame_default();
+        assert_eq!(f.len(), 256);
+        assert!(f.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn read_write_frame_field_roundtrip() {
+        let mut f = frame_default();
+        unsafe {
+            write_frame_field(&mut f, 0, 0xDEADBEEF);
+            assert_eq!(read_frame_field(&f, 0), 0xDEADBEEF);
+        }
+    }
+
+    #[test]
+    fn write_retval_writes_to_offset_0() {
+        let mut f = frame_default();
+        unsafe {
+            write_retval(&mut f, 42);
+            assert_eq!(read_frame_field(&f, 0), 42);
+        }
+    }
+
+    #[test]
+    fn read_syscall_nr_from_rax() {
+        let mut f = frame_default();
+        unsafe {
+            write_frame_field(&mut f, 0, 59); // NR_WAITPID
+            assert_eq!(read_syscall_nr(&f), 59);
+        }
+    }
+
+    #[test]
+    fn read_syscall_args_by_index() {
+        let mut f = frame_default();
+        unsafe {
+            // x86_64: arg0=rdi(40), arg1=rsi(32), arg2=rdx(24),
+            // arg3=r10(64), arg4=r8(48), arg5=r9(56)
+            write_frame_field(&mut f, 40, 10); // rdi = arg0
+            write_frame_field(&mut f, 32, 20); // rsi = arg1
+            write_frame_field(&mut f, 24, 30); // rdx = arg2
+            write_frame_field(&mut f, 64, 40); // r10 = arg3
+            write_frame_field(&mut f, 48, 50); // r8  = arg4
+            write_frame_field(&mut f, 56, 60); // r9  = arg5
+            assert_eq!(read_syscall_arg(&f, 0), 10);
+            assert_eq!(read_syscall_arg(&f, 1), 20);
+            assert_eq!(read_syscall_arg(&f, 2), 30);
+            assert_eq!(read_syscall_arg(&f, 3), 40);
+            assert_eq!(read_syscall_arg(&f, 4), 50);
+            assert_eq!(read_syscall_arg(&f, 5), 60);
+        }
+    }
+
+    #[test]
+    fn read_frame_ip_from_offset_160() {
+        let mut f = frame_default();
+        unsafe {
+            write_frame_field(&mut f, 160, 0x401000);
+            assert_eq!(read_frame_ip(&f), 0x401000);
+        }
+    }
+
+    #[test]
+    fn write_frame_ip_writes_to_offset_160() {
+        let mut f = frame_default();
+        unsafe {
+            write_frame_ip(&mut f, 0x401000);
+            assert_eq!(read_frame_field(&f, 160), 0x401000);
+        }
+    }
+
+    #[test]
+    fn set_initial_regs_sets_rcx_r11_rsp_rdi() {
+        let mut f = frame_default();
+        unsafe {
+            set_initial_regs(&mut f, 0x401000, 0x7FFF_F000, 0x7FFF_F000);
+            // rcx (offset 16) = entry
+            assert_eq!(read_frame_field(&f, 16), 0x401000);
+            // r11 (offset 72) = PSL_USERSET = 0x0202
+            assert_eq!(read_frame_field(&f, 72), 0x0202);
+            // rsp (offset 168) = stack pointer
+            assert_eq!(read_frame_field(&f, 168), 0x7FFF_F000);
+            // rdi (offset 40) = arg0
+            assert_eq!(read_frame_field(&f, 40), 0x7FFF_F000);
+        }
+    }
+
+    #[test]
+    fn copy_frame_copies_all_256_bytes() {
+        let mut src = frame_default();
+        let mut dst = frame_default();
+        unsafe {
+            write_frame_field(&mut src, 0, 0x1234);
+            write_frame_field(&mut src, 200, 0x5678);
+            copy_frame(&mut dst, &src);
+        }
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn trapframe_mcontext_roundtrip_preserves_regs() {
+        let mut f = frame_default();
+        unsafe {
+            write_frame_field(&mut f, 0, 0xAAAA); // rax
+            write_frame_field(&mut f, 160, 0xBBBB); // rip
+            write_frame_field(&mut f, 168, 0xCCCC); // rsp
+
+            let mc = trapframe_to_mcontext(&f);
+            assert_eq!(mc.mc_rax, 0xAAAA);
+            assert_eq!(mc.mc_rip, 0xBBBB);
+            assert_eq!(mc.mc_rsp, 0xCCCC);
+
+            let mut f2 = frame_default();
+            mcontext_to_trapframe(&mut f2, &mc);
+            assert_eq!(f2, f);
+        }
+    }
+
+    #[test]
+    fn frame_field_out_of_bounds_panics() {
+        let mut f = frame_default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unsafe { write_frame_field(&mut f, 252, 0) };
+        }));
+        assert!(result.is_err(), "offset 252+8 > 256 should panic");
     }
 }

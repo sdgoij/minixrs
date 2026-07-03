@@ -2045,7 +2045,10 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Added RISC-V `ecall` versions with `#[cfg(target_arch = "riscv64")]`
   - Added `_start` entry for both architectures
   - Gated `pause`/`wfi` in `exit()` spin-loop
-  - x86_64 build unchanged; RISC-V targets can now compile minix-rt
+  - +13 HAL unit tests for read_syscall_arg, write_retval, set_initial_regs,
+    copy_frame, trapframe/mcontext round-trip, and frame field accessors
+  - Fixed unused import warning in kernel-boot main.rs
+  - **635 tests pass, `cargo clippy -- -D warnings` clean**
 
 ### Implementation Plan — 19.1 onward
 

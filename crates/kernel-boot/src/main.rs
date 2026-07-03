@@ -9,7 +9,8 @@
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-use kernel_boot::*;
+#[cfg(not(test))]
+use kernel_boot::{boot_init, serial_write};
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
@@ -154,7 +155,7 @@ pub extern "C" fn kmain() -> ! {
     {
         serial_write("Running integration tests...\r\n");
         // This never returns — calls qemu_exit_success/failure
-        test_runner::run_integration_tests();
+        kernel_boot::test_runner::run_integration_tests();
     }
 
     #[cfg(not(feature = "integration-tests"))]
