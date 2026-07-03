@@ -400,6 +400,15 @@ pub unsafe fn read_fault_addr() -> u64 {
     addr
 }
 
+/// Read the current frame pointer (RISC-V: s0 register).
+pub fn read_frame_pointer() -> u64 {
+    let fp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, s0", out(reg) fp, options(nomem, nostack));
+    }
+    fp
+}
+
 /// Allocate a physical page.
 ///
 /// # Safety

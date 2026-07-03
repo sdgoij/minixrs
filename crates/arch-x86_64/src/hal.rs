@@ -610,6 +610,15 @@ pub unsafe fn read_fault_addr() -> u64 {
     unsafe { crate::asm::read_cr2() }
 }
 
+/// Read the current frame pointer (x86_64: RBP register).
+pub fn read_frame_pointer() -> u64 {
+    let fp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
+    }
+    fp
+}
+
 // ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
 
 /// Read a byte from an I/O port.

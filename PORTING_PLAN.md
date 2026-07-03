@@ -2402,10 +2402,11 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
 ### debug.rs — Stack tracing (LOW priority)
 
-- [ ] **19.x.10 — Abstract RBP read for stack trace**
+- [x] **19.x.10 — Abstract RBP read for stack trace**
   - `proc_stacktrace` uses `#[cfg(target_arch = "x86_64")]` inline asm
     to read RBP. RISC-V would read `s0` (frame pointer).
-  - **Fix**: Add `hal::read_frame_pointer() -> u64`.
+  - **Fix**: Add `hal::read_frame_pointer() -> u64` (RBP on x86_64,
+    `s0` on RISC-V). Remove the `#[cfg]` gate from debug.rs.
 
 ### smp.rs — CPU ID (LOW priority)
 

@@ -598,14 +598,8 @@ pub unsafe fn proc_stacktrace(rp: *const Proc) {
         // Walk the kernel RBP chain.
         // On x86_64, kernel functions push rbp; mov rbp, rsp at entry.
         // Since the kernel stack is identity-mapped, we can read directly.
-        // The caller's stack frame is where we start; read RBP via inline asm.
-        let mut rbp: u64;
-        #[cfg(target_arch = "x86_64")]
-        core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            rbp = 0;
-        }
+        // The caller's stack frame is where we start; read RBP via HAL.
+        let mut rbp = crate::hal::read_frame_pointer();
 
         append_kmess(b"  Stack trace:\n");
 
