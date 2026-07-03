@@ -72,18 +72,6 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
         match code {
             cause::ECALL_UMODE => {
                 let nr = u64::from_ne_bytes(frame[136..144].try_into().unwrap());
-                // Use UART MMIO for diagnostics (avoid ecall from trap handler)
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'[');
-                }
-                // Print low 8 bits of syscall number as hex
-                let lo = (nr & 0xFF) as u8;
-                let hex = b"0123456789abcdef";
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, hex[(lo >> 4) as usize]);
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, hex[(lo & 0xF) as usize]);
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b']');
-                }
                 let args = [
                     u64::from_ne_bytes(frame[80..88].try_into().unwrap()),
                     u64::from_ne_bytes(frame[88..96].try_into().unwrap()),
@@ -96,17 +84,6 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     Some(handler) => unsafe { handler(nr as usize, &args) },
                     None => -38,
                 };
-                // Print return value via UART MMIO
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'<');
-                    let r = ret as u64;
-                    let hex = b"0123456789abcdef";
-                    for i in (0..4).rev() {
-                        let nibble = ((r >> (i * 4)) & 0xF) as usize;
-                        core::ptr::write_volatile(0x10000000usize as *mut u8, hex[nibble]);
-                    }
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'>');
-                }
                 frame[80..88].copy_from_slice(&ret.to_ne_bytes());
             }
             cause::INSTR_PAGE_FAULT | cause::LOAD_PAGE_FAULT | cause::STORE_PAGE_FAULT => {

@@ -61,6 +61,10 @@ trap_vector:
     sd      t0, 256(sp)
     csrr    t0, sstatus
     sd      t0, 264(sp)
+    # Set SUM=1 in sstatus so S-mode can access user pages (for IPC copy).
+    # The original sstatus with SUM=0 is saved at offset 264 and restored on return.
+    li      t0, 0x40000              # SUM bit = bit 18
+    csrs    sstatus, t0
     csrr    t0, scause
     sd      t0, 272(sp)
 

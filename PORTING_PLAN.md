@@ -2400,40 +2400,48 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     handler instead of causing a double-fault loop. Trap handler
     correctly reports stval and sepc via UART.
 
-- [ ] **19.25 — Debug user code load page fault at stack access**
-  After the sscratch swap fix, the trap handler correctly catches the
-  first user-mode exception: a load page fault at VA 0x8FE0FFD0 when
-  PM executes `ld a0, 0(sp)`. The stack PTEs are verified to have
-  correct V|R|W|U flags. Investigation needed:
+- [x] **19.25 — Fix supervisor interrupt firing before sret (SIE=0)**
+  The `set_initial_regs` function wrote sstatus value 0x222 to the
+  initial trap frame, which has SIE=1 (bit 1). When `switch_to_user`
+  executed `csrw sstatus, t0` with SIE=1, a pending timer interrupt
+  (from SSTC stimecmp) fired IMMEDIATELY after the csrw, before the
+  `sret` instruction. This overwrote sepc with the sret instruction's
+  address (0x8020xxxx). After the interrupt handler returned, sret
+  used the overwritten sepc, jumping to itself in U-mode — causing
+  an exec_page_fault since kernel pages lack the U bit.
 
-  - The L0 PTEs for all 16 stack pages have user_flags (flags 0xDF
-    = V|R|W|X|U|A|D). The physical addresses are contiguous.
-  - The fault is NOT delegated (medeleg bit 13 = 0), so it goes to
-    M-mode first, where OpenSBI re-injects it to S-mode.
-  - The re-injected trap has sepc=0x1000000 and stval=0x8FE0FFD0,
-    confirming the user code IS running and IS trying to load from
-    the stack. The question is WHY the load faults if the PTE is
-    valid.
+  **Root cause:** SIE=1 in sstatus before sret. The sret instruction
+  atomically copies SPIE to SIE, enabling interrupts AFTER the mode
+  switch to U-mode. SIE must be 0 before sret.
 
-  **Possible causes to investigate:**
-  - Though L0[15] shows user_flags, the TWo 4KB-levels between the
-    PD (L1) branches might have stale entries
-  - The initial SP (0x8FE0FFD0) might be in a page that was not
-    properly zeroed or has a stale identity map entry
-  - The trap handler's UART MMIO write at 0x10000000 might fault,
-    causing a SECONDARY fault that overwrites the original CSR state
+  **Fix:** Changed sstatus value from 0x222 (SIE|SPIE) to
+  SPIE|FS_INITIAL = 0x2020 (SIE=0). Updated `PSL_USERSET` constant
+  in psl.rs to match. Added diagnostic comment in hal.rs.
 
-  - Deliverable: user process executes its first instruction without fault
+  **Also added:** Set sstatus.SUM=1 (bit 18) in trap_vector after
+  saving the original sstatus, so S-mode trap handler code can
+  access user pages for IPC message copy.
+
+  **Files changed:**
+    - `hal.rs`: sstatus value (SIE=0) in set_initial_regs
+    - `psl.rs`: PSL_USERSET definition (SIE=0)
+    - `trap_asm.rs`: set SUM=1 after saving sstatus
+    - `trap.rs`: remove diagnostic UART characters from ECALL handler
+
+  - Deliverable: PM's first RECEIVE syscall (nr=47) is handled
+    correctly. The kernel dispatches to the IPC handler and returns
+    to userspace without crashing. The `[2f]` diagnostic confirms
+    syscall processing.
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
 | M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching |
 | M-RV3 ✅ | Trap handler catches faults | Page faults print `!PF` via UART |
-| M-RV4 🏗️ | User process runs without page fault | First user instruction executes cleanly |
-| M-RV5 | Shell prompt (`#`) | Full boot to shell |
-| M-RV6 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
-| M-RV7 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
+| M-RV4 ✅ | First user-mode syscall (RECEIVE) succeeds | `[2f]` output shows syscall 47 handled |
+| M-RV5 🏗️ | Full boot sequence (PM/RS/VFS/init) to shell | Multi-process scheduling with IPC |
+| M-RV6 | Shell prompt (`#`) | Full boot to shell |
+| M-RV7 | External commands work | fork/exec support |
 
 **Stretch goals (after M-RV3):**
 - Run the x86_64 userland binaries (same initramfs, different ELF target)

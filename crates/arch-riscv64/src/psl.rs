@@ -38,8 +38,10 @@ pub mod sie {
     pub const SEIE: u64 = 1 << 9;
 }
 
-/// Default sstatus value for user space (interrupts enabled, U-mode, FS=initial).
-pub const PSL_USERSET: u64 = sstatus::SIE | sstatus::SPIE | sstatus::FS_INITIAL;
+/// Default sstatus value for user space (interrupts enabled after sret, U-mode, FS=initial).
+/// SIE=0 is CRITICAL: prevents supervisor interrupts from firing between `csrw sstatus`
+/// and `sret` in switch_to_user. The sret atomically copies SPIE to SIE.
+pub const PSL_USERSET: u64 = sstatus::SPIE | sstatus::FS_INITIAL;
 
 /// Default sstatus for kernel mode (interrupts disabled, S-mode, FS=initial).
 pub const PSL_KERNELSET: u64 = sstatus::SPP | sstatus::FS_INITIAL;

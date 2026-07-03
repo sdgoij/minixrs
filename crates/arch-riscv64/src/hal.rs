@@ -220,13 +220,18 @@ pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg:
     // sepc = entry (stored at offset 0 = x0 slot, never loaded as GPR)
     // sp = stack pointer (x2 at offset 16)
     // a0 = arg (x10 at offset 80) = 0
-    // sstatus = PSL_USERSET (SIE=1, SPIE=1, FS=initial) stored at offset 248 (t6 slot)
-    //   bit 1=SIE, bit 5=SPIE => after sret: SIE=1 (ints enabled), SPP=0 (U-mode)
+    // sstatus = SPIE | FS_INITIAL (SIE=0, SPIE=1, SPP=0, FS=initial)
+    // SIE=0 is CRITICAL: prevents supervisor interrupts from firing between
+    // `csrw sstatus` and `sret` in switch_to_user.
     unsafe {
         write_frame_field(frame, 0, entry); // sepc in x0 slot
         write_frame_field(frame, 16, sp); // sp (x2 at offset 16)
         write_frame_field(frame, 80, 0); // a0 (x10) = 0
-        write_frame_field(frame, 248, 0x0000000000000222); // sstatus in t6 slot
+        write_frame_field(
+            frame,
+            248,
+            crate::psl::sstatus::SPIE | crate::psl::sstatus::FS_INITIAL,
+        ); // sstatus: SIE=0, SPIE=1
     }
 }
 
