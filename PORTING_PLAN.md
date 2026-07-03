@@ -1901,85 +1901,375 @@ _not_ being used — its ISR reads back 0x00.
 
 ---
 
-## Phase 19: RISC-V64 Architecture (Bonus Challenge)
+## Phase 19: RISC-V64 Architecture
 
-**Goal**: Implement a RISC-V64 architecture layer for the port. This is a bonus because Minix 3.3.0 has no RISC-V support — everything must be designed from scratch.
+**Goal**: Add RISC-V64 as a second target architecture alongside x86_64.
+The kernel must compile for both `x86_64-pc-minix` and `riscv64gc-unknown-minix`
+from the same source, with architecture-specific code cleanly separated.
 
-### RISC-V64 considerations:
+**Target platform:** QEMU `virt` machine (`qemu-system-riscv64 -M virt`)
+- SBI 1.0 (Supervisor Binary Interface) for console, reset, timer
+- CLINT (Core-Local Interrupt Controller) for timer interrupts
+- PLIC (Platform-Level Interrupt Controller) for device interrupts
+- NS16550a UART at 0x10000000
+- Virtio block/network (future)
 
-| Area | x86_64 (Phase 8) | RISC-V64 (Phase 19) |
-|------|-------------------|----------------------|
-| **Boot** | Multiboot2/UEFI | Device tree + bootloader (QEMU SBI) |
-| **Syscall** | `syscall` instruction | `ecall` instruction |
-| **Page tables** | 4-level paging | SV39 (3-level) or SV48 (4-level) |
-| **Registers** | 16 general + SSE | 32 general + CSR |
-| **Interrupts** | APIC/x2APIC | PLIC (Platform Level Interrupt Controller) |
-| **Stack** | Fixed kernel stack | Per-CPU stack with shadow stack |
-| **MMU** | PTE/PDE | PTE/PMD/PUD (SV39) |
+**Reference ports in `.refs/minix-3.3.0`:**
+- `minix/kernel/arch/earm/` — ARM trap handling, context switch, page tables
+- `sys/arch/evbarm/` — ARM boot code, device tree, interrupt controller
 
-### Tasks
+### Architecture comparison
 
-- [ ] **19.1 — Create `crates/arch-riscv64/` crate**
-  - Target: `riscv64gc-unknown-minix` (GC = IMACFD = G extension)
-  - Custom JSON target spec: `riscv64gc-unknown-minix.json`
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+| Area | x86_64 | RISC-V64 |
+|------|--------|----------|
+| **Boot** | Multiboot2 → trampoline.elf | OpenSBI → kernel at 0x80200000 |
+| **Syscall** | `syscall`/`sysret` + MSRs | `ecall` + `sret` + `sepc`/`scause` CSRs |
+| **Trap entry** | IDT with 256 vectors, IST stacks | Direct `stvec` (single entry or vectored) |
+| **Registers** | 16 GPR + segment regs + RFLAGS | 32 GPR (x0–x31) + `sstatus` + `sepc` |
+| **Page tables** | 4-level (PML4→PDPT→PD→PT), 48-bit VA | SV39 (3-level), 39-bit VA (or SV48) |
+| **PTE flags** | Present, R/W, U/S, NX, Global | V, R, W, X, U, G, A, D |
+| **TLB mgmt** | `invlpg` / CR3 write | `sfence.vma` |
+| **Interrupts** | APIC (MSR + MMIO), 16 IRQs | CLINT (MSI-like) + PLIC (MMIO), 53 IRQs |
+| **Per-CPU** | `swapgs` + GS segment | `tp` register (x4) |
+| **Atomics** | `lock cmpxchg`, `mfence` | `lr.d`/`sc.d`, `fence` |
+| **Port I/O** | `in`/`out` instructions | MMIO only (no separate I/O space) |
+| **Floating point** | SSE via FXSAVE/FXRSTOR | F/D extensions via `fscsr`/`frcsr` |
+| **Context save** | 14 regs pushed by syscall_entry | All 32 regs + sepc/sstatus pushed by handler |
 
-- [ ] **19.2 — Port/Adapt Minix config headers for RISC-V**
-  - Source: `.refs/minix-3.3.0/minix/include/minix/sys_config.h` (configuration)
-  - Adapt `param.h`, `vmparam.h` for RISC-V:
-  - PAGE_SIZE = 4096, VM_USER_R/VM_USER_W/VM_USER_X regions
-  - Virtual address layout: kernel at 0x80000000, user space below
-  - Stack frame layout for RISC-V
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+### Prerequisite: Architectural abstraction (must be done first)
 
-- [ ] **19.3 — Implement RISC-V64 boot code**
-  - Device tree parsing (DTB)
-  - Multi-hart boot (SBI calls)
-  - Page table setup (SV39)
-  - Enable MMU and paging
-  - Source: adapt `.refs/minix-3.3.0/sys/arch/evbarm/` boot pattern
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+Before any RISC-V code is written, the kernel crate must be made
+architecture-agnostic. Currently it has hard dependencies on `arch-x86_64`.
 
-- [ ] **19.4 — Implement RISC-V64 low-level primitives**
-  - Assembly: `switch.S` (context switch), `idt.S` (trap table), `cpulocals.S`
-  - Rust: trap handler, interrupt controller (PLIC)
-  - `mret`/`sret` for returning from traps
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+**19.0a — Gate arch deps behind `cfg(target_arch)`** (`kernel/Cargo.toml`,
+`kernel-boot/Cargo.toml`)
+- `kernel/Cargo.toml`: move `arch-x86_64` to
+  `[target.'cfg(target_arch = "x86_64")'.dependencies]`, same for riscv64
+- `kernel-boot/Cargo.toml`: same treatment
+- `minix-rt/Cargo.toml`: no arch deps needed (syscall asm is inline)
+- **Test:** `cargo check -p kernel` still compiles for x86_64
+- **Test:** `cargo check -p kernel --target riscv64*` succeeds (no x86_64
+  symbols pulled in)
 
-- [ ] **19.5 — Implement RISC-V64 memory management**
-  - Page table management (SV39)
-  - TLB management
-  - Physical memory allocator for RISC-V
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+**19.0b — Extract `Hal` trait for init/serial/halt** (`kernel/src/hal.rs` new,
+`kernel/src/lib.rs`)
+```rust
+// kernel/src/hal.rs
+pub trait Hal {
+    fn init();
+    fn halt() -> !;
+    fn serial_write(s: &str);
+    fn serial_read_byte() -> u8;
+    fn serial_byte_available() -> bool;
+}
+```
+- `kernel/src/lib.rs`: replace `arch_x86_64::init()` → `Hal::init()`,
+  dispatch via `cfg!(target_arch = "x86_64")` or a static `HAL` vtable
+- The `cfg`-gated `impl Hal for X86_64Hal` lives in `arch-x86_64/src/lib.rs`
+- `kernel/src/ser_input.rs`: replace `in`/`out` port I/O → `Hal::serial_*`
+- **Test:** kernel compiles, boots, serial still works on x86_64
 
-- [ ] **19.6 — Implement RISC-V64 syscall ABI**
-  - `ecall` entry/exit
-  - Register mapping (A0-A7 for args, A0/A1 for return)
-  - Signal return via `mret`/`sret`
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+**19.0c — Abstract `TrapFrame`** (`kernel/src/proc.rs`, `system.rs`)
 
-- [ ] **19.7 — RISC-V64 device driver support**
-  - PLIC (interrupt controller)
-  - UART (serial console)
-  - Virtio devices (disk, net)
-  - Source: `.refs/minix-3.3.0/minix/drivers/` (port existing drivers with RISC-V adaptations)
-  - Tests: Kernel boots in QEMU riscv64; IPC round-trip; fork/exec works; all milestones M1-M12 pass on RISC-V
+This is the biggest coupling point. `Proc` embeds
+`arch_x86_64::frame::TrapFrame` directly. Three approaches:
 
-- [ ] **19.8 — Test RISC-V64 boot in QEMU**
-  - QEMU `qemu-system-riscv64 -M virt` boot test
-  - All milestones M1-M12 pass on RISC-V
+| Approach | Complexity | Type safety | Notes |
+|----------|-----------|-------------|-------|
+| **A — Raw bytes** | Low (2h) | Medium | `p_reg: [u8; MAX_TRAPFRAME_SIZE]`, arch provides typed accessors |
+| **B — Generic `Proc<A: Arch>`** | High (major refactor) | High | Monomorphizes entire kernel, binary bloat |
+| **C — Trait object vtable** | Medium (4h) | Medium | `p_reg: Box<dyn TrapFrame>` dynamic dispatch |
 
----
+**Recommendation: Approach A** — practical, minimal churn, proven pattern
+(original Minix i386 uses the same raw-byte approach between i386 and ARM):
 
-### Bonus challenge scope for RISC-V
+```rust
+// kernel/src/proc.rs
+pub struct Proc {
+    /// Register save area. Size is max(sizeof(x86_64 TrapFrame), sizeof(RISCV TrapFrame)).
+    /// Currently 184 bytes (x86_64). RISC-V needs ~256 bytes.
+    pub p_reg: [u8; 256],
+    // ... rest of Proc unchanged
+}
+```
 
-This phase is **roughly equivalent to Phases 2 + 8 combined** (~8 weeks for a single developer), but with the twist that no Minix 3.3.0 source exists for RISC-V — everything is new design work inspired by:
-- Minix 3.3.0 ARM code (`.refs/minix-3.3.0/sys/arch/evbarm/`, `.refs/minix-3.3.0/minix/kernel/arch/earm/`) as architectural reference
-- RISC-V spec ( privileged architecture spec for traps, MMU, PLIC)
-- QEMU RISC-V machine `virt` as the target platform
-- Linux RISC-V kernel for comparison on boot process, page tables, and traps
+Each arch crate provides:
+```rust
+// arch-x86_64/src/frame.rs
+impl X86_64Hal {
+    /// Read syscall arg 0 (rdi) from a raw TrapFrame
+    pub unsafe fn read_arg0(frame: &[u8; 256]) -> u64 { /* read bytes 16-23 */ }
+    pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64) { /* write bytes 0-7 */ }
+}
+```
 
----
+Files affected:
+- `kernel/src/proc.rs` — `TrapFrame` → `[u8; 256]`, update `Default`
+- `kernel/src/system.rs` — `use arch_x86_64::frame::TrapFrame` → use accessors
+- `kernel/src/syscall.rs` — all `frame.rax` → `Hal::read_arg0(&frame)`
+- `kernel/src/sched.rs` — context save/restore → arch-provided
+- **Ripple check:** ~20 files in kernel reference `p_reg` fields
+
+**19.0d — Split `kernel-boot` into shared lib + per-arch binaries**
+
+```
+crates/kernel-boot/
+  src/
+    lib.rs              ← shared: ELF loading, boot_init, process setup
+    x86_64_main.rs      ← x86_64 boot sequence: multiboot, APIC, IDT, PIT
+    riscv64_main.rs     ← RISC-V boot sequence: SBI, CLINT, PLIC, FDT
+    test_runner.rs      ← shared integration test framework
+```
+
+- The `kmain()` entry point becomes per-arch:
+  - `kernel-boot-x86_64` binary: calls `kmain_x86_64()`
+  - `kernel-boot-riscv64` binary: calls `kmain_riscv64()`
+- Shared logic (`load_and_prepare_proc`, page table creation helpers) stays
+  in `lib.rs`
+- **Test:** `just run` still boots x86_64 to shell prompt
+
+**19.0e — `cfg`-gate inline asm in `minix-rt`** (`crates/minix-rt/src/lib.rs`)
+
+```rust
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn syscall0(nr: u64) -> i64 {
+    core::arch::asm!("syscall", ...)
+}
+
+#[cfg(target_arch = "riscv64")]
+pub unsafe fn syscall0(nr: u64) -> i64 {
+    // RISC-V syscall convention: a7 = nr, ecall
+    core::arch::asm!("ecall", in("a7") nr, ...)
+}
+```
+
+- Affects: `syscall0`–`syscall6`, `syscall2` with message pointer
+- **Test:** userland programs compile for riscv64 target
+
+### Implementation Plan — 19.1 onward
+
+**Milestone M-RV1: "Hello MINIX!" from RISC-V serial**
+
+- [ ] **19.1 — RISC-V target spec** (`riscv64gc-unknown-minix.json`)
+  - Custom target JSON: `"is-builtin": false, "cpu": "generic-rv64",
+    "features": "+m,+a,+f,+d,+c", "llvm-target": "riscv64-unknown-none",
+    "os": "none", "env": "newlib"`
+  - Double-check against existing `x86_64-pc-minix.json` for consistency
+  - Place in project root next to the x86_64 target spec
+  - **Test:** `rustc --target riscv64gc-unknown-minix.json --print cfg`
+    produces `target_arch = "riscv64"`
+
+- [ ] **19.2 — RISC-V constants and types** (`arch-riscv64/src/param.rs`,
+  `vmparam.rs`, `psl.rs`, `mcontext.rs`)
+  - `param.rs`: PAGE_SIZE=4096, KERNEL_STACK_SIZE, NR_REGS=32
+  - `vmparam.rs`: virtual address layout — kernel at 0x80000000 or higher,
+    user space at 0x00000000–0x7FFFFFFF (SV39 39-bit = 512GB)
+  - `psl.rs`: `sstatus` bit flags (SPP, SPIE, SUM, etc.), `sie` bit flags
+  - `mcontext.rs`: register save layout matching `struct sigcontext`
+  - Match the pattern from `arch-x86_64/src/param.rs` etc.
+  - **Test:** constants have expected values, no panics
+
+- [ ] **19.3 — SBI console (serial output)** (`arch-riscv64/src/sbi.rs`)
+  - SBI 1.0 legacy extensions: `sbi_console_putchar(char)`, `sbi_console_getchar()`
+  - SBI DBCN extension (1.0+): `sbi_debug_console_write()`, `sbi_system_reset()`
+  - `ecall` with `a7 = extension_id`, `a6 = function_id`, `a0-a5 = args`
+  - **Test:** call `sbi_console_putchar('H')` and see it on QEMU serial
+
+- [ ] **19.4 — Trap handler vector (assembly)** (`arch-riscv64/src/trap_asm.S`)
+  - Write raw assembly trap vector installed at `stvec`:
+  ```asm
+  .align 2
+  .globl trap_vector
+  trap_vector:
+      # Allocate trap frame on kernel stack (32 regs + sepc + sstatus + scause)
+      addi sp, sp, -272  # 34 × 8
+
+      # Save all 32 GPRs
+      sd ra, 0(sp)
+      sd sp, 8(sp)
+      sd gp, 16(sp)
+      sd tp, 24(sp)
+      # ... t0-t6, s0-s11, a0-a7 ...
+
+      # Save CSRs (sepc, sstatus, scause)
+      csrr t0, sepc
+      sd t0, 256(sp)
+      csrr t0, sstatus
+      sd t0, 264(sp)
+      csrr t0, scause
+      sd t0, 272(sp)
+
+      # Call Rust handler: trap_handler(frame_ptr)
+      mv a0, sp
+      call trap_handler
+
+      # Restore CSRs and regs, sret
+      ld t0, 256(sp)
+      csrw sepc, t0
+      ld t0, 264(sp)
+      csrw sstatus, t0
+      # restore regs...
+      ld ra, 0(sp)
+      addi sp, sp, 272
+      sret
+  ```
+  - Two entry paths:
+    - Trap from user mode (`sstatus.SPP == 0`): save to kernel stack
+    - Trap from kernel mode (`sstatus.SPP == 1`): save to current stack,
+      never re-enable (panic on nested kernel fault)
+  - **Test:** install trivial handler that writes a char via SBI and returns
+
+- [ ] **19.5 — Trap handler (Rust)** (`arch-riscv64/src/trap.rs`)
+  - Parse `scause` to determine trap type:
+    - `scause == 8` → `ecall from U-mode` → syscall dispatch
+    - `scause == 9` → `ecall from S-mode` → SBI calls (shouldn't happen)
+    - `scause < 0` → interrupt (MSB set) → timer/PLIC dispatch
+    - `scause == 12/13/15` → page fault → VM
+  - Syscall dispatch:
+    ```rust
+    pub extern "C" fn trap_handler(frame: &mut TrapFrame) {
+        let cause = scause::read();
+        match cause {
+            8 => { // ecall from U-mode
+                let nr = frame.a7;  // syscall number
+                let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
+                frame.a0 = kernel::syscall::dispatch_basic_syscall(current_proc, nr, &args);
+            }
+            // ... other trap types
+        }
+    }
+    ```
+  - **Test:** trigger `ecall` from assembly, verify dispatch works
+
+- [ ] **19.6 — Context switch** (`arch-riscv64/src/switch.rs` + assembly)
+  - `switch_to_user(proc_ptr)`: restore registers from Proc.p_reg → `sret`
+  - Following ARM pattern (`mpx.S` `restore_user_context`)
+  - **Test:** round-trip context switch: kernel → user → ecall → kernel → user
+
+- [ ] **19.7 — SV39 page tables** (`arch-riscv64/src/pagetable.rs`)
+  - `struct PageTable { root: u64 }` (physical address of root page table)
+  - Sv39: 3 levels (L0 = 4096-entry PT, L1 = PD, L2 = PML), 9 bits per level
+  - `map_page(table, vaddr, paddr, flags)` — walk/create entries, set PTE
+  - `unmap_page(table, vaddr)` — clear PTE, `sfence.vma`
+  - `switch_to(table)` — write `satp` CSR
+  - PTE flags: `V=1`, `R`, `W`, `X`, `U`, `G`, `A`, `D`
+  - **Test:** map a page, write to it, read back, verify data
+
+- [ ] **19.8 — Boot code** (`arch-riscv64/src/boot.rs` + linker script)
+  - `_start` entry point (QEMU loads kernel at 0x80200000)
+  - Read `a0` = hart ID, `a1` = DTB pointer from QEMU
+  - Parse FDT to find memory size, UART address, CLINT address
+  - Initialize physical memory allocator from FDT memory node
+  - Set up boot page table (identity map kernel at 0x80200000)
+  - Enable MMU (write `satp` with MODE=Sv39)
+  - Set `stvec` to trap vector
+  - Initialize kernel stack pointer, clear BSS
+  - Call into `kernel::init()` then boot processes
+  - Device tree parsing via `fdt` crate or manual walk
+  - **Test:** QEMU boots to serial output without crashing
+
+- [ ] **19.9 — Physical memory allocator** (`arch-riscv64/src/alloc.rs`)
+  - Same pattern as `arch-x86_64/src/alloc.rs`: bump allocator for early
+    boot, bitmap allocator for runtime
+  - Parse memory reservations from FDT (`/reserved-memory` node)
+  - **Test:** allocate and free pages
+
+- [ ] **19.10 — CLINT timer** (`arch-riscv64/src/clint.rs`)
+  - `clint_base` from FDT (typically 0x02000000 on `virt`)
+  - `mtime` register at offset 0xBFF8 (64-bit, global free-running counter)
+  - `mtimecmp` per hart at offset 0x4000 + 8 × hart_id
+  - Timer interrupt: set `mtimecmp = mtime + interval`, enable `MTIE` in `mie`
+  - **Note:** In S-mode, we can't write `mtimecmp` directly (it's M-mode).
+    Use SBI timer extension: `sbi_set_timer(stime_value)`
+  - **Test:** set timer, verify interrupt fires
+
+- [ ] **19.11 — Interrupt handling (PLIC)** (`arch-riscv64/src/plic.rs`)
+  - `plic_base` from FDT (typically 0x0C000000 on `virt`)
+  - Enable/disable IRQ sources, set priority, claim/complete
+  - UART IRQ = 10 on `virt` machine
+  - **Test:** enable UART IRQ, receive character via interrupt
+
+- [ ] **19.12 — Serial I/O (NS16550a)** (`arch-riscv64/src/uart.rs`)
+  - MMIO at 0x10000000 (from FDT)
+  - Same NS16550a UART as x86_64, but accessed via MMIO instead of `in`/`out`
+  - `read_byte()`, `write_byte(byte)`, `init()`
+  - Can share logic with `drivers:` crate if abstracted
+  - **Test:** read/write characters from QEMU serial console
+
+- [ ] **19.13 — Per-CPU data (`tp` register)** (`arch-riscv64/src/cpulocals.rs`)
+  - RISC-V uses `tp` (x4) as the thread pointer, analogous to x86_64's `GS`
+  - Point `tp` at a per-CPU structure with:
+    - `current_proc: *mut Proc` (like `arch_x86_64::cpulocals::get_cpulocal_proc_ptr`)
+    - `kernel_stack_top: u64`
+    - `cpu_id: u32`
+  - **Test:** read/write tp-relative data
+
+- [ ] **19.14 — RISC-V kernel-boot binary** (new:
+  `crates/kernel-boot-riscv64/` or `kernel-boot/src/riscv64_main.rs`)
+  - Entry point: `_start` (QEMU riscv64)
+  - Call sequence:
+    1. `arch_riscv64::boot::early_init()` — parse FDT, init allocator
+    2. `kernel::init()` — initialize subsystems (uses `Hal` trait)
+    3. `kernel::syscall::init_basic_syscalls()` — register handlers
+    4. Load boot processes from initramfs
+    5. Create per-process page tables (SV39)
+    6. Set up scheduler, `switch_to_user(first_proc)`
+  - **Test:** same output as x86_64 — "Hello MINIX!" + boot log + shell
+
+### Build system changes
+
+- [ ] **19.15 — Toolchain and build scripts**
+  - `justfile`: add `just run-riscv64` target
+  - QEMU command:
+    ```
+    qemu-system-riscv64 -machine virt -m 256M -nographic -bios none \
+      -kernel target/riscv64_trampoline.elf
+    ```
+  - Or with OpenSBI:
+    ```
+    qemu-system-riscv64 -machine virt -m 256M -nographic -bios fw_jump.bin \
+      -kernel target/riscv64_kernel.bin
+    ```
+  - `tools/mkboot.rs` — add riscv64 initramfs build path
+  - Adapt the trampoline/linker approach for RISC-V
+
+### New module structure for `arch-riscv64/src/`
+
+| File | What | Equivalent x86_64 module |
+|------|------|--------------------------|
+| `lib.rs` | Module declarations, `impl Hal for RiscV64Hal` | `arch-x86_64/src/lib.rs` |
+| `param.rs` | Architecture parameters (page size, stack sizes) | `param.rs` |
+| `vmparam.rs` | Virtual memory layout constants | `vmparam.rs` |
+| `sbi.rs` | SBI call wrappers (ecall) | *(none — platform-specific)* |
+| `trap_asm.S` | Trap vector, save/restore, ecall entry/exit | `asm.rs` (syscall_entry, etc.) |
+| `trap.rs` | Trap handler dispatch (scause → handler) | `interrupt.rs` + `idt.rs` |
+| `switch.rs` | Context switch assembly stubs | `asm.rs` (restore) |
+| `pagetable.rs` | SV39 page table management | `pte.rs` + `pagetable` (kernel) |
+| `alloc.rs` | Physical memory allocator | `alloc.rs` |
+| `clint.rs` | CLINT timer driver | `apic.rs` (timer part) |
+| `plic.rs` | PLIC interrupt controller | `apic.rs` (IRQ part) |
+| `uart.rs` | NS16550a MMIO serial driver | *(in kernel-boot main.rs inline)* |
+| `cpulocals.rs` | Per-CPU data via `tp` register | `cpulocals.rs` |
+| `boot.rs` | `_start`, FDT parsing, MMU enable | *(in kernel-boot main.rs)* |
+| `mcontext.rs` | Signal context layout | `mcontext.rs` |
+| `psl.rs` | CSR bit definitions | `psl.rs` (RFLAGS) |
+| `frame.rs` | TrapFrame type + accessors | `frame.rs` |
+
+### Test milestones
+
+| Milestone | What boots | How to test |
+|-----------|-----------|-------------|
+| M-RV1 | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
+| M-RV2 | Boot process loading (PM + RS + VFS + init) | Serial shows loading messages |
+| M-RV3 | Shell prompt (`#`) with built-in commands | Type `echo hello` → `hello` |
+| M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
+| M-RV5 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
+
+**Stretch goals (after M-RV3):**
+- Run the x86_64 userland binaries (same initramfs, different ELF target)
+- RISC-V MFS + VFS for filesystem-backed binaries
+- RISC-V TTY server for keyboard input
+
 
 ## Phase 9: File System Servers
 
