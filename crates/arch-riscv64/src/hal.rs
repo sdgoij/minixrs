@@ -298,6 +298,35 @@ pub const fn pt_index(va: u64, level: u32) -> usize {
     ((va >> (12 + level * 9)) & 0x1FF) as usize
 }
 
+/// PTE flag: present / valid bit.
+pub const fn pte_present() -> u64 {
+    pte::PTE_V
+}
+/// PTE flag: writable (RISC-V: requires both R+W for writable).
+pub const fn pte_writable() -> u64 {
+    pte::PTE_W
+}
+/// PTE flag: user-accessible.
+pub const fn pte_user() -> u64 {
+    pte::PTE_U
+}
+/// PTE flag: large page indicator (SV39: PTE at upper level with R/W/X).
+pub const fn pte_large_page() -> u64 {
+    0 // RISC-V uses level + R/W/X bits; no dedicated flag bit
+}
+/// PTE flag: global page.
+pub const fn pte_global() -> u64 {
+    pte::PTE_G
+}
+/// Physical address page mask (bits 10-53, 44-bit PPN).
+pub const fn pte_frame_mask() -> u64 {
+    pte::PTE_PPN_MASK
+}
+/// Lower PTE flags mask (bits 0-9, 10-bit flags).
+pub const fn pte_flags_mask() -> u64 {
+    pte::PTE_FLAGS_MASK
+}
+
 pub const MAP_PRESENT: u64 = pte::PTE_V;
 pub const MAP_WRITE: u64 = pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;

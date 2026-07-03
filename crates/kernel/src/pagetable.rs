@@ -31,14 +31,14 @@ pub const fn pt_l0_index(va: u64) -> usize {
     crate::hal::pt_index(va, 0)
 }
 
-// PTE bit masks (x86_64)
-pub const PG_P: u64 = 0x0000000000000001;
-pub const PG_RW: u64 = 0x0000000000000002;
-pub const PG_U: u64 = 0x0000000000000004;
-pub const PG_PS: u64 = 0x0000000000000080;
-pub const PG_G: u64 = 0x0000000000000100;
-pub const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
-pub const PG_PTEMASK: u64 = 0x0000000000000FFF;
+// PTE bit masks (now delegated to HAL so pagetable.rs is arch-agnostic)
+pub const PG_P: u64 = crate::hal::pte_present();
+pub const PG_RW: u64 = crate::hal::pte_writable();
+pub const PG_U: u64 = crate::hal::pte_user();
+pub const PG_PS: u64 = crate::hal::pte_large_page();
+pub const PG_G: u64 = crate::hal::pte_global();
+pub const PG_FRAME: u64 = crate::hal::pte_frame_mask();
+pub const PG_PTEMASK: u64 = crate::hal::pte_flags_mask();
 
 /// Return the saved CR3 value for a process, or 0 if the process has no
 /// per-process page table.

@@ -2331,7 +2331,7 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     `hal::pt_index(va: u64, level: u32) -> usize`, and `hal::PtEntry`
     type alias.
 
-- [ ] **19.x.2 — Abstract PTE flag constants**
+- [x] **19.x.2 — Abstract PTE flag constants**
   - `PG_P`, `PG_RW`, `PG_U`, `PG_PS`, `PG_G`, `PG_FRAME`, `PG_PTEMASK`
     are x86_64-specific bit positions. RISC-V SV39 uses different bit
     layouts (V/R/W/X/U/G/A/D).

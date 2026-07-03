@@ -526,6 +526,35 @@ pub const fn pt_index(va: u64, level: u32) -> usize {
     ((va >> (12 + level * 9)) & 0x1FF) as usize
 }
 
+/// PTE flag: present / valid bit.
+pub const fn pte_present() -> u64 {
+    0x0000000000000001 // PG_P
+}
+/// PTE flag: writable.
+pub const fn pte_writable() -> u64 {
+    0x0000000000000002 // PG_RW
+}
+/// PTE flag: user-accessible.
+pub const fn pte_user() -> u64 {
+    0x0000000000000004 // PG_U
+}
+/// PTE flag: large page (2MB / 1GB).
+pub const fn pte_large_page() -> u64 {
+    0x0000000000000080 // PG_PS
+}
+/// PTE flag: global page (not flushed on CR3 write).
+pub const fn pte_global() -> u64 {
+    0x0000000000000100 // PG_G
+}
+/// Physical address page mask (bits 12-51).
+pub const fn pte_frame_mask() -> u64 {
+    0x000FFFFFFFFFF000 // PG_FRAME
+}
+/// Lower PTE flags mask (bits 0-11).
+pub const fn pte_flags_mask() -> u64 {
+    0x0000000000000FFF // PG_PTEMASK
+}
+
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
 pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW
