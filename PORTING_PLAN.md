@@ -2015,17 +2015,13 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ---
 
-**19.0.5 — Spinlock abstraction** (`kernel/src/grants.rs`, `ipc.rs`, `sched.rs`)
-
-Replace `arch_x86_64::spinlock::*` with a simple `core::sync::atomic::*
-`-based spinlock or hal-provided spinlock. RISC-V uses `lr.d`/`sc.d`
-instead of `lock cmpxchg`, but `core::sync::atomic::AtomicBool` with
-`spin_loop_hint()` works on both.
-
-**Files changed:**
-- `kernel/src/grants.rs` — replace spinlock import
-- `kernel/src/ipc.rs` — replace spinlock import
-- `kernel/src/sched.rs` — replace spinlock import
+- [x] **19.0.5 — Spinlock abstraction** (`kernel/src/smp.rs`)
+  - Added `hal::bkl_lock()` / `hal::bkl_unlock()` wrapping arch BKL
+  - `smp.rs`: replaced `arch_x86_64::spinlock::bkl_*` with
+    `crate::hal::bkl_*`
+  - `grants.rs`, `ipc.rs`, `sched.rs` no longer import spinlock
+    (already cleaned in 19.0.2/19.0.3)
+  - 622 tests pass, `cargo clippy -- -D warnings` clean
 
 ---
 

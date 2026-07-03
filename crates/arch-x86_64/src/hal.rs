@@ -159,6 +159,25 @@ impl Default for Spinlock {
     }
 }
 
+/// Acquire the Big Kernel Lock (BKL).
+///
+/// # Safety
+///
+/// Must be paired with a subsequent `bkl_unlock()`. Nested locking is
+/// not supported and will deadlock.
+pub unsafe fn bkl_lock() {
+    unsafe { crate::spinlock::bkl_lock() }
+}
+
+/// Release the Big Kernel Lock (BKL).
+///
+/// # Safety
+///
+/// Must be called from the same context that acquired the lock.
+pub unsafe fn bkl_unlock() {
+    unsafe { crate::spinlock::bkl_unlock() }
+}
+
 // ── TrapFrame accessors (raw [u8; 256] helpers) ──────────────────────────
 
 // x86_64 TrapFrame byte offsets (each field is 8 bytes):

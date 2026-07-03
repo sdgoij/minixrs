@@ -9,8 +9,8 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::hal::{bkl_lock, bkl_unlock};
 use arch_x86_64::hw::hlt;
-use arch_x86_64::spinlock::{bkl_lock, bkl_unlock};
 
 use crate::proc::{Proc, RtsFlags};
 
