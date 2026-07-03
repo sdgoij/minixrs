@@ -2460,6 +2460,20 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Deliverable: `just run-riscv64` boots to `init: booting MINIX/Rust`
     with 400k+ ECALLs processed across all 4 boot servers.
 
+- [ ] **19.27 — Port exec_initramfs_for_target to RISC-V**
+  The `exec_replace` syscall is used by init to start /bin/sh. The
+  current implementation in `syscall.rs` is x86_64-specific (4-level
+  page tables, x86_64 TrapFrame offsets). On RISC-V it returns ENOSYS.
+
+  **Required changes:**
+    - Use SV39 page table creation (3-level L2→L1→L0)
+    - Write correct RISC-V p_reg offsets (sepc at 0, sp at 16,
+      sstatus at 248)
+    - Use RISC-V user stack base: 0x8FE00000 (not 0x0FE00000)
+    - Handle BOOT_CR3 correctly for SV39 identity map
+
+  - Deliverable: `init: starting shell...` followed by `# ` shell prompt
+
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
@@ -2467,8 +2481,9 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 | M-RV3 ✅ | Trap handler catches faults | Page faults print `!PF` via UART |
 | M-RV4 ✅ | First user-mode syscall (RECEIVE) succeeds | ECALL handler dispatches correctly |
 | M-RV5 ✅ | Full multi-process boot (PM/RS/VFS/init) | `init: booting MINIX/Rust` printed |
-| M-RV6 🏗️ | Shell prompt (`#`) | init exec's /bin/sh after boot |
-| M-RV7 | External commands work | fork/exec support |
+| M-RV6 ✅ | ECALL sepc increment (prevents ecall loop) | `init: pid=10; starting shell...` |
+| M-RV7 🏗️ | Shell prompt (`#`) | init exec's /bin/sh after boot |
+| M-RV8 | External commands work | fork/exec support |
 
 **Stretch goals (after M-RV3):**
 - Run the x86_64 userland binaries (same initramfs, different ELF target)

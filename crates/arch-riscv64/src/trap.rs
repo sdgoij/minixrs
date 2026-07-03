@@ -99,6 +99,12 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     None => -38,
                 };
                 frame[80..88].copy_from_slice(&ret.to_ne_bytes());
+                // Increment sepc by 4 to skip the ecall instruction.
+                // On RISC-V, ecall sets sepc to the ecall instruction's
+                // address (unlike x86_64 syscall which returns to the
+                // instruction after syscall).
+                let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
+                frame[256..264].copy_from_slice(&(sepc + 4).to_ne_bytes());
                 // Post-syscall hook: if current process blocked (IPC), switch.
                 if let Some(hook) = unsafe { POST_SYSCALL_HOOK } {
                     unsafe { hook(frame) };

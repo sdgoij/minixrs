@@ -488,6 +488,12 @@ unsafe fn sys_ipc_notify_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
 /// Helper: load a binary from initramfs and apply it to a target process.
 /// Returns 0 on success, negative error code on failure.
 unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i64 {
+    #[cfg(target_arch = "riscv64")]
+    {
+        // RISC-V exec not yet implemented (uses x86_64-specific page table
+        // layout and register offsets). Returns ENOSYS for now.
+        return -38i64;
+    }
     unsafe {
         let (data, _mode) = match crate::initramfs::find_initramfs_file(path) {
             Some(d) => d,
@@ -628,6 +634,7 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
     }
 }
 
+/// SYS_exec_replace (61) — replace current process with a new binary
 /// SYS_EXEC_REPLACE (61) — replace the current process with a binary from initramfs.
 unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     unsafe {
