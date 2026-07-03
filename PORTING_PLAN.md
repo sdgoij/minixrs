@@ -2236,17 +2236,18 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ### M-RV2 Implementation — RISC-V Process Loading
 
-- [ ] **19.17 — SV39 page table walk and mapping** (`kernel/src/pagetable.rs`)
+- [x] **19.17 — SV39 page table walk and mapping** (`kernel/src/pagetable.rs`)
   - Current `pagetable.rs` has hardcoded x86_64 4-level walk (PML4→PDPT→PD→PT)
     with `pml4_index`, `pdpt_index`, `pd_index`, `pt_index`
   - RISC-V SV39 uses 3-level (L2→L1→L0) with different index shifts
     (L2: 30, L1: 21, L0: 12, each 9 bits)
-  - Either: add `#[cfg]`-gated index fns + separate walk/map/unmap impls,
-    or: add HAL fns `hal::page_table_walk()`, `hal::page_table_map()` etc.
-    and move x86_64 impl to `arch-x86_64/src/hal.rs`
-  - Must handle: PtEntry type (u64 on both but different flag layouts),
-    root page table pointer (CR3 vs SATP), TLB flush (invlpg vs sfence.vma)
-  - Existing hal fns already provide: `alloc_phys_page()`, `boot_cr3()`,
+  - **Done**: `walk` and `map_page` rewritten as generic loops using
+    `hal::pt_levels()` and `hal::pt_index()` (19.x.3–19.x.4).
+    `exec_setup_new_page_table` and `boot_create_restricted_page_table`
+    refactored to allocate `(levels-1)` pages dynamically, walk the boot
+    page table via generic `pt_index()`, and link the hierarchy with HAL
+    flag constants. The level-walk loop correctly stops at the
+    page-directory level (2..levels) to avoid reading 2MB huge-page PTEs.
     `write_cr3()`, `tlb_flush_page()`, MAP_* constants
   - Deliverable: `cargo check -p kernel --target riscv64gc-unknown-none-elf` passes
 

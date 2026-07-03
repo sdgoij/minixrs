@@ -9,7 +9,6 @@ use kernel::pagetable::{boot_cr3, map_page};
 
 use crate::print;
 
-use arch_x86_64::pte;
 /// Convenience alias for the Proc type.
 use kernel::proc::Proc;
 
@@ -381,62 +380,65 @@ pub unsafe fn boot_create_restricted_page_table(
     stack_end: u64,
     stack_phys: u64,
 ) -> Option<u64> {
-    // Walk the boot page table to reach the PD (512 × 2MB entries = 1GB).
+    // Walk the boot page table to find the bottom-level page directory.
     let boot_cr3_val = boot_cr3();
     if boot_cr3_val == 0 {
         return None;
     }
-    let boot_pml4 = boot_cr3_val as *const u64;
-    let boot_pml4e0 = unsafe { core::ptr::read(boot_pml4) };
-    let boot_pdpt_phys = boot_pml4e0 & arch_x86_64::pte::PG_FRAME;
-    let boot_pdpt = boot_pdpt_phys as *const u64;
-    let boot_pdpte0 = unsafe { core::ptr::read(boot_pdpt) };
-    let boot_pd_phys = boot_pdpte0 & arch_x86_64::pte::PG_FRAME;
-    let boot_pd = boot_pd_phys as *const u64;
+    let levels = kernel::hal::pt_levels();
+    let page_sz = kernel::hal::PAGE_SIZE as usize;
 
-    // Allocate 3 pages from the arch allocator: PML4, PDPT, PD.
-    let pml4 = arch_x86_64::alloc::alloc_phys_page()?;
-    let pdpt_page = arch_x86_64::alloc::alloc_phys_page()?;
-    let pd_page = arch_x86_64::alloc::alloc_phys_page()?;
-    let page_sz = arch_x86_64::param::NBPG as usize;
-    unsafe {
-        core::ptr::write_bytes(pml4 as *mut u8, 0, page_sz);
-        core::ptr::write_bytes(pdpt_page as *mut u8, 0, page_sz);
-        core::ptr::write_bytes(pd_page as *mut u8, 0, page_sz);
+    // Walk to find the bottom-level PD (x86_64: PD after PML4→PDPT, SV39: PMD after PUD).
+    // Iterates levels 2..N-1 — stops at the page-directory level (above PT).
+    let mut table_phys = boot_cr3_val;
+    for lvl in (2..levels).rev() {
+        let table = table_phys as *const u64;
+        let idx = kernel::hal::pt_index(0, lvl);
+        let entry = unsafe { core::ptr::read(table.add(idx)) };
+        table_phys = entry & kernel::hal::pte_frame_mask();
+    }
+    let boot_pd_phys = table_phys;
+
+    // Allocate (levels-1) pages: root + intermediate levels (PD is last).
+    let n_pages = (levels - 1) as usize;
+    let mut pages = [0u64; 4];
+    for i in 0..n_pages {
+        pages[i] = unsafe { kernel::hal::alloc_phys_page()? };
+        unsafe { core::ptr::write_bytes(pages[i] as *mut u8, 0, page_sz) };
     }
 
-    // Link: PML4[0] → PDPT[0] → PD.
-    let flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
-    unsafe {
-        core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
-        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+    // Link hierarchy: root[0] → next[0] → ... → PD.
+    let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
+    for i in 0..(n_pages - 1) {
+        unsafe {
+            core::ptr::write(pages[i] as *mut u64, pages[i + 1] | flags);
+        }
     }
 
-    // Deep-copy all 512 PD entries from boot PD (gives full 1GB identity
-    // map so the kernel can still run after CR3 switch).
+    // Deep-copy all 512 bottom-level entries from boot PD (identity map).
     unsafe {
-        let new_pd = pd_page as *mut u64;
+        let new_pd = pages[n_pages - 1] as *mut u64;
         for i in 0..512 {
-            let entry = core::ptr::read(boot_pd.add(i));
+            let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
             core::ptr::write(new_pd.add(i), entry);
         }
 
-        // Share kernel high mappings (PML4[256..512]).
+        // Share kernel high mappings (top half of root).
+        let boot_root = boot_cr3_val as *const u64;
+        let new_root = pages[0] as *mut u64;
         for i in 256..512 {
-            let entry = core::ptr::read(boot_pml4.add(i));
-            core::ptr::write((pml4 as *mut u64).add(i), entry);
+            let entry = core::ptr::read(boot_root.add(i));
+            core::ptr::write(new_root.add(i), entry);
         }
     }
 
-    // Overwrite user code pages: replace the identity-mapped 2MB huge
-    // pages with 4KB pages pointing to the per-process physical pages.
-    // The identity map has 2MB huge pages; map_page will split them.
-    let user_flags = pte::PG_P | pte::PG_RW | pte::PG_U;
+    // Overwrite user code pages: map_page will split 2MB huge pages to 4KB.
+    let user_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
     let mut va = code_start;
     let mut pa = code_phys;
     while va < code_end {
         unsafe {
-            if map_page(pml4, va, pa, user_flags).is_err() {
+            if map_page(pages[0], va, pa, user_flags).is_err() {
                 return None;
             }
         }
@@ -449,7 +451,7 @@ pub unsafe fn boot_create_restricted_page_table(
     let mut pa = stack_phys;
     while va < stack_end {
         unsafe {
-            if map_page(pml4, va, pa, user_flags).is_err() {
+            if map_page(pages[0], va, pa, user_flags).is_err() {
                 return None;
             }
         }
@@ -457,7 +459,7 @@ pub unsafe fn boot_create_restricted_page_table(
         pa += 0x1000;
     }
 
-    Some(pml4)
+    Some(pages[0])
 }
 
 /// Jump to userspace — the final step of boot.
