@@ -2,6 +2,8 @@
 
 #![no_std]
 
+pub mod hal;
+
 /// Initialize RISC-V64 architecture subsystem.
 pub fn init() {
     // No-op for now

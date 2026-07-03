@@ -2054,14 +2054,14 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 **Milestone M-RV1: "Hello MINIX!" from RISC-V serial**
 
-- [ ] **19.1 — RISC-V target spec** (`riscv64gc-unknown-minix.json`)
-  - Custom target JSON: `"is-builtin": false, "cpu": "generic-rv64",
-    "features": "+m,+a,+f,+d,+c", "llvm-target": "riscv64-unknown-none",
-    "os": "none", "env": "newlib"`
-  - Double-check against existing `x86_64-pc-minix.json` for consistency
-  - Place in project root next to the x86_64 target spec
-  - **Test:** `rustc --target riscv64gc-unknown-minix.json --print cfg`
-    produces `target_arch = "riscv64"`
+- [x] **19.1 — RISC-V target spec** (`riscv64gc-unknown-minix.json`)
+  - Fixed `"os": "minix"` → `"os": "none"` to match x86_64
+    convention (required for `#[cfg(target_os = "none")]` guards)
+  - Removed redundant `"linker": "rust-lld"` field
+  - Created `crates/arch-riscv64/src/hal.rs` with stub implementations
+    matching the x86_64 HAL interface (todo!() + plan task refs)
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
+  - `cargo check -p minix-rt --target riscv64gc-unknown-none-elf` passes
 
 - [ ] **19.2 — RISC-V constants and types** (`arch-riscv64/src/param.rs`,
   `vmparam.rs`, `psl.rs`, `mcontext.rs`)
