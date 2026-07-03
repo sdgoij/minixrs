@@ -19,6 +19,8 @@ integration-tests = ["kernel/qemu-tests"]
 
 [dependencies]
 arch-common = { path = "../arch-common" }
-arch-x86_64 = { path = "../arch-x86_64" }
 kernel = { path = "../kernel" }
 drivers = { path = "../drivers" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+arch-x86_64 = { path = "../arch-x86_64" }

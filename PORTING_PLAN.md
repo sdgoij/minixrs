@@ -1941,76 +1941,214 @@ from the same source, with architecture-specific code cleanly separated.
 Before any RISC-V code is written, the kernel crate must be made
 architecture-agnostic. Currently it has hard dependencies on `arch-x86_64`.
 
-**19.0a — Gate arch deps behind `cfg(target_arch)`** (`kernel/Cargo.toml`,
-`kernel-boot/Cargo.toml`)
-- `kernel/Cargo.toml`: move `arch-x86_64` to
-  `[target.'cfg(target_arch = "x86_64")'.dependencies]`, same for riscv64
-- `kernel-boot/Cargo.toml`: same treatment
-- `minix-rt/Cargo.toml`: no arch deps needed (syscall asm is inline)
-- **Test:** `cargo check -p kernel` still compiles for x86_64
-- **Test:** `cargo check -p kernel --target riscv64*` succeeds (no x86_64
-  symbols pulled in)
+A `cargo check -p kernel --target riscv64gc-unknown-none-elf` revealed **170
+errors across 15 kernel files** with direct `arch_x86_64::*` references.
 
-**19.0b — Extract `Hal` trait for init/serial/halt** (`kernel/src/hal.rs` new,
-`kernel/src/lib.rs`)
-```rust
-// kernel/src/hal.rs
-pub trait Hal {
-    fn init();
-    fn halt() -> !;
-    fn serial_write(s: &str);
-    fn serial_read_byte() -> u8;
-    fn serial_byte_available() -> bool;
-}
-```
-- `kernel/src/lib.rs`: replace `arch_x86_64::init()` → `Hal::init()`,
-  dispatch via `cfg!(target_arch = "x86_64")` or a static `HAL` vtable
-- The `cfg`-gated `impl Hal for X86_64Hal` lives in `arch-x86_64/src/lib.rs`
-- `kernel/src/ser_input.rs`: replace `in`/`out` port I/O → `Hal::serial_*`
-- **Test:** kernel compiles, boots, serial still works on x86_64
+| Category | Files | Count | What it couples |
+|----------|-------|-------|-----------------|
+| **TrapFrame** | `proc.rs`, `system.rs`, `exec.rs`,
+  `syscall.rs`, `sched.rs`, `clock.rs` | 6 | `Proc.p_reg` typed as
+  x86_64's register layout; field access like `frame.rax`, `frame.rip` |
+| **Page tables** | `pagetable.rs` | 1 | Direct
+  `arch_x86_64::pte::*` imports for PTE flags, index helpers, page masks;
+  `arch_x86_64::vmparam::VM_MAXUSER_ADDRESS`;
+  `arch_x86_64::BOOT_CR3` |
+| **Per-CPU data** | `sched.rs`, `syscall.rs`, `ipc.rs`,
+  `smp.rs`, `profile.rs`, `clock.rs` | 6 |
+  `cpulocals::get_cpulocal_proc_ptr()`, `CPU_LOCAL_STORAGE` |
+| **Inline asm** | `ser_input.rs`, `debug.rs`, `clock.rs`,
+  `syscall.rs`, `sched.rs` | 5 | `in`/`out` for COM1, `rdtsc`,
+  `xchg`, `hlt`, `pause` |
+| **Segments** | `sched.rs`, `table.rs`, `vm.rs` | 3 | GDT segment
+  selectors (`GDATA_SEL`, `GCODE_SEL`, etc.) for privilege levels |
+| **Multiboot** | `vm.rs`, `pagetable.rs` | 2 | Multiboot memory map
+  parsing for x86_64 specific boot protocol |
+| **Spinlock** | `sched.rs`, `ipc.rs`, `grants.rs` | 3 |
+  `arch_x86_64::spinlock` |
 
-**19.0c — Abstract `TrapFrame`** (`kernel/src/proc.rs`, `system.rs`)
+---
 
-This is the biggest coupling point. `Proc` embeds
-`arch_x86_64::frame::TrapFrame` directly. Three approaches:
+**19.0 — Architectural abstraction (the refactoring)**
 
-| Approach | Complexity | Type safety | Notes |
-|----------|-----------|-------------|-------|
-| **A — Raw bytes** | Low (2h) | Medium | `p_reg: [u8; MAX_TRAPFRAME_SIZE]`, arch provides typed accessors |
-| **B — Generic `Proc<A: Arch>`** | High (major refactor) | High | Monomorphizes entire kernel, binary bloat |
-| **C — Trait object vtable** | Medium (4h) | Medium | `p_reg: Box<dyn TrapFrame>` dynamic dispatch |
+This is a multi-step refactoring that does NOT change behavior. After each
+step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
+`just run` must boot to shell prompt unchanged.
 
-**Recommendation: Approach A** — practical, minimal churn, proven pattern
-(original Minix i386 uses the same raw-byte approach between i386 and ARM):
+---
+
+**19.0.1 — Create `kernel/src/hal.rs` — arch abstraction module**
+
+Single cfg-gated re-export file. This is THE ONLY `#[cfg(target_arch)]`
+in `kernel/src/`. Everything else calls `hal::*()` unconditionally.
 
 ```rust
-// kernel/src/proc.rs
-pub struct Proc {
-    /// Register save area. Size is max(sizeof(x86_64 TrapFrame), sizeof(RISCV TrapFrame)).
-    /// Currently 184 bytes (x86_64). RISC-V needs ~256 bytes.
-    pub p_reg: [u8; 256],
-    // ... rest of Proc unchanged
-}
+// kernel/src/hal.rs — THE ONE cfg gate in kernel source
+#[cfg(target_arch = "x86_64")]
+pub use arch_x86_64::hal::*;
+#[cfg(target_arch = "riscv64")]
+pub use arch_riscv64::hal::*;
 ```
 
-Each arch crate provides:
+Then create `arch-x86_64/src/hal.rs` exposing all the functions the
+kernel needs:
+
+| Function | What it does | Replaces |
+|----------|-------------|----------|
+| `hal::init()` | Arch init (IDT, MSRs, etc.) | `arch_x86_64::init()` in `lib.rs` |
+| `hal::serial_write_byte(u8)` | Write one char to serial | `in`/`out` asm in `ser_input.rs` |
+| `hal::serial_read_byte() -> u8` | Read one char from serial | `in`/`out` asm in `ser_input.rs` |
+| `hal::serial_byte_available() -> bool` | Check if data ready | `in`/`out` asm in `ser_input.rs` |
+| `hal::read_cycles() -> u64` | Read timestamp/cycle counter | `rdtsc` in `clock.rs` |
+| `hal::halt() -> !` | Stop CPU with interrupts disabled | `cli; hlt` in `debug.rs` |
+| `hal::set_current_proc(*mut Proc)` | Set per-CPU current proc | `cpulocals::set_*` in `sched.rs` |
+| `hal::current_proc() -> *mut Proc` | Get per-CPU current proc | `cpulocals::get_*` in 6 files |
+| `hal::current_ep() -> i32` | Get current proc endpoint | `(*current_proc()).p_endpoint` in `sched.rs` |
+| `hal::cause_signal(endpoint, sig)` | Deliver kernel signal | `cause_sig()` (currently arch-free, check) |
+| `hal::spinlock_acquire(lock)`
+  `hal::spinlock_release(lock)` | Spinlock primitives | `arch_x86_64::spinlock` |
+
+**Files changed:**
+- `NEW: kernel/src/hal.rs` — cfg-gated re-export (~5 lines)
+- `NEW: arch-x86_64/src/hal.rs` — x86_64 impl (~100 lines)
+- `MOD: kernel/src/lib.rs` — add `pub mod hal;`, replace cfg-gated
+  calls with `hal::init()`
+- `MOD: kernel/src/ser_input.rs` — replace inline `in`/`out` with
+  `hal::serial_read_byte()`, `hal::serial_byte_available()`
+- `MOD: kernel/src/debug.rs` — replace `hlt` asm with `hal::halt()`
+
+**Test:** `cargo check -p kernel` passes, `just run` boots to shell
+
+---
+
+**19.0.2 — TrapFrame as raw bytes (`p_reg: [u8; 256]`)**
+
+`Proc.p_reg` is currently typed as `arch_x86_64::frame::TrapFrame`
+(184 bytes). This makes `Proc` arch-dependent. Change it to a fixed-size
+byte array large enough for any target.
+
+| Arch | Register save size | Notes |
+|------|-------------------|-------|
+| x86_64 | 184 bytes | 16 GPR + 6 seg + RIP/RSP/RFLAGS |
+| RISC-V | ~272 bytes | 32 GPR + sepc + sstatus + scause |
+
+**Chosen size: 256 bytes** — sufficient for x86_64, expand to 288 if
+RISC-V needs more for S-mode CSRs.
+
+Each arch crate provides accessor functions:
+
 ```rust
-// arch-x86_64/src/frame.rs
-impl X86_64Hal {
-    /// Read syscall arg 0 (rdi) from a raw TrapFrame
-    pub unsafe fn read_arg0(frame: &[u8; 256]) -> u64 { /* read bytes 16-23 */ }
-    pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64) { /* write bytes 0-7 */ }
-}
+// arch-x86_64/src/hal.rs (additions)
+pub unsafe fn read_syscall_arg(frame: &[u8; 256], i: usize) -> u64;
+pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64);
+pub unsafe fn read_syscall_nr(frame: &[u8; 256]) -> u64;
+pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: u64);
+pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64;
+pub unsafe fn set_frame_ip(frame: &mut [u8; 256], ip: u64);
+pub unsafe fn copy_frame(dst: &mut [u8; 256], src: &[u8; 256]);
 ```
 
-Files affected:
-- `kernel/src/proc.rs` — `TrapFrame` → `[u8; 256]`, update `Default`
-- `kernel/src/system.rs` — `use arch_x86_64::frame::TrapFrame` → use accessors
-- `kernel/src/syscall.rs` — all `frame.rax` → `Hal::read_arg0(&frame)`
-- `kernel/src/sched.rs` — context save/restore → arch-provided
-- **Ripple check:** ~20 files in kernel reference `p_reg` fields
+All files that currently access `p_reg` fields directly must be updated
+to use these accessors.
 
-**19.0d — Split `kernel-boot` into shared lib + per-arch binaries**
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `kernel/src/proc.rs` | `p_reg: TrapFrame` → `p_reg: [u8; 256]`;
+  remove `use arch_x86_64::frame::TrapFrame`;
+  update `Default` impl (zeroed array) |
+| `kernel/src/system.rs` | `use arch_x86_64::frame::TrapFrame` →
+  `use hal;`; replace `frame.rax` → `hal::read_syscall_arg()`, etc.;
+  7 call sites accessing p_reg fields |
+| `kernel/src/exec.rs` | Replace `frame.rip = entry;
+  frame.rsp = sp; frame.rdi = arg;` → `hal::set_initial_regs()`;
+  replace `frame.rax = ...` → `hal::write_retval()` |
+| `kernel/src/syscall.rs` | Replace `frame.rax = val` →
+  `hal::write_retval()`; replace `current_proc_ptr` → `hal::current_proc()`;
+  replace inline `in`/`out` → `hal::serial_*` |
+| `kernel/src/sched.rs` | Replace `(*rp).p_reg` direct field access |
+| `kernel/src/clock.rs` | Replace `(*rp).p_reg` field access |
+
+**Test:** `cargo check -p kernel` passes, `just run` boots to shell
+
+---
+
+**19.0.3 — Page table abstraction** (`kernel/src/pagetable.rs`)
+
+Currently directly uses x86_64 PTE constants and functions:
+
+```rust
+use arch_x86_64::pte::{self, PG_FRAME, PG_NX, PG_P, PG_PTEMASK, PtEntry, ...};
+use arch_x86_64::vmparam::VM_MAXUSER_ADDRESS;
+use arch_x86_64::BOOT_CR3;
+use arch_x86_64::asm::write_cr3;
+```
+
+Extract these into per-arch constants:
+
+```rust
+// kernel/src/hal.rs (additions)
+pub const PAGE_SIZE: u64 = 4096;
+pub const PAGE_SHIFT: u64 = 12;
+pub const MAX_USER_ADDRESS: u64 = /* arch-specific */;
+
+pub fn tlb_flush(cr3: u64);
+pub fn boot_page_table_root() -> u64;
+pub fn page_table_flags_present() -> u64;
+pub fn page_table_flags_write() -> u64;
+pub fn page_table_flags_user() -> u64;
+pub fn page_table_flags_nx() -> u64;
+pub fn page_table_flags_mask() -> u64;
+pub fn page_table_frame_mask() -> u64;
+```
+
+But pagetable.rs also uses PTE index functions (`pml4_index()`, `pdpt_index()`,
+etc.) and `PtEntry` struct — these are x86_64-specific. For RISC-V SV39,
+the page table walk is different (3 levels, different bit widths).
+
+The pagetable module may need to be partially arch-gated or split into
+shared + per-arch parts.
+
+**Files changed:**
+- `kernel/src/pagetable.rs` — extract all x86_64-specific constants and
+  functions behind `hal::*` calls
+- Only `pagetable.rs` — no other files use PTE constants directly
+
+---
+
+**19.0.4 — Segment & boot constants** (`kernel/src/table.rs`, `vm.rs`)
+
+These files use segment selectors from `arch_x86_64::segments` and
+multiboot info from `arch_x86_64::multiboot`. These are x86_64 concepts
+that don't exist on RISC-V. The relevant code paths are:
+
+- `table.rs`: segment selector initialization in `proc_init()`
+- `vm.rs`: multiboot memory map parsing, segment setup
+
+**Fix:** Gate the segment/multiboot code as x86_64-only. On RISC-V,
+these functions are either no-ops or use FDT instead of multiboot.
+
+**Files changed:**
+- `kernel/src/table.rs` — gate segment init
+- `kernel/src/vm.rs` — gate multiboot parsing
+
+---
+
+**19.0.5 — Spinlock abstraction** (`kernel/src/grants.rs`, `ipc.rs`, `sched.rs`)
+
+Replace `arch_x86_64::spinlock::*` with a simple `core::sync::atomic::*
+`-based spinlock or hal-provided spinlock. RISC-V uses `lr.d`/`sc.d`
+instead of `lock cmpxchg`, but `core::sync::atomic::AtomicBool` with
+`spin_loop_hint()` works on both.
+
+**Files changed:**
+- `kernel/src/grants.rs` — replace spinlock import
+- `kernel/src/ipc.rs` — replace spinlock import
+- `kernel/src/sched.rs` — replace spinlock import
+
+---
+
+**19.0.6 — Split `kernel-boot` into shared lib + per-arch binaries**
 
 ```
 crates/kernel-boot/
@@ -2021,14 +2159,18 @@ crates/kernel-boot/
     test_runner.rs      ← shared integration test framework
 ```
 
+- `kernel-boot/Cargo.toml`: move `arch-x86_64` to
+  `[target.'cfg(target_arch = "x86_64")'.dependencies]`
 - The `kmain()` entry point becomes per-arch:
-  - `kernel-boot-x86_64` binary: calls `kmain_x86_64()`
-  - `kernel-boot-riscv64` binary: calls `kmain_riscv64()`
-- Shared logic (`load_and_prepare_proc`, page table creation helpers) stays
-  in `lib.rs`
+  - x86_64 binary: `kernel-boot-x86_64` with `kmain_x86_64()`
+  - RISC-V binary: `kernel-boot-riscv64` with `kmain_riscv64()`
+- Shared logic (`load_and_prepare_proc`, page table creation helpers)
+  stays in `lib.rs`
 - **Test:** `just run` still boots x86_64 to shell prompt
 
-**19.0e — `cfg`-gate inline asm in `minix-rt`** (`crates/minix-rt/src/lib.rs`)
+---
+
+**19.0.7 — `cfg`-gate inline asm in `minix-rt`** (`crates/minix-rt/src/lib.rs`)
 
 ```rust
 #[cfg(target_arch = "x86_64")]
@@ -2038,7 +2180,6 @@ pub unsafe fn syscall0(nr: u64) -> i64 {
 
 #[cfg(target_arch = "riscv64")]
 pub unsafe fn syscall0(nr: u64) -> i64 {
-    // RISC-V syscall convention: a7 = nr, ecall
     core::arch::asm!("ecall", in("a7") nr, ...)
 }
 ```

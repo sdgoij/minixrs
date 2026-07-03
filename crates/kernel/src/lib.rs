@@ -36,7 +36,10 @@ pub mod tests;
 
 /// Kernel initialization.
 pub fn init() {
+    #[cfg(target_arch = "x86_64")]
     arch_x86_64::init();
+    #[cfg(target_arch = "riscv64")]
+    arch_riscv64::init();
     arch_common::init();
 }
 
