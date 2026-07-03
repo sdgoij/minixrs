@@ -2460,31 +2460,30 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Deliverable: `just run-riscv64` boots to `init: booting MINIX/Rust`
     with 400k+ ECALLs processed across all 4 boot servers.
 
-- [x] **19.27 — Port exec_initramfs_for_target to RISC-V (partial)**
+- [x] **19.27 — Port exec_initramfs_for_target to RISC-V**
   The `exec_replace` syscall is used by init to start /bin/sh. Ported
-  the exec function to RISC-V with:
-    - SV39 page table: deep-copy boot root L2[0..3] instead of 4-level
-      PML4→PDPT→PD x86_64 walk
+  to RISC-V with the following changes:
+
+  **Problem:** On x86_64, `load_elf` writes binary data to identity-
+  mapped addresses (VA 0x1000000 → PA 0x1000000, which is in RAM).
+  On RISC-V QEMU virt, RAM starts at 0x80000000, so PA 0x1000000 is
+  MMIO space — writing there corrupts device state.
+
+  **Fix:** Use `alloc_phys_contig` to allocate physical pages for the
+  binary (same approach as boot_init's `load_and_prepare_proc`). Man-
+  ually copy ELF segments from the initramfs data to allocated pages.
+  Create SV39 page table mapping VA (0x1000000) → allocated PA. The
+  user stack (0x8FE00000) is in RAM and uses identity mapping, with
+  stack data copied to allocated pages.
+
+  **Additional fixes:**
+    - SV39 page table creation (deep-copy boot root L2[0..3])
     - Correct RISC-V p_reg offsets: sepc at 0, sp at 16, sstatus at 248
-    - Correct user stack base: 0x8FE00000 (hal::user_stack_base())
-    - Contributed context: added CONTEXT_SET misc flag + post-syscall
-      hook to copy p_reg into trap frame after exec
-    - Increment sepc by 4 on ECALL (RISC-V ecall sets sepc to ecall
-      address, not next instruction)
+    - Correct user_flags for RISC-V pages: add R|X|A|D bits
+    - CONTEXT_SET misc flag for post-syscall hook to refresh trap frame
+    - sepc increment by 4 on ECALL from U-mode
 
-  **Remaining issue:** On RISC-V QEMU virt, RAM starts at 0x80000000.
-  The exec function loads the binary to identity-mapped VA 0x1000000
-  (ELF virtual address), but PA 0x1000000 is NOT in RAM — it's in
-  MMIO space. Writing the shell binary there faults.
-
-  **Fix needed:** Use `alloc_phys_contig` to allocate physical pages
-  for the new binary (like boot_init's load_and_prepare_proc does),
-  then create a per-process page table mapping VA→allocated PA.
-  The current identity-map approach only works on x86_64 where
-  RAM starts at PA 0.
-
-  Shell briefly runs (14 ECALLs visible) before crashing on the
-  identity-map write.
+  - Deliverable: `init: starting shell...` followed by `# ` shell prompt
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
@@ -2494,8 +2493,8 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 | M-RV4 ✅ | First user-mode syscall (RECEIVE) succeeds | ECALL handler dispatches correctly |
 | M-RV5 ✅ | Full multi-process boot (PM/RS/VFS/init) | `init: booting MINIX/Rust` printed |
 | M-RV6 ✅ | ECALL sepc increment (prevents ecall loop) | `init: pid=10; starting shell...` |
-| M-RV7 🏗️ | Shell prompt (`#`) | init exec's /bin/sh after boot |
-| M-RV8 | External commands work | fork/exec support |
+| M-RV7 ✅ | Shell prompt (`#`) | `just run-riscv64` shows shell |
+| M-RV8 🏗️ | External commands work | fork/exec + VFS support |
 
 **Stretch goals (after M-RV3):**
 - Run the x86_64 userland binaries (same initramfs, different ELF target)

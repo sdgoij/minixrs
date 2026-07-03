@@ -498,17 +498,54 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             Err(_) => return -38,
         };
 
-        // Switch to BOOT_CR3 so load_elf and setup_user_stack write to
-        // identity-mapped physical pages.
-        let saved_cr3 = crate::hal::read_cr3();
+        // Boot CR3 switch + ELF loading (x86_64 uses identity map for this).
         let boot_cr3_val = crate::pagetable::boot_cr3();
-        crate::hal::write_cr3(boot_cr3_val);
+        #[cfg(target_arch = "x86_64")]
+        let loaded = {
+            let saved_cr3 = crate::hal::read_cr3();
+            crate::hal::write_cr3(boot_cr3_val);
+            let l = match crate::elf::load_elf(data) {
+                Ok(l) => l,
+                Err(_) => {
+                    crate::hal::write_cr3(saved_cr3);
+                    return -38;
+                }
+            };
+            crate::hal::write_cr3(saved_cr3);
+            l
+        };
 
-        let loaded = match crate::elf::load_elf(data) {
-            Ok(l) => l,
-            Err(_) => {
-                crate::hal::write_cr3(saved_cr3);
+        // RISC-V: RAM starts at 0x80000000 — cannot load ELF to identity
+        // addresses. Compute bounds from ELF headers manually.
+        #[cfg(target_arch = "riscv64")]
+        let loaded = {
+            let ehdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
+            let phoff = ehdr.e_phoff as usize;
+            let phnum = ehdr.e_phnum as usize;
+            let phentsize = ehdr.e_phentsize as usize;
+            let mut base = u64::MAX;
+            let mut top = 0u64;
+            for i in 0..phnum {
+                let phdr =
+                    &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
+                if phdr.p_type != crate::elf::PT_LOAD {
+                    continue;
+                }
+                if phdr.p_vaddr < base {
+                    base = phdr.p_vaddr;
+                }
+                let seg_top = phdr.p_vaddr + phdr.p_memsz;
+                if seg_top > top {
+                    top = seg_top;
+                }
+            }
+            if base == u64::MAX {
                 return -38;
+            }
+            crate::elf::LoadedElf {
+                base,
+                top,
+                entry: ehdr.e_entry,
             }
         };
 
@@ -519,6 +556,11 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let user_stack_base: u64 = crate::hal::user_stack_base();
         let user_stack_size: usize = crate::hal::user_stack_size();
         let stack_top = user_stack_base + user_stack_size as u64;
+
+        // Setup user stack (writes through identity map; on RISC-V the stack
+        // base is 0x8FE00000 which IS in RAM, so this works).
+        let saved_cr3 = crate::hal::read_cr3();
+        crate::hal::write_cr3(boot_cr3_val);
         let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
             Ok(rsp) => rsp,
             Err(_) => {
@@ -526,7 +568,6 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
                 return -38;
             }
         };
-
         crate::hal::write_cr3(saved_cr3);
 
         let code_start = loaded.base & !0xFFF;
@@ -574,37 +615,152 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         };
 
         #[cfg(target_arch = "riscv64")]
+        // RISC-V: RAM starts at 0x80000000, so identity map at VA 0x1000000
+        // (the ELF virtual address) writes to MMIO, not RAM. We must allocate
+        // physical pages for the binary and map VA → allocated PA.
         let root = {
-            // SV39: allocate root (L2) page, deep-copy boot root entries.
             let new_root = match crate::hal::alloc_phys_page() {
                 Some(p) => p,
                 None => return -12,
             };
             core::ptr::write_bytes(new_root as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
+            // Deep-copy boot root entries (identity map for kernel + devices).
             let boot_root = boot_cr3_val as *const u64;
             for i in 0usize..4 {
                 let e = core::ptr::read(boot_root.add(i));
                 core::ptr::write((new_root as *mut u64).add(i), e);
             }
+            // Allocate physical pages for the code and load ELF segments.
+            let code_pages = ((code_end - code_start) / 4096) as usize;
+            let phys_code_base = match crate::hal::alloc_phys_contig(code_pages) {
+                Some(b) => b,
+                None => return -12,
+            };
+            // Load ELF segments to the allocated physical pages.
+            let ehdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
+            let phoff = ehdr.e_phoff as usize;
+            let phnum = ehdr.e_phnum as usize;
+            let phentsize = ehdr.e_phentsize as usize;
+            for i in 0..phnum {
+                let phdr =
+                    &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
+                if phdr.p_type != crate::elf::PT_LOAD {
+                    continue;
+                }
+                let seg_vaddr = phdr.p_vaddr;
+                let seg_offset = seg_vaddr - code_start;
+                let dst = (phys_code_base + seg_offset) as *mut u8;
+                if phdr.p_filesz > 0 {
+                    let src = data.as_ptr().add(phdr.p_offset as usize);
+                    core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+                }
+                let bss = phdr.p_memsz - phdr.p_filesz;
+                if bss > 0 {
+                    core::ptr::write_bytes(dst.add(phdr.p_filesz as usize), 0, bss as usize);
+                }
+            }
+            // Allocate physical pages for the stack (identity-map works for
+            // stack since 0x8FE00000 IS in RAM on RISC-V).
+            let stack_pages = ((stack_end - stack_start) / 4096) as usize;
+            let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
+                Some(b) => b,
+                None => return -12,
+            };
+            // Copy stack data from identity-mapped temp area to allocated pages.
+            // setup_user_stack wrote the stack at user_stack_base (0x8FE00000)
+            // while BOOT_CR3 was active (identity map).
+            core::ptr::copy_nonoverlapping(
+                user_stack_base as *const u8,
+                phys_stack_base as *mut u8,
+                user_stack_size,
+            );
+            // Map user code: VA → allocated PA
+            #[cfg(target_arch = "riscv64")]
+            let user_flags = crate::pagetable::PG_P
+                | crate::pagetable::PG_RW
+                | crate::pagetable::PG_U
+                | 0x02
+                | 0x08
+                | 0xC0; // R|X|A|D
+            #[cfg(target_arch = "x86_64")]
+            let user_flags =
+                crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
+            let mut va = code_start;
+            let mut pa = phys_code_base;
+            while va < code_end {
+                if crate::pagetable::map_page(new_root, va, pa, user_flags).is_err() {
+                    return -12;
+                }
+                va += 0x1000;
+                pa += 0x1000;
+            }
+            // Map stack: VA → allocated PA
+            let mut va = stack_start;
+            let mut pa = phys_stack_base;
+            while va < stack_end {
+                if crate::pagetable::map_page(new_root, va, pa, user_flags).is_err() {
+                    return -12;
+                }
+                va += 0x1000;
+                pa += 0x1000;
+            }
             new_root
         };
 
-        // Map user code and stack (arch-generic map_page handles splitting).
-        let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
-        let mut va = code_start;
-        while va < code_end {
-            if crate::pagetable::map_page(root, va, va, user_flags).is_err() {
-                return -12;
+        #[cfg(target_arch = "x86_64")]
+        let root = {
+            let pml4 = match crate::hal::alloc_phys_page() {
+                Some(p) => p,
+                None => return -12,
+            };
+            core::ptr::write_bytes(pml4 as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
+            let boot_pml4 = boot_cr3_val as *const u64;
+            let pml4e0 = core::ptr::read(boot_pml4);
+            let pdpt_phys = crate::hal::pte_to_phys(pml4e0);
+            let boot_pdpt = pdpt_phys as *const u64;
+            let pdpte0 = core::ptr::read(boot_pdpt);
+            let pd_phys = crate::hal::pte_to_phys(pdpte0);
+            let boot_pd = pd_phys as *const u64;
+            let pdpt_page = match crate::hal::alloc_phys_page() {
+                Some(p) => p,
+                None => return -12,
+            };
+            let pd_page = match crate::hal::alloc_phys_page() {
+                Some(p) => p,
+                None => return -12,
+            };
+            core::ptr::write_bytes(pdpt_page as *mut u8, 0, 4096);
+            core::ptr::write_bytes(pd_page as *mut u8, 0, 4096);
+            let flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
+            core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
+            core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+            for i in 0usize..512 {
+                let e = core::ptr::read(boot_pd.add(i));
+                core::ptr::write((pd_page as *mut u64).add(i), e);
             }
-            va += 0x1000;
-        }
-        let mut va = stack_start;
-        while va < stack_end {
-            if crate::pagetable::map_page(root, va, va, user_flags).is_err() {
-                return -12;
+            for i in 256usize..512 {
+                let e = core::ptr::read(boot_pml4.add(i));
+                core::ptr::write((pml4 as *mut u64).add(i), e);
             }
-            va += 0x1000;
-        }
+            // Map user code and stack (identity).
+            let user_flags =
+                crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
+            let mut va = code_start;
+            while va < code_end {
+                if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                    return -12;
+                }
+                va += 0x1000;
+            }
+            let mut va = stack_start;
+            while va < stack_end {
+                if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                    return -12;
+                }
+                va += 0x1000;
+            }
+            pml4
+        };
 
         // Set the new page table.
         core::ptr::write_volatile(&mut (*rp).p_seg.p_cr3, root);
@@ -631,15 +787,12 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         }
         #[cfg(target_arch = "riscv64")]
         {
-            // sepc at offset 0, sp at offset 16, a0=0 at offset 80,
-            // sstatus = SPIE|FS_INITIAL = 0x2020 at offset 248.
             let p_reg = &mut (*rp).p_reg;
             p_reg[0..8].copy_from_slice(&ehdr.e_entry.to_ne_bytes());
             p_reg[16..24].copy_from_slice(&rsp_fb.to_ne_bytes());
             p_reg[80..88].copy_from_slice(&0u64.to_ne_bytes());
             let sst: u64 = 0x2020;
             p_reg[248..256].copy_from_slice(&sst.to_ne_bytes());
-            // Signal the post-syscall hook to copy p_reg into the trap frame.
             (*rp).p_misc_flags.fetch_or(
                 crate::proc::MiscFlags::CONTEXT_SET.bits(),
                 core::sync::atomic::Ordering::SeqCst,
