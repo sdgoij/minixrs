@@ -387,6 +387,19 @@ pub unsafe fn tlb_flush_page(_va: u64) {
     }
 }
 
+/// Read the page fault address (RISC-V: stval CSR).
+///
+/// # Safety
+///
+/// Must be called from a page fault handler context.
+pub unsafe fn read_fault_addr() -> u64 {
+    let addr: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, stval", out(reg) addr, options(nomem, nostack));
+    }
+    addr
+}
+
 /// Allocate a physical page.
 ///
 /// # Safety

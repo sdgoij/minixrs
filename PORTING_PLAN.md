@@ -2364,10 +2364,12 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     already generic (same pattern as the huge-page split in `map_page`,
     using PG_PS/PG_FRAME/PG_PTEMASK from the HAL).
 
-- [ ] **19.x.6 — Abstract `handle_page_fault`**
+- [x] **19.x.6 — Abstract `handle_page_fault`**
   - Currently uses x86_64 CR2 register to get fault address.
     RISC-V reads `stval` CSR (or `mtval` in M-mode).
-  - **Fix**: Add `hal::read_fault_addr() -> u64`.
+  - **Fix**: Add `hal::read_fault_addr() -> u64` (CR2 on x86_64,
+    `stval` on RISC-V). Update `handle_page_fault` doc to reference
+    the HAL instead of CR2.
 
 - [ ] **19.x.7 — Remove or cfg-gate `__bss_start`/`__bss_end` stubs**
   - The BSS stubs use `cfg(not(target_vendor = "pc"))` to avoid x86_64.

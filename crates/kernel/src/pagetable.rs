@@ -401,7 +401,8 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 /// # Safety
 ///
 /// Must be called from the page fault interrupt handler with interrupts
-/// disabled. `va` must be the value from CR2.
+/// disabled. `va` must be the fault address obtained via
+/// `hal::read_fault_addr()`.
 pub unsafe fn handle_page_fault(va: u64, err: u32) -> bool {
     unsafe {
         let proc = current_proc();

@@ -601,6 +601,15 @@ pub unsafe fn tlb_flush_page(va: u64) {
     unsafe { crate::asm::invlpg(va) }
 }
 
+/// Read the page fault address (x86_64: CR2 register).
+///
+/// # Safety
+///
+/// Must be called from a page fault handler context.
+pub unsafe fn read_fault_addr() -> u64 {
+    unsafe { crate::asm::read_cr2() }
+}
+
 /// Allocate a physical page for page table use.
 ///
 /// # Safety
