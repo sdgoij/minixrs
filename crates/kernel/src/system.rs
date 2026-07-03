@@ -667,9 +667,9 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             if boot_cr3 != 0 {
                 if is_input {
                     let value = match io_type {
-                        t if t == arch_common::com::DIO_BYTE => arch_x86_64::asm::inb(port) as u32,
-                        t if t == arch_common::com::DIO_WORD => arch_x86_64::asm::inw(port) as u32,
-                        _ => arch_x86_64::asm::inl(port),
+                        t if t == arch_common::com::DIO_BYTE => crate::hal::inb(port) as u32,
+                        t if t == arch_common::com::DIO_WORD => crate::hal::inw(port) as u32,
+                        _ => crate::hal::inl(port),
                     };
                     let reply_bytes = value.to_ne_bytes();
                     let reply_start = DEVIO_REPLY_VALUE_OFF;
@@ -678,12 +678,12 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                     let value = msg_read_u32(msg, DEVIO_VALUE_OFF);
                     match io_type {
                         t if t == arch_common::com::DIO_BYTE => {
-                            arch_x86_64::asm::outb(port, value as u8)
+                            crate::hal::outb(port, value as u8)
                         }
                         t if t == arch_common::com::DIO_WORD => {
-                            arch_x86_64::asm::outw(port, value as u16)
+                            crate::hal::outw(port, value as u16)
                         }
-                        _ => arch_x86_64::asm::outl(port, value),
+                        _ => crate::hal::outl(port, value),
                     }
                 }
             }
@@ -811,11 +811,11 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                         core::slice::from_raw_parts_mut(buf_ptr as *mut PvbPair, vec_size as usize);
                     if _io_in {
                         for pair in pairs.iter_mut() {
-                            pair.value = arch_x86_64::asm::inb(pair.port);
+                            pair.value = crate::hal::inb(pair.port);
                         }
                     } else {
                         for pair in pairs.iter() {
-                            arch_x86_64::asm::outb(pair.port, pair.value);
+                            crate::hal::outb(pair.port, pair.value);
                         }
                     }
                 }
@@ -827,14 +827,14 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                             if pair.port & 1 != 0 {
                                 return crate::ipc::EPERM;
                             }
-                            pair.value = arch_x86_64::asm::inw(pair.port);
+                            pair.value = crate::hal::inw(pair.port);
                         }
                     } else {
                         for pair in pairs.iter() {
                             if pair.port & 1 != 0 {
                                 return crate::ipc::EPERM;
                             }
-                            arch_x86_64::asm::outw(pair.port, pair.value);
+                            crate::hal::outw(pair.port, pair.value);
                         }
                     }
                 }
@@ -847,14 +847,14 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                             if pair.port & 3 != 0 {
                                 return crate::ipc::EPERM;
                             }
-                            pair.value = arch_x86_64::asm::inl(pair.port);
+                            pair.value = crate::hal::inl(pair.port);
                         }
                     } else {
                         for pair in pairs.iter() {
                             if pair.port & 3 != 0 {
                                 return crate::ipc::EPERM;
                             }
-                            arch_x86_64::asm::outl(pair.port, pair.value);
+                            crate::hal::outl(pair.port, pair.value);
                         }
                     }
                 }
@@ -1011,11 +1011,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 let result = if _req_dir == arch_common::com::DIO_INPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
-                            arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_insb(abs_port, vir_buf, count as usize);
                             OK
                         }
                         t if t == arch_common::com::DIO_WORD => {
-                            arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_insw(abs_port, vir_buf, count as usize);
                             OK
                         }
                         _ => crate::ipc::EINVAL,
@@ -1023,11 +1023,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 } else if _req_dir == arch_common::com::DIO_OUTPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
-                            arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_outsb(abs_port, vir_buf, count as usize);
                             OK
                         }
                         t if t == arch_common::com::DIO_WORD => {
-                            arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_outsw(abs_port, vir_buf, count as usize);
                             OK
                         }
                         _ => crate::ipc::EINVAL,
@@ -1091,11 +1091,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 let result = if _req_dir == arch_common::com::DIO_INPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
-                            arch_x86_64::asm::phys_insb(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_insb(abs_port, vir_buf, count as usize);
                             OK
                         }
                         t if t == arch_common::com::DIO_WORD => {
-                            arch_x86_64::asm::phys_insw(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_insw(abs_port, vir_buf, count as usize);
                             OK
                         }
                         _ => crate::ipc::EINVAL,
@@ -1103,11 +1103,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 } else if _req_dir == arch_common::com::DIO_OUTPUT {
                     match req_type {
                         t if t == arch_common::com::DIO_BYTE => {
-                            arch_x86_64::asm::phys_outsb(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_outsb(abs_port, vir_buf, count as usize);
                             OK
                         }
                         t if t == arch_common::com::DIO_WORD => {
-                            arch_x86_64::asm::phys_outsw(abs_port, vir_buf, count as usize);
+                            crate::hal::phys_outsw(abs_port, vir_buf, count as usize);
                             OK
                         }
                         _ => crate::ipc::EINVAL,

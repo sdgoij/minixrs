@@ -2384,15 +2384,13 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 `do_sdevio_handler`) call x86_64 port I/O functions directly via
 `arch_x86_64::asm::inb/outb/inw/outw/inl/outl/phys_insb/phys_outsb/...`.
 
-- [ ] **19.x.8 — Abstract port I/O operations**
+- [x] **19.x.8 — Abstract port I/O operations**
   - ~50 lines of `#[cfg(target_arch = "x86_64")]` blocks with
     `arch_x86_64::asm::*` calls.
-  - **Fix**: Add `hal::inb(port)`, `hal::outb(port, val)`, `hal::inw`,
-    `hal::outw`, `hal::inl`, `hal::outl`, `hal::phys_insb`,
-    `hal::phys_outsb`, `hal::phys_insw`, `hal::phys_outsw`.
-  - RISC-V has no port I/O; these handlers should return `ENOSYS` on
-    non-x86_64 (already done with `#[cfg(not(target_arch = "x86_64"))]`
-    blocks, but the gating macro should be used instead).
+  - **Fix**: Add `hal::inb/outb/inw/outw/inl/outl/phys_insb/phys_outsb/phys_insw/phys_outsw`
+    to both HALs (real implementations on x86_64, no-ops on RISC-V).
+    Replace all 17 direct `arch_x86_64::asm::*` calls in system.rs with
+    `crate::hal::*`.
 
 ### profile.rs — Profile clock (LOW priority)
 

@@ -610,6 +610,49 @@ pub unsafe fn read_fault_addr() -> u64 {
     unsafe { crate::asm::read_cr2() }
 }
 
+// ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
+
+/// Read a byte from an I/O port.
+pub unsafe fn inb(port: u16) -> u8 {
+    unsafe { crate::asm::inb(port) }
+}
+/// Write a byte to an I/O port.
+pub unsafe fn outb(port: u16, val: u8) {
+    unsafe { crate::asm::outb(port, val) }
+}
+/// Read a word (2 bytes) from an I/O port.
+pub unsafe fn inw(port: u16) -> u16 {
+    unsafe { crate::asm::inw(port) }
+}
+/// Write a word (2 bytes) to an I/O port.
+pub unsafe fn outw(port: u16, val: u16) {
+    unsafe { crate::asm::outw(port, val) }
+}
+/// Read a long (4 bytes) from an I/O port.
+pub unsafe fn inl(port: u16) -> u32 {
+    unsafe { crate::asm::inl(port) }
+}
+/// Write a long (4 bytes) to an I/O port.
+pub unsafe fn outl(port: u16, val: u32) {
+    unsafe { crate::asm::outl(port, val) }
+}
+/// String input from an I/O port (byte) to a physical buffer.
+pub unsafe fn phys_insb(port: u16, buf: u64, count: usize) {
+    unsafe { crate::asm::phys_insb(port, buf, count) }
+}
+/// String output to an I/O port (byte) from a physical buffer.
+pub unsafe fn phys_outsb(port: u16, buf: u64, count: usize) {
+    unsafe { crate::asm::phys_outsb(port, buf, count) }
+}
+/// String input from an I/O port (word) to a physical buffer.
+pub unsafe fn phys_insw(port: u16, buf: u64, count: usize) {
+    unsafe { crate::asm::phys_insw(port, buf, count) }
+}
+/// String output to an I/O port (word) from a physical buffer.
+pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
+    unsafe { crate::asm::phys_outsw(port, buf, count) }
+}
+
 // Stub linker symbols for builds without the kernel linker script.
 // The linker script (`minix-raw.ld`) defines these from the sections.
 // These stubs prevent unresolved symbol errors in dev/test builds.

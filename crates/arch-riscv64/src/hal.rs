@@ -409,6 +409,35 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
 }
 
+// ── Port I/O stubs (RISC-V has no port I/O; used by do_devio etc. returning ENOSYS) ──
+
+/// Read a byte from an I/O port (unimplemented on RISC-V).
+pub unsafe fn inb(_port: u16) -> u8 {
+    0
+}
+/// Write a byte to an I/O port (unimplemented on RISC-V).
+pub unsafe fn outb(_port: u16, _val: u8) {}
+/// Read a word from an I/O port (unimplemented on RISC-V).
+pub unsafe fn inw(_port: u16) -> u16 {
+    0
+}
+/// Write a word to an I/O port (unimplemented on RISC-V).
+pub unsafe fn outw(_port: u16, _val: u16) {}
+/// Read a long from an I/O port (unimplemented on RISC-V).
+pub unsafe fn inl(_port: u16) -> u32 {
+    0
+}
+/// Write a long to an I/O port (unimplemented on RISC-V).
+pub unsafe fn outl(_port: u16, _val: u32) {}
+/// String input from I/O port (byte) to physical buffer (unimplemented on RISC-V).
+pub unsafe fn phys_insb(_port: u16, _buf: u64, _count: usize) {}
+/// String output to I/O port (byte) from physical buffer (unimplemented on RISC-V).
+pub unsafe fn phys_outsb(_port: u16, _buf: u64, _count: usize) {}
+/// String input from I/O port (word) to physical buffer (unimplemented on RISC-V).
+pub unsafe fn phys_insw(_port: u16, _buf: u64, _count: usize) {}
+/// String output to I/O port (word) from physical buffer (unimplemented on RISC-V).
+pub unsafe fn phys_outsw(_port: u16, _buf: u64, _count: usize) {}
+
 // Stub linker symbols for builds without the kernel linker script.
 // The RISC-V linker script (`minix-raw-riscv64.ld`) defines these from
 // the sections. These stubs prevent unresolved symbol errors in dev/test.
