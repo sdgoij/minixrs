@@ -2424,10 +2424,16 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
 ### arch_compat.rs — Type re-exports (DONE, needs review)
 
-- [ ] **19.x.13 — Verify `TrapFrame` compat type**
+- [x] **19.x.13 — Verify `TrapFrame` compat type**
   - `arch_compat.rs` re-exports the real `TrapFrame` on x86_64 and a
     `[u8; 256]` alias on non-x86_64. Verify this is sufficient for all
     kernel code that references `TrapFrame` directly.
+  - **Verification**: `TrapFrame` is used in `system.rs` only via
+    `size_of::<TrapFrame>()` in `do_trace_handler` for bounds checking
+    of trace register writes. On x86_64 this correctly limits to the
+    184-byte TrapFrame area within the 256-byte `p_reg`; on RISC-V
+    the 256-byte alias allows access to the full array. No changes
+    needed.
 
 ### Summary of arch-specific references in kernel crate
 
