@@ -371,7 +371,7 @@ pub unsafe fn req_create(
         let path_len = if _path.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path as *const i8)
+            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -565,7 +565,7 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc as *const i8)
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -689,7 +689,7 @@ pub unsafe fn req_mkdir(
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc as *const i8)
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -742,7 +742,7 @@ pub unsafe fn req_mknod(
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc as *const i8)
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -853,7 +853,7 @@ pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
         let path_len = if _label.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_label as *const i8)
+            core::ffi::CStr::from_ptr(_label.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -972,7 +972,7 @@ pub unsafe fn req_readsuper(
         let label_len = if _label.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_label as *const i8)
+            core::ffi::CStr::from_ptr(_label.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1043,7 +1043,7 @@ pub unsafe fn req_rename(
         let len_old = if _old_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_old_name as *const i8)
+            core::ffi::CStr::from_ptr(_old_name.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1051,7 +1051,7 @@ pub unsafe fn req_rename(
         let len_new = if _new_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_new_name as *const i8)
+            core::ffi::CStr::from_ptr(_new_name.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1102,7 +1102,7 @@ pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc as *const i8)
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1152,7 +1152,7 @@ pub unsafe fn req_slink(
         let len_name = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path as *const i8)
+            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1160,7 +1160,7 @@ pub unsafe fn req_slink(
         let len_buf = if _path.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path as *const i8)
+            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
@@ -1265,7 +1265,7 @@ pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         let path_len = if _lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc as *const i8)
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1

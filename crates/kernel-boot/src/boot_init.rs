@@ -454,7 +454,13 @@ pub unsafe fn boot_create_restricted_page_table(
     }
 
     // Overwrite user code pages: map_page will split huge pages to 4KB.
+    // On x86_64: PG_P | PG_RW | PG_U = readable+writable+user
+    // On RISC-V: need V|R|W|X|U (RISC-V requires R for read, W for write, X for exec)
+    #[cfg(target_arch = "x86_64")]
     let user_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
+    #[cfg(target_arch = "riscv64")]
+    let user_flags =
+        kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U | 0x02 | 0x08; // R|X bits (required by RISC-V)
     let mut va = code_start;
     let mut pa = code_phys;
     while va < code_end {

@@ -728,7 +728,14 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(&[b'0' + (err % 10) as u8]);
     write_out(b"\n");
     loop {
-        unsafe { core::arch::asm!("pause") };
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack))
+        };
+        #[cfg(not(target_arch = "riscv64"))]
+        unsafe {
+            core::arch::asm!("pause")
+        };
         let _ = minix_rt::getpid();
     }
 }

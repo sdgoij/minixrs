@@ -2311,7 +2311,7 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   user-mode code hits illegal instructions — RISC-V userland builds are
   Phase 19.20.
 
-- [ ] **19.20 — Build RISC-V userland binaries for initramfs**
+- [x] **19.20 — Build RISC-V userland binaries for initramfs**
   The initramfs is built by `tools/mkinitramfs.rs` which compiles userland
   and server packages for `x86_64-pc-minix`. For RISC-V, we need:
 

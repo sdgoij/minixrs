@@ -180,7 +180,13 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 // original mapping, then overwrite the specific PTE below.
                 let pt_phys = alloc_pt_page()?;
                 let base_pa = pte & PG_FRAME;
-                let pte_flags_src = (pte & PG_PTEMASK) & !PG_PS;
+                // On x86_64: strip PG_PS (bit 7) when converting leaf to branch.
+                // On RISC-V: PG_PS = 0x0F (V|R|W|X detection), keep all flags.
+                #[cfg(target_arch = "x86_64")]
+                let strip_ps = PG_PS;
+                #[cfg(target_arch = "riscv64")]
+                let strip_ps = 0u64;
+                let pte_flags_src = (pte & PG_PTEMASK) & !strip_ps;
                 let pt_virt = pt_phys as *mut u64;
                 for i in 0..512u64 {
                     let pte_pa = base_pa + i * 4096;
@@ -308,8 +314,14 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 
         let base_pa = result.pte_value & PG_FRAME;
 
-        // Attributes to propagate to each 4KB PTE (exclude frame, PS, and G)
-        let attrs = result.pte_value & !(PG_FRAME | PG_PS | PG_G);
+        // Attributes to propagate to each 4KB PTE.
+        // On x86_64: exclude frame, PS, and G. On RISC-V: exclude frame and G only
+        // (PG_PS = 0x0F = V|R|W|X, not a dedicated flag bit).
+        #[cfg(target_arch = "x86_64")]
+        let exclude_mask = PG_FRAME | PG_PS | PG_G;
+        #[cfg(target_arch = "riscv64")]
+        let exclude_mask = PG_FRAME | PG_G;
+        let attrs = result.pte_value & !exclude_mask;
 
         // Allocate a 4KB page table to hold the split PTEs
         let pt_phys = alloc_pt_page()?;
@@ -322,8 +334,13 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
             write_pte(pt.add(i), pte_val);
         }
 
-        // Replace the PDE to point to the new page table (clear PS, G)
-        let pde_flags = (result.pte_value & PG_PTEMASK) & !(PG_PS | PG_G);
+        // Replace the PDE to point to the new page table.
+        // On x86_64: clear PS and G. On RISC-V: clear G only (PG_PS = V|R|W|X).
+        #[cfg(target_arch = "x86_64")]
+        let clear_mask = PG_PS | PG_G;
+        #[cfg(target_arch = "riscv64")]
+        let clear_mask = PG_G;
+        let pde_flags = (result.pte_value & PG_PTEMASK) & !clear_mask;
         let new_pde = crate::hal::build_pte(pt_phys, pde_flags);
         write_pte(result.pte_virt, new_pde);
 

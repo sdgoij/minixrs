@@ -10,6 +10,7 @@ pub const ELFCLASS64: u8 = 2;
 pub const ELFDATA2LSB: u8 = 1;
 pub const ET_EXEC: u16 = 2;
 pub const EM_X86_64: u16 = 62;
+pub const EM_RISCV: u16 = 243;
 
 pub const PT_NULL: u32 = 0;
 pub const PT_LOAD: u32 = 1;
@@ -108,8 +109,12 @@ pub fn parse_elf_header(data: &[u8]) -> Result<&Elf64Ehdr, ElfError> {
     if ehdr.e_type != ET_EXEC {
         return Err(ElfError::NotExecutable);
     }
-    // Must be x86_64
-    if ehdr.e_machine != EM_X86_64 {
+    // Must be x86_64 or RISC-V
+    #[cfg(target_arch = "x86_64")]
+    let expected_machine = EM_X86_64;
+    #[cfg(target_arch = "riscv64")]
+    let expected_machine = EM_RISCV;
+    if ehdr.e_machine != expected_machine {
         return Err(ElfError::WrongArch);
     }
     Ok(ehdr)

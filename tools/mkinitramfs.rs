@@ -142,33 +142,55 @@ const MODE_FILE: u32 = 0o100755;
 const MODE_CHAR: u32 = 0o020777;
 
 fn main() {
+    // Parse optional architecture argument: "x86_64" (default) or "riscv64"
+    let arch = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "x86_64".to_string());
+    let is_riscv = arch == "riscv64";
+
     let workspace = Path::new(".");
     let target_dir = workspace.join("target");
     fs::create_dir_all(&target_dir).ok();
 
-    // Step 1a: Build all userland binaries for the minix target
-    println!("Building userland binaries...");
+    // Architecture-specific settings
+    let target_spec = if is_riscv {
+        "riscv64gc-unknown-none-elf"
+    } else {
+        "x86_64-pc-minix.json"
+    };
+    let target_out_dir = if is_riscv {
+        "riscv64gc-unknown-none-elf"
+    } else {
+        "x86_64-pc-minix"
+    };
+
+    println!("Building userland binaries for {}...", arch);
     let bins_dir = target_dir.join("initramfs_bins");
     fs::create_dir_all(&bins_dir).ok();
 
     for (pkg_name, label) in [("userland", "userland"), ("servers", "servers")] {
         println!("Building {label} binaries...");
+        let mut cargo_args = vec![
+            "run",
+            "nightly",
+            "cargo",
+            "build",
+            "-p",
+            pkg_name,
+            "--bins",
+            "--target",
+            target_spec,
+        ];
+        // Only add -Zjson-target-spec for custom targets (.json files)
+        if target_spec.ends_with(".json") {
+            cargo_args.push("-Zjson-target-spec");
+        }
+        cargo_args.push("-Zbuild-std=core,alloc");
+        cargo_args.push("-Zbuild-std-features=compiler-builtins-mem");
+        cargo_args.push("--release");
+
         let status = Command::new("rustup")
-            .args([
-                "run",
-                "nightly",
-                "cargo",
-                "build",
-                "-p",
-                pkg_name,
-                "--bins",
-                "--target",
-                "x86_64-pc-minix.json",
-                "-Zjson-target-spec",
-                "-Zbuild-std=core,alloc",
-                "-Zbuild-std-features=compiler-builtins-mem",
-                "--release",
-            ])
+            .args(&cargo_args)
             .env(
                 "RUSTFLAGS",
                 "-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr",
@@ -183,7 +205,7 @@ fn main() {
     // Copy the built ELF binaries to our staging directory
     for &(_dest, _pkg, bin_name) in BOOT_BINS {
         let src = target_dir
-            .join("x86_64-pc-minix")
+            .join(target_out_dir)
             .join("release")
             .join(bin_name);
         if src.exists() {
