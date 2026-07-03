@@ -409,6 +409,40 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
 }
 
+// Stub linker symbols for builds without the kernel linker script.
+// The RISC-V linker script (`minix-raw-riscv64.ld`) defines these from
+// the sections. These stubs prevent unresolved symbol errors in dev/test.
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_arch = "riscv64"))
+))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_start: u8 = 0;
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_arch = "riscv64"))
+))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_end: u8 = 0;
+
+/// Return the kernel BSS start address (linker symbol `__bss_start`).
+pub fn bss_start() -> u64 {
+    unsafe extern "C" {
+        static __bss_start: u8;
+    }
+    unsafe { core::ptr::addr_of!(__bss_start) as u64 }
+}
+
+/// Return the kernel BSS end address (linker symbol `__bss_end`).
+pub fn bss_end() -> u64 {
+    unsafe extern "C" {
+        static __bss_end: u8;
+    }
+    unsafe { core::ptr::addr_of!(__bss_end) as u64 }
+}
+
 /// Kernel base virtual address (SV39: 0xFFFFFF8000000000+).
 pub const KERNBASE: u64 = 0xFFFFFF8000000000u64;
 

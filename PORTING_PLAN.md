@@ -2371,9 +2371,12 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     `stval` on RISC-V). Update `handle_page_fault` doc to reference
     the HAL instead of CR2.
 
-- [ ] **19.x.7 — Remove or cfg-gate `__bss_start`/`__bss_end` stubs**
+- [x] **19.x.7 — Remove or cfg-gate `__bss_start`/`__bss_end` stubs**
   - The BSS stubs use `cfg(not(target_vendor = "pc"))` to avoid x86_64.
     Replace with a HAL function that returns kernel BSS boundaries.
+  - **Fix**: Add `hal::bss_start()` and `hal::bss_end()` to both HALs,
+    with cfg-gated stubs for host builds. Remove the stubs from
+    `pagetable.rs` and update `pt_mapkernel` to use the HAL functions.
 
 ### system.rs — Port I/O handlers (MEDIUM priority)
 

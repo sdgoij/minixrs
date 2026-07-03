@@ -51,41 +51,8 @@ pub fn get_proc_cr3(ep: i32) -> u64 {
     unsafe { (*rp).p_seg.p_cr3 }
 }
 
-// Mock definitions for `__bss_start`/`__bss_end` used by `pt_mapkernel`
-// and any other kernel code that references BSS bounds.
-// On Windows (where the kernel linker script is not available), these
-// prevent unresolved symbol errors in any binary that links the kernel
-// crate.  When building with a real linker script (Linux), duplicate
-// strong symbols would conflict, so this is only active on Windows.
-//
-// `#[used]` ensures the symbols survive dead-code elimination.
-// When linking without the kernel linker script, provide stub symbols.
-// The linker script (`minix-raw.ld`) also defines these, so we only emit
-// stubs on targets where the linker script is not used (Windows host or
-// `x86_64-unknown-none` dev builds).
-#[cfg(any(
-    target_os = "windows",
-    all(
-        target_os = "none",
-        not(target_arch = "riscv64"),
-        not(target_vendor = "pc")
-    )
-))]
-#[used]
-#[unsafe(no_mangle)]
-pub static __bss_start: u8 = 0;
-#[cfg(any(
-    target_os = "windows",
-    all(
-        target_os = "none",
-        not(target_arch = "riscv64"),
-        not(target_vendor = "pc")
-    )
-))]
-#[used]
-#[unsafe(no_mangle)]
-pub static __bss_end: u8 = 0;
-
+// PTE index extraction via generic HAL function.
+// Convenience wrappers for each level (name matches x86_64 convention).
 #[derive(Debug, Clone, Copy)]
 pub struct PageWalkResult {
     pub pte_phys: u64,
@@ -356,13 +323,8 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 
         // ── Set NX on BSS pages ──────────────────────────────────────
 
-        unsafe extern "C" {
-            static __bss_start: u8;
-            static __bss_end: u8;
-        }
-
-        let bss_start = core::ptr::addr_of!(__bss_start) as u64;
-        let bss_end = core::ptr::addr_of!(__bss_end) as u64;
+        let bss_start = crate::hal::bss_start();
+        let bss_end = crate::hal::bss_end();
 
         // BSS must be within the kernel 2MB region
         if bss_start < kern_start || bss_end > kern_start + (512 * 0x1000) {

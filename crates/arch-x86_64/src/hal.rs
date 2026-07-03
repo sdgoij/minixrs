@@ -610,6 +610,42 @@ pub unsafe fn read_fault_addr() -> u64 {
     unsafe { crate::asm::read_cr2() }
 }
 
+// Stub linker symbols for builds without the kernel linker script.
+// The linker script (`minix-raw.ld`) defines these from the sections.
+// These stubs prevent unresolved symbol errors in dev/test builds.
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_vendor = "pc"))
+))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_start: u8 = 0;
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "none", not(target_vendor = "pc"))
+))]
+#[used]
+#[unsafe(no_mangle)]
+pub static __bss_end: u8 = 0;
+
+/// Return the kernel BSS start address (linker symbol `__bss_start`).
+pub fn bss_start() -> u64 {
+    unsafe extern "C" {
+        static __bss_start: u8;
+    }
+    core::ptr::addr_of!(__bss_start) as u64
+}
+
+/// Return the kernel BSS end address (linker symbol `__bss_end`).
+pub fn bss_end() -> u64 {
+    unsafe extern "C" {
+        static __bss_end: u8;
+    }
+    core::ptr::addr_of!(__bss_end) as u64
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
 /// Allocate a physical page for page table use.
 ///
 /// # Safety
