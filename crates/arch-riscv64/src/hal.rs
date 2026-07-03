@@ -310,9 +310,9 @@ pub const fn pte_writable() -> u64 {
 pub const fn pte_user() -> u64 {
     pte::PTE_U
 }
-/// PTE flag: large page indicator (SV39: PTE at upper level with R/W/X).
+/// PTE flag: large page indicator (SV39: any R/W/X set at non-leaf level).
 pub const fn pte_large_page() -> u64 {
-    0 // RISC-V uses level + R/W/X bits; no dedicated flag bit
+    pte::PTE_R | pte::PTE_W | pte::PTE_X
 }
 /// PTE flag: global page.
 pub const fn pte_global() -> u64 {

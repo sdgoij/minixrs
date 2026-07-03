@@ -11,16 +11,6 @@
 /// (t6 slot). Also loads the per-process page table from p_seg.p_cr3
 /// (offset 256) and writes SATP with SV39 mode before sret.
 ///
-/// Trap frame layout within `p_reg` (`[u8; 256]`):
-///   0: sepc   (x0 slot, 8 bytes, never loaded as GPR)
-///   8: ra     (x1), 16: sp (x2), 24: gp (x3), 32: tp (x4)
-///  40: t0,    48: t1,  56: t2,  64: s0,  72: s1
-///  80: a0,    88: a1,  96: a2, 104: a3, 112: a4
-/// 120: a5,   128: a6, 136: a7, 144: s2, 152: s3
-/// 160: s4,   168: s5, 176: s6, 184: s7, 192: s8
-/// 200: s9,   208: s10, 216: s11, 224: t3, 232: t4
-/// 240: t5,   248: sstatus (t6 slot, skipped in GPR loads)
-///
 /// # Safety
 ///
 /// `proc_ptr` must point to a valid `Proc` whose `p_reg` and `p_seg`
@@ -30,64 +20,67 @@
 pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
     unsafe {
         core::arch::asm!(
-            // Read sepc from offset 0 (x0 slot).
-            "ld      t0, 0(a0)",
-            "csrw    sepc, t0",
+        // Save proc_ptr in t6 (t6 is skipped in GPR loads below, so it persists).
+        "mv      t6, a0",
 
-            // Read sstatus from offset 248 (t6 slot).
-            "ld      t0, 248(a0)",
-            "csrw    sstatus, t0",
+        // Read sepc from offset 0 (x0 slot) and set it.
+        "ld      t0, 0(t6)",
+        "csrw    sepc, t0",
 
-            // Set SATP from p_seg.p_cr3 at offset 256.
-            // SATP = (8 << 60) | (cr3 >> 12)  [SV39 mode]
-            "ld      t0, 256(a0)",
-            "srli    t0, t0, 12",        // PPN = cr3 >> 12
-            "li      t1, 8",
-            "slli    t1, t1, 60",        // MODE = 8 (SV39)
-            "or      t0, t0, t1",
-            "csrw    satp, t0",
-            "sfence.vma",
+        // Set SATP from p_seg.p_cr3 at offset 256.
+        // SATP = (8 << 60) | (cr3 >> 12)  [SV39 mode]
+        "ld      t0, 256(t6)",
+        "srli    t0, t0, 12",        // PPN = cr3 >> 12
+        "li      t1, 8",
+        "slli    t1, t1, 60",        // MODE = 8 (SV39)
+        "or      t0, t0, t1",
+        "csrw    satp, t0",
+        "sfence.vma",
 
-            // Load all GPRs except x0 (offset 0, holds sepc) and t6 (offset 248, holds sstatus).
-            "ld      ra,   8(a0)",
-            "ld      gp,   24(a0)",
-            "ld      tp,   32(a0)",
-            "ld      t0,   40(a0)",
-            "ld      t1,   48(a0)",
-            "ld      t2,   56(a0)",
-            "ld      s0,   64(a0)",
-            "ld      s1,   72(a0)",
-            "ld      a1,   88(a0)",
-            "ld      a2,   96(a0)",
-            "ld      a3,   104(a0)",
-            "ld      a4,   112(a0)",
-            "ld      a5,   120(a0)",
-            "ld      a6,   128(a0)",
-            "ld      a7,   136(a0)",
-            "ld      s2,   144(a0)",
-            "ld      s3,   152(a0)",
-            "ld      s4,   160(a0)",
-            "ld      s5,   168(a0)",
-            "ld      s6,   176(a0)",
-            "ld      s7,   184(a0)",
-            "ld      s8,   192(a0)",
-            "ld      s9,   200(a0)",
-            "ld      s10,  208(a0)",
-            "ld      s11,  216(a0)",
-            "ld      t3,   224(a0)",
-            "ld      t4,   232(a0)",
-            "ld      t5,   240(a0)",
-            // Skip t6 (offset 248) — holds sstatus.
+        // Save kernel sp to sscratch (before any U-mode trap can happen).
+        "mv      t0, sp",
+        "csrw    sscratch, t0",
 
-            // Save current kernel stack pointer in sscratch for the trap handler.
-            // The trap handler swaps sp ↔ sscratch on U-mode entry.
-            "mv      t0, sp",
-            "csrw    sscratch, t0",
+        // Load all GPRs except x0 (offset 0, holds sepc), t6 (offset 248, holds sstatus),
+        // and sp/a0 (loaded at the end).
+        "ld      ra,   8(t6)",
+        "ld      gp,   24(t6)",
+            "ld      tp,   32(t6)",
+            "ld      t0,   40(t6)",
+            "ld      t1,   48(t6)",
+            "ld      t2,   56(t6)",
+            "ld      s0,   64(t6)",
+            "ld      s1,   72(t6)",
+            "ld      a1,   88(t6)",
+            "ld      a2,   96(t6)",
+            "ld      a3,   104(t6)",
+            "ld      a4,   112(t6)",
+            "ld      a5,   120(t6)",
+            "ld      a6,   128(t6)",
+            "ld      a7,   136(t6)",
+            "ld      s2,   144(t6)",
+            "ld      s3,   152(t6)",
+            "ld      s4,   160(t6)",
+            "ld      s5,   168(t6)",
+            "ld      s6,   176(t6)",
+            "ld      s7,   184(t6)",
+            "ld      s8,   192(t6)",
+            "ld      s9,   200(t6)",
+            "ld      s10,  208(t6)",
+            "ld      s11,  216(t6)",
+            "ld      t3,   224(t6)",
+            "ld      t4,   232(t6)",
+            "ld      t5,   240(t6)",
+            // t6 (offset 248) NOT loaded — holds proc_ptr.
 
             // Load sp (user stack) and a0 last.
-            "ld      sp,   16(a0)",
-            "ld      a0,   80(a0)",
+            "ld      sp,   16(t6)",
+            "ld      a0,   80(t6)",
 
+            // Set sstatus (SPP=0 → U-mode) RIGHT BEFORE sret.
+            // sret is atomic WRT interrupts, so no timer can fire between csrw and sret.
+            "ld      t0,   248(t6)",
+            "csrw    sstatus, t0",
             "sret",
 
             in("a0") proc_ptr,

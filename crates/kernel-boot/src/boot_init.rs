@@ -328,7 +328,13 @@ pub unsafe fn boot_create_page_table() -> u64 {
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.
+    // On RISC-V SV39: non-leaf (branching) PTEs must have V=1 and R=W=X=0.
+    // On x86_64: non-leaf entries can have R/W and U/S bits.
+    // Include PTE_A|PTE_D to avoid hardware A/D bit update faults.
+    #[cfg(target_arch = "x86_64")]
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
+    #[cfg(target_arch = "riscv64")]
+    let flags = kernel::hal::pte_present() | 0xC0; // V | A | D
     for i in 0..(n_pages - 1) {
         unsafe {
             let pte = kernel::hal::build_pte(pages[i + 1], flags);
@@ -422,7 +428,15 @@ pub unsafe fn boot_create_restricted_page_table(
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.
+    // On RISC-V SV39: non-leaf (branching) PTEs must have V=1 and R=W=X=0.
+    // On x86_64: non-leaf entries can have R/W and U/S bits.
+    #[cfg(target_arch = "x86_64")]
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
+    // Non-leaf (branching) PTEs on RISC-V SV39 must have V=1 and R=W=X=0.
+    // A and D bits are WPRI (Write-Preserve-Read-Ignore) for non-leaf PTEs.
+    // Some QEMU implementations reject A/D bits in non-leaf entries.
+    #[cfg(target_arch = "riscv64")]
+    let flags = kernel::hal::pte_present(); // V only (not A|D)
     for i in 0..(n_pages - 1) {
         unsafe {
             let pte = kernel::hal::build_pte(pages[i + 1], flags);
@@ -443,13 +457,24 @@ pub unsafe fn boot_create_restricted_page_table(
         }
     }
 
-    // Share kernel high mappings (top half of root).
+    // Share kernel mappings from the boot page table.
+    // On x86_64: kernel high mappings are in the top half (indices 256-511).
+    // On RISC-V SV39: the boot page table identity-maps the full 4GB at
+    //   indices 0-3 (1GB huge pages), which covers both kernel code and
+    //   device memory. We copy ALL entries so the kernel remains accessible
+    //   after switching to the per-process page table.
     let boot_root = boot_cr3_val as *const u64;
     let new_root = pages[0] as *mut u64;
-    for i in 256..512 {
+    #[cfg(target_arch = "x86_64")]
+    let copy_range = 256..512;
+    #[cfg(target_arch = "riscv64")]
+    let copy_range = 0..512;
+    for i in copy_range {
         let entry = unsafe { core::ptr::read(boot_root.add(i)) };
-        unsafe {
-            core::ptr::write(new_root.add(i), entry);
+        if entry != 0 {
+            unsafe {
+                core::ptr::write(new_root.add(i), entry);
+            }
         }
     }
 
@@ -459,8 +484,12 @@ pub unsafe fn boot_create_restricted_page_table(
     #[cfg(target_arch = "x86_64")]
     let user_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
     #[cfg(target_arch = "riscv64")]
-    let user_flags =
-        kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U | 0x02 | 0x08; // R|X bits (required by RISC-V)
+    let user_flags = kernel::pagetable::PG_P
+        | kernel::pagetable::PG_RW
+        | kernel::pagetable::PG_U
+        | 0x02
+        | 0x08
+        | 0xC0; // R|X|A|D
     let mut va = code_start;
     let mut pa = code_phys;
     while va < code_end {

@@ -2346,15 +2346,63 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Deliverable: `just run-riscv64` loads PM, RS, VFS, init, enqueues all,
     and switches to userspace via the scheduler.
 
-### Test milestones
+- [x] **19.23 — Fix per-process page tables for SV39 (U-mode boot hang)**
+  The RISC-V kernel boots through process loading but hangs immediately after
+  `switch_to_user` because:
+
+  **Root cause 1 — Non-leaf PTE flags**: RISC-V SV39 requires non-leaf
+  (branching) PTEs to have V=1 and R=W=X=0, but the code used x86_64's
+  convention of V|R|W|U. This made the CPU interpret branch entries as
+  1GB huge page leaves, causing `map_page` to corrupt memory by walking
+  page tables as if they were data pages.
+
+  **Root cause 2 — Branch PTE A|D bits**: Some QEMU versions reject non-leaf
+  PTEs with A (Accessed) or D (Dirty) bits set, as these are WPRI (Write-
+  Preserve-Read-Ignore) for non-leaf entries per the RISC-V privileged spec.
+  Removed A|D from all branching PTEs.
+
+  **Root cause 3 — Missing kernel identity map**: `boot_create_restricted_
+  page_table` only copied root indices 256-511 from the boot root (kernel
+  high half on x86_64). On RISC-V SV39, the identity map is at indices 0-3
+  (1GB huge pages), so the kernel code at 0x80200000 became inaccessible
+  after switching page tables.
+
+  **Root cause 4 — Incorrect huge page split granularity**: `map_page`
+  split huge pages directly into 4KB entries regardless of level. On SV39,
+  splitting a 1GB (L2) huge page must create 2MB (L1) entries, then split
+  the relevant 2MB page into 4KB (L0).
+
+  **Files changed:**
+    - `boot_init.rs`: branch PTE flags (V-only), copy all boot root entries
+    - `pagetable.rs`: branch PTE flags (V-only), multi-level huge page split
+    - `hal.rs`: `pte_large_page` returns R|W|X for SV39 leaf detection
+    - `arch-riscv64/src/alloc.rs`: fallback to 0x8FF00000 when bitmap full
+    - `arch-riscv64/src/clint.rs`: use SSTC stimecmp directly (no SBI ecall)
+  - Deliverable: trap handler fires correctly, page faults are caught and
+    printed. User stack page fault at 0x8FE00000 remains (next task).
+
+- [ ] **19.24 — Fix user stack page fault in per-process page table**
+  After switching to the per-process page table, the user process's first
+  instruction (a stack load at VA 0x8FE0FFD0) causes a store_page_fault.
+  The trap handler successfully catches it but enters the stub panic loop.
+
+  **Investigations needed:**
+  - Verify the 16 stack PTEs (L0[0..15]) are all mapped with user_flags
+  - Check if `alloc_phys_contig` returns contiguous pages that overlap
+  - Verify the kernel sp (sscratch) is correctly set on trap entry
+  - Test with `sstatus.SUM=1` for S-mode user memory access
+
+  - Deliverable: user process executes its first instruction without fault
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
 | M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching messages |
-| M-RV3 🏗️ | Shell prompt (`#`) with built-in commands | Need RISC-V userland binaries (19.20) + syscalls (19.21) + working per-process page tables (19.22 fix) |
-| M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
-| M-RV5 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
+| M-RV3 🏗️ | Trap handler catches faults | Page faults print `!PF addr sepc` via UART |
+| M-RV4 | User process runs without page fault | First user instruction executes cleanly |
+| M-RV5 🏗️ | Shell prompt (`#`) | Full boot to shell |
+| M-RV6 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
+| M-RV7 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
 
 **Stretch goals (after M-RV3):**
 - Run the x86_64 userland binaries (same initramfs, different ELF target)

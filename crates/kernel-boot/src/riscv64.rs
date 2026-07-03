@@ -151,13 +151,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     }
 
     // ── Create boot SV39 page table and enable MMU ────────────────────
-    // The kernel runs in Bare mode at this point. We need virtual memory
-    // enabled (SV39) for per-process page tables to work. Create a simple
-    // identity-mapped boot page table using 1GB huge pages.
     serial_write("  enabling SV39 paging...\r\n");
     unsafe {
         if let Some(boot_pt) = create_boot_page_table() {
-            // write_cr3 encodes SATP with SV39 mode
             kernel::hal::write_cr3(boot_pt);
             serial_write("  SV39 enabled\r\n");
         } else {
@@ -291,7 +287,65 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     serial_write("  scheduler starting...\r\n");
 
-    // Pick the first process and switch to userspace.
+    // Dump page table entries for the first process
+    unsafe {
+        let rp = kernel::table::proc_addr(boot_procs[0].1);
+        let cr3 = (*rp).p_seg.p_cr3;
+        serial_write("  PT root: 0x");
+        for i in (0..16).rev() {
+            let nibble = ((cr3 >> (i * 4)) & 0xF) as u8;
+            let hex = b"0123456789abcdef";
+            arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
+        }
+        arch_riscv64::sbi::console_putchar(b'\r');
+        arch_riscv64::sbi::console_putchar(b'\n');
+        // Dump root entries
+        let root = cr3 as *const u64;
+        for i in 0..4 {
+            let entry = core::ptr::read_volatile(root.add(i));
+            serial_write("    L2[");
+            let hex = b"0123456789abcdef";
+            arch_riscv64::sbi::console_putchar(hex[(i >> 4) as usize]);
+            arch_riscv64::sbi::console_putchar(hex[(i & 0xF) as usize]);
+            serial_write("]=0x");
+            for j in (0..16).rev() {
+                let nibble = ((entry >> (j * 4)) & 0xF) as u8;
+                arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
+            }
+            // Check if leaf (has R/W/X) or branch
+            if entry & 0x0E != 0 {
+                serial_write(" LEAF");
+            } else if entry & 0x01 != 0 {
+                serial_write(" BRANCH");
+                // Dump L1 entries for this branch
+                let pd_phys = ((entry & 0x003FFFFFFFFFFC00) >> 10) << 12;
+                let pd = pd_phys as *const u64;
+                for j in 0..8 {
+                    let l1 = core::ptr::read_volatile(pd.add(j));
+                    if l1 != 0 {
+                        serial_write("\r\n      L1[");
+                        arch_riscv64::sbi::console_putchar(hex[(j >> 4) as usize]);
+                        arch_riscv64::sbi::console_putchar(hex[(j & 0xF) as usize]);
+                        serial_write("]=0x");
+                        for k in (0..16).rev() {
+                            let nibble = ((l1 >> (k * 4)) & 0xF) as u8;
+                            arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
+                        }
+                        if l1 & 0x0E != 0 {
+                            serial_write(" LEAF");
+                        } else if l1 & 0x01 != 0 {
+                            serial_write(" BRANCH");
+                        }
+                    }
+                }
+            }
+            arch_riscv64::sbi::console_putchar(b'\r');
+            arch_riscv64::sbi::console_putchar(b'\n');
+        }
+    }
+
+    // TEST: Manually trigger a Supervisor Software Interrupt to test trap handler
+    // BEFORE switching to userspace. If trap handler works, we'll see 'VPick the first process and switch to userspace.
     let next_proc = unsafe { kernel::sched::pick_proc() };
     let next_ptr = match next_proc {
         Some(p) => p,
@@ -302,6 +356,11 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             }
         }
     };
+
+    // Write diagnostic character to confirm UART MMIO works
+    unsafe {
+        core::ptr::write_volatile(0x10000000usize as *mut u8, b'!');
+    }
 
     serial_write("  switching to userspace...\r\n");
     unsafe {
@@ -331,9 +390,9 @@ unsafe fn create_boot_page_table() -> Option<u64> {
         let root_phys = match arch_riscv64::alloc::alloc_phys_page() {
             Some(pa) => pa,
             None => {
-                // Fallback: page at 0x80400000 is in the gap between
-                // initramfs end (~0x80330000) and allocator start (~0x80A00000)
-                0x80400000u64
+                // Fallback: page at 0x8FF00000 is in RAM but outside
+                // PMP protected ranges (0x80000000-0x8004FFFF).
+                0x8FF00000u64
             }
         };
         core::ptr::write_bytes(root_phys as *mut u8, 0, 4096);

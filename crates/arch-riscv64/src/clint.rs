@@ -37,6 +37,7 @@ pub fn read_time() -> u64 {
 /// Initialize the timer by scheduling the first tick.
 ///
 /// Sets up a periodic timer at the given `interval_hz` frequency.
+/// Uses SSTC stimecmp directly (QEMU virt supports this).
 /// Returns the actual interval in ticks that was programmed.
 ///
 /// # Safety
@@ -47,12 +48,17 @@ pub unsafe fn init_timer(interval_hz: u64) -> u64 {
     let interval_ticks = timebase_hz / interval_hz;
     let now = read_time();
     let next = now + interval_ticks;
-    crate::sbi::set_timer(next);
+    // Write stimecmp directly (SSTC extension, CSR 0x14D)
+    unsafe {
+        core::arch::asm!("csrw 0x14D, {next}", next = in(reg) next, options(nomem, nostack));
+    }
     NEXT_INTERVAL.store(interval_ticks, Ordering::Relaxed);
     interval_ticks
 }
 
 /// Handle a timer interrupt — schedule the next tick.
+///
+/// Uses the SBI set_timer call (ecall to OpenSBI).
 ///
 /// Must be called from the trap handler on `SUP_TIMER_INTR`.
 ///
@@ -63,7 +69,10 @@ pub unsafe fn handle_timer_interrupt() {
     let now = read_time();
     let interval = NEXT_INTERVAL.load(Ordering::Relaxed);
     if interval > 0 {
-        crate::sbi::set_timer(now + interval);
+        let next = now + interval;
+        unsafe {
+            core::arch::asm!("csrw 0x14D, {next}", next = in(reg) next, options(nomem, nostack));
+        }
     }
 }
 

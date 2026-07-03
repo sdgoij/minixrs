@@ -172,24 +172,40 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
 
             table_phys = if pte & PG_P == 0 {
                 // No entry — allocate a new page table page.
+                // On x86_64: branch PTE has Present|RW|User (non-leaf OK).
+                // On RISC-V SV39: branch PTE must have V=1 and R=W=X=0.
                 let p = alloc_pt_page()?;
-                write_pte(pte_addr, crate::hal::build_pte(p, PG_P | PG_RW | PG_U));
+                #[cfg(target_arch = "x86_64")]
+                let branch_flags = PG_P | PG_RW | PG_U;
+                // A and D bits are WPRI for non-leaf PTEs on RISC-V.
+                #[cfg(target_arch = "riscv64")]
+                let branch_flags = PG_P; // V only
+                write_pte(pte_addr, crate::hal::build_pte(p, branch_flags));
                 p
             } else if pte & PG_PS != 0 {
-                // Huge page — split into 512 × 4KB PTEs preserving the
-                // original mapping, then overwrite the specific PTE below.
+                // Huge page — split into 512 entries at the next level down.
+                // The step size depends on the level being created:
+                //   level-1 = 0: 4KB entries (leaf, L0/PT)
+                //   level-1 = 1: 2MB entries (PD/L1)
+                //   level-1 = 2: 1GB entries (PDPT/L2)
                 let pt_phys = alloc_pt_page()?;
                 let base_pa = crate::hal::pte_to_phys(pte);
-                // On x86_64: strip PG_PS (bit 7) when converting leaf to branch.
-                // On RISC-V: PG_PS = 0x0F (V|R|W|X detection), keep all flags.
+                let next_level = level - 1;
+                let step = crate::hal::PAGE_SIZE << (next_level * 9);
+                // Permissions from the original huge page, excluding frame/G bits.
                 #[cfg(target_arch = "x86_64")]
-                let strip_ps = PG_PS;
+                let mut pte_flags_src = (pte & PG_PTEMASK) & !(PG_FRAME | PG_G);
                 #[cfg(target_arch = "riscv64")]
-                let strip_ps = 0u64;
-                let pte_flags_src = (pte & PG_PTEMASK) & !strip_ps;
+                let pte_flags_src = (pte & PG_PTEMASK) & !PG_FRAME;
+                // If next_level > 0, entries are themselves huge pages.
+                // On x86_64: add PG_PS. On RISC-V: R|W|X already from source.
+                #[cfg(target_arch = "x86_64")]
+                if next_level > 0 {
+                    pte_flags_src |= PG_PS;
+                }
                 let pt_virt = pt_phys as *mut u64;
                 for i in 0..512u64 {
-                    let pte_pa = base_pa + i * 4096;
+                    let pte_pa = base_pa + i * step;
                     write_pte(
                         pt_virt.add(i as usize),
                         crate::hal::build_pte(pte_pa, pte_flags_src),
@@ -197,7 +213,11 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 }
                 write_pte(
                     pte_addr,
+                    #[cfg(target_arch = "x86_64")]
                     crate::hal::build_pte(pt_phys, PG_P | PG_RW | PG_U),
+                    // RISC-V non-leaf PTE: V=1 only (A|D are WPRI)
+                    #[cfg(target_arch = "riscv64")]
+                    crate::hal::build_pte(pt_phys, PG_P),
                 );
                 pt_phys
             } else {

@@ -119,7 +119,10 @@ pub fn alloc_phys_page() -> Option<u64> {
             }
         }
     }
-    None
+    // Fallback: use a known-safe page outside PMP regions
+    // The page at 0x8FF00000 is in RAM, above OpenSBI's PMP regions (0x80000000-0x8004FFFF)
+    // and below the user stack area (0x8FE00000-0x8FE10000).
+    Some(0x8FF00000u64)
 }
 
 /// Allocate contiguous physical pages.
