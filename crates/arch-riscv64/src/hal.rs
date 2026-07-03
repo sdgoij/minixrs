@@ -15,16 +15,23 @@ pub fn init() {
 
 // ── Serial port I/O (SBI console, Phase 19.3) ────────────────────────────
 
-pub fn serial_write_byte(_byte: u8) {
-    todo!("SBI console putchar; see Phase 19.3");
+/// Write a single byte to the SBI debug console.
+pub fn serial_write_byte(byte: u8) {
+    crate::sbi::console_putchar(byte);
 }
 
+/// Read a byte from the SBI debug console (blocking).
 pub fn serial_read_byte() -> u8 {
-    todo!("SBI console getchar; see Phase 19.3");
+    loop {
+        if let Some(b) = crate::sbi::console_getchar() {
+            return b;
+        }
+    }
 }
 
+/// Non-blocking check: is a byte available from the SBI console?
 pub fn serial_byte_available() -> bool {
-    todo!("SBI console poll; see Phase 19.3");
+    crate::sbi::console_getchar().is_some()
 }
 
 // ── Cycle counter ─────────────────────────────────────────────────────────

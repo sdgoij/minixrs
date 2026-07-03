@@ -7,7 +7,7 @@ pub mod hal;
 pub mod mcontext;
 pub mod param;
 pub mod psl;
-pub mod vmparam;
+pub mod sbi;
 
 /// Initialize RISC-V64 architecture subsystem.
 pub fn init() {

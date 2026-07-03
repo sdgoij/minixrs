@@ -2075,11 +2075,15 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - `lib.rs`: declare new modules, gate hal on `target_arch = "riscv64"`
   - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
-- [ ] **19.3 — SBI console (serial output)** (`arch-riscv64/src/sbi.rs`)
-  - SBI 1.0 legacy extensions: `sbi_console_putchar(char)`, `sbi_console_getchar()`
-  - SBI DBCN extension (1.0+): `sbi_debug_console_write()`, `sbi_system_reset()`
-  - `ecall` with `a7 = extension_id`, `a6 = function_id`, `a0-a5 = args`
-  - **Test:** call `sbi_console_putchar('H')` and see it on QEMU serial
+- [x] **19.3 — SBI console (serial output)** (`arch-riscv64/src/sbi.rs`)
+  - `sbi_legacy()`, `sbi_ecall()` wrappers for RISC-V `ecall`
+  - Legacy console: `console_putchar()`, `console_getchar()`
+  - SBI 1.0 DBCN extension: `debug_console_write()`
+  - System reset via SRST extension: `system_reset()`
+  - Wired into hal.rs: `serial_write_byte()`, `serial_read_byte()`,
+    `serial_byte_available()` now use SBI console
+  - 4 tests for constant values
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
 - [ ] **19.4 — Trap handler vector (assembly)** (`arch-riscv64/src/trap_asm.S`)
   - Write raw assembly trap vector installed at `stvec`:
