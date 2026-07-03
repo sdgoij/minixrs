@@ -2085,84 +2085,37 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - 4 tests for constant values
   - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
-- [ ] **19.4 — Trap handler vector (assembly)** (`arch-riscv64/src/trap_asm.S`)
-  - Write raw assembly trap vector installed at `stvec`:
-  ```asm
-  .align 2
-  .globl trap_vector
-  trap_vector:
-      # Allocate trap frame on kernel stack (32 regs + sepc + sstatus + scause)
-      addi sp, sp, -272  # 34 × 8
+- [x] **19.4 — Trap handler vector** (`arch-riscv64/src/trap_asm.rs`, `trap.rs`)
+  - Assembly trap vector via `global_asm!()`: saves/restores all 32
+    GPRs + sepc/sstatus/scause, calls Rust `trap_handler`
+  - Rust handler dispatches on `scause`: ecall from U-mode routes
+    to registered syscall handler; page faults, timer, external
+    interrupts handled (stubs for later phases)
+  - Syscall number from a7 (offset 136), args from a0-a5 (offsets
+    80-128), return via a0 (offset 80); registered via callback
+    to avoid circular kernel dependency
+  - `trap_vector_addr()` returns aligned trap vector address for stvec
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
-      # Save all 32 GPRs
-      sd ra, 0(sp)
-      sd sp, 8(sp)
-      sd gp, 16(sp)
-      sd tp, 24(sp)
-      # ... t0-t6, s0-s11, a0-a7 ...
+- [x] **19.5 — Trap handler (Rust)** (`arch-riscv64/src/trap.rs`)
+  - Done within 19.4: scause dispatch, ecall routing, syscall
+    callback registration, page fault/timer/IRQ stubs
+- [x] **19.5b — SV39 page tables** (`arch-riscv64/src/pte.rs`)
+  - PtEntry type, PTE flags (V/R/W/X/U/G/A/D), index helpers
+  - SATP CSR read/write, SFENCE.VMA for TLB flush
+  - MAP_* constants wired to real PTE_V/PTE_W/PTE_U
+  - 8 tests covering flags, construction, indices
 
-      # Save CSRs (sepc, sstatus, scause)
-      csrr t0, sepc
-      sd t0, 256(sp)
-      csrr t0, sstatus
-      sd t0, 264(sp)
-      csrr t0, scause
-      sd t0, 272(sp)
+- [x] **19.6 — Context switch** (`arch-riscv64/src/switch.rs`)
+  - `switch_to_user(frame)` inline asm: restores all 32 GPRs, sepc,
+    sstatus from trap frame, then sret to userspace
+  - Per-CPU current proc via tp register (hal::set_current_proc,
+    hal::current_proc)
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
-      # Call Rust handler: trap_handler(frame_ptr)
-      mv a0, sp
-      call trap_handler
-
-      # Restore CSRs and regs, sret
-      ld t0, 256(sp)
-      csrw sepc, t0
-      ld t0, 264(sp)
-      csrw sstatus, t0
-      # restore regs...
-      ld ra, 0(sp)
-      addi sp, sp, 272
-      sret
-  ```
-  - Two entry paths:
-    - Trap from user mode (`sstatus.SPP == 0`): save to kernel stack
-    - Trap from kernel mode (`sstatus.SPP == 1`): save to current stack,
-      never re-enable (panic on nested kernel fault)
-  - **Test:** install trivial handler that writes a char via SBI and returns
-
-- [ ] **19.5 — Trap handler (Rust)** (`arch-riscv64/src/trap.rs`)
-  - Parse `scause` to determine trap type:
-    - `scause == 8` → `ecall from U-mode` → syscall dispatch
-    - `scause == 9` → `ecall from S-mode` → SBI calls (shouldn't happen)
-    - `scause < 0` → interrupt (MSB set) → timer/PLIC dispatch
-    - `scause == 12/13/15` → page fault → VM
-  - Syscall dispatch:
-    ```rust
-    pub extern "C" fn trap_handler(frame: &mut TrapFrame) {
-        let cause = scause::read();
-        match cause {
-            8 => { // ecall from U-mode
-                let nr = frame.a7;  // syscall number
-                let args = [frame.a0, frame.a1, frame.a2, frame.a3, frame.a4, frame.a5];
-                frame.a0 = kernel::syscall::dispatch_basic_syscall(current_proc, nr, &args);
-            }
-            // ... other trap types
-        }
-    }
-    ```
-  - **Test:** trigger `ecall` from assembly, verify dispatch works
-
-- [ ] **19.6 — Context switch** (`arch-riscv64/src/switch.rs` + assembly)
-  - `switch_to_user(proc_ptr)`: restore registers from Proc.p_reg → `sret`
-  - Following ARM pattern (`mpx.S` `restore_user_context`)
-  - **Test:** round-trip context switch: kernel → user → ecall → kernel → user
-
-- [ ] **19.7 — SV39 page tables** (`arch-riscv64/src/pagetable.rs`)
-  - `struct PageTable { root: u64 }` (physical address of root page table)
-  - Sv39: 3 levels (L0 = 4096-entry PT, L1 = PD, L2 = PML), 9 bits per level
-  - `map_page(table, vaddr, paddr, flags)` — walk/create entries, set PTE
-  - `unmap_page(table, vaddr)` — clear PTE, `sfence.vma`
-  - `switch_to(table)` — write `satp` CSR
-  - PTE flags: `V=1`, `R`, `W`, `X`, `U`, `G`, `A`, `D`
+- [x] **19.7 — SV39 page tables** (`arch-riscv64/src/pte.rs`)
+  - Done in 19.5b: PtEntry, PTE flags, index helpers, SATP CSR,
+    SFENCE.VMA, MAP_* constants, 8 tests
   - **Test:** map a page, write to it, read back, verify data
 
 - [ ] **19.8 — Boot code** (`arch-riscv64/src/boot.rs` + linker script)

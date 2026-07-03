@@ -10,6 +10,8 @@ pub mod psl;
 pub mod pte;
 pub mod sbi;
 #[cfg(target_arch = "riscv64")]
+pub mod switch;
+#[cfg(target_arch = "riscv64")]
 pub mod trap;
 #[cfg(target_arch = "riscv64")]
 pub mod trap_asm;

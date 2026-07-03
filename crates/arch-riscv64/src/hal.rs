@@ -56,12 +56,19 @@ pub fn halt() -> ! {
 
 use core::ffi::c_void;
 
-pub unsafe fn set_current_proc(_proc: *mut c_void) {
-    todo!("RISC-V tp-relative per-CPU data; see Phase 19.13");
+pub unsafe fn set_current_proc(proc: *mut c_void) {
+    // RISC-V: store current process pointer in tp register
+    unsafe {
+        core::arch::asm!("mv tp, {proc}", proc = in(reg) proc, options(nomem, nostack));
+    }
 }
 
 pub fn current_proc() -> *mut c_void {
-    todo!("RISC-V tp-relative per-CPU data; see Phase 19.13");
+    let ptr: *mut c_void;
+    unsafe {
+        core::arch::asm!("mv {ptr}, tp", ptr = out(reg) ptr, options(nomem, nostack));
+    }
+    ptr
 }
 
 // ── Spinlocks ─────────────────────────────────────────────────────────────
