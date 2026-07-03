@@ -8,6 +8,7 @@ pub mod elf;
 pub mod exec;
 pub mod glo;
 pub mod grants;
+pub mod hal;
 pub mod initramfs;
 pub mod interrupt;
 pub mod ipc;
@@ -36,10 +37,7 @@ pub mod tests;
 
 /// Kernel initialization.
 pub fn init() {
-    #[cfg(target_arch = "x86_64")]
-    arch_x86_64::init();
-    #[cfg(target_arch = "riscv64")]
-    arch_riscv64::init();
+    hal::init();
     arch_common::init();
 }
 

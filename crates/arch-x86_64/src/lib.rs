@@ -25,6 +25,7 @@ pub mod cpu_msr;
 pub mod cpulocals;
 pub mod cpuvar;
 pub mod frame;
+pub mod hal;
 pub mod hw;
 pub mod idt;
 pub mod interrupt;
