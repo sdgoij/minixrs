@@ -2,7 +2,12 @@
 
 #![no_std]
 
+#[cfg(target_arch = "riscv64")]
 pub mod hal;
+pub mod mcontext;
+pub mod param;
+pub mod psl;
+pub mod vmparam;
 
 /// Initialize RISC-V64 architecture subsystem.
 pub fn init() {

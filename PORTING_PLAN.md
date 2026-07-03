@@ -2063,15 +2063,17 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
   - `cargo check -p minix-rt --target riscv64gc-unknown-none-elf` passes
 
-- [ ] **19.2 — RISC-V constants and types** (`arch-riscv64/src/param.rs`,
-  `vmparam.rs`, `psl.rs`, `mcontext.rs`)
-  - `param.rs`: PAGE_SIZE=4096, KERNEL_STACK_SIZE, NR_REGS=32
-  - `vmparam.rs`: virtual address layout — kernel at 0x80000000 or higher,
-    user space at 0x00000000–0x7FFFFFFF (SV39 39-bit = 512GB)
-  - `psl.rs`: `sstatus` bit flags (SPP, SPIE, SUM, etc.), `sie` bit flags
-  - `mcontext.rs`: register save layout matching `struct sigcontext`
-  - Match the pattern from `arch-x86_64/src/param.rs` etc.
-  - **Test:** constants have expected values, no panics
+- [x] **19.2 — RISC-V constants and types** (`arch-riscv64/src/`)
+  - `param.rs`: PAGE_SIZE, KERNBASE (SV39: 0xFFFFFF8000000000+),
+    NPTEPG=512, conversion helpers, 4 tests
+  - `vmparam.rs`: SV39 paging shifts (L2/L1/L0), user address
+    range (0–0x0000003FFFFFFFFFFF), kernel range, 3 tests
+  - `psl.rs`: sstatus bits (SIE, SPIE, SPP, FS, SUM, MXR) and
+    sie bits (SSIE, STIE, SEIE), PSL_USERSET, 3 tests
+  - `mcontext.rs`: full 31 GPR + sepc + sstatus + FPU state,
+    Debug impl, size assertion test
+  - `lib.rs`: declare new modules, gate hal on `target_arch = "riscv64"`
+  - `cargo check -p arch-riscv64 --target riscv64gc-unknown-none-elf` passes
 
 - [ ] **19.3 — SBI console (serial output)** (`arch-riscv64/src/sbi.rs`)
   - SBI 1.0 legacy extensions: `sbi_console_putchar(char)`, `sbi_console_getchar()`

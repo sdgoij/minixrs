@@ -70,8 +70,9 @@ impl Spinlock {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            // RISC-V: use fence + lightweight hint
             unsafe {
-                core::arch::asm!("pause", options(nomem, nostack));
+                core::arch::asm!("fence", options(nomem, nostack));
             }
         }
     }
@@ -147,10 +148,13 @@ pub unsafe fn write_frame_ip(_frame: &mut [u8; 256], _ip: u64) {
 pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg: u64) {
     // RISC-V: set up initial register state for new process.
     // sepc = entry, sp = stack pointer, a0 = arg.
+    // sstatus = PSL_USERSET (SIE=1, SPIE=1, FS=initial)
     unsafe {
         write_frame_field(frame, 248, entry); // sepc (temporary location)
         write_frame_field(frame, 8, sp); // sp (x2 at offset 8)
         write_frame_field(frame, 80, 0); // a0 (x10) = 0
+        write_frame_field(frame, 256, 0x0000000000000222); // sstatus: SIE|SPIE|FS_INITIAL
+        // ^^ offset 256 is past our 256-byte frame — need 288 bytes for full RISC-V frame.
     }
 }
 
@@ -174,19 +178,12 @@ pub unsafe fn arch_proc_init(
     todo!("RISC-V arch_proc_init; see Phase 19.4");
 }
 
-pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 256]) -> Mcontext {
+pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 256]) -> crate::mcontext::Mcontext {
     todo!("RISC-V mcontext; see Phase 19.6");
 }
 
-pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &Mcontext) {
+pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontext::Mcontext) {
     todo!("RISC-V mcontext; see Phase 19.6");
-}
-
-/// Stub mcontext for RISC-V until Phase 19.6.
-pub struct Mcontext {
-    pub mc_rax: u64,
-    pub mc_rip: u64,
-    pub mc_rsp: u64,
 }
 
 // ── Page table constants (Phase 19.5 — SV39 page tables) ──────────────────
