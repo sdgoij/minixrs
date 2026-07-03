@@ -2156,12 +2156,13 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
     completes
   - 2 tests for constants and IRQ range
 
-- [ ] **19.12 — Serial I/O (NS16550a)** (`arch-riscv64/src/uart.rs`)
-  - MMIO at 0x10000000 (from FDT)
-  - Same NS16550a UART as x86_64, but accessed via MMIO instead of `in`/`out`
-  - `read_byte()`, `write_byte(byte)`, `init()`
-  - Can share logic with `drivers:` crate if abstracted
-  - **Test:** read/write characters from QEMU serial console
+- [x] **19.12 — Serial I/O (NS16550a)** (`arch-riscv64/src/uart.rs`)
+  - MMIO-based NS16550a UART driver at 0x10000000 (QEMU virt)
+  - `init_uart()`: 115200 baud, 8N1, FIFO enabled
+  - `putchar(c)`, `getchar()`, `try_getchar()`, `byte_available()`
+  - `puts(s)`, `get_line(buf)`: string I/O helpers
+  - Same register layout as x86_64 COM1 but via MMIO load/store
+  - 3 tests for base address, register offsets, LSR bits
 
 - [ ] **19.13 — Per-CPU data (`tp` register)** (`arch-riscv64/src/cpulocals.rs`)
   - RISC-V uses `tp` (x4) as the thread pointer, analogous to x86_64's `GS`

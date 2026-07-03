@@ -23,6 +23,8 @@ pub mod switch;
 pub mod trap;
 #[cfg(target_arch = "riscv64")]
 pub mod trap_asm;
+#[cfg(target_arch = "riscv64")]
+pub mod uart;
 pub mod vmparam;
 
 /// Initialize RISC-V64 architecture subsystem.
