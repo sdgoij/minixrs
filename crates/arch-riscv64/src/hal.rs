@@ -6,6 +6,8 @@
 
 use core::sync::atomic::Ordering;
 
+use crate::pte;
+
 // ── Initialization ────────────────────────────────────────────────────────
 
 /// Initialize RISC-V64 architecture subsystem (SBI, PLIC, CLINT, etc.).
@@ -197,26 +199,44 @@ pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontex
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u64 = 12;
-pub const MAP_PRESENT: u64 = 0x0000000000000001; // V (Valid)
-pub const MAP_WRITE: u64 = 0x0000000000000002; // W (Writable)
-pub const MAP_USER: u64 = 0x0000000000000004; // X (eXecutable) — note: RISC-V uses X, not U here
-pub const MAP_NX: u64 = 0x0000000000000000; // RISC-V: no NX bit; use X bit inverted
-pub const MAX_USER_ADDRESS: u64 = 0x0000003FFFFFFF; // SV39: 39-bit address space top
+pub const MAP_PRESENT: u64 = pte::PTE_V;
+pub const MAP_WRITE: u64 = pte::PTE_W;
+pub const MAP_USER: u64 = pte::PTE_U;
+pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
+pub const MAX_USER_ADDRESS: u64 = 0x0000003FFFFFFFFFFF;
 
 pub fn boot_cr3() -> u64 {
-    todo!("RISC-V SATP register read; see Phase 19.5");
+    // Read SATP CSR (Supervisor Address Translation and Protection)
+    unsafe {
+        let satp: u64;
+        core::arch::asm!("csrr {satp}, satp", satp = out(reg) satp, options(nomem, nostack));
+        satp
+    }
 }
 
-pub unsafe fn write_cr3(_cr3: u64) {
-    todo!("RISC-V SATP register write; see Phase 19.5");
+pub unsafe fn write_cr3(cr3: u64) {
+    // Write SATP CSR
+    // SV39 mode = 8 (bits 60-63), ASID = 0 (bits 44-59), PPN = bits 0-43
+    // cr3 is the physical page number (PPN) of the root page table
+    let satp = (8u64 << 60) | (cr3 >> 12); // MODE=SV39, PPN=cr3>>12
+    unsafe {
+        core::arch::asm!("csrw satp, {satp}", satp = in(reg) satp, options(nomem, nostack));
+    }
+    // Flush TLB after SATP write
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
 }
 
 pub unsafe fn read_cr3() -> u64 {
-    todo!("RISC-V SATP register read; see Phase 19.5");
+    boot_cr3()
 }
 
 pub unsafe fn tlb_flush_page(_va: u64) {
-    todo!("RISC-V sfence.vma; see Phase 19.5");
+    // RISC-V sfence.vma with a single address
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
 }
 
 pub unsafe fn alloc_phys_page() -> Option<u64> {

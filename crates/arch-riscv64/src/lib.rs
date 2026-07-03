@@ -7,7 +7,13 @@ pub mod hal;
 pub mod mcontext;
 pub mod param;
 pub mod psl;
+pub mod pte;
 pub mod sbi;
+#[cfg(target_arch = "riscv64")]
+pub mod trap;
+#[cfg(target_arch = "riscv64")]
+pub mod trap_asm;
+pub mod vmparam;
 
 /// Initialize RISC-V64 architecture subsystem.
 pub fn init() {
