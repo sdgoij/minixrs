@@ -12,13 +12,14 @@ global_asm!(
 .align 2
 
 trap_vector:
-    # Check if we came from U-mode (sstatus.SPP = 0) or S-mode (SPP = 1).
-    # If from U-mode, switch to the kernel stack via sscratch.
-    csrr    t0, sstatus
-    andi    t0, t0, 0x100          # SPP bit = bit 8, 0=U-mode, 1=S-mode
-    bnez    t0, 1f                  # skip stack switch if from S-mode
-    csrrw   sp, sscratch, sp        # sp = sscratch (kernel stack), sscratch = user sp
-1:
+    # ALWAYS swap sp with sscratch, regardless of SPP.
+    # When OpenSBI re-injects a non-delegated exception (e.g. load/store page
+    # faults where medeleg bits 13/15 are 0), it does mret to S-mode but sp
+    # is left pointing to OpenSBI's M-mode stack. Without the swap, the
+    # subsequent sd instructions write to the wrong memory.
+    # sscratch always holds the correct kernel stack pointer (set by
+    # switch_to_user and restored by the trap return path).
+    csrrw   sp, sscratch, sp
     # Allocate trap frame (32 GPRs + sepc + sstatus + scause + kstack = 296 bytes)
     addi    sp, sp, -296
 
@@ -64,14 +65,12 @@ trap_vector:
     sd      t0, 272(sp)
 
     # Save the original SP (before trap allocation).
-    # If from U-mode: user sp is in sscratch.
-    # If from S-mode: original sp = current sp + 296.
+    # For U-mode traps: user sp ends up in sscratch after csrrw swap.
+    # For re-injected S-mode traps: original sp was OpenSBI's M-mode stack.
     csrr    t0, sscratch
     sd      t0, 16(sp)
 
     # Save the kernel stack pointer at offset 280 for restoring sscratch later.
-    # For U-mode traps: sp is the kernel stack (after swap).
-    # For S-mode traps: sp is the kernel stack (already).
     addi    t0, sp, 296             # t0 = kernel sp BEFORE trap allocation
     sd      t0, 280(sp)
 

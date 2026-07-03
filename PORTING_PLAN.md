@@ -2381,26 +2381,57 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Deliverable: trap handler fires correctly, page faults are caught and
     printed. User stack page fault at 0x8FE00000 remains (next task).
 
-- [ ] **19.24 — Fix user stack page fault in per-process page table**
-  After switching to the per-process page table, the user process's first
-  instruction (a stack load at VA 0x8FE0FFD0) causes a store_page_fault.
-  The trap handler successfully catches it but enters the stub panic loop.
+- [x] **19.24 — Always swap sscratch with sp on trap entry**
+  The trap vector conditionally swapped sp with sscratch only when
+  SPP=0 (trap from U-mode). This breaks when OpenSBI re-injects
+  non-delegated exceptions (load/store page faults where medeleg
+  bits 13/15 are 0): OpenSBI's `mret` leaves sp pointing to its
+  M-mode stack, but SPP=1 causes the swap to be skipped, so the
+  subsequent register saves overwrite the wrong memory.
 
-  **Investigations needed:**
-  - Verify the 16 stack PTEs (L0[0..15]) are all mapped with user_flags
-  - Check if `alloc_phys_contig` returns contiguous pages that overlap
-  - Verify the kernel sp (sscratch) is correctly set on trap entry
-  - Test with `sstatus.SUM=1` for S-mode user memory access
+  **Fix:** Always swap sp with sscratch on every trap entry.
+  sscratch always holds the correct kernel stack pointer (set by
+  `switch_to_user` and restored by the trap return path).
+
+  **Files changed:**
+    - `arch-riscv64/src/trap_asm.rs`: remove SPP check, always swap
+
+  - Deliverable: page faults from user code are caught by the trap
+    handler instead of causing a double-fault loop. Trap handler
+    correctly reports stval and sepc via UART.
+
+- [ ] **19.25 — Debug user code load page fault at stack access**
+  After the sscratch swap fix, the trap handler correctly catches the
+  first user-mode exception: a load page fault at VA 0x8FE0FFD0 when
+  PM executes `ld a0, 0(sp)`. The stack PTEs are verified to have
+  correct V|R|W|U flags. Investigation needed:
+
+  - The L0 PTEs for all 16 stack pages have user_flags (flags 0xDF
+    = V|R|W|X|U|A|D). The physical addresses are contiguous.
+  - The fault is NOT delegated (medeleg bit 13 = 0), so it goes to
+    M-mode first, where OpenSBI re-injects it to S-mode.
+  - The re-injected trap has sepc=0x1000000 and stval=0x8FE0FFD0,
+    confirming the user code IS running and IS trying to load from
+    the stack. The question is WHY the load faults if the PTE is
+    valid.
+
+  **Possible causes to investigate:**
+  - Though L0[15] shows user_flags, the TWo 4KB-levels between the
+    PD (L1) branches might have stale entries
+  - The initial SP (0x8FE0FFD0) might be in a page that was not
+    properly zeroed or has a stale identity map entry
+  - The trap handler's UART MMIO write at 0x10000000 might fault,
+    causing a SECONDARY fault that overwrites the original CSR state
 
   - Deliverable: user process executes its first instruction without fault
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
-| M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching messages |
-| M-RV3 🏗️ | Trap handler catches faults | Page faults print `!PF addr sepc` via UART |
-| M-RV4 | User process runs without page fault | First user instruction executes cleanly |
-| M-RV5 🏗️ | Shell prompt (`#`) | Full boot to shell |
+| M-RV2 ✅ | Init process loading + switch_to_user | `just run-riscv64` shows enqueuing + switching |
+| M-RV3 ✅ | Trap handler catches faults | Page faults print `!PF` via UART |
+| M-RV4 🏗️ | User process runs without page fault | First user instruction executes cleanly |
+| M-RV5 | Shell prompt (`#`) | Full boot to shell |
 | M-RV6 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
 | M-RV7 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
 
