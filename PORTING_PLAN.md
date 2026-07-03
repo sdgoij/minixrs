@@ -2348,11 +2348,13 @@ x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
     to PT. Consumers of the `level` field see the same values (1=PT,
     2=PD/PMD, 3=PDPT/PUD) regardless of architecture.
 
-- [ ] **19.x.4 — Abstract map_page** (`pub unsafe fn map_page`)
+- [x] **19.x.4 — Abstract map_page** (`pub unsafe fn map_page`)
   - Splits huge pages into 4KB PTEs (x86_64: 2MB page → 512 PTEs).
     RISC-V has 2MB and 1GB huge pages.
-  - **Fix**: Add `hal::split_hugepage(cr3: u64, va: u64)` or make the
-    splitting logic arch-agnostic via HAL callbacks.
+  - **Fix**: Rewrite `map_page()` as a generic loop using
+    `hal::pt_levels()` and `hal::pt_index()`, with generic huge-page
+    splitting that works for both x86_64 and RISC-V (512 PTEs per
+    level, 4KB base page size).
 
 - [ ] **19.x.5 — Abstract pt_mapkernel** (`pub unsafe fn pt_mapkernel`)
   - Hardcodes kernel load address at `0x200000` and uses 2MB page splitting.

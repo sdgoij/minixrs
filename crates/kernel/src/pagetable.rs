@@ -181,63 +181,54 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 
 /// Map a 4KB page. Allocates intermediate page tables as needed.
 ///
+/// Uses `hal::pt_levels()` and `hal::pt_index()` for an arch-generic walk.
+/// If a huge page is encountered at a non-leaf level, it is split into
+/// 512 × 4KB PTEs before the requested page is mapped.
+///
 /// # Safety
 ///
-/// `cr3` must point to a valid, identity-mapped PML4.
+/// `cr3` must point to a valid, identity-mapped root page table.
 pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), PageTableError> {
     unsafe {
+        let levels = crate::hal::pt_levels();
         let pte_flags = (flags & PG_PTEMASK) | PG_P;
         let pte_val = (pa & PG_FRAME) | pte_flags;
-        let pml4 = cr3 as *mut PtEntry;
+        let mut table_phys = cr3;
 
-        let pml4e_addr = pml4.add(pml4_index(va));
-        let pml4e = read_pte(pml4e_addr);
-        let pdpt_phys = if pml4e & PG_P == 0 {
-            let p = alloc_pt_page()?;
-            write_pte(pml4e_addr, p | PG_P | PG_RW | PG_U);
-            p
-        } else {
-            pml4e & PG_FRAME
-        };
+        // Walk from the top non-leaf level down to level 1.
+        for level in (1..levels).rev() {
+            let table = table_phys as *mut PtEntry;
+            let idx = crate::hal::pt_index(va, level);
+            let pte_addr = table.add(idx);
+            let pte = read_pte(pte_addr);
 
-        let pdpt = pdpt_phys as *mut PtEntry;
-        let pdpte_addr = pdpt.add(pdpt_index(va));
-        let pdpte = read_pte(pdpte_addr);
-        let pd_phys = if pdpte & PG_P == 0 {
-            let p = alloc_pt_page()?;
-            write_pte(pdpte_addr, p | PG_P | PG_RW | PG_U);
-            p
-        } else {
-            pdpte & PG_FRAME
-        };
+            table_phys = if pte & PG_P == 0 {
+                // No entry — allocate a new page table page.
+                let p = alloc_pt_page()?;
+                write_pte(pte_addr, p | PG_P | PG_RW | PG_U);
+                p
+            } else if pte & PG_PS != 0 {
+                // Huge page — split into 512 × 4KB PTEs preserving the
+                // original mapping, then overwrite the specific PTE below.
+                let pt_phys = alloc_pt_page()?;
+                let base_pa = pte & PG_FRAME;
+                let pte_flags_src = (pte & PG_PTEMASK) & !PG_PS;
+                let pt_virt = pt_phys as *mut u64;
+                for i in 0..512u64 {
+                    let pte_pa = base_pa + i * 4096;
+                    write_pte(pt_virt.add(i as usize), pte_pa | pte_flags_src);
+                }
+                write_pte(pte_addr, pt_phys | PG_P | PG_RW | PG_U);
+                pt_phys
+            } else {
+                pte & PG_FRAME
+            };
+        }
 
-        let pd = pd_phys as *mut PtEntry;
-        let pde_addr = pd.add(pd_index(va));
-        let pde = read_pte(pde_addr);
-        let pt_phys = if pde & PG_P == 0 {
-            let p = alloc_pt_page()?;
-            write_pte(pde_addr, p | PG_P | PG_RW | PG_U);
-            p
-        } else if pde & PG_PS != 0 {
-            // Split a 2MB huge page into 512 × 4KB PTEs, preserving
-            // the original 2MB mapping. Then the specific PTE will be
-            // overwritten below for the per-process page.
-            let pt_phys = alloc_pt_page()?;
-            let base_pa = pde & PG_FRAME;
-            let pte_flags = (pde & PG_PTEMASK) & !PG_PS;
-            let pt_virt = pt_phys as *mut u64;
-            for i in 0..512u64 {
-                let pte_pa = base_pa + i * 4096;
-                write_pte(pt_virt.add(i as usize), pte_pa | pte_flags);
-            }
-            write_pte(pde_addr, pt_phys | PG_P | PG_RW | PG_U);
-            pt_phys
-        } else {
-            pde & PG_FRAME
-        };
-
-        let pt = pt_phys as *mut u64;
-        let pte_addr = pt.add(pt_l0_index(va));
+        // Level 0 (PT — write the final PTE).
+        let pt = table_phys as *mut u64;
+        let idx = crate::hal::pt_index(va, 0);
+        let pte_addr = pt.add(idx);
         write_pte(pte_addr, pte_val);
         Ok(())
     }
