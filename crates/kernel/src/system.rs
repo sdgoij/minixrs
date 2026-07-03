@@ -659,7 +659,7 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
 
         // Perform I/O (gated: only on bare metal where BOOT_CR3 is set)
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 != 0 {
             if is_input {
                 let value = match io_type {
@@ -745,17 +745,17 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
         // then copy into the kernel VDEVIO_BUF (identity-mapped).
         let buf_ptr = VDEVIO_BUF.get() as u64;
         {
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
                 let caller_cr3 = (*caller).p_seg.p_cr3;
                 if caller_cr3 != 0 {
-                    arch_x86_64::asm::write_cr3(caller_cr3);
+                    crate::hal::write_cr3(caller_cr3);
                 }
             }
             let buf_mut = VDEVIO_BUF.get() as *mut u8;
             core::ptr::copy_nonoverlapping(vec_addr as *const u8, buf_mut, bytes);
             if boot_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(boot_cr3);
+                crate::hal::write_cr3(boot_cr3);
             }
         }
 
@@ -851,17 +851,17 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 
         // Copy results back for input requests
         if io_in {
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
                 let caller_cr3 = (*caller).p_seg.p_cr3;
                 if caller_cr3 != 0 {
-                    arch_x86_64::asm::write_cr3(caller_cr3);
+                    crate::hal::write_cr3(caller_cr3);
                 }
             }
             let buf_src = VDEVIO_BUF.get() as *const u8;
             core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
             if boot_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(boot_cr3);
+                crate::hal::write_cr3(boot_cr3);
             }
         }
 
@@ -980,11 +980,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             }
 
             // Switch to destination address space
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
                 let dest_cr3 = (*new_rp).p_seg.p_cr3;
                 if dest_cr3 != 0 {
-                    arch_x86_64::asm::write_cr3(dest_cr3);
+                    crate::hal::write_cr3(dest_cr3);
                 }
             }
 
@@ -1019,7 +1019,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 
             // Switch back to boot CR3
             if boot_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(boot_cr3);
+                crate::hal::write_cr3(boot_cr3);
             }
 
             result
@@ -1059,11 +1059,11 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             }
 
             // Switch to destination address space
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
                 let dest_cr3 = (*dest_rp).p_seg.p_cr3;
                 if dest_cr3 != 0 {
-                    arch_x86_64::asm::write_cr3(dest_cr3);
+                    crate::hal::write_cr3(dest_cr3);
                 }
             }
 
@@ -1098,7 +1098,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 
             // Switch back to boot CR3
             if boot_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(boot_cr3);
+                crate::hal::write_cr3(boot_cr3);
             }
 
             result
@@ -2535,7 +2535,7 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         if source_cr3 == 0 {
             return crate::ipc::EFAULT;
         }
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             return crate::ipc::EFAULT;
         }
@@ -2546,13 +2546,13 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 
         // Copy input vector from caller's address space
         let _size = vcount as usize * size_of::<arch_common::types::VumapVir>();
-        arch_x86_64::asm::write_cr3(source_cr3);
+        crate::hal::write_cr3(source_cr3);
         core::ptr::copy_nonoverlapping(
             vaddr as *const arch_common::types::VumapVir,
             vvec.as_mut_ptr(),
             vcount as usize,
         );
-        arch_x86_64::asm::write_cr3(boot_cr3);
+        crate::hal::write_cr3(boot_cr3);
 
         let mut pcount: i32 = 0;
 
@@ -2623,13 +2623,13 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         // Copy output vector back to caller's address space
         if pcount > 0 {
             let _psize = pcount as usize * size_of::<arch_common::types::VumapPhys>();
-            arch_x86_64::asm::write_cr3(source_cr3);
+            crate::hal::write_cr3(source_cr3);
             core::ptr::copy_nonoverlapping(
                 pvec.as_ptr(),
                 paddr as *mut arch_common::types::VumapPhys,
                 pcount as usize,
             );
-            arch_x86_64::asm::write_cr3(boot_cr3);
+            crate::hal::write_cr3(boot_cr3);
 
             // Write back pcount
             msg_write_i32(msg, VUMAP_REPLY_PCOUNT_OFF, pcount);
@@ -3194,16 +3194,16 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         let mut name_buf = [0u8; arch_common::types::PROC_NAME_LEN];
         let copy_len = name_buf.len() - 1;
         {
-            let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+            let boot_cr3 = crate::hal::boot_cr3();
             if boot_cr3 != 0 {
                 let caller_cr3 = (*caller).p_seg.p_cr3;
                 if caller_cr3 != 0 {
-                    arch_x86_64::asm::write_cr3(caller_cr3);
+                    crate::hal::write_cr3(caller_cr3);
                 }
             }
             core::ptr::copy_nonoverlapping(name_ptr as *const u8, name_buf.as_mut_ptr(), copy_len);
             if boot_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(boot_cr3);
+                crate::hal::write_cr3(boot_cr3);
             }
         }
         name_buf[copy_len] = 0; // null-terminate
@@ -3237,7 +3237,7 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
             .p_misc_flags
             .store(old_mf2 & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
         // Force reloading FPU if current process owns it
-        arch_x86_64::hw::release_fpu(rp as *mut core::ffi::c_void);
+        crate::hal::release_fpu(rp as *mut core::ffi::c_void);
 
         // set_exec_target to switch to new binary on return
         crate::ipc::set_exec_target(rp, ip, stack);
@@ -3348,11 +3348,11 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
-        let pml4 = match arch_x86_64::alloc::alloc_phys_page() {
+        let pml4 = match crate::hal::alloc_phys_page() {
             Some(p) => p,
             None => return crate::ipc::ENOMEM,
         };
-        core::ptr::write_bytes(pml4 as *mut u8, 0, arch_x86_64::param::NBPG as usize);
+        core::ptr::write_bytes(pml4 as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
 
         let boot_pml4 = crate::pagetable::boot_cr3() as *const u64;
         for i in 256..512 {
@@ -3360,7 +3360,7 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             core::ptr::write((pml4 as *mut u64).add(i), entry);
         }
 
-        let user_flags = arch_x86_64::pte::PG_P | arch_x86_64::pte::PG_RW | arch_x86_64::pte::PG_U;
+        let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
 
         let mut va = code_start;
         while va < code_end {
@@ -3431,16 +3431,16 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         // Copy the Mcontext to the caller's address space via CR3 switching
         let mc_bytes = &mc as *const Mcontext as *const u8;
         let copy_sz = core::mem::size_of::<Mcontext>();
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 != 0 {
             let caller_cr3 = (*caller).p_seg.p_cr3;
             if caller_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(caller_cr3);
+                crate::hal::write_cr3(caller_cr3);
             }
         }
         core::ptr::copy_nonoverlapping(mc_bytes, ctx_ptr as *mut u8, copy_sz);
         if boot_cr3 != 0 {
-            arch_x86_64::asm::write_cr3(boot_cr3);
+            crate::hal::write_cr3(boot_cr3);
         }
 
         OK
@@ -3501,16 +3501,16 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         };
         let mc_bytes = &raw mut mc as *mut u8;
 
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 != 0 {
             let caller_cr3 = (*caller).p_seg.p_cr3;
             if caller_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(caller_cr3);
+                crate::hal::write_cr3(caller_cr3);
             }
         }
         core::ptr::copy_nonoverlapping(ctx_ptr as *const u8, mc_bytes, copy_sz);
         if boot_cr3 != 0 {
-            arch_x86_64::asm::write_cr3(boot_cr3);
+            crate::hal::write_cr3(boot_cr3);
         }
 
         // Apply the saved context to the target process's TrapFrame
@@ -3529,7 +3529,7 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
                 .store(old_mf & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
         }
         // Force reloading FPU in either case
-        arch_x86_64::hw::release_fpu(rp as *mut core::ffi::c_void);
+        crate::hal::release_fpu(rp as *mut core::ffi::c_void);
 
         OK
     }
@@ -4080,7 +4080,7 @@ pub unsafe fn switch_address_space(proc: *const Proc) {
     unsafe {
         let cr3 = (*proc).p_seg.p_cr3;
         if cr3 != 0 {
-            arch_x86_64::asm::write_cr3(cr3);
+            crate::hal::write_cr3(cr3);
         }
     }
 }
@@ -4116,52 +4116,52 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
         // Kernel entries (256-511) are shared BOOT_PDP references.
         for pml4_idx in 0..256 {
             let pml4e = core::ptr::read(pml4.add(pml4_idx));
-            if pml4e & arch_x86_64::pte::PG_P == 0 {
+            if pml4e & crate::pagetable::PG_P == 0 {
                 continue; // not mapped
             }
 
-            let pdpt_phys = pml4e & arch_x86_64::pte::PG_FRAME;
+            let pdpt_phys = pml4e & crate::pagetable::PG_FRAME;
             let pdpt = pdpt_phys as *const u64;
 
             for pdpt_idx in 0..512 {
                 let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-                if pdpte & arch_x86_64::pte::PG_P == 0 {
+                if pdpte & crate::pagetable::PG_P == 0 {
                     continue;
                 }
-                if pdpte & arch_x86_64::pte::PG_PS != 0 {
+                if pdpte & crate::pagetable::PG_PS != 0 {
                     // 1GB huge page — free the single physical frame
-                    let pa = pdpte & arch_x86_64::pte::PG_FRAME;
+                    let pa = pdpte & crate::pagetable::PG_FRAME;
                     let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                     crate::vm::free_mem(page, 1);
                     continue;
                 }
 
-                let pd_phys = pdpte & arch_x86_64::pte::PG_FRAME;
+                let pd_phys = pdpte & crate::pagetable::PG_FRAME;
                 let pd = pd_phys as *const u64;
 
                 for pd_idx in 0..512 {
                     let pde = core::ptr::read(pd.add(pd_idx));
-                    if pde & arch_x86_64::pte::PG_P == 0 {
+                    if pde & crate::pagetable::PG_P == 0 {
                         continue;
                     }
-                    if pde & arch_x86_64::pte::PG_PS != 0 {
+                    if pde & crate::pagetable::PG_PS != 0 {
                         // 2MB huge page — free the single physical frame
-                        let pa = pde & arch_x86_64::pte::PG_FRAME;
+                        let pa = pde & crate::pagetable::PG_FRAME;
                         let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                         crate::vm::free_mem(page, 1);
                         continue;
                     }
 
-                    let pt_phys = pde & arch_x86_64::pte::PG_FRAME;
+                    let pt_phys = pde & crate::pagetable::PG_FRAME;
                     let pt = pt_phys as *const u64;
 
                     for pt_idx in 0..512 {
                         let pte = core::ptr::read(pt.add(pt_idx));
-                        if pte & arch_x86_64::pte::PG_P == 0 {
+                        if pte & crate::pagetable::PG_P == 0 {
                             continue;
                         }
                         // Free the 4KB user page
-                        let pa = pte & arch_x86_64::pte::PG_FRAME;
+                        let pa = pte & crate::pagetable::PG_FRAME;
                         let page = pa / crate::vm::VM_PAGE_SIZE as u64;
                         crate::vm::free_mem(page, 1);
                     }
@@ -4364,9 +4364,9 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             }
             arch_common::com::VMCTL_FLUSHTLB => {
                 // Flush TLB by rewriting CR3
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 != 0 {
-                    arch_x86_64::asm::tlb_flush();
+                    crate::hal::tlb_flush();
                 }
                 OK
             }
@@ -4459,7 +4459,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 // Use virtual_copy to copy from kernel (boot address space)
                 // Since the machine struct is in the kernel's identity-mapped space,
                 // we can copy directly if BOOT_CR3 is active.
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     // Pre-init / test mode: direct copy works
                     core::ptr::copy_nonoverlapping(
@@ -4485,7 +4485,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && kinfo_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         kinfo,
@@ -4509,7 +4509,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                     core::ptr::addr_of!(hz).cast::<u8>(),
                     core::mem::size_of::<u32>(),
                 );
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         src_slice.as_ptr(),
@@ -4533,7 +4533,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && hooks_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         hooks,
@@ -4558,7 +4558,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && proctab_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         proc_base,
@@ -4583,7 +4583,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && privtab_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         priv_base,
@@ -4619,7 +4619,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && proc_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         target_pr.cast::<u8>(),
@@ -4652,7 +4652,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && priv_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         core::ptr::addr_of!(*priv_entry).cast::<u8>(),
@@ -4676,7 +4676,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && irq_actids_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         irq_actids,
@@ -4701,7 +4701,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && params_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = arch_x86_64::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+                let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 == 0 {
                     core::ptr::copy_nonoverlapping(
                         params.as_ptr(),
@@ -4864,7 +4864,7 @@ mod tests {
 
     fn init_signal_env() {
         unsafe {
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             proc_init();
         }
     }
@@ -4975,7 +4975,7 @@ mod tests {
 
     fn init_signal_test_env() {
         unsafe {
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             proc_init();
         }
     }

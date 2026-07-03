@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod arch_compat;
 pub mod clock;
 pub mod debug;
 pub mod elf;

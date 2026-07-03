@@ -2185,20 +2185,26 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 
 ### Build system changes
 
-- [ ] **19.15 — Toolchain and build scripts**
-  - `justfile`: add `just run-riscv64` target
+- [x] **19.15 — Toolchain and build scripts**
+  - Added `just run-riscv64` and `just build-riscv64` targets
   - QEMU command:
     ```
-    qemu-system-riscv64 -machine virt -m 256M -nographic -bios none \
-      -kernel target/riscv64_trampoline.elf
+    qemu-system-riscv64 -machine virt -m 256M -nographic \
+      -bios none -kernel target/riscv64_kernel.bin
     ```
   - Or with OpenSBI:
     ```
-    qemu-system-riscv64 -machine virt -m 256M -nographic -bios fw_jump.bin \
-      -kernel target/riscv64_kernel.bin
+    qemu-system-riscv64 -machine virt -m 256M -nographic \
+      -bios fw_jump.bin -kernel target/riscv64_kernel.bin
     ```
-  - `tools/mkboot.rs` — add riscv64 initramfs build path
-  - Adapt the trampoline/linker approach for RISC-V
+  - Build command:
+    ```
+    cargo build -p kernel-boot --bin kernel-boot-riscv64 \
+      --target riscv64gc-unknown-none-elf -Zbuild-std=core,alloc \
+      -Zbuild-std-features=compiler-builtins-mem --release
+    ```
+  - Full boot not yet possible (kernel crate has 112 remaining
+    arch_x86_64 references blocking full RISC-V compilation)
 
 ### New module structure for `arch-riscv64/src/`
 

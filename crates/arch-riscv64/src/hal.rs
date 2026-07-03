@@ -243,6 +243,29 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
     crate::alloc::alloc_phys_page()
 }
 
+/// Kernel base virtual address (SV39: 0xFFFFFF8000000000+).
+pub const KERNBASE: u64 = 0xFFFFFF8000000000u64;
+
+/// Initialize per-CPU local storage.
+pub unsafe fn init_cpulocals() {
+    crate::cpulocals::init_cpulocals();
+}
+
+/// Read the timestamp counter.
+pub fn read_tsc() -> u64 {
+    crate::clint::read_time()
+}
+
+/// Release FPU state for a process (no-op on RISC-V).
+pub unsafe fn release_fpu(_proc: *mut core::ffi::c_void) {}
+
+/// Flush the entire TLB.
+pub unsafe fn tlb_flush() {
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

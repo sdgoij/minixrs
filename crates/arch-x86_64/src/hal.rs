@@ -122,6 +122,38 @@ pub fn current_proc() -> *mut c_void {
     unsafe { crate::cpulocals::get_cpulocal_proc_ptr() }
 }
 
+/// Initialize per-CPU local storage.
+///
+/// # Safety
+///
+/// Must be called once during early boot on the BSP.
+pub unsafe fn init_cpulocals() {
+    unsafe { crate::cpulocals::init_cpulocals() }
+}
+
+/// Read the timestamp counter.
+pub fn read_tsc() -> u64 {
+    crate::hw::read_tsc()
+}
+
+/// Release the FPU for a process.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` that owns the FPU state.
+pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
+    unsafe { crate::hw::release_fpu(proc) }
+}
+
+/// Flush the entire TLB.
+///
+/// # Safety
+///
+/// Must be called after page table modifications.
+pub unsafe fn tlb_flush() {
+    unsafe { crate::asm::tlb_flush() }
+}
+
 // ── Spinlocks ─────────────────────────────────────────────────────────────
 
 /// A simple spinlock backed by an atomic flag.
@@ -398,6 +430,8 @@ pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext:
 pub const PAGE_SIZE: u64 = 4096;
 /// Number of bits for the page offset.
 pub const PAGE_SHIFT: u64 = 12;
+/// Kernel base virtual address.
+pub const KERNBASE: u64 = 0xFFFF8000_00000000u64;
 
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P

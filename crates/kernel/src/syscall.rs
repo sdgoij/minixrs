@@ -931,7 +931,7 @@ mod tests {
         unsafe {
             proc_init();
             #[cfg(target_arch = "x86_64")]
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             let rp = crate::table::proc_addr(0);
             (*rp).p_nr = 0;
             (*rp).p_endpoint = 100;

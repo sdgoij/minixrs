@@ -435,12 +435,12 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
             return OK;
         }
 
-        let boot_cr3 = arch_x86_64::BOOT_CR3.load(Ordering::Relaxed);
+        let boot_cr3 = crate::hal::boot_cr3();
         let saved_cr3 = if boot_cr3 != 0 {
-            let saved = arch_x86_64::asm::read_cr3();
+            let saved = crate::hal::read_cr3();
             let target_cr3 = (*rp).p_seg.p_cr3;
             if target_cr3 != 0 {
-                arch_x86_64::asm::write_cr3(target_cr3);
+                crate::hal::write_cr3(target_cr3);
             }
             Some(saved)
         } else {
@@ -452,7 +452,7 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
 
         // Restore the original CR3.
         if let Some(saved) = saved_cr3 {
-            arch_x86_64::asm::write_cr3(saved);
+            crate::hal::write_cr3(saved);
         }
 
         OK
@@ -1063,7 +1063,7 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
         }
 
         // Validate table address is in user space
-        if (table as u64) >= arch_x86_64::param::KERNBASE {
+        if (table as u64) >= crate::hal::KERNBASE {
             return crate::grants::EFAULT_DST;
         }
 
@@ -1201,7 +1201,7 @@ mod tests {
 
     fn setup_proc(nr: i32) -> *mut Proc {
         unsafe {
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             let rp = proc_addr(nr);
             if !rp.is_null() {
                 (*rp).p_rts_flags.store(0, Ordering::Relaxed);

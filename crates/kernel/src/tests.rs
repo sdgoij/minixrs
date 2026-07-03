@@ -368,7 +368,7 @@ fn test_tmr_never_value(ctx: &mut TestCtx) {
 
 unsafe fn sched_make_proc(nr: i32, priority: i8) -> *mut crate::proc::Proc {
     unsafe {
-        arch_x86_64::cpulocals::init_cpulocals();
+        crate::hal::init_cpulocals();
         let head = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_head_ptr();
         let tail = arch_x86_64::cpulocals::CPU_LOCAL_STORAGE.run_q_tail_ptr();
         for q in 0..arch_x86_64::cpulocals::NR_SCHED_QUEUES {

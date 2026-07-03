@@ -223,7 +223,7 @@ pub unsafe fn dequeue(rp: *mut Proc) {
         if (*rp).p_accounting.enter_queue != 0 {
             #[cfg(not(test))]
             {
-                let _tsc = arch_x86_64::hw::read_tsc();
+                let _tsc = crate::hal::read_tsc();
             }
             (*rp).p_accounting.enter_queue = 0;
         }
@@ -496,7 +496,7 @@ mod tests {
     /// Must be called after init_cpulocals() (done by make_test_proc).
     unsafe fn clear_run_queues() {
         unsafe {
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             let head = run_q_head_array();
             let tail = run_q_tail_array();
             for q in 0..NR_SCHED_QUEUES {
@@ -510,7 +510,7 @@ mod tests {
     unsafe fn make_test_proc(nr: i32, priority: i8) -> *mut Proc {
         unsafe {
             // Initialize cpulocals if not already done
-            arch_x86_64::cpulocals::init_cpulocals();
+            crate::hal::init_cpulocals();
             let rp = crate::table::proc_addr(nr);
             if !rp.is_null() {
                 (*rp).p_rts_flags.store(0, Ordering::Relaxed); // runnable
