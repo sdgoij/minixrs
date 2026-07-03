@@ -2410,10 +2410,10 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
 ### smp.rs — CPU ID (LOW priority)
 
-- [ ] **19.x.11 — Abstract `cpu_id`**
+- [x] **19.x.11 — Abstract `cpu_id`**
   - `cpu_id()` has a TODO: `arch_x86_64::cpulocals::cpuid()`.
-  - **Fix**: Add `hal::cpu_id() -> u32` (x86_64: CPUID, RISC-V: `mhartid`
-    CSR).
+  - **Fix**: Add `hal::cpu_id() -> u32` (x86_64: CPUID leaf 1 APIC ID,
+    RISC-V: `mhartid` CSR). Remove the TODO stub from smp.rs.
 
 ### tests.rs — Serial output (LOW priority)
 

@@ -118,9 +118,7 @@ static mut AP_CPUS_BOOTED: u32 = 0;
 /// storage must be initialized.
 #[inline]
 pub unsafe fn cpu_id() -> u32 {
-    // TODO: Replace with `arch_x86_64::cpulocals::cpuid()` when that
-    //       accessor is added (see NEXT.md or porting tracker).
-    0
+    crate::hal::cpu_id()
 }
 
 // ─────────────────────────────────────────────────────────────────────────

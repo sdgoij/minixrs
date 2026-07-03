@@ -409,6 +409,15 @@ pub fn read_frame_pointer() -> u64 {
     fp
 }
 
+/// Return the current CPU ID (RISC-V: mhartid CSR).
+pub fn cpu_id() -> u32 {
+    let hartid: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, mhartid", out(reg) hartid, options(nomem, nostack));
+    }
+    hartid as u32
+}
+
 /// Allocate a physical page.
 ///
 /// # Safety

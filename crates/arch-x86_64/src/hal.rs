@@ -619,6 +619,12 @@ pub fn read_frame_pointer() -> u64 {
     fp
 }
 
+/// Return the current CPU ID (x86_64: APIC ID from CPUID leaf 1).
+pub fn cpu_id() -> u32 {
+    let (_, ebx, _, _) = unsafe { crate::asm::cpuid(1) };
+    (ebx >> 24) & 0xFF // Initial APIC ID in bits 31:24
+}
+
 // ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
 
 /// Read a byte from an I/O port.
