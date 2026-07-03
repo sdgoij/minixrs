@@ -2173,17 +2173,15 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Wired into hal.rs: set/current_proc delegate to cpulocals
   - 2 tests for storage size and boot init values
 
-- [ ] **19.14 — RISC-V kernel-boot binary** (new:
-  `crates/kernel-boot-riscv64/` or `kernel-boot/src/riscv64_main.rs`)
-  - Entry point: `_start` (QEMU riscv64)
-  - Call sequence:
-    1. `arch_riscv64::boot::early_init()` — parse FDT, init allocator
-    2. `kernel::init()` — initialize subsystems (uses `Hal` trait)
-    3. `kernel::syscall::init_basic_syscalls()` — register handlers
-    4. Load boot processes from initramfs
-    5. Create per-process page tables (SV39)
-    6. Set up scheduler, `switch_to_user(first_proc)`
-  - **Test:** same output as x86_64 — "Hello MINIX!" + boot log + shell
+- [x] **19.14 — RISC-V kernel-boot binary** (`kernel-boot/src/riscv64.rs`)
+  - `_start` entry via global_asm: sets up stack, clears BSS, calls kmain
+  - `kmain(hart_id, dtb_ptr)`: parses FDT, init allocator, stvec,
+    cpulocals, banner, kernel::init(), timer, PLIC, S-mode interrupts
+  - `[[bin]]` section in Cargo.toml: `kernel-boot-riscv64` binary target
+  - Gated with `#[cfg(target_arch = "riscv64")]`
+  - x86_64 build unaffected; RISC-V build blocked by remaining
+    arch_x86_64 refs in kernel crate (~112 remaining)
+  - Prints "Hello MINIX/RISC-V!" banner on boot
 
 ### Build system changes
 

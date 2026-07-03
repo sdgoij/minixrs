@@ -28,3 +28,11 @@ drivers = { path = "../drivers" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 arch-x86_64 = { path = "../arch-x86_64" }
+
+[[bin]]
+name = "kernel-boot-riscv64"
+path = "src/riscv64.rs"
+required-features = ["embed_initramfs"]
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+arch-riscv64 = { path = "../arch-riscv64" }
