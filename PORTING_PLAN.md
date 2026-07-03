@@ -2234,12 +2234,71 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 | `psl.rs` | CSR bit definitions | `psl.rs` (RFLAGS) |
 | `frame.rs` | TrapFrame type + accessors | `frame.rs` |
 
+### M-RV2 Implementation — RISC-V Process Loading
+
+- [ ] **19.17 — SV39 page table walk and mapping** (`kernel/src/pagetable.rs`)
+  - Current `pagetable.rs` has hardcoded x86_64 4-level walk (PML4→PDPT→PD→PT)
+    with `pml4_index`, `pdpt_index`, `pd_index`, `pt_index`
+  - RISC-V SV39 uses 3-level (L2→L1→L0) with different index shifts
+    (L2: 30, L1: 21, L0: 12, each 9 bits)
+  - Either: add `#[cfg]`-gated index fns + separate walk/map/unmap impls,
+    or: add HAL fns `hal::page_table_walk()`, `hal::page_table_map()` etc.
+    and move x86_64 impl to `arch-x86_64/src/hal.rs`
+  - Must handle: PtEntry type (u64 on both but different flag layouts),
+    root page table pointer (CR3 vs SATP), TLB flush (invlpg vs sfence.vma)
+  - Existing hal fns already provide: `alloc_phys_page()`, `boot_cr3()`,
+    `write_cr3()`, `tlb_flush_page()`, MAP_* constants
+  - Deliverable: `cargo check -p kernel --target riscv64gc-unknown-none-elf` passes
+
+- [ ] **19.18 — RISC-V process loading from initramfs** (`kernel-boot/src/`)
+  - `boot_init.rs` is x86_64-only (uses `arch_x86_64::alloc::alloc_phys_contig`,
+    identity-mapped phys writes, `arch_x86_64::asm::write_cr3`)
+  - Create a new arch-agnostic process loader or add riscv64 impl:
+    - Read ELF64 binaries from initramfs CPIO (shared with x86_64)
+    - Parse ELF headers, calculate segment bounds (shared)
+    - Allocate pages via `hal::alloc_phys_page()` (arch-agnostic)
+    - Copy ELF segment data to allocated pages
+    - Create per-process SV39 page tables mapping virtual→physical
+    - Set initial register state via `hal::set_initial_regs()`
+  - Deliverable: RISC-V kernel loads /sbin/init from initramfs
+
+- [ ] **19.19 — Context switch to userspace via sret** (`arch-riscv64/src/switch.rs`)
+  - `switch.rs` currently has `switch_to_user(frame)` stub
+  - Implement full restore: load all 32 GPRs, sepc, sstatus from p_reg,
+    then `sret` to jump to user process
+  - Trap frame layout: offsets 0-248 for 31 GPRs, 256 for sepc,
+    264 for sstatus (see `mcontext.rs` for layout reference)
+  - Wire into scheduler: after `pick_proc()`, call `switch_to_user()`
+    instead of halting
+  - Deliverable: first context switch to init process executes
+
+- [ ] **19.20 — Syscall handling from U-mode** (`arch-riscv64/src/trap.rs`)
+  - `ecall` from U-mode raises trap with scause=8 (Environment Call from U-mode)
+  - Current trap handler dispatches ecall to registered syscall handler
+    via `SYSCALL_HANDLER` callback
+  - Must verify: syscall number is read from a7 register (offset 136 in frame),
+    args from a0-a5 (offsets 80, 88, 96, 104, 112, 120)
+  - Return value written to a0 (offset 80) before sret
+  - Wire up `kernel::syscall::dispatch_basic_syscall()` as handler
+  - Deliverable: init process can make basic syscalls (exit, write to debug)
+
+- [ ] **19.21 — Boot PM, RS, VFS, init processes** (`kernel-boot/src/riscv64.rs`)
+  - After `kernel::init()`, create boot processes in order:
+    1. PM (Process Manager) — /sbin/pm
+    2. RS (Reincarnation Server) — /sbin/rs
+    3. VFS (File System) — /sbin/vfs
+    4. init — /sbin/init
+  - Each: allocate Proc entry, load ELF, create page table, set regs
+  - After all loaded, switch to init (lowest priority, runs after servers block)
+  - Print progress messages: "PM loaded", "RS loaded", etc.
+  - Deliverable: `just run-riscv64` shows loading messages and boots to init
+
 ### Test milestones
 
 | Milestone | What boots | How to test |
 |-----------|-----------|-------------|
 | M-RV1 ✅ | "Hello MINIX!" serial output | `just run-riscv64` shows banner |
-| M-RV2 | Boot process loading (PM + RS + VFS + init) | Serial shows loading messages |
+| M-RV2 🏗️ | Boot process loading (PM + RS + VFS + init) | `just run-riscv64` shows loading messages | 19.17–19.21 |
 | M-RV3 | Shell prompt (`#`) with built-in commands | Type `echo hello` → `hello` |
 | M-RV4 | Multi-process scheduling (PM fork/exec + IPC) | External binaries work |
 | M-RV5 | Full test suite passes on RISC-V QEMU | `cargo test ...` on riscv64 target |
@@ -2250,9 +2309,130 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 - RISC-V TTY server for keyboard input
 
 
-## Phase 9: File System Servers
 
-**Goal**: Port the file system servers that run in user space.
+## Phase 19.x — HAL migration of remaining x86_64-specific kernel code
+
+**Goal**: Eliminate all `#[cfg(target_arch = "x86_64")]` and direct `arch_x86_64::`
+references from the kernel crate, moving them behind the HAL so the kernel is
+arch-agnostic.
+
+### pagetable.rs — Page table walk and constants (HIGH priority)
+
+The kernel's page table module (`crates/kernel/src/pagetable.rs`) encodes the
+x86_64 4-level (PML4→PDPT→PD→PT) walk directly. This must be abstracted:
+
+- [x] **19.x.1 — Abstract PTE type and page index functions**
+  - `PtEntry = u64` is x86_64-specific (8-byte PTE). RISC-V uses `[u8; 8]` or
+    a SATP-level specific type.
+  - `pml4_index`, `pdpt_index`, `pd_index`, `pt_index` encode a 4-level
+    walk (9 bits per level). RISC-V SV39 has a 3-level walk with different
+    shift amounts (39→30→21 vs 30→21→12).
+  - **Fix**: Add `hal::pt_levels() -> u32` (4 vs 3),
+    `hal::pt_index(va: u64, level: u32) -> usize`, and `hal::PtEntry`
+    type alias.
+
+- [ ] **19.x.2 — Abstract PTE flag constants**
+  - `PG_P`, `PG_RW`, `PG_U`, `PG_PS`, `PG_G`, `PG_FRAME`, `PG_PTEMASK`
+    are x86_64-specific bit positions. RISC-V SV39 uses different bit
+    layouts (V/R/W/X/U/G/A/D).
+  - **Fix**: Add `hal::pte_present()`, `hal::pte_writable()`,
+    `hal::pte_user()`, `hal::pte_large_page()` (huge page flag),
+    `hal::pte_frame_mask()`, `hal::pte_flags_mask()` functions or
+    constants.
+
+- [ ] **19.x.3 — Abstract page table walk** (`pub unsafe fn walk`)
+  - The 4-level walk (PML4→PDPT→PD→PT) is hardcoded. RISC-V SV39 has
+    3 levels (PUD→PMD→PT) with different page sizes.
+  - **Fix**: Add `hal::walk_pagetable(cr3: u64, va: u64)` that returns
+    the last-level PTE, or use a generic walk with `hal::pt_levels()`
+    and `hal::pt_index()`.
+
+- [ ] **19.x.4 — Abstract map_page** (`pub unsafe fn map_page`)
+  - Splits huge pages into 4KB PTEs (x86_64: 2MB page → 512 PTEs).
+    RISC-V has 2MB and 1GB huge pages.
+  - **Fix**: Add `hal::split_hugepage(cr3: u64, va: u64)` or make the
+    splitting logic arch-agnostic via HAL callbacks.
+
+- [ ] **19.x.5 — Abstract pt_mapkernel** (`pub unsafe fn pt_mapkernel`)
+  - Hardcodes kernel load address at `0x200000` and uses 2MB page splitting.
+    RISC-V kernel is linked at `0x80200000`.
+  - **Fix**: Add `hal::kern_vaddr() -> u64` and `hal::map_kernel_pages(cr3)`
+    for arch-specific kernel mapping.
+
+- [ ] **19.x.6 — Abstract `handle_page_fault`**
+  - Currently uses x86_64 CR2 register to get fault address.
+    RISC-V reads `stval` CSR (or `mtval` in M-mode).
+  - **Fix**: Add `hal::read_fault_addr() -> u64`.
+
+- [ ] **19.x.7 — Remove or cfg-gate `__bss_start`/`__bss_end` stubs**
+  - The BSS stubs use `cfg(not(target_vendor = "pc"))` to avoid x86_64.
+    Replace with a HAL function that returns kernel BSS boundaries.
+
+### system.rs — Port I/O handlers (MEDIUM priority)
+
+The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
+`do_sdevio_handler`) call x86_64 port I/O functions directly via
+`arch_x86_64::asm::inb/outb/inw/outw/inl/outl/phys_insb/phys_outsb/...`.
+
+- [ ] **19.x.8 — Abstract port I/O operations**
+  - ~50 lines of `#[cfg(target_arch = "x86_64")]` blocks with
+    `arch_x86_64::asm::*` calls.
+  - **Fix**: Add `hal::inb(port)`, `hal::outb(port, val)`, `hal::inw`,
+    `hal::outw`, `hal::inl`, `hal::outl`, `hal::phys_insb`,
+    `hal::phys_outsb`, `hal::phys_insw`, `hal::phys_outsw`.
+  - RISC-V has no port I/O; these handlers should return `ENOSYS` on
+    non-x86_64 (already done with `#[cfg(not(target_arch = "x86_64"))]`
+    blocks, but the gating macro should be used instead).
+
+### profile.rs — Profile clock (LOW priority)
+
+- [ ] **19.x.9 — Abstract profile clock**
+  - `init_profile_clock()` and `stop_profile_clock()` call
+    `arch_x86_64::apic::*` directly. RISC-V would use CLINT/ACLINT.
+  - **Fix**: Add `hal::init_profile_clock(rate)` and
+    `hal::stop_profile_clock()`, implemented as no-ops on RISC-V
+    (profile clock is optional).
+
+### debug.rs — Stack tracing (LOW priority)
+
+- [ ] **19.x.10 — Abstract RBP read for stack trace**
+  - `proc_stacktrace` uses `#[cfg(target_arch = "x86_64")]` inline asm
+    to read RBP. RISC-V would read `s0` (frame pointer).
+  - **Fix**: Add `hal::read_frame_pointer() -> u64`.
+
+### smp.rs — CPU ID (LOW priority)
+
+- [ ] **19.x.11 — Abstract `cpu_id`**
+  - `cpu_id()` has a TODO: `arch_x86_64::cpulocals::cpuid()`.
+  - **Fix**: Add `hal::cpu_id() -> u32` (x86_64: CPUID, RISC-V: `mhartid`
+    CSR).
+
+### tests.rs — Serial output (LOW priority)
+
+- [ ] **19.x.12 — Abstract test serial output**
+  - `ser_putc` in tests.rs uses x86_64 COM1 inline asm.
+  - **Fix**: Use `hal::serial_write_byte()` (already exists) instead of
+    duplicating COM1 access.
+
+### arch_compat.rs — Type re-exports (DONE, needs review)
+
+- [ ] **19.x.13 — Verify `TrapFrame` compat type**
+  - `arch_compat.rs` re-exports the real `TrapFrame` on x86_64 and a
+    `[u8; 256]` alias on non-x86_64. Verify this is sufficient for all
+    kernel code that references `TrapFrame` directly.
+
+### Summary of arch-specific references in kernel crate
+
+| File | `#[cfg]` blocks | Direct `arch_x86_64::` refs | Priority |
+|------|-----------------|----------------------------|----------|
+| `pagetable.rs` | ~3 | 0 (uses constants) | **HIGH** |
+| `system.rs` | ~7 | ~25 port I/O calls | MEDIUM |
+| `profile.rs` | ~4 | ~8 | LOW |
+| `debug.rs` | ~1 | 0 | LOW |
+| `smp.rs` | 0 | 1 (TODO comment) | LOW |
+| `tests.rs` | ~2 | 0 (uses inline asm) | LOW |
+| `arch_compat.rs` | ~2 | 0 | DONE |
+
 
 ### Tasks
 

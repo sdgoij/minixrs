@@ -282,6 +282,22 @@ pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontex
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u64 = 12;
+
+/// Page table entry type (RISC-V SV39: 8-byte PTE with 3-level paging).
+pub type PtEntry = u64;
+
+/// Number of page table levels (RISC-V SV39: 3-level: PUD→PMD→PT).
+pub const fn pt_levels() -> u32 {
+    3
+}
+
+/// Extract the page table index at a given level.
+/// Level 0 = PT (offset 12), level 1 = PMD (offset 21),
+/// level 2 = PUD (offset 30).
+pub const fn pt_index(va: u64, level: u32) -> usize {
+    ((va >> (12 + level * 9)) & 0x1FF) as usize
+}
+
 pub const MAP_PRESENT: u64 = pte::PTE_V;
 pub const MAP_WRITE: u64 = pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;

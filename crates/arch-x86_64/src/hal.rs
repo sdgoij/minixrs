@@ -511,6 +511,21 @@ pub const PAGE_SHIFT: u64 = 12;
 /// Kernel base virtual address.
 pub const KERNBASE: u64 = 0xFFFF8000_00000000u64;
 
+/// Page table entry type (x86_64: 8-byte PTE with 4-level paging).
+pub type PtEntry = u64;
+
+/// Number of page table levels (x86_64: 4-level: PML4→PDPT→PD→PT).
+pub const fn pt_levels() -> u32 {
+    4
+}
+
+/// Extract the page table index at a given level.
+/// Level 0 = PT (offset 12), level 1 = PD (offset 21),
+/// level 2 = PDPT (offset 30), level 3 = PML4 (offset 39).
+pub const fn pt_index(va: u64, level: u32) -> usize {
+    ((va >> (12 + level * 9)) & 0x1FF) as usize
+}
+
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
 pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW

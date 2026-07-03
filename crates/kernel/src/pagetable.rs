@@ -13,21 +13,22 @@ pub use crate::hal::{
     MAP_NX, MAP_PRESENT, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3, write_cr3,
 };
 
-/// x86_64 page table entry type (u64 — 8 bytes).
-pub type PtEntry = u64;
+/// Page table entry type (arch-specific, provided by HAL).
+pub use crate::hal::PtEntry;
 
-// PTE index extraction (x86_64 4-level: 9 bits per level)
+// PTE index extraction via generic HAL function.
+// Convenience wrappers for each level (name matches x86_64 convention).
 pub const fn pml4_index(va: u64) -> usize {
-    ((va >> 39) & 0x1FF) as usize
+    crate::hal::pt_index(va, 3)
 }
 pub const fn pdpt_index(va: u64) -> usize {
-    ((va >> 30) & 0x1FF) as usize
+    crate::hal::pt_index(va, 2)
 }
 pub const fn pd_index(va: u64) -> usize {
-    ((va >> 21) & 0x1FF) as usize
+    crate::hal::pt_index(va, 1)
 }
-pub const fn pt_index(va: u64) -> usize {
-    ((va >> 12) & 0x1FF) as usize
+pub const fn pt_l0_index(va: u64) -> usize {
+    crate::hal::pt_index(va, 0)
 }
 
 // PTE bit masks (x86_64)
@@ -166,14 +167,14 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 
         let pt_phys = pde & PG_FRAME;
         let pt = pt_phys as *const u64;
-        let pte = read_pte(pt.add(pt_index(va)));
+        let pte = read_pte(pt.add(pt_l0_index(va)));
         if pte & PG_P == 0 {
             return Err(PageTableError::NotMapped);
         }
 
         Ok(PageWalkResult {
-            pte_phys: pt_phys + (pt_index(va) as u64) * 8,
-            pte_virt: (pt_phys + (pt_index(va) as u64) * 8) as *mut u64,
+            pte_phys: pt_phys + (pt_l0_index(va) as u64) * 8,
+            pte_virt: (pt_phys + (pt_l0_index(va) as u64) * 8) as *mut u64,
             pte_value: pte,
             level: 1,
         })
@@ -238,7 +239,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         };
 
         let pt = pt_phys as *mut u64;
-        let pte_addr = pt.add(pt_index(va));
+        let pte_addr = pt.add(pt_l0_index(va));
         write_pte(pte_addr, pte_val);
         Ok(())
     }
