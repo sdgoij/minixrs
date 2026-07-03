@@ -53,7 +53,16 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 288]) {
             cause::SUP_TIMER_INTR => {
                 unsafe { crate::clint::handle_timer_interrupt() };
             }
-            cause::SUP_EXT_INTR => {}
+            cause::SUP_EXT_INTR => {
+                // External interrupt — claim and handle via PLIC
+                unsafe {
+                    let irq = crate::plic::claim_irq();
+                    if irq != 0 {
+                        // TODO: dispatch to registered handler based on IRQ
+                        crate::plic::complete_irq(irq);
+                    }
+                }
+            }
             _ => {}
         }
     } else {

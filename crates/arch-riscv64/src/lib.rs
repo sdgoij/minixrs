@@ -12,6 +12,8 @@ pub mod clint;
 pub mod hal;
 pub mod mcontext;
 pub mod param;
+#[cfg(target_arch = "riscv64")]
+pub mod plic;
 pub mod psl;
 pub mod pte;
 pub mod sbi;

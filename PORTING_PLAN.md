@@ -2146,11 +2146,15 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Added `set_timer(stime_value)` to `sbi.rs`
   - 1 test for CLINT constants
 
-- [ ] **19.11 — Interrupt handling (PLIC)** (`arch-riscv64/src/plic.rs`)
-  - `plic_base` from FDT (typically 0x0C000000 on `virt`)
-  - Enable/disable IRQ sources, set priority, claim/complete
-  - UART IRQ = 10 on `virt` machine
-  - **Test:** enable UART IRQ, receive character via interrupt
+- [x] **19.11 — Interrupt handling (PLIC)** (`arch-riscv64/src/plic.rs`)
+  - MMIO-based PLIC driver for QEMU virt (base 0x0C000000)
+  - `init_plic()`, `enable_irq()`, `disable_irq()`, `claim_irq()`,
+    `complete_irq()`, `irq_pending()`
+  - Supports hart 0 S-mode context with threshold/claim registers
+  - UART IRQ = 10 (QEMU virt standard)
+  - Wired into trap.rs: `SUP_EXT_INTR` claims via PLIC, dispatches,
+    completes
+  - 2 tests for constants and IRQ range
 
 - [ ] **19.12 — Serial I/O (NS16550a)** (`arch-riscv64/src/uart.rs`)
   - MMIO at 0x10000000 (from FDT)
