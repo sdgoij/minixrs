@@ -347,7 +347,10 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
     //  96: r14, 104: r15, 160: rip, 168: rsp, 176: rflags
     let frame = unsafe { &mut (*rp).p_reg };
     unsafe {
-        // Write each register at its byte offset in the raw frame.
+        // Use volatile writes so the compiler cannot optimize away these
+        // register saves. The restore() function reads them via naked asm
+        // that the compiler cannot see, so without volatile the writes
+        // would appear dead and get eliminated.
         let regs = [
             (0usize, *saved.add(0)),    // rax
             (8usize, *saved.add(1)),    // rbx
@@ -365,16 +368,25 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
             (104usize, *saved.add(13)), // r15
         ];
         for (offset, val) in regs {
-            frame[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
+            let bytes = val.to_ne_bytes();
+            for (i, b) in bytes.iter().enumerate() {
+                core::ptr::write_volatile(frame.as_mut_ptr().add(offset + i), *b);
+            }
         }
         // RSP = saved_ptr + 112 (14 pushes × 8 bytes)
         let rsp = (saved as u64) + 112;
-        frame[168..176].copy_from_slice(&rsp.to_ne_bytes());
+        for (i, b) in rsp.to_ne_bytes().iter().enumerate() {
+            core::ptr::write_volatile(frame.as_mut_ptr().add(168 + i), *b);
+        }
         // RIP = RCX value (pushed as arg 2), RFLAGS = R11 value (pushed as arg 9)
         let rip = *saved.add(2);
         let rflags = *saved.add(9);
-        frame[160..168].copy_from_slice(&rip.to_ne_bytes());
-        frame[176..184].copy_from_slice(&rflags.to_ne_bytes());
+        for (i, b) in rip.to_ne_bytes().iter().enumerate() {
+            core::ptr::write_volatile(frame.as_mut_ptr().add(160 + i), *b);
+        }
+        for (i, b) in rflags.to_ne_bytes().iter().enumerate() {
+            core::ptr::write_volatile(frame.as_mut_ptr().add(176 + i), *b);
+        }
     }
 }
 

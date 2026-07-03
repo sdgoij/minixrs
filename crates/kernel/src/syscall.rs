@@ -602,8 +602,24 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             va += 0x1000;
         }
 
-        (*rp).p_seg.p_cr3 = pml4;
-        crate::hal::set_initial_regs(&mut (*rp).p_reg, ehdr.e_entry, user_rsp, user_rsp);
+        // Use write_volatile so the compiler cannot optimize away this
+        // assignment. The restore() function reads p_cr3 via naked asm
+        // ([rdi + 256]) that the compiler cannot see, so without volatile
+        // the write would appear dead and get eliminated.
+        core::ptr::write_volatile(&mut (*rp).p_seg.p_cr3, pml4);
+        // Use a fallback RSP in case setup_user_stack returns 0
+        let rsp_fb = if user_rsp == 0 {
+            0x0FE0FFD0u64
+        } else {
+            user_rsp
+        };
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        core::ptr::write_volatile((*rp).p_reg.as_mut_ptr().add(168) as *mut u64, rsp_fb);
+        core::ptr::write_volatile((*rp).p_reg.as_mut_ptr() as *mut u64, rsp_fb);
+        crate::hal::write_frame_field(&mut (*rp).p_reg, 16, ehdr.e_entry);
+        crate::hal::write_frame_field(&mut (*rp).p_reg, 72, 0x0202);
+        crate::hal::write_frame_field(&mut (*rp).p_reg, 40, rsp_fb);
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
 
         0
     }

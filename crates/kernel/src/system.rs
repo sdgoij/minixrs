@@ -3300,7 +3300,8 @@ pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
         }
 
         // Update the process's page table root
-        (*rp).p_seg.p_cr3 = new_cr3;
+        // Use write_volatile — restore() reads p_cr3 via naked asm.
+        core::ptr::write_volatile(&mut (*rp).p_seg.p_cr3, new_cr3);
 
         // Set up trap frame for sysretq return to userspace:
         crate::hal::set_initial_regs(&mut (*rp).p_reg, entry, user_stack, 0);
@@ -3408,7 +3409,7 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             return crate::ipc::EINVAL;
         }
 
-        (*rp).p_seg.p_cr3 = pml4;
+        core::ptr::write_volatile(&mut (*rp).p_seg.p_cr3, pml4);
         crate::hal::set_initial_regs(&mut (*rp).p_reg, ehdr.e_entry, user_rsp, user_rsp);
 
         OK
@@ -4471,10 +4472,8 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 msg_write_i32(msg, WHOAMI_PRIVFLAGS_OFF, priv_flags);
                 // Copy process name (up to 48 bytes)
                 let name = (*caller).p_name;
-                let name_bytes: &[u8] = core::slice::from_raw_parts(
-                    name.as_ptr(),
-                    core::cmp::min(name.len(), 48),
-                );
+                let name_bytes: &[u8] =
+                    core::slice::from_raw_parts(name.as_ptr(), core::cmp::min(name.len(), 48));
                 let dst = &mut msg[WHOAMI_NAME_OFF..WHOAMI_NAME_OFF + 48];
                 let copy_len = core::cmp::min(name_bytes.len(), dst.len() - 1);
                 dst[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
