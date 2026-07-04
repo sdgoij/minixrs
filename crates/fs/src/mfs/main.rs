@@ -63,21 +63,19 @@ pub fn mfs_main() -> i32 {
             }
             let _src_ep = src as i32;
 
-            // Store the incoming message in global state.
-            unsafe {
-                (*glo::mfs_ptr()).m_in = msg;
-            }
-
             // Determine request number by subtracting FS_BASE from m_type.
             let req_type = msg.m_type;
             let req_nr = (req_type - crate::mfs::consts::FS_BASE) as usize;
-
-            // Populate caller credentials from the message.
-            // The standard FS message uses M1 layout: m1i1 = uid, m1i2 = gid.
+            // Extract caller credentials before moving msg into global state.
+            // Union field access requires unsafe.
+            let (caller_uid, caller_gid) =
+                unsafe { (msg.m_payload.m1.m1i1 as u16, msg.m_payload.m1.m1i2 as u16) };
+            // Store the incoming message and derived fields in global state.
             unsafe {
+                (*glo::mfs_ptr()).m_in = msg;
                 (*glo::mfs_ptr()).req_nr = req_nr as i32;
-                (*glo::mfs_ptr()).caller_uid = msg.m_payload.m1.m1i1 as u16;
-                (*glo::mfs_ptr()).caller_gid = msg.m_payload.m1.m1i2 as u16;
+                (*glo::mfs_ptr()).caller_uid = caller_uid;
+                (*glo::mfs_ptr()).caller_gid = caller_gid;
             }
 
             // Dispatch the request.
@@ -89,10 +87,10 @@ pub fn mfs_main() -> i32 {
                 m_type: status,
                 m_payload: unsafe { core::mem::zeroed() },
             };
+            // Clone the reply into global state (Message is Clone).
             unsafe {
-                (*glo::mfs_ptr()).m_out = reply;
+                (*glo::mfs_ptr()).m_out = reply.clone();
             }
-
             let _ = unsafe {
                 minix_rt::syscall2(
                     SENDREC_CALL,

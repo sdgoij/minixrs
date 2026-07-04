@@ -15,6 +15,7 @@ workspace = true
 [features]
 default = []
 embed_initramfs = ["kernel/embed_initramfs"]
+embed_minixfs = ["kernel/embed_minixfs"]
 integration-tests = ["kernel/qemu-tests"]
 riscv64 = ["kernel/riscv64"]
 

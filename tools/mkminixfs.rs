@@ -95,6 +95,9 @@ struct SuperBlock {
 
 struct FsImage {
     data: Vec<u8>,
+    #[allow(dead_code)]
+    /// Block size in bytes (reserved for variable block size support;
+    /// currently only 4096 is used, via the BLOCK_SIZE constant).
     block_size: usize,
     zone_size: usize,
     total_blocks: u32,
@@ -356,7 +359,9 @@ fn main() {
     let target_dir = workspace.join("target");
 
     // Parse optional architecture argument: "x86_64" (default) or "riscv64"
-    let arch = std::env::args().nth(1).unwrap_or_else(|| "x86_64".to_string());
+    let arch = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "x86_64".to_string());
 
     // Binaries are in the cargo target output directory
     let target_out_dir = match arch.as_str() {

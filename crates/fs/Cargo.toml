@@ -15,3 +15,4 @@ workspace = true
 [dependencies]
 libs = { path = "../libs" }
 arch-common = { path = "../arch-common" }
+minix-rt = { path = "../minix-rt" }
