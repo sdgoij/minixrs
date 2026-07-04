@@ -22,18 +22,21 @@ pub fn serial_write_byte(byte: u8) {
     crate::sbi::console_putchar(byte);
 }
 
-/// Read a byte from the SBI debug console (blocking).
+/// Read a byte from the 8250 UART at MMIO 0x10000000 (blocking).
 pub fn serial_read_byte() -> u8 {
-    loop {
-        if let Some(b) = crate::sbi::console_getchar() {
-            return b;
+    unsafe {
+        // Wait until data is ready (LSR bit 0 = DR).
+        while (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) == 0 {
+            core::hint::spin_loop();
         }
+        // Read the data byte from RBR.
+        core::ptr::read_volatile(0x10000000usize as *const u8)
     }
 }
 
-/// Non-blocking check: is a byte available from the SBI console?
+/// Non-blocking check: is a byte available from the 8250 UART?
 pub fn serial_byte_available() -> bool {
-    crate::sbi::console_getchar().is_some()
+    unsafe { (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) != 0 }
 }
 
 // ── Cycle counter ─────────────────────────────────────────────────────────

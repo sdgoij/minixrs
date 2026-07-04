@@ -207,6 +207,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_post_syscall_hook(riscv_post_syscall);
     }
+    unsafe {
+        // Register UART input callback: pushes received bytes to ser_input.
+        unsafe fn uart_input_cb(byte: u8) {
+            unsafe { kernel::ser_input::push_byte(byte) };
+        }
+        arch_riscv64::trap::register_uart_input_callback(uart_input_cb);
+    }
 
     // Initialize timer (100 Hz)
     unsafe {

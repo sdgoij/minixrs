@@ -32,6 +32,10 @@ static mut SYSCALL_HANDLER: Option<unsafe fn(usize, &[u64; 6]) -> i64> = None;
 /// Registered post-syscall hook (set by kernel at init).
 static mut POST_SYSCALL_HOOK: Option<unsafe fn(&mut [u8; 296])> = None;
 
+/// Registered UART input callback (set by kernel at init).
+/// Called on each timer tick if a byte is available from UART.
+static mut UART_INPUT_CALLBACK: Option<unsafe fn(u8)> = None;
+
 /// Register the basic syscall dispatch function.
 ///
 /// # Safety
@@ -54,6 +58,17 @@ pub unsafe fn register_post_syscall_hook(hook: unsafe fn(&mut [u8; 296])) {
     }
 }
 
+/// Register the UART input callback.
+///
+/// # Safety
+///
+/// Must be called once during kernel init, before any userspace execution.
+pub unsafe fn register_uart_input_callback(cb: unsafe fn(u8)) {
+    unsafe {
+        UART_INPUT_CALLBACK = Some(cb);
+    }
+}
+
 /// The main trap handler — called from trap_asm.S.
 ///
 /// # Safety
@@ -68,7 +83,16 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
     if is_interrupt(scause_val) {
         match code {
             cause::SUP_TIMER_INTR => {
-                unsafe { crate::clint::handle_timer_interrupt() };
+                unsafe {
+                    crate::clint::handle_timer_interrupt();
+                    // Poll for console input via SBI (doesn't need page tables).
+                    // Drain all available bytes.
+                    if let Some(cb) = UART_INPUT_CALLBACK {
+                        while let Some(byte) = crate::sbi::console_getchar() {
+                            cb(byte);
+                        }
+                    }
+                };
             }
             cause::SUP_EXT_INTR => {
                 // External interrupt — claim and handle via PLIC
