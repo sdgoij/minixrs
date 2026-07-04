@@ -576,8 +576,17 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
         // ─── Build new page table (arch-specific) ───────────────────
+        //
+        // HACK: The first x86_64 `let _ = { ... }` block (allocs PML4/PDPT/PD
+        // + copies boot entries) was originally shadowed by the second block
+        // below. The second block does the same setup + maps user pages.
+        // Removing the first block causes a `G` (page fault) at shell start.
+        // Root cause unknown — likely an allocator-ordering issue where the
+        // first block's 3 leaked page allocations shift map_page's PT page
+        // addresses in a way that avoids corrupting some identity-mapped region.
+        // Keep this block even though _discard shadows it. (FIXME: investigate)
         #[cfg(target_arch = "x86_64")]
-        let root = {
+        let _ = {
             let pml4 = match crate::hal::alloc_phys_page() {
                 Some(p) => p,
                 None => return -12,
@@ -611,13 +620,13 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
                 let e = core::ptr::read(boot_pml4.add(i));
                 core::ptr::write((pml4 as *mut u64).add(i), e);
             }
-            pml4
+            0
         };
 
-        #[cfg(target_arch = "riscv64")]
         // RISC-V: RAM starts at 0x80000000, so identity map at VA 0x1000000
         // (the ELF virtual address) writes to MMIO, not RAM. We must allocate
         // physical pages for the binary and map VA → allocated PA.
+        #[cfg(target_arch = "riscv64")]
         let root = {
             let new_root = match crate::hal::alloc_phys_page() {
                 Some(p) => p,
