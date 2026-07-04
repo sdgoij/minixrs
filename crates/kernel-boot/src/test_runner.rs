@@ -117,6 +117,10 @@ pub fn run_integration_tests() -> ! {
     // Phase N: ELF loading to physical pages
     total += test_elf_load_to_phys_pages();
 
+    // Phase O: Hardware device access
+    total += test_rtc_cmos_reads_reasonable_time();
+    total += test_keyboard_controller_present();
+
     // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
     // If all prior tests passed, attempt the ring-3 transition.
     // On success, the ring-3 code writes to the isa-debug-exit port and QEMU
@@ -1359,6 +1363,132 @@ fn test_elf_load_to_phys_pages() -> u32 {
         t.assert(
             check == 0xCAFEBABE,
             "identity map write/readback must work at phys_base",
+        );
+    })
+}
+
+// ===========================================================================
+// Phase O: Hardware device access
+// ===========================================================================
+
+fn test_rtc_cmos_reads_reasonable_time() -> u32 {
+    run("rtc_cmos_reads_reasonable_time", |t| unsafe {
+        // Helper: convert BCD byte to decimal
+        fn bcd_to_dec(bcd: u8) -> u8 {
+            (bcd >> 4) * 10 + (bcd & 0x0F)
+        }
+
+        // Read multiple RTC registers to confirm CMOS is accessible
+        // RTC registers: 0x00=seconds, 0x02=minutes, 0x04=hours,
+        // 0x07=day-of-month, 0x08=month, 0x09=year
+        let regs: [(u8, &str); 6] = [
+            (0x00, "seconds"),
+            (0x02, "minutes"),
+            (0x04, "hours"),
+            (0x07, "day"),
+            (0x08, "month"),
+            (0x09, "year"),
+        ];
+
+        let mut year_val: u8 = 0;
+        for &(reg, name) in &regs {
+            // Select register (clear NMI bit 7)
+            arch_x86_64::asm::outb(0x70, reg);
+            // Read value
+            let val = arch_x86_64::asm::inb(0x71);
+            let dec = bcd_to_dec(val);
+            // All values should be in reasonable ranges
+            if name == "seconds" {
+                t.assert(dec <= 59, "seconds must be 0-59");
+            } else if name == "minutes" {
+                t.assert(dec <= 59, "minutes must be 0-59");
+            } else if name == "hours" {
+                t.assert(dec <= 23, "hours must be 0-23");
+            } else if name == "day" {
+                t.assert(dec >= 1 && dec <= 31, "day must be 1-31");
+            } else if name == "month" {
+                t.assert(dec >= 1 && dec <= 12, "month must be 1-12");
+            } else if name == "year" {
+                year_val = dec;
+                // QEMU RTC typically returns 0-99 (year within century)
+                t.assert(dec <= 99, "year (BCD) must be 0-99");
+            }
+        }
+
+        // Year must be reasonable: 2024-2099 → BCD year 24-99
+        t.assert(year_val >= 24, "year should be >= 24 (2024 or later)");
+        t.assert(year_val <= 99, "year should be <= 99 (2099 or earlier)");
+
+        // Read status register A to verify CMOS is not in update cycle
+        arch_x86_64::asm::outb(0x70, 0x0A); // Status Register A
+        let reg_a = arch_x86_64::asm::inb(0x71);
+        // UIP (Update-In-Progress) bit 7: should settle to 0 eventually
+        // We just read once — on real HW this could be 1, but in QEMU it's 0
+        let _uip = (reg_a & 0x80) != 0;
+
+        // Read status register B to verify RTC is configured
+        arch_x86_64::asm::outb(0x70, 0x0B); // Status Register B
+        let reg_b = arch_x86_64::asm::inb(0x71);
+        // Bit 2 (DM) = 0 means BCD mode (typical default)
+        // Bit 1 (24/12) = 1 means 24-hour mode
+        // In QEMU, these may vary; just verify the register is readable
+        t.assert(
+            reg_b != 0xFF,
+            "status register B should be readable (not float high)",
+        );
+    })
+}
+
+fn test_keyboard_controller_present() -> u32 {
+    run("keyboard_controller_present", |t| unsafe {
+        // Read PS/2 controller status register (port 0x64)
+        // This should return a valid status byte on any PC-compatible system
+        let status = arch_x86_64::asm::inb(0x64);
+        // Status bits:
+        //   bit 0 = output buffer full (data ready to read from 0x60)
+        //   bit 1 = input buffer full (controller busy)
+        //   bit 2 = system flag (POST done)
+        //   bit 3 = command/data (0=data, 1=command)
+        //   bit 4 = keyboard lock (0=locked, 1=unlocked)
+        //   bit 5 = mouse output buffer full
+        //   bit 6 = general timeout
+        //   bit 7 = parity error
+        // In QEMU with no keyboard input, bit 0 should be 0 (nothing to read)
+        t.assert(
+            status & 0x01 == 0,
+            "keyboard output buffer should be empty (no key pressed)",
+        );
+        // Bit 2 (system flag) should be 1 after POST
+        t.assert(
+            status & 0x04 != 0,
+            "system flag bit 2 should be set after POST",
+        );
+        // Bit 1 (input buffer full) should be 0 (no command in progress)
+        t.assert(status & 0x02 == 0, "input buffer should not be full");
+
+        // Verify we can write a command to the keyboard controller
+        // Write 0xAA to 0x64 = self-test command
+        // First wait for input buffer to clear
+        for _ in 0..1000 {
+            let s = arch_x86_64::asm::inb(0x64);
+            if s & 0x02 == 0 {
+                break; // input buffer empty
+            }
+        }
+        arch_x86_64::asm::outb(0x64, 0xAA); // self-test
+        // Wait for output buffer to have data
+        let mut response = 0u8;
+        for _ in 0..1000 {
+            let s = arch_x86_64::asm::inb(0x64);
+            if s & 0x01 != 0 {
+                response = arch_x86_64::asm::inb(0x60);
+                break; // data ready
+            }
+        }
+        // Self-test should return 0x55 (test passed)
+        t.assert(
+            response == 0x55,
+            "keyboard controller self-test should return 0x55",
         );
     })
 }

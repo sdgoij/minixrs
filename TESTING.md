@@ -36,9 +36,10 @@ Located in `crates/kernel-boot/src/test_runner.rs` (34 test functions) +
 | **L** (2) | `pit_programmed`, `monotonic_advances` | PIT counter programmed at 100 Hz; monotonic clock advances from timer interrupts |
 | **M** (1) | `irq_put_and_remove` | Interrupt handling: install/remove handlers |
 | **N** (1) | `elf_load_to_phys_pages` | ELF binary loaded into VM-allocated physical pages via identity map; data/BSS readback verification |
+| **O** (2) | `rtc_cmos_reads_reasonable_time`, `keyboard_controller_present` | CMOS/RTC registers readable via I/O ports with reasonable time values; PS/2 controller responds to self-test (0x55) |
 | **E** (1) | `sysretq_ring3` | **FINALE**: ring-3 transition via sysretq, isa-debug-exit |
 
-**Total hardware QEMU tests: 38**
+**Total hardware QEMU tests: 40**
 
 ### 2.1 Kernel QEMU-Compatible Tests (`kernel/src/tests.rs`)
 
@@ -225,7 +226,7 @@ All gated on `target_os = "none"` (compile-only on host).
 
 | Domain | Count | Notes |
 |--------|-------|-------|
-| **QEMU integration** (A–N) | **38 tests** | Hardware validation: paging, allocators, IPC, grants, timers, PIT, interrupts, ELF loading, ring-3 |
+| **QEMU integration** (A–O) | **40 tests** | Hardware validation: paging, allocators, IPC, grants, timers, PIT, interrupts, ELF loading, RTC/CMOS, keyboard controller, ring-3 |
 | **Kernel QEMU-compatible** (Phase H) | **22 tests** | Pure-logic kernel tests running in QEMU (incl. priority scheduler + round-robin) |
 | **Host — arch-common** | ~55 | Type layouts, ABI constants, IPC message formats |
 | **Host — arch-x86_64** | ~125 | Allocator, APIC, paging, IDT, cpulocals, asm ops |
@@ -242,7 +243,7 @@ All gated on `target_os = "none"` (compile-only on host).
 | **Host — libs** | ~14 | libminixfs block cache, VTreeFS |
 | **Host — net** | 1 | Placeholder |
 | **Host total** | **~690 tests** | All crates combined |
-| **Grand total** | **~796 tests** | Host + QEMU (+58 tests from gap-filling) |
+| **Grand total** | **~798 tests** | Host + QEMU (+60 tests from gap-filling) |
 
 ---
 
@@ -294,6 +295,7 @@ The following gaps from the original analysis have been filled:
 | **SENDREC→reply cycle** | Added `test_sendrec_reply_cycle` to `kernel/src/tests.rs` | Full IPC roundtrip: SENDREC request delivery, sender blocks, reply delivery, receiver blocks, roundtrip reversibility |
 | **Syscall exit** | Added `test_syscall_exit` to `test_runner.rs` Phase J | Exit returns EDONTREPLY, stores exit status in p_signal_received, sets SLOT_FREE |
 | **ELF loading to physical pages** | Added `test_elf_load_to_phys_pages` to `test_runner.rs` Phase N | Minimal ELF built, parsed, loaded into VM-allocated pages via identity map; data/BSS readback verified; entry point validated |
+| **Driver integration (RTC/CMOS, keyboard)** | Added `test_rtc_cmos_reads_reasonable_time` and `test_keyboard_controller_present` to `test_runner.rs` Phase O | RTC registers readable with reasonable values; PS/2 controller responds to self-test command |
 
 ### 5.5 Remaining Notable Gaps
 
@@ -306,7 +308,7 @@ The following gaps from the original analysis have been filled:
 | **Network** | 1 placeholder test | Phase 16 not started |
 | **Live Update** | No tests | Phase 15 not started |
 | **RISC-V64 integration** | M1R prints banner; no test suite analogous to Phases A–L | Medium |
-| **Driver integration** | All driver tests are mock-based; no QEMU tests with real (emulated) hardware | **High** |
+| **Driver integration (real hardware)** | RTC/CMOS, PS/2 keyboard controller tested in QEMU; virtio-blk, PCI, ATA, network not tested | **High** — 2 of ~30 drivers tested on real (emulated) HW |
 | **Windows host gaps** | Several tests `#[ignore]`'d due to ring-0 / IOPL restrictions | Low (kernels don't test on Windows) |
 
 ---
@@ -368,6 +370,7 @@ The plan outlines these for `test_runner.rs`:
 | **L** | PIT/hardware timer | PIT counter readback, monotonic clock advancement (✅ DONE) |
 | **M** | Interrupts | `put_irq_handler`, `irq_handle`, `rm_irq_handler` (✅ DONE) |
 | **N** | ELF loading to physical pages | Build ELF → parse → alloc pages → load via identity map → readback verify (✅ DONE) |
+| **O** | Driver hardware access | RTC/CMOS register readback, PS/2 controller self-test (✅ DONE) |
 
 ---
 
