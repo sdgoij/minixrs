@@ -14,9 +14,7 @@ use crate::hal::{bkl_lock, bkl_unlock};
 
 use crate::proc::{Proc, RtsFlags};
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Maximum number of CPUs the SMP layer supports.
 pub const CONFIG_MAX_CPUS: usize = 32;
@@ -40,9 +38,7 @@ const SCHED_IPI_VM_INHIBIT: u32 = 2;
 #[allow(dead_code)]
 const SCHED_IPI_SAVE_CTX: u32 = 4;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Per-CPU information
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Per-CPU state information.
 #[derive(Debug)]
@@ -72,9 +68,7 @@ pub static BSP_CPU_ID: AtomicU32 = AtomicU32::new(0);
 /// Number of hyperthreads per core.
 pub static HT_PER_CORE: AtomicU32 = AtomicU32::new(1);
 
-// ─────────────────────────────────────────────────────────────────────────
 // Sched IPI data (per-target-CPU, synchronised via BKL)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Per-CPU sched-IPI payload.
 #[derive(Debug, Clone, Copy)]
@@ -103,9 +97,7 @@ static mut SCHED_IPI_DATA: [SchedIpiData; CONFIG_MAX_CPUS] = [SCHED_IPI_DATA_INI
 /// is active).
 static mut AP_CPUS_BOOTED: u32 = 0;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Helpers
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Get the current CPU's logical ID.
 ///
@@ -121,9 +113,7 @@ pub unsafe fn cpu_id() -> u32 {
     crate::hal::cpu_id()
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // AP boot tracking
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Wait for all Application Processors to finish booting.
 ///
@@ -167,9 +157,7 @@ pub unsafe fn ap_boot_finished(_cpu: u32) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPI handlers
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Halt handler — stop the current CPU.
 ///
@@ -242,9 +230,7 @@ pub unsafe fn smp_ipi_sched_handler() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Sched IPI helpers (send side)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Schedule a stop-process IPI for `p`.
 ///
@@ -298,7 +284,7 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
     // Must not target ourselves
     assert!(cpu != mycpu, "smp_schedule_sync: target CPU == current CPU");
 
-    // ── Phase 1: wait for any previous IPI to this target ──
+    // Phase 1: wait for any previous IPI to this target
     if unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
         unsafe { bkl_unlock() };
         while unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
@@ -313,7 +299,7 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
         unsafe { bkl_lock() };
     }
 
-    // ── Phase 2: post the IPI ──
+    // Phase 2: post the IPI
     unsafe {
         SCHED_IPI_DATA[cpu].data = p as u32;
         SCHED_IPI_DATA[cpu].flags |= task;
@@ -322,7 +308,7 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
     // TODO: arch_send_smp_schedule_ipi(cpu as u32)
     //       — send the actual IPI via APIC.
 
-    // ── Phase 3: wait for the remote CPU to clear the flags ──
+    // Phase 3: wait for the remote CPU to clear the flags
     unsafe { bkl_unlock() };
     while unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
         // Service our own IPI queue while we wait
@@ -336,9 +322,7 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
     unsafe { bkl_lock() };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // CPU frequency tracking
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Set the frequency for a given CPU.
 pub fn cpu_set_freq(cpu: u32, freq: u32) {
@@ -356,9 +340,7 @@ pub fn cpu_get_freq(cpu: u32) -> u32 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

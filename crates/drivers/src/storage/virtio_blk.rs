@@ -26,7 +26,6 @@ use crate::bus::virtio;
 use crate::bus::virtio::{VRING_DESC_F_WRITE, VirtioDevice, VirtioFeature, VirtioPhysBuf};
 use core::ptr::addr_of_mut;
 
-// ── Virtio vendor/device IDs ────────────────────────────────────────────────
 
 /// Virtio PCI vendor ID (Red Hat / QEMU).
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
@@ -37,7 +36,6 @@ pub const VIRTIO_DEVICE_ID_BLOCK: u16 = 0x1001;
 /// Virtio block PCI subsystem device ID (used by `virtio_probe`).
 pub const VIRTIO_BLK_SUBSYSTEM_ID: u16 = 0x0002;
 
-// ── Feature bits ───────────────────────────────────────────────────────────
 
 pub const VIRTIO_BLK_F_BARRIER: u8 = 0;
 pub const VIRTIO_BLK_F_SIZE_MAX: u8 = 1;
@@ -122,7 +120,6 @@ const VIRTIO_BLK_FEATURE_LIST: &[VirtioFeature] = &[
     },
 ];
 
-// ── Block config structure ─────────────────────────────────────────────────
 
 /// Virtio block device configuration (from PCI config space / virtio
 /// device-specific registers).
@@ -166,7 +163,6 @@ impl Default for VirtioBlkConfig {
     }
 }
 
-// ── Request types ──────────────────────────────────────────────────────────
 
 pub const VIRTIO_BLK_T_IN: u32 = 0;
 pub const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -175,7 +171,6 @@ pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 pub const VIRTIO_BLK_T_GET_ID: u32 = 8;
 pub const VIRTIO_BLK_T_BARRIER: u32 = 0x8000_0000;
 
-// ── Request header ─────────────────────────────────────────────────────────
 
 /// Virtio block request header.
 #[derive(Clone, Copy)]
@@ -202,13 +197,11 @@ impl Default for VirtioBlkOuthdr {
     }
 }
 
-// ── Status codes ───────────────────────────────────────────────────────────
 
 pub const VIRTIO_BLK_S_OK: u8 = 0;
 pub const VIRTIO_BLK_S_IOERR: u8 = 1;
 pub const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-// ── Device constants ───────────────────────────────────────────────────────
 
 /// Block size is always 512 bytes for virtio-blk.
 pub const VIRTIO_BLK_BLOCK_SIZE: u32 = 512;
@@ -220,7 +213,6 @@ pub const VIRTIO_BLK_NUM_THREADS: usize = 4;
 /// Maximum number of segments per request.
 pub const VIRTIO_BLK_MAX_SEGMENTS: u32 = 128;
 
-// ── Static DMA buffers ─────────────────────────────────────────────────────
 
 /// Pre-allocated request headers for each thread slot.
 ///
@@ -232,7 +224,6 @@ static mut HDRS: [VirtioBlkOuthdr; 1] = [VirtioBlkOuthdr::new()];
 /// Pre-allocated status bytes for each thread slot.
 static mut STATUS: [u8; 1] = [0u8];
 
-// ── Device state ───────────────────────────────────────────────────────────
 
 /// Runtime state of the virtio-block driver.
 struct VirtioBlkState {
@@ -272,7 +263,6 @@ impl VirtioBlkState {
     }
 }
 
-// ── Global state singleton ─────────────────────────────────────────────────
 
 static mut STATE: VirtioBlkState = VirtioBlkState::new();
 
@@ -291,7 +281,6 @@ fn status_ptr() -> *mut [u8; 1] {
     addr_of_mut!(STATUS)
 }
 
-// ── Private helpers ─────────────────────────────────────────────────────────
 
 /// Read the virtio-blk device configuration from the device-specific
 /// PCI config registers.
@@ -387,7 +376,6 @@ fn wait_for_completion(max_spins: u32) -> Result<(), DriverError> {
     Err(DriverError::Busy)
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 /// Initialise global driver state (must be called before anything else).
 ///
@@ -565,7 +553,6 @@ pub unsafe fn virtio_blk_transfer(
 
     let transfer_size = transfer_sectors * VIRTIO_BLK_BLOCK_SIZE;
 
-    // ── Build the scatter-gather list ────────────────────────────────────
     //
     // Layout: [header (readable)] [data (writable for read, readable for
     // write)] [status (writable)]
@@ -732,7 +719,6 @@ pub fn virtio_blk_has_feature(bit: u8) -> bool {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

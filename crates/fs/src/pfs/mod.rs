@@ -48,7 +48,6 @@ pub mod time;
 pub mod types;
 pub mod utility;
 
-// ── Re-exports of all public functions from submodules ──
 
 pub use bitmap::*;
 pub use buffer::*;

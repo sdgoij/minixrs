@@ -12,7 +12,6 @@
 
 use crate::DriverError;
 
-// ── CMOS register addresses ────────────────────────────────────────────────
 
 /// CMOS I/O index port (bit 7 = NMI enable).
 const RTC_INDEX: u16 = 0x70;
@@ -47,7 +46,6 @@ const RTC_REG_B: u8 = 0x0B;
 /// Status register C.
 const RTC_REG_C: u8 = 0x0C;
 
-// ── Register A bits ────────────────────────────────────────────────────────
 
 /// Update in progress.
 const RTC_A_UIP: u8 = 0x80;
@@ -62,7 +60,6 @@ const RTC_A_RS: u8 = 0x0F;
 /// Default interrupt rate (1024 Hz).
 const RTC_A_RS_DEF: u8 = 6;
 
-// ── Register B bits ────────────────────────────────────────────────────────
 
 /// Inhibit updates (SET bit).
 const RTC_B_SET: u8 = 0x80;
@@ -81,7 +78,6 @@ const RTC_B_24: u8 = 0x02;
 /// Daylight savings enable.
 const RTC_B_DSE: u8 = 0x01;
 
-// ── CMOS status register (address 0x0E) ────────────────────────────────────
 
 /// Chip lost power.
 const CS_LOST_POWER: u8 = 0x80;
@@ -96,11 +92,9 @@ const CS_BAD_HD: u8 = 0x08;
 /// CMOS time is invalid.
 const CS_BAD_TIME: u8 = 0x04;
 
-// ── Keyboard controller power-off port (PS/2 system control port B) ────────
 
 const KBD_CTRL_PORT_B: u16 = 0x64;
 
-// ── I/O helpers (x86 CMOS ports) ─────────────────────────────────────────
 
 /// Read a CMOS register value.
 unsafe fn cmos_read(reg: u8) -> u8 {
@@ -112,7 +106,6 @@ unsafe fn cmos_write(reg: u8, val: u8) {
     unsafe { crate::arch_io::cmos_write(reg, val) }
 }
 
-// ── BCD/binary conversion ─────────────────────────────────────────────────
 
 /// Convert BCD to decimal.
 const fn bcd_to_dec(bcd: u8) -> u8 {
@@ -124,7 +117,6 @@ const fn dec_to_bcd(dec: u8) -> u8 {
     ((dec / 10) << 4) | (dec % 10)
 }
 
-// ── RTC time structure ─────────────────────────────────────────────────────
 
 /// Broken-down time from the CMOS RTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +144,6 @@ impl RtcTime {
     }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Initialize the RTC driver.
 ///

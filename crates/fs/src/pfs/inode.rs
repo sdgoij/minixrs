@@ -294,7 +294,6 @@ pub fn fs_putnode() -> i32 {
     todo!("fs_putnode: not yet wired")
 }
 
-// ── Private helpers ──
 
 unsafe fn remove_from_unused(idx: u16) {
     let head_ptr = glo::UNUSED_INODES_HEAD.get();

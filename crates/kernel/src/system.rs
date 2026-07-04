@@ -32,9 +32,7 @@ use crate::sched::dequeue;
 use crate::table;
 use crate::table::proc_addr;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Message field offset helpers
-// ─────────────────────────────────────────────────────────────────────────
 // These offsets match the C `mess_*` struct layouts from minix/ipc.h.
 // Each message is [u8; MESSAGE_SIZE] with m_type at bytes 0-3.
 // The message-specific fields follow at the offsets defined below.
@@ -73,7 +71,7 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
     msg[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
-// ── Message struct offset constants ────────────────────────────────────
+// Message struct offset constants
 //
 // mess_lsys_krn_sys_fork (for do_fork):
 //   offset 0: endpt (endpoint_t / i32) — parent endpoint
@@ -210,7 +208,7 @@ const SAFEMEMSET_GRANT_ID_OFF: usize = 4;
 const SAFEMEMSET_OFFSET_OFF: usize = 8;
 const SAFEMEMSET_PATTERN_OFF: usize = 16;
 const SAFEMEMSET_BYTES_OFF: usize = 24;
-// ── Exec message offsets (Phase 8.10) ──────────────────────────────────
+// Exec message offsets (Phase 8.10)
 //
 // mess_lsys_krn_sys_exec:
 //   offset  0: endpt   (endpoint_t / i32, 4 bytes)
@@ -225,7 +223,7 @@ const EXEC_STACK_OFF: usize = 24;
 const EXEC_NAME_OFF: usize = 32;
 const EXEC_PS_STR_OFF: usize = 40;
 
-// ── Exec finalization message offsets (SYS_EXEC at call 60) ───────────
+// Exec finalization message offsets (SYS_EXEC at call 60)
 //
 // This is a simpler finalization handler separate from the full exec
 // (call 1). Message format:
@@ -239,7 +237,7 @@ const EXEC_FINISH_CR3_OFF: usize = 16;
 const EXEC_FINISH_IP_OFF: usize = 24;
 const EXEC_FINISH_STACK_OFF: usize = 32;
 
-// ── Mcontext message offsets (Phase 8.10) ─────────────────────────────
+// Mcontext message offsets (Phase 8.10)
 //
 // mess_lsys_krn_sys_{get,set}mcontext:
 //   offset  0: endpt    (endpoint_t / i32, 4 bytes)
@@ -251,7 +249,7 @@ const MCONTEXT_CTX_PTR_OFF: usize = 8;
 const M1_P1_OFF: usize = 24;
 // M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
 
-// ── Devio message offsets (Phase 8.8) ────────────────────────────────
+// Devio message offsets (Phase 8.8)
 //
 // mess_lsys_krn_sys_devio (for do_devio):
 //   offset  0: request  (int / i32)
@@ -415,9 +413,7 @@ const VTIMER_ENDPT_OFF: usize = 32;
 const SETGRANT_ADDR_OFF: usize = 0;
 const SETGRANT_SIZE_OFF: usize = 8;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Base for kernel call numbers.
 pub const KERNEL_CALL: i32 = 0x600;
@@ -461,9 +457,7 @@ pub const PFF_VMINHIBIT: u32 = 0x01;
 /// Fork name suffix (C `FORKSTR`).
 pub const FORK_STR: &str = "*F";
 
-// ─────────────────────────────────────────────────────────────────────────
 // Wrapper types for static mut elimination
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Wrapper for `[IrqHook; NR_IRQ_HOOKS]` — the IRQ hook table.
 pub struct IrqHooksCell(UnsafeCell<[IrqHook; NR_IRQ_HOOKS]>);
@@ -513,18 +507,14 @@ impl VdevioBufCell {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Kernel call billing
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Process currently being billed for kernel calls.
 pub static KBILL_KCALL: AtomicPtr<Proc> = AtomicPtr::new(core::ptr::null_mut());
 /// Process currently being billed for IPC.
 pub static KBILL_IPC: AtomicPtr<Proc> = AtomicPtr::new(core::ptr::null_mut());
 
-// ─────────────────────────────────────────────────────────────────────────
 // Call table
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Type for kernel call handlers.
 pub type CallHandler = unsafe fn(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32;
@@ -544,9 +534,7 @@ pub unsafe fn map_call(call_nr: i32, handler: CallHandler) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IrqHook
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Interrupt handler hook.
 #[derive(Debug, Clone, Copy)]
@@ -597,7 +585,7 @@ pub static IRQ_USE: AtomicI32 = AtomicI32::new(0);
 /// VDEVIO static buffer for copying (port,value) pairs from/to user space.
 const VDEVIO_BUF_SIZE: usize = 64;
 
-// ── do_devio — single I/O port access (Phase 8.8) ─────────────────────
+// do_devio — single I/O port access (Phase 8.8)
 // Source: .refs/minix-3.3.0/minix/kernel/system/do_devio.c
 
 /// Handle SYS_DEVIO: read/write a single I/O port.
@@ -695,7 +683,7 @@ pub unsafe fn do_devio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
     }
 }
 
-// ── do_vdevio — vectored I/O port access (Phase 8.8) ──────────────────
+// do_vdevio — vectored I/O port access (Phase 8.8)
 // Source: .refs/minix-3.3.0/minix/kernel/system/do_vdevio.c
 
 /// Static buffer for VDEVIO (port,value) pairs.
@@ -883,7 +871,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// ── do_sdevio — string I/O (block read/write) (Phase 8.8) ────────────
+// do_sdevio — string I/O (block read/write) (Phase 8.8)
 // Source: .refs/minix-3.3.0/minix/kernel/arch/i386/do_sdevio.c
 
 /// Handle SYS_SDEVIO: read/write a block of bytes/words from/to a single port.
@@ -1129,9 +1117,7 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // system_init
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Initialize the system call infrastructure.
 ///
@@ -1214,9 +1200,7 @@ pub unsafe fn system_init() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // kernel_call / kernel_call_dispatch / kernel_call_finish
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Entry point for kernel calls.
 ///
@@ -1320,9 +1304,7 @@ pub unsafe fn kernel_call_resume(caller: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // get_priv — privilege structure allocation
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Allocate a privilege structure (static or dynamic).
 ///
@@ -1356,9 +1338,7 @@ pub unsafe fn get_priv(rp: *mut Proc) -> Option<usize> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPC send bit manipulation
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Set a send-to bit for a process.
 ///
@@ -1393,9 +1373,7 @@ pub unsafe fn fill_sendto_mask(rc: &Proc, map: &SysMap) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Signal delivery (skeletons)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Send a signal to a process using the C path: set `s_sig_pending` in
 /// the priv structure and notify SYSTEM if the process is not a system process.
@@ -1503,9 +1481,7 @@ pub unsafe fn sig_delay_done(rp: *mut Proc) -> bool {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPC cleanup (skeletons)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Clear IPC state for a process.
 ///
@@ -1635,9 +1611,7 @@ pub unsafe fn clear_ipc_refs(rp: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // sched_proc (skeleton)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Notify a process's scheduler (skeleton).
 ///
@@ -1651,9 +1625,7 @@ pub unsafe fn sched_proc(rp: *mut Proc, priority: i8) -> i32 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Stub handlers — need VM/data_copy/clock infrastructure (Phase 6+)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Handle SYS_EXEC (Phase 8.10): set up a process after a successful exec.
 // Message layout for privctl:
@@ -1667,9 +1639,7 @@ use arch_common::com::{
     SYS_PRIV_QUERY_MEM, SYS_PRIV_SET_SYS, SYS_PRIV_SET_USER, SYS_PRIV_UPDATE_SYS, SYS_PRIV_YIELD,
 };
 
-// ─────────────────────────────────────────────────────────────────────────
 // data_copy helper — wraps virtual_copy for common kernel→user copies
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Copy data from a user process into kernel space.
 ///
@@ -2078,9 +2048,7 @@ pub unsafe fn do_privctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // do_trace — ptrace kernel support (SYS_TRACE)
-// ─────────────────────────────────────────────────────────────────────────
 
 // Internal trace request codes (matching C do_trace.c switch cases).
 const T_STOP: i32 = 0;
@@ -2320,7 +2288,7 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// ── do_copy message offsets (mess_lsys_krn_sys_copy) ────────────────
+// do_copy message offsets (mess_lsys_krn_sys_copy)
 //   offset  0: src_endpt (i32)
 //   offset  4: _pad      (4 bytes)
 //   offset  8: src_addr  (u64)
@@ -2338,7 +2306,7 @@ const COPY_FLAGS_OFF: usize = 40;
 
 const CP_FLAG_TRY: i32 = 0x01;
 
-// ── Deferred stubs — need VM infrastructure: ─────────────────────────
+// Deferred stubs — need VM infrastructure:
 // Replaced: do_vircopy_stub and do_physcopy_stub with real handlers below.
 
 /// Handle SYS_VIRCOPY: virtual copy between processes.
@@ -2500,9 +2468,7 @@ pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // do_vumap — vectored virtual-to-physical mapping (Phase 6.17)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Handle SYS_VUMAP: map a vector of grants or local virtual addresses to
 /// physical addresses.
@@ -2663,9 +2629,7 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Phase 7.3 — Timer/clock-dependent syscall handlers
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Generic interrupt handler for IRQ hooks registered via IRQ_SETPOLICY.
 ///
@@ -3019,7 +2983,7 @@ pub unsafe fn do_vtimer_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
     }
 }
 
-// ── SPROF message offsets (mess_lsys_krn_sys_sprof, from ipc.h) ──
+// SPROF message offsets (mess_lsys_krn_sys_sprof, from ipc.h)
 //   offset  0: action   (i32)
 //   offset  4: freq     (i32)
 //   offset  8: intr_type (i32)
@@ -3035,7 +2999,7 @@ const SPROF_CTL_PTR_OFF: usize = 16;
 const SPROF_MEM_PTR_OFF: usize = 24;
 const SPROF_MEM_SIZE_OFF: usize = 32;
 
-// ── CPROF message offsets (generic mess_1 layout) ───────────────────
+// CPROF message offsets (generic mess_1 layout)
 //   offset  0: action   (i32)
 //   offset  4: mem_size (i32)
 //   offset  8: endpt    (i32)
@@ -3047,13 +3011,13 @@ const CPROF_ENDPT_OFF: usize = 8;
 const CPROF_CTL_PTR_OFF: usize = 16;
 const CPROF_MEM_PTR_OFF: usize = 24;
 
-// ── PROFBUF message offsets (mess_lsys_krn_sys_profbuf, from ipc.h) ─
+// PROFBUF message offsets (mess_lsys_krn_sys_profbuf, from ipc.h)
 //   offset  0: ctl_ptr  (u64)
 //   offset  8: mem_ptr  (u64)
 const PROFBUF_CTL_PTR_OFF: usize = 0;
 const PROFBUF_MEM_PTR_OFF: usize = 8;
 
-// ── Profiling handlers ───────────────────────────────────────────────
+// Profiling handlers
 
 /// Handle SYS_SPROF: start/stop statistical profiling.
 ///
@@ -3308,10 +3272,10 @@ pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
     }
 }
 
-// ── do_getmcontext / do_setmcontext — machine context (Phase 8.10) ────
+// do_getmcontext / do_setmcontext — machine context (Phase 8.10)
 // Source: .refs/minix-3.3.0/minix/kernel/system/do_mcontext.c
 
-// ── EXEC_INITRAMFS message offsets ─────────────────────────────────
+// EXEC_INITRAMFS message offsets
 // Message format for SYS_EXEC_INITRAMFS (call 61):
 //   offset  0: target_endpt (i32, 4 bytes)
 //   offset  4: path_len     (i32, 4 bytes)
@@ -4092,9 +4056,7 @@ pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Address space switching
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Switch to a process's address space by loading its per-process page
 /// table root (CR3). If the process has no private page table
@@ -4234,9 +4196,7 @@ pub fn switch_address_space_idle() {
     //     switch_address_space(proc_addr(VM_PROC_NR));
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Phase 6.13 — VM-dependent system call handlers
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Handle SYS_UMAP: map virtual address to physical (subset of SYS_UMAP_REMOTE).
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_umap.c`
@@ -4856,9 +4816,7 @@ pub unsafe fn do_setgrant_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -4866,7 +4824,7 @@ mod tests {
     use crate::table::proc_init;
     use arch_common::com::GET_WHOAMI;
 
-    // ── Static Priv pool for test pointer stability ─────────────────
+    // Static Priv pool for test pointer stability
     // Prevents dangling pointers when tests set p_priv and later
     // tests invoke clear_ipc_refs / cancel_async on the same process.
 
@@ -4997,7 +4955,7 @@ mod tests {
             }
         }
     }
-    // ── Signal delivery tests ────────────────────────────────────────────
+    // Signal delivery tests
     //
     // Tests for cause_sig (signal manager notification) and send_sig
     // (C path with priv->s_sig_pending + SYSTEM notification).
@@ -5113,7 +5071,7 @@ mod tests {
         }
     }
 
-    // ── Signal delivery tests ────────────────────────────────────────────
+    // Signal delivery tests
     //
     // Tests for cause_sig (signal manager notification) and send_sig
     // (C path with priv->s_sig_pending + SYSTEM notification).
@@ -5324,7 +5282,7 @@ mod tests {
         switch_address_space_idle();
     }
 
-    // ── Syscall handler tests ──────────────────────────────────────────
+    // Syscall handler tests
 
     #[test]
     fn test_do_exit_handler_returns_edontreply() {
@@ -5510,7 +5468,7 @@ mod tests {
         }
     }
 
-    // ── Phase 6.13 handler tests ───────────────────────────────────
+    // Phase 6.13 handler tests
 
     #[test]
     fn test_do_umap_handler_invalid_endpoint() {
@@ -5735,7 +5693,7 @@ mod tests {
         assert_eq!(crate::clock::get_boottime(), 0);
     }
 
-    // ── Phase 8.8: DEVIO / VDEVIO / SDEVIO tests ──────────────────────
+    // Phase 8.8: DEVIO / VDEVIO / SDEVIO tests
 
     /// Reset proc 0 to a clean state for devio tests.
     unsafe fn reset_devio_test_proc() -> *mut Proc {
@@ -5956,7 +5914,7 @@ mod tests {
         }
     }
 
-    // ── Phase 8.10: EXEC / mcontext tests ──────────────────────────────
+    // Phase 8.10: EXEC / mcontext tests
 
     #[test]
     fn test_exec_bad_endpoint_returns_einval() {

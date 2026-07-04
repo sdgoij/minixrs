@@ -1,6 +1,5 @@
 //! PFS constants — adapted from `minix/fs/pfs/const.h`
 
-// ── Inode table ──
 /// Number of slots in the in-core inode table.
 pub const PFS_NR_INODES: usize = 512;
 
@@ -8,14 +7,12 @@ pub const INODE_HASH_LOG2: usize = 7;
 pub const INODE_HASH_SIZE: usize = 1 << INODE_HASH_LOG2;
 pub const INODE_HASH_MASK: usize = INODE_HASH_SIZE - 1;
 
-// ── Pipe buffer ──
 /// Standard pipe buffer size.
 pub const PIPE_BUF: usize = 4096;
 
 /// Number of pipe data buffers in the static pool.
 pub const PIPE_NR_BUFS: usize = 64;
 
-// ── Bitmap ──
 /// Returned by alloc_bit() to signal failure.
 pub const NO_BIT: u32 = 0;
 
@@ -33,15 +30,12 @@ pub const fn fs_bitmap_chunks(nr_inodes: usize) -> usize {
 
 pub const INODEMAP_CHUNKS: usize = fs_bitmap_chunks(PFS_NR_INODES);
 
-// ── VFS call constants ──
 pub const FS_BASE: i32 = 0xA00;
 pub const FS_CALL_VEC_SIZE: usize = 33;
 
-// ── Request types (FS_BASE + offset) ──
 pub const REQ_READ: i32 = FS_BASE + 19;
 pub const REQ_WRITE: i32 = FS_BASE + 20;
 
-// ── Errno values ──
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;
 pub const EPERM: i32 = 1;
@@ -52,7 +46,6 @@ pub const EIO: i32 = 5;
 pub const EBUSY: i32 = 16;
 pub const ENOSYS: i32 = 78;
 
-// ── Mode / permission bits (from Minix <sys/stat.h> and <minix/const.h>) ──
 pub const I_TYPE: u16 = 0o170000;
 pub const I_NAMED_PIPE: u16 = 0o010000;
 pub const I_NOT_ALLOC: u16 = 0o000000;
@@ -66,16 +59,13 @@ pub const S_IFIFO: u16 = 0o010000;
 pub const S_IFBLK: u16 = 0o060000;
 pub const S_IFCHR: u16 = 0o020000;
 
-// ── Sentinels ──
 pub const NO_DEV: u32 = 0xFFFF;
 pub const NO_ENTRY: u32 = 0;
 pub const NO_LINK: u16 = 0;
 
-// ── R/W flags ──
 pub const READING: i32 = 0;
 pub const WRITING: i32 = 1;
 
-// ── Misc ──
 pub const FALSE: i32 = 0;
 pub const TRUE: i32 = 1;
 pub const S_BLKSIZE: u32 = 512;

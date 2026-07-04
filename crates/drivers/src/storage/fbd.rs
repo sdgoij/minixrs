@@ -335,7 +335,6 @@ mod tests {
         assert_send::<FbdConfig>();
     }
 
-    // ── New tests for wired functionality ──
 
     #[test]
     fn test_fbd_open_close_ok() {

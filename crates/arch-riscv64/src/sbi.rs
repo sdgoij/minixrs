@@ -104,8 +104,6 @@ pub unsafe fn sbi_ecall(
     SbiRet { error, value }
 }
 
-// ── Legacy console functions ──────────────────────────────────────────────
-
 /// Write a single character to the SBI debug console.
 pub fn console_putchar(c: u8) {
     unsafe {
@@ -132,8 +130,6 @@ pub fn console_getchar() -> Option<u8> {
     }
 }
 
-// ── DBCN extension (SBI 1.0) ──────────────────────────────────────────────
-
 /// Write bytes to the debug console (SBI 1.0 DBCN extension).
 /// Returns the number of bytes written, or None on error.
 pub fn debug_console_write(buf: &[u8]) -> Option<usize> {
@@ -156,8 +152,6 @@ pub fn debug_console_write(buf: &[u8]) -> Option<usize> {
         Some(ret.value as usize)
     }
 }
-
-// ── System reset ──────────────────────────────────────────────────────────
 
 /// Shut down or reboot the system via SBI SRST.
 pub fn system_reset(shutdown: bool) -> ! {

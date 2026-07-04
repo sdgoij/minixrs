@@ -285,7 +285,6 @@ pub unsafe fn fs_putnode() -> i32 {
     OK
 }
 
-// ── Internal helpers ──
 
 unsafe fn remove_from_unused(rip: *mut Inode) {
     let idx = (rip as *const Inode as usize - glo::get_inode_ptr(0) as *const Inode as usize)

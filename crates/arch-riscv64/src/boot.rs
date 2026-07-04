@@ -5,9 +5,7 @@
 
 #![cfg(target_arch = "riscv64")]
 
-// ═════════════════════════════════════════════════════════════════════════
-// Minimal FDT (Flattened Device Tree) parser
-// ═════════════════════════════════════════════════════════════════════════
+/// Minimal FDT (Flattened Device Tree) parser.
 
 /// FDT header (big-endian).
 #[repr(C)]

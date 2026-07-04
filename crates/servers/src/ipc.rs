@@ -17,11 +17,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Constants
-// ═════════════════════════════════════════════════════════════════════════════
 
-// ── Error codes (POSIX subset) ─────────────────────────────────────────────
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -42,7 +39,6 @@ const ERANGE: i32 = -34;
 const EDOM: i32 = -33;
 const E2BIG: i32 = -7;
 
-// ── IPC commands (from sys/ipc.h) ──────────────────────────────────────────
 
 const IPC_CREAT: i32 = 0o001000;
 const IPC_EXCL: i32 = 0o002000;
@@ -55,13 +51,11 @@ const IPC_SET: i32 = 1;
 const IPC_STAT: i32 = 2;
 const IPC_INFO: i32 = 500; // Minix-specific
 
-// ── IPC permission bits ────────────────────────────────────────────────────
 
 const IPC_R: i32 = 0o000400;
 const IPC_W: i32 = 0o000200;
 const IPC_M: i32 = 0o010000;
 
-// ── Semaphore constants (from sys/sem.h) ───────────────────────────────────
 
 const SEMMNI: usize = 10; // # of semaphore identifiers
 const SEMMNS: usize = 60; // # of semaphores in system
@@ -70,7 +64,6 @@ const SEMOPM: usize = 100; // max # of operations per semop call
 const SEMVMX: u16 = 32767; // semaphore maximum value
 const SEMAEM: u16 = 16384; // adjust on exit max value
 
-// ── Semaphore control commands ─────────────────────────────────────────────
 
 const GETNCNT: i32 = 3;
 const GETPID: i32 = 4;
@@ -84,7 +77,6 @@ const SETALL: i32 = 9;
 const SEM_STAT: i32 = 18;
 const SEM_INFO: i32 = 19;
 
-// ── Shared memory constants (from sys/shm.h) ───────────────────────────────
 
 const SHM_RDONLY: i32 = 0o010000;
 const SHM_RND: i32 = 0o020000;
@@ -94,14 +86,12 @@ const SHM_LOCKED: i32 = 0o002000;
 const MAX_SHM_NR: usize = 1024;
 const SHMMNI: usize = MAX_SHM_NR; // # of SHM identifiers
 
-// ── Shared memory control commands ─────────────────────────────────────────
 
 const SHM_LOCK: i32 = 3;
 const SHM_UNLOCK: i32 = 4;
 const SHM_STAT: i32 = 13; // Minix-specific
 const SHM_INFO: i32 = 14; // Minix-specific
 
-// ── Message offsets for raw buffer access ───────────────────────────────────
 
 /// Size of a full IPC message buffer (matches kernel MESSAGE_SIZE).
 const MESSAGE_SIZE: usize = 64;
@@ -120,9 +110,7 @@ const MSG_OFF_D04: usize = 20; // i32 — fourth data field (retid/retaddr/ret)
 const MSG_OFF_D05: usize = 24; // i32 — fifth data field (padding / ops pointer)
 const MSG_OFF_D06: usize = 28; // i32 — sixth data field
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Types
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// IPC permission structure (matches `struct ipc_perm`).
 #[derive(Debug, Clone, Copy)]
@@ -323,9 +311,7 @@ struct ShmInfo {
     swap_successes: u64,
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Static state
-// ═════════════════════════════════════════════════════════════════════════════
 
 struct SemListRaw(UnsafeCell<[SemStruct; SEMMNI]>);
 unsafe impl Sync for SemListRaw {}
@@ -358,9 +344,7 @@ static SHM_LIST_NR: AtomicU32 = AtomicU32::new(0);
 /// Auto-incrementing identifier counter (replaces C `int identifier`).
 static IDENTIFIER: AtomicI32 = AtomicI32::new(0x1234);
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Message helpers
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Read an i32 field from a message buffer at the given offset.
 ///
@@ -398,9 +382,7 @@ unsafe fn msg_set_u64(msg: &mut [u8; MESSAGE_SIZE], off: usize, val: u64) {
     msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Semaphore helpers
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Find a semaphore set by key.
 unsafe fn sem_find_key(key: i32) -> Option<*mut SemStruct> {
@@ -557,13 +539,9 @@ unsafe fn update_semaphores() {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // VM dependency stubs
-// ═════════════════════════════════════════════════════════════════════════════
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Permission checking
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Check IPC permissions.
 ///
@@ -640,9 +618,7 @@ unsafe fn pm_get_credentials(who: i32) -> (i32, i32) {
     (euid, egid)
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // VM dependency stubs
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// EIDRM error code (identifier removed).
 const fn eidrm() -> i32 {
@@ -764,9 +740,7 @@ pub unsafe fn vm_getphys(who: i32, addr: u64) -> i32 {
     msg_i32(&msg, 24) // Reply in m1i4
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Semaphore operations
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Handle IPC_SEMGET — get or create a semaphore set.
 ///
@@ -1119,9 +1093,7 @@ pub unsafe fn sem_process_vm_notify() {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Shared memory helpers
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Find a shared memory segment by key.
 unsafe fn shm_find_key(key: i32) -> Option<*mut ShmStruct> {
@@ -1152,9 +1124,7 @@ unsafe fn shm_find_id(id: i32) -> Option<*mut ShmStruct> {
     None
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Shared memory operations
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Handle IPC_SHMGET — get or create a shared memory segment.
 ///
@@ -1439,7 +1409,6 @@ pub fn is_shm_nil() -> bool {
     SHM_LIST_NR.load(Ordering::Relaxed) == 0
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Server main loop (stub)
 /// Call the VM server to map physical pages into a process's address space.
 ///

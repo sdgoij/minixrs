@@ -9,7 +9,6 @@
 
 use crate::DriverError;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Maximum I2C devices (10-bit addressing: 0-1023).
 pub const NR_I2C_DEV: usize = 1024;
@@ -17,7 +16,6 @@ pub const NR_I2C_DEV: usize = 1024;
 /// Maximum key length for device labels.
 pub const DS_MAX_KEYLEN: usize = 64;
 
-// ── Device reservation entry ───────────────────────────────────────────────
 
 /// An I2C device reservation entry.
 #[derive(Debug, Clone, Copy)]
@@ -41,18 +39,15 @@ impl I2cDevice {
     }
 }
 
-// ── I2C ioctl exec structure (re-export from eeprom for convenience) ────────
 
 pub use crate::eeprom::cat24c256::I2cExec;
 
-// ── Hardware process callback ───────────────────────────────────────────────
 
 /// Type for the hardware-specific I2C process function.
 ///
 /// Implemented by architecture-specific code (e.g., OMAP I2C).
 pub type I2cProcessFn = fn(ioctl: &mut I2cExec) -> Result<(), DriverError>;
 
-// ── Global state ────────────────────────────────────────────────────────────
 
 /// Device reservation table.
 static mut I2C_DEVICES: [I2cDevice; NR_I2C_DEV] = [I2cDevice::new(); NR_I2C_DEV];
@@ -63,7 +58,6 @@ static mut I2C_BUS_ID: u32 = 0;
 /// Hardware-specific process callback.
 static mut I2C_PROCESS: Option<I2cProcessFn> = None;
 
-// ── Key building ────────────────────────────────────────────────────────────
 
 /// Build a reservation key: "drv.i2c.{bus+1}.{label}" into the output buffer.
 ///
@@ -115,7 +109,6 @@ fn build_key(bus_id: u32, label: &[u8], out: &mut [u8]) -> usize {
     pos
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 /// Initialize the I2C driver.
 ///

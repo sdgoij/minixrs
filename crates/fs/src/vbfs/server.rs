@@ -12,7 +12,6 @@
 
 use crate::vbfs::config::{PATH_MAX, SffsParams};
 
-// ── Global state ────────────────────────────────────────────────────────
 
 /// Shared folder share name.
 static mut SHARE: [u8; PATH_MAX] = [0; PATH_MAX];
@@ -27,7 +26,6 @@ static mut PARAMS: SffsParams = SffsParams {
     p_case_insens: 0,
 };
 
-// ── External library stubs ──────────────────────────────────────────────
 
 /// Stub: initialize vboxfs library with the given share name.
 unsafe fn vboxfs_init(_share: &[u8]) -> Result<(bool, bool), i32> {
@@ -50,7 +48,6 @@ unsafe fn sffs_loop() {
     todo!("sffs_loop: SFFS library not yet ported")
 }
 
-// ── Server implementation ───────────────────────────────────────────────
 
 /// Initialize the VBFS server.
 ///

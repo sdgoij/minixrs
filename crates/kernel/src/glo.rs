@@ -12,9 +12,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64};
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants & config
-// ─────────────────────────────────────────────────────────────────────────
 
 /// System clock frequency (HZ).
 pub static SYSTEM_HZ: AtomicU32 = AtomicU32::new(60);
@@ -26,9 +24,7 @@ pub static CONFIG_APIC_TIMER_X: AtomicU32 = AtomicU32::new(0);
 /// SMP configuration.
 pub static CONFIG_NO_SMP: AtomicBool = AtomicBool::new(true);
 
-// ─────────────────────────────────────────────────────────────────────────
 // Wrapper types for struct statics
-// ─────────────────────────────────────────────────────────────────────────
 
 pub struct KInfoCell(UnsafeCell<KInfo>);
 unsafe impl Sync for KInfoCell {}
@@ -97,9 +93,7 @@ impl MinixKernInfoCell {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Kernel info structures
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Kernel information for userspace.
 pub static KINFO: KInfoCell = KInfoCell::new(KInfo::new());
@@ -119,9 +113,7 @@ pub static KRANDOM: KRandomnessCell = KRandomnessCell::new(KRandomness::new());
 /// Minix kernel info struct (ABI).
 pub static MINIX_KERNINFO: MinixKernInfoCell = MinixKernInfoCell::new(MinixKernInfo::new());
 
-// ─────────────────────────────────────────────────────────────────────────
 // Simple globals (atomic for Rust 2024 safety)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Pointer to user-facing kernel info (address).
 pub static MINIX_KERNINFO_USER: AtomicU64 = AtomicU64::new(0);
@@ -150,9 +142,7 @@ pub static MINIX_FEATURE_FLAGS: AtomicU32 = AtomicU32::new(0);
 /// Serial debug active.
 pub static SERIAL_DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// ─────────────────────────────────────────────────────────────────────────
 // CPU frequency
-// ─────────────────────────────────────────────────────────────────────────
 
 const fn new_atomic_u64_array() -> [AtomicU64; 32] {
     [
@@ -247,9 +237,7 @@ pub fn cpu_get_freq(cpu: usize) -> u64 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // BKL statistics
-// ─────────────────────────────────────────────────────────────────────────
 
 /// BKL statistics per-CPU.
 pub static KERNEL_TICKS: [AtomicU64; 32] = new_atomic_u64_array();
@@ -257,9 +245,7 @@ pub static BKL_TICKS: [AtomicU64; 32] = new_atomic_u64_array();
 pub static BKL_TRIES: [AtomicU32; 32] = new_atomic_u32_array();
 pub static BKL_SUCC: [AtomicU32; 32] = new_atomic_u32_array();
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPC call names
-// ─────────────────────────────────────────────────────────────────────────
 
 pub struct IpcCallNamesCell(UnsafeCell<[Option<&'static str>; 256]>);
 unsafe impl Sync for IpcCallNamesCell {}
@@ -288,9 +274,7 @@ pub fn init_ipc_call_names() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Struct definitions
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Kernel information structure.
 #[derive(Debug, Clone, Copy)]
@@ -492,16 +476,12 @@ impl MinixKernInfo {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // VM request queue head
-// ─────────────────────────────────────────────────────────────────────────
 
 /// First process on VM request queue.
 pub static VMREQUEST: AtomicPtr<crate::proc::Proc> = AtomicPtr::new(core::ptr::null_mut());
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

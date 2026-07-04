@@ -3,7 +3,6 @@
 use crate::procfs::consts::*;
 use crate::procfs::types::{File, FileData};
 
-// ── VTreeFS wrapper ────────────────────────────────────────────────────
 
 // Re-export the VTreeFS constants/functions we use.
 use libs::vtreefs;
@@ -45,7 +44,6 @@ fn start_vtreefs() -> ! {
     vtreefs::start_vtreefs()
 }
 
-// ── Hook table ────────────────────────────────────────────────────────
 
 /// Initialization hook called by VTreeFS at startup.
 ///

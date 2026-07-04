@@ -9,7 +9,6 @@ use crate::mfs::read::*;
 /* Args to unlink_file */
 const SAME: i32 = 1000;
 
-// ── Internal helpers ──
 
 /// Remove a directory entry from `dirp` and decrement the link count on `rip`.
 unsafe fn unlink_file(dirp_idx: u16, rip: Option<u16>, fname: &[u8]) -> i32 {
@@ -68,7 +67,6 @@ unsafe fn remove_dir(rldirp_idx: u16, rip_idx: u16, dir_name: &[u8]) -> i32 {
     OK
 }
 
-// ── FS dispatch handlers ──
 
 pub fn fs_link() -> i32 {
     unsafe {

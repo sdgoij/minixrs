@@ -19,9 +19,7 @@ pub mod vmem;
 
 use core::cell::UnsafeCell;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Endpoint constants (from `minix/include/minix/endpoint.h`, `com.h`)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Endpoint encoding constants (mirrors kernel's `table.rs`).
 const EP_GENERATION_SHIFT: i32 = 15;
@@ -81,9 +79,7 @@ pub fn endpoint_slot(ep: i32) -> i32 {
     ((ep + MAX_NR_TASKS) & (EP_GENERATION_SIZE - 1)) - MAX_NR_TASKS
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Error types (from `minix/include/minix/errno.h`)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// A MINIX error code, wrapping a positive errno value.
 ///
@@ -133,9 +129,7 @@ pub const ENOSYS: i32 = -71;
 pub const EDONTREPLY: i32 = -201;
 pub const SUSPEND: i32 = -998;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // IPC primitives
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Syscall number for SEND.
 pub const SEND_CALL: u64 = 46;
@@ -238,9 +232,7 @@ pub fn notify(dest: i32) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Grant table
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of grant entries in the table.
 pub const NR_GRANTS: usize = 64;
@@ -379,15 +371,12 @@ impl Default for GrantTable {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Endpoint validation ──────────────────────────────────────────────
 
     #[test]
     fn test_any_none_self_constants() {
@@ -465,7 +454,6 @@ mod tests {
         assert_eq!(endpoint_slot(SELF), -3);
     }
 
-    // ── Error conversion ────────────────────────────────────────────────
 
     #[test]
     fn test_error_constants() {
@@ -516,7 +504,6 @@ mod tests {
         assert_clone_copy::<MinixErr>();
     }
 
-    // ── Grant table lifecycle ───────────────────────────────────────────
 
     #[test]
     fn test_grant_table_new_is_empty() {

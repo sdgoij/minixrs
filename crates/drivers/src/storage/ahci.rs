@@ -11,7 +11,6 @@
 use crate::DriverError;
 use core::ptr;
 
-// ── AHCI register constants (from ahci.h) ───────────────────────────────────
 
 /// Maximum number of ports.
 pub const NR_PORTS: usize = 32;
@@ -29,7 +28,6 @@ pub const MAX_PRD_BYTES: u64 = 1 << 22;
 /// Maximum transfer size.
 pub const MAX_TRANSFER: u64 = MAX_PRD_BYTES;
 
-// ── HBA register offsets ─────────────────────────────────────────────────
 
 pub const AHCI_HBA_CAP: usize = 0;
 pub const AHCI_HBA_GHC: usize = 1;
@@ -49,7 +47,6 @@ pub const HBA_GHC_AE: u32 = 1 << 31;
 pub const HBA_GHC_IE: u32 = 1 << 1;
 pub const HBA_GHC_HR: u32 = 1 << 0;
 
-// ── Port register offsets ─────────────────────────────────────────────────
 
 pub const AHCI_PORT_CLB: usize = 0;
 pub const AHCI_PORT_CLBU: usize = 1;
@@ -101,7 +98,6 @@ pub const SCTL_DET_NONE: u32 = 0x0000;
 pub const ATA_SIG_ATA: u32 = 0x00000101;
 pub const ATA_SIG_ATAPI: u32 = 0xEB140101;
 
-// ── ATA commands ─────────────────────────────────────────────────────────
 
 pub const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
@@ -114,7 +110,6 @@ pub const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
 pub const ATA_CMD_SET_FEATURES: u8 = 0xEF;
 
-// ── ATA identify offsets ─────────────────────────────────────────────────
 
 pub const ATA_ID_GCAP: usize = 0;
 pub const ATA_ID_GCAP_ATAPI_MASK: u16 = 0xC000;
@@ -143,7 +138,6 @@ pub const ATA_ID_LBA1: usize = 101;
 pub const ATA_ID_LBA2: usize = 102;
 pub const ATA_ID_LBA3: usize = 103;
 
-// ── Port states ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortState {
@@ -168,7 +162,6 @@ impl PortState {
     }
 }
 
-// ── Port flags ───────────────────────────────────────────────────────────
 
 pub const FLAG_ATAPI: u32 = 0x00000001;
 pub const FLAG_HAS_MEDIUM: u32 = 0x00000002;
@@ -184,7 +177,6 @@ pub const FLAG_HAS_FUA: u32 = 0x00000400;
 pub const FLAG_HAS_NCQ: u32 = 0x00000800;
 pub const FLAG_NCQ_MODE: u32 = 0x00001000;
 
-// ── FIS constants ────────────────────────────────────────────────────────
 
 pub const ATA_FIS_TYPE_H2D: u8 = 0x27;
 pub const ATA_H2D_SIZE: usize = 20;
@@ -217,7 +209,6 @@ pub const AHCI_FIS_SIZE: usize = 256;
 pub const AHCI_MEM_BASE_SIZE: usize = 0x100;
 pub const AHCI_MEM_PORT_SIZE: usize = 0x80;
 
-// ── Helper functions ─────────────────────────────────────────────────────
 
 pub fn is_atapi(ident: &[u16; 256]) -> bool {
     (ident[ATA_ID_GCAP] & ATA_ID_GCAP_ATAPI_MASK) == ATA_ID_GCAP_ATAPI
@@ -251,7 +242,6 @@ pub fn lba_count(ident: &[u16; 256]) -> u64 {
         | ((ident[ATA_ID_LBA3] as u64) << 48)
 }
 
-// ── HBA state ────────────────────────────────────────────────────────────
 
 type MmioReg = u32;
 
@@ -294,7 +284,6 @@ impl Default for AhciHba {
     }
 }
 
-// ── Port state ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -336,13 +325,11 @@ impl Default for AhciPort {
     }
 }
 
-// ── Global state ─────────────────────────────────────────────────────────
 
 static mut HBA: AhciHba = AhciHba::new();
 static mut PORTS: [AhciPort; NR_PORTS] = [AhciPort::new(); NR_PORTS];
 static mut NR_INIT_PORTS: usize = 0;
 
-// ── PCI config access ─────────────────────────────────────────────────────
 
 unsafe fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
@@ -355,7 +342,6 @@ unsafe fn pci_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
     }
 }
 
-// ── Initialization ───────────────────────────────────────────────────────
 
 pub unsafe fn ahci_init() -> Result<(), DriverError> {
     unsafe {
@@ -446,7 +432,6 @@ unsafe fn ahci_init_device(bus: u8, dev: u8) -> Result<(), DriverError> {
     }
 }
 
-// ── Public API ───────────────────────────────────────────────────────────
 
 pub fn map_minor_to_port(minor: usize) -> Option<usize> {
     unsafe {
@@ -480,7 +465,6 @@ pub fn ahci_port(index: usize) -> Option<&'static mut AhciPort> {
     }
 }
 
-// ── ATA command FIS ─────────────────────────────────────────────────────
 
 #[repr(C)]
 pub struct AtaCmdFis {

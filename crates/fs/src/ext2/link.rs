@@ -329,7 +329,6 @@ pub unsafe fn fs_ftrunc() -> i32 {
     r
 }
 
-// ── Static helpers from link.c ──
 
 unsafe fn remove_dir(rldirp: *mut Inode, rip: *mut Inode, dir_name: &[u8]) -> i32 {
     // search_dir checks that rip is a directory

@@ -15,9 +15,7 @@ use core::sync::atomic::AtomicU32;
 
 use crate::hal;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 pub const NR_TASKS: usize = 5;
 pub const NR_PROCS: usize = 256;
@@ -36,9 +34,7 @@ pub const NR_SCHED_QUEUES: usize = 16;
 /// C `sizeof(message)` = 56 on i386; we use 64 for x86_64 alignment.
 pub const MESSAGE_SIZE: usize = 64;
 
-// ─────────────────────────────────────────────────────────────────────────
 // ProcVmrequest
-// ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -94,9 +90,7 @@ impl Default for ProcVmrequest {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // ProcAccounting
-// ─────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -115,9 +109,7 @@ pub struct ProcAccounting {
     pub preempted: u32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // SegFrame
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Segment frame — per-process page table and FPU state.
 ///
@@ -139,9 +131,7 @@ pub struct SegFrame {
     pub p_kern_trap_style: i32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // RtsFlags (Runtime Flags)
-// ─────────────────────────────────────────────────────────────────────────
 
 bitflags::bitflags! {
     /// Runtime flags for a process. A process is runnable iff `rts_flags == 0`.
@@ -189,9 +179,7 @@ impl Default for RtsFlags {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // MiscFlags
-// ─────────────────────────────────────────────────────────────────────────
 
 bitflags::bitflags! {
     /// Misc flags that do not suspend the process.
@@ -239,9 +227,7 @@ impl Default for MiscFlags {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Proc
-// ─────────────────────────────────────────────────────────────────────────
 
 /// The process table entry — core kernel type.
 ///
@@ -473,9 +459,7 @@ impl Proc {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

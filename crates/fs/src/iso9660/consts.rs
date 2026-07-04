@@ -27,7 +27,6 @@ pub const ISO9660_MIN_BLOCK_SIZE: usize = 2048;
 /// Maximum file identifier length.
 pub const ISO9660_MAX_FILE_ID_LEN: usize = 32;
 
-// ── String field sizes for ISO 9660 structures ──
 pub const ISO9660_SIZE_STANDARD_ID: usize = 5;
 pub const ISO9660_SIZE_BOOT_SYS_ID: usize = 32;
 pub const ISO9660_SIZE_BOOT_ID: usize = 32;
@@ -121,7 +120,6 @@ pub const VFS_PROC_NR: i32 = 0; // placeholder — real value from <minix/com.h>
 pub const FALSE: i32 = 0;
 pub const TRUE: i32 = 1;
 
-// ── errno values (POSIX subset, defined locally to avoid libc dependency) ──
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;
 pub const EPERM: i32 = 1;

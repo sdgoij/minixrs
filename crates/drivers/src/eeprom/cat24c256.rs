@@ -11,7 +11,6 @@
 
 use crate::DriverError;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Maximum I2C exec buffer length (matching I2C_EXEC_MAX_BUFLEN).
 pub const I2C_EXEC_MAX_BUFLEN: usize = 256;
@@ -34,7 +33,6 @@ pub const WRITE_PAGE_SIZE: usize = 16;
 /// Valid I2C slave addresses for CAT24C256.
 pub const VALID_ADDRS: [u8; 9] = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x00];
 
-// ── I2C operation types ─────────────────────────────────────────────────────
 
 /// I2C operation: read with stop.
 pub const I2C_OP_READ_WITH_STOP: u8 = 0x01;
@@ -42,7 +40,6 @@ pub const I2C_OP_READ_WITH_STOP: u8 = 0x01;
 /// I2C operation: write with stop.
 pub const I2C_OP_WRITE_WITH_STOP: u8 = 0x02;
 
-// ── I2C exec ioctl structure ────────────────────────────────────────────────
 
 /// I2C ioctl exec structure — describes a single I2C transaction.
 ///
@@ -84,7 +81,6 @@ impl Default for I2cExec {
     }
 }
 
-// ── I2C bus abstraction ─────────────────────────────────────────────────────
 
 /// Result of an I2C transaction.
 pub type I2cResult = Result<(), DriverError>;
@@ -102,12 +98,10 @@ pub trait EepromBus {
     fn exec(&mut self, ioctl: &mut I2cExec) -> I2cResult;
 }
 
-// ── Open count tracking ─────────────────────────────────────────────────────
 
 /// Per-device open count.
 static mut OPEN_COUNT: [i32; NR_DEVS] = [0; NR_DEVS];
 
-// ── Geometry ────────────────────────────────────────────────────────────────
 
 /// Device geometry: base offset and size.
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +117,6 @@ pub const EEPROM_GEOMETRY: EepromGeometry = EepromGeometry {
     size: EEPROM_SIZE as u64,
 };
 
-// ── Low-level I/O ───────────────────────────────────────────────────────────
 
 /// Read up to 128 bytes from the EEPROM at a given memory address.
 ///
@@ -279,7 +272,6 @@ pub unsafe fn cat24c256_write(
     Ok(())
 }
 
-// ── Device management ─────────────────────────────────────────────────────
 
 /// Open an EEPROM device.
 pub fn cat24c256_open(minor: usize) -> Result<(), DriverError> {

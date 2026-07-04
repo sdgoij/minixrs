@@ -82,7 +82,6 @@ impl Default for Buf {
     }
 }
 
-// ── Bitmap types ──
 pub type BitchunkT = u32;
 pub type BitT = u32;
 

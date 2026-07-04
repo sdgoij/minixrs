@@ -365,7 +365,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         let new_pde = crate::hal::build_pte(pt_phys, pde_flags);
         write_pte(result.pte_virt, new_pde);
 
-        // ── Set NX on BSS pages ──────────────────────────────────────
+        // Set NX on BSS pages
 
         let bss_start = crate::hal::bss_start();
         let bss_end = crate::hal::bss_end();
@@ -546,7 +546,7 @@ mod tests {
         _assert_send::<PageTableError>();
     }
 
-    // ── pt_mapkernel tests ───────────────────────────────────────────
+    // pt_mapkernel tests
 
     #[test]
     fn test_pt_mapkernel_invalid_cr3_returns_err() {

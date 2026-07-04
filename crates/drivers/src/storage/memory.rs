@@ -14,9 +14,7 @@
 use crate::DriverError;
 use core::ptr::addr_of_mut;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Minor device numbers (from `dmap.h`)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const MEM_DEV: usize = 1;
 pub const KMEM_DEV: usize = 2;
@@ -26,9 +24,7 @@ pub const ZERO_DEV: usize = 5;
 pub const IMGRD_DEV: usize = 6;
 pub const RAM_DEV_FIRST: usize = 7;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // State
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Per-device open count.
 const NR_DEVS: usize = 7 + 6; // 7 special + 6 ramdisks
@@ -38,9 +34,7 @@ fn openct_ptr() -> *mut [i32; NR_DEVS] {
     addr_of_mut!(OPENCT)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Character device API
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Open a memory device.
 pub fn mem_open(minor: usize, _access: i32) -> Result<(), DriverError> {
@@ -166,9 +160,7 @@ pub unsafe fn mem_init() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -182,7 +174,6 @@ mod tests {
         }
     }
 
-    // ── Constants ──────────────────────────────────────────────────────
 
     #[test]
     fn test_minor_constants() {
@@ -195,7 +186,6 @@ mod tests {
         assert_eq!(RAM_DEV_FIRST, 7);
     }
 
-    // ── Open / Close ───────────────────────────────────────────────────
 
     #[test]
     fn test_null_open_close() {
@@ -234,7 +224,6 @@ mod tests {
         assert_eq!(mem_open_count(NULL_DEV), 0);
     }
 
-    // ── Read ───────────────────────────────────────────────────────────
 
     #[test]
     fn test_null_read() {
@@ -265,7 +254,6 @@ mod tests {
         assert!(mem_read(0, 0, &mut buf).is_err());
     }
 
-    // ── Write ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_null_write() {
@@ -287,7 +275,6 @@ mod tests {
         assert!(mem_write(0, 0, &buf).is_err());
     }
 
-    // ── Validation ─────────────────────────────────────────────────────
 
     #[test]
     fn test_mem_is_valid() {
@@ -299,7 +286,6 @@ mod tests {
         assert!(!mem_is_valid(99));
     }
 
-    // ── Init ───────────────────────────────────────────────────────────
 
     #[test]
     fn test_mem_init() {

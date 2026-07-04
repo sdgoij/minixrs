@@ -20,7 +20,6 @@
 use crate::sendrec;
 use crate::{MinixErr, PM_PROC_NR};
 
-// ── PM call numbers ─────────────────────────────────────────────────────
 
 pub const PM_BASE: u32 = 0x000;
 pub const PM_EXIT: u32 = PM_BASE + 1;
@@ -30,7 +29,6 @@ pub const PM_GETPID: u32 = PM_BASE + 4;
 pub const PM_EXEC: u32 = PM_BASE + 14;
 pub const PM_EXEC_NEW: u32 = PM_BASE + 43;
 
-// ── Message field offsets (64-byte message buffer) ─────────────────────
 
 // For PM calls, the message layout is:
 //   offset 0: dest endpoint (i32) — set by sendrec
@@ -65,9 +63,7 @@ const OFF_WAIT_STATUS: usize = 20;
 //   offset 20: grant_size (i32) — size of exec data
 const OFF_EXEC_ENDPT: usize = 12;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Read an i32 from a message buffer at the given offset.
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
@@ -79,9 +75,7 @@ fn msg_set_i32(msg: &mut [u8; 64], off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Process lifecycle functions
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Fork the current process.
 ///
@@ -218,7 +212,6 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
     }
 }
 
-// ── Error constant for MinixErr ───────────────────────────────────────
 
 impl MinixErr {
     /// Create a MinixErr from a raw syscall return value (non-positive).
@@ -231,9 +224,7 @@ impl MinixErr {
     pub const ENOSYS: MinixErr = MinixErr(71);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

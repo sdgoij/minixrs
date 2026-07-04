@@ -18,11 +18,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Constants
-// ═════════════════════════════════════════════════════════════════════════════
 
-// ── Error codes ────────────────────────────────────────────────────────────
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -34,7 +31,6 @@ const EBUSY: i32 = -16;
 const ENODEV: i32 = -19;
 const EINVAL: i32 = -22;
 
-// ── DEVMAN message types (from com.rs) ─────────────────────────────────────
 
 const DEVMAN_BASE: u32 = 0x1200;
 const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE;
@@ -48,7 +44,6 @@ const DEVMAN_REPLY: u32 = DEVMAN_BASE + 7;
 const DEVMAN_BIND: u32 = DEVMAN_BASE + 8;
 const DEVMAN_UNBIND: u32 = DEVMAN_BASE + 9;
 
-// ── Message field offsets ──────────────────────────────────────────────────
 //
 // DEVMAN uses m4_* fields (m4_l1, m4_l2, m4_l3) mapped to:
 //   DEVMAN_GRANT_ID  = m4_l1 = offset 16
@@ -63,33 +58,26 @@ const MSG_OFF_M4_L1: usize = 16; // i32 — DEVMAN_GRANT_ID / DEVMAN_RESULT
 const MSG_OFF_M4_L2: usize = 20; // i32 — DEVMAN_GRANT_SIZE / DEVMAN_DEVICE_ID
 const MSG_OFF_M4_L3: usize = 24; // i32 — DEVMAN_ENDPOINT
 
-// ── String/name limits ────────────────────────────────────────────────────
 
 const DEVMAN_STRING_LEN: usize = 128;
 
-// ── Device state constants ─────────────────────────────────────────────────
 
 const DEVMAN_DEVICE_UNBOUND: i32 = 0;
 const DEVMAN_DEVICE_BOUND: i32 = 1;
 const DEVMAN_DEVICE_ZOMBIE: i32 = 2;
 
-// ── Event string prefixes ──────────────────────────────────────────────────
 
 const ADD_STRING: &str = "ADD ";
 const REMOVE_STRING: &str = "REMOVE ";
 
-// ── Inode type constants ───────────────────────────────────────────────────
 
 const DEVMAN_DEVINFO_STATIC: u32 = 0;
 const DEVMAN_DEVINFO_DYNAMIC: u32 = 1;
 
-// ── Maximum devices in the tree ────────────────────────────────────────────
 
 const MAX_DEVICES: usize = 256;
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Types
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// A device info entry (serialized from user-supplied grant).
 #[derive(Debug, Clone, Copy)]
@@ -223,9 +211,7 @@ impl DevmanDevice {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Static state
-// ═════════════════════════════════════════════════════════════════════════════
 
 struct DeviceTableRaw(UnsafeCell<[DevmanDevice; MAX_DEVICES]>);
 unsafe impl Sync for DeviceTableRaw {}
@@ -295,7 +281,6 @@ impl InfoInodeTableRaw {
 static INFO_INODE_TABLE: InfoInodeTableRaw = InfoInodeTableRaw::new();
 static INFO_INODE_COUNT: AtomicU32 = AtomicU32::new(0);
 
-// ── Buffer for read operations ─────────────────────────────────────────────
 
 struct BufState {
     buf: [u8; 4096],
@@ -319,9 +304,7 @@ impl BufState {
 
 static BUF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Message helpers
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Read an i32 from a message buffer at the given offset.
 unsafe fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
@@ -333,9 +316,7 @@ unsafe fn msg_set_i32(msg: &mut [u8; 64], off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Buffer operations (from buf.c)
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Format a string into the static buffer (stub — no formatting).
 ///
@@ -345,9 +326,7 @@ unsafe fn buf_append_str(s: &str) {
     let _ = s;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Device tree operations
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Initialize the root device.
 ///
@@ -632,9 +611,7 @@ unsafe fn devman_dev_add_child(parent_idx: usize) -> Result<usize, i32> {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Event queue operations
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Add an event to the event queue.
 ///
@@ -681,9 +658,7 @@ unsafe fn devman_read_event() -> Option<[u8; DEVMAN_STRING_LEN]> {
     Some(data)
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Message handlers (stubs)
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Handle DEVMAN_ADD_DEV — add a device to the tree.
 ///
@@ -814,9 +789,7 @@ pub unsafe fn do_unbind_device(msg: &mut [u8; 64]) -> i32 {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Server main loop (stub)
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// DEVMAN server main loop.
 ///
@@ -830,9 +803,7 @@ pub fn devman_server_main() {
     //   - Start VTreeFS with `start_vtreefs`
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
 // Tests
-// ═════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

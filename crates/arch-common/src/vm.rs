@@ -2,8 +2,6 @@
 
 use crate::types::{Endpoint, PhysBytes, VirBytes};
 
-// ─── VM statistics ──────────────────────────────────────────────────────
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VmStatsInfo {
@@ -14,8 +12,6 @@ pub struct VmStatsInfo {
     pub vsi_cached: u64,
 }
 
-// ─── VM usage ───────────────────────────────────────────────────────────
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VmUsageInfo {
@@ -23,8 +19,6 @@ pub struct VmUsageInfo {
     pub vui_common: VirBytes,
     pub vui_shared: VirBytes,
 }
-
-// ─── VM region ──────────────────────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -38,8 +32,6 @@ pub struct VmRegionInfo {
 /// Maximum number of regions provided at once.
 pub const MAX_VRI_COUNT: usize = 64;
 
-// ─── VM cache flags ─────────────────────────────────────────────────────
-
 pub const VMMC_FLAGS_LOCKED: u32 = 0x01;
 pub const VMMC_DIRTY: u32 = 0x02;
 pub const VMMC_EVICTED: u32 = 0x04;
@@ -48,16 +40,10 @@ pub const VMMC_BLOCK_LOCKED: u32 = 0x08;
 /// Special inode number for VM cache functions (disk block, no file).
 pub const VMC_NO_INODE: u64 = 0;
 
-// ─── VM mmap flags ──────────────────────────────────────────────────────
-
 pub const MVM_WRITABLE: u16 = 0x8000;
-
-// ─── VM request types ───────────────────────────────────────────────────
 
 pub const VMPTYPE_NONE: u32 = 0;
 pub const VMPTYPE_CHECK: u32 = 1;
-
-// ─── Function prototypes (extern "C" stubs) ─────────────────────────────
 
 pub type VmExitFn = unsafe extern "C" fn(Endpoint) -> i32;
 pub type VmForkFn = unsafe extern "C" fn(Endpoint, i32, *mut Endpoint) -> i32;
@@ -77,14 +63,14 @@ pub type VmForgetBlockFn = unsafe extern "C" fn(u64) -> i32;
 pub type VmForgetBlocksFn = unsafe extern "C" fn();
 pub type VmInfoStatsFn = unsafe extern "C" fn(*mut VmStatsInfo) -> i32;
 pub type VmInfoUsageFn = unsafe extern "C" fn(Endpoint, *mut VmUsageInfo) -> i32;
-pub type VmInfoRegionFn = unsafe extern "C" fn(Endpoint, *mut VmRegionInfo, i32, *mut VirBytes) -> i32;
+pub type VmInfoRegionFn =
+    unsafe extern "C" fn(Endpoint, *mut VmRegionInfo, i32, *mut VirBytes) -> i32;
 pub type VmProcCtlClearFn = unsafe extern "C" fn(Endpoint) -> i32;
 pub type VmProcCtlHandlememFn = unsafe extern "C" fn(Endpoint, VirBytes, VirBytes, i32) -> i32;
-pub type VmSetCacheBlockFn = unsafe extern "C" fn(*mut u8, u64, u64, u64, u64, *mut u32, i32) -> i32;
+pub type VmSetCacheBlockFn =
+    unsafe extern "C" fn(*mut u8, u64, u64, u64, u64, *mut u32, i32) -> i32;
 pub type VmMapCacheBlockFn = unsafe extern "C" fn(u64, u64, u64, u64, *mut u32, i32) -> *mut u8;
 pub type VmClearCacheFn = unsafe extern "C" fn(u64) -> i32;
-
-// ─── Minix VFS mmap ─────────────────────────────────────────────────────
 
 // minix_vfs_mmap uses dev_t, ino_t, u16 flags — defined here for completeness.
 

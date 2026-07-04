@@ -67,7 +67,6 @@ mod tests {
         assert_eq!(NO_BIT, 0);
     }
 
-    // ── PFS tests ──
     mod pfs {
         use crate::pfs::consts::*;
 

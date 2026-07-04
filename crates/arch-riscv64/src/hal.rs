@@ -8,14 +8,10 @@ use core::sync::atomic::Ordering;
 
 use crate::pte;
 
-// ── Initialization ────────────────────────────────────────────────────────
-
 /// Initialize RISC-V64 architecture subsystem (SBI, PLIC, CLINT, etc.).
 pub fn init() {
     crate::init();
 }
-
-// ── Serial port I/O (SBI console, Phase 19.3) ────────────────────────────
 
 /// Write a single byte to the SBI debug console.
 pub fn serial_write_byte(byte: u8) {
@@ -39,13 +35,9 @@ pub fn serial_byte_available() -> bool {
     unsafe { (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) != 0 }
 }
 
-// ── Cycle counter ─────────────────────────────────────────────────────────
-
 pub fn read_cycles() -> u64 {
     todo!("RISC-V cycle CSR (mcycle/cycle); see Phase 19.4");
 }
-
-// ── Halt ──────────────────────────────────────────────────────────────────
 
 pub fn halt() -> ! {
     loop {
@@ -60,8 +52,6 @@ pub fn halt() -> ! {
 pub fn pause() {
     core::hint::spin_loop();
 }
-
-// ── Per-CPU current process pointer ───────────────────────────────────────
 
 use core::ffi::c_void;
 
@@ -79,8 +69,6 @@ pub unsafe fn set_current_proc(proc: *mut c_void) {
 pub fn current_proc() -> *mut c_void {
     crate::cpulocals::current_proc() as *mut c_void
 }
-
-// ── Spinlocks ─────────────────────────────────────────────────────────────
 
 pub struct Spinlock(core::sync::atomic::AtomicBool);
 
@@ -130,8 +118,6 @@ pub unsafe fn bkl_lock() {
 pub unsafe fn bkl_unlock() {
     todo!("RISC-V BKL; see Phase 19.5");
 }
-
-// ── TrapFrame accessors (Phase 19.4 — trap handler) ──────────────────────
 
 // RISC-V TrapFrame layout (32 GPR + sepc + sstatus + scause = 35 × 8 = 280 bytes)
 // We use the same [u8; 256] layout as x86_64 for now. Expand to 288 if needed later.
@@ -285,8 +271,6 @@ pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 256]) -> crate::mcontext::Mcon
 pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontext::Mcontext) {
     todo!("RISC-V mcontext; see Phase 19.6");
 }
-
-// ── Page table constants (Phase 19.5 — SV39 page tables) ──────────────────
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u64 = 12;
@@ -472,8 +456,6 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
 }
 
-// ── Port I/O stubs (RISC-V has no port I/O; used by do_devio etc. returning ENOSYS) ──
-
 /// Read a byte from an I/O port (unimplemented on RISC-V).
 pub unsafe fn inb(_port: u16) -> u8 {
     0
@@ -500,8 +482,6 @@ pub unsafe fn phys_outsb(_port: u16, _buf: u64, _count: usize) {}
 pub unsafe fn phys_insw(_port: u16, _buf: u64, _count: usize) {}
 /// String output to I/O port (word) from physical buffer (unimplemented on RISC-V).
 pub unsafe fn phys_outsw(_port: u16, _buf: u64, _count: usize) {}
-
-// ── Profile clock stubs (RISC-V: use CLINT/ACLINT if needed) ────────────
 
 /// Initialize the profiling clock (no-op on RISC-V).
 pub unsafe fn init_profile_clock(_rate_code: u32, _callback: unsafe extern "C" fn()) -> i32 {

@@ -1,6 +1,5 @@
 //! IPC constants from `minix/ipcconst.h`
 
-// ── IPC call numbers ────────────────────────────────────────────────────
 
 pub const SEND: i32 = 1;
 pub const RECEIVE: i32 = 2;
@@ -11,7 +10,6 @@ pub const MINIX_KERNINFO: i32 = 6;
 pub const SENDA: i32 = 16;
 pub const IPCNO_HIGHEST: i32 = SENDA;
 
-// ── IPC status macros ───────────────────────────────────────────────────
 
 pub const IPC_STATUS_CALL_SHIFT: i32 = 0;
 pub const IPC_STATUS_CALL_MASK: i32 = 0xff;

@@ -7,7 +7,6 @@ use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
 use crate::vfs::types::*;
 
-// ── Initialization ─────────────────────────────────────────────────────────
 
 /// Initialize the worker thread pool.
 ///
@@ -26,7 +25,6 @@ pub unsafe fn worker_init() {
     }
 }
 
-// ── Worker management ──────────────────────────────────────────────────────
 
 /// Start a worker thread for a given process.
 ///

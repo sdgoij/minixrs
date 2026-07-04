@@ -9,11 +9,11 @@ use arch_common::types::CpGrantId;
 use crate::proc::*;
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
 
-// ── Re-export types from arch-common ───────────────────────────────────
+// Re-export types from arch-common
 
 pub use arch_common::safecopies::*;
 
-// ── Constants ──────────────────────────────────────────────────────────
+// Constants
 
 /// Maximum depth for following indirect grant chains.
 pub const MAX_INDIRECT_DEPTH: usize = 5;
@@ -33,14 +33,14 @@ pub const EINVAL: i32 = -22;
 pub const EPERM: i32 = -1;
 pub const OK: i32 = 0;
 
-// ── Grant validation helper ────────────────────────────────────────────
+// Grant validation helper
 
 /// Check if a grant ID is valid (non-negative).
 pub fn grant_valid(g: CpGrantId) -> bool {
     g >= 0
 }
 
-// ── verify_grant ───────────────────────────────────────────────────────
+// verify_grant
 
 /// Verify a grant and resolve it to an address and granter.
 ///
@@ -209,7 +209,7 @@ pub unsafe fn verify_grant(
     }
 }
 
-// ── safecopy ───────────────────────────────────────────────────────────
+// safecopy
 
 /// Perform a safe copy using grant verification.
 ///
@@ -325,7 +325,7 @@ pub unsafe fn safecopy(
     }
 }
 
-// ── do_safecopy_to ─────────────────────────────────────────────────────
+// do_safecopy_to
 
 /// SYS_SAFECOPYTO handler — copy FROM caller TO granter's granted memory.
 ///
@@ -353,7 +353,7 @@ pub unsafe fn do_safecopy_to(caller: *mut Proc, msg: &[u8; MESSAGE_SIZE]) -> i32
     }
 }
 
-// ── do_safecopy_from ───────────────────────────────────────────────────
+// do_safecopy_from
 
 /// SYS_SAFECOPYFROM handler — copy FROM granter's granted memory TO caller.
 ///
@@ -381,7 +381,7 @@ pub unsafe fn do_safecopy_from(caller: *mut Proc, msg: &[u8; MESSAGE_SIZE]) -> i
     }
 }
 
-// ── do_vsafecopy ──────────────────────────────────────────────────────
+// do_vsafecopy
 
 /// SYS_VSAFECOPY handler — vectored safe copy.
 ///
@@ -437,7 +437,7 @@ pub unsafe fn do_vsafecopy(caller: *mut Proc, msg: &[u8; MESSAGE_SIZE]) -> i32 {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// Tests
 
 #[cfg(test)]
 mod tests {
@@ -447,7 +447,7 @@ mod tests {
     use crate::table::proc_addr;
     use core::sync::atomic::AtomicU32;
 
-    // ── Helper: set up a Proc at slot `proc_nr` with a Priv pointing to a
+    // Helper: set up a Proc at slot `proc_nr` with a Priv pointing to a
     //    grant table. The caller provides the grant buffer.
     //
     //    The Priv lives in an aligned static pool (8 slots, 2KB each) for
@@ -578,7 +578,7 @@ mod tests {
         };
     }
 
-    // ── Constants ────────────────────────────────────────────────────────
+    // Constants
 
     #[test]
     fn test_grant_constants() {
@@ -616,7 +616,7 @@ mod tests {
         assert!(size_of::<VscpVec>() >= 32);
     }
 
-    // ── Invalid arguments ────────────────────────────────────────────────
+    // Invalid arguments
 
     #[test]
     fn test_verify_grant_invalid_granter() {
@@ -713,7 +713,7 @@ mod tests {
         }
     }
 
-    // ── Direct grant ─────────────────────────────────────────────────────
+    // Direct grant
 
     #[test]
     fn test_direct_grant_valid() {
@@ -832,7 +832,7 @@ mod tests {
         }
     }
 
-    // ── Indirect grant ───────────────────────────────────────────────────
+    // Indirect grant
 
     #[test]
     fn test_indirect_grant_single_hop() {
@@ -932,7 +932,7 @@ mod tests {
         }
     }
 
-    // ── Magic grant ──────────────────────────────────────────────────────
+    // Magic grant
 
     #[test]
     fn test_magic_grant_valid() {
@@ -993,7 +993,7 @@ mod tests {
         }
     }
 
-    // ── safecopy ─────────────────────────────────────────────────────────
+    // safecopy
 
     #[test]
     fn test_safecopy_none_granter_fails() {
@@ -1029,7 +1029,7 @@ mod tests {
         }
     }
 
-    // ── do_safecopy_from / do_safecopy_to ────────────────────────────────
+    // do_safecopy_from / do_safecopy_to
 
     fn build_safecopy_msg(
         granter: i32,
@@ -1092,7 +1092,7 @@ mod tests {
         }
     }
 
-    // ── do_vsafecopy ─────────────────────────────────────────────────────
+    // do_vsafecopy
 
     fn build_vsafecpy_msg(vec_addr: u64, vec_size: usize) -> [u8; MESSAGE_SIZE] {
         let mut msg = [0u8; MESSAGE_SIZE];

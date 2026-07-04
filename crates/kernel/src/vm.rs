@@ -25,7 +25,6 @@ pub struct MemoryChunk {
 
 pub const NO_MEM: u64 = u64::MAX;
 
-// ── Bitmap storage ────────────────────────────────────────────────────
 static mut BITS: [u32; PAGE_BITMAP_CHUNKS] = [0u32; PAGE_BITMAP_CHUNKS];
 static mut CACHE: [i32; PAGE_CACHE_MAX] = [0i32; PAGE_CACHE_MAX];
 static mut CACHE_SZ: i32 = 0;
@@ -212,9 +211,7 @@ pub unsafe fn mem_add_total_pages(pages: i32) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Kernel physical mapping table (Phase 6.4 — port of vm_kern.c)
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const KERN_PHYS_MAP_ENTRIES: usize = 16;
 
@@ -636,8 +633,6 @@ mod tests {
         assert_eq!(KERN_PHYS_MAP_ENTRIES, 16);
     }
 
-    // ── Phase 6.13 VM helper tests ─────────────────────────────────
-
     #[test]
     fn test_vm_lookup_invalid_proc_returns_no_mem() {
         unsafe {
@@ -710,8 +705,6 @@ mod tests {
             assert_eq!(free, 0);
         }
     }
-
-    // ── Phase 6.14 vm_check_range tests ────────────────────────────
 
     #[test]
     fn test_vm_check_range_null_caller() {

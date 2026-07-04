@@ -375,7 +375,6 @@ pub unsafe fn load_dir_record_from_disk(address: u32) -> *mut DirRecord {
     dir
 }
 
-// ── Block I/O wrappers ──
 
 /// Get a block from the libminixfs block cache.
 ///

@@ -9,7 +9,6 @@ use minix_std::MinixErr;
 
 type Message = [u8; 64];
 
-// ── CDEV message types (from arch_common::com) ────────────────────────
 
 const CDEV_RQ_BASE: u32 = 0x400;
 const CDEV_OPEN: u32 = CDEV_RQ_BASE;
@@ -30,7 +29,6 @@ const CDEV_W_BIT: u32 = 0x02;
 const CDEV_NOFLAGS: u32 = 0x00;
 const CDEV_NONBLOCK: u32 = 0x01;
 
-// ── Message field offsets ─────────────────────────────────────────────
 // Character devices use the standard driver message layout:
 //   m_type    = offset 0  (i32) — request/reply type
 //   m2_i1     = offset 8  (i32) — minor device number
@@ -46,9 +44,7 @@ const OFF_GRANT: usize = 16; // i64: grant ID for data transfer
 const OFF_COUNT: usize = 24; // i64: byte count / returned status
 const OFF_ADDR: usize = 32; // i64: user buffer / position
 
-// ═══════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════
 
 fn msg_set_i32(msg: &mut Message, off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
@@ -79,9 +75,7 @@ fn check_result(msg: &Message) -> Result<i32, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Public API
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Open a character device.
 pub fn cdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr> {
@@ -214,9 +208,7 @@ pub fn cdev_select(endpoint: i32, minor: i32, ops: u32) -> Result<u32, MinixErr>
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

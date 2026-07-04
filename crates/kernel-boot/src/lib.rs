@@ -13,7 +13,6 @@ pub mod boot_init;
 #[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]
 pub mod test_runner;
 
-// ── Boot-time serial output (x86_64 COM1 via port I/O) ────────────────
 
 /// Write a string to the boot console.
 ///

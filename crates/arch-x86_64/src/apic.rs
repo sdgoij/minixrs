@@ -881,9 +881,7 @@ pub unsafe extern "C" fn timer_isr_entry() {
     )
 }
 
-// ═════════════════════════════════════════════════════════════════════
 // Serial (COM1) interrupt handler
-// ═════════════════════════════════════════════════════════════════════
 
 /// Function pointer type for the serial interrupt handler.
 pub type SerialIsrFn = unsafe extern "C" fn();

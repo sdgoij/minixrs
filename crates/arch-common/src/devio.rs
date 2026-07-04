@@ -1,11 +1,9 @@
 //! Device I/O types from `minix/devio.h`
 
-// ── Port type ───────────────────────────────────────────────────────────
 
 /// I/O port address (16-bit).
 pub type PortT = u16;
 
-// ── (Port, value) pair types ────────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +26,6 @@ pub struct PvlPair {
     pub value: u32,
 }
 
-// ── Deprecated constants (no longer in use) ─────────────────────────────
 
 #[deprecated = "No longer in use"]
 pub const MASK_GRANULARITY: u32 = 0x000F;

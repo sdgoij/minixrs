@@ -3,7 +3,6 @@
 use crate::types::{CpGrantId, Endpoint, VirBytes};
 use core::fmt;
 
-// ── Grant struct ────────────────────────────────────────────────────────
 
 /// A grant entry — direct, indirect, or magic.
 #[repr(C)]
@@ -65,7 +64,6 @@ pub struct CpMagic {
     pub cp_reserved: [u8; 8],
 }
 
-// ── Vectored safecopy descriptor ────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +76,6 @@ pub struct VscpVec {
     pub v_bytes: usize,
 }
 
-// ── Constants ───────────────────────────────────────────────────────────
 
 pub const GRANT_INVALID: CpGrantId = -1;
 

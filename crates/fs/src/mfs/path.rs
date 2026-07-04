@@ -58,7 +58,6 @@ pub fn fs_lookup() -> i32 {
 
         // caller_uid and caller_gid are already set in globals.
 
-        // ── Parse the path (inline parse_path logic) ──
         let mut cp_offset: usize = 0;
         let mut symlinks: i32 = 0;
         let mut offset: usize = 0;
@@ -496,7 +495,6 @@ pub fn search_dir(
             return if flag == IS_EMPTY { OK } else { ENOENT };
         }
 
-        // ── ENTER path ──
         // When ENTER next time, start searching for free slot from i_last_dpos.
         let ldir_mut = &mut *glo::get_inode_ptr(ldir_idx as usize);
         (*ldir_mut).i_last_dpos = pos;

@@ -10,9 +10,7 @@ use core::sync::atomic::Ordering;
 
 use crate::proc::*;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Helpers: cast cpulocals run queue pointers to *mut Proc array
-// ─────────────────────────────────────────────────────────────────────────
 
 type RunQArray = [*mut Proc; NR_SCHED_QUEUES];
 
@@ -31,9 +29,7 @@ unsafe fn current_proc() -> *mut Proc {
     crate::hal::sched_current_proc() as *mut Proc
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // enqueue
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Add `rp` to one of the run queues.
 ///
@@ -130,9 +126,7 @@ pub unsafe fn remove_from_queue(rp: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // enqueue_head
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Insert `rp` at the front of its run queue.
 ///
@@ -170,9 +164,7 @@ pub unsafe fn enqueue_head(rp: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // dequeue
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Remove `rp` from the run queues.
 ///
@@ -228,9 +220,7 @@ pub unsafe fn dequeue(rp: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // pick_proc
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Select the next process to run.
 ///
@@ -267,9 +257,7 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // notify_scheduler
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Notify a process's user-space scheduler that it has run out of quantum.
 ///
@@ -310,9 +298,7 @@ pub unsafe fn notify_scheduler(p: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // proc_no_time
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Handle quantum expiry for process `p`.
 ///
@@ -342,9 +328,7 @@ pub unsafe fn proc_no_time(p: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // reset_proc_accounting
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Clear all scheduling accounting fields for process `p`.
 ///
@@ -362,9 +346,7 @@ pub unsafe fn reset_proc_accounting(p: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // is_idle_proc
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Check if `rp` is the idle process.
 ///
@@ -377,9 +359,7 @@ pub unsafe fn is_idle_proc(rp: *mut Proc) -> bool {
     unsafe { (*rp).p_endpoint == -4 }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // runqueues_ok — sanity checker
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Run queue sanity check (3-pass validation).
 ///
@@ -441,9 +421,7 @@ pub unsafe fn runqueues_ok() -> bool {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Utility: ms to CPU time conversion (placeholder)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Convert milliseconds to CPU time (TSC cycles).
 /// This is a placeholder — real implementation uses TSC frequency.
@@ -452,9 +430,7 @@ fn ms_2_cpu_time(ms: u32) -> u64 {
     (ms as u64) * 2_500_000
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -820,8 +796,6 @@ mod tests {
             assert!(is_idle_proc(idle_rp));
         }
     }
-
-    // ── notify_scheduler tests ───────────────────────────────────────────
 
     #[test]
     fn test_notify_scheduler_sends_message() {

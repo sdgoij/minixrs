@@ -11,7 +11,6 @@ use kernel::pagetable;
 use kernel::table::{endpoint_slot, proc_addr};
 use kernel::vm::{self, NO_MEM};
 
-// ── x86_64 page table constants ────────────────────────────────────────
 const PG_P: u64 = 0x001;
 const PG_U: u64 = 0x004;
 const PG_PS: u64 = 0x080;
@@ -24,7 +23,6 @@ type PtEntry = u64;
 const USER_PML4_ENTRIES: usize = 256;
 const NENTRIES: usize = 512;
 
-// ── Vmproc table ───────────────────────────────────────────────────────
 
 /// Per-process VM state, analogous to MINIX's `struct vmproc`.
 #[derive(Clone, Copy, Default)]
@@ -185,7 +183,6 @@ unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
     }
 }
 
-// ── Page table management ───────────────────────────────────────────────
 
 /// Allocate a new PML4 for a process.
 ///
@@ -260,7 +257,6 @@ pub unsafe fn pt_bind(ep: Endpoint) -> i32 {
     }
 }
 
-// ── Process lifecycle ───────────────────────────────────────────────────
 
 /// Initialize a new Vmproc entry for a process.
 ///
@@ -574,7 +570,6 @@ pub unsafe fn pt_new_for_fork(child_ep: Endpoint, parent_ep: Endpoint) -> i32 {
     }
 }
 
-// ── Address space queries ───────────────────────────────────────────────
 
 /// Get the physical address of a process's PML4 (CR3 value).
 ///
@@ -598,7 +593,6 @@ pub unsafe fn vm_get_addrspace(ep: Endpoint) -> u64 {
     }
 }
 
-// ── Cross-address-space memory operations ─────────────────────────────────
 
 /// Copy data from one process's address space to another.
 ///
@@ -736,9 +730,7 @@ pub unsafe fn vm_collect(ep: Endpoint, addr: u64, pages: u32) -> i32 {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Tests
-// ═════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

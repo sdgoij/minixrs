@@ -3,7 +3,6 @@
 use crate::procfs::buf;
 use crate::procfs::consts::*;
 
-// ── External process table stubs ──────────────────────────────────────
 
 /// Kernel process table entry (stub).
 #[derive(Debug, Default, Clone, Copy)]
@@ -47,7 +46,6 @@ pub static MPROC: [MProc; 32] = [MPROC_INIT; 32];
 const FPROC_INIT: FProc = FProc { fp_flags: 0 };
 pub static FPROC: [FProc; 32] = [FPROC_INIT; 32];
 
-// ── Hook implementations ──────────────────────────────────────────────
 
 /// Return whether the given kernel/PM slot is in use by a process.
 pub fn slot_in_use(_slot: i32) -> bool {
@@ -68,7 +66,6 @@ pub fn construct_pid_entries(_parent: u32, _name: Option<&str>) {
     // No-op (stub).
 }
 
-// ── VTreeFS hooks (called by the VTreeFS event loop) ──────────────────
 
 /// Path name resolution hook.
 ///

@@ -22,9 +22,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of process slots.
 pub const NR_PROCS: usize = 256; // matches kernel NR_PROCS
@@ -47,7 +45,6 @@ pub const BALANCE_TIMEOUT: u32 = 5;
 /// Maximum number of CPUs.
 pub const CONFIG_MAX_CPUS: usize = 8;
 
-// ── Scheduling change flags ──────────────────────────────────────────────
 
 const SCHEDULE_CHANGE_PRIO: u32 = 0x1;
 const SCHEDULE_CHANGE_QUANTUM: u32 = 0x2;
@@ -55,7 +52,6 @@ const SCHEDULE_CHANGE_CPU: u32 = 0x4;
 const SCHEDULE_CHANGE_ALL: u32 =
     SCHEDULE_CHANGE_PRIO | SCHEDULE_CHANGE_QUANTUM | SCHEDULE_CHANGE_CPU;
 
-// ── Error codes ──────────────────────────────────────────────────────────
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -73,9 +69,7 @@ const SCHEDULING_SET_NICE: i32 = 0xF04;
 const SCHEDULING_INHERIT: i32 = 0xF05;
 const SCHEDULING_NO_QUANTUM_NONBLOCK: i32 = 0xF06;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Types
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Per-process scheduling information.
 #[derive(Debug, Clone, Copy)]
@@ -124,9 +118,7 @@ impl SchedProc {
 /// Flag values for SchedProc.flags.
 pub const IN_USE: u32 = 0x0001;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Static state
-// ═══════════════════════════════════════════════════════════════════════════
 
 use core::cell::UnsafeCell;
 
@@ -149,9 +141,7 @@ static CPU_PROC: AtomicU32 = AtomicU32::new(0);
 /// Balance timeout in ticks.
 static BALANCE_TIMEOUT_TICKS: AtomicU32 = AtomicU32::new(0);
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Check if a process endpoint is valid and its slot is in use.
 pub unsafe fn sched_isokendpt(endpoint: i32) -> Result<usize, i32> {
@@ -201,9 +191,7 @@ fn is_system_proc(rmp: &SchedProc) -> bool {
     rmp.parent == -4 // RS_PROC_NR
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Scheduling operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Handle a process running out of quantum — lower its priority.
 pub unsafe fn do_noquantum(source: i32) -> Result<(), i32> {
@@ -328,9 +316,7 @@ pub fn init_scheduling(hz: u32) {
     BALANCE_TIMEOUT_TICKS.store(BALANCE_TIMEOUT * hz, Ordering::Relaxed);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Internal scheduling helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Pick the best CPU for a process (simple: CPU 0 for now, SMP deferred).
 fn pick_cpu(rmp: &mut SchedProc) {
@@ -414,9 +400,7 @@ pub unsafe fn sched_proc(proc_nr: usize) -> &'static SchedProc {
     unsafe { &*SCHED_PROC.as_ptr().add(proc_nr) }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Server main loop (stub — see Phase 12 wiring)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// SCHED server main loop.
 ///
@@ -523,9 +507,7 @@ pub fn sched_server_main() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

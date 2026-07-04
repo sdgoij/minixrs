@@ -211,7 +211,6 @@ pub unsafe fn fs_inhibread() -> i32 {
     OK
 }
 
-// ── internal helper: new_node ──
 
 unsafe fn new_node(ldirp: *mut Inode, string: &[u8], bits: u16, z0: u32) -> *mut Inode {
     let ext2 = glo::ext2_ptr();

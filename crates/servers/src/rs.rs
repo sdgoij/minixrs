@@ -21,9 +21,7 @@
 
 #![allow(dead_code, clippy::missing_safety_doc)]
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of system process slots.
 pub const NR_SYS_PROCS: usize = 32;
@@ -50,7 +48,6 @@ pub const RS_NR_CONTROL: usize = 8;
 pub const RS_INIT_T: u32 = 100; // system_hz * 10
 pub const RS_DELTA_T: u32 = 10; // system_hz
 
-// ── rproc flags ──────────────────────────────────────────────────────────
 
 pub const RS_IN_USE: u32 = 0x001;
 pub const RS_EXITING: u32 = 0x002;
@@ -63,7 +60,6 @@ pub const RS_UPDATING: u32 = 0x080;
 pub const RS_ACTIVE: u32 = 0x100;
 pub const RS_REINCARNATE: u32 = 0x200;
 
-// ── sys flags ────────────────────────────────────────────────────────────
 
 pub const SF_CORE_SRV: u32 = 0x001;
 pub const SF_SYNCH_BOOT: u32 = 0x002;
@@ -76,14 +72,12 @@ pub const SF_NO_BIN_EXP: u32 = 0x040;
 /// Immutable sys flags.
 pub const IMM_SF: u32 = SF_NO_BIN_EXP | SF_CORE_SRV | SF_SYNCH_BOOT | SF_NEED_COPY | SF_NEED_REPL;
 
-// ── Default sys flags for service types ──────────────────────────────────
 
 pub const SRV_SF: u32 = SF_CORE_SRV;
 pub const SRVR_SF: u32 = SRV_SF | SF_NEED_REPL;
 pub const DSRV_SF: u32 = 0;
 pub const VM_SF: u32 = SRVR_SF;
 
-// ── Error codes ──────────────────────────────────────────────────────────
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -92,9 +86,7 @@ const EBUSY: i32 = -16;
 const EINVAL: i32 = -22;
 const ENOSYS: i32 = -71;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Types
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// A boot image entry.
 #[derive(Debug, Clone, Copy)]
@@ -239,9 +231,7 @@ pub struct Rupdate {
     pub rp_idx: i32,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Static tables
-// ═══════════════════════════════════════════════════════════════════════════
 
 use core::cell::UnsafeCell;
 
@@ -354,9 +344,7 @@ pub unsafe fn lookup_slot_by_endpoint(endpoint: i32) -> Option<usize> {
     None
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Initialization
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Reset the system process table.
 pub unsafe fn rs_init() {
@@ -482,9 +470,7 @@ pub unsafe fn slot_endpoint(idx: usize) -> Option<i32> {
     Some(rpub.endpoint)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Server main loop (stub — see Phase 12 wiring)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// RS server main loop.
 ///
@@ -544,9 +530,7 @@ pub fn rs_server_main() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

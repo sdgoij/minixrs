@@ -13,9 +13,7 @@ use core::cell::UnsafeCell;
 
 use crate::proc::NR_SYS_PROCS;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 pub const NR_IO_RANGE: usize = 64;
 pub const NR_MEM_RANGE: usize = 20;
@@ -36,9 +34,7 @@ pub const USER_PRIV_ID: usize = NR_TASKS + LAST_SPECIAL_PROC_NR;
 /// Stack guard value for x86_64 (sizeof(reg_t) == 8).
 pub const STACK_GUARD: u64 = 0xDEAD_BEEF;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Wrapper types for static mut elimination
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Wrapper for `[Priv; NR_SYS_PROCS]` — the privilege table.
 pub struct PrivTableCell(UnsafeCell<[Priv; NR_SYS_PROCS]>);
@@ -79,9 +75,7 @@ impl IdlePrivCell {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Privilege Flags
-// ─────────────────────────────────────────────────────────────────────────
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -118,9 +112,7 @@ impl Default for PrivFlags {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // SysMap — bitmap for system indexes
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Number of u32 chunks in a sys_map_t covering NR_SYS_PROCS bits.
 const SYS_MAP_CHUNKS: usize = NR_SYS_PROCS.div_ceil(32);
@@ -176,9 +168,7 @@ impl SysMap {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IoRange
-// ─────────────────────────────────────────────────────────────────────────
 
 /// I/O port range.
 #[derive(Debug, Clone, Copy, Default)]
@@ -190,9 +180,7 @@ pub struct IoRange {
     pub ior_limit: u32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // MemRange
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Memory range.
 #[derive(Debug, Clone, Copy, Default)]
@@ -204,9 +192,7 @@ pub struct MemRange {
     pub mr_limit: u64,
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // MinixTimer (placeholder)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Timer structure (placeholder).
 ///
@@ -228,9 +214,7 @@ pub struct MinixTimer {
     pub tmr_arg: usize,  // opaque argument
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Priv
-// ─────────────────────────────────────────────────────────────────────────
 
 /// System privilege structure.
 ///
@@ -334,9 +318,7 @@ impl Default for Priv {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Global privilege table
-// ─────────────────────────────────────────────────────────────────────────
 
 pub static PRIV: PrivTableCell = PrivTableCell::new(
     [Priv {
@@ -426,9 +408,7 @@ pub static IDLE_PRIV: IdlePrivCell = IdlePrivCell::new(Priv {
     s_grant_entries: 0,
 });
 
-// ─────────────────────────────────────────────────────────────────────────
 // Accessors
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Get privilege structure for a given index.
 pub fn priv_addr(i: usize) -> &'static Priv {
@@ -459,9 +439,7 @@ pub fn may_send_to(rp: &crate::proc::Proc, _proc_nr_e: i32) -> bool {
     unsafe { (*rp.p_priv).s_ipc_to.test(priv_id) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Address constants (as functions, since they reference statics)
-// ─────────────────────────────────────────────────────────────────────────
 
 pub fn beg_priv_addr() -> *const Priv {
     PRIV.get() as *const Priv
@@ -490,9 +468,7 @@ pub fn end_dyn_priv_addr() -> *const Priv {
     end_priv_addr()
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

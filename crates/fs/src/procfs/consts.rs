@@ -7,7 +7,6 @@ pub const NR_PROCS: usize = 32;
 /// Number of inodes: enough for statically created files plus all PID directories.
 pub const NR_INODES: usize = (NR_TASKS + NR_PROCS) * 4;
 
-// ── File type mode bits (from Minix `<sys/stat.h>`) ──
 pub const S_IFMT: u32 = 0o170000; /* type mask */
 pub const S_IFREG: u32 = 0o100000; /* regular file */
 pub const S_IFDIR: u32 = 0o040000; /* directory */
@@ -34,11 +33,9 @@ pub const PSINFO_VERSION: i32 = 1;
 /// Index sentinel meaning "no index" (for static files).
 pub const NO_INDEX: i32 = -1;
 
-// ── Errno / OK ──
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;
 
-// ── State / type constants for psinfo file ──
 pub const TYPE_TASK: char = 'T';
 pub const TYPE_SYSTEM: char = 'S';
 pub const TYPE_USER: char = 'U';
@@ -57,7 +54,6 @@ pub const FSTATE_SELECT: char = 's';
 pub const FSTATE_TASK: char = 'T';
 pub const FSTATE_UNKNOWN: char = '?';
 
-// ── VTreeFS stub constants ──
 pub const NO_PID: i32 = -1;
 pub const NONE: i32 = -1;
 

@@ -23,9 +23,7 @@ pub const NR_SCHED_QUEUES: usize = 16;
 /// struct (regs, flags, scheduling fields, etc.).
 pub const IDLE_PROC_SIZE: usize = 1024;
 
-// ─────────────────────────────────────────────────────────────────────────
 // CpuLocalVars
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Per-CPU local variables — mirrors the layout of `struct cpulocal_vars`
 /// from `minix/kernel/cpulocals.h`.
@@ -109,9 +107,7 @@ impl CpuLocalVars {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // CpuLocalStorage
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Global wrapper around per-CPU local variables.
 ///
@@ -356,9 +352,7 @@ impl Default for CpuLocalStorage {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Global instance
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Global per-CPU local storage. Must be initialized before use.
 pub static CPU_LOCAL_STORAGE: CpuLocalStorage = CpuLocalStorage::new();
@@ -428,9 +422,7 @@ pub unsafe fn set_cpulocal_proc_ptr(p: *mut core::ffi::c_void) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

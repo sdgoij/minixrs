@@ -7,7 +7,6 @@
 use core::fmt;
 use core::mem::size_of;
 
-// ── Primitive type aliases ──────────────────────────────────────────────
 
 /// Virtual address/length in bytes (unsigned long = 8 bytes on x86_64).
 pub type VirBytes = u64;
@@ -27,7 +26,6 @@ pub type Endpoint = i32;
 /// Grant ID (int32_t = 4 bytes).
 pub type CpGrantId = i32;
 
-// ── Core structures ─────────────────────────────────────────────────────
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +165,6 @@ pub struct Memory {
     pub size: PhysBytes,
 }
 
-// ── Kernel messages ─────────────────────────────────────────────────────
 
 pub const KMESS_BUF_SIZE: usize = 10000;
 
@@ -182,7 +179,6 @@ pub struct KMessages {
     pub _pad: i32,
 }
 
-// ── Randomness ──────────────────────────────────────────────────────────
 
 pub const RANDOM_SOURCES: usize = 16;
 pub const RANDOM_ELEMENTS: usize = 64;
@@ -204,7 +200,6 @@ pub struct KRandomness {
     pub bin: [KRandomnessBin; RANDOM_SOURCES],
 }
 
-// ── Minix kerninfo ──────────────────────────────────────────────────────
 
 pub const KERNINFO_MAGIC: u32 = 0xfc3b84bf;
 
@@ -227,7 +222,6 @@ pub struct MinixKernInfo {
 
 pub const MINIX_KIF_IPCVECS: u32 = 1 << 0;
 
-// ── Compile-time checks ─────────────────────────────────────────────────
 
 const _: () = assert!(size_of::<VirAddr>() == 16);
 const _: () = assert!(size_of::<VirCpReq>() == 40);

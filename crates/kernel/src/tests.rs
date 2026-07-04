@@ -280,7 +280,6 @@ fn test_sendrec_direct(ctx: &mut TestCtx) {
             .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
         (*dst).p_getfrom_e = src_ep;
 
-        // ── SENDREC = mini_send + mini_receive ────────────────────
         // Build a message with a known payload (42 at bytes 0-3).
         let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
         msg[0..4].copy_from_slice(&42i32.to_ne_bytes());
@@ -354,7 +353,6 @@ fn test_sendrec_reply_cycle(ctx: &mut TestCtx) {
         let src_ep = (*src).p_endpoint;
         let dst_ep = (*dst).p_endpoint;
 
-        // ── Phase 1: src SENDREC to dst ────────────────────────────
         // dst is RECEIVING from src (waiting for src's message)
         (*dst)
             .p_rts_flags
@@ -401,7 +399,6 @@ fn test_sendrec_reply_cycle(ctx: &mut TestCtx) {
             "src must be waiting for reply from dst",
         );
 
-        // ── Phase 2: dst replies to src ────────────────────────────
         // Set src RECEIVING from dst (src is already waiting for dst's reply)
         // Note: src already has RECEIVING set and p_getfrom_e == dst_ep
         // from the mini_receive above. We just need dst to reply.

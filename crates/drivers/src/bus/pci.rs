@@ -14,7 +14,6 @@ pub(crate) fn pci_device_exists(vendor: u16) -> bool {
     vendor != 0xFFFF && vendor != 0
 }
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Maximum number of PCI buses.
 pub const NR_PCI_BUS: usize = 256;
@@ -31,14 +30,12 @@ pub const BAR_MAX: usize = 6;
 /// Number of expansion ROM BARs.
 pub const ROM_BARS: usize = 1;
 
-// ── BAR flags ──────────────────────────────────────────────────────────────
 
 /// I/O space BAR.
 pub const PBF_IO: u8 = 0x01;
 /// Not yet allocated.
 pub const PBF_INCOMPLETE: u8 = 0x02;
 
-// ── Bridge types ───────────────────────────────────────────────────────────
 
 /// Intel host bridge.
 pub const PBT_INTEL_HOST: u8 = 1;
@@ -47,12 +44,10 @@ pub const PBT_PCIBRIDGE: u8 = 2;
 /// CardBus bridge.
 pub const PBT_CARDBUS: u8 = 3;
 
-// ── Device flags for ACL ───────────────────────────────────────────────────
 
 /// Device is in use by a driver.
 pub const PDF_INUSE: u8 = 0x01;
 
-// ── Type definitions ───────────────────────────────────────────────────────
 
 /// A Base Address Register description.
 #[derive(Debug, Clone, Copy, Default)]
@@ -188,7 +183,6 @@ impl PciAcl {
     }
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 /// All detected PCI devices.
 static mut PCI_DEVICES: [PciDev; NR_PCI_DEV] = [PciDev::new(); NR_PCI_DEV];
@@ -205,7 +199,6 @@ static mut NR_PCI_BUSES: usize = 0;
 /// PCI ACL table.
 static mut PCI_ACL: [PciAcl; NR_DRIVERS] = [PciAcl::new(); NR_DRIVERS];
 
-// ── Initialization ─────────────────────────────────────────────────────────
 
 /// Initialize the PCI subsystem.
 ///
@@ -290,7 +283,6 @@ unsafe fn pci_add_device(busnr: u8, dev: u8, func: u8, pd: &mut PciDev) {
     }
 }
 
-// ── Device lookup ──────────────────────────────────────────────────────────
 
 /// Find a PCI device by vendor/device ID.
 pub fn pci_find_device(vid: u16, did: u16) -> Option<usize> {
@@ -326,7 +318,6 @@ pub fn pci_device_count() -> usize {
     unsafe { *core::ptr::addr_of_mut!(NR_PCI_DEVICES) }
 }
 
-// ── ACL management ─────────────────────────────────────────────────────────
 
 /// Grant a driver access to a PCI device.
 ///

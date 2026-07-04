@@ -14,7 +14,6 @@
 use crate::DriverError;
 use core::ptr::addr_of_mut;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Size of the intermediate I/O transfer buffer (64 KB).
 pub const VND_BUF_SIZE: usize = 65536;
@@ -31,7 +30,6 @@ pub const SUB_PER_DRIVE: usize = NR_PARTITIONS * NR_PARTITIONS; // 16
 /// Minor device number for the first subpartition of the first partition.
 pub const MINOR_D0P0S0: usize = 128;
 
-// ── IOCTL flags (from `vndvar.h`) ──────────────────────────────────────────
 
 /// Use user-specified geometry (instead of computed).
 pub const VNDIOF_HASGEOM: u32 = 0x01;
@@ -40,7 +38,6 @@ pub const VNDIOF_READONLY: u32 = 0x02;
 /// Force close (overrides busy check).
 pub const VNDIOF_FORCE: u32 = 0x04;
 
-// ── IOCTL request codes ────────────────────────────────────────────────────
 
 /// Configure the virtual disk with a file descriptor.
 pub const VNDIOCSET: u32 = 0x4600;
@@ -49,7 +46,6 @@ pub const VNDIOCCLR: u32 = 0x4601;
 /// Query the current virtual disk configuration.
 pub const VNDIOCGET: u32 = 0x4603;
 
-// ── Geometry constants ─────────────────────────────────────────────────────
 
 /// Default sector size in bytes.
 pub const SECTOR_SIZE: u32 = 512;
@@ -58,7 +54,6 @@ pub const SECTOR_SIZE: u32 = 512;
 pub const DEFAULT_HEADS: u64 = 64;
 pub const DEFAULT_SECTORS: u64 = 32;
 
-// ── Type definitions ───────────────────────────────────────────────────────
 
 /// Virtual disk geometry (from `vndvar.h` `struct vndgeom`).
 #[derive(Debug, Clone, Copy, Default)]
@@ -158,7 +153,6 @@ impl Default for VndUser {
     }
 }
 
-// ── Driver state ───────────────────────────────────────────────────────────
 
 /// Runtime state of the virtual disk driver.
 ///
@@ -213,7 +207,6 @@ impl VndState {
     }
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 static mut STATE: VndState = VndState::new();
 
@@ -221,7 +214,6 @@ fn state_ptr() -> *mut VndState {
     addr_of_mut!(STATE)
 }
 
-// ── Helper: geometry computation ───────────────────────────────────────────
 
 /// Compute device geometry from total size in bytes.
 ///
@@ -251,7 +243,6 @@ fn compute_geometry(size: u64) -> PartGeom {
     }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 /// Initialize the virtual disk driver.
 ///
@@ -745,7 +736,6 @@ pub unsafe fn vnd_terminate() {
     }
 }
 
-// ── Internal helpers ───────────────────────────────────────────────────────
 
 fn vnd_partition_inner(st: &mut VndState) {
     // Reset partition tables.
@@ -781,7 +771,6 @@ fn vnd_cleanup_inner(st: &mut VndState) {
     st.exiting = false;
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -799,7 +788,6 @@ mod tests {
         st.initialized = false;
     }
 
-    // ── Constants ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_constants() {
@@ -825,7 +813,6 @@ mod tests {
         assert_eq!(VNDIOCGET, 0x4603);
     }
 
-    // ── Type layout ────────────────────────────────────────────────────────
 
     #[test]
     fn test_vnd_device_new() {
@@ -873,7 +860,6 @@ mod tests {
         assert_eq!(g.nsectors, 0);
     }
 
-    // ── State lifecycle ────────────────────────────────────────────────────
 
     #[test]
     fn test_vnd_init() {

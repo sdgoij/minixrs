@@ -17,7 +17,6 @@
 
 use core::ptr::addr_of_mut;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Default page size (4 KB).  Used for page-count calculations.
 pub const DMA_PAGE_SIZE: usize = 4096;
@@ -25,7 +24,6 @@ pub const DMA_PAGE_SIZE: usize = 4096;
 /// Maximum number of pages a single `DmaBuffer` can hold.
 pub const DMA_MAX_PAGES: usize = 64; // 256 KB
 
-// ── Allocator backend ───────────────────────────────────────────────────────
 
 /// Allocate `pages` contiguous physical pages.
 ///
@@ -60,7 +58,6 @@ pub unsafe fn register_allocator(alloc: AllocFn, free: FreeFn) {
     }
 }
 
-// ── DmaBuffer ───────────────────────────────────────────────────────────────
 
 /// A contiguous DMA buffer with automatic deallocation.
 ///
@@ -136,7 +133,6 @@ impl Drop for DmaBuffer {
     }
 }
 
-// ── Convenience helpers ─────────────────────────────────────────────────────
 
 /// Allocate a DMA buffer for the given number of pages.
 pub fn alloc_dma_buf(pages: usize) -> Option<DmaBuffer> {
@@ -165,7 +161,6 @@ pub fn dma_buf_size(buf: &DmaBuffer) -> usize {
     buf.size()
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

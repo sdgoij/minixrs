@@ -24,15 +24,11 @@ use arch_common::com::{
 };
 use arch_common::endpoint::ANY;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Imports from kernel
-// ═══════════════════════════════════════════════════════════════════════════
 
 use kernel::r#priv::MinixTimer;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants — device configuration
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of console lines.
 pub const NR_CONS: usize = 4;
@@ -73,9 +69,7 @@ const TAB_MASK: usize = 7;
 /// Escape character.
 const ESC: u8 = b'\x1b';
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Termios constants (CC_* indexes)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of control characters.
 pub const NCCS: usize = 20;
@@ -104,9 +98,7 @@ const _SPARE2: usize = 19;
 /// _POSIX_VDISABLE value (0xFF).
 pub const POSIX_VDISABLE: u8 = 0xFF;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Input flags (c_iflag)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const IGNBRK: u32 = 0x00000001;
 pub const BRKINT: u32 = 0x00000002;
@@ -122,9 +114,7 @@ pub const IXOFF: u32 = 0x00000400;
 pub const IXANY: u32 = 0x00000800;
 pub const IMAXBEL: u32 = 0x00002000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Output flags (c_oflag)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const OPOST: u32 = 0x00000001;
 pub const ONLCR: u32 = 0x00000002;
@@ -134,9 +124,7 @@ pub const OCRNL: u32 = 0x00000010;
 pub const ONOCR: u32 = 0x00000020;
 pub const ONLRET: u32 = 0x00000040;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Control flags (c_cflag)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const CIGNORE: u32 = 0x00000001;
 pub const CSIZE: u32 = 0x00000300;
@@ -154,9 +142,7 @@ pub const CRTSCTS: u32 = 0x00010000;
 pub const CDTRCTS: u32 = 0x00020000;
 pub const MDMBUF: u32 = 0x00100000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Local flags (c_lflag)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const ECHOKE: u32 = 0x00000001;
 pub const ECHOE: u32 = 0x00000002;
@@ -176,9 +162,7 @@ pub const NOKERNINFO: u32 = 0x02000000;
 pub const PENDIN: u32 = 0x20000000;
 pub const NOFLSH: u32 = 0x80000000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Speed constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const B0: u32 = 0;
 pub const B50: u32 = 50;
@@ -199,9 +183,7 @@ pub const B38400: u32 = 38400;
 pub const B7200: u32 = 7200;
 pub const B115200: u32 = 115200;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Default character values
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// CTRL(x) macro: (x & 0x1F)
 const fn ctrl(x: u8) -> u8 {
@@ -232,9 +214,7 @@ const TTYDEF_LFLAG: u32 = ECHO | ICANON | ISIG | IEXTEN | ECHOE | ECHOKE | ECHOC
 const TTYDEF_CFLAG: u32 = CREAD | CS8 | HUPCL;
 const TTYDEF_SPEED: u32 = B115200;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Signal numbers (local definitions, minimal set)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const SIGINT: u8 = 2;
 pub const SIGQUIT: u8 = 3;
@@ -243,9 +223,7 @@ pub const SIGHUP: u8 = 1;
 pub const SIGWINCH: u8 = 28;
 pub const SIGINFO: u8 = 29;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // IOCTL codes (for stubs)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const TIOCGETA: u32 = 0;
 pub const TIOCSETA: u32 = 1;
@@ -270,9 +248,7 @@ pub const KIOCBELL: u32 = 19;
 pub const KIOCSMAP: u32 = 20;
 pub const TIOCSFON: u32 = 21;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Character driver constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// No endpoint / no caller.
 pub const NONE: u32 = u32::MAX;
@@ -316,9 +292,7 @@ const TTYDISC: i32 = 0;
 const TTLINEDNAMELEN: usize = 8;
 const LINED_NAME: [u8; TTLINEDNAMELEN] = *b"termios\0";
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Input queue flags (stored in upper bits of u16 entries)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Low 8 bits are the character itself.
 const IN_CHAR: u16 = 0x00FF;
@@ -343,9 +317,7 @@ const RUNNING: u8 = 0;
 /// STOP (^S) has been typed to stop output.
 const STOPPED: u8 = 1;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Device function types
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Device function returning int (e.g., devread, devwrite).  `try_only` indicates
 /// a non-blocking probe.
@@ -354,9 +326,7 @@ type DevFun = fn(tp: &mut Tty, try_only: i32) -> i32;
 /// Device function taking a character (e.g., echo).
 type DevFunArg = fn(tp: &mut Tty, c: i32);
 
-// ═══════════════════════════════════════════════════════════════════════════
 // winsize struct
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Window size (lines and columns).
 #[derive(Clone, Copy)]
@@ -383,9 +353,7 @@ impl WinSize {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // termios struct
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Terminal I/O attributes (POSIX termios).
 #[derive(Clone, Copy)]
@@ -442,9 +410,7 @@ impl Termios {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // TTY per-line structure
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Per-terminal state structure.
 ///
@@ -460,7 +426,6 @@ pub struct Tty {
     /// Device minor number.
     pub tty_minor: u32,
 
-    // ── Input queue ────────────────────────────────────────────────
     /// Pointer to place where next char goes (offset into tty_inbuf).
     pub tty_inhead: usize,
     /// Pointer to next char to be given to program (offset into tty_inbuf).
@@ -478,7 +443,6 @@ pub struct Tty {
     /// Timer for this TTY.
     pub tty_tmr: MinixTimer,
 
-    // ── Output section ─────────────────────────────────────────────
     /// Routine to start actual device output.
     pub tty_devwrite: DevFun,
     /// Routine to echo characters input.
@@ -490,7 +454,6 @@ pub struct Tty {
     /// Let the device de-assert a break.
     pub tty_break_off: DevFun,
 
-    // ── Terminal parameters and status ─────────────────────────────
     /// Current position on the screen for echoing.
     pub tty_position: i32,
     /// 1 when echoed input messed up, else 0.
@@ -504,7 +467,6 @@ pub struct Tty {
     /// Count of number of opens of this TTY.
     pub tty_openct: u8,
 
-    // ── Suspended read state ───────────────────────────────────────
     /// Process that made the read call, or NONE.
     pub tty_incaller: u32,
     /// ID of suspended read request.
@@ -516,7 +478,6 @@ pub struct Tty {
     /// Number of chars input so far.
     pub tty_incum: usize,
 
-    // ── Suspended write state ─────────────────────────────────────
     /// Process that made the write call, or NONE.
     pub tty_outcaller: u32,
     /// ID of suspended write request.
@@ -528,7 +489,6 @@ pub struct Tty {
     /// Number of chars output so far.
     pub tty_outcum: usize,
 
-    // ── Suspended ioctl state ──────────────────────────────────────
     /// Process that made the ioctl call, or NONE.
     pub tty_iocaller: u32,
     /// ID of suspended ioctl request.
@@ -538,7 +498,6 @@ pub struct Tty {
     /// Grant for ioctl buffer.
     pub tty_iogrant: u32,
 
-    // ── Select state ───────────────────────────────────────────────
     /// Which operations are interesting.
     pub tty_select_ops: u32,
     /// Which process wants notification.
@@ -546,7 +505,6 @@ pub struct Tty {
     /// Minor used to start select query (for translated minors).
     pub tty_select_minor: u32,
 
-    // ── Miscellaneous ──────────────────────────────────────────────
     /// Set line speed, etc. at the device level.
     pub tty_ioctl: DevFun,
     /// Tell the device that the tty is opened.
@@ -624,9 +582,7 @@ impl Tty {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Static TTY table
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// The global TTY table — one entry per terminal line.
 ///
@@ -660,9 +616,7 @@ static SYSTEM_HZ: AtomicU32 = AtomicU32::new(0);
 /// Currently visible console index.
 static CCURRENT: AtomicU32 = AtomicU32::new(0);
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helper functions
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Return a pointer to a TTY entry by its index in the table.
 #[inline]
@@ -681,9 +635,7 @@ fn isconsole(tp: &Tty) -> bool {
     (tp.tty_minor as usize) < NR_CONS
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Buffer helper functions
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Compute the length (number of elements) of a slice-like buffer.
 fn buflen<T>(_buf: &[T]) -> usize {
@@ -695,9 +647,7 @@ fn bufend<T>(buf: &[T]) -> usize {
     buf.len()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Default device functions (no-ops)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// No-op device function.
 fn tty_devnop(_tp: &mut Tty, _try_only: i32) -> i32 {
@@ -707,9 +657,7 @@ fn tty_devnop(_tp: &mut Tty, _try_only: i32) -> i32 {
 /// Dummy echo function (no-op).
 fn tty_echo_dummy(_tp: &mut Tty, _c: i32) {}
 
-// ═══════════════════════════════════════════════════════════════════════════
 // line2tty — minor number to TTY line mapping
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Convert a minor device number to a `&mut Tty`.
 ///
@@ -750,9 +698,7 @@ pub fn line2tty(minor: u32) -> Option<&'static mut Tty> {
     Some(tp_ref)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // in_process — input processing pipeline
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Process input characters through the line discipline.
 ///
@@ -957,9 +903,7 @@ pub fn in_process(tp: &mut Tty, buf: &[u8]) -> usize {
     processed
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // tty_echo — echo a character with processing
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Echo a character if echoing is on.
 ///
@@ -1031,9 +975,7 @@ fn tty_echo(tp: &mut Tty, mut ch: i32) -> i32 {
     ch | (len << IN_LSHIFT)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // rawecho — echo without interpretation
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Echo without interpretation if ECHO is set.
 fn rawecho(tp: &mut Tty, ch: i32) {
@@ -1044,9 +986,7 @@ fn rawecho(tp: &mut Tty, ch: i32) {
     tp.tty_reprint = rp;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // back_over — backspace and erase previous character
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Backspace to previous character on screen and erase it.
 ///
@@ -1089,9 +1029,7 @@ fn back_over(tp: &mut Tty) -> i32 {
     1 // one character erased
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // reprint — restore echoed characters on screen
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Restore what has been echoed to screen if the user input has been
 /// messed up by output, or if REPRINT (^R) is typed.
@@ -1137,9 +1075,7 @@ fn reprint(tp: &mut Tty) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // out_process — output processing
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Perform output processing on a circular buffer.
 ///
@@ -1241,9 +1177,7 @@ pub fn out_process(
     *ocount -= oct;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // sigchar — signal delivery to process group
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Send a signal to the foreground process group of this TTY.
 ///
@@ -1270,9 +1204,7 @@ pub fn sigchar(tp: &mut Tty, _sig: u8, may_flush: bool) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // in_transfer — transfer from input queue to reader
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Transfer bytes from the input queue to a process reading from a terminal.
 ///
@@ -1346,9 +1278,7 @@ pub fn in_transfer(tp: &mut Tty) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // handle_events — event loop for a TTY line
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Handle any events pending on a TTY line.
 ///
@@ -1391,9 +1321,7 @@ pub fn handle_events(tp: &mut Tty) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // dev_ioctl — execute deferred ioctl
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Execute an ioctl that was deferred pending output drain.
 fn dev_ioctl(tp: &mut Tty) {
@@ -1415,9 +1343,7 @@ fn dev_ioctl(tp: &mut Tty) {
     tp.tty_iocaller = NONE;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // setattr — apply new terminal attributes
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Apply new line attributes (raw/canonical, line speed, etc.).
 fn setattr(tp: &mut Tty) {
@@ -1463,9 +1389,7 @@ fn setattr(tp: &mut Tty) {
     (tp.tty_ioctl)(tp, 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // tty_icancel — discard all pending input
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Discard all pending input, both in the TTY buffer and in the device.
 fn tty_icancel(tp: &mut Tty) {
@@ -1475,9 +1399,7 @@ fn tty_icancel(tp: &mut Tty) {
     (tp.tty_icancel_fn)(tp, 0);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // select_try / select_retry
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Test which select operations would not block.
 fn select_try(tp: &mut Tty, ops: u32) -> u32 {
@@ -1520,9 +1442,7 @@ fn select_retry(tp: &mut Tty) -> i32 {
     OK
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Timer functions
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Timer callback — called when a TTY timer expires.
 ///
@@ -1555,9 +1475,7 @@ fn settimer(tp: &mut Tty, enable: bool) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // tty_init — TTY table initialization
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Initialize the TTY structure and call device initialization routines.
 ///
@@ -1597,9 +1515,7 @@ pub fn tty_init(system_hz_val: u32) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Character driver interface stubs
-// ═══════════════════════════════════════════════════════════════════════════
 //
 // These depend on the chardriver framework (Phase 13).
 // They are provided as stubs matching the original C signatures.
@@ -1997,9 +1913,7 @@ pub fn do_select(minor: DevMinor, mut ops: u32, endpt: Endpoint) -> i32 {
     ready_ops as i32
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Server main loop stub
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Main loop for the TTY server.
 ///
@@ -2144,9 +2058,7 @@ unsafe fn handle_cdev_request(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Public accessors (for tests and device drivers)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Get the TTY table pointer (for testing).
 pub fn get_tty_table() -> *mut Tty {
@@ -2163,9 +2075,7 @@ pub fn get_console_line() -> u32 {
     CONSOLE_LINE.load(Ordering::Relaxed)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -2252,7 +2162,6 @@ mod tests {
         }
     }
 
-    // ── line2tty tests ──────────────────────────────────────────────
 
     #[test]
     fn test_line2tty_console_minor() {
@@ -2342,7 +2251,6 @@ mod tests {
         assert!(tp.is_none());
     }
 
-    // ── tty_init tests ──────────────────────────────────────────────
 
     #[test]
     fn test_tty_init_initializes_table() {
@@ -2375,7 +2283,6 @@ mod tests {
         }
     }
 
-    // ── in_process tests ────────────────────────────────────────────
 
     #[test]
     fn test_in_process_raw_mode_basic() {
@@ -2819,7 +2726,6 @@ mod tests {
         assert_eq!(tp.tty_position, 0);
     }
 
-    // ── sigchar tests ───────────────────────────────────────────────
 
     #[test]
     fn test_sigchar_flushes_input() {
@@ -2868,7 +2774,6 @@ mod tests {
         assert_eq!(tp.tty_incount, 10);
     }
 
-    // ── handle_events tests ─────────────────────────────────────────
 
     fn test_devread(tp: &mut Tty, _try_only: i32) -> i32 {
         if tp.tty_incount < 5 {
@@ -2945,7 +2850,6 @@ mod tests {
         assert_eq!(tp.tty_events, 0);
     }
 
-    // ── Echo tests ──────────────────────────────────────────────────
 
     /// Echo collector for tests.
     fn echo_collector(tp: &mut Tty, c: i32) {
@@ -3007,7 +2911,6 @@ mod tests {
         assert_eq!(tp.tty_inhead, 0);
     }
 
-    // ── do_cancel tests ─────────────────────────────────────────────
 
     #[test]
     fn test_do_cancel_reading_process() {
@@ -3059,7 +2962,6 @@ mod tests {
         assert_eq!(r, EDONTREPLY);
     }
 
-    // ── do_open / do_close tests ────────────────────────────────────
 
     #[test]
     fn test_do_open_console_line() {
@@ -3103,7 +3005,6 @@ mod tests {
         assert_eq!(tp.tty_openct, 0);
     }
 
-    // ── select_try tests ────────────────────────────────────────────
 
     fn setup_try(tp: &mut Tty) {
         tp.tty_events = 0;

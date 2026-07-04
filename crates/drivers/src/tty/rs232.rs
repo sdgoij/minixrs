@@ -8,9 +8,7 @@
 
 use crate::DriverError;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // I/O backend trait
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Abstract I/O port access for the UART.
 pub trait IoPort {
@@ -53,9 +51,7 @@ impl IoPort for MockIo {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // UART register offsets (relative to base port)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const UART_RBR: u16 = 0; // Receive Buffer Register (read, DLAB=0)
 pub const UART_THR: u16 = 0; // Transmit Holding Register (write, DLAB=0)
@@ -70,18 +66,14 @@ pub const UART_LSR: u16 = 5; // Line Status Register
 pub const UART_MSR: u16 = 6; // Modem Status Register
 pub const UART_SCR: u16 = 7; // Scratch Register
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Register bit definitions
-// ═══════════════════════════════════════════════════════════════════════════
 
-// ── IER bits ─────────────────────────────────────────────────────────────
 
 pub const IER_ERXBF: u8 = 0x01; // Enable Received Data Available Interrupt
 pub const IER_ETXBE: u8 = 0x02; // Enable Transmitter Holding Register Empty Interrupt
 pub const IER_ERLS: u8 = 0x04; // Enable Receiver Line Status Interrupt
 pub const IER_EMSC: u8 = 0x08; // Enable Modem Status Interrupt
 
-// ── IIR bits ─────────────────────────────────────────────────────────────
 
 pub const IIR_IPEND: u8 = 0x01; // Interrupt Pending (0 = pending)
 pub const IIR_IID: u8 = 0x0E; // Interrupt ID mask
@@ -111,7 +103,6 @@ impl From<u8> for UartInterruptId {
     }
 }
 
-// ── FCR bits ─────────────────────────────────────────────────────────────
 
 pub const FCR_ENABLE: u8 = 0x01; // Enable FIFOs
 pub const FCR_CLEAR_RX: u8 = 0x02; // Clear Receiver FIFO
@@ -122,7 +113,6 @@ pub const FCR_TRIGGER_4: u8 = 0x40; // 4 bytes trigger
 pub const FCR_TRIGGER_8: u8 = 0x80; // 8 bytes trigger
 pub const FCR_TRIGGER_14: u8 = 0xC0; // 14 bytes trigger
 
-// ── LCR bits ─────────────────────────────────────────────────────────────
 
 pub const LCR_WLEN5: u8 = 0x00; // 5 data bits
 pub const LCR_WLEN6: u8 = 0x01; // 6 data bits
@@ -135,7 +125,6 @@ pub const LCR_SP: u8 = 0x20; // Stick Parity
 pub const LCR_BREAK: u8 = 0x40; // Break Control (send break)
 pub const LCR_DLAB: u8 = 0x80; // Divisor Latch Access Bit
 
-// ── MCR bits ─────────────────────────────────────────────────────────────
 
 pub const MCR_DTR: u8 = 0x01; // Data Terminal Ready
 pub const MCR_RTS: u8 = 0x02; // Request To Send
@@ -143,7 +132,6 @@ pub const MCR_OUT1: u8 = 0x04; // Auxiliary output 1
 pub const MCR_OUT2: u8 = 0x08; // Auxiliary output 2 (IRQ enable on PC)
 pub const MCR_LOOP: u8 = 0x10; // Loopback mode
 
-// ── LSR bits ─────────────────────────────────────────────────────────────
 
 pub const LSR_DR: u8 = 0x01; // Data Ready (receiver)
 pub const LSR_OE: u8 = 0x02; // Overrun Error
@@ -154,7 +142,6 @@ pub const LSR_THRE: u8 = 0x20; // Transmitter Holding Register Empty
 pub const LSR_TEMT: u8 = 0x40; // Transmitter Empty
 pub const LSR_RXFE: u8 = 0x80; // Error in Receiver FIFO
 
-// ── MSR bits ─────────────────────────────────────────────────────────────
 
 pub const MSR_DCTS: u8 = 0x01; // Delta Clear To Send
 pub const MSR_DDSR: u8 = 0x02; // Delta Data Set Ready
@@ -165,9 +152,7 @@ pub const MSR_DSR: u8 = 0x20; // Data Set Ready
 pub const MSR_RI: u8 = 0x40; // Ring Indicator
 pub const MSR_DCD: u8 = 0x80; // Data Carrier Detect
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Standard COM port base addresses
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const COM1_BASE: u16 = 0x3F8;
 pub const COM2_BASE: u16 = 0x2F8;
@@ -186,9 +171,7 @@ pub const DEFAULT_BAUD: u32 = 9600;
 /// Circular input buffer size.
 pub const RBUF_SIZE: usize = 256;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Data structures
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Line status error counters.
 #[derive(Debug, Clone, Copy, Default)]
@@ -274,7 +257,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         }
     }
 
-    // ── Register access ───────────────────────────────────────────────
 
     pub fn read_reg(&self, reg: u16) -> u8 {
         self.io.inb(self.base + reg)
@@ -283,7 +265,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.io.outb(self.base + reg, val);
     }
 
-    // ── Baud rate ──────────────────────────────────────────────────────
 
     pub fn set_baud(&mut self, baud: u32) -> Result<(), DriverError> {
         if baud == 0 {
@@ -306,7 +287,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.baud
     }
 
-    // ── Line control ──────────────────────────────────────────────────
 
     pub fn set_line_params(&mut self, bits: u8, parity: u8, stop: u8) {
         let mut lcr = match bits {
@@ -329,7 +309,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.lcr = lcr;
     }
 
-    // ── FIFO control ───────────────────────────────────────────────────
 
     pub fn set_fifo(&mut self, trigger: u8) {
         let fcr = FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX | (trigger & FCR_TRIGGER_14);
@@ -337,7 +316,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.fcr = fcr;
     }
 
-    // ── Interrupt control ──────────────────────────────────────────────
 
     pub fn set_interrupts(&mut self, ier: u8) {
         self.write_reg(UART_IER, ier);
@@ -348,7 +326,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         UartInterruptId::from(self.read_reg(UART_IIR))
     }
 
-    // ── Modem control ──────────────────────────────────────────────────
 
     pub fn set_modem(&mut self, mcr: u8) {
         self.write_reg(UART_MCR, mcr);
@@ -374,7 +351,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.set_modem(mcr);
     }
 
-    // ── Transmit / receive ─────────────────────────────────────────────
 
     pub fn is_data_ready(&self) -> bool {
         self.read_reg(UART_LSR) & LSR_DR != 0
@@ -425,7 +401,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         count
     }
 
-    // ── Break control ──────────────────────────────────────────────────
 
     pub fn send_break(&mut self, on: bool) {
         let mut lcr = self.read_reg(UART_LCR);
@@ -438,7 +413,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.lcr = lcr;
     }
 
-    // ── Initialization ─────────────────────────────────────────────────
 
     pub fn init(&mut self, baud: u32, mcr_out2: bool) -> Result<(), DriverError> {
         self.set_baud(baud)?;
@@ -502,7 +476,6 @@ impl<IO: IoPort> Rs232Port<IO> {
     }
 }
 
-// ── Default implementations ─────────────────────────────────────────────
 
 #[allow(clippy::new_without_default)]
 impl Default for RsInputBuf {
@@ -511,9 +484,7 @@ impl Default for RsInputBuf {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

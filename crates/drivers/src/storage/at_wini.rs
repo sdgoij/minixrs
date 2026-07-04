@@ -10,7 +10,6 @@
 
 use crate::DriverError;
 
-// ── I/O port bases ──────────────────────────────────────────────────────────
 
 /// Primary command base.
 pub const REG_CMD_BASE0: u16 = 0x1F0;
@@ -21,7 +20,6 @@ pub const REG_CTL_BASE0: u16 = 0x3F6;
 /// Secondary control base.
 pub const REG_CTL_BASE1: u16 = 0x376;
 
-// ── Register offsets (relative to command base) ─────────────────────────────
 
 pub const REG_DATA: u16 = 0;
 pub const REG_PRECOMP: u16 = 1;
@@ -32,13 +30,11 @@ pub const REG_CYL_HI: u16 = 5;
 pub const REG_LDH: u16 = 6;
 pub const REG_COMMAND: u16 = 7; // write: command, read: status
 
-// ── LDH register bits ──────────────────────────────────────────────────────
 
 pub const LDH_DEFAULT: u8 = 0xA0;
 pub const LDH_LBA: u8 = 0x40;
 pub const LDH_DEV: u8 = 0x10;
 
-// ── Status register bits ────────────────────────────────────────────────────
 
 pub const STATUS_BSY: u8 = 0x80;
 pub const STATUS_RDY: u8 = 0x40;
@@ -46,14 +42,12 @@ pub const STATUS_WF: u8 = 0x20;
 pub const STATUS_DRQ: u8 = 0x08;
 pub const STATUS_ERR: u8 = 0x01;
 
-// ── Error register bits ─────────────────────────────────────────────────────
 
 pub const ERROR_BB: u8 = 0x80;
 pub const ERROR_ECC: u8 = 0x40;
 pub const ERROR_ID: u8 = 0x10;
 pub const ERROR_AC: u8 = 0x04;
 
-// ── ATA commands ────────────────────────────────────────────────────────────
 
 pub const CMD_IDLE: u8 = 0x00;
 pub const CMD_RECALIBRATE: u8 = 0x10;
@@ -72,12 +66,10 @@ pub const CMD_WRITE_DMA: u8 = 0xCA;
 pub const CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_IDENTIFY: u8 = 0xEC;
 
-// ── Control register bits ───────────────────────────────────────────────────
 
 pub const CTL_RESET: u8 = 0x04;
 pub const CTL_INTDISABLE: u8 = 0x02;
 
-// ── Identify word offsets ───────────────────────────────────────────────────
 
 pub const ID_GENERAL: usize = 0x00;
 pub const ID_GEN_NOT_ATA: u16 = 0x8000;
@@ -91,7 +83,6 @@ pub const ID_CSS: usize = 0x53;
 pub const ID_CSS_LBA48: u16 = 0x0400;
 pub const ID_ULTRA_DMA: usize = 0x58;
 
-// ── DMA registers (relative to bus master base) ─────────────────────────────
 
 pub const DMA_COMMAND: u16 = 0;
 pub const DMA_CMD_START: u8 = 0x01;
@@ -102,7 +93,6 @@ pub const DMA_ST_ERROR: u8 = 0x02;
 pub const DMA_ST_ACTIVE: u8 = 0x01;
 pub const DMA_PRDTP: u16 = 4;
 
-// ── Drive flags ─────────────────────────────────────────────────────────────
 
 pub const DF_INITIALIZED: u32 = 0x01;
 pub const DF_DEAF: u32 = 0x02;
@@ -111,7 +101,6 @@ pub const DF_ATAPI: u32 = 0x08;
 pub const DF_IDENTIFIED: u32 = 0x10;
 pub const DF_IGNORING: u32 = 0x20;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 pub const MAX_DRIVES: usize = 4;
 pub const MAX_SECS: u16 = 256;
@@ -122,7 +111,6 @@ pub const ATA_DMA_BUF_SIZE: usize = ATA_DMA_SECTORS as usize * SECTOR_SIZE;
 pub const N_PRDTE: usize = 1024;
 pub const PRDTE_FL_EOT: u8 = 0x80;
 
-// ── ATA command block ───────────────────────────────────────────────────────
 
 #[repr(C)]
 pub struct AtaCommand {
@@ -185,7 +173,6 @@ impl Default for AtaCommand {
     }
 }
 
-// ── PRD Table Entry ─────────────────────────────────────────────────────────
 
 #[repr(C)]
 pub struct Prdte {
@@ -212,7 +199,6 @@ impl Default for Prdte {
     }
 }
 
-// ── Drive state ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -256,12 +242,10 @@ impl Default for AtWiniDrive {
     }
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 static mut DRIVES: [AtWiniDrive; MAX_DRIVES] = [AtWiniDrive::new(); MAX_DRIVES];
 static mut NR_DRIVES: usize = 0;
 
-// ── I/O helpers ───────────────────────────────────────────────────────────
 
 unsafe fn inb(port: u16) -> u8 {
     unsafe { crate::arch_io::inb(port) }
@@ -287,7 +271,6 @@ unsafe fn outl(port: u16, val: u32) {
     unsafe { crate::arch_io::outl(port, val) }
 }
 
-// ── ATA register access ─────────────────────────────────────────────────────
 
 unsafe fn ata_read(base_cmd: u16, reg: u16) -> u8 {
     unsafe { inb(base_cmd + reg) }
@@ -303,7 +286,6 @@ unsafe fn ata_read_data(base_cmd: u16) -> u16 {
     unsafe { inw(base_cmd + REG_DATA) }
 }
 
-// ── Wait for drive ready ────────────────────────────────────────────────────
 
 unsafe fn ata_wait(alt_port: u16) -> Result<(), DriverError> {
     unsafe {
@@ -323,7 +305,6 @@ unsafe fn ata_wait(alt_port: u16) -> Result<(), DriverError> {
     }
 }
 
-// ── Initialize controller ───────────────────────────────────────────────────
 
 unsafe fn ata_controller_reset(base_ctl: u16) {
     unsafe {
@@ -333,7 +314,6 @@ unsafe fn ata_controller_reset(base_ctl: u16) {
     }
 }
 
-// ── Probe drives ───────────────────────────────────────────────────────────
 
 /// Probe legacy IDE controller ports for drives.
 ///
@@ -462,7 +442,6 @@ unsafe fn ata_identify(drv: &mut AtWiniDrive) -> Result<(), DriverError> {
     }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 /// Get the number of detected drives.
 pub fn at_wini_drive_count() -> usize {

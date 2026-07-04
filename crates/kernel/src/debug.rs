@@ -11,9 +11,7 @@ use core::cell::UnsafeCell;
 use crate::r#priv::NR_SYS_CALLS;
 use crate::proc::*;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// IPC stats matrix size (NR_PROCS + 1, with +1 for kernel slot).
 const IPCPROCS: usize = NR_PROCS_TOTAL;
@@ -24,9 +22,7 @@ const KERNELIPC: usize = NR_PROCS_TOTAL - 1;
 /// Number of top-talker slots for stats printing.
 const PRINTSLOTS: usize = 20;
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPC statistics matrix
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Wrapper for `[[u32; IPCPROCS]; IPCPROCS]` — the IPC message matrix.
 pub struct IpcMessagesCell(UnsafeCell<[[u32; IPCPROCS]; IPCPROCS]>);
@@ -130,9 +126,7 @@ unsafe fn ipc_record(src_slot: usize, dst_slot: usize) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // IPC message type identification (partial — covers common types)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Return a human-readable name for a message type, if known.
 pub fn mtypename(mtype: i32) -> Option<&'static str> {
@@ -155,9 +149,7 @@ pub fn mtypename(mtype: i32) -> Option<&'static str> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Flag-to-string conversion
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Convert RTS flags to a string representation.
 pub fn rtsflagstr(flags: u32, buf: &mut [u8]) -> &str {
@@ -307,9 +299,7 @@ pub fn miscflagstr(flags: u32, buf: &mut [u8]) -> &str {
     core::str::from_utf8(&buf[..len]).unwrap_or("(bad utf-8)")
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Scheduler name
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Return the name of a process's scheduler.
 ///
@@ -337,9 +327,7 @@ pub unsafe fn schedulerstr(rp: *mut Proc, buf: &mut [u8]) -> &str {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Process pointer validation
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Check if a process pointer is valid.
 ///
@@ -363,9 +351,7 @@ pub unsafe fn proc_ptr_ok(p: *const Proc) -> bool {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // print_proc
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Write a human-readable process description into the provided buffer.
 ///
@@ -446,9 +432,7 @@ fn itoa(mut n: u32, buf: &mut [u8]) -> &str {
     core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Debug IPC hooks
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Resolve a process to a stats matrix slot.
 unsafe fn proc_to_slot(rp: *mut Proc) -> usize {
@@ -528,9 +512,7 @@ pub unsafe fn hook_ipc_clear(p: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // proc_stacktrace — dump call stack for diagnostics (Phase 8.9)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Dump a process's call stack to the kernel message buffer.
 ///
@@ -694,9 +676,7 @@ fn append_kmess(bytes: &[u8]) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

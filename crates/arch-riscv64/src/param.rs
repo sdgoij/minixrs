@@ -36,8 +36,6 @@ pub const KERNEL_STACK_SIZE: u64 = 16384;
 pub const INTRSTACKSIZE: u32 = 16384;
 pub const MSGBUFSIZE: u64 = 8 * NBPG;
 
-// ── Conversion macros ────────────────────────────────────────────────────
-
 pub const fn round_page(x: u64) -> u64 {
     (x + PGOFSET) & !PGOFSET
 }

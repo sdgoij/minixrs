@@ -4,7 +4,6 @@
 //! and clock resolution queries. A full IPC server loop is deferred until
 //! the scheduler and PM are running (Phase 12+).
 
-// ── Clock message types ────────────────────────────────────────────────
 
 /// Clock RQ base (0xE00), matching com.h conventions.
 pub const CLOCK_RQ_BASE: u32 = 0xE00;
@@ -357,7 +356,6 @@ mod tests {
         clock_server_main();
     }
 
-    // ── Dispatch tests ────────────────────────────────────────────────
 
     #[test]
     fn test_dispatch_getres_realtime() {

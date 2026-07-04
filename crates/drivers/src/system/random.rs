@@ -9,7 +9,6 @@
 
 use crate::DriverError;
 
-// ── Entropy source constants ───────────────────────────────────────────────
 
 /// Number of derivative history entries per source.
 const N_DERIV: usize = 16;
@@ -23,12 +22,10 @@ const MIN_SAMPLES: u32 = 256;
 /// Total sources (16 kernel + 1 internal timing).
 pub const TOTAL_SOURCES: usize = 17;
 
-// ── AES-128 constants ──────────────────────────────────────────────────────
 
 const AES_BLOCK_SIZE: usize = 16;
 const AES_KEY_SIZE: usize = 16; // AES-128
 
-// ── SHA-256 constants ──────────────────────────────────────────────────────
 
 const SHA256_BLOCK_SIZE: usize = 64;
 const SHA256_DIGEST_SIZE: usize = 32;
@@ -174,7 +171,6 @@ fn sha256_transform(state: &mut [u32; 8], block: &[u8; SHA256_BLOCK_SIZE]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-// ── AES-128 ECB encryption only ────────────────────────────────────────────
 
 /// AES-128 round constant table.
 const AES_RCON: [u8; 11] = [
@@ -297,7 +293,6 @@ fn gf_mul3(x: u16) -> u16 {
     gf_mul2(x) ^ x
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 /// Derivative history for each entropy source.
 ///
@@ -325,7 +320,6 @@ static mut RESEED_COUNT: u32 = 0;
 /// Per-call counter for CTR-mode PRNG output.
 static mut RANDOM_NEXT: u64 = 0;
 
-// ── Internal helpers ───────────────────────────────────────────────────────
 
 /// Add a sample from a specific entropy source.
 ///
@@ -413,7 +407,6 @@ unsafe fn reseed() {
     }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Initialize the random number generator.
 ///

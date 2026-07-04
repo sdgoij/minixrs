@@ -6,10 +6,6 @@
 //! constant must match the C `#define` value exactly.
 use crate::types::Endpoint;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 1: Kernel Task & Process Endpoints
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const ASYNCM: Endpoint = -5;
 pub const IDLE: Endpoint = -4;
 pub const CLOCK: Endpoint = -3;
@@ -39,10 +35,6 @@ pub const NR_BOOT_MODULES: Endpoint = INIT_PROC_NR + 1;
 pub const ROOT_SYS_PROC_NR: Endpoint = RS_PROC_NR;
 pub const ROOT_USR_PROC_NR: Endpoint = INIT_PROC_NR;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 2: Notification Types
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const NOTIFY_MESSAGE: u32 = 0x1000;
 
 /// Check if an IPC status indicates a notification.
@@ -60,10 +52,6 @@ pub fn is_ipc_asynch(ipc_status: i32) -> bool {
     is_ipc_notify(ipc_status)
         || crate::ipcconst::ipc_status_call(ipc_status) == crate::ipcconst::SENDA
 }
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 3: Bus Controller Driver Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const BUSC_RQ_BASE: u32 = 0x300;
 pub const BUSC_RS_BASE: u32 = 0x380;
@@ -90,10 +78,6 @@ pub const IOMMU_MAP: u32 = BUSC_RQ_BASE + 32;
 
 pub const BUSC_I2C_RESERVE: u32 = BUSC_RQ_BASE + 64;
 pub const BUSC_I2C_EXEC: u32 = BUSC_RQ_BASE + 65;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 4: Data Link Layer (Networking) Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const DL_RQ_BASE: u32 = 0x200;
 pub const DL_RS_BASE: u32 = 0x280;
@@ -122,10 +106,6 @@ pub const DL_NOMODE: u32 = 0x0;
 pub const DL_PROMISC_REQ: u32 = 0x1;
 pub const DL_MULTI_REQ: u32 = 0x2;
 pub const DL_BROAD_REQ: u32 = 0x4;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 5: System Call Numbers (SYSTASK / KERNEL_CALL)
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const KERNEL_CALL: u32 = 0x600;
 
@@ -203,10 +183,6 @@ pub const SYS_BASIC_CALLS: [u32; 12] = [
     sys::SAFEMEMSET,
 ];
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 6: Device I/O Direction/Size Flags
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const DIO_INPUT: u32 = 0x001;
 pub const DIO_OUTPUT: u32 = 0x002;
 pub const DIO_DIRMASK: u32 = 0x00f;
@@ -230,10 +206,6 @@ pub const DIO_SAFE_OUTPUT_BYTE: u32 = DIO_OUTPUT | DIO_BYTE | DIO_SAFE;
 pub const DIO_SAFE_OUTPUT_WORD: u32 = DIO_OUTPUT | DIO_WORD | DIO_SAFE;
 pub const DIO_SAFE_OUTPUT_LONG: u32 = DIO_OUTPUT | DIO_LONG | DIO_SAFE;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 7: IRQ Control
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const IRQ_SETPOLICY: u32 = 1;
 pub const IRQ_RMPOLICY: u32 = 2;
 pub const IRQ_ENABLE: u32 = 3;
@@ -242,10 +214,6 @@ pub const IRQ_REENABLE: u32 = 0x001;
 pub const IRQ_BYTE: u32 = 0x100;
 pub const IRQ_WORD: u32 = 0x200;
 pub const IRQ_LONG: u32 = 0x400;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 8: SYS_GETINFO Subcodes
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const GET_KINFO: u32 = 0;
 pub const GET_IMAGE: u32 = 1;
@@ -272,10 +240,6 @@ pub const GET_CPUINFO: u32 = 23;
 pub const GET_REGS: u32 = 24;
 pub const GET_RUSAGE: u32 = 25;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 9: SYS_PRIVCTL Subfunctions
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const SYS_PRIV_ALLOW: u32 = 1;
 pub const SYS_PRIV_DISALLOW: u32 = 2;
 pub const SYS_PRIV_SET_SYS: u32 = 3;
@@ -287,16 +251,8 @@ pub const SYS_PRIV_QUERY_MEM: u32 = 8;
 pub const SYS_PRIV_UPDATE_SYS: u32 = 9;
 pub const SYS_PRIV_YIELD: u32 = 10;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 10: Exec & Fork Flags
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const PMEF_AUXVECTORS: u32 = 20;
 pub const PFF_VMINHIBIT: u32 = 0x01;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 11: SYS_VMCTL - VM Control Subcodes
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const VMCTL_CLEAR_PAGEFAULT: u32 = 12;
 pub const VMCTL_GET_PDBR: u32 = 13;
@@ -319,19 +275,11 @@ pub const VMMF_USER: u32 = 1 << 1;
 pub const VMMF_WRITE: u32 = 1 << 2;
 pub const VMMF_GLO: u32 = 1 << 3;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 12: SYS_DIAGCTL Codes
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const DIAGCTL_CODE_DIAG: u32 = 1;
 pub const DIAGCTL_CODE_STACKTRACE: u32 = 2;
 pub const DIAGCTL_CODE_REGISTER: u32 = 3;
 pub const DIAGCTL_CODE_UNREGISTER: u32 = 4;
 pub const DIAG_BUFSIZE: u32 = 80 * 25;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 13: SYS_VTIMER, SYS_RUNCTL, SYS_UPDATE, SYS_STATECTL, SYS_SCHEDCTL
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const VT_VIRTUAL: u32 = 1;
 pub const VT_PROF: u32 = 2;
@@ -343,10 +291,6 @@ pub const RC_DELAY: u32 = 1;
 pub const SYS_STATE_CLEAR_IPC_REFS: u32 = 1;
 
 pub const SCHEDCTL_FLAG_KERNEL: u32 = 1;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 14: RS (Reincarnation Server) Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const RS_RQ_BASE: u32 = 0x700;
 
@@ -363,10 +307,6 @@ pub const RS_GETSYSINFO: u32 = RS_RQ_BASE + 9;
 pub const RS_INIT: u32 = RS_RQ_BASE + 20;
 pub const RS_LU_PREPARE: u32 = RS_RQ_BASE + 21;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 15: DS (Data Store) Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const DS_RQ_BASE: u32 = 0x800;
 
 pub const DS_PUBLISH: u32 = DS_RQ_BASE;
@@ -377,10 +317,6 @@ pub const DS_DELETE: u32 = DS_RQ_BASE + 4;
 pub const DS_SNAPSHOT: u32 = DS_RQ_BASE + 5;
 pub const DS_RETRIEVE_LABEL: u32 = DS_RQ_BASE + 6;
 pub const DS_GETSYSINFO: u32 = DS_RQ_BASE + 7;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 16: VFS ↔ PM Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const VFS_PM_RQ_BASE: u32 = 0x900;
 pub const VFS_PM_RS_BASE: u32 = 0x980;
@@ -448,19 +384,11 @@ pub mod vfs_pm {
     pub const TERM_SIG: i32 = 1; // m7_i2
 }
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 17: Common Request Base
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const COMMON_RQ_BASE: u32 = 0xE00;
 
 pub const SIGS_SIGNAL_RECEIVED: u32 = COMMON_RQ_BASE;
 pub const COMMON_REQ_GCOV_DATA: u32 = COMMON_RQ_BASE + 1;
 pub const COMMON_REQ_FI_CTL: u32 = COMMON_RQ_BASE + 2;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 18: VM Server Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const VM_RQ_BASE: u32 = 0xC00;
 
@@ -527,10 +455,6 @@ pub const VM_BASIC_CALLS: [u32; 7] = [
     VM_GETRUSAGE,
 ];
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 19: IPC Server Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const IPC_BASE: u32 = 0xD00;
 
 pub const IPC_SHMGET: u32 = IPC_BASE + 1;
@@ -541,10 +465,6 @@ pub const IPC_SEMGET: u32 = IPC_BASE + 5;
 pub const IPC_SEMCTL: u32 = IPC_BASE + 6;
 pub const IPC_SEMOP: u32 = IPC_BASE + 7;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 20: Scheduling Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const SCHEDULING_BASE: u32 = 0xF00;
 
 pub const SCHEDULING_NO_QUANTUM: u32 = SCHEDULING_BASE + 1;
@@ -552,10 +472,6 @@ pub const SCHEDULING_START: u32 = SCHEDULING_BASE + 2;
 pub const SCHEDULING_STOP: u32 = SCHEDULING_BASE + 3;
 pub const SCHEDULING_SET_NICE: u32 = SCHEDULING_BASE + 4;
 pub const SCHEDULING_INHERIT: u32 = SCHEDULING_BASE + 5;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 21: USB Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const USB_BASE: u32 = 0x1100;
 
@@ -570,10 +486,6 @@ pub const USB_COMPLETE_URB: u32 = USB_BASE + 6;
 pub const USB_ANNOUCE_DEV: u32 = USB_BASE + 7;
 pub const USB_WITHDRAW_DEV: u32 = USB_BASE + 8;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 22: Device Manager (DEVMAN) Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const DEVMAN_BASE: u32 = 0x1200;
 
 pub const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE;
@@ -587,10 +499,6 @@ pub const DEVMAN_REPLY: u32 = DEVMAN_BASE + 7;
 pub const DEVMAN_BIND: u32 = DEVMAN_BASE + 8;
 pub const DEVMAN_UNBIND: u32 = DEVMAN_BASE + 9;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 23: TTY Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const TTY_RQ_BASE: u32 = 0x1300;
 
 pub const TTY_FKEY_CONTROL: u32 = TTY_RQ_BASE + 1;
@@ -601,20 +509,12 @@ pub const FKEY_EVENTS: u32 = 12;
 pub const TTY_INPUT_UP: u32 = TTY_RQ_BASE + 2;
 pub const TTY_INPUT_EVENT: u32 = TTY_RQ_BASE + 3;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 24: Input Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const INPUT_RQ_BASE: u32 = 0x1500;
 pub const INPUT_RS_BASE: u32 = 0x1580;
 
 pub const INPUT_CONF: u32 = INPUT_RQ_BASE;
 pub const INPUT_SETLEDS: u32 = INPUT_RQ_BASE + 1;
 pub const INPUT_EVENT: u32 = INPUT_RS_BASE;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 25: VFS-FS Transaction IDs
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const VFS_TRANSACTION_BASE: u32 = 0xB00;
 
@@ -623,10 +523,6 @@ pub const VFS_TRANSID: u32 = VFS_TRANSACTION_BASE + 1;
 pub fn is_vfs_fs_transid(typ: u32) -> bool {
     (typ & !0xff) == VFS_TRANSACTION_BASE
 }
-
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 26: Character Device (CDEV) Messages
-// ═════════════════════════════════════════════════════════════════════════
 
 pub const CDEV_RQ_BASE: u32 = 0x400;
 pub const CDEV_RS_BASE: u32 = 0x480;
@@ -665,10 +561,6 @@ pub const CDEV_NOTIFY: u32 = 0x08;
 pub const CDEV_CLONED: u32 = 0x20000000;
 pub const CDEV_CTTY: u32 = 0x40000000;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 27: Block Device (BDEV) Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const BDEV_RQ_BASE: u32 = 0x500;
 pub const BDEV_RS_BASE: u32 = 0x580;
 
@@ -696,10 +588,6 @@ pub const BDEV_NOFLAGS: u32 = 0x00;
 pub const BDEV_FORCEWRITE: u32 = 0x01;
 pub const BDEV_NOPAGE: u32 = 0x02;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 28: Real Time Clock (RTCDEV) Messages
-// ═════════════════════════════════════════════════════════════════════════
-
 pub const RTCDEV_RQ_BASE: u32 = 0x1400;
 pub const RTCDEV_RS_BASE: u32 = 0x1480;
 
@@ -722,16 +610,8 @@ pub const RTCDEV_NOFLAGS: u32 = 0x00;
 pub const RTCDEV_Y2KBUG: u32 = 0x01;
 pub const RTCDEV_CMOSREG: u32 = 0x02;
 
-// ═════════════════════════════════════════════════════════════════════════
-// Chapter 29: SUSPEND — Internal Code
-// ═════════════════════════════════════════════════════════════════════════
-
 /// Status to suspend caller, reply later.
 pub const SUSPEND: i32 = -998;
-
-// ═════════════════════════════════════════════════════════════════════════
-// Tests
-// ═════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

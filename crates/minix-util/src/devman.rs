@@ -10,7 +10,6 @@ use minix_std::MinixErr;
 
 type Message = [u8; 64];
 
-// ── DEVMAN message types (from arch_common::com) ──────────────────────
 
 const DEVMAN_BASE: u32 = 0x1200;
 const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE;
@@ -23,7 +22,6 @@ const DEVMAN_REQUEST: u32 = DEVMAN_BASE + 6;
 const DEVMAN_BIND: u32 = DEVMAN_BASE + 8;
 const DEVMAN_UNBIND: u32 = DEVMAN_BASE + 9;
 
-// ── Message field offsets ─────────────────────────────────────────────
 // DEVMAN uses m4_* fields:
 //   m4_l1 = offset 16 (grant ID / result)
 //   m4_l2 = offset 20 (grant size / device ID)
@@ -34,13 +32,10 @@ const OFF_M4_L1: usize = 16; // i32: grant ID / result
 const OFF_M4_L2: usize = 20; // i32: grant size / device ID
 const OFF_M4_L3: usize = 24; // i32: endpoint
 
-// ── String/name limits ────────────────────────────────────────────────
 
 const DEVMAN_STRING_LEN: usize = 128;
 
-// ═══════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════
 
 fn msg_set_i32(msg: &mut Message, off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
@@ -67,9 +62,7 @@ fn check_result(msg: &Message) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Public API
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Add a device to the device tree.
 pub fn devman_add_device(endpoint: i32, _name: &str) -> Result<i32, MinixErr> {
@@ -169,9 +162,7 @@ pub fn devman_unbind(dev_id: i32) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

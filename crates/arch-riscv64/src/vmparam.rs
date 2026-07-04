@@ -4,8 +4,6 @@
 //! User addresses: bit 38 = 0 (0x0000000000 – 0x0000003FFFFFFF)
 //! Kernel addresses: bits 63–39 = all 1s (0xFFFFFF8000000000+)
 
-// ── Paging level shifts (SV39) ───────────────────────────────────────────
-
 /// L2: PML4 shift (bits 30-38)
 pub const L2_SHIFT: u32 = 30;
 /// L1: PD shift (bits 21-29)
@@ -23,13 +21,9 @@ pub const NBPD_L0: u64 = 1u64 << L0_SHIFT;
 /// Number of entries per page table (all levels, 9-bit index).
 pub const NENTRIES: u64 = 512;
 
-// ── Page size ───────────────────────────────────────────────────────────
-
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
 pub const PAGE_MASK: u64 = PAGE_SIZE - 1;
-
-// ── Virtual address space layout (SV39) ─────────────────────────────────
 
 /// Top of user stack (end of user address space).
 pub const USRSTACK: u64 = 0x0000003FFFFFFFE000u64;
@@ -41,15 +35,11 @@ pub const VM_MAX_ADDRESS: u64 = 0xFFFFFFFFFFFFFFFFu64;
 pub const VM_MIN_KERNEL_ADDRESS: u64 = 0xFFFFFF8000000000u64;
 pub const VM_MAX_KERNEL_ADDRESS: u64 = 0xFFFFFFFFFFFFFFFFu64;
 
-// ── Process size limits (same as x86_64 for now) ─────────────────────────
-
 pub const MAXTSIZ: u64 = 256 * 1024 * 1024;
 pub const DFLDSIZ: u64 = 512 * 1024 * 1024;
 pub const MAXDSIZ: u64 = 128 * 1024 * 1024 * 1024;
 pub const DFLSSIZ: u64 = 8 * 1024 * 1024;
 pub const MAXSSIZ: u64 = 64 * 1024 * 1024;
-
-// ── Physical memory ─────────────────────────────────────────────────────
 
 pub const USRIOSIZE: u32 = 300;
 pub const VM_PHYS_SIZE: u64 = USRIOSIZE as u64 * PAGE_SIZE;

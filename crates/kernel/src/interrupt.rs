@@ -14,9 +14,7 @@ const NR_IRQ_VECTORS: usize = 32;
 /// Per-IRQ linked list heads — `NULL` means no handler for that IRQ.
 static mut IRQ_HANDLERS: [*mut IrqHook; NR_IRQ_VECTORS] = [core::ptr::null_mut(); NR_IRQ_VECTORS];
 
-// ─────────────────────────────────────────────────────────────────────────
 // put_irq_handler
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Register an interrupt handler.
 ///
@@ -84,9 +82,7 @@ pub unsafe fn put_irq_handler(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // rm_irq_handler
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Unregister an interrupt handler.
 ///
@@ -139,9 +135,7 @@ pub unsafe fn rm_irq_handler(hook: *const IrqHook) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // irq_handle
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Handle a hardware interrupt.
 ///
@@ -196,9 +190,7 @@ pub unsafe fn irq_handle(irq: i32) {
     hw_intr_ack(irq);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // enable_irq / disable_irq
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Enable (unmask) a specific IRQ hook.
 ///
@@ -249,9 +241,7 @@ pub unsafe fn disable_irq(hook: *const IrqHook) -> bool {
     true
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Hardware stubs
-// ─────────────────────────────────────────────────────────────────────────
 
 fn hw_intr_used(_irq: i32) {}
 fn hw_intr_not_used(_irq: i32) {}
@@ -273,9 +263,7 @@ pub unsafe fn intr_init() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

@@ -75,7 +75,6 @@ pub const NREQS: usize = 34;
 pub const INVAL_UID: u16 = 0xFFFF;
 pub const INVAL_GID: u16 = 0xFFFF;
 
-// ── errno values (POSIX subset) ──
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;
 pub const EPERM: i32 = 1;
@@ -100,7 +99,6 @@ pub const ESYMLINK: i32 = 100;
 pub const EENTERMOUNT: i32 = 101;
 pub const ELEAVEMOUNT: i32 = 102;
 
-// ── Constants from Minix headers ──
 pub const NO_ZONE: u32 = 0xFFFFFFFF;
 pub const NO_BLOCK: u32 = 0xFFFFFFFF;
 pub const NO_ENTRY: u32 = 0;

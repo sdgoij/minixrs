@@ -9,7 +9,6 @@ use minix_std::MinixErr;
 
 type Message = [u8; 64];
 
-// ── DS message types (from arch_common::com) ───────────────────────────
 
 const DS_RQ_BASE: u32 = 0x800;
 const DS_PUBLISH: u32 = DS_RQ_BASE;
@@ -18,19 +17,15 @@ const DS_SUBSCRIBE: u32 = DS_RQ_BASE + 2;
 const DS_CHECK: u32 = DS_RQ_BASE + 3;
 const DS_DELETE: u32 = DS_RQ_BASE + 4;
 
-// ── Message field offsets ─────────────────────────────────────────────
 
 const OFF_TYPE: usize = 0; // i32: message type (DS_PUBLISH, etc.)
 const OFF_M2_I1: usize = 8; // i32: key length
 const OFF_M2_I2: usize = 12; // i32: value (u32) or endpoint for labels
 
-// ── DS endpoint ───────────────────────────────────────────────────────
 
 const DS_ENDPOINT: i32 = 6; // DS_PROC_NR
 
-// ═══════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════
 
 fn msg_set_i32(msg: &mut Message, off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
@@ -59,9 +54,7 @@ fn check_result(msg: &Message) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Public API
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Publish an unsigned 32-bit value under `key`.
 pub fn ds_publish_u32(key: &[u8], value: u32) -> Result<(), MinixErr> {
@@ -164,9 +157,7 @@ pub fn ds_delete(key: &[u8]) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

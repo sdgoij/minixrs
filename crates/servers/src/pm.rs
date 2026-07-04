@@ -8,9 +8,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use kernel::r#priv::MinixTimer;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Number of signals on x86_64.
 pub const _NSIG: usize = 128;
@@ -37,7 +35,6 @@ pub const NGROUPS_MAX: usize = 32;
 /// Process name length.
 pub const PROC_NAME_LEN: usize = 16;
 
-// ── MProc flags (from mproc.h) ─────────────────────────────────────────────
 
 pub const IN_USE: u32 = 0x00001;
 pub const WAITING: u32 = 0x00002;
@@ -62,9 +59,7 @@ pub const TAINTED: u32 = 0x40000;
 pub const ENOSYS: i32 = -71;
 pub const EINVAL: i32 = -22;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // SigSet — signal set type (sigset_t equivalent)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Signal set type (`sigset_t` equivalent). Supports 128 signals on x86_64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,9 +126,7 @@ impl Default for SigSet {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // TimeVal and Itimerval — POSIX interval timer types
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// POSIX `timeval` struct for interval timers.
 #[derive(Debug, Clone, Copy)]
@@ -151,9 +144,7 @@ pub struct Itimerval {
     pub it_value: TimeVal,    // current value
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // MProc — process manager slot
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// PM process table slot — adapted from `mproc.h`.
 ///
@@ -263,9 +254,7 @@ impl MProc {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Process table — wrapped in UnsafeCell + Sync for interior mutability
-// ─────────────────────────────────────────────────────────────────────────────
 
 struct MProcTable(UnsafeCell<[MProc; NR_PROCS]>);
 
@@ -388,9 +377,7 @@ pub unsafe fn get_proc_mut(slot: usize) -> Option<&'static mut MProc> {
     Some(rmp)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Alarm management
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Set the alarm timer for a process slot.
 ///
@@ -459,9 +446,7 @@ pub fn cancel_alarm(slot: usize) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Compile-time offset verification
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Compile-time assertion that `MProc` field offsets match the C layout
 /// from `mproc.h`.  These verify the `#[repr(C)]` layout is as expected.
@@ -502,9 +487,7 @@ const _: () = {
     assert!(core::mem::size_of::<Itimerval>() == 32);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PID management
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Next available PID.
 static NEXT_PID: AtomicI32 = AtomicI32::new(0);
@@ -540,9 +523,7 @@ pub unsafe fn get_free_pid() -> i32 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // do_fork — create child process
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Fork the current process — create a child with copied MProc state.
 ///
@@ -596,9 +577,7 @@ pub unsafe fn do_fork(slot: usize) -> Result<usize, i32> {
     Ok(child_slot)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // do_exit + do_waitpid
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Exit the current process — mark as ZOMBIE, notify parent.
 ///
@@ -710,9 +689,7 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
     Err(-4) // EINTR — no zombie child found
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Signal handling
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a signal can be sent to a process and deliver it.
 ///
@@ -827,9 +804,7 @@ pub unsafe fn do_kill(caller_slot: usize, pid: i32, signo: i32) -> Result<(), i3
     unsafe { check_sig(pid, signo, false) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // do_get / do_set — UID, GID, PID
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Handle PM_GET* requests.
 ///
@@ -909,9 +884,7 @@ pub unsafe fn do_set(slot: usize, call_nr: i32, uid: i32, gid: i32) -> Result<()
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // pm_isokendpt
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a process endpoint is valid.
 ///
@@ -1744,9 +1717,7 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Compile-time offset verification
-// ─────────────────────────────────────────────────────────────────────────────
 
 const _: () = {
     use core::mem::offset_of;
@@ -1759,9 +1730,7 @@ const _: () = {
     assert!(core::mem::size_of::<Itimerval>() == 32);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

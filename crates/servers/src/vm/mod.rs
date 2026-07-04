@@ -24,7 +24,6 @@ use arch_common::ipcconst::{
     IPC_FLG_MSG_FROM_KERNEL, IPC_STATUS_FLAGS_SHIFT, ipc_status_flags_test,
 };
 
-// ── Constants ────────────────────────────────────────────────────────────
 
 const OK: i32 = 0;
 
@@ -61,9 +60,7 @@ const _FROM_KERNEL: i32 = 0x100;
 #[allow(dead_code)]
 const _ANY: i32 = 0x0000ffff;
 
-// ═════════════════════════════════════════════════════════════════════════
 // Call dispatch table
-// ═════════════════════════════════════════════════════════════════════════
 
 /// A single entry in the VM call dispatch table.
 #[derive(Copy, Clone)]
@@ -114,13 +111,11 @@ pub fn init_vm() {
         };
     }
 
-    // ── Basic ──
     set_call(VM_MMAP, do_mmap, "do_mmap");
     set_call(VM_MUNMAP, do_munmap, "do_munmap");
     set_call(VM_MAP_PHYS, do_map_phys, "do_map_phys");
     set_call(VM_UNMAP_PHYS, do_munmap, "do_munmap");
 
-    // ── PM (Process Manager) ──
     set_call(VM_EXIT, do_exit, "do_exit");
     set_call(VM_FORK, do_fork, "do_fork");
     set_call(VM_BRK, do_brk, "do_brk");
@@ -129,16 +124,13 @@ pub fn init_vm() {
     set_call(VM_PROCCTL, do_procctl_notrans, "do_procctl");
     set_call(VM_EXEC_NEWMEM, do_exec_newmem, "do_exec_newmem");
 
-    // ── VFS (Virtual File System) ──
     set_call(VM_VFS_REPLY, do_vfs_reply, "do_vfs_reply");
     set_call(VM_VFS_MMAP, do_vfs_mmap, "do_vfs_mmap");
 
-    // ── RS (Reincarnation Server) ──
     set_call(VM_RS_SET_PRIV, do_rs_set_priv, "do_rs_set_priv");
     set_call(VM_RS_UPDATE, do_rs_update, "do_rs_update");
     set_call(VM_RS_MEMCTL, do_rs_memctl, "do_rs_memctl");
 
-    // ── Generic ──
     set_call(VM_REMAP, do_remap, "do_remap");
     set_call(VM_REMAP_RO, do_remap, "do_remap");
     set_call(VM_GETPHYS, do_get_phys, "do_get_phys");
@@ -148,18 +140,14 @@ pub fn init_vm() {
     set_call(VM_QUERY_EXIT, do_query_exit, "do_query_exit");
     set_call(VM_WATCH_EXIT, do_watch_exit, "do_watch_exit");
 
-    // ── Cache ──
     set_call(VM_MAPCACHEPAGE, do_mapcache, "do_mapcache");
     set_call(VM_SETCACHEPAGE, do_setcache, "do_setcache");
     set_call(VM_CLEARCACHE, do_clearcache, "do_clearcache");
 
-    // ── Rusage ──
     set_call(VM_GETRUSAGE, do_getrusage, "do_getrusage");
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Server main loop
-// ═════════════════════════════════════════════════════════════════════════
 
 /// VM server main entry point.
 ///
@@ -307,9 +295,7 @@ pub fn sef_signal_handler() {
     // TODO: Phase 8+ — respond to kernel signals (SIGS_PAGEFAULT, etc.)
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Page fault handling (Phase 6.9 — port of pagefaults.c)
-// ═════════════════════════════════════════════════════════════════════════
 
 // PFERR_* constants from C's VPF_FLAGS decoding
 #[allow(dead_code)]
@@ -380,9 +366,7 @@ pub fn clear_pagefault(_ep: i32) -> i32 {
     OK
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Phase 6.10 — Shared memory (shm.c)
-// ═════════════════════════════════════════════════════════════════════════
 
 /// Handle VM_SHM_UNMAP — clear matching shared memory regions.
 fn do_shm_unmap(msg: &mut Message) -> i32 {
@@ -409,9 +393,7 @@ fn do_shm_at(msg: &mut Message) -> i32 {
     ENOSYS
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Phase 6.11 — Remap operations (mmap.c)
-// ═════════════════════════════════════════════════════════════════════════
 
 /// Handle VM_REMAP / VM_REMAP_RO — remap a shared region.
 ///
@@ -632,9 +614,7 @@ fn do_munmap(msg: &mut Message) -> i32 {
     OK
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Phase 6.12 — Procctl and exit (exit.c)
-// ═════════════════════════════════════════════════════════════════════════
 
 /// Handle VM_PROCCTL — process control operations.
 ///
@@ -716,9 +696,7 @@ fn do_willexit(msg: &mut Message) -> i32 {
     OK
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Stub handlers (remaining unimplemented calls)
-// ═════════════════════════════════════════════════════════════════════════
 
 fn do_mmap(msg: &mut Message) -> i32 {
     let _ = msg;
@@ -1065,9 +1043,7 @@ fn do_getrusage(msg: &mut Message) -> i32 {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Tests
-// ═════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -1321,7 +1297,6 @@ mod tests {
         sef_signal_handler();
     }
 
-    // ── dispatch_message tests ────────────────────────────────────────
 
     #[test]
     fn test_dispatch_notification_returns_edontreply() {

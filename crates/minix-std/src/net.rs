@@ -11,7 +11,6 @@
 
 use crate::MinixErr;
 
-// ── Address families ────────────────────────────────────────────────────
 
 pub const AF_UNSPEC: i32 = 0;
 pub const AF_LOCAL: i32 = 1;
@@ -19,7 +18,6 @@ pub const AF_UNIX: i32 = AF_LOCAL;
 pub const AF_INET: i32 = 2;
 pub const AF_INET6: i32 = 10;
 
-// ── Socket types ────────────────────────────────────────────────────────
 
 pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
@@ -27,7 +25,6 @@ pub const SOCK_RAW: i32 = 3;
 pub const SOCK_RDM: i32 = 4;
 pub const SOCK_SEQPACKET: i32 = 5;
 
-// ── Socket protocol numbers ─────────────────────────────────────────────
 
 pub const IPPROTO_IP: i32 = 0;
 pub const IPPROTO_ICMP: i32 = 1;
@@ -35,13 +32,11 @@ pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_UDP: i32 = 17;
 pub const IPPROTO_RAW: i32 = 255;
 
-// ── Socket option levels ────────────────────────────────────────────────
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SOL_TCP: i32 = 6;
 pub const SOL_UDP: i32 = 17;
 
-// ── Socket option names ─────────────────────────────────────────────────
 
 pub const SO_REUSEADDR: i32 = 0x0004;
 pub const SO_KEEPALIVE: i32 = 0x0008;
@@ -52,7 +47,6 @@ pub const SO_SNDBUF: i32 = 0x1001;
 pub const SO_RCVBUF: i32 = 0x1002;
 pub const SO_ERROR: i32 = 0x1007;
 
-// ── Socket operations ───────────────────────────────────────────────────
 
 /// Create a socket endpoint.
 pub fn socket(domain: i32, type_: i32, protocol: i32) -> Result<i32, MinixErr> {
@@ -108,7 +102,6 @@ pub fn setsockopt(sockfd: i32, level: i32, optname: i32, optval: i32) -> Result<
     Err(MinixErr::ENOSYS)
 }
 
-// ── sockaddr_in structure ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -136,9 +129,7 @@ impl SockAddrIn {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

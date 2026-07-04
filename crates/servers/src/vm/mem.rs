@@ -16,7 +16,6 @@ use core::sync::atomic::Ordering;
 use kernel::pagetable;
 use kernel::table::{endpoint_slot, proc_addr};
 
-// ── Constants ────────────────────────────────────────────────────────────
 
 /// Maximum number of endpoints supported by the grant table.
 pub const MAX_ENDPOINTS: usize = 64;
@@ -30,7 +29,6 @@ pub const GRANT_PHYS: u32 = 1;
 /// Grant type: virtual address space sharing.
 pub const GRANT_VIRT: u32 = 2;
 
-// ── Grant entry ──────────────────────────────────────────────────────────
 
 /// A single grant entry in the endpoint grant table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +65,6 @@ impl Grant {
     }
 }
 
-// ── Grant tables ─────────────────────────────────────────────────────────
 
 const GRANT_ZERO: Grant = Grant::zeroed();
 const GRANT_ROW: [Grant; GRANTS_PER_ENDPOINT] = [GRANT_ZERO; GRANTS_PER_ENDPOINT];
@@ -89,7 +86,6 @@ impl GrantTablesCell {
 /// A slot is "free" when its `g_grantor` field is 0.
 pub static GRANT_TABLES: GrantTablesCell = GrantTablesCell::new([GRANT_ROW; MAX_ENDPOINTS]);
 
-// ── Core grant operations ────────────────────────────────────────────────
 
 /// Find a free grant slot for the given endpoint.
 ///
@@ -291,7 +287,6 @@ pub unsafe fn sys_vmctl(ep: i32, cmd: u32, arg: u32) -> i32 {
     }
 }
 
-// ── High-level grant helpers ─────────────────────────────────────────────
 
 /// Grant physical memory from source to destination endpoint.
 ///
@@ -406,15 +401,12 @@ pub unsafe fn grant_free(physaddr: u64, npages: u32) -> i32 {
     -1
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Tests
-// ═════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Grant struct ─────────────────────────────────────────────────
 
     #[test]
     fn test_grant_zeroed() {
@@ -433,7 +425,6 @@ mod tests {
         assert_eq!(GRANT_VIRT, 2);
     }
 
-    // ── Grant tables initialisation ─────────────────────────────────
 
     #[test]
     fn test_grants_table_initially_zeroed() {
@@ -466,7 +457,6 @@ mod tests {
         }
     }
 
-    // ── find_free_grant ─────────────────────────────────────────────
 
     #[test]
     fn test_find_free_grant_on_clean_table() {
@@ -505,9 +495,7 @@ mod tests {
         }
     }
 
-    // ── sys_vm_map ──────────────────────────────────────────────────
 
-    // ── map_grant ────────────────────────────────────────────────
 
     #[test]
     fn test_map_grant_zero_pages_returns_zero() {
@@ -526,7 +514,6 @@ mod tests {
         }
     }
 
-    // ── sys_vmctl ─────────────────────────────────────────────────
 
     #[test]
     fn test_sys_vmctl_commands() {
@@ -596,7 +583,6 @@ mod tests {
         }
     }
 
-    // ── grant_physmem ───────────────────────────────────────────────
 
     #[test]
     fn test_grant_physmem_valid() {
@@ -624,7 +610,6 @@ mod tests {
         }
     }
 
-    // ── grant_alloc ─────────────────────────────────────────────────
 
     #[test]
     fn test_grant_alloc_valid() {
@@ -658,7 +643,6 @@ mod tests {
         }
     }
 
-    // ── grant_free ──────────────────────────────────────────────────
 
     #[test]
     fn test_grant_free_finds_and_clears() {

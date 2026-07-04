@@ -14,9 +14,7 @@ use crate::libminixfs::constants::*;
 use crate::libminixfs::errors::*;
 use crate::libminixfs::types::*;
 
-// ---------------------------------------------------------------------------
 // Block I/O callback — set by the server to perform actual disk reads/writes
-// ---------------------------------------------------------------------------
 
 /// Block I/O function type.
 ///
@@ -67,9 +65,7 @@ fn get_block_io() -> Option<BlockIoFn> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Static (global) state
-// ---------------------------------------------------------------------------
 
 /// Hash table for fast buffer lookup by block number.
 static mut BUF_HASH: *mut *mut Buf = ptr::null_mut();
@@ -104,9 +100,7 @@ static mut RDWT_ERR: i32 = OK;
 /// Quiet mode flag (suppress diagnostic output).
 static mut QUIET: i32 = 0;
 
-// ---------------------------------------------------------------------------
 // Helpers to safely read/write static mut via raw pointers
-// ---------------------------------------------------------------------------
 
 macro_rules! static_read {
     ($var:ident) => {{
@@ -128,9 +122,7 @@ macro_rules! static_write {
     }};
 }
 
-// ---------------------------------------------------------------------------
 // Internal helpers
-// ---------------------------------------------------------------------------
 
 /// Hash function: maps a block number to a hash bucket index.
 fn bufhash(block: u64) -> usize {
@@ -314,9 +306,7 @@ unsafe fn cache_resize(blocksize: u32, bufs: usize) {
     static_write!(FS_BLOCK_SIZE, blocksize);
 }
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
 /// Allocate a block of data memory for a buffer.
 ///
@@ -1028,9 +1018,7 @@ pub unsafe fn fs_bufs_heuristic() -> u32 {
     1024
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "tests.rs"]

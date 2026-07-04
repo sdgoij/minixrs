@@ -26,9 +26,7 @@
 //! - **Memory allocation** (`flt_malloc`, `flt_free`) — deferred; depends
 //!   on `alloc_contig` / `PhysicalAllocator`.
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Types & Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -105,9 +103,7 @@ impl Default for DriverInfo {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Configuration (mutable globals mirroring the C `extern int` variables)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Runtime configuration of the filter driver.
 #[repr(C)]
@@ -161,9 +157,7 @@ impl FilterConfig {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // CRC32
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Generate the standard CRC-32 lookup table.
 ///
@@ -229,9 +223,7 @@ pub fn compute_crc(data: &[u8]) -> u32 {
     s
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // MD5
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// MD5 message-digest context.
 #[derive(Clone)]
@@ -467,9 +459,7 @@ impl MD5Context {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Checksum computation (calc_sum in C)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Compute the checksum for a single sector's data.
 ///
@@ -513,9 +503,7 @@ pub fn calc_sum_into(sector: u32, data: &[u8], sum: &mut [u8], config: &FilterCo
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Layout math
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Convert logical sector number to physical sector number (with
 /// interspersed checksums).  Corresponds to C `LOG2PHYS`.
@@ -626,9 +614,7 @@ pub fn convert(raw_size: u64, use_sum_layout: bool, nr_sum_sec: u32) -> u64 {
     (sectors / (nss + 1)) * nss * (SECTOR_SIZE as u64)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Checksum group operations (depend on read_write IPC)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Callback type for low-level block I/O.
 /// Reads or writes `size` bytes at `pos` (physical sector address).
@@ -774,15 +760,12 @@ pub fn filter_transfer(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Constants ──────────────────────────────────────────────────────
 
     #[test]
     fn test_constants() {
@@ -793,7 +776,6 @@ mod tests {
         assert_eq!(DRIVER_BACKUP, 1);
     }
 
-    // ── Config ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_config_default() {
@@ -827,7 +809,6 @@ mod tests {
         assert_eq!(cfg.sum_size, 16);
     }
 
-    // ── Types ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_checksum_type_repr() {
@@ -845,7 +826,6 @@ mod tests {
         assert_eq!(di.problem, DriverProblem::None);
     }
 
-    // ── CRC32 ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_crc32_empty() {
@@ -868,7 +848,6 @@ mod tests {
         assert_eq!(compute_crc(b"test data"), compute_crc(b"test data"));
     }
 
-    // ── MD5 ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_md5_rfc1321_empty() {
@@ -949,7 +928,6 @@ mod tests {
         assert_ne!(d, [0u8; 16]);
     }
 
-    // ── calc_sum_into ──────────────────────────────────────────────────
 
     #[test]
     fn test_calc_sum_nil() {
@@ -982,7 +960,6 @@ mod tests {
         assert_ne!(sum, [0u8; 16]);
     }
 
-    // ── Layout math ────────────────────────────────────────────────────
 
     #[test]
     fn test_log2phys_basic() {

@@ -5,7 +5,6 @@
 
 #![allow(clippy::identity_op)]
 
-// ── I/O port addresses ─────────────────────────────────────────────────
 
 /// Keyboard data port (read/write data, read output buffer).
 pub const KEYBD: u16 = 0x60;
@@ -16,12 +15,10 @@ pub const KB_COMMAND: u16 = 0x64;
 /// Keyboard status port (read status from controller).
 pub const KB_STATUS: u16 = 0x64;
 
-// ── Keyboard ACK ───────────────────────────────────────────────────────
 
 /// ACK byte sent by keyboard in response to a command.
 pub const KB_ACK: u8 = 0xFA;
 
-// ── Status register bits ───────────────────────────────────────────────
 
 /// Auxiliary device output buffer full.
 pub const KB_AUX_BYTE: u8 = 0x20;
@@ -32,7 +29,6 @@ pub const KB_OUT_FULL: u8 = 0x01;
 /// Input buffer full (controller not ready to receive).
 pub const KB_IN_FULL: u8 = 0x02;
 
-// ── Controller commands ────────────────────────────────────────────────
 
 /// Read the controller command byte.
 pub const KBC_RD_RAM_CCB: u8 = 0x20;
@@ -52,7 +48,6 @@ pub const KBC_DI_KBD: u8 = 0xAD;
 /// Enable keyboard interface.
 pub const KBC_EN_KBD: u8 = 0xAE;
 
-// ── Timing constants (microseconds) ────────────────────────────────────
 
 /// Wait this many microseconds for a status update.
 pub const KBC_WAIT_TIME: u32 = 100_000;
@@ -63,7 +58,6 @@ pub const KBC_READ_TIME: u32 = 1_000_000;
 /// Microseconds to delay when polling.
 pub const KBC_IN_DELAY: u32 = 7;
 
-// ── Buffer sizes ───────────────────────────────────────────────────────
 
 /// Output buffer size for data to the keyboard.
 pub const KBD_OUT_BUFSZ: usize = 16;
@@ -71,7 +65,6 @@ pub const KBD_OUT_BUFSZ: usize = 16;
 /// Number of scancode entries in the translation tables.
 pub const KBD_SCAN_CODES: usize = 0x80;
 
-// ── Scancode constants ─────────────────────────────────────────────────
 
 /// OR this mask to indicate a key release.
 pub const SCAN_RELEASE: u8 = 0x80;
@@ -88,7 +81,6 @@ pub const SCAN_EXT0: u8 = 0xE0;
 /// Prefix for Pause/Break-style extended scancodes.
 pub const SCAN_EXT1: u8 = 0xE1;
 
-// ── LED flags (written to keyboard port 0x60 after LED_CODE) ──────────
 
 /// Scroll Lock LED bit.
 pub const LED_SCROLL_LOCK: u8 = 0x01;
@@ -102,7 +94,6 @@ pub const LED_CAPS_LOCK: u8 = 0x04;
 /// Command to set keyboard LEDs.
 pub const LED_CODE: u8 = 0xED;
 
-// ── HID usage pages (from `minix/include/minix/input.h`) ───────────────
 
 /// General Desktop page.
 pub const INPUT_PAGE_GD: u16 = 0x0001;
@@ -119,7 +110,6 @@ pub const INPUT_PAGE_BUTTON: u16 = 0x0009;
 /// Consumer page.
 pub const INPUT_PAGE_CONS: u16 = 0x000C;
 
-// ── Event values ───────────────────────────────────────────────────────
 
 /// Key release event value.
 pub const INPUT_RELEASE: i32 = 0;
@@ -127,7 +117,6 @@ pub const INPUT_RELEASE: i32 = 0;
 /// Key press event value.
 pub const INPUT_PRESS: i32 = 1;
 
-// ── Event flags ────────────────────────────────────────────────────────
 
 /// Absolute value (the default).
 pub const INPUT_FLAG_ABS: u16 = 0x00;
@@ -135,7 +124,6 @@ pub const INPUT_FLAG_ABS: u16 = 0x00;
 /// Relative value.
 pub const INPUT_FLAG_REL: u16 = 0x04;
 
-// ── General Desktop codes ──────────────────────────────────────────────
 
 /// X-axis movement.
 pub const INPUT_GD_X: u16 = 0x0030;
@@ -152,7 +140,6 @@ pub const INPUT_GD_SYSTEM_SLEEP: u16 = 0x0082;
 /// System Wake Up.
 pub const INPUT_GD_SYSTEM_WAKE_UP: u16 = 0x0083;
 
-// ── Keyboard/Keypad page codes ─────────────────────────────────────────
 
 pub const INPUT_KEY_A: u16 = 0x0004;
 pub const INPUT_KEY_B: u16 = 0x0005;
@@ -291,7 +278,6 @@ pub const INPUT_KEY_LANG_5: u16 = 0x0088;
 
 pub const INPUT_KEY_SYSREQ: u16 = 0x008C;
 
-// ── Modifier keys ──────────────────────────────────────────────────────
 
 pub const INPUT_KEY_LEFT_CTRL: u16 = 0x00E0;
 pub const INPUT_KEY_LEFT_SHIFT: u16 = 0x00E1;
@@ -302,17 +288,14 @@ pub const INPUT_KEY_RIGHT_SHIFT: u16 = 0x00E5;
 pub const INPUT_KEY_RIGHT_ALT: u16 = 0x00E6;
 pub const INPUT_KEY_RIGHT_GUI: u16 = 0x00E7;
 
-// ── LED page codes ─────────────────────────────────────────────────────
 
 pub const INPUT_LED_NUMLOCK: u16 = 0x0001;
 pub const INPUT_LED_CAPSLOCK: u16 = 0x0002;
 pub const INPUT_LED_SCROLLLOCK: u16 = 0x0003;
 
-// ── Button page codes ──────────────────────────────────────────────────
 
 pub const INPUT_BUTTON_1: u16 = 0x0001;
 
-// ── Consumer page codes ────────────────────────────────────────────────
 
 pub const INPUT_CONS_SCAN_NEXT_TRACK: u16 = 0x00B5;
 pub const INPUT_CONS_SCAN_PREVIOUS_TRACK: u16 = 0x00B6;
@@ -343,7 +326,6 @@ pub const INPUT_CONS_AC_REFRESH: u16 = 0x0227;
 
 pub const INPUT_CONS_AC_BOOKMARKS: u16 = 0x022A;
 
-// ── Device type flags ──────────────────────────────────────────────────
 
 /// Keyboard device flag.
 pub const INPUT_DEV_KBD: u8 = 0x01;

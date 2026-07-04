@@ -12,9 +12,7 @@ use crate::r#priv::{MinixTimer, PrivFlags};
 use crate::proc::{MiscFlags, Proc};
 use crate::system::cause_sig;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Special expiration time meaning "no timer is set".
 pub const TMR_NEVER: u64 = u64::MAX;
@@ -31,9 +29,7 @@ const SIGVTALRM: i32 = 26;
 /// POSIX signal: profiling timer alarm (SIGPROF).
 const SIGPROF: i32 = 27;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Clock state
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Monotonic time since boot in ticks (BSP only).
 static MONOTONIC: AtomicU64 = AtomicU64::new(0);
@@ -53,9 +49,7 @@ static mut CLOCK_TIMERS: *mut MinixTimer = core::ptr::null_mut();
 /// Monotonic time at which the next timer in the queue expires.
 static mut NEXT_TIMEOUT: u64 = TMR_NEVER;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Timer queue management  (from `minix/include/minix/timers.h`)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Insert a timer into the timer queue, sorted by expiration time.
 ///
@@ -138,9 +132,7 @@ pub unsafe fn tmrs_exptimers(timers: *mut *mut MinixTimer, now: u64, _param: *mu
     count
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Clock accessors
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Get monotonic time since boot in ticks.
 pub fn get_monotonic() -> u64 {
@@ -182,9 +174,7 @@ pub fn get_adjtime_delta() -> i32 {
     ADJTIME_DELTA.load(Ordering::Relaxed)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Kernel timer interface
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Insert a new timer in the active timers list and update `next_timeout`.
 ///
@@ -220,9 +210,7 @@ pub unsafe fn reset_kernel_timer(tp: *mut MinixTimer) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Virtual timer check
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Check if a process's virtual or profiling timer has expired and send the
 /// appropriate signal.
@@ -256,9 +244,7 @@ unsafe fn vtimer_check(rp: *mut Proc) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Load average update
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Update the load-average circular buffer.
 ///
@@ -297,9 +283,7 @@ unsafe fn load_update() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Timer interrupt handler
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Timer interrupt handler — called on every clock tick on the BSP.
 ///
@@ -311,10 +295,8 @@ unsafe fn load_update() {
 /// Must only be called from the timer interrupt context.
 pub unsafe fn timer_int_handler() {
     unsafe {
-        // ── Increment monotonic time ──────────────────────────────────
         let mono = MONOTONIC.fetch_add(1, Ordering::Relaxed) + 1;
 
-        // ── Update realtime with adjtime support ──────────────────────
         // Limit adjtime changes to every other tick.
         let delta = ADJTIME_DELTA.load(Ordering::Relaxed);
         if delta != 0 && (mono & 0x1) != 0 {
@@ -330,7 +312,6 @@ pub unsafe fn timer_int_handler() {
             REALTIME.fetch_add(1, Ordering::Relaxed);
         }
 
-        // ── Update process accounting ─────────────────────────────────
         let p = crate::hal::sched_current_proc() as *mut Proc;
         let billp = crate::hal::sched_bill_proc() as *mut Proc;
 
@@ -375,10 +356,8 @@ pub unsafe fn timer_int_handler() {
             }
         }
 
-        // ── Update load average ─────────────────────────────────────────
         load_update();
 
-        // ── Check for expired watchdog timers ───────────────────────────
         if NEXT_TIMEOUT <= mono {
             let timers = core::ptr::addr_of_mut!(CLOCK_TIMERS);
             tmrs_exptimers(timers, mono, core::ptr::null_mut());
@@ -391,9 +370,7 @@ pub unsafe fn timer_int_handler() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Time conversion utilities
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Convert milliseconds to CPU cycles.
 pub fn ms_2_cpu_time(ms: usize) -> u64 {
@@ -418,9 +395,7 @@ pub fn set_system_hz(hz: u32) {
     SYSTEM_HZ.store(hz, Ordering::Relaxed);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Cycle accounting (architecture-dependent stubs)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Initialize cycle accounting.
 pub fn cycles_accounting_init() {
@@ -448,9 +423,7 @@ pub unsafe fn context_stop_idle() {
     // No-op for now; see `context_stop`.
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Timer initialization stubs
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Initialize the boot CPU timer.
 ///
@@ -471,9 +444,7 @@ pub unsafe fn app_cpu_init_timer(_freq: u32) -> i32 {
     0
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Compile-time size assertions
-// ─────────────────────────────────────────────────────────────────────────
 
 const _: () = {
     let _ = core::mem::transmute::<*mut MinixTimer, [u8; 8]>;
@@ -481,9 +452,7 @@ const _: () = {
     assert!(size_of::<MinixTimer>() == 32);
 };
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

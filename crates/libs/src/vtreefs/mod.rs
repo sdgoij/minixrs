@@ -10,12 +10,10 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-// ── Constants ───────────────────────────────────────────────────────────
 
 pub const NO_INDEX: i32 = -1;
 pub const MAX_INODES: usize = 1024;
 
-// ── Types ───────────────────────────────────────────────────────────────
 
 /// Opaque user data stored in each inode (e.g. a file-handler pointer).
 pub type CbData = usize;
@@ -53,7 +51,6 @@ pub struct FsHooks {
     pub message_hook: Option<fn(msg: &mut [u8; 64]) -> i32>,
 }
 
-// ── Static state ────────────────────────────────────────────────────────
 
 const ZERO_INODE: INode = INode {
     id: 0,
@@ -71,7 +68,6 @@ const ZERO_INODE: INode = INode {
     cbdata: 0,
 };
 
-// ── Newtype wrappers for static state (needed to impl `Sync` on foreign types) ──
 
 /// Wrapper around `UnsafeCell<[INode; MAX_INODES]>` so we can implement `Sync`.
 struct InodeTable(UnsafeCell<[INode; MAX_INODES]>);
@@ -91,7 +87,6 @@ static INODE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Registered hook table.
 static HOOKS: HookStorage = HookStorage(UnsafeCell::new(None));
 
-// ── Helpers ─────────────────────────────────────────────────────────────
 
 fn get_table() -> *mut [INode; MAX_INODES] {
     INODE_TABLE.0.get()
@@ -101,7 +96,6 @@ fn get_hooks_ptr() -> *mut Option<FsHooks> {
     HOOKS.0.get()
 }
 
-// ── Public API ──────────────────────────────────────────────────────────
 
 /// Initialise the inode table, store hooks, create the root inode, and
 /// call the `init_hook` (if set).
@@ -296,7 +290,6 @@ pub fn get_inode(id: u32) -> &'static INode {
     unsafe { &(*get_table())[id as usize] }
 }
 
-// ── Event loop stub ─────────────────────────────────────────────────────
 
 /// Enter the VTreeFS receive-dispatch loop.
 ///
@@ -309,7 +302,6 @@ pub fn start_vtreefs() -> ! {
     loop {}
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -341,13 +333,11 @@ mod tests {
     /// state (UnsafeCell) and cannot tolerate parallel test execution.
     #[test]
     fn vtreefs_all() {
-        // ── init_creates_root ──
         let r = vtreefs_init(null_hooks(), 64, test_root_stat());
         assert_eq!(r, 0);
         assert_eq!(get_root_inode(), 0);
         assert_eq!(INODE_COUNT.load(Ordering::Relaxed), 1);
 
-        // ── add_and_find_inode ──
         vtreefs_init(null_hooks(), 64, test_root_stat());
         let stat = InodeStat {
             mode: 0o100444,
@@ -362,11 +352,9 @@ mod tests {
         assert_eq!(get_inode_name(1), "testfile");
         assert_eq!(get_inode_cbdata(1), 42);
 
-        // ── find_missing ──
         vtreefs_init(null_hooks(), 64, test_root_stat());
         assert_eq!(find_inode(0, "nope"), None);
 
-        // ── first_inode_and_next_sibling ──
         vtreefs_init(null_hooks(), 64, test_root_stat());
         let a = add_inode(0, "a", NO_INDEX, &stat, 0);
         let b = add_inode(0, "b", NO_INDEX, &stat, 0);
@@ -375,7 +363,6 @@ mod tests {
         assert_eq!(next_sibling(b), Some(a));
         assert_eq!(next_sibling(a), None);
 
-        // ── delete_inode_removes_children ──
         vtreefs_init(null_hooks(), 64, test_root_stat());
         let _a = add_inode(0, "a", NO_INDEX, &stat, 0);
         let b = add_inode(0, "b", NO_INDEX, &stat, 0);
@@ -385,7 +372,6 @@ mod tests {
         // b's children were also deleted.
         assert_eq!(find_inode(0, "a"), Some(1));
 
-        // ── init_hook_is_called ──
         static CALLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         fn hook() {
             CALLED.store(true, Ordering::Relaxed);
@@ -397,7 +383,6 @@ mod tests {
         vtreefs_init(hooks, 64, test_root_stat());
         assert!(CALLED.load(Ordering::Relaxed));
 
-        // ── add_inode_table_full ──
         vtreefs_init(null_hooks(), 64, test_root_stat());
         // Fill the table (root already uses slot 0).
         for _ in 1..MAX_INODES {

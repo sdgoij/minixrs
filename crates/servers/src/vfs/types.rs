@@ -339,7 +339,6 @@ impl Default for Scratchpad {
     }
 }
 
-// ── Comm (VFS<->FS communication, from type.h) ─────────────────────────────
 
 /// Communication state between VFS and a filesystem process.
 #[derive(Clone, Copy)]
@@ -360,13 +359,11 @@ impl Default for Comm {
     }
 }
 
-// ── Convenience type aliases ────────────────────────────────────────────
 
 /// File offset (64-bit, used in VFS<->FS messages).
 #[allow(non_camel_case_types)]
 pub type off_t = i64;
 
-// ── Request-layer result types (from request.h) ─────────────────────────
 
 /// Result of a FS create/lookup/readsuper/newnode operation.
 ///

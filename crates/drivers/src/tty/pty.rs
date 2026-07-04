@@ -21,9 +21,7 @@
 use crate::DriverError;
 use core::cell::UnsafeCell;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of PTY pairs.
 pub const NR_PTYS: usize = 4;
@@ -37,8 +35,6 @@ pub const TTYPX_MINOR: u32 = 128;
 /// Output buffer size (bytes from slave→master).
 pub const TTY_OUT_BYTES: usize = 2048;
 
-// ── State flags ──────────────────────────────────────────────────────────
-
 /// TTY side is open/active.
 const TTY_ACTIVE: u8 = 0x01;
 /// PTY (master) side is open/active.
@@ -48,9 +44,7 @@ const TTY_CLOSED: u8 = 0x04;
 /// PTY (master) side has closed down.
 const PTY_CLOSED: u8 = 0x08;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Host trait — callbacks into the TTY server
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Callbacks that the PTY driver calls into the TTY server for input/output
 /// processing, signal delivery, event handling, and grant-based I/O.
@@ -105,9 +99,7 @@ impl PtyHost for NoopHost {
     fn handle_events(&mut self) {}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // PTY state structure
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Per-PTY bookkeeping structure.
 ///
@@ -116,7 +108,6 @@ pub struct Pty {
     /// State flags: TTY_ACTIVE, PTY_ACTIVE, TTY_CLOSED, PTY_CLOSED.
     state: u8,
 
-    // ── Master read (master reading from output buffer) ────────────
     /// Endpoint of the process reading from the master.
     rdcaller: u32,
     /// ID of the suspended read request.
@@ -128,7 +119,6 @@ pub struct Pty {
     /// Bytes transferred so far.
     rdcum: usize,
 
-    // ── Master write (master writing data that goes to slave input) ─
     /// Endpoint of the process writing to the master.
     wrcaller: u32,
     /// ID of the suspended write request.
@@ -140,7 +130,6 @@ pub struct Pty {
     /// Bytes transferred so far.
     wrcum: usize,
 
-    // ── Output buffer (slave→master direction) ─────────────────────
     /// Circular output buffer.
     obuf: [u8; TTY_OUT_BYTES],
     /// Head index (next write position).
@@ -150,7 +139,6 @@ pub struct Pty {
     /// Number of bytes in the output buffer.
     ocount: usize,
 
-    // ── Select/notification ────────────────────────────────────────
     /// Select operations the master is interested in.
     select_ops: u32,
     /// Process to notify on select.
@@ -186,8 +174,6 @@ impl Pty {
         *self = Self::new();
     }
 
-    // ── State query helpers ────────────────────────────────────────
-
     /// Returns `true` if the TTY (slave) side is active.
     pub fn is_tty_active(&self) -> bool {
         self.state & TTY_ACTIVE != 0
@@ -207,8 +193,6 @@ impl Pty {
     pub fn is_pty_closed(&self) -> bool {
         self.state & PTY_CLOSED != 0
     }
-
-    // ── Master-side operations ─────────────────────────────────────
 
     /// Open the master side.
     ///
@@ -379,8 +363,6 @@ impl Pty {
         // No matching request found (C: return EDONTREPLY).
         None
     }
-
-    // ── Slave-side operations (called by the TTY server) ────────────
 
     /// The TTY (slave) side has been opened.
     pub fn slave_open(&mut self) {
@@ -562,8 +544,6 @@ impl Pty {
         self.otail = self.ohead;
     }
 
-    // ── Select ─────────────────────────────────────────────────────
-
     /// Check which select operations are ready on the master side.
     pub fn select_try(&self, ops: u32) -> u32 {
         let mut r = 0;
@@ -624,8 +604,6 @@ impl Pty {
         r
     }
 
-    // ── Internal helpers ───────────────────────────────────────────
-
     /// Transfer bytes from the output buffer to the master reader.
     fn start_transfer(&mut self) {
         loop {
@@ -659,17 +637,13 @@ impl Pty {
     }
 }
 
-// ── Default impl ──────────────────────────────────────────────────────────
-
 impl Default for Pty {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // PTY table — one per pair
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Wrapper around `UnsafeCell<Pty>` that implements `Sync`.
 /// Safe because PTY access is single-threaded (only the TTY server).
@@ -751,9 +725,7 @@ pub unsafe fn pty_init(index: usize) -> &'static mut Pty {
     pp
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

@@ -15,9 +15,7 @@ use core::mem::size_of;
 use crate::r#priv::{PPRIV_ADDR, PRIV, Priv, PrivFlags};
 use crate::proc::*;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Size of the process table in bytes.
 const PROC_TABLE_SIZE: usize = size_of::<Proc>() * NR_PROCS_TOTAL;
@@ -30,9 +28,7 @@ const MAX_NR_TASKS: i32 = 1023;
 /// Maximum generation number.
 pub const EP_MAX_GENERATION: i32 = i32::MAX / EP_GENERATION_SIZE - 1;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Process Table
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Aligned byte array for process table storage.
 #[repr(C, align(64))]
@@ -89,9 +85,7 @@ pub fn proc_addr_const(n: i32) -> *const Proc {
     proc_addr(n) as *const Proc
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Address constants (as functions)
-// ─────────────────────────────────────────────────────────────────────────
 
 pub fn beg_proc_addr() -> *mut Proc {
     unsafe { proc_index(0) }
@@ -105,9 +99,7 @@ pub fn end_proc_addr() -> *mut Proc {
     unsafe { proc_index(NR_PROCS_TOTAL) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Endpoint encoding
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Encode a generation number and process slot into an endpoint.
 pub const fn make_endpoint(r#gen: i32, slot: i32) -> i32 {
@@ -124,9 +116,7 @@ pub const fn endpoint_slot(ep: i32) -> i32 {
     ((ep + MAX_NR_TASKS) & (EP_GENERATION_SIZE - 1)) - MAX_NR_TASKS
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Validity checks
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Check if a process number is valid.
 pub fn is_ok_proc_nr(n: i32) -> bool {
@@ -197,10 +187,9 @@ pub fn endpoint_lookup(ep: i32) -> *mut Proc {
     rp
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Boot image
-// ─────────────────────────────────────────────────────────────────────────
 
+/// Boot-time process descriptor.
 /// Number of boot processes.
 pub const NR_BOOT_PROCS: usize = 17;
 
@@ -291,9 +280,7 @@ pub static BOOT_IMAGE: [BootImage; NR_BOOT_PROCS] = [
     }, // RAMDISK_PROC_NR
 ];
 
-// ─────────────────────────────────────────────────────────────────────────
 // Run queue
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Multi-level run queue.
 ///
@@ -355,9 +342,7 @@ impl RunQueueCell {
 /// Global run queue.
 pub static RUN_QUEUE: RunQueueCell = RunQueueCell::new(RunQueue::new());
 
-// ─────────────────────────────────────────────────────────────────────────
 // proc_init
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Initialize the process table.
 ///
@@ -446,9 +431,7 @@ pub unsafe fn proc_init() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

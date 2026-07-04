@@ -8,7 +8,6 @@
 
 use crate::DriverError;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Number of RAM disk devices.
 pub const RAMDISKS: usize = 6;
@@ -19,7 +18,6 @@ pub const RAMDISK_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
 /// Sector size for RAM disk.
 pub const SECTOR_SIZE: usize = 512;
 
-// ── Device geometry ─────────────────────────────────────────────────────────
 
 /// Geometry of a RAM disk device.
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +46,6 @@ impl Default for RamDiskDev {
     }
 }
 
-// ── Global state ────────────────────────────────────────────────────────────
 
 /// RAM disk device table.
 static mut RAM_DISKS: [RamDiskDev; RAMDISKS] = [RamDiskDev::new(); RAMDISKS];
@@ -59,7 +56,6 @@ static mut RAM_BUF: [u8; RAMDISK_DEFAULT_SIZE] = [0u8; RAMDISK_DEFAULT_SIZE];
 /// Track whether the driver has been initialized.
 static mut RAM_INITIALIZED: bool = false;
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 /// Initialize the RAM disk driver.
 ///

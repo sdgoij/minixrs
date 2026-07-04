@@ -21,9 +21,7 @@ pub const CONFIG_MAX_CPUS: u32 = 1;
 /// Whether real spinlock operations are needed.
 const SPINLOCKS_ACTIVE: bool = CONFIG_SMP && CONFIG_MAX_CPUS > 1;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Spinlock
-// ─────────────────────────────────────────────────────────────────────────
 
 /// A spinlock — busy-wait mutual exclusion primitive.
 ///
@@ -95,9 +93,7 @@ impl Default for Spinlock {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Big Kernel Lock (BKL)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Big Kernel Lock — a global lock serializing kernel entry.
 ///
@@ -126,9 +122,7 @@ pub unsafe fn bkl_unlock() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Macros — matching Minix C `SPINLOCK_DEFINE`, `SPINLOCK_DECLARE`
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Define a new Spinlock static.
 ///
@@ -159,9 +153,7 @@ macro_rules! spinlock_declare {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

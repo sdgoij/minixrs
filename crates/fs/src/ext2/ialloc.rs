@@ -202,7 +202,6 @@ fn free_inode_bit(sp: &mut SuperBlock, bit_returned: u32, is_dir: bool) {
     }
 }
 
-// ── Group finder functions ──
 
 fn find_group_any(sp: &SuperBlock) -> i32 {
     let ngroups = sp.s_groups_count;

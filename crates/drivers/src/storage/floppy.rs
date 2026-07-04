@@ -5,7 +5,6 @@
 //! Supports 360K, 720K, 1.2M, and 1.44M floppy diskettes.
 //! Uses I/O ports 0x3F2–0x3F7 and legacy DMA channel 2.
 
-// ── I/O ports ──────────────────────────────────────────────────────────────
 
 /// Digital output register (motor/drive control).
 pub const DOR: u16 = 0x3F2;
@@ -16,19 +15,16 @@ pub const FDC_DATA: u16 = 0x3F5;
 /// Transfer rate register.
 pub const FDC_RATE: u16 = 0x3F7;
 
-// ── FDC status register bits ───────────────────────────────────────────────
 
 pub const FDC_BUSY: u8 = 0x10;
 pub const FDC_DIR: u8 = 0x40; // 1 = controller ready to send data
 pub const FDC_MASTER: u8 = 0x80; // Data register accessible
 
-// ── DOR bits ───────────────────────────────────────────────────────────────
 
 pub const DOR_MOTOR_SHIFT: u8 = 4;
 pub const DOR_ENABLE_INT: u8 = 0x0C;
 pub const DOR_RESET: u8 = 0x00;
 
-// ── FDC commands ───────────────────────────────────────────────────────────
 
 pub const FDC_SEEK: u8 = 0x0F;
 pub const FDC_READ: u8 = 0xE6;
@@ -39,7 +35,6 @@ pub const FDC_SPECIFY: u8 = 0x03;
 pub const FDC_READ_ID: u8 = 0x4A;
 pub const FDC_FORMAT: u8 = 0x4D;
 
-// ── Status registers returned by controller ────────────────────────────────
 
 pub const ST0: usize = 0;
 pub const ST1: usize = 1;
@@ -48,23 +43,19 @@ pub const ST_CYL: usize = 3;
 pub const ST_HEAD: usize = 4;
 pub const ST_SEC: usize = 5;
 
-// ── ST0 bits ───────────────────────────────────────────────────────────────
 
 pub const ST0_BITS_TRANS: u8 = 0xD8;
 pub const TRANS_ST0: u8 = 0x00;
 pub const ST0_BITS_SEEK: u8 = 0xF8;
 pub const SEEK_ST0: u8 = 0x20;
 
-// ── ST1 bits ───────────────────────────────────────────────────────────────
 
 pub const ST1_BAD_SECTOR: u8 = 0x05;
 pub const ST1_WRITE_PROTECT: u8 = 0x02;
 
-// ── ST2 bits ───────────────────────────────────────────────────────────────
 
 pub const ST2_BAD_CYL: u8 = 0x1F;
 
-// ── DMA ports ──────────────────────────────────────────────────────────────
 
 pub const DMA_ADDR: u16 = 0x004;
 pub const DMA_TOP: u16 = 0x081;
@@ -76,7 +67,6 @@ pub const DMA_INIT: u16 = 0x00A;
 pub const DMA_READ: u8 = 0x46;
 pub const DMA_WRITE: u8 = 0x4A;
 
-// ── Drive constants ────────────────────────────────────────────────────────
 
 pub const NR_DRIVES: usize = 2;
 pub const NR_HEADS: u8 = 2;
@@ -87,7 +77,6 @@ pub const DTL: u8 = 0xFF;
 pub const BASE_SECTOR: u8 = 1;
 pub const HC_SIZE: usize = 2880;
 
-// ── Drive states ──────────────────────────────────────────────────────────
 
 pub const UNCALIBRATED: u8 = 0;
 pub const CALIBRATED: u8 = 1;
@@ -98,7 +87,6 @@ pub const BSY_IDLE: u8 = 0;
 pub const BSY_IO: u8 = 1;
 pub const BSY_WAKEN: u8 = 2;
 
-// ── Error codes ────────────────────────────────────────────────────────────
 
 pub const ERR_SEEK: i32 = -1;
 pub const ERR_TRANSFER: i32 = -2;
@@ -109,7 +97,6 @@ pub const ERR_DRIVE: i32 = -6;
 pub const ERR_WR_PROTECT: i32 = -7;
 pub const ERR_TIMEOUT: i32 = -8;
 
-// ── Density table ──────────────────────────────────────────────────────────
 
 /// Density parameter entry for a floppy diskette/drive combination.
 #[derive(Clone, Copy)]
@@ -229,7 +216,6 @@ pub const TEST_ORDER: [TestOrder; NT - 1] = [
     }, // 360K
 ];
 
-// ── Drive state ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -264,7 +250,6 @@ impl Default for FloppyDrive {
 /// Global floppy drive state.
 static mut FLOPPY_DRIVES: [FloppyDrive; NR_DRIVES] = [FloppyDrive::new(); NR_DRIVES];
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Initialize a floppy drive.
 pub fn floppy_init_drive(drive: usize) {

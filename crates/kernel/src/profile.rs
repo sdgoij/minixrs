@@ -13,9 +13,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::r#priv::PrivFlags;
 use crate::proc::*;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Sample buffer size for statistical profiling.
 pub const SAMPLE_BUFFER_SIZE: usize = 64 * 1024 * 1024; // 64 MB — matches C (64 << 20)
@@ -47,9 +45,7 @@ pub const PROF_RESET: i32 = 3;
 pub const PROF_RTC: i32 = 0;
 pub const PROF_NMI: i32 = 1;
 
-// ─────────────────────────────────────────────────────────────────────────
 // Wrapper types for static mut elimination
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Wrapper for `SprofInfo`.
 pub struct SprofInfoCell(UnsafeCell<SprofInfo>);
@@ -99,9 +95,7 @@ impl CprofProcInfoCell {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Statistical profiling state
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Whether statistical profiling is active.
 pub static SPROFILING: AtomicBool = AtomicBool::new(false);
@@ -133,9 +127,7 @@ pub static SPROF_SAMPLE_BUFFER: SprofSampleBufferCell =
 /// Profiling memory size (set by userspace via sys_sprofile).
 pub static SPROF_MEM_SIZE: AtomicUsize = AtomicUsize::new(0);
 
-// ─────────────────────────────────────────────────────────────────────────
 // Statistical profiling data types
-// ─────────────────────────────────────────────────────────────────────────
 
 /// A single profiling sample (endpoint + program counter).
 #[derive(Debug, Clone, Copy)]
@@ -153,16 +145,12 @@ pub struct SprofProc {
     pub name: [u8; crate::proc::PROC_NAME_LEN],
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Call profiling state
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Number of call profiling processes registered.
 pub static CPROF_PROCS_NO: AtomicUsize = AtomicUsize::new(0);
 
-// ─────────────────────────────────────────────────────────────────────────
 // Call profiling data types
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Call profiling info.
 #[derive(Debug, Clone, Copy, Default)]
@@ -232,9 +220,7 @@ pub static CPROF_PROC_INFO: CprofProcInfoCell = CprofProcInfoCell::new(
     }; 64],
 );
 
-// ─────────────────────────────────────────────────────────────────────────
 // sprofile — start/stop statistical profiling
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Start or stop statistical profiling.
 ///
@@ -264,9 +250,7 @@ pub unsafe fn sprofile(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Profile clock (skeletons — arch-specific)
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Initialize the profiling clock.
 ///
@@ -351,9 +335,7 @@ pub fn stop_profile_clock() {
 #[cfg(not(target_arch = "x86_64"))]
 pub fn stop_profile_clock() {}
 
-// ─────────────────────────────────────────────────────────────────────────
 // sprof_save_sample / sprof_save_proc / profile_sample
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Save a profiling sample to the buffer.
 ///
@@ -467,9 +449,7 @@ pub unsafe fn nmi_sprofile_handler(frame_pc: u64) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Call profiling
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Return the kernel's call profiling table size.
 pub fn profile_get_tbl_size() -> i32 {
@@ -506,9 +486,7 @@ pub unsafe fn profile_register(ctl_ptr: *mut core::ffi::c_void, tbl_ptr: *mut co
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

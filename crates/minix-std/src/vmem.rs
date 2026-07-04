@@ -25,7 +25,6 @@
 #[cfg(target_os = "none")]
 use crate::{Message, MinixErr, VM_PROC_NR, sendrec};
 
-// ── VM call numbers ─────────────────────────────────────────────────────
 
 pub const VM_RQ_BASE: u32 = 0xC00;
 pub const VM_MMAP: u32 = VM_RQ_BASE + 10; // 0xC0A
@@ -33,7 +32,6 @@ pub const VM_MUNMAP: u32 = VM_RQ_BASE + 17; // 0xC11
 pub const VM_BRK: u32 = VM_RQ_BASE + 2; // 0xC02
 pub const VM_MAP_PHYS: u32 = VM_RQ_BASE + 15; // 0xC0F
 
-// ── IPC server call numbers ─────────────────────────────────────────────
 
 pub const IPC_BASE: u32 = 0xD00;
 pub const IPC_SHMGET: u32 = IPC_BASE + 1; // 0xD01
@@ -41,7 +39,6 @@ pub const IPC_SHMAT: u32 = IPC_BASE + 2; // 0xD02
 pub const IPC_SHMDT: u32 = IPC_BASE + 3; // 0xD03
 pub const IPC_SHMCTL: u32 = IPC_BASE + 4; // 0xD04
 
-// ── Memory protection / mapping flags ───────────────────────────────────
 
 pub const PROT_READ: i32 = 0x01;
 pub const PROT_WRITE: i32 = 0x02;
@@ -54,7 +51,6 @@ pub const MAP_FIXED: i32 = 0x10;
 pub const MAP_ANONYMOUS: i32 = 0x20;
 pub const MAP_FAILED: *mut u8 = usize::MAX as *mut u8;
 
-// ── Shared memory flags ─────────────────────────────────────────────────
 
 pub const IPC_CREAT: i32 = 0o001000;
 pub const IPC_EXCL: i32 = 0o002000;
@@ -68,7 +64,6 @@ pub const IPC_PRIVATE: i32 = 0;
 pub const SHM_RDONLY: i32 = 0o010000;
 pub const SHM_RND: i32 = 0o020000;
 
-// ── Message offsets (64-byte message buffer) ───────────────────────────
 
 const OFF_TYPE: usize = 8;
 
@@ -101,9 +96,7 @@ const OFF_SHMCTL_ID: usize = 12; // i32
 const OFF_SHMCTL_CMD: usize = 16; // i32
 const OFF_SHMCTL_BUF: usize = 20; // u64 — buffer pointer
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
     i32::from_ne_bytes(msg[off..off + 4].try_into().unwrap())
@@ -156,9 +149,7 @@ unsafe fn ipc_call(msg: &mut Message) -> Result<i32, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Memory operations (VM protocol)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Map memory pages.
 ///
@@ -234,9 +225,7 @@ pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Shared memory operations (IPC server protocol)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Get or create a shared memory segment.
 ///
@@ -362,9 +351,7 @@ pub unsafe fn shmctl(id: i32, cmd: i32, _buf: *mut u8) -> i32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

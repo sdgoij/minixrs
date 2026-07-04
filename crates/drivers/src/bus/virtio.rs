@@ -20,13 +20,11 @@ use core::ptr::addr_of_mut;
 #[cfg(test)]
 use core::mem::size_of;
 
-// ── Error type ─────────────────────────────────────────────────────────────────
 
 /// Error type for virtio operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtioError;
 
-// ── Constants ──────────────────────────────────────────────────────────────────
 
 /// Register offsets for legacy virtio PCI (I/O port BAR).
 pub const VIRTIO_HOST_F_OFF: u16 = 0x0000;
@@ -63,7 +61,6 @@ pub const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
 /// Maximum number of descriptors per queue.
 const QUEUE_NUM: u16 = 256;
 
-// ── Types ──────────────────────────────────────────────────────────────────────
 
 /// Virtio feature descriptor.
 ///
@@ -166,7 +163,6 @@ pub struct VirtioPhysBuf {
     pub size: u32,
 }
 
-// ── Static vring storage ───────────────────────────────────────────────────────
 //
 // Pre-allocated storage for one virtqueue. Access is always through
 // `core::ptr::addr_of_mut!()` — never create direct references to
@@ -195,7 +191,6 @@ static mut Q0_USED: VringUsed = VringUsed {
 /// opaque data token given via `virtio_to_queue`.
 static mut Q0_DATA: [usize; QUEUE_NUM as usize] = [0; QUEUE_NUM as usize];
 
-// ── I/O port helpers ───────────────────────────────────────────────────────────
 
 /// Write 8 bits to an I/O port.
 #[inline]
@@ -233,7 +228,6 @@ unsafe fn in32(port: u16) -> u32 {
     unsafe { crate::arch_io::inl(port) }
 }
 
-// ── PCI config space access ────────────────────────────────────────────────────
 
 /// Build a PCI configuration address.
 fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
@@ -271,7 +265,6 @@ unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
 }
 
-// ── Virtio register accessors ──────────────────────────────────────────────────
 
 /// Read 32-bit from device register at `offset`.
 pub fn virtio_read32(dev: &VirtioDevice, offset: u16) -> u32 {
@@ -303,7 +296,6 @@ pub fn virtio_write8(dev: &VirtioDevice, offset: u16, val: u8) {
     unsafe { out8(dev.port + offset, val) }
 }
 
-// ── Device-specific reads (with MSI offset compensation) ───────────────────────
 
 /// Device-specific read 32-bit: adds `VIRTIO_DEV_SPECIFIC_OFF` and MSI offset.
 pub fn virtio_sread32(dev: &VirtioDevice, offset: u16) -> u32 {
@@ -323,7 +315,6 @@ pub fn virtio_sread8(dev: &VirtioDevice, offset: u16) -> u8 {
     unsafe { in8(dev.port + off) }
 }
 
-// ── Vring initialization ───────────────────────────────────────────────────────
 
 /// Initialize a vring with the given descriptor table, avail, and used rings.
 ///
@@ -349,7 +340,6 @@ fn vring_init(
     }
 }
 
-// ── Feature helpers ────────────────────────────────────────────────────────────
 
 /// Check if the host supports a specific feature bit.
 pub fn virtio_host_supports(dev: &VirtioDevice, bit: u8) -> bool {
@@ -376,7 +366,6 @@ fn exchange_features(dev: &mut VirtioDevice) {
     virtio_write32(dev, VIRTIO_GUEST_F_OFF, guest_features);
 }
 
-// ── Queue management ───────────────────────────────────────────────────────────
 
 /// Allocate and initialize device queues.
 ///
@@ -427,7 +416,6 @@ pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
     Ok(())
 }
 
-// ── Kick helpers ───────────────────────────────────────────────────────────────
 
 /// Write 16-bit directly to a device port (no borrow).
 #[inline]
@@ -435,7 +423,6 @@ fn virtio_write16_raw(port: u16, offset: u16, val: u16) {
     unsafe { out16(port + offset, val) }
 }
 
-// ── Descriptor chain helpers ───────────────────────────────────────────────────
 
 /// Fill a single vring descriptor from a `VirtioPhysBuf`.
 ///
@@ -479,7 +466,6 @@ fn fill_descriptors(vring: &mut Vring, start: u16, bufs: &[VirtioPhysBuf]) {
     }
 }
 
-// ── Submit / reap ──────────────────────────────────────────────────────────────
 
 /// Submit buffers to queue 0.
 ///
@@ -629,7 +615,6 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
     }
 }
 
-// ── IRQ helpers ────────────────────────────────────────────────────────────────
 
 /// Check if the device has asserted an interrupt.
 ///
@@ -657,7 +642,6 @@ pub fn virtio_irq_disable(_dev: &mut VirtioDevice) {
     // On real hardware, disable the IRQ line at the PIC/IOAPIC.
 }
 
-// ── Device lifecycle ───────────────────────────────────────────────────────────
 
 /// Probe for a virtio device with the given subsystem device ID.
 ///
@@ -791,7 +775,6 @@ pub fn virtio_reset_device(dev: &mut VirtioDevice) {
     dev.initialized = false;
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -822,7 +805,6 @@ mod tests {
         vr
     }
 
-    // ── Constants ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_virtio_constants() {
@@ -848,7 +830,6 @@ mod tests {
         assert_eq!(VIRTIO_PCI_VENDOR, 0x1AF4);
     }
 
-    // ── Type layout ────────────────────────────────────────────────────────
 
     #[test]
     fn test_type_sizes() {
@@ -859,7 +840,6 @@ mod tests {
         assert_eq!(size_of::<VirtioPhysBuf>(), 16);
     }
 
-    // ── Vring initialisation ───────────────────────────────────────────────
 
     #[test]
     fn test_vring_init() {
@@ -905,7 +885,6 @@ mod tests {
         assert_eq!(vr.used.idx, 0);
     }
 
-    // ── Descriptor chain management ────────────────────────────────────────
 
     /// Test that `use_vring_desc` correctly strips the LSB and sets
     /// the WRITE flag.
@@ -1119,7 +1098,6 @@ mod tests {
         assert_eq!(q.free_tail, 0);
     }
 
-    // ── Feature helpers ────────────────────────────────────────────────────
 
     #[test]
     fn test_virtio_host_supports_with_bitmap() {
@@ -1152,7 +1130,6 @@ mod tests {
         assert!(!virtio_host_supports(&dev, 0));
     }
 
-    // ── VirtioError ────────────────────────────────────────────────────────
 
     #[test]
     fn test_virtio_error_is_copy() {
@@ -1168,7 +1145,6 @@ mod tests {
         assert_debug(&e);
     }
 
-    // ── PCI config address builder ─────────────────────────────────────────
 
     #[test]
     fn test_pci_config_addr() {
@@ -1184,7 +1160,6 @@ mod tests {
         assert_eq!(addr, 0x8001_132C);
     }
 
-    // ── Default initialisers ───────────────────────────────────────────────
 
     #[test]
     fn test_vringdesc_default_is_zeroed() {

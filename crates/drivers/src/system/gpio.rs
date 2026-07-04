@@ -15,7 +15,6 @@
 
 use crate::DriverError;
 
-// ── Pin modes ──────────────────────────────────────────────────────────────
 
 /// GPIO pin direction/mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +27,6 @@ pub enum GpioMode {
     AltFn(u8),
 }
 
-// ── Pin state ──────────────────────────────────────────────────────────────
 
 /// Per-pin state.
 #[derive(Clone, Copy)]
@@ -52,7 +50,6 @@ impl GpioPin {
     }
 }
 
-// ── Constants ──────────────────────────────────────────────────────────────
 
 /// Number of GPIO pins supported.
 pub const GPIO_PINS: usize = 128;
@@ -63,7 +60,6 @@ pub const GPIO_BANKS: usize = 4;
 /// Pins per bank.
 pub const PINS_PER_BANK: usize = 32;
 
-// ── BeagleBone-specific pin assignments ────────────────────────────────────
 
 /// Beaglebone USR0 LED (bank 1, pin 21).
 pub const BEAGLEBONE_USR0: usize = gpio_global_pin(1, 21);
@@ -83,7 +79,6 @@ pub const BEAGLEBONE_LCD_EN: usize = gpio_global_pin(0, 27);
 /// Beaglebone USER button (bank 0, pin 26).
 pub const BEAGLEBONE_USER_BTN: usize = gpio_global_pin(0, 26);
 
-// ── Pin numbering helpers ──────────────────────────────────────────────────
 
 /// Compute a global pin number from (bank, pin).
 ///
@@ -100,7 +95,6 @@ pub fn gpio_parse_pin(global: usize) -> Option<(usize, usize)> {
     Some((global / PINS_PER_BANK, global % PINS_PER_BANK))
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 /// GPIO pin state table.
 static mut GPIO_STATE: [GpioPin; GPIO_PINS] = [GpioPin::new(); GPIO_PINS];
@@ -108,7 +102,6 @@ static mut GPIO_STATE: [GpioPin; GPIO_PINS] = [GpioPin::new(); GPIO_PINS];
 /// Owner label for each claimed pin.
 static mut GPIO_OWNER: [[u8; 16]; GPIO_PINS] = [[0u8; 16]; GPIO_PINS];
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Initialize the GPIO driver.
 ///

@@ -24,7 +24,6 @@ use crate::MinixErr;
 #[cfg(target_os = "none")]
 use crate::{Message, PM_PROC_NR, sendrec};
 
-// ── PM call numbers ─────────────────────────────────────────────────────
 
 pub const PM_BASE: u32 = 0x000;
 pub const PM_ITIMER: u32 = PM_BASE + 17; // 0x011
@@ -37,7 +36,6 @@ pub const PM_CLOCK_GETRES: u32 = PM_BASE + 33; // 0x021
 pub const PM_CLOCK_GETTIME: u32 = PM_BASE + 34; // 0x022
 pub const PM_CLOCK_SETTIME: u32 = PM_BASE + 35; // 0x023
 
-// ── Signal numbers ──────────────────────────────────────────────────────
 
 pub const SIGHUP: i32 = 1;
 pub const SIGINT: i32 = 2;
@@ -69,18 +67,15 @@ pub const SA_SIGINFO: i32 = 0x00000004;
 pub const SA_RESTART: i32 = 0x00000008;
 pub const SA_NODEFER: i32 = 0x00000010;
 
-// ── Clock identifiers ───────────────────────────────────────────────────
 
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
 
-// ── Itimers ─────────────────────────────────────────────────────────────
 
 pub const ITIMER_REAL: i32 = 0;
 pub const ITIMER_VIRTUAL: i32 = 1;
 pub const ITIMER_PROF: i32 = 2;
 
-// ── Timespec / Itimerval structures ─────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -96,7 +91,6 @@ pub struct ITimerVal {
     pub it_value: TimeSpec,
 }
 
-// ── Sigaction structure ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -107,7 +101,6 @@ pub struct SigAction {
     pub sa_restorer: Option<unsafe extern "C" fn()>,
 }
 
-// ── Message offsets (64-byte message buffer) ───────────────────────────
 
 const OFF_TYPE: usize = 8;
 
@@ -134,9 +127,7 @@ const OFF_ITIMER_WHICH: usize = 12; // i32
 const OFF_ITIMER_VALUE: usize = 16; // u64 — pointer to ITimerVal
 const OFF_ITIMER_OVALUE: usize = 24; // u64 — pointer to old ITimerVal
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
     i32::from_ne_bytes(msg[off..off + 4].try_into().unwrap())
@@ -176,9 +167,7 @@ unsafe fn pm_call(msg: &mut Message) -> Result<i32, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Clock operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Get the current time for the given clock.
 pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
@@ -272,9 +261,7 @@ pub fn nanosleep(req: &TimeSpec) -> Result<TimeSpec, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Signal operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Send a signal to a process.
 pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
@@ -424,9 +411,7 @@ pub fn alarm(seconds: u32) -> u32 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

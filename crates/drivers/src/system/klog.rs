@@ -18,7 +18,6 @@
 
 use crate::DriverError;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// Size of the circular log buffer (50 KB, matching the original C driver).
 pub const LOG_SIZE: usize = 50 * 1024;
@@ -34,7 +33,6 @@ fn log_inc(n: u32, i: u32) -> u32 {
     (n + i) % (LOG_SIZE as u32)
 }
 
-// ── Device state ────────────────────────────────────────────────────────────
 
 /// Per-device log state.
 ///
@@ -85,7 +83,6 @@ fn log_device(minor: usize) -> *mut LogDevice {
     }
 }
 
-// ── Initialization ─────────────────────────────────────────────────────────
 
 /// Initialize the log driver.
 ///
@@ -107,7 +104,6 @@ pub unsafe fn log_init() {
     }
 }
 
-// ── Data writing (subwrite) ────────────────────────────────────────────────
 
 /// Write data into the circular buffer.
 ///
@@ -181,7 +177,6 @@ unsafe fn subwrite(
     }
 }
 
-// ── Data reading (subread) ─────────────────────────────────────────────────
 
 /// Read data from the circular buffer into a user buffer.
 ///
@@ -221,7 +216,6 @@ unsafe fn subread(log: *mut LogDevice, size: u32, endpt: i32, grant: u32) -> i32
     }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Open a log device.
 ///

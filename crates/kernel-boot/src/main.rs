@@ -154,7 +154,6 @@ pub extern "C" fn kmain() -> ! {
         arch_x86_64::apic::unmask_serial_irq();
     }
 
-    // ── Integration tests or normal boot ────────────────────────────────
     #[cfg(feature = "integration-tests")]
     {
         serial_write("Running integration tests...\r\n");
@@ -427,7 +426,6 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
-        // ── Context switch ───────────────────────────────────────────
         // Save the current process's register state, UNLESS this was an
         // exec_replace (syscall 61), which already set up new register
         // state in p_reg (entry point, stack pointer, RFLAGS). Saving
@@ -469,9 +467,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════
 // Serial I/O — available in all build modes (no-op in test mode)
-// ═════════════════════════════════════════════════════════════════════════
 
 /// Halt the CPU forever (fallback if boot fails).
 #[cfg(not(test))]

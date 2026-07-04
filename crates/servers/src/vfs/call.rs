@@ -61,9 +61,7 @@ fn current_fp() -> Option<&'static mut Fproc> {
     unsafe { (*vfs_global()).fp.as_mut() }
 }
 
-// =============================================================================
 // File operations
-// =============================================================================
 
 /// Perform the `open(name, flags)` system call (O_CREAT *not* set).
 ///
@@ -1658,9 +1656,7 @@ pub fn do_rmdir() -> i32 {
     r
 }
 
-// =============================================================================
 // Permission operations
-// =============================================================================
 
 /// Perform the `access(path, mode)` system call.
 ///
@@ -1824,9 +1820,7 @@ pub fn do_umask() -> i32 {
     old as i32
 }
 
-// =============================================================================
 // Mount operations
-// =============================================================================
 
 /// Perform the `mount(special, path, rwflag, ...)` system call.
 ///
@@ -1849,9 +1843,7 @@ pub fn do_mapdriver() -> i32 {
     crate::vfs::dmap::map_service(core::ptr::null())
 }
 
-// =============================================================================
 // Time operations
-// =============================================================================
 
 /// Perform the `utimens(path, times, flag)` system call (and its friends).
 ///

@@ -20,9 +20,7 @@
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Syscall numbers (from `.refs/minix-3.3.0/minix/include/minix/callnr.h`)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Exit process
 const NR_EXIT: u64 = 0;
@@ -103,9 +101,7 @@ pub unsafe fn exec_replace(path: &[u8]) -> i64 {
     unsafe { syscall1(NR_EXEC_REPLACE, path.as_ptr() as u64) }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Syscall wrappers
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(target_arch = "x86_64")]
 /// Perform a syscall with 0 arguments.
@@ -339,9 +335,7 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
     unsafe { riscv_syscall(nr, a1, a2, a3, a4, a5, a6) }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // POSIX-like primitives
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Exit the current process with the given status code.
 pub fn exit(status: i32) -> ! {
@@ -540,9 +534,7 @@ pub unsafe fn sbrk(increment: isize) -> i64 {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Entry point
-// ═══════════════════════════════════════════════════════════════════════════
 
 // External main function defined by the user program.
 #[cfg(target_os = "none")]
@@ -597,9 +589,7 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Panic handler
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Panic handler — writes the panic message to stderr and aborts.
 #[cfg(all(not(test), target_os = "none"))]
@@ -642,9 +632,7 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Bump allocator
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// A simple bump allocator backed by the `brk` syscall.
 ///
@@ -742,9 +730,7 @@ impl Default for BrkAllocator {
 #[global_allocator]
 static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

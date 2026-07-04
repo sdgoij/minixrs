@@ -31,7 +31,6 @@ fn main() {
     let rust_lld = find_rust_lld();
     let rust_nm = find_rust_nm();
 
-    // ── Build stage 1 (MBR) ──
     let mbr_src = tools_dir.join("mbr.S");
     let mbr_obj = target_dir.join("mbr.o");
     run(
@@ -75,7 +74,6 @@ fn main() {
     fs::remove_file(&mbr_obj).ok();
     println!("mbr.bin: 512 bytes");
 
-    // ── Build stage 2 ──
     let stage2_src = tools_dir.join("stage2.S");
     let stage2_obj = target_dir.join("stage2.o");
     run(
@@ -126,7 +124,6 @@ fn main() {
         fs::metadata(&stage2_bin).unwrap().len()
     );
 
-    // ── Read kernel binary ──
     let kernel = fs::read(&kernel_bin).unwrap_or_else(|_| {
         panic!("kernel.bin not found — build kernel first: just build");
     });
@@ -137,11 +134,9 @@ fn main() {
         kernel_sectors
     );
 
-    // ── Extract kmain address from kernel ELF ──
     let kmain_addr = extract_kmain(&rust_nm, &kernel_elf);
     println!("kmain @ 0x{kmain_addr:x}");
 
-    // ── Find patch locations in stage2 binary ──
     let ker_entry_off = find_sym_offset(&rust_nm, &stage2_elf, "ker_entry", 0x1000);
     let ker_sectors_off = find_sym_offset(&rust_nm, &stage2_elf, "ker_sectors", 0x1000);
     // DAP sector count word is at dap_kernel + 2
@@ -149,7 +144,6 @@ fn main() {
     println!("  ker_entry @ binary offset 0x{ker_entry_off:x}");
     println!("  ker_sectors @ binary offset 0x{ker_sectors_off:x}");
 
-    // ── Patch stage2 with kernel values ──
     let mut stage2 = fs::read(&stage2_bin).unwrap();
     // ker_entry: 8-byte kmain address
     stage2[ker_entry_off..ker_entry_off + 8].copy_from_slice(&(kmain_addr as u64).to_le_bytes());
@@ -161,7 +155,6 @@ fn main() {
         .copy_from_slice(&(kernel_sectors as u16).to_le_bytes());
     fs::write(&stage2_bin, &stage2).unwrap();
 
-    // ── Create disk image ──
     let mut img = File::create(&output).unwrap();
     img.set_len(8 * 1024 * 1024).ok();
 

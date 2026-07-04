@@ -75,7 +75,6 @@ pub fn buf_get() -> (&'static [u8], usize) {
     unsafe { (&BUF[OFF..][..USED], USED) }
 }
 
-// ── Writer adapter for `core::fmt::Write` ──
 
 struct BufWriter;
 

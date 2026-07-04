@@ -19,9 +19,7 @@
 
 #![allow(dead_code)]
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of data store entries.
 pub const NR_DS_KEYS: usize = 64; // 2 * NR_SYS_PROCS (32)
@@ -32,7 +30,6 @@ pub const NR_DS_SUBS: usize = 128; // 4 * NR_SYS_PROCS (32)
 /// Maximum key length.
 pub const DS_MAX_KEYLEN: usize = 64;
 
-// ── Flag bits ────────────────────────────────────────────────────────────
 
 /// Entry is in use.
 pub const DSF_IN_USE: u32 = 0x001;
@@ -63,9 +60,7 @@ const DSF_PRIV_RETRIEVE: u32 = 0x2000;
 #[expect(dead_code)]
 const DSF_PRIV_SUBSCRIBE: u32 = 0x4000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Types
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// A data store entry (maps to C `struct data_store`).
 #[derive(Debug, Clone)]
@@ -137,9 +132,7 @@ pub enum CheckResult {
     NoSubscription,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Static tables (wrapped for Rust 2024 static_mut_refs safety)
-// ═══════════════════════════════════════════════════════════════════════════
 
 use core::cell::UnsafeCell;
 
@@ -191,9 +184,7 @@ impl DsSubsRaw {
 static DS_STORE: DsStoreRaw = DsStoreRaw::new();
 static DS_SUBS: DsSubsRaw = DsSubsRaw::new();
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Internal helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Allocate a new data slot. Returns `None` if the store is full.
 unsafe fn alloc_data_slot() -> Option<*mut DataStore> {
@@ -330,7 +321,6 @@ fn pattern_match(pattern: &[u8], key: &[u8]) -> bool {
     }
 }
 
-// ── Helpers on DataStore ─────────────────────────────────────────────────
 
 impl DataStore {
     /// Return the key as a byte slice (up to the null terminator).
@@ -395,9 +385,7 @@ impl Subscription {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Check subscription match
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Check if an entry matches a subscription.
 ///
@@ -420,9 +408,7 @@ unsafe fn check_sub_match(subp: &Subscription, dsp: &DataStore) -> bool {
     pattern_match(&pat_slice[..pat_len], dsp.key_as_slice())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Update subscribers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Set or clear bits in subscriber bitmaps for a changed entry.
 /// When `set` is true, marks the entry as changed; when false, clears.
@@ -452,9 +438,7 @@ unsafe fn update_subscribers(entry_idx: usize, set: bool) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Initialize / Reset
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Initialize (or reset) the data store. Clears all entries and subscriptions.
 ///
@@ -476,9 +460,7 @@ pub unsafe fn ds_init() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Published operations (do_*)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Publish a U32 value under the given key.
 ///
@@ -820,9 +802,7 @@ unsafe fn ds_getprocname_by_name(name: &[u8]) -> Option<i32> {
     None
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Server main loop (stub — see Phase 12)
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// DS server main loop.
 ///
@@ -914,9 +894,7 @@ pub fn ds_server_main() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,5 @@
 //! Device major/minor numbers from `minix/dmap.h`
 
-// ── Major device numbers ────────────────────────────────────────────────
 
 pub const NONE_MAJOR: u32 = 0;
 pub const MEMORY_MAJOR: u32 = 1;
@@ -65,7 +64,6 @@ pub const USB_BASE_MAJOR: u32 = 65;
 /// Number of (major) devices.
 pub const NR_DEVICES: u32 = 134;
 
-// ── Memory driver minor numbers ─────────────────────────────────────────
 
 pub const RAM_DEV_OLD: u32 = 0;
 pub const MEM_DEV: u32 = 1;
@@ -76,11 +74,9 @@ pub const ZERO_DEV: u32 = 5;
 pub const IMGRD_DEV: u32 = 6;
 pub const RAM_DEV_FIRST: u32 = 7;
 
-// ── Log driver minor numbers ────────────────────────────────────────────
 
 pub const IS_KLOG_DEV: u32 = 0;
 
-// ── Full device numbers ─────────────────────────────────────────────────
 
 /// Device number of /dev/ram.
 pub const DEV_RAM: u32 = 0x0100;
@@ -88,7 +84,6 @@ pub const DEV_RAM: u32 = 0x0100;
 /// Device number of /dev/imgrd.
 pub const DEV_IMGRD: u32 = 0x0106;
 
-// ── Controller-to-IRQ mapping ───────────────────────────────────────────
 
 /// Magic formula mapping controller index to IRQ number.
 pub const fn ctrlr(n: u32) -> u32 {

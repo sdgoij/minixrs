@@ -340,7 +340,6 @@ pub fn fs_putnode() -> i32 {
     }
 }
 
-// ── Private helpers ──
 
 unsafe fn remove_from_unused(idx: u16) {
     let n = ino_mut(idx);

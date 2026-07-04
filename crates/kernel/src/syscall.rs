@@ -81,7 +81,7 @@ pub unsafe fn dispatch_basic_syscall(
     }
 }
 
-// ── Handlers ───────────────────────────────────────────────────────────
+// Syscall handlers (table in syscall_map)
 
 /// SYS_read (2) — read from file descriptor.
 unsafe fn sys_read_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
@@ -123,7 +123,7 @@ unsafe fn sys_getpid_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -
     unsafe { (*caller).p_endpoint as i64 }
 }
 
-// ── Pending exit notification queue ───────────────────────────────────
+// Pending exit notification queue
 // When a process exits via sys_exit_handler, the kernel stores the exit
 // info here and notifies PM via mini_notify. PM reads the queue to find
 // which process exited and with what status.
@@ -399,7 +399,7 @@ unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
     unsafe { vfs_ipc_call(caller, 0x11D, fd, count, 0) }
 }
 
-// ── IPC syscall handlers (46-49) ────────────────────────────────────
+// IPC syscall handlers (46-49)
 
 /// SYS_IPC_SEND (46) — send a message to a process.
 unsafe fn sys_ipc_send_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
@@ -575,7 +575,7 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
-        // ─── Build new page table (arch-specific) ───────────────────
+        // Build new page table (arch-specific)
         //
         // HACK: The first x86_64 `let _ = { ... }` block (allocs PML4/PDPT/PD
         // + copies boot entries) was originally shadowed by the second block

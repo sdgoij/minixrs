@@ -62,7 +62,6 @@ pub mod types;
 pub mod utility;
 pub mod write;
 
-// ── Re-exports of all public functions from submodules ──
 
 pub use cache::*;
 pub use inode::*;

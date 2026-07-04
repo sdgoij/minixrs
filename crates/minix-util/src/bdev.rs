@@ -9,7 +9,6 @@ use minix_std::MinixErr;
 
 type Message = [u8; 64];
 
-// ── BDEV message types (from arch_common::com) ────────────────────────
 
 const BDEV_RQ_BASE: u32 = 0x500;
 const BDEV_OPEN: u32 = BDEV_RQ_BASE;
@@ -26,7 +25,6 @@ const BDEV_R_BIT: u32 = 0x01;
 const BDEV_W_BIT: u32 = 0x02;
 const BDEV_NOFLAGS: u32 = 0x00;
 
-// ── Message field offsets (MINIX driver message format) ───────────────
 // Standard driver message layout:
 //   m_type    = offset 0  (i32) — request/reply type
 //   m2_i1     = offset 8  (i32) — minor device number
@@ -42,9 +40,7 @@ const OFF_GRANT: usize = 16; // i64: grant ID for data transfer
 const OFF_COUNT: usize = 24; // i64: byte count
 const OFF_ADDR: usize = 32; // i64: buffer address / position
 
-// ═══════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════
 
 fn msg_set_i32(msg: &mut Message, off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
@@ -82,9 +78,7 @@ fn check_result(msg: &Message) -> Result<i32, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Public API
-// ═══════════════════════════════════════════════════════════════════════
 
 /// Open a block device.
 ///
@@ -182,9 +176,7 @@ pub fn bdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Resul
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

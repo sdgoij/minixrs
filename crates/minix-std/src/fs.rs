@@ -29,9 +29,7 @@
 use crate::sendrec;
 use crate::{MinixErr, VFS_PROC_NR};
 
-// ═══════════════════════════════════════════════════════════════════════════
 // VFS call numbers
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const VFS_BASE: u32 = 0x100;
 
@@ -50,9 +48,7 @@ pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Open flags  (from `minix/include/fcntl.h`)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const O_RDONLY: i32 = 0o00;
 pub const O_WRONLY: i32 = 0o01;
@@ -65,17 +61,13 @@ pub const O_APPEND: i32 = 0o2000;
 pub const O_NONBLOCK: i32 = 0o4000;
 pub const O_SYNC: i32 = 0o10000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Seek whence constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 pub const SEEK_END: i32 = 2;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // File type constants (for st_mode in Stat)
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub const S_IFMT: u32 = 0o170000;
 pub const S_IFSOCK: u32 = 0o140000;
@@ -86,9 +78,7 @@ pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFIFO: u32 = 0o010000;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Stat structure
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// File status structure (mirrors POSIX `stat`).
 #[repr(C)]
@@ -108,9 +98,7 @@ pub struct Stat {
     pub st_ctime: i64,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Message field offsets (64-byte message buffer)
-// ═══════════════════════════════════════════════════════════════════════════
 
 // For VFS calls, the message layout is:
 //   offset 0:  dest endpoint (i32) — set by sendrec
@@ -120,7 +108,6 @@ pub struct Stat {
 
 const OFF_TYPE: usize = 8;
 
-// ── VFS_OPEN / VFS_CREAT ──────────────────────────────────────────────────
 //   offset 12: name pointer (u64)
 //   offset 20: name length (i32)
 //   offset 24: flags (i32)   — O_RDONLY, O_WRONLY, etc.
@@ -131,7 +118,6 @@ const OFF_OPEN_NAME_LEN: usize = 20;
 const OFF_OPEN_FLAGS: usize = 24;
 const OFF_OPEN_MODE: usize = 28;
 
-// ── VFS_READ / VFS_WRITE ──────────────────────────────────────────────────
 //   offset 12: fd (i32)
 //   offset 16: buf pointer (u64)
 //   offset 24: nbytes (u64)   — number of bytes
@@ -142,12 +128,10 @@ const OFF_RW_BUF: usize = 16;
 const OFF_RW_NBYTES: usize = 24;
 const OFF_RW_POSITION: usize = 32;
 
-// ── VFS_CLOSE ─────────────────────────────────────────────────────────────
 //   offset 12: fd (i32)
 
 const OFF_CLOSE_FD: usize = 12;
 
-// ── VFS_LSEEK ─────────────────────────────────────────────────────────────
 //   offset 12: fd (i32)
 //   offset 16: offset (i64)
 //   offset 24: whence (i32)
@@ -156,14 +140,12 @@ const OFF_LSEEK_FD: usize = 12;
 const OFF_LSEEK_OFFSET: usize = 16;
 const OFF_LSEEK_WHENCE: usize = 24;
 
-// ── VFS_STAT / VFS_FSTAT ──────────────────────────────────────────────────
 //   offset 12: name/fd (i32) — fd for fstat, name pointer for stat
 //   offset 16: stat buffer (u64) — pointer to stat struct in caller's space
 
 const OFF_STAT_NAME_FD: usize = 12;
 const OFF_STAT_BUF: usize = 16;
 
-// ── VFS_IOCTL ─────────────────────────────────────────────────────────────
 //   offset 12: fd (i32)
 //   offset 16: request (u32) — ioctl request code
 //   offset 20: arg pointer (u64)
@@ -172,7 +154,6 @@ const OFF_IOCTL_FD: usize = 12;
 const OFF_IOCTL_REQ: usize = 16;
 const OFF_IOCTL_ARG: usize = 20;
 
-// ── VFS_GETDENTS ──────────────────────────────────────────────────────────
 //   offset 12: fd (i32)
 //   offset 16: buf pointer (u64)
 //   offset 24: nbytes (u64)
@@ -181,7 +162,6 @@ const OFF_GETDENTS_FD: usize = 12;
 const OFF_GETDENTS_BUF: usize = 16;
 const OFF_GETDENTS_NBYTES: usize = 24;
 
-// ── VFS_SELECT ────────────────────────────────────────────────────────────
 //   offset 12: nfds (i32)
 //   offset 16: fd_set pointer (u64) — readfds
 //   offset 24: fd_set pointer (u64) — writefds
@@ -190,16 +170,13 @@ const OFF_SELECT_NFDS: usize = 12;
 const OFF_SELECT_READFDS: usize = 16;
 const OFF_SELECT_WRITEFDS: usize = 24;
 
-// ── VFS_FSYNC / VFS_TRUNCATE ──────────────────────────────────────────────
 //   offset 12: fd (i32)
 //   offset 16: length (i64) — only for VFS_TRUNCATE
 
 const OFF_FD_ONLY: usize = 12;
 const OFF_TRUNC_LENGTH: usize = 16;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Read an i32 from a message buffer at the given offset.
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
@@ -241,9 +218,7 @@ fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
     msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Internal: send a VFS request and check the result
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Perform a VFS `sendrec` and validate the response m_type.
 ///
@@ -260,9 +235,7 @@ unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // File descriptor operations
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Open a file.
 ///
@@ -489,9 +462,7 @@ pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

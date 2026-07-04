@@ -10,9 +10,7 @@
 
 use crate::DriverError;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // I2C Bus Trait
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Abstract I2C bus operations.
 pub trait I2cBus {
@@ -47,9 +45,7 @@ impl I2cBus for MockI2c {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Constants
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of devices this driver handles.
 pub const NR_DEVS: usize = 1;
@@ -61,14 +57,12 @@ pub const HDMI_ADDR: u8 = 0x70;
 /// Standard EDID block length.
 pub const EDID_LEN: usize = 128;
 
-// ── CEC Registers ─────────────────────────────────────────────────────────
 
 pub const CEC_STATUS_REG: u8 = 0xfe;
 pub const CEC_STATUS_CONNECTED_MASK: u8 = 0x02;
 pub const CEC_ENABLE_REG: u8 = 0xff;
 pub const CEC_ENABLE_ALL_MASK: u8 = 0x87;
 
-// ── HDMI Pages ────────────────────────────────────────────────────────────
 
 pub const HDMI_CTRL_PAGE: u8 = 0x00;
 pub const HDMI_PPL_PAGE: u8 = 0x02;
@@ -79,7 +73,6 @@ pub const HDMI_HDCP_OTP_PAGE: u8 = 0x12;
 pub const HDMI_GAMUT_PAGE: u8 = 0x13;
 pub const HDMI_PAGELESS: u8 = 0xff;
 
-// ── Control Page Registers ────────────────────────────────────────────────
 
 pub const HDMI_CTRL_REV_LO_REG: u8 = 0x00;
 pub const HDMI_CTRL_REV_HI_REG: u8 = 0x02;
@@ -94,7 +87,6 @@ pub const HDMI_CTRL_INTR_EN_GLO_MASK: u8 = 0x04;
 pub const HDMI_CTRL_INT_REG: u8 = 0x11;
 pub const HDMI_CTRL_INT_EDID_MASK: u8 = 0x02;
 
-// ── EDID Page Registers ───────────────────────────────────────────────────
 
 pub const HDMI_EDID_DATA_REG: u8 = 0x00;
 pub const HDMI_EDID_DEV_ADDR_REG: u8 = 0xfb;
@@ -108,24 +100,19 @@ pub const HDMI_EDID_SEG_ADDR: u8 = 0x00;
 pub const HDMI_EDID_REQ_REG: u8 = 0xfa;
 pub const HDMI_EDID_REQ_READ_MASK: u8 = 0x01;
 
-// ── HDCP & OTP Registers ──────────────────────────────────────────────────
 
 pub const HDMI_HDCP_OTP_DDC_CLK_REG: u8 = 0x9a;
 pub const HDMI_HDCP_OTP_DDC_CLK_MASK: u8 = 0x27;
 pub const HDMI_HDCP_OTP_SOME_REG: u8 = 0x9b;
 pub const HDMI_HDCP_OTP_SOME_MASK: u8 = 0x02;
 
-// ── Pageless Register ─────────────────────────────────────────────────────
 
 pub const HDMI_PAGE_SELECT_REG: u8 = 0xff;
 
-// ── Revision ───────────────────────────────────────────────────────────────
 
 pub const HDMI_REV_TDA19988: u16 = 0x0331;
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Driver
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// TDA19988 HDMI encoder driver parameterized over an I2C bus backend.
 pub struct Tda19988Driver<B: I2cBus> {
@@ -226,9 +213,7 @@ impl<B: I2cBus> Tda19988Driver<B> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

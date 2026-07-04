@@ -8,7 +8,6 @@
 
 use crate::DriverError;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// TI1225 vendor ID (Texas Instruments).
 pub const TI1225_VENDOR: u16 = 0x104C;
@@ -19,7 +18,6 @@ pub const TI1225_DEVICE: u16 = 0xAC1E;
 /// Number of CardBus sockets supported (TI1225 has 2).
 pub const TI1225_SOCKETS: usize = 2;
 
-// ── TI1225 registers (PCI config space offsets) ────────────────────────────
 
 /// System Control register.
 pub const TI1225_SYSTEM_CONTROL: u8 = 0x80;
@@ -45,7 +43,6 @@ pub const TI1225_MEM0_START: u8 = 0xA0;
 /// ExCA I/O Window 0 Start (per socket).
 pub const TI1225_IO0_START: u8 = 0xA4;
 
-// ── Register bit definitions ───────────────────────────────────────────────
 
 /// System Control: reset the bridge.
 pub const TI1225_CTRL_RESET: u32 = 0x0000_0001;
@@ -83,7 +80,6 @@ pub const TI1225_VS1: u32 = 0x0000_0020;
 /// Voltage sense 2 (bit 6).
 pub const TI1225_VS2: u32 = 0x0000_0040;
 
-// ── Socket state ───────────────────────────────────────────────────────────
 
 /// State of a single CardBus socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -150,13 +146,11 @@ impl Ti1225State {
     }
 }
 
-// ── Global state ───────────────────────────────────────────────────────────
 
 /// TI1225 bridge instances (max 4 bridges).
 static mut TI1225_BRIDGES: [Ti1225State; 4] = [Ti1225State::new(); 4];
 static mut TI1225_BRIDGE_COUNT: usize = 0;
 
-// ── PCI config access ─────────────────────────────────────────────────────
 
 unsafe fn ti_pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
@@ -166,7 +160,6 @@ unsafe fn ti_pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
     unsafe { crate::arch_io::pci_cfg_write32(bus, dev, func, reg, val) }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Initialize a TI1225 bridge.
 ///

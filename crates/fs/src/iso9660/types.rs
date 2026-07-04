@@ -40,7 +40,6 @@ pub struct DirRecord {
     /// Pointer to extended attributes (in-memory only).
     pub ext_attr: *mut ExtAttrRec,
 
-    // ── Memory-only fields ──
     /// Reference count.
     pub d_count: u8,
     /// File mode (type + permissions).
@@ -163,7 +162,6 @@ pub struct Iso9660VdPri {
     pub count: i32,
 }
 
-// ── Volume descriptor type constants ──
 pub const VD_BOOT_RECORD: u8 = 0;
 pub const VD_PRIMARY: u8 = 1;
 pub const VD_SUPPL: u8 = 2;
