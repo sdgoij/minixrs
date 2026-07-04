@@ -49,14 +49,14 @@ These run **inside QEMU** as Phase H, using the same `run()`/`TestCtx` harness:
 |----------|-------|-----------|
 | **ELF** (3) | `ehdr_size`, `phdr_size`, `elf_constants` | Struct sizes, ELF magic/machine constants |
 | **CPIO** (1) | `cpio_parse_simple` | CPIO archive construction and parsing |
-| **IPC** (5) | `mini_send_direct`, `mini_send_queue`, `mini_notify`, `sendrec_direct`, `sendrec_reply_cycle` | Direct delivery, queueing, notify; SENDREC send-half; full SENDREC→reply roundtrip with reversibility |
+| **IPC** (6) | `mini_send_direct`, `mini_send_queue`, `mini_notify`, `sendrec_direct`, `sendrec_reply_cycle`, `vfs_mfs_ipc` | Direct delivery, queueing, notify; SENDREC send-half; full SENDREC→reply roundtrip; VFS→MFS REQ_READSUPER protocol roundtrip via in-kernel dispatch |
 | **Process Table** (6) | `proc_addr_tasks`, `proc_addr_oob`, `endpoint_encoding`, `endpoint_lookup`, `is_ok_proc_nr`, `is_kernel_nr` | Slot addressing, endpoint roundtrip, bounds checks |
 | **Timer** (1) | `tmr_never` | TMR_NEVER == u64::MAX |
 | **Scheduler** (4) | `enqueue_dequeue`, `sched_priority`, `sched_round_robin`, `sched_proc_no_time` | Run-queue enqueue/dequeue; priority ordering; round-robin cycling; proc_no_time preemption with NO_QUANTUM and notify_scheduler |
 | **Privilege** (2) | `priv_default`, `priv_flags` | Priv struct default fields |
 | **Process** (2) | `proc_size`, `proc_ptr_ok` | Proc struct size ≤ 1024, PMAGIC validation |
 
-**Total: 23 QEMU-compatible kernel tests**
+**Total: 24 QEMU-compatible kernel tests**
 
 ---
 
@@ -227,7 +227,7 @@ All gated on `target_os = "none"` (compile-only on host).
 | Domain | Count | Notes |
 |--------|-------|-------|
 | **QEMU integration** (A–O) | **40 tests** | Hardware validation (unchanged) |
-| **Kernel QEMU-compatible** (Phase H) | **23 tests** | Pure-logic kernel tests running in QEMU (incl. proc_no_time preemption) |
+| **Kernel QEMU-compatible** (Phase H) | **24 tests** | Pure-logic kernel tests running in QEMU (incl. VFS→MFS IPC protocol) |
 | **Host — arch-common** | ~55 | Type layouts, ABI constants, IPC message formats |
 | **Host — arch-x86_64** | ~125 | Allocator, APIC, paging, IDT, cpulocals, asm ops |
 | **Host — arch-riscv64** | ~24 | Allocator, PTE, SBI, PLIC, CLINT, cpulocals |
@@ -243,7 +243,7 @@ All gated on `target_os = "none"` (compile-only on host).
 | **Host — libs** | ~14 | libminixfs block cache, VTreeFS |
 | **Host — net** | 1 | Placeholder |
 | **Host total** | **~690 tests** | All crates combined |
-| **Grand total** | **~799 tests** | Host + QEMU (+61 tests from gap-filling) |
+| **Grand total** | **~800 tests** | Host + QEMU (+62 tests from gap-filling) |
 
 ---
 
@@ -303,7 +303,7 @@ The following gaps from the original analysis have been filled:
 | Area | Gap | Risk |
 |------|-----|------|
 | **Scheduler preemption (proc_no_time + notify_scheduler)** | Added `test_sched_proc_no_time_preempts` to `kernel/src/tests.rs` | Proves proc_no_time with PREEMPTIBLE sets NO_QUANTUM, dequeues process, pick_proc returns next; all-blocked returns None; round-robin cycling after quantum renewal |
-| **VFS↔MFS IPC** | No QEMU or integration test | **High** — M5 |
+| **VFS↔MFS IPC** | Added `test_vfs_mfs_ipc_roundtrip` to `kernel/src/tests.rs` | Registers MFS dispatch handler, sends REQ_READSUPER via do_sync_ipc, handler parses request and returns valid response (root inode=1, mode=0x41FF, file_size=0), caller verifies all fields |
 | **Network** | 1 placeholder test | Phase 16 not started |
 | **Live Update** | No tests | Phase 15 not started |
 | **RISC-V64 integration** | M1R prints banner; no test suite analogous to Phases A–L | Medium |

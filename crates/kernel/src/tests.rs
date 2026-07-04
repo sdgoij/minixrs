@@ -127,13 +127,13 @@ fn test_cpio_parse_simple(ctx: &mut TestCtx) {
 
     archive[pos..pos + path.len()].copy_from_slice(path);
     pos += path.len();
-    while pos % 4 != 0 {
+    while !pos.is_multiple_of(4) {
         pos += 1;
     }
 
     archive[pos..pos + data.len()].copy_from_slice(data);
     pos += data.len();
-    while pos % 4 != 0 {
+    while !pos.is_multiple_of(4) {
         pos += 1;
     }
 
@@ -149,7 +149,7 @@ fn test_cpio_parse_simple(ctx: &mut TestCtx) {
     archive[pos - 8..pos].copy_from_slice(b"00000000");
     archive[pos..pos + trailer.len()].copy_from_slice(trailer);
     pos += trailer.len();
-    while pos % 4 != 0 {
+    while !pos.is_multiple_of(4) {
         pos += 1;
     }
 
@@ -931,6 +931,124 @@ fn test_proc_ptr_ok(ctx: &mut TestCtx) {
     ctx.assert(p.ptr_ok(), "Proc with PMAGIC must pass ptr_ok");
 }
 
+fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
+    unsafe {
+        // Register an MFS dispatch handler that handles REQ_READSUPER
+        // VFS→MFS message format (from servers/src/vfs/request.rs):
+        //   m_type at offset 4: REQ_READSUPER = FS_BASE + 28 = 0xA10 + 28 = 0xA1C
+        //   PAYLOAD_OFF (8):    device (u32)
+        //   PAYLOAD_OFF + 4:    flags (u32)
+        //   PAYLOAD_OFF + 8:    label_len (u64)
+        //   PAYLOAD_OFF + 24:   grant_id (i32)
+        //
+        // MFS→VFS reply format:
+        //   m_type at offset 4: status (0 = OK)
+        //   PAYLOAD_OFF (8):    file_size (i64)
+        //   PAYLOAD_OFF + 8:    dev (u32)
+        //   PAYLOAD_OFF + 12:   inode_nr (u32)
+        //   PAYLOAD_OFF + 16:   flags (u32)
+        //   PAYLOAD_OFF + 20:   mode (u16)
+        fn mfs_readsuper_handler(
+            _caller: *mut crate::proc::Proc,
+            msg: &mut [u8; crate::proc::MESSAGE_SIZE],
+        ) -> i32 {
+            // Parse the request
+            let req_type = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+            let _device = u32::from_ne_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+            let flags = u32::from_ne_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
+            let _label_len = u64::from_ne_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+
+            // Verify it's a REQ_READSUPER
+            if req_type != 0xA1C {
+                msg[4..8].copy_from_slice(&(-5i32).to_ne_bytes()); // EIO
+                return 0;
+            }
+
+            // Build response: simulate a successful root filesystem mount
+            // Root inode: inode_nr=1, mode=directory(0x41FF), file_size=0, dev=matching, flags=0
+            let is_root = (flags & 2) != 0; // REQ_ISROOT = 2
+            let inode_nr: u32 = if is_root { 1 } else { 2 };
+            let mode: u16 = 0x41FF; // I_DIRECTORY | 0755
+            let file_size: i64 = 0;
+
+            msg[4..8].copy_from_slice(&0i32.to_ne_bytes()); // status = OK
+            msg[8..16].copy_from_slice(&file_size.to_ne_bytes()); // file_size
+            msg[16..20].copy_from_slice(&0u32.to_ne_bytes()); // dev
+            msg[20..24].copy_from_slice(&inode_nr.to_ne_bytes()); // inode_nr
+            msg[24..28].copy_from_slice(&0u32.to_ne_bytes()); // flags
+            msg[28..30].copy_from_slice(&mode.to_ne_bytes()); // mode
+            0
+        }
+
+        // Use MFS_PROC_NR = 5 (from boot_init.rs: ("/sbin/mfs", MFS_PROC_NR))
+        const MFS_PROC_NR: i32 = 5;
+
+        // Register the MFS handler
+        let registered = crate::ipc::register_server_dispatch(MFS_PROC_NR, mfs_readsuper_handler);
+        ctx.assert(registered, "register_server_dispatch for MFS must succeed");
+
+        // Set up a caller process (simulating VFS)
+        let caller = make_test_proc(117);
+        if caller.is_null() {
+            ctx.assert(false, "make_test_proc for VFS caller failed");
+            return;
+        }
+        let _caller_ep = (*caller).p_endpoint;
+
+        // Build a REQ_READSUPER message (VFS→MFS mount request)
+        // Format matches req_readsuper in servers/src/vfs/request.rs
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+
+        // Bytes 0-3: destination endpoint (MFS_PROC_NR)
+        msg[0..4].copy_from_slice(&MFS_PROC_NR.to_le_bytes());
+        // Bytes 4-7: m_type = REQ_READSUPER = 0xA1C
+        msg[4..8].copy_from_slice(&0xA1Ci32.to_le_bytes());
+        // Byte 8-11: device = 1 (root device)
+        msg[8..12].copy_from_slice(&1u32.to_le_bytes());
+        // Byte 12-15: flags = REQ_ISROOT (2) | REQ_RDONLY (1) = 3
+        msg[12..16].copy_from_slice(&3u32.to_le_bytes());
+        // Byte 16-23: label_len = 0
+        msg[16..24].copy_from_slice(&0u64.to_le_bytes());
+        // Byte 24-27: grant_id = 0 (no label)
+        msg[24..28].copy_from_slice(&0i32.to_le_bytes());
+
+        // Send the message via do_sync_ipc (SENDREC to MFS)
+        let result = crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC);
+        ctx.assert(result == 0, "do_sync_ipc SENDREC to MFS must return OK");
+
+        // Parse the response
+        let status = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0xFF; 4]));
+        ctx.assert(status == 0, "MFS mount response status must be OK (0)");
+
+        let inode_nr = u32::from_ne_bytes(msg[20..24].try_into().unwrap_or([0; 4]));
+        ctx.assert(inode_nr == 1, "MFS root inode must be 1");
+
+        let mode = u16::from_ne_bytes(msg[28..30].try_into().unwrap_or([0; 2]));
+        // 0x41FF = I_DIRECTORY | 0x1FF (0777 permissions)
+        ctx.assert(
+            mode == 0x41FF,
+            "MFS root inode mode must be directory (0x41FF)",
+        );
+
+        let file_size = i64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0xFF; 8]));
+        ctx.assert(file_size == 0, "MFS root inode file_size must be 0");
+
+        // Caller is still runnable after SENDREC — the in-kernel dispatch
+        // handler processed both the send and receive halves of SENDREC
+        // atomically, so the caller doesn't need to wait for a separate reply.
+        let caller_rts = (*caller).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            caller_rts == 0,
+            "VFS caller must be runnable after in-kernel MFS dispatch",
+        );
+
+        // Clean up
+        (*caller)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
 /// Run all kernel unit tests inside QEMU. Returns the number of failures (0 = all passed).
 pub fn run_all() -> u32 {
     let mut total: u32 = 0;
@@ -960,6 +1078,7 @@ pub fn run_all() -> u32 {
     total += run("sched_priority", test_sched_priority_ordering);
     total += run("sched_round_robin", test_sched_round_robin);
     total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
+    total += run("vfs_mfs_ipc", test_vfs_mfs_ipc_roundtrip);
 
     total += run("priv_default", test_priv_default_proc_nr);
     total += run("priv_flags", test_priv_flags_empty);
