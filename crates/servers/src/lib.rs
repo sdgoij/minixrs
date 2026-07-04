@@ -8,6 +8,7 @@ pub mod ds;
 pub mod ipc;
 pub mod mutex;
 pub mod pm;
+pub mod ramdisk;
 pub mod rs;
 pub mod sched;
 pub mod tty;

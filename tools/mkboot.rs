@@ -15,11 +15,14 @@ fn main() {
     // Parse optional --features argument (e.g. "embed_initramfs,integration-tests")
     let extra_features: Vec<String> = std::env::args().skip(1).collect();
     let features = if extra_features.is_empty() {
-        "embed_initramfs".to_string()
+        "embed_initramfs,embed_minixfs".to_string()
     } else {
         let mut all = extra_features.join(",");
         if !all.contains("embed_initramfs") {
             all = format!("embed_initramfs,{}", all);
+        }
+        if !all.contains("embed_minixfs") {
+            all = format!("{},embed_minixfs", all);
         }
         all
     };
@@ -46,6 +49,25 @@ fn main() {
         .expect("mkinitramfs failed");
     assert!(status.success());
     println!("initramfs built.");
+
+    // 1b. Build the Minix FS image (needs binaries from initramfs)
+    println!("Building Minix FS image...");
+    let mkminixfs = workspace.join("target").join("mkminixfs.exe");
+    std::fs::remove_file(&mkminixfs).ok();
+    let status = Command::new("rustc")
+        .args([
+            workspace.join("tools/mkminixfs.rs").to_str().unwrap(),
+            "--edition",
+            "2021",
+            "-o",
+            &mkminixfs.to_string_lossy(),
+        ])
+        .status()
+        .expect("rustc mkminixfs failed");
+    assert!(status.success());
+    let status = Command::new(&mkminixfs).status().expect("mkminixfs failed");
+    assert!(status.success());
+    println!("Minix FS image built.");
 
     // 2. Build the kernel with cargo
     let status = Command::new("rustup")

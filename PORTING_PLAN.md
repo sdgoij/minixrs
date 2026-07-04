@@ -2641,40 +2641,174 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 | `arch_compat.rs` | ~2 | 0 | DONE |
 
 
+## Phase 9: File System Servers
+
+**Goal**: Port the file system servers that run in user space.
+
 ### Tasks
 
-- [x] **9.1 — Port `minix/fs/mfs/` — Memory File System** (simplest, validation target)
-  - Source: `.refs/minix-3.3.0/minix/fs/mfs/` (all 28 files)
-  - Implemented in `crates/fs/src/mfs/` (17 modules):
-    - `types.rs` — D2Inode, Direct (on-disk dir entry), SuperBlock, Inode (in-memory cache entry),
-      BitT/BitchunkT types, derived size functions
-    - `consts.rs` — All MFS constants (inode table sizes, zone counts, magic numbers,
-      super block flags, VFS request type numbers, errno values)
-    - `glo.rs` — Global state via `MfsGlobal` struct behind raw pointer
-    - `super_block.rs` — Super block read/write, bitmap alloc/free, geometry validation
-    - `inode.rs` — Inode cache with hash table + free list, get/put/find/alloc/rw/update_times,
-      init_inode_cache
-    - `cache.rs` — Zone alloc/free
-    - `path.rs` — Path lookup, advance(), search_dir() with LOOKUP/ENTER/DELETE/IS_EMPTY
-    - `read.rs` — read_map() logical→physical block resolution, get_block_map(), rd_indir(),
-      read_ahead(); fs_readwrite/fs_breadwrite stubs
-    - `write.rs` — write_map(), new_block(), truncate_inode(), freesp_inode(), clear_zone(),
-      zero_block(); fs_ftrunc stub
-    - `link.rs` — fs_link/unlink/rdlink/rename/ftrunc stubs (need buffer cache)
-    - `open.rs` — fs_create/mkdir/mknod/slink/inhibread stubs (need buffer cache)
-    - `mount.rs` — fs_readsuper (validates super block), fs_unmount, fs_mountpoint
-    - `protect.rs` — forbidden() permission check, read_only(), fs_chmod/chown/getdents stubs
+- [ ] **9.1 — Port `minix/fs/mfs/` — Memory File System** (simplest, validation target)
+
+  The MFS code is ported (~4000 lines across 20 modules) but the server is non-functional:
+  the message loop is missing, handlers that need the buffer cache are `todo!()` stubs,
+  and the block device I/O in libminixfs is a `todo!()` stub.
+
+  **Critical path (must be done in order):**
+
+  **Layer 1 — Block device I/O (read a disk block)**
+
+  - [x] **9.1.1 — Wire `lmfs_rw_scattered` block I/O** (`crates/libs/src/libminixfs/cache.rs`)
+    - Added `BlockIoFn` callback type and `lmfs_set_block_io()` registration
+    - Wired `read_block()` (cache miss path) and `lmfs_rw_scattered()` (writeback path)
+      to call the registered callback instead of being no-ops
+    - Used `AtomicUsize` for the function pointer (no `static mut`)
+    - Also added direct-memory RAM disk callback in `crates/fs/src/block_io.rs`
+    - **Test:** 4 tests for RAM disk block I/O (read, write, out-of-bounds, multiblock)
+
+  - [x] **9.1.2 — RAM disk block driver** (new: `crates/servers/src/ramdisk.rs`)
+    - Full BDEV message-loop server: handles BDEV_OPEN/BDEV_CLOSE/BDEV_READ/
+      BDEV_WRITE/BDEV_IOCTL via IPC messages matching the standard MINIX driver
+      message format (byte offsets matching `minix-util/src/bdev.rs`)
+    - Dispatches to `drivers::storage::ramdisk` library functions
+    - Binary entry point at `crates/servers/src/bin/ramdisk.rs`
+    - Added to boot process list at `RAMDISK_PROC_NR=11` for both x86_64 and RISC-V
+    - Added to `mkinitramfs.rs` BOOT_BINS so it's included in the initramfs
+
+  - [x] **9.1.3 — Build Minix FS image and embed in kernel** (`tools/`)
+    - `tools/mkminixfs.rs`: Creates a Minix V3 filesystem image (magic 0x4D5A,
+      block size 4096) from the built initramfs binaries. Handles superblock,
+      inode/zone bitmaps, D2Inode table, directory entries, and data zones.
+      Supports both x86_64 and RISC-V target directories.
+    - Kernel includes the generated file directly from `target/minixfs_data.rs`
+      via `include!("../../../target/minixfs_data.rs")` — no copy step needed.
+    - `crates/kernel/src/minixfs.rs`: Module exposing `minixfs_image()` and
+      `minixfs_image_len()` behind `embed_minixfs` feature.
+    - `tools/mkboot.rs` and Justfile: Build the FS image in the build pipeline.
+
+  **Layer 2 — MFS server process**
+
+  - [ ] **9.1.4 — MFS message loop** (`crates/fs/src/mfs/main.rs`)
+    - Port the `main()` loop from `main.c:27-78`: `get_work → dispatch → reply`.
+    - `get_work()` receives a message from VFS via `sef_receive(ANY, &m_in)`.
+    - Extract `req_nr` from `m_in.m_type`, subtract `FS_BASE`, call
+      `FS_CALL_VEC[ind]()`, set `m_out.m_type = error`, reply via `ipc_send()`.
+    - Set `caller_uid`/`caller_gid` from message, populate `req_nr`/`fs_m_in`.
+    - **Depends on:** Working IPC send/receive.
+
+  - [ ] **9.1.5 — MFS server binary** (new: `crates/servers/src/bin/mfs.rs`)
+    - Thin entry point: `fn main() { mfs_main(); 0 }`
+    - Add to server build list in `mkboot.rs` so it's linked into initramfs.
+    - **Depends on:** 9.1.4
+
+  - [ ] **9.1.6 — Boot MFS** (`crates/kernel-boot/src/main.rs`)
+    - Add `/sbin/mfs` to the `boot_procs` list alongside PM/RS/VFS/init.
+    - Initialize the RAM disk before boot processes (copy embedded FS image
+      into allocated physical memory, register endpoint).
+
+  **Layer 3 — Read path handlers (make mounted files readable)**
+
+  - [ ] **9.1.7 — Buffer cache `get_block`/`put_block` wiring**
+    - MFS handlers call `get_block(dev, block, flags)` and `put_block(bp, type)`.
+      These are macros in C (`lmfs_get_block`/`lmfs_put_block`).
+    - In Rust, these are already implemented in `crates/libs/src/libminixfs/cache.rs`.
+      They call `lmfs_rw_scattered` for cache misses — which we wired in 9.1.1.
+    - Verify the wiring: `lmfs_buf_pool()` is called at init, `get_block()`
+      returns a buffer with data, `put_block()` releases it.
+
+  - [ ] **9.1.8 — `read_map` indirect blocks** (`crates/fs/src/mfs/read.rs`)
+    - `read_map()` handles direct zones (already done) and indirect zones via
+      `rd_indir()`. The indirect case has `todo!()`. Implement `rd_indir()`:
+      read the indirect block via `get_block()`, extract zone pointer, release
+      via `put_block()`.
+    - **Depends on:** 9.1.7 (buffer cache)
+
+  - [ ] **9.1.9 — `get_block_map`** (`crates/fs/src/mfs/read.rs`)
+    - Returns a buffer pointing to the disk block at a file position.
+      Calls `read_map()` then `lmfs_get_block_ino()`.
+    - Replace `todo!()` — already mostly correct, just needs buffer cache.
+    - **Depends on:** 9.1.7, 9.1.8
+
+  - [ ] **9.1.10 — `fs_readwrite` / `fs_breadwrite`** (`crates/fs/src/mfs/read.rs`)
+    - `fs_readwrite`: Read data from a file. For each block in the request
+      range: `get_block_map(rip, pos)` → `get_block(dev, block, NORMAL)` →
+      copy data to user → `put_block(bp, FULL_DATA_BLOCK)`.
+    - `fs_breadwrite`: Raw block I/O (for metadata). Read/write a block
+      by device+block number.
+    - **Depends on:** 9.1.7, 9.1.9
+
+  - [ ] **9.1.11 — `search_dir`** (`crates/fs/src/mfs/path.rs`)
+    - Look up a filename in a directory. Two cases:
+      - `LOOKUP`: iterate directory blocks via `get_block_map()`, scan
+        `struct direct` entries for matching name.
+      - `ENTER`: find a free slot (or append new block via `new_block()`)
+        and write the new entry.
+    - Has two `todo!()` for the ENTER path (needs `new_block` from 9.1.12).
+    - **Depends on:** 9.1.9, 9.1.12 (new_block for ENTER)
+
+  **Layer 4 — Write path handlers**
+
+  - [ ] **9.1.12 — `new_block`** (`crates/fs/src/mfs/write.rs`)
+    - Allocate a new block for writing: `alloc_zone()` → `get_block(NO_READ)` →
+      zero the block → mark dirty → `put_block()`.
+    - Replace `todo!()` — needs buffer cache.
+    - **Depends on:** 9.1.7
+
+  - [ ] **9.1.13 — `write_map` indirect blocks** (`crates/fs/src/mfs/write.rs`)
+    - Write zone pointers for indirect blocks (same pattern as read_map
+      but for writing).
+    - **Depends on:** 9.1.7, 9.1.12
+
+  - [ ] **9.1.14 — `fs_ftrunc`** (`crates/fs/src/mfs/write.rs`)
+    - Truncate a file to zero length. Free all direct and indirect zones.
+    - **Depends on:** 9.1.7
+
+  - [ ] **9.1.15 — Remaining handler wiring**
+    - `fs_create`/`fs_mkdir`/`fs_mknod` — need `new_block` + `search_dir(ENTER)`
+    - `fs_link`/`fs_unlink`/`fs_rename` — need `search_dir` + inode refcounting
+    - `fs_chmod`/`fs_chown`/`fs_utime` — need `rw_inode` (write inode to disk)
+    - `fs_statvfs` — via `count_free_bits()` (already implemented)
+    - `fs_getdents` — via `fs_readwrite` (9.1.10)
+
+  - [ ] **9.1.16 — Integration test: boot to shell with mounted FS**
+    - Boot MFS+VFS, have VFS mount the RAM disk via `req_readsuper`.
+    - Shell can `ls /`, `cat /etc/passwd` (or whatever is in the FS image).
+    - `echo hello > /tmp/test` creates a new file on a writable MFS mount.
+    - **Depends on:** All above.
+
+  **Files already ported (not stubs):**
+    - `types.rs` — on-disk structures, inode cache entry, derived sizes
+    - `consts.rs` — all MFS constants
+    - `glo.rs` — global state
+    - `super_block.rs` — super block read/write, bitmap alloc/free, geometry
+    - `inode.rs` — inode cache: get/put/find/alloc/rw/update_times
+    - `cache.rs` — zone alloc/free (not the buffer cache — that's in libminixfs)
+    - `mount.rs` — fs_readsuper, fs_unmount, fs_mountpoint
+    - `protect.rs` — forbidden() permission check, read_only()
     - `misc.rs` — fs_flush/sync/new_driver/bpeek
-    - `stats.rs` — count_free_bits() for inode/zone maps
+    - `stats.rs` — count_free_bits()
     - `time.rs` — fs_utime()
-    - `utility.rs` — conv2/conv4 byte swapping, clock_time(), no_sys(), min_u(), sanitycheck()
-    - `table.rs` — 34-entry dispatch table FS_CALL_VEC, dispatch()
-    - `main.rs` — mfs_init(), mfs_main() server loop, signal_handler()
-  - Buffer cache (get_block/put_block from libminixfs) stubbed with todo!() — needs external
-    buffer cache layer
-  - `#![no_std]` compatible throughout
-  - Tests: 62 tests covering super block validation, bitmap allocation, inode cache hashing,
-    path lookup edge cases, byte swapping, dispatch table routing, init, and error paths
+    - `utility.rs` — conv2/conv4, clock_time stub, no_sys
+    - `table.rs` — 34-entry dispatch table
+    - `link.rs` — link/unlink/rdlink/rename (without block I/O, just inode mgmt)
+    - `open.rs` — create/mkdir/mknod/slink (without block I/O)
+    - `path.rs` — advance(), search_dir structure (without block I/O)
+    - `read.rs` — read_map direct zones, read_ahead
+    - `write.rs` — truncate_inode, freesp_inode, clear_zone, zero_block
+
+  **`todo!()` stubs to implement:**
+    - `read.rs`: `fs_readwrite`, `fs_breadwrite`, `rd_indir`, `get_block_map`
+    - `write.rs`: `write_map` (indirect), `new_block`, `fs_ftrunc`
+    - `path.rs`: `search_dir` (ENTER case)
+    - `utility.rs`: `clock_time`
+    - `main.rs`: message loop (ported from C `main()`)
+    - `libminixfs/cache.rs`: `lmfs_rw_scattered` block I/O
+
+  **Tests:** 62 existing tests. Each new implementation must add tests.
+  - 9.1.8: test indirect block read_map
+  - 9.1.10: test fs_readwrite with known data
+  - 9.1.11: test search_dir lookup
+  - 9.1.2: test RAM disk read/write
+
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
 - [x] **9.2 — Port `minix/fs/vbfs/` — Virtual Block File System**

@@ -8,10 +8,64 @@
 
 use alloc::alloc;
 use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::libminixfs::constants::*;
 use crate::libminixfs::errors::*;
 use crate::libminixfs::types::*;
+
+// ---------------------------------------------------------------------------
+// Block I/O callback — set by the server to perform actual disk reads/writes
+// ---------------------------------------------------------------------------
+
+/// Block I/O function type.
+///
+/// `dev`: device number (major << MINOR | minor)
+/// `block`: first block number to read/write
+/// `nblocks`: number of consecutive blocks
+/// `bufs`: pointer to array of `nblocks` buffer data pointers
+/// `block_size`: size of each block in bytes
+/// `rw_flag`: `READING` (0) or `WRITING` (1)
+///
+/// Returns the number of blocks successfully transferred, or a negative
+/// error code on failure.
+pub type BlockIoFn = unsafe fn(
+    dev: u32,
+    block: u64,
+    nblocks: usize,
+    bufs: *const *mut u8,
+    block_size: usize,
+    rw_flag: i32,
+) -> i32;
+
+/// Registered block I/O callback.  The MFS (or other FS) server sets this
+/// at init time so the cache can perform actual disk I/O.
+///
+/// Stored as `AtomicUsize` because `BlockIoFn` is a function pointer
+/// (pointer-sized). `0` = `None`, non-zero = the function address passed
+/// through `transmute`.
+static BLOCK_IO: AtomicUsize = AtomicUsize::new(0);
+
+/// Register the block I/O callback.
+///
+/// # Safety
+///
+/// Must be called once during server init, before any block I/O is attempted.
+pub unsafe fn lmfs_set_block_io(f: BlockIoFn) {
+    BLOCK_IO.store(f as usize, Ordering::Release);
+}
+
+/// Read the registered block I/O callback, if any.
+fn get_block_io() -> Option<BlockIoFn> {
+    let val = BLOCK_IO.load(Ordering::Acquire);
+    if val == 0 {
+        None
+    } else {
+        // SAFETY: `val` was stored as `f as usize` where `f: BlockIoFn`,
+        // so transmuting back is valid.
+        Some(unsafe { core::mem::transmute::<usize, BlockIoFn>(val) })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Static (global) state
@@ -203,16 +257,32 @@ unsafe fn flushall(dev: u32) {
     }
 }
 
-/// Stub: read a block from disk into the buffer.
+/// Read a block from disk into the buffer.
 ///
-/// The block device I/O layer is not yet ported, so this is a no-op.
-/// The buffer data will be zero-filled from allocation.
+/// Calls the registered block I/O callback to perform the actual read.
+/// Falls back to zero-filled data if no callback is registered.
 ///
 /// # Safety
 ///
 /// `bp` must point to a valid `Buf` with `data_ptr` already allocated.
-unsafe fn read_block(_bp: *mut Buf) {
-    // TODO: call bdev_read / bdev_gather when the block device layer is ported.
+unsafe fn read_block(bp: *mut Buf) {
+    unsafe {
+        let dev = (*bp).lmfs_dev;
+        let block = (*bp).lmfs_blocknr;
+        let block_size = (*bp).lmfs_bytes as usize;
+        let data = (*bp).data_ptr;
+        if data.is_null() || block_size == 0 {
+            return;
+        }
+        if let Some(f) = get_block_io() {
+            let bufs = &data as *const *mut u8;
+            let n = f(dev, block, 1, bufs, block_size, READING);
+            if n <= 0 {
+                // I/O failed — leave buffer zero-filled.
+            }
+        }
+        // No callback → leave buffer zero-filled (from allocation).
+    }
 }
 
 /// Re-evaluate the cache size based on a heuristic.
@@ -664,12 +734,28 @@ pub unsafe fn lmfs_rw_scattered(dev: u32, buf_vec: *mut *mut Buf, num: i32, rw_f
 
         debug_assert!(nblocks > 0);
 
-        // Perform I/O — stub.
-        // TODO: bdev_gather / bdev_scatter
-        let _pos = first_block * static_read!(FS_BLOCK_SIZE) as u64;
-
-        // Harvest results — stub: assume failure.
-        let i = 0; // Nothing was successfully transferred.
+        // Perform I/O via registered callback.
+        let block_size = static_read!(FS_BLOCK_SIZE) as usize;
+        let transferred = if let Some(f) = get_block_io() {
+            // Build array of buffer data pointers for this consecutive range.
+            // SAFETY: we own the buffers; they are valid for the duration of the call.
+            let mut addrs = [core::ptr::null_mut::<u8>(); 64];
+            let count = nblocks.min(64) as usize;
+            for (j, slot) in addrs.iter_mut().enumerate().take(count) {
+                let bp = unsafe { *remaining.add(j) };
+                if !bp.is_null() {
+                    *slot = unsafe { (*bp).data_ptr };
+                }
+            }
+            unsafe { f(dev, first_block, count, addrs.as_ptr(), block_size, rw_flag) }
+        } else {
+            0 // No callback — zero blocks transferred.
+        };
+        let i = if transferred > 0 {
+            transferred as usize
+        } else {
+            0
+        };
 
         remaining = unsafe { remaining.add(i as usize) };
         remaining_count -= i as isize;

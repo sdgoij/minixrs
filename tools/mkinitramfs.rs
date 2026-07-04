@@ -36,6 +36,7 @@ const BOOT_BINS: &[(&str, &str, &str)] = &[
     ("/sbin/ds", "servers", "ds"),
     ("/sbin/sched", "servers", "sched"),
     ("/sbin/tty", "servers", "tty"),
+    ("/sbin/ramdisk", "servers", "ramdisk"),
 ];
 
 /// Device nodes to create in the initramfs.

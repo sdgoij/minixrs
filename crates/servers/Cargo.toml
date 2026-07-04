@@ -17,6 +17,7 @@ kernel = { path = "../kernel" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
+drivers = { path = "../drivers" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # server binaries that cannot run as host-native tests. Tests live in the lib target.
@@ -53,4 +54,9 @@ test = false
 [[bin]]
 name = "tty"
 path = "src/bin/tty.rs"
+test = false
+
+[[bin]]
+name = "ramdisk"
+path = "src/bin/ramdisk.rs"
 test = false

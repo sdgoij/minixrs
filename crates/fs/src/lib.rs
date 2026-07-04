@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod block_io;
 pub mod ext2;
 pub mod iso9660;
 pub mod mfs;

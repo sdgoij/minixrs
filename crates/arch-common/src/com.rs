@@ -30,6 +30,7 @@ pub const DS_PROC_NR: Endpoint = 6;
 pub const MFS_PROC_NR: Endpoint = 7;
 pub const VM_PROC_NR: Endpoint = 8;
 pub const PFS_PROC_NR: Endpoint = 9;
+pub const RAMDISK_PROC_NR: Endpoint = 11;
 
 pub const LAST_SPECIAL_PROC_NR: Endpoint = 10;
 pub const INIT_PROC_NR: Endpoint = LAST_SPECIAL_PROC_NR;
