@@ -764,6 +764,143 @@ fn test_sched_round_robin(ctx: &mut TestCtx) {
     }
 }
 
+fn test_sched_proc_no_time_preempts(ctx: &mut TestCtx) {
+    unsafe {
+        // Create a scheduler proc so has_user_sched == true in proc_no_time.
+        // (kernel_scheduler() checks p_scheduler.is_null() — a null scheduler
+        //  means kernel-scheduled, which would just renew quantum instead of
+        //  preempting.)
+        let scheduler = sched_make_proc(114, 7);
+        if scheduler.is_null() {
+            ctx.assert(false, "sched_make_proc for scheduler failed");
+            return;
+        }
+        // Set scheduler in RECEIVING state so mini_send can deliver.
+        // Also set PREEMPTED so that after delivery clears RECEIVING,
+        // the scheduler stays non-runnable (new != 0 → no enqueue).
+        (*scheduler).p_rts_flags.store(
+            crate::proc::RtsFlags::RECEIVING.bits() | crate::proc::RtsFlags::PREEMPTED.bits(),
+            Ordering::Relaxed,
+        );
+        (*scheduler).p_getfrom_e = crate::system::NONE;
+
+        // Use Priv::default() and override only the fields we care about.
+        // (The struct has many fields; initializing by hand would be fragile.)
+        let mut priv_hi = crate::r#priv::Priv::default();
+        priv_hi.s_proc_nr = 115;
+        priv_hi.s_id = 99;
+        priv_hi.s_flags =
+            crate::r#priv::PrivFlags::PREEMPTIBLE | crate::r#priv::PrivFlags::BILLABLE;
+
+        let mut priv_lo = crate::r#priv::Priv::default();
+        priv_lo.s_proc_nr = 116;
+        priv_lo.s_id = 100;
+        priv_lo.s_flags =
+            crate::r#priv::PrivFlags::PREEMPTIBLE | crate::r#priv::PrivFlags::BILLABLE;
+
+        // Create two procs at the same priority (round-robin)
+        let hi = sched_make_proc(115, 7);
+        let lo = sched_make_proc(116, 7);
+        if hi.is_null() || lo.is_null() {
+            ctx.assert(false, "sched_make_proc failed");
+            return;
+        }
+
+        // Wire up privilege structures and the user-space scheduler
+        (*hi).p_priv = &raw mut priv_hi;
+        (*lo).p_priv = &raw mut priv_lo;
+        (*hi).p_scheduler = scheduler;
+        (*lo).p_scheduler = scheduler;
+
+        // Set quantum
+        (*hi).p_quantum_size_ms = 50;
+        (*hi).p_cpu_time_left = crate::clock::ms_2_cpu_time(50);
+        (*lo).p_quantum_size_ms = 50;
+        (*lo).p_cpu_time_left = crate::clock::ms_2_cpu_time(50);
+
+        // Enqueue both
+        crate::sched::enqueue(hi);
+        crate::sched::enqueue(lo);
+
+        // Both are runnable. pick_proc should return hi (first enqueued at this priority)
+        let p1 = crate::sched::pick_proc();
+        ctx.assert(p1.is_some(), "pick_proc should return a proc");
+        if let Some(p) = p1 {
+            ctx.assert(p == hi, "first pick should return hi");
+
+            // Simulate timer ISR: call proc_no_time on the current process
+            // With PREEMPTIBLE set and a non-kernel scheduler, this should
+            // set NO_QUANTUM and dequeue the process.
+            crate::sched::proc_no_time(hi);
+
+            // Verify hi is no longer runnable (NO_QUANTUM set)
+            let hi_rts = (*hi).p_rts_flags.load(Ordering::Relaxed);
+            ctx.assert(
+                hi_rts & crate::proc::RtsFlags::NO_QUANTUM.bits() != 0,
+                "hi should have NO_QUANTUM set after proc_no_time",
+            );
+        }
+
+        // Now pick_proc should return lo (hi is no longer runnable)
+        let p2 = crate::sched::pick_proc();
+        ctx.assert(p2.is_some(), "pick_proc should return lo");
+        if let Some(p) = p2 {
+            ctx.assert(p == lo, "second pick should return lo");
+
+            // Preempt lo too
+            crate::sched::proc_no_time(lo);
+
+            let lo_rts = (*lo).p_rts_flags.load(Ordering::Relaxed);
+            ctx.assert(
+                lo_rts & crate::proc::RtsFlags::NO_QUANTUM.bits() != 0,
+                "lo should have NO_QUANTUM set after proc_no_time",
+            );
+        }
+
+        // Both are non-runnable now, pick_proc should return None
+        let p3 = crate::sched::pick_proc();
+        ctx.assert(
+            p3.is_none(),
+            "pick_proc should return None when all procs blocked",
+        );
+
+        // Test round-robin: re-enqueue both and verify alternating preemption
+        // Clear NO_QUANTUM and re-enqueue
+        (*hi).p_rts_flags.store(0, Ordering::Relaxed);
+        (*lo).p_rts_flags.store(0, Ordering::Relaxed);
+        (*hi).p_cpu_time_left = crate::clock::ms_2_cpu_time(50);
+        (*lo).p_cpu_time_left = crate::clock::ms_2_cpu_time(50);
+
+        crate::sched::enqueue(hi);
+        crate::sched::enqueue(lo);
+
+        // Simulate round-robin: pick hi, preempt, pick lo, preempt, pick hi, ...
+        let r1 = crate::sched::pick_proc();
+        ctx.assert(r1 == Some(hi), "round-robin cycle 1 should return hi");
+        crate::sched::proc_no_time(hi);
+
+        let r2 = crate::sched::pick_proc();
+        ctx.assert(r2 == Some(lo), "round-robin cycle 2 should return lo");
+        crate::sched::proc_no_time(lo);
+
+        // Re-enqueue hi after its quantum expires (simulate scheduler renewal)
+        (*hi).p_rts_flags.store(0, Ordering::Relaxed);
+        (*hi).p_cpu_time_left = crate::clock::ms_2_cpu_time(50);
+        crate::sched::enqueue(hi);
+
+        let r3 = crate::sched::pick_proc();
+        ctx.assert(r3 == Some(hi), "round-robin cycle 3 should return hi again");
+
+        // Clean up
+        (*hi)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*lo)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
 // Privilege table tests
 
 fn test_priv_default_proc_nr(ctx: &mut TestCtx) {
@@ -822,6 +959,7 @@ pub fn run_all() -> u32 {
     total += run("enqueue_dequeue", test_enqueue_dequeue);
     total += run("sched_priority", test_sched_priority_ordering);
     total += run("sched_round_robin", test_sched_round_robin);
+    total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
 
     total += run("priv_default", test_priv_default_proc_nr);
     total += run("priv_flags", test_priv_flags_empty);

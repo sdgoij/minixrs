@@ -52,11 +52,11 @@ These run **inside QEMU** as Phase H, using the same `run()`/`TestCtx` harness:
 | **IPC** (5) | `mini_send_direct`, `mini_send_queue`, `mini_notify`, `sendrec_direct`, `sendrec_reply_cycle` | Direct delivery, queueing, notify; SENDREC send-half; full SENDREC→reply roundtrip with reversibility |
 | **Process Table** (6) | `proc_addr_tasks`, `proc_addr_oob`, `endpoint_encoding`, `endpoint_lookup`, `is_ok_proc_nr`, `is_kernel_nr` | Slot addressing, endpoint roundtrip, bounds checks |
 | **Timer** (1) | `tmr_never` | TMR_NEVER == u64::MAX |
-| **Scheduler** (3) | `enqueue_dequeue`, `sched_priority`, `sched_round_robin` | Run-queue enqueue/dequeue roundtrip; priority ordering (pick_proc returns highest); same-priority round-robin cycling |
+| **Scheduler** (4) | `enqueue_dequeue`, `sched_priority`, `sched_round_robin`, `sched_proc_no_time` | Run-queue enqueue/dequeue; priority ordering; round-robin cycling; proc_no_time preemption with NO_QUANTUM and notify_scheduler |
 | **Privilege** (2) | `priv_default`, `priv_flags` | Priv struct default fields |
 | **Process** (2) | `proc_size`, `proc_ptr_ok` | Proc struct size ≤ 1024, PMAGIC validation |
 
-**Total: 22 QEMU-compatible kernel tests**
+**Total: 23 QEMU-compatible kernel tests**
 
 ---
 
@@ -226,8 +226,8 @@ All gated on `target_os = "none"` (compile-only on host).
 
 | Domain | Count | Notes |
 |--------|-------|-------|
-| **QEMU integration** (A–O) | **40 tests** | Hardware validation: paging, allocators, IPC, grants, timers, PIT, interrupts, ELF loading, RTC/CMOS, keyboard controller, ring-3 |
-| **Kernel QEMU-compatible** (Phase H) | **22 tests** | Pure-logic kernel tests running in QEMU (incl. priority scheduler + round-robin) |
+| **QEMU integration** (A–O) | **40 tests** | Hardware validation (unchanged) |
+| **Kernel QEMU-compatible** (Phase H) | **23 tests** | Pure-logic kernel tests running in QEMU (incl. proc_no_time preemption) |
 | **Host — arch-common** | ~55 | Type layouts, ABI constants, IPC message formats |
 | **Host — arch-x86_64** | ~125 | Allocator, APIC, paging, IDT, cpulocals, asm ops |
 | **Host — arch-riscv64** | ~24 | Allocator, PTE, SBI, PLIC, CLINT, cpulocals |
@@ -243,7 +243,7 @@ All gated on `target_os = "none"` (compile-only on host).
 | **Host — libs** | ~14 | libminixfs block cache, VTreeFS |
 | **Host — net** | 1 | Placeholder |
 | **Host total** | **~690 tests** | All crates combined |
-| **Grand total** | **~798 tests** | Host + QEMU (+60 tests from gap-filling) |
+| **Grand total** | **~799 tests** | Host + QEMU (+61 tests from gap-filling) |
 
 ---
 
@@ -302,7 +302,7 @@ The following gaps from the original analysis have been filled:
 
 | Area | Gap | Risk |
 |------|-----|------|
-| **Multi-process boot** | 8 processes boot and run, but no QEMU test that verifies **all** get CPU time | **High** |
+| **Scheduler preemption (proc_no_time + notify_scheduler)** | Added `test_sched_proc_no_time_preempts` to `kernel/src/tests.rs` | Proves proc_no_time with PREEMPTIBLE sets NO_QUANTUM, dequeues process, pick_proc returns next; all-blocked returns None; round-robin cycling after quantum renewal |
 | **VFS↔MFS IPC** | No QEMU or integration test | **High** — M5 |
 | **Network** | 1 placeholder test | Phase 16 not started |
 | **Live Update** | No tests | Phase 15 not started |
@@ -362,7 +362,7 @@ The plan outlines these for `test_runner.rs`:
 |-------|-----------|-------|
 | **F** | Process table | `proc_addr`, `endpoint_lookup`, `proc_init` (✅ DONE) |
 | **G** | IPC | `mini_send`, `mini_receive`, `mini_notify`, `do_sync_ipc` (✅ partial — SENDREC added, reply cycle added, no full scheduler-mediated cycle) |
-| **H** | Context switching / Scheduling | `pick_proc`, priority ordering, round-robin (✅ DONE — pick_proc, priority, round-robin tested); `switch_to` stack save/restore ping-pong (❌ not done) |
+| **H** | Scheduler preemption | `proc_no_time` → NO_QUANTUM → dequeue → pick_proc next → all-blocked None → round-robin renewal (✅ DONE) |
 | **I** | Grants | `grant_set`, `verify_grant` with `CpGrant` table (✅ DONE) |
 | **J** | Syscalls | `getpid`, `write`, `brk`, `exit` dispatch (✅ partial — getpid/write/brk/exit done in QEMU) |
 | **K** | Timers | `tmrs_settimer`, `tmrs_exptimers`, `tmrs_clrtimer` (✅ DONE) |
