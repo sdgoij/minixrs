@@ -319,12 +319,12 @@ pub unsafe fn boot_create_page_table() -> u64 {
     // Allocate (levels-1) pages: root + intermediate + PD.
     let n_pages = (levels - 1) as usize;
     let mut pages = [0u64; 4];
-    for i in 0..n_pages {
-        pages[i] = match unsafe { kernel::hal::alloc_phys_page() } {
+    for entry in pages.iter_mut().take(n_pages) {
+        *entry = match unsafe { kernel::hal::alloc_phys_page() } {
             Some(p) => p,
             None => return 0,
         };
-        unsafe { core::ptr::write_bytes(pages[i] as *mut u8, 0, page_sz) };
+        unsafe { core::ptr::write_bytes(*entry as *mut u8, 0, page_sz) };
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.
@@ -422,9 +422,9 @@ pub unsafe fn boot_create_restricted_page_table(
     // Allocate (levels-1) pages: root + intermediate levels (PD is last).
     let n_pages = (levels - 1) as usize;
     let mut pages = [0u64; 4];
-    for i in 0..n_pages {
-        pages[i] = unsafe { kernel::hal::alloc_phys_page()? };
-        unsafe { core::ptr::write_bytes(pages[i] as *mut u8, 0, page_sz) };
+    for entry in pages.iter_mut().take(n_pages) {
+        *entry = unsafe { kernel::hal::alloc_phys_page()? };
+        unsafe { core::ptr::write_bytes(*entry as *mut u8, 0, page_sz) };
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.

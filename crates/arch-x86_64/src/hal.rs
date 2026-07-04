@@ -653,42 +653,86 @@ pub fn cpu_id() -> u32 {
 // ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
 
 /// Read a byte from an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn inb(port: u16) -> u8 {
     unsafe { crate::asm::inb(port) }
 }
 /// Write a byte to an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn outb(port: u16, val: u8) {
     unsafe { crate::asm::outb(port, val) }
 }
 /// Read a word (2 bytes) from an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn inw(port: u16) -> u16 {
     unsafe { crate::asm::inw(port) }
 }
 /// Write a word (2 bytes) to an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn outw(port: u16, val: u16) {
     unsafe { crate::asm::outw(port, val) }
 }
 /// Read a long (4 bytes) from an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn inl(port: u16) -> u32 {
     unsafe { crate::asm::inl(port) }
 }
 /// Write a long (4 bytes) to an I/O port.
+///
+/// # Safety
+///
+/// The port must be valid and accessible by the caller.
 pub unsafe fn outl(port: u16, val: u32) {
     unsafe { crate::asm::outl(port, val) }
 }
 /// String input from an I/O port (byte) to a physical buffer.
+///
+/// # Safety
+///
+/// The port must be valid and accessible. `buf` must point to a valid
+/// physical address with room for at least `count` bytes.
 pub unsafe fn phys_insb(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_insb(port, buf, count) }
 }
 /// String output to an I/O port (byte) from a physical buffer.
+///
+/// # Safety
+///
+/// The port must be valid and accessible. `buf` must point to a valid
+/// physical address with room for at least `count` bytes.
 pub unsafe fn phys_outsb(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsb(port, buf, count) }
 }
 /// String input from an I/O port (word) to a physical buffer.
+///
+/// # Safety
+///
+/// The port must be valid and accessible. `buf` must point to a valid
+/// physical address with room for at least `count` words.
 pub unsafe fn phys_insw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_insw(port, buf, count) }
 }
 /// String output to an I/O port (word) from a physical buffer.
+///
+/// # Safety
+///
+/// The port must be valid and accessible. `buf` must point to a valid
+/// physical address with room for at least `count` words.
 pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsw(port, buf, count) }
 }
@@ -698,6 +742,10 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
 /// Initialize the profiling clock. `rate_code` encodes the RTC divider.
 /// `callback` is invoked on each tick. Returns the IRQ number (≥0) or <0 on
 /// failure.
+///
+/// # Safety
+///
+/// The `callback` must remain valid for the lifetime of the profiling clock.
 pub unsafe fn init_profile_clock(rate_code: u32, callback: unsafe extern "C" fn()) -> i32 {
     let irq = unsafe { crate::apic::arch_init_profile_clock(rate_code as u8) };
     if irq >= 0 {
@@ -762,6 +810,10 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
 }
 
 /// Allocate `count` contiguous physical pages (bottom-up).
+///
+/// # Safety
+///
+/// Must be called after the physical memory allocator is initialized.
 pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
 }

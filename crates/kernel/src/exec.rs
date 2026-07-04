@@ -40,13 +40,13 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // Allocate level pages: (levels-1) for the hierarchy (root + PD).
         let n_pages = (levels - 1) as usize; // root + intermediate + PD
         let mut page_addrs: [u64; 4] = [0u64; 4]; // max 4 levels
-        for i in 0..n_pages {
+        for entry in page_addrs.iter_mut().take(n_pages) {
             let p = vm::alloc_mem(1, 0);
             if p == NO_MEM {
                 return 0;
             }
-            page_addrs[i] = p * vm::VM_PAGE_SIZE as u64;
-            core::ptr::write_bytes(page_addrs[i] as *mut u8, 0, vm::VM_PAGE_SIZE);
+            *entry = p * vm::VM_PAGE_SIZE as u64;
+            core::ptr::write_bytes(*entry as *mut u8, 0, vm::VM_PAGE_SIZE);
         }
 
         // Link hierarchy: root[0] → level[1][0] → ... → PD.

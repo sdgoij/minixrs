@@ -306,9 +306,10 @@ pub fn decode_page_fault(va: u64, err: u32) -> PageFaultInfo {
 /// huge page. This function splits that 2MB PDE into 512 × 4KB PTEs so that
 /// per-page attributes can be applied, then:
 ///   - Sets `PG_NX` on BSS pages (preventing code execution from BSS)
-///   - Clears `PG_G` on BSS entries (so TLB entries are flushed on CR3 switch)
-/// Split the kernel's 2MB identity-mapped huge page into 4KB PTEs and
-/// set NX on BSS pages (if the kernel is mapped as a huge page at boot).
+///   - Clears `PG_G` on BSS entries (so TLB entries are flushed on CR3 switch).
+///
+/// Splits the kernel's 2MB identity-mapped huge page into 4KB PTEs and
+/// sets NX on BSS pages (if the kernel is mapped as a huge page at boot).
 ///
 /// The kernel virtual address is obtained from `hal::kern_vaddr()`.
 ///
