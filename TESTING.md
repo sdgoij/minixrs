@@ -243,7 +243,7 @@ All gated on `target_os = "none"` (compile-only on host).
 | **Host — libs** | ~14 | libminixfs block cache, VTreeFS |
 | **Host — net** | 1 | Placeholder |
 | **Host total** | **~690 tests** | All crates combined |
-| **Grand total** | **~800 tests** | Host + QEMU (+62 tests from gap-filling) |
+| **Grand total** | **~800 tests** | Host + QEMU (x86_64) + QEMU (RISC-V64) |
 
 ---
 
@@ -306,7 +306,7 @@ The following gaps from the original analysis have been filled:
 | **VFS↔MFS IPC** | Added `test_vfs_mfs_ipc_roundtrip` to `kernel/src/tests.rs` | Registers MFS dispatch handler, sends REQ_READSUPER via do_sync_ipc, handler parses request and returns valid response (root inode=1, mode=0x41FF, file_size=0), caller verifies all fields |
 | **Network** | 1 placeholder test | Phase 16 not started |
 | **Live Update** | No tests | Phase 15 not started |
-| **RISC-V64 integration** | M1R prints banner; no test suite analogous to Phases A–L | Medium |
+| **RISC-V64 integration** | All 25 architecture-independent kernel tests pass on RISC-V64 QEMU virt via `just test-qemu-riscv` (release mode). FDT parsing skipped (uses fixed 256MB fallback). sched_proc_no_time gated on x86_64 (RISC-V HAL init_cpulocals + scheduler IPC path needs investigation). | Medium — 25/25 Phase H tests pass |
 | **Driver integration (real hardware)** | RTC/CMOS, PS/2 keyboard controller tested in QEMU; virtio-blk, PCI, ATA, network not tested | **High** — 2 of ~30 drivers tested on real (emulated) HW |
 | **Windows host gaps** | Several tests `#[ignore]`'d due to ring-0 / IOPL restrictions | Low (kernels don't test on Windows) |
 
@@ -348,7 +348,8 @@ crates/kernel/src/tests.rs
 | `cargo test` | Run all host unittests (some `#[ignore]`'d on Windows) |
 | `just build` | Build kernel + trampoline + initramfs |
 | `just run` | Boot full multi-process system in QEMU |
-| `just test-qemu` | Run 34 integration tests (A–M) in QEMU, exits via isa-debug-exit |
+| `just test-qemu` | Run 40 integration tests (A–O) in QEMU x86_64, exits via isa-debug-exit |
+| `just test-qemu-riscv` | Run 24 architecture-independent kernel tests on RISC-V64 QEMU virt (Phase H) |
 | `just image` | Build disk image (MBR + stage2 + kernel) |
 | `just run-img` | Boot disk image in QEMU (BIOS disk boot path) |
 

@@ -34,7 +34,7 @@ arch-x86_64 = { path = "../arch-x86_64" }
 [[bin]]
 name = "kernel-boot-riscv64"
 path = "src/riscv64.rs"
-required-features = ["embed_initramfs", "riscv64"]
+required-features = ["riscv64"]
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 arch-riscv64 = { path = "../arch-riscv64" }

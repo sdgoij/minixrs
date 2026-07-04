@@ -60,3 +60,9 @@ build-riscv64: build-initramfs-riscv64
 # Run the RISC-V64 kernel in QEMU (uses OpenSBI built-in).
 run-riscv64: build-riscv64
     {{QEMU_RV}} -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+
+# Build and run RISC-V64 integration tests.
+# Runs 24 architecture-independent kernel tests (Phase H), exits via SBI shutdown.
+test-qemu-riscv:
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target {{RV_TARGET}} --features riscv64,integration-tests -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release 2>&1
+    {{QEMU_RV}} -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
