@@ -76,7 +76,7 @@ fn set_tp_pointer(addr: u64) {
 /// directly. SMP support will need a different mechanism (e.g., a dedicated
 /// CSR or mhartid-based lookup).
 fn tp_ptr() -> *mut PerCpuStorage {
-    unsafe { core::ptr::addr_of_mut!(BOOT_CPU_STORAGE) }
+    core::ptr::addr_of_mut!(BOOT_CPU_STORAGE)
 }
 
 /// Set the current process pointer for this hart.

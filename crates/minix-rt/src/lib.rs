@@ -306,37 +306,37 @@ pub unsafe fn riscv_syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall0(nr: u64) -> i64 {
-    riscv_syscall(nr, 0, 0, 0, 0, 0, 0)
+    unsafe { riscv_syscall(nr, 0, 0, 0, 0, 0, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
-    riscv_syscall(nr, a1, 0, 0, 0, 0, 0)
+    unsafe { riscv_syscall(nr, a1, 0, 0, 0, 0, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    riscv_syscall(nr, a1, a2, 0, 0, 0, 0)
+    unsafe { riscv_syscall(nr, a1, a2, 0, 0, 0, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    riscv_syscall(nr, a1, a2, a3, 0, 0, 0)
+    unsafe { riscv_syscall(nr, a1, a2, a3, 0, 0, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    riscv_syscall(nr, a1, a2, a3, a4, 0, 0)
+    unsafe { riscv_syscall(nr, a1, a2, a3, a4, 0, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
-    riscv_syscall(nr, a1, a2, a3, a4, a5, 0)
+    unsafe { riscv_syscall(nr, a1, a2, a3, a4, a5, 0) }
 }
 #[cfg(target_arch = "riscv64")]
 #[inline]
 pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
-    riscv_syscall(nr, a1, a2, a3, a4, a5, a6)
+    unsafe { riscv_syscall(nr, a1, a2, a3, a4, a5, a6) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1506,27 +1506,26 @@ pub unsafe fn vm_unmap(who: i32, addr: u64) -> Result<(), i32> {
 ///
 /// `msg_ptr` must point to a valid 64-byte message buffer.
 /// The kernel syscall entry point must be configured in LSTAR MSR.
-pub unsafe fn syscall_kernel(dest: i32, call_nr: i32, msg_ptr: *mut u8) -> i32 {
-    let rax: u64 = (arch_common::com::KERNEL_CALL + call_nr as u32) as u64;
-    let rdi: u64 = dest as u64;
-    let rsi: u64 = msg_ptr as u64;
-    let result: u64;
+pub unsafe fn syscall_kernel(_dest: i32, _call_nr: i32, _msg_ptr: *mut u8) -> i32 {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inout("rax") rax => result,
-            in("rdi") rdi,
-            in("rsi") rsi,
-            // RCX and R11 are clobbered by syscall
-            out("rcx") _,
-            out("r11") _,
-            options(nostack, preserves_flags),
-        );
+    {
+        let mut _result: u64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inout("rax") (arch_common::com::KERNEL_CALL + _call_nr as u32) as u64 => _result,
+                in("rdi") _dest as u64,
+                in("rsi") _msg_ptr as u64,
+                // RCX and R11 are clobbered by syscall
+                out("rcx") _,
+                out("r11") _,
+                options(nostack, preserves_flags),
+            );
+        }
+        _result as i32
     }
     #[cfg(not(target_arch = "x86_64"))]
-    let result = 0u64;
-    result as i32
+    0i32
 }
 
 /// Send a message and receive a reply (SENDREC).
