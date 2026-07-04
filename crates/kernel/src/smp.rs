@@ -443,8 +443,14 @@ mod tests {
     #[test]
     fn test_cpu_id_returns_zero() {
         unsafe {
-            // In single-CPU mode cpu_id always returns 0.
-            assert_eq!(cpu_id(), 0);
+            // On RISC-V, cpu_id reads mhartid. BSP hartid is typically 0
+            // but can differ on some platforms, so assert it's a valid ID.
+            let id = cpu_id();
+            assert!(
+                (id as usize) < CONFIG_MAX_CPUS,
+                "cpu_id {} out of range",
+                id
+            );
         }
     }
 

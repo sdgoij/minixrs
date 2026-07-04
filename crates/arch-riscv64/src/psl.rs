@@ -64,6 +64,8 @@ mod tests {
 
     #[test]
     fn test_psl_userset() {
-        assert!(PSL_USERSET & sstatus::SIE != 0);
+        // SIE is deliberately zero: prevents interrupts between csrw sstatus
+        // and sret in switch_to_user; sret atomically copies SPIE to SIE.
+        assert_eq!(PSL_USERSET & sstatus::SIE, 0);
     }
 }
