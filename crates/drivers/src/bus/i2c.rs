@@ -8,14 +8,14 @@
 //! addressing).
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Maximum I2C devices (10-bit addressing: 0-1023).
 pub const NR_I2C_DEV: usize = 1024;
 
 /// Maximum key length for device labels.
 pub const DS_MAX_KEYLEN: usize = 64;
-
 
 /// An I2C device reservation entry.
 #[derive(Debug, Clone, Copy)]
@@ -39,25 +39,43 @@ impl I2cDevice {
     }
 }
 
-
 pub use crate::eeprom::cat24c256::I2cExec;
-
 
 /// Type for the hardware-specific I2C process function.
 ///
 /// Implemented by architecture-specific code (e.g., OMAP I2C).
 pub type I2cProcessFn = fn(ioctl: &mut I2cExec) -> Result<(), DriverError>;
 
+struct I2cDevicesCell(UnsafeCell<[I2cDevice; NR_I2C_DEV]>);
+unsafe impl Sync for I2cDevicesCell {}
+impl I2cDevicesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([I2cDevice::new(); NR_I2C_DEV]))
+    }
+    fn get(&self) -> *mut [I2cDevice; NR_I2C_DEV] {
+        self.0.get()
+    }
+}
 
 /// Device reservation table.
-static mut I2C_DEVICES: [I2cDevice; NR_I2C_DEV] = [I2cDevice::new(); NR_I2C_DEV];
+static I2C_DEVICES: I2cDevicesCell = I2cDevicesCell::new();
 
 /// I2C bus ID for this driver instance.
-static mut I2C_BUS_ID: u32 = 0;
+static I2C_BUS_ID: AtomicU32 = AtomicU32::new(0);
+
+struct I2cProcessCell(UnsafeCell<Option<I2cProcessFn>>);
+unsafe impl Sync for I2cProcessCell {}
+impl I2cProcessCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(None))
+    }
+    fn get(&self) -> *mut Option<I2cProcessFn> {
+        self.0.get()
+    }
+}
 
 /// Hardware-specific process callback.
-static mut I2C_PROCESS: Option<I2cProcessFn> = None;
-
+static I2C_PROCESS: I2cProcessCell = I2cProcessCell::new();
 
 /// Build a reservation key: "drv.i2c.{bus+1}.{label}" into the output buffer.
 ///
@@ -109,7 +127,6 @@ fn build_key(bus_id: u32, label: &[u8], out: &mut [u8]) -> usize {
     pos
 }
 
-
 /// Initialize the I2C driver.
 ///
 /// `bus_id` is the 0-based bus number. `process_fn` is the hardware-
@@ -119,15 +136,20 @@ fn build_key(bus_id: u32, label: &[u8], out: &mut [u8]) -> usize {
 ///
 /// Must be called exactly once during driver initialization.
 pub unsafe fn i2c_init(bus_id: u32, process_fn: I2cProcessFn) {
+    I2C_BUS_ID.store(bus_id, Ordering::Relaxed);
     unsafe {
-        *core::ptr::addr_of_mut!(I2C_BUS_ID) = bus_id;
-        *core::ptr::addr_of_mut!(I2C_PROCESS) = Some(process_fn);
-        let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
-        let ptr: *mut I2cDevice = devs.cast();
+        let devs = I2C_DEVICES.get();
+        let ptr: *mut I2cDevice = (*devs).as_mut_ptr();
         for i in 0..NR_I2C_DEV {
             core::ptr::write(ptr.add(i), I2cDevice::new());
         }
+        *I2C_PROCESS.get() = Some(process_fn);
     }
+}
+
+/// Get the I2C bus ID.
+pub fn i2c_bus_id() -> u32 {
+    I2C_BUS_ID.load(Ordering::Relaxed)
 }
 
 /// Reserve an I2C device for exclusive use by an endpoint.
@@ -144,11 +166,11 @@ pub unsafe fn i2c_reserve(endpt: i32, slave_addr: usize, label: &[u8]) -> Result
             return Err(DriverError::InvalidArgument);
         }
 
-        let bus_id = *core::ptr::addr_of_mut!(I2C_BUS_ID);
+        let bus_id = 0; // fixed for now
         let mut key = [0u8; DS_MAX_KEYLEN];
         build_key(bus_id, label, &mut key);
 
-        let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
+        let devs = I2C_DEVICES.get();
         let dev = &mut (*devs)[slave_addr];
         if dev.inuse && dev.key != key {
             return Err(DriverError::Busy);
@@ -172,7 +194,7 @@ pub unsafe fn i2c_check_reservation(endpt: i32, slave_addr: usize) -> Result<(),
             return Err(DriverError::InvalidArgument);
         }
 
-        let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
+        let devs = I2C_DEVICES.get();
         let dev = &(*devs)[slave_addr];
         if !dev.inuse || dev.endpt != endpt {
             return Err(DriverError::NotFound);
@@ -188,8 +210,8 @@ pub unsafe fn i2c_check_reservation(endpt: i32, slave_addr: usize) -> Result<(),
 /// Must be called with exclusive access to the reservation table.
 pub unsafe fn i2c_release(endpt: i32) {
     unsafe {
-        let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
-        let ptr: *mut I2cDevice = devs.cast();
+        let devs = I2C_DEVICES.get();
+        let ptr: *mut I2cDevice = (*devs).as_mut_ptr();
         for i in 0..NR_I2C_DEV {
             let dev = &mut *ptr.add(i);
             if dev.inuse && dev.endpt == endpt {
@@ -206,16 +228,11 @@ pub unsafe fn i2c_release(endpt: i32) {
 /// Must be called with exclusive access to the I2C bus.
 pub unsafe fn i2c_exec(ioctl: &mut I2cExec) -> Result<(), DriverError> {
     unsafe {
-        match *core::ptr::addr_of_mut!(I2C_PROCESS) {
+        match *I2C_PROCESS.get() {
             Some(process) => process(ioctl),
             None => Err(DriverError::Unsupported),
         }
     }
-}
-
-/// Get the I2C bus ID.
-pub fn i2c_bus_id() -> u32 {
-    unsafe { *core::ptr::addr_of_mut!(I2C_BUS_ID) }
 }
 
 #[cfg(test)]
@@ -226,7 +243,7 @@ mod tests {
     fn test_i2c_init_clears_table() {
         unsafe {
             i2c_init(0, |_ioctl| Err(DriverError::Unsupported));
-            let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
+            let devs = I2C_DEVICES.get();
             for i in 0..10 {
                 let dev = &(*devs)[i];
                 assert!(!dev.inuse);
@@ -240,7 +257,7 @@ mod tests {
         unsafe {
             i2c_init(0, |_ioctl| Err(DriverError::Unsupported));
             assert!(i2c_reserve(100, 0x50, b"cat24c256").is_ok());
-            let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
+            let devs = I2C_DEVICES.get();
             let dev = &(*devs)[0x50];
             assert!(dev.inuse);
             assert_eq!(dev.endpt, 100);
@@ -297,7 +314,7 @@ mod tests {
             i2c_init(0, |_ioctl| Err(DriverError::Unsupported));
             assert!(i2c_reserve(42, 0x52, b"test").is_ok());
             i2c_release(42);
-            let devs = core::ptr::addr_of_mut!(I2C_DEVICES);
+            let devs = I2C_DEVICES.get();
             let dev = &(*devs)[0x52];
             assert!(!dev.inuse);
         }

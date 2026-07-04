@@ -13,6 +13,7 @@
 //! are deferred until the server framework is available (Phase 12).
 
 use crate::DriverError;
+use core::cell::UnsafeCell;
 
 /// Maximum number of rules that can be active at once.
 pub const MAX_RULES: usize = 16;
@@ -115,8 +116,19 @@ impl Default for FbdConfig {
     }
 }
 
-// Static rule table for fault injection.
-static mut RULES: [FbdRule; MAX_RULES] = [const { FbdRule::new() }; MAX_RULES];
+struct RulesCell(UnsafeCell<[FbdRule; MAX_RULES]>);
+unsafe impl Sync for RulesCell {}
+impl RulesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([const { FbdRule::new() }; MAX_RULES]))
+    }
+    fn get(&self) -> *mut [FbdRule; MAX_RULES] {
+        self.0.get()
+    }
+}
+
+/// Static rule table for fault injection.
+static RULES: RulesCell = RulesCell::new();
 
 /// Find a rule by index (0-based). Returns None if out of range or empty.
 fn rule_find(index: usize) -> Option<&'static FbdRule> {
@@ -124,7 +136,8 @@ fn rule_find(index: usize) -> Option<&'static FbdRule> {
         return None;
     }
     unsafe {
-        let rule = &RULES[index];
+        let rules = RULES.get();
+        let rule = &(*rules)[index];
         if rule.action == 0 && rule.flags == 0 && rule.probability == 0 {
             return None;
         }
@@ -141,9 +154,10 @@ fn rule_find_by_pos(position: u64, do_write: bool, action: u32) -> Option<usize>
         FBD_FLAG_READ
     };
     unsafe {
+        let rules = RULES.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_RULES {
-            let rule = &RULES[i];
+            let rule = &(*rules)[i];
             if rule.action == 0 && rule.flags == 0 && rule.probability == 0 {
                 continue;
             }
@@ -235,7 +249,7 @@ pub fn fbd_ioctl(request: u32, arg: u64) -> Result<(), DriverError> {
             let idx = arg as usize;
             if idx < MAX_RULES {
                 unsafe {
-                    RULES[idx] = FbdRule::new();
+                    (*RULES.get())[idx] = FbdRule::new();
                 }
                 Ok(())
             } else {
@@ -262,9 +276,9 @@ mod tests {
     /// Reset global state for tests.
     unsafe fn reset() {
         unsafe {
-            let rules_ptr = core::ptr::addr_of_mut!(RULES) as *mut FbdRule;
+            let rules = RULES.get();
             for i in 0..MAX_RULES {
-                core::ptr::write(rules_ptr.add(i), FbdRule::new());
+                core::ptr::write(&mut (*rules)[i], FbdRule::new());
             }
         }
     }
@@ -334,7 +348,6 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<FbdConfig>();
     }
-
 
     #[test]
     fn test_fbd_open_close_ok() {
@@ -408,7 +421,7 @@ mod tests {
         unsafe {
             reset();
             // Add a drop rule.
-            RULES[0] = FbdRule {
+            (*RULES.get())[0] = FbdRule {
                 action: FbdAction::Drop as u32,
                 flags: FBD_FLAG_WRITE,
                 pos_start: 0,

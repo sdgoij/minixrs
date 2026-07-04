@@ -4,7 +4,7 @@
 //! virtual timers, and load-average accounting. The timer interrupt handler
 //! (`timer_int_handler`) is called on every clock tick on the BSP.
 
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, Ordering};
 
 use crate::glo::LOADINFO;
 use crate::glo::SYSTEM_HZ;
@@ -44,10 +44,10 @@ static ADJTIME_DELTA: core::sync::atomic::AtomicI32 = core::sync::atomic::Atomic
 static BOOTTIME: AtomicI64 = AtomicI64::new(0);
 
 /// Queue of CLOCK timers.
-static mut CLOCK_TIMERS: *mut MinixTimer = core::ptr::null_mut();
+static CLOCK_TIMERS: AtomicPtr<MinixTimer> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Monotonic time at which the next timer in the queue expires.
-static mut NEXT_TIMEOUT: u64 = TMR_NEVER;
+static NEXT_TIMEOUT: AtomicU64 = AtomicU64::new(TMR_NEVER);
 
 // Timer queue management  (from `minix/include/minix/timers.h`)
 
@@ -183,13 +183,17 @@ pub fn get_adjtime_delta() -> i32 {
 /// `tp` must point to a valid, unqueued `MinixTimer`.
 pub unsafe fn set_kernel_timer(tp: *mut MinixTimer, exp_time: u64, watchdog: usize) {
     unsafe {
-        let timers = core::ptr::addr_of_mut!(CLOCK_TIMERS);
+        let timers = CLOCK_TIMERS.as_ptr();
         tmrs_settimer(timers, tp, exp_time, watchdog, core::ptr::null_mut());
-        NEXT_TIMEOUT = if CLOCK_TIMERS.is_null() {
-            TMR_NEVER
-        } else {
-            (*CLOCK_TIMERS).tmr_exp_time
-        };
+        let head = CLOCK_TIMERS.load(Ordering::Relaxed);
+        NEXT_TIMEOUT.store(
+            if head.is_null() {
+                TMR_NEVER
+            } else {
+                (*head).tmr_exp_time
+            },
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -200,13 +204,17 @@ pub unsafe fn set_kernel_timer(tp: *mut MinixTimer, exp_time: u64, watchdog: usi
 /// `tp` must point to a timer that may or may not be queued.
 pub unsafe fn reset_kernel_timer(tp: *mut MinixTimer) {
     unsafe {
-        let timers = core::ptr::addr_of_mut!(CLOCK_TIMERS);
+        let timers = CLOCK_TIMERS.as_ptr();
         tmrs_clrtimer(timers, tp, core::ptr::null_mut());
-        NEXT_TIMEOUT = if CLOCK_TIMERS.is_null() {
-            TMR_NEVER
-        } else {
-            (*CLOCK_TIMERS).tmr_exp_time
-        };
+        let head = CLOCK_TIMERS.load(Ordering::Relaxed);
+        NEXT_TIMEOUT.store(
+            if head.is_null() {
+                TMR_NEVER
+            } else {
+                (*head).tmr_exp_time
+            },
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -358,14 +366,18 @@ pub unsafe fn timer_int_handler() {
 
         load_update();
 
-        if NEXT_TIMEOUT <= mono {
-            let timers = core::ptr::addr_of_mut!(CLOCK_TIMERS);
+        if NEXT_TIMEOUT.load(Ordering::Relaxed) <= mono {
+            let timers = CLOCK_TIMERS.as_ptr();
             tmrs_exptimers(timers, mono, core::ptr::null_mut());
-            NEXT_TIMEOUT = if CLOCK_TIMERS.is_null() {
-                TMR_NEVER
-            } else {
-                (*CLOCK_TIMERS).tmr_exp_time
-            };
+            let head = CLOCK_TIMERS.load(Ordering::Relaxed);
+            NEXT_TIMEOUT.store(
+                if head.is_null() {
+                    TMR_NEVER
+                } else {
+                    (*head).tmr_exp_time
+                },
+                Ordering::Relaxed,
+            );
         }
     }
 }

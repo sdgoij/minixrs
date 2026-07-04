@@ -2,6 +2,7 @@
 //!
 //! Implements the core Minix IPC primitives.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
 
 use arch_common::ipc::{
@@ -534,8 +535,25 @@ pub const SERVER_DISPATCH_SLOTS: usize = 16;
 pub type ServerDispatchFn = unsafe fn(*mut Proc, &mut [u8; MESSAGE_SIZE]) -> i32;
 
 /// Dispatch table indexed by endpoint slot.
-static mut SERVER_DISPATCH: [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS] =
-    [None; SERVER_DISPATCH_SLOTS];
+struct ServerDispatchCell(UnsafeCell<[Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS]>);
+unsafe impl Sync for ServerDispatchCell {}
+impl ServerDispatchCell {
+    const fn new(val: [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS] {
+        self.0.get()
+    }
+}
+
+static SERVER_DISPATCH: ServerDispatchCell = ServerDispatchCell::new([None; SERVER_DISPATCH_SLOTS]);
+
+unsafe fn write_server_dispatch(slot: usize, handler: ServerDispatchFn) {
+    unsafe {
+        let p = core::ptr::addr_of_mut!((*SERVER_DISPATCH.get())[slot]);
+        core::ptr::write(p, Some(handler));
+    }
+}
 
 /// Register an in-kernel dispatch handler for an endpoint.
 /// Returns `true` if the endpoint was within the dispatch range.
@@ -545,7 +563,7 @@ pub fn register_server_dispatch(ep: i32, handler: ServerDispatchFn) -> bool {
         return false;
     }
     unsafe {
-        SERVER_DISPATCH[slot as usize] = Some(handler);
+        write_server_dispatch(slot as usize, handler);
     }
     true
 }
@@ -566,7 +584,7 @@ pub unsafe fn try_server_dispatch(
     if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
         return None;
     }
-    unsafe { SERVER_DISPATCH[slot as usize].map(|handler| handler(caller, msg)) }
+    unsafe { (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg)) }
 }
 
 // ── Exec dispatch handlers
@@ -577,12 +595,23 @@ pub type SetExecRipFn = unsafe fn(*mut Proc, new_rip: u64, new_rsp: u64);
 
 /// Arch-specific exec target setter. Set by the architecture layer
 /// during initialization (e.g., to `asm_exec_handler` in arch-x86_64).
-static mut SET_EXEC_RIP: Option<SetExecRipFn> = None;
+struct SetExecRipCell(UnsafeCell<Option<SetExecRipFn>>);
+unsafe impl Sync for SetExecRipCell {}
+impl SetExecRipCell {
+    const fn new(val: Option<SetExecRipFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<SetExecRipFn> {
+        self.0.get()
+    }
+}
+
+static SET_EXEC_RIP: SetExecRipCell = SetExecRipCell::new(None);
 
 /// Register the architecture-specific function for setting exec targets.
 pub fn register_set_exec_rip(f: SetExecRipFn) {
     unsafe {
-        SET_EXEC_RIP = Some(f);
+        core::ptr::write(SET_EXEC_RIP.get(), Some(f));
     }
 }
 
@@ -594,7 +623,7 @@ pub fn register_set_exec_rip(f: SetExecRipFn) {
 /// `proc` must point to a valid `Proc`. The returned function pointer
 /// must be the arch-specific exec target setter.
 pub unsafe fn set_exec_target(proc: *mut Proc, new_rip: u64, new_rsp: u64) {
-    if let Some(f) = unsafe { SET_EXEC_RIP } {
+    if let Some(f) = unsafe { *SET_EXEC_RIP.get() } {
         unsafe { f(proc, new_rip, new_rsp) };
     }
 }

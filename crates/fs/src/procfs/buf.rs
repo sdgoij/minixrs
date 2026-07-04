@@ -3,27 +3,38 @@
 //! Provides a static 4096-byte buffer with skip/limit semantics.
 //! All formatting goes through `core::fmt::Write` to remain `no_std`-compatible.
 
+use core::cell::UnsafeCell;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub const BUF_SIZE: usize = 4096;
 
-static mut BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
-static mut OFF: usize = 0; // offset into BUF where data starts (after skip)
-static mut USED: usize = 0; // bytes of useful data written
-static mut LEFT: usize = 0; // remaining writable capacity
-static mut SKIP: u64 = 0; // bytes to skip before recording
+struct ProcfsBufCell(UnsafeCell<[u8; BUF_SIZE]>);
+unsafe impl Sync for ProcfsBufCell {}
+impl ProcfsBufCell {
+    const fn new(val: [u8; BUF_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u8; BUF_SIZE] {
+        self.0.get()
+    }
+}
+
+static BUF: ProcfsBufCell = ProcfsBufCell::new([0; BUF_SIZE]);
+static OFF: AtomicUsize = AtomicUsize::new(0); // offset into BUF where data starts (after skip)
+static USED: AtomicUsize = AtomicUsize::new(0); // bytes of useful data written
+static LEFT: AtomicUsize = AtomicUsize::new(0); // remaining writable capacity
+static SKIP: AtomicU64 = AtomicU64::new(0); // bytes to skip before recording
 
 /// Initialize the buffer for fresh use.
 ///
 /// The first `start` bytes of produced output are skipped. After that,
 /// at most `len` bytes are retained.
 pub fn buf_init(start: u64, len: usize) {
-    unsafe {
-        SKIP = start;
-        LEFT = len.min(BUF_SIZE);
-        OFF = 0;
-        USED = 0;
-    }
+    SKIP.store(start, Ordering::Relaxed);
+    LEFT.store(len.min(BUF_SIZE), Ordering::Relaxed);
+    OFF.store(0, Ordering::Relaxed);
+    USED.store(0, Ordering::Relaxed);
 }
 
 /// Append a plain string to the buffer.
@@ -39,42 +50,51 @@ pub fn buf_write_fmt(args: fmt::Arguments<'_>) {
 
 /// Append raw bytes to the buffer.
 pub fn buf_append(data: &[u8]) {
-    unsafe {
-        if LEFT == 0 {
+    let left = LEFT.load(Ordering::Relaxed);
+    if left == 0 {
+        return;
+    }
+
+    let mut data = data;
+    let mut len = data.len();
+
+    let skip = SKIP.load(Ordering::Relaxed);
+    if skip > 0 {
+        let skip_usize = skip as usize;
+        if skip_usize >= len {
+            SKIP.store(skip - len as u64, Ordering::Relaxed);
             return;
         }
-
-        let mut data = data;
-        let mut len = data.len();
-
-        if SKIP > 0 {
-            let skip = SKIP as usize;
-            if skip >= len {
-                SKIP -= len as u64;
-                return;
-            }
-            data = &data[skip..];
-            len -= skip;
-            SKIP = 0;
-        }
-
-        if len > LEFT {
-            len = LEFT;
-        }
-
-        let dst = &mut BUF[OFF + USED..][..len];
-        dst.copy_from_slice(&data[..len]);
-
-        USED += len;
-        LEFT -= len;
+        data = &data[skip_usize..];
+        len -= skip_usize;
+        SKIP.store(0, Ordering::Relaxed);
     }
+
+    if len > left {
+        len = left;
+    }
+
+    let off = OFF.load(Ordering::Relaxed);
+    let used = USED.load(Ordering::Relaxed);
+    let dst =
+        unsafe { core::slice::from_raw_parts_mut(BUF.get().cast::<u8>().add(off + used), len) };
+    dst.copy_from_slice(&data[..len]);
+
+    USED.store(used + len, Ordering::Relaxed);
+    LEFT.store(left - len, Ordering::Relaxed);
 }
 
 /// Return a pointer to the used portion of the buffer and its length.
 pub fn buf_get() -> (&'static [u8], usize) {
-    unsafe { (&BUF[OFF..][..USED], USED) }
+    let off = OFF.load(Ordering::Relaxed);
+    let used = USED.load(Ordering::Relaxed);
+    unsafe {
+        (
+            core::slice::from_raw_parts(BUF.get().cast::<u8>().add(off), used),
+            used,
+        )
+    }
 }
-
 
 struct BufWriter;
 

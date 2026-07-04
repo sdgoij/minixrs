@@ -14,6 +14,8 @@
 
 #![no_std]
 
+#[cfg(target_os = "none")]
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod alloc;
@@ -73,19 +75,60 @@ pub fn init() {
 
 /// Boot-time kernel stack for ring-3→ring-0 transitions (RSP0).
 #[cfg(target_os = "none")]
-static mut BOOT_KSTACK: [u8; 4096] = [0u8; 4096];
+struct BootStackCell(UnsafeCell<[u8; 4096]>);
+#[cfg(target_os = "none")]
+unsafe impl Sync for BootStackCell {}
+#[cfg(target_os = "none")]
+impl BootStackCell {
+    const fn new(val: [u8; 4096]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u8; 4096] {
+        self.0.get()
+    }
+}
+#[cfg(target_os = "none")]
+static BOOT_KSTACK: BootStackCell = BootStackCell::new([0u8; 4096]);
 /// IST1 stack for page fault handler.
 #[cfg(target_os = "none")]
-static mut BOOT_IST1_STACK: [u8; 4096] = [0u8; 4096];
+static BOOT_IST1_STACK: BootStackCell = BootStackCell::new([0u8; 4096]);
 /// IST2 stack for double fault handler.
 #[cfg(target_os = "none")]
-static mut BOOT_IST2_STACK: [u8; 4096] = [0u8; 4096];
+static BOOT_IST2_STACK: BootStackCell = BootStackCell::new([0u8; 4096]);
+
+#[cfg(target_os = "none")]
+struct BootTssCell(UnsafeCell<crate::tss::Tss64>);
+#[cfg(target_os = "none")]
+unsafe impl Sync for BootTssCell {}
+#[cfg(target_os = "none")]
+impl BootTssCell {
+    const fn new(val: crate::tss::Tss64) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut crate::tss::Tss64 {
+        self.0.get()
+    }
+}
 /// Boot TSS.
 #[cfg(target_os = "none")]
-static mut BOOT_TSS: crate::tss::Tss64 = crate::tss::Tss64::new_zeroed();
+static BOOT_TSS: BootTssCell = BootTssCell::new(crate::tss::Tss64::new_zeroed());
+
+#[cfg(target_os = "none")]
+struct BootGdtCell(UnsafeCell<[u64; segments::NGDT as usize]>);
+#[cfg(target_os = "none")]
+unsafe impl Sync for BootGdtCell {}
+#[cfg(target_os = "none")]
+impl BootGdtCell {
+    const fn new(val: [u64; segments::NGDT as usize]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u64; segments::NGDT as usize] {
+        self.0.get()
+    }
+}
 /// Boot GDT (16 entries).
 #[cfg(target_os = "none")]
-static mut BOOT_GDT: [u64; segments::NGDT as usize] = [
+static BOOT_GDT: BootGdtCell = BootGdtCell::new([
     0x0000000000000000,
     0x00AF9A0000000000,
     0x00CF920000000000,
@@ -102,7 +145,7 @@ static mut BOOT_GDT: [u64; segments::NGDT as usize] = [
     0,
     0,
     0,
-];
+]);
 
 /// Set up the TSS and GDT required for ring-3 interrupts.
 ///
@@ -118,11 +161,11 @@ pub unsafe fn init_tss_for_boot() {
 
     // Wrap all unsafe operations in a single block for Rust 2024 compatibility.
     unsafe {
-        let stack_top = ptr::addr_of_mut!(BOOT_KSTACK) as *mut u8 as u64 + 4096;
-        let ist1_top = ptr::addr_of_mut!(BOOT_IST1_STACK) as *mut u8 as u64 + 4096;
-        let ist2_top = ptr::addr_of_mut!(BOOT_IST2_STACK) as *mut u8 as u64 + 4096;
+        let stack_top = BOOT_KSTACK.get() as *mut u8 as u64 + 4096;
+        let ist1_top = BOOT_IST1_STACK.get() as *mut u8 as u64 + 4096;
+        let ist2_top = BOOT_IST2_STACK.get() as *mut u8 as u64 + 4096;
 
-        let tss_bytes = ptr::addr_of_mut!(BOOT_TSS) as *mut u8;
+        let tss_bytes = BOOT_TSS.get() as *mut u8;
         ptr::write_unaligned(tss_bytes.add(4) as *mut u32, stack_top as u32);
         ptr::write_unaligned(tss_bytes.add(8) as *mut u32, (stack_top >> 32) as u32);
         ptr::write_unaligned(tss_bytes.add(36) as *mut u32, ist1_top as u32);
@@ -130,7 +173,7 @@ pub unsafe fn init_tss_for_boot() {
         ptr::write_unaligned(tss_bytes.add(44) as *mut u32, ist2_top as u32);
         ptr::write_unaligned(tss_bytes.add(48) as *mut u32, (ist2_top >> 32) as u32);
 
-        let gdt = ptr::addr_of_mut!(BOOT_GDT) as *mut u8;
+        let gdt = BOOT_GDT.get() as *mut u8;
         let tss_addr = tss_bytes as u64;
         let tss_limit = 103u32;
         let tss_desc = gdt.add(GTSS_SEL as usize * 8);

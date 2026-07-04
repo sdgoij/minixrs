@@ -9,7 +9,9 @@
 //! accessible at the point of use. On bare metal this holds (PD3 covers
 //! the 3-4 GB range); on host test binaries these calls will fault.
 
+use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::asm;
 
@@ -80,10 +82,22 @@ pub enum ApicMode {
 
 // ── Global APIC state ──────────────────────────────────────────────────
 
-static mut APIC_BASE: u64 = 0;
-static mut IOAPIC_BASE: u64 = 0;
-static mut APIC_MODE: ApicMode = ApicMode::PicOnly;
-static mut APIC_ENABLED: bool = false;
+/// APIC mode cell (wraps UnsafeCell for safe global access).
+struct ApicModeCell(UnsafeCell<ApicMode>);
+unsafe impl Sync for ApicModeCell {}
+impl ApicModeCell {
+    const fn new(val: ApicMode) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut ApicMode {
+        self.0.get()
+    }
+}
+
+static APIC_BASE: AtomicU64 = AtomicU64::new(0);
+static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
+static APIC_MODE: ApicModeCell = ApicModeCell::new(ApicMode::PicOnly);
+static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // ── Helper: MMIO register access ───────────────────────────────────────
 
@@ -95,7 +109,7 @@ static mut APIC_ENABLED: bool = false;
 /// Calling this in x2APIC mode or without a mapped APIC produces UB.
 unsafe fn apic_read(offset: u32) -> u32 {
     unsafe {
-        let addr = (APIC_BASE + offset as u64) as *const u32;
+        let addr = (APIC_BASE.load(Ordering::Relaxed) + offset as u64) as *const u32;
         ptr::read_volatile(addr)
     }
 }
@@ -108,7 +122,7 @@ unsafe fn apic_read(offset: u32) -> u32 {
 /// Calling this in x2APIC mode or without a mapped APIC produces UB.
 unsafe fn apic_write(offset: u32, val: u32) {
     unsafe {
-        let addr = (APIC_BASE + offset as u64) as *mut u32;
+        let addr = (APIC_BASE.load(Ordering::Relaxed) + offset as u64) as *mut u32;
         ptr::write_volatile(addr, val);
     }
 }
@@ -121,8 +135,8 @@ unsafe fn apic_write(offset: u32, val: u32) {
 /// address. Calling without a mapped I/O APIC produces UB.
 unsafe fn ioapic_read(reg: u32) -> u32 {
     unsafe {
-        let sel_addr = (IOAPIC_BASE + IOAPIC_IOREGSEL) as *mut u32;
-        let win_addr = (IOAPIC_BASE + IOAPIC_IOWIN) as *mut u32;
+        let sel_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOREGSEL) as *mut u32;
+        let win_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOWIN) as *mut u32;
         ptr::write_volatile(sel_addr, reg);
         ptr::read_volatile(win_addr)
     }
@@ -136,8 +150,8 @@ unsafe fn ioapic_read(reg: u32) -> u32 {
 /// address. Calling without a mapped I/O APIC produces UB.
 unsafe fn ioapic_write(reg: u32, val: u32) {
     unsafe {
-        let sel_addr = (IOAPIC_BASE + IOAPIC_IOREGSEL) as *mut u32;
-        let win_addr = (IOAPIC_BASE + IOAPIC_IOWIN) as *mut u32;
+        let sel_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOREGSEL) as *mut u32;
+        let win_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOWIN) as *mut u32;
         ptr::write_volatile(sel_addr, reg);
         ptr::write_volatile(win_addr, val);
     }
@@ -327,7 +341,7 @@ pub unsafe fn setup_pit_irq(vector: u8) {
 /// Must be called in ring 0.
 pub unsafe fn eoi() {
     unsafe {
-        if APIC_ENABLED {
+        if APIC_ENABLED.load(Ordering::Relaxed) {
             apic_write(APIC_EOI_OFF, 0);
         }
     }
@@ -350,21 +364,21 @@ pub unsafe fn detect_and_init() {
         // SAFETY: caller guarantees ring 0.
         let base = detect_apic_base();
         if base == 0 || !apic_is_enabled() {
-            APIC_MODE = ApicMode::PicOnly;
+            *APIC_MODE.get() = ApicMode::PicOnly;
             return;
         }
 
-        APIC_BASE = base;
+        APIC_BASE.store(base, Ordering::Relaxed);
 
         if apic_is_x2apic() {
-            APIC_MODE = ApicMode::X2Apic;
+            *APIC_MODE.get() = ApicMode::X2Apic;
             // x2APIC uses MSR-based access, not MMIO
         } else {
-            APIC_MODE = ApicMode::XApic;
+            *APIC_MODE.get() = ApicMode::XApic;
         }
 
         // Initialize I/O APIC
-        IOAPIC_BASE = DEFAULT_IOAPIC_BASE;
+        IOAPIC_BASE.store(DEFAULT_IOAPIC_BASE, Ordering::Relaxed);
 
         // Reprogram LINT0 if needed
         reprogram_lint0();
@@ -375,7 +389,7 @@ pub unsafe fn detect_and_init() {
         // Mask all I/O APIC RTEs
         init_ioapic();
 
-        APIC_ENABLED = true;
+        APIC_ENABLED.store(true, Ordering::Relaxed);
     }
 }
 
@@ -489,7 +503,7 @@ pub unsafe fn enable_apic() {
 /// Must be called in ring 0 with a mapped I/O APIC.
 pub unsafe fn set_irq_vector(irq: u32, vector: u8) {
     unsafe {
-        if !APIC_ENABLED {
+        if !APIC_ENABLED.load(Ordering::Relaxed) {
             return;
         }
         let reg = ioapic_rte_index(irq);
@@ -507,7 +521,7 @@ pub unsafe fn mask_irq(irq: u32) {
     use crate::asm;
 
     unsafe {
-        if APIC_ENABLED {
+        if APIC_ENABLED.load(Ordering::Relaxed) {
             let reg = ioapic_rte_index(irq);
             let val = ioapic_read(reg);
             ioapic_write(reg, val | 0x10000);
@@ -529,7 +543,7 @@ pub unsafe fn unmask_irq(irq: u32) {
     use crate::asm;
 
     unsafe {
-        if APIC_ENABLED {
+        if APIC_ENABLED.load(Ordering::Relaxed) {
             let reg = ioapic_rte_index(irq);
             let val = ioapic_read(reg);
             ioapic_write(reg, val & !0x10000);
@@ -544,12 +558,12 @@ pub unsafe fn unmask_irq(irq: u32) {
 
 /// Get the current APIC mode.
 pub fn current_apic_mode() -> ApicMode {
-    unsafe { APIC_MODE }
+    unsafe { *APIC_MODE.get() }
 }
 
 /// Get whether the APIC is currently enabled.
 pub fn is_apic_enabled() -> bool {
-    unsafe { APIC_ENABLED }
+    APIC_ENABLED.load(Ordering::Relaxed)
 }
 
 // ── 11b.13: PIT timer programming ──────────────────────────────────────
@@ -582,8 +596,20 @@ pub unsafe fn init_pit(freq: u32) {
 /// Function pointer type for the timer interrupt handler.
 pub type TimerIsrFn = unsafe extern "C" fn();
 
+struct TimerIsrCell(UnsafeCell<Option<TimerIsrFn>>);
+unsafe impl Sync for TimerIsrCell {}
+impl TimerIsrCell {
+    const fn new(val: Option<TimerIsrFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<TimerIsrFn> {
+        self.0.get()
+    }
+}
+
 /// Registered timer ISR handler.  Called by the assembly trampoline.
-static mut TIMER_ISR_HANDLER: Option<TimerIsrFn> = None;
+#[used]
+static TIMER_ISR_HANDLER: TimerIsrCell = TimerIsrCell::new(None);
 
 /// Register the function to call on each timer tick.
 ///
@@ -593,7 +619,7 @@ static mut TIMER_ISR_HANDLER: Option<TimerIsrFn> = None;
 /// interrupt context and must be re-entrant safe.
 pub unsafe fn set_timer_isr_handler(handler: TimerIsrFn) {
     unsafe {
-        TIMER_ISR_HANDLER = Some(handler);
+        core::ptr::write(TIMER_ISR_HANDLER.get(), Some(handler));
     }
 }
 
@@ -688,8 +714,20 @@ pub unsafe fn arch_ack_profile_clock() {
 /// Function pointer type for the profile clock interrupt handler.
 pub type ProfileClockFn = unsafe extern "C" fn();
 
+struct ProfileClockCell(UnsafeCell<Option<ProfileClockFn>>);
+unsafe impl Sync for ProfileClockCell {}
+impl ProfileClockCell {
+    const fn new(val: Option<ProfileClockFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<ProfileClockFn> {
+        self.0.get()
+    }
+}
+
 /// Registered profile clock ISR handler.
-static mut PROFILE_CLOCK_HANDLER: Option<ProfileClockFn> = None;
+#[used]
+static PROFILE_CLOCK_HANDLER: ProfileClockCell = ProfileClockCell::new(None);
 
 /// Register the function to call on each profile clock tick.
 ///
@@ -698,7 +736,7 @@ static mut PROFILE_CLOCK_HANDLER: Option<ProfileClockFn> = None;
 /// Must be called once during boot.
 pub unsafe fn set_profile_clock_handler(handler: ProfileClockFn) {
     unsafe {
-        PROFILE_CLOCK_HANDLER = Some(handler);
+        core::ptr::write(PROFILE_CLOCK_HANDLER.get(), Some(handler));
     }
 }
 
@@ -810,8 +848,20 @@ pub unsafe extern "C" fn nmi_profile_entry() {
 /// NMI profile handler function pointer type.
 pub type NmiProfileFn = unsafe extern "C" fn();
 
+struct NmiProfileCell(UnsafeCell<Option<NmiProfileFn>>);
+unsafe impl Sync for NmiProfileCell {}
+impl NmiProfileCell {
+    const fn new(val: Option<NmiProfileFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<NmiProfileFn> {
+        self.0.get()
+    }
+}
+
 /// Registered NMI profile handler.
-static mut NMI_PROFILE_HANDLER: Option<NmiProfileFn> = None;
+#[used]
+static NMI_PROFILE_HANDLER: NmiProfileCell = NmiProfileCell::new(None);
 
 /// Register the function to call on each NMI profile tick.
 ///
@@ -820,7 +870,7 @@ static mut NMI_PROFILE_HANDLER: Option<NmiProfileFn> = None;
 /// Must be called once during boot.
 pub unsafe fn set_nmi_profile_handler(handler: NmiProfileFn) {
     unsafe {
-        NMI_PROFILE_HANDLER = Some(handler);
+        core::ptr::write(NMI_PROFILE_HANDLER.get(), Some(handler));
     }
 }
 
@@ -886,8 +936,20 @@ pub unsafe extern "C" fn timer_isr_entry() {
 /// Function pointer type for the serial interrupt handler.
 pub type SerialIsrFn = unsafe extern "C" fn();
 
+struct SerialIsrCell(UnsafeCell<Option<SerialIsrFn>>);
+unsafe impl Sync for SerialIsrCell {}
+impl SerialIsrCell {
+    const fn new(val: Option<SerialIsrFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<SerialIsrFn> {
+        self.0.get()
+    }
+}
+
 /// Registered serial ISR handler. Called by the assembly trampoline.
-static mut SERIAL_ISR_HANDLER: Option<SerialIsrFn> = None;
+#[used]
+static SERIAL_ISR_HANDLER: SerialIsrCell = SerialIsrCell::new(None);
 
 /// Register the function to call on each serial port interrupt.
 ///
@@ -896,7 +958,7 @@ static mut SERIAL_ISR_HANDLER: Option<SerialIsrFn> = None;
 /// Must be called before enabling serial interrupts.
 pub unsafe fn set_serial_isr_handler(handler: SerialIsrFn) {
     unsafe {
-        SERIAL_ISR_HANDLER = Some(handler);
+        core::ptr::write(SERIAL_ISR_HANDLER.get(), Some(handler));
     }
 }
 

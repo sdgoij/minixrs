@@ -7,6 +7,7 @@
 //! The implementation is ported from Minix 3.3.0's `libminixfs/cache.c`.
 
 use alloc::alloc;
+use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -67,57 +68,63 @@ fn get_block_io() -> Option<BlockIoFn> {
 
 // Static (global) state
 
-/// Hash table for fast buffer lookup by block number.
-static mut BUF_HASH: *mut *mut Buf = ptr::null_mut();
+struct FsCacheGlobals {
+    buf_hash: *mut *mut Buf,
+    front: *mut Buf,
+    rear: *mut Buf,
+    buf: *mut Buf,
+    nr_bufs: usize,
+    bufs_in_use: i32,
+    fs_block_size: u32,
+    vmcache: i32,
+    may_use_vmcache: i32,
+    rdwt_err: i32,
+    quiet: i32,
+}
 
-/// Front of the LRU free list (least recently used).
-static mut FRONT: *mut Buf = ptr::null_mut();
+struct FsCacheCell(UnsafeCell<FsCacheGlobals>);
+unsafe impl Sync for FsCacheCell {}
+impl FsCacheCell {
+    const fn new(val: FsCacheGlobals) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut FsCacheGlobals {
+        self.0.get()
+    }
+}
 
-/// Rear of the LRU free list (most recently used).
-static mut REAR: *mut Buf = ptr::null_mut();
-
-/// The buffer array (allocated at pool init).
-static mut BUF: *mut Buf = ptr::null_mut();
-
-/// Total number of buffers.
-static mut NR_BUFS: usize = 0;
-
-/// Number of buffers currently in use (not on free list).
-static mut BUFS_IN_USE: i32 = 0;
-
-/// Current filesystem block size.
-static mut FS_BLOCK_SIZE: u32 = PAGE_SIZE;
-
-/// VM secondary cache enabled flag.
-static mut VMCACHE: i32 = 0;
-
-/// Whether the VM secondary cache is allowed for this FS.
-static mut MAY_USE_VMCACHE: i32 = 0;
-
-/// Last read/write error code.
-static mut RDWT_ERR: i32 = OK;
-
-/// Quiet mode flag (suppress diagnostic output).
-static mut QUIET: i32 = 0;
+static FS_CACHE: FsCacheCell = FsCacheCell::new(FsCacheGlobals {
+    buf_hash: ptr::null_mut(),
+    front: ptr::null_mut(),
+    rear: ptr::null_mut(),
+    buf: ptr::null_mut(),
+    nr_bufs: 0,
+    bufs_in_use: 0,
+    fs_block_size: PAGE_SIZE,
+    vmcache: 0,
+    may_use_vmcache: 0,
+    rdwt_err: OK,
+    quiet: 0,
+});
 
 // Helpers to safely read/write static mut via raw pointers
 
 macro_rules! static_read {
-    ($var:ident) => {{
+    ($field:ident) => {{
         // SAFETY: single-threaded; no concurrent access
         #[allow(unused_unsafe)]
         unsafe {
-            ptr::addr_of_mut!($var).read()
+            (*FS_CACHE.get()).$field
         }
     }};
 }
 
 macro_rules! static_write {
-    ($var:ident, $val:expr) => {{
+    ($field:ident, $val:expr) => {{
         // SAFETY: single-threaded; no concurrent access
         #[allow(unused_unsafe)]
         unsafe {
-            ptr::addr_of_mut!($var).write($val)
+            (*FS_CACHE.get()).$field = $val;
         }
     }};
 }
@@ -126,7 +133,7 @@ macro_rules! static_write {
 
 /// Hash function: maps a block number to a hash bucket index.
 fn bufhash(block: u64) -> usize {
-    let nr = static_read!(NR_BUFS);
+    let nr = static_read!(nr_bufs);
     if nr == 0 { 0 } else { (block as usize) % nr }
 }
 
@@ -145,13 +152,13 @@ unsafe fn rm_lru(bp: *mut Buf) {
     if !prev_ptr.is_null() {
         unsafe { (*prev_ptr).lmfs_next = next_ptr };
     } else {
-        static_write!(FRONT, next_ptr);
+        static_write!(front, next_ptr);
     }
 
     if !next_ptr.is_null() {
         unsafe { (*next_ptr).lmfs_prev = prev_ptr };
     } else {
-        static_write!(REAR, prev_ptr);
+        static_write!(rear, prev_ptr);
     }
 }
 
@@ -161,14 +168,14 @@ unsafe fn rm_lru(bp: *mut Buf) {
 ///
 /// `bp` must point to a valid `Buf`.
 unsafe fn raisecount(bp: *mut Buf) {
-    debug_assert!(static_read!(BUFS_IN_USE) >= 0);
+    debug_assert!(static_read!(bufs_in_use) >= 0);
     debug_assert!(unsafe { (*bp).lmfs_count >= 0 });
     unsafe { (*bp).lmfs_count += 1 };
     if unsafe { (*bp).lmfs_count == 1 } {
-        let in_use = static_read!(BUFS_IN_USE);
-        static_write!(BUFS_IN_USE, in_use + 1);
+        let in_use = static_read!(bufs_in_use);
+        static_write!(bufs_in_use, in_use + 1);
     }
-    debug_assert!(static_read!(BUFS_IN_USE) > 0);
+    debug_assert!(static_read!(bufs_in_use) > 0);
 }
 
 /// Decrement reference count on a buffer.
@@ -177,14 +184,14 @@ unsafe fn raisecount(bp: *mut Buf) {
 ///
 /// `bp` must point to a valid `Buf`.
 unsafe fn lowercount(bp: *mut Buf) {
-    debug_assert!(static_read!(BUFS_IN_USE) > 0);
+    debug_assert!(static_read!(bufs_in_use) > 0);
     debug_assert!(unsafe { (*bp).lmfs_count > 0 });
     unsafe { (*bp).lmfs_count -= 1 };
     if unsafe { (*bp).lmfs_count == 0 } {
-        let in_use = static_read!(BUFS_IN_USE);
-        static_write!(BUFS_IN_USE, in_use - 1);
+        let in_use = static_read!(bufs_in_use);
+        static_write!(bufs_in_use, in_use - 1);
     }
-    debug_assert!(static_read!(BUFS_IN_USE) >= 0);
+    debug_assert!(static_read!(bufs_in_use) >= 0);
 }
 
 /// Free a block's data memory and reset it to the initial (NO_DEV) state.
@@ -200,7 +207,7 @@ unsafe fn freeblock(bp: *mut Buf) {
             // SAFETY: flushall accesses global state but we hold BP.
             unsafe { flushall((*bp).lmfs_dev) };
         }
-        debug_assert!(unsafe { (*bp).lmfs_bytes == static_read!(FS_BLOCK_SIZE) });
+        debug_assert!(unsafe { (*bp).lmfs_bytes == static_read!(fs_block_size) });
         unsafe { (*bp).lmfs_dev = NO_DEV };
     }
 
@@ -223,8 +230,8 @@ unsafe fn freeblock(bp: *mut Buf) {
 ///
 /// Must only be called when the global state is in a consistent state.
 unsafe fn flushall(dev: u32) {
-    let nr = static_read!(NR_BUFS);
-    let buf_ptr = static_read!(BUF);
+    let nr = static_read!(nr_bufs);
+    let buf_ptr = static_read!(buf);
 
     if buf_ptr.is_null() || nr == 0 {
         return;
@@ -291,8 +298,8 @@ unsafe fn cache_resize(blocksize: u32, bufs: usize) {
     debug_assert!(blocksize > 0);
     debug_assert!(bufs >= MINBUFS);
 
-    let nr = static_read!(NR_BUFS);
-    let buf_ptr = static_read!(BUF);
+    let nr = static_read!(nr_bufs);
+    let buf_ptr = static_read!(buf);
     for i in 0..nr {
         let bp = unsafe { buf_ptr.add(i) };
         if unsafe { (*bp).lmfs_count != 0 } {
@@ -303,7 +310,7 @@ unsafe fn cache_resize(blocksize: u32, bufs: usize) {
 
     // SAFETY: we checked no buffers are in use.
     unsafe { lmfs_buf_pool(bufs as i32) };
-    static_write!(FS_BLOCK_SIZE, blocksize);
+    static_write!(fs_block_size, blocksize);
 }
 
 // Public API
@@ -318,7 +325,7 @@ pub unsafe fn lmfs_alloc_block(bp: *mut Buf) {
     debug_assert!(unsafe { (*bp).data_ptr.is_null() });
     debug_assert!(unsafe { (*bp).lmfs_bytes == 0 });
 
-    let block_size = static_read!(FS_BLOCK_SIZE);
+    let block_size = static_read!(fs_block_size);
 
     let layout = alloc::Layout::from_size_align(block_size as usize, PAGE_SIZE as usize)
         .expect("bad block size alignment");
@@ -366,14 +373,14 @@ pub unsafe fn lmfs_get_block_ino(
     ino: u64,
     ino_off: u64,
 ) -> *mut Buf {
-    let buf_hash = static_read!(BUF_HASH);
-    let buf = static_read!(BUF);
-    let nr_bufs_val = static_read!(NR_BUFS);
+    let buf_hash = static_read!(buf_hash);
+    let buf = static_read!(buf);
+    let nr_bufs_val = static_read!(nr_bufs);
 
     debug_assert!(!buf_hash.is_null());
     debug_assert!(!buf.is_null());
     debug_assert!(nr_bufs_val > 0);
-    debug_assert!(static_read!(FS_BLOCK_SIZE) > 0);
+    debug_assert!(static_read!(fs_block_size) > 0);
     debug_assert!(dev != NO_DEV);
 
     // Search the hash chain for (dev, block).
@@ -402,7 +409,7 @@ pub unsafe fn lmfs_get_block_ino(
             }
             // SAFETY: bp is valid.
             unsafe { raisecount(bp) };
-            debug_assert!(unsafe { (*bp).lmfs_bytes == static_read!(FS_BLOCK_SIZE) });
+            debug_assert!(unsafe { (*bp).lmfs_bytes == static_read!(fs_block_size) });
             debug_assert!(unsafe { (*bp).lmfs_dev == dev });
             debug_assert!(unsafe { (*bp).lmfs_dev != NO_DEV });
             debug_assert!(unsafe { (*bp).lmfs_flags & VMMC_BLOCK_LOCKED != 0 });
@@ -431,7 +438,7 @@ pub unsafe fn lmfs_get_block_ino(
     if !bp.is_null() {
         debug_assert!(unsafe { (*bp).lmfs_flags & VMMC_EVICTED != 0 });
     } else {
-        bp = static_read!(FRONT);
+        bp = static_read!(front);
         if bp.is_null() {
             panic!("all buffers in use: {}", nr_bufs_val);
         }
@@ -479,7 +486,7 @@ pub unsafe fn lmfs_get_block_ino(
     debug_assert!(unsafe { (*bp).lmfs_bytes == 0 });
 
     // Try VM secondary cache first.
-    if static_read!(VMCACHE) != 0 {
+    if static_read!(vmcache) != 0 {
         // TODO: vm_map_cacheblock(dev, dev_off, ino, ino_off, &flags, fs_block_size)
     }
 
@@ -534,30 +541,30 @@ pub unsafe fn lmfs_put_block(bp: *mut Buf, _block_type: i32) {
     if dev == DEV_RAM || (_block_type & ONE_SHOT) != 0 {
         // Put on front (will be evicted soon).
         unsafe { (*bp).lmfs_prev = ptr::null_mut() };
-        unsafe { (*bp).lmfs_next = static_read!(FRONT) };
+        unsafe { (*bp).lmfs_next = static_read!(front) };
         if unsafe { (*bp).lmfs_next.is_null() } {
-            static_write!(REAR, bp);
+            static_write!(rear, bp);
         } else {
             unsafe { (*(*bp).lmfs_next).lmfs_prev = bp };
         }
-        static_write!(FRONT, bp);
+        static_write!(front, bp);
     } else {
         // Put on rear (will stay in cache longer).
-        unsafe { (*bp).lmfs_prev = static_read!(REAR) };
+        unsafe { (*bp).lmfs_prev = static_read!(rear) };
         unsafe { (*bp).lmfs_next = ptr::null_mut() };
         if unsafe { (*bp).lmfs_prev.is_null() } {
-            static_write!(FRONT, bp);
+            static_write!(front, bp);
         } else {
             unsafe { (*(*bp).lmfs_prev).lmfs_next = bp };
         }
-        static_write!(REAR, bp);
+        static_write!(rear, bp);
     }
 
     debug_assert!(unsafe { (*bp).lmfs_flags & VMMC_BLOCK_LOCKED != 0 });
     unsafe { (*bp).lmfs_flags &= !VMMC_BLOCK_LOCKED };
 
     // If VM cache is enabled, register this block with the VM.
-    if static_read!(VMCACHE) != 0 && unsafe { (*bp).lmfs_needsetcache != 0 } && dev != NO_DEV {
+    if static_read!(vmcache) != 0 && unsafe { (*bp).lmfs_needsetcache != 0 } && dev != NO_DEV {
         // TODO: vm_set_cacheblock(...)
     }
     unsafe { (*bp).lmfs_needsetcache = 0 };
@@ -600,8 +607,8 @@ pub unsafe fn lmfs_isclean(bp: *mut Buf) -> i32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_flushall() {
-    let nr = static_read!(NR_BUFS);
-    let buf_ptr = static_read!(BUF);
+    let nr = static_read!(nr_bufs);
+    let buf_ptr = static_read!(buf);
     if buf_ptr.is_null() {
         return;
     }
@@ -620,8 +627,8 @@ pub unsafe fn lmfs_flushall() {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_invalidate(device: u32) {
-    let nr = static_read!(NR_BUFS);
-    let buf_ptr = static_read!(BUF);
+    let nr = static_read!(nr_bufs);
+    let buf_ptr = static_read!(buf);
     if buf_ptr.is_null() {
         return;
     }
@@ -658,7 +665,7 @@ pub unsafe fn lmfs_rw_scattered(dev: u32, buf_vec: *mut *mut Buf, num: i32, rw_f
         return;
     }
 
-    let start_in_use = static_read!(BUFS_IN_USE);
+    let start_in_use = static_read!(bufs_in_use);
     let start_bufqsize = num;
 
     // For READING, all buffers must be held (count > 0).
@@ -725,7 +732,7 @@ pub unsafe fn lmfs_rw_scattered(dev: u32, buf_vec: *mut *mut Buf, num: i32, rw_f
         debug_assert!(nblocks > 0);
 
         // Perform I/O via registered callback.
-        let block_size = static_read!(FS_BLOCK_SIZE) as usize;
+        let block_size = static_read!(fs_block_size) as usize;
         let transferred = if let Some(f) = get_block_io() {
             // Build array of buffer data pointers for this consecutive range.
             // SAFETY: we own the buffers; they are valid for the duration of the call.
@@ -773,10 +780,10 @@ pub unsafe fn lmfs_rw_scattered(dev: u32, buf_vec: *mut *mut Buf, num: i32, rw_f
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_set_blocksize(new_block_size: u32, _major: i32) {
-    let nr = static_read!(NR_BUFS);
+    let nr = static_read!(nr_bufs);
     if nr == 0 {
         // Not initialized yet; just set the block size.
-        static_write!(FS_BLOCK_SIZE, new_block_size);
+        static_write!(fs_block_size, new_block_size);
         return;
     }
 
@@ -785,9 +792,9 @@ pub unsafe fn lmfs_set_blocksize(new_block_size: u32, _major: i32) {
     cache_heuristic_check(_major);
 
     // Decide whether to use VM secondary cache.
-    static_write!(VMCACHE, 0);
-    if static_read!(MAY_USE_VMCACHE) != 0 && new_block_size.is_multiple_of(PAGE_SIZE) {
-        static_write!(VMCACHE, 1);
+    static_write!(vmcache, 0);
+    if static_read!(may_use_vmcache) != 0 && new_block_size.is_multiple_of(PAGE_SIZE) {
+        static_write!(vmcache, 1);
     }
 }
 
@@ -803,8 +810,8 @@ pub unsafe fn lmfs_buf_pool(new_nr_bufs: i32) {
     let new_nr = new_nr_bufs as usize;
     debug_assert!(new_nr >= MINBUFS);
 
-    let old_nr = static_read!(NR_BUFS);
-    let old_buf = static_read!(BUF);
+    let old_nr = static_read!(nr_bufs);
+    let old_buf = static_read!(buf);
 
     if old_nr > 0 {
         debug_assert!(!old_buf.is_null());
@@ -836,14 +843,14 @@ pub unsafe fn lmfs_buf_pool(new_nr_bufs: i32) {
         panic!("couldn't allocate buf hash list ({})", new_nr);
     }
 
-    static_write!(BUF, new_buf);
-    static_write!(BUF_HASH, new_hash);
-    static_write!(NR_BUFS, new_nr);
-    static_write!(BUFS_IN_USE, 0);
+    static_write!(buf, new_buf);
+    static_write!(buf_hash, new_hash);
+    static_write!(nr_bufs, new_nr);
+    static_write!(bufs_in_use, 0);
 
     // Set up the LRU chain.
-    static_write!(FRONT, new_buf);
-    static_write!(REAR, unsafe { new_buf.add(new_nr - 1) });
+    static_write!(front, new_buf);
+    static_write!(rear, unsafe { new_buf.add(new_nr - 1) });
 
     for i in 0..new_nr {
         let bp = unsafe { new_buf.add(i) };
@@ -882,7 +889,7 @@ pub unsafe fn lmfs_buf_pool(new_nr_bufs: i32) {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_bufs_in_use() -> i32 {
-    static_read!(BUFS_IN_USE)
+    static_read!(bufs_in_use)
 }
 
 /// Return the total number of buffers.
@@ -891,7 +898,7 @@ pub unsafe fn lmfs_bufs_in_use() -> i32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_nr_bufs() -> i32 {
-    static_read!(NR_BUFS) as i32
+    static_read!(nr_bufs) as i32
 }
 
 /// Track block count changes (delta) for cache re-evaluation.
@@ -927,7 +934,7 @@ pub unsafe fn lmfs_bytes(bp: *const Buf) -> i32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_rdwt_err() -> i32 {
-    static_read!(RDWT_ERR)
+    static_read!(rdwt_err)
 }
 
 /// Reset the last read/write error.
@@ -936,7 +943,7 @@ pub unsafe fn lmfs_rdwt_err() -> i32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_reset_rdwt_err() {
-    static_write!(RDWT_ERR, OK);
+    static_write!(rdwt_err, OK);
 }
 
 /// Enable or disable VM secondary cache for this FS.
@@ -945,7 +952,7 @@ pub unsafe fn lmfs_reset_rdwt_err() {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_may_use_vmcache(yesno: i32) {
-    static_write!(MAY_USE_VMCACHE, yesno);
+    static_write!(may_use_vmcache, yesno);
 }
 
 /// Get the current filesystem block size.
@@ -954,7 +961,7 @@ pub unsafe fn lmfs_may_use_vmcache(yesno: i32) {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_fs_block_size() -> u32 {
-    static_read!(FS_BLOCK_SIZE)
+    static_read!(fs_block_size)
 }
 
 /// "Block peek" — ensure a range of blocks is in the VM cache.
@@ -963,11 +970,11 @@ pub unsafe fn lmfs_fs_block_size() -> u32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_do_bpeek(dev: u32, start: u64, len: u64) -> i32 {
-    if static_read!(VMCACHE) == 0 {
+    if static_read!(vmcache) == 0 {
         return ENXIO;
     }
 
-    let block_size = static_read!(FS_BLOCK_SIZE);
+    let block_size = static_read!(fs_block_size);
     debug_assert!(block_size > 0);
     debug_assert!(dev != NO_DEV);
 
@@ -990,7 +997,7 @@ pub unsafe fn lmfs_do_bpeek(dev: u32, start: u64, len: u64) -> i32 {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn lmfs_cache_reevaluate(dev: u32) {
-    if static_read!(BUFS_IN_USE) == 0 && dev != NO_DEV {
+    if static_read!(bufs_in_use) == 0 && dev != NO_DEV {
         // cache_heuristic_check(major(dev));
     }
 }
@@ -1003,7 +1010,7 @@ pub unsafe fn lmfs_cache_reevaluate(dev: u32) {
 /// This function accesses global mutable state and must be called in a
 /// single-threaded context.
 pub unsafe fn lmfs_setquiet(q: i32) {
-    static_write!(QUIET, q);
+    static_write!(quiet, q);
 }
 
 /// Determine buffer count from VM stats (heuristic).
@@ -1012,7 +1019,7 @@ pub unsafe fn lmfs_setquiet(q: i32) {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn fs_bufs_heuristic() -> u32 {
-    if static_read!(QUIET) == 0 {
+    if static_read!(quiet) == 0 {
         // printf("fslib: heuristic info fail: default to %d bufs\n", 1024);
     }
     1024

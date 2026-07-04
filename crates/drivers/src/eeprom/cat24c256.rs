@@ -10,7 +10,7 @@
 //! must be implemented by the caller to provide the actual I2C transactions.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
 
 /// Maximum I2C exec buffer length (matching I2C_EXEC_MAX_BUFLEN).
 pub const I2C_EXEC_MAX_BUFLEN: usize = 256;
@@ -33,13 +33,11 @@ pub const WRITE_PAGE_SIZE: usize = 16;
 /// Valid I2C slave addresses for CAT24C256.
 pub const VALID_ADDRS: [u8; 9] = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x00];
 
-
 /// I2C operation: read with stop.
 pub const I2C_OP_READ_WITH_STOP: u8 = 0x01;
 
 /// I2C operation: write with stop.
 pub const I2C_OP_WRITE_WITH_STOP: u8 = 0x02;
-
 
 /// I2C ioctl exec structure — describes a single I2C transaction.
 ///
@@ -81,7 +79,6 @@ impl Default for I2cExec {
     }
 }
 
-
 /// Result of an I2C transaction.
 pub type I2cResult = Result<(), DriverError>;
 
@@ -98,10 +95,19 @@ pub trait EepromBus {
     fn exec(&mut self, ioctl: &mut I2cExec) -> I2cResult;
 }
 
+struct OpenCountCell(UnsafeCell<[i32; NR_DEVS]>);
+unsafe impl Sync for OpenCountCell {}
+impl OpenCountCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; NR_DEVS]))
+    }
+    fn get(&self) -> *mut [i32; NR_DEVS] {
+        self.0.get()
+    }
+}
 
 /// Per-device open count.
-static mut OPEN_COUNT: [i32; NR_DEVS] = [0; NR_DEVS];
-
+static OPEN_COUNT: OpenCountCell = OpenCountCell::new();
 
 /// Device geometry: base offset and size.
 #[derive(Debug, Clone, Copy)]
@@ -116,7 +122,6 @@ pub const EEPROM_GEOMETRY: EepromGeometry = EepromGeometry {
     base: 0,
     size: EEPROM_SIZE as u64,
 };
-
 
 /// Read up to 128 bytes from the EEPROM at a given memory address.
 ///
@@ -272,14 +277,13 @@ pub unsafe fn cat24c256_write(
     Ok(())
 }
 
-
 /// Open an EEPROM device.
 pub fn cat24c256_open(minor: usize) -> Result<(), DriverError> {
     if minor >= NR_DEVS {
         return Err(DriverError::NotFound);
     }
     unsafe {
-        OPEN_COUNT[minor] += 1;
+        (*OPEN_COUNT.get())[minor] += 1;
     }
     Ok(())
 }
@@ -290,10 +294,10 @@ pub fn cat24c256_close(minor: usize) -> Result<(), DriverError> {
         return Err(DriverError::NotFound);
     }
     unsafe {
-        if OPEN_COUNT[minor] < 1 {
+        if (*OPEN_COUNT.get())[minor] < 1 {
             return Err(DriverError::Io);
         }
-        OPEN_COUNT[minor] -= 1;
+        (*OPEN_COUNT.get())[minor] -= 1;
     }
     Ok(())
 }
@@ -405,7 +409,7 @@ mod tests {
     #[test]
     fn test_open_close() {
         unsafe {
-            OPEN_COUNT[0] = 0;
+            (*OPEN_COUNT.get())[0] = 0;
         }
         assert!(cat24c256_open(0).is_ok());
         assert!(cat24c256_open(99).is_err());
@@ -415,7 +419,7 @@ mod tests {
     #[test]
     fn test_close_unopened_fails() {
         unsafe {
-            OPEN_COUNT[0] = 0;
+            (*OPEN_COUNT.get())[0] = 0;
         }
         assert!(cat24c256_close(0).is_err());
     }

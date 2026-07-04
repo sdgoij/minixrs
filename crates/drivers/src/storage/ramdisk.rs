@@ -7,7 +7,8 @@
 //! with configurable device count and size.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Number of RAM disk devices.
 pub const RAMDISKS: usize = 6;
@@ -17,7 +18,6 @@ pub const RAMDISK_DEFAULT_SIZE: usize = 4 * 1024 * 1024;
 
 /// Sector size for RAM disk.
 pub const SECTOR_SIZE: usize = 512;
-
 
 /// Geometry of a RAM disk device.
 #[derive(Debug, Clone, Copy)]
@@ -46,16 +46,36 @@ impl Default for RamDiskDev {
     }
 }
 
+struct RamDisksCell(UnsafeCell<[RamDiskDev; RAMDISKS]>);
+unsafe impl Sync for RamDisksCell {}
+impl RamDisksCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([RamDiskDev::new(); RAMDISKS]))
+    }
+    fn get(&self) -> *mut [RamDiskDev; RAMDISKS] {
+        self.0.get()
+    }
+}
+
+struct RamBufCell(UnsafeCell<[u8; RAMDISK_DEFAULT_SIZE]>);
+unsafe impl Sync for RamBufCell {}
+impl RamBufCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0u8; RAMDISK_DEFAULT_SIZE]))
+    }
+    fn get(&self) -> *mut [u8; RAMDISK_DEFAULT_SIZE] {
+        self.0.get()
+    }
+}
 
 /// RAM disk device table.
-static mut RAM_DISKS: [RamDiskDev; RAMDISKS] = [RamDiskDev::new(); RAMDISKS];
+static RAM_DISKS: RamDisksCell = RamDisksCell::new();
 
 /// Global storage buffer for RAM disks (allocated at init time).
-static mut RAM_BUF: [u8; RAMDISK_DEFAULT_SIZE] = [0u8; RAMDISK_DEFAULT_SIZE];
+static RAM_BUF: RamBufCell = RamBufCell::new();
 
 /// Track whether the driver has been initialized.
-static mut RAM_INITIALIZED: bool = false;
-
+static RAM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the RAM disk driver.
 ///
@@ -67,33 +87,33 @@ static mut RAM_INITIALIZED: bool = false;
 /// Must be called exactly once during driver initialization.
 pub unsafe fn ramdisk_init() {
     unsafe {
-        if RAM_INITIALIZED {
+        if RAM_INITIALIZED.load(Ordering::Relaxed) {
             return;
         }
 
-        let buf_ptr = core::ptr::addr_of_mut!(RAM_BUF) as *mut u8;
+        let buf_ptr = RAM_BUF.get() as *mut u8;
         let per_device = RAMDISK_DEFAULT_SIZE / RAMDISKS;
 
         #[allow(clippy::needless_range_loop)]
         for i in 0..RAMDISKS {
-            let dev = &mut RAM_DISKS[i];
+            let dev = &mut (*RAM_DISKS.get())[i];
             dev.base = (i * per_device) as u64;
             dev.size = per_device as u64;
             dev.open_count = 0;
             dev.data = buf_ptr.add(i * per_device);
         }
 
-        RAM_INITIALIZED = true;
+        RAM_INITIALIZED.store(true, Ordering::Relaxed);
     }
 }
 
 /// Open a RAM disk device.
 pub fn ramdisk_open(minor: usize) -> Result<(), DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        RAM_DISKS[minor].open_count += 1;
+        (*RAM_DISKS.get())[minor].open_count += 1;
         Ok(())
     }
 }
@@ -101,11 +121,11 @@ pub fn ramdisk_open(minor: usize) -> Result<(), DriverError> {
 /// Close a RAM disk device.
 pub fn ramdisk_close(minor: usize) -> Result<(), DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        if RAM_DISKS[minor].open_count > 0 {
-            RAM_DISKS[minor].open_count -= 1;
+        if (*RAM_DISKS.get())[minor].open_count > 0 {
+            (*RAM_DISKS.get())[minor].open_count -= 1;
         }
         Ok(())
     }
@@ -125,10 +145,10 @@ pub unsafe fn ramdisk_read(
     buf: &mut [u8],
 ) -> Result<usize, DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        let dev = &RAM_DISKS[minor];
+        let dev = &(*RAM_DISKS.get())[minor];
         if offset >= dev.size {
             return Ok(0); // Beyond EOF.
         }
@@ -156,10 +176,10 @@ pub unsafe fn ramdisk_read(
 /// `buf` must point to a valid buffer of at least `count` bytes.
 pub unsafe fn ramdisk_write(minor: usize, offset: u64, buf: &[u8]) -> Result<usize, DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        let dev = &RAM_DISKS[minor];
+        let dev = &(*RAM_DISKS.get())[minor];
         if offset >= dev.size {
             return Err(DriverError::Io); // Beyond EOF.
         }
@@ -176,10 +196,10 @@ pub unsafe fn ramdisk_write(minor: usize, offset: u64, buf: &[u8]) -> Result<usi
 /// Get device geometry.
 pub fn ramdisk_geometry(minor: usize) -> Result<(u64, u64), DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        let dev = &RAM_DISKS[minor];
+        let dev = &(*RAM_DISKS.get())[minor];
         Ok((dev.base, dev.size))
     }
 }
@@ -187,16 +207,16 @@ pub fn ramdisk_geometry(minor: usize) -> Result<(u64, u64), DriverError> {
 /// Get device open count.
 pub fn ramdisk_open_count(minor: usize) -> Result<i32, DriverError> {
     unsafe {
-        if minor >= RAMDISKS || !RAM_INITIALIZED {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
             return Err(DriverError::NotFound);
         }
-        Ok(RAM_DISKS[minor].open_count)
+        Ok((*RAM_DISKS.get())[minor].open_count)
     }
 }
 
 /// Check if the RAM disk driver has been initialized.
 pub fn ramdisk_is_initialized() -> bool {
-    unsafe { RAM_INITIALIZED }
+    RAM_INITIALIZED.load(Ordering::Relaxed)
 }
 
 /// Get the number of RAM disk devices.
@@ -233,7 +253,7 @@ mod tests {
     #[test]
     fn test_ramdisk_init() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
             assert!(ramdisk_is_initialized());
         }
@@ -242,7 +262,7 @@ mod tests {
     #[test]
     fn test_ramdisk_init_sets_geometry() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
             let (base, size) = ramdisk_geometry(0).unwrap();
             assert_eq!(base, 0);
@@ -253,7 +273,7 @@ mod tests {
     #[test]
     fn test_ramdisk_open_close() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
             assert!(ramdisk_open(0).is_ok());
             assert_eq!(ramdisk_open_count(0).unwrap(), 1);
@@ -265,7 +285,7 @@ mod tests {
     #[test]
     fn test_ramdisk_open_invalid_minor() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
             assert!(ramdisk_open(99).is_err());
         }
@@ -274,7 +294,7 @@ mod tests {
     #[test]
     fn test_ramdisk_read_write() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             let data = b"Hello RAM disk!";
@@ -294,7 +314,7 @@ mod tests {
     #[test]
     fn test_ramdisk_read_offset() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             let data = b"ABCDEFGHIJ";
@@ -310,7 +330,7 @@ mod tests {
     #[test]
     fn test_ramdisk_beyond_eof() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             let data = b"test";
@@ -325,7 +345,7 @@ mod tests {
     #[test]
     fn test_ramdisk_read_beyond_eof() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             let mut buf = [0u8; 4];
@@ -336,16 +356,14 @@ mod tests {
 
     #[test]
     fn test_ramdisk_uninitialized() {
-        unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
-            assert!(ramdisk_open(0).is_err());
-        }
+        RAM_INITIALIZED.store(false, Ordering::Relaxed);
+        assert!(ramdisk_open(0).is_err());
     }
 
     #[test]
     fn test_ramdisk_double_init() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
             ramdisk_init(); // second call should be a no-op
             assert!(ramdisk_open(0).is_ok());
@@ -360,7 +378,7 @@ mod tests {
     #[test]
     fn test_ramdisk_write_read_full_capacity() {
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             // Write a pattern and verify read-back.
@@ -379,7 +397,7 @@ mod tests {
     fn test_ramdisk_ioctl_semantics() {
         // Verify the device_open_count tracks correctly across open/close.
         unsafe {
-            *core::ptr::addr_of_mut!(RAM_INITIALIZED) = false;
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
             ramdisk_init();
 
             assert!(ramdisk_open(2).is_ok());

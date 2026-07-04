@@ -10,6 +10,9 @@
 //! IPC. For early boot, we stub them directly in the kernel to allow
 //! basic userspace programs to run (getpid, write to serial, etc.).
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 /// Type for a basic syscall handler.
 /// Takes the current process and register arguments, returns a value.
 pub type BasicSyscallFn = unsafe fn(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64;
@@ -17,18 +20,28 @@ pub type BasicSyscallFn = unsafe fn(caller: *mut crate::proc::Proc, args: &[u64;
 /// Maximum syscall number we handle.
 pub const NR_BASIC_SYSCALLS: usize = 64;
 
+struct BasicSyscallTable(UnsafeCell<[Option<BasicSyscallFn>; NR_BASIC_SYSCALLS]>);
+unsafe impl Sync for BasicSyscallTable {}
+impl BasicSyscallTable {
+    const fn new(val: [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS] {
+        self.0.get()
+    }
+}
+
 /// Dispatch table for basic syscalls.
 /// Accessed via raw pointers to avoid Rust 2024 `static_mut_refs` issues.
-static mut BASIC_SYSCALL_TABLE: [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS] =
-    [None; NR_BASIC_SYSCALLS];
+static BASIC_SYSCALL_TABLE: BasicSyscallTable = BasicSyscallTable::new([None; NR_BASIC_SYSCALLS]);
 
 /// Get a raw pointer to the syscall table.
 fn syscall_table_ptr() -> *mut [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS] {
-    core::ptr::addr_of_mut!(BASIC_SYSCALL_TABLE)
+    BASIC_SYSCALL_TABLE.get()
 }
 
 /// Simple bump allocator brk (0x3FE00000-0x3FF00000 region).
-static mut CURRENT_BRK: u64 = 0x3FE00000;
+static CURRENT_BRK: AtomicU64 = AtomicU64::new(0x3FE00000);
 
 /// Register a basic syscall handler.
 ///
@@ -138,32 +151,46 @@ struct PendingExit {
     exit_status: i32,
 }
 
+struct PendingExitTable(UnsafeCell<[PendingExit; PENDING_EXIT_QUEUE_SIZE]>);
+unsafe impl Sync for PendingExitTable {}
+impl PendingExitTable {
+    const fn new(val: [PendingExit; PENDING_EXIT_QUEUE_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [PendingExit; PENDING_EXIT_QUEUE_SIZE] {
+        self.0.get()
+    }
+}
+
 /// Circular buffer of pending exits.
-static mut PENDING_EXITS: [PendingExit; PENDING_EXIT_QUEUE_SIZE] = [PendingExit {
-    endpoint: 0,
-    exit_status: 0,
-}; PENDING_EXIT_QUEUE_SIZE];
+static PENDING_EXITS: PendingExitTable = PendingExitTable::new(
+    [PendingExit {
+        endpoint: 0,
+        exit_status: 0,
+    }; PENDING_EXIT_QUEUE_SIZE],
+);
 
 /// Head index (next slot to read).
-static mut PE_HEAD: usize = 0;
+static PE_HEAD: AtomicUsize = AtomicUsize::new(0);
 /// Tail index (next slot to write).
-static mut PE_TAIL: usize = 0;
+static PE_TAIL: AtomicUsize = AtomicUsize::new(0);
 /// Count of entries.
-static mut PE_COUNT: usize = 0;
+static PE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Push an exit notification. Returns true if queued, false if full.
 unsafe fn push_pending_exit(endpoint: i32, exit_status: i32) -> bool {
     unsafe {
-        let count = PE_COUNT;
+        let count = PE_COUNT.load(Ordering::Relaxed);
         if count >= PENDING_EXIT_QUEUE_SIZE {
             return false; // queue full, drop notification
         }
-        PENDING_EXITS[PE_TAIL] = PendingExit {
+        let tail = PE_TAIL.load(Ordering::Relaxed);
+        (*PENDING_EXITS.get())[tail] = PendingExit {
             endpoint,
             exit_status,
         };
-        PE_TAIL = (PE_TAIL + 1) % PENDING_EXIT_QUEUE_SIZE;
-        PE_COUNT = count + 1;
+        PE_TAIL.store((tail + 1) % PENDING_EXIT_QUEUE_SIZE, Ordering::Relaxed);
+        PE_COUNT.store(count + 1, Ordering::Relaxed);
         true
     }
 }
@@ -177,13 +204,14 @@ unsafe fn push_pending_exit(endpoint: i32, exit_status: i32) -> bool {
 #[allow(unused)]
 pub unsafe fn pop_pending_exit() -> Option<(i32, i32)> {
     unsafe {
-        let count = PE_COUNT;
+        let count = PE_COUNT.load(Ordering::Relaxed);
         if count == 0 {
             return None;
         }
-        let entry = PENDING_EXITS[PE_HEAD];
-        PE_HEAD = (PE_HEAD + 1) % PENDING_EXIT_QUEUE_SIZE;
-        PE_COUNT = count - 1;
+        let head = PE_HEAD.load(Ordering::Relaxed);
+        let entry = (*PENDING_EXITS.get())[head];
+        PE_HEAD.store((head + 1) % PENDING_EXIT_QUEUE_SIZE, Ordering::Relaxed);
+        PE_COUNT.store(count - 1, Ordering::Relaxed);
         Some((entry.endpoint, entry.exit_status))
     }
 }
@@ -243,17 +271,15 @@ unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) ->
 /// SYS_brk (13) — change data segment size.
 /// Simple bump allocator in 0x3FE00000-0x3FF00000 region.
 unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    unsafe {
-        let new_brk = args[0];
-        if new_brk == 0 {
-            // Query current break
-            CURRENT_BRK as i64
-        } else if (0x3FE00000..0x3FF00000).contains(&new_brk) {
-            CURRENT_BRK = new_brk;
-            new_brk as i64
-        } else {
-            -12i64 // ENOMEM
-        }
+    let new_brk = args[0];
+    if new_brk == 0 {
+        // Query current break
+        CURRENT_BRK.load(Ordering::Relaxed) as i64
+    } else if (0x3FE00000..0x3FF00000).contains(&new_brk) {
+        CURRENT_BRK.store(new_brk, Ordering::Relaxed);
+        new_brk as i64
+    } else {
+        -12i64 // ENOMEM
     }
 }
 
@@ -1097,8 +1123,7 @@ mod tests {
     fn test_brk_query_returns_current() {
         unsafe {
             proc_init();
-            let brk_ptr = core::ptr::addr_of_mut!(CURRENT_BRK);
-            *brk_ptr = 0x3FE01000;
+            CURRENT_BRK.store(0x3FE01000, Ordering::Relaxed);
             let args = [0u64, 0, 0, 0, 0, 0];
             assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), 0x3FE01000i64);
         }
@@ -1107,11 +1132,10 @@ mod tests {
     #[test]
     fn test_brk_set_valid() {
         unsafe {
-            let brk_ptr = core::ptr::addr_of_mut!(CURRENT_BRK);
-            *brk_ptr = 0x3FE00000;
+            CURRENT_BRK.store(0x3FE00000, Ordering::Relaxed);
             let args = [0x3FE02000u64, 0, 0, 0, 0, 0];
             assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), 0x3FE02000i64);
-            assert_eq!(*brk_ptr, 0x3FE02000);
+            assert_eq!(CURRENT_BRK.load(Ordering::Relaxed), 0x3FE02000);
         }
     }
 
@@ -1178,8 +1202,7 @@ mod tests {
     #[ignore = "requires ring 0 (cr3 access via dispatch_basic_syscall)"]
     fn test_init_registers_brk() {
         unsafe {
-            let brk_ptr = core::ptr::addr_of_mut!(CURRENT_BRK);
-            *brk_ptr = 0x3FE00000;
+            CURRENT_BRK.store(0x3FE00000, Ordering::Relaxed);
             init_basic_syscalls();
             assert_eq!(
                 dispatch_basic_syscall(core::ptr::null_mut(), 13, &[0u64, 0, 0, 0, 0, 0]),

@@ -32,8 +32,19 @@ pub struct PfsGlobal {
     pub inodemap: [BitchunkT; INODEMAP_CHUNKS],
 }
 
+struct PfsStorageCell(UnsafeCell<MaybeUninit<PfsGlobal>>);
+unsafe impl Sync for PfsStorageCell {}
+impl PfsStorageCell {
+    const fn new(val: MaybeUninit<PfsGlobal>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut MaybeUninit<PfsGlobal> {
+        self.0.get()
+    }
+}
+
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
-static mut PFS_STORAGE: MaybeUninit<PfsGlobal> = MaybeUninit::uninit();
+static PFS_STORAGE: PfsStorageCell = PfsStorageCell::new(MaybeUninit::uninit());
 
 /// Wrapper for `[Option<u16>; INODE_HASH_SIZE]`.
 pub(crate) struct HashInodesCell(UnsafeCell<[Option<u16>; INODE_HASH_SIZE]>);
@@ -74,7 +85,7 @@ pub(crate) static BUF_REAR: OptionU16Cell = OptionU16Cell::new(None);
 /// Initialize globals. Must be called once before any access.
 pub unsafe fn pfs_init_globals() {
     // SAFETY: PFS_STORAGE is only accessed once here before any other code runs.
-    let p: *mut PfsGlobal = core::ptr::addr_of_mut!(PFS_STORAGE).cast();
+    let p: *mut PfsGlobal = PFS_STORAGE.get().cast();
     // SAFETY: we have exclusive access at init time.
     p.write(PfsGlobal {
         err_code: 0,
@@ -95,19 +106,19 @@ pub unsafe fn pfs_init_globals() {
 
 /// Get a raw pointer to PFS global state.
 pub unsafe fn pfs_ptr() -> *mut PfsGlobal {
-    core::ptr::addr_of_mut!(PFS_STORAGE).cast()
+    PFS_STORAGE.get().cast()
 }
 
 /// Get a raw pointer to the i-th inode in the table.
 pub unsafe fn get_inode_ptr(idx: usize) -> *mut Inode {
-    let pfs = core::ptr::addr_of_mut!(PFS_STORAGE).cast::<PfsGlobal>();
+    let pfs = PFS_STORAGE.get().cast::<PfsGlobal>();
     let base = core::ptr::addr_of_mut!((*pfs).inode_table[0]);
     base.add(idx)
 }
 
 /// Get a raw pointer to the i-th buffer in the pool.
 pub unsafe fn get_buf_ptr(idx: usize) -> *mut Buf {
-    let pfs = core::ptr::addr_of_mut!(PFS_STORAGE).cast::<PfsGlobal>();
+    let pfs = PFS_STORAGE.get().cast::<PfsGlobal>();
     let base = core::ptr::addr_of_mut!((*pfs).buf_pool[0]);
     base.add(idx)
 }

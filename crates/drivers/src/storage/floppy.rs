@@ -5,6 +5,7 @@
 //! Supports 360K, 720K, 1.2M, and 1.44M floppy diskettes.
 //! Uses I/O ports 0x3F2–0x3F7 and legacy DMA channel 2.
 
+use core::cell::UnsafeCell;
 
 /// Digital output register (motor/drive control).
 pub const DOR: u16 = 0x3F2;
@@ -15,16 +16,13 @@ pub const FDC_DATA: u16 = 0x3F5;
 /// Transfer rate register.
 pub const FDC_RATE: u16 = 0x3F7;
 
-
 pub const FDC_BUSY: u8 = 0x10;
 pub const FDC_DIR: u8 = 0x40; // 1 = controller ready to send data
 pub const FDC_MASTER: u8 = 0x80; // Data register accessible
 
-
 pub const DOR_MOTOR_SHIFT: u8 = 4;
 pub const DOR_ENABLE_INT: u8 = 0x0C;
 pub const DOR_RESET: u8 = 0x00;
-
 
 pub const FDC_SEEK: u8 = 0x0F;
 pub const FDC_READ: u8 = 0xE6;
@@ -35,7 +33,6 @@ pub const FDC_SPECIFY: u8 = 0x03;
 pub const FDC_READ_ID: u8 = 0x4A;
 pub const FDC_FORMAT: u8 = 0x4D;
 
-
 pub const ST0: usize = 0;
 pub const ST1: usize = 1;
 pub const ST2: usize = 2;
@@ -43,19 +40,15 @@ pub const ST_CYL: usize = 3;
 pub const ST_HEAD: usize = 4;
 pub const ST_SEC: usize = 5;
 
-
 pub const ST0_BITS_TRANS: u8 = 0xD8;
 pub const TRANS_ST0: u8 = 0x00;
 pub const ST0_BITS_SEEK: u8 = 0xF8;
 pub const SEEK_ST0: u8 = 0x20;
 
-
 pub const ST1_BAD_SECTOR: u8 = 0x05;
 pub const ST1_WRITE_PROTECT: u8 = 0x02;
 
-
 pub const ST2_BAD_CYL: u8 = 0x1F;
-
 
 pub const DMA_ADDR: u16 = 0x004;
 pub const DMA_TOP: u16 = 0x081;
@@ -67,7 +60,6 @@ pub const DMA_INIT: u16 = 0x00A;
 pub const DMA_READ: u8 = 0x46;
 pub const DMA_WRITE: u8 = 0x4A;
 
-
 pub const NR_DRIVES: usize = 2;
 pub const NR_HEADS: u8 = 2;
 pub const MAX_SECTORS: u8 = 18;
@@ -76,7 +68,6 @@ pub const SECTOR_SIZE_CODE: u8 = 2;
 pub const DTL: u8 = 0xFF;
 pub const BASE_SECTOR: u8 = 1;
 pub const HC_SIZE: usize = 2880;
-
 
 pub const UNCALIBRATED: u8 = 0;
 pub const CALIBRATED: u8 = 1;
@@ -87,7 +78,6 @@ pub const BSY_IDLE: u8 = 0;
 pub const BSY_IO: u8 = 1;
 pub const BSY_WAKEN: u8 = 2;
 
-
 pub const ERR_SEEK: i32 = -1;
 pub const ERR_TRANSFER: i32 = -2;
 pub const ERR_STATUS: i32 = -3;
@@ -96,7 +86,6 @@ pub const ERR_RECALIBRATE: i32 = -5;
 pub const ERR_DRIVE: i32 = -6;
 pub const ERR_WR_PROTECT: i32 = -7;
 pub const ERR_TIMEOUT: i32 = -8;
-
 
 /// Density parameter entry for a floppy diskette/drive combination.
 #[derive(Clone, Copy)]
@@ -216,7 +205,6 @@ pub const TEST_ORDER: [TestOrder; NT - 1] = [
     }, // 360K
 ];
 
-
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct FloppyDrive {
@@ -247,15 +235,25 @@ impl Default for FloppyDrive {
     }
 }
 
-/// Global floppy drive state.
-static mut FLOPPY_DRIVES: [FloppyDrive; NR_DRIVES] = [FloppyDrive::new(); NR_DRIVES];
+struct FloppyDrivesCell(UnsafeCell<[FloppyDrive; NR_DRIVES]>);
+unsafe impl Sync for FloppyDrivesCell {}
+impl FloppyDrivesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([FloppyDrive::new(); NR_DRIVES]))
+    }
+    fn get(&self) -> *mut [FloppyDrive; NR_DRIVES] {
+        self.0.get()
+    }
+}
 
+/// Global floppy drive state.
+static FLOPPY_DRIVES: FloppyDrivesCell = FloppyDrivesCell::new();
 
 /// Initialize a floppy drive.
 pub fn floppy_init_drive(drive: usize) {
     unsafe {
         if drive < NR_DRIVES {
-            FLOPPY_DRIVES[drive] = FloppyDrive::new();
+            (*FLOPPY_DRIVES.get())[drive] = FloppyDrive::new();
         }
     }
 }
@@ -264,7 +262,7 @@ pub fn floppy_init_drive(drive: usize) {
 pub fn floppy_drive(drive: usize) -> Option<&'static FloppyDrive> {
     unsafe {
         if drive < NR_DRIVES {
-            Some(&FLOPPY_DRIVES[drive])
+            Some(&(*FLOPPY_DRIVES.get())[drive])
         } else {
             None
         }
@@ -275,7 +273,7 @@ pub fn floppy_drive(drive: usize) -> Option<&'static FloppyDrive> {
 pub fn floppy_drive_mut(drive: usize) -> *mut FloppyDrive {
     unsafe {
         if drive < NR_DRIVES {
-            core::ptr::addr_of_mut!(FLOPPY_DRIVES[drive])
+            &mut (*FLOPPY_DRIVES.get())[drive] as *mut FloppyDrive
         } else {
             core::ptr::null_mut()
         }

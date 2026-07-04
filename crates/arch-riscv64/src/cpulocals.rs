@@ -9,6 +9,8 @@
 
 #![cfg(target_arch = "riscv64")]
 
+use core::cell::UnsafeCell;
+
 /// Per-CPU storage structure.
 ///
 /// Each hart has its own copy of this structure. The `tp` register
@@ -39,16 +41,27 @@ pub fn run_q_tail_ptr() -> *mut [*mut core::ffi::c_void; 16] {
     unsafe { core::ptr::addr_of_mut!((*storage).run_q_tail) }
 }
 
+pub struct BootCpuStorageCell(UnsafeCell<PerCpuStorage>);
+unsafe impl Sync for BootCpuStorageCell {}
+impl BootCpuStorageCell {
+    const fn new(val: PerCpuStorage) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut PerCpuStorage {
+        self.0.get()
+    }
+}
+
 /// Static storage for the boot hart (hart 0).
 /// APs will allocate their own during SMP init.
-pub static mut BOOT_CPU_STORAGE: PerCpuStorage = PerCpuStorage {
+pub static BOOT_CPU_STORAGE: BootCpuStorageCell = BootCpuStorageCell::new(PerCpuStorage {
     current_proc: 0,
     kernel_stack_top: 0,
     hart_id: 0,
     _pad1: [0u8; 28],
     run_q_head: [core::ptr::null_mut(); 16],
     run_q_tail: [core::ptr::null_mut(); 16],
-};
+});
 
 /// Initialize per-CPU storage for the boot hart.
 ///
@@ -58,7 +71,7 @@ pub static mut BOOT_CPU_STORAGE: PerCpuStorage = PerCpuStorage {
 ///
 /// Must be called once during early boot on the BSP.
 pub unsafe fn init_cpulocals() {
-    let ptr = core::ptr::addr_of_mut!(BOOT_CPU_STORAGE) as u64;
+    let ptr = BOOT_CPU_STORAGE.get() as u64;
     set_tp_pointer(ptr);
 }
 
@@ -76,7 +89,7 @@ fn set_tp_pointer(addr: u64) {
 /// directly. SMP support will need a different mechanism (e.g., a dedicated
 /// CSR or mhartid-based lookup).
 fn tp_ptr() -> *mut PerCpuStorage {
-    core::ptr::addr_of_mut!(BOOT_CPU_STORAGE)
+    BOOT_CPU_STORAGE.get()
 }
 
 /// Set the current process pointer for this hart.
@@ -89,7 +102,7 @@ pub unsafe fn set_current_proc(proc: u64) {
         // SAFETY: BOOT_CPU_STORAGE is a static mut accessed directly.
         // tp register may hold a user value (restored from trap frame),
         // so we MUST NOT use tp_ptr() here. Access the static directly.
-        core::ptr::write_volatile(&raw mut BOOT_CPU_STORAGE.current_proc, proc);
+        core::ptr::write_volatile(&raw mut (*BOOT_CPU_STORAGE.get()).current_proc, proc);
     }
 }
 
@@ -98,7 +111,7 @@ pub fn current_proc() -> u64 {
     unsafe {
         // SAFETY: BOOT_CPU_STORAGE is a static mut accessed directly.
         // tp register may hold a user value — do NOT use tp_ptr().
-        core::ptr::read_volatile(&raw const BOOT_CPU_STORAGE.current_proc)
+        core::ptr::read_volatile(&raw const (*BOOT_CPU_STORAGE.get()).current_proc)
     }
 }
 
@@ -150,8 +163,8 @@ mod tests {
     #[test]
     fn test_boot_storage_initialized() {
         unsafe {
-            assert_eq!(BOOT_CPU_STORAGE.current_proc, 0);
-            assert_eq!(BOOT_CPU_STORAGE.hart_id, 0);
+            assert_eq!((*BOOT_CPU_STORAGE.get()).current_proc, 0);
+            assert_eq!((*BOOT_CPU_STORAGE.get()).hart_id, 0);
         }
     }
 }

@@ -5,14 +5,26 @@
 //! Synchronised via atomics — the ISR runs with interrupts disabled so
 //! there is no concurrency on the writer side.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Size of the ring buffer (power of two for fast masking).
 const BUF_SIZE: usize = 256;
 const BUF_MASK: usize = BUF_SIZE - 1;
 
+struct SerInputBuf(UnsafeCell<[u8; BUF_SIZE]>);
+unsafe impl Sync for SerInputBuf {}
+impl SerInputBuf {
+    const fn new(val: [u8; BUF_SIZE]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u8; BUF_SIZE] {
+        self.0.get()
+    }
+}
+
 /// Ring buffer storage.
-static mut BUF: [u8; BUF_SIZE] = [0u8; BUF_SIZE];
+static BUF: SerInputBuf = SerInputBuf::new([0u8; BUF_SIZE]);
 
 /// Write index (ISR writes here, then advances).
 static WRITE_IDX: AtomicUsize = AtomicUsize::new(0);
@@ -32,7 +44,7 @@ pub unsafe fn push_byte(byte: u8) {
         let r = READ_IDX.load(Ordering::Acquire);
         let next = (w + 1) & BUF_MASK;
         if next != r {
-            let p = core::ptr::addr_of_mut!(BUF) as *mut u8;
+            let p = BUF.get().cast::<u8>();
             core::ptr::write(p.add(w), byte);
             WRITE_IDX.store(next, Ordering::Release);
         }
@@ -49,7 +61,7 @@ pub fn try_read() -> Option<u8> {
         if r == w {
             return None;
         }
-        let p = core::ptr::addr_of_mut!(BUF) as *mut u8;
+        let p = BUF.get().cast::<u8>();
         let byte = core::ptr::read(p.add(r));
         READ_IDX.store((r + 1) & BUF_MASK, Ordering::Release);
         Some(byte)
@@ -87,7 +99,7 @@ pub fn available() -> usize {
 #[cfg(test)]
 pub fn reset() {
     unsafe {
-        let p = core::ptr::addr_of_mut!(BUF) as *mut u8;
+        let p = BUF.get().cast::<u8>();
         for i in 0..BUF_SIZE {
             core::ptr::write(p.add(i), 0);
         }

@@ -4775,6 +4775,11 @@ reliable cross-function test patterns.
 - [x] **13.11.12 — Clippy sweep**: `cargo clippy --workspace -- --deny warnings`
   Clean.
 
+- [x] **13.11.13 — All production `static mut` eliminated**: All ~93 instances
+  across ~30 files converted to `UnsafeCell` wrappers, `Atomic*`, or `Mutex<T>`.
+  Only 3 test-local `static mut` instances remain (permitted by `.rules` exception).
+  `cargo clippy --workspace --all-targets -- -D warnings` — 0 Rust warnings.
+
 **Goal**: Port userland commands. These are pure C with no kernel dependencies beyond libc.
 
 ### Priority 1 — Boot critical (need to boot the system)

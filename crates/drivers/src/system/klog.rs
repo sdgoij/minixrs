@@ -17,7 +17,7 @@
 //! by advancing `log_read` past the overflow.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
 
 /// Size of the circular log buffer (50 KB, matching the original C driver).
 pub const LOG_SIZE: usize = 50 * 1024;
@@ -32,7 +32,6 @@ pub const MINOR_KLOG: usize = 0;
 fn log_inc(n: u32, i: u32) -> u32 {
     (n + i) % (LOG_SIZE as u32)
 }
-
 
 /// Per-device log state.
 ///
@@ -71,18 +70,28 @@ impl LogDevice {
     }
 }
 
+struct LogDevicesCell(UnsafeCell<[LogDevice; NR_DEVS]>);
+unsafe impl Sync for LogDevicesCell {}
+impl LogDevicesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([LogDevice::new(); NR_DEVS]))
+    }
+    fn get(&self) -> *mut [LogDevice; NR_DEVS] {
+        self.0.get()
+    }
+}
+
 /// Global log device table (matching C: `struct logdevice logdevices[NR_DEVS]`).
-static mut LOG_DEVICES: [LogDevice; NR_DEVS] = [LogDevice::new(); NR_DEVS];
+static LOG_DEVICES: LogDevicesCell = LogDevicesCell::new();
 
 /// Get a raw pointer to a log device by minor number.
 fn log_device(minor: usize) -> *mut LogDevice {
     if minor < NR_DEVS {
-        unsafe { core::ptr::addr_of_mut!(LOG_DEVICES[minor]) }
+        unsafe { &mut (*LOG_DEVICES.get())[minor] as *mut LogDevice }
     } else {
         core::ptr::null_mut()
     }
 }
-
 
 /// Initialize the log driver.
 ///
@@ -103,7 +112,6 @@ pub unsafe fn log_init() {
         }
     }
 }
-
 
 /// Write data into the circular buffer.
 ///
@@ -177,7 +185,6 @@ unsafe fn subwrite(
     }
 }
 
-
 /// Read data from the circular buffer into a user buffer.
 ///
 /// Copies up to `size` bytes from the current read position, handling
@@ -215,7 +222,6 @@ unsafe fn subread(log: *mut LogDevice, size: u32, endpt: i32, grant: u32) -> i32
         offset as i32
     }
 }
-
 
 /// Open a log device.
 ///

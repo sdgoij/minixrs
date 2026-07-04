@@ -5,8 +5,8 @@
 //! Mirrors the `arch-x86_64/src/alloc.rs` interface.
 
 #![cfg(target_arch = "riscv64")]
-#![allow(static_mut_refs)]
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Maximum number of physical memory regions.
@@ -59,8 +59,19 @@ impl PhysicalMemoryMap {
     }
 }
 
+struct AllocBitmapCell(UnsafeCell<[u32; 65536]>);
+unsafe impl Sync for AllocBitmapCell {}
+impl AllocBitmapCell {
+    const fn new(val: [u32; 65536]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u32; 65536] {
+        self.0.get()
+    }
+}
+
 /// Bitmap allocator state (covers up to 8 GB: 65536 × 32 × 4096).
-static mut ALLOC_BITMAP: [u32; 65536] = [0u32; 65536];
+static ALLOC_BITMAP: AllocBitmapCell = AllocBitmapCell::new([0u32; 65536]);
 static ALLOC_START: AtomicU64 = AtomicU64::new(0);
 static ALLOC_END: AtomicU64 = AtomicU64::new(0);
 static ALLOC_INIT: AtomicBool = AtomicBool::new(false);
@@ -81,7 +92,7 @@ pub unsafe fn init_allocator(mmap: &PhysicalMemoryMap) {
 /// Read a bitmap entry.
 unsafe fn read_bitmap(chunk: usize) -> u32 {
     unsafe {
-        let ptr = core::ptr::addr_of!(ALLOC_BITMAP) as *const u32;
+        let ptr = ALLOC_BITMAP.get() as *const u32;
         core::ptr::read(ptr.add(chunk))
     }
 }
@@ -89,7 +100,7 @@ unsafe fn read_bitmap(chunk: usize) -> u32 {
 /// Write a bitmap entry.
 unsafe fn write_bitmap(chunk: usize, val: u32) {
     unsafe {
-        let ptr = core::ptr::addr_of_mut!(ALLOC_BITMAP) as *mut u32;
+        let ptr = ALLOC_BITMAP.get() as *mut u32;
         core::ptr::write(ptr.add(chunk), val)
     }
 }

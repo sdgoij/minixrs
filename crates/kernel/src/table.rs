@@ -36,20 +36,29 @@ struct AlignedTable {
     data: [u8; PROC_TABLE_SIZE],
 }
 
+struct AlignedTableCell(UnsafeCell<AlignedTable>);
+unsafe impl Sync for AlignedTableCell {}
+impl AlignedTableCell {
+    const fn new(val: AlignedTable) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut AlignedTable {
+        self.0.get()
+    }
+}
+
 /// Raw process table storage (BSS, cache-line aligned).
 ///
 /// Accessed through `proc_addr()` which maps process numbers to slots.
 /// Layout: tasks occupy indices [0, NR_TASKS), user procs occupy
 /// indices [NR_TASKS, NR_PROCS_TOTAL).
-static mut PROC_TABLE_ALIGNED: AlignedTable = AlignedTable {
+static PROC_TABLE_ALIGNED: AlignedTableCell = AlignedTableCell::new(AlignedTable {
     data: [0u8; PROC_TABLE_SIZE],
-};
+});
 
 /// Return a raw pointer to the process table as `[Proc]` (unsized slice).
 fn proc_table_ptr() -> *mut Proc {
-    core::ptr::addr_of_mut!(PROC_TABLE_ALIGNED)
-        .cast::<u8>()
-        .cast::<Proc>()
+    PROC_TABLE_ALIGNED.get().cast::<u8>().cast::<Proc>()
 }
 
 /// Get a pointer to the process at index `i` in the table.

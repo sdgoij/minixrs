@@ -7,12 +7,25 @@
 //! The hardware-level enable/disable functions (`hw_intr_*`) are
 //! stubs here; the arch layer will provide real implementations.
 
+use core::cell::UnsafeCell;
+
 use crate::system::{IRQ_ACTIDS, IrqHook};
 
 const NR_IRQ_VECTORS: usize = 32;
 
+struct IrqHandlerCell(UnsafeCell<[*mut IrqHook; NR_IRQ_VECTORS]>);
+unsafe impl Sync for IrqHandlerCell {}
+impl IrqHandlerCell {
+    const fn new(val: [*mut IrqHook; NR_IRQ_VECTORS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [*mut IrqHook; NR_IRQ_VECTORS] {
+        self.0.get()
+    }
+}
+
 /// Per-IRQ linked list heads — `NULL` means no handler for that IRQ.
-static mut IRQ_HANDLERS: [*mut IrqHook; NR_IRQ_VECTORS] = [core::ptr::null_mut(); NR_IRQ_VECTORS];
+static IRQ_HANDLERS: IrqHandlerCell = IrqHandlerCell::new([core::ptr::null_mut(); NR_IRQ_VECTORS]);
 
 // put_irq_handler
 
@@ -39,7 +52,7 @@ pub unsafe fn put_irq_handler(
     // Walk the per-IRQ linked list, building a bitmap of used IDs.
     let mut line: *mut *mut IrqHook;
     unsafe {
-        line = core::ptr::addr_of_mut!(IRQ_HANDLERS[irq as usize]);
+        line = core::ptr::addr_of_mut!((*IRQ_HANDLERS.get())[irq as usize]);
     }
     let mut bitmap: i32 = 0;
 
@@ -108,7 +121,7 @@ pub unsafe fn rm_irq_handler(hook: *const IrqHook) {
     // Walk the list and remove the matching node.
     let mut line: *mut *mut IrqHook;
     unsafe {
-        line = core::ptr::addr_of_mut!(IRQ_HANDLERS[irq as usize]);
+        line = core::ptr::addr_of_mut!((*IRQ_HANDLERS.get())[irq as usize]);
     }
     unsafe {
         while !(*line).is_null() {
@@ -126,7 +139,7 @@ pub unsafe fn rm_irq_handler(hook: *const IrqHook) {
     // Disable the hardware IRQ if no handlers remain; otherwise
     // re-enable it if no handler is currently active.
     unsafe {
-        if IRQ_HANDLERS[irq as usize].is_null() {
+        if (*IRQ_HANDLERS.get())[irq as usize].is_null() {
             hw_intr_mask(irq);
             hw_intr_not_used(irq);
         } else if (*IRQ_ACTIDS.get())[irq as usize] == 0 {
@@ -155,7 +168,7 @@ pub unsafe fn irq_handle(irq: i32) {
 
     let mut hook: *mut IrqHook;
     unsafe {
-        hook = IRQ_HANDLERS[irq as usize];
+        hook = (*IRQ_HANDLERS.get())[irq as usize];
     }
 
     // Spurious interrupt — no registered handler.
@@ -257,7 +270,7 @@ fn hw_intr_ack(_irq: i32) {}
 ///
 /// Must be called once during boot before any interrupt registration.
 pub unsafe fn intr_init() {
-    let base = core::ptr::addr_of_mut!(IRQ_HANDLERS);
+    let base = IRQ_HANDLERS.get();
     for i in 0..NR_IRQ_VECTORS {
         unsafe { (*base)[i] = core::ptr::null_mut() };
     }
@@ -330,9 +343,12 @@ mod tests {
             let mut hook = IrqHook::default();
             let hook_ptr = &mut hook as *mut IrqHook;
             put_irq_handler(hook_ptr, 7, dummy_handler);
-            assert!(!IRQ_HANDLERS[7].is_null());
+            assert!(!(*IRQ_HANDLERS.get())[7].is_null());
             rm_irq_handler(hook_ptr as *const IrqHook);
-            assert!(IRQ_HANDLERS[7].is_null(), "handler should be removed");
+            assert!(
+                (*IRQ_HANDLERS.get())[7].is_null(),
+                "handler should be removed"
+            );
         }
     }
 

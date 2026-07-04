@@ -9,8 +9,9 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::DriverError;
+use core::cell::UnsafeCell;
 use core::ptr;
-
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maximum number of ports.
 pub const NR_PORTS: usize = 32;
@@ -27,7 +28,6 @@ pub const ATA_MAX_SECTORS: u32 = 0x10000;
 pub const MAX_PRD_BYTES: u64 = 1 << 22;
 /// Maximum transfer size.
 pub const MAX_TRANSFER: u64 = MAX_PRD_BYTES;
-
 
 pub const AHCI_HBA_CAP: usize = 0;
 pub const AHCI_HBA_GHC: usize = 1;
@@ -46,7 +46,6 @@ pub const HBA_CAP_NP_MASK: u32 = 0x1F;
 pub const HBA_GHC_AE: u32 = 1 << 31;
 pub const HBA_GHC_IE: u32 = 1 << 1;
 pub const HBA_GHC_HR: u32 = 1 << 0;
-
 
 pub const AHCI_PORT_CLB: usize = 0;
 pub const AHCI_PORT_CLBU: usize = 1;
@@ -98,7 +97,6 @@ pub const SCTL_DET_NONE: u32 = 0x0000;
 pub const ATA_SIG_ATA: u32 = 0x00000101;
 pub const ATA_SIG_ATAPI: u32 = 0xEB140101;
 
-
 pub const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 pub const ATA_CMD_READ_FPDMA_QUEUED: u8 = 0x60;
@@ -109,7 +107,6 @@ pub const ATA_CMD_IDENTIFY_PACKET: u8 = 0xA1;
 pub const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_CMD_IDENTIFY: u8 = 0xEC;
 pub const ATA_CMD_SET_FEATURES: u8 = 0xEF;
-
 
 pub const ATA_ID_GCAP: usize = 0;
 pub const ATA_ID_GCAP_ATAPI_MASK: u16 = 0xC000;
@@ -138,7 +135,6 @@ pub const ATA_ID_LBA1: usize = 101;
 pub const ATA_ID_LBA2: usize = 102;
 pub const ATA_ID_LBA3: usize = 103;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortState {
     NoPort,
@@ -162,7 +158,6 @@ impl PortState {
     }
 }
 
-
 pub const FLAG_ATAPI: u32 = 0x00000001;
 pub const FLAG_HAS_MEDIUM: u32 = 0x00000002;
 pub const FLAG_USE_DMADIR: u32 = 0x00000004;
@@ -176,7 +171,6 @@ pub const FLAG_SUSPENDED: u32 = 0x00000200;
 pub const FLAG_HAS_FUA: u32 = 0x00000400;
 pub const FLAG_HAS_NCQ: u32 = 0x00000800;
 pub const FLAG_NCQ_MODE: u32 = 0x00001000;
-
 
 pub const ATA_FIS_TYPE_H2D: u8 = 0x27;
 pub const ATA_H2D_SIZE: usize = 20;
@@ -209,7 +203,6 @@ pub const AHCI_FIS_SIZE: usize = 256;
 pub const AHCI_MEM_BASE_SIZE: usize = 0x100;
 pub const AHCI_MEM_PORT_SIZE: usize = 0x80;
 
-
 pub fn is_atapi(ident: &[u16; 256]) -> bool {
     (ident[ATA_ID_GCAP] & ATA_ID_GCAP_ATAPI_MASK) == ATA_ID_GCAP_ATAPI
 }
@@ -241,7 +234,6 @@ pub fn lba_count(ident: &[u16; 256]) -> u64 {
         | ((ident[ATA_ID_LBA2] as u64) << 32)
         | ((ident[ATA_ID_LBA3] as u64) << 48)
 }
-
 
 type MmioReg = u32;
 
@@ -284,7 +276,6 @@ impl Default for AhciHba {
     }
 }
 
-
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct AhciPort {
@@ -325,11 +316,31 @@ impl Default for AhciPort {
     }
 }
 
+struct HbaCell(UnsafeCell<AhciHba>);
+unsafe impl Sync for HbaCell {}
+impl HbaCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(AhciHba::new()))
+    }
+    fn get(&self) -> *mut AhciHba {
+        self.0.get()
+    }
+}
 
-static mut HBA: AhciHba = AhciHba::new();
-static mut PORTS: [AhciPort; NR_PORTS] = [AhciPort::new(); NR_PORTS];
-static mut NR_INIT_PORTS: usize = 0;
+struct PortsCell(UnsafeCell<[AhciPort; NR_PORTS]>);
+unsafe impl Sync for PortsCell {}
+impl PortsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([AhciPort::new(); NR_PORTS]))
+    }
+    fn get(&self) -> *mut [AhciPort; NR_PORTS] {
+        self.0.get()
+    }
+}
 
+static HBA: HbaCell = HbaCell::new();
+static PORTS: PortsCell = PortsCell::new();
+static NR_INIT_PORTS: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
@@ -341,7 +352,6 @@ unsafe fn pci_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
         ((raw >> ((reg & 0x03) * 8)) & 0xFFFF) as u16
     }
 }
-
 
 pub unsafe fn ahci_init() -> Result<(), DriverError> {
     unsafe {
@@ -375,7 +385,7 @@ unsafe fn ahci_init_device(bus: u8, dev: u8) -> Result<(), DriverError> {
         }
 
         let mmio_base = (bar5 & 0xFFFF_FF00) as *mut MmioReg;
-        let hba = &mut *core::ptr::addr_of_mut!(HBA);
+        let hba = &mut *HBA.get();
         hba.base = mmio_base;
         hba.size = AHCI_MEM_BASE_SIZE + NR_PORTS * AHCI_MEM_PORT_SIZE;
 
@@ -395,7 +405,7 @@ unsafe fn ahci_init_device(bus: u8, dev: u8) -> Result<(), DriverError> {
         }
 
         let pi = hba.read(AHCI_HBA_PI);
-        let ports = core::ptr::addr_of_mut!(PORTS);
+        let ports = PORTS.get();
         for port_idx in 0..hba.nr_ports {
             if pi & (1 << port_idx) == 0 {
                 continue;
@@ -427,19 +437,16 @@ unsafe fn ahci_init_device(bus: u8, dev: u8) -> Result<(), DriverError> {
         let ports_impl = hba.read(AHCI_HBA_PI);
         let port_count = ports_impl.count_ones() as usize;
         hba.nr_ports = port_count;
-        *core::ptr::addr_of_mut!(NR_INIT_PORTS) = port_count;
+        NR_INIT_PORTS.store(port_count, Ordering::Relaxed);
         Ok(())
     }
 }
 
-
 pub fn map_minor_to_port(minor: usize) -> Option<usize> {
-    unsafe {
-        if minor < NR_INIT_PORTS {
-            Some(minor)
-        } else {
-            None
-        }
+    if minor < NR_INIT_PORTS.load(Ordering::Relaxed) {
+        Some(minor)
+    } else {
+        None
     }
 }
 
@@ -448,23 +455,22 @@ pub unsafe fn port_probe(port: &mut AhciPort) -> bool {
 }
 
 pub fn ahci_port_count() -> usize {
-    unsafe { NR_INIT_PORTS }
+    NR_INIT_PORTS.load(Ordering::Relaxed)
 }
 
 pub fn ahci_hba() -> *mut AhciHba {
-    core::ptr::addr_of_mut!(HBA)
+    HBA.get()
 }
 
 pub fn ahci_port(index: usize) -> Option<&'static mut AhciPort> {
     unsafe {
-        if index < NR_INIT_PORTS {
-            Some(&mut (*core::ptr::addr_of_mut!(PORTS))[index])
+        if index < NR_INIT_PORTS.load(Ordering::Relaxed) {
+            Some(&mut (*PORTS.get())[index])
         } else {
             None
         }
     }
 }
-
 
 #[repr(C)]
 pub struct AtaCmdFis {
@@ -606,9 +612,7 @@ mod tests {
 
     #[test]
     fn test_map_minor() {
-        unsafe {
-            *core::ptr::addr_of_mut!(NR_INIT_PORTS) = 4;
-        }
+        NR_INIT_PORTS.store(4, Ordering::Relaxed);
         assert_eq!(map_minor_to_port(0), Some(0));
         assert_eq!(map_minor_to_port(3), Some(3));
         assert_eq!(map_minor_to_port(4), None);

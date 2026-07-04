@@ -1,5 +1,7 @@
 //! File read and block mapping — adapted from `minix/fs/ext2/read.c`
 
+use core::sync::atomic::Ordering;
+
 use libs::libminixfs::cache::{lmfs_get_block, lmfs_get_block_ino, lmfs_markdirty, lmfs_put_block};
 use libs::libminixfs::constants::{
     DIRECTORY_BLOCK, FULL_DATA_BLOCK, NO_READ, NORMAL, PARTIAL_DATA_BLOCK, PREFETCH, VMC_NO_INODE,
@@ -103,8 +105,8 @@ pub unsafe fn fs_readwrite() -> i32 {
         && position % block_size == 0
         && (regular || mode_word == I_DIRECTORY)
     {
-        glo::RDAHED_INODE = rip;
-        glo::RDAHEDPOS = position;
+        glo::RDAHED_INODE.store(rip, Ordering::Relaxed);
+        glo::RDAHEDPOS.store(position, Ordering::Relaxed);
         read_ahead();
     }
 
@@ -309,15 +311,15 @@ pub unsafe fn rd_indir(bp: *mut libs::libminixfs::types::Buf, index: usize) -> u
 
 /// read_ahead — read a block into the cache before it is needed.
 pub unsafe fn read_ahead() {
-    let rip = glo::RDAHED_INODE;
+    let rip = glo::RDAHED_INODE.load(Ordering::Relaxed);
     if rip.is_null() {
         return;
     }
 
     let block_size = (*(*rip).i_sp.as_ref().unwrap()).s_block_size as u64;
-    let rdahedpos = glo::RDAHEDPOS;
+    let rdahedpos = glo::RDAHEDPOS.load(Ordering::Relaxed);
 
-    glo::RDAHED_INODE = core::ptr::null_mut(); // turn off read-ahead
+    glo::RDAHED_INODE.store(core::ptr::null_mut(), Ordering::Relaxed); // turn off read-ahead
 
     let b = read_map(rip, rdahedpos, 1); // opportunistic = 1 (PREFETCH)
     if b == NO_BLOCK {

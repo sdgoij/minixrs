@@ -9,7 +9,8 @@
 #![allow(dead_code, clippy::collapsible_if)]
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Primary command base.
 pub const REG_CMD_BASE0: u16 = 0x1F0;
@@ -20,7 +21,6 @@ pub const REG_CTL_BASE0: u16 = 0x3F6;
 /// Secondary control base.
 pub const REG_CTL_BASE1: u16 = 0x376;
 
-
 pub const REG_DATA: u16 = 0;
 pub const REG_PRECOMP: u16 = 1;
 pub const REG_COUNT: u16 = 2;
@@ -30,11 +30,9 @@ pub const REG_CYL_HI: u16 = 5;
 pub const REG_LDH: u16 = 6;
 pub const REG_COMMAND: u16 = 7; // write: command, read: status
 
-
 pub const LDH_DEFAULT: u8 = 0xA0;
 pub const LDH_LBA: u8 = 0x40;
 pub const LDH_DEV: u8 = 0x10;
-
 
 pub const STATUS_BSY: u8 = 0x80;
 pub const STATUS_RDY: u8 = 0x40;
@@ -42,12 +40,10 @@ pub const STATUS_WF: u8 = 0x20;
 pub const STATUS_DRQ: u8 = 0x08;
 pub const STATUS_ERR: u8 = 0x01;
 
-
 pub const ERROR_BB: u8 = 0x80;
 pub const ERROR_ECC: u8 = 0x40;
 pub const ERROR_ID: u8 = 0x10;
 pub const ERROR_AC: u8 = 0x04;
-
 
 pub const CMD_IDLE: u8 = 0x00;
 pub const CMD_RECALIBRATE: u8 = 0x10;
@@ -66,10 +62,8 @@ pub const CMD_WRITE_DMA: u8 = 0xCA;
 pub const CMD_FLUSH_CACHE: u8 = 0xE7;
 pub const ATA_IDENTIFY: u8 = 0xEC;
 
-
 pub const CTL_RESET: u8 = 0x04;
 pub const CTL_INTDISABLE: u8 = 0x02;
-
 
 pub const ID_GENERAL: usize = 0x00;
 pub const ID_GEN_NOT_ATA: u16 = 0x8000;
@@ -83,7 +77,6 @@ pub const ID_CSS: usize = 0x53;
 pub const ID_CSS_LBA48: u16 = 0x0400;
 pub const ID_ULTRA_DMA: usize = 0x58;
 
-
 pub const DMA_COMMAND: u16 = 0;
 pub const DMA_CMD_START: u8 = 0x01;
 pub const DMA_CMD_WRITE: u8 = 0x08;
@@ -93,14 +86,12 @@ pub const DMA_ST_ERROR: u8 = 0x02;
 pub const DMA_ST_ACTIVE: u8 = 0x01;
 pub const DMA_PRDTP: u16 = 4;
 
-
 pub const DF_INITIALIZED: u32 = 0x01;
 pub const DF_DEAF: u32 = 0x02;
 pub const DF_SMART: u32 = 0x04;
 pub const DF_ATAPI: u32 = 0x08;
 pub const DF_IDENTIFIED: u32 = 0x10;
 pub const DF_IGNORING: u32 = 0x20;
-
 
 pub const MAX_DRIVES: usize = 4;
 pub const MAX_SECS: u16 = 256;
@@ -110,7 +101,6 @@ pub const ATA_DMA_SECTORS: u16 = 64;
 pub const ATA_DMA_BUF_SIZE: usize = ATA_DMA_SECTORS as usize * SECTOR_SIZE;
 pub const N_PRDTE: usize = 1024;
 pub const PRDTE_FL_EOT: u8 = 0x80;
-
 
 #[repr(C)]
 pub struct AtaCommand {
@@ -173,7 +163,6 @@ impl Default for AtaCommand {
     }
 }
 
-
 #[repr(C)]
 pub struct Prdte {
     pub base: u64,
@@ -198,7 +187,6 @@ impl Default for Prdte {
         Self::new()
     }
 }
-
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -242,10 +230,19 @@ impl Default for AtWiniDrive {
     }
 }
 
+struct DrivesCell(UnsafeCell<[AtWiniDrive; MAX_DRIVES]>);
+unsafe impl Sync for DrivesCell {}
+impl DrivesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([AtWiniDrive::new(); MAX_DRIVES]))
+    }
+    fn get(&self) -> *mut [AtWiniDrive; MAX_DRIVES] {
+        self.0.get()
+    }
+}
 
-static mut DRIVES: [AtWiniDrive; MAX_DRIVES] = [AtWiniDrive::new(); MAX_DRIVES];
-static mut NR_DRIVES: usize = 0;
-
+static DRIVES: DrivesCell = DrivesCell::new();
+static NR_DRIVES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn inb(port: u16) -> u8 {
     unsafe { crate::arch_io::inb(port) }
@@ -271,7 +268,6 @@ unsafe fn outl(port: u16, val: u32) {
     unsafe { crate::arch_io::outl(port, val) }
 }
 
-
 unsafe fn ata_read(base_cmd: u16, reg: u16) -> u8 {
     unsafe { inb(base_cmd + reg) }
 }
@@ -285,7 +281,6 @@ unsafe fn ata_write(base_cmd: u16, reg: u16, val: u8) {
 unsafe fn ata_read_data(base_cmd: u16) -> u16 {
     unsafe { inw(base_cmd + REG_DATA) }
 }
-
 
 unsafe fn ata_wait(alt_port: u16) -> Result<(), DriverError> {
     unsafe {
@@ -305,7 +300,6 @@ unsafe fn ata_wait(alt_port: u16) -> Result<(), DriverError> {
     }
 }
 
-
 unsafe fn ata_controller_reset(base_ctl: u16) {
     unsafe {
         outb(base_ctl, CTL_RESET);
@@ -313,7 +307,6 @@ unsafe fn ata_controller_reset(base_ctl: u16) {
         outb(base_ctl, 0);
     }
 }
-
 
 /// Probe legacy IDE controller ports for drives.
 ///
@@ -357,7 +350,7 @@ pub unsafe fn at_wini_probe() -> Result<usize, DriverError> {
                     break;
                 }
 
-                let drv = &mut (*core::ptr::addr_of_mut!(DRIVES))[count];
+                let drv = &mut (*DRIVES.get())[count];
                 drv.base_cmd = cmd_base;
                 drv.base_ctl = ctl_base;
                 drv.ldhpref = ldh;
@@ -373,7 +366,7 @@ pub unsafe fn at_wini_probe() -> Result<usize, DriverError> {
             }
         }
 
-        *core::ptr::addr_of_mut!(NR_DRIVES) = count;
+        NR_DRIVES.store(count, Ordering::Relaxed);
         if count == 0 {
             Err(DriverError::NotFound)
         } else {
@@ -442,17 +435,16 @@ unsafe fn ata_identify(drv: &mut AtWiniDrive) -> Result<(), DriverError> {
     }
 }
 
-
 /// Get the number of detected drives.
 pub fn at_wini_drive_count() -> usize {
-    unsafe { NR_DRIVES }
+    NR_DRIVES.load(Ordering::Relaxed)
 }
 
 /// Get a mutable pointer to a drive by index.
 pub fn at_wini_drive(index: usize) -> Option<&'static mut AtWiniDrive> {
     unsafe {
-        if index < NR_DRIVES {
-            Some(&mut (*core::ptr::addr_of_mut!(DRIVES))[index])
+        if index < NR_DRIVES.load(Ordering::Relaxed) {
+            Some(&mut (*DRIVES.get())[index])
         } else {
             None
         }
@@ -672,7 +664,7 @@ mod tests {
     #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
     fn test_probe_no_hardware() {
         unsafe {
-            *core::ptr::addr_of_mut!(NR_DRIVES) = 0;
+            NR_DRIVES.store(0, Ordering::Relaxed);
             let result = at_wini_probe();
             assert!(result.is_err() || result.is_ok());
         }

@@ -8,12 +8,13 @@
 //! resource management, and driver access control lists.
 
 use crate::DriverError;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Check if a PCI device exists (vendor ID != 0xFFFF).
 pub(crate) fn pci_device_exists(vendor: u16) -> bool {
     vendor != 0xFFFF && vendor != 0
 }
-
 
 /// Maximum number of PCI buses.
 pub const NR_PCI_BUS: usize = 256;
@@ -30,12 +31,10 @@ pub const BAR_MAX: usize = 6;
 /// Number of expansion ROM BARs.
 pub const ROM_BARS: usize = 1;
 
-
 /// I/O space BAR.
 pub const PBF_IO: u8 = 0x01;
 /// Not yet allocated.
 pub const PBF_INCOMPLETE: u8 = 0x02;
-
 
 /// Intel host bridge.
 pub const PBT_INTEL_HOST: u8 = 1;
@@ -44,10 +43,8 @@ pub const PBT_PCIBRIDGE: u8 = 2;
 /// CardBus bridge.
 pub const PBT_CARDBUS: u8 = 3;
 
-
 /// Device is in use by a driver.
 pub const PDF_INUSE: u8 = 0x01;
-
 
 /// A Base Address Register description.
 #[derive(Debug, Clone, Copy, Default)]
@@ -183,22 +180,53 @@ impl PciAcl {
     }
 }
 
+struct PciDevicesCell(UnsafeCell<[PciDev; NR_PCI_DEV]>);
+unsafe impl Sync for PciDevicesCell {}
+impl PciDevicesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([PciDev::new(); NR_PCI_DEV]))
+    }
+    fn get(&self) -> *mut [PciDev; NR_PCI_DEV] {
+        self.0.get()
+    }
+}
+
+struct PciBusesCell(UnsafeCell<[PciBus; NR_PCI_BUS]>);
+unsafe impl Sync for PciBusesCell {}
+impl PciBusesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([PciBus::new(); NR_PCI_BUS]))
+    }
+    fn get(&self) -> *mut [PciBus; NR_PCI_BUS] {
+        self.0.get()
+    }
+}
+
+struct PciAclCell(UnsafeCell<[PciAcl; NR_DRIVERS]>);
+unsafe impl Sync for PciAclCell {}
+impl PciAclCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([PciAcl::new(); NR_DRIVERS]))
+    }
+    fn get(&self) -> *mut [PciAcl; NR_DRIVERS] {
+        self.0.get()
+    }
+}
 
 /// All detected PCI devices.
-static mut PCI_DEVICES: [PciDev; NR_PCI_DEV] = [PciDev::new(); NR_PCI_DEV];
+static PCI_DEVICES: PciDevicesCell = PciDevicesCell::new();
 
 /// All PCI bus descriptors.
-static mut PCI_BUSES: [PciBus; NR_PCI_BUS] = [PciBus::new(); NR_PCI_BUS];
+static PCI_BUSES: PciBusesCell = PciBusesCell::new();
 
 /// Number of detected devices.
-static mut NR_PCI_DEVICES: usize = 0;
+static NR_PCI_DEVICES: AtomicUsize = AtomicUsize::new(0);
 
 /// Number of detected buses.
-static mut NR_PCI_BUSES: usize = 0;
+static NR_PCI_BUSES: AtomicUsize = AtomicUsize::new(0);
 
 /// PCI ACL table.
-static mut PCI_ACL: [PciAcl; NR_DRIVERS] = [PciAcl::new(); NR_DRIVERS];
-
+static PCI_ACL: PciAclCell = PciAclCell::new();
 
 /// Initialize the PCI subsystem.
 ///
@@ -210,10 +238,8 @@ static mut PCI_ACL: [PciAcl; NR_DRIVERS] = [PciAcl::new(); NR_DRIVERS];
 /// Must be called exactly once during boot.
 pub unsafe fn pci_init() {
     unsafe {
-        let n_devices = core::ptr::addr_of_mut!(NR_PCI_DEVICES);
-        let _n_buses = core::ptr::addr_of_mut!(NR_PCI_BUSES);
-        *n_devices = 0;
-        *_n_buses = 0;
+        NR_PCI_DEVICES.store(0, Ordering::Relaxed);
+        NR_PCI_BUSES.store(0, Ordering::Relaxed);
 
         // Scan bus 0 devices 0-31, functions 0-7.
         for dev in 0..32u8 {
@@ -258,9 +284,8 @@ pub unsafe fn pci_init() {
 /// Add a discovered device to the table.
 unsafe fn pci_add_device(busnr: u8, dev: u8, func: u8, pd: &mut PciDev) {
     unsafe {
-        let devs = core::ptr::addr_of_mut!(PCI_DEVICES);
-        let n = core::ptr::addr_of_mut!(NR_PCI_DEVICES);
-        let idx = *n;
+        let devs = PCI_DEVICES.get();
+        let idx = NR_PCI_DEVICES.load(Ordering::Relaxed);
         if idx >= NR_PCI_DEV {
             return;
         }
@@ -279,16 +304,15 @@ unsafe fn pci_add_device(busnr: u8, dev: u8, func: u8, pd: &mut PciDev) {
         }
 
         (*devs)[idx] = *pd;
-        *n = idx + 1;
+        NR_PCI_DEVICES.store(idx + 1, Ordering::Relaxed);
     }
 }
-
 
 /// Find a PCI device by vendor/device ID.
 pub fn pci_find_device(vid: u16, did: u16) -> Option<usize> {
     unsafe {
-        let devs = core::ptr::addr_of_mut!(PCI_DEVICES);
-        let n = *core::ptr::addr_of_mut!(NR_PCI_DEVICES);
+        let devs = PCI_DEVICES.get();
+        let n = NR_PCI_DEVICES.load(Ordering::Relaxed);
         #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let pd = &(*devs)[i];
@@ -303,8 +327,8 @@ pub fn pci_find_device(vid: u16, did: u16) -> Option<usize> {
 /// Get a reference to a PCI device by index.
 pub fn pci_get_device(index: usize) -> Option<&'static PciDev> {
     unsafe {
-        let devs = core::ptr::addr_of_mut!(PCI_DEVICES);
-        let n = *core::ptr::addr_of_mut!(NR_PCI_DEVICES);
+        let devs = PCI_DEVICES.get();
+        let n = NR_PCI_DEVICES.load(Ordering::Relaxed);
         if index < n {
             Some(&(*devs)[index])
         } else {
@@ -315,9 +339,8 @@ pub fn pci_get_device(index: usize) -> Option<&'static PciDev> {
 
 /// Get the number of discovered PCI devices.
 pub fn pci_device_count() -> usize {
-    unsafe { *core::ptr::addr_of_mut!(NR_PCI_DEVICES) }
+    NR_PCI_DEVICES.load(Ordering::Relaxed)
 }
-
 
 /// Grant a driver access to a PCI device.
 ///
@@ -326,7 +349,7 @@ pub fn pci_device_count() -> usize {
 /// Must be called with exclusive access to the ACL table.
 pub unsafe fn pci_acl_add(endpoint: i32, vid: u16, did: u16) -> Result<(), DriverError> {
     unsafe {
-        let acl = core::ptr::addr_of_mut!(PCI_ACL);
+        let acl = PCI_ACL.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..NR_DRIVERS {
             let entry = &mut (*acl)[i];
@@ -348,7 +371,7 @@ pub unsafe fn pci_acl_add(endpoint: i32, vid: u16, did: u16) -> Result<(), Drive
 /// Must be called with exclusive access to the ACL table.
 pub unsafe fn pci_acl_check(endpoint: i32, vid: u16, did: u16) -> bool {
     unsafe {
-        let acl = core::ptr::addr_of_mut!(PCI_ACL);
+        let acl = PCI_ACL.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..NR_DRIVERS {
             let entry = &(*acl)[i];
@@ -367,7 +390,7 @@ pub unsafe fn pci_acl_check(endpoint: i32, vid: u16, did: u16) -> bool {
 /// Must be called with exclusive access to the ACL table.
 pub unsafe fn pci_acl_remove(endpoint: i32) {
     unsafe {
-        let acl = core::ptr::addr_of_mut!(PCI_ACL);
+        let acl = PCI_ACL.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..NR_DRIVERS {
             let entry = &mut (*acl)[i];
@@ -403,7 +426,7 @@ mod tests {
     fn test_pci_acl_add_and_check() {
         unsafe {
             // Reset ACL table
-            let acl = core::ptr::addr_of_mut!(PCI_ACL);
+            let acl = PCI_ACL.get();
             #[allow(clippy::needless_range_loop)]
             for i in 0..NR_DRIVERS {
                 (*acl)[i] = PciAcl::new();
@@ -419,7 +442,7 @@ mod tests {
     #[test]
     fn test_pci_acl_remove() {
         unsafe {
-            let acl = core::ptr::addr_of_mut!(PCI_ACL);
+            let acl = PCI_ACL.get();
             #[allow(clippy::needless_range_loop)]
             for i in 0..NR_DRIVERS {
                 (*acl)[i] = PciAcl::new();
@@ -435,7 +458,7 @@ mod tests {
     #[test]
     fn test_pci_acl_table_full() {
         unsafe {
-            let acl = core::ptr::addr_of_mut!(PCI_ACL);
+            let acl = PCI_ACL.get();
             #[allow(clippy::needless_range_loop)]
             for i in 0..NR_DRIVERS {
                 (*acl)[i] = PciAcl::new();

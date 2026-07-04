@@ -15,16 +15,13 @@
 
 #![allow(dead_code)]
 
-use core::ptr::addr_of_mut;
-
+use core::cell::UnsafeCell;
 #[cfg(test)]
 use core::mem::size_of;
-
 
 /// Error type for virtio operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtioError;
-
 
 /// Register offsets for legacy virtio PCI (I/O port BAR).
 pub const VIRTIO_HOST_F_OFF: u16 = 0x0000;
@@ -60,7 +57,6 @@ pub const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
 
 /// Maximum number of descriptors per queue.
 const QUEUE_NUM: u16 = 256;
-
 
 /// Virtio feature descriptor.
 ///
@@ -168,29 +164,72 @@ pub struct VirtioPhysBuf {
 // `core::ptr::addr_of_mut!()` — never create direct references to
 // mutable statics per Rust 2024 rules.
 
-static mut Q0_DESCS: [VringDesc; QUEUE_NUM as usize] = [VringDesc {
-    addr: 0,
-    len: 0,
-    flags: 0,
-    next: 0,
-}; QUEUE_NUM as usize];
+struct Q0DescsCell(UnsafeCell<[VringDesc; QUEUE_NUM as usize]>);
+unsafe impl Sync for Q0DescsCell {}
+impl Q0DescsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [VringDesc {
+                addr: 0,
+                len: 0,
+                flags: 0,
+                next: 0,
+            }; QUEUE_NUM as usize],
+        ))
+    }
+    fn get(&self) -> *mut [VringDesc; QUEUE_NUM as usize] {
+        self.0.get()
+    }
+}
 
-static mut Q0_AVAIL: VringAvail = VringAvail {
-    flags: 0,
-    idx: 0,
-    ring: [0; 256],
-};
+struct Q0AvailCell(UnsafeCell<VringAvail>);
+unsafe impl Sync for Q0AvailCell {}
+impl Q0AvailCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(VringAvail {
+            flags: 0,
+            idx: 0,
+            ring: [0; 256],
+        }))
+    }
+    fn get(&self) -> *mut VringAvail {
+        self.0.get()
+    }
+}
 
-static mut Q0_USED: VringUsed = VringUsed {
-    flags: 0,
-    idx: 0,
-    ring: [VringUsedElem { id: 0, len: 0 }; 256],
-};
+struct Q0UsedCell(UnsafeCell<VringUsed>);
+unsafe impl Sync for Q0UsedCell {}
+impl Q0UsedCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(VringUsed {
+            flags: 0,
+            idx: 0,
+            ring: [VringUsedElem { id: 0, len: 0 }; 256],
+        }))
+    }
+    fn get(&self) -> *mut VringUsed {
+        self.0.get()
+    }
+}
+
+struct Q0DataCell(UnsafeCell<[usize; QUEUE_NUM as usize]>);
+unsafe impl Sync for Q0DataCell {}
+impl Q0DataCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; QUEUE_NUM as usize]))
+    }
+    fn get(&self) -> *mut [usize; QUEUE_NUM as usize] {
+        self.0.get()
+    }
+}
+
+static Q0_DESCS: Q0DescsCell = Q0DescsCell::new();
+static Q0_AVAIL: Q0AvailCell = Q0AvailCell::new();
+static Q0_USED: Q0UsedCell = Q0UsedCell::new();
 
 /// Token storage for the queue — maps descriptor-chain head to the
 /// opaque data token given via `virtio_to_queue`.
-static mut Q0_DATA: [usize; QUEUE_NUM as usize] = [0; QUEUE_NUM as usize];
-
+static Q0_DATA: Q0DataCell = Q0DataCell::new();
 
 /// Write 8 bits to an I/O port.
 #[inline]
@@ -228,7 +267,6 @@ unsafe fn in32(port: u16) -> u32 {
     unsafe { crate::arch_io::inl(port) }
 }
 
-
 /// Build a PCI configuration address.
 fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     0x8000_0000
@@ -265,7 +303,6 @@ unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
 }
 
-
 /// Read 32-bit from device register at `offset`.
 pub fn virtio_read32(dev: &VirtioDevice, offset: u16) -> u32 {
     unsafe { in32(dev.port + offset) }
@@ -296,7 +333,6 @@ pub fn virtio_write8(dev: &VirtioDevice, offset: u16, val: u8) {
     unsafe { out8(dev.port + offset, val) }
 }
 
-
 /// Device-specific read 32-bit: adds `VIRTIO_DEV_SPECIFIC_OFF` and MSI offset.
 pub fn virtio_sread32(dev: &VirtioDevice, offset: u16) -> u32 {
     let off = VIRTIO_DEV_SPECIFIC_OFF + if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
@@ -314,7 +350,6 @@ pub fn virtio_sread8(dev: &VirtioDevice, offset: u16) -> u8 {
     let off = VIRTIO_DEV_SPECIFIC_OFF + if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
     unsafe { in8(dev.port + off) }
 }
-
 
 /// Initialize a vring with the given descriptor table, avail, and used rings.
 ///
@@ -339,7 +374,6 @@ fn vring_init(
         vr.desc[i].next = ((i as u16) + 1) & (num - 1);
     }
 }
-
 
 /// Check if the host supports a specific feature bit.
 pub fn virtio_host_supports(dev: &VirtioDevice, bit: u8) -> bool {
@@ -366,7 +400,6 @@ fn exchange_features(dev: &mut VirtioDevice) {
     virtio_write32(dev, VIRTIO_GUEST_F_OFF, guest_features);
 }
 
-
 /// Allocate and initialize device queues.
 ///
 /// For the single-queue device, this reads the queue size from the
@@ -389,9 +422,9 @@ pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
     // storage. We hold `&mut VirtioDevice` guaranteeing exclusive
     // access. Static storage is accessed via raw pointers.
     unsafe {
-        let descs: &'static mut [VringDesc] = &mut *addr_of_mut!(Q0_DESCS);
-        let avail: &'static mut VringAvail = &mut *addr_of_mut!(Q0_AVAIL);
-        let used: &'static mut VringUsed = &mut *addr_of_mut!(Q0_USED);
+        let descs: &'static mut [VringDesc] = &mut *Q0_DESCS.get();
+        let avail: &'static mut VringAvail = &mut *Q0_AVAIL.get();
+        let used: &'static mut VringUsed = &mut *Q0_USED.get();
 
         let q = &mut dev.queues[0];
         vring_init(&mut q.vring, num, descs, avail, used);
@@ -406,7 +439,7 @@ pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
         out32(dev_port + VIRTIO_QADDR_OFF, (q.paddr >> 12) as u32);
 
         // Clear token store.
-        let data: &mut [usize; QUEUE_NUM as usize] = &mut *addr_of_mut!(Q0_DATA);
+        let data: &mut [usize; QUEUE_NUM as usize] = &mut *Q0_DATA.get();
         for slot in data.iter_mut() {
             *slot = 0;
         }
@@ -416,13 +449,11 @@ pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
     Ok(())
 }
 
-
 /// Write 16-bit directly to a device port (no borrow).
 #[inline]
 fn virtio_write16_raw(port: u16, offset: u16, val: u16) {
     unsafe { out16(port + offset, val) }
 }
-
 
 /// Fill a single vring descriptor from a `VirtioPhysBuf`.
 ///
@@ -465,7 +496,6 @@ fn fill_descriptors(vring: &mut Vring, start: u16, bufs: &[VirtioPhysBuf]) {
         i = vd.next;
     }
 }
-
 
 /// Submit buffers to queue 0.
 ///
@@ -515,7 +545,7 @@ pub fn virtio_to_queue(
 
         // Store the data token.
         unsafe {
-            (*addr_of_mut!(Q0_DATA))[head as usize] = data;
+            (*Q0_DATA.get())[head as usize] = data;
         }
 
         // Memory barrier: host must see descriptor writes before
@@ -606,15 +636,14 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
         q.free_num = q.free_num.wrapping_add(count);
 
         // Retrieve the data token.
-        let tok = unsafe { (*addr_of_mut!(Q0_DATA))[idx as usize] };
+        let tok = unsafe { (*Q0_DATA.get())[idx as usize] };
         unsafe {
-            (*addr_of_mut!(Q0_DATA))[idx as usize] = 0;
+            (*Q0_DATA.get())[idx as usize] = 0;
         }
 
         Some(tok)
     }
 }
-
 
 /// Check if the device has asserted an interrupt.
 ///
@@ -641,7 +670,6 @@ pub fn virtio_irq_enable(_dev: &mut VirtioDevice) {
 pub fn virtio_irq_disable(_dev: &mut VirtioDevice) {
     // On real hardware, disable the IRQ line at the PIC/IOAPIC.
 }
-
 
 /// Probe for a virtio device with the given subsystem device ID.
 ///
@@ -724,8 +752,8 @@ pub fn virtio_probe(
                     vring: Vring {
                         num: 0,
                         desc: &mut [],
-                        avail: unsafe { &mut *addr_of_mut!(Q0_AVAIL) },
-                        used: unsafe { &mut *addr_of_mut!(Q0_USED) },
+                        avail: unsafe { &mut *Q0_AVAIL.get() },
+                        used: unsafe { &mut *Q0_USED.get() },
                     },
                     paddr: 0,
                     free_num: 0,
@@ -775,7 +803,6 @@ pub fn virtio_reset_device(dev: &mut VirtioDevice) {
     dev.initialized = false;
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,17 +821,16 @@ mod tests {
         let used: &'static mut VringUsed = unsafe { &mut *(used as *mut VringUsed) };
 
         // Use dummy init values; vring_init will overwrite them.
-        let dummy = unsafe { &mut *addr_of_mut!(Q0_AVAIL) };
+        let dummy = unsafe { &mut *Q0_AVAIL.get() };
         let mut vr = Vring {
             num: 0,
             desc: &mut [], // vring_init overwrites this
             avail: dummy,  // vring_init overwrites this
-            used: unsafe { &mut *addr_of_mut!(Q0_USED) },
+            used: unsafe { &mut *Q0_USED.get() },
         };
         vring_init(&mut vr, num, descs, avail, used);
         vr
     }
-
 
     #[test]
     fn test_virtio_constants() {
@@ -830,7 +856,6 @@ mod tests {
         assert_eq!(VIRTIO_PCI_VENDOR, 0x1AF4);
     }
 
-
     #[test]
     fn test_type_sizes() {
         assert_eq!(size_of::<VringDesc>(), 16);
@@ -839,7 +864,6 @@ mod tests {
         assert_eq!(size_of::<VringUsed>(), 4 + 256 * 8);
         assert_eq!(size_of::<VirtioPhysBuf>(), 16);
     }
-
 
     #[test]
     fn test_vring_init() {
@@ -884,7 +908,6 @@ mod tests {
         assert_eq!(vr.used.flags, 0);
         assert_eq!(vr.used.idx, 0);
     }
-
 
     /// Test that `use_vring_desc` correctly strips the LSB and sets
     /// the WRITE flag.
@@ -1020,8 +1043,8 @@ mod tests {
         let mut v = Vring {
             num: 0,
             desc: &mut [],
-            avail: unsafe { &mut *addr_of_mut!(Q0_AVAIL) },
-            used: unsafe { &mut *addr_of_mut!(Q0_USED) },
+            avail: unsafe { &mut *Q0_AVAIL.get() },
+            used: unsafe { &mut *Q0_USED.get() },
         };
         vring_init(&mut v, 16, descs, avail, used);
 
@@ -1098,7 +1121,6 @@ mod tests {
         assert_eq!(q.free_tail, 0);
     }
 
-
     #[test]
     fn test_virtio_host_supports_with_bitmap() {
         let dev = VirtioDevice {
@@ -1110,8 +1132,8 @@ mod tests {
                 vring: Vring {
                     num: 0,
                     desc: &mut [],
-                    avail: unsafe { &mut *addr_of_mut!(Q0_AVAIL) },
-                    used: unsafe { &mut *addr_of_mut!(Q0_USED) },
+                    avail: unsafe { &mut *Q0_AVAIL.get() },
+                    used: unsafe { &mut *Q0_USED.get() },
                 },
                 paddr: 0,
                 free_num: 0,
@@ -1130,7 +1152,6 @@ mod tests {
         assert!(!virtio_host_supports(&dev, 0));
     }
 
-
     #[test]
     fn test_virtio_error_is_copy() {
         let e = VirtioError;
@@ -1145,7 +1166,6 @@ mod tests {
         assert_debug(&e);
     }
 
-
     #[test]
     fn test_pci_config_addr() {
         let addr = pci_config_addr(0, 0, 0, 0x00);
@@ -1159,7 +1179,6 @@ mod tests {
         // reg=0x2E is aligned to 0x2C (0x2E & 0xFC).
         assert_eq!(addr, 0x8001_132C);
     }
-
 
     #[test]
     fn test_vringdesc_default_is_zeroed() {

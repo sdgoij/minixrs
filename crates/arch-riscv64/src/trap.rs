@@ -4,6 +4,8 @@
 //! Avoids direct dependency on kernel crate to prevent circular deps.
 //! The kernel registers a syscall handler callback at init time.
 
+use core::cell::UnsafeCell;
+
 /// Trap cause codes for RISC-V (scause register).
 pub mod cause {
     pub const SUP_SW_INTR: u64 = 1;
@@ -26,15 +28,51 @@ pub fn cause_code(scause: u64) -> u64 {
     scause & !(1u64 << 63)
 }
 
+struct SyscallHandlerCell(UnsafeCell<Option<unsafe fn(usize, &[u64; 6]) -> i64>>);
+unsafe impl Sync for SyscallHandlerCell {}
+impl SyscallHandlerCell {
+    const fn new(val: Option<unsafe fn(usize, &[u64; 6]) -> i64>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<unsafe fn(usize, &[u64; 6]) -> i64> {
+        self.0.get()
+    }
+}
+
+struct PostSyscallHookCell(UnsafeCell<Option<unsafe fn(&mut [u8; 296])>>);
+unsafe impl Sync for PostSyscallHookCell {}
+impl PostSyscallHookCell {
+    const fn new(val: Option<unsafe fn(&mut [u8; 296])>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<unsafe fn(&mut [u8; 296])> {
+        self.0.get()
+    }
+}
+
+struct UartInputCallbackCell(UnsafeCell<Option<unsafe fn(u8)>>);
+unsafe impl Sync for UartInputCallbackCell {}
+impl UartInputCallbackCell {
+    const fn new(val: Option<unsafe fn(u8)>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<unsafe fn(u8)> {
+        self.0.get()
+    }
+}
+
 /// Registered syscall handler (set by kernel at init).
-static mut SYSCALL_HANDLER: Option<unsafe fn(usize, &[u64; 6]) -> i64> = None;
+#[used]
+static SYSCALL_HANDLER: SyscallHandlerCell = SyscallHandlerCell::new(None);
 
 /// Registered post-syscall hook (set by kernel at init).
-static mut POST_SYSCALL_HOOK: Option<unsafe fn(&mut [u8; 296])> = None;
+#[used]
+static POST_SYSCALL_HOOK: PostSyscallHookCell = PostSyscallHookCell::new(None);
 
 /// Registered UART input callback (set by kernel at init).
 /// Called on each timer tick if a byte is available from UART.
-static mut UART_INPUT_CALLBACK: Option<unsafe fn(u8)> = None;
+#[used]
+static UART_INPUT_CALLBACK: UartInputCallbackCell = UartInputCallbackCell::new(None);
 
 /// Register the basic syscall dispatch function.
 ///
@@ -43,7 +81,7 @@ static mut UART_INPUT_CALLBACK: Option<unsafe fn(u8)> = None;
 /// Must be called once during kernel init, before any userspace execution.
 pub unsafe fn register_syscall_handler(handler: unsafe fn(usize, &[u64; 6]) -> i64) {
     unsafe {
-        SYSCALL_HANDLER = Some(handler);
+        core::ptr::write(SYSCALL_HANDLER.get(), Some(handler));
     }
 }
 
@@ -54,7 +92,7 @@ pub unsafe fn register_syscall_handler(handler: unsafe fn(usize, &[u64; 6]) -> i
 /// Must be called once during kernel init, before any userspace execution.
 pub unsafe fn register_post_syscall_hook(hook: unsafe fn(&mut [u8; 296])) {
     unsafe {
-        POST_SYSCALL_HOOK = Some(hook);
+        core::ptr::write(POST_SYSCALL_HOOK.get(), Some(hook));
     }
 }
 
@@ -65,7 +103,7 @@ pub unsafe fn register_post_syscall_hook(hook: unsafe fn(&mut [u8; 296])) {
 /// Must be called once during kernel init, before any userspace execution.
 pub unsafe fn register_uart_input_callback(cb: unsafe fn(u8)) {
     unsafe {
-        UART_INPUT_CALLBACK = Some(cb);
+        core::ptr::write(UART_INPUT_CALLBACK.get(), Some(cb));
     }
 }
 
@@ -86,7 +124,7 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     crate::clint::handle_timer_interrupt();
                     // Poll for console input via SBI (doesn't need page tables).
                     // Drain all available bytes.
-                    if let Some(cb) = UART_INPUT_CALLBACK {
+                    if let Some(cb) = *UART_INPUT_CALLBACK.get() {
                         while let Some(byte) = crate::sbi::console_getchar() {
                             cb(byte);
                         }
@@ -117,7 +155,7 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     u64::from_ne_bytes(frame[112..120].try_into().unwrap()),
                     u64::from_ne_bytes(frame[120..128].try_into().unwrap()),
                 ];
-                let ret = match unsafe { SYSCALL_HANDLER } {
+                let ret = match unsafe { *SYSCALL_HANDLER.get() } {
                     Some(handler) => unsafe { handler(nr as usize, &args) },
                     None => -38,
                 };
@@ -129,7 +167,7 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
                 frame[256..264].copy_from_slice(&(sepc + 4).to_ne_bytes());
                 // Post-syscall hook: if current process blocked (IPC), switch.
-                if let Some(hook) = unsafe { POST_SYSCALL_HOOK } {
+                if let Some(hook) = unsafe { *POST_SYSCALL_HOOK.get() } {
                     unsafe { hook(frame) };
                 }
             }

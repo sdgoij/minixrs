@@ -51,8 +51,19 @@ pub struct MfsGlobal {
     pub m_out: Message,
 }
 
+struct MfsStorageCell(UnsafeCell<MaybeUninit<MfsGlobal>>);
+unsafe impl Sync for MfsStorageCell {}
+impl MfsStorageCell {
+    const fn new(val: MaybeUninit<MfsGlobal>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut MaybeUninit<MfsGlobal> {
+        self.0.get()
+    }
+}
+
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
-static mut MFS_STORAGE: MaybeUninit<MfsGlobal> = MaybeUninit::uninit();
+static MFS_STORAGE: MfsStorageCell = MfsStorageCell::new(MaybeUninit::uninit());
 
 /// Wrapper for `[Option<u16>; INODE_HASH_SIZE]`.
 pub(crate) struct HashInodesCell(UnsafeCell<[Option<u16>; INODE_HASH_SIZE]>);
@@ -87,7 +98,7 @@ pub(crate) static UNUSED_INODES_HEAD: UnusedInodesHeadCell = UnusedInodesHeadCel
 /// Initialize globals. Must be called once before any access.
 pub unsafe fn mfs_init_globals() {
     // SAFETY: MFS_STORAGE is only accessed once here before any other code runs.
-    let p: *mut MfsGlobal = core::ptr::addr_of_mut!(MFS_STORAGE).cast();
+    let p: *mut MfsGlobal = MFS_STORAGE.get().cast();
     // SAFETY: we have exclusive access at init time.
     p.write(MfsGlobal {
         err_code: 0,
@@ -132,12 +143,12 @@ pub unsafe fn mfs_init_globals() {
 
 /// Get a raw pointer to MFS global state.
 pub unsafe fn mfs_ptr() -> *mut MfsGlobal {
-    core::ptr::addr_of_mut!(MFS_STORAGE).cast()
+    MFS_STORAGE.get().cast()
 }
 
 /// Get a raw pointer to the i-th inode.
 pub unsafe fn get_inode_ptr(idx: usize) -> *mut Inode {
-    let mfs = core::ptr::addr_of_mut!(MFS_STORAGE).cast::<MfsGlobal>();
+    let mfs = MFS_STORAGE.get().cast::<MfsGlobal>();
     // SAFETY: we take the address of the first element via addr_of_mut!,
     // which does NOT create a reference to the static.
     let base = core::ptr::addr_of_mut!((*mfs).inode_table[0]);
@@ -146,7 +157,7 @@ pub unsafe fn get_inode_ptr(idx: usize) -> *mut Inode {
 
 /// Get a raw pointer to the i-th super block.
 pub unsafe fn get_super_ptr(idx: usize) -> *mut SuperBlock {
-    let mfs = core::ptr::addr_of_mut!(MFS_STORAGE).cast::<MfsGlobal>();
+    let mfs = MFS_STORAGE.get().cast::<MfsGlobal>();
     let base = core::ptr::addr_of_mut!((*mfs).super_blocks[0]);
     base.add(idx)
 }

@@ -12,7 +12,7 @@
 //! RAM disk block devices are in the separate `ramdisk` module (see 11b.4).
 
 use crate::DriverError;
-use core::ptr::addr_of_mut;
+use core::cell::UnsafeCell;
 
 // Minor device numbers (from `dmap.h`)
 
@@ -28,10 +28,22 @@ pub const RAM_DEV_FIRST: usize = 7;
 
 /// Per-device open count.
 const NR_DEVS: usize = 7 + 6; // 7 special + 6 ramdisks
-static mut OPENCT: [i32; NR_DEVS] = [0; NR_DEVS];
+
+struct OpenctCell(UnsafeCell<[i32; NR_DEVS]>);
+unsafe impl Sync for OpenctCell {}
+impl OpenctCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; NR_DEVS]))
+    }
+    fn get(&self) -> *mut [i32; NR_DEVS] {
+        self.0.get()
+    }
+}
+
+static OPENCT: OpenctCell = OpenctCell::new();
 
 fn openct_ptr() -> *mut [i32; NR_DEVS] {
-    addr_of_mut!(OPENCT)
+    OPENCT.get()
 }
 
 // Character device API
@@ -174,7 +186,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_minor_constants() {
         assert_eq!(MEM_DEV, 1);
@@ -185,7 +196,6 @@ mod tests {
         assert_eq!(IMGRD_DEV, 6);
         assert_eq!(RAM_DEV_FIRST, 7);
     }
-
 
     #[test]
     fn test_null_open_close() {
@@ -224,7 +234,6 @@ mod tests {
         assert_eq!(mem_open_count(NULL_DEV), 0);
     }
 
-
     #[test]
     fn test_null_read() {
         let mut buf = [0xABu8; 64];
@@ -254,7 +263,6 @@ mod tests {
         assert!(mem_read(0, 0, &mut buf).is_err());
     }
 
-
     #[test]
     fn test_null_write() {
         let buf = [0xABu8; 64];
@@ -275,7 +283,6 @@ mod tests {
         assert!(mem_write(0, 0, &buf).is_err());
     }
 
-
     #[test]
     fn test_mem_is_valid() {
         assert!(mem_is_valid(NULL_DEV));
@@ -285,7 +292,6 @@ mod tests {
         assert!(!mem_is_valid(0));
         assert!(!mem_is_valid(99));
     }
-
 
     #[test]
     fn test_mem_init() {

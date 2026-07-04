@@ -24,8 +24,7 @@
 use crate::DriverError;
 use crate::bus::virtio;
 use crate::bus::virtio::{VRING_DESC_F_WRITE, VirtioDevice, VirtioFeature, VirtioPhysBuf};
-use core::ptr::addr_of_mut;
-
+use core::cell::UnsafeCell;
 
 /// Virtio PCI vendor ID (Red Hat / QEMU).
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
@@ -35,7 +34,6 @@ pub const VIRTIO_DEVICE_ID_BLOCK: u16 = 0x1001;
 
 /// Virtio block PCI subsystem device ID (used by `virtio_probe`).
 pub const VIRTIO_BLK_SUBSYSTEM_ID: u16 = 0x0002;
-
 
 pub const VIRTIO_BLK_F_BARRIER: u8 = 0;
 pub const VIRTIO_BLK_F_SIZE_MAX: u8 = 1;
@@ -120,7 +118,6 @@ const VIRTIO_BLK_FEATURE_LIST: &[VirtioFeature] = &[
     },
 ];
 
-
 /// Virtio block device configuration (from PCI config space / virtio
 /// device-specific registers).
 #[derive(Clone, Copy)]
@@ -163,14 +160,12 @@ impl Default for VirtioBlkConfig {
     }
 }
 
-
 pub const VIRTIO_BLK_T_IN: u32 = 0;
 pub const VIRTIO_BLK_T_OUT: u32 = 1;
 pub const VIRTIO_BLK_T_SCSI_CMD: u32 = 2;
 pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 pub const VIRTIO_BLK_T_GET_ID: u32 = 8;
 pub const VIRTIO_BLK_T_BARRIER: u32 = 0x8000_0000;
-
 
 /// Virtio block request header.
 #[derive(Clone, Copy)]
@@ -197,11 +192,9 @@ impl Default for VirtioBlkOuthdr {
     }
 }
 
-
 pub const VIRTIO_BLK_S_OK: u8 = 0;
 pub const VIRTIO_BLK_S_IOERR: u8 = 1;
 pub const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
 
 /// Block size is always 512 bytes for virtio-blk.
 pub const VIRTIO_BLK_BLOCK_SIZE: u32 = 512;
@@ -213,17 +206,48 @@ pub const VIRTIO_BLK_NUM_THREADS: usize = 4;
 /// Maximum number of segments per request.
 pub const VIRTIO_BLK_MAX_SEGMENTS: u32 = 128;
 
-
 /// Pre-allocated request headers for each thread slot.
 ///
 /// In the C driver these are allocated via `alloc_contig()` for DMA.
 /// For the initial Rust port we use static storage (single-threaded).
 /// Physical addresses must be supplied by the platform layer.
-static mut HDRS: [VirtioBlkOuthdr; 1] = [VirtioBlkOuthdr::new()];
+struct HdrsCell(UnsafeCell<[VirtioBlkOuthdr; 1]>);
+unsafe impl Sync for HdrsCell {}
+impl HdrsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([VirtioBlkOuthdr::new()]))
+    }
+    fn get(&self) -> *mut [VirtioBlkOuthdr; 1] {
+        self.0.get()
+    }
+}
+
+struct StatusCell(UnsafeCell<[u8; 1]>);
+unsafe impl Sync for StatusCell {}
+impl StatusCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0u8]))
+    }
+    fn get(&self) -> *mut [u8; 1] {
+        self.0.get()
+    }
+}
+
+struct StateCell(UnsafeCell<VirtioBlkState>);
+unsafe impl Sync for StateCell {}
+impl StateCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(VirtioBlkState::new()))
+    }
+    fn get(&self) -> *mut VirtioBlkState {
+        self.0.get()
+    }
+}
+
+static HDRS: HdrsCell = HdrsCell::new();
 
 /// Pre-allocated status bytes for each thread slot.
-static mut STATUS: [u8; 1] = [0u8];
-
+static STATUS: StatusCell = StatusCell::new();
 
 /// Runtime state of the virtio-block driver.
 struct VirtioBlkState {
@@ -263,24 +287,22 @@ impl VirtioBlkState {
     }
 }
 
-
-static mut STATE: VirtioBlkState = VirtioBlkState::new();
+static STATE: StateCell = StateCell::new();
 
 /// Helper: get a mutable pointer to the global state.
 fn state_ptr() -> *mut VirtioBlkState {
-    addr_of_mut!(STATE)
+    STATE.get()
 }
 
 /// Helper: get a mutable pointer to the header storage.
 fn hdrs_ptr() -> *mut [VirtioBlkOuthdr; 1] {
-    addr_of_mut!(HDRS)
+    HDRS.get()
 }
 
 /// Helper: get a mutable pointer to the status storage.
 fn status_ptr() -> *mut [u8; 1] {
-    addr_of_mut!(STATUS)
+    STATUS.get()
 }
-
 
 /// Read the virtio-blk device configuration from the device-specific
 /// PCI config registers.
@@ -375,7 +397,6 @@ fn wait_for_completion(max_spins: u32) -> Result<(), DriverError> {
     }
     Err(DriverError::Busy)
 }
-
 
 /// Initialise global driver state (must be called before anything else).
 ///
@@ -718,7 +739,6 @@ pub fn virtio_blk_has_feature(bit: u8) -> bool {
             .is_some_and(|dev| virtio::virtio_host_supports(dev, bit))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

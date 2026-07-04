@@ -5,6 +5,7 @@
 
 use crate::iso9660::consts::*;
 use crate::iso9660::types::*;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
 /// Global ISO 9660 FS state.
@@ -29,8 +30,19 @@ pub struct Iso9660Global {
     pub ext_attr_recs: [ExtAttrRec; NR_ATTR_RECS],
 }
 
+struct IsofsStorageCell(UnsafeCell<MaybeUninit<Iso9660Global>>);
+unsafe impl Sync for IsofsStorageCell {}
+impl IsofsStorageCell {
+    const fn new(val: MaybeUninit<Iso9660Global>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut MaybeUninit<Iso9660Global> {
+        self.0.get()
+    }
+}
+
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
-static mut ISOFS_STORAGE: MaybeUninit<Iso9660Global> = MaybeUninit::uninit();
+static ISOFS_STORAGE: IsofsStorageCell = IsofsStorageCell::new(MaybeUninit::uninit());
 
 /// Initialize globals. Must be called once before any access.
 ///
@@ -38,7 +50,7 @@ static mut ISOFS_STORAGE: MaybeUninit<Iso9660Global> = MaybeUninit::uninit();
 ///
 /// Must be called exactly once, before any other code accesses globals.
 pub unsafe fn isofs_init_globals() {
-    let p: *mut Iso9660Global = core::ptr::addr_of_mut!(ISOFS_STORAGE).cast();
+    let p: *mut Iso9660Global = ISOFS_STORAGE.get().cast();
     p.write(Iso9660Global {
         err_code: 0,
         rdwt_err: 0,
@@ -157,7 +169,7 @@ pub unsafe fn isofs_init_globals() {
 ///
 /// Caller must ensure no aliasing violations.
 pub unsafe fn isofs_ptr() -> *mut Iso9660Global {
-    core::ptr::addr_of_mut!(ISOFS_STORAGE).cast()
+    ISOFS_STORAGE.get().cast()
 }
 
 /// Helper to get a raw pointer to the primary volume descriptor.
@@ -166,7 +178,7 @@ pub unsafe fn isofs_ptr() -> *mut Iso9660Global {
 ///
 /// Caller must ensure no aliasing violations.
 pub unsafe fn v_pri_ptr() -> *mut Iso9660VdPri {
-    let isofs = core::ptr::addr_of_mut!(ISOFS_STORAGE).cast::<Iso9660Global>();
+    let isofs = ISOFS_STORAGE.get().cast::<Iso9660Global>();
     core::ptr::addr_of_mut!((*isofs).v_pri)
 }
 
@@ -176,7 +188,7 @@ pub unsafe fn v_pri_ptr() -> *mut Iso9660VdPri {
 ///
 /// `idx` must be < NR_DIR_RECORDS. Caller must ensure no aliasing violations.
 pub unsafe fn dir_record_ptr(idx: usize) -> *mut DirRecord {
-    let isofs = core::ptr::addr_of_mut!(ISOFS_STORAGE).cast::<Iso9660Global>();
+    let isofs = ISOFS_STORAGE.get().cast::<Iso9660Global>();
     let base = core::ptr::addr_of_mut!((*isofs).dir_records[0]);
     base.add(idx)
 }
@@ -187,7 +199,7 @@ pub unsafe fn dir_record_ptr(idx: usize) -> *mut DirRecord {
 ///
 /// Caller must ensure no aliasing violations.
 pub unsafe fn dir_records_ptr() -> *mut DirRecord {
-    let isofs = core::ptr::addr_of_mut!(ISOFS_STORAGE).cast::<Iso9660Global>();
+    let isofs = ISOFS_STORAGE.get().cast::<Iso9660Global>();
     core::ptr::addr_of_mut!((*isofs).dir_records[0])
 }
 
@@ -197,6 +209,6 @@ pub unsafe fn dir_records_ptr() -> *mut DirRecord {
 ///
 /// Caller must ensure no aliasing violations.
 pub unsafe fn ext_attr_recs_ptr() -> *mut ExtAttrRec {
-    let isofs = core::ptr::addr_of_mut!(ISOFS_STORAGE).cast::<Iso9660Global>();
+    let isofs = ISOFS_STORAGE.get().cast::<Iso9660Global>();
     core::ptr::addr_of_mut!((*isofs).ext_attr_recs[0])
 }

@@ -328,33 +328,57 @@ impl PhysicalAllocator {
 
 // Global allocator
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// Number of pages for 64 GB of physical memory.
 const GLOBAL_BITMAP_U64: usize = (64u64 * 1024 * 1024 * 1024 / 4096 / 64) as usize;
 
 static ALLOC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static mut GLOBAL_BITMAP: BitmapStorage<GLOBAL_BITMAP_U64> = BitmapStorage::new();
-static mut GLOBAL_ALLOCATOR: *mut PhysicalAllocator = core::ptr::null_mut();
+
+struct GlobalBitmapCell(UnsafeCell<BitmapStorage<GLOBAL_BITMAP_U64>>);
+unsafe impl Sync for GlobalBitmapCell {}
+impl GlobalBitmapCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(BitmapStorage::new()))
+    }
+    fn get(&self) -> *mut BitmapStorage<GLOBAL_BITMAP_U64> {
+        self.0.get()
+    }
+}
+
+static GLOBAL_BITMAP: GlobalBitmapCell = GlobalBitmapCell::new();
+static GLOBAL_ALLOCATOR: AtomicPtr<PhysicalAllocator> = AtomicPtr::new(core::ptr::null_mut());
+
+struct AllocInstanceCell(UnsafeCell<PhysicalAllocator>);
+unsafe impl Sync for AllocInstanceCell {}
+impl AllocInstanceCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(PhysicalAllocator {
+            bitmap: core::ptr::null_mut(),
+            bitmap_len: 0,
+            top_page: 0,
+            free_pages: 0,
+        }))
+    }
+    fn get(&self) -> *mut PhysicalAllocator {
+        self.0.get()
+    }
+}
 
 /// Internal allocator instance (lazily initialized).
-static mut ALLOC_INSTANCE: PhysicalAllocator = PhysicalAllocator {
-    bitmap: core::ptr::null_mut(),
-    bitmap_len: 0,
-    top_page: 0,
-    free_pages: 0,
-};
+static ALLOC_INSTANCE: AllocInstanceCell = AllocInstanceCell::new();
 
 pub fn init_allocator(mmap: &PhysicalMemoryMap) {
     if ALLOC_INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
     unsafe {
-        let storage = &raw mut GLOBAL_BITMAP;
-        let alloc = &raw mut ALLOC_INSTANCE;
+        let storage = GLOBAL_BITMAP.get();
+        let alloc = ALLOC_INSTANCE.get();
         *alloc = PhysicalAllocator::new(&mut *storage);
         (*alloc).init_from_mmap(mmap);
-        GLOBAL_ALLOCATOR = alloc;
+        GLOBAL_ALLOCATOR.store(alloc, Ordering::Relaxed);
     }
 }
 
@@ -363,7 +387,7 @@ pub fn global_allocator() -> *mut PhysicalAllocator {
         ALLOC_INITIALIZED.load(Ordering::SeqCst),
         "allocator not initialized"
     );
-    unsafe { GLOBAL_ALLOCATOR }
+    GLOBAL_ALLOCATOR.load(Ordering::Relaxed)
 }
 
 pub fn alloc_phys_page() -> Option<u64> {

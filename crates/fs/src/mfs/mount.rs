@@ -1,12 +1,14 @@
 //! Mount/unmount operations — adapted from `minix/fs/mfs/mount.c`
 
+use core::sync::atomic::{AtomicI32, Ordering};
+
 use crate::mfs::consts::*;
 use crate::mfs::glo;
 use crate::mfs::inode::*;
 use crate::mfs::super_block::*;
 use crate::mfs::types::*;
 
-static mut CLEANMOUNT: i32 = 1;
+static CLEANMOUNT: AtomicI32 = AtomicI32::new(1);
 
 pub fn fs_readsuper() -> i32 {
     unsafe {
@@ -21,7 +23,7 @@ pub fn fs_readsuper() -> i32 {
                     return r;
                 }
                 if (*sp).s_flags & MFSFLAG_CLEAN != 0 {
-                    CLEANMOUNT = 1;
+                    CLEANMOUNT.store(1, Ordering::Relaxed);
                 }
                 if get_inode(dev, ROOT_INODE).is_none() {
                     (*sp).s_dev = NO_DEV;
@@ -52,7 +54,7 @@ pub fn fs_unmount() -> i32 {
             return if count > 1 { EBUSY } else { EINVAL };
         }
         put_inode(root_ip);
-        if CLEANMOUNT != 0 && (*mfs).super_blocks[0].s_rd_only == 0 {
+        if CLEANMOUNT.load(Ordering::Relaxed) != 0 && (*mfs).super_blocks[0].s_rd_only == 0 {
             (*mfs).super_blocks[0].s_flags |= MFSFLAG_CLEAN;
         }
         (*mfs).super_blocks[0].s_dev = NO_DEV;

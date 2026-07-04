@@ -14,7 +14,7 @@
 //! `gpio_parse_pin(global_pin)` to decompose it.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
 
 /// GPIO pin direction/mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,6 @@ pub enum GpioMode {
     /// Alternate function.
     AltFn(u8),
 }
-
 
 /// Per-pin state.
 #[derive(Clone, Copy)]
@@ -50,7 +49,6 @@ impl GpioPin {
     }
 }
 
-
 /// Number of GPIO pins supported.
 pub const GPIO_PINS: usize = 128;
 
@@ -59,7 +57,6 @@ pub const GPIO_BANKS: usize = 4;
 
 /// Pins per bank.
 pub const PINS_PER_BANK: usize = 32;
-
 
 /// Beaglebone USR0 LED (bank 1, pin 21).
 pub const BEAGLEBONE_USR0: usize = gpio_global_pin(1, 21);
@@ -79,7 +76,6 @@ pub const BEAGLEBONE_LCD_EN: usize = gpio_global_pin(0, 27);
 /// Beaglebone USER button (bank 0, pin 26).
 pub const BEAGLEBONE_USER_BTN: usize = gpio_global_pin(0, 26);
 
-
 /// Compute a global pin number from (bank, pin).
 ///
 /// Bank is 0–3, pin is 0–31.
@@ -95,13 +91,33 @@ pub fn gpio_parse_pin(global: usize) -> Option<(usize, usize)> {
     Some((global / PINS_PER_BANK, global % PINS_PER_BANK))
 }
 
+struct GpioStateCell(UnsafeCell<[GpioPin; GPIO_PINS]>);
+unsafe impl Sync for GpioStateCell {}
+impl GpioStateCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([GpioPin::new(); GPIO_PINS]))
+    }
+    fn get(&self) -> *mut [GpioPin; GPIO_PINS] {
+        self.0.get()
+    }
+}
+
+struct GpioOwnerCell(UnsafeCell<[[u8; 16]; GPIO_PINS]>);
+unsafe impl Sync for GpioOwnerCell {}
+impl GpioOwnerCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([[0u8; 16]; GPIO_PINS]))
+    }
+    fn get(&self) -> *mut [[u8; 16]; GPIO_PINS] {
+        self.0.get()
+    }
+}
 
 /// GPIO pin state table.
-static mut GPIO_STATE: [GpioPin; GPIO_PINS] = [GpioPin::new(); GPIO_PINS];
+static GPIO_STATE: GpioStateCell = GpioStateCell::new();
 
 /// Owner label for each claimed pin.
-static mut GPIO_OWNER: [[u8; 16]; GPIO_PINS] = [[0u8; 16]; GPIO_PINS];
-
+static GPIO_OWNER: GpioOwnerCell = GpioOwnerCell::new();
 
 /// Initialize the GPIO driver.
 ///
@@ -114,8 +130,8 @@ static mut GPIO_OWNER: [[u8; 16]; GPIO_PINS] = [[0u8; 16]; GPIO_PINS];
 pub unsafe fn gpio_init() {
     unsafe {
         for i in 0..GPIO_PINS {
-            GPIO_STATE[i] = GpioPin::new();
-            GPIO_OWNER[i] = [0u8; 16];
+            (*GPIO_STATE.get())[i] = GpioPin::new();
+            (*GPIO_OWNER.get())[i] = [0u8; 16];
         }
     }
 }
@@ -133,14 +149,15 @@ pub unsafe fn gpio_claim(label: &[u8], nr: usize) -> Result<(), DriverError> {
         if nr >= GPIO_PINS {
             return Err(DriverError::NotFound);
         }
-        if GPIO_STATE[nr].claimed {
+        if (*GPIO_STATE.get())[nr].claimed {
             return Err(DriverError::Busy);
         }
 
-        GPIO_STATE[nr].claimed = true;
+        (*GPIO_STATE.get())[nr].claimed = true;
         let len = label.len().min(15);
-        GPIO_OWNER[nr][..len].copy_from_slice(&label[..len]);
-        GPIO_OWNER[nr][len] = 0; // NUL-terminate
+        let owner = &mut *((*GPIO_OWNER.get()).as_mut_ptr().add(nr));
+        owner[..len].copy_from_slice(&label[..len]);
+        owner[len] = 0; // NUL-terminate
         Ok(())
     }
 }
@@ -153,8 +170,8 @@ pub unsafe fn gpio_claim(label: &[u8], nr: usize) -> Result<(), DriverError> {
 pub unsafe fn gpio_release(nr: usize) {
     unsafe {
         if nr < GPIO_PINS {
-            GPIO_STATE[nr] = GpioPin::new();
-            GPIO_OWNER[nr] = [0u8; 16];
+            (*GPIO_STATE.get())[nr] = GpioPin::new();
+            (*GPIO_OWNER.get())[nr] = [0u8; 16];
         }
     }
 }
@@ -168,10 +185,10 @@ pub unsafe fn gpio_release(nr: usize) {
 /// Must be called with exclusive access to the GPIO state table.
 pub unsafe fn gpio_pin_mode(nr: usize, mode: GpioMode) -> Result<(), DriverError> {
     unsafe {
-        if nr >= GPIO_PINS || !GPIO_STATE[nr].claimed {
+        if nr >= GPIO_PINS || !(*GPIO_STATE.get())[nr].claimed {
             return Err(DriverError::NotFound);
         }
-        GPIO_STATE[nr].mode = mode;
+        (*GPIO_STATE.get())[nr].mode = mode;
         Ok(())
     }
 }
@@ -185,10 +202,10 @@ pub unsafe fn gpio_pin_mode(nr: usize, mode: GpioMode) -> Result<(), DriverError
 /// Must be called with exclusive access to the GPIO state table.
 pub unsafe fn gpio_read(nr: usize) -> Result<u8, DriverError> {
     unsafe {
-        if nr >= GPIO_PINS || !GPIO_STATE[nr].claimed {
+        if nr >= GPIO_PINS || !(*GPIO_STATE.get())[nr].claimed {
             return Err(DriverError::NotFound);
         }
-        Ok(GPIO_STATE[nr].value)
+        Ok((*GPIO_STATE.get())[nr].value)
     }
 }
 
@@ -201,13 +218,13 @@ pub unsafe fn gpio_read(nr: usize) -> Result<u8, DriverError> {
 /// Must be called with exclusive access to the GPIO state table.
 pub unsafe fn gpio_write(nr: usize, val: u8) -> Result<(), DriverError> {
     unsafe {
-        if nr >= GPIO_PINS || !GPIO_STATE[nr].claimed {
+        if nr >= GPIO_PINS || !(*GPIO_STATE.get())[nr].claimed {
             return Err(DriverError::NotFound);
         }
-        if GPIO_STATE[nr].mode != GpioMode::Output {
+        if (*GPIO_STATE.get())[nr].mode != GpioMode::Output {
             return Err(DriverError::Unsupported);
         }
-        GPIO_STATE[nr].value = val & 1;
+        (*GPIO_STATE.get())[nr].value = val & 1;
         Ok(())
     }
 }
@@ -294,7 +311,7 @@ mod tests {
             gpio_init();
             assert!(gpio_claim(b"t", 7).is_ok());
             assert!(gpio_pin_mode(7, GpioMode::Output).is_ok());
-            assert_eq!(GPIO_STATE[7].mode, GpioMode::Output);
+            assert_eq!((*GPIO_STATE.get())[7].mode, GpioMode::Output);
         }
     }
 

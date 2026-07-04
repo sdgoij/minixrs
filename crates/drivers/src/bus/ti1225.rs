@@ -7,7 +7,8 @@
 //! and bus rescanning.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// TI1225 vendor ID (Texas Instruments).
 pub const TI1225_VENDOR: u16 = 0x104C;
@@ -17,7 +18,6 @@ pub const TI1225_DEVICE: u16 = 0xAC1E;
 
 /// Number of CardBus sockets supported (TI1225 has 2).
 pub const TI1225_SOCKETS: usize = 2;
-
 
 /// System Control register.
 pub const TI1225_SYSTEM_CONTROL: u8 = 0x80;
@@ -42,7 +42,6 @@ pub const TI1225_MEM0_START: u8 = 0xA0;
 
 /// ExCA I/O Window 0 Start (per socket).
 pub const TI1225_IO0_START: u8 = 0xA4;
-
 
 /// System Control: reset the bridge.
 pub const TI1225_CTRL_RESET: u32 = 0x0000_0001;
@@ -79,7 +78,6 @@ pub const TI1225_VS1: u32 = 0x0000_0020;
 
 /// Voltage sense 2 (bit 6).
 pub const TI1225_VS2: u32 = 0x0000_0040;
-
 
 /// State of a single CardBus socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,11 +144,20 @@ impl Ti1225State {
     }
 }
 
+struct Ti1225BridgesCell(UnsafeCell<[Ti1225State; 4]>);
+unsafe impl Sync for Ti1225BridgesCell {}
+impl Ti1225BridgesCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([Ti1225State::new(); 4]))
+    }
+    fn get(&self) -> *mut [Ti1225State; 4] {
+        self.0.get()
+    }
+}
 
 /// TI1225 bridge instances (max 4 bridges).
-static mut TI1225_BRIDGES: [Ti1225State; 4] = [Ti1225State::new(); 4];
-static mut TI1225_BRIDGE_COUNT: usize = 0;
-
+static TI1225_BRIDGES: Ti1225BridgesCell = Ti1225BridgesCell::new();
+static TI1225_BRIDGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn ti_pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
@@ -159,7 +166,6 @@ unsafe fn ti_pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
 unsafe fn ti_pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
     unsafe { crate::arch_io::pci_cfg_write32(bus, dev, func, reg, val) }
 }
-
 
 /// Initialize a TI1225 bridge.
 ///
@@ -171,9 +177,8 @@ unsafe fn ti_pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
 /// Must be called with exclusive access to PCI config space.
 pub unsafe fn ti1225_init(bus: u8, dev: u8, func: u8) -> Result<usize, DriverError> {
     unsafe {
-        let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
-        let count = core::ptr::addr_of_mut!(TI1225_BRIDGE_COUNT);
-        let idx = *count;
+        let bridges = TI1225_BRIDGES.get();
+        let idx = TI1225_BRIDGE_COUNT.load(Ordering::Relaxed);
         if idx >= (*bridges).len() {
             return Err(DriverError::Busy);
         }
@@ -192,7 +197,7 @@ pub unsafe fn ti1225_init(bus: u8, dev: u8, func: u8) -> Result<usize, DriverErr
             ti1225_detect_socket(idx, socket);
         }
 
-        *count = idx + 1;
+        TI1225_BRIDGE_COUNT.store(idx + 1, Ordering::Relaxed);
         Ok(idx)
     }
 }
@@ -207,7 +212,7 @@ pub unsafe fn ti1225_init(bus: u8, dev: u8, func: u8) -> Result<usize, DriverErr
 /// Must be called with exclusive access to PCI config space.
 pub unsafe fn ti1225_detect_socket(bridge_idx: usize, socket: usize) -> CardState {
     unsafe {
-        let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
+        let bridges = TI1225_BRIDGES.get();
         if bridge_idx >= (*bridges).len() || socket >= TI1225_SOCKETS {
             return CardState::Empty;
         }
@@ -254,7 +259,7 @@ pub unsafe fn ti1225_detect_socket(bridge_idx: usize, socket: usize) -> CardStat
 /// Must be called with exclusive access to PCI config space.
 pub unsafe fn ti1225_power_on(bridge_idx: usize, socket: usize) -> Result<(), DriverError> {
     unsafe {
-        let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
+        let bridges = TI1225_BRIDGES.get();
         if bridge_idx >= (*bridges).len() || socket >= TI1225_SOCKETS {
             return Err(DriverError::InvalidArgument);
         }
@@ -291,7 +296,7 @@ pub unsafe fn ti1225_power_on(bridge_idx: usize, socket: usize) -> Result<(), Dr
 /// Must be called with exclusive access to PCI config space.
 pub unsafe fn ti1225_reset_socket(bridge_idx: usize, socket: usize) -> Result<(), DriverError> {
     unsafe {
-        let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
+        let bridges = TI1225_BRIDGES.get();
         if bridge_idx >= (*bridges).len() || socket >= TI1225_SOCKETS {
             return Err(DriverError::InvalidArgument);
         }
@@ -321,7 +326,7 @@ pub unsafe fn ti1225_reset_socket(bridge_idx: usize, socket: usize) -> Result<()
 /// Must be called with exclusive access to PCI config space.
 pub unsafe fn ti1225_release_reset(bridge_idx: usize, socket: usize) -> Result<(), DriverError> {
     unsafe {
-        let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
+        let bridges = TI1225_BRIDGES.get();
         if bridge_idx >= (*bridges).len() || socket >= TI1225_SOCKETS {
             return Err(DriverError::InvalidArgument);
         }
@@ -338,15 +343,15 @@ pub unsafe fn ti1225_release_reset(bridge_idx: usize, socket: usize) -> Result<(
 
 /// Get the number of initialized bridges.
 pub fn ti1225_bridge_count() -> usize {
-    unsafe { *core::ptr::addr_of_mut!(TI1225_BRIDGE_COUNT) }
+    TI1225_BRIDGE_COUNT.load(Ordering::Relaxed)
 }
 
 /// Get a reference to a bridge state.
 pub fn ti1225_get_bridge(index: usize) -> Option<&'static Ti1225State> {
     unsafe {
-        let count = *core::ptr::addr_of_mut!(TI1225_BRIDGE_COUNT);
+        let count = TI1225_BRIDGE_COUNT.load(Ordering::Relaxed);
         if index < count {
-            let bridges = core::ptr::addr_of_mut!(TI1225_BRIDGES);
+            let bridges = TI1225_BRIDGES.get();
             Some(&(*bridges)[index])
         } else {
             None
@@ -444,7 +449,7 @@ mod tests {
     #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
     fn test_ti1225_bridge_count() {
         unsafe {
-            *core::ptr::addr_of_mut!(TI1225_BRIDGE_COUNT) = 0;
+            TI1225_BRIDGE_COUNT.store(0, Ordering::Relaxed);
             let _ = ti1225_init(0, 0, 0);
             assert_eq!(ti1225_bridge_count(), 1);
         }
@@ -454,7 +459,7 @@ mod tests {
     #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
     fn test_ti1225_get_bridge() {
         unsafe {
-            *core::ptr::addr_of_mut!(TI1225_BRIDGE_COUNT) = 0;
+            TI1225_BRIDGE_COUNT.store(0, Ordering::Relaxed);
             let _ = ti1225_init(1, 2, 3);
             let bridge = ti1225_get_bridge(0);
             assert!(bridge.is_some());

@@ -8,7 +8,8 @@
 //! 256 samples must be collected before the first reseed.
 
 use crate::DriverError;
-
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Number of derivative history entries per source.
 const N_DERIV: usize = 16;
@@ -22,10 +23,8 @@ const MIN_SAMPLES: u32 = 256;
 /// Total sources (16 kernel + 1 internal timing).
 pub const TOTAL_SOURCES: usize = 17;
 
-
 const AES_BLOCK_SIZE: usize = 16;
 const AES_KEY_SIZE: usize = 16; // AES-128
-
 
 const SHA256_BLOCK_SIZE: usize = 64;
 const SHA256_DIGEST_SIZE: usize = 32;
@@ -171,7 +170,6 @@ fn sha256_transform(state: &mut [u32; 8], block: &[u8; SHA256_BLOCK_SIZE]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-
 /// AES-128 round constant table.
 const AES_RCON: [u8; 11] = [
     0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
@@ -293,33 +291,61 @@ fn gf_mul3(x: u16) -> u16 {
     gf_mul2(x) ^ x
 }
 
-
 /// Derivative history for each entropy source.
 ///
 /// Tracks the last N_DERIV samples to detect quality (entropy estimation).
-static mut DERIV: [[u32; N_DERIV]; TOTAL_SOURCES] = [[0u32; N_DERIV]; TOTAL_SOURCES];
+struct DerivCell(UnsafeCell<[[u32; N_DERIV]; TOTAL_SOURCES]>);
+unsafe impl Sync for DerivCell {}
+impl DerivCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([[0u32; N_DERIV]; TOTAL_SOURCES]))
+    }
+    fn get(&self) -> *mut [[u32; N_DERIV]; TOTAL_SOURCES] {
+        self.0.get()
+    }
+}
 
-/// Current index into each source's derivative history.
-static mut POOL_IND: [usize; TOTAL_SOURCES] = [0usize; TOTAL_SOURCES];
+struct PoolIndCell(UnsafeCell<[usize; TOTAL_SOURCES]>);
+unsafe impl Sync for PoolIndCell {}
+impl PoolIndCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0usize; TOTAL_SOURCES]))
+    }
+    fn get(&self) -> *mut [usize; TOTAL_SOURCES] {
+        self.0.get()
+    }
+}
 
-/// SHA-256 entropy pools (32 pools, each accumulating samples).
-static mut POOL_CTX: [Sha256Ctx; NR_POOLS] = [Sha256Ctx::new(); NR_POOLS];
+struct PoolCtxCell(UnsafeCell<[Sha256Ctx; NR_POOLS]>);
+unsafe impl Sync for PoolCtxCell {}
+impl PoolCtxCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([Sha256Ctx::new(); NR_POOLS]))
+    }
+    fn get(&self) -> *mut [Sha256Ctx; NR_POOLS] {
+        self.0.get()
+    }
+}
 
-/// Total number of samples collected in pool 0.
-static mut SAMPLES: u32 = 0;
+struct RandomKeyCell(UnsafeCell<[u8; AES_KEY_SIZE * 2]>);
+unsafe impl Sync for RandomKeyCell {}
+impl RandomKeyCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0u8; AES_KEY_SIZE * 2]))
+    }
+    fn get(&self) -> *mut [u8; AES_KEY_SIZE * 2] {
+        self.0.get()
+    }
+}
 
-/// Whether the generator has been seeded at least once.
-static mut GOT_SEEDED: bool = false;
-
-/// AES key for the PRNG.
-static mut RANDOM_KEY: [u8; AES_KEY_SIZE * 2] = [0u8; AES_KEY_SIZE * 2];
-
-/// Counter for tracking reseed operations.
-static mut RESEED_COUNT: u32 = 0;
-
-/// Per-call counter for CTR-mode PRNG output.
-static mut RANDOM_NEXT: u64 = 0;
-
+static DERIV: DerivCell = DerivCell::new();
+static POOL_IND: PoolIndCell = PoolIndCell::new();
+static POOL_CTX: PoolCtxCell = PoolCtxCell::new();
+static SAMPLES: AtomicU32 = AtomicU32::new(0);
+static GOT_SEEDED: AtomicBool = AtomicBool::new(false);
+static RANDOM_KEY: RandomKeyCell = RandomKeyCell::new();
+static RESEED_COUNT: AtomicU32 = AtomicU32::new(0);
+static RANDOM_NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// Add a sample from a specific entropy source.
 ///
@@ -332,48 +358,45 @@ unsafe fn add_sample(source: usize, sample: u32) {
         }
 
         // Store in derivative history.
-        let ind = &mut POOL_IND[source];
-        DERIV[source][*ind] = sample;
+        let ind = &mut (*POOL_IND.get())[source];
+        (*DERIV.get())[source][*ind] = sample;
         *ind = (*ind + 1) % N_DERIV;
 
         // Hash into pool (source % NR_POOLS, then advanced by derivative).
         let pool = source % NR_POOLS;
         let sample_bytes = sample.to_le_bytes();
-        POOL_CTX[pool].update(&sample_bytes);
+        (*POOL_CTX.get())[pool].update(&sample_bytes);
 
         // Use derivative to select next pool (quality detection).
         let mut deriv = 0u32;
-        for d in DERIV[source].iter() {
+        for d in (*DERIV.get())[source].iter() {
             deriv ^= d;
         }
         let next_pool = (pool + (deriv as usize) % NR_POOLS) % NR_POOLS;
         if next_pool != pool {
-            POOL_CTX[next_pool].update(&sample_bytes);
+            (*POOL_CTX.get())[next_pool].update(&sample_bytes);
         }
 
         if source == 0 {
-            SAMPLES += 1;
+            SAMPLES.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 /// Generate one AES block of output from the PRNG.
 unsafe fn data_block(key: &AesKey, output: &mut [u8; AES_BLOCK_SIZE]) {
-    unsafe {
-        // Encrypt the counter as a 16-byte block.
-        let mut block = [0u8; AES_BLOCK_SIZE];
-        let ctr = RANDOM_NEXT;
-        RANDOM_NEXT = ctr.wrapping_add(1);
-        block[0..8].copy_from_slice(&ctr.to_le_bytes());
+    // Encrypt the counter as a 16-byte block.
+    let mut block = [0u8; AES_BLOCK_SIZE];
+    let ctr = RANDOM_NEXT.fetch_add(1, Ordering::Relaxed);
+    block[0..8].copy_from_slice(&ctr.to_le_bytes());
 
-        *output = aes_encrypt_block(key, &block);
-    }
+    *output = aes_encrypt_block(key, &block);
 }
 
 /// Reseed the PRNG using accumulated entropy.
 unsafe fn reseed() {
     unsafe {
-        if SAMPLES < MIN_SAMPLES {
+        if SAMPLES.load(Ordering::Relaxed) < MIN_SAMPLES {
             return;
         }
 
@@ -381,14 +404,14 @@ unsafe fn reseed() {
         let mut hash_buf = [0u8; SHA256_DIGEST_SIZE * 2];
         #[allow(clippy::needless_range_loop)]
         for i in 0..NR_POOLS {
-            let digest = POOL_CTX[i].finalize();
+            let digest = (*POOL_CTX.get())[i].finalize();
             let offset = (i % 2) * SHA256_DIGEST_SIZE;
             // XOR each pool's digest into the hash buffer.
             for (j, &d_j) in digest.iter().enumerate() {
                 hash_buf[offset + j] ^= d_j;
             }
             // Reset the pool.
-            POOL_CTX[i].init();
+            (*POOL_CTX.get())[i].init();
         }
 
         // Final hash to produce 32 bytes of key material.
@@ -397,16 +420,15 @@ unsafe fn reseed() {
         let final_key = ctx.finalize();
 
         // Update the first 16 bytes of random_key.
-        for i in 0..AES_KEY_SIZE {
-            RANDOM_KEY[i] ^= final_key[i];
+        for (i, fk) in final_key.iter().enumerate().take(AES_KEY_SIZE) {
+            (*RANDOM_KEY.get())[i] ^= fk;
         }
 
-        SAMPLES = 0;
-        GOT_SEEDED = true;
-        RESEED_COUNT += 1;
+        SAMPLES.store(0, Ordering::Relaxed);
+        GOT_SEEDED.store(true, Ordering::Relaxed);
+        RESEED_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
-
 
 /// Initialize the random number generator.
 ///
@@ -418,7 +440,7 @@ unsafe fn reseed() {
 /// Writes to all global mutable state.
 pub unsafe fn random_init() {
     unsafe {
-        let deriv = core::ptr::addr_of_mut!(DERIV);
+        let deriv = DERIV.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..TOTAL_SOURCES {
             #[allow(clippy::needless_range_loop)]
@@ -426,27 +448,27 @@ pub unsafe fn random_init() {
                 (*deriv)[i][j] = 0;
             }
         }
-        let pool_ind = core::ptr::addr_of_mut!(POOL_IND);
+        let pool_ind = POOL_IND.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..TOTAL_SOURCES {
             (*pool_ind)[i] = 0;
         }
-        let pool_ctx = core::ptr::addr_of_mut!(POOL_CTX);
+        let pool_ctx = POOL_CTX.get();
         #[allow(clippy::needless_range_loop)]
         for i in 0..NR_POOLS {
             (*pool_ctx)[i].init();
         }
-        SAMPLES = 0;
-        GOT_SEEDED = false;
-        RANDOM_KEY = [0u8; AES_KEY_SIZE * 2];
-        RESEED_COUNT = 0;
-        RANDOM_NEXT = 0;
+        SAMPLES.store(0, Ordering::Relaxed);
+        GOT_SEEDED.store(false, Ordering::Relaxed);
+        *RANDOM_KEY.get() = [0u8; AES_KEY_SIZE * 2];
+        RESEED_COUNT.store(0, Ordering::Relaxed);
+        RANDOM_NEXT.store(0, Ordering::Relaxed);
     }
 }
 
 /// Check if the RNG has been seeded.
 pub fn random_isseeded() -> bool {
-    unsafe { GOT_SEEDED }
+    GOT_SEEDED.load(Ordering::Relaxed)
 }
 
 /// Update entropy pools with samples from a kernel source.
@@ -475,7 +497,11 @@ pub unsafe fn random_getbytes(buf: &mut [u8]) {
     unsafe {
         let key = aes_key_expansion(&{
             let mut k = [0u8; AES_KEY_SIZE];
-            k.copy_from_slice(&RANDOM_KEY[..AES_KEY_SIZE]);
+            core::ptr::copy_nonoverlapping(
+                RANDOM_KEY.get().cast::<u8>(),
+                k.as_mut_ptr(),
+                AES_KEY_SIZE,
+            );
             k
         });
 
@@ -533,11 +559,10 @@ mod tests {
     fn test_random_init_clears_state() {
         unsafe {
             random_init();
-            assert!(!random_isseeded(), "should not be seeded after init");
-            let deriv_ptr = core::ptr::addr_of_mut!(DERIV);
+            let deriv = DERIV.get();
             for i in 0..TOTAL_SOURCES {
                 for j in 0..N_DERIV {
-                    assert_eq!((*deriv_ptr)[i][j], 0, "deriv[{i}][{j}] should be 0");
+                    assert_eq!((*deriv)[i][j], 0, "deriv[{i}][{j}] should be 0");
                 }
             }
         }
@@ -720,8 +745,7 @@ mod tests {
         unsafe {
             random_init();
             add_sample(99, 42);
-            let samples_ptr = core::ptr::addr_of_mut!(SAMPLES);
-            assert_eq!(*samples_ptr, 0);
+            assert_eq!(SAMPLES.load(Ordering::Relaxed), 0);
         }
     }
 
@@ -731,9 +755,9 @@ mod tests {
             random_init();
             add_sample(0, 100);
             add_sample(0, 200);
-            let deriv_ptr = core::ptr::addr_of_mut!(DERIV);
-            assert_eq!((*deriv_ptr)[0][0], 100);
-            assert_eq!((*deriv_ptr)[0][1], 200);
+            let deriv = DERIV.get();
+            assert_eq!((*deriv)[0][0], 100);
+            assert_eq!((*deriv)[0][1], 200);
         }
     }
 

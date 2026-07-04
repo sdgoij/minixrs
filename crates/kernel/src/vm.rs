@@ -1,6 +1,7 @@
 //! Physical memory manager — adapted from `minix/servers/vm/alloc.c`
 
-#![allow(static_mut_refs)]
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 pub const VM_PAGE_SIZE: usize = 4096;
 pub const NR_PHYS_PAGES: usize = 0x100000000 / VM_PAGE_SIZE;
@@ -25,27 +26,60 @@ pub struct MemoryChunk {
 
 pub const NO_MEM: u64 = u64::MAX;
 
-static mut BITS: [u32; PAGE_BITMAP_CHUNKS] = [0u32; PAGE_BITMAP_CHUNKS];
-static mut CACHE: [i32; PAGE_CACHE_MAX] = [0i32; PAGE_CACHE_MAX];
-static mut CACHE_SZ: i32 = 0;
-static mut TOTAL: i32 = 0;
-static mut LAST_SCAN: i32 = -1;
+struct BitsCell(UnsafeCell<[u32; PAGE_BITMAP_CHUNKS]>);
+unsafe impl Sync for BitsCell {}
+impl BitsCell {
+    const fn new(val: [u32; PAGE_BITMAP_CHUNKS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u32; PAGE_BITMAP_CHUNKS] {
+        self.0.get()
+    }
+}
+
+struct CacheCell(UnsafeCell<[i32; PAGE_CACHE_MAX]>);
+unsafe impl Sync for CacheCell {}
+impl CacheCell {
+    const fn new(val: [i32; PAGE_CACHE_MAX]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [i32; PAGE_CACHE_MAX] {
+        self.0.get()
+    }
+}
+
+struct KernPhysMapCell(UnsafeCell<[KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES]>);
+unsafe impl Sync for KernPhysMapCell {}
+impl KernPhysMapCell {
+    const fn new(val: [KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES] {
+        self.0.get()
+    }
+}
+
+static BITS: BitsCell = BitsCell::new([0u32; PAGE_BITMAP_CHUNKS]);
+static CACHE: CacheCell = CacheCell::new([0i32; PAGE_CACHE_MAX]);
+static CACHE_SZ: AtomicI32 = AtomicI32::new(0);
+static TOTAL: AtomicI32 = AtomicI32::new(0);
+static LAST_SCAN: AtomicI32 = AtomicI32::new(-1);
 
 pub fn total_pages() -> i32 {
-    unsafe { TOTAL }
+    TOTAL.load(Ordering::Relaxed)
 }
 
 fn page_free(p: usize) -> bool {
     if p >= NR_PHYS_PAGES {
         return false;
     }
-    unsafe { (BITS[p / 32] & (1u32 << (p % 32))) != 0 }
+    unsafe { ((*BITS.get())[p / 32] & (1u32 << (p % 32))) != 0 }
 }
 
 fn set_free(p: usize) {
     if p < NR_PHYS_PAGES {
         unsafe {
-            BITS[p / 32] |= 1u32 << (p % 32);
+            (*BITS.get())[p / 32] |= 1u32 << (p % 32);
         }
     }
 }
@@ -53,7 +87,7 @@ fn set_free(p: usize) {
 fn set_used(p: usize) {
     if p < NR_PHYS_PAGES {
         unsafe {
-            BITS[p / 32] &= !(1u32 << (p % 32));
+            (*BITS.get())[p / 32] &= !(1u32 << (p % 32));
         }
     }
 }
@@ -92,11 +126,10 @@ unsafe fn alloc_pages_raw(n: usize, flags: u32) -> u64 {
     };
 
     if n == 1 && flags & (PAF_LOWER16MB | PAF_LOWER1MB) == 0 {
-        while unsafe { CACHE_SZ } > 0 {
-            unsafe {
-                CACHE_SZ -= 1;
-            }
-            let p = unsafe { CACHE[CACHE_SZ as usize] } as usize;
+        while CACHE_SZ.load(Ordering::Relaxed) > 0 {
+            CACHE_SZ.fetch_sub(1, Ordering::Relaxed);
+            let sz = CACHE_SZ.load(Ordering::Relaxed);
+            let p = unsafe { (*CACHE.get())[sz as usize] } as usize;
             if p < NR_PHYS_PAGES && page_free(p) {
                 set_used(p);
                 return p as u64;
@@ -104,8 +137,10 @@ unsafe fn alloc_pages_raw(n: usize, flags: u32) -> u64 {
         }
     }
 
-    let start = if unsafe { LAST_SCAN >= 0 && (LAST_SCAN as usize) <= max } {
-        unsafe { LAST_SCAN as usize }
+    let start = if LAST_SCAN.load(Ordering::Relaxed) >= 0
+        && (LAST_SCAN.load(Ordering::Relaxed) as usize) <= max
+    {
+        LAST_SCAN.load(Ordering::Relaxed) as usize
     } else {
         max
     };
@@ -119,19 +154,18 @@ unsafe fn alloc_pages_raw(n: usize, flags: u32) -> u64 {
     for i in p as usize..p as usize + n {
         set_used(i);
     }
-    unsafe {
-        LAST_SCAN = p as i32;
-    }
+    LAST_SCAN.store(p as i32, Ordering::Relaxed);
     p
 }
 
 unsafe fn free_pages_raw(pageno: usize, n: usize) {
     for i in pageno..pageno + n {
         set_free(i);
-        if unsafe { CACHE_SZ } < PAGE_CACHE_MAX as i32 {
+        if CACHE_SZ.load(Ordering::Relaxed) < PAGE_CACHE_MAX as i32 {
             unsafe {
-                CACHE[CACHE_SZ as usize] = i as i32;
-                CACHE_SZ += 1;
+                let sz = CACHE_SZ.load(Ordering::Relaxed);
+                (*CACHE.get())[sz as usize] = i as i32;
+                CACHE_SZ.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -142,19 +176,17 @@ unsafe fn free_pages_raw(pageno: usize, n: usize) {
 /// Must be called exactly once during boot, before any alloc/free.
 pub unsafe fn mem_init(chunks: &[MemoryChunk]) {
     unsafe {
-        BITS.fill(0);
+        (*BITS.get()).fill(0);
     }
-    unsafe {
-        CACHE_SZ = 0;
-        LAST_SCAN = -1;
-        TOTAL = 0;
-    }
+    CACHE_SZ.store(0, Ordering::Relaxed);
+    LAST_SCAN.store(-1, Ordering::Relaxed);
+    TOTAL.store(0, Ordering::Relaxed);
     for chunk in chunks.iter().rev() {
         if chunk.size > 0 {
             unsafe {
                 free_pages_raw(chunk.base as usize, chunk.size as usize);
-                TOTAL += chunk.size as i32;
             }
+            TOTAL.fetch_add(chunk.size as i32, Ordering::Relaxed);
         }
     }
 }
@@ -206,9 +238,7 @@ pub unsafe fn free_mem(base: u64, clicks: u64) {
 ///
 /// Must only be called during boot initialization.
 pub unsafe fn mem_add_total_pages(pages: i32) {
-    unsafe {
-        TOTAL += pages;
-    }
+    TOTAL.fetch_add(pages, Ordering::Relaxed);
 }
 
 // Kernel physical mapping table (Phase 6.4 — port of vm_kern.c)
@@ -232,8 +262,8 @@ const KERN_PHYS_MAP_INIT: KernPhysMapEntry = KernPhysMapEntry {
     kpme_len: 0,
 };
 
-static mut KERN_PHYS_MAP: [KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES] =
-    [KERN_PHYS_MAP_INIT; KERN_PHYS_MAP_ENTRIES];
+static KERN_PHYS_MAP: KernPhysMapCell =
+    KernPhysMapCell::new([KERN_PHYS_MAP_INIT; KERN_PHYS_MAP_ENTRIES]);
 
 /// Find and reserve a free entry in the kernel physical mapping table.
 ///
@@ -243,7 +273,7 @@ static mut KERN_PHYS_MAP: [KernPhysMapEntry; KERN_PHYS_MAP_ENTRIES] =
 ///
 /// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
 pub unsafe fn kern_map(physaddr: u64, virtaddr: u64, len: u64) -> i32 {
-    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+    for entry in unsafe { (*KERN_PHYS_MAP.get()).iter_mut() } {
         if entry.kpme_physaddr == 0 && entry.kpme_virtaddr == 0 {
             entry.kpme_physaddr = physaddr;
             entry.kpme_virtaddr = virtaddr;
@@ -262,7 +292,7 @@ pub unsafe fn kern_map(physaddr: u64, virtaddr: u64, len: u64) -> i32 {
 ///
 /// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
 pub unsafe fn kern_unmap(virtaddr: u64, len: u64) -> i32 {
-    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+    for entry in unsafe { (*KERN_PHYS_MAP.get()).iter_mut() } {
         if entry.kpme_virtaddr == virtaddr && entry.kpme_len == len {
             entry.kpme_physaddr = 0;
             entry.kpme_virtaddr = 0;
@@ -290,7 +320,7 @@ pub unsafe fn phys_map_add(physaddr: u64, virtaddr: u64, len: u64) -> i32 {
 ///
 /// Requires exclusive access to the mutable static `KERN_PHYS_MAP`.
 pub unsafe fn phys_map_remove(physaddr: u64, _len: u64) -> i32 {
-    for entry in unsafe { KERN_PHYS_MAP.iter_mut() } {
+    for entry in unsafe { (*KERN_PHYS_MAP.get()).iter_mut() } {
         if entry.kpme_physaddr == physaddr {
             entry.kpme_physaddr = 0;
             entry.kpme_virtaddr = 0;

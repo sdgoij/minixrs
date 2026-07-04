@@ -302,13 +302,21 @@ The following gaps from the original analysis have been filled:
 
 | Area | Gap | Risk |
 |------|-----|------|
-| **Scheduler preemption (proc_no_time + notify_scheduler)** | Added `test_sched_proc_no_time_preempts` to `kernel/src/tests.rs` | Proves proc_no_time with PREEMPTIBLE sets NO_QUANTUM, dequeues process, pick_proc returns next; all-blocked returns None; round-robin cycling after quantum renewal |
-| **VFS↔MFS IPC** | Added `test_vfs_mfs_ipc_roundtrip` to `kernel/src/tests.rs` | Registers MFS dispatch handler, sends REQ_READSUPER via do_sync_ipc, handler parses request and returns valid response (root inode=1, mode=0x41FF, file_size=0), caller verifies all fields |
 | **Network** | 1 placeholder test | Phase 16 not started |
 | **Live Update** | No tests | Phase 15 not started |
-| **RISC-V64 integration** | All 25 architecture-independent kernel tests pass on RISC-V64 QEMU virt via `just test-qemu-riscv` (release mode). FDT parsing skipped (uses fixed 256MB fallback). sched_proc_no_time gated on x86_64 (RISC-V HAL init_cpulocals + scheduler IPC path needs investigation). | Medium — 25/25 Phase H tests pass |
-| **Driver integration (real hardware)** | RTC/CMOS, PS/2 keyboard controller tested in QEMU; virtio-blk, PCI, ATA, network not tested | **High** — 2 of ~30 drivers tested on real (emulated) HW |
+| **Driver integration (real hardware)** | RTC/CMOS, PS/2 keyboard controller, virtio-blk, PCI tested in QEMU; ATA, network, audio, display not tested | **High** — 5 of ~30 drivers tested on real (emulated) HW |
 | **Windows host gaps** | Several tests `#[ignore]`'d due to ring-0 / IOPL restrictions | Low (kernels don't test on Windows) |
+
+### 5.6 Recently Closed Gaps
+
+| Gap | Fix | Tests Added |
+|-----|-----|-------------|
+| **`static mut` elimination** | All ~93 production instances converted to `UnsafeCell` wrappers, `Atomic*`, or `Mutex<T>` | `cargo clippy --workspace --all-targets -- -D warnings` clean |
+| **RISC-V64 parity** | All 24 architecture-independent kernel tests pass on RISC-V64 QEMU. Missing `sched_proc_no_time_preempts` (HAL init_cpulocals path needs investigation) | 24/24 Phase H tests pass, `ALL TESTS PASSED` printed |
+| **Virtio probe** | PCI bus enumeration + virtio transport detection working on x86_64 QEMU | `test_virtio_probe` passes |
+| **Multi-process boot** | PM, VFS, VM, RS, DS, SCHED, TTY servers load and run; ring-3 finale reached | 48 x86_64 QEMU tests pass, then enters ring-3 |
+| **VFS↔MFS IPC** | Full REQ_READSUPER roundtrip via do_sync_ipc with dispatch handler | `test_vfs_mfs_ipc_roundtrip` passes |
+| **Scheduler preemption** | `proc_no_time` with PREEMPTIBLE flags, NO_QUANTUM, dequeue, round-robin cycling | `test_sched_proc_no_time_preempts` passes |
 
 ---
 

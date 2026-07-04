@@ -7,6 +7,7 @@
 //! **Current status:** single-CPU only (CONFIG_SMP = false). All BKL
 //! operations are no-ops. Multi-CPU bring-up is planned for a later phase.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::hal::hlt;
@@ -82,12 +83,24 @@ struct SchedIpiData {
 
 const SCHED_IPI_DATA_INIT: SchedIpiData = SchedIpiData { flags: 0, data: 0 };
 
+struct SchedIpiDataCell(UnsafeCell<[SchedIpiData; CONFIG_MAX_CPUS]>);
+unsafe impl Sync for SchedIpiDataCell {}
+impl SchedIpiDataCell {
+    const fn new(val: [SchedIpiData; CONFIG_MAX_CPUS]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [SchedIpiData; CONFIG_MAX_CPUS] {
+        self.0.get()
+    }
+}
+
 /// Pending sched-IPI requests, one slot per target CPU.
 ///
 /// # Safety
 ///
 /// Accessed only while holding the BKL.
-static mut SCHED_IPI_DATA: [SchedIpiData; CONFIG_MAX_CPUS] = [SCHED_IPI_DATA_INIT; CONFIG_MAX_CPUS];
+static SCHED_IPI_DATA: SchedIpiDataCell =
+    SchedIpiDataCell::new([SCHED_IPI_DATA_INIT; CONFIG_MAX_CPUS]);
 
 /// Number of APs that have finished booting.
 ///
@@ -95,7 +108,7 @@ static mut SCHED_IPI_DATA: [SchedIpiData; CONFIG_MAX_CPUS] = [SCHED_IPI_DATA_INI
 ///
 /// Accessed only while holding the BKL (or during early boot before SMP
 /// is active).
-static mut AP_CPUS_BOOTED: u32 = 0;
+static AP_CPUS_BOOTED: AtomicU32 = AtomicU32::new(0);
 
 // Helpers
 
@@ -137,10 +150,8 @@ pub unsafe fn wait_for_aps_to_finish_booting() {
     unsafe { bkl_unlock() };
 
     // Wait for all APs to finish
-    unsafe {
-        while AP_CPUS_BOOTED < n - 1 {
-            hlt();
-        }
+    while AP_CPUS_BOOTED.load(Ordering::Relaxed) < n - 1 {
+        hlt();
     }
 
     unsafe { bkl_lock() };
@@ -152,9 +163,10 @@ pub unsafe fn wait_for_aps_to_finish_booting() {
 ///
 /// Must be called on the AP that just finished booting.
 pub unsafe fn ap_boot_finished(_cpu: u32) {
-    unsafe {
-        AP_CPUS_BOOTED = AP_CPUS_BOOTED.wrapping_add(1);
-    }
+    AP_CPUS_BOOTED.store(
+        AP_CPUS_BOOTED.load(Ordering::Relaxed).wrapping_add(1),
+        Ordering::Relaxed,
+    );
 }
 
 // IPI handlers
@@ -191,9 +203,9 @@ pub unsafe fn smp_schedule(cpu: u32) {
 /// Must be called with interrupts disabled, holding the BKL.
 pub unsafe fn smp_sched_handler() {
     let cpu = unsafe { cpu_id() as usize };
-    let flgs = unsafe { SCHED_IPI_DATA[cpu].flags };
+    let flgs = unsafe { (*SCHED_IPI_DATA.get())[cpu].flags };
     if flgs != 0 {
-        let p = unsafe { SCHED_IPI_DATA[cpu].data } as *mut Proc;
+        let p = unsafe { (*SCHED_IPI_DATA.get())[cpu].data } as *mut Proc;
         if flgs & SCHED_IPI_STOP_PROC != 0 {
             unsafe {
                 (*p).p_rts_flags
@@ -207,7 +219,7 @@ pub unsafe fn smp_sched_handler() {
             }
         }
         unsafe {
-            SCHED_IPI_DATA[cpu].flags = 0;
+            (*SCHED_IPI_DATA.get())[cpu].flags = 0;
         }
     }
 }
@@ -285,11 +297,11 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
     assert!(cpu != mycpu, "smp_schedule_sync: target CPU == current CPU");
 
     // Phase 1: wait for any previous IPI to this target
-    if unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
+    if unsafe { (*SCHED_IPI_DATA.get())[cpu].flags != 0 } {
         unsafe { bkl_unlock() };
-        while unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
+        while unsafe { (*SCHED_IPI_DATA.get())[cpu].flags != 0 } {
             // Service our own IPI queue while we wait
-            if unsafe { SCHED_IPI_DATA[mycpu].flags != 0 } {
+            if unsafe { (*SCHED_IPI_DATA.get())[mycpu].flags != 0 } {
                 unsafe { bkl_lock() };
                 unsafe { smp_sched_handler() };
                 unsafe { bkl_unlock() };
@@ -301,8 +313,8 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
 
     // Phase 2: post the IPI
     unsafe {
-        SCHED_IPI_DATA[cpu].data = p as u32;
-        SCHED_IPI_DATA[cpu].flags |= task;
+        (*SCHED_IPI_DATA.get())[cpu].data = p as u32;
+        (*SCHED_IPI_DATA.get())[cpu].flags |= task;
     }
 
     // TODO: arch_send_smp_schedule_ipi(cpu as u32)
@@ -310,9 +322,9 @@ unsafe fn smp_schedule_sync(p: *mut Proc, task: u32) {
 
     // Phase 3: wait for the remote CPU to clear the flags
     unsafe { bkl_unlock() };
-    while unsafe { SCHED_IPI_DATA[cpu].flags != 0 } {
+    while unsafe { (*SCHED_IPI_DATA.get())[cpu].flags != 0 } {
         // Service our own IPI queue while we wait
-        if unsafe { SCHED_IPI_DATA[mycpu].flags != 0 } {
+        if unsafe { (*SCHED_IPI_DATA.get())[mycpu].flags != 0 } {
             unsafe { bkl_lock() };
             unsafe { smp_sched_handler() };
             unsafe { bkl_unlock() };
@@ -401,12 +413,12 @@ mod tests {
     #[test]
     fn test_ap_boot_finished_increments_counter() {
         unsafe {
-            let before = core::ptr::addr_of_mut!(AP_CPUS_BOOTED).read();
+            let before = AP_CPUS_BOOTED.load(Ordering::Relaxed);
             ap_boot_finished(1);
-            let after = core::ptr::addr_of_mut!(AP_CPUS_BOOTED).read();
+            let after = AP_CPUS_BOOTED.load(Ordering::Relaxed);
             assert_eq!(after, before.wrapping_add(1));
             // Reset for other tests
-            core::ptr::addr_of_mut!(AP_CPUS_BOOTED).write(before);
+            AP_CPUS_BOOTED.store(before, Ordering::Relaxed);
         }
     }
 

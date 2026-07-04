@@ -10,22 +10,44 @@
 //! provides the VBFS server skeleton with option parsing, init sequence,
 //! and main loop structure. External library calls are stubbed.
 
+use core::cell::UnsafeCell;
+
 use crate::vbfs::config::{PATH_MAX, SffsParams};
 
+struct ShareCell(UnsafeCell<[u8; PATH_MAX]>);
+unsafe impl Sync for ShareCell {}
+impl ShareCell {
+    const fn new(val: [u8; PATH_MAX]) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut [u8; PATH_MAX] {
+        self.0.get()
+    }
+}
+
+struct ParamsCell(UnsafeCell<SffsParams>);
+unsafe impl Sync for ParamsCell {}
+impl ParamsCell {
+    const fn new(val: SffsParams) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut SffsParams {
+        self.0.get()
+    }
+}
 
 /// Shared folder share name.
-static mut SHARE: [u8; PATH_MAX] = [0; PATH_MAX];
+static SHARE: ShareCell = ShareCell::new([0; PATH_MAX]);
 
 /// SFFS parameters.
-static mut PARAMS: SffsParams = SffsParams {
+static PARAMS: ParamsCell = ParamsCell::new(SffsParams {
     p_prefix: [0; PATH_MAX],
     p_uid: 0,
     p_gid: 0,
     p_file_mask: crate::vbfs::config::DEFAULT_FILE_MASK,
     p_dir_mask: crate::vbfs::config::DEFAULT_DIR_MASK,
     p_case_insens: 0,
-};
-
+});
 
 /// Stub: initialize vboxfs library with the given share name.
 unsafe fn vboxfs_init(_share: &[u8]) -> Result<(bool, bool), i32> {
@@ -48,7 +70,6 @@ unsafe fn sffs_loop() {
     todo!("sffs_loop: SFFS library not yet ported")
 }
 
-
 /// Initialize the VBFS server.
 ///
 /// Parses options, initializes VBOXFS and SFFS libraries.
@@ -58,8 +79,8 @@ unsafe fn sffs_loop() {
 /// Must be called exactly once at startup.
 pub unsafe fn vbfs_init() -> Result<(), i32> {
     unsafe {
-        let share_ptr = core::ptr::addr_of_mut!(SHARE);
-        let params_ptr = core::ptr::addr_of_mut!(PARAMS);
+        let share_ptr = SHARE.get();
+        let params_ptr = PARAMS.get();
 
         // A share name is required.
         let first = (*share_ptr)[0];

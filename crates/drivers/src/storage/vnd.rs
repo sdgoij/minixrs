@@ -12,8 +12,7 @@
 //! now the driver returns `DriverError::NotFound` on all operations.
 
 use crate::DriverError;
-use core::ptr::addr_of_mut;
-
+use core::cell::UnsafeCell;
 
 /// Size of the intermediate I/O transfer buffer (64 KB).
 pub const VND_BUF_SIZE: usize = 65536;
@@ -30,14 +29,12 @@ pub const SUB_PER_DRIVE: usize = NR_PARTITIONS * NR_PARTITIONS; // 16
 /// Minor device number for the first subpartition of the first partition.
 pub const MINOR_D0P0S0: usize = 128;
 
-
 /// Use user-specified geometry (instead of computed).
 pub const VNDIOF_HASGEOM: u32 = 0x01;
 /// Expose the device as read-only.
 pub const VNDIOF_READONLY: u32 = 0x02;
 /// Force close (overrides busy check).
 pub const VNDIOF_FORCE: u32 = 0x04;
-
 
 /// Configure the virtual disk with a file descriptor.
 pub const VNDIOCSET: u32 = 0x4600;
@@ -46,14 +43,12 @@ pub const VNDIOCCLR: u32 = 0x4601;
 /// Query the current virtual disk configuration.
 pub const VNDIOCGET: u32 = 0x4603;
 
-
 /// Default sector size in bytes.
 pub const SECTOR_SIZE: u32 = 512;
 
 /// Default geometry for large disks: 64 heads, 32 sectors/track.
 pub const DEFAULT_HEADS: u64 = 64;
 pub const DEFAULT_SECTORS: u64 = 32;
-
 
 /// Virtual disk geometry (from `vndvar.h` `struct vndgeom`).
 #[derive(Debug, Clone, Copy, Default)]
@@ -153,7 +148,6 @@ impl Default for VndUser {
     }
 }
 
-
 /// Runtime state of the virtual disk driver.
 ///
 /// Mirrors the C `static struct` in `vnd.c`.
@@ -207,13 +201,22 @@ impl VndState {
     }
 }
 
-
-static mut STATE: VndState = VndState::new();
-
-fn state_ptr() -> *mut VndState {
-    addr_of_mut!(STATE)
+struct StateCell(UnsafeCell<VndState>);
+unsafe impl Sync for StateCell {}
+impl StateCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(VndState::new()))
+    }
+    fn get(&self) -> *mut VndState {
+        self.0.get()
+    }
 }
 
+static STATE: StateCell = StateCell::new();
+
+fn state_ptr() -> *mut VndState {
+    STATE.get()
+}
 
 /// Compute device geometry from total size in bytes.
 ///
@@ -242,7 +245,6 @@ fn compute_geometry(size: u64) -> PartGeom {
         }
     }
 }
-
 
 /// Initialize the virtual disk driver.
 ///
@@ -736,7 +738,6 @@ pub unsafe fn vnd_terminate() {
     }
 }
 
-
 fn vnd_partition_inner(st: &mut VndState) {
     // Reset partition tables.
     st.part = [VndDevice::new(); DEV_PER_DRIVE];
@@ -771,7 +772,6 @@ fn vnd_cleanup_inner(st: &mut VndState) {
     st.exiting = false;
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,7 +787,6 @@ mod tests {
         st.geom = PartGeom::default();
         st.initialized = false;
     }
-
 
     #[test]
     fn test_constants() {
@@ -812,7 +811,6 @@ mod tests {
         assert_eq!(VNDIOCCLR, 0x4601);
         assert_eq!(VNDIOCGET, 0x4603);
     }
-
 
     #[test]
     fn test_vnd_device_new() {
@@ -859,7 +857,6 @@ mod tests {
         assert_eq!(g.secsize, 0);
         assert_eq!(g.nsectors, 0);
     }
-
 
     #[test]
     fn test_vnd_init() {

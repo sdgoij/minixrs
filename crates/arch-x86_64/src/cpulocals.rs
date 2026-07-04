@@ -12,6 +12,7 @@
 //!   C `struct proc idle_proc` layout). Accessor casts to `*mut c_void`.
 //! - Run queue arrays sized by `NR_SCHED_QUEUES` (16)
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
 /// Number of scheduling priority queues.
@@ -357,24 +358,35 @@ impl Default for CpuLocalStorage {
 /// Global per-CPU local storage. Must be initialized before use.
 pub static CPU_LOCAL_STORAGE: CpuLocalStorage = CpuLocalStorage::new();
 
+struct CpuLocalVarsCell(UnsafeCell<CpuLocalVars>);
+unsafe impl Sync for CpuLocalVarsCell {}
+impl CpuLocalVarsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(CpuLocalVars {
+            proc_ptr: core::ptr::null_mut(),
+            bill_ptr: core::ptr::null_mut(),
+            idle_proc: [0u8; IDLE_PROC_SIZE],
+            pagefault_handled: 0,
+            ptproc: core::ptr::null_mut(),
+            run_q_head: [core::ptr::null_mut(); NR_SCHED_QUEUES],
+            run_q_tail: [core::ptr::null_mut(); NR_SCHED_QUEUES],
+            cpu_is_idle: AtomicI32::new(0),
+            idle_interrupted: AtomicI32::new(0),
+            tsc_ctr_switch: 0,
+            cpu_last_tsc: 0,
+            cpu_last_idle: 0,
+            fpu_presence: 0,
+            _pad: [0u8; 7],
+            fpu_owner: core::ptr::null_mut(),
+        }))
+    }
+    fn get(&self) -> *mut CpuLocalVars {
+        self.0.get()
+    }
+}
+
 /// Underlying storage for CPU local vars (lives in BSS, zeroed at boot).
-static mut CPU_LOCAL_VARS: CpuLocalVars = CpuLocalVars {
-    proc_ptr: core::ptr::null_mut(),
-    bill_ptr: core::ptr::null_mut(),
-    idle_proc: [0u8; IDLE_PROC_SIZE],
-    pagefault_handled: 0,
-    ptproc: core::ptr::null_mut(),
-    run_q_head: [core::ptr::null_mut(); NR_SCHED_QUEUES],
-    run_q_tail: [core::ptr::null_mut(); NR_SCHED_QUEUES],
-    cpu_is_idle: AtomicI32::new(0),
-    idle_interrupted: AtomicI32::new(0),
-    tsc_ctr_switch: 0,
-    cpu_last_tsc: 0,
-    cpu_last_idle: 0,
-    fpu_presence: 0,
-    _pad: [0u8; 7],
-    fpu_owner: core::ptr::null_mut(),
-};
+static CPU_LOCAL_VARS: CpuLocalVarsCell = CpuLocalVarsCell::new();
 
 /// Initialize the per-CPU local variables.
 ///
@@ -385,7 +397,7 @@ static mut CPU_LOCAL_VARS: CpuLocalVars = CpuLocalVars {
 /// Must be called exactly once on the BSP.
 pub unsafe fn init_cpulocals() {
     // Storage must outlive all accessors — it's a static, so it does.
-    let vars = core::ptr::addr_of_mut!(CPU_LOCAL_VARS);
+    let vars = CPU_LOCAL_VARS.get();
     // SAFETY: Called exactly once on the BSP per safety contract.
     unsafe {
         CPU_LOCAL_STORAGE.init(vars);
@@ -399,9 +411,10 @@ pub unsafe fn init_cpulocals() {
 /// `proc` should point to a valid `Proc` or be null.
 pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
     unsafe {
-        let owner = (*core::ptr::addr_of_mut!(CPU_LOCAL_VARS)).fpu_owner;
+        let vars = CPU_LOCAL_VARS.get();
+        let owner = (*vars).fpu_owner;
         if owner == proc {
-            (*core::ptr::addr_of_mut!(CPU_LOCAL_VARS)).fpu_owner = core::ptr::null_mut();
+            (*vars).fpu_owner = core::ptr::null_mut();
         }
     }
 }

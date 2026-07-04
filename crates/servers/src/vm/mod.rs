@@ -4,7 +4,6 @@
 //! for all VM calls. Real implementations come in Phases 6.4+.
 
 #![allow(unused_variables)]
-#![allow(static_mut_refs)]
 
 pub mod mem;
 pub mod proc;
@@ -23,7 +22,7 @@ use arch_common::ipc::{EDONTREPLY, Message};
 use arch_common::ipcconst::{
     IPC_FLG_MSG_FROM_KERNEL, IPC_STATUS_FLAGS_SHIFT, ipc_status_flags_test,
 };
-
+use core::cell::UnsafeCell;
 
 const OK: i32 = 0;
 
@@ -69,13 +68,26 @@ pub struct VmCallEntry {
     pub name: &'static str,
 }
 
+struct VmCallsCell(UnsafeCell<[VmCallEntry; NR_VM_CALLS as usize]>);
+unsafe impl Sync for VmCallsCell {}
+impl VmCallsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [VmCallEntry {
+                func: None,
+                name: "",
+            }; NR_VM_CALLS as usize],
+        ))
+    }
+    fn get(&self) -> *mut [VmCallEntry; NR_VM_CALLS as usize] {
+        self.0.get()
+    }
+}
+
 /// VM call dispatch table, indexed by `call_number()`.
 ///
 /// Initialized to all-None; populated by `init_vm()`.
-static mut VM_CALLS: [VmCallEntry; NR_VM_CALLS as usize] = [VmCallEntry {
-    func: None,
-    name: "",
-}; NR_VM_CALLS as usize];
+static VM_CALLS: VmCallsCell = VmCallsCell::new();
 
 /// Map a message type to a 0-based dispatch table index.
 ///
@@ -89,13 +101,19 @@ pub fn call_number(c: u32) -> i32 {
 }
 
 /// Set a single entry in the dispatch table.
-fn set_call(call_nr: u32, func: fn(&mut Message) -> i32, name: &'static str) {
-    let idx = (call_nr - VM_RQ_BASE) as usize;
-    unsafe {
-        VM_CALLS[idx] = VmCallEntry {
-            func: Some(func),
-            name,
-        };
+pub fn set_call(msg_type: u32, func: fn(&mut Message) -> i32, name: &'static str) {
+    let idx = call_number(msg_type);
+    if idx >= 0 {
+        unsafe {
+            let p = core::ptr::addr_of_mut!((*VM_CALLS.get())[idx as usize]);
+            core::ptr::write(
+                p,
+                VmCallEntry {
+                    func: Some(func),
+                    name,
+                },
+            );
+        }
     }
 }
 
@@ -104,7 +122,7 @@ fn set_call(call_nr: u32, func: fn(&mut Message) -> i32, name: &'static str) {
 /// Must be called once before entering the main loop.
 pub fn init_vm() {
     // Zero out the table first
-    for entry in unsafe { VM_CALLS.iter_mut() } {
+    for entry in unsafe { (*VM_CALLS.get()).iter_mut() } {
         *entry = VmCallEntry {
             func: None,
             name: "",
@@ -253,7 +271,7 @@ pub fn dispatch_message(msg: &mut Message, ipc_status: i32) -> i32 {
     // Normal dispatch through call table.
     let idx = call_number(call_nr);
     let result = if idx >= 0 {
-        let entry = unsafe { &VM_CALLS[idx as usize] };
+        let entry = unsafe { &(*VM_CALLS.get())[idx as usize] };
         if let Some(func) = entry.func {
             func(msg)
         } else {
@@ -1079,11 +1097,18 @@ mod tests {
         init_vm();
         unsafe {
             // Spot-check a few entries
-            assert!(VM_CALLS[0].func.is_some(), "VM_EXIT should be set");
-            assert_eq!(VM_CALLS[0].name, "do_exit");
+            assert!((*VM_CALLS.get())[0].func.is_some(), "VM_EXIT should be set");
+            assert_eq!((*VM_CALLS.get())[0].name, "do_exit");
 
-            assert!(VM_CALLS[(VM_MMAP - VM_RQ_BASE) as usize].func.is_some());
-            assert_eq!(VM_CALLS[(VM_MMAP - VM_RQ_BASE) as usize].name, "do_mmap");
+            assert!(
+                (*VM_CALLS.get())[(VM_MMAP - VM_RQ_BASE) as usize]
+                    .func
+                    .is_some()
+            );
+            assert_eq!(
+                (*VM_CALLS.get())[(VM_MMAP - VM_RQ_BASE) as usize].name,
+                "do_mmap"
+            );
         }
     }
 
@@ -1093,7 +1118,10 @@ mod tests {
         unsafe {
             // Slots that are not in the official call list should remain None
             // VM_WILLEXIT is at index 5; check an empty slot like index 4 (VM_RQ_BASE + 4)
-            assert!(VM_CALLS[4].func.is_none(), "slot 4 should not be set");
+            assert!(
+                (*VM_CALLS.get())[4].func.is_none(),
+                "slot 4 should not be set"
+            );
         }
     }
 
@@ -1104,14 +1132,14 @@ mod tests {
             // VM_UNMAP_PHYS maps to do_munmap, VM_SHM_UNMAP maps to do_shm_unmap
             let unmap_idx = (VM_UNMAP_PHYS - VM_RQ_BASE) as usize;
             let shm_idx = (VM_SHM_UNMAP - VM_RQ_BASE) as usize;
-            assert!(VM_CALLS[unmap_idx].func.is_some());
-            assert!(VM_CALLS[shm_idx].func.is_some());
+            assert!((*VM_CALLS.get())[unmap_idx].func.is_some());
+            assert!((*VM_CALLS.get())[shm_idx].func.is_some());
 
             // VM_REMAP and VM_REMAP_RO both map to do_remap
             let remap_idx = (VM_REMAP - VM_RQ_BASE) as usize;
             let remap_ro_idx = (VM_REMAP_RO - VM_RQ_BASE) as usize;
-            assert!(VM_CALLS[remap_idx].func.is_some());
-            assert!(VM_CALLS[remap_ro_idx].func.is_some());
+            assert!((*VM_CALLS.get())[remap_idx].func.is_some());
+            assert!((*VM_CALLS.get())[remap_ro_idx].func.is_some());
         }
     }
 
@@ -1296,7 +1324,6 @@ mod tests {
         exec_bootproc();
         sef_signal_handler();
     }
-
 
     #[test]
     fn test_dispatch_notification_returns_edontreply() {

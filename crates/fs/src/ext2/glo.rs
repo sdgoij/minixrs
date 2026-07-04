@@ -6,7 +6,7 @@
 //! dereference are used.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, Ordering};
 
 use crate::ext2::consts::*;
 use crate::ext2::types::*;
@@ -36,9 +36,20 @@ pub struct Ext2Global {
     pub inode_cache_miss: u32,
 }
 
+pub(crate) struct Ext2StorageCell(UnsafeCell<MaybeUninit<Ext2Global>>);
+unsafe impl Sync for Ext2StorageCell {}
+impl Ext2StorageCell {
+    const fn new(val: MaybeUninit<Ext2Global>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut MaybeUninit<Ext2Global> {
+        self.0.get()
+    }
+}
+
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
 // Use ext2_ptr() helper instead of accessing this directly.
-pub(crate) static mut EXT2_STORAGE: MaybeUninit<Ext2Global> = MaybeUninit::uninit();
+pub(crate) static EXT2_STORAGE: Ext2StorageCell = Ext2StorageCell::new(MaybeUninit::uninit());
 
 /// Wrapper for `[Option<u16>; INODE_HASH_SIZE]`.
 pub(crate) struct HashInodesCell(UnsafeCell<[Option<u16>; INODE_HASH_SIZE]>);
@@ -92,8 +103,9 @@ pub(crate) static OPT: OptCell = OptCell::new(Opt {
 });
 
 /// Read-ahead globals.
-pub(crate) static mut RDAHED_INODE: *mut crate::ext2::types::Inode = core::ptr::null_mut();
-pub(crate) static mut RDAHEDPOS: u64 = 0;
+pub(crate) static RDAHED_INODE: AtomicPtr<crate::ext2::types::Inode> =
+    AtomicPtr::new(core::ptr::null_mut());
+pub(crate) static RDAHEDPOS: AtomicU64 = AtomicU64::new(0);
 
 /// Group descriptors dirty flag.
 pub(crate) static GROUP_DESCRIPTORS_DIRTY: AtomicI32 = AtomicI32::new(0);
@@ -103,7 +115,7 @@ pub(crate) static SUPERBLOCK: AtomicPtr<SuperBlock> = AtomicPtr::new(core::ptr::
 
 /// Initialize globals. Must be called once before any access.
 pub unsafe fn ext2_init_globals() {
-    let p: *mut Ext2Global = core::ptr::addr_of_mut!(EXT2_STORAGE).cast();
+    let p: *mut Ext2Global = EXT2_STORAGE.get().cast();
     p.write(Ext2Global {
         err_code: 0,
         rdwt_err: 0,
@@ -129,12 +141,12 @@ pub unsafe fn ext2_init_globals() {
 
 /// Get a raw pointer to ext2 global state.
 pub unsafe fn ext2_ptr() -> *mut Ext2Global {
-    core::ptr::addr_of_mut!(EXT2_STORAGE).cast()
+    EXT2_STORAGE.get().cast()
 }
 
 /// Get a raw pointer to the i-th inode.
 pub unsafe fn get_inode_ptr(idx: usize) -> *mut Inode {
-    let ext2 = core::ptr::addr_of_mut!(EXT2_STORAGE).cast::<Ext2Global>();
+    let ext2 = EXT2_STORAGE.get().cast::<Ext2Global>();
     let base = core::ptr::addr_of_mut!((*ext2).inode_table[0]);
     base.add(idx)
 }

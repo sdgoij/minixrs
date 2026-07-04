@@ -14,13 +14,14 @@
 //! ```
 
 use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Block size for the RAM disk (must match the FS block size — 4096 for Minix V3).
 pub const RAM_DISK_BLOCK_SIZE: usize = 4096;
 
 /// Static storage for the RAM disk base pointer and size.
-static mut BASE: *const u8 = core::ptr::null();
-static mut SIZE: usize = 0;
+static BASE: AtomicUsize = AtomicUsize::new(0);
+static SIZE: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize the RAM disk with a base pointer and size.
 ///
@@ -29,15 +30,13 @@ static mut SIZE: usize = 0;
 /// `base` must point to a valid memory region of at least `size` bytes
 /// that remains valid for the lifetime of the process.
 pub unsafe fn ram_disk_init(base: *const u8, size: usize) {
-    unsafe {
-        BASE = base;
-        SIZE = size;
-    }
+    BASE.store(base as usize, Ordering::Relaxed);
+    SIZE.store(size, Ordering::Relaxed);
 }
 
 /// Check if the RAM disk has been initialized.
 pub fn ram_disk_is_initialized() -> bool {
-    unsafe { !BASE.is_null() && SIZE > 0 }
+    !(BASE.load(Ordering::Relaxed) as *const u8).is_null() && SIZE.load(Ordering::Relaxed) > 0
 }
 
 /// Block I/O callback for a direct-memory RAM disk.
@@ -56,8 +55,8 @@ pub unsafe fn ram_disk_io(
     block_size: usize,
     rw_flag: i32,
 ) -> i32 {
-    let base = unsafe { BASE };
-    let size = unsafe { SIZE };
+    let base = BASE.load(Ordering::Relaxed) as *const u8;
+    let size = SIZE.load(Ordering::Relaxed);
     if base.is_null() || size == 0 {
         return -5; // EIO
     }
