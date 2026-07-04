@@ -202,7 +202,7 @@ pub fn endpoint_lookup(ep: i32) -> *mut Proc {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Number of boot processes.
-pub const NR_BOOT_PROCS: usize = 16;
+pub const NR_BOOT_PROCS: usize = 17;
 
 /// Boot image entry.
 #[derive(Debug, Clone, Copy)]
@@ -285,6 +285,10 @@ pub static BOOT_IMAGE: [BootImage; NR_BOOT_PROCS] = [
         proc_nr: 10,
         name: "init",
     }, // INIT_PROC_NR
+    BootImage {
+        proc_nr: 11,
+        name: "ramdisk",
+    }, // RAMDISK_PROC_NR
 ];
 
 // ─────────────────────────────────────────────────────────────────────────

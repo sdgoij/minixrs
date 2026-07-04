@@ -674,4 +674,91 @@ mod tests {
         init();
         assert_eq!(search_dir(0, b"name", None, LOOK_UP, IGN_PERM), ENOTDIR);
     }
+
+    /// End-to-end test: create a RAM disk with a directory containing known
+    /// entries, set up an inode pointing to it, and verify search_dir finds them.
+    #[test]
+    fn test_search_dir_lookup_finds_entry() {
+        use alloc::vec;
+
+        // Initialise globals and buffer cache.
+        init();
+        unsafe {
+            libs::libminixfs::cache::lmfs_buf_pool(10);
+            libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
+        }
+
+        // Create a RAM disk containing one directory block (block 0).
+        // Directory has two entries: "." (inode 1) and "file" (inode 42).
+        let mut disk = vec![0u8; 4096];
+        let entry_size = core::mem::size_of::<Direct>();
+
+        // Entry 0: "." -> inode 1
+        let dot = Direct {
+            mfs_d_ino: 1,
+            mfs_d_name: {
+                let mut n = [0u8; MFS_NAME_MAX];
+                n[0] = b'.';
+                n
+            },
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &dot as *const Direct as *const u8,
+                disk.as_mut_ptr(),
+                entry_size,
+            );
+        }
+
+        // Entry 1: "file" -> inode 42
+        let file_entry = Direct {
+            mfs_d_ino: 42,
+            mfs_d_name: {
+                let mut n = [0u8; MFS_NAME_MAX];
+                n[..4].copy_from_slice(b"file");
+                n
+            },
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &file_entry as *const Direct as *const u8,
+                disk.as_mut_ptr().add(entry_size),
+                entry_size,
+            );
+        }
+
+        // Register the RAM disk block I/O callback.
+        unsafe {
+            crate::block_io::ram_disk_init(disk.as_ptr(), disk.len());
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+        }
+
+        unsafe {
+            // Set up the directory inode.
+            let sp = crate::mfs::glo::get_super_ptr(0);
+            (*sp).s_block_size = 4096;
+            (*sp).s_log_zone_size = 0;
+            (*sp).s_ndzones = 7;
+            (*sp).s_nindirs = 1024;
+            (*sp).s_native = 1;
+
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            (*rip).i_dev = 0;
+            (*rip).i_mode = I_DIRECTORY;
+            (*rip).i_size = (2 * entry_size) as i32;
+            (*rip).i_zone[0] = 0; // data zone 0 = block 0 on device 0
+            (*rip).i_sp = Some(&mut *sp);
+        }
+
+        // Look up "file" — should find inode 42.
+        let mut found_ino: u32 = 0;
+        let r = search_dir(0, b"file", Some(&mut found_ino), LOOK_UP, IGN_PERM);
+        assert_eq!(r, OK, "search_dir should find 'file'");
+        assert_eq!(found_ino, 42);
+
+        // Look up nonexistent file — should return ENOENT.
+        let mut dummy: u32 = 0;
+        let r = search_dir(0, b"nope", Some(&mut dummy), LOOK_UP, IGN_PERM);
+        assert_eq!(r, ENOENT, "search_dir should not find 'nope'");
+    }
 }

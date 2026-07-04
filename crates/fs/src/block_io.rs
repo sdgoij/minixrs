@@ -15,8 +15,8 @@
 
 use core::ptr;
 
-/// Block size for the RAM disk (must match the FS block size).
-pub const RAM_DISK_BLOCK_SIZE: usize = 1024;
+/// Block size for the RAM disk (must match the FS block size — 4096 for Minix V3).
+pub const RAM_DISK_BLOCK_SIZE: usize = 4096;
 
 /// Static storage for the RAM disk base pointer and size.
 static mut BASE: *const u8 = core::ptr::null();

@@ -2706,43 +2706,58 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
   **Layer 3 — Read path handlers (make mounted files readable)**
 
-  - [ ] **9.1.7 — Buffer cache `get_block`/`put_block` wiring**
-    - MFS handlers call `get_block(dev, block, flags)` and `put_block(bp, type)`.
-      These are macros in C (`lmfs_get_block`/`lmfs_put_block`).
-    - In Rust, these are already implemented in `crates/libs/src/libminixfs/cache.rs`.
-      They call `lmfs_rw_scattered` for cache misses — which we wired in 9.1.1.
-    - Verify the wiring: `lmfs_buf_pool()` is called at init, `get_block()`
-      returns a buffer with data, `put_block()` releases it.
+  - [x] **9.1.7 — Buffer cache `get_block`/`put_block` wiring**
+    - Added `lmfs_buf_pool(DEFAULT_NR_BUFS)` call to `mfs_init()` to initialise
+      the buffer cache pool at server start
+    - Added `lmfs_set_blocksize(4096, ...)` to set the FS block size
+    - Verified end-to-end wiring: `lmfs_get_block()` → cache miss →
+      `read_block()` → `BlockIoFn` callback → RAM disk → data returned
+    - Test: write known data to RAM disk, read via `lmfs_get_block`,
+      verify data integrity (covers both block 0 and non-zero block)
 
-  - [ ] **9.1.8 — `read_map` indirect blocks** (`crates/fs/src/mfs/read.rs`)
-    - `read_map()` handles direct zones (already done) and indirect zones via
-      `rd_indir()`. The indirect case has `todo!()`. Implement `rd_indir()`:
-      read the indirect block via `get_block()`, extract zone pointer, release
-      via `put_block()`.
-    - **Depends on:** 9.1.7 (buffer cache)
+  - [x] **9.1.8 — `read_map` indirect blocks** (`crates/fs/src/mfs/read.rs`)
+    - `read_map()` now handles single-indirect, double-indirect, and
+      triple-indirect zones. Added `rd_indir_single()` and `rd_indir_level()`
+      helpers for multi-level indirect block traversal.
+    - Direct zones (0-6) and single indirect were already implemented.
+    - 2 new tests for `rd_indir`: index 0 and arbitrary index.
 
-  - [ ] **9.1.9 — `get_block_map`** (`crates/fs/src/mfs/read.rs`)
-    - Returns a buffer pointing to the disk block at a file position.
-      Calls `read_map()` then `lmfs_get_block_ino()`.
-    - Replace `todo!()` — already mostly correct, just needs buffer cache.
-    - **Depends on:** 9.1.7, 9.1.8
+  - [x] **9.1.9 — `get_block_map`** (`crates/fs/src/mfs/read.rs`)
+    - Changed return type from `*mut u8` to `*mut Buf` so callers can
+      release the buffer
+    - Calls `read_map()` then `lmfs_get_block_ino()` with inode tracking
+    - Returns the locked buffer (caller must `lmfs_put_block()`)
 
-  - [ ] **9.1.10 — `fs_readwrite` / `fs_breadwrite`** (`crates/fs/src/mfs/read.rs`)
-    - `fs_readwrite`: Read data from a file. For each block in the request
-      range: `get_block_map(rip, pos)` → `get_block(dev, block, NORMAL)` →
-      copy data to user → `put_block(bp, FULL_DATA_BLOCK)`.
-    - `fs_breadwrite`: Raw block I/O (for metadata). Read/write a block
-      by device+block number.
-    - **Depends on:** 9.1.7, 9.1.9
+  - [x] **9.1.10 — `fs_readwrite` / `fs_breadwrite`** (`crates/fs/src/mfs/read.rs`)
+    - `fs_readwrite`: Reads `rip_idx`, `position`, `count` from the incoming
+      message (`m_in`), iterates block-by-block via `read_map` +
+      `lmfs_get_block_ino`, copies data in chunks
+    - `fs_breadwrite`: Raw block I/O — reads/writes a specific device+block
+      via `lmfs_get_block`/`lmfs_markdirty`/`lmfs_put_block`
+    - Added `read_ahead(rip_idx, pos)` — prefetches the next block into
+      the buffer cache via `PREFETCH` mode
+    - Both read message parameters through raw pointers
 
-  - [ ] **9.1.11 — `search_dir`** (`crates/fs/src/mfs/path.rs`)
-    - Look up a filename in a directory. Two cases:
-      - `LOOKUP`: iterate directory blocks via `get_block_map()`, scan
-        `struct direct` entries for matching name.
-      - `ENTER`: find a free slot (or append new block via `new_block()`)
-        and write the new entry.
-    - Has two `todo!()` for the ENTER path (needs `new_block` from 9.1.12).
-    - **Depends on:** 9.1.9, 9.1.12 (new_block for ENTER)
+  - [x] **9.1.11 — `search_dir` LOOKUP** (`crates/fs/src/mfs/path.rs`)
+    - LOOKUP path was already implemented (iterates directory blocks via
+      `read_map` + `lmfs_get_block`, scans `Direct` entries, returns inode)
+    - Added end-to-end test: RAM disk with known directory entries,
+      `search_dir` finds them correctly
+    - ENTER path remains as `todo!()` — depends on `new_block` (9.1.12)
+
+  **Known issues:**
+  - RISC-V page fault (`!PF`) when MFS (`proc_nr=7`) is added to
+    `boot_procs` in `riscv64.rs`. Stack access at `0x8fdfed80` in init
+    fails — likely an allocator ordering issue where extra boot processes
+    shift physical page layout. MFS and RAMDISK are excluded from the
+    RISC-V boot list for now. x86_64 boots all 6 processes successfully.
+
+  **Known issues:**
+  - RISC-V page fault (`!PF`) when MFS (`proc_nr=7`) is added to
+    `boot_procs` in `riscv64.rs`. Stack access at `0x8fdfed80` in init
+    fails — likely an allocator ordering issue where extra boot processes
+    shift physical page layout. MFS and RAMDISK are excluded from the
+    RISC-V boot list for now. x86_64 boots all 6 processes successfully.
 
   **Layer 4 — Write path handlers**
 

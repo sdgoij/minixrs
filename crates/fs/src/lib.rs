@@ -2,6 +2,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod block_io;
 pub mod ext2;
 pub mod iso9660;
