@@ -174,6 +174,7 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
         // VM, DS, SCHED, TTY excluded — their main loops are stubs

@@ -258,6 +258,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
         ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
         ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+        ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
         ("/sbin/init", INIT_PROC_NR),       // init
     ];
 

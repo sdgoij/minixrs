@@ -14,3 +14,4 @@ workspace = true
 
 [dependencies]
 libs = { path = "../libs" }
+arch-common = { path = "../arch-common" }

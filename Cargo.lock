@@ -37,6 +37,7 @@ dependencies = [
 name = "fs"
 version = "0.1.0"
 dependencies = [
+ "arch-common",
  "libs",
 ]
 
@@ -100,6 +101,7 @@ version = "0.1.0"
 dependencies = [
  "arch-common",
  "drivers",
+ "fs",
  "kernel",
  "minix-rt",
  "minix-std",

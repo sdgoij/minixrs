@@ -7,6 +7,7 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::types::*;
+use arch_common::ipc::Message;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
@@ -44,6 +45,10 @@ pub struct MfsGlobal {
     pub lookup_res_gid: u16,
     pub lookup_res_device: u32,
     pub lookup_res_offset: usize,
+
+    // Incoming and outgoing FS protocol messages.
+    pub m_in: Message,
+    pub m_out: Message,
 }
 
 /// Raw storage — only accessed via `addr_of_mut!` / raw pointers.
@@ -112,6 +117,16 @@ pub unsafe fn mfs_init_globals() {
         lookup_res_gid: 0,
         lookup_res_device: 0,
         lookup_res_offset: 0,
+        m_in: Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        },
+        m_out: Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        },
     });
 }
 

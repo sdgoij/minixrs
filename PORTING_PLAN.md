@@ -2687,23 +2687,22 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
 
   **Layer 2 — MFS server process**
 
-  - [ ] **9.1.4 — MFS message loop** (`crates/fs/src/mfs/main.rs`)
-    - Port the `main()` loop from `main.c:27-78`: `get_work → dispatch → reply`.
-    - `get_work()` receives a message from VFS via `sef_receive(ANY, &m_in)`.
-    - Extract `req_nr` from `m_in.m_type`, subtract `FS_BASE`, call
-      `FS_CALL_VEC[ind]()`, set `m_out.m_type = error`, reply via `ipc_send()`.
-    - Set `caller_uid`/`caller_gid` from message, populate `req_nr`/`fs_m_in`.
-    - **Depends on:** Working IPC send/receive.
+  - [x] **9.1.4 — MFS message loop** (`crates/fs/src/mfs/main.rs`)
+    - Ported the `get_work → dispatch → reply` loop from `main.c`
+    - Receives messages via `minix_rt::syscall2(RECEIVE_CALL, ANY, msg)`
+    - Extracts `req_nr = m_type - FS_BASE`, dispatches via `FS_CALL_VEC`
+    - Populates `caller_uid`/`caller_gid` from message M1 fields
+    - Stores incoming/outgoing messages in `MfsGlobal.m_in`/`m_out`
+    - Registers `ram_disk_io` block I/O callback at init time
 
-  - [ ] **9.1.5 — MFS server binary** (new: `crates/servers/src/bin/mfs.rs`)
-    - Thin entry point: `fn main() { mfs_main(); 0 }`
-    - Add to server build list in `mkboot.rs` so it's linked into initramfs.
-    - **Depends on:** 9.1.4
+  - [x] **9.1.5 — MFS server binary** (new: `crates/servers/src/bin/mfs.rs`)
+    - Thin entry point: `fn main() { fs::mfs::main::mfs_main() }`
+    - Added `fs` dependency to `servers` crate
+    - Added to `mkinitramfs.rs` BOOT_BINS
 
-  - [ ] **9.1.6 — Boot MFS** (`crates/kernel-boot/src/main.rs`)
-    - Add `/sbin/mfs` to the `boot_procs` list alongside PM/RS/VFS/init.
-    - Initialize the RAM disk before boot processes (copy embedded FS image
-      into allocated physical memory, register endpoint).
+  - [x] **9.1.6 — Boot MFS** (`crates/kernel-boot/src/`)
+    - Added `/sbin/mfs` to `boot_procs` list for both x86_64 and RISC-V
+    - Uses existing `MFS_PROC_NR = 7` endpoint
 
   **Layer 3 — Read path handlers (make mounted files readable)**
 
