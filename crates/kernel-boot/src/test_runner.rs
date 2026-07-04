@@ -96,16 +96,26 @@ pub fn run_integration_tests() -> ! {
     total += test_grant_indirect();
     total += test_grant_invalid_id();
 
-    // Phase J: Syscalls
+    // Phase J: Syscalls (getpid, write, brk, exit)
     total += test_syscall_getpid();
+    total += test_syscall_write();
+    total += test_syscall_brk();
+    total += test_syscall_exit();
 
     // Phase K: Timers
     total += test_timer_set_and_expire();
     total += test_timer_clear();
     total += test_timer_multiple();
 
-    // Phase L: Interrupts
+    // Phase L: PIT and monotonic clock
+    total += test_pit_programmed();
+    total += test_monotonic_advances();
+
+    // Phase M: Interrupts
     total += test_irq_put_and_remove();
+
+    // Phase N: ELF loading to physical pages
+    total += test_elf_load_to_phys_pages();
 
     // Phase E: Ring-3 execution (M1b proof) — run LAST, never returns on success.
     // If all prior tests passed, attempt the ring-3 transition.
@@ -842,7 +852,7 @@ fn test_grant_direct_valid() -> u32 {
                     t.assert(offset == 0x1000, "direct grant offset must match start");
                     t.assert(e_granter == granter_ep, "e_granter must match granter");
                 }
-                Err(e) => t.assert(false, "verify_grant direct should succeed"),
+                Err(_e) => t.assert(false, "verify_grant direct should succeed"),
             }
 
             // Verify grant 0 for write access from wrong grantee — should fail
@@ -863,7 +873,7 @@ fn test_grant_direct_valid() -> u32 {
 }
 
 fn test_grant_indirect() -> u32 {
-    run("grant_indirect", |t| {
+    run("grant_indirect", |_t| {
         // Indirect grant chain is complex — validated in kernel unit tests
         // (kernel/src/grants.rs has 400+ lines of grant tests)
         // This test is a placeholder to maintain test infrastructure.
@@ -918,6 +928,117 @@ fn test_syscall_getpid() -> u32 {
                 core::sync::atomic::Ordering::Relaxed,
             );
         }
+    })
+}
+
+fn test_syscall_write() -> u32 {
+    run("syscall_write", |t| unsafe {
+        let rp = kernel::table::proc_addr(71);
+        if rp.is_null() {
+            t.assert(false, "proc_addr(71) failed");
+            return;
+        }
+        (*rp).p_magic = kernel::proc::PMAGIC;
+        (*rp).p_endpoint = 71;
+        (*rp)
+            .p_rts_flags
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+
+        let mut buf = [0u8; 16];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = b'A' + i as u8;
+        }
+        let args = [1u64, buf.as_ptr() as u64, 5u64, 0, 0, 0];
+        let result = kernel::syscall::dispatch_basic_syscall(rp, 3, &args);
+        t.assert(result == 5, "write should return count of bytes written");
+
+        (*rp).p_rts_flags.store(
+            kernel::proc::RtsFlags::SLOT_FREE.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    })
+}
+
+fn test_syscall_brk() -> u32 {
+    run("syscall_brk", |t| unsafe {
+        let rp = kernel::table::proc_addr(72);
+        if rp.is_null() {
+            t.assert(false, "proc_addr(72) failed");
+            return;
+        }
+        (*rp).p_magic = kernel::proc::PMAGIC;
+        (*rp).p_endpoint = 72;
+        (*rp)
+            .p_rts_flags
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+
+        // Query current break (new_brk = 0)
+        let args = [0u64, 0, 0, 0, 0, 0];
+        let result = kernel::syscall::dispatch_basic_syscall(rp, 36, &args);
+        t.assert(result >= 0x3FE00000, "initial brk should be in valid range");
+
+        // Set new break
+        let args2 = [0x3FE01000u64, 0, 0, 0, 0, 0];
+        let result2 = kernel::syscall::dispatch_basic_syscall(rp, 36, &args2);
+        t.assert(result2 == 0x3FE01000, "brk should return new break value");
+
+        // Query again
+        let args3 = [0u64, 0, 0, 0, 0, 0];
+        let result3 = kernel::syscall::dispatch_basic_syscall(rp, 36, &args3);
+        t.assert(result3 == 0x3FE01000, "brk query should return new break");
+
+        // Try out-of-range (ENOMEM)
+        let args4 = [0x40000000u64, 0, 0, 0, 0, 0];
+        let result4 = kernel::syscall::dispatch_basic_syscall(rp, 36, &args4);
+        t.assert(
+            result4 == -12,
+            "brk with invalid address should return ENOMEM",
+        );
+
+        (*rp).p_rts_flags.store(
+            kernel::proc::RtsFlags::SLOT_FREE.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    })
+}
+
+fn test_syscall_exit() -> u32 {
+    run("syscall_exit", |t| unsafe {
+        let rp = kernel::table::proc_addr(73);
+        if rp.is_null() {
+            t.assert(false, "proc_addr(73) failed");
+            return;
+        }
+        (*rp).p_magic = kernel::proc::PMAGIC;
+        (*rp).p_endpoint = 73;
+        (*rp)
+            .p_rts_flags
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+        (*rp).p_signal_received = 0;
+
+        // NR_EXIT = 0, exit status = 42
+        let args = [42u64, 0, 0, 0, 0, 0];
+        let result = kernel::syscall::dispatch_basic_syscall(rp, 0, &args);
+
+        // SYS_exit returns EDONTREPLY to signal the caller should not reply
+        // EDONTREPLY = -771 (from arch-common)
+        t.assert(result == -771, "exit should return EDONTREPLY");
+
+        // p_signal_received should have the exit status
+        t.assert(
+            (*rp).p_signal_received == 42,
+            "exit status should be stored in p_signal_received",
+        );
+
+        // SLOT_FREE should be set (process slot released)
+        let rts = (*rp)
+            .p_rts_flags
+            .load(core::sync::atomic::Ordering::Relaxed);
+        t.assert(
+            rts & kernel::proc::RtsFlags::SLOT_FREE.bits() != 0,
+            "SLOT_FREE should be set after exit",
+        );
+        // Note: no cleanup needed — exit already set SLOT_FREE
     })
 }
 
@@ -1005,6 +1126,46 @@ fn test_timer_multiple() -> u32 {
     })
 }
 
+fn test_pit_programmed() -> u32 {
+    run("pit_programmed", |t| unsafe {
+        // Latch counter 0 (write 0x00 to control register 0x43)
+        arch_x86_64::asm::outb(0x43, 0x00);
+        // Read latched value (LSB then MSB from port 0x40)
+        let low = arch_x86_64::asm::inb(0x40);
+        let high = arch_x86_64::asm::inb(0x40);
+        let count = (low as u16) | ((high as u16) << 8);
+        // PIT input frequency is 1.193182 MHz. At 100 Hz:
+        // divisor = 1,193,182 / 100 ≈ 11,932 (0x2E9C)
+        // Counter should be counting down from this value
+        t.assert(count > 0, "PIT counter should be > 0");
+        t.assert(
+            count <= 12000,
+            "PIT counter should be ≤ 12000 for 100 Hz mode 3",
+        );
+    })
+}
+
+fn test_monotonic_advances() -> u32 {
+    run("monotonic_advances", |t| {
+        let before = kernel::clock::get_monotonic();
+        // Spin for a short while to let timer interrupts fire
+        // At 100 Hz, one tick = 10ms. Spin for ~15ms worth of iterations.
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+        let after = kernel::clock::get_monotonic();
+        // The monotonic clock should have advanced (PIT should be firing)
+        t.assert(
+            after > before,
+            "monotonic clock should advance (timer interrupts firing)",
+        );
+        t.assert(
+            after - before <= 100,
+            "monotonic shouldn't advance more than 100 ticks in a spin loop",
+        );
+    })
+}
+
 /// Dummy IRQ handler that returns the hook's ID.
 unsafe fn test_irq_handler(hook: *mut kernel::system::IrqHook) -> i32 {
     unsafe { (*hook).id }
@@ -1042,6 +1203,163 @@ fn test_irq_put_and_remove() -> u32 {
             (*hook).irq = 0;
             (*hook).id = 0;
         }
+    })
+}
+
+fn test_elf_load_to_phys_pages() -> u32 {
+    run("elf_load_to_phys_pages", |t| unsafe {
+        use kernel::elf::{
+            ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_EXEC, Elf64Ehdr, Elf64Phdr, PT_LOAD,
+            parse_elf_header,
+        };
+
+        // Build a minimal ELF64 binary
+        // ELF header (64 bytes) + 1 PHDR (56 bytes) + segment data
+        let seg_content: &[u8] = b"Hello, ELF physical page!";
+        let elf_base_vaddr: u64 = 0x100_0000; // 16MB
+        let phdr_offset: u64 = 64; // right after ELF header
+        let data_offset: u64 = 64 + 56; // after header + phdr
+
+        let mut buf = [0u8; 512];
+        // ELF header
+        let ehdr = Elf64Ehdr {
+            e_ident: [
+                ELF_MAGIC[0],
+                ELF_MAGIC[1],
+                ELF_MAGIC[2],
+                ELF_MAGIC[3],
+                ELFCLASS64,  // 64-bit
+                ELFDATA2LSB, // little-endian
+                1,           // version
+                0,           // OS/ABI
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // padding
+            ],
+            e_type: ET_EXEC,
+            e_machine: EM_X86_64,
+            e_version: 1,
+            e_entry: elf_base_vaddr,
+            e_phoff: phdr_offset,
+            e_shoff: 0,
+            e_flags: 0,
+            e_ehsize: 64,
+            e_phentsize: 56,
+            e_phnum: 1,
+            e_shentsize: 0,
+            e_shnum: 0,
+            e_shstrndx: 0,
+        };
+        core::ptr::copy_nonoverlapping(&ehdr as *const _ as *const u8, buf.as_mut_ptr(), 64);
+
+        // Program header: one LOAD segment
+        let phdr = Elf64Phdr {
+            p_type: PT_LOAD,
+            p_flags: 4 | 2 | 1, // PF_R | PF_W | PF_X
+            p_offset: data_offset,
+            p_vaddr: elf_base_vaddr,
+            p_paddr: elf_base_vaddr,
+            p_filesz: seg_content.len() as u64,
+            p_memsz: seg_content.len() as u64 + 16, // 16 bytes of BSS
+            p_align: 0x1000,
+        };
+        core::ptr::copy_nonoverlapping(
+            &phdr as *const _ as *const u8,
+            buf.as_mut_ptr().add(64),
+            56,
+        );
+
+        // Segment data
+        buf[data_offset as usize..data_offset as usize + seg_content.len()]
+            .copy_from_slice(seg_content);
+
+        let total_size = (data_offset + seg_content.len() as u64) as usize;
+
+        // Parse ELF and calculate page requirements
+        let data = &buf[..total_size];
+        let ehdr_parsed = parse_elf_header(data);
+        t.assert(ehdr_parsed.is_ok(), "ELF header must parse");
+        let ehdr = ehdr_parsed.unwrap();
+
+        t.assert(ehdr.e_ehsize == 64, "ELF header size must be 64");
+        t.assert(ehdr.e_phnum == 1, "must have 1 program header");
+        t.assert(ehdr.e_phentsize == 56, "PHDR size must be 56");
+
+        // Read the PHDR
+        let phdr_parsed = &*(data.as_ptr().add(ehdr.e_phoff as usize) as *const Elf64Phdr);
+        t.assert(phdr_parsed.p_type == PT_LOAD, "PHDR type must be PT_LOAD");
+        t.assert(
+            phdr_parsed.p_vaddr == elf_base_vaddr,
+            "PHDR vaddr must match",
+        );
+
+        // Calculate pages needed (round up page-aligned top)
+        let seg_top = phdr_parsed.p_vaddr + phdr_parsed.p_memsz;
+        let pages_needed = ((seg_top + 0xFFF) / 0x1000 - (elf_base_vaddr / 0x1000)) as usize;
+
+        let clicks_needed = (pages_needed + 3) / 4; // 1 click = 4 pages = 16KB
+
+        // Allocate physical pages
+        let click = kernel::vm::alloc_mem(clicks_needed, 0);
+        t.assert(
+            click != kernel::vm::NO_MEM,
+            "alloc_mem must succeed for ELF pages",
+        );
+
+        let page_sz = kernel::vm::VM_PAGE_SIZE as u64;
+        let phys_base = (click as u64) * page_sz;
+
+        // Load segment data via identity map
+        // For each LOAD segment, copy file data to identity-mapped physical address
+        let offset = phdr_parsed.p_vaddr.wrapping_sub(elf_base_vaddr);
+        let dst_addr = phys_base.wrapping_add(offset);
+        let dst = dst_addr as *mut u8;
+
+        if phdr_parsed.p_filesz > 0 {
+            let src = data.as_ptr().add(phdr_parsed.p_offset as usize);
+            core::ptr::copy_nonoverlapping(src, dst, phdr_parsed.p_filesz as usize);
+        }
+
+        // Write BSS (zero-fill)
+        let bss_size = phdr_parsed.p_memsz.saturating_sub(phdr_parsed.p_filesz);
+        if bss_size > 0 {
+            core::ptr::write_bytes(dst.add(phdr_parsed.p_filesz as usize), 0, bss_size as usize);
+        }
+
+        // Read the first few bytes from the identity-mapped address
+        let mut readback = [0u8; 64];
+        core::ptr::copy_nonoverlapping(dst, readback.as_mut_ptr(), seg_content.len().min(64));
+
+        // Compare with original content
+        let expected = &seg_content[..seg_content.len().min(64)];
+        let actual = &readback[..expected.len()];
+        t.assert(actual == expected, "loaded ELF data must match source");
+
+        // Verify BSS is zero-filled
+        let bss_start = dst.add(phdr_parsed.p_filesz as usize);
+        for i in 0..16 {
+            let byte = core::ptr::read_volatile(bss_start.add(i));
+            t.assert(byte == 0, "BSS must be zero-filled");
+        }
+
+        // Verify entry point matches
+        t.assert(ehdr.e_entry == elf_base_vaddr, "entry point must match");
+
+        kernel::vm::free_mem(click, clicks_needed as u64);
+
+        // Additional integrity check: verify the identity map is functional
+        // by writing/reading a known pattern at the physical address
+        core::ptr::write_volatile(phys_base as *mut u32, 0xCAFEBABE);
+        let check = core::ptr::read_volatile(phys_base as *const u32);
+        t.assert(
+            check == 0xCAFEBABE,
+            "identity map write/readback must work at phys_base",
+        );
     })
 }
 

@@ -10,7 +10,11 @@
 use core::panic::PanicInfo;
 
 #[cfg(not(test))]
-use kernel_boot::{boot_init, serial_write};
+#[cfg(not(feature = "integration-tests"))]
+use kernel_boot::boot_init;
+
+#[cfg(not(test))]
+use kernel_boot::serial_write;
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps

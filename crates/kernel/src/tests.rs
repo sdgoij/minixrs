@@ -263,6 +263,222 @@ fn test_mini_send_queues_when_not_receiving(ctx: &mut TestCtx) {
     }
 }
 
+fn test_sendrec_direct(ctx: &mut TestCtx) {
+    unsafe {
+        let src = make_test_proc(106);
+        let dst = make_test_proc(107);
+        if src.is_null() || dst.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        let src_ep = (*src).p_endpoint;
+        let dst_ep = (*dst).p_endpoint;
+
+        // Set dst to be RECEIVING from src
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*dst).p_getfrom_e = src_ep;
+
+        // ── SENDREC = mini_send + mini_receive ────────────────────
+        // Build a message with a known payload (42 at bytes 0-3).
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        msg[0..4].copy_from_slice(&42i32.to_ne_bytes());
+
+        // Step 1: Set REPLY_PEND (SENDREC preamble)
+        (*src)
+            .p_misc_flags
+            .fetch_or(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+
+        // Step 2: Send — dst is RECEIVING, so direct delivery
+        let r = crate::ipc::mini_send(src, dst_ep, msg.as_ptr(), 0);
+        ctx.assert(r == 0, "mini_send (SENDREC half) must return OK");
+
+        // dst's RECEIVING flag must be cleared (direct delivery)
+        let dst_rts = (*dst).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            dst_rts & crate::proc::RtsFlags::RECEIVING.bits() == 0,
+            "dst RECEIVING must be cleared after mini_send",
+        );
+
+        // The payload was copied to dst's p_delivermsg
+        let mut buf = [0u8; 4];
+        core::ptr::copy_nonoverlapping((*dst).p_delivermsg.as_ptr(), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == 42,
+            "dst delivermsg must contain sent payload",
+        );
+
+        // mini_send also wrote src_ep at bytes 4-7 of delivermsg
+        core::ptr::copy_nonoverlapping((*dst).p_delivermsg.as_ptr().add(4), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == src_ep,
+            "dst delivermsg must have src_ep at offset 4 (m_source)",
+        );
+
+        // Step 3: Receive — src now waits for a reply from dst
+        let r = crate::ipc::mini_receive(src, dst_ep, msg.as_mut_ptr(), 0);
+        ctx.assert(r == 0, "mini_receive (SENDREC half) must return OK");
+
+        // src must have RECEIVING set (blocked waiting for reply)
+        let src_rts = (*src).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            src_rts & crate::proc::RtsFlags::RECEIVING.bits() != 0,
+            "src must have RECEIVING set after SENDREC (waiting for reply)",
+        );
+
+        // src should be waiting for dst's reply
+        ctx.assert(
+            (*src).p_getfrom_e == dst_ep,
+            "src must be waiting for reply from dst endpoint",
+        );
+
+        // Clean up
+        (*src)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_sendrec_reply_cycle(ctx: &mut TestCtx) {
+    unsafe {
+        let src = make_test_proc(108);
+        let dst = make_test_proc(109);
+        if src.is_null() || dst.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        let src_ep = (*src).p_endpoint;
+        let dst_ep = (*dst).p_endpoint;
+
+        // ── Phase 1: src SENDREC to dst ────────────────────────────
+        // dst is RECEIVING from src (waiting for src's message)
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*dst).p_getfrom_e = src_ep;
+
+        // Build request message with payload 42
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        msg[0..4].copy_from_slice(&42i32.to_ne_bytes());
+
+        // SENDREC step 1: set REPLY_PEND
+        (*src)
+            .p_misc_flags
+            .store(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+
+        // SENDREC step 2: send — direct delivery since dst is RECEIVING
+        let r = crate::ipc::mini_send(src, dst_ep, msg.as_ptr(), 0);
+        ctx.assert(r == 0, "mini_send must return OK");
+
+        // Verify dst got the message
+        let dst_rts = (*dst).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            dst_rts & crate::proc::RtsFlags::RECEIVING.bits() == 0,
+            "dst RECEIVING must be cleared after request delivery",
+        );
+        let mut buf = [0u8; 4];
+        core::ptr::copy_nonoverlapping((*dst).p_delivermsg.as_ptr(), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == 42,
+            "dst delivermsg must contain request payload",
+        );
+
+        // SENDREC step 3: receive — src blocks waiting for dst's reply
+        let r = crate::ipc::mini_receive(src, dst_ep, msg.as_mut_ptr(), 0);
+        ctx.assert(r == 0, "mini_receive must return OK");
+
+        let src_rts = (*src).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            src_rts & crate::proc::RtsFlags::RECEIVING.bits() != 0,
+            "src must have RECEIVING set after SENDREC",
+        );
+        ctx.assert(
+            (*src).p_getfrom_e == dst_ep,
+            "src must be waiting for reply from dst",
+        );
+
+        // ── Phase 2: dst replies to src ────────────────────────────
+        // Set src RECEIVING from dst (src is already waiting for dst's reply)
+        // Note: src already has RECEIVING set and p_getfrom_e == dst_ep
+        // from the mini_receive above. We just need dst to reply.
+
+        // Build reply message with payload 99
+        let mut reply = [0u8; crate::proc::MESSAGE_SIZE];
+        reply[0..4].copy_from_slice(&99i32.to_ne_bytes());
+
+        // dst does mini_send to src — src is RECEIVING from dst, so direct delivery
+        let r = crate::ipc::mini_send(dst, src_ep, reply.as_ptr(), 0);
+        ctx.assert(r == 0, "reply mini_send must return OK");
+
+        // Verify src got the reply
+        let src_rts2 = (*src).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            src_rts2 & crate::proc::RtsFlags::RECEIVING.bits() == 0,
+            "src RECEIVING must be cleared after reply delivery",
+        );
+
+        // Verify reply payload
+        core::ptr::copy_nonoverlapping((*src).p_delivermsg.as_ptr(), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == 99,
+            "src delivermsg must contain reply payload",
+        );
+
+        // Verify m_source at offset 4 is dst's endpoint
+        core::ptr::copy_nonoverlapping((*src).p_delivermsg.as_ptr().add(4), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == dst_ep,
+            "src delivermsg m_source must be dst endpoint",
+        );
+
+        // After replying, dst now does mini_receive to wait for next message
+        let r = crate::ipc::mini_receive(dst, src_ep, reply.as_mut_ptr(), 0);
+        ctx.assert(r == 0, "dst mini_receive after reply must return OK");
+
+        let dst_rts2 = (*dst).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            dst_rts2 & crate::proc::RtsFlags::RECEIVING.bits() != 0,
+            "dst must have RECEIVING set after reply (waiting for next message)",
+        );
+
+        // Verify the IPC roundtrip is reversible: src can now send again to dst
+        // Rebuild request with new payload
+        msg[0..4].copy_from_slice(&77i32.to_ne_bytes());
+        (*src).p_rts_flags.store(0, Ordering::Relaxed); // src is no longer RECEIVING
+        (*src)
+            .p_misc_flags
+            .store(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+
+        let r = crate::ipc::mini_send(src, dst_ep, msg.as_ptr(), 0);
+        ctx.assert(r == 0, "second mini_send must return OK (roundtrip)");
+
+        // dst is RECEIVING from src, so direct delivery
+        let dst_rts3 = (*dst).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            dst_rts3 & crate::proc::RtsFlags::RECEIVING.bits() == 0,
+            "dst RECEIVING cleared on second delivery",
+        );
+
+        core::ptr::copy_nonoverlapping((*dst).p_delivermsg.as_ptr(), buf.as_mut_ptr(), 4);
+        ctx.assert(
+            i32::from_ne_bytes(buf) == 77,
+            "dst must receive second request payload",
+        );
+
+        // Clean up both procs
+        (*src)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
 fn test_mini_notify_receiving(ctx: &mut TestCtx) {
     unsafe {
         let dst = make_test_proc(104);
@@ -406,6 +622,148 @@ fn test_enqueue_dequeue(ctx: &mut TestCtx) {
     }
 }
 
+fn test_sched_priority_ordering(ctx: &mut TestCtx) {
+    unsafe {
+        // Create three procs at different priorities (lower number = higher priority)
+        let high = sched_make_proc(110, 0); // highest priority
+        let mid = sched_make_proc(111, 5); // medium priority
+        let low = sched_make_proc(112, 15); // lowest priority
+        if high.is_null() || mid.is_null() || low.is_null() {
+            ctx.assert(false, "sched_make_proc failed");
+            return;
+        }
+
+        // Enqueue lowest first, then mid, then highest — pick_proc must
+        // still return the highest regardless of insertion order.
+        crate::sched::enqueue(low);
+        crate::sched::enqueue(mid);
+        crate::sched::enqueue(high);
+
+        // pick_proc should return the highest priority (queue 0)
+        let picked = crate::sched::pick_proc();
+        ctx.assert(picked.is_some(), "pick_proc should return a proc");
+        if let Some(p) = picked {
+            ctx.assert(p == high, "pick_proc must return highest priority proc");
+            ctx.assert(
+                (*p).p_endpoint == 110,
+                "highest priority proc should be endpoint 110",
+            );
+        }
+
+        // Remove high from queue, pick_proc should return mid
+        crate::sched::remove_from_queue(high);
+        let picked2 = crate::sched::pick_proc();
+        ctx.assert(picked2.is_some(), "pick_proc should still return a proc");
+        if let Some(p) = picked2 {
+            ctx.assert(
+                p == mid,
+                "pick_proc must return medium priority after removing high",
+            );
+        }
+
+        // Remove mid, pick_proc should return low
+        crate::sched::remove_from_queue(mid);
+        let picked3 = crate::sched::pick_proc();
+        ctx.assert(
+            picked3.is_some(),
+            "pick_proc should return low priority proc",
+        );
+        if let Some(p) = picked3 {
+            ctx.assert(p == low, "pick_proc must return lowest after removing mid");
+        }
+
+        // Remove low, pick_proc should return None
+        crate::sched::remove_from_queue(low);
+        let picked4 = crate::sched::pick_proc();
+        ctx.assert(
+            picked4.is_none(),
+            "pick_proc should return None when queues empty",
+        );
+
+        // Clean up
+        (*high)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*mid)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*low)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_sched_round_robin(ctx: &mut TestCtx) {
+    unsafe {
+        // Create two procs at the SAME priority (round-robin queue)
+        let a = sched_make_proc(113, 7);
+        let b = sched_make_proc(114, 7);
+        if a.is_null() || b.is_null() {
+            ctx.assert(false, "sched_make_proc failed");
+            return;
+        }
+
+        // Enqueue both on the same priority queue
+        crate::sched::enqueue(a);
+        crate::sched::enqueue(b);
+
+        // First pick should return 'a' (head of queue)
+        let p1 = crate::sched::pick_proc();
+        ctx.assert(p1.is_some(), "pick_proc should return a proc");
+        if let Some(p) = p1 {
+            ctx.assert(
+                p == a,
+                "first pick should return first enqueued at same priority",
+            );
+        }
+
+        // Remove 'a' from queue (simulating it getting CPU)
+        crate::sched::remove_from_queue(a);
+
+        // Re-enqueue 'a' at the tail (round-robin: move to end)
+        (*a).p_rts_flags.store(0, Ordering::Relaxed); // ensure runnable
+        crate::sched::enqueue(a);
+
+        // Now the queue should be: head = b, tail = a
+        // pick should return 'b'
+        let p2 = crate::sched::pick_proc();
+        ctx.assert(
+            p2.is_some(),
+            "pick_proc should return a proc after round-robin",
+        );
+        if let Some(p) = p2 {
+            ctx.assert(
+                p == b,
+                "second pick should return second enqueued (round-robin)",
+            );
+        }
+
+        // Remove 'b', pick should return 'a' again
+        crate::sched::remove_from_queue(b);
+        let p3 = crate::sched::pick_proc();
+        ctx.assert(
+            p3.is_some(),
+            "pick_proc should return a proc after removing b",
+        );
+        if let Some(p) = p3 {
+            ctx.assert(
+                p == a,
+                "third pick should return 'a' after 'b' removed (round-robin cycle)",
+            );
+        }
+
+        // Clean up
+        crate::sched::remove_from_queue(a);
+        let empty = crate::sched::pick_proc();
+        ctx.assert(empty.is_none(), "queues should be empty after cleanup");
+
+        (*a).p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*b).p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
 // Privilege table tests
 
 fn test_priv_default_proc_nr(ctx: &mut TestCtx) {
@@ -449,6 +807,8 @@ pub fn run_all() -> u32 {
     total += run("mini_send_direct", test_mini_send_direct_delivery);
     total += run("mini_send_queue", test_mini_send_queues_when_not_receiving);
     total += run("mini_notify", test_mini_notify_receiving);
+    total += run("sendrec_direct", test_sendrec_direct);
+    total += run("sendrec_reply_cycle", test_sendrec_reply_cycle);
 
     total += run("proc_addr_tasks", test_proc_addr_valid_tasks);
     total += run("proc_addr_oob", test_proc_addr_out_of_range);
@@ -460,6 +820,8 @@ pub fn run_all() -> u32 {
     total += run("tmr_never", test_tmr_never_value);
 
     total += run("enqueue_dequeue", test_enqueue_dequeue);
+    total += run("sched_priority", test_sched_priority_ordering);
+    total += run("sched_round_robin", test_sched_round_robin);
 
     total += run("priv_default", test_priv_default_proc_nr);
     total += run("priv_flags", test_priv_flags_empty);
