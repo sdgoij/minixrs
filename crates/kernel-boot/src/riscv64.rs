@@ -370,65 +370,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     serial_write("  scheduler starting...\r\n");
 
-    // Dump page table entries for the first process
-    unsafe {
-        let rp = kernel::table::proc_addr(boot_procs[0].1);
-        let cr3 = (*rp).p_seg.p_cr3;
-        serial_write("  PT root: 0x");
-        for i in (0..16).rev() {
-            let nibble = ((cr3 >> (i * 4)) & 0xF) as u8;
-            let hex = b"0123456789abcdef";
-            arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
-        }
-        arch_riscv64::sbi::console_putchar(b'\r');
-        arch_riscv64::sbi::console_putchar(b'\n');
-        // Dump root entries
-        let root = cr3 as *const u64;
-        for i in 0..4 {
-            let entry = core::ptr::read_volatile(root.add(i));
-            serial_write("    L2[");
-            let hex = b"0123456789abcdef";
-            arch_riscv64::sbi::console_putchar(hex[(i >> 4) as usize]);
-            arch_riscv64::sbi::console_putchar(hex[(i & 0xF) as usize]);
-            serial_write("]=0x");
-            for j in (0..16).rev() {
-                let nibble = ((entry >> (j * 4)) & 0xF) as u8;
-                arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
-            }
-            // Check if leaf (has R/W/X) or branch
-            if entry & 0x0E != 0 {
-                serial_write(" LEAF");
-            } else if entry & 0x01 != 0 {
-                serial_write(" BRANCH");
-                // Dump L1 entries for this branch
-                let pd_phys = ((entry & 0x003FFFFFFFFFFC00) >> 10) << 12;
-                let pd = pd_phys as *const u64;
-                for j in 0..8 {
-                    let l1 = core::ptr::read_volatile(pd.add(j));
-                    if l1 != 0 {
-                        serial_write("\r\n      L1[");
-                        arch_riscv64::sbi::console_putchar(hex[(j >> 4) as usize]);
-                        arch_riscv64::sbi::console_putchar(hex[(j & 0xF) as usize]);
-                        serial_write("]=0x");
-                        for k in (0..16).rev() {
-                            let nibble = ((l1 >> (k * 4)) & 0xF) as u8;
-                            arch_riscv64::sbi::console_putchar(hex[nibble as usize]);
-                        }
-                        if l1 & 0x0E != 0 {
-                            serial_write(" LEAF");
-                        } else if l1 & 0x01 != 0 {
-                            serial_write(" BRANCH");
-                        }
-                    }
-                }
-            }
-            arch_riscv64::sbi::console_putchar(b'\r');
-            arch_riscv64::sbi::console_putchar(b'\n');
-        }
-    }
-
-    // TEST: Manually trigger a Supervisor Software Interrupt to test trap handler
-    // BEFORE switching to userspace. If trap handler works, we'll see 'VPick the first process and switch to userspace.
+    // Pick the first process and switch to userspace.
     let next_proc = unsafe { kernel::sched::pick_proc() };
     let next_ptr = match next_proc {
         Some(p) => p,
@@ -439,11 +381,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             }
         }
     };
-
-    // Write diagnostic character to confirm UART MMIO works
-    unsafe {
-        core::ptr::write_volatile(0x10000000usize as *mut u8, b'!');
-    }
 
     serial_write("  switching to userspace...\r\n");
     unsafe {
