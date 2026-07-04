@@ -2460,6 +2460,39 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
   - Deliverable: `just run-riscv64` boots to `init: booting MINIX/Rust`
     with 400k+ ECALLs processed across all 4 boot servers.
 
+- [x] **19.28 — Enable RAMDISK on RISC-V and fix MFS page fault**
+
+  **Problem**: Adding `/sbin/mfs` to the RISC-V `boot_procs` causes an
+  immediate `!PF 000000008fdfed80 000000000100612a` after switching to
+  userspace. RAMDISK (proc_nr=11) works fine alone.
+
+  **Root cause — Stack underflow into supervisor-only memory**:
+  The per-process page table on RISC-V (`boot_create_restricted_page_table`)
+  copies ALL 512 L2 entries from the boot page table (1GB huge pages at
+  indices 0-3). These are supervisor-only (no `PTE_U` bit). When `map_page`
+  splits a huge page to create 4KB user mappings, only the specifically
+  mapped code/stack pages get the U bit. All other pages remain supervisor-
+  only 2MB huge pages. A stack underflow of just ~4.7KB below the 64KB
+  stack base (0x8FE00000) lands in the supervisor-only 2MB region at
+  L1[0x7E] (0x8FC00000-0x8FDFFFFF), triggering an immediate page fault.
+
+  **Fix**: Map the 2MB region below the user stack as user-accessible
+  RW pages. The physical pages at these addresses (0x8FC00000-0x8FDFFFFF
+  on QEMU virt) are free RAM — well above any allocated boot pages — so
+  identity-mapping them with U bit is safe. This provides a 2MB guard
+  against stack underflow.
+
+  **Also**: Added `/sbin/ramdisk` to the RISC-V boot_procs (confirmed
+  working on both arches).
+
+  **Files changed:**
+    - `kernel-boot/src/riscv64.rs`: add ramdisk to boot_procs
+    - `kernel-boot/src/boot_init.rs`: map 2MB guard below user stack
+      on RISC-V after the stack mapping loop
+
+  - Deliverable: `just run-riscv64` boots with RAMDISK and MFS in
+    boot_procs to `# ` shell prompt.
+
 - [x] **19.27 — Port exec_initramfs_for_target to RISC-V**
   The `exec_replace` syscall is used by init to start /bin/sh. Ported
   to RISC-V with the following changes:

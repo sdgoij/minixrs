@@ -515,6 +515,33 @@ pub unsafe fn boot_create_restricted_page_table(
         pa += 0x1000;
     }
 
+    // RISC-V: map the 2MB region below the user stack as user-accessible.
+    // The per-process page table copies supervisor-only 1GB/2MB huge pages
+    // from the boot page table. Only the specifically mapped code/stack pages
+    // get the U (user) bit. A stack underflow of even a few KB lands in an
+    // adjacent supervisor-only 2MB region and triggers an immediate page
+    // fault. This guard maps the 2MB below the stack with the same user
+    // permissions so modest stack underflows (up to 2 MB) survive.
+    //
+    // The physical pages in this range (0x8FC00000-0x8FDFFFFF for RISC-V
+    // QEMU virt) are identity-mapped free RAM, well above any allocated
+    // boot pages, so no conflict with kernel data.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let guard_start = stack_start.wrapping_sub(0x200000);
+        let guard_end = stack_start;
+        let mut gva = guard_start;
+        while gva < guard_end {
+            unsafe {
+                // Identity-map: PA == VA (memory is free RAM)
+                if map_page(pages[0], gva, gva, user_flags).is_err() {
+                    return None;
+                }
+            }
+            gva += 0x1000;
+        }
+    }
+
     Some(pages[0])
 }
 

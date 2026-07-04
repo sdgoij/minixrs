@@ -254,10 +254,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     // Define all boot processes: (path, proc_nr)
     let boot_procs: &[(&str, i32)] = &[
-        ("/sbin/pm", PM_PROC_NR),     // Process Manager
-        ("/sbin/rs", RS_PROC_NR),     // Reincarnation Server
-        ("/sbin/vfs", VFS_PROC_NR),   // Virtual File System
-        ("/sbin/init", INIT_PROC_NR), // init
+        ("/sbin/pm", PM_PROC_NR),           // Process Manager
+        ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+        ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
+        ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+        ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+        ("/sbin/init", INIT_PROC_NR),       // init
     ];
 
     // Load each boot process from initramfs, storing InitInfo for
