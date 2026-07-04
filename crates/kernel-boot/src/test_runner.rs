@@ -1493,17 +1493,32 @@ fn test_keyboard_controller_present() -> u32 {
     })
 }
 
-/// Test that `sysretq` can transition to ring-3.
+/// Test that `restore()` transitions to ring-3 with correct register values.
 ///
-/// Sets up a tiny ring-3 code blob that writes directly to the QEMU
-/// isa-debug-exit I/O port (with IOPL=3 in RFLAGS). The ring-3 code:
+/// Calls `restore()` which loads all registers from the Proc struct, zeroes
+/// RBX/RDX/RSI/RDI/R8-R15, then executes sysretq to ring-3. The ring-3 code
+/// validates:
+///   - RBX == 0 (was xor'd by restore)
+///   - RAX == 0x42 (test value loaded from Proc[0])
 ///
+/// If all checks pass, writes exit code 0 to QEMU isa-debug-exit (port 0x501)
+/// and QEMU exits with (0 << 1) | 1 = 1 (success). On failure, writes exit
+/// code 1 and QEMU exits with (1 << 1) | 1 = 3 (failure).
+///
+/// Ring-3 assembly:
 /// ```asm
-/// mov dx, 0x501    ; QEMU isa-debug-exit port
-/// mov eax, 0       ; exit code 0 → success
-/// out dx, eax      ; QEMU exits with (0 << 1) | 1 = 1
+/// test ebx, ebx
+/// jnz fail
+/// cmp eax, 0x42
+/// jne fail
+/// xor eax, eax     ; success
+/// jmp exit
+/// fail:
+/// mov eax, 1
+/// exit:
+/// mov edx, 0x501
+/// out dx, eax
 /// hlt
-/// jmp $-3
 /// ```
 ///
 /// If this function returns, the test setup failed (allocation, page table,
@@ -1513,17 +1528,40 @@ fn test_sysretq_ring3() {
 
     // Step 1: Use fixed addresses in a safe range (3MB-4MB, above kernel
     // at 2MB, below the kernel stack at 8MB, within the boot identity map).
-    // These pages must NOT be allocated by the arch allocator.
     let code_page: u64 = 0x0030_0000; // 3 MB: ring-3 code
     let stack_top: u64 = 0x0031_1000; // 3 MB + 4KB + 4KB: top of stack
 
-    // Step 2: Write the ring-3 code blob (just isa-debug-exit, no serial).
-    let code: [u8; 13] = [
-        0x66, 0xBA, 0x01, 0x05, // mov dx, 0x501
-        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
-        0xEF, // out dx, eax
-        0xF4, // hlt
-        0xEB, 0xFD, // jmp $-3
+    // Step 2: Write ring-3 code that validates register state after restore().
+    // restore() loads RAX from Proc[0] and zeroes RBX, RDX, RSI, RDI, R8-R15.
+    //
+    // Assembly:
+    //   test ebx, ebx        ; 85 db      — RBX should be 0
+    //   jnz fail              ; 75 09      — jump to fail if RBX non-zero
+    //   cmp eax, 0x42         ; 83 f8 42   — RAX should be 0x42 (test value)
+    //   jne fail              ; 75 04      — jump to fail if RAX wrong
+    //   xor eax, eax          ; 33 c0      — success: eax = 0
+    //   jmp exit              ; eb 05      — skip to exit
+    // fail:
+    //   mov eax, 1            ; b8 01 00 00 00
+    // exit:
+    //   mov edx, 0x501        ; ba 01 05 00 00 — QEMU isa-debug-exit
+    //   out dx, eax           ; ef
+    //   hlt                   ; f4
+    //   jmp $-3               ; eb fd
+    let code: [u8; 27] = [
+        0x85, 0xdb, // test ebx, ebx
+        0x75, 0x09, // jnz fail (+9 bytes)
+        0x83, 0xf8, 0x42, // cmp eax, 0x42
+        0x75, 0x04, // jne fail (+4 bytes)
+        0x33, 0xc0, // xor eax, eax (success)
+        0xeb, 0x05, // jmp exit (+5 bytes)
+        // fail:
+        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+        // exit:
+        0xba, 0x01, 0x05, 0x00, 0x00, // mov edx, 0x501
+        0xef, // out dx, eax
+        0xf4, // hlt
+        0xeb, 0xfd, // jmp $-3
     ];
     unsafe {
         core::ptr::copy_nonoverlapping(code.as_ptr(), code_page as *mut u8, code.len());
@@ -1531,9 +1569,6 @@ fn test_sysretq_ring3() {
 
     serial_puts("  sysretq_ring3: creating page table...\r\n");
 
-    // Step 4: Create a per-process page table that deep-copies the boot
-    // identity map (which has PG_U set on all 2MB pages) and shares
-    // kernel high mappings.
     let pt_phys = unsafe { crate::boot_init::boot_create_page_table() };
     if pt_phys == 0 {
         serial_puts("FAIL: page table creation\r\n");
@@ -1542,8 +1577,6 @@ fn test_sysretq_ring3() {
 
     serial_puts("  sysretq_ring3: setting up Proc entry...\r\n");
 
-    // Step 5: Set up init's Proc entry for sysretq.
-    // Use the boot-allocated INIT_PROC_NR slot.
     let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
     if rp.is_null() {
         serial_puts("FAIL: null proc_addr\r\n");
@@ -1551,32 +1584,38 @@ fn test_sysretq_ring3() {
     }
 
     unsafe {
-        // Set per-process CR3
         (*rp).p_seg.p_cr3 = pt_phys;
 
-        // Set up initial register state via raw byte offsets.
-        // x86_64 TrapFrame: rcx=16, r11=72, rsp=168
+        // Set up register state for restore().
+        // restore() reads these offsets from the Proc struct:
+        //   [0]    = RAX   (test value the ring-3 code checks for 0x42)
+        //   [16]   = RCX   (RIP via sysretq)
+        //   [72]   = R11   (RFLAGS with IOPL=3)
+        //   [168]  = RSP   (user stack pointer)
+        //   [256]  = CR3   (p_seg.p_cr3 — already set above)
         let frame = &mut (*rp).p_reg;
-        frame[16..24].copy_from_slice(&code_page.to_ne_bytes()); // rcx = entry (RIP via sysretq)
-        frame[72..80].copy_from_slice(&0x3202u64.to_ne_bytes()); // r11 = RFLAGS (IOPL=3)
-        frame[168..176].copy_from_slice(&stack_top.to_ne_bytes()); // rsp
+        frame[0..8].copy_from_slice(&0x42u64.to_ne_bytes()); // RAX test value
+        frame[16..24].copy_from_slice(&code_page.to_ne_bytes()); // RIP
+        frame[72..80].copy_from_slice(&0x3202u64.to_ne_bytes()); // RFLAGS (IOPL=3)
+        frame[168..176].copy_from_slice(&stack_top.to_ne_bytes()); // RSP
     }
 
-    // Debug: print addresses
     serial_puts("  code_page=0x");
     print_hex(code_page);
     serial_puts(" stack=0x");
     print_hex(stack_top);
     serial_puts(" cr3=0x");
     print_hex(pt_phys);
-    serial_puts("\r\n");
+    serial_puts(" rax_test=0x42\r\n");
 
-    serial_puts("  sysretq_ring3: jumping to ring-3...\r\n");
+    serial_puts("  sysretq_ring3: calling restore() to ring-3...\r\n");
 
-    // Step 6: Execute sysretq. On success, the ring-3 code runs and QEMU
-    // exits via isa-debug-exit. This function never returns.
+    // Call restore() which: loads CR3, loads regs from Proc,
+    // zeroes RBX/RDX/RSI/RDI/R8-R15, then sysretq to ring-3.
+    // The ring-3 code validates registers and writes to isa-debug-exit.
+    // This function never returns on success.
     unsafe {
-        arch_x86_64::asm::sysretq_to_user(rp as *const u8);
+        arch_x86_64::asm::restore(rp as *const u8);
     }
 }
 

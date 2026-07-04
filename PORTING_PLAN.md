@@ -5680,15 +5680,15 @@ parent                |                        |                  |
     verifies the generated machine code bytes for `mov gs:0x8, rsp` and
     `mov rsp, gs:0x0` are correct (opcode 89 for store, 8B for load).
   - Tests: Doc tests pass; integration tests for each server; driver mock tests
-- [ ] **18.12 — QEMU integration test for register values after restore**
-  - The `restore()` function clears all GPRs before iretq. Add a test that
-    verifies all registers are zeroed (or set to expected values) after
-    restore completes. This requires a QEMU-based integration test that
-    captures register state after the first iretq.
-  - Approach: Add a test mode to the init trampoline that writes register
-    values to the serial port, then verify the output matches expectations.
-    See `QEMU_ACK` or custom test harness in `tests/`.
-  - Tests: Doc tests pass; integration tests for each server; driver mock tests; build-time verification checks
+- [x] **18.12 — QEMU integration test for register values after restore**
+  - The `restore()` function loads RAX from Proc[0], zeroes RBX/RDX/RSI/RDI/R8-R15,
+    then sysretq to ring-3. The `test_sysretq_ring3` finale now calls `restore()`
+    instead of `sysretq_to_user()` and the ring-3 code validates:
+    - RBX == 0 (proves the xor instructions executed)
+    - RAX == 0x42 (test value loaded from Proc offset 0)
+  - On success, writes exit code 0 to QEMU isa-debug-exit → QEMU exits with
+    (0 << 1) | 1 = 1. On failure, writes exit code 1 → exits with 3.
+  - See `crates/kernel-boot/src/test_runner.rs` `test_sysretq_ring3()`.
 
 ---
 

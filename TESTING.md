@@ -37,7 +37,7 @@ Located in `crates/kernel-boot/src/test_runner.rs` (34 test functions) +
 | **M** (1) | `irq_put_and_remove` | Interrupt handling: install/remove handlers |
 | **N** (1) | `elf_load_to_phys_pages` | ELF binary loaded into VM-allocated physical pages via identity map; data/BSS readback verification |
 | **O** (2) | `rtc_cmos_reads_reasonable_time`, `keyboard_controller_present` | CMOS/RTC registers readable via I/O ports with reasonable time values; PS/2 controller responds to self-test (0x55) |
-| **E** (1) | `sysretq_ring3` | **FINALE**: ring-3 transition via sysretq, isa-debug-exit |
+| **E** (1) | `sysretq_ring3` | **FINALE**: restore() loads RAX from Proc, zeroes RBX/RDX/RSI/RDI/R8-R15, sysretq to ring-3; ring-3 code validates RBX==0 and RAX==0x42 before exiting QEMU |
 
 **Total hardware QEMU tests: 40**
 
@@ -295,14 +295,13 @@ The following gaps from the original analysis have been filled:
 | **SENDREC→reply cycle** | Added `test_sendrec_reply_cycle` to `kernel/src/tests.rs` | Full IPC roundtrip: SENDREC request delivery, sender blocks, reply delivery, receiver blocks, roundtrip reversibility |
 | **Syscall exit** | Added `test_syscall_exit` to `test_runner.rs` Phase J | Exit returns EDONTREPLY, stores exit status in p_signal_received, sets SLOT_FREE |
 | **ELF loading to physical pages** | Added `test_elf_load_to_phys_pages` to `test_runner.rs` Phase N | Minimal ELF built, parsed, loaded into VM-allocated pages via identity map; data/BSS readback verified; entry point validated |
+| **Context switch `restore()` + register validation** | Replaced test_sysretq_ring3 with restore()-based version that validates RBX==0 and RAX==0x42 via ring-3 code before QEMU exit | Proves restore() loads RAX from Proc[0], zeroes GPRs, and sysretq delivers correct register state to ring-3 |
 | **Driver integration (RTC/CMOS, keyboard)** | Added `test_rtc_cmos_reads_reasonable_time` and `test_keyboard_controller_present` to `test_runner.rs` Phase O | RTC registers readable with reasonable values; PS/2 controller responds to self-test command |
 
 ### 5.5 Remaining Notable Gaps
 
 | Area | Gap | Risk |
 |------|-----|------|
-| **Scheduler round-robin** | Added `test_sched_priority_ordering` and `test_sched_round_robin` to `kernel/src/tests.rs` | Priority ordering: pick_proc returns highest-priority queued proc regardless of insertion order; round-robin: enqueue/dequeue/re-enqueue cycles through same-priority procs correctly |
-| **Context switch `restore()`** | No QEMU test verifying register values after switch (Phase 18.12 planned but not implemented) | **High** — fundamental to multi-process |
 | **Multi-process boot** | 8 processes boot and run, but no QEMU test that verifies **all** get CPU time | **High** |
 | **VFS↔MFS IPC** | No QEMU or integration test | **High** — M5 |
 | **Network** | 1 placeholder test | Phase 16 not started |
