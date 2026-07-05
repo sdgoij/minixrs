@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.96"
-license = "BSD-3-Clause"
+license = "GPL2.0"
 
 [workspace.dependencies]
 bitflags = { version = "2", default-features = false }
