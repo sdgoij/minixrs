@@ -1,96 +1,26 @@
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
-* Do not write organizational or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
-  - This includes decorative separators, banners, section dividers (`// ====...`, `// ----...`, `// ═══...`, `// ──...──`) and any other ornamental comment formatting that does not convey meaning about the code itself.
-* Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.
-* Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
-* Be careful with operations like indexing which may panic if the indexes are out of bounds.
-* Never silently discard errors with `let _ =` on fallible operations. Always handle errors appropriately:
-  - Propagate errors with `?` when the calling function should handle them
-  - Use explicit error handling with `match` or `if let Err(...)` when you need custom logic
-  - Example: avoid `let _ = client.request(...).await?;` - use `client.request(...).await?;` instead
-* Avoid creative additions unless explicitly requested
-* Use variable shadowing to scope clones in async contexts for clarity, minimizing the lifetime of borrowed references.
-  Example:
-  ```rust
-  executor.spawn({
-      let task_ran = task_ran.clone();
-      async move {
-          *task_ran.borrow_mut() = true;
-      }
-  });
-  ```
-* Prefer `x.clamp(min, max)` over `x.max(min).min(max)`
-* Always run `cargo clippy -- -D warnings` after a change
-* Resolve ALL compiler warnings
+* Do not write organizational comments that summarize the code. Comments should only explain "why" for non-obvious reasons.
+  - No decorative separators, banners, or ornamental formatting.
+* Prefer implementing in existing files unless it's a new logical component.
+* Avoid panicking functions like `unwrap()` — use `?` to propagate errors.
+* Watch out for panics from indexing out of bounds.
+* Never silently discard errors with `let _ =` on fallible operations.
+* Avoid creative additions unless explicitly requested.
+* Use variable shadowing to scope clones in async contexts.
+* Prefer `x.clamp(min, max)` over `x.max(min).min(max)`.
+* **Always run `cargo clippy -- -D warnings` after every change.**
+* **Resolve ALL compiler warnings.**
 
-## No Stubs — Real Implementations Only
+## Project Policies
 
-**Write real code. Do not stub out functionality with `unimplemented!()`, `panic!("not yet")`, or empty `todo!()` calls.**
+See the following skills for full details:
+- **No stubs / real implementations**: `minix-c-to-rust` skill
+- **Testing requirements**: `minix-testing` skill
+- **Commit message format**: `git-commit-messages` skill
 
-Every function, method, and module you touch must do something meaningful. If you are implementing a feature that requires infrastructure that does not yet exist, do one of two things:
-
-1. **Implement the missing infrastructure first** — this becomes the prerequisite task.
-2. **If you cannot implement it in this session**, add a **new task** to this tracker describing the missing functionality, then use `todo!("<brief explanation of what goes here>")` with the task reference so future agents know what to implement.
-
-### Good `todo!()` examples
-
-```rust
-// GOOD — explains what, why, and links to the tracker
-todo!("Read config from user's shell preference; see NEXT.md T3.1");
-
-// GOOD — clear scope for the future task
-todo!("Implement ConPTY backend for Windows Container PTY; see NEXT.md T0.1 follow-up");
-```
-
-### Bad `todo!()` examples
-
-```rust
-// BAD — no explanation
-todo!();
-
-// BAD — vague
-todo!("implement later");
-
-// BAD — stub with empty body
-fn some_method(&self) {
-    // TODO: implement
-}
-```
-
-**Rule of thumb:** if the code compiles but the behavior is a no-op, it's a stub. Stubs are only allowed when explicitly marked with `todo!()` + a new task reference.
-
-## Stub Deferral — Must Create Concrete Task
-
-When you defer an implementation (write a `stub_handler!` or `todo!()` because
-dependencies aren't available), you MUST create a new concrete task in the
-PORTING_PLAN.md under the Phase where those dependencies become available.
-
-For example, if you stub `do_privctl` because `data_copy()` doesn't exist yet,
-and `data_copy()` is planned for Phase 12, add a new task `do_privctl` under
-Phase 12 with `**Depends on:**` listing the prerequisite.
-
-Do NOT leave vague notes like "deferred to later phase" — every stub must
-have a traceable task that future agents will find and implement.
-
----
-
-## Testing Requirement (MANDATORY)
-
-**Every task MUST include tests. No exceptions.**
-
-| Test Type | When to Use | Example |
-|-----------|-------------|---------|
-| **Unit tests** (`#[test]`) | Pure functions, state machines, parsing, configuration | VT SGR parsing, buffer row operations, keybinding matching |
-| **Property tests** (`proptest`) | Any input where behavior should hold for ALL valid inputs | VT sequence parser handles arbitrary escape sequences, buffer invariant (rows/cols always valid after any operation), keybinding always finds at most one match |
-| **Integration tests** | Multi-crate behavior, widget tree, event dispatch | Connection → VT adapter → TextBuffer pipeline, tab creation flow |
-
----
-
-## IMPORTANT: Agent Behavior
-
-### Git — DO NOT TOUCH STAGED FILES
+## Git — DO NOT TOUCH STAGED FILES
 The operator controls all staging and commit decisions. **Agents must never stage or unstage anything.**
 - **NEVER** run `git add` — the operator decides what gets staged.
 - **NEVER** run `git commit` — the operator decides what gets committed and with what message.
