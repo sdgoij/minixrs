@@ -36,6 +36,13 @@ pub const PM_PROC_NR: i32 = 0;
 /// Virtual File System endpoint.
 pub const VFS_PROC_NR: i32 = 1;
 
+/// VFS call numbers (from vfs/consts.h).
+pub const VFS_CHDIR: i32 = 0x108;
+pub const VFS_OPEN: i32 = 0x103;
+pub const VFS_READ: i32 = 0x100;
+pub const VFS_CLOSE: i32 = 0x105;
+pub const VFS_GETDENTS: i32 = 0x106;
+
 /// PM message types (from callnr.h).
 pub const PM_FORK: i32 = 0x0002;
 pub const PM_WAITPID: i32 = 0x0003;
@@ -433,7 +440,23 @@ pub fn getpid() -> i32 {
 /// `path` must be a non-null byte slice.
 /// Returns 0 on success, negative error code on failure.
 pub fn chdir(path: &[u8]) -> i64 {
-    unsafe { syscall2(NR_CHDIR, path.as_ptr() as u64, path.len() as u64) }
+    let mut msg = [0u8; 64];
+    // Destination endpoint at bytes 0-3
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    // Call number at bytes 4-7
+    msg[4..8].copy_from_slice(&VFS_CHDIR.to_le_bytes());
+    // Path pointer at bytes 8-15, path length at bytes 16-19
+    msg[8..16].copy_from_slice(&(path.as_ptr() as u64).to_le_bytes());
+    msg[16..20].copy_from_slice(&(path.len() as u32).to_le_bytes());
+    // Use SENDREC directly to VFS so the IPC uses the user-space buffer.
+    // This way deliver_msg writes the reply to our stack buffer, not a
+    // kernel stack buffer that gets freed before the reply arrives.
+    let ret = unsafe { syscall2(SENDREC_CALL, VFS_PROC_NR as u64, msg.as_mut_ptr() as u64) };
+    if ret < 0 {
+        return ret;
+    }
+    // Read the reply status from bytes 4-7 (m_type, set by VFS's reply())
+    i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) as i64
 }
 
 /// Send a message to a process and wait for a reply (blocking).
@@ -665,15 +688,33 @@ impl BrkAllocator {
         let size = layout.size();
         let align = layout.align();
 
+        // On first call, self.ptr is 0. Jump to the start of the valid
+        // brk range (0x3FE00000..0x3FF00000). The kernel rejects brk
+        // calls outside this range.
+        let current = self.ptr.load(Ordering::Relaxed);
+        if current == 0 {
+            let init_brk = 0x3FE00000usize;
+            let result = unsafe { brk(init_brk as *const u8) };
+            if result < 0 {
+                return core::ptr::null_mut();
+            }
+            self.ptr.store(init_brk, Ordering::Relaxed);
+        }
+
         // Round up the current pointer to the required alignment.
         let current = self.ptr.load(Ordering::Relaxed);
         let aligned = (current + align - 1) & !(align - 1);
 
-        // Extend the heap.
         let new_end = aligned + size;
-        let heap_end = (unsafe { brk(core::ptr::null()) }) as usize;
 
-        if new_end > heap_end {
+        if new_end > 0x3FF00000 {
+            // Out of heap space.
+            return core::ptr::null_mut();
+        }
+
+        // Extend the heap if needed.
+        let heap_end = (unsafe { brk(core::ptr::null()) }) as usize;
+        if new_end > heap_end.max(0x3FE00000) {
             // Need to extend the heap.
             let result = unsafe { brk(new_end as *const u8) };
             if result < 0 {

@@ -165,6 +165,15 @@ pub mod sys {
     pub const EXEC_INITRAMFS: u32 = KERNEL_CALL + 61;
 }
 
+/// Virtual address where the MFS RAM disk is mapped in MFS's address space.
+/// Must not conflict with code (0x1000000) or stack (0x0FE00000) on x86_64,
+/// or with the 0x80000000+ region on RISC-V.
+pub const MFS_RAMDISK_VA: u64 = 0x100000000;
+
+/// Size of the MFS filesystem image (2048 blocks x 4096 bytes).
+/// Must match `total_blocks * BLOCK_SIZE` in `tools/mkminixfs.rs`.
+pub const MFS_RAMDISK_SIZE: usize = 2048 * 4096;
+
 pub const NR_SYS_CALLS: u32 = 64;
 
 /// Basic kernel calls allowed to every system process.

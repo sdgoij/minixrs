@@ -1,4 +1,4 @@
-//! VFS call handler functions — adapted from the following C sources:
+﻿//! VFS call handler functions â€” adapted from the following C sources:
 //!
 //! | Category         | Source file     | Functions                                 |
 //! |------------------|-----------------|-------------------------------------------|
@@ -33,6 +33,52 @@ use crate::vfs::types::*;
 const FD_OFF: usize = 8;
 /// lseek: offset (u64).
 const LSEEK_OFF_OFF: usize = 12;
+
+/// SELF endpoint constant (from kernel::system::SELF).
+const SELF: i32 = 31742;
+/// SYS_VIRCOPY kernel call number.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+const SYS_VIRCOPY: i32 = 15;
+/// CP_FLAG_TRY: direct copy without VM fallback.
+const CP_FLAG_TRY: i32 = 0x01;
+/// SYS_VIRCOPY message field offsets (matches kernel/src/system.rs)
+// NOTE: offset 0-7 is reserved for the kernel_call header
+// (internal call number at 0-3, source endpoint at 4-7).
+// All COPY_* fields must start at offset >= 8.
+const COPY_SRC_ADDR_OFF: usize = 8;
+const COPY_DST_ENDPT_OFF: usize = 16;
+const COPY_DST_ADDR_OFF: usize = 24;
+const COPY_NR_BYTES_OFF: usize = 32;
+const COPY_FLAGS_OFF: usize = 40;
+const COPY_SRC_ENDPT_OFF: usize = 48;
+
+/// Perform a SYS_VIRCOPY kernel call to copy data between address spaces.
+/// Runs the copy in ring 0 via the kernel call dispatch mechanism.
+/// Safety: see `kernel::vm::virtual_copy`.
+unsafe fn sys_vircopy(
+    src_endpt: i32,
+    src_addr: u64,
+    dst_endpt: i32,
+    dst_addr: u64,
+    bytes: usize,
+) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[COPY_SRC_ENDPT_OFF..COPY_SRC_ENDPT_OFF + 4].copy_from_slice(&src_endpt.to_ne_bytes());
+    msg[COPY_SRC_ADDR_OFF..COPY_SRC_ADDR_OFF + 8].copy_from_slice(&src_addr.to_ne_bytes());
+    msg[COPY_DST_ENDPT_OFF..COPY_DST_ENDPT_OFF + 4].copy_from_slice(&dst_endpt.to_ne_bytes());
+    msg[COPY_DST_ADDR_OFF..COPY_DST_ADDR_OFF + 8].copy_from_slice(&dst_addr.to_ne_bytes());
+    msg[COPY_NR_BYTES_OFF..COPY_NR_BYTES_OFF + 8].copy_from_slice(&(bytes as u64).to_ne_bytes());
+    msg[COPY_FLAGS_OFF..COPY_FLAGS_OFF + 4].copy_from_slice(&CP_FLAG_TRY.to_ne_bytes());
+    #[cfg(target_os = "none")]
+    {
+        minix_rt::kernel_call(SYS_VIRCOPY, &mut msg)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = &msg;
+        -38 // ENOSYS
+    }
+}
 /// lseek: whence (i32).
 const LSEEK_WHENCE_OFF: usize = 20;
 /// fcntl: cmd (i32).
@@ -65,10 +111,10 @@ fn current_fp() -> Option<&'static mut Fproc> {
 
 /// Perform the `open(name, flags)` system call (O_CREAT *not* set).
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_open()` (line 39)
+/// C source: `minix/servers/vfs/open.c` â€” `do_open()` (line 39)
 /// Perform the `open(name, flags)` system call (O_CREAT *not* set).
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_open()` (line 39)
+/// C source: `minix/servers/vfs/open.c` â€” `do_open()` (line 39)
 pub fn do_open() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -92,17 +138,17 @@ pub fn do_open() -> i32 {
     if path_addr == 0 || copy_len == 0 {
         return ENOENT;
     }
-    unsafe {
-        let r = kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+    let copy_r = unsafe {
+        sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
-        );
-        if r != 0 {
-            return ENOENT;
-        }
+        )
+    };
+    if copy_r != 0 {
+        return ENOENT;
     }
     let actual_len = path_buf[..copy_len]
         .iter()
@@ -167,7 +213,7 @@ pub fn do_open() -> i32 {
 
 /// Perform the `creat(name, mode)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_creat()` (line 59)
+/// C source: `minix/servers/vfs/open.c` â€” `do_creat()` (line 59)
 pub fn do_creat() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -181,10 +227,10 @@ pub fn do_creat() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -219,7 +265,7 @@ pub fn do_creat() -> i32 {
 
 /// Perform the `close(fd)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_close()` (line 664)
+/// C source: `minix/servers/vfs/open.c` â€” `do_close()` (line 664)
 pub fn do_close() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -231,7 +277,7 @@ pub fn do_close() -> i32 {
 
 /// Perform the `lseek(fd, offset, whence)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_lseek()` (line 143)
+/// C source: `minix/servers/vfs/open.c` â€” `do_lseek()` (line 143)
 pub fn do_lseek() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -276,7 +322,7 @@ pub fn do_lseek() -> i32 {
 
 /// Perform the `read(fd, buf, count)` system call.
 ///
-/// C source: `minix/servers/vfs/read.c` — `do_read()` (line 31)
+/// C source: `minix/servers/vfs/read.c` â€” `do_read()` (line 31)
 pub fn do_read() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -324,7 +370,7 @@ pub fn do_read() -> i32 {
 
 /// Perform the `write(fd, buf, count)` system call.
 ///
-/// C source: `minix/servers/vfs/read.c` — `read_write()` (line 132)
+/// C source: `minix/servers/vfs/read.c` â€” `read_write()` (line 132)
 pub fn do_write() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -368,7 +414,7 @@ pub fn do_write() -> i32 {
 
 /// Perform the `getdents(fd, buf, count)` system call.
 ///
-/// C source: `minix/servers/vfs/read.c` — `do_getdents()` (line 269)
+/// C source: `minix/servers/vfs/read.c` â€” `do_getdents()` (line 269)
 pub fn do_getdents() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -376,7 +422,7 @@ pub fn do_getdents() -> i32 {
     };
     let glob = unsafe { &*vfs_global() };
     let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _buf_addr = r_u64(&glob.fs_m_in, 16);
+    let buf_addr = r_u64(&glob.fs_m_in, 16);
     let count = r_u32(&glob.fs_m_in, 24) as usize;
 
     if fd < 0 || (fd as usize) >= OPEN_MAX {
@@ -389,32 +435,36 @@ pub fn do_getdents() -> i32 {
 
     unsafe {
         let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
-        let filp = &*filp_arr.add(filp_idx as usize);
+        let filp = &mut *filp_arr.add(filp_idx as usize);
         let vp = filp.filp_vno;
         if vp.is_null() {
             return EBADF;
         }
-        let (r, _new_pos) = crate::vfs::request::req_getdents(
+        let (r, new_pos) = crate::vfs::request::req_getdents(
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
             filp.filp_pos,
-            core::ptr::null_mut(),
+            buf_addr as *mut u8,
             count,
             0,
+            fp.fp_endpoint,
         );
+        if r >= 0 {
+            filp.filp_pos = new_pos;
+        }
         r
     }
 }
 
 /// Perform the `pipe2(flags)` system call.
 ///
-/// C source: `minix/servers/vfs/pipe.c` — `do_pipe2()` (line 150)
+/// C source: `minix/servers/vfs/pipe.c` â€” `do_pipe2()` (line 150)
 /// Perform the `pipe2(flags)` system call.
 ///
 /// Creates a pipe by allocating a vnode, calling req_newnode on PFS,
 /// and setting up two file descriptors (read end, write end).
 ///
-/// C source: `minix/servers/vfs/pipe.c` — `do_pipe2()` (line 40)
+/// C source: `minix/servers/vfs/pipe.c` â€” `do_pipe2()` (line 40)
 pub fn do_pipe2() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -501,7 +551,7 @@ pub fn do_pipe2() -> i32 {
 
 /// Perform the `ioctl(fd, request, arg)` system call.
 ///
-/// C source: `minix/servers/vfs/device.c` — `do_ioctl()` (line 45)
+/// C source: `minix/servers/vfs/device.c` â€” `do_ioctl()` (line 45)
 pub fn do_ioctl() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -540,7 +590,7 @@ pub fn do_ioctl() -> i32 {
 
 /// Perform the `fcntl(fd, cmd, arg)` system call.
 ///
-/// C source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` — `do_fcntl()` (line 110)
+/// C source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` â€” `do_fcntl()` (line 110)
 pub fn do_fcntl() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -552,7 +602,7 @@ pub fn do_fcntl() -> i32 {
 
     match cmd {
         F_DUPFD => {
-            // Duplicate fd — allocate the lowest free fd >= arg.
+            // Duplicate fd â€” allocate the lowest free fd >= arg.
             let mut new_fd: i32 = 0;
             unsafe {
                 let r = filedes::get_fd(fp, _arg.max(0), &mut new_fd);
@@ -591,9 +641,9 @@ pub fn do_fcntl() -> i32 {
     }
 }
 
-/// Perform the `copyfd(fd, newfd, flags)` — duplicate a file descriptor.
+/// Perform the `copyfd(fd, newfd, flags)` â€” duplicate a file descriptor.
 ///
-/// C source: `minix/servers/vfs/filedes.c` — `do_copyfd()` (line 82)
+/// C source: `minix/servers/vfs/filedes.c` â€” `do_copyfd()` (line 82)
 pub fn do_copyfd() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let fp = match unsafe { glob.fp.as_mut() } {
@@ -627,7 +677,7 @@ pub fn do_copyfd() -> i32 {
 
 /// Perform the `truncate(path, length)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_truncate()` (line 91)
+/// C source: `minix/servers/vfs/link.c` â€” `do_truncate()` (line 91)
 pub fn do_truncate() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -640,10 +690,10 @@ pub fn do_truncate() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -669,7 +719,7 @@ pub fn do_truncate() -> i32 {
 
 /// Perform the `ftruncate(fd, length)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_ftruncate()` (line 92)
+/// C source: `minix/servers/vfs/link.c` â€” `do_ftruncate()` (line 92)
 pub fn do_ftruncate() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -696,11 +746,11 @@ pub fn do_ftruncate() -> i32 {
     }
 }
 
-/// Perform the `sync()` system call — flush all filesystem buffers.
+/// Perform the `sync()` system call â€” flush all filesystem buffers.
 ///
 /// Iterates all mounted filesystems and calls `req_sync` on each.
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_sync()` (line 116)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_sync()` (line 116)
 pub fn do_sync() -> i32 {
     unsafe {
         let vmnt_arr = core::ptr::addr_of!((*vfs_global()).vmnt) as *const Vmnt;
@@ -714,12 +764,12 @@ pub fn do_sync() -> i32 {
     OK
 }
 
-/// Perform the `fsync(fd)` system call — flush a single file descriptor.
+/// Perform the `fsync(fd)` system call â€” flush a single file descriptor.
 ///
 /// Validates the fd, gets the vnode from the filp, and calls `req_sync`
 /// on the filesystem that owns the file.
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_fsync()` (line 117)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_fsync()` (line 117)
 pub fn do_fsync() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -747,7 +797,7 @@ pub fn do_fsync() -> i32 {
 
 /// Perform the `select(nfds, readfds, writefds, errorfds, timeout)` call.
 ///
-/// C source: `minix/servers/vfs/select.c` — `do_select()` (line 30)
+/// C source: `minix/servers/vfs/select.c` â€” `do_select()` (line 30)
 pub fn do_select() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -777,7 +827,7 @@ pub fn do_select() -> i32 {
 
 /// Perform the `chdir(name)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_chdir()` (line 50)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_chdir()` (line 50)
 pub fn do_chdir() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -793,10 +843,10 @@ pub fn do_chdir() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        let r = kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        let r = sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         );
@@ -843,7 +893,7 @@ pub fn do_chdir() -> i32 {
 
 /// Perform the `fchdir(fd)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_fchdir()` (line 32)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_fchdir()` (line 32)
 pub fn do_fchdir() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -892,7 +942,7 @@ pub fn do_fchdir() -> i32 {
 
 /// Perform the `chroot(name)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_chroot()` (line 83)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_chroot()` (line 83)
 pub fn do_chroot() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -913,10 +963,10 @@ pub fn do_chroot() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        let r = kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        let r = sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         );
@@ -963,7 +1013,7 @@ pub fn do_chroot() -> i32 {
 
 /// Perform the `stat(path, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_stat()` (line 130)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_stat()` (line 130)
 pub fn do_stat() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -980,10 +1030,10 @@ pub fn do_stat() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        let r = kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        let r = sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         );
@@ -1015,7 +1065,7 @@ pub fn do_stat() -> i32 {
 
 /// Perform the `fstat(fd, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_fstat()` (line 155)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_fstat()` (line 155)
 pub fn do_fstat() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1052,7 +1102,7 @@ pub fn do_fstat() -> i32 {
 
 /// Perform the `lstat(path, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_lstat()` (line 180)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_lstat()` (line 180)
 pub fn do_lstat() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1069,10 +1119,10 @@ pub fn do_lstat() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        let r = kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        let r = sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         );
@@ -1104,7 +1154,7 @@ pub fn do_lstat() -> i32 {
 
 /// Perform the `statvfs(path, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_statvfs()` (line 256)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_statvfs()` (line 256)
 pub fn do_statvfs() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1116,10 +1166,10 @@ pub fn do_statvfs() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1146,7 +1196,7 @@ pub fn do_statvfs() -> i32 {
 
 /// Perform the `fstatvfs(fd, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_fstatvfs()` (line 257)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_fstatvfs()` (line 257)
 pub fn do_fstatvfs() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1175,7 +1225,7 @@ pub fn do_fstatvfs() -> i32 {
 
 /// Perform the `getvfsstat(buf, bufsize, flags)` system call.
 ///
-/// C source: `minix/servers/vfs/stadir.c` — `do_getvfsstat()` (line 258)
+/// C source: `minix/servers/vfs/stadir.c` â€” `do_getvfsstat()` (line 258)
 pub fn do_getvfsstat() -> i32 {
     // Get VFS-wide filesystem statistics.
     let glob = unsafe { &*vfs_global() };
@@ -1199,7 +1249,7 @@ pub fn do_getvfsstat() -> i32 {
 
 /// Perform the `readlink(path, buf, bufsize)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_rdlink()` (line 94)
+/// C source: `minix/servers/vfs/link.c` â€” `do_rdlink()` (line 94)
 pub fn do_rdlink() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1213,10 +1263,10 @@ pub fn do_rdlink() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1252,7 +1302,7 @@ pub fn do_rdlink() -> i32 {
 
 /// Perform the `link(oldpath, newpath)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_link()` (line 30)
+/// C source: `minix/servers/vfs/link.c` â€” `do_link()` (line 30)
 pub fn do_link() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1266,10 +1316,10 @@ pub fn do_link() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = name1_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             name1_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1294,10 +1344,10 @@ pub fn do_link() -> i32 {
     let mut name2_buf = [0u8; PATH_MAX];
     let copy2 = name2_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             name2_addr,
-            -1,
+            SELF,
             name2_buf.as_mut_ptr() as u64,
             copy2,
         ) != 0
@@ -1327,7 +1377,7 @@ pub fn do_link() -> i32 {
 
 /// Perform the `unlink(path)` system call (also used for `rmdir` in C).
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_unlink()` (line 88)
+/// C source: `minix/servers/vfs/link.c` â€” `do_unlink()` (line 88)
 pub fn do_unlink() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1339,10 +1389,10 @@ pub fn do_unlink() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1371,7 +1421,7 @@ pub fn do_unlink() -> i32 {
 
 /// Perform the `rename(oldpath, newpath)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_rename()` (line 89)
+/// C source: `minix/servers/vfs/link.c` â€” `do_rename()` (line 89)
 pub fn do_rename() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1385,10 +1435,10 @@ pub fn do_rename() -> i32 {
     let mut buf = [0u8; PATH_MAX];
     let copy = name1_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             name1_addr,
-            -1,
+            SELF,
             buf.as_mut_ptr() as u64,
             copy,
         ) != 0
@@ -1411,10 +1461,10 @@ pub fn do_rename() -> i32 {
     let mut buf2 = [0u8; PATH_MAX];
     let copy2 = name2_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             name2_addr,
-            -1,
+            SELF,
             buf2.as_mut_ptr() as u64,
             copy2,
         ) != 0
@@ -1450,7 +1500,7 @@ pub fn do_rename() -> i32 {
 
 /// Perform the `mkdir(path, mode)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_mkdir()` (line 145)
+/// C source: `minix/servers/vfs/open.c` â€” `do_mkdir()` (line 145)
 pub fn do_mkdir() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1463,10 +1513,10 @@ pub fn do_mkdir() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1503,7 +1553,7 @@ pub fn do_mkdir() -> i32 {
 
 /// Perform the `mknod(path, mode, dev)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_mknod()` (line 144)
+/// C source: `minix/servers/vfs/open.c` â€” `do_mknod()` (line 144)
 pub fn do_mknod() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1517,10 +1567,10 @@ pub fn do_mknod() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1558,7 +1608,7 @@ pub fn do_mknod() -> i32 {
 
 /// Perform the `symlink(target, linkpath)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` — `do_slink()` (line 148)
+/// C source: `minix/servers/vfs/open.c` â€” `do_slink()` (line 148)
 pub fn do_slink() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1572,10 +1622,10 @@ pub fn do_slink() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1614,7 +1664,7 @@ pub fn do_slink() -> i32 {
 /// This separate stub is kept for clarity and will dispatch to the same
 /// internal logic once implemented.
 ///
-/// C source: `minix/servers/vfs/link.c` — `do_unlink()` (also handles RMDIR, line 88)
+/// C source: `minix/servers/vfs/link.c` â€” `do_unlink()` (also handles RMDIR, line 88)
 pub fn do_rmdir() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1626,10 +1676,10 @@ pub fn do_rmdir() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1660,7 +1710,7 @@ pub fn do_rmdir() -> i32 {
 
 /// Perform the `access(path, mode)` system call.
 ///
-/// C source: `minix/servers/vfs/protect.c` — `do_access()` (line 177)
+/// C source: `minix/servers/vfs/protect.c` â€” `do_access()` (line 177)
 pub fn do_access() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1673,10 +1723,10 @@ pub fn do_access() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1717,7 +1767,7 @@ pub fn do_access() -> i32 {
 
 /// Perform the `chmod(path, mode)` and `fchmod(fd, mode)` system calls.
 ///
-/// C source: `minix/servers/vfs/protect.c` — `do_chmod()` (line 25)
+/// C source: `minix/servers/vfs/protect.c` â€” `do_chmod()` (line 25)
 /// Also handles `VFS_FCHMOD` (see `table.c` line 54: `CALL(VFS_FCHMOD) = do_chmod`).
 pub fn do_chmod() -> i32 {
     let fp = match current_fp() {
@@ -1731,10 +1781,10 @@ pub fn do_chmod() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1762,7 +1812,7 @@ pub fn do_chmod() -> i32 {
 
 /// Perform the `chown(path, owner, group)` and `fchown(fd, owner, group)` system calls.
 ///
-/// C source: `minix/servers/vfs/protect.c` — `do_chown()` (line 179)
+/// C source: `minix/servers/vfs/protect.c` â€” `do_chown()` (line 179)
 /// Also handles `VFS_FCHOWN` (see `table.c` line 55: `CALL(VFS_FCHOWN) = do_chown`).
 pub fn do_chown() -> i32 {
     let fp = match current_fp() {
@@ -1777,10 +1827,10 @@ pub fn do_chown() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1808,7 +1858,7 @@ pub fn do_chown() -> i32 {
 
 /// Perform the `umask(mode)` system call.
 ///
-/// C source: `minix/servers/vfs/protect.c` — `do_umask()` (line 180)
+/// C source: `minix/servers/vfs/protect.c` â€” `do_umask()` (line 180)
 pub fn do_umask() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1824,21 +1874,21 @@ pub fn do_umask() -> i32 {
 
 /// Perform the `mount(special, path, rwflag, ...)` system call.
 ///
-/// C source: `minix/servers/vfs/mount.c` — `do_mount()` (line 128)
+/// C source: `minix/servers/vfs/mount.c` â€” `do_mount()` (line 128)
 pub fn do_mount() -> i32 {
     crate::vfs::mount::do_mount()
 }
 
 /// Perform the `umount(special)` system call.
 ///
-/// C source: `minix/servers/vfs/mount.c` — `do_umount()` (line 129)
+/// C source: `minix/servers/vfs/mount.c` â€” `do_umount()` (line 129)
 pub fn do_umount() -> i32 {
     crate::vfs::mount::do_umount()
 }
 
-/// Perform the `mapdriver(label, major, endpoint)` — register a device driver.
+/// Perform the `mapdriver(label, major, endpoint)` â€” register a device driver.
 ///
-/// C source: `minix/servers/vfs/dmap.c` — `do_mapdriver()` (line 50)
+/// C source: `minix/servers/vfs/dmap.c` â€” `do_mapdriver()` (line 50)
 pub fn do_mapdriver() -> i32 {
     crate::vfs::dmap::map_service(core::ptr::null())
 }
@@ -1847,7 +1897,7 @@ pub fn do_mapdriver() -> i32 {
 
 /// Perform the `utimens(path, times, flag)` system call (and its friends).
 ///
-/// C source: `minix/servers/vfs/time.c` — `do_utimens()` (line 26)
+/// C source: `minix/servers/vfs/time.c` â€” `do_utimens()` (line 26)
 pub fn do_utimens() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1861,10 +1911,10 @@ pub fn do_utimens() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -1903,7 +1953,7 @@ struct Sysgetenv {
 /// by copying a sysgetenv struct from userspace via virtual_copy.
 /// Handles the "verbose" parameter (0-4).
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_svrctl()` (line 777)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_svrctl()` (line 777)
 pub fn do_svrctl() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -1927,10 +1977,10 @@ pub fn do_svrctl() -> i32 {
             vallen: 0,
         };
         let r = unsafe {
-            kernel::vm::virtual_copy(
-                kernel::table::endpoint_slot(fp.fp_endpoint),
+            sys_vircopy(
+                fp.fp_endpoint,
                 ptr,
-                -1,
+                SELF,
                 &mut env as *mut Sysgetenv as u64,
                 core::mem::size_of::<Sysgetenv>(),
             )
@@ -2020,20 +2070,20 @@ pub fn do_svrctl() -> i32 {
     }
 }
 
-/// Perform the `getsysinfo(what, where, size)` — copy VFS data structures.
+/// Perform the `getsysinfo(what, where, size)` â€” copy VFS data structures.
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_getsysinfo()` (line 120)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_getsysinfo()` (line 120)
 pub fn do_getsysinfo() -> i32 {
     crate::vfs::misc::do_getsysinfo()
 }
 
 /// Handle a VM call to VFS.
 ///
-/// VM↔VFS protocol: VM sends requests (FDLOOKUP/FDCLOSE/FDIO) to VFS
+/// VMâ†”VFS protocol: VM sends requests (FDLOOKUP/FDCLOSE/FDIO) to VFS
 /// through the SYS_VMCALL path. VFS must reply with VM_VFS_REPLY
 /// so VM can distinguish replies from new requests.
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_vm_call()` (line 359)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_vm_call()` (line 359)
 pub fn do_vm_call() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let req = r_i32(&glob.fs_m_in, VMCALL_REQ_OFF);
@@ -2128,7 +2178,7 @@ pub fn do_vm_call() -> i32 {
                 let inode_nr = (*vp).v_inode_nr;
                 let r = crate::vfs::request::req_peek(fs_e, inode_nr, offset, length);
 
-                // Always restore position — peek does not consume data.
+                // Always restore position â€” peek does not consume data.
                 filp.filp_pos = old_pos;
 
                 let glob_mut = &mut *vfs_global();
@@ -2144,7 +2194,7 @@ pub fn do_vm_call() -> i32 {
 
 /// Perform the `getrusage(who, buf)` system call.
 ///
-/// C source: `minix/servers/vfs/misc.c` — `do_getrusage()` (line 959)
+/// C source: `minix/servers/vfs/misc.c` â€” `do_getrusage()` (line 959)
 pub fn do_getrusage() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -2177,23 +2227,23 @@ pub fn do_getrusage() -> i32 {
     }
 }
 
-/// Perform the `gcov_flush()` system call — flush gcov coverage data.
+/// Perform the `gcov_flush()` system call â€” flush gcov coverage data.
 ///
-/// C source: `minix/servers/vfs/gcov.c` — `do_gcov_flush()` (line 322)
+/// C source: `minix/servers/vfs/gcov.c` â€” `do_gcov_flush()` (line 322)
 /// Flush GCOV profiling data from a target process.
 ///
 /// This is a GCC-specific feature (`-fprofile-arcs -ftest-coverage`)
 /// that has no equivalent in Rust. The function is intentionally
-/// unimplemented — returning ENOSYS is correct behavior.
+/// unimplemented â€” returning ENOSYS is correct behavior.
 ///
-/// C source: `minix/servers/vfs/gcov.c` — `do_gcov_flush()` (line 10)
+/// C source: `minix/servers/vfs/gcov.c` â€” `do_gcov_flush()` (line 10)
 pub fn do_gcov_flush() -> i32 {
     ENOSYS
 }
 
 /// Check file access permissions for a given process.
 ///
-/// C source: `minix/servers/vfs/path.c` — `do_checkperms()` (line 161)
+/// C source: `minix/servers/vfs/path.c` â€” `do_checkperms()` (line 161)
 pub fn do_checkperms() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -2205,10 +2255,10 @@ pub fn do_checkperms() -> i32 {
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
-        if kernel::vm::virtual_copy(
-            kernel::table::endpoint_slot(fp.fp_endpoint),
+        if sys_vircopy(
+            fp.fp_endpoint,
             path_addr,
-            -1,
+            SELF,
             path_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
@@ -2258,7 +2308,7 @@ pub fn lock_op() -> i32 {
     if fp.fp_filp[fd as usize] < 0 {
         return EBADF;
     }
-    // Advisory file locking — supported as no-op (OK for F_SETLK/F_SETLKW).
+    // Advisory file locking â€” supported as no-op (OK for F_SETLK/F_SETLKW).
     // Real implementation would allocate FileLock entries, check conflicts,
     // and manage the lock table.
     OK

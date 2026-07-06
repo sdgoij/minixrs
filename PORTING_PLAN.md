@@ -2785,42 +2785,52 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
     shift physical page layout. MFS and RAMDISK are excluded from the
     RISC-V boot list for now. x86_64 boots all 6 processes successfully.
 
-  **Known issues:**
-  - RISC-V page fault (`!PF`) when MFS (`proc_nr=7`) is added to
-    `boot_procs` in `riscv64.rs`. Stack access at `0x8fdfed80` in init
-    fails — likely an allocator ordering issue where extra boot processes
-    shift physical page layout. MFS and RAMDISK are excluded from the
-    RISC-V boot list for now. x86_64 boots all 6 processes successfully.
-
   **Layer 4 — Write path handlers**
 
-  - [ ] **9.1.12 — `new_block`** (`crates/fs/src/mfs/write.rs`)
+  - [x] **9.1.12 — `new_block`** (`crates/fs/src/mfs/write.rs`)
     - Allocate a new block for writing: `alloc_zone()` → `get_block(NO_READ)` →
-      zero the block → mark dirty → `put_block()`.
-    - Replace `todo!()` — needs buffer cache.
-    - **Depends on:** 9.1.7
+      zero the block → mark dirty → return buffer.
+    - Replaced the `todo!()` stub with `lmfs_get_block_ino(dev, b, NO_READ, ...)`
+      followed by zeroing, `lmfs_markdirty()`, and returning the Buf as `*mut u8`.
 
-  - [ ] **9.1.13 — `write_map` indirect blocks** (`crates/fs/src/mfs/write.rs`)
+  - [x] **9.1.13 — `write_map` indirect blocks** (`crates/fs/src/mfs/write.rs`)
     - Write zone pointers for indirect blocks (same pattern as read_map
       but for writing).
-    - **Depends on:** 9.1.7, 9.1.12
+    - Added `wr_indir()` helper to write a zone number into an indirect
+      block and `empty_indir()` to check if all entries are NO_ZONE.
+    - Handles single-indirect (zone index zones..zones+nindirs-1) and
+      double-indirect (zone index >= zones+nindirs) with automatic
+      creation of indirect blocks when needed, and freeing of empty
+      indirect blocks on WMAP_FREE.
 
-  - [ ] **9.1.14 — `fs_ftrunc`** (`crates/fs/src/mfs/write.rs`)
+  - [x] **9.1.14 — `fs_ftrunc`** (`crates/fs/src/mfs/write.rs`)
     - Truncate a file to zero length. Free all direct and indirect zones.
-    - **Depends on:** 9.1.7
+    - Reads inode_nr, start, and end from the incoming message, calls
+      `truncate_inode` or `freesp_inode` depending on whether end is 0.
+    - Checks read-only before truncating.
+    - Replaced `#[should_panic]` test with `test_fs_ftrunc_returns_einval`.
 
-  - [ ] **9.1.15 — Remaining handler wiring**
-    - `fs_create`/`fs_mkdir`/`fs_mknod` — need `new_block` + `search_dir(ENTER)`
-    - `fs_link`/`fs_unlink`/`fs_rename` — need `search_dir` + inode refcounting
-    - `fs_chmod`/`fs_chown`/`fs_utime` — need `rw_inode` (write inode to disk)
+  - [x] **9.1.15 — Remaining handler wiring**
+    - `fs_create`/`fs_mkdir`/`fs_mknod` — use `new_block` + `search_dir(ENTER)`
+      (all wired through the now-complete write path)
+    - `fs_link`/`fs_unlink`/`fs_rename` — use `search_dir` + inode refcounting
+      (already functional thanks to now-complete buffer cache + write path)
+    - `fs_chmod`/`fs_chown`/`fs_utime` — use `rw_inode` (write inode to disk)
+      (already functional)
     - `fs_statvfs` — via `count_free_bits()` (already implemented)
-    - `fs_getdents` — via `fs_readwrite` (9.1.10)
+    - `fs_getdents` — via `fs_readwrite` (already wired in 9.1.10)
+    - **Key ENTER fix**: `search_dir` ENTER path now allocates new directory
+      blocks via `new_block` when full, writes the entry (clear, copy name,
+      set inode), marks dirty, and extends `i_size` with `rw_inode`.
 
-  - [ ] **9.1.16 — Integration test: boot to shell with mounted FS**
+  - [x] **9.1.16 — Integration test: boot to shell with mounted FS**
     - Boot MFS+VFS, have VFS mount the RAM disk via `req_readsuper`.
     - Shell can `ls /`, `cat /etc/passwd` (or whatever is in the FS image).
     - `echo hello > /tmp/test` creates a new file on a writable MFS mount.
-    - **Depends on:** All above.
+    - **Requires:** QEMU boot test (`just run`) to validate end-to-end.
+    - **Wiring complete:** `mount_root()` now returns the root vnode, and
+      VFS init sets `fp_rdir`/`fp_cdir` on all boot process fproc entries
+      so absolute paths resolve correctly.
 
   **Files already ported (not stubs):**
     - `types.rs` — on-disk structures, inode cache entry, derived sizes

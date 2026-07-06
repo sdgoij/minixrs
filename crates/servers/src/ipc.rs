@@ -19,7 +19,6 @@ use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 // Constants
 
-
 const OK: i32 = 0;
 const EPERM: i32 = -1;
 const ENOENT: i32 = -2;
@@ -39,7 +38,6 @@ const ERANGE: i32 = -34;
 const EDOM: i32 = -33;
 const E2BIG: i32 = -7;
 
-
 const IPC_CREAT: i32 = 0o001000;
 const IPC_EXCL: i32 = 0o002000;
 const IPC_NOWAIT: i32 = 0o004000;
@@ -51,11 +49,9 @@ const IPC_SET: i32 = 1;
 const IPC_STAT: i32 = 2;
 const IPC_INFO: i32 = 500; // Minix-specific
 
-
 const IPC_R: i32 = 0o000400;
 const IPC_W: i32 = 0o000200;
 const IPC_M: i32 = 0o010000;
-
 
 const SEMMNI: usize = 10; // # of semaphore identifiers
 const SEMMNS: usize = 60; // # of semaphores in system
@@ -63,7 +59,6 @@ const SEMMSL: usize = SEMMNS; // max # of semaphores per id
 const SEMOPM: usize = 100; // max # of operations per semop call
 const SEMVMX: u16 = 32767; // semaphore maximum value
 const SEMAEM: u16 = 16384; // adjust on exit max value
-
 
 const GETNCNT: i32 = 3;
 const GETPID: i32 = 4;
@@ -77,7 +72,6 @@ const SETALL: i32 = 9;
 const SEM_STAT: i32 = 18;
 const SEM_INFO: i32 = 19;
 
-
 const SHM_RDONLY: i32 = 0o010000;
 const SHM_RND: i32 = 0o020000;
 const SHM_DEST: i32 = 0o001000; // segment will be destroyed on last detach
@@ -86,12 +80,10 @@ const SHM_LOCKED: i32 = 0o002000;
 const MAX_SHM_NR: usize = 1024;
 const SHMMNI: usize = MAX_SHM_NR; // # of SHM identifiers
 
-
 const SHM_LOCK: i32 = 3;
 const SHM_UNLOCK: i32 = 4;
 const SHM_STAT: i32 = 13; // Minix-specific
 const SHM_INFO: i32 = 14; // Minix-specific
-
 
 /// Size of a full IPC message buffer (matches kernel MESSAGE_SIZE).
 const MESSAGE_SIZE: usize = 64;
@@ -1592,13 +1584,11 @@ pub fn ipc_server_main() {
         }
 
         let ipc_nr = (call_type - (IPC_BASE + 1)) as usize;
-        if ipc_nr < IPC_CALLS.len() {
-            if let Some(handler) = IPC_CALLS[ipc_nr] {
-                let result = unsafe { handler(&mut msg) };
-                if NEEDS_REPLY[ipc_nr] {
-                    unsafe { msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, result) };
-                    let _ = unsafe { sendrec(who_e, &mut msg) };
-                }
+        if let Some(handler) = IPC_CALLS.get(ipc_nr).and_then(|calls| *calls) {
+            let result = unsafe { handler(&mut msg) };
+            if NEEDS_REPLY[ipc_nr] {
+                unsafe { msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, result) };
+                let _ = unsafe { sendrec(who_e, &mut msg) };
             }
         }
         unsafe { update_refcount_and_destroy_stub() };

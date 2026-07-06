@@ -143,14 +143,19 @@ impl GrantTable {
         {
             let addr = self.as_ptr();
             let nr = VFS_NR_GRANTS as i32;
-            // Build SYS_SETGRANT message and call sendrec(SYSTEM, msg)
+            // Build SYS_SETGRANT (kernel call 34) message.
+            // The kernel handler (do_setgrant) reads:
+            //   msg[0..8]  = addr (u64)
+            //   msg[8..12] = nr_entries (i32)
             let mut msg = [0u8; 64];
-            // msg[0..8] = addr (u64)
             msg[0..8].copy_from_slice(&addr.to_le_bytes());
-            // msg[8..12] = nr_entries (i32)
             msg[8..12].copy_from_slice(&nr.to_le_bytes());
-            // msg[12..16] = pad
-            let _ = unsafe { crate::ipc::sendrec(arch_common::com::SYSTEM, &mut msg) };
+            let r = minix_rt::kernel_call(34, &mut msg);
+            if r != 0 {
+                #[cfg(target_os = "none")]
+                minix_rt::write(2, b"vfs: setgrant failed\n");
+                let _ = r;
+            }
         }
         #[cfg(not(target_os = "none"))]
         {

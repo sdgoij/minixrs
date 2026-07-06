@@ -100,81 +100,79 @@ pub struct Stat {
 
 // Message field offsets (64-byte message buffer)
 
-// For VFS calls, the message layout is:
-//   offset 0:  dest endpoint (i32) — set by sendrec
-//   offset 4:  source endpoint (i32) — set by kernel
-//   offset 8:  call_nr / m_type (i32) — VFS_* constant / return value
-//   offset 12+: call-specific data
+// For VFS calls, the message layout matches VFS get_work/handle_work:
+//   offset 0-3:  dest endpoint (i32) — written by sendrec wrapper
+//   offset 4-7:  call_nr / m_type (i32) — VFS_* constant sent TO VFS,
+//                result code received FROM VFS in reply
+//   offset 8+:   call-specific data (per VFS handler expectations)
 
-const OFF_TYPE: usize = 8;
+const OFF_CALL: usize = 4;
 
-//   offset 12: name pointer (u64)
-//   offset 20: name length (i32)
-//   offset 24: flags (i32)   — O_RDONLY, O_WRONLY, etc.
-//   offset 28: mode (i32)    — only for VFS_CREAT
+// VFS_OPEN / VFS_CREAT (matches do_open):
+//   offset 8:  flags (i32)
+//   offset 16: name pointer (u64)
+//   offset 24: name length (i32)
 
-const OFF_OPEN_NAME: usize = 12;
-const OFF_OPEN_NAME_LEN: usize = 20;
-const OFF_OPEN_FLAGS: usize = 24;
-const OFF_OPEN_MODE: usize = 28;
+const OFF_OPEN_FLAGS: usize = 8;
+const OFF_OPEN_NAME: usize = 16;
+const OFF_OPEN_NAME_LEN: usize = 24;
 
-//   offset 12: fd (i32)
+// VFS_READ / VFS_WRITE (matches do_read/do_write):
+//   offset 8:  fd (i32)
 //   offset 16: buf pointer (u64)
-//   offset 24: nbytes (u64)   — number of bytes
-//   offset 32: position (u64) — seek position (for pread/pwrite), or 0
+//   offset 24: nbytes (u64)
+//   offset 32: position (u64)
 
-const OFF_RW_FD: usize = 12;
+const OFF_RW_FD: usize = 8;
 const OFF_RW_BUF: usize = 16;
 const OFF_RW_NBYTES: usize = 24;
 const OFF_RW_POSITION: usize = 32;
 
-//   offset 12: fd (i32)
+// VFS_CLOSE (matches do_close):
+//   offset 8:  fd (i32)
 
-const OFF_CLOSE_FD: usize = 12;
+const OFF_CLOSE_FD: usize = 8;
 
-//   offset 12: fd (i32)
-//   offset 16: offset (i64)
-//   offset 24: whence (i32)
+// VFS_LSEEK (matches do_lseek):
+//   offset 8:  fd (i32)
+//   offset 12: offset (i64)
+//   offset 20: whence (i32)
 
-const OFF_LSEEK_FD: usize = 12;
-const OFF_LSEEK_OFFSET: usize = 16;
-const OFF_LSEEK_WHENCE: usize = 24;
+const OFF_LSEEK_FD: usize = 8;
+const OFF_LSEEK_OFFSET: usize = 12;
+const OFF_LSEEK_WHENCE: usize = 20;
 
-//   offset 12: name/fd (i32) — fd for fstat, name pointer for stat
-//   offset 16: stat buffer (u64) — pointer to stat struct in caller's space
+// VFS_STAT / VFS_FSTAT (matches do_stat/do_fstat):
+//   offset 8:  name/fd (i32)
+//   offset 12: stat buffer (u64)
 
-const OFF_STAT_NAME_FD: usize = 12;
-const OFF_STAT_BUF: usize = 16;
+const OFF_STAT_NAME_FD: usize = 8;
+const OFF_STAT_BUF: usize = 12;
 
-//   offset 12: fd (i32)
-//   offset 16: request (u32) — ioctl request code
-//   offset 20: arg pointer (u64)
+// VFS_IOCTL (matches do_ioctl):
+//   offset 8:  fd (i32)
+//   offset 12: request (u32)
+//   offset 16: arg pointer (u64)
 
-const OFF_IOCTL_FD: usize = 12;
-const OFF_IOCTL_REQ: usize = 16;
-const OFF_IOCTL_ARG: usize = 20;
+const OFF_IOCTL_FD: usize = 8;
+const OFF_IOCTL_REQ: usize = 12;
+const OFF_IOCTL_ARG: usize = 16;
 
-//   offset 12: fd (i32)
+// VFS_GETDENTS (matches do_getdents):
+//   offset 8:  fd (i32)
 //   offset 16: buf pointer (u64)
 //   offset 24: nbytes (u64)
 
-const OFF_GETDENTS_FD: usize = 12;
+const OFF_GETDENTS_FD: usize = 8;
 const OFF_GETDENTS_BUF: usize = 16;
 const OFF_GETDENTS_NBYTES: usize = 24;
 
-//   offset 12: nfds (i32)
-//   offset 16: fd_set pointer (u64) — readfds
-//   offset 24: fd_set pointer (u64) — writefds
+// VFS_FSYNC / VFS_TRUNCATE (matches do_fsync/do_ftrunc):
+//   offset 8:  fd (i32)
+//   offset 12: length (i64) — for truncate only
 
-const OFF_SELECT_NFDS: usize = 12;
-const OFF_SELECT_READFDS: usize = 16;
-const OFF_SELECT_WRITEFDS: usize = 24;
-
-//   offset 12: fd (i32)
-//   offset 16: length (i64) — only for VFS_TRUNCATE
-
-const OFF_FD_ONLY: usize = 12;
-const OFF_TRUNC_LENGTH: usize = 16;
+const OFF_FD_ONLY: usize = 8;
+const OFF_TRUNC_LENGTH: usize = 12;
 
 // Helpers
 
@@ -227,7 +225,7 @@ fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
 #[cfg(target_os = "none")]
 unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
     unsafe { sendrec(VFS_PROC_NR, msg)? };
-    let mtype = msg_i32(msg, OFF_TYPE);
+    let mtype = msg_i32(msg, OFF_CALL);
     if mtype < 0 {
         Err(MinixErr::from_i32(mtype))
     } else {
@@ -249,20 +247,19 @@ unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
 ///
 /// `path` must be a valid, null-terminated string in the caller's address
 /// space.
-pub unsafe fn open(path: &str, flags: i32, mode: u32) -> Result<i32, MinixErr> {
+pub unsafe fn open(path: &str, flags: i32, _mode: u32) -> Result<i32, MinixErr> {
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (path, flags, mode, VFS_PROC_NR);
+        let _ = (path, flags, _mode, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_OPEN as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_OPEN as i32);
         msg_set_u64(&mut msg, OFF_OPEN_NAME, path.as_ptr() as u64);
         msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, (path.len() + 1) as i32);
         msg_set_i32(&mut msg, OFF_OPEN_FLAGS, flags);
-        msg_set_u32(&mut msg, OFF_OPEN_MODE, mode);
         let mtype = vfs_call(&mut msg)?;
         // VFS_OPEN returns the file descriptor in m_type on success.
         Ok(mtype)
@@ -279,7 +276,7 @@ pub fn close(fd: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_CLOSE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CLOSE as i32);
         msg_set_i32(&mut msg, OFF_CLOSE_FD, fd);
         let _ = vfs_call(&mut msg)?;
         Ok(())
@@ -303,7 +300,7 @@ pub unsafe fn read(fd: i32, buf: &mut [u8]) -> Result<i64, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_READ as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_READ as i32);
         msg_set_i32(&mut msg, OFF_RW_FD, fd);
         msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_RW_NBYTES, buf.len() as u64);
@@ -330,7 +327,7 @@ pub unsafe fn write(fd: i32, buf: &[u8]) -> Result<i64, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_WRITE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_WRITE as i32);
         msg_set_i32(&mut msg, OFF_RW_FD, fd);
         msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_RW_NBYTES, buf.len() as u64);
@@ -353,7 +350,7 @@ pub fn lseek(fd: i32, offset: i64, whence: i32) -> Result<i64, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_LSEEK as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_LSEEK as i32);
         msg_set_i32(&mut msg, OFF_LSEEK_FD, fd);
         msg_set_i64(&mut msg, OFF_LSEEK_OFFSET, offset);
         msg_set_i32(&mut msg, OFF_LSEEK_WHENCE, whence);
@@ -373,7 +370,7 @@ pub fn fstat(fd: i32) -> Result<Stat, MinixErr> {
     unsafe {
         let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_FSTAT as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FSTAT as i32);
         msg_set_i32(&mut msg, OFF_STAT_NAME_FD, fd);
         msg_set_u64(&mut msg, OFF_STAT_BUF, stat_buf.as_mut_ptr() as u64);
         let _ = vfs_call(&mut msg)?;
@@ -396,7 +393,7 @@ pub unsafe fn ioctl(fd: i32, request: u32, arg: *mut u8) -> Result<i32, MinixErr
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_IOCTL as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_IOCTL as i32);
         msg_set_i32(&mut msg, OFF_IOCTL_FD, fd);
         msg_set_u32(&mut msg, OFF_IOCTL_REQ, request);
         msg_set_u64(&mut msg, OFF_IOCTL_ARG, arg as u64);
@@ -418,7 +415,7 @@ pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<i32, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_GETDENTS as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_GETDENTS as i32);
         msg_set_i32(&mut msg, OFF_GETDENTS_FD, fd);
         msg_set_u64(&mut msg, OFF_GETDENTS_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_GETDENTS_NBYTES, buf.len() as u64);
@@ -437,7 +434,7 @@ pub fn fsync(fd: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_FSYNC as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FSYNC as i32);
         msg_set_i32(&mut msg, OFF_FD_ONLY, fd);
         let _ = vfs_call(&mut msg)?;
         Ok(())
@@ -454,7 +451,7 @@ pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_TRUNCATE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_TRUNCATE as i32);
         msg_set_i32(&mut msg, OFF_FD_ONLY, fd);
         msg_set_i64(&mut msg, OFF_TRUNC_LENGTH, length);
         let _ = vfs_call(&mut msg)?;
@@ -550,48 +547,45 @@ mod tests {
     #[test]
     fn test_open_message_format() {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_OPEN as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_OPEN as i32);
         msg_set_u64(&mut msg, OFF_OPEN_NAME, 0x1234_5678_9ABC_DEF0);
-        msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, 5); // e.g. "/tmp\0"
+        msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, 5);
         msg_set_i32(&mut msg, OFF_OPEN_FLAGS, O_RDWR | O_CREAT);
-        msg_set_u32(&mut msg, OFF_OPEN_MODE, 0o644);
 
-        assert_eq!(msg_i32(&msg, 8), 0x103);
-        assert_eq!(msg_u64(&msg, 12), 0x1234_5678_9ABC_DEF0);
-        assert_eq!(msg_i32(&msg, 20), 5);
-        assert_eq!(msg_i32(&msg, 24), O_RDWR | O_CREAT);
-        assert_eq!(msg_u32(&msg, 28), 0o644);
+        assert_eq!(msg_i32(&msg, 4), 0x103);
+        assert_eq!(msg_i32(&msg, 8), O_RDWR | O_CREAT);
+        assert_eq!(msg_u64(&msg, 16), 0x1234_5678_9ABC_DEF0);
+        assert_eq!(msg_i32(&msg, 24), 5);
     }
 
     #[test]
     fn test_read_message_format() {
         let mut msg = [0u8; 64];
         let buf: [u8; 128] = [0; 128];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_READ as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_READ as i32);
         msg_set_i32(&mut msg, OFF_RW_FD, 3);
         msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_RW_NBYTES, 128);
         msg_set_u64(&mut msg, OFF_RW_POSITION, 0);
 
-        assert_eq!(msg_i32(&msg, 8), 0x100);
-        assert_eq!(msg_i32(&msg, 12), 3);
+        assert_eq!(msg_i32(&msg, 4), 0x100);
+        assert_eq!(msg_i32(&msg, 8), 3);
         assert_eq!(msg_u64(&msg, 16), buf.as_ptr() as u64);
         assert_eq!(msg_u64(&msg, 24), 128);
-        assert_eq!(msg_u64(&msg, 32), 0);
     }
 
     #[test]
     fn test_write_message_format() {
         let mut msg = [0u8; 64];
         let buf: [u8; 64] = [0; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_WRITE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_WRITE as i32);
         msg_set_i32(&mut msg, OFF_RW_FD, 1);
         msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_RW_NBYTES, 64);
         msg_set_u64(&mut msg, OFF_RW_POSITION, 0);
 
-        assert_eq!(msg_i32(&msg, 8), 0x101);
-        assert_eq!(msg_i32(&msg, 12), 1);
+        assert_eq!(msg_i32(&msg, 4), 0x101);
+        assert_eq!(msg_i32(&msg, 8), 1);
         assert_eq!(msg_u64(&msg, 16), buf.as_ptr() as u64);
         assert_eq!(msg_u64(&msg, 24), 64);
     }
@@ -599,66 +593,66 @@ mod tests {
     #[test]
     fn test_close_message_format() {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_CLOSE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CLOSE as i32);
         msg_set_i32(&mut msg, OFF_CLOSE_FD, 42);
 
-        assert_eq!(msg_i32(&msg, 8), 0x105);
-        assert_eq!(msg_i32(&msg, 12), 42);
+        assert_eq!(msg_i32(&msg, 4), 0x105);
+        assert_eq!(msg_i32(&msg, 8), 42);
     }
 
     #[test]
     fn test_lseek_message_format() {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_LSEEK as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_LSEEK as i32);
         msg_set_i32(&mut msg, OFF_LSEEK_FD, 3);
         msg_set_i64(&mut msg, OFF_LSEEK_OFFSET, 100);
         msg_set_i32(&mut msg, OFF_LSEEK_WHENCE, SEEK_SET);
 
-        assert_eq!(msg_i32(&msg, 8), 0x102);
-        assert_eq!(msg_i32(&msg, 12), 3);
-        assert_eq!(msg_i64(&msg, 16), 100);
-        assert_eq!(msg_i32(&msg, 24), SEEK_SET);
+        assert_eq!(msg_i32(&msg, 4), 0x102);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_i64(&msg, 12), 100);
+        assert_eq!(msg_i32(&msg, 20), SEEK_SET);
     }
 
     #[test]
     fn test_fstat_message_format() {
         let mut msg = [0u8; 64];
         let stat_buf: Stat = unsafe { core::mem::zeroed() };
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_FSTAT as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FSTAT as i32);
         msg_set_i32(&mut msg, OFF_STAT_NAME_FD, 3);
         msg_set_u64(&mut msg, OFF_STAT_BUF, &stat_buf as *const Stat as u64);
 
-        assert_eq!(msg_i32(&msg, 8), 0x116);
-        assert_eq!(msg_i32(&msg, 12), 3);
-        assert_eq!(msg_u64(&msg, 16), &stat_buf as *const Stat as u64);
+        assert_eq!(msg_i32(&msg, 4), 0x116);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_u64(&msg, 12), &stat_buf as *const Stat as u64);
     }
 
     #[test]
     fn test_ioctl_message_format() {
         let mut msg = [0u8; 64];
         let arg: u8 = 0;
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_IOCTL as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_IOCTL as i32);
         msg_set_i32(&mut msg, OFF_IOCTL_FD, 3);
         msg_set_u32(&mut msg, OFF_IOCTL_REQ, 0x1234_5678);
         msg_set_u64(&mut msg, OFF_IOCTL_ARG, &arg as *const u8 as u64);
 
-        assert_eq!(msg_i32(&msg, 8), 0x118);
-        assert_eq!(msg_i32(&msg, 12), 3);
-        assert_eq!(msg_u32(&msg, 16), 0x1234_5678);
-        assert_eq!(msg_u64(&msg, 20), &arg as *const u8 as u64);
+        assert_eq!(msg_i32(&msg, 4), 0x118);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_u32(&msg, 12), 0x1234_5678);
+        assert_eq!(msg_u64(&msg, 16), &arg as *const u8 as u64);
     }
 
     #[test]
     fn test_getdents_message_format() {
         let mut msg = [0u8; 64];
         let buf: [u8; 256] = [0; 256];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_GETDENTS as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_GETDENTS as i32);
         msg_set_i32(&mut msg, OFF_GETDENTS_FD, 3);
         msg_set_u64(&mut msg, OFF_GETDENTS_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_GETDENTS_NBYTES, 256);
 
-        assert_eq!(msg_i32(&msg, 8), 0x11D);
-        assert_eq!(msg_i32(&msg, 12), 3);
+        assert_eq!(msg_i32(&msg, 4), 0x11D);
+        assert_eq!(msg_i32(&msg, 8), 3);
         assert_eq!(msg_u64(&msg, 16), buf.as_ptr() as u64);
         assert_eq!(msg_u64(&msg, 24), 256);
     }
@@ -666,23 +660,23 @@ mod tests {
     #[test]
     fn test_fsync_message_format() {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_FSYNC as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FSYNC as i32);
         msg_set_i32(&mut msg, OFF_FD_ONLY, 3);
 
-        assert_eq!(msg_i32(&msg, 8), 0x120);
-        assert_eq!(msg_i32(&msg, 12), 3);
+        assert_eq!(msg_i32(&msg, 4), 0x120);
+        assert_eq!(msg_i32(&msg, 8), 3);
     }
 
     #[test]
     fn test_truncate_message_format() {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, VFS_TRUNCATE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_TRUNCATE as i32);
         msg_set_i32(&mut msg, OFF_FD_ONLY, 3);
         msg_set_i64(&mut msg, OFF_TRUNC_LENGTH, 1024);
 
-        assert_eq!(msg_i32(&msg, 8), 0x121);
-        assert_eq!(msg_i32(&msg, 12), 3);
-        assert_eq!(msg_i64(&msg, 16), 1024);
+        assert_eq!(msg_i32(&msg, 4), 0x121);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_i64(&msg, 12), 1024);
     }
 
     #[test]

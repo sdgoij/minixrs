@@ -17,6 +17,7 @@ default = []
 embed_initramfs = ["kernel/embed_initramfs"]
 embed_minixfs = ["kernel/embed_minixfs"]
 integration-tests = ["kernel/qemu-tests"]
+boot-test = []
 riscv64 = ["kernel/riscv64"]
 
 [lib]

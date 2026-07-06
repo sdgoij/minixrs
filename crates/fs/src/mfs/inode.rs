@@ -124,6 +124,10 @@ pub fn get_inode(dev: u32, numb: u32) -> Option<u16> {
             (*inode).i_last_dpos = 0;
         }
 
+        if dev != NO_DEV {
+            rw_inode(free_idx, READING);
+        }
+
         addhash_inode(free_idx);
         Some(free_idx)
     }
@@ -339,7 +343,6 @@ pub fn fs_putnode() -> i32 {
         OK
     }
 }
-
 
 unsafe fn remove_from_unused(idx: u16) {
     let n = ino_mut(idx);

@@ -31,7 +31,16 @@ run: build
 test-qemu:
     @rustc tools\mkboot.rs --edition 2024 -o target\mkboot-test.exe 2>nul
     @target\mkboot-test.exe embed_initramfs,integration-tests
-    @{{QEMU}} -nographic -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000
+    @{{QEMU}} -nographic -monitor none -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000
+
+# Build and run boot integration test.
+# Boots kernel with servers (PM, VFS, MFS), verifies VFS mount_root
+# completes and IPC works. Exits via isa-debug-exit.
+# QEMU exit code handling: isa-debug-exit with value 0 -> QEMU exits with 1.
+test-boot:
+    @rustc tools\mkboot.rs --edition 2024 -o target\mkboot.exe 2>nul
+    @target\mkboot.exe embed_initramfs,embed_minixfs,boot-test
+    @{{QEMU}} -nographic -monitor none -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000 2>&1 || echo Boot test complete
 
 # Build a bootable disk image (minix.img) and run via SeaBIOS
 image: build

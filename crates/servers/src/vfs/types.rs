@@ -307,20 +307,11 @@ pub union ScratchpadData {
     pub filp: *mut Filp,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct IoCmd {
     pub io_buffer: *mut u8,
     pub io_nbytes: usize,
-}
-
-impl Default for IoCmd {
-    fn default() -> Self {
-        Self {
-            io_buffer: core::ptr::null_mut(),
-            io_nbytes: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -339,9 +330,8 @@ impl Default for Scratchpad {
     }
 }
 
-
 /// Communication state between VFS and a filesystem process.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct Comm {
     pub c_max_reqs: i32,
@@ -349,21 +339,9 @@ pub struct Comm {
     pub c_req_queue: *mut WorkerThread,
 }
 
-impl Default for Comm {
-    fn default() -> Self {
-        Self {
-            c_max_reqs: 0,
-            c_cur_reqs: 0,
-            c_req_queue: core::ptr::null_mut(),
-        }
-    }
-}
-
-
 /// File offset (64-bit, used in VFS<->FS messages).
 #[allow(non_camel_case_types)]
 pub type off_t = i64;
-
 
 /// Result of a FS create/lookup/readsuper/newnode operation.
 ///

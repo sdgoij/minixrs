@@ -44,6 +44,13 @@ pub extern "C" fn kmain() -> ! {
         kernel::syscall::init_basic_syscalls();
     }
 
+    #[cfg(feature = "boot-test")]
+    unsafe {
+        // Register the boot-complete syscall (60) that VFS calls after
+        // mount_root succeeds.  The handler runs verification tests.
+        kernel::syscall::register_basic_syscall(60, boot_test_syscall_handler);
+    }
+
     fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
         let alloc = arch_x86_64::alloc::global_allocator();
         if alloc.is_null() {
@@ -70,9 +77,10 @@ pub extern "C" fn kmain() -> ! {
     serial_write("initializing allocator...\r\n");
     {
         let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-        // Start after the kernel image (~3MB kernel binary + BSS at 0x200000).
-        // The kernel binary extends to roughly 0x600000.
-        mmap.add(0x0060_0000, 0x1000_0000);
+        // Start after the kernel image (loaded at 0x200000). With the
+        // embedded 8 MB MFS image (.rodata) the kernel extends to ~0xB00000.
+        // Start the free pool at 16 MB to safely clear it.
+        mmap.add(0x0100_0000, 0x1000_0000);
         mmap.cut(0x0FE0_0000, 0x0FF0_0000);
         arch_x86_64::alloc::init_allocator(&mmap);
     }
@@ -169,9 +177,16 @@ pub extern "C" fn kmain() -> ! {
 
         unsafe {
             kernel::table::proc_init();
+            kernel::system::system_init();
+            kernel::ipc::register_ipc_syscalls();
         }
 
         // Define all boot processes: (path, proc_nr, endpoint_name)
+        // VFS must come before MFS so VFS's SENDREC is queued and
+        // processed when MFS later runs.
+        // When boot-test is active, INIT is excluded so the test
+        // completes before any user process starts.
+        #[cfg(not(feature = "boot-test"))]
         let boot_procs: &[(&str, i32)] = &[
             ("/sbin/pm", PM_PROC_NR),           // Process Manager
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
@@ -180,14 +195,21 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
+        #[cfg(feature = "boot-test")]
+        let boot_procs: &[(&str, i32)] = &[
+            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+            ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
+            ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+        ];
         // VM, DS, SCHED, TTY excluded — their main loops are stubs
         // (spin_loop without IPC) which would hang the CPU.
 
         // Load each boot process from initramfs, storing InitInfo for
         // per-process page table creation.
         serial_write("  loading boot processes...\r\n");
-        let mut boot_infos: [core::mem::MaybeUninit<boot_init::InitInfo>; 8] =
-            unsafe { core::mem::zeroed() };
+        let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe { boot_init::load_and_prepare_proc(path, proc_nr, &[path]) } {
                 Some(info) => info,
@@ -198,39 +220,11 @@ pub extern "C" fn kmain() -> ! {
                     hlt_loop();
                 }
             };
-            boot_infos[i] = core::mem::MaybeUninit::new(info);
-        }
 
-        serial_write("  creating per-process page tables...\r\n");
-
-        #[cfg(target_os = "none")]
-        unsafe {
-            arch_x86_64::asm::syscall_abi::set_syscall_handler(syscall_handler_c);
-            let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
-            arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
-            arch_x86_64::cpulocals::init_cpulocals();
-            // Set up TSS and GDT for ring-3 interrupts and exception handlers.
-            arch_x86_64::init_tss_for_boot();
-
-            // Install exception handlers: page fault, GPF, double fault.
-            // These use IST stacks for reliability.
-            let pf_entry = arch_x86_64::asm::exception_page_fault_entry as *const () as u64;
-            (*arch_x86_64::idt::IDT.get()).set_handler(14, pf_entry, 1, 0);
-            let gpf_entry = arch_x86_64::asm::exception_gpf_entry as *const () as u64;
-            (*arch_x86_64::idt::IDT.get()).set_handler(13, gpf_entry, 0, 0);
-            let df_entry = arch_x86_64::asm::exception_double_fault_entry as *const () as u64;
-            (*arch_x86_64::idt::IDT.get()).set_handler(8, df_entry, 2, 0);
-        }
-
-        // Create per-process (restricted) page tables and enqueue each process.
-        let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
-        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let rp = kernel::table::proc_addr(proc_nr);
             if i == 0 {
                 first_proc = rp;
             }
-
-            let info = unsafe { boot_infos[i].assume_init_ref() };
 
             // Create a restricted page table that maps only this process's
             // code and stack, not the entire identity-mapped 1GB region.
@@ -256,11 +250,85 @@ pub extern "C" fn kmain() -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                // Set scheduling parameters.
                 core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
                 core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
                 core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
             }
+
+            // Map the brk range.
+            let user_flags =
+                kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
+            let brk_va_start = 0x3FE00000u64;
+            let brk_va_end = 0x3FF00000u64;
+            let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
+            let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
+                Some(base) => base,
+                None => {
+                    serial_write("  FAILED: out of memory for brk heap\r\n");
+                    hlt_loop();
+                }
+            };
+            for j in 0..brk_pages {
+                let va = brk_va_start + (j as u64) * 4096;
+                let pa = brk_phys + (j as u64) * 4096;
+                if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err() {
+                    serial_write("  FAILED: brk page mapping\r\n");
+                    hlt_loop();
+                }
+            }
+
+            // If this is the MFS process, set up the RAM disk mapping.
+            if proc_nr == MFS_PROC_NR {
+                let image = kernel::minixfs::minixfs_image();
+                let image_len = kernel::minixfs::minixfs_image_len();
+                if image_len > 0 {
+                    let pages = image_len.div_ceil(4096);
+                    let ramdisk_phys = match unsafe { kernel::hal::alloc_phys_contig(pages) } {
+                        Some(base) => base,
+                        None => {
+                            serial_write("  FAILED: out of memory for RAM disk\r\n");
+                            hlt_loop();
+                        }
+                    };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            image.as_ptr(),
+                            ramdisk_phys as *mut u8,
+                            image_len,
+                        );
+                    }
+                    for j in 0..pages {
+                        let va = arch_common::com::MFS_RAMDISK_VA + (j as u64) * 4096;
+                        let pa = ramdisk_phys + (j as u64) * 4096;
+                        if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }
+                            .is_err()
+                        {
+                            serial_write("  FAILED: RAM disk page mapping\r\n");
+                            hlt_loop();
+                        }
+                    }
+                    serial_write("  RAM disk mapped for MFS\r\n");
+                }
+            }
+        }
+
+        #[cfg(target_os = "none")]
+        unsafe {
+            arch_x86_64::asm::syscall_abi::set_syscall_handler(syscall_handler_c);
+            let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
+            arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
+            arch_x86_64::cpulocals::init_cpulocals();
+            // Set up TSS and GDT for ring-3 interrupts and exception handlers.
+            arch_x86_64::init_tss_for_boot();
+
+            // Install exception handlers: page fault, GPF, double fault.
+            // These use IST stacks for reliability.
+            let pf_entry = arch_x86_64::asm::exception_page_fault_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(14, pf_entry, 1, 0);
+            let gpf_entry = arch_x86_64::asm::exception_gpf_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(13, gpf_entry, 0, 0);
+            let df_entry = arch_x86_64::asm::exception_double_fault_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(8, df_entry, 2, 0);
         }
 
         if first_proc.is_null() {
@@ -438,17 +506,31 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
 
         // If the current process is still runnable, keep it running.
         // Do NOT re-enqueue — it's already in the run queue from boot.
+        // Pick the next runnable process.
+        // Do NOT re-enqueue — it's already in the run queue from boot.
         // Re-enqueuing would overwrite p_nextready and orphan the list.
         //
         // TODO: Move to tail for round-robin fairness once the run queue
         // corruption from duplicate enqueues (in IPC code paths) is fixed.
 
         // Pick the next runnable process.
+        // Do NOT re-enqueue — it's already in the run queue from boot.
+        // Re-enqueuing would overwrite p_nextready and orphan the list.
+        //
+        // TODO: Move to tail for round-robin fairness once the run queue
+        // corruption from duplicate enqueues (in IPC code paths) is fixed.
+
         if let Some(next) = kernel::sched::pick_proc() {
             if next != rp || is_exec {
+                // Deliver any pending IPC message to the target process's
+                // user buffer and set RAX to the source endpoint.
+                unsafe { deliver_msg(next) };
                 arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
                 // Switch to the new process — never returns.
                 arch_x86_64::asm::restore(next as *const u8);
+            } else {
+                // Same process: deliver pending message before returning.
+                unsafe { deliver_msg(rp) };
             }
         } else {
             // No runnable processes — all blocked on IPC.
@@ -459,10 +541,48 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                     arch_common::com::PM_PROC_NR,
                 );
                 if let Some(next) = kernel::sched::pick_proc() {
+                    unsafe { deliver_msg(next) };
                     arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
                     arch_x86_64::asm::restore(next as *const u8);
                 }
             }
+        }
+    }
+}
+
+/// Deliver any pending IPC message to a process's user-space buffer.
+///
+/// If the `DELIVERMSG` flag is set on the process, this calls
+/// `kernel::ipc::delivermsg` to copy the contents of `p_delivermsg`
+/// to the user-space virtual address stored in `p_delivermsg_vir`.
+///
+/// After delivery, RAX is set to the source endpoint from the message
+/// header (bytes 0-3).
+///
+/// # Safety
+///
+/// `rp` must point to a valid `Proc`.
+unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) {
+    unsafe {
+        let has_deliver = (*rp)
+            .p_misc_flags
+            .load(core::sync::atomic::Ordering::Relaxed)
+            & kernel::proc::MiscFlags::DELIVERMSG.bits()
+            != 0;
+        if has_deliver {
+            kernel::ipc::delivermsg(rp);
+            // Read source endpoint from delivered message header (bytes 0-3).
+            let src_ep = i32::from_le_bytes([
+                (*rp).p_delivermsg[0],
+                (*rp).p_delivermsg[1],
+                (*rp).p_delivermsg[2],
+                (*rp).p_delivermsg[3],
+            ]);
+            kernel::hal::write_retval(&mut (*rp).p_reg, src_ep as u64);
+            (*rp).p_misc_flags.fetch_and(
+                !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 }
@@ -476,6 +596,18 @@ fn hlt_loop() -> ! {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }
+    }
+}
+
+/// Handler for SYS_BOOT_COMPLETE (syscall 60) — called by VFS after mount_root.
+///
+/// When the `boot-test` feature is enabled, VFS calls this syscall after
+/// mount_root completes.  The handler runs the boot test suite and exits
+/// QEMU via isa-debug-exit.
+#[cfg(feature = "boot-test")]
+unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args: &[u64; 6]) -> i64 {
+    unsafe {
+        kernel_boot::boot_test::run_boot_tests();
     }
 }
 

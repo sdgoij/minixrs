@@ -169,20 +169,59 @@ const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 /// ls — list directory contents.
 pub fn ls(args: &[&str]) -> i32 {
     let dir = if args.len() > 1 { args[1] } else { "." };
-    // Open directory O_RDONLY (0)
-    let fd = unsafe { minix_rt::syscall3(4, dir.as_ptr() as u64, dir.len() as u64, 0) };
-    if fd < 0 {
-        write_err(b"ls: cannot access ");
-        write_err(dir.as_bytes());
-        write_err(b"\n");
-        return 1;
-    }
+    // Debug: we entered ls
+    write_out(b"LS!\r\n");
+    write_out(b"CD:\r\n");
+    let cd_r = minix_rt::chdir(b"/");
+    let _ = cd_r;
+    write_out(b"CD done\r\n");
+    // Use IPC-based open via minix_std (routes to VFS)
+    let fd = match unsafe { minix_std::fs::open(dir, 0, 0) } {
+        Ok(fd) => {
+            write_out(b"OP:OK fd=");
+            let code = fd;
+            if code >= 100 {
+                write_out(&[b'0' + ((code / 100) % 10) as u8]);
+            }
+            if code >= 10 {
+                write_out(&[b'0' + ((code / 10) % 10) as u8]);
+            }
+            write_out(&[b'0' + (code % 10) as u8]);
+            write_out(b"\r\n");
+            fd
+        }
+        Err(e) => {
+            write_err(b"ls: cannot access ");
+            write_err(dir.as_bytes());
+            write_err(b": err=");
+            let code = e.0;
+            if code >= 100 {
+                write_err(&[b'0' + ((code / 100) % 10) as u8]);
+            }
+            if code >= 10 {
+                write_err(&[b'0' + ((code / 10) % 10) as u8]);
+            }
+            write_err(&[b'0' + (code % 10) as u8]);
+            write_err(b"\r\n");
+            return 1;
+        }
+    };
     let mut buf = [0u8; 4096];
-    let n = unsafe { minix_rt::syscall3(57, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    let n = minix_std::fs::getdents(fd, &mut buf).unwrap_or(0);
+    // Debug always
+    write_out(b"[n=");
+    if n >= 100 {
+        write_out(&[b'0' + ((n / 100) % 10) as u8]);
+    }
+    if n >= 10 {
+        write_out(&[b'0' + ((n / 10) % 10) as u8]);
+    }
+    write_out(&[b'0' + (n % 10) as u8]);
+    write_out(b" \r\n");
     if n <= 0 {
         // Fallback: just print the directory name if getdents fails
         write_out(dir.as_bytes());
-        write_out(b"\n");
+        write_out(b"\r\n");
     } else {
         let mut off = 0usize;
         while off < n as usize {
@@ -206,9 +245,7 @@ pub fn ls(args: &[&str]) -> i32 {
         }
         write_out(b"\n");
     }
-    unsafe {
-        minix_rt::syscall1(5, fd as u64);
-    }
+    let _ = minix_std::fs::close(fd);
     0
 }
 
@@ -607,6 +644,13 @@ pub fn sh(_args: &[&str]) -> i32 {
                             } else {
                                 let path = args[1].as_bytes();
                                 let r = minix_rt::chdir(path);
+                                write_out(b"[r=");
+                                let code = if r >= 0 { r as u64 } else { (-r) as u64 };
+                                if code >= 10 {
+                                    write_out(&[b'0' + ((code / 10) % 10) as u8]);
+                                }
+                                write_out(&[b'0' + (code % 10) as u8]);
+                                write_out(b"]\r\n");
                                 if r < 0 {
                                     write_err(b"sh: cd: ");
                                     write_err(path);

@@ -13,6 +13,8 @@ pub mod boot_init;
 #[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]
 pub mod test_runner;
 
+#[cfg(all(feature = "boot-test", target_arch = "x86_64"))]
+pub mod boot_test;
 
 /// Write a string to the boot console.
 ///

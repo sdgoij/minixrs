@@ -6,7 +6,9 @@
 use core::ptr::addr_of_mut;
 
 use crate::vfs::consts::*;
+use crate::vfs::dmap;
 use crate::vfs::glo::vfs_global;
+use crate::vfs::mount;
 use crate::vfs::pm;
 use crate::vfs::table;
 use crate::vfs::types::Fproc;
@@ -28,6 +30,17 @@ const MSG_SOURCE_OFF: usize = 0;
 pub unsafe fn vfs_main() -> i32 {
     sef_local_startup();
 
+    // Debug: VFS entering main loop
+    #[cfg(target_os = "none")]
+    minix_rt::write(1, b"VFS: ready\n");
+
+    // Signal kernel that mount_root completed via syscall 60.
+    // Boot-test: kernel runs verification and exits QEMU.
+    // Normal boot: no handler registered, returns -38 (ENOSYS), ignored.
+    #[cfg(target_os = "none")]
+    unsafe {
+        let _ = minix_rt::syscall1(60, 0);
+    }
     loop {
         get_work();
         handle_work();
@@ -68,6 +81,29 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     worker::worker_init();
 
     unsafe { (*glob).system_hz = 60 };
+
+    // Initialise device map and mount the root filesystem.
+    dmap::init_dmap();
+
+    // Register the grant table with the kernel so FS servers can
+    // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
+    crate::vfs::grant::vfs_grant_init();
+
+    let root_vp = mount::mount_root();
+    if !root_vp.is_null() {
+        // Set up root and working directories for all boot processes,
+        // so they can resolve absolute paths immediately.
+        let fproc_array = addr_of_mut!((*glob).fproc) as *mut Fproc;
+        for i in 0..256 {
+            let rfp = unsafe { &mut *fproc_array.add(i) };
+            if rfp.fp_endpoint >= 0 {
+                mount::dup_vnode(root_vp);
+                rfp.fp_rdir = root_vp;
+                mount::dup_vnode(root_vp);
+                rfp.fp_cdir = root_vp;
+            }
+        }
+    }
 
     OK
 }
@@ -133,6 +169,11 @@ unsafe fn handle_work() {
     };
     (*glob).fp = fp;
 
+    // Store the caller endpoint so handlers can use it for data copies.
+    if !fp.is_null() {
+        (*fp).fp_endpoint = source;
+    }
+
     let result = if source == PM_PROC_NR {
         // PM messages are dispatched through service_pm.
         pm::service_pm()
@@ -162,10 +203,10 @@ unsafe fn reply(who: *mut Fproc, result: i32) {
         // Write the result code into the message type field (offset 4).
         out[4..8].copy_from_slice(&result.to_le_bytes());
 
-        const SENDREC_CALL: u64 = 48;
+        const SEND_CALL: u64 = 46;
         let dest = (*who).fp_endpoint;
         if dest >= 0 {
-            minix_rt::syscall2(SENDREC_CALL, dest as u64, out as *mut [u8; 64] as u64);
+            minix_rt::syscall2(SEND_CALL, dest as u64, out as *mut [u8; 64] as u64);
         }
     }
     #[cfg(not(target_os = "none"))]

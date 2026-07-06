@@ -140,7 +140,10 @@ pub const SENDREC_CALL: u64 = 48;
 /// Syscall number for NOTIFY.
 pub const NOTIFY_CALL: u64 = 49;
 
-/// Size of an IPC message in bytes (matches kernel's `Message`).
+/// Size of an IPC message buffer (user-facing, 64 bytes).
+/// The kernel's internal MESSAGE_SIZE is 56 (`sizeof(Message)`), but userland
+/// uses 64-byte buffers to leave room for additional padding/metadata.
+/// The kernel copies only 56 bytes to/from user buffers when doing IPC.
 pub const MESSAGE_SIZE: usize = 64;
 
 /// A fixed-size IPC message buffer.
@@ -163,7 +166,7 @@ pub unsafe fn send(dest: i32, msg: &Message) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let ret = minix_rt::syscall2(SEND_CALL, dest as u64, msg.as_ptr() as u64);
-        return MinixErr::from_syscall(ret as i32).map(|_| ());
+        MinixErr::from_syscall(ret as i32).map(|_| ())
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -184,7 +187,7 @@ pub unsafe fn receive(src: i32, msg: &mut Message) -> Result<i32, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let ret = minix_rt::syscall2(RECEIVE_CALL, src as u64, msg.as_mut_ptr() as u64);
-        return MinixErr::from_syscall(ret as i32);
+        MinixErr::from_syscall(ret as i32)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -206,7 +209,7 @@ pub unsafe fn sendrec(dest: i32, msg: &mut Message) -> Result<i32, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let ret = minix_rt::syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64);
-        return MinixErr::from_syscall(ret as i32);
+        MinixErr::from_syscall(ret as i32)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -223,7 +226,7 @@ pub fn notify(dest: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let ret = minix_rt::syscall1(NOTIFY_CALL, dest as u64);
-        return MinixErr::from_syscall(ret as i32).map(|_| ());
+        MinixErr::from_syscall(ret as i32).map(|_| ())
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -377,7 +380,6 @@ impl Default for GrantTable {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_any_none_self_constants() {
         assert_eq!(ANY, 0x0000ffff);
@@ -454,7 +456,6 @@ mod tests {
         assert_eq!(endpoint_slot(SELF), -3);
     }
 
-
     #[test]
     fn test_error_constants() {
         assert_eq!(OK, 0);
@@ -503,7 +504,6 @@ mod tests {
         assert_debug::<MinixErr>();
         assert_clone_copy::<MinixErr>();
     }
-
 
     #[test]
     fn test_grant_table_new_is_empty() {

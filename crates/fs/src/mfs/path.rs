@@ -397,6 +397,9 @@ pub fn search_dir(
             new_slots = pos as usize / DIR_ENTRY_SIZE;
         }
 
+        // Buffer held across the loop for ENTER writes.
+        let mut held_bp: *mut libs::libminixfs::types::Buf = core::ptr::null_mut();
+
         while (pos as i64) < (*ldir).i_size as i64 {
             // Directories don't have holes, so b cannot be NO_BLOCK.
             let b = read_map(ldir_idx, pos as i64, 0);
@@ -483,7 +486,12 @@ pub fn search_dir(
                 e_hit = true;
             }
             debug_assert!(lmfs_dev(bp) != NO_DEV);
-            lmfs_put_block(bp, DIRECTORY_BLOCK);
+            if e_hit && flag == ENTER {
+                // Hold the buffer — we'll write into it after the loop.
+                held_bp = bp;
+            } else {
+                lmfs_put_block(bp, DIRECTORY_BLOCK);
+            }
             if e_hit {
                 break;
             }
@@ -499,13 +507,70 @@ pub fn search_dir(
         let ldir_mut = &mut *glo::get_inode_ptr(ldir_idx as usize);
         (*ldir_mut).i_last_dpos = pos;
 
+        let mut extended = false;
+
         if !e_hit {
-            todo!("search_dir: ENTER — directory full, new_block not yet wired; see NEXT.md");
+            // Directory is full — allocate a new block.
+            new_slots += 1;
+            if new_slots == 0 {
+                return EFBIG;
+            }
+            let bp = crate::mfs::write::new_block(ldir_idx, (*ldir_mut).i_size as i64);
+            if bp.is_null() {
+                return (*glo::mfs_ptr()).err_code;
+            }
+            held_bp = bp as *mut libs::libminixfs::types::Buf;
+            extended = true;
         }
 
-        // 'bp' now points to a directory block with space. 'dp' points to slot.
-        // For now, ENTER is not fully wired.
-        todo!("search_dir: ENTER not yet wired; depends on new_block and buffer cache");
+        // held_bp points to a directory block with space. Write the entry.
+        if held_bp.is_null() {
+            return EIO;
+        }
+        let dp = &mut *((*held_bp).data_ptr as *mut Direct);
+        // If we found a free slot in an existing block (not extended),
+        // re-find it by scanning for a zero mfs_d_ino slot.
+        let dp = if !extended {
+            let num_entries = nr_dir_entries(block_size);
+            let mut found: *mut Direct = core::ptr::null_mut();
+            for i in 0..num_entries {
+                let e = &mut *((*held_bp).data_ptr as *mut Direct).add(i);
+                if (*e).mfs_d_ino == 0 {
+                    found = e;
+                    break;
+                }
+            }
+            if found.is_null() {
+                // Re-scan failed — should not happen if e_hit was true.
+                lmfs_put_block(held_bp, DIRECTORY_BLOCK);
+                return EIO;
+            }
+            &mut *found
+        } else {
+            dp
+        };
+
+        // Clear entry, copy name, set inode number.
+        dp.mfs_d_name = [0u8; MFS_NAME_MAX];
+        let copy_len = string.len().min(MFS_NAME_MAX);
+        dp.mfs_d_name[..copy_len].copy_from_slice(&string[..copy_len]);
+        if let Some(numb_ref) = numb {
+            dp.mfs_d_ino = conv4(sp.s_native as i32, *numb_ref as i64) as u32;
+        }
+        lmfs_markdirty(held_bp);
+        lmfs_put_block(held_bp, DIRECTORY_BLOCK);
+
+        (*ldir_mut).i_update |= CTIME | MTIME;
+        (*ldir_mut).i_dirt = IN_DIRTY;
+
+        if new_slots > old_slots {
+            (*ldir_mut).i_size = (new_slots * DIR_ENTRY_SIZE) as i32;
+            if extended {
+                rw_inode(ldir_idx, WRITING);
+            }
+        }
+
+        OK
     }
 }
 

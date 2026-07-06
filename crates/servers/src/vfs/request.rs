@@ -498,9 +498,10 @@ pub unsafe fn req_getdents(
     fs_e: i32,
     inode_nr: u32,
     pos: off_t,
-    _buf: *mut u8,
+    buf: *mut u8,
     size: usize,
     _direct: i32,
+    user_e: i32,
 ) -> (i32, off_t) {
     #[cfg(target_os = "none")]
     {
@@ -510,7 +511,7 @@ pub unsafe fn req_getdents(
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos); // seek_pos
 
         // FS writes directory entries to VFS buffer → CPF_WRITE
-        let grant_id = cpf_grant_magic_write(VFS_PROC_NR, fs_e, _buf as u64, size);
+        let grant_id = cpf_grant_magic_write(user_e, fs_e, buf as u64, size);
         w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64); // mem_size
 
@@ -526,7 +527,7 @@ pub unsafe fn req_getdents(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (fs_e, inode_nr, pos, _buf, size, _direct);
+        let _ = (fs_e, inode_nr, pos, buf, size, _direct, user_e);
         (ENOSYS, 0)
     }
 }
@@ -649,8 +650,10 @@ pub unsafe fn req_lookup(
         let r = fs_sendrec(fs_e, &mut msg);
         cpf_revoke(grant_path);
 
-        let mut res = LookupRes::default();
-        res.fs_e = r_i32(&msg, 0); // m_source
+        let mut res = LookupRes {
+            fs_e: r_i32(&msg, 0),
+            ..Default::default()
+        };
 
         if r == crate::vfs::consts::OK {
             res.inode_nr = r_u32(&msg, PAYLOAD_OFF + 20); // inode
@@ -1391,12 +1394,14 @@ pub unsafe fn req_read(
         w_i32(&mut msg, M_TYPE_OFF, REQ_READ);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr);
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos);
-        w_i32(&mut msg, PAYLOAD_OFF + 16, -1);
+        let grant_id = -1;
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64);
 
         let r = fs_sendrec(fs_e, &mut msg);
+        cpf_revoke(grant_id);
 
-        if r != crate::vfs::consts::OK {
+        if r < 0 {
             return (r, 0);
         }
 
@@ -1442,7 +1447,7 @@ pub unsafe fn req_write(
         let r = fs_sendrec(fs_e, &mut msg);
         cpf_revoke(grant_id);
 
-        if r != crate::vfs::consts::OK {
+        if r < 0 {
             return (r, 0);
         }
 
@@ -1590,7 +1595,7 @@ mod tests {
         let (s, _st) = unsafe { req_statvfs(0) };
         assert_eq!(s, ENOSYS);
 
-        let (s, _pos) = unsafe { req_getdents(0, 0, 0, core::ptr::null_mut(), 0, 0) };
+        let (s, _pos) = unsafe { req_getdents(0, 0, 0, core::ptr::null_mut(), 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
         let (s, _pos) = unsafe { req_write(0, 0, core::ptr::null(), 0, 0, 0, 0) };

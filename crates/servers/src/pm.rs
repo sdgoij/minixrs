@@ -35,7 +35,6 @@ pub const NGROUPS_MAX: usize = 32;
 /// Process name length.
 pub const PROC_NAME_LEN: usize = 16;
 
-
 pub const IN_USE: u32 = 0x00001;
 pub const WAITING: u32 = 0x00002;
 pub const ZOMBIE: u32 = 0x00004;
@@ -1014,10 +1013,21 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
 pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
     #[cfg(target_os = "none")]
     unsafe {
-        minix_rt::kernel_call(
-            call_nr,
-            core::mem::transmute::<&mut Message, &mut [u8; 64]>(msg),
-        )
+        // Message is 56 bytes, but kernel expects 64. Use a proper
+        // 64-byte buffer to avoid stack corruption from the size mismatch.
+        let mut buf = [0u8; 64];
+        let msg_size = core::mem::size_of::<Message>();
+        // Copy Message into 64-byte buffer (first msg_size bytes).
+        core::ptr::copy_nonoverlapping(
+            msg as *const Message as *const u8,
+            buf.as_mut_ptr(),
+            msg_size,
+        );
+        let result = minix_rt::kernel_call(call_nr, &mut buf);
+        // Copy back the first msg_size bytes (avoids reading garbage
+        // from bytes 56-63 that the kernel may have overwritten).
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), msg as *mut Message as *mut u8, msg_size);
+        result
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1061,6 +1071,10 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 kmsg.m_payload.m1.m1i3 = 0; // normal fork, no flags
             }
             let kresult = send_kernel_call(0, &mut kmsg);
+            #[cfg(target_os = "none")]
+            unsafe {
+                minix_rt::write(1, b"PMK");
+            }
             if kresult != OK {
                 // Kernel fork failed — free the MProc slot we allocated.
                 unsafe { free_proc(child_slot) };
@@ -1081,6 +1095,10 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             }
 
             // Step 3: Notify VFS about the new child process.
+            #[cfg(target_os = "none")]
+            unsafe {
+                minix_rt::write(1, b"PMV");
+            }
             // Message format (matches VFS pm.rs VFS_PM_FORK handler):
             //   m_type = VFS_PM_FORK (0x907)
             //   m1_i1 = child endpoint
@@ -1125,51 +1143,15 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                     vfs_msg.m_type
                 }
             } else {
-                // Step 4: Notify SCHED server to start scheduling the child.
-                // SCHEDULING_START (0xF02) message format using M2:
-                //   m2i1 = child endpoint
-                //   m2i2 = parent endpoint
-                //   m2i3 = max_priority (USER_Q = 5 for user processes)
-                //   m2l1 = quantum (DEFAULT_USER_TIME_SLICE = 200 ticks)
-                // SCHED server endpoint is 4 (SCHED_PROC_NR).
-                let mut sched_msg = Message {
-                    m_source: 0,
-                    m_type: 0xF02, // SCHEDULING_START
-                    m_payload: unsafe { core::mem::zeroed() },
-                };
+                #[cfg(target_os = "none")]
                 unsafe {
-                    sched_msg.m_payload.m2.m2i1 = child_endpoint;
-                    sched_msg.m_payload.m2.m2i2 = parent_endpoint;
-                    sched_msg.m_payload.m2.m2i3 = 5; // USER_Q
-                    sched_msg.m_payload.m2.m2l1 = 200; // DEFAULT_USER_TIME_SLICE
+                    minix_rt::write(1, b"PMS");
                 }
-                let sched_reply = unsafe {
-                    minix_rt::syscall2(
-                        minix_rt::SENDREC_CALL,
-                        4u64, // SCHED_PROC_NR
-                        &mut sched_msg as *mut Message as u64,
-                    )
-                };
-                if sched_reply < 0 || sched_msg.m_type < 0 {
-                    // SCHED server failed — free the MProc and Proc slots.
-                    unsafe { free_proc(child_slot) };
-                    let mut clear_msg = Message {
-                        m_source: 0,
-                        m_type: 0,
-                        m_payload: unsafe { core::mem::zeroed() },
-                    };
-                    unsafe {
-                        clear_msg.m_payload.m1.m1i1 = child_endpoint;
-                    }
-                    let _ = send_kernel_call(2, &mut clear_msg); // SYS_CLEAR = 2
-                    if sched_reply < 0 {
-                        sched_reply as i32
-                    } else {
-                        sched_msg.m_type
-                    }
-                } else {
-                    OK
-                }
+                // Step 4: Skip SCHED server notification (SCHED is not loaded).
+                // The child was already enqueued by do_fork_handler, so the
+                // normal scheduler will pick it. No SCHED server interaction
+                // needed at this stage of development.
+                OK
             }
         }
         Err(_) => -11,
@@ -1391,7 +1373,8 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
             // SYS_GETKSIG reply: endpoint at kernel msg[16] = m1i3,
             // exit status at kernel msg[24] = m1i5.
             let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
-            if endpt == -1 || endpt == 0 {
+            // NONE (31743) is the sentinel for "no more pending"
+            if endpt == -1 || endpt == 0 || endpt == 31743 {
                 break; // NONE sentinel — no more pending
             }
             let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
@@ -1428,7 +1411,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
                                 reply_msg.m_payload.m1.m1i1 = pid;
                                 reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
                                 minix_rt::syscall2(
-                                    minix_rt::SENDREC_CALL,
+                                    minix_rt::SEND_CALL,
                                     parent_rmp.mp_endpoint as u64,
                                     &mut reply_msg as *mut Message as u64,
                                 );
@@ -1502,9 +1485,8 @@ pub fn pm_server_main() {
 
         // Syscall numbers for IPC (from minix-std):
         //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
-        //   SENDREC_CALL = 48: sendrec(dest, &mut msg) → replier endpoint
+        const SEND_CALL: u64 = 46;
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
         const ANY: i32 = 0x0000ffff;
 
         loop {
@@ -1537,11 +1519,7 @@ pub fn pm_server_main() {
             if status != EDONTREPLY {
                 msg.m_type = status;
                 unsafe {
-                    minix_rt::syscall2(
-                        SENDREC_CALL,
-                        src_ep as u64,
-                        &mut msg as *mut Message as u64,
-                    );
+                    minix_rt::syscall2(SEND_CALL, src_ep as u64, &mut msg as *mut Message as u64);
                 }
             }
         }

@@ -31,8 +31,10 @@ pub const PMAGIC: u32 = 0xC0FFEE1;
 pub const NR_SCHED_QUEUES: usize = 16;
 
 /// Size of an opaque IPC message buffer.
-/// C `sizeof(message)` = 56 on i386; we use 64 for x86_64 alignment.
-pub const MESSAGE_SIZE: usize = 64;
+/// Must match `core::mem::size_of::<arch_common::ipc::Message>()` which is 56 bytes.
+/// Do NOT change to 64 — all user-space `Message` structs are 56 bytes and the
+/// kernel copies `MESSAGE_SIZE` bytes to/from user buffers. 64 would overflow.
+pub const MESSAGE_SIZE: usize = 56;
 
 // ProcVmrequest
 

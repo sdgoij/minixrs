@@ -25,20 +25,17 @@
 #[cfg(target_os = "none")]
 use crate::{Message, MinixErr, VM_PROC_NR, sendrec};
 
-
 pub const VM_RQ_BASE: u32 = 0xC00;
 pub const VM_MMAP: u32 = VM_RQ_BASE + 10; // 0xC0A
 pub const VM_MUNMAP: u32 = VM_RQ_BASE + 17; // 0xC11
 pub const VM_BRK: u32 = VM_RQ_BASE + 2; // 0xC02
 pub const VM_MAP_PHYS: u32 = VM_RQ_BASE + 15; // 0xC0F
 
-
 pub const IPC_BASE: u32 = 0xD00;
 pub const IPC_SHMGET: u32 = IPC_BASE + 1; // 0xD01
 pub const IPC_SHMAT: u32 = IPC_BASE + 2; // 0xD02
 pub const IPC_SHMDT: u32 = IPC_BASE + 3; // 0xD03
 pub const IPC_SHMCTL: u32 = IPC_BASE + 4; // 0xD04
-
 
 pub const PROT_READ: i32 = 0x01;
 pub const PROT_WRITE: i32 = 0x02;
@@ -51,7 +48,6 @@ pub const MAP_FIXED: i32 = 0x10;
 pub const MAP_ANONYMOUS: i32 = 0x20;
 pub const MAP_FAILED: *mut u8 = usize::MAX as *mut u8;
 
-
 pub const IPC_CREAT: i32 = 0o001000;
 pub const IPC_EXCL: i32 = 0o002000;
 pub const IPC_NOWAIT: i32 = 0o004000;
@@ -63,7 +59,6 @@ pub const IPC_PRIVATE: i32 = 0;
 
 pub const SHM_RDONLY: i32 = 0o010000;
 pub const SHM_RND: i32 = 0o020000;
-
 
 const OFF_TYPE: usize = 8;
 
@@ -246,10 +241,7 @@ pub unsafe fn shmget(key: i32, size: usize, flags: i32) -> i32 {
         msg_set_i32(&mut msg, OFF_SHM_SIZE, size as i32);
         msg_set_i32(&mut msg, OFF_SHM_FLAGS, flags);
 
-        match ipc_call(&mut msg) {
-            Ok(id) => id,
-            Err(_) => -1,
-        }
+        ipc_call(&mut msg).unwrap_or(-1)
     }
     #[cfg(not(target_os = "none"))]
     {

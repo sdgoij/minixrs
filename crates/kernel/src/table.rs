@@ -428,6 +428,10 @@ pub unsafe fn proc_init() {
             (*priv_ptr).s_proc_nr = bi.proc_nr;
             (*priv_ptr).s_id = i as i16;
             (*priv_ptr).s_flags = PrivFlags::SYS_PROC;
+            // Allow all kernel calls (IPC, safecopy, etc.) for boot processes.
+            for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
+                *chunk = !0u32;
+            }
 
             // Link the privilege structure to the process.
             // This enables notification delivery (mini_notify stores

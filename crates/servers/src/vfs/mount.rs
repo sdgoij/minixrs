@@ -398,6 +398,97 @@ pub fn is_nonedev(dev: u32) -> i32 {
 /// Unmount all filesystems (for reboot).
 pub fn unmount_all(_force: i32) {}
 
+/// Mount the root filesystem at boot time.
+///
+/// Registers MFS in the dmap table, allocates a vmnt entry, calls
+/// req_readsuper on MFS, and sets root_dev / root_fs_e so VFS can
+/// resolve absolute paths. Returns a pointer to the root vnode, or
+/// null on failure. Should be called once during VFS init.
+pub fn mount_root() -> *mut Vnode {
+    // Step 1: Register MFS in the dmap table.
+    // MFS is at endpoint 7 (MFS_PROC_NR, generation 0).
+    // Label "mfs" is matched by do_mount / init mount.
+    let label = b"mfs";
+    unsafe {
+        dmap::map_driver(label, 0, arch_common::com::MFS_PROC_NR);
+    }
+
+    // Step 2: Look up the FS driver by label in dmap.
+    let major = dmap::find_dmap_by_label(label);
+    if major < 0 {
+        return core::ptr::null_mut();
+    }
+    let dp = dmap::get_dmap_by_major(major);
+    if dp.is_null() {
+        return core::ptr::null_mut();
+    }
+    let fs_e = unsafe { (*dp).dmap_ep };
+
+    // Step 3: Allocate a vmnt entry and fill the FS endpoint.
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        (*vmp).m_fs_e = fs_e;
+    }
+
+    // Step 4: Call req_readsuper on MFS with dev=0 (RAM disk), isroot=1.
+    #[cfg(target_os = "none")]
+    let (r, node, _flags_reply) = unsafe {
+        req_readsuper(
+            vmp,
+            label.as_ptr(),
+            0, /* dev: RAM disk */
+            0, /* readonly: writable */
+            1, /* isroot */
+        )
+    };
+    #[cfg(not(target_os = "none"))]
+    let (r, node, _flags_reply) = (ENOSYS, crate::vfs::types::NodeDetails::default(), 0);
+
+    if r != OK {
+        unsafe { mark_vmnt_free(vmp) };
+        return core::ptr::null_mut();
+    }
+
+    // Step 5: Fill remaining vmnt fields.
+    unsafe {
+        (*vmp).m_dev = node.dev;
+        (*vmp).m_root_node = node.inode_nr;
+        (*vmp).m_flags = 0;
+        let m_label = &mut (*vmp).m_label;
+        let copy_len = label.len().min(LABEL_MAX - 1);
+        m_label[..copy_len].copy_from_slice(&label[..copy_len]);
+        m_label[copy_len] = 0;
+    }
+
+    // Step 6: Allocate a root vnode and link it.
+    let vp = get_free_vnode();
+    if vp.is_null() {
+        unsafe { mark_vmnt_free(vmp) };
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        (*vp).v_fs_e = fs_e;
+        (*vp).v_inode_nr = node.inode_nr;
+        (*vp).v_mode = node.mode;
+        (*vp).v_size = node.file_size;
+        (*vp).v_dev = node.dev;
+        (*vp).v_ref_count = 1;
+        (*vp).v_fs_count = 1;
+    }
+
+    // Step 7: Set root directory references.
+    unsafe {
+        let glob_mut = &mut *vfs_global();
+        glob_mut.root_dev = node.dev;
+        glob_mut.root_fs_e = fs_e;
+    }
+
+    vp
+}
+
 // Tests
 
 #[cfg(test)]

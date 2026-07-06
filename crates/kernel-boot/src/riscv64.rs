@@ -190,6 +190,30 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // Current process blocked — pick a new one.
                 if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                     unsafe {
+                        // Deliver any pending IPC message to the target
+                        // process's user buffer before switching to it.
+                        let mf = (*next_proc)
+                            .p_misc_flags
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
+                            kernel::ipc::delivermsg(next_proc);
+                            // Set a0 (return value) to source endpoint.
+                            // Use hal::write_retval which knows the arch-
+                            // specific offset (a0 at +80 on RISC-V, rax
+                            // at +0 on x86_64).
+                            let src_ep = i32::from_le_bytes([
+                                (*next_proc).p_delivermsg[0],
+                                (*next_proc).p_delivermsg[1],
+                                (*next_proc).p_delivermsg[2],
+                                (*next_proc).p_delivermsg[3],
+                            ]);
+                            kernel::hal::write_retval(&mut (*next_proc).p_reg, src_ep as u64);
+                            (*next_proc).p_misc_flags.fetch_and(
+                                !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+
                         // Copy new process's p_reg into frame[0..256]
                         core::ptr::copy_nonoverlapping(
                             &raw const (*next_proc).p_reg as *const u8,
@@ -211,6 +235,55 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         // Update current process pointer
                         arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
                     }
+                } else {
+                    // No runnable processes — all blocked on IPC.
+                    // Send a notification to PM to kickstart scheduling.
+                    let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
+                    if !pm_proc.is_null() {
+                        let _ = kernel::ipc::mini_notify(
+                            arch_common::com::RS_PROC_NR,
+                            arch_common::com::PM_PROC_NR,
+                        );
+                        if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
+                            unsafe {
+                                let mf = (*next_proc)
+                                    .p_misc_flags
+                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
+                                    kernel::ipc::delivermsg(next_proc);
+                                    let src_ep = i32::from_le_bytes([
+                                        (*next_proc).p_delivermsg[0],
+                                        (*next_proc).p_delivermsg[1],
+                                        (*next_proc).p_delivermsg[2],
+                                        (*next_proc).p_delivermsg[3],
+                                    ]);
+                                    kernel::hal::write_retval(
+                                        &mut (*next_proc).p_reg,
+                                        src_ep as u64,
+                                    );
+                                    (*next_proc).p_misc_flags.fetch_and(
+                                        !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
+                                core::ptr::copy_nonoverlapping(
+                                    &raw const (*next_proc).p_reg as *const u8,
+                                    frame.as_mut_ptr(),
+                                    256,
+                                );
+                                let p_reg = &raw const (*next_proc).p_reg;
+                                let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
+                                frame[256..264].copy_from_slice(&sepc_bytes);
+                                let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
+                                frame[264..272].copy_from_slice(&sst_bytes);
+                                let new_cr3 = (*next_proc).p_seg.p_cr3;
+                                if new_cr3 != 0 {
+                                    kernel::hal::write_cr3(new_cr3);
+                                }
+                                arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -223,7 +296,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_uart_input_callback(uart_input_cb);
     }
-
 
     #[cfg(feature = "integration-tests")]
     {
@@ -267,7 +339,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             arch_riscv64::plic::init_plic();
         }
 
-
         serial_write("  enabling SV39 paging...\r\n");
         unsafe {
             if let Some(boot_pt) = create_boot_page_table() {
@@ -280,7 +351,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 }
             }
         }
-
 
         use arch_common::com::*;
 
@@ -366,6 +436,84 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
                 core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
                 core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+            }
+
+            // Map the brk range (0x3FE00000..0x3FF00000 = 1 MB heap) with
+            // allocated physical pages so the bump allocator has backing memory.
+            // RISC-V requires V|R|W|U|X|A|D for user writable pages.
+            // Without R (0x02), W=1 without R=1 is a reserved encoding.
+            let user_flags = kernel::pagetable::PG_P
+                | kernel::pagetable::PG_RW
+                | kernel::pagetable::PG_U
+                | 0x02
+                | 0x08
+                | 0xC0; // R|X|A|D
+            let brk_va_start = 0x3FE00000u64;
+            let brk_va_end = 0x3FF00000u64;
+            let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
+            let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
+                Some(base) => base,
+                None => {
+                    serial_write("  FAILED: out of memory for brk heap\r\n");
+                    loop {
+                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                    }
+                }
+            };
+            for j in 0..brk_pages {
+                let va = brk_va_start + (j as u64) * 4096;
+                let pa = brk_phys + (j as u64) * 4096;
+                if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err() {
+                    serial_write("  FAILED: brk page mapping\r\n");
+                    loop {
+                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                    }
+                }
+            }
+
+            // If this is the MFS process, set up the RAM disk mapping.
+            if proc_nr == MFS_PROC_NR {
+                let image = kernel::minixfs::minixfs_image();
+                let image_len = kernel::minixfs::minixfs_image_len();
+                if image_len > 0 {
+                    let pages = image_len.div_ceil(4096);
+                    let ramdisk_phys = match unsafe { kernel::hal::alloc_phys_contig(pages) } {
+                        Some(base) => base,
+                        None => {
+                            serial_write("  FAILED: out of memory for RAM disk\r\n");
+                            loop {
+                                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                            }
+                        }
+                    };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            image.as_ptr(),
+                            ramdisk_phys as *mut u8,
+                            image_len,
+                        );
+                    }
+                    // Map the RAM disk pages in MFS's page table.
+                    let user_flags = kernel::pagetable::PG_P
+                        | kernel::pagetable::PG_RW
+                        | kernel::pagetable::PG_U
+                        | 0x02
+                        | 0x08
+                        | 0xC0; // R|X|A|D
+                    for j in 0..pages {
+                        let va = arch_common::com::MFS_RAMDISK_VA + (j as u64) * 4096;
+                        let pa = ramdisk_phys + (j as u64) * 4096;
+                        if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }
+                            .is_err()
+                        {
+                            serial_write("  FAILED: RAM disk page mapping\r\n");
+                            loop {
+                                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
+                            }
+                        }
+                    }
+                    serial_write("  RAM disk mapped for MFS\r\n");
+                }
             }
         }
 

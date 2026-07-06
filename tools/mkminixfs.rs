@@ -144,8 +144,9 @@ impl FsImage {
             inode_table: Vec::new(),
         };
 
-        // Reserve inode 0 (unused) and inode 1 (root)
-        fs.inode_table.push(D2Inode::new(0, 0)); // ino 0
+        // Reserve inode 1 (root).  In MINIX, inode numbers are 1-based;
+        // the on-disk inode table stores inode N at slot (N-1).  Slot 0
+        // corresponds to inode 1, slot 1 to inode 2, etc.  No dummy inode 0.
         fs.inode_table.push(D2Inode::new(0, 0)); // ino 1 (will be set up later)
         fs.set_inode_used(ROOT_INODE);
 
@@ -192,8 +193,9 @@ impl FsImage {
     }
 
     fn write_inode_zone(&mut self, ino: u32, zone: u32) {
-        // Find the inode in the table and set its first direct zone
-        let idx = ino as usize;
+        // Find the inode in the table and set its first direct zone.
+        // inode_table index = (ino - 1): slot 0 = inode 1.
+        let idx = (ino - 1) as usize;
         if idx < self.inode_table.len() {
             self.inode_table[idx].d2_zone[0] = zone;
         }
@@ -222,9 +224,13 @@ impl FsImage {
 
         self.write_zone(zone, &dir_data);
 
-        // Update the inode's first zone pointer
-        if (dir_ino as usize) < self.inode_table.len() {
-            self.inode_table[dir_ino as usize].d2_zone[0] = zone;
+        // Update the inode's first zone pointer, mode, and size.
+        // inode_table index = (dir_ino - 1): slot 0 = inode 1.
+        let idx = (dir_ino - 1) as usize;
+        if idx < self.inode_table.len() {
+            self.inode_table[idx].d2_zone[0] = zone;
+            self.inode_table[idx].d2_mode = I_DIRECTORY | RWX_ALL;
+            self.inode_table[idx].d2_size = dir_data.len() as i32;
         }
 
         zone
@@ -281,10 +287,12 @@ impl FsImage {
 
         // Create inode
         let ino = self.alloc_inode(I_REGULAR | RWX_ALL, data.len() as u32);
-        // Set first zone pointer
-        if (ino as usize) < self.inode_table.len() {
-            self.inode_table[ino as usize].d2_zone[0] = first_zone;
-            self.inode_table[ino as usize].d2_size = data.len() as i32;
+        // Set first zone pointer and size.
+        // inode_table index = (ino - 1): slot 0 = inode 1.
+        let idx = (ino - 1) as usize;
+        if idx < self.inode_table.len() {
+            self.inode_table[idx].d2_zone[0] = first_zone;
+            self.inode_table[idx].d2_size = data.len() as i32;
         }
 
         // Add directory entry

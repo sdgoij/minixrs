@@ -25,27 +25,16 @@ fn main() {
     let trampoline_elf = target_dir.join("trampoline.elf");
 
     // Skip rebuild if tools aren't available (e.g. rust-analyzer).
-    // The find_* functions return None gracefully.
-
-    // Check tools are available before attempting to rebuild
     let clang = match find_clang() {
         Some(c) => c,
         None => {
             if trampoline_elf.exists() {
-                return; // existing trampoline is fine
+                return;
             }
-            println!(
-                "cargo::warning=kernel-boot build.rs: clang not found, skipping trampoline rebuild"
-            );
+            eprintln!("kernel-boot: clang not found, cannot build trampoline");
             return;
         }
     };
-
-    // Debug: print target_dir
-    println!(
-        "cargo::warning=kernel-boot build.rs: clang found, target_dir={}",
-        target_dir.display()
-    );
 
     let rust_lld = match find_rust_lld() {
         Some(l) => l,
@@ -53,9 +42,7 @@ fn main() {
             if trampoline_elf.exists() {
                 return;
             }
-            println!(
-                "cargo::warning=kernel-boot build.rs: rust-lld not found, skipping trampoline rebuild"
-            );
+            eprintln!("kernel-boot: rust-lld not found, cannot link trampoline");
             return;
         }
     };
@@ -81,7 +68,7 @@ fn main() {
     match status {
         Ok(s) if s.success() => {}
         _ => {
-            println!("cargo::warning=kernel-boot build.rs: clang assembly failed");
+            eprintln!("kernel-boot: clang assembly failed");
             return;
         }
     }
@@ -101,23 +88,9 @@ fn main() {
         ])
         .status();
     match status {
-        Ok(s) if s.success() => {
-            println!(
-                "cargo::warning=Trampoline built: {}",
-                trampoline_elf.display()
-            );
-            // Verify file exists
-            if trampoline_elf.exists() {
-                println!("cargo::warning=  FILE EXISTS: {}", trampoline_elf.display());
-            } else {
-                println!(
-                    "cargo::warning=  FILE MISSING: {}",
-                    trampoline_elf.display()
-                );
-            }
-        }
+        Ok(s) if s.success() => {}
         _ => {
-            println!("cargo::warning=kernel-boot build.rs: lld linking failed");
+            eprintln!("kernel-boot: lld linking failed");
         }
     }
 

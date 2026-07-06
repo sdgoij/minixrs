@@ -21,11 +21,28 @@ const LSR_DR: u8 = 0x01; // Data Ready bit
 /// Write a single byte to the COM1 serial port.
 pub fn serial_write_byte(byte: u8) {
     unsafe {
+        // Wait for Transmitter Holding Register Empty (LSR bit 5 = 0x20)
+        // This is REQUIRED because the UART's THR is a single-byte register.
+        // Writing without waiting causes data corruption when multiple
+        // bytes are written in rapid succession (e.g., shell echo loop).
+        let lsr_port: u16 = COM1_DATA + 5;
+        loop {
+            let lsr: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") lsr,
+                in("dx") lsr_port,
+                options(nostack),
+            );
+            if lsr & 0x20 != 0 {
+                break;
+            }
+        }
         core::arch::asm!(
             "out dx, al",
             in("dx") COM1_DATA,
             in("al") byte,
-            options(nomem, nostack),
+            options(nostack),
         );
     }
 }
@@ -51,7 +68,7 @@ pub fn serial_byte_available() -> bool {
             "in al, dx",
             out("al") lsr,
             in("dx") COM1_LSR,
-            options(nomem, nostack),
+            options(nostack),
         );
     }
     lsr & LSR_DR != 0
@@ -68,7 +85,7 @@ fn serial_try_read_byte() -> Option<u8> {
             "in al, dx",
             out("al") byte,
             in("dx") COM1_DATA,
-            options(nomem, nostack),
+            options(nostack),
         );
     }
     Some(byte)

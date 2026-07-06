@@ -12,7 +12,12 @@ static CLEANMOUNT: AtomicI32 = AtomicI32::new(1);
 
 pub fn fs_readsuper() -> i32 {
     unsafe {
-        let dev: u32 = 0;
+        // Read device number from the incoming message (m1i1).
+        // VFS's req_readsuper writes dev at PAYLOAD_OFF + 0 → m1.m1i1.
+        let mfs = glo::mfs_ptr();
+        let dev = (*mfs).m_in.m_payload.m1.m1i1 as u32;
+
+        // fs_readsuper called
         for i in 0..8 {
             let sp = glo::get_super_ptr(i);
             if (*sp).s_dev == NO_DEV {
@@ -25,10 +30,29 @@ pub fn fs_readsuper() -> i32 {
                 if (*sp).s_flags & MFSFLAG_CLEAN != 0 {
                     CLEANMOUNT.store(1, Ordering::Relaxed);
                 }
-                if get_inode(dev, ROOT_INODE).is_none() {
-                    (*sp).s_dev = NO_DEV;
-                    return EINVAL;
-                }
+                let root_rip = match get_inode(dev, ROOT_INODE) {
+                    Some(rip) => rip,
+                    None => {
+                        (*sp).s_dev = NO_DEV;
+                        return EINVAL;
+                    }
+                };
+
+                // Fill reply payload with root inode info for VFS.
+                // VFS req_readsuper expects reply fields at:
+                //   file_size (i64) at PAYLOAD_OFF+0 → m1.m1i1 (low) + m1i2 (high)
+                //   dev       (u32) at PAYLOAD_OFF+8 → m1.m1i3
+                //   inode_nr  (u32) at PAYLOAD_OFF+12 → m1.m1i4
+                //   flags     (u32) at PAYLOAD_OFF+16 → m1.m1i5
+                //   mode (u16) at PAYLOAD_OFF+20 → low 16 of m1i6
+                let root_inode = &*glo::get_inode_ptr(root_rip as usize);
+                (*mfs).m_out.m_payload.m1.m1i1 = root_inode.i_size;
+                (*mfs).m_out.m_payload.m1.m1i2 = if root_inode.i_size < 0 { -1 } else { 0 };
+                (*mfs).m_out.m_payload.m1.m1i3 = dev as i32;
+                (*mfs).m_out.m_payload.m1.m1i4 = ROOT_INODE as i32;
+                (*mfs).m_out.m_payload.m1.m1i5 = 0; // flags: not read-only during boot
+                (*mfs).m_out.m_payload.m1.m1i6 = root_inode.i_mode as i32;
+
                 return OK;
             }
         }

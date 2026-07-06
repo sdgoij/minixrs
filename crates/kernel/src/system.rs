@@ -157,6 +157,7 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 
 // Offset constants
 const FORK_ENDPT_OFF: usize = 8;
+#[cfg_attr(not(test), allow(dead_code))]
 const FORK_SLOT_OFF: usize = 12;
 const FORK_FLAGS_OFF: usize = 16;
 
@@ -1330,6 +1331,11 @@ pub unsafe fn get_priv(rp: *mut Proc) -> Option<usize> {
                 for chunk in ipc.chunk.iter_mut() {
                     *chunk = 0;
                 }
+                // Allow all kernel calls (SAFECOPYTO, etc.) — proper
+                // per-process masks will be configured by PM/RS later.
+                for chunk in (*sp).s_k_call_mask.iter_mut() {
+                    *chunk = !0u32;
+                }
                 (*rp).p_priv = sp;
                 return Some(i);
             }
@@ -2297,12 +2303,15 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 //   offset 24: dst_addr  (u64)
 //   offset 32: nr_bytes  (u64)
 //   offset 40: flags     (i32)
-const COPY_SRC_ENDPT_OFF: usize = 0;
-const COPY_SRC_ADDR_OFF: usize = 8;
-const COPY_DST_ENDPT_OFF: usize = 16;
-const COPY_DST_ADDR_OFF: usize = 24;
-const COPY_NR_BYTES_OFF: usize = 32;
-const COPY_FLAGS_OFF: usize = 40;
+// NOTE: offset 0-7 is reserved for the kernel_call header
+// (internal call number at 0-3, source endpoint at 4-7).
+// All COPY_* fields must start at offset >= 8.
+pub const COPY_SRC_ADDR_OFF: usize = 8;
+pub const COPY_DST_ENDPT_OFF: usize = 16;
+pub const COPY_DST_ADDR_OFF: usize = 24;
+pub const COPY_NR_BYTES_OFF: usize = 32;
+pub const COPY_FLAGS_OFF: usize = 40;
+pub const COPY_SRC_ENDPT_OFF: usize = 48;
 
 const CP_FLAG_TRY: i32 = 0x01;
 
@@ -3318,10 +3327,29 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             Ok(e) => e,
             Err(_) => return crate::ipc::ENOSYS,
         };
-        let loaded = match crate::elf::load_elf(data) {
-            Ok(l) => l,
-            Err(_) => return crate::ipc::ENOSYS,
-        };
+
+        // Parse ELF to get bounds (no identity-mapped writes).
+        let phoff = ehdr.e_phoff as usize;
+        let phnum = ehdr.e_phnum as usize;
+        let phentsize = ehdr.e_phentsize as usize;
+        let mut loaded_base = u64::MAX;
+        let mut loaded_top = 0u64;
+        for i in 0..phnum {
+            let phdr = &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
+            if phdr.p_type != crate::elf::PT_LOAD {
+                continue;
+            }
+            if phdr.p_vaddr < loaded_base {
+                loaded_base = phdr.p_vaddr;
+            }
+            let seg_top = phdr.p_vaddr + phdr.p_memsz;
+            if seg_top > loaded_top {
+                loaded_top = seg_top;
+            }
+        }
+        if loaded_base == u64::MAX {
+            return crate::ipc::ENOSYS;
+        }
 
         let user_stack_base: u64 = 0x0FE00000;
         let user_stack_size: usize = 65536;
@@ -3331,8 +3359,8 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             Err(_) => return crate::ipc::ENOSYS,
         };
 
-        let code_start = loaded.base & !0xFFF;
-        let code_end = (loaded.top + 0xFFF) & !0xFFF;
+        let code_start = loaded_base & !0xFFF;
+        let code_end = (loaded_top + 0xFFF) & !0xFFF;
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
@@ -3348,21 +3376,63 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             core::ptr::write((pml4 as *mut u64).add(i), entry);
         }
 
-        let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
-
-        let mut va = code_start;
-        while va < code_end {
-            if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
-                return crate::ipc::ENOMEM;
+        // Allocate physical pages for the code and load ELF segments.
+        let code_pages = ((code_end - code_start) / 4096) as usize;
+        let phys_code_base = match crate::hal::alloc_phys_contig(code_pages) {
+            Some(b) => b,
+            None => return crate::ipc::ENOMEM,
+        };
+        for i in 0..phnum {
+            let phdr = &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
+            if phdr.p_type != crate::elf::PT_LOAD {
+                continue;
             }
-            va += 0x1000;
+            let seg_vaddr = phdr.p_vaddr;
+            let seg_offset = seg_vaddr - code_start;
+            let dst = (phys_code_base + seg_offset) as *mut u8;
+            if phdr.p_filesz > 0 {
+                let src = data.as_ptr().add(phdr.p_offset as usize);
+                core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+            }
+            let bss = phdr.p_memsz - phdr.p_filesz;
+            if bss > 0 {
+                core::ptr::write_bytes(dst.add(phdr.p_filesz as usize), 0, bss as usize);
+            }
         }
-        let mut va = stack_start;
-        while va < stack_end {
-            if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+
+        // Allocate physical pages for the stack.
+        let stack_pages = ((stack_end - stack_start) / 4096) as usize;
+        let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
+            Some(b) => b,
+            None => return crate::ipc::ENOMEM,
+        };
+        // Copy stack data from identity-mapped temp area to allocated pages.
+        core::ptr::copy_nonoverlapping(
+            user_stack_base as *const u8,
+            phys_stack_base as *mut u8,
+            user_stack_size,
+        );
+
+        // Map user code: VA -> allocated PA
+        let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
+        let mut va = code_start;
+        let mut pa = phys_code_base;
+        while va < code_end {
+            if crate::pagetable::map_page(pml4, va, pa, user_flags).is_err() {
                 return crate::ipc::ENOMEM;
             }
             va += 0x1000;
+            pa += 0x1000;
+        }
+        // Map stack: VA -> allocated PA
+        let mut va = stack_start;
+        let mut pa = phys_stack_base;
+        while va < stack_end {
+            if crate::pagetable::map_page(pml4, va, pa, user_flags).is_err() {
+                return crate::ipc::ENOMEM;
+            }
+            va += 0x1000;
+            pa += 0x1000;
         }
 
         let proc_nr = crate::table::endpoint_slot(endpt);
@@ -3643,37 +3713,38 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 /// `msg` must contain valid fork message fields in the correct layout.
 pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        crate::hal::serial_write_byte(b'F');
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
-        let mut child_slot = msg_read_i32(msg, FORK_SLOT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
         if !table::is_ok_endpoint(parent_ep) {
+            crate::hal::serial_write_byte(b'N');
             return crate::ipc::EFAULT;
         }
         let rpp = proc_addr(table::endpoint_slot(parent_ep));
         if rpp.is_null() || table::is_empty_proc(rpp) {
+            crate::hal::serial_write_byte(b'E');
             return crate::ipc::EFAULT;
         }
-        if (*rpp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::RECEIVING.bits() == 0 {
-            return crate::ipc::EFAULT;
+        // Always search for a free Proc slot (ignore PM's child_slot hint
+        // which may be corrupted by the 56-vs-64 byte message size mismatch).
+        let nr_procs = crate::proc::NR_PROCS as i32;
+        let mut child_slot: i32 = -1;
+        for slot in 0..nr_procs {
+            let rp = proc_addr(slot);
+            if !rp.is_null() && table::is_empty_proc(rp) {
+                child_slot = slot;
+                break;
+            }
         }
-        // If child_slot < 0, search for a free Proc slot.
         if child_slot < 0 {
-            let nr_procs = crate::proc::NR_PROCS as i32;
-            for slot in 0..nr_procs {
-                let rp = proc_addr(slot);
-                if !rp.is_null() && table::is_empty_proc(rp) {
-                    child_slot = slot;
-                    break;
-                }
-            }
-            if child_slot < 0 {
-                return crate::ipc::EAGAIN;
-            }
+            return crate::ipc::EAGAIN;
         }
         let rpc = proc_addr(child_slot);
         if rpc.is_null() || !table::is_empty_proc(rpc) {
+            crate::hal::serial_write_byte(b'I');
             return crate::ipc::EFAULT;
         }
+        crate::hal::serial_write_byte(b'K');
 
         let mut new_gen = table::endpoint_gen((*rpc).p_endpoint) + 1;
         if new_gen >= table::EP_MAX_GENERATION {
@@ -3728,9 +3799,12 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             (*rpc).p_name[end + 2] = 0u8;
         }
 
+        // SCHED server's schedule_process is a stub (never clears NO_QUANTUM),
+        // so skip NO_QUANTUM and enqueue the child directly.
         (*rpc)
             .p_rts_flags
-            .store(RtsFlags::NO_QUANTUM.bits(), Ordering::Relaxed);
+            .store(RtsFlags::empty().bits(), Ordering::Relaxed);
+        crate::sched::enqueue(rpc);
         crate::sched::reset_proc_accounting(rpc);
 
         if !(*rpp).p_priv.is_null() && (*(*rpp).p_priv).s_flags.contains(PrivFlags::SYS_PROC) {
@@ -6101,7 +6175,8 @@ mod tests {
     #[test]
     fn test_copy_offset_constants() {
         // Verify offsets match struct layout
-        assert_eq!(COPY_SRC_ENDPT_OFF, 0);
+        // Offset 48 (past kernel_call header at bytes 0-7)
+        assert_eq!(COPY_SRC_ENDPT_OFF, 48);
         assert_eq!(COPY_SRC_ADDR_OFF, 8);
         assert_eq!(COPY_DST_ENDPT_OFF, 16);
         assert_eq!(COPY_DST_ADDR_OFF, 24);

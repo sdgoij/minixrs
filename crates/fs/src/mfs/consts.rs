@@ -136,7 +136,7 @@ pub const X_BIT: u16 = 1;
 pub const RWX_MODES: u16 = 0o0777;
 
 // VFS request types (FS_BASE + n)
-pub const FS_BASE: i32 = 200;
+pub const FS_BASE: i32 = 0xA00;
 pub const REQ_READ: i32 = FS_BASE + 19;
 pub const REQ_WRITE: i32 = FS_BASE + 20;
 pub const REQ_PEEK: i32 = FS_BASE + 32;

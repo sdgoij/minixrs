@@ -440,17 +440,28 @@ pub unsafe fn virtual_copy(
             return -1;
         }
 
-        let src_cr3 = (*src_rp).p_seg.p_cr3;
-        let dst_cr3 = (*dst_rp).p_seg.p_cr3;
-
-        if src_cr3 == 0 || dst_cr3 == 0 {
-            return -1;
-        }
+        let mut src_cr3 = (*src_rp).p_seg.p_cr3;
+        let mut dst_cr3 = (*dst_rp).p_seg.p_cr3;
 
         let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             return -1;
         }
+
+        // Boot processes (init, VFS, MFS, etc.) use the identity-mapped
+        // boot CR3 (p_cr3 == 0). Fall back to boot_cr3 for them.
+        if src_cr3 == 0 {
+            src_cr3 = boot_cr3;
+        }
+        if dst_cr3 == 0 {
+            dst_cr3 = boot_cr3;
+        }
+
+        // Save the current CR3 so we can restore it after the copy.
+        // On the boot path this is boot_cr3; on a server path (VFS, MFS)
+        // this is the server's per-process CR3. Restoring boot_cr3 would
+        // switch the server to the identity map and crash it.
+        let saved_cr3 = crate::hal::read_cr3();
 
         // Use a small stack buffer for the bounce
         let mut buf = [0u8; 256];
@@ -469,8 +480,8 @@ pub unsafe fn virtual_copy(
             crate::hal::write_cr3(dst_cr3);
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
 
-            // Restore boot CR3
-            crate::hal::write_cr3(boot_cr3);
+            // Restore the saved CR3 (not boot_cr3 — servers have their own)
+            crate::hal::write_cr3(saved_cr3);
 
             remaining -= chunk;
             src_va += chunk as u64;

@@ -5,12 +5,20 @@ use crate::mfs::glo;
 use crate::mfs::inode::*;
 use crate::mfs::misc::*;
 
+/// Virtual address of the RAM disk in MFS's address space.
+/// Set by the kernel boot code before MFS starts.
+const MFS_RAMDISK_VA: u64 = arch_common::com::MFS_RAMDISK_VA;
+const MFS_RAMDISK_SIZE: usize = arch_common::com::MFS_RAMDISK_SIZE;
+
 /// IPC receive/send syscall numbers.  Only used when compiling for the
 /// MINIX target; marked `#[allow(dead_code)]` because the library build
 /// (`cargo check`) compiles without `target_os = "none"`.
 #[cfg(target_os = "none")]
 const RECEIVE_CALL: u64 = 47;
 #[cfg(target_os = "none")]
+const SEND_CALL: u64 = 46;
+#[cfg(target_os = "none")]
+#[allow(dead_code)]
 const SENDREC_CALL: u64 = 48;
 #[allow(dead_code)]
 const ANY: i32 = 0x0000ffff;
@@ -26,14 +34,17 @@ pub fn mfs_init() -> i32 {
         }
         init_inode_cache();
 
-        // Register the block I/O callback if a RAM disk is configured.
-        if crate::block_io::ram_disk_is_initialized() {
-            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
-        }
-        // `mfs_init` is called.
-        if crate::block_io::ram_disk_is_initialized() {
-            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
-        }
+        // Initialise the buffer cache.
+        libs::libminixfs::cache::lmfs_buf_pool(crate::mfs::consts::DEFAULT_NR_BUFS as i32);
+        libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
+
+        // Initialise the RAM disk from the well-known virtual address.
+        // The kernel boot code maps the MFS image into MFS's address space
+        // at MFS_RAMDISK_VA before the process starts.
+        crate::block_io::ram_disk_init(MFS_RAMDISK_VA as *const u8, MFS_RAMDISK_SIZE);
+
+        // Register the block I/O callback.
+        libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
     }
     OK
 }
@@ -80,22 +91,23 @@ pub fn mfs_main() -> i32 {
                 (*glo::mfs_ptr()).caller_gid = caller_gid;
             }
 
-            // Dispatch the request.
+            // Dispatch the request (handler may populate m_out payload).
             let status = crate::mfs::table::dispatch(req_nr);
 
-            // Build and send the reply.
+            // Build the reply using m_out's payload (handler-set fields).
+            let reply_payload = unsafe { (*glo::mfs_ptr()).m_out.m_payload };
             let mut reply = arch_common::ipc::Message {
                 m_source: 0,
                 m_type: status,
-                m_payload: unsafe { core::mem::zeroed() },
+                m_payload: reply_payload,
             };
-            // Clone the reply into global state (Message is Clone).
+            // Store the reply in global state, then send.
             unsafe {
                 (*glo::mfs_ptr()).m_out = reply.clone();
             }
             let _ = unsafe {
                 minix_rt::syscall2(
-                    SENDREC_CALL,
+                    SEND_CALL,
                     src as u64,
                     &mut reply as *mut arch_common::ipc::Message as u64,
                 )

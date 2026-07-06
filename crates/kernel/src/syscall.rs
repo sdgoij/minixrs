@@ -97,7 +97,8 @@ pub unsafe fn dispatch_basic_syscall(
 // Syscall handlers (table in syscall_map)
 
 /// SYS_read (2) — read from file descriptor.
-unsafe fn sys_read_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+/// fd=0: serial input. fd>0: forward to VFS.
+unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
@@ -111,24 +112,64 @@ unsafe fn sys_read_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> 
         unsafe { core::ptr::write(buf, byte) };
         1
     } else {
-        -9 // EBADF
+        let mut msg = [0u8; 64];
+        msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+        msg[4..8].copy_from_slice(&0x100i32.to_le_bytes()); // VFS_READ = 0x100
+        msg[8..12].copy_from_slice(&fd.to_le_bytes());
+        msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
+        msg[24..28].copy_from_slice(&(count as u32).to_le_bytes());
+
+        let result =
+            unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+        if result != 0 {
+            return result as i64;
+        }
+        let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+        reply_status as i64
     }
 }
 
 /// SYS_open (4) — open a file.
-unsafe fn sys_open_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let _flags = args[2] as i32;
-    // Stub — VFS server handles real opens
-    let _ = (path_ptr, path_len);
-    -5 // EIO (no VFS server yet)
+/// args[0] = path pointer, args[1] = path length, args[2] = flags.
+/// Forwards to VFS via IPC. VFS's do_open reads:
+///   flags at offset 8, path_addr at offset 16, path_len at offset 24.
+unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let path_ptr = args[0];
+    let path_len = args[1] as u32;
+    let flags = args[2] as i32;
+
+    let mut msg = [0u8; 64];
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    msg[4..8].copy_from_slice(&0x103i32.to_le_bytes()); // VFS_OPEN = 0x103
+    msg[8..12].copy_from_slice(&flags.to_le_bytes());
+    msg[16..24].copy_from_slice(&path_ptr.to_le_bytes());
+    msg[24..28].copy_from_slice(&path_len.to_le_bytes());
+
+    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+    if result != 0 {
+        return result as i64;
+    }
+    // Reply status in bytes 4-7 (m_type, set by VFS reply).
+    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    reply_status as i64
 }
 
 /// SYS_close (5) — close a file descriptor.
-unsafe fn sys_close_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let _fd = args[0] as i32;
-    0 // stub: always succeed
+/// Forwards to VFS via IPC. VFS's do_close reads fd at offset 8.
+unsafe fn sys_close_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let fd = args[0] as i32;
+
+    let mut msg = [0u8; 64];
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    msg[4..8].copy_from_slice(&0x105i32.to_le_bytes()); // VFS_CLOSE = 0x105
+    msg[8..12].copy_from_slice(&fd.to_le_bytes());
+
+    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+    if result != 0 {
+        return result as i64;
+    }
+    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    reply_status as i64
 }
 
 /// SYS_getpid (20) — return the caller's endpoint as PID.
@@ -320,33 +361,6 @@ unsafe fn vfs_ipc_call(
     reply_status as i64
 }
 
-/// VFS_CHDIR call number (VFS_BASE + 8 = 0x108).
-const VFS_CHDIR: i32 = 0x108;
-
-/// SYS_chdir (12) — change working directory.
-/// args[0] = path pointer, args[1] = path length.
-unsafe fn sys_chdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0];
-    let path_len = args[1] as u32;
-
-    let mut msg = [0u8; 64];
-    // Destination at bytes 0-3 (set by syscall handler, but do_sync_ipc reads it)
-    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-    // Call number at bytes 4-7
-    msg[4..8].copy_from_slice(&VFS_CHDIR.to_le_bytes());
-    // VFS do_chdir reads: path_addr at offset 8 (u64), path_len at offset 16 (u32)
-    msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
-    msg[16..20].copy_from_slice(&path_len.to_le_bytes());
-
-    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-    if result != 0 {
-        return result as i64;
-    }
-    // Read reply status from bytes 4-7 (m_type, overwritten with result by VFS's reply())
-    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    reply_status as i64
-}
-
 /// SYS_mkdir (40) — create a directory.
 unsafe fn sys_mkdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let path_ptr = args[0] as *const u8;
@@ -416,13 +430,27 @@ unsafe fn sys_mknod_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> 
     unsafe { vfs_ipc_call(caller, 0x10A, mode, dev, 0) }
 }
 
-/// SYS_getdents (47) — read directory entries.
+/// SYS_getdents (57) — read directory entries.
+/// Forwards to VFS via IPC. VFS's do_getdents reads:
+///   fd at offset 8, buf_addr at offset 16, count at offset 24.
 unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
-    let _buf = args[1] as *mut u8;
-    let count = args[2] as i32;
-    // Route to VFS: VFS_GETDENTS = 0x11D
-    unsafe { vfs_ipc_call(caller, 0x11D, fd, count, 0) }
+    let buf_ptr = args[1];
+    let count = args[2] as u32;
+
+    let mut msg = [0u8; 64];
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    msg[4..8].copy_from_slice(&0x11Di32.to_le_bytes()); // VFS_GETDENTS = 0x11D
+    msg[8..12].copy_from_slice(&fd.to_le_bytes());
+    msg[16..24].copy_from_slice(&buf_ptr.to_le_bytes());
+    msg[24..28].copy_from_slice(&count.to_le_bytes());
+
+    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+    if result != 0 {
+        return result as i64;
+    }
+    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    reply_status as i64
 }
 
 // IPC syscall handlers (46-49)
@@ -447,6 +475,8 @@ unsafe fn sys_ipc_receive_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
     if msg_ptr.is_null() {
         return -14; // EFAULT
     }
+    // Set delivery address so delivermsg can copy directly-delivered message.
+    unsafe { (*caller).p_delivermsg_vir = msg_ptr as u64 };
     // do_sync_ipc reads source from msg[0..4]
     unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, src) };
     unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::RECEIVE) as i64 }
@@ -459,6 +489,24 @@ unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
     if msg_ptr.is_null() {
         return -14; // EFAULT
     }
+    // Debug
+    if dest == 0 {
+        let pm = crate::table::proc_addr(0);
+        if !pm.is_null() {
+            let pm_rts = unsafe {
+                (*pm)
+                    .p_rts_flags
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if pm_rts != 0 {
+                crate::hal::serial_write_byte(b'P');
+                crate::hal::serial_write_byte(b'M');
+                crate::hal::serial_write_byte(b':');
+            }
+        }
+    }
+    // Set delivery address so delivermsg can copy reply to user buffer.
+    unsafe { (*caller).p_delivermsg_vir = msg_ptr as u64 };
     // do_sync_ipc reads destination from msg[0..4]
     unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
     unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDREC) as i64 }
@@ -524,26 +572,9 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             Err(_) => return -38,
         };
 
-        // Boot CR3 switch + ELF loading (x86_64 uses identity map for this).
+        // Parse ELF to get bounds (no identity-mapped writes that would
+        // corrupt boot process code at 0x1000000).
         let boot_cr3_val = crate::pagetable::boot_cr3();
-        #[cfg(target_arch = "x86_64")]
-        let loaded = {
-            let saved_cr3 = crate::hal::read_cr3();
-            crate::hal::write_cr3(boot_cr3_val);
-            let l = match crate::elf::load_elf(data) {
-                Ok(l) => l,
-                Err(_) => {
-                    crate::hal::write_cr3(saved_cr3);
-                    return -38;
-                }
-            };
-            crate::hal::write_cr3(saved_cr3);
-            l
-        };
-
-        // RISC-V: RAM starts at 0x80000000 — cannot load ELF to identity
-        // addresses. Compute bounds from ELF headers manually.
-        #[cfg(target_arch = "riscv64")]
         let loaded = {
             let ehdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
             let phoff = ehdr.e_phoff as usize;
@@ -602,52 +633,6 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
         // Build new page table (arch-specific)
-        //
-        // HACK: The first x86_64 `let _ = { ... }` block (allocs PML4/PDPT/PD
-        // + copies boot entries) was originally shadowed by the second block
-        // below. The second block does the same setup + maps user pages.
-        // Removing the first block causes a `G` (page fault) at shell start.
-        // Root cause unknown — likely an allocator-ordering issue where the
-        // first block's 3 leaked page allocations shift map_page's PT page
-        // addresses in a way that avoids corrupting some identity-mapped region.
-        // Keep this block even though _discard shadows it. (FIXME: investigate)
-        #[cfg(target_arch = "x86_64")]
-        let _ = {
-            let pml4 = match crate::hal::alloc_phys_page() {
-                Some(p) => p,
-                None => return -12,
-            };
-            core::ptr::write_bytes(pml4 as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
-            let boot_pml4 = boot_cr3_val as *const u64;
-            let pml4e0 = core::ptr::read(boot_pml4);
-            let pdpt_phys = crate::hal::pte_to_phys(pml4e0);
-            let boot_pdpt = pdpt_phys as *const u64;
-            let pdpte0 = core::ptr::read(boot_pdpt);
-            let pd_phys = crate::hal::pte_to_phys(pdpte0);
-            let boot_pd = pd_phys as *const u64;
-            let pdpt_page = match crate::hal::alloc_phys_page() {
-                Some(p) => p,
-                None => return -12,
-            };
-            let pd_page = match crate::hal::alloc_phys_page() {
-                Some(p) => p,
-                None => return -12,
-            };
-            core::ptr::write_bytes(pdpt_page as *mut u8, 0, 4096);
-            core::ptr::write_bytes(pd_page as *mut u8, 0, 4096);
-            let flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
-            core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
-            core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
-            for i in 0usize..512 {
-                let e = core::ptr::read(boot_pd.add(i));
-                core::ptr::write((pd_page as *mut u64).add(i), e);
-            }
-            for i in 256usize..512 {
-                let e = core::ptr::read(boot_pml4.add(i));
-                core::ptr::write((pml4 as *mut u64).add(i), e);
-            }
-            0
-        };
 
         // RISC-V: RAM starts at 0x80000000, so identity map at VA 0x1000000
         // (the ELF virtual address) writes to MMIO, not RAM. We must allocate
@@ -777,22 +762,72 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
                 let e = core::ptr::read(boot_pml4.add(i));
                 core::ptr::write((pml4 as *mut u64).add(i), e);
             }
-            // Map user code and stack (identity).
+            // Allocate physical pages for the code and load ELF segments.
+            let code_pages = ((code_end - code_start) / 4096) as usize;
+            let phys_code_base = match crate::hal::alloc_phys_contig(code_pages) {
+                Some(b) => b,
+                None => return -12,
+            };
+            // Copy ELF segments from initramfs data to the allocated pages.
+            let ehdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
+            let phoff = ehdr.e_phoff as usize;
+            let phnum = ehdr.e_phnum as usize;
+            let phentsize = ehdr.e_phentsize as usize;
+            for i in 0..phnum {
+                let phdr =
+                    &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
+                if phdr.p_type != crate::elf::PT_LOAD {
+                    continue;
+                }
+                let seg_vaddr = phdr.p_vaddr;
+                let seg_offset = seg_vaddr - code_start;
+                let dst = (phys_code_base + seg_offset) as *mut u8;
+                if phdr.p_filesz > 0 {
+                    let src = data.as_ptr().add(phdr.p_offset as usize);
+                    core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+                }
+                let bss = phdr.p_memsz - phdr.p_filesz;
+                if bss > 0 {
+                    core::ptr::write_bytes(dst.add(phdr.p_filesz as usize), 0, bss as usize);
+                }
+            }
+            // Allocate physical pages for the stack.
+            let stack_pages = ((stack_end - stack_start) / 4096) as usize;
+            let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
+                Some(b) => b,
+                None => return -12,
+            };
+            // Copy stack data from identity-mapped temp area to allocated pages.
+            // setup_user_stack wrote the stack at user_stack_base (0x0FE00000)
+            // while BOOT_CR3 was active (identity map). Under the kernel CR3,
+            // the identity map still covers 0-1GB, so both source and dest are
+            // accessible.
+            core::ptr::copy_nonoverlapping(
+                user_stack_base as *const u8,
+                phys_stack_base as *mut u8,
+                user_stack_size,
+            );
+            // Map user code: VA -> allocated PA
             let user_flags =
                 crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
             let mut va = code_start;
+            let mut pa = phys_code_base;
             while va < code_end {
-                if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                if crate::pagetable::map_page(pml4, va, pa, user_flags).is_err() {
                     return -12;
                 }
                 va += 0x1000;
+                pa += 0x1000;
             }
+            // Map stack: VA -> allocated PA
             let mut va = stack_start;
+            let mut pa = phys_stack_base;
             while va < stack_end {
-                if crate::pagetable::map_page(pml4, va, va, user_flags).is_err() {
+                if crate::pagetable::map_page(pml4, va, pa, user_flags).is_err() {
                     return -12;
                 }
                 va += 0x1000;
+                pa += 0x1000;
             }
             pml4
         };
@@ -1048,7 +1083,6 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(3, sys_write_handler); // NR_WRITE
         register_basic_syscall(4, sys_open_handler); // NR_OPEN
         register_basic_syscall(5, sys_close_handler); // NR_CLOSE
-        register_basic_syscall(12, sys_chdir_handler); // NR_CHDIR
         register_basic_syscall(20, sys_getpid_handler); // NR_GETPID
         register_basic_syscall(36, sys_brk_handler); // NR_BRK
         register_basic_syscall(40, sys_mkdir_handler); // NR_MKDIR
