@@ -1,12 +1,21 @@
 # minixrs
 
+> **⚠️ Research project — not production-ready.**  
+> If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
+
 A Rust port of [MINIX 3.3.0](https://www.minix3.org/), written from scratch.
 
 This project implements the full MINIX 3 stack in Rust — kernel, architecture-specific code, device drivers, filesystem servers, networking, system servers, and userland programs — targeting both **x86_64** and **RISC-V64**.
 
 ## Status
 
-[See [PORTING_PLAN.md](PORTING_PLAN.md) for the phased implementation roadmap and [TESTING.md](TESTING.md) for test coverage details.]
+Boots multi-process userspace in QEMU on x86_64 with a serial shell.
+VFS mounts the root filesystem and MFS can read directories, but
+grant-based data transfer (`virtual_copy`) and external binary exec
+are still works in progress.
+
+See `.agents/skills/` for domain-specific documentation and
+[PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
 
 ## Quick Start
 
@@ -70,11 +79,23 @@ MINIX 3's microkernel design is preserved:
 
 The project supports both **x86_64** and **RISC-V64** targets via architecture-specific crates (`arch-x86_64`, `arch-riscv64`) sharing a common core (`arch-common`).
 
+See `.agents/skills/` for domain deep-dives:
+- `minix-boot-process` — boot chain from QEMU to shell
+- `minix-ipc-patterns` — message formats, SENDREC semantics, grants
+- `minix-server-patterns` — main loop, dispatch, SEF callbacks
+- `minix-c-to-rust` — struct layout, type mapping, no-stubs policy
+
 ## Testing
 
-- **~600+ tests** across all crates (`cargo test`)
-- **QEMU integration tests** that boot the kernel, run assertions, and verify behavior end-to-end
-- See [TESTING.md](TESTING.md) for the full breakdown
+- **Host tests:** `cargo test` — pure-logic unit and property tests
+- **QEMU integration:** `just test-qemu` — 40 kernel tests running in-ring 0
+  (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants)
+- **Boot tests:** `just test-boot` — multi-server verification after VFS mount_root
+  (server liveness, IPC round-trips, filesystem metadata)
+
+See `minix-testing` skill in `.agents/skills/` for full patterns and isolation mechanisms.
+
+The original C reference source is at `.refs/minix-3.3.0/` (git submodule).
 
 ## Build & Development
 
