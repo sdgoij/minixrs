@@ -484,21 +484,34 @@ pub fn kernel_call(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
 /// or negative on error.
 pub fn fork() -> i32 {
     let mut msg = [0u8; 64];
-    // Set m_type = PM_FORK at bytes 4-7
     msg[4..8].copy_from_slice(&PM_FORK.to_le_bytes());
+    write(1, b"fork: call SENDREC\r\n");
     let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
+    write(1, b"fork: SENDREC ret=");
+    let r = if reply >= 0 {
+        reply as u64
+    } else {
+        (-reply) as u64
+    };
+    let r10 = r / 10;
+    let r1 = r % 10;
+    if r10 > 0 {
+        write(1, &[b'0' + r10 as u8]);
+    }
+    write(1, &[b'0' + r1 as u8]);
+    write(1, b"\r\n");
     if reply < 0 {
         return reply as i32;
     }
-    // NR_IS_FORK_CHILD returns 1 if do_fork_handler set p_defer_r1=1
-    // on this process (the child). The parent sees 0.
-    // This is needed because parent and child share the same page table
-    // (no VM isolation), so both see PM's reply in the msg buffer.
+    write(1, b"fork: call IS_FORK_CHILD\r\n");
     let is_child = unsafe { syscall0(NR_IS_FORK_CHILD) };
+    write(1, b"fork: IS_FORK_CHILD=");
+    write(1, &[b'0' + is_child as u8]);
+    write(1, b"\r\n");
     if is_child != 0 {
         return 0;
     }
-    // Parent: read child PID from m1i1 (bytes 8-11)
+    write(1, b"fork: parent read PID\r\n");
     i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]))
 }
 

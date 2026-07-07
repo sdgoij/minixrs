@@ -1,2 +1,6 @@
 [target.riscv64gc-unknown-none-elf]
 rustflags = ["-C", "link-arg=-Ttools/minix-raw-riscv64.ld"]
+
+[env]
+# Tests share global mutable state (UnsafeCell) — must run single-threaded.
+RUST_TEST_THREADS = "1"

@@ -245,4 +245,42 @@ mod tests {
         assert_eq!(ENOENT, -2);
         assert_eq!(EINVAL, -22);
     }
+
+    #[test]
+    fn test_ds_val_size() {
+        assert_eq!(size_of::<DsVal>(), 4);
+    }
+
+    #[test]
+    fn test_asyn_msg_size() {
+        assert!(size_of::<AsynMsg>() >= 68);
+    }
+
+    #[test]
+    fn test_amf_flags() {
+        assert_eq!(AMF_VALID, 0x01);
+        assert_eq!(AMF_DONE, 0x02);
+        assert_eq!(AMF_NOTIFY, 0x04);
+        assert_eq!(AMF_NOREPLY, 0x08);
+        assert_eq!(AMF_NOTIFY_ERR, 0x10);
+    }
+
+    #[test]
+    fn test_message_bases() {
+        assert_eq!(PM_BASE, 0x0000);
+        assert_eq!(KERNEL_CALL, 0x0100);
+        assert_eq!(FS_BASE, 0x0200);
+    }
+
+    #[test]
+    fn test_extra_error_codes() {
+        assert_eq!(EBUSY, -16);
+        assert_eq!(EEXIST, -17);
+        assert_eq!(ENODEV, -19);
+        assert_eq!(ENOTDIR, -20);
+        assert_eq!(EISDIR, -21);
+        assert_eq!(ENOBUFS, -55);
+        assert_eq!(ELOCKED, -202);
+        assert_eq!(ELOCKWILLBLOCK, -203);
+    }
 }

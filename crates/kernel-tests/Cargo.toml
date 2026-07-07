@@ -1,0 +1,15 @@
+[package]
+name = "kernel-tests"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kernel-tests"
+path = "src/main.rs"
+harness = false
+
+[dependencies]
+kernel = { path = "../kernel" }
+arch-x86_64 = { path = "../arch-x86_64" }
+arch-common = { path = "../arch-common" }
+drivers = { path = "../drivers" }

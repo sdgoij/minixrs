@@ -30,10 +30,6 @@ const MSG_SOURCE_OFF: usize = 0;
 pub unsafe fn vfs_main() -> i32 {
     sef_local_startup();
 
-    // Debug: VFS entering main loop
-    #[cfg(target_os = "none")]
-    minix_rt::write(1, b"VFS: ready\n");
-
     // Signal kernel that mount_root completed via syscall 60.
     // Boot-test: kernel runs verification and exits QEMU.
     // Normal boot: no handler registered, returns -38 (ENOSYS), ignored.

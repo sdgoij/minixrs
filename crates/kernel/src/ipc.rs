@@ -372,6 +372,14 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         if rts & RtsFlags::RECEIVING.bits() != 0
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
         {
+            // Build notification message in the destination's kernel buffer,
+            // so deliver_msg copies it to the user buffer on context switch.
+            build_notify_message(&mut (*dst_ptr).p_delivermsg, src_e, dst_ptr);
+            // Set DELIVERMSG flag so deliver_msg copies p_delivermsg to user.
+            (*dst_ptr).p_misc_flags.fetch_or(
+                crate::proc::MiscFlags::DELIVERMSG.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
             // Set the receiver's return value to the notifier's endpoint.
             crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_e as u64);
             let new = rts & !RtsFlags::RECEIVING.bits();
@@ -1423,6 +1431,10 @@ mod tests {
         unsafe {
             proc_init();
             let dst = setup_proc(0);
+            // Clear any DELIVERMSG left by previous tests.
+            (*dst)
+                .p_misc_flags
+                .fetch_and(!MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
             assert_eq!(
                 mini_receive(
                     dst,

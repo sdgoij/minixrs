@@ -95,5 +95,23 @@ mod tests {
         assert_eq!(DFLDSIZ, 512 * 1024 * 1024);
         assert_eq!(MAXDSIZ, 128u64 * 1024 * 1024 * 1024);
         assert_eq!(MAXSSIZ, 64 * 1024 * 1024);
+        assert_eq!(DFLSSIZ, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_physical_memory_constants() {
+        assert_eq!(USRIOSIZE, 300);
+        assert_eq!(VM_PHYS_SIZE, USRIOSIZE as u64 * PAGE_SIZE);
+        assert_eq!(VM_MAX_KERNEL_BUF, 384 * 1024 * 1024);
+        assert_eq!(VM_PHYSSEG_MAX, 32);
+        assert_eq!(VM_NFREELIST, 2);
+        assert_eq!(VM_FREELIST_DEFAULT, 0);
+        assert_eq!(VM_FREELIST_FIRST16, 1);
+    }
+
+    #[test]
+    fn test_max_address() {
+        assert_eq!(VM_MAX_ADDRESS, 0xFFFFFFFFFFFFFFFF);
+        assert_eq!(VM_MAX_KERNEL_ADDRESS, 0xFFFFFFFFFFFFFFFF);
     }
 }

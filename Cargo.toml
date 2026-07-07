@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 
+exclude = [
+    "crates/kernel-tests",
+]
+
 members = [
     "crates/arch-common",
     "crates/arch-x86_64",

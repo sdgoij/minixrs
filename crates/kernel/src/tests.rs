@@ -18,6 +18,13 @@
 //!
 //! Then add `total += run("my_feature", test_my_feature);` to `run_all()`.
 
+// Several test functions are intentionally unused: they are registered
+// in `run_all()` but their invocations are commented out due to a known
+// compiler-optimization issue (side-effect-free bodies get eliminated,
+// causing infinite loops). They will be re-enabled when LTO barriers
+// are added. Keep them until then.
+#![allow(dead_code)]
+
 use core::mem::size_of;
 use core::sync::atomic::Ordering;
 

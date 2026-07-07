@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware PCI access")]
+    #[ignore = "covered in kernel-tests (QEMU)"]
     fn test_pci_init_does_not_panic() {
         unsafe {
             pci_init();

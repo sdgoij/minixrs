@@ -240,10 +240,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                     // Send a notification to PM to kickstart scheduling.
                     let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
                     if !pm_proc.is_null() {
-                        let _ = kernel::ipc::mini_notify(
-                            arch_common::com::RS_PROC_NR,
-                            arch_common::com::PM_PROC_NR,
-                        );
+                        unsafe {
+                            let _ = kernel::ipc::mini_notify(
+                                arch_common::com::RS_PROC_NR,
+                                arch_common::com::PM_PROC_NR,
+                            );
+                        }
                         if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                             unsafe {
                                 let mf = (*next_proc)

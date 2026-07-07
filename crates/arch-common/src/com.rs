@@ -815,4 +815,50 @@ mod tests {
     fn test_suspend() {
         assert_eq!(SUSPEND, -998);
     }
+
+    #[test]
+    fn test_is_vfs_fs_transid() {
+        assert!(is_vfs_fs_transid(VFS_TRANSACTION_BASE));
+        assert!(is_vfs_fs_transid(VFS_TRANSACTION_BASE + 0xFF));
+        assert!(!is_vfs_fs_transid(VFS_TRANSACTION_BASE - 1));
+        assert!(!is_vfs_fs_transid(VFS_TRANSACTION_BASE + 0x100));
+    }
+
+    #[test]
+    fn test_is_cdev_rq() {
+        assert!(is_cdev_rq(CDEV_RQ_BASE));
+        assert!(is_cdev_rq(CDEV_RQ_BASE + 0x7F));
+        assert!(!is_cdev_rq(CDEV_RQ_BASE - 1));
+        assert!(!is_cdev_rq(CDEV_RS_BASE)); // RS is different base
+    }
+
+    #[test]
+    fn test_is_cdev_rs() {
+        assert!(is_cdev_rs(CDEV_RS_BASE));
+        assert!(!is_cdev_rs(CDEV_RQ_BASE));
+    }
+
+    #[test]
+    fn test_is_bdev_rq() {
+        assert!(is_bdev_rq(BDEV_RQ_BASE));
+        assert!(!is_bdev_rq(BDEV_RS_BASE));
+    }
+
+    #[test]
+    fn test_is_bdev_rs() {
+        assert!(is_bdev_rs(BDEV_RS_BASE));
+        assert!(!is_bdev_rs(BDEV_RQ_BASE));
+    }
+
+    #[test]
+    fn test_is_rtcdev_rq() {
+        assert!(is_rtcdev_rq(RTCDEV_RQ_BASE));
+        assert!(!is_rtcdev_rq(RTCDEV_RS_BASE));
+    }
+
+    #[test]
+    fn test_is_rtcdev_rs() {
+        assert!(is_rtcdev_rs(RTCDEV_RS_BASE));
+        assert!(!is_rtcdev_rs(RTCDEV_RQ_BASE));
+    }
 }

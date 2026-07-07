@@ -1089,6 +1089,22 @@ pub unsafe fn mask_timer_irq() {
     }
 }
 
+/// QEMU smoke test for PIC remap. Called from kernel-tests (ring 0).
+///
+/// Performs a standard PIC remap (master IRQ base 0x08, slave base 0x70)
+/// and asserts no panic. This requires ring 0 privileges and real PIC
+/// hardware (or QEMU's emulated one).
+///
+/// # Safety
+///
+/// Must be called from ring 0 with PIC hardware present (or QEMU emulation).
+/// Incorrect call context may cause system instability.
+pub unsafe fn test_remap_pic_qemu() {
+    unsafe {
+        remap_pic(0x08, 0x70);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1452,25 +1468,5 @@ mod tests {
         let a = ApicMode::XApic;
         let _b = a;
         let _c = a;
-    }
-
-    // ── 11b.11: Hardware-dependent smoke tests ─────────────────────────
-
-    #[test]
-    #[cfg_attr(
-        any(target_os = "windows", not(target_arch = "x86_64")),
-        ignore = "requires ring 0"
-    )]
-    fn test_remap_pic_no_crash() {
-        // Verifies the function is callable. Will fault from usermode.
-    }
-
-    #[test]
-    #[cfg_attr(
-        any(target_os = "windows", not(target_arch = "x86_64")),
-        ignore = "requires ring 0"
-    )]
-    fn test_mask_unmask_irq_no_crash() {
-        // Verifies the function is callable. Will fault from usermode.
     }
 }

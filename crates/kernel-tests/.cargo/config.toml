@@ -1,0 +1,2 @@
+[target.x86_64-pc-minix]
+rustflags = ["-C", "link-arg=-T../../tools/minix-raw.ld"]

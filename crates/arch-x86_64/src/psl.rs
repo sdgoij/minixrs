@@ -95,4 +95,33 @@ mod tests {
         assert!(intr_enabled(0x00000202)); // MBO | I
         assert!(!intr_enabled(0x00000002)); // MBO only
     }
+
+    #[test]
+    fn test_all_rflags_bits() {
+        assert_eq!(rflags::PF, 0x00000004);
+        assert_eq!(rflags::AF, 0x00000010);
+        assert_eq!(rflags::Z, 0x00000040);
+        assert_eq!(rflags::N, 0x00000080);
+        assert_eq!(rflags::T, 0x00000100);
+        assert_eq!(rflags::D, 0x00000400);
+        assert_eq!(rflags::V, 0x00000800);
+        assert_eq!(rflags::NT, 0x00004000);
+        assert_eq!(rflags::RF, 0x00010000);
+        assert_eq!(rflags::VM, 0x00020000);
+        assert_eq!(rflags::VIF, 0x00080000);
+        assert_eq!(rflags::VIP, 0x00100000);
+        assert_eq!(rflags::ID, 0x00200000);
+    }
+
+    #[test]
+    fn test_mbz() {
+        assert_eq!(rflags::MBZ, 0xFFC08028);
+    }
+
+    #[test]
+    fn test_psl_constants() {
+        assert_eq!(PSL_USERSET, 0x202);
+        assert_eq!(PSL_USER, 0x40DD5);
+        assert_eq!(PSL_CLEARSIG, 0x60500);
+    }
 }

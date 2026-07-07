@@ -908,10 +908,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        any(target_os = "windows", not(target_arch = "x86_64")),
-        ignore = "requires hardware I/O"
-    )]
+    #[ignore = "covered in kernel-tests (QEMU)"]
     fn test_virtio_blk_probe_fails_no_hardware() {
         unsafe {
             reset_state();

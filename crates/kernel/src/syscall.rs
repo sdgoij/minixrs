@@ -269,7 +269,12 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         (*caller).p_signal_received = exit_status as u64;
 
         // Set SIGNALED so do_getksig_handler finds this process.
-        // Set SIG_PENDING because the exit represents a on for PM.
+        (*caller).p_rts_flags.fetch_or(
+            crate::proc::RtsFlags::SIGNALED.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Push to pending exit queue for PM to read via SYS_GETKSIG.
         push_pending_exit(endpoint, exit_status);
 
         // Notify PM so it can mark the MProc as ZOMBIE.
@@ -280,13 +285,21 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
             crate::proc::RtsFlags::SLOT_FREE.bits(),
             core::sync::atomic::Ordering::Relaxed,
         );
+
+        // Remove from run queue so pick_proc doesn't find a dead process.
+        crate::sched::dequeue(caller);
     }
     crate::system::EDONTREPLY as i64
 }
 
 /// SYS_write (9) — write to a file descriptor.
 /// fd=1 (stdout), fd=2 (stderr) go to serial output.
-unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+///
+/// # Safety
+///
+/// Must be called from ring 0 with a valid caller process pointer.
+/// The buffer pointer in `args[1]` must be readable in the caller's address space.
+pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
     let count = args[2] as usize;
 
@@ -870,6 +883,31 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         }
 
+        // Clean up legacy misc flags that may have been set before exec.
+        // RTS_RECEIVING is not touched here — that's only needed when called
+        // from SYS_EXEC_TARGET (where the target is blocked), and is handled
+        // by sys_exec_target_handler after this function returns.
+        {
+            use crate::proc::MiscFlags;
+            // Clear MF_DELIVERMSG if set.
+            let old_mf = (*rp)
+                .p_misc_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            (*rp).p_misc_flags.store(
+                old_mf & !MiscFlags::DELIVERMSG.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            // Mark FPU regs as not significant.
+            let old_mf2 = (*rp)
+                .p_misc_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            (*rp).p_misc_flags.store(
+                old_mf2 & !MiscFlags::FPU_INITIALIZED.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            crate::hal::release_fpu(rp as *mut core::ffi::c_void);
+        }
+
         0
     }
 }
@@ -940,7 +978,21 @@ unsafe fn sys_exec_target_handler(_caller: *mut crate::proc::Proc, args: &[u64; 
             Err(_) => return -14,
         };
 
-        exec_initramfs_for_target(rp, path)
+        let result = exec_initramfs_for_target(rp, path);
+        if result == 0 {
+            // Exec succeeded — the target process was blocked on SENDREC
+            // to PM (waiting for the exec reply). Clear its blocking state
+            // and enqueue it so the scheduler picks it up.
+            use crate::proc::RtsFlags;
+            let old_rts = (*rp).p_rts_flags.fetch_and(
+                !RtsFlags::RECEIVING.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            if old_rts & !RtsFlags::RECEIVING.bits() == 0 {
+                crate::sched::enqueue(rp);
+            }
+        }
+        result
     }
 }
 
@@ -1221,25 +1273,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ring 0 (cr3 access via dispatch_basic_syscall)"]
     fn test_init_registers_getpid() {
         unsafe {
             proc_init();
             init_basic_syscalls();
             let rp = crate::table::proc_addr(0);
             (*rp).p_endpoint = 42;
-            assert_eq!(dispatch_basic_syscall(rp, 0, &[0u64; 6]), 42);
+            assert_eq!(dispatch_basic_syscall(rp, 20, &[0u64; 6]), 42);
         }
     }
 
     #[test]
-    #[ignore = "requires ring 0 (cr3 access via dispatch_basic_syscall)"]
     fn test_init_registers_brk() {
         unsafe {
             CURRENT_BRK.store(0x3FE00000, Ordering::Relaxed);
             init_basic_syscalls();
             assert_eq!(
-                dispatch_basic_syscall(core::ptr::null_mut(), 13, &[0u64, 0, 0, 0, 0, 0]),
+                dispatch_basic_syscall(core::ptr::null_mut(), 36, &[0u64, 0, 0, 0, 0, 0]),
                 0x3FE00000i64
             );
         }

@@ -42,6 +42,12 @@ test-boot:
     @target\mkboot.exe embed_initramfs,embed_minixfs,boot-test
     @{{QEMU}} -nographic -monitor none -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000 2>&1 || echo Boot test complete
 
+# Build and run kernel unit tests in QEMU.
+# Builds kernel-tests binary, extracts kmain, rebuilds trampoline, boots.
+test-kernel:
+    set RUSTFLAGS=-C link-arg=-T%CD%\tools\minix-raw.ld && rustup run nightly cargo build --manifest-path crates/kernel-tests/Cargo.toml --target x86_64-pc-minix.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release --target-dir target
+    @for /f %i in ('rust-nm -n target\x86_64-pc-minix\release\kernel-tests ^| findstr kmain') do rust-objcopy -O binary target\x86_64-pc-minix\release\kernel-tests target\kernel-test.bin && clang -c crates\kernel-boot\src\trampoline.S -o target\trampoline.o -target i386-pc-none-elf -m32 -DKMAIN=0x%i && rust-lld -flavor gnu -m elf_i386 -T crates\kernel-boot\trampoline.ld -o target\trampoline.elf target\trampoline.o && qemu-system-x86_64 -nographic -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel-test.bin,addr=0x200000 2>&1 || echo Kernel tests complete
+
 # Build a bootable disk image (minix.img) and run via SeaBIOS
 image: build
     @rustc tools/mkimg.rs --out-dir target 2>nul || rustc tools/mkimg.rs -o target\\mkimg.exe

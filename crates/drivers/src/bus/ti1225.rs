@@ -404,6 +404,9 @@ mod tests {
         assert_eq!(TI1225_POWER_5V, 0x200);
     }
 
+    // QEMU does not emulate the TI1225 CardBus bridge, so these hardware-
+    // dependent tests cannot run on Windows (no PCI passthrough available).
+
     #[test]
     #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
     fn test_ti1225_init_no_hardware_still_returns_index() {

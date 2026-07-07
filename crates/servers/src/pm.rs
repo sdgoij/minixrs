@@ -1071,10 +1071,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 kmsg.m_payload.m1.m1i3 = 0; // normal fork, no flags
             }
             let kresult = send_kernel_call(0, &mut kmsg);
-            #[cfg(target_os = "none")]
-            unsafe {
-                minix_rt::write(1, b"PMK");
-            }
             if kresult != OK {
                 // Kernel fork failed — free the MProc slot we allocated.
                 unsafe { free_proc(child_slot) };
@@ -1095,10 +1091,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             }
 
             // Step 3: Notify VFS about the new child process.
-            #[cfg(target_os = "none")]
-            unsafe {
-                minix_rt::write(1, b"PMV");
-            }
             // Message format (matches VFS pm.rs VFS_PM_FORK handler):
             //   m_type = VFS_PM_FORK (0x907)
             //   m1_i1 = child endpoint
@@ -1143,10 +1135,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                     vfs_msg.m_type
                 }
             } else {
-                #[cfg(target_os = "none")]
-                unsafe {
-                    minix_rt::write(1, b"PMS");
-                }
                 // Step 4: Skip SCHED server notification (SCHED is not loaded).
                 // The child was already enqueued by do_fork_handler, so the
                 // normal scheduler will pick it. No SCHED server interaction

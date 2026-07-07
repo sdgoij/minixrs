@@ -61,11 +61,63 @@ mod tests {
 
     #[test]
     fn test_mcontext_size() {
-        // GPRs: 16 × 8 = 128
-        // rip/rsp/rflags: 3 × 8 = 24
-        // Seg regs: 6 × 8 = 48
+        // GPRs: 16 x 8 = 128
+        // rip/rsp/rflags: 3 x 8 = 24
+        // Seg regs: 6 x 8 = 48
         // fpstate: 512
         // Total: 712
         assert!(size_of::<Mcontext>() >= 700 && size_of::<Mcontext>() <= 720);
+    }
+
+    #[test]
+    fn test_mcontext_field_offsets() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(Mcontext, mc_rax), 0);
+        assert_eq!(offset_of!(Mcontext, mc_rbx), 8);
+        assert_eq!(offset_of!(Mcontext, mc_rcx), 16);
+        assert_eq!(offset_of!(Mcontext, mc_rdi), 40);
+        assert_eq!(offset_of!(Mcontext, mc_rip), 120);
+        assert_eq!(offset_of!(Mcontext, mc_rsp), 128);
+        assert_eq!(offset_of!(Mcontext, mc_rflags), 136);
+        assert_eq!(offset_of!(Mcontext, mc_cs), 144);
+        assert_eq!(offset_of!(Mcontext, mc_gs), 184);
+        assert_eq!(offset_of!(Mcontext, mc_ss), 152);
+        assert_eq!(offset_of!(Mcontext, mc_fpstate), 192);
+    }
+
+    #[test]
+    fn test_mcontext_accessors() {
+        let ctx = Mcontext {
+            mc_rax: 0x42,
+            mc_rbx: 0,
+            mc_rcx: 0,
+            mc_rdx: 0,
+            mc_rsi: 0,
+            mc_rdi: 0,
+            mc_rbp: 0,
+            mc_r8: 0,
+            mc_r9: 0,
+            mc_r10: 0,
+            mc_r11: 0,
+            mc_r12: 0,
+            mc_r13: 0,
+            mc_r14: 0,
+            mc_r15: 0,
+            mc_rip: 0x1000,
+            mc_rsp: 0x2000,
+            mc_rflags: 0x202,
+            mc_cs: 0x08,
+            mc_ss: 0x10,
+            mc_ds: 0,
+            mc_es: 0,
+            mc_fs: 0,
+            mc_gs: 0,
+            mc_fpstate: [0u8; 512],
+        };
+        assert_eq!(ctx.mc_rax, 0x42);
+        assert_eq!(ctx.mc_rip, 0x1000);
+        assert_eq!(ctx.mc_rsp, 0x2000);
+        assert_eq!(ctx.mc_rflags, 0x202);
+        assert_eq!(ctx.mc_cs, 0x08);
     }
 }

@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[ignore = "covered in kernel-tests (QEMU)"]
     fn test_probe_no_hardware() {
         unsafe {
             NR_DRIVES.store(0, Ordering::Relaxed);

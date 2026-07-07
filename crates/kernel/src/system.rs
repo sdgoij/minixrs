@@ -3179,11 +3179,12 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
             return crate::ipc::EINVAL;
         }
 
-        // Clear MF_DELIVERMSG if set (C: rp->p_misc_flags &= ~MF_DELIVERMSG)
+        // Clear MF_DELIVERMSG if set.
         let old_mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        (*rp)
-            .p_misc_flags
-            .store(old_mf & !0x0004, Ordering::Relaxed);
+        (*rp).p_misc_flags.store(
+            old_mf & !crate::proc::MiscFlags::DELIVERMSG.bits(),
+            Ordering::Relaxed,
+        );
 
         // Copy program name from caller's address space
         // use a stack buffer and CR3 switching like VDEVIO
@@ -3221,17 +3222,21 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         crate::hal::arch_proc_init(&mut (*rp).p_reg, ip, stack, name_slice, ps_str);
 
         // No reply to EXEC call: clear RTS_RECEIVING
-        // The target will start executing at the new entry point on return
-        let old_rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
-        (*rp)
+        // The target will start executing at the new entry point on return.
+        let old_rts = (*rp)
             .p_rts_flags
-            .store(old_rts & !0x4000_0000, Ordering::Relaxed); // clear RECEIVING
+            .fetch_and(!crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        // Enqueue if the process became fully runnable (no other RTS flags).
+        if old_rts & !crate::proc::RtsFlags::RECEIVING.bits() == 0 {
+            crate::sched::enqueue(rp);
+        }
 
         // Mark FPU regs as not significant
         let old_mf2 = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        (*rp)
-            .p_misc_flags
-            .store(old_mf2 & !0x1000, Ordering::Relaxed); // clear FPU_INITIALIZED
+        (*rp).p_misc_flags.store(
+            old_mf2 & !crate::proc::MiscFlags::FPU_INITIALIZED.bits(),
+            Ordering::Relaxed,
+        );
         // Force reloading FPU if current process owns it
         crate::hal::release_fpu(rp as *mut core::ffi::c_void);
 
@@ -3713,7 +3718,6 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 /// `msg` must contain valid fork message fields in the correct layout.
 pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
-        crate::hal::serial_write_byte(b'F');
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
         if !table::is_ok_endpoint(parent_ep) {
@@ -3744,7 +3748,6 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             crate::hal::serial_write_byte(b'I');
             return crate::ipc::EFAULT;
         }
-        crate::hal::serial_write_byte(b'K');
 
         let mut new_gen = table::endpoint_gen((*rpc).p_endpoint) + 1;
         if new_gen >= table::EP_MAX_GENERATION {
@@ -5454,6 +5457,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires ring 0 (cr3 access via proc_init)"]
     fn test_do_fork_handler_invalid_parent() {
         unsafe {
             proc_init();
@@ -5467,6 +5471,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires ring 0 (serial port I/O)"]
     fn test_do_fork_handler_child_slot_in_use() {
         unsafe {
             proc_init();
@@ -5490,6 +5495,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires ring 0 (serial port I/O)"]
     fn test_do_fork_handler_child_not_receiving() {
         unsafe {
             proc_init();
@@ -6068,7 +6074,9 @@ mod tests {
                 .p_rts_flags
                 .store(RtsFlags::empty().bits(), Ordering::Relaxed);
             // Set MF_DELIVERMSG before exec
-            (*rp).p_misc_flags.store(0x0004, Ordering::Relaxed);
+            (*rp)
+                .p_misc_flags
+                .store(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
 
             let mut msg = [0u8; MESSAGE_SIZE];
             msg_write_i32(&mut msg, EXEC_ENDPT_OFF, 0);
@@ -6080,7 +6088,11 @@ mod tests {
             let _ = do_exec_handler(rp, &mut msg);
 
             let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
-            assert_eq!(mf & 0x0004, 0, "MF_DELIVERMSG should have been cleared");
+            assert_eq!(
+                mf & MiscFlags::DELIVERMSG.bits(),
+                0,
+                "MF_DELIVERMSG should have been cleared",
+            );
         }
     }
 

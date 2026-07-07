@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[ignore = "covered in kernel-tests (QEMU)"]
     fn test_ahci_init_no_hardware() {
         unsafe {
             assert!(ahci_init().is_err());

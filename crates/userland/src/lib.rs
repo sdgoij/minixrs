@@ -169,12 +169,6 @@ const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 /// ls — list directory contents.
 pub fn ls(args: &[&str]) -> i32 {
     let dir = if args.len() > 1 { args[1] } else { "." };
-    // Debug: we entered ls
-    write_out(b"LS!\r\n");
-    write_out(b"CD:\r\n");
-    let cd_r = minix_rt::chdir(b"/");
-    let _ = cd_r;
-    write_out(b"CD done\r\n");
     // Use IPC-based open via minix_std (routes to VFS)
     let fd = match unsafe { minix_std::fs::open(dir, 0, 0) } {
         Ok(fd) => {
@@ -665,43 +659,97 @@ pub fn sh(_args: &[&str]) -> i32 {
                             return 0;
                         }
                         _ => {
+                            write_out(b"\r\nEXTERNAL COMMAND\r\n");
                             // Try external command via kernel fork/exec.
                             let cmd_bytes = cmd.as_bytes();
                             let mut cmd_path = [0u8; 256];
-                            let path_len = if 5 + cmd_bytes.len() + 1 <= cmd_path.len() {
+                            // If the command starts with '/', use it directly.
+                            // Otherwise try /bin/<cmd> first, then /sbin/<cmd>.
+                            let path_len = if cmd_bytes.starts_with(b"/") {
+                                let len = (cmd_bytes.len() + 1).min(cmd_path.len());
+                                cmd_path[..len - 1].copy_from_slice(&cmd_bytes[..len - 1]);
+                                cmd_path[len - 1] = 0;
+                                write_out(b"abs: ");
+                                write_out(&cmd_path[..len]);
+                                write_out(b"\r\n");
+                                len
+                            } else if 5 + cmd_bytes.len() + 1 <= cmd_path.len() {
                                 cmd_path[..5].copy_from_slice(b"/bin/");
                                 cmd_path[5..5 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
                                 cmd_path[5 + cmd_bytes.len()] = 0;
+                                write_out(b"bin: ");
+                                write_out(&cmd_path[..5 + cmd_bytes.len() + 1]);
+                                write_out(b"\r\n");
                                 5 + cmd_bytes.len() + 1
                             } else {
                                 0
                             };
                             if path_len > 0 {
+                                write_out(b"FORK...\r\n");
                                 let pid = minix_rt::fork();
+                                write_out(b"FORK ret=");
+                                let p = if pid >= 0 { pid as u64 } else { (-pid) as u64 };
+                                if p >= 10 {
+                                    write_out(&[b'0' + ((p / 10) % 10) as u8]);
+                                }
+                                write_out(&[b'0' + (p % 10) as u8]);
+                                write_out(b"\r\n");
                                 if pid < 0 {
                                     write_err(b"sh: fork failed\r\n");
                                 } else if pid == 0 {
-                                    // Child: try /bin/<cmd> first
+                                    write_out(b"CHILD: exec_replace\r\n");
+                                    // Child: try /bin/<cmd> first, or use path directly
                                     let r =
                                         unsafe { minix_rt::exec_replace(&cmd_path[..path_len]) };
-                                    if r < 0 && 6 + cmd_bytes.len() + 1 <= cmd_path.len() {
+                                    write_out(b"EXEC ret=");
+                                    let e = if r >= 0 { r as u64 } else { (-r) as u64 };
+                                    if e >= 10 {
+                                        write_out(&[b'0' + ((e / 10) % 10) as u8]);
+                                    }
+                                    write_out(&[b'0' + (e % 10) as u8]);
+                                    write_out(b"\r\n");
+                                    if r < 0
+                                        && !cmd_bytes.starts_with(b"/")
+                                        && 6 + cmd_bytes.len() + 1 <= cmd_path.len()
+                                    {
+                                        write_out(b"sbin fallback\r\n");
                                         // Try /sbin/<cmd>
                                         cmd_path[..6].copy_from_slice(b"/sbin/");
                                         cmd_path[6..6 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
                                         cmd_path[6 + cmd_bytes.len()] = 0;
-                                        let _ = unsafe {
+                                        let r2 = unsafe {
                                             minix_rt::exec_replace(
                                                 &cmd_path[..6 + cmd_bytes.len() + 1],
                                             )
                                         };
+                                        write_out(b"sbin ret=");
+                                        let e2 = if r2 >= 0 { r2 as u64 } else { (-r2) as u64 };
+                                        if e2 >= 10 {
+                                            write_out(&[b'0' + ((e2 / 10) % 10) as u8]);
+                                        }
+                                        write_out(&[b'0' + (e2 % 10) as u8]);
+                                        write_out(b"\r\n");
                                     }
                                     write_err(b"sh: ");
                                     write_err(cmd.as_bytes());
                                     write_err(b": not found\r\n");
+                                    write_out(b"CHILD: exit\r\n");
                                     minix_rt::exit(1);
                                 } else {
                                     // Parent: wait for child
+                                    write_out(b"PARENT: waitpid\r\n");
                                     let status = minix_rt::waitpid(pid);
+                                    write_out(b"WAITPID ret=");
+                                    let s = if status >= 0 {
+                                        status as u64
+                                    } else {
+                                        (-status) as u64
+                                    };
+                                    if s >= 10 {
+                                        write_out(&[b'0' + ((s / 10) % 10) as u8]);
+                                    }
+                                    write_out(&[b'0' + (s % 10) as u8]);
+                                    write_out(b"\r\n");
                                     if status < 0 {
                                         write_err(b"sh: waitpid failed\r\n");
                                     }

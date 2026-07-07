@@ -306,6 +306,7 @@ pub unsafe fn setup_user_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::offset_of;
 
     const EHDR_SIZE: usize = core::mem::size_of::<Elf64Ehdr>();
     const PHDR_SIZE: usize = core::mem::size_of::<Elf64Phdr>();
@@ -523,6 +524,32 @@ mod tests {
         assert_eq!(PT_NULL, 0);
         assert_eq!(PT_LOAD, 1);
         assert_eq!(EM_X86_64, 62);
+        assert_eq!(EM_RISCV, 243);
+        assert_eq!(PT_DYNAMIC, 2);
+        assert_eq!(PT_INTERP, 3);
+        assert_eq!(PT_NOTE, 4);
+        assert_eq!(PT_PHDR, 6);
+        assert_eq!(PT_GNU_STACK, 0x6474e551);
+    }
+
+    #[test]
+    fn test_ehdr_field_offsets() {
+        assert_eq!(offset_of!(Elf64Ehdr, e_entry), 24);
+        assert_eq!(offset_of!(Elf64Ehdr, e_phoff), 32);
+        assert_eq!(offset_of!(Elf64Ehdr, e_phentsize), 54);
+        assert_eq!(offset_of!(Elf64Ehdr, e_phnum), 56);
+    }
+
+    #[test]
+    fn test_phdr_field_offsets() {
+        assert_eq!(offset_of!(Elf64Phdr, p_type), 0);
+        assert_eq!(offset_of!(Elf64Phdr, p_flags), 4);
+        assert_eq!(offset_of!(Elf64Phdr, p_offset), 8);
+        assert_eq!(offset_of!(Elf64Phdr, p_vaddr), 16);
+        assert_eq!(offset_of!(Elf64Phdr, p_paddr), 24);
+        assert_eq!(offset_of!(Elf64Phdr, p_filesz), 32);
+        assert_eq!(offset_of!(Elf64Phdr, p_memsz), 40);
+        assert_eq!(offset_of!(Elf64Phdr, p_align), 48);
     }
 
     #[test]
