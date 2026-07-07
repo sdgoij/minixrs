@@ -502,22 +502,6 @@ unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
     if msg_ptr.is_null() {
         return -14; // EFAULT
     }
-    // Debug
-    if dest == 0 {
-        let pm = crate::table::proc_addr(0);
-        if !pm.is_null() {
-            let pm_rts = unsafe {
-                (*pm)
-                    .p_rts_flags
-                    .load(core::sync::atomic::Ordering::Relaxed)
-            };
-            if pm_rts != 0 {
-                crate::hal::serial_write_byte(b'P');
-                crate::hal::serial_write_byte(b'M');
-                crate::hal::serial_write_byte(b':');
-            }
-        }
-    }
     // Set delivery address so delivermsg can copy reply to user buffer.
     unsafe { (*caller).p_delivermsg_vir = msg_ptr as u64 };
     // do_sync_ipc reads destination from msg[0..4]

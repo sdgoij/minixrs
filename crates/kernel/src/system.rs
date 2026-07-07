@@ -3726,7 +3726,6 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
         let rpp = proc_addr(table::endpoint_slot(parent_ep));
         if rpp.is_null() || table::is_empty_proc(rpp) {
-            crate::hal::serial_write_byte(b'E');
             return crate::ipc::EFAULT;
         }
         // Always search for a free Proc slot (ignore PM's child_slot hint
