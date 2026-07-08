@@ -20,6 +20,20 @@ See the following skills for full details:
 - **Testing requirements**: `minix-testing` skill
 - **Commit message format**: `git-commit-messages` skill
 
+## Boot process dependencies
+
+VM is now a boot process (`/sbin/vm` at slot 8) and manages all `brk()`
+allocations via IPC. Any process that calls `brk()` depends on VM being
+started first.
+
+- **Keep VM in `boot_procs`** — removing it breaks `brk()` for every
+  process, causing immediate allocation failures.
+- **VM must come before any process that calls `brk()`** in the
+  `boot_procs` list. Currently INIT and MFS are after VM, which is
+  correct.
+- If a boot config file (`data/boot.cfg` or similar) specifies process
+  order, VM must precede all processes that allocate heap.
+
 ## Git — DO NOT TOUCH STAGED FILES
 The operator controls all staging and commit decisions. **Agents must never stage or unstage anything.**
 - **NEVER** run `git add` — the operator decides what gets staged.

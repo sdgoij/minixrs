@@ -237,6 +237,7 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
@@ -246,10 +247,9 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
         ];
-        // VM, DS, SCHED, TTY excluded — their main loops are stubs
-        // (spin_loop without IPC) which would hang the CPU.
 
         // Load each boot process from initramfs, storing InitInfo for
         // per-process page table creation.
@@ -300,25 +300,32 @@ pub extern "C" fn kmain() -> ! {
                 core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
             }
 
-            // Map the brk range.
             let user_flags =
                 kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
-            let brk_va_start = 0x3FE00000u64;
-            let brk_va_end = 0x3FF00000u64;
-            let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
-            let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
-                Some(base) => base,
-                None => {
-                    serial_write("  FAILED: out of memory for brk heap\r\n");
-                    hlt_loop();
-                }
-            };
-            for j in 0..brk_pages {
-                let va = brk_va_start + (j as u64) * 4096;
-                let pa = brk_phys + (j as u64) * 4096;
-                if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err() {
-                    serial_write("  FAILED: brk page mapping\r\n");
-                    hlt_loop();
+
+            // Map the brk range.
+            // For processes other than VM, pre-allocate a 1MB heap so brk
+            // calls work during boot before VM is fully initialized.
+            // VM manages its own heap via kernel allocator calls.
+            if proc_nr != VM_PROC_NR {
+                let brk_va_start = 0x3FE00000u64;
+                let brk_va_end = 0x3FF00000u64;
+                let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
+                let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
+                    Some(base) => base,
+                    None => {
+                        serial_write("  FAILED: out of memory for brk heap\r\n");
+                        hlt_loop();
+                    }
+                };
+                for j in 0..brk_pages {
+                    let va = brk_va_start + (j as u64) * 4096;
+                    let pa = brk_phys + (j as u64) * 4096;
+                    if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err()
+                    {
+                        serial_write("  FAILED: brk page mapping\r\n");
+                        hlt_loop();
+                    }
                 }
             }
 

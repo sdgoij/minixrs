@@ -35,6 +35,8 @@ const NR_GETPID: u64 = 20;
 pub const PM_PROC_NR: i32 = 0;
 /// Virtual File System endpoint.
 pub const VFS_PROC_NR: i32 = 1;
+/// VM server endpoint.
+pub const VM_PROC_NR: i32 = 8;
 
 /// VFS call numbers (from vfs/consts.h).
 pub const VFS_CHDIR: i32 = 0x108;
@@ -513,9 +515,10 @@ pub fn waitpid(child_pid: i32) -> i32 {
     i32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]))
 }
 
-/// Send a message to a process and wait for a reply (blocking).
-/// `msg` must be a 64-byte buffer. Returns the reply sender endpoint.
-/// Change the program break (heap end).
+/// VM_BRK message type — IPC call number for brk requests to the VM server.
+pub const VM_BRK: u32 = 0xC02;
+
+/// Change the program break (heap end) via IPC to the VM server.
 /// If `addr` is 0, returns the current break.
 /// Otherwise, sets the break to `addr` and returns the new break on success,
 /// or a negative error code on failure.
@@ -525,7 +528,26 @@ pub fn waitpid(child_pid: i32) -> i32 {
 /// `addr` must be a valid heap address or null (to query the current break).
 /// The caller must ensure no other code concurrently modifies the program break.
 pub unsafe fn brk(addr: *const u8) -> i64 {
-    unsafe { syscall1(NR_BRK, addr as u64) }
+    let mut msg = [0u8; 64];
+    // m_type at bytes 4-7
+    msg[4..8].copy_from_slice(&(VM_BRK as i32).to_le_bytes());
+    // New break address in m1i1 at bytes 8-11
+    let addr_val = addr as u32;
+    msg[8..12].copy_from_slice(&addr_val.to_le_bytes());
+    let r = sendrec(VM_PROC_NR, &mut msg);
+    if r < 0 {
+        return r as i64;
+    }
+    // Read reply: result code from m_type at bytes 4-7, or new break from m1i1 at bytes 8-11
+    // The VM server writes the new break address into m1i1 on success.
+    let result = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    if result < 0 {
+        result as i64
+    } else {
+        // Success: the new break address is in m1i1
+        let new_brk = u32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+        new_brk as i64
+    }
 }
 
 /// Increase the program break by `increment` bytes and return the old break,

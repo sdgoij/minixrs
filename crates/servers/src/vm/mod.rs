@@ -163,25 +163,62 @@ pub fn init_vm() {
     set_call(VM_CLEARCACHE, do_clearcache, "do_clearcache");
 
     set_call(VM_GETRUSAGE, do_getrusage, "do_getrusage");
+
+    // Initialize vmproc entries for all boot processes.
+    vm_init_boot();
+}
+
+/// Initialize vmproc entries for all boot processes.
+///
+/// Records the initial data segment boundaries so that do_brk can
+/// track per-process heap state. The initial brk starts at the
+/// pre-allocated heap base (0x3FE00000) that the kernel maps during boot.
+fn vm_init_boot() {
+    use arch_common::consts::NR_PROCS;
+
+    for slot in 0..NR_PROCS {
+        let ep = kernel::table::make_endpoint(0, slot as i32);
+        let rp = kernel::table::proc_addr(slot as i32);
+        if rp.is_null() {
+            continue;
+        }
+        unsafe {
+            let flags = (*rp)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            if flags & kernel::proc::RtsFlags::SLOT_FREE.bits() != 0 {
+                continue;
+            }
+        }
+        // Check if this is a boot process by looking for a CR3
+        unsafe {
+            let cr3 = (*rp).p_seg.p_cr3;
+            if cr3 == 0 {
+                continue;
+            }
+        }
+        if let Some(vmp) = unsafe { proc::vmproc_alloc(ep) } {
+            vmp.vm_region_top = 0x3FE00000u64;
+            unsafe {
+                vmp.vm_pml4_phys = (*rp).p_seg.p_cr3;
+            }
+        }
+    }
 }
 
 // Server main loop
 
 /// VM server main entry point.
 ///
-/// Initializes the call table and enters the message dispatch loop.
-/// The IPC receive call (`sef_receive`) is stubbed — real IPC comes
-/// in Phase 13 (IPC + SEF framework).
+/// Initializes the call table, boots vmproc table, and enters the
+/// message dispatch loop.
 pub fn vm_main() {
     init_vm();
 
     #[cfg(target_os = "none")]
     {
-        // Syscall numbers for IPC (from minix-std):
-        //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
-        //   SENDREC_CALL = 48: sendrec(dest, &mut msg) → replier endpoint
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SEND_CALL: u64 = 46;
         const ANY: i32 = 0x0000ffff;
 
         loop {
@@ -192,7 +229,6 @@ pub fn vm_main() {
             };
 
             // Receive a message from any sender.
-            // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
             let src = unsafe {
                 minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
             };
@@ -200,22 +236,18 @@ pub fn vm_main() {
                 continue;
             }
             let src_ep = src as i32;
-
-            // Write the sender endpoint into the message.
             msg.m_source = src_ep;
 
-            // Dispatch the call.
+            // Dispatch the call. dispatch_message handles setting msg.m_type
+            // to the result and (via ipc_send_stub) sending the reply.
+            // The stub is a no-op; the main loop sends the actual reply via SEND.
             let status = dispatch_message(&mut msg, 0);
 
-            // Send the reply if the handler didn't return EDONTREPLY.
-            if status != EDONTREPLY {
+            // Send the reply if the handler didn't request no-reply.
+            if status != SUSPEND && status != EDONTREPLY {
                 msg.m_type = status;
                 unsafe {
-                    minix_rt::syscall2(
-                        SENDREC_CALL,
-                        src_ep as u64,
-                        &mut msg as *mut Message as u64,
-                    );
+                    minix_rt::syscall2(SEND_CALL, src_ep as u64, &mut msg as *mut Message as u64);
                 }
             }
         }
@@ -764,7 +796,6 @@ fn do_exec_newmem(msg: &mut Message) -> i32 {
 }
 
 fn do_brk(msg: &mut Message) -> i32 {
-    // The new heap break address comes in m1i1.
     let new_brk = unsafe { msg.m_payload.m1.m1i1 } as u64;
     let ep = msg.m_source;
 
@@ -772,8 +803,19 @@ fn do_brk(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // Validate: break must be page-aligned-ish (MINIX rounds up).
-    // The break address must be within the user address space.
+    // addr 0 is a query — return the current break without modification
+    if new_brk == 0 {
+        let current = unsafe {
+            match proc::vmproc_lookup(ep) {
+                Some(vmp) => vmp.vm_region_top,
+                None => return EINVAL,
+            }
+        };
+        msg.m_payload.m1.m1i1 = current as i32;
+        return OK;
+    }
+
+    // Validate: break must be within the user address space.
     if new_brk > kernel::pagetable::MAX_USER_ADDRESS {
         return EINVAL;
     }
@@ -783,11 +825,9 @@ fn do_brk(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // Round up to page boundary.
     let page_size: u64 = 4096;
     let target = (new_brk + page_size - 1) & !(page_size - 1);
 
-    // Get the current region_top (approximate current break).
     let current_top = unsafe {
         match proc::vmproc_lookup(ep) {
             Some(vmp) => vmp.vm_region_top,
@@ -797,17 +837,21 @@ fn do_brk(msg: &mut Message) -> i32 {
 
     if target > current_top {
         // Expand heap: allocate and map new pages.
-        let start = if current_top.is_multiple_of(page_size) {
-            current_top
+        // Pages in the pre-allocated range (0x3FE00000..0x3FF00000) are
+        // already mapped by the kernel during boot. Only allocate pages
+        // beyond that range.
+        let prealloc_end: u64 = 0x3FF00000;
+        let alloc_start = if current_top < prealloc_end {
+            prealloc_end
         } else {
-            (current_top + page_size - 1) & !(page_size - 1)
+            current_top
         };
 
-        let mut va = start;
+        let mut va = alloc_start;
         while va < target {
             let pg = unsafe { kernel::vm::alloc_mem(1, 0) };
             if pg == kernel::vm::NO_MEM {
-                return -1;
+                return EAGAIN;
             }
             let pa = pg * page_size;
             let flags = kernel::pagetable::MAP_PRESENT
@@ -815,14 +859,20 @@ fn do_brk(msg: &mut Message) -> i32 {
                 | kernel::pagetable::MAP_WRITE;
             if unsafe { kernel::pagetable::map_page(cr3, va, pa, flags) }.is_err() {
                 unsafe { kernel::vm::free_mem(pg, 1) };
-                return -1;
+                return EAGAIN;
             }
             va += page_size;
         }
     } else if target < current_top {
         // Shrink heap: unmap pages.
-        unsafe {
-            let _ = kernel::pagetable::unmap_range(cr3, target, current_top - target);
+        // Don't unmap pages within the pre-allocated range.
+        let prealloc_start: u64 = 0x3FE00000;
+        let unmap_end = current_top;
+        let unmap_start = target.max(prealloc_start);
+        if unmap_end > unmap_start {
+            unsafe {
+                let _ = kernel::pagetable::unmap_range(cr3, unmap_start, unmap_end - unmap_start);
+            }
         }
     }
 
