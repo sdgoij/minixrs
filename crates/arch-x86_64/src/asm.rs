@@ -404,7 +404,11 @@ pub unsafe fn read_cr3() -> u64 {
 #[inline]
 pub unsafe fn write_cr3(value: u64) {
     unsafe {
-        asm!("mov cr3, rax", in("rax") value, options(nomem, nostack));
+        // SAFETY: mov to cr3 flushes the TLB (non-global entries).
+        // The `nomem` option is intentionally omitted — the compiler
+        // must not reorder memory accesses across the CR3 switch,
+        // because virtual→physical translations change.
+        asm!("mov cr3, rax", in("rax") value, options(nostack));
     }
 }
 

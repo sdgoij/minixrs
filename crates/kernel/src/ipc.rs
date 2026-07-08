@@ -62,11 +62,9 @@ pub fn ipc_status_has_flag(status: u16, flag: u16) -> bool {
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
     unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed) as u16;
-        let new_status = (status & !IPC_FLG_CALL_MASK) | (call as u16);
-        (*rp)
-            .p_misc_flags
-            .store(new_status as u32, Ordering::Relaxed);
+        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        let new_status = (status & !(IPC_FLG_CALL_MASK as u32)) | (call as u32);
+        (*rp).p_misc_flags.store(new_status, Ordering::Relaxed);
     }
 }
 
@@ -77,10 +75,10 @@ pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
     unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed) as u16;
+        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
         (*rp)
             .p_misc_flags
-            .store((status | flag) as u32, Ordering::Relaxed);
+            .store(status | (flag as u32), Ordering::Relaxed);
     }
 }
 
@@ -91,10 +89,10 @@ pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_clear(rp: *mut Proc) {
     unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed) as u16;
+        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
         (*rp)
             .p_misc_flags
-            .store((status & !IPC_FLG_STATUS_MASK) as u32, Ordering::Relaxed);
+            .store(status & !(IPC_FLG_STATUS_MASK as u32), Ordering::Relaxed);
     }
 }
 
@@ -139,8 +137,13 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
         }
 
         if will_receive(dst_ptr, (*caller_ptr).p_endpoint) {
-            // Direct delivery
-            assert!((*dst_ptr).p_misc_flags.load(Ordering::Relaxed) as u16 & (1 << 6) == 0);
+            // Direct delivery.
+            // Destination must not be in its own SENDREC (MF_REPLY_PEND set).
+            // If it were, the reply from its SENDREC target could be
+            // intercepted by a spurious delivery from this sender.
+            assert!(
+                (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() == 0
+            );
 
             let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*dst_ptr).p_delivermsg;
             core::ptr::copy_nonoverlapping(m_ptr, dst_msg.as_mut_ptr(), MESSAGE_SIZE);
@@ -155,7 +158,9 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                 .p_misc_flags
                 .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
 
-            let call = if (*caller_ptr).p_misc_flags.load(Ordering::Relaxed) as u16 & (1 << 0) != 0
+            let call = if (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
+                & MiscFlags::REPLY_PEND.bits()
+                != 0
             {
                 SENDREC
             } else if flags & NON_BLOCKING != 0 {
@@ -164,13 +169,6 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                 SEND
             };
             ipc_status_add_call(dst_ptr, call);
-
-            if call == SENDREC {
-                // Clear REPLY_PEND on the DESTINATION (not caller)
-                (*dst_ptr)
-                    .p_misc_flags
-                    .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-            }
 
             // Set the receiver's return value to the sender's endpoint.
             // Uses write_retval which knows the arch-specific offset
@@ -282,8 +280,8 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
             }
 
             // C (L936): If REPLY_PEND is set (SENDREC in progress), skip
-            // notification checks — the process is waiting for a reply, not
-            // for notifications.
+            // notification and async checks — the process is waiting for a
+            // reply, not for notifications or async messages.
             let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
                 & MiscFlags::REPLY_PEND.bits()
                 != 0;
@@ -313,6 +311,22 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                 return notify_src;
                             }
                         }
+                    }
+                }
+
+                // C: try pending async messages (try_async).
+                // This delivers SENDA messages that were deferred when the
+                // destination was not in WILLRECEIVE at send time.
+                if has_pending_asend(caller_ptr) {
+                    let r = try_async(caller_ptr);
+                    if r == OK {
+                        // try_async delivered the message directly into
+                        // p_delivermsg; the syscall handler will copy it out
+                        // via delivermsg on the return path.
+                        (*caller_ptr)
+                            .p_misc_flags
+                            .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+                        return OK;
                     }
                 }
             }
@@ -1273,6 +1287,7 @@ mod tests {
             let rp = proc_addr(nr);
             if !rp.is_null() {
                 (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+                (*rp).p_misc_flags.store(0, Ordering::Relaxed);
                 (*rp).p_nr = nr;
                 // Use proper endpoint encoding: generation 0, slot = nr
                 (*rp).p_endpoint = crate::table::make_endpoint(0, nr);

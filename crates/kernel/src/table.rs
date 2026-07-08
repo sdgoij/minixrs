@@ -371,6 +371,10 @@ pub unsafe fn proc_init() {
             (*rp).p_magic = PMAGIC;
             // Clear run queue link (prevents stale pointers between tests)
             (*rp).p_nextready = core::ptr::null_mut();
+            // Clear misc flags (prevents REPLY_PEND leakage between tests)
+            (*rp)
+                .p_misc_flags
+                .store(0, core::sync::atomic::Ordering::Relaxed);
             // Mark slot as free
             (*rp).p_rts_flags.store(
                 RtsFlags::SLOT_FREE.bits(),

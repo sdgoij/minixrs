@@ -17,6 +17,20 @@ use crate::vfs::worker;
 /// PM process endpoint.
 const PM_PROC_NR: i32 = 0;
 
+/// Boot process endpoints — processes the kernel loads before starting
+/// the scheduler.  Their Fproc slots must be populated before
+/// `mount_root` so they get `fp_rdir` / `fp_cdir` assigned.
+///
+/// Matches the `boot_procs` table in `crates/kernel-boot/src/main.rs`.
+const BOOT_ENDPOINTS: &[i32] = &[
+    arch_common::com::PM_PROC_NR,      // 0: Process Manager
+    arch_common::com::VFS_PROC_NR,     // 1: Virtual File System (self)
+    arch_common::com::RS_PROC_NR,      // 2: Reincarnation Server
+    arch_common::com::MFS_PROC_NR,     // 7: Minix File System
+    arch_common::com::INIT_PROC_NR,    // 10: init
+    arch_common::com::RAMDISK_PROC_NR, // 11: RAM disk driver
+];
+
 /// Offset of m_source in the message buffer (4 bytes).
 const MSG_SOURCE_OFF: usize = 0;
 
@@ -68,11 +82,18 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         rfp.fp_umask = 0o0022;
     }
 
-    // Set up PM's Fproc entry so VFS can reply to PM messages.
-    // PM has endpoint 0, slot 0.
-    let pm_fp = unsafe { &mut *fproc_array.add(0) };
-    pm_fp.fp_endpoint = PM_PROC_NR;
-    pm_fp.fp_pid = 1;
+    // Pre-populate Fproc entries for all boot processes so that
+    // mount_root can assign them fp_rdir / fp_cdir.
+    // PIDs start at 1 (PM) and increase; exact values don't matter for
+    // boot since PM handles the authoritative PID assignment.
+    for (pid, &ep) in (1..).zip(BOOT_ENDPOINTS.iter()) {
+        let slot = (ep & 0xff) as usize;
+        if slot < 256 {
+            let fp = unsafe { &mut *fproc_array.add(slot) };
+            fp.fp_endpoint = ep;
+            fp.fp_pid = pid;
+        }
+    }
 
     worker::worker_init();
 

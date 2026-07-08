@@ -382,11 +382,16 @@ pub unsafe fn write_cr3(cr3: u64) {
     // cr3 is the physical page number (PPN) of the root page table
     let satp = (8u64 << 60) | (cr3 >> 12); // MODE=SV39, PPN=cr3>>12
     unsafe {
-        core::arch::asm!("csrw satp, {satp}", satp = in(reg) satp, options(nomem, nostack));
+        // SAFETY: `nomem` is intentionally omitted — the csrw satp
+        // invalidates cached translations, so memory accesses must not
+        // be reordered across this instruction.
+        core::arch::asm!("csrw satp, {satp}", satp = in(reg) satp, options(nostack));
     }
     // Flush TLB after SATP write
     unsafe {
-        core::arch::asm!("sfence.vma", options(nomem, nostack));
+        // SAFETY: `nomem` omitted — sfence.vma is a TLB invalidation
+        // barrier.  Memory accesses must not cross it.
+        core::arch::asm!("sfence.vma", options(nostack));
     }
 }
 
