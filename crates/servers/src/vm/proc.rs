@@ -384,6 +384,9 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
         // Free the PML4 page itself.
         vm::free_mem(cr3 / vm::VM_PAGE_SIZE as u64, 1);
 
+        // Clear the region tracking.
+        (*vmp).vm_regions = crate::vm::region::RegionList::new();
+
         // Reset the Vmproc entry.
         vmproc_free(ep);
     }
@@ -412,11 +415,17 @@ pub unsafe fn vm_clone(parent_ep: Endpoint, child_ep: Endpoint) -> i32 {
             return r;
         }
 
-        // Copy counters from parent.
+        // Copy counters and regions from parent.
         if let Some(parent_vmp) = vmproc_lookup(parent_ep) {
             (*child_vmp).vm_minor_page_fault = parent_vmp.vm_minor_page_fault;
             (*child_vmp).vm_major_page_fault = parent_vmp.vm_major_page_fault;
             (*child_vmp).vm_region_top = parent_vmp.vm_region_top;
+            // Copy all regions from parent to child.
+            for i in 0..crate::vm::region::MAX_REGIONS {
+                if let Some(region) = &parent_vmp.vm_regions.regions[i] {
+                    let _ = (*child_vmp).vm_regions.insert(*region);
+                }
+            }
         }
 
         0

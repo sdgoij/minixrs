@@ -1027,6 +1027,14 @@ fn do_exec_newmem(msg: &mut Message) -> i32 {
             // Allocation of the new page table failed
             return EAGAIN;
         }
+
+        // Clear old regions — the process has a fresh page table.
+        if let Some(vmp) = proc::vmproc_lookup(ep) {
+            for i in 0..crate::vm::region::MAX_REGIONS {
+                vmp.vm_regions.regions[i] = None;
+            }
+            vmp.vm_region_top = 0;
+        }
     }
 
     OK
