@@ -7,6 +7,7 @@
 
 pub mod mem;
 pub mod proc;
+pub mod region;
 
 use arch_common::com::{
     NR_VM_CALLS, RS_INIT, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT,
@@ -202,6 +203,17 @@ fn vm_init_boot() {
             unsafe {
                 vmp.vm_pml4_phys = (*rp).p_seg.p_cr3;
             }
+            // Create a data segment region for the pre-allocated brk heap.
+            let data_region = region::VirRegion::new(
+                0x3FE00000u64,
+                0x100000u64, // 1 MB
+                region::VR_READABLE
+                    | region::VR_WRITABLE
+                    | region::VR_ANON
+                    | region::VR_PRESENT
+                    | region::VR_DATA,
+            );
+            vmp.vm_regions.insert(data_region);
         }
     }
 }

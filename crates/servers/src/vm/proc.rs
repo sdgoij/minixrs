@@ -11,6 +11,8 @@ use kernel::pagetable;
 use kernel::table::{endpoint_slot, proc_addr};
 use kernel::vm::{self, NO_MEM};
 
+use crate::vm::region::RegionList;
+
 const PG_P: u64 = 0x001;
 const PG_U: u64 = 0x004;
 const PG_PS: u64 = 0x080;
@@ -23,7 +25,6 @@ type PtEntry = u64;
 const USER_PML4_ENTRIES: usize = 256;
 const NENTRIES: usize = 512;
 
-
 /// Per-process VM state, analogous to MINIX's `struct vmproc`.
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -34,6 +35,8 @@ pub(crate) struct Vmproc {
     pub vm_pml4_phys: u64,
     /// Highest virtual address inserted into regions.
     pub vm_region_top: u64,
+    /// Virtual memory regions for this process.
+    pub vm_regions: RegionList,
     /// Minor page fault counter.
     pub vm_minor_page_fault: u64,
     /// Major page fault counter.
@@ -117,6 +120,7 @@ pub(crate) unsafe fn vmproc_alloc(ep: Endpoint) -> Option<&'static mut Vmproc> {
             vm_endpoint: ep,
             vm_pml4_phys: 0,
             vm_region_top: 0,
+            vm_regions: RegionList::new(),
             vm_minor_page_fault: 0,
             vm_major_page_fault: 0,
         };
@@ -182,7 +186,6 @@ unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
         (*rp).p_seg.p_cr3
     }
 }
-
 
 /// Allocate a new PML4 for a process.
 ///
@@ -256,7 +259,6 @@ pub unsafe fn pt_bind(ep: Endpoint) -> i32 {
         0
     }
 }
-
 
 /// Initialize a new Vmproc entry for a process.
 ///
@@ -570,7 +572,6 @@ pub unsafe fn pt_new_for_fork(child_ep: Endpoint, parent_ep: Endpoint) -> i32 {
     }
 }
 
-
 /// Get the physical address of a process's PML4 (CR3 value).
 ///
 /// Returns 0 if the process has no per-process page table.
@@ -592,7 +593,6 @@ pub unsafe fn vm_get_addrspace(ep: Endpoint) -> u64 {
         get_p_cr3(ep)
     }
 }
-
 
 /// Copy data from one process's address space to another.
 ///

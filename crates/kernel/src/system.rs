@@ -414,6 +414,25 @@ const VTIMER_ENDPT_OFF: usize = 32;
 const SETGRANT_ADDR_OFF: usize = 0;
 const SETGRANT_SIZE_OFF: usize = 8;
 
+// VM_PAGING message offsets (kernel call 62):
+//   offset  8: subcmd      (i32) — VM_PAGING_ALLOC/FREE/MAP/UNMAP
+//   offset 12: count       (i32) — page count for ALLOC
+//   offset 24: cr3         (u64) — page table root for MAP/UNMAP
+//   offset 32: va          (u64) — virtual address for MAP/UNMAP
+//   offset 40: pa          (u64) — physical address for MAP / reply for ALLOC
+//   offset 48: flags       (u64) — page flags for MAP
+const VM_PAGING_SUBCMD_OFF: usize = 8;
+const VM_PAGING_COUNT_OFF: usize = 12;
+const VM_PAGING_CR3_OFF: usize = 24;
+const VM_PAGING_VA_OFF: usize = 32;
+const VM_PAGING_PA_OFF: usize = 40;
+const VM_PAGING_FLAGS_OFF: usize = 48;
+
+pub const VM_PAGING_ALLOC: i32 = 1;
+pub const VM_PAGING_FREE: i32 = 2;
+pub const VM_PAGING_MAP: i32 = 3;
+pub const VM_PAGING_UNMAP: i32 = 4;
+
 // Constants
 
 /// Base for kernel call numbers.
@@ -1193,6 +1212,7 @@ pub unsafe fn system_init() {
         map_call(56, do_safememset_handler); // SYS_SAFEMEMSET
         map_call(60, do_exec_finish_handler); // SYS_EXEC finalization
         map_call(61, do_exec_initramfs_handler); // SYS_EXEC_INITRAMFS
+        map_call(62, do_vm_paging_handler); // SYS_VM_PAGING
     }
 
     /// Stub for SYS_UPDATE — deferred.
@@ -4477,6 +4497,85 @@ pub unsafe fn do_memset_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         // Delegate to vm_memset (physical address write)
         crate::vm::vm_memset(_base, _pattern as u8, _count as usize);
         OK
+    }
+}
+
+/// Handle SYS_VM_PAGING — low-level page table operations for VM.
+///
+/// Sub-commands (at VM_PAGING_SUBCMD_OFF):
+/// - VM_PAGING_ALLOC: Allocate contiguous physical pages
+///   - VM_PAGING_COUNT_OFF = page count (i32)
+///   - Reply: VM_PAGING_PA_OFF = physical address (u64)
+/// - VM_PAGING_FREE: Free physical pages
+///   - VM_PAGING_PA_OFF = physical address (u64)
+///   - VM_PAGING_COUNT_OFF = page count (i32)
+/// - VM_PAGING_MAP: Map a 4K page in a page table
+///   - VM_PAGING_CR3_OFF = page table root (u64)
+///   - VM_PAGING_VA_OFF = virtual address (u64)
+///   - VM_PAGING_PA_OFF = physical address (u64)
+///   - VM_PAGING_FLAGS_OFF = page flags (u64)
+/// - VM_PAGING_UNMAP: Unmap a 4K page from a page table
+///   - VM_PAGING_CR3_OFF = page table root (u64)
+///   - VM_PAGING_VA_OFF = virtual address (u64)
+///
+/// # Safety
+///
+/// `caller` must be a valid process pointer. The VM server is trusted
+/// to provide valid CR3 values.
+pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let subcmd = msg_read_i32(msg, VM_PAGING_SUBCMD_OFF);
+
+        match subcmd {
+            VM_PAGING_ALLOC => {
+                let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
+                if count <= 0 {
+                    return crate::ipc::EINVAL;
+                }
+                let page = crate::vm::alloc_mem(count as usize, 0);
+                if page == crate::vm::NO_MEM {
+                    return crate::ipc::ENOMEM;
+                }
+                let pa = page * crate::vm::VM_PAGE_SIZE as u64;
+                msg_write_u64(msg, VM_PAGING_PA_OFF, pa);
+                OK
+            }
+            VM_PAGING_FREE => {
+                let pa = msg_read_u64(msg, VM_PAGING_PA_OFF);
+                let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
+                if count <= 0 {
+                    return crate::ipc::EINVAL;
+                }
+                crate::vm::free_mem(pa / crate::vm::VM_PAGE_SIZE as u64, count as u64);
+                OK
+            }
+            VM_PAGING_MAP => {
+                let cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                let va = msg_read_u64(msg, VM_PAGING_VA_OFF);
+                let pa = msg_read_u64(msg, VM_PAGING_PA_OFF);
+                let flags = msg_read_u64(msg, VM_PAGING_FLAGS_OFF);
+                if cr3 == 0 || va > crate::pagetable::MAX_USER_ADDRESS {
+                    return crate::ipc::EINVAL;
+                }
+                match crate::pagetable::map_page(cr3, va, pa, flags) {
+                    Ok(_) => OK,
+                    Err(crate::pagetable::PageTableError::OutOfMemory) => crate::ipc::ENOMEM,
+                    Err(_) => crate::ipc::EINVAL,
+                }
+            }
+            VM_PAGING_UNMAP => {
+                let cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                let va = msg_read_u64(msg, VM_PAGING_VA_OFF);
+                if cr3 == 0 || va > crate::pagetable::MAX_USER_ADDRESS {
+                    return crate::ipc::EINVAL;
+                }
+                match crate::pagetable::unmap_page(cr3, va) {
+                    Ok(_) => OK,
+                    Err(_) => crate::ipc::EINVAL,
+                }
+            }
+            _ => crate::ipc::ENOSYS,
+        }
     }
 }
 
