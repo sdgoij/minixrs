@@ -163,7 +163,10 @@ unsafe fn initramfs_data() -> &'static [u8] {
     let len = end.wrapping_sub(start);
     // With stubs: len = 1, which is < 110 (header size), so
     // parse_initramfs will return None gracefully.
-    if len == 0 || len > 10 * 1024 * 1024 {
+    // Debug-profile servers produce ~42 MB initramfs. Allow up to 256 MB
+    // (the full QEMU memory), which is the maximum the physical memory
+    // allocator can address before we hit MMIO space.
+    if len == 0 || len > 256 * 1024 * 1024 {
         return &[];
     }
     unsafe { core::slice::from_raw_parts(start as *const u8, len) }

@@ -25,6 +25,13 @@ pub extern "C" fn _start() -> ! {
     kmain()
 }
 
+// Linker symbol: byte just past the end of the kernel binary
+// (after the `.initramfs` section, page-aligned in minix-raw.ld).
+#[cfg(not(test))]
+unsafe extern "C" {
+    static __kernel_end: u8;
+}
+
 /// Kernel main entry point — called from the multiboot trampoline.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -76,12 +83,50 @@ pub extern "C" fn kmain() -> ! {
     // Initialize the physical memory allocator.
     serial_write("initializing allocator...\r\n");
     {
+        // Use the linker-provided __kernel_end symbol to compute where the
+        // kernel binary ends in physical memory. This is page-aligned in
+        // minix-raw.ld (ALIGN(4096) after .initramfs).
+        let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+
+        // Build the physical memory map following the MINIX pattern
+        // (see pre_init.c get_parameters + kmain):
+        //
+        //   1. Add AVAILABLE regions as reported by the platform.
+        //   2. Remove occupied regions (kernel + boot modules).
+        //   3. (After bootstrap) Release bootstrap memory back to pool.
+        //
+        // Without a multiboot-provided memory map, we use the known
+        // QEMU `-m 256M` physical layout. Everything BELOW kernel_end is
+        // occupied by one of:
+        //
+        //   0x000000 - 0x09FFFF   Conventional (640 KB) — may contain
+        //                          real-mode IVT/BDA/EBDA from SeaBIOS
+        //   0x0A0000 - 0x0FFFFF   Reserved (VGA, BIOS, option ROMs)
+        //   0x100000 - 0x10XXXX   32-bit trampoline (linked at 0x100000).
+        //                          Its .bss holds the ACTIVE identity-
+        //                          mapped page tables (PML4/PDP/PD at
+        //                          ~0x101000) that CR3 still points to.
+        //                          Overwriting these causes a triple fault.
+        //   0x200000 - kernel_end  Kernel binary (loaded by -device loader).
+        //
+        // The free pool starts at kernel_end (after all occupied ranges).
+        //
+        const PHYS_MEM_TOP: u64 = 0x1000_0000; // 256 MB
+
         let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-        // Start after the kernel image (loaded at 0x200000). With the
-        // embedded 8 MB MFS image (.rodata) the kernel extends to ~0xB00000.
-        // Start the free pool at 16 MB to safely clear it.
-        mmap.add(0x0100_0000, 0x1000_0000);
+
+        // Step 1: Add memory from kernel binary end to top of RAM.
+        // This is unequivocally free — the trampoline and kernel occupy
+        // everything below, and QEMU provides contiguous RAM from 0.
+        if kernel_end < PHYS_MEM_TOP {
+            mmap.add(kernel_end, PHYS_MEM_TOP);
+        }
+
+        // Step 2: Remove platform-specific reserved region near top.
+        // QEMU reserves a window for ACPI tables, PIIX4 PM registers,
+        // and PCI config space at the top of the 256 MB range.
         mmap.cut(0x0FE0_0000, 0x0FF0_0000);
+
         arch_x86_64::alloc::init_allocator(&mmap);
     }
     serial_write("allocator ready\r\n");

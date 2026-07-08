@@ -10,6 +10,14 @@ use arch_common::com::{MFS_PROC_NR, PM_PROC_NR, VFS_PROC_NR};
 const FS_BASE: i32 = 0xA00;
 const REQ_READSUPER: i32 = FS_BASE + 28;
 
+/// Run all boot tests, then exit QEMU with success/failure.
+///
+/// # Safety
+///
+/// Must be called from the SYS_BOOT_COMPLETE syscall handler after VFS
+/// has finished mount_root and all boot processes are initialized.
+/// Requires that the kernel-allocator, process table, IPC, and per-process
+/// page tables are fully set up. The function never returns — it exits QEMU.
 pub unsafe fn run_boot_tests() -> ! {
     serial_write("\r\n=== BOOT TEST ===\r\n");
     let mut failures: u32 = 0;
@@ -40,6 +48,10 @@ pub unsafe fn run_boot_tests() -> ! {
 
     // G: PM notification
     failures += test_pm_has_message();
+
+    // H: Physical memory allocator — kernel binary excluded from free pool
+    failures += test_allocator_no_kernel_overlap();
+    failures += test_allocator_has_free_pages();
 
     if failures == 0 {
         serial_write("ALL TESTS PASSED\r\n");
@@ -315,6 +327,67 @@ fn test_vm_check_range() -> u32 {
     0
 }
 
+// H: Physical memory allocator
+
+// Linker symbol: byte just past the end of the kernel binary.
+// Same extern as in main.rs — the boot test runs in the same binary.
+unsafe extern "C" {
+    static __kernel_end: u8;
+}
+
+fn test_allocator_no_kernel_overlap() -> u32 {
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+
+    // Allocate a single page from the physical allocator.
+    let page = match arch_x86_64::alloc::alloc_phys_page() {
+        Some(p) => p,
+        None => {
+            serial_write("  FAIL: alloc_phys_page returned None\r\n");
+            return 1;
+        }
+    };
+
+    // Verify the page is NOT inside the kernel binary range.
+    // Kernel occupies [0x200000, kernel_end).
+    if page >= 0x20_0000 && page < kernel_end {
+        serial_write("  FAIL: allocator page 0x");
+        print_hex(page);
+        serial_write(" is inside kernel range [0x200000, 0x");
+        print_hex(kernel_end);
+        serial_write(")\r\n");
+        return 1;
+    }
+
+    // Free the page back.
+    arch_x86_64::alloc::free_phys_page(page);
+
+    serial_write("  OK allocator page 0x");
+    print_hex(page);
+    serial_write(" outside kernel\r\n");
+    0
+}
+
+fn test_allocator_has_free_pages() -> u32 {
+    let alloc = arch_x86_64::alloc::global_allocator();
+    if alloc.is_null() {
+        serial_write("  FAIL: global allocator null\r\n");
+        return 1;
+    }
+    unsafe {
+        let free = (*alloc).free_count();
+        if free < 10 {
+            serial_write("  FAIL: only ");
+            print_dec(free as u32);
+            serial_write(" free pages (expected >= 10)\r\n");
+            return 1;
+        }
+        serial_write("  OK allocator free pages=");
+        print_dec(free as u32);
+        serial_write("\r\n");
+    }
+    0
+}
+
 fn test_pm_has_message() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(PM_PROC_NR);
@@ -374,4 +447,11 @@ fn print_dec(mut n: u32) {
         n /= 10;
     }
     serial_write(core::str::from_utf8(&buf[i..]).unwrap_or(""));
+}
+fn print_hex(val: u64) {
+    let hex = b"0123456789abcdef";
+    for i in (0..16).rev() {
+        let nibble = ((val >> (i * 4)) & 0xF) as usize;
+        kernel::hal::serial_write_byte(hex[nibble]);
+    }
 }

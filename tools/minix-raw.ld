@@ -50,11 +50,14 @@ SECTIONS
                 __bss_end = .;
             }
 
-    .initramfs : {
+    .initramfs : ALIGN(4096) {
         __initramfs_start = .;
         *(.initramfs)
+        *(.minixfs)
         __initramfs_end = .;
     }
+
+    __kernel_end = ALIGN(4096);
 
     /DISCARD/ : {
         *(.eh_frame)
