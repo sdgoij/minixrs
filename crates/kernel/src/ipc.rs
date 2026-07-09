@@ -506,7 +506,11 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
         };
 
         // Copy the message from the kernel buffer to the user virtual address.
-        core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, MESSAGE_SIZE);
+        // Copy only size_of::<Message>() bytes (56), not MESSAGE_SIZE (64),
+        // to avoid stack corruption — user receive buffers are typically
+        // Message structs (56 bytes), not 64-byte buffers.
+        let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
+        core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, copy_sz);
 
         // Restore the original CR3.
         if let Some(saved) = saved_cr3 {

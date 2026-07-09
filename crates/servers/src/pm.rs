@@ -1055,11 +1055,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
 
             // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
-            // Kernel message format (SYS_FORK, call 0):
-            //   m1_i1 = parent endpoint
-            //   m1_i2 = child slot (-1 = kernel auto-selects)
-            //   m1_i3 = fork flags (0 for normal fork)
-            // Reply: m1_i1 = child endpoint
             let mut kmsg = Message {
                 m_source: 0,
                 m_type: 0,
@@ -1067,35 +1062,27 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             };
             unsafe {
                 kmsg.m_payload.m1.m1i1 = parent_endpoint;
-                kmsg.m_payload.m1.m1i2 = -1; // auto-select free slot
-                kmsg.m_payload.m1.m1i3 = 0; // normal fork, no flags
+                kmsg.m_payload.m1.m1i2 = -1;
+                kmsg.m_payload.m1.m1i3 = 0;
             }
             let kresult = send_kernel_call(0, &mut kmsg);
             if kresult != OK {
-                // Kernel fork failed — free the MProc slot we allocated.
                 unsafe { free_proc(child_slot) };
                 return kresult;
             }
-            // Read the child endpoint from the kernel reply.
             let child_endpoint = unsafe { kmsg.m_payload.m1.m1i1 };
-            // Update the MProc entry with the kernel-assigned endpoint.
             unsafe {
                 let child_ptr = base.add(child_slot);
                 (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Set reply fields for the caller (the PM_FORK requester).
+            // Step 2: Set reply fields.
             unsafe {
                 msg.m_payload.m1.m1i1 = child.mp_pid;
                 msg.m_payload.m1.m1i2 = child_endpoint;
             }
 
-            // Step 3: Notify VFS about the new child process.
-            // Message format (matches VFS pm.rs VFS_PM_FORK handler):
-            //   m_type = VFS_PM_FORK (0x907)
-            //   m1_i1 = child endpoint
-            //   m1_i2 = parent endpoint
-            //   m1_i3 = child PID
+            // Step 3: Notify VFS.
             let mut vfs_msg = Message {
                 m_source: 0,
                 m_type: arch_common::com::VFS_PM_FORK as i32,
@@ -1106,9 +1093,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 vfs_msg.m_payload.m1.m1i2 = parent_endpoint;
                 vfs_msg.m_payload.m1.m1i3 = child.mp_pid;
             }
-            // Send to VFS and wait for reply.
-            // VFS's reply() overwrites m_type with the result code (OK=0),
-            // so we check m_type or the syscall return value.
             let reply = unsafe {
                 minix_rt::syscall2(
                     minix_rt::SENDREC_CALL,
@@ -1117,9 +1101,7 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 )
             };
             if reply < 0 || vfs_msg.m_type < 0 {
-                // VFS fork failed — free the MProc and Proc slots.
                 unsafe { free_proc(child_slot) };
-                // Also send SYS_CLEAR to kernel to free the Proc slot.
                 let mut clear_msg = Message {
                     m_source: 0,
                     m_type: 0,
@@ -1128,17 +1110,13 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 unsafe {
                     clear_msg.m_payload.m1.m1i1 = child_endpoint;
                 }
-                let _ = send_kernel_call(2, &mut clear_msg); // SYS_CLEAR = 2
+                let _ = send_kernel_call(2, &mut clear_msg);
                 if reply < 0 {
                     reply as i32
                 } else {
                     vfs_msg.m_type
                 }
             } else {
-                // Step 4: Skip SCHED server notification (SCHED is not loaded).
-                // The child was already enqueued by do_fork_handler, so the
-                // normal scheduler will pick it. No SCHED server interaction
-                // needed at this stage of development.
                 OK
             }
         }
@@ -1478,17 +1456,14 @@ pub fn pm_server_main() {
         const ANY: i32 = 0x0000ffff;
 
         loop {
-            let mut msg = Message {
-                m_source: 0,
-                m_type: 0,
-                m_payload: unsafe { core::mem::zeroed() },
-            };
+            // Use an 8-byte-aligned 64-byte buffer for RECEIVE.
+            // [u64; 8] is 8-byte aligned and exactly 64 bytes.
+            let mut raw_buf = [0u64; 8];
+            let buf_ptr = raw_buf.as_mut_ptr() as *mut u8;
 
             // Receive a message from any sender.
             // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
-            let src = unsafe {
-                minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
-            };
+            let src = unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf_ptr as u64) };
             if src < 0 {
                 continue;
             }
@@ -1500,14 +1475,22 @@ pub fn pm_server_main() {
                 None => continue,
             };
 
-            // Dispatch the call.
-            let status = pm_dispatch(slot, &mut msg);
+            // Cast the 64-byte buffer as a Message for dispatch.
+            let msg: &mut Message = unsafe { &mut *(buf_ptr as *mut Message) };
 
-            // Send the reply if the handler didn't return EDONTREPLY.
+            // Skip reply for notifications
+            if msg.m_type == -10 {
+                continue;
+            }
+
+            // Dispatch the call
+            let status = pm_dispatch(slot, msg);
+
+            // Send reply if the handler didn't return EDONTREPLY.
             if status != EDONTREPLY {
                 msg.m_type = status;
                 unsafe {
-                    minix_rt::syscall2(SEND_CALL, src_ep as u64, &mut msg as *mut Message as u64);
+                    minix_rt::syscall2(SEND_CALL, src_ep as u64, buf_ptr as u64);
                 }
             }
         }

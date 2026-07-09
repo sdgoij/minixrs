@@ -48,7 +48,6 @@ pub const RS_NR_CONTROL: usize = 8;
 pub const RS_INIT_T: u32 = 100; // system_hz * 10
 pub const RS_DELTA_T: u32 = 10; // system_hz
 
-
 pub const RS_IN_USE: u32 = 0x001;
 pub const RS_EXITING: u32 = 0x002;
 pub const RS_REFRESHING: u32 = 0x004;
@@ -59,7 +58,6 @@ pub const RS_INITIALIZING: u32 = 0x040;
 pub const RS_UPDATING: u32 = 0x080;
 pub const RS_ACTIVE: u32 = 0x100;
 pub const RS_REINCARNATE: u32 = 0x200;
-
 
 pub const SF_CORE_SRV: u32 = 0x001;
 pub const SF_SYNCH_BOOT: u32 = 0x002;
@@ -72,12 +70,10 @@ pub const SF_NO_BIN_EXP: u32 = 0x040;
 /// Immutable sys flags.
 pub const IMM_SF: u32 = SF_NO_BIN_EXP | SF_CORE_SRV | SF_SYNCH_BOOT | SF_NEED_COPY | SF_NEED_REPL;
 
-
 pub const SRV_SF: u32 = SF_CORE_SRV;
 pub const SRVR_SF: u32 = SRV_SF | SF_NEED_REPL;
 pub const DSRV_SF: u32 = 0;
 pub const VM_SF: u32 = SRVR_SF;
-
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -503,7 +499,7 @@ pub fn rs_server_main() {
 
         // Syscall numbers for IPC.
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SEND_CALL: u64 = 46;
         const ANY: i32 = 0x0000ffff;
 
         loop {
@@ -515,12 +511,20 @@ pub fn rs_server_main() {
             if src < 0 {
                 continue;
             }
-            let sender = src as i32;
+            let _sender = src as i32;
 
-            // Send a reply acknowledging receipt.
-            // This unblocks the sender's SENDREC.
-            unsafe {
-                minix_rt::syscall2(SENDREC_CALL, sender as u64, buf.as_mut_ptr() as u64);
+            // Notifications (m_type == -10) are fire-and-forget.
+            // The sender used NOTIFY and does not expect a reply.
+            // Actual request messages are acknowledged with ENOSYS
+            // (RS is a stub). Use SEND (not SENDREC) so RS doesn't
+            // block waiting for the sender to receive the reply.
+            // The reply is read from buf[4..8] which contains m_type.
+            if i32::from_le_bytes(buf[4..8].try_into().unwrap_or([0; 4])) != -10 {
+                // Write ENOSYS to m_type (bytes 4-7) and SEND it back.
+                buf[4..8].copy_from_slice(&(-71i32).to_le_bytes()); // ENOSYS
+                unsafe {
+                    minix_rt::syscall2(SEND_CALL, src as u64, buf.as_mut_ptr() as u64);
+                }
             }
         }
     }

@@ -10,6 +10,7 @@
 //! IPC. For early boot, we stub them directly in the kernel to allow
 //! basic userspace programs to run (getpid, write to serial, etc.).
 
+use arch_common::ipc::Message;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -528,9 +529,26 @@ unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
         return -14; // EFAULT
     }
     unsafe {
-        // Copy user message into kernel buffer
+        // Switch to the caller's page table so we can read/write its buffer.
+        // The kernel might be running under a different CR3 if the current
+        // process was context-switched in via restore() with a different
+        // per-process page table.
+        let saved_cr3 = crate::hal::read_cr3();
+        let caller_cr3 = (*caller).p_seg.p_cr3;
+        if saved_cr3 != caller_cr3 && caller_cr3 != 0 {
+            crate::hal::write_cr3(caller_cr3);
+        }
+
+        // Copy user message into kernel buffer.
+        // Use Message struct size (56 bytes), not MESSAGE_SIZE (64), because
+        // send_kernel_call may pass a Message struct directly (the compiler
+        // can optimize away the 64-byte intermediate buffer). Reading 64 bytes
+        // would ingest 8 bytes of adjacent stack garbage.
         let mut kbuf = [0u8; crate::proc::MESSAGE_SIZE];
-        core::ptr::copy_nonoverlapping(msg_ptr, kbuf.as_mut_ptr(), crate::proc::MESSAGE_SIZE);
+        // Copy only Message size (56 bytes), not MESSAGE_SIZE (64), because
+        // the caller's buffer may be a Message struct, not a raw 64-byte buffer.
+        let copy_sz = core::mem::size_of::<Message>().min(crate::proc::MESSAGE_SIZE);
+        core::ptr::copy_nonoverlapping(msg_ptr, kbuf.as_mut_ptr(), copy_sz);
         // Set call number at bytes 0-3 (for kernel_call_dispatch)
         let call_val = (crate::system::KERNEL_CALL as u32 + call_nr as u32) as i32;
         kbuf[0..4].copy_from_slice(&call_val.to_ne_bytes());
@@ -540,8 +558,12 @@ unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
         // Set delivery address for result copy-back
         (*caller).p_delivermsg_vir = msg_ptr as u64;
         let result = crate::system::kernel_call_dispatch(caller, &mut kbuf);
-        // Copy result back to user (handles EDONTREPLY / VMSUSPEND internally)
+        // Copy result back to user
         crate::system::kernel_call_finish(caller, &mut kbuf, result);
+        // Restore original CR3
+        if saved_cr3 != caller_cr3 && caller_cr3 != 0 {
+            crate::hal::write_cr3(saved_cr3);
+        }
         result as i64
     }
 }

@@ -804,7 +804,6 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(&[b'0' + (pid % 10) as u8]);
     write_out(b"\n");
 
-    // Replace self with /bin/sh via kernel exec_replace syscall.
     write_out(b"init: starting shell...\n");
     // Build argv: ["/bin/sh", null]
     #[cfg(target_os = "none")]

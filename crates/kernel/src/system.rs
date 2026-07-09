@@ -186,10 +186,13 @@ const DIAGCTL_BUF_OFF: usize = 8;
 const DIAGCTL_LEN_OFF: usize = 16;
 const DIAGCTL_ENDPT_OFF: usize = 20;
 
-const SCHEDULE_ENDPT_OFF: usize = 0;
-const SCHEDULE_QUANTUM_OFF: usize = 4;
-const SCHEDULE_PRIORITY_OFF: usize = 8;
-const SCHEDULE_CPU_OFF: usize = 12;
+// SYS_SCHEDULE kernel call message offsets.
+// kbuf[0..4] = call number, kbuf[4..8] = source endpoint (set by
+// sys_kernel_call_handler). The payload starts at offset 8.
+const SCHEDULE_ENDPT_OFF: usize = 8;
+const SCHEDULE_QUANTUM_OFF: usize = 12;
+const SCHEDULE_PRIORITY_OFF: usize = 16;
+const SCHEDULE_CPU_OFF: usize = 20;
 
 const SCHEDCTL_FLAGS_OFF: usize = 0;
 const SCHEDCTL_ENDPT_OFF: usize = 4;
@@ -1301,7 +1304,10 @@ pub unsafe fn kernel_call_finish(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         if result != EDONTREPLY {
             let vir = (*caller).p_delivermsg_vir;
             if vir != 0 {
-                core::ptr::copy_nonoverlapping(msg.as_ptr(), vir as *mut u8, MESSAGE_SIZE);
+                // Copy only Message size (56 bytes), not MESSAGE_SIZE (64),
+                // to match the user's receive buffer which is a Message struct.
+                let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
+                core::ptr::copy_nonoverlapping(msg.as_ptr(), vir as *mut u8, copy_sz);
             }
         }
     }
@@ -3742,13 +3748,18 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
         if !table::is_ok_endpoint(parent_ep) {
-            crate::hal::serial_write_byte(b'N');
             return crate::ipc::EFAULT;
         }
         let rpp = proc_addr(table::endpoint_slot(parent_ep));
         if rpp.is_null() || table::is_empty_proc(rpp) {
             return crate::ipc::EFAULT;
         }
+
+        // Note: original C asserts RTS_RECEIVING and !MF_DELIVERMSG here,
+        // but our IPC SENDREC flow clears RECEIVING before do_fork_handler
+        // runs (the parent completes the SENDREC send phase before blocking
+        // on receive). The child's state is handled correctly regardless.
+
         // Always search for a free Proc slot (ignore PM's child_slot hint
         // which may be corrupted by the 56-vs-64 byte message size mismatch).
         let nr_procs = crate::proc::NR_PROCS as i32;
@@ -3822,12 +3833,20 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             (*rpc).p_name[end + 2] = 0u8;
         }
 
-        // SCHED server's schedule_process is a stub (never clears NO_QUANTUM),
-        // so skip NO_QUANTUM and enqueue the child directly.
-        (*rpc)
-            .p_rts_flags
-            .store(RtsFlags::empty().bits(), Ordering::Relaxed);
-        crate::sched::enqueue(rpc);
+        // The child inherits the parent's core state but must NOT inherit:
+        // - RECEIVING: parent was in SENDREC waiting for PM's reply
+        // - REPLY_PEND: part of the parent's SENDREC state
+        // - SENDING: cleared by mini_send
+        // - SIGNALED/SIG_PENDING/P_STOP: per-process signal state
+        let parent_flags = (*rpp).p_rts_flags.load(Ordering::Relaxed);
+        let child_flags = parent_flags
+            & !(RtsFlags::RECEIVING.bits()
+                | RtsFlags::SIGNALED.bits()
+                | RtsFlags::SIG_PENDING.bits()
+                | RtsFlags::P_STOP.bits());
+        (*rpc).p_rts_flags.store(child_flags, Ordering::Relaxed);
+        (*rpc).p_pending = 0;
+
         crate::sched::reset_proc_accounting(rpc);
 
         if !(*rpp).p_priv.is_null() && (*(*rpp).p_priv).s_flags.contains(PrivFlags::SYS_PROC) {
@@ -3846,11 +3865,14 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 .p_rts_flags
                 .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
         }
-        let clear_rts = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING | RtsFlags::P_STOP;
-        (*rpc)
-            .p_rts_flags
-            .fetch_and(!clear_rts.bits(), Ordering::Relaxed);
-        (*rpc).p_pending = 0;
+
+        // Enqueue the child immediately. The parent is blocked in SENDREC
+        // waiting for PM's reply. The child has its own endpoint and will
+        // return from fork() with 0, then call exec_replace which allocates
+        // an independent page table (no shared-stack corruption risk).
+        if (*rpc).is_runnable() {
+            crate::sched::enqueue(rpc);
+        }
         OK
     }
 }
