@@ -68,27 +68,63 @@ and all atomic operations use `Ordering::Relaxed`.
 ### Symptom
 
 Typing `/bin/echo test` at the shell prompt produces no output or hangs.
-Debug output shows only RS running — PM, the child, and other processes
-are starved.
+Even a non-existent command like `123` (which should fail with
+"sh: 123: not found") also hangs. The shell echoes the input but no
+error message or "123" output appears before the hang.
 
-### Context
+### Current State
 
-The fork and exec IPC paths are wired:
-- Fork: shell → `sendrec(PM, PM_FORK)` → PM calls `do_fork_handler` kernel
-  call → child enqueued → PM replies.
-- Exec: child → `syscall(61, SYS_EXEC_REPLACE)` → kernel loads binary from
-  initramfs → child starts.
-- Wait: parent → `sendrec(PM, PM_WAITPID)` → PM blocks until child exits.
+**What works:**
+- Fork SENDREC completes — shell receives child PID from PM.
+- Child kernel Proc is created, flags cleared, priority set to 5.
+- Child is enqueued at the tail of run queue (priority 5).
+- Scheduler picks the child (confirmed: `sys_exec_replace_handler` is
+  called from the child context, including for failed execs).
+- `exec_replace` system call reaches the kernel handler.
+- Exit notification path: PM processes child exits in the main loop
+  (fixed), WAITPID reply is sent to the parent.
 
-Timer interrupts are masked at boot (IRQ 0 masked on PIC), so
-`proc_no_time()` is never called and quantum never expires — the scheduler
-never preempts cooperatively. Without timer preemption, processes at the
-same priority (5) are not guaranteed to receive CPU time after another
-process starts running. `pick_proc()` always returns the head of the
-highest-priority non-empty queue.
+**What doesn't work:**
+- Neither the command output ("123") nor error messages ("not found")
+  appear.
+- The child reaches `sys_exec_replace_handler` but its output never
+  reaches the serial port.
+- Root cause unknown — likely a subtle issue in `exec_initramfs_for_target`
+  or the `restore()` path after the child is scheduled.
 
-This is also affected by IPC Bugs A-D above — if the fork/exec IPC messages
-are corrupted or never delivered, the child process never starts.
+### Fixes Applied
+
+| Fix | File | Detail |
+|-----|------|--------|
+| PM notification handler | `pm.rs` | Exit processing moved from `pm_dispatch` (dead code — never called for notifications) inline into main loop before `continue`. |
+| VFS fork notification | `pm.rs` | Changed from `SENDREC`/`SEND` to `NOTIFY`. VFS is blocked in `mount_root()` with `p_getfrom_e = MFS_PROC_NR`; `will_receive` fails and PM would get queued with `SENDING` — blocking PM forever. |
+| Child rts_flags | `system.rs` | Mask now clears `NO_QUANTUM`, `BOOTINHIBIT`, `PREEMPTED`, `SENDING`, `VMINHIBIT` in addition to previously-cleared flags. |
+| Child priority | `system.rs` | Set `p_priority = 5` before `enqueue` to avoid assertion panic from inherited invalid priority. |
+
+### Remaining Investigation
+
+Debug markers added to `sys_exec_replace_handler` show it is called
+~5 times per boot+command (1 boot exec + 1 per fork child + extras).
+The child reaches the exec handler but produces no output.
+
+Hypotheses for further investigation:
+1. `exec_initramfs_for_target` returns an error (allocation failure,
+   ELF parse error, initramfs lookup failure). The child would print
+   "not found" via `write_err` but this output might not appear if
+   the child's page table is corrupted.
+2. The new binary starts executing but `write(1, ...)` fails silently
+   (e.g. buffer pointer in unmapped memory, serial port issue).
+3. The child's page table is set up incorrectly and the child faults
+   on the first instruction.
+
+### Root Cause Hypothesis
+
+The original MINIX C `do_fork` (`.refs/minix-3.3.0/minix/kernel/system/do_fork.c`)
+sets `RTS_NO_QUANTUM` on the child — the child is NOT enqueued by the kernel.
+Enqueue is deferred to the SCHED server which later sends `SYS_SCHEDULE`.
+Our Rust version intentionally skips `NO_QUANTUM` and enqueues immediately
+because the SCHED server is a stub. This difference may expose a subtle
+race or state corruption.
 
 ---
 

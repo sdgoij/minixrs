@@ -3776,7 +3776,6 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
         let rpc = proc_addr(child_slot);
         if rpc.is_null() || !table::is_empty_proc(rpc) {
-            crate::hal::serial_write_byte(b'I');
             return crate::ipc::EFAULT;
         }
 
@@ -3833,29 +3832,32 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             (*rpc).p_name[end + 2] = 0u8;
         }
 
-        // The child inherits the parent's core state but must NOT inherit:
-        // - RECEIVING: parent was in SENDREC waiting for PM's reply
-        // - REPLY_PEND: part of the parent's SENDREC state
-        // - SENDING: cleared by mini_send
-        // - SIGNALED/SIG_PENDING/P_STOP: per-process signal state
+        // The child inherits the parent's core state but must NOT inherit
+        // any flags that would make it non-runnable. Clear ALL flags — the
+        // child should be immediately runnable (the SCHED server is a stub).
+        // The original C sets RTS_NO_QUANTUM and relies on a SCHED server to
+        // clear it; without one, the child would be stuck forever.
         let parent_flags = (*rpp).p_rts_flags.load(Ordering::Relaxed);
         let child_flags = parent_flags
             & !(RtsFlags::RECEIVING.bits()
                 | RtsFlags::SIGNALED.bits()
                 | RtsFlags::SIG_PENDING.bits()
-                | RtsFlags::P_STOP.bits());
+                | RtsFlags::P_STOP.bits()
+                | RtsFlags::NO_PRIV.bits()
+                | RtsFlags::NO_QUANTUM.bits()
+                | RtsFlags::BOOTINHIBIT.bits()
+                | RtsFlags::PREEMPTED.bits()
+                | RtsFlags::SENDING.bits()
+                | RtsFlags::VMINHIBIT.bits());
         (*rpc).p_rts_flags.store(child_flags, Ordering::Relaxed);
         (*rpc).p_pending = 0;
 
         crate::sched::reset_proc_accounting(rpc);
 
-        if !(*rpp).p_priv.is_null() && (*(*rpp).p_priv).s_flags.contains(PrivFlags::SYS_PROC) {
-            let priv_arr = crate::r#priv::PPRIV_ADDR.get() as *mut *mut Priv;
-            (*rpc).p_priv = *((priv_arr).add(crate::r#priv::USER_PRIV_ID));
-            (*rpc)
-                .p_rts_flags
-                .fetch_or(RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
-        }
+        // The child inherits the parent's privilege structure.
+        // The original C sets NO_PRIV for children of SYS_PROC processes,
+        // but that requires a working SCHED server to clear it. Without one,
+        // the child would be stuck non-runnable forever. Skip NO_PRIV.
 
         msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
         msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
@@ -3866,10 +3868,8 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
         }
 
-        // Enqueue the child immediately. The parent is blocked in SENDREC
-        // waiting for PM's reply. The child has its own endpoint and will
-        // return from fork() with 0, then call exec_replace which allocates
-        // an independent page table (no shared-stack corruption risk).
+        // Enqueue the child at the head of the run queue.
+        (*rpc).p_priority = 5;
         if (*rpc).is_runnable() {
             crate::sched::enqueue(rpc);
         }

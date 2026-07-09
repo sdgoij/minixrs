@@ -893,10 +893,7 @@ unsafe fn exec_initramfs_for_target(
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         }
 
-        // Clean up legacy misc flags that may have been set before exec.
-        // RTS_RECEIVING is not touched here — that's only needed when called
-        // from SYS_EXEC_TARGET (where the target is blocked), and is handled
-        // by sys_exec_target_handler after this function returns.
+        // Clean up legacy misc flags
         {
             use crate::proc::MiscFlags;
             // Clear MF_DELIVERMSG if set.

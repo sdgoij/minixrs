@@ -53,6 +53,12 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_allocator_no_kernel_overlap();
     failures += test_allocator_has_free_pages();
 
+    // I: Exec / initramfs verification
+    failures += test_initramfs_echo_exists();
+    failures += test_initramfs_echo_elf();
+    failures += test_initramfs_sh_exists();
+    failures += test_initramfs_boot_files();
+
     if failures == 0 {
         serial_write("ALL TESTS PASSED\r\n");
         exit_qemu_success();
@@ -427,6 +433,122 @@ fn test_pm_has_message() -> u32 {
         serial_write("\r\n");
     }
     0
+}
+
+// I: Exec / initramfs verification
+
+fn test_initramfs_echo_exists() -> u32 {
+    unsafe {
+        match kernel::initramfs::find_initramfs_file("/bin/echo") {
+            Some((data, _mode)) => {
+                serial_write("  OK /bin/echo exists, size=");
+                print_dec(data.len() as u32);
+                serial_write("\r\n");
+                0
+            }
+            None => {
+                serial_write("  FAIL: /bin/echo not found in initramfs\r\n");
+                1
+            }
+        }
+    }
+}
+
+fn test_initramfs_sh_exists() -> u32 {
+    unsafe {
+        match kernel::initramfs::find_initramfs_file("/bin/sh") {
+            Some((data, _mode)) => {
+                serial_write("  OK /bin/sh exists, size=");
+                print_dec(data.len() as u32);
+                serial_write("\r\n");
+                0
+            }
+            None => {
+                serial_write("  FAIL: /bin/sh not found\r\n");
+                1
+            }
+        }
+    }
+}
+
+fn test_initramfs_boot_files() -> u32 {
+    // Verify all boot-critical binaries exist in initramfs
+    let files = [
+        "/sbin/init",
+        "/bin/sh",
+        "/bin/echo",
+        "/sbin/pm",
+        "/sbin/vfs",
+        "/sbin/vm",
+        "/sbin/rs",
+        "/sbin/ds",
+        "/sbin/sched",
+        "/sbin/tty",
+        "/sbin/mfs",
+        "/sbin/ramdisk",
+    ];
+    let mut failures: u32 = 0;
+    for &f in &files {
+        if kernel::initramfs::find_initramfs_file(f).is_none() {
+            serial_write("  FAIL: missing ");
+            serial_write(f);
+            serial_write("\r\n");
+            failures += 1;
+        }
+    }
+    if failures == 0 {
+        serial_write("  OK all boot files present\r\n");
+    }
+    failures
+}
+
+fn test_initramfs_echo_elf() -> u32 {
+    unsafe {
+        let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/echo") {
+            Some(d) => d,
+            None => return 1,
+        };
+        let ehdr = match kernel::elf::parse_elf_header(data) {
+            Ok(e) => e,
+            Err(_) => {
+                serial_write("  FAIL: /bin/echo bad ELF header\r\n");
+                return 1;
+            }
+        };
+        serial_write("  OK /bin/echo ELF entry=0x");
+        print_hex(ehdr.e_entry);
+        serial_write(" phnum=");
+        print_dec(ehdr.e_phnum as u32);
+        serial_write("\r\n");
+        // Check PT_LOAD segments
+        let phoff = ehdr.e_phoff as usize;
+        let phnum = ehdr.e_phnum as usize;
+        let phentsize = ehdr.e_phentsize as usize;
+        let mut load_count = 0u32;
+        for i in 0..phnum {
+            let phdr =
+                &*(data.as_ptr().add(phoff + i * phentsize) as *const kernel::elf::Elf64Phdr);
+            if phdr.p_type != kernel::elf::PT_LOAD {
+                continue;
+            }
+            load_count += 1;
+            serial_write("    LOAD vaddr=0x");
+            print_hex(phdr.p_vaddr);
+            serial_write(" memsz=");
+            print_dec(phdr.p_memsz as u32);
+            serial_write(" filesz=");
+            print_dec(phdr.p_filesz as u32);
+            serial_write("\r\n");
+        }
+        if load_count == 0 {
+            serial_write("  FAIL: no PT_LOAD segments\r\n");
+            return 1;
+        }
+        serial_write("  OK /bin/echo PT_LOAD count=");
+        print_dec(load_count);
+        serial_write("\r\n");
+        0
+    }
 }
 
 // Exit helpers

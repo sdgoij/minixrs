@@ -1082,43 +1082,20 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 msg.m_payload.m1.m1i2 = child_endpoint;
             }
 
-            // Step 3: Notify VFS.
-            let mut vfs_msg = Message {
-                m_source: 0,
-                m_type: arch_common::com::VFS_PM_FORK as i32,
-                m_payload: unsafe { core::mem::zeroed() },
-            };
+            // Step 3: Notify VFS if it's reachable.
+            // VFS may be blocked in mount_root() waiting for MFS. If VFS
+            // isn't receiving, the SEND would queue PM (SENDING set) and
+            // block forever. Use NOTIFY which is always non-blocking — it
+            // stores a pending notification bit if VFS isn't ready.
+            let mut notify_buf = [0u8; 64];
             unsafe {
-                vfs_msg.m_payload.m1.m1i1 = child_endpoint;
-                vfs_msg.m_payload.m1.m1i2 = parent_endpoint;
-                vfs_msg.m_payload.m1.m1i3 = child.mp_pid;
-            }
-            let reply = unsafe {
                 minix_rt::syscall2(
-                    minix_rt::SENDREC_CALL,
+                    minix_rt::NOTIFY_CALL,
                     arch_common::com::VFS_PROC_NR as u64,
-                    &mut vfs_msg as *mut Message as u64,
+                    notify_buf.as_mut_ptr() as u64,
                 )
             };
-            if reply < 0 || vfs_msg.m_type < 0 {
-                unsafe { free_proc(child_slot) };
-                let mut clear_msg = Message {
-                    m_source: 0,
-                    m_type: 0,
-                    m_payload: unsafe { core::mem::zeroed() },
-                };
-                unsafe {
-                    clear_msg.m_payload.m1.m1i1 = child_endpoint;
-                }
-                let _ = send_kernel_call(2, &mut clear_msg);
-                if reply < 0 {
-                    reply as i32
-                } else {
-                    vfs_msg.m_type
-                }
-            } else {
-                OK
-            }
+            OK
         }
         Err(_) => -11,
     }
@@ -1478,8 +1455,56 @@ pub fn pm_server_main() {
             // Cast the 64-byte buffer as a Message for dispatch.
             let msg: &mut Message = unsafe { &mut *(buf_ptr as *mut Message) };
 
-            // Skip reply for notifications
+            // Handle notifications inline — pm_dispatch has the handler but the
+            // main loop skips dispatch for notifications (no reply needed).
             if msg.m_type == -10 {
+                // Check for pending process exits via SYS_GETKSIG (kernel call 7).
+                loop {
+                    let mut kmsg = Message {
+                        m_source: 0,
+                        m_type: 0,
+                        m_payload: unsafe { core::mem::zeroed() },
+                    };
+                    let result = send_kernel_call(7, &mut kmsg);
+                    if result != 0 {
+                        break;
+                    }
+                    let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
+                    if endpt == -1 || endpt == 0 || endpt == 31743 {
+                        break;
+                    }
+                    let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
+                    if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
+                        let base = MPROC.as_ptr();
+                        let pid = unsafe { (*base.add(slot)).mp_pid };
+                        unsafe { do_exit(slot, exit_status) };
+                        let parent_slot = unsafe { (*base.add(slot)).mp_parent };
+                        if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                            unsafe {
+                                let parent_rmp = &*base.add(parent_slot as usize);
+                                if parent_rmp.mp_flags & IN_USE != 0 {
+                                    let wp = parent_rmp.mp_wpid;
+                                    if wp == -1 || wp == pid {
+                                        let mut reply_msg = Message {
+                                            m_source: 0,
+                                            m_type: OK,
+                                            m_payload: core::mem::zeroed(),
+                                        };
+                                        reply_msg.m_payload.m1.m1i1 = pid;
+                                        reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
+                                        minix_rt::syscall2(
+                                            minix_rt::SEND_CALL,
+                                            parent_rmp.mp_endpoint as u64,
+                                            &mut reply_msg as *mut Message as u64,
+                                        );
+                                        let parent_ptr = base.add(parent_slot as usize);
+                                        (*parent_ptr).mp_wpid = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
