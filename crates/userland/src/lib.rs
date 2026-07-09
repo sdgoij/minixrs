@@ -10,12 +10,41 @@
 
 /// Write a byte slice to file descriptor 1 (stdout).
 pub fn write_out(s: &[u8]) {
-    minix_rt::write(1, s);
+    unsafe {
+        let fd: u64 = 1;
+        let ptr: u64 = s.as_ptr() as u64;
+        let count: u64 = s.len() as u64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") 3u64,  // NR_WRITE
+            in("rdi") fd,
+            in("rsi") ptr,
+            in("rdx") count,
+            lateout("rcx") _,
+            lateout("r11") _,
+            lateout("rax") _,
+            options(nostack),
+        );
+    }
 }
 
-/// Write a byte slice to file descriptor 2 (stderr).
 pub fn write_err(s: &[u8]) {
-    minix_rt::write(2, s);
+    unsafe {
+        let fd: u64 = 2;
+        let ptr: u64 = s.as_ptr() as u64;
+        let count: u64 = s.len() as u64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") 3u64,  // NR_WRITE
+            in("rdi") fd,
+            in("rsi") ptr,
+            in("rdx") count,
+            lateout("rcx") _,
+            lateout("r11") _,
+            lateout("rax") _,
+            options(nostack),
+        );
+    }
 }
 
 /// Convert a null-terminated argv pointer into a slice of string slices.
@@ -682,9 +711,23 @@ pub fn sh(_args: &[&str]) -> i32 {
                                 if pid < 0 {
                                     write_err(b"sh: fork failed\r\n");
                                 } else if pid == 0 {
+                                    // Build argv array for the child.
+                                    // argv[0] = resolved path (cmd_path)
+                                    // argv[1..] = remaining command-line tokens
+                                    // argv[N] = null terminator (from zeroed array)
+                                    let mut argv_buf: [*const u8; 32] = [core::ptr::null(); 32];
+                                    argv_buf[0] = cmd_path.as_ptr() as *const u8;
+                                    for i in 1..argc.min(31) {
+                                        argv_buf[i] = tokens[i].as_ptr();
+                                    }
+
                                     // Child: try /bin/<cmd> first, or use path directly
-                                    let r =
-                                        unsafe { minix_rt::exec_replace(&cmd_path[..path_len]) };
+                                    let r = unsafe {
+                                        minix_rt::exec_replace(
+                                            &cmd_path[..path_len],
+                                            argv_buf.as_ptr(),
+                                        )
+                                    };
                                     if r < 0
                                         && !cmd_bytes.starts_with(b"/")
                                         && 6 + cmd_bytes.len() < cmd_path.len()
@@ -696,6 +739,7 @@ pub fn sh(_args: &[&str]) -> i32 {
                                         let _ = unsafe {
                                             minix_rt::exec_replace(
                                                 &cmd_path[..6 + cmd_bytes.len() + 1],
+                                                argv_buf.as_ptr(),
                                             )
                                         };
                                     }
@@ -762,13 +806,15 @@ pub fn init(_args: &[&str]) -> i32 {
 
     // Replace self with /bin/sh via kernel exec_replace syscall.
     write_out(b"init: starting shell...\n");
+    // Build argv: ["/bin/sh", null]
     #[cfg(target_os = "none")]
-    let ret = unsafe { minix_rt::exec_replace(b"/bin/sh\0") };
+    let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];
+    #[cfg(target_os = "none")]
+    let ret = unsafe { minix_rt::exec_replace(c"/bin/sh".to_bytes_with_nul(), argv.as_ptr()) };
     #[cfg(not(target_os = "none"))]
     let ret = -38i64; // ENOSYS on host
     // If exec fails, print error and loop.
     write_err(b"init: exec failed: err=");
-    // Print negative error code
     let err = -ret as i32;
     if err >= 10 {
         write_out(&[b'0' + (err / 10) as u8]);

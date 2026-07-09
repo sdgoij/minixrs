@@ -558,7 +558,11 @@ unsafe fn sys_ipc_notify_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
 
 /// Helper: load a binary from initramfs and apply it to a target process.
 /// Returns 0 on success, negative error code on failure.
-unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i64 {
+unsafe fn exec_initramfs_for_target(
+    rp: *mut crate::proc::Proc,
+    path: &str,
+    argv_strs: &[&str],
+) -> i64 {
     unsafe {
         let (data, _mode) = match crate::initramfs::find_initramfs_file(path) {
             Some(d) => d,
@@ -615,7 +619,7 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
         // base is 0x8FE00000 which IS in RAM, so this works).
         let saved_cr3 = crate::hal::read_cr3();
         crate::hal::write_cr3(boot_cr3_val);
-        let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
+        let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, argv_strs) {
             Ok(rsp) => rsp,
             Err(_) => {
                 crate::hal::write_cr3(saved_cr3);
@@ -896,8 +900,11 @@ unsafe fn exec_initramfs_for_target(rp: *mut crate::proc::Proc, path: &str) -> i
     }
 }
 
-/// SYS_exec_replace (61) — replace current process with a new binary
-/// SYS_EXEC_REPLACE (61) — replace the current process with a binary from initramfs.
+/// SYS_exec_replace (61) — replace current process with a binary from initramfs.
+///
+/// args[0] = pointer to null-terminated path string in caller's address space
+/// args[1] = pointer to null-terminated argv array (array of string pointers)
+///          in caller's address space, or null for no argv (just the path).
 unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     unsafe {
         let path_ptr = args[0] as *const u8;
@@ -921,7 +928,62 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
             Ok(s) => s,
             Err(_) => return -14,
         };
-        exec_initramfs_for_target(caller, path)
+
+        // Read argv array from userspace.
+        // args[1] points to a null-terminated array of string pointers.
+        let argv_ptr = args[1] as *const *const u8;
+
+        // Fixed-size buffer for argument strings (max 1024 bytes total).
+        let mut argv_buf = [0u8; 1024];
+        // Offsets into argv_buf for each argument.
+        let mut argv_offsets: [u16; 32] = [0u16; 32];
+        let mut argv_count = 0usize;
+        let mut argv_pos = 0usize;
+
+        if !argv_ptr.is_null() {
+            for i in 0..31usize {
+                let str_ptr = core::ptr::read_volatile(argv_ptr.add(i));
+                if str_ptr.is_null() {
+                    break;
+                }
+                argv_offsets[argv_count] = argv_pos as u16;
+                let start = argv_pos;
+                for j in 0..255usize {
+                    let byte = core::ptr::read_volatile(str_ptr.add(j));
+                    if byte == 0 {
+                        break;
+                    }
+                    if argv_pos < argv_buf.len() {
+                        argv_buf[argv_pos] = byte;
+                        argv_pos += 1;
+                    } else {
+                        return -7; // E2BIG
+                    }
+                }
+                if argv_pos == start {
+                    return -14; // EFAULT — empty string
+                }
+                argv_buf[argv_pos] = 0; // NUL terminator in buffer
+                argv_pos += 1;
+                argv_count += 1;
+            }
+        }
+
+        // Build &str references into argv_buf.
+        let mut argv_strs: [&str; 32] = [""; 32];
+        let n = argv_count.min(32);
+        for i in 0..n {
+            let start = argv_offsets[i] as usize;
+            // Find the NUL terminator in argv_buf.
+            let end = start
+                + argv_buf[start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(argv_buf.len() - start);
+            argv_strs[i] = core::str::from_utf8(&argv_buf[start..end]).unwrap_or("");
+        }
+
+        exec_initramfs_for_target(caller, path, &argv_strs[..n])
     }
 }
 
@@ -962,7 +1024,7 @@ unsafe fn sys_exec_target_handler(_caller: *mut crate::proc::Proc, args: &[u64; 
             Err(_) => return -14,
         };
 
-        let result = exec_initramfs_for_target(rp, path);
+        let result = exec_initramfs_for_target(rp, path, &[path]);
         if result == 0 {
             // Exec succeeded — the target process was blocked on SENDREC
             // to PM (waiting for the exec reply). Clear its blocking state

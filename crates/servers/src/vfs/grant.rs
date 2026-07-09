@@ -153,7 +153,10 @@ impl GrantTable {
             let r = minix_rt::kernel_call(34, &mut msg);
             if r != 0 {
                 #[cfg(target_os = "none")]
-                minix_rt::write(2, b"vfs: setgrant failed\n");
+                let msg = b"vfs: setgrant failed\n";
+                unsafe {
+                    minix_rt::write(2, msg.as_ptr(), msg.len());
+                }
                 let _ = r;
             }
         }

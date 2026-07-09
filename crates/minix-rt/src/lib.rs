@@ -95,19 +95,22 @@ pub const NR_EXEC_REPLACE: u64 = 61;
 
 /// Replace the current process with a binary from initramfs.
 ///
-/// `path` must be a null-terminated string. The calling process is
-/// replaced entirely — no return on success.
+/// `path` must be a null-terminated string. `argv` is a pointer to a
+/// null-terminated array of string pointers (the argument vector), or
+/// null to pass no arguments. The calling process is replaced entirely
+/// — no return on success.
 ///
 /// # Safety
 ///
 /// `path` must point to a valid null-terminated string in the process's
-/// address space. The binary named by `path` must exist in the embedded
-/// initramfs. On success this function never returns.
+/// address space. `argv` must point to a valid null-terminated array of
+/// string pointers, or be null. The binary named by `path` must exist
+/// in the embedded initramfs. On success this function never returns.
 ///
 /// Only available on bare-metal; returns ENOSYS on host builds.
 #[cfg(target_os = "none")]
-pub unsafe fn exec_replace(path: &[u8]) -> i64 {
-    unsafe { syscall1(NR_EXEC_REPLACE, path.as_ptr() as u64) }
+pub unsafe fn exec_replace(path: &[u8], argv: *const *const u8) -> i64 {
+    unsafe { syscall2(NR_EXEC_REPLACE, path.as_ptr() as u64, argv as u64) }
 }
 
 // Syscall wrappers
@@ -365,8 +368,14 @@ pub fn exit(status: i32) -> ! {
 
 /// Write `buf` to file descriptor `fd`.
 /// Returns the number of bytes written, or a negative error code.
-pub fn write(fd: i32, buf: &[u8]) -> i64 {
-    unsafe { syscall3(NR_WRITE, fd as u64, buf.as_ptr() as u64, buf.len() as u64) }
+/// Uses extern "C" for a stable ABI across crate boundaries.
+///
+/// # Safety
+///
+/// `buf` must point to at least `len` valid bytes in the process's address space.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn write(fd: i32, buf: *const u8, len: usize) -> i64 {
+    unsafe { syscall3(NR_WRITE, fd as u64, buf as u64, len as u64) }
 }
 
 /// Read from a file descriptor.
@@ -647,8 +656,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let len = cursor.pos.min(buf.len() - 1);
     let msg = &buf[..len];
 
-    let _ = write(2, msg);
-    let _ = write(2, b"\n");
+    unsafe {
+        write(2, msg.as_ptr(), msg.len());
+        let nl: &[u8] = b"\n";
+        write(2, nl.as_ptr(), nl.len());
+    }
 
     // Abort via exit.
     exit(-1);
@@ -856,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_write_signature() {
-        fn _check(f: fn(i32, &[u8]) -> i64) {
+        pub fn _check(f: unsafe extern "C" fn(i32, *const u8, usize) -> i64) {
             let _ = f;
         }
         _check(write);

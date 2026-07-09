@@ -547,15 +547,18 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
         // Save the current process's register state, UNLESS this was
-        // SYS_EXEC_REPLACE (61), which replaces the CURRENT process. In
-        // that case p_reg already has the new entry point and stack from
-        // exec_initramfs_for_replace(), and save_proc_regs would overwrite
-        // them with the OLD process state.
+        // a SUCCESSFUL SYS_EXEC_REPLACE (61). In that case p_reg already
+        // has the new entry point and stack from exec_initramfs_for_target,
+        // and save_proc_regs would overwrite them with the OLD process state.
+        //
+        // If exec fails, is_exec is false, save_proc_regs runs normally,
+        // and the error code in result is written to p_reg[0] (RAX) so
+        // the caller sees the failure return value.
         //
         // SYS_EXEC_TARGET (62) is different — PM calls it on behalf of a
         // CHILD process. The current process (PM) is NOT being replaced,
         // so its registers must be saved normally.
-        let is_exec = nr == 61;
+        let is_exec = nr == 61 && result == 0;
         if !is_exec {
             save_proc_regs(rp, saved);
         }
