@@ -138,12 +138,9 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
 
         if will_receive(dst_ptr, (*caller_ptr).p_endpoint) {
             // Direct delivery.
-            // Destination must not be in its own SENDREC (MF_REPLY_PEND set).
-            // If it were, the reply from its SENDREC target could be
-            // intercepted by a spurious delivery from this sender.
-            assert!(
-                (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() == 0
-            );
+            // Note: dest may have REPLY_PEND set if it was in SENDREC waiting
+            // for OUR message (we ARE the SENDREC target replying).  The C
+            // code handles this by clearing REPLY_PEND before RECEIVING.
 
             let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*dst_ptr).p_delivermsg;
             core::ptr::copy_nonoverlapping(m_ptr, dst_msg.as_mut_ptr(), MESSAGE_SIZE);
@@ -169,6 +166,15 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                 SEND
             };
             ipc_status_add_call(dst_ptr, call);
+
+            // C: If the destination has REPLY_PEND set, it was waiting in
+            // SENDREC for our reply. Clear REPLY_PEND before clearing
+            // RECEIVING so the receiver becomes fully runnable.
+            if (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0 {
+                (*dst_ptr)
+                    .p_misc_flags
+                    .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+            }
 
             // Set the receiver's return value to the sender's endpoint.
             // Uses write_retval which knows the arch-specific offset
@@ -208,11 +214,15 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             }
             (*caller_ptr).p_sendto_e = dst_e;
 
-            let mut xpp: *mut *mut Proc = &mut (*dst_ptr).p_caller_q;
-            while !(*xpp).is_null() {
-                xpp = &mut (**xpp).p_q_link;
+            // Only link into destination's caller_q if not already linked.
+            // A process with SENDING already set is already in the queue.
+            if old & RtsFlags::SENDING.bits() == 0 {
+                let mut xpp: *mut *mut Proc = &mut (*dst_ptr).p_caller_q;
+                while !(*xpp).is_null() {
+                    xpp = &mut (**xpp).p_q_link;
+                }
+                *xpp = caller_ptr;
             }
-            *xpp = caller_ptr;
         }
         OK
     }

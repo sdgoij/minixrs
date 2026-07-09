@@ -95,6 +95,11 @@ unsafe fn sef_cb_init_fresh() -> i32 {
 
     unsafe { (*glob).system_hz = 60 };
 
+    // Initialize VFS data structures before registering with device map.
+    mount::init_vnodes();
+    mount::init_vmnts();
+    crate::vfs::filedes::init_filps();
+
     // Initialise device map and mount the root filesystem.
     dmap::init_dmap();
 
