@@ -432,6 +432,7 @@ pub const VM_PAGING_ALLOC: i32 = 1;
 pub const VM_PAGING_FREE: i32 = 2;
 pub const VM_PAGING_MAP: i32 = 3;
 pub const VM_PAGING_UNMAP: i32 = 4;
+pub const VM_PAGING_QUERY_PROC: i32 = 5;
 
 // Constants
 
@@ -4574,6 +4575,34 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     Err(_) => crate::ipc::EINVAL,
                 }
             }
+            VM_PAGING_QUERY_PROC => {
+                // Return boot process info for a given slot:
+                //   VM_PAGING_CR3_OFF = in_use (u64, 0 or 1)
+                //   VM_PAGING_VA_OFF  = endpoint (u64)
+                //   VM_PAGING_PA_OFF  = CR3 (u64)
+                let slot = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
+                let rp = crate::table::proc_addr(slot);
+                if rp.is_null() {
+                    msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                    msg_write_u64(msg, VM_PAGING_VA_OFF, 0);
+                    msg_write_u64(msg, VM_PAGING_PA_OFF, 0);
+                } else {
+                    let flags = (*rp)
+                        .p_rts_flags
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let cr3 = (*rp).p_seg.p_cr3;
+                    let in_use =
+                        if (flags & crate::proc::RtsFlags::SLOT_FREE.bits() == 0) && cr3 != 0 {
+                            1
+                        } else {
+                            0
+                        };
+                    msg_write_u64(msg, VM_PAGING_CR3_OFF, in_use);
+                    msg_write_u64(msg, VM_PAGING_VA_OFF, (*rp).p_endpoint as u64);
+                    msg_write_u64(msg, VM_PAGING_PA_OFF, cr3);
+                }
+                OK
+            }
             _ => crate::ipc::ENOSYS,
         }
     }
@@ -6386,6 +6415,84 @@ mod tests {
             msg_write_i32(&mut msg, CPROF_ENDPT_OFF, 99999); // bad endpoint
             let result = do_cprofile_handler(rp, &mut msg);
             assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_vm_paging_query_proc_returns_in_use_slot() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*rp).p_endpoint = 42;
+            (*rp).p_seg.p_cr3 = 0x12345000;
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, VM_PAGING_SUBCMD_OFF, VM_PAGING_QUERY_PROC);
+            msg_write_i32(&mut msg, VM_PAGING_COUNT_OFF, 0);
+
+            let result = do_vm_paging_handler(core::ptr::null_mut(), &mut msg);
+            assert_eq!(result, 0, "handler should return OK");
+
+            assert_eq!(
+                msg_read_u64(&msg, VM_PAGING_CR3_OFF),
+                1,
+                "in-use slot should report in_use=1"
+            );
+            assert_eq!(
+                msg_read_u64(&msg, VM_PAGING_VA_OFF) as i32,
+                42,
+                "should return correct endpoint"
+            );
+            assert_eq!(
+                msg_read_u64(&msg, VM_PAGING_PA_OFF),
+                0x12345000,
+                "should return correct CR3"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vm_paging_query_proc_free_slot() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(255);
+            (*rp)
+                .p_rts_flags
+                .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+            (*rp).p_seg.p_cr3 = 0;
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, VM_PAGING_SUBCMD_OFF, VM_PAGING_QUERY_PROC);
+            msg_write_i32(&mut msg, VM_PAGING_COUNT_OFF, 255);
+
+            let result = do_vm_paging_handler(core::ptr::null_mut(), &mut msg);
+            assert_eq!(result, 0, "handler should return OK for free slot");
+
+            assert_eq!(
+                msg_read_u64(&msg, VM_PAGING_CR3_OFF),
+                0,
+                "free slot should report in_use=0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vm_paging_query_proc_invalid_slot() {
+        unsafe {
+            proc_init();
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, VM_PAGING_SUBCMD_OFF, VM_PAGING_QUERY_PROC);
+            msg_write_i32(&mut msg, VM_PAGING_COUNT_OFF, -100);
+
+            let result = do_vm_paging_handler(core::ptr::null_mut(), &mut msg);
+            assert_eq!(result, 0, "handler should return OK for invalid slot");
+
+            assert_eq!(
+                msg_read_u64(&msg, VM_PAGING_CR3_OFF),
+                0,
+                "invalid slot should report in_use=0"
+            );
         }
     }
 }

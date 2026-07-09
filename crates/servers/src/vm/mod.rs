@@ -177,32 +177,57 @@ pub fn init_vm() {
 fn vm_init_boot() {
     use arch_common::consts::NR_PROCS;
 
+    // Query the kernel for each process slot via SYS_VM_PAGING / VM_PAGING_QUERY_PROC.
+    // The kernel has the real Proc table; VM cannot access it directly because
+    // the kernel crate's static data becomes a separate BSS copy in VM's binary.
+    // This matches MINIX's approach: VM uses sys_getkinfo to retrieve boot info.
+    const VM_PAGING_CALL: i32 = 62;
+    const VM_PAGING_QUERY_PROC: i32 = 5;
+    const VM_PAGING_SUBCMD_OFF: usize = 8;
+    const VM_PAGING_COUNT_OFF: usize = 12;
+    // Output offsets (match do_vm_paging_handler):
+    //   VM_PAGING_CR3_OFF (24) = in_use (u64, 0 or 1)
+    //   VM_PAGING_VA_OFF  (32) = endpoint (u64)
+    //   VM_PAGING_PA_OFF  (40) = CR3 (u64)
+    const VM_PAGING_INUSE_OFF: usize = 24;
+    const VM_PAGING_EP_OFF: usize = 32;
+    const VM_PAGING_CR3_OFF: usize = 40;
+
     for slot in 0..NR_PROCS {
-        let ep = kernel::table::make_endpoint(0, slot as i32);
-        let rp = kernel::table::proc_addr(slot as i32);
-        if rp.is_null() {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_QUERY_PROC.to_le_bytes());
+        msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+            .copy_from_slice(&(slot as i32).to_le_bytes());
+
+        let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+        if r != 0 {
             continue;
         }
-        unsafe {
-            let flags = (*rp)
-                .p_rts_flags
-                .load(core::sync::atomic::Ordering::Relaxed);
-            if flags & kernel::proc::RtsFlags::SLOT_FREE.bits() != 0 {
-                continue;
-            }
+
+        let in_use = u64::from_le_bytes(
+            msg[VM_PAGING_INUSE_OFF..VM_PAGING_INUSE_OFF + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
+        if in_use == 0 {
+            continue;
         }
-        // Check if this is a boot process by looking for a CR3
-        unsafe {
-            let cr3 = (*rp).p_seg.p_cr3;
-            if cr3 == 0 {
-                continue;
-            }
-        }
+
+        let ep = u64::from_le_bytes(
+            msg[VM_PAGING_EP_OFF..VM_PAGING_EP_OFF + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        ) as i32;
+        let cr3 = u64::from_le_bytes(
+            msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
+
         if let Some(vmp) = unsafe { proc::vmproc_alloc(ep) } {
             vmp.vm_region_top = 0x3FE00000u64;
-            unsafe {
-                vmp.vm_pml4_phys = (*rp).p_seg.p_cr3;
-            }
+            vmp.vm_pml4_phys = cr3;
             // Create a data segment region for the pre-allocated brk heap.
             let data_region = region::VirRegion::new(
                 0x3FE00000u64,

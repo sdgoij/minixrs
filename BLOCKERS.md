@@ -142,7 +142,7 @@ ruled out. Root cause of `virtual_copy` zeros remains unknown.
 
 ---
 
-## Blocker 5: VM Server's `vm_init_boot` Reads Own BSS, Not Kernel Proc Table
+## Blocker 5: VM Server's `vm_init_boot` Reads Own BSS, Not Kernel Proc Table — RESOLVED
 
 ### Symptom
 
@@ -150,7 +150,7 @@ The VM server starts, calls `vm_init_boot()` in `crates/servers/src/vm/mod.rs`,
 and creates zero vmproc entries. Every `brk()` IPC from any process returns
 `EINVAL` because `vmproc_lookup()` finds no entry for the caller.
 
-### Context
+### Root Cause
 
 The `kernel` crate is linked as a library into VM's userspace binary. When
 `vm_init_boot()` calls `kernel::table::proc_addr(slot)`, it returns a pointer
@@ -158,23 +158,24 @@ into VM's **own BSS copy** of `PROC_TABLE_ALIGNED` — not the kernel's actual
 process table. The BSS is zeroed, so every slot shows `p_rts_flags = 0` (not
 SLOT_FREE) and `cr3 = 0`, causing all slots to be skipped.
 
-Consequences:
-- All `brk()` calls via IPC to VM fail with `EINVAL`.
-- The kernel's `sys_brk_handler` (syscall 36) still works, but
-  `minix_rt::brk()` now sends IPC to VM instead of calling the kernel
-  syscall.
-- Boot processes survive because the kernel pre-maps a 1MB brk heap
-  (`0x3FE00000`-`0x3FF00000`) during boot, before VM starts. But any
-  `brk()` past that range silently fails.
+### Fix Applied
 
-### Fix needed
+Added `VM_PAGING_QUERY_PROC` subcommand (5) to the existing `do_vm_paging_handler`
+(kernel call 62, SYS_VM_PAGING). The handler runs in kernel context with
+BOOT_CR3, so it correctly reads the kernel's real `Proc` table. The handler
+returns `(in_use, endpoint, cr3)` for a given slot number.
 
-VM needs access to real boot process information (endpoint, CR3, data
-segment boundaries) from the kernel. Options:
-- Add a kernel call that returns boot process info for all processes with
-  a CR3 set.
-- Or have the kernel pass this data to VM during VM's `sef_cb_init_fresh`
-  (e.g. via a shared data structure mapped into VM's address space).
+Rewrote `vm_init_boot()` to call `minix_rt::kernel_call(62, ...)` for each
+slot instead of calling `proc_addr()` directly. This matches the MINIX 3.3.0
+pattern where VM calls `sys_getkinfo()` to retrieve boot process info from
+the kernel, rather than accessing kernel data structures directly.
+
+**Files changed:**
+- `crates/kernel/src/system.rs` — added `VM_PAGING_QUERY_PROC = 5` subcommand
+- `crates/servers/src/vm/mod.rs` — `vm_init_boot()` now uses kernel call
+
+**Tests:** 3 host tests in `system.rs` verifying the handler returns correct
+data for in-use, free, and invalid slots.
 
 ---
 
