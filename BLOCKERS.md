@@ -1,0 +1,230 @@
+# Blockers
+
+## Blocker 1: VFS `mount_root()` — Root Filesystem Never Mounted
+
+### Symptom
+
+VFS boots and enters its main loop (`get_work()` / `handle_work()`).
+External commands that need file I/O (`/bin/echo`, `/bin/ls`, `cd /`) fail
+because the root filesystem vnode is never set up — `mount_root()` returns
+`null`, `fp_rdir` and `fp_cdir` for all processes remain null, and every
+path resolution starts from nowhere.
+
+### Context
+
+The Rust VFS `sef_cb_init_fresh()` is a simplified version of the original C
+init. The original C flow (`.refs/minix-3.3.0/minix/servers/vfs/main.c` and
+`.refs/minix-3.3.0/minix/servers/pm/main.c`) has a multi-step boot protocol:
+
+1. PM sends `VFS_PM_INIT` for each boot process (endpoint/pid/slot).
+2. PM sends `NONE` sentinel and synchronises.
+3. VFS subscribes to DS events.
+4. VFS calls `init_dmap()` then `map_service()` from RS's rproctab.
+5. VFS mounts PFS.
+6. VFS starts a worker thread to call `mount_fs(DEV_IMGRD, ...)` which
+   does `req_readsuper` to MFS.
+
+The Rust version (`crates/servers/src/vfs/main.rs`) skips steps 1-5 and calls
+`mount_root()` directly. `mount_root()` (crates/servers/src/vfs/mount.rs)
+does `req_readsuper(vmp, "mfs", 0, 0, 1)` via `fs_sendrec(MFS_PROC_NR, msg)`.
+
+This `req_readsuper` → MFS IPC path has never been tested end-to-end on real
+QEMU hardware.
+
+### Additional deficiencies found by cross-reference
+
+| Issue | File | Detail |
+|-------|------|--------|
+| No `VFS_PM_INIT` handshake | `crates/servers/src/pm.rs` | PM never sends boot process endpoints to VFS. VFS fproc table has only PM's entry (slot 0). All other processes have `fp_endpoint = -1` — no `fp_rdir`/`fp_cdir` can be assigned. |
+| PM uses hardcoded endpoints | `crates/servers/src/pm.rs` | PM iterates `[0..10]` instead of calling `sys_getimage` from the kernel. PIDs are `ep + 1` (wrong), no parent hierarchy, missing signal sets/timers. |
+| `VFS_PROC_NR` mismatch | `crates/servers/src/vfs/main.rs` | VFS uses `PM_PROC_NR = 0` to address PM, but PM's actual kernel endpoint is 3. Messages to endpoint 0 hit the wrong dispatch table. |
+| VFS replies with `SEND` | Various | VFS uses `SEND` (syscall 46) to reply to callers blocked in `sendrec`. The kernel expects the replying process to use `SENDREC` (or `send + receive`), otherwise the caller may never wake. |
+| Missing `init_vnodes/init_vmnts/init_filps` | `crates/servers/src/vfs/main.rs` | These are never called during VFS init. Subsystems start uninitialized. |
+| Synchronous mount | `crates/servers/src/vfs/main.rs` | `mount_root()` blocks the VFS main loop. No worker thread — VFS can't process other IPC during mount. |
+
+---
+
+## Blocker 1b: IPC Subsystem Bugs
+
+### Context
+
+The IPC implementation in `crates/kernel/src/ipc.rs` has four bugs found by
+cross-referencing against the original MINIX C (`proc.c`).
+
+| Bug | Location | Description |
+|-----|----------|-------------|
+| **A** | `ipc.rs:143` | `mini_send` assertion checks `DELIVERMSG` (bit 6) instead of `REPLY_PEND` (bit 0). A destination with `REPLY_PEND` set passes when it should fail — nested SENDREC corruption hazard. |
+| **B** | `ipc.rs:170-172` | `mini_send` clears `REPLY_PEND` on the **destination** during direct delivery. Original C never does this. If the destination is concurrently in its own SENDREC, this corrupts that SENDREC's state. |
+| **C** | `mini_receive` (~line 319) | `try_async` is never called. Pending asynchronous messages (from `senda` or interrupt) are never delivered to blocking receivers — the process blocks forever even though a message is available. |
+| **D** | `ipc_status_add_call/ipc_status_add_flags` | Reads `p_misc_flags` as `u32`, truncates to `u16`, modifies low bits, writes back as `u32`. Flags in bits 16-31 (`FLUSH_TLB=0x10000`, `SENDA_VM_MISS=0x20000`, `STEP=0x40000`) are zeroed on every call. |
+
+Additionally, `may_send_to` privilege checking is disabled (`ipc.rs:526-529`),
+and all atomic operations use `Ordering::Relaxed`.
+
+---
+
+## Blocker 2: Fork/Exec of External Binaries
+
+### Symptom
+
+Typing `/bin/echo test` at the shell prompt produces no output or hangs.
+Debug output shows only RS running — PM, the child, and other processes
+are starved.
+
+### Context
+
+The fork and exec IPC paths are wired:
+- Fork: shell → `sendrec(PM, PM_FORK)` → PM calls `do_fork_handler` kernel
+  call → child enqueued → PM replies.
+- Exec: child → `syscall(61, SYS_EXEC_REPLACE)` → kernel loads binary from
+  initramfs → child starts.
+- Wait: parent → `sendrec(PM, PM_WAITPID)` → PM blocks until child exits.
+
+Timer interrupts are masked at boot (IRQ 0 masked on PIC), so
+`proc_no_time()` is never called and quantum never expires — the scheduler
+never preempts cooperatively. Without timer preemption, processes at the
+same priority (5) are not guaranteed to receive CPU time after another
+process starts running. `pick_proc()` always returns the head of the
+highest-priority non-empty queue.
+
+This is also affected by IPC Bugs A-D above — if the fork/exec IPC messages
+are corrupted or never delivered, the child process never starts.
+
+---
+
+## Blocker 3: VFS `req_getdents` — Grant Table / SAFECOPYTO Data Transfer
+
+### Symptom
+
+Calling `req_getdents(MFS, root_inode, ...)` from VFS after `mount_root()`
+succeeds at the IPC level (MFS receives `REQ_GETDENTS`, reads directory
+entries from the RAM disk, returns OK), but the returned buffer contains
+all zeros — entries are never copied from MFS to VFS.
+
+### Context
+
+Two separate issues:
+
+**Issue A: Grant table not registered with kernel.**
+VFS's `vfs_grant_init()` was never called during init. The function exists
+and calls `register_with_kernel()` via `kernel_call(34)`, but no code path
+invoked it. Fixed by calling `vfs_grant_init()` before `mount_root()`.
+
+**Issue B: `SAFECOPYTO` → `virtual_copy` writes zeros.**
+Even with the grant table registered, when MFS calls `kernel_call(SAFECOPYTO)`
+to copy directory entries from MFS's address space to VFS's grant buffer, the
+kernel's `virtual_copy` function writes zeros to the destination.
+
+Key files:
+- `crates/servers/src/vfs/grant.rs` — grant table init and registration
+- `crates/servers/src/vfs/request.rs` — `req_getdents` IPC
+- `crates/kernel/src/system.rs` — `do_safecopy_to_handler`
+- `crates/kernel-boot/src/main.rs` — `boot_create_restricted_page_table`
+
+Boot test output shows:
+```
+VM: direct @ MFS= 48 8b 3c 24   ← CR3 switch + read works (reads MFS entry point)
+VM: copy data: 00 00 00 00        ← virtual_copy writes zeros
+```
+
+A direct CR3 switch + read (switch to MFS's page table, read from MFS's
+code VA, restore) works correctly. The bounce-buffer copy through the
+kernel stack produces zeros.
+
+**Page table audit:** `boot_create_restricted_page_table` on x86_64
+deep-copies PD entries — they point to the same physical 2MB frames as
+the boot PD, not newly allocated ones. PD[1] (kernel stack at
+`0x200000`-`0x3FFFFF`) maps the same physical memory in every per-process
+page table. The kernel stack IS accessible after a CR3 switch.
+
+**Stale hypothesis closed.** The earlier "fresh PD frames" theory was
+ruled out. Root cause of `virtual_copy` zeros remains unknown.
+
+---
+
+## Blocker 5: VM Server's `vm_init_boot` Reads Own BSS, Not Kernel Proc Table
+
+### Symptom
+
+The VM server starts, calls `vm_init_boot()` in `crates/servers/src/vm/mod.rs`,
+and creates zero vmproc entries. Every `brk()` IPC from any process returns
+`EINVAL` because `vmproc_lookup()` finds no entry for the caller.
+
+### Context
+
+The `kernel` crate is linked as a library into VM's userspace binary. When
+`vm_init_boot()` calls `kernel::table::proc_addr(slot)`, it returns a pointer
+into VM's **own BSS copy** of `PROC_TABLE_ALIGNED` — not the kernel's actual
+process table. The BSS is zeroed, so every slot shows `p_rts_flags = 0` (not
+SLOT_FREE) and `cr3 = 0`, causing all slots to be skipped.
+
+Consequences:
+- All `brk()` calls via IPC to VM fail with `EINVAL`.
+- The kernel's `sys_brk_handler` (syscall 36) still works, but
+  `minix_rt::brk()` now sends IPC to VM instead of calling the kernel
+  syscall.
+- Boot processes survive because the kernel pre-maps a 1MB brk heap
+  (`0x3FE00000`-`0x3FF00000`) during boot, before VM starts. But any
+  `brk()` past that range silently fails.
+
+### Fix needed
+
+VM needs access to real boot process information (endpoint, CR3, data
+segment boundaries) from the kernel. Options:
+- Add a kernel call that returns boot process info for all processes with
+  a CR3 set.
+- Or have the kernel pass this data to VM during VM's `sef_cb_init_fresh`
+  (e.g. via a shared data structure mapped into VM's address space).
+
+---
+
+## Blocker 4: MFS Buffer Pool Allocation & Initramfs Loading — RESOLVED
+
+The system boots to a shell prompt. MFS buffer pool allocation succeeds.
+All boot processes load, the RAM disk is mapped, and init runs.
+
+Previous issues that were fixed:
+- Physical memory allocator overlapped the kernel binary (free pool now
+  starts at `__kernel_end`).
+- `.minixfs` orphan section was not included in the linker script output,
+  so `__kernel_end` was too early.
+- Initramfs size limit raised from 10 MB to 256 MB.
+- `opt-level=2` set in workspace `Cargo.toml` (avoids `__rust_alloc_zeroed`
+  LLVM codegen issue at O3).
+
+**Still missing from claimed fixes:**
+- `BrkAllocator::GlobalAlloc` never received the explicit `alloc_zeroed`
+  override. The current code relies entirely on `opt-level=2` to avoid the
+  LLVM bug.
+
+---
+
+## Testing
+
+### Build
+
+```sh
+just build
+```
+
+### Run
+
+```sh
+just run
+```
+
+With QEMU diagnostics (interrupts + CPU resets):
+```sh
+qemu-system-x86_64 -nographic -m 256M -no-reboot -d int,cpu_reset \
+    -kernel target/trampoline.elf \
+    -device loader,file=target/kernel.bin,addr=0x200000
+```
+
+### Boot test suite
+
+```sh
+just test-boot
+```
+
+Runs kernel-space assertions in `crates/kernel-boot/src/boot_test.rs` after
+VFS mount_root, exits via `isa-debug-exit`.

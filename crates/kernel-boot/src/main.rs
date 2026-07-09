@@ -560,17 +560,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             save_proc_regs(rp, saved);
         }
 
-        // Rotate the current process to the tail of its queue for
-        // round-robin fairness if it's still runnable. This is safe:
-        // remove_from_queue fully unlinks the process from its queue
-        // without asserting runnability, then enqueue re-adds at the
-        // tail (asserting runnability). Processes that blocked on IPC
-        // are NOT runnable, so they are not rotated.
-        if !is_exec && unsafe { (*rp).is_runnable() } {
-            kernel::sched::remove_from_queue(rp);
-            kernel::sched::enqueue(rp);
-        }
-
+        // Pick the next runnable process.
         if let Some(next) = kernel::sched::pick_proc() {
             if next != rp || is_exec {
                 // Deliver any pending IPC message to the target process's
