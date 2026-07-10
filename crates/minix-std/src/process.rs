@@ -20,7 +20,6 @@
 use crate::sendrec;
 use crate::{MinixErr, PM_PROC_NR};
 
-
 pub const PM_BASE: u32 = 0x000;
 pub const PM_EXIT: u32 = PM_BASE + 1;
 pub const PM_FORK: u32 = PM_BASE + 2;
@@ -28,7 +27,6 @@ pub const PM_WAITPID: u32 = PM_BASE + 3;
 pub const PM_GETPID: u32 = PM_BASE + 4;
 pub const PM_EXEC: u32 = PM_BASE + 14;
 pub const PM_EXEC_NEW: u32 = PM_BASE + 43;
-
 
 // For PM calls, the message layout is:
 //   offset 0: dest endpoint (i32) — set by sendrec
@@ -160,24 +158,23 @@ pub fn waitpid(pid: i32, _options: i32) -> Result<(i32, i32), MinixErr> {
 ///
 /// `path` is the binary path, `argv` is the null-terminated argument list.
 /// On success, does not return (the process is replaced).
-pub fn exec(_path: &str, _argv: &[*const u8]) -> Result<i32, MinixErr> {
+pub fn exec(path: &str, _argv: &[*const u8]) -> Result<i32, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
-        let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_EXEC_NEW as i32);
-        // Grant setup and data copying to be implemented in Phase 13.5.
-        let _ = sendrec(PM_PROC_NR, &mut msg);
-        let mtype = msg_i32(&msg, OFF_TYPE);
-        if mtype < 0 {
-            Err(MinixErr::from_i32(mtype))
+        // Call SYS_EXEC_REPLACE (61) directly to load from initramfs.
+        // This bypasses PM's incomplete grant-based exec path.
+        // args[0] = path pointer, args[1] = argv pointer (unused).
+        let result = minix_rt::syscall3(61, path.as_ptr() as u64, 0, 0);
+        if result == 0 {
+            // Should not return — process is replaced.
+            loop {}
         } else {
-            // Should not return; but if it does, treat as error.
-            Err(MinixErr::ENOSYS)
+            Err(MinixErr::from_i32(result as i32))
         }
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (_path, _argv);
+        let _ = (path, _argv);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -211,7 +208,6 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
         Err(MinixErr::ENOSYS)
     }
 }
-
 
 impl MinixErr {
     /// Create a MinixErr from a raw syscall return value (non-positive).
