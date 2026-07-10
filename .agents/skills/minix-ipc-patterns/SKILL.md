@@ -46,6 +46,23 @@ Message types distinguish which subsystem handles the request:
 | `SENDNB` | 49 | Non-blocking send — returns `ENOTREADY` if target not receiving |
 | `NOTIFY` | 45 | Asynchronous notification — queued in bitmask, no data payload |
 
+### `ANY` → `NONE` Normalization Pitfall
+
+The C `mini_receive` stores the raw `src_e` (which can be `ANY = 0xFFFF`) directly into
+`p_getfrom_e`. Our Rust version normalizes `ANY = 0xFFFF` to `NONE = 31743` before storing.
+
+The `will_receive` function must compare against `NONE`, not the raw `ANY` constant:
+
+```rust
+// will_receive checks:
+let from = (*dst_ptr).p_getfrom_e;  // stored as NONE (31743), not ANY (0xFFFF)
+from == src_e || from == crate::system::NONE  // ✓ uses NONE
+```
+
+If `will_receive` checked `from == ANY` instead, cross-process message delivery would
+silently fail — every process that called `RECEIVE(ANY, ...)` would have `p_getfrom_e = NONE`,
+and `NONE != ANY` would always be false. Verify this whenever debugging IPC hang scenarios.
+
 ### SENDREC Semantics (C Minix behavior)
 
 SENDREC is the most common IPC pattern (client → server → reply). Correct implementation:

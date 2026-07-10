@@ -106,6 +106,38 @@ Total size = 56 bytes (`m_source(4) + m_type(4) + m_payload(48)`).
 
 ## C Macro → Rust Translation
 
+### `RTS_SET` / `RTS_UNSET` — Implicit Dequeue/Enqueue Side Effects
+
+These C macros in `proc.h` have **hidden side effects** that are easy to miss:
+
+```c
+#define RTS_SET(rp, f)                          \
+    do {                                        \
+        const int rts = (rp)->p_rts_flags;      \
+        (rp)->p_rts_flags |= (f);               \
+        if(rts_f_is_runnable(rts) && !proc_is_runnable(rp)) {  \
+            dequeue(rp);                        \
+        }                                       \
+    } while(0)
+
+#define RTS_UNSET(rp, f)                        \
+    do {                                        \
+        int rts;                                \
+        rts = (rp)->p_rts_flags;                \
+        (rp)->p_rts_flags &= ~(f);              \
+        if(!rts_f_is_runnable(rts) && proc_is_runnable(rp)) {  \
+            enqueue(rp);                        \
+        }                                       \
+    } while(0)
+```
+
+- `RTS_SET` adds a flag. If the process WAS runnable and is NOW not runnable, it calls `dequeue`.
+- `RTS_UNSET` clears a flag. If the process WAS NOT runnable and is NOW runnable, it calls `enqueue`.
+
+**Every place in the C code that uses `RTS_SET` or `RTS_UNSET` must be checked** —
+the macro does more than just the flag operation. A direct translation might use
+`fetch_or` / `store` but forget the conditional `dequeue` / `enqueue`.
+
 ### `conv2` / `conv4` — Byte Swapping
 
 ```c
