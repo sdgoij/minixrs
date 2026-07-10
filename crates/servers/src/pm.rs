@@ -887,6 +887,16 @@ pub unsafe fn do_set(slot: usize, call_nr: i32, uid: i32, gid: i32) -> Result<()
 
 /// Check if a process endpoint is valid.
 ///
+/// Searches the MProc table by endpoint value (not by extracting slot bits),
+/// because PM's slot allocator and the kernel's Proc table allocator may
+/// assign different slot numbers for the same process (the kernel ignores
+/// PM's child_slot hint due to a message size mismatch).
+///
+/// Matching C `pm_isokendpt()` from `minix/servers/pm/main.c` which extracts
+/// the slot from the endpoint (`_ENDPOINT_P`). Our Rust implementation
+/// cannot use that shortcut because the kernel and PM slot allocators are
+/// independent, so we scan linearly.
+///
 /// # Safety
 ///
 /// The caller must ensure that no conflicting mutable reference to the
@@ -895,19 +905,16 @@ pub unsafe fn pm_isokendpt(endpoint: i32) -> Option<usize> {
     if endpoint < 0 {
         return None;
     }
-    let proc_nr = (endpoint & 0x7FFF) as usize;
-    if proc_nr >= NR_PROCS {
-        return None;
-    }
     let base = MPROC.as_ptr();
-    let rmp = unsafe { &*base.add(proc_nr) };
-    if rmp.mp_flags & IN_USE == 0 {
-        return None;
+    for i in 0..NR_PROCS {
+        unsafe {
+            let rmp = &*base.add(i);
+            if rmp.mp_flags & IN_USE != 0 && rmp.mp_endpoint == endpoint {
+                return Some(i);
+            }
+        }
     }
-    if rmp.mp_endpoint != endpoint {
-        return None;
-    }
-    Some(proc_nr)
+    None
 }
 
 // Dispatch table + main loop
@@ -1001,6 +1008,42 @@ pub unsafe fn no_sys(_caller_slot: usize, _msg: &mut Message) -> i32 {
 pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     let status = unsafe { msg.m_payload.m1.m1i1 };
     unsafe { do_exit(caller_slot, status) };
+
+    // Check if the parent is waiting for this child (via waitpid).
+    // The notification path (SYS_GETKSIG loop) can't handle this because
+    // PM_EXIT is a regular IPC message, not a kernel notification.
+    // Handle it here directly — matching C's check_parent().
+    let base = MPROC.as_ptr();
+    let child = unsafe { &*base.add(caller_slot) };
+    let pid = child.mp_pid;
+    let parent_slot = child.mp_parent;
+    if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+        let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
+        if parent_rmp.mp_flags & IN_USE != 0 {
+            let wp = parent_rmp.mp_wpid;
+            if wp == -1 || wp == pid {
+                let mut reply_msg = Message {
+                    m_source: 0,
+                    m_type: OK,
+                    m_payload: unsafe { core::mem::zeroed() },
+                };
+                reply_msg.m_payload.m1.m1i1 = pid;
+                reply_msg.m_payload.m1.m1i2 = status & 0xFF;
+                unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SEND_CALL,
+                        parent_rmp.mp_endpoint as u64,
+                        &mut reply_msg as *mut Message as u64,
+                    );
+                }
+                let parent_ptr = unsafe { base.add(parent_slot as usize) };
+                unsafe {
+                    (*parent_ptr).mp_wpid = 0;
+                }
+            }
+        }
+    }
+
     EDONTREPLY
 }
 
@@ -1106,6 +1149,8 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             //   m7_i4 = -1 (VFS_PM_REUID, unused)
             //   m7_i5 = -1 (VFS_PM_REGID, unused)
             let mut vfs_buf = [0u8; 64];
+            // Byte 0-3: destination endpoint (read by do_sync_ipc for ep)
+            vfs_buf[0..4].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
             let vfs_msg_type = arch_common::com::VFS_PM_FORK as i32;
             vfs_buf[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
                 .copy_from_slice(&vfs_msg_type.to_le_bytes());
@@ -1480,23 +1525,11 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 
     match call_nr as u32 {
         arch_common::com::VFS_PM_FORK_REPLY => {
-            // Schedule the newly created process — reply to child and parent.
-            // Matching C pm/forkexit.c case VFS_PM_FORK_REPLY:
-            //   1. Reply to child with OK
-            //   2. Reply to parent with child PID
-
-            // Reply to child (proc_n) with OK
-            let mut child_reply = [0u8; 64];
-            child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4].copy_from_slice(&OK.to_le_bytes());
-            unsafe {
-                minix_rt::syscall2(
-                    minix_rt::SEND_CALL,
-                    rmp.mp_endpoint as u64,
-                    child_reply.as_ptr() as u64,
-                );
-            }
-
-            // Reply to parent with child PID
+            // Reply to the parent with child PID.
+            // The child detects itself via `is_fork_child` (p_defer_r1 == 1)
+            // set by do_fork_handler — it does NOT need a message from PM.
+            // C uses ipc_sendnb here which silently fails if the child
+            // isn't in RECEIVE — our SEND would block. Skip it.
             let parent_slot = rmp.mp_parent;
             if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
                 let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
@@ -1505,10 +1538,10 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                     // m_type = OK
                     parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
                         .copy_from_slice(&OK.to_le_bytes());
-                    // m1_i1 = child PID
+                    // m7_i1 = child PID
                     parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
                         .copy_from_slice(&rmp.mp_pid.to_le_bytes());
-                    // m1_i2 = 0 (exit status — not exiting, just forking)
+                    // m7_i2 = 0 (exit status — not exiting, just forking)
                     let zero: i32 = 0;
                     parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
                         .copy_from_slice(&zero.to_le_bytes());

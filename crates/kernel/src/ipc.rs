@@ -372,6 +372,16 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
 /// # Safety
 ///
 /// Destination must be valid.
+/// Send a notification to `dst_e`.
+///
+/// Matching C: `mini_notify(caller_ptr, dst_e)` in `proc.c`.
+/// The C code uses `priv(caller_ptr)->s_id` as the notification bitmap index.
+/// Our Rust version must also use the sender's privilege ID, not the endpoint
+/// number, because endpoints for forked children exceed the 64-bit bitmap.
+///
+/// # Safety
+///
+/// Source and destination must be valid endpoints.
 pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
     unsafe {
         if !is_ok_endpoint(dst_e) {
@@ -383,28 +393,35 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             return EDEADSRCDST;
         }
 
-        // C: skip delivery when destination has MF_REPLY_PEND
-        if (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0 {
-            // Record pending notification and return
-            if !(*dst_ptr).p_priv.is_null() {
-                (*(*dst_ptr).p_priv).s_notify_pending.set(src_e as usize);
+        // Get the sender's privilege ID (matching C: priv(caller_ptr)->s_id).
+        // Look up the source Proc to read its priv structure.
+        let src_id = if is_ok_endpoint(src_e) {
+            let src_p = endpoint_slot(src_e);
+            let src_ptr = proc_addr(src_p);
+            if !src_ptr.is_null() {
+                let priv_ptr = (*src_ptr).p_priv;
+                if !priv_ptr.is_null() {
+                    (*priv_ptr).s_id as usize
+                } else {
+                    src_e as usize
+                }
+            } else {
+                src_e as usize
             }
-            return OK;
-        }
+        } else {
+            src_e as usize
+        };
 
         let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
         if rts & RtsFlags::RECEIVING.bits() != 0
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
         {
-            // Build notification message in the destination's kernel buffer,
-            // so deliver_msg copies it to the user buffer on context switch.
+            // Direct delivery: build notification message in destination's buffer.
             build_notify_message(&mut (*dst_ptr).p_delivermsg, src_e, dst_ptr);
-            // Set DELIVERMSG flag so deliver_msg copies p_delivermsg to user.
             (*dst_ptr).p_misc_flags.fetch_or(
                 crate::proc::MiscFlags::DELIVERMSG.bits(),
                 core::sync::atomic::Ordering::Relaxed,
             );
-            // Set the receiver's return value to the notifier's endpoint.
             crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_e as u64);
             let new = rts & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
@@ -412,9 +429,11 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
                 enqueue(dst_ptr);
             }
         } else {
-            // C: record pending notification when destination isn't waiting
+            // C: record pending notification when destination isn't waiting.
+            // Use the sender's privilege ID (src_id), not the endpoint number,
+            // because endpoints may exceed the bitmap size (NR_SYS_PROCS = 64).
             if !(*dst_ptr).p_priv.is_null() {
-                (*(*dst_ptr).p_priv).s_notify_pending.set(src_e as usize);
+                (*(*dst_ptr).p_priv).s_notify_pending.set(src_id);
             }
         }
         OK
