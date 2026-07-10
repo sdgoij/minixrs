@@ -1284,7 +1284,10 @@ pub unsafe fn kernel_call_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         // Dispatch
         let call_vec = CALL_VEC.get();
         match unsafe { (*call_vec)[idx] } {
-            Some(handler) => handler(caller, msg),
+            Some(handler) => {
+                let result = handler(caller, msg);
+                result
+            }
             None => EBADREQUEST,
         }
     }
@@ -3685,6 +3688,7 @@ pub unsafe fn do_getksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 && !(*rp).p_priv.is_null()
                 && (*(*rp).p_priv).s_sig_mgr == caller_ep
             {
+                crate::hal::serial_write_byte(b'!');
                 msg_write_i32(msg, SIGCALLS_ENDPT_OFF, (*rp).p_endpoint);
                 msg[SIGCALLS_MAP_OFF..SIGCALLS_MAP_OFF + 16]
                     .copy_from_slice(&(*rp).p_pending.to_ne_bytes());
@@ -3868,10 +3872,15 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
         }
 
-        // Enqueue the child at the head of the run queue.
+        // Enqueue the child so it can be scheduled.
+        // Without timer preemption, a process at the head of a queue
+        // (e.g. VM in a notification loop) can starve newly enqueued
+        // processes.  The IPC direct delivery path now uses enqueue_head
+        // to ensure freshly woken processes get to run promptly.
         (*rpc).p_priority = 5;
         if (*rpc).is_runnable() {
-            crate::sched::enqueue(rpc);
+            (*rpc).p_cpu_time_left = 50_000_000;
+            crate::sched::enqueue_head(rpc);
         }
         OK
     }

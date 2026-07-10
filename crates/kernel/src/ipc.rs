@@ -186,7 +186,17 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             let new = old & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
-                enqueue(dst_ptr);
+                // Without timer preemption, a process at the head of the
+                // queue (e.g. VM receiving notifications) can starve a newly
+                // woken process enqueued at the tail.  Use enqueue_head to
+                // put the freshly woken process at the front so it runs
+                // next.  This matches the intent that the process that was
+                // waiting for THIS message should process it promptly.
+                if (*dst_ptr).p_cpu_time_left > 0 {
+                    crate::sched::enqueue_head(dst_ptr);
+                } else {
+                    enqueue(dst_ptr);
+                }
             }
         } else {
             if flags & NON_BLOCKING != 0 {
@@ -424,9 +434,18 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             );
             crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_e as u64);
             let new = rts & !RtsFlags::RECEIVING.bits();
+
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
-                enqueue(dst_ptr);
+                // Use enqueue_head so the freshly woken process runs
+                // before any existing head-of-queue process (same rationale
+                // as mini_send: without timer preemption, tail enqueue can
+                // starve under a runnable head).
+                if (*dst_ptr).p_cpu_time_left > 0 {
+                    crate::sched::enqueue_head(dst_ptr);
+                } else {
+                    enqueue(dst_ptr);
+                }
             }
         } else {
             // C: record pending notification when destination isn't waiting.
@@ -586,6 +605,12 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
                 if r != OK {
                     return r;
                 }
+                // C: SENDREC falls through to RECEIVE without clearing
+                // SENDING. If the message was queued (not direct delivery),
+                // SENDING stays set so the destination can find this sender
+                // in its caller_q when it calls mini_receive. mini_receive
+                // skips caller_q/notification checks when SENDING is set
+                // and just adds RECEIVING, matching C behavior.
                 // Fall through to mini_receive (C: case SENDREC falls through
                 // to case RECEIVE via case SEND). MF_REPLY_PEND is preserved
                 // so mini_receive skips notification checks as intended.

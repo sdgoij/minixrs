@@ -53,7 +53,11 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_allocator_no_kernel_overlap();
     failures += test_allocator_has_free_pages();
 
-    // I: Exec / initramfs verification
+    // I: Process signal manager — s_sig_mgr must be PM_PROC_NR
+    //    so do_getksig_handler can find exited processes.
+    failures += test_boot_procs_have_sig_mgr();
+
+    // J: Exec / initramfs verification
     failures += test_initramfs_echo_exists();
     failures += test_initramfs_echo_elf();
     failures += test_initramfs_sh_exists();
@@ -435,38 +439,83 @@ fn test_pm_has_message() -> u32 {
     0
 }
 
-// I: Exec / initramfs verification
+// I: Process signal manager
+
+fn test_boot_procs_have_sig_mgr() -> u32 {
+    unsafe {
+        // Check that all boot processes have s_sig_mgr == PM_PROC_NR,
+        // so do_getksig_handler can find exited processes.
+        let base = kernel::table::proc_table_base();
+        let end = kernel::table::end_proc_addr();
+        let mut ok = 0u32;
+        let mut fail = 0u32;
+        let mut rp = base;
+        while rp < end {
+            let rts = (*rp)
+                .p_rts_flags
+                .load(core::sync::atomic::Ordering::Relaxed);
+            if rts & kernel::proc::RtsFlags::SLOT_FREE.bits() != 0 {
+                rp = rp.add(1);
+                continue;
+            }
+            let priv_ptr = (*rp).p_priv;
+            if priv_ptr.is_null() {
+                serial_write("  FAIL: ");
+                serial_write(core::str::from_utf8(&(*rp).p_name).unwrap_or("?"));
+                serial_write(" p_priv is null\r\n");
+                fail += 1;
+                rp = rp.add(1);
+                continue;
+            }
+            if (*priv_ptr).s_sig_mgr != PM_PROC_NR {
+                serial_write("  FAIL: ");
+                serial_write(core::str::from_utf8(&(*rp).p_name).unwrap_or("?"));
+                serial_write(" s_sig_mgr=");
+                print_dec((*priv_ptr).s_sig_mgr as u32);
+                serial_write(" expected ");
+                print_dec(PM_PROC_NR as u32);
+                serial_write("\r\n");
+                fail += 1;
+            } else {
+                ok += 1;
+            }
+            rp = rp.add(1);
+        }
+        serial_write("  OK ");
+        print_dec(ok);
+        serial_write(" processes have s_sig_mgr=PM\r\n");
+        fail
+    }
+}
+
+// J: Exec / initramfs verification
 
 fn test_initramfs_echo_exists() -> u32 {
-    unsafe {
-        match kernel::initramfs::find_initramfs_file("/bin/echo") {
-            Some((data, _mode)) => {
-                serial_write("  OK /bin/echo exists, size=");
-                print_dec(data.len() as u32);
-                serial_write("\r\n");
-                0
-            }
-            None => {
-                serial_write("  FAIL: /bin/echo not found in initramfs\r\n");
-                1
-            }
+    match kernel::initramfs::find_initramfs_file("/bin/echo") {
+        Some((data, _mode)) => {
+            serial_write("  OK /bin/echo exists, size=");
+            print_dec(data.len() as u32);
+            serial_write("\r\n");
+            0
+        }
+        None => {
+            serial_write("  FAIL: /bin/echo not found in initramfs\r\n");
+            1
         }
     }
 }
 
 fn test_initramfs_sh_exists() -> u32 {
-    unsafe {
-        match kernel::initramfs::find_initramfs_file("/bin/sh") {
-            Some((data, _mode)) => {
-                serial_write("  OK /bin/sh exists, size=");
-                print_dec(data.len() as u32);
-                serial_write("\r\n");
-                0
-            }
-            None => {
-                serial_write("  FAIL: /bin/sh not found\r\n");
-                1
-            }
+    match kernel::initramfs::find_initramfs_file("/bin/sh") {
+        Some((data, _mode)) => {
+            serial_write("  OK /bin/sh exists, size=");
+            print_dec(data.len() as u32);
+            serial_write("\r\n");
+            0
+        }
+        None => {
+            serial_write("  FAIL: /bin/sh not found\r\n");
+            1
         }
     }
 }

@@ -117,14 +117,40 @@ Hypotheses for further investigation:
 3. The child's page table is set up incorrectly and the child faults
    on the first instruction.
 
-### Root Cause Hypothesis
+### Investigation Results
 
-The original MINIX C `do_fork` (`.refs/minix-3.3.0/minix/kernel/system/do_fork.c`)
-sets `RTS_NO_QUANTUM` on the child — the child is NOT enqueued by the kernel.
-Enqueue is deferred to the SCHED server which later sends `SYS_SCHEDULE`.
-Our Rust version intentionally skips `NO_QUANTUM` and enqueues immediately
-because the SCHED server is a stub. This difference may expose a subtle
-race or state corruption.
+Exhaustive comparison of C and Rust IPC/scheduling code:
+
+| Function | C (`.refs/minix-3.3.0/minix/kernel/proc.c`) | Rust | Match? |
+|----------|---------------------------------------------|------|--------|
+| `enqueue` | Adds to tail, preemption check | Same | ✓ |
+| `enqueue_head` | Adds to head | Same (unused in prod) | ✓ |
+| `dequeue` | Walks queue, unlinks | Same | ✓ |
+| `pick_proc` | Returns head of first non-empty queue | Same | ✓ |
+| `RTS_SET` | Sets flag + dequeues if was runnable | Explicit `dequeue` check | ✓ |
+| `RTS_UNSET` | Clears flag + enqueues if now runnable | Explicit `enqueue` check | ✓ |
+| `mini_send` direct delivery | `RTS_UNSET(dst, RTS_RECEIVING)` → enqueue(tail) | Same logic | ✓ |
+| `mini_receive` blocking | `RTS_SET(caller, RTS_RECEIVING)` → dequeue | Same logic | ✓ |
+| `mini_notify` delivery | `RTS_UNSET(dst, RTS_RECEIVING)` → enqueue(tail) | Same logic | ✓ |
+| `switch_to_user` | Handles DELIVERMSG, misc flags, picks new proc | Handled in `syscall_handler_c` | Structure differs |
+
+All core scheduling/IPC functions are functionally identical. The
+starvation happens because:
+1. `pick_proc()` returns the head of the first non-empty queue
+2. The head stays the same if it never blocks (VM receives notifications)
+3. No clock-interrupt preemption fires to rotate the queue
+4. PM (enqueued at tail) never becomes head
+
+The original C depends on the **timer interrupt** to preempt long-running
+processes (`RTS_PREEMPTED` → dequeue → pick_proc finds next process).
+Without working timer preemption, a process that stays runnable starves
+everyone else.
+
+**Leads to check:**
+- Is the clock/timer interrupt properly configured and firing?
+- Does `proc_no_time` / quantum depletion work?
+- Does the APIC timer interrupt handler correctly preempt the running
+  process when its quantum expires?
 
 ---
 

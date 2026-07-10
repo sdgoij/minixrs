@@ -190,12 +190,56 @@ After 4 pushes (32 bytes):
 ```
 If CS=0x1B (GUDATA_SEL) instead of 0x23 (GUCODE_SEL), SYSRETQ is loading the wrong CS.
 
+## Sending Serial Input via stdin
+
+When testing the shell interactively (e.g., running an unknown command to
+trigger fork/exec/exit/waitpid), you need to send input to QEMU's serial
+port. Piping directly through `just run` does **not** work because the
+Justfile uses `-nographic` which sets `-serial mon:stdio` — the QEMU
+monitor multiplexes on stdin and interferes with serial input.
+
+### Working approaches
+
+**Approach 1: Run QEMU directly with `-nographic -monitor none`**
+
+```
+(sleep 3 && echo "abc"; sleep 3) | qemu-system-x86_64 -nographic -monitor none \
+    -m 256M -no-reboot -kernel target/trampoline.elf \
+    -device loader,file=target/kernel.bin,addr=0x200000
+```
+
+This keeps the serial port on stdio but removes the monitor from the mux.
+
+The `sleep 3` gives the kernel time to boot before input arrives.
+
+**Approach 2: Modify Justfile**
+
+Edit the `run` recipe to use `-nographic -monitor none` instead of just `-nographic`.
+
+### What DOESN'T work
+
+- `(sleep N; echo ...) | just run` — the `-nographic` default leaves the monitor
+  on stdio, which steals bytes from the serial input.
+- `-display none -serial stdio` — creates a serial port but may not configure
+  COM1 interrupts correctly for this kernel.
+- `echo "cmd" > /proc/PID/fd/0` — not applicable on Windows (WSL may work).
+
+### Why this matters
+
+When debugging fork/exec/exit/waitpid hangs, you need to:
+1. Boot the kernel with shell at `# ` prompt
+2. Send an unknown command (e.g., `abc`)
+3. Observe the shell's response (`sh: abc: not found`) or the absence thereof
+4. Check kernel diagnostic characters (`!` = child found by SYS_GETKSIG, `?` = none found)
+
+Without proper serial input, step 2 fails and the test is useless.
+
 ### QEMU `-d int,cpu_reset`
 
 Run with interrupt tracing to see every exception and the final crash state:
 
 ```
-qemu-system-x86_64 -nographic -m 256M -no-reboot -d int,cpu_reset \
+qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -d int,cpu_reset \
     -kernel target/trampoline.elf \
     -device loader,file=target/kernel.bin,addr=0x200000
 ```

@@ -1094,8 +1094,11 @@ pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
 const VFS_MSG_TYPE_OFF: usize = 4;
 const VFS_M7_I1_OFF: usize = 8;
 const VFS_M7_I2_OFF: usize = 12;
+#[allow(dead_code)]
 const VFS_M7_I3_OFF: usize = 16;
+#[allow(dead_code)]
 const VFS_M7_I4_OFF: usize = 20;
+#[allow(dead_code)]
 const VFS_M7_I5_OFF: usize = 24;
 
 /// Handle a PM_FORK request.
@@ -1111,7 +1114,7 @@ const VFS_M7_I5_OFF: usize = 24;
 ///
 /// - `caller_slot` must be a valid, in-use process slot.
 /// - `msg` must point to a valid message buffer.
-#[allow(unused_variables)]
+
 pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
     let result = unsafe { do_fork(caller_slot) };
     match result {
@@ -1121,53 +1124,45 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
 
             // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
+
+            // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
             let mut kmsg = Message {
                 m_source: 0,
                 m_type: 0,
                 m_payload: unsafe { core::mem::zeroed() },
             };
             kmsg.m_payload.m1.m1i1 = parent_endpoint;
-            kmsg.m_payload.m1.m1i2 = -1;
+            // fork_flags = 0: no special flags. PFF_VMINHIBIT (bit 0) is
+            // NOT set because VM fork (vm_fork) is a stub — no one would
+            // clear VMINHIBIT and the child would be stuck non-runnable.
+            kmsg.m_payload.m1.m1i2 = 0;
             kmsg.m_payload.m1.m1i3 = 0;
             let kresult = send_kernel_call(0, &mut kmsg);
             if kresult != OK {
                 unsafe { free_proc(child_slot) };
                 return kresult;
-            }
+            };
             let child_endpoint = unsafe { kmsg.m_payload.m1.m1i1 };
             unsafe {
                 let child_ptr = base.add(child_slot);
                 (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Send VFS_PM_FORK to VFS (matching C tell_vfs).
-            // Build VFS_PM_FORK message with:
-            //   m_type = VFS_PM_FORK (0x907)
-            //   m7_i1 = child endpoint (VFS_PM_ENDPT)
-            //   m7_i2 = parent endpoint (VFS_PM_PENDPT)
-            //   m7_i3 = child pid (VFS_PM_CPID)
-            //   m7_i4 = -1 (VFS_PM_REUID, unused)
-            //   m7_i5 = -1 (VFS_PM_REGID, unused)
-            let mut vfs_buf = [0u8; 64];
-            // Byte 0-3: destination endpoint (read by do_sync_ipc for ep)
-            vfs_buf[0..4].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
-            let vfs_msg_type = arch_common::com::VFS_PM_FORK as i32;
-            vfs_buf[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-                .copy_from_slice(&vfs_msg_type.to_le_bytes());
-            vfs_buf[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
-                .copy_from_slice(&child_endpoint.to_le_bytes());
-            vfs_buf[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
-                .copy_from_slice(&parent_endpoint.to_le_bytes());
-            vfs_buf[VFS_M7_I3_OFF..VFS_M7_I3_OFF + 4].copy_from_slice(&child.mp_pid.to_le_bytes());
-            let neg_one: i32 = -1;
-            vfs_buf[VFS_M7_I4_OFF..VFS_M7_I4_OFF + 4].copy_from_slice(&neg_one.to_le_bytes());
-            vfs_buf[VFS_M7_I5_OFF..VFS_M7_I5_OFF + 4].copy_from_slice(&neg_one.to_le_bytes());
-
+            // Step 2: Send VFS_PM_FORK notification to VFS (fire-and-forget).
+            // The original C uses a full message SEND and expects VFS to reply
+            // later with VFS_PM_FORK_REPLY, but since VFS is busy with
+            // mount_root during boot, this SEND would queue PM in VFS's
+            // caller_q with SENDING set — PM would never block on RECEIVE
+            // properly and the fork caller would wait forever.
+            //
+            // Instead, use NOTIFY so VFS gets a pending notification bit.
+            // VFS can process it when it's ready (in its main loop).
+            // The child's VFS_CALL flag is still set, matching C convention.
             unsafe {
                 minix_rt::syscall2(
-                    minix_rt::SEND_CALL,
+                    minix_rt::NOTIFY_CALL,
                     arch_common::com::VFS_PROC_NR as u64,
-                    vfs_buf.as_ptr() as u64,
+                    0,
                 )
             };
 
@@ -1177,9 +1172,13 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 (*child_ptr).mp_flags |= VFS_CALL;
             }
 
-            // Step 4: Return EDONTREPLY — caller stays blocked until VFS
-            // sends VFS_PM_FORK_REPLY and we reply to both child and parent.
-            EDONTREPLY
+            // Step 4: Set the reply message fields and return child PID.
+            // Set m1_i1 (bytes 8-11 of the message) to the child PID.
+            // The user-space fork() reads the PID from msg[8..12].
+            // The main loop will set msg.m_type = status (the return value)
+            // before sending the reply.
+            msg.m_payload.m1.m1i1 = child.mp_pid;
+            child.mp_pid
         }
         Err(_) => -11,
     }

@@ -12,6 +12,8 @@
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 
+use arch_common::com::PM_PROC_NR;
+
 use crate::r#priv::{PPRIV_ADDR, PRIV, Priv, PrivFlags};
 use crate::proc::*;
 
@@ -437,6 +439,12 @@ pub unsafe fn proc_init() {
                 *chunk = !0u32;
             }
 
+            // Set the signal manager to PM so that do_getksig_handler
+            // finds processes with SIGNALED set (matching C: PM registers
+            // as sig_mgr via SYS_PRIVCTL during init; we set it directly
+            // since we don't have that protocol yet).
+            (*priv_ptr).s_sig_mgr = PM_PROC_NR;
+
             // Link the privilege structure to the process.
             // This enables notification delivery (mini_notify stores
             // pending notifications in s_notify_pending via p_priv).
@@ -640,6 +648,26 @@ mod tests {
             proc_init();
             let rp = endpoint_lookup(make_endpoint(0, 0)); // PM
             assert!(!rp.is_null());
+        }
+    }
+
+    #[test]
+    fn test_proc_init_sets_sig_mgr() {
+        unsafe {
+            proc_init();
+            for bi in &BOOT_IMAGE {
+                let rp = proc_addr(bi.proc_nr);
+                assert!(!rp.is_null(), "{}: null proc", bi.name);
+                let priv_ptr = (*rp).p_priv;
+                assert!(!priv_ptr.is_null(), "{}: p_priv is null", bi.name);
+                assert_eq!(
+                    (*priv_ptr).s_sig_mgr,
+                    PM_PROC_NR,
+                    "{}: s_sig_mgr should be PM_PROC_NR ({})",
+                    bi.name,
+                    PM_PROC_NR
+                );
+            }
         }
     }
 }

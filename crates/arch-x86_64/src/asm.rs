@@ -782,6 +782,15 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "xor    r13, r13",
         "xor    r14, r14",
         "xor    r15, r15",
+        // Restore GS.base to user value (swapgs exchanges GS.base
+        // with KernelGSbase MSR).  After kernel entry via syscall+swapgs,
+        // GS.base points to cpu-local storage.  Without this swapgs,
+        // the process would resume with GS.base = cpu-local, causing the
+        // NEXT syscall's swapgs to set GS.base to the wrong value
+        // (KernelGSbase, which is the previous user's value).  The kernel
+        // would then read cpu-local storage from the wrong GS.base ->
+        // garbage cpulocal proc_ptr -> crash on next syscall.
+        "swapgs",
         // Jump to ring 3.
         "sysretq",
     );

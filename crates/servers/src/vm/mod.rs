@@ -302,8 +302,10 @@ pub fn vm_main() {
 ///
 /// Returns the result code (for testing).
 pub fn dispatch_message(msg: &mut Message, ipc_status: i32) -> i32 {
-    // Check for notifications from kernel.
-    if is_ipc_notify(ipc_status) {
+    // Check for notifications.
+    // The ipc_status parameter is not available (main loop passes 0),
+    // so also check m_type directly for NOTIFY_MESSAGE (-10).
+    if is_ipc_notify(ipc_status) || msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
         if ipc_status_flags_test(
             ipc_status,
             IPC_FLG_MSG_FROM_KERNEL << IPC_STATUS_FLAGS_SHIFT,

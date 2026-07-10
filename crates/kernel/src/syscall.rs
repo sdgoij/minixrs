@@ -269,26 +269,27 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // Store exit status in p_signal_received for PM to read via SYS_GETKSIG.
         (*caller).p_signal_received = exit_status as u64;
 
-        // Set SIGNALED so do_getksig_handler finds this process.
-        (*caller).p_rts_flags.fetch_or(
-            crate::proc::RtsFlags::SIGNALED.bits(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
+        // Set SIGNALED + SIG_PENDING so do_getksig_handler finds this process.
+        // Matching C cause_sig(): RTS_SET(rp, RTS_SIGNALED | RTS_SIG_PENDING)
+        let sig_flags =
+            crate::proc::RtsFlags::SIGNALED.bits() | crate::proc::RtsFlags::SIG_PENDING.bits();
+        (*caller)
+            .p_rts_flags
+            .fetch_or(sig_flags, core::sync::atomic::Ordering::Relaxed);
 
-        // Push to pending exit queue for PM to read via SYS_GETKSIG.
+        // Push to pending exit queue.
         push_pending_exit(endpoint, exit_status);
 
-        // Notify PM so it can mark the MProc as ZOMBIE.
-        crate::ipc::mini_notify((*caller).p_endpoint, arch_common::com::PM_PROC_NR);
-
-        // Free the Proc slot so the kernel-fork path waitpid works.
-        (*caller).p_rts_flags.fetch_or(
-            crate::proc::RtsFlags::SLOT_FREE.bits(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
-
         // Remove from run queue so pick_proc doesn't find a dead process.
+        // RTS_SET above already dequeues if was runnable, but dequeue
+        // again for safety (no-op if already dequeued).
         crate::sched::dequeue(caller);
+
+        // Notify PM (the signal manager) that this process has exited.
+        // Matching C: cause_sig() -> send_sig() -> mini_notify(proc_addr(SYSTEM), rp->p_endpoint)
+        if let Some(sig_mgr_ep) = get_sig_manager(caller) {
+            let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr_ep);
+        }
     }
     crate::system::EDONTREPLY as i64
 }
@@ -522,7 +523,7 @@ unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
 ///
 /// After the call, the Message struct is updated with the kernel's reply
 /// (result code in bytes 0-3, reply fields in m_payload).
-unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let call_nr = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;
     if msg_ptr.is_null() {
@@ -1178,6 +1179,33 @@ unsafe fn sys_waitpid_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -
             // Yield CPU so the child (or scheduler) can run.
             crate::hal::pause();
         }
+    }
+}
+
+/// Get the signal manager endpoint for a process.
+///
+/// Returns the endpoint of the signal manager (typically PM) for the
+/// given process, or `None` if the process has no valid signal manager.
+///
+/// Matching C: `priv(rp)->s_sig_mgr` in `cause_sig()` (system.c).
+///
+/// # Safety
+///
+/// `rp` must point to a valid `Proc`.
+unsafe fn get_sig_manager(rp: *const crate::proc::Proc) -> Option<i32> {
+    unsafe {
+        let priv_ptr = (*rp).p_priv;
+        if priv_ptr.is_null() {
+            return None;
+        }
+        let mgr = (*priv_ptr).s_sig_mgr;
+        // s_sig_mgr stores the proc_nr (e.g. PM_PROC_NR = 0).
+        // For generation-0 boot processes, the kernel endpoint equals
+        // the proc_nr (make_endpoint(0, n) = n). Check if valid.
+        if mgr < 0 || mgr >= crate::proc::NR_PROCS as i32 {
+            return None;
+        }
+        Some(mgr)
     }
 }
 

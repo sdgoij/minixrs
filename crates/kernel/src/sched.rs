@@ -45,6 +45,13 @@ unsafe fn current_proc() -> *mut Proc {
 pub unsafe fn enqueue(rp: *mut Proc) {
     unsafe {
         assert!((*rp).is_runnable());
+        // Trace: every enqueue with name
+        let ename0 = (*rp).p_name[0];
+        let ename1 = (*rp).p_name[1];
+        crate::hal::serial_write_byte(b'+');
+        crate::hal::serial_write_byte(ename0);
+        crate::hal::serial_write_byte(ename1);
+        crate::hal::serial_write_byte(b'+');
 
         let q = (*rp).p_priority as usize;
         assert!(q < NR_SCHED_QUEUES);
@@ -238,24 +245,23 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
         let head = run_q_head_array();
 
         for q in 0..NR_SCHED_QUEUES {
-            let rp = (*head)[q];
-            if rp.is_null() {
-                continue;
-            }
-            // Preempted processes (RTS_PREEMPTED set) are allowed — the
-            // caller re-enqueues them. Skip non-runnable, non-preempted.
-            if !(*rp).is_runnable() && !(*rp).is_preempted() {
-                continue;
-            }
-
-            // Check if billable
-            if !(*rp).p_priv.is_null() {
-                let flags = (*(*rp).p_priv).s_flags;
-                if flags.contains(crate::r#priv::PrivFlags::BILLABLE) {
-                    crate::hal::sched_set_bill_proc(rp as *mut core::ffi::c_void);
+            // Walk the linked list within this queue — the head may be
+            // non-runnable (e.g., blocked on RECEIVE) while other processes
+            // deeper in the list are runnable.
+            let mut rp = (*head)[q];
+            while !rp.is_null() {
+                if (*rp).is_runnable() || (*rp).is_preempted() {
+                    // Check if billable
+                    if !(*rp).p_priv.is_null() {
+                        let flags = (*(*rp).p_priv).s_flags;
+                        if flags.contains(crate::r#priv::PrivFlags::BILLABLE) {
+                            crate::hal::sched_set_bill_proc(rp as *mut core::ffi::c_void);
+                        }
+                    }
+                    return Some(rp);
                 }
+                rp = (*rp).p_nextready;
             }
-            return Some(rp);
         }
         None
     }
