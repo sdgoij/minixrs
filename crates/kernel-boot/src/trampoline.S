@@ -93,7 +93,7 @@ _start:
 
 .code64
 1:
-    movw $0x10, %ax
+    movw $0x20, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %ss
@@ -129,9 +129,9 @@ info_save:  .space 8
 gdt_start:
 .quad 0x0000000000000000         // null descriptor (0x00)
 .quad 0x00AF9A0000000000         // kernel code (0x08): 64-bit, DPL=0
-.quad 0x00CF920000000000         // kernel data (0x10): DPL=0
-.quad 0x00CFF2000000FFFF         // user data (0x1B): DPL=3, G=1, D/B=1, limit=4GB
-.quad 0x00AFFA000000FFFF         // user code (0x23): 64-bit, DPL=3, G=1, L=1, limit=4GB
+.quad 0x00CFF2000000FFFF         // user data (0x13): DPL=3, G=1, D/B=1, limit=4GB
+.quad 0x00AFFA000000FFFF         // user code (0x1B): 64-bit, DPL=3, G=1, L=1, limit=4GB
+.quad 0x00CF920000000000         // kernel data (0x23): DPL=0
 gdt_end:
 
 gdt_ptr:

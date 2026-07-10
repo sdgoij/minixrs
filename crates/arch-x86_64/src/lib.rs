@@ -129,11 +129,11 @@ impl BootGdtCell {
 /// Boot GDT (16 entries).
 #[cfg(target_os = "none")]
 static BOOT_GDT: BootGdtCell = BootGdtCell::new([
-    0x0000000000000000,
-    0x00AF9A0000000000,
-    0x00CF920000000000,
-    0x00CFF2000000FFFF,
-    0x00AFFA000000FFFF,
+    0x0000000000000000, // 0: NULL
+    0x00AF9A0000000000, // 1: kernel code (sel 0x08)
+    0x00CFF2000000FFFF, // 2: user data (sel 0x13)
+    0x00AFFA000000FFFF, // 3: user code (sel 0x1B)
+    0x00CF920000000000, // 4: kernel data (sel 0x23)
     0,
     0,
     0,

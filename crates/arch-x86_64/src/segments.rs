@@ -144,15 +144,9 @@ pub struct RegionDescriptor64 {
 
 pub const GNULL_SEL: u16 = 0;
 pub const GCODE_SEL: u16 = 1;
-pub const GDATA_SEL: u16 = 2;
-// GDT selector indices must satisfy SYSRETQ's CS/SS computation:
-//   CS = (STAR[47:32] + 16) | 3, SS = (STAR[47:32] +  8) | 3.
-// With STAR[47:32] = 0x0010: CS = 0x0023, SS = 0x001B.
-// Since CS must be the USER CODE segment (index 4) and SS must be
-// the USER DATA segment (index 3), GUDATA_SEL must come before
-// GUCODE_SEL in the GDT.
-pub const GUDATA_SEL: u16 = 3;
-pub const GUCODE_SEL: u16 = 4;
+pub const GUDATA_SEL: u16 = 2;
+pub const GUCODE_SEL: u16 = 3;
+pub const GDATA_SEL: u16 = 4;
 pub const GLDT_SEL: u16 = 5;
 pub const GCPU_SEL: u16 = 6;
 pub const GTSS_SEL: u16 = 7;
@@ -189,9 +183,9 @@ mod tests {
     #[test]
     fn test_gdt_selector() {
         assert_eq!(gsel(GCODE_SEL, SEL_KPL), 0x08);
-        // GUCODE_SEL=4 → (4<<3)|3 = 0x23, GUDATA_SEL=3 → (3<<3)|3 = 0x1B
-        assert_eq!(gsel(GUCODE_SEL, SEL_UPL), 0x23);
-        assert_eq!(gsel(GUDATA_SEL, SEL_UPL), 0x1B);
+        // GUCODE_SEL=3 → (3<<3)|3 = 0x1B, GUDATA_SEL=2 → (2<<3)|3 = 0x13
+        assert_eq!(gsel(GUCODE_SEL, SEL_UPL), 0x1B);
+        assert_eq!(gsel(GUDATA_SEL, SEL_UPL), 0x13);
     }
 
     #[test]
@@ -241,7 +235,7 @@ mod tests {
     fn test_gdt_indices() {
         assert_eq!(gsel(GNULL_SEL, SEL_KPL), 0x00);
         assert_eq!(gsel(GCODE_SEL, SEL_KPL), 0x08);
-        assert_eq!(gsel(GDATA_SEL, SEL_KPL), 0x10);
+        assert_eq!(gsel(GUDATA_SEL, SEL_KPL), 0x10);
     }
 
     // ── Selector helper functions ──────────────────────────────────────────
@@ -269,9 +263,9 @@ mod tests {
     #[test]
     fn test_idxsel() {
         assert_eq!(idxsel(0x08), 1); // GCODE_SEL
-        assert_eq!(idxsel(0x10), 2); // GDATA_SEL
-        assert_eq!(idxsel(0x1B), 3); // GUDATA_SEL
-        assert_eq!(idxsel(0x23), 4); // GUCODE_SEL
+        assert_eq!(idxsel(0x10), 2); // GUDATA_SEL (RPL=0, kernel mode)
+        assert_eq!(idxsel(0x1B), 3); // GUCODE_SEL (RPL=3, user mode)
+        assert_eq!(idxsel(0x23), 4); // GDATA_SEL (RPL=3, user mode)
         assert_eq!(idxsel(0x00), 0); // NULL selector
         // Max index (13 bits).
         assert_eq!(idxsel(0xFFF8), 0x1FFF);
@@ -283,10 +277,10 @@ mod tests {
         // Kernel selectors.
         assert!(kernelmode(0x00)); // NULL
         assert!(kernelmode(0x08)); // GCODE_SEL | SEL_KPL
-        assert!(!kernelmode(0x1B)); // GUDATA_SEL | SEL_UPL (data segment)
+        assert!(!kernelmode(0x1B)); // GUCODE_SEL | SEL_UPL (user code, RPL=3)
         assert!(!usermode(0x08));
-        assert!(usermode(0x1B)); // user data
-        assert!(usermode(0x23)); // user code
+        assert!(usermode(0x1B)); // user code
+        assert!(usermode(0x23)); // GDATA_SEL with RPL=3 (user RPL on kernel data)
     }
 
     #[test]
@@ -432,10 +426,9 @@ mod tests {
     fn test_gdt_selector_indices() {
         assert_eq!(GNULL_SEL, 0);
         assert_eq!(GCODE_SEL, 1);
-        assert_eq!(GDATA_SEL, 2);
-        // GUDATA_SEL=3 must come before GUCODE_SEL=4 for SYSRETQ CS/SS
-        assert_eq!(GUDATA_SEL, 3);
-        assert_eq!(GUCODE_SEL, 4);
+        assert_eq!(GUDATA_SEL, 2);
+        assert_eq!(GUCODE_SEL, 3);
+        assert_eq!(GDATA_SEL, 4);
         assert_eq!(GLDT_SEL, 5);
         assert_eq!(GCPU_SEL, 6);
         assert_eq!(GTSS_SEL, 7);

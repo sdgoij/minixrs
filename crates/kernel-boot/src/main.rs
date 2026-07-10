@@ -160,8 +160,8 @@ pub extern "C" fn kmain() -> ! {
             0, // DPL (kernel only)
         );
 
-        // 5. Unmask the timer IRQ on the master PIC.
-        arch_x86_64::apic::unmask_timer_irq();
+        // 5. Timer IRQ is unmasked just before the scheduler starts,
+        //    after all boot processes are initialized and running.
 
         // 6. Configure COM1 for interrupt-driven input.
         // C callback called on every serial interrupt.
@@ -420,28 +420,10 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  scheduler starting...\r\n");
 
-        // Mask the timer IRQ and serial IRQ to prevent crashes when the
-        // timer interrupt fires in ring 3. The timer ISR (IDT vector 32)
-        // and PIT init are installed above, but the ISR path causes a #GP
-        // when the timer actually fires. This is a workaround — enabling
-        // preemptive multitasking requires debugging the timer ISR path
-        // (likely a missing swapgs or GS-relative memory access issue in
-        // clock::timer_int_handler or the apic timer_isr_entry asm).
+        // Unmask the timer IRQ NOW — all boot processes are initialized
+        // and running in user mode, so the ISR has valid state to work with.
         unsafe {
-            // Mask IRQ 0 (timer) and IRQ 4 (serial) on master PIC (port 0x21).
-            let mask: u8;
-            core::arch::asm!(
-                "in al, dx",
-                out("al") mask,
-                in("dx") 0x21u16,
-                options(nomem, nostack),
-            );
-            core::arch::asm!(
-                "out dx, al",
-                in("al") mask | 0x11u8,
-                in("dx") 0x21u16,
-                options(nomem, nostack),
-            );
+            arch_x86_64::apic::unmask_timer_irq();
         }
 
         // Jump to the first process via restore().

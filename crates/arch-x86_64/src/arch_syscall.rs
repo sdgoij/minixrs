@@ -17,10 +17,11 @@ use crate::cpu_msr;
 /// Kernel code segment selector (GDT index 1, RPL=0).
 pub const SYSCALL_CS: u16 = 0x0008;
 
-/// User code segment selector (GDT index 4, RPL=3).
+/// User code segment selector produced by SYSRETQ.
 /// SYSRETQ computes CS = (star[47:32] + 16) | 3, SS = (star[47:32] + 8) | 3.
-/// With star[47:32] = 0x0010: CS = 0x0023 (index 4, RPL 3), SS = 0x001B (index 3, RPL 3).
-pub const SYSRET_CS: u16 = 0x0010;
+/// With star[47:32] = 0x0008: CS = 0x001B (index 3, user code),
+/// SS = 0x0013 (index 2, user data).
+pub const SYSRET_CS: u16 = 0x0008;
 
 /// Set up the syscall MSRs for `syscall`/`sysret`.
 ///
@@ -37,7 +38,7 @@ pub const SYSRET_CS: u16 = 0x0010;
 pub unsafe fn setup_syscall_msrs(entry_rip: u64) {
     // STAR layout (x86_64):
     //   Bits 63:48 = SYSCALL CS/SS selector (e.g. 0x0008 for kernel)
-    //   Bits 47:32 = SYSRET CS/SS selector  (e.g. 0x001B for user CS=0x001B, SS=0x0023)
+    //   Bits 47:32 = SYSRET CS/SS selector  (e.g. 0x0008 for user CS=0x001B, SS=0x0013)
     //   Bits 31:0  = SYSCALL EIP (unused on x86_64)
     //
     // The SS selector for both SYSCALL and SYSRET is always the data
@@ -75,8 +76,8 @@ mod tests {
     fn test_sysret_cs_value() {
         // SYSRET_CS is the base for the SYSRETQ CS/SS computation.
         // SYSRETQ computes: CS = STAR[47:32] + 16 | 3, SS = STAR[47:32] + 8 | 3.
-        // With SYSRET_CS = 0x0010: CS = 0x0023 (idx 4, user code), SS = 0x001B (idx 3, user data).
-        assert_eq!(SYSRET_CS, 0x0010);
+        // With SYSRET_CS = 0x0008: CS = 0x001B (idx 3, user code), SS = 0x0013 (idx 2, user data).
+        assert_eq!(SYSRET_CS, 0x0008);
     }
 
     #[test]
