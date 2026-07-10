@@ -242,7 +242,11 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
             if rp.is_null() {
                 continue;
             }
-            assert!((*rp).is_runnable());
+            // Preempted processes (RTS_PREEMPTED set) are allowed — the
+            // caller re-enqueues them. Skip non-runnable, non-preempted.
+            if !(*rp).is_runnable() && !(*rp).is_preempted() {
+                continue;
+            }
 
             // Check if billable
             if !(*rp).p_priv.is_null() {

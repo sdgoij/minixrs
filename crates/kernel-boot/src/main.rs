@@ -545,20 +545,32 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             save_proc_regs(rp, saved);
         }
 
-        // Pick the next runnable process.
-        if let Some(next) = kernel::sched::pick_proc() {
-            if next != rp || is_exec {
-                // Deliver any pending IPC message to the target process's
-                // user buffer and set RAX to the source endpoint.
-                unsafe { deliver_msg(next) };
-                arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
-                // Switch to the new process — never returns.
-                arch_x86_64::asm::restore(next as *const u8);
+        // Pick the next runnable process, handling RTS_PREEMPTED.
+        // Preempted processes are re-enqueued and another is picked.
+        let next = loop {
+            if let Some(candidate) = kernel::sched::pick_proc() {
+                if (*candidate).is_preempted() {
+                    let old = (*candidate).p_rts_flags.fetch_and(
+                        !kernel::proc::RtsFlags::PREEMPTED.bits(),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    // If no other blocking flags remain, re-enqueue
+                    if (old & !kernel::proc::RtsFlags::PREEMPTED.bits()) == 0 {
+                        if (*candidate).p_cpu_time_left > 0 {
+                            kernel::sched::enqueue_head(candidate);
+                        } else {
+                            kernel::sched::enqueue(candidate);
+                        }
+                    }
+                    continue;
+                }
+                break candidate;
             } else {
-                // Same process: deliver pending message before returning.
-                unsafe { deliver_msg(rp) };
+                break core::ptr::null_mut();
             }
-        } else {
+        };
+
+        if next.is_null() {
             // No runnable processes — all blocked on IPC.
             let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
             if !pm_proc.is_null() {
@@ -566,12 +578,24 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                     arch_common::com::RS_PROC_NR,
                     arch_common::com::PM_PROC_NR,
                 );
-                if let Some(next) = kernel::sched::pick_proc() {
-                    unsafe { deliver_msg(next) };
-                    arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
-                    arch_x86_64::asm::restore(next as *const u8);
+                if let Some(pm_candidate) = kernel::sched::pick_proc() {
+                    unsafe { deliver_msg(pm_candidate) };
+                    arch_x86_64::cpulocals::set_cpulocal_proc_ptr(
+                        pm_candidate as *mut core::ffi::c_void,
+                    );
+                    arch_x86_64::asm::restore(pm_candidate as *const u8);
                 }
             }
+        } else if next != rp || is_exec {
+            // Deliver any pending IPC message to the target process's
+            // user buffer and set RAX to the source endpoint.
+            unsafe { deliver_msg(next) };
+            arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
+            // Switch to the new process — never returns.
+            arch_x86_64::asm::restore(next as *const u8);
+        } else {
+            // Same process: deliver pending message before returning.
+            unsafe { deliver_msg(rp) };
         }
     }
 }
