@@ -215,9 +215,27 @@ pub fn hlt() {
 
 // ── Timestamp counter ────────────────────────────────────────────────────
 
-/// Read the timestamp counter.
+/// Read the TSC (timestamp counter).
 pub fn read_tsc() -> u64 {
     crate::hw::read_tsc()
+}
+
+/// Read the per-CPU TSC context-switch timestamp.
+///
+/// # Safety
+///
+/// CPU locals must be initialized.
+pub unsafe fn read_tsc_ctr_switch() -> u64 {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.tsc_ctr_switch() }
+}
+
+/// Write the per-CPU TSC context-switch timestamp.
+///
+/// # Safety
+///
+/// CPU locals must be initialized.
+pub unsafe fn write_tsc_ctr_switch(val: u64) {
+    unsafe { crate::cpulocals::CPU_LOCAL_STORAGE.set_tsc_ctr_switch(val) }
 }
 
 /// Release the FPU for a process.

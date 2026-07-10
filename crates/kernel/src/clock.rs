@@ -303,6 +303,12 @@ unsafe fn load_update() {
 /// Must only be called from the timer interrupt context.
 pub unsafe fn timer_int_handler() {
     unsafe {
+        // Call context_stop for the current process (currently no-op).
+        let p = crate::hal::sched_current_proc() as *mut Proc;
+        if !p.is_null() {
+            context_stop(p);
+        }
+
         let mono = MONOTONIC.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Limit adjtime changes to every other tick.
@@ -320,7 +326,6 @@ pub unsafe fn timer_int_handler() {
             REALTIME.fetch_add(1, Ordering::Relaxed);
         }
 
-        let p = crate::hal::sched_current_proc() as *mut Proc;
         let billp = crate::hal::sched_bill_proc() as *mut Proc;
 
         if !p.is_null() {
@@ -420,9 +425,32 @@ pub fn cycles_accounting_init() {
 ///
 /// Must be called in a context where the interrupt handler is guaranteed not to
 /// run concurrently with this operation (e.g., interrupts disabled).
-pub unsafe fn context_stop(_p: *mut Proc) {
-    // Will read TSC and update cycle counters when the arch layer provides
-    // the necessary primitives.
+pub unsafe fn context_stop(p: *mut Proc) {
+    unsafe {
+        let tsc = crate::hal::read_tsc();
+        let prev = crate::hal::read_tsc_ctr_switch();
+        if prev == 0 {
+            // First call: just record the TSC, no delta to account yet.
+            crate::hal::write_tsc_ctr_switch(tsc);
+            return;
+        }
+        let delta = tsc.wrapping_sub(prev);
+        // Update total cycles for the process.
+        (*p).p_cycles = (*p).p_cycles.wrapping_add(delta);
+        // Decrement remaining quantum. Only meaningful for runnable processes
+        // (blocked processes will have quantum renewed when they wake).
+        if (*p).p_endpoint >= 0 && (*p).p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) == 0
+        {
+            if delta < (*p).p_cpu_time_left {
+                (*p).p_cpu_time_left -= delta;
+            } else {
+                (*p).p_cpu_time_left = 0;
+                // Quantum exhausted — renew or notify scheduler.
+                crate::sched::proc_no_time(p);
+            }
+        }
+        crate::hal::write_tsc_ctr_switch(tsc);
+    }
 }
 
 /// Wrapper for `context_stop` suitable for calling from assembly.
