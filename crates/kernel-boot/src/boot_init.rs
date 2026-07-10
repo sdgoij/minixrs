@@ -454,6 +454,23 @@ pub unsafe fn boot_create_restricted_page_table(
                 let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
                 core::ptr::write(new_pd.add(i), entry);
             }
+
+            // Remove PG_U from kernel PD entries to prevent user-space access to
+            // kernel code/data.  Matches C pg_mapkernel() which maps kernel virtual
+            // addresses without I386_VM_USER, while keeping the identity map entries
+            // separate.  The kernel binary is at 0x200000, so the first relevant PD
+            // index is 1 (each 2MB entry covers 0x200000 bytes).
+            // Userspace split on these PD entries (via map_page for code/stack)
+            // will re-add PG_U to the specific 4KB pages that belong to the process.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let kernel_pde_start: usize = 1; // 0x200000 / 0x200000
+                let kernel_pde_end: usize = 8; // 0x1000000 / 0x200000 — 16MB
+                for i in kernel_pde_start..kernel_pde_end {
+                    let pde = core::ptr::read(new_pd.add(i));
+                    core::ptr::write(new_pd.add(i), pde & !kernel::pagetable::PG_U);
+                }
+            }
         }
     }
 
