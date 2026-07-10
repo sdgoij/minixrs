@@ -10,6 +10,10 @@ use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
 use crate::vfs::misc::*;
 
+// PM_PROC_NR is only needed by the MINIX-target send helpers.
+#[cfg(target_os = "none")]
+use arch_common::com::PM_PROC_NR;
+
 // PM↔VFS message types (from com.h)
 
 const VFS_PM_RQ_BASE: i32 = 0x900;
@@ -68,12 +72,40 @@ fn w_u64(buf: &mut [u8; 64], off: usize, val: u64) {
 
 // Dispatch
 
+/// SEND syscall number.
+/// Only used on the MINIX target (host build SEND is a no-op).
+#[cfg(target_os = "none")]
+const SEND_CALL_NR: u64 = 46;
+
+/// Helper: send a reply message to PM via SEND syscall.
+///
+/// Only available on the MINIX target (not host tests).
+/// Matching C: `ipc_send(PM_PROC_NR, &m_out)` in `service_pm()`.
+/// Builds a 64-byte buffer with the given m_type and endpoint.
+#[cfg(target_os = "none")]
+unsafe fn reply_to_pm(m_type: i32, endpoint: i32) {
+    let mut buf = [0u8; 64];
+    buf[4..8].copy_from_slice(&m_type.to_le_bytes());
+    buf[8..12].copy_from_slice(&endpoint.to_le_bytes());
+    minix_rt::syscall2(SEND_CALL_NR, PM_PROC_NR as u64, buf.as_ptr() as u64);
+}
+
+/// SEND a raw buffer to PM (MINIX target only).
+#[cfg(target_os = "none")]
+unsafe fn send_raw_to_pm(buf: &[u8; 64]) {
+    minix_rt::syscall2(SEND_CALL_NR, PM_PROC_NR as u64, buf.as_ptr() as u64);
+}
+
 /// Dispatch a PM message to the appropriate handler.
 ///
 /// Called from the VFS main loop when a message arrives from PM_PROC_NR.
 /// Handles PM messages that can be processed immediately (non-blocking).
 /// For exec/exit/dumpcore, the first phase is done here (closing FDs, etc.)
 /// and the heavy lifting is deferred to service_pm_postponed.
+///
+/// Matching C: `service_pm()` in `minix/servers/vfs/main.c`.
+/// The C code builds a local `message m_out` and calls `ipc_send(PM_PROC_NR, &m_out)`
+/// directly — it does NOT go through the generic `reply()` function.
 pub fn service_pm() -> i32 {
     let glob = unsafe { &mut *vfs_global() };
     let call_nr = r_i32(&glob.fs_m_in, MSG_TYPE_OFF);
@@ -84,8 +116,10 @@ pub fn service_pm() -> i32 {
             let euid = r_i32(&glob.fs_m_in, PM_EID_OFF);
             let ruid = r_i32(&glob.fs_m_in, PM_RID_OFF);
             pm_setuid(proc_e, euid, ruid);
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_RS_BASE + 1);
-            w_i32(&mut glob.fs_m_out, PM_ENDPT_OFF, proc_e);
+            #[cfg(target_os = "none")]
+            unsafe {
+                reply_to_pm(VFS_PM_RS_BASE + 1, proc_e)
+            };
             OK
         }
 
@@ -94,16 +128,20 @@ pub fn service_pm() -> i32 {
             let egid = r_i32(&glob.fs_m_in, PM_EID_OFF);
             let rgid = r_i32(&glob.fs_m_in, PM_RID_OFF);
             pm_setgid(proc_e, egid, rgid);
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_RS_BASE + 2);
-            w_i32(&mut glob.fs_m_out, PM_ENDPT_OFF, proc_e);
+            #[cfg(target_os = "none")]
+            unsafe {
+                reply_to_pm(VFS_PM_RS_BASE + 2, proc_e)
+            };
             OK
         }
 
         VFS_PM_SETSID => {
             let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
             pm_setsid(proc_e);
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_RS_BASE + 3);
-            w_i32(&mut glob.fs_m_out, PM_ENDPT_OFF, proc_e);
+            #[cfg(target_os = "none")]
+            unsafe {
+                reply_to_pm(VFS_PM_RS_BASE + 3, proc_e)
+            };
             OK
         }
 
@@ -119,11 +157,16 @@ pub fn service_pm() -> i32 {
             pm_exec();
 
             // Build reply with ENOSYS so PM falls back to initramfs.
-            let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_EXEC_REPLY);
-            w_i32(&mut glob.fs_m_out, PM_ENDPT_OFF, proc_e);
-            w_i32(&mut glob.fs_m_out, PM_EID_OFF, ENOSYS); // STATUS
-            ENOSYS
+            let _proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
+            #[cfg(target_os = "none")]
+            {
+                let mut buf = [0u8; 64];
+                buf[4..8].copy_from_slice(&(VFS_PM_EXEC_REPLY as i32).to_le_bytes());
+                buf[8..12].copy_from_slice(&_proc_e.to_le_bytes());
+                buf[12..16].copy_from_slice(&ENOSYS.to_le_bytes()); // STATUS
+                unsafe { send_raw_to_pm(&buf) };
+            }
+            OK
         }
 
         VFS_PM_EXIT | VFS_PM_DUMPCORE | VFS_PM_UNPAUSE => {
@@ -150,20 +193,30 @@ pub fn service_pm() -> i32 {
 
             pm_fork(pproc_e, proc_e, child_pid);
 
-            let reply_type = if call_nr == VFS_PM_SRV_FORK {
+            let _reply_type = if call_nr == VFS_PM_SRV_FORK {
                 pm_setuid(proc_e, _reuid, _reuid);
                 pm_setgid(proc_e, _regid, _regid);
                 VFS_PM_RS_BASE + 8
             } else {
                 VFS_PM_RS_BASE + 7
             };
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, reply_type);
+            // Build reply directly and send to PM (matching C pattern).
+            #[cfg(target_os = "none")]
+            {
+                let mut buf = [0u8; 64];
+                buf[4..8].copy_from_slice(&(_reply_type as i32).to_le_bytes());
+                buf[8..12].copy_from_slice(&proc_e.to_le_bytes());
+                unsafe { send_raw_to_pm(&buf) };
+            }
             OK
         }
 
         VFS_PM_REBOOT => {
             pm_reboot();
-            w_i32(&mut glob.fs_m_out, MSG_TYPE_OFF, VFS_PM_RS_BASE + 10);
+            #[cfg(target_os = "none")]
+            unsafe {
+                reply_to_pm(VFS_PM_RS_BASE + 10, 0)
+            };
             OK
         }
 

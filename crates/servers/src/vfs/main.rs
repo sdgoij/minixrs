@@ -181,6 +181,14 @@ unsafe fn handle_work() {
     let call_nr = i32::from_le_bytes(fs_m_in[4..8].try_into().unwrap_or([0; 4]));
     (*glob).req_nr = call_nr;
 
+    // Notifications (m_type == -10) are fire-and-forget — no reply needed.
+    // Replying to a notification would send a message back to the sender,
+    // who is NOT waiting for a reply, creating an infinite IPC loop.
+    if call_nr == -10 {
+        // Update req_nr, but skip dispatch and reply.
+        return;
+    }
+
     // Look up the caller's Fproc slot from the source endpoint.
     let fp = if source >= 0 {
         let slot = (source & 0xff) as usize;
@@ -200,16 +208,17 @@ unsafe fn handle_work() {
         (*fp).fp_endpoint = source;
     }
 
-    let result = if source == PM_PROC_NR {
-        // PM messages are dispatched through service_pm.
-        pm::service_pm()
+    if source == PM_PROC_NR {
+        // PM messages are handled by service_pm, which sends its own
+        // reply directly — do NOT call reply() here. This matches the C
+        // pattern where service_pm calls ipc_send() directly (main.c:796).
+        let _ = pm::service_pm();
     } else {
         // Regular VFS calls are dispatched through the call table.
-        table::dispatch(call_nr)
-    };
-
-    (*glob).err_code = result;
-    reply(fp, result);
+        let result = table::dispatch(call_nr);
+        (*glob).err_code = result;
+        reply(fp, result);
+    }
 }
 
 /// Send a reply message to a process.

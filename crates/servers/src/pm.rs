@@ -1046,6 +1046,29 @@ pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
 /// `caller_slot` must be a valid, in-use process slot. `msg` must point
 /// to a valid message buffer.
 #[allow(unused_unsafe)]
+/// Message field offsets for building VFS PM messages via raw buffer.
+/// Matches the mess_7 layout: m_type at +4, m7_i1..m7_i5 at +8,+12,+16,+20,+24.
+const VFS_MSG_TYPE_OFF: usize = 4;
+const VFS_M7_I1_OFF: usize = 8;
+const VFS_M7_I2_OFF: usize = 12;
+const VFS_M7_I3_OFF: usize = 16;
+const VFS_M7_I4_OFF: usize = 20;
+const VFS_M7_I5_OFF: usize = 24;
+
+/// Handle a PM_FORK request.
+///
+/// Performs the fork: creates a child MProc slot via `do_fork`, calls
+/// SYS_FORK kernel call to clone the kernel Proc entry, then sends
+/// VFS_PM_FORK to VFS and returns EDONTREPLY (the reply is deferred
+/// until VFS sends VFS_PM_FORK_REPLY).
+///
+/// Matching C: `do_fork()` in `minix/servers/pm/forkexit.c`.
+///
+/// # Safety
+///
+/// - `caller_slot` must be a valid, in-use process slot.
+/// - `msg` must point to a valid message buffer.
+#[allow(unused_variables)]
 pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
     let result = unsafe { do_fork(caller_slot) };
     match result {
@@ -1060,11 +1083,9 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 m_type: 0,
                 m_payload: unsafe { core::mem::zeroed() },
             };
-            unsafe {
-                kmsg.m_payload.m1.m1i1 = parent_endpoint;
-                kmsg.m_payload.m1.m1i2 = -1;
-                kmsg.m_payload.m1.m1i3 = 0;
-            }
+            kmsg.m_payload.m1.m1i1 = parent_endpoint;
+            kmsg.m_payload.m1.m1i2 = -1;
+            kmsg.m_payload.m1.m1i3 = 0;
             let kresult = send_kernel_call(0, &mut kmsg);
             if kresult != OK {
                 unsafe { free_proc(child_slot) };
@@ -1076,26 +1097,44 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Set reply fields.
-            unsafe {
-                msg.m_payload.m1.m1i1 = child.mp_pid;
-                msg.m_payload.m1.m1i2 = child_endpoint;
-            }
+            // Step 2: Send VFS_PM_FORK to VFS (matching C tell_vfs).
+            // Build VFS_PM_FORK message with:
+            //   m_type = VFS_PM_FORK (0x907)
+            //   m7_i1 = child endpoint (VFS_PM_ENDPT)
+            //   m7_i2 = parent endpoint (VFS_PM_PENDPT)
+            //   m7_i3 = child pid (VFS_PM_CPID)
+            //   m7_i4 = -1 (VFS_PM_REUID, unused)
+            //   m7_i5 = -1 (VFS_PM_REGID, unused)
+            let mut vfs_buf = [0u8; 64];
+            let vfs_msg_type = arch_common::com::VFS_PM_FORK as i32;
+            vfs_buf[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                .copy_from_slice(&vfs_msg_type.to_le_bytes());
+            vfs_buf[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
+                .copy_from_slice(&child_endpoint.to_le_bytes());
+            vfs_buf[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
+                .copy_from_slice(&parent_endpoint.to_le_bytes());
+            vfs_buf[VFS_M7_I3_OFF..VFS_M7_I3_OFF + 4].copy_from_slice(&child.mp_pid.to_le_bytes());
+            let neg_one: i32 = -1;
+            vfs_buf[VFS_M7_I4_OFF..VFS_M7_I4_OFF + 4].copy_from_slice(&neg_one.to_le_bytes());
+            vfs_buf[VFS_M7_I5_OFF..VFS_M7_I5_OFF + 4].copy_from_slice(&neg_one.to_le_bytes());
 
-            // Step 3: Notify VFS if it's reachable.
-            // VFS may be blocked in mount_root() waiting for MFS. If VFS
-            // isn't receiving, the SEND would queue PM (SENDING set) and
-            // block forever. Use NOTIFY which is always non-blocking — it
-            // stores a pending notification bit if VFS isn't ready.
-            let mut notify_buf = [0u8; 64];
             unsafe {
                 minix_rt::syscall2(
-                    minix_rt::NOTIFY_CALL,
+                    minix_rt::SEND_CALL,
                     arch_common::com::VFS_PROC_NR as u64,
-                    notify_buf.as_mut_ptr() as u64,
+                    vfs_buf.as_ptr() as u64,
                 )
             };
-            OK
+
+            // Step 3: Set VFS_CALL flag on child (matching C tell_vfs).
+            unsafe {
+                let child_ptr = base.add(child_slot);
+                (*child_ptr).mp_flags |= VFS_CALL;
+            }
+
+            // Step 4: Return EDONTREPLY — caller stays blocked until VFS
+            // sends VFS_PM_FORK_REPLY and we reply to both child and parent.
+            EDONTREPLY
         }
         Err(_) => -11,
     }
@@ -1402,6 +1441,94 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
     }
 }
 
+/// Handle a VFS reply message (VFS_PM_FORK_REPLY, etc.).
+///
+/// Matching C: `handle_vfs_reply()` in `servers/pm/main.c`.
+/// Called from the main loop when a message arrives from VFS_PROC_NR
+/// with a type in the VFS_PM_RS range (0x980..0x9BF).
+///
+/// For VFS_PM_FORK_REPLY, sends OK to the child and PID to the parent,
+/// matching the C flow in forkexit.c case VFS_PM_FORK_REPLY.
+///
+/// # Safety
+///
+/// - `_vfs_ep` must be VFS_PROC_NR.
+/// - `msg` must point to a valid 64-byte message buffer.
+/// - Must be called with exclusive access to the MProc table.
+pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
+    let call_nr = msg.m_type;
+
+    // Look up the process associated with this reply.
+    // VFS echoes the child endpoint back in m7_i1 (offset 8).
+    let msg_bytes = msg as *mut Message as *mut u8;
+    let proc_e = i32::from_le_bytes(unsafe {
+        core::ptr::read_unaligned(msg_bytes.add(VFS_M7_I1_OFF) as *const [u8; 4])
+    });
+
+    let proc_n = match unsafe { pm_isokendpt(proc_e) } {
+        Some(n) => n,
+        None => return, // endpoint gone — nothing to do
+    };
+
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(proc_n) };
+
+    // Clear VFS_CALL flag (matching C: rmp->mp_flags &= ~VFS_CALL)
+    // Use raw pointer to modify the actual mproc entry
+    let rmp_mut = unsafe { &mut *base.add(proc_n) };
+    rmp_mut.mp_flags &= !VFS_CALL;
+
+    match call_nr as u32 {
+        arch_common::com::VFS_PM_FORK_REPLY => {
+            // Schedule the newly created process — reply to child and parent.
+            // Matching C pm/forkexit.c case VFS_PM_FORK_REPLY:
+            //   1. Reply to child with OK
+            //   2. Reply to parent with child PID
+
+            // Reply to child (proc_n) with OK
+            let mut child_reply = [0u8; 64];
+            child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4].copy_from_slice(&OK.to_le_bytes());
+            unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SEND_CALL,
+                    rmp.mp_endpoint as u64,
+                    child_reply.as_ptr() as u64,
+                );
+            }
+
+            // Reply to parent with child PID
+            let parent_slot = rmp.mp_parent;
+            if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
+                if parent_rmp.mp_flags & IN_USE != 0 {
+                    let mut parent_reply = [0u8; 64];
+                    // m_type = OK
+                    parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                        .copy_from_slice(&OK.to_le_bytes());
+                    // m1_i1 = child PID
+                    parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
+                        .copy_from_slice(&rmp.mp_pid.to_le_bytes());
+                    // m1_i2 = 0 (exit status — not exiting, just forking)
+                    let zero: i32 = 0;
+                    parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
+                        .copy_from_slice(&zero.to_le_bytes());
+                    unsafe {
+                        minix_rt::syscall2(
+                            minix_rt::SEND_CALL,
+                            parent_rmp.mp_endpoint as u64,
+                            parent_reply.as_ptr() as u64,
+                        );
+                    }
+                }
+            }
+        }
+
+        _ => {
+            // Unknown VFS reply — ignore (C panics here)
+        }
+    }
+}
+
 /// PM server main loop entry point.
 ///
 /// Called once from the PM server process. Receives messages via kernel
@@ -1454,6 +1581,18 @@ pub fn pm_server_main() {
 
             // Cast the 64-byte buffer as a Message for dispatch.
             let msg: &mut Message = unsafe { &mut *(buf_ptr as *mut Message) };
+
+            // Handle VFS replies: messages from VFS in the VFS_PM_RS range
+            // (0x980..0x9BF). These are replies to PM's VFS_PM_FORK etc.
+            // Matching C: `if (IS_VFS_PM_RS(call_nr) && who_e == VFS_PROC_NR)`
+            if src_ep == arch_common::com::VFS_PROC_NR
+                && arch_common::com::is_vfs_pm_rs(msg.m_type as u32)
+            {
+                unsafe { handle_vfs_reply(src_ep, msg) };
+                // VFS messages should NOT receive a reply from PM's main loop —
+                // handle_vfs_reply replies to the waiting caller directly.
+                continue;
+            }
 
             // Handle notifications inline — pm_dispatch has the handler but the
             // main loop skips dispatch for notifications (no reply needed).
