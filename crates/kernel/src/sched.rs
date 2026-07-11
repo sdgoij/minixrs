@@ -45,13 +45,6 @@ unsafe fn current_proc() -> *mut Proc {
 pub unsafe fn enqueue(rp: *mut Proc) {
     unsafe {
         assert!((*rp).is_runnable());
-        // Trace: every enqueue with name
-        let ename0 = (*rp).p_name[0];
-        let ename1 = (*rp).p_name[1];
-        crate::hal::serial_write_byte(b'+');
-        crate::hal::serial_write_byte(ename0);
-        crate::hal::serial_write_byte(ename1);
-        crate::hal::serial_write_byte(b'+');
 
         let q = (*rp).p_priority as usize;
         assert!(q < NR_SCHED_QUEUES);
@@ -332,8 +325,13 @@ pub unsafe fn proc_no_time(p: *mut Proc) {
         if has_user_sched && is_preemptible {
             notify_scheduler(p);
         } else {
-            // Non-preemptible: just renew quantum
+            // Non-preemptible (kernel-scheduled): renew quantum and set
+            // PREEMPTED so the next syscall entry picks another process.
             (*p).p_cpu_time_left = ms_2_cpu_time((*p).p_quantum_size_ms);
+            (*p).p_rts_flags.fetch_or(
+                crate::proc::RtsFlags::PREEMPTED.bits(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 }

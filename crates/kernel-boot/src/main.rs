@@ -295,9 +295,22 @@ pub extern "C" fn kmain() -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
-                core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
-                core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
+                // Priority/quantum matching C MINIX:
+                //   VM, RS: SRV_Q = 7 with 200ms quantum
+                //   Others (PM, VFS, MFS, INIT): priority 0 with 50ms quantum
+                let (priority, quantum_ms) = if proc_nr == arch_common::com::VM_PROC_NR
+                    || proc_nr == arch_common::com::RS_PROC_NR
+                {
+                    (7i8, 200u32)
+                } else {
+                    (0i8, 50u32)
+                };
+                core::ptr::write_volatile(&raw mut (*rp).p_priority, priority);
+                core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, quantum_ms);
+                core::ptr::write_volatile(
+                    &raw mut (*rp).p_cpu_time_left,
+                    (quantum_ms as u64) * 2_500_000,
+                );
             }
 
             let user_flags =
@@ -545,28 +558,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         // CHILD process. The current process (PM) is NOT being replaced,
         // so its registers must be saved normally.
         let is_exec = nr == 61 && result == 0;
-        // Trace: proc name (first 3 chars) and syscall nr (2 hex chars)
-        let name0 = (*rp).p_name[0];
-        let name1 = (*rp).p_name[1];
-        let name2 = (*rp).p_name[2];
-        let hex = b"0123456789abcdef";
-        kernel::hal::serial_write_byte(b'[');
-        if name0 != 0 {
-            kernel::hal::serial_write_byte(name0);
-        }
-        if name1 != 0 {
-            kernel::hal::serial_write_byte(name1);
-        }
-        if name2 != 0 {
-            kernel::hal::serial_write_byte(name2);
-        }
-        kernel::hal::serial_write_byte(b':');
-        if nr < 64 {
-            kernel::hal::serial_write_byte(hex[(nr >> 4) & 0xF]);
-            kernel::hal::serial_write_byte(hex[nr & 0xF]);
-        }
 
-        kernel::hal::serial_write_byte(b']');
         if !is_exec {
             save_proc_regs(rp, saved);
         }
@@ -583,12 +575,11 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             (*rp)
                 .p_rts_flags
                 .store(cleared, core::sync::atomic::Ordering::Relaxed);
+            // Always enqueue at tail after preemption (round-robin).
+            // Matching C: preempted processes go to tail so other
+            // processes at the same priority get a chance to run.
             if cleared == 0 {
-                if (*rp).p_cpu_time_left > 0 {
-                    kernel::sched::enqueue_head(rp);
-                } else {
-                    kernel::sched::enqueue(rp);
-                }
+                kernel::sched::enqueue(rp);
             }
         } else if rts == 0 && !is_exec {
             // Still runnable — continue with same process.
@@ -671,10 +662,6 @@ unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) {
             != 0;
         if has_deliver {
             kernel::ipc::delivermsg(rp);
-            // Trace: message delivery
-            kernel::hal::serial_write_byte(b'{');
-            kernel::hal::serial_write_byte(b'M');
-            kernel::hal::serial_write_byte(b'}');
             // Read source endpoint from delivered message header (bytes 0-3).
             let src_ep = i32::from_le_bytes([
                 (*rp).p_delivermsg[0],

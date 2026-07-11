@@ -294,7 +294,8 @@ pub struct Proc {
     pub p_sendto_e: i32,
 
     /// Bit map for pending kernel signals.
-    pub p_pending: u32,
+    /// Matches C MINIX `sigset_t` (16 bytes on NetBSD/Minix).
+    pub p_pending: u128,
 
     /// Process name (null-terminated).
     pub p_name: [u8; PROC_NAME_LEN],
@@ -362,7 +363,7 @@ impl Default for Proc {
             p_q_link: core::ptr::null_mut(),
             p_getfrom_e: 0,
             p_sendto_e: 0,
-            p_pending: 0,
+            p_pending: 0u128,
             p_name: [0u8; PROC_NAME_LEN],
             p_endpoint: 0,
             p_sendmsg: [0u8; MESSAGE_SIZE],

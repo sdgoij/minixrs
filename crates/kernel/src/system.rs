@@ -1450,7 +1450,10 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
 
         // Notify SYSTEM unconditionally (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
         // p_signal_received is not incremented here; signal tracking is via RTS flags
-        crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
+        // C: only notify on first signal — skip if already SIGNALED
+        if old & RtsFlags::SIGNALED.bits() == 0 {
+            crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
+        }
 
         OK
     }
@@ -1473,7 +1476,7 @@ pub unsafe fn cause_sig(proc_nr: i32, sig_nr: i32) {
 
         // Set the signal bit in p_pending
         if (0..32).contains(&sig_nr) {
-            (*rp).p_pending |= 1u32 << sig_nr;
+            (*rp).p_pending |= 1u128 << sig_nr;
         }
 
         // Mark SIGNALED and SIG_PENDING, dequeue if was runnable
@@ -3688,7 +3691,6 @@ pub unsafe fn do_getksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 && !(*rp).p_priv.is_null()
                 && (*(*rp).p_priv).s_sig_mgr == caller_ep
             {
-                crate::hal::serial_write_byte(b'!');
                 msg_write_i32(msg, SIGCALLS_ENDPT_OFF, (*rp).p_endpoint);
                 msg[SIGCALLS_MAP_OFF..SIGCALLS_MAP_OFF + 16]
                     .copy_from_slice(&(*rp).p_pending.to_ne_bytes());
@@ -3873,14 +3875,13 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
 
         // Enqueue the child so it can be scheduled.
-        // Without timer preemption, a process at the head of a queue
-        // (e.g. VM in a notification loop) can starve newly enqueued
-        // processes.  The IPC direct delivery path now uses enqueue_head
-        // to ensure freshly woken processes get to run promptly.
-        (*rpc).p_priority = 5;
+        // The child inherits the parent's priority (already copied by
+        // copy_nonoverlapping at line 3791).  Match C MINIX: use tail
+        // enqueue, zero initial cpu time (quantum accounting is handled
+        // by the SCHED server or the kernel's default scheduler).
         if (*rpc).is_runnable() {
-            (*rpc).p_cpu_time_left = 50_000_000;
-            crate::sched::enqueue_head(rpc);
+            (*rpc).p_cpu_time_left = 0;
+            crate::sched::enqueue(rpc);
         }
         OK
     }
@@ -5228,18 +5229,18 @@ mod tests {
             // Signal 5 should set bit 5 in p_pending
             cause_sig(0, 5);
             assert!(
-                (*rp).p_pending & (1u32 << 5) != 0,
+                (*rp).p_pending & (1u128 << 5) != 0,
                 "p_pending should have bit 5 set after cause_sig(0, 5)"
             );
 
             // Signal 17 should also be OR'd in
             cause_sig(0, 17);
             assert!(
-                (*rp).p_pending & (1u32 << 5) != 0,
+                (*rp).p_pending & (1u128 << 5) != 0,
                 "bit 5 should still be set"
             );
             assert!(
-                (*rp).p_pending & (1u32 << 17) != 0,
+                (*rp).p_pending & (1u128 << 17) != 0,
                 "p_pending should have bit 17 set after cause_sig(0, 17)"
             );
 

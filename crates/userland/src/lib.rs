@@ -690,7 +690,11 @@ pub fn sh(_args: &[&str]) -> i32 {
                         _ => {
                             // Try external command via kernel fork/exec.
                             let cmd_bytes = cmd.as_bytes();
+                            let cmd_len = cmd_bytes.len().min(55);
                             let mut cmd_path = [0u8; 256];
+                            // Save original cmd at byte 200+ (beyond parent's
+                            // 64-byte waitpid msg which overlaps the first 64 bytes).
+                            cmd_path[200..200 + cmd_len].copy_from_slice(&cmd_bytes[..cmd_len]);
                             // If the command starts with '/', use it directly.
                             // Otherwise try /bin/<cmd> first, then /sbin/<cmd>.
                             let path_len = if cmd_bytes.starts_with(b"/") {
@@ -743,9 +747,11 @@ pub fn sh(_args: &[&str]) -> i32 {
                                             )
                                         };
                                     }
-                                    write_err(b"sh: ");
-                                    write_err(cmd.as_bytes());
-                                    write_err(b": not found\r\n");
+                                    write_err(b"sh: '");
+                                    // Read original cmd from safe region of cmd_path
+                                    // (parent's 64-byte waitpid msg only reaches bytes 0-63).
+                                    write_err(&cmd_path[200..200 + cmd_len]);
+                                    write_err(b"' not found\r\n");
                                     minix_rt::exit(1);
                                 } else {
                                     // Parent: wait for child
@@ -755,9 +761,9 @@ pub fn sh(_args: &[&str]) -> i32 {
                                     }
                                 }
                             } else {
-                                write_err(b"sh: ");
+                                write_err(b"sh: '");
                                 write_err(cmd.as_bytes());
-                                write_err(b": not found\r\n");
+                                write_err(b"' not found\r\n");
                             }
                         }
                     }

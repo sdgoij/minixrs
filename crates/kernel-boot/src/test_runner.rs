@@ -1477,11 +1477,11 @@ fn test_keyboard_controller_present() -> u32 {
 
 /// Test that `restore()` transitions to ring-3 with correct register values.
 ///
-/// Calls `restore()` which loads all registers from the Proc struct, zeroes
-/// RBX/RDX/RSI/RDI/R8-R15, then executes sysretq to ring-3. The ring-3 code
-/// validates:
-///   - RBX == 0 (was xor'd by restore)
-///   - RAX == 0x42 (test value loaded from Proc[0])
+/// Calls `restore()` which loads CR3, callee-saved regs (RBX, R12-R15) from
+/// p_reg, sets RAX/RCX/R11/RSP from p_reg, zeroes RDX/RSI/RDI/R8-R10, then
+/// executes sysretq to ring-3. The ring-3 code validates:
+///   - RBX == 0 (set in p_reg for this test)
+///   - RAX == 0x42 (test value loaded from p_reg)
 ///
 /// If all checks pass, writes exit code 0 to QEMU isa-debug-exit (port 0x501)
 /// and QEMU exits with (0 << 1) | 1 = 1 (success). On failure, writes exit
@@ -1571,14 +1571,24 @@ fn test_sysretq_ring3() {
         // Set up register state for restore().
         // restore() reads these offsets from the Proc struct:
         //   [0]    = RAX   (test value the ring-3 code checks for 0x42)
+        //   [8]    = RBX   (callee-saved, loaded from p_reg)
         //   [16]   = RCX   (RIP via sysretq)
         //   [72]   = R11   (RFLAGS with IOPL=3)
+        //   [80]   = R12   (callee-saved, loaded from p_reg)
+        //   [88]   = R13   (callee-saved, loaded from p_reg)
+        //   [96]   = R14   (callee-saved, loaded from p_reg)
+        //   [104]  = R15   (callee-saved, loaded from p_reg)
         //   [168]  = RSP   (user stack pointer)
-        //   [256]  = CR3   (p_seg.p_cr3 — already set above)
+        //   [256]  = CR3   (p_seg.p_cr3)
         let frame = &mut (*rp).p_reg;
         frame[0..8].copy_from_slice(&0x42u64.to_ne_bytes()); // RAX test value
+        frame[8..16].copy_from_slice(&0u64.to_ne_bytes()); // RBX = 0 (test checks this)
         frame[16..24].copy_from_slice(&code_page.to_ne_bytes()); // RIP
         frame[72..80].copy_from_slice(&0x3202u64.to_ne_bytes()); // RFLAGS (IOPL=3)
+        frame[80..88].copy_from_slice(&0u64.to_ne_bytes()); // R12 = 0
+        frame[88..96].copy_from_slice(&0u64.to_ne_bytes()); // R13 = 0
+        frame[96..104].copy_from_slice(&0u64.to_ne_bytes()); // R14 = 0
+        frame[104..112].copy_from_slice(&0u64.to_ne_bytes()); // R15 = 0
         frame[168..176].copy_from_slice(&stack_top.to_ne_bytes()); // RSP
     }
 

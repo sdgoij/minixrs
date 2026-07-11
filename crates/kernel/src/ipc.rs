@@ -9,6 +9,7 @@ use arch_common::ipc::{
     AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg, Message,
 };
 
+use crate::r#priv::priv_addr;
 use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
@@ -25,8 +26,10 @@ pub const NOTIFY: i32 = 0x04;
 pub const SENDNB: i32 = 0x05;
 
 pub const IPC_FLG_MSG_FROM_KERNEL: u16 = 0x0001;
-pub const IPC_FLG_CALL_MASK: u16 = 0x007F;
-pub const IPC_FLG_STATUS_MASK: u16 = 0x00FF;
+// C ipcconst.h: IPC_STATUS_CALL_MASK = 0x3F (6 bits, bits 0-5)
+// Does NOT include bit 6 (MF_DELIVERMSG = 0x40).
+pub const IPC_FLG_CALL_MASK: u16 = 0x003F;
+pub const IPC_FLG_STATUS_MASK: u16 = 0x003F;
 
 pub const OK: i32 = 0;
 pub const EPERM: i32 = -1;
@@ -47,15 +50,19 @@ pub const EINVAL: i32 = -22;
 
 // ── IPC status helpers (safe — work on values, not pointers)
 
-pub fn ipc_status_call(status: u16) -> i32 {
-    (status & IPC_FLG_CALL_MASK) as i32
+// C ipcconst.h: status is stored in p_misc_flags (u32_t).
+// Low 6 bits: call type; bits 16+: flags.
+pub fn ipc_status_call(status: u32) -> i32 {
+    (status & IPC_FLG_CALL_MASK as u32) as i32
 }
 
-pub fn ipc_status_has_flag(status: u16, flag: u16) -> bool {
-    status & flag != 0
+// C ipcconst.h: IPC_STATUS_FLAGS_TEST(status, flgs) checks bits at 16+.
+pub fn ipc_status_has_flag(status: u32, flag: u32) -> bool {
+    (status >> 16) & flag != 0
 }
 
-/// Add a call type to a process's IPC status.
+/// Set the IPC call type in a process's misc_flags (low 6 bits).
+/// Keeps bits 6-15 and 16+ unchanged (DELIVERMSG, flags, etc.).
 ///
 /// # Safety
 ///
@@ -63,7 +70,10 @@ pub fn ipc_status_has_flag(status: u16, flag: u16) -> bool {
 pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
     unsafe {
         let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        let new_status = (status & !(IPC_FLG_CALL_MASK as u32)) | (call as u32);
+        // C ipcconst.h: call stored in low 6 bits (IPC_STATUS_CALL_MASK = 0x3F)
+        // bit 6 (MF_DELIVERMSG = 0x40) and above are preserved.
+        let new_status =
+            (status & !(IPC_FLG_CALL_MASK as u32)) | ((call as u32) & IPC_FLG_CALL_MASK as u32);
         (*rp).p_misc_flags.store(new_status, Ordering::Relaxed);
     }
 }
@@ -76,9 +86,10 @@ pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
 pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
     unsafe {
         let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        // C ipcconst.h: IPC_STATUS_FLAGS(flgs) = flgs << 16
         (*rp)
             .p_misc_flags
-            .store(status | (flag as u32), Ordering::Relaxed);
+            .store(status | ((flag as u32) << 16), Ordering::Relaxed);
     }
 }
 
@@ -90,9 +101,11 @@ pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
 pub unsafe fn ipc_status_clear(rp: *mut Proc) {
     unsafe {
         let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
+        // Clear call bits (0-5) AND flags bits (16+) matching C layout.
+        let clear_mask = (IPC_FLG_STATUS_MASK as u32) | (0xFFFFu32 << 16);
         (*rp)
             .p_misc_flags
-            .store(status & !(IPC_FLG_STATUS_MASK as u32), Ordering::Relaxed);
+            .store(status & !clear_mask, Ordering::Relaxed);
     }
 }
 
@@ -123,6 +136,7 @@ fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {
 /// Both processes and `m_ptr` must be valid.
 pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, flags: i32) -> i32 {
     unsafe {
+        // trace removed
         if !is_ok_endpoint(dst_e) {
             return EDEADSRCDST;
         }
@@ -186,17 +200,7 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             let new = old & !RtsFlags::RECEIVING.bits();
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
-                // Without timer preemption, a process at the head of the
-                // queue (e.g. VM receiving notifications) can starve a newly
-                // woken process enqueued at the tail.  Use enqueue_head to
-                // put the freshly woken process at the front so it runs
-                // next.  This matches the intent that the process that was
-                // waiting for THIS message should process it promptly.
-                if (*dst_ptr).p_cpu_time_left > 0 {
-                    crate::sched::enqueue_head(dst_ptr);
-                } else {
-                    enqueue(dst_ptr);
-                }
+                enqueue(dst_ptr);
             }
         } else {
             if flags & NON_BLOCKING != 0 {
@@ -316,7 +320,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                 let bit = chunk.trailing_zeros() as usize;
                                 let priv_id = chunk_i * 32 + bit;
                                 (*priv_ptr).s_notify_pending.clear(priv_id);
-                                let notify_src = priv_id as i32;
+                                let notify_src = priv_addr(priv_id).s_proc_nr;
                                 build_notify_message(
                                     &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]),
                                     notify_src,
@@ -437,15 +441,7 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
 
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
-                // Use enqueue_head so the freshly woken process runs
-                // before any existing head-of-queue process (same rationale
-                // as mini_send: without timer preemption, tail enqueue can
-                // starve under a runnable head).
-                if (*dst_ptr).p_cpu_time_left > 0 {
-                    crate::sched::enqueue_head(dst_ptr);
-                } else {
-                    enqueue(dst_ptr);
-                }
+                enqueue(dst_ptr);
             }
         } else {
             // C: record pending notification when destination isn't waiting.
@@ -527,7 +523,6 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
     unsafe {
         let vir = (*rp).p_delivermsg_vir;
         if vir == 0 {
-            // No user-space buffer to write to — skip delivery.
             return OK;
         }
 
@@ -544,9 +539,6 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
         };
 
         // Copy the message from the kernel buffer to the user virtual address.
-        // Copy only size_of::<Message>() bytes (56), not MESSAGE_SIZE (64),
-        // to avoid stack corruption — user receive buffers are typically
-        // Message structs (56 bytes), not 64-byte buffers.
         let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
         core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, copy_sz);
 
@@ -593,6 +585,7 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
         // NOTE: may_send_to is currently broken (s_ipc_to never filled).
         // All IPC attempts from user processes would fail with ECALLDENIED.
         // Disabled until privilege system is fixed.
+        // may_send_to disabled (privilege system incomplete)
 
         match call {
             SENDREC => {
@@ -1361,11 +1354,13 @@ mod tests {
 
     #[test]
     fn test_ipc_status_helpers() {
-        let mut status: u16 = 0;
-        status = (status & !0x7F) | SEND as u16;
+        // C layout: call in low 6 bits, flags at bits 16+
+        let mut status: u32 = 0;
+        status = (status & !(IPC_FLG_CALL_MASK as u32)) | (SEND as u32);
         assert_eq!(ipc_status_call(status), SEND);
-        status |= IPC_FLG_MSG_FROM_KERNEL;
-        assert!(ipc_status_has_flag(status, IPC_FLG_MSG_FROM_KERNEL));
+        // Flags at bits 16+
+        status |= (IPC_FLG_MSG_FROM_KERNEL as u32) << 16;
+        assert!(ipc_status_has_flag(status, IPC_FLG_MSG_FROM_KERNEL as u32));
     }
 
     #[test]

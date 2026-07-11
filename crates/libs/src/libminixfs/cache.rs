@@ -6,7 +6,6 @@
 //!
 //! The implementation is ported from Minix 3.3.0's `libminixfs/cache.c`.
 
-use alloc::alloc;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -327,12 +326,18 @@ pub unsafe fn lmfs_alloc_block(bp: *mut Buf) {
 
     let block_size = static_read!(fs_block_size);
 
-    let layout = alloc::Layout::from_size_align(block_size as usize, PAGE_SIZE as usize)
+    let layout = alloc::alloc::Layout::from_size_align(block_size as usize, PAGE_SIZE as usize)
         .expect("bad block size alignment");
-    let ptr = unsafe { alloc::alloc_zeroed(layout) };
+    #[cfg(target_os = "none")]
+    let ptr = unsafe { minix_rt::minix_alloc_zeroed(layout) };
+    #[cfg(not(target_os = "none"))]
+    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         // Free unused blocks and try again.
-        let ptr2 = unsafe { alloc::alloc_zeroed(layout) };
+        #[cfg(target_os = "none")]
+        let ptr2 = unsafe { minix_rt::minix_alloc_zeroed(layout) };
+        #[cfg(not(target_os = "none"))]
+        let ptr2 = unsafe { alloc::alloc::alloc_zeroed(layout) };
         if ptr2.is_null() {
             panic!("libminixfs: could not allocate block");
         }
@@ -829,16 +834,24 @@ pub unsafe fn lmfs_buf_pool(new_nr_bufs: i32) {
         // TODO: free(old_buf) — for now just leak
     }
 
-    // Allocate new buffer array (zeroed).
-    let buf_layout = alloc::Layout::array::<Buf>(new_nr).expect("bad Buf array layout");
-    let new_buf = unsafe { alloc::alloc_zeroed(buf_layout) as *mut Buf };
+    // Allocate new buffer array (zeroed). Use minix-rt's direct allocator
+    // on bare-metal to avoid __rust_alloc_zeroed routing issues.
+    let buf_layout = alloc::alloc::Layout::array::<Buf>(new_nr).expect("bad Buf array layout");
+    #[cfg(target_os = "none")]
+    let new_buf = unsafe { minix_rt::minix_alloc_zeroed(buf_layout) as *mut Buf };
+    #[cfg(not(target_os = "none"))]
+    let new_buf = unsafe { alloc::alloc::alloc_zeroed(buf_layout) as *mut Buf };
     if new_buf.is_null() {
         panic!("couldn't allocate buf list ({})", new_nr);
     }
 
     // Allocate new hash table (zeroed).
-    let hash_layout = alloc::Layout::array::<*mut Buf>(new_nr).expect("bad hash array layout");
-    let new_hash = unsafe { alloc::alloc_zeroed(hash_layout) as *mut *mut Buf };
+    let hash_layout =
+        alloc::alloc::Layout::array::<*mut Buf>(new_nr).expect("bad hash array layout");
+    #[cfg(target_os = "none")]
+    let new_hash = unsafe { minix_rt::minix_alloc_zeroed(hash_layout) as *mut *mut Buf };
+    #[cfg(not(target_os = "none"))]
+    let new_hash = unsafe { alloc::alloc::alloc_zeroed(hash_layout) as *mut *mut Buf };
     if new_hash.is_null() {
         panic!("couldn't allocate buf hash list ({})", new_nr);
     }

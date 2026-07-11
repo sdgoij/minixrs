@@ -52,6 +52,7 @@ pub const PM_EXEC_NEW: i32 = 0x002B;
 
 /// IPC syscall numbers.
 pub const SEND_CALL: u64 = 46;
+pub const SENDNB_CALL: u64 = 51;
 pub const RECEIVE_CALL: u64 = 47;
 pub const SENDREC_CALL: u64 = 48;
 pub const NOTIFY_CALL: u64 = 49;
@@ -130,6 +131,10 @@ pub unsafe fn syscall0(nr: u64) -> i64 {
             in("rax") nr,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -153,6 +158,10 @@ pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
             in("rdi") a1,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -177,6 +186,16 @@ pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
             in("rsi") a2,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -202,6 +221,16 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             in("rdx") a3,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -228,6 +257,16 @@ pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
             in("r10") a4,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -255,6 +294,16 @@ pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
             in("r8") a5,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -283,6 +332,16 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
             in("r9") a6,
             lateout("rcx") _,
             lateout("r11") _,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -511,6 +570,7 @@ pub fn fork() -> i32 {
 /// `child_pid` is the child's PID (returned by fork).
 /// Sends PM_WAITPID to the Process Manager.
 /// Returns the child's exit status on success, negative on error.
+#[inline(never)]
 pub fn waitpid(child_pid: i32) -> i32 {
     let mut msg = [0u8; 64];
     // Set m_type = PM_WAITPID at bytes 4-7, wpid at m1i1 (bytes 8-11)
@@ -716,6 +776,11 @@ impl BrkAllocator {
         let size = layout.size();
         let align = layout.align();
 
+        // Debug: trace BrkAllocator::alloc calls.
+        unsafe {
+            write(1, b"A" as *const u8, 1);
+        }
+
         // On first call, self.ptr is 0. Jump to the start of the valid
         // brk range (0x3FE00000..0x3FF00000). The kernel rejects brk
         // calls outside this range.
@@ -777,6 +842,29 @@ unsafe impl core::alloc::GlobalAlloc for BrkAllocator {
         BrkAllocator::alloc(self, layout)
     }
 
+    /// Allocate zero-initialized memory.
+    ///
+    /// Override the default `alloc_zeroed` (which may be optimized into a
+    /// `__rust_alloc_zeroed` call that doesn't exist in bare-metal) with
+    /// an explicit alloc + volatile memset that cannot be optimized away.
+    ///
+    /// # Safety
+    ///
+    /// `layout` must have non-zero size.
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = self.alloc(layout);
+        if !ptr.is_null() {
+            // Volatile byte-by-byte memset prevents LLVM from optimizing
+            // alloc + memset back into __rust_alloc_zeroed. Each volatile
+            // write is a compiler barrier that cannot be reordered or elided.
+            let len = layout.size();
+            for i in 0..len {
+                unsafe { core::ptr::write_volatile(ptr.add(i), 0u8) };
+            }
+        }
+        ptr
+    }
+
     /// Deallocate memory previously allocated by this allocator.
     ///
     /// # Safety
@@ -798,6 +886,78 @@ impl Default for BrkAllocator {
 #[cfg(target_os = "none")]
 #[global_allocator]
 static ALLOCATOR: BrkAllocator = BrkAllocator::new();
+
+/// Allocate zeroed memory via the BrkAllocator, bypassing the Rust alloc
+/// crate's GlobalAlloc chain. This is a workaround for cross-compiled server
+/// binaries where `alloc::alloc::alloc_zeroed` may not route correctly.
+///
+/// # Safety
+///
+/// `layout` must have non-zero size. The returned pointer must be freed
+/// with `minix_dealloc` using the same layout.
+/// Allocate zeroed memory via direct brk syscall, bypassing the Rust alloc
+/// crate's GlobalAlloc chain. This is a workaround for cross-compiled server
+/// binaries where `alloc::alloc::alloc_zeroed` may not route correctly.
+///
+/// Uses a simple bump scheme starting at 0x3FE00000, matching the kernel's
+/// brk range.
+///
+/// # Safety
+///
+/// `layout` must have non-zero size.
+#[cfg(target_os = "none")]
+pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static BPTR: AtomicUsize = AtomicUsize::new(0);
+
+    let size = layout.size();
+    let align = layout.align();
+
+    let current = BPTR.load(Ordering::Relaxed);
+    let base = if current == 0 {
+        0x3FE00000usize
+    } else {
+        current
+    };
+    let aligned = (base + align - 1) & !(align - 1);
+    let new_end = aligned + size;
+
+    if new_end > 0x3FF00000 {
+        return core::ptr::null_mut();
+    }
+
+    // Call brk syscall directly: syscall1(36, new_end)
+    let brk_result: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") 36u64,
+            in("rdi") new_end as u64,
+            lateout("rcx") _,
+            lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
+            lateout("rax") brk_result,
+            options(nostack),
+        );
+    }
+    if brk_result < 0 {
+        return core::ptr::null_mut();
+    }
+
+    BPTR.store(aligned + size, Ordering::Relaxed);
+
+    // Volatile-zero the allocated memory
+    let ptr = aligned as *mut u8;
+    for i in 0..size {
+        unsafe {
+            core::ptr::write_volatile(ptr.add(i), 0u8);
+        }
+    }
+    ptr
+}
 
 // Tests
 

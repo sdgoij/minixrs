@@ -284,7 +284,11 @@ pub fn vm_main() {
             if status != SUSPEND && status != EDONTREPLY {
                 msg.m_type = status;
                 unsafe {
-                    minix_rt::syscall2(SEND_CALL, src_ep as u64, &mut msg as *mut Message as u64);
+                    minix_rt::syscall2(
+                        minix_rt::SENDNB_CALL,
+                        src_ep as u64,
+                        &mut msg as *mut Message as u64,
+                    );
                 }
             }
         }

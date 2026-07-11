@@ -535,16 +535,17 @@ pub unsafe fn get_free_pid() -> i32 {
 /// caller must ensure exclusive access to the process table.
 pub unsafe fn do_fork(slot: usize) -> Result<usize, i32> {
     let base = MPROC.as_ptr();
-    // Safety: caller guarantees `slot < NR_PROCS`.
     let parent_ptr = unsafe { base.add(slot) };
-    // Safety: caller guarantees the pointer is valid and the slot is in use.
     let parent_flags = unsafe { (*parent_ptr).mp_flags };
     if parent_flags & IN_USE == 0 {
         return Err(EINVAL);
     }
-
-    // Find a free child slot.
-    let child_slot = alloc_proc().ok_or(-11)?; // EAGAIN
+    let child_slot = match alloc_proc() {
+        Some(s) => s,
+        None => {
+            return Err(-11);
+        }
+    };
     // Safety: `child_slot` was just returned by `alloc_proc()`, so it is
     // a valid index (< NR_PROCS).
     let child_ptr = unsafe { base.add(child_slot) };
@@ -1031,7 +1032,7 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
                 reply_msg.m_payload.m1.m1i2 = status & 0xFF;
                 unsafe {
                     minix_rt::syscall2(
-                        minix_rt::SEND_CALL,
+                        minix_rt::SENDNB_CALL,
                         parent_rmp.mp_endpoint as u64,
                         &mut reply_msg as *mut Message as u64,
                     );
@@ -1124,17 +1125,12 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
 
             // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
-
-            // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
             let mut kmsg = Message {
                 m_source: 0,
                 m_type: 0,
                 m_payload: unsafe { core::mem::zeroed() },
             };
             kmsg.m_payload.m1.m1i1 = parent_endpoint;
-            // fork_flags = 0: no special flags. PFF_VMINHIBIT (bit 0) is
-            // NOT set because VM fork (vm_fork) is a stub — no one would
-            // clear VMINHIBIT and the child would be stuck non-runnable.
             kmsg.m_payload.m1.m1i2 = 0;
             kmsg.m_payload.m1.m1i3 = 0;
             let kresult = send_kernel_call(0, &mut kmsg);
@@ -1381,7 +1377,6 @@ pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
 /// Maps each PM call number to its handler function.
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
     // Handle notifications (m_type == NOTIFY_MESSAGE = -10).
-    // These include kernel exit notifications.
     if msg.m_type == -10 {
         // Check for pending process exits via SYS_GETKSIG (kernel call 7).
         // This returns: endpoint at m1i1, exit status at m1i2.
@@ -1437,7 +1432,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
                                 reply_msg.m_payload.m1.m1i1 = pid;
                                 reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
                                 minix_rt::syscall2(
-                                    minix_rt::SEND_CALL,
+                                    minix_rt::SENDNB_CALL,
                                     parent_rmp.mp_endpoint as u64,
                                     &mut reply_msg as *mut Message as u64,
                                 );
@@ -1546,7 +1541,7 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                         .copy_from_slice(&zero.to_le_bytes());
                     unsafe {
                         minix_rt::syscall2(
-                            minix_rt::SEND_CALL,
+                            minix_rt::SENDNB_CALL,
                             parent_rmp.mp_endpoint as u64,
                             parent_reply.as_ptr() as u64,
                         );
@@ -1587,50 +1582,33 @@ pub fn pm_server_main() {
 
         // Syscall numbers for IPC (from minix-std):
         //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
-        const SEND_CALL: u64 = 46;
         const RECEIVE_CALL: u64 = 47;
         const ANY: i32 = 0x0000ffff;
 
         loop {
             // Use an 8-byte-aligned 64-byte buffer for RECEIVE.
             // [u64; 8] is 8-byte aligned and exactly 64 bytes.
-            let mut raw_buf = [0u64; 8];
-            let buf_ptr = raw_buf.as_mut_ptr() as *mut u8;
+            // Use [u8; 64] as the buffer — matches kernel MESSAGE_SIZE exactly.
+            let mut raw_buf = [0u8; 64];
+            let buf_ptr = raw_buf.as_mut_ptr();
 
             // Receive a message from any sender.
-            // syscall2(RECEIVE_CALL=47, src=ANY, msg_ptr) → sender endpoint
             let src = unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf_ptr as u64) };
-            if src < 0 {
-                continue;
-            }
             let src_ep = src as i32;
-
-            // Resolve the sender's process slot.
-            let slot = match unsafe { pm_isokendpt(src_ep) } {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Cast the 64-byte buffer as a Message for dispatch.
             let msg: &mut Message = unsafe { &mut *(buf_ptr as *mut Message) };
 
-            // Handle VFS replies: messages from VFS in the VFS_PM_RS range
-            // (0x980..0x9BF). These are replies to PM's VFS_PM_FORK etc.
-            // Matching C: `if (IS_VFS_PM_RS(call_nr) && who_e == VFS_PROC_NR)`
-            if src_ep == arch_common::com::VFS_PROC_NR
-                && arch_common::com::is_vfs_pm_rs(msg.m_type as u32)
-            {
-                unsafe { handle_vfs_reply(src_ep, msg) };
-                // VFS messages should NOT receive a reply from PM's main loop —
-                // handle_vfs_reply replies to the waiting caller directly.
-                continue;
-            }
-
-            // Handle notifications inline — pm_dispatch has the handler but the
-            // main loop skips dispatch for notifications (no reply needed).
+            // Handle notifications FIRST — before endpoint/slot resolution,
+            // because notifications can come from kernel tasks with negative
+            // endpoints (e.g. SYSTEM = -2) that won't pass pm_isokendpt.
             if msg.m_type == -10 {
                 // Check for pending process exits via SYS_GETKSIG (kernel call 7).
+                // Limit iterations to prevent infinite loop if signals keep regenerating.
+                let mut sig_count = 0u32;
                 loop {
+                    if sig_count > 50 {
+                        break;
+                    }
+                    sig_count += 1;
                     let mut kmsg = Message {
                         m_source: 0,
                         m_type: 0,
@@ -1641,8 +1619,20 @@ pub fn pm_server_main() {
                         break;
                     }
                     let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
-                    if endpt == -1 || endpt == 0 || endpt == 31743 {
+                    // C: NONE check only — no `endpt == 0` guard.
+                    // endpoint 0 is PM_PROC_NR, which should NOT be skipped.
+                    // endpoint validated below
+                    if endpt == -1 || endpt == 31743 {
                         break;
+                    }
+                    // Skip PM's own endpoint (0) — signal manager signals
+                    // itself via send_sig, which is not an exit to process.
+                    if endpt == 0 {
+                        // Still need SYS_ENDKSIG to clear SIG_PENDING,
+                        // even though we skip processing (PM's own signal).
+                        kmsg.m_payload.m1.m1i3 = endpt;
+                        send_kernel_call(8, &mut kmsg);
+                        continue;
                     }
                     let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
                     if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
@@ -1664,7 +1654,7 @@ pub fn pm_server_main() {
                                         reply_msg.m_payload.m1.m1i1 = pid;
                                         reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
                                         minix_rt::syscall2(
-                                            minix_rt::SEND_CALL,
+                                            minix_rt::SENDNB_CALL,
                                             parent_rmp.mp_endpoint as u64,
                                             &mut reply_msg as *mut Message as u64,
                                         );
@@ -1675,7 +1665,29 @@ pub fn pm_server_main() {
                             }
                         }
                     }
+                    // Clear SIG_PENDING via SYS_ENDKSIG (kernel call 8),
+                    // matching C's end_work() after get_work().
+                    kmsg.m_payload.m1.m1i3 = endpt;
+                    send_kernel_call(8, &mut kmsg);
                 }
+                continue;
+            }
+
+            // For non-notifications, resolve the sender's process slot.
+            let slot = match unsafe { pm_isokendpt(src_ep) } {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Handle VFS replies: messages from VFS in the VFS_PM_RS range
+            // (0x980..0x9BF). These are replies to PM's VFS_PM_FORK etc.
+            // Matching C: `if (IS_VFS_PM_RS(call_nr) && who_e == VFS_PROC_NR)`
+            if src_ep == arch_common::com::VFS_PROC_NR
+                && arch_common::com::is_vfs_pm_rs(msg.m_type as u32)
+            {
+                unsafe { handle_vfs_reply(src_ep, msg) };
+                // VFS messages should NOT receive a reply from PM's main loop —
+                // handle_vfs_reply replies to the waiting caller directly.
                 continue;
             }
 
@@ -1683,10 +1695,14 @@ pub fn pm_server_main() {
             let status = pm_dispatch(slot, msg);
 
             // Send reply if the handler didn't return EDONTREPLY.
+            // Use SENDNB (non-blocking) matching C MINIX's reply() which
+            // uses ipc_sendnb. If the destination isn't receiving, the
+            // send fails gracefully instead of blocking PM forever.
             if status != EDONTREPLY {
                 msg.m_type = status;
                 unsafe {
-                    minix_rt::syscall2(SEND_CALL, src_ep as u64, buf_ptr as u64);
+                    let send_buf = &raw_buf as *const _ as u64;
+                    minix_rt::syscall2(minix_rt::SENDNB_CALL, src_ep as u64, send_buf);
                 }
             }
         }

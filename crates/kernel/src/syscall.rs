@@ -470,7 +470,7 @@ unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
 
 // IPC syscall handlers (46-49)
 
-/// SYS_IPC_SEND (46) — send a message to a process.
+/// SYS_IPC_SEND (46) — blocking send a message to a process.
 unsafe fn sys_ipc_send_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let dest = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;
@@ -509,6 +509,18 @@ unsafe fn sys_ipc_sendrec_handler(caller: *mut crate::proc::Proc, args: &[u64; 6
     // do_sync_ipc reads destination from msg[0..4]
     unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
     unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDREC) as i64 }
+}
+
+/// SYS_IPC_SENDNB (51) — non-blocking send a message to a process.
+/// Same as SEND (46) but does not block if the destination is not receiving.
+unsafe fn sys_ipc_sendnb_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let dest = args[0] as i32;
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    unsafe { core::ptr::write_unaligned(msg_ptr as *mut i32, dest) };
+    unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDNB) as i64 }
 }
 
 /// SYS_KERNEL_CALL (50) — invoke a kernel call on the SYSTEM task.
@@ -1244,6 +1256,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(48, sys_ipc_sendrec_handler); // SENDREC
         register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
         register_basic_syscall(50, sys_kernel_call_handler); // NR_KERNEL_CALL
+        register_basic_syscall(51, sys_ipc_sendnb_handler); // SENDNB
         register_basic_syscall(58, sys_fork_handler); // NR_FORK
         register_basic_syscall(59, sys_waitpid_handler); // NR_WAITPID
         register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE

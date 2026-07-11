@@ -523,7 +523,7 @@ pub fn rs_server_main() {
                 // Write ENOSYS to m_type (bytes 4-7) and SEND it back.
                 buf[4..8].copy_from_slice(&(-71i32).to_le_bytes()); // ENOSYS
                 unsafe {
-                    minix_rt::syscall2(SEND_CALL, src as u64, buf.as_mut_ptr() as u64);
+                    minix_rt::syscall2(minix_rt::SENDNB_CALL, src as u64, buf.as_mut_ptr() as u64);
                 }
             }
         }
