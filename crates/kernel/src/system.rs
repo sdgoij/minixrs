@@ -1656,9 +1656,12 @@ pub unsafe fn clear_ipc_refs(rp: *mut Proc) {
 /// # Safety
 ///
 /// Process must be valid.
-pub unsafe fn sched_proc(rp: *mut Proc, priority: i8) -> i32 {
+pub unsafe fn sched_proc(rp: *mut Proc, priority: i8, quantum: i32) -> i32 {
     unsafe {
         (*rp).p_priority = priority;
+        if quantum > 0 {
+            (*rp).p_cpu_time_left = crate::clock::ms_2_cpu_time(quantum as usize);
+        }
         OK
     }
 }
@@ -3866,6 +3869,18 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
         msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
 
+        // Fork marker
+        #[cfg(target_os = "none")]
+        {
+            crate::hal::serial_write_byte(b'F');
+        }
+
+        // DEBUG: print fork marker
+        #[cfg(target_os = "none")]
+        {
+            crate::hal::serial_write_byte(b'F');
+        }
+
         // Set VMINHIBIT (matching C: PFF_VMINHIBIT flag).
         // Child does NOT run until VM sets up the page table.
         if fork_flags & PFF_VMINHIBIT != 0 {
@@ -4068,11 +4083,14 @@ pub unsafe fn do_schedule_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
             return crate::ipc::EPERM;
         }
 
-        let _quantum = msg_read_i32(msg, SCHEDULE_QUANTUM_OFF);
+        let quantum = msg_read_i32(msg, SCHEDULE_QUANTUM_OFF);
         let priority = msg_read_i32(msg, SCHEDULE_PRIORITY_OFF);
         let _cpu = msg_read_i32(msg, SCHEDULE_CPU_OFF);
 
-        sched_proc(p, priority as i8);
+        let r = sched_proc(p, priority as i8, quantum);
+        if r != OK {
+            return r;
+        }
         // C also clears RTS_NO_QUANTUM after scheduling
         (*p).p_rts_flags
             .fetch_and(!RtsFlags::NO_QUANTUM.bits(), Ordering::Relaxed);
@@ -4728,15 +4746,16 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 const PG_PS: u64 = 0x80;
                 const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
                 const MAP_FLAGS: u64 = 0x02 | 0x04; // RW | USER
+
                 let parent = parent_cr3 as *const u64;
                 let child = child_pml4_pa as *mut u64;
-                // Copy kernel entries
+                // Copy kernel upper-half entries (256-511) from parent.
                 core::ptr::copy_nonoverlapping(
                     parent.add(USER_ENTRIES),
                     child.add(USER_ENTRIES),
                     USER_ENTRIES,
                 );
-                // Walk and map user pages
+                // Walk and map user pages into fresh child page tables.
                 for l4 in 0..USER_ENTRIES {
                     let e4 = core::ptr::read(parent.add(l4));
                     if e4 & PG_P == 0 {
@@ -4775,6 +4794,39 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                         }
                     }
                 }
+                // Copy kernel identity map entries from boot PD into
+                // the child's PD (indices 1-7 for 2MB-16MB range, covering
+                // kernel code at 0x200000). Do NOT overwrite PML4[0]
+                // which was set up by map_page with user mappings.
+                let boot_cr3_val = crate::hal::boot_cr3();
+                if boot_cr3_val != 0 {
+                    let boot_pml4 = boot_cr3_val as *const u64;
+                    let boot_pml4e0 = boot_pml4.read();
+                    if boot_pml4e0 & PG_P != 0 {
+                        let boot_pdpt_pa = boot_pml4e0 & PG_FRAME;
+                        let boot_pdpt = boot_pdpt_pa as *const u64;
+                        let boot_pdpte0 = boot_pdpt.read();
+                        if boot_pdpte0 & PG_P != 0 {
+                            let boot_pd_pa = boot_pdpte0 & PG_FRAME;
+                            let boot_pd = boot_pd_pa as *const u64;
+                            let child_pml4e0 = child.read();
+                            if child_pml4e0 & PG_P != 0 {
+                                let child_pdpt_pa = child_pml4e0 & PG_FRAME;
+                                let child_pdpt = child_pdpt_pa as *const u64;
+                                let child_pdpte0 = child_pdpt.read();
+                                if child_pdpte0 & PG_P != 0 {
+                                    let child_pd_pa = child_pdpte0 & PG_FRAME;
+                                    let child_pd = child_pd_pa as *mut u64;
+                                    for i in 1..8 {
+                                        let boot_pde = boot_pd.add(i).read();
+                                        child_pd.add(i).write(boot_pde);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 msg_write_u64(msg, VM_PAGING_CR3_OFF, child_pml4_pa);
                 OK
             }
@@ -5444,7 +5496,7 @@ mod tests {
         unsafe {
             proc_init();
             let rp = crate::table::proc_addr(0);
-            let result = sched_proc(rp, 7);
+            let result = sched_proc(rp, 7, 0);
             assert_eq!(result, OK);
             assert_eq!((*rp).p_priority, 7);
         }

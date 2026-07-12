@@ -559,26 +559,21 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             core::ptr::read_volatile(saved.add(6)),
             core::ptr::read_volatile(saved.add(7)),
         ];
+        // Save registers BEFORE dispatch so blocking syscalls (SENDREC,
+        // RECEIVE) capture the correct return RIP. Without this, the
+        // parent's p_reg retains state from a PREVIOUS syscall (e.g.,
+        // read()), and do_fork_handler copies stale p_reg to the child.
+        // For SYS_EXEC_REPLACE (61), skip the pre-save — the dispatch
+        // replaces the process image and sets up new p_reg.
+        if nr != 61 {
+            save_proc_regs(rp, saved);
+        }
+
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
-        // Save the current process's register state, UNLESS this was
-        // a SUCCESSFUL SYS_EXEC_REPLACE (61). In that case p_reg already
-        // has the new entry point and stack from exec_initramfs_for_target,
-        // and save_proc_regs would overwrite them with the OLD process state.
-        //
-        // If exec fails, is_exec is false, save_proc_regs runs normally,
-        // and the error code in result is written to p_reg[0] (RAX) so
-        // the caller sees the failure return value.
-        //
-        // SYS_EXEC_TARGET (62) is different — PM calls it on behalf of a
-        // CHILD process. The current process (PM) is NOT being replaced,
-        // so its registers must be saved normally.
+        // Check if this was a successful exec — needed for scheduler logic.
         let is_exec = nr == 61 && result == 0;
-
-        if !is_exec {
-            save_proc_regs(rp, saved);
-        }
 
         // If the current process is still runnable (not blocked) and not
         // preempted, continue running it — matching C MINIX switch_to_user.
@@ -639,11 +634,31 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             // Deliver any pending IPC message to the target process's
             // user buffer and set RAX to the source endpoint.
             unsafe { deliver_msg(next) };
-            // P1
-            kernel::hal::serial_write_byte(b'1');
+            // DEBUG: print endpoint for child processes
+            #[cfg(target_os = "none")]
+            {
+                let ep = unsafe { (*next).p_endpoint };
+                if ep > 100 {
+                    let epb = (ep as u32).to_le_bytes();
+                    kernel::hal::serial_write_byte(b'E');
+                    for i in 0..2 {
+                        let b = epb[i as usize];
+                        let hi = (b >> 4) & 0xF;
+                        let lo = b & 0xF;
+                        kernel::hal::serial_write_byte(if hi < 10 {
+                            b'0' + hi
+                        } else {
+                            b'A' + hi - 10
+                        });
+                        kernel::hal::serial_write_byte(if lo < 10 {
+                            b'0' + lo
+                        } else {
+                            b'A' + lo - 10
+                        });
+                    }
+                }
+            }
             arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
-            // P2
-            kernel::hal::serial_write_byte(b'2');
             // Switch to the new process — never returns.
             arch_x86_64::asm::restore(next as *const u8);
         } else {
@@ -673,18 +688,20 @@ unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) {
             & kernel::proc::MiscFlags::DELIVERMSG.bits()
             != 0;
         if has_deliver {
-            kernel::ipc::delivermsg(rp);
-            // Read source endpoint from delivered message header (bytes 0-3).
-            let src_ep = i32::from_le_bytes([
-                (*rp).p_delivermsg[0],
-                (*rp).p_delivermsg[1],
-                (*rp).p_delivermsg[2],
-                (*rp).p_delivermsg[3],
-            ]);
-            kernel::hal::write_retval(&mut (*rp).p_reg, src_ep as u64);
+            // C: delivermsg copies p_delivermsg to user buffer,
+            // then sets retreg = result code (OK on success).
+            let result = kernel::ipc::delivermsg(rp);
+            // Set RAX = result (matching C: rp->p_reg.retreg = r)
+            kernel::hal::write_retval(&mut (*rp).p_reg, result as u64);
             (*rp).p_misc_flags.fetch_and(
                 !kernel::proc::MiscFlags::DELIVERMSG.bits(),
                 core::sync::atomic::Ordering::Relaxed,
+            );
+            // Matching C: rp->p_delivermsg.m_source = NONE
+            core::ptr::copy_nonoverlapping(
+                kernel::system::NONE.to_le_bytes().as_ptr(),
+                (*rp).p_delivermsg.as_mut_ptr(),
+                4,
             );
         }
     }

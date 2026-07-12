@@ -339,27 +339,45 @@ fn pick_cpu(rmp: &mut SchedProc) {
 
 /// Schedule a process with the kernel (update priority/quantum/CPU).
 unsafe fn schedule_process(rmp: &SchedProc, flags: u32) -> Result<(), i32> {
-    let _new_prio = if flags & SCHEDULE_CHANGE_PRIO != 0 {
+    let new_prio = if flags & SCHEDULE_CHANGE_PRIO != 0 {
         rmp.priority as i32
     } else {
-        -1
+        -1i32
     };
 
-    let _new_quantum = if flags & SCHEDULE_CHANGE_QUANTUM != 0 {
+    let new_quantum = if flags & SCHEDULE_CHANGE_QUANTUM != 0 {
         rmp.time_slice as i32
     } else {
-        -1
+        -1i32
     };
 
-    let _new_cpu = if flags & SCHEDULE_CHANGE_CPU != 0 {
+    let new_cpu = if flags & SCHEDULE_CHANGE_CPU != 0 {
         rmp.cpu as i32
     } else {
-        -1
+        -1i32
     };
 
-    // TODO: call sys_schedule(rmp.endpoint, new_prio, new_quantum, new_cpu)
-    // This requires the IPC/kernel-call infrastructure (Phase 12 wiring).
+    let r = sys_schedule(rmp.endpoint, new_prio, new_quantum, new_cpu);
+    if r != 0 {
+        return Err(r);
+    }
     Ok(())
+}
+
+/// Invoke SYS_SCHEDULE (kernel call 3) to update a process's scheduling
+/// parameters in the kernel. Clears RTS_NO_QUANTUM and re-enqueues.
+fn sys_schedule(endpoint: i32, priority: i32, quantum: i32, cpu: i32) -> i32 {
+    let mut msg = [0u8; 64];
+    // Message layout matching do_schedule_handler offsets:
+    //   [8..12] = endpoint (SCHEDULE_ENDPT_OFF)
+    //   [12..16] = quantum (SCHEDULE_QUANTUM_OFF)
+    //   [16..20] = priority (SCHEDULE_PRIORITY_OFF)
+    //   [20..24] = cpu (SCHEDULE_CPU_OFF)
+    msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+    msg[12..16].copy_from_slice(&quantum.to_le_bytes());
+    msg[16..20].copy_from_slice(&priority.to_le_bytes());
+    msg[20..24].copy_from_slice(&cpu.to_le_bytes());
+    minix_rt::kernel_call(3, &mut msg)
 }
 
 /// Shortcut for local priority+quantum changes.
@@ -411,6 +429,7 @@ pub fn sched_server_main() {
         // Syscall numbers for IPC.
         const RECEIVE_CALL: u64 = 47;
         const SENDREC_CALL: u64 = 48;
+        const SENDNB_CALL: u64 = 51;
         const ANY: i32 = 0x0000ffff;
 
         // Notification message type (matching C MINIX NOTIFY_MESSAGE = 0x1000).
@@ -448,9 +467,34 @@ pub fn sched_server_main() {
                 SCHEDULING_NO_QUANTUM => {
                     // Kernel sends this — the source IS the endpoint of
                     // the process that ran out of quantum.
+                    // For NO_QUANTUM, the kernel doesn't expect a reply.
+                    // Skip the reply below (we still need to process it).
                     match unsafe { do_noquantum(src_ep) } {
-                        Ok(()) => OK,
-                        Err(e) => e,
+                        Ok(()) => {
+                            // Reply to the process that lost quantum
+                            // with just SEND (not SENDREC), because the
+                            // target is not expecting a message from us.
+                            msg.m_type = OK;
+                            unsafe {
+                                minix_rt::syscall2(
+                                    SENDNB_CALL,
+                                    src_ep as u64,
+                                    &mut msg as *mut arch_common::ipc::Message as u64,
+                                );
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            msg.m_type = e;
+                            unsafe {
+                                minix_rt::syscall2(
+                                    SENDNB_CALL,
+                                    src_ep as u64,
+                                    &mut msg as *mut arch_common::ipc::Message as u64,
+                                );
+                            }
+                            continue;
+                        }
                     }
                 }
                 SCHEDULING_START | SCHEDULING_INHERIT => {
