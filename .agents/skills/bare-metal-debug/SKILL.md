@@ -165,6 +165,46 @@ The #GP exception pushes an error code. Modify the handler to dump it. Error cod
 - **IDT=0x02**: Fault refers to IDT entry
 - **TI=0x04**: Fault refers to LDT (otherwise GDT)
 
+### Error Code 0x0010: SS vs CS Ambiguity
+
+An iretq #GP with error code **0x0010** (GDT index 2 = GUDATA_SEL)
+is **ambiguous** between two possible causes:
+
+| Possible Cause | What Happens |
+|---------------|--------------|
+| **SS problem** | SS=0x0010 with RPL=0 loaded while CS.RPL=3 → SS.RPL mismatch |
+| **CS problem** | CS=0x0010 loaded into CS — a **data segment descriptor** (type=2)
+  cannot be loaded into a code segment register → descriptor type violation |
+
+To distinguish:
+
+1. **Add a diagnostic before iretq** that dumps the SS field (at `[rsp+32]`
+   in a 5-entry user-mode frame).
+2. If SS is already correct (0x0013 with RPL=3) but the #GP with error
+   code 0x0010 persists, **CS is the culprit** — the iretq is trying
+   to load a data segment selector into CS.
+3. The most robust fix is to **pop all 5 iretq frame entries and rebuild**
+   them with hardcoded correct segment selectors, rather than patching
+   individual fields:
+   ```asm
+   pop    rcx              ; RIP
+   pop    rax              ; CS (discarded — use 0x001B below)
+   pop    r11              ; RFLAGS
+   pop    r10              ; old_RSP
+   add    rsp, 8           ; skip old_SS (discarded)
+   push   0x0013           ; SS = GUDATA_SEL | RPL=3
+   push   r10              ; old_RSP
+   push   r11              ; RFLAGS
+   push   0x001B           ; CS = GUCODE_SEL | RPL=3
+   push   rcx              ; RIP
+   iretq
+   ```
+
+Actual case from this project: `mov [rsp+32], 0x0013` (patching SS)
+did NOT fix the crash because the real problem was CS=0x0010, not SS.
+The diagnostic dump showed SS was already correct (0x13) yet the #GP
+persisted — proving the problem was elsewhere in the frame.
+
 ### Common #GP Causes on iretq to Ring 3
 
 | Check | Stack Offset | Common Failure |

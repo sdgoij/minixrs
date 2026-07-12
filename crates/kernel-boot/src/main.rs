@@ -159,7 +159,10 @@ pub extern "C" fn kmain() -> ! {
             arch_x86_64::interrupt::PIC_SLAVE_BASE,
         );
 
-        // 2. Program the PIT at 100 Hz, mode 3 (square wave).
+        // 2. Mask timer IRQ — SeaBIOS may leave IRQ0 unmasked.
+        arch_x86_64::apic::mask_timer_irq();
+
+        // 3. Program the PIT at 100 Hz, mode 3 (square wave).
         arch_x86_64::apic::init_pit(100);
 
         // 3. Register the timer ISR handler.
@@ -220,6 +223,8 @@ pub extern "C" fn kmain() -> ! {
         );
 
         // 8. Enable COM1 receive interrupts and unmask IRQ 4.
+        // Serial interrupts are fine — the serial ISR doesn't use iretq
+        // to return to user mode.
         arch_x86_64::apic::enable_com1_interrupts();
         arch_x86_64::apic::unmask_serial_irq();
     }
@@ -312,22 +317,21 @@ pub extern "C" fn kmain() -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                // Priority/quantum matching C MINIX:
-                //   VM, RS: SRV_Q = 7 with 200ms quantum
-                //   Others (PM, VFS, MFS, INIT): priority 0 with 50ms quantum
-                let (priority, quantum_ms) = if proc_nr == arch_common::com::VM_PROC_NR
-                    || proc_nr == arch_common::com::RS_PROC_NR
-                {
-                    (7i8, 200u32)
-                } else {
-                    (0i8, 50u32)
-                };
+                // Set scheduling parameters matching C MINIX proc_init:
+                // all user-space processes get USER_Q = 7 and USER_QUANTUM = 200ms.
+                // Priority 0 (TASK_Q) is reserved for kernel tasks that run in
+                // ring 0 — none of our boot processes are kernel tasks.
+                // The SCHED server will later adjust these via SYS_SCHEDCTL.
+                let priority: i8 = 7; // USER_Q
+                let quantum_ms: u32 = 200; // USER_QUANTUM
                 core::ptr::write_volatile(&raw mut (*rp).p_priority, priority);
                 core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, quantum_ms);
+                // p_cpu_time_left in cycles: 200ms * 2.5 GHz = 500M cycles
                 core::ptr::write_volatile(
                     &raw mut (*rp).p_cpu_time_left,
                     (quantum_ms as u64) * 2_500_000,
                 );
+                // p_scheduler is already null (kernel scheduler) from Proc::default()
             }
 
             let user_flags =

@@ -17,11 +17,18 @@ use crate::cpu_msr;
 /// Kernel code segment selector (GDT index 1, RPL=0).
 pub const SYSCALL_CS: u16 = 0x0008;
 
-/// User code segment selector produced by SYSRETQ.
+/// User code segment selector base for SYSRETQ.
 /// SYSRETQ computes CS = (star[47:32] + 16) | 3, SS = (star[47:32] + 8) | 3.
-/// With star[47:32] = 0x0008: CS = 0x001B (index 3, user code),
-/// SS = 0x0013 (index 2, user data).
-pub const SYSRET_CS: u16 = 0x0008;
+///
+/// QEMU's SYSRETQ does NOT implement the `| 3` for SS (observed: leaves SS
+/// at STAR[47:32] + 8 = 0x0010 with RPL=0).  This causes the timer ISR's
+/// iretq to #GP because SS.RPL (0) != CPL (3).
+///
+/// To work around this, set star[47:32] = 0x000B so the computed values
+/// already have RPL=3 built-in even without the `| 3`:
+///   CS = 0x000B + 16 = 0x001B (index 3, user code, RPL 3)
+///   SS = 0x000B +  8 = 0x0013 (index 2, user data, RPL 3)
+pub const SYSRET_CS: u16 = 0x000B;
 
 /// Set up the syscall MSRs for `syscall`/`sysret`.
 ///

@@ -600,7 +600,7 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
     );
 }
 
-/// General protection fault handler — prints 'G', then halts.
+/// General protection fault handler — prints 'G' and diagnostic info, then halts.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
@@ -650,14 +650,76 @@ pub unsafe extern "C" fn exception_gpf_entry() {
         "4:",
         "add    al, '0'",
         "out    dx, al",
-        // Print CRLF then halt
-        "mov    al, 0x0D",
-        "out    dx, al",
-        "mov    al, 0x0A",
-        "out    dx, al",
+        // Call Rust handler with error_code (rdi) and frame_ptr (rsi)
+        // RSP points to iretq frame: [RIP, CS, RFLAGS, old_RSP, old_SS]
+        "mov    rdi, rbx",
+        "mov    rsi, rsp",
+        "call   rust_gpf_handler",
+        // Halt
         "cli",
         "hlt",
     );
+}
+
+/// Rust-side #GP handler — prints detailed diagnostic info.
+///
+/// # Safety
+///
+/// Called from the naked asm #GP entry. `frame_ptr` must point to the iretq
+/// frame on the stack: [RIP(8), CS(8), RFLAGS(8), old_RSP(8), old_SS(8)].
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_gpf_handler(error_code: u64, frame_ptr: *const u64) {
+    unsafe {
+        // #GP frame from ring 0: [RIP, CS, RFLAGS] at frame_ptr[0..2]
+        let rip = core::ptr::read_unaligned(frame_ptr);
+        let cs = core::ptr::read_unaligned(frame_ptr.add(1));
+        let rflags = core::ptr::read_unaligned(frame_ptr.add(2));
+
+        // The timer ISR's interrupt frame is BELOW the #GP frame
+        // (higher addresses). #GP pushed 24 bytes (RIP+CS+RFLAGS) + error_code.
+        // After popping error_code, RSP = old_RSP_of_iretq - 24.
+        // So the timer frame starts at frame_ptr + 3 (in u64 units).
+        let timer_frame = frame_ptr.add(3);
+        let tir = core::ptr::read_unaligned(timer_frame); // RIP of interrupted code
+        let tcs = core::ptr::read_unaligned(timer_frame.add(1)); // CS
+        let trf = core::ptr::read_unaligned(timer_frame.add(2)); // RFLAGS
+        let trsp = core::ptr::read_unaligned(timer_frame.add(3)); // old_RSP (if ring3)
+        let tss = core::ptr::read_unaligned(timer_frame.add(4)); // old_SS (if ring3)
+
+        let com1 = 0x3F8;
+        let wr = |b: u8| core::arch::asm!("out dx, al", in("dx") com1, in("al") b, options(nomem, nostack));
+        let wr_hex = |v: u64, nibbles: usize| {
+            for i in (0..nibbles).rev() {
+                let nib = ((v >> (i * 4)) & 0xF) as u8;
+                let c = if nib < 10 {
+                    b'0' + nib
+                } else {
+                    b'A' + nib - 10
+                };
+                wr(c);
+            }
+        };
+
+        // Print #GP frame
+        wr(b' ');
+        wr_hex(rip, 16);
+        wr(b' ');
+        wr_hex(cs, 4);
+        // Print timer frame
+        wr(b' ');
+        wr_hex(tir, 16);
+        wr(b' ');
+        wr_hex(tcs, 4);
+        wr(b' ');
+        wr_hex(trf, 8);
+        wr(b' ');
+        wr_hex(trsp, 16);
+        wr(b' ');
+        wr_hex(tss, 4);
+        wr(b'\r');
+        wr(b'\n');
+    }
 }
 
 /// Ring-3 halt stub — a minimal user-mode program that just halts.
@@ -772,39 +834,39 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
 #[unsafe(naked)]
 pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
     core::arch::naked_asm!(
-        // Load the process's private page table from p_seg.p_cr3.
-        "mov    r15, [rdi + 256]",
-        "mov    cr3, r15",
-        // Load RIP (→RCX) and RFLAGS (→R11) for sysretq.
-        "mov    rcx, [rdi + 16]",
-        "mov    r11, [rdi + 72]",
-        // Load the user stack pointer from p_reg.rsp.
-        "mov    rsp, [rdi + 168]",
-        // Load RAX from p_reg.rax (syscall return value).
-        "mov    rax, [rdi]",
-        // Zero remaining GPRs.
-        "xor    rbx, rbx",
-        "xor    r12, r12",
-        "xor    r13, r13",
-        "xor    r14, r14",
-        "xor    r15, r15",
-        "xor    rdx, rdx",
-        "xor    rsi, rsi",
-        "xor    rdi, rdi",
-        "xor    r8, r8",
-        "xor    r9, r9",
-        "xor    r10, r10",
-        // Restore GS.base to user value (swapgs exchanges GS.base
-        // with KernelGSbase MSR).  After kernel entry via syscall+swapgs,
-        // GS.base points to cpu-local storage.  Without this swapgs,
-        // the process would resume with GS.base = cpu-local, causing the
-        // NEXT syscall's swapgs to set GS.base to the wrong value
-        // (KernelGSbase, which is the previous user's value).  The kernel
-        // would then read cpu-local storage from the wrong GS.base ->
-        // garbage cpulocal proc_ptr -> crash on next syscall.
+        // Use IRETQ instead of SYSRETQ.  QEMU's SYSRETQ does not set
+        // SS, leaving the kernel value 0x0010 (RPL=0).  This causes the
+        // timer ISR's iretq to #GP (SS.RPL=0 vs CPL=3).
+        //
+        // Save proc_ptr in r15, load CR3, then build iretq frame
+        // from p_reg and load all user registers.
+        "mov    r15, rdi",
+        // Load CR3 from p_seg.p_cr3 at offset 256.
+        "mov    rdi, [r15 + 256]",
+        "mov    cr3, rdi",
+        // Build iretq frame (push order: SS, RSP, RFLAGS, CS, RIP):
+        "push   0x0013",
+        "push   qword ptr [r15 + 168]",
+        "push   qword ptr [r15 + 72]",
+        "push   0x001B",
+        "push   qword ptr [r15 + 16]",
+        // Load user registers from p_reg via r15.
+        "mov    rax, [r15]",
+        "mov    rbx, [r15 + 8]",
+        "mov    rcx, [r15 + 16]",
+        "mov    rdx, [r15 + 24]",
+        "mov    rsi, [r15 + 32]",
+        "mov    rdi, [r15 + 40]",
+        "mov    r8, [r15 + 48]",
+        "mov    r9, [r15 + 56]",
+        "mov    r10, [r15 + 64]",
+        "mov    r11, [r15 + 72]",
+        "mov    r12, [r15 + 80]",
+        "mov    r13, [r15 + 88]",
+        "mov    r14, [r15 + 96]",
+        "mov    r15, [r15 + 104]",
         "swapgs",
-        // Jump to ring 3.
-        "sysretq",
+        "iretq",
     );
 }
 
@@ -892,8 +954,26 @@ pub mod syscall_abi {
             "pop    r13",
             "pop    r14",
             "pop    r15",
+            // Use IRETQ instead of SYSRETQ.  QEMU's SYSRETQ does not set
+            // the SS segment selector, leaving 0x0010 (RPL=0).  Any
+            // interrupt taken after SYSRETQ captures SS=0x0010 in its
+            // iretq frame, causing a #GP (SS.RPL != CS.RPL).
+            // By using iretq, SS is always loaded properly from the frame.
+            //
+            // After all 14 pops: RSP=user_RSP, RAX=return_value,
+            // RCX=user_RIP, R11=user_RFLAGS.
+            // Build 5-entry iretq frame in-place on the user stack.
+            // Keep RAX (the return value) intact — it's the only register
+            // the user sees after a syscall (via syscall return convention).
+            "sub    rsp, 40",
+            "mov    [rsp], rcx",
+            "mov    qword ptr [rsp + 8], 0x001B",
+            "mov    [rsp + 16], r11",
+            "mov    [rsp + 24], rsp",
+            "add    qword ptr [rsp + 24], 40",
+            "mov    qword ptr [rsp + 32], 0x0013",
             "swapgs",
-            "sysretq",
+            "iretq",
             ptr = sym SYSCALL_HANDLER_PTR,
         );
     }

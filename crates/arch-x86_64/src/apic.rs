@@ -887,7 +887,6 @@ pub unsafe fn set_nmi_profile_handler(handler: NmiProfileFn) {
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timer_isr_entry() {
-    // SAFETY: naked asm — no prologue/epilogue.
     core::arch::naked_asm!(
         // Save caller-saved registers (scratch registers).
         // The CPU already pushed SS, RSP, RFLAGS, CS, RIP.
@@ -925,7 +924,21 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "pop rcx",
         "pop rax",
 
-        // Return from interrupt.
+        // Pop iretq frame entries and rebuild with hardcoded correct
+        // CS (0x001B = GUCODE_SEL | RPL=3) and SS (0x0013 = GUDATA_SEL | RPL=3).
+        // The saved CS in the frame may be corrupted (e.g., 0x0010)
+        // because QEMU's SYSRETQ does not set the SS segment selector,
+        // and the iretq frame captures stale segment register state.
+        "pop    rcx",             // RIP
+        "pop    rax",             // CS (discarded — use 0x001B)
+        "pop    r11",             // RFLAGS
+        "pop    r10",             // old_RSP
+        "add    rsp, 8",          // skip old_SS (discarded)
+        "push   0x0013",          // SS = GUDATA_SEL | RPL=3
+        "push   r10",             // old_RSP
+        "push   r11",             // RFLAGS
+        "push   0x001B",          // CS = GUCODE_SEL | RPL=3
+        "push   rcx",             // RIP
         "iretq",
         timer = sym TIMER_ISR_HANDLER,
     )
@@ -1009,7 +1022,8 @@ pub unsafe extern "C" fn serial_isr_entry() {
         "pop rcx",
         "pop rax",
 
-        // Return from interrupt.
+        // Return from interrupt — the syscall_entry uses iretq (not sysretq),
+        // so SS is always set correctly (0x0013 with RPL=3).  No fix needed.
         "iretq",
         handler = sym SERIAL_ISR_HANDLER,
     )

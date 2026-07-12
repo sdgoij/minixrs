@@ -4125,10 +4125,13 @@ pub unsafe fn do_schedctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
         }
 
         if (flags as u32) & arch_common::com::SCHEDCTL_FLAG_KERNEL != 0 {
-            let _priority = msg_read_i32(msg, SCHEDCTL_PRIORITY_OFF);
-            let _quantum = msg_read_i32(msg, SCHEDCTL_QUANTUM_OFF);
+            let priority = msg_read_i32(msg, SCHEDCTL_PRIORITY_OFF);
+            let quantum = msg_read_i32(msg, SCHEDCTL_QUANTUM_OFF);
             let _cpu = msg_read_i32(msg, SCHEDCTL_CPU_OFF);
-            // Kernel becomes scheduler
+            // Kernel becomes scheduler: set priority and quantum,
+            // matching C: sched_proc(p, priority, quantum, cpu).
+            crate::system::sched_proc(p, priority as i8, quantum);
+            (*p).p_quantum_size_ms = quantum as u32;
             (*p).p_scheduler = core::ptr::null_mut();
             // Clear NO_QUANTUM to start scheduling
             (*p).p_rts_flags
@@ -4783,8 +4786,24 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                                     | ((l3 as u64) << 30)
                                     | ((l2 as u64) << 21)
                                     | ((l1 as u64) << 12);
-                                let pa = e1 & PG_FRAME;
-                                if crate::pagetable::map_page(child_pml4_pa, va, pa, MAP_FLAGS)
+                                let src_pa = e1 & PG_FRAME;
+                                // Allocate a new physical page for the child
+                                // — fork must NOT share pages with the parent.
+                                let dst_pa = match crate::pagetable::alloc_pt_page() {
+                                    Ok(pa) => pa,
+                                    Err(_) => {
+                                        msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                                        return crate::ipc::ENOMEM;
+                                    }
+                                };
+                                // Copy page content from parent to child
+                                // via kernel identity map (physical == virtual).
+                                core::ptr::copy_nonoverlapping(
+                                    src_pa as *const u8,
+                                    dst_pa as *mut u8,
+                                    4096,
+                                );
+                                if crate::pagetable::map_page(child_pml4_pa, va, dst_pa, MAP_FLAGS)
                                     .is_err()
                                 {
                                     msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);

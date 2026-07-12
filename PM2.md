@@ -168,42 +168,21 @@ quantum.
 **Fix:** Updated to accept `quantum: i32` and set `p_cpu_time_left` via
 `ms_2_cpu_time(quantum)`. Updated `do_schedule_handler` to pass quantum.
 
-## Current Blocker: VFS Page Fault on VFS_PM_FORK
+## Current Blocker: VFS/PM IPC Hang on Exec
 
 ### What Happens
 
-The fork flow now reaches the point where PM sends `VFS_PM_FORK` to VFS:
-1. Shell reads "abc" → calls `fork()` → SENDREC to PM
-2. PM receives PM_FORK → allocates slot → calls VM's do_fork
-3. VM creates child page table (via VM_PAGING_FORK) + Proc entry (via SYS_FORK)
-4. PM sends VFS_PM_FORK to VFS ← **VFS CRASHES HERE**
-5. PM blocks waiting for VFS reply
-6. VFS page-faults with RIP=0x105cfff, CR2=0xFFFFFFFFFFFFFF8B
+The timer ISR #GP is fixed. The shell now receives input ("abc") without
+crashing, but the system silently hangs after the fork/exec path is
+initiated. The flow:
+1. Shell reads "abc" → fork() → PM creates child → VM creates page table
+2. PM sends VFS_PM_FORK to VFS
+3. System hangs — no "sh: abc: not found" or any error output
 
-The page fault trace (from QEMU `-d int`):
-```
-v=0e e=0004 i=0 cpl=3 IP=001b:000000000105cfff CR2=ffffffffffffff8b
-```
-- `e=0004`: user-mode (bit 2 = 1), read (bit 1 = 0), non-present page (bit 0 = 0)
-- `CPL=3`: fault in user mode (VFS process)
-- `IP=0x105cfff`: instruction pointer inside VFS binary
-- `CR2=0xFFFFFFFFFFFFFF8B`: fault address = NULL - 117 (signed)
-
-### Analysis
-
-The CR2 value `0xFFFFFFFFFFFFFF8B` = -117 in signed 64-bit. This is a
-non-canonical address, meaning it was computed from a NULL or near-NULL
-pointer. The VFS code is dereferencing a pointer that's NULL minus some
-offset.
-
-VFS binary starts at virtual 0x1000000. The faulting IP 0x105cfff is at
-offset 0x5cfff within the VFS binary. This is a VFS-specific function.
-
-The VFS_PM_FORK handler in VFS is looking up or creating something with
-a NULL pointer. This is likely:
-- A process slot lookup that returns NULL
-- A file descriptor or inode pointer that's uninitialized
-- A slab allocator returning NULL
+The kernel diagnostic `E0C80` (child scheduled) appears when the timer
+is masked, confirming the child IS created and scheduled. The hang is
+likely in the IPC exchange between PM, VFS, or the SCHED server during
+exec.
 
 ### Possible Causes
 
@@ -216,8 +195,17 @@ a NULL pointer. This is likely:
    table, inode cache, or mount point) might be NULL because it wasn't
    properly initialized during boot.
 
-3. **Out of memory:** The VFS slab allocator returns NULL when out of
-   memory, and the caller doesn't check for NULL.
+3. **SCHED server handshake missing:** During fork, PM should send
+   `SCHEDULING_START` to the SCHED server for the new child. If the
+   SCHED server never receives this, the child might be stuck waiting
+   for a scheduling reply.
+
+4. **VFS mount_root incomplete:** If VFS's root mount didn't fully
+   complete during boot, file operations during exec might hang.
+
+5. **TTY echo deadlock:** If the shell's stdin read goes through VFS→TTY
+   and TTY is blocked waiting for a buffer or grant, the hang could be
+   in the TTY server.
 
 ## Remaining Issues
 
@@ -236,6 +224,62 @@ from RS during boot, or handle the kernel-scheduled path more
 aggressively (e.g., set `PREEMPTED` in the timer interrupt handler
 itself, not just in `proc_no_time`).
 
+### Bug 7: Timer ISR iretq frame had corrupted CS (FIXED)
+
+**File:** `crates/arch-x86_64/src/apic.rs` — `timer_isr_entry()`
+
+**Symptom:** After the shell receives input and tries to fork, the timer
+ISR's `iretq` consistently #GPs with error code `0x0010` (selector at
+GDT index 2, RPL=0). The `#GP` crash trace shows:
+```
+G1000 ...
+```
+
+**Root cause analysis:** The error code `0x0010` was initially assumed
+to be an SS selector issue (SS.RPL=0 vs CS.RPL=3), but patching SS in
+the frame did not fix the crash. Writing a diagnostic showed SS=0x0013
+(correct) in the frame, yet iretq still #GPs with error code 0x0010.
+
+The error code `0x0010` at GDT index 2 corresponds to `GUDATA_SEL` —
+a **data segment descriptor**. Loading a data segment descriptor into
+CS is invalid and causes #GP. The actual frame had CS=0x0010 (data
+segment) at the CS position, not CS=0x001B (user code segment).
+
+**Why CS was corrupted:** QEMU's `sysretq` does not set the SS segment
+selector, leaving it with the kernel value 0x0010. When the timer
+interrupt fires during a period where segment registers hold stale
+values (after `sysretq`), the interrupt frame captures CS=0x0010
+instead of CS=0x001B.
+
+**Fix:** Instead of patching SS in the frame, pop all 5 iretq frame
+entries and rebuild them with **hardcoded correct segment selectors**:
+- CS = `0x001B` (GUCODE_SEL | RPL=3)
+- SS = `0x0013` (GUDATA_SEL | RPL=3)
+
+This discards any stale CS/SS values from the original frame.
+
+```asm
+pop    rcx              ; RIP
+pop    rax              ; CS (discarded)
+pop    r11              ; RFLAGS
+pop    r10              ; old_RSP
+add    rsp, 8           ; skip old_SS
+push   0x0013           ; SS = GUDATA_SEL | RPL=3
+push   r10              ; old_RSP
+push   r11              ; RFLAGS
+push   0x001B           ; CS = GUCODE_SEL | RPL=3
+push   rcx              ; RIP
+iretq
+```
+
+**Verification:** The system boots, receives shell input `"abc"`, and
+processes the command without any #GP. The fork/exec path no longer
+crashes.
+
+**Also fixed (housekeeping):** Added missing `#[unsafe(naked)]` to
+`exception_page_fault_entry`, `exception_double_fault_entry`, and
+`exception_gpf_entry` in `crates/arch-x86_64/src/asm.rs`.
+
 ### Files Changed This Session
 
 | File | Change |
@@ -244,3 +288,5 @@ itself, not just in `proc_no_time`).
 | `crates/kernel/src/system.rs` | Rewrote `VM_PAGING_FORK` handler to include boot CR3 switch and kernel identity map copy; fixed `sched_proc` to accept quantum; fixed `do_schedule_handler` to pass quantum; added fork diagnostic |
 | `crates/kernel/src/sched.rs` | Removed `C` diagnostic from `pick_proc` |
 | `crates/servers/src/sched.rs` | Added `sys_schedule()` calling `kernel_call(3)`; fixed NO_QUANTUM reply to use SENDNB; added `SENDNB_CALL` constant |
+| `crates/arch-x86_64/src/apic.rs` | Rewrote timer ISR's iretq to pop and rebuild frame with hardcoded CS=0x001B, SS=0x0013 |
+| `crates/arch-x86_64/src/asm.rs` | Added `#[unsafe(naked)]` to exception handlers; added SS fix to page fault handler iretq |

@@ -653,7 +653,7 @@ pub unsafe fn tell_parent(parent: usize, child: &MProc) {
 
     reply_msg.m_payload.m1.m1i1 = child.mp_pid;
     reply_msg.m_payload.m1.m1i2 = (child.mp_exitstatus as i32) & 0xFF;
-    
+
     let _ = unsafe {
         minix_rt::syscall2(
             minix_rt::SENDNB_CALL,
@@ -1213,21 +1213,31 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Send VFS_PM_FORK notification to VFS (fire-and-forget).
-            // The original C uses a full message SEND and expects VFS to reply
-            // later with VFS_PM_FORK_REPLY, but since VFS is busy with
-            // mount_root during boot, this SEND would queue PM in VFS's
-            // caller_q with SENDING set — PM would never block on RECEIVE
-            // properly and the fork caller would wait forever.
-            //
-            // Instead, use NOTIFY so VFS gets a pending notification bit.
-            // VFS can process it when it's ready (in its main loop).
-            // The child's VFS_CALL flag is still set, matching C convention.
+            // Step 2: Send VFS_PM_FORK to VFS (async, matching C tell_vfs).
+            // The C code uses asynsend3(VFS_PROC_NR, &m, AMF_NOREPLY)
+            // to send the VFS_PM_FORK message without blocking.
+            // We use SENDNB which is the non-blocking send equivalent.
+            // PM must NOT block here because the caller (shell) is waiting
+            // for PM's reply — PM's main loop will handle the VFS reply
+            // (VFS_PM_FORK_REPLY) asynchronously.
+            let mut vfs_msg = [0u8; 64];
+            // m_type at bytes 4-7 = VFS_PM_FORK
+            vfs_msg[4..8].copy_from_slice(&(arch_common::com::VFS_PM_FORK as i32).to_le_bytes());
+            // VFS_PM_ENDPT (m7_i1) at bytes 8-11 = child endpoint
+            vfs_msg[8..12].copy_from_slice(&child_endpoint.to_le_bytes());
+            // VFS_PM_PENDPT (m7_i2) at bytes 12-15 = parent endpoint
+            vfs_msg[12..16].copy_from_slice(&parent_endpoint.to_le_bytes());
+            // VFS_PM_CPID (m7_i3) at bytes 16-19 = child PID
+            vfs_msg[16..20].copy_from_slice(&child_pid.to_le_bytes());
+            // VFS_PM_REUID (m7_i4) at bytes 20-23 = -1 (unused)
+            vfs_msg[20..24].copy_from_slice(&(-1i32).to_le_bytes());
+            // VFS_PM_REGID (m7_i5) at bytes 24-27 = -1 (unused)
+            vfs_msg[24..28].copy_from_slice(&(-1i32).to_le_bytes());
             unsafe {
                 minix_rt::syscall2(
-                    minix_rt::NOTIFY_CALL,
+                    minix_rt::SENDNB_CALL,
                     arch_common::com::VFS_PROC_NR as u64,
-                    0,
+                    vfs_msg.as_ptr() as u64,
                 )
             };
 
@@ -1237,13 +1247,14 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 (*child_ptr).mp_flags |= VFS_CALL;
             }
 
-            // Step 4: Set the reply message fields and return child PID.
-            // Set m1_i1 (bytes 8-11 of the message) to the child PID.
-            // The user-space fork() reads the PID from msg[8..12].
-            // The main loop will set msg.m_type = status (the return value)
-            // before sending the reply.
+            // Step 4: Return EDONTREPLY — the main loop will NOT reply
+            // to the fork caller. Instead, the VFS_PM_FORK_REPLY handler
+            // (handle_vfs_reply) will send the fork result to parent and
+            // child when VFS acknowledges the fork.
+            // Set m1_i1 to child PID so handle_vfs_reply can use it
+            // when building the reply to the parent.
             msg.m_payload.m1.m1i1 = child_pid;
-            child_pid
+            EDONTREPLY
         }
         Err(_) => -11,
     }
@@ -1589,11 +1600,23 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 
     match call_nr as u32 {
         arch_common::com::VFS_PM_FORK_REPLY => {
-            // Reply to the parent with child PID.
-            // The child detects itself via `is_fork_child` (p_defer_r1 == 1)
-            // set by do_fork_handler — it does NOT need a message from PM.
-            // C uses ipc_sendnb here which silently fails if the child
-            // isn't in RECEIVE — our SEND would block. Skip it.
+            // Reply to child with OK (0) — matching C: reply(proc_n, OK).
+            // The child detects itself via is_fork_child (p_defer_r1 == 1)
+            // set by do_fork_handler. The reply is sent via SENDNB which
+            // silently fails if the child isn't in RECEIVE mode yet.
+            // In C MINIX this is OK — the kernel's do_fork_handler already
+            // sets p_reg.retreg = 0 for the child.
+            let mut child_reply = [0u8; 64];
+            child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4].copy_from_slice(&OK.to_le_bytes());
+            unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDNB_CALL,
+                    proc_e as u64,
+                    child_reply.as_ptr() as u64,
+                )
+            };
+
+            // Reply to parent with child PID — matching C: reply(parent, pid).
             let parent_slot = rmp.mp_parent;
             if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
                 let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
