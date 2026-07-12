@@ -639,7 +639,11 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             // Deliver any pending IPC message to the target process's
             // user buffer and set RAX to the source endpoint.
             unsafe { deliver_msg(next) };
+            // P1
+            kernel::hal::serial_write_byte(b'1');
             arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
+            // P2
+            kernel::hal::serial_write_byte(b'2');
             // Switch to the new process — never returns.
             arch_x86_64::asm::restore(next as *const u8);
         } else {

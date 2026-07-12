@@ -615,16 +615,52 @@ pub unsafe fn do_exit(slot: usize, exit_status: i32) {
     rmp.mp_sigstatus = 0;
     rmp.mp_ksigpending.sigemptyset();
 
-    // Notify parent.
+    // Check if parent is waiting for this child.
     let parent = rmp.mp_parent;
     if parent >= 0 && (parent as usize) < NR_PROCS {
-        // Safety: `parent as usize < NR_PROCS` checked above.
         let parent_rmp = unsafe { &mut *base.add(parent as usize) };
         if parent_rmp.mp_flags & IN_USE != 0 {
             parent_rmp.mp_child_utime = rmp.mp_child_utime;
             parent_rmp.mp_child_stime = rmp.mp_child_stime;
+            unsafe {
+                // If parent is waiting, tell them immediately (matching C tell_parent).
+                if wait_test(parent as usize, rmp) {
+                    tell_parent(parent as usize, rmp);
+                }
+            }
         }
     }
+}
+
+/// Tell a waiting parent that its child has exited.
+/// Sends a reply to the parent's WAITPID call with child PID and status.
+/// Matching C tell_parent() in forkexit.c
+pub unsafe fn tell_parent(parent: usize, child: &MProc) {
+    if parent >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let parent_rmp = unsafe { &mut *base.add(parent) };
+    if parent_rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    parent_rmp.mp_flags &= !WAITING;
+    let mut reply_msg = Message {
+        m_source: 0,
+        m_type: OK,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+
+    reply_msg.m_payload.m1.m1i1 = child.mp_pid;
+    reply_msg.m_payload.m1.m1i2 = (child.mp_exitstatus as i32) & 0xFF;
+    
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDNB_CALL,
+            parent_rmp.mp_endpoint as u64,
+            &mut reply_msg as *mut Message as u64,
+        )
+    };
 }
 
 /// Test whether a parent is waiting for a specific child.
@@ -641,12 +677,14 @@ pub unsafe fn wait_test(parent: usize, child: &MProc) -> bool {
         return false;
     }
     let base = MPROC.as_ptr();
-    // Safety: `parent < NR_PROCS` checked above.
     let parent_rmp = unsafe { &*base.add(parent) };
     if parent_rmp.mp_flags & IN_USE == 0 {
         return false;
     }
-    // Check if parent is waiting for this specific child or any child.
+    // Parent must have WAITING flag set AND matching wpid
+    if parent_rmp.mp_flags & WAITING == 0 {
+        return false;
+    }
     let wpid = parent_rmp.mp_wpid;
     wpid == -1 || wpid == child.mp_pid
 }
@@ -1234,6 +1272,7 @@ pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
             let base = MPROC.as_ptr();
             unsafe {
                 let rmp = &mut *base.add(caller_slot);
+                rmp.mp_flags |= WAITING;
                 rmp.mp_wpid = wpid;
             }
             EDONTREPLY

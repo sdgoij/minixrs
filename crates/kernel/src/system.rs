@@ -3817,6 +3817,14 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_kipc_cycles = 0;
         (*rpc).p_signal_received = 0;
 
+        // Give child a reasonable initial quantum so it can execute.
+        let q_ms = if (*rpc).p_quantum_size_ms > 0 {
+            (*rpc).p_quantum_size_ms
+        } else {
+            50u32
+        };
+        (*rpc).p_cpu_time_left = (q_ms as u64) * 1000000; // fallback: 50M cycles = ~50ms at 1GHz
+
         // Append "*F" to name
         let mut end = (*rpc).p_name.len();
         for i in 0..(*rpc).p_name.len() {
@@ -3841,7 +3849,8 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             | RtsFlags::SIG_PENDING.bits()
             | RtsFlags::P_STOP.bits()
             | RtsFlags::SENDING.bits()
-            | RtsFlags::NO_QUANTUM.bits();
+            | RtsFlags::NO_QUANTUM.bits()
+            | RtsFlags::PREEMPTED.bits();
         (*rpc).p_rts_flags.fetch_and(!clear_rts, Ordering::Relaxed);
         // Set defer_r1 so IS_FORK_CHILD (syscall 63) returns 1 for the child.
         // This lets userland fork() distinguish parent (retval=pid) from child (retval=0).

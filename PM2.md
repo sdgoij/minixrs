@@ -1,69 +1,77 @@
 # Fork/Exec/Waitpid Hang Investigation
 
-## Current State
+## Current State (2026-07-12)
 
-The system boots to shell prompt. Typing `abc` causes the shell to call `fork()`.
-**Fork works now** — the child page table is created and the child is scheduled
-(diagnostic `C` from `pick_proc` confirms child found). But exec/exit/waitpid
-chain hangs silently.
+**Fork works.** The child page table is created, the child is enqueued, and
+`restore()` switches to the child. The child executes user-mode instructions
+(confirmed by QEMU `-d int` showing CPL=3 RIP changes).
 
-## What Was Fixed
+**The system then hangs** — the kernel enters `hlt()` idle loop because no
+process is runnable. The child makes no syscalls (no `S` or `1`/`2` diagnostics
+appear after `restore`), and no other processes are picked by the scheduler.
 
-### VM Physical Memory Mapping (VM_PHYS_MEM.md)
+## Fixed Bugs This Session
 
-VM's `pt_new_for_fork` previously dereferenced physical addresses through the
-identity map from ring 3. The boot identity map has supervisor-only pages (PG_U
-cleared), making these accesses invalid.
+### VM Physical Memory Model
+- Added `vm_mappage`/`vm_unmappage` for safe physical page access from user mode
+- Added `VM_PAGING_FORK` (kernel call 62, subcmd 7) — single ring-0 kernel call
+  for page table cloning, replacing the broken multi-call user-mode approach
+- Rewrote `pt_new_for_fork` to use `VM_PAGING_FORK`
 
-**Initial fix**: Added `vm_mappage()`/`vm_unmappage()` and `vm_map_page_in()`
-infrastructure — maps physical pages into VM's address space via kernel call
-(ring 0). This worked for 6 pages then hung on the 7th `vm_map_page_in` call.
-Root cause unclear (possibly stack exhaustion from nested kernel calls, or
-allocator state corruption).
+### Scheduler / Fork
+- Added `PREEMPTIBLE` flag to boot process privileges
+- Added `PREEMPTED` flag to `do_fork_handler` clear list (child inherits from parent)
+- Set child's `p_cpu_time_left` to 50ms (was 0, causing immediate quantum expiry)
+- Added `WAITING` flag in PM's `handle_waitpid` (matching C code)
+- Added `tell_parent` / `wait_test` in PM's `do_exit` to unblock waiting parent
+- Fixed `wait_test` to check `WAITING` flag (was only checking `mp_wpid`)
 
-**Current fix**: Added `VM_PAGING_FORK` (kernel call 62, subcmd 7) — a SINGLE
-kernel call that does the entire fork page table clone in ring 0. The kernel:
-1. Allocates new child PML4
-2. Copies kernel entries (upper 256 PML4 slots)
-3. Walks parent's user page tables (ring 0, identity map accessible)
-4. Maps each user page in child via `map_page()` (ring 0 allocator)
-5. Returns child's CR3
+### Kernel Call Dispatch
+- Fixed extra brace in `VM_PAGING_MAP` handler
+- Made `alloc_pt_page` pub(crate) for internal use
+- Removed all debug diagnostics from `syscall_entry` and `kernel_call_dispatch`
 
-This bypasses ALL user-mode page table access, eliminating the supervisor-only
-identity map issue and the multi-call state corruption.
+## Remaining Blocker
 
-### Other fixes from this session
-- `VM_SELF_CR3` stored during VM init (endpoint slot extraction fix)
-- `VM_MAP_FLAGS` corrected to use `MAP_USER` (bit 2) instead of `PCD` (bit 4)
-- `pt_free_internal()` for cleanup on fork failure
-- `vm_map_page_in()` helper function
-- `VM_PAGING_FORK` kernel call (subcmd 7)
-- `alloc_pt_page()` made `pub(crate)` for kernel-internal use
+After `restore()` switches to the child, the child runs a few user-mode
+instructions (confirmed by QEMU `-d int` showing CPL=3 RIP at 0x1000000,
+0x1008fa6, 0x1000e6c) but never makes a syscall. Then the kernel enters
+`hlt()` with CPL=0, `II=0` (interrupts disabled), and the system hangs.
 
-## Remaining Issue: exec/exit/waitpid
+Possible causes:
+1. Child page table maps code pages incorrectly (TLB miss #PF on first
+   instruction fetch). The #PF handler might not deliver SIGSEGV properly.
+2. Child's stack is not mapped (argv pointers dereference causes #PF).
+3. Child jumps to an invalid address (RIP or RSP corrupted by fork).
 
-After fork, the child is scheduled (`C` from `pick_proc`). The child starts
-executing user code but hangs during the exec/exit/waitpid pipeline.
+The `-d int` QEMU output showed:
+- `RIP=0x1000000 CPL=3` — user code at entry point
+- `RIP=0x1008fa6 CPL=3` — moved further
+- `RIP=0x1000e6c CPL=3` — same address, different RFLAGS (ZF changed)
+- `RIP=0x211bcf CPL=0` — kernel hlt address
 
-Likely cause: the child's first action after fork is `execvp("/bin/abc", ...)`.
-This requires:
-1. Child calls `SYS_EXEC` (59) → PM receives it
-2. PM coordinates with VFS to open `/bin/abc`
-3. VFS asks MFS to read the file → file not found → error
-4. PM tells VM to destroy child's address space
-5. Child calls `exit()` → sends SIGCHLD to parent
-6. Parent's `waitpid()` returns with child's status
+The ZF change between `0x00000246` and `0x00010246` suggests a `cmp` or `test`
+instruction executed at 0x1000e6c followed by a `jz`/`jne`. This is consistent
+with the fork RAX check (`cmp rax, 0; jne parent`).
 
-If any step in this chain hangs (e.g., PM is not receiving the exec syscall,
-or VFS is blocked, or the SCHED server doesn't schedule the right process),
-the system stalls.
+No `#PF` or `#GP` exceptions were logged, suggesting the child's page table
+IS valid for the first few instructions. The child should be able to reach
+`exec_replace` (syscall 61).
 
-## Files Changed
+## Next Steps
 
-| File | Change |
-|------|--------|
-| `crates/servers/src/vm/mod.rs` | Added `VM_SELF_CR3`, `vm_find_hole`, `vm_mappage`, `vm_unmappage`, `vm_map_page_in`, `vm_fork_pagetable`, `VM_PAGING_FORK` |
-| `crates/servers/src/vm/proc.rs` | Rewrote `pt_new_for_fork` to use `VM_PAGING_FORK` single kernel call, added `pt_free_internal` |
-| `crates/kernel/src/system.rs` | Added `VM_PAGING_FORK` subcommand handler, removed kernel diagnostics |
-| `crates/kernel/src/pagetable.rs` | Made `alloc_pt_page` pub(crate) |
-| `crates/arch-x86_64/src/asm.rs` | Removed `syscall_entry` diagnostics |
+1. **Run with `-d int` without grep filtering** to see the full exception trace
+   when the child runs. Look for any exception (even unlabeled ones like `T=`
+   for timer) that might indicate a fault.
+
+2. **Check if the child's `syscall` instruction works**. The child tries to
+   call syscall 61 (exec_replace). If the syscall mechanism fails (bad LSTAR
+   MSR, bad kernel stack), the child would #GP. But the log shows no #GP.
+
+3. **Check if the kernel's `syscall_handler_c` processes the child's syscall**.
+   Add a minimal diagnostic right at the entry of `syscall_handler_c` that
+   prints the syscall number for CPL=3 calls. If the child makes a syscall
+   but the handler crashes, we'd see the syscall number but no return.
+
+4. **Test with a simpler command** like `cat /bin/sh` that goes through the
+   existing VFS read path instead of trying to exec a non-existent binary.
