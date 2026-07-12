@@ -546,6 +546,132 @@ pub fn kernel_call(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
     unsafe { syscall2(NR_KERNEL_CALL, call_nr as u64, msg.as_mut_ptr() as u64) as i32 }
 }
 
+/// Invoke SYS_FORK (kernel call 0) to clone a kernel Proc entry.
+///
+/// Matches C: `sys_fork()` in `.refs/minix-3.3.0/minix/lib/libsys/sys_fork.c`
+///
+/// `parent_ep` is the parent's endpoint.
+/// `child_slot` is the child's process table slot number.
+/// `flags` can contain PFF_VMINHIBIT.
+/// On success, returns `(child_endpoint, parent_msgaddr)`.
+/// On failure, returns an error code.
+pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32) -> Result<(i32, u64), i32> {
+    let mut msg = [0u8; 64];
+    // SYS_FORK message layout (mess_lsys_krn_sys_fork):
+    //   [8..12]  = parent endpoint (endpt)
+    //   [12..16] = child slot (slot)
+    //   [16..20] = fork flags (flags)
+    msg[8..12].copy_from_slice(&parent_ep.to_le_bytes());
+    msg[12..16].copy_from_slice(&child_slot.to_le_bytes());
+    msg[16..20].copy_from_slice(&flags.to_le_bytes());
+    let r = kernel_call(0, &mut msg);
+    if r != 0 {
+        return Err(r);
+    }
+    // Reply layout (mess_krn_lsys_sys_fork):
+    //   [8..12]  = child endpoint
+    //   [16..24] = parent's message delivery virtual address
+    let child_ep = i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+    let msgaddr = u64::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+    Ok((child_ep, msgaddr))
+}
+
+/// Write a diagnostic byte directly to the serial port via SYS_DIAGCTL.
+/// This does NOT go through VFS, so it can be called even when VFS is
+/// blocked (e.g., during mount_root or fork).
+pub fn diag_putchar(c: u8) {
+    let mut msg = [0u8; 64];
+    // DIAGCTL message: kernel overwrites msg[0..8] with call_nr + src.
+    // Use msg[8..12] for the subfunction code (read by handler).
+    // buf ptr at msg[24..32] (M1_P1_OFF), len at msg[16..20].
+    msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
+    let buf = [c, b'\r', b'\n'];
+    msg[24..32].copy_from_slice(&(buf.as_ptr() as u64).to_le_bytes());
+    msg[16..20].copy_from_slice(&3i32.to_le_bytes()); // len = 3
+    let _ = kernel_call(44, &mut msg); // SYS_DIAGCTL = kernel call 44
+}
+
+/// Invoke SYS_VMCTL(VMCTL_SETADDRSPACE) to set a process's CR3 and clear
+/// VMINHIBIT.
+///
+/// Matches C: arch_do_vmctl.c `case VMCTL_SETADDRSPACE` which calls
+/// `setcr3()` to set `p_seg.p_cr3` and clear `RTS_VMINHIBIT`.
+///
+/// # Safety
+///
+/// `ep` must be a valid process endpoint. `cr3` must be the physical address
+/// of a valid, fully-populated PML4 page table.
+pub unsafe fn sys_vmctl_set_addspace(ep: i32, cr3: u64) -> Result<(), i32> {
+    let mut msg = [0u8; 64];
+    // SYS_VMCTL message layout:
+    //   [8..12]  = who (endpoint)
+    //   [12..16] = param (VMCTL_SETADDRSPACE = 29)
+    //   [16..20] = value (unused for SETADDRSPACE)
+    //   [24..32] = new CR3 (u64, at M1_P1_OFF)
+    msg[8..12].copy_from_slice(&ep.to_le_bytes());
+    msg[12..16].copy_from_slice(&29i32.to_le_bytes()); // VMCTL_SETADDRSPACE
+    msg[24..32].copy_from_slice(&cr3.to_le_bytes());
+    let r = kernel_call(43, &mut msg); // SYS_VMCTL = kernel call 43
+    if r != 0 {
+        return Err(r);
+    }
+    Ok(())
+}
+
+/// Invoke SYS_VMCTL(VMCTL_MEMREQ_GET) to read pending page fault info
+/// for a process from the kernel.
+///
+/// The kernel stores page fault information keyed by process slot.
+/// VM calls this after receiving a notification that a page fault
+/// has occurred. Using a kernel call avoids the static-data-duplication
+/// issue (Blocker 5 class).
+///
+/// Returns `Ok((fault_addr, error_code))` if fault info is available,
+/// or `Err(-1)` if no fault is pending.
+pub fn sys_vmctl_memreq_get(ep: i32) -> Result<(u64, u32), i32> {
+    let mut msg = [0u8; 64];
+    // SYS_VMCTL message layout:
+    //   [8..12]  = who (endpoint)
+    //   [12..16] = param (VMCTL_MEMREQ_GET = 14)
+    //   [16..20] = value (unused for MEMREQ_GET)
+    // Output (on success):
+    //   [24..32] = fault_addr (u64, at M1_P1_OFF)
+    //   [40..48] = error_code (u64, at M1_P3_OFF)
+    msg[8..12].copy_from_slice(&ep.to_le_bytes());
+    msg[12..16].copy_from_slice(&14i32.to_le_bytes()); // VMCTL_MEMREQ_GET
+    let r = kernel_call(43, &mut msg); // SYS_VMCTL = kernel call 43
+    if r != 0 {
+        return Err(r);
+    }
+    let fault_addr = u64::from_le_bytes(msg[24..32].try_into().unwrap_or([0; 8]));
+    let error_code = u32::from_le_bytes(msg[40..44].try_into().unwrap_or([0; 4]));
+    Ok((fault_addr, error_code))
+}
+
+/// Invoke SYS_VMCTL(VMCTL_CLEAR_PAGEFAULT) to clear a process's
+/// pending page fault state and make it runnable again.
+///
+/// VM calls this after successfully handling a page fault (COW,
+/// demand paging, etc.) or after sending SIGSEGV when a fault
+/// cannot be resolved. Using a kernel call avoids the static-data-
+/// duplication issue (Blocker 5 class).
+///
+/// Returns `Ok(())` on success, `Err(errno)` on failure.
+pub fn sys_vmctl_clear_pagefault(ep: i32) -> Result<(), i32> {
+    let mut msg = [0u8; 64];
+    // SYS_VMCTL message layout:
+    //   [8..12]  = who (endpoint)
+    //   [12..16] = param (VMCTL_CLEAR_PAGEFAULT = 12)
+    //   [16..20] = value (unused)
+    msg[8..12].copy_from_slice(&ep.to_le_bytes());
+    msg[12..16].copy_from_slice(&12i32.to_le_bytes()); // VMCTL_CLEAR_PAGEFAULT
+    let r = kernel_call(43, &mut msg); // SYS_VMCTL = kernel call 43
+    if r != 0 {
+        return Err(r);
+    }
+    Ok(())
+}
+
 /// Fork the current process via PM IPC.
 /// Sends PM_FORK to the Process Manager, which creates a child
 /// process via MProc allocation → SYS_FORK (kernel call 0) →
@@ -558,6 +684,12 @@ pub fn fork() -> i32 {
     let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
     if reply < 0 {
         return reply as i32;
+    }
+    // Check the reply message type for errors. When PM returns an error,
+    // m_type (bytes 4-7) contains the negative error code instead of OK=0.
+    let reply_type = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    if reply_type < 0 {
+        return reply_type;
     }
     let is_child = unsafe { syscall0(NR_IS_FORK_CHILD) };
     if is_child != 0 {

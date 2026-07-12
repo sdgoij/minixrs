@@ -209,7 +209,7 @@ pub unsafe fn smp_set_proc_ptr(proc: *mut core::ffi::c_void) {
 /// Halt the CPU (single `hlt` instruction, no infinite loop).
 pub fn hlt() {
     unsafe {
-        core::arch::asm!("hlt", options(nomem, nostack));
+        core::arch::asm!("sti; hlt", options(nomem, nostack));
     }
 }
 
@@ -851,6 +851,11 @@ pub unsafe fn alloc_phys_page() -> Option<u64> {
 /// Must be called after the physical memory allocator is initialized.
 pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
+}
+
+/// Initialize the physical page allocator with a memory range [base, base+size).
+pub unsafe fn init_phys_alloc(base: u64, size: u64) {
+    crate::alloc::init_range(base, size);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

@@ -399,6 +399,12 @@ pub unsafe fn proc_init() {
             );
             // Set process number
             (*rp).p_nr = bi.proc_nr;
+            // Set priority: idle at lowest, kernel tasks at high
+            if bi.proc_nr == arch_common::com::IDLE {
+                (*rp).p_priority = 15; // NR_SCHED_QUEUES - 1 (lowest)
+            } else {
+                (*rp).p_priority = 0;
+            }
             // Set endpoint (generation 0, so ep == proc_nr for hardcoded values)
             (*rp).p_endpoint = make_endpoint(0, bi.proc_nr);
             // Copy name
@@ -433,7 +439,7 @@ pub unsafe fn proc_init() {
             // Set up basic privilege fields
             (*priv_ptr).s_proc_nr = bi.proc_nr;
             (*priv_ptr).s_id = i as i16;
-            (*priv_ptr).s_flags = PrivFlags::SYS_PROC;
+            (*priv_ptr).s_flags = PrivFlags::SYS_PROC | PrivFlags::PREEMPTIBLE;
             // Allow all kernel calls (IPC, safecopy, etc.) for boot processes.
             for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
                 *chunk = !0u32;

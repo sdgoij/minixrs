@@ -4,8 +4,11 @@
 //! for all VM calls. Real implementations come in Phases 6.4+.
 
 #![allow(unused_variables)]
+#![allow(dead_code)]
 
+pub mod cow;
 pub mod mem;
+pub mod pb;
 pub mod proc;
 pub mod region;
 
@@ -24,6 +27,7 @@ use arch_common::ipcconst::{
     IPC_FLG_MSG_FROM_KERNEL, IPC_STATUS_FLAGS_SHIFT, ipc_status_flags_test,
 };
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const OK: i32 = 0;
 
@@ -35,6 +39,217 @@ const EINVAL: i32 = -5;
 
 /// Resource temporarily unavailable (EAGAIN).
 const EAGAIN: i32 = -11;
+
+// ---- Physical memory management via kernel calls ----
+// VMINIX: VM manages physical memory through its own allocator.
+// In our port, VM uses kernel call 62 (SYS_VM_PAGING) which
+// runs in kernel context and accesses the kernel's allocator.
+// This avoids the static-data-duplication issue (Blocker 5 class).
+
+const VM_PAGING_CALL: i32 = 62;
+const VM_PAGING_SUBCMD_OFF: usize = 8;
+const VM_PAGING_COUNT_OFF: usize = 12;
+const VM_PAGING_CR3_OFF: usize = 24;
+const VM_PAGING_VA_OFF: usize = 32;
+const VM_PAGING_PA_OFF: usize = 40;
+const VM_PAGING_FLAGS_OFF: usize = 48;
+
+const VM_PAGING_ALLOC: i32 = 1;
+const VM_PAGING_FREE: i32 = 2;
+const VM_PAGING_MAP: i32 = 3;
+const VM_PAGING_UNMAP: i32 = 4;
+const VM_PAGING_COPY: i32 = 6;
+const VM_PAGING_FORK: i32 = 7;
+
+/// Allocate `count` contiguous physical pages via kernel call.
+/// Returns the physical address of the first page, or 0 on failure.
+pub fn vm_alloc_pages(count: usize) -> u64 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_ALLOC.to_le_bytes());
+    msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+        .copy_from_slice(&(count as i32).to_le_bytes());
+    let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    u64::from_le_bytes(
+        msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    )
+}
+
+/// Free `count` contiguous physical pages starting at `pa` via kernel call.
+pub fn vm_free_pages(pa: u64, count: usize) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_FREE.to_le_bytes());
+    msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8].copy_from_slice(&pa.to_le_bytes());
+    msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+        .copy_from_slice(&(count as i32).to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// VM's own page table root (CR3 physical address).
+/// Set during `vm_init_boot` and used by `vm_mappages`/`vm_unmappages`
+/// to map physical pages into VM's address space for direct access.
+pub static VM_SELF_CR3: AtomicU64 = AtomicU64::new(0);
+
+/// Next free virtual address in VM's address space for temporary mappings.
+/// Starts at 0x7F0000000000 — well above the heap (0x3FE00000) and
+/// below the kernel half (0xFFFF800000000000). Each call to `vm_find_hole`
+/// bumps this by the requested number of pages.
+static VM_NEXT_MAP_VA: AtomicU64 = AtomicU64::new(0x7F0000000000);
+
+const PAGE_SIZE: u64 = 4096;
+
+/// Find a range of `pages` consecutive virtual addresses in VM's own
+/// address space for temporary physical page mappings.
+///
+/// Returns the starting VA. This is a simple bump allocator — pages
+/// are unmapped (freed) by returning them to the allocator, but for
+/// the fork workload the mappings are short-lived and the VA space is
+/// large enough (100+ MB) to never wrap.
+pub fn vm_find_hole(pages: usize) -> u64 {
+    let bytes = (pages as u64) * PAGE_SIZE;
+    VM_NEXT_MAP_VA.fetch_add(bytes, Ordering::Relaxed)
+}
+
+/// Map a single physical page `phys` into VM's address space at a
+/// virtual address obtained from `vm_find_hole`, with the given `flags`.
+///
+/// Returns the virtual address on success, or 0 on failure.
+/// After this call, the returned VA can be dereferenced from VM's
+/// user-mode context to access the physical page.
+pub fn vm_mappage(phys: u64, flags: u64) -> u64 {
+    let va = vm_find_hole(1);
+    let self_cr3 = VM_SELF_CR3.load(Ordering::Relaxed);
+    if self_cr3 == 0 {
+        return 0;
+    }
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_MAP.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&self_cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8].copy_from_slice(&phys.to_le_bytes());
+    msg[VM_PAGING_FLAGS_OFF..VM_PAGING_FLAGS_OFF + 8].copy_from_slice(&flags.to_le_bytes());
+    let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    va
+}
+
+/// Unmap a page from VM's address space at `va`.
+pub fn vm_unmappage(va: u64) -> i32 {
+    let self_cr3 = VM_SELF_CR3.load(Ordering::Relaxed);
+    if self_cr3 == 0 {
+        return -1;
+    }
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_UNMAP.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&self_cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// Map `count` consecutive physical pages into VM's address space.
+/// Returns the starting VA, or 0 on failure.
+pub fn vm_mappages(phys: u64, count: usize, flags: u64) -> u64 {
+    let va = vm_find_hole(count);
+    let self_cr3 = VM_SELF_CR3.load(Ordering::Relaxed);
+    if self_cr3 == 0 {
+        return 0;
+    }
+    for i in 0..count {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_MAP.to_le_bytes());
+        msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&self_cr3.to_le_bytes());
+        msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8]
+            .copy_from_slice(&(va + (i as u64) * PAGE_SIZE).to_le_bytes());
+        msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8]
+            .copy_from_slice(&(phys + (i as u64) * PAGE_SIZE).to_le_bytes());
+        msg[VM_PAGING_FLAGS_OFF..VM_PAGING_FLAGS_OFF + 8].copy_from_slice(&flags.to_le_bytes());
+        let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+        if r != 0 {
+            return 0;
+        }
+    }
+    va
+}
+
+/// Unmap `count` pages from VM's address space starting at `va`.
+pub fn vm_unmappages(va: u64, count: usize) {
+    let self_cr3 = VM_SELF_CR3.load(Ordering::Relaxed);
+    if self_cr3 == 0 {
+        return;
+    }
+    for i in 0..count {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_UNMAP.to_le_bytes());
+        msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&self_cr3.to_le_bytes());
+        msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8]
+            .copy_from_slice(&(va + (i as u64) * PAGE_SIZE).to_le_bytes());
+        let _ = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    }
+}
+
+/// Map a single physical page `pa` at virtual address `va` in the page table
+/// identified by `cr3`. The kernel runs in ring 0 and can access all physical
+/// memory. The caller must ensure `cr3` is a valid page table root and `va`
+/// is within the user address range.
+///
+/// `flags` should contain permission bits (MAP_USER, MAP_WRITE, etc.) but
+/// NOT MAP_PRESENT — the kernel's `map_page` adds PRESENT automatically.
+/// Returns 0 on success, negative errno on failure.
+pub fn vm_map_page_in(cr3: u64, va: u64, pa: u64, flags: u64) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_MAP.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8].copy_from_slice(&pa.to_le_bytes());
+    msg[VM_PAGING_FLAGS_OFF..VM_PAGING_FLAGS_OFF + 8].copy_from_slice(&flags.to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// Copy `count` physical pages from `src_pa` to `dst_pa` via kernel call.
+/// The kernel runs in ring 0 and copies via the identity map.
+pub fn vm_copy_pages(src_pa: u64, dst_pa: u64, count: usize) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_COPY.to_le_bytes());
+    msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8].copy_from_slice(&src_pa.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&dst_pa.to_le_bytes());
+    msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+        .copy_from_slice(&(count as i32).to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// Create a child page table by cloning the parent's via kernel call.
+/// The kernel (ring 0) walks the parent's page table, allocates a new PML4
+/// and intermediate pages, and maps all user pages in the child.
+/// Returns the child's CR3 (physical address of PML4), or 0 on failure.
+pub fn vm_fork_pagetable(parent_cr3: u64) -> u64 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_FORK.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&parent_cr3.to_le_bytes());
+    let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    u64::from_le_bytes(
+        msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    )
+}
 
 /// Process flags
 #[allow(dead_code)]
@@ -225,6 +440,14 @@ fn vm_init_boot() {
                 .unwrap_or([0; 8]),
         );
 
+        // Save VM's own CR3 for self-mapping physical pages.
+        // The kernel returns the full endpoint (gen << 16 + slot),
+        // so extract the slot portion, not the raw endpoint value.
+        let slot = kernel::table::endpoint_slot(ep);
+        if slot == arch_common::com::VM_PROC_NR && cr3 != 0 {
+            VM_SELF_CR3.store(cr3, Ordering::Relaxed);
+        }
+
         if let Some(vmp) = unsafe { proc::vmproc_alloc(ep) } {
             vmp.vm_region_top = 0x3FE00000u64;
             vmp.vm_pml4_phys = cr3;
@@ -250,11 +473,20 @@ fn vm_init_boot() {
 /// Initializes the call table, boots vmproc table, and enters the
 /// message dispatch loop.
 pub fn vm_main() {
+    // Initialize the PhysicalAllocator for this server's copy of the
+    // kernel crate (which contains arch-specific code). Each server
+    // binary has its own copy; the kernel's copy was init'd in kmain.
+    #[cfg(target_os = "none")]
+    unsafe {
+        // Use the full 4MB-256MB range for page table allocation.
+        kernel::hal::init_phys_alloc(0x400000, 0x0FE00000);
+    }
     init_vm();
 
     #[cfg(target_os = "none")]
     {
         const RECEIVE_CALL: u64 = 47;
+        #[allow(dead_code)]
         const SEND_CALL: u64 = 46;
         const ANY: i32 = 0x0000ffff;
 
@@ -383,11 +615,32 @@ pub fn exec_bootproc() {
     // TODO: Phase 7 — execute boot process with ELF loading
 }
 
-/// SEF signal handler callback (stub).
+/// SEF signal handler callback.
 ///
 /// Handles kernel signals delivered to the VM server.
+/// Iterates all process slots to find pending page faults
+/// (stored by the kernel's #PF handler) and processes them.
 pub fn sef_signal_handler() {
-    // TODO: Phase 8+ — respond to kernel signals (SIGS_PAGEFAULT, etc.)
+    // Process pending page faults by querying the kernel via
+    // SYS_VMCTL(VMCTL_MEMREQ_GET). This kernel call reads fault
+    // info from the kernel's own PAGE_FAULT_INFO static, avoiding
+    // the static-data-duplication issue (Bug 2 / Blocker 5 class).
+    //
+    // Iterate all active Vmproc entries and check each one for
+    // pending fault data. If found, dispatch to the shared handler.
+    unsafe {
+        proc::for_each_active_vmproc(|vmp| {
+            let ep = vmp.vm_endpoint;
+            match minix_rt::sys_vmctl_memreq_get(ep) {
+                Ok((addr, error_code)) => {
+                    handle_pagefault_for(ep, addr, error_code);
+                }
+                Err(_) => {
+                    // No pending fault for this endpoint — continue.
+                }
+            }
+        });
+    }
 }
 
 // Page fault handling (Phase 6.9 — port of pagefaults.c)
@@ -423,11 +676,16 @@ pub fn do_pagefaults(msg: &mut Message) {
     let ep = msg.m_source;
     let addr = unsafe { msg.m_payload.m9.m9l1 } as u64;
     let flags = unsafe { msg.m_payload.m9.m9l2 } as u32;
+    handle_pagefault_for(ep, addr, flags);
+}
 
-    let is_write = flags & PFERR_WRITE != 0;
-    let _is_read = flags & PFERR_READ != 0;
-    let is_prot_fault = flags & PFERR_PROT != 0;
-    let is_nopage = true; // PFERR_NOPAGE is 0; every page fault is a "no page" initially
+/// Core page fault handler shared by message dispatch and notification path.
+///
+/// Processes a page fault for `ep` at `addr` with the given `error_code`
+/// (the CPU page fault error code bits).
+fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
+    let is_write = error_code & PFERR_WRITE != 0;
+    let is_prot_fault = error_code & PFERR_PROT != 0;
 
     // Validate the endpoint via the Vmproc table.
     let vmp = match unsafe { proc::vmproc_lookup(ep) } {
@@ -457,10 +715,20 @@ pub fn do_pagefaults(msg: &mut Message) {
 
     match region {
         Some(region) => {
-            // Check if access is valid.
-            if is_prot_fault {
-                // Protection fault: access type doesn't match region permissions.
-                if is_write && region.flags & region::VR_WRITABLE == 0 {
+            // Determine fault type.
+            if is_prot_fault && is_write {
+                // Protection fault with write access.
+                if region.flags & region::VR_WRITABLE != 0 {
+                    // Writable region but PTE is read-only → COW candidate.
+                    let result = cow::handle_cow_fault(vmp, addr);
+                    if result != 0 {
+                        sys_kill(ep, SIGSEGV);
+                    }
+                    unsafe {
+                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+                    }
+                    return;
+                } else {
                     // Write to read-only region → SIGSEGV
                     sys_kill(ep, SIGSEGV);
                     unsafe {
@@ -470,67 +738,62 @@ pub fn do_pagefaults(msg: &mut Message) {
                 }
             }
 
-            if is_nopage || !is_prot_fault {
-                // Demand-paging: allocate a physical page, zero-fill, and map it.
-                let page_size: u64 = 4096;
-                let page_addr = addr & !(page_size - 1);
+            // Demand-paging: allocate a physical page, zero-fill, and map it.
+            let page_size: u64 = 4096;
+            let page_addr = addr & !(page_size - 1);
 
-                // Allocate a physical page.
-                let pg = unsafe { kernel::vm::alloc_mem(1, 0) };
-                if pg == kernel::vm::NO_MEM {
-                    // Out of memory — send SIGSEGV.
+            // Allocate a physical page.
+            let pg = unsafe { kernel::vm::alloc_mem(1, 0) };
+            if pg == kernel::vm::NO_MEM {
+                // Out of memory — send SIGSEGV.
+                sys_kill(ep, SIGSEGV);
+                unsafe {
+                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+                }
+                return;
+            }
+            let pa = pg * page_size;
+
+            // Zero-fill the page.
+            unsafe {
+                kernel::vm::vm_memset(pa, 0, page_size as usize);
+            }
+
+            // Build page flags from region permissions.
+            let mut pt_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
+            if region.flags & region::VR_WRITABLE != 0 {
+                pt_flags |= kernel::pagetable::MAP_WRITE;
+            }
+
+            // Map the page in the process's page table.
+            let map_result = unsafe { kernel::pagetable::map_page(cr3, page_addr, pa, pt_flags) };
+
+            match map_result {
+                Ok(_) => {
+                    // Create a PhysBlock for the new page.
+                    pb::pb_new(pa);
+
+                    // Record the physical page in the region.
+                    if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+                        && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+                    {
+                        r.add_page(page_addr, pa);
+                    }
+
+                    // Clear the page fault flag, resuming the process.
+                    unsafe {
+                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+                    }
+                }
+                Err(_) => {
+                    // Mapping failed — free the page and send SIGSEGV.
+                    unsafe {
+                        kernel::vm::free_mem(pg, 1);
+                    }
                     sys_kill(ep, SIGSEGV);
                     unsafe {
                         mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
                     }
-                    return;
-                }
-                let pa = pg * page_size;
-
-                // Zero-fill the page.
-                unsafe {
-                    kernel::vm::vm_memset(pa, 0, page_size as usize);
-                }
-
-                // Build page flags from region permissions.
-                let mut pt_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
-                if region.flags & region::VR_WRITABLE != 0 {
-                    pt_flags |= kernel::pagetable::MAP_WRITE;
-                }
-
-                // Map the page in the process's page table.
-                let map_result =
-                    unsafe { kernel::pagetable::map_page(cr3, page_addr, pa, pt_flags) };
-
-                match map_result {
-                    Ok(_) => {
-                        // Record the physical page in the region.
-                        if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
-                            && let Some(r) = vmp.vm_regions.find_mut(page_addr)
-                        {
-                            r.add_page(page_addr, pa);
-                        }
-
-                        // Clear the page fault flag, resuming the process.
-                        unsafe {
-                            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                        }
-                    }
-                    Err(_) => {
-                        // Mapping failed — free the page and send SIGSEGV.
-                        unsafe {
-                            kernel::vm::free_mem(pg, 1);
-                        }
-                        sys_kill(ep, SIGSEGV);
-                        unsafe {
-                            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                        }
-                    }
-                }
-            } else {
-                // Shouldn't reach here, but handle gracefully.
-                unsafe {
-                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
                 }
             }
         }
@@ -928,9 +1191,6 @@ const MMAP_LEN: usize = 12; // u64 — bytes 20-27
 const MMAP_ADDR: usize = 20; // u64 — bytes 28-35
 const MMAP_FD: usize = 28; // i32 — bytes 36-39
 
-/// Page size constant.
-const PAGE_SIZE: u64 = 4096;
-
 /// Handle VM_MMAP — map memory into a process.
 ///
 /// Message format (from minix-std vmem.rs):
@@ -1022,24 +1282,83 @@ fn do_mmap(msg: &mut Message) -> i32 {
 }
 
 fn do_fork(msg: &mut Message) -> i32 {
-    // Extract parent and child endpoints from message.
-    // m1i1 = child endpoint, m_source = parent endpoint.
-    let parent_ep = msg.m_source;
-    let child_ep = unsafe { msg.m_payload.m1.m1i1 };
+    // Message format (matching C: VMF_ENDPOINT / VMF_SLOTNO):
+    //   m_source = PM_PROC_NR (sender, set by IPC — not the parent!)
+    //   m1.m1i1  = parent endpoint (VMF_ENDPOINT)
+    //   m1.m1i2  = child slot number (VMF_SLOTNO)
+    // Reply:
+    //   m1.m1i1  = child endpoint (VMF_CHILD_ENDPOINT)
 
-    if parent_ep < 0 || child_ep < 0 {
+    let parent_ep = unsafe { msg.m_payload.m1.m1i1 };
+    let child_slot = unsafe { msg.m_payload.m1.m1i2 };
+    if parent_ep < 0 || child_slot < 0 || child_slot >= NR_PROCS as i32 {
         return EINVAL;
     }
-    if parent_ep >= NR_PROCS as i32 || child_ep >= NR_PROCS as i32 {
+
+    // Phase 1: Allocate Vmproc for child and create a private page table
+    // (deep copy of all user pages). VM_clone uses the slot number as a
+    // temporary endpoint; the real endpoint is created by sys_fork below.
+    let temp_ep: i32 = child_slot;
+    if unsafe { proc::vm_clone(parent_ep, temp_ep) } != 0 {
         return EINVAL;
     }
 
-    unsafe {
-        if proc::vm_clone(parent_ep, child_ep) != 0 {
-            return EINVAL;
+    // Only inherit VMF_INUSE flag; clear any other flags that may
+    // have been set on the pre-allocated slot. Matching C fork.c line 84:
+    //   vmc->vm_flags &= VMF_INUSE;
+    // Also reset ACL if the parent had a system (non-user) ACL.
+    // Matching C: acl_fork(vmc) at fork.c line 87.
+    if let Some(child_vmp) = unsafe { proc::vmproc_lookup(temp_ep) } {
+        child_vmp.vm_flags &= proc::VMF_INUSE;
+        proc::acl_fork(child_vmp);
+    }
+
+    // Call SYS_FORK to create the kernel Proc entry.
+    const PFF_VMINHIBIT: u32 = 0x01;
+    let result = minix_rt::sys_fork(parent_ep, child_slot, PFF_VMINHIBIT);
+    let (child_ep, msgaddr) = match result {
+        Ok((ep, ma)) => (ep, ma),
+        Err(_) => {
+            unsafe { proc::vmproc_free(temp_ep) };
+            return EAGAIN;
+        }
+    };
+    // Update child Vmproc with the real endpoint returned by the kernel.
+    if let Some(vmp) = unsafe { proc::vmproc_lookup(temp_ep) } {
+        vmp.vm_endpoint = child_ep;
+    }
+
+    // Set the child's CR3 via SYS_VMCTL(VMCTL_SETADDRSPACE).
+    // Use child_ep (not temp_ep) because vm_endpoint was already updated
+    // to child_ep above, and vmproc_lookup checks vm_endpoint match.
+    if let Some(vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+        let child_cr3 = vmp.vm_pml4_phys;
+        if child_cr3 != 0 {
+            let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
         }
     }
 
+    // Handle memory for the message buffer — DISABLED: COW handler
+    // needs a working page copy mechanism. The C code says this is
+    // just an optimization whose return value needn't be checked.
+    /*
+    const MESSAGE_SIZE: u64 = 56;
+        while va < msg_end {
+            let _ = cow::handle_cow_fault(child_vmp, va);
+            va = va.wrapping_add(page_size);
+        }
+    }
+    if let Some(parent_vmp) = unsafe { proc::vmproc_lookup(parent_ep) } {
+        let mut va = msgaddr;
+        while va < msg_end {
+            let _ = cow::handle_cow_fault(parent_vmp, va);
+            va = va.wrapping_add(page_size);
+        }
+    }
+    */
+
+    // Reply with child endpoint in m1i1 (matching C VMF_CHILD_ENDPOINT).
+    msg.m_payload.m1.m1i1 = child_ep;
     OK
 }
 

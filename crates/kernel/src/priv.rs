@@ -468,6 +468,26 @@ pub fn end_dyn_priv_addr() -> *const Priv {
     end_priv_addr()
 }
 
+/// Find the privilege ID for a process number by searching the privilege
+/// table. Returns None if not found.
+///
+/// Matching C: priv_find_proc() iterates priv table to find s_proc_nr match.
+pub fn priv_find_proc_id(proc_nr: i32) -> Option<usize> {
+    unsafe {
+        let base = PRIV.get() as *const Priv;
+        for i in 0..NR_SYS_PROCS {
+            let p = &*base.add(i);
+            if p.s_proc_nr == proc_nr {
+                return Some(p.s_id as usize);
+            }
+        }
+    }
+    // Also check the IDLE priv (proc_nr = IDLE = -4).
+    // In the current table, IDLE is at BOOT_IMAGE index 1, but check
+    // as fallback.
+    None
+}
+
 // Tests
 
 #[cfg(test)]

@@ -45,13 +45,11 @@ pub const BALANCE_TIMEOUT: u32 = 5;
 /// Maximum number of CPUs.
 pub const CONFIG_MAX_CPUS: usize = 8;
 
-
 const SCHEDULE_CHANGE_PRIO: u32 = 0x1;
 const SCHEDULE_CHANGE_QUANTUM: u32 = 0x2;
 const SCHEDULE_CHANGE_CPU: u32 = 0x4;
 const SCHEDULE_CHANGE_ALL: u32 =
     SCHEDULE_CHANGE_PRIO | SCHEDULE_CHANGE_QUANTUM | SCHEDULE_CHANGE_CPU;
-
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -415,8 +413,8 @@ pub fn sched_server_main() {
         const SENDREC_CALL: u64 = 48;
         const ANY: i32 = 0x0000ffff;
 
-        // Notification message type (-10 in kernel's delivery format).
-        const NOTIFY_MTYPE: i32 = -10;
+        // Notification message type (matching C MINIX NOTIFY_MESSAGE = 0x1000).
+        const NOTIFY_MTYPE: i32 = arch_common::com::NOTIFY_MESSAGE as i32;
 
         loop {
             let mut msg = arch_common::ipc::Message {

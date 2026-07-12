@@ -519,7 +519,9 @@ pub fn rs_server_main() {
             // (RS is a stub). Use SEND (not SENDREC) so RS doesn't
             // block waiting for the sender to receive the reply.
             // The reply is read from buf[4..8] which contains m_type.
-            if i32::from_le_bytes(buf[4..8].try_into().unwrap_or([0; 4])) != -10 {
+            if i32::from_le_bytes(buf[4..8].try_into().unwrap_or([0; 4]))
+                != arch_common::com::NOTIFY_MESSAGE as i32
+            {
                 // Write ENOSYS to m_type (bytes 4-7) and SEND it back.
                 buf[4..8].copy_from_slice(&(-71i32).to_le_bytes()); // ENOSYS
                 unsafe {

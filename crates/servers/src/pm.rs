@@ -282,6 +282,19 @@ static PROCS_IN_USE: AtomicU32 = AtomicU32::new(0);
 ///
 /// Scans the process table for a slot with `IN_USE` not set, marks it as in
 /// use, and returns its index. Returns `None` if all slots are occupied.
+/// Reserve a slot so alloc_proc skips it.
+#[allow(dead_code)]
+fn reserve_slot(slot: usize) {
+    if slot < NR_PROCS {
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_magic = MP_MAGIC;
+        }
+        PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub fn alloc_proc() -> Option<usize> {
     let base = MPROC.as_ptr();
     for i in 0..NR_PROCS {
@@ -1104,18 +1117,17 @@ const VFS_M7_I5_OFF: usize = 24;
 
 /// Handle a PM_FORK request.
 ///
-/// Performs the fork: creates a child MProc slot via `do_fork`, calls
-/// SYS_FORK kernel call to clone the kernel Proc entry, then sends
-/// VFS_PM_FORK to VFS and returns EDONTREPLY (the reply is deferred
-/// until VFS sends VFS_PM_FORK_REPLY).
+/// Performs the fork: creates a child MProc slot via `do_fork`, sends
+/// VM_FORK to the VM server (which creates the child's kernel Proc entry
+/// via SYS_FORK), then notifies VFS and returns the child PID.
 ///
-/// Matching C: `do_fork()` in `minix/servers/pm/forkexit.c`.
+/// Matching C: `do_fork()` in `minix/servers/pm/forkexit.c` with the
+/// VM_FORK call order.
 ///
 /// # Safety
 ///
 /// - `caller_slot` must be a valid, in-use process slot.
 /// - `msg` must point to a valid message buffer.
-
 pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
     let result = unsafe { do_fork(caller_slot) };
     match result {
@@ -1123,22 +1135,41 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             let base = MPROC.as_ptr();
             let child = unsafe { &*base.add(child_slot) };
             let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
+            let child_slot_i32 = child_slot as i32;
+            let child_pid = child.mp_pid;
 
-            // Step 1: Send SYS_FORK to kernel to clone the Proc entry.
-            let mut kmsg = Message {
-                m_source: 0,
-                m_type: 0,
-                m_payload: unsafe { core::mem::zeroed() },
+            // Step 1: Send VM_FORK to VM server.
+            // VM creates the child's page table and calls SYS_FORK to
+            // create the kernel Proc entry. We send via SENDREC and
+            // receive the child endpoint in the reply.
+            let mut vm_msg = [0u8; 64];
+            // m_type at bytes 4-7 = VM_FORK (0xC01)
+            vm_msg[4..8].copy_from_slice(&(arch_common::com::VM_FORK as i32).to_le_bytes());
+            // m1i1 at bytes 8-11 = parent endpoint (VMF_ENDPOINT)
+            vm_msg[8..12].copy_from_slice(&parent_endpoint.to_le_bytes());
+            // m1i2 at bytes 12-15 = child slot (VMF_SLOTNO)
+            vm_msg[12..16].copy_from_slice(&child_slot_i32.to_le_bytes());
+
+            // Send VM_FORK to VM via SENDREC and wait for reply.
+            let vm_src = unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDREC_CALL,
+                    arch_common::com::VM_PROC_NR as u64,
+                    vm_msg.as_mut_ptr() as u64,
+                )
             };
-            kmsg.m_payload.m1.m1i1 = parent_endpoint;
-            kmsg.m_payload.m1.m1i2 = 0;
-            kmsg.m_payload.m1.m1i3 = 0;
-            let kresult = send_kernel_call(0, &mut kmsg);
-            if kresult != OK {
+            // Check VM's reply status in m_type (bytes 4-7).
+            // Note: vm_src is the SENDREC return value (sender's endpoint),
+            // NOT the error code. The error is in msg.m_type.
+            let vm_reply_type = i32::from_le_bytes(vm_msg[4..8].try_into().unwrap_or([0; 4]));
+            if vm_src < 0 || vm_reply_type != 0 {
+                // VM_FORK failed; free the child slot and return error.
                 unsafe { free_proc(child_slot) };
-                return kresult;
-            };
-            let child_endpoint = unsafe { kmsg.m_payload.m1.m1i1 };
+                return if vm_src < 0 { vm_src as i32 } else { -1 };
+            }
+
+            // Read child endpoint from VM's reply (m1i1 at bytes 8-11).
+            let child_endpoint = i32::from_le_bytes(vm_msg[8..12].try_into().unwrap_or([0; 4]));
             unsafe {
                 let child_ptr = base.add(child_slot);
                 (*child_ptr).mp_endpoint = child_endpoint;
@@ -1173,8 +1204,8 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             // The user-space fork() reads the PID from msg[8..12].
             // The main loop will set msg.m_type = status (the return value)
             // before sending the reply.
-            msg.m_payload.m1.m1i1 = child.mp_pid;
-            child.mp_pid
+            msg.m_payload.m1.m1i1 = child_pid;
+            child_pid
         }
         Err(_) => -11,
     }
@@ -1376,8 +1407,8 @@ pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
 /// The PM dispatch table.
 /// Maps each PM call number to its handler function.
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
-    // Handle notifications (m_type == NOTIFY_MESSAGE = -10).
-    if msg.m_type == -10 {
+    // Handle notifications (m_type == NOTIFY_MESSAGE).
+    if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
         // Check for pending process exits via SYS_GETKSIG (kernel call 7).
         // This returns: endpoint at m1i1, exit status at m1i2.
         // Call repeatedly until no more exits.
@@ -1579,6 +1610,11 @@ pub fn pm_server_main() {
                 mp.mp_pid = ep + 1; // PID = slot + 1 (like real MINIX)
             }
         }
+        // Reserve slot 11 (kernel proc_addr(11) = RAMDISK) so alloc_proc
+        // doesn't return it. The kernel's Proc table has boot processes
+        // at proc_nr 0..11; PM's slot numbers must match for do_fork_handler
+        // to find a free slot via proc_addr(child_slot).
+        reserve_slot(11);
 
         // Syscall numbers for IPC (from minix-std):
         //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
@@ -1600,7 +1636,7 @@ pub fn pm_server_main() {
             // Handle notifications FIRST — before endpoint/slot resolution,
             // because notifications can come from kernel tasks with negative
             // endpoints (e.g. SYSTEM = -2) that won't pass pm_isokendpt.
-            if msg.m_type == -10 {
+            if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
                 // Check for pending process exits via SYS_GETKSIG (kernel call 7).
                 // Limit iterations to prevent infinite loop if signals keep regenerating.
                 let mut sig_count = 0u32;
@@ -1619,9 +1655,6 @@ pub fn pm_server_main() {
                         break;
                     }
                     let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
-                    // C: NONE check only — no `endpt == 0` guard.
-                    // endpoint 0 is PM_PROC_NR, which should NOT be skipped.
-                    // endpoint validated below
                     if endpt == -1 || endpt == 31743 {
                         break;
                     }
@@ -1637,7 +1670,7 @@ pub fn pm_server_main() {
                     let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
                     if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
                         let base = MPROC.as_ptr();
-                        let pid = unsafe { (*base.add(slot)).mp_pid };
+                        let _pid = unsafe { (*base.add(slot)).mp_pid };
                         unsafe { do_exit(slot, exit_status) };
                         let parent_slot = unsafe { (*base.add(slot)).mp_parent };
                         if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
@@ -1645,13 +1678,13 @@ pub fn pm_server_main() {
                                 let parent_rmp = &*base.add(parent_slot as usize);
                                 if parent_rmp.mp_flags & IN_USE != 0 {
                                     let wp = parent_rmp.mp_wpid;
-                                    if wp == -1 || wp == pid {
+                                    if wp == -1 || wp == _pid {
                                         let mut reply_msg = Message {
                                             m_source: 0,
                                             m_type: OK,
                                             m_payload: core::mem::zeroed(),
                                         };
-                                        reply_msg.m_payload.m1.m1i1 = pid;
+                                        reply_msg.m_payload.m1.m1i1 = _pid;
                                         reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
                                         minix_rt::syscall2(
                                             minix_rt::SENDNB_CALL,

@@ -33,6 +33,10 @@ pub(crate) struct Vmproc {
     pub vm_endpoint: i32,
     /// Physical address of the PML4 (CR3 value).
     pub vm_pml4_phys: u64,
+    /// Access control list index. `USER_ACL` (0) for normal user
+    /// processes; reset to `NO_ACL` (-1) on fork for privileged
+    /// processes that had a system ACL assigned.
+    pub vm_acl: i32,
     /// Highest virtual address inserted into regions.
     pub vm_region_top: u64,
     /// Virtual memory regions for this process.
@@ -47,6 +51,19 @@ pub(crate) struct Vmproc {
 pub(crate) const VMF_INUSE: u32 = 0x001;
 pub(crate) const VMF_EXITING: u32 = 0x002;
 pub(crate) const VMF_WATCHEXIT: u32 = 0x008;
+
+/// ACL index: user processes share slot 0.
+pub(crate) const USER_ACL: i32 = 0;
+/// ACL index: no ACL assigned.
+pub(crate) const NO_ACL: i32 = -1;
+
+/// On fork, reset non-user ACLs so the child doesn't inherit system
+/// privileges. Matching C: acl_fork() in minix/servers/vm/acl.c
+pub(crate) fn acl_fork(vmp: &mut Vmproc) {
+    if vmp.vm_acl != USER_ACL {
+        vmp.vm_acl = NO_ACL;
+    }
+}
 
 /// Wrapper to make `UnsafeCell` `Sync` — safe because the VM server
 /// runs on a single thread and serialises all access.
@@ -95,6 +112,25 @@ pub(crate) unsafe fn vmproc_lookup(ep: Endpoint) -> Option<&'static mut Vmproc> 
     }
 }
 
+/// Call `f` for each active Vmproc entry.
+///
+/// Iterates the Vmproc table and invokes `f` for every slot that has
+/// the `VMF_INUSE` flag set.
+///
+/// # Safety
+///
+/// Must be called from the single-threaded VM server context.
+pub(crate) unsafe fn for_each_active_vmproc(mut f: impl FnMut(&Vmproc)) {
+    unsafe {
+        let table = &*VMPROC_TABLE.get();
+        for slot in table.iter().flatten() {
+            if slot.vm_flags & VMF_INUSE != 0 {
+                f(slot);
+            }
+        }
+    }
+}
+
 /// Allocate a free Vmproc slot for the given endpoint.
 ///
 /// Returns `None` if the slot is already in use or the endpoint is invalid.
@@ -119,6 +155,7 @@ pub(crate) unsafe fn vmproc_alloc(ep: Endpoint) -> Option<&'static mut Vmproc> {
             vm_flags: VMF_INUSE,
             vm_endpoint: ep,
             vm_pml4_phys: 0,
+            vm_acl: USER_ACL,
             vm_region_top: 0,
             vm_regions: RegionList::new(),
             vm_minor_page_fault: 0,
@@ -444,140 +481,102 @@ pub unsafe fn vm_clone(parent_ep: Endpoint, child_ep: Endpoint) -> i32 {
 /// Both endpoints must be valid and the parent's address space must not be
 /// concurrently modified.
 pub unsafe fn pt_new_for_fork(child_ep: Endpoint, parent_ep: Endpoint) -> i32 {
-    // SAFETY: the function-level safety invariant requires the caller to ensure
-    // valid endpoints and no concurrent address space modification. Within the
-    // body, all unsafe pointer operations are justified by this invariant.
     unsafe {
-        // 1. Get parent's CR3 (physical address of the PML4)
         let parent_cr3 = vm_get_addrspace(parent_ep);
         if parent_cr3 == 0 {
             return -1;
         }
-
-        // 2. Allocate a new PML4 for the child
-        let child_pml4_pg = vm::alloc_mem(1, 0);
-        if child_pml4_pg == NO_MEM {
+        // Single kernel call does the entire fork page table creation in ring 0
+        let child_pml4_pa = crate::vm::vm_fork_pagetable(parent_cr3);
+        if child_pml4_pa == 0 {
             return -1;
         }
-        let child_cr3 = child_pml4_pg * vm::VM_PAGE_SIZE as u64;
-
-        // 3. Copy kernel entries from parent (upper 256 PML4 slots,
-        //    indices 256-511). Kernel entries are shared between
-        //    parent and child.
-        let parent_pml4 = parent_cr3 as *const PtEntry;
-        let child_pml4 = child_cr3 as *mut PtEntry;
-        core::ptr::copy_nonoverlapping(
-            parent_pml4.add(USER_PML4_ENTRIES),
-            child_pml4.add(USER_PML4_ENTRIES),
-            USER_PML4_ENTRIES,
-        );
-
-        // 4. Walk each user PML4 entry (0..USER_PML4_ENTRIES)
-        //    and private-copy user-accessible 4KB pages.
-        for pml4_idx in 0..USER_PML4_ENTRIES {
-            let pml4e = core::ptr::read(parent_pml4.add(pml4_idx));
-            if pml4e & PG_P == 0 {
-                continue;
-            }
-
-            let pdpt_phys = pml4e & PG_FRAME;
-            let pdpt = pdpt_phys as *const PtEntry;
-
-            for pdpt_idx in 0..NENTRIES {
-                let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-                if pdpte & PG_P == 0 {
-                    continue;
-                }
-
-                let va_l3 = (pml4_idx as u64) << 39 | (pdpt_idx as u64) << 30;
-
-                if pdpte & PG_PS != 0 {
-                    // 1GB huge page — shared identity mapping,
-                    // skip private copy.
-                    continue;
-                }
-
-                let pd_phys = pdpte & PG_FRAME;
-                let pd = pd_phys as *const PtEntry;
-
-                for pd_idx in 0..NENTRIES {
-                    let pde = core::ptr::read(pd.add(pd_idx));
-                    if pde & PG_P == 0 {
-                        continue;
-                    }
-
-                    let va_l2 = va_l3 | (pd_idx as u64) << 21;
-
-                    if pde & PG_PS != 0 {
-                        // 2MB huge page — shared identity mapping.
-                        // Each 4KB sub-page within the 2MB range
-                        // shares the parent's physical frame.
-                        let pa_base = pde & PG_FRAME;
-                        let pte_flags = (pde & PG_PTEMASK) & !PG_PS;
-
-                        for sub in 0..NENTRIES {
-                            let va = va_l2 | (sub as u64) << 12;
-                            let pa = pa_base + ((sub as u64) << 12);
-                            if pagetable::map_page(
-                                child_cr3,
-                                va,
-                                pa,
-                                pte_flags | pagetable::MAP_PRESENT,
-                            )
-                            .is_err()
-                            {
-                                return -1;
-                            }
-                        }
-                        continue;
-                    }
-
-                    let pt_phys = pde & PG_FRAME;
-                    let pt = pt_phys as *const PtEntry;
-
-                    for pt_idx in 0..NENTRIES {
-                        let pte_val = core::ptr::read(pt.add(pt_idx));
-                        if pte_val & PG_P == 0 || pte_val & PG_U == 0 {
-                            continue;
-                        }
-
-                        let va = va_l2 | (pt_idx as u64) << 12;
-                        let parent_pa = pte_val & PG_FRAME;
-
-                        // Allocate a new physical frame for the child
-                        let child_pg = vm::alloc_mem(1, 0);
-                        if child_pg == NO_MEM {
-                            return -1;
-                        }
-                        let child_pa = child_pg * vm::VM_PAGE_SIZE as u64;
-
-                        // Copy data from parent's physical page to
-                        // child's (identity-mapped: physical == virtual).
-                        core::ptr::copy_nonoverlapping(
-                            parent_pa as *const u8,
-                            child_pa as *mut u8,
-                            vm::VM_PAGE_SIZE,
-                        );
-
-                        // Map the child's page at the same virtual
-                        // address, preserving parent's PTE flags (minus
-                        // PG_PS since this is now a 4KB entry).
-                        let map_flags = pte_val & !PG_PS;
-                        if pagetable::map_page(child_cr3, va, child_pa, map_flags).is_err() {
-                            return -1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. Store the child's CR3 and bind it.
         if let Some(vmp) = vmproc_lookup(child_ep) {
-            vmp.vm_pml4_phys = child_cr3;
+            vmp.vm_pml4_phys = child_pml4_pa;
         }
         pt_bind(child_ep);
-
         0
+    }
+}
+
+/// Free a page table rooted at `pml4_pa` by walking and freeing all
+/// intermediate pages (PDPT, PD, PT). Used for cleanup when fork fails
+/// partway through pt_new_for_fork.
+unsafe fn pt_free_internal(pml4_pa: u64) {
+    unsafe {
+        // Map the PML4 into VM's address space to walk user entries.
+        const VM_MAP_FLAGS: u64 = kernel::pagetable::MAP_WRITE | kernel::pagetable::MAP_USER;
+        let pml4_va = crate::vm::vm_mappage(pml4_pa, VM_MAP_FLAGS);
+        if pml4_va == 0 {
+            crate::vm::vm_free_pages(pml4_pa, 1);
+            return;
+        }
+        let pml4 = pml4_va as *const PtEntry;
+
+        for i in 0..512 {
+            let entry = core::ptr::read(pml4.add(i));
+            if entry & PG_P == 0 {
+                continue;
+            }
+            let pdpt_pa = entry & PG_FRAME;
+            if i >= USER_PML4_ENTRIES {
+                continue;
+            }
+            let pdpt_va = crate::vm::vm_mappage(pdpt_pa, VM_MAP_FLAGS);
+            if pdpt_va == 0 {
+                continue;
+            }
+            let pdpt = pdpt_va as *const PtEntry;
+            for j in 0..512 {
+                let pdpte = core::ptr::read(pdpt.add(j));
+                if pdpte & PG_P == 0 || pdpte & PG_PS != 0 {
+                    continue;
+                }
+                let pd_pa = pdpte & PG_FRAME;
+                let pd_va = crate::vm::vm_mappage(pd_pa, VM_MAP_FLAGS);
+                if pd_va == 0 {
+                    continue;
+                }
+                let pd = pd_va as *const PtEntry;
+                for k in 0..512 {
+                    let pde = core::ptr::read(pd.add(k));
+                    if pde & PG_P == 0 || pde & PG_PS != 0 {
+                        continue;
+                    }
+                    let pt_pa = pde & PG_FRAME;
+                    crate::vm::vm_free_pages(pt_pa, 1);
+                }
+                crate::vm::vm_unmappage(pd_va);
+                crate::vm::vm_free_pages(pd_pa, 1);
+            }
+            crate::vm::vm_unmappage(pdpt_va);
+            crate::vm::vm_free_pages(pdpt_pa, 1);
+        }
+        crate::vm::vm_unmappage(pml4_va);
+        crate::vm::vm_free_pages(pml4_pa, 1);
+    }
+}
+
+/// Helper: walk the page table for `cr3` at `va` and clear PG_RW
+/// in the leaf PTE. This makes the page read-only for COW.
+///
+/// Returns 0 on success, -1 if the page is not mapped.
+unsafe fn make_pte_readonly(cr3: u64, va: u64) -> i32 {
+    unsafe {
+        match pagetable::walk(cr3, va) {
+            Ok(result) => {
+                let pte_val = result.pte_value;
+                if pte_val & PG_P == 0 || pte_val & PG_RW == 0 {
+                    // Not present or already read-only — nothing to do.
+                    return 0;
+                }
+                // Clear PG_RW and write the PTE back.
+                let new_val = pte_val & !PG_RW;
+                core::ptr::write(result.pte_virt, new_val);
+                0
+            }
+            Err(_) => -1,
+        }
     }
 }
 

@@ -574,6 +574,125 @@ pub fn mem_stats() -> (i32, i32, i32) {
     (nodes, free, large)
 }
 
+// ── Page fault forwarding infrastructure (Phase 6.9 — VMFORK Step 2)
+
+/// Number of process slots for page fault info storage.
+const PF_INFO_SLOTS: usize = 256;
+
+/// A single page fault record, indexed by process slot.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct PfInfo {
+    /// Faulting virtual address (from CR2).
+    pub fault_addr: u64,
+    /// Page fault error code (pushed by CPU).
+    pub error_code: u32,
+    /// Non-zero when a fault is pending for this slot.
+    pub valid: u32,
+}
+
+/// Storage for pending page faults.
+/// Written by the #PF interrupt handler (handle_page_fault),
+/// read by VM server via pf_info_read / VMCTL_MEMREQ_GET.
+struct PfInfoCell(UnsafeCell<[PfInfo; PF_INFO_SLOTS]>);
+unsafe impl Sync for PfInfoCell {}
+impl PfInfoCell {
+    const fn new() -> Self {
+        const EMPTY: PfInfo = PfInfo {
+            fault_addr: 0,
+            error_code: 0,
+            valid: 0,
+        };
+        Self(UnsafeCell::new([EMPTY; PF_INFO_SLOTS]))
+    }
+    fn get(&self) -> *mut [PfInfo; PF_INFO_SLOTS] {
+        self.0.get()
+    }
+}
+
+static PAGE_FAULT_INFO: PfInfoCell = PfInfoCell::new();
+
+/// Read a pending page fault record for a given process slot.
+///
+/// Returns `Some((fault_addr, error_code))` if a fault is pending.
+/// Returns `None` if no fault is pending or the slot is out of range.
+///
+/// The record is **not** cleared by this call; the caller must call
+/// `pf_info_clear()` after processing the fault.
+pub fn pf_info_read(slot: usize) -> Option<(u64, u32)> {
+    if slot >= PF_INFO_SLOTS {
+        return None;
+    }
+    let info = unsafe { &(*PAGE_FAULT_INFO.get())[slot] };
+    if info.valid != 0 {
+        Some((info.fault_addr, info.error_code))
+    } else {
+        None
+    }
+}
+
+/// Clear a pending page fault record for a given process slot.
+pub fn pf_info_clear(slot: usize) {
+    if slot < PF_INFO_SLOTS {
+        let info = unsafe { &mut (*PAGE_FAULT_INFO.get())[slot] };
+        info.valid = 0;
+    }
+}
+
+/// Called from the #PF assembly handler (IST1, interrupts disabled).
+///
+/// For user-mode page faults, stores the fault info, sets
+/// `RTS_PAGEFAULT` on the faulting process (blocking it), and
+/// sends a notification to the VM server. Returns 0 (handled).
+///
+/// For kernel-mode or non-forwardable faults, returns -1 (fatal),
+/// causing the asm handler to cli + hlt.
+///
+/// # Safety
+///
+/// Must only be called from the #PF interrupt handler.
+/// Interrupts must be disabled.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> i32 {
+    unsafe {
+        // Get the faulting process.
+        let rp = crate::ipc::current_proc();
+        if rp.is_null() {
+            return -1;
+        }
+
+        let _present = error_code & 0x1 != 0;
+        let _write = error_code & 0x2 != 0;
+        let user = error_code & 0x4 != 0;
+
+        // Forward all user-mode page faults to VM for resolution
+        // (demand paging for non-present pages, COW for present
+        // read-only pages, etc.).
+        if user {
+            let slot = (*rp).p_nr as usize;
+            if slot < PF_INFO_SLOTS {
+                let info = &mut (*PAGE_FAULT_INFO.get())[slot];
+                info.fault_addr = fault_addr;
+                info.error_code = error_code;
+                info.valid = 1;
+            }
+
+            // Block the process until VM clears the fault.
+            (*rp)
+                .p_rts_flags
+                .fetch_or(crate::proc::RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
+
+            // Notify VM server that a page fault is pending.
+            let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::VM_PROC_NR);
+
+            return 0; // handled — process will retry when VM clears fault
+        }
+
+        // Kernel-mode page fault: fatal.
+        -1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

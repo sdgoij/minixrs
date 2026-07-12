@@ -690,11 +690,7 @@ pub fn sh(_args: &[&str]) -> i32 {
                         _ => {
                             // Try external command via kernel fork/exec.
                             let cmd_bytes = cmd.as_bytes();
-                            let cmd_len = cmd_bytes.len().min(55);
                             let mut cmd_path = [0u8; 256];
-                            // Save original cmd at byte 200+ (beyond parent's
-                            // 64-byte waitpid msg which overlaps the first 64 bytes).
-                            cmd_path[200..200 + cmd_len].copy_from_slice(&cmd_bytes[..cmd_len]);
                             // If the command starts with '/', use it directly.
                             // Otherwise try /bin/<cmd> first, then /sbin/<cmd>.
                             let path_len = if cmd_bytes.starts_with(b"/") {
@@ -715,42 +711,52 @@ pub fn sh(_args: &[&str]) -> i32 {
                                 if pid < 0 {
                                     write_err(b"sh: fork failed\r\n");
                                 } else if pid == 0 {
-                                    // Build argv array for the child.
-                                    // argv[0] = resolved path (cmd_path)
-                                    // argv[1..] = remaining command-line tokens
-                                    // argv[N] = null terminator (from zeroed array)
+                                    // Signal child started via diag_putchar
+                                    // (kernel call, bypasses syscall path)
+                                    minix_rt::diag_putchar(b'X');
+                                    // cmd_path is a stack array, preserved via COW.
+                                    // Derive path length from null terminator.
+                                    let child_path_len =
+                                        cmd_path.iter().position(|&b| b == 0).unwrap_or(255) + 1;
+                                    let cmd_end = child_path_len - 1;
+                                    let cmd_start = (0..cmd_end)
+                                        .rev()
+                                        .find(|&i| cmd_path[i] == b'/')
+                                        .map(|i| i + 1)
+                                        .unwrap_or(0);
+                                    let cmd_len = cmd_end - cmd_start;
+
+                                    // Save command name in a local array so it
+                                    // survives if cmd_path is modified below.
+                                    let mut cmd_name = [0u8; 56];
+                                    let cmd_name_len = cmd_len.min(56);
+                                    cmd_name[..cmd_name_len]
+                                        .copy_from_slice(&cmd_path[cmd_start..cmd_end]);
+
                                     let mut argv_buf: [*const u8; 32] = [core::ptr::null(); 32];
                                     argv_buf[0] = cmd_path.as_ptr() as *const u8;
-                                    for i in 1..argc.min(31) {
-                                        argv_buf[i] = tokens[i].as_ptr();
-                                    }
-
-                                    // Child: try /bin/<cmd> first, or use path directly
                                     let r = unsafe {
                                         minix_rt::exec_replace(
-                                            &cmd_path[..path_len],
+                                            &cmd_path[..child_path_len],
                                             argv_buf.as_ptr(),
                                         )
                                     };
-                                    if r < 0
-                                        && !cmd_bytes.starts_with(b"/")
-                                        && 6 + cmd_bytes.len() < cmd_path.len()
-                                    {
-                                        // Try /sbin/<cmd>
+                                    if r < 0 && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
+                                        // Try /sbin/<cmd> — original was bare,
+                                        // we prepended /bin/ earlier.
                                         cmd_path[..6].copy_from_slice(b"/sbin/");
-                                        cmd_path[6..6 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
-                                        cmd_path[6 + cmd_bytes.len()] = 0;
+                                        cmd_path[6..6 + cmd_name_len]
+                                            .copy_from_slice(&cmd_name[..cmd_name_len]);
+                                        cmd_path[6 + cmd_name_len] = 0;
                                         let _ = unsafe {
                                             minix_rt::exec_replace(
-                                                &cmd_path[..6 + cmd_bytes.len() + 1],
+                                                &cmd_path[..6 + cmd_name_len + 1],
                                                 argv_buf.as_ptr(),
                                             )
                                         };
                                     }
                                     write_err(b"sh: '");
-                                    // Read original cmd from safe region of cmd_path
-                                    // (parent's 64-byte waitpid msg only reaches bytes 0-63).
-                                    write_err(&cmd_path[200..200 + cmd_len]);
+                                    write_err(&cmd_name[..cmd_name_len]);
                                     write_err(b"' not found\r\n");
                                     minix_rt::exit(1);
                                 } else {

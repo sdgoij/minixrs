@@ -251,6 +251,10 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
                             crate::hal::sched_set_bill_proc(rp as *mut core::ffi::c_void);
                         }
                     }
+                    #[cfg(target_os = "none")]
+                    if (*rp).p_endpoint.abs() > 100 {
+                        crate::hal::serial_write_byte(b'C');
+                    }
                     return Some(rp);
                 }
                 rp = (*rp).p_nextready;

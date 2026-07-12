@@ -382,6 +382,17 @@ pub fn init_allocator(mmap: &PhysicalMemoryMap) {
     }
 }
 
+/// Initialize the allocator from a base address and size.
+/// Convenience wrapper that creates a PhysicalMemoryMap internally.
+pub fn init_range(base: u64, size: u64) {
+    let mut mmap = PhysicalMemoryMap::new();
+    mmap.add(base, size);
+    if mmap.total_available() == 0 {
+        return;
+    }
+    init_allocator(&mmap);
+}
+
 pub fn global_allocator() -> *mut PhysicalAllocator {
     assert!(
         ALLOC_INITIALIZED.load(Ordering::SeqCst),

@@ -128,6 +128,23 @@ pub extern "C" fn kmain() -> ! {
         mmap.cut(0x0FE0_0000, 0x0FF0_0000);
 
         arch_x86_64::alloc::init_allocator(&mmap);
+
+        // Initialize the kernel::vm physical page allocator (separate bitmap
+        // from arch_x86_64::alloc). This allocator is used by kernel call 62
+        // (VM_PAGING_ALLOC) which VM servers use to allocate physical pages.
+        // Without this, vm_alloc_pages() returns 0 and every fork fails.
+        unsafe {
+            let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+            let kernel_end_page = (kernel_end + 0xFFF) / 4096;
+            let total_pages = 256 * 1024 * 1024 / 4096;
+            if kernel_end_page < total_pages {
+                let free_chunks = [kernel::vm::MemoryChunk {
+                    base: kernel_end_page,
+                    size: (total_pages - kernel_end_page) as u64,
+                }];
+                kernel::vm::mem_init(&free_chunks);
+            }
+        }
     }
     serial_write("allocator ready\r\n");
 
@@ -607,27 +624,18 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                 }
                 break candidate;
             } else {
-                break core::ptr::null_mut();
+                // No runnable processes — halt CPU until interrupt.
+                // Matching C MINIX: the IDLE task runs hlt when nothing
+                // else is runnable. An interrupt (timer, serial, etc.)
+                // will wake the CPU and potentially make a process
+                // runnable, at which point we retry pick_proc.
+                kernel::hal::hlt();
+                // Retry after interrupt
+                continue;
             }
         };
 
-        if next.is_null() {
-            // No runnable processes — all blocked on IPC.
-            let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
-            if !pm_proc.is_null() {
-                let _ = kernel::ipc::mini_notify(
-                    arch_common::com::RS_PROC_NR,
-                    arch_common::com::PM_PROC_NR,
-                );
-                if let Some(pm_candidate) = kernel::sched::pick_proc() {
-                    unsafe { deliver_msg(pm_candidate) };
-                    arch_x86_64::cpulocals::set_cpulocal_proc_ptr(
-                        pm_candidate as *mut core::ffi::c_void,
-                    );
-                    arch_x86_64::asm::restore(pm_candidate as *const u8);
-                }
-            }
-        } else if next != rp || is_exec {
+        if next != rp || is_exec {
             // Deliver any pending IPC message to the target process's
             // user buffer and set RAX to the source endpoint.
             unsafe { deliver_msg(next) };

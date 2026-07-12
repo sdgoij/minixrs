@@ -289,6 +289,10 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // Matching C: cause_sig() -> send_sig() -> mini_notify(proc_addr(SYSTEM), rp->p_endpoint)
         if let Some(sig_mgr_ep) = get_sig_manager(caller) {
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr_ep);
+        } else {
+            // Fallback: notify PM directly (fork children may not have
+            // privilege structures set up).
+            let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::PM_PROC_NR);
         }
     }
     crate::system::EDONTREPLY as i64
@@ -535,6 +539,11 @@ unsafe fn sys_ipc_sendnb_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
 ///
 /// After the call, the Message struct is updated with the kernel's reply
 /// (result code in bytes 0-3, reply fields in m_payload).
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc` struct. `args` must contain a valid
+/// message buffer pointer at `args[1]`.
 pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let call_nr = args[0] as i32;
     let msg_ptr = args[1] as *mut u8;

@@ -3,11 +3,6 @@
 //! Provides page table allocation, walking, mapping, and unmapping.
 //! Architecture-specific constants and operations come from `crate::hal`.
 
-use arch_common::com::{VM_PAGEFAULT, VM_PROC_NR};
-
-use crate::ipc::{OK, SENDREC, current_proc, do_sync_ipc};
-use crate::proc::MESSAGE_SIZE;
-
 // Re-export page table constants and basic operations from hal
 pub use crate::hal::{
     MAP_NX, MAP_PRESENT, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3, write_cr3,
@@ -40,6 +35,16 @@ pub const PG_G: u64 = crate::hal::pte_global();
 pub const PG_FRAME: u64 = crate::hal::pte_frame_mask();
 pub const PG_PTEMASK: u64 = crate::hal::pte_flags_mask();
 
+/// Error indicating the virtual address is not mapped in the page table.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PageNotMapped;
+
+impl core::fmt::Display for PageNotMapped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "page not mapped")
+    }
+}
+
 /// Return the saved CR3 value for a process, or 0 if the process has no
 /// per-process page table.
 pub fn get_proc_cr3(ep: i32) -> u64 {
@@ -69,7 +74,7 @@ pub enum PageTableError {
     InvalidArgument,
 }
 
-unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
+pub(crate) unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
     unsafe {
         match crate::hal::alloc_phys_page() {
             Some(addr) => Ok(addr),
@@ -287,6 +292,56 @@ pub struct PageFaultInfo {
     pub protection: bool,
 }
 
+/// Clear the write (RW) bit in a leaf PTE for a given CR3 and VA.
+/// This makes the page read-only for COW.
+/// Returns Ok if the PTE was updated, Err if the page is not mapped.
+pub fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
+    let pml4_idx = pml4_index(va);
+    let pdpt_idx = pdpt_index(va);
+    let pd_idx = pd_index(va);
+    let pt_idx = pt_l0_index(va);
+
+    unsafe {
+        let pml4 = cr3 as *const u64;
+        let pml4e = core::ptr::read(pml4.add(pml4_idx));
+        if pml4e & PG_P == 0 {
+            return Err(PageNotMapped);
+        }
+
+        let pdpt = (pml4e & PG_FRAME) as *const u64;
+        let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
+        if pdpte & PG_P == 0 {
+            return Err(PageNotMapped);
+        }
+        if pdpte & PG_PS != 0 {
+            return Err(PageNotMapped);
+        } // 1GB page - skip
+
+        let pd = (pdpte & PG_FRAME) as *mut u64;
+        let pde = core::ptr::read(pd.add(pd_idx));
+        if pde & PG_P == 0 {
+            return Err(PageNotMapped);
+        }
+        if pde & PG_PS != 0 {
+            return Err(PageNotMapped);
+        } // 2MB page - skip
+
+        let pt = (pde & PG_FRAME) as *mut u64;
+        let pte_ptr = pt.add(pt_idx);
+        let pte_val = core::ptr::read(pte_ptr);
+        if pte_val & PG_P == 0 {
+            return Err(PageNotMapped);
+        }
+
+        // Clear the write bit (keep everything else)
+        core::ptr::write(pte_ptr, pte_val & !PG_RW);
+        // Flush TLB for this page
+        core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
+    }
+
+    Ok(())
+}
+
 /// Decode a page fault error code into structured information.
 pub fn decode_page_fault(va: u64, err: u32) -> PageFaultInfo {
     PageFaultInfo {
@@ -392,62 +447,6 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
     }
 }
 
-/// Handle a page fault. Routes to the VM server for resolution.
-/// Handle a page fault by forwarding it to the VM server.
-///
-/// Builds a VM_PAGEFAULT message with the fault address and error code,
-/// then calls `do_sync_ipc` with SENDREC to deliver it to the VM server.
-/// The VM server processes the fault (demand paging, COW, etc.) and
-/// replies. Returns true if the fault was handled, false if the process
-/// should receive SIGSEGV.
-///
-/// If the VM server is not available or the fault is from VM_PROC_NR
-/// itself, returns false immediately.
-///
-/// # Safety
-///
-/// Must be called from the page fault interrupt handler with interrupts
-/// disabled. `va` must be the fault address obtained via
-/// `hal::read_fault_addr()`.
-pub unsafe fn handle_page_fault(va: u64, err: u32) -> bool {
-    unsafe {
-        let proc = current_proc();
-        if proc.is_null() {
-            return false;
-        }
-
-        // VM server can't handle its own page faults.
-        if (*proc).p_endpoint == VM_PROC_NR {
-            return false;
-        }
-
-        // Build the VM_PAGEFAULT message.
-        // Layout (64-byte message):
-        //   offset 0:  destination endpoint (i32) — VM_PROC_NR
-        //   offset 4:  source endpoint (i32) — set by kernel
-        //   offset 8:  m_type (i32) — VM_PAGEFAULT
-        //   offset 12: m_source (i32) — faulting process endpoint
-        //   offset 16: VPF_ADDR (u64) — fault address from CR2
-        //   offset 24: VPF_FLAGS (u32) — page fault error code
-        let mut msg = [0u8; MESSAGE_SIZE];
-        let dest = VM_PROC_NR;
-        msg[0..4].copy_from_slice(&dest.to_ne_bytes());
-        let call_type = VM_PAGEFAULT as i32;
-        msg[8..12].copy_from_slice(&call_type.to_ne_bytes());
-        let source = (*proc).p_endpoint;
-        msg[12..16].copy_from_slice(&source.to_ne_bytes());
-        msg[16..24].copy_from_slice(&va.to_ne_bytes());
-        msg[24..28].copy_from_slice(&err.to_ne_bytes());
-
-        // Send the fault to the VM server and wait for a reply.
-        // do_sync_ipc will first try in-kernel dispatch; if no dispatch
-        // handler is registered for VM_PROC_NR, it falls through to full
-        // IPC (mini_send + mini_receive).
-        let r = do_sync_ipc(proc, msg.as_mut_ptr(), SENDREC);
-        r == OK
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -516,13 +515,13 @@ mod tests {
     }
 
     #[test]
-    fn test_page_fault_handler_returns_false() {
-        // Without CPU local storage initialized, this might panic.
-        // In a real environment with an initialized system, it returns false
-        // (no VM server dispatch handler registered).
-        let result = std::panic::catch_unwind(|| unsafe { handle_page_fault(0x1000, PF_WRITE) });
+    fn test_page_fault_handler_returns_minus_one() {
+        // Without a valid current process, handle_page_fault should
+        // return -1 (fatal).
+        let result =
+            std::panic::catch_unwind(|| unsafe { crate::vm::handle_page_fault(0x1000, 0x7) });
         if let Ok(val) = result {
-            assert!(!val)
+            assert_eq!(val, -1) // no current process → fatal
         }
     }
 

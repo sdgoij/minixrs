@@ -9,7 +9,7 @@ use arch_common::ipc::{
     AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg, Message,
 };
 
-use crate::r#priv::priv_addr;
+use crate::r#priv::{priv_addr, priv_find_proc_id};
 use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
@@ -409,6 +409,8 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
 
         // Get the sender's privilege ID (matching C: priv(caller_ptr)->s_id).
         // Look up the source Proc to read its priv structure.
+        // For kernel tasks (negative endpoints), fallback to searching the
+        // privilege table by s_proc_nr (matching C's priv_find_proc behavior).
         let src_id = if is_ok_endpoint(src_e) {
             let src_p = endpoint_slot(src_e);
             let src_ptr = proc_addr(src_p);
@@ -417,13 +419,17 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
                 if !priv_ptr.is_null() {
                     (*priv_ptr).s_id as usize
                 } else {
-                    src_e as usize
+                    // p_priv is null; search privilege table by s_proc_nr.
+                    priv_find_proc_id(src_e).unwrap_or(0)
                 }
             } else {
-                src_e as usize
+                // Proc not found; search privilege table by s_proc_nr.
+                priv_find_proc_id(src_e).unwrap_or(0)
             }
         } else {
-            src_e as usize
+            // Endpoint not valid (e.g., negative kernel task number).
+            // Search privilege table by s_proc_nr.
+            priv_find_proc_id(src_e).unwrap_or(0)
         };
 
         let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
@@ -1320,8 +1326,8 @@ pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
 /// Build a notification message.
 pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *mut Proc) {
     msg.fill(0);
-    // m_type at offset 4 (C: m_ptr->m_type = NOTIFY_MESSAGE)
-    msg[4..8].copy_from_slice(&(-10i32).to_ne_bytes()); // NOTIFY_MESSAGE = -10
+    // m_type at offset 4 = NOTIFY_MESSAGE (0x1000), matching C MINIX.
+    msg[4..8].copy_from_slice(&(arch_common::com::NOTIFY_MESSAGE as i32).to_le_bytes());
     // m_source at offset 0 — set by caller / delivery path
 }
 

@@ -157,7 +157,6 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 
 // Offset constants
 const FORK_ENDPT_OFF: usize = 8;
-#[cfg_attr(not(test), allow(dead_code))]
 const FORK_SLOT_OFF: usize = 12;
 const FORK_FLAGS_OFF: usize = 16;
 
@@ -179,6 +178,7 @@ const TIMES_REPLY_SYSTEM_OFF: usize = 32;
 
 const ABORT_HOW_OFF: usize = 0;
 
+#[allow(dead_code)]
 const DIAGCTL_CODE_OFF: usize = 0;
 #[allow(dead_code)]
 const DIAGCTL_BUF_OFF: usize = 8;
@@ -251,7 +251,7 @@ const MCONTEXT_ENDPT_OFF: usize = 0;
 const MCONTEXT_CTX_PTR_OFF: usize = 8;
 
 const M1_P1_OFF: usize = 24;
-// M1_P2_OFF = 32, M1_P3_OFF = 40, M1_P4_OFF = 48 — reserved for future use
+const M1_P3_OFF: usize = 40;
 
 // Devio message offsets (Phase 8.8)
 //
@@ -436,6 +436,8 @@ pub const VM_PAGING_FREE: i32 = 2;
 pub const VM_PAGING_MAP: i32 = 3;
 pub const VM_PAGING_UNMAP: i32 = 4;
 pub const VM_PAGING_QUERY_PROC: i32 = 5;
+pub const VM_PAGING_COPY: i32 = 6;
+pub const VM_PAGING_FORK: i32 = 7;
 
 // Constants
 
@@ -1284,10 +1286,7 @@ pub unsafe fn kernel_call_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         // Dispatch
         let call_vec = CALL_VEC.get();
         match unsafe { (*call_vec)[idx] } {
-            Some(handler) => {
-                let result = handler(caller, msg);
-                result
-            }
+            Some(handler) => handler(caller, msg),
             None => EBADREQUEST,
         }
     }
@@ -3746,13 +3745,26 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 
 /// Handle SYS_FORK: clone a process table entry.
 ///
+/// Matches C: `.refs/minix-3.3.0/minix/kernel/system/do_fork.c`
+///
+/// Message fields (from `mess_lsys_krn_sys_fork`):
+///   [8..12] = parent endpoint
+///   [12..16] = child slot number
+///   [16..20] = fork flags (PFF_VMINHIBIT)
+///
+/// Reply fields (from `mess_krn_lsys_sys_fork`):
+///   [8..12]  = child endpoint
+///   [16..24] = parent's message delivery virtual address
+///
 /// # Safety
 ///
 /// `msg` must contain valid fork message fields in the correct layout.
 pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
+        let child_slot = msg_read_i32(msg, FORK_SLOT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
+
         if !table::is_ok_endpoint(parent_ep) {
             return crate::ipc::EFAULT;
         }
@@ -3761,24 +3773,10 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             return crate::ipc::EFAULT;
         }
 
-        // Note: original C asserts RTS_RECEIVING and !MF_DELIVERMSG here,
-        // but our IPC SENDREC flow clears RECEIVING before do_fork_handler
-        // runs (the parent completes the SENDREC send phase before blocking
-        // on receive). The child's state is handled correctly regardless.
-
-        // Always search for a free Proc slot (ignore PM's child_slot hint
-        // which may be corrupted by the 56-vs-64 byte message size mismatch).
-        let nr_procs = crate::proc::NR_PROCS as i32;
-        let mut child_slot: i32 = -1;
-        for slot in 0..nr_procs {
-            let rp = proc_addr(slot);
-            if !rp.is_null() && table::is_empty_proc(rp) {
-                child_slot = slot;
-                break;
-            }
-        }
-        if child_slot < 0 {
-            return crate::ipc::EAGAIN;
+        // Use the child slot from the message (matching C do_fork.c).
+        // The caller (VM server) selects the slot; we verify it's empty.
+        if child_slot < 0 || child_slot >= crate::proc::NR_PROCS as i32 {
+            return crate::ipc::EFAULT;
         }
         let rpc = proc_addr(child_slot);
         if rpc.is_null() || !table::is_empty_proc(rpc) {
@@ -3818,11 +3816,6 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_kcall_cycles = 0;
         (*rpc).p_kipc_cycles = 0;
         (*rpc).p_signal_received = 0;
-        // Set p_defer_r1 = 1 so the child can detect it's a fork child
-        // via NR_IS_FORK_CHILD syscall. This is needed because parent and
-        // child share the same page table after fork (no VM isolation yet),
-        // so the child sees the parent's PM_FORK reply in the shared msg buffer.
-        (*rpc).p_defer_r1 = 1;
 
         // Append "*F" to name
         let mut end = (*rpc).p_name.len();
@@ -3838,51 +3831,43 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             (*rpc).p_name[end + 2] = 0u8;
         }
 
-        // The child inherits the parent's core state but must NOT inherit
-        // any flags that would make it non-runnable. Clear ALL flags — the
-        // child should be immediately runnable (the SCHED server is a stub).
-        // The original C sets RTS_NO_QUANTUM and relies on a SCHED server to
-        // clear it; without one, the child would be stuck forever.
-        let parent_flags = (*rpp).p_rts_flags.load(Ordering::Relaxed);
-        let child_flags = parent_flags
-            & !(RtsFlags::RECEIVING.bits()
-                | RtsFlags::SIGNALED.bits()
-                | RtsFlags::SIG_PENDING.bits()
-                | RtsFlags::P_STOP.bits()
-                | RtsFlags::NO_PRIV.bits()
-                | RtsFlags::NO_QUANTUM.bits()
-                | RtsFlags::BOOTINHIBIT.bits()
-                | RtsFlags::PREEMPTED.bits()
-                | RtsFlags::SENDING.bits()
-                | RtsFlags::VMINHIBIT.bits());
-        (*rpc).p_rts_flags.store(child_flags, Ordering::Relaxed);
+        // Phase 2: zero the child's CR3 and set VMINHIBIT (matching C
+        // do_fork.c). The child is NOT enqueued here — VM will:
+        //   1. Create the child's page table
+        //   2. Call SYS_VMCTL(VMCTL_SETADDRSPACE) to set CR3 and clear
+        //      VMINHIBIT, which enqueues the child if now runnable.
+        let clear_rts = RtsFlags::RECEIVING.bits()
+            | RtsFlags::SIGNALED.bits()
+            | RtsFlags::SIG_PENDING.bits()
+            | RtsFlags::P_STOP.bits()
+            | RtsFlags::SENDING.bits()
+            | RtsFlags::NO_QUANTUM.bits();
+        (*rpc).p_rts_flags.fetch_and(!clear_rts, Ordering::Relaxed);
+        // Set defer_r1 so IS_FORK_CHILD (syscall 63) returns 1 for the child.
+        // This lets userland fork() distinguish parent (retval=pid) from child (retval=0).
+        (*rpc).p_defer_r1 = 1;
         (*rpc).p_pending = 0;
 
         crate::sched::reset_proc_accounting(rpc);
 
-        // The child inherits the parent's privilege structure.
-        // The original C sets NO_PRIV for children of SYS_PROC processes,
-        // but that requires a working SCHED server to clear it. Without one,
-        // the child would be stuck non-runnable forever. Skip NO_PRIV.
+        // Zero CR3 — matching C: rpc->p_seg.p_cr3 = 0
+        (*rpc).p_seg.p_cr3 = 0;
+        (*rpc).p_seg.p_cr3_v = core::ptr::null_mut();
 
         msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
         msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
 
+        // Set VMINHIBIT (matching C: PFF_VMINHIBIT flag).
+        // Child does NOT run until VM sets up the page table.
         if fork_flags & PFF_VMINHIBIT != 0 {
             (*rpc)
                 .p_rts_flags
                 .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
         }
 
-        // Enqueue the child so it can be scheduled.
-        // The child inherits the parent's priority (already copied by
-        // copy_nonoverlapping at line 3791).  Match C MINIX: use tail
-        // enqueue, zero initial cpu time (quantum accounting is handled
-        // by the SCHED server or the kernel's default scheduler).
-        if (*rpc).is_runnable() {
-            (*rpc).p_cpu_time_left = 0;
-            crate::sched::enqueue(rpc);
-        }
+        // Do NOT enqueue. VM must first set up the child's page table
+        // and call VMCTL_SETADDRSPACE, which clears VMINHIBIT and
+        // enqueues the child if runnable.
         OK
     }
 }
@@ -4135,16 +4120,34 @@ pub unsafe fn do_schedctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
 /// Handle SYS_DIAGCTL: diagnostic control.
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_diagctl.c`
 ///
+/// Message layout (after kernel overwrites bytes 0-7 with call_nr+src):
+///   [8..12]  = subfunction code (DIAGCTL_CODE_DIAG = 1, etc.)
+///   [16..20] = len (for DIAG)
+///   [24..32] = buf pointer (for DIAG)
+///   [20..24] = endpt (for STACKTRACE)
+///
 /// # Safety
 ///
 /// `caller` and `msg` must be valid.
 pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
-        let code = msg_read_i32(msg, DIAGCTL_CODE_OFF);
+        // Read subfunction code from msg[8..12] (offset 8 = M1_I1_OFF)
+        // because msg[0..4] is overwritten with the kernel call number.
+        let code = msg_read_i32(msg, 8);
         match code as u32 {
             arch_common::com::DIAGCTL_CODE_DIAG => {
-                // Simplified: data_copy_vmcheck not available, skip copy
-                // TODO: add data_copy when VM is available
+                // Write diagnostic data to serial port directly.
+                // buf (offset 24) = pointer to data in caller's address space.
+                // len (offset 16) = number of bytes to write.
+                let buf_ptr = msg_read_u64(msg, 24) as *const u8;
+                let len = msg_read_i32(msg, 16);
+                if !buf_ptr.is_null() && len > 0 {
+                    let max_len = len.min(256) as usize;
+                    for i in 0..max_len {
+                        let byte = core::ptr::read_volatile(buf_ptr.add(i));
+                        crate::hal::serial_write_byte(byte);
+                    }
+                }
                 OK
             }
             arch_common::com::DIAGCTL_CODE_STACKTRACE => {
@@ -4505,6 +4508,47 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                     .fetch_and(!RtsFlags::BOOTINHIBIT.bits(), Ordering::Relaxed);
                 OK
             }
+            arch_common::com::VMCTL_SETADDRSPACE => {
+                // Set a process's page table (CR3) and clear VMINHIBIT.
+                let new_cr3 = msg_read_u64(msg, M1_P1_OFF);
+                if new_cr3 == 0 {
+                    return crate::ipc::EINVAL;
+                }
+                (*p).p_seg.p_cr3 = new_cr3;
+                (*p).p_seg.p_cr3_v = core::ptr::null_mut();
+                // Clear VMINHIBIT with RTS_UNSET semantics: if the process
+                // WAS not runnable and IS now runnable, enqueue it.
+                let old = (*p)
+                    .p_rts_flags
+                    .fetch_and(!RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
+                // was not runnable: old != 0
+                // is now runnable: after clearing, rts_flags == 0
+                if old != 0 && (*p).is_runnable() {
+                    (*p).p_cpu_time_left = 0;
+                    crate::sched::enqueue(p);
+                }
+                OK
+            }
+            arch_common::com::VMCTL_MEMREQ_GET => {
+                // Return the pending page fault info for this process.
+                // The VM server calls this after receiving a notification
+                // to read the fault address and error code.
+                //
+                // Output:
+                //   M1_P1_OFF = fault_addr (u64)
+                //   M1_P3_OFF = error_code (u64)
+                // Returns 0 if fault info is available, -1 if none.
+                let slot = proc_nr as usize;
+                if let Some((fa, ec)) = crate::vm::pf_info_read(slot) {
+                    msg_write_u64(msg, M1_P1_OFF, fa);
+                    msg_write_u64(msg, M1_P3_OFF, ec as u64);
+                    // Clear the stored info so it's consumed exactly once.
+                    crate::vm::pf_info_clear(slot);
+                    OK
+                } else {
+                    -1
+                }
+            }
             arch_common::com::VMCTL_CLEARMAPCACHE => {
                 // No map cache to clear in the Rust port yet
                 OK
@@ -4633,6 +4677,96 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     msg_write_u64(msg, VM_PAGING_VA_OFF, (*rp).p_endpoint as u64);
                     msg_write_u64(msg, VM_PAGING_PA_OFF, cr3);
                 }
+                OK
+            }
+            VM_PAGING_COPY => {
+                // Copy count pages from src_pa to dst_pa.
+                // The kernel runs in ring 0 and can access physical
+                // addresses via the identity map (virtual == physical).
+                let src_pa = msg_read_u64(msg, VM_PAGING_PA_OFF);
+                let dst_pa = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
+                if count <= 0 || count > 256 {
+                    return crate::ipc::EINVAL;
+                }
+                let page_size: u64 = 4096;
+                for i in 0..count as u64 {
+                    let src = (src_pa + i * page_size) as *const u8;
+                    let dst = (dst_pa + i * page_size) as *mut u8;
+                    core::ptr::copy_nonoverlapping(src, dst, page_size as usize);
+                }
+                OK
+            }
+            VM_PAGING_FORK => {
+                // Fork: create a child page table from parent CR3.
+                // Input:  [24] = parent CR3 (u64)
+                // Output: [24] = child CR3 (u64), 0 on failure
+                let parent_cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                if parent_cr3 == 0 {
+                    return crate::ipc::EINVAL;
+                }
+                let child_pml4_pa = match crate::pagetable::alloc_pt_page() {
+                    Ok(pa) => pa,
+                    Err(_) => {
+                        msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                        return crate::ipc::ENOMEM;
+                    }
+                };
+                const USER_ENTRIES: usize = 256;
+                const ALL_ENTRIES: usize = 512;
+                const PG_P: u64 = 0x01;
+                const PG_U: u64 = 0x04;
+                const PG_PS: u64 = 0x80;
+                const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+                const MAP_FLAGS: u64 = 0x02 | 0x04; // RW | USER
+                let parent = parent_cr3 as *const u64;
+                let child = child_pml4_pa as *mut u64;
+                // Copy kernel entries
+                core::ptr::copy_nonoverlapping(
+                    parent.add(USER_ENTRIES),
+                    child.add(USER_ENTRIES),
+                    USER_ENTRIES,
+                );
+                // Walk and map user pages
+                for l4 in 0..USER_ENTRIES {
+                    let e4 = core::ptr::read(parent.add(l4));
+                    if e4 & PG_P == 0 {
+                        continue;
+                    }
+                    let p3 = (e4 & PG_FRAME) as *const u64;
+                    for l3 in 0..ALL_ENTRIES {
+                        let e3 = core::ptr::read(p3.add(l3));
+                        if e3 & PG_P == 0 || e3 & PG_PS != 0 {
+                            continue;
+                        }
+                        let p2 = (e3 & PG_FRAME) as *const u64;
+                        for l2 in 0..ALL_ENTRIES {
+                            let e2 = core::ptr::read(p2.add(l2));
+                            if e2 & PG_P == 0 || e2 & PG_PS != 0 {
+                                continue;
+                            }
+                            let p1 = (e2 & PG_FRAME) as *const u64;
+                            for l1 in 0..ALL_ENTRIES {
+                                let e1 = core::ptr::read(p1.add(l1));
+                                if e1 & PG_P == 0 || e1 & PG_U == 0 {
+                                    continue;
+                                }
+                                let va = ((l4 as u64) << 39)
+                                    | ((l3 as u64) << 30)
+                                    | ((l2 as u64) << 21)
+                                    | ((l1 as u64) << 12);
+                                let pa = e1 & PG_FRAME;
+                                if crate::pagetable::map_page(child_pml4_pa, va, pa, MAP_FLAGS)
+                                    .is_err()
+                                {
+                                    msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                                    return crate::ipc::ENOMEM;
+                                }
+                            }
+                        }
+                    }
+                }
+                msg_write_u64(msg, VM_PAGING_CR3_OFF, child_pml4_pa);
                 OK
             }
             _ => crate::ipc::ENOSYS,

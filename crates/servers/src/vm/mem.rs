@@ -16,7 +16,6 @@ use core::sync::atomic::Ordering;
 use kernel::pagetable;
 use kernel::table::{endpoint_slot, proc_addr};
 
-
 /// Maximum number of endpoints supported by the grant table.
 pub const MAX_ENDPOINTS: usize = 64;
 
@@ -28,7 +27,6 @@ pub const GRANT_PHYS: u32 = 1;
 
 /// Grant type: virtual address space sharing.
 pub const GRANT_VIRT: u32 = 2;
-
 
 /// A single grant entry in the endpoint grant table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +63,6 @@ impl Grant {
     }
 }
 
-
 const GRANT_ZERO: Grant = Grant::zeroed();
 const GRANT_ROW: [Grant; GRANTS_PER_ENDPOINT] = [GRANT_ZERO; GRANTS_PER_ENDPOINT];
 
@@ -85,7 +82,6 @@ impl GrantTablesCell {
 ///
 /// A slot is "free" when its `g_grantor` field is 0.
 pub static GRANT_TABLES: GrantTablesCell = GrantTablesCell::new([GRANT_ROW; MAX_ENDPOINTS]);
-
 
 /// Find a free grant slot for the given endpoint.
 ///
@@ -215,20 +211,13 @@ pub unsafe fn sys_vmctl(ep: i32, cmd: u32, arg: u32) -> i32 {
                 }
             }
             VMCTL_CLEAR_PAGEFAULT => {
-                // Clear the page fault flag on a process, making it
-                // runnable again.
-                let slot = endpoint_slot(ep);
-                let rp = proc_addr(slot);
-                if rp.is_null() {
-                    return -1;
-                }
-                // Clear RTS_PAGEFAULT flag from p_rts_flags.
-                const RTS_PAGEFAULT: u32 = 0x2000;
-                let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
-                (*rp)
-                    .p_rts_flags
-                    .store(old & !RTS_PAGEFAULT, Ordering::Relaxed);
-                0
+                // Forward to the kernel via SYS_VMCTL to avoid the
+                // static-data-duplication issue (Blocker 5 class).
+                // The kernel's do_vmctl_handler clears RTS_PAGEFAULT
+                // on the real Proc struct.
+                minix_rt::sys_vmctl_clear_pagefault(ep)
+                    .map(|()| 0)
+                    .unwrap_or(-1)
             }
             VMCTL_FLUSHTLB => {
                 // Flush the TLB for the given endpoint.
@@ -286,7 +275,6 @@ pub unsafe fn sys_vmctl(ep: i32, cmd: u32, arg: u32) -> i32 {
         }
     }
 }
-
 
 /// Grant physical memory from source to destination endpoint.
 ///
@@ -407,7 +395,6 @@ pub unsafe fn grant_free(physaddr: u64, npages: u32) -> i32 {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_grant_zeroed() {
         let g = Grant::zeroed();
@@ -424,7 +411,6 @@ mod tests {
         assert_eq!(GRANT_PHYS, 1);
         assert_eq!(GRANT_VIRT, 2);
     }
-
 
     #[test]
     fn test_grants_table_initially_zeroed() {
@@ -456,7 +442,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn test_find_free_grant_on_clean_table() {
@@ -495,8 +480,6 @@ mod tests {
         }
     }
 
-
-
     #[test]
     fn test_map_grant_zero_pages_returns_zero() {
         unsafe {
@@ -513,7 +496,6 @@ mod tests {
             assert_eq!(map_grant(1, 2, 0x3000, 4), 0x3000);
         }
     }
-
 
     #[test]
     fn test_sys_vmctl_commands() {
@@ -583,7 +565,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_grant_physmem_valid() {
         unsafe {
@@ -609,7 +590,6 @@ mod tests {
             assert_eq!(grant_physmem(1, 3, 0x2000, 0), -1);
         }
     }
-
 
     #[test]
     fn test_grant_alloc_valid() {
@@ -642,7 +622,6 @@ mod tests {
             assert_eq!(grant_alloc(4, 0x3000, 0), -1);
         }
     }
-
 
     #[test]
     fn test_grant_free_finds_and_clears() {

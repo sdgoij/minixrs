@@ -181,10 +181,8 @@ unsafe fn handle_work() {
     let call_nr = i32::from_le_bytes(fs_m_in[4..8].try_into().unwrap_or([0; 4]));
     (*glob).req_nr = call_nr;
 
-    // Notifications (m_type == -10) are fire-and-forget — no reply needed.
-    // Replying to a notification would send a message back to the sender,
-    // who is NOT waiting for a reply, creating an infinite IPC loop.
-    if call_nr == -10 {
+    // Notifications (m_type == NOTIFY_MESSAGE) are fire-and-forget — no reply needed.
+    if call_nr == arch_common::com::NOTIFY_MESSAGE as i32 {
         // Update req_nr, but skip dispatch and reply.
         return;
     }

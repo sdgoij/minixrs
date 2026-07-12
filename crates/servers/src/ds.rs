@@ -30,7 +30,6 @@ pub const NR_DS_SUBS: usize = 128; // 4 * NR_SYS_PROCS (32)
 /// Maximum key length.
 pub const DS_MAX_KEYLEN: usize = 64;
 
-
 /// Entry is in use.
 pub const DSF_IN_USE: u32 = 0x001;
 /// Overwrite existing entry on publish.
@@ -320,7 +319,6 @@ fn pattern_match(pattern: &[u8], key: &[u8]) -> bool {
         k_len == inner.len() && key[..k_len] == *inner
     }
 }
-
 
 impl DataStore {
     /// Return the key as a byte slice (up to the null terminator).
@@ -845,9 +843,8 @@ pub fn ds_server_main() {
             }
             let src_ep = src as i32;
 
-            // Handle notifications (m_type == -10).
-            // Reply with ENOSYS so the kernel can continue waking other servers.
-            if msg.m_type == -10 {
+            // Handle notifications (m_type == NOTIFY_MESSAGE).
+            if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
                 msg.m_type = ENOSYS;
                 unsafe {
                     minix_rt::syscall2(

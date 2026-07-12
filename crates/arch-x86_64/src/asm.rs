@@ -523,50 +523,62 @@ pub unsafe fn hlt() {
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_page_fault_entry() {
-    // Write 'P' to serial, then write CR2 value as hex, then halt.
+    // Save caller-saved registers, read CR2 and error code, call
+    // handle_page_fault(fault_addr, error_code). If it returns 0
+    // (handled), restore and iretq. Otherwise (fatal), cli + hlt.
+    //
+    // Stack layout on entry (after CPU pushes error code + interrupt frame):
+    //   [RSP+0]  = error code (u64, pushed by CPU for #PF)
+    //   [RSP+8]  = RIP
+    //   [RSP+16] = CS
+    //   [RSP+24] = RFLAGS
+    //   [RSP+32] = RSP (user stack, stack switch via IST1)
+    //   [RSP+40] = SS
+    //
+    // After saving 9 callee-clobbered regs (72 bytes):
+    //   [RSP+72] = error code
     core::arch::naked_asm!(
-        // Save rax, rcx, rdx (clobbered by I/O ops).
+        // Save caller-saved registers (clobbered by the call).
         "push   rax",
         "push   rcx",
         "push   rdx",
-        // Write 'P' (0x50) to COM1 (0x3F8).
-        "mov    dx, 0x3F8",
-        "mov    al, 0x50",
-        "out    dx, al",
-        // Read CR2 into rax, then write 16 hex nibbles to serial.
-        "mov    rax, cr2",
-        // Write CR2 hex. We'll loop over 16 nibbles (64 bits).
-        // Since we're in a naked function, we use inline labels.
-        "mov    rcx, 16",
-        "2:",
-        "rol    rax, 4",
-        "push   rax",
-        "and    al, 0x0F",
-        "cmp    al, 10",
-        "jb     3f",
-        "add    al, 0x57", // 'a' - 10
-        "jmp    4f",
-        "3:",
-        "add    al, 0x30", // '0'
-        "4:",
-        "out    dx, al",
-        "pop    rax",
-        "loop   2b",
-        // Write newline
-        "mov    al, 0x0D",
-        "out    dx, al",
-        "mov    al, 0x0A",
-        "out    dx, al",
-        // Restore and halt
+        "push   rsi",
+        "push   rdi",
+        "push   r8",
+        "push   r9",
+        "push   r10",
+        "push   r11",
+        // Read CR2 into rdi (first arg = fault_addr).
+        "mov    rdi, cr2",
+        // Read error code from stack.
+        // After 9 pushes (9*8 = 72 bytes), error code is at [rsp + 72].
+        "mov    rsi, [rsp + 72]",
+        // Call the Rust handler.
+        "call   handle_page_fault",
+        // Check return value.
+        "test   rax, rax",
+        "jnz    1f",
+        // Handled (return 0): restore registers and iretq.
+        "pop    r11",
+        "pop    r10",
+        "pop    r9",
+        "pop    r8",
+        "pop    rdi",
+        "pop    rsi",
         "pop    rdx",
         "pop    rcx",
         "pop    rax",
+        // Skip past the error code pushed by CPU.
+        "add    rsp, 8",
+        "iretq",
+        // Fatal (return != 0): halt.
+        "1:",
         "cli",
         "hlt",
     );
 }
 
-/// Double fault handler — prints 'D', then halts.
+// Double fault handler — prints 'D', then halts.
 /// Uses IST2 (TSS.IST[2]) for a reliable stack.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -852,7 +864,17 @@ pub mod syscall_abi {
             "lea    rax, [rip + {ptr}]",
             "mov    rax, [rax]",
             "test   rax, rax",
-            "jz     1f",
+            "jnz    2f",
+            // Handler is NULL — print 'N' to COM1
+            "push   rax",
+            "push   rdx",
+            "mov    al, 0x4E",  // 'N'
+            "mov    dx, 0x3F8",
+            "out    dx, al",
+            "pop    rdx",
+            "pop    rax",
+            "jmp    1f",
+            "2:",
             "call   rax",
             "1:",
             "add    rsp, 32",

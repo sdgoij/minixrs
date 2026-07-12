@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use arch_common::com::{
     CDEV_CANCEL, CDEV_CLOSE, CDEV_IOCTL, CDEV_OPEN, CDEV_READ, CDEV_SELECT, CDEV_WRITE,
-    NOTIFY_MESSAGE, TTY_FKEY_CONTROL, TTY_INPUT_EVENT, TTY_INPUT_UP, is_cdev_rq,
+    TTY_FKEY_CONTROL, TTY_INPUT_EVENT, TTY_INPUT_UP, is_cdev_rq,
 };
 use arch_common::endpoint::ANY;
 
@@ -1944,10 +1944,8 @@ pub fn tty_server_main() {
         let src_ep = src as i32;
         let call_type = msg.m_type as u32;
 
-        // Check for kernel notifications.
-        // The kernel sends NOTIFY_MESSAGE (-10) as the message type.
-        let is_notify =
-            msg.m_type == -10 || (msg.m_type as u32).wrapping_sub(NOTIFY_MESSAGE) < 0x100;
+        // Check for kernel notifications (NOTIFY_MESSAGE = 0x1000).
+        let is_notify = (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
         if is_notify {
             // Handle events on all TTY lines.
             for i in 0..NR_CONS + NR_RS_LINES {
@@ -2162,7 +2160,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_line2tty_console_minor() {
         let _lock = TestLockGuard::acquire();
@@ -2251,7 +2248,6 @@ mod tests {
         assert!(tp.is_none());
     }
 
-
     #[test]
     fn test_tty_init_initializes_table() {
         let _lock = TestLockGuard::acquire();
@@ -2282,7 +2278,6 @@ mod tests {
             assert_eq!(tp.tty_index, s as i32);
         }
     }
-
 
     #[test]
     fn test_in_process_raw_mode_basic() {
@@ -2726,7 +2721,6 @@ mod tests {
         assert_eq!(tp.tty_position, 0);
     }
 
-
     #[test]
     fn test_sigchar_flushes_input() {
         let _lock = TestLockGuard::acquire();
@@ -2773,7 +2767,6 @@ mod tests {
         sigchar(&mut tp, SIGINT, false);
         assert_eq!(tp.tty_incount, 10);
     }
-
 
     fn test_devread(tp: &mut Tty, _try_only: i32) -> i32 {
         if tp.tty_incount < 5 {
@@ -2850,7 +2843,6 @@ mod tests {
         assert_eq!(tp.tty_events, 0);
     }
 
-
     /// Echo collector for tests.
     fn echo_collector(tp: &mut Tty, c: i32) {
         // Store in a fake "echo buffer" at position 0 in tty_inbuf
@@ -2911,7 +2903,6 @@ mod tests {
         assert_eq!(tp.tty_inhead, 0);
     }
 
-
     #[test]
     fn test_do_cancel_reading_process() {
         let _lock = TestLockGuard::acquire();
@@ -2962,7 +2953,6 @@ mod tests {
         assert_eq!(r, EDONTREPLY);
     }
 
-
     #[test]
     fn test_do_open_console_line() {
         let _lock = TestLockGuard::acquire();
@@ -3004,7 +2994,6 @@ mod tests {
         assert_eq!(tp.tty_pgrp, 0);
         assert_eq!(tp.tty_openct, 0);
     }
-
 
     fn setup_try(tp: &mut Tty) {
         tp.tty_events = 0;
