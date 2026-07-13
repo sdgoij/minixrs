@@ -1,83 +1,27 @@
-# Build the 64-bit kernel (release) and run in QEMU.
+# Build the 64-bit kernel and run in QEMU.
+# Also supports RISC-V 64 (riscv64gc-unknown-none-elf).
 #
-# QEMU's built-in multiboot loader refuses ELF64 kernels, so we use a small
-# ELF32 trampoline (built by crates/kernel-boot/build.rs) that transitions to
-# 64-bit long mode and jumps to the kernel loaded at 0x200000 via -device loader.
+# Prerequisite: compile jsh once:
+#   rustc tools/jsh.rs -o target/jsh
+#
+# On Unix, `just prepare` handles this automatically.
+# On Windows, run the command above manually.
 
-set shell := ["cmd.exe", "/c"]
+[unix]
+prepare:
+    #!/usr/bin/env sh
+    rustc tools/jsh.rs -o target/jsh
 
-KERNEL     := "target\\x86_64-pc-minix\\release\\kernel-boot"
-KERNEL_BIN := "target\\kernel.bin"
-TRAMP_ELF  := "target\\trampoline.elf"
-TARGET     := "x86_64-pc-minix.json"
-OBJCOPY    := "rust-objcopy"
-RUSTUP     := "rustup"
-QEMU       := "qemu-system-x86_64"
-CLANG      := "clang"
-RUST_LD    := "rust-lld"
-RUST_NM    := "rust-nm"
+set shell := ["target/jsh", "-c"]
 
-# Build the 64-bit kernel binary, then build the trampoline with correct kmain address.
-build:
-    @rustc tools\mkboot.rs --edition 2024 -o target\mkboot.exe 2>nul
-    target\mkboot.exe
+build target="x86":
+    @build {{target}}
 
-# Build + run in QEMU (uses default SeaBIOS)
-run: build
-    {{QEMU}} -nographic -m 256M -no-reboot -kernel {{TRAMP_ELF}} -device loader,file={{KERNEL_BIN}},addr=0x200000
+run target="x86": build
+    @run {{target}}
 
-# Build and run QEMU integration tests.
-# Boots the kernel without userland, runs assertions, exits via isa-debug-exit.
-test-qemu:
-    @rustc tools\mkboot.rs --edition 2024 -o target\mkboot-test.exe 2>nul
-    @target\mkboot-test.exe embed_initramfs,integration-tests
-    @{{QEMU}} -nographic -monitor none -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000
+debug target="x86": build
+    @debug {{target}}
 
-# Build and run boot integration test.
-# Boots kernel with servers (PM, VFS, MFS), verifies VFS mount_root
-# completes and IPC works. Exits via isa-debug-exit.
-# QEMU exit code handling: isa-debug-exit with value 0 -> QEMU exits with 1.
-test-boot:
-    @rustc tools\mkboot.rs --edition 2024 -o target\mkboot.exe 2>nul
-    @target\mkboot.exe embed_initramfs,embed_minixfs,boot-test
-    @{{QEMU}} -nographic -monitor none -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel.bin,addr=0x200000 2>&1 || echo Boot test complete
-
-# Build and run kernel unit tests in QEMU.
-# Builds kernel-tests binary, extracts kmain, rebuilds trampoline, boots.
-test-kernel:
-    set RUSTFLAGS=-C link-arg=-T%CD%\tools\minix-raw.ld && rustup run nightly cargo build --manifest-path crates/kernel-tests/Cargo.toml --target x86_64-pc-minix.json -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release --target-dir target
-    @for /f %i in ('rust-nm -n target\x86_64-pc-minix\release\kernel-tests ^| findstr kmain') do rust-objcopy -O binary target\x86_64-pc-minix\release\kernel-tests target\kernel-test.bin && clang -c crates\kernel-boot\src\trampoline.S -o target\trampoline.o -target i386-pc-none-elf -m32 -DKMAIN=0x%i && rust-lld -flavor gnu -m elf_i386 -T crates\kernel-boot\trampoline.ld -o target\trampoline.elf target\trampoline.o && qemu-system-x86_64 -nographic -m 256M -no-reboot -device isa-debug-exit -kernel target\trampoline.elf -device loader,file=target\kernel-test.bin,addr=0x200000 2>&1 || echo Kernel tests complete
-
-# Build a bootable disk image (minix.img) and run via SeaBIOS
-image: build
-    @rustc tools/mkimg.rs --out-dir target 2>nul || rustc tools/mkimg.rs -o target\\mkimg.exe
-    target\\mkimg.exe
-
-# Run the disk image directly
-run-img: image
-    {{QEMU}} -nographic -serial mon:stdio -m 256M -no-reboot -drive format=raw,file=target\\minix.img
-
-QEMU_RV := "qemu-system-riscv64"
-RV_TARGET := "riscv64gc-unknown-none-elf"
-
-# Build the initramfs with RISC-V userland binaries.
-build-initramfs-riscv64:
-    @rustc tools\mkinitramfs.rs --edition 2024 -o target\mkinitramfs.exe 2>nul
-    target\mkinitramfs.exe riscv64
-    @rustc tools\mkminixfs.rs --edition 2021 -o target\mkminixfs.exe 2>nul
-    -target\mkminixfs.exe riscv64
-
-# Build the RISC-V64 kernel binary (requires nightly for -Zbuild-std).
-# Linker script is set in .cargo/config.toml.
-build-riscv64: build-initramfs-riscv64
-    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target {{RV_TARGET}} --features embed_initramfs,embed_minixfs,riscv64 -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
-
-# Run the RISC-V64 kernel in QEMU (uses OpenSBI built-in).
-run-riscv64: build-riscv64
-    {{QEMU_RV}} -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
-
-# Build and run RISC-V64 integration tests.
-# Runs 24 architecture-independent kernel tests (Phase H), exits via SBI shutdown.
-test-qemu-riscv:
-    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target {{RV_TARGET}} --features riscv64,integration-tests -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release 2>&1
-    {{QEMU_RV}} -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+test-qemu target="x86":
+    @test {{target}}

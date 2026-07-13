@@ -27,22 +27,31 @@ See `.agents/skills/` for domain-specific documentation and
 - Clang (for trampoline bootstrap)
 - [Just](https://just.systems/) (build runner)
 
-### x86_64
+### One-Time Bootstrap
+
+jsh is a custom shell that handles cross-platform path resolution.
+Compile it once before using `just`:
 
 ```bash
-just build          # Build the kernel
-just run            # Build and boot in QEMU
-just test-qemu      # Run QEMU integration tests
-just image          # Build a bootable disk image (minix.img)
-just run-img        # Boot the disk image
+# Windows (manual):
+rustc tools/jsh.rs -o target/jsh
+
+# Linux (shebang, or just run the same command):
+just prepare
 ```
 
-### RISC-V64
+### Usage
 
 ```bash
-just build-riscv64   # Build the RISC-V kernel (requires nightly toolchain)
-just run-riscv64     # Boot in QEMU (uses OpenSBI)
-just test-qemu-riscv # Run integration tests
+# x86_64
+just build                    # Build the kernel
+just run                      # Build and boot in QEMU
+just debug                    # Build and boot with GDB server on :1234
+
+# RISC-V64 (requires nightly)
+just build riscv64            # Build the RISC-V kernel
+just run riscv64              # Boot in QEMU (uses OpenSBI)
+just test-qemu riscv64        # Run integration tests
 ```
 
 ## Project Structure
