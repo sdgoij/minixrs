@@ -889,7 +889,9 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
         let caller_ep = (*src_ptr).p_endpoint;
 
         for i in 0..size {
-            // Read the async table entry from the source's address space
+            // Read the async table entry from the source's address space.
+            // We read with the current CR3 because the kernel is
+            // identity-mapped and can access user addresses directly.
             let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
             let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
 
@@ -912,12 +914,22 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
                 continue;
             }
 
+            // If AMF_NOREPLY is set and the destination has REPLY_PEND,
+            // skip this message — it shouldn't satisfy the RECEIVE part
+            // of a SENDREC. Matching C: try_async() in proc.c line 1401.
+            if (flags & AMF_NOREPLY != 0)
+                && (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits()
+                    != 0
+            {
+                continue;
+            }
+
             // Found a message for dst — deliver it
             let mut result = OK;
 
             if will_receive(dst_ptr, caller_ep) {
                 // Destination is waiting for this message.
-                // Copy only the `msg` field from the async entry (not flags/endpoint/result).
+                // Copy only the `msg` field from the async entry.
                 let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
@@ -1257,7 +1269,10 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
 
             if r == OK
                 && will_receive(dst_ptr, (*caller_ptr).p_endpoint)
-                && (flags & AMF_NOREPLY == 0)
+                && (flags & AMF_NOREPLY == 0
+                    || (*dst_ptr).p_misc_flags.load(Ordering::Relaxed)
+                        & MiscFlags::REPLY_PEND.bits()
+                        == 0)
             {
                 // Destination is waiting for this message — deliver directly.
                 // Copy only the `msg` field from the async entry (not flags/endpoint/result).

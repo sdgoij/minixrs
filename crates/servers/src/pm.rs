@@ -635,6 +635,11 @@ pub unsafe fn do_exit(slot: usize, exit_status: i32) {
 /// Tell a waiting parent that its child has exited.
 /// Sends a reply to the parent's WAITPID call with child PID and status.
 /// Matching C tell_parent() in forkexit.c
+///
+/// # Safety
+///
+/// - `parent` must be < `NR_PROCS`.
+/// - `child` must point to a valid, in-use MProc entry.
 pub unsafe fn tell_parent(parent: usize, child: &MProc) {
     if parent >= NR_PROCS {
         return;
@@ -1177,9 +1182,6 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
             let child_pid = child.mp_pid;
 
             // Step 1: Send VM_FORK to VM server.
-            // VM creates the child's page table and calls SYS_FORK to
-            // create the kernel Proc entry. We send via SENDREC and
-            // receive the child endpoint in the reply.
             let mut vm_msg = [0u8; 64];
             // m_type at bytes 4-7 = VM_FORK (0xC01)
             vm_msg[4..8].copy_from_slice(&(arch_common::com::VM_FORK as i32).to_le_bytes());
@@ -1213,33 +1215,19 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 (*child_ptr).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Send VFS_PM_FORK to VFS (async, matching C tell_vfs).
-            // The C code uses asynsend3(VFS_PROC_NR, &m, AMF_NOREPLY)
-            // to send the VFS_PM_FORK message without blocking.
-            // We use SENDNB which is the non-blocking send equivalent.
-            // PM must NOT block here because the caller (shell) is waiting
-            // for PM's reply — PM's main loop will handle the VFS reply
-            // (VFS_PM_FORK_REPLY) asynchronously.
+            // Step 2: Send VFS_PM_FORK to VFS via asynsend3 (matching C
+            // tell_vfs which uses asynsend3(VFS_PROC_NR, &m, AMF_NOREPLY)).
+            // This queues the message in the kernel's async send table;
+            // the kernel delivers it when VFS does RECEIVE.
             let mut vfs_msg = [0u8; 64];
-            // m_type at bytes 4-7 = VFS_PM_FORK
             vfs_msg[4..8].copy_from_slice(&(arch_common::com::VFS_PM_FORK as i32).to_le_bytes());
-            // VFS_PM_ENDPT (m7_i1) at bytes 8-11 = child endpoint
             vfs_msg[8..12].copy_from_slice(&child_endpoint.to_le_bytes());
-            // VFS_PM_PENDPT (m7_i2) at bytes 12-15 = parent endpoint
             vfs_msg[12..16].copy_from_slice(&parent_endpoint.to_le_bytes());
-            // VFS_PM_CPID (m7_i3) at bytes 16-19 = child PID
             vfs_msg[16..20].copy_from_slice(&child_pid.to_le_bytes());
-            // VFS_PM_REUID (m7_i4) at bytes 20-23 = -1 (unused)
             vfs_msg[20..24].copy_from_slice(&(-1i32).to_le_bytes());
-            // VFS_PM_REGID (m7_i5) at bytes 24-27 = -1 (unused)
             vfs_msg[24..28].copy_from_slice(&(-1i32).to_le_bytes());
-            unsafe {
-                minix_rt::syscall2(
-                    minix_rt::SENDNB_CALL,
-                    arch_common::com::VFS_PROC_NR as u64,
-                    vfs_msg.as_ptr() as u64,
-                )
-            };
+            // AMF_NOREPLY = 0x08 | AMF_VALID = 0x01 → flags = 0x09
+            unsafe { minix_rt::asynsend3(arch_common::com::VFS_PROC_NR, vfs_msg.as_ptr(), 0x09) };
 
             // Step 3: Set VFS_CALL flag on child (matching C tell_vfs).
             unsafe {

@@ -854,6 +854,11 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
 }
 
 /// Initialize the physical page allocator with a memory range [base, base+size).
+///
+/// # Safety
+///
+/// - `base` and `size` must describe a valid, free physical memory region.
+/// - Must be called exactly once, before any allocations are made.
 pub unsafe fn init_phys_alloc(base: u64, size: u64) {
     crate::alloc::init_range(base, size);
 }

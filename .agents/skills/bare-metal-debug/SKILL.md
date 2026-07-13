@@ -153,11 +153,38 @@ The kernel uses `syscall 60` (`SYS_BOOT_COMPLETE`) as a signal from VFS to trigg
 
 ## Debugging General Protection Faults (#GP)
 
-A #GP (vector 13) is the most common crash. The #GP handler in this project outputs `G` to COM1 and halts.
+A #GP (vector 13) is the most common crash. The #GP handler prints `G` followed by a
+structured diagnostic line to COM1, then halts.
+
+### Output Format
+
+The handler outputs a single line:
+```
+G{err} {rip} {cs} {rfl} {tir} {tcs} {trf} {trsp} {tss}\r\n
+```
+
+| Field | Width | Description |
+|-------|-------|-------------|
+| `G` | 1 char | #GP marker |
+| `err` | 4 hex | Error code |
+| `rip` | 16 hex | Instruction pointer at fault |
+| `cs` | 4 hex | Code segment at fault |
+| `rfl` | 8 hex | RFLAGS at fault |
+| `tir` | 16 hex | Timer ISR interrupted RIP |
+| `tcs` | 4 hex | Timer ISR interrupted CS |
+| `trf` | 8 hex | Timer ISR interrupted RFLAGS |
+| `trsp` | 16 hex | Timer ISR interrupted stack pointer |
+| `tss` | 4 hex | Timer ISR interrupted stack segment |
+
+The timer ISR fields are only meaningful when the #GP occurred during the timer
+ISR's iretq. Otherwise they contain stale stack data.
 
 ### Decoding the #GP Error Code
 
-The #GP exception pushes an error code. Modify the handler to dump it. Error code meanings:
+The #GP error code is the first 4 hex digits after `G`.
+Example: `G0010` means error code 0x0010 (GDT index 2 = GUDATA_SEL).
+
+Error code meanings:
 
 - **0x00000000**: Reserved RFLAGS bit set (VM=bit 17, or bits 31:22, 17:12, 16:14 non-zero), OR non-canonical RIP. Most common on iretq to ring 3.
 - **0x000000XX**: Segment selector error. XX is the selector. Check GDT entry at `idx = XX >> 3`.
@@ -299,3 +326,136 @@ qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -d int,cpu_reset 
 - [ ] Test with `int $0x20` (software) vs real IRQ - if one works and the other doesn't, compare privilege level, page table, or stack
 - [ ] Disable the interrupt source (PIT, serial) - if crash disappears, the ISR has a bug
 - [ ] If crash appears during boot before any user process, check IDT, GDT, TSS, syscall MSRs
+
+## LLDB Remote Debugging with QEMU
+
+QEMU can act as a GDB server, allowing LLDB to set breakpoints, step through
+code, and inspect memory/registers — without adding temporary diagnostic prints.
+
+### Quick start
+
+```bash
+# Terminal 1: start QEMU with GDB server, frozen at boot
+just debug
+
+# Terminal 2: connect LLDB
+lldb target/x86_64-pc-minix/release/kernel-boot
+(lldb) gdb-remote 127.0.0.1:1234
+(lldb) b kmain
+(lldb) c
+```
+
+Or connect to an already-running system (no `-S`):
+
+```bash
+# Terminal 1 (after build):
+qemu-system-x86_64 -display none -serial stdio -m 256M -no-reboot -s \
+    -kernel target/trampoline.elf \
+    -device loader,file=target/kernel.bin,addr=0x200000 &
+
+# Terminal 2 (after boot reaches shell):
+lldb target/x86_64-pc-minix/release/kernel-boot
+(lldb) gdb-remote 127.0.0.1:1234
+(lldb) b pm_dispatch
+(lldb) c
+```
+
+### Symbol files
+
+| Component | ELF path |
+|-----------|----------|
+| Kernel    | `target/x86_64-pc-minix/release/kernel-boot` |
+| PM        | `target/x86_64-pc-minix/release/pm` |
+| VFS       | `target/x86_64-pc-minix/release/vfs` |
+| VM        | `target/x86_64-pc-minix/release/vm` |
+| SCHED     | `target/x86_64-pc-minix/release/sched` |
+| TTY       | `target/x86_64-pc-minix/release/tty` |
+| MFS       | `target/x86_64-pc-minix/release/mfs` |
+
+All server ELFs are statically linked and **not stripped** (have symbol tables).
+Since servers all load at virtual address 0x1000000, debug one at a time:
+
+```
+lldb target/x86_64-pc-minix/release/pm
+(lldb) gdb-remote 127.0.0.1:1234
+(lldb) b do_fork
+(lldb) c
+```
+
+### Useful LLDB commands
+
+| Command | What it does |
+|---------|-------------|
+| `gdb-remote localhost:1234` | Connect to QEMU's GDB server |
+| `b kmain` | Set breakpoint at `kmain` function |
+| `b 0x200400` | Set breakpoint at an address |
+| `c` | Continue execution |
+| `n` | Step over (next line) |
+| `s` | Step into |
+| `si` | Step one instruction |
+| `register read` | Dump all CPU registers |
+| `register read rflags` | Read RFLAGS specifically |
+| `x/10gx $rip` | Examine 10 qwords at RIP |
+| `x/10i $rip` | Disassemble 10 instructions at RIP |
+| `memory read -f x -s 8 -c 64 0x200000` | Read 64 qwords as hex |
+| `p/x *(uint64_t*)0x200000` | Evaluate C-like expression (LLDB) |
+| `frame variable` | Show local variables (if DWARF available) |
+| `thread backtrace` | Show stack backtrace |
+| `target create -s symtab <elf>` | Load symbols from an ELF file |
+| `image list` | List loaded shared libraries/symbol files |
+
+### Finding symbol addresses
+
+Since release builds strip DWARF but keep symbol tables, use `rust-nm` to
+find mangled function names for breakpoints:
+
+```bash
+# Kernel symbols
+rust-nm -n target/x86_64-pc-minix/release/kernel-boot | grep do_fork
+
+# Server symbols (separate ELFs)
+rust-nm -n target/x86_64-pc-minix/release/pm | grep handle_fork
+rust-nm -n target/x86_64-pc-minix/release/vm | grep vm_clone
+```
+
+This is required because Rust mangling changes function names. Use the
+mangled name or set a breakpoint by address:
+
+```
+(lldb) b 0x2043e0    # kernel do_fork_handler
+(lldb) b 0x1000170   # PM handle_fork
+(lldb) b 0x1000e20   # VM do_fork
+```
+
+### Debugging practice: check CPU state on hang
+
+When the system hangs, connect LLDB and examine the current state:
+
+```
+(lldb) gdb-remote 127.0.0.1:1234
+(lldb) bt                  # backtrace
+(lldb) register read rip cr2 eflags   # fault address + CPU flags
+(lldb) x/10i $rip          # disassemble at current RIP
+(lldb) memory read -f x -s 8 -c 16 $rsp  # examine stack
+```
+
+- RIP tells you what code was running
+- CR2 gives the fault address (on page fault)
+- eflags bit 9 (IF=0) means interrupts disabled — CPU may be halted
+- Compare RIP against `rust-nm` output to identify the function
+
+### Building with debug info
+
+The default `--release` build strips DWARF info but keeps the symbol table.
+For source-level debugging with line numbers, build the kernel with debug
+symbols:
+
+```
+# Temporarily edit Justfile or run directly:
+cargo build -p kernel-boot --target x86_64-pc-minix.json \
+    -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+```
+
+Without debug info, LLDB can still resolve function names from the symbol
+table and set breakpoints by name, but `frame variable` and line-level
+stepping won't work.

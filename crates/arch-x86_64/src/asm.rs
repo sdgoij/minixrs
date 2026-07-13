@@ -609,46 +609,10 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
 /// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_gpf_entry() {
     core::arch::naked_asm!(
-        // Pop error code into ebx
+        // Pop error code into rbx, print 'G'
         "pop    rbx",
-        // Print 'G'
         "mov    dx, 0x3F8",
         "mov    al, 0x47",
-        "out    dx, al",
-        // Print error code as 4 hex digits
-        "mov    eax, ebx",
-        "shr    al, 4",
-        "cmp    al, 10",
-        "jb     1f",
-        "add    al, 7",
-        "1:",
-        "add    al, '0'",
-        "out    dx, al",
-        "mov    eax, ebx",
-        "and    al, 0x0F",
-        "cmp    al, 10",
-        "jb     2f",
-        "add    al, 7",
-        "2:",
-        "add    al, '0'",
-        "out    dx, al",
-        "mov    eax, ebx",
-        "shr    eax, 12",
-        "and    al, 0x0F",
-        "cmp    al, 10",
-        "jb     3f",
-        "add    al, 7",
-        "3:",
-        "add    al, '0'",
-        "out    dx, al",
-        "mov    eax, ebx",
-        "shr    eax, 20",
-        "and    al, 0x0F",
-        "cmp    al, 10",
-        "jb     4f",
-        "add    al, 7",
-        "4:",
-        "add    al, '0'",
         "out    dx, al",
         // Call Rust handler with error_code (rdi) and frame_ptr (rsi)
         // RSP points to iretq frame: [RIP, CS, RFLAGS, old_RSP, old_SS]
@@ -702,11 +666,14 @@ pub unsafe extern "C" fn rust_gpf_handler(error_code: u64, frame_ptr: *const u64
         };
 
         // Print #GP frame
+        // Error code: 0 = RFLAGS/RIP issue, non-zero = segment selector
+        wr_hex(error_code, 4);
         wr(b' ');
         wr_hex(rip, 16);
         wr(b' ');
         wr_hex(cs, 4);
-        // Print timer frame
+        wr(b' ');
+        wr_hex(rflags, 8);
         wr(b' ');
         wr_hex(tir, 16);
         wr(b' ');

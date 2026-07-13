@@ -527,6 +527,27 @@ unsafe fn sys_ipc_sendnb_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
     unsafe { crate::ipc::do_sync_ipc(caller, msg_ptr, crate::ipc::SENDNB) as i64 }
 }
 
+/// SYS_IPC_SENDA (52) — send asynchronous messages.
+///
+/// args[0] = unused (0)
+/// args[1] = pointer to a message buffer containing table ptr and size
+///
+/// The message buffer layout (set by asynsend3 wrapper):
+///   [8..16] = table pointer (u64)
+///   [16..24] = table size (u64)
+unsafe fn sys_ipc_senda_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let msg_ptr = args[1] as *mut u8;
+    if msg_ptr.is_null() {
+        return -14; // EFAULT
+    }
+    unsafe {
+        crate::ipc::ipc_senda_handler(
+            caller,
+            &mut *msg_ptr.cast::<[u8; crate::proc::MESSAGE_SIZE]>(),
+        ) as i64
+    }
+}
+
 /// SYS_KERNEL_CALL (50) — invoke a kernel call on the SYSTEM task.
 ///
 /// args[0] = call_nr (kernel call number, e.g. 0 for SYS_FORK)
@@ -1266,6 +1287,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(49, sys_ipc_notify_handler); // NOTIFY
         register_basic_syscall(50, sys_kernel_call_handler); // NR_KERNEL_CALL
         register_basic_syscall(51, sys_ipc_sendnb_handler); // SENDNB
+        register_basic_syscall(52, sys_ipc_senda_handler); // SENDA
         register_basic_syscall(58, sys_fork_handler); // NR_FORK
         register_basic_syscall(59, sys_waitpid_handler); // NR_WAITPID
         register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE

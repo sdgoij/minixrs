@@ -494,7 +494,10 @@ pub unsafe fn pt_new_for_fork(child_ep: Endpoint, parent_ep: Endpoint) -> i32 {
         if let Some(vmp) = vmproc_lookup(child_ep) {
             vmp.vm_pml4_phys = child_pml4_pa;
         }
-        pt_bind(child_ep);
+        // NOTE: pt_bind deliberately NOT called here — it would write to
+        // VM's local copy of the kernel's process table (proc_addr resolves
+        // to VM's BSS, not the real kernel). The child's CR3 is properly set
+        // by sys_vmctl_set_addspace in do_fork() after SYS_FORK returns.
         0
     }
 }

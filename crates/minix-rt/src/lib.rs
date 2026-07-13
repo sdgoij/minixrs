@@ -56,6 +56,7 @@ pub const SENDNB_CALL: u64 = 51;
 pub const RECEIVE_CALL: u64 = 47;
 pub const SENDREC_CALL: u64 = 48;
 pub const NOTIFY_CALL: u64 = 49;
+pub const SENDA_CALL: u64 = 52;
 /// Write to file descriptor.
 const NR_WRITE: u64 = 3;
 /// Set program break (heap end).
@@ -557,10 +558,6 @@ pub fn kernel_call(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
 /// On failure, returns an error code.
 pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32) -> Result<(i32, u64), i32> {
     let mut msg = [0u8; 64];
-    // SYS_FORK message layout (mess_lsys_krn_sys_fork):
-    //   [8..12]  = parent endpoint (endpt)
-    //   [12..16] = child slot (slot)
-    //   [16..20] = fork flags (flags)
     msg[8..12].copy_from_slice(&parent_ep.to_le_bytes());
     msg[12..16].copy_from_slice(&child_slot.to_le_bytes());
     msg[16..20].copy_from_slice(&flags.to_le_bytes());
@@ -568,9 +565,6 @@ pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32) -> Result<(i32, u64
     if r != 0 {
         return Err(r);
     }
-    // Reply layout (mess_krn_lsys_sys_fork):
-    //   [8..12]  = child endpoint
-    //   [16..24] = parent's message delivery virtual address
     let child_ep = i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
     let msgaddr = u64::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
     Ok((child_ep, msgaddr))
@@ -696,6 +690,40 @@ pub fn fork() -> i32 {
         return 0;
     }
     i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]))
+}
+
+/// Static async send table for asynsend3 (single entry).
+/// Must be static so the kernel can read it asynchronously.
+static mut ASYNC_TABLE: [u8; 72] = [0u8; 72];
+
+/// Send an asynchronous message (matching C `asynsend3`).
+///
+/// Queues a message for `dst` without blocking. The kernel delivers it
+/// when `dst` does a RECEIVE. If `dst` is already in a RECEIVE wait,
+/// the message is delivered immediately.
+///
+/// `flags` should be `AMF_NOREPLY` (0x08) for fire-and-forget messages.
+/// Uses a static buffer for the async table so the kernel can read it
+/// asynchronously (when the receiver does RECEIVE).
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+/// This function is NOT reentrant (single-entry async table).
+pub unsafe fn asynsend3(dst: i32, msg: *const u8, flags: u32) -> i32 {
+    // Use the module-level static async table.
+    let tabent = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_TABLE) };
+    tabent[0..4].copy_from_slice(&(flags | 0x01).to_le_bytes()); // flags | AMF_VALID
+    tabent[4..8].copy_from_slice(&dst.to_le_bytes());
+    unsafe {
+        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(16), 64);
+    }
+
+    // SENDA syscall (52): msg[8..16] = table ptr, msg[16..24] = size
+    let mut senda_msg = [0u8; 64];
+    senda_msg[8..16].copy_from_slice(&(tabent.as_ptr() as u64).to_le_bytes());
+    senda_msg[16..24].copy_from_slice(&1u64.to_le_bytes()); // 1 entry
+    unsafe { syscall2(SENDA_CALL, 0, senda_msg.as_mut_ptr() as u64) as i32 }
 }
 
 /// Wait for a child process to exit via PM IPC.

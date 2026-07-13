@@ -1338,6 +1338,7 @@ fn do_fork(msg: &mut Message) -> i32 {
         }
     }
 
+    // Handle memory for the message buffer
     // Handle memory for the message buffer — DISABLED: COW handler
     // needs a working page copy mechanism. The C code says this is
     // just an optimization whose return value needn't be checked.
