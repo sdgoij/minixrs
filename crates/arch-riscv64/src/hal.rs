@@ -533,6 +533,18 @@ pub fn bss_end() -> u64 {
 /// Kernel base virtual address (SV39: 0xFFFFFF8000000000+).
 pub const KERNBASE: u64 = 0xFFFFFF8000000000u64;
 
+/// Initialize the physical page allocator with a memory range [base, base+size).
+///
+/// # Safety
+///
+/// - `base` and `size` must describe a valid, free physical memory region.
+/// - Must be called exactly once, before any allocations are made.
+pub unsafe fn init_phys_alloc(base: u64, size: u64) {
+    unsafe {
+        crate::alloc::init_range(base, size);
+    }
+}
+
 /// Initialize per-CPU local storage.
 ///
 /// # Safety
@@ -610,6 +622,24 @@ pub fn hlt() {
 /// Read the timestamp counter.
 pub fn read_tsc() -> u64 {
     crate::clint::read_time()
+}
+
+/// Read the per-CPU TSC context-switch timestamp (RISC-V: uses read_time).
+///
+/// # Safety
+///
+/// CPU locals must be initialized.
+pub unsafe fn read_tsc_ctr_switch() -> u64 {
+    unsafe { crate::cpulocals::tsc_ctr_switch() }
+}
+
+/// Write the per-CPU TSC context-switch timestamp.
+///
+/// # Safety
+///
+/// CPU locals must be initialized.
+pub unsafe fn write_tsc_ctr_switch(val: u64) {
+    unsafe { crate::cpulocals::set_tsc_ctr_switch(val) }
 }
 
 /// Release FPU state for a process (no-op on RISC-V).

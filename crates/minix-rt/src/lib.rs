@@ -1086,25 +1086,47 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // Call brk syscall directly: syscall1(36, new_end)
-    let brk_result: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") 36u64,
-            in("rdi") new_end as u64,
-            lateout("rcx") _,
-            lateout("r11") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
-            lateout("rax") brk_result,
-            options(nostack),
-        );
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Call brk syscall directly: syscall1(36, new_end)
+        let brk_result: i64;
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") 36u64,
+                in("rdi") new_end as u64,
+                lateout("rcx") _,
+                lateout("r11") _,
+                lateout("r12") _,
+                lateout("r13") _,
+                lateout("r14") _,
+                lateout("r15") _,
+                lateout("rax") brk_result,
+                options(nostack),
+            );
+        }
+        if brk_result < 0 {
+            return core::ptr::null_mut();
+        }
     }
-    if brk_result < 0 {
-        return core::ptr::null_mut();
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // RISC-V: brk via ecall with MINIX syscall number (36 = NR_BRK).
+        // The kernel's basic syscall handler uses the same number as x86_64.
+        let brk_result: isize;
+        unsafe {
+            core::arch::asm!(
+                "li a7, 36",
+                "ecall",
+                in("a0") new_end as usize,
+                lateout("a0") brk_result,
+                options(nostack),
+            );
+        }
+        if brk_result < 0 {
+            return core::ptr::null_mut();
+        }
     }
 
     BPTR.store(aligned + size, Ordering::Relaxed);

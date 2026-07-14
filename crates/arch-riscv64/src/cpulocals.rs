@@ -23,8 +23,10 @@ pub struct PerCpuStorage {
     pub kernel_stack_top: u64,
     /// Hart ID (0 for BSP, 1+ for APs).
     pub hart_id: u32,
+    /// TSC context-switch timestamp (used for quantum accounting).
+    pub tsc_ctr_switch: u64,
     /// Padding.
-    _pad1: [u8; 28],
+    _pad1: [u8; 20],
     /// Ready list head pointers (one per priority queue, up to 16).
     pub run_q_head: [*mut core::ffi::c_void; 16],
     /// Ready list tail pointers (one per priority queue, up to 16).
@@ -58,7 +60,8 @@ pub static BOOT_CPU_STORAGE: BootCpuStorageCell = BootCpuStorageCell::new(PerCpu
     current_proc: 0,
     kernel_stack_top: 0,
     hart_id: 0,
-    _pad1: [0u8; 28],
+    tsc_ctr_switch: 0,
+    _pad1: [0u8; 20],
     run_q_head: [core::ptr::null_mut(); 16],
     run_q_tail: [core::ptr::null_mut(); 16],
 });
@@ -151,6 +154,20 @@ pub unsafe fn set_hart_id(id: u32) {
     }
 }
 
+/// Read the TSC context-switch timestamp.
+pub unsafe fn tsc_ctr_switch() -> u64 {
+    let storage = tp_ptr();
+    unsafe { (*storage).tsc_ctr_switch }
+}
+
+/// Write the TSC context-switch timestamp.
+pub unsafe fn set_tsc_ctr_switch(val: u64) {
+    let storage = tp_ptr();
+    unsafe {
+        (*storage).tsc_ctr_switch = val;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +182,7 @@ mod tests {
         unsafe {
             assert_eq!((*BOOT_CPU_STORAGE.get()).current_proc, 0);
             assert_eq!((*BOOT_CPU_STORAGE.get()).hart_id, 0);
+            assert_eq!((*BOOT_CPU_STORAGE.get()).tsc_ctr_switch, 0);
         }
     }
 }

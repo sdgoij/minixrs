@@ -122,8 +122,6 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
             cause::SUP_TIMER_INTR => {
                 unsafe {
                     crate::clint::handle_timer_interrupt();
-                    // Poll for console input via SBI (doesn't need page tables).
-                    // Drain all available bytes.
                     if let Some(cb) = *UART_INPUT_CALLBACK.get() {
                         while let Some(byte) = crate::sbi::console_getchar() {
                             cb(byte);

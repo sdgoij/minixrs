@@ -76,7 +76,18 @@ static ALLOC_START: AtomicU64 = AtomicU64::new(0);
 static ALLOC_END: AtomicU64 = AtomicU64::new(0);
 static ALLOC_INIT: AtomicBool = AtomicBool::new(false);
 
-/// Initialize the allocator from a memory map.
+/// Initialize the allocator with a single memory range [base, base+size).
+///
+/// # Safety
+///
+/// Must be called once during early boot, before any allocation.
+pub unsafe fn init_range(base: u64, size: u64) {
+    ALLOC_START.store(base, Ordering::Relaxed);
+    ALLOC_END.store(base + size, Ordering::Relaxed);
+    ALLOC_INIT.store(true, Ordering::Release);
+}
+
+/// Initialize the allocator from a physical memory map.
 ///
 /// # Safety
 ///

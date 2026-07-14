@@ -478,8 +478,14 @@ pub fn vm_main() {
     // binary has its own copy; the kernel's copy was init'd in kmain.
     #[cfg(target_os = "none")]
     unsafe {
-        // Use the full 4MB-256MB range for page table allocation.
-        kernel::hal::init_phys_alloc(0x400000, 0x0FE00000);
+        // Physical memory range for page table allocation.
+        // On x86_64: RAM is identity-mapped at 0x400000-0x10000000.
+        // On RISC-V (QEMU virt): RAM starts at 0x80000000.
+        #[cfg(target_arch = "x86_64")]
+        let range = (0x400000u64, 0x0FE00000u64);
+        #[cfg(target_arch = "riscv64")]
+        let range = (0x80400000u64, 0x0FA00000u64);
+        kernel::hal::init_phys_alloc(range.0, range.1);
     }
     init_vm();
 

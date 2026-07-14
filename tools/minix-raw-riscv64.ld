@@ -31,12 +31,20 @@ SECTIONS
         }
 
         .initramfs : ALIGN(8) {
-            __initramfs_start = .;
-            KEEP(*(.initramfs))
-            __initramfs_end = .;
-        }
+                    __initramfs_start = .;
+                    KEEP(*(.initramfs))
+                    __initramfs_end = .;
+                }
 
-    /DISCARD/ : {
+            .minixfs : ALIGN(8) {
+                __minixfs_start = .;
+                KEEP(*(.minixfs))
+                __minixfs_end = .;
+            }
+
+            __kernel_end = .;
+
+            /DISCARD/ : {
         *(.eh_frame)
         *(.note .note.*)
         *(.comment)

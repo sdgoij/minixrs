@@ -94,7 +94,11 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     #[cfg(feature = "integration-tests")]
     let (mem_base, mem_size) = (0x80000000u64, 256 * 1024 * 1024);
 
-    let kernel_end = 0x80200000u64 + 0x800000u64; // 8MB kernel estimate
+    // Page-aligned end-of-kernel estimate.
+    // The kernel binary with embedded initramfs and minixfs is ~11 MB.
+    // Pad to 14 MB for safety (avoids overlapping the allocator with the
+    // kernel image).
+    let kernel_end = 0x80200000u64 + 0xE00000u64;
 
     let mut mmap = arch_riscv64::alloc::PhysicalMemoryMap::new();
     if kernel_end < mem_base + mem_size {
@@ -110,6 +114,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         core::arch::asm!("csrw stvec, {addr}", addr = in(reg) trap_vec, options(nomem, nostack));
     }
 
+    // Initialize sscratch to the current stack pointer BEFORE enabling any
+    // interrupts.  The trap handler swaps SP with sscratch on EVERY trap;
+    // if sscratch holds garbage, the first timer interrupt corrupts the stack.
+    unsafe {
+        core::arch::asm!("csrw sscratch, sp", options(nomem, nostack));
+    }
+
     // Initialize per-CPU data (tp register)
     unsafe {
         arch_riscv64::cpulocals::init_cpulocals();
@@ -121,9 +132,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Initialize kernel subsystems
     kernel::init();
 
-    // Initialize the process table
+    // Initialize the process table, kernel call handlers, and IPC syscalls.
+    // These mirror x86_64's boot_init sequence (main.rs).
     unsafe {
         kernel::table::proc_init();
+        // Register only the kernel call handlers needed for boot.
+        // Full system_init() causes a hang on RISC-V (investigation needed).
+        // Register SYS_SETGRANT (34) so VFS can register its grant table.
+        kernel::system::map_call(34, kernel::system::do_setgrant_handler);
+        // Register SYS_VM_PAGING (62) for VM's physical page management.
+        kernel::system::map_call(62, kernel::system::do_vm_paging_handler);
+        // IPC syscalls are already registered by init_basic_syscalls below.
     }
 
     // Initialize basic userspace syscall handlers
@@ -187,7 +206,20 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                     .load(core::sync::atomic::Ordering::Relaxed)
             };
             if rts != 0 {
-                // Current process blocked — pick a new one.
+                // Current process blocked or preempted — pick a new one.
+                // FIRST: save current process's registers from the trap frame
+                // to its p_reg.  The trap frame holds the register state at
+                // the time of the ecall; without saving it, the current
+                // process loses its register state (including syscall args
+                // like a1=buffer pointer) when we overwrite the frame below.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        frame.as_ptr(),
+                        &raw mut (*caller).p_reg as *mut u8,
+                        256,
+                    );
+                }
+
                 if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                     unsafe {
                         // Deliver any pending IPC message to the target
@@ -237,6 +269,15 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                     }
                 } else {
                     // No runnable processes — all blocked on IPC.
+                    // First save current process's registers (same reason as above).
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            frame.as_ptr(),
+                            &raw mut (*caller).p_reg as *mut u8,
+                            256,
+                        );
+                    }
+
                     // Send a notification to PM to kickstart scheduling.
                     let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
                     if !pm_proc.is_null() {

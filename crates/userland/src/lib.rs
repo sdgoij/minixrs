@@ -9,6 +9,7 @@
 #![no_std]
 
 /// Write a byte slice to file descriptor 1 (stdout).
+#[cfg(target_arch = "x86_64")]
 pub fn write_out(s: &[u8]) {
     unsafe {
         let fd: u64 = 1;
@@ -28,7 +29,15 @@ pub fn write_out(s: &[u8]) {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn write_out(s: &[u8]) {
+    unsafe {
+        minix_rt::write(1, s.as_ptr(), s.len());
+    }
+}
+
 pub fn write_err(s: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         let fd: u64 = 2;
         let ptr: u64 = s.as_ptr() as u64;
@@ -44,6 +53,10 @@ pub fn write_err(s: &[u8]) {
             lateout("rax") _,
             options(nostack),
         );
+    }
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        minix_rt::write(2, s.as_ptr(), s.len());
     }
 }
 
