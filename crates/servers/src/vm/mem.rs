@@ -498,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_sys_vmctl_commands() {
         unsafe {
             // Unknown command should return -1

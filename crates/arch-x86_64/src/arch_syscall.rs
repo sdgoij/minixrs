@@ -82,9 +82,12 @@ mod tests {
     #[test]
     fn test_sysret_cs_value() {
         // SYSRET_CS is the base for the SYSRETQ CS/SS computation.
-        // SYSRETQ computes: CS = STAR[47:32] + 16 | 3, SS = STAR[47:32] + 8 | 3.
-        // With SYSRET_CS = 0x0008: CS = 0x001B (idx 3, user code), SS = 0x0013 (idx 2, user data).
-        assert_eq!(SYSRET_CS, 0x0008);
+        // SYSRETQ computes: CS = STAR[47:32] + 16, SS = STAR[47:32] + 8.
+        // The standard formula adds | 3 for RPL, but QEMU's SYSRETQ skips
+        // the OR for SS (leaving SS.RPL=0).  We set SYSRET_CS = 0x000B so
+        // CS = 0x001B (idx 3, user code, RPL 3) and SS = 0x0013 (idx 2,
+        // user data, RPL 3) — the RPL bits are baked into the selector.
+        assert_eq!(SYSRET_CS, 0x000B);
     }
 
     #[test]

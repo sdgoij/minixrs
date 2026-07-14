@@ -640,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_start_and_stop_scheduling() {
         let _g = setup();
         unsafe {
@@ -669,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_start_scheduling_rejects_non_pm_rs() {
         let _g = setup();
         unsafe {
@@ -685,6 +687,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_start_scheduling_inherit() {
         let _g = setup();
         unsafe {
@@ -709,6 +712,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_do_nice() {
         let _g = setup();
         unsafe {
@@ -721,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_do_nice_rejects_non_pm_rs() {
         let _g = setup();
         unsafe {
@@ -730,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_do_nice_out_of_range() {
         let _g = setup();
         unsafe {
@@ -739,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_noquantum_lowers_priority() {
         let _g = setup();
         unsafe {
@@ -752,6 +759,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_noquantum_clamps_at_min() {
         let _g = setup();
         unsafe {
@@ -768,6 +776,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_balance_queues_restores_priority() {
         let _g = setup();
         unsafe {
@@ -786,6 +795,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_stop_scheduling_rejects_non_pm_rs() {
         let _g = setup();
         unsafe {
@@ -824,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires kernel_call (ring 0)"]
     fn test_init_self_parented() {
         let _g = setup();
         unsafe {

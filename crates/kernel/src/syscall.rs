@@ -271,8 +271,10 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 
         // Set SIGNALED + SIG_PENDING so do_getksig_handler finds this process.
         // Matching C cause_sig(): RTS_SET(rp, RTS_SIGNALED | RTS_SIG_PENDING)
-        let sig_flags =
-            crate::proc::RtsFlags::SIGNALED.bits() | crate::proc::RtsFlags::SIG_PENDING.bits();
+        // Also set SLOT_FREE so the slot can be reused after PM reads the exit.
+        let sig_flags = crate::proc::RtsFlags::SIGNALED.bits()
+            | crate::proc::RtsFlags::SIG_PENDING.bits()
+            | crate::proc::RtsFlags::SLOT_FREE.bits();
         (*caller)
             .p_rts_flags
             .fetch_or(sig_flags, core::sync::atomic::Ordering::Relaxed);

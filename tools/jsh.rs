@@ -47,6 +47,9 @@ fn exe_name(name: &str) -> String {
 
 // ── Build steps ───────────────────────────────────────────────────────
 fn build_mkboot() {
+    if mkboot_exe().exists() {
+        return; // Already compiled. Avoid LNK1104 on Windows.
+    }
     println!("[jsh] compile {}", mkboot_src().display());
     let mut cmd = Command::new("rustc");
     cmd.arg(mkboot_src())
@@ -64,6 +67,17 @@ fn run_mkboot() {
         .current_dir(root_dir())
         .status()
         .expect("mkboot failed");
+    assert!(status.success(), "mkboot failed");
+}
+
+fn run_mkboot_with_features(features: &str) {
+    println!("[jsh] run {} features={features}", mkboot_exe().display());
+    let status = Command::new(&mkboot_exe())
+        .arg(features)
+        .current_dir(root_dir())
+        .status()
+        .expect("mkboot failed");
+    // Boot tests exit non-zero on failure; let the caller decide.
     assert!(status.success(), "mkboot failed");
 }
 
@@ -197,6 +211,47 @@ fn cmd_debug(target: &str) {
     run_qemu_x86(true);
 }
 
+fn cmd_test_qemu(_target: &str) {
+    // QEMU integration tests (kernel-level, ring 0).
+    build_mkboot();
+    run_mkboot_with_features("embed_initramfs,integration-tests");
+    run_qemu_x86_test();
+}
+
+fn cmd_test_boot(_target: &str) {
+    // Boot tests (multi-server verification after VFS mount_root).
+    build_mkboot();
+    run_mkboot_with_features("embed_initramfs,embed_minixfs,boot-test");
+    run_qemu_x86_test();
+}
+
+fn run_qemu_x86_test() {
+    let status = Command::new("qemu-system-x86_64")
+        .args([
+            "-nographic",
+            "-m",
+            "256M",
+            "-no-reboot",
+            "-kernel",
+            &trampoline().to_string_lossy(),
+            "-device",
+            &format!(
+                "loader,file={},addr=0x200000",
+                kernel_bin().to_string_lossy()
+            ),
+            "-device",
+            "isa-debug-exit",
+            "-monitor",
+            "none",
+        ])
+        .status()
+        .expect("QEMU failed");
+    let code = status.code().unwrap_or(1);
+    // isa-debug-exit encodes result as (value << 1) | 1.
+    // value=0 (success) => code=1, value=1 (failure) => code=3.
+    std::process::exit(if code == 1 { 0 } else { code });
+}
+
 fn cmd_test(target: &str) {
     match target {
         "riscv64" => {
@@ -242,7 +297,9 @@ fn run_shell_command(cmd_str: &str) {
         "build" => return cmd_build(parts.get(1).copied().unwrap_or("x86")),
         "run" => return cmd_run(parts.get(1).copied().unwrap_or("x86")),
         "debug" => return cmd_debug(parts.get(1).copied().unwrap_or("x86")),
-        "test" | "test-qemu" => return cmd_test(parts.get(1).copied().unwrap_or("x86")),
+        "test-qemu" => return cmd_test_qemu(parts.get(1).copied().unwrap_or("x86")),
+        "test-boot" => return cmd_test_boot(parts.get(1).copied().unwrap_or("x86")),
+        "test" => return cmd_test(parts.get(1).copied().unwrap_or("x86")),
         _ => {}
     }
 
@@ -298,7 +355,9 @@ fn main() {
             "build" => return cmd_build(target),
             "run" => return cmd_run(target),
             "debug" => return cmd_debug(target),
-            "test" | "test-qemu" => return cmd_test(target),
+            "test-qemu" => return cmd_test_qemu(target),
+            "test-boot" => return cmd_test_boot(target),
+            "test" => return cmd_test(target),
             _ => {} // fall through to shell mode
         }
     }

@@ -24,4 +24,10 @@ debug target="x86": build
     @debug {{target}}
 
 test-qemu target="x86":
-    @test {{target}}
+    @test-qemu {{target}}
+
+test-boot target="x86":
+    @test-boot {{target}}
+
+test-kernel target="x86":
+    @test-qemu {{target}}
