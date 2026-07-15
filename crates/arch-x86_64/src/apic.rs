@@ -889,7 +889,7 @@ pub unsafe fn set_nmi_profile_handler(handler: NmiProfileFn) {
 pub unsafe extern "C" fn timer_isr_entry() {
     core::arch::naked_asm!(
         // Save caller-saved registers (scratch registers).
-        // The CPU already pushed SS, RSP, RFLAGS, CS, RIP.
+        // The CPU already pushed SS, RSP, RFLAGS, CS, RIP (5 entries on x86-64).
         "push rax",
         "push rcx",
         "push rdx",
@@ -1022,8 +1022,11 @@ pub unsafe extern "C" fn serial_isr_entry() {
         "pop rcx",
         "pop rax",
 
-        // Return from interrupt — the syscall_entry uses iretq (not sysretq),
-        // so SS is always set correctly (0x0013 with RPL=3).  No fix needed.
+        // Return from interrupt — iretq works for both modes:
+        // User mode: syscall_entry uses iretq (not sysretq), so SS is
+        // always correct (0x0013 with RPL=3).  No QEMU SYSRETQ bug.
+        // Kernel mode: serial ISR has no IST, so frame is 3 values
+        // (24 bytes).  iretq returns to ring 0 without issues.
         "iretq",
         handler = sym SERIAL_ISR_HANDLER,
     )

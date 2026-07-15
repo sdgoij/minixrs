@@ -475,20 +475,29 @@ pub unsafe fn boot_create_restricted_page_table(
     }
 
     // Share kernel mappings from the boot page table.
-    // On x86_64: kernel high mappings are in the top half (indices 256-511).
+    // On x86_64: copy BOTH the lower identity-mapped half (indices 0-255)
+    // and the high-half kernel mappings (indices 256-511). The lower half
+    // is needed so kernel code at 0x200000+ is accessible from ring 0 when
+    // the timer ISR or other interrupt handler fires while CR3 points to
+    // this per-process page table. Without it, the CPU can't fetch handler
+    // code from the IDT's identity-mapped entry address, causing a #PF.
     // On RISC-V SV39: the boot page table identity-maps the full 4GB at
     //   indices 0-3 (1GB huge pages), which covers both kernel code and
-    //   device memory. We copy ALL entries so the kernel remains accessible
-    //   after switching to the per-process page table.
+    //   device memory. We copy ALL entries so the kernel remains accessible.
     let boot_root = boot_cr3_val as *const u64;
     let new_root = pages[0] as *mut u64;
     #[cfg(target_arch = "x86_64")]
-    let copy_range = 256..512;
+    let copy_range = 1..512;
     #[cfg(target_arch = "riscv64")]
-    let copy_range = 0..512;
+    let copy_range = 1..512;
     for i in copy_range {
         let entry = unsafe { core::ptr::read(boot_root.add(i)) };
         if entry != 0 {
+            // Ensure PG_U is set on the top-level entry so that nested
+            // user pages (code, stack, brk) can be accessed from ring 3.
+            // Without PG_U on a PML4 entry, the entire 512GB range it
+            // covers is supervisor-only regardless of lower-level U/S bits.
+            let entry = entry | kernel::pagetable::PG_U;
             unsafe {
                 core::ptr::write(new_root.add(i), entry);
             }

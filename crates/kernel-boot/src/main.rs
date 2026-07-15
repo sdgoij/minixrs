@@ -317,6 +317,14 @@ pub extern "C" fn kmain() -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+                // Set up privilege structure for this boot process.
+                // Without this, p_priv is null, which causes:
+                // - Notifications to be silently dropped (mini_notify checks
+                //   p_priv before setting the pending bit)
+                // - kernel_call_dispatch to UB when dereferencing null for
+                //   the k_call_mask permission check
+                // get_priv allocates a Priv entry with all kernel calls allowed.
+                let _ = kernel::system::get_priv(rp);
                 // Set scheduling parameters matching C MINIX proc_init:
                 // all user-space processes get USER_Q = 7 and USER_QUANTUM = 200ms.
                 // Priority 0 (TASK_Q) is reserved for kernel tasks that run in
@@ -461,7 +469,7 @@ pub extern "C" fn kmain() -> ! {
         // First, swapgs to set up the GS.base/KernelGSbase pair correctly.
         // Initial state: GS.base=0 (boot), KernelGSbase=cpu-local.
         // After swapgs: GS.base=cpu-local, KernelGSbase=0.
-        // restore() also does swapgs; sysretq, producing the final state:
+        // restore() also does swapgs; iretq, producing the final state:
         // GS.base=0 (user), KernelGSbase=cpu-local — matching a normal
         // syscall return.
         unsafe {
@@ -624,11 +632,12 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                 break candidate;
             } else {
                 // No runnable processes — halt CPU until interrupt.
-                // Matching C MINIX: the IDLE task runs hlt when nothing
-                // else is runnable. An interrupt (timer, serial, etc.)
-                // will wake the CPU and potentially make a process
-                // runnable, at which point we retry pick_proc.
-                kernel::hal::hlt();
+                // On QEMU, hlt with IF=0 exits on the next interrupt
+                // (QEMU doesn't check IF for hlt).  The timer ISR kernel
+                // path now uses jmp (not iretq), so no #GP on return.
+                // To keep real hardware compatibility, enable interrupts
+                // before hlt and disable after.
+                core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
                 // Retry after interrupt
                 continue;
             }
@@ -745,6 +754,8 @@ fn init_serial() {
         core::arch::asm!("out dx, al", in("dx") port, in("al") 0x01u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 3, in("al") 0x03u8, options(nomem, nostack));
+        // FIFO trigger at 14 bytes (bits 7-6 = 11). Polling fallback in
+        // read_blocking handles cases with fewer bytes than the trigger.
         core::arch::asm!("out dx, al", in("dx") port + 2, in("al") 0xC7u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 4, in("al") 0x0Bu8, options(nomem, nostack));
     }

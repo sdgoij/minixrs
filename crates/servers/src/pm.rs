@@ -1463,8 +1463,10 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
             // SYS_GETKSIG reply: endpoint at kernel msg[16] = m1i3,
             // exit status at kernel msg[24] = m1i5.
             let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
-            // NONE (31743) is the sentinel for "no more pending"
-            if endpt == -1 || endpt == 0 || endpt == 31743 {
+            // Kernel writes system::NONE (31743, not arch_common::endpoint::NONE)
+            // as the sentinel for "no more pending".  Both -1 and 31743 are checked.
+            // (Use raw 31743 since PM can't import kernel symbols.)
+            if endpt == -1 || endpt == 31743 {
                 break; // NONE sentinel — no more pending
             }
             let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
@@ -1688,13 +1690,7 @@ pub fn pm_server_main() {
             // endpoints (e.g. SYSTEM = -2) that won't pass pm_isokendpt.
             if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
                 // Check for pending process exits via SYS_GETKSIG (kernel call 7).
-                // Limit iterations to prevent infinite loop if signals keep regenerating.
-                let mut sig_count = 0u32;
                 loop {
-                    if sig_count > 50 {
-                        break;
-                    }
-                    sig_count += 1;
                     let mut kmsg = Message {
                         m_source: 0,
                         m_type: 0,
@@ -1705,6 +1701,7 @@ pub fn pm_server_main() {
                         break;
                     }
                     let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
+                    // Kernel writes system::NONE (31743) as sentinel.
                     if endpt == -1 || endpt == 31743 {
                         break;
                     }

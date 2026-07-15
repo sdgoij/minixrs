@@ -109,8 +109,12 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
             return -14; // EFAULT
         }
         // Read one byte (blocking).
+        // Read one byte (blocking).
         let byte = crate::ser_input::read_blocking();
-        unsafe { core::ptr::write(buf, byte) };
+        unsafe {
+            core::ptr::write_volatile(buf, byte);
+            core::arch::asm!("", options(nostack, preserves_flags));
+        }
         1
     } else {
         let mut msg = [0u8; 64];

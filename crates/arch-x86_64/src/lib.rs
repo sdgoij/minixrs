@@ -134,11 +134,11 @@ static BOOT_GDT: BootGdtCell = BootGdtCell::new([
     0x00CFF2000000FFFF, // 2: user data (sel 0x13)
     0x00AFFA000000FFFF, // 3: user code (sel 0x1B)
     0x00CF920000000000, // 4: kernel data (sel 0x23)
-    0,
-    0,
-    0,
-    0,
-    0,
+    0,                  // 5: LDT (unused)
+    0,                  // 6: CPU (unused)
+    0,                  // 7: TSS (filled at runtime)
+    0,                  // 8: user FS (unused)
+    0,                  // 9: user GS (unused)
     0,
     0,
     0,

@@ -504,6 +504,7 @@ pub fn vm_main() {
             };
 
             // Receive a message from any sender.
+            // syscall2 returns the sender's endpoint via write_retval (RAX).
             let src = unsafe {
                 minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
             };
@@ -511,7 +512,6 @@ pub fn vm_main() {
                 continue;
             }
             let src_ep = src as i32;
-            msg.m_source = src_ep;
 
             // Dispatch the call. dispatch_message handles setting msg.m_type
             // to the result and (via ipc_send_stub) sending the reply.

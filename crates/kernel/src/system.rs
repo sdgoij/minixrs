@@ -1276,11 +1276,16 @@ pub unsafe fn kernel_call_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
 
         // Check permission via k_call_mask
         let idx = call_nr as usize;
-        let mask = (*(*caller).p_priv).s_k_call_mask;
-        let chunk = idx / 32;
-        let bit = idx % 32;
-        if chunk >= mask.len() || (mask[chunk] & (1u32 << bit)) == 0 {
-            return ECALLDENIED;
+        // Boot processes may not have a privilege structure (p_priv is null
+        // until RS sets them up via SYS_PRIVCTL). Allow the call through
+        // rather than dereferencing null and reading garbage from page 0.
+        if !(*caller).p_priv.is_null() {
+            let mask = (*(*caller).p_priv).s_k_call_mask;
+            let chunk = idx / 32;
+            let bit = idx % 32;
+            if chunk >= mask.len() || (mask[chunk] & (1u32 << bit)) == 0 {
+                return ECALLDENIED;
+            }
         }
 
         // Dispatch

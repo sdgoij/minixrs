@@ -232,6 +232,109 @@ did NOT fix the crash because the real problem was CS=0x0010, not SS.
 The diagnostic dump showed SS was already correct (0x13) yet the #GP
 persisted — proving the problem was elsewhere in the frame.
 
+### Error Code 0: Reserved RFLAGS / Corrupted TrapFrame
+
+A #GP with **error code 0x00000000** and suspicious RFLAGS (e.g., TF bit 8
+set, or non-zero reserved bits 31:22, 17:12, 16:14) means the CPU found
+a reserved bit set in RFLAGS during iretq or a segment load. But when
+this occurs **inside a server process** (RIP in the 0x1000000-0x200000
+range, CS=0x001B) rather than during iretq, the root cause is often
+**corrupted register state from a CR3-switching kernel call** — not an
+actual RFLAGS problem.
+
+**How it happens (kernel_call CR3 switch corruption):**
+
+```
+1. Server (e.g., VM) calls kernel_call(62, VM_PAGING_FORK)
+2. sys_kernel_call_handler:
+   a. Saves current CR3
+   b. Switches to caller's CR3 (server's page table)
+   c. Copies caller's message buffer into kernel space
+   d. Dispatches the kernel call (e.g., do_vm_paging_handler)
+   e. Checks if caller is still runnable
+   f. If scheduler picks a DIFFERENT process → restore() loads
+      THAT process's p_reg, corrupting the caller's saved state
+   g. Returns with caller's p_reg containing garbage
+3. Server resumes with corrupted registers (e.g., RFLAGS with TF set)
+4. Next instruction after kernel_call triggers #GP with error code 0
+```
+
+**Distinctive signature:**
+
+```
+G0000 0000000001000E2B 001B 010282 ...
+   ^     ^server code^   ^user^ ^TF!^
+   |                      CS    RFLAGS has bit 8
+   error code 0                 (Trap Flag) set
+```
+
+- **RIP** is in the server's code range (0x1000000+)
+- **CS=0x001B** — valid user code segment (no segment selector issue)
+- **Error code=0** — not a CS/SS segment violation
+- **RFLAGS has illegal bit(s) set** — TF (bit 8), or reserved bits
+- The #GP happens on a regular instruction, not iretq
+
+**Root cause chain:**
+
+1. `sys_kernel_call_handler` switches CR3 to the calling server's page
+table so it can read/write the server's message buffer directly
+2. After dispatching, `syscall_handler_c` checks if the caller is still
+runnable. If not (or if the scheduler picks a higher-priority process),
+it calls `pick_proc()` which loads a **different** process's register
+state
+3. The caller's original `p_reg` (saved on kernel stack or in the proc
+table) never gets its return value written back — the kernel context-
+switches away and the caller's registers are left in a partially-
+modified state
+4. On the next timer tick or reschedule, when the caller runs again,
+its register state has garbage bits (especially in RFLAGS), causing
+a #GP on the very first instruction that checks reserved bits
+
+**How to confirm:**
+
+1. Check the RIP against the server ELF symbols:
+   ```
+   rust-nm -n target/x86_64-pc-minix/release/vm | grep -i "1000E2B"
+   ```
+   If RIP is in the server's .text and not near an iretq/sti/cli,
+   the fault is from corrupted registers, not a bad iretq.
+
+2. Add a diagnostic in `sys_kernel_call_handler` to print the
+kernel_call result and the caller's endpoint BEFORE returning:
+   ```rust
+   serial_write_hex16(result);           // kernel call return value
+   serial_write_byte(b' ');
+   serial_write_hex16(caller_endpoint);  // who made the call
+   serial_write_byte(b'\r');
+   serial_write_byte(b'\n');
+   ```
+   If the result is OK (0) but the server still GP-faults, the
+   corruption happens in the scheduler context switch, not in the
+   kernel call dispatch itself.
+
+3. Verify the kernel_call return path writes back to the caller:
+   - In `kernel_call_finish`, check that `copy_nonoverlapping`
+     writes the result to the caller's user-space buffer
+   - In `syscall_handler_c`, confirm that after `kernel_call`
+     dispatches, it continues execution in the **same** process
+     rather than scheduling a different one
+
+**The fix:** Either:
+
+- **A)** Ensure `syscall_handler_c` always returns to the kernel_call
+  caller before allowing a context switch (scheduler transparency)
+- **B)** Save the kernel_call return value in the caller's `p_reg`
+  before any potential context switch, so when the caller is
+  rescheduled, the result is in the right register
+- **C)** In `do_vm_paging_handler` and similar, avoid operations that
+  may block or reschedule while holding a borrowed user-space buffer
+
+**Contrast with error code 0 on iretq:**
+
+If error code 0 happens on an iretq (RIP points to iretq instruction),
+the cause is usually a non-canonical RIP or forbidden RFLAGS value on
+the stack frame, not corrupted registers. See the iretq checklist below.
+
 ### Common #GP Causes on iretq to Ring 3
 
 | Check | Stack Offset | Common Failure |
@@ -256,6 +359,126 @@ After 4 pushes (32 bytes):
 [RSP+64] = old_SS
 ```
 If CS=0x1B (GUDATA_SEL) instead of 0x23 (GUCODE_SEL), SYSRETQ is loading the wrong CS.
+
+### Timer ISR Frame Size Mismatch (3 vs 5 Values)
+
+When an interrupt fires, the CPU pushes a frame whose size depends on whether a
+privilege level switch occurred:
+
+| Mode Transition | Stack Layout (RSP→) | Values | Bytes |
+|-----------------|----------------------|--------|-------|
+| Ring 3 → Ring 0 (user) | RIP, CS, RFLAGS, old_RSP, old_SS | 5 | 40 |
+| Ring 0 → Ring 0 (kernel) | RIP, CS, RFLAGS | 3 | 24 |
+
+**Critical:** The ISR must handle both frame sizes. If the ISR always assumes one
+size, the iretq will consume the wrong stack layout and #GP.
+
+**How the bug manifests:**
+1. Timer fires in user mode → CPU pushes 5 values (40 bytes)
+2. ISR saves regs, calls handler, does EOI
+3. ISR pops only 3 values (RIP, CS, RFLAGS), leaving old_RSP + old_SS (16 bytes) on stack
+4. ISR pushes 3 values back and iretq — the remaining 16 bytes shift everything:
+   - iretq consumes the stale old_RSP as RIP
+   - Consumes old_SS as CS (data segment → #GP with error code = old_SS selector)
+5. **Error code 0x0010**: old_SS = 0x0010 (GUDATA_SEL, a data segment) gets loaded into CS
+
+**The fix — pop all 5, rebuild with hardcoded selectors:**
+
+```asm
+; After restoring all caller-saved registers, RSP points to the iretq frame.
+; Pop all 5 entries regardless of ring level.
+pop    rcx              ; RIP
+pop    rax              ; CS (discard)
+pop    r11              ; RFLAGS
+pop    r10              ; old_RSP
+pop    r9               ; old_SS (discard)
+
+; Check CS.RPL to decide which path
+mov    rdx, rax
+and    rdx, 3           ; CS.RPL
+cmp    rdx, 0
+je     .Lkernel_path
+
+; User path: reconstruct all 5 with correct selectors
+push   0x0013           ; SS = GUDATA_SEL | RPL=3
+push   r10              ; old_RSP
+push   r11              ; RFLAGS
+push   0x001B           ; CS = GUCODE_SEL | RPL=3
+push   rcx              ; RIP
+iretq
+
+.Lkernel_path:
+; Kernel path: push only 3 with hardcoded CS
+push   rcx              ; RIP
+push   0x0008           ; CS = GUCODE_SEL (ring 0)
+push   r11              ; RFLAGS
+iretq
+```
+
+**Why this works:** Both paths consume exactly 40 bytes from the original stack
+frame, then push either 3 or 5 values back. The stack is always balanced.
+
+**Alternative (fragile) approach — patching in-place:**
+
+```asm
+; This approach assumes the frame is already the right size
+mov    qword [rsp+8], 0x001B   ; patch CS
+mov    qword [rsp+32], 0x0013  ; patch SS
+iretq
+```
+
+This fails if the frame size is wrong (extra 16 bytes shift all offsets).
+Always prefer the pop-and-rebuild approach.
+
+**Diagnostic hint:** The #GP handler's extra fields (`tir`, `tcs`, `trf`, `trsp`,
+`tss`) capture the timer ISR's interrupted context. If `tcs` shows a data segment
+(0x0010) or `tss` shows 0x0010, the timer ISR likely pushed/popped the wrong
+number of values.
+
+### QEMU SYSRETQ SS.RPL Corruption
+
+QEMU's SYSRETQ implementation has a bug: it loads the SS segment with the
+selector from STAR MSR (typically 0x0018, GUDATA_SEL with RPL=0) but does **not**
+set the RPL bits to 3. The segment register ends up with SS.RPL = 0 instead of 3.
+
+**Why this breaks iretq:** The iretq instruction validates that SS.RPL == CS.RPL.
+When CS.RPL = 3 (user mode) and SS.RPL = 0 (from corrupted SYSRETQ), the iretq
+triggers a #GP with error code = SS selector (0x0018 or 0x0010 depending on
+layout).
+
+**Effect:** A process that entered ring 3 via SYSRETQ will run correctly in user
+mode (64-bit mode doesn't re-check segment registers on every instruction), but
+the very first interrupt that tries to return via iretq will #GP.
+
+**How to confirm:**
+- Read the timer ISR's interrupted frame (vector 0x20):
+  - After 4 pushes from PUSHAD: `[RSP+32]` through `[RSP+64]`
+  - Or dump SS from the #GP handler's `tss` field
+- If SS = 0x0010 or 0x0018 (RPL=0) while CS = 0x001B (RPL=3), SYSRETQ corrupted SS
+
+**Workaround:** The pop-and-rebuild approach in the timer ISR (above)
+unconditionally pushes 0x0013 for SS, overriding the stale value.
+
+**Note:** This is a QEMU implementation limitation. Real hardware sets SS.RPL
+to match the target CPL (3) on SYSRETQ.
+
+### Kernel-Mode Timer iretq with Kernelized Frame
+
+If the timer ISR runs with interrupts disabled or processes a pending context
+switch, it may attempt iretq while in ring 0. The CPU expects a 3-value frame
+for ring 0→0 returns, but the ISR may have a 5-value frame on the stack (from
+the original user-mode entry).
+
+**The safest pattern:** Always reconstruct based on CS.RPL rather than assuming
+the stack contains the right number of entries. The pop-all-5 approach above
+handles both cases correctly because it decides the push count based on the
+*original* CS value that was on the stack, not the current CPL.
+
+**Additional consideration for IST stacks:** If the timer ISR uses a separate
+IST stack (TSS.IST1), it always gets a full 5-value frame even when interrupting
+ring 0, because the stack switch adds SS and RSP. Check whether `set_handler`
+was called with `ist=0` (no IST → ring 0→0 pushes 3 values) or `ist>0` (IST
+→ always 5 values due to stack switch).
 
 ## Sending Serial Input via stdin
 
@@ -325,7 +548,7 @@ qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -d int,cpu_reset 
 - [ ] Check RFLAGS bits 17:12 and 16:14 are zero
 - [ ] Test with `int $0x20` (software) vs real IRQ - if one works and the other doesn't, compare privilege level, page table, or stack
 - [ ] Disable the interrupt source (PIT, serial) - if crash disappears, the ISR has a bug
-- [ ] If crash appears during boot before any user process, check IDT, GDT, TSS, syscall MSRs
+- If crash appears during boot before any user process, check IDT, GDT, TSS, syscall MSRs
 
 ## LLDB Remote Debugging with QEMU
 
