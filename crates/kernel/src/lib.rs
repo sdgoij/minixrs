@@ -15,6 +15,7 @@ pub mod interrupt;
 pub mod ipc;
 pub mod minixfs;
 pub mod pagetable;
+pub mod panic;
 pub mod r#priv;
 pub mod proc;
 pub mod profile;

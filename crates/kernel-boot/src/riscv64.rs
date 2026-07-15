@@ -124,6 +124,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Initialize per-CPU data (tp register)
     unsafe {
         arch_riscv64::cpulocals::init_cpulocals();
+        kernel::panic::mark_cpulocals_ready();
     }
 
     // Print banner via SBI
@@ -677,10 +678,6 @@ unsafe fn create_boot_page_table() -> Option<u64> {
 /// Panic handler.
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
-        }
-    }
+fn panic(info: &PanicInfo) -> ! {
+    kernel::panic::handle(info)
 }

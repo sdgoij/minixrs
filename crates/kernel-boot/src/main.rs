@@ -135,12 +135,12 @@ pub extern "C" fn kmain() -> ! {
         // Without this, vm_alloc_pages() returns 0 and every fork fails.
         unsafe {
             let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
-            let kernel_end_page = (kernel_end + 0xFFF) / 4096;
+            let kernel_end_page = kernel_end.div_ceil(4096);
             let total_pages = 256 * 1024 * 1024 / 4096;
             if kernel_end_page < total_pages {
                 let free_chunks = [kernel::vm::MemoryChunk {
                     base: kernel_end_page,
-                    size: (total_pages - kernel_end_page) as u64,
+                    size: total_pages - kernel_end_page,
                 }];
                 kernel::vm::mem_init(&free_chunks);
             }
@@ -412,6 +412,7 @@ pub extern "C" fn kmain() -> ! {
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
             arch_x86_64::arch_syscall::setup_syscall_msrs(entry);
             arch_x86_64::cpulocals::init_cpulocals();
+            kernel::panic::mark_cpulocals_ready();
             // Set up TSS and GDT for ring-3 interrupts and exception handlers.
             arch_x86_64::init_tss_for_boot();
 
@@ -766,6 +767,6 @@ fn init_serial() {
 /// Panic handler.
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    hlt_loop()
+fn panic(info: &PanicInfo) -> ! {
+    kernel::panic::handle(info)
 }
