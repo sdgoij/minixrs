@@ -108,8 +108,8 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         if buf.is_null() || count == 0 {
             return -14; // EFAULT
         }
-        // Read one byte (blocking).
-        // Read one byte (blocking).
+        // Read one byte (blocking via read_blocking which polls ser_input,
+        // UART MMIO, and on RISC-V also SBI DBCN console_read).
         let byte = crate::ser_input::read_blocking();
         unsafe {
             core::ptr::write_volatile(buf, byte);
@@ -933,7 +933,8 @@ unsafe fn exec_initramfs_for_target(
             p_reg[0..8].copy_from_slice(&ehdr.e_entry.to_ne_bytes());
             p_reg[16..24].copy_from_slice(&rsp_fb.to_ne_bytes());
             p_reg[80..88].copy_from_slice(&0u64.to_ne_bytes());
-            let sst: u64 = 0x2020;
+            // sstatus = SPIE | FS_INITIAL (match set_initial_regs)
+            let sst: u64 = 0x00000220;
             p_reg[248..256].copy_from_slice(&sst.to_ne_bytes());
             (*rp).p_misc_flags.fetch_or(
                 crate::proc::MiscFlags::CONTEXT_SET.bits(),

@@ -65,7 +65,7 @@ pub unsafe fn init_uart() {
     unsafe {
         uart_write(LCR, 0x03);
     }
-    // Enable FIFOs, clear them, set trigger level to 1
+    // Enable FIFOs, clear them, set trigger level to 1 (FCR: enable=1, rx_clear=1, tx_clear=1)
     unsafe {
         uart_write(FCR, 0x07);
     }

@@ -69,20 +69,17 @@ pub fn try_read() -> Option<u8> {
 }
 
 /// Block until a byte is available, then return it.
-/// First tries the interrupt-driven buffer; if empty, polls the COM1
-/// serial port hardware directly via `hal::serial_read_byte()`.
+/// First tries the interrupt-driven buffer; if empty, polls the UART
+/// hardware directly via HAL.
 #[inline]
 pub fn read_blocking() -> u8 {
     loop {
-        // Try the interrupt-driven buffer first.
         if let Some(byte) = try_read() {
             return byte;
         }
-        // Fallback: poll COM1 directly via HAL.
         if crate::hal::serial_byte_available() {
             return crate::hal::serial_read_byte();
         }
-        // Spin-hint to yield on hypervisors.
         crate::hal::pause();
     }
 }

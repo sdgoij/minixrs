@@ -3874,13 +3874,8 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
         msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
 
+        // Trace: print fork info via serial_write_byte
         // Fork marker
-        #[cfg(target_os = "none")]
-        {
-            crate::hal::serial_write_byte(b'F');
-        }
-
-        // DEBUG: print fork marker
         #[cfg(target_os = "none")]
         {
             crate::hal::serial_write_byte(b'F');
@@ -4544,6 +4539,8 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 OK
             }
             arch_common::com::VMCTL_SETADDRSPACE => {
+                #[cfg(target_os = "none")]
+                crate::hal::serial_write_byte(b'V');
                 // Set a process's page table (CR3) and clear VMINHIBIT.
                 let new_cr3 = msg_read_u64(msg, M1_P1_OFF);
                 if new_cr3 == 0 {
@@ -4740,123 +4737,326 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 if parent_cr3 == 0 {
                     return crate::ipc::EINVAL;
                 }
-                let child_pml4_pa = match crate::pagetable::alloc_pt_page() {
+                let child_cr3 = match crate::pagetable::alloc_pt_page() {
                     Ok(pa) => pa,
                     Err(_) => {
                         msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
                         return crate::ipc::ENOMEM;
                     }
                 };
-                const USER_ENTRIES: usize = 256;
-                const ALL_ENTRIES: usize = 512;
-                const PG_P: u64 = 0x01;
-                const PG_U: u64 = 0x04;
-                const PG_PS: u64 = 0x80;
-                const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
-                const MAP_FLAGS: u64 = 0x02 | 0x04; // RW | USER
 
-                let parent = parent_cr3 as *const u64;
-                let child = child_pml4_pa as *mut u64;
-                // Copy kernel upper-half entries (256-511) from parent.
-                core::ptr::copy_nonoverlapping(
-                    parent.add(USER_ENTRIES),
-                    child.add(USER_ENTRIES),
-                    USER_ENTRIES,
-                );
-                // Walk and map user pages into fresh child page tables.
-                for l4 in 0..USER_ENTRIES {
-                    let e4 = core::ptr::read(parent.add(l4));
-                    if e4 & PG_P == 0 {
-                        continue;
-                    }
-                    let p3 = (e4 & PG_FRAME) as *const u64;
-                    for l3 in 0..ALL_ENTRIES {
-                        let e3 = core::ptr::read(p3.add(l3));
-                        if e3 & PG_P == 0 || e3 & PG_PS != 0 {
-                            continue;
-                        }
-                        let p2 = (e3 & PG_FRAME) as *const u64;
-                        for l2 in 0..ALL_ENTRIES {
-                            let e2 = core::ptr::read(p2.add(l2));
-                            if e2 & PG_P == 0 || e2 & PG_PS != 0 {
-                                continue;
-                            }
-                            let p1 = (e2 & PG_FRAME) as *const u64;
-                            for l1 in 0..ALL_ENTRIES {
-                                let e1 = core::ptr::read(p1.add(l1));
-                                if e1 & PG_P == 0 || e1 & PG_U == 0 {
-                                    continue;
-                                }
-                                let va = ((l4 as u64) << 39)
-                                    | ((l3 as u64) << 30)
-                                    | ((l2 as u64) << 21)
-                                    | ((l1 as u64) << 12);
-                                let src_pa = e1 & PG_FRAME;
-                                // Allocate a new physical page for the child
-                                // — fork must NOT share pages with the parent.
-                                let dst_pa = match crate::pagetable::alloc_pt_page() {
-                                    Ok(pa) => pa,
-                                    Err(_) => {
-                                        msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
-                                        return crate::ipc::ENOMEM;
-                                    }
-                                };
-                                // Copy page content from parent to child
-                                // via kernel identity map (physical == virtual).
-                                core::ptr::copy_nonoverlapping(
-                                    src_pa as *const u8,
-                                    dst_pa as *mut u8,
-                                    4096,
-                                );
-                                if crate::pagetable::map_page(child_pml4_pa, va, dst_pa, MAP_FLAGS)
-                                    .is_err()
-                                {
-                                    msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
-                                    return crate::ipc::ENOMEM;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Copy kernel identity map entries from boot PD into
-                // the child's PD (indices 1-7 for 2MB-16MB range, covering
-                // kernel code at 0x200000). Do NOT overwrite PML4[0]
-                // which was set up by map_page with user mappings.
-                let boot_cr3_val = crate::hal::boot_cr3();
-                if boot_cr3_val != 0 {
-                    let boot_pml4 = boot_cr3_val as *const u64;
-                    let boot_pml4e0 = boot_pml4.read();
-                    if boot_pml4e0 & PG_P != 0 {
-                        let boot_pdpt_pa = boot_pml4e0 & PG_FRAME;
-                        let boot_pdpt = boot_pdpt_pa as *const u64;
-                        let boot_pdpte0 = boot_pdpt.read();
-                        if boot_pdpte0 & PG_P != 0 {
-                            let boot_pd_pa = boot_pdpte0 & PG_FRAME;
-                            let boot_pd = boot_pd_pa as *const u64;
-                            let child_pml4e0 = child.read();
-                            if child_pml4e0 & PG_P != 0 {
-                                let child_pdpt_pa = child_pml4e0 & PG_FRAME;
-                                let child_pdpt = child_pdpt_pa as *const u64;
-                                let child_pdpte0 = child_pdpt.read();
-                                if child_pdpte0 & PG_P != 0 {
-                                    let child_pd_pa = child_pdpte0 & PG_FRAME;
-                                    let child_pd = child_pd_pa as *mut u64;
-                                    for i in 1..8 {
-                                        let boot_pde = boot_pd.add(i).read();
-                                        child_pd.add(i).write(boot_pde);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                #[cfg(target_arch = "x86_64")]
+                let result = vm_paging_fork_x86_64(parent_cr3, child_cr3, msg);
+                #[cfg(target_arch = "riscv64")]
+                let result = vm_paging_fork_sv39(parent_cr3, child_cr3, msg);
 
-                msg_write_u64(msg, VM_PAGING_CR3_OFF, child_pml4_pa);
-                OK
+                if result != 0 {
+                    msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                } else {
+                    msg_write_u64(msg, VM_PAGING_CR3_OFF, child_cr3);
+                }
+                result
             }
             _ => crate::ipc::ENOSYS,
         }
     }
+}
+
+// ── VM_PAGING_FORK helpers ──────────────────────────────────────────────
+
+/// x86_64: deep-copy user pages from parent to child for fork.
+/// Walks 4-level page tables (PML4 → PDPT → PD → PT).
+#[cfg(target_arch = "x86_64")]
+unsafe fn vm_paging_fork_x86_64(
+    parent_cr3: u64,
+    child_cr3: u64,
+    _msg: &mut [u8; MESSAGE_SIZE],
+) -> i32 {
+    const USER_ENTRIES: usize = 256;
+    const ALL_ENTRIES: usize = 512;
+    const PG_P: u64 = 0x01;
+    const PG_U: u64 = 0x04;
+    const PG_PS: u64 = 0x80;
+    const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+    const MAP_FLAGS: u64 = 0x02 | 0x04;
+
+    let parent = parent_cr3 as *const u64;
+    let child = child_cr3 as *mut u64;
+    core::ptr::copy_nonoverlapping(
+        parent.add(USER_ENTRIES),
+        child.add(USER_ENTRIES),
+        USER_ENTRIES,
+    );
+    for l4 in 0..USER_ENTRIES {
+        let e4 = core::ptr::read(parent.add(l4));
+        if e4 & PG_P == 0 {
+            continue;
+        }
+        let p3 = (e4 & PG_FRAME) as *const u64;
+        for l3 in 0..ALL_ENTRIES {
+            let e3 = core::ptr::read(p3.add(l3));
+            if e3 & PG_P == 0 || e3 & PG_PS != 0 {
+                continue;
+            }
+            let p2 = (e3 & PG_FRAME) as *const u64;
+            for l2 in 0..ALL_ENTRIES {
+                let e2 = core::ptr::read(p2.add(l2));
+                if e2 & PG_P == 0 || e2 & PG_PS != 0 {
+                    continue;
+                }
+                let p1 = (e2 & PG_FRAME) as *const u64;
+                for l1 in 0..ALL_ENTRIES {
+                    let e1 = core::ptr::read(p1.add(l1));
+                    if e1 & PG_P == 0 || e1 & PG_U == 0 {
+                        continue;
+                    }
+                    let va = ((l4 as u64) << 39)
+                        | ((l3 as u64) << 30)
+                        | ((l2 as u64) << 21)
+                        | ((l1 as u64) << 12);
+                    let src_pa = e1 & PG_FRAME;
+                    let dst_pa = match crate::pagetable::alloc_pt_page() {
+                        Ok(pa) => pa,
+                        Err(_) => {
+                            return crate::ipc::ENOMEM;
+                        }
+                    };
+                    core::ptr::copy_nonoverlapping(src_pa as *const u8, dst_pa as *mut u8, 4096);
+                    if crate::pagetable::map_page(child_cr3, va, dst_pa, MAP_FLAGS).is_err() {
+                        return crate::ipc::ENOMEM;
+                    }
+                }
+            }
+        }
+    }
+    // Copy kernel identity map entries from boot PD into child PD.
+    let boot_cr3_val = crate::hal::boot_cr3();
+    if boot_cr3_val != 0 {
+        let boot_pml4 = boot_cr3_val as *const u64;
+        let boot_pml4e0 = boot_pml4.read();
+        if boot_pml4e0 & PG_P != 0 {
+            let boot_pdpt_pa = boot_pml4e0 & PG_FRAME;
+            let boot_pdpt = boot_pdpt_pa as *const u64;
+            let boot_pdpte0 = boot_pdpt.read();
+            if boot_pdpte0 & PG_P != 0 {
+                let boot_pd_pa = boot_pdpte0 & PG_FRAME;
+                let boot_pd = boot_pd_pa as *const u64;
+                let child_pml4e0 = child.read();
+                if child_pml4e0 & PG_P != 0 {
+                    let child_pdpt_pa = child_pml4e0 & PG_FRAME;
+                    let child_pdpt = child_pdpt_pa as *const u64;
+                    let child_pdpte0 = child_pdpt.read();
+                    if child_pdpte0 & PG_P != 0 {
+                        let child_pd_pa = child_pdpte0 & PG_FRAME;
+                        let child_pd = child_pd_pa as *mut u64;
+                        for i in 1..8 {
+                            let boot_pde = boot_pd.add(i).read();
+                            child_pd.add(i).write(boot_pde);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    crate::ipc::OK
+}
+
+/// RISC-V SV39: deep-copy user pages from parent to child for fork.
+/// Walks 3-level page tables (L2 → L1 → L0).
+#[cfg(target_arch = "riscv64")]
+unsafe fn vm_paging_fork_sv39(
+    parent_cr3: u64,
+    child_cr3: u64,
+    _msg: &mut [u8; MESSAGE_SIZE],
+) -> i32 {
+    // SV39 page table walk constants
+    const V: u64 = 0x001;
+    const R: u64 = 0x002;
+    const W: u64 = 0x004;
+    const X: u64 = 0x008;
+    const U: u64 = 0x010;
+    const PPN_MASK: u64 = 0x003FFFFFFFFFFC00;
+
+    // Phase 1: Copy the parent's root page table (L2) to the child.
+    // At this point, the child's root entries for branch (non-leaf)
+    // L2 entries still point to the PARENT's L1 page tables. We must
+    // deep-copy all intermediate page table pages (L1, L0) before
+    // creating any leaf mappings, because map_page() follows the
+    // page table hierarchy and would overwrite the PARENT's entries.
+    let parent = parent_cr3 as *const u64;
+    let child_root = child_cr3 as *mut u64;
+    core::ptr::copy_nonoverlapping(parent, child_root, 512);
+
+    // Phase 2: Deep-copy all intermediate L1 and L0 page table pages
+    // to the child. Walk the parent's page tables to find shared pages
+    // and allocate+copy them for the child, updating the child's L2/L1
+    // entries to point to the child's own pages.
+    for l2 in 0..512 {
+        let e2 = core::ptr::read(parent.add(l2));
+        if e2 & V == 0 {
+            continue;
+        }
+        let l2_leaf = (e2 & (R | W | X)) != 0;
+        if !l2_leaf {
+            // L2 is a branch entry — the parent's L1 page is shared.
+            // Allocate a new L1 page for the child, copy parent's L1
+            // entries into it, and update the child's L2 entry.
+            let parent_l1_pa = e2 & PPN_MASK;
+            let parent_l1 = parent_l1_pa as *const u64;
+            let child_l1_pa = match crate::pagetable::alloc_pt_page() {
+                Ok(p) => p,
+                Err(_) => return crate::ipc::ENOMEM,
+            };
+            let child_l1 = child_l1_pa as *mut u64;
+            core::ptr::copy_nonoverlapping(parent_l1, child_l1, 512);
+            // Update child's L2 entry to point to child's L1 page.
+            // Preserve original flags (V=1, R=W=X=0 for branch PTE).
+            let l2_flags = e2 & !PPN_MASK;
+            core::ptr::write(
+                child_root.add(l2),
+                crate::hal::build_pte(child_l1_pa, l2_flags),
+            );
+
+            // Now walk L1 entries in the CHILD's (now private) L1 page
+            // and deep-copy any shared L0 pages.
+            for l1 in 0..512 {
+                let e1 = core::ptr::read(child_l1.add(l1));
+                if e1 & V == 0 {
+                    continue;
+                }
+                let l1_leaf = (e1 & (R | W | X)) != 0;
+                if !l1_leaf {
+                    // L1 is a branch entry — the parent's L0 page is
+                    // shared. Allocate a new L0 page for the child,
+                    // copy parent's L0 entries, update child's L1.
+                    let parent_l0_pa = e1 & PPN_MASK;
+                    let parent_l0 = parent_l0_pa as *const u64;
+                    let child_l0_pa = match crate::pagetable::alloc_pt_page() {
+                        Ok(p) => p,
+                        Err(_) => return crate::ipc::ENOMEM,
+                    };
+                    let child_l0 = child_l0_pa as *mut u64;
+                    core::ptr::copy_nonoverlapping(parent_l0, child_l0, 512);
+                    let l1_flags = e1 & !PPN_MASK;
+                    core::ptr::write(
+                        child_l1.add(l1),
+                        crate::hal::build_pte(child_l0_pa, l1_flags),
+                    );
+                }
+            }
+        }
+    }
+
+    // Phase 3: Now all intermediate page tables belong to the child.
+    // Walk the parent's page table hierarchy and deep-copy each user
+    // leaf page, using map_page() which only touches the child's own
+    // page table pages.
+    for l2 in 0..512 {
+        let e2 = core::ptr::read(parent.add(l2));
+        if e2 & V == 0 {
+            continue;
+        }
+        let l2_leaf = (e2 & (R | W | X)) != 0;
+        if l2_leaf {
+            // 1GB huge page at L2. If user-accessible, split into 4KB
+            // pages and deep-copy each.
+            if e2 & U != 0 {
+                let src_1gb = e2 & PPN_MASK;
+                let user_flags = V | R | W | X | U;
+                let l2_base = (l2 as u64) << 30;
+                for l1_idx in 0..512 {
+                    for l0_idx in 0..512 {
+                        let va = l2_base | ((l1_idx as u64) << 21) | ((l0_idx as u64) << 12);
+                        if va >= 0x40000000 {
+                            break;
+                        } // only 0..1GB
+                        let src_4k =
+                            src_1gb + (l1_idx as u64) * 0x200000 + (l0_idx as u64) * 0x1000;
+                        let dst_4k = match crate::pagetable::alloc_pt_page() {
+                            Ok(p) => p,
+                            Err(_) => return crate::ipc::ENOMEM,
+                        };
+                        core::ptr::copy_nonoverlapping(
+                            src_4k as *const u8,
+                            dst_4k as *mut u8,
+                            4096,
+                        );
+                        if crate::pagetable::map_page(child_cr3, va, dst_4k, user_flags).is_err() {
+                            return crate::ipc::ENOMEM;
+                        }
+                    }
+                }
+            }
+            // Kernel 1GB huge page: already shared via root copy.
+            continue;
+        }
+        // Branch entry — walk L1 entries using the PARENT's L1 page.
+        let parent_l1_pa = e2 & PPN_MASK;
+        let parent_l1 = parent_l1_pa as *const u64;
+        let l2_base = (l2 as u64) << 30;
+
+        for l1 in 0..512 {
+            let e1 = core::ptr::read(parent_l1.add(l1));
+            if e1 & V == 0 {
+                continue;
+            }
+            let l1_leaf = (e1 & (R | W | X)) != 0;
+            let l1_base = l2_base | ((l1 as u64) << 21);
+
+            if l1_leaf {
+                if e1 & U != 0 {
+                    // User 2MB huge page — split into 4KB and deep-copy.
+                    let src_2mb = e1 & PPN_MASK;
+                    let user_flags = (e1 & !PPN_MASK) | V;
+                    for l0 in 0..512 {
+                        let va = l1_base | ((l0 as u64) << 12);
+                        let src_4k = src_2mb + (l0 as u64) * 0x1000;
+                        let dst_4k = match crate::pagetable::alloc_pt_page() {
+                            Ok(p) => p,
+                            Err(_) => return crate::ipc::ENOMEM,
+                        };
+                        core::ptr::copy_nonoverlapping(
+                            src_4k as *const u8,
+                            dst_4k as *mut u8,
+                            4096,
+                        );
+                        if crate::pagetable::map_page(child_cr3, va, dst_4k, user_flags).is_err() {
+                            return crate::ipc::ENOMEM;
+                        }
+                    }
+                }
+                // Kernel 2MB huge page: shared via root copy.
+                continue;
+            }
+            // Branch entry — walk L0 entries using the PARENT's L0 page.
+            let parent_l0_pa = e1 & PPN_MASK;
+            let parent_l0 = parent_l0_pa as *const u64;
+
+            for l0 in 0..512 {
+                let e0 = core::ptr::read(parent_l0.add(l0));
+                if e0 & V == 0 {
+                    continue;
+                }
+                if e0 & U == 0 {
+                    continue;
+                } // kernel page, shared
+
+                // User 4KB page — deep-copy.
+                let src_pa = e0 & PPN_MASK;
+                let dst_pa = match crate::pagetable::alloc_pt_page() {
+                    Ok(p) => p,
+                    Err(_) => return crate::ipc::ENOMEM,
+                };
+                core::ptr::copy_nonoverlapping(src_pa as *const u8, dst_pa as *mut u8, 4096);
+                let va = l1_base | ((l0 as u64) << 12);
+                let page_flags = (e0 & !PPN_MASK) | V;
+                if crate::pagetable::map_page(child_cr3, va, dst_pa, page_flags).is_err() {
+                    return crate::ipc::ENOMEM;
+                }
+            }
+        }
+    }
+    crate::ipc::OK
 }
 
 /// Handle SYS_GETINFO: retrieve system information.

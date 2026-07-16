@@ -484,7 +484,7 @@ pub fn vm_main() {
         #[cfg(target_arch = "x86_64")]
         let range = (0x400000u64, 0x0FE00000u64);
         #[cfg(target_arch = "riscv64")]
-        let range = (0x80400000u64, 0x0FA00000u64);
+        let range = (0x81000000u64, 0x0F000000u64); // 256MB RAM: base=0x81000000, 240MB size
         kernel::hal::init_phys_alloc(range.0, range.1);
     }
     init_vm();

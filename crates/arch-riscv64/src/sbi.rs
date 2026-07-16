@@ -153,6 +153,29 @@ pub fn debug_console_write(buf: &[u8]) -> Option<usize> {
     }
 }
 
+/// Read bytes from the debug console (SBI 1.0 DBCN extension).
+/// Returns the number of bytes read, or None on error.
+pub fn debug_console_read(buf: &mut [u8]) -> Option<usize> {
+    let phys_addr = buf.as_mut_ptr() as u64;
+    let ret = unsafe {
+        sbi_ecall(
+            SBI_EXT_DBCN,
+            SBI_EXT_DBCN_CONSOLE_READ,
+            phys_addr,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    if ret.error != 0 {
+        None
+    } else {
+        Some(ret.value as usize)
+    }
+}
+
 /// Shut down or reboot the system via SBI SRST.
 pub fn system_reset(shutdown: bool) -> ! {
     let reset_type = if shutdown { 0u64 } else { 1u64 }; // 0 = shutdown, 1 = reboot

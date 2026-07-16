@@ -134,12 +134,22 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // These mirror x86_64's boot_init sequence (main.rs).
     unsafe {
         kernel::table::proc_init();
-        // Register only the kernel call handlers needed for boot.
+        // Register kernel call handlers needed for boot.
         // Full system_init() causes a hang on RISC-V (investigation needed).
         // Register SYS_SETGRANT (34) so VFS can register its grant table.
         kernel::system::map_call(34, kernel::system::do_setgrant_handler);
+        // Register SYS_FORK (0) so VM can create child Proc entries.
+        kernel::system::map_call(0, kernel::system::do_fork_handler);
         // Register SYS_VM_PAGING (62) for VM's physical page management.
         kernel::system::map_call(62, kernel::system::do_vm_paging_handler);
+        // Register SYS_GETKSIG (7) so PM can get exit signals.
+        kernel::system::map_call(7, kernel::system::do_getksig_handler);
+        // Register SYS_ENDKSIG (8) so PM can clear signal pending.
+        kernel::system::map_call(8, kernel::system::do_endksig_handler);
+        // Register SYS_VMCTL (43) so VM can set child's CR3 via
+        // VMCTL_SETADDRSPACE, which also clears VMINHIBIT and enqueues
+        // the child process after fork.
+        kernel::system::map_call(43, kernel::system::do_vmctl_handler);
         // IPC syscalls are already registered by init_basic_syscalls below.
     }
 
@@ -210,11 +220,37 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // the time of the ecall; without saving it, the current
                 // process loses its register state (including syscall args
                 // like a1=buffer pointer) when we overwrite the frame below.
+                //
+                // CRITICAL: p_reg layout differs from trap frame layout:
+                //   frame[x]   = RISC-V GPRs x0..x31 (offsets 0..248)
+                //                + sepc (256) + sstatus (264) + scause (272)
+                //   p_reg[x]   = sepc (0), ra (8), ..., sstatus (248)
+                //
+                // We must save each field carefully:
+                // 1. frame[0..256] (GPRs x0..x31) → p_reg[0..256]
+                //    But frame[0..8] = x0 (0), which overwrites p_reg sepc!
+                //    Fixed below.
+                // 2. frame[248..256] = t6 (x31) overwrites p_reg[248..256] (sstatus!)
+                //    Fixed below.
+                // 3. frame[256..264] = sepc → p_reg[0..8]
+                // 4. frame[264..272] = sstatus → p_reg[248..256]
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         frame.as_ptr(),
                         &raw mut (*caller).p_reg as *mut u8,
                         256,
+                    );
+                    // Save sepc from frame[256..264] into p_reg[0..8]
+                    core::ptr::copy_nonoverlapping(
+                        frame.as_ptr().add(256),
+                        &raw mut (*caller).p_reg as *mut u8,
+                        8,
+                    );
+                    // Save sstatus from frame[264..272] into p_reg[248..256]
+                    core::ptr::copy_nonoverlapping(
+                        frame.as_ptr().add(264),
+                        (&raw mut (*caller).p_reg as *mut u8).add(248),
+                        8,
                     );
                 }
 
@@ -268,11 +304,24 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 } else {
                     // No runnable processes — all blocked on IPC.
                     // First save current process's registers (same reason as above).
+                    // Must also save sstatus from frame[264..272] to p_reg[248..256].
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             frame.as_ptr(),
                             &raw mut (*caller).p_reg as *mut u8,
                             256,
+                        );
+                        // Save sepc from frame[256..264] into p_reg[0..8] (x0 slot)
+                        core::ptr::copy_nonoverlapping(
+                            frame.as_ptr().add(256),
+                            &raw mut (*caller).p_reg as *mut u8,
+                            8,
+                        );
+                        // Save sstatus from frame[264..272] into p_reg[248..256]
+                        core::ptr::copy_nonoverlapping(
+                            frame.as_ptr().add(264),
+                            (&raw mut (*caller).p_reg as *mut u8).add(248),
+                            8,
                         );
                     }
 
@@ -330,8 +379,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_post_syscall_hook(riscv_post_syscall);
     }
+    // Register UART input callback: pushes received bytes to ser_input.
     unsafe {
-        // Register UART input callback: pushes received bytes to ser_input.
         unsafe fn uart_input_cb(byte: u8) {
             unsafe { kernel::ser_input::push_byte(byte) };
         }
@@ -384,6 +433,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         unsafe {
             if let Some(boot_pt) = create_boot_page_table() {
                 kernel::hal::write_cr3(boot_pt);
+                // Enable UART FIFO for piped input support
+                unsafe {
+                    arch_riscv64::uart::init_uart();
+                }
                 serial_write("  SV39 enabled\r\n");
             } else {
                 serial_write("  FAILED: boot page table\r\n");
@@ -402,6 +455,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/pm", PM_PROC_NR),           // Process Manager
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
+            ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
             ("/sbin/init", INIT_PROC_NR),       // init
@@ -473,6 +527,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+                // Set up privilege structure for this boot process.
+                // Without this, p_priv is null, which causes:
+                // - Async messages (asynsend3) to be silently dropped
+                // - Notifications to be lost
+                // - Other privilege-dependent features to not work
+                let _ = kernel::system::get_priv(rp);
                 // Set scheduling parameters.
                 core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
                 core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);

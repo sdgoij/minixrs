@@ -211,17 +211,27 @@ unsafe fn set_p_cr3(ep: Endpoint, cr3: u64) {
 ///
 /// `ep` must be a valid endpoint.
 unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
-    unsafe {
-        if !kernel::table::is_ok_endpoint(ep) {
-            return 0;
-        }
-        let slot = endpoint_slot(ep);
-        let rp = proc_addr(slot);
-        if rp.is_null() {
-            return 0;
-        }
-        (*rp).p_seg.p_cr3
+    // SAFETY: caller must ensure ep is valid.
+    if !kernel::table::is_ok_endpoint(ep) {
+        return 0;
     }
+    // Query the real kernel's Proc table via kernel call.
+    // VM's own copy of the kernel crate has a separate BSS with
+    // zeroed Proc entries — we cannot read p_seg.p_cr3 directly.
+    const VMC: i32 = 62;
+    const QP: i32 = 5;
+    const SO: usize = 8;
+    const CO: usize = 12;
+    // PA_OFF = 40 holds CR3 in QUERY_PROC reply
+    const PAO: usize = 40;
+    let mut msg = [0u8; 64];
+    msg[SO..SO + 4].copy_from_slice(&QP.to_le_bytes());
+    msg[CO..CO + 4].copy_from_slice(&endpoint_slot(ep).to_le_bytes());
+    let r = minix_rt::kernel_call(VMC, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    u64::from_le_bytes(msg[PAO..PAO + 8].try_into().unwrap_or([0; 8]))
 }
 
 /// Allocate a new PML4 for a process.
