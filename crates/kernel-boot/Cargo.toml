@@ -2,6 +2,7 @@
 name = "kernel-boot"
 version = "0.1.0"
 description = "Boot binary crate (breaks circular dep between kernel and arch-x86_64)"
+autobins = false
 
 [package.edition]
 workspace = true
@@ -23,6 +24,11 @@ riscv64 = ["kernel/riscv64"]
 [lib]
 name = "kernel_boot"
 path = "src/lib.rs"
+
+[[bin]]
+name = "kernel-boot"
+path = "src/main.rs"
+required-features = []
 
 [dependencies]
 arch-common = { path = "../arch-common" }

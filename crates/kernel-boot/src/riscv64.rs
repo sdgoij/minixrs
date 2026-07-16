@@ -20,10 +20,8 @@ global_asm!(
 .globl _start
 
 _start:
-    # Set up a temporary stack
-    la      sp, _start
-    li      t0, 0x10000
-    add     sp, sp, t0
+    # Set up a stack near the top of RAM (256MB QEMU virt).
+    li      sp, 0x8FC00000
 
     # Clear BSS
     la      t0, __bss_start
@@ -127,7 +125,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         kernel::panic::mark_cpulocals_ready();
     }
 
-    // Print banner via SBI
     serial_write("\r\nHello MINIX/RISC-V!\r\n");
 
     // Initialize kernel subsystems

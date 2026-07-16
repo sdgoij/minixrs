@@ -460,21 +460,11 @@ pub extern "C" fn kmain() -> ! {
 
         serial_write("  scheduler starting...\r\n");
 
-        // Unmask the timer IRQ NOW — all boot processes are initialized
-        // and running in user mode, so the ISR has valid state to work with.
-        unsafe {
-            arch_x86_64::apic::unmask_timer_irq();
-        }
-
         // Jump to the first process via restore().
-        // First, swapgs to set up the GS.base/KernelGSbase pair correctly.
-        // Initial state: GS.base=0 (boot), KernelGSbase=cpu-local.
-        // After swapgs: GS.base=cpu-local, KernelGSbase=0.
-        // restore() also does swapgs; iretq, producing the final state:
-        // GS.base=0 (user), KernelGSbase=cpu-local — matching a normal
-        // syscall return.
+        // The timer IRQ is masked at the START of restore() and unmasked
+        // right before iretq, ensuring the entire swapgs → iretq sequence
+        // is covered. The timer can only fire in user mode after iretq.
         unsafe {
-            core::arch::asm!("swapgs", options(nomem, nostack));
             arch_x86_64::asm::restore(first_proc as *const u8);
         }
     }

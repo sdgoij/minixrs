@@ -484,22 +484,27 @@ pub unsafe fn boot_create_restricted_page_table(
     // On RISC-V SV39: the boot page table identity-maps the full 4GB at
     //   indices 0-3 (1GB huge pages), which covers both kernel code and
     //   device memory. We copy ALL entries so the kernel remains accessible.
+    //   Index 0 (0x00000000-0x3FFFFFFF) covers UART, CLINT, PLIC MMIO
+    //   regions needed by kernel trap handlers under per-process page tables.
     let boot_root = boot_cr3_val as *const u64;
     let new_root = pages[0] as *mut u64;
     #[cfg(target_arch = "x86_64")]
     let copy_range = 1..512;
     #[cfg(target_arch = "riscv64")]
-    let copy_range = 1..512;
+    let copy_range = 0..512;
     for i in copy_range {
         let entry = unsafe { core::ptr::read(boot_root.add(i)) };
         if entry != 0 {
-            // Ensure PG_U is set on the top-level entry so that nested
-            // user pages (code, stack, brk) can be accessed from ring 3.
-            // Without PG_U on a PML4 entry, the entire 512GB range it
-            // covers is supervisor-only regardless of lower-level U/S bits.
-            let entry = entry | kernel::pagetable::PG_U;
+            // x86_64: need PG_U at PML4 level for nested user pages.
+            // RISC-V: must NOT add PG_U — kernel page tables with U=1
+            // are inaccessible from S-mode (sstatus.SUM=0 by default).
+            // map_page already adds PG_U to individual user pages.
+            #[cfg(target_arch = "x86_64")]
+            let pte = entry | kernel::pagetable::PG_U;
+            #[cfg(not(target_arch = "x86_64"))]
+            let pte = entry;
             unsafe {
-                core::ptr::write(new_root.add(i), entry);
+                core::ptr::write(new_root.add(i), pte);
             }
         }
     }

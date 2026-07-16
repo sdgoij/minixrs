@@ -175,33 +175,43 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     core::arch::asm!("csrr {v}, stval", v = out(reg) stval, options(nomem, nostack))
                 };
                 let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
-                // Use UART MMIO for diagnostics
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'!');
+                // Use SBI console for diagnostics (no page table dependency)
+                unsafe fn sbi_putc(c: u8) {
+                    unsafe {
+                        core::arch::asm!(
+                            "ecall",
+                            in("a7") 1u64,   // SBI_CONSOLE_PUTCHAR
+                            in("a6") 0u64,
+                            in("a0") c as u64,
+                            in("a1") 0u64,
+                            in("a2") 0u64,
+                            options(nomem, nostack),
+                        );
+                    }
                 }
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'P');
+                unsafe fn sbi_puts(s: &str) {
+                    for &b in s.as_bytes() {
+                        unsafe {
+                            sbi_putc(b);
+                        }
+                    }
                 }
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'F');
-                }
-                unsafe {
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b' ');
-                }
-                // Print stval and sepc as hex via UART MMIO
-                unsafe {
+                unsafe fn print_hex(val: u64) {
                     let hex = b"0123456789abcdef";
                     for i in (0..16).rev() {
-                        let nibble = ((stval >> (i * 4)) & 0xF) as usize;
-                        core::ptr::write_volatile(0x10000000usize as *mut u8, hex[nibble]);
+                        let nibble = ((val >> (i * 4)) & 0xF) as usize;
+                        unsafe {
+                            sbi_putc(hex[nibble]);
+                        }
                     }
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b' ');
-                    for i in (0..16).rev() {
-                        let nibble = ((sepc >> (i * 4)) & 0xF) as usize;
-                        core::ptr::write_volatile(0x10000000usize as *mut u8, hex[nibble]);
-                    }
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'\r');
-                    core::ptr::write_volatile(0x10000000usize as *mut u8, b'\n');
+                }
+                unsafe {
+                    sbi_puts("!PF ");
+                    print_hex(stval);
+                    sbi_putc(b' ');
+                    print_hex(sepc);
+                    sbi_putc(b'\r');
+                    sbi_putc(b'\n');
                 }
                 loop {
                     unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }

@@ -295,6 +295,7 @@ pub struct PageFaultInfo {
 /// Clear the write (RW) bit in a leaf PTE for a given CR3 and VA.
 /// This makes the page read-only for COW.
 /// Returns Ok if the PTE was updated, Err if the page is not mapped.
+#[cfg(target_arch = "x86_64")]
 pub fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
     let pml4_idx = pml4_index(va);
     let pdpt_idx = pdpt_index(va);
@@ -340,6 +341,11 @@ pub fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
     }
 
     Ok(())
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn clear_rw(_cr3: u64, _va: u64) -> Result<(), PageNotMapped> {
+    Err(PageNotMapped)
 }
 
 /// Decode a page fault error code into structured information.

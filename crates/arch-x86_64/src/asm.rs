@@ -806,8 +806,13 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         // timer ISR's iretq to #GP (SS.RPL=0 vs CPL=3).
         //
         // Save proc_ptr in r15, load CR3, then build iretq frame
+
         // from p_reg and load all user registers.
         "mov    r15, rdi",
+        // Mask IRQ 0 (PIT timer) — covers the entire swapgs → iretq window.
+        "in     al, 0x21",
+        "or     al, 0x01",
+        "out    0x21, al",
         // Load CR3 from p_seg.p_cr3 at offset 256.
         "mov    rdi, [r15 + 256]",
         "mov    cr3, rdi",
@@ -833,6 +838,11 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "mov    r14, [r15 + 96]",
         "mov    r15, [r15 + 104]",
         "swapgs",
+        // Unmask IRQ 0 right before iretq.
+        // After swapgs, GS.base points to kernel cpulocals.
+        "in     al, 0x21",
+        "and    al, 0xfe",
+        "out    0x21, al",
         "iretq",
     );
 }
