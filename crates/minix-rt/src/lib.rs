@@ -716,7 +716,7 @@ pub unsafe fn asynsend3(dst: i32, msg: *const u8, flags: u32) -> i32 {
     tabent[0..4].copy_from_slice(&(flags | 0x01).to_le_bytes()); // flags | AMF_VALID
     tabent[4..8].copy_from_slice(&dst.to_le_bytes());
     unsafe {
-        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(16), 64);
+        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(12), 64);
     }
 
     // SENDA syscall (52): msg[8..16] = table ptr, msg[16..24] = size

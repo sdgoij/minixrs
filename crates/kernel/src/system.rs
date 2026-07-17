@@ -3781,6 +3781,18 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             return crate::ipc::EFAULT;
         }
 
+        // C: assert(!(rpp->p_misc_flags & MF_DELIVERMSG))
+        if (*rpp).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::DELIVERMSG.bits() != 0 {
+            return crate::ipc::EINVAL;
+        }
+
+        // C: if(!RTS_ISSET(rpp, RTS_RECEIVING)) { return EINVAL; }
+        // Parent must be in RECEIVE mode (SENDREC from usermode fork()).
+        if (*rpp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::RECEIVING.bits() == 0 {
+            crate::hal::serial_write_byte(b'r');
+            return crate::ipc::EINVAL;
+        }
+
         // Use the child slot from the message (matching C do_fork.c).
         // The caller (VM server) selects the slot; we verify it's empty.
         if child_slot < 0 || child_slot >= crate::proc::NR_PROCS as i32 {
@@ -3791,49 +3803,49 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             return crate::ipc::EFAULT;
         }
 
+        // C: save_fpu(rpp) — save parent FPU state before struct copy
+        // Skipped: FPU save requires architecture-specific code
+
         let mut new_gen = table::endpoint_gen((*rpc).p_endpoint) + 1;
         if new_gen >= table::EP_MAX_GENERATION {
             new_gen = 1;
         }
 
+        // C: *rpc = *rpp — copy parent Proc struct to child
         core::ptr::copy_nonoverlapping(rpp, rpc, 1);
+
+        // C: rpc->p_nr = slot (obliterated by copy, restore it)
         (*rpc).p_nr = child_slot;
         (*rpc).p_endpoint = table::make_endpoint(new_gen, child_slot);
+        // C: rpc->p_reg.retreg = 0 (child sees pid=0)
         crate::hal::write_retval(&mut (*rpc).p_reg, 0);
+        // C: rpc->p_user_time = 0; rpc->p_sys_time = 0;
         (*rpc).p_user_time = 0;
         (*rpc).p_sys_time = 0;
-        // Clear misc flags that should not be inherited by the child.
-        // REPLY_PEND: parent was in SENDREC waiting for PM's reply.
-        // VIRT_TIMER / PROF_TIMER / SC_TRACE / SPROF_SEEN / STEP:
-        //   per-process profiling/tracing state should start fresh.
-        let clear_mf = (MiscFlags::REPLY_PEND
-            | MiscFlags::VIRT_TIMER
+        // C: rpc->p_misc_flags &= ~(MF_VIRT_TIMER | MF_PROF_TIMER | MF_SC_TRACE | MF_SPROF_SEEN | MF_STEP)
+        let clear_mf = (MiscFlags::VIRT_TIMER
             | MiscFlags::PROF_TIMER
             | MiscFlags::SC_TRACE
             | MiscFlags::SPROF_SEEN
             | MiscFlags::STEP)
             .bits();
-        (*rpc).p_misc_flags.store(
-            (*rpp).p_misc_flags.load(Ordering::Relaxed) & !clear_mf,
-            Ordering::Relaxed,
-        );
+        let old_mf = (*rpc).p_misc_flags.load(Ordering::Relaxed);
+        (*rpc)
+            .p_misc_flags
+            .store(old_mf & !clear_mf, Ordering::Relaxed);
+        // C: rpc->p_virt_left = 0; rpc->p_prof_left = 0;
         (*rpc).p_virt_left = 0;
         (*rpc).p_prof_left = 0;
+        // C: rpc->p_cpu_time_left = 0 — child has no quantum, RTS_NO_QUANTUM set below
         (*rpc).p_cpu_time_left = 0;
+        // C: rpc->p_cycles = 0; rpc->p_kcall_cycles = 0; rpc->p_kipc_cycles = 0;
         (*rpc).p_cycles = 0;
         (*rpc).p_kcall_cycles = 0;
         (*rpc).p_kipc_cycles = 0;
+        // C: rpc->p_signal_received = 0
         (*rpc).p_signal_received = 0;
 
-        // Give child a reasonable initial quantum so it can execute.
-        let q_ms = if (*rpc).p_quantum_size_ms > 0 {
-            (*rpc).p_quantum_size_ms
-        } else {
-            50u32
-        };
-        (*rpc).p_cpu_time_left = (q_ms as u64) * 1000000; // fallback: 50M cycles = ~50ms at 1GHz
-
-        // Append "*F" to name
+        // Append "*F" to name (matching C)
         let mut end = (*rpc).p_name.len();
         for i in 0..(*rpc).p_name.len() {
             if (*rpc).p_name[i] == 0 {
@@ -3847,51 +3859,77 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             (*rpc).p_name[end + 2] = 0u8;
         }
 
-        // Phase 2: zero the child's CR3 and set VMINHIBIT (matching C
-        // do_fork.c). The child is NOT enqueued here — VM will:
-        //   1. Create the child's page table
-        //   2. Call SYS_VMCTL(VMCTL_SETADDRSPACE) to set CR3 and clear
-        //      VMINHIBIT, which enqueues the child if now runnable.
-        let clear_rts = RtsFlags::RECEIVING.bits()
-            | RtsFlags::SIGNALED.bits()
-            | RtsFlags::SIG_PENDING.bits()
-            | RtsFlags::P_STOP.bits()
-            | RtsFlags::SENDING.bits()
-            | RtsFlags::NO_QUANTUM.bits()
-            | RtsFlags::PREEMPTED.bits();
-        (*rpc).p_rts_flags.fetch_and(!clear_rts, Ordering::Relaxed);
+        // C: RTS_SET(rpc, RTS_NO_QUANTUM) — child is NOT runnable until scheduled
+        // This dequeues the child if it was runnable (inherited from parent).
+        let old_rts = (*rpc)
+            .p_rts_flags
+            .fetch_or(RtsFlags::NO_QUANTUM.bits(), Ordering::Relaxed);
+        // RTS_SET side effect: if WAS runnable and NOW not, dequeue
+        let was_runnable = (old_rts & RtsFlags::NO_QUANTUM.bits()) == 0 && old_rts == 0;
+        if was_runnable {
+            crate::sched::dequeue(rpc);
+        }
+
+        // C: reset_proc_accounting(rpc);
+        crate::sched::reset_proc_accounting(rpc);
+
+        // C: if parent is SYS_PROC, downgrade child to USER_PRIV_ID
+        // C: rpc->p_priv = priv_addr(USER_PRIV_ID); rpc->p_rts_flags |= RTS_NO_PRIV;
+        if !(*rpp).p_priv.is_null() {
+            let priv_flags = (*(*rpp).p_priv).s_flags;
+            if priv_flags.contains(crate::r#priv::PrivFlags::SYS_PROC) {
+                (*rpc).p_priv = crate::r#priv::priv_addr_mut(crate::r#priv::USER_PRIV_ID);
+                (*rpc)
+                    .p_rts_flags
+                    .fetch_or(crate::proc::RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
+            }
+        }
+
+        // C: m_ptr->m_krn_lsys_sys_fork.endpt = rpc->p_endpoint;
+        msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
+        // C: m_ptr->m_krn_lsys_sys_fork.msgaddr = rpp->p_delivermsg_vir;
+        msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
+
+        // C: if(flags & PFF_VMINHIBIT) { RTS_SET(rpc, RTS_VMINHIBIT); }
+        // RTS_SET handles dequeue if the child becomes non-runnable.
+        if fork_flags & PFF_VMINHIBIT != 0 {
+            let old_rts2 = (*rpc)
+                .p_rts_flags
+                .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
+            let was_run2 = (old_rts2 & RtsFlags::VMINHIBIT.bits()) == 0 && old_rts2 == 0;
+            if was_run2 {
+                crate::sched::dequeue(rpc);
+            }
+        }
+
+        // C: RTS_UNSET(rpc, (RTS_SIGNALED | RTS_SIG_PENDING | RTS_P_STOP));
+        let unset_rts =
+            RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits() | RtsFlags::P_STOP.bits();
+        let old_rts3 = (*rpc).p_rts_flags.fetch_and(!unset_rts, Ordering::Relaxed);
+        // RTS_UNSET side effect: if WASN'T runnable and NOW is, enqueue
+        // But child has NO_QUANTUM set, so it's still not runnable
+        let was_not_run = (old_rts3 & unset_rts) != 0 && old_rts3 != 0 && (*rpc).is_runnable();
+        if was_not_run {
+            crate::sched::enqueue(rpc);
+        }
+
+        // C: (void) sigemptyset(&rpc->p_pending);
+        (*rpc).p_pending = 0;
+
         // Set defer_r1 so IS_FORK_CHILD (syscall 63) returns 1 for the child.
         // This lets userland fork() distinguish parent (retval=pid) from child (retval=0).
         (*rpc).p_defer_r1 = 1;
-        (*rpc).p_pending = 0;
 
-        crate::sched::reset_proc_accounting(rpc);
-
-        // Zero CR3 — matching C: rpc->p_seg.p_cr3 = 0
+        // C: rpc->p_seg.p_cr3 = 0; rpc->p_seg.p_cr3_v = NULL;
         (*rpc).p_seg.p_cr3 = 0;
         (*rpc).p_seg.p_cr3_v = core::ptr::null_mut();
 
-        msg_write_i32(msg, FORK_REPLY_ENDPT_OFF, (*rpc).p_endpoint);
-        msg_write_u64(msg, FORK_REPLY_MSGADDR_OFF, (*rpp).p_delivermsg_vir);
-
-        // Trace: print fork info via serial_write_byte
-        // Fork marker
+        // Trace: print 'F' to serial
         #[cfg(target_os = "none")]
         {
             crate::hal::serial_write_byte(b'F');
         }
 
-        // Set VMINHIBIT (matching C: PFF_VMINHIBIT flag).
-        // Child does NOT run until VM sets up the page table.
-        if fork_flags & PFF_VMINHIBIT != 0 {
-            (*rpc)
-                .p_rts_flags
-                .fetch_or(RtsFlags::VMINHIBIT.bits(), Ordering::Relaxed);
-        }
-
-        // Do NOT enqueue. VM must first set up the child's page table
-        // and call VMCTL_SETADDRSPACE, which clears VMINHIBIT and
-        // enqueues the child if runnable.
         OK
     }
 }
