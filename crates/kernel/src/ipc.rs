@@ -1282,10 +1282,12 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                 (*dst_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
-                let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
-                (*dst_ptr)
-                    .p_rts_flags
-                    .store(rts & !RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+                let old_rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
+                let new_rts = old_rts & !RtsFlags::RECEIVING.bits();
+                (*dst_ptr).p_rts_flags.store(new_rts, Ordering::Relaxed);
+                if new_rts == 0 {
+                    enqueue(dst_ptr);
+                }
             } else if r == OK {
                 // Destination not waiting — mark as pending
                 let caller_id = (*privp).s_id;

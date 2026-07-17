@@ -1101,6 +1101,17 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
         }
     }
 
+    // Matching C exit_proc / exit_restart: clean up kernel Proc entry
+    // via SYS_CLEAR (kernel call 2). Without this, the kernel still
+    // thinks the process is alive and blocked in RECEIVE/SENDREC.
+    let mut clear_msg = Message {
+        m_source: 0,
+        m_type: 0,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    clear_msg.m_payload.m1.m1i1 = unsafe { (*MPROC.as_ptr().add(caller_slot)).mp_endpoint };
+    let _ = send_kernel_call(2, &mut clear_msg);
+
     EDONTREPLY
 }
 

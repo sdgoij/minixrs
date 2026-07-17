@@ -160,7 +160,7 @@ const FORK_ENDPT_OFF: usize = 8;
 const FORK_SLOT_OFF: usize = 12;
 const FORK_FLAGS_OFF: usize = 16;
 
-const CLEAR_ENDPT_OFF: usize = 0;
+const CLEAR_ENDPT_OFF: usize = 8;
 
 const SIGCALLS_MAP_OFF: usize = 0;
 const SIGCALLS_ENDPT_OFF: usize = 16;

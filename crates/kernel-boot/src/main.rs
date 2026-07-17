@@ -162,16 +162,15 @@ pub extern "C" fn kmain() -> ! {
         // 2. Mask timer IRQ — SeaBIOS may leave IRQ0 unmasked.
         arch_x86_64::apic::mask_timer_irq();
 
-        // 3. Program the PIT at 100 Hz, mode 3 (square wave).
-        arch_x86_64::apic::init_pit(100);
-
-        // 3. Register the timer ISR handler.
+        // 3. Register the timer ISR handler and install the IDT entry
+        //    BEFORE programming the PIT, to avoid a window where a timer
+        //    interrupt hits a null handler (init_idt sets all entries to
+        //    handler=0, which would jump to address 0 on interrupt).
         unsafe extern "C" fn timer_callback() {
             unsafe { kernel::clock::timer_int_handler() };
         }
         arch_x86_64::apic::set_timer_isr_handler(timer_callback);
 
-        // 4. Install the assembly trampoline in the IDT.
         let handler_addr = arch_x86_64::apic::timer_isr_entry as *const () as u64;
         (*arch_x86_64::idt::IDT.get()).set_handler(
             arch_x86_64::interrupt::VECTOR_TIMER as usize,
@@ -179,6 +178,11 @@ pub extern "C" fn kmain() -> ! {
             0, // IST
             0, // DPL (kernel only)
         );
+
+        // 4. Program the PIT at 100 Hz, mode 3 (square wave).
+        //    The timer is still masked at the PIC; it will be unmasked
+        //    just before the scheduler starts (after enqueuing).
+        arch_x86_64::apic::init_pit(100);
 
         // 5. Timer IRQ is unmasked just before the scheduler starts,
         //    after all boot processes are initialized and running.

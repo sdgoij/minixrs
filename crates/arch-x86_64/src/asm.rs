@@ -838,8 +838,13 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "mov    r14, [r15 + 96]",
         "mov    r15, [r15 + 104]",
         "swapgs",
+        // Disable interrupts before unmasking the timer to prevent
+        // a timer interrupt from firing in kernel mode between the
+        // unmask and iretq. The iretq restores IF from the frame's
+        // RFLAGS (which has IF=1 for user processes), so interrupts
+        // are re-enabled atomically with the return to user mode.
+        "cli",
         // Unmask IRQ 0 right before iretq.
-        // After swapgs, GS.base points to kernel cpulocals.
         "in     al, 0x21",
         "and    al, 0xfe",
         "out    0x21, al",

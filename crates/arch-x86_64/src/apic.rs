@@ -883,64 +883,126 @@ pub unsafe fn set_nmi_profile_handler(handler: NmiProfileFn) {
 ///
 /// # Safety
 ///
-/// Must be set as an interrupt gate in the IDT.
-#[unsafe(naked)]
+/// Call the registered timer handler and perform EOI.
+///
+/// This is called from the assembly `timer_isr_entry`. The assembly saves
+/// all registers before calling this, so we can freely use C-registers.
+///
+/// # Safety
+///
+/// Must be called from the timer ISR with interrupts disabled.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn timer_isr_c_handler() {
+    unsafe {
+        // Call the registered handler if any.
+        let ptr = TIMER_ISR_HANDLER.get();
+        if let Some(handler) = *ptr {
+            handler();
+        }
+        // Send EOI to the APIC (or PIC fallback).
+        eoi();
+    }
+}
+
+/// Timer interrupt entry point — installed in the IDT.
+///
+/// Assembly trampoline that:
+/// 1. Saves ALL GPRs
+/// 2. Calls `timer_isr_c_handler()` which calls the handler + EOI
+/// 3. Checks if we interrupted kernel mode (CS.RPL) or user mode
+/// 4. For kernel mode: restores GPRs, clears IF in saved RFLAGS, ret
+/// 5. For user mode: restores GPRs, iretq with hardcoded selectors
+///
+/// This matches the C MINIX `lapic_intr` pattern.
+///
+/// # Safety
+///
+/// Must be installed in the IDT as an interrupt gate for the timer
+/// vector. Called from hardware interrupt context with interrupts
+/// disabled. Must be called in ring 0.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub unsafe extern "C" fn timer_isr_entry() {
     core::arch::naked_asm!(
-        // Save caller-saved registers (scratch registers).
-        // The CPU already pushed SS, RSP, RFLAGS, CS, RIP (5 entries on x86-64).
+        // Save ALL general-purpose registers (15 pushes = 120 bytes).
         "push rax",
         "push rcx",
         "push rdx",
-        "push rdi",
+        "push rbx",
+        "push rbp",
         "push rsi",
+        "push rdi",
         "push r8",
         "push r9",
         "push r10",
         "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
 
-        // Call the registered handler.
-        // Load TIMER_ISR_HANDLER via RIP-relative addressing.
-        "lea rax, [rip + {timer}]",
-        "mov rax, [rax]",
-        "test rax, rax",
-        "jz 2f",
-        "call rax",
-        "2:",
+        // Call the C handler (calls timer callback + EOI).
+        // This is a non-naked extern "C" function, so the compiler
+        // handles stack management correctly.
+        "call   {c_handler}",
 
-        // Send EOI to master PIC (IRQ 0-7).
-        "mov al, 0x20",
-        "out 0x20, al",
+        // After call returns, RSP is back to pointing at r15 save slot.
+        // Restore ALL GPRs.
+        "pop    r15",
+        "pop    r14",
+        "pop    r13",
+        "pop    r12",
+        "pop    r11",
+        "pop    r10",
+        "pop    r9",
+        "pop    r8",
+        "pop    rdi",
+        "pop    rsi",
+        "pop    rbp",
+        "pop    rbx",
+        "pop    rdx",
+        "pop    rcx",
+        "pop    rax",
 
-        // Restore caller-saved registers.
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rsi",
-        "pop rdi",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
+        // Now RSP points to the CPU-interrupt frame.
+        // Check CS.RPL to decide kernel vs user mode return.
+        // On x86-64, CS is at [RSP + 8] after popping all GPRs.
+        "mov    rdx, [rsp + 8]",        // CS
+        "and    rdx, 3",                // CS.RPL
+        "cmp    rdx, 0",
+        "je     1f",                    // kernel mode (RPL=0)
 
-        // Pop iretq frame entries and rebuild with hardcoded correct
-        // CS (0x001B = GUCODE_SEL | RPL=3) and SS (0x0013 = GUDATA_SEL | RPL=3).
-        // The saved CS in the frame may be corrupted (e.g., 0x0010)
-        // because QEMU's SYSRETQ does not set the SS segment selector,
-        // and the iretq frame captures stale segment register state.
-        "pop    rcx",             // RIP
-        "pop    rax",             // CS (discarded — use 0x001B)
-        "pop    r11",             // RFLAGS
-        "pop    r10",             // old_RSP
-        "add    rsp, 8",          // skip old_SS (discarded)
-        "push   0x0013",          // SS = GUDATA_SEL | RPL=3
-        "push   r10",             // old_RSP
-        "push   r11",             // RFLAGS
-        "push   0x001B",          // CS = GUCODE_SEL | RPL=3
-        "push   rcx",             // RIP
+        // ── User mode (RPL=3): 5-value frame [RIP, CS, RFLAGS, old_RSP, old_SS] ──
+        // Pop and rebuild with hardcoded selectors (QEMU SYSRETQ corrupts SS).
+        "pop    rcx",                   // RIP
+        "pop    rax",                   // CS (discard, use 0x001B)
+        "pop    r11",                   // RFLAGS
+        "pop    r10",                   // old_RSP
+        "add    rsp, 8",                // skip old_SS
+        "push   0x0013",                // SS = GUDATA_SEL | RPL=3
+        "push   r10",                   // old_RSP
+        "push   r11",                   // RFLAGS
+        "push   0x001B",                // CS = GUCODE_SEL | RPL=3
+        "push   rcx",                   // RIP
         "iretq",
-        timer = sym TIMER_ISR_HANDLER,
+
+        // ── Kernel mode (RPL=0): 3-value frame [RIP, CS, RFLAGS] ──
+        // Clear IF in the saved RFLAGS to prevent re-entering the timer
+        // ISR when returning to kernel code that had IF=1.
+        "1:",
+        // RFLAGS is at [RSP + 16]. Clear bit 9 (IF).
+        "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
+        // Use ret to avoid QEMU TCG same-ring iretq bug.
+        // Pop RIP and CS, discard CS, then restore RFLAGS and ret.
+        "pop    rcx",                   // RIP
+        "add    rsp, 8",                // skip CS
+        "pop    r11",                   // RFLAGS (IF cleared)
+        "push   r11",
+        "popfq",                        // restore RFLAGS (IF=0)
+        "push   rcx",
+        "ret",
+
+        c_handler = sym timer_isr_c_handler,
     )
 }
 
