@@ -22,7 +22,7 @@ use kernel_boot::serial_write;
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    kmain()
+    kmain_body()
 }
 
 // Linker symbol: byte just past the end of the kernel binary
@@ -32,10 +32,18 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-/// Kernel main entry point — called from the multiboot trampoline.
+/// Asm entry point: adjust RSP by 8 for the jmp-entry ABI mismatch.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain() -> ! {
+#[unsafe(naked)]
+pub unsafe extern "C" fn kmain() -> ! {
+    core::arch::naked_asm!("sub rsp, 8", "jmp kmain_body",);
+}
+
+/// Kernel main entry point.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn kmain_body() -> ! {
     // Enable SSE (required by compiler_builtins memset/memcpy which use
     // SSE instructions like movdqa). CR4.OSFXSR = bit 9, OSXMMEXCPT = bit 10.
     unsafe {
@@ -259,24 +267,28 @@ pub extern "C" fn kmain() -> ! {
         // completes before any user process starts.
         #[cfg(not(feature = "boot-test"))]
         let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/ds", DS_PROC_NR),           // Data Store (first, matches C order)
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
-            ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
-            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
+            ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
+            ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
         #[cfg(feature = "boot-test")]
         let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/ds", DS_PROC_NR),           // Data Store (first, matches C order)
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
-            ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
-            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
+            ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
+            ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
         ];
 
         // Load each boot process from initramfs, storing InitInfo for
@@ -718,6 +730,8 @@ unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) -> i32 {
 
 /// Halt the CPU forever (fallback if boot fails).
 #[cfg(not(test))]
+/// Halt the CPU forever (used on fatal boot errors).
+#[allow(dead_code)]
 fn hlt_loop() -> ! {
     loop {
         unsafe {

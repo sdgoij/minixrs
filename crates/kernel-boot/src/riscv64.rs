@@ -455,14 +455,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         serial_write("  loading boot processes...\r\n");
 
         // Define all boot processes: (path, proc_nr)
+        // Order matches C MINIX kernel/table.c: ds first, then rs, pm, ...
         let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/ds", DS_PROC_NR),           // Data Store
             ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+            ("/sbin/pm", PM_PROC_NR),           // Process Manager
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
-            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
+            ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
 
@@ -470,7 +473,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         // per-process page table creation.
         // Note: boot_init's internal error messages use `print!` which is
         // a no-op on RISC-V (x86_64 COM1 only), so we add our own diagnostics.
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 9] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {

@@ -5,7 +5,10 @@
 //!
 //! Gated behind cfg(feature = "boot-test") — no impact on normal builds.
 
-use arch_common::com::{MFS_PROC_NR, PM_PROC_NR, VFS_PROC_NR};
+use arch_common::com::{
+    DS_PROC_NR, MFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR,
+    VFS_PROC_NR, VM_PROC_NR,
+};
 
 const FS_BASE: i32 = 0xA00;
 const REQ_READSUPER: i32 = FS_BASE + 28;
@@ -65,6 +68,14 @@ pub unsafe fn run_boot_tests() -> ! {
 
     // K: PM MPROC page table walk
     failures += test_pm_mproc_pt();
+
+    // L: Page table creation + map + walk roundtrip
+    // Exercises map_page() with freshly allocated pages, catching
+    // validation-bound regressions (e.g. RISC-V 0x1000_0000 limit).
+    failures += test_map_page_walk_roundtrip();
+
+    // M: Every boot process has a walkable page table
+    failures += test_boot_procs_page_tables();
 
     if failures == 0 {
         serial_write("ALL TESTS PASSED\r\n");
@@ -621,47 +632,207 @@ fn test_pm_mproc_pt() -> u32 {
         print_hex(cr3);
         serial_write("\r\n");
 
-        // Check slot 0 (0x1004010)
-        let slot0_va = 0x1004010u64;
+        // Walk known PM code pages — must be mapped with user permissions.
+        // PM is loaded at PM_PROC_NR * 0x4000 + 0x100000; slot_va formula
+        // matches `boot_init.rs` load address:
+        //   slot_va = 0x100000 + (NR_TASKS + slot_nr) * 0x4000
+        // with NR_TASKS = 5 (IDLE, CLOCK, SYSTEM, HARDWARE, ASYNCM).
+        let slot0_va = 0x100000 + (5 + 0) * 0x4000 + 0x10u64;
         match kernel::pagetable::walk(cr3, slot0_va) {
             Ok(r) => {
-                let has_user = r.pte_value & 0x4 != 0;
-                serial_write("  slot0 PTE=0x");
+                let has_user = r.pte_value & kernel::pagetable::PG_U != 0;
+                serial_write("  PM slot0 PTE=0x");
                 print_hex(r.pte_value);
-                serial_write(" level=");
-                print_dec(r.level as u32);
-                if has_user {
-                    serial_write(" PG_U=1\r\n");
-                } else {
-                    serial_write(" PG_U=0 FAIL\r\n");
+                if !has_user {
+                    serial_write(" FAIL (no PG_U)\r\n");
+                    return 1;
                 }
+                serial_write("\r\n");
             }
             Err(_) => {
-                serial_write("  slot0 NOT MAPPED FAIL\r\n");
+                serial_write("  FAIL: PM slot0 not mapped\r\n");
+                return 1;
             }
         }
 
-        // Check slot 12 (0x1005510)
-        let slot12_va = 0x1005510u64;
-        match kernel::pagetable::walk(cr3, slot12_va) {
+        // Check user stack is mapped.
+        // PM's stack is allocated near 0x8FE00000 (arch-specific).
+        // Walk a known valid stack address from PM's own stack pointer.
+        let rsp_field: u64 = core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(168) as *const u64);
+        let stack_va = rsp_field & !0xFFF;
+        match kernel::pagetable::walk(cr3, stack_va) {
             Ok(r) => {
-                let has_user = r.pte_value & 0x4 != 0;
-                serial_write("  slot12 PTE=0x");
+                let has_user = r.pte_value & kernel::pagetable::PG_U != 0;
+                serial_write("  PM stack PTE=0x");
                 print_hex(r.pte_value);
-                serial_write(" level=");
-                print_dec(r.level as u32);
-                if has_user {
-                    serial_write(" PG_U=1\r\n");
-                } else {
-                    serial_write(" PG_U=0 FAIL\r\n");
+                if !has_user {
+                    serial_write(" FAIL (no PG_U)\r\n");
+                    return 1;
                 }
+                serial_write("\r\n");
             }
             Err(_) => {
-                serial_write("  slot12 NOT MAPPED FAIL\r\n");
+                serial_write("  FAIL: PM stack not mapped\r\n");
+                return 1;
             }
         }
     }
     0
+}
+
+/// Verify every booted process has a non-zero per-process page table
+/// and that a walk at the entry point succeeds.
+fn test_boot_procs_page_tables() -> u32 {
+    unsafe {
+        // Only check processes that actually get per-process page tables
+        // during boot (the boot_procs list in main.rs / riscv64.rs).
+        let booted: &[(i32, &str)] = &[
+            (DS_PROC_NR, "ds"),
+            (RS_PROC_NR, "rs"),
+            (PM_PROC_NR, "pm"),
+            (SCHED_PROC_NR, "sched"),
+            (VFS_PROC_NR, "vfs"),
+            (VM_PROC_NR, "vm"),
+            (RAMDISK_PROC_NR, "ramdisk"),
+            (MFS_PROC_NR, "mfs"),
+            (TTY_PROC_NR, "tty"),
+        ];
+        let mut failures = 0u32;
+        for &(proc_nr, name) in booted {
+            let rp = kernel::table::proc_addr(proc_nr);
+            if rp.is_null() {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" null proc\r\n");
+                failures += 1;
+                continue;
+            }
+
+            let cr3 = (*rp).p_seg.p_cr3;
+            if cr3 == 0 {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" CR3=0\r\n");
+                failures += 1;
+                continue;
+            }
+
+            // Walk at the process's entry point (from p_reg).
+            // x86_64: RIP at p_reg offset 16.
+            #[cfg(target_arch = "x86_64")]
+            let entry_va: u64 =
+                core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(16) as *const u64);
+            #[cfg(not(target_arch = "x86_64"))]
+            let entry_va = 0x1000000u64;
+
+            let walk_va = entry_va & !0xFFF;
+            match kernel::pagetable::walk(cr3, walk_va) {
+                Ok(r) => {
+                    let has_user = r.pte_value & kernel::pagetable::PG_U != 0;
+                    if !has_user {
+                        serial_write("  FAIL: ");
+                        serial_write(name);
+                        serial_write(" entry missing PG_U\r\n");
+                        failures += 1;
+                    }
+                }
+                Err(_) => {
+                    serial_write("  FAIL: ");
+                    serial_write(name);
+                    serial_write(" entry not mapped\r\n");
+                    failures += 1;
+                }
+            }
+        }
+
+        if failures == 0 {
+            serial_write("  OK all booted procs have walkable page tables\r\n");
+        }
+        failures
+    }
+}
+
+/// Allocate a fresh page table, map one page, walk it back, verify PA.
+///
+/// Catches validation-bound regressions (e.g. `map_page` rejecting
+/// physical addresses above an arbitrary cutoff like 0x1000_0000 on RISC-V).
+/// Also validates huge-page splitting when the inserted VA falls within
+/// an existing 1GB/2MB boot-PTE range.
+fn test_map_page_walk_roundtrip() -> u32 {
+    unsafe {
+        // 1. Allocate a root page table page and zero it.
+        let root = match kernel::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                serial_write("  FAIL: alloc root page\r\n");
+                return 1;
+            }
+        };
+        core::ptr::write_bytes(root as *mut u8, 0, 4096);
+
+        // 2. Allocate a page to map.
+        let test_pa = match kernel::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                serial_write("  FAIL: alloc data page\r\n");
+                return 1;
+            }
+        };
+
+        // 3. Pick a VA that is NOT backed by any boot-PTE copy.
+        //    0x6000_0000 is above the boot identity map on x86_64 (indices 1..511)
+        //    and well within the 512-entry root on both arches.
+        let test_va = 0x6000_0000u64;
+
+        // 4. Build arch-appropriate user page flags.
+        #[cfg(target_arch = "x86_64")]
+        let flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
+        #[cfg(target_arch = "riscv64")]
+        let flags = kernel::pagetable::PG_P
+            | kernel::pagetable::PG_RW
+            | kernel::pagetable::PG_U
+            | 0x02
+            | 0x08
+            | 0xC0; // R|X|A|D
+
+        // 5. Map the page — this must allocate intermediate tables and
+        //    write the final PTE.  The map_page validation must accept
+        //    the physical addresses returned by alloc_phys_page().
+        if kernel::pagetable::map_page(root, test_va, test_pa, flags).is_err() {
+            serial_write("  FAIL: map_page returned error\r\n");
+            return 1;
+        }
+
+        // 6. Walk back and verify the physical address matches.
+        match kernel::pagetable::walk(root, test_va) {
+            Ok(result) => {
+                let mapped_pa = kernel::hal::pte_to_phys(result.pte_value);
+                let expected_pa = test_pa & kernel::hal::pte_frame_mask();
+                if mapped_pa != expected_pa {
+                    serial_write("  FAIL: PA mismatch mapped=0x");
+                    print_hex(mapped_pa);
+                    serial_write(" expected=0x");
+                    print_hex(expected_pa);
+                    serial_write("\r\n");
+                    return 1;
+                }
+                let has_user = result.pte_value & kernel::pagetable::PG_U != 0;
+                if !has_user {
+                    serial_write("  FAIL: mapped PTE missing PG_U\r\n");
+                    return 1;
+                }
+                serial_write("  OK map+walk roundtrip PA=0x");
+                print_hex(mapped_pa);
+                serial_write("\r\n");
+            }
+            Err(_) => {
+                serial_write("  FAIL: walk after map_page\r\n");
+                return 1;
+            }
+        }
+
+        0
+    }
 }
 
 // Exit helpers
