@@ -577,10 +577,13 @@ pub fn diag_putchar(c: u8) {
     let mut msg = [0u8; 64];
     // DIAGCTL message: kernel overwrites msg[0..8] with call_nr + src.
     // Use msg[8..12] for the subfunction code (read by handler).
-    // buf ptr at msg[24..32] (M1_P1_OFF), len at msg[16..20].
+    // Put the byte directly in msg[12] (offset 12 = M1_I2_OFF) so the
+    // kernel handler can read it without dereferencing a user-space
+    // pointer (which fails due to CR3 mismatch).
     msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
-    let buf = [c, b'\r', b'\n'];
-    msg[24..32].copy_from_slice(&(buf.as_ptr() as u64).to_le_bytes());
+    msg[12] = c; // byte value stored directly in message
+    msg[13] = b'\r';
+    msg[14] = b'\n';
     msg[16..20].copy_from_slice(&3i32.to_le_bytes()); // len = 3
     let _ = kernel_call(44, &mut msg); // SYS_DIAGCTL = kernel call 44
 }
@@ -694,7 +697,11 @@ pub fn fork() -> i32 {
 
 /// Static async send table for asynsend3 (single entry).
 /// Must be static so the kernel can read it asynchronously.
-static mut ASYNC_TABLE: [u8; 72] = [0u8; 72];
+// Static async table used by asynsend3.
+// One entry (AsynMsg). Message alignment is 8 (i64 in Payload),
+// so AsynMsg.msg is at offset 16 (not 12). The table must be
+// large enough for the full AsynMsg struct (68+ bytes at minimum).
+static mut ASYNC_TABLE: [u8; 192] = [0u8; 192];
 
 /// Send an asynchronous message (matching C `asynsend3`).
 ///
@@ -715,8 +722,12 @@ pub unsafe fn asynsend3(dst: i32, msg: *const u8, flags: u32) -> i32 {
     let tabent = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_TABLE) };
     tabent[0..4].copy_from_slice(&(flags | 0x01).to_le_bytes()); // flags | AMF_VALID
     tabent[4..8].copy_from_slice(&dst.to_le_bytes());
+    // Write zeros to result field (offset 8-11) and then message at
+    // offset 16 (matching AsynMsg layout where msg is at offset 16
+    // due to Message's 8-byte alignment requirement).
+    tabent[8..12].copy_from_slice(&0i32.to_le_bytes()); // result = 0
     unsafe {
-        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(12), 64);
+        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(16), 64);
     }
 
     // SENDA syscall (52): msg[8..16] = table ptr, msg[16..24] = size

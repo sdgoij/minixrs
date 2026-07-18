@@ -150,6 +150,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         // VMCTL_SETADDRSPACE, which also clears VMINHIBIT and enqueues
         // the child process after fork.
         kernel::system::map_call(43, kernel::system::do_vmctl_handler);
+        // Register SYS_SCHEDULE (3) so the SCHED server can clear
+        // RTS_NO_QUANTUM on forked children via sys_schedule().
+        kernel::system::map_call(3, kernel::system::do_schedule_handler);
+        // Register SYS_SCHEDCTL (54) so the SCHED server can set
+        // p->p_scheduler for boot processes.
+        kernel::system::map_call(54, kernel::system::do_schedctl_handler);
         // IPC syscalls are already registered by init_basic_syscalls below.
     }
 
@@ -434,9 +440,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             if let Some(boot_pt) = create_boot_page_table() {
                 kernel::hal::write_cr3(boot_pt);
                 // Enable UART FIFO for piped input support
-                unsafe {
-                    arch_riscv64::uart::init_uart();
-                }
+                arch_riscv64::uart::init_uart();
                 serial_write("  SV39 enabled\r\n");
             } else {
                 serial_write("  FAILED: boot page table\r\n");
@@ -458,6 +462,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
 
@@ -465,7 +470,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         // per-process page table creation.
         // Note: boot_init's internal error messages use `print!` which is
         // a no-op on RISC-V (x86_64 COM1 only), so we add our own diagnostics.
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 8] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 9] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {

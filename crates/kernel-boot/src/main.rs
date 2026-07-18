@@ -265,6 +265,7 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
         #[cfg(feature = "boot-test")]
@@ -275,6 +276,7 @@ pub extern "C" fn kmain() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
         ];
 
         // Load each boot process from initramfs, storing InitInfo for
@@ -602,7 +604,13 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             }
         } else if rts == 0 && !is_exec {
             // Still runnable — continue with same process.
-            unsafe { deliver_msg(rp) };
+            let delivered = unsafe { deliver_msg(rp) };
+            // Same-process return: syscall_entry pops RAX from saved[0],
+            // NOT from p_reg[0].  If deliver_msg set a return value, write
+            // it to the kernel stack so the pop chain returns it correctly.
+            if delivered >= 0 {
+                core::ptr::write_volatile(saved as *mut u64, delivered as u64);
+            }
             return;
         }
 
@@ -627,9 +635,6 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                 break candidate;
             } else {
                 // No runnable processes — halt CPU until interrupt.
-                // On QEMU, hlt with IF=0 exits on the next interrupt
-                // (QEMU doesn't check IF for hlt).  The timer ISR kernel
-                // path now uses jmp (not iretq), so no #GP on return.
                 // To keep real hardware compatibility, enable interrupts
                 // before hlt and disable after.
                 core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
@@ -638,40 +643,24 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             }
         };
 
+        // D4: scheduler switch
         if next != rp || is_exec {
-            // Deliver any pending IPC message to the target process's
-            // user buffer and set RAX to the source endpoint.
-            unsafe { deliver_msg(next) };
-            // DEBUG: print endpoint for child processes
-            #[cfg(target_os = "none")]
-            {
-                let ep = unsafe { (*next).p_endpoint };
-                if ep > 100 {
-                    let epb = (ep as u32).to_le_bytes();
-                    kernel::hal::serial_write_byte(b'E');
-                    for i in 0..2 {
-                        let b = epb[i as usize];
-                        let hi = (b >> 4) & 0xF;
-                        let lo = b & 0xF;
-                        kernel::hal::serial_write_byte(if hi < 10 {
-                            b'0' + hi
-                        } else {
-                            b'A' + hi - 10
-                        });
-                        kernel::hal::serial_write_byte(if lo < 10 {
-                            b'0' + lo
-                        } else {
-                            b'A' + lo - 10
-                        });
-                    }
-                }
-            }
+            let delivered_next = unsafe { deliver_msg(next) };
+            let _ = delivered_next;
             arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);
-            // Switch to the new process — never returns.
             arch_x86_64::asm::restore(next as *const u8);
         } else {
             // Same process: deliver pending message before returning.
-            unsafe { deliver_msg(rp) };
+            let delivered = unsafe { deliver_msg(rp) };
+            // deliver_msg writes the source endpoint to p_reg[0] via
+            // write_retval, but syscall_entry returns RAX by popping from
+            // the kernel stack (saved[0]), NOT from p_reg[0].  The dispatch
+            // result written to saved[0] at line 582 is the syscall return
+            // value (0=OK), not the message source endpoint.  Overwrite
+            // saved[0] so the pop chain returns the correct value.
+            if delivered >= 0 {
+                core::ptr::write_volatile(saved as *mut u64, delivered as u64);
+            }
         }
     }
 }
@@ -688,7 +677,20 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
 /// # Safety
 ///
 /// `rp` must point to a valid `Proc`.
-unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) {
+/// Deliver any pending IPC message to a process's user-space buffer.
+///
+/// If the `DELIVERMSG` flag is set on the process, this calls
+/// `kernel::ipc::delivermsg` to copy the contents of `p_delivermsg`
+/// to the user-space virtual address stored in `p_delivermsg_vir`.
+///
+/// After delivery, RAX is set to the source endpoint from the message
+/// header (bytes 0-3).  Returns the source endpoint if delivery was
+/// performed, or -1 if there was no pending message.
+///
+/// # Safety
+///
+/// `rp` must point to a valid `Proc`.
+unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) -> i32 {
     unsafe {
         let has_deliver = (*rp)
             .p_misc_flags
@@ -696,23 +698,20 @@ unsafe fn deliver_msg(rp: *mut kernel::proc::Proc) {
             & kernel::proc::MiscFlags::DELIVERMSG.bits()
             != 0;
         if has_deliver {
-            // C: delivermsg copies p_delivermsg to user buffer,
-            // then sets retreg = result code (OK on success).
             let result = kernel::ipc::delivermsg(rp);
-            // Set RAX = result (matching C: rp->p_reg.retreg = r)
-            kernel::hal::write_retval(&mut (*rp).p_reg, result as u64);
+            let _ = result;
+            let src_ep_bytes =
+                core::ptr::read_unaligned((*rp).p_delivermsg.as_ptr() as *const [u8; 4]);
+            let src_ep = i32::from_ne_bytes(src_ep_bytes);
+            kernel::hal::write_retval(&mut (*rp).p_reg, src_ep as u64);
             (*rp).p_misc_flags.fetch_and(
                 !kernel::proc::MiscFlags::DELIVERMSG.bits(),
                 core::sync::atomic::Ordering::Relaxed,
             );
-            // Matching C: rp->p_delivermsg.m_source = NONE
-            core::ptr::copy_nonoverlapping(
-                kernel::system::NONE.to_le_bytes().as_ptr(),
-                (*rp).p_delivermsg.as_mut_ptr(),
-                4,
-            );
+            return src_ep;
         }
     }
+    -1
 }
 
 // Serial I/O — available in all build modes (no-op in test mode)

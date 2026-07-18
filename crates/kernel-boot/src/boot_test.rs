@@ -63,6 +63,9 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_initramfs_sh_exists();
     failures += test_initramfs_boot_files();
 
+    // K: PM MPROC page table walk
+    failures += test_pm_mproc_pt();
+
     if failures == 0 {
         serial_write("ALL TESTS PASSED\r\n");
         exit_qemu_success();
@@ -598,6 +601,67 @@ fn test_initramfs_echo_elf() -> u32 {
         serial_write("\r\n");
         0
     }
+}
+
+// K: PM page table check for MPROC
+
+fn test_pm_mproc_pt() -> u32 {
+    unsafe {
+        let rp = kernel::table::proc_addr(PM_PROC_NR);
+        if rp.is_null() {
+            serial_write("  FAIL: PM not found\r\n");
+            return 1;
+        }
+        let cr3 = (*rp).p_seg.p_cr3;
+        if cr3 == 0 {
+            serial_write("  FAIL: PM has no CR3\r\n");
+            return 1;
+        }
+        serial_write("  PM CR3=0x");
+        print_hex(cr3);
+        serial_write("\r\n");
+
+        // Check slot 0 (0x1004010)
+        let slot0_va = 0x1004010u64;
+        match kernel::pagetable::walk(cr3, slot0_va) {
+            Ok(r) => {
+                let has_user = r.pte_value & 0x4 != 0;
+                serial_write("  slot0 PTE=0x");
+                print_hex(r.pte_value);
+                serial_write(" level=");
+                print_dec(r.level as u32);
+                if has_user {
+                    serial_write(" PG_U=1\r\n");
+                } else {
+                    serial_write(" PG_U=0 FAIL\r\n");
+                }
+            }
+            Err(_) => {
+                serial_write("  slot0 NOT MAPPED FAIL\r\n");
+            }
+        }
+
+        // Check slot 12 (0x1005510)
+        let slot12_va = 0x1005510u64;
+        match kernel::pagetable::walk(cr3, slot12_va) {
+            Ok(r) => {
+                let has_user = r.pte_value & 0x4 != 0;
+                serial_write("  slot12 PTE=0x");
+                print_hex(r.pte_value);
+                serial_write(" level=");
+                print_dec(r.level as u32);
+                if has_user {
+                    serial_write(" PG_U=1\r\n");
+                } else {
+                    serial_write(" PG_U=0 FAIL\r\n");
+                }
+            }
+            Err(_) => {
+                serial_write("  slot12 NOT MAPPED FAIL\r\n");
+            }
+        }
+    }
+    0
 }
 
 // Exit helpers

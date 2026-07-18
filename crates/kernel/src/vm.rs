@@ -443,6 +443,15 @@ pub unsafe fn virtual_copy(
         let mut src_cr3 = (*src_rp).p_seg.p_cr3;
         let mut dst_cr3 = (*dst_rp).p_seg.p_cr3;
 
+        // Kernel tasks (proc_nr < 0) always use boot_cr3. Their p_seg.p_cr3
+        // may contain garbage from adjacent register saves or other corruption.
+        if src_proc < 0 {
+            src_cr3 = 0;
+        }
+        if dst_proc < 0 {
+            dst_cr3 = 0;
+        }
+
         let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 == 0 {
             return -1;
@@ -463,6 +472,15 @@ pub unsafe fn virtual_copy(
         // switch the server to the identity map and crash it.
         let saved_cr3 = crate::hal::read_cr3();
 
+        // When both src and dst are kernel tasks (physical addresses only),
+        // always restore boot_cr3. The saved_cr3 might be garbage if a
+        // previous CR3 switch wasn't properly restored.
+        let restore_cr3 = if src_proc < 0 && dst_proc < 0 {
+            boot_cr3
+        } else {
+            saved_cr3
+        };
+
         // Use a small stack buffer for the bounce
         let mut buf = [0u8; 256];
         let mut remaining = bytes;
@@ -481,7 +499,7 @@ pub unsafe fn virtual_copy(
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
 
             // Restore the saved CR3 (not boot_cr3 — servers have their own)
-            crate::hal::write_cr3(saved_cr3);
+            crate::hal::write_cr3(restore_cr3);
 
             remaining -= chunk;
             src_va += chunk as u64;
@@ -678,14 +696,18 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
             }
 
             // Block the process until VM clears the fault.
-            (*rp)
+            // RTS_SET semantics: set flag, dequeue if was runnable.
+            let old = (*rp)
                 .p_rts_flags
                 .fetch_or(crate::proc::RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
+            if old == 0 {
+                crate::sched::dequeue(rp);
+            }
 
             // Notify VM server that a page fault is pending.
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::VM_PROC_NR);
 
-            return 0; // handled — process will retry when VM clears fault
+            return 0; // handled — scheduler will switch to another process
         }
 
         // Kernel-mode page fault: fatal.

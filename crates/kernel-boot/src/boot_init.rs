@@ -462,15 +462,10 @@ pub unsafe fn boot_create_restricted_page_table(
             // index is 1 (each 2MB entry covers 0x200000 bytes).
             // Userspace split on these PD entries (via map_page for code/stack)
             // will re-add PG_U to the specific 4KB pages that belong to the process.
-            #[cfg(target_arch = "x86_64")]
-            {
-                let kernel_pde_start: usize = 1; // 0x200000 / 0x200000
-                let kernel_pde_end: usize = 8; // 0x1000000 / 0x200000 — 16MB
-                for i in kernel_pde_start..kernel_pde_end {
-                    let pde = core::ptr::read(new_pd.add(i));
-                    core::ptr::write(new_pd.add(i), pde & !kernel::pagetable::PG_U);
-                }
-            }
+            // NOTE: PG_U is NOT cleared here because boot processes (PM, VFS, VM,
+            // etc.) need user-mode access to kernel identity-mapped pages. The
+            // original C MINIX has all boot processes share the kernel page table,
+            // so kernel pages are user-accessible.
         }
     }
 

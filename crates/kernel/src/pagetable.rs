@@ -170,21 +170,40 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
 
         // Walk from the top non-leaf level down to level 1.
         for level in (1..levels).rev() {
+            // Validate table_phys before dereferencing.
+            // Physical addresses must be within the identity-mapped range
+            // (0 to 4GB on RISC-V, 0 to 1GB on x86_64) and must not have
+            // non-canonical upper bits (x86_64).
+            #[cfg(target_arch = "x86_64")]
+            let out_of_range = table_phys >= 0x1000_0000 || (table_phys >> 48) != 0;
+            #[cfg(target_arch = "riscv64")]
+            let out_of_range = table_phys >= 0x1_0000_0000;
+            if out_of_range {
+                // Dump the corrupted table_phys for diagnosis
+                crate::hal::serial_write_byte(b'!');
+                let hex = b"0123456789abcdef";
+                let bytes = table_phys.to_le_bytes();
+                for b in bytes {
+                    crate::hal::serial_write_byte(hex[(b >> 4) as usize]);
+                    crate::hal::serial_write_byte(hex[(b & 0xF) as usize]);
+                }
+                return Err(PageTableError::InvalidArgument);
+            }
             let table = table_phys as *mut PtEntry;
             let idx = crate::hal::pt_index(va, level);
             let pte_addr = table.add(idx);
             let pte = read_pte(pte_addr);
 
             table_phys = if pte & PG_P == 0 {
-                // No entry — allocate a new page table page.
-                // On x86_64: branch PTE has Present|RW|User (non-leaf OK).
-                // On RISC-V SV39: branch PTE must have V=1 and R=W=X=0.
+                // No entry — allocate a new page table page and zero it.
                 let p = alloc_pt_page()?;
+                // Zero the entire page so stale data doesn't masquerade as
+                // valid PTEs on subsequent lookups at different indices.
+                core::ptr::write_bytes(p as *mut u8, 0, 4096);
                 #[cfg(target_arch = "x86_64")]
                 let branch_flags = PG_P | PG_RW | PG_U;
-                // A and D bits are WPRI for non-leaf PTEs on RISC-V.
                 #[cfg(target_arch = "riscv64")]
-                let branch_flags = PG_P; // V only
+                let branch_flags = PG_P;
                 write_pte(pte_addr, crate::hal::build_pte(p, branch_flags));
                 p
             } else if pte & PG_PS != 0 {

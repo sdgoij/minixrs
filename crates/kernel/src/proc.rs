@@ -31,10 +31,19 @@ pub const PMAGIC: u32 = 0xC0FFEE1;
 pub const NR_SCHED_QUEUES: usize = 16;
 
 /// Size of an opaque IPC message buffer.
-/// Must match `core::mem::size_of::<arch_common::ipc::Message>()` which is 56 bytes.
-/// Do NOT change to 64 — all user-space `Message` structs are 56 bytes and the
-/// kernel copies `MESSAGE_SIZE` bytes to/from user buffers. 64 would overflow.
-pub const MESSAGE_SIZE: usize = 56;
+/// Must match `core::mem::size_of::<arch_common::ipc::Message>()` which is
+/// 64 bytes on x86_64 (matching C `sizeof(message) == 64`).
+pub const MESSAGE_SIZE: usize = 64;
+
+// Compile-time guard: Message size must match kernel buffer size.
+const _MSG_SIZE_MATCH: () =
+    assert!(core::mem::size_of::<arch_common::ipc::Message>() == MESSAGE_SIZE);
+
+// Compile-time guard: p_delivermsg_vir must not overlap with p_delivermsg.
+const _DELIVERMSG_LAYOUT: () = assert!(
+    core::mem::offset_of!(Proc, p_delivermsg_vir)
+        >= core::mem::offset_of!(Proc, p_delivermsg) + MESSAGE_SIZE,
+);
 
 // ProcVmrequest
 

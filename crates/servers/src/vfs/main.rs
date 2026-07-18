@@ -207,9 +207,6 @@ unsafe fn handle_work() {
     }
 
     if source == PM_PROC_NR {
-        // PM messages are handled by service_pm, which sends its own
-        // reply directly — do NOT call reply() here. This matches the C
-        // pattern where service_pm calls ipc_send() directly (main.c:796).
         let _ = pm::service_pm();
     } else {
         // Regular VFS calls are dispatched through the call table.

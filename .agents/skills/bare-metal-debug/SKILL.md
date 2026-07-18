@@ -360,80 +360,19 @@ After 4 pushes (32 bytes):
 ```
 If CS=0x1B (GUDATA_SEL) instead of 0x23 (GUCODE_SEL), SYSRETQ is loading the wrong CS.
 
-### Timer ISR Frame Size Mismatch (3 vs 5 Values)
+### Timer ISR Frame Size Mismatch (fixed)
 
-When an interrupt fires, the CPU pushes a frame whose size depends on whether a
-privilege level switch occurred:
+The timer ISR previously assumed a 3-value interrupt frame
+([RIP, CS, RFLAGS]) even when the interrupt fired in user mode
+(5-value frame adds old_RSP and old_SS). The fix pops all 5
+values and reconstructs the correct frame based on CS.RPL — see
+`timer_isr_entry` in `crates/arch-x86_64/src/apic.rs`.
 
-| Mode Transition | Stack Layout (RSP→) | Values | Bytes |
-|-----------------|----------------------|--------|-------|
-| Ring 3 → Ring 0 (user) | RIP, CS, RFLAGS, old_RSP, old_SS | 5 | 40 |
-| Ring 0 → Ring 0 (kernel) | RIP, CS, RFLAGS | 3 | 24 |
-
-**Critical:** The ISR must handle both frame sizes. If the ISR always assumes one
-size, the iretq will consume the wrong stack layout and #GP.
-
-**How the bug manifests:**
-1. Timer fires in user mode → CPU pushes 5 values (40 bytes)
-2. ISR saves regs, calls handler, does EOI
-3. ISR pops only 3 values (RIP, CS, RFLAGS), leaving old_RSP + old_SS (16 bytes) on stack
-4. ISR pushes 3 values back and iretq — the remaining 16 bytes shift everything:
-   - iretq consumes the stale old_RSP as RIP
-   - Consumes old_SS as CS (data segment → #GP with error code = old_SS selector)
-5. **Error code 0x0010**: old_SS = 0x0010 (GUDATA_SEL, a data segment) gets loaded into CS
-
-**The fix — pop all 5, rebuild with hardcoded selectors:**
-
-```asm
-; After restoring all caller-saved registers, RSP points to the iretq frame.
-; Pop all 5 entries regardless of ring level.
-pop    rcx              ; RIP
-pop    rax              ; CS (discard)
-pop    r11              ; RFLAGS
-pop    r10              ; old_RSP
-pop    r9               ; old_SS (discard)
-
-; Check CS.RPL to decide which path
-mov    rdx, rax
-and    rdx, 3           ; CS.RPL
-cmp    rdx, 0
-je     .Lkernel_path
-
-; User path: reconstruct all 5 with correct selectors
-push   0x0013           ; SS = GUDATA_SEL | RPL=3
-push   r10              ; old_RSP
-push   r11              ; RFLAGS
-push   0x001B           ; CS = GUCODE_SEL | RPL=3
-push   rcx              ; RIP
-iretq
-
-.Lkernel_path:
-; Kernel path: push only 3 with hardcoded CS
-push   rcx              ; RIP
-push   0x0008           ; CS = GUCODE_SEL (ring 0)
-push   r11              ; RFLAGS
-iretq
-```
-
-**Why this works:** Both paths consume exactly 40 bytes from the original stack
-frame, then push either 3 or 5 values back. The stack is always balanced.
-
-**Alternative (fragile) approach — patching in-place:**
-
-```asm
-; This approach assumes the frame is already the right size
-mov    qword [rsp+8], 0x001B   ; patch CS
-mov    qword [rsp+32], 0x0013  ; patch SS
-iretq
-```
-
-This fails if the frame size is wrong (extra 16 bytes shift all offsets).
-Always prefer the pop-and-rebuild approach.
-
-**Diagnostic hint:** The #GP handler's extra fields (`tir`, `tcs`, `trf`, `trsp`,
-`tss`) capture the timer ISR's interrupted context. If `tcs` shows a data segment
-(0x0010) or `tss` shows 0x0010, the timer ISR likely pushed/popped the wrong
-number of values.
+**Diagnostic hint (still relevant):** The #GP handler captures
+the interrupted context from below the #GP frame as `tir`, `tcs`,
+`trf`, `trsp`, `tss`. If `tcs = 0x0010` (a data segment), the
+same class of frame-size mismatch is occurring in whichever ISR
+fired before the #GP.
 
 ### QEMU SYSRETQ SS.RPL Corruption
 

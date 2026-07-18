@@ -604,11 +604,16 @@ pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u6
         // Set source endpoint at bytes 4-7
         let src_ep = (*caller).p_endpoint;
         kbuf[4..8].copy_from_slice(&src_ep.to_ne_bytes());
-        // Set delivery address for result copy-back
+        // Set delivery address for result copy-back.
+        // Save the previous p_delivermsg_vir so a blocked RECEIVE's
+        // buffer address isn't lost when a kernel call overwrites it.
+        let saved_vir = (*caller).p_delivermsg_vir;
         (*caller).p_delivermsg_vir = msg_ptr as u64;
         let result = crate::system::kernel_call_dispatch(caller, &mut kbuf);
         // Copy result back to user
         crate::system::kernel_call_finish(caller, &mut kbuf, result);
+        // Restore the original delivery address
+        (*caller).p_delivermsg_vir = saved_vir;
         // Restore original CR3
         if saved_cr3 != caller_cr3 && caller_cr3 != 0 {
             crate::hal::write_cr3(saved_cr3);
@@ -995,7 +1000,9 @@ unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 
         }
         let path = match core::str::from_utf8(&path_buf[..path_len]) {
             Ok(s) => s,
-            Err(_) => return -14,
+            Err(_) => {
+                return -14;
+            }
         };
 
         // Read argv array from userspace.

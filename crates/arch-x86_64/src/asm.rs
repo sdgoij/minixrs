@@ -538,6 +538,7 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
     // After saving 9 callee-clobbered regs (72 bytes):
     //   [RSP+72] = error code
     core::arch::naked_asm!(
+        "swapgs",
         // Save caller-saved registers (clobbered by the call).
         "push   rax",
         "push   rcx",
@@ -558,19 +559,23 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
         // Check return value.
         "test   rax, rax",
         "jnz    1f",
-        // Handled (return 0): restore registers and iretq.
-        "pop    r11",
-        "pop    r10",
-        "pop    r9",
-        "pop    r8",
-        "pop    rdi",
-        "pop    rsi",
-        "pop    rdx",
-        "pop    rcx",
-        "pop    rax",
-        // Skip past the error code pushed by CPU.
-        "add    rsp, 8",
-        "iretq",
+        // Handled (return 0): process is no longer runnable (PAGEFAULT set).
+        // Discard saved state and invoke the scheduler to pick the next
+        // process. We do NOT iretq directly because the faulting process
+        // must not run until VM resolves the fault.
+        //
+        // Stack cleanup: 9 regs (72) + error code (8) + frame (40) = 120.
+        // After add, RSP = IST1_RSP (page-aligned, hence 16-byte aligned).
+        "add    rsp, 120",
+        "call   pick_proc_raw",
+        "test   rax, rax",
+        "jz     2f",
+        "mov    rdi, rax",
+        "call   restore",
+        // restore never returns.
+        "2:",
+        "cli",
+        "hlt",
         // Fatal (return != 0): halt.
         "1:",
         "cli",
@@ -844,10 +849,14 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         // RFLAGS (which has IF=1 for user processes), so interrupts
         // are re-enabled atomically with the return to user mode.
         "cli",
+        // Save RAX before unmasking IRQ0 — in/out clobber AL,
+        // corrupting the low byte of the return value loaded from p_reg.
+        "push   rax",
         // Unmask IRQ 0 right before iretq.
         "in     al, 0x21",
         "and    al, 0xfe",
         "out    0x21, al",
+        "pop    rax",
         "iretq",
     );
 }

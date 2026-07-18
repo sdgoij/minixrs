@@ -9,7 +9,8 @@ pub const PM_BASE: i32 = 0x0000;
 pub const KERNEL_CALL: i32 = 0x0100;
 pub const FS_BASE: i32 = 0x0200;
 
-/// The central IPC message (56 bytes).
+/// The central IPC message (64 bytes on x86_64 — 4 + 4 + 56).
+/// Matches C `sizeof(message) == 64`.
 #[repr(C)]
 #[derive(Clone)]
 pub struct Message {
@@ -27,7 +28,7 @@ impl fmt::Debug for Message {
     }
 }
 
-/// 48-byte payload union.
+/// 56-byte payload union (matches C MINIX `_ASSERT_MSG_SIZE`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
@@ -37,10 +38,10 @@ pub union Payload {
     pub m4: M4,
     pub m5: M5,
     pub m6: M6,
-    pub m7: [u8; 48],
+    pub m7: [u8; 56],
     pub m9: M9,
     pub m10: M10,
-    pub raw: [u8; 48],
+    pub raw: [u8; 56],
 }
 
 impl fmt::Debug for Payload {
@@ -88,7 +89,7 @@ pub struct M3 {
     pub m3i5: i32,
     pub m3i6: i32,
     pub m3i7: i32,
-    pub m3s: [i16; 16],
+    pub m3s: [i16; 10],
     pub m3ca1: [u8; 8],
 }
 
@@ -134,7 +135,6 @@ pub struct M9 {
     pub m9l1: i64,
     pub m9l2: i64,
     pub m9l3: i64,
-    pub m9l4: i64,
     pub m9i1: i32,
     pub m9i2: i32,
     pub m9i3: i32,
@@ -188,6 +188,11 @@ pub const EDONTREPLY: i32 = -201;
 pub const ELOCKED: i32 = -202;
 pub const ELOCKWILLBLOCK: i32 = -203;
 
+// Compile-time guard: Payload must be exactly 56 bytes so Message is 64.
+// If this fails, an M variant exceeds 56 bytes and will cause
+// copy_nonoverlapping overflow in the kernel's IPC delivery path.
+const _PAYLOAD_SIZE: () = assert!(core::mem::size_of::<Payload>() == 56);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,9 +237,6 @@ mod tests {
         assert_eq!(offset_of!(AsynMsg, flags), 0);
         assert_eq!(offset_of!(AsynMsg, endpoint), 4);
         assert_eq!(offset_of!(AsynMsg, result), 8);
-        // msg is at offset 16 rather than 12 because Message has alignment 8
-        // (i64 fields in Payload). On i386 C this would be offset 12.
-        // This is the pre-existing size mismatch the user noted.
         assert_eq!(offset_of!(AsynMsg, msg), 16);
     }
 
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_asyn_msg_size() {
-        assert!(size_of::<AsynMsg>() >= 68);
+        assert!(size_of::<AsynMsg>() >= 80);
     }
 
     #[test]

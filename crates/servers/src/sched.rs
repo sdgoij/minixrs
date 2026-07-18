@@ -357,11 +357,46 @@ unsafe fn schedule_process(rmp: &SchedProc, flags: u32) -> Result<(), i32> {
         -1i32
     };
 
-    let r = sys_schedule(rmp.endpoint, new_prio, new_quantum, new_cpu);
-    if r != 0 {
-        return Err(r);
+    // FIRST: Register as scheduler via SYS_SCHEDCTL (kernel call 54) —
+    // matching C `do_start_scheduling` in servers/sched/schedule.c line 221.
+    // This sets p->p_scheduler = caller on the kernel's Proc struct,
+    // which makes the subsequent do_schedule_handler check pass.
+    // C: sys_schedctl(0, endpoint, 0, 0, 0) with flags=0 means
+    // SCHED server (caller) becomes the process's p_scheduler,
+    // per C MINIX do_schedctl.c: p->p_scheduler = caller.
+    // For the kernel-scheduled case, set KERNEL flag with NULL.
+    let schedctl_r = sys_schedctl(rmp.endpoint, new_prio, new_quantum, new_cpu);
+    if schedctl_r != 0 {
+        return Err(schedctl_r);
+    }
+
+    // SECOND: Call SYS_SCHEDULE (kernel call 3) to set priority/quantum
+    // and clear RTS_NO_QUANTUM. Matching C: schedule_process calls
+    // sys_schedule AFTER sys_schedctl registers us as the scheduler,
+    // so the do_schedule_handler's p_scheduler check passes.
+    let schedule_r = sys_schedule(rmp.endpoint, new_prio, new_quantum, new_cpu);
+    if schedule_r != 0 {
+        return Err(schedule_r);
     }
     Ok(())
+}
+
+/// Invoke SYS_SCHEDCTL (kernel call 54) to register this process as the
+/// scheduler for the target. Sets p->p_scheduler = caller on the kernel
+/// Proc struct, which enables do_schedule_handler's caller check.
+/// Matching C: do_schedctl.c lines 41-42.
+fn sys_schedctl(endpoint: i32, priority: i32, quantum: i32, cpu: i32) -> i32 {
+    let mut msg = [0u8; 64];
+    // Message layout matching do_schedctl_handler offsets.
+    // NOTE: kernel_call overwrites msg[0..8] with call_nr + src_ep,
+    // so all payload fields MUST be placed at offset 8+.
+    // flags = 0 means caller becomes the scheduler
+    msg[8..12].copy_from_slice(&0i32.to_le_bytes()); // flags = 0 (caller = sched), at SCHEDCTL_FLAGS_OFF=8
+    msg[12..16].copy_from_slice(&endpoint.to_le_bytes()); // SCHEDCTL_ENDPT_OFF=12
+    msg[16..20].copy_from_slice(&priority.to_le_bytes()); // SCHEDCTL_PRIORITY_OFF=16
+    msg[20..24].copy_from_slice(&quantum.to_le_bytes()); // SCHEDCTL_QUANTUM_OFF=20
+    msg[24..28].copy_from_slice(&cpu.to_le_bytes()); // SCHEDCTL_CPU_OFF=24
+    minix_rt::kernel_call(54, &mut msg)
 }
 
 /// Invoke SYS_SCHEDULE (kernel call 3) to update a process's scheduling

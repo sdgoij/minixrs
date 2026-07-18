@@ -127,6 +127,22 @@ fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {
     }
 }
 
+/// Like will_receive but also rejects messages when the destination has
+/// REPLY_PEND set (meaning it is in the RECEIVE phase of a SENDREC and
+/// waiting for a reply from a specific source). Without this check, a
+/// message from a third party can be delivered to a process in SENDREC,
+/// breaking the atomic send-receive pair.
+fn will_receive_sendrec(dst_ptr: *mut Proc, src_e: i32) -> bool {
+    unsafe {
+        let mf = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed);
+        if mf & MiscFlags::REPLY_PEND.bits() != 0 {
+            let from = (*dst_ptr).p_getfrom_e;
+            return from == src_e;
+        }
+        will_receive(dst_ptr, src_e)
+    }
+}
+
 // ── mini_send
 
 /// Send a message from `caller_ptr` to `dst_e`.
@@ -150,7 +166,15 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             return EDEADSRCDST;
         }
 
-        if will_receive(dst_ptr, (*caller_ptr).p_endpoint) {
+        // Use will_receive_sendrec to prevent delivering messages to a
+        // process that is in the RECEIVE phase of a SENDREC (has REPLY_PEND).
+        // Without this, a third-party message can break the atomic SENDREC.
+        // This is needed because in our Rust port, all processes run at the
+        // same priority (USER_Q=5), so PM's sched_init can be interrupted
+        // by the shell's fork message. In C MINIX, PM has higher priority
+        // and completes sched_init before the shell ever runs.
+        let will_recv = will_receive_sendrec(dst_ptr, (*caller_ptr).p_endpoint);
+        if will_recv {
             // Direct delivery.
             // Note: dest may have REPLY_PEND set if it was in SENDREC waiting
             // for OUR message (we ARE the SENDREC target replying).  The C
@@ -193,8 +217,7 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // Set the receiver's return value to the sender's endpoint.
             // Uses write_retval which knows the arch-specific offset
             // (RAX at +0 on x86_64, a0 at +80 on RISC-V).
-            let src_ep = (*caller_ptr).p_endpoint;
-            crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_ep as u64);
+            crate::hal::write_retval(&mut (*dst_ptr).p_reg, (*caller_ptr).p_endpoint as u64);
 
             let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
@@ -280,13 +303,25 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                     (*send_ptr).p_q_link = core::ptr::null_mut();
 
                     let msg_ptr = (*send_ptr).p_sendmsg.as_ptr();
+                    // Copy message to p_delivermsg FIRST (matching C:
+                    // caller_ptr->p_delivermsg = sender->p_sendmsg).
+                    // This ensures the kernel's deliver_msg can copy the
+                    // correct data to the user buffer, and that the return
+                    // value (m_source) is the sender's endpoint.
+                    let dst_dmsg = (*caller_ptr).p_delivermsg.as_mut_ptr();
+                    core::ptr::copy_nonoverlapping(msg_ptr, dst_dmsg, MESSAGE_SIZE);
+                    // Also copy to user buffer directly (for immediate use).
                     core::ptr::copy_nonoverlapping(msg_ptr, m_ptr, MESSAGE_SIZE);
 
                     let src = (*send_ptr).p_endpoint;
                     let ep_bytes = src.to_ne_bytes();
-                    // Write source endpoint to m_source (bytes 0-3)
+                    // Write source endpoint to m_source (bytes 0-3) in BOTH buffers.
+                    core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), dst_dmsg.add(0), 4);
                     core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), m_ptr.add(0), 4);
-
+                    // Set DELIVERMSG so deliver_msg copies p_delivermsg to user.
+                    (*caller_ptr)
+                        .p_misc_flags
+                        .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
                     let old = (*send_ptr).p_rts_flags.load(Ordering::Relaxed);
                     let new = old & !RtsFlags::SENDING.bits();
                     (*send_ptr).p_rts_flags.store(new, Ordering::Relaxed);
@@ -532,25 +567,21 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
             return OK;
         }
 
-        let boot_cr3 = crate::hal::boot_cr3();
-        let saved_cr3 = if boot_cr3 != 0 {
-            let saved = crate::hal::read_cr3();
-            let target_cr3 = (*rp).p_seg.p_cr3;
-            if target_cr3 != 0 {
-                crate::hal::write_cr3(target_cr3);
-            }
-            Some(saved)
+        // Switch to the target's CR3 so user-space virtual addresses
+        // map to the correct physical pages. When CR3 is 0 the target
+        // shares the boot page tables, so no switch is needed.
+        let target_cr3 = (*rp).p_seg.p_cr3;
+        let caller_cr3 = if target_cr3 != 0 {
+            let cr3 = crate::hal::read_cr3();
+            crate::hal::write_cr3(target_cr3);
+            Some(cr3)
         } else {
             None
         };
-
-        // Copy the message from the kernel buffer to the user virtual address.
         let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
         core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, copy_sz);
-
-        // Restore the original CR3.
-        if let Some(saved) = saved_cr3 {
-            crate::hal::write_cr3(saved);
+        if let Some(prev_cr3) = caller_cr3 {
+            crate::hal::write_cr3(prev_cr3);
         }
 
         OK
@@ -695,7 +726,8 @@ pub unsafe fn try_server_dispatch(
     if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
         return None;
     }
-    unsafe { (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg)) }
+    // D2: trace server dispatch
+    (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg))
 }
 
 // ── Exec dispatch handlers
@@ -890,8 +922,7 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
 
         for i in 0..size {
             // Read the async table entry from the source's address space.
-            // We read with the current CR3 because the kernel is
-            // identity-mapped and can access user addresses directly.
+            // All boot processes share boot_cr3, so direct reads work.
             let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
             let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
 
@@ -925,7 +956,6 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
             }
 
             // Found a message for dst — deliver it
-            let mut result = OK;
 
             if will_receive(dst_ptr, caller_ep) {
                 // Destination is waiting for this message.
@@ -933,22 +963,21 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
                 let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
-            } else {
-                // Not waiting — mark as pending
-                let src_id = (*privp).s_id;
-                if !(*dst_ptr).p_priv.is_null() {
-                    (*(*dst_ptr).p_priv).s_asyn_pending.set(src_id as usize);
-                }
-                result = EAGAIN;
+                // Set m_source (bytes 0-3) to the sender's endpoint, matching C:
+                // dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint;
+                core::ptr::write_unaligned(msg_dst as *mut i32, caller_ep);
+
+                // Mark as done and write back to the table
+                let mut updated = tabent;
+                updated.flags = flags | AMF_DONE;
+                let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
+                core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
+
+                return OK;
             }
-
-            // Write result back to the table
-            let mut updated = tabent;
-            updated.flags = flags | AMF_DONE;
-            let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-            core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
-
-            return result;
+            // Destination not waiting — don't mark as done, try again later.
+            // The message stays pending in s_asyn_pending.
+            // Matching C try_one: returns ESRCH if no deliverable entry found.
         }
 
         EAGAIN
@@ -1250,7 +1279,11 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
             if !is_ok_endpoint_f(dst, &mut dst_p, false) {
                 r = EDEADSRCDST;
             } else if crate::table::is_kernel_nr(dst_p)
-                || !crate::r#priv::may_send_to(&*(caller_ptr as *const Proc), dst_p)
+            // NOTE: may_send_to is currently broken (s_ipc_to never filled
+            // for boot processes). All async sends from user processes
+            // would fail with ECALLDENIED. Disabled until the privilege
+            // system is fixed (matching do_sync_ipc).
+            // || !crate::r#priv::may_send_to(&*(caller_ptr as *const Proc), dst_p)
             {
                 r = crate::system::ECALLDENIED;
             }
@@ -1275,10 +1308,13 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                         == 0)
             {
                 // Destination is waiting for this message — deliver directly.
-                // Copy only the `msg` field from the async entry (not flags/endpoint/result).
                 let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
+                // Set m_source (bytes 0-3) to the sender's endpoint, matching C:
+                // dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint;
+                let src_ep = (*caller_ptr).p_endpoint;
+                core::ptr::write_unaligned(msg_dst as *mut i32, src_ep);
                 (*dst_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);

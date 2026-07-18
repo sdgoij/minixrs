@@ -461,6 +461,16 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
 }
 
+/// Free `count` contiguous physical pages starting at `addr`.
+///
+/// # Safety
+///
+/// Must be called after the physical memory allocator is initialized.
+/// `addr` must have been previously allocated via `alloc_phys_contig`.
+pub unsafe fn free_phys_contig(addr: u64, count: usize) {
+    unsafe { crate::alloc::free_phys_contig(addr, count) }
+}
+
 /// Read a byte from an I/O port (unimplemented on RISC-V).
 pub unsafe fn inb(_port: u16) -> u8 {
     0

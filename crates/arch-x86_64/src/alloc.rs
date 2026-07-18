@@ -415,6 +415,18 @@ pub fn free_phys_page(addr: u64) {
     }
 }
 
+/// Free `count` contiguous physical pages starting at `addr`.
+///
+/// # Safety
+///
+/// `addr` must have been previously allocated via `alloc_phys_contig`
+/// with the same count.
+pub fn free_phys_contig(addr: u64, count: usize) {
+    unsafe {
+        (*global_allocator()).free_contig(addr, count);
+    }
+}
+
 // Tests — use a small bitmap (256 bits = 256 pages = 1 MB)
 
 #[cfg(test)]

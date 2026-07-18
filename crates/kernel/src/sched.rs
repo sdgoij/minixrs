@@ -222,6 +222,24 @@ pub unsafe fn dequeue(rp: *mut Proc) {
 
 // pick_proc
 
+/// Debug dump: iterate the run queue and call a callback for each entry.
+///
+/// # Safety
+///
+/// Must be called with exclusive access to the scheduler.
+pub unsafe fn dump_queues(mut cb: impl FnMut(i32)) {
+    unsafe {
+        let head = run_q_head_array();
+        for q in 0..NR_SCHED_QUEUES {
+            let mut rp = (*head)[q];
+            while !rp.is_null() {
+                cb((*rp).p_endpoint);
+                rp = (*rp).p_nextready;
+            }
+        }
+    }
+}
+
 /// Select the next process to run.
 ///
 /// Scans all 16 priority queues from highest (0) to lowest (15) and
@@ -258,6 +276,17 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
         }
         None
     }
+}
+
+/// FFI-safe wrapper for `pick_proc` — callable from assembly.
+/// Returns null if no runnable process exists.
+///
+/// # Safety
+///
+/// The run queue state must be accessible (not concurrently modified).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pick_proc_raw() -> *mut Proc {
+    unsafe { pick_proc().unwrap_or(core::ptr::null_mut()) }
 }
 
 // notify_scheduler

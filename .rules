@@ -3,6 +3,8 @@
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
 * Do not write organizational comments that summarize the code. Comments should only explain "why" for non-obvious reasons.
   - No decorative separators, banners, or ornamental formatting.
+  - Do not remove existing comments unless you have a specific, stated reason
+    (e.g., the comment describes code that was removed, or it's factually wrong).
 * Prefer implementing in existing files unless it's a new logical component.
 * Avoid panicking functions like `unwrap()` — use `?` to propagate errors.
 * Watch out for panics from indexing out of bounds.

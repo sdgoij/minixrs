@@ -216,6 +216,18 @@ pub unsafe fn free_phys_page(addr: u64) {
     }
 }
 
+/// Free `count` contiguous physical pages starting at `addr`.
+///
+/// # Safety
+///
+/// `addr` must have been previously allocated via `alloc_phys_contig`
+/// with the same count.
+pub unsafe fn free_phys_contig(addr: u64, count: usize) {
+    for i in 0..count {
+        unsafe { free_phys_page(addr + (i as u64) * 4096) };
+    }
+}
+
 /// Get the global allocator pointer (for DMA registration).
 pub fn global_allocator() -> *mut core::ffi::c_void {
     core::ptr::null_mut()

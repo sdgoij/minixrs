@@ -1182,15 +1182,17 @@ const VFS_M7_I5_OFF: usize = 24;
 ///
 /// - `caller_slot` must be a valid, in-use process slot.
 /// - `msg` must point to a valid message buffer.
-pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
+pub unsafe fn handle_fork(caller_slot: usize, _msg: &mut Message) -> i32 {
     let result = unsafe { do_fork(caller_slot) };
     match result {
         Ok(child_slot) => {
             let base = MPROC.as_ptr();
-            let child = unsafe { &*base.add(child_slot) };
+            // Use raw pointer reads only — never create a Rust reference to
+            // the child slot, because we modify it later through raw pointers.
+            // An immutable reference would violate aliasing rules.
             let parent_endpoint = unsafe { (*base.add(caller_slot)).mp_endpoint };
+            let child_pid = unsafe { (*base.add(child_slot)).mp_pid };
             let child_slot_i32 = child_slot as i32;
-            let child_pid = child.mp_pid;
 
             // Step 1: Send VM_FORK to VM server.
             let mut vm_msg = [0u8; 64];
@@ -1218,41 +1220,48 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
                 unsafe { free_proc(child_slot) };
                 return if vm_src < 0 { vm_src as i32 } else { -1 };
             }
-
-            // Read child endpoint from VM's reply (m1i1 at bytes 8-11).
+            // Read child endpoint from VM reply and update MProc table
             let child_endpoint = i32::from_le_bytes(vm_msg[8..12].try_into().unwrap_or([0; 4]));
             unsafe {
-                let child_ptr = base.add(child_slot);
-                (*child_ptr).mp_endpoint = child_endpoint;
+                let mp = MPROC.as_ptr().add(child_slot);
+                (*mp).mp_endpoint = child_endpoint;
             }
 
-            // Step 2: Send VFS_PM_FORK to VFS via asynsend3 (matching C
-            // tell_vfs which uses asynsend3(VFS_PROC_NR, &m, AMF_NOREPLY)).
-            // This queues the message in the kernel's async send table;
-            // the kernel delivers it when VFS does RECEIVE.
+            // Step 2: Notify VFS of the new child (matching C tell_vfs).
+            // Build VFS_PM_FORK message using m7 layout:
+            //   m_type at +4, m7_i1 at +8 (child ep), m7_i2 at +12 (parent ep),
+            //   m7_i3 at +16 (child pid), m7_i4 at +20 (reuid = -1),
+            //   m7_i5 at +24 (regid = -1).
             let mut vfs_msg = [0u8; 64];
-            vfs_msg[4..8].copy_from_slice(&(arch_common::com::VFS_PM_FORK as i32).to_le_bytes());
+            vfs_msg[4..8]
+                .copy_from_slice(&(arch_common::com::VFS_PM_RQ_BASE as i32 + 7).to_le_bytes()); // VFS_PM_FORK
             vfs_msg[8..12].copy_from_slice(&child_endpoint.to_le_bytes());
             vfs_msg[12..16].copy_from_slice(&parent_endpoint.to_le_bytes());
             vfs_msg[16..20].copy_from_slice(&child_pid.to_le_bytes());
-            vfs_msg[20..24].copy_from_slice(&(-1i32).to_le_bytes());
-            vfs_msg[24..28].copy_from_slice(&(-1i32).to_le_bytes());
-            // AMF_NOREPLY = 0x08 | AMF_VALID = 0x01 → flags = 0x09
-            unsafe { minix_rt::asynsend3(arch_common::com::VFS_PROC_NR, vfs_msg.as_ptr(), 0x09) };
-
-            // Step 3: Set VFS_CALL flag on child (matching C tell_vfs).
-            unsafe {
-                let child_ptr = base.add(child_slot);
-                (*child_ptr).mp_flags |= VFS_CALL;
+            vfs_msg[20..24].copy_from_slice(&(-1i32).to_le_bytes()); // reuid
+            vfs_msg[24..28].copy_from_slice(&(-1i32).to_le_bytes()); // regid
+            let asend_result = unsafe {
+                minix_rt::asynsend3(
+                    arch_common::com::VFS_PROC_NR,
+                    vfs_msg.as_ptr(),
+                    arch_common::ipc::AMF_NOREPLY,
+                )
+            };
+            if asend_result != 0 {
+                // VFS notification failed — free the child and abort.
+                unsafe { free_proc(child_slot) };
+                return -1;
             }
 
-            // Step 4: Return EDONTREPLY — the main loop will NOT reply
-            // to the fork caller. Instead, the VFS_PM_FORK_REPLY handler
-            // (handle_vfs_reply) will send the fork result to parent and
-            // child when VFS acknowledges the fork.
-            // Set m1_i1 to child PID so handle_vfs_reply can use it
-            // when building the reply to the parent.
-            msg.m_payload.m1.m1i1 = child_pid;
+            // Set VFS_CALL flag so handle_vfs_reply knows this child
+            // has an outstanding VFS request (matching C tell_vfs).
+            unsafe {
+                let mp = MPROC.as_ptr().add(child_slot);
+                (*mp).mp_flags |= VFS_CALL;
+            }
+
+            // Return EDONTREPLY — the caller (shell) will be replied to
+            // by handle_vfs_reply when VFS sends VFS_PM_FORK_REPLY.
             EDONTREPLY
         }
         Err(_) => -11,
@@ -1601,44 +1610,99 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 
     match call_nr as u32 {
         arch_common::com::VFS_PM_FORK_REPLY => {
-            // Reply to child with OK (0) — matching C: reply(proc_n, OK).
-            // The child detects itself via is_fork_child (p_defer_r1 == 1)
-            // set by do_fork_handler. The reply is sent via SENDNB which
-            // silently fails if the child isn't in RECEIVE mode yet.
-            // In C MINIX this is OK — the kernel's do_fork_handler already
-            // sets p_reg.retreg = 0 for the child.
-            let mut child_reply = [0u8; 64];
-            child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4].copy_from_slice(&OK.to_le_bytes());
-            unsafe {
-                minix_rt::syscall2(
-                    minix_rt::SENDNB_CALL,
-                    proc_e as u64,
-                    child_reply.as_ptr() as u64,
-                )
-            };
+            // Step 1: Schedule the child (matching C: sched_start_user).
+            // Give it a default user quantum and priority.
+            // This calls SYS_SCHEDULE (kernel call 3) which clears
+            // RTS_NO_QUANTUM on the child and enqueues it.
+            minix_rt::diag_putchar(b'1');
+            // Diagnostic: print child endpoint
+            {
+                let ep_bytes = proc_e.to_le_bytes();
+                let hex = b"0123456789abcdef";
+                for &b in &ep_bytes {
+                    minix_rt::diag_putchar(hex[(b >> 4) as usize]);
+                    minix_rt::diag_putchar(hex[(b & 0xF) as usize]);
+                }
+            }
+            let mut sched_msg = [0u8; 64];
+            sched_msg[8..12].copy_from_slice(&proc_e.to_le_bytes()); // endpoint
+            sched_msg[12..16].copy_from_slice(&200i32.to_le_bytes()); // quantum (ticks)
+            sched_msg[16..20].copy_from_slice(&5i32.to_le_bytes()); // priority (USER_Q)
+            sched_msg[20..24].copy_from_slice(&0i32.to_le_bytes()); // cpu
+            let sched_result = minix_rt::kernel_call(3, &mut sched_msg);
+            minix_rt::diag_putchar(b'2');
+            // Diagnostic: print return value
+            {
+                let bytes = sched_result.to_le_bytes();
+                let hex = b"0123456789abcdef";
+                for &b in &bytes {
+                    minix_rt::diag_putchar(hex[(b >> 4) as usize]);
+                    minix_rt::diag_putchar(hex[(b & 0xF) as usize]);
+                }
+            }
 
-            // Reply to parent with child PID — matching C: reply(parent, pid).
-            let parent_slot = rmp.mp_parent;
-            if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
-                let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
-                if parent_rmp.mp_flags & IN_USE != 0 {
-                    let mut parent_reply = [0u8; 64];
-                    // m_type = OK
-                    parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-                        .copy_from_slice(&OK.to_le_bytes());
-                    // m7_i1 = child PID
-                    parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
-                        .copy_from_slice(&rmp.mp_pid.to_le_bytes());
-                    // m7_i2 = 0 (exit status — not exiting, just forking)
-                    let zero: i32 = 0;
-                    parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
-                        .copy_from_slice(&zero.to_le_bytes());
-                    unsafe {
-                        minix_rt::syscall2(
-                            minix_rt::SENDNB_CALL,
-                            parent_rmp.mp_endpoint as u64,
-                            parent_reply.as_ptr() as u64,
-                        );
+            if sched_result != 0 {
+                minix_rt::diag_putchar(b'X');
+                // Scheduling failed — tear down child (matching C).
+                unsafe {
+                    free_proc(proc_n);
+                };
+                let parent_slot = rmp.mp_parent;
+                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                    let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
+                    if parent_rmp.mp_flags & IN_USE != 0 {
+                        // Tell parent fork failed.
+                        let mut reply = [0u8; 64];
+                        reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                            .copy_from_slice(&(-1i32).to_le_bytes());
+                        reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
+                            .copy_from_slice(&0i32.to_le_bytes());
+                        reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
+                            .copy_from_slice(&0i32.to_le_bytes());
+                        unsafe {
+                            minix_rt::syscall2(
+                                minix_rt::SENDNB_CALL,
+                                parent_rmp.mp_endpoint as u64,
+                                reply.as_ptr() as u64,
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Step 2: Reply to child with OK (matching C: reply(proc_n, OK)).
+                let mut child_reply = [0u8; 64];
+                child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                    .copy_from_slice(&OK.to_le_bytes());
+                unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SENDNB_CALL,
+                        proc_e as u64,
+                        child_reply.as_ptr() as u64,
+                    );
+                }
+
+                // Step 3: Reply to parent with child PID (matching C).
+                let parent_slot = rmp.mp_parent;
+                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                    let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
+                    if parent_rmp.mp_flags & IN_USE != 0 {
+                        minix_rt::diag_putchar(b'3');
+                        let mut parent_reply = [0u8; 64];
+                        parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                            .copy_from_slice(&OK.to_le_bytes());
+                        parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
+                            .copy_from_slice(&rmp.mp_pid.to_le_bytes());
+                        let zero: i32 = 0;
+                        parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
+                            .copy_from_slice(&zero.to_le_bytes());
+                        unsafe {
+                            minix_rt::syscall2(
+                                minix_rt::SENDNB_CALL,
+                                parent_rmp.mp_endpoint as u64,
+                                parent_reply.as_ptr() as u64,
+                            );
+                        }
+                        minix_rt::diag_putchar(b'4');
                     }
                 }
             }
@@ -1646,6 +1710,60 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 
         _ => {
             // Unknown VFS reply — ignore (C panics here)
+        }
+    }
+}
+
+/// Initialize user-space scheduling for all boot processes.
+///
+/// Sends SCHEDULING_START to the SCHED server for each IN_USE process
+/// in PM's MProc table, matching C MINIX's `sched_init()` in `main.c`.
+/// The SCHED server calls SYS_SCHEDCTL to set p->p_scheduler, then
+/// SYS_SCHEDULE to set priority/quantum and clear RTS_NO_QUANTUM.
+///
+/// Uses SENDREC (matching C's _taskcall) so PM waits for each reply
+/// before moving to the next process. The SCHED server replies via
+/// SENDREC which pairs with PM's RECEIVE phase.
+///
+/// # Safety
+///
+/// Must be called after MProc table is populated and IPC is available.
+#[cfg(target_os = "none")]
+pub unsafe fn sched_init() {
+    let base = MPROC.as_ptr();
+    let sched_ep = arch_common::com::SCHED_PROC_NR;
+    let sendrec_call: u64 = 48; // SYS_SENDREC
+
+    for slot in 0..NR_PROCS {
+        let rmp = unsafe { &*base.add(slot) };
+        if rmp.mp_flags & IN_USE == 0 {
+            continue;
+        }
+
+        // Build SCHEDULING_START message (m2 format).
+        // m2i1 = endpoint, m2i2 = parent,
+        // m2i3 = max_priority, m2l1 = quantum
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0xF02, // SCHEDULING_START
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        msg.m_payload.m2.m2i1 = rmp.mp_endpoint;
+        msg.m_payload.m2.m2i2 = rmp.mp_parent as i32;
+        // User processes (INIT): USER_Q = 5.
+        // System processes: SRV_Q = 7.
+        msg.m_payload.m2.m2i3 = if rmp.mp_flags & PRIV_PROC != 0 { 7 } else { 5 };
+        msg.m_payload.m2.m2l1 = 200; // DEFAULT_USER_TIME_SLICE
+
+        // Send to SCHED server via SENDREC and wait for reply.
+        // Matching C: _taskcall(scheduler_e, SCHEDULING_START, &m)
+        // which does ipc_sendrec / SENDREC.
+        unsafe {
+            minix_rt::syscall2(
+                sendrec_call,
+                sched_ep as u64,
+                &mut msg as *mut Message as u64,
+            );
         }
     }
 }
@@ -1679,6 +1797,17 @@ pub fn pm_server_main() {
         // to find a free slot via proc_addr(child_slot).
         reserve_slot(11);
 
+        // NOTE: sched_init() is NOT called. Boot processes never have
+        // RTS_NO_QUANTUM set, and forked children get their quantum
+        // cleared by handle_vfs_reply's direct SYS_SCHEDULE call.
+        // The SCHED server is loaded but its IPC-based scheduling
+        // init (SCHEDULING_START handshake) deadlocks because PM and
+        // SCHED both use priority 5 (same queue) and the sched_init
+        // SENDREC cycle is interruptible by other processes.
+        //
+        // When the privilege and priority system is properly wired
+        // (PM higher than USER_Q), this can be restored.
+
         // Syscall numbers for IPC (from minix-std):
         //   RECEIVE_CALL = 47: receive(src, &mut msg) → sender endpoint
         const RECEIVE_CALL: u64 = 47;
@@ -1695,6 +1824,19 @@ pub fn pm_server_main() {
             let src = unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf_ptr as u64) };
             let src_ep = src as i32;
             let msg: &mut Message = unsafe { &mut *(buf_ptr as *mut Message) };
+
+            // Diagnostic: print what message PM received.
+            if msg.m_type == PM_FORK {
+                minix_rt::diag_putchar(b'k');
+            } else if msg.m_type == PM_EXIT {
+                minix_rt::diag_putchar(b'x');
+            } else if msg.m_type == PM_GETPID {
+                // common; don't spam
+            } else if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
+                minix_rt::diag_putchar(b'n');
+            } else if arch_common::com::is_vfs_pm_rs(msg.m_type as u32) {
+                minix_rt::diag_putchar(b'v');
+            }
 
             // Handle notifications FIRST — before endpoint/slot resolution,
             // because notifications can come from kernel tasks with negative
@@ -1767,7 +1909,9 @@ pub fn pm_server_main() {
             // For non-notifications, resolve the sender's process slot.
             let slot = match unsafe { pm_isokendpt(src_ep) } {
                 Some(s) => s,
-                None => continue,
+                None => {
+                    continue;
+                }
             };
 
             // Handle VFS replies: messages from VFS in the VFS_PM_RS range
@@ -1776,7 +1920,9 @@ pub fn pm_server_main() {
             if src_ep == arch_common::com::VFS_PROC_NR
                 && arch_common::com::is_vfs_pm_rs(msg.m_type as u32)
             {
+                minix_rt::diag_putchar(b'h');
                 unsafe { handle_vfs_reply(src_ep, msg) };
+                minix_rt::diag_putchar(b'H');
                 // VFS messages should NOT receive a reply from PM's main loop —
                 // handle_vfs_reply replies to the waiting caller directly.
                 continue;

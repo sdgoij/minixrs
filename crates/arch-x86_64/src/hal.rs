@@ -853,6 +853,16 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
 }
 
+/// Free `count` contiguous physical pages starting at `addr`.
+///
+/// # Safety
+///
+/// Must be called after the physical memory allocator is initialized.
+/// `addr` must have been previously allocated via `alloc_phys_contig`.
+pub unsafe fn free_phys_contig(addr: u64, count: usize) {
+    crate::alloc::free_phys_contig(addr, count)
+}
+
 /// Initialize the physical page allocator with a memory range [base, base+size).
 ///
 /// # Safety
