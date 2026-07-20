@@ -165,10 +165,13 @@ pub unsafe fn is_user_proc(rp: *const Proc) -> bool {
 /// `rp` must point to a valid `Proc` within the process table.
 pub unsafe fn is_empty_proc(rp: *const Proc) -> bool {
     unsafe {
-        (*rp)
+        let flags = (*rp)
             .p_rts_flags
-            .load(core::sync::atomic::Ordering::Relaxed)
-            == RtsFlags::SLOT_FREE.bits()
+            .load(core::sync::atomic::Ordering::Relaxed);
+        // NO_ENDPOINT may also be set by clear_endpoint after exit.
+        // Accept SLOT_FREE with or without NO_ENDPOINT.
+        flags == RtsFlags::SLOT_FREE.bits()
+            || flags == (RtsFlags::SLOT_FREE.bits() | RtsFlags::NO_ENDPOINT.bits())
     }
 }
 

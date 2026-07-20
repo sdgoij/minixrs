@@ -411,9 +411,22 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
                         if pte & PG_P == 0 || pte & PG_U == 0 {
                             continue;
                         }
-                        // Free the user page.
+                        // Free the user page, but only if not COW-shared.
                         let frame = pte & PG_FRAME;
-                        vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
+                        if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
+                            let refcount = match crate::vm::pb::pb_get(pb_idx) {
+                                Some(b) => b.refcount,
+                                None => 1,
+                            };
+                            if refcount > 1 {
+                                crate::vm::pb::pb_unref(pb_idx);
+                            } else {
+                                crate::vm::pb::pb_unref(pb_idx);
+                                vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
+                            }
+                        } else {
+                            vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
+                        }
                     }
 
                     // Free the page table page itself.
@@ -603,15 +616,24 @@ unsafe fn make_pte_readonly(cr3: u64, va: u64) -> i32 {
 /// pointer is not concurrently modified.
 pub unsafe fn vm_get_addrspace(ep: Endpoint) -> u64 {
     unsafe {
-        // First check the Vmproc table.
+        // Always use the kernel's CR3 first — it's the authoritative source
+        // and is updated by exec_initramfs_for_target (which can't update
+        // VM's Vmproc directly). The Vmproc's vm_pml4_phys may be stale
+        // after exec_replace, causing fork to create children with wrong
+        // page tables and immediate SIGSEGV on the first instruction.
+        let kernel_cr3 = get_p_cr3(ep);
+        if kernel_cr3 != 0 {
+            return kernel_cr3;
+        }
+
+        // Fall back to Vmproc table.
         if let Some(vmp) = vmproc_lookup(ep)
             && vmp.vm_pml4_phys != 0
         {
             return vmp.vm_pml4_phys;
         }
 
-        // Fall back to the kernel's Proc struct p_cr3.
-        get_p_cr3(ep)
+        0
     }
 }
 

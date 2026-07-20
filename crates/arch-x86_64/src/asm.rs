@@ -841,6 +841,7 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "mov    r12, [r15 + 80]",
         "mov    r13, [r15 + 88]",
         "mov    r14, [r15 + 96]",
+        "mov    rbp, [r15 + 112]",
         "mov    r15, [r15 + 104]",
         "swapgs",
         // Disable interrupts before unmasking the timer to prevent
@@ -871,6 +872,23 @@ pub mod syscall_abi {
     #[unsafe(no_mangle)]
     pub static SYSCALL_HANDLER_PTR: AtomicU64 = AtomicU64::new(0);
 
+    /// Kernel stack top for syscall_entry (top of BOOT_KSTACK).
+    /// Written once during `init_tss_for_boot()`, then read-only.
+    #[unsafe(no_mangle)]
+    pub static mut KERNEL_STACK_TOP: u64 = 0;
+
+    /// Saved user RSP during syscall_entry, written by the naked asm
+    /// before switching to the kernel stack.  Read by `save_proc_regs`
+    /// and by the iretq frame builder.  Only valid during the current
+    /// syscall invocation.
+    #[unsafe(no_mangle)]
+    pub static mut SAVED_USER_RSP: u64 = 0;
+
+    /// Read the saved user RSP with a volatile load.
+    pub fn saved_user_rsp() -> u64 {
+        unsafe { core::ptr::read_volatile(&raw const SAVED_USER_RSP) }
+    }
+
     /// Set the syscall handler pointer.
     ///
     /// # Safety
@@ -890,6 +908,12 @@ pub mod syscall_abi {
 
     /// Syscall entry point — called by hardware via `syscall` instruction.
     ///
+    /// Saves all registers on the **kernel stack** (not the user stack),
+    /// so no user stack data is ever corrupted.  The iretq return also
+    /// builds its frame on the kernel stack — the CPU automatically
+    /// switches to the user stack (from the frame's old_RSP field)
+    /// during iretq itself.
+    ///
     /// # Safety
     ///
     /// `entry` must point to a valid, writable page table entry.
@@ -898,6 +922,12 @@ pub mod syscall_abi {
     pub unsafe extern "C" fn syscall_entry() {
         core::arch::naked_asm!(
             "swapgs",
+            // Save user RSP to a static, then switch to kernel stack.
+            // From here until iretq, the user stack is never touched.
+            "mov    [rip + {saved_rsp}], rsp",
+            "mov    rsp, [rip + {kstack_top}]",
+            // Save 15 registers on the kernel stack (incl. rbp — callee-saved).
+            "push   rbp",
             "push   r15",
             "push   r14",
             "push   r13",
@@ -913,7 +943,7 @@ pub mod syscall_abi {
             "push   rbx",
             "push   rax",
             "mov    rdi, rsp",
-            "sub    rsp, 32",
+            "sub    rsp, 40",
             "lea    rax, [rip + {ptr}]",
             "mov    rax, [rax]",
             "test   rax, rax",
@@ -930,7 +960,7 @@ pub mod syscall_abi {
             "2:",
             "call   rax",
             "1:",
-            "add    rsp, 32",
+            "add    rsp, 40",
             "pop    rax",
             "pop    rbx",
             "pop    rcx",
@@ -945,27 +975,23 @@ pub mod syscall_abi {
             "pop    r13",
             "pop    r14",
             "pop    r15",
-            // Use IRETQ instead of SYSRETQ.  QEMU's SYSRETQ does not set
-            // the SS segment selector, leaving 0x0010 (RPL=0).  Any
-            // interrupt taken after SYSRETQ captures SS=0x0010 in its
-            // iretq frame, causing a #GP (SS.RPL != CS.RPL).
-            // By using iretq, SS is always loaded properly from the frame.
-            //
-            // After all 14 pops: RSP=user_RSP, RAX=return_value,
-            // RCX=user_RIP, R11=user_RFLAGS.
-            // Build 5-entry iretq frame in-place on the user stack.
-            // Keep RAX (the return value) intact — it's the only register
-            // the user sees after a syscall (via syscall return convention).
-            "sub    rsp, 40",
-            "mov    [rsp], rcx",
-            "mov    qword ptr [rsp + 8], 0x001B",
-            "mov    [rsp + 16], r11",
-            "mov    [rsp + 24], rsp",
-            "add    qword ptr [rsp + 24], 40",
-            "mov    qword ptr [rsp + 32], 0x0013",
+            "pop    rbp",
+            // All registers restored.  RSP = kernel stack base.
+            // Build iretq frame on the **kernel** stack, not on the
+            // user stack.  The iretq instruction reads old_SS and
+            // old_RSP from this frame and switches stacks atomically.
+            // RAX = return value (preserved through pop chain).
+            // RCX = user RIP, R11 = user RFLAGS.
+            "push   0x0013",                    // SS
+            "push   [rip + {saved_rsp}]",       // user RSP
+            "push   r11",                       // user RFLAGS
+            "push   0x001B",                    // CS
+            "push   rcx",                       // user RIP
             "swapgs",
             "iretq",
             ptr = sym SYSCALL_HANDLER_PTR,
+            kstack_top = sym KERNEL_STACK_TOP,
+            saved_rsp = sym SAVED_USER_RSP,
         );
     }
 }

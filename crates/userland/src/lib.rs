@@ -673,32 +673,36 @@ pub fn sh(_args: &[&str]) -> i32 {
                         }
                         _ => {
                             // Try external command via kernel fork/exec.
-                            static mut CMD_PATH: [u8; 256] = [0u8; 256];
-                            let cmd_path = unsafe { &mut *(&raw mut CMD_PATH) };
+                            // Use stack buffer (NOT static mut) to avoid COW page
+                            // faults after fork and potential aliasing issues.
+                            let mut cmd_path = [0u8; 256];
                             let cmd_bytes = cmd.as_bytes();
                             // If the command starts with '/', use it directly.
                             // Otherwise try /bin/<cmd> first, then /sbin/<cmd>.
                             let path_len = if cmd_bytes.starts_with(b"/") {
                                 let len = (cmd_bytes.len() + 1).min(cmd_path.len());
-                                cmd_path[..len - 1].copy_from_slice(&cmd_bytes[..len - 1]);
+                                for j in 0..(len - 1) {
+                                    cmd_path[j] = cmd_bytes[j];
+                                }
                                 cmd_path[len - 1] = 0;
                                 len
                             } else if 5 + cmd_bytes.len() < cmd_path.len() {
-                                cmd_path[..5].copy_from_slice(b"/bin/");
-                                cmd_path[5..5 + cmd_bytes.len()].copy_from_slice(cmd_bytes);
+                                for j in 0..5 {
+                                    cmd_path[j] = b"/bin/"[j];
+                                }
+                                for j in 0..cmd_bytes.len() {
+                                    cmd_path[5 + j] = cmd_bytes[j];
+                                }
                                 cmd_path[5 + cmd_bytes.len()] = 0;
                                 5 + cmd_bytes.len() + 1
                             } else {
                                 0
                             };
                             if path_len > 0 {
-                                write_err(b"sh: forking start ...\r\n");
                                 let pid = minix_rt::fork();
-                                write_err(b"sh: forking done ...\r\n");
                                 if pid < 0 {
                                     write_err(b"sh: fork failed\r\n");
                                 } else if pid == 0 {
-                                    write_err(b"  -- I'm the child");
                                     let child_path_len =
                                         cmd_path.iter().position(|&b| b == 0).unwrap_or(255) + 1;
                                     let cmd_end = child_path_len - 1;
@@ -709,30 +713,29 @@ pub fn sh(_args: &[&str]) -> i32 {
                                         .unwrap_or(0);
                                     let cmd_len = cmd_end - cmd_start;
 
-                                    write_err(b"  -- 1");
-
                                     // Save command name in a local array so it
                                     // survives if cmd_path is modified below.
                                     let mut cmd_name = [0u8; 56];
                                     let cmd_name_len = cmd_len.min(56);
-                                    cmd_name[..cmd_name_len]
-                                        .copy_from_slice(&cmd_path[cmd_start..cmd_end]);
-
-                                    write_err(b"  -- 2");
+                                    for j in 0..cmd_name_len {
+                                        cmd_name[j] = cmd_path[cmd_start + j];
+                                    }
 
                                     let mut argv_buf: [*const u8; 32] = [core::ptr::null(); 32];
-                                    argv_buf[0] = cmd_path.as_ptr() as *const u8;
+                                    argv_buf[0] = cmd_path.as_ptr();
                                     let r = unsafe {
                                         minix_rt::exec_replace(
                                             &cmd_path[..child_path_len],
                                             argv_buf.as_ptr(),
                                         )
                                     };
-                                    write_err(b"  -- 3");
                                     if r < 0 && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
-                                        cmd_path[..6].copy_from_slice(b"/sbin/");
-                                        cmd_path[6..6 + cmd_name_len]
-                                            .copy_from_slice(&cmd_name[..cmd_name_len]);
+                                        for j in 0..6 {
+                                            cmd_path[j] = b"/sbin/"[j];
+                                        }
+                                        for j in 0..cmd_name_len {
+                                            cmd_path[6 + j] = cmd_name[j];
+                                        }
                                         cmd_path[6 + cmd_name_len] = 0;
                                         let _ = unsafe {
                                             minix_rt::exec_replace(
@@ -746,7 +749,6 @@ pub fn sh(_args: &[&str]) -> i32 {
                                     write_err(b"' not found\r\n");
                                     minix_rt::exit(1);
                                 } else {
-                                    write_err(b"  ++ The parent");
                                     // Parent: wait for child
                                     let status = minix_rt::waitpid(pid);
                                     if status < 0 {

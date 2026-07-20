@@ -684,8 +684,6 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
         let user = error_code & 0x4 != 0;
 
         // Forward all user-mode page faults to VM for resolution
-        // (demand paging for non-present pages, COW for present
-        // read-only pages, etc.).
         if user {
             let slot = (*rp).p_nr as usize;
             if slot < PF_INFO_SLOTS {

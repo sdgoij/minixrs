@@ -161,7 +161,7 @@ pub fn service_pm() -> i32 {
             #[cfg(target_os = "none")]
             {
                 let mut buf = [0u8; 64];
-                buf[4..8].copy_from_slice(&(VFS_PM_EXEC_REPLY as i32).to_le_bytes());
+                buf[4..8].copy_from_slice(&VFS_PM_EXEC_REPLY.to_le_bytes());
                 buf[8..12].copy_from_slice(&_proc_e.to_le_bytes());
                 buf[12..16].copy_from_slice(&ENOSYS.to_le_bytes()); // STATUS
                 unsafe { send_raw_to_pm(&buf) };
@@ -204,7 +204,7 @@ pub fn service_pm() -> i32 {
             #[cfg(target_os = "none")]
             {
                 let mut buf = [0u8; 64];
-                buf[4..8].copy_from_slice(&(_reply_type as i32).to_le_bytes());
+                buf[4..8].copy_from_slice(&_reply_type.to_le_bytes());
                 buf[8..12].copy_from_slice(&proc_e.to_le_bytes());
                 unsafe { send_raw_to_pm(&buf) };
             }

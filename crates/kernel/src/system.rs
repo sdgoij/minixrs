@@ -438,6 +438,7 @@ pub const VM_PAGING_UNMAP: i32 = 4;
 pub const VM_PAGING_QUERY_PROC: i32 = 5;
 pub const VM_PAGING_COPY: i32 = 6;
 pub const VM_PAGING_FORK: i32 = 7;
+pub const VM_PAGING_WALK_PAGE: i32 = 8;
 
 // Constants
 
@@ -1584,12 +1585,11 @@ pub unsafe fn clear_ipc(rp: *mut Proc) {
 /// Process must be valid.
 pub unsafe fn clear_endpoint(rp: *mut Proc) {
     unsafe {
-        // Mark as having no endpoint
-        let rts_flags = RtsFlags::NO_ENDPOINT;
-        let old_flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
-        (*rp)
-            .p_rts_flags
-            .store(old_flags | rts_flags.bits(), Ordering::Relaxed);
+        // Mark as having no endpoint AND free the slot for reuse.
+        // Matching C: clear_endpoint in do_clear.c sets SLOT_FREE
+        // after release_address_space, so the slot can be reused.
+        let rts_flags = RtsFlags::NO_ENDPOINT | RtsFlags::SLOT_FREE;
+        (*rp).p_rts_flags.store(rts_flags.bits(), Ordering::Relaxed);
 
         // Clear async size for system processes
         if !(*rp).p_priv.is_null() {
@@ -3823,6 +3823,26 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_endpoint = table::make_endpoint(new_gen, child_slot);
         // C: rpc->p_reg.retreg = 0 (child sees pid=0)
         crate::hal::write_retval(&mut (*rpc).p_reg, 0);
+
+        // C MINIX does NOT clear REPLY_PEND or p_getfrom_e on the child.
+        // The child inherits RECEIVING + p_getfrom_e=PM from the parent
+        // (which is blocked in SENDREC during fork). When PM later sends
+        // SENDNB, mini_send finds RECEIVING set and delivers directly —
+        // this is what enqueues the child for the first time.
+        //
+        // However, the parent was in SENDREC which means it had BOTH
+        // RECEIVING and SENDING set. will_receive() rejects processes with
+        // SENDING, so we must clear SENDING on the child. In C MINIX,
+        // SENDREC sets REPLY_PEND + mini_send + mini_receive; the SENDING
+        // flag is cleared inside mini_send after the message is sent. Since
+        // we copy the parent AFTER its mini_send succeeds but BEFORE
+        // mini_receive (which adds RECEIVING without SENDING), the inherited
+        // SENDING flag is a stale artifact that blocks child delivery.
+        let old_rts_send = (*rpc).p_rts_flags.load(Ordering::Relaxed);
+        (*rpc)
+            .p_rts_flags
+            .store(old_rts_send & !RtsFlags::SENDING.bits(), Ordering::Relaxed);
+
         // C: rpc->p_user_time = 0; rpc->p_sys_time = 0;
         (*rpc).p_user_time = 0;
         (*rpc).p_sys_time = 0;
@@ -3910,8 +3930,11 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
 
         // C: RTS_UNSET(rpc, (RTS_SIGNALED | RTS_SIG_PENDING | RTS_P_STOP));
-        let unset_rts =
-            RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits() | RtsFlags::P_STOP.bits();
+        // Also clear PAGEFAULT — the child is a fresh copy, not faulting.
+        let unset_rts = RtsFlags::SIGNALED.bits()
+            | RtsFlags::SIG_PENDING.bits()
+            | RtsFlags::P_STOP.bits()
+            | RtsFlags::PAGEFAULT.bits();
         let old_rts3 = (*rpc).p_rts_flags.fetch_and(!unset_rts, Ordering::Relaxed);
         // RTS_UNSET side effect: if WASN'T runnable and NOW is, enqueue
         // But child has NO_QUANTUM set, so it's still not runnable
@@ -3928,19 +3951,19 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         (*rpc).p_defer_r1 = 1;
 
         // C: rpc->p_seg.p_cr3 = 0; rpc->p_seg.p_cr3_v = NULL;
+        // Child initially has no page table set. VM's sys_vmctl_set_addspace
+        // will set the deep-copy CR3 and clear VMINHIBIT.
         (*rpc).p_seg.p_cr3 = 0;
         (*rpc).p_seg.p_cr3_v = core::ptr::null_mut();
 
-        // Clear IPC state inherited from parent's SENDREC (Proc copy
-        // happened after mini_receive set RECEIVING / REPLY_PEND).
-        // Must be AFTER NO_QUANTUM/VMINHIBIT blocks so dequeue()
-        // doesn't see a temporarily-runnable child.
-        (*rpc)
-            .p_rts_flags
-            .fetch_and(!RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
-        (*rpc)
-            .p_misc_flags
-            .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        // C MINIX does NOT clear RECEIVING or REPLY_PEND on the child.
+        // The child inherits RECEIVING from the parent (which is blocked in
+        // SENDREC during the fork). When PM later sends SENDNB to the child,
+        // mini_send finds RECEIVING set and delivers the reply directly —
+        // this is what enqueues the child for the first time.
+        // Clearing RECEIVING here prevents that delivery and forces the
+        // child to be enqueued by SYS_SCHEDULE, creating a duplicate queue
+        // entry and leaving p_delivermsg unpopulated.
 
         OK
     }
@@ -4384,10 +4407,15 @@ pub unsafe fn release_address_space(proc: *mut Proc) {
                         if pte & crate::pagetable::PG_P == 0 {
                             continue;
                         }
-                        // Free the 4KB user page
-                        let pa = crate::hal::pte_to_phys(pte);
-                        let page = pa / crate::vm::VM_PAGE_SIZE as u64;
-                        crate::vm::free_mem(page, 1);
+                        // Free the 4KB user page — BUT beware: some pages
+                        // are COW-shared with another process (the parent).
+                        // The kernel doesn't track PhysBlock refcounts, so
+                        // we must NOT free them here. VM's vm_destroy handles
+                        // user page freeing with proper refcounting.
+                        // We free ONLY page table pages (PT/PD/PDPT/PML4).
+                        // let pa = crate::hal::pte_to_phys(pte);
+                        // let page = pa / crate::vm::VM_PAGE_SIZE as u64;
+                        // crate::vm::free_mem(page, 1);
                     }
 
                     // Free the PT page itself
@@ -4804,6 +4832,27 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 }
                 OK
             }
+            VM_PAGING_WALK_PAGE => {
+                // Walk the page table for the given CR3 and VA, return the
+                // PTE value at VM_PAGING_CR3_OFF. The kernel runs in ring 0
+                // with full identity mapping — safe to dereference physical
+                // page table addresses.
+                let cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                let va = msg_read_u64(msg, VM_PAGING_VA_OFF);
+                if cr3 == 0 {
+                    return crate::ipc::EINVAL;
+                }
+                match crate::pagetable::walk(cr3, va) {
+                    Ok(result) => {
+                        msg_write_u64(msg, VM_PAGING_CR3_OFF, result.pte_value);
+                        OK
+                    }
+                    Err(_) => {
+                        msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
+                        crate::ipc::EINVAL
+                    }
+                }
+            }
             VM_PAGING_FORK => {
                 let parent_cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
                 if parent_cr3 == 0 {
@@ -4848,89 +4897,91 @@ unsafe fn vm_paging_fork_x86_64(
     _msg: &mut [u8; MESSAGE_SIZE],
 ) -> i32 {
     const USER_ENTRIES: usize = 256;
-    const ALL_ENTRIES: usize = 512;
     const PG_P: u64 = 0x01;
+    const PG_RW: u64 = 0x02;
     const PG_U: u64 = 0x04;
     const PG_PS: u64 = 0x80;
     const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
-    const MAP_FLAGS: u64 = 0x02 | 0x04;
-
-    // CR3 management is handled by sys_kernel_call_handler.
 
     let parent = parent_cr3 as *const u64;
     let child = child_cr3 as *mut u64;
+
+    // Copy kernel half (entries 256-511) directly
     core::ptr::copy_nonoverlapping(
         parent.add(USER_ENTRIES),
         child.add(USER_ENTRIES),
         USER_ENTRIES,
     );
+
+    // Copy user half (entries 0-255): walk parent's PML4, copy
+    // intermediate page table pages, and share leaf pages.
     for l4 in 0..USER_ENTRIES {
         let e4 = core::ptr::read(parent.add(l4));
         if e4 & PG_P == 0 {
             continue;
         }
-        let p3 = (e4 & PG_FRAME) as *const u64;
-        for l3 in 0..ALL_ENTRIES {
-            let e3 = core::ptr::read(p3.add(l3));
-            if e3 & PG_P == 0 || e3 & PG_PS != 0 {
+        let parent_p3 = (e4 & PG_FRAME) as *const u64;
+        let child_p3 = match crate::pagetable::alloc_pt_page() {
+            Ok(pa) => pa as *mut u64,
+            Err(_) => return crate::ipc::ENOMEM,
+        };
+        core::ptr::write(child.add(l4), (child_p3 as u64) | (e4 & !PG_FRAME));
+        for l3 in 0..512 {
+            let e3 = core::ptr::read(parent_p3.add(l3));
+            if e3 & PG_P == 0 {
                 continue;
             }
-            let p2 = (e3 & PG_FRAME) as *const u64;
-            for l2 in 0..ALL_ENTRIES {
-                let e2 = core::ptr::read(p2.add(l2));
-                if e2 & PG_P == 0 || e2 & PG_PS != 0 {
+            let parent_p2 = (e3 & PG_FRAME) as *const u64;
+            let child_p2 = match crate::pagetable::alloc_pt_page() {
+                Ok(pa) => pa as *mut u64,
+                Err(_) => return crate::ipc::ENOMEM,
+            };
+            core::ptr::write(child_p3.add(l3), (child_p2 as u64) | (e3 & !PG_FRAME));
+            if e3 & PG_PS != 0 {
+                // 1GB page — copy and COW-protect if user-writable.
+                if e3 & PG_U != 0 && e3 & PG_RW != 0 {
+                    let cow_entry = e3 & !PG_RW;
+                    core::ptr::write(parent_p3.add(l3) as *mut u64, cow_entry);
+                    core::ptr::write(child_p3.add(l3), cow_entry);
+                } else {
+                    core::ptr::write(child_p3.add(l3), e3);
+                }
+                continue;
+            }
+            for l2 in 0..512 {
+                let e2 = core::ptr::read(parent_p2.add(l2));
+                if e2 & PG_P == 0 {
                     continue;
                 }
-                let p1 = (e2 & PG_FRAME) as *const u64;
-                for l1 in 0..ALL_ENTRIES {
-                    let e1 = core::ptr::read(p1.add(l1));
-                    if e1 & PG_P == 0 || e1 & PG_U == 0 {
+                if e2 & PG_PS != 0 {
+                    // 2MB page — copy and COW-protect (clear RW) if user-writable.
+                    if e2 & PG_U != 0 && e2 & PG_RW != 0 {
+                        // COW: clear RW in both parent and child.
+                        let cow_entry = e2 & !PG_RW;
+                        core::ptr::write(parent_p2.add(l2) as *mut u64, cow_entry);
+                        core::ptr::write(child_p2.add(l2), cow_entry);
+                    } else {
+                        core::ptr::write(child_p2.add(l2), e2);
+                    }
+                    continue;
+                }
+                let parent_p1 = (e2 & PG_FRAME) as *const u64;
+                let child_p1 = match crate::pagetable::alloc_pt_page() {
+                    Ok(pa) => pa as *mut u64,
+                    Err(_) => return crate::ipc::ENOMEM,
+                };
+                core::ptr::write(child_p2.add(l2), (child_p1 as u64) | (e2 & !PG_FRAME));
+                // 4KB page table — copy entries directly, then COW-protect.
+                core::ptr::copy_nonoverlapping(parent_p1, child_p1, 512);
+                // Clear RW on all user-writable PTEs in both parent and child.
+                for l1 in 0..512 {
+                    let e1 = core::ptr::read(parent_p1.add(l1));
+                    if e1 & PG_P == 0 || e1 & PG_U == 0 || e1 & PG_RW == 0 {
                         continue;
                     }
-                    let va = ((l4 as u64) << 39)
-                        | ((l3 as u64) << 30)
-                        | ((l2 as u64) << 21)
-                        | ((l1 as u64) << 12);
-                    let src_pa = e1 & PG_FRAME;
-                    let dst_pa = match crate::pagetable::alloc_pt_page() {
-                        Ok(pa) => pa,
-                        Err(_) => {
-                            return crate::ipc::ENOMEM;
-                        }
-                    };
-                    core::ptr::copy_nonoverlapping(src_pa as *const u8, dst_pa as *mut u8, 4096);
-                    if crate::pagetable::map_page(child_cr3, va, dst_pa, MAP_FLAGS).is_err() {
-                        return crate::ipc::ENOMEM;
-                    }
-                }
-            }
-        }
-    }
-    // Copy kernel identity map entries from boot PD into child PD.
-    let boot_cr3_for_kernel = crate::hal::boot_cr3();
-    if boot_cr3_for_kernel != 0 {
-        let boot_pml4 = boot_cr3_for_kernel as *const u64;
-        let boot_pml4e0 = boot_pml4.read();
-        if boot_pml4e0 & PG_P != 0 {
-            let boot_pdpt_pa = boot_pml4e0 & PG_FRAME;
-            let boot_pdpt = boot_pdpt_pa as *const u64;
-            let boot_pdpte0 = boot_pdpt.read();
-            if boot_pdpte0 & PG_P != 0 {
-                let boot_pd_pa = boot_pdpte0 & PG_FRAME;
-                let boot_pd = boot_pd_pa as *const u64;
-                let child_pml4e0 = child.read();
-                if child_pml4e0 & PG_P != 0 {
-                    let child_pdpt_pa = child_pml4e0 & PG_FRAME;
-                    let child_pdpt = child_pdpt_pa as *const u64;
-                    let child_pdpte0 = child_pdpt.read();
-                    if child_pdpte0 & PG_P != 0 {
-                        let child_pd_pa = child_pdpte0 & PG_FRAME;
-                        let child_pd = child_pd_pa as *mut u64;
-                        for i in 1..8 {
-                            let boot_pde = boot_pd.add(i).read();
-                            child_pd.add(i).write(boot_pde);
-                        }
-                    }
+                    let cow_e1 = e1 & !PG_RW;
+                    core::ptr::write(parent_p1.add(l1) as *mut u64, cow_e1);
+                    core::ptr::write(child_p1.add(l1), cow_e1);
                 }
             }
         }

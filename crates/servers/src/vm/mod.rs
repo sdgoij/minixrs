@@ -23,9 +23,6 @@ use arch_common::com::{
 use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
 use arch_common::ipc::{EDONTREPLY, Message};
-use arch_common::ipcconst::{
-    IPC_FLG_MSG_FROM_KERNEL, IPC_STATUS_FLAGS_SHIFT, ipc_status_flags_test,
-};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -60,6 +57,28 @@ const VM_PAGING_MAP: i32 = 3;
 const VM_PAGING_UNMAP: i32 = 4;
 const VM_PAGING_COPY: i32 = 6;
 const VM_PAGING_FORK: i32 = 7;
+const VM_PAGING_WALK_PAGE: i32 = 8;
+
+/// Walk the page table identified by `cr3` at virtual address `va`
+/// and return the PTE value. Runs in ring 0 via kernel call so it can
+/// safely dereference physical page table addresses.
+/// Returns the raw 64-bit PTE value, or 0 if the page is not mapped.
+pub fn vm_walk_page(cr3: u64, va: u64) -> u64 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_WALK_PAGE.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    if r != 0 {
+        return 0;
+    }
+    u64::from_le_bytes(
+        msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    )
+}
 
 /// Allocate `count` contiguous physical pages via kernel call.
 /// Returns the physical address of the first page, or 0 on failure.
@@ -548,13 +567,7 @@ pub fn dispatch_message(msg: &mut Message, ipc_status: i32) -> i32 {
     // The ipc_status parameter is not available (main loop passes 0),
     // so also check m_type directly for NOTIFY_MESSAGE (-10).
     if is_ipc_notify(ipc_status) || msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
-        if ipc_status_flags_test(
-            ipc_status,
-            IPC_FLG_MSG_FROM_KERNEL << IPC_STATUS_FLAGS_SHIFT,
-        ) {
-            sef_signal_handler();
-        }
-        // Notifications don't get a reply.
+        sef_signal_handler();
         return EDONTREPLY;
     }
 
@@ -628,22 +641,13 @@ pub fn exec_bootproc() {
 /// (stored by the kernel's #PF handler) and processes them.
 pub fn sef_signal_handler() {
     // Process pending page faults by querying the kernel via
-    // SYS_VMCTL(VMCTL_MEMREQ_GET). This kernel call reads fault
-    // info from the kernel's own PAGE_FAULT_INFO static, avoiding
-    // the static-data-duplication issue (Bug 2 / Blocker 5 class).
-    //
-    // Iterate all active Vmproc entries and check each one for
-    // pending fault data. If found, dispatch to the shared handler.
+    // SYS_VMCTL(VMCTL_MEMREQ_GET). Iterate all active Vmproc
+    // entries and check each one for pending fault data.
     unsafe {
         proc::for_each_active_vmproc(|vmp| {
             let ep = vmp.vm_endpoint;
-            match minix_rt::sys_vmctl_memreq_get(ep) {
-                Ok((addr, error_code)) => {
-                    handle_pagefault_for(ep, addr, error_code);
-                }
-                Err(_) => {
-                    // No pending fault for this endpoint — continue.
-                }
+            if let Ok((addr, error_code)) = minix_rt::sys_vmctl_memreq_get(ep) {
+                handle_pagefault_for(ep, addr, error_code);
             }
         });
     }
@@ -697,7 +701,6 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     let vmp = match unsafe { proc::vmproc_lookup(ep) } {
         Some(vmp) => vmp,
         None => {
-            // Unknown endpoint — send SIGSEGV and clear.
             sys_kill(ep, SIGSEGV);
             unsafe {
                 mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
@@ -706,9 +709,10 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         }
     };
 
-    let cr3 = vmp.vm_pml4_phys;
+    // Use vm_get_addrspace which prefers the kernel's authoritative CR3
+    // (updated by exec_replace) over Vmproc's potentially stale value.
+    let cr3 = unsafe { proc::vm_get_addrspace(ep) };
     if cr3 == 0 {
-        // No page table — can't resolve fault, send SIGSEGV.
         sys_kill(ep, SIGSEGV);
         unsafe {
             mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
@@ -716,95 +720,84 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         return;
     }
 
-    // Find the region containing the faulting address.
-    let region = vmp.vm_regions.find(addr);
-
-    match region {
-        Some(region) => {
-            // Determine fault type.
-            if is_prot_fault && is_write {
-                // Protection fault with write access.
-                if region.flags & region::VR_WRITABLE != 0 {
-                    // Writable region but PTE is read-only → COW candidate.
-                    let result = cow::handle_cow_fault(vmp, addr);
-                    if result != 0 {
-                        sys_kill(ep, SIGSEGV);
-                    }
-                    unsafe {
-                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                    }
-                    return;
-                } else {
-                    // Write to read-only region → SIGSEGV
-                    sys_kill(ep, SIGSEGV);
-                    unsafe {
-                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                    }
-                    return;
-                }
-            }
-
-            // Demand-paging: allocate a physical page, zero-fill, and map it.
-            let page_size: u64 = 4096;
-            let page_addr = addr & !(page_size - 1);
-
-            // Allocate a physical page.
-            let pg = unsafe { kernel::vm::alloc_mem(1, 0) };
-            if pg == kernel::vm::NO_MEM {
-                // Out of memory — send SIGSEGV.
+    // Handle COW faults via PTE walk (not region lookup). After exec_replace,
+    // VM's region cache is stale (init's pre-exec layout) and doesn't reflect
+    // the new binary's mappings. Walking the PTE directly is authoritative.
+    if is_prot_fault && is_write {
+        let pte_val = crate::vm::vm_walk_page(cr3, addr);
+        if pte_val & (kernel::pagetable::PG_P | kernel::pagetable::PG_U) != 0
+            && pte_val & kernel::pagetable::PG_RW == 0
+        {
+            // Present, user, read-only with write fault → COW.
+            if cow::handle_cow_fault(vmp, addr) != 0 {
                 sys_kill(ep, SIGSEGV);
-                unsafe {
-                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                }
-                return;
             }
-            let pa = pg * page_size;
-
-            // Zero-fill the page.
             unsafe {
-                kernel::vm::vm_memset(pa, 0, page_size as usize);
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
             }
+            return;
+        }
+        // PTE is read-only → SIGSEGV (write to non-writable page)
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+        return;
+    }
 
-            // Build page flags from region permissions.
-            let mut pt_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
-            if region.flags & region::VR_WRITABLE != 0 {
-                pt_flags |= kernel::pagetable::MAP_WRITE;
+    // Non-COW fault: find region for demand paging.
+    let region = vmp.vm_regions.find(addr);
+    let region = match region {
+        Some(r) => r,
+        None => {
+            sys_kill(ep, SIGSEGV);
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
             }
+            return;
+        }
+    };
 
-            // Map the page in the process's page table.
-            let map_result = unsafe { kernel::pagetable::map_page(cr3, page_addr, pa, pt_flags) };
+    // Demand-paging: allocate a physical page, zero-fill, and map it.
+    let page_size: u64 = 4096;
+    let page_addr = addr & !(page_size - 1);
+    let pg = match unsafe { kernel::vm::alloc_mem(1, 0) } {
+        p if p != kernel::vm::NO_MEM => p,
+        _ => {
+            sys_kill(ep, SIGSEGV);
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+            return;
+        }
+    };
+    let pa = pg * page_size;
 
-            match map_result {
-                Ok(_) => {
-                    // Create a PhysBlock for the new page.
-                    pb::pb_new(pa);
+    unsafe {
+        kernel::vm::vm_memset(pa, 0, page_size as usize);
+    }
 
-                    // Record the physical page in the region.
-                    if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
-                        && let Some(r) = vmp.vm_regions.find_mut(page_addr)
-                    {
-                        r.add_page(page_addr, pa);
-                    }
+    let mut pt_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
+    if region.flags & region::VR_WRITABLE != 0 {
+        pt_flags |= kernel::pagetable::MAP_WRITE;
+    }
 
-                    // Clear the page fault flag, resuming the process.
-                    unsafe {
-                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                    }
-                }
-                Err(_) => {
-                    // Mapping failed — free the page and send SIGSEGV.
-                    unsafe {
-                        kernel::vm::free_mem(pg, 1);
-                    }
-                    sys_kill(ep, SIGSEGV);
-                    unsafe {
-                        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                    }
-                }
+    match unsafe { kernel::pagetable::map_page(cr3, page_addr, pa, pt_flags) } {
+        Ok(_) => {
+            pb::pb_new(pa);
+            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+                && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+            {
+                r.add_page(page_addr, pa);
+            }
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
             }
         }
-        None => {
-            // No region found — fault on an unmapped address → SIGSEGV.
+        Err(_) => {
+            unsafe {
+                kernel::vm::free_mem(pg, 1);
+            }
             sys_kill(ep, SIGSEGV);
             unsafe {
                 mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
@@ -1156,7 +1149,7 @@ fn do_procctl_notrans(msg: &mut Message) -> i32 {
 ///
 /// Validates endpoint, destroys the process's VM state.
 fn do_exit(msg: &mut Message) -> i32 {
-    let ep = msg.m_source;
+    let ep = unsafe { msg.m_payload.m1.m1i1 };
     if ep < 0 || ep >= NR_PROCS as i32 {
         return EINVAL;
     }
@@ -1335,34 +1328,38 @@ fn do_fork(msg: &mut Message) -> i32 {
     }
 
     // Set the child's CR3 via SYS_VMCTL(VMCTL_SETADDRSPACE).
-    // Use child_ep (not temp_ep) because vm_endpoint was already updated
-    // to child_ep above, and vmproc_lookup checks vm_endpoint match.
-    if let Some(vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
-        let child_cr3 = vmp.vm_pml4_phys;
+    // This also clears VMINHIBIT and enqueues the child.
+    if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+        let child_cr3 = child_vmp.vm_pml4_phys;
         if child_cr3 != 0 {
             let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
         }
+        let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
+        if parent_cr3_val != 0 && child_cr3 != 0 {
+            let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3) };
+        }
     }
 
-    // Handle memory for the message buffer
-    // Handle memory for the message buffer — DISABLED: COW handler
-    // needs a working page copy mechanism. The C code says this is
-    // just an optimization whose return value needn't be checked.
-    /*
-    const MESSAGE_SIZE: u64 = 56;
+    // Handle memory for the message buffer — pre-fault COW pages
+    // Matching C: handle_memory_once() after fork
+    #[allow(clippy::const_is_empty)]
+    if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+        const PAGE_SIZE: u64 = 4096;
+        let msg_va = msgaddr;
+        let msg_end = msgaddr + 56;
+        let mut va = msg_va & !(PAGE_SIZE - 1);
         while va < msg_end {
             let _ = cow::handle_cow_fault(child_vmp, va);
-            va = va.wrapping_add(page_size);
+            va = va.wrapping_add(PAGE_SIZE);
+        }
+        if let Some(parent_vmp) = unsafe { proc::vmproc_lookup(parent_ep) } {
+            let mut va = msg_va & !(PAGE_SIZE - 1);
+            while va < msg_end {
+                let _ = cow::handle_cow_fault(parent_vmp, va);
+                va = va.wrapping_add(PAGE_SIZE);
+            }
         }
     }
-    if let Some(parent_vmp) = unsafe { proc::vmproc_lookup(parent_ep) } {
-        let mut va = msgaddr;
-        while va < msg_end {
-            let _ = cow::handle_cow_fault(parent_vmp, va);
-            va = va.wrapping_add(page_size);
-        }
-    }
-    */
 
     // Reply with child endpoint in m1i1 (matching C VMF_CHILD_ENDPOINT).
     msg.m_payload.m1.m1i1 = child_ep;

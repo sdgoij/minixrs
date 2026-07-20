@@ -132,10 +132,6 @@ pub unsafe fn syscall0(nr: u64) -> i64 {
             in("rax") nr,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -159,10 +155,6 @@ pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
             in("rdi") a1,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -187,16 +179,6 @@ pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
             in("rsi") a2,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("rdx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -222,16 +204,6 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             in("rdx") a3,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("rdx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -258,16 +230,6 @@ pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
             in("r10") a4,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("rdx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -295,16 +257,6 @@ pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
             in("r8") a5,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("rdx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -333,16 +285,6 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
             in("r9") a6,
             lateout("rcx") _,
             lateout("r11") _,
-            lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("rdx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r12") _,
-            lateout("r13") _,
-            lateout("r14") _,
-            lateout("r15") _,
             lateout("rax") ret,
             options(nostack),
         );
@@ -675,15 +617,15 @@ pub fn sys_vmctl_clear_pagefault(ep: i32) -> Result<(), i32> {
 /// VFS_PM_FORK notification.
 /// Returns 0 in the child, child's PID in the parent,
 /// or negative on error.
+#[inline(never)]
 pub fn fork() -> i32 {
-    let mut msg = [0u8; 64];
+    let mut fork_msg = [0u8; 64];
+    let msg = &mut fork_msg;
     msg[4..8].copy_from_slice(&PM_FORK.to_le_bytes());
     let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
     if reply < 0 {
         return reply as i32;
     }
-    // Check the reply message type for errors. When PM returns an error,
-    // m_type (bytes 4-7) contains the negative error code instead of OK=0.
     let reply_type = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
     if reply_type < 0 {
         return reply_type;

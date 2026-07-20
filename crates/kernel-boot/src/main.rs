@@ -36,6 +36,7 @@ unsafe extern "C" {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn kmain() -> ! {
     core::arch::naked_asm!("sub rsp, 8", "jmp kmain_body",);
 }
@@ -258,6 +259,16 @@ pub extern "C" fn kmain_body() -> ! {
             kernel::table::proc_init();
             kernel::system::system_init();
             kernel::ipc::register_ipc_syscalls();
+
+            // Set CPU frequency so clock::ms_2_cpu_time works for all
+            // processes (including child processes created via fork).
+            // Without this, cpu_get_freq(0) returns 0, ms_2_cpu_time
+            // returns 0, and every SYS_SCHEDULE gives forked children
+            // p_cpu_time_left = 0. That causes the first timer tick to
+            // call proc_no_time → notify_scheduler → RTS_NO_QUANTUM,
+            // and the child hangs forever because the SCHED server
+            // has no message loop to handle SCHEDULING_NO_QUANTUM.
+            kernel::glo::cpu_set_freq(0, 2_500_000_000);
         }
 
         // Define all boot processes: (path, proc_nr, endpoint_name)
@@ -496,38 +507,53 @@ pub extern "C" fn kmain_body() -> ! {
 ///   [6]=r8, [7]=r9, [8]=r10, [9]=r11(=RFLAGS), [10]=r12,
 ///   [11]=r13, [12]=r14, [13]=r15
 ///
-/// The original user RSP = saved_ptr + 112 (14 pushes × 8 bytes).
+/// The original user RSP is read from the SAVED_USER_RSP static
+/// (written by syscall_entry before switching to the kernel stack).
 ///
 /// # Safety
 ///
 /// `saved` must point to a valid kernel-stack save area pushed by
 /// `syscall_entry`. `rp` must point to a valid `Proc`.
 unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
-    // x86_64 TrapFrame byte offsets (each field is 8 bytes):
-    //   0: rax,   8: rbx,  16: rcx,  24: rdx,  32: rsi,  40: rdi
-    //  48: r8,   56: r9,   64: r10,  72: r11,  80: r12,  88: r13
-    //  96: r14, 104: r15, 160: rip, 168: rsp, 176: rflags
+    // syscall_entry push order (bottom of stack = RSP after last push):
+    //   push rbp → saved[14] (highest address, pushed first)
+    //   push r15 → saved[13]
+    //   push r14 → saved[12]
+    //   push r13 → saved[11]
+    //   push r12 → saved[10]
+    //   push r11 → saved[9]   ← user RFLAGS from syscall/sysenter
+    //   push r10 → saved[8]
+    //   push r9  → saved[7]
+    //   push r8  → saved[6]
+    //   push rdi → saved[5]
+    //   push rsi → saved[4]
+    //   push rdx → saved[3]
+    //   push rcx → saved[2]   ← user RIP from syscall/sysenter
+    //   push rbx → saved[1]
+    //   push rax → saved[0]   (RSP points here, pushed last)
+    //
+    // p_reg TrapFrame byte offsets (matching restore() iretq layout):
+    //   0=rax, 8=rbx, 16=rcx(=RIP), 24=rdx, 32=rsi, 40=rdi,
+    //   48=r8, 56=r9, 64=r10, 72=r11(=RFLAGS), 80=r12,
+    //   88=r13, 96=r14, 104=r15, 112=rbp, 168=rsp
     let frame = unsafe { &mut (*rp).p_reg };
     unsafe {
-        // Use volatile writes so the compiler cannot optimize away these
-        // register saves. The restore() function reads them via naked asm
-        // that the compiler cannot see, so without volatile the writes
-        // would appear dead and get eliminated.
         let regs = [
-            (0usize, *saved.add(0)),    // rax
-            (8usize, *saved.add(1)),    // rbx
-            (16usize, *saved.add(2)),   // rcx (RIP via sysretq)
-            (24usize, *saved.add(3)),   // rdx
-            (32usize, *saved.add(4)),   // rsi
-            (40usize, *saved.add(5)),   // rdi
-            (48usize, *saved.add(6)),   // r8
-            (56usize, *saved.add(7)),   // r9
-            (64usize, *saved.add(8)),   // r10 (RFLAGS via sysretq)
-            (72usize, *saved.add(9)),   // r11
-            (80usize, *saved.add(10)),  // r12
-            (88usize, *saved.add(11)),  // r13
-            (96usize, *saved.add(12)),  // r14
-            (104usize, *saved.add(13)), // r15
+            (0usize, *saved.add(0)),    // rax = saved[0]  (pushed last, at RSP)
+            (8usize, *saved.add(1)),    // rbx = saved[1]
+            (16usize, *saved.add(2)),   // rcx = saved[2]  ← user RIP
+            (24usize, *saved.add(3)),   // rdx = saved[3]
+            (32usize, *saved.add(4)),   // rsi = saved[4]
+            (40usize, *saved.add(5)),   // rdi = saved[5]
+            (48usize, *saved.add(6)),   // r8  = saved[6]
+            (56usize, *saved.add(7)),   // r9  = saved[7]
+            (64usize, *saved.add(8)),   // r10 = saved[8]
+            (72usize, *saved.add(9)),   // r11 = saved[9]  ← user RFLAGS
+            (80usize, *saved.add(10)),  // r12 = saved[10]
+            (88usize, *saved.add(11)),  // r13 = saved[11]
+            (96usize, *saved.add(12)),  // r14 = saved[12]
+            (104usize, *saved.add(13)), // r15 = saved[13] (pushed second, highest addr after rbp)
+            (112usize, *saved.add(14)), // rbp = saved[14] (pushed first, highest addr)
         ];
         for (offset, val) in regs {
             let bytes = val.to_ne_bytes();
@@ -535,19 +561,16 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
                 core::ptr::write_volatile(frame.as_mut_ptr().add(offset + i), *b);
             }
         }
-        // RSP = saved_ptr + 112 (14 pushes × 8 bytes)
-        let rsp = (saved as u64) + 112;
+        // RSP = SAVED_USER_RSP (written by syscall_entry naked asm
+        // before switching to kernel stack, so it reflects the exact
+        // user RSP at the time of syscall).
+        // Use cfg guard: syscall_abi module only exists on target_os = "none".
+        #[cfg(target_os = "none")]
+        let rsp = arch_x86_64::asm::syscall_abi::saved_user_rsp();
+        #[cfg(not(target_os = "none"))]
+        let rsp: u64 = 0;
         for (i, b) in rsp.to_ne_bytes().iter().enumerate() {
             core::ptr::write_volatile(frame.as_mut_ptr().add(168 + i), *b);
-        }
-        // RIP = RCX value (pushed as arg 2), RFLAGS = R11 value (pushed as arg 9)
-        let rip = *saved.add(2);
-        let rflags = *saved.add(9);
-        for (i, b) in rip.to_ne_bytes().iter().enumerate() {
-            core::ptr::write_volatile(frame.as_mut_ptr().add(160 + i), *b);
-        }
-        for (i, b) in rflags.to_ne_bytes().iter().enumerate() {
-            core::ptr::write_volatile(frame.as_mut_ptr().add(176 + i), *b);
         }
     }
 }
@@ -580,12 +603,13 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             core::ptr::read_volatile(saved.add(6)),
             core::ptr::read_volatile(saved.add(7)),
         ];
-        // Save registers BEFORE dispatch so blocking syscalls (SENDREC,
-        // RECEIVE) capture the correct return RIP. Without this, the
-        // parent's p_reg retains state from a PREVIOUS syscall (e.g.,
-        // read()), and do_fork_handler copies stale p_reg to the child.
-        // For SYS_EXEC_REPLACE (61), skip the pre-save — the dispatch
-        // replaces the process image and sets up new p_reg.
+        // Save registers BEFORE dispatch for all syscalls. The timer ISR
+        // can preempt any syscall and trigger a context switch. When the
+        // process is restored, p_reg must have the CURRENT syscall's
+        // registers (RIP pointing to the return from this syscall), not
+        // stale state from a previous blocking syscall.
+        // For SYS_EXEC_REPLACE (61), skip — the dispatch replaces the
+        // process image and sets up new p_reg.
         if nr != 61 {
             save_proc_regs(rp, saved);
         }

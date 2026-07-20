@@ -165,6 +165,13 @@ pub unsafe fn init_tss_for_boot() {
         let ist1_top = BOOT_IST1_STACK.get() as *mut u8 as u64 + 4096;
         let ist2_top = BOOT_IST2_STACK.get() as *mut u8 as u64 + 4096;
 
+        // Also set the kernel stack top for syscall_entry (must match RSP0).
+        // Align to 16 bytes: syscall_entry pushes 14 regs (112 bytes) + 32
+        // bytes shadow = 144 bytes before `call`.  The call pushes 8 more,
+        // so for the callee RSP ≡ 8 (mod 16), we need KERNEL_STACK_TOP ≡ 0
+        // (mod 16).  BOOT_KSTACK may only be 8-byte aligned, so truncate.
+        crate::asm::syscall_abi::KERNEL_STACK_TOP = stack_top & !15;
+
         let tss_bytes = BOOT_TSS.get() as *mut u8;
         ptr::write_unaligned(tss_bytes.add(4) as *mut u32, stack_top as u32);
         ptr::write_unaligned(tss_bytes.add(8) as *mut u32, (stack_top >> 32) as u32);

@@ -314,19 +314,19 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
     let count = args[2] as usize;
-
     let buf = args[1] as *const u8;
     if buf.is_null() {
-        return -14; // EFAULT
+        return -14;
     }
-
     if fd == 1 || fd == 2 {
-        for i in 0..count.min(256) {
-            let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
-            if c == b'\n' {
-                crate::hal::serial_write_byte(b'\r');
+        if count > 0 {
+            for i in 0..count.min(256) {
+                let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
+                if c == b'\n' {
+                    crate::hal::serial_write_byte(b'\r');
+                }
+                crate::hal::serial_write_byte(c);
             }
-            crate::hal::serial_write_byte(c);
         }
         count as i64
     } else {

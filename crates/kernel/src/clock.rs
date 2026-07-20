@@ -439,7 +439,8 @@ pub unsafe fn context_stop(p: *mut Proc) {
         (*p).p_cycles = (*p).p_cycles.wrapping_add(delta);
         // Decrement remaining quantum. Only meaningful for runnable processes
         // (blocked processes will have quantum renewed when they wake).
-        if (*p).p_endpoint >= 0 && (*p).p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) == 0
+        if !crate::table::is_kernel_nr((*p).p_nr)
+            && (*p).p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) == 0
         {
             if delta < (*p).p_cpu_time_left {
                 (*p).p_cpu_time_left -= delta;

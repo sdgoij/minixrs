@@ -167,6 +167,7 @@ pub fn exec(path: &str, _argv: &[*const u8]) -> Result<i32, MinixErr> {
         let result = minix_rt::syscall3(61, path.as_ptr() as u64, 0, 0);
         if result == 0 {
             // Should not return — process is replaced.
+            #[allow(clippy::empty_loop)]
             loop {}
         } else {
             Err(MinixErr::from_i32(result as i32))

@@ -193,6 +193,15 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                 .p_misc_flags
                 .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
 
+            // Deliver the message to user space immediately.
+            // When a process is woken via SENDNB (not through syscall
+            // return), syscall_handler_c's deliver_msg is never called.
+            // delivermsg switches to the receiver's CR3 for the copy.
+            crate::ipc::delivermsg(dst_ptr);
+            (*dst_ptr)
+                .p_misc_flags
+                .fetch_and(!MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+
             let call = if (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
                 & MiscFlags::REPLY_PEND.bits()
                 != 0
@@ -404,11 +413,13 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // C L1033-1034: Block — set p_getfrom_e and RECEIVING.
         (*caller_ptr).p_getfrom_e = src_any;
         let old = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        (*caller_ptr)
-            .p_rts_flags
-            .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
-        if old == 0 {
-            dequeue(caller_ptr);
+        if caller_rts & RtsFlags::SENDING.bits() == 0 {
+            (*caller_ptr)
+                .p_rts_flags
+                .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            if old == 0 {
+                dequeue(caller_ptr);
+            }
         }
         OK
     }
@@ -570,18 +581,27 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
         // Switch to the target's CR3 so user-space virtual addresses
         // map to the correct physical pages. When CR3 is 0 the target
         // shares the boot page tables, so no switch is needed.
+        //
+        // IMPORTANT: Use compiler_fence to prevent the copy_nonoverlapping
+        // from being reordered before/after the CR3 switch.
+        use core::sync::atomic::{Ordering, compiler_fence};
+
         let target_cr3 = (*rp).p_seg.p_cr3;
-        let caller_cr3 = if target_cr3 != 0 {
+        let prev_cr3 = if target_cr3 != 0 {
             let cr3 = crate::hal::read_cr3();
+            compiler_fence(Ordering::SeqCst);
             crate::hal::write_cr3(target_cr3);
+            compiler_fence(Ordering::SeqCst);
             Some(cr3)
         } else {
             None
         };
         let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
         core::ptr::copy_nonoverlapping((*rp).p_delivermsg.as_ptr(), vir as *mut u8, copy_sz);
-        if let Some(prev_cr3) = caller_cr3 {
-            crate::hal::write_cr3(prev_cr3);
+        if let Some(prev_cr3_val) = prev_cr3 {
+            compiler_fence(Ordering::SeqCst);
+            crate::hal::write_cr3(prev_cr3_val);
+            compiler_fence(Ordering::SeqCst);
         }
 
         OK

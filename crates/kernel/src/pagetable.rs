@@ -254,6 +254,10 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let idx = crate::hal::pt_index(va, 0);
         let pte_addr = pt.add(idx);
         write_pte(pte_addr, pte_val);
+        // Flush TLB for the modified page so the new mapping is visible.
+        // Without this, stale read-only TLB entries (e.g., from COW
+        // protection) persist and cause repeated page faults.
+        core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
         Ok(())
     }
 }

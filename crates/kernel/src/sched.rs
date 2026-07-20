@@ -63,7 +63,6 @@ pub unsafe fn enqueue(rp: *mut Proc) {
             (*tail)[q] = rp;
             (*rp).p_nextready = core::ptr::null_mut();
         }
-
         // Check preemption
         let current = current_proc();
         if !current.is_null() {
@@ -269,6 +268,7 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
                             crate::hal::sched_set_bill_proc(rp as *mut core::ffi::c_void);
                         }
                     }
+
                     return Some(rp);
                 }
                 rp = (*rp).p_nextready;
@@ -286,7 +286,7 @@ pub unsafe fn pick_proc() -> Option<*mut Proc> {
 /// The run queue state must be accessible (not concurrently modified).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pick_proc_raw() -> *mut Proc {
-    unsafe { pick_proc().unwrap_or(core::ptr::null_mut()) }
+    unsafe { pick_proc().unwrap_or_default() }
 }
 
 // notify_scheduler
