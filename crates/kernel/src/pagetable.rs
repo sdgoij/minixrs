@@ -257,7 +257,10 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         // Flush TLB for the modified page so the new mapping is visible.
         // Without this, stale read-only TLB entries (e.g., from COW
         // protection) persist and cause repeated page faults.
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
         Ok(())
     }
 }
@@ -360,7 +363,10 @@ pub fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
         // Clear the write bit (keep everything else)
         core::ptr::write(pte_ptr, pte_val & !PG_RW);
         // Flush TLB for this page
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
     }
 
     Ok(())

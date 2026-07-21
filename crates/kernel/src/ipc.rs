@@ -230,7 +230,8 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
 
             let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
-            (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
+            (*dst_ptr).p_rts_flags.store(new, Ordering::SeqCst);
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
             if new == 0 {
                 enqueue(dst_ptr);
             }

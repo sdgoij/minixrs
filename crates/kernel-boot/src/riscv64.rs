@@ -156,6 +156,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         // Register SYS_SCHEDCTL (54) so the SCHED server can set
         // p->p_scheduler for boot processes.
         kernel::system::map_call(54, kernel::system::do_schedctl_handler);
+        // Register SYS_DIAGCTL (44) so user-space servers can use
+        // diag_putchar for diagnostics.
+        kernel::system::map_call(44, kernel::system::do_diagctl_handler);
         // IPC syscalls are already registered by init_basic_syscalls below.
     }
 
@@ -438,6 +441,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         serial_write("  enabling SV39 paging...\r\n");
         unsafe {
             if let Some(boot_pt) = create_boot_page_table() {
+                // Save boot CR3 for delivermsg and other kernel code
+                // that needs to switch to the identity-mapped page table.
+                arch_riscv64::BOOT_CR3.store(boot_pt, core::sync::atomic::Ordering::Relaxed);
                 kernel::hal::write_cr3(boot_pt);
                 // Enable UART FIFO for piped input support
                 arch_riscv64::uart::init_uart();

@@ -360,15 +360,7 @@ pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 pub const MAX_USER_ADDRESS: u64 = 0x0000003FFFFFFFFFFF;
 
 pub fn boot_cr3() -> u64 {
-    // Read SATP CSR and extract the physical page table address.
-    // SATP format: [63:60]=MODE, [59:44]=ASID, [43:0]=PPN (phys>>12)
-    // Return the full physical address (like x86_64 CR3).
-    unsafe {
-        let satp: u64;
-        core::arch::asm!("csrr {satp}, satp", satp = out(reg) satp, options(nomem, nostack));
-        // Extract PPN (bits [43:0]) and shift to get physical address
-        (satp & 0x00000FFFFFFFFFFF) << 12
-    }
+    crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Write the SATP register (RISC-V equivalent of x86 CR3).
@@ -397,11 +389,26 @@ pub unsafe fn write_cr3(cr3: u64) {
 
 /// Read the SATP register (RISC-V equivalent of x86 CR3).
 ///
+/// Actually reads the current SATP CSR value, NOT boot_cr3().
+/// Converts the SATP PPN field back to a physical address
+/// (matching the format expected by write_cr3 and p_seg.p_cr3).
+/// This is critical for delivermsg() and other kernel functions
+/// that need to save/restore the current page table.
+///
 /// # Safety
 ///
 /// No special safety requirements; the SATP CSR is always readable.
 pub unsafe fn read_cr3() -> u64 {
-    boot_cr3()
+    let satp: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack));
+    }
+    // SATP format: MODE (bits 60-63) | ASID (bits 44-59) | PPN (bits 0-43)
+    // PPN is the page number (4KB pages). Convert back to physical address
+    // by shifting left by PAGE_SHIFT (12), matching the format write_cr3
+    // expects (physical address of root page table).
+    let ppn = satp & 0x00000FFFFFFFFFFF;
+    ppn << 12
 }
 
 /// Flush the TLB for a single virtual address.

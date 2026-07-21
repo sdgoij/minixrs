@@ -1643,10 +1643,32 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 
     match call_nr as u32 {
         arch_common::com::VFS_PM_FORK_REPLY => {
-            // Step 1: Schedule the child (matching C: sched_start_user).
-            // Give it a default user quantum and priority.
-            // This calls SYS_SCHEDULE (kernel call 3) which clears
-            // RTS_NO_QUANTUM on the child and enqueues it.
+            // Step 1: Reply to parent FIRST so parent is ready to
+            // handle waitpid before the child is scheduled.
+            let parent_slot = rmp.mp_parent;
+            if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
+                let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
+                if parent_rmp.mp_flags & IN_USE != 0 {
+                    let mut parent_reply = [0u8; 64];
+                    parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                        .copy_from_slice(&OK.to_le_bytes());
+                    parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
+                        .copy_from_slice(&rmp.mp_pid.to_le_bytes());
+                    let zero: i32 = 0;
+                    parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
+                        .copy_from_slice(&zero.to_le_bytes());
+                    unsafe {
+                        minix_rt::syscall2(
+                            minix_rt::SENDNB_CALL,
+                            parent_rmp.mp_endpoint as u64,
+                            parent_reply.as_ptr() as u64,
+                        );
+                    }
+                }
+            }
+
+            // Step 2: Schedule the child (matching C: sched_start_user).
+            // This clears RTS_NO_QUANTUM on the child and enqueues it.
             let mut sched_msg = [0u8; 64];
             sched_msg[8..12].copy_from_slice(&proc_e.to_le_bytes()); // endpoint
             sched_msg[12..16].copy_from_slice(&200i32.to_le_bytes()); // quantum (ticks)
@@ -1658,64 +1680,25 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                 unsafe {
                     free_proc(proc_n);
                 };
-                let parent_slot = rmp.mp_parent;
-                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
-                    let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
-                    if parent_rmp.mp_flags & IN_USE != 0 {
-                        // Tell parent fork failed.
-                        let mut reply = [0u8; 64];
-                        reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-                            .copy_from_slice(&(-1i32).to_le_bytes());
-                        reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
-                            .copy_from_slice(&0i32.to_le_bytes());
-                        reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
-                            .copy_from_slice(&0i32.to_le_bytes());
-                        unsafe {
-                            minix_rt::syscall2(
-                                minix_rt::SENDNB_CALL,
-                                parent_rmp.mp_endpoint as u64,
-                                reply.as_ptr() as u64,
-                            );
-                        }
-                    }
-                }
+                // (parent already received the OK reply above, will see
+                //  no child or get SIGCHLD when child_free happens)
             } else {
-                // Step 2/3: Reply to parent FIRST so parent runs before child.
-                // This avoids the child's deliver_msg overwriting the shared
-                // fork_msg buffer with PID=0 before the parent reads it.
-                let parent_slot = rmp.mp_parent;
-                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
-                    let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
-                    if parent_rmp.mp_flags & IN_USE != 0 {
-                        let mut parent_reply = [0u8; 64];
-                        parent_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-                            .copy_from_slice(&OK.to_le_bytes());
-                        parent_reply[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4]
-                            .copy_from_slice(&rmp.mp_pid.to_le_bytes());
-                        let zero: i32 = 0;
-                        parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
-                            .copy_from_slice(&zero.to_le_bytes());
-                        unsafe {
-                            minix_rt::syscall2(
-                                minix_rt::SENDNB_CALL,
-                                parent_rmp.mp_endpoint as u64,
-                                parent_reply.as_ptr() as u64,
-                            );
-                        }
-                    }
+                // Step 3: Reply to child with OK (matching C: reply(proc_n, OK)).
+                // On RISC-V, do_fork_handler clears RECEIVING and REPLY_PEND
+                // on the child directly — SENDNB reply is skipped.
+                #[cfg(not(target_arch = "riscv64"))]
+                {
+                    let mut child_reply = [0u8; 64];
+                    child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+                        .copy_from_slice(&OK.to_le_bytes());
+                    let _child_send_result = unsafe {
+                        minix_rt::syscall2(
+                            minix_rt::SENDNB_CALL,
+                            proc_e as u64,
+                            child_reply.as_ptr() as u64,
+                        )
+                    };
                 }
-
-                // Reply to child with OK (matching C: reply(proc_n, OK)).
-                let mut child_reply = [0u8; 64];
-                child_reply[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-                    .copy_from_slice(&OK.to_le_bytes());
-                let _child_send_result = unsafe {
-                    minix_rt::syscall2(
-                        minix_rt::SENDNB_CALL,
-                        proc_e as u64,
-                        child_reply.as_ptr() as u64,
-                    )
-                };
             }
         }
 

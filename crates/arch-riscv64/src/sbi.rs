@@ -122,11 +122,16 @@ pub fn set_timer(stime_value: u64) {
 /// Read a character from the SBI debug console.
 /// Returns `None` if no character is available, `Some(c)` otherwise.
 pub fn console_getchar() -> Option<u8> {
+    // Legacy SBI v0.1: a0 = character, or -1 if no data.
+    // There is NO separate error code — the value IS the return.
+    // Our sbi_legacy captures a0 as "error" and a1 as "value",
+    // but for legacy SBI_CONSOLE_GETCHAR, the character is in a0.
     let ret = unsafe { sbi_legacy(SBI_CONSOLE_GETCHAR, 0, 0, 0) };
-    if ret.error != 0 || ret.value == u64::MAX {
+    let ch = ret.error as i64; // legacy: a0 IS the return value
+    if ch < 0 || ch > 255 {
         None
     } else {
-        Some(ret.value as u8)
+        Some(ch as u8)
     }
 }
 

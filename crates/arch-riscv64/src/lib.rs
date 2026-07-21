@@ -2,6 +2,12 @@
 
 #![no_std]
 
+use core::sync::atomic::AtomicU64;
+
+/// Boot page table root physical address.
+/// Set once during boot, before any per-process page tables are active.
+pub static BOOT_CR3: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(target_arch = "riscv64")]
 pub mod alloc;
 #[cfg(target_arch = "riscv64")]

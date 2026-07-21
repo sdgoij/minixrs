@@ -77,9 +77,25 @@ pub fn read_blocking() -> u8 {
         if let Some(byte) = try_read() {
             return byte;
         }
+        #[cfg(target_arch = "riscv64")]
+        if let Some(byte) = arch_riscv64::sbi::console_getchar() {
+            return byte;
+        }
+        #[cfg(not(target_arch = "riscv64"))]
         if crate::hal::serial_byte_available() {
             return crate::hal::serial_read_byte();
         }
+        // Yield to QEMU's event loop.  On RISC-V: wfi with SIE=1.
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!(
+                "csrsi sstatus, 2", // SIE=1
+                "wfi",
+                "csrci sstatus, 2", // SIE=0
+                options(nomem, nostack)
+            );
+        }
+        #[cfg(not(target_arch = "riscv64"))]
         crate::hal::pause();
     }
 }
