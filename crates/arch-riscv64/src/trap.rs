@@ -61,6 +61,17 @@ impl UartInputCallbackCell {
     }
 }
 
+struct TimerCallbackCell(UnsafeCell<Option<unsafe fn(&mut [u8; 296])>>);
+unsafe impl Sync for TimerCallbackCell {}
+impl TimerCallbackCell {
+    const fn new(val: Option<unsafe fn(&mut [u8; 296])>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<unsafe fn(&mut [u8; 296])> {
+        self.0.get()
+    }
+}
+
 /// Registered syscall handler (set by kernel at init).
 #[used]
 static SYSCALL_HANDLER: SyscallHandlerCell = SyscallHandlerCell::new(None);
@@ -73,6 +84,11 @@ static POST_SYSCALL_HOOK: PostSyscallHookCell = PostSyscallHookCell::new(None);
 /// Called on each timer tick if a byte is available from UART.
 #[used]
 static UART_INPUT_CALLBACK: UartInputCallbackCell = UartInputCallbackCell::new(None);
+
+/// Registered timer callback (set by kernel-boot at init).
+/// Called on each timer interrupt with the trap frame.
+#[used]
+static TIMER_CALLBACK: TimerCallbackCell = TimerCallbackCell::new(None);
 
 /// Register the basic syscall dispatch function.
 ///
@@ -107,6 +123,17 @@ pub unsafe fn register_uart_input_callback(cb: unsafe fn(u8)) {
     }
 }
 
+/// Register the timer callback for preemptive scheduling.
+///
+/// # Safety
+///
+/// Must be called once during kernel init, before any userspace execution.
+pub unsafe fn register_timer_callback(cb: unsafe fn(&mut [u8; 296])) {
+    unsafe {
+        core::ptr::write(TIMER_CALLBACK.get(), Some(cb));
+    }
+}
+
 /// The main trap handler — called from trap_asm.S.
 ///
 /// # Safety
@@ -126,6 +153,9 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                         while let Some(byte) = crate::sbi::console_getchar() {
                             cb(byte);
                         }
+                    }
+                    if let Some(cb) = *TIMER_CALLBACK.get() {
+                        cb(frame);
                     }
                 };
             }

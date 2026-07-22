@@ -597,17 +597,16 @@ pub fn sched_current_proc() -> *mut core::ffi::c_void {
 
 /// Get the billable process pointer.
 pub fn sched_bill_proc() -> *mut core::ffi::c_void {
-    todo!("RISC-V sched_bill_proc; see Phase 19.7");
+    crate::cpulocals::bill_proc() as *mut core::ffi::c_void
 }
 
-/// Set the billable process pointer.
 /// Set the billable process pointer.
 ///
 /// # Safety
 ///
 /// Must be called from a scheduler context where the pointer is valid.
-pub unsafe fn sched_set_bill_proc(_proc: *mut core::ffi::c_void) {
-    todo!("RISC-V sched_set_bill_proc; see Phase 19.7");
+pub unsafe fn sched_set_bill_proc(proc: *mut core::ffi::c_void) {
+    unsafe { crate::cpulocals::set_bill_proc(proc as u64) }
 }
 
 /// Get the current process pointer (SMP context).

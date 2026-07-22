@@ -25,8 +25,8 @@ pub struct PerCpuStorage {
     pub hart_id: u32,
     /// TSC context-switch timestamp (used for quantum accounting).
     pub tsc_ctr_switch: u64,
-    /// Padding.
-    _pad1: [u8; 20],
+    /// Billable process pointer (for quantum accounting).
+    pub bill_proc: u64,
     /// Ready list head pointers (one per priority queue, up to 16).
     pub run_q_head: [*mut core::ffi::c_void; 16],
     /// Ready list tail pointers (one per priority queue, up to 16).
@@ -61,7 +61,7 @@ pub static BOOT_CPU_STORAGE: BootCpuStorageCell = BootCpuStorageCell::new(PerCpu
     kernel_stack_top: 0,
     hart_id: 0,
     tsc_ctr_switch: 0,
-    _pad1: [0u8; 20],
+    bill_proc: 0,
     run_q_head: [core::ptr::null_mut(); 16],
     run_q_tail: [core::ptr::null_mut(); 16],
 });
@@ -115,6 +115,22 @@ pub fn current_proc() -> u64 {
         // SAFETY: BOOT_CPU_STORAGE is a static mut accessed directly.
         // tp register may hold a user value — do NOT use tp_ptr().
         core::ptr::read_volatile(&raw const (*BOOT_CPU_STORAGE.get()).current_proc)
+    }
+}
+
+/// Get the billable process pointer for this hart.
+pub fn bill_proc() -> u64 {
+    unsafe { core::ptr::read_volatile(&raw const (*BOOT_CPU_STORAGE.get()).bill_proc) }
+}
+
+/// Set the billable process pointer for this hart.
+///
+/// # Safety
+///
+/// `proc` must point to a valid `Proc` or be 0.
+pub unsafe fn set_bill_proc(proc: u64) {
+    unsafe {
+        core::ptr::write_volatile(&raw mut (*BOOT_CPU_STORAGE.get()).bill_proc, proc);
     }
 }
 
