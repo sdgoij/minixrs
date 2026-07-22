@@ -723,6 +723,25 @@ pub fn sh(_args: &[&str]) -> i32 {
 
                                     let mut argv_buf: [*const u8; 32] = [core::ptr::null(); 32];
                                     argv_buf[0] = cmd_path.as_ptr();
+                                    // Copy argument strings into cmd_path after
+                                    // the command name. Each arg gets up to 56
+                                    // bytes (space for most arguments).
+                                    let mut arg_off = child_path_len;
+                                    for i in 1..argc.min(32) {
+                                        let tok = tokens[i].as_bytes();
+                                        let len = tok.len().min(55);
+                                        if arg_off + len + 1 >= cmd_path.len() {
+                                            break;
+                                        }
+                                        for j in 0..len {
+                                            cmd_path[arg_off + j] = tok[j];
+                                        }
+                                        cmd_path[arg_off + len] = 0;
+                                        argv_buf[i] = unsafe { cmd_path.as_ptr().add(arg_off) };
+                                        arg_off += len + 1;
+                                        // Align to 8 bytes for next arg
+                                        arg_off = (arg_off + 7) & !7;
+                                    }
                                     let r = unsafe {
                                         minix_rt::exec_replace(
                                             &cmd_path[..child_path_len],

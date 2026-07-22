@@ -763,12 +763,20 @@ unsafe fn exec_initramfs_for_target(
             };
             // Copy stack data from identity-mapped temp area to allocated pages.
             // setup_user_stack wrote the stack at user_stack_base (0x8FE00000)
-            // while BOOT_CR3 was active (identity map).
-            core::ptr::copy_nonoverlapping(
-                user_stack_base as *const u8,
-                phys_stack_base as *mut u8,
-                user_stack_size,
-            );
+            // while BOOT_CR3 was active (identity map). Do the copy under
+            // BOOT_CR3 so we read from the identity-mapped location, not
+            // from the caller's per-process page table (which maps the same
+            // VA to the caller's own physical stack pages).
+            {
+                let saved = crate::hal::read_cr3();
+                crate::hal::write_cr3(boot_cr3_val);
+                core::ptr::copy_nonoverlapping(
+                    user_stack_base as *const u8,
+                    phys_stack_base as *mut u8,
+                    user_stack_size,
+                );
+                crate::hal::write_cr3(saved);
+            }
             // Map user code: VA → allocated PA
             #[cfg(target_arch = "riscv64")]
             let user_flags = crate::pagetable::PG_P
@@ -874,14 +882,20 @@ unsafe fn exec_initramfs_for_target(
             };
             // Copy stack data from identity-mapped temp area to allocated pages.
             // setup_user_stack wrote the stack at user_stack_base (0x0FE00000)
-            // while BOOT_CR3 was active (identity map). Under the kernel CR3,
-            // the identity map still covers 0-1GB, so both source and dest are
-            // accessible.
-            core::ptr::copy_nonoverlapping(
-                user_stack_base as *const u8,
-                phys_stack_base as *mut u8,
-                user_stack_size,
-            );
+            // while BOOT_CR3 was active (identity map). Do the copy under
+            // BOOT_CR3 so we read from the identity-mapped location, not
+            // from the caller's per-process page table (which maps the same
+            // VA to the caller's own physical stack pages).
+            {
+                let saved = crate::hal::read_cr3();
+                crate::hal::write_cr3(boot_cr3_val);
+                core::ptr::copy_nonoverlapping(
+                    user_stack_base as *const u8,
+                    phys_stack_base as *mut u8,
+                    user_stack_size,
+                );
+                crate::hal::write_cr3(saved);
+            }
             // Map user code: VA -> allocated PA
             let user_flags =
                 crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;
@@ -935,7 +949,14 @@ unsafe fn exec_initramfs_for_target(
             let p_reg = &mut (*rp).p_reg;
             p_reg[0..8].copy_from_slice(&ehdr.e_entry.to_ne_bytes());
             p_reg[16..24].copy_from_slice(&rsp_fb.to_ne_bytes());
-            p_reg[80..88].copy_from_slice(&0u64.to_ne_bytes());
+            // Use argv_strs.len() directly — reading from the user stack
+            // through the kernel CR3 gives stale data because the stack
+            // was copied to phys_stack_base and the kernel CR3 sees the
+            // original identity-mapped location, not the copy.
+            let argc = argv_strs.len() as u64;
+            let argv_ptr = rsp_fb + 8;
+            p_reg[80..88].copy_from_slice(&argc.to_ne_bytes()); // a0 = argc
+            p_reg[88..96].copy_from_slice(&argv_ptr.to_ne_bytes()); // a1 = argv
             // sstatus = SPIE | FS_INITIAL (match set_initial_regs)
             let sst: u64 = 0x00000220;
             p_reg[248..256].copy_from_slice(&sst.to_ne_bytes());
