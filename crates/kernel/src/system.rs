@@ -1445,19 +1445,16 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
         // Set the signal bit in the priv structure's pending signals
         (*priv_data).s_sig_pending |= 1u128 << sig_nr;
 
-        // Set RTS_SIGNALED | RTS_SIG_PENDING, dequeue if was runnable
+        // Set RTS_SIGNALED | RTS_SIG_PENDING. Do NOT dequeue — these
+        // are non-blocking flags; the process stays in the queue and
+        // will discover the notification when it calls RECEIVE.
         let sig_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
         let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
         (*rp)
             .p_rts_flags
             .store(old | sig_flags.bits(), Ordering::Relaxed);
-        if old == 0 {
-            dequeue(rp);
-        }
 
         // Notify SYSTEM unconditionally (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
-        // p_signal_received is not incremented here; signal tracking is via RTS flags
-        // C: only notify on first signal — skip if already SIGNALED
         if old & RtsFlags::SIGNALED.bits() == 0 {
             crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
         }

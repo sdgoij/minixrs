@@ -296,8 +296,6 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         if let Some(sig_mgr_ep) = get_sig_manager(caller) {
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr_ep);
         } else {
-            // Fallback: notify PM directly (fork children may not have
-            // privilege structures set up).
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::PM_PROC_NR);
         }
     }

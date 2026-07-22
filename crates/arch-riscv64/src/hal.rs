@@ -640,13 +640,17 @@ pub fn read_tsc() -> u64 {
     crate::clint::read_time()
 }
 
-/// Read the per-CPU TSC context-switch timestamp (RISC-V: uses read_time).
+/// Read the per-CPU TSC context-switch timestamp.
+///
+/// Returns 0 on RISC-V to make context_stop a no-op for quantum
+/// accounting. Preemptive scheduling is handled cooperatively
+/// in the post-syscall hook.
 ///
 /// # Safety
 ///
 /// CPU locals must be initialized.
 pub unsafe fn read_tsc_ctr_switch() -> u64 {
-    unsafe { crate::cpulocals::tsc_ctr_switch() }
+    0
 }
 
 /// Write the per-CPU TSC context-switch timestamp.

@@ -377,6 +377,12 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                 (*caller_ptr)
                                     .p_misc_flags
                                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+                                // Consume transient signal flags that
+                                // send_sig set alongside s_notify_pending.
+                                (*caller_ptr).p_rts_flags.fetch_and(
+                                    !(RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
+                                    Ordering::Relaxed,
+                                );
                                 return notify_src;
                             }
                         }
@@ -418,7 +424,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
             (*caller_ptr)
                 .p_rts_flags
                 .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
-            if old == 0 {
+            if old == 0 || old & RtsFlags::PREEMPTED.bits() != 0 {
                 dequeue(caller_ptr);
             }
         }
@@ -502,6 +508,23 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             // because endpoints may exceed the bitmap size (NR_SYS_PROCS = 64).
             if !(*dst_ptr).p_priv.is_null() {
                 (*(*dst_ptr).p_priv).s_notify_pending.set(src_id);
+            }
+            // If the destination isn't RECEIVING, it needs to eventually
+            // call RECEIVE to discover the pending notification. Clear
+            // transient non-blocking flags (SIGNALED, SIG_PENDING,
+            // PREEMPTED) that prevent pick_proc from finding it, then
+            // enqueue. Blocking flags (RECEIVING, SENDING) would not
+            // reach this branch.
+            let transient = RtsFlags::SIGNALED.bits()
+                | RtsFlags::SIG_PENDING.bits()
+                | RtsFlags::PREEMPTED.bits();
+            if rts == 0 || rts & transient != 0 {
+                if rts & transient != 0 {
+                    (*dst_ptr)
+                        .p_rts_flags
+                        .store(rts & !transient, Ordering::Relaxed);
+                }
+                enqueue(dst_ptr);
             }
         }
         OK

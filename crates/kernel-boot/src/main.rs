@@ -475,11 +475,17 @@ pub extern "C" fn kmain_body() -> ! {
             }
         }
 
-        // Send a boot notification to PM. This must happen AFTER enqueuing
-        // so PM isn't double-enqueued (mini_notify enqueues on direct delivery).
-        // The notification will be pending when PM calls RECEIVE.
+        // Set a boot notification on PM directly (without mini_notify, which
+        // would double-enqueue PM since it is runnable and already in the
+        // queue). PM will discover the pending notification when it calls
+        // RECEIVE.
         unsafe {
-            kernel::ipc::mini_notify(arch_common::com::RS_PROC_NR, arch_common::com::PM_PROC_NR);
+            let pm = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
+            if !pm.is_null() && !(*pm).p_priv.is_null() {
+                let rs_priv_id =
+                    kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR).unwrap_or(0);
+                (*(*pm).p_priv).s_notify_pending.set(rs_priv_id);
+            }
         }
 
         // Set the current process pointer to the first one.

@@ -232,7 +232,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         .store(cleared, core::sync::atomic::Ordering::Relaxed);
                 }
                 if cleared == 0 {
-                    unsafe { kernel::sched::enqueue(caller) };
+                    // Use remove_from_queue first to avoid double-enqueue
+                    // when the process was already in the run queue (e.g.,
+                    // PREEMPTED set by proc_no_time while the process was
+                    // still in the queue).
+                    unsafe {
+                        kernel::sched::remove_from_queue(caller);
+                        kernel::sched::enqueue(caller);
+                    };
                 }
                 // Fall through to pick a new process.
             }
@@ -419,74 +426,75 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_uart_input_callback(uart_input_cb);
     }
-    // Register timer callback for preemptive scheduling (matching x86-64).
+    // Register timer callback for preemptive scheduling.
     unsafe {
         unsafe fn riscv_timer_callback(frame: &mut [u8; 296]) {
-            unsafe {
-                kernel::clock::timer_int_handler();
-            }
-            // Check if we interrupted user mode (SPP bit in sstatus).
+            let mono = kernel::clock::get_monotonic();
+            kernel::clock::set_monotonic(mono + 1);
+            let real = kernel::clock::get_realtime();
+            kernel::clock::set_realtime(real + 1);
+            // Preempt: if we interrupted user mode, save state and
+            // potentially switch to another runnable process.
             let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
-            if (sstatus >> 8) & 1 == 0 {
-                // SPP=0: interrupted user mode — consider preemption.
-                let caller = arch_riscv64::hal::current_proc() as *mut kernel::proc::Proc;
-                if caller.is_null() {
-                    return;
-                }
-                unsafe {
-                    // Save user registers from trap frame to p_reg.
-                    core::ptr::copy_nonoverlapping(
-                        frame.as_ptr(),
-                        &raw mut (*caller).p_reg as *mut u8,
-                        256,
-                    );
-                    core::ptr::copy_nonoverlapping(
-                        frame.as_ptr().add(256),
-                        &raw mut (*caller).p_reg as *mut u8,
-                        8,
-                    );
-                    core::ptr::copy_nonoverlapping(
-                        frame.as_ptr().add(264),
-                        (&raw mut (*caller).p_reg as *mut u8).add(248),
-                        8,
-                    );
-                }
-                if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
-                    if next_proc != caller {
-                        unsafe {
-                            let mf = (*next_proc)
-                                .p_misc_flags
-                                .load(core::sync::atomic::Ordering::Relaxed);
-                            if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
-                                kernel::ipc::delivermsg(next_proc);
-                                let src_ep = i32::from_le_bytes([
-                                    (*next_proc).p_delivermsg[0],
-                                    (*next_proc).p_delivermsg[1],
-                                    (*next_proc).p_delivermsg[2],
-                                    (*next_proc).p_delivermsg[3],
-                                ]);
-                                kernel::hal::write_retval(&mut (*next_proc).p_reg, src_ep as u64);
-                                (*next_proc).p_misc_flags.fetch_and(
-                                    !kernel::proc::MiscFlags::DELIVERMSG.bits(),
-                                    core::sync::atomic::Ordering::Relaxed,
-                                );
-                            }
-                            core::ptr::copy_nonoverlapping(
-                                &raw const (*next_proc).p_reg as *const u8,
-                                frame.as_mut_ptr(),
-                                256,
+            if (sstatus >> 8) & 1 != 0 {
+                return; // SPP=1: interrupted kernel mode, skip
+            }
+            let caller = arch_riscv64::hal::current_proc() as *mut kernel::proc::Proc;
+            if caller.is_null() {
+                return;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame.as_ptr(),
+                    &raw mut (*caller).p_reg as *mut u8,
+                    256,
+                );
+                core::ptr::copy_nonoverlapping(
+                    frame.as_ptr().add(256),
+                    &raw mut (*caller).p_reg as *mut u8,
+                    8,
+                );
+                core::ptr::copy_nonoverlapping(
+                    frame.as_ptr().add(264),
+                    (&raw mut (*caller).p_reg as *mut u8).add(248),
+                    8,
+                );
+            }
+            if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
+                if next_proc != caller {
+                    unsafe {
+                        let mf = (*next_proc)
+                            .p_misc_flags
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
+                            kernel::ipc::delivermsg(next_proc);
+                            let src_ep = i32::from_le_bytes([
+                                (*next_proc).p_delivermsg[0],
+                                (*next_proc).p_delivermsg[1],
+                                (*next_proc).p_delivermsg[2],
+                                (*next_proc).p_delivermsg[3],
+                            ]);
+                            kernel::hal::write_retval(&mut (*next_proc).p_reg, src_ep as u64);
+                            (*next_proc).p_misc_flags.fetch_and(
+                                !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                                core::sync::atomic::Ordering::Relaxed,
                             );
-                            let p_reg = &raw const (*next_proc).p_reg;
-                            let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
-                            frame[256..264].copy_from_slice(&sepc_bytes);
-                            let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
-                            frame[264..272].copy_from_slice(&sst_bytes);
-                            let new_cr3 = (*next_proc).p_seg.p_cr3;
-                            if new_cr3 != 0 {
-                                kernel::hal::write_cr3(new_cr3);
-                            }
-                            arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
                         }
+                        core::ptr::copy_nonoverlapping(
+                            &raw const (*next_proc).p_reg as *const u8,
+                            frame.as_mut_ptr(),
+                            256,
+                        );
+                        let p_reg = &raw const (*next_proc).p_reg;
+                        let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
+                        frame[256..264].copy_from_slice(&sepc_bytes);
+                        let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
+                        frame[264..272].copy_from_slice(&sst_bytes);
+                        let new_cr3 = (*next_proc).p_seg.p_cr3;
+                        if new_cr3 != 0 {
+                            kernel::hal::write_cr3(new_cr3);
+                        }
+                        arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
                     }
                 }
             }
@@ -737,11 +745,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             }
         }
 
-        // Send a boot notification to PM before starting the scheduler.
-        // This notification will be pending when PM calls RECEIVE, causing
-        // mini_receive to build a notification message and deliver it.
+        // Set a boot notification on PM directly (without mini_notify, which
+        // would double-enqueue PM since it is runnable and already in the
+        // queue). PM will discover the pending notification when it calls
+        // RECEIVE.
         unsafe {
-            kernel::ipc::mini_notify(arch_common::com::RS_PROC_NR, arch_common::com::PM_PROC_NR);
+            let pm = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
+            if !pm.is_null() && !(*pm).p_priv.is_null() {
+                let rs_priv_id =
+                    kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR).unwrap_or(0);
+                (*(*pm).p_priv).s_notify_pending.set(rs_priv_id);
+            }
         }
 
         serial_write("  enqueuing processes...\r\n");
