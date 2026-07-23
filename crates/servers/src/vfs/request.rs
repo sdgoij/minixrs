@@ -193,7 +193,8 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
             Ok(_) => {
                 // Copy result back (kernel updated m_source at offset 0)
                 msg[..56].copy_from_slice(&ipc_msg[..56]);
-                crate::vfs::consts::OK
+                // Return the reply's m_type (the FS server's return value)
+                r_i32(&msg, M_TYPE_OFF)
             }
             Err(e) => e.0,
         }
@@ -620,35 +621,35 @@ pub unsafe fn req_lookup(
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
-        w_u32(&mut msg, PAYLOAD_OFF, dir_ino); // dir_ino
-        w_u32(&mut msg, PAYLOAD_OFF + 4, root_ino); // root_ino
-        w_u32(&mut msg, PAYLOAD_OFF + 8, flags); // flags
+        // VFS → FS message format (u64 for inodes, path embedded at +24):
+        //   msg[8..16]  = dir_ino   (u64)
+        //   msg[16..24] = root_ino  (u64)
+        //   msg[24..28] = flags     (u32)
+        //   msg[28..32] = path_len  (u32)
+        //   msg[32..]   = path data (up to 24 bytes)
+        w_u64(&mut msg, PAYLOAD_OFF, dir_ino as u64);
+        w_u64(&mut msg, PAYLOAD_OFF + 8, root_ino as u64);
+        w_u32(&mut msg, PAYLOAD_OFF + 16, flags);
 
-        // Copy path to message payload.
         #[cfg(target_os = "none")]
         let path_len = resolve.l_path_len.min(PATH_MAX - 1);
         #[cfg(not(target_os = "none"))]
         let path_len = resolve.l_path_len;
-        w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32);
-        if path_len > 0 {
-            let msg_path = &mut msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_len];
-            let src_path = &resolve.l_path[..path_len];
-            let copy_len = msg_path.len().min(src_path.len());
-            msg_path[..copy_len].copy_from_slice(&src_path[..copy_len]);
+        w_u32(&mut msg, PAYLOAD_OFF + 20, path_len as u32);
+
+        // Embed path in message (grant-based SAFECOPY not working yet)
+        let path_max = 24usize;
+        let path_copy_len = path_len.min(path_max);
+        if path_copy_len > 0 {
+            let dst = &mut msg[PAYLOAD_OFF + 24..PAYLOAD_OFF + 24 + path_copy_len];
+            dst.copy_from_slice(&resolve.l_path[..path_copy_len]);
+        }
+        // Null-terminate
+        if 24 + path_copy_len < 56 {
+            msg[PAYLOAD_OFF + 24 + path_copy_len] = 0;
         }
 
-        w_u32(&mut msg, PAYLOAD_OFF + 32, 0); // ucred_size
-
-        // FS reads the path from the Lookup struct (in VFS space) → CPF_READ
-        let grant_path =
-            cpf_grant_magic(VFS_PROC_NR, fs_e, resolve.l_path.as_ptr() as u64, path_len);
-        w_i32(&mut msg, PAYLOAD_OFF + 40, grant_path);
-        w_i32(&mut msg, PAYLOAD_OFF + 44, -1); // grant_ucred (stub — Phase 14+)
-        w_u16(&mut msg, PAYLOAD_OFF + 48, uid); // uid
-        w_u16(&mut msg, PAYLOAD_OFF + 50, gid); // gid
-
         let r = fs_sendrec(fs_e, &mut msg);
-        cpf_revoke(grant_path);
 
         let mut res = LookupRes {
             fs_e: r_i32(&msg, 0),
@@ -656,10 +657,15 @@ pub unsafe fn req_lookup(
         };
 
         if r == crate::vfs::consts::OK {
-            res.inode_nr = r_u32(&msg, PAYLOAD_OFF + 20); // inode
-            res.mode = r_u32(&msg, PAYLOAD_OFF + 24); // mode
-            res.file_size = r_i64(&msg, PAYLOAD_OFF + 8); // file_size
-            res.dev = r_u32(&msg, PAYLOAD_OFF + 16); // device
+            // Response: mess_fs_vfs_lookup at PAYLOAD_OFF:
+            //   msg[16..24] = file_size (i64)
+            //   msg[24..28] = device    (u32 low)
+            //   msg[28..32] = inode_nr  (u32 low)
+            //   msg[32..36] = mode      (u32)
+            res.file_size = r_i64(&msg, PAYLOAD_OFF + 8);
+            res.dev = r_u32(&msg, PAYLOAD_OFF + 16);
+            res.inode_nr = r_u32(&msg, PAYLOAD_OFF + 20);
+            res.mode = r_u32(&msg, PAYLOAD_OFF + 24);
         }
 
         (r, res)

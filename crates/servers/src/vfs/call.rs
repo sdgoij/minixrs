@@ -207,6 +207,37 @@ pub fn do_open() -> i32 {
 
     // Release the vnode reference (the filp now holds it).
     unsafe { mount::put_vnode(vp) };
+    // D: before openOK
+
+    #[cfg(target_os = "none")]
+    unsafe {
+        minix_rt::write(2, b"V[openOK]\n" as *const u8, 10);
+    }
+
+    // Diagnostic: print the fd value
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut dbg = [0u8; 64];
+        let mut pos = 0usize;
+        dbg[pos] = b'f';
+        pos += 1;
+        dbg[pos] = b'=';
+        pos += 1;
+        let val = fd;
+        if val >= 100 {
+            dbg[pos] = b'0' + ((val / 100) % 10) as u8;
+            pos += 1;
+        }
+        if val >= 10 {
+            dbg[pos] = b'0' + ((val / 10) % 10) as u8;
+            pos += 1;
+        }
+        dbg[pos] = b'0' + (val % 10) as u8;
+        pos += 1;
+        dbg[pos] = b'\n';
+        pos += 1;
+        minix_rt::write(2, dbg.as_ptr(), pos);
+    }
 
     fd
 }

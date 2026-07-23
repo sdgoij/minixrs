@@ -181,7 +181,12 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // code handles this by clearing REPLY_PEND before RECEIVING.
 
             let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*dst_ptr).p_delivermsg;
-            core::ptr::copy_nonoverlapping(m_ptr, dst_msg.as_mut_ptr(), MESSAGE_SIZE);
+            let _ = crate::ipc::copy_from_user(
+                caller_ptr,
+                m_ptr as u64,
+                dst_msg.as_mut_ptr(),
+                MESSAGE_SIZE,
+            );
 
             let src_ep = (*caller_ptr).p_endpoint;
             let ep_bytes = src_ep.to_ne_bytes();
@@ -244,7 +249,12 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             }
 
             let caller_msg: &mut [u8; MESSAGE_SIZE] = &mut (*caller_ptr).p_sendmsg;
-            core::ptr::copy_nonoverlapping(m_ptr, caller_msg.as_mut_ptr(), MESSAGE_SIZE);
+            let _ = crate::ipc::copy_from_user(
+                caller_ptr,
+                m_ptr as u64,
+                caller_msg.as_mut_ptr(),
+                MESSAGE_SIZE,
+            );
 
             if flags & FROM_KERNEL != 0 {
                 (*caller_ptr)
@@ -299,7 +309,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // skip checking caller_q, notifications, and async. The process should
         // block until the destination (from the SENDREC) receives and replies.
         let caller_rts = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        if caller_rts & RtsFlags::SENDING.bits() == 0 {
+        if caller_rts & RtsFlags::SENDING.bits() == 0  {
             // Check caller queue for pending messages.
             let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
             while !(*xpp).is_null() {
@@ -420,7 +430,8 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // C L1033-1034: Block — set p_getfrom_e and RECEIVING.
         (*caller_ptr).p_getfrom_e = src_any;
         let old = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        if caller_rts & RtsFlags::SENDING.bits() == 0 {
+        let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0;
+        if caller_rts & RtsFlags::SENDING.bits() == 0 || has_reply_pend {
             (*caller_ptr)
                 .p_rts_flags
                 .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
@@ -567,6 +578,45 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
             }
         }
         false
+    }
+}
+
+// ── copy_from_user
+
+pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usize) -> i32 {
+    unsafe {
+        if len == 0 {
+            return OK;
+        }
+        let target_cr3 = (*rp).p_seg.p_cr3;
+        let boot_cr3 = crate::hal::boot_cr3();
+        let cr3 = if target_cr3 != 0 {
+            target_cr3
+        } else {
+            boot_cr3
+        };
+        if cr3 == 0 {
+            return OK;
+        }
+        let mut remaining = len;
+        let mut va = user_va;
+        let mut off = 0usize;
+        while remaining > 0 {
+            let chunk = core::cmp::min(remaining, 4096 - ((va & 0xFFF) as usize));
+            match crate::pagetable::walk(cr3, va) {
+                Ok(result) => {
+                    let phys_addr = crate::hal::pte_to_phys(result.pte_value) | (va & 0xFFF);
+                    core::ptr::copy_nonoverlapping(phys_addr as *const u8, dst.add(off), chunk);
+                }
+                Err(_) => {
+                    return EFAULT;
+                }
+            }
+            remaining -= chunk;
+            va += chunk as u64;
+            off += chunk;
+        }
+        OK
     }
 }
 

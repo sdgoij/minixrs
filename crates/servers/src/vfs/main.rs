@@ -212,6 +212,45 @@ unsafe fn handle_work() {
         // Regular VFS calls are dispatched through the call table.
         let result = table::dispatch(call_nr);
         (*glob).err_code = result;
+        #[cfg(target_os = "none")]
+        unsafe {
+            let mut dbg = [0u8; 64];
+            let mut pos = 0usize;
+            dbg[pos] = b'R';
+            pos += 1;
+            dbg[pos] = b'=';
+            pos += 1;
+            let val = result;
+            if val < 0 {
+                dbg[pos] = b'-';
+                pos += 1;
+                let val = (-val) as u32;
+                if val >= 100 {
+                    dbg[pos] = b'0' + ((val / 100) % 10) as u8;
+                    pos += 1;
+                }
+                if val >= 10 {
+                    dbg[pos] = b'0' + ((val / 10) % 10) as u8;
+                    pos += 1;
+                }
+                dbg[pos] = b'0' + (val % 10) as u8;
+                pos += 1;
+            } else {
+                if val >= 100 {
+                    dbg[pos] = b'0' + ((val / 100) % 10) as u8;
+                    pos += 1;
+                }
+                if val >= 10 {
+                    dbg[pos] = b'0' + ((val / 10) % 10) as u8;
+                    pos += 1;
+                }
+                dbg[pos] = b'0' + (val % 10) as u8;
+                pos += 1;
+            }
+            dbg[pos] = b'\n';
+            pos += 1;
+            minix_rt::write(2, dbg.as_ptr(), pos);
+        }
         reply(fp, result);
     }
 }
@@ -221,7 +260,7 @@ unsafe fn handle_work() {
 /// Writes the result code into the outgoing message buffer and sends
 /// it via `sendrec` to the caller. The `who` pointer identifies the
 /// caller's Fproc slot; if null, the reply is skipped.
-unsafe fn reply(who: *mut Fproc, result: i32) {
+unsafe fn reply(who: *mut Fproc, _result: i32) {
     if who.is_null() {
         return;
     }
@@ -230,18 +269,13 @@ unsafe fn reply(who: *mut Fproc, result: i32) {
     {
         let glob = vfs_global();
         let out = &mut (*glob).fs_m_out;
-        // Write the result code into the message type field (offset 4).
-        out[4..8].copy_from_slice(&result.to_le_bytes());
+        out[4..8].copy_from_slice(&_result.to_le_bytes());
 
         const SEND_CALL: u64 = 46;
         let dest = (*who).fp_endpoint;
         if dest >= 0 {
             minix_rt::syscall2(SEND_CALL, dest as u64, out as *mut [u8; 64] as u64);
         }
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = result;
     }
 }
 

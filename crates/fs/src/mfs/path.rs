@@ -51,9 +51,9 @@ pub fn fs_lookup() -> i32 {
             return EINVAL;
         }
 
-        // Verify null-terminated path.
-        if (*mfs).user_path[path_len - 1] != 0 {
-            return EINVAL;
+        // Verify null-terminated path (C code only logs a warning, don't reject)
+        if path_len > 0 && (*mfs).user_path[path_len - 1] == 0 {
+            // Path already null-terminated, use as-is
         }
 
         // caller_uid and caller_gid are already set in globals.

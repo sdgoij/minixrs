@@ -487,19 +487,27 @@ pub unsafe fn virtual_copy(
         let mut src_va = src_addr;
         let mut dst_va = dst_addr;
 
+        use core::sync::atomic::{Ordering, compiler_fence};
+
         while remaining > 0 {
             let chunk = core::cmp::min(remaining, buf.len());
 
             // Switch to source, read
+            compiler_fence(Ordering::SeqCst);
             crate::hal::write_cr3(src_cr3);
+            compiler_fence(Ordering::SeqCst);
             core::ptr::copy_nonoverlapping(src_va as *const u8, buf.as_mut_ptr(), chunk);
 
             // Switch to destination, write
+            compiler_fence(Ordering::SeqCst);
             crate::hal::write_cr3(dst_cr3);
+            compiler_fence(Ordering::SeqCst);
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
 
             // Restore the saved CR3 (not boot_cr3 — servers have their own)
+            compiler_fence(Ordering::SeqCst);
             crate::hal::write_cr3(restore_cr3);
+            compiler_fence(Ordering::SeqCst);
 
             remaining -= chunk;
             src_va += chunk as u64;

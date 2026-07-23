@@ -15,6 +15,8 @@ use crate::mfs::read::*;
 use crate::mfs::time::*;
 use crate::mfs::utility::*;
 use crate::mfs::write::*;
+#[cfg(target_os = "none")]
+use minix_rt;
 
 /// Dispatch table: 34 entries indexed by `req_nr - FS_BASE`.
 // Reference: table.c fs_call_vec[]
@@ -57,6 +59,30 @@ pub static FS_CALL_VEC: [fn() -> i32; NREQS] = [
 
 /// Dispatch a request by index into the call vector.
 pub fn dispatch(ind: usize) -> i32 {
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut dbg = [0u8; 64];
+        let mut pos = 0usize;
+        dbg[pos] = b'M';
+        pos += 1;
+        dbg[pos] = b'[';
+        pos += 1;
+        if ind >= 100 {
+            dbg[pos] = b'0' + ((ind / 100) % 10) as u8;
+            pos += 1;
+        }
+        if ind >= 10 {
+            dbg[pos] = b'0' + ((ind / 10) % 10) as u8;
+            pos += 1;
+        }
+        dbg[pos] = b'0' + (ind % 10) as u8;
+        pos += 1;
+        dbg[pos] = b']';
+        pos += 1;
+        dbg[pos] = b' ';
+        pos += 1;
+        minix_rt::write(2, dbg.as_ptr(), pos);
+    }
     if ind >= NREQS {
         return EINVAL;
     }
