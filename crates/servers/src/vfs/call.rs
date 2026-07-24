@@ -207,37 +207,6 @@ pub fn do_open() -> i32 {
 
     // Release the vnode reference (the filp now holds it).
     unsafe { mount::put_vnode(vp) };
-    // D: before openOK
-
-    #[cfg(target_os = "none")]
-    unsafe {
-        minix_rt::write(2, b"V[openOK]\n" as *const u8, 10);
-    }
-
-    // Diagnostic: print the fd value
-    #[cfg(target_os = "none")]
-    unsafe {
-        let mut dbg = [0u8; 64];
-        let mut pos = 0usize;
-        dbg[pos] = b'f';
-        pos += 1;
-        dbg[pos] = b'=';
-        pos += 1;
-        let val = fd;
-        if val >= 100 {
-            dbg[pos] = b'0' + ((val / 100) % 10) as u8;
-            pos += 1;
-        }
-        if val >= 10 {
-            dbg[pos] = b'0' + ((val / 10) % 10) as u8;
-            pos += 1;
-        }
-        dbg[pos] = b'0' + (val % 10) as u8;
-        pos += 1;
-        dbg[pos] = b'\n';
-        pos += 1;
-        minix_rt::write(2, dbg.as_ptr(), pos);
-    }
 
     fd
 }
@@ -445,7 +414,7 @@ pub fn do_write() -> i32 {
 
 /// Perform the `getdents(fd, buf, count)` system call.
 ///
-/// C source: `minix/servers/vfs/read.c` â€” `do_getdents()` (line 269)
+/// C source: `minix/servers/vfs/read.c` — `do_getdents()` (line 269)
 pub fn do_getdents() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -488,14 +457,6 @@ pub fn do_getdents() -> i32 {
 }
 
 /// Perform the `pipe2(flags)` system call.
-///
-/// C source: `minix/servers/vfs/pipe.c` â€” `do_pipe2()` (line 150)
-/// Perform the `pipe2(flags)` system call.
-///
-/// Creates a pipe by allocating a vnode, calling req_newnode on PFS,
-/// and setting up two file descriptors (read end, write end).
-///
-/// C source: `minix/servers/vfs/pipe.c` â€” `do_pipe2()` (line 40)
 pub fn do_pipe2() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,

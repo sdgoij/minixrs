@@ -134,31 +134,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // These mirror x86_64's boot_init sequence (main.rs).
     unsafe {
         kernel::table::proc_init();
-        // Register kernel call handlers needed for boot.
-        // Full system_init() causes a hang on RISC-V (investigation needed).
-        // Register SYS_SETGRANT (34) so VFS can register its grant table.
-        kernel::system::map_call(34, kernel::system::do_setgrant_handler);
-        // Register SYS_FORK (0) so VM can create child Proc entries.
-        kernel::system::map_call(0, kernel::system::do_fork_handler);
-        // Register SYS_VM_PAGING (62) for VM's physical page management.
-        kernel::system::map_call(62, kernel::system::do_vm_paging_handler);
-        // Register SYS_GETKSIG (7) so PM can get exit signals.
-        kernel::system::map_call(7, kernel::system::do_getksig_handler);
-        // Register SYS_ENDKSIG (8) so PM can clear signal pending.
-        kernel::system::map_call(8, kernel::system::do_endksig_handler);
-        // Register SYS_VMCTL (43) so VM can set child's CR3 via
-        // VMCTL_SETADDRSPACE, which also clears VMINHIBIT and enqueues
-        // the child process after fork.
-        kernel::system::map_call(43, kernel::system::do_vmctl_handler);
-        // Register SYS_SCHEDULE (3) so the SCHED server can clear
-        // RTS_NO_QUANTUM on forked children via sys_schedule().
-        kernel::system::map_call(3, kernel::system::do_schedule_handler);
-        // Register SYS_SCHEDCTL (54) so the SCHED server can set
-        // p->p_scheduler for boot processes.
-        kernel::system::map_call(54, kernel::system::do_schedctl_handler);
-        // Register SYS_DIAGCTL (44) so user-space servers can use
-        // diag_putchar for diagnostics.
-        kernel::system::map_call(44, kernel::system::do_diagctl_handler);
+        kernel::system::system_init();
         // IPC syscalls are already registered by init_basic_syscalls below.
     }
 
@@ -653,6 +629,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // - Notifications to be lost
                 // - Other privilege-dependent features to not work
                 let _ = kernel::system::get_priv(rp);
+                // Store physical delta for PA translation in verify_grant.
+                // VFS's grant table is at VA grant_addr; s_phys_delta
+                // converts VA to PA: PA = VA + s_phys_delta.
+                if !(*rp).p_priv.is_null() {
+                    (*(*rp).p_priv).s_phys_delta =
+                        (info.phys_code_base as i64) - (info.code_start as i64);
+                }
                 // Set scheduling parameters.
                 core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
                 core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);

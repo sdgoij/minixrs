@@ -140,7 +140,7 @@ pub fn fs_lookup() -> i32 {
                     let is_root = (*rip_inode)
                         .i_sp
                         .as_ref()
-                        .map_or(false, |sp| sp.s_is_root != 0);
+                        .map_or(false, |sp| (**sp).s_is_root != 0);
                     if !is_root {
                         // Climbing up to parent FS.
                         put_inode(Some(current_rip));
@@ -300,6 +300,7 @@ pub fn advance(dirp_idx: u16, string: &[u8], chk_perm: i32) -> Option<u16> {
     let mut numb: u32 = 0;
     let r = search_dir(dirp_idx, string, Some(&mut numb), LOOK_UP, chk_perm);
     if r != OK {
+        unsafe { (*glo::mfs_ptr()).err_code = r; }
         return None;
     }
     let dev = unsafe { (*glo::get_inode_ptr(dirp_idx as usize)).i_dev };
@@ -317,7 +318,7 @@ pub fn advance(dirp_idx: u16, string: &[u8], chk_perm: i32) -> Option<u16> {
             if !(*rip_ptr)
                 .i_sp
                 .as_ref()
-                .map_or(true, |sp| sp.s_is_root != 0)
+                .map_or(true, |sp| (**sp).s_is_root != 0)
             {
                 (*glo::mfs_ptr()).err_code = ELEAVEMOUNT;
             }
@@ -345,7 +346,7 @@ pub fn search_dir(
         }
 
         if (flag == DELETE || flag == ENTER)
-            && (*ldir).i_sp.as_ref().map_or(false, |sp| sp.s_rd_only != 0)
+            && (*ldir).i_sp.as_ref().map_or(false, |sp| (**sp).s_rd_only != 0)
         {
             return EROFS;
         }
@@ -380,10 +381,11 @@ pub fn search_dir(
             return r;
         }
 
-        let sp = match (*ldir).i_sp.as_ref() {
-            Some(sp) => sp,
-            None => return EINVAL,
-        };
+        let sp_ptr = crate::mfs::super_block::get_super((*ldir).i_dev);
+        if sp_ptr.is_null() {
+            return EINVAL;
+        }
+        let sp = &*sp_ptr;
         let block_size = sp.s_block_size as usize;
 
         let old_slots = (*ldir).i_size as usize / DIR_ENTRY_SIZE;
@@ -466,7 +468,7 @@ pub fn search_dir(
                     } else {
                         // flag is LOOK_UP
                         if let Some(numb_ref) = numb {
-                            *numb_ref = conv4(sp.s_native as i32, dp.mfs_d_ino as i64) as u32;
+                            *numb_ref = conv4((*sp).s_native as i32, dp.mfs_d_ino as i64) as u32;
                         }
                     }
                     debug_assert!(lmfs_dev(bp) != NO_DEV);
@@ -555,7 +557,7 @@ pub fn search_dir(
         let copy_len = string.len().min(MFS_NAME_MAX);
         dp.mfs_d_name[..copy_len].copy_from_slice(&string[..copy_len]);
         if let Some(numb_ref) = numb {
-            dp.mfs_d_ino = conv4(sp.s_native as i32, *numb_ref as i64) as u32;
+            dp.mfs_d_ino = conv4((*sp).s_native as i32, *numb_ref as i64) as u32;
         }
         lmfs_markdirty(held_bp);
         lmfs_put_block(held_bp, DIRECTORY_BLOCK);
@@ -623,7 +625,7 @@ mod tests {
             let sp = crate::mfs::glo::get_super_ptr(0);
             (*sp).s_block_size = 1024;
             (*sp).s_native = 1;
-            rip.i_sp = Some(&mut *sp);
+            rip.i_sp = Some(&*sp);
         }
         assert_eq!(
             search_dir(0, b"nonexistent", None, LOOK_UP, IGN_PERM),
@@ -677,7 +679,7 @@ mod tests {
             let sp = crate::mfs::glo::get_super_ptr(0);
             (*sp).s_block_size = 1024;
             (*sp).s_native = 1;
-            rip.i_sp = Some(&mut *sp);
+            rip.i_sp = Some(&*sp);
         }
         assert_eq!(search_dir(0, b"", None, IS_EMPTY, IGN_PERM), OK);
     }
@@ -810,7 +812,7 @@ mod tests {
             (*rip).i_mode = I_DIRECTORY;
             (*rip).i_size = (2 * entry_size) as i32;
             (*rip).i_zone[0] = 0; // data zone 0 = block 0 on device 0
-            (*rip).i_sp = Some(&mut *sp);
+            (*rip).i_sp = Some(&*sp);
         }
 
         // Look up "file" — should find inode 42.

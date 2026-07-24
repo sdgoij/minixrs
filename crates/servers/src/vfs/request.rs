@@ -194,7 +194,7 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
                 // Copy result back (kernel updated m_source at offset 0)
                 msg[..56].copy_from_slice(&ipc_msg[..56]);
                 // Return the reply's m_type (the FS server's return value)
-                r_i32(&msg, M_TYPE_OFF)
+                r_i32(msg, M_TYPE_OFF)
             }
             Err(e) => e.0,
         }
@@ -524,7 +524,8 @@ pub unsafe fn req_getdents(
         }
 
         let new_pos = r_i64(&msg, PAYLOAD_OFF); // seek_pos (reply)
-        (r, new_pos)
+        let nbytes = r_i32(&msg, PAYLOAD_OFF + 8); // buf_offset from MFS
+        (nbytes, new_pos)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -611,8 +612,8 @@ pub unsafe fn req_lookup(
     fs_e: i32,
     dir_ino: u32,
     root_ino: u32,
-    uid: u16,
-    gid: u16,
+    _uid: u16,
+    _gid: u16,
     resolve: &Lookup,
 ) -> (i32, LookupRes) {
     #[cfg(target_os = "none")]
@@ -672,7 +673,7 @@ pub unsafe fn req_lookup(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (fs_e, dir_ino, root_ino, uid, gid, resolve);
+        let _ = (fs_e, dir_ino, root_ino, _uid, _gid, resolve);
         (ENOSYS, LookupRes::default())
     }
 }

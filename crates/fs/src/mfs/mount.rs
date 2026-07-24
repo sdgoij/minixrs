@@ -46,6 +46,7 @@ pub fn fs_readsuper() -> i32 {
                 //   flags     (u32) at PAYLOAD_OFF+16 → m1.m1i5
                 //   mode (u16) at PAYLOAD_OFF+20 → low 16 of m1i6
                 let root_inode = &*glo::get_inode_ptr(root_rip as usize);
+                (*mfs).fs_dev = dev;
                 (*mfs).m_out.m_payload.m1.m1i1 = root_inode.i_size;
                 (*mfs).m_out.m_payload.m1.m1i2 = if root_inode.i_size < 0 { -1 } else { 0 };
                 (*mfs).m_out.m_payload.m1.m1i3 = dev as i32;

@@ -185,16 +185,6 @@ pub fn ls(args: &[&str]) -> i32 {
     // Use IPC-based open via minix_std (routes to VFS)
     let fd = match unsafe { minix_std::fs::open(dir, 0, 0) } {
         Ok(fd) => {
-            write_out(b"OP:OK fd=");
-            let code = fd;
-            if code >= 100 {
-                write_out(&[b'0' + ((code / 100) % 10) as u8]);
-            }
-            if code >= 10 {
-                write_out(&[b'0' + ((code / 10) % 10) as u8]);
-            }
-            write_out(&[b'0' + (code % 10) as u8]);
-            write_out(b"\r\n");
             fd
         }
         Err(e) => {
@@ -215,16 +205,6 @@ pub fn ls(args: &[&str]) -> i32 {
     };
     let mut buf = [0u8; 4096];
     let n = minix_std::fs::getdents(fd, &mut buf).unwrap_or(0);
-    // Debug always
-    write_out(b"[n=");
-    if n >= 100 {
-        write_out(&[b'0' + ((n / 100) % 10) as u8]);
-    }
-    if n >= 10 {
-        write_out(&[b'0' + ((n / 10) % 10) as u8]);
-    }
-    write_out(&[b'0' + (n % 10) as u8]);
-    write_out(b" \r\n");
     if n <= 0 {
         // Fallback: just print the directory name if getdents fails
         write_out(dir.as_bytes());

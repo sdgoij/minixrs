@@ -2,6 +2,7 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::glo;
+use crate::mfs::super_block;
 use libs::libminixfs::cache::{lmfs_get_block, lmfs_get_block_ino, lmfs_put_block};
 use libs::libminixfs::constants::{FULL_DATA_BLOCK, PARTIAL_DATA_BLOCK};
 use libs::libminixfs::types::Buf;
@@ -22,8 +23,8 @@ pub fn fs_readwrite() -> i32 {
         let _grant = (*msg).m_payload.m1.m1i5;
 
         let rip = &*glo::get_inode_ptr(rip_idx as usize);
-        let block_size = match (*rip).i_sp.as_ref() {
-            Some(sp) => sp.s_block_size as usize,
+        let block_size = match (*rip).i_sp {
+            Some(sp) => (*sp).s_block_size as usize,
             None => return EINVAL,
         };
 
@@ -107,10 +108,12 @@ pub fn fs_breadwrite() -> i32 {
 pub fn read_map(rip_idx: u16, position: i64, _opportunistic: i32) -> u32 {
     unsafe {
         let rip = &*glo::get_inode_ptr(rip_idx as usize);
-        let sp = match rip.i_sp.as_ref() {
-            Some(s) => s,
-            None => return NO_BLOCK,
-        };
+        // Use get_super directly to avoid i_sp aliasing UB
+        let sp_ptr = super_block::get_super(rip.i_dev);
+        if sp_ptr.is_null() {
+            return NO_BLOCK;
+        }
+        let sp = &*sp_ptr;
         let scale = sp.s_log_zone_size as u64;
         let block_pos = (position as u64) / sp.s_block_size as u64;
         let zone = block_pos >> scale;
@@ -342,7 +345,7 @@ mod tests {
             (*sp).s_block_size = 4096;
             (*sp).s_log_zone_size = 0;
             let rip = glo::get_inode_ptr(0);
-            (*rip).i_sp = Some(&mut *sp);
+            (*rip).i_sp = Some(sp);
         }
         set_req_read(0, 0, 0);
         let r = fs_readwrite();
@@ -389,7 +392,7 @@ mod tests {
             let rip = glo::get_inode_ptr(0);
             (*rip).i_dev = 0;
             (*rip).i_zone[0] = 1; // first zone points to block 1
-            (*rip).i_sp = Some(&mut *sp);
+            (*rip).i_sp = Some(sp);
         }
         // get_block_map calls lmfs_get_block which needs a buffer pool.
         // Without it, lmfs_get_block returns null (no pool).

@@ -258,7 +258,7 @@ pub unsafe fn open(path: &str, flags: i32, _mode: u32) -> Result<i32, MinixErr> 
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_OPEN as i32);
         msg_set_u64(&mut msg, OFF_OPEN_NAME, path.as_ptr() as u64);
-        msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, (path.len() + 1) as i32);
+        msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, path.len() as i32);
         msg_set_i32(&mut msg, OFF_OPEN_FLAGS, flags);
         let mtype = vfs_call(&mut msg)?;
         // VFS_OPEN returns the file descriptor in m_type on success.

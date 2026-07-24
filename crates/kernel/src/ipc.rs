@@ -309,7 +309,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // skip checking caller_q, notifications, and async. The process should
         // block until the destination (from the SENDREC) receives and replies.
         let caller_rts = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        if caller_rts & RtsFlags::SENDING.bits() == 0  {
+        if caller_rts & RtsFlags::SENDING.bits() == 0 {
             // Check caller queue for pending messages.
             let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
             while !(*xpp).is_null() {
@@ -430,7 +430,8 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // C L1033-1034: Block — set p_getfrom_e and RECEIVING.
         (*caller_ptr).p_getfrom_e = src_any;
         let old = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0;
+        let has_reply_pend =
+            (*caller_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0;
         if caller_rts & RtsFlags::SENDING.bits() == 0 || has_reply_pend {
             (*caller_ptr)
                 .p_rts_flags
@@ -583,6 +584,13 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
 
 // ── copy_from_user
 
+/// Copy data from a process's virtual address space into kernel memory.
+///
+/// # Safety
+///
+/// `rp` must point to a valid `Proc` with a valid page table (`p_seg.p_cr3`).
+/// `user_va` must be a valid virtual address in that process's address space.
+/// `dst` must be a valid pointer with at least `len` bytes of writable memory.
 pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usize) -> i32 {
     unsafe {
         if len == 0 {

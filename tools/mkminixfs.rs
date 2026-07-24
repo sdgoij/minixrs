@@ -246,6 +246,7 @@ impl FsImage {
         let entry_size = std::mem::size_of::<Direct>();
         let max_entries = self.zone_size / entry_size;
         let mut found = false;
+        let mut slot = 0usize;
         for i in 0..max_entries {
             let e_off = i * entry_size;
             let ino_bytes = &dir_data[e_off..e_off + 4];
@@ -258,6 +259,7 @@ impl FsImage {
                 };
                 dir_data[e_off..e_off + entry_size].copy_from_slice(entry_bytes);
                 found = true;
+                slot = i;
                 break;
             }
         }
@@ -266,6 +268,15 @@ impl FsImage {
         }
 
         self.data[off..off + self.zone_size].copy_from_slice(&dir_data);
+
+        // Update directory inode size to encompass the new entry.
+        let new_size = ((slot + 1) * entry_size) as i32;
+        for entry in self.inode_table.iter_mut() {
+            if entry.d2_zone[0] == dir_zone && (entry.d2_size as usize) < (slot + 1) * entry_size {
+                entry.d2_size = new_size;
+                break;
+            }
+        }
     }
 
     /// Add a regular file, returns its inode number.

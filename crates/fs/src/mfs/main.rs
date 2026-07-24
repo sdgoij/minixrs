@@ -92,33 +92,36 @@ pub fn mfs_main() -> i32 {
             }
 
             // For lookup requests, extract fields from the message payload.
-            // The payload is m_payload.raw[0..56]; mess_vfs_fs_lookup starts at +0.
+            // VFS req_lookup writes at PAYLOAD_OFF (offset 8 in Message):
+            //   +0  = dir_ino  (u64) -> m_payload.m4.l1, m4.l2
+            //   +8  = root_ino (u64) -> m_payload.m4.l3, m4.l4
+            //   +16 = flags    (u32) -> m_payload.m1.m1i5
+            //   +20 = path_len (u32) -> m_payload.m1.m1i6
+            //   +24 = path data
             if req_nr == 26 {
                 unsafe {
-                    let raw = (*glo::mfs_ptr()).m_in.m_payload.raw;
-                    (*glo::mfs_ptr()).lookup_dir_ino =
-                        u64::from_le_bytes(raw[0..8].try_into().unwrap_or([0u8; 8])) as u32;
-                    (*glo::mfs_ptr()).lookup_root_ino =
-                        u64::from_le_bytes(raw[8..16].try_into().unwrap_or([0u8; 8])) as u32;
-                    (*glo::mfs_ptr()).lookup_flags =
-                        i32::from_le_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
-                    let path_len =
-                        u32::from_le_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
-                    (*glo::mfs_ptr()).lookup_path_len = path_len;
-                    (*glo::mfs_ptr()).lookup_path_size =
-                        u32::from_le_bytes(raw[24..28].try_into().unwrap_or([0u8; 4])) as usize;
-                    // Copy path from embedded location in payload (+24)
+                    let mfs = glo::mfs_ptr();
+                    let dir_ino = (*mfs).m_in.m_payload.m4.m4l1 as u64;
+                    let root_ino = (*mfs).m_in.m_payload.m4.m4l2 as u64;
+                    let flags = (*mfs).m_in.m_payload.m1.m1i5;
+                    let path_len = (*mfs).m_in.m_payload.m1.m1i6 as usize;
+                    (*mfs).lookup_dir_ino = dir_ino as u32;
+                    (*mfs).lookup_root_ino = root_ino as u32;
+                    (*mfs).lookup_flags = flags;
+                    (*mfs).lookup_path_len = path_len;
+                    // Copy path from embedded location in payload (+24 = m_payload.raw[24])
+                    let raw = (*mfs).m_in.m_payload.raw;
                     let copy_len = path_len.min(PATH_MAX - 1).min(24);
                     if copy_len > 0 {
-                        let user_path_ptr = (*glo::mfs_ptr()).user_path.as_mut_ptr();
+                        let user_path_ptr = (*mfs).user_path.as_mut_ptr();
                         for j in 0..copy_len {
                             core::ptr::write(user_path_ptr.add(j), raw[24 + j]);
                         }
                         core::ptr::write(user_path_ptr.add(copy_len), 0);
+
                     }
                 }
             }
-
             // Dispatch the request (handler may populate m_out payload).
             let status = crate::mfs::table::dispatch(req_nr);
 
@@ -127,10 +130,11 @@ pub fn mfs_main() -> i32 {
                 unsafe {
                     let mfs = glo::mfs_ptr();
                     let raw = &mut (*mfs).m_out.m_payload.raw;
-                    raw[8..16].copy_from_slice(&(*mfs).lookup_res_file_size.to_le_bytes());
+                    let file_size = (*mfs).lookup_res_file_size as i64;
+                    raw[8..16].copy_from_slice(&file_size.to_le_bytes());
                     raw[16..20].copy_from_slice(&(*mfs).lookup_res_device.to_le_bytes());
                     raw[20..24].copy_from_slice(&(*mfs).lookup_res_inode.to_le_bytes());
-                    raw[24..28].copy_from_slice(&(*mfs).lookup_res_mode.to_le_bytes());
+                    raw[24..28].copy_from_slice(&((*mfs).lookup_res_mode as u32).to_le_bytes());
                 }
             }
 

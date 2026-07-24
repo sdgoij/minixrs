@@ -412,10 +412,12 @@ const VTIMER_VALUE_OFF: usize = 24;
 const VTIMER_ENDPT_OFF: usize = 32;
 
 // mess_lsys_krn_sys_setgrant (for do_setgrant):
-//   offset  0: addr       (vir_bytes / u64)
-//   offset  8: size       (int / i32)
-const SETGRANT_ADDR_OFF: usize = 0;
-const SETGRANT_SIZE_OFF: usize = 8;
+// sys_kernel_call_handler overwrites kbuf[0..8] with
+// call_nr + src_ep. The grant addr/size start at offset 8.
+//   offset  8: addr       (vir_bytes / u64)
+//   offset 16: size       (int / i32)
+const SETGRANT_ADDR_OFF: usize = 8;
+const SETGRANT_SIZE_OFF: usize = 16;
 
 // VM_PAGING message offsets (kernel call 62):
 //   offset  8: subcmd      (i32) — VM_PAGING_ALLOC/FREE/MAP/UNMAP
@@ -5629,18 +5631,24 @@ pub unsafe fn do_setgrant_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
         let grant_addr = msg_read_u64(msg, SETGRANT_ADDR_OFF);
         let grant_entries = msg_read_i32(msg, SETGRANT_SIZE_OFF);
 
-        // Check that the caller has a valid privilege structure
         let rts = (*caller).p_rts_flags.load(Ordering::Relaxed);
-        if rts & RtsFlags::NO_PRIV.bits() != 0 || (*caller).p_priv.is_null() {
+        if rts & RtsFlags::NO_PRIV.bits() != 0 {
             return crate::ipc::EPERM;
         }
 
-        // Set the grant table pointer and entry count in the priv structure
-        // This mirrors the C `_K_SET_GRANT_TABLE` macro:
-        //   priv(rp)->s_grant_table = (ptr);
-        //   priv(rp)->s_grant_entries = (entries);
-        (*(*caller).p_priv).s_grant_table = grant_addr;
-        (*(*caller).p_priv).s_grant_entries = grant_entries;
+        // Allocate a privilege structure if needed (boot processes start
+        // with null p_priv before RS sets them up).
+        if (*caller).p_priv.is_null() && get_priv(caller).is_none() {
+            return ENOSPC;
+        }
+
+        let priv_ptr = (*caller).p_priv;
+        (*priv_ptr).s_grant_table = grant_addr;
+        (*priv_ptr).s_grant_entries = grant_entries;
+        // Compute physical address using phys_delta.
+        // For identity-mapped processes, PA = VA.
+        (*priv_ptr).s_grant_pa =
+            (grant_addr as i64 + (*priv_ptr).s_phys_delta) as u64;
 
         OK
     }

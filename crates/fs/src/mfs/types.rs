@@ -118,7 +118,7 @@ pub struct Inode {
     pub i_count: i32,
     pub i_ndzones: u32,
     pub i_nindirs: u32,
-    pub i_sp: Option<&'static mut SuperBlock>,
+    pub i_sp: Option<*const SuperBlock>,
     pub i_dirt: u8,
     pub i_zsearch: u32,
     pub i_last_dpos: i64,
@@ -172,9 +172,8 @@ impl Inode {
 
     /// Mark inode as dirty (only if FS is not read-only).
     pub fn mark_dirty(&mut self) {
-        if let Some(ref sp) = self.i_sp {
-            if sp.s_rd_only != 0 {
-                // Would print warning in C code
+        if let Some(sp) = self.i_sp {
+            if unsafe { (*sp).s_rd_only != 0 } {
                 return;
             }
         }

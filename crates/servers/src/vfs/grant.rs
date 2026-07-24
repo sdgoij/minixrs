@@ -143,21 +143,16 @@ impl GrantTable {
         {
             let addr = self.as_ptr();
             let nr = VFS_NR_GRANTS as i32;
-            // Build SYS_SETGRANT (kernel call 34) message.
-            // The kernel handler (do_setgrant) reads:
-            //   msg[0..8]  = addr (u64)
-            //   msg[8..12] = nr_entries (i32)
             let mut msg = [0u8; 64];
-            msg[0..8].copy_from_slice(&addr.to_le_bytes());
-            msg[8..12].copy_from_slice(&nr.to_le_bytes());
+            // Payload starts at offset 8 (after m_source + m_type).
+            // Kernel overwrites bytes 0..7 with call_nr + src_ep.
+            msg[8..16].copy_from_slice(&addr.to_le_bytes());
+            msg[16..20].copy_from_slice(&nr.to_le_bytes());
             let r = minix_rt::kernel_call(34, &mut msg);
             if r != 0 {
-                #[cfg(target_os = "none")]
-                let msg = b"vfs: setgrant failed\n";
                 unsafe {
-                    minix_rt::write(2, msg.as_ptr(), msg.len());
+                    minix_rt::write(2, b"vfs:setgrant err\n" as *const u8, 18);
                 }
-                let _ = r;
             }
         }
         #[cfg(not(target_os = "none"))]

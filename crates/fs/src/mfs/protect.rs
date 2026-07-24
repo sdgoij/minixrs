@@ -7,7 +7,7 @@ use crate::mfs::read::*;
 use crate::mfs::types::{DIR_ENTRY_SIZE, Direct};
 use libs::libminixfs::cache::{lmfs_get_block, lmfs_put_block};
 
-/// SAFECOPYTO kernel call offset (KERNEL_CALL + 32).
+/// SAFECOPYTO kernel call number (KERNEL_CALL + 32).
 const SAFECOPYTO_CALL: i32 = 32;
 
 pub fn forbidden(rip_idx: u16, access_desired: u16) -> i32 {
@@ -54,14 +54,9 @@ pub fn forbidden(rip_idx: u16, access_desired: u16) -> i32 {
 pub fn read_only(rip_idx: u16) -> i32 {
     unsafe {
         let rip = &*glo::get_inode_ptr(rip_idx as usize);
-        match (*rip).i_sp.as_ref() {
-            Some(sp) => {
-                if sp.s_rd_only != 0 {
-                    EROFS
-                } else {
-                    OK
-                }
-            }
+        match (*rip).i_sp {
+            Some(sp) if (*sp).s_rd_only != 0 => EROFS,
+            Some(_) => OK,
             None => EROFS,
         }
     }
@@ -117,10 +112,11 @@ pub fn fs_getdents() -> i32 {
             return 0;
         }
 
-        let block_size = (*rip_ref)
-            .i_sp
-            .as_ref()
-            .map_or(0, |sp| sp.s_block_size as i64);
+        let sp = crate::mfs::super_block::get_super(dev);
+        if sp.is_null() {
+            return EINVAL;
+        }
+        let block_size = (*sp).s_block_size as i64;
         if block_size == 0 {
             return EINVAL;
         }
@@ -219,7 +215,13 @@ pub fn fs_getdents() -> i32 {
         }
 
         (*mfs).cch[0] = buf_offset as i32;
-        buf_offset as i32
+        // Set reply payload:
+        //   raw[0..8]  = new seek_pos
+        //   raw[8..12] = buf_offset (bytes written via grant)
+        let raw_ref = &mut (*mfs).m_out.m_payload.raw;
+        raw_ref[0..8].copy_from_slice(&pos.to_le_bytes());
+        raw_ref[8..12].copy_from_slice(&(buf_offset as i32).to_le_bytes());
+OK
     }
 }
 

@@ -36,7 +36,7 @@ pub fn write_map(rip_idx: u16, position: i64, new_zone: u32, op: u32) -> i32 {
         let rip = &mut *glo::get_inode_ptr(rip_idx as usize);
         (*rip).i_dirt = IN_DIRTY;
         let sp = match (*rip).i_sp {
-            Some(ref mut s) => *s as *mut SuperBlock,
+            Some(s) => s as *mut SuperBlock,
             None => return EIO,
         };
         let scale = (*sp).s_log_zone_size as u64;
@@ -186,7 +186,7 @@ pub fn write_map(rip_idx: u16, position: i64, new_zone: u32, op: u32) -> i32 {
 pub fn clear_zone(rip_idx: u16, _pos: i64, _flag: i32) {
     unsafe {
         let rip = &*glo::get_inode_ptr(rip_idx as usize);
-        debug_assert!((*rip).i_sp.as_ref().map_or(0, |sp| sp.s_log_zone_size) == 0);
+        debug_assert!((*rip).i_sp.map_or(true, |sp| (*sp).s_log_zone_size == 0));
     }
 }
 
@@ -200,10 +200,7 @@ pub fn new_block(rip_idx: u16, position: i64) -> *mut u8 {
                 (*rip).i_zsearch
             };
             let z = if z == NO_ZONE {
-                (*rip)
-                    .i_sp
-                    .as_ref()
-                    .map_or(NO_ZONE, |sp| sp.s_firstdatazone)
+                (*rip).i_sp.map_or(NO_ZONE, |sp| (*sp).s_firstdatazone)
             } else {
                 z
             };
@@ -222,7 +219,7 @@ pub fn new_block(rip_idx: u16, position: i64) -> *mut u8 {
 
         // Calculate the block number from the zone mapping.
         let sp = match (*rip).i_sp {
-            Some(ref s) => *s as *const SuperBlock,
+            Some(s) => s,
             None => return core::ptr::null_mut(),
         };
         let scale = (*sp).s_log_zone_size as u64;
@@ -273,7 +270,7 @@ pub fn truncate_inode(rip_idx: u16, newsize: i64) -> i32 {
         if ft == I_CHAR_SPECIAL || ft == I_BLOCK_SPECIAL {
             return EINVAL;
         }
-        let max_sz = (*rip).i_sp.as_ref().map_or(0, |sp| sp.s_max_size as i64);
+        let max_sz = (*rip).i_sp.map_or(0, |sp| (*sp).s_max_size as i64);
         if newsize > max_sz {
             return EFBIG;
         }
@@ -320,13 +317,12 @@ pub fn fs_ftrunc() -> i32 {
         };
 
         // Check read-only.
-        let sp = (*crate::mfs::glo::get_inode_ptr(rip as usize))
-            .i_sp
-            .as_ref()
-            .map_or(core::ptr::null(), |s| &**s as *const SuperBlock);
-        if sp.is_null() {
-            return EIO;
-        }
+        let sp = match (*crate::mfs::glo::get_inode_ptr(rip as usize)).i_sp {
+            Some(sp) => sp,
+            None => {
+                return EIO;
+            }
+        };
         if (*sp).s_rd_only != 0 {
             return EROFS;
         }
@@ -350,8 +346,8 @@ fn freesp_inode(rip_idx: u16, start: i64, mut end: i64) -> i32 {
         }
         let zs = (*rip)
             .i_sp
-            .as_ref()
-            .map_or(0, |sp| (sp.s_block_size as i64) << sp.s_log_zone_size) as u64;
+            .map_or(0, |sp| ((*sp).s_block_size as i64) << (*sp).s_log_zone_size)
+            as u64;
         let e = end as u64 / zs;
         let mut p = ((start as u64 + zs - 1) / zs) * zs;
         while p < e * zs {

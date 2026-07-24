@@ -354,6 +354,13 @@ pub extern "C" fn kmain_body() -> ! {
                 //   the k_call_mask permission check
                 // get_priv allocates a Priv entry with all kernel calls allowed.
                 let _ = kernel::system::get_priv(rp);
+                // Store physical delta for PA translation in verify_grant.
+                // Boot processes have per-process page tables that remap
+                // VA 0x1000000 → loaded PA. s_phys_delta = PA - VA.
+                if !(*rp).p_priv.is_null() {
+                    (*(*rp).p_priv).s_phys_delta =
+                        (info.phys_code_base as i64) - (info.code_start as i64);
+                }
                 // Set scheduling parameters matching C MINIX proc_init:
                 // all user-space processes get USER_Q = 7 and USER_QUANTUM = 200ms.
                 // Priority 0 (TASK_Q) is reserved for kernel tasks that run in

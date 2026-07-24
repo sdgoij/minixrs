@@ -179,11 +179,8 @@ pub fn fs_unlink() -> i32 {
             }
         };
 
-        if (*glo::get_inode_ptr(rip as usize))
-            .i_sp
-            .as_ref()
-            .map_or(true, |sp| sp.s_rd_only != 0)
-        {
+        let rip_ptr = glo::get_inode_ptr(rip as usize);
+        if (*rip_ptr).i_sp.map_or(true, |sp| (*sp).s_rd_only != 0) {
             r = EROFS;
         } else if req_nr == (REQ_UNLINK - FS_BASE) {
             let mode = (*glo::get_inode_ptr(rip as usize)).i_mode;

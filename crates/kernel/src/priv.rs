@@ -278,8 +278,14 @@ pub struct Priv {
     pub s_nr_irq: i32,
     pub s_irq_tab: [i32; NR_IRQ],
 
-    /// Grant table address (or 0).
+    /// Grant table address in granter's virtual address space (or 0).
     pub s_grant_table: u64,
+    /// Grant table base physical address (identity-mapped).
+    /// Set during do_setgrant_handler by translating VA to PA.
+    pub s_grant_pa: u64,
+    /// Physical delta: phys_code_base - code_start.
+    /// Used to translate VAs to PAs for per-process mappings.
+    pub s_phys_delta: i64,
     /// Number of grant entries (or 0).
     pub s_grant_entries: i32,
 }
@@ -313,6 +319,8 @@ impl Default for Priv {
             s_nr_irq: 0,
             s_irq_tab: [0i32; NR_IRQ],
             s_grant_table: 0,
+            s_grant_pa: 0,
+            s_phys_delta: 0,
             s_grant_entries: 0,
         }
     }
@@ -359,6 +367,8 @@ pub static PRIV: PrivTableCell = PrivTableCell::new(
         s_nr_irq: 0,
         s_irq_tab: [0i32; NR_IRQ],
         s_grant_table: 0,
+        s_grant_pa: 0,
+        s_phys_delta: 0,
         s_grant_entries: 0,
     }; NR_SYS_PROCS],
 );
@@ -405,6 +415,8 @@ pub static IDLE_PRIV: IdlePrivCell = IdlePrivCell::new(Priv {
     s_nr_irq: 0,
     s_irq_tab: [0i32; NR_IRQ],
     s_grant_table: 0,
+    s_grant_pa: 0,
+    s_phys_delta: 0,
     s_grant_entries: 0,
 });
 

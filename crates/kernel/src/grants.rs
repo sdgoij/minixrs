@@ -93,25 +93,12 @@ pub unsafe fn verify_grant(
             }
 
             // Read the grant entry from the granter's grant table.
-            // On bare metal with per-process page tables, the grant table
-            // address is only valid in the granter's address space, so we
-            // switch CR3 to read it. In test mode (BOOT_CR3 == 0) or when
-            // the granter has no per-process page table (identity-mapped),
-            // read via the identity-mapped address directly.
-            let grant_entry_addr = priv_data.s_grant_table
-                + (cur_grant as u64) * core::mem::size_of::<CpGrant>() as u64;
+            // s_grant_pa was computed during do_setgrant_handler using
+            // s_phys_delta: PA = VA + (phys_code_base - code_start).
+            let grant_entry_pa =
+                priv_data.s_grant_pa + (cur_grant as u64) * core::mem::size_of::<CpGrant>() as u64;
 
-            let boot_cr3 = crate::hal::boot_cr3();
-            let g = if boot_cr3 != 0 && (*granter_proc).p_seg.p_cr3 != 0 {
-                let saved = crate::hal::read_cr3();
-                crate::hal::write_cr3((*granter_proc).p_seg.p_cr3);
-                let entry = core::ptr::read(grant_entry_addr as *const CpGrant);
-                crate::hal::write_cr3(saved);
-                entry
-            } else {
-                // No per-process page table — read via identity map
-                core::ptr::read(grant_entry_addr as *const CpGrant)
-            };
+            let g = core::ptr::read(grant_entry_pa as *const CpGrant);
 
             let flags = g.cp_flags;
 
@@ -298,10 +285,6 @@ pub unsafe fn safecopy(
             // Normal: CR3-switched copy using virtual_copy.
             // virtual_copy handles the bounce-buffer switching
             // between source and destination address spaces.
-            // It returns non-zero when a process has no per-process
-            // CR3 (kernel task using identity map); in that case
-            // fall back to direct copy since both addresses are
-            // accessible from the kernel's current CR3.
             let caller_slot = endpoint_slot((*caller).p_endpoint);
             let effective_slot = endpoint_slot(new_granter);
 

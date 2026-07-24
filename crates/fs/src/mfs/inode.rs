@@ -204,7 +204,7 @@ pub fn alloc_inode(dev: u32, bits: u16) -> Option<u16> {
         (*inode).i_dev = dev;
         (*inode).i_ndzones = (*sp).s_ndzones as u32;
         (*inode).i_nindirs = (*sp).s_nindirs as u32;
-        (*inode).i_sp = Some(&mut *sp);
+        (*inode).i_sp = Some(sp);
         (*inode).i_size = 0;
         (*inode).i_update = ATIME | CTIME | MTIME;
         (*inode).i_dirt = IN_DIRTY;
@@ -232,7 +232,7 @@ pub fn rw_inode(rip_idx: u16, rw_flag: i32) -> i32 {
         if sp.is_null() {
             return EINVAL;
         }
-        (*rip).i_sp = Some(&mut *sp);
+        (*rip).i_sp = Some(sp);
 
         let offset = START_BLOCK + (*sp).s_imap_blocks as u32 + (*sp).s_zmap_blocks as u32;
         let b = ((*rip).i_num - 1) / (*sp).s_inodes_per_block + offset;
@@ -295,10 +295,11 @@ pub fn rw_inode(rip_idx: u16, rw_flag: i32) -> i32 {
 pub fn update_times(rip_idx: u16) {
     unsafe {
         let inode = ino_mut(rip_idx);
-        let sp = match (*inode).i_sp.as_mut() {
-            Some(s) => s,
+        let sp_ptr = match (*inode).i_sp {
+            Some(sp) => sp as *mut SuperBlock,
             None => return,
         };
+        let sp = &mut *sp_ptr;
         if sp.s_rd_only != 0 {
             return;
         }

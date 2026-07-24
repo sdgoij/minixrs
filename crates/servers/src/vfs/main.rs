@@ -150,7 +150,6 @@ unsafe fn get_work() {
         const ANY: i32 = 0x0000ffff;
         let src = unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf as u64) };
         if src >= 0 {
-            // Store the sender endpoint at offset 0 (m_source)
             let src_bytes = (src as i32).to_le_bytes();
             core::ptr::copy_nonoverlapping(src_bytes.as_ptr(), buf as *mut u8, 4);
         }
@@ -212,45 +211,6 @@ unsafe fn handle_work() {
         // Regular VFS calls are dispatched through the call table.
         let result = table::dispatch(call_nr);
         (*glob).err_code = result;
-        #[cfg(target_os = "none")]
-        unsafe {
-            let mut dbg = [0u8; 64];
-            let mut pos = 0usize;
-            dbg[pos] = b'R';
-            pos += 1;
-            dbg[pos] = b'=';
-            pos += 1;
-            let val = result;
-            if val < 0 {
-                dbg[pos] = b'-';
-                pos += 1;
-                let val = (-val) as u32;
-                if val >= 100 {
-                    dbg[pos] = b'0' + ((val / 100) % 10) as u8;
-                    pos += 1;
-                }
-                if val >= 10 {
-                    dbg[pos] = b'0' + ((val / 10) % 10) as u8;
-                    pos += 1;
-                }
-                dbg[pos] = b'0' + (val % 10) as u8;
-                pos += 1;
-            } else {
-                if val >= 100 {
-                    dbg[pos] = b'0' + ((val / 100) % 10) as u8;
-                    pos += 1;
-                }
-                if val >= 10 {
-                    dbg[pos] = b'0' + ((val / 10) % 10) as u8;
-                    pos += 1;
-                }
-                dbg[pos] = b'0' + (val % 10) as u8;
-                pos += 1;
-            }
-            dbg[pos] = b'\n';
-            pos += 1;
-            minix_rt::write(2, dbg.as_ptr(), pos);
-        }
         reply(fp, result);
     }
 }
@@ -260,13 +220,13 @@ unsafe fn handle_work() {
 /// Writes the result code into the outgoing message buffer and sends
 /// it via `sendrec` to the caller. The `who` pointer identifies the
 /// caller's Fproc slot; if null, the reply is skipped.
+#[allow(unused_variables)]
 unsafe fn reply(who: *mut Fproc, _result: i32) {
-    if who.is_null() {
-        return;
-    }
-
     #[cfg(target_os = "none")]
     {
+        if who.is_null() {
+            return;
+        }
         let glob = vfs_global();
         let out = &mut (*glob).fs_m_out;
         out[4..8].copy_from_slice(&_result.to_le_bytes());
