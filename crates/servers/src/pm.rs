@@ -2189,7 +2189,8 @@ mod tests {
         let _idx = alloc_proc().expect("should find a free slot");
         assert!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed) > 0);
         init_proc();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
+        // init_proc marks 10 boot process slots as IN_USE.
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
     }
 
     #[test]
@@ -2208,8 +2209,9 @@ mod tests {
     #[test]
     fn test_free_proc_clears_slot() {
         init_proc();
+        // 10 boot process slots are pre-marked as IN_USE.
         let idx = alloc_proc().expect("should find a free slot");
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
         unsafe {
             free_proc(idx);
         }
@@ -2218,36 +2220,40 @@ mod tests {
             let rmp = &*base.add(idx);
             assert!(!rmp.in_use());
             assert_eq!(rmp.mp_magic, 0);
-            assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
+            // Back to 10 boot process slots.
+            assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
         }
     }
 
     #[test]
     fn test_alloc_proc_exhaustion() {
         init_proc();
+        // 10 boot process slots are pre-marked as IN_USE.
+        let boot_slots = 10;
         let mut count = 0;
         while alloc_proc().is_some() {
             count += 1;
         }
-        assert_eq!(count, NR_PROCS);
+        assert_eq!(count, NR_PROCS - boot_slots);
     }
 
     #[test]
     fn test_procs_in_use_tracking() {
         init_proc();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
+        // init_proc marks 10 boot process slots as IN_USE.
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
         let a = alloc_proc().unwrap();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
         let b = alloc_proc().unwrap();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 12);
         unsafe {
             free_proc(a);
         }
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
         unsafe {
             free_proc(b);
         }
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
     }
 
     #[test]
@@ -2285,8 +2291,9 @@ mod tests {
     fn test_get_proc_none_for_unused_slot() {
         init_proc();
         unsafe {
-            assert!(get_proc(0).is_none());
-            assert!(get_proc_mut(0).is_none());
+            // Slot 0 is PM (a boot process), so use a non-boot slot.
+            assert!(get_proc(66).is_none());
+            assert!(get_proc_mut(66).is_none());
         }
     }
 

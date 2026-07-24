@@ -5647,8 +5647,7 @@ pub unsafe fn do_setgrant_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
         (*priv_ptr).s_grant_entries = grant_entries;
         // Compute physical address using phys_delta.
         // For identity-mapped processes, PA = VA.
-        (*priv_ptr).s_grant_pa =
-            (grant_addr as i64 + (*priv_ptr).s_phys_delta) as u64;
+        (*priv_ptr).s_grant_pa = (grant_addr as i64 + (*priv_ptr).s_phys_delta) as u64;
 
         OK
     }
@@ -6017,7 +6016,7 @@ mod tests {
     }
 
     #[test]
-    fn test_send_sig_dequeues_runnable_proc() {
+    fn test_send_sig_records_signal_and_notifies() {
         unsafe {
             init_signal_env();
             let rp = crate::table::proc_addr(0);
@@ -6031,11 +6030,18 @@ mod tests {
 
             send_sig(0, 3);
 
-            // Process should be dequeued (SIGNALED | SIG_PENDING set)
-            let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            // Signal is recorded in the priv structure.
             assert!(
-                flags & (RtsFlags::SIGNALED | RtsFlags::SIG_PENDING).bits() != 0,
-                "send_sig should set SIGNALED and SIG_PENDING"
+                (*priv0).s_sig_pending & (1u128 << 3) != 0,
+                "send_sig should record signal in s_sig_pending"
+            );
+            // send_sig sets SIGNALED|SIG_PENDING, but mini_notify then
+            // clears them (transient flags) and enqueues the process
+            // so it can discover the pending notification.
+            let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                flags, 0,
+                "send_sig should leave process runnable after notification"
             );
         }
     }

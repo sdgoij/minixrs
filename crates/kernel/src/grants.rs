@@ -455,6 +455,7 @@ mod tests {
             let p = base.add((slot as usize) * PRIV_SLOT_BYTES).cast::<Priv>();
             core::ptr::write_bytes(p.cast::<u8>(), 0, PRIV_SLOT_BYTES);
             (*p).s_grant_table = grant_table_ptr;
+            (*p).s_grant_pa = grant_table_ptr;
             (*p).s_grant_entries = grant_entries;
             (*p).s_flags = PrivFlags::empty();
             (*p).s_sig_mgr = i32::MIN;
