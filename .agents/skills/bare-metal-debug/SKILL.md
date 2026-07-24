@@ -427,7 +427,7 @@ port. Piping directly through `just run` does **not** work because the
 Justfile uses `-nographic` which sets `-serial mon:stdio` — the QEMU
 monitor multiplexes on stdin and interferes with serial input.
 
-### Working approaches
+### Working approaches (x86_64)
 
 **Approach 1: Run QEMU directly with `-nographic -monitor none`**
 
@@ -445,13 +445,40 @@ The `sleep 3` gives the kernel time to boot before input arrives.
 
 Edit the `run` recipe to use `-nographic -monitor none` instead of just `-nographic`.
 
-### What DOESN'T work
+### What DOESN'T work (x86_64)
 
 - `(sleep N; echo ...) | just run` — the `-nographic` default leaves the monitor
   on stdio, which steals bytes from the serial input.
 - `-display none -serial stdio` — creates a serial port but may not configure
   COM1 interrupts correctly for this kernel.
 - `echo "cmd" > /proc/PID/fd/0` — not applicable on Windows (WSL may work).
+
+### Working approaches (RISC-V64)
+
+RISC-V uses `qemu-system-riscv64 -machine virt`. The UART is at
+`0x10000000` (NS16550a-compatible). Unlike x86_64, piped input works
+correctly with `-nographic` **without** `-monitor none`.
+
+With `-monitor none`, the UART only receives partial input (first few
+bytes dropped — e.g., "l" instead of "ls /").
+
+**Working incantation:**
+
+```
+(sleep 8 && printf "ls /\nls /bin\n" && sleep 3) | \
+  qemu-system-riscv64 -machine virt -m 256M -nographic -no-reboot \
+  -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+```
+
+The kernel binary is at
+`target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64`.
+`sleep 8` accounts for OpenSBI (~3s) + kernel boot (~5s) before the
+`# ` prompt appears.
+
+**What DOESN'T work on RISC-V:**
+- Adding `-monitor none` — causes partial/dropped UART bytes
+- `(sleep N; echo ...) | just run riscv64` — the Justfile does a full
+  x86_64 + riscv64 rebuild, too slow for iterative testing
 
 ### Why this matters
 
@@ -621,3 +648,35 @@ cargo build -p kernel-boot --target x86_64-pc-minix.json \
 Without debug info, LLDB can still resolve function names from the symbol
 table and set breakpoints by name, but `frame variable` and line-level
 stepping won't work.
+
+## RISC-V64 Debugging
+
+### Page faults
+
+The RISC-V trap handler in `crates/arch-riscv64/src/trap.rs` prints
+`!PF <stval> <sepc>` on page faults (instruction, load, or store).
+The system then loops on `wfi`. Decode `sepc` with:
+
+```bash
+rust-nm -n target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64 \
+  | grep -i <address>
+```
+
+### Missing kernel call handlers
+
+The RISC-V boot code (`crates/kernel-boot/src/riscv64.rs`) now calls
+`kernel::system::system_init()` directly, registering all 44 handlers.
+The old `-212` (`EBADREQUEST`) pattern (manual `map_call()` list missing
+a handler) is obsolete but preserved here for bisecting older commits.
+
+### CR3 / SATP switching
+
+RISC-V uses the `satp` CSR for the page table root (SV39 format).
+`virtual_copy()` switches `satp` between source and destination
+processes. Each restricted page table copies kernel mappings from
+the boot page table, so the kernel stays accessible after the switch.
+
+`s_phys_delta` must be set during boot (`PA = VA + s_phys_delta`)
+so `verify_grant` can read grant entries from physical memory.
+RISC-V processes use `code_start = 0x1000000` with `phys_code_base`
+around `0x80800000+`.
