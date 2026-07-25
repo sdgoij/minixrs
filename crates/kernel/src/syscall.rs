@@ -1159,6 +1159,9 @@ unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> 
                 // Found a free slot — clone the caller into it.
                 core::ptr::copy_nonoverlapping(caller, rpc, 1);
                 (*rpc).p_nr = slot as i32;
+                // Assign a unique endpoint so PM/VFS can distinguish child
+                // from parent in waitpid/exit tracking.
+                (*rpc).p_endpoint = crate::table::make_endpoint(0, slot as i32);
                 crate::hal::write_retval(&mut (*rpc).p_reg, 0); // child returns 0
                 (*rpc).p_user_time = 0;
                 (*rpc).p_sys_time = 0;

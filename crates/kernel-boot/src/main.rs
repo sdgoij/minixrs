@@ -630,6 +630,8 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
+        kernel::hal::write_retval(&mut (*rp).p_reg, result as u64);
+
         // Check if this was a successful exec — needed for scheduler logic.
         let is_exec = nr == 61 && result == 0;
 

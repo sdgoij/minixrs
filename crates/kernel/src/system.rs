@@ -4967,7 +4967,6 @@ unsafe fn vm_paging_fork_x86_64(
                 // 1GB page — copy and COW-protect if user-writable.
                 if e3 & PG_U != 0 && e3 & PG_RW != 0 {
                     let cow_entry = e3 & !PG_RW;
-                    core::ptr::write(parent_p3.add(l3) as *mut u64, cow_entry);
                     core::ptr::write(child_p3.add(l3), cow_entry);
                 } else {
                     core::ptr::write(child_p3.add(l3), e3);
@@ -4984,7 +4983,6 @@ unsafe fn vm_paging_fork_x86_64(
                     if e2 & PG_U != 0 && e2 & PG_RW != 0 {
                         // COW: clear RW in both parent and child.
                         let cow_entry = e2 & !PG_RW;
-                        core::ptr::write(parent_p2.add(l2) as *mut u64, cow_entry);
                         core::ptr::write(child_p2.add(l2), cow_entry);
                     } else {
                         core::ptr::write(child_p2.add(l2), e2);
@@ -5006,7 +5004,6 @@ unsafe fn vm_paging_fork_x86_64(
                         continue;
                     }
                     let cow_e1 = e1 & !PG_RW;
-                    core::ptr::write(parent_p1.add(l1) as *mut u64, cow_e1);
                     core::ptr::write(child_p1.add(l1), cow_e1);
                 }
             }
