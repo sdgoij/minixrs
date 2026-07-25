@@ -14,6 +14,18 @@ prepare:
 
 set shell := ["target/jsh", "-c"]
 
+# Check code quality across all targets.
+# Host clippy (fast), riscv64 check (compilation verification).
+check:
+    cargo clippy -- -D warnings
+    cargo check -p kernel-boot --lib --target riscv64gc-unknown-none-elf -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+    cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-none-elf -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+
+# Remove generated assets that jsh doesn't rebuild if they exist.
+# Run this if you suspect stale generated data (e.g. after arch switch).
+clean:
+    rm -f target/initramfs_data.rs target/minixfs_data.rs target/jsh.exe target/jsh_new.exe target/mkinitramfs.exe target/mkminixfs.exe target/mkboot.exe
+
 build target="x86":
     @build {{target}}
 

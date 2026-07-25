@@ -211,18 +211,131 @@ fn cmd_debug(target: &str) {
     run_qemu_x86(true);
 }
 
-fn cmd_test_qemu(_target: &str) {
-    // QEMU integration tests (kernel-level, ring 0).
-    build_mkboot();
-    run_mkboot_with_features("embed_initramfs,integration-tests");
-    run_qemu_x86_test();
+fn cmd_test_qemu(target: &str) {
+    match target {
+        "x86" => {
+            // QEMU integration tests (kernel-level, ring 0).
+            build_mkboot();
+            run_mkboot_with_features("embed_initramfs,integration-tests");
+            run_qemu_x86_test();
+        }
+        "riscv64" => {
+            // Build kernel with integration-tests and run.
+            // Note: no integration tests exist for riscv64 yet (test_runner
+            // is x86-specific). This just validates the kernel boots.
+            let status = Command::new("rustc")
+                .args([
+                    "tools/mkinitramfs.rs",
+                    "--edition",
+                    "2024",
+                    "-o",
+                    "target/mkinitramfs",
+                ])
+                .status()
+                .expect("rustc failed");
+            assert!(status.success());
+            let status = Command::new(&target_dir().join(exe_name("mkinitramfs")))
+                .arg("riscv64")
+                .status()
+                .expect("mkinitramfs failed");
+            assert!(status.success());
+            let status = Command::new("rustup")
+                .args([
+                    "run",
+                    "nightly",
+                    "cargo",
+                    "build",
+                    "-p",
+                    "kernel-boot",
+                    "--bin",
+                    "kernel-boot-riscv64",
+                    "--target",
+                    "riscv64gc-unknown-none-elf",
+                    "--features",
+                    "embed_initramfs,riscv64,integration-tests",
+                    "-Zbuild-std=core,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "--release",
+                ])
+                .status()
+                .expect("cargo failed");
+            assert!(status.success());
+            run_qemu_riscv();
+        }
+        _ => {
+            eprintln!("jsh: unknown target '{target}' (use x86 or riscv64)");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn cmd_test_boot(_target: &str) {
-    // Boot tests (multi-server verification after VFS mount_root).
-    build_mkboot();
-    run_mkboot_with_features("embed_initramfs,embed_minixfs,boot-test");
-    run_qemu_x86_test();
+fn cmd_test_boot(target: &str) {
+    match target {
+        "x86" => {
+            build_mkboot();
+            run_mkboot_with_features("embed_initramfs,embed_minixfs,boot-test");
+            run_qemu_x86_test();
+        }
+        "riscv64" => {
+            // Build initramfs → kernel → riscv64 QEMU
+            let status = Command::new("rustc")
+                .args([
+                    "tools/mkinitramfs.rs",
+                    "--edition",
+                    "2024",
+                    "-o",
+                    "target/mkinitramfs",
+                ])
+                .status()
+                .expect("rustc failed");
+            assert!(status.success());
+            let status = Command::new(&target_dir().join(exe_name("mkinitramfs")))
+                .arg("riscv64")
+                .status()
+                .expect("mkinitramfs failed");
+            assert!(status.success());
+            let status = Command::new("rustc")
+                .args([
+                    "tools/mkminixfs.rs",
+                    "--edition",
+                    "2021",
+                    "-o",
+                    "target/mkminixfs",
+                ])
+                .status()
+                .expect("rustc failed");
+            assert!(status.success());
+            let _ = Command::new(&target_dir().join(exe_name("mkminixfs")))
+                .arg("riscv64")
+                .status();
+            let status = Command::new("rustup")
+                .args([
+                    "run",
+                    "nightly",
+                    "cargo",
+                    "build",
+                    "-p",
+                    "kernel-boot",
+                    "--bin",
+                    "kernel-boot-riscv64",
+                    "--target",
+                    "riscv64gc-unknown-none-elf",
+                    "--features",
+                    "embed_initramfs,embed_minixfs,riscv64,boot-test",
+                    "-Zbuild-std=core,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "--release",
+                ])
+                .status()
+                .expect("cargo failed");
+            assert!(status.success());
+            run_qemu_riscv();
+        }
+        _ => {
+            eprintln!("jsh: unknown target '{target}' (use x86 or riscv64)");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn run_qemu_x86_test() {

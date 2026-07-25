@@ -13,8 +13,13 @@ pub mod boot_init;
 #[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]
 pub mod test_runner;
 
-#[cfg(all(feature = "boot-test", target_arch = "x86_64"))]
+#[cfg(feature = "boot-test")]
 pub mod boot_test;
+
+#[cfg(feature = "boot-test")]
+pub unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args: &[u64; 6]) -> i64 {
+    unsafe { boot_test::run_boot_tests() }
+}
 
 /// Write a string to the boot console.
 ///

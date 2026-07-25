@@ -142,6 +142,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     unsafe {
         kernel::syscall::init_basic_syscalls();
     }
+    #[cfg(feature = "boot-test")]
+    unsafe {
+        kernel::syscall::register_basic_syscall(60, kernel_boot::boot_test_syscall_handler);
+    }
     unsafe {
         // Wrap the kernel dispatcher to supply the caller from CPU locals.
         unsafe fn riscv_syscall_handler(nr: usize, args: &[u64; 6]) -> i64 {

@@ -875,6 +875,18 @@ pub unsafe fn init_phys_alloc(base: u64, size: u64) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
+/// Exit QEMU via isa-debug-exit device (port 0x501 on x86_64).
+/// Pass 0 for success, non-zero for failure.
+pub fn qemu_exit(code: u32) -> ! {
+    unsafe {
+        let val = if code == 0 { 0u32 } else { (code << 1) | 1 };
+        core::arch::asm!("out dx, eax", in("dx") 0x501u16, in("eax") val);
+    }
+    loop {
+        unsafe { core::arch::asm!("hlt") }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;

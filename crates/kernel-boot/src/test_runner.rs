@@ -805,6 +805,7 @@ fn test_grant_direct_valid() -> u32 {
             let priv_ptr = _priv_buf.as_ptr() as *mut Priv;
             core::ptr::write_bytes(priv_ptr.cast::<u8>(), 0, 2048);
             (*priv_ptr).s_grant_table = gp as u64;
+            (*priv_ptr).s_grant_pa = gp as u64;
             (*priv_ptr).s_grant_entries = 8;
             (*priv_ptr).s_flags = PrivFlags::empty();
 

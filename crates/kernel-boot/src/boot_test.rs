@@ -53,8 +53,7 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_pm_has_message();
 
     // H: Physical memory allocator — kernel binary excluded from free pool
-    failures += test_allocator_no_kernel_overlap();
-    failures += test_allocator_has_free_pages();
+    failures += test_allocator();
 
     // I: Process signal manager — s_sig_mgr must be PM_PROC_NR
     //    so do_getksig_handler can find exited processes.
@@ -378,9 +377,21 @@ fn test_vm_check_range() -> u32 {
 // Linker symbol: byte just past the end of the kernel binary.
 // Same extern as in main.rs — the boot test runs in the same binary.
 unsafe extern "C" {
+    #[cfg(target_arch = "x86_64")]
     static __kernel_end: u8;
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn test_allocator() -> u32 {
+    0
+}
+
+#[cfg(target_arch = "x86_64")]
+fn test_allocator() -> u32 {
+    test_allocator_no_kernel_overlap() + test_allocator_has_free_pages()
+}
+
+#[cfg(target_arch = "x86_64")]
 fn test_allocator_no_kernel_overlap() -> u32 {
     let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
 
@@ -413,6 +424,7 @@ fn test_allocator_no_kernel_overlap() -> u32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 fn test_allocator_has_free_pages() -> u32 {
     let alloc = arch_x86_64::alloc::global_allocator();
     if alloc.is_null() {
@@ -637,7 +649,12 @@ fn test_pm_mproc_pt() -> u32 {
         // matches `boot_init.rs` load address:
         //   slot_va = 0x100000 + (NR_TASKS + slot_nr) * 0x4000
         // with NR_TASKS = 5 (IDLE, CLOCK, SYSTEM, HARDWARE, ASYNCM).
+        // x86_64: PM loaded at 0x100000 + (NR_TASKS + slot) * 0x4000
+        // RISC-V: all processes loaded at 0x1000000
+        #[cfg(target_arch = "x86_64")]
         let slot0_va = 0x100000 + (5 + 0) * 0x4000 + 0x10u64;
+        #[cfg(target_arch = "riscv64")]
+        let slot0_va = 0x1000000u64 + 0x10;
         match kernel::pagetable::walk(cr3, slot0_va) {
             Ok(r) => {
                 let has_user = r.pte_value & kernel::pagetable::PG_U != 0;
@@ -658,7 +675,10 @@ fn test_pm_mproc_pt() -> u32 {
         // Check user stack is mapped.
         // PM's stack is allocated near 0x8FE00000 (arch-specific).
         // Walk a known valid stack address from PM's own stack pointer.
+        #[cfg(target_arch = "x86_64")]
         let rsp_field: u64 = core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(168) as *const u64);
+        #[cfg(target_arch = "riscv64")]
+        let rsp_field: u64 = core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(16) as *const u64);
         let stack_va = rsp_field & !0xFFF;
         match kernel::pagetable::walk(cr3, stack_va) {
             Ok(r) => {
@@ -838,24 +858,10 @@ fn test_map_page_walk_roundtrip() -> u32 {
 // Exit helpers
 
 fn exit_qemu_success() -> ! {
-    unsafe {
-        core::arch::asm!("out dx, eax", in("dx") 0x501u16, in("eax") 0u32);
-    }
-    loop {
-        unsafe {
-            core::arch::asm!("hlt", options(nostack));
-        }
-    }
+    kernel::hal::qemu_exit(0)
 }
 fn exit_qemu_failure(f: u32) -> ! {
-    unsafe {
-        core::arch::asm!("out dx, eax", in("dx") 0x501u16, in("eax") (f << 1 | 1));
-    }
-    loop {
-        unsafe {
-            core::arch::asm!("hlt", options(nostack));
-        }
-    }
+    kernel::hal::qemu_exit(if f == 0 { 1 } else { f })
 }
 fn serial_write(s: &str) {
     for &b in s.as_bytes() {

@@ -64,7 +64,7 @@ pub extern "C" fn kmain_body() -> ! {
     unsafe {
         // Register the boot-complete syscall (60) that VFS calls after
         // mount_root succeeds.  The handler runs verification tests.
-        kernel::syscall::register_basic_syscall(60, boot_test_syscall_handler);
+        kernel::syscall::register_basic_syscall(60, kernel_boot::boot_test_syscall_handler);
     }
 
     fn dma_alloc(pages: usize) -> Option<(*mut u8, u64)> {
@@ -774,18 +774,6 @@ fn hlt_loop() -> ! {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }
-    }
-}
-
-/// Handler for SYS_BOOT_COMPLETE (syscall 60) — called by VFS after mount_root.
-///
-/// When the `boot-test` feature is enabled, VFS calls this syscall after
-/// mount_root completes.  The handler runs the boot test suite and exits
-/// QEMU via isa-debug-exit.
-#[cfg(feature = "boot-test")]
-unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args: &[u64; 6]) -> i64 {
-    unsafe {
-        kernel_boot::boot_test::run_boot_tests();
     }
 }
 

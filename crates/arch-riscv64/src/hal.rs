@@ -682,6 +682,18 @@ pub unsafe fn tlb_flush() {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
+/// Exit QEMU via sifive_test device (MMIO 0x100000 on virt machine).
+/// 0x5555 = pass (exit code 0), 0x3333 = fail (exit code 1).
+pub fn qemu_exit(code: u32) -> ! {
+    unsafe {
+        let val = if code == 0 { 0x5555u32 } else { 0x3333u32 };
+        core::ptr::write_volatile(0x100000 as *mut u32, val);
+    }
+    loop {
+        unsafe { core::arch::asm!("wfi") }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
