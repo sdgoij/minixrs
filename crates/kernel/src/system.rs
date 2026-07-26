@@ -5113,7 +5113,7 @@ unsafe fn vm_paging_fork_sv39(
             // 2MB sub-entries (single L1 page) with COW (W cleared).
             // Non-user pages (kernel) are shared directly.
             if e2 & U != 0 {
-                let src_1gb = e2 & PPN_MASK;
+                let src_1gb = crate::hal::pte_to_phys(e2);
                 let l1_pa = match crate::pagetable::alloc_pt_page() {
                     Ok(p) => p,
                     Err(_) => return crate::ipc::ENOMEM,
@@ -5141,7 +5141,7 @@ unsafe fn vm_paging_fork_sv39(
             continue;
         }
         // Branch entry — walk L1 entries using the PARENT's L1 page.
-        let parent_l1_pa = e2 & PPN_MASK;
+        let parent_l1_pa = crate::hal::pte_to_phys(e2);
         let parent_l1 = parent_l1_pa as *const u64;
         let l2_base = (l2 as u64) << 30;
 
@@ -5155,12 +5155,8 @@ unsafe fn vm_paging_fork_sv39(
 
             if l1_leaf {
                 if e1 & U != 0 && e1 & W != 0 {
-                    // User 2MB huge page — COW: clear W in both.
+                    // User 2MB huge page — COW in child only.
                     let cow = e1 & !W;
-                    // Update parent's L1 entry
-                    let parent_l1_pa = crate::hal::pte_to_phys(e2);
-                    let parent_l1 = parent_l1_pa as *mut u64;
-                    core::ptr::write(parent_l1.add(l1), cow);
                     // Update child's L1 entry via child's page table
                     let child_root = child_cr3 as *const u64;
                     let child_l2e = core::ptr::read(child_root.add(l2));
@@ -5191,12 +5187,11 @@ unsafe fn vm_paging_fork_sv39(
                     continue;
                 }
 
-                // User writable 4KB page — COW: clear W in both parent and child.
+                // User writable 4KB page — COW in child only.
+                // RISC-V does not forward page faults to the VM server,
+                // so clearing W on the parent's PTE would permanently
+                // revoke write access. Only protect the child's copy.
                 let cow_e0 = e0 & !W;
-                // Update parent's PTE in the PARENT'S page table
-                let parent_l0_pa = e1 & PPN_MASK;
-                let parent_l0_mut = parent_l0_pa as *mut u64;
-                core::ptr::write(parent_l0_mut.add(l0), cow_e0);
                 // Map in child with W cleared
                 let va = l1_base | ((l0 as u64) << 12);
                 let pa = crate::hal::pte_to_phys(e0);

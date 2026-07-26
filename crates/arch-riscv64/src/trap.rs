@@ -236,10 +236,16 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     }
                 }
                 unsafe {
+                    let sstatus: u64;
+                    core::arch::asm!("csrr {v}, sstatus", v = out(reg) sstatus, options(nomem, nostack));
                     sbi_puts("!PF ");
                     print_hex(stval);
                     sbi_putc(b' ');
                     print_hex(sepc);
+                    sbi_putc(b' ');
+                    print_hex(scause_val);
+                    sbi_putc(b' ');
+                    print_hex(sstatus);
                     sbi_putc(b'\r');
                     sbi_putc(b'\n');
                 }

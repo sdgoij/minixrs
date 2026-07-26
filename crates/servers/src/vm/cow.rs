@@ -6,7 +6,8 @@
 
 use crate::vm::pb;
 use crate::vm::proc::Vmproc;
-use kernel::pagetable::{PG_FRAME, PG_P, PG_PS, PG_PTEMASK, PG_RW, PG_U};
+use kernel::hal::pte_to_phys;
+use kernel::pagetable::{PG_P, PG_PS, PG_PTEMASK, PG_RW, PG_U};
 
 /// Set up COW for a fork: create PhysBlock entries for all shared
 /// user-writable pages with refcount=2.
@@ -55,8 +56,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
             continue;
         }
 
-        let parent_p3_pa = e4 & PG_FRAME;
-        let child_p3_pa = child_e4 & PG_FRAME;
+        let parent_p3_pa = pte_to_phys(e4);
+        let child_p3_pa = pte_to_phys(child_e4);
         let parent_p3_va = vm_mappage(parent_p3_pa, flags);
         let child_p3_va = vm_mappage(child_p3_pa, flags);
         if parent_p3_va == 0 || child_p3_va == 0 {
@@ -81,8 +82,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                 continue;
             }
 
-            let parent_p2_pa = e3 & PG_FRAME;
-            let child_p2_pa = child_e3 & PG_FRAME;
+            let parent_p2_pa = pte_to_phys(e3);
+            let child_p2_pa = pte_to_phys(child_e3);
             let parent_p2_va = vm_mappage(parent_p2_pa, flags);
             let child_p2_va = vm_mappage(child_p2_pa, flags);
             if parent_p2_va == 0 || child_p2_va == 0 {
@@ -107,8 +108,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                     continue;
                 }
 
-                let parent_p1_pa = e2 & PG_FRAME;
-                let child_p1_pa = child_e2 & PG_FRAME;
+                let parent_p1_pa = pte_to_phys(e2);
+                let child_p1_pa = pte_to_phys(child_e2);
                 let parent_p1_va = vm_mappage(parent_p1_pa, flags);
                 let child_p1_va = vm_mappage(child_p1_pa, flags);
                 if parent_p1_va == 0 || child_p1_va == 0 {
@@ -132,7 +133,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                     if e1 & PG_RW != 0 {
                         continue;
                     }
-                    let phys = e1 & PG_FRAME;
+                    let phys = pte_to_phys(e1);
                     if phys == 0 {
                         continue;
                     }
@@ -210,7 +211,7 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
         return 0;
     }
 
-    let phys_addr = pte_val & PG_FRAME;
+    let phys_addr = pte_to_phys(pte_val);
     if phys_addr == 0 {
         return -1;
     }

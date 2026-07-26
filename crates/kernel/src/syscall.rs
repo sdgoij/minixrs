@@ -776,8 +776,9 @@ unsafe fn exec_initramfs_for_target(
                 | crate::pagetable::PG_RW
                 | crate::pagetable::PG_U
                 | 0x02
+                | 0x04
                 | 0x08
-                | 0xC0; // R|X|A|D
+                | 0xC0; // R|W|X|A|D
             #[cfg(target_arch = "x86_64")]
             let user_flags =
                 crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;

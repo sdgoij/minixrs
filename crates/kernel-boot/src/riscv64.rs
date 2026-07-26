@@ -654,8 +654,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 | kernel::pagetable::PG_RW
                 | kernel::pagetable::PG_U
                 | 0x02
+                | 0x04
                 | 0x08
-                | 0xC0; // R|X|A|D
+                | 0xC0; // R|W|X|A|D
             let brk_va_start = 0x3FE00000u64;
             let brk_va_end = 0x3FF00000u64;
             let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
@@ -706,8 +707,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         | kernel::pagetable::PG_RW
                         | kernel::pagetable::PG_U
                         | 0x02
+                        | 0x04
                         | 0x08
-                        | 0xC0; // R|X|A|D
+                        | 0xC0; // R|W|X|A|D
                     for j in 0..pages {
                         let va = arch_common::com::MFS_RAMDISK_VA + (j as u64) * 4096;
                         let pa = ramdisk_phys + (j as u64) * 4096;

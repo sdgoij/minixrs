@@ -514,8 +514,9 @@ pub unsafe fn boot_create_restricted_page_table(
         | kernel::pagetable::PG_RW
         | kernel::pagetable::PG_U
         | 0x02
+        | 0x04
         | 0x08
-        | 0xC0; // R|X|A|D
+        | 0xC0; // R|W|X|A|D
     let mut va = code_start;
     let mut pa = code_phys;
     while va < code_end {
