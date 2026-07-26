@@ -351,6 +351,8 @@ unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 
 /// VFS server endpoint.
 const VFS_PROC_NR: i32 = 1;
+#[allow(dead_code)]
+const TTY_PROC_NR: i32 = 5;
 
 /// Build a VFS IPC message and send it via `do_sync_ipc`.
 ///

@@ -521,6 +521,16 @@ pub struct Tty {
 
     /// Input buffer (16-bit entries for flags + char data).
     pub tty_inbuf: [u16; TTY_IN_BYTES],
+
+    /// Accumulated read data for reply (non-grant path).
+    pub tty_inbuf_user: [u8; 256],
+
+    /// Inline write data from caller (non-grant path).
+    pub tty_writedata: [u8; 64],
+    /// Current read position in tty_writedata.
+    pub tty_writeidx: usize,
+    /// Total bytes in tty_writedata.
+    pub tty_writecount: usize,
 }
 
 impl Tty {
@@ -578,6 +588,10 @@ impl Tty {
             tty_termios: Termios::defaults(),
             tty_winsize: WinSize::zeroed(),
             tty_inbuf: [0u16; TTY_IN_BYTES],
+            tty_inbuf_user: [0u8; 256],
+            tty_writedata: [0u8; 64],
+            tty_writeidx: 0,
+            tty_writecount: 0,
         }
     }
 }
@@ -1235,10 +1249,11 @@ pub fn in_transfer(tp: &mut Tty) {
             tp.tty_inleft -= 1;
             bp += 1;
             if bp >= buf.len() {
-                // Temp buffer full, copy to user space.
-                // TODO: Phase 13 — sys_safecopyto(tp.tty_incaller, tp.tty_ingrant,
-                //       tp.tty_incum, buf.as_ptr(), buf.len())
-                tp.tty_incum += buf.len();
+                // Temp buffer full, copy to tty_inbuf_user.
+                let start = tp.tty_incum;
+                let end = start + buf.len();
+                tp.tty_inbuf_user[start..end].copy_from_slice(&buf);
+                tp.tty_incum = end;
                 bp = 0;
             }
         }
@@ -1263,18 +1278,16 @@ pub fn in_transfer(tp: &mut Tty) {
 
     if bp > 0 {
         // Leftover characters in the buffer.
-        // TODO: Phase 13 — sys_safecopyto(tp.tty_incaller, tp.tty_ingrant,
-        //       tp.tty_incum, buf.as_ptr(), bp)
-        tp.tty_incum += bp;
+        let start = tp.tty_incum;
+        let end = start + bp;
+        tp.tty_inbuf_user[start..end].copy_from_slice(&buf[..bp]);
+        tp.tty_incum = end;
     }
 
     // Usually reply to the reader, possibly even if incum == 0 (EOF).
     if tp.tty_inleft == 0 {
-        // TODO: Phase 13 — chardriver_reply_task(tp.tty_incaller, tp.tty_inid,
-        //       tp.tty_incum as i32)
+        // Keep incum and incaller for the reply path.
         tp.tty_inleft = 0;
-        tp.tty_incum = 0;
-        tp.tty_incaller = NONE;
     }
 }
 
@@ -1306,15 +1319,6 @@ pub fn handle_events(tp: &mut Tty) {
 
     // Transfer characters from the input queue to a waiting process.
     in_transfer(tp);
-
-    // Reply if enough bytes are available.
-    if tp.tty_incum >= tp.tty_min as usize && tp.tty_inleft > 0 {
-        // TODO: Phase 13 — chardriver_reply_task(tp.tty_incaller, tp.tty_inid,
-        //       tp.tty_incum as i32)
-        tp.tty_inleft = 0;
-        tp.tty_incum = 0;
-        tp.tty_incaller = NONE;
-    }
 
     if tp.tty_select_ops != 0 {
         select_retry(tp);
@@ -1508,11 +1512,60 @@ pub fn tty_init(system_hz_val: u32) {
             // Console lines: scr_init and kb_init will be called by
             // the console/keyboard drivers.
             tp.tty_minor = CONS_MINOR + s as u32;
+            // Console hooks (console_read/console_write/console_echo)
+            // are implemented but not wired by default — they conflict
+            // with the kernel's serial ISR. They'll be activated when
+            // VFS device plumbing routes fd 0/1/2 through TTY.
         } else {
             // RS-232 lines: rs_init will be called by the serial driver.
             tp.tty_minor = RS232_MINOR + s as u32 - NR_CONS as u32;
         }
     }
+}
+
+// ── Console I/O hooks ───────────────────────────────────────────────────────
+
+/// Poll serial for input and feed through line discipline.
+fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {
+    let mut count = 0;
+    while tp.tty_incount < TTY_IN_BYTES as i32 {
+        if !kernel::hal::serial_byte_available() {
+            break;
+        }
+        let byte = kernel::hal::serial_read_byte();
+        in_process(tp, &[byte]);
+        count += 1;
+    }
+    count
+}
+
+/// Console write hook — output inline write data to serial.
+fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
+    if tp.tty_writecount == 0 {
+        return 0;
+    }
+    while tp.tty_writeidx < tp.tty_writecount {
+        let c = tp.tty_writedata[tp.tty_writeidx];
+        tp.tty_writeidx += 1;
+        // Output processing: handle \n → \r\n if OPOST|ONLCR is set.
+        if c == b'\n' && tp.tty_termios.c_oflag & (OPOST | ONLCR) == OPOST | ONLCR {
+            kernel::hal::serial_write_byte(b'\r');
+            tp.tty_position += 1;
+        }
+        console_echo(tp, c as i32);
+    }
+    tp.tty_writeidx = 0;
+    tp.tty_writecount = 0;
+    tp.tty_outleft = 0;
+    tp.tty_outcum = 0;
+    tp.tty_outcaller = NONE;
+    1
+}
+
+/// Console echo — write a byte to serial and update position.
+fn console_echo(_tp: &mut Tty, c: i32) {
+    let byte = c as u8;
+    kernel::hal::serial_write_byte(byte);
 }
 
 // Character driver interface stubs
@@ -1640,7 +1693,11 @@ pub fn do_read(
     // ...then go back for more.
     handle_events(tp);
     if tp.tty_inleft == 0 {
-        return EDONTREPLY; // already done
+        // Read completed — return accumulated bytes.
+        let r = tp.tty_incum as i32;
+        tp.tty_incum = 0;
+        tp.tty_incaller = NONE;
+        return r;
     }
 
     // There were no bytes in the input queue available.
@@ -1657,11 +1714,22 @@ pub fn do_read(
         return r;
     }
 
+    // Blocking read: wait for at least one byte from serial.
+    let byte = kernel::hal::serial_read_byte();
+    in_process(tp, &[byte]);
+    in_transfer(tp);
+    if tp.tty_inleft == 0 {
+        let r = tp.tty_incum as i32;
+        tp.tty_incum = 0;
+        tp.tty_incaller = NONE;
+        return r;
+    }
+
     if tp.tty_select_ops != 0 {
         select_retry(tp);
     }
 
-    EDONTREPLY // suspend the caller
+    EDONTREPLY
 }
 
 /// do_write — write to a TTY line.
@@ -1696,7 +1764,10 @@ pub fn do_write(
     // Try to write.
     handle_events(tp);
     if tp.tty_outleft == 0 {
-        return EDONTREPLY; // already done
+        // Write completed — return the count.
+        let r = size as i32;
+        tp.tty_outcaller = NONE;
+        return r;
     }
 
     // None or not all the bytes could be written.
@@ -2028,14 +2099,34 @@ unsafe fn handle_cdev_request(
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
-            do_read(minor, position, who_e, grant, count, flags, 0)
+            let result = do_read(minor, position, who_e, grant, count, flags, 0);
+            // If read completed with data, copy into reply payload.
+            if result > 0 {
+                let tp = line2tty(minor).unwrap();
+                let reply_len = result as usize;
+                unsafe {
+                    msg.m_payload.raw[..reply_len].copy_from_slice(&tp.tty_inbuf_user[..reply_len]);
+                }
+            }
+            result
         }
         CDEV_WRITE => {
             let flags = unsafe { msg.m_payload.m2.m2i2 };
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
-            do_write(minor, position, who_e, grant, count, flags, 0)
+            // Copy inline write data from message payload (after M2 = offset 40).
+            let copy_len = count.min(16);
+            {
+                let tp_mut = line2tty(minor).unwrap();
+                unsafe {
+                    tp_mut.tty_writedata[..copy_len]
+                        .copy_from_slice(&msg.m_payload.raw[40..40 + copy_len]);
+                }
+                tp_mut.tty_writeidx = 0;
+                tp_mut.tty_writecount = copy_len;
+            }
+            do_write(minor, position, who_e, grant, copy_len, flags, 0)
         }
         CDEV_IOCTL => {
             let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
