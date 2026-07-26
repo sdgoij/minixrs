@@ -118,8 +118,45 @@ pub fn mfs_main() -> i32 {
                             core::ptr::write(user_path_ptr.add(j), raw[24 + j]);
                         }
                         core::ptr::write(user_path_ptr.add(copy_len), 0);
-
                     }
+                }
+            }
+
+            // For create (23) and mkdir (22) requests, extract fields from
+            // the message payload and read the filename from embedded data.
+            // VFS req_create/req_mkdir layout (raw offsets):
+            //   raw[0..4]   = dir_ino (u32)
+            //   raw[4..6]   = mode (u16)
+            //   raw[6..8]   = uid (u16)
+            //   raw[8..10]  = gid (u16)
+            //   raw[12..16] = path_len (u32)
+            //   raw[16..]   = path data (up to 28 bytes, null-terminated)
+            if req_nr == 22 || req_nr == 23 {
+                unsafe {
+                    let mfs = glo::mfs_ptr();
+                    let raw = (*mfs).m_in.m_payload.raw;
+                    let dir_ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
+                    let mode = u16::from_ne_bytes(raw[4..6].try_into().unwrap_or([0u8; 2]));
+                    let uid = u16::from_ne_bytes(raw[6..8].try_into().unwrap_or([0u8; 2]));
+                    let gid = u16::from_ne_bytes(raw[8..10].try_into().unwrap_or([0u8; 2]));
+                    let path_len =
+                        u32::from_ne_bytes(raw[12..16].try_into().unwrap_or([0u8; 4])) as usize;
+
+                    // Store in cch[] for the handler.
+                    (*mfs).cch[0] = dir_ino as i32;
+                    (*mfs).cch[1] = mode as i32;
+                    (*mfs).cch[2] = uid as i32;
+                    (*mfs).cch[3] = gid as i32;
+
+                    // Copy path from embedded message data (raw[16..]).
+                    let copy_len = path_len.min(PATH_MAX - 1).min(28);
+                    if copy_len > 0 {
+                        let mut tmp = [0u8; 28];
+                        let len = copy_len.min(tmp.len());
+                        tmp[..len].copy_from_slice(&raw[16..16 + len]);
+                        (&mut (*mfs).user_path)[..len].copy_from_slice(&tmp[..len]);
+                    }
+                    (&mut (*mfs).user_path)[copy_len] = 0;
                 }
             }
             // Dispatch the request (handler may populate m_out payload).
@@ -135,6 +172,37 @@ pub fn mfs_main() -> i32 {
                     raw[16..20].copy_from_slice(&(*mfs).lookup_res_device.to_le_bytes());
                     raw[20..24].copy_from_slice(&(*mfs).lookup_res_inode.to_le_bytes());
                     raw[24..28].copy_from_slice(&((*mfs).lookup_res_mode as u32).to_le_bytes());
+                }
+            }
+
+            // For create (23) responses, populate m_out with result fields.
+            if req_nr == 23 && status >= 0 {
+                unsafe {
+                    let mfs = glo::mfs_ptr();
+                    let raw = &mut (*mfs).m_out.m_payload.raw;
+                    // fs_create stored result in cch[]:
+                    //   cch[0] = i_num (inode)
+                    //   cch[1] = i_mode
+                    //   cch[2] = i_size
+                    //   cch[3] = i_uid
+                    //   cch[4] = i_gid
+                    // VFS req_create expects:
+                    //   payload[0..8]  = file_size (i64)
+                    //   payload[8..12] = inode_nr (u32)
+                    //   payload[12..14] = mode (u16)
+                    raw[0..8].copy_from_slice(&((*mfs).cch[2] as i64).to_le_bytes()); // file_size
+                    raw[8..12].copy_from_slice(&((*mfs).cch[0] as u32).to_le_bytes()); // inode_nr
+                    raw[12..14].copy_from_slice(&((*mfs).cch[1] as u16).to_le_bytes()); // mode
+                }
+            }
+
+            // For read/write responses, populate m_out with result fields.
+            if (req_nr == 19 || req_nr == 20) && status >= 0 {
+                unsafe {
+                    let mfs = glo::mfs_ptr();
+                    let raw = &mut (*mfs).m_out.m_payload.raw;
+                    raw[0..8].copy_from_slice(&(*mfs).readwrite_res_pos.to_le_bytes());
+                    raw[8..12].copy_from_slice(&(*mfs).readwrite_res_count.to_le_bytes());
                 }
             }
 

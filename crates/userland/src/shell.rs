@@ -215,10 +215,12 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                 return 1;
             }
             if pid == 0 {
-                // Child: redirect stdout, run command, exit.
-                setup_redirect(outfile);
+                // Child: open redirect file, run command, exit.
+                // Use fd >= 3 to avoid the kernel's serial shortcut
+                // for fd 1/2.
+                let redirect_fd = setup_redirect(outfile);
                 let status = if is_builtin {
-                    run_builtin(cmd, args)
+                    run_builtin_out(cmd, args, redirect_fd)
                 } else {
                     run_external(cmd, args)
                 };
@@ -295,10 +297,20 @@ fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
             0
         }
         "clear" => {
-            write_out(b"\x1b[H\x1b[2J");
+            write_out(b"\x1b[2J\x1b[H");
             0
         }
-        _ => 1,
+        _ => 127,
+    }
+}
+
+/// Like `run_builtin`, but routes stdout through `redirect_fd`
+/// (via VFS) so file redirects work correctly.
+#[cfg(target_os = "none")]
+fn run_builtin_out(cmd: &str, args: &[&str], redirect_fd: i32) -> i32 {
+    match cmd {
+        "echo" => crate::echo_fd(args, redirect_fd),
+        _ => run_builtin(cmd, args),
     }
 }
 
@@ -417,21 +429,26 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
 /// In the child process: close fd 1, open `outfile` for writing on fd 1.
 /// Exits the child on failure.
 #[cfg(target_os = "none")]
-fn setup_redirect(outfile: &str) {
-    minix_rt::close(1);
-    let fd = minix_rt::open(
-        outfile.as_bytes(),
-        minix_std::fs::O_WRONLY | minix_std::fs::O_CREAT | minix_std::fs::O_TRUNC,
-    );
-    if fd < 0 {
-        write_err(b"sh: cannot create ");
-        write_err(outfile.as_bytes());
-        write_err(b"\r\n");
-        minix_rt::exit(1);
-    }
-    if fd != 1 {
-        // Shouldn't happen — fd 1 was closed, so open should return 1.
-        minix_rt::close(fd as i32);
-        minix_rt::exit(1);
+fn setup_redirect(outfile: &str) -> i32 {
+    // Open the file WITHOUT closing fd 1.
+    // The returned fd (>= 3) avoids the kernel's serial shortcut
+    // for fd 1/2, so writes go through VFS to the filesystem.
+    match unsafe {
+        minix_std::fs::open(
+            outfile,
+            minix_std::fs::O_WRONLY | minix_std::fs::O_CREAT | minix_std::fs::O_TRUNC,
+            0o644,
+        )
+    } {
+        Ok(fd) => fd,
+        Err(e) => {
+            let pos = if e.0 < 0 { -e.0 } else { e.0 } as u32;
+            write_err(b"sh: cannot create ");
+            write_err(outfile.as_bytes());
+            write_err(b": err=");
+            write_err(&[b'0' + (pos / 10) as u8, b'0' + (pos % 10) as u8]);
+            write_err(b"\r\n");
+            minix_rt::exit(1);
+        }
     }
 }

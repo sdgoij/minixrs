@@ -242,6 +242,8 @@ pub fn do_creat() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    // Null-terminate for easy string handling.
+    path_buf[actual_len] = 0;
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
@@ -249,6 +251,13 @@ pub fn do_creat() -> i32 {
     if dirp.is_null() {
         return ENOENT;
     }
+    // Find the filename (last component after the last '/' in path_buf).
+    let file_name_ptr =
+        if let Some(slash_pos) = path_buf[..actual_len].iter().rposition(|&b| b == b'/') {
+            unsafe { path_buf.as_ptr().add(slash_pos + 1) }
+        } else {
+            path_buf.as_ptr()
+        };
     let (r, _nd) = unsafe {
         crate::vfs::request::req_create(
             (*dirp).v_fs_e,
@@ -256,11 +265,49 @@ pub fn do_creat() -> i32 {
             create_mode as i32,
             fp.fp_effuid,
             fp.fp_effgid,
-            core::ptr::null(),
+            file_name_ptr,
         )
     };
     unsafe { mount::put_vnode(dirp) };
-    r
+    if r != OK {
+        return r;
+    }
+
+    // Get a free file descriptor before resolving the new vnode.
+    let mut fd = 0i32;
+    let r2 = unsafe { filedes::get_fd(fp, 0, &mut fd) };
+    if r2 != OK {
+        return r2;
+    }
+
+    // Resolve the newly created file to obtain a vnode.
+    let mut resolve2 = Lookup::default();
+    resolve2.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
+    resolve2.l_path_len = actual_len;
+    let vp = unsafe { path::eat_path(&resolve2, fp) };
+    if vp.is_null() {
+        fp.fp_filp[fd as usize] = -1;
+        return ENOENT;
+    }
+
+    // Allocate a filp entry and wire up fd → filp → vnode.
+    let filp_idx = unsafe { filedes::alloc_filp() };
+    if filp_idx < 0 {
+        fp.fp_filp[fd as usize] = -1;
+        unsafe { mount::put_vnode(vp) };
+        return filp_idx;
+    }
+    unsafe {
+        let glob = vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+        (*filp_arr.add(filp_idx as usize)).filp_count = 1;
+        (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
+        (*filp_arr.add(filp_idx as usize)).filp_flags = _open_flags;
+        (*filp_arr.add(filp_idx as usize)).filp_mode = 2; // W_BIT
+    }
+    fp.fp_filp[fd as usize] = filp_idx;
+    unsafe { mount::put_vnode(vp) };
+    fd
 }
 
 /// Perform the `close(fd)` system call.
@@ -330,7 +377,7 @@ pub fn do_read() -> i32 {
     };
     let glob = unsafe { &*vfs_global() };
     let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _buf_addr = r_u64(&glob.fs_m_in, 16);
+    let buf_addr = r_u64(&glob.fs_m_in, 16);
     let count = r_u32(&glob.fs_m_in, 24) as usize;
 
     if fd < 0 || (fd as usize) >= OPEN_MAX {
@@ -355,10 +402,10 @@ pub fn do_read() -> i32 {
         let (r, new_pos) = crate::vfs::request::req_read(
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
-            core::ptr::null_mut(),
+            buf_addr as *mut u8,
             filp.filp_pos,
             count as u32,
-            0,
+            fp.fp_endpoint,
             0,
         );
         if r >= 0 {
@@ -378,7 +425,7 @@ pub fn do_write() -> i32 {
     };
     let glob = unsafe { &*vfs_global() };
     let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _buf_addr = r_u64(&glob.fs_m_in, 16);
+    let buf_addr = r_u64(&glob.fs_m_in, 16);
     let count = r_u32(&glob.fs_m_in, 24) as usize;
 
     if fd < 0 || (fd as usize) >= OPEN_MAX {
@@ -391,7 +438,7 @@ pub fn do_write() -> i32 {
 
     unsafe {
         let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
-        let filp = &*filp_arr.add(filp_idx as usize);
+        let filp = &mut *filp_arr.add(filp_idx as usize);
         if (filp.filp_mode & 2) == 0 {
             return EBADF;
         }
@@ -399,15 +446,18 @@ pub fn do_write() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        let (r, _new_pos) = crate::vfs::request::req_write(
+        let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
-            core::ptr::null(),
+            buf_addr as *const u8,
             filp.filp_pos,
             count as u32,
-            0,
+            fp.fp_endpoint,
             0,
         );
+        if r >= 0 {
+            filp.filp_pos = new_pos;
+        }
         r
     }
 }
@@ -1527,13 +1577,20 @@ pub fn do_mkdir() -> i32 {
     if dirp.is_null() {
         return ENOENT;
     }
+    // Find the filename (last component after the last '/' in path_buf).
+    let file_name_ptr =
+        if let Some(slash_pos) = path_buf[..actual_len].iter().rposition(|&b| b == b'/') {
+            unsafe { path_buf.as_ptr().add(slash_pos + 1) }
+        } else {
+            path_buf.as_ptr()
+        };
     let fs_e = unsafe { (*dirp).v_fs_e };
     let dir_ino = unsafe { (*dirp).v_inode_nr };
     let r = unsafe {
         crate::vfs::request::req_mkdir(
             fs_e,
             dir_ino,
-            core::ptr::null(),
+            file_name_ptr,
             fp.fp_effuid,
             fp.fp_effgid,
             mode,

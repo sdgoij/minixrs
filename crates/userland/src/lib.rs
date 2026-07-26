@@ -20,6 +20,45 @@ pub fn write_out(s: &[u8]) {
     }
 }
 
+/// echo — print arguments to stdout separated by spaces, ending with newline.
+pub fn echo(args: &[&str]) -> i32 {
+    echo_fd(args, -1)
+}
+
+/// echo with output fd (for redirect).
+pub fn echo_fd(args: &[&str], out_fd: i32) -> i32 {
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if i > 1 {
+            write_fd(out_fd, b" ");
+        }
+        write_fd(out_fd, arg.as_bytes());
+    }
+    write_fd(out_fd, b"\n");
+    0
+}
+
+fn write_fd(fd: i32, s: &[u8]) {
+    if fd >= 0 {
+        let _ = unsafe { minix_std::fs::write(fd, s) };
+    } else {
+        write_out(s);
+    }
+}
+
+pub fn print_dec(mut n: u32) {
+    let mut buf = [0u8; 12];
+    let mut i = 12;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    write_err(&buf[i..]);
+}
+
 pub fn write_err(s: &[u8]) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -55,18 +94,6 @@ pub unsafe fn parse_args<'a>(
     &buf[..count]
 }
 
-/// echo — print arguments to stdout separated by spaces, ending with newline.
-pub fn echo(args: &[&str]) -> i32 {
-    for (i, arg) in args.iter().enumerate().skip(1) {
-        if i > 1 {
-            write_out(b" ");
-        }
-        write_out(arg.as_bytes());
-    }
-    write_out(b"\n");
-    0
-}
-
 /// cat — concatenate files and print to stdout.
 /// With no arguments, reads from stdin (fd 0).
 pub fn cat(args: &[&str]) -> i32 {
@@ -85,30 +112,24 @@ pub fn cat(args: &[&str]) -> i32 {
     }
 
     for path in &args[1..] {
-        // NR_OPEN = 4, O_RDONLY = 0
-        let fd = unsafe { minix_rt::syscall3(4, path.as_ptr() as u64, path.len() as u64, 0) };
-        if fd < 0 {
-            write_err(b"cat: ");
-            write_err(path.as_bytes());
-            write_err(b": cannot open\n");
-            exit_code = 1;
-            continue;
-        }
+        let fd = match unsafe { minix_std::fs::open(path, minix_std::fs::O_RDONLY, 0) } {
+            Ok(fd) => fd,
+            Err(_) => {
+                write_err(b"cat: ");
+                write_err(path.as_bytes());
+                write_err(b": cannot open\n");
+                exit_code = 1;
+                continue;
+            }
+        };
         let mut buf = [0u8; 8192];
-        loop {
-            // NR_READ = 2
-            let n = unsafe {
-                minix_rt::syscall3(2, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
-            };
+        while let Ok(n) = unsafe { minix_std::fs::read(fd, &mut buf) } {
             if n <= 0 {
                 break;
             }
             write_out(&buf[..n as usize]);
         }
-        // NR_CLOSE = 5
-        unsafe {
-            minix_rt::syscall1(5, fd as u64);
-        }
+        let _ = minix_std::fs::close(fd);
     }
     exit_code
 }
@@ -242,12 +263,16 @@ pub fn mkdir(args: &[&str]) -> i32 {
     }
     let mut exit_code = 0;
     for path in &args[1..] {
-        let ret = minix_rt::mkdir(path.as_bytes(), 0o755);
-        if ret < 0 {
+        let ret = minix_std::fs::mkdir(path, 0o755);
+        if let Err(e) = ret {
             write_err(b"mkdir: ");
             write_err(path.as_bytes());
-            write_err(b": ");
-            write_err(errstr(-ret as i32));
+            write_err(b": err=");
+            // Convert negative MINIX errno to positive
+            let pos = if e.0 < 0 { -e.0 } else { e.0 } as u32;
+            write_err(&[b'0' + (pos / 10) as u8, b'0' + (pos % 10) as u8]);
+            write_err(b" ");
+            write_err(errstr(pos as i32));
             write_err(b"\n");
             exit_code = 1;
         }

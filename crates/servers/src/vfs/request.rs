@@ -369,20 +369,13 @@ pub unsafe fn req_create(
 ) -> (i32, NodeDetails) {
     #[cfg(target_os = "none")]
     {
-        let path_len = if _path.is_null() {
-            0
+        let path_bytes = if _path.is_null() {
+            &[]
         } else {
-            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
-                .to_bytes()
-                .len()
-                + 1
+            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>()).to_bytes()
         };
-        let grant_id = crate::vfs::grant::cpf_grant_magic(
-            arch_common::com::VFS_PROC_NR,
-            fs_e,
-            _path as u64,
-            path_len,
-        );
+        let path_len = path_bytes.len() + 1;
+        let path_copy_len = path_bytes.len().min(28);
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_CREATE);
@@ -390,11 +383,16 @@ pub unsafe fn req_create(
         w_u16(&mut msg, PAYLOAD_OFF + 4, omode as u16); // mode
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 12, grant_id);
-        w_u64(&mut msg, PAYLOAD_OFF + 20, path_len as u64);
+        w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32); // path_len
+        // Embed path at offset 16 (up to 28 bytes)
+        if path_copy_len > 0 {
+            msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_copy_len]
+                .copy_from_slice(&path_bytes[..path_copy_len]);
+        }
+        // Null-terminate
+        msg[PAYLOAD_OFF + 16 + path_copy_len] = 0;
 
         let r = fs_sendrec(fs_e, &mut msg);
-        crate::vfs::grant::cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, NodeDetails::default());
@@ -696,20 +694,13 @@ pub unsafe fn req_mkdir(
 ) -> i32 {
     #[cfg(target_os = "none")]
     {
-        let path_len = if _lastc.is_null() {
-            0
+        let path_bytes = if _lastc.is_null() {
+            &[]
         } else {
-            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
-                .to_bytes()
-                .len()
-                + 1
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>()).to_bytes()
         };
-        let grant_id = crate::vfs::grant::cpf_grant_magic(
-            arch_common::com::VFS_PROC_NR,
-            fs_e,
-            _lastc as u64,
-            path_len,
-        );
+        let path_len = path_bytes.len() + 1;
+        let path_copy_len = path_bytes.len().min(28);
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_MKDIR);
@@ -717,12 +708,16 @@ pub unsafe fn req_mkdir(
         w_u16(&mut msg, PAYLOAD_OFF + 4, dmode as u16); // mode
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 12, grant_id);
-        w_u64(&mut msg, PAYLOAD_OFF + 20, path_len as u64);
+        w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32); // path_len
+        // Embed path at offset 16 (up to 28 bytes)
+        if path_copy_len > 0 {
+            msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_copy_len]
+                .copy_from_slice(&path_bytes[..path_copy_len]);
+        }
+        // Null-terminate
+        msg[PAYLOAD_OFF + 16 + path_copy_len] = 0;
 
-        let r = fs_sendrec(fs_e, &mut msg);
-        crate::vfs::grant::cpf_revoke(grant_id);
-        r
+        fs_sendrec(fs_e, &mut msg)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1389,10 +1384,10 @@ pub unsafe fn req_peek(fs_e: i32, inode_nr: u32, pos: off_t, bytes: u32) -> i32 
 pub unsafe fn req_read(
     fs_e: i32,
     inode_nr: u32,
-    _buf: *mut u8,
+    buf: *mut u8,
     pos: off_t,
     size: u32,
-    _user_e: i32,
+    user_e: i32,
     _direct: i32,
 ) -> (i32, off_t) {
     #[cfg(target_os = "none")]
@@ -1401,7 +1396,8 @@ pub unsafe fn req_read(
         w_i32(&mut msg, M_TYPE_OFF, REQ_READ);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr);
         w_i64(&mut msg, PAYLOAD_OFF + 8, pos);
-        let grant_id = -1;
+        // FS writes data to user buffer -> CPF_WRITE
+        let grant_id = cpf_grant_magic_write(user_e, fs_e, buf as u64, size as usize);
         w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 24, size as u64);
 
@@ -1417,7 +1413,7 @@ pub unsafe fn req_read(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (fs_e, inode_nr, _buf, pos, size, _user_e, _direct);
+        let _ = (fs_e, inode_nr, buf, pos, size, user_e, _direct);
         (ENOSYS, 0)
     }
 }

@@ -221,7 +221,7 @@ pub fn fs_getdents() -> i32 {
         let raw_ref = &mut (*mfs).m_out.m_payload.raw;
         raw_ref[0..8].copy_from_slice(&pos.to_le_bytes());
         raw_ref[8..12].copy_from_slice(&(buf_offset as i32).to_le_bytes());
-OK
+        OK
     }
 }
 

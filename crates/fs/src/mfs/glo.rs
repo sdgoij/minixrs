@@ -46,6 +46,10 @@ pub struct MfsGlobal {
     pub lookup_res_device: u32,
     pub lookup_res_offset: usize,
 
+    // Read/write response fields (written by fs_readwrite)
+    pub readwrite_res_pos: i64,
+    pub readwrite_res_count: u32,
+
     // Incoming and outgoing FS protocol messages.
     pub m_in: Message,
     pub m_out: Message,
@@ -128,6 +132,8 @@ pub unsafe fn mfs_init_globals() {
         lookup_res_gid: 0,
         lookup_res_device: 0,
         lookup_res_offset: 0,
+        readwrite_res_pos: 0,
+        readwrite_res_count: 0,
         m_in: Message {
             m_source: 0,
             m_type: 0,

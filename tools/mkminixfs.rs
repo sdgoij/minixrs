@@ -159,7 +159,7 @@ impl FsImage {
     }
 
     fn set_zone_used(&mut self, zone: u32) {
-        let bit = zone as usize;
+        let bit = (zone - (self.first_data_zone - 1)) as usize;
         if bit / 8 < self.zone_bitmap.len() {
             self.zone_bitmap[bit / 8] |= 1 << (bit % 8);
         }
@@ -347,7 +347,11 @@ impl FsImage {
         let imap_len = (self.imap_blocks as usize) * BLOCK_SIZE;
         self.data[imap_off..imap_off + imap_len].copy_from_slice(&self.inode_bitmap[..imap_len]);
 
-        // Write zone bitmap after inode bitmap
+        // Write zone bitmap after inode bitmap.
+        // The ZMAP covers zones first_data_zone-1 through total_blocks-1.
+        // Zone first_data_zone-1 is the last non-data block; mark it used
+        // so alloc_zone doesn't return it.
+        self.set_zone_used(self.first_data_zone - 1);
         let zmap_block = imap_block + self.imap_blocks as usize;
         let zmap_off = zmap_block * BLOCK_SIZE;
         let zmap_len = (self.zmap_blocks as usize) * BLOCK_SIZE;

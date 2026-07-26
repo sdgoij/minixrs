@@ -62,18 +62,13 @@ pub fn fs_lookup() -> i32 {
         let mut symlinks: i32 = 0;
         let mut offset: usize = 0;
 
-        // Find starting inode.
-        let rip = match find_inode((*mfs).fs_dev, dir_ino) {
+        // Find starting inode. Use get_inode (not find_inode) because
+        // find_inode requires i_count > 0 which fails if the inode was
+        // released to the unused list by a previous request.
+        let rip = match get_inode((*mfs).fs_dev, dir_ino) {
             Some(i) => i,
             None => return ENOENT,
         };
-
-        // If dir has been removed return ENOENT.
-        if (*glo::get_inode_ptr(rip as usize)).i_nlinks == NO_LINK {
-            return ENOENT;
-        }
-
-        dup_inode(rip);
 
         // If the given start inode is a mountpoint, only accept "..".
         let mut leaving_mount = (*glo::get_inode_ptr(rip as usize)).i_mountpoint != FALSE;
@@ -340,15 +335,15 @@ pub fn search_dir(
     check_permissions: i32,
 ) -> i32 {
     unsafe {
-        let ldir = &*glo::get_inode_ptr(ldir_idx as usize);
+        let ldirp = glo::get_inode_ptr(ldir_idx as usize);
 
         // If 'ldir_ptr' is not a pointer to a dir inode, error.
-        if ((*ldir).i_mode & I_TYPE) != I_DIRECTORY {
+        if ((*ldirp).i_mode & I_TYPE) != I_DIRECTORY {
             return ENOTDIR;
         }
 
         if (flag == DELETE || flag == ENTER)
-            && (*ldir)
+            && (*ldirp)
                 .i_sp
                 .as_ref()
                 .map_or(false, |sp| (**sp).s_rd_only != 0)
@@ -386,34 +381,34 @@ pub fn search_dir(
             return r;
         }
 
-        let sp_ptr = crate::mfs::super_block::get_super((*ldir).i_dev);
+        let sp_ptr = crate::mfs::super_block::get_super((*ldirp).i_dev);
         if sp_ptr.is_null() {
             return EINVAL;
         }
         let sp = &*sp_ptr;
         let block_size = sp.s_block_size as usize;
 
-        let old_slots = (*ldir).i_size as usize / DIR_ENTRY_SIZE;
+        let old_slots = (*ldirp).i_size as usize / DIR_ENTRY_SIZE;
         let mut new_slots = 0usize;
         let mut e_hit = false;
         let mut match_found = false;
 
         let mut pos: i64 = 0;
-        if flag == ENTER && (*ldir).i_last_dpos < (*ldir).i_size as i64 {
-            pos = (*ldir).i_last_dpos;
+        if flag == ENTER && (*ldirp).i_last_dpos < (*ldirp).i_size as i64 {
+            pos = (*ldirp).i_last_dpos;
             new_slots = pos as usize / DIR_ENTRY_SIZE;
         }
 
         // Buffer held across the loop for ENTER writes.
         let mut held_bp: *mut libs::libminixfs::types::Buf = core::ptr::null_mut();
 
-        while (pos as i64) < (*ldir).i_size as i64 {
+        while (pos as i64) < (*ldirp).i_size as i64 {
             // Directories don't have holes, so b cannot be NO_BLOCK.
             let b = read_map(ldir_idx, pos as i64, 0);
-            debug_assert!((*ldir).i_dev != NO_DEV);
+            debug_assert!((*ldirp).i_dev != NO_DEV);
             debug_assert!(b != NO_BLOCK);
 
-            let bp = lmfs_get_block((*ldir).i_dev, b as u64);
+            let bp = lmfs_get_block((*ldirp).i_dev, b as u64);
             debug_assert!(!bp.is_null());
             debug_assert!(lmfs_dev(bp) != NO_DEV);
 
@@ -423,13 +418,13 @@ pub fn search_dir(
             let mut block_e_hit = false;
 
             for i in 0..num_entries {
-                if new_slots + 1 > old_slots {
+                new_slots += 1;
+                if new_slots > old_slots {
                     if flag == ENTER {
                         block_e_hit = true;
                     }
                     break;
                 }
-                new_slots += 1;
 
                 let dp = &*dp_base.add(i);
 
@@ -464,11 +459,10 @@ pub fn search_dir(
                         }
                         dp_mut.mfs_d_ino = NO_ENTRY;
                         lmfs_markdirty(bp);
-                        let ldir_mut = &mut *glo::get_inode_ptr(ldir_idx as usize);
-                        (*ldir_mut).i_update |= CTIME | MTIME;
-                        (*ldir_mut).i_dirt = IN_DIRTY;
-                        if (pos as i64) < (*ldir_mut).i_last_dpos {
-                            (*ldir_mut).i_last_dpos = pos;
+                        (*ldirp).i_update |= CTIME | MTIME;
+                        (*ldirp).i_dirt = IN_DIRTY;
+                        if (pos as i64) < (*ldirp).i_last_dpos {
+                            (*ldirp).i_last_dpos = pos;
                         }
                     } else {
                         // flag is LOOK_UP
@@ -511,8 +505,7 @@ pub fn search_dir(
         }
 
         // When ENTER next time, start searching for free slot from i_last_dpos.
-        let ldir_mut = &mut *glo::get_inode_ptr(ldir_idx as usize);
-        (*ldir_mut).i_last_dpos = pos;
+        (*ldirp).i_last_dpos = pos;
 
         let mut extended = false;
 
@@ -522,7 +515,7 @@ pub fn search_dir(
             if new_slots == 0 {
                 return EFBIG;
             }
-            let bp = crate::mfs::write::new_block(ldir_idx, (*ldir_mut).i_size as i64);
+            let bp = crate::mfs::write::new_block(ldir_idx, (*ldirp).i_size as i64);
             if bp.is_null() {
                 return (*glo::mfs_ptr()).err_code;
             }
@@ -567,11 +560,11 @@ pub fn search_dir(
         lmfs_markdirty(held_bp);
         lmfs_put_block(held_bp, DIRECTORY_BLOCK);
 
-        (*ldir_mut).i_update |= CTIME | MTIME;
-        (*ldir_mut).i_dirt = IN_DIRTY;
+        (*ldirp).i_update |= CTIME | MTIME;
+        (*ldirp).i_dirt = IN_DIRTY;
 
         if new_slots > old_slots {
-            (*ldir_mut).i_size = (new_slots * DIR_ENTRY_SIZE) as i32;
+            (*ldirp).i_size = (new_slots * DIR_ENTRY_SIZE) as i32;
             if extended {
                 rw_inode(ldir_idx, WRITING);
             }

@@ -302,8 +302,10 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     crate::system::EDONTREPLY as i64
 }
 
-/// SYS_write (9) — write to a file descriptor.
+/// SYS_write (3) — write to a file descriptor.
 /// fd=1 (stdout), fd=2 (stderr) go to serial output.
+/// Regular file writes go through VFS via
+/// `minix_std::fs::write`.
 ///
 /// # Safety
 ///
@@ -314,7 +316,7 @@ pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]
     let count = args[2] as usize;
     let buf = args[1] as *const u8;
     if buf.is_null() {
-        return -14;
+        return -14; // EFAULT
     }
     if fd == 1 || fd == 2 {
         if count > 0 {
@@ -576,15 +578,10 @@ pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u6
         return -14; // EFAULT
     }
     unsafe {
-        // Switch to the caller's page table so we can read/write its buffer.
-        // The kernel might be running under a different CR3 if the current
-        // process was context-switched in via restore() with a different
-        // per-process page table.
-        let saved_cr3 = crate::hal::read_cr3();
-        let caller_cr3 = (*caller).p_seg.p_cr3;
-        if saved_cr3 != caller_cr3 && caller_cr3 != 0 {
-            crate::hal::write_cr3(caller_cr3);
-        }
+        // The kernel identity map is preserved in all per-process page
+        // tables via PD deep-copy, so we can read/write the caller's
+        // message buffer without switching CR3.  No CR3 save/restore
+        // needed — see dispatch_basic_syscall comment.
 
         // Copy user message into kernel buffer.
         // Use Message struct size (56 bytes), not MESSAGE_SIZE (64), because
@@ -612,10 +609,6 @@ pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u6
         crate::system::kernel_call_finish(caller, &mut kbuf, result);
         // Restore the original delivery address
         (*caller).p_delivermsg_vir = saved_vir;
-        // Restore original CR3
-        if saved_cr3 != caller_cr3 && caller_cr3 != 0 {
-            crate::hal::write_cr3(saved_cr3);
-        }
         result as i64
     }
 }

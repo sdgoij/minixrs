@@ -135,7 +135,7 @@ pub fn fs_mkdir() -> i32 {
             None => return ENOENT,
         };
 
-        let rip = new_node(ldirp, string, mode | I_DIRECTORY, 0);
+        let rip = new_node(ldirp, string, mode | I_DIRECTORY, NO_ZONE);
 
         if rip.is_none() || (*glo::mfs_ptr()).err_code == EEXIST {
             if let Some(r) = rip {

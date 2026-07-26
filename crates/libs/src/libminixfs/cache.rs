@@ -529,9 +529,35 @@ pub unsafe fn lmfs_get_block_ino(
 /// # Safety
 ///
 /// This function accesses global mutable state.
-pub unsafe fn lmfs_put_block(bp: *mut Buf, _block_type: i32) {
+pub unsafe fn lmfs_put_block(bp: *mut Buf, block_type: i32) {
     if bp.is_null() {
         return;
+    }
+
+    // Write dirty blocks to disk before releasing them.
+    // Block types from mfs/consts: DIRECTORY_BLOCK=1, INODE_BLOCK=3, FULL_DATA_BLOCK=4.
+    // These must be written immediately for filesystem consistency.
+    let needs_write = unsafe { (*bp).lmfs_flags & VMMC_DIRTY != 0 };
+    let flush_type = match block_type {
+        3 => 1, // INODE_BLOCK: write immediately
+        1 => 1, // DIRECTORY_BLOCK: write immediately
+        4 => 2, // FULL_DATA_BLOCK: write before eviction
+        _ => 0, // no write needed
+    };
+    if needs_write && flush_type != 0 {
+        unsafe {
+            let dev = (*bp).lmfs_dev;
+            let block = (*bp).lmfs_blocknr;
+            if dev != NO_DEV
+                && !(*bp).data_ptr.is_null()
+                && let Some(io) = get_block_io()
+            {
+                let data = (*bp).data_ptr;
+                let block_size = static_read!(fs_block_size) as usize;
+                io(dev, block, 1, &data as *const *mut u8, block_size, 1);
+                (*bp).lmfs_flags &= !VMMC_DIRTY;
+            }
+        }
     }
 
     // SAFETY: bp is valid.
@@ -543,7 +569,7 @@ pub unsafe fn lmfs_put_block(bp: *mut Buf, _block_type: i32) {
     let dev = unsafe { (*bp).lmfs_dev };
 
     // Put this block back on the LRU chain.
-    if dev == DEV_RAM || (_block_type & ONE_SHOT) != 0 {
+    if dev == DEV_RAM || (block_type & ONE_SHOT) != 0 {
         // Put on front (will be evicted soon).
         unsafe { (*bp).lmfs_prev = ptr::null_mut() };
         unsafe { (*bp).lmfs_next = static_read!(front) };

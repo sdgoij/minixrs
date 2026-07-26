@@ -39,6 +39,7 @@ pub const VFS_LSEEK: u32 = VFS_BASE + 2;
 pub const VFS_OPEN: u32 = VFS_BASE + 3;
 pub const VFS_CREAT: u32 = VFS_BASE + 4;
 pub const VFS_CLOSE: u32 = VFS_BASE + 5;
+pub const VFS_MKDIR: u32 = VFS_BASE + 9;
 pub const VFS_STAT: u32 = VFS_BASE + 21;
 pub const VFS_FSTAT: u32 = VFS_BASE + 22;
 pub const VFS_IOCTL: u32 = VFS_BASE + 24;
@@ -108,7 +109,7 @@ pub struct Stat {
 
 const OFF_CALL: usize = 4;
 
-// VFS_OPEN / VFS_CREAT (matches do_open):
+// VFS_OPEN (matches do_open):
 //   offset 8:  flags (i32)
 //   offset 16: name pointer (u64)
 //   offset 24: name length (i32)
@@ -116,6 +117,12 @@ const OFF_CALL: usize = 4;
 const OFF_OPEN_FLAGS: usize = 8;
 const OFF_OPEN_NAME: usize = 16;
 const OFF_OPEN_NAME_LEN: usize = 24;
+
+// VFS_CREAT (matches do_creat):
+//   offset 8:  name pointer (u64)
+//   offset 16: name length (i32)
+//   offset 24: flags (i32)
+//   offset 28: mode (i32)
 
 // VFS_READ / VFS_WRITE (matches do_read/do_write):
 //   offset 8:  fd (i32)
@@ -247,21 +254,38 @@ unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
 ///
 /// `path` must be a valid, null-terminated string in the caller's address
 /// space.
-pub unsafe fn open(path: &str, flags: i32, _mode: u32) -> Result<i32, MinixErr> {
+pub unsafe fn open(path: &str, flags: i32, mode: u32) -> Result<i32, MinixErr> {
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (path, flags, _mode, VFS_PROC_NR);
+        let _ = (path, flags, mode, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_CALL, VFS_OPEN as i32);
-        msg_set_u64(&mut msg, OFF_OPEN_NAME, path.as_ptr() as u64);
-        msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, path.len() as i32);
-        msg_set_i32(&mut msg, OFF_OPEN_FLAGS, flags);
+        if flags & O_CREAT != 0 {
+            // Send VFS_CREAT (0x104) — do_creat expects:
+            //   offset 8:  name pointer (u64)
+            //   offset 16: name length (i32)
+            //   offset 24: flags (i32)
+            //   offset 28: mode (i32)
+            msg_set_i32(&mut msg, OFF_CALL, VFS_CREAT as i32);
+            msg_set_u64(&mut msg, 8, path.as_ptr() as u64);
+            msg_set_i32(&mut msg, 16, path.len() as i32);
+            msg_set_i32(&mut msg, 24, flags);
+            msg_set_i32(&mut msg, 28, mode as i32);
+        } else {
+            // VFS_OPEN (matches do_open):
+            //   offset 8:  flags (i32)
+            //   offset 16: name pointer (u64)
+            //   offset 24: name length (i32)
+            msg_set_i32(&mut msg, OFF_CALL, VFS_OPEN as i32);
+            msg_set_u64(&mut msg, OFF_OPEN_NAME, path.as_ptr() as u64);
+            msg_set_i32(&mut msg, OFF_OPEN_NAME_LEN, path.len() as i32);
+            msg_set_i32(&mut msg, OFF_OPEN_FLAGS, flags);
+        }
         let mtype = vfs_call(&mut msg)?;
-        // VFS_OPEN returns the file descriptor in m_type on success.
+        // VFS_OPEN/VFS_CREAT returns the file descriptor in m_type on success.
         Ok(mtype)
     }
 }
@@ -279,6 +303,29 @@ pub fn close(fd: i32) -> Result<(), MinixErr> {
         msg_set_i32(&mut msg, OFF_CALL, VFS_CLOSE as i32);
         msg_set_i32(&mut msg, OFF_CLOSE_FD, fd);
         let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Create a directory.
+pub fn mkdir(path: &str, mode: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (path, mode, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        // VFS_MKDIR (0x109) — do_mkdir expects:
+        //   offset 8:  name pointer (u64)
+        //   offset 16: name length (i32)
+        //   offset 24: mode (u32)
+        msg_set_i32(&mut msg, OFF_CALL, VFS_MKDIR as i32);
+        msg_set_u64(&mut msg, 8, path.as_ptr() as u64);
+        msg_set_i32(&mut msg, 16, path.len() as i32);
+        msg_set_u32(&mut msg, 24, mode);
+        vfs_call(&mut msg)?;
         Ok(())
     }
 }

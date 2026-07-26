@@ -2,10 +2,17 @@
 
 use crate::mfs::consts::*;
 use crate::mfs::glo;
+use crate::mfs::inode;
 use crate::mfs::super_block;
-use libs::libminixfs::cache::{lmfs_get_block, lmfs_get_block_ino, lmfs_put_block};
+use crate::mfs::write;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_get_block_ino, lmfs_markdirty, lmfs_put_block};
 use libs::libminixfs::constants::{FULL_DATA_BLOCK, PARTIAL_DATA_BLOCK};
 use libs::libminixfs::types::Buf;
+
+/// SAFECOPYTO kernel call number (KERNEL_CALL + 32).
+const SAFECOPYTO_CALL: i32 = 32;
+/// SAFECOPYFROM kernel call number (KERNEL_CALL + 31).
+const SAFECOPYFROM_CALL: i32 = 31;
 
 // Reference: read.c fs_readwrite()
 pub fn fs_readwrite() -> i32 {
@@ -14,61 +21,203 @@ pub fn fs_readwrite() -> i32 {
         let req_nr = (*mfs).req_nr;
         let is_write = req_nr == REQ_WRITE - FS_BASE;
 
-        // Extract request parameters from the incoming message via raw pointer.
-        let msg: *const arch_common::ipc::Message = core::ptr::addr_of!((*mfs).m_in);
-        let rip_idx = (*msg).m_payload.m1.m1i1 as u16;
-        let position = (*msg).m_payload.m1.m1i2 as i64;
-        let count = (*msg).m_payload.m1.m1i3 as usize;
-        let _user_ep = (*msg).m_payload.m1.m1i4;
-        let _grant = (*msg).m_payload.m1.m1i5;
+        // Extract request parameters from m_payload.raw at C struct offsets.
+        // Payload layout (mess_vfs_fs_readwrite):
+        //   raw[0..4]  = inode (u32)
+        //   raw[4..8]  = padding
+        //   raw[8..16] = seek_pos (i64)
+        //   raw[16..20] = grant (i32)
+        //   raw[20..24] = padding
+        //   raw[24..32] = nbytes (u64)
+        let payload = &(*mfs).m_in.m_payload.raw;
+        let inode = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
+        let position = i64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8]));
+        let grant = i32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4]));
+        let nrbytes = u64::from_ne_bytes(payload[24..32].try_into().unwrap_or([0u8; 8])) as usize;
 
-        let rip = &*glo::get_inode_ptr(rip_idx as usize);
-        let block_size = match (*rip).i_sp {
-            Some(sp) => (*sp).s_block_size as usize,
-            None => return EINVAL,
-        };
-
-        if count == 0 {
+        // Zero-byte read/write is a no-op.
+        if nrbytes == 0 {
             return OK;
         }
 
-        let mut bytes_left = count;
+        // Look up the inode slot from inode number via the cache.
+        let rip_idx = match inode::get_inode((*mfs).fs_dev, inode) {
+            Some(idx) => idx,
+            None => return -EINVAL,
+        };
+
+        let rip_ptr = glo::get_inode_ptr(rip_idx as usize);
+        let block_size = match (*rip_ptr).i_sp {
+            Some(sp) => (*sp).s_block_size as usize,
+            None => return -EINVAL,
+        };
+
+        let mut cum_io: usize = 0;
         let mut pos = position;
+        let mut r: i32 = OK;
 
-        while bytes_left > 0 {
+        // For reads, stop at EOF (file size).
+        let f_size = if !is_write {
+            (*rip_ptr).i_size
+        } else {
+            i32::MAX
+        } as i64;
+
+        while cum_io < nrbytes {
+            // EOF check for reads.
+            if !is_write && pos >= f_size {
+                break;
+            }
+
             let b = read_map(rip_idx, pos, 0);
-            if b == NO_BLOCK {
-                break;
-            }
 
-            let bp = lmfs_get_block_ino((*rip).i_dev, b as u64, NORMAL, rip_idx as u64, pos as u64);
-            if bp.is_null() {
-                break;
-            }
-
-            let data = (*bp).data_ptr;
-            let block_off = (pos as usize) % block_size;
-            let chunk = (block_size - block_off).min(bytes_left);
-
-            if is_write {
-                libs::libminixfs::cache::lmfs_markdirty(bp);
+            let chunk = if b == NO_BLOCK {
+                // Hole or past EOF — reads as zeros. Use the full remaining chunk size.
+                let remaining = (nrbytes - cum_io).min(block_size);
+                if !is_write {
+                    // Don't read past EOF for real files (holes before EOF are OK).
+                    remaining.min((f_size - pos) as usize)
+                } else {
+                    remaining
+                }
             } else {
-                let _ = data;
+                let block_off = (pos as usize) % block_size;
+                let mut ch = (block_size - block_off).min(nrbytes - cum_io);
+                // Limit reads to the file size.
+                if !is_write {
+                    ch = ch.min((f_size - pos) as usize);
+                }
+                ch
+            };
+
+            if chunk == 0 {
+                break;
             }
 
-            lmfs_put_block(bp, FULL_DATA_BLOCK);
-            bytes_left -= chunk;
+            if b == NO_BLOCK {
+                if !is_write {
+                    // Reading from a hole — fill user buffer with zeros.
+                    // Use a local zero buffer and SAFECOPYTO.
+                    let zero_buf = [0u8; 4096];
+                    let len = chunk.min(zero_buf.len());
+                    let mut kmsg = [0u8; 64];
+                    kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+                    kmsg[12..16].copy_from_slice(&grant.to_le_bytes());
+                    kmsg[16..24].copy_from_slice(&(cum_io as u64).to_le_bytes());
+                    kmsg[24..32].copy_from_slice(&(zero_buf.as_ptr() as u64).to_le_bytes());
+                    kmsg[32..40].copy_from_slice(&(len as u64).to_le_bytes());
+                    r = minix_rt::kernel_call(SAFECOPYTO_CALL, &mut kmsg);
+                    if r != 0 {
+                        break;
+                    }
+                } else {
+                    // Writing to a hole — allocate a new block and copy data in.
+                    let bp = write::new_block(rip_idx, pos) as *mut Buf;
+                    if bp.is_null() {
+                        r = -EIO;
+                        break;
+                    }
+                    let block_data = (*bp).data_ptr;
+                    let block_off = (pos as usize) % block_size;
+                    let mut kmsg = [0u8; 64];
+                    kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+                    kmsg[12..16].copy_from_slice(&grant.to_le_bytes());
+                    kmsg[16..24].copy_from_slice(&(cum_io as u64).to_le_bytes());
+                    kmsg[24..32].copy_from_slice(&(block_data.add(block_off) as u64).to_le_bytes());
+                    kmsg[32..40].copy_from_slice(&(chunk as u64).to_le_bytes());
+                    r = minix_rt::kernel_call(SAFECOPYFROM_CALL, &mut kmsg);
+                    let put_type = if block_off + chunk == block_size {
+                        FULL_DATA_BLOCK
+                    } else {
+                        PARTIAL_DATA_BLOCK
+                    };
+                    lmfs_put_block(bp, put_type);
+                    if r != 0 {
+                        break;
+                    }
+                }
+            } else if is_write {
+                // Writing — copy chunk from userland (via grant) to block buffer.
+                let bp = lmfs_get_block_ino(
+                    (*rip_ptr).i_dev,
+                    b as u64,
+                    NORMAL,
+                    rip_idx as u64,
+                    pos as u64,
+                );
+                if bp.is_null() {
+                    r = -EIO;
+                    break;
+                }
+                let block_data = (*bp).data_ptr;
+                let block_off = (pos as usize) % block_size;
+
+                let mut kmsg = [0u8; 64];
+                kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+                kmsg[12..16].copy_from_slice(&grant.to_le_bytes());
+                kmsg[16..24].copy_from_slice(&(cum_io as u64).to_le_bytes());
+                kmsg[24..32].copy_from_slice(&(block_data.add(block_off) as u64).to_le_bytes());
+                kmsg[32..40].copy_from_slice(&(chunk as u64).to_le_bytes());
+                r = minix_rt::kernel_call(SAFECOPYFROM_CALL, &mut kmsg);
+                lmfs_markdirty(bp);
+                lmfs_put_block(bp, FULL_DATA_BLOCK);
+                if r != 0 {
+                    break;
+                }
+                if chunk == 0 {
+                    r = -EFBIG;
+                    break;
+                }
+            } else {
+                // Reading — copy chunk from block buffer to userland (via grant).
+                let bp = lmfs_get_block_ino(
+                    (*rip_ptr).i_dev,
+                    b as u64,
+                    NORMAL,
+                    rip_idx as u64,
+                    pos as u64,
+                );
+                if bp.is_null() {
+                    r = -EIO;
+                    break;
+                }
+                let block_data = (*bp).data_ptr;
+                let block_off = (pos as usize) % block_size;
+
+                let mut kmsg = [0u8; 64];
+                kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+                kmsg[12..16].copy_from_slice(&grant.to_le_bytes());
+                kmsg[16..24].copy_from_slice(&(cum_io as u64).to_le_bytes());
+                kmsg[24..32].copy_from_slice(&(block_data.add(block_off) as u64).to_le_bytes());
+                kmsg[32..40].copy_from_slice(&(chunk as u64).to_le_bytes());
+                r = minix_rt::kernel_call(SAFECOPYTO_CALL, &mut kmsg);
+                lmfs_put_block(bp, FULL_DATA_BLOCK);
+                if r != 0 {
+                    break;
+                }
+            }
+
+            cum_io += chunk;
             pos += chunk as i64;
 
-            // Prefetch the next block.
-            read_ahead(rip_idx, pos as u64);
-
-            if is_write && chunk == 0 {
-                return EFBIG;
+            // Prefetch the next block for reads.
+            if !is_write {
+                read_ahead(rip_idx, pos as u64);
             }
         }
 
-        (count - bytes_left) as i32
+        // Update inode size if we wrote past EOF.
+        if is_write && pos > (*rip_ptr).i_size as i64 {
+            (*rip_ptr).i_size = pos as i32;
+            (*rip_ptr).i_update |= CTIME | MTIME;
+            (*rip_ptr).i_dirt = IN_DIRTY;
+        }
+
+        // Store results for the main loop to populate the reply.
+        (*mfs).readwrite_res_pos = pos;
+        (*mfs).readwrite_res_count = cum_io as u32;
+
+        if r != 0 { r } else { cum_io as i32 }
     }
 }
 
@@ -285,13 +434,15 @@ mod tests {
         }
     }
 
-    fn set_req_read(rip_idx: u16, pos: i64, count: usize) {
+    fn set_req_read(inode_nr: u32, pos: i64, count: usize) {
         unsafe {
             let mfs = glo::mfs_ptr();
             (*mfs).req_nr = REQ_READ - FS_BASE;
-            (*mfs).m_in.m_payload.m1.m1i1 = rip_idx as i32;
-            (*mfs).m_in.m_payload.m1.m1i2 = pos as i32;
-            (*mfs).m_in.m_payload.m1.m1i3 = count as i32;
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&inode_nr.to_le_bytes());
+            raw[8..16].copy_from_slice(&pos.to_le_bytes());
+            raw[16..20].copy_from_slice(&(-1i32).to_le_bytes()); // grant = invalid
+            raw[24..32].copy_from_slice(&(count as u64).to_le_bytes());
         }
     }
 
@@ -328,11 +479,11 @@ mod tests {
 
     #[test]
     fn test_fs_readwrite_no_super_returns_einval() {
-        // Without a super block on the inode, fs_readwrite returns EINVAL.
+        // Without a registered inode, fs_readwrite returns -EINVAL.
         init();
-        set_req_read(0, 0, 0);
+        set_req_read(0, 0, 100); // non-zero count to reach inode lookup
         let r = fs_readwrite();
-        assert_eq!(r, EINVAL);
+        assert_eq!(r, -EINVAL);
     }
 
     #[test]

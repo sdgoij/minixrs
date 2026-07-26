@@ -192,33 +192,35 @@ pub fn clear_zone(rip_idx: u16, _pos: i64, _flag: i32) {
 
 pub fn new_block(rip_idx: u16, position: i64) -> *mut u8 {
     unsafe {
-        let rip = &mut *glo::get_inode_ptr(rip_idx as usize);
+        // Read inode fields through raw pointer to avoid aliasing
+        // with read_map/write_map which also access the inode.
+        let rip_ptr = glo::get_inode_ptr(rip_idx as usize);
         if read_map(rip_idx, position, 0) == NO_BLOCK {
-            let z = if (*rip).i_zsearch == NO_ZONE {
-                (*rip).i_zone[0]
+            let z = if (*rip_ptr).i_zsearch == NO_ZONE {
+                (*rip_ptr).i_zone[0]
             } else {
-                (*rip).i_zsearch
+                (*rip_ptr).i_zsearch
             };
             let z = if z == NO_ZONE {
-                (*rip).i_sp.map_or(NO_ZONE, |sp| (*sp).s_firstdatazone)
+                (*rip_ptr).i_sp.map_or(NO_ZONE, |sp| (*sp).s_firstdatazone)
             } else {
                 z
             };
-            let z = alloc_zone((*rip).i_dev, z);
+            let z = alloc_zone((*rip_ptr).i_dev, z);
             if z == NO_ZONE {
                 return core::ptr::null_mut();
             }
-            (*rip).i_zsearch = z;
+            (*rip_ptr).i_zsearch = z;
             let r = write_map(rip_idx, position, z, 0);
             if r != OK {
-                free_zone((*rip).i_dev, z);
+                free_zone((*rip_ptr).i_dev, z);
                 (*glo::mfs_ptr()).err_code = r;
                 return core::ptr::null_mut();
             }
         }
 
         // Calculate the block number from the zone mapping.
-        let sp = match (*rip).i_sp {
+        let sp = match (*rip_ptr).i_sp {
             Some(s) => s,
             None => return core::ptr::null_mut(),
         };
@@ -234,10 +236,10 @@ pub fn new_block(rip_idx: u16, position: i64) -> *mut u8 {
 
         // Get a clean buffer (NO_READ — block will be entirely overwritten).
         let bp = lmfs_get_block_ino(
-            (*rip).i_dev,
+            (*rip_ptr).i_dev,
             b,
             NO_READ,
-            (*rip).i_num as u64,
+            (*rip_ptr).i_num as u64,
             (position as u64 / block_size) * block_size,
         );
         if bp.is_null() {

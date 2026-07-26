@@ -168,7 +168,7 @@ pub fn put_inode(inode_idx: Option<u16>) {
             }
             (*inode).i_mountpoint = FALSE;
             if (*inode).i_dirt == IN_DIRTY {
-                // rw_inode
+                rw_inode(idx, WRITING);
             }
             if (*inode).i_nlinks == NO_LINK {
                 unhash_inode(idx);

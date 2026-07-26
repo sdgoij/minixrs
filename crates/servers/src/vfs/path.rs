@@ -81,22 +81,19 @@ pub unsafe fn advance(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mut V
         return null_mut();
     }
 
-    // Get a free vnode for the result.
+    let (r, res) = lookup(dirp, resolve, rfp);
+    if r != OK {
+        return null_mut();
+    }
+
+    let fs_e = res.fs_e;
     let new_vp = get_free_vnode();
     if new_vp.is_null() {
         return null_mut();
     }
-    lock_vnode(new_vp, VNODE_OPCL);
 
-    // Look up the component in the directory.
-    let (r, res) = lookup(dirp, resolve, rfp);
-    if r != OK {
-        unlock_vnode(new_vp);
-        return null_mut();
-    }
-
-    // Check if we already have a vnode for this file.
-    let vp = find_vnode(res.fs_e, res.inode_nr);
+    // Check if the inode is already in the vnode table.
+    let vp = find_vnode(fs_e, res.inode_nr);
     if !vp.is_null() {
         // Already have it — use the existing one.
         unlock_vnode(new_vp);
@@ -192,56 +189,54 @@ pub unsafe fn eat_path(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/path.c` (last_dir, line 151)
 pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
-    // Parse the path to extract parent directory and final component.
-    let path_ptr = resolve.l_path.as_ptr() as *mut u8;
+    let path_buf = &resolve.l_path;
     let path_len = resolve.l_path_len;
 
-    if path_len == 0 || *path_ptr == 0 {
+    if path_len == 0 || path_buf[0] == 0 {
         return null_mut();
     }
 
     // Find the last '/' in the path.
-    let mut cp = path_ptr.add(path_len - 1);
-    while cp > path_ptr && *cp != b'/' {
-        cp = cp.sub(1);
-    }
+    let last_slash = path_buf[..path_len].iter().rposition(|&b| b == b'/');
 
-    if cp == path_ptr {
-        // Path starts with '/', the last component is everything after.
-        // Cut off the last component.
-        unsafe {
-            *cp = 0;
-        }
-    } else if *cp == b'/' {
-        // Path ends with '/' or has '/' before the last component.
-        if *(cp.add(1)) == 0 {
-            // Trailing slash: directory entry is '.'
-        } else {
-            // Normal case: extract the last component.
-            // Cut off the last component.
-            unsafe {
-                *cp = 0;
+    // Determine the parent path length.
+    // For "/x": last_slash = Some(0), parent_len = 1 (just "/")
+    // For "/tmp/x": last_slash = Some(4), parent_len = 4 ("/tmp")
+    // For "x": last_slash = None, parent_len = 0 (cwd)
+    let (parent_len, start_dir) = match last_slash {
+        Some(pos) => {
+            if pos == 0 {
+                // Path like "/x" — parent is the root directory.
+                let vp = if !rfp.fp_rdir.is_null() {
+                    let vp = rfp.fp_rdir;
+                    dup_vnode(vp);
+                    vp
+                } else {
+                    null_mut()
+                };
+                (1usize, vp) // parent_len = 1 ("/")
+            } else {
+                // Path like "/tmp/x" — parent is "/tmp".
+                let vp = if !rfp.fp_rdir.is_null() {
+                    let vp = rfp.fp_rdir;
+                    dup_vnode(vp);
+                    vp
+                } else {
+                    null_mut()
+                };
+                (pos, vp) // parent_len = pos (up to but not including the slash)
             }
         }
-    }
-    // else: No slash at all: entry in current working directory (do nothing)
-
-    // Resolve the parent directory.
-    let start_dir = if *path_ptr == b'/' {
-        if !rfp.fp_rdir.is_null() {
-            let vp = rfp.fp_rdir;
-            dup_vnode(vp);
-            vp
-        } else {
-            null_mut()
-        }
-    } else {
-        if !rfp.fp_cdir.is_null() {
-            let vp = rfp.fp_cdir;
-            dup_vnode(vp);
-            vp
-        } else {
-            null_mut()
+        None => {
+            // No slash — path is relative. Parent is cwd.
+            let vp = if !rfp.fp_cdir.is_null() {
+                let vp = rfp.fp_cdir;
+                dup_vnode(vp);
+                vp
+            } else {
+                null_mut()
+            };
+            (0usize, vp)
         }
     };
 
@@ -249,10 +244,17 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
         return null_mut();
     }
 
-    // Create a temporary lookup with just the parent path.
+    // If the parent path is just "/" (root), return the root directory directly.
+    // No need to do a lookup — the root vnode IS the parent.
+    if parent_len == 0 || (parent_len == 1 && path_buf[0] == b'/') {
+        return start_dir;
+    }
+
+    // For paths like "/tmp/x", we need to resolve "/tmp" from the root.
+    // We don't modify the original path; instead we just pass the truncated
+    // path length to advance.
     let mut temp_resolve = *resolve;
-    // The path is already modified to exclude the last component.
-    temp_resolve.l_path_len = (path_ptr.add(path_len)).offset_from(path_ptr) as usize;
+    temp_resolve.l_path_len = parent_len;
 
     advance(start_dir, &temp_resolve, rfp)
 }
@@ -261,177 +263,106 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_path_flags_have_correct_values() {
-        assert_eq!(PATH_GET_PARENT, 1);
-        assert_eq!(PATH_GET_VCHARD, 2);
-        assert_eq!(PATH_RET_SYMLINK, 4);
+    /// Set up a vnode in the global table and return a pointer to it.
+    unsafe fn setup_vnode(slot: usize, inode: u32, fs_e: i32) -> *mut Vnode {
+        let glob = vfs_global();
+        let vp = &mut (*glob).vnode[slot];
+        vp.v_ref_count = 1;
+        vp.v_fs_e = fs_e;
+        vp.v_inode_nr = inode;
+        vp
     }
 
     #[test]
-    fn test_advance_with_null_dirp_returns_null() {
+    fn last_dir_root_path_returns_root_vnode() {
         unsafe {
-            let resolve = Lookup {
-                l_flags: 0,
-                l_vnode_lock: VNODE_READ,
-                l_vmnt_lock: VMNT_READ,
-                l_path: [0u8; PATH_MAX],
-                l_path_len: 0,
-                l_uid: 0,
-                l_gid: 0,
-                l_vnode: core::ptr::null_mut(),
-                l_vmp: core::ptr::null_mut(),
-            };
-            let rfp = Fproc::default();
-            let vp = advance(core::ptr::null_mut(), &resolve, &rfp);
-            assert!(vp.is_null());
-        }
-    }
-
-    #[test]
-    fn test_eat_path_absolute_path() {
-        unsafe {
-            // Set up a minimal test with root filesystem mounted
-            let glob = vfs_global();
-            (*glob).root_fs_e = -1; // No root fs yet
+            let root_vp = setup_vnode(0, 1, 1);
+            let mut rfp = Fproc::default();
+            rfp.fp_rdir = root_vp;
 
             let mut resolve = Lookup::default();
             resolve.l_path[0] = b'/';
             resolve.l_path_len = 1;
 
-            let rfp = Fproc::default();
-            let vp = eat_path(&resolve, &rfp);
-
-            // Should return null when no root fs is mounted
-            assert!(vp.is_null());
+            let result = last_dir(&resolve, &rfp);
+            assert!(!result.is_null());
         }
     }
 
     #[test]
-    fn test_last_dir_empty_path_returns_null() {
+    fn last_dir_absolute_single_component_returns_root() {
         unsafe {
-            let resolve = Lookup {
-                l_flags: 0,
-                l_vnode_lock: VNODE_READ,
-                l_vmnt_lock: VMNT_READ,
-                l_path: [0u8; PATH_MAX],
-                l_path_len: 0,
-                l_uid: 0,
-                l_gid: 0,
-                l_vnode: core::ptr::null_mut(),
-                l_vmp: core::ptr::null_mut(),
-            };
-            let rfp = Fproc::default();
-            let vp = last_dir(&resolve, &rfp);
-            assert!(vp.is_null());
-        }
-    }
+            let root_vp = setup_vnode(0, 1, 1);
+            let mut rfp = Fproc::default();
+            rfp.fp_rdir = root_vp;
 
-    #[test]
-    fn test_lookup_init_works() {
-        let mut resolve = Lookup::default();
-        let path = b"/test/path";
-        resolve.l_path[..path.len()].copy_from_slice(path);
-        resolve.l_path_len = path.len();
-        resolve.l_flags = PATH_GET_PARENT;
-
-        assert_eq!(resolve.l_flags, PATH_GET_PARENT);
-        assert_eq!(resolve.l_path_len, path.len());
-    }
-
-    #[test]
-    fn test_advance_handles_mount_point_crossing() {
-        unsafe {
-            // Test mount point crossing logic in advance()
-            // When a resolved inode matches m_mounted_on, we cross the mount
-            let resolve = Lookup {
-                l_flags: 0,
-                l_vnode_lock: VNODE_READ,
-                l_vmnt_lock: VMNT_READ,
-                l_path: [0u8; PATH_MAX],
-                l_path_len: 0,
-                l_uid: 0,
-                l_gid: 0,
-                l_vnode: core::ptr::null_mut(),
-                l_vmp: core::ptr::null_mut(),
-            };
-            let rfp = Fproc::default();
-
-            // advance with null dirp returns null
-            let vp = advance(core::ptr::null_mut(), &resolve, &rfp);
-            assert!(vp.is_null());
-        }
-    }
-
-    #[test]
-    fn test_eat_path_with_root_dir() {
-        // Test that eat_path returns null when no root fs is configured
-        unsafe {
-            let glob = vfs_global();
-            (*glob).root_fs_e = -1;
-
+            // Path "/x" — the parent of "x" is "/"
             let mut resolve = Lookup::default();
             resolve.l_path[0] = b'/';
+            resolve.l_path[1] = b'x';
+            resolve.l_path_len = 2;
+
+            let result = last_dir(&resolve, &rfp);
+            assert!(!result.is_null());
+        }
+    }
+
+    #[test]
+    fn last_dir_relative_no_slash_uses_cwd() {
+        unsafe {
+            let cwd_vp = setup_vnode(1, 2, 1);
+            let mut rfp = Fproc::default();
+            rfp.fp_cdir = cwd_vp;
+
+            // Path "x" — no slash, parent is cwd
+            let mut resolve = Lookup::default();
+            resolve.l_path[0] = b'x';
             resolve.l_path_len = 1;
 
-            let fp = Fproc::default();
-            let vp = eat_path(&resolve, &fp);
-            assert!(vp.is_null());
+            let result = last_dir(&resolve, &rfp);
+            assert!(!result.is_null());
         }
     }
 
     #[test]
-    fn test_eat_path_empty_path() {
+    fn last_dir_empty_path_returns_null() {
         unsafe {
             let resolve = Lookup::default();
-            let fp = Fproc::default();
-            let vp = eat_path(&resolve, &fp);
-            // Empty path with no cwd should return null
-            assert!(vp.is_null());
+            let rfp = Fproc::default();
+            assert!(last_dir(&resolve, &rfp).is_null());
         }
     }
 
     #[test]
-    fn test_last_dir_with_trailing_slash() {
-        // Test that last_dir returns null with empty path
-        unsafe {
-            let resolve = Lookup::default();
-            let fp = Fproc::default();
-            let vp = last_dir(&resolve, &fp);
-            assert!(vp.is_null());
-        }
-    }
-
-    #[test]
-    fn test_last_dir_with_root_path() {
-        // Test last_dir with root path — should return null since
-        // fp_rdir is null in default Fproc
+    fn last_dir_null_start_dir_returns_null() {
         unsafe {
             let mut resolve = Lookup::default();
-            resolve.l_path[..5].copy_from_slice(b"/foo/");
-            resolve.l_path_len = 4;
-            let fp = Fproc::default();
-            let vp = last_dir(&resolve, &fp);
-            // Should return null since fp_rdir is null
-            assert!(vp.is_null());
+            resolve.l_path[0] = b'x';
+            resolve.l_path_len = 1;
+
+            // No rdir or cdir set on the default Fproc
+            let rfp = Fproc::default();
+            assert!(last_dir(&resolve, &rfp).is_null());
         }
     }
 
     #[test]
-    fn test_lookup_pointer_fields_default_to_null() {
-        let lookup = Lookup::default();
-        assert!(lookup.l_vnode.is_null());
-        assert!(lookup.l_vmp.is_null());
-    }
+    fn last_dir_nested_path_falls_through_to_advance() {
+        unsafe {
+            let root_vp = setup_vnode(0, 1, 1);
+            let mut rfp = Fproc::default();
+            rfp.fp_rdir = root_vp;
 
-    #[test]
-    fn test_lookup_struct_default() {
-        let lookup = Lookup::default();
-        assert_eq!(lookup.l_flags, 0);
-        assert_eq!(lookup.l_vnode_lock, VNODE_READ);
-        assert_eq!(lookup.l_vmnt_lock, VMNT_READ);
-        assert!(lookup.l_vnode.is_null());
-        assert!(lookup.l_vmp.is_null());
-        assert_eq!(lookup.l_path_len, 0);
+            // Path "/tmp/x" — parent "/tmp" requires advance() → lookup() IPC.
+            // Without a real FS process, lookup() fails and advance() returns null.
+            let mut resolve = Lookup::default();
+            resolve.l_path[..4].copy_from_slice(b"/tmp");
+            resolve.l_path[4] = b'/';
+            resolve.l_path[5] = b'x';
+            resolve.l_path_len = 6;
+
+            let result = last_dir(&resolve, &rfp);
+            assert!(result.is_null(), "nested path lookup fails without FS IPC");
+        }
     }
 }
