@@ -21,6 +21,8 @@
 
 #![allow(dead_code, clippy::missing_safety_doc)]
 
+use arch_common::ipc::Message;
+
 // Constants
 
 /// Number of system process slots.
@@ -81,6 +83,24 @@ const ENOMEM: i32 = -12;
 const EBUSY: i32 = -16;
 const EINVAL: i32 = -22;
 const ENOSYS: i32 = -71;
+
+// RS call numbers
+pub const RS_UP: i32 = 0x700;
+pub const RS_DOWN: i32 = 0x701;
+pub const RS_REFRESH: i32 = 0x702;
+pub const RS_RESTART: i32 = 0x703;
+pub const RS_SHUTDOWN: i32 = 0x704;
+pub const RS_UPDATE: i32 = 0x705;
+pub const RS_CLONE: i32 = 0x706;
+pub const RS_EDIT: i32 = 0x707;
+pub const RS_GETSYSINFO: i32 = 0x708;
+pub const RS_LOOKUP: i32 = 0x709;
+pub const RS_INIT: i32 = 0x70A;
+pub const RS_LU_PREPARE: i32 = 0x70B;
+
+const ESRCH: i32 = -3;
+const EEXIST: i32 = -17;
+const EDONTREPLY: i32 = -201;
 
 // Types
 
@@ -466,7 +486,164 @@ pub unsafe fn slot_endpoint(idx: usize) -> Option<i32> {
     Some(rpub.endpoint)
 }
 
-// Server main loop (stub — see Phase 12 wiring)
+// ---- RS request handlers ----
+
+/// Register a new service (RS_UP).
+unsafe fn do_up(msg: &mut Message) -> i32 {
+    let label_ptr = unsafe { msg.m_payload.m2.m2l1 } as u64;
+    let label_len = unsafe { msg.m_payload.m2.m2i1 } as usize;
+    let endpoint = unsafe { msg.m_payload.m2.m2i2 };
+
+    let copy_len = label_len.min(RS_MAX_LABEL_LEN);
+    let label_buf = [0u8; RS_MAX_LABEL_LEN];
+
+    let r = minix_rt::sys_vircopy(
+        msg.m_source,
+        label_ptr,
+        minix_rt::SELF,
+        label_buf.as_ptr() as u64,
+        copy_len,
+    );
+    if r != 0 {
+        return r;
+    }
+
+    let slot = match unsafe { alloc_slot() } {
+        Some(s) => s,
+        None => return ENOMEM,
+    };
+
+    if let Err(e) = unsafe { init_slot(slot, endpoint, 0, &label_buf[..copy_len]) } {
+        unsafe {
+            free_slot(slot);
+        }
+        return e;
+    }
+
+    if let Err(e) = unsafe { mark_initialized(slot, endpoint) } {
+        unsafe {
+            free_slot(slot);
+        }
+        return e;
+    }
+
+    OK
+}
+
+/// Stop a service (RS_DOWN).
+unsafe fn do_down(msg: &Message) -> i32 {
+    let endpoint = unsafe { msg.m_payload.m2.m2i1 };
+    match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(slot) => {
+            unsafe {
+                mark_terminated(slot);
+                free_slot(slot);
+            }
+            OK
+        }
+        None => ESRCH,
+    }
+}
+
+/// Refresh/restart a service (RS_REFRESH).
+unsafe fn do_refresh(msg: &Message) -> i32 {
+    let endpoint = unsafe { msg.m_payload.m2.m2i1 };
+    match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(slot) => {
+            let base = RPROC.as_ptr();
+            unsafe {
+                (*base.add(slot)).flags |= RS_REFRESHING;
+                mark_terminated(slot);
+                free_slot(slot);
+            }
+            OK
+        }
+        None => ESRCH,
+    }
+}
+
+/// Restart a service (RS_RESTART).
+unsafe fn do_restart(msg: &Message) -> i32 {
+    let endpoint = unsafe { msg.m_payload.m2.m2i1 };
+    match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(slot) => {
+            unsafe {
+                mark_terminated(slot);
+                free_slot(slot);
+            }
+            OK
+        }
+        None => ESRCH,
+    }
+}
+
+/// Shutdown (RS_SHUTDOWN).
+fn do_shutdown(_msg: &Message) -> i32 {
+    OK
+}
+
+/// Live update (RS_UPDATE) — not yet implemented.
+fn do_update(_msg: &Message) -> i32 {
+    ENOSYS
+}
+
+/// Clone a service (RS_CLONE) — not yet implemented.
+fn do_clone(_msg: &Message) -> i32 {
+    ENOSYS
+}
+
+/// Edit a service (RS_EDIT) — not yet implemented.
+fn do_edit(_msg: &Message) -> i32 {
+    ENOSYS
+}
+
+/// Look up a service by label (RS_LOOKUP).
+unsafe fn do_lookup(msg: &mut Message) -> i32 {
+    let label_ptr = unsafe { msg.m_payload.m2.m2l1 } as u64;
+    let label_len = unsafe { msg.m_payload.m2.m2i1 } as usize;
+
+    let copy_len = label_len.min(RS_MAX_LABEL_LEN);
+    let label_buf = [0u8; RS_MAX_LABEL_LEN];
+
+    let r = minix_rt::sys_vircopy(
+        msg.m_source,
+        label_ptr,
+        minix_rt::SELF,
+        label_buf.as_ptr() as u64,
+        copy_len,
+    );
+    if r != 0 {
+        return r;
+    }
+
+    match unsafe { lookup_slot_by_label(&label_buf[..copy_len]) } {
+        Some(slot) => {
+            if let Some(ep) = unsafe { slot_endpoint(slot) } {
+                msg.m_payload.m2.m2i1 = ep;
+                OK
+            } else {
+                ESRCH
+            }
+        }
+        None => ESRCH,
+    }
+}
+
+/// Service reports initialization complete (RS_INIT).
+unsafe fn do_init_ready(msg: &Message) -> i32 {
+    let endpoint = msg.m_source;
+    match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(slot) => unsafe { mark_initialized(slot, endpoint) }.map_or_else(|e| e, |_| OK),
+        None => ESRCH,
+    }
+}
+
+/// Live update prepare (RS_LU_PREPARE) — not yet implemented.
+fn do_upd_ready(_msg: &Message) -> i32 {
+    ENOSYS
+}
+
+// Server main loop
 
 /// RS server main loop.
 ///
@@ -479,54 +656,74 @@ pub fn rs_server_main() {
             rs_init();
         }
 
-        // Register boot services so PM's notifications can reach us.
-        // For now, just register PM (endpoint 0) as a known service.
-        let boot_services: &[(i32, &[u8])] = &[
-            (0, b"pm"),
-            (1, b"vfs"),
-            (2, b"rs"),
-            (8, b"vm"),
-            (4, b"sched"),
-            (5, b"tty"),
-            (6, b"ds"),
-            (10, b"init"),
+        // Register boot services with their known endpoints.
+        let boot_svcs: &[(i32, &[u8])] = &[
+            (arch_common::com::DS_PROC_NR, b"ds"),
+            (arch_common::com::RS_PROC_NR, b"rs"),
+            (arch_common::com::PM_PROC_NR, b"pm"),
+            (arch_common::com::SCHED_PROC_NR, b"sched"),
+            (arch_common::com::VFS_PROC_NR, b"vfs"),
+            (arch_common::com::VM_PROC_NR, b"vm"),
+            (arch_common::com::TTY_PROC_NR, b"tty"),
+            (arch_common::com::MFS_PROC_NR, b"mfs"),
         ];
-        for &(ep, label) in boot_services {
+        for &(ep, label) in boot_svcs {
             if let Some(slot) = unsafe { alloc_slot() } {
-                let _ = unsafe { init_slot(slot, ep, -1, label) };
+                let _ = unsafe { init_slot(slot, ep, 0, label) };
+                unsafe {
+                    let _ = mark_initialized(slot, ep);
+                }
             }
         }
 
-        // Syscall numbers for IPC.
+        // IPC syscall numbers.
         const RECEIVE_CALL: u64 = 47;
-        const SEND_CALL: u64 = 46;
+        const SENDREC_CALL: u64 = 48;
         const ANY: i32 = 0x0000ffff;
 
         loop {
-            let mut buf = [0u8; 64];
+            let mut msg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
 
             // Receive from any sender.
-            let src =
-                unsafe { minix_rt::syscall2(RECEIVE_CALL, ANY as u64, buf.as_mut_ptr() as u64) };
+            let src = unsafe {
+                minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64)
+            };
             if src < 0 {
                 continue;
             }
-            let _sender = src as i32;
 
-            // Notifications (m_type == -10) are fire-and-forget.
-            // The sender used NOTIFY and does not expect a reply.
-            // Actual request messages are acknowledged with ENOSYS
-            // (RS is a stub). Use SEND (not SENDREC) so RS doesn't
-            // block waiting for the sender to receive the reply.
-            // The reply is read from buf[4..8] which contains m_type.
-            if i32::from_le_bytes(buf[4..8].try_into().unwrap_or([0; 4]))
-                != arch_common::com::NOTIFY_MESSAGE as i32
-            {
-                // Write ENOSYS to m_type (bytes 4-7) and SEND it back.
-                buf[4..8].copy_from_slice(&(-71i32).to_le_bytes()); // ENOSYS
-                unsafe {
-                    minix_rt::syscall2(minix_rt::SENDNB_CALL, src as u64, buf.as_mut_ptr() as u64);
-                }
+            // Notifications are fire-and-forget; the sender does not expect a reply.
+            if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
+                continue;
+            }
+
+            let call_nr = msg.m_type;
+
+            // Dispatch to handler.
+            let result = match call_nr {
+                RS_UP => unsafe { do_up(&mut msg) },
+                RS_DOWN => unsafe { do_down(&msg) },
+                RS_REFRESH => unsafe { do_refresh(&msg) },
+                RS_RESTART => unsafe { do_restart(&msg) },
+                RS_SHUTDOWN => do_shutdown(&msg),
+                RS_UPDATE => do_update(&msg),
+                RS_CLONE => do_clone(&msg),
+                RS_EDIT => do_edit(&msg),
+                RS_LOOKUP => unsafe { do_lookup(&mut msg) },
+                RS_INIT => unsafe { do_init_ready(&msg) },
+                RS_LU_PREPARE => do_upd_ready(&msg),
+                RS_GETSYSINFO => ENOSYS,
+                _ => ENOSYS,
+            };
+
+            // Reply to sender.
+            msg.m_type = result;
+            unsafe {
+                minix_rt::syscall2(SENDREC_CALL, src as u64, &mut msg as *mut Message as u64);
             }
         }
     }

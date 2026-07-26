@@ -857,21 +857,182 @@ pub fn ds_server_main() {
             }
 
             // Dispatch the DS call.
-            //
-            // For the MVP, grants are not yet wired, so we acknowledge
-            // requests that don't need grant-based data and return ENOSYS
-            // for ones that do (retrieve, snapshot, etc.).
-            // DS call numbers from arch_common::com: DS_RQ_BASE = 0x800
-            let status = match msg.m_type as u32 {
-                0x800 /* DS_PUBLISH */
-                | 0x802 /* DS_SUBSCRIBE */
-                | 0x803 /* DS_CHECK */
-                | 0x804 /* DS_DELETE */ => 0, // OK
-                0x801 /* DS_RETRIEVE */
-                | 0x805 /* DS_SNAPSHOT */
-                | 0x806 /* DS_RETRIEVE_LABEL */
-                | 0x807 /* DS_GETSYSINFO */ => ENOSYS,
-                _ => ENOSYS,
+            // DS call numbers: DS_RQ_BASE = 0x800
+            let status = unsafe {
+                match msg.m_type as u32 {
+                    0x800 => {
+                        // DS_PUBLISH: key_ptr(m2l1), key_len(m2i1), value(m2l2),
+                        // flags(m2i3)
+                        let key_ptr = msg.m_payload.m2.m2l1;
+                        let key_len = msg.m_payload.m2.m2i1 as usize;
+                        let flags = msg.m_payload.m2.m2i3 as u32;
+
+                        let mut key_buf = [0u8; 80];
+                        let copy_len = key_len.min(80);
+                        let _ = minix_rt::sys_vircopy(
+                            src_ep,
+                            key_ptr as u64,
+                            minix_rt::SELF,
+                            key_buf.as_mut_ptr() as u64,
+                            copy_len,
+                        );
+                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+
+                        match flags & DSF_MASK_TYPE {
+                            DSF_TYPE_U32 => {
+                                let value = msg.m_payload.m2.m2l2 as u32;
+                                match do_publish_u32(key.as_bytes(), value, src_ep) {
+                                    Ok(()) => 0,
+                                    Err(e) => e,
+                                }
+                            }
+                            DSF_TYPE_LABEL => {
+                                let endpoint = msg.m_payload.m2.m2l2 as i32;
+                                match do_publish_label(key.as_bytes(), endpoint, src_ep) {
+                                    Ok(()) => 0,
+                                    Err(e) => e,
+                                }
+                            }
+                            _ => ENOSYS,
+                        }
+                    }
+                    0x801 => {
+                        // DS_RETRIEVE: key_ptr(m2l1), key_len(m2i1), flags(m2i2)
+                        let key_ptr = msg.m_payload.m2.m2l1;
+                        let key_len = msg.m_payload.m2.m2i1 as usize;
+                        let flags = msg.m_payload.m2.m2i2 as u32;
+
+                        let mut key_buf = [0u8; 80];
+                        let copy_len = key_len.min(80);
+                        let _ = minix_rt::sys_vircopy(
+                            src_ep,
+                            key_ptr as u64,
+                            minix_rt::SELF,
+                            key_buf.as_mut_ptr() as u64,
+                            copy_len,
+                        );
+                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+
+                        match flags & DSF_MASK_TYPE {
+                            DSF_TYPE_U32 => match do_retrieve_u32(key.as_bytes()) {
+                                Ok(value) => {
+                                    msg.m_payload.m2.m2l1 = value as i64;
+                                    msg.m_payload.m2.m2i1 = DSF_TYPE_U32 as i32;
+                                    0
+                                }
+                                Err(e) => e,
+                            },
+                            DSF_TYPE_LABEL => match do_retrieve_label(key.as_bytes()) {
+                                Ok(endpoint) => {
+                                    msg.m_payload.m2.m2l1 = endpoint as i64;
+                                    msg.m_payload.m2.m2i1 = DSF_TYPE_LABEL as i32;
+                                    0
+                                }
+                                Err(e) => e,
+                            },
+                            _ => ENOSYS,
+                        }
+                    }
+                    0x802 => {
+                        // DS_SUBSCRIBE: pattern_ptr(m2l1), pattern_len(m2i1),
+                        // flags(m2i2)
+                        let pattern_ptr = msg.m_payload.m2.m2l1;
+                        let pattern_len = msg.m_payload.m2.m2i1 as usize;
+                        let flags = msg.m_payload.m2.m2i2 as u32;
+
+                        let mut pat_buf = [0u8; 80];
+                        let copy_len = pattern_len.min(80);
+                        let _ = minix_rt::sys_vircopy(
+                            src_ep,
+                            pattern_ptr as u64,
+                            minix_rt::SELF,
+                            pat_buf.as_mut_ptr() as u64,
+                            copy_len,
+                        );
+                        let pattern = &pat_buf[..copy_len];
+                        let overwrite = flags & DSF_OVERWRITE != 0;
+                        let initial = flags & DSF_INITIAL != 0;
+                        let type_flags = flags & DSF_MASK_TYPE;
+
+                        match do_subscribe(src_ep, pattern, overwrite, initial, type_flags) {
+                            Ok(SubscribeResult::Subscribed) => {
+                                msg.m_payload.m2.m2l1 = 0;
+                                0
+                            }
+                            Ok(SubscribeResult::Overwritten) => {
+                                msg.m_payload.m2.m2l1 = 1;
+                                0
+                            }
+                            Ok(SubscribeResult::Exists) => {
+                                const EEXIST: i32 = -17;
+                                EEXIST
+                            }
+                            Ok(SubscribeResult::NoSlot) => {
+                                const ENOMEM: i32 = -12;
+                                ENOMEM
+                            }
+                            Err(e) => e,
+                        }
+                    }
+                    0x803 => {
+                        // DS_CHECK: no extra fields
+                        match do_check(src_ep) {
+                            Ok(CheckResult::Found {
+                                key_idx,
+                                entry_type,
+                                owner_endpoint,
+                            }) => {
+                                msg.m_payload.m2.m2i1 = key_idx as i32;
+                                msg.m_payload.m2.m2i2 = entry_type as i32;
+                                msg.m_payload.m2.m2i3 = owner_endpoint;
+                                0
+                            }
+                            Ok(CheckResult::NotFound) => {
+                                const EAGAIN: i32 = -11;
+                                EAGAIN
+                            }
+                            Ok(CheckResult::NoSubscription) => {
+                                const EINVAL: i32 = -22;
+                                EINVAL
+                            }
+                            Err(e) => e,
+                        }
+                    }
+                    0x804 => {
+                        // DS_DELETE: key_ptr(m2l1), key_len(m2i1)
+                        let key_ptr = msg.m_payload.m2.m2l1;
+                        let key_len = msg.m_payload.m2.m2i1 as usize;
+
+                        let mut key_buf = [0u8; 80];
+                        let copy_len = key_len.min(80);
+                        let _ = minix_rt::sys_vircopy(
+                            src_ep,
+                            key_ptr as u64,
+                            minix_rt::SELF,
+                            key_buf.as_mut_ptr() as u64,
+                            copy_len,
+                        );
+                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+
+                        match do_delete(key.as_bytes()) {
+                            Ok(()) => 0,
+                            Err(e) => e,
+                        }
+                    }
+                    0x806 => {
+                        // DS_RETRIEVE_LABEL: endpoint(m2i1)
+                        let endpoint = msg.m_payload.m2.m2i1;
+                        match do_retrieve_label_by_ep(endpoint) {
+                            Ok(_key_arr) => 0,
+                            Err(e) => e,
+                        }
+                    }
+                    0x807 => {
+                        // DS_GETSYSINFO — not implemented yet
+                        ENOSYS
+                    }
+                    _ => ENOSYS,
+                }
             };
 
             // Send the reply.
