@@ -66,3 +66,8 @@ test = false
 name = "ramdisk"
 path = "src/bin/ramdisk.rs"
 test = false
+
+[[bin]]
+name = "pfs"
+path = "src/bin/pfs.rs"
+test = false

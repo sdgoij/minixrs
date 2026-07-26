@@ -35,6 +35,7 @@ pub mod misc;
 pub mod mmap;
 pub mod mount;
 pub mod path;
+pub mod pipe;
 pub mod pm;
 pub mod request;
 pub mod stadir;

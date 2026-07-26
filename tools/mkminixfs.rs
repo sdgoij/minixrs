@@ -454,6 +454,8 @@ fn main() {
         "/sbin/ds",
         "/sbin/sched",
         "/sbin/tty",
+        "/sbin/mfs",
+        "/sbin/pfs",
         "/sbin/ramdisk",
         "/bin/sh",
         "/bin/cat",

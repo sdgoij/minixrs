@@ -564,6 +564,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
+            ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
             ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
             ("/sbin/init", INIT_PROC_NR),       // init
         ];

@@ -37,6 +37,7 @@ const BOOT_BINS: &[(&str, &str, &str)] = &[
     ("/sbin/sched", "servers", "sched"),
     ("/sbin/tty", "servers", "tty"),
     ("/sbin/mfs", "servers", "mfs"),
+    ("/sbin/pfs", "servers", "pfs"),
     ("/sbin/ramdisk", "servers", "ramdisk"),
 ];
 

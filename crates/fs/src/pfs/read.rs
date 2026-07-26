@@ -7,13 +7,13 @@
 use crate::pfs::buffer::*;
 use crate::pfs::consts::*;
 use core::ptr;
-use core::ptr::addr_of_mut;
 
 /// Handle read/write requests for pipe inodes.
 ///
-/// Reads the request from global m_in, determines READ/WRITE from the
-/// m_type (REQ_READ vs REQ_WRITE), extracts inode/position/count from
-/// the message payload, and calls pipe_read/pipe_write.
+/// Reads the request from global pfs.m_in_data, determines READ/WRITE from
+/// pfs.m_in_type, extracts inode/position/count, and calls pipe_read/pipe_write.
+/// For writes, data is read from the message payload (offset 28).
+/// For reads, data is written to pfs.m_out_data (for the reply).
 ///
 /// Returns number of bytes transferred on success, or a negative errno.
 // Reference: read.c fs_readwrite()
@@ -23,21 +23,28 @@ pub fn fs_readwrite() -> i32 {
         let m_type = (*pfs).m_in_type;
         let is_read = m_type == REQ_READ;
 
-        // Read message fields from m_in_data (48-byte payload) using
-        // unaligned reads since the payload may not be 8-byte aligned.
-        let data_ptr = addr_of_mut!((*pfs).m_in_data) as *mut u8;
+        let data_ptr = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
         let ino = core::ptr::read_unaligned(data_ptr.add(8) as *const u32);
         let pos = core::ptr::read_unaligned(data_ptr.add(12) as *const i64);
         let nbytes = core::ptr::read_unaligned(data_ptr.add(20) as *const u64) as usize;
 
         let n = nbytes.min(PIPE_BUF);
-        let out = addr_of_mut!((*pfs).m_out_data) as *mut u8;
+        let out = core::ptr::addr_of_mut!((*pfs).m_out_data) as *mut u8;
 
         let r = if is_read {
+            // Read into m_out_data (offset 8 = caller's buffer area)
             let mut buf = [0u8; PIPE_BUF];
-            pipe_read(ino as u16, &mut buf, n)
+            let nr = pipe_read(ino as u16, &mut buf, n);
+            if nr > 0 {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), out.add(8), nr as usize);
+            }
+            nr
         } else {
-            pipe_write(ino as u16, &[0u8; 0], n)
+            // Write from m_in_data offset 28 (write payload after header)
+            let write_data = data_ptr.add(28);
+            let mut src = [0u8; PIPE_BUF];
+            core::ptr::copy_nonoverlapping(write_data, src.as_mut_ptr(), n);
+            pipe_write(ino as u16, &src, n)
         };
 
         if r > 0 {

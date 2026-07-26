@@ -25,6 +25,7 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::mount;
 use crate::vfs::path;
 use crate::vfs::path::PATH_RET_SYMLINK;
+use crate::vfs::request::{w_i32, w_i64, w_u32, w_u64};
 use crate::vfs::stadir;
 use crate::vfs::stadir::close_fd;
 use crate::vfs::types::*;
@@ -398,6 +399,30 @@ pub fn do_read() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
+        // Pipe reads go through the in-VFS pipe buffer.
+        if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
+            // Route to Pipe File Server (PFS) via FS IPC.
+            let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
+            let mut msg = [0u8; 56];
+            w_i32(&mut msg, 0, 0xA13); // REQ_READ
+            w_u32(&mut msg, 8, pipe_idx as u32);
+            w_i64(&mut msg, 12, filp.filp_pos);
+            w_u64(&mut msg, 20, count as u64);
+            let r = crate::vfs::request::fs_sendrec(PFS_PROC_NR, &mut msg);
+            if r < 0 {
+                return r;
+            }
+            let reply_count = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
+            if reply_count <= 0 {
+                return reply_count;
+            }
+            filp.filp_pos = i64::from_le_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
+            let copy_len = (reply_count as usize).min(count).min(48);
+            if copy_len > 0 {
+                core::ptr::copy_nonoverlapping(msg.as_ptr().add(8), buf_addr as *mut u8, copy_len);
+            }
+            return reply_count;
+        }
         // Call the FS request layer to perform the read.
         let (r, new_pos) = crate::vfs::request::req_read(
             (*vp).v_fs_e,
@@ -445,6 +470,32 @@ pub fn do_write() -> i32 {
         let vp = filp.filp_vno;
         if vp.is_null() {
             return EBADF;
+        }
+        // Pipe writes go through the Pipe File Server (PFS).
+        if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
+            let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
+            let mut msg = [0u8; 56];
+            w_i32(&mut msg, 0, 0xA14); // REQ_WRITE
+            w_u32(&mut msg, 8, pipe_idx as u32);
+            w_i64(&mut msg, 12, filp.filp_pos);
+            w_u64(&mut msg, 20, count as u64);
+            let copy_len = count.min(28);
+            if copy_len > 0 {
+                core::ptr::copy_nonoverlapping(
+                    buf_addr as *const u8,
+                    msg.as_mut_ptr().add(28),
+                    copy_len,
+                );
+            }
+            let r = crate::vfs::request::fs_sendrec(PFS_PROC_NR, &mut msg);
+            if r < 0 {
+                return r;
+            }
+            let written = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
+            if written > 0 {
+                filp.filp_pos = i64::from_le_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
+            }
+            return written;
         }
         let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,
@@ -566,14 +617,41 @@ pub fn do_pipe2() -> i32 {
         )
     };
 
+    // Allocate a local pipe buffer (in-VFS, no separate PFS server).
+    let pipe_idx = match crate::vfs::pipe::alloc_pipe() {
+        Some(idx) => idx,
+        None => {
+            fp.fp_filp[fd0 as usize] = -1;
+            fp.fp_filp[fd1 as usize] = -1;
+            mount::unlock_vnode(vp);
+            return ENFILE;
+        }
+    };
+
+    // Mark the vnode as a pipe and link filps to the pipe buffer.
+    unsafe {
+        (*vp).v_pipe = 1;
+    }
+    let pipe_ino = crate::vfs::pipe::pipe_index_for_filp(pipe_idx);
+    let filp_arr = unsafe { core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp };
+    // Read end (fd0)
+    unsafe {
+        (*filp_arr.add(filp0 as usize)).filp_pipe_ino = pipe_ino;
+        (*filp_arr.add(filp0 as usize)).filp_mode = 1; // R_BIT
+        (*filp_arr.add(filp0 as usize)).filp_vno = vp;
+    }
+    // Write end (fd1)
+    unsafe {
+        (*filp_arr.add(filp1 as usize)).filp_pipe_ino = pipe_ino;
+        (*filp_arr.add(filp1 as usize)).filp_mode = 2; // W_BIT
+        (*filp_arr.add(filp1 as usize)).filp_vno = vp;
+    }
+
     // Apply flags to the pipe ends.
     let extra_flags = flags as u32 & !0o3;
     unsafe {
-        let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
-        (*filp_arr.add(filp0 as usize)).filp_count = 1;
         (*filp_arr.add(filp0 as usize)).filp_flags = extra_flags;
-        (*filp_arr.add(filp1 as usize)).filp_count = 1;
-        (*filp_arr.add(filp1 as usize)).filp_flags = 0o1 | extra_flags; // O_WRONLY + extra
+        (*filp_arr.add(filp1 as usize)).filp_flags = extra_flags;
     }
 
     if (flags as u32) & 0x00400000 != 0 {

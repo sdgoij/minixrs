@@ -5,6 +5,7 @@
 //! userspace via the FS request layer.
 
 use crate::vfs::consts::*;
+use crate::vfs::glo::vfs_global;
 use crate::vfs::types::*;
 
 // StatvfsCache
@@ -84,6 +85,26 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
     if filp_idx < 0 {
         return EBADF;
     }
+
+    // Handle pipe filps: release the read or write end before closing.
+    unsafe {
+        let glob = &mut *vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
+        if (filp_idx as usize) < NR_FILPS {
+            let f = &*filp_arr.add(filp_idx as usize);
+            if crate::vfs::pipe::is_pipe_filp(f.filp_pipe_ino) {
+                let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(f.filp_pipe_ino);
+                if f.filp_mode & 1 != 0 {
+                    crate::vfs::pipe::release_read_end(pipe_idx);
+                }
+                if f.filp_mode & 2 != 0 {
+                    crate::vfs::pipe::release_write_end(pipe_idx);
+                }
+                crate::vfs::pipe::release_pipe(pipe_idx);
+            }
+        }
+    }
+
     rfp.fp_filp[fd_nr as usize] = -1;
     rfp.fp_cloexec &= !(1u64 << fd_nr);
     unsafe { crate::vfs::filedes::close_filp(rfp, filp_idx) }

@@ -309,6 +309,12 @@ pub fn fp_is_blocked(fp_flags: i32) -> bool {
 /// PFS (Pipe File System) endpoint number.
 pub const PFS_PROC_NR: i32 = 4;
 
+/// Pipe buffer size in bytes (POSIX PIPE_BUF, minimum atomic write size).
+pub const PIPE_BUF_SIZE: i32 = 7168;
+
+/// Open flag: non-blocking I/O.
+pub const O_NONBLOCK: i32 = 0o4000;
+
 /// VM (memory server) endpoint number.
 pub const VM_PROC_NR: i32 = 8;
 

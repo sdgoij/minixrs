@@ -286,6 +286,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
+            ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
             ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
             ("/sbin/init", INIT_PROC_NR),       // init
         ];
@@ -299,6 +300,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
+            ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
             ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
         ];
 

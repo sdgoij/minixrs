@@ -35,24 +35,51 @@ pub fn pfs_init() -> i32 {
 ///
 /// After initialization, enters an infinite loop receiving VFS requests,
 /// dispatching them through the call vector, and sending replies.
-///
-/// On the host platform, acts as a no-op placeholder (IPC not available).
-/// On the Minix target, uses minix_std::receive/send for IPC.
-// Reference: main.c main()
 pub fn pfs_main() -> i32 {
     pfs_init();
 
-    // The main loop is only active on the Minix target.
-    // On the host, it returns immediately.
     #[cfg(target_os = "none")]
     unsafe {
+        use arch_common::ipc::Message;
+        const RECEIVE_CALL: u64 = 47;
+        const SENDREC_CALL: u64 = 48;
+        const ANY: i32 = 0x0000ffff;
+
         loop {
             let pfs = glo::pfs_ptr();
-            if (*pfs).unmountdone != FALSE && (*pfs).exitsignaled != 0 {
+            if (*pfs).unmountdone != 0 && (*pfs).exitsignaled != 0 {
                 break;
             }
-            // IPC receive/dispatch/reply would go here.
-            // Waits for minix_std::receive() to be available.
+
+            let mut msg = Message {
+                m_source: 0,
+                m_type: 0,
+                m_payload: core::mem::zeroed(),
+            };
+            let src = minix_rt::syscall2(RECEIVE_CALL, ANY as u64, &mut msg as *mut Message as u64);
+            if src < 0 {
+                continue;
+            }
+
+            // Copy message fields into PFS globals for handler access.
+            let call_nr = msg.m_type as u32;
+            (*pfs).m_in_type = msg.m_type;
+            // Copy first 48 bytes of payload (m_in_data size)
+            let src_data = &msg as *const Message as *const u8;
+            let dst_data = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
+            core::ptr::copy_nonoverlapping(src_data.add(8), dst_data, 48);
+
+            // Dispatch
+            let idx = (call_nr.wrapping_sub(FS_BASE as u32)) as usize;
+            let result = crate::pfs::table::dispatch(idx);
+
+            // Copy reply data from m_out_data into message
+            let reply_data = core::ptr::addr_of!((*pfs).m_out_data) as *const u8;
+            let msg_data = &mut msg as *mut Message as *mut u8;
+            core::ptr::copy_nonoverlapping(reply_data, msg_data.add(8), 48);
+            msg.m_type = result;
+
+            minix_rt::syscall2(SENDREC_CALL, src as u64, &mut msg as *mut Message as u64);
         }
     }
 
