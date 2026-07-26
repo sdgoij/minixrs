@@ -241,17 +241,33 @@ pub fn frame_default() -> [u8; 256] {
 
 /// Initialize architecture-specific process state in the trap frame.
 ///
+/// Called from `do_exec_handler` (PM exec path) to set up a new process's
+/// initial register state before its first schedule.  On RISC-V, sets:
+/// - sepc (offset 0) = entry point
+/// - sp   (offset 16) = stack pointer
+/// - sstatus (offset 248) = SPIE | FS_INITIAL (user mode, interrupts on)
+///
 /// # Safety
 ///
-/// `frame` must be a valid, writable trap frame.
+/// `frame` must be a valid, writable p_reg buffer (256 bytes).
 pub unsafe fn arch_proc_init(
-    _frame: &mut [u8; 256],
-    _entry: u64,
-    _stack: u64,
+    frame: &mut [u8; 256],
+    entry: u64,
+    stack: u64,
     _name: &[u8],
     _ps_str: u64,
 ) {
-    todo!("RISC-V arch_proc_init; see Phase 19.4");
+    // Clear the entire frame for a clean start.
+    frame.fill(0);
+    unsafe {
+        write_frame_field(frame, 0, entry); // sepc = entry point
+        write_frame_field(frame, 16, stack); // sp = user stack
+        write_frame_field(
+            frame,
+            248,
+            crate::psl::sstatus::SPIE | crate::psl::sstatus::FS_INITIAL,
+        ); // sstatus: SIE=0, SPIE=1, SPP=0
+    }
 }
 
 /// Convert a trap frame to a machine context (for signal handling).

@@ -72,6 +72,17 @@ impl TimerCallbackCell {
     }
 }
 
+struct PfHandlerCell(UnsafeCell<Option<unsafe fn(u64, u32) -> i32>>);
+unsafe impl Sync for PfHandlerCell {}
+impl PfHandlerCell {
+    const fn new(val: Option<unsafe fn(u64, u32) -> i32>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<unsafe fn(u64, u32) -> i32> {
+        self.0.get()
+    }
+}
+
 /// Registered syscall handler (set by kernel at init).
 #[used]
 static SYSCALL_HANDLER: SyscallHandlerCell = SyscallHandlerCell::new(None);
@@ -89,6 +100,12 @@ static UART_INPUT_CALLBACK: UartInputCallbackCell = UartInputCallbackCell::new(N
 /// Called on each timer interrupt with the trap frame.
 #[used]
 static TIMER_CALLBACK: TimerCallbackCell = TimerCallbackCell::new(None);
+
+/// Registered page fault handler (set by kernel-boot at init).
+/// Called on user-mode page faults with (fault_addr, error_code).
+/// Returns 0 if handled (process blocked, VM notified), -1 if fatal.
+#[used]
+static PF_HANDLER: PfHandlerCell = PfHandlerCell::new(None);
 
 /// Register the basic syscall dispatch function.
 ///
@@ -131,6 +148,17 @@ pub unsafe fn register_uart_input_callback(cb: unsafe fn(u8)) {
 pub unsafe fn register_timer_callback(cb: unsafe fn(&mut [u8; 296])) {
     unsafe {
         core::ptr::write(TIMER_CALLBACK.get(), Some(cb));
+    }
+}
+
+/// Register the page fault handler for VM forwarding.
+///
+/// # Safety
+///
+/// Must be called once during kernel init, before any userspace execution.
+pub unsafe fn register_page_fault_handler(handler: unsafe fn(u64, u32) -> i32) {
+    unsafe {
+        core::ptr::write(PF_HANDLER.get(), Some(handler));
     }
 }
 
@@ -200,17 +228,58 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 }
             }
             cause::INSTR_PAGE_FAULT | cause::LOAD_PAGE_FAULT | cause::STORE_PAGE_FAULT => {
+                // Read stval and sepc from the trap frame.
                 let stval: u64;
                 unsafe {
                     core::arch::asm!("csrr {v}, stval", v = out(reg) stval, options(nomem, nostack))
                 };
                 let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
-                // Use SBI console for diagnostics (no page table dependency)
+
+                // Check if the fault was in user mode (SPP=0 in saved sstatus).
+                let saved_sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
+                let spp = (saved_sstatus >> 8) & 1;
+
+                if spp == 0 {
+                    // User-mode page fault: forward to VM if handler registered.
+                    // Build error_code matching x86_64 format:
+                    //   bit 0: present (1 = page-protection violation)
+                    //   bit 1: write
+                    //   bit 2: user
+                    //   bit 4: instruction fetch
+                    let error_code = match code {
+                        cause::INSTR_PAGE_FAULT => 0x14, // user | instruction
+                        cause::STORE_PAGE_FAULT => 0x07, // present | write | user
+                        _ => 0x05,                       // load: present | user
+                    };
+
+                    match unsafe { *PF_HANDLER.get() } {
+                        Some(handler) => {
+                            let ret = unsafe { handler(stval, error_code) };
+                            if ret == 0 {
+                                // Handled: process blocked with RTS_PAGEFAULT.
+                                // Switch to another process via post-syscall hook.
+                                if let Some(hook) = unsafe { *POST_SYSCALL_HOOK.get() } {
+                                    unsafe { hook(frame) };
+                                }
+                                // Frame now holds the next process's state.
+                                // sret in trap_asm.S returns to that process.
+                                return;
+                            }
+                            // Fatal: handler returned -1.
+                        }
+                        None => {
+                            // No handler registered — fall through to halt.
+                        }
+                    }
+                }
+
+                // Fatal page fault: print diagnostics and halt.
+                // Use SBI console for diagnostics (no page table dependency).
                 unsafe fn sbi_putc(c: u8) {
                     unsafe {
                         core::arch::asm!(
                             "ecall",
-                            in("a7") 1u64,   // SBI_CONSOLE_PUTCHAR
+                            in("a7") 1u64,
                             in("a6") 0u64,
                             in("a0") c as u64,
                             in("a1") 0u64,

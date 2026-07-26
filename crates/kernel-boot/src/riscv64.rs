@@ -481,6 +481,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
         arch_riscv64::trap::register_timer_callback(riscv_timer_callback);
     }
+    // Register page fault handler for COW / demand paging forwarding to VM.
+    unsafe {
+        unsafe fn riscv_pf_handler(fault_addr: u64, error_code: u32) -> i32 {
+            unsafe { kernel::vm::handle_page_fault(fault_addr, error_code) }
+        }
+        arch_riscv64::trap::register_page_fault_handler(riscv_pf_handler);
+    }
 
     #[cfg(feature = "integration-tests")]
     {
