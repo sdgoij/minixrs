@@ -600,43 +600,216 @@ pub unsafe fn do_fork(slot: usize) -> Result<usize, i32> {
 
 // do_exit + do_waitpid
 
-/// Exit the current process — mark as ZOMBIE, notify parent.
+/// Main exit path — mark the process as exiting, handle children and session.
+///
+/// Replaces the old `do_exit` with semantics matching C `exit_proc()` in
+/// `minix/servers/pm/forkexit.c`.
 ///
 /// # Safety
 ///
 /// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
 /// caller must ensure exclusive access to the process table.
-pub unsafe fn do_exit(slot: usize, exit_status: i32) {
+pub unsafe fn exit_proc(slot: usize, exit_status: i32, dump_core: bool) {
     if slot >= NR_PROCS {
         return;
     }
     let base = MPROC.as_ptr();
-    // Safety: `slot < NR_PROCS` checked above.
     let rmp = unsafe { &mut *base.add(slot) };
     if rmp.mp_flags & IN_USE == 0 {
         return;
     }
 
-    rmp.mp_flags |= EXITING | ZOMBIE;
-    rmp.mp_flags &= !PROC_STOPPED;
+    // PRIV_PROC processes cannot exit — send SIGKILL and warn.
+    if rmp.mp_flags & PRIV_PROC != 0 {
+        // Matching C: sys_kill(rmp->mp_endpoint, SIGKILL)
+        let _ = unsafe { check_sig(rmp.mp_pid, 9, true) };
+        return;
+    }
+
+    unsafe { stop_proc(slot) };
+    rmp.mp_flags |= EXITING;
     rmp.mp_exitstatus = exit_status as i8;
-    rmp.mp_sigstatus = 0;
+    rmp.mp_sigstatus = (exit_status & 0xFF) as i8;
     rmp.mp_ksigpending.sigemptyset();
 
-    // Check if parent is waiting for this child.
+    // Reparent children to INIT (pid 1) if parent is PM or INIT.
     let parent = rmp.mp_parent;
-    if parent >= 0 && (parent as usize) < NR_PROCS {
-        let parent_rmp = unsafe { &mut *base.add(parent as usize) };
-        if parent_rmp.mp_flags & IN_USE != 0 {
-            parent_rmp.mp_child_utime = rmp.mp_child_utime;
-            parent_rmp.mp_child_stime = rmp.mp_child_stime;
-            unsafe {
-                // If parent is waiting, tell them immediately (matching C tell_parent).
-                if wait_test(parent as usize, rmp) {
-                    tell_parent(parent as usize, rmp);
-                }
-            }
+    for i in 0..NR_PROCS {
+        let child = unsafe { &mut *base.add(i) };
+        if child.mp_flags & IN_USE == 0 {
+            continue;
         }
+        if child.mp_parent != slot as i32 {
+            continue;
+        }
+        if parent == 0 || parent == 1 {
+            child.mp_parent = 1; // INIT
+        } else {
+            child.mp_parent = parent;
+            child.mp_flags |= NEW_PARENT;
+        }
+    }
+
+    // If session leader, send SIGHUP to the process group.
+    if rmp.mp_pid == rmp.mp_procgrp {
+        let _ = unsafe { check_sig(-rmp.mp_procgrp, 1, false) };
+    }
+
+    let _dump = dump_core;
+    unsafe { zombify(slot) };
+}
+
+/// Complete exit after VFS has finished cleanup.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let traced = rmp.mp_flags & TRACE_EXIT != 0;
+    let tracer = rmp.mp_tracer;
+    let told_parent = rmp.mp_flags & TOLD_PARENT != 0;
+    let endpoint = rmp.mp_endpoint;
+
+    // Stop scheduling (SYS_STOP via kernel call 5).
+    let mut stop_msg = [0u8; 64];
+    stop_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+    let _ = minix_rt::kernel_call(5, &mut stop_msg);
+
+    if dump_core {
+        unsafe { zombify(slot) };
+    }
+
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & PRIV_PROC == 0 {
+        // SYS_CLEAR (kernel call 2) — free kernel Proc entry.
+        let mut clear_msg = [0u8; 64];
+        clear_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+        let _ = minix_rt::kernel_call(2, &mut clear_msg);
+
+        // VM_EXIT — notify VM to free address space.
+        let mut vm_exit_msg = [0u8; 64];
+        vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
+        vm_exit_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+        let _ = unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDNB_CALL,
+                arch_common::com::VM_PROC_NR as u64,
+                vm_exit_msg.as_mut_ptr() as u64,
+            )
+        };
+    }
+
+    if traced {
+        // Reply to tracer with exit status.
+        let mut reply_msg = Message {
+            m_source: 0,
+            m_type: OK,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        reply_msg.m_payload.m1.m1i1 = rmp.mp_pid;
+        reply_msg.m_payload.m1.m1i2 =
+            w_exitcode(rmp.mp_exitstatus as i32, rmp.mp_sigstatus as i32 & 0o377);
+        let _ = unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDNB_CALL,
+                tracer as u64,
+                &mut reply_msg as *mut Message as u64,
+            )
+        };
+    }
+
+    if told_parent {
+        unsafe { cleanup(slot) };
+    }
+}
+
+/// Compute waitpid exit status from exit code and signal.
+const fn w_exitcode(status: i32, sig: i32) -> i32 {
+    (status << 8) | sig
+}
+
+/// Transition a process to zombie state, handling tracer logic.
+///
+/// If the process has a tracer (not its parent), sets TRACE_ZOMBIE and
+/// notifies the tracer if it's waiting. Otherwise sets ZOMBIE and calls
+/// check_parent. Matching C `zombify()` in `forkexit.c`.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn zombify(slot: usize) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let tracer = rmp.mp_tracer;
+    let parent = rmp.mp_parent;
+
+    if tracer != NO_TRACER && tracer != parent {
+        let rmp = unsafe { &mut *base.add(slot) };
+        rmp.mp_flags |= TRACE_ZOMBIE;
+        // If tracer is waiting, tell it.
+        if rmp.mp_flags & WAITING != 0 {
+            unsafe { tell_tracer(slot) };
+        }
+    } else {
+        let rmp = unsafe { &mut *base.add(slot) };
+        rmp.mp_flags |= ZOMBIE;
+        unsafe { check_parent(slot, true) };
+    }
+}
+
+/// Called when a child exits — handles parent notification.
+///
+/// If parent is EXITING: no-op. If parent is waiting: call tell_parent.
+/// If try_cleanup and parent exists: call cleanup. Otherwise: send SIGCHLD.
+///
+/// # Safety
+///
+/// `child_slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn check_parent(child_slot: usize, try_cleanup: bool) {
+    if child_slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let child = unsafe { &*base.add(child_slot) };
+    if child.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let parent = child.mp_parent;
+    if parent < 0 || parent as usize >= NR_PROCS {
+        return;
+    }
+    let parent_rmp = unsafe { &*base.add(parent as usize) };
+    if parent_rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    if parent_rmp.mp_flags & EXITING != 0 {
+        return;
+    }
+
+    if unsafe { wait_test(parent as usize, child) } {
+        unsafe { tell_parent(parent as usize, child) };
+        return;
+    }
+
+    if try_cleanup && parent_rmp.mp_flags & IN_USE != 0 {
+        unsafe { cleanup(child_slot) };
+    } else {
+        // Send SIGCHLD (signal 18) to parent.
+        unsafe { sig_proc(parent as usize, 18, false, false) };
     }
 }
 
@@ -700,6 +873,84 @@ pub unsafe fn wait_test(parent: usize, child: &MProc) -> bool {
     }
     let wpid = parent_rmp.mp_wpid;
     wpid == -1 || wpid == child.mp_pid
+}
+
+/// Tell the tracer that a traced child exited.
+///
+/// Sets TOLD_PARENT if child is ZOMBIE, replies to tracer with child PID
+/// and w_exitcode(exitstatus, sigstatus&0377), clears WAITING on tracer.
+/// Matching C `tell_tracer()` in `forkexit.c`.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn tell_tracer(slot: usize) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let child = unsafe { &*base.add(slot) };
+    if child.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let tracer = child.mp_tracer;
+    if tracer < 0 || tracer as usize >= NR_PROCS {
+        return;
+    }
+
+    if child.mp_flags & ZOMBIE != 0 {
+        let child_mut = unsafe { &mut *base.add(slot) };
+        child_mut.mp_flags |= TOLD_PARENT;
+    }
+
+    let tracer_rmp = unsafe { &mut *base.add(tracer as usize) };
+    if tracer_rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    tracer_rmp.mp_flags &= !WAITING;
+
+    let mut reply_msg = Message {
+        m_source: 0,
+        m_type: OK,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    reply_msg.m_payload.m1.m1i1 = child.mp_pid;
+    reply_msg.m_payload.m1.m1i2 = w_exitcode(
+        child.mp_exitstatus as i32,
+        child.mp_sigstatus as i32 & 0o377,
+    );
+
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDNB_CALL,
+            tracer_rmp.mp_endpoint as u64,
+            &mut reply_msg as *mut Message as u64,
+        )
+    };
+}
+
+/// Clean up a zombie process slot.
+///
+/// Zeroes mp_pid, mp_flags, mp_child_utime, mp_child_stime and decrements
+/// PROCS_IN_USE. Matching C `cleanup()` in `forkexit.c`.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn cleanup(slot: usize) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    rmp.mp_pid = 0;
+    rmp.mp_flags = 0;
+    rmp.mp_child_utime = 0;
+    rmp.mp_child_stime = 0;
+    PROCS_IN_USE.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Wait for a child process to exit.
@@ -837,15 +1088,20 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
     }
 
     // SIGKILL and SIGSTOP cannot be caught or ignored.
-    if signo == 9 || signo == 19 {
-        // SIGKILL or SIGSTOP
-        if signo == 9 {
-            // Safety: `do_exit` requires exclusive access to the process
-            // table, which the caller guarantees.
-            unsafe {
-                do_exit(slot, 0);
-            }
-        }
+    if signo == 9 {
+        unsafe { sig_proc_exit(slot, signo) };
+        return;
+    }
+    if signo == 19 {
+        unsafe { stop_proc(slot) };
+        return;
+    }
+
+    // Check pending after adding a signal — it may be immediately deliverable.
+    if has_pending(rmp) {
+        let base = MPROC.as_ptr();
+        let rmp2 = unsafe { &mut *base.add(slot) };
+        unsafe { check_pending(rmp2) };
     }
 }
 
@@ -883,6 +1139,566 @@ pub unsafe fn do_kill(caller_slot: usize, pid: i32, signo: i32) -> Result<(), i3
 
     // Safety: caller guarantees exclusive access to the process table.
     unsafe { check_sig(pid, signo, false) }
+}
+
+// Signal delivery infrastructure
+
+const SIG_BLOCK: i32 = 0;
+const SIG_UNBLOCK: i32 = 1;
+const SIG_SETMASK: i32 = 2;
+const SIG_INQUIRE: i32 = 3;
+const SIG_DFL: u64 = 0;
+const SIG_IGN: u64 = 1;
+const SUSPEND: i32 = -998;
+const SA_NODEFER: i32 = 0x4000000;
+const SA_RESETHAND: i32 = 0x80000000u32 as i32;
+
+/// Terminate a process due to a signal.
+///
+/// Sets exit status to (signo | 0x80) and calls do_exit.
+/// If signo is in the core set (SIGQUIT=3, SIGILL=4, SIGTRAP=5, SIGABRT=6,
+/// SIGFPE=8, SIGSEGV=11), marks the slot for a core dump (not yet implemented).
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access to the
+/// process table.
+pub unsafe fn sig_proc_exit(slot: usize, signo: i32) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let exit_status = signo | 0x80;
+    // Core dump signals: SIGQUIT(3), SIGILL(4), SIGTRAP(5),
+    // SIGABRT(6), SIGFPE(8), SIGSEGV(11)
+    if matches!(signo, 3 | 4 | 5 | 6 | 8 | 11) {
+        // Core dump flag would go here when VM core dump is implemented.
+    }
+    unsafe { exit_proc(slot, exit_status, false) };
+}
+
+/// Stop a process by setting PROC_STOPPED and sending a SYS_STOP kernel call.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn stop_proc(slot: usize) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return;
+    }
+    rmp.mp_flags |= PROC_STOPPED;
+    let endpoint = rmp.mp_endpoint;
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+    let _ = minix_rt::kernel_call(5, &mut msg);
+}
+
+/// Deliver pending signals to a process.
+///
+/// Iterates `mp_sigpending`; for each signal not masked by `mp_sigmask`,
+/// delivers via `sig_proc`. After a delivery that doesn't trigger a VFS_CALL,
+/// if more pending signals remain, calls itself recursively.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn check_pending(rmp: &mut MProc) {
+    // Safety: called under exclusive access to process table.
+    for signo in 1..(_NSIG as i32) {
+        if !rmp.mp_sigpending.sigismember(signo) {
+            continue;
+        }
+        if rmp.mp_sigmask.sigismember(signo) {
+            continue;
+        }
+        rmp.mp_sigpending.sigdelset(signo);
+        // Deliver the signal. The slot is derived from `rmp`'s position
+        // in the table — find it by scanning.
+        let slot = {
+            let base = MPROC.as_ptr();
+            let mut found = NR_PROCS;
+            for i in 0..NR_PROCS {
+                if core::ptr::eq(unsafe { &*base.add(i) }, rmp) {
+                    found = i;
+                    break;
+                }
+            }
+            found
+        };
+        if slot >= NR_PROCS {
+            return;
+        }
+        unsafe { sig_proc(slot, signo, false, false) };
+        // If the process now has VFS_CALL set, stop — the VFS reply will
+        // call restart_sigs to continue delivery.
+        if rmp.mp_flags & VFS_CALL != 0 {
+            return;
+        }
+        // If more pending signals remain, recurse to deliver them.
+        if has_pending(rmp) {
+            let base = MPROC.as_ptr();
+            let rmp2 = unsafe { &mut *base.add(slot) };
+            unsafe { check_pending(rmp2) };
+            return;
+        }
+    }
+}
+
+/// Check whether a process has any pending (non-masked) signals.
+fn has_pending(rmp: &MProc) -> bool {
+    for signo in 1..(_NSIG as i32) {
+        if rmp.mp_sigpending.sigismember(signo) && !rmp.mp_sigmask.sigismember(signo) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Restart signal delivery after a VFS/VM reply to an unpause request.
+///
+/// Delivers any ksigpending signals, then pending signals via check_pending.
+/// Clears the VFS_CALL flag.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn restart_sigs(rmp: &mut MProc) {
+    rmp.mp_flags &= !VFS_CALL;
+    // Deliver kernel-signalled pending signals first.
+    let slot = {
+        let base = MPROC.as_ptr();
+        let mut found = NR_PROCS;
+        for i in 0..NR_PROCS {
+            if core::ptr::eq(unsafe { &*base.add(i) }, rmp) {
+                found = i;
+                break;
+            }
+        }
+        found
+    };
+    if slot >= NR_PROCS {
+        return;
+    }
+    // Deliver ksigpending signals.
+    for signo in 1..(_NSIG as i32) {
+        if rmp.mp_ksigpending.sigismember(signo) {
+            rmp.mp_ksigpending.sigdelset(signo);
+            unsafe { sig_proc(slot, signo, false, true) };
+        }
+    }
+    // Deliver remaining pending signals.
+    if has_pending(rmp) {
+        let base = MPROC.as_ptr();
+        let rmp2 = unsafe { &mut *base.add(slot) };
+        unsafe { check_pending(rmp2) };
+    }
+}
+
+/// Handle PM_SIGACTION — set or get signal action.
+///
+/// Message layout: m1i1=signo, m2l1=nact pointer, m2l2=oact pointer.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_sigaction(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let signo = unsafe { msg.m_payload.m1.m1i1 };
+    let nact_ptr = unsafe { msg.m_payload.m2.m2l1 };
+    let oact_ptr = unsafe { msg.m_payload.m2.m2l2 };
+
+    // SIGKILL and SIGSTOP cannot have their action changed.
+    if signo == 9 || signo == 19 {
+        return OK;
+    }
+    if signo < 1 || signo >= _NSIG as i32 {
+        return EINVAL;
+    }
+
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+
+    // If oact provided, read old action back.
+    if oact_ptr != 0 {
+        // Build old sigaction struct: handler(u64) + mask(16 bytes) + flags(i32) = 28 bytes
+        let old_handler: u64 = if rmp.mp_catch.sigismember(signo) {
+            rmp.mp_sigreturn
+        } else if rmp.mp_ignore.sigismember(signo) {
+            SIG_IGN
+        } else {
+            SIG_DFL
+        };
+        let _ = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            &old_handler as *const u64 as u64,
+            caller_ep,
+            oact_ptr as u64,
+            8,
+        );
+        // Copy old mask (16 bytes) to oact_ptr + 8
+        let old_mask = rmp.mp_sigmask;
+        let _ = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            &old_mask as *const SigSet as u64,
+            caller_ep,
+            (oact_ptr as u64) + 8,
+            16,
+        );
+        // Copy old flags (0 for now) to oact_ptr + 24
+        let old_flags: i32 = 0;
+        let _ = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            &old_flags as *const i32 as u64,
+            caller_ep,
+            (oact_ptr as u64) + 24,
+            4,
+        );
+    }
+
+    // If nact provided, read and apply new action.
+    if nact_ptr != 0 {
+        let mut sa_buf = [0u8; 28];
+        let copy_r = minix_rt::sys_vircopy(
+            caller_ep,
+            nact_ptr as u64,
+            minix_rt::SELF,
+            sa_buf.as_mut_ptr() as u64,
+            28,
+        );
+        if copy_r != 0 {
+            return copy_r;
+        }
+        let handler = u64::from_ne_bytes(sa_buf[0..8].try_into().unwrap());
+        let mask_bytes: [u8; 16] = sa_buf[8..24].try_into().unwrap();
+        let mask_bits = u128::from_ne_bytes(mask_bytes);
+        let flags = i32::from_ne_bytes(sa_buf[24..28].try_into().unwrap());
+
+        let mut new_mask = SigSet { bits: [mask_bits] };
+        // SA_NODEFER: don't add the signal being handled to the mask.
+        if flags & SA_NODEFER == 0 {
+            new_mask.sigaddset(signo);
+        }
+
+        rmp.mp_ignore.sigdelset(signo);
+        rmp.mp_catch.sigdelset(signo);
+
+        if handler == SIG_DFL {
+            // Default action — clear catch, keep ignore clear.
+        } else if handler == SIG_IGN {
+            rmp.mp_ignore.sigaddset(signo);
+        } else {
+            rmp.mp_catch.sigaddset(signo);
+            rmp.mp_sigreturn = handler;
+            rmp.mp_sigmask = new_mask;
+
+            // SA_RESETHAND: reset to SIG_DFL after first delivery.
+            if flags & SA_RESETHAND != 0 {
+                // Would need to track this per-signal; simplified for now.
+            }
+        }
+    }
+
+    OK
+}
+
+/// Handle PM_SIGPENDING — return the set of pending signals.
+///
+/// Message layout: m2l1 = set pointer (user buffer for SigSet).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_sigpending(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let set_ptr = unsafe { msg.m_payload.m2.m2l1 };
+    if set_ptr == 0 {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    let rmp = unsafe { &*base.add(caller_slot) };
+    let pending = rmp.mp_sigpending;
+    // Merge ksigpending into the result — these are also pending signals.
+    let mut result_set = pending;
+    for signo in 1..(_NSIG as i32) {
+        if rmp.mp_ksigpending.sigismember(signo) {
+            result_set.sigaddset(signo);
+        }
+    }
+    minix_rt::sys_vircopy(
+        minix_rt::SELF,
+        &result_set as *const SigSet as u64,
+        caller_ep,
+        set_ptr as u64,
+        16,
+    )
+}
+
+/// Handle PM_SIGPROCMASK — block, unblock, set, or get the signal mask.
+///
+/// Message layout: m1i1=how, m2l1=set pointer, m2l2=old_set pointer.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_sigprocmask(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let how = unsafe { msg.m_payload.m1.m1i1 };
+    let set_ptr = unsafe { msg.m_payload.m2.m2l1 };
+    let old_set_ptr = unsafe { msg.m_payload.m2.m2l2 };
+
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+
+    // Save old mask for return.
+    let old_mask = rmp.mp_sigmask;
+
+    if old_set_ptr != 0 {
+        let _ = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            &old_mask as *const SigSet as u64,
+            caller_ep,
+            old_set_ptr as u64,
+            16,
+        );
+    }
+
+    if how == SIG_INQUIRE {
+        return OK;
+    }
+
+    if set_ptr == 0 {
+        return EINVAL;
+    }
+
+    // Read the new mask from caller.
+    let mut mask_buf = [0u8; 16];
+    let copy_r = minix_rt::sys_vircopy(
+        caller_ep,
+        set_ptr as u64,
+        minix_rt::SELF,
+        mask_buf.as_mut_ptr() as u64,
+        16,
+    );
+    if copy_r != 0 {
+        return copy_r;
+    }
+    let set_bits = u128::from_ne_bytes(mask_buf);
+    let set = SigSet { bits: [set_bits] };
+
+    match how {
+        SIG_BLOCK => {
+            // mask |= set
+            for signo in 1..(_NSIG as i32) {
+                if set.sigismember(signo) {
+                    rmp.mp_sigmask.sigaddset(signo);
+                }
+            }
+        }
+        SIG_UNBLOCK => {
+            // mask &= ~set
+            for signo in 1..(_NSIG as i32) {
+                if set.sigismember(signo) {
+                    rmp.mp_sigmask.sigdelset(signo);
+                }
+            }
+            // Newly unblocked signals may now be deliverable.
+            if has_pending(rmp) {
+                let slot = caller_slot;
+                let base2 = MPROC.as_ptr();
+                let rmp2 = unsafe { &mut *base2.add(slot) };
+                unsafe { check_pending(rmp2) };
+            }
+        }
+        SIG_SETMASK => {
+            rmp.mp_sigmask = set;
+            // After changing mask, check for newly deliverable pending signals.
+            if has_pending(rmp) {
+                let slot = caller_slot;
+                let base2 = MPROC.as_ptr();
+                let rmp2 = unsafe { &mut *base2.add(slot) };
+                unsafe { check_pending(rmp2) };
+            }
+        }
+        _ => return EINVAL,
+    }
+
+    OK
+}
+
+/// Handle PM_SIGSUSPEND — atomically replace signal mask and suspend.
+///
+/// Message layout: m2l1 = set pointer (new mask).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_sigsuspend(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let set_ptr = unsafe { msg.m_payload.m2.m2l1 };
+    if set_ptr == 0 {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+
+    // Read the new mask from caller.
+    let mut mask_buf = [0u8; 16];
+    let copy_r = minix_rt::sys_vircopy(
+        caller_ep,
+        set_ptr as u64,
+        minix_rt::SELF,
+        mask_buf.as_mut_ptr() as u64,
+        16,
+    );
+    if copy_r != 0 {
+        return copy_r;
+    }
+    let set_bits = u128::from_ne_bytes(mask_buf);
+    let set = SigSet { bits: [set_bits] };
+
+    // Atomically: save old mask, set new mask, suspend.
+    rmp.mp_sigmask2 = rmp.mp_sigmask;
+    rmp.mp_sigmask = set;
+    rmp.mp_flags |= SIGSUSPENDED;
+
+    SUSPEND
+}
+
+/// Handle PM_SIGRETURN — restore signal mask and kernel context.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_sigreturn(caller_slot: usize, _msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+
+    // Restore signal mask from sigmask2.
+    rmp.mp_sigmask = rmp.mp_sigmask2;
+    rmp.mp_sigmask2 = SigSet::new();
+
+    // Tell the kernel to restore CPU context (SYS_SIGRETURN = kernel call 10).
+    let endpoint = rmp.mp_endpoint;
+    let mut kmsg = [0u8; 64];
+    // SYS_SIGRETURN reads the endpoint from SIGCALLS_ENDPT_OFF = 16.
+    kmsg[16..20].copy_from_slice(&endpoint.to_le_bytes());
+    let _ = minix_rt::kernel_call(10, &mut kmsg);
+
+    // Deliver any pending signals that are now unmasked.
+    if has_pending(rmp) {
+        let base = MPROC.as_ptr();
+        let rmp2 = unsafe { &mut *base.add(caller_slot) };
+        unsafe { check_pending(rmp2) };
+    }
+
+    OK
+}
+
+/// Process a kernel signal for a given process.
+///
+/// Called by `pm_server_main`'s NOTIFY_MESSAGE handler when the kernel
+/// reports a signal via SYS_GETKSIG.
+///
+/// Returns the number of processes signaled.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn process_ksig(proc_nr_e: i32, signo: i32) -> i32 {
+    let mut count = 0;
+
+    match signo {
+        2 | 3 | 28 | 29 => {
+            // SIGINT, SIGQUIT, SIGWINCH, SIGINFO: broadcast to process group 0.
+            let _ = unsafe { check_sig(-1, signo, true) };
+            // Count signaled processes by iterating.
+            let base = MPROC.as_ptr();
+            for i in 0..NR_PROCS {
+                let rmp = unsafe { &*base.add(i) };
+                if rmp.mp_flags & IN_USE != 0 && rmp.mp_sigpending.sigismember(signo) {
+                    count += 1;
+                }
+            }
+        }
+        14 => {
+            // SIGALRM: find the process with this endpoint.
+            if let Some(slot) = unsafe { pm_isokendpt(proc_nr_e) } {
+                unsafe { sig_proc(slot, signo, false, true) };
+                count = 1;
+            }
+        }
+        _ => {
+            // Other signals: find the process, check ksigpending.
+            if let Some(slot) = unsafe { pm_isokendpt(proc_nr_e) } {
+                let base = MPROC.as_ptr();
+                let rmp = unsafe { &mut *base.add(slot) };
+                if rmp.mp_ksigpending.sigismember(signo) {
+                    rmp.mp_ksigpending.sigdelset(signo);
+                    unsafe { sig_proc(slot, signo, false, true) };
+                    count = 1;
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// Try to unpause a process.
+///
+/// If process is WAITING or SIGSUSPENDED: sets PROC_STOPPED, sends
+/// SYS_STOP kernel call, clears WAITING/SIGSUSPENDED, returns true.
+/// If process has VFS_CALL flag: cannot unpause yet, returns false.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
+pub unsafe fn unpause(slot: usize) -> bool {
+    if slot >= NR_PROCS {
+        return false;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return false;
+    }
+    if rmp.mp_flags & VFS_CALL != 0 {
+        return false;
+    }
+    if rmp.mp_flags & (WAITING | SIGSUSPENDED) != 0 {
+        rmp.mp_flags |= PROC_STOPPED;
+        let endpoint = rmp.mp_endpoint;
+        let mut msg = [0u8; 64];
+        msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+        let _ = minix_rt::kernel_call(5, &mut msg);
+        rmp.mp_flags &= !(WAITING | SIGSUSPENDED);
+        return true;
+    }
+    false
 }
 
 // do_get / do_set — UID, GID, PID
@@ -1089,7 +1905,7 @@ pub unsafe fn no_sys(_caller_slot: usize, _msg: &mut Message) -> i32 {
 /// to a valid message buffer.
 pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     let status = unsafe { msg.m_payload.m1.m1i1 };
-    unsafe { do_exit(caller_slot, status) };
+    unsafe { exit_proc(caller_slot, status, false) };
 
     // Notify VM to clean up the child's address space BEFORE SYS_CLEAR.
     // In C MINIX, exit_proc calls vm_exit() which decrements PhysBlock
@@ -1433,6 +2249,51 @@ pub unsafe fn handle_kill(caller_slot: usize, msg: &mut Message) -> i32 {
     }
 }
 
+/// Handler for PM_SIGACTION — set or get signal action.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_sigaction(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_sigaction(caller_slot, msg) }
+}
+
+/// Handler for PM_SIGPENDING — return pending signal set.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_sigpending(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_sigpending(caller_slot, msg) }
+}
+
+/// Handler for PM_SIGPROCMASK — block/unblock/set/get signal mask.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_sigprocmask(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_sigprocmask(caller_slot, msg) }
+}
+
+/// Handler for PM_SIGSUSPEND — replace signal mask and suspend.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_sigsuspend(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_sigsuspend(caller_slot, msg) }
+}
+
+/// Handler for PM_SIGRETURN — restore mask and kernel context.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_sigreturn(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_sigreturn(caller_slot, msg) }
+}
+
 /// Handler for PM_SETSID — create a new session.
 ///
 /// # Safety
@@ -1484,14 +2345,91 @@ pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
     OK
 }
 
+/// Handler for PM_EXEC — forward exec to VFS.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_exec(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_exec(caller_slot, msg) }
+}
+
+/// Handler for PM_EXEC_NEW — process exec info after VFS opens binary.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_newexec(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_newexec(caller_slot, msg) }
+}
+
+/// Handler for PM_EXEC_RESTART — complete exec with new entry point.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_execrestart(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_execrestart(caller_slot, msg) }
+}
+
+/// Handler for PM_GETTIMEOFDAY — return realtime clock.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_time(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_time(caller_slot, msg) }
+}
+
+/// Handler for PM_GETRUSAGE — return resource usage.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_rusage(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_getrusage(caller_slot, msg) }
+}
+
+/// Handler for PM_ITIMER — set/get interval timer.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_itimer(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_itimer(caller_slot, msg) }
+}
+
+/// Handler for PM_SRV_KILL — kill a server process.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid process slot.
+pub unsafe fn handle_srv_kill(caller_slot: usize, msg: &mut Message) -> i32 {
+    let pid = unsafe { msg.m_payload.m1.m1i1 };
+    let signo = unsafe { msg.m_payload.m1.m1i2 };
+    match unsafe { do_kill(caller_slot, pid, signo) } {
+        Ok(()) => OK,
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_STIME — set system time.
+///
+/// # Safety
+///
+/// `_caller_slot` must be a valid process slot.
+pub unsafe fn handle_stime(_caller_slot: usize, _msg: &mut Message) -> i32 {
+    // Setting system time requires root — simplified stub.
+    ENOSYS
+}
+
 /// The PM dispatch table.
 /// Maps each PM call number to its handler function.
 pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
     // Handle notifications (m_type == NOTIFY_MESSAGE).
     if msg.m_type == arch_common::com::NOTIFY_MESSAGE as i32 {
-        // Check for pending process exits via SYS_GETKSIG (kernel call 7).
-        // This returns: endpoint at m1i1, exit status at m1i2.
-        // Call repeatedly until no more exits.
+        // Check for pending process exits and kernel signals
+        // via SYS_GETKSIG (kernel call 7).
         loop {
             let mut kmsg = Message {
                 m_source: 0,
@@ -1507,10 +2445,26 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
             let endpt = unsafe { kmsg.m_payload.m1.m1i3 };
             // Kernel writes system::NONE (31743, not arch_common::endpoint::NONE)
             // as the sentinel for "no more pending".  Both -1 and 31743 are checked.
-            // (Use raw 31743 since PM can't import kernel symbols.)
             if endpt == -1 || endpt == 31743 {
                 break; // NONE sentinel — no more pending
             }
+
+            // Reconstruct pending signal bitmask from scattered message fields.
+            let b0 = (kmsg.m_source as u32) as u128;
+            let b1 = (kmsg.m_type as u32) as u128;
+            let b2 = (unsafe { kmsg.m_payload.m1.m1i1 } as u32) as u128;
+            let b3 = (unsafe { kmsg.m_payload.m1.m1i2 } as u32) as u128;
+            let pending_bits: u128 = b0 | (b1 << 32) | (b2 << 64) | (b3 << 96);
+
+            // Process kernel signals from the pending bitmask.
+            if pending_bits != 0 {
+                for signo in 1..(_NSIG as i32) {
+                    if pending_bits & (1u128 << ((signo as usize) - 1)) != 0 {
+                        let _ = unsafe { process_ksig(endpt, signo) };
+                    }
+                }
+            }
+
             let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
             // Find the MProc slot for this endpoint.
             if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
@@ -1518,7 +2472,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
                     let base = MPROC.as_ptr();
                     (*base.add(slot)).mp_pid
                 };
-                unsafe { do_exit(slot, exit_status) };
+                unsafe { exit_proc(slot, exit_status, false) };
 
                 // Check if any parent is waiting for this child (waitpid).
                 // The parent set mp_wpid in handle_waitpid when returning
@@ -1569,26 +2523,34 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         4 => unsafe { handle_getpid(caller_slot, msg) },
         5 => unsafe { handle_setuid(caller_slot, msg) },
         6 => unsafe { handle_getuid(caller_slot, msg) },
-        7 => unsafe { no_sys(caller_slot, msg) }, // PM_STIME
-        8 => unsafe { no_sys(caller_slot, msg) }, // PM_PTRACE
-        9 => unsafe { no_sys(caller_slot, msg) }, // PM_SETGROUPS
-        10 => unsafe { no_sys(caller_slot, msg) }, // PM_GETGROUPS
+        7 => unsafe { handle_stime(caller_slot, msg) }, // PM_STIME
+        8 => unsafe { no_sys(caller_slot, msg) },       // PM_PTRACE
+        9 => unsafe { no_sys(caller_slot, msg) },       // PM_SETGROUPS
+        10 => unsafe { no_sys(caller_slot, msg) },      // PM_GETGROUPS
         11 => unsafe { handle_kill(caller_slot, msg) },
         12 => unsafe { handle_setgid(caller_slot, msg) }, // PM_SETGID
         13 => unsafe { handle_getgid(caller_slot, msg) }, // PM_GETGID
-        14 => unsafe { do_exec(caller_slot, msg) },
+        14 => unsafe { handle_exec(caller_slot, msg) },
         15 => unsafe { handle_setsid(caller_slot, msg) },
         16 => unsafe { handle_getpgrp(caller_slot, msg) },
-        17 => unsafe { no_sys(caller_slot, msg) }, // PM_ITIMER
-        20 => unsafe { no_sys(caller_slot, msg) }, // PM_SIGACTION
-        21 => unsafe { no_sys(caller_slot, msg) }, // PM_SIGSUSPEND
+        17 => unsafe { handle_itimer(caller_slot, msg) }, // PM_ITIMER
+        20 => unsafe { handle_sigaction(caller_slot, msg) },
+        21 => unsafe { handle_sigsuspend(caller_slot, msg) },
+        22 => unsafe { handle_sigpending(caller_slot, msg) },
+        23 => unsafe { handle_sigprocmask(caller_slot, msg) },
+        24 => unsafe { handle_sigreturn(caller_slot, msg) },
         25 => unsafe { no_sys(caller_slot, msg) }, // PM_SYSUNAME
-        28 => unsafe { no_sys(caller_slot, msg) }, // PM_GETTIMEOFDAY
+        28 => unsafe { handle_time(caller_slot, msg) }, // PM_GETTIMEOFDAY
         29 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEUID
         30 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEGID
         32 => unsafe { no_sys(caller_slot, msg) }, // PM_GETSID
+        36 => unsafe { handle_rusage(caller_slot, msg) }, // PM_GETRUSAGE
         37 => unsafe { handle_reboot(caller_slot, msg) }, // PM_REBOOT
-        43 => unsafe { do_exec(caller_slot, msg) }, // PM_EXEC_NEW
+        42 => unsafe { handle_srv_kill(caller_slot, msg) }, // PM_SRV_KILL
+        43 => unsafe { handle_newexec(caller_slot, msg) }, // PM_EXEC_NEW
+        44 => unsafe { handle_execrestart(caller_slot, msg) }, // PM_EXEC_RESTART
+        45 => unsafe { no_sys(caller_slot, msg) }, // PM_GETEPINFO
+        46 => unsafe { no_sys(caller_slot, msg) }, // PM_GETPROCNR
         _ => unsafe { no_sys(caller_slot, msg) },
     }
 }
@@ -1847,11 +2809,30 @@ pub fn pm_server_main() {
                         send_kernel_call(8, &mut kmsg);
                         continue;
                     }
+
+                    // Reconstruct pending signal bitmask from scattered message
+                    // fields. The kernel writes the u128 bitmask at offset 0,
+                    // but bytes 0-7 are clobbered by the kernel_call trampoline.
+                    let b0 = (kmsg.m_source as u32) as u128;
+                    let b1 = (kmsg.m_type as u32) as u128;
+                    let b2 = (unsafe { kmsg.m_payload.m1.m1i1 } as u32) as u128;
+                    let b3 = (unsafe { kmsg.m_payload.m1.m1i2 } as u32) as u128;
+                    let pending_bits: u128 = b0 | (b1 << 32) | (b2 << 64) | (b3 << 96);
+
+                    // Process kernel signals from the pending bitmask.
+                    if pending_bits != 0 {
+                        for signo in 1..(_NSIG as i32) {
+                            if pending_bits & (1u128 << ((signo as usize) - 1)) != 0 {
+                                let _ = unsafe { process_ksig(endpt, signo) };
+                            }
+                        }
+                    }
+
                     let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
                     if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
                         let base = MPROC.as_ptr();
                         let _pid = unsafe { (*base.add(slot)).mp_pid };
-                        unsafe { do_exit(slot, exit_status) };
+                        unsafe { exit_proc(slot, exit_status, false) };
                     }
                     // Clear SIG_PENDING via SYS_ENDKSIG (kernel call 8),
                     // matching C's end_work() after get_work().
@@ -1903,169 +2884,260 @@ pub fn pm_server_main() {
     }
 }
 
-/// Execute a new binary in the current process.
+/// Forward exec to VFS — PM_EXEC handler (call 14).
 ///
-/// Handles PM_EXEC_NEW (call 43). The caller (libc) sends the exec
-/// data (path + argv + envp) through a grant. The PM server:
-/// 1. Reads the exec data from the grant
-/// 2. Opens the binary via VFS
-/// 3. Reads the ELF header
-/// 4. Coordinates with VM for address space setup
-/// 5. Loads segments, sets up stack
-/// 6. Finalizes the new process state
+/// Reads path and frame info from the message, copies the path from the
+/// caller's address space, and sends VFS_PM_EXEC to VFS via SENDREC.
+/// Returns SUSPEND; VFS will call back via PM_EXEC_NEW then PM_EXEC_RESTART.
 ///
 /// # Safety
 ///
-/// Must be called from a valid PM dispatch context with the process
-/// table lock held.
+/// `caller_slot` must be a valid, in-use process slot.
 pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
-    // PM_EXEC_NEW message format (from callnr.h / mproc.h):
-    //   m1_i1  (payload.m1.m1i1): exec_endpt (set by kernel)
-    //   m1_i2  (payload.m1.m1i2): grant_id (path pointer)
-    //   m1_i3  (payload.m1.m1i3): stack_frame pointer (grant)
-    //   m1_i4  (payload.m1.m1i4): frame length
-    //
-    // The grant points to exec data in the caller's address space:
-    //   [path\0][argv[0]\0][argv[1]\0]...[argv[n]\0][envp[0]\0]...
-    //   The first null-terminated string is the executable path.
-    //
-    // Full flow:
-    //   1. Send VFS_PM_EXEC to VFS → VFS opens binary, reads ELF, returns pc/newsp/ps_str
-    //   2. Send SYS_EXEC (kernel call 1) to set up the process's TrapFrame
-    //   3. Return EDONTREPLY (child already set up to run)
-    //
-    // If VFS returns ENOSYS (no FS servers available), fall back to
-    // kernel SYS_EXEC_TARGET (62) which loads from the embedded initramfs.
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
 
-    let exec_endpt = unsafe { msg.m_payload.m1.m1i1 };
-    let grant_id = unsafe { msg.m_payload.m1.m1i2 };
-    let stack_frame = unsafe { msg.m_payload.m1.m1i3 };
-    let frame_len = unsafe { msg.m_payload.m1.m1i4 };
+    let path_ptr =
+        u64::from_le_bytes(unsafe { msg.m_payload.m7[0..8].try_into().unwrap_or([0u8; 8]) });
+    let path_len =
+        i32::from_le_bytes(unsafe { msg.m_payload.m7[0..4].try_into().unwrap_or([0u8; 4]) })
+            as usize;
+    let frame_addr =
+        u64::from_le_bytes(unsafe { msg.m_payload.m7[8..16].try_into().unwrap_or([0u8; 8]) });
+    let frame_len =
+        i32::from_le_bytes(unsafe { msg.m_payload.m7[4..8].try_into().unwrap_or([0u8; 4]) })
+            as usize;
 
-    // Validate the caller slot.
+    let caller_ep = rmp.mp_endpoint;
+
+    // Copy path from caller to local buffer via sys_vircopy.
+    let mut path_buf = [0u8; 256];
+    let copy_len = if path_len > 255 { 255 } else { path_len };
+    let _ = minix_rt::sys_vircopy(
+        caller_ep,
+        path_ptr,
+        minix_rt::SELF,
+        path_buf.as_mut_ptr() as u64,
+        copy_len,
+    );
+
+    rmp.mp_flags |= PARTIAL_EXEC;
+    rmp.mp_frame_addr = frame_addr;
+    rmp.mp_frame_len = frame_len as u64;
+
+    // Send VFS_PM_EXEC to VFS via SENDREC.
+    let mut vfs_msg = [0u8; 64];
+    vfs_msg[4..8].copy_from_slice(&(arch_common::com::VFS_PM_EXEC as i32).to_le_bytes());
+    vfs_msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
+    vfs_msg[16..20].copy_from_slice(&(path_len as i32).to_le_bytes());
+    vfs_msg[24..32].copy_from_slice(&frame_addr.to_le_bytes());
+    vfs_msg[32..36].copy_from_slice(&(frame_len as i32).to_le_bytes());
+    let _reply = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::VFS_PROC_NR as u64,
+            vfs_msg.as_mut_ptr() as u64,
+        )
+    };
+
+    SUSPEND
+}
+
+/// Handle PM's side after VFS opens the executable — PM_EXEC_NEW handler.
+///
+/// Reads exec info from VFS reply: new euid, egid, process name.
+/// Applies setuid/setgid bits (if not traced), updates mp_effuid,
+/// mp_effgid, mp_realuid, mp_name. Sets TAINTED flag.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_newexec(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+
+    // Read exec info from VFS reply: m1i1=euid, m1i2=egid, name in raw bytes.
+    let new_euid = unsafe { msg.m_payload.m1.m1i1 };
+    let new_egid = unsafe { msg.m_payload.m1.m1i2 };
+
+    // Only apply setuid/setgid if not traced.
+    if rmp.mp_tracer == NO_TRACER {
+        if new_euid != -1 {
+            rmp.mp_effuid = new_euid;
+            rmp.mp_realuid = new_euid;
+        }
+        if new_egid != -1 {
+            rmp.mp_effgid = new_egid;
+        }
+        rmp.mp_flags |= TAINTED;
+    }
+
+    // Copy process name from VFS reply (bytes at offset 24 in raw payload).
+    let raw = unsafe { &msg.m_payload.raw };
+    let name_len = PROC_NAME_LEN.min(16);
+    for i in 0..name_len {
+        rmp.mp_name[i] = raw[24 + i] as i8;
+    }
+
+    OK
+}
+
+/// Complete exec — PM_EXEC_RESTART handler.
+///
+/// Reads new entry point and stack pointer from msg. Clears PARTIAL_EXEC.
+/// Resets caught signals to SIG_DFL. Sends SYS_EXEC (kernel call 1) to
+/// kernel with new entry point and stack. If traced, sends SIGTRAP.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn do_execrestart(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+
+    let pc = unsafe { msg.m_payload.m1.m1i1 as u64 };
+    let newsp = unsafe { msg.m_payload.m1.m1i2 as u64 };
+
+    rmp.mp_flags &= !PARTIAL_EXEC;
+
+    // Reset caught signals to SIG_DFL (clear mp_catch and mp_ignore).
+    rmp.mp_catch.sigemptyset();
+    rmp.mp_ignore.sigemptyset();
+
+    let endpoint = rmp.mp_endpoint;
+
+    // Send SYS_EXEC (kernel call 1) to set up the new process image.
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&endpoint.to_le_bytes()); // EXEC_ENDPT_OFF
+    kmsg[16..24].copy_from_slice(&pc.to_le_bytes()); // EXEC_IP_OFF
+    kmsg[24..32].copy_from_slice(&newsp.to_le_bytes()); // EXEC_STACK_OFF
+    let kresult = minix_rt::kernel_call(1, &mut kmsg);
+    if kresult != 0 {
+        // Exec failed — kill the process with SIGKILL.
+        unsafe { sig_proc(caller_slot, 9, false, true) };
+        return kresult;
+    }
+
+    // If traced, send SIGTRAP.
+    if rmp.mp_tracer != NO_TRACER {
+        let tracer = rmp.mp_tracer;
+        if tracer >= 0 && (tracer as usize) < NR_PROCS {
+            let tracer_rmp = unsafe { &*base.add(tracer as usize) };
+            if tracer_rmp.mp_flags & IN_USE != 0 {
+                let mut trap_msg = Message {
+                    m_source: 0,
+                    m_type: OK,
+                    m_payload: unsafe { core::mem::zeroed() },
+                };
+                trap_msg.m_payload.m1.m1i1 = rmp.mp_pid;
+                trap_msg.m_payload.m1.m1i2 = 5; // SIGTRAP
+                let _ = unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SENDNB_CALL,
+                        tracer_rmp.mp_endpoint as u64,
+                        &mut trap_msg as *mut Message as u64,
+                    )
+                };
+            }
+        }
+    }
+
+    OK
+}
+
+/// Return current realtime clock — PM_GETTIMEOFDAY handler.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid process slot.
+#[cfg(target_os = "none")]
+pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
     let base = MPROC.as_ptr();
     let rmp = unsafe { &*base.add(caller_slot) };
     if rmp.mp_flags & IN_USE == 0 {
         return EINVAL;
     }
 
-    // Step 1: Try VFS exec path.
-    // Send VFS_PM_EXEC to VFS with the exec parameters.
-    // Message format (matching VFS pm.rs offset constants):
-    //   m1_i1 (PM_ENDPT_OFF = 8):  exec_endpt
-    //   m7_p1 (PM_PATH_OFF = 28):  path pointer (from grant_id)
-    //   m1_i2 (PM_EID_OFF = 12):   path length (computed from path string)
-    //   m7_p2 (PM_FRAME_OFF = 36): stack frame pointer
-    //   m1_i3 (PM_RID_OFF = 16):   frame length
-    //   m1_i4 (PM_REUID_OFF = 20): ps_str pointer
+    let realtime = kernel::clock::get_realtime();
+    let tv_sec = (realtime / 1_000_000) as i64;
+    let tv_usec = (realtime % 1_000_000) as i64;
+    // Write timeval to msg: m2l1 = tv_sec, m2l2 = tv_usec.
+    msg.m_payload.m2.m2l1 = tv_sec as i64;
+    msg.m_payload.m2.m2l2 = tv_usec as i64;
+    OK
+}
 
-    // Compute path length from the path string.
-    let path_ptr = grant_id as *const u8;
-    let mut path_len = 0usize;
-    for i in 0..1023usize {
-        if unsafe { *path_ptr.add(i) } == 0 {
-            path_len = i;
-            break;
-        }
+/// Stub for host builds. Returns ENOSYS since realtime clock requires
+/// a running kernel.
+///
+/// # Safety
+///
+/// `_caller_slot` must be a valid process slot.
+#[cfg(not(target_os = "none"))]
+pub unsafe fn do_time(_caller_slot: usize, _msg: &mut Message) -> i32 {
+    ENOSYS
+}
+
+/// Return resource usage — PM_GETRUSAGE handler.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid process slot.
+pub unsafe fn do_getrusage(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
     }
 
-    // Build VFS exec request.
-    let mut vfs_msg = Message {
-        m_source: 0,
-        m_type: arch_common::com::VFS_PM_EXEC as i32,
-        m_payload: unsafe { core::mem::zeroed() },
-    };
-    unsafe {
-        vfs_msg.m_payload.m1.m1i1 = exec_endpt; // PM_ENDPT_OFF
-        vfs_msg.m_payload.m1.m1i2 = path_len as i32; // PM_EID_OFF
-        vfs_msg.m_payload.m1.m1i3 = frame_len; // PM_RID_OFF
-        vfs_msg.m_payload.m1.m1i4 = 0; // PM_REUID_OFF — reserved
-        // m7_p1 at bytes 28-35: path pointer
-        // m7_p2 at bytes 36-43: stack frame pointer
-        // M7 layout in the union: 6 x i32 (24 bytes) followed by the raw bytes [24..48)
-        // Actually m7 is a raw [u8; 48] — we write the pointers at the right offsets.
-        // The offset constants in vfs/pm.rs use:
-        //   PM_ENDPT_OFF = 8   (m1_i1)
-        //   PM_EID_OFF = 12     (m1_i2)
-        //   PM_RID_OFF = 16     (m1_i3)
-        //   PM_REUID_OFF = 20   (m1_i4)
-        //   PM_REGID_OFF = 24   (m1_i5)
-        //   PM_PATH_OFF = 28    (m7_p1, u64)
-        //   PM_FRAME_OFF = 36   (m7_p2, u64)
-        // In the M1 struct, fields are at:
-        //   m1i1=0, m1i2=4, m1i3=8, m1i4=12, m1i5=16 (relative to m1 start)
-        //   m1 starts at payload offset 0 = absolute offset 8
-        //   So PM_ENDPT_OFF = 8 → m1i1 at abs 8 = m1 offset 0 ✓
-        // For the u64 pointers, we write to the raw payload bytes at abs offsets 28 and 36.
-        let raw = &mut vfs_msg.m_payload.raw;
-        raw[20..28].copy_from_slice(&(grant_id as u64).to_le_bytes()); // PM_PATH_OFF - 8 = 20
-        raw[28..36].copy_from_slice(&(stack_frame as u64).to_le_bytes()); // PM_FRAME_OFF - 8 = 28
+    // Write child_utime/child_stime to msg: m2l1/m2l2.
+    msg.m_payload.m2.m2l1 = rmp.mp_child_utime as i64;
+    msg.m_payload.m2.m2l2 = rmp.mp_child_stime as i64;
+    OK
+}
+
+/// Set/get interval timer — PM_ITIMER handler.
+///
+/// Simplified: returns OK for now.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid process slot.
+pub unsafe fn do_itimer(caller_slot: usize, _msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
     }
-
-    // SENDREC to VFS.
-    let vfs_reply = unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDREC_CALL,
-            arch_common::com::VFS_PROC_NR as u64,
-            &mut vfs_msg as *mut Message as u64,
-        )
-    };
-
-    if vfs_reply >= 0 && vfs_msg.m_type >= 0 {
-        // VFS exec succeeded: read pc, newsp, ps_str from reply.
-        // Reply format (from VFS service_pm_postponed):
-        //   m_type = VFS_PM_EXEC_REPLY (overwritten with OK=0 by reply())
-        //   PM_ENDPT_OFF = 8:  exec_endpt
-        //   PM_EID_OFF = 12:   result code
-        //   PM_PATH_OFF = 28:  pc (entry point, u64)
-        //   PM_FRAME_OFF = 36: newsp (stack pointer, u64)
-        //   PM_REGID_OFF = 24: ps_str (process string pointer, i32 as u64)
-        let pc = unsafe {
-            u64::from_le_bytes(vfs_msg.m_payload.raw[20..28].try_into().unwrap_or([0u8; 8]))
-        };
-        let newsp = unsafe {
-            u64::from_le_bytes(vfs_msg.m_payload.raw[28..36].try_into().unwrap_or([0u8; 8]))
-        };
-        let ps_str = unsafe { vfs_msg.m_payload.m1.m1i5 as u64 };
-
-        // Step 2: Send SYS_EXEC to kernel.
-        // Kernel message format (SYS_EXEC, call 1):
-        //   m1_i1 (EXEC_ENDPT_OFF = 8):  exec_endpt
-        //   m1_i2 (EXEC_IP_OFF = 16):    entry point
-        //   m1_i3 (EXEC_STACK_OFF = 24): stack pointer
-        //   m1_p1 (EXEC_NAME_OFF = 32):  program name pointer
-        //   m1_p2 (EXEC_PS_STR_OFF = 40): ps_str
-        let mut kmsg = Message {
-            m_source: 0,
-            m_type: 0,
-            m_payload: unsafe { core::mem::zeroed() },
-        };
-        unsafe {
-            kmsg.m_payload.m1.m1i1 = exec_endpt;
-            kmsg.m_payload.m1.m1i2 = pc as i32;
-            kmsg.m_payload.m1.m1i3 = newsp as i32;
-            let raw = &mut kmsg.m_payload.raw;
-            // EXEC_NAME_OFF = 32: name pointer at abs offset 32 = raw offset 24
-            raw[24..32].copy_from_slice(&(path_ptr as u64).to_le_bytes());
-            // EXEC_PS_STR_OFF = 40: ps_str at abs offset 40 = raw offset 32
-            raw[32..40].copy_from_slice(&(ps_str as u64).to_le_bytes());
-        }
-        let _ = send_kernel_call(1, &mut kmsg); // SYS_EXEC = 1
-
-        // Return EDONTREPLY — the exec target is set up by the kernel.
-        // pm_server_main will not send a reply (child starts running).
-        EDONTREPLY
-    } else {
-        // VFS exec failed (or not available). Fall back to initramfs path.
-        // Call kernel SYS_EXEC_TARGET (62) to load from initramfs.
-        // args[0] = target endpoint, args[1] = path pointer.
-        let result = unsafe { minix_rt::syscall2(62, exec_endpt as u64, path_ptr as u64) };
-        if result == 0 {
-            EDONTREPLY
-        } else {
-            result as i32
-        }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
     }
+    let _ = rmp;
+    OK
 }
 
 // Compile-time offset verification

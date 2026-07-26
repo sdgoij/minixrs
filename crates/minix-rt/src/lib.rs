@@ -50,6 +50,9 @@ pub const PM_FORK: i32 = 0x0002;
 pub const PM_WAITPID: i32 = 0x0003;
 pub const PM_EXEC_NEW: i32 = 0x002B;
 
+/// SELF endpoint — send to the calling process itself.
+pub const SELF: i32 = 0x0000fffd;
+
 /// IPC syscall numbers.
 pub const SEND_CALL: u64 = 46;
 pub const SENDNB_CALL: u64 = 51;
@@ -487,6 +490,30 @@ pub fn sendrec(dest: i32, msg: &mut [u8; 64]) -> i32 {
 /// Returns 0 on success, negative error code on failure.
 pub fn kernel_call(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
     unsafe { syscall2(NR_KERNEL_CALL, call_nr as u64, msg.as_mut_ptr() as u64) as i32 }
+}
+
+/// Invoke SYS_VIRCOPY (kernel call 15) — copy data between process address spaces.
+///
+/// Matches C: `sys_vircopy()` in `.refs/minix-3.3.0/minix/lib/libsys/sys_vircopy.c`
+///
+/// `src_ep` / `dst_ep` can be `SELF` to refer to the calling process.
+/// Returns 0 on success, negative error code on failure.
+pub fn sys_vircopy(src_ep: i32, src_addr: u64, dst_ep: i32, dst_addr: u64, bytes: usize) -> i32 {
+    if bytes == 0 {
+        return 0;
+    }
+    let mut msg = [0u8; 64];
+    // Layout matches kernel's do_copy_common offsets:
+    // COPY_SRC_ADDR_OFF=8 (u64), COPY_DST_ENDPT_OFF=16 (i32),
+    // COPY_DST_ADDR_OFF=24 (u64), COPY_NR_BYTES_OFF=32 (u64),
+    // COPY_FLAGS_OFF=40 (i32), COPY_SRC_ENDPT_OFF=48 (i32)
+    msg[8..16].copy_from_slice(&src_addr.to_ne_bytes());
+    msg[16..20].copy_from_slice(&dst_ep.to_ne_bytes());
+    msg[24..32].copy_from_slice(&dst_addr.to_ne_bytes());
+    msg[32..40].copy_from_slice(&(bytes as u64).to_ne_bytes());
+    msg[40..44].copy_from_slice(&0i32.to_ne_bytes()); // flags = 0
+    msg[48..52].copy_from_slice(&src_ep.to_ne_bytes());
+    kernel_call(15, &mut msg)
 }
 
 /// Invoke SYS_FORK (kernel call 0) to clone a kernel Proc entry.
