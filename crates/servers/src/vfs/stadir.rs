@@ -86,6 +86,19 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
         return EBADF;
     }
 
+    // Release any file locks held by this process on this vnode.
+    unsafe {
+        let glob = &mut *vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
+        if (filp_idx as usize) < NR_FILPS {
+            let f = &*filp_arr.add(filp_idx as usize);
+            if !f.filp_vno.is_null() {
+                crate::vfs::lock::remove_locks_by_pid_vnode(rfp.fp_pid, f.filp_vno);
+                crate::vfs::lock::lock_revive();
+            }
+        }
+    }
+
     // Handle pipe filps: release the read or write end before closing.
     unsafe {
         let glob = &mut *vfs_global();

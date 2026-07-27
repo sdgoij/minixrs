@@ -757,6 +757,10 @@ pub fn do_fcntl() -> i32 {
             }
             OK
         }
+        // File locking commands — delegate to lock_op.
+        c if matches!(c, F_SETLK | F_SETLKW | F_GETLK) || c == F_UNLCK as i32 => unsafe {
+            crate::vfs::lock::lock_op()
+        },
         _ => ENOSYS,
     }
 }
@@ -2418,28 +2422,7 @@ pub fn do_checkperms() -> i32 {
     r
 }
 
-pub fn lock_op() -> i32 {
-    let fp = match current_fp() {
-        Some(fp) => fp,
-        None => return EINVAL,
-    };
-    let glob = unsafe { &*vfs_global() };
-    let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _cmd = r_i32(&glob.fs_m_in, 12);
-    let _typ = r_i32(&glob.fs_m_in, 16);
-    let _start = r_u64(&glob.fs_m_in, 24) as i64;
-    let _len = r_u64(&glob.fs_m_in, 32) as i64;
-    if fd < 0 || (fd as usize) >= OPEN_MAX {
-        return EBADF;
-    }
-    if fp.fp_filp[fd as usize] < 0 {
-        return EBADF;
-    }
-    // Advisory file locking â€” supported as no-op (OK for F_SETLK/F_SETLKW).
-    // Real implementation would allocate FileLock entries, check conflicts,
-    // and manage the lock table.
-    OK
-}
+// lock_op is implemented in crate::vfs::lock — called from do_fcntl.
 
 #[cfg(test)]
 mod tests {
@@ -3014,7 +2997,7 @@ mod tests {
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[FD_OFF..FD_OFF + 4].copy_from_slice(&(-1i32).to_le_bytes());
         }
-        assert_eq!(lock_op(), EBADF);
+        assert_eq!(unsafe { crate::vfs::lock::lock_op() }, EBADF);
     }
 
     #[test]

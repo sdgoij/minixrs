@@ -30,6 +30,7 @@ pub mod dmap;
 pub mod filedes;
 pub mod glo;
 pub mod grant;
+pub mod lock;
 pub mod main;
 pub mod misc;
 pub mod mmap;

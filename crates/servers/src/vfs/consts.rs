@@ -281,6 +281,7 @@ pub const ENOSPC: i32 = -28;
 pub const EROFS: i32 = -30;
 pub const EMLINK: i32 = -31;
 pub const EPIPE: i32 = -32;
+pub const ENOLCK: i32 = -37;
 pub const ELOOP: i32 = -40;
 pub const ENAMETOOLONG: i32 = -36;
 pub const ENOTEMPTY: i32 = -39;
@@ -314,6 +315,25 @@ pub const PIPE_BUF_SIZE: i32 = 7168;
 
 /// Open flag: non-blocking I/O.
 pub const O_NONBLOCK: i32 = 0o4000;
+
+// fcntl lock commands
+pub const F_SETLK: i32 = 6;
+pub const F_SETLKW: i32 = 7;
+pub const F_GETLK: i32 = 5;
+
+// lock types
+pub const F_RDLCK: i16 = 0;
+pub const F_WRLCK: i16 = 1;
+pub const F_UNLCK: i16 = 2;
+
+// fcntl lock message offsets (in fs_m_in / fs_m_out, 64-byte buffers)
+pub const LOCK_FD_OFF: usize = 8;
+pub const LOCK_CMD_OFF: usize = 12;
+pub const LOCK_TYPE_OFF: usize = 16;
+pub const LOCK_WHENCE_OFF: usize = 18;
+pub const LOCK_START_OFF: usize = 24;
+pub const LOCK_LEN_OFF: usize = 32;
+pub const LOCK_PID_OFF: usize = 40;
 
 /// VM (memory server) endpoint number.
 pub const VM_PROC_NR: i32 = 8;
