@@ -335,6 +335,14 @@ pub const LOCK_START_OFF: usize = 24;
 pub const LOCK_LEN_OFF: usize = 32;
 pub const LOCK_PID_OFF: usize = 40;
 
+// select message offsets (in fs_m_in / fs_m_out, 64-byte buffers)
+pub const SEL_NFDS_OFF: usize = 8;
+pub const SEL_RDFDS_OFF: usize = 16;
+pub const SEL_WRFDS_OFF: usize = 24;
+pub const SEL_EXFDS_OFF: usize = 32;
+pub const SEL_TV_SEC_OFF: usize = 40;
+pub const SEL_TV_USEC_OFF: usize = 48;
+
 /// VM (memory server) endpoint number.
 pub const VM_PROC_NR: i32 = 8;
 
@@ -366,6 +374,12 @@ pub const VMV_SIZE_PAGES_OFF: usize = 32;
 
 /// Named pipe mode for req_newnode.
 pub const I_NAMED_PIPE: u32 = 0o010000;
+
+// File type bits (st_mode & S_IFMT)
+pub const S_IFMT: u32 = 0o170000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFBLK: u32 = 0o060000;
+pub const S_IFREG: u32 = 0o100000;
 
 /// CDEV message base (from `<minix/com.h>`).
 pub const CDEV_RQ_BASE: i32 = 0x400;

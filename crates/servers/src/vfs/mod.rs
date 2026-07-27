@@ -39,6 +39,7 @@ pub mod path;
 pub mod pipe;
 pub mod pm;
 pub mod request;
+pub mod select;
 pub mod stadir;
 pub mod table;
 pub mod types;

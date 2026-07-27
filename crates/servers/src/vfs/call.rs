@@ -923,30 +923,7 @@ pub fn do_fsync() -> i32 {
 ///
 /// C source: `minix/servers/vfs/select.c` â€” `do_select()` (line 30)
 pub fn do_select() -> i32 {
-    let fp = match current_fp() {
-        Some(fp) => fp,
-        None => return EINVAL,
-    };
-    let glob = unsafe { &*vfs_global() };
-    let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let ops = r_u32(&glob.fs_m_in, 12);
-    if fd < 0 || (fd as usize) >= OPEN_MAX {
-        return EBADF;
-    }
-    let filp_idx = fp.fp_filp[fd as usize];
-    if filp_idx < 0 {
-        return EBADF;
-    }
-    unsafe {
-        let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
-        let filp = &*filp_arr.add(filp_idx as usize);
-        let vp = filp.filp_vno;
-        if vp.is_null() {
-            return EBADF;
-        }
-        let dev = (*vp).v_dev;
-        crate::vfs::device::cdev_select(dev, ops as i32)
-    }
+    unsafe { crate::vfs::select::do_select() }
 }
 
 /// Perform the `chdir(name)` system call.
@@ -3016,9 +2993,10 @@ mod tests {
             setup();
             let glob = vfs_global();
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[FD_OFF..FD_OFF + 4].copy_from_slice(&(-1i32).to_le_bytes());
+            fs_m_in[SEL_NFDS_OFF..SEL_NFDS_OFF + 4].copy_from_slice(&1i32.to_le_bytes());
         }
-        assert_eq!(do_select(), EBADF);
+        // select with nfds=1 but no fds set — should complete with 0 ready
+        assert_eq!(do_select(), 0);
     }
 
     #[test]
