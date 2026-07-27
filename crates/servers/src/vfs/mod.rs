@@ -38,6 +38,7 @@ pub mod mount;
 pub mod path;
 pub mod pipe;
 pub mod pm;
+pub mod protect;
 pub mod request;
 pub mod select;
 pub mod stadir;

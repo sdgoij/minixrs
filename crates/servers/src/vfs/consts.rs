@@ -380,6 +380,10 @@ pub const S_IFMT: u32 = 0o170000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFBLK: u32 = 0o060000;
 pub const S_IFREG: u32 = 0o100000;
+pub const S_IFDIR: u32 = 0o040000;
+
+/// Self endpoint (for sys_vircopy).
+pub const SELF: i32 = 0x0000fffd;
 
 /// CDEV message base (from `<minix/com.h>`).
 pub const CDEV_RQ_BASE: i32 = 0x400;

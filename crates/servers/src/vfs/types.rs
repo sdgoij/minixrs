@@ -150,6 +150,8 @@ pub struct Vnode {
     pub v_inode_nr: u32,
     pub v_mode: u32,
     pub v_size: i64,
+    pub v_uid: i32,
+    pub v_gid: i32,
     pub v_ref_count: i32,
     pub v_ref_check: i32,
     pub v_fs_count: i32,
@@ -160,6 +162,8 @@ pub struct Vnode {
     pub v_dev: u32,
     pub v_fs_dev: u32,
     pub v_fs_count_inc: i32,
+    /// Mount point this vnode belongs to (NULL if not mounted).
+    pub v_vmnt: *const Vmnt,
 }
 
 impl Default for Vnode {
@@ -170,6 +174,8 @@ impl Default for Vnode {
             v_inode_nr: 0,
             v_mode: 0,
             v_size: 0,
+            v_uid: 0,
+            v_gid: 0,
             v_ref_count: 0,
             v_ref_check: 0,
             v_fs_count: 0,
@@ -180,6 +186,7 @@ impl Default for Vnode {
             v_dev: 0,
             v_fs_dev: 0,
             v_fs_count_inc: 0,
+            v_vmnt: core::ptr::null(),
         }
     }
 }

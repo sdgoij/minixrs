@@ -1853,22 +1853,9 @@ pub fn do_access() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
-    // Check access using real uid/gid.
-    let mode = unsafe { (*vp).v_mode };
-    let r = if fp.fp_realuid == SU_UID {
-        OK // root can do anything
-    } else if (amode & 4) != 0 && (mode & 4) == 0 {
-        // R_OK
-        EACCES
-    } else if (amode & 2) != 0 && (mode & 2) == 0 {
-        // W_OK
-        EACCES
-    } else if (amode & 1) != 0 && (mode & 1) == 0 {
-        // X_OK
-        EACCES
-    } else {
-        OK
-    };
+    // Check access using real uid/gid via the proper forbidden() check.
+    let vp_ref = unsafe { &*vp };
+    let r = unsafe { crate::vfs::protect::check_access(fp, vp_ref, amode) };
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -1911,9 +1898,18 @@ pub fn do_chmod() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
-    let fs_e = unsafe { (*vp).v_fs_e };
-    let inode_nr = unsafe { (*vp).v_inode_nr };
-    let (r, _new_mode) = unsafe { crate::vfs::request::req_chmod(fs_e, inode_nr, rmode) };
+    // Permission check: must own file or be root.
+    let vp_ref = unsafe { &*vp };
+    let r = crate::vfs::protect::chmod_allowed(fp, vp_ref);
+    if r != OK {
+        unsafe { mount::put_vnode(vp) };
+        return r;
+    }
+    let fs_e = vp_ref.v_fs_e;
+    let inode_nr = vp_ref.v_inode_nr;
+    let mut new_mode = rmode;
+    crate::vfs::protect::chmod_strip_setgid(fp, vp_ref, &mut new_mode);
+    let (r, _new_mode) = unsafe { crate::vfs::request::req_chmod(fs_e, inode_nr, new_mode) };
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -1957,8 +1953,15 @@ pub fn do_chown() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
-    let fs_e = unsafe { (*vp).v_fs_e };
-    let inode_nr = unsafe { (*vp).v_inode_nr };
+    // Permission check: ownership validation for non-root.
+    let vp_ref = unsafe { &*vp };
+    let r = crate::vfs::protect::chown_allowed(fp, vp_ref, owner as i32, group as i32);
+    if r != OK {
+        unsafe { mount::put_vnode(vp) };
+        return r;
+    }
+    let fs_e = vp_ref.v_fs_e;
+    let inode_nr = vp_ref.v_inode_nr;
     let (r, _new_mode) = unsafe { crate::vfs::request::req_chown(fs_e, inode_nr, owner, group) };
     unsafe { mount::put_vnode(vp) };
     r

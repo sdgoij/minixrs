@@ -171,6 +171,8 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
         v_inode_nr: 0,
         v_mode: 0,
         v_size: 0,
+        v_uid: 0,
+        v_gid: 0,
         v_ref_count: 0,
         v_ref_check: 0,
         v_fs_count: 0,
@@ -181,6 +183,7 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
         v_dev: 0,
         v_fs_dev: 0,
         v_fs_count_inc: 0,
+        v_vmnt: core::ptr::null(),
     }; NR_VNODES]
 }
 
