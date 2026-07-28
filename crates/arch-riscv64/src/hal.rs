@@ -13,6 +13,10 @@ pub fn init() {
     crate::init();
 }
 
+// Re-export arch-specific types for kernel use.
+pub use crate::frame::TrapFrame;
+pub use crate::mcontext::Mcontext;
+
 /// Write a single byte to the SBI debug console.
 pub fn serial_write_byte(byte: u8) {
     crate::sbi::console_putchar(byte);
@@ -33,6 +37,31 @@ pub fn serial_read_byte() -> u8 {
 /// Non-blocking check: is a byte available from the 8250 UART?
 pub fn serial_byte_available() -> bool {
     unsafe { (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) != 0 }
+}
+
+/// Non-blocking poll: returns a byte if available from any console source
+/// (SBI debug console or MMIO 8250 UART).
+pub fn poll_console() -> Option<u8> {
+    if let Some(byte) = crate::sbi::console_getchar() {
+        return Some(byte);
+    }
+    if serial_byte_available() {
+        unsafe { Some(core::ptr::read_volatile(0x10000000usize as *const u8)) }
+    } else {
+        None
+    }
+}
+
+/// Arch-specific CPU idle hint (wfi with interrupts enabled on RISC-V).
+pub fn cpu_idle() {
+    unsafe {
+        core::arch::asm!(
+            "csrsi sstatus, 2",
+            "wfi",
+            "csrci sstatus, 2",
+            options(nomem, nostack)
+        );
+    }
 }
 
 pub fn read_cycles() -> u64 {
@@ -138,6 +167,25 @@ pub unsafe fn read_frame_field(frame: &[u8; 256], offset: usize) -> u64 {
 /// `frame` must be a valid trap frame; `offset` must be in bounds.
 pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) {
     frame[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
+}
+
+/// Set up register frame for a new process via exec(2).
+/// Writes entry point (sepc), stack pointer (sp), argc (a0),
+/// argv (a1), and sstatus.
+///
+/// # Safety
+///
+/// `frame` must be a valid, writable `[u8; 256]` trap frame.
+pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, argc: u64, argv: u64) {
+    unsafe {
+        write_frame_field(frame, 0, entry); // sepc in x0 slot
+        write_frame_field(frame, 16, sp); // sp (x2)
+        write_frame_field(frame, 80, argc); // a0 (x10)
+        write_frame_field(frame, 88, argv); // a1 (x11)
+        // sstatus = SPIE | FS_INITIAL (SIE=0, SPIE=1, SPP=0)
+        write_frame_field(frame, 248, 0x00000220);
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Read a syscall argument from the trap frame.
@@ -291,6 +339,11 @@ pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontex
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u64 = 12;
 
+/// ELF machine identifier for this architecture (e_machine field).
+pub const ELF_MACHINE: u16 = 243; // EM_RISCV
+/// Size of FPU save area.
+pub const FPU_STATE_SIZE: usize = 256;
+
 /// Page table entry type (RISC-V SV39: 8-byte PTE with 3-level paging).
 pub type PtEntry = u64;
 
@@ -333,6 +386,39 @@ pub const fn pte_frame_mask() -> u64 {
 /// Lower PTE flags mask (bits 0-9, 10-bit flags).
 pub const fn pte_flags_mask() -> u64 {
     pte::PTE_FLAGS_MASK
+}
+
+/// Validate a physical address is within the identity-mapped range.
+pub const fn pte_is_valid_phys(phys: u64) -> bool {
+    phys < 0x1_0000_0000
+}
+
+/// Flags for a non-leaf (branch) page table entry.
+pub const fn pte_nonleaf_flags() -> u64 {
+    pte_present()
+}
+
+/// Extract permission flags from a huge-page PTE when splitting into
+/// sub-entries. RISC-V preserves all flags except the frame mask.
+pub const fn pte_split_flags(source_pte: u64, _next_level: u32) -> u64 {
+    (source_pte & pte_flags_mask()) & !pte_frame_mask()
+}
+
+/// Mask of flags to exclude when extracting attributes from a PDE
+/// being split into 4KB entries (pt_mapkernel path).
+pub const fn pte_pd_split_exclude_mask() -> u64 {
+    pte_frame_mask() | pte_global()
+}
+
+/// Mask of flags to clear on the replacement PDE after splitting
+/// (pt_mapkernel path). On RISC-V, only G must be cleared.
+pub const fn pte_pd_split_clear_mask() -> u64 {
+    pte_global()
+}
+
+/// Complete set of PTE flags for a user code/data page (exec mapping).
+pub const fn pte_user_flags() -> u64 {
+    pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_X | pte::PTE_U | pte::PTE_A | pte::PTE_D
 }
 
 /// Build a page table entry from a physical address and flags.
@@ -439,6 +525,25 @@ pub unsafe fn tlb_flush_page(_va: u64) {
     }
 }
 
+/// Error returned when a page is not mapped.
+#[derive(Debug, Clone, Copy)]
+pub struct PageNotMapped;
+
+impl core::fmt::Display for PageNotMapped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "page not mapped")
+    }
+}
+
+/// Clear the write bit in a leaf PTE (not yet implemented on RISC-V).
+///
+/// # Safety
+///
+/// `cr3` must point to a valid page table.
+pub unsafe fn clear_rw(_cr3: u64, _va: u64) -> Result<(), PageNotMapped> {
+    Err(PageNotMapped)
+}
+
 /// Read the page fault address (RISC-V: stval CSR).
 ///
 /// # Safety
@@ -494,6 +599,16 @@ pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
 }
 
+/// Whether port I/O is available on this architecture.
+pub const fn has_port_io() -> bool {
+    false
+}
+
+/// Whether fork(2) needs explicit RECEIVING/REPLY_PEND clearing on the child.
+pub const fn fork_needs_child_flag_clear() -> bool {
+    true
+}
+
 /// Read a byte from an I/O port (unimplemented on RISC-V).
 pub unsafe fn inb(_port: u16) -> u8 {
     0
@@ -520,6 +635,84 @@ pub unsafe fn phys_outsb(_port: u16, _buf: u64, _count: usize) {}
 pub unsafe fn phys_insw(_port: u16, _buf: u64, _count: usize) {}
 /// String output to I/O port (word) from physical buffer (unimplemented on RISC-V).
 pub unsafe fn phys_outsw(_port: u16, _buf: u64, _count: usize) {}
+
+// ── PCI/CMOS stubs (not available on RISC-V via port I/O) ──────────────
+
+/// PCI configuration address port (unused on RISC-V).
+pub const PCI_ADDR_PORT: u16 = 0xCF8;
+/// PCI configuration data port (unused on RISC-V).
+pub const PCI_DATA_PORT: u16 = 0xCFC;
+/// RTC CMOS index port (unused on RISC-V).
+pub const RTC_INDEX: u16 = 0x70;
+
+/// Build a PCI config address (same encoding on all arches).
+#[inline]
+pub fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
+    0x8000_0000
+        | ((bus as u32) << 16)
+        | ((dev as u32) << 11)
+        | ((func as u32) << 8)
+        | (reg as u32 & 0xFC)
+}
+
+/// Read 8 bits from PCI config space (stub — returns 0xFF on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call but returns a sentinel value.
+pub unsafe fn pci_cfg_read8(_bus: u8, _dev: u8, _func: u8, _reg: u8) -> u8 {
+    0xFF
+}
+
+/// Read 16 bits from PCI config space (stub — returns 0xFFFF on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call but returns a sentinel value.
+pub unsafe fn pci_cfg_read16(_bus: u8, _dev: u8, _func: u8, _reg: u8) -> u16 {
+    0xFFFF
+}
+
+/// Read 32 bits from PCI config space (stub — returns 0xFFFF_FFFF on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call but returns a sentinel value.
+pub unsafe fn pci_cfg_read32(_bus: u8, _dev: u8, _func: u8, _reg: u8) -> u32 {
+    0xFFFF_FFFF
+}
+
+/// Write 32 bits to PCI config space (stub — no-op on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call; PCI config is not accessible.
+pub unsafe fn pci_cfg_write32(_bus: u8, _dev: u8, _func: u8, _reg: u8, _val: u32) {}
+
+/// Read a CMOS register value (stub — returns 0 on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call; CMOS is not accessible.
+pub unsafe fn cmos_read(_reg: u8) -> u8 {
+    0
+}
+
+/// Write a value to a CMOS register (stub — no-op on RISC-V).
+///
+/// # Safety
+///
+/// Stub: always safe to call; CMOS is not accessible.
+pub unsafe fn cmos_write(_reg: u8, _val: u8) {}
+
+/// Full memory fence (compiler fence on RISC-V).
+///
+/// # Safety
+///
+/// Issues a SeqCst compiler fence; sufficient for single-hart use.
+pub unsafe fn mfence() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
 
 /// Initialize the profiling clock (no-op on RISC-V).
 pub unsafe fn init_profile_clock(_rate_code: u32, _callback: unsafe extern "C" fn()) -> i32 {
@@ -707,6 +900,205 @@ pub fn qemu_exit(code: u32) -> ! {
     }
     loop {
         unsafe { core::arch::asm!("wfi") }
+    }
+}
+
+// ── VM fork (deep-copy user pages from parent to child) ─────────────────
+
+/// Deep-copy user page table entries from parent to child for fork.
+/// Walks SV39 3-level page tables (L2 → L1 → L0).
+/// Returns 0 on success, -12 (ENOMEM) on allocation failure.
+///
+/// # Safety
+///
+/// `parent_cr3` and `child_cr3` must point to valid page tables.
+/// `child_cr3` must be a freshly-allocated zero-filled page.
+pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64]) -> i32 {
+    const V: u64 = 0x001;
+    const R: u64 = 0x002;
+    const W: u64 = 0x004;
+    const X: u64 = 0x008;
+    const U: u64 = 0x010;
+    const PPN_MASK: u64 = 0x003FFFFFFFFFFC00;
+
+    unsafe {
+        let parent = parent_cr3 as *const u64;
+        let child_root = child_cr3 as *mut u64;
+
+        // Phase 1: Copy the parent's root page table (L2) to the child.
+        core::ptr::copy_nonoverlapping(parent, child_root, 512);
+
+        // Phase 2: Deep-copy all intermediate L1 and L0 page table pages.
+        for l2 in 0..512 {
+            let e2 = core::ptr::read(parent.add(l2));
+            if e2 & V == 0 {
+                continue;
+            }
+            let l2_leaf = (e2 & (R | W | X)) != 0;
+            if !l2_leaf {
+                let parent_l1_pa = pte_to_phys(e2);
+                let parent_l1 = parent_l1_pa as *const u64;
+                let child_l1_pa = match alloc_phys_page() {
+                    Some(p) => p,
+                    None => return -12,
+                };
+                let child_l1 = child_l1_pa as *mut u64;
+                core::ptr::copy_nonoverlapping(parent_l1, child_l1, 512);
+                let l2_flags = e2 & !PPN_MASK;
+                core::ptr::write(child_root.add(l2), build_pte(child_l1_pa, l2_flags));
+
+                for l1 in 0..512 {
+                    let e1 = core::ptr::read(child_l1.add(l1));
+                    if e1 & V == 0 {
+                        continue;
+                    }
+                    let l1_leaf = (e1 & (R | W | X)) != 0;
+                    if !l1_leaf {
+                        let parent_l0_pa = pte_to_phys(e1);
+                        let parent_l0 = parent_l0_pa as *const u64;
+                        let child_l0_pa = match alloc_phys_page() {
+                            Some(p) => p,
+                            None => return -12,
+                        };
+                        let child_l0 = child_l0_pa as *mut u64;
+                        core::ptr::copy_nonoverlapping(parent_l0, child_l0, 512);
+                        let l1_flags = e1 & !PPN_MASK;
+                        core::ptr::write(child_l1.add(l1), build_pte(child_l0_pa, l1_flags));
+                    }
+                }
+            }
+        }
+
+        // Phase 3: Walk parent's page table hierarchy and deep-copy each
+        // user leaf page via direct PTE writes into the child's page table.
+        for l2 in 0..512 {
+            let e2 = core::ptr::read(parent.add(l2));
+            if e2 & V == 0 {
+                continue;
+            }
+            let l2_leaf = (e2 & (R | W | X)) != 0;
+            if l2_leaf {
+                if e2 & U != 0 {
+                    let src_1gb = pte_to_phys(e2);
+                    let l1_pa = match alloc_phys_page() {
+                        Some(p) => p,
+                        None => return -12,
+                    };
+                    let l1 = l1_pa as *mut u64;
+                    let is_writable = (e2 & W) != 0;
+                    for l1_idx in 0..512 {
+                        let pa_2mb = src_1gb + (l1_idx as u64) * 0x200000;
+                        let flags = if is_writable {
+                            (e2 & !(PPN_MASK | W)) | V
+                        } else {
+                            e2 & !PPN_MASK
+                        };
+                        core::ptr::write(l1.add(l1_idx), build_pte(pa_2mb, flags));
+                    }
+                    let l2_branch = build_pte(l1_pa, V);
+                    core::ptr::write(parent.add(l2) as *mut u64, l2_branch);
+                    core::ptr::write(child_root.add(l2), l2_branch);
+                } else {
+                    core::ptr::write(child_root.add(l2), e2);
+                }
+                continue;
+            }
+            let parent_l1_pa = pte_to_phys(e2);
+            let parent_l1 = parent_l1_pa as *const u64;
+
+            for l1 in 0..512 {
+                let e1 = core::ptr::read(parent_l1.add(l1));
+                if e1 & V == 0 {
+                    continue;
+                }
+                let l1_leaf = (e1 & (R | W | X)) != 0;
+
+                if l1_leaf {
+                    if e1 & U != 0 && e1 & W != 0 {
+                        let cow = e1 & !W;
+                        let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                        let child_l1_pa = pte_to_phys(child_l2e);
+                        if child_l1_pa != 0 {
+                            core::ptr::write((child_l1_pa as *mut u64).add(l1), cow);
+                        }
+                    }
+                    continue;
+                }
+                let parent_l0_pa = pte_to_phys(e1);
+                let parent_l0 = parent_l0_pa as *const u64;
+
+                for l0 in 0..512 {
+                    let e0 = core::ptr::read(parent_l0.add(l0));
+                    if e0 & V == 0 {
+                        continue;
+                    }
+                    let pa = pte_to_phys(e0);
+                    if e0 & U == 0 || e0 & W == 0 {
+                        // Kernel page or already read-only: share directly.
+                        let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                        let child_l1_pa = pte_to_phys(child_l2e);
+                        let child_l1e = core::ptr::read((child_l1_pa as *const u64).add(l1));
+                        let child_l0_pa = pte_to_phys(child_l1e);
+                        let child_l0_ptr = (child_l0_pa as *mut u64).add(l0);
+                        core::ptr::write(child_l0_ptr, build_pte(pa, e0 & !PPN_MASK));
+                        continue;
+                    }
+                    // User writable 4KB page — COW in child only.
+                    let cow_e0 = e0 & !W;
+                    let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                    let child_l1_pa = pte_to_phys(child_l2e);
+                    let child_l1e = core::ptr::read((child_l1_pa as *const u64).add(l1));
+                    let child_l0_pa = pte_to_phys(child_l1e);
+                    let child_l0_ptr = (child_l0_pa as *mut u64).add(l0);
+                    core::ptr::write(child_l0_ptr, build_pte(pa, cow_e0 & !PPN_MASK));
+                }
+            }
+        }
+
+        // Restore kernel identity map entries in the child's page table
+        // after COW splitting may have removed them.
+        let boot_cr3 = crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        if boot_cr3 != 0 {
+            let boot = boot_cr3 as *const u64;
+            let cr = child_cr3 as *mut u64;
+            for i in 0..4 {
+                let child_entry = core::ptr::read(cr.add(i));
+                if child_entry & V == 0 {
+                    let boot_entry = core::ptr::read(boot.add(i));
+                    if boot_entry != 0 {
+                        core::ptr::write(cr.add(i), boot_entry);
+                    }
+                }
+            }
+        }
+
+        0
+    }
+}
+
+// ── Exec page table root creation ───────────────────────────────────────
+
+/// Create the initial page table root for a new process via exec(2).
+/// Allocates an L2 page, copies kernel identity-map entries from the
+/// boot page table, and returns the L2 physical address.
+/// Returns 0 on allocation failure.
+///
+/// # Safety
+///
+/// `boot_cr3` must point to a valid boot page table.
+pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
+    unsafe {
+        let new_root = match alloc_phys_page() {
+            Some(p) => p,
+            None => return 0,
+        };
+        core::ptr::write_bytes(new_root as *mut u8, 0, PAGE_SIZE as usize);
+        let boot_root = boot_cr3 as *const u64;
+        for i in 0usize..4 {
+            let e = core::ptr::read(boot_root.add(i));
+            core::ptr::write((new_root as *mut u64).add(i), e);
+        }
+        new_root
     }
 }
 

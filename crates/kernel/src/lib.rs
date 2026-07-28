@@ -3,7 +3,6 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-pub mod arch_compat;
 pub mod clock;
 pub mod debug;
 pub mod elf;

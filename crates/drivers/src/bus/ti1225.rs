@@ -160,11 +160,11 @@ static TI1225_BRIDGES: Ti1225BridgesCell = Ti1225BridgesCell::new();
 static TI1225_BRIDGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn ti_pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
+    unsafe { crate::hal::pci_cfg_read32(bus, dev, func, reg) }
 }
 
 unsafe fn ti_pci_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
-    unsafe { crate::arch_io::pci_cfg_write32(bus, dev, func, reg, val) }
+    unsafe { crate::hal::pci_cfg_write32(bus, dev, func, reg, val) }
 }
 
 /// Initialize a TI1225 bridge.

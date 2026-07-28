@@ -234,37 +234,37 @@ static Q0_DATA: Q0DataCell = Q0DataCell::new();
 /// Write 8 bits to an I/O port.
 #[inline]
 unsafe fn out8(port: u16, val: u8) {
-    unsafe { crate::arch_io::outb(port, val) }
+    unsafe { crate::hal::outb(port, val) }
 }
 
 /// Write 16 bits to an I/O port.
 #[inline]
 unsafe fn out16(port: u16, val: u16) {
-    unsafe { crate::arch_io::outw(port, val) }
+    unsafe { crate::hal::outw(port, val) }
 }
 
 /// Write 32 bits to an I/O port.
 #[inline]
 unsafe fn out32(port: u16, val: u32) {
-    unsafe { crate::arch_io::outl(port, val) }
+    unsafe { crate::hal::outl(port, val) }
 }
 
 /// Read 8 bits from an I/O port.
 #[inline]
 unsafe fn in8(port: u16) -> u8 {
-    unsafe { crate::arch_io::inb(port) }
+    unsafe { crate::hal::inb(port) }
 }
 
 /// Read 16 bits from an I/O port.
 #[inline]
 unsafe fn in16(port: u16) -> u16 {
-    unsafe { crate::arch_io::inw(port) }
+    unsafe { crate::hal::inw(port) }
 }
 
 /// Read 32 bits from an I/O port.
 #[inline]
 unsafe fn in32(port: u16) -> u32 {
-    unsafe { crate::arch_io::inl(port) }
+    unsafe { crate::hal::inl(port) }
 }
 
 /// Build a PCI configuration address.
@@ -282,7 +282,7 @@ fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
-    unsafe { crate::arch_io::pci_cfg_read8(bus, dev, func, reg) }
+    unsafe { crate::hal::pci_cfg_read8(bus, dev, func, reg) }
 }
 
 /// Read 16 bits from PCI config space.
@@ -291,7 +291,7 @@ unsafe fn pci_cfg_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
-    unsafe { crate::arch_io::pci_cfg_read16(bus, dev, func, reg) }
+    unsafe { crate::hal::pci_cfg_read16(bus, dev, func, reg) }
 }
 
 /// Read 32 bits from PCI config space.
@@ -300,7 +300,7 @@ unsafe fn pci_cfg_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
 ///
 /// May conflict with other PCI config accesses. Must be serialized.
 unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
+    unsafe { crate::hal::pci_cfg_read32(bus, dev, func, reg) }
 }
 
 /// Read 32-bit from device register at `offset`.
@@ -551,7 +551,7 @@ pub fn virtio_to_queue(
         // Memory barrier: host must see descriptor writes before
         // the avail index update.
         unsafe {
-            crate::arch_io::mfence();
+            crate::hal::mfence();
         }
 
         // Advance the avail index.
@@ -559,7 +559,7 @@ pub fn virtio_to_queue(
 
         // Memory barrier: host must see updated avail index before kick.
         unsafe {
-            crate::arch_io::mfence();
+            crate::hal::mfence();
         }
 
         // Check if the host wants notification.
@@ -585,7 +585,7 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
 
     // Ensure we see the host's writes.
     unsafe {
-        crate::arch_io::mfence();
+        crate::hal::mfence();
     }
 
     // All queue operations in one borrow scope.

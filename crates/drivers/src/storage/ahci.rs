@@ -343,7 +343,7 @@ static PORTS: PortsCell = PortsCell::new();
 static NR_INIT_PORTS: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn pci_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
-    unsafe { crate::arch_io::pci_cfg_read32(bus, dev, func, reg) }
+    unsafe { crate::hal::pci_cfg_read32(bus, dev, func, reg) }
 }
 
 unsafe fn pci_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {

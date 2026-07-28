@@ -12,6 +12,10 @@ pub fn init() {
     crate::init();
 }
 
+// Re-export arch-specific types for kernel use.
+pub use crate::frame::TrapFrame;
+pub use crate::mcontext::Mcontext;
+
 // ── Serial port I/O (COM1) ───────────────────────────────────────────────
 
 const COM1_DATA: u16 = 0x3F8;
@@ -72,6 +76,16 @@ pub fn serial_byte_available() -> bool {
         );
     }
     lsr & LSR_DR != 0
+}
+
+/// Non-blocking poll: returns a byte if available from COM1.
+pub fn poll_console() -> Option<u8> {
+    serial_try_read_byte()
+}
+
+/// Arch-specific CPU idle hint (PAUSE on x86_64).
+pub fn cpu_idle() {
+    pause();
 }
 
 /// Try to read a byte from COM1 without blocking.
@@ -365,6 +379,23 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
     }
 }
 
+/// Set up register frame for a new process via exec(2).
+/// Writes entry point, stack pointer, and arch-specific status flags.
+///
+/// # Safety
+///
+/// `frame` must be a valid, writable `[u8; 256]` trap frame.
+pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _argc: u64, _argv: u64) {
+    unsafe {
+        write_frame_field(frame, 0, sp); // rax = 0 (convention)
+        write_frame_field(frame, 16, entry); // rcx = entry
+        write_frame_field(frame, 40, sp); // rdi = sp
+        write_frame_field(frame, 72, 0x0202); // r11 = user-mode (IF|IOPL=0)
+        write_frame_field(frame, 168, sp); // rsp = sp
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
+    }
+}
+
 /// Read syscall argument `i` (0-5) from a raw TrapFrame.
 ///
 /// # Safety
@@ -543,6 +574,10 @@ pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext:
 pub const PAGE_SIZE: u64 = 4096;
 /// Number of bits for the page offset.
 pub const PAGE_SHIFT: u64 = 12;
+/// ELF machine identifier for this architecture (e_machine field).
+pub const ELF_MACHINE: u16 = 62; // EM_X86_64
+/// Size of FPU save area (FXSAVE/FXRSTOR format).
+pub const FPU_STATE_SIZE: usize = 512;
 /// Kernel base virtual address.
 pub const KERNBASE: u64 = 0xFFFF8000_00000000u64;
 
@@ -588,6 +623,43 @@ pub const fn pte_frame_mask() -> u64 {
 /// Lower PTE flags mask (bits 0-11).
 pub const fn pte_flags_mask() -> u64 {
     0x0000000000000FFF // PG_PTEMASK
+}
+
+/// Validate a physical address is within the identity-mapped range.
+pub const fn pte_is_valid_phys(phys: u64) -> bool {
+    phys < 0x1000_0000 && (phys >> 48) == 0
+}
+
+/// Flags for a non-leaf (branch) page table entry.
+pub const fn pte_nonleaf_flags() -> u64 {
+    pte_present() | pte_writable() | pte_user()
+}
+
+/// Extract permission flags from a huge-page PTE when splitting into
+/// sub-entries at `next_level` (0 = leaf 4KB, >0 = further non-leaf).
+pub const fn pte_split_flags(source_pte: u64, next_level: u32) -> u64 {
+    let mut flags = (source_pte & pte_flags_mask()) & !(pte_frame_mask() | pte_global());
+    if next_level > 0 {
+        flags |= pte_large_page();
+    }
+    flags
+}
+
+/// Mask of flags to exclude when extracting attributes from a PDE
+/// being split into 4KB entries (pt_mapkernel path).
+pub const fn pte_pd_split_exclude_mask() -> u64 {
+    pte_frame_mask() | pte_large_page() | pte_global()
+}
+
+/// Mask of flags to clear on the replacement PDE after splitting
+/// (pt_mapkernel path).
+pub const fn pte_pd_split_clear_mask() -> u64 {
+    pte_large_page() | pte_global()
+}
+
+/// Complete set of PTE flags for a user code/data page (exec mapping).
+pub const fn pte_user_flags() -> u64 {
+    pte_present() | pte_writable() | pte_user()
 }
 
 /// Build a page table entry from a physical address and flags.
@@ -661,6 +733,67 @@ pub unsafe fn tlb_flush_page(va: u64) {
     unsafe { crate::asm::invlpg(va) }
 }
 
+/// Clear the write bit in a leaf PTE for a given CR3 and VA.
+/// Used by copy-on-write to make a page read-only.
+///
+/// # Safety
+///
+/// `cr3` must point to a valid page table. `va` must be a mapped virtual address.
+pub unsafe fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
+    let pml4_idx = pt_index(va, 3);
+    let pdpt_idx = pt_index(va, 2);
+    let pd_idx = pt_index(va, 1);
+    let pt_idx = pt_index(va, 0);
+
+    unsafe {
+        let pml4 = cr3 as *const u64;
+        let pml4e = core::ptr::read(pml4.add(pml4_idx));
+        if pml4e & pte_present() == 0 {
+            return Err(PageNotMapped);
+        }
+
+        let pdpt = (pml4e & pte_frame_mask()) as *const u64;
+        let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
+        if pdpte & pte_present() == 0 {
+            return Err(PageNotMapped);
+        }
+        if pdpte & pte_large_page() != 0 {
+            return Err(PageNotMapped); // 1GB huge page
+        }
+
+        let pd = (pdpte & pte_frame_mask()) as *mut u64;
+        let pde = core::ptr::read(pd.add(pd_idx));
+        if pde & pte_present() == 0 {
+            return Err(PageNotMapped);
+        }
+        if pde & pte_large_page() != 0 {
+            return Err(PageNotMapped); // 2MB huge page
+        }
+
+        let pt = (pde & pte_frame_mask()) as *mut u64;
+        let pte_ptr = pt.add(pt_idx);
+        let pte_val = core::ptr::read(pte_ptr);
+        if pte_val & pte_present() == 0 {
+            return Err(PageNotMapped);
+        }
+
+        core::ptr::write(pte_ptr, pte_val & !pte_writable());
+        tlb_flush_page(va);
+    }
+
+    Ok(())
+}
+
+/// Error returned when a page is not mapped.
+#[derive(Debug, Clone, Copy)]
+pub struct PageNotMapped;
+
+impl core::fmt::Display for PageNotMapped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "page not mapped")
+    }
+}
+
 /// Read the page fault address (x86_64: CR2 register).
 ///
 /// # Safety
@@ -686,6 +819,18 @@ pub fn cpu_id() -> u32 {
 }
 
 // ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
+
+/// Whether port I/O is available on this architecture.
+pub const fn has_port_io() -> bool {
+    true
+}
+
+/// Whether fork(2) needs explicit RECEIVING/REPLY_PEND clearing on the child.
+/// On RISC-V, PM's SENDNB to the child is skipped so flags must be cleared
+/// directly. On x86_64, the reply delivery path handles this.
+pub const fn fork_needs_child_flag_clear() -> bool {
+    false
+}
 
 /// Read a byte from an I/O port.
 ///
@@ -772,6 +917,137 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsw(port, buf, count) }
 }
 
+// ── PCI configuration access (x86_64: CF8/CFC ports) ────────────────────
+
+/// PCI configuration address port.
+pub const PCI_ADDR_PORT: u16 = 0xCF8;
+/// PCI configuration data port.
+pub const PCI_DATA_PORT: u16 = 0xCFC;
+
+/// Build a PCI config address.
+#[inline]
+pub fn pci_config_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
+    0x8000_0000
+        | ((bus as u32) << 16)
+        | ((dev as u32) << 11)
+        | ((func as u32) << 8)
+        | (reg as u32 & 0xFC)
+}
+
+/// Read 8 bits from PCI config space.
+///
+/// # Safety
+///
+/// Caller must ensure the PCI bus/device/function is valid and accessible.
+pub unsafe fn pci_cfg_read8(bus: u8, dev: u8, func: u8, reg: u8) -> u8 {
+    let addr = pci_config_addr(bus, dev, func, reg);
+    unsafe {
+        outl(PCI_ADDR_PORT, addr);
+        let raw = inl(PCI_DATA_PORT);
+        ((raw >> ((reg as u32 & 0x03) * 8)) & 0xFF) as u8
+    }
+}
+
+/// Read 16 bits from PCI config space.
+///
+/// # Safety
+///
+/// Caller must ensure the PCI bus/device/function is valid and accessible.
+pub unsafe fn pci_cfg_read16(bus: u8, dev: u8, func: u8, reg: u8) -> u16 {
+    let addr = pci_config_addr(bus, dev, func, reg);
+    unsafe {
+        outl(PCI_ADDR_PORT, addr);
+        let raw = inl(PCI_DATA_PORT);
+        ((raw >> ((reg as u32 & 0x02) * 8)) & 0xFFFF) as u16
+    }
+}
+
+/// Read 32 bits from PCI config space.
+///
+/// # Safety
+///
+/// Caller must ensure the PCI bus/device/function is valid and accessible.
+pub unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
+    let addr = pci_config_addr(bus, dev, func, reg);
+    unsafe {
+        outl(PCI_ADDR_PORT, addr);
+        inl(PCI_DATA_PORT)
+    }
+}
+
+/// Write 32 bits to PCI config space.
+///
+/// # Safety
+///
+/// Caller must ensure the PCI bus/device/function is valid and writable.
+pub unsafe fn pci_cfg_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
+    let addr = pci_config_addr(bus, dev, func, reg);
+    unsafe {
+        outl(PCI_ADDR_PORT, addr);
+        outl(PCI_DATA_PORT, val);
+    }
+}
+
+// ── CMOS/RTC access (x86_64: ports 0x70/0x71) ───────────────────────────
+
+/// RTC CMOS index port.
+pub const RTC_INDEX: u16 = 0x70;
+
+/// Read a CMOS register value.
+///
+/// # Safety
+///
+/// Caller must ensure the CMOS register is valid and not concurrently accessed.
+pub unsafe fn cmos_read(reg: u8) -> u8 {
+    let val: u8;
+    unsafe {
+        core::arch::asm! {
+            "out dx, al",
+            "mov dl, 0x71",
+            "in al, dx",
+            inout("dx") RTC_INDEX => _,
+            inout("al") reg => val,
+            options(nomem, nostack),
+        };
+    }
+    val
+}
+
+/// Write a value to a CMOS register.
+///
+/// # Safety
+///
+/// Caller must ensure the CMOS register is valid and not concurrently accessed.
+pub unsafe fn cmos_write(reg: u8, val: u8) {
+    unsafe {
+        core::arch::asm! {
+            "mov dx, 0x70",
+            "mov al, al",
+            "out dx, al",
+            "mov dx, 0x71",
+            "mov al, cl",
+            "out dx, al",
+            in("eax") reg as u32,
+            in("ecx") val as u32,
+            options(nomem, nostack, preserves_flags),
+        };
+    }
+}
+
+// ── Memory fence ─────────────────────────────────────────────────────────
+
+/// Full memory fence (serializes loads and stores).
+///
+/// # Safety
+///
+/// Must be paired with a corresponding fence or atomic operation
+/// on the other side of the memory ordering.
+pub unsafe fn mfence() {
+    unsafe {
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
+    }
+}
+
 // ── Profile clock (RTC-based) ────────────────────────────────────────────
 
 /// Initialize the profiling clock. `rate_code` encodes the RTC divider.
@@ -833,6 +1109,104 @@ pub fn bss_end() -> u64 {
     core::ptr::addr_of!(__bss_end) as u64
 }
 
+// ── VM fork (deep-copy user pages from parent to child) ─────────────────
+
+/// Deep-copy user page table entries from parent to child for fork.
+/// Walks 4-level page tables (PML4 → PDPT → PD → PT).
+/// Returns 0 on success, -12 (ENOMEM) on allocation failure.
+///
+/// # Safety
+///
+/// `parent_cr3` and `child_cr3` must point to valid page tables.
+/// `child_cr3` must be a freshly-allocated zero-filled page.
+pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64]) -> i32 {
+    const USER_ENTRIES: usize = 256;
+    const PG_P: u64 = 0x01;
+    const PG_RW: u64 = 0x02;
+    const PG_U: u64 = 0x04;
+    const PG_PS: u64 = 0x80;
+    const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+
+    unsafe {
+        let parent = parent_cr3 as *const u64;
+        let child = child_cr3 as *mut u64;
+
+        // Copy kernel half (entries 256-511) directly.
+        core::ptr::copy_nonoverlapping(
+            parent.add(USER_ENTRIES),
+            child.add(USER_ENTRIES),
+            USER_ENTRIES,
+        );
+
+        // Copy user half (entries 0-255): walk parent's PML4, copy
+        // intermediate page table pages, and COW-protect leaf pages.
+        for l4 in 0..USER_ENTRIES {
+            let e4 = core::ptr::read(parent.add(l4));
+            if e4 & PG_P == 0 {
+                continue;
+            }
+            let parent_p3 = (e4 & PG_FRAME) as *const u64;
+            let child_p3 = match alloc_phys_page() {
+                Some(pa) => pa as *mut u64,
+                None => return -12,
+            };
+            core::ptr::write(child.add(l4), (child_p3 as u64) | (e4 & !PG_FRAME));
+            for l3 in 0..512 {
+                let e3 = core::ptr::read(parent_p3.add(l3));
+                if e3 & PG_P == 0 {
+                    continue;
+                }
+                let parent_p2 = (e3 & PG_FRAME) as *const u64;
+                let child_p2 = match alloc_phys_page() {
+                    Some(pa) => pa as *mut u64,
+                    None => return -12,
+                };
+                core::ptr::write(child_p3.add(l3), (child_p2 as u64) | (e3 & !PG_FRAME));
+                if e3 & PG_PS != 0 {
+                    // 1GB page — COW-protect if user-writable.
+                    if e3 & PG_U != 0 && e3 & PG_RW != 0 {
+                        core::ptr::write(child_p3.add(l3), e3 & !PG_RW);
+                    } else {
+                        core::ptr::write(child_p3.add(l3), e3);
+                    }
+                    continue;
+                }
+                for l2 in 0..512 {
+                    let e2 = core::ptr::read(parent_p2.add(l2));
+                    if e2 & PG_P == 0 {
+                        continue;
+                    }
+                    if e2 & PG_PS != 0 {
+                        // 2MB page — COW-protect if user-writable.
+                        if e2 & PG_U != 0 && e2 & PG_RW != 0 {
+                            core::ptr::write(child_p2.add(l2), e2 & !PG_RW);
+                        } else {
+                            core::ptr::write(child_p2.add(l2), e2);
+                        }
+                        continue;
+                    }
+                    let parent_p1 = (e2 & PG_FRAME) as *const u64;
+                    let child_p1 = match alloc_phys_page() {
+                        Some(pa) => pa as *mut u64,
+                        None => return -12,
+                    };
+                    core::ptr::write(child_p2.add(l2), (child_p1 as u64) | (e2 & !PG_FRAME));
+                    // Copy 4KB PTEs and COW-protect user-writable entries.
+                    core::ptr::copy_nonoverlapping(parent_p1, child_p1, 512);
+                    for l1 in 0..512 {
+                        let e1 = core::ptr::read(parent_p1.add(l1));
+                        if e1 & PG_P == 0 || e1 & PG_U == 0 || e1 & PG_RW == 0 {
+                            continue;
+                        }
+                        core::ptr::write(child_p1.add(l1), e1 & !PG_RW);
+                    }
+                }
+            }
+        }
+        0
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 /// Allocate a physical page for page table use.
@@ -884,6 +1258,60 @@ pub fn qemu_exit(code: u32) -> ! {
     }
     loop {
         unsafe { core::arch::asm!("hlt") }
+    }
+}
+
+// ── Exec page table root creation ───────────────────────────────────────
+
+/// Create the initial page table root for a new process via exec(2).
+/// Allocates PML4/PDPT/PD pages, copies kernel-half entries from
+/// the boot page table, and returns the PML4 physical address.
+/// Returns 0 on allocation failure.
+///
+/// # Safety
+///
+/// `boot_cr3` must point to a valid boot page table.
+pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
+    const PG_P: u64 = 0x01;
+    const PG_RW: u64 = 0x02;
+    const PG_U: u64 = 0x04;
+    const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+
+    unsafe {
+        let pml4 = match alloc_phys_page() {
+            Some(p) => p,
+            None => return 0,
+        };
+        core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
+        let boot_pml4 = boot_cr3 as *const u64;
+        let pml4e0 = core::ptr::read(boot_pml4);
+        let pdpt_phys = pml4e0 & PG_FRAME;
+        let boot_pdpt = pdpt_phys as *const u64;
+        let pdpte0 = core::ptr::read(boot_pdpt);
+        let pd_phys = pdpte0 & PG_FRAME;
+        let boot_pd = pd_phys as *const u64;
+        let pdpt_page = match alloc_phys_page() {
+            Some(p) => p,
+            None => return 0,
+        };
+        let pd_page = match alloc_phys_page() {
+            Some(p) => p,
+            None => return 0,
+        };
+        core::ptr::write_bytes(pdpt_page as *mut u8, 0, 4096);
+        core::ptr::write_bytes(pd_page as *mut u8, 0, 4096);
+        let flags = PG_P | PG_RW | PG_U;
+        core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
+        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
+        for i in 0usize..512 {
+            let e = core::ptr::read(boot_pd.add(i));
+            core::ptr::write((pd_page as *mut u64).add(i), e);
+        }
+        for i in 256usize..512 {
+            let e = core::ptr::read(boot_pml4.add(i));
+            core::ptr::write((pml4 as *mut u64).add(i), e);
+        }
+        pml4
     }
 }
 

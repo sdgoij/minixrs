@@ -98,12 +98,12 @@ const KBD_CTRL_PORT_B: u16 = 0x64;
 
 /// Read a CMOS register value.
 unsafe fn cmos_read(reg: u8) -> u8 {
-    unsafe { crate::arch_io::cmos_read(reg) }
+    unsafe { crate::hal::cmos_read(reg) }
 }
 
 /// Write a value to a CMOS register.
 unsafe fn cmos_write(reg: u8, val: u8) {
-    unsafe { crate::arch_io::cmos_write(reg, val) }
+    unsafe { crate::hal::cmos_write(reg, val) }
 }
 
 
@@ -311,7 +311,7 @@ pub unsafe fn rtc_set_time(t: &RtcTime) -> Result<(), DriverError> {
 pub unsafe fn rtc_power_off() {
     unsafe {
         // Try keyboard controller power-off via arch_io.
-        crate::arch_io::outb(KBD_CTRL_PORT_B, 0xFE);
+        crate::hal::outb(KBD_CTRL_PORT_B, 0xFE);
     }
 }
 

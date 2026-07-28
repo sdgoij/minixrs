@@ -31,6 +31,8 @@ name = "drivers"
 version = "0.1.0"
 dependencies = [
  "arch-common",
+ "arch-riscv64",
+ "arch-x86_64",
 ]
 
 [[package]]

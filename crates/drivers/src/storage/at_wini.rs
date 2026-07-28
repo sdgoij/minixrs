@@ -245,27 +245,27 @@ static DRIVES: DrivesCell = DrivesCell::new();
 static NR_DRIVES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn inb(port: u16) -> u8 {
-    unsafe { crate::arch_io::inb(port) }
+    unsafe { crate::hal::inb(port) }
 }
 
 unsafe fn outb(port: u16, val: u8) {
-    unsafe { crate::arch_io::outb(port, val) }
+    unsafe { crate::hal::outb(port, val) }
 }
 
 unsafe fn inw(port: u16) -> u16 {
-    unsafe { crate::arch_io::inw(port) }
+    unsafe { crate::hal::inw(port) }
 }
 
 unsafe fn outw(port: u16, val: u16) {
-    unsafe { crate::arch_io::outw(port, val) }
+    unsafe { crate::hal::outw(port, val) }
 }
 
 unsafe fn inl(port: u16) -> u32 {
-    unsafe { crate::arch_io::inl(port) }
+    unsafe { crate::hal::inl(port) }
 }
 
 unsafe fn outl(port: u16, val: u32) {
-    unsafe { crate::arch_io::outl(port, val) }
+    unsafe { crate::hal::outl(port, val) }
 }
 
 unsafe fn ata_read(base_cmd: u16, reg: u16) -> u8 {

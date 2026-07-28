@@ -2,7 +2,7 @@
 
 #![no_std]
 
-pub mod arch_io;
+pub mod hal;
 
 pub mod prelude {
     pub use core::ops::Deref;

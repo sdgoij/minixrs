@@ -36,14 +36,12 @@ pub const PG_FRAME: u64 = crate::hal::pte_frame_mask();
 pub const PG_PTEMASK: u64 = crate::hal::pte_flags_mask();
 
 /// Error indicating the virtual address is not mapped in the page table.
-#[derive(Debug, PartialEq, Eq)]
-pub struct PageNotMapped;
+pub use crate::hal::PageNotMapped;
 
-impl core::fmt::Display for PageNotMapped {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "page not mapped")
-    }
-}
+/// Clear the write bit in a leaf PTE for a given CR3 and VA.
+/// This makes the page read-only for COW.
+/// Returns Ok if the PTE was updated, Err if the page is not mapped.
+pub use crate::hal::clear_rw;
 
 /// Return the saved CR3 value for a process, or 0 if the process has no
 /// per-process page table.
@@ -171,14 +169,8 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         // Walk from the top non-leaf level down to level 1.
         for level in (1..levels).rev() {
             // Validate table_phys before dereferencing.
-            // Physical addresses must be within the identity-mapped range
-            // (0 to 4GB on RISC-V, 0 to 1GB on x86_64) and must not have
-            // non-canonical upper bits (x86_64).
-            #[cfg(target_arch = "x86_64")]
-            let out_of_range = table_phys >= 0x1000_0000 || (table_phys >> 48) != 0;
-            #[cfg(target_arch = "riscv64")]
-            let out_of_range = table_phys >= 0x1_0000_0000;
-            if out_of_range {
+            // Physical addresses must be within the identity-mapped range.
+            if !crate::hal::pte_is_valid_phys(table_phys) {
                 // Dump the corrupted table_phys for diagnosis
                 crate::hal::serial_write_byte(b'!');
                 let hex = b"0123456789abcdef";
@@ -200,10 +192,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 // Zero the entire page so stale data doesn't masquerade as
                 // valid PTEs on subsequent lookups at different indices.
                 core::ptr::write_bytes(p as *mut u8, 0, 4096);
-                #[cfg(target_arch = "x86_64")]
-                let branch_flags = PG_P | PG_RW | PG_U;
-                #[cfg(target_arch = "riscv64")]
-                let branch_flags = PG_P;
+                let branch_flags = crate::hal::pte_nonleaf_flags();
                 write_pte(pte_addr, crate::hal::build_pte(p, branch_flags));
                 p
             } else if pte & PG_PS != 0 {
@@ -216,17 +205,8 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 let base_pa = crate::hal::pte_to_phys(pte);
                 let next_level = level - 1;
                 let step = crate::hal::PAGE_SIZE << (next_level * 9);
-                // Permissions from the original huge page, excluding frame/G bits.
-                #[cfg(target_arch = "x86_64")]
-                let mut pte_flags_src = (pte & PG_PTEMASK) & !(PG_FRAME | PG_G);
-                #[cfg(target_arch = "riscv64")]
-                let pte_flags_src = (pte & PG_PTEMASK) & !PG_FRAME;
-                // If next_level > 0, entries are themselves huge pages.
-                // On x86_64: add PG_PS. On RISC-V: R|W|X already from source.
-                #[cfg(target_arch = "x86_64")]
-                if next_level > 0 {
-                    pte_flags_src |= PG_PS;
-                }
+                // Permissions from the original huge page, arch-adjusted.
+                let pte_flags_src = crate::hal::pte_split_flags(pte, next_level);
                 let pt_virt = pt_phys as *mut u64;
                 for i in 0..512u64 {
                     let pte_pa = base_pa + i * step;
@@ -237,11 +217,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 }
                 write_pte(
                     pte_addr,
-                    #[cfg(target_arch = "x86_64")]
-                    crate::hal::build_pte(pt_phys, PG_P | PG_RW | PG_U),
-                    // RISC-V non-leaf PTE: V=1 only (A|D are WPRI)
-                    #[cfg(target_arch = "riscv64")]
-                    crate::hal::build_pte(pt_phys, PG_P),
+                    crate::hal::build_pte(pt_phys, crate::hal::pte_nonleaf_flags()),
                 );
                 pt_phys
             } else {
@@ -257,10 +233,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         // Flush TLB for the modified page so the new mapping is visible.
         // Without this, stale read-only TLB entries (e.g., from COW
         // protection) persist and cause repeated page faults.
-        #[cfg(target_arch = "x86_64")]
-        core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
+        crate::hal::tlb_flush_page(va);
         Ok(())
     }
 }
@@ -318,65 +291,6 @@ pub struct PageFaultInfo {
     pub protection: bool,
 }
 
-/// Clear the write (RW) bit in a leaf PTE for a given CR3 and VA.
-/// This makes the page read-only for COW.
-/// Returns Ok if the PTE was updated, Err if the page is not mapped.
-#[cfg(target_arch = "x86_64")]
-pub fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
-    let pml4_idx = pml4_index(va);
-    let pdpt_idx = pdpt_index(va);
-    let pd_idx = pd_index(va);
-    let pt_idx = pt_l0_index(va);
-
-    unsafe {
-        let pml4 = cr3 as *const u64;
-        let pml4e = core::ptr::read(pml4.add(pml4_idx));
-        if pml4e & PG_P == 0 {
-            return Err(PageNotMapped);
-        }
-
-        let pdpt = (pml4e & PG_FRAME) as *const u64;
-        let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-        if pdpte & PG_P == 0 {
-            return Err(PageNotMapped);
-        }
-        if pdpte & PG_PS != 0 {
-            return Err(PageNotMapped);
-        } // 1GB page - skip
-
-        let pd = (pdpte & PG_FRAME) as *mut u64;
-        let pde = core::ptr::read(pd.add(pd_idx));
-        if pde & PG_P == 0 {
-            return Err(PageNotMapped);
-        }
-        if pde & PG_PS != 0 {
-            return Err(PageNotMapped);
-        } // 2MB page - skip
-
-        let pt = (pde & PG_FRAME) as *mut u64;
-        let pte_ptr = pt.add(pt_idx);
-        let pte_val = core::ptr::read(pte_ptr);
-        if pte_val & PG_P == 0 {
-            return Err(PageNotMapped);
-        }
-
-        // Clear the write bit (keep everything else)
-        core::ptr::write(pte_ptr, pte_val & !PG_RW);
-        // Flush TLB for this page
-        #[cfg(target_arch = "x86_64")]
-        core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
-        #[cfg(target_arch = "riscv64")]
-        core::arch::asm!("sfence.vma", options(nostack, preserves_flags));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn clear_rw(_cr3: u64, _va: u64) -> Result<(), PageNotMapped> {
-    Err(PageNotMapped)
-}
-
 /// Decode a page fault error code into structured information.
 pub fn decode_page_fault(va: u64, err: u32) -> PageFaultInfo {
     PageFaultInfo {
@@ -426,12 +340,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         let base_pa = crate::hal::pte_to_phys(result.pte_value);
 
         // Attributes to propagate to each 4KB PTE.
-        // On x86_64: exclude frame, PS, and G. On RISC-V: exclude frame and G only
-        // (PG_PS = 0x0F = V|R|W|X, not a dedicated flag bit).
-        #[cfg(target_arch = "x86_64")]
-        let exclude_mask = PG_FRAME | PG_PS | PG_G;
-        #[cfg(target_arch = "riscv64")]
-        let exclude_mask = PG_FRAME | PG_G;
+        let exclude_mask = crate::hal::pte_pd_split_exclude_mask();
         let attrs = result.pte_value & !exclude_mask;
 
         // Allocate a 4KB page table to hold the split PTEs
@@ -446,11 +355,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
         }
 
         // Replace the PDE to point to the new page table.
-        // On x86_64: clear PS and G. On RISC-V: clear G only (PG_PS = V|R|W|X).
-        #[cfg(target_arch = "x86_64")]
-        let clear_mask = PG_PS | PG_G;
-        #[cfg(target_arch = "riscv64")]
-        let clear_mask = PG_G;
+        let clear_mask = crate::hal::pte_pd_split_clear_mask();
         let pde_flags = (result.pte_value & PG_PTEMASK) & !clear_mask;
         let new_pde = crate::hal::build_pte(pt_phys, pde_flags);
         write_pte(result.pte_virt, new_pde);

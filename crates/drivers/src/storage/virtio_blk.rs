@@ -378,11 +378,7 @@ fn wait_for_completion(max_spins: u32) -> Result<(), DriverError> {
         if poll_completion() {
             return Ok(());
         }
-        // Lightweight hint for the CPU (equivalent to `pause` / `rep nop`).
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("pause", options(nomem, nostack, preserves_flags));
-        }
+        core::hint::spin_loop();
     }
     // Final check before declaring timeout.
     if poll_completion() {

@@ -21,10 +21,10 @@ pub struct RealIo;
 
 impl IoPort for RealIo {
     fn inb(&self, port: u16) -> u8 {
-        unsafe { crate::arch_io::inb(port) }
+        unsafe { crate::hal::inb(port) }
     }
     fn outb(&mut self, port: u16, val: u8) {
-        unsafe { crate::arch_io::outb(port, val) }
+        unsafe { crate::hal::outb(port, val) }
     }
 }
 

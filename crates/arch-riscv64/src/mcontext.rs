@@ -59,6 +59,13 @@ impl fmt::Debug for Mcontext {
     }
 }
 
+impl Default for Mcontext {
+    fn default() -> Self {
+        // SAFETY: all-zero is a valid (if degenerate) machine context.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

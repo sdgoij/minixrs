@@ -109,12 +109,8 @@ pub fn parse_elf_header(data: &[u8]) -> Result<&Elf64Ehdr, ElfError> {
     if ehdr.e_type != ET_EXEC {
         return Err(ElfError::NotExecutable);
     }
-    // Must be x86_64 or RISC-V
-    #[cfg(target_arch = "x86_64")]
-    let expected_machine = EM_X86_64;
-    #[cfg(target_arch = "riscv64")]
-    let expected_machine = EM_RISCV;
-    if ehdr.e_machine != expected_machine {
+    // Must match the running architecture
+    if ehdr.e_machine != crate::hal::ELF_MACHINE {
         return Err(ElfError::WrongArch);
     }
     Ok(ehdr)

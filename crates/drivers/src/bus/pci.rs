@@ -244,15 +244,15 @@ pub unsafe fn pci_init() {
         // Scan bus 0 devices 0-31, functions 0-7.
         for dev in 0..32u8 {
             for func in 0..8u8 {
-                let vendor = crate::arch_io::pci_cfg_read16(0, dev, func, 0x00);
+                let vendor = crate::hal::pci_cfg_read16(0, dev, func, 0x00);
                 if pci_device_exists(vendor) {
-                    let did = crate::arch_io::pci_cfg_read16(0, dev, func, 0x02);
-                    let class_raw = crate::arch_io::pci_cfg_read32(0, dev, func, 0x08);
+                    let did = crate::hal::pci_cfg_read16(0, dev, func, 0x02);
+                    let class_raw = crate::hal::pci_cfg_read32(0, dev, func, 0x08);
                     let baseclass = ((class_raw >> 24) & 0xFF) as u8;
                     let subclass = ((class_raw >> 16) & 0xFF) as u8;
                     let infclass = ((class_raw >> 8) & 0xFF) as u8;
-                    let _header = crate::arch_io::pci_cfg_read8(0, dev, func, 0x0E);
-                    let ilr = crate::arch_io::pci_cfg_read8(0, dev, func, 0x3F);
+                    let _header = crate::hal::pci_cfg_read8(0, dev, func, 0x0E);
+                    let ilr = crate::hal::pci_cfg_read8(0, dev, func, 0x3F);
 
                     let mut pd = PciDev::new();
                     pd.busnr = 0;
@@ -271,7 +271,7 @@ pub unsafe fn pci_init() {
                 }
                 // Single-function device — skip remaining functions.
                 if func == 0 {
-                    let header = crate::arch_io::pci_cfg_read8(0, dev, 0, 0x0E);
+                    let header = crate::hal::pci_cfg_read8(0, dev, 0, 0x0E);
                     if header & 0x80 == 0 {
                         break;
                     }
@@ -293,7 +293,7 @@ unsafe fn pci_add_device(busnr: u8, dev: u8, func: u8, pd: &mut PciDev) {
         // Read BARs.
         for i in 0..BAR_MAX {
             let offset = 0x10 + (i as u8) * 4;
-            let bar_val = crate::arch_io::pci_cfg_read32(busnr, dev, func, offset);
+            let bar_val = crate::hal::pci_cfg_read32(busnr, dev, func, offset);
             if bar_val == 0 {
                 continue;
             }

@@ -50,11 +50,11 @@ pub struct RealIo;
 
 impl IoBackend for RealIo {
     unsafe fn inb(port: u16) -> u8 {
-        unsafe { crate::arch_io::inb(port) }
+        unsafe { crate::hal::inb(port) }
     }
 
     unsafe fn outb(port: u16, value: u8) {
-        unsafe { crate::arch_io::outb(port, value) }
+        unsafe { crate::hal::outb(port, value) }
     }
 }
 
