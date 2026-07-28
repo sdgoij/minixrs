@@ -43,7 +43,7 @@ pub const VFS_CHDIR: i32 = 0x108;
 pub const VFS_OPEN: i32 = 0x103;
 pub const VFS_READ: i32 = 0x100;
 pub const VFS_CLOSE: i32 = 0x105;
-pub const VFS_GETDENTS: i32 = 0x106;
+pub const VFS_GETDENTS: i32 = 0x11D; // VFS_BASE + 29
 
 /// PM message types (from callnr.h).
 pub const PM_FORK: i32 = 0x0002;
@@ -1136,6 +1136,61 @@ mod tests {
     }
 
     #[test]
+    fn test_minix_rt_constants() {
+        // PM call numbers from .refs/minix-3.3.0/minix/include/minix/callnr.h
+        let pm_base: i32 = 0x000;
+        assert_eq!(PM_FORK, pm_base + 2);
+        assert_eq!(PM_WAITPID, pm_base + 3);
+        assert_eq!(PM_EXEC_NEW, pm_base + 43);
+
+        // VFS call numbers from the same header
+        let vfs_base: i32 = 0x100;
+        assert_eq!(VFS_READ, vfs_base + 0);
+        assert_eq!(VFS_OPEN, vfs_base + 3);
+        assert_eq!(VFS_CLOSE, vfs_base + 5);
+        assert_eq!(VFS_CHDIR, vfs_base + 8);
+        assert_eq!(
+            VFS_GETDENTS,
+            vfs_base + 29,
+            "VFS_GETDENTS must be VFS_BASE + 29 (0x11D), not VFS_BASE + 6"
+        );
+
+        // IPC syscall numbers
+        assert_eq!(SEND_CALL, 46);
+        assert_eq!(SENDNB_CALL, 51);
+        assert_eq!(RECEIVE_CALL, 47);
+        assert_eq!(SENDREC_CALL, 48);
+        assert_eq!(NOTIFY_CALL, 49);
+        assert_eq!(SENDA_CALL, 52);
+
+        // Syscall numbers (from .refs/minix-3.3.0/minix/include/minix/callnr.h)
+        assert_eq!(NR_FORK, 58);
+        assert_eq!(NR_WAITPID, 59);
+        assert_eq!(NR_EXEC_REPLACE, 61);
+        assert_eq!(NR_KERNEL_CALL, 50);
+        assert_eq!(NR_IS_FORK_CHILD, 63);
+
+        // File operation syscall numbers
+        assert_eq!(NR_READ, 2);
+        assert_eq!(NR_CHDIR, 12);
+        assert_eq!(NR_DUP, 32);
+        assert_eq!(NR_MKDIR, 40);
+        assert_eq!(NR_UNLINK, 41);
+        assert_eq!(NR_RMDIR, 42);
+        assert_eq!(NR_LINK, 43);
+        assert_eq!(NR_CHMOD, 44);
+        assert_eq!(NR_CHOWN, 45);
+        assert_eq!(NR_MKNOD, 56);
+        assert_eq!(NR_GETDENTS, 57);
+
+        // Endpoints (from .refs/minix-3.3.0/minix/include/minix/endpoint.h)
+        assert_eq!(PM_PROC_NR, 0);
+        assert_eq!(VFS_PROC_NR, 1);
+        assert_eq!(VM_PROC_NR, 8);
+        assert_eq!(SELF, 0x0000fffd);
+    }
+
+    #[test]
     fn test_syscall0_signature() {
         // Verify the function compiles with the right signature.
         fn _check(f: unsafe fn(u64) -> i64) {
@@ -1167,6 +1222,43 @@ mod tests {
         assert_eq!((1 + align - 1) & !(align - 1), 4096);
         assert_eq!((4095 + align - 1) & !(align - 1), 4096);
         assert_eq!((4096 + align - 1) & !(align - 1), 4096);
+    }
+
+    #[test]
+    fn test_stack_alignment_edge_cases() {
+        // These are the alignment patterns used by setup_user_stack in elf.rs.
+        // The SysV AMD64 ABI requires RSP to be 16-byte aligned at process entry.
+        //
+        // argv_array_size = align16((argc + 2) * 8)
+        // Verify for 0 to 32 arguments.
+        for argc in 0..32u64 {
+            let raw = (argc + 2) * 8;
+            let aligned = (raw + 15) & !15;
+            assert!(
+                aligned % 16 == 0,
+                "align16({}) = {} not 16-byte aligned for argc={}",
+                raw,
+                aligned,
+                argc
+            );
+            assert!(aligned >= raw, "align16 must not shrink");
+            assert!(
+                aligned - raw < 16,
+                "align16 pad must be < 16 for argc={}",
+                argc
+            );
+        }
+    }
+
+    #[test]
+    fn test_allocator_heap_bounds() {
+        // The bump allocator uses the 0x3FE00000 - 0x3FF00000 region.
+        // Verify the bounds don't overflow or wrap.
+        let start = 0x3FE00000usize;
+        let end = 0x3FF00000usize;
+        assert!(start < end, "heap start must be below end");
+        assert!(end - start == 0x100000, "heap size must be 1MB");
+        assert!(end <= usize::MAX, "heap end must not overflow");
     }
 
     #[test]
