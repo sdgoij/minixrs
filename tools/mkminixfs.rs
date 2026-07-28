@@ -504,8 +504,17 @@ fn main() {
 
     // Write the raw image
     let img_path = target_dir.join("minixfs.img");
-    fs::write(&img_path, &image).unwrap();
-    println!("minixfs.img: {} bytes written", image.len());
+    // Only write if content changed, so Cargo doesn't rebuild the kernel
+    let img_needs_write = match fs::read(&img_path) {
+        Ok(existing) => existing.as_slice() != image,
+        Err(_) => true,
+    };
+    if img_needs_write {
+        fs::write(&img_path, &image).unwrap();
+        println!("minixfs.img: {} bytes written", image.len());
+    } else {
+        println!("minixfs.img: {} bytes, unchanged", image.len());
+    }
 
     // Generate Rust source stub that includes the raw binary via include_bytes!
     // This is vastly faster than emitting an 8-million-entry array literal.
@@ -525,7 +534,17 @@ fn main() {
         image.len(),
         image.len(),
     );
-    fs::write(&rs_path, &rs).unwrap();
-    println!("minixfs_data.rs: {} bytes written", rs.len());
+    // Only write if content changed, so Cargo doesn't rebuild the kernel
+    // when nothing actually changed.
+    let needs_write = match fs::read_to_string(&rs_path) {
+        Ok(existing) => existing != rs,
+        Err(_) => true,
+    };
+    if needs_write {
+        fs::write(&rs_path, &rs).unwrap();
+        println!("minixfs_data.rs: {} bytes written", rs.len());
+    } else {
+        println!("minixfs_data.rs: unchanged");
+    }
     println!("Done.");
 }

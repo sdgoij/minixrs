@@ -266,8 +266,18 @@ fn main() {
     // Add trailer
     write_entry(&mut cpio, 0, "TRAILER!!!", 0, 0, 0, 0, 0, &[]);
 
-    fs::write(&cpio_path, &cpio).unwrap();
-    println!("initramfs.cpio: {} bytes written", cpio.len());
+    // Only write if content changed, so Cargo doesn't rebuild the kernel
+    // when binary content is identical.
+    let cpio_needs_write = match fs::read(&cpio_path) {
+        Ok(existing) => existing.as_slice() != cpio.as_slice(),
+        Err(_) => true,
+    };
+    if cpio_needs_write {
+        fs::write(&cpio_path, &cpio).unwrap();
+        println!("initramfs.cpio: {} bytes written", cpio.len());
+    } else {
+        println!("initramfs.cpio: {} bytes, unchanged", cpio.len());
+    }
     println!(
         "  {} entries ({} files, {} dirs, {} devices)",
         BOOT_BINS.len() + 7, // 4 dirs + bins + devices + trailer
@@ -294,8 +304,18 @@ fn main() {
         cpio.len(),
         cpio.len(),
     );
-    fs::write(&rs_path, &rs).unwrap();
-    println!("initramfs_data.rs: {} bytes written", rs.len());
+    // Only write if content changed, so Cargo doesn't rebuild the kernel
+    // when nothing actually changed.
+    let needs_write = match fs::read_to_string(&rs_path) {
+        Ok(existing) => existing != rs,
+        Err(_) => true,
+    };
+    if needs_write {
+        fs::write(&rs_path, &rs).unwrap();
+        println!("initramfs_data.rs: {} bytes written", rs.len());
+    } else {
+        println!("initramfs_data.rs: unchanged");
+    }
 
     // Clean up staging
     fs::remove_dir_all(&bins_dir).ok();
