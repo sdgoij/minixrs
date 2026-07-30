@@ -23,7 +23,6 @@ pub mod msr {
     /// C1E enable/disable (AMD).
     pub const C1E: u32 = 0xC001_0016;
 
-    // ── SYSCALL/SYSRET MSRs (x86_64 only) ────────────────────────────────
 
     /// Extended Feature Enable Register.
     /// Bit 0: SCE (Syscall Enable)
@@ -47,7 +46,6 @@ pub mod msr {
     /// SF_MASK — SYSCALL Flag Mask (clears RFLAGS bits on syscall).
     pub const SF_MASK: u32 = 0xC000_0084;
 
-    // ── FS/GS BASE MSRs ───────────────────────────────────────────────────
 
     /// IA32_FS_BASE — User-mode FS segment base.
     pub const FS_BASE: u32 = 0xC000_0100;
@@ -57,7 +55,6 @@ pub mod msr {
     /// Per Intel SDM Vol 4 Table 2-7: MSR at 0xC0000102.
     pub const KERNEL_GS_BASE: u32 = 0xC000_0102;
 
-    // ── Other common MSRs ─────────────────────────────────────────────────
 
     pub const PAT: u32 = 0x0000_0277;
     pub const MTRR_CAP: u32 = 0x0000_00FE;
@@ -77,7 +74,6 @@ pub mod msr {
     pub const MICROCODE_UPDATE: u32 = 0x0000_0079;
 }
 
-// ── EFER bit definitions ────────────────────────────────────────────────
 
 pub mod efer {
     pub const SCE: u64 = 1 << 0; // Syscall Enable
@@ -86,7 +82,6 @@ pub mod efer {
     pub const NXE: u64 = 1 << 11; // No-Execute Enable
 }
 
-// ── STAR bit layout ─────────────────────────────────────────────────────
 // STAR bits 47:32 = SYSRET CS/SS selector (SysCallEIP is unused on x86_64)
 
 /// Extract the SYSRET selector from STAR.

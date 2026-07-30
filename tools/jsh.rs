@@ -45,7 +45,6 @@ fn exe_name(name: &str) -> String {
     }
 }
 
-// ── Build steps ───────────────────────────────────────────────────────
 fn build_mkboot() {
     if mkboot_exe().exists() {
         return; // Already compiled. Avoid LNK1104 on Windows.
@@ -129,7 +128,6 @@ fn run_qemu_riscv() {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-// ── Built-in commands ─────────────────────────────────────────────────
 fn cmd_build(target: &str) {
     match target {
         "x86" => {
@@ -398,7 +396,6 @@ fn cmd_test(target: &str) {
     }
 }
 
-// ── Shell mode ────────────────────────────────────────────────────────
 fn run_shell_command(cmd_str: &str) {
     let trimmed = cmd_str.trim();
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -456,7 +453,6 @@ fn is_builtin(program: &str) -> bool {
     )
 }
 
-// ── Entry ─────────────────────────────────────────────────────────────
 fn main() {
     let args: Vec<String> = env::args().collect();
 

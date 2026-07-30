@@ -636,7 +636,6 @@ pub unsafe fn phys_insw(_port: u16, _buf: u64, _count: usize) {}
 /// String output to I/O port (word) from physical buffer (unimplemented on RISC-V).
 pub unsafe fn phys_outsw(_port: u16, _buf: u64, _count: usize) {}
 
-// ── PCI/CMOS stubs (not available on RISC-V via port I/O) ──────────────
 
 /// PCI configuration address port (unused on RISC-V).
 pub const PCI_ADDR_PORT: u16 = 0xCF8;
@@ -782,7 +781,6 @@ pub unsafe fn init_cpulocals() {
     }
 }
 
-// ── Scheduler cpulocals accessors (Phase 19.7) ──────────────────────────
 
 /// Get the run queue head pointer array.
 pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
@@ -842,7 +840,6 @@ pub fn hlt() {
     }
 }
 
-// ── Timestamp counter ────────────────────────────────────────────────────
 
 /// Read the timestamp counter.
 pub fn read_tsc() -> u64 {
@@ -889,7 +886,6 @@ pub unsafe fn tlb_flush() {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
 
 /// Exit QEMU via sifive_test device (MMIO 0x100000 on virt machine).
 /// 0x5555 = pass (exit code 0), 0x3333 = fail (exit code 1).
@@ -903,7 +899,6 @@ pub fn qemu_exit(code: u32) -> ! {
     }
 }
 
-// ── VM fork (deep-copy user pages from parent to child) ─────────────────
 
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks SV39 3-level page tables (L2 → L1 → L0).
@@ -1076,7 +1071,6 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     }
 }
 
-// ── Exec page table root creation ───────────────────────────────────────
 
 /// Create the initial page table root for a new process via exec(2).
 /// Allocates an L2 page, copies kernel identity-map entries from the

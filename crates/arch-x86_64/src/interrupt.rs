@@ -7,7 +7,6 @@
 //! - I/O APIC handles device interrupt routing
 //! - IRQ vectors: 0x20-0x2F for PIC, 0x30-0xEF for I/O APIC
 
-// ── Legacy 8259A PIC ────────────────────────────────────────────────────
 
 pub const PIC_MASTER_CMD: u16 = 0x20;
 pub const PIC_MASTER_DATA: u16 = 0x21;
@@ -21,7 +20,6 @@ pub const PIC_CASCADE_ID: u8 = 0x04;
 pub const PIC_MASTER_BASE: u8 = 0x20;
 pub const PIC_SLAVE_BASE: u8 = 0x28;
 
-// ── Local APIC base ─────────────────────────────────────────────────────
 
 pub const LAPIC_DEFAULT_BASE: u64 = 0xFEE00000;
 
@@ -50,7 +48,6 @@ pub const LAPIC_TIMER_ICR: u32 = 0x380;
 pub const LAPIC_TIMER_CCR: u32 = 0x390;
 pub const LAPIC_TIMER_DCR: u32 = 0x3E0;
 
-// ── LVT entry bit definitions ───────────────────────────────────────────
 
 pub const LVT_MASKED: u32 = 0x00010000;
 pub const LVT_TRIGGER_LEVEL: u32 = 0x00008000;
@@ -62,7 +59,6 @@ pub const LVT_DELIVERY_NMI: u32 = 0x00000400;
 pub const LVT_DELIVERY_SMI: u32 = 0x00000200;
 pub const LVT_DELIVERY_EXTINT: u32 = 0x00000700;
 
-// ── ICR (IPI) bit definitions ───────────────────────────────────────────
 
 pub const ICR_DELIVERY_FIXED: u64 = 0x00000000;
 pub const ICR_DELIVERY_NMI: u64 = 0x00000400;
@@ -73,19 +69,16 @@ pub const ICR_DEST_SELF: u64 = 0x00040000;
 pub const ICR_DEST_ALL: u64 = 0x00080000;
 pub const ICR_DEST_ALLBUT: u64 = 0x000C0000;
 
-// ── I/O APIC ────────────────────────────────────────────────────────────
 
 pub const IOAPIC_DEFAULT_BASE: u64 = 0xFEC00000;
 pub const IOAPIC_ID: u32 = 0x00;
 pub const IOAPIC_VERSION: u32 = 0x01;
 pub const IOAPIC_REDIR_TABLE: u32 = 0x10;
 
-// ── IRQ vector layout ───────────────────────────────────────────────────
 
 pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_SPURIOUS: u8 = 0xFF;
 
-// ── IRQ hook structure ──────────────────────────────────────────────────
 
 pub const NR_IRQ_HOOKS: u32 = 64;
 
@@ -100,7 +93,6 @@ pub struct IrqHook {
 }
 
 
-// ── Helper ──────────────────────────────────────────────────────────────
 
 pub const fn irq_vector(irq: u32) -> u8 {
     (VECTOR_TIMER as u32 + irq) as u8

@@ -11,7 +11,6 @@ pub use crate::asm::{
     read_cr0, read_cr2, read_cr3, read_cr4, tlb_flush, write_cr0, write_cr3, write_cr4,
 };
 
-// ── GDT/IDT/TSS read ─────────────────────────────────────
 
 pub fn sgdt() -> (u16, u64) {
     let mut desc: [u8; 10] = [0u8; 10];
@@ -41,7 +40,6 @@ pub fn str() -> u16 {
     unsafe { asm::str_sel() }
 }
 
-// ── TLB ──────────────────────────────────────────────────
 
 pub fn tlb_flush_current() {
     unsafe {
@@ -63,7 +61,6 @@ pub fn tlb_flush_page(addr: u64) {
     }
 }
 
-// ── FPU ───────────────────────────────────────────────────
 
 pub const FPU_SAVE_AREA_SIZE: usize = 512;
 
@@ -108,7 +105,6 @@ pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
     }
 }
 
-// ── IDT gate builders ─────────────────────────────────────
 
 /// 16-byte x86_64 IDT gate descriptor as (low_qword, high_qword).
 pub const fn idt_gate_descriptor(
@@ -138,7 +134,6 @@ pub const fn idt_trap_gate_64(offset: u64, selector: u16, dpl: u8) -> (u64, u64)
     idt_gate_descriptor(offset, selector, 0, 15, dpl, true)
 }
 
-// ── APIC ──────────────────────────────────────────────────
 
 const LAPIC_BASE: u64 = 0xFEE00000;
 
@@ -166,7 +161,6 @@ pub unsafe fn apic_eoi() {
     }
 }
 
-// ── PIC ───────────────────────────────────────────────────
 
 use crate::interrupt as intr;
 
@@ -207,7 +201,6 @@ pub unsafe fn pic_eoi(irq: u8) {
     }
 }
 
-// ── Serial ────────────────────────────────────────────────
 
 pub const COM1: u16 = 0x3F8;
 pub const COM2: u16 = 0x2F8;
@@ -257,7 +250,6 @@ pub unsafe fn ser_puts(port: u16, s: &[u8]) {
     }
 }
 
-// ── TSC ───────────────────────────────────────────────────
 
 pub fn read_tsc() -> u64 {
     unsafe { asm::rdtsc() }
@@ -275,7 +267,6 @@ pub fn read_apic_tsc() -> u64 {
     read_tsc()
 }
 
-// ── Atomics ───────────────────────────────────────────────
 
 pub use core::sync::atomic::AtomicU32;
 pub use core::sync::atomic::AtomicU64;
@@ -370,7 +361,6 @@ mod tests {
         let _ = read_tsc();
     }
 
-    // ── IDT gate edge cases ────────────────────────────────────────────────
 
     #[test]
     fn test_idt_gate_selector_zero() {
@@ -462,7 +452,6 @@ mod tests {
         assert_eq!((lo >> 40) & 0xFF, 0x0F);
     }
 
-    // ── Atomic operation edge cases ────────────────────────────────────────
 
     #[test]
     fn test_atomic_cas_64_fail() {
@@ -511,7 +500,6 @@ mod tests {
         assert_eq!(x.load(Ordering::Relaxed), 0x1234);
     }
 
-    // ── TLB flush type-check tests ─────────────────────────────────────────
     //
     // TLB flush functions call privileged instructions (write_cr3, write_cr4,
     // invlpg).  These cannot be executed from usermode test binaries.  We
@@ -526,7 +514,6 @@ mod tests {
         _is_fn1(tlb_flush_page);
     }
 
-    // ── SGDT / SIDT / STR tests (ring-3-safe) ──────────────────────────────
     //
     // SGDT, SIDT, and STR are all accessible from ring 3, so executing them
     // in a test binary is safe.

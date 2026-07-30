@@ -8,7 +8,6 @@
 //! - Larger process size limits (no 4 GB ceiling)
 //! - Paging level constants for 4-level paging
 
-// ── Paging level shifts and page directory sizes ───────────────────────
 
 /// L4: PML4 shift (bits 39-47)
 pub const L4_SHIFT: u32 = 39;
@@ -31,13 +30,11 @@ pub const NBPD_L1: u64 = 1u64 << L1_SHIFT;
 /// Number of entries per page table (all levels).
 pub const NENTRIES: u64 = 512;
 
-// ── Page size ───────────────────────────────────────────────────────────
 
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
 pub const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
-// ── Virtual address space layout ───────────────────────────────────────
 
 /// Top of user stack (end of user address space).
 pub const USRSTACK: u64 = 0x00007FFFFFFFFFFFu64;
@@ -49,7 +46,6 @@ pub const VM_MAX_ADDRESS: u64 = 0xFFFFFFFFFFFFFFFFu64;
 pub const VM_MIN_KERNEL_ADDRESS: u64 = 0xFFFF800000000000u64;
 pub const VM_MAX_KERNEL_ADDRESS: u64 = 0xFFFFFFFFFFFFFFFFu64;
 
-// ── Process size limits ────────────────────────────────────────────────
 
 pub const MAXTSIZ: u64 = 256 * 1024 * 1024;
 pub const DFLDSIZ: u64 = 512 * 1024 * 1024;
@@ -57,7 +53,6 @@ pub const MAXDSIZ: u64 = 128 * 1024 * 1024 * 1024;
 pub const DFLSSIZ: u64 = 8 * 1024 * 1024;
 pub const MAXSSIZ: u64 = 64 * 1024 * 1024;
 
-// ── Physical memory ─────────────────────────────────────────────────────
 
 pub const USRIOSIZE: u32 = 300;
 pub const VM_PHYS_SIZE: u64 = USRIOSIZE as u64 * PAGE_SIZE;

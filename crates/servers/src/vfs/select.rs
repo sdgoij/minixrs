@@ -22,7 +22,6 @@ pub const SEL_RD: u32 = 0x01;
 pub const SEL_WR: u32 = 0x02;
 pub const SEL_EX: u32 = 0x04;
 
-// ── fd_set helpers ─────────────────────────────────────────────────────────
 
 #[inline]
 pub fn fd_zero(set: &mut FdSet) {
@@ -90,7 +89,6 @@ fn ops2tab(
     count
 }
 
-// ── Select table entry ─────────────────────────────────────────────────────
 
 struct SelectEntry {
     /// Owning fproc (NULL = free slot).
@@ -144,7 +142,6 @@ impl SelectEntry {
     }
 }
 
-// ── Global select table ────────────────────────────────────────────────────
 
 use core::cell::UnsafeCell;
 
@@ -169,7 +166,6 @@ unsafe fn se_slot_ref(i: usize) -> &'static SelectEntry {
     unsafe { &*(*SELECT_TABLE.get()).as_ptr().add(i) }
 }
 
-// ── Select request per file type ───────────────────────────────────────────
 
 /// Check whether a regular file's fd is ready for the given ops.
 /// Regular files are always ready.
@@ -202,7 +198,6 @@ fn select_request_char(_filp: &Filp, ops: u32) -> u32 {
     ops
 }
 
-// ── do_select — entry point ───────────────────────────────────────────────
 
 /// Perform the `select(nfds, readfds, writefds, errorfds, timeout)` system call.
 ///
@@ -384,7 +379,6 @@ unsafe fn write_results(se: &SelectEntry) {
     }
 }
 
-// ── Message helpers ────────────────────────────────────────────────────────
 
 fn r2_i32(buf: &[u8; 64], off: usize) -> i32 {
     i32::from_le_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4]))
@@ -411,7 +405,6 @@ unsafe fn copy_to_user(val: FdSet, user_ptr: u64) {
     }
 }
 
-// ── select_notify — called when a pipe or device becomes ready ─────────────
 
 /// Notify any blocked select() caller that fds are ready.
 /// Called by pipe close/release or device event handlers.

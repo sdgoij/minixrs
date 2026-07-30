@@ -154,7 +154,6 @@ impl CpuLocalStorage {
         self.vars.load(Ordering::Relaxed)
     }
 
-    // ── Field accessors ──────────────────────────────────────────────────
     //
     // Each accessor wraps raw pointer dereferences in an `unsafe` block
     // to satisfy `unsafe_op_in_unsafe_fn` (Rust 2024).

@@ -101,7 +101,6 @@ impl Pipe {
     }
 }
 
-// ── Global pipe table ──────────────────────────────────────────────────────
 
 struct PipeTable(UnsafeCell<[Pipe; NR_PIPES]>);
 
@@ -116,7 +115,6 @@ impl PipeTable {
 
 static PIPES: PipeTable = PipeTable::new();
 
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Allocate a new pipe.  Returns the pipe index, or `None` if the table is
 /// full.

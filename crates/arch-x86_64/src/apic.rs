@@ -15,12 +15,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::asm;
 
-// ── MSR ─────────────────────────────────────────────────────────────────
 
 /// IA32_APIC_BASE MSR.
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
 
-// ── Local APIC MMIO register offsets (xAPIC) ───────────────────────────
 
 #[allow(unused)]
 const APIC_ID_OFF: u32 = 0x20;
@@ -43,7 +41,6 @@ const APIC_TIMER_CURRCNT_OFF: u32 = 0x390;
 #[allow(unused)]
 const APIC_TIMER_DIV_OFF: u32 = 0x3E0;
 
-// ── I/O APIC register offsets ──────────────────────────────────────────
 
 const IOAPIC_IOREGSEL: u64 = 0x00;
 const IOAPIC_IOWIN: u64 = 0x10;
@@ -54,7 +51,6 @@ const IOAPIC_VERSION: u32 = 0x01;
 const IOAPIC_ARB: u32 = 0x02;
 const IOAPIC_REDIR_TBL: u32 = 0x10; // first RTE index
 
-// ── Local APIC physical base addresses (typical) ───────────────────────
 
 /// Local APIC physical base address (typical).
 pub const DEFAULT_APIC_BASE: u64 = 0xFEE00000;
@@ -62,12 +58,10 @@ pub const DEFAULT_APIC_BASE: u64 = 0xFEE00000;
 /// I/O APIC physical base address (typical).
 pub const DEFAULT_IOAPIC_BASE: u64 = 0xFEC00000;
 
-// ── Spurious vector ────────────────────────────────────────────────────
 
 const APIC_SVR_ENABLE: u32 = 0x100; // bit 8
 const APIC_SPURIOUS_VECTOR: u32 = 0xFF;
 
-// ── APIC mode ──────────────────────────────────────────────────────────
 
 /// The detected operating mode of the system's interrupt controllers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +74,6 @@ pub enum ApicMode {
     X2Apic,
 }
 
-// ── Global APIC state ──────────────────────────────────────────────────
 
 /// APIC mode cell (wraps UnsafeCell for safe global access).
 struct ApicModeCell(UnsafeCell<ApicMode>);
@@ -99,7 +92,6 @@ static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 static APIC_MODE: ApicModeCell = ApicModeCell::new(ApicMode::PicOnly);
 static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 
-// ── Helper: MMIO register access ───────────────────────────────────────
 
 /// Read an APIC MMIO register (xAPIC mode).
 ///
@@ -157,7 +149,6 @@ unsafe fn ioapic_write(reg: u32, val: u32) {
     }
 }
 
-// ── 7.6.1: APIC base detection from IA32_APIC_BASE MSR ─────────────────
 
 /// Detect Local APIC base address from the IA32_APIC_BASE MSR.
 ///
@@ -207,7 +198,6 @@ pub unsafe fn apic_is_x2apic() -> bool {
     }
 }
 
-// ── 7.6.2: APIC version and LVT entry reading ──────────────────────────
 
 /// Version information from the APIC version register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +240,6 @@ pub fn lvt_is_nmi(lvt_val: u32) -> bool {
     (lvt_val >> 8) & 0x7 == 4
 }
 
-// ── 7.6.3: Reprogram LINT0 ─────────────────────────────────────────────
 
 /// Reprogram LINT0 if it is configured for NMI or ExtINT delivery.
 ///
@@ -273,7 +262,6 @@ pub unsafe fn reprogram_lint0() {
     }
 }
 
-// ── 7.6.4: Set up SVR (spurious vector register) ───────────────────────
 
 /// Enable the local APIC and set the spurious interrupt vector.
 ///
@@ -290,7 +278,6 @@ pub unsafe fn setup_svr() {
     }
 }
 
-// ── 7.6.5: I/O APIC initialization ─────────────────────────────────────
 
 /// Initialize the I/O APIC: mask all redirection table entries.
 ///
@@ -315,7 +302,6 @@ pub unsafe fn init_ioapic() -> u32 {
     }
 }
 
-// ── 7.6.6: Wire PIT interrupt ──────────────────────────────────────────
 
 /// Configure I/O APIC RTE 0 (IRQ 0, PIT timer) with the given vector.
 ///
@@ -332,7 +318,6 @@ pub unsafe fn setup_pit_irq(vector: u8) {
     }
 }
 
-// ── 7.6.7: End-of-interrupt ────────────────────────────────────────────
 
 /// Signal end-of-interrupt to the local APIC (or PIC fallback).
 ///
@@ -348,7 +333,6 @@ pub unsafe fn eoi() {
     // When APIC is not enabled, the caller should write to the PIC instead.
 }
 
-// ── 7.6.9: Full APIC detection and initialization ──────────────────────
 
 /// Detect APIC mode and perform full initialization.
 ///
@@ -393,7 +377,6 @@ pub unsafe fn detect_and_init() {
     }
 }
 
-// ── 11b.11: PIC (8259A) wiring and IRQ management ──────────────────────
 
 /// I/O port delays for PIC programming (short I/O delay via `jmp`).
 ///
@@ -566,7 +549,6 @@ pub fn is_apic_enabled() -> bool {
     APIC_ENABLED.load(Ordering::Relaxed)
 }
 
-// ── 11b.13: PIT timer programming ──────────────────────────────────────
 
 /// PIT I/O ports.
 pub const PIT_DATA0: u16 = 0x40;
@@ -591,7 +573,6 @@ pub unsafe fn init_pit(freq: u32) {
     }
 }
 
-// ── 11b.13: Timer ISR trampoline ───────────────────────────────────────
 
 /// Function pointer type for the timer interrupt handler.
 pub type TimerIsrFn = unsafe extern "C" fn();
@@ -623,7 +604,6 @@ pub unsafe fn set_timer_isr_handler(handler: TimerIsrFn) {
     }
 }
 
-// ── RTC (CMOS) profile clock constants ────────────────────────────────
 
 /// CMOS I/O index port.
 const RTC_INDEX_PORT: u16 = 0x70;
@@ -709,7 +689,6 @@ pub unsafe fn arch_ack_profile_clock() {
     }
 }
 
-// ── Profile clock handler ──────────────────────────────────────────────
 
 /// Function pointer type for the profile clock interrupt handler.
 pub type ProfileClockFn = unsafe extern "C" fn();
@@ -972,7 +951,6 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "cmp    rdx, 0",
         "je     1f",                    // kernel mode (RPL=0)
 
-        // ── User mode (RPL=3): 5-value frame [RIP, CS, RFLAGS, old_RSP, old_SS] ──
         // Pop and rebuild with hardcoded selectors (QEMU SYSRETQ corrupts SS).
         "pop    rcx",                   // RIP
         "pop    rax",                   // CS (discard, use 0x001B)
@@ -986,7 +964,6 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "push   rcx",                   // RIP
         "iretq",
 
-        // ── Kernel mode (RPL=0): 3-value frame [RIP, CS, RFLAGS] ──
         // Clear IF in the saved RFLAGS to prevent re-entering the timer
         // ISR when returning to kernel code that had IF=1.
         "1:",
@@ -1188,7 +1165,6 @@ pub unsafe fn test_remap_pic_qemu() {
 mod tests {
     use super::*;
 
-    // ── ApicMode enum ──────────────────────────────────────────────────
 
     #[test]
     fn test_apic_mode_enum_values() {
@@ -1222,7 +1198,6 @@ mod tests {
         assert_ne!(a, ApicMode::PicOnly);
     }
 
-    // ── lvt_is_nmi ────────────────────────────────────────────────────
 
     #[test]
     fn test_lvt_is_nmi_true() {
@@ -1266,7 +1241,6 @@ mod tests {
         assert!(lvt_is_nmi(0x400 | 0x2F));
     }
 
-    // ── ApicVersionInfo ────────────────────────────────────────────────
 
     #[test]
     fn test_apic_version_info_construction() {
@@ -1288,7 +1262,6 @@ mod tests {
         assert_eq!(info.max_lvt, 6);
     }
 
-    // ── Constants ──────────────────────────────────────────────────────
 
     #[test]
     fn test_ia32_apic_base_msr() {
@@ -1337,7 +1310,6 @@ mod tests {
         assert_eq!(IOAPIC_REDIR_TBL, 0x10);
     }
 
-    // ── detect_apic_base mask layout ───────────────────────────────────
 
     #[test]
     fn test_detect_apic_base_mask() {
@@ -1377,7 +1349,6 @@ mod tests {
         assert_eq!(1u64 << 10, 0x400);
     }
 
-    // ── ApicVersionInfo from raw register ──────────────────────────────
 
     #[test]
     fn test_apic_version_info_from_raw() {
@@ -1402,7 +1373,6 @@ mod tests {
         assert_eq!(info.max_lvt, 0);
     }
 
-    // ── Initial static state ───────────────────────────────────────────
 
     #[test]
     fn test_global_state_defaults() {
@@ -1412,7 +1382,6 @@ mod tests {
         assert_eq!(DEFAULT_IOAPIC_BASE, 0xFEC00000);
     }
 
-    // ── 11b.11: PIC / IRQ state accessors ──────────────────────────────
 
     #[test]
     fn test_current_apic_mode_default() {
@@ -1424,7 +1393,6 @@ mod tests {
         assert!(!is_apic_enabled());
     }
 
-    // ── 11b.11: IMR port mapping ──────────────────────────────────────
 
     #[test]
     fn test_pic_imr_port_irq0_is_master() {
@@ -1454,7 +1422,6 @@ mod tests {
         assert_ne!(pic_imr_port(7), pic_imr_port(8));
     }
 
-    // ── 11b.11: IMR bit mask ──────────────────────────────────────────
 
     #[test]
     fn test_pic_imr_bit_irq0() {
@@ -1494,7 +1461,6 @@ mod tests {
         assert_eq!(seen, 0xFF); // all 8 bits set
     }
 
-    // ── 11b.11: I/O APIC RTE register index ───────────────────────────
 
     #[test]
     fn test_ioapic_rte_index_irq0() {
@@ -1518,7 +1484,6 @@ mod tests {
         }
     }
 
-    // ── 11b.11: set_irq_vector no-op when APIC disabled ────────────────
 
     #[test]
     fn test_set_irq_vector_noop_when_apic_disabled() {
@@ -1532,7 +1497,6 @@ mod tests {
         // No assertion needed — if we reach here, the no-op path works.
     }
 
-    // ── 11b.11: APIC mode ─────────────────────────────────────────────
 
     #[test]
     fn test_apic_mode_debug() {

@@ -600,7 +600,6 @@ pub fn mem_stats() -> (i32, i32, i32) {
     (nodes, free, large)
 }
 
-// ── Page fault forwarding infrastructure (Phase 6.9 — VMFORK Step 2)
 
 /// Number of process slots for page fault info storage.
 const PF_INFO_SLOTS: usize = 256;

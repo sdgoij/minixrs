@@ -12,7 +12,6 @@
 //! - GDT selector layout: same (index << 3 | RPL)
 //! - No VM86 mode support needed
 
-// ── Selector manipulation ───────────────────────────────────────────────
 
 pub const SEL_KPL: u16 = 0;
 pub const SEL_UPL: u16 = 3;
@@ -42,7 +41,6 @@ pub const fn kernelmode(cs: u16) -> bool {
     ispl(cs) == SEL_KPL
 }
 
-// ── GDT entry structure (8 bytes, same as i386) ─────────────────────────
 
 /// 8-byte GDT segment descriptor.
 #[repr(C, packed)]
@@ -88,7 +86,6 @@ pub const fn data64_descriptor(dpl: u8, present: bool) -> SegmentDescriptor {
     }
 }
 
-// ── 16-byte IDT gate descriptor (x86_64 only) ───────────────────────────
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -131,7 +128,6 @@ pub fn gate_offset(g: &GateDescriptor64) -> u64 {
     off_low | (off_mid << 16) | (off_high << 32)
 }
 
-// ── Region descriptor (for LGDT/LIDT) — x86_64 has 64-bit base ──────────
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -140,7 +136,6 @@ pub struct RegionDescriptor64 {
     pub base: u64,
 }
 
-// ── GDT selector indices ───────────────────────────────────────────────
 
 pub const GNULL_SEL: u16 = 0;
 pub const GCODE_SEL: u16 = 1;
@@ -156,12 +151,10 @@ pub const GUSERGS_SEL: u16 = 9;
 /// On x86_64, a TSS descriptor takes 2 GDT entries (16 bytes).
 pub const NGDT: u16 = 16;
 
-// ── IDT constants ─────────────────────────────────────────────────────
 
 pub const NIDT: u16 = 256;
 pub const NRSVIDT: u16 = 32;
 
-// ── Gate types ──────────────────────────────────────────────────────────
 
 pub const SDT_SYS386TSS: u8 = 9;
 pub const SDT_SYS386BSY: u8 = 11;
@@ -238,7 +231,6 @@ mod tests {
         assert_eq!(gsel(GUDATA_SEL, SEL_KPL), 0x10);
     }
 
-    // ── Selector helper functions ──────────────────────────────────────────
 
     #[test]
     fn test_ispl() {
@@ -291,7 +283,6 @@ mod tests {
         assert_eq!(gsyssel(0, 0), gsel(0, 0));
     }
 
-    // ── Descriptor edge cases ──────────────────────────────────────────────
 
     #[test]
     fn test_data64_descriptor_user() {
@@ -321,7 +312,6 @@ mod tests {
         assert_eq!(d.sd_type, 0xFA);
     }
 
-    // ── IDT gate descriptor ────────────────────────────────────────────────
 
     #[test]
     fn test_gate_offset_roundtrip() {
@@ -387,7 +377,6 @@ mod tests {
         assert_eq!(tdp, 0x8F);
     }
 
-    // ── Constants ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_segment_constants() {

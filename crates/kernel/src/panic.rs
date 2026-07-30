@@ -96,7 +96,6 @@ pub fn handle(info: &core::panic::PanicInfo) -> ! {
     crate::hal::halt()
 }
 
-// ── Serial output helpers ──
 
 /// Write a byte slice directly to serial (no allocation, no formatting).
 fn ser_write(bytes: &[u8]) {

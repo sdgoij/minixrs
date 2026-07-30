@@ -5,7 +5,6 @@
 
 use core::sync::atomic::Ordering;
 
-// ── Initialization ────────────────────────────────────────────────────────
 
 /// Initialize x86_64 architecture subsystem (IDT, MSRs, cpulocals, etc.).
 pub fn init() {
@@ -16,7 +15,6 @@ pub fn init() {
 pub use crate::frame::TrapFrame;
 pub use crate::mcontext::Mcontext;
 
-// ── Serial port I/O (COM1) ───────────────────────────────────────────────
 
 const COM1_DATA: u16 = 0x3F8;
 const COM1_LSR: u16 = 0x3FD; // Line Status Register
@@ -105,7 +103,6 @@ fn serial_try_read_byte() -> Option<u8> {
     Some(byte)
 }
 
-// ── Cycle counter ─────────────────────────────────────────────────────────
 
 /// Read the x86_64 timestamp counter (TSC).
 pub fn read_cycles() -> u64 {
@@ -122,7 +119,6 @@ pub fn read_cycles() -> u64 {
     (lo as u64) | ((hi as u64) << 32)
 }
 
-// ── Halt ──────────────────────────────────────────────────────────────────
 
 /// Halt the CPU with interrupts disabled. Never returns.
 pub fn halt() -> ! {
@@ -141,7 +137,6 @@ pub fn pause() {
     }
 }
 
-// ── Per-CPU current process pointer ───────────────────────────────────────
 
 use core::ffi::c_void;
 
@@ -170,7 +165,6 @@ pub unsafe fn init_cpulocals() {
     unsafe { crate::cpulocals::init_cpulocals() }
 }
 
-// ── Scheduler cpulocals accessors ──────────────────────────────────────
 
 /// Get the run queue head pointer array from per-CPU storage.
 pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
@@ -227,7 +221,6 @@ pub fn hlt() {
     }
 }
 
-// ── Timestamp counter ────────────────────────────────────────────────────
 
 /// Read the TSC (timestamp counter).
 pub fn read_tsc() -> u64 {
@@ -270,7 +263,6 @@ pub unsafe fn tlb_flush() {
     unsafe { crate::asm::tlb_flush() }
 }
 
-// ── Spinlocks ─────────────────────────────────────────────────────────────
 
 /// A simple spinlock backed by an atomic flag.
 pub struct Spinlock(core::sync::atomic::AtomicBool);
@@ -326,7 +318,6 @@ pub unsafe fn bkl_unlock() {
     unsafe { crate::spinlock::bkl_unlock() }
 }
 
-// ── TrapFrame accessors (raw [u8; 256] helpers) ──────────────────────────
 
 // x86_64 TrapFrame byte offsets (each field is 8 bytes):
 //   0: rax,   8: rbx,  16: rcx,  24: rdx,  32: rsi,  40: rdi
@@ -568,7 +559,6 @@ pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext:
     }
 }
 
-// ── Page table constants ────────────────────────────────────────────────
 
 /// Physical memory page size.
 pub const PAGE_SIZE: u64 = 4096;
@@ -818,7 +808,6 @@ pub fn cpu_id() -> u32 {
     (ebx >> 24) & 0xFF // Initial APIC ID in bits 31:24
 }
 
-// ── Port I/O (x86_64-specific, used by do_devio / do_vdevio / do_sdevio) ──
 
 /// Whether port I/O is available on this architecture.
 pub const fn has_port_io() -> bool {
@@ -917,7 +906,6 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsw(port, buf, count) }
 }
 
-// ── PCI configuration access (x86_64: CF8/CFC ports) ────────────────────
 
 /// PCI configuration address port.
 pub const PCI_ADDR_PORT: u16 = 0xCF8;
@@ -988,7 +976,6 @@ pub unsafe fn pci_cfg_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
     }
 }
 
-// ── CMOS/RTC access (x86_64: ports 0x70/0x71) ───────────────────────────
 
 /// RTC CMOS index port.
 pub const RTC_INDEX: u16 = 0x70;
@@ -1034,7 +1021,6 @@ pub unsafe fn cmos_write(reg: u8, val: u8) {
     }
 }
 
-// ── Memory fence ─────────────────────────────────────────────────────────
 
 /// Full memory fence (serializes loads and stores).
 ///
@@ -1048,7 +1034,6 @@ pub unsafe fn mfence() {
     }
 }
 
-// ── Profile clock (RTC-based) ────────────────────────────────────────────
 
 /// Initialize the profiling clock. `rate_code` encodes the RTC divider.
 /// `callback` is invoked on each tick. Returns the IRQ number (≥0) or <0 on
@@ -1109,7 +1094,6 @@ pub fn bss_end() -> u64 {
     core::ptr::addr_of!(__bss_end) as u64
 }
 
-// ── VM fork (deep-copy user pages from parent to child) ─────────────────
 
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks 4-level page tables (PML4 → PDPT → PD → PT).
@@ -1207,7 +1191,6 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
 
 /// Allocate a physical page for page table use.
 ///
@@ -1247,7 +1230,6 @@ pub unsafe fn init_phys_alloc(base: u64, size: u64) {
     crate::alloc::init_range(base, size);
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
 
 /// Exit QEMU via isa-debug-exit device (port 0x501 on x86_64).
 /// Pass 0 for success, non-zero for failure.
@@ -1261,7 +1243,6 @@ pub fn qemu_exit(code: u32) -> ! {
     }
 }
 
-// ── Exec page table root creation ───────────────────────────────────────
 
 /// Create the initial page table root for a new process via exec(2).
 /// Allocates PML4/PDPT/PD pages, copies kernel-half entries from

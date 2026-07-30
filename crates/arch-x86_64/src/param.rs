@@ -43,7 +43,6 @@ pub const INTRSTACKSIZE: u32 = 16384;
 
 pub const MSGBUFSIZE: u64 = 8 * NBPG;
 
-// ── Conversion macros (as const fns) ────────────────────────────────────
 
 pub const fn round_page(x: u64) -> u64 {
     (x + PGOFSET) & !PGOFSET

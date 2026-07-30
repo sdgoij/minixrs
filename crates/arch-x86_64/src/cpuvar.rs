@@ -43,7 +43,6 @@ pub struct CpuInfo {
     pub _reserved: [u64; 8],
 }
 
-// ── CPU roles ───────────────────────────────────────────────────────────
 
 /// CPU role: service processor (BSP bootstrap).
 pub const CPU_ROLE_SP: u32 = 0;
@@ -64,7 +63,6 @@ impl CpuInfoCell {
     }
 }
 
-// ── Global CPU info array ───────────────────────────────────────────────
 
 pub static CPU_INFO: CpuInfoCell = CpuInfoCell::new(
     [CpuInfo {
@@ -86,7 +84,6 @@ pub static CPU_INFO: CpuInfoCell = CpuInfoCell::new(
     }; MAXCPUS as usize],
 );
 
-// ── Helper functions ────────────────────────────────────────────────────
 
 /// Get CPU info for a given CPU number.
 pub fn cpu_info(cpu: u32) -> &'static CpuInfo {

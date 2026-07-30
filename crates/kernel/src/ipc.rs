@@ -14,7 +14,6 @@ use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
 
-// ── Constants
 
 pub const NON_BLOCKING: i32 = 0x80;
 pub const FROM_KERNEL: i32 = 0x100;
@@ -48,7 +47,6 @@ pub const EDEADSRCDST: i32 = -199;
 pub const ENOSYS: i32 = -72;
 pub const EINVAL: i32 = -22;
 
-// ── IPC status helpers (safe — work on values, not pointers)
 
 // C ipcconst.h: status is stored in p_misc_flags (u32_t).
 // Low 6 bits: call type; bits 16+: flags.
@@ -109,7 +107,6 @@ pub unsafe fn ipc_status_clear(rp: *mut Proc) {
     }
 }
 
-// ── WillReceive check
 
 fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {
     unsafe {
@@ -143,7 +140,6 @@ fn will_receive_sendrec(dst_ptr: *mut Proc, src_e: i32) -> bool {
     }
 }
 
-// ── mini_send
 
 /// Send a message from `caller_ptr` to `dst_e`.
 ///
@@ -285,7 +281,6 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
     }
 }
 
-// ── mini_receive
 
 /// Receive a message for `caller_ptr` from `src_e`.
 ///
@@ -444,7 +439,6 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
     }
 }
 
-// ── mini_notify
 
 /// Send a notification to `dst_e`.
 ///
@@ -543,7 +537,6 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
     }
 }
 
-// ── deadlock
 
 fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
     unsafe {
@@ -582,7 +575,6 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
     }
 }
 
-// ── copy_from_user
 
 /// Copy data from a process's virtual address space into kernel memory.
 ///
@@ -628,7 +620,6 @@ pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usi
     }
 }
 
-// ── delivermsg
 
 /// Deliver the message stored in `p_delivermsg` (kernel buffer) to the
 /// target process's user-space virtual address (`p_delivermsg_vir`), by
@@ -690,7 +681,6 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
     }
 }
 
-// ── do_sync_ipc
 
 /// Perform a synchronous IPC operation.
 /// Tries in-kernel server dispatch before sending to a user-space process.
@@ -763,7 +753,6 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     }
 }
 
-// ── In-kernel server dispatch infrastructure
 
 /// Maximum number of dispatchable server endpoints (matches arch-common
 /// NR_BOOT_MODULES range).
@@ -832,7 +821,6 @@ pub unsafe fn try_server_dispatch(
     (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg))
 }
 
-// ── Exec dispatch handlers
 
 /// Function type for setting the exec target (RIP and RSP) on a process.
 /// Called during PM_EXEC to switch the process to the new binary's entry point.
@@ -960,7 +948,6 @@ pub fn init_server_dispatch() {
     // servers goes through the normal IPC path.
 }
 
-// ── Async helpers (skeletons)
 
 /// # Safety
 ///
@@ -1460,7 +1447,6 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
     }
 }
 
-// ── is_ok_endpoint_f
 
 /// Validate an endpoint with optional panic.
 pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
@@ -1476,7 +1462,6 @@ pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
     ok
 }
 
-// ── build_notify_message
 
 /// Build a notification message.
 pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *mut Proc) {
@@ -1486,7 +1471,6 @@ pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *
     // m_source at offset 0 — set by caller / delivery path
 }
 
-// ── Tests
 
 #[cfg(test)]
 mod tests {

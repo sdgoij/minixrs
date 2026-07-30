@@ -5,21 +5,18 @@
 
 use core::fmt;
 
-// ── Multiboot header constants ──────────────────────────────────────────
 
 pub const MULTIBOOT_HEADER_MAGIC: u32 = 0x1BADB002;
 pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BADB002;
 pub const MULTIBOOT_MOD_ALIGN: u32 = 0x00001000;
 pub const MULTIBOOT_INFO_ALIGN: u32 = 0x00000004;
 
-// ── Multiboot header flags ──────────────────────────────────────────────
 
 pub const MULTIBOOT_PAGE_ALIGN: u32 = 0x00000001;
 pub const MULTIBOOT_MEMORY_INFO: u32 = 0x00000002;
 pub const MULTIBOOT_VIDEO_MODE: u32 = 0x00000004;
 pub const MULTIBOOT_AOUT_KLUDGE: u32 = 0x00010000;
 
-// ── Multiboot info flags ────────────────────────────────────────────────
 
 pub const MULTIBOOT_INFO_MEMORY: u32 = 0x00000001;
 pub const MULTIBOOT_INFO_BOOTDEV: u32 = 0x00000002;
@@ -35,7 +32,6 @@ pub const MULTIBOOT_INFO_APM_TABLE: u32 = 0x00000400;
 pub const MULTIBOOT_INFO_VBE_INFO: u32 = 0x00000800;
 pub const MULTIBOOT_INFO_FRAMEBUFFER_INFO: u32 = 0x00001000;
 
-// ── Memory map entry types ──────────────────────────────────────────────
 
 pub const MULTIBOOT_MEMORY_AVAILABLE: u32 = 1;
 pub const MULTIBOOT_MEMORY_RESERVED: u32 = 2;
@@ -43,7 +39,6 @@ pub const MULTIBOOT_MEMORY_ACPI_RECLAIMABLE: u32 = 3;
 pub const MULTIBOOT_MEMORY_NVS: u32 = 4;
 pub const MULTIBOOT_MEMORY_BADRAM: u32 = 5;
 
-// ── Structures ──────────────────────────────────────────────────────────
 
 /// Multiboot header (in boot image).
 #[repr(C)]
@@ -209,7 +204,6 @@ mod tests {
         assert_eq!(size_of::<MultibootModInfo>(), 16);
     }
 
-    // ── Field offset tests using offset_of! ────────────────────────────────
 
     #[test]
     fn test_multiboot_header_offsets() {

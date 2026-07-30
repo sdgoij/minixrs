@@ -537,7 +537,6 @@ mod tests {
         assert!(a.bitmap_len() > 0);
     }
 
-    // ── PhysicalMemoryMap edge cases ──────────────────────────────────────
 
     #[test]
     fn test_mmap_cut_no_overlap() {
@@ -601,7 +600,6 @@ mod tests {
         assert!(mm.count <= MAX_MMAP_ENTRIES);
     }
 
-    // ── PhysicalAllocator edge cases ──────────────────────────────────────
 
     #[test]
     fn test_alloc_from_empty_mmap() {

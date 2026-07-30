@@ -1523,7 +1523,6 @@ pub fn tty_init(system_hz_val: u32) {
     }
 }
 
-// ── Console I/O hooks ───────────────────────────────────────────────────────
 
 /// Poll serial for input and feed through line discipline.
 fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {

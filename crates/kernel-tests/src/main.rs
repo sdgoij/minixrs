@@ -88,7 +88,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     exit_qemu_failure(1)
 }
 
-// ── QEMU-required tests ──
 
 fn test_write_stdout() -> u32 {
     unsafe {
@@ -227,7 +226,6 @@ fn test_page_table_walk_end() -> u32 {
     0
 }
 
-// ── IO helpers ──
 
 fn serial_write(bytes: &[u8]) {
     for &b in bytes {

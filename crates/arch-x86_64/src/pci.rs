@@ -17,7 +17,6 @@
 
 use core::arch::asm;
 
-// ── Constants ───────────────────────────────────────────────────────────────
 
 /// PCI configuration address port.
 pub const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
@@ -88,7 +87,6 @@ pub const PCI_CMD_MEM: u16 = 0x0002;
 /// Command register: bus master enable.
 pub const PCI_CMD_MASTER: u16 = 0x0004;
 
-// ── Address encoding ────────────────────────────────────────────────────────
 
 /// Build a PCI config address.
 ///
@@ -102,7 +100,6 @@ pub const fn pci_make_addr(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
         | (reg as u32)
 }
 
-// ── Low-level access ────────────────────────────────────────────────────────
 
 /// Read 8 bits from PCI config space.
 ///
