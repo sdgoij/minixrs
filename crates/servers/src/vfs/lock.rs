@@ -10,6 +10,8 @@
 
 use crate::vfs::consts::*;
 use crate::vfs::types::*;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 // ── Local message helpers (fs_m_in / fs_m_out are [u8; 64]) ───────────────
 
@@ -42,15 +44,25 @@ pub struct LockConflict {
 
 // ── Global lock table ──────────────────────────────────────────────────────
 
-static mut LOCK_TABLE: [FileLock; NR_LOCKS] = [FileLock {
-    lock_type: F_UNLCK,
-    lock_pid: 0,
-    lock_vnode: 0,
-    lock_first: 0,
-    lock_last: 0,
-}; NR_LOCKS];
+struct LockTable(UnsafeCell<[FileLock; NR_LOCKS]>);
+unsafe impl Sync for LockTable {}
 
-static mut NR_ACTIVE_LOCKS: i32 = 0;
+impl LockTable {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [FileLock {
+                lock_type: F_UNLCK,
+                lock_pid: 0,
+                lock_vnode: 0,
+                lock_first: 0,
+                lock_last: 0,
+            }; NR_LOCKS],
+        ))
+    }
+}
+
+static LOCK_TABLE: LockTable = LockTable::new();
+static NR_ACTIVE_LOCKS: AtomicI32 = AtomicI32::new(0);
 
 /// Maximum byte position (2 GB − 1), used when `l_len == 0` (lock to EOF).
 const MAX_FILE_POS: i64 = 0x7FFFFFFF;
@@ -103,41 +115,44 @@ fn compute_range(
 
 // ── Lock table operations ──────────────────────────────────────────────────
 
+/// Get a raw pointer to the lock table.
+fn lock_table_ptr() -> *mut [FileLock; NR_LOCKS] {
+    LOCK_TABLE.0.get()
+}
+
 /// Find a free slot in the lock table.  Returns `None` if the table is full.
 fn alloc_lock_slot() -> Option<usize> {
-    unsafe {
-        for i in 0..NR_LOCKS {
-            if LOCK_TABLE[i].lock_type == F_UNLCK {
-                return Some(i);
-            }
-        }
-    }
-    None
+    let table = lock_table_ptr();
+    (0..NR_LOCKS).find(|&i| unsafe { (*table)[i].lock_type == F_UNLCK })
 }
 
 /// Insert a new lock into the table.  Caller must ensure no conflict exists
 /// and that a free slot is available.
 unsafe fn insert_lock(l_type: i16, pid: i32, vnode: *const Vnode, first: i64, last: i64) {
     if let Some(slot) = alloc_lock_slot() {
-        LOCK_TABLE[slot].lock_type = l_type;
-        LOCK_TABLE[slot].lock_pid = pid;
-        LOCK_TABLE[slot].lock_vnode = vnode as u32;
-        LOCK_TABLE[slot].lock_first = first;
-        LOCK_TABLE[slot].lock_last = last;
-        NR_ACTIVE_LOCKS += 1;
+        let table = lock_table_ptr();
+        unsafe {
+            (*table)[slot].lock_type = l_type;
+            (*table)[slot].lock_pid = pid;
+            (*table)[slot].lock_vnode = vnode as u32;
+            (*table)[slot].lock_first = first;
+            (*table)[slot].lock_last = last;
+        }
+        NR_ACTIVE_LOCKS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Remove all locks held by a specific PID on a specific vnode.
 /// Called by `close_fd()` when a process closes a file.
 pub fn remove_locks_by_pid_vnode(pid: i32, vnode: *const Vnode) {
-    unsafe {
-        let vn = vnode as u32;
-        for i in 0..NR_LOCKS {
-            let l = &mut LOCK_TABLE[i];
+    let vn = vnode as u32;
+    let table = lock_table_ptr();
+    for i in 0..NR_LOCKS {
+        unsafe {
+            let l = &mut (*table)[i];
             if l.lock_type != F_UNLCK && l.lock_pid == pid && l.lock_vnode == vn {
                 l.lock_type = F_UNLCK;
-                NR_ACTIVE_LOCKS -= 1;
+                NR_ACTIVE_LOCKS.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -157,38 +172,37 @@ pub fn check_lock(
     first: i64,
     last: i64,
 ) -> Result<(), LockConflict> {
-    unsafe {
-        let vn = vnode as u32;
-        for i in 0..NR_LOCKS {
-            let l = &LOCK_TABLE[i];
-            if l.lock_type == F_UNLCK {
-                continue;
-            }
-            if l.lock_vnode != vn {
-                continue; // different file
-            }
-            if last < l.lock_first {
-                continue; // new region before existing
-            }
-            if first > l.lock_last {
-                continue; // new region after existing
-            }
-            // Both read locks — shared, no conflict.
-            if l_type == F_RDLCK && l.lock_type == F_RDLCK {
-                continue;
-            }
-            // Same PID — process doesn't conflict with itself.
-            if l.lock_pid == pid {
-                continue;
-            }
-
-            return Err(LockConflict {
-                lock_type: l.lock_type,
-                lock_pid: l.lock_pid,
-                lock_first: l.lock_first,
-                lock_last: l.lock_last,
-            });
+    let vn = vnode as u32;
+    let table = lock_table_ptr();
+    for i in 0..NR_LOCKS {
+        let l = unsafe { &(*table)[i] };
+        if l.lock_type == F_UNLCK {
+            continue;
         }
+        if l.lock_vnode != vn {
+            continue; // different file
+        }
+        if last < l.lock_first {
+            continue; // new region before existing
+        }
+        if first > l.lock_last {
+            continue; // new region after existing
+        }
+        // Both read locks — shared, no conflict.
+        if l_type == F_RDLCK && l.lock_type == F_RDLCK {
+            continue;
+        }
+        // Same PID — process doesn't conflict with itself.
+        if l.lock_pid == pid {
+            continue;
+        }
+
+        return Err(LockConflict {
+            lock_type: l.lock_type,
+            lock_pid: l.lock_pid,
+            lock_first: l.lock_first,
+            lock_last: l.lock_last,
+        });
     }
     Ok(())
 }
@@ -206,68 +220,70 @@ pub fn check_lock(
 ///
 /// Returns the number of locks released (≥ 0) or a negative errno.
 pub fn remove_locks(pid: i32, vnode: *const Vnode, first: i64, last: i64) -> i32 {
-    unsafe {
-        let vn = vnode as u32;
-        let mut freed = 0;
+    let vn = vnode as u32;
+    let table = lock_table_ptr();
+    let mut freed = 0;
 
-        for i in 0..NR_LOCKS {
-            let l = &mut LOCK_TABLE[i];
-            if l.lock_type == F_UNLCK {
-                continue;
-            }
-            if l.lock_pid != pid || l.lock_vnode != vn {
-                continue;
-            }
-            // No overlap at all
-            if last < l.lock_first || first > l.lock_last {
-                continue;
-            }
-
-            // Full overlap: [first..last] covers the entire locked range
-            if first <= l.lock_first && last >= l.lock_last {
-                l.lock_type = F_UNLCK;
-                NR_ACTIVE_LOCKS -= 1;
-                freed += 1;
-                continue;
-            }
-
-            // Front overlap: unlock the front portion
-            if first <= l.lock_first {
-                l.lock_first = last + 1;
-                freed += 1;
-                continue;
-            }
-
-            // Back overlap: unlock the back portion
-            if last >= l.lock_last {
-                l.lock_last = first - 1;
-                freed += 1;
-                continue;
-            }
-
-            // Middle removal: [first..last] is entirely inside the locked range.
-            // Split into two locks.
-            let saved_last = l.lock_last;
-            l.lock_last = first - 1; // left portion
-
-            // Right portion needs a free slot.
-            if let Some(slot) = alloc_lock_slot() {
-                LOCK_TABLE[slot].lock_type = l.lock_type;
-                LOCK_TABLE[slot].lock_pid = pid;
-                LOCK_TABLE[slot].lock_vnode = vn;
-                LOCK_TABLE[slot].lock_first = last + 1;
-                LOCK_TABLE[slot].lock_last = saved_last;
-                NR_ACTIVE_LOCKS += 1;
-            } else {
-                // Roll back — can't split.
-                l.lock_last = saved_last;
-                return ENOLCK;
-            }
-            freed += 1;
+    for i in 0..NR_LOCKS {
+        let l = unsafe { &mut (*table)[i] };
+        if l.lock_type == F_UNLCK {
+            continue;
+        }
+        if l.lock_pid != pid || l.lock_vnode != vn {
+            continue;
+        }
+        // No overlap at all
+        if last < l.lock_first || first > l.lock_last {
+            continue;
         }
 
-        freed
+        // Full overlap: [first..last] covers the entire locked range
+        if first <= l.lock_first && last >= l.lock_last {
+            l.lock_type = F_UNLCK;
+            NR_ACTIVE_LOCKS.fetch_sub(1, Ordering::Relaxed);
+            freed += 1;
+            continue;
+        }
+
+        // Front overlap: unlock the front portion
+        if first <= l.lock_first {
+            l.lock_first = last + 1;
+            freed += 1;
+            continue;
+        }
+
+        // Back overlap: unlock the back portion
+        if last >= l.lock_last {
+            l.lock_last = first - 1;
+            freed += 1;
+            continue;
+        }
+
+        // Middle removal: [first..last] is entirely inside the locked range.
+        // Split into two locks.
+        let saved_last = l.lock_last;
+        l.lock_last = first - 1; // left portion
+
+        // Right portion needs a free slot.
+        if let Some(slot) = alloc_lock_slot() {
+            let t = lock_table_ptr();
+            unsafe {
+                (*t)[slot].lock_type = l.lock_type;
+                (*t)[slot].lock_pid = pid;
+                (*t)[slot].lock_vnode = vn;
+                (*t)[slot].lock_first = last + 1;
+                (*t)[slot].lock_last = saved_last;
+            }
+            NR_ACTIVE_LOCKS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Roll back — can't split.
+            l.lock_last = saved_last;
+            return ENOLCK;
+        }
+        freed += 1;
     }
+
+    freed
 }
 
 // ── Revive blocked processes ───────────────────────────────────────────────
@@ -430,14 +446,15 @@ mod tests {
     }
 
     fn clear_table() {
-        unsafe {
-            for i in 0..NR_LOCKS {
-                LOCK_TABLE[i].lock_type = F_UNLCK;
-                LOCK_TABLE[i].lock_pid = 0;
-                LOCK_TABLE[i].lock_vnode = 0;
+        let table = lock_table_ptr();
+        for i in 0..NR_LOCKS {
+            unsafe {
+                (*table)[i].lock_type = F_UNLCK;
+                (*table)[i].lock_pid = 0;
+                (*table)[i].lock_vnode = 0;
             }
-            NR_ACTIVE_LOCKS = 0;
         }
+        NR_ACTIVE_LOCKS.store(0, Ordering::Relaxed);
     }
 
     #[test]

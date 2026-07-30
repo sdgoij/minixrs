@@ -122,6 +122,11 @@ pub fn forbidden(fp: &Fproc, vp: &Vnode, access_desired: u32, use_real_ids: bool
 
 /// Check `access(path, mode)` using the real uid/gid (POSIX semantics).
 /// Called from `call.rs` after path resolution obtains the vnode.
+///
+/// # Safety
+///
+/// `vp` must point to a valid, initialized `Vnode`. `fp` must reference
+/// the calling process's file context.
 pub unsafe fn check_access(fp: &Fproc, vp: &Vnode, amode: u32) -> i32 {
     if amode == F_OK as u32 {
         return OK; // existence check only

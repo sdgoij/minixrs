@@ -71,8 +71,8 @@ impl Pipe {
         let cap = self.data.len();
         let available = cap - self.count;
         let n = buf.len().min(available);
-        for i in 0..n {
-            self.data[self.head] = buf[i];
+        for &b in buf.iter().take(n) {
+            self.data[self.head] = b;
             self.head += 1;
             if self.head >= cap {
                 self.head = 0;
@@ -86,8 +86,8 @@ impl Pipe {
     /// Returns the number of bytes actually read.
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let n = buf.len().min(self.count);
-        for i in 0..n {
-            buf[i] = self.data[self.tail];
+        for dst in buf.iter_mut().take(n) {
+            *dst = self.data[self.tail];
             self.tail += 1;
             if self.tail >= self.tail.max(1).min(self.data.len()) {
                 // wrap
@@ -148,30 +148,31 @@ pub fn get_pipe(idx: usize) -> Option<&'static mut Pipe> {
 
 /// Decrement the reader count for a pipe.
 pub fn release_read_end(idx: usize) {
-    if let Some(p) = get_pipe(idx) {
-        if p.readers > 0 {
-            p.readers -= 1;
-        }
+    if let Some(p) = get_pipe(idx)
+        && p.readers > 0
+    {
+        p.readers -= 1;
     }
 }
 
 /// Decrement the writer count for a pipe.
 pub fn release_write_end(idx: usize) {
-    if let Some(p) = get_pipe(idx) {
-        if p.writers > 0 {
-            p.writers -= 1;
-        }
+    if let Some(p) = get_pipe(idx)
+        && p.writers > 0
+    {
+        p.writers -= 1;
     }
 }
 
 /// Release both ends and reset the pipe buffer for reuse.
 /// Called when both ends are closed.
 pub fn release_pipe(idx: usize) {
-    if let Some(p) = get_pipe(idx) {
-        if p.readers == 0 && p.writers == 0 {
-            p.head = 0;
-            p.tail = 0;
-            p.count = 0;
-        }
+    if let Some(p) = get_pipe(idx)
+        && p.readers == 0
+        && p.writers == 0
+    {
+        p.head = 0;
+        p.tail = 0;
+        p.count = 0;
     }
 }

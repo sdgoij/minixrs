@@ -208,6 +208,11 @@ fn select_request_char(_filp: &Filp, ops: u32) -> u32 {
 ///
 /// Reads parameters from `fs_m_in`, checks ready fds across the fd set,
 /// and either returns immediately or suspends the caller.
+///
+/// # Safety
+///
+/// Must be called from a valid VFS dispatch context where `fs_m_in` contains
+/// a properly-formed `select` request.
 pub unsafe fn do_select() -> i32 {
     use crate::vfs::glo::vfs_global;
     let glob = unsafe { &mut *vfs_global() };
