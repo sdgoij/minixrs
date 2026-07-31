@@ -9,3 +9,6 @@ pub use arch_x86_64::hal::*;
 
 #[cfg(target_arch = "riscv64")]
 pub use arch_riscv64::hal::*;
+
+#[cfg(target_arch = "aarch64")]
+pub use arch_aarch64::hal::*;

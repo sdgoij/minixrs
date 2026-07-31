@@ -381,7 +381,7 @@ fn main() {
     let workspace = Path::new(".");
     let target_dir = workspace.join("target");
 
-    // Parse optional architecture argument: "x86_64" (default) or "riscv64"
+    // Parse optional architecture argument: "x86_64" (default), "riscv64", or "aarch64"
     let arch = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "x86_64".to_string());
@@ -389,6 +389,7 @@ fn main() {
     // Binaries are in the cargo target output directory
     let target_out_dir = match arch.as_str() {
         "riscv64" => "riscv64gc-unknown-none-elf",
+        "aarch64" => "aarch64-unknown-minix",
         _ => "x86_64-pc-minix",
     };
     let release_dir = target_dir.join(target_out_dir).join("release");

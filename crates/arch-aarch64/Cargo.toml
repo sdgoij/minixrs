@@ -1,0 +1,16 @@
+[package]
+name = "arch-aarch64"
+version = "0.1.0"
+description = "AArch64-specific kernel code (registers, exceptions, page tables)"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }

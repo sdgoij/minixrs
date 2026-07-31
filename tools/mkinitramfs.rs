@@ -145,26 +145,24 @@ const MODE_FILE: u32 = 0o100755;
 const MODE_CHAR: u32 = 0o020777;
 
 fn main() {
-    // Parse optional architecture argument: "x86_64" (default) or "riscv64"
+    // Parse optional architecture argument: "x86_64" (default), "riscv64", or "aarch64"
     let arch = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "x86_64".to_string());
     let is_riscv = arch == "riscv64";
+    let is_aarch64 = arch == "aarch64";
 
     let workspace = Path::new(".");
     let target_dir = workspace.join("target");
     fs::create_dir_all(&target_dir).ok();
 
     // Architecture-specific settings
-    let target_spec = if is_riscv {
-        "riscv64gc-unknown-none-elf"
+    let (target_spec, target_out_dir) = if is_riscv {
+        ("riscv64gc-unknown-none-elf", "riscv64gc-unknown-none-elf")
+    } else if is_aarch64 {
+        ("aarch64-unknown-minix.json", "aarch64-unknown-minix")
     } else {
-        "x86_64-pc-minix.json"
-    };
-    let target_out_dir = if is_riscv {
-        "riscv64gc-unknown-none-elf"
-    } else {
-        "x86_64-pc-minix"
+        ("x86_64-pc-minix.json", "x86_64-pc-minix")
     };
 
     println!("Building userland binaries for {}...", arch);
@@ -184,8 +182,9 @@ fn main() {
             "--target",
             target_spec,
         ];
-        // Only add -Zjson-target-spec for custom targets (.json files)
+        // Only add -Z flags for custom targets (.json files)
         if target_spec.ends_with(".json") {
+            cargo_args.push("-Zunstable-options");
             cargo_args.push("-Zjson-target-spec");
         }
         cargo_args.push("-Zbuild-std=core,alloc");

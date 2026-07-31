@@ -96,6 +96,33 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         return None;
     }
 
+    // AArch64: clean D-cache + invalidate I-cache for loaded code.
+    // The identity-mapped PA used for loading differs from the runtime
+    // VA (0x1000000+). Without I-cache invalidation, VIPT aliasing
+    // causes the CPU to fetch stale instructions.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut addr = phys_code_base;
+        let end = phys_code_base + (code_end - code_start);
+        let ctr_el0: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr_el0, options(nomem, nostack));
+        }
+        let dcache_line_shift = ((ctr_el0 >> 16) & 0xF) + 2;
+        let line_size = 4u64 << dcache_line_shift;
+        while addr < end {
+            unsafe {
+                core::arch::asm!("dc cvau, {va}", va = in(reg) addr, options(nostack));
+                core::arch::asm!("ic ivau, {va}", va = in(reg) addr, options(nostack));
+            }
+            addr += line_size;
+        }
+        unsafe {
+            core::arch::asm!("dsb ish", options(nostack));
+            core::arch::asm!("isb", options(nostack));
+        }
+    }
+
     // Step 4: Allocate physical pages for user stack.
     let user_stack_base: u64 = kernel::hal::user_stack_base();
     let user_stack_size: usize = kernel::hal::user_stack_size();
@@ -110,26 +137,48 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         }
     };
 
-    // Step 5: Set up the user stack via identity mapping, then copy
-    // the stack data to the per-process physical pages.
-    let stack_top = user_stack_base + user_stack_size as u64;
-    let user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
-        Ok(rsp) => rsp,
-        Err(_) => {
-            print!("  ");
-            print!(path);
-            print!(": stack setup failed\r\n");
-            return None;
-        }
-    };
+    let mut user_rsp;
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        user_rsp = 0;
+        let _ = user_rsp;
 
-    // Copy identity-mapped stack data to the allocated physical pages.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            user_stack_base as *const u8,
-            phys_stack_base as *mut u8,
-            user_stack_size,
-        );
+        let stack_top = user_stack_base + user_stack_size as u64;
+        user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
+            Ok(rsp) => rsp,
+            Err(_) => {
+                print!("  ");
+                print!(path);
+                print!(": stack setup failed\r\n");
+                return None;
+            }
+        };
+        // Copy identity-mapped stack data to the allocated physical pages.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                user_stack_base as *const u8,
+                phys_stack_base as *mut u8,
+                user_stack_size,
+            );
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Write stack setup directly to the physical pages.
+        // phys_stack_base is in the identity-mapped range (PUD[1]).
+        let stack_top_virt = phys_stack_base + user_stack_size as u64;
+        user_rsp = match unsafe { setup_user_stack(stack_top_virt, user_stack_size, argv) } {
+            Ok(rsp) => rsp,
+            Err(_) => {
+                print!("  ");
+                print!(path);
+                print!(": stack setup failed\r\n");
+                return None;
+            }
+        };
+        // Convert physical RSP to virtual RSP for the user process.
+        let phys_rsp = user_rsp;
+        user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
     }
 
     // Step 6: Store the physical code base in the new TrapFrame.
@@ -335,6 +384,8 @@ pub unsafe fn boot_create_page_table() -> u64 {
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
     #[cfg(target_arch = "riscv64")]
     let flags = kernel::hal::pte_present() | 0xC0; // V | A | D
+    #[cfg(target_arch = "aarch64")]
+    let flags = kernel::hal::pte_present(); // PTE_TABLE for AArch64 non-leaf entries
     for i in 0..(n_pages - 1) {
         unsafe {
             let pte = kernel::hal::build_pte(pages[i + 1], flags);
@@ -409,6 +460,9 @@ pub unsafe fn boot_create_restricted_page_table(
             && (entry & kernel::hal::pte_large_page()) != 0;
         #[cfg(target_arch = "riscv64")]
         let is_leaf = (entry & kernel::hal::pte_present() != 0) && (entry & 0x0E) != 0;
+        // AArch64: block entries have bits[1:0]=01, table entries have 11.
+        #[cfg(target_arch = "aarch64")]
+        let is_leaf = (entry & 3) == 1;
         if is_leaf {
             found_boot_pd = false;
             break;
@@ -424,7 +478,14 @@ pub unsafe fn boot_create_restricted_page_table(
     let mut pages = [0u64; 4];
     for entry in pages.iter_mut().take(n_pages) {
         *entry = unsafe { kernel::hal::alloc_phys_page()? };
-        unsafe { core::ptr::write_bytes(*entry as *mut u8, 0, page_sz) };
+        #[cfg(not(target_arch = "aarch64"))]
+        unsafe {
+            core::ptr::write_bytes(*entry as *mut u8, 0, page_sz)
+        };
+        #[cfg(target_arch = "aarch64")]
+        for i in 0..(page_sz / 8) {
+            unsafe { core::ptr::write_volatile((*entry as *mut u64).add(i), 0) };
+        }
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.
@@ -437,6 +498,9 @@ pub unsafe fn boot_create_restricted_page_table(
     // Some QEMU implementations reject A/D bits in non-leaf entries.
     #[cfg(target_arch = "riscv64")]
     let flags = kernel::hal::pte_present(); // V only (not A|D)
+    // AArch64 non-leaf: PTE_TABLE (bits[1:0] = 0b11, no AP/AF/SH).
+    #[cfg(target_arch = "aarch64")]
+    let flags = kernel::hal::pte_present(); // PTE_TABLE for AArch64 non-leaf entries
     for i in 0..(n_pages - 1) {
         unsafe {
             let pte = kernel::hal::build_pte(pages[i + 1], flags);
@@ -485,15 +549,11 @@ pub unsafe fn boot_create_restricted_page_table(
     let new_root = pages[0] as *mut u64;
     #[cfg(target_arch = "x86_64")]
     let copy_range = 1..512;
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
     let copy_range = 0..512;
     for i in copy_range {
         let entry = unsafe { core::ptr::read(boot_root.add(i)) };
         if entry != 0 {
-            // x86_64: need PG_U at PML4 level for nested user pages.
-            // RISC-V: must NOT add PG_U — kernel page tables with U=1
-            // are inaccessible from S-mode (sstatus.SUM=0 by default).
-            // map_page already adds PG_U to individual user pages.
             #[cfg(target_arch = "x86_64")]
             let pte = entry | kernel::pagetable::PG_U;
             #[cfg(not(target_arch = "x86_64"))]
@@ -501,6 +561,71 @@ pub unsafe fn boot_create_restricted_page_table(
             unsafe {
                 core::ptr::write(new_root.add(i), pte);
             }
+        }
+    }
+
+    // On AArch64, replace the shared boot PUD with a private copy.
+    // The boot PUD is shared via PGD[0], but map_page will split
+    // PUD[0] (breaking the boot identity map), and the subsequent
+    // "Restore PUD[0]" code undoes the split, corrupting the
+    // per-process page table. A private PUD copy isolates the
+    // per-process page table from boot page table modifications.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let boot_pgd_entry = unsafe { core::ptr::read(boot_root) };
+        if boot_pgd_entry != 0 {
+            let boot_pud_phys = kernel::hal::pte_to_phys(boot_pgd_entry);
+            let private_pud = unsafe { kernel::hal::alloc_phys_page()? };
+            // Zero private PUD.
+            for i in 0..(page_sz / 8) {
+                unsafe { core::ptr::write_volatile((private_pud as *mut u64).add(i), 0) };
+            }
+            // Copy boot PUD entries as-is (PUD[0] only — PUD[1] replaced below).
+            let entry0 = unsafe { core::ptr::read((boot_pud_phys as *const u64).add(0)) };
+            unsafe { core::ptr::write((private_pud as *mut u64).add(0), entry0) };
+
+            // Create a PMD page with 512 2MB block entries
+            // for the kernel identity range (0x40000000-0x7FFFFFFF).
+            // PMD entry 0 (0x40000000-0x401FFFFF) uses AP=EL1_only
+            // because it contains the exception vector table — changing
+            // AP to EL0_RW causes a prefetch abort on kernel exception
+            // entry (QEMU Cortex-A57 quirk). All other entries (1..511)
+            // use AP=EL0_RW so user-mode servers like VM can access
+            // physical memory.
+            let user_pmd = unsafe { kernel::hal::alloc_phys_page()? };
+            const PMD_BLOCK_EL1: u64 = 0b01u64 | (0b11u64 << 8) | (1u64 << 10); // 0x701, AP=EL1 only
+            const PMD_BLOCK_USER: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741, AP=EL0_RW
+            let ram_base: u64 = 0x4000_0000;
+            let ram_size: u64 = 0x1000_0000; // 256MB
+            for i in 0..512usize {
+                let va = (i as u64) * 0x20_0000; // 2MB per PMD entry
+                let pa = if va >= ram_base && va < ram_base + ram_size {
+                    va
+                } else {
+                    // Alias non-RAM VAs to RAM (wrap around)
+                    ram_base + (va & (ram_size - 1))
+                };
+                // PMD entry 0 contains the exception vector table;
+                // use EL1-only to avoid QEMU Cortex-A57 prefetch abort.
+                let flags = if i == 0 {
+                    PMD_BLOCK_EL1
+                } else {
+                    PMD_BLOCK_USER
+                };
+                unsafe {
+                    core::ptr::write_volatile((user_pmd as *mut u64).add(i), pa | flags);
+                }
+            }
+
+            // Set PUD[1] to point to the user PMD page.
+            let pud1_flags = arch_aarch64::pte::PTE_VALID | arch_aarch64::pte::PTE_TYPE;
+            let pud1_entry = kernel::hal::build_pte(user_pmd, pud1_flags);
+            unsafe { core::ptr::write((private_pud as *mut u64).add(1), pud1_entry) };
+
+            // Replace PGD[0] with private PUD.
+            let flags = kernel::hal::pte_nonleaf_flags();
+            let new_pgd0 = kernel::hal::build_pte(private_pud, flags);
+            unsafe { core::ptr::write(new_root, new_pgd0) };
         }
     }
 
@@ -517,6 +642,9 @@ pub unsafe fn boot_create_restricted_page_table(
         | 0x04
         | 0x08
         | 0xC0; // R|W|X|A|D
+    // AArch64: use the HAL-provided user flags.
+    #[cfg(target_arch = "aarch64")]
+    let user_flags = kernel::hal::pte_user_flags();
     let mut va = code_start;
     let mut pa = code_phys;
     while va < code_end {
@@ -569,7 +697,58 @@ pub unsafe fn boot_create_restricted_page_table(
         }
     }
 
+    // With cacheable PT walks (TCR_EL1.IRGN0=ORGN0=1), the walker
+    // reads from cache where our writes are already visible.
+    // No explicit cache maintenance is needed.
+
     Some(pages[0])
+}
+
+/// Walk the AArch64 page table tree and clean + invalidate D-cache
+/// for every page table page.  Must be called after all map_page
+/// modifications so the page table walker sees the final state.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn clean_page_table_cache_aarch64(root_pa: u64) {
+    let pgd = root_pa as *const u64;
+    unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(root_pa) };
+
+    for pgd_idx in 0..512 {
+        let pgd_entry = unsafe { core::ptr::read(pgd.add(pgd_idx)) };
+        if pgd_entry & 1 == 0 {
+            continue;
+        }
+        if (pgd_entry & 3) == 1 {
+            continue;
+        }
+        let pud_pa = pgd_entry & 0x0000_FFFF_FFFF_F000;
+        unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pud_pa) };
+
+        let pud = pud_pa as *const u64;
+        for pud_idx in 0..512 {
+            let pud_entry = unsafe { core::ptr::read(pud.add(pud_idx)) };
+            if pud_entry & 1 == 0 {
+                continue;
+            }
+            if (pud_entry & 3) == 1 {
+                continue;
+            }
+            let pmd_pa = pud_entry & 0x0000_FFFF_FFFF_F000;
+            unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pmd_pa) };
+
+            let pmd = pmd_pa as *const u64;
+            for pmd_idx in 0..512 {
+                let pmd_entry = unsafe { core::ptr::read(pmd.add(pmd_idx)) };
+                if pmd_entry & 1 == 0 {
+                    continue;
+                }
+                if (pmd_entry & 3) == 1 {
+                    continue;
+                }
+                let pte_pa = pmd_entry & 0x0000_FFFF_FFFF_F000;
+                unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pte_pa) };
+            }
+        }
+    }
 }
 
 /// Jump to userspace — the final step of boot.

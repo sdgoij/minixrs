@@ -7,6 +7,10 @@
       `// ── Section Name ──`
       `// ═══════════════`
       `/* ---------- Module ---------- */`
+    This applies to ALL comment styles: line comments (`//`), doc comments (`///`, `//!`),
+    and block comments (`/* */`). Never write comments whose primary purpose is visual
+    separation or decoration. If you are about to write a comment that draws a line,
+    a box, or uses repeated symbols for visual effect — STOP. It is prohibited.
   - Do not remove existing comments unless you have a specific, stated reason
     (e.g., the comment describes code that was removed, or it's factually wrong).
 * Prefer implementing in existing files unless it's a new logical component.

@@ -148,12 +148,7 @@ impl GrantTable {
             // Kernel overwrites bytes 0..7 with call_nr + src_ep.
             msg[8..16].copy_from_slice(&addr.to_le_bytes());
             msg[16..20].copy_from_slice(&nr.to_le_bytes());
-            let r = minix_rt::kernel_call(34, &mut msg);
-            if r != 0 {
-                unsafe {
-                    minix_rt::write(2, b"vfs:setgrant err\n" as *const u8, 18);
-                }
-            }
+            let _r = minix_rt::kernel_call(34, &mut msg);
         }
         #[cfg(not(target_os = "none"))]
         {

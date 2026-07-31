@@ -1162,7 +1162,20 @@ pub unsafe fn system_init() {
         let base = crate::r#priv::PRIV.get() as *mut Priv;
         for i in 0..NR_SYS_PROCS {
             let sp = base.add(i);
-            (*sp).s_alarm_timer = MinixTimer::default();
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                (*sp).s_alarm_timer = MinixTimer::default();
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                // MinixTimer::default() may use memset which triggers DC ZVA.
+                // Manually zero on AArch64.
+                let tp = core::ptr::addr_of_mut!((*sp).s_alarm_timer) as *mut u64;
+                core::ptr::write_volatile(tp.add(0), 0);
+                core::ptr::write_volatile(tp.add(1), 0);
+                core::ptr::write_volatile(tp.add(2), 0);
+                core::ptr::write_volatile(tp.add(3), 0);
+            }
         }
 
         // Initialize call vector — map known calls

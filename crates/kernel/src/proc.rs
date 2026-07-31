@@ -45,6 +45,11 @@ const _DELIVERMSG_LAYOUT: () = assert!(
         >= core::mem::offset_of!(Proc, p_delivermsg) + MESSAGE_SIZE,
 );
 
+// AArch64: p_seg.p_cr3 must be at offset 288 (p_reg is 288 bytes).
+// switch_to_user assembly loads p_cr3 from [x20, #288].
+#[cfg(target_arch = "aarch64")]
+const _AARCH64_CR3_OFFSET: () = assert!(core::mem::offset_of!(Proc, p_seg) == 288);
+
 // ProcVmrequest
 
 #[derive(Debug, Clone, Copy)]
@@ -247,7 +252,10 @@ impl Default for MiscFlags {
 #[repr(C)]
 pub struct Proc {
     /// Process registers saved in stack frame (arch-specific layout as raw bytes).
+    #[cfg(not(target_arch = "aarch64"))]
     pub p_reg: [u8; 256],
+    #[cfg(target_arch = "aarch64")]
+    pub p_reg: [u8; 288],
     /// Segment descriptors (page table root, FPU state).
     pub p_seg: SegFrame,
     /// Process number (for fast access).

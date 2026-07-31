@@ -188,11 +188,149 @@ fn cmd_build(target: &str) {
                 .expect("cargo failed");
             assert!(status.success());
         }
+        "aarch64" => {
+            // Build userland binaries for AArch64.
+            let status = Command::new("rustup")
+                .args([
+                    "run",
+                    "nightly",
+                    "cargo",
+                    "build",
+                    "-p",
+                    "userland",
+                    "--target",
+                    "aarch64-unknown-minix.json",
+                    "-Zbuild-std=core,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "-Zunstable-options",
+                    "-Zjson-target-spec",
+                    "--release",
+                ])
+                .status()
+                .expect("cargo failed");
+            assert!(status.success());
+
+            // Build server binaries for AArch64.
+            let status = Command::new("rustup")
+                .args([
+                    "run",
+                    "nightly",
+                    "cargo",
+                    "build",
+                    "-p",
+                    "servers",
+                    "--target",
+                    "aarch64-unknown-minix.json",
+                    "-Zbuild-std=core,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "-Zunstable-options",
+                    "-Zjson-target-spec",
+                    "--release",
+                ])
+                .status()
+                .expect("cargo failed");
+            assert!(status.success());
+
+            // Build initramfs tool and generate initramfs.
+            let status = Command::new("rustc")
+                .args([
+                    "tools/mkinitramfs.rs",
+                    "--edition",
+                    "2024",
+                    "-o",
+                    "target/mkinitramfs",
+                ])
+                .status()
+                .expect("rustc failed");
+            assert!(status.success());
+            let status = Command::new(&target_dir().join(exe_name("mkinitramfs")))
+                .arg("aarch64")
+                .status()
+                .expect("mkinitramfs failed");
+            assert!(status.success());
+
+            // Build minixfs tool and generate minixfs.
+            let status = Command::new("rustc")
+                .args([
+                    "tools/mkminixfs.rs",
+                    "--edition",
+                    "2024",
+                    "-o",
+                    "target/mkminixfs",
+                ])
+                .status()
+                .expect("rustc failed");
+            assert!(status.success());
+            let _ = Command::new(&target_dir().join(exe_name("mkminixfs")))
+                .arg("aarch64")
+                .status();
+
+            // Build the kernel with embedded initramfs and minixfs.
+            let status = Command::new("rustup")
+                .args([
+                    "run",
+                    "nightly",
+                    "cargo",
+                    "build",
+                    "-p",
+                    "kernel-boot",
+                    "--bin",
+                    "kernel-boot-aarch64",
+                    "--target",
+                    "aarch64-unknown-minix.json",
+                    "--features",
+                    "embed_initramfs,embed_minixfs,aarch64",
+                    "-Zunstable-options",
+                    "-Zjson-target-spec",
+                    "-Zbuild-std=core,alloc",
+                    "-Zbuild-std-features=compiler-builtins-mem",
+                    "--release",
+                ])
+                .status()
+                .expect("cargo failed");
+            assert!(status.success());
+        }
         _ => {
-            eprintln!("jsh: unknown target '{target}' (use x86 or riscv64)");
+            eprintln!("jsh: unknown target '{target}' (use x86, riscv64, or aarch64)");
             std::process::exit(1);
         }
     }
+}
+
+fn run_qemu_aarch64(gdb: bool) {
+    let kernel_path = target_dir()
+        .join("aarch64-unknown-minix/release/kernel-boot-aarch64")
+        .to_string_lossy()
+        .to_string();
+    let mut cmd = Command::new("qemu-system-aarch64");
+    cmd.args([
+        "-machine",
+        "virt",
+        "-cpu",
+        "cortex-a57",
+        "-m",
+        "256M",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-kernel",
+        &kernel_path,
+    ]);
+    if gdb {
+        cmd.args(["-s", "-S"]);
+        println!("[jsh] QEMU waiting for GDB on port 1234");
+        println!(
+            "[jsh]   lldb {}",
+            target_dir()
+                .join("aarch64-unknown-minix/release/kernel-boot-aarch64")
+                .display()
+        );
+        println!("[jsh]   (lldb) gdb-remote 127.0.0.1:1234");
+    }
+    let status = cmd.status().expect("QEMU failed");
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 fn cmd_run(target: &str) {
@@ -200,13 +338,21 @@ fn cmd_run(target: &str) {
     match target {
         "x86" => run_qemu_x86(false),
         "riscv64" => run_qemu_riscv(),
+        "aarch64" => run_qemu_aarch64(false),
         _ => std::process::exit(1),
     }
 }
 
 fn cmd_debug(target: &str) {
     cmd_build(target);
-    run_qemu_x86(true);
+    match target {
+        "x86" => run_qemu_x86(true),
+        "aarch64" => run_qemu_aarch64(true),
+        _ => {
+            eprintln!("jsh: debug not supported for target '{target}'");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_test_qemu(target: &str) {

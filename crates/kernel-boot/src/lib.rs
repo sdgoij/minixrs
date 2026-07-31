@@ -21,10 +21,22 @@ pub unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args:
     unsafe { boot_test::run_boot_tests() }
 }
 
+/// Non-boot-test fallback for SYS_BOOT_COMPLETE: VFS signals boot finished.
+///
+/// # Safety
+///
+/// Must only be invoked from the kernel's syscall dispatch path; the
+/// caller/args are ignored.
+#[cfg(not(feature = "boot-test"))]
+pub unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args: &[u64; 6]) -> i64 {
+    0 // OK — VFS calls SYS_BOOT_COMPLETE to signal boot finished
+}
+
 /// Write a string to the boot console.
 ///
 /// On x86_64: COM1 serial port via port I/O.
 /// On RISC-V: SBI debug console.
+/// On AArch64: PL011 UART (QEMU virt, 0x09000000).
 pub fn serial_write(s: &str) {
     #[cfg(all(not(test), target_arch = "x86_64"))]
     {
@@ -53,7 +65,28 @@ pub fn serial_write(s: &str) {
             arch_riscv64::sbi::console_putchar(b);
         }
     }
-    #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "riscv64"))))]
+    #[cfg(all(not(test), target_arch = "aarch64"))]
+    {
+        const UART_DR: usize = 0x0900_0000;
+        const UART_FR: usize = 0x0900_0000 + 0x18;
+        const FR_TXFF: u32 = 1 << 5;
+        for &b in s.as_bytes() {
+            unsafe {
+                while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
+                    core::hint::spin_loop();
+                }
+                core::ptr::write_volatile(UART_DR as *mut u32, b as u32);
+            }
+        }
+    }
+    #[cfg(any(
+        test,
+        not(any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        ))
+    ))]
     let _ = s;
 }
 
@@ -61,6 +94,7 @@ pub fn serial_write(s: &str) {
 ///
 /// On x86_64: COM1 serial port via port I/O.
 /// On RISC-V: SBI debug console.
+/// On AArch64: PL011 UART (QEMU virt, 0x09000000).
 pub fn serial_putc(c: u8) {
     #[cfg(all(not(test), target_arch = "x86_64"))]
     {
@@ -85,7 +119,26 @@ pub fn serial_putc(c: u8) {
     {
         arch_riscv64::sbi::console_putchar(c);
     }
-    #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "riscv64"))))]
+    #[cfg(all(not(test), target_arch = "aarch64"))]
+    {
+        const UART_DR: usize = 0x0900_0000;
+        const UART_FR: usize = 0x0900_0000 + 0x18;
+        const FR_TXFF: u32 = 1 << 5;
+        unsafe {
+            while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
+                core::hint::spin_loop();
+            }
+            core::ptr::write_volatile(UART_DR as *mut u32, c as u32);
+        }
+    }
+    #[cfg(any(
+        test,
+        not(any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        ))
+    ))]
     let _ = c;
 }
 

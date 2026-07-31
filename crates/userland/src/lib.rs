@@ -10,11 +10,11 @@
 
 /// Write a byte slice to file descriptor 1 (stdout).
 pub fn write_out(s: &[u8]) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        minix_rt::write(1, s.as_ptr(), s.len());
-    }
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
     unsafe {
         minix_rt::write(1, s.as_ptr(), s.len());
     }
@@ -60,11 +60,11 @@ pub fn print_dec(mut n: u32) {
 }
 
 pub fn write_err(s: &[u8]) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        minix_rt::write(2, s.as_ptr(), s.len());
-    }
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
     unsafe {
         minix_rt::write(2, s.as_ptr(), s.len());
     }
@@ -597,11 +597,11 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(&[b'0' + (err % 10) as u8]);
     write_out(b"\n");
     loop {
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack))
         };
-        #[cfg(not(target_arch = "riscv64"))]
+        #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
         unsafe {
             core::arch::asm!("pause")
         };

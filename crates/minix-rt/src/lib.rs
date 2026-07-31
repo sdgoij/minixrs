@@ -352,6 +352,71 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
     unsafe { riscv_syscall(nr, a1, a2, a3, a4, a5, a6) }
 }
 
+// AArch64 syscalls: svc #0, nr in x8, args in x0-x5, ret in x0.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn aarch64_syscall(
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            inlateout("x0") a0 => ret,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
+            in("x5") a5,
+            in("x8") nr,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall0(nr: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, 0, 0, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, 0, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, a2, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, a2, a3, 0, 0, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, a2, a3, a4, 0, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, a2, a3, a4, a5, 0) }
+}
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    unsafe { aarch64_syscall(nr, a1, a2, a3, a4, a5, a6) }
+}
+
 // POSIX-like primitives
 
 /// Exit the current process with the given status code.
@@ -365,6 +430,10 @@ pub fn exit(status: i32) -> ! {
             core::arch::asm!("pause")
         };
         #[cfg(target_arch = "riscv64")]
+        unsafe {
+            core::arch::asm!("wfi")
+        };
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!("wfi")
         };
@@ -837,6 +906,23 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
+#[cfg(all(not(test), target_os = "none", target_arch = "aarch64"))]
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn _start() -> ! {
+    // AArch64 entry: sp[0] = argc, sp[8..] = argv pointers.
+    // x0 = argc, x1 = argv, call main, then exit via syscall 0.
+    core::arch::naked_asm!(
+        "ldr    x0, [sp]",
+        "add    x1, sp, #8",
+        "bl     main",
+        "mov    x1, x0",
+        "mov    w8, #0",
+        "mov    w0, w1",
+        "svc    #0",
+    );
+}
+
 // Panic handler
 
 /// Panic handler — writes the panic message to stderr and aborts.
@@ -1090,10 +1176,8 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "riscv64")]
     {
-        // RISC-V: brk via ecall with MINIX syscall number (36 = NR_BRK).
-        // The kernel's basic syscall handler uses the same number as x86_64.
         let brk_result: isize;
         unsafe {
             core::arch::asm!(
@@ -1101,6 +1185,29 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
                 "ecall",
                 in("a0") new_end as usize,
                 lateout("a0") brk_result,
+                // The `li a7, 36` clobbers a7; declare it so the compiler
+                // does not keep a live value in a7 across the ecall.
+                lateout("a7") _,
+                options(nostack),
+            );
+        }
+        if brk_result < 0 {
+            return core::ptr::null_mut();
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let brk_result: i64;
+        unsafe {
+            core::arch::asm!(
+                "mov x8, #36",
+                "svc #0",
+                in("x0") new_end as u64,
+                lateout("x0") brk_result,
+                // The `mov x8, #36` clobbers x8; declare it so the compiler
+                // does not keep a live value in x8 across the svc.
+                lateout("x8") _,
                 options(nostack),
             );
         }

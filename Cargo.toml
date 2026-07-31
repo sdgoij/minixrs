@@ -6,6 +6,7 @@ exclude = [
 ]
 
 members = [
+    "crates/arch-aarch64",
     "crates/arch-common",
     "crates/arch-x86_64",
     "crates/arch-riscv64",

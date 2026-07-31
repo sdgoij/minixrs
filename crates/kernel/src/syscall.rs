@@ -679,20 +679,44 @@ unsafe fn exec_initramfs_for_target(
         // Architecture-specific user stack base.
         let user_stack_base: u64 = crate::hal::user_stack_base();
         let user_stack_size: usize = crate::hal::user_stack_size();
+        #[cfg(not(target_arch = "aarch64"))]
         let stack_top = user_stack_base + user_stack_size as u64;
 
-        // Setup user stack (writes through identity map; on RISC-V the stack
-        // base is 0x8FE00000 which IS in RAM, so this works).
-        let saved_cr3 = crate::hal::read_cr3();
-        crate::hal::write_cr3(boot_cr3_val);
-        let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, argv_strs) {
-            Ok(rsp) => rsp,
-            Err(_) => {
-                crate::hal::write_cr3(saved_cr3);
-                return -38;
-            }
+        // Setup user stack.
+        // On AArch64, the user stack VA (0x3FC00000) is below RAM start
+        // (0x40000000), so writing via the boot identity map hits
+        // non-existent PA. Use a RAM-backed temp VA in the PUD[1] range
+        // instead, then convert the resulting RSP to the user VA.
+        #[cfg(target_arch = "aarch64")]
+        let user_rsp = {
+            let saved_cr3 = crate::hal::read_cr3();
+            let temp_stack_top = 0x4FC0_0000u64 + user_stack_size as u64;
+            crate::hal::write_cr3(boot_cr3_val);
+            let rsp = match crate::elf::setup_user_stack(temp_stack_top, user_stack_size, argv_strs)
+            {
+                Ok(rsp) => rsp,
+                Err(_) => {
+                    crate::hal::write_cr3(saved_cr3);
+                    return -38;
+                }
+            };
+            crate::hal::write_cr3(saved_cr3);
+            user_stack_base + (rsp - 0x4FC0_0000u64)
         };
-        crate::hal::write_cr3(saved_cr3);
+        #[cfg(not(target_arch = "aarch64"))]
+        let user_rsp = {
+            let saved_cr3 = crate::hal::read_cr3();
+            crate::hal::write_cr3(boot_cr3_val);
+            let rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, argv_strs) {
+                Ok(rsp) => rsp,
+                Err(_) => {
+                    crate::hal::write_cr3(saved_cr3);
+                    return -38;
+                }
+            };
+            crate::hal::write_cr3(saved_cr3);
+            rsp
+        };
 
         let code_start = loaded.base & !0xFFF;
         let code_end = (loaded.top + 0xFFF) & !0xFFF;
@@ -739,7 +763,32 @@ unsafe fn exec_initramfs_for_target(
             Some(b) => b,
             None => return -12,
         };
-        // Copy stack data from identity-mapped temp area to allocated pages.
+        // Copy stack data to allocated pages.
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Stack was written at temp PA 0x4FC00000 via boot identity map.
+            let saved = crate::hal::read_cr3();
+            crate::hal::write_cr3(boot_cr3_val);
+            core::ptr::copy_nonoverlapping(
+                0x4FC0_0000u64 as *const u8,
+                phys_stack_base as *mut u8,
+                user_stack_size,
+            );
+            // setup_user_stack stored the argv string pointers as absolute
+            // addresses in the temp frame (0x4FC0_0000). The stack is
+            // remapped at user_stack_base for the new process, so convert
+            // each pointer value by the frame offset before user code
+            // dereferences them (e.g. parse_args -> strlen(argv[0])).
+            let frame_delta = 0x4FC0_0000u64 - user_stack_base;
+            for i in 0..argv_strs.len() {
+                let slot_va = user_rsp + 8 + (i as u64) * 8;
+                let slot = (phys_stack_base + (slot_va - user_stack_base)) as *mut u64;
+                let val = core::ptr::read_volatile(slot);
+                core::ptr::write_volatile(slot, val - frame_delta);
+            }
+            crate::hal::write_cr3(saved);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         {
             let saved = crate::hal::read_cr3();
             crate::hal::write_cr3(boot_cr3_val);

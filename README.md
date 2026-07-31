@@ -5,14 +5,13 @@
 
 A Rust port of [MINIX 3.3.0](https://www.minix3.org/), written from scratch.
 
-This project implements the full MINIX 3 stack in Rust — kernel, architecture-specific code, device drivers, filesystem servers, networking, system servers, and userland programs — targeting both **x86_64** and **RISC-V64**.
+This project implements the full MINIX 3 stack in Rust — kernel, architecture-specific code, device drivers, filesystem servers, networking, system servers, and userland programs — targeting **x86_64**, **RISC-V64**, and **AArch64**.
 
 ## Status
 
-Boots multi-process userspace in QEMU on x86_64 with a serial shell.
-VFS mounts the root filesystem and MFS can read directories, but
-grant-based data transfer (`virtual_copy`) and external binary exec
-are still works in progress.
+Boots multi-process userspace in QEMU on x86_64, RISC-V64, and AArch64 with a serial shell.
+VFS mounts the root filesystem and MFS can read directories; grant-based data transfer
+(`virtual_copy`) is still a work in progress.
 
 See `.agents/skills/` for domain-specific documentation and
 [PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
@@ -22,7 +21,7 @@ See `.agents/skills/` for domain-specific documentation and
 ### Prerequisites
 
 - Rust toolchain (MSRV: **1.96**, edition: **2024**)
-- QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`)
+- QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
 - `rust-objcopy`, `rust-nm`, `rust-lld` (from `rust-src` component)
 - Clang (for trampoline bootstrap)
 - [Just](https://just.systems/) (build runner)
@@ -52,6 +51,11 @@ just debug                    # Build and boot with GDB server on :1234
 just build riscv64            # Build the RISC-V kernel
 just run riscv64              # Boot in QEMU (uses OpenSBI)
 just test-qemu riscv64        # Run integration tests
+
+# AArch64 (requires nightly)
+just build aarch64            # Build the AArch64 kernel
+just run aarch64              # Boot in QEMU (virt machine)
+just debug aarch64            # Build and boot with GDB server on :1234
 ```
 
 ## Project Structure
@@ -61,6 +65,7 @@ crates/
 ├── kernel              # Core kernel: processes, scheduling, IPC, VM
 ├── kernel-boot         # Boot loader & entry point (x86_64 trampoline)
 ├── arch-common         # Architecture-independent kernel types & ABI
+├── arch-aarch64        # AArch64-specific kernel code
 ├── arch-x86_64         # x86_64-specific kernel code
 ├── arch-riscv64        # RISC-V64-specific kernel code
 ├── drivers             # Device drivers (serial, keyboard, etc.)
@@ -86,7 +91,7 @@ MINIX 3's microkernel design is preserved:
 - **VFS** — virtual filesystem layer for unified file operations
 - **Userland** — classic POSIX utilities (cat, ls, cp, rm, sh, etc.)
 
-The project supports both **x86_64** and **RISC-V64** targets via architecture-specific crates (`arch-x86_64`, `arch-riscv64`) sharing a common core (`arch-common`).
+The project supports **x86_64**, **RISC-V64**, and **AArch64** targets via architecture-specific crates (`arch-x86_64`, `arch-riscv64`, `arch-aarch64`) sharing a common core (`arch-common`).
 
 See `.agents/skills/` for domain deep-dives:
 - `minix-boot-process` — boot chain from QEMU to shell
@@ -113,7 +118,7 @@ The original C reference source is at `.refs/minix-3.3.0/` (git submodule).
   - `embed_initramfs` — embed initramfs in the kernel binary
   - `embed_minixfs` — embed minixfs driver in the kernel
   - `qemu-tests` — enable QEMU integration test infrastructure
-- **RISC-V64** requires the nightly toolchain (`-Zbuild-std`)
+- **RISC-V64 and AArch64** require the nightly toolchain (`-Zbuild-std`)
 
 ## License
 

@@ -171,14 +171,6 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
             // Validate table_phys before dereferencing.
             // Physical addresses must be within the identity-mapped range.
             if !crate::hal::pte_is_valid_phys(table_phys) {
-                // Dump the corrupted table_phys for diagnosis
-                crate::hal::serial_write_byte(b'!');
-                let hex = b"0123456789abcdef";
-                let bytes = table_phys.to_le_bytes();
-                for b in bytes {
-                    crate::hal::serial_write_byte(hex[(b >> 4) as usize]);
-                    crate::hal::serial_write_byte(hex[(b & 0xF) as usize]);
-                }
                 return Err(PageTableError::InvalidArgument);
             }
             let table = table_phys as *mut PtEntry;
@@ -191,7 +183,12 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 let p = alloc_pt_page()?;
                 // Zero the entire page so stale data doesn't masquerade as
                 // valid PTEs on subsequent lookups at different indices.
+                #[cfg(not(target_arch = "aarch64"))]
                 core::ptr::write_bytes(p as *mut u8, 0, 4096);
+                #[cfg(target_arch = "aarch64")]
+                for i in 0..512 {
+                    core::ptr::write_volatile((p as *mut u64).add(i), 0);
+                }
                 let branch_flags = crate::hal::pte_nonleaf_flags();
                 write_pte(pte_addr, crate::hal::build_pte(p, branch_flags));
                 p

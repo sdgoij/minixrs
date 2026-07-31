@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "arch-aarch64"
+version = "0.1.0"
+dependencies = [
+ "arch-common",
+]
+
+[[package]]
 name = "arch-common"
 version = "0.1.0"
 
@@ -30,6 +37,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 name = "drivers"
 version = "0.1.0"
 dependencies = [
+ "arch-aarch64",
  "arch-common",
  "arch-riscv64",
  "arch-x86_64",
@@ -48,6 +56,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "arch-aarch64",
  "arch-common",
  "arch-riscv64",
  "arch-x86_64",
@@ -58,6 +67,7 @@ dependencies = [
 name = "kernel-boot"
 version = "0.1.0"
 dependencies = [
+ "arch-aarch64",
  "arch-common",
  "arch-riscv64",
  "arch-x86_64",
