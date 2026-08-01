@@ -4,6 +4,9 @@ rustflags = ["-C", "link-arg=-Ttools/minix-raw-riscv64.ld"]
 [target.aarch64-unknown-minix]
 rustflags = ["-C", "link-arg=-Ttools/minix-raw-aarch64.ld"]
 
+[target.x86_64-pc-minix]
+rustflags = ["-C", "link-arg=-Ttools/minix-raw.ld"]
+
 [env]
 # Tests share global mutable state (UnsafeCell) — must run single-threaded.
 RUST_TEST_THREADS = "1"

@@ -1,10 +1,12 @@
-// Build helper: extracts kmain address from kernel ELF and rebuilds the trampoline.
+// x86 post-link build helper: compiles the kernel, extracts the kmain
+// address, rebuilds the trampoline with it, and produces target/kernel.bin.
 //
-// Usage: rustc tools/build.rs --edition 2024 -o target/build_tramp.exe
-//   or:  rustup run nightly cargo run --manifest-path tools/Cargo.toml
+// The initramfs and MinixFS images are assembled by crates/kernel/build.rs;
+// this tool only does the steps that must run AFTER the kernel ELF links
+// (a build script cannot do post-link work).
 //
-// Actually just run as a standalone script:
-//   rustc tools/mkboot.rs --edition 2018 -o target/mkboot.exe && target/mkboot.exe
+// Usage: rustc tools/mkboot.rs --edition 2024 -o target/mkboot
+//        target/mkboot [features]     (default: embed_initramfs,embed_minixfs)
 
 use std::path::Path;
 use std::process::Command;
@@ -28,48 +30,7 @@ fn main() {
     };
     println!("Features: {}", features);
 
-    // 1. Build initramfs first (kernel build needs initramfs.cpio via include_bytes!)
-    println!("Building initramfs...");
-    let mkinitramfs = workspace.join("target").join("mkinitramfs.exe");
-    // Always rebuild mkinitramfs to pick up source changes.
-    std::fs::remove_file(&mkinitramfs).ok();
-    let status = Command::new("rustc")
-        .args([
-            workspace.join("tools/mkinitramfs.rs").to_str().unwrap(),
-            "--edition",
-            "2024",
-            "-o",
-            &mkinitramfs.to_string_lossy(),
-        ])
-        .status()
-        .expect("rustc mkinitramfs failed");
-    assert!(status.success());
-    let status = Command::new(&mkinitramfs)
-        .status()
-        .expect("mkinitramfs failed");
-    assert!(status.success());
-    println!("initramfs built.");
-
-    // 1b. Build the Minix FS image (needs binaries from initramfs)
-    println!("Building Minix FS image...");
-    let mkminixfs = workspace.join("target").join("mkminixfs.exe");
-    std::fs::remove_file(&mkminixfs).ok();
-    let status = Command::new("rustc")
-        .args([
-            workspace.join("tools/mkminixfs.rs").to_str().unwrap(),
-            "--edition",
-            "2021",
-            "-o",
-            &mkminixfs.to_string_lossy(),
-        ])
-        .status()
-        .expect("rustc mkminixfs failed");
-    assert!(status.success());
-    let status = Command::new(&mkminixfs).status().expect("mkminixfs failed");
-    assert!(status.success());
-    println!("Minix FS image built.");
-
-    // 2. Build the kernel with cargo
+    // 1. Build the kernel (the linker script comes from .cargo/config.toml).
     let status = Command::new("rustup")
         .args([
             "run",
@@ -80,6 +41,7 @@ fn main() {
             "kernel-boot",
             "--target",
             "x86_64-pc-minix.json",
+            "-Zunstable-options",
             "-Zjson-target-spec",
             "-Zbuild-std=core,alloc",
             "-Zbuild-std-features=compiler-builtins-mem",
@@ -87,12 +49,11 @@ fn main() {
             &features,
             "--release",
         ])
-        .env("RUSTFLAGS", "-C link-arg=-Ttools/minix-raw.ld")
         .status()
         .expect("cargo build failed");
     assert!(status.success());
 
-    // 2. Extract kmain address
+    // 2. Extract the kmain address from the linked ELF.
     let kernel_elf = workspace
         .join("target")
         .join("x86_64-pc-minix")
@@ -120,7 +81,7 @@ fn main() {
 
     println!("kmain @ 0x{}", kmain_addr);
 
-    // 3. Build trampoline with correct address
+    // 3. Build the trampoline with the correct address.
     let trampoline_s = workspace
         .join("crates")
         .join("kernel-boot")
@@ -167,7 +128,7 @@ fn main() {
     std::fs::remove_file(&trampoline_obj).ok();
     println!("Trampoline rebuilt with kmain @ 0x{}", kmain_addr);
 
-    // 4. objcopy to raw binary
+    // 4. objcopy to raw binary.
     let kernel_bin = workspace.join("target").join("kernel.bin");
     let status = Command::new("rust-objcopy")
         .args([

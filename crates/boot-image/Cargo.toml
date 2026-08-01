@@ -1,0 +1,25 @@
+[package]
+name = "boot-image"
+version = "0.1.0"
+description = "Boot image assembly: initramfs CPIO + MinixFS v3 image builders"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[lib]
+name = "boot_image"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mkinitramfs"
+path = "src/bin/mkinitramfs.rs"
+
+[[bin]]
+name = "mkminixfs"
+path = "src/bin/mkminixfs.rs"

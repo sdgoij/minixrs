@@ -17,8 +17,7 @@ x86 and RISC-V boot to a shell; AArch64 is the least-tested port. Start by compa
 ## Build & Run (Windows)
 
 ```
-rustc tools/jsh.rs -o target/jsh          # after any tools/jsh.rs change
-just run aarch64                          # full build + boot (rebuilds x86 too — slow)
+just run aarch64                          # full build + boot
 just debug aarch64                        # QEMU with -s -S, waits for GDB on :1234
 ```
 
@@ -221,9 +220,9 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
    "  enqueuing processes...", "  scheduler starting...", "  switching to userspace...").
    If per-process lines are missing, check the lib.rs serial_write cfg (gotcha 1).
 
-6. **`jsh` lock (LNK1104)**: `target/jsh` is locked while a jsh/QEMU process runs.
-   `taskkill -F -IM qemu-system-aarch64.exe; taskkill -F -IM jsh.exe; rm -f target/jsh target/jsh.exe`
-   then recompile with `rustc tools/jsh.rs -o target/jsh`.
+6. **`mkboot`/QEMU process lock (LNK1104)**: `target/mkboot(.exe)` is locked while a
+   build/QEMU process runs. `taskkill -F -IM qemu-system-aarch64.exe; taskkill -F -IM qemu-system-x86_64.exe`
+   then re-run. There is no separate `jsh` anymore — Just uses the default shell.
 
 7. **AArch64 boot proc page tables** (boot_init.rs): non-leaf links must be `PTE_TABLE` (0b11),
    not `pte_present()` (0b01 = block descriptor). The entry-0 PMD block (exception vectors)

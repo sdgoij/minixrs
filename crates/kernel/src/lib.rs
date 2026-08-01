@@ -28,12 +28,9 @@ pub mod table;
 pub mod vm;
 
 // Include the generated initramfs data when embed_initramfs is active.
-// CARGO_MANIFEST_DIR = crates/kernel/, ../../target/ = target/
+// The path comes from kernel/build.rs via cargo:rustc-env=INITRAMFS_DATA.
 #[cfg(feature = "embed_initramfs")]
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/initramfs_data.rs"
-));
+include!(concat!(env!("INITRAMFS_DATA")));
 
 #[cfg(feature = "qemu-tests")]
 pub mod tests;

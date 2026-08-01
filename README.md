@@ -20,37 +20,32 @@ See `.agents/skills/` for domain-specific documentation and
 
 ### Prerequisites
 
-- Rust toolchain (MSRV: **1.96**, edition: **2024**)
+- Rust toolchain (MSRV: **1.96**, edition: **2024**) + **nightly** (`-Zbuild-std`)
+- bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
 - QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
 - `rust-objcopy`, `rust-nm`, `rust-lld` (from `rust-src` component)
-- Clang (for trampoline bootstrap)
+- Clang (for the x86 trampoline post-link)
 - [Just](https://just.systems/) (build runner)
 
-### One-Time Bootstrap
-
-jsh is a custom shell that handles cross-platform path resolution.
-Compile it once before using `just`:
-
-```bash
-# Windows (manual):
-rustc tools/jsh.rs -o target/jsh
-
-# Linux (shebang, or just run the same command):
-just prepare
-```
+> **Windows users:** Just executes recipes with `sh` (the POSIX shell) —
+> without it, Just falls back to `cmd` and the recipes break. Git for
+> Windows ships one at `C:\Program Files\Git\usr\bin\sh.exe`; add that
+> directory to your `PATH` (or `C:\Program Files\Git\bin`). See
+> <https://github.com/casey/just#windows> for how Just selects its shell.
 
 ### Usage
 
 ```bash
 # x86_64
-just build                    # Build the kernel
+just build                    # Build the kernel + boot images
 just run                      # Build and boot in QEMU
 just debug                    # Build and boot with GDB server on :1234
+just test-qemu                # Run the QEMU integration tests
 
 # RISC-V64 (requires nightly)
 just build riscv64            # Build the RISC-V kernel
 just run riscv64              # Boot in QEMU (uses OpenSBI)
-just test-qemu riscv64        # Run integration tests
+just test-qemu riscv64        # Boot (no integration test runner on riscv64)
 
 # AArch64 (requires nightly)
 just build aarch64            # Build the AArch64 kernel
@@ -58,12 +53,19 @@ just run aarch64              # Boot in QEMU (virt machine)
 just debug aarch64            # Build and boot with GDB server on :1234
 ```
 
+The Just recipes orchestrate plain `cargo` invocations; the initramfs CPIO
+and MinixFS root image are assembled by `crates/kernel/build.rs` from the
+built userland/server binaries, and the x86 trampoline/kernel.bin post-link
+is handled by `tools/mkboot.rs`. Assembled images are mirrored per-target
+under `target/images/<triple>/` for host inspection.
+
 ## Project Structure
 
 ```
 crates/
 ├── kernel              # Core kernel: processes, scheduling, IPC, VM
 ├── kernel-boot         # Boot loader & entry point (x86_64 trampoline)
+├── boot-image          # Initramfs CPIO + MinixFS image builders (host)
 ├── arch-common         # Architecture-independent kernel types & ABI
 ├── arch-aarch64        # AArch64-specific kernel code
 ├── arch-x86_64         # x86_64-specific kernel code

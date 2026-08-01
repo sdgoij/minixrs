@@ -25,9 +25,10 @@ The ELF32 multiboot trampoline transitions the CPU from 32-bit to 64-bit long mo
 4. Enables PAE (CR4.PAE + CR4.PGE), loads CR3, enables Long Mode (EFER.LME)
 5. Enables paging (CR0.PG | CR0.WP), loads 64-bit GDT
 6. Far-jumps (lret) to 64-bit entry, sets up temporary stack
-7. Jumps to kmain() at address extracted by mkboot
+7. Jumps to kmain() at address extracted by `tools/mkboot.rs` (x86 post-link)
 
-Built by `build.rs` using clang + rust-lld. Address determined by mkboot extracting `kmain` symbol.
+Built by `tools/mkboot.rs` (clang + rust-lld) after the kernel ELF links; the
+address comes from `rust-nm` on the kernel-boot ELF.
 
 ## Stage 2: kmain() (crates/kernel-boot/src/main.rs)
 
@@ -115,9 +116,9 @@ The full PM↔VFS boot protocol (VFS_PM_INIT handshake) is **not implemented** i
 | `crates/kernel-boot/src/main.rs` | kmain(), syscall handlers, boot test runner |
 | `crates/kernel-boot/src/boot_init.rs` | Server loading, page table creation |
 | `crates/kernel-boot/src/boot_test.rs` | In-kernel boot verification tests |
-| `tools/mkboot.rs` | Build orchestrator (trampoline + kernel + initramfs) |
-| `tools/mkinitramfs.rs` | CPIO archive builder |
-| `tools/mkminixfs.rs` | MINIX FS image builder |
+| `crates/kernel/build.rs` | Boot image assembly (initramfs CPIO + MinixFS) |
+| `tools/mkboot.rs` | x86 post-link: kmain extract, trampoline, kernel.bin |
+| `crates/boot-image/` | CPIO + MinixFS image builders (host lib + CLIs) |
 | `tools/minix-raw.ld` | Kernel linker script (link address 0x200000) |
 
 ## Build & Run

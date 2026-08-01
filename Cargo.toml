@@ -10,6 +10,7 @@ members = [
     "crates/arch-common",
     "crates/arch-x86_64",
     "crates/arch-riscv64",
+    "crates/boot-image",
     "crates/drivers",
     "crates/fs",
     "crates/kernel",

@@ -24,6 +24,9 @@ aarch64 = []
 arch-common = { path = "../arch-common" }
 bitflags = { workspace = true }
 
+[build-dependencies]
+boot-image = { path = "../boot-image" }
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 arch-x86_64 = { path = "../arch-x86_64" }
 

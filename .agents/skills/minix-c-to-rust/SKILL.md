@@ -215,7 +215,7 @@ MINIX error codes are negative integers (0 = OK, -1 = EPERM, -2 = ENOENT, etc.).
 - Block number: `(i_num - 1) / inodes_per_block + inode_table_start_block`
 - Slot within block: `(i_num - 1) % inodes_per_block`
 
-The FS image builder (`tools/mkminixfs.rs`) must follow the same convention — **no dummy inode 0** at slot 0.
+The FS image builder (`crates/boot-image/src/minixfs.rs`) must follow the same convention — **no dummy inode 0** at slot 0.
 
 ## Reference Source Files
 
