@@ -686,7 +686,6 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
 }
 
 /// Perform a synchronous IPC operation.
-/// Tries in-kernel server dispatch before sending to a user-space process.
 ///
 /// # Safety
 ///
@@ -695,15 +694,6 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     unsafe {
         let src_dst_e = core::ptr::read_unaligned(m_ptr.cast::<[u8; 8]>());
         let ep = i32::from_ne_bytes([src_dst_e[0], src_dst_e[1], src_dst_e[2], src_dst_e[3]]);
-
-        // Try in-kernel server dispatch first (SENDREC and SEND only, not
-        // RECEIVE or NOTIFY which are addressed to self / any).
-        if call == SENDREC || call == SEND {
-            let msg = &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]);
-            if let Some(result) = try_server_dispatch(caller_ptr, ep, msg) {
-                return result;
-            }
-        }
 
         // C: check iskerneln — forbid SEND/SENDNB/NOTIFY to kernel tasks
         if (call == SEND || call == SENDNB || call == NOTIFY)
@@ -756,73 +746,6 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     }
 }
 
-/// Maximum number of dispatchable server endpoints (matches arch-common
-/// NR_BOOT_MODULES range).
-pub const SERVER_DISPATCH_SLOTS: usize = 16;
-
-/// Dispatch function signature: handles an IPC call directed at a server
-/// endpoint directly in the kernel, bypassing the user-space server process.
-///
-/// Parameters:
-/// - `caller`: the sending process
-/// - `msg`: the IPC message (can be modified in place for the reply)
-/// - Returns: 0 (OK) on success, negative error code on failure
-pub type ServerDispatchFn = unsafe fn(*mut Proc, &mut [u8; MESSAGE_SIZE]) -> i32;
-
-/// Dispatch table indexed by endpoint slot.
-struct ServerDispatchCell(UnsafeCell<[Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS]>);
-unsafe impl Sync for ServerDispatchCell {}
-impl ServerDispatchCell {
-    const fn new(val: [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS]) -> Self {
-        Self(UnsafeCell::new(val))
-    }
-    fn get(&self) -> *mut [Option<ServerDispatchFn>; SERVER_DISPATCH_SLOTS] {
-        self.0.get()
-    }
-}
-
-static SERVER_DISPATCH: ServerDispatchCell = ServerDispatchCell::new([None; SERVER_DISPATCH_SLOTS]);
-
-unsafe fn write_server_dispatch(slot: usize, handler: ServerDispatchFn) {
-    unsafe {
-        let p = core::ptr::addr_of_mut!((*SERVER_DISPATCH.get())[slot]);
-        core::ptr::write(p, Some(handler));
-    }
-}
-
-/// Register an in-kernel dispatch handler for an endpoint.
-/// Returns `true` if the endpoint was within the dispatch range.
-pub fn register_server_dispatch(ep: i32, handler: ServerDispatchFn) -> bool {
-    let slot = endpoint_slot(ep);
-    if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
-        return false;
-    }
-    unsafe {
-        write_server_dispatch(slot as usize, handler);
-    }
-    true
-}
-
-/// Try to dispatch an IPC call to an in-kernel server handler.
-/// Returns `Some(result)` if a handler was found, `None` otherwise.
-///
-/// # Safety
-///
-/// `caller` must point to a valid `Proc`. `msg` must point to a valid
-/// message buffer. `dst_ep` must be a valid endpoint.
-pub unsafe fn try_server_dispatch(
-    caller: *mut Proc,
-    dst_ep: i32,
-    msg: &mut [u8; MESSAGE_SIZE],
-) -> Option<i32> {
-    let slot = endpoint_slot(dst_ep);
-    if slot < 0 || slot >= SERVER_DISPATCH_SLOTS as i32 {
-        return None;
-    }
-    // D2: trace server dispatch
-    (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg))
-}
-
 /// Function type for setting the exec target (RIP and RSP) on a process.
 /// Called during PM_EXEC to switch the process to the new binary's entry point.
 pub type SetExecRipFn = unsafe fn(*mut Proc, new_rip: u64, new_rsp: u64);
@@ -860,17 +783,6 @@ pub unsafe fn set_exec_target(proc: *mut Proc, new_rip: u64, new_rsp: u64) {
     if let Some(f) = unsafe { *SET_EXEC_RIP.get() } {
         unsafe { f(proc, new_rip, new_rsp) };
     }
-}
-
-/// Initialize the server dispatch table with default handlers.
-///
-/// Currently empty — IPC messages to user-space servers (PM, VFS, etc.)
-/// go through the normal `mini_send`/`mini_receive` IPC path. Server
-/// dispatch handlers can be registered here for performance optimization
-/// once the server implementations are complete and stable.
-pub fn init_server_dispatch() {
-    // No server dispatch handlers registered. All IPC to user-space
-    // servers goes through the normal IPC path.
 }
 
 /// # Safety
@@ -1674,45 +1586,6 @@ mod tests {
     }
 
     #[test]
-    fn test_register_dispatch_invalid_endpoint() {
-        assert!(!register_server_dispatch(-999, |_, _| 0));
-        assert!(!register_server_dispatch(9999, |_, _| 0));
-    }
-
-    #[test]
-    fn test_register_dispatch_valid_endpoint() {
-        let handler: ServerDispatchFn = |_, _| 42;
-        assert!(register_server_dispatch(
-            arch_common::com::PM_PROC_NR,
-            handler
-        ));
-    }
-
-    #[test]
-    fn test_try_server_dispatch_no_handler() {
-        unsafe {
-            proc_init();
-            let rp = crate::table::proc_addr(0);
-            let mut msg = [0u8; MESSAGE_SIZE];
-            let result = try_server_dispatch(rp, 42, &mut msg);
-            assert!(result.is_none());
-        }
-    }
-
-    #[test]
-    fn test_try_server_dispatch_registered_handler() {
-        unsafe {
-            proc_init();
-            let rp = crate::table::proc_addr(0);
-            let mut msg = [0u8; MESSAGE_SIZE];
-            let handler: ServerDispatchFn = |_, _| 99;
-            register_server_dispatch(arch_common::com::PM_PROC_NR, handler);
-            let result = try_server_dispatch(rp, arch_common::com::PM_PROC_NR, &mut msg);
-            assert_eq!(result, Some(99));
-        }
-    }
-
-    #[test]
     fn test_set_exec_rip_register_and_call() {
         unsafe {
             let handler: SetExecRipFn = |_, _, _| {};
@@ -1720,31 +1593,6 @@ mod tests {
             proc_init();
             let rp = crate::table::proc_addr(0);
             set_exec_target(rp, 0x400000, 0x7fff0000);
-        }
-    }
-
-    #[test]
-    fn test_init_server_dispatch_adds_no_handlers() {
-        // init_server_dispatch should not register any handlers.
-        // IPC messages go through the normal mini_send/mini_receive path.
-        init_server_dispatch();
-        unsafe {
-            let mut msg = [0u8; MESSAGE_SIZE];
-            let rp = crate::table::proc_addr(0);
-            let result = try_server_dispatch(rp, arch_common::com::PM_PROC_NR, &mut msg);
-            // Re-init (should be idempotent)
-            init_server_dispatch();
-            let result2 = try_server_dispatch(rp, arch_common::com::PM_PROC_NR, &mut msg);
-            // State should not change
-            assert_eq!(
-                result.is_some(),
-                result2.is_some(),
-                "init_server_dispatch should be idempotent"
-            );
-            assert_eq!(
-                result, result2,
-                "init_server_dispatch should not modify dispatch table"
-            );
         }
     }
 

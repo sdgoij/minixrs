@@ -917,7 +917,7 @@ fn test_proc_ptr_ok(ctx: &mut TestCtx) {
 
 fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
     unsafe {
-        // Register an MFS dispatch handler that handles REQ_READSUPER
+        // Simulate the MFS side of a VFS→MFS REQ_READSUPER exchange.
         // VFS→MFS message format (from servers/src/vfs/request.rs):
         //   m_type at offset 4: REQ_READSUPER = FS_BASE + 28 = 0xA10 + 28 = 0xA1C
         //   PAYLOAD_OFF (8):    device (u32)
@@ -964,27 +964,10 @@ fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
             0
         }
 
-        // Use MFS_PROC_NR = 5 (from boot_init.rs: ("/sbin/mfs", MFS_PROC_NR))
-        const MFS_PROC_NR: i32 = 5;
-
-        // Register the MFS handler
-        let registered = crate::ipc::register_server_dispatch(MFS_PROC_NR, mfs_readsuper_handler);
-        ctx.assert(registered, "register_server_dispatch for MFS must succeed");
-
-        // Set up a caller process (simulating VFS)
-        let caller = make_test_proc(117);
-        if caller.is_null() {
-            ctx.assert(false, "make_test_proc for VFS caller failed");
-            return;
-        }
-        let _caller_ep = (*caller).p_endpoint;
-
         // Build a REQ_READSUPER message (VFS→MFS mount request)
         // Format matches req_readsuper in servers/src/vfs/request.rs
         let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
 
-        // Bytes 0-3: destination endpoint (MFS_PROC_NR)
-        msg[0..4].copy_from_slice(&MFS_PROC_NR.to_le_bytes());
         // Bytes 4-7: m_type = REQ_READSUPER = 0xA1C
         msg[4..8].copy_from_slice(&0xA1Ci32.to_le_bytes());
         // Byte 8-11: device = 1 (root device)
@@ -996,9 +979,10 @@ fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
         // Byte 24-27: grant_id = 0 (no label)
         msg[24..28].copy_from_slice(&0i32.to_le_bytes());
 
-        // Send the message via do_sync_ipc (SENDREC to MFS)
-        let result = crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC);
-        ctx.assert(result == 0, "do_sync_ipc SENDREC to MFS must return OK");
+        // Hand the message to the MFS handler in place (the same shape the
+        // real IPC path uses — MFS replies into the caller's buffer).
+        let result = mfs_readsuper_handler(core::ptr::null_mut(), &mut msg);
+        ctx.assert(result == 0, "MFS readsuper handler must return OK");
 
         // Parse the response
         let status = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0xFF; 4]));
@@ -1016,20 +1000,6 @@ fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
 
         let file_size = i64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0xFF; 8]));
         ctx.assert(file_size == 0, "MFS root inode file_size must be 0");
-
-        // Caller is still runnable after SENDREC — the in-kernel dispatch
-        // handler processed both the send and receive halves of SENDREC
-        // atomically, so the caller doesn't need to wait for a separate reply.
-        let caller_rts = (*caller).p_rts_flags.load(Ordering::Relaxed);
-        ctx.assert(
-            caller_rts == 0,
-            "VFS caller must be runnable after in-kernel MFS dispatch",
-        );
-
-        // Clean up
-        (*caller)
-            .p_rts_flags
-            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
     }
 }
 

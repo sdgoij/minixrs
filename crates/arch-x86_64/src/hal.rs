@@ -1330,7 +1330,7 @@ mod tests {
     fn read_syscall_nr_from_rax() {
         let mut f = frame_default();
         unsafe {
-            write_frame_field(&mut f, 0, 59); // NR_WAITPID
+            write_frame_field(&mut f, 0, 59); // any syscall number
             assert_eq!(read_syscall_nr(&f), 59);
         }
     }

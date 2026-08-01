@@ -24,10 +24,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Exit process
 const NR_EXIT: u64 = 0;
-/// Fork
-const NR_FORK: u64 = 58;
-/// Wait for child
-const NR_WAITPID: u64 = 59;
 /// Get process ID.
 const NR_GETPID: u64 = 20;
 
@@ -1396,8 +1392,6 @@ mod tests {
         assert_eq!(SENDA_CALL, 52);
 
         // Syscall numbers (from .refs/minix-3.3.0/minix/include/minix/callnr.h)
-        assert_eq!(NR_FORK, 58);
-        assert_eq!(NR_WAITPID, 59);
         assert_eq!(NR_KERNEL_CALL, 50);
 
         // File operation syscall numbers
