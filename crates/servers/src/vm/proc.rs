@@ -617,10 +617,11 @@ unsafe fn make_pte_readonly(cr3: u64, va: u64) -> i32 {
 pub unsafe fn vm_get_addrspace(ep: Endpoint) -> u64 {
     unsafe {
         // Always use the kernel's CR3 first — it's the authoritative source
-        // and is updated by exec_initramfs_for_target (which can't update
-        // VM's Vmproc directly). The Vmproc's vm_pml4_phys may be stale
-        // after exec_replace, causing fork to create children with wrong
-        // page tables and immediate SIGSEGV on the first instruction.
+        // and is updated by the exec path (exec_elf_for_target via VFS's
+        // SYS_EXEC_LOAD, which can't update VM's Vmproc directly). The
+        // Vmproc's vm_pml4_phys may be stale after an exec, causing fork to
+        // create children with wrong page tables and immediate SIGSEGV on
+        // the first instruction.
         let kernel_cr3 = get_p_cr3(ep);
         if kernel_cr3 != 0 {
             return kernel_cr3;

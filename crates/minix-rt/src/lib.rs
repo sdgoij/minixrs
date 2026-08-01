@@ -48,6 +48,7 @@ pub const VFS_GETDENTS: i32 = 0x11D; // VFS_BASE + 29
 /// PM message types (from callnr.h).
 pub const PM_FORK: i32 = 0x0002;
 pub const PM_WAITPID: i32 = 0x0003;
+pub const PM_EXEC: i32 = 0x000E;
 pub const PM_EXEC_NEW: i32 = 0x002B;
 
 /// SELF endpoint — send to the calling process itself.
@@ -92,30 +93,155 @@ const NR_MKNOD: u64 = 56;
 const NR_GETDENTS: u64 = 57;
 /// Kernel call syscall number — invoke a kernel call on the SYSTEM task.
 pub const NR_KERNEL_CALL: u64 = 50;
-/// Syscall to check if this process is a fork child (detects parent vs child
-/// after IPC-based fork when page tables are shared).
-pub const NR_IS_FORK_CHILD: u64 = 63;
-/// Syscall to replace current process with a binary from initramfs.
-pub const NR_EXEC_REPLACE: u64 = 61;
 
-/// Replace the current process with a binary from initramfs.
+// User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
+// used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
+// The exec frame's pointer arithmetic depends on this value.
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+const USER_STACK_TOP: u64 = 0x0FE1_0000;
+#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+const USER_STACK_TOP: u64 = 0x8FE1_0000;
+#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+const USER_STACK_TOP: u64 = 0x3FD0_0000;
+
+/// Execute a new program via the PM→VFS chain (matching C `execve` in
+/// `.refs/minix-3.3.0/minix/lib/libc/sys/execve.c`).
 ///
-/// `path` must be a null-terminated string. `argv` is a pointer to a
-/// null-terminated array of string pointers (the argument vector), or
-/// null to pass no arguments. The calling process is replaced entirely
-/// — no return on success.
+/// Builds the stack frame (argc, argv pointers, envp pointers, then the
+/// strings) in the heap via `sbrk`, then SENDRECs `PM_EXEC` to PM with the
+/// path and frame. On success the process image is replaced and this never
+/// returns; on failure a negative errno is returned.
+///
+/// `path` must include the NUL terminator. `argv`/`envp` are NUL-terminated
+/// arrays of NUL-terminated strings in the caller's address space.
 ///
 /// # Safety
 ///
-/// `path` must point to a valid null-terminated string in the process's
-/// address space. `argv` must point to a valid null-terminated array of
-/// string pointers, or be null. The binary named by `path` must exist
-/// in the embedded initramfs. On success this function never returns.
-///
-/// Only available on bare-metal; returns ENOSYS on host builds.
+/// `path`, `argv` and `envp` must point to valid memory as described above.
 #[cfg(target_os = "none")]
-pub unsafe fn exec_replace(path: &[u8], argv: *const *const u8) -> i64 {
-    unsafe { syscall2(NR_EXEC_REPLACE, path.as_ptr() as u64, argv as u64) }
+pub unsafe fn execve(
+    path: *const u8,
+    path_len: usize,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> i32 {
+    unsafe {
+        // Count argv/envp and total string bytes.
+        let mut argc = 0usize;
+        let mut envc = 0usize;
+        let mut str_bytes = 0usize;
+        let mut p = argv;
+        while !p.read().is_null() && argc < 63 {
+            let s = p.read();
+            str_bytes += cstr_len(s) + 1;
+            argc += 1;
+            p = p.add(1);
+        }
+        if !envp.is_null() {
+            let mut q = envp;
+            while !q.read().is_null() && envc < 63 {
+                let s = q.read();
+                str_bytes += cstr_len(s) + 1;
+                envc += 1;
+                q = q.add(1);
+            }
+        }
+
+        // Frame: argc + (argv ptrs + NULL + envp ptrs + NULL) + strings, 8-aligned.
+        let header = 8 + (argc + envc + 2) * 8;
+        let frame_size = (header + str_bytes + 7) & !7usize;
+        if frame_size == 0 || frame_size > 16384 {
+            return -7; // E2BIG
+        }
+
+        let frame = sbrk(frame_size as isize);
+        if frame < 0 {
+            return frame as i32;
+        }
+        let frame = frame as usize;
+        let vsp = USER_STACK_TOP - frame_size as u64;
+
+        // Copy strings to the end of the frame, going down: argv then envp.
+        let mut str_pos = frame + frame_size;
+        let mut offsets = [0usize; 64];
+        let mut oi = 0usize;
+        let mut pi = argv;
+        for _ in 0..argc {
+            let s = pi.read();
+            let len = cstr_len(s);
+            str_pos -= len + 1;
+            core::ptr::copy_nonoverlapping(s, str_pos as *mut u8, len);
+            *(str_pos as *mut u8).add(len) = 0;
+            offsets[oi] = str_pos;
+            oi += 1;
+            pi = pi.add(1);
+        }
+        if !envp.is_null() {
+            let mut qi = envp;
+            for _ in 0..envc {
+                let s = qi.read();
+                let len = cstr_len(s);
+                str_pos -= len + 1;
+                core::ptr::copy_nonoverlapping(s, str_pos as *mut u8, len);
+                *(str_pos as *mut u8).add(len) = 0;
+                offsets[oi] = str_pos;
+                oi += 1;
+                qi = qi.add(1);
+            }
+        }
+
+        // Pointer array: argc, argv ptrs, NULL, envp ptrs, NULL.
+        let mut pos = frame;
+        (pos as *mut u64).write(argc as u64);
+        pos += 8;
+        let mut si = 0usize;
+        for _ in 0..argc {
+            (pos as *mut u64).write(vsp + (offsets[si] as u64 - frame as u64));
+            pos += 8;
+            si += 1;
+        }
+        (pos as *mut u64).write(0); // argv NULL
+        pos += 8;
+        for _ in 0..envc {
+            (pos as *mut u64).write(vsp + (offsets[si] as u64 - frame as u64));
+            pos += 8;
+            si += 1;
+        }
+        (pos as *mut u64).write(0); // envp NULL
+
+        // Send PM_EXEC to PM (m_lc_pm_exec layout: name, namelen, frame,
+        // framelen, ps_str at message offsets 8/16/24/32/40).
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&PM_EXEC.to_le_bytes());
+        msg[8..16].copy_from_slice(&(path as u64).to_le_bytes());
+        msg[16..24].copy_from_slice(&(path_len as u64).to_le_bytes());
+        msg[24..32].copy_from_slice(&(frame as u64).to_le_bytes());
+        msg[32..40].copy_from_slice(&(frame_size as u64).to_le_bytes());
+        msg[40..48].copy_from_slice(&0u64.to_le_bytes()); // ps_str
+        let r = syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64);
+
+        // On failure, return the memory used for the frame (matching C).
+        sbrk(-(frame_size as isize));
+        if r < 0 {
+            return r as i32;
+        }
+        // Success never returns here (the image is replaced).
+        -1
+    }
+}
+
+/// Length of a NUL-terminated string in the current address space.
+///
+/// # Safety
+///
+/// `p` must point to a valid NUL-terminated string.
+#[cfg(target_os = "none")]
+unsafe fn cstr_len(p: *const u8) -> usize {
+    let mut len = 0usize;
+    while unsafe { *p.add(len) } != 0 {
+        len += 1;
+    }
+    len
 }
 
 // Syscall wrappers
@@ -726,11 +852,15 @@ pub fn fork() -> i32 {
     if reply_type < 0 {
         return reply_type;
     }
-    let is_child = unsafe { syscall0(NR_IS_FORK_CHILD) };
-    if is_child != 0 {
+    // PM replies to the parent with the child PID at offset 8 (m7_i1) and
+    // leaves it zero in the child's reply, so a zero there means we are the
+    // child. The child's buffer still holds the fork request (only offset 4
+    // was written), and PIDs from get_free_pid() always start at 1.
+    let child_pid = i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+    if child_pid == 0 {
         return 0;
     }
-    i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]))
+    child_pid
 }
 
 /// Static async send table for asynsend3 (single entry).
@@ -1002,11 +1132,6 @@ impl BrkAllocator {
         let size = layout.size();
         let align = layout.align();
 
-        // Debug: trace BrkAllocator::alloc calls.
-        unsafe {
-            write(1, b"A" as *const u8, 1);
-        }
-
         // On first call, self.ptr is 0. Jump to the start of the valid
         // brk range (0x3FE00000..0x3FF00000). The kernel rejects brk
         // calls outside this range.
@@ -1273,9 +1398,7 @@ mod tests {
         // Syscall numbers (from .refs/minix-3.3.0/minix/include/minix/callnr.h)
         assert_eq!(NR_FORK, 58);
         assert_eq!(NR_WAITPID, 59);
-        assert_eq!(NR_EXEC_REPLACE, 61);
         assert_eq!(NR_KERNEL_CALL, 50);
-        assert_eq!(NR_IS_FORK_CHILD, 63);
 
         // File operation syscall numbers
         assert_eq!(NR_READ, 2);

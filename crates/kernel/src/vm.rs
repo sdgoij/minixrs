@@ -600,7 +600,6 @@ pub fn mem_stats() -> (i32, i32, i32) {
     (nodes, free, large)
 }
 
-
 /// Number of process slots for page fault info storage.
 const PF_INFO_SLOTS: usize = 256;
 
@@ -690,7 +689,7 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
         let _write = error_code & 0x2 != 0;
         let user = error_code & 0x4 != 0;
 
-        // Forward all user-mode page faults to VM for resolution
+        // Forward all user-mode page faults to VM for resolution.
         if user {
             let slot = (*rp).p_nr as usize;
             if slot < PF_INFO_SLOTS {

@@ -146,26 +146,34 @@ pub fn service_pm() -> i32 {
         }
 
         VFS_PM_EXEC => {
-            // Exec request from PM. For now, FS servers are not available
-            // so this returns ENOSYS. PM falls back to the initramfs path.
-            // When FS servers (Phase 9) are wired, this will:
-            //   1. Open the binary file via req_open
-            //   2. Read ELF segments via req_read
-            //   3. Return pc, newsp, ps_str in the reply
-            //
-            // Run pm_exec() to close CLOEXEC fds as preparation.
-            pm_exec();
+            // Exec request from PM (forwarded from the exec'ing process's
+            // PM_EXEC). Read the fields and do the real work in pm_exec,
+            // then reply VFS_PM_EXEC_REPLY with the status, PC and new SP.
+            let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
+            let path = r_u64(&glob.fs_m_in, PM_PATH_OFF);
+            let path_len = r_i32(&glob.fs_m_in, PM_EID_OFF) as usize;
+            let frame = r_u64(&glob.fs_m_in, PM_FRAME_OFF);
+            let frame_len = r_i32(&glob.fs_m_in, PM_RID_OFF) as usize;
+            let ps_str = r_u64(&glob.fs_m_in, PM_REGID_OFF);
 
-            // Build reply with ENOSYS so PM falls back to initramfs.
-            let _proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
+            let result = unsafe {
+                crate::vfs::exec::pm_exec(proc_e, path, path_len, frame, frame_len, ps_str)
+            };
+
+            // Build reply: VFS_PM_EXEC_REPLY with endpt, status, pc, newsp.
             #[cfg(target_os = "none")]
             {
                 let mut buf = [0u8; 64];
                 buf[4..8].copy_from_slice(&VFS_PM_EXEC_REPLY.to_le_bytes());
-                buf[8..12].copy_from_slice(&_proc_e.to_le_bytes());
-                buf[12..16].copy_from_slice(&ENOSYS.to_le_bytes()); // STATUS
+                buf[8..12].copy_from_slice(&proc_e.to_le_bytes());
+                buf[12..16].copy_from_slice(&result.status.to_le_bytes());
+                buf[24..32].copy_from_slice(&0u64.to_le_bytes()); // NEWPS_STR
+                buf[28..36].copy_from_slice(&result.pc.to_le_bytes());
+                buf[36..44].copy_from_slice(&result.newsp.to_le_bytes());
                 unsafe { send_raw_to_pm(&buf) };
             }
+            #[cfg(not(target_os = "none"))]
+            let _ = result;
             OK
         }
 

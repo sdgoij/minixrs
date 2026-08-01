@@ -511,6 +511,30 @@ pub unsafe fn hlt() {
 
 // Exception handlers (naked asm, IST-safe, use serial I/O port 0x3F8)
 
+/// Set the CPU-local current-process pointer to `next` and return it.
+///
+/// Called from `exception_page_fault_entry` before `restore(next)`. The
+/// syscall path (`syscall_handler_c`) updates the CPU-local pointer before
+/// restoring a different process, but the #PF path previously skipped this:
+/// after a fault, the kernel restored the next process while the CPU-local
+/// pointer still named the faulting process, so every subsequent syscall
+/// (e.g. VM resolving the fault) was mis-attributed to the faulting process,
+/// corrupting its p_reg, rts flags, and getfrom endpoint.
+///
+/// # Safety
+///
+/// `next` must be a valid Proc pointer or null.
+#[unsafe(no_mangle)]
+#[cfg(target_os = "none")]
+pub unsafe extern "C" fn set_cpulocal_proc_asm(
+    next: *mut core::ffi::c_void,
+) -> *mut core::ffi::c_void {
+    unsafe {
+        crate::cpulocals::set_cpulocal_proc_ptr(next);
+    }
+    next
+}
+
 /// Page fault handler — prints 'P', CR2 as hex nibbles, then halts.
 /// Uses IST1 (TSS.IST[1]) for a reliable stack.
 ///
@@ -523,9 +547,12 @@ pub unsafe fn hlt() {
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_page_fault_entry() {
-    // Save caller-saved registers, read CR2 and error code, call
-    // handle_page_fault(fault_addr, error_code). If it returns 0
-    // (handled), restore and iretq. Otherwise (fatal), cli + hlt.
+    // Save the faulting user context (all 15 GPRs + RIP/RFLAGS/RSP from the
+    // CPU frame) into the faulting process's p_reg so it resumes at the
+    // faulting instruction after VM resolves the fault. C MINIX preserves
+    // the exception frame as the process's saved context (p_reg.pc = the
+    // faulting pc); without this, the process would resume with the stale
+    // p_reg from its last syscall and execute garbage.
     //
     // Stack layout on entry (after CPU pushes error code + interrupt frame):
     //   [RSP+0]  = error code (u64, pushed by CPU for #PF)
@@ -535,25 +562,43 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
     //   [RSP+32] = RSP (user stack, stack switch via IST1)
     //   [RSP+40] = SS
     //
-    // After saving 9 callee-clobbered regs (72 bytes):
-    //   [RSP+72] = error code
+    // After saving 15 regs (120 bytes), the CPU frame shifts up by 120:
+    //   [RSP+120] = error code, [RSP+128] = RIP, [RSP+136] = CS,
+    //   [RSP+144] = RFLAGS, [RSP+152] = user RSP, [RSP+160] = SS
+    //
+    // The 15 pushes leave RSP ≡ 8 (mod 16), which violates the SysV
+    // AMD64 ABI (the call site must have RSP ≡ 0 mod 16). Rust functions
+    // compiled with SSE (e.g. `movaps` for zeroing locals) fault on the
+    // misaligned stack, so align RSP by 8 before the calls. This shifts
+    // the CPU-frame-relative reads by 8 (error code at [RSP+128]).
     core::arch::naked_asm!(
         "swapgs",
-        // Save caller-saved registers (clobbered by the call).
-        "push   rax",
-        "push   rcx",
-        "push   rdx",
-        "push   rsi",
-        "push   rdi",
-        "push   r8",
-        "push   r9",
-        "push   r10",
+        // Save all 15 user registers (syscall_entry push order).
+        "push   rbp",
+        "push   r15",
+        "push   r14",
+        "push   r13",
+        "push   r12",
         "push   r11",
+        "push   r10",
+        "push   r9",
+        "push   r8",
+        "push   rdi",
+        "push   rsi",
+        "push   rdx",
+        "push   rcx",
+        "push   rbx",
+        "push   rax",
+        // Persist the faulting context in the faulting process's p_reg.
+        "mov    rdi, rsp",
+        // Align RSP to 16 bytes for the ABI before calling Rust functions.
+        "sub    rsp, 8",
+        "call   save_fault_context",
         // Read CR2 into rdi (first arg = fault_addr).
         "mov    rdi, cr2",
         // Read error code from stack.
-        // After 9 pushes (9*8 = 72 bytes), error code is at [rsp + 72].
-        "mov    rsi, [rsp + 72]",
+        // After 15 pushes (120) + alignment (8), error code is at [rsp + 128].
+        "mov    rsi, [rsp + 128]",
         // Call the Rust handler.
         "call   handle_page_fault",
         // Check return value.
@@ -564,12 +609,17 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
         // process. We do NOT iretq directly because the faulting process
         // must not run until VM resolves the fault.
         //
-        // Stack cleanup: 9 regs (72) + error code (8) + frame (40) = 120.
-        // After add, RSP = IST1_RSP (page-aligned, hence 16-byte aligned).
-        "add    rsp, 120",
+        // Stack cleanup: 15 regs (120) + error code (8) + frame (40) + align (8)
+        // = 176. After add, RSP = the pre-push stack pointer.
+        "add    rsp, 176",
         "call   pick_proc_raw",
         "test   rax, rax",
         "jz     2f",
+        // Update the CPU-local current-process pointer before restoring the
+        // next process; otherwise the next process's syscalls are attributed
+        // to the faulting process (see set_cpulocal_proc_asm).
+        "mov    rdi, rax",
+        "call   set_cpulocal_proc_asm",
         "mov    rdi, rax",
         "call   restore",
         // restore never returns.
@@ -786,12 +836,14 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
     core::arch::naked_asm!("mov    cr3, rax", "mov    rsp, rdx", "sysretq",);
 }
 
-/// Restore a process context and jump to it via `sysretq`.
+/// Restore a process context and jump to it via iretq.
 ///
 /// Takes a pointer to a `Proc` struct in `rdi` (System V AMD64 ABI),
-/// loads its CR3, RIP (via RCX), RFLAGS (via R11), and user RSP from
-/// the `p_reg` and `p_seg` fields, then zeros all other GPRs and
-/// executes `sysretq` to enter (or re-enter) the process in ring 3.
+/// loads CR3 from `p_seg.p_cr3` and user RIP/RFLAGS/RSP from the p_reg
+/// dedicated slots (rip@160, rflags@176, rsp@168), then loads all GPRs —
+/// including rcx from the rcx slot (16) and r11 from the r11 slot (72),
+/// which the save paths populate per the syscall convention — and iretq's
+/// into ring 3. Never returns.
 ///
 /// This is the atomic "switch to process" primitive for the scheduler.
 /// The caller MUST save the outgoing process's register state into its
@@ -821,12 +873,14 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         // Load CR3 from p_seg.p_cr3 at offset 256.
         "mov    rdi, [r15 + 256]",
         "mov    cr3, rdi",
-        // Build iretq frame (push order: SS, RSP, RFLAGS, CS, RIP):
+        // Build iretq frame (push order: SS, RSP, RFLAGS, CS, RIP).
+        // RIP/RFLAGS come from the dedicated p_reg slots (160/176) so the
+        // GPR rcx/r11 loads below (16/72) keep the user's real registers.
         "push   0x0013",
         "push   qword ptr [r15 + 168]",
-        "push   qword ptr [r15 + 72]",
+        "push   qword ptr [r15 + 176]",
         "push   0x001B",
-        "push   qword ptr [r15 + 16]",
+        "push   qword ptr [r15 + 160]",
         // Load user registers from p_reg via r15.
         "mov    rax, [r15]",
         "mov    rbx, [r15 + 8]",

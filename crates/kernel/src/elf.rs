@@ -299,6 +299,235 @@ pub unsafe fn setup_user_stack(
     Ok(sp)
 }
 
+/// Maximum number of argv/envp strings the frame parser extracts.
+pub const MAX_EXEC_STRINGS: usize = 64;
+
+/// Set up a user-mode stack including the environment vector, following the
+/// SysV AMD64 ABI layout used by `execve`:
+///
+/// ```text
+///   [sp + 0]:              argc
+///   [sp + 8]:              argv[0..argc] pointers
+///   [sp + 8 + argc*8]:     NULL (argv terminator)
+///   [sp + 8 + (argc+1)*8]: envp[0..envc] pointers
+///   [sp + 8 + (argc+envc+1)*8]: NULL (envp terminator)
+/// ```
+///
+/// Strings are placed at the top of the stack, going down, with the argv
+/// strings first and the envp strings above them.
+///
+/// Returns the new stack pointer, 16-byte aligned.
+///
+/// # Safety
+///
+/// The caller must ensure `stack_top` points to a valid, writable memory
+/// region of at least `size` bytes.
+pub unsafe fn setup_user_stack_full(
+    stack_top: u64,
+    size: usize,
+    argv: &[&str],
+    envp: &[&str],
+) -> Result<u64, ElfError> {
+    if size < 4096 {
+        return Err(ElfError::StackSetupFailed {
+            msg: "stack too small",
+        });
+    }
+
+    let argc = argv.len().min(63);
+    let envc = envp.len().min(63);
+
+    // Compute string data area: write argv strings first, then envp strings
+    // above them (both at the top of the stack, going down).
+    let mut string_pos = stack_top;
+    let mut argv_offsets: [u64; MAX_EXEC_STRINGS] = [0u64; MAX_EXEC_STRINGS];
+    let mut envp_offsets: [u64; MAX_EXEC_STRINGS] = [0u64; MAX_EXEC_STRINGS];
+
+    for (i, arg) in argv.iter().enumerate().take(argc) {
+        let s = arg.as_bytes();
+        let len = s.len() + 1;
+        string_pos = string_pos.wrapping_sub(len as u64);
+        if string_pos < stack_top.wrapping_sub(size as u64) {
+            return Err(ElfError::StackSetupFailed {
+                msg: "argv strings overflow stack",
+            });
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(s.as_ptr(), string_pos as *mut u8, s.len());
+            *((string_pos as usize + s.len()) as *mut u8) = 0;
+        }
+        argv_offsets[i] = string_pos;
+    }
+
+    for (i, env) in envp.iter().enumerate().take(envc) {
+        let s = env.as_bytes();
+        let len = s.len() + 1;
+        string_pos = string_pos.wrapping_sub(len as u64);
+        if string_pos < stack_top.wrapping_sub(size as u64) {
+            return Err(ElfError::StackSetupFailed {
+                msg: "envp strings overflow stack",
+            });
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(s.as_ptr(), string_pos as *mut u8, s.len());
+            *((string_pos as usize + s.len()) as *mut u8) = 0;
+        }
+        envp_offsets[i] = string_pos;
+    }
+
+    // Align string_pos down to 16 bytes for the pointer array.
+    let base = string_pos & !15u64;
+
+    // Layout: argc + argv ptrs + NULL + envp ptrs + NULL.
+    let total_words = 1 + (argc as u64) + 1 + (envc as u64) + 1;
+    let array_size = (total_words * 8 + 15) & !15u64;
+    let sp = base.wrapping_sub(array_size);
+    if sp < stack_top.wrapping_sub(size as u64) {
+        return Err(ElfError::StackSetupFailed {
+            msg: "stack too small for argv/envp area",
+        });
+    }
+
+    // argc at [sp].
+    unsafe {
+        *((sp) as *mut u64) = argc as u64;
+    }
+    // argv pointers at [sp+8 .. sp+8+argc*8].
+    for (i, &off) in argv_offsets[..argc].iter().enumerate() {
+        let ptr_pos = sp + 8 + (i as u64) * 8;
+        unsafe {
+            *((ptr_pos) as *mut u64) = off;
+        }
+    }
+    // argv NULL terminator.
+    let argv_null = sp + 8 + (argc as u64) * 8;
+    unsafe {
+        *((argv_null) as *mut u64) = 0;
+    }
+    // envp pointers.
+    for (i, &off) in envp_offsets[..envc].iter().enumerate() {
+        let ptr_pos = argv_null + 8 + (i as u64) * 8;
+        unsafe {
+            *((ptr_pos) as *mut u64) = off;
+        }
+    }
+    // envp NULL terminator.
+    let envp_null = argv_null + 8 + (envc as u64) * 8;
+    unsafe {
+        *((envp_null) as *mut u64) = 0;
+    }
+
+    debug_assert!(sp.is_multiple_of(16), "RSP must be 16-byte aligned");
+
+    Ok(sp)
+}
+
+/// Argument and environment strings parsed from a user-built exec frame.
+///
+/// The strings borrow from the frame buffer passed to [`parse_exec_frame`].
+#[derive(Debug, Clone, Copy)]
+pub struct FrameArgs<'a> {
+    pub argv: [&'a str; MAX_EXEC_STRINGS],
+    pub argc: usize,
+    pub envp: [&'a str; MAX_EXEC_STRINGS],
+    pub envc: usize,
+}
+
+/// Parse the exec stack frame built by the libc `minix_stack_fill` layout
+/// (see `.refs/minix-3.3.0/minix/lib/libc/sys/stack_utils.c`):
+///
+/// ```text
+///   frame[0]:      argc (u64)
+///   frame[8 + i*8]: argv[i] pointer — absolute VA in the new image,
+///                   equal to vsp + offset of the string within the frame
+///   ... argv pointers, then NULL, then envp pointers, then NULL
+///   strings live at frame[offset] (NUL-terminated)
+/// ```
+///
+/// `user_stack_top` is the top of the user stack (`user_stack_base` +
+/// `user_stack_size`); `vsp = user_stack_top - frame.len()`, matching the
+/// pointer arithmetic the frame was built with.
+pub fn parse_exec_frame(frame: &[u8], user_stack_top: u64) -> Result<FrameArgs<'_>, ElfError> {
+    let mut out = FrameArgs {
+        argv: [""; MAX_EXEC_STRINGS],
+        argc: 0,
+        envp: [""; MAX_EXEC_STRINGS],
+        envc: 0,
+    };
+    if frame.len() < 16 {
+        return Err(ElfError::StackSetupFailed {
+            msg: "frame too small",
+        });
+    }
+    let vsp = user_stack_top.wrapping_sub(frame.len() as u64);
+
+    // Read one pointer-sized word; returns None past the buffer end.
+    let word = |off: usize| -> Option<u64> {
+        if off + 8 > frame.len() {
+            None
+        } else {
+            Some(u64::from_le_bytes(frame[off..off + 8].try_into().unwrap()))
+        }
+    };
+
+    // String at the offset given by (pointer - vsp).
+    let string_at = |ptr: u64| -> Result<&str, ElfError> {
+        let off = ptr.wrapping_sub(vsp);
+        if off > frame.len() as u64 {
+            return Err(ElfError::StackSetupFailed {
+                msg: "argv pointer out of frame",
+            });
+        }
+        let start = off as usize;
+        let end = frame[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| start + p)
+            .unwrap_or(frame.len());
+        core::str::from_utf8(&frame[start..end]).map_err(|_| ElfError::StackSetupFailed {
+            msg: "argv string not utf8",
+        })
+    };
+
+    let argc = word(0).unwrap_or(0) as usize;
+    if argc > MAX_EXEC_STRINGS {
+        return Err(ElfError::StackSetupFailed {
+            msg: "too many argv",
+        });
+    }
+
+    // argv pointers.
+    for i in 0..argc {
+        let ptr = word(8 + i * 8).unwrap_or(0);
+        out.argv[i] = string_at(ptr)?;
+    }
+    out.argc = argc;
+
+    // Walk past argv's NULL terminator to reach envp.
+    let mut pos = 8 + argc * 8;
+    if word(pos).unwrap_or(1) != 0 {
+        // No NULL after argv — malformed frame; envp is empty.
+        return Ok(out);
+    }
+    pos += 8;
+    let mut envc = 0usize;
+    while envc < MAX_EXEC_STRINGS {
+        let ptr = match word(pos) {
+            Some(p) => p,
+            None => break,
+        };
+        if ptr == 0 {
+            break;
+        }
+        out.envp[envc] = string_at(ptr)?;
+        envc += 1;
+        pos += 8;
+    }
+    out.envc = envc;
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +755,118 @@ mod tests {
         assert_eq!(PT_NOTE, 4);
         assert_eq!(PT_PHDR, 6);
         assert_eq!(PT_GNU_STACK, 0x6474e551);
+    }
+
+    /// Build a C-style exec frame (`minix_stack_fill` layout) in `frame`:
+    /// argc, argv pointers, NULL, envp pointers, NULL, then strings. Pointers
+    /// are stored as `vsp + offset` where `vsp = user_stack_top - frame.len()`.
+    fn build_minix_frame(frame: &mut [u8], argv: &[&str], envp: &[&str], user_stack_top: u64) {
+        let vsp = user_stack_top - frame.len() as u64;
+        let mut pos = 0usize;
+
+        // argc (u64) at offset 0.
+        frame[pos..pos + 8].copy_from_slice(&(argv.len() as u64).to_le_bytes());
+        pos += 8;
+        // Place strings at the END of the frame, going down: argv then envp.
+        let mut str_pos = frame.len();
+        let mut offsets = [0usize; 16];
+        let mut si = 0usize;
+        for s in argv.iter().chain(envp.iter()) {
+            str_pos -= s.len() + 1;
+            frame[str_pos..str_pos + s.len()].copy_from_slice(s.as_bytes());
+            frame[str_pos + s.len()] = 0;
+            offsets[si] = str_pos;
+            si += 1;
+        }
+        let mut oi = 0usize;
+        for _ in argv {
+            let ptr = vsp + offsets[oi] as u64;
+            frame[pos..pos + 8].copy_from_slice(&ptr.to_le_bytes());
+            pos += 8;
+            oi += 1;
+        }
+        frame[pos..pos + 8].copy_from_slice(&0u64.to_le_bytes()); // argv NULL
+        pos += 8;
+        for _ in envp {
+            let ptr = vsp + offsets[oi] as u64;
+            frame[pos..pos + 8].copy_from_slice(&ptr.to_le_bytes());
+            pos += 8;
+            oi += 1;
+        }
+        frame[pos..pos + 8].copy_from_slice(&0u64.to_le_bytes()); // envp NULL
+    }
+
+    #[test]
+    fn test_parse_exec_frame_basic() {
+        let mut frame = [0u8; 4096];
+        let user_stack_top = 0x3FC0_0000u64 + 0x100000u64;
+        build_minix_frame(
+            &mut frame,
+            &["/bin/echo", "hello"],
+            &["PATH=/bin"],
+            user_stack_top,
+        );
+        let parsed = parse_exec_frame(&frame, user_stack_top).unwrap();
+        assert_eq!(parsed.argc, 2);
+        assert_eq!(parsed.argv[0], "/bin/echo");
+        assert_eq!(parsed.argv[1], "hello");
+        assert_eq!(parsed.envc, 1);
+        assert_eq!(parsed.envp[0], "PATH=/bin");
+    }
+
+    #[test]
+    fn test_parse_exec_frame_empty_envp() {
+        let mut frame = [0u8; 2048];
+        let user_stack_top = 0x3FC0_0000u64 + 0x100000u64;
+        build_minix_frame(&mut frame, &["sh"], &[], user_stack_top);
+        let parsed = parse_exec_frame(&frame, user_stack_top).unwrap();
+        assert_eq!(parsed.argc, 1);
+        assert_eq!(parsed.argv[0], "sh");
+        assert_eq!(parsed.envc, 0);
+    }
+
+    #[test]
+    fn test_parse_exec_frame_bad_pointer() {
+        // A frame whose argv pointer is outside the frame must be rejected.
+        let mut frame = [0u8; 256];
+        frame[0..8].copy_from_slice(&1u64.to_le_bytes()); // argc = 1
+        // argv[0] pointer far outside the frame.
+        let vsp = 0x3FC0_0000u64;
+        frame[8..16].copy_from_slice(&(vsp + 0x100000).to_le_bytes());
+        let parsed = parse_exec_frame(&frame, vsp + frame.len() as u64);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_setup_user_stack_full_layout() {
+        let stack = [0u8; 8192];
+        let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
+        let rsp = unsafe { setup_user_stack_full(stack_top, 8192, &["echo", "hi"], &["A=1"]) };
+        let rsp = rsp.unwrap();
+        let argc = unsafe { *(rsp as *const u64) };
+        assert_eq!(argc, 2);
+        let argv0 = unsafe { *(rsp as *const u64).add(1) };
+        let argv1 = unsafe { *(rsp as *const u64).add(2) };
+        assert_eq!(
+            unsafe { core::str::from_utf8_unchecked(cstr(argv0)) },
+            "echo"
+        );
+        assert_eq!(unsafe { core::str::from_utf8_unchecked(cstr(argv1)) }, "hi");
+        // argv NULL terminator at word 3.
+        assert_eq!(unsafe { *(rsp as *const u64).add(3) }, 0);
+        // envp[0] at word 4.
+        let env0 = unsafe { *(rsp as *const u64).add(4) };
+        assert_eq!(unsafe { core::str::from_utf8_unchecked(cstr(env0)) }, "A=1");
+        // envp NULL terminator at word 5.
+        assert_eq!(unsafe { *(rsp as *const u64).add(5) }, 0);
+
+        unsafe fn cstr(p: u64) -> &'static [u8] {
+            let mut len = 0usize;
+            while unsafe { *((p as *const u8).add(len)) } != 0 {
+                len += 1;
+            }
+            core::slice::from_raw_parts(p as *const u8, len)
+        }
     }
 
     #[test]

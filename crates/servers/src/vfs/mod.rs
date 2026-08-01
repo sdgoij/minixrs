@@ -27,6 +27,7 @@ pub mod call;
 pub mod consts;
 pub mod device;
 pub mod dmap;
+pub mod exec;
 pub mod filedes;
 pub mod glo;
 pub mod grant;

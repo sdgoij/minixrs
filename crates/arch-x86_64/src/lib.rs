@@ -74,27 +74,35 @@ pub fn init() {
 }
 
 /// Boot-time kernel stack for ring-3→ring-0 transitions (RSP0).
+///
+/// 64 KiB: syscall/interrupt handlers share this stack, and deep kernel
+/// operations (e.g. the exec loader's page-table walk + stack setup) exceed
+/// the previous 4 KiB, overflowing into adjacent kernel data and corrupting
+/// caller registers.
 #[cfg(target_os = "none")]
-struct BootStackCell(UnsafeCell<[u8; 4096]>);
+struct BootStackCell<const N: usize>(UnsafeCell<[u8; N]>);
 #[cfg(target_os = "none")]
-unsafe impl Sync for BootStackCell {}
+unsafe impl<const N: usize> Sync for BootStackCell<N> {}
 #[cfg(target_os = "none")]
-impl BootStackCell {
-    const fn new(val: [u8; 4096]) -> Self {
+impl<const N: usize> BootStackCell<N> {
+    const fn new(val: [u8; N]) -> Self {
         Self(UnsafeCell::new(val))
     }
-    fn get(&self) -> *mut [u8; 4096] {
+    fn get(&self) -> *mut [u8; N] {
         self.0.get()
+    }
+    const fn size(&self) -> usize {
+        N
     }
 }
 #[cfg(target_os = "none")]
-static BOOT_KSTACK: BootStackCell = BootStackCell::new([0u8; 4096]);
+static BOOT_KSTACK: BootStackCell<65536> = BootStackCell::new([0u8; 65536]);
 /// IST1 stack for page fault handler.
 #[cfg(target_os = "none")]
-static BOOT_IST1_STACK: BootStackCell = BootStackCell::new([0u8; 4096]);
+static BOOT_IST1_STACK: BootStackCell<4096> = BootStackCell::new([0u8; 4096]);
 /// IST2 stack for double fault handler.
 #[cfg(target_os = "none")]
-static BOOT_IST2_STACK: BootStackCell = BootStackCell::new([0u8; 4096]);
+static BOOT_IST2_STACK: BootStackCell<4096> = BootStackCell::new([0u8; 4096]);
 
 #[cfg(target_os = "none")]
 struct BootTssCell(UnsafeCell<crate::tss::Tss64>);
@@ -161,7 +169,8 @@ pub unsafe fn init_tss_for_boot() {
 
     // Wrap all unsafe operations in a single block for Rust 2024 compatibility.
     unsafe {
-        let stack_top = BOOT_KSTACK.get() as *mut u8 as u64 + 4096;
+        let kstack_size = BOOT_KSTACK.size();
+        let stack_top = BOOT_KSTACK.get() as *mut u8 as u64 + kstack_size as u64;
         let ist1_top = BOOT_IST1_STACK.get() as *mut u8 as u64 + 4096;
         let ist2_top = BOOT_IST2_STACK.get() as *mut u8 as u64 + 4096;
 

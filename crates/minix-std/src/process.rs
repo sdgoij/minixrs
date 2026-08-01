@@ -158,24 +158,35 @@ pub fn waitpid(pid: i32, _options: i32) -> Result<(i32, i32), MinixErr> {
 ///
 /// `path` is the binary path, `argv` is the null-terminated argument list.
 /// On success, does not return (the process is replaced).
-pub fn exec(path: &str, _argv: &[*const u8]) -> Result<i32, MinixErr> {
+pub fn exec(path: &str, argv: &[*const u8]) -> Result<i32, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
-        // Call SYS_EXEC_REPLACE (61) directly to load from initramfs.
-        // This bypasses PM's incomplete grant-based exec path.
-        // args[0] = path pointer, args[1] = argv pointer (unused).
-        let result = minix_rt::syscall3(61, path.as_ptr() as u64, 0, 0);
-        if result == 0 {
-            // Should not return — process is replaced.
-            #[allow(clippy::empty_loop)]
-            loop {}
+        // Delegate to the PM→VFS exec chain (minix_rt::execve). Build a
+        // NUL-terminated path and a null-terminated argv array on the stack
+        // since execve requires both.
+        let mut path_buf = [0u8; 256];
+        let n = path.len().min(path_buf.len() - 1);
+        path_buf[..n].copy_from_slice(&path.as_bytes()[..n]);
+        let mut argv_buf = [core::ptr::null(); 64];
+        let argc = argv.len().min(argv_buf.len() - 1);
+        argv_buf[..argc].copy_from_slice(&argv[..argc]);
+        let r = minix_rt::execve(
+            path_buf.as_ptr(),
+            n + 1,
+            argv_buf.as_ptr(),
+            core::ptr::null(),
+        );
+        if r < 0 {
+            Err(MinixErr::from_i32(r))
         } else {
-            Err(MinixErr::from_i32(result as i32))
+            // On success execve never returns; reaching here means the
+            // image was not replaced.
+            Err(MinixErr(0))
         }
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (path, _argv);
+        let _ = (path, argv);
         Err(MinixErr::ENOSYS)
     }
 }

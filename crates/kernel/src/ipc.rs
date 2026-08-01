@@ -14,7 +14,6 @@ use crate::proc::*;
 use crate::sched::{dequeue, enqueue};
 use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
 
-
 pub const NON_BLOCKING: i32 = 0x80;
 pub const FROM_KERNEL: i32 = 0x100;
 
@@ -46,7 +45,6 @@ pub const ELOCKED: i32 = -132;
 pub const EDEADSRCDST: i32 = -199;
 pub const ENOSYS: i32 = -72;
 pub const EINVAL: i32 = -22;
-
 
 // C ipcconst.h: status is stored in p_misc_flags (u32_t).
 // Low 6 bits: call type; bits 16+: flags.
@@ -107,7 +105,6 @@ pub unsafe fn ipc_status_clear(rp: *mut Proc) {
     }
 }
 
-
 fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {
     unsafe {
         let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
@@ -139,7 +136,6 @@ fn will_receive_sendrec(dst_ptr: *mut Proc, src_e: i32) -> bool {
         will_receive(dst_ptr, src_e)
     }
 }
-
 
 /// Send a message from `caller_ptr` to `dst_e`.
 ///
@@ -281,7 +277,6 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
     }
 }
 
-
 /// Receive a message for `caller_ptr` from `src_e`.
 ///
 /// # Safety
@@ -376,8 +371,11 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                     notify_src,
                                     caller_ptr,
                                 );
-                                let ep_bytes = notify_src.to_ne_bytes();
-                                core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), m_ptr, 4);
+                                // build_notify_message leaves m_source = 0;
+                                // return 0 (not notify_src, which is negative
+                                // for kernel tasks) so the receiver's main
+                                // loop processes the notification instead of
+                                // skipping it via a `src < 0` check.
                                 // C: receive_done — clear REPLY_PEND if set
                                 (*caller_ptr)
                                     .p_misc_flags
@@ -388,7 +386,7 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                     !(RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
                                     Ordering::Relaxed,
                                 );
-                                return notify_src;
+                                return OK;
                             }
                         }
                     }
@@ -438,7 +436,6 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         OK
     }
 }
-
 
 /// Send a notification to `dst_e`.
 ///
@@ -497,11 +494,21 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         {
             // Direct delivery: build notification message in destination's buffer.
             build_notify_message(&mut (*dst_ptr).p_delivermsg, src_e, dst_ptr);
-            (*dst_ptr).p_misc_flags.fetch_or(
-                crate::proc::MiscFlags::DELIVERMSG.bits(),
-                core::sync::atomic::Ordering::Relaxed,
+            (*dst_ptr)
+                .p_misc_flags
+                .fetch_or(crate::proc::MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+            // Deliver immediately. The destination may be resumed by the
+            // page-fault handler's restore path, which does not run
+            // syscall_handler_c's deliver_msg (matching mini_send's direct
+            // delivery for the same reason).
+            delivermsg(dst_ptr);
+            (*dst_ptr).p_misc_flags.fetch_and(
+                !crate::proc::MiscFlags::DELIVERMSG.bits(),
+                Ordering::Relaxed,
             );
-            crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_e as u64);
+            // RECEIVE returns the notification's m_source (0), matching what
+            // deliver_msg would set on the normal syscall-return path.
+            crate::hal::write_retval(&mut (*dst_ptr).p_reg, 0);
             let new = rts & !RtsFlags::RECEIVING.bits();
 
             (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
@@ -536,7 +543,6 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         OK
     }
 }
-
 
 fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
     unsafe {
@@ -574,7 +580,6 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
         false
     }
 }
-
 
 /// Copy data from a process's virtual address space into kernel memory.
 ///
@@ -619,7 +624,6 @@ pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usi
         OK
     }
 }
-
 
 /// Deliver the message stored in `p_delivermsg` (kernel buffer) to the
 /// target process's user-space virtual address (`p_delivermsg_vir`), by
@@ -680,7 +684,6 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
         OK
     }
 }
-
 
 /// Perform a synchronous IPC operation.
 /// Tries in-kernel server dispatch before sending to a user-space process.
@@ -753,7 +756,6 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     }
 }
 
-
 /// Maximum number of dispatchable server endpoints (matches arch-common
 /// NR_BOOT_MODULES range).
 pub const SERVER_DISPATCH_SLOTS: usize = 16;
@@ -821,7 +823,6 @@ pub unsafe fn try_server_dispatch(
     (*SERVER_DISPATCH.get())[slot as usize].map(|handler| handler(caller, msg))
 }
 
-
 /// Function type for setting the exec target (RIP and RSP) on a process.
 /// Called during PM_EXEC to switch the process to the new binary's entry point.
 pub type SetExecRipFn = unsafe fn(*mut Proc, new_rip: u64, new_rsp: u64);
@@ -861,82 +862,6 @@ pub unsafe fn set_exec_target(proc: *mut Proc, new_rip: u64, new_rsp: u64) {
     }
 }
 
-/// PM_FORK dispatch handler (stub).
-///
-/// In the real PM, this creates a new process by copying the caller's
-/// address space. The kernel stub returns 0 (caller is parent, child
-/// will be told separately) — this matches the convention where
-/// SENDREC for FORK returns 0 to the parent and the child starts
-/// as a separate process.
-///
-/// # Safety
-///
-/// `caller` must point to a valid `Proc`.
-pub unsafe fn pm_fork_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
-    let _ = caller;
-    let _ = msg;
-    // Stub: return 0 (child PID), simulating immediate success.
-    // Real implementation needs to clone the address space.
-    0
-}
-
-/// PM_EXEC dispatch handler (stub).
-///
-/// In the real PM, this loads an ELF binary into the caller's address
-/// space and sets the entry point. The kernel stub just returns OK.
-/// The ELF loading and initramfs access require VFS interaction.
-///
-/// # Safety
-///
-/// `caller` must be valid.
-pub unsafe fn pm_exec_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
-    let _ = caller;
-    let _ = msg;
-    // Stub: return OK. Real implementation needs to:
-    // 1. Read the ELF path from the message
-    // 2. Load the binary via VFS
-    // 3. Set up the stack with argv/envp
-    // 4. Call set_exec_target() with new RIP/RSP
-    OK
-}
-
-/// PM_EXIT dispatch handler (stub).
-///
-/// In the real PM, this terminates the calling process. The kernel stub
-/// just returns OK.
-///
-/// # Safety
-///
-/// `caller` must be valid.
-pub unsafe fn pm_exit_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
-    let _ = caller;
-    let _ = msg;
-    // Stub: return OK. Real implementation needs to:
-    // 1. Clean up the process's resources
-    // 2. Notify the parent process
-    // 3. Set the process to a terminating state
-    OK
-}
-
-/// PM_WAITPID dispatch handler (stub).
-///
-/// In the real PM, this waits for a child process to change state.
-/// The kernel stub returns ECHILD (no children), which is the correct
-/// return when there are no child processes.
-///
-/// # Safety
-///
-/// `caller` must be valid.
-pub unsafe fn pm_waitpid_dispatch(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
-    let _ = caller;
-    let _ = msg;
-    // Stub: return ECHILD. Real implementation needs to:
-    // 1. Search for a child process
-    // 2. Block if none available and WNOHANG not set
-    // 3. Return child's exit status
-    crate::system::EBADREQUEST
-}
-
 /// Initialize the server dispatch table with default handlers.
 ///
 /// Currently empty — IPC messages to user-space servers (PM, VFS, etc.)
@@ -947,7 +872,6 @@ pub fn init_server_dispatch() {
     // No server dispatch handlers registered. All IPC to user-space
     // servers goes through the normal IPC path.
 }
-
 
 /// # Safety
 ///
@@ -1447,7 +1371,6 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
     }
 }
 
-
 /// Validate an endpoint with optional panic.
 pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
     *p = endpoint_slot(ep);
@@ -1462,7 +1385,6 @@ pub fn is_ok_endpoint_f(ep: i32, p: &mut i32, fatal: bool) -> bool {
     ok
 }
 
-
 /// Build a notification message.
 pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *mut Proc) {
     msg.fill(0);
@@ -1470,7 +1392,6 @@ pub fn build_notify_message(msg: &mut [u8; MESSAGE_SIZE], _src: i32, _dst_ptr: *
     msg[4..8].copy_from_slice(&(arch_common::com::NOTIFY_MESSAGE as i32).to_le_bytes());
     // m_source at offset 0 — set by caller / delivery path
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1800,18 +1721,6 @@ mod tests {
             let rp = crate::table::proc_addr(0);
             set_exec_target(rp, 0x400000, 0x7fff0000);
         }
-    }
-
-    #[test]
-    fn test_pm_dispatch_stubs_compile() {
-        fn _fork(_: ServerDispatchFn) {}
-        fn _exec(_: ServerDispatchFn) {}
-        fn _exit(_: ServerDispatchFn) {}
-        fn _waitpid(_: ServerDispatchFn) {}
-        _fork(pm_fork_dispatch);
-        _exec(pm_exec_dispatch);
-        _exit(pm_exit_dispatch);
-        _waitpid(pm_waitpid_dispatch);
     }
 
     #[test]

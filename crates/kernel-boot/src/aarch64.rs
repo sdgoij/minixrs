@@ -263,6 +263,10 @@ pub unsafe extern "C" fn kmain() -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
+                    (*next_proc).p_misc_flags.fetch_and(
+                        !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                        core::sync::atomic::Ordering::SeqCst,
+                    );
                     let new_cr3 = (*next_proc).p_seg.p_cr3;
                     if new_cr3 != 0 {
                         kernel::hal::write_cr3(new_cr3);
@@ -306,6 +310,10 @@ pub unsafe extern "C" fn kmain() -> ! {
                                 &raw const (*next_proc).p_reg as *const u8,
                                 frame.as_mut_ptr(),
                                 288,
+                            );
+                            (*next_proc).p_misc_flags.fetch_and(
+                                !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                                core::sync::atomic::Ordering::SeqCst,
                             );
                             let new_cr3 = (*next_proc).p_seg.p_cr3;
                             if new_cr3 != 0 {
@@ -378,6 +386,10 @@ pub unsafe extern "C" fn kmain() -> ! {
                         &raw const (*next_proc).p_reg as *const u8,
                         frame.as_mut_ptr(),
                         288,
+                    );
+                    (*next_proc).p_misc_flags.fetch_and(
+                        !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                        core::sync::atomic::Ordering::SeqCst,
                     );
                     let new_cr3 = (*next_proc).p_seg.p_cr3;
                     if new_cr3 != 0 {

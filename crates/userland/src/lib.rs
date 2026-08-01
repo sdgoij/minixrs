@@ -585,7 +585,14 @@ pub fn init(_args: &[&str]) -> i32 {
     #[cfg(target_os = "none")]
     let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];
     #[cfg(target_os = "none")]
-    let ret = unsafe { minix_rt::exec_replace(c"/bin/sh".to_bytes_with_nul(), argv.as_ptr()) };
+    let ret = unsafe {
+        minix_rt::execve(
+            c"/bin/sh".as_ptr() as *const u8,
+            c"/bin/sh".to_bytes_with_nul().len(),
+            argv.as_ptr(),
+            core::ptr::null(),
+        ) as i64
+    };
     #[cfg(not(target_os = "none"))]
     let ret = -38i64; // ENOSYS on host
     // If exec fails, print error and loop.

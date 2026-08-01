@@ -56,7 +56,13 @@ pub unsafe fn arch_proc_init(
         (*tf).rcx = entry;
     }
     unsafe {
+        (*tf).rip = entry;
+    }
+    unsafe {
         (*tf).r11 = crate::psl::PSL_USERSET;
+    }
+    unsafe {
+        (*tf).rflags = crate::psl::PSL_USERSET;
     }
     unsafe {
         (*tf).rsp = stack;

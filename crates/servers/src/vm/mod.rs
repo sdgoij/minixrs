@@ -37,6 +37,15 @@ const EINVAL: i32 = -5;
 /// Resource temporarily unavailable (EAGAIN).
 const EAGAIN: i32 = -11;
 
+/// True if `ep` is a valid user-process endpoint of any generation.
+///
+/// Endpoints encode `(generation << 16) | slot`, so forked children (which
+/// get generation 1 via `make_endpoint(new_gen, slot)`) carry values well
+/// above `NR_PROCS`. The old `ep >= NR_PROCS` check rejected them.
+fn is_user_ep(ep: i32) -> bool {
+    kernel::table::is_ok_endpoint(ep) && kernel::table::endpoint_slot(ep) >= 0
+}
+
 // ---- Physical memory management via kernel calls ----
 // VMINIX: VM manages physical memory through its own allocator.
 // In our port, VM uses kernel call 62 (SYS_VM_PAGING) which
@@ -234,6 +243,19 @@ pub fn vm_map_page_in(cr3: u64, va: u64, pa: u64, flags: u64) -> i32 {
     msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
     msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8].copy_from_slice(&pa.to_le_bytes());
     msg[VM_PAGING_FLAGS_OFF..VM_PAGING_FLAGS_OFF + 8].copy_from_slice(&flags.to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// Unmap a single 4K page at `va` from the page table identified by `cr3`.
+/// The kernel runs in ring 0 and can access all physical memory. The caller
+/// must ensure `cr3` is a valid page table root and `va` is within the user
+/// address range. Returns 0 on success, negative errno on failure.
+pub fn vm_unmap_page_in(cr3: u64, va: u64) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_UNMAP.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
     minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
 }
 
@@ -712,7 +734,7 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     };
 
     // Use vm_get_addrspace which prefers the kernel's authoritative CR3
-    // (updated by exec_replace) over Vmproc's potentially stale value.
+    // (updated by the exec path) over Vmproc's potentially stale value.
     let cr3 = unsafe { proc::vm_get_addrspace(ep) };
     if cr3 == 0 {
         sys_kill(ep, SIGSEGV);
@@ -722,7 +744,7 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         return;
     }
 
-    // Handle COW faults via PTE walk (not region lookup). After exec_replace,
+    // Handle COW faults via PTE walk (not region lookup). After an exec,
     // VM's region cache is stale (init's pre-exec layout) and doesn't reflect
     // the new binary's mappings. Walking the PTE directly is authoritative.
     if is_prot_fault && is_write {
@@ -761,49 +783,58 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     };
 
     // Demand-paging: allocate a physical page, zero-fill, and map it.
+    // Physical memory is managed by the kernel; route through kernel call 62
+    // (VM_PAGING) rather than calling kernel functions directly, which would
+    // operate on a duplicated copy of the kernel allocator inside VM's binary.
     let page_size: u64 = 4096;
     let page_addr = addr & !(page_size - 1);
-    let pg = match unsafe { kernel::vm::alloc_mem(1, 0) } {
-        p if p != kernel::vm::NO_MEM => p,
-        _ => {
-            sys_kill(ep, SIGSEGV);
-            unsafe {
-                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-            }
-            return;
+    let pa = crate::vm::vm_alloc_pages(1);
+    if pa == 0 {
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
-    };
-    let pa = pg * page_size;
-
-    unsafe {
-        kernel::vm::vm_memset(pa, 0, page_size as usize);
+        return;
     }
 
-    let mut pt_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
+    // Zero-fill the page via a temporary mapping in VM's own address space.
+    let tmp_va = crate::vm::vm_mappage(
+        pa,
+        kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+    );
+    if tmp_va == 0 {
+        crate::vm::vm_free_pages(pa, 1);
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+        return;
+    }
+    unsafe {
+        core::ptr::write_bytes(tmp_va as *mut u8, 0, page_size as usize);
+    }
+    crate::vm::vm_unmappage(tmp_va);
+
+    let mut pt_flags = kernel::pagetable::MAP_USER;
     if region.flags & region::VR_WRITABLE != 0 {
         pt_flags |= kernel::pagetable::MAP_WRITE;
     }
 
-    match unsafe { kernel::pagetable::map_page(cr3, page_addr, pa, pt_flags) } {
-        Ok(_) => {
-            pb::pb_new(pa);
-            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
-                && let Some(r) = vmp.vm_regions.find_mut(page_addr)
-            {
-                r.add_page(page_addr, pa);
-            }
-            unsafe {
-                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-            }
+    if crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags) == 0 {
+        pb::pb_new(pa);
+        if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+            && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+        {
+            r.add_page(page_addr, pa);
         }
-        Err(_) => {
-            unsafe {
-                kernel::vm::free_mem(pg, 1);
-            }
-            sys_kill(ep, SIGSEGV);
-            unsafe {
-                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-            }
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+    } else {
+        crate::vm::vm_free_pages(pa, 1);
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
     }
 }
@@ -831,7 +862,7 @@ pub fn clear_pagefault(_ep: i32) -> i32 {
 /// Handle VM_SHM_UNMAP — clear matching shared memory regions.
 fn do_shm_unmap(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
     let _addr = unsafe { msg.m_payload.m1.m1i1 } as u64;
@@ -867,10 +898,10 @@ fn do_remap(msg: &mut Message) -> i32 {
     let mut _size = unsafe { msg.m_payload.m1.m1i4 } as usize;
 
     // Validate endpoints
-    if dest_ep < 0 || dest_ep >= NR_PROCS as i32 {
+    if !is_user_ep(dest_ep) {
         return EINVAL;
     }
-    if src_ep < 0 || src_ep >= NR_PROCS as i32 {
+    if !is_user_ep(src_ep) {
         return EINVAL;
     }
 
@@ -930,7 +961,7 @@ fn do_map_phys(msg: &mut Message) -> i32 {
     }
 
     let actual_target = if target == -1 { msg.m_source } else { target };
-    if actual_target < 0 || actual_target >= NR_PROCS as i32 {
+    if !is_user_ep(actual_target) {
         return EINVAL;
     }
 
@@ -976,7 +1007,7 @@ fn do_get_phys(msg: &mut Message) -> i32 {
     let target = unsafe { msg.m_payload.m1.m1i1 };
     let addr = unsafe { msg.m_payload.m1.m1i2 } as u64;
 
-    if target < 0 || target >= NR_PROCS as i32 {
+    if !is_user_ep(target) {
         return EINVAL;
     }
 
@@ -985,6 +1016,8 @@ fn do_get_phys(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
+    // Walk the page table to get the physical address of the given
+    // virtual address.
     let result = unsafe { kernel::pagetable::walk(cr3, addr) };
     match result {
         Ok(r) => {
@@ -1007,7 +1040,7 @@ fn do_get_refcount(msg: &mut Message) -> i32 {
     let target = unsafe { msg.m_payload.m1.m1i1 };
     let addr = unsafe { msg.m_payload.m1.m1i2 } as u64;
 
-    if target < 0 || target >= NR_PROCS as i32 {
+    if !is_user_ep(target) {
         return EINVAL;
     }
 
@@ -1044,7 +1077,7 @@ fn do_get_refcount(msg: &mut Message) -> i32 {
 /// the page table, and frees physical pages.
 fn do_munmap(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1112,7 +1145,7 @@ fn do_procctl(msg: &mut Message, transid: u32) -> i32 {
 
     // Validate target endpoint from m9.m9l2
     let target_ep = unsafe { msg.m_payload.m9.m9l2 } as i32;
-    if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+    if !is_user_ep(target_ep) {
         return EINVAL;
     }
 
@@ -1152,7 +1185,7 @@ fn do_procctl_notrans(msg: &mut Message) -> i32 {
 /// Validates endpoint, destroys the process's VM state.
 fn do_exit(msg: &mut Message) -> i32 {
     let ep = unsafe { msg.m_payload.m1.m1i1 };
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1167,7 +1200,7 @@ fn do_exit(msg: &mut Message) -> i32 {
 /// Handle VM_WILLEXIT — process announces intent to exit.
 fn do_willexit(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1205,7 +1238,7 @@ const MMAP_FD: usize = 28; // i32 — bytes 36-39
 /// Return: m1i1 = mapped address on success.
 fn do_mmap(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1374,7 +1407,7 @@ fn do_fork(msg: &mut Message) -> i32 {
 /// The PM server will later map segments into the new address space.
 fn do_exec_newmem(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1400,7 +1433,7 @@ fn do_brk(msg: &mut Message) -> i32 {
     let new_brk = unsafe { msg.m_payload.m1.m1i1 } as u64;
     let ep = msg.m_source;
 
-    if ep < 0 || ep >= NR_PROCS as i32 {
+    if !is_user_ep(ep) {
         return EINVAL;
     }
 
@@ -1448,18 +1481,15 @@ fn do_brk(msg: &mut Message) -> i32 {
             current_top
         };
 
+        let flags = kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE;
         let mut va = alloc_start;
         while va < target {
-            let pg = unsafe { kernel::vm::alloc_mem(1, 0) };
-            if pg == kernel::vm::NO_MEM {
+            let pa = crate::vm::vm_alloc_pages(1);
+            if pa == 0 {
                 return EAGAIN;
             }
-            let pa = pg * page_size;
-            let flags = kernel::pagetable::MAP_PRESENT
-                | kernel::pagetable::MAP_USER
-                | kernel::pagetable::MAP_WRITE;
-            if unsafe { kernel::pagetable::map_page(cr3, va, pa, flags) }.is_err() {
-                unsafe { kernel::vm::free_mem(pg, 1) };
+            if crate::vm::vm_map_page_in(cr3, va, pa, flags) != 0 {
+                crate::vm::vm_free_pages(pa, 1);
                 return EAGAIN;
             }
             va += page_size;
@@ -1471,8 +1501,10 @@ fn do_brk(msg: &mut Message) -> i32 {
         let unmap_end = current_top;
         let unmap_start = target.max(prealloc_start);
         if unmap_end > unmap_start {
-            unsafe {
-                let _ = kernel::pagetable::unmap_range(cr3, unmap_start, unmap_end - unmap_start);
+            let mut va = unmap_start;
+            while va < unmap_end {
+                let _ = crate::vm::vm_unmap_page_in(cr3, va);
+                va += page_size;
             }
         }
     }
@@ -1495,7 +1527,7 @@ fn do_notify_sig(msg: &mut Message) -> i32 {
     // m1i2 contains the signal number to deliver.
     let _sig = unsafe { msg.m_payload.m1.m1i2 };
 
-    if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+    if !is_user_ep(target_ep) {
         return EINVAL;
     }
 
@@ -1583,7 +1615,7 @@ fn do_info(msg: &mut Message) -> i32 {
         }
         VMIW_USAGE => {
             // Populate VmUsageInfo from target process's Vmproc entry.
-            if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+            if !is_user_ep(target_ep) {
                 return EINVAL;
             }
             unsafe {
@@ -1606,7 +1638,7 @@ fn do_info(msg: &mut Message) -> i32 {
         VMIW_REGION => {
             // Walk region array, write VmRegionInfo structs to output buffer
             // Stubbed for now — real impl needs region AVL tree
-            if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+            if !is_user_ep(target_ep) {
                 return EINVAL;
             }
             msg.m_payload.m1.m1i1 = 0; // count of regions
@@ -1651,7 +1683,7 @@ fn do_mapcache(msg: &mut Message) -> i32 {
     let _block = unsafe { msg.m_payload.m1.m1i2 } as u64;
     let _flags = unsafe { msg.m_payload.m1.m1i3 } as u32;
 
-    if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+    if !is_user_ep(target_ep) {
         return EINVAL;
     }
 
@@ -1693,7 +1725,7 @@ fn do_getrusage(msg: &mut Message) -> i32 {
     // m1i1 = target endpoint.
     let target_ep = unsafe { msg.m_payload.m1.m1i1 };
 
-    if target_ep < 0 || target_ep >= NR_PROCS as i32 {
+    if !is_user_ep(target_ep) {
         return EINVAL;
     }
 

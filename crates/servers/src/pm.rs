@@ -2028,6 +2028,27 @@ const VFS_M7_I4_OFF: usize = 20;
 #[allow(dead_code)]
 const VFS_M7_I5_OFF: usize = 24;
 
+// m7 pointer fields in the packed convention used by `crates/servers/src/vfs/pm.rs`
+// (m7p1 @ 28, m7p2 @ 36 — the Rust port does not 8-align pointers after the
+// five i32 fields). VFS_PM_EXEC uses these for PATH and FRAME.
+const VFS_M7_P1_OFF: usize = 28;
+const VFS_M7_P2_OFF: usize = 36;
+
+// VFS_PM_EXEC_REPLY field offsets (VFS→PM, same packed convention):
+//   type@4, endpt@8, status@12, pc@28 (u64), newsp@36 (u64)
+const EXEC_REPLY_STATUS_OFF: usize = 12;
+const EXEC_REPLY_PC_OFF: usize = 28;
+const EXEC_REPLY_NEWSP_OFF: usize = 36;
+
+// m_lc_pm_exec (userland → PM) field offsets within the message payload
+// (matches `mess_lc_pm_exec` in `.refs/minix-3.3.0/minix/include/minix/ipc.h`):
+//   name@8 (u64), namelen@16 (u64), frame@24 (u64), framelen@32 (u64), ps_str@40 (u64)
+const LC_EXEC_NAME_OFF: usize = 8;
+const LC_EXEC_NAMELEN_OFF: usize = 16;
+const LC_EXEC_FRAME_OFF: usize = 24;
+const LC_EXEC_FRAMELEN_OFF: usize = 32;
+const LC_EXEC_PS_STR_OFF: usize = 40;
+
 /// Handle a PM_FORK request.
 ///
 /// Performs the fork: creates a child MProc slot via `do_fork`, sends
@@ -2903,50 +2924,161 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    let path_ptr =
-        u64::from_le_bytes(unsafe { msg.m_payload.m7[0..8].try_into().unwrap_or([0u8; 8]) });
-    let path_len =
-        i32::from_le_bytes(unsafe { msg.m_payload.m7[0..4].try_into().unwrap_or([0u8; 4]) })
-            as usize;
-    let frame_addr =
-        u64::from_le_bytes(unsafe { msg.m_payload.m7[8..16].try_into().unwrap_or([0u8; 8]) });
-    let frame_len =
-        i32::from_le_bytes(unsafe { msg.m_payload.m7[4..8].try_into().unwrap_or([0u8; 4]) })
-            as usize;
+    // m_lc_pm_exec layout (C `mess_lc_pm_exec`): name, namelen, frame,
+    // framelen, ps_str — all vir_bytes/size_t (u64) fields.
+    let name_ptr = u64::from_le_bytes(unsafe {
+        msg.m_payload.raw[LC_EXEC_NAME_OFF - 8..LC_EXEC_NAME_OFF - 8 + 8]
+            .try_into()
+            .unwrap_or([0u8; 8])
+    });
+    let namelen = u64::from_le_bytes(unsafe {
+        msg.m_payload.raw[LC_EXEC_NAMELEN_OFF - 8..LC_EXEC_NAMELEN_OFF - 8 + 8]
+            .try_into()
+            .unwrap_or([0u8; 8])
+    }) as usize;
+    let frame_ptr = u64::from_le_bytes(unsafe {
+        msg.m_payload.raw[LC_EXEC_FRAME_OFF - 8..LC_EXEC_FRAME_OFF - 8 + 8]
+            .try_into()
+            .unwrap_or([0u8; 8])
+    });
+    let frame_len = u64::from_le_bytes(unsafe {
+        msg.m_payload.raw[LC_EXEC_FRAMELEN_OFF - 8..LC_EXEC_FRAMELEN_OFF - 8 + 8]
+            .try_into()
+            .unwrap_or([0u8; 8])
+    }) as usize;
+    let _ps_str = u64::from_le_bytes(unsafe {
+        msg.m_payload.raw[LC_EXEC_PS_STR_OFF - 8..LC_EXEC_PS_STR_OFF - 8 + 8]
+            .try_into()
+            .unwrap_or([0u8; 8])
+    });
+
+    if name_ptr == 0 || namelen == 0 {
+        return EINVAL;
+    }
 
     let caller_ep = rmp.mp_endpoint;
 
-    // Copy path from caller to local buffer via sys_vircopy.
-    let mut path_buf = [0u8; 256];
-    let copy_len = if path_len > 255 { 255 } else { path_len };
-    let _ = minix_rt::sys_vircopy(
-        caller_ep,
-        path_ptr,
-        minix_rt::SELF,
-        path_buf.as_mut_ptr() as u64,
-        copy_len,
-    );
-
+    // Matching C `do_exec`: remember the frame for procfs bookkeeping and
+    // mark the process as mid-exec.
     rmp.mp_flags |= PARTIAL_EXEC;
-    rmp.mp_frame_addr = frame_addr;
+    rmp.mp_frame_addr = frame_ptr;
     rmp.mp_frame_len = frame_len as u64;
 
-    // Send VFS_PM_EXEC to VFS via SENDREC.
+    // Forward the exec request to VFS (VFS_PM_EXEC). Use a blocking SENDREC:
+    // our VFS services PM requests synchronously, so the reply arrives here.
+    // (C suspends the request and handles VFS_PM_EXEC_REPLY in the main loop;
+    // the blocking form is equivalent for our single-threaded servers.)
     let mut vfs_msg = [0u8; 64];
-    vfs_msg[4..8].copy_from_slice(&(arch_common::com::VFS_PM_EXEC as i32).to_le_bytes());
-    vfs_msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
-    vfs_msg[16..20].copy_from_slice(&(path_len as i32).to_le_bytes());
-    vfs_msg[24..32].copy_from_slice(&frame_addr.to_le_bytes());
-    vfs_msg[32..36].copy_from_slice(&(frame_len as i32).to_le_bytes());
-    let _reply = unsafe {
+    vfs_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+        .copy_from_slice(&(arch_common::com::VFS_PM_EXEC as i32).to_le_bytes());
+    // Packed m7 convention: endpt@8, path_len@12, frame_len@16, ps_str@24,
+    // path@28, frame@36 (see `crates/servers/src/vfs/pm.rs`).
+    vfs_msg[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4].copy_from_slice(&caller_ep.to_le_bytes());
+    vfs_msg[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4].copy_from_slice(&(namelen as i32).to_le_bytes());
+    vfs_msg[VFS_M7_I3_OFF..VFS_M7_I3_OFF + 4].copy_from_slice(&(frame_len as i32).to_le_bytes());
+    vfs_msg[VFS_M7_I5_OFF..VFS_M7_I5_OFF + 8].copy_from_slice(&_ps_str.to_le_bytes());
+    vfs_msg[VFS_M7_P1_OFF..VFS_M7_P1_OFF + 8].copy_from_slice(&name_ptr.to_le_bytes());
+    vfs_msg[VFS_M7_P2_OFF..VFS_M7_P2_OFF + 8].copy_from_slice(&frame_ptr.to_le_bytes());
+    let sendrec_result = unsafe {
         minix_rt::syscall2(
             minix_rt::SENDREC_CALL,
             arch_common::com::VFS_PROC_NR as u64,
             vfs_msg.as_mut_ptr() as u64,
         )
     };
+    if sendrec_result < 0 {
+        // VFS unreachable — fail the exec.
+        return sendrec_result as i32;
+    }
 
-    SUSPEND
+    // Parse the VFS_PM_EXEC_REPLY (delivered into vfs_msg by SENDREC).
+    let reply_type = i32::from_le_bytes(
+        vfs_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    if reply_type != arch_common::com::VFS_PM_EXEC_REPLY as i32 {
+        return EINVAL;
+    }
+    let status = i32::from_le_bytes(
+        vfs_msg[EXEC_REPLY_STATUS_OFF..EXEC_REPLY_STATUS_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let pc = u64::from_le_bytes(
+        vfs_msg[EXEC_REPLY_PC_OFF..EXEC_REPLY_PC_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let newsp = u64::from_le_bytes(
+        vfs_msg[EXEC_REPLY_NEWSP_OFF..EXEC_REPLY_NEWSP_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+
+    // exec_restart is unsafe: it mutates shared mproc state.
+    unsafe { exec_restart(caller_slot, status, pc, newsp) }
+}
+
+/// Finish an exec after VFS has loaded the image — matching C `exec_restart()`
+/// in `.refs/minix-3.3.0/minix/servers/pm/exec.c`.
+///
+/// On success the kernel's SYS_EXEC_LOAD already replaced the image AND made
+/// the process runnable at the new entry point, so PM only resets signal
+/// state and mproc fields; it deliberately does NOT re-issue SYS_EXEC (the
+/// aarch64/riscv64 `arch_proc_init` zero-fills the frame, which would destroy
+/// the argc/argv registers set during loading). On failure the caller's
+/// SENDREC is answered with the error, or the process is killed if the image
+/// was partially replaced.
+///
+/// Returns EDONTREPLY so the PM main loop does not double-reply.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn exec_restart(caller_slot: usize, status: i32, _pc: u64, _newsp: u64) -> i32 {
+    // pc/newsp are used by the C flow's sys_exec; the kernel's SYS_EXEC_LOAD
+    // already set the registers when it replaced the image.
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &mut *base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+
+    if status != OK {
+        if rmp.mp_flags & PARTIAL_EXEC != 0 {
+            // The image was partially replaced — the process cannot continue.
+            unsafe { sig_proc(caller_slot, 9, false, true) };
+        } else {
+            // Exec failed before anything was touched — reply the error.
+            let mut reply_msg = Message {
+                m_source: 0,
+                m_type: status,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+            let ep = rmp.mp_endpoint;
+            unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDNB_CALL,
+                    ep as u64,
+                    &mut reply_msg as *mut Message as u64,
+                );
+            }
+        }
+        rmp.mp_flags &= !PARTIAL_EXEC;
+        return EDONTREPLY;
+    }
+
+    rmp.mp_flags &= !PARTIAL_EXEC;
+
+    // Reset caught/ignored signals to default (matching C).
+    rmp.mp_catch.sigemptyset();
+    rmp.mp_ignore.sigemptyset();
+
+    EDONTREPLY
 }
 
 /// Handle PM's side after VFS opens the executable — PM_EXEC_NEW handler.

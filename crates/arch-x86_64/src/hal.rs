@@ -5,7 +5,6 @@
 
 use core::sync::atomic::Ordering;
 
-
 /// Initialize x86_64 architecture subsystem (IDT, MSRs, cpulocals, etc.).
 pub fn init() {
     crate::init();
@@ -14,7 +13,6 @@ pub fn init() {
 // Re-export arch-specific types for kernel use.
 pub use crate::frame::TrapFrame;
 pub use crate::mcontext::Mcontext;
-
 
 const COM1_DATA: u16 = 0x3F8;
 const COM1_LSR: u16 = 0x3FD; // Line Status Register
@@ -103,7 +101,6 @@ fn serial_try_read_byte() -> Option<u8> {
     Some(byte)
 }
 
-
 /// Read the x86_64 timestamp counter (TSC).
 pub fn read_cycles() -> u64 {
     let lo: u32;
@@ -118,7 +115,6 @@ pub fn read_cycles() -> u64 {
     }
     (lo as u64) | ((hi as u64) << 32)
 }
-
 
 /// Halt the CPU with interrupts disabled. Never returns.
 pub fn halt() -> ! {
@@ -136,7 +132,6 @@ pub fn pause() {
         core::arch::asm!("pause", options(nomem, nostack));
     }
 }
-
 
 use core::ffi::c_void;
 
@@ -164,7 +159,6 @@ pub fn current_proc() -> *mut c_void {
 pub unsafe fn init_cpulocals() {
     unsafe { crate::cpulocals::init_cpulocals() }
 }
-
 
 /// Get the run queue head pointer array from per-CPU storage.
 pub fn sched_run_q_head() -> *mut [*mut core::ffi::c_void; 16] {
@@ -221,7 +215,6 @@ pub fn hlt() {
     }
 }
 
-
 /// Read the TSC (timestamp counter).
 pub fn read_tsc() -> u64 {
     crate::hw::read_tsc()
@@ -262,7 +255,6 @@ pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
 pub unsafe fn tlb_flush() {
     unsafe { crate::asm::tlb_flush() }
 }
-
 
 /// A simple spinlock backed by an atomic flag.
 pub struct Spinlock(core::sync::atomic::AtomicBool);
@@ -317,7 +309,6 @@ pub unsafe fn bkl_lock() {
 pub unsafe fn bkl_unlock() {
     unsafe { crate::spinlock::bkl_unlock() }
 }
-
 
 // x86_64 TrapFrame byte offsets (each field is 8 bytes):
 //   0: rax,   8: rbx,  16: rcx,  24: rdx,  32: rsi,  40: rdi
@@ -379,9 +370,11 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
 pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _argc: u64, _argv: u64) {
     unsafe {
         write_frame_field(frame, 0, sp); // rax = 0 (convention)
-        write_frame_field(frame, 16, entry); // rcx = entry
+        write_frame_field(frame, 16, entry); // rcx = entry (syscall convention)
+        write_frame_field(frame, 160, entry); // dedicated rip slot = entry
         write_frame_field(frame, 40, sp); // rdi = sp
         write_frame_field(frame, 72, 0x0202); // r11 = user-mode (IF|IOPL=0)
+        write_frame_field(frame, 176, 0x0202); // dedicated rflags slot = PSL_USERSET
         write_frame_field(frame, 168, sp); // rsp = sp
         core::arch::asm!("mfence", options(nostack, preserves_flags));
     }
@@ -445,8 +438,10 @@ pub unsafe fn write_frame_ip(frame: &mut [u8; 256], ip: u64) {
 /// `frame` must point to a writable, zeroed register save area.
 pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: u64) {
     unsafe {
-        write_frame_field(frame, 16, entry); // rcx = entry (RIP via sysretq)
+        write_frame_field(frame, 16, entry); // rcx = entry (syscall convention)
+        write_frame_field(frame, 160, entry); // dedicated rip slot = entry
         write_frame_field(frame, 72, 0x0202); // r11 = PSL_USERSET
+        write_frame_field(frame, 176, 0x0202); // dedicated rflags slot = PSL_USERSET
         write_frame_field(frame, 168, sp); // rsp
         write_frame_field(frame, 40, arg); // rdi = arg0
     }
@@ -558,7 +553,6 @@ pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext:
         dst.rflags = mc.mc_rflags;
     }
 }
-
 
 /// Physical memory page size.
 pub const PAGE_SIZE: u64 = 4096;
@@ -808,7 +802,6 @@ pub fn cpu_id() -> u32 {
     (ebx >> 24) & 0xFF // Initial APIC ID in bits 31:24
 }
 
-
 /// Whether port I/O is available on this architecture.
 pub const fn has_port_io() -> bool {
     true
@@ -906,7 +899,6 @@ pub unsafe fn phys_outsw(port: u16, buf: u64, count: usize) {
     unsafe { crate::asm::phys_outsw(port, buf, count) }
 }
 
-
 /// PCI configuration address port.
 pub const PCI_ADDR_PORT: u16 = 0xCF8;
 /// PCI configuration data port.
@@ -976,7 +968,6 @@ pub unsafe fn pci_cfg_write32(bus: u8, dev: u8, func: u8, reg: u8, val: u32) {
     }
 }
 
-
 /// RTC CMOS index port.
 pub const RTC_INDEX: u16 = 0x70;
 
@@ -1021,7 +1012,6 @@ pub unsafe fn cmos_write(reg: u8, val: u8) {
     }
 }
 
-
 /// Full memory fence (serializes loads and stores).
 ///
 /// # Safety
@@ -1033,7 +1023,6 @@ pub unsafe fn mfence() {
         core::arch::asm!("mfence", options(nostack, preserves_flags));
     }
 }
-
 
 /// Initialize the profiling clock. `rate_code` encodes the RTC divider.
 /// `callback` is invoked on each tick. Returns the IRQ number (≥0) or <0 on
@@ -1093,7 +1082,6 @@ pub fn bss_end() -> u64 {
     }
     core::ptr::addr_of!(__bss_end) as u64
 }
-
 
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks 4-level page tables (PML4 → PDPT → PD → PT).
@@ -1191,7 +1179,6 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     }
 }
 
-
 /// Allocate a physical page for page table use.
 ///
 /// # Safety
@@ -1230,7 +1217,6 @@ pub unsafe fn init_phys_alloc(base: u64, size: u64) {
     crate::alloc::init_range(base, size);
 }
 
-
 /// Exit QEMU via isa-debug-exit device (port 0x501 on x86_64).
 /// Pass 0 for success, non-zero for failure.
 pub fn qemu_exit(code: u32) -> ! {
@@ -1242,7 +1228,6 @@ pub fn qemu_exit(code: u32) -> ! {
         unsafe { core::arch::asm!("hlt") }
     }
 }
-
 
 /// Create the initial page table root for a new process via exec(2).
 /// Allocates PML4/PDPT/PD pages, copies kernel-half entries from
@@ -1396,8 +1381,12 @@ mod tests {
             set_initial_regs(&mut f, 0x401000, 0x7FFF_F000, 0x7FFF_F000);
             // rcx (offset 16) = entry
             assert_eq!(read_frame_field(&f, 16), 0x401000);
+            // rip (offset 160) = entry
+            assert_eq!(read_frame_field(&f, 160), 0x401000);
             // r11 (offset 72) = PSL_USERSET = 0x0202
             assert_eq!(read_frame_field(&f, 72), 0x0202);
+            // rflags (offset 176) = PSL_USERSET = 0x0202
+            assert_eq!(read_frame_field(&f, 176), 0x0202);
             // rsp (offset 168) = stack pointer
             assert_eq!(read_frame_field(&f, 168), 0x7FFF_F000);
             // rdi (offset 40) = arg0

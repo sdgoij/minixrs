@@ -227,6 +227,25 @@ const EXEC_STACK_OFF: usize = 24;
 const EXEC_NAME_OFF: usize = 32;
 const EXEC_PS_STR_OFF: usize = 40;
 
+// SYS_EXEC_LOAD message offsets (kernel call 63) — PM→VFS exec chain.
+//
+//   offset  0: endpt      (endpoint_t / i32, 4 bytes)
+//   offset  4: _pad       (4 bytes)
+//   offset  8: elf_ptr    (vir_bytes / u64) — ELF bytes in caller's space
+//   offset 16: elf_len    (vir_bytes / u64)
+//   offset 24: frame_ptr  (vir_bytes / u64) — exec frame in caller's space
+//   offset 32: frame_len  (vir_bytes / u64)
+// Reply fields:
+//   offset 16: pc         (vir_bytes / u64) — entry point of the new image
+//   offset 24: newsp      (vir_bytes / u64) — new user stack pointer
+const EXEC_LOAD_ENDPT_OFF: usize = 8;
+const EXEC_LOAD_ELF_PTR_OFF: usize = 16;
+const EXEC_LOAD_ELF_LEN_OFF: usize = 24;
+const EXEC_LOAD_FRAME_PTR_OFF: usize = 32;
+const EXEC_LOAD_FRAME_LEN_OFF: usize = 40;
+const EXEC_LOAD_PC_OFF: usize = 16;
+const EXEC_LOAD_NEWSP_OFF: usize = 24;
+
 // Exec finalization message offsets (SYS_EXEC at call 60)
 //
 // This is a simpler finalization handler separate from the full exec
@@ -1229,6 +1248,7 @@ pub unsafe fn system_init() {
         map_call(60, do_exec_finish_handler); // SYS_EXEC finalization
         map_call(61, do_exec_initramfs_handler); // SYS_EXEC_INITRAMFS
         map_call(62, do_vm_paging_handler); // SYS_VM_PAGING
+        map_call(63, do_exec_load_handler); // SYS_EXEC_LOAD — PM→VFS exec chain
     }
 
     /// Stub for SYS_UPDATE — deferred.
@@ -3298,6 +3318,125 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
     }
 }
 
+/// Handle SYS_EXEC_LOAD (kernel call 63) — load a new executable image into a
+/// target process from ELF bytes and an exec frame supplied by VFS.
+///
+/// This is the kernel half of the PM→VFS exec chain. VFS reads the binary
+/// from the filesystem into buffers in its own address space and passes
+/// pointers to them (kernel calls run with the caller's page table active).
+/// The kernel copies the ELF and the frame into kernel buffers, parses
+/// argv/envp out of the frame (libc `minix_stack_fill` layout), replaces the
+/// target's image via [`crate::syscall::exec_elf_for_target`], and makes the
+/// target runnable at the new entry point.
+///
+/// On success the entry point (PC) and new stack pointer are written back
+/// into the message so VFS can report them to PM.
+///
+/// # Safety
+///
+/// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
+pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+    unsafe {
+        let endpt = msg_read_i32(msg, EXEC_LOAD_ENDPT_OFF);
+        let elf_ptr = msg_read_u64(msg, EXEC_LOAD_ELF_PTR_OFF);
+        let elf_len = msg_read_u64(msg, EXEC_LOAD_ELF_LEN_OFF);
+        let frame_ptr = msg_read_u64(msg, EXEC_LOAD_FRAME_PTR_OFF);
+        let frame_len = msg_read_u64(msg, EXEC_LOAD_FRAME_LEN_OFF);
+
+        // Bounds: executables up to 16 MiB, frames bounded by ARG_MAX.
+        if elf_len > 16 * 1024 * 1024 || frame_len > 1024 * 1024 {
+            return crate::ipc::E2BIG;
+        }
+        if elf_ptr == 0 || elf_len == 0 {
+            return crate::ipc::EINVAL;
+        }
+
+        if !crate::table::is_ok_endpoint(endpt) {
+            return crate::ipc::EINVAL;
+        }
+        let proc_nr = crate::table::endpoint_slot(endpt);
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != endpt {
+            return crate::ipc::EINVAL;
+        }
+
+        // Copy the ELF and frame from the caller (VFS) into kernel buffers.
+        // alloc_phys_contig returns identity-mapped physical pages, writable
+        // under any CR3.
+        let elf_pages = (elf_len as usize).div_ceil(0x1000).max(1);
+        let elf_base = match crate::hal::alloc_phys_contig(elf_pages) {
+            Some(b) => b,
+            None => return crate::ipc::ENOMEM,
+        };
+        let frame_pages = (frame_len as usize).div_ceil(0x1000).max(1);
+        let frame_base = match crate::hal::alloc_phys_contig(frame_pages) {
+            Some(b) => b,
+            None => {
+                crate::hal::free_phys_contig(elf_base, elf_pages);
+                return crate::ipc::ENOMEM;
+            }
+        };
+
+        // Kernel runs with the caller's page table active during a kernel
+        // call, so the caller's buffer VAs are directly readable.
+        core::ptr::copy_nonoverlapping(elf_ptr as *const u8, elf_base as *mut u8, elf_len as usize);
+        core::ptr::copy_nonoverlapping(
+            frame_ptr as *const u8,
+            frame_base as *mut u8,
+            frame_len as usize,
+        );
+
+        let elf_slice = core::slice::from_raw_parts(elf_base as *const u8, elf_len as usize);
+        let frame_slice = core::slice::from_raw_parts(frame_base as *const u8, frame_len as usize);
+
+        // Parse argv/envp out of the frame.
+        let user_stack_top = crate::hal::user_stack_base() + crate::hal::user_stack_size() as u64;
+        let args = match crate::elf::parse_exec_frame(frame_slice, user_stack_top) {
+            Ok(a) => a,
+            Err(_) => {
+                crate::hal::free_phys_contig(elf_base, elf_pages);
+                crate::hal::free_phys_contig(frame_base, frame_pages);
+                return crate::ipc::EINVAL;
+            }
+        };
+
+        // Load the new image (builds fresh page tables, copies segments,
+        // sets up the stack and registers).
+        let loaded = match crate::syscall::exec_elf_for_target(
+            rp,
+            elf_slice,
+            &args.argv[..args.argc],
+            &args.envp[..args.envc],
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                crate::hal::free_phys_contig(elf_base, elf_pages);
+                crate::hal::free_phys_contig(frame_base, frame_pages);
+                return e as i32;
+            }
+        };
+
+        crate::hal::free_phys_contig(elf_base, elf_pages);
+        crate::hal::free_phys_contig(frame_base, frame_pages);
+
+        // Make the target runnable at the new entry point: it is blocked in
+        // SENDREC to PM; clear RECEIVING and enqueue so restore() loads the
+        // new p_reg and jumps to the exec'd entry.
+        let old_rts = (*rp)
+            .p_rts_flags
+            .fetch_and(!crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        if old_rts & !crate::proc::RtsFlags::RECEIVING.bits() == 0 {
+            crate::sched::enqueue(rp);
+        }
+
+        // Return entry point + stack pointer to VFS for the PM reply.
+        msg_write_u64(msg, EXEC_LOAD_PC_OFF, loaded.entry);
+        msg_write_u64(msg, EXEC_LOAD_NEWSP_OFF, loaded.rsp);
+
+        OK
+    }
+}
+
 /// Handle SYS_EXEC finalization (call 60): set CR3 and trap frame for a
 /// process after a successful exec, without the full exec protocol.
 ///
@@ -3922,10 +4061,6 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         // C: (void) sigemptyset(&rpc->p_pending);
         (*rpc).p_pending = 0;
 
-        // Set defer_r1 so IS_FORK_CHILD (syscall 63) returns 1 for the child.
-        // This lets userland fork() distinguish parent (retval=pid) from child (retval=0).
-        (*rpc).p_defer_r1 = 1;
-
         // C: rpc->p_seg.p_cr3 = 0; rpc->p_seg.p_cr3_v = NULL;
         // Child initially has no page table set. VM's sys_vmctl_set_addspace
         // will set the deep-copy CR3 and clear VMINHIBIT.
@@ -3944,9 +4079,8 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 
         // On RISC-V, clear RECEIVING and REPLY_PEND on the child
         // directly since PM's SENDNB reply to the child is skipped
-        // (see handle_vfs_reply). The child already has write_retval=0
-        // and p_defer_r1=1 from the parent copy, so it doesn't need
-        // the reply message.
+        // (see handle_vfs_reply). The child already has write_retval=0,
+        // so it doesn't need the reply message.
         if crate::hal::fork_needs_child_flag_clear() {
             let rts = (*rpc).p_rts_flags.load(Ordering::Relaxed);
             (*rpc)

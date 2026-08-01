@@ -125,9 +125,7 @@ pub fn run_integration_tests() -> ! {
     total += test_elf_load_to_phys_pages();
 
     // Phase P: Syscall exec and initramfs verification
-    total += test_syscall_is_fork_child();
     total += test_initramfs_all_executables_elf();
-    total += test_syscall_exec_replace_echo();
 
     // Phase O: Hardware device access
     total += test_rtc_cmos_reads_reasonable_time();
@@ -155,7 +153,6 @@ pub fn run_integration_tests() -> ! {
     total += test_sys_kill_invalid();
     total += test_sys_schedule_roundtrip();
     total += test_sys_getksig_pending();
-    total += test_sys_exec_new_cr3();
 
     if total == 0 {
         serial_puts("-- done --\r\n");
@@ -1383,47 +1380,6 @@ fn test_elf_load_to_phys_pages() -> u32 {
 
 // Phase P: Syscall exec and initramfs verification
 
-fn test_syscall_is_fork_child() -> u32 {
-    run("syscall_is_fork_child", |t| unsafe {
-        // is_fork_child checks p_defer_r1. It should return 0 if not set, 1 if set.
-        let rp = kernel::table::proc_addr(80);
-        if rp.is_null() {
-            t.assert(false, "proc_addr(80) failed");
-            return;
-        }
-        (*rp).p_magic = kernel::proc::PMAGIC;
-        (*rp).p_endpoint = 80;
-        (*rp)
-            .p_rts_flags
-            .store(0, core::sync::atomic::Ordering::Relaxed);
-
-        // Without flag set, returns 0
-        (*rp).p_defer_r1 = 0;
-        let result = kernel::syscall::dispatch_basic_syscall(rp, 63, &[0u64; 6]);
-        t.assert(
-            result == 0,
-            "is_fork_child should return 0 when p_defer_r1=0",
-        );
-
-        // With flag set, returns 1 and clears it
-        (*rp).p_defer_r1 = 1;
-        let result = kernel::syscall::dispatch_basic_syscall(rp, 63, &[0u64; 6]);
-        t.assert(
-            result == 1,
-            "is_fork_child should return 1 when p_defer_r1=1",
-        );
-        t.assert(
-            (*rp).p_defer_r1 == 0,
-            "is_fork_child should clear p_defer_r1",
-        );
-
-        (*rp).p_rts_flags.store(
-            kernel::proc::RtsFlags::SLOT_FREE.bits(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
-    })
-}
-
 fn test_initramfs_all_executables_elf() -> u32 {
     run("initramfs_all_executables_elf", |t| {
         use kernel::elf::parse_elf_header;
@@ -1493,46 +1449,6 @@ fn test_initramfs_all_executables_elf() -> u32 {
                 }
             }
         }
-    })
-}
-
-fn test_syscall_exec_replace_echo() -> u32 {
-    run("syscall_exec_replace_echo", |t| unsafe {
-        let rp = kernel::table::proc_addr(81);
-        if rp.is_null() {
-            t.assert(false, "proc_addr(81) failed");
-            return;
-        }
-        (*rp).p_magic = kernel::proc::PMAGIC;
-        (*rp).p_endpoint = 81;
-        (*rp)
-            .p_rts_flags
-            .store(0, core::sync::atomic::Ordering::Relaxed);
-        (*rp).p_nr = 81;
-
-        // Verify /bin/echo exists in initramfs
-        let exists = kernel::initramfs::find_initramfs_file("/bin/echo").is_some();
-        if !exists {
-            t.assert(false, "/bin/echo not in initramfs");
-            return;
-        }
-
-        let path = b"/bin/echo\0";
-        let path_ptr = path.as_ptr();
-        let args = [path_ptr as u64, 0u64, 0u64, 0u64, 0u64, 0u64];
-        let result = kernel::syscall::dispatch_basic_syscall(rp, 61, &args);
-        // exec_replace returns 0 on success
-        if result != 0 {
-            t.assert(false, "exec_replace should return 0");
-        }
-        // A new page table should have been created
-        let cr3 = (*rp).p_seg.p_cr3;
-        t.assert(cr3 != 0, "new CR3 should be non-zero after exec");
-
-        (*rp).p_rts_flags.store(
-            kernel::proc::RtsFlags::SLOT_FREE.bits(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
     })
 }
 
@@ -2321,66 +2237,6 @@ fn test_sys_getksig_pending() -> u32 {
         t.assert(found_sig == 42, "getksig should return signal value 42");
 
         (*ep).p_rts_flags.store(
-            kernel::proc::RtsFlags::SLOT_FREE.bits(),
-            core::sync::atomic::Ordering::Relaxed,
-        );
-    })
-}
-
-fn test_sys_exec_new_cr3() -> u32 {
-    run("sys_exec_new_cr3", |t| unsafe {
-        // Verify that exec_replace actually sets a new CR3.
-        // Uses a non-boot slot to avoid disrupting boot processes.
-        let rp = kernel::table::proc_addr(77);
-        if rp.is_null() {
-            t.assert(false, "proc_addr(77) failed");
-            return;
-        }
-        (*rp).p_magic = kernel::proc::PMAGIC;
-        (*rp).p_endpoint = 77;
-        (*rp).p_nr = 77;
-        (*rp)
-            .p_rts_flags
-            .store(0, core::sync::atomic::Ordering::Relaxed);
-
-        // Record the old CR3
-        let old_cr3 = (*rp).p_seg.p_cr3;
-
-        // Call exec_replace with /bin/echo
-        let path = b"/bin/echo\0";
-        let args = [path.as_ptr() as u64, 0u64, 0u64, 0u64, 0u64, 0u64];
-        let result = kernel::syscall::dispatch_basic_syscall(rp, 61, &args);
-        t.assert(result == 0, "exec_replace should succeed");
-
-        // The CR3 should have changed to a new per-process page table
-        let new_cr3 = (*rp).p_seg.p_cr3;
-        t.assert(new_cr3 != 0, "new CR3 should be non-zero");
-        t.assert(new_cr3 != old_cr3, "CR3 should change after exec_replace");
-
-        // Verify the new page table has user mappings
-        let pml4 = new_cr3 as *const u64;
-        let entry0 = core::ptr::read_volatile(pml4);
-        t.assert(
-            entry0 & kernel::pagetable::PG_P != 0,
-            "new PML4[0] should be present",
-        );
-        t.assert(
-            entry0 & kernel::pagetable::PG_U != 0,
-            "new PML4[0] should be user-accessible",
-        );
-        t.assert(
-            entry0 & kernel::pagetable::PG_RW != 0,
-            "new PML4[0] should be writable",
-        );
-
-        // The kernel high entry (bit 511) should also be shared.
-        // Note: this may fail if the boot page table is incomplete.
-        let entry511 = core::ptr::read_volatile(pml4.add(511));
-        if entry511 & kernel::pagetable::PG_P == 0 {
-            // Kernel high mapping not present — skip this check
-        }
-
-        (*rp).p_rts_flags.store(
             kernel::proc::RtsFlags::SLOT_FREE.bits(),
             core::sync::atomic::Ordering::Relaxed,
         );

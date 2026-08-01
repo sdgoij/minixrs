@@ -163,6 +163,9 @@ pub mod sys {
     pub const SAFEMEMSET: u32 = KERNEL_CALL + 56;
     pub const PADCONF: u32 = KERNEL_CALL + 57;
     pub const EXEC_INITRAMFS: u32 = KERNEL_CALL + 61;
+    /// Load an executable image into a target process from caller-supplied
+    /// ELF bytes and an exec stack frame (the PM→VFS exec chain).
+    pub const EXEC_LOAD: u32 = KERNEL_CALL + 63;
 }
 
 /// Virtual address where the MFS RAM disk is mapped in MFS's address space.

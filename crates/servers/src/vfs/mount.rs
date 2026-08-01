@@ -405,12 +405,6 @@ pub fn unmount_all(_force: i32) {}
 /// resolve absolute paths. Returns a pointer to the root vnode, or
 /// null on failure. Should be called once during VFS init.
 pub fn mount_root() -> *mut Vnode {
-    // Diagnostic: confirm mount_root is entered.
-    #[cfg(target_os = "none")]
-    unsafe {
-        minix_rt::syscall1(62, 0)
-    };
-
     // Step 1: Register MFS in the dmap table.
     // MFS is at endpoint 7 (MFS_PROC_NR, generation 0).
     // Label "mfs" is matched by do_mount / init mount.
@@ -440,11 +434,6 @@ pub fn mount_root() -> *mut Vnode {
     }
 
     // Step 4: Call req_readsuper on MFS with dev=0 (RAM disk), isroot=1.
-    #[cfg(target_os = "none")]
-    {
-        // Diagnostic: confirm we reached this point.
-        unsafe { minix_rt::syscall1(61, 0) };
-    }
     #[cfg(target_os = "none")]
     let (r, node, _flags_reply) = unsafe {
         req_readsuper(

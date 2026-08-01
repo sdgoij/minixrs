@@ -410,15 +410,28 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
         arg_off = (arg_off + 7) & !7;
     }
 
-    let r = unsafe { minix_rt::exec_replace(&cmd_path[..child_path_len], argv_buf.as_ptr()) };
+    let r = unsafe {
+        minix_rt::execve(
+            cmd_path.as_ptr(),
+            child_path_len,
+            argv_buf.as_ptr(),
+            core::ptr::null(),
+        )
+    };
 
     // Try /sbin/<cmd> as fallback.
     if r < 0 && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
         cmd_path[6 + cmd_name_len] = 0;
-        let _ =
-            unsafe { minix_rt::exec_replace(&cmd_path[..6 + cmd_name_len + 1], argv_buf.as_ptr()) };
+        let _ = unsafe {
+            minix_rt::execve(
+                cmd_path.as_ptr(),
+                6 + cmd_name_len + 1,
+                argv_buf.as_ptr(),
+                core::ptr::null(),
+            )
+        };
     }
 }
 

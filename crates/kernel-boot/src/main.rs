@@ -548,27 +548,33 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
     //   push rax → saved[0]   (RSP points here, pushed last)
     //
     // p_reg TrapFrame byte offsets (matching restore() iretq layout):
-    //   0=rax, 8=rbx, 16=rcx(=RIP), 24=rdx, 32=rsi, 40=rdi,
-    //   48=r8, 56=r9, 64=r10, 72=r11(=RFLAGS), 80=r12,
-    //   88=r13, 96=r14, 104=r15, 112=rbp, 168=rsp
+    //   0=rax, 8=rbx, 16=rcx, 24=rdx, 32=rsi, 40=rdi,
+    //   48=r8, 56=r9, 64=r10, 72=r11, 80=r12,
+    //   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags.
+    //   The syscall convention stores user RIP in the rcx slot (16) and user
+    //   RFLAGS in the r11 slot (72) — the `syscall` instruction does the same
+    //   — so restore() loads rcx/r11 from those slots, while iretq reads the
+    //   dedicated rip/rflags slots (160/176).
     let frame = unsafe { &mut (*rp).p_reg };
     unsafe {
         let regs = [
             (0usize, *saved.add(0)),    // rax = saved[0]  (pushed last, at RSP)
             (8usize, *saved.add(1)),    // rbx = saved[1]
-            (16usize, *saved.add(2)),   // rcx = saved[2]  ← user RIP
+            (16usize, *saved.add(2)),   // rcx = saved[2]  ← user RIP (syscall convention)
             (24usize, *saved.add(3)),   // rdx = saved[3]
             (32usize, *saved.add(4)),   // rsi = saved[4]
             (40usize, *saved.add(5)),   // rdi = saved[5]
             (48usize, *saved.add(6)),   // r8  = saved[6]
             (56usize, *saved.add(7)),   // r9  = saved[7]
             (64usize, *saved.add(8)),   // r10 = saved[8]
-            (72usize, *saved.add(9)),   // r11 = saved[9]  ← user RFLAGS
+            (72usize, *saved.add(9)),   // r11 = saved[9]  ← user RFLAGS (syscall convention)
             (80usize, *saved.add(10)),  // r12 = saved[10]
             (88usize, *saved.add(11)),  // r13 = saved[11]
             (96usize, *saved.add(12)),  // r14 = saved[12]
             (104usize, *saved.add(13)), // r15 = saved[13] (pushed second, highest addr after rbp)
             (112usize, *saved.add(14)), // rbp = saved[14] (pushed first, highest addr)
+            (160usize, *saved.add(2)),  // dedicated rip slot = user RIP (syscall return address)
+            (176usize, *saved.add(9)),  // dedicated rflags slot = user RFLAGS
         ];
         for (offset, val) in regs {
             let bytes = val.to_ne_bytes();
@@ -586,6 +592,69 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
         let rsp: u64 = 0;
         for (i, b) in rsp.to_ne_bytes().iter().enumerate() {
             core::ptr::write_volatile(frame.as_mut_ptr().add(168 + i), *b);
+        }
+    }
+}
+
+/// Save the faulting user context from the IST-stack frame into the current
+/// process's p_reg, so a later restore() resumes at the faulting instruction
+/// after VM resolves the fault.
+///
+/// The frame is pushed by `exception_page_fault_entry` (naked asm) in the
+/// syscall_entry order (15 registers), followed by the CPU's #PF frame:
+///   frame[0]=rax, [1]=rbx, [2]=rcx(user), [3]=rdx, [4]=rsi, [5]=rdi,
+///   [6]=r8, [7]=r9, [8]=r10, [9]=r11(user), [10]=r12, [11]=r13,
+///   [12]=r14, [13]=r15, [14]=rbp, [15]=errcode, [16]=faulting RIP,
+///   [17]=CS, [18]=faulting RFLAGS, [19]=user RSP, [20]=SS
+///
+/// p_reg TrapFrame byte offsets (matching restore() iretq layout):
+///   0=rax, 8=rbx, 16=rcx, 24=rdx, 32=rsi, 40=rdi,
+///   48=r8, 56=r9, 64=r10, 72=r11, 80=r12,
+///   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags.
+///   Unlike the syscall path, rcx (16) and r11 (72) hold the user's REAL
+///   registers (a #PF does not clobber them); the faulting RIP/RFLAGS go in
+///   the dedicated 160/176 slots.
+///
+/// # Safety
+///
+/// `frame` must point to the valid IST-stack frame built by
+/// `exception_page_fault_entry`. The current process must be the faulting
+/// process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn save_fault_context(frame: *const u64) {
+    unsafe {
+        let rp = arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc;
+        if rp.is_null() {
+            return;
+        }
+        // fault RIP/RFLAGS/user RSP live in the CPU-pushed portion of the
+        // frame (after the 15 GPR pushes), not in the GPR slots.
+        let regs = [
+            (0usize, *frame.add(0)),    // rax
+            (8usize, *frame.add(1)),    // rbx
+            (16usize, *frame.add(2)),   // rcx = real user rcx (NOT the RIP)
+            (24usize, *frame.add(3)),   // rdx
+            (32usize, *frame.add(4)),   // rsi
+            (40usize, *frame.add(5)),   // rdi
+            (48usize, *frame.add(6)),   // r8
+            (56usize, *frame.add(7)),   // r9
+            (64usize, *frame.add(8)),   // r10
+            (72usize, *frame.add(9)),   // r11 = real user r11 (NOT the RFLAGS)
+            (80usize, *frame.add(10)),  // r12
+            (88usize, *frame.add(11)),  // r13
+            (96usize, *frame.add(12)),  // r14
+            (104usize, *frame.add(13)), // r15
+            (112usize, *frame.add(14)), // rbp
+            (160usize, *frame.add(16)), // dedicated rip slot = faulting RIP (CPU frame)
+            (168usize, *frame.add(19)), // user RSP (CPU frame)
+            (176usize, *frame.add(18)), // dedicated rflags slot = faulting RFLAGS (CPU frame)
+        ];
+        let p_reg = &mut (*rp).p_reg;
+        for (offset, val) in regs {
+            let bytes = val.to_ne_bytes();
+            for (i, b) in bytes.iter().enumerate() {
+                core::ptr::write_volatile(p_reg.as_mut_ptr().add(offset + i), *b);
+            }
         }
     }
 }
@@ -623,19 +692,12 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         // process is restored, p_reg must have the CURRENT syscall's
         // registers (RIP pointing to the return from this syscall), not
         // stale state from a previous blocking syscall.
-        // For SYS_EXEC_REPLACE (61), skip — the dispatch replaces the
-        // process image and sets up new p_reg.
-        if nr != 61 {
-            save_proc_regs(rp, saved);
-        }
+        save_proc_regs(rp, saved);
 
         let result = kernel::syscall::dispatch_basic_syscall(rp, nr, &args);
         core::ptr::write_volatile(saved as *mut u64, result as u64);
 
         kernel::hal::write_retval(&mut (*rp).p_reg, result as u64);
-
-        // Check if this was a successful exec — needed for scheduler logic.
-        let is_exec = nr == 61 && result == 0;
 
         // If the current process is still runnable (not blocked) and not
         // preempted, continue running it — matching C MINIX switch_to_user.
@@ -655,7 +717,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             if cleared == 0 {
                 kernel::sched::enqueue(rp);
             }
-        } else if rts == 0 && !is_exec {
+        } else if rts == 0 {
             // Still runnable — continue with same process.
             let delivered = unsafe { deliver_msg(rp) };
             // Same-process return: syscall_entry pops RAX from saved[0],
@@ -697,7 +759,7 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
         };
 
         // D4: scheduler switch
-        if next != rp || is_exec {
+        if next != rp {
             let delivered_next = unsafe { deliver_msg(next) };
             let _ = delivered_next;
             arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);

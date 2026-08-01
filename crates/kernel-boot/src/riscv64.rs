@@ -303,6 +303,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         // Copy sstatus from p_reg[248..256] to frame[264..272]
                         let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
                         frame[264..272].copy_from_slice(&sst_bytes);
+                        // Consume CONTEXT_SET: loading the exec'd p_reg into
+                        // the frame fulfills it. If left set, the exec'd
+                        // process's first syscall re-loads p_reg (sepc = entry)
+                        // and restarts, re-running that syscall.
+                        (*next_proc).p_misc_flags.fetch_and(
+                            !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                            core::sync::atomic::Ordering::SeqCst,
+                        );
                         // Load new process's page table
                         let new_cr3 = (*next_proc).p_seg.p_cr3;
                         if new_cr3 != 0 {
@@ -386,6 +394,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                                 frame[256..264].copy_from_slice(&sepc_bytes);
                                 let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
                                 frame[264..272].copy_from_slice(&sst_bytes);
+                                (*next_proc).p_misc_flags.fetch_and(
+                                    !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                                    core::sync::atomic::Ordering::SeqCst,
+                                );
                                 let new_cr3 = (*next_proc).p_seg.p_cr3;
                                 if new_cr3 != 0 {
                                     kernel::hal::write_cr3(new_cr3);
@@ -470,6 +482,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         frame[256..264].copy_from_slice(&sepc_bytes);
                         let sst_bytes = core::ptr::read(p_reg.add(248) as *const [u8; 8]);
                         frame[264..272].copy_from_slice(&sst_bytes);
+                        (*next_proc).p_misc_flags.fetch_and(
+                            !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
+                            core::sync::atomic::Ordering::SeqCst,
+                        );
                         let new_cr3 = (*next_proc).p_seg.p_cr3;
                         if new_cr3 != 0 {
                             kernel::hal::write_cr3(new_cr3);

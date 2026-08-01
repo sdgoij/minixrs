@@ -625,21 +625,40 @@ unsafe fn sys_ipc_notify_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]
     }
 }
 
-/// Helper: load a binary from initramfs and apply it to a target process.
-/// Returns 0 on success, negative error code on failure.
-unsafe fn exec_initramfs_for_target(
+/// Result of loading a new executable image into a process.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecLoadResult {
+    /// Entry point (PC) of the new image.
+    pub entry: u64,
+    /// User stack pointer (RSP) of the new image.
+    pub rsp: u64,
+}
+
+/// Load a raw ELF binary into a target process, replacing its image.
+///
+/// This is the shared core of the kernel exec paths: it builds a fresh page
+/// table, copies PT_LOAD segments into newly allocated pages, sets up the
+/// user stack from `argv_strs`/`envp_strs`, and programs the target's
+/// registers (entry, RSP, argc, argv). It does NOT make the target runnable
+/// — the caller decides when the process resumes at the new entry point.
+///
+/// Returns the entry point and stack pointer on success, or a negative
+/// errno.
+///
+/// # Safety
+///
+/// `rp` must point to a valid, in-use `Proc`. `data` must contain a valid
+/// ELF64 binary for the running architecture.
+pub unsafe fn exec_elf_for_target(
     rp: *mut crate::proc::Proc,
-    path: &str,
+    data: &[u8],
     argv_strs: &[&str],
-) -> i64 {
+    envp_strs: &[&str],
+) -> Result<ExecLoadResult, i64> {
     unsafe {
-        let (data, _mode) = match crate::initramfs::find_initramfs_file(path) {
-            Some(d) => d,
-            None => return -2,
-        };
         let ehdr = match crate::elf::parse_elf_header(data) {
             Ok(e) => e,
-            Err(_) => return -38,
+            Err(_) => return Err(-38),
         };
 
         // Parse ELF to get bounds (no identity-mapped writes that would
@@ -667,7 +686,7 @@ unsafe fn exec_initramfs_for_target(
                 }
             }
             if base == u64::MAX {
-                return -38;
+                return Err(-38);
             }
             crate::elf::LoadedElf {
                 base,
@@ -692,12 +711,16 @@ unsafe fn exec_initramfs_for_target(
             let saved_cr3 = crate::hal::read_cr3();
             let temp_stack_top = 0x4FC0_0000u64 + user_stack_size as u64;
             crate::hal::write_cr3(boot_cr3_val);
-            let rsp = match crate::elf::setup_user_stack(temp_stack_top, user_stack_size, argv_strs)
-            {
+            let rsp = match crate::elf::setup_user_stack_full(
+                temp_stack_top,
+                user_stack_size,
+                argv_strs,
+                envp_strs,
+            ) {
                 Ok(rsp) => rsp,
                 Err(_) => {
                     crate::hal::write_cr3(saved_cr3);
-                    return -38;
+                    return Err(-38);
                 }
             };
             crate::hal::write_cr3(saved_cr3);
@@ -707,11 +730,16 @@ unsafe fn exec_initramfs_for_target(
         let user_rsp = {
             let saved_cr3 = crate::hal::read_cr3();
             crate::hal::write_cr3(boot_cr3_val);
-            let rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, argv_strs) {
+            let rsp = match crate::elf::setup_user_stack_full(
+                stack_top,
+                user_stack_size,
+                argv_strs,
+                envp_strs,
+            ) {
                 Ok(rsp) => rsp,
                 Err(_) => {
                     crate::hal::write_cr3(saved_cr3);
-                    return -38;
+                    return Err(-38);
                 }
             };
             crate::hal::write_cr3(saved_cr3);
@@ -725,7 +753,7 @@ unsafe fn exec_initramfs_for_target(
 
         // Build new page table root (arch-specific layout).
         let root = match crate::hal::exec_create_root(boot_cr3_val) {
-            0 => return -12,
+            0 => return Err(-12),
             r => r,
         };
 
@@ -733,7 +761,7 @@ unsafe fn exec_initramfs_for_target(
         let code_pages = ((code_end - code_start) / 4096) as usize;
         let phys_code_base = match crate::hal::alloc_phys_contig(code_pages) {
             Some(b) => b,
-            None => return -12,
+            None => return Err(-12),
         };
         let elf_hdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
         let phoff = elf_hdr.e_phoff as usize;
@@ -761,7 +789,7 @@ unsafe fn exec_initramfs_for_target(
         let stack_pages = ((stack_end - stack_start) / 4096) as usize;
         let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
             Some(b) => b,
-            None => return -12,
+            None => return Err(-12),
         };
         // Copy stack data to allocated pages.
         #[cfg(target_arch = "aarch64")]
@@ -774,13 +802,14 @@ unsafe fn exec_initramfs_for_target(
                 phys_stack_base as *mut u8,
                 user_stack_size,
             );
-            // setup_user_stack stored the argv string pointers as absolute
-            // addresses in the temp frame (0x4FC0_0000). The stack is
+            // setup_user_stack_full stored the argv/envp string pointers as
+            // absolute addresses in the temp frame (0x4FC0_0000). The stack is
             // remapped at user_stack_base for the new process, so convert
             // each pointer value by the frame offset before user code
             // dereferences them (e.g. parse_args -> strlen(argv[0])).
             let frame_delta = 0x4FC0_0000u64 - user_stack_base;
-            for i in 0..argv_strs.len() {
+            let total_ptrs = argv_strs.len() + envp_strs.len();
+            for i in 0..total_ptrs {
                 let slot_va = user_rsp + 8 + (i as u64) * 8;
                 let slot = (phys_stack_base + (slot_va - user_stack_base)) as *mut u64;
                 let val = core::ptr::read_volatile(slot);
@@ -806,7 +835,7 @@ unsafe fn exec_initramfs_for_target(
         let mut pa = phys_code_base;
         while va < code_end {
             if crate::pagetable::map_page(root, va, pa, user_flags).is_err() {
-                return -12;
+                return Err(-12);
             }
             va += 0x1000;
             pa += 0x1000;
@@ -815,10 +844,31 @@ unsafe fn exec_initramfs_for_target(
         let mut pa = phys_stack_base;
         while va < stack_end {
             if crate::pagetable::map_page(root, va, pa, user_flags).is_err() {
-                return -12;
+                return Err(-12);
             }
             va += 0x1000;
             pa += 0x1000;
+        }
+
+        // Map the brk heap range (0x3FE00000..0x3FF00000) with private
+        // physical pages so the exec'd process's bump allocator (minix-rt
+        // hardcodes this range) has real backing. The page-table copy in
+        // exec_create_root does not provide a user-accessible heap mapping on
+        // every arch: RISC-V copies a supervisor-only identity 1GB page whose
+        // low-GB PAs are below RAM, so user heap writes fault forever.
+        let brk_start = 0x3FE00000u64;
+        let brk_end = 0x3FF00000u64;
+        let brk_pages = ((brk_end - brk_start) / 4096) as usize;
+        if let Some(brk_phys) = crate::hal::alloc_phys_contig(brk_pages) {
+            let mut brk_va = brk_start;
+            let mut brk_pa = brk_phys;
+            while brk_va < brk_end {
+                if crate::pagetable::map_page(root, brk_va, brk_pa, user_flags).is_err() {
+                    break;
+                }
+                brk_va += 0x1000;
+                brk_pa += 0x1000;
+            }
         }
 
         // Set the new page table.
@@ -861,151 +911,10 @@ unsafe fn exec_initramfs_for_target(
             crate::hal::release_fpu(rp as *mut core::ffi::c_void);
         }
 
-        0
-    }
-}
-
-/// SYS_exec_replace (61) — replace current process with a binary from initramfs.
-///
-/// args[0] = pointer to null-terminated path string in caller's address space
-/// args[1] = pointer to null-terminated argv array (array of string pointers)
-///          in caller's address space, or null for no argv (just the path).
-unsafe fn sys_exec_replace_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    unsafe {
-        let path_ptr = args[0] as *const u8;
-        if path_ptr.is_null() {
-            return -14;
-        }
-        let mut path_buf = [0u8; 256];
-        let mut path_len = 0usize;
-        for (i, slot) in path_buf.iter_mut().enumerate().take(255) {
-            let byte = core::ptr::read_volatile(path_ptr.add(i));
-            if byte == 0 {
-                break;
-            }
-            *slot = byte;
-            path_len = i + 1;
-        }
-        if path_len == 0 {
-            return -14;
-        }
-        let path = match core::str::from_utf8(&path_buf[..path_len]) {
-            Ok(s) => s,
-            Err(_) => {
-                return -14;
-            }
-        };
-
-        // Read argv array from userspace.
-        // args[1] points to a null-terminated array of string pointers.
-        let argv_ptr = args[1] as *const *const u8;
-
-        // Fixed-size buffer for argument strings (max 1024 bytes total).
-        let mut argv_buf = [0u8; 1024];
-        // Offsets into argv_buf for each argument.
-        let mut argv_offsets: [u16; 32] = [0u16; 32];
-        let mut argv_count = 0usize;
-        let mut argv_pos = 0usize;
-
-        if !argv_ptr.is_null() {
-            for i in 0..31usize {
-                let str_ptr = core::ptr::read_volatile(argv_ptr.add(i));
-                if str_ptr.is_null() {
-                    break;
-                }
-                argv_offsets[argv_count] = argv_pos as u16;
-                let start = argv_pos;
-                for j in 0..255usize {
-                    let byte = core::ptr::read_volatile(str_ptr.add(j));
-                    if byte == 0 {
-                        break;
-                    }
-                    if argv_pos < argv_buf.len() {
-                        argv_buf[argv_pos] = byte;
-                        argv_pos += 1;
-                    } else {
-                        return -7; // E2BIG
-                    }
-                }
-                if argv_pos == start {
-                    return -14; // EFAULT — empty string
-                }
-                argv_buf[argv_pos] = 0; // NUL terminator in buffer
-                argv_pos += 1;
-                argv_count += 1;
-            }
-        }
-
-        // Build &str references into argv_buf.
-        let mut argv_strs: [&str; 32] = [""; 32];
-        let n = argv_count.min(32);
-        for i in 0..n {
-            let start = argv_offsets[i] as usize;
-            // Find the NUL terminator in argv_buf.
-            let end = start
-                + argv_buf[start..]
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(argv_buf.len() - start);
-            argv_strs[i] = core::str::from_utf8(&argv_buf[start..end]).unwrap_or("");
-        }
-
-        exec_initramfs_for_target(caller, path, &argv_strs[..n])
-    }
-}
-
-/// SYS_EXEC_TARGET (62) — exec a binary from initramfs for a specific process.
-/// args[0] = target endpoint, args[1] = path pointer in caller's space.
-unsafe fn sys_exec_target_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    unsafe {
-        let target_ep = args[0] as i32;
-        let path_ptr = args[1] as *const u8;
-        if path_ptr.is_null() {
-            return -14;
-        }
-
-        if !crate::table::is_ok_endpoint(target_ep) {
-            return -5; // EIO
-        }
-        let proc_nr = crate::table::endpoint_slot(target_ep);
-        let rp = crate::table::proc_addr(proc_nr);
-        if rp.is_null() || (*rp).is_empty() || (*rp).p_endpoint != target_ep {
-            return -5;
-        }
-
-        let mut path_buf = [0u8; 256];
-        let mut path_len = 0usize;
-        for (i, slot) in path_buf.iter_mut().enumerate().take(255) {
-            let byte = core::ptr::read_volatile(path_ptr.add(i));
-            if byte == 0 {
-                break;
-            }
-            *slot = byte;
-            path_len = i + 1;
-        }
-        if path_len == 0 {
-            return -14;
-        }
-        let path = match core::str::from_utf8(&path_buf[..path_len]) {
-            Ok(s) => s,
-            Err(_) => return -14,
-        };
-
-        let result = exec_initramfs_for_target(rp, path, &[path]);
-        if result == 0 {
-            // Exec succeeded — the target process was blocked on SENDREC
-            // to PM (waiting for the exec reply). Clear its blocking state
-            // and enqueue it so the scheduler picks it up.
-            use crate::proc::RtsFlags;
-            let old_rts = (*rp).p_rts_flags.fetch_and(
-                !RtsFlags::RECEIVING.bits(),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-            if old_rts & !RtsFlags::RECEIVING.bits() == 0 {
-                crate::sched::enqueue(rp);
-            }
-        }
-        result
+        Ok(ExecLoadResult {
+            entry: ehdr.e_entry,
+            rsp: rsp_fb,
+        })
     }
 }
 
@@ -1074,21 +983,6 @@ unsafe fn sys_fork_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> 
             }
         }
         -11 // EAGAIN — no free slot
-    }
-}
-
-/// NR_IS_FORK_CHILD (63) — returns 1 if this process was created by fork
-/// and hasn't yet detected it's the child. Used to distinguish parent from
-/// child in the PM IPC fork path, where both share the same page table.
-unsafe fn sys_is_fork_child_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
-    unsafe {
-        let r1 = (*caller).p_defer_r1;
-        if r1 == 1 {
-            (*caller).p_defer_r1 = 0;
-            1
-        } else {
-            0
-        }
     }
 }
 
@@ -1198,9 +1092,6 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(52, sys_ipc_senda_handler); // SENDA
         register_basic_syscall(58, sys_fork_handler); // NR_FORK
         register_basic_syscall(59, sys_waitpid_handler); // NR_WAITPID
-        register_basic_syscall(61, sys_exec_replace_handler); // SYS_EXEC_REPLACE
-        register_basic_syscall(62, sys_exec_target_handler); // SYS_EXEC_TARGET
-        register_basic_syscall(63, sys_is_fork_child_handler); // NR_IS_FORK_CHILD
     }
 }
 
@@ -1348,7 +1239,6 @@ mod tests {
         _check(sys_exit_handler);
         _check(sys_write_handler);
         _check(sys_brk_handler);
-        _check(sys_is_fork_child_handler);
     }
 
     #[test]
@@ -1388,24 +1278,6 @@ mod tests {
                 assert!(pop_pending_exit().is_some());
             }
             assert!(pop_pending_exit().is_none());
-        }
-    }
-
-    #[test]
-    fn test_is_fork_child_handler() {
-        unsafe {
-            proc_init();
-            let rp = crate::table::proc_addr(0);
-            // Without flag set, returns 0
-            (*rp).p_defer_r1 = 0;
-            let result = sys_is_fork_child_handler(rp, &[0u64; 6]);
-            assert_eq!(result, 0);
-            // With flag set, returns 1 and clears it
-            (*rp).p_defer_r1 = 1;
-            let result = sys_is_fork_child_handler(rp, &[0u64; 6]);
-            assert_eq!(result, 1);
-            // Flag should be cleared
-            assert_eq!((*rp).p_defer_r1, 0);
         }
     }
 }

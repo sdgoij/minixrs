@@ -281,28 +281,38 @@ impl FsImage {
 
     /// Add a regular file, returns its inode number.
     fn add_file(&mut self, dir_zone: u32, name: &str, data: &[u8]) -> u32 {
-        // Allocate zone(s) for the file
+        // Allocate one zone per block and write each block.
         let zones_needed = (data.len() + self.zone_size - 1) / self.zone_size;
-        let first_zone = self.alloc_zone();
-
-        // Write file data
-        self.write_zone(first_zone, data);
-
-        // For multi-zone files, write additional zones
-        for i in 1..zones_needed {
+        let mut zones = Vec::with_capacity(zones_needed);
+        for i in 0..zones_needed {
             let z = self.alloc_zone();
             let start = i * self.zone_size;
             let end = (start + self.zone_size).min(data.len());
             self.write_zone(z, &data[start..end]);
+            zones.push(z);
         }
 
-        // Create inode
+        // Create inode.
         let ino = self.alloc_inode(I_REGULAR | RWX_ALL, data.len() as u32);
-        // Set first zone pointer and size.
-        // inode_table index = (ino - 1): slot 0 = inode 1.
+        // Record the zone map: 7 direct zones, then a single-indirect block
+        // for any additional zones. MFS's read_map resolves these as
+        // i_ndzones=7 direct + i_nindirs=block_size/4 indirect entries, so
+        // files larger than 7 blocks read as holes unless zone[7] is set.
         let idx = (ino - 1) as usize;
         if idx < self.inode_table.len() {
-            self.inode_table[idx].d2_zone[0] = first_zone;
+            let n_direct = zones_needed.min(7);
+            for i in 0..n_direct {
+                self.inode_table[idx].d2_zone[i] = zones[i];
+            }
+            if zones_needed > 7 {
+                let indir_zone = self.alloc_zone();
+                let mut indir_data = vec![0u8; self.zone_size];
+                for (j, z) in zones.iter().skip(7).enumerate() {
+                    indir_data[j * 4..j * 4 + 4].copy_from_slice(&z.to_le_bytes());
+                }
+                self.write_zone(indir_zone, &indir_data);
+                self.inode_table[idx].d2_zone[7] = indir_zone;
+            }
             self.inode_table[idx].d2_size = data.len() as i32;
         }
 
