@@ -98,12 +98,12 @@ pub unsafe fn dispatch_basic_syscall(
 // Syscall handlers (table in syscall_map)
 
 /// SYS_read (2) — read from file descriptor.
-/// fd=0: serial input. fd>0: forward to VFS.
+/// fd=0: serial input (unless the process VFS-owns fd 0). fd>0: forward to VFS.
 unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
-    if fd == 0 {
+    if fd == 0 && (!caller.is_null() && (*caller).p_fd_vfs & 1 == 0) {
         // stdin → serial input (interrupt-driven via ser_input).
         if buf.is_null() || count == 0 {
             return -14; // EFAULT
@@ -117,13 +117,19 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         }
         1
     } else {
-        let mut msg = [0u8; 64];
+        // Forward to VFS. Use the caller's per-process send buffer, not
+        // the shared kernel stack (the SENDREC blocks the caller; the next
+        // process reuses the same kernel stack and a reply written there
+        // would corrupt its live frame).
+        let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+        msg.fill(0);
         msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
         msg[4..8].copy_from_slice(&0x100i32.to_le_bytes()); // VFS_READ = 0x100
         msg[8..12].copy_from_slice(&fd.to_le_bytes());
         msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
         msg[24..28].copy_from_slice(&(count as u32).to_le_bytes());
 
+        (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
         let result =
             unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
         if result != 0 {
@@ -143,13 +149,18 @@ unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     let path_len = args[1] as u32;
     let flags = args[2] as i32;
 
-    let mut msg = [0u8; 64];
+    // Forward to VFS using the caller's per-process send buffer: the
+    // SENDREC blocks the caller, and a reply delivered to the shared
+    // kernel stack would be overwritten by the next process to run.
+    let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+    msg.fill(0);
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
     msg[4..8].copy_from_slice(&0x103i32.to_le_bytes()); // VFS_OPEN = 0x103
     msg[8..12].copy_from_slice(&flags.to_le_bytes());
     msg[16..24].copy_from_slice(&path_ptr.to_le_bytes());
     msg[24..28].copy_from_slice(&path_len.to_le_bytes());
 
+    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
     let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
     if result != 0 {
         return result as i64;
@@ -164,11 +175,13 @@ unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 unsafe fn sys_close_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
 
-    let mut msg = [0u8; 64];
+    let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+    msg.fill(0);
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
     msg[4..8].copy_from_slice(&0x105i32.to_le_bytes()); // VFS_CLOSE = 0x105
     msg[8..12].copy_from_slice(&fd.to_le_bytes());
 
+    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
     let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
     if result != 0 {
         return result as i64;
@@ -303,15 +316,15 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 }
 
 /// SYS_write (3) — write to a file descriptor.
-/// fd=1 (stdout), fd=2 (stderr) go to serial output.
-/// Regular file writes go through VFS via
-/// `minix_std::fs::write`.
+/// fd=1 (stdout), fd=2 (stderr) go to serial output, unless the process
+/// VFS-owns them (dup2'd redirect), in which case the write is forwarded
+/// to VFS. Regular file writes go through VFS via `minix_std::fs::write`.
 ///
 /// # Safety
 ///
 /// Must be called from ring 0 with a valid caller process pointer.
 /// The buffer pointer in `args[1]` must be readable in the caller's address space.
-pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let fd = args[0] as i32;
     let count = args[2] as usize;
     let buf = args[1] as *const u8;
@@ -319,6 +332,35 @@ pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]
         return -14; // EFAULT
     }
     if fd == 1 || fd == 2 {
+        if !caller.is_null() && (*caller).p_fd_vfs & (1u32 << fd) != 0 {
+            // Forward the write to VFS. Build the request in the caller's
+            // per-process send buffer, NOT on the shared kernel stack: the
+            // SENDREC blocks the caller, and the next process to run reuses
+            // the same kernel stack. A reply delivered to a kernel-stack
+            // address would overwrite that process's live frame (its saved
+            // registers and return addresses) and crash the kernel.
+            let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+            msg.fill(0);
+            msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+            msg[4..8].copy_from_slice(&0x101i32.to_le_bytes()); // VFS_WRITE = 0x101
+            msg[8..12].copy_from_slice(&fd.to_le_bytes());
+            msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
+            msg[24..32].copy_from_slice(&(count as u64).to_le_bytes());
+            msg[32..40].copy_from_slice(&0u64.to_le_bytes()); // position (unused)
+
+            // mini_receive re-points p_delivermsg_vir at m_ptr (p_sendmsg)
+            // before blocking, so the reply lands in the same per-process
+            // buffer. Set it up front too so a reply arriving during the
+            // send phase (before mini_receive runs) is also delivered there
+            // instead of to a stale address.
+            (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
+            let result =
+                unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
+            if result != 0 {
+                return result as i64;
+            }
+            return i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) as i64;
+        }
         if count > 0 {
             for i in 0..count.min(256) {
                 let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
@@ -332,6 +374,24 @@ pub unsafe fn sys_write_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]
     } else {
         -9 // EBADF
     }
+}
+
+/// SYS_setfdvfs (53) — mark fd 0..2 as VFS-owned (on=1) or serial (on=0).
+/// The shell calls this after dup2'ing a redirect file onto fd 1 so the
+/// exec'd command's write(1) reaches the file instead of the serial console.
+unsafe fn sys_setfdvfs_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    let fd = args[0] as i32;
+    if !(0..=2).contains(&fd) {
+        return -9; // EBADF
+    }
+    if !caller.is_null() {
+        if args[1] != 0 {
+            (*caller).p_fd_vfs |= 1u32 << fd;
+        } else {
+            (*caller).p_fd_vfs &= !(1u32 << fd);
+        }
+    }
+    0
 }
 
 /// SYS_brk (13) — change data segment size.
@@ -368,7 +428,11 @@ unsafe fn vfs_ipc_call(
     arg2: i32,
     arg3: i32,
 ) -> i64 {
-    let mut msg = [0u8; 64];
+    // Build the request in the caller's per-process send buffer: the
+    // SENDREC blocks the caller, and a reply delivered to the shared
+    // kernel stack would be overwritten by the next process to run.
+    let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+    msg.fill(0);
     // Set destination endpoint (first 4 bytes)
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
     // Set call number (offset 4-8)
@@ -378,6 +442,7 @@ unsafe fn vfs_ipc_call(
     msg[16..20].copy_from_slice(&arg2.to_le_bytes());
     msg[20..24].copy_from_slice(&arg3.to_le_bytes());
 
+    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
     let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
     if result != 0 {
         return result as i64;
@@ -465,13 +530,15 @@ unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
     let buf_ptr = args[1];
     let count = args[2] as u32;
 
-    let mut msg = [0u8; 64];
+    let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+    msg.fill(0);
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
     msg[4..8].copy_from_slice(&0x11Di32.to_le_bytes()); // VFS_GETDENTS = 0x11D
     msg[8..12].copy_from_slice(&fd.to_le_bytes());
     msg[16..24].copy_from_slice(&buf_ptr.to_le_bytes());
     msg[24..28].copy_from_slice(&count.to_le_bytes());
 
+    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
     let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
     if result != 0 {
         return result as i64;
@@ -982,6 +1049,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(50, sys_kernel_call_handler); // NR_KERNEL_CALL
         register_basic_syscall(51, sys_ipc_sendnb_handler); // SENDNB
         register_basic_syscall(52, sys_ipc_senda_handler); // SENDA
+        register_basic_syscall(53, sys_setfdvfs_handler); // NR_SETFDVFS
     }
 }
 

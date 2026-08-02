@@ -610,7 +610,13 @@ pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usi
             let chunk = core::cmp::min(remaining, 4096 - ((va & 0xFFF) as usize));
             match crate::pagetable::walk(cr3, va) {
                 Ok(result) => {
-                    let phys_addr = crate::hal::pte_to_phys(result.pte_value) | (va & 0xFFF);
+                    // The walk result may be a 4KB leaf or a huge page
+                    // (2MB/1GB). The intra-page offset must use that page
+                    // size, not a fixed 4KB mask — a 4KB mask on a huge
+                    // page reads from the wrong physical address.
+                    let page_size = 0x1000u64 << (9 * (result.level as u64 - 1));
+                    let phys_addr =
+                        crate::hal::pte_to_phys(result.pte_value) | (va & (page_size - 1));
                     core::ptr::copy_nonoverlapping(phys_addr as *const u8, dst.add(off), chunk);
                 }
                 Err(_) => {

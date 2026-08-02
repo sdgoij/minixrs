@@ -10,8 +10,10 @@ This project implements the full MINIX 3 stack in Rust — kernel, architecture-
 ## Status
 
 Boots multi-process userspace in QEMU on x86_64, RISC-V64, and AArch64 with a serial shell.
-VFS mounts the root filesystem and MFS can read directories; grant-based data transfer
-(`virtual_copy`) is still a work in progress.
+VFS mounts the root filesystem, MFS reads and writes files, and the shell supports
+`>` redirection (create/truncate) for builtin commands **and external binaries**
+(exec'd commands write through VFS via a dup2'd fd, so `/bin/echo x > file` works).
+Pipes are not wired into the shell parser yet.
 
 See `.agents/skills/` for domain-specific documentation and
 [PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.

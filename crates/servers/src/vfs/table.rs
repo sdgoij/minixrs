@@ -69,6 +69,7 @@ static CALL_VEC: [VfsHandler; NR_VFS_CALLS] = {
     table[call_index(VFS_GCOV_FLUSH)] = do_gcov_flush;
     table[call_index(VFS_MAPDRIVER)] = do_mapdriver;
     table[call_index(VFS_COPYFD)] = do_copyfd;
+    table[call_index(VFS_DUP2)] = do_dup2;
     table[call_index(VFS_CHECKPERMS)] = do_checkperms;
     table[call_index(VFS_GETSYSINFO)] = do_getsysinfo;
     table

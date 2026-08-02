@@ -191,9 +191,6 @@ pub const NGROUPS_MAX: usize = 64;
 /// VFS call number base.
 pub const VFS_BASE: i32 = 0x100;
 
-/// Number of VFS calls.
-pub const NR_VFS_CALLS: usize = 49;
-
 pub const VFS_READ: i32 = VFS_BASE;
 pub const VFS_WRITE: i32 = VFS_BASE + 1;
 pub const VFS_LSEEK: i32 = VFS_BASE + 2;
@@ -243,8 +240,10 @@ pub const VFS_MAPDRIVER: i32 = VFS_BASE + 45;
 pub const VFS_COPYFD: i32 = VFS_BASE + 46;
 pub const VFS_CHECKPERMS: i32 = VFS_BASE + 47;
 pub const VFS_GETSYSINFO: i32 = VFS_BASE + 48;
+pub const VFS_DUP2: i32 = VFS_BASE + 49;
 
-// Errno constants
+/// Number of VFS calls.
+pub const NR_VFS_CALLS: usize = 50;
 
 /// F_DUPFD = 0 — duplicate fd as lowest available >= arg.
 pub const F_DUPFD: i32 = 0;

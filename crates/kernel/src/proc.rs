@@ -349,6 +349,11 @@ pub struct Proc {
     /// private address space.
     /// Zero means the process has no per-process page table (uses BOOT_CR3).
     pub p_cr3_saved: u64,
+
+    /// Bit n set = fd n (0..2) is owned by VFS, so read/write syscalls on it
+    /// are forwarded to VFS instead of the serial console shortcut. Set by
+    /// `set_fd_vfs` after the shell dup2's a redirect file onto fd 0..2.
+    pub p_fd_vfs: u32,
 }
 
 impl Default for Proc {
@@ -394,6 +399,7 @@ impl Default for Proc {
             p_defer_r3: 0,
             p_signal_received: 0,
             p_cr3_saved: 0,
+            p_fd_vfs: 0,
         }
     }
 }

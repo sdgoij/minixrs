@@ -455,13 +455,19 @@ pub extern "C" fn kmain_body() -> ! {
             arch_x86_64::init_tss_for_boot();
 
             // Install exception handlers: page fault, GPF, double fault.
-            // These use IST stacks for reliability.
+            // These use IST stacks for reliability. #UD/#DB get plain
+            // entries that print and halt — without them init_idt leaves
+            // the vectors at offset 0, so the CPU vectors to address 0.
             let pf_entry = arch_x86_64::asm::exception_page_fault_entry as *const () as u64;
             (*arch_x86_64::idt::IDT.get()).set_handler(14, pf_entry, 1, 0);
             let gpf_entry = arch_x86_64::asm::exception_gpf_entry as *const () as u64;
             (*arch_x86_64::idt::IDT.get()).set_handler(13, gpf_entry, 0, 0);
             let df_entry = arch_x86_64::asm::exception_double_fault_entry as *const () as u64;
             (*arch_x86_64::idt::IDT.get()).set_handler(8, df_entry, 2, 0);
+            let ud_entry = arch_x86_64::asm::exception_ud_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(6, ud_entry, 0, 0);
+            let db_entry = arch_x86_64::asm::exception_db_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(1, db_entry, 0, 0);
         }
 
         if first_proc.is_null() {

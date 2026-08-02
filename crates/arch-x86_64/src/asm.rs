@@ -655,6 +655,51 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
     );
 }
 
+/// #UD (invalid opcode) handler — prints 'U' and halts. Without an entry,
+/// init_idt leaves vector 6 at offset 0, so an unhandled #UD vectors to
+/// address 0 (the IVT) and executes garbage.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
+pub unsafe extern "C" fn exception_ud_entry() {
+    core::arch::naked_asm!(
+        "mov    dx, 0x3F8",
+        "mov    al, 0x55", // 'U'
+        "out    dx, al",
+        "mov    al, 0x0D",
+        "out    dx, al",
+        "mov    al, 0x0A",
+        "out    dx, al",
+        "cli",
+        "hlt",
+    );
+}
+
+/// #DB (debug exception) handler — prints 'B' and halts. Without an entry,
+/// init_idt leaves vector 1 at offset 0 (see #UD comment).
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "none")]
+/// # Safety
+///
+/// Must be called only during early boot on the BSP, before SMP is initialized.
+pub unsafe extern "C" fn exception_db_entry() {
+    core::arch::naked_asm!(
+        "mov    dx, 0x3F8",
+        "mov    al, 0x42", // 'B'
+        "out    dx, al",
+        "mov    al, 0x0D",
+        "out    dx, al",
+        "mov    al, 0x0A",
+        "out    dx, al",
+        "cli",
+        "hlt",
+    );
+}
+
 /// General protection fault handler — prints 'G' and diagnostic info, then halts.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]

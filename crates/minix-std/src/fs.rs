@@ -48,6 +48,7 @@ pub const VFS_SELECT: u32 = VFS_BASE + 30;
 pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
+pub const VFS_DUP2: u32 = VFS_BASE + 49;
 
 // Open flags  (from `minix/include/fcntl.h`)
 
@@ -304,6 +305,25 @@ pub fn close(fd: i32) -> Result<(), MinixErr> {
         msg_set_i32(&mut msg, OFF_CLOSE_FD, fd);
         let _ = vfs_call(&mut msg)?;
         Ok(())
+    }
+}
+
+/// Duplicate `fd` onto `newfd` (POSIX `dup2`): closes `newfd` first if it is
+/// open. Returns `newfd` on success.
+pub fn dup2(fd: i32, newfd: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (fd, newfd, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_DUP2 as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        msg_set_i32(&mut msg, 12, newfd);
+        let mtype = vfs_call(&mut msg)?;
+        Ok(mtype)
     }
 }
 

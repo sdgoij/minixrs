@@ -40,6 +40,10 @@ const SELF: i32 = 31742;
 /// SYS_VIRCOPY kernel call number.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 const SYS_VIRCOPY: i32 = 15;
+/// O_EXCL open flag (from `minix/include/fcntl.h`).
+const O_EXCL: u32 = 0o200;
+/// O_TRUNC open flag (from `minix/include/fcntl.h`).
+const O_TRUNC: u32 = 0o1000;
 /// CP_FLAG_TRY: direct copy without VM fallback.
 const CP_FLAG_TRY: i32 = 0x01;
 /// SYS_VIRCOPY message field offsets (matches kernel/src/system.rs)
@@ -223,7 +227,7 @@ pub fn do_creat() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let _open_flags = r_u32(&glob.fs_m_in, 24); // O_TRUNC/O_EXCL handling deferred until FS rw layer
+    let open_flags = r_u32(&glob.fs_m_in, 24);
     let create_mode = r_u32(&glob.fs_m_in, 28);
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
@@ -270,18 +274,32 @@ pub fn do_creat() -> i32 {
         )
     };
     unsafe { mount::put_vnode(dirp) };
-    if r != OK {
+
+    // C's `common_open`: a successful create means the file is new; EEXIST
+    // from the FS means it already existed (an error only with O_EXCL). FS
+    // servers report positive errno codes; VFS replies use negative errnos.
+    let created;
+    if r == OK {
+        created = true;
+    } else if r == -EEXIST {
+        if open_flags & O_EXCL != 0 {
+            return EEXIST;
+        }
+        created = false;
+    } else if r > 0 {
+        return -r;
+    } else {
         return r;
     }
 
-    // Get a free file descriptor before resolving the new vnode.
+    // Get a free file descriptor before resolving the vnode.
     let mut fd = 0i32;
     let r2 = unsafe { filedes::get_fd(fp, 0, &mut fd) };
     if r2 != OK {
         return r2;
     }
 
-    // Resolve the newly created file to obtain a vnode.
+    // Resolve the file (newly created, or pre-existing) to obtain a vnode.
     let mut resolve2 = Lookup::default();
     resolve2.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve2.l_path_len = actual_len;
@@ -289,6 +307,34 @@ pub fn do_creat() -> i32 {
     if vp.is_null() {
         fp.fp_filp[fd as usize] = -1;
         return ENOENT;
+    }
+
+    // For an already-existing file, run the open-existing checks: verify
+    // write permission, and truncate regular files when O_TRUNC is set.
+    if !created {
+        let r =
+            crate::vfs::protect::forbidden(fp, unsafe { &*vp }, crate::vfs::protect::W_BIT, false);
+        if r != OK {
+            fp.fp_filp[fd as usize] = -1;
+            unsafe { mount::put_vnode(vp) };
+            return r;
+        }
+        let mode = unsafe { (*vp).v_mode };
+        if mode & S_IFMT == S_IFREG && open_flags & O_TRUNC != 0 {
+            let fs_e = unsafe { (*vp).v_fs_e };
+            let inode_nr = unsafe { (*vp).v_inode_nr };
+            let r = unsafe { crate::vfs::request::req_ftrunc(fs_e, inode_nr, 0, 0) };
+            if r != OK {
+                fp.fp_filp[fd as usize] = -1;
+                unsafe { mount::put_vnode(vp) };
+                return if r > 0 { -r } else { r };
+            }
+            unsafe { (*vp).v_size = 0 };
+        } else if mode & S_IFMT == S_IFDIR {
+            fp.fp_filp[fd as usize] = -1;
+            unsafe { mount::put_vnode(vp) };
+            return EISDIR;
+        }
     }
 
     // Allocate a filp entry and wire up fd → filp → vnode.
@@ -303,7 +349,7 @@ pub fn do_creat() -> i32 {
         let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
         (*filp_arr.add(filp_idx as usize)).filp_count = 1;
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
-        (*filp_arr.add(filp_idx as usize)).filp_flags = _open_flags;
+        (*filp_arr.add(filp_idx as usize)).filp_flags = open_flags;
         (*filp_arr.add(filp_idx as usize)).filp_mode = 2; // W_BIT
     }
     fp.fp_filp[fd as usize] = filp_idx;
@@ -868,6 +914,49 @@ pub fn do_ftruncate() -> i32 {
         }
         crate::vfs::request::req_ftrunc((*vp).v_fs_e, (*vp).v_inode_nr, 0, length)
     }
+}
+
+/// Perform the `dup2(fd, newfd)` system call — make `newfd` a copy of `fd`,
+/// closing `newfd` first if it is open.
+///
+/// C libc `dup2` is `close(fd2)` + `fcntl(F_DUPFD, fd2)`; that only yields
+/// `fd2` when fds below it are occupied, which is not the case here (0..2
+/// have no VFS mapping by default), so the exact-fd form is handled directly.
+pub fn do_dup2() -> i32 {
+    let glob = unsafe { &*vfs_global() };
+    let fp = match unsafe { glob.fp.as_mut() } {
+        Some(fp) => fp,
+        None => return EINVAL,
+    };
+    let fd = r_i32(&glob.fs_m_in, FD_OFF);
+    let newfd = r_i32(&glob.fs_m_in, COPYFD_NEWFD_OFF);
+
+    if fd < 0 || (fd as usize) >= OPEN_MAX || fp.fp_filp[fd as usize] < 0 {
+        return EBADF;
+    }
+    if newfd < 0 || (newfd as usize) >= OPEN_MAX {
+        return EBADF;
+    }
+    if fd == newfd {
+        return newfd;
+    }
+    // Close newfd if it is already open (POSIX dup2 semantics).
+    if fp.fp_filp[newfd as usize] >= 0 {
+        let r = close_fd(fp, newfd);
+        if r != OK {
+            return r;
+        }
+    }
+    // Copy the fd table entry and bump the shared filp's refcount.
+    let filp_idx = fp.fp_filp[fd as usize];
+    fp.fp_filp[newfd as usize] = filp_idx;
+    fp.fp_cloexec &= !(1u64 << newfd); // dup2 clears close-on-exec on newfd
+    unsafe {
+        let glob = vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+        (*filp_arr.add(filp_idx as usize)).filp_count += 1;
+    }
+    newfd
 }
 
 /// Perform the `sync()` system call â€” flush all filesystem buffers.

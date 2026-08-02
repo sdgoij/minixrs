@@ -8,8 +8,26 @@
 
 #![no_std]
 
+use core::sync::atomic::{AtomicI32, Ordering};
+
+/// When >= 0, all `write_out` calls are routed through this fd (via VFS)
+/// instead of the kernel's serial shortcut on fd 1. Set by the shell's
+/// redirect child after `fork`, so it is process-private.
+static REDIRECT_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Route subsequent `write_out` calls to `fd` (>= 0) or back to serial (-1).
+#[cfg(target_os = "none")]
+pub fn set_redirect_fd(fd: i32) {
+    REDIRECT_FD.store(fd, Ordering::Relaxed);
+}
+
 /// Write a byte slice to file descriptor 1 (stdout).
 pub fn write_out(s: &[u8]) {
+    let fd = REDIRECT_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        write_fd(fd, s);
+        return;
+    }
     #[cfg(any(
         target_arch = "x86_64",
         target_arch = "riscv64",

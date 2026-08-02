@@ -7,7 +7,10 @@ use crate::write_out;
 #[cfg(target_os = "none")]
 use crate::write_err;
 #[cfg(target_os = "none")]
-use crate::{cat, chmod, chown, cp, echo, errstr, fsck, ln, ls, mkdir, mknod, reboot, rm, sync};
+use crate::{
+    cat, chmod, chown, cp, echo, errstr, fsck, ln, ls, mkdir, mknod, reboot, rm, set_redirect_fd,
+    sync,
+};
 
 /// Sentinel for `exit` — must not overlap any valid exit status.
 #[allow(dead_code)]
@@ -216,13 +219,37 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
             }
             if pid == 0 {
                 // Child: open redirect file, run command, exit.
-                // Use fd >= 3 to avoid the kernel's serial shortcut
-                // for fd 1/2.
+                // The fd avoids the kernel's serial shortcut for fd 1/2,
+                // so writes go through VFS to the filesystem.
                 let redirect_fd = setup_redirect(outfile);
+                set_redirect_fd(redirect_fd);
                 let status = if is_builtin {
-                    run_builtin_out(cmd, args, redirect_fd)
+                    run_builtin(cmd, args)
                 } else {
-                    run_external(cmd, args)
+                    // External commands: make fd 1 the redirect file at the
+                    // VFS level, mark fd 1 VFS-owned, then exec in place.
+                    // The redirect child is already a throwaway fork, so no
+                    // second fork is needed (and the exec'd image inherits
+                    // both the fd table and the kernel flag).
+                    if let Err(_) = minix_std::fs::dup2(redirect_fd, 1) {
+                        write_err(b"sh: dup2 failed\r\n");
+                        minix_rt::exit(1);
+                    }
+                    unsafe { minix_rt::set_fd_vfs(1, 1) };
+                    let mut cmd_path = [0u8; 256];
+                    let path_len = build_path(cmd.as_bytes(), &mut cmd_path);
+                    if path_len == 0 {
+                        write_err(b"sh: '");
+                        write_err(cmd.as_bytes());
+                        write_err(b"' not found\r\n");
+                        minix_rt::exit(1);
+                    }
+                    try_exec(args, &mut cmd_path);
+                    // If we get here, exec failed.
+                    write_err(b"sh: '");
+                    write_err(cmd.as_bytes());
+                    write_err(b"' not found\r\n");
+                    minix_rt::exit(1);
                 };
                 minix_rt::exit(status);
             }
@@ -301,16 +328,6 @@ fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
             0
         }
         _ => 127,
-    }
-}
-
-/// Like `run_builtin`, but routes stdout through `redirect_fd`
-/// (via VFS) so file redirects work correctly.
-#[cfg(target_os = "none")]
-fn run_builtin_out(cmd: &str, args: &[&str], redirect_fd: i32) -> i32 {
-    match cmd {
-        "echo" => crate::echo_fd(args, redirect_fd),
-        _ => run_builtin(cmd, args),
     }
 }
 

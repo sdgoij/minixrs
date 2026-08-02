@@ -89,6 +89,8 @@ const NR_MKNOD: u64 = 56;
 const NR_GETDENTS: u64 = 57;
 /// Kernel call syscall number — invoke a kernel call on the SYSTEM task.
 pub const NR_KERNEL_CALL: u64 = 50;
+/// Mark fd 0..2 as VFS-owned (1) or serial (0).
+pub const NR_SETFDVFS: u64 = 53;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
@@ -584,6 +586,15 @@ pub fn read(fd: i32, buf: &mut [u8]) -> i64 {
             buf.len() as u64,
         )
     }
+}
+
+/// Mark fd 0..2 as VFS-owned (on=1) or serial console (on=0).
+///
+/// # Safety
+///
+/// `fd` must be in 0..=2; other values are rejected with `EBADF`.
+pub unsafe fn set_fd_vfs(fd: i32, on: i32) -> i64 {
+    unsafe { syscall2(NR_SETFDVFS, fd as u64, on as u64) }
 }
 
 /// Open a file.
