@@ -60,7 +60,7 @@ run-riscv64: build-riscv64
     qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
 
 run-aarch64: build-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -display none -serial stdio -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
 
 # ---------- debug (QEMU gdb stub on :1234) ----------
 
