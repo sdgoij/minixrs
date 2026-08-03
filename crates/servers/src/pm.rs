@@ -13,6 +13,24 @@ use kernel::r#priv::MinixTimer;
 /// Number of signals on x86_64.
 pub const _NSIG: usize = 128;
 
+// Signal numbers (MINIX 3.3.0 <minix/signal.h>).
+pub const SIGHUP: i32 = 1;
+pub const SIGINT: i32 = 2;
+pub const SIGQUIT: i32 = 3;
+pub const SIGILL: i32 = 4;
+pub const SIGTRAP: i32 = 5;
+pub const SIGABRT: i32 = 6;
+pub const SIGEMT: i32 = 7;
+pub const SIGFPE: i32 = 8;
+pub const SIGKILL: i32 = 9;
+pub const SIGBUS: i32 = 10;
+pub const SIGSEGV: i32 = 11;
+pub const SIGCHLD: i32 = 18;
+pub const SIGSTOP: i32 = 19;
+pub const SIGCONT: i32 = 25;
+pub const SIGWINCH: i32 = 28;
+pub const SIGINFO: i32 = 29;
+
 /// Magic number to verify an `MProc` is valid.
 pub const MP_MAGIC: u32 = 0xC0FFEE;
 
@@ -124,6 +142,26 @@ impl Default for SigSet {
         Self::new()
     }
 }
+
+/// Build a signal set from a list of signal numbers.
+const fn sigset_of(sigs: &[i32]) -> SigSet {
+    let mut bits = 0u128;
+    let mut i = 0;
+    while i < sigs.len() {
+        bits |= 1u128 << ((sigs[i] as u32) - 1);
+        i += 1;
+    }
+    SigSet { bits: [bits] }
+}
+
+/// Signals whose default disposition is to ignore the signal
+/// (C: `ign_sigs[]` in pm/main.c: SIGCHLD, SIGWINCH, SIGCONT, SIGINFO).
+static IGN_SSET: SigSet = sigset_of(&[SIGCHLD, SIGWINCH, SIGCONT, SIGINFO]);
+
+/// Signals that may not be ignored or blocked when sent by the kernel
+/// (C: `noign_sigs[]` in pm/main.c: SIGILL, SIGTRAP, SIGEMT, SIGFPE,
+/// SIGBUS, SIGSEGV).
+static NOIGN_SSET: SigSet = sigset_of(&[SIGILL, SIGTRAP, SIGEMT, SIGFPE, SIGBUS, SIGSEGV]);
 
 // TimeVal and Itimerval — POSIX interval timer types
 
@@ -655,6 +693,32 @@ pub unsafe fn exit_proc(slot: usize, exit_status: i32, dump_core: bool) {
         let _ = unsafe { check_sig(-rmp.mp_procgrp, 1, false) };
     }
 
+    // Tell VFS the process exited so it closes the process's open file
+    // descriptors (pipe ends, file locks) before the process is gone.
+    // Without this, pipe writer counts never drop and readers spin on
+    // EAGAIN instead of seeing EOF. Matching C: exit_proc() sends
+    // VFS_PM_EXIT via tell_vfs() (asynsend3). Called from every exit
+    // path (direct PM_EXIT, kernel exit notification, signal death) —
+    // handle_exit only sees direct PM_EXIT messages, while normal exits
+    // arrive via the kernel's SYS_GETKSIG notification loop.
+    //
+    // Async, fire-and-forget: a blocking SENDREC here can return ELOCKED
+    // when the deadlock detector sees a PM→VFS→…→PM chain, silently
+    // dropping the notification and leaving VFS's fds (pipe ends) open
+    // forever.
+    let endpoint = rmp.mp_endpoint;
+    let mut vfs_msg = [0u8; 64];
+    vfs_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+        .copy_from_slice(&(arch_common::com::VFS_PM_EXIT as i32).to_le_bytes());
+    vfs_msg[VFS_M7_I1_OFF..VFS_M7_I1_OFF + 4].copy_from_slice(&endpoint.to_le_bytes());
+    let _ = unsafe {
+        minix_rt::asynsend3(
+            arch_common::com::VFS_PROC_NR,
+            vfs_msg.as_ptr(),
+            arch_common::ipc::AMF_NOREPLY,
+        )
+    };
+
     let _dump = dump_core;
     unsafe { zombify(slot) };
 }
@@ -694,13 +758,15 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
         clear_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
         let _ = minix_rt::kernel_call(2, &mut clear_msg);
 
-        // VM_EXIT — notify VM to free address space.
+        // VM_EXIT — notify VM to free address space. Matching C
+        // exit_restart()'s vm_exit() (_taskcall, synchronous) so the
+        // notification is never dropped when VM is busy.
         let mut vm_exit_msg = [0u8; 64];
         vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
         vm_exit_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
         let _ = unsafe {
             minix_rt::syscall2(
-                minix_rt::SENDNB_CALL,
+                minix_rt::SENDREC_CALL,
                 arch_common::com::VM_PROC_NR as u64,
                 vm_exit_msg.as_mut_ptr() as u64,
             )
@@ -779,7 +845,7 @@ pub unsafe fn zombify(slot: usize) {
 /// # Safety
 ///
 /// `child_slot` must be < `NR_PROCS`. Caller must ensure exclusive access.
-pub unsafe fn check_parent(child_slot: usize, try_cleanup: bool) {
+pub unsafe fn check_parent(child_slot: usize, _try_cleanup: bool) {
     if child_slot >= NR_PROCS {
         return;
     }
@@ -805,12 +871,13 @@ pub unsafe fn check_parent(child_slot: usize, try_cleanup: bool) {
         return;
     }
 
-    if try_cleanup && parent_rmp.mp_flags & IN_USE != 0 {
-        unsafe { cleanup(child_slot) };
-    } else {
-        // Send SIGCHLD (signal 18) to parent.
-        unsafe { sig_proc(parent as usize, 18, false, false) };
-    }
+    // Parent is not waiting: leave the child as a zombie and signal the
+    // parent. Matching C check_parent(): the child is only cleaned up when
+    // the parent reaps it via waitpid (do_waitpid's free_proc + SYS_CLEAR).
+    // Cleaning up here would destroy the zombie before the parent's waitpid
+    // can find it, blocking the parent forever (the shell hangs on
+    // `echo hi | cat` because echo exited before the shell's waitpid).
+    unsafe { sig_proc(parent as usize, SIGCHLD, false, false) };
 }
 
 /// Tell a waiting parent that its child has exited.
@@ -1001,15 +1068,21 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
             let mut clear_msg = [0u8; 64];
             clear_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
             let _ = minix_rt::kernel_call(2, &mut clear_msg);
-            // Notify VM to free its Vmproc entry. Matching C: vm_notify_sig().
+            // Notify VM to free its Vmproc entry. Matching C: exit_restart()
+            // calls vm_exit() (libsys/vm_exit.c) which uses _taskcall — a
+            // synchronous SENDREC, so the notification is never dropped. A
+            // SENDNB here fails silently (ENOTREADY) whenever VM is busy
+            // mid-request, leaking the child's Vmproc; the next fork that
+            // reuses this mproc slot then fails vmproc_alloc and the shell
+            // hangs.
             let mut vm_exit_msg = [0u8; 64];
             vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
             vm_exit_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
             let _ = unsafe {
                 minix_rt::syscall2(
-                    minix_rt::SENDNB_CALL,
+                    minix_rt::SENDREC_CALL,
                     arch_common::com::VM_PROC_NR as u64,
-                    vm_exit_msg.as_ptr() as u64,
+                    vm_exit_msg.as_mut_ptr() as u64,
                 )
             };
             return Ok((pid, status));
@@ -1035,6 +1108,12 @@ pub unsafe fn check_sig(proc_id: i32, signo: i32, ksig: bool) -> Result<(), i32>
         // Safety: `i < NR_PROCS` holds by loop bound.
         let rmp = unsafe { &*base.add(i) };
         if rmp.mp_flags & IN_USE == 0 {
+            continue;
+        }
+        // Do not signal processes that are already exiting — re-entering
+        // exit_proc on the same slot corrupts the table. Matching C
+        // check_sig(): `if (signo == 0 || (rmp->mp_flags & EXITING)) continue;`.
+        if rmp.mp_flags & EXITING != 0 {
             continue;
         }
         if rmp.mp_pid != proc_id && proc_id != -1 {
@@ -1069,40 +1148,80 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
         return;
     }
 
-    if trace {
+    // Matching C sig_proc(): a traced process gets the signal diverted to
+    // its tracer first, unless the signal is SIGKILL.
+    if trace && rmp.mp_tracer != NO_TRACER && signo != SIGKILL {
         rmp.mp_sigtrace.sigaddset(signo);
         rmp.mp_flags |= TRACE_STOPPED;
         return;
     }
 
-    // Check if signal is ignored.
-    if rmp.mp_ignore.sigismember(signo) {
+    // System processes: PM never takes signals (C: "Always skip signals
+    // for PM"). Other system processes are routed through the kernel in C
+    // (sys_kill / SIGS_SIGNAL_RECEIVED), which this port does not implement;
+    // skip them rather than terminate PM or a driver via the user-process
+    // path.
+    if rmp.mp_flags & PRIV_PROC != 0 {
         return;
     }
 
-    // Add to pending set.
-    if ksig {
-        rmp.mp_ksigpending.sigaddset(signo);
-    } else {
+    // Kernel-sent signals from noign_sset (SIGILL, SIGSEGV, ...) may not be
+    // ignored or blocked even if the process requested it.
+    let badignore = ksig
+        && NOIGN_SSET.sigismember(signo)
+        && (rmp.mp_ignore.sigismember(signo) || rmp.mp_sigmask.sigismember(signo));
+
+    // Explicitly ignored.
+    if !badignore && rmp.mp_ignore.sigismember(signo) {
+        return;
+    }
+
+    // Blocked: pend until unmasked; check_pending() delivers on unblock.
+    if !badignore && rmp.mp_sigmask.sigismember(signo) {
         rmp.mp_sigpending.sigaddset(signo);
-    }
-
-    // SIGKILL and SIGSTOP cannot be caught or ignored.
-    if signo == 9 {
-        unsafe { sig_proc_exit(slot, signo) };
+        if ksig {
+            rmp.mp_ksigpending.sigaddset(signo);
+        }
         return;
     }
-    if signo == 19 {
+
+    // Stopped for a debugger: pend (except SIGKILL) until the debugger
+    // releases the process.
+    if rmp.mp_flags & TRACE_STOPPED != 0 && signo != SIGKILL {
+        rmp.mp_sigpending.sigaddset(signo);
+        if ksig {
+            rmp.mp_ksigpending.sigaddset(signo);
+        }
+        return;
+    }
+
+    // SIGSTOP stops the process.
+    if signo == SIGSTOP {
         unsafe { stop_proc(slot) };
         return;
     }
 
-    // Check pending after adding a signal — it may be immediately deliverable.
-    if has_pending(rmp) {
-        let base = MPROC.as_ptr();
-        let rmp2 = unsafe { &mut *base.add(slot) };
-        unsafe { check_pending(rmp2) };
+    // Caught: no sigframe delivery in this port yet, so leave the signal
+    // pending rather than terminating the process.
+    if !badignore && rmp.mp_catch.sigismember(signo) {
+        rmp.mp_sigpending.sigaddset(signo);
+        if ksig {
+            rmp.mp_ksigpending.sigaddset(signo);
+        }
+        return;
     }
+
+    // Default disposition is to ignore (SIGCHLD, SIGWINCH, SIGCONT, SIGINFO).
+    // This is what makes check_parent() safe: a parent that is not waiting
+    // gets SIGCHLD, which must be dropped here — pending it would make
+    // check_pending() deliver it again, re-pend, and recurse forever.
+    if !badignore && IGN_SSET.sigismember(signo) {
+        return;
+    }
+
+    // Everything else terminates the process (SIGKILL reaches this point:
+    // it can never be ignored, blocked, or caught).
+    unsafe { sig_proc_exit(slot, signo) };
 }
 
 /// Handle do_kill request.
@@ -1205,8 +1324,10 @@ pub unsafe fn stop_proc(slot: usize) {
 /// Deliver pending signals to a process.
 ///
 /// Iterates `mp_sigpending`; for each signal not masked by `mp_sigmask`,
-/// delivers via `sig_proc`. After a delivery that doesn't trigger a VFS_CALL,
-/// if more pending signals remain, calls itself recursively.
+/// deletes it from the pending sets and delivers via `sig_proc`. If a
+/// delivery sets VFS_CALL, delivery pauses until the VFS reply triggers
+/// restart_sigs. Matching C `check_pending()` in `signal.c` (flat loop,
+/// no recursion).
 ///
 /// # Safety
 ///
@@ -1220,7 +1341,10 @@ pub unsafe fn check_pending(rmp: &mut MProc) {
         if rmp.mp_sigmask.sigismember(signo) {
             continue;
         }
+        // Matching C: preserve the ksig flag and delete from both sets.
+        let ksig = rmp.mp_ksigpending.sigismember(signo);
         rmp.mp_sigpending.sigdelset(signo);
+        rmp.mp_ksigpending.sigdelset(signo);
         // Deliver the signal. The slot is derived from `rmp`'s position
         // in the table — find it by scanning.
         let slot = {
@@ -1237,19 +1361,15 @@ pub unsafe fn check_pending(rmp: &mut MProc) {
         if slot >= NR_PROCS {
             return;
         }
-        unsafe { sig_proc(slot, signo, false, false) };
+        unsafe { sig_proc(slot, signo, false, ksig) };
         // If the process now has VFS_CALL set, stop — the VFS reply will
         // call restart_sigs to continue delivery.
         if rmp.mp_flags & VFS_CALL != 0 {
             return;
         }
-        // If more pending signals remain, recurse to deliver them.
-        if has_pending(rmp) {
-            let base = MPROC.as_ptr();
-            let rmp2 = unsafe { &mut *base.add(slot) };
-            unsafe { check_pending(rmp2) };
-            return;
-        }
+        // No recursion: sig_proc() may re-pend a blocked/traced signal,
+        // and the loop re-checks it on a later iteration. Matching C
+        // check_pending(), which is a flat loop.
     }
 }
 
@@ -1911,7 +2031,8 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     // In C MINIX, exit_proc calls vm_exit() which decrements PhysBlock
     // refcounts so shared COW pages survive. If we skip this and go
     // straight to SYS_CLEAR, release_address_space frees shared pages
-    // that are still in use by the parent.
+    // that are still in use by the parent. Matching C's vm_exit()
+    // (_taskcall, synchronous) so the notification is never dropped.
     let child_ep = unsafe { (*MPROC.as_ptr().add(caller_slot)).mp_endpoint };
     let mut vm_exit_msg = [0u8; 64];
     vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
@@ -1919,7 +2040,7 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     vm_exit_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
     let _ = unsafe {
         minix_rt::syscall2(
-            minix_rt::SENDNB_CALL,
+            minix_rt::SENDREC_CALL,
             arch_common::com::VM_PROC_NR as u64,
             vm_exit_msg.as_mut_ptr() as u64,
         )
@@ -2085,9 +2206,18 @@ pub unsafe fn handle_fork(caller_slot: usize, _msg: &mut Message) -> i32 {
                     vm_msg.as_mut_ptr() as u64,
                 )
             };
-            if vm_reply < 0 {
+            // The SENDREC return is the source endpoint (always >= 0); the
+            // reply status is m_type at bytes 4-8. Matching C: vm_fork()
+            // returns the _taskcall reply type and do_fork() does
+            // `if ((s = vm_fork(...)) != OK) return s;`. A failed VM fork
+            // leaves m1i1 (= VMF_ENDPOINT, the parent endpoint) untouched,
+            // so using it without checking m_type would record a garbage
+            // child endpoint (observed: 10 = INIT's endpoint) and hang the
+            // parent's waitpid forever.
+            let vm_type = i32::from_le_bytes(vm_msg[4..8].try_into().unwrap_or([0; 4]));
+            if vm_reply < 0 || vm_type != 0 {
                 unsafe { free_proc(child_slot) };
-                return -1;
+                return if vm_type != 0 { vm_type } else { -1 };
             }
             let child_endpoint = i32::from_le_bytes(vm_msg[8..12].try_into().unwrap_or([0; 4]));
             unsafe {

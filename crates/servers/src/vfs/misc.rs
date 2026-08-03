@@ -44,10 +44,11 @@ fn fproc_by_endpoint(endpt: i32) -> Option<*mut Fproc> {
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (free_proc)
 fn free_proc(rfp: &mut Fproc, flags: u32) {
-    // Close all open file descriptors.
+    // Close all open file descriptors. Use the full close_fd so pipe
+    // reader/writer counts and file locks are released (matching C).
     for i in 0..OPEN_MAX {
         if rfp.fp_filp[i] >= 0 {
-            let _ = close_fd_from_table(rfp, i as i32);
+            let _ = crate::vfs::stadir::close_fd(rfp, i as i32);
         }
     }
 
@@ -103,33 +104,6 @@ fn free_proc(rfp: &mut Fproc, flags: u32) {
     rfp.fp_flags = FP_NOFLAGS;
 }
 
-/// Close a file descriptor by index, decrementing filp refcount.
-fn close_fd_from_table(rfp: &mut Fproc, fd_nr: i32) -> i32 {
-    if fd_nr < 0 || fd_nr as usize >= OPEN_MAX {
-        return EBADF;
-    }
-    let idx = rfp.fp_filp[fd_nr as usize];
-    if idx < 0 {
-        return EBADF;
-    }
-
-    unsafe {
-        let glob = vfs_global();
-        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-        if (idx as usize) < NR_FILPS {
-            let f = &mut *filp_arr.add(idx as usize);
-            f.filp_count -= 1;
-            if f.filp_count <= 0 {
-                f.filp_mode = FILP_CLOSED;
-                f.filp_count = 0;
-            }
-        }
-    }
-
-    rfp.fp_filp[fd_nr as usize] = -1;
-    0
-}
-
 // Public API
 
 /// Clean up after a process exits.
@@ -143,6 +117,25 @@ pub fn pm_exit() {
         return;
     }
     unsafe {
+        free_proc(&mut *rfp, FP_EXITING);
+    }
+}
+
+/// Clean up after a process exits, identified by endpoint.
+///
+/// VFS_PM_EXIT messages arrive from PM, so `glob.fp` points at PM's own
+/// fproc slot rather than the exiting process. Look the exiting process's
+/// fproc up by endpoint instead. Matching C: VFS's `do_exit()` operates on
+/// the fproc of the exiting process, not the message sender.
+pub fn pm_exit_endpoint(proc_e: i32) {
+    let rfp = match fproc_by_endpoint(proc_e) {
+        Some(p) => p,
+        None => return,
+    };
+    unsafe {
+        if (*rfp).fp_endpoint != proc_e {
+            return;
+        }
         free_proc(&mut *rfp, FP_EXITING);
     }
 }
@@ -177,7 +170,9 @@ pub fn pm_fork(pproc: i32, cproc: i32, cpid: i32) -> i32 {
         child.fp_pid = cpid;
         child.fp_flags = FP_NOFLAGS;
 
-        // Increment filp refcounts for inherited fds.
+        // Increment filp refcounts for inherited fds. Pipe reader/writer
+        // counts are derived from the filp table (pipe_refcounts), so the
+        // pipe itself needs no adjustment here.
         for i in 0..OPEN_MAX {
             let fd_idx = child.fp_filp[i];
             if fd_idx >= 0 && (fd_idx as usize) < NR_FILPS {
@@ -203,7 +198,7 @@ pub fn pm_exec() {
         let rfp = &mut *rfp;
         for i in 0..OPEN_MAX {
             if rfp.fp_filp[i] >= 0 && (rfp.fp_cloexec & (1u64 << i)) != 0 {
-                let _ = close_fd_from_table(rfp, i as i32);
+                let _ = crate::vfs::stadir::close_fd(rfp, i as i32);
             }
         }
         rfp.fp_cloexec = 0;
@@ -442,15 +437,18 @@ mod tests {
     #[test]
     fn test_close_fd_invalid_fd() {
         let mut fp = Fproc::default();
-        assert_eq!(close_fd_from_table(&mut fp, -1), EBADF);
-        assert_eq!(close_fd_from_table(&mut fp, OPEN_MAX as i32), EBADF);
+        assert_eq!(crate::vfs::stadir::close_fd(&mut fp, -1), EBADF);
+        assert_eq!(
+            crate::vfs::stadir::close_fd(&mut fp, OPEN_MAX as i32),
+            EBADF
+        );
     }
 
     #[test]
     fn test_close_fd_not_open() {
         let mut fp = Fproc::default();
         fp.fp_filp[0] = -1;
-        assert_eq!(close_fd_from_table(&mut fp, 0), EBADF);
+        assert_eq!(crate::vfs::stadir::close_fd(&mut fp, 0), EBADF);
     }
 
     #[test]
@@ -591,6 +589,62 @@ mod tests {
             assert_eq!((*fp_slot(1)).fp_flags, FP_NOFLAGS);
             assert_eq!((*filp_slot(1)).filp_count, 0);
             assert_eq!((*filp_slot(2)).filp_count, 0);
+        }
+    }
+
+    #[test]
+    fn test_pm_exit_endpoint_closes_target_fproc() {
+        unsafe {
+            reset_globals();
+        }
+        unsafe {
+            let glob = vfs_global();
+            // Exiting process at slot 21 (endpoint 21) with an open write end.
+            (*fp_slot(21)).fp_endpoint = 21;
+            (*fp_slot(21)).fp_pid = 210;
+            (*fp_slot(21)).fp_filp[1] = 1; // fd 1 -> filp 1
+            (*filp_slot(1)).filp_count = 1;
+            (*filp_slot(1)).filp_mode = 2; // W_BIT (pipe write end)
+            (*filp_slot(1)).filp_pipe_ino = crate::vfs::pipe::pipe_index_for_filp(0);
+            // glob.fp points at a DIFFERENT slot (PM's own slot for
+            // PM-sourced messages), which must NOT be touched.
+            (*glob).fp = fp_slot(0);
+        }
+
+        pm_exit_endpoint(21);
+
+        unsafe {
+            assert_eq!((*fp_slot(21)).fp_filp[1], -1);
+            assert_eq!((*fp_slot(21)).fp_endpoint, -1);
+            assert_eq!((*fp_slot(21)).fp_pid, PID_FREE);
+            assert_eq!((*fp_slot(21)).fp_flags, FP_NOFLAGS);
+            assert_eq!((*filp_slot(1)).filp_count, 0);
+            // Unrelated current fp untouched.
+            assert_eq!((*fp_slot(0)).fp_endpoint, -1);
+        }
+    }
+
+    #[test]
+    fn test_pm_exit_endpoint_unknown_is_noop() {
+        unsafe {
+            reset_globals();
+        }
+        unsafe {
+            let glob = vfs_global();
+            (*fp_slot(5)).fp_endpoint = 5; // live process
+            (*fp_slot(5)).fp_pid = 50;
+            (*fp_slot(5)).fp_filp[0] = 1;
+            (*filp_slot(1)).filp_count = 1;
+            (*glob).fp = fp_slot(5);
+        }
+
+        pm_exit_endpoint(99); // no such process
+
+        unsafe {
+            assert_eq!((*fp_slot(5)).fp_endpoint, 5);
+            assert_eq!((*fp_slot(5)).fp_pid, 50);
+            assert_eq!((*fp_slot(5)).fp_filp[0], 1);
+            assert_eq!((*filp_slot(1)).filp_count, 1);
         }
     }
 

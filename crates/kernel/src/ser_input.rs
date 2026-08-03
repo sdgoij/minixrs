@@ -69,16 +69,24 @@ pub fn try_read() -> Option<u8> {
 }
 
 /// Block until a byte is available, then return it.
-/// First tries the interrupt-driven buffer; if empty, polls the UART
-/// hardware directly via HAL.
+///
+/// Reads exclusively from the ring buffer. While waiting, the UART FIFO is
+/// drained into the ring: the syscall runs with interrupts disabled, so the
+/// serial ISR cannot fire and this drain is the sole UART consumer at that
+/// moment (the ISR drains when the process is in user mode with interrupts
+/// enabled). Draining here (rather than returning a single polled byte
+/// directly) keeps burst input from overrunning the UART's small FIFO while
+/// the process waits.
 #[inline]
 pub fn read_blocking() -> u8 {
     loop {
         if let Some(byte) = try_read() {
             return byte;
         }
-        if let Some(byte) = crate::hal::poll_console() {
-            return byte;
+        // In the syscall with interrupts disabled; feed the ring from the
+        // UART so the FIFO never overflows during bursts.
+        while let Some(byte) = crate::hal::poll_console() {
+            unsafe { push_byte(byte) };
         }
         crate::hal::cpu_idle();
     }

@@ -155,10 +155,15 @@ pub unsafe fn alloc_filp() -> i32 {
 /// Close a filp by index. Decrements the reference count and frees the
 /// slot if it reaches zero.
 ///
+/// The caller is responsible for clearing the specific fd table entry;
+/// this function must NOT touch the fproc's other fd slots, because a
+/// filp can be referenced by several fds in the same process (via dup2)
+/// and clearing all of them would destroy the aliases.
+///
 /// # Safety
 ///
 /// Requires exclusive access to the global filp table and vnode table.
-pub unsafe fn close_filp(fp: &mut Fproc, filp_idx: i32) -> i32 {
+pub unsafe fn close_filp(filp_idx: i32) -> i32 {
     if filp_idx < 0 || (filp_idx as usize) >= NR_FILPS {
         return EBADF;
     }
@@ -173,15 +178,40 @@ pub unsafe fn close_filp(fp: &mut Fproc, filp_idx: i32) -> i32 {
 
     f.filp_count -= 1;
 
-    for fd in 0..OPEN_MAX {
-        if fp.fp_filp[fd] == filp_idx {
-            fp.fp_filp[fd] = -1;
-        }
-    }
-
     if f.filp_count == 0 {
         *f = Filp::default();
     }
 
     OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Closing one fd must not clear the other fds that alias the same filp
+    /// (dup2). The caller of close_filp is responsible for clearing the one
+    /// fd slot it closed; close_filp only decrements the refcount.
+    #[test]
+    fn test_close_filp_preserves_dup_aliases() {
+        unsafe {
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let idx = alloc_filp();
+            assert!(idx >= 0, "alloc_filp should succeed");
+            (*filp_arr.add(idx as usize)).filp_count = 2; // two fds (dup2 alias)
+
+            let mut fp = Fproc::default();
+            fp.fp_filp[0] = idx;
+            fp.fp_filp[1] = idx;
+
+            assert_eq!(close_filp(idx), OK);
+            assert_eq!(fp.fp_filp[0], idx, "fd 0 alias must survive");
+            assert_eq!(fp.fp_filp[1], idx, "fd 1 alias must survive");
+            assert_eq!((*filp_arr.add(idx as usize)).filp_count, 1);
+
+            assert_eq!(close_filp(idx), OK);
+            assert_eq!((*filp_arr.add(idx as usize)).filp_count, 0);
+        }
+    }
 }

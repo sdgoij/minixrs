@@ -98,7 +98,9 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     // Initialize VFS data structures before registering with device map.
     mount::init_vnodes();
     mount::init_vmnts();
-    crate::vfs::filedes::init_filps();
+    // Register the PFS vmnt so do_pipe2 can lock it (C: mount_pfs()
+    // runs before mount_root()).
+    mount::mount_pfs();
 
     // Initialise device map and mount the root filesystem.
     dmap::init_dmap();

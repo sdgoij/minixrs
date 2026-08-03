@@ -660,6 +660,17 @@ pub const fn pte_to_phys(pte: u64) -> u64 {
     pte & 0x000FFFFFFFFFF000
 }
 
+/// Decide whether a user leaf PTE at `va` maps a frame owned by the process.
+///
+/// x86 per-process tables split the boot identity 2MB blocks (copied with
+/// PG_U set) into 4KB entries whose phys == va; those shared identity
+/// frames must never be freed when a process exits. Real per-process
+/// allocations (code/stack/brk) always map at a phys != va.
+pub const fn pte_user_owned(pte: u64, va: u64) -> bool {
+    let user_present = pte_present() | pte_user();
+    (pte & user_present) == user_present && pte_to_phys(pte) != va
+}
+
 /// Kernel load virtual address (x86_64: identity-mapped at 0x200000).
 pub const fn kern_vaddr() -> u64 {
     0x200000

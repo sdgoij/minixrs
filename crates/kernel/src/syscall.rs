@@ -128,15 +128,7 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         msg[8..12].copy_from_slice(&fd.to_le_bytes());
         msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
         msg[24..28].copy_from_slice(&(count as u32).to_le_bytes());
-
-        (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-        let result =
-            unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-        if result != 0 {
-            return result as i64;
-        }
-        let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-        reply_status as i64
+        unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
     }
 }
 
@@ -159,15 +151,7 @@ unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     msg[8..12].copy_from_slice(&flags.to_le_bytes());
     msg[16..24].copy_from_slice(&path_ptr.to_le_bytes());
     msg[24..28].copy_from_slice(&path_len.to_le_bytes());
-
-    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-    if result != 0 {
-        return result as i64;
-    }
-    // Reply status in bytes 4-7 (m_type, set by VFS reply).
-    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    reply_status as i64
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_close (5) — close a file descriptor.
@@ -180,14 +164,7 @@ unsafe fn sys_close_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> 
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
     msg[4..8].copy_from_slice(&0x105i32.to_le_bytes()); // VFS_CLOSE = 0x105
     msg[8..12].copy_from_slice(&fd.to_le_bytes());
-
-    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-    if result != 0 {
-        return result as i64;
-    }
-    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    reply_status as i64
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_getpid (20) — return the caller's endpoint as PID.
@@ -352,14 +329,7 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
             // before blocking, so the reply lands in the same per-process
             // buffer. Set it up front too so a reply arriving during the
             // send phase (before mini_receive runs) is also delivered there
-            // instead of to a stale address.
-            (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-            let result =
-                unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-            if result != 0 {
-                return result as i64;
-            }
-            return i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) as i64;
+            return unsafe { crate::ipc::syscall_sendrec_status(caller, msg) };
         }
         if count > 0 {
             for i in 0..count.min(256) {
@@ -441,16 +411,7 @@ unsafe fn vfs_ipc_call(
     msg[12..16].copy_from_slice(&arg1.to_le_bytes());
     msg[16..20].copy_from_slice(&arg2.to_le_bytes());
     msg[20..24].copy_from_slice(&arg3.to_le_bytes());
-
-    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-    if result != 0 {
-        return result as i64;
-    }
-
-    // Read the reply status from offset 4-8 (m_type).
-    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    reply_status as i64
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_mkdir (40) — create a directory.
@@ -537,14 +498,7 @@ unsafe fn sys_getdents_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
     msg[8..12].copy_from_slice(&fd.to_le_bytes());
     msg[16..24].copy_from_slice(&buf_ptr.to_le_bytes());
     msg[24..28].copy_from_slice(&count.to_le_bytes());
-
-    (*caller).p_delivermsg_vir = msg.as_mut_ptr() as u64;
-    let result = unsafe { crate::ipc::do_sync_ipc(caller, msg.as_mut_ptr(), crate::ipc::SENDREC) };
-    if result != 0 {
-        return result as i64;
-    }
-    let reply_status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    reply_status as i64
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 // IPC syscall handlers (46-49)

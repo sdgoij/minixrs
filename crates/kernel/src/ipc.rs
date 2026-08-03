@@ -220,10 +220,25 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
             }
 
-            // Set the receiver's return value to the sender's endpoint.
+            // Set the receiver's return value. Normally the sender's
+            // endpoint (IPC semantics: RECEIVE/SENDREC return m_source).
+            // But a syscall forwarded to a server (SYS_read/write/etc.)
+            // must return the reply STATUS (m_type, bytes 4-8), not the
+            // endpoint: the forwarding syscall handler never resumes after
+            // blocking, so this delivery is the only place the status can
+            // reach the caller's return register.
             // Uses write_retval which knows the arch-specific offset
             // (RAX at +0 on x86_64, a0 at +80 on RISC-V).
-            crate::hal::write_retval(&mut (*dst_ptr).p_reg, (*caller_ptr).p_endpoint as u64);
+            let mf = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed);
+            if mf & MiscFlags::SYS_FWD_REPLY.bits() != 0 {
+                let status = i32::from_le_bytes(dst_msg[4..8].try_into().unwrap_or([0; 4]));
+                crate::hal::write_retval(&mut (*dst_ptr).p_reg, status as u64);
+                (*dst_ptr)
+                    .p_misc_flags
+                    .fetch_and(!MiscFlags::SYS_FWD_REPLY.bits(), Ordering::Relaxed);
+            } else {
+                crate::hal::write_retval(&mut (*dst_ptr).p_reg, (*caller_ptr).p_endpoint as u64);
+            }
 
             let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
@@ -300,6 +315,71 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
         // block until the destination (from the SENDREC) receives and replies.
         let caller_rts = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
         if caller_rts & RtsFlags::SENDING.bits() == 0 {
+            // C (L936): notifications are skipped while REPLY_PEND is set
+            // (the process is in the RECEIVE phase of a SENDREC, waiting
+            // for its reply).
+            let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
+                & MiscFlags::REPLY_PEND.bits()
+                != 0;
+            if !has_reply_pend {
+                // Check for pending notifications before blocking.
+                if has_pending_notify(caller_ptr) {
+                    let priv_ptr = (*caller_ptr).p_priv;
+                    if !priv_ptr.is_null() {
+                        let pending = &(*priv_ptr).s_notify_pending;
+                        for (chunk_i, &chunk) in pending.chunk.iter().enumerate() {
+                            if chunk != 0 {
+                                let bit = chunk.trailing_zeros() as usize;
+                                let priv_id = chunk_i * 32 + bit;
+                                (*priv_ptr).s_notify_pending.clear(priv_id);
+                                let notify_src = priv_addr(priv_id).s_proc_nr;
+                                build_notify_message(
+                                    &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]),
+                                    notify_src,
+                                    caller_ptr,
+                                );
+                                // build_notify_message leaves m_source = 0;
+                                // return 0 (not notify_src, which is negative
+                                // for kernel tasks) so the receiver's main
+                                // loop processes the notification instead of
+                                // skipping it via a `src < 0` check.
+                                // C: receive_done — clear REPLY_PEND if set
+                                (*caller_ptr)
+                                    .p_misc_flags
+                                    .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+                                // Consume transient signal flags that
+                                // send_sig set alongside s_notify_pending.
+                                (*caller_ptr).p_rts_flags.fetch_and(
+                                    !(RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
+                                    Ordering::Relaxed,
+                                );
+                                return OK;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // C (L967-978): try pending async messages (try_async) BEFORE
+            // the caller queue scan, and even while REPLY_PEND is set
+            // (try_one's NOREPLY skip guards a SENDREC waiter). The port
+            // previously scanned the caller_q first; a busy sender that
+            // re-queues on every cycle (e.g. cat's EAGAIN read loop) kept
+            // it non-empty forever, starving this branch so deferred async
+            // messages such as VFS_PM_EXIT were never delivered.
+            if has_pending_asend(caller_ptr) {
+                let r = try_async(caller_ptr);
+                if r == OK {
+                    // try_async delivered the message directly into
+                    // p_delivermsg; the syscall handler will copy it out
+                    // via delivermsg on the return path.
+                    (*caller_ptr)
+                        .p_misc_flags
+                        .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+                    return OK;
+                }
+            }
+
             // Check caller queue for pending messages.
             let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
             while !(*xpp).is_null() {
@@ -347,67 +427,6 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                 }
                 xpp = &mut (**xpp).p_q_link;
             }
-
-            // C (L936): If REPLY_PEND is set (SENDREC in progress), skip
-            // notification and async checks — the process is waiting for a
-            // reply, not for notifications or async messages.
-            let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
-                & MiscFlags::REPLY_PEND.bits()
-                != 0;
-            if !has_reply_pend {
-                // Check for pending notifications before blocking.
-                if has_pending_notify(caller_ptr) {
-                    let priv_ptr = (*caller_ptr).p_priv;
-                    if !priv_ptr.is_null() {
-                        let pending = &(*priv_ptr).s_notify_pending;
-                        for (chunk_i, &chunk) in pending.chunk.iter().enumerate() {
-                            if chunk != 0 {
-                                let bit = chunk.trailing_zeros() as usize;
-                                let priv_id = chunk_i * 32 + bit;
-                                (*priv_ptr).s_notify_pending.clear(priv_id);
-                                let notify_src = priv_addr(priv_id).s_proc_nr;
-                                build_notify_message(
-                                    &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]),
-                                    notify_src,
-                                    caller_ptr,
-                                );
-                                // build_notify_message leaves m_source = 0;
-                                // return 0 (not notify_src, which is negative
-                                // for kernel tasks) so the receiver's main
-                                // loop processes the notification instead of
-                                // skipping it via a `src < 0` check.
-                                // C: receive_done — clear REPLY_PEND if set
-                                (*caller_ptr)
-                                    .p_misc_flags
-                                    .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                                // Consume transient signal flags that
-                                // send_sig set alongside s_notify_pending.
-                                (*caller_ptr).p_rts_flags.fetch_and(
-                                    !(RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
-                                    Ordering::Relaxed,
-                                );
-                                return OK;
-                            }
-                        }
-                    }
-                }
-
-                // C: try pending async messages (try_async).
-                // This delivers SENDA messages that were deferred when the
-                // destination was not in WILLRECEIVE at send time.
-                if has_pending_asend(caller_ptr) {
-                    let r = try_async(caller_ptr);
-                    if r == OK {
-                        // try_async delivered the message directly into
-                        // p_delivermsg; the syscall handler will copy it out
-                        // via delivermsg on the return path.
-                        (*caller_ptr)
-                            .p_misc_flags
-                            .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                        return OK;
-                    }
-                }
-            }
         }
 
         // NON_BLOCKING check (C L1027-1037)
@@ -420,18 +439,18 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
             return ELOCKED;
         }
 
-        // C L1033-1034: Block — set p_getfrom_e and RECEIVING.
+        // C L1033-1034: Block — set p_getfrom_e and RECEIVING. C uses
+        // RTS_SET(caller_ptr, RTS_RECEIVING) which blocks unconditionally;
+        // the previous SENDING/REPLY_PEND guard left a process with SENDING
+        // set and no REPLY_PEND runnable, so its RECEIVE returned
+        // immediately (the documented receive-loop livelock).
         (*caller_ptr).p_getfrom_e = src_any;
         let old = (*caller_ptr).p_rts_flags.load(Ordering::Relaxed);
-        let has_reply_pend =
-            (*caller_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0;
-        if caller_rts & RtsFlags::SENDING.bits() == 0 || has_reply_pend {
-            (*caller_ptr)
-                .p_rts_flags
-                .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
-            if old == 0 || old & RtsFlags::PREEMPTED.bits() != 0 {
-                dequeue(caller_ptr);
-            }
+        (*caller_ptr)
+            .p_rts_flags
+            .store(old | RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        if old == 0 || old & RtsFlags::PREEMPTED.bits() != 0 {
+            dequeue(caller_ptr);
         }
         OK
     }
@@ -489,7 +508,13 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
         };
 
         let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
+        // C (L1069-1070): WILLRECEIVE(dst, src) && !(MF_REPLY_PEND). A
+        // notification must not satisfy the RECEIVE phase of a SENDREC.
+        let has_reply_pend = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed)
+            & crate::proc::MiscFlags::REPLY_PEND.bits()
+            != 0;
         if rts & RtsFlags::RECEIVING.bits() != 0
+            && !has_reply_pend
             && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
         {
             // Direct delivery: build notification message in destination's buffer.
@@ -516,28 +541,18 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
                 enqueue(dst_ptr);
             }
         } else {
-            // C: record pending notification when destination isn't waiting.
-            // Use the sender's privilege ID (src_id), not the endpoint number,
-            // because endpoints may exceed the bitmap size (NR_SYS_PROCS = 64).
+            // C (L1087-1093): destination is not ready — just record the
+            // notification in the pending bit map. It is discovered when
+            // the destination next calls RECEIVE. C does NOT enqueue or
+            // clear flags here: a destination that is already runnable is
+            // in the run queue, and enqueuing it again links it a second
+            // time, corrupting the queue into cycles (observed: pm<->vm
+            // livelock that stalls every later pipeline).
+            // Use the sender's privilege ID (src_id), not the endpoint
+            // number, because endpoints may exceed the bitmap size
+            // (NR_SYS_PROCS = 64).
             if !(*dst_ptr).p_priv.is_null() {
                 (*(*dst_ptr).p_priv).s_notify_pending.set(src_id);
-            }
-            // If the destination isn't RECEIVING, it needs to eventually
-            // call RECEIVE to discover the pending notification. Clear
-            // transient non-blocking flags (SIGNALED, SIG_PENDING,
-            // PREEMPTED) that prevent pick_proc from finding it, then
-            // enqueue. Blocking flags (RECEIVING, SENDING) would not
-            // reach this branch.
-            let transient = RtsFlags::SIGNALED.bits()
-                | RtsFlags::SIG_PENDING.bits()
-                | RtsFlags::PREEMPTED.bits();
-            if rts == 0 || rts & transient != 0 {
-                if rts & transient != 0 {
-                    (*dst_ptr)
-                        .p_rts_flags
-                        .store(rts & !transient, Ordering::Relaxed);
-                }
-                enqueue(dst_ptr);
             }
         }
         OK
@@ -752,6 +767,34 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
     }
 }
 
+/// Perform a server-forwarding SENDREC for a kernel syscall and return the
+/// reply status (m_type, bytes 4-8), not the SENDREC's return (the sender
+/// endpoint).
+///
+/// Sets `SYS_FWD_REPLY` so the kernel's direct-delivery path returns the
+/// reply status in the caller's return register when the SENDREC blocks
+/// (the forwarding handler never resumes after the block). Clears the flag
+/// if the send fails so it cannot corrupt a later reply's return value.
+///
+/// # Safety
+///
+/// `caller_ptr` must be valid and `msg` must be the caller's `p_sendmsg`.
+pub unsafe fn syscall_sendrec_status(caller_ptr: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i64 {
+    unsafe {
+        (*caller_ptr)
+            .p_misc_flags
+            .fetch_or(MiscFlags::SYS_FWD_REPLY.bits(), Ordering::Relaxed);
+        let r = do_sync_ipc(caller_ptr, msg.as_mut_ptr(), SENDREC);
+        if r != 0 {
+            (*caller_ptr)
+                .p_misc_flags
+                .fetch_and(!MiscFlags::SYS_FWD_REPLY.bits(), Ordering::Relaxed);
+            return r as i64;
+        }
+        i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) as i64
+    }
+}
+
 /// Function type for setting the exec target (RIP and RSP) on a process.
 /// Called during PM_EXEC to switch the process to the new binary's entry point.
 pub type SetExecRipFn = unsafe fn(*mut Proc, new_rip: u64, new_rsp: u64);
@@ -837,9 +880,12 @@ pub unsafe fn unset_notify_pending(rp: *mut Proc, priv_id: usize) {
 /// Both process pointers must be valid.
 pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
     unsafe {
-        use crate::r#priv::PrivFlags;
         let privp = (*src_ptr).p_priv;
-        if privp.is_null() || (*privp).s_flags & PrivFlags::SYS_PROC == PrivFlags::empty() {
+        // Only require a privilege structure, matching the send side
+        // (`try_deliver_senda`): boot processes in this port are configured
+        // without the SYS_PROC flag, so requiring it here would reject every
+        // deferred async message from them.
+        if privp.is_null() {
             return crate::grants::EPERM;
         }
         if (*privp).s_asynsize == 0 || (*privp).s_asyntab == 0 {
@@ -851,67 +897,127 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
         let dst_ep = (*dst_ptr).p_endpoint;
         let caller_ep = (*src_ptr).p_endpoint;
 
+        // C proc.c L1351: clear the destination's pending bit for this
+        // source first; it is re-armed below while any valid entry remains
+        // undelivered, so the destination retries on its next RECEIVE.
+        let dst_priv = (*dst_ptr).p_priv;
+        let src_id = (*privp).s_id;
+        if !dst_priv.is_null() && src_id >= 0 {
+            (*dst_priv).s_asyn_pending.clear(src_id as usize);
+        }
+
+        let mut r = EAGAIN;
+        let mut done = true;
+        let mut do_notify = false;
+
         for i in 0..size {
-            // Read the async table entry from the source's address space.
-            // All boot processes share boot_cr3, so direct reads work.
+            // Read the async table entry from the SOURCE's address space.
+            // The table lives in the sender's user memory, and each process
+            // maps the same VA range to its own physical frames. Use
+            // virtual_copy (CR3 switch to the source) rather than a direct
+            // read or copy_from_user: the latter walks the source's page
+            // table but then reads the resulting phys through the CURRENT
+            // (destination's) CR3, which does not identity-map the source's
+            // frames — yielding zeros.
             let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-            let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
+            let mut tabent: AsynMsg = core::mem::zeroed();
+            let rr = crate::vm::virtual_copy(
+                (*src_ptr).p_nr,
+                table_v + offset,
+                -1, // kernel buffer
+                (&mut tabent as *mut AsynMsg) as u64,
+                core::mem::size_of::<AsynMsg>(),
+            );
+            if rr != OK {
+                return rr as i32;
+            }
 
             let flags = tabent.flags;
 
+            // C L1374: empty entries are skipped entirely.
             if flags == 0 {
                 continue;
             }
-            if flags & !(AMF_VALID | AMF_DONE | AMF_NOTIFY | AMF_NOREPLY | AMF_NOTIFY_ERR) != 0 {
-                continue;
-            }
-            if flags & AMF_VALID == 0 {
-                continue;
-            }
-            if flags & AMF_DONE != 0 {
-                continue;
-            }
 
-            if tabent.endpoint != dst_ep {
+            // C L1377-1381: invalid flag combinations are reported back to
+            // the sender (marked DONE with EINVAL); already-done entries
+            // are skipped. Any valid, not-yet-done entry keeps the table
+            // armed (`done = false`) so the next RECEIVE keeps delivering.
+            let invalid =
+                flags & !(AMF_VALID | AMF_DONE | AMF_NOTIFY | AMF_NOREPLY | AMF_NOTIFY_ERR) != 0
+                    || flags & AMF_VALID == 0;
+            if !invalid && flags & AMF_DONE != 0 {
                 continue;
             }
+            r = if invalid { crate::grants::EINVAL } else { OK };
+            done = false;
 
-            // If AMF_NOREPLY is set and the destination has REPLY_PEND,
-            // skip this message — it shouldn't satisfy the RECEIVE part
-            // of a SENDREC. Matching C: try_async() in proc.c line 1401.
-            if (flags & AMF_NOREPLY != 0)
-                && (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits()
-                    != 0
-            {
-                continue;
-            }
+            if r != crate::grants::EINVAL {
+                // C L1395: the message must be directed at this receiver.
+                if tabent.endpoint != dst_ep {
+                    continue;
+                }
 
-            // Found a message for dst — deliver it
+                // C L1401: an AMF_NOREPLY message must not satisfy the
+                // RECEIVE phase of a SENDREC.
+                if (flags & AMF_NOREPLY != 0)
+                    && (*dst_ptr).p_misc_flags.load(Ordering::Relaxed)
+                        & MiscFlags::REPLY_PEND.bits()
+                        != 0
+                {
+                    continue;
+                }
 
-            if will_receive(dst_ptr, caller_ep) {
-                // Destination is waiting for this message.
-                // Copy only the `msg` field from the async entry.
+                // Deliver the message: copy it into p_delivermsg, stamp the
+                // source endpoint, and set DELIVERMSG so the syscall return
+                // path copies it to the destination's user buffer.
                 let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
-                // Set m_source (bytes 0-3) to the sender's endpoint, matching C:
-                // dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint;
                 core::ptr::write_unaligned(msg_dst as *mut i32, caller_ep);
-
-                // Mark as done and write back to the table
-                let mut updated = tabent;
-                updated.flags = flags | AMF_DONE;
-                let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-                core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
-
-                return OK;
+                (*dst_ptr)
+                    .p_misc_flags
+                    .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
             }
-            // Destination not waiting — don't mark as done, try again later.
-            // The message stays pending in s_asyn_pending.
-            // Matching C try_one: returns ESRCH if no deliverable entry found.
+
+            // C L1415-1419 (store_result): write the result and AMF_DONE
+            // back to the source's table (A_INSRT).
+            let mut updated = tabent;
+            updated.result = r;
+            updated.flags = flags | AMF_DONE;
+            if flags & AMF_NOTIFY != 0 || (r != OK && flags & AMF_NOTIFY_ERR != 0) {
+                do_notify = true;
+            }
+            let w = crate::vm::virtual_copy(
+                -1, // kernel buffer
+                (&updated as *const AsynMsg) as u64,
+                (*src_ptr).p_nr,
+                table_v + offset,
+                core::mem::size_of::<AsynMsg>(),
+            );
+            if w != OK {
+                return w as i32;
+            }
+
+            break;
         }
 
-        EAGAIN
+        if do_notify {
+            mini_notify(arch_common::com::ASYNCM, caller_ep);
+        }
+
+        // C L1427-1432: only drop the source's table reference when every
+        // entry is empty or done. While any valid entry remains (including
+        // one addressed to a different destination), keep the pending bit
+        // armed so the destination retries on its next RECEIVE.
+        if done {
+            (*privp).s_asyntab = 0;
+            (*privp).s_asynsize = 0;
+        } else if !dst_priv.is_null() && src_id >= 0 {
+            (*dst_priv).s_asyn_pending.set(src_id as usize);
+        }
+
+        r
     }
 }
 
@@ -998,8 +1104,22 @@ pub unsafe fn cancel_async(src_ptr: *mut Proc, dst_ptr: *mut Proc) {
 
         if table_v != 0 && size > 0 {
             for i in 0..size {
+                // Read the entry from the source's address space via a CR3
+                // switch to the source (matching C's A_RETR()); direct reads
+                // or page-table walks without a switch would hit the wrong
+                // frames.
                 let offset = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-                let tabent = core::ptr::read_unaligned((table_v + offset) as *const AsynMsg);
+                let mut tabent: AsynMsg = core::mem::zeroed();
+                if crate::vm::virtual_copy(
+                    (*src_ptr).p_nr,
+                    table_v + offset,
+                    -1,
+                    (&mut tabent as *mut AsynMsg) as u64,
+                    core::mem::size_of::<AsynMsg>(),
+                ) != OK
+                {
+                    continue;
+                }
 
                 let flags = tabent.flags;
                 // Skip invalid or already-done entries
@@ -1012,7 +1132,13 @@ pub unsafe fn cancel_async(src_ptr: *mut Proc, dst_ptr: *mut Proc) {
                     let mut updated = tabent;
                     updated.result = EDEADSRCDST;
                     updated.flags = flags | AMF_DONE;
-                    core::ptr::write_unaligned((table_v + offset) as *mut AsynMsg, updated);
+                    let _ = crate::vm::virtual_copy(
+                        -1,
+                        (&updated as *const AsynMsg) as u64,
+                        (*src_ptr).p_nr,
+                        table_v + offset,
+                        core::mem::size_of::<AsynMsg>(),
+                    );
                     do_notify = true;
                 } else {
                     entries_remain = true;
@@ -1182,9 +1308,26 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
         let mut all_done = true;
 
         for i in 0..size {
-            // Read async table entry from caller's address space
+            // Read async table entry from the caller's address space. The
+            // table lives in the caller's user memory; walk its page table
+            // (matching C's A_RETR()/data_copy()) so the access is correct
+            // regardless of which page table is currently loaded.
             let off = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-            let tabent = core::ptr::read_unaligned((table as u64 + off) as *const AsynMsg);
+            let mut tabent: AsynMsg = core::mem::zeroed();
+            // Read via a CR3 switch to the caller (matching C's
+            // A_RETR()/data_copy()); copy_from_user would read the target
+            // phys through the current CR3, which does not identity-map
+            // the caller's frames.
+            let cr = crate::vm::virtual_copy(
+                (*caller_ptr).p_nr,
+                table as u64 + off,
+                -1,
+                (&mut tabent as *mut AsynMsg) as u64,
+                core::mem::size_of::<AsynMsg>(),
+            );
+            if cr != OK {
+                return EFAULT;
+            }
 
             let flags = tabent.flags;
 
@@ -1265,11 +1408,22 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                 continue;
             }
 
-            // Write result back to the table
+            // Write result back to the caller's table (CR3 switch to the
+            // caller, matching C's A_INSRT()).
             let mut updated = tabent;
+            updated.result = r;
             updated.flags = flags | AMF_DONE;
             let off = (i as u64) * core::mem::size_of::<AsynMsg>() as u64;
-            core::ptr::write_unaligned((table as u64 + off) as *mut AsynMsg, updated);
+            let cw = crate::vm::virtual_copy(
+                -1,
+                (&updated as *const AsynMsg) as u64,
+                (*caller_ptr).p_nr,
+                table as u64 + off,
+                core::mem::size_of::<AsynMsg>(),
+            );
+            if cw != OK {
+                return EFAULT;
+            }
 
             if flags & AMF_NOTIFY != 0 || (r != OK && flags & AMF_NOTIFY_ERR != 0) {
                 do_notify = true;

@@ -354,13 +354,22 @@ pub unsafe fn proc_no_time(p: *mut Proc) {
         if has_user_sched && is_preemptible {
             notify_scheduler(p);
         } else {
-            // Non-preemptible (kernel-scheduled): renew quantum and set
-            // PREEMPTED so the next syscall entry picks another process.
+            // Non-preemptible (kernel-scheduled): renew quantum and mark the
+            // process preempted so the next syscall entry picks another
+            // process. Must dequeue (C's RTS_SET(p, RTS_PREEMPTED) does this
+            // via its hidden side effect): leaving the process linked while
+            // PREEMPTED makes the later PREEMPTED handling in
+            // syscall_handler_c/pick_proc re-enqueue it a second time,
+            // corrupting the run queue into cycles (observed: pm<->vm
+            // livelock after a second shell pipeline).
             (*p).p_cpu_time_left = ms_2_cpu_time((*p).p_quantum_size_ms);
-            (*p).p_rts_flags.fetch_or(
+            let old = (*p).p_rts_flags.fetch_or(
                 crate::proc::RtsFlags::PREEMPTED.bits(),
                 core::sync::atomic::Ordering::Relaxed,
             );
+            if old == 0 {
+                dequeue(p);
+            }
         }
     }
 }

@@ -86,6 +86,13 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
         return EBADF;
     }
 
+    // C (open.c L692): clear the fd table entry FIRST so future
+    // get_filp2() calls on this fd fail. The old code never cleared it,
+    // so closed fds (e.g. pipe ends) kept their filp reference forever:
+    // pipe_refcounts() still saw a writer, readers spun on EAGAIN, and
+    // the shell's own stdio (fds 0/1) stayed wedged into the pipe.
+    rfp.fp_filp[fd_nr as usize] = -1;
+
     // Release any file locks held by this process on this vnode.
     unsafe {
         let glob = &mut *vfs_global();
@@ -99,7 +106,9 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
         }
     }
 
-    // Handle pipe filps: release the read or write end before closing.
+    // Handle pipe filps: reset the buffer when the last reference goes away.
+    // The reader/writer counts are derived from the filp table (see
+    // pipe_refcounts), so nothing needs adjusting here beyond the reset.
     unsafe {
         let glob = &mut *vfs_global();
         let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
@@ -107,20 +116,12 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
             let f = &*filp_arr.add(filp_idx as usize);
             if crate::vfs::pipe::is_pipe_filp(f.filp_pipe_ino) {
                 let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(f.filp_pipe_ino);
-                if f.filp_mode & 1 != 0 {
-                    crate::vfs::pipe::release_read_end(pipe_idx);
-                }
-                if f.filp_mode & 2 != 0 {
-                    crate::vfs::pipe::release_write_end(pipe_idx);
-                }
                 crate::vfs::pipe::release_pipe(pipe_idx);
             }
         }
     }
 
-    rfp.fp_filp[fd_nr as usize] = -1;
-    rfp.fp_cloexec &= !(1u64 << fd_nr);
-    unsafe { crate::vfs::filedes::close_filp(rfp, filp_idx) }
+    unsafe { crate::vfs::filedes::close_filp(filp_idx) }
 }
 
 #[cfg(test)]

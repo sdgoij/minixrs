@@ -18,10 +18,38 @@ const SH_EXIT: i32 = i32::MIN;
 
 /// A single parsed command with optional stdout redirection.
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct ParsedCommand<'a> {
     tokens: [&'a str; 32],
     argc: usize,
     redirect_stdout: Option<&'a str>,
+}
+
+/// Maximum number of commands in a single `|` pipeline.
+#[cfg(target_os = "none")]
+const MAX_PIPELINE: usize = 8;
+
+/// True if `cmd` is a shell builtin (run in-process).
+#[cfg(target_os = "none")]
+fn is_builtin_cmd(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "echo"
+            | "cat"
+            | "cp"
+            | "ls"
+            | "mkdir"
+            | "rm"
+            | "ln"
+            | "chmod"
+            | "chown"
+            | "sync"
+            | "mknod"
+            | "reboot"
+            | "fsck"
+            | "help"
+            | "clear"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -62,14 +90,14 @@ pub fn sh(_args: &[&str]) -> i32 {
                 continue;
             }
 
-            // Split on `&&` and run each sub-command in sequence.
+            // Split on `&&` and run each sub-command (possibly a `|`
+            // pipeline) in sequence.
             let mut cmd_start = 0usize;
             let mut last_status = 0i32;
             for i in 0..raw_argc {
                 if raw_tokens[i] == "&&" {
                     if i > cmd_start {
-                        let parsed = parse_command(&raw_tokens[cmd_start..i], i - cmd_start);
-                        last_status = run_parsed_command(&parsed);
+                        last_status = run_segment(&raw_tokens[cmd_start..i]);
                         if last_status == SH_EXIT {
                             return 0;
                         }
@@ -83,8 +111,7 @@ pub fn sh(_args: &[&str]) -> i32 {
 
             // Run the final (or only) sub-command.
             if last_status == 0 && cmd_start < raw_argc {
-                let parsed = parse_command(&raw_tokens[cmd_start..raw_argc], raw_argc - cmd_start);
-                last_status = run_parsed_command(&parsed);
+                last_status = run_segment(&raw_tokens[cmd_start..raw_argc]);
                 if last_status == SH_EXIT {
                     return 0;
                 }
@@ -163,6 +190,201 @@ fn parse_command<'a>(raw_tokens: &[&'a str], raw_argc: usize) -> ParsedCommand<'
 }
 
 // ---------------------------------------------------------------------------
+// Pipelines (`|`)
+// ---------------------------------------------------------------------------
+
+/// Split a token slice on `|` and run the resulting pipeline.
+/// Returns the exit status of the last command, or `SH_EXIT`.
+#[cfg(target_os = "none")]
+fn run_segment(tokens: &[&str]) -> i32 {
+    let mut commands = [ParsedCommand {
+        tokens: [""; 32],
+        argc: 0,
+        redirect_stdout: None,
+    }; MAX_PIPELINE];
+    let mut ncmds = 0usize;
+    let mut start = 0usize;
+    for i in 0..=tokens.len() {
+        if i == tokens.len() || tokens[i] == "|" {
+            if i > start && ncmds < MAX_PIPELINE {
+                commands[ncmds] = parse_command(&tokens[start..i], i - start);
+                ncmds += 1;
+            }
+            start = i + 1;
+        }
+    }
+    if ncmds == 0 {
+        return 0;
+    }
+    if ncmds == 1 {
+        return run_parsed_command(&commands[0]);
+    }
+    run_pipeline(&commands[..ncmds])
+}
+
+/// Move pipe ends out of the 0-2 range before wiring a pipeline.
+///
+/// The shell's stdio (fds 0-2) is the kernel serial console, not VFS fds,
+/// so the shell's VFS fd table starts empty and `pipe()` returns fds 0 and
+/// 1. dup2'ing a pipe end onto fd 1 would then be a no-op, and closing the
+/// originals would destroy the pipe. Lift both ends to the top of the fd
+/// space (which is free) so the dup2 wiring in the children works.
+///
+/// Each pipe gets its own pair (pipe i -> fds 62-2i/63-2i) so multi-stage
+/// pipelines don't collide: a later pipe() would otherwise re-lift onto an
+/// already-occupied fd and close the earlier pipe's end.
+#[cfg(target_os = "none")]
+fn lift_pipe_fds(r: i32, w: i32, pipe_index: usize) -> (i32, i32) {
+    let mut r = r;
+    let mut w = w;
+    if r < 3 || w < 3 {
+        let hi = 63 - 2 * pipe_index as i32;
+        let lo = hi - 1;
+        if w < 3 && minix_std::fs::dup2(w, hi).is_ok() {
+            let _ = minix_std::fs::close(w);
+            w = hi;
+        }
+        if r < 3 && minix_std::fs::dup2(r, lo).is_ok() {
+            let _ = minix_std::fs::close(r);
+            r = lo;
+        }
+    }
+    (r, w)
+}
+
+/// Run a pipeline of two or more commands: each command's stdout feeds the
+/// next command's stdin through a VFS pipe.
+///
+/// Children are forked in order (left to right) so the writer generally runs
+/// before the reader; the parent closes its pipe ends and reaps each child.
+#[cfg(target_os = "none")]
+fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
+    let n = commands.len();
+    if n < 2 || n > MAX_PIPELINE {
+        return 1;
+    }
+    // pipes[i] connects commands[i] (writer) to commands[i+1] (reader).
+    let mut pipes = [(-1i32, -1i32); MAX_PIPELINE - 1];
+    let npipes = n - 1;
+    for i in 0..npipes {
+        match minix_std::fs::pipe() {
+            Ok((r, w)) => pipes[i] = lift_pipe_fds(r, w, i),
+            Err(_) => {
+                write_err(b"sh: pipe failed\r\n");
+                return 1;
+            }
+        }
+    }
+
+    let mut pids = [0i32; MAX_PIPELINE];
+    for i in 0..n {
+        let pid = minix_rt::fork();
+        if pid < 0 {
+            write_err(b"sh: fork failed\r\n");
+            for &(r, w) in &pipes[..npipes] {
+                let _ = minix_std::fs::close(r);
+                let _ = minix_std::fs::close(w);
+            }
+            return 1;
+        }
+        if pid == 0 {
+            // Child: wire stdin/stdout to the pipe ends, close the rest,
+            // then run the command in place (no second fork).
+            if i > 0 {
+                let (r, _w) = pipes[i - 1];
+                if minix_std::fs::dup2(r, 0).is_err() {
+                    write_err(b"sh: dup2 failed\r\n");
+                    minix_rt::exit(1);
+                }
+                unsafe { minix_rt::set_fd_vfs(0, 1) };
+            }
+            if i + 1 < n {
+                let (_r, w) = pipes[i];
+                if minix_std::fs::dup2(w, 1).is_err() {
+                    write_err(b"sh: dup2 failed\r\n");
+                    minix_rt::exit(1);
+                }
+                unsafe { minix_rt::set_fd_vfs(1, 1) };
+            }
+            for &(r, w) in &pipes[..npipes] {
+                let _ = minix_std::fs::close(r);
+                let _ = minix_std::fs::close(w);
+            }
+            let status = run_command_inline(&commands[i]);
+            minix_rt::exit(status);
+        }
+        pids[i] = pid;
+    }
+
+    // Parent: close all pipe ends, then reap each child.
+    for &(r, w) in &pipes[..npipes] {
+        let _ = minix_std::fs::close(r);
+        let _ = minix_std::fs::close(w);
+    }
+    let mut last_status = 0i32;
+    for &pid in &pids[..n] {
+        let s = minix_rt::waitpid(pid);
+        if s >= 0 {
+            last_status = s;
+        }
+    }
+    last_status
+}
+
+/// Run one command in the current process (used by pipeline children, which
+/// are already forked). Builtins run directly; external commands exec in
+/// place. Handles an optional stdout file redirect.
+#[cfg(target_os = "none")]
+fn run_command_inline(parsed: &ParsedCommand) -> i32 {
+    let cmd = parsed.tokens[0];
+    let args = &parsed.tokens[..parsed.argc];
+
+    // `cd` always runs in-process — redirection is meaningless for it.
+    if cmd == "cd" {
+        return run_cd(args);
+    }
+    // `exit` returns a sentinel so the main loop can break out.
+    if cmd == "exit" {
+        return SH_EXIT;
+    }
+
+    let is_builtin = is_builtin_cmd(cmd);
+
+    // Optional stdout redirect to a file (typically on the last command).
+    if let Some(outfile) = parsed.redirect_stdout {
+        let fd = setup_redirect(outfile);
+        set_redirect_fd(fd);
+        if !is_builtin {
+            if minix_std::fs::dup2(fd, 1).is_err() {
+                write_err(b"sh: dup2 failed\r\n");
+                return 1;
+            }
+            unsafe { minix_rt::set_fd_vfs(1, 1) };
+        }
+    }
+
+    if is_builtin {
+        return run_builtin(cmd, args);
+    }
+
+    // External: exec in place.
+    let mut cmd_path = [0u8; 256];
+    let path_len = build_path(cmd.as_bytes(), &mut cmd_path);
+    if path_len == 0 {
+        write_err(b"sh: '");
+        write_err(cmd.as_bytes());
+        write_err(b"' not found\r\n");
+        return 1;
+    }
+    try_exec(args, &mut cmd_path);
+    // If we get here, exec failed.
+    write_err(b"sh: '");
+    write_err(cmd.as_bytes());
+    write_err(b"' not found\r\n");
+    1
+}
+
+// ---------------------------------------------------------------------------
 // Command execution
 // ---------------------------------------------------------------------------
 
@@ -189,24 +411,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
         return SH_EXIT;
     }
 
-    let is_builtin = matches!(
-        cmd,
-        "echo"
-            | "cat"
-            | "cp"
-            | "ls"
-            | "mkdir"
-            | "rm"
-            | "ln"
-            | "chmod"
-            | "chown"
-            | "sync"
-            | "mknod"
-            | "reboot"
-            | "fsck"
-            | "help"
-            | "clear"
-    );
+    let is_builtin = is_builtin_cmd(cmd);
 
     match parsed.redirect_stdout {
         Some(outfile) => {

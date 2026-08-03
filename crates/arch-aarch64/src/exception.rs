@@ -260,6 +260,17 @@ unsafe extern "C" fn el1_irq_handler_c(_frame: *mut u8) {
         crate::timer::timer_irq_ack();
     }
 
+    // Poll the UART on every IRQ (the timer fires continuously, so this
+    // effectively feeds the ser_input ring on each tick). The ring is the
+    // single input source for read_blocking; polling the UART there instead
+    // would race with this producer and reorder/drop bytes under burst
+    // (piped) input. Mirrors the RISC-V timer-tick input poll.
+    if let Some(cb) = unsafe { UART_INPUT_CB } {
+        while let Some(byte) = crate::hal::poll_console() {
+            unsafe { cb(byte) };
+        }
+    }
+
     // Notify the scheduler.
     if let Some(cb) = unsafe { TIMER_CB } {
         let frame_slice = unsafe { core::slice::from_raw_parts_mut(_frame, 288) };

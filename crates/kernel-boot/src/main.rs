@@ -723,6 +723,17 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             if cleared == 0 {
                 kernel::sched::enqueue(rp);
             }
+            // A message delivered during this syscall (e.g. a deferred
+            // async delivery in RECEIVE) must reach the user buffer even
+            // though the process is being rescheduled. Skipping
+            // deliver_msg here strands it in p_delivermsg while the
+            // source's async table entry is already marked done — a lost
+            // wakeup (observed: VFS's VFS_PM_EXIT stranded, so the pipe
+            // write end was never closed and the reader spun on EAGAIN).
+            let delivered = unsafe { deliver_msg(rp) };
+            if delivered >= 0 {
+                core::ptr::write_volatile(saved as *mut u64, delivered as u64);
+            }
         } else if rts == 0 {
             // Still runnable — continue with same process.
             let delivered = unsafe { deliver_msg(rp) };
@@ -766,6 +777,10 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
 
         // D4: scheduler switch
         if next != rp {
+            // Deliver any message this process's syscall produced before
+            // switching away (same lost-wakeup concern as the preempted
+            // case above). No-op if there is no pending message.
+            let _ = unsafe { deliver_msg(rp) };
             let delivered_next = unsafe { deliver_msg(next) };
             let _ = delivered_next;
             arch_x86_64::cpulocals::set_cpulocal_proc_ptr(next as *mut core::ffi::c_void);

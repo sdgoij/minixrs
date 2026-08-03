@@ -439,6 +439,16 @@ pub const fn pte_to_phys(pte: u64) -> u64 {
     ((pte & pte::PTE_PPN_MASK) >> 10) << 12
 }
 
+/// Decide whether a user leaf PTE at `va` maps a frame owned by the process.
+///
+/// RISC-V boot processes map an identity guard region below the user stack
+/// (phys == va, PTE_U set); those shared frames must never be freed when a
+/// process exits. Real per-process allocations always map at a phys != va.
+pub const fn pte_user_owned(pte: u64, va: u64) -> bool {
+    let user_present = pte_present() | pte_user();
+    (pte & user_present) == user_present && pte_to_phys(pte) != va
+}
+
 /// Kernel load virtual address (RISC-V: linked at 0x80200000).
 pub const fn kern_vaddr() -> u64 {
     0x80200000

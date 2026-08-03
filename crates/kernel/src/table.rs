@@ -372,6 +372,12 @@ pub unsafe fn proc_init() {
     for i in 0..NR_PROCS_TOTAL {
         unsafe {
             let rp = proc_index(i);
+            // Zero the entire slot so no stale state survives between
+            // tests (host test binaries reuse the static proc table):
+            // p_delivermsg_vir, p_priv, p_getfrom_e, p_priority, and the
+            // run-queue link must all be deterministic. At boot the table
+            // is already zeroed, so this is a no-op there.
+            core::ptr::write_bytes(rp.cast::<u8>(), 0, core::mem::size_of::<Proc>());
             // Set magic number for pointer validation
             (*rp).p_magic = PMAGIC;
             // Clear run queue link (prevents stale pointers between tests)

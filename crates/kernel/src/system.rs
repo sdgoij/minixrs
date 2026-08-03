@@ -1471,22 +1471,14 @@ pub unsafe fn send_sig(proc_nr: i32, sig_nr: i32) -> i32 {
             return EBADREQUEST;
         }
 
-        // Set the signal bit in the priv structure's pending signals
+        // Record the signal in the priv structure and notify SYSTEM.
+        // Matching C send_sig() (system.c): the target's rts_flags are NOT
+        // touched — a system process stays runnable and picks up the
+        // pending notification on its next RECEIVE. Setting
+        // RTS_SIGNALED|RTS_SIG_PENDING here would freeze a runnable
+        // system process until mini_receive happened to clear them.
         (*priv_data).s_sig_pending |= 1u128 << sig_nr;
-
-        // Set RTS_SIGNALED | RTS_SIG_PENDING. Do NOT dequeue — these
-        // are non-blocking flags; the process stays in the queue and
-        // will discover the notification when it calls RECEIVE.
-        let sig_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
-        let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
-        (*rp)
-            .p_rts_flags
-            .store(old | sig_flags.bits(), Ordering::Relaxed);
-
-        // Notify SYSTEM unconditionally (C: mini_notify(proc_addr(SYSTEM), rp->p_endpoint))
-        if old & RtsFlags::SIGNALED.bits() == 0 {
-            crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
-        }
+        crate::ipc::mini_notify(arch_common::com::SYSTEM, (*rp).p_endpoint);
 
         OK
     }
@@ -4468,112 +4460,24 @@ pub unsafe fn switch_address_space(proc: *const Proc) {
     }
 }
 
-/// Release a process's address space. Currently a no-op — page table
-/// deallocation is managed by the VM server (Phase 6+). In the C code,
-/// this frees the page table pages allocated for the process.
-/// Release a process's address space, freeing all page table pages.
+/// Release a process's address space.
 ///
-/// Walks the 4-level page table hierarchy (PML4 → PDP → PD → PT)
-/// via the identity map, frees all physical frames for user pages
-/// and page table pages, then zeros the process's CR3.
+/// Matching C `release_address_space()` (kernel/arch/*/memory.c): the
+/// kernel only drops its reference to the page table; the VM server
+/// frees the actual frames via `vm_destroy()` (VM_EXIT) with PhysBlock
+/// refcounting. The kernel never walks the tables here: the previous
+/// x86-formatted walk freed arch-allocated pages into the wrong
+/// allocator (kernel::vm, a separate copy) and raced vm_destroy, which
+/// walks the same tables right after SYS_CLEAR (double-free / reads of
+/// freed pages); on Sv39/AArch64 it also dereferenced shared identity
+/// leaves as table pointers and faulted in S-mode.
 ///
 /// # Safety
 ///
-/// `proc` must point to a valid `Proc` with a page table that was
-/// allocated through `kernel::vm::alloc_mem()`. Must run on BOOT_CR3
-/// so the identity map is active for page table access.
+/// `proc` must point to a valid `Proc`.
 pub unsafe fn release_address_space(proc: *mut Proc) {
     unsafe {
-        let cr3 = (*proc).p_seg.p_cr3;
-        if cr3 == 0 {
-            return; // no per-process page table (kernel task or init)
-        }
-
-        // Walk the 4-level page table hierarchy.
-        // The identity map covers 0-1GB, which is where page tables
-        // are allocated (via alloc_mem within the boot memory chunks).
-
-        let pml4 = cr3 as *const u64;
-
-        // Process only user-space PML4 entries (0-255).
-        // Kernel entries (256-511) are shared BOOT_PDP references.
-        for pml4_idx in 0..256 {
-            let pml4e = core::ptr::read(pml4.add(pml4_idx));
-            if pml4e & crate::pagetable::PG_P == 0 {
-                continue; // not mapped
-            }
-
-            let pdpt_phys = crate::hal::pte_to_phys(pml4e);
-            let pdpt = pdpt_phys as *const u64;
-
-            for pdpt_idx in 0..512 {
-                let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-                if pdpte & crate::pagetable::PG_P == 0 {
-                    continue;
-                }
-                if pdpte & crate::pagetable::PG_PS != 0 {
-                    // 1GB huge page — free the single physical frame
-                    let pa = crate::hal::pte_to_phys(pdpte);
-                    let page = pa / crate::vm::VM_PAGE_SIZE as u64;
-                    crate::vm::free_mem(page, 1);
-                    continue;
-                }
-
-                let pd_phys = crate::hal::pte_to_phys(pdpte);
-                let pd = pd_phys as *const u64;
-
-                for pd_idx in 0..512 {
-                    let pde = core::ptr::read(pd.add(pd_idx));
-                    if pde & crate::pagetable::PG_P == 0 {
-                        continue;
-                    }
-                    if pde & crate::pagetable::PG_PS != 0 {
-                        // 2MB huge page — free the single physical frame
-                        let pa = crate::hal::pte_to_phys(pde);
-                        let page = pa / crate::vm::VM_PAGE_SIZE as u64;
-                        crate::vm::free_mem(page, 1);
-                        continue;
-                    }
-
-                    let pt_phys = crate::hal::pte_to_phys(pde);
-                    let pt = pt_phys as *const u64;
-
-                    for pt_idx in 0..512 {
-                        let pte = core::ptr::read(pt.add(pt_idx));
-                        if pte & crate::pagetable::PG_P == 0 {
-                            continue;
-                        }
-                        // Free the 4KB user page — BUT beware: some pages
-                        // are COW-shared with another process (the parent).
-                        // The kernel doesn't track PhysBlock refcounts, so
-                        // we must NOT free them here. VM's vm_destroy handles
-                        // user page freeing with proper refcounting.
-                        // We free ONLY page table pages (PT/PD/PDPT/PML4).
-                        // let pa = crate::hal::pte_to_phys(pte);
-                        // let page = pa / crate::vm::VM_PAGE_SIZE as u64;
-                        // crate::vm::free_mem(page, 1);
-                    }
-
-                    // Free the PT page itself
-                    let pt_page = pt_phys / crate::vm::VM_PAGE_SIZE as u64;
-                    crate::vm::free_mem(pt_page, 1);
-                }
-
-                // Free the PD page itself
-                let pd_page = pd_phys / crate::vm::VM_PAGE_SIZE as u64;
-                crate::vm::free_mem(pd_page, 1);
-            }
-
-            // Free the PDP page itself
-            let pdpt_page = pdpt_phys / crate::vm::VM_PAGE_SIZE as u64;
-            crate::vm::free_mem(pdpt_page, 1);
-        }
-
-        // Free the PML4 page itself
-        let pml4_page = cr3 / crate::vm::VM_PAGE_SIZE as u64;
-        crate::vm::free_mem(pml4_page, 1);
-
-        // Zero the process's CR3 fields
+        // Zero the process's CR3 fields (C: p_seg.p_cr3_v = NULL).
         (*proc).p_seg.p_cr3 = 0;
         (*proc).p_seg.p_cr3_v = core::ptr::null_mut();
         (*proc).p_cr3_saved = 0;
@@ -5718,12 +5622,7 @@ mod tests {
             let priv1 = setup_test_priv(1);
             (*priv1).s_sig_pending = 0;
             (*mgr).p_priv = priv1;
-
-            // Set mgr as RECEIVING from ANY so mini_notify will wake it
-            (*mgr)
-                .p_rts_flags
-                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
-            (*mgr).p_getfrom_e = crate::system::NONE;
+            (*mgr).p_rts_flags.store(0, Ordering::Relaxed);
 
             cause_sig(0, 1);
 
@@ -5733,16 +5632,18 @@ mod tests {
                 "send_sig should set SIGKSIG (74) in s_sig_pending"
             );
 
-            // send_sig also sets SIGNALED and SIG_PENDING on the mgr process
+            // send_sig does not touch the mgr's rts_flags (C: system.c):
+            // the manager stays runnable and discovers the pending
+            // notification on its next RECEIVE. (The mgr is deliberately
+            // not set RECEIVING here — the wake path belongs to
+            // mini_notify and would enqueue into the shared run queues.)
             let mgr_rts = (*mgr).p_rts_flags.load(Ordering::Relaxed);
-            assert!(
-                mgr_rts & RtsFlags::SIGNALED.bits() != 0,
-                "SIGNALED should be set on mgr via send_sig"
+            assert_eq!(
+                mgr_rts & (RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
+                0,
+                "send_sig must not block the signal manager"
             );
-            assert!(
-                mgr_rts & RtsFlags::SIG_PENDING.bits() != 0,
-                "SIG_PENDING should be set on mgr via send_sig"
-            );
+            assert_eq!(mgr_rts, 0, "mgr should be runnable after notification");
         }
     }
 
@@ -5818,9 +5719,9 @@ mod tests {
                 (*priv0).s_sig_pending & (1u128 << 3) != 0,
                 "send_sig should record signal in s_sig_pending"
             );
-            // send_sig sets SIGNALED|SIG_PENDING, but mini_notify then
-            // clears them (transient flags) and enqueues the process
-            // so it can discover the pending notification.
+            // send_sig does not touch rts_flags (matching C system.c):
+            // the target stays runnable and discovers the pending
+            // notification on its next RECEIVE.
             let flags = (*rp).p_rts_flags.load(Ordering::Relaxed);
             assert_eq!(
                 flags, 0,

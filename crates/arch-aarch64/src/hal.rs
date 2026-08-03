@@ -464,6 +464,29 @@ pub const fn pte_to_phys(pte: u64) -> u64 {
     pte & crate::pte::PTE_ADDR_MASK
 }
 
+/// Decide whether a user leaf PTE at `va` maps a frame owned by the process.
+///
+/// AArch64 per-process tables split the low-GB 2MB alias blocks into 4KB
+/// entries that wrap phys = RAM_BASE + (va & (RAM_SIZE - 1)); the device
+/// MMIO window (0x08000000-0x10000000) is identity-mapped (phys == va).
+/// Those shared alias/identity frames must never be freed when a process
+/// exits. Real per-process allocations always map at a phys != va.
+pub const fn pte_user_owned(pte: u64, va: u64) -> bool {
+    const RAM_BASE: u64 = 0x4000_0000;
+    const RAM_SIZE: u64 = 0x1000_0000;
+    const DEV_BASE: u64 = 0x0800_0000;
+    const DEV_END: u64 = 0x1000_0000;
+    let user_present = pte_present() | pte_user();
+    if pte & user_present != user_present {
+        return false;
+    }
+    let frame = pte_to_phys(pte);
+    if frame == va || (va >= DEV_BASE && va < DEV_END) {
+        return false; // identity mapping (RAM identity or device MMIO)
+    }
+    frame != RAM_BASE + (va & (RAM_SIZE - 1))
+}
+
 pub const fn kern_vaddr() -> u64 {
     0x4000_0000
 }

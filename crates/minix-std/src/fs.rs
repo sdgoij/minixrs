@@ -47,6 +47,7 @@ pub const VFS_GETDENTS: u32 = VFS_BASE + 29;
 pub const VFS_SELECT: u32 = VFS_BASE + 30;
 pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
+pub const VFS_PIPE2: u32 = VFS_BASE + 26;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
 pub const VFS_DUP2: u32 = VFS_BASE + 49;
 
@@ -324,6 +325,27 @@ pub fn dup2(fd: i32, newfd: i32) -> Result<i32, MinixErr> {
         msg_set_i32(&mut msg, 12, newfd);
         let mtype = vfs_call(&mut msg)?;
         Ok(mtype)
+    }
+}
+
+/// Create a pipe: returns `(read_fd, write_fd)`.
+///
+/// VFS's `do_pipe2` replies with fd0 at message offset 8 and fd1 at
+/// offset 12 (matching `m_lc_vfs_pipe2`).
+pub fn pipe() -> Result<(i32, i32), MinixErr> {
+    #[cfg(not(target_os = "none"))]
+    {
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_PIPE2 as i32);
+        msg_set_i32(&mut msg, 8, 0); // flags (no O_CLOEXEC support needed yet)
+        vfs_call(&mut msg)?;
+        let fd0 = msg_i32(&msg, 8);
+        let fd1 = msg_i32(&msg, 12);
+        Ok((fd0, fd1))
     }
 }
 

@@ -232,8 +232,13 @@ bitflags::bitflags! {
         const FLUSH_TLB            = 0x10000;
         /// VM miss on async send.
         const SENDA_VM_MISS        = 0x20000;
-        /// Single-step process.
+        /// Single-step process (syscall tracing).
         const STEP                 = 0x40000;
+        /// Kernel syscall forwarded to a server: when the reply arrives,
+        /// return the reply status (m_type, bytes 4-8) instead of the
+        /// sender endpoint. Set by the SYS_read/write/open/... handlers
+        /// before their SENDREC to VFS.
+        const SYS_FWD_REPLY         = 0x80000;
     }
 }
 

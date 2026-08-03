@@ -24,6 +24,7 @@ type PtEntry = u64;
 
 const USER_PML4_ENTRIES: usize = 256;
 const NENTRIES: usize = 512;
+const PAGE_SIZE: u64 = kernel::vm::VM_PAGE_SIZE as u64;
 
 /// Per-process VM state, analogous to MINIX's `struct vmproc`.
 #[derive(Clone, Copy, Default)]
@@ -357,92 +358,113 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
             return;
         }
 
-        // Walk the page table hierarchy and free all physical frames
-        // for user pages (lower 256 PML4 entries) and intermediate
-        // page table pages.
-        let pml4 = cr3 as *const PtEntry;
+        // Walk the user half of the page table and free the process's
+        // memory. VM is a user process without a user-visible identity
+        // map, so physical table pages must be mapped into VM's address
+        // space via the kernel (VM_PAGING_MAP) before dereferencing
+        // them — same pattern as cow_setup_fork. The old direct
+        // phys-pointer walk worked on x86 (its identity map is
+        // user-visible) but faulted on RISC-V/AArch64, where the
+        // identity leaves are supervisor-only.
+        //
+        // Page-table format details (present/leaf/user bits, physical
+        // address extraction, level count) come from the arch crate via
+        // kernel::hal, so this walk is arch-independent:
+        //   - entries without the present bit are skipped,
+        //   - block/huge leaves above the bottom level are shared
+        //     identity mappings and are never freed,
+        //   - at the bottom level, hal::pte_user_owned decides which
+        //     user leaves map frames the process owns (private
+        //     allocations freed with COW refcounting); shared
+        //     identity/alias frames left by huge-page splits are not
+        //     freed,
+        //   - table pages are returned to the kernel allocator after
+        //     their children are walked (per-process table pages are
+        //     private copies on every arch).
+        use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
+        use kernel::hal::{pte_to_phys, pte_user_owned};
+        use kernel::pagetable::{PG_P, PG_PS};
+        let map_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
 
-        for pml4_idx in 0..USER_PML4_ENTRIES {
-            let pml4e = core::ptr::read(pml4.add(pml4_idx));
-            if pml4e & PG_P == 0 {
-                continue;
+        unsafe fn with_table<F, R>(phys: u64, flags: u64, f: F) -> Option<R>
+        where
+            F: FnOnce(&[u64; 512]) -> R,
+        {
+            let va = vm_mappage(phys, flags);
+            if va == 0 {
+                return None;
             }
-
-            let pdpt_phys = pml4e & PG_FRAME;
-            let pdpt = pdpt_phys as *const PtEntry;
-
-            for pdpt_idx in 0..NENTRIES {
-                let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
-                if pdpte & PG_P == 0 {
-                    continue;
-                }
-
-                if pdpte & PG_PS != 0 {
-                    // 1GB huge page — free the frame.
-                    let frame = pdpte & PG_FRAME;
-                    vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
-                    continue;
-                }
-
-                let pd_phys = pdpte & PG_FRAME;
-                let pd = pd_phys as *const PtEntry;
-
-                for pd_idx in 0..NENTRIES {
-                    let pde = core::ptr::read(pd.add(pd_idx));
-                    if pde & PG_P == 0 {
-                        continue;
-                    }
-
-                    if pde & PG_PS != 0 {
-                        // 2MB huge page — free all 4KB frames within.
-                        let pa_base = pde & PG_FRAME;
-                        for sub in 0..NENTRIES {
-                            let pa = pa_base + (sub as u64) * 0x1000;
-                            vm::free_mem(pa / vm::VM_PAGE_SIZE as u64, 1);
-                        }
-                        continue;
-                    }
-
-                    let pt_phys = pde & PG_FRAME;
-                    let pt = pt_phys as *const PtEntry;
-
-                    for pt_idx in 0..NENTRIES {
-                        let pte = core::ptr::read(pt.add(pt_idx));
-                        if pte & PG_P == 0 || pte & PG_U == 0 {
-                            continue;
-                        }
-                        // Free the user page, but only if not COW-shared.
-                        let frame = pte & PG_FRAME;
-                        if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
-                            let refcount = match crate::vm::pb::pb_get(pb_idx) {
-                                Some(b) => b.refcount,
-                                None => 1,
-                            };
-                            if refcount > 1 {
-                                crate::vm::pb::pb_unref(pb_idx);
-                            } else {
-                                crate::vm::pb::pb_unref(pb_idx);
-                                vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
-                            }
-                        } else {
-                            vm::free_mem(frame / vm::VM_PAGE_SIZE as u64, 1);
-                        }
-                    }
-
-                    // Free the page table page itself.
-                    vm::free_mem(pt_phys / vm::VM_PAGE_SIZE as u64, 1);
-                }
-
-                // Free the page directory page.
-                vm::free_mem(pd_phys / vm::VM_PAGE_SIZE as u64, 1);
-            }
-
-            // Free the PDP table page.
-            vm::free_mem(pdpt_phys / vm::VM_PAGE_SIZE as u64, 1);
+            // SAFETY: the VA was just mapped to `phys` by vm_mappage.
+            let table = unsafe { &*(va as *const [u64; 512]) };
+            let r = f(table);
+            let _ = vm_unmappage(va);
+            Some(r)
         }
 
-        // Free the PML4 page itself.
-        vm::free_mem(cr3 / vm::VM_PAGE_SIZE as u64, 1);
+        fn free_user_frame(frame: u64) {
+            if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
+                let refcount = crate::vm::pb::pb_get(pb_idx).map_or(1, |b| b.refcount);
+                crate::vm::pb::pb_unref(pb_idx);
+                if refcount > 1 {
+                    return; // still COW-shared with another process
+                }
+            }
+            let _ = vm_free_pages(frame, 1);
+        }
+
+        // Free the table at `phys`: the bottom level frees user 4KB
+        // pages owned by the process, higher levels recurse into child
+        // tables (block leaves are skipped), then the table page itself
+        // is returned to the kernel allocator. `va_base` is the virtual
+        // address of entry 0 of this table, used to compute each leaf's
+        // VA for the arch ownership check.
+        unsafe fn walk_table(phys: u64, level: u32, va_base: u64, flags: u64) {
+            if let Some(table) = unsafe { with_table(phys, flags, |t| *t) } {
+                let step = PAGE_SIZE << (level * 9);
+                for (idx, &e) in table.iter().enumerate() {
+                    if e & PG_P == 0 {
+                        continue;
+                    }
+                    let entry_va = va_base + (idx as u64) * step;
+                    if level == 0 {
+                        // Bottom level: 4KB pages. The arch decides which
+                        // user leaves map frames owned by the process —
+                        // shared identity/alias frames are not freed.
+                        if pte_user_owned(e, entry_va) {
+                            let frame = pte_to_phys(e);
+                            if frame != 0 {
+                                free_user_frame(frame);
+                            }
+                        }
+                        continue;
+                    }
+                    if e & PG_PS != 0 {
+                        continue; // block/huge leaf — shared identity
+                    }
+                    unsafe {
+                        walk_table(pte_to_phys(e), level - 1, entry_va, flags);
+                    }
+                }
+            }
+            let _ = vm_free_pages(phys, 1);
+        }
+
+        // Walk only the user half of the root (indices 0..USER_PML4_ENTRIES);
+        // the kernel half holds shared boot table references.
+        let top = kernel::hal::pt_levels() - 1;
+        let root_step = PAGE_SIZE << (top * 9);
+        if let Some(root) = with_table(cr3, map_flags, |t| *t) {
+            for (idx, &e) in root.iter().enumerate().take(USER_PML4_ENTRIES) {
+                if e & PG_P == 0 {
+                    continue;
+                }
+                if e & PG_PS != 0 {
+                    continue; // block/huge leaf — shared identity
+                }
+                walk_table(pte_to_phys(e), top - 1, (idx as u64) * root_step, map_flags);
+            }
+        }
+        let _ = vm_free_pages(cr3, 1);
 
         // Clear the region tracking.
         (*vmp).vm_regions = crate::vm::region::RegionList::new();

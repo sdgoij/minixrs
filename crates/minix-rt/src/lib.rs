@@ -870,13 +870,32 @@ pub fn fork() -> i32 {
     child_pid
 }
 
-/// Static async send table for asynsend3 (single entry).
-/// Must be static so the kernel can read it asynchronously.
-// Static async table used by asynsend3.
-// One entry (AsynMsg). Message alignment is 8 (i64 in Payload),
-// so AsynMsg.msg is at offset 16 (not 12). The table must be
-// large enough for the full AsynMsg struct (68+ bytes at minimum).
-static mut ASYNC_TABLE: [u8; 192] = [0u8; 192];
+/// Async table entry layout — matches the kernel's `AsynMsg`: flags@0,
+/// endpoint@4, result@8, message@16 (Message is 8-aligned so it lands at 16).
+const ASYNMSG_BYTES: usize = 80;
+
+/// Number of async table entries (matching C `libsys/asynsend.c`:
+/// `#define ASYN_NR (2*_NR_PROCS)`).
+const ASYN_NR: usize = 2 * 256;
+
+const AMF_EMPTY: u32 = 0x00;
+const AMF_VALID: u32 = 0x01;
+const AMF_DONE: u32 = 0x02;
+const AMF_NOTIFY: u32 = 0x04;
+const AMF_NOREPLY: u32 = 0x08;
+const AMF_NOTIFY_ERR: u32 = 0x10;
+
+/// Static async send table for asynsend3. Must be static so the kernel
+/// can read it asynchronously (when the receiver does RECEIVE). Multiple
+/// entries so several messages can be outstanding at once — a second send
+/// appends a new slot instead of overwriting a still-pending one.
+static mut ASYNC_TABLE: [u8; ASYN_NR * ASYNMSG_BYTES] = [0u8; ASYN_NR * ASYNMSG_BYTES];
+
+/// First not-yet-completed entry; next free entry (C asynsend.c
+/// first_slot/next_slot).
+static mut ASYN_FIRST: usize = 0;
+static mut ASYN_NEXT: usize = 0;
+static mut ASYN_INIT: bool = false;
 
 /// Send an asynchronous message (matching C `asynsend3`).
 ///
@@ -885,31 +904,124 @@ static mut ASYNC_TABLE: [u8; 192] = [0u8; 192];
 /// the message is delivered immediately.
 ///
 /// `flags` should be `AMF_NOREPLY` (0x08) for fire-and-forget messages.
-/// Uses a static buffer for the async table so the kernel can read it
-/// asynchronously (when the receiver does RECEIVE).
 ///
 /// # Safety
 ///
 /// `msg` must point to a valid 64-byte message buffer.
-/// This function is NOT reentrant (single-entry async table).
+/// This function is NOT reentrant.
 pub unsafe fn asynsend3(dst: i32, msg: *const u8, flags: u32) -> i32 {
-    // Use the module-level static async table.
-    let tabent = unsafe { &mut *core::ptr::addr_of_mut!(ASYNC_TABLE) };
-    tabent[0..4].copy_from_slice(&(flags | 0x01).to_le_bytes()); // flags | AMF_VALID
-    tabent[4..8].copy_from_slice(&dst.to_le_bytes());
-    // Write zeros to result field (offset 8-11) and then message at
-    // offset 16 (matching AsynMsg layout where msg is at offset 16
-    // due to Message's 8-byte alignment requirement).
-    tabent[8..12].copy_from_slice(&0i32.to_le_bytes()); // result = 0
     unsafe {
-        core::ptr::copy_nonoverlapping(msg, tabent.as_mut_ptr().add(16), 64);
-    }
+        let tab = &mut *core::ptr::addr_of_mut!(ASYNC_TABLE);
+        let mut first = core::ptr::addr_of!(ASYN_FIRST).read();
+        let mut next = core::ptr::addr_of!(ASYN_NEXT).read();
+        let mut needack = false;
 
-    // SENDA syscall (52): msg[8..16] = table ptr, msg[16..24] = size
-    let mut senda_msg = [0u8; 64];
-    senda_msg[8..16].copy_from_slice(&(tabent.as_ptr() as u64).to_le_bytes());
-    senda_msg[16..24].copy_from_slice(&1u64.to_le_bytes()); // 1 entry
-    unsafe { syscall2(SENDA_CALL, 0, senda_msg.as_mut_ptr() as u64) as i32 }
+        if !core::ptr::addr_of!(ASYN_INIT).read() {
+            for i in 0..ASYN_NR {
+                let off = i * ASYNMSG_BYTES;
+                tab[off..off + 4].fill(0); // AMF_EMPTY
+            }
+            core::ptr::addr_of_mut!(ASYN_INIT).write(true);
+        }
+
+        // Update first: skip entries the kernel has completed (VALID|DONE),
+        // noting result errors that need acknowledgement; stop at the first
+        // live entry.
+        while first < next {
+            let f = u32::from_le_bytes(
+                tab[first * ASYNMSG_BYTES..first * ASYNMSG_BYTES + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            if (f & (AMF_VALID | AMF_DONE)) == (AMF_VALID | AMF_DONE) {
+                let res = i32::from_le_bytes(
+                    tab[first * ASYNMSG_BYTES + 8..first * ASYNMSG_BYTES + 12]
+                        .try_into()
+                        .unwrap_or([0; 4]),
+                );
+                if res != 0 {
+                    needack = (f & (AMF_NOTIFY | AMF_NOTIFY_ERR)) != 0;
+                }
+                first += 1;
+                continue;
+            }
+            if f != AMF_EMPTY {
+                break;
+            }
+            first += 1;
+        }
+
+        // All messages completed — restart the window from the beginning.
+        if first >= next && !needack {
+            next = 0;
+            first = 0;
+        }
+
+        // Table full: tell the kernel to stop scanning, compact the live
+        // entries to the front, and retry.
+        if next >= ASYN_NR {
+            let mut stop = [0u8; 64];
+            if syscall2(SENDA_CALL, 0, stop.as_mut_ptr() as u64) < 0 {
+                return -1;
+            }
+            let mut dst_ind = 0usize;
+            for src_ind in first..next {
+                let f = u32::from_le_bytes(
+                    tab[src_ind * ASYNMSG_BYTES..src_ind * ASYNMSG_BYTES + 4]
+                        .try_into()
+                        .unwrap_or([0; 4]),
+                );
+                if f == AMF_EMPTY {
+                    continue;
+                }
+                if (f & (AMF_VALID | AMF_DONE)) == (AMF_VALID | AMF_DONE) {
+                    let res = i32::from_le_bytes(
+                        tab[src_ind * ASYNMSG_BYTES + 8..src_ind * ASYNMSG_BYTES + 12]
+                            .try_into()
+                            .unwrap_or([0; 4]),
+                    );
+                    if res == 0 || (f & (AMF_NOTIFY | AMF_NOTIFY_ERR)) == 0 {
+                        continue;
+                    }
+                }
+                if src_ind != dst_ind {
+                    let s = src_ind * ASYNMSG_BYTES;
+                    let d = dst_ind * ASYNMSG_BYTES;
+                    tab.copy_within(s..s + ASYNMSG_BYTES, d);
+                }
+                dst_ind += 1;
+            }
+            for i in dst_ind..ASYN_NR {
+                let off = i * ASYNMSG_BYTES;
+                tab[off..off + 4].fill(0); // AMF_EMPTY
+            }
+            first = 0;
+            next = dst_ind;
+            if next >= ASYN_NR {
+                return -1; // every slot still live — table overflow
+            }
+        }
+
+        // Write the new entry; flags last so the kernel never sees a
+        // half-written message (matching C).
+        let off = next * ASYNMSG_BYTES;
+        tab[off + 4..off + 8].copy_from_slice(&dst.to_le_bytes());
+        core::ptr::copy_nonoverlapping(msg, tab.as_mut_ptr().add(off + 16), 64);
+        core::sync::atomic::fence(Ordering::Release);
+        tab[off..off + 4].copy_from_slice(&(flags | AMF_VALID).to_le_bytes());
+        next += 1;
+
+        core::ptr::addr_of_mut!(ASYN_FIRST).write(first);
+        core::ptr::addr_of_mut!(ASYN_NEXT).write(next);
+
+        // SENDA syscall (52): msg[8..16] = table ptr, msg[16..24] = size
+        let len = next - first;
+        let mut senda_msg = [0u8; 64];
+        let base = tab.as_ptr() as u64 + (first * ASYNMSG_BYTES) as u64;
+        senda_msg[8..16].copy_from_slice(&base.to_le_bytes());
+        senda_msg[16..24].copy_from_slice(&(len as u64).to_le_bytes());
+        syscall2(SENDA_CALL, 0, senda_msg.as_mut_ptr() as u64) as i32
+    }
 }
 
 /// Wait for a child process to exit via PM IPC.

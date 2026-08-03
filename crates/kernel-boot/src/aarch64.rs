@@ -325,6 +325,37 @@ pub unsafe extern "C" fn kmain() -> ! {
                     }
                 }
             }
+        } else {
+            // Caller stayed runnable — flush any message this syscall
+            // staged in p_delivermsg (mini_receive's try_async path sets
+            // DELIVERMSG and returns OK). x86's syscall_handler_c delivers
+            // to a still-runnable caller; without this, the message sits
+            // staged forever (observed: VFS never saw VFS_PM_FORK and the
+            // shell's fork hung).
+            let mf = unsafe {
+                (*caller)
+                    .p_misc_flags
+                    .load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
+                unsafe {
+                    kernel::ipc::delivermsg(caller);
+                    let src_ep = i32::from_le_bytes([
+                        (*caller).p_delivermsg[0],
+                        (*caller).p_delivermsg[1],
+                        (*caller).p_delivermsg[2],
+                        (*caller).p_delivermsg[3],
+                    ]);
+                    // Overwrite the syscall's OK return in x0 (offset 0)
+                    // with the source endpoint.
+                    let ret = src_ep as u64;
+                    frame[0..8].copy_from_slice(&ret.to_ne_bytes());
+                    (*caller).p_misc_flags.fetch_and(
+                        !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            }
         }
     }
     arch_aarch64::exception::register_post_syscall_hook(aarch64_post_syscall);

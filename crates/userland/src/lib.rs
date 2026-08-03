@@ -117,10 +117,16 @@ pub unsafe fn parse_args<'a>(
 pub fn cat(args: &[&str]) -> i32 {
     let mut exit_code = 0;
     if args.len() <= 1 {
-        // Read from stdin
+        // Read from stdin. A pipe read returns EAGAIN (-11) when the pipe is
+        // empty but a writer is still open (this port's pipes don't suspend
+        // readers yet); retry so we wait for the writer's data instead of
+        // treating a transient empty pipe as EOF.
         let mut buf = [0u8; 8192];
         loop {
             let n = minix_rt::read(0, &mut buf);
+            if n == -11 {
+                continue;
+            }
             if n <= 0 {
                 break;
             }

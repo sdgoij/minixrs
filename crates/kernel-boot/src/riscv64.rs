@@ -343,25 +343,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         );
                     }
 
-                    // Send a notification to PM to kickstart scheduling.
-                    let pm_proc = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
-                    if !pm_proc.is_null() {
-                        unsafe {
-                            let _ = kernel::ipc::mini_notify(
-                                arch_common::com::RS_PROC_NR,
-                                arch_common::com::PM_PROC_NR,
-                            );
-                            // PM may be runnable (rts==0) but preempted
-                            // before calling RECEIVE — mini_notify only
-                            // enqueues when RECEIVING. Manually enqueue
-                            // so pick_proc below finds it.
-                            let pm_rts = (*pm_proc)
-                                .p_rts_flags
-                                .load(core::sync::atomic::Ordering::Relaxed);
-                            if pm_rts == 0 {
-                                kernel::sched::enqueue(pm_proc);
-                            }
-                        }
+                    // All processes are blocked — idle until an interrupt
+                    // makes one runnable (matching x86's sti; hlt; cli and
+                    // the AArch64 post-syscall loop). Do NOT notify PM here:
+                    // that self-wakeup makes PM spin on GETKSIG notifications
+                    // while real IPC messages (e.g. VFS_PM_FORK_REPLY) sit
+                    // undelivered, livelocking the system.
+                    loop {
+                        arch_riscv64::hal::cpu_idle();
                         if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                             unsafe {
                                 let mf = (*next_proc)
@@ -404,7 +393,39 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                                 }
                                 arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
                             }
+                            break;
                         }
+                    }
+                }
+            } else {
+                // Caller stayed runnable — flush any message this syscall
+                // staged in p_delivermsg (mini_receive's try_async path
+                // sets DELIVERMSG and returns OK). x86's syscall_handler_c
+                // delivers to a still-runnable caller; without this, the
+                // message sits staged forever (observed: VFS never saw
+                // VFS_PM_FORK and the shell's fork hung).
+                let mf = unsafe {
+                    (*caller)
+                        .p_misc_flags
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                };
+                if mf & kernel::proc::MiscFlags::DELIVERMSG.bits() != 0 {
+                    unsafe {
+                        kernel::ipc::delivermsg(caller);
+                        let src_ep = i32::from_le_bytes([
+                            (*caller).p_delivermsg[0],
+                            (*caller).p_delivermsg[1],
+                            (*caller).p_delivermsg[2],
+                            (*caller).p_delivermsg[3],
+                        ]);
+                        // Overwrite the syscall's OK return in a0 (x10 at
+                        // frame offset 80) with the source endpoint.
+                        let ret = src_ep as u64;
+                        frame[80..88].copy_from_slice(&ret.to_ne_bytes());
+                        (*caller).p_misc_flags.fetch_and(
+                            !kernel::proc::MiscFlags::DELIVERMSG.bits(),
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                 }
             }

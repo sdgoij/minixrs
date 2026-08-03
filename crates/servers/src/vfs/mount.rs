@@ -386,9 +386,25 @@ pub fn mount_fs(
 pub fn unmount(_dev: u32, _label: Option<&[u8]>) -> i32 {
     ENOSYS
 }
-
-/// Mount the Pipe File System (PFS) for pipe operations.
-pub fn mount_pfs() {}
+///
+/// PFS is not really mounted onto the filesystem tree — it just needs a
+/// vmnt entry so pipe operations can find and lock it (matching the
+/// original C `mount_pfs()` in `minix/servers/vfs/mount.c`).
+pub fn mount_pfs() {
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return;
+    }
+    unsafe {
+        (*vmp).m_dev = u32::MAX; // NO_DEV — PFS has no real device
+        (*vmp).m_fs_e = PFS_PROC_NR;
+        (*vmp).m_flags = 0;
+        let label = b"pfs";
+        let m_label = &mut (*vmp).m_label;
+        m_label[..label.len()].copy_from_slice(label);
+        m_label[label.len()] = 0;
+    }
+}
 
 /// Check if a device is NONE (no device).
 pub fn is_nonedev(dev: u32) -> i32 {

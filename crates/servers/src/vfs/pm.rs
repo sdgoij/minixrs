@@ -178,17 +178,17 @@ pub fn service_pm() -> i32 {
         }
 
         VFS_PM_EXIT | VFS_PM_DUMPCORE | VFS_PM_UNPAUSE => {
-            // Phase 1: do quick non-blocking work, defer the rest.
             let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
-            let glob2 = unsafe { &mut *vfs_global() };
-            let fp = glob2.fp;
-            if !fp.is_null() {
-                unsafe { (*fp).fp_endpoint = proc_e };
-            }
             if call_nr == VFS_PM_EXIT {
-                pm_exit();
+                // Close the exiting process's FDs by endpoint. Do NOT use
+                // the current fp: for PM-sourced messages glob.fp is PM's
+                // own fproc slot (endpoint 0), not the exiting process.
+                pm_exit_endpoint(proc_e);
+                #[cfg(target_os = "none")]
+                unsafe {
+                    reply_to_pm(VFS_PM_EXIT_REPLY, proc_e)
+                };
             }
-            // Phase 2 (postponed) is called by the worker thread when ready.
             OK
         }
 

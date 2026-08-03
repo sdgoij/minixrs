@@ -25,7 +25,6 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::mount;
 use crate::vfs::path;
 use crate::vfs::path::PATH_RET_SYMLINK;
-use crate::vfs::request::{w_i32, w_i64, w_u32, w_u64};
 use crate::vfs::stadir;
 use crate::vfs::stadir::close_fd;
 use crate::vfs::types::*;
@@ -36,7 +35,7 @@ const FD_OFF: usize = 8;
 const LSEEK_OFF_OFF: usize = 12;
 
 /// SELF endpoint constant (from kernel::system::SELF).
-const SELF: i32 = 31742;
+pub(crate) const SELF: i32 = 31742;
 /// SYS_VIRCOPY kernel call number.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 const SYS_VIRCOPY: i32 = 15;
@@ -60,7 +59,7 @@ const COPY_SRC_ENDPT_OFF: usize = 48;
 /// Perform a SYS_VIRCOPY kernel call to copy data between address spaces.
 /// Runs the copy in ring 0 via the kernel call dispatch mechanism.
 /// Safety: see `kernel::vm::virtual_copy`.
-unsafe fn sys_vircopy(
+pub(crate) unsafe fn sys_vircopy(
     src_endpt: i32,
     src_addr: u64,
     dst_endpt: i32,
@@ -445,29 +444,10 @@ pub fn do_read() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        // Pipe reads go through the in-VFS pipe buffer.
+        // Pipe reads come from the in-VFS ring buffer.
         if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
-            // Route to Pipe File Server (PFS) via FS IPC.
             let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
-            let mut msg = [0u8; 56];
-            w_i32(&mut msg, 0, 0xA13); // REQ_READ
-            w_u32(&mut msg, 8, pipe_idx as u32);
-            w_i64(&mut msg, 12, filp.filp_pos);
-            w_u64(&mut msg, 20, count as u64);
-            let r = crate::vfs::request::fs_sendrec(PFS_PROC_NR, &mut msg);
-            if r < 0 {
-                return r;
-            }
-            let reply_count = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
-            if reply_count <= 0 {
-                return reply_count;
-            }
-            filp.filp_pos = i64::from_le_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
-            let copy_len = (reply_count as usize).min(count).min(48);
-            if copy_len > 0 {
-                core::ptr::copy_nonoverlapping(msg.as_ptr().add(8), buf_addr as *mut u8, copy_len);
-            }
-            return reply_count;
+            return crate::vfs::pipe::pipe_read_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
         }
         // Call the FS request layer to perform the read.
         let (r, new_pos) = crate::vfs::request::req_read(
@@ -517,31 +497,10 @@ pub fn do_write() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        // Pipe writes go through the Pipe File Server (PFS).
+        // Pipe writes go into the in-VFS ring buffer.
         if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
             let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
-            let mut msg = [0u8; 56];
-            w_i32(&mut msg, 0, 0xA14); // REQ_WRITE
-            w_u32(&mut msg, 8, pipe_idx as u32);
-            w_i64(&mut msg, 12, filp.filp_pos);
-            w_u64(&mut msg, 20, count as u64);
-            let copy_len = count.min(28);
-            if copy_len > 0 {
-                core::ptr::copy_nonoverlapping(
-                    buf_addr as *const u8,
-                    msg.as_mut_ptr().add(28),
-                    copy_len,
-                );
-            }
-            let r = crate::vfs::request::fs_sendrec(PFS_PROC_NR, &mut msg);
-            if r < 0 {
-                return r;
-            }
-            let written = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
-            if written > 0 {
-                filp.filp_pos = i64::from_le_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
-            }
-            return written;
+            return crate::vfs::pipe::pipe_write_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
         }
         let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,
@@ -652,18 +611,10 @@ pub fn do_pipe2() -> i32 {
     fp.fp_filp[fd0 as usize] = filp0;
     fp.fp_filp[fd1 as usize] = filp1;
 
-    // Create the pipe inode on PFS.
-    let (_r, _nd) = unsafe {
-        crate::vfs::request::req_newnode(
-            PFS_PROC_NR,
-            fp.fp_effuid,
-            fp.fp_effgid,
-            I_NAMED_PIPE,
-            0xffff,
-        )
-    };
-
     // Allocate a local pipe buffer (in-VFS, no separate PFS server).
+    // Deviation from C: the original creates a named-pipe inode on PFS via
+    // req_newnode; here the pipe data lives in VFS's own ring buffer, so no
+    // PFS inode is needed and the vnode stays a local pipe vnode.
     let pipe_idx = match crate::vfs::pipe::alloc_pipe() {
         Some(idx) => idx,
         None => {
