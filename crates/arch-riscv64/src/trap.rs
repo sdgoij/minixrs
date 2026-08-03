@@ -192,7 +192,17 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 unsafe {
                     let irq = crate::plic::claim_irq();
                     if irq != 0 {
-                        // TODO: dispatch to registered handler based on IRQ
+                        if irq == crate::plic::UART_IRQ {
+                            // Drain the 16550 RX FIFO into the ser_input
+                            // ring so piped bursts don't overrun the
+                            // 16-byte FIFO while the shell is busy between
+                            // timer ticks.
+                            if let Some(cb) = *UART_INPUT_CALLBACK.get() {
+                                while let Some(byte) = crate::uart::try_getchar() {
+                                    cb(byte);
+                                }
+                            }
+                        }
                         crate::plic::complete_irq(irq);
                     }
                 }

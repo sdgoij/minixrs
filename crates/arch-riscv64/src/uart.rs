@@ -71,6 +71,21 @@ pub unsafe fn init_uart() {
     }
 }
 
+/// Enable the receiver-data-available interrupt (IER bit 0).
+///
+/// Without this the UART never raises IRQ 10, so piped input is only
+/// drained on timer ticks / read_blocking and a burst overruns the
+/// 16-byte RX FIFO while the shell is busy.
+///
+/// # Safety
+///
+/// Must be called once during boot after `init_uart()`.
+pub unsafe fn enable_rx_interrupt() {
+    unsafe {
+        uart_write(IER, uart_read(IER) | 0x01);
+    }
+}
+
 /// Write a single byte to the UART (blocking).
 pub fn putchar(c: u8) {
     unsafe {

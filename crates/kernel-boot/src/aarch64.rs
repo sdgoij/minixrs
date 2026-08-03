@@ -645,6 +645,11 @@ pub unsafe extern "C" fn kmain() -> ! {
             enable_gic();
         }
 
+        // Enable the PL011 RX interrupt so piped bursts drain into the
+        // ser_input ring promptly (via el1_irq_handler_c) instead of
+        // overrunning the RX FIFO between timer ticks.
+        arch_aarch64::hal::enable_rx_interrupt();
+
         if first_proc.is_null() {
             serial_write("  FAILED: no boot processes found\r\n");
             arch_aarch64::hal::halt();

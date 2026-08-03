@@ -18,8 +18,11 @@ const UART_BASE: usize = 0x0900_0000;
 const UART_DR: usize = UART_BASE + 0x00;
 const UART_FR: usize = UART_BASE + 0x18;
 const UART_CR: usize = UART_BASE + 0x30;
+const UART_IMSC: usize = UART_BASE + 0x38; // Interrupt Mask Set/Clear
+const UART_ICR: usize = UART_BASE + 0x44; // Interrupt Clear
 const FR_RXFE: u32 = 1 << 4; // Receive FIFO empty
 const FR_TXFF: u32 = 1 << 5; // Transmit FIFO full
+const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
 
 /// Initialize the PL011 UART.
 pub fn uart_init() {
@@ -27,6 +30,22 @@ pub fn uart_init() {
         // Enable UART: UARTEN | TXE | RXE
         let cr: u32 = core::ptr::read_volatile(UART_CR as *const u32);
         core::ptr::write_volatile(UART_CR as *mut u32, cr | (1 << 0) | (1 << 8) | (1 << 9));
+    }
+}
+
+/// Enable the PL011 receive interrupt (IMSC RXIM).
+///
+/// Without this the UART never raises its IRQ line, so piped input is
+/// only drained on timer ticks / read_blocking and a burst overruns the
+/// RX FIFO while the shell is busy. The GIC must already route SPI 33
+/// (see `enable_gic` in kernel-boot) and `el1_irq_handler_c` drains the
+/// UART on every IRQ, so enabling the mask is all that is needed.
+pub fn enable_rx_interrupt() {
+    unsafe {
+        // Clear any stale RX interrupt before unmasking.
+        core::ptr::write_volatile(UART_ICR as *mut u32, IMSC_RXIM);
+        let imsc: u32 = core::ptr::read_volatile(UART_IMSC as *const u32);
+        core::ptr::write_volatile(UART_IMSC as *mut u32, imsc | IMSC_RXIM);
     }
 }
 

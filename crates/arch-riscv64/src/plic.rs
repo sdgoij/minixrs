@@ -17,11 +17,14 @@ use core::ptr::{read_volatile, write_volatile};
 pub const PLIC_BASE: u64 = 0x0C000000;
 
 /// Enable bit offset for hart 0 (S-mode).
-pub const PLIC_ENABLE_HART0: u64 = PLIC_BASE + 0x2000 + 0x80; // S-mode context
+/// QEMU sifive_plic: enable stride 0x80; context 1 (hart 0 S-mode).
+pub const PLIC_ENABLE_HART0: u64 = PLIC_BASE + 0x2000 + 0x80;
 /// Claim/Complete register for hart 0 (S-mode).
-pub const PLIC_CLAIM_HART0: u64 = PLIC_BASE + 0x200000 + 0x1F0000 + 0x04; // S-mode claim
+/// QEMU sifive_plic: context stride 0x1000; context 1 (hart 0 S-mode).
+pub const PLIC_CLAIM_HART0: u64 = PLIC_BASE + 0x200000 + 0x1000 + 0x04;
 /// Threshold register for hart 0 (S-mode).
-pub const PLIC_THRESHOLD_HART0: u64 = PLIC_BASE + 0x200000 + 0x1F0000; // S-mode threshold
+/// QEMU sifive_plic: context stride 0x1000; context 1 (hart 0 S-mode).
+pub const PLIC_THRESHOLD_HART0: u64 = PLIC_BASE + 0x200000 + 0x1000;
 
 /// UART IRQ number on QEMU virt.
 pub const UART_IRQ: u32 = 10;

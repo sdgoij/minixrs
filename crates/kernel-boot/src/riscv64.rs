@@ -577,6 +577,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 kernel::hal::write_cr3(boot_pt);
                 // Enable UART FIFO for piped input support
                 arch_riscv64::uart::init_uart();
+                // Enable UART RX interrupts: the 16550 must raise IRQ 10
+                // on received data (IER bit 0) and the PLIC must forward
+                // it, so a piped burst drains into the ser_input ring
+                // promptly instead of overrunning the 16-byte FIFO between
+                // timer ticks. Done after init_uart() (UART configured)
+                // and write_cr3() (device MMIO mapped by the boot table).
+                arch_riscv64::uart::enable_rx_interrupt();
+                arch_riscv64::plic::enable_irq(arch_riscv64::plic::UART_IRQ);
                 serial_write("  SV39 enabled\r\n");
             } else {
                 serial_write("  FAILED: boot page table\r\n");
