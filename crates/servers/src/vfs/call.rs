@@ -179,6 +179,19 @@ pub fn do_open() -> i32 {
         return ENOENT;
     }
 
+    // Character devices: route the open to the registered driver before
+    // wiring a filp. The filp still references the device vnode so that
+    // close/dup/fcntl behave normally; reads, writes and close dispatch on
+    // the vnode mode.
+    if unsafe { (*vp).v_mode & S_IFMT } == S_IFCHR {
+        let r = unsafe { crate::vfs::device::cdev_open((*vp).v_dev, flags as i32) };
+        if r < 0 {
+            unsafe { mount::put_vnode(vp) };
+            fp.fp_filp[fd as usize] = -1;
+            return r;
+        }
+    }
+
     // Allocate a filp entry.
     let filp_idx = unsafe { filedes::alloc_filp() };
     if filp_idx < 0 {
@@ -449,6 +462,18 @@ pub fn do_read() -> i32 {
             let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
             return crate::vfs::pipe::pipe_read_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
         }
+        // Character devices: route through the registered driver.
+        if ((*vp).v_mode & S_IFMT) == S_IFCHR {
+            return crate::vfs::device::cdev_io(
+                crate::vfs::consts::CDEV_READ,
+                (*vp).v_dev,
+                fp.fp_endpoint,
+                buf_addr,
+                filp.filp_pos,
+                count as u64,
+                filp.filp_flags as i32,
+            );
+        }
         // Call the FS request layer to perform the read.
         let (r, new_pos) = crate::vfs::request::req_read(
             (*vp).v_fs_e,
@@ -501,6 +526,18 @@ pub fn do_write() -> i32 {
         if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
             let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
             return crate::vfs::pipe::pipe_write_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
+        }
+        // Character devices: route through the registered driver.
+        if ((*vp).v_mode & S_IFMT) == S_IFCHR {
+            return crate::vfs::device::cdev_io(
+                crate::vfs::consts::CDEV_WRITE,
+                (*vp).v_dev,
+                fp.fp_endpoint,
+                buf_addr,
+                filp.filp_pos,
+                count as u64,
+                filp.filp_flags as i32,
+            );
         }
         let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,

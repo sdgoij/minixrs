@@ -7,13 +7,44 @@ description: Testing patterns for MINIX/Rust OS development — three test domai
 
 **Every task MUST include tests. No exceptions.**
 
-| Test Type | When to Use | Example |
-|-----------|-------------|---------|
-| **Unit tests** (`#[test]`) | Pure functions, state machines, parsing | Struct layouts, message encoding, constants |
-| **Property tests** (`proptest`) | Behavior must hold for ALL valid inputs | Page table walks, endpoint encoding roundtrip |
-| **Integration tests** (QEMU/boot test) | Multi-crate or cross-process behavior | IPC round-trip, VFS↔MFS protocol, grant verify |
+## A change is not done until a test pins it
 
-## Three Test Domains
+"Existing tests still pass" is not evidence — the suite passing on both the
+old and the new code verifies nothing. A behavioral or architectural change is
+done only when a test **fails on the pre-change code and passes on the new**
+(a regression pin). A QEMU boot is not a regression test: nobody re-runs it
+after every edit, so a change verified only by booting leaves the tree exactly
+as easy to break as it was before.
+
+**The pin must live in `cargo test` (host), not in a boot.** If the changed
+logic sits behind a syscall or hardware access, refactor it to be host-
+testable instead of leaving it untested:
+
+- **Extract the pure decision logic** into a function and test that; the
+  syscall-touching caller becomes a thin wrapper. Examples in-tree:
+  `apply_action` (extracted from PM `do_sigaction`), `process_ksig_reply`
+  (extracted from the PM NOTIFY loop), tty `sigchar`'s `#[cfg(not(test))]`
+  around `send_kill`.
+- **Pin cross-layer invariants at the layer that owns them.** If user-space
+  logic relies on a kernel invariant (e.g. PM's "exit_proc only for
+  `pending_bits == 0`" depends on "`sys_exit_handler` sets
+  `p_signal_received` but never `p_pending`; `cause_sig` sets `p_pending`
+  but never `p_signal_received`"), write the invariant test in the kernel,
+  not just a consumer-side assertion.
+- **Re-enable or delete parked/`#[ignore]`d tests** that touch the changed
+  area — a disabled test is an unverified behavior.
+
+Checklist before declaring a change done:
+
+- [ ] A host test exercises the NEW behavior (not just "suite is green")
+- [ ] That test would fail on the pre-change code (verify with `git stash`
+      or by reverting the one-line fix if needed)
+- [ ] Parked tests touching the change are re-enabled or deleted
+- [ ] All host suites green: kernel, servers, minix-std, minix-rt, userland,
+      boot-image
+- [ ] `cargo clippy -- -D warnings` clean on the changed crates
+
+## Test Type / Domain Quick Reference
 
 | Domain | Runner | Best For | Cost |
 |--------|--------|----------|------|

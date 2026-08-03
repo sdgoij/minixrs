@@ -24,7 +24,6 @@ use crate::MinixErr;
 #[cfg(target_os = "none")]
 use crate::{Message, PM_PROC_NR, sendrec};
 
-
 pub const PM_BASE: u32 = 0x000;
 pub const PM_ITIMER: u32 = PM_BASE + 17; // 0x011
 pub const PM_KILL: u32 = PM_BASE + 11; // 0x00B
@@ -36,11 +35,15 @@ pub const PM_CLOCK_GETRES: u32 = PM_BASE + 33; // 0x021
 pub const PM_CLOCK_GETTIME: u32 = PM_BASE + 34; // 0x022
 pub const PM_CLOCK_SETTIME: u32 = PM_BASE + 35; // 0x023
 
-
 pub const SIGHUP: i32 = 1;
 pub const SIGINT: i32 = 2;
 pub const SIGQUIT: i32 = 3;
 pub const SIGILL: i32 = 4;
+
+/// Signal disposition values: SIG_DFL (0) / SIG_IGN (1), as the kernel
+/// (`do_sigaction`) reads them from the raw handler field.
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
 pub const SIGTRAP: i32 = 5;
 pub const SIGABRT: i32 = 6;
 pub const SIGFPE: i32 = 8;
@@ -67,15 +70,12 @@ pub const SA_SIGINFO: i32 = 0x00000004;
 pub const SA_RESTART: i32 = 0x00000008;
 pub const SA_NODEFER: i32 = 0x00000010;
 
-
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
-
 
 pub const ITIMER_REAL: i32 = 0;
 pub const ITIMER_VIRTUAL: i32 = 1;
 pub const ITIMER_PROF: i32 = 2;
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -91,7 +91,6 @@ pub struct ITimerVal {
     pub it_value: TimeSpec,
 }
 
-
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct SigAction {
@@ -100,7 +99,6 @@ pub struct SigAction {
     pub sa_flags: i32,
     pub sa_restorer: Option<unsafe extern "C" fn()>,
 }
-
 
 const OFF_TYPE: usize = 8;
 
@@ -322,6 +320,53 @@ pub unsafe fn sigaction(
     }
 }
 
+/// A C-style 28-byte sigaction whose handler field is SIG_IGN (1).
+///
+/// Kept in the data segment (not on the stack): PM reads it via
+/// cross-address-space SYS_VIRCOPY, which resolves the pointer in the
+/// caller's page table. A stack-local buffer worked, but exec'd processes'
+/// stack pages read back as zeros through the copy path on this port, so
+/// the value must live somewhere the copy resolves reliably.
+static SIG_IGN_ACTION: [u8; 28] = [
+    1, 0, 0, 0, 0, 0, 0, 0, // handler = SIG_IGN
+    0, 0, 0, 0, 0, 0, 0, 0, // mask
+    0, 0, 0, 0, 0, 0, 0, 0, // mask (cont.) + flags
+    0, 0, 0, 0, // flags + restorer
+];
+
+/// Ignore a signal: set its disposition to SIG_IGN.
+///
+/// PM reads a C-style 28-byte sigaction from the act pointer (handler u64 +
+/// mask 16 + flags i32); SIG_IGN is the raw handler value 1.
+///
+/// The message is built against PM's actual layout (m_type at bytes 4-8,
+/// signo in m1i1 @8, act pointer in m2l1 @24, oact pointer in m2l2 @32),
+/// not the `OFF_TYPE = 8` used by the other (as-yet-unwired) minix-std PM
+/// wrappers, which PM would misread as call 0.
+pub fn sig_ignore(sig: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "none")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, 4, PM_SIGACTION as i32);
+        msg_set_i32(&mut msg, 8, sig);
+        msg_set_u64(&mut msg, 24, SIG_IGN_ACTION.as_ptr() as u64);
+        msg_set_u64(&mut msg, 32, 0);
+        let _ = sendrec(PM_PROC_NR, &mut msg)?;
+        // PM replies with the status in m_type (bytes 4-8).
+        let mtype = msg_i32(&msg, 4);
+        if mtype < 0 {
+            Err(MinixErr::from_i32(mtype))
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = sig;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
 /// Examine and change the signal mask.
 pub fn sigprocmask(how: i32, set: u64) -> Result<u64, MinixErr> {
     #[cfg(target_os = "none")]
@@ -450,6 +495,33 @@ mod tests {
         assert_eq!(SA_NOCLDSTOP, 0x00000001);
         assert_eq!(SA_RESTART, 0x00000008);
         assert_eq!(SA_SIGINFO, 0x00000004);
+    }
+
+    #[test]
+    fn test_sig_dispositions() {
+        assert_eq!(SIG_DFL, 0);
+        assert_eq!(SIG_IGN, 1);
+    }
+
+    #[test]
+    fn test_sig_ignore_message_layout() {
+        // The PM_SIGACTION request must carry the call number in m_type
+        // (bytes 4-8), signo in m1i1 (bytes 8-12), the act pointer in m2l1
+        // (bytes 24-32) and no oact pointer — matching PM's dispatch and
+        // do_sigaction offsets. The act buffer's handler field is SIG_IGN=1.
+        let mut act = [0u8; 28];
+        act[0..8].copy_from_slice(&SIG_IGN.to_ne_bytes());
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, 4, PM_SIGACTION as i32);
+        msg_set_i32(&mut msg, 8, SIGINT);
+        msg_set_u64(&mut msg, 24, act.as_ptr() as u64);
+        msg_set_u64(&mut msg, 32, 0);
+
+        assert_eq!(msg_i32(&msg, 4), PM_SIGACTION as i32);
+        assert_eq!(msg_i32(&msg, 8), SIGINT);
+        assert_eq!(msg_u64(&msg, 24), act.as_ptr() as u64);
+        assert_eq!(msg_u64(&msg, 32), 0);
+        assert_eq!(u64::from_ne_bytes(act[0..8].try_into().unwrap()), SIG_IGN);
     }
 
     #[test]

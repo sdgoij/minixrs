@@ -5,6 +5,31 @@ description: Debugging methodology for bare-metal MINIX/Rust OS development. Use
 
 # Bare-Metal Debug Methodology
 
+## NO MORE DIAGNOSTIC PRINTS — EVER
+
+**Never add temporary debug prints to kernel or server source to diagnose an
+issue.** No `serial_write`/`serial_putc` debug blocks, no `[tag] field=` value
+dumps in the hot path, no commented-out debug code kept "just in case".
+
+Why this is a hard rule, not a preference:
+
+- Every debug block is a landmine for the next session: removing it later is
+  another edit that can silently drop a real line of code (this happened — a
+  `write_cr3(restore_cr3)` call vanished with its surrounding debug block and
+  would have left the kernel running on the wrong page table).
+- Debug prints change timing, interleave with serial console output, and get
+  mistaken for real boot messages.
+- The tree must be shippable at every checkpoint; a debug print left behind
+  is a regression the operator has to catch.
+
+Instead, use the **LLDB remote-debugging flow** in this skill: run QEMU with
+`-s` (GDB stub), attach LLDB, set breakpoints, read registers/memory — no
+source changes needed. Boot tests (`just test-boot`) may still assert values,
+but they must be removed or gated once the issue is resolved.
+
+If you find a debug print already in the tree (left by an earlier session),
+**remove it** as part of your work — never leave it for the operator.
+
 ## Core Principle: Cheapest Test First
 
 Every QEMU cycle costs ~30-120 seconds. **Do not theorize for 10 minutes what you can disprove in one boot test.** Before writing a paragraph of analysis, write 5 lines of boot test code.

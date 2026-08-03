@@ -105,6 +105,13 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     // Initialise device map and mount the root filesystem.
     dmap::init_dmap();
 
+    // Register the tty server as the console (major 5) character driver so
+    // opening /dev/console reaches it. TODO(1A.5): replace with RS-driven
+    // registration once tty publishes its dev_nr at boot.
+    unsafe {
+        dmap::map_driver(b"tty", 5, arch_common::com::TTY_PROC_NR);
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();

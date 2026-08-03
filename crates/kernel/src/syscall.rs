@@ -104,7 +104,13 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     let buf = args[1] as *mut u8;
     let count = args[2] as usize;
     if fd == 0 && (!caller.is_null() && (*caller).p_fd_vfs & 1 == 0) {
-        // stdin → serial input (interrupt-driven via ser_input).
+        // stdin → serial input (interrupt-driven via ser_input). The
+        // tty server is the only process that reads the ring directly
+        // (its own fd 0 stays non-VFS); a stray reader would steal
+        // console input from tty (TTY.md 1C.4).
+        if !caller.is_null() && (*caller).p_endpoint != TTY_PROC_NR {
+            return -9; // EBADF
+        }
         if buf.is_null() || count == 0 {
             return -14; // EFAULT
         }
@@ -381,7 +387,8 @@ unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 
 /// VFS server endpoint.
 const VFS_PROC_NR: i32 = 1;
-#[allow(dead_code)]
+/// TTY server endpoint — the only process allowed to read the kernel
+/// serial ring directly (its fd 0 stays non-VFS).
 const TTY_PROC_NR: i32 = 5;
 
 /// Build a VFS IPC message and send it via `do_sync_ipc`.
@@ -1090,15 +1097,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses PM as both the exiting process and its own signal manager; mini_notify tries to enqueue the process after clearing transient flags, but SLOT_FREE set by sys_exit_handler makes it non-runnable. Would need a non-PM process with proper priv setup."]
     fn test_exit_frees_slot_and_stores_status() {
         unsafe {
             proc_init();
             #[cfg(target_arch = "x86_64")]
             crate::hal::init_cpulocals();
-            let rp = crate::table::proc_addr(0);
-            (*rp).p_nr = 0;
+            // Exit a non-PM process (proc 1) so the SIGKSIG notification to
+            // PM (proc 0) does not target the exiting process itself.
+            let rp = crate::table::proc_addr(1);
+            (*rp).p_nr = 1;
             (*rp).p_endpoint = 100;
+            (*rp).p_pending = 0;
             (*rp)
                 .p_rts_flags
                 .store(0, core::sync::atomic::Ordering::Relaxed);
@@ -1115,6 +1124,11 @@ mod tests {
             );
             // Should store exit status in p_signal_received
             assert_eq!((*rp).p_signal_received, 42);
+            // Invariant PM's SYS_GETKSIG loop relies on: an exit carries the
+            // status in p_signal_received and NEVER sets p_pending (only
+            // cause_sig does). A signal-only reply has p_pending != 0 and
+            // p_signal_received == 0; exit_proc must only run for the former.
+            assert_eq!((*rp).p_pending, 0, "exit must not set p_pending");
             // Should have queued a pending exit notification
             let pending = pop_pending_exit();
             assert_eq!(pending, Some((100, 42)));

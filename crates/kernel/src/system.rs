@@ -5517,6 +5517,77 @@ mod tests {
     }
 
     #[test]
+    fn test_cause_sig_never_sets_exit_status() {
+        unsafe {
+            init_signal_test_env();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*rp).p_pending = 0;
+            (*rp).p_signal_received = 0;
+
+            // SIGINT = 2
+            cause_sig(0, 2);
+
+            assert!((*rp).p_pending & (1u128 << 2) != 0);
+            assert_eq!(
+                (*rp).p_signal_received,
+                0,
+                "a signal must not look like an exit"
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_getksig_reply_contract() {
+        unsafe {
+            init_signal_test_env();
+            let mgr = crate::table::proc_addr(0);
+            let rp = crate::table::proc_addr(1);
+            let mut target_priv: Priv = core::mem::zeroed();
+            target_priv.s_sig_mgr = (*mgr).p_endpoint;
+            (*rp).p_priv = &raw mut target_priv;
+            (*rp).p_endpoint = crate::table::make_endpoint(0, 1);
+            (*rp)
+                .p_rts_flags
+                .store(RtsFlags::SIGNALED.bits(), Ordering::Relaxed);
+            (*rp).p_pending = 1u128 << 2;
+            (*rp).p_signal_received = 7;
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let r = do_getksig_handler(mgr, &mut msg);
+            assert_eq!(r, OK);
+            assert_eq!(
+                msg_read_i32(&msg, SIGCALLS_ENDPT_OFF),
+                1,
+                "endpoint at SIGCALLS_ENDPT_OFF (16)"
+            );
+            assert_eq!(
+                u128::from_ne_bytes(
+                    msg[SIGCALLS_MAP_OFF..SIGCALLS_MAP_OFF + 16]
+                        .try_into()
+                        .unwrap()
+                ),
+                1u128 << 2,
+                "pending map at SIGCALLS_MAP_OFF (0)"
+            );
+            assert_eq!(msg_read_i32(&msg, 24), 7, "exit status at offset 24");
+            assert_eq!((*rp).p_pending, 0, "map cleared after reply");
+            assert_eq!((*rp).p_signal_received, 0, "status cleared after reply");
+            assert_eq!(
+                (*rp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SIGNALED.bits(),
+                0,
+                "SIGNALED cleared after reply"
+            );
+
+            // Second call finds nothing: NONE sentinel.
+            let mut msg2 = [0u8; MESSAGE_SIZE];
+            let r2 = do_getksig_handler(mgr, &mut msg2);
+            assert_eq!(r2, OK);
+            assert_eq!(msg_read_i32(&msg2, SIGCALLS_ENDPT_OFF), NONE);
+        }
+    }
+
+    #[test]
     fn test_cause_sig_sets_p_pending() {
         unsafe {
             init_signal_test_env();
@@ -6643,6 +6714,37 @@ mod tests {
     #[test]
     fn test_copy_flags_constant() {
         assert_eq!(CP_FLAG_TRY, 0x01);
+    }
+
+    #[test]
+    fn test_vircopy_self_resolves_to_caller() {
+        unsafe {
+            proc_init();
+            let caller = crate::table::proc_addr(0);
+            (*caller).p_endpoint = 42;
+            let mut msg = [0u8; MESSAGE_SIZE];
+            // src = SELF, dst = SELF, zero bytes: virtual_copy returns OK
+            // early, but only after do_copy_common resolves SELF to the
+            // caller's endpoint. An UNresolved SELF (31742) fails
+            // is_ok_endpoint -> EINVAL, so OK proves the resolution.
+            msg_write_i32(&mut msg, COPY_SRC_ENDPT_OFF, crate::system::SELF);
+            msg_write_i32(&mut msg, COPY_DST_ENDPT_OFF, crate::system::SELF);
+            msg_write_u64(&mut msg, COPY_NR_BYTES_OFF, 0);
+            let result = do_vircopy_handler(caller, &mut msg);
+            assert_eq!(result, 0, "SELF must resolve to the caller");
+        }
+    }
+
+    #[test]
+    fn test_old_self_sentinel_maps_to_kernel_task_slot() {
+        // minix_rt::SELF was once 0x0000fffd. endpoint_slot() maps it to
+        // -3 (the CLOCK kernel-task slot), so an unresolved SELF silently
+        // targeted a kernel task instead of failing — the root cause of
+        // the sig_ignore delivery bug. The kernel's SELF (31742) is not a
+        // valid endpoint and would be rejected, which is why resolution
+        // must happen before validation.
+        assert_eq!(crate::table::endpoint_slot(0x0000fffd), -3);
+        assert!(!crate::table::is_ok_endpoint(crate::system::SELF));
     }
 
     #[test]

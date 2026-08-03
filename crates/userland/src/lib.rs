@@ -605,6 +605,45 @@ pub fn init(_args: &[&str]) -> i32 {
     write_out(b"\n");
 
     write_out(b"init: starting shell...\n");
+
+    // Route stdio through VFS → tty: open /dev/console, dup2 it onto
+    // 0/1/2, and mark the fds VFS-owned so the kernel forwards reads and
+    // writes to VFS (and the tty) instead of the serial ring / direct
+    // UART. The p_fd_vfs flags and the VFS filps survive fork/exec, so
+    // the shell and its children inherit tty-backed stdio (TTY.md 1C.1).
+    let mut console_ok = false;
+    let fd = minix_rt::open(b"/dev/console", 0o2); // O_RDWR
+    if fd >= 0 {
+        let fd = fd as i32;
+        if minix_std::fs::dup2(fd, 0).is_ok()
+            && minix_std::fs::dup2(fd, 1).is_ok()
+            && minix_std::fs::dup2(fd, 2).is_ok()
+        {
+            unsafe {
+                minix_rt::set_fd_vfs(0, 1);
+                minix_rt::set_fd_vfs(1, 1);
+                minix_rt::set_fd_vfs(2, 1);
+            }
+            console_ok = true;
+        }
+    }
+    if !console_ok {
+        // The kernel guards the direct fd-0 serial path to tty only, so a
+        // shell without VFS stdio would be unable to read input. Hang
+        // loudly rather than boot a broken shell.
+        write_err(b"init: /dev/console setup failed - hanging\n");
+        loop {
+            #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack))
+            };
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
+            unsafe {
+                core::arch::asm!("pause")
+            };
+        }
+    }
+
     // Build argv: ["/bin/sh", null]
     #[cfg(target_os = "none")]
     let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];

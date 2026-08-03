@@ -48,7 +48,12 @@ pub const PM_EXEC: i32 = 0x000E;
 pub const PM_EXEC_NEW: i32 = 0x002B;
 
 /// SELF endpoint — send to the calling process itself.
-pub const SELF: i32 = 0x0000fffd;
+///
+/// Must match the kernel's `system::SELF` (`_ENDPOINT_SLOT_TOP - 3` = 31742,
+/// MINIX 3.3.0 `minix/endpoint.h`). The kernel resolves SELF in kernel_call
+/// messages to the caller's endpoint; 0xFFFD is not recognized and silently
+/// maps to a kernel-task slot, corrupting vircopy destinations.
+pub const SELF: i32 = 31742;
 
 /// IPC syscall numbers.
 pub const SEND_CALL: u64 = 46;
@@ -1534,7 +1539,7 @@ mod tests {
         assert_eq!(PM_PROC_NR, 0);
         assert_eq!(VFS_PROC_NR, 1);
         assert_eq!(VM_PROC_NR, 8);
-        assert_eq!(SELF, 0x0000fffd);
+        assert_eq!(SELF, 31742);
     }
 
     #[test]

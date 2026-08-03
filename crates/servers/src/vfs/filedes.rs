@@ -179,6 +179,13 @@ pub unsafe fn close_filp(filp_idx: i32) -> i32 {
     f.filp_count -= 1;
 
     if f.filp_count == 0 {
+        // Last reference: tell the driver about character-device closes.
+        let vp = f.filp_vno;
+        if !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFCHR {
+            unsafe {
+                crate::vfs::device::cdev_close((*vp).v_dev);
+            }
+        }
         *f = Filp::default();
     }
 

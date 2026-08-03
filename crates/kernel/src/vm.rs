@@ -503,8 +503,6 @@ pub unsafe fn virtual_copy(
             crate::hal::write_cr3(dst_cr3);
             compiler_fence(Ordering::SeqCst);
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst_va as *mut u8, chunk);
-
-            // Restore the saved CR3 (not boot_cr3 — servers have their own)
             compiler_fence(Ordering::SeqCst);
             crate::hal::write_cr3(restore_cr3);
             compiler_fence(Ordering::SeqCst);

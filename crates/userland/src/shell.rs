@@ -64,6 +64,12 @@ pub fn sh(_args: &[&str]) -> i32 {
     }
     #[cfg(target_os = "none")]
     {
+        // Ignore SIGINT: the tty's sigchar sends it on ^C, and the shell
+        // must survive it at the prompt (read_line just gets EINTR and the
+        // loop reprints the prompt). TTY.md 1C.3.
+        if minix_std::time::sig_ignore(minix_std::time::SIGINT).is_err() {
+            write_err(b"sh: warning: cannot ignore SIGINT\n");
+        }
         write_out(b"# ");
         let mut buf = [0u8; 256];
         loop {
@@ -127,35 +133,34 @@ pub fn sh(_args: &[&str]) -> i32 {
 // Line reading
 // ---------------------------------------------------------------------------
 
-/// Read one line from stdin into `buf`.  Returns the number of bytes stored
-/// (excluding the trailing null / cr / lf).
+/// Read one line from stdin into `buf`. Returns the number of bytes stored
+/// (excluding the trailing newline).
+///
+/// The tty's canonical line discipline (ICANON) does the echoing, backspace
+/// and line editing; this only accumulates bytes until the line ends. The
+/// first read blocks until a line is available, so a ^C (EINTR) at an empty
+/// prompt yields an empty line and the caller reprints the prompt.
 #[cfg(target_os = "none")]
 fn read_line(buf: &mut [u8]) -> usize {
-    let mut pos = 0usize;
-    while pos < buf.len() - 1 {
-        let n = minix_rt::read(0, &mut buf[pos..pos + 1]);
+    let mut total = 0usize;
+    loop {
+        let n = minix_rt::read(0, &mut buf[total..]);
         if n <= 0 {
             break;
         }
-        let c = buf[pos];
-        // Enter (\r from QEMU terminal) ends the line.
-        if c == b'\r' || c == b'\n' {
-            write_out(b"\r\n");
+        total += n as usize;
+        if total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
             break;
         }
-        // Backspace (DEL 0x7F or BS 0x08) erases previous char.
-        if c == 0x7F || c == 0x08 {
-            if pos > 0 {
-                pos -= 1;
-                write_out(b"\x08 \x08");
-            }
-            continue;
+        if total >= buf.len() {
+            break;
         }
-        // Echo printable character and store it.
-        write_out(&[c]);
-        pos += 1;
     }
-    pos
+    // Strip the trailing newline (canonical mode delivers it).
+    while total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
+        total -= 1;
+    }
+    total
 }
 
 // ---------------------------------------------------------------------------

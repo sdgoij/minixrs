@@ -436,6 +436,12 @@ pub struct Tty {
     pub tty_eotct: i32,
     /// Routine to read from low level buffers.
     pub tty_devread: DevFun,
+    /// True when the line is wired (devread etc. configured); gates
+    /// `line2tty`. An explicit flag rather than comparing `tty_devread`
+    /// against `tty_devnop`: the linker can fold byte-identical no-op
+    /// functions (console_read vs tty_devnop), making the pointer
+    /// comparison unreliable.
+    pub tty_line_active: bool,
     /// Cancel any device input.
     pub tty_icancel_fn: DevFun,
     /// Minimum requested number of chars in input queue.
@@ -477,6 +483,8 @@ pub struct Tty {
     pub tty_inleft: usize,
     /// Number of chars input so far.
     pub tty_incum: usize,
+    /// Set when sigchar released the pending read; do_read replies EINTR.
+    pub tty_read_intr: bool,
 
     /// Process that made the write call, or NONE.
     pub tty_outcaller: u32,
@@ -545,6 +553,7 @@ impl Tty {
             tty_incount: 0,
             tty_eotct: 0,
             tty_devread: tty_devnop,
+            tty_line_active: false,
             tty_icancel_fn: tty_devnop,
             tty_min: 1,
             tty_tmr: MinixTimer {
@@ -569,6 +578,7 @@ impl Tty {
             tty_ingrant: 0,
             tty_inleft: 0,
             tty_incum: 0,
+            tty_read_intr: false,
             tty_outcaller: NONE,
             tty_outid: 0,
             tty_outgrant: 0,
@@ -638,10 +648,10 @@ fn tty_addr(idx: usize) -> *mut Tty {
     unsafe { TTY_TABLE.as_ptr().add(idx) }
 }
 
-/// Returns `true` if the TTY line is active (has a devread function).
+/// Returns `true` if the TTY line is wired (active).
 #[inline]
 fn tty_active(tp: &Tty) -> bool {
-    tp.tty_devread as usize != tty_devnop as *const () as usize
+    tp.tty_line_active
 }
 
 /// Returns `true` if the TTY is a console line.
@@ -783,8 +793,17 @@ pub fn in_process(tp: &mut Tty, buf: &[u8]) -> usize {
 
         // Canonical mode?
         if tp.tty_termios.c_lflag & ICANON != 0 {
-            // Erase processing (rub out of last character).
-            if ch as u8 == tp.tty_termios.c_cc[VERASE] {
+            // Erase processing (rub out of last character). Accept both
+            // BS (0x08) and DEL (0x7F) as erase when VERASE is one of
+            // them — real terminals disagree on which the Backspace key
+            // sends, and a mismatched byte would be stored as a literal
+            // character and echoed as "^?" (observed: backspace flooding
+            // the line with ^? on a DEL-sending terminal).
+            let erase = tp.tty_termios.c_cc[VERASE];
+            let is_erase = ch as u8 == erase
+                || ((ch as u8 == b'\x08' || ch as u8 == b'\x7f')
+                    && (erase == b'\x08' || erase == b'\x7f'));
+            if is_erase {
                 back_over(tp);
                 if tp.tty_termios.c_lflag & ECHOE == 0 {
                     tty_echo(tp, ch);
@@ -1193,15 +1212,55 @@ pub fn out_process(
 
 // sigchar — signal delivery to process group
 
+/// Build a SYS_KILL kernel-call message: target endpoint at payload offset
+/// 16 (SIGCALLS_ENDPT_OFF) and signal at offset 20 (SIGCALLS_SIG_OFF) — the
+/// offsets the kernel's `do_kill_handler` reads.
+fn sigcalls_msg(target: i32, sig: u8) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg[16..20].copy_from_slice(&target.to_ne_bytes());
+    msg[20..24].copy_from_slice(&(sig as i32).to_ne_bytes());
+    msg
+}
+
+/// Send a signal to a process via SYS_KILL (kernel call 6).
+///
+/// Host tests cannot execute the syscall, so this is compiled out there;
+/// the message layout is covered by `test_sigcalls_msg_layout`.
+#[cfg(not(test))]
+fn send_kill(target: i32, sig: u8) {
+    let mut msg = sigcalls_msg(target, sig);
+    minix_rt::kernel_call(6, &mut msg);
+}
+
 /// Send a signal to the foreground process group of this TTY.
 ///
 /// `sig` is the signal number (SIGINT, SIGQUIT, SIGHUP, etc.).
 /// `may_flush` controls whether input/output is flushed.
-pub fn sigchar(tp: &mut Tty, _sig: u8, may_flush: bool) {
-    if tp.tty_pgrp != 0 {
-        // TODO: Phase 13 — call sys_kill(tp->tty_pgrp, sig)
-        // For now, this is a stub.
-        // sys_kill(tp.tty_pgrp, sig);
+///
+/// Targets the controlling process group (`tty_pgrp`, set when the console
+/// is opened with CDEV_CTTY — the shell/session leader), falling back to the
+/// current reader (`tty_incaller`) when no controlling process is set.
+/// PM's process_ksig broadcasts INT/QUIT/WINCH/INFO to the target's process
+/// group, so ^C reaches the whole foreground job, not just the reader. When
+/// the signal can kill the reader, the pending read is released so VFS's
+/// worker is not left suspended on a reply that never comes; `do_read` turns
+/// this into an EINTR completion.
+pub fn sigchar(tp: &mut Tty, sig: u8, may_flush: bool) {
+    let target = if tp.tty_pgrp != 0 {
+        tp.tty_pgrp
+    } else {
+        tp.tty_incaller
+    };
+    if target != NONE {
+        #[cfg(not(test))]
+        send_kill(target as i32, sig);
+    }
+
+    if tp.tty_inleft != 0 && (sig == SIGINT || sig == SIGQUIT || sig == SIGHUP) {
+        tp.tty_inleft = 0;
+        tp.tty_incum = 0;
+        tp.tty_incaller = NONE;
+        tp.tty_read_intr = true;
     }
 
     if may_flush && tp.tty_termios.c_lflag & NOFLSH == 0 {
@@ -1507,15 +1566,19 @@ pub fn tty_init(system_hz_val: u32) {
         tp.tty_ioctl = tty_devnop;
         tp.tty_close = tty_devnop;
         tp.tty_open = tty_devnop;
+        tp.tty_line_active = false;
 
         if s < NR_CONS {
-            // Console lines: scr_init and kb_init will be called by
-            // the console/keyboard drivers.
+            // Console lines. Input is pulled by do_read via the tty's own
+            // read(0) (kernel ser_input ring, burst-safe); the devread hook
+            // stays non-blocking (a no-op for v1 — there is no non-blocking
+            // fd-0 read for a user process yet, so select on the console is
+            // deferred). Wiring the hooks activates the line for line2tty.
             tp.tty_minor = CONS_MINOR + s as u32;
-            // Console hooks (console_read/console_write/console_echo)
-            // are implemented but not wired by default — they conflict
-            // with the kernel's serial ISR. They'll be activated when
-            // VFS device plumbing routes fd 0/1/2 through TTY.
+            tp.tty_line_active = true;
+            tp.tty_devread = console_read;
+            tp.tty_devwrite = console_write;
+            tp.tty_echo_fn = console_echo;
         } else {
             // RS-232 lines: rs_init will be called by the serial driver.
             tp.tty_minor = RS232_MINOR + s as u32 - NR_CONS as u32;
@@ -1523,36 +1586,35 @@ pub fn tty_init(system_hz_val: u32) {
     }
 }
 
-
-/// Poll serial for input and feed through line discipline.
-fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {
-    let mut count = 0;
-    while tp.tty_incount < TTY_IN_BYTES as i32 {
-        if !kernel::hal::serial_byte_available() {
-            break;
-        }
-        let byte = kernel::hal::serial_read_byte();
-        in_process(tp, &[byte]);
-        count += 1;
-    }
-    count
+/// Console devread hook — non-blocking input drain.
+///
+/// v1 no-op: input flows through `do_read`, which pulls from the kernel's
+/// serial ring via the tty's own `read(0)`. Wired (rather than `tty_devnop`)
+/// so the console line is active for `line2tty`/CDEV requests.
+fn console_read(_tp: &mut Tty, _try_only: i32) -> i32 {
+    0
 }
 
-/// Console write hook — output inline write data to serial.
+/// Console devwrite hook — flush inline write data to the serial console.
+///
+/// The bytes go through the tty's own `write(1)` (the kernel's direct
+/// serial path), which maps LF to CRLF, so the tty's ONLCR handling is not
+/// applied again. Keeping the UART write in the kernel preserves the
+/// single-writer burst ordering.
 fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     if tp.tty_writecount == 0 {
         return 0;
     }
-    while tp.tty_writeidx < tp.tty_writecount {
-        let c = tp.tty_writedata[tp.tty_writeidx];
-        tp.tty_writeidx += 1;
-        // Output processing: handle \n → \r\n if OPOST|ONLCR is set.
-        if c == b'\n' && tp.tty_termios.c_oflag & (OPOST | ONLCR) == OPOST | ONLCR {
-            kernel::hal::serial_write_byte(b'\r');
-            tp.tty_position += 1;
-        }
-        console_echo(tp, c as i32);
+    let n = tp.tty_writecount;
+    if tp.tty_termios.c_oflag & (OPOST | ONLCR) == OPOST | ONLCR {
+        // The kernel inserts a CR per LF; track the column so echo tab
+        // expansion stays aligned.
+        tp.tty_position += tp.tty_writedata[..n]
+            .iter()
+            .filter(|&&c| c == b'\n')
+            .count() as i32;
     }
+    unsafe { minix_rt::write(1, tp.tty_writedata.as_ptr(), n) };
     tp.tty_writeidx = 0;
     tp.tty_writecount = 0;
     tp.tty_outleft = 0;
@@ -1561,10 +1623,14 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     1
 }
 
-/// Console echo — write a byte to serial and update position.
+/// Console echo hook — write a single echoed byte to the serial console.
+///
+/// Uses the tty's own `write(1)` (kernel direct serial path) so echoed
+/// bytes interleave correctly with other console output and the kernel's
+/// LF→CRLF mapping applies to echoed newlines.
 fn console_echo(_tp: &mut Tty, c: i32) {
-    let byte = c as u8;
-    kernel::hal::serial_write_byte(byte);
+    let byte = (c & 0xFF) as u8;
+    unsafe { minix_rt::write(1, &raw const byte, 1) };
 }
 
 // Character driver interface stubs
@@ -1644,12 +1710,32 @@ pub fn do_close(minor: DevMinor) -> i32 {
     OK
 }
 
+/// Complete a pending read: return the accumulated byte count, or EINTR if
+/// `sigchar` released the read. Clears the read state either way.
+fn finish_read(tp: &mut Tty) -> i32 {
+    let r = if tp.tty_read_intr {
+        tp.tty_read_intr = false;
+        EINTR
+    } else {
+        let r = tp.tty_incum as i32;
+        tp.tty_incum = 0;
+        r
+    };
+    tp.tty_incaller = NONE;
+    r
+}
+
 /// do_read — read from a TTY line.
+///
+/// Console input comes from the tty's own `read(0)` (the kernel serial
+/// ring, burst-safe) rather than the UART directly, so the tty never
+/// competes with the kernel's serial ISR. The read blocks until the
+/// requested data is available (canonical: a line break; raw: enough
+/// bytes); `sigchar` releases it with EINTR when it signals the reader.
 pub fn do_read(
     minor: DevMinor,
     _position: Position,
-    endpt: Endpoint,
-    grant: CpGrantId,
+    user_endpt: Endpoint,
     size: usize,
     flags: i32,
     id: CDevId,
@@ -1667,11 +1753,13 @@ pub fn do_read(
         return EINVAL;
     }
 
-    // Copy information from the message to the tty struct.
-    tp.tty_incaller = endpt as u32;
+    // tty_incaller is the USER process: VFS forwards the CDEV_READ and is
+    // only the message sender, so sigchar must target the real reader. The
+    // reply always goes back to VFS as the message sender.
+    tp.tty_incaller = user_endpt as u32;
     tp.tty_inid = id;
-    tp.tty_ingrant = grant;
     tp.tty_inleft = size;
+    tp.tty_read_intr = false;
 
     if tp.tty_termios.c_lflag & ICANON == 0 && tp.tty_termios.c_cc[VTIME] > 0 {
         if tp.tty_termios.c_cc[VMIN] == 0 {
@@ -1692,11 +1780,7 @@ pub fn do_read(
     // ...then go back for more.
     handle_events(tp);
     if tp.tty_inleft == 0 {
-        // Read completed — return accumulated bytes.
-        let r = tp.tty_incum as i32;
-        tp.tty_incum = 0;
-        tp.tty_incaller = NONE;
-        return r;
+        return finish_read(tp);
     }
 
     // There were no bytes in the input queue available.
@@ -1710,25 +1794,31 @@ pub fn do_read(
         tp.tty_inleft = 0;
         tp.tty_incum = 0;
         tp.tty_incaller = NONE;
+        tp.tty_read_intr = false;
         return r;
     }
 
-    // Blocking read: wait for at least one byte from serial.
-    let byte = kernel::hal::serial_read_byte();
-    in_process(tp, &[byte]);
-    in_transfer(tp);
-    if tp.tty_inleft == 0 {
-        let r = tp.tty_incum as i32;
-        tp.tty_incum = 0;
-        tp.tty_incaller = NONE;
-        return r;
+    // Blocking read: pull one byte at a time from the kernel serial ring
+    // and run it through the line discipline until the request completes
+    // or sigchar releases it with EINTR.
+    loop {
+        let mut byte = [0u8; 1];
+        let r = minix_rt::read(0, &mut byte);
+        if r <= 0 {
+            // The serial-ring path always delivers a byte; a failure here
+            // means the console is gone — release the caller.
+            tp.tty_inleft = 0;
+            tp.tty_incum = 0;
+            tp.tty_incaller = NONE;
+            tp.tty_read_intr = false;
+            return EIO;
+        }
+        in_process(tp, &byte);
+        in_transfer(tp);
+        if tp.tty_inleft == 0 {
+            return finish_read(tp);
+        }
     }
-
-    if tp.tty_select_ops != 0 {
-        select_retry(tp);
-    }
-
-    EDONTREPLY
 }
 
 /// do_write — write to a TTY line.
@@ -2031,8 +2121,12 @@ pub fn tty_server_main() {
             if result != EDONTREPLY {
                 msg.m_type = result;
                 unsafe {
+                    // SEND (not SENDREC): the reply is a one-way reply; a
+                    // SENDREC here would consume the caller's NEXT request
+                    // in its receive phase and discard it, deadlocking the
+                    // caller (observed: VFS's CDEV_WRITE vanished).
                     minix_rt::syscall2(
-                        minix_rt::SENDREC_CALL,
+                        minix_rt::SEND_CALL,
                         src_ep as u64,
                         &mut msg as *mut arch_common::ipc::Message as u64,
                     );
@@ -2049,7 +2143,7 @@ pub fn tty_server_main() {
             msg.m_type = OK;
             unsafe {
                 minix_rt::syscall2(
-                    minix_rt::SENDREC_CALL,
+                    minix_rt::SEND_CALL,
                     src_ep as u64,
                     &mut msg as *mut arch_common::ipc::Message as u64,
                 );
@@ -2061,7 +2155,7 @@ pub fn tty_server_main() {
         msg.m_type = ENOSYS;
         unsafe {
             minix_rt::syscall2(
-                minix_rt::SENDREC_CALL,
+                minix_rt::SEND_CALL,
                 src_ep as u64,
                 &mut msg as *mut arch_common::ipc::Message as u64,
             );
@@ -2090,15 +2184,20 @@ unsafe fn handle_cdev_request(
     match call_type {
         CDEV_OPEN => {
             let access = unsafe { msg.m_payload.m2.m2i2 };
-            do_open(minor, access, who_e)
+            // VFS passes the opener's endpoint in m2_i3 (payload offset 8)
+            // so tty_pgrp tracks the user process, not VFS itself.
+            let user = unsafe { msg.m_payload.m2.m2i3 };
+            do_open(minor, access, user)
         }
         CDEV_CLOSE => do_close(minor),
         CDEV_READ => {
             let flags = unsafe { msg.m_payload.m2.m2i2 };
-            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            // m2_i3 carries the USER endpoint (VFS passes it through); the
+            // tty needs it to signal the real reader, not the VFS sender.
+            let user = unsafe { msg.m_payload.m2.m2i3 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
-            let result = do_read(minor, position, who_e, grant, count, flags, 0);
+            let result = do_read(minor, position, user, count, flags, 0);
             // If read completed with data, copy into reply payload.
             if result > 0 {
                 let tp = line2tty(minor).unwrap();
@@ -2114,13 +2213,16 @@ unsafe fn handle_cdev_request(
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
-            // Copy inline write data from message payload (after M2 = offset 40).
-            let copy_len = count.min(16);
+            // Copy inline write data from m2_l3, the last 8 payload bytes
+            // (payload offset 32; VFS writes it at absolute byte 40, which
+            // is m_payload.raw[32]). Reading raw[40..] here would grab 8
+            // bytes past the data.
+            let copy_len = count.min(8);
             {
                 let tp_mut = line2tty(minor).unwrap();
                 unsafe {
                     tp_mut.tty_writedata[..copy_len]
-                        .copy_from_slice(&msg.m_payload.raw[40..40 + copy_len]);
+                        .copy_from_slice(&msg.m_payload.raw[32..32 + copy_len]);
                 }
                 tp_mut.tty_writeidx = 0;
                 tp_mut.tty_writecount = copy_len;
@@ -2210,6 +2312,7 @@ mod tests {
         tp.tty_ingrant = 0;
         tp.tty_inleft = 0;
         tp.tty_incum = 0;
+        tp.tty_read_intr = false;
         tp.tty_echo_fn = tty_echo_dummy;
     }
 
@@ -2264,6 +2367,22 @@ mod tests {
     }
 
     #[test]
+    fn test_tty_init_activates_console_lines() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        // tty_init wires the console lines (tty_line_active), so line2tty
+        // resolves them without any manual devread assignment. RS-232 lines
+        // stay inactive.
+        assert!(line2tty(CONS_MINOR).is_some());
+        assert!(line2tty(CONS_MINOR + 1).is_some());
+        assert!(
+            line2tty(RS232_MINOR).is_none(),
+            "RS-232 lines stay inactive"
+        );
+    }
+
+    #[test]
     fn test_line2tty_console_minor_1() {
         let _lock = TestLockGuard::acquire();
         tty_init(100);
@@ -2292,7 +2411,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         tty_init(100);
 
-        table_mut(NR_CONS).tty_devread = |_, _| 0;
+        table_mut(NR_CONS).tty_line_active = true;
 
         let tp = line2tty(RS232_MINOR);
         assert!(tp.is_some(), "RS-232 minor should map");
@@ -2304,7 +2423,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         tty_init(100);
 
-        table_mut(NR_CONS + 1).tty_devread = |_, _| 0;
+        table_mut(NR_CONS + 1).tty_line_active = true;
 
         let tp = line2tty(RS232_MINOR + 1);
         assert!(tp.is_some());
@@ -2475,6 +2594,37 @@ mod tests {
 
         let count = in_process(&mut tp, b"ab\x7fc\n");
         assert_eq!(count, 5);
+        assert_queue_chars(&tp, b"ac\n");
+        assert_eq!(tp.tty_eotct, 1);
+    }
+
+    #[test]
+    fn test_in_process_erase_accepts_bs_and_del() {
+        let _lock = TestLockGuard::acquire();
+        // The default VERASE is BS (0x08, matching MINIX 3.3.0), but real
+        // terminals disagree on whether the Backspace key sends BS or DEL
+        // (0x7F). Both must erase, or the mismatched byte is stored as a
+        // literal character and echoed as "^?".
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_termios.c_lflag |= ICANON | ECHOE;
+        tp.tty_termios.c_lflag &= !(ISIG | IEXTEN | ECHO);
+        tp.tty_termios.c_iflag &= !(IXON | ISTRIP | IGNCR | ICRNL | INLCR);
+        tp.tty_termios.c_cc[VERASE] = 0x08; // default
+
+        // DEL erases even though VERASE is BS.
+        in_process(&mut tp, b"ab\x7fc\n");
+        assert_queue_chars(&tp, b"ac\n");
+        assert_eq!(tp.tty_eotct, 1);
+
+        // And BS erases when VERASE is DEL.
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_termios.c_lflag |= ICANON | ECHOE;
+        tp.tty_termios.c_lflag &= !(ISIG | IEXTEN | ECHO);
+        tp.tty_termios.c_iflag &= !(IXON | ISTRIP | IGNCR | ICRNL | INLCR);
+        tp.tty_termios.c_cc[VERASE] = 0x7F;
+        in_process(&mut tp, b"ab\x08c\n");
         assert_queue_chars(&tp, b"ac\n");
         assert_eq!(tp.tty_eotct, 1);
     }
@@ -2856,6 +3006,108 @@ mod tests {
         tp.tty_incount = 10;
         sigchar(&mut tp, SIGINT, false);
         assert_eq!(tp.tty_incount, 10);
+    }
+
+    #[test]
+    fn test_sigchar_releases_pending_read() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_incaller = 100;
+        tp.tty_inleft = 10;
+        tp.tty_incum = 2;
+        tp.tty_incount = 4;
+        tp.tty_eotct = 1;
+
+        sigchar(&mut tp, SIGINT, true);
+
+        assert_eq!(tp.tty_incaller, NONE, "reader released");
+        assert_eq!(tp.tty_inleft, 0);
+        assert_eq!(tp.tty_incum, 0);
+        assert!(tp.tty_read_intr, "read should complete with EINTR");
+        assert_eq!(tp.tty_incount, 0, "ISIG flushes the queue");
+        assert_eq!(tp.tty_eotct, 0);
+    }
+
+    #[test]
+    fn test_sigchar_does_not_release_on_informational_signal() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_incaller = 100;
+        tp.tty_inleft = 10;
+
+        sigchar(&mut tp, SIGWINCH, false);
+
+        assert_eq!(tp.tty_incaller, 100, "SIGWINCH must not release the read");
+        assert_eq!(tp.tty_inleft, 10);
+        assert!(!tp.tty_read_intr);
+    }
+
+    #[test]
+    fn test_in_process_isig_interrupts_pending_read() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_termios.c_lflag |= ISIG;
+        tp.tty_termios.c_lflag &= !(ICANON | IEXTEN | ECHO);
+        tp.tty_termios.c_iflag &= !(IXON);
+        tp.tty_incaller = 100;
+        tp.tty_inleft = 10;
+
+        let count = in_process(&mut tp, &[0x03u8]); // ^C
+        assert_eq!(count, 1);
+
+        assert_eq!(tp.tty_incaller, NONE);
+        assert_eq!(tp.tty_inleft, 0);
+        assert!(tp.tty_read_intr);
+        assert_eq!(tp.tty_incount, 0);
+        assert_eq!(tp.tty_events, 1);
+    }
+
+    #[test]
+    fn test_finish_read_returns_count() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_incaller = 100;
+        tp.tty_incum = 7;
+
+        let r = finish_read(&mut tp);
+        assert_eq!(r, 7);
+        assert_eq!(tp.tty_incaller, NONE);
+        assert_eq!(tp.tty_incum, 0);
+    }
+
+    #[test]
+    fn test_finish_read_returns_eintr_when_interrupted() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_tty(&mut tp);
+        tp.tty_incaller = 100;
+        tp.tty_incum = 0;
+        tp.tty_read_intr = true;
+
+        let r = finish_read(&mut tp);
+        assert_eq!(r, EINTR);
+        assert_eq!(tp.tty_incaller, NONE);
+        assert!(!tp.tty_read_intr);
+    }
+
+    #[test]
+    fn test_sigcalls_msg_layout() {
+        // The kernel's do_kill_handler reads the target at payload offset
+        // 16 (SIGCALLS_ENDPT_OFF) and the signal at offset 20
+        // (SIGCALLS_SIG_OFF); the syscall trampoline writes the call
+        // number + source at offsets 0-7. Verify the builder matches.
+        let msg = sigcalls_msg(1234, SIGINT);
+        assert_eq!(i32::from_ne_bytes(msg[16..20].try_into().unwrap()), 1234);
+        assert_eq!(
+            i32::from_ne_bytes(msg[20..24].try_into().unwrap()),
+            SIGINT as i32
+        );
+        assert_eq!(msg[..16], [0u8; 16]);
+        assert_eq!(msg[24..], [0u8; 40]);
     }
 
     fn test_devread(tp: &mut Tty, _try_only: i32) -> i32 {

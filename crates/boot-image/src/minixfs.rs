@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use crate::manifest::DEVICES;
+
 pub const SUPER_MAGIC_V3: u16 = 0x4D5A;
 pub const BLOCK_SIZE: usize = 4096;
 pub const ZONE_SIZE: usize = 4096;
@@ -15,6 +17,7 @@ pub const NAMESIZE: usize = 60;
 
 pub const I_DIRECTORY: u16 = 0o040000;
 pub const I_REGULAR: u16 = 0o100000;
+pub const I_CHAR_SPECIAL: u16 = 0o020000;
 pub const RWX_ALL: u16 = 0o755;
 
 pub const ROOT_INODE: u32 = 1;
@@ -244,6 +247,22 @@ impl MinixFs {
         ino
     }
 
+    /// Add a character-device node to `dir_zone`; returns its inode number.
+    ///
+    /// The device number (major << 16 | minor) is stored in the inode's
+    /// first zone pointer — MFS's `fs_lookup` reports `i_zone[0]` as the
+    /// vnode device, which VFS's `cdev_*` decodes as major = dev >> 16,
+    /// minor = dev & 0xFFFF.
+    pub fn add_device(&mut self, dir_zone: u32, name: &str, mode: u16, dev: u32) -> u32 {
+        let ino = self.alloc_inode(I_CHAR_SPECIAL | mode, 0);
+        let idx = (ino - 1) as usize;
+        if idx < self.inode_table.len() {
+            self.inode_table[idx].d2_zone[0] = dev;
+        }
+        self.add_dirent(dir_zone, ino, name);
+        ino
+    }
+
     /// Finalize and write the superblock, bitmaps, and inode table.
     pub fn finalise(mut self) -> Vec<u8> {
         let sb = SuperBlock {
@@ -389,6 +408,7 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let sbin_zone = fs.add_directory(root_zone, "sbin");
     let _etc_ino = fs.add_directory(root_zone, "etc");
     let _tmp_ino = fs.add_directory(root_zone, "tmp");
+    let dev_zone = fs.add_directory(root_zone, "dev");
 
     for (dest, data) in files {
         if data.is_empty() {
@@ -401,6 +421,14 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             _ => root_zone,
         };
         fs.add_file(parent_zone, bin_name, data);
+    }
+
+    // Character-device nodes (major << 16 | minor, matching VFS's cdev
+    // decoding). TTY.md 1C.1 relies on /dev/console resolving so init can
+    // route stdio through the tty.
+    for &(path, mode, major, minor) in DEVICES {
+        let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+        fs.add_device(dev_zone, name, mode as u16, (major << 16) | minor);
     }
 
     fs.finalise()
@@ -421,6 +449,39 @@ mod tests {
     }
 
     #[test]
+    fn device_nodes_in_image() {
+        // With no files, inodes are deterministic: 1=root, 2=bin, 3=sbin,
+        // 4=etc, 5=tmp, 6=dev, then the four devices in manifest order
+        // (tty00, tty01, null, console). The console inode must be a
+        // char-special node whose zone[0] carries (major << 16 | minor) so
+        // MFS reports the device number VFS's cdev_* expects.
+        let empty: &[(&'static str, Vec<u8>)] = &[];
+        let image = build_minixfs(empty);
+
+        let imap_blocks = i16::from_le_bytes(image[1024 + 8..1024 + 10].try_into().unwrap());
+        let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
+        let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
+
+        let console_ino = 10usize; // root, bin, sbin, etc, tmp, dev + 3 devices
+        let off = itable_off + (console_ino - 1) * INODE_SIZE;
+        let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
+        let dev = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
+        assert_eq!(
+            mode & 0o170000,
+            I_CHAR_SPECIAL,
+            "console must be char-special"
+        );
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(dev, (5u32 << 16) | 0, "console major 5 minor 0");
+
+        // /dev/tty00: major 3 minor 0.
+        let tty00_off = itable_off + 6 * INODE_SIZE;
+        let tty00_dev =
+            u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
+        assert_eq!(tty00_dev, (3u32 << 16) | 0);
+    }
+
+    #[test]
     fn single_file_roundtrip() {
         let data = b"hello minix".to_vec();
         let image = build_minixfs(&[("/bin/echo", data)]);
@@ -432,22 +493,15 @@ mod tests {
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
         // Root inode (inode 1) must be a directory with a non-zero first zone.
-        let root_mode = u16::from_le_bytes(
-            image[itable_off..itable_off + 2]
-                .try_into()
-                .unwrap(),
-        );
+        let root_mode = u16::from_le_bytes(image[itable_off..itable_off + 2].try_into().unwrap());
         assert_eq!(root_mode, I_DIRECTORY | RWX_ALL);
-        let root_zone = u32::from_le_bytes(
-            image[itable_off + 24..itable_off + 28]
-                .try_into()
-                .unwrap(),
-        );
+        let root_zone =
+            u32::from_le_bytes(image[itable_off + 24..itable_off + 28].try_into().unwrap());
         assert!(root_zone >= 2, "root data zone must be allocated");
 
-        // "echo" inode (inode 6: 1=root, 2=bin, 3=sbin, 4=etc, 5=tmp)
-        // must be a regular file of size 11.
-        let echo_ino_off = itable_off + 5 * INODE_SIZE;
+        // "echo" inode (inode 7: 1=root, 2=bin, 3=sbin, 4=etc, 5=tmp,
+        // 6=dev) must be a regular file of size 11.
+        let echo_ino_off = itable_off + 6 * INODE_SIZE;
         let echo_mode =
             u16::from_le_bytes(image[echo_ino_off..echo_ino_off + 2].try_into().unwrap());
         assert_eq!(echo_mode, I_REGULAR | RWX_ALL);
@@ -466,9 +520,13 @@ mod tests {
                 .unwrap(),
         );
         let bin_off = bin_zone as usize * BLOCK_SIZE;
-        let bin_ino = u32::from_le_bytes(image[bin_off + 2 * (4 + NAMESIZE)..bin_off + 2 * (4 + NAMESIZE) + 4].try_into().unwrap());
+        let bin_ino = u32::from_le_bytes(
+            image[bin_off + 2 * (4 + NAMESIZE)..bin_off + 2 * (4 + NAMESIZE) + 4]
+                .try_into()
+                .unwrap(),
+        );
         let bin_name = &image[bin_off + 2 * (4 + NAMESIZE) + 4..bin_off + 2 * (4 + NAMESIZE) + 9];
-        assert_eq!(bin_ino, 6, "echo dirent must point at inode 6");
+        assert_eq!(bin_ino, 7, "echo dirent must point at inode 7");
         assert_eq!(&bin_name[..4], b"echo", "echo dirent must be in /bin");
     }
 

@@ -11,30 +11,103 @@ use crate::vfs::dmap;
 use crate::vfs::request;
 use crate::vfs::types::*;
 
+// CDEV message field offsets (absolute byte offsets in a 56-byte Message:
+// m_type @ 4, payload @ 8). The m2 fields are: m2i1 @ 8, m2i2 @ 12, m2i3 @ 16,
+// m2l1 @ 24, m2l2 @ 32, m2l3 @ 40. These must match the tty server's
+// handle_cdev_request reads (crates/servers/src/tty.rs).
+const CDEV_MINOR_OFF: usize = 8; // m2_i1
+const CDEV_FLAGS_OFF: usize = 12; // m2_i2
+const CDEV_USER_OFF: usize = 16; // m2_i3
+const CDEV_POS_OFF: usize = 24; // m2_l1
+const CDEV_COUNT_OFF: usize = 32; // m2_l2
+const CDEV_BUF_OFF: usize = 40; // m2_l3 (CDEV_WRITE inline data)
+
+// Access flags for CDEV_OPEN — must match the tty server's CDEV_* constants
+// (crates/servers/src/tty.rs), which differ from the C chardriver.h values.
+const CDEV_R_BIT: i32 = 0x04;
+const CDEV_W_BIT: i32 = 0x08;
+const CDEV_NOCTTY: i32 = 0x02;
+
+/// Reply flag: a successful CDEV_OPEN made the device the controlling tty.
+const CDEV_CTTY: i32 = 2;
+
+/// O_NOCTTY open flag (minix/include/fcntl.h).
+const O_NOCTTY: i32 = 0o400;
+
+/// Max bytes the tty replies inline per CDEV_READ (48-byte payload).
+const INLINE_READ_MAX: usize = 48;
+/// Max bytes the tty accepts inline per CDEV_WRITE (m2_l3 = last 8 payload bytes).
+const INLINE_WRITE_MAX: usize = 8;
+
+/// Convert open(2) flags to the tty server's CDEV access bits.
+/// O_RDONLY=0, O_WRONLY=1, O_RDWR=2 (access mode in the low two bits).
+fn open_access_flags(flags: i32) -> i32 {
+    let mode = flags & 0o3;
+    let mut access = 0;
+    if mode != 1 {
+        access |= CDEV_R_BIT;
+    }
+    if mode != 0 {
+        access |= CDEV_W_BIT;
+    }
+    if flags & O_NOCTTY != 0 {
+        access |= CDEV_NOCTTY;
+    }
+    access
+}
+
+/// Build a CDEV_OPEN/CDEV_CLOSE request message.
+fn build_open_close_msg(op: i32, dev: u32, access: i32, user_ep: i32) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, op); // m_type
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, (dev & 0xFFFF) as i32);
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, access);
+    request::w_i32(&mut msg, CDEV_USER_OFF, user_ep);
+    msg
+}
+
 // Character device operations
 
 /// Open a character device.
 ///
 /// Sends a \`CDEV_OPEN\` message to the device driver endpoint found via the
-/// dmap table for the given \`dev\`'s major number.  If the device is cloned
-/// the minor number may be replaced.
+/// dmap table for the given \`dev\`'s major number. On a \`CDEV_CTTY\` reply
+/// the device becomes the caller's controlling terminal.
 ///
 /// C source: \`minix/servers/vfs/device.c\` — \`cdev_open()\` (line 484)
 ///
 /// # Safety
 ///
 /// Requires exclusive access to the global fproc/dmap tables.
-///
-/// # TODO
-///
-/// Wire IPC send/recv to the character driver endpoint.  The underlying
-/// \`cdev_opcl()\` helper performs:
-///   1. Lookup dmap entry via \`cdev_get()\`.
-///   2. Build \`CDEV_OPEN\` message with minor, flags, access bits.
-///   3. \`asynsend3()\` + \`worker_wait()\` to block until reply.
-///   4. Handle \`CDEV_CLONED\` / \`CDEV_CTTY\` flags in the reply.
-pub fn cdev_open(_dev: u32, _flags: i32) -> i32 {
-    ENOSYS
+pub unsafe fn cdev_open(dev: u32, flags: i32) -> i32 {
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+
+    // The user endpoint travels in m2_i3 so the driver can track the
+    // controlling terminal and the read caller.
+    let user_ep = unsafe { (*crate::vfs::glo::current_fp()).fp_endpoint };
+    let mut msg = build_open_close_msg(CDEV_OPEN, dev, open_access_flags(flags), user_ep);
+
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r < 0 {
+        return r;
+    }
+    // A CDEV_CTTY bit in the reply means the open made this device the
+    // controlling terminal (C cdev_opcl: fp->fp_tty = dev).
+    if r & CDEV_CTTY != 0 {
+        unsafe { (*crate::vfs::glo::current_fp()).fp_tty = dev as i32 };
+    }
+    OK
 }
 
 /// Close a character device.
@@ -51,8 +124,17 @@ pub fn cdev_open(_dev: u32, _flags: i32) -> i32 {
 ///
 /// Wire IPC send/recv to the character driver endpoint.  The underlying
 /// `cdev_opcl()` helper mirrors cdev_open's flow with `CDEV_CLOSE`.
-pub fn cdev_close(_dev: u32) -> i32 {
-    ENOSYS
+pub unsafe fn cdev_close(dev: u32) -> i32 {
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+    let mut msg = build_open_close_msg(CDEV_CLOSE, dev, 0, 0);
+    unsafe { request::fs_sendrec(drv_e, &mut msg) }
 }
 
 /// Perform I/O on a character device.
@@ -61,9 +143,7 @@ pub fn cdev_close(_dev: u32) -> i32 {
 /// driver via synchronous sendrec. The driver endpoint is resolved from
 /// the dmap table using the device's major number.
 pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _flags: i32) -> i32 {
-    let major = (dev >> 16) as i32;
-    let minor = dev & 0xFFFF;
-    let dp = dmap::get_dmap_by_major(major);
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
     if dp.is_null() {
         return ENXIO;
     }
@@ -71,22 +151,86 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     if drv_e < 0 {
         return ENXIO;
     }
+    let minor = (dev & 0xFFFF) as i32;
 
-    let mut msg = [0u8; 56];
-    request::w_i32(&mut msg, 4, minor as i32); // m2_i1
-    request::w_i32(&mut msg, 8, proc_e); // m2_i2
-    request::w_i32(&mut msg, 12, -1); // m2_i3 = grant (stub)
-    request::w_i64(&mut msg, 16, pos); // m2_l1 = position
-    request::w_u64(&mut msg, 24, bytes); // m2_l2 = count/request
-    request::w_u64(&mut msg, 32, buf); // m2_l3 = user buffer
-    request::w_i32(&mut msg, 0, op); // m_type
+    if op == CDEV_WRITE {
+        // Writes travel inline in m2_l3 (last 8 payload bytes); loop so
+        // arbitrary user buffer lengths are written in full.
+        let mut written: u64 = 0;
+        let mut cur_pos = pos;
+        while written < bytes {
+            let chunk = ((bytes - written) as usize).min(INLINE_WRITE_MAX);
+            let mut msg = [0u8; 56];
+            request::w_i32(&mut msg, 4, CDEV_WRITE);
+            request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+            request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+            request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+            request::w_i64(&mut msg, CDEV_POS_OFF, cur_pos);
+            request::w_u64(&mut msg, CDEV_COUNT_OFF, chunk as u64);
+            let copy_r = unsafe {
+                crate::vfs::call::sys_vircopy(
+                    proc_e,
+                    buf + written,
+                    crate::vfs::call::SELF,
+                    msg.as_mut_ptr() as u64 + CDEV_BUF_OFF as u64,
+                    chunk,
+                )
+            };
+            if copy_r != 0 {
+                return if written > 0 { written as i32 } else { copy_r };
+            }
+            let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+            if r < 0 {
+                return if written > 0 { written as i32 } else { r };
+            }
+            written += chunk as u64;
+            cur_pos += chunk as i64;
+        }
+        return written as i32;
+    }
 
-    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
-    if r != 0 {
+    if op == CDEV_READ {
+        // The tty replies with data inline in the payload; request at most
+        // what the 48-byte payload can carry per round trip. A short read is
+        // fine (blocking reads return when a line/queue is ready).
+        let want = (bytes as usize).min(INLINE_READ_MAX);
+        let mut msg = [0u8; 56];
+        request::w_i32(&mut msg, 4, CDEV_READ);
+        request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+        request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+        request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+        request::w_i64(&mut msg, CDEV_POS_OFF, pos);
+        request::w_u64(&mut msg, CDEV_COUNT_OFF, want as u64);
+        let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        if r < 0 {
+            return r;
+        }
+        let n = r as usize;
+        if n > 0 && buf != 0 {
+            let copy_r = unsafe {
+                crate::vfs::call::sys_vircopy(
+                    crate::vfs::call::SELF,
+                    msg.as_ptr() as u64 + 8, // reply data at payload[0..]
+                    proc_e,
+                    buf,
+                    n,
+                )
+            };
+            if copy_r != 0 {
+                return copy_r;
+            }
+        }
         return r;
     }
-    // Reply status in m_type, bytes in m2_l1
-    request::r_i64(&msg, 16) as i32
+
+    // CDEV_IOCTL: request code in m2_i2, reply status only (grant data path
+    // is not wired).
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, op);
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, bytes as i32); // ioctl request
+    request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+    unsafe { request::fs_sendrec(drv_e, &mut msg) }
 }
 
 /// Map a character device to a different device number.
@@ -280,4 +424,67 @@ pub fn bdev_reply() {
 pub fn bdev_up(major: i32) {
     let _ = major;
     // TODO: reopen block-special files and notify mounted filesystems.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_open_access_flags_rdonly() {
+        // O_RDONLY = 0: read access only.
+        assert_eq!(open_access_flags(0o00), CDEV_R_BIT);
+    }
+
+    #[test]
+    fn test_open_access_flags_wronly() {
+        // O_WRONLY = 1: write access only.
+        assert_eq!(open_access_flags(0o01), CDEV_W_BIT);
+    }
+
+    #[test]
+    fn test_open_access_flags_rdwr() {
+        // O_RDWR = 2: read + write access.
+        assert_eq!(open_access_flags(0o02), CDEV_R_BIT | CDEV_W_BIT);
+    }
+
+    #[test]
+    fn test_open_access_flags_noctty() {
+        // O_RDWR | O_NOCTTY: read + write, not the controlling tty.
+        assert_eq!(
+            open_access_flags(0o02 | 0o400),
+            CDEV_R_BIT | CDEV_W_BIT | CDEV_NOCTTY
+        );
+    }
+
+    #[test]
+    fn test_open_close_msg_layout() {
+        // The tty server reads m2_i1 (minor @8), m2_i2 (access @12),
+        // m2_i3 (user endpoint @16) and m_type @4. Verify our builder
+        // matches that contract.
+        let dev = (5u32 << 16) | 0; // major 5 (console), minor 0
+        let msg = build_open_close_msg(CDEV_OPEN, dev, CDEV_R_BIT | CDEV_W_BIT, 42);
+        assert_eq!(request::r_i32(&msg, 4), CDEV_OPEN);
+        assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 0);
+        assert_eq!(
+            request::r_i32(&msg, CDEV_FLAGS_OFF),
+            CDEV_R_BIT | CDEV_W_BIT
+        );
+        assert_eq!(request::r_i32(&msg, CDEV_USER_OFF), 42);
+
+        let msg = build_open_close_msg(CDEV_CLOSE, dev, 0, 0);
+        assert_eq!(request::r_i32(&msg, 4), CDEV_CLOSE);
+        assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 0);
+    }
+
+    #[test]
+    fn test_offset_constants_match_tty_contract() {
+        // The tty server reads minor/flags/user at these payload offsets.
+        assert_eq!(CDEV_MINOR_OFF, 8);
+        assert_eq!(CDEV_FLAGS_OFF, 12);
+        assert_eq!(CDEV_USER_OFF, 16);
+        assert_eq!(CDEV_POS_OFF, 24);
+        assert_eq!(CDEV_COUNT_OFF, 32);
+        assert_eq!(CDEV_BUF_OFF, 40);
+    }
 }
