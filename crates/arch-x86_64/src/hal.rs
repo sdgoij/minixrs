@@ -80,6 +80,13 @@ pub fn poll_console() -> Option<u8> {
 }
 
 /// Arch-specific CPU idle hint (PAUSE on x86_64).
+///
+/// Note: this deliberately does NOT enable interrupts: enabling IF here
+/// would let the timer ISR fire in kernel mode and burn the waiting
+/// process's quantum (`context_stop` runs per tick in this port, unlike
+/// C MINIX which accounts at context-switch time). Burst input is instead
+/// captured by the serial ISR plus the timer-tick UART drain (see
+/// `drain_uart_input` in kernel-boot).
 pub fn cpu_idle() {
     pause();
 }

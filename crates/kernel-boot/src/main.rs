@@ -176,17 +176,27 @@ pub extern "C" fn kmain_body() -> ! {
         //    interrupt hits a null handler (init_idt sets all entries to
         //    handler=0, which would jump to address 0 on interrupt).
         unsafe extern "C" fn timer_callback() {
-            unsafe { kernel::clock::timer_int_handler() };
+            unsafe {
+                kernel::clock::timer_int_handler();
+                // Drain the UART on every tick (matching AArch64's
+                // el1_irq_handler_c, which polls the UART on every IRQ) so
+                // piped bursts are captured even when the shell is busy and
+                // no serial IRQ is pending.
+                drain_uart_input();
+            }
         }
         arch_x86_64::apic::set_timer_isr_handler(timer_callback);
 
-        let handler_addr = arch_x86_64::apic::timer_isr_entry as *const () as u64;
-        (*arch_x86_64::idt::IDT.get()).set_handler(
-            arch_x86_64::interrupt::VECTOR_TIMER as usize,
-            handler_addr,
-            0, // IST
-            0, // DPL (kernel only)
-        );
+        #[cfg(target_os = "none")]
+        {
+            let handler_addr = arch_x86_64::apic::timer_isr_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                arch_x86_64::interrupt::VECTOR_TIMER as usize,
+                handler_addr,
+                0, // IST
+                0, // DPL (kernel only)
+            );
+        }
 
         // 4. Program the PIT at 100 Hz, mode 3 (square wave).
         //    The timer is still masked at the PIC; it will be unmasked
@@ -199,45 +209,26 @@ pub extern "C" fn kmain_body() -> ! {
         // 6. Configure COM1 for interrupt-driven input.
         // C callback called on every serial interrupt.
         unsafe extern "C" fn serial_callback() {
-            const COM1_DATA: u16 = 0x3F8;
-            unsafe {
-                // Read all available bytes from the serial port.
-                loop {
-                    let lsr: u8;
-                    core::arch::asm!(
-                        "in al, dx",
-                        out("al") lsr,
-                        in("dx") COM1_DATA + 5,
-                        options(nomem, nostack)
-                    );
-                    if lsr & 0x01 == 0 {
-                        break; // no data ready
-                    }
-                    let byte: u8;
-                    core::arch::asm!(
-                        "in al, dx",
-                        out("al") byte,
-                        in("dx") COM1_DATA,
-                        options(nomem, nostack)
-                    );
-                    kernel::ser_input::push_byte(byte);
-                }
-            }
+            unsafe { drain_uart_input() };
         }
         arch_x86_64::apic::set_serial_isr_handler(serial_callback);
 
         // 7. Install the serial ISR in the IDT (IRQ 4 → vector 0x24).
-        let serial_handler_addr = arch_x86_64::apic::serial_isr_entry as *const () as u64;
-        (*arch_x86_64::idt::IDT.get()).set_handler(
-            arch_x86_64::interrupt::irq_vector(4) as usize,
-            serial_handler_addr,
-            0, // IST
-            0, // DPL (kernel only)
-        );
+        #[cfg(target_os = "none")]
+        {
+            let serial_handler_addr = arch_x86_64::apic::serial_isr_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                arch_x86_64::interrupt::irq_vector(4) as usize,
+                serial_handler_addr,
+                0, // IST
+                0, // DPL (kernel only)
+            );
+        }
 
         // 8. Enable COM1 receive interrupts and unmask IRQ 4.
-        // Serial interrupts are fine — the serial ISR doesn't use iretq
-        // to return to user mode.
+        // The serial ISR is a context-switch point like the timer: in
+        // user mode it saves the interrupted context and restores the
+        // next runnable process; in kernel mode it returns via ret.
         arch_x86_64::apic::enable_com1_interrupts();
         arch_x86_64::apic::unmask_serial_irq();
     }
@@ -520,6 +511,43 @@ pub extern "C" fn kmain_body() -> ! {
     }
 }
 
+/// Drain all available UART RX bytes into the ser_input ring.
+///
+/// Called from the serial ISR and from every timer tick. The serial ISR
+/// alone misses bursts that arrive while the CPU is in kernel mode with
+/// IF=0 (no serial IRQ can fire); draining on the 100 Hz tick too matches
+/// AArch64's el1_irq_handler_c (poll the UART on every IRQ) and keeps the
+/// 16-byte UART FIFO from overflowing on piped input bursts.
+///
+/// # Safety
+///
+/// Must be called from interrupt-disabled context (ISR or syscall).
+unsafe fn drain_uart_input() {
+    const COM1_DATA: u16 = 0x3F8;
+    unsafe {
+        loop {
+            let lsr: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") lsr,
+                in("dx") COM1_DATA + 5,
+                options(nomem, nostack)
+            );
+            if lsr & 0x01 == 0 {
+                break; // no data ready
+            }
+            let byte: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") byte,
+                in("dx") COM1_DATA,
+                options(nomem, nostack)
+            );
+            kernel::ser_input::push_byte(byte);
+        }
+    }
+}
+
 /// Save the current process's register state from the kernel-stack save
 /// area into its Proc::p_reg TrapFrame, so a later restore() can resume it.
 ///
@@ -665,6 +693,83 @@ pub unsafe extern "C" fn save_fault_context(frame: *const u64) {
     }
 }
 
+/// Save an interrupted user context from a timer/serial ISR frame into the
+/// current process's p_reg, so the ISR can context-switch via `restore()`.
+///
+/// The ISR pushes 15 GPRs (rax,rcx,rdx,rbx,rbp,rsi,rdi,r8,r9,r10,r11,r12,
+/// r13,r14,r15) then the CPU's ring-3 frame, so with r15 at frame[0]:
+///   frame[0]=r15 [1]=r14 [2]=r13 [3]=r12 [4]=r11 [5]=r10 [6]=r9 [7]=r8
+///   frame[8]=rdi [9]=rsi [10]=rbp [11]=rbx [12]=rdx [13]=rcx [14]=rax
+///   frame[15]=RIP [16]=CS [17]=RFLAGS [18]=user RSP [19]=SS
+///
+/// p_reg writes (TrapFrame byte offsets matching `restore()`):
+///   rax←[14], rbx←[11], rcx←[13], rdx←[12], rsi←[9], rdi←[8], r8←[7],
+///   r9←[6], r10←[5], r11←[4], r12←[3], r13←[2], r14←[1], r15←[0],
+///   rbp←[10], rip←[15], rsp←[18], rflags←[17].
+/// rcx/r11 in the frame are the user's REAL registers (like
+/// `save_fault_context`); the dedicated 160/176 slots carry RIP/RFLAGS.
+///
+/// Returns the interrupted process pointer (or null), so the caller can
+/// fall back to resuming it when `pick_proc_raw()` returns null.
+///
+/// # Safety
+///
+/// `frame` must point to the valid ISR frame built by `timer_isr_entry` /
+/// `serial_isr_entry`. The current process must be the interrupted process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn save_timer_context(frame: *const u64) -> *mut core::ffi::c_void {
+    unsafe {
+        let rp = arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc;
+        if rp.is_null() {
+            return core::ptr::null_mut();
+        }
+        let regs = [
+            (0usize, *frame.add(14)),   // rax
+            (8usize, *frame.add(11)),   // rbx
+            (16usize, *frame.add(13)),  // rcx = real user rcx (NOT the RIP)
+            (24usize, *frame.add(12)),  // rdx
+            (32usize, *frame.add(9)),   // rsi
+            (40usize, *frame.add(8)),   // rdi
+            (48usize, *frame.add(7)),   // r8
+            (56usize, *frame.add(6)),   // r9
+            (64usize, *frame.add(5)),   // r10
+            (72usize, *frame.add(4)),   // r11 = real user r11 (NOT the RFLAGS)
+            (80usize, *frame.add(3)),   // r12
+            (88usize, *frame.add(2)),   // r13
+            (96usize, *frame.add(1)),   // r14
+            (104usize, *frame.add(0)),  // r15
+            (112usize, *frame.add(10)), // rbp
+            (160usize, *frame.add(15)), // dedicated rip slot = interrupted RIP (CPU frame)
+            (168usize, *frame.add(18)), // user RSP (CPU frame)
+            (176usize, *frame.add(17)), // dedicated rflags slot = interrupted RFLAGS (CPU frame)
+        ];
+        let p_reg = &mut (*rp).p_reg;
+        for (offset, val) in regs {
+            let bytes = val.to_ne_bytes();
+            for (i, b) in bytes.iter().enumerate() {
+                core::ptr::write_volatile(p_reg.as_mut_ptr().add(offset + i), *b);
+            }
+        }
+        rp as *mut core::ffi::c_void
+    }
+}
+
+/// Deliver any staged message to the process the timer/serial ISR is
+/// switching to, mirroring the RISC-V/AArch64 timer callbacks
+/// (riscv64.rs `riscv_timer_callback`). Without this the picked process
+/// resumes with the message stuck in `p_delivermsg` until its next
+/// syscall return.
+///
+/// # Safety
+///
+/// `next` must point to a valid `Proc` that is about to be restored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn isr_deliver_msg(next: *mut kernel::proc::Proc) {
+    unsafe {
+        deliver_msg(next);
+    }
+}
+
 /// C handler for syscall entry — called from arch-x86_64's naked asm.
 /// Dispatches the syscall, then attempts round-robin context switch
 /// by saving the current process's state, re-enqueuing it, and picking
@@ -684,6 +789,12 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             core::ptr::write_volatile(saved as *mut u64, 0);
             return;
         }
+        // Drain the UART FIFO into the ser_input ring on every syscall so
+        // piped bursts are captured promptly even when no serial IRQ is
+        // pending (the syscall runs with IF=0). Syscalls are far more
+        // frequent than the 100 Hz timer tick, so the 16-byte FIFO never
+        // sits full long enough to overflow.
+        drain_uart_input();
 
         let args = [
             core::ptr::read_volatile(saved.add(5)),
@@ -721,6 +832,13 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             // Matching C: preempted processes go to tail so other
             // processes at the same priority get a chance to run.
             if cleared == 0 {
+                // remove_from_queue first: pick_proc does not dequeue, and
+                // the proc may still be linked if it was re-enqueued between
+                // the PREEMPTED marking and this syscall return (e.g. by
+                // SYS_SCHEDULE). A plain enqueue would then link it twice and
+                // corrupt the queue into cycles. No-op when not linked
+                // (matching RISC-V riscv_post_syscall).
+                kernel::sched::remove_from_queue(rp);
                 kernel::sched::enqueue(rp);
             }
             // A message delivered during this syscall (e.g. a deferred
@@ -754,8 +872,12 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
                         !kernel::proc::RtsFlags::PREEMPTED.bits(),
                         core::sync::atomic::Ordering::Relaxed,
                     );
-                    // If no other blocking flags remain, re-enqueue
+                    // If no other blocking flags remain, re-enqueue. Remove
+                    // first — pick_proc only scans the queue, so a preempted
+                    // candidate is still linked; enqueue_head/enqueue without
+                    // unlinking would add it a second time (queue cycle).
                     if (old & !kernel::proc::RtsFlags::PREEMPTED.bits()) == 0 {
+                        kernel::sched::remove_from_queue(candidate);
                         if (*candidate).p_cpu_time_left > 0 {
                             kernel::sched::enqueue_head(candidate);
                         } else {
@@ -874,8 +996,9 @@ fn init_serial() {
         core::arch::asm!("out dx, al", in("dx") port, in("al") 0x01u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 1, in("al") 0x00u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 3, in("al") 0x03u8, options(nomem, nostack));
-        // FIFO trigger at 14 bytes (bits 7-6 = 11). Polling fallback in
-        // read_blocking handles cases with fewer bytes than the trigger.
+        // FIFO trigger at 14 bytes (bits 7-6 = 11). The serial ISR drains
+        // the full FIFO on the trigger; the timer-tick drain (drain_uart_input)
+        // and read_blocking's poll_console cover sub-trigger contents.
         core::arch::asm!("out dx, al", in("dx") port + 2, in("al") 0xC7u8, options(nomem, nostack));
         core::arch::asm!("out dx, al", in("dx") port + 4, in("al") 0x0Bu8, options(nomem, nostack));
     }

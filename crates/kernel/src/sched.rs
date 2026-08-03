@@ -354,22 +354,15 @@ pub unsafe fn proc_no_time(p: *mut Proc) {
         if has_user_sched && is_preemptible {
             notify_scheduler(p);
         } else {
-            // Non-preemptible (kernel-scheduled): renew quantum and mark the
-            // process preempted so the next syscall entry picks another
-            // process. Must dequeue (C's RTS_SET(p, RTS_PREEMPTED) does this
-            // via its hidden side effect): leaving the process linked while
-            // PREEMPTED makes the later PREEMPTED handling in
-            // syscall_handler_c/pick_proc re-enqueue it a second time,
-            // corrupting the run queue into cycles (observed: pm<->vm
-            // livelock after a second shell pipeline).
+            // Non-preemptible (kernel-scheduled): C only renews the
+            // quantum (proc.c `proc_no_time` L1837) — the process keeps
+            // running and "bypasses scheduling". Setting RTS_PREEMPTED
+            // and dequeuing strands the process: pick_proc only walks
+            // the run queue, so a dequeued process is never picked again
+            // to clear the flag and re-enqueue — the queue drains and
+            // the system deadlocks (observed: boot hangs at init's
+            // execve with an empty run queue).
             (*p).p_cpu_time_left = ms_2_cpu_time((*p).p_quantum_size_ms);
-            let old = (*p).p_rts_flags.fetch_or(
-                crate::proc::RtsFlags::PREEMPTED.bits(),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-            if old == 0 {
-                dequeue(p);
-            }
         }
     }
 }
@@ -437,30 +430,40 @@ pub unsafe fn runqueues_ok() -> bool {
                 continue;
             }
 
-            // Pass 2: tail reachable from head
+            // Pass 2: tail reachable from head. Bounded walk: a valid queue
+            // holds at most NR_PROCS_TOTAL procs (one link per proc), so
+            // visiting more distinct nodes than that means the queue contains
+            // a cycle (self-loop, 2-cycle, or longer). Without this bound the
+            // naive `while !walk.is_null()` would follow the cycle forever.
             let mut found_tail = false;
             let mut walk = h;
+            let mut steps = 0usize;
             while !walk.is_null() {
+                if steps >= NR_PROCS_TOTAL {
+                    return false; // cycle — corrupt queue
+                }
                 if walk == t {
                     found_tail = true;
                 }
-                // Check infinite loop
-                if walk == (*walk).p_nextready {
-                    return false;
-                }
                 walk = (*walk).p_nextready;
+                steps += 1;
             }
             if !found_tail {
                 return false;
             }
 
-            // Pass 3: all processes runnable
+            // Pass 3: all processes runnable (same cycle bound).
             let mut walk2 = h;
+            let mut steps2 = 0usize;
             while !walk2.is_null() {
+                if steps2 >= NR_PROCS_TOTAL {
+                    return false;
+                }
                 if !(*walk2).is_runnable() {
                     return false;
                 }
                 walk2 = (*walk2).p_nextready;
+                steps2 += 1;
             }
         }
         true
@@ -816,6 +819,39 @@ mod tests {
     }
 
     #[test]
+    fn test_runqueues_ok_detects_two_cycle() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+
+            // Build a 2-cycle A→B→A (e.g. a double-enqueue). The walk must
+            // terminate and report the queue corrupt instead of spinning.
+            let head = run_q_head_array();
+            let tail = run_q_tail_array();
+            (*head)[0] = rp0;
+            (*tail)[0] = rp1;
+            (*rp0).p_nextready = rp1;
+            (*rp1).p_nextready = rp0;
+            assert!(!runqueues_ok());
+
+            // Also verify a self-loop is caught by the same bound.
+            (*head)[0] = rp0;
+            (*tail)[0] = rp0;
+            (*rp0).p_nextready = rp0;
+            assert!(!runqueues_ok());
+
+            // Clean up
+            (*head)[0] = core::ptr::null_mut();
+            (*tail)[0] = core::ptr::null_mut();
+            (*rp0).p_nextready = core::ptr::null_mut();
+            (*rp1).p_nextready = core::ptr::null_mut();
+        }
+    }
+
+    #[test]
     fn test_reset_proc_accounting_clears() {
         unsafe {
             let _lock = SchedTestLock::acquire();
@@ -866,6 +902,84 @@ mod tests {
                 "RTS_NO_QUANTUM should be set"
             );
             assert_eq!((*rp).p_accounting.dequeues, 0);
+        }
+    }
+
+    #[test]
+    fn test_notify_scheduler_dequeues_runnable_proc() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp = make_test_proc(0, 0);
+            let sched_rp = make_test_proc(1, 0);
+            (*sched_rp).p_endpoint = crate::table::make_endpoint(0, 1);
+            (*rp).p_scheduler = sched_rp;
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*sched_rp)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*sched_rp).p_getfrom_e = crate::system::NONE;
+
+            // The running proc is linked in its queue; quantum expiry must
+            // dequeue it (old_flags == 0 && !is_runnable() after NO_QUANTUM).
+            enqueue(rp);
+            assert_eq!(pick_proc(), Some(rp));
+
+            notify_scheduler(rp);
+
+            let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            assert!(
+                rts & RtsFlags::NO_QUANTUM.bits() != 0,
+                "RTS_NO_QUANTUM should be set"
+            );
+            // The proc must be gone from the queue (the woken scheduler is
+            // now the only entry).
+            let head = run_q_head_array();
+            assert_ne!((*head)[0], rp, "preempted proc must be dequeued");
+            let mut cur = (*head)[0];
+            while !cur.is_null() {
+                assert_ne!(cur, rp, "preempted proc must not be linked");
+                cur = (*cur).p_nextready;
+            }
+            assert!(runqueues_ok());
+        }
+    }
+
+    #[test]
+    fn test_preempted_re_enqueue_no_double_link() {
+        unsafe {
+            let _lock = SchedTestLock::acquire();
+            proc_init();
+            clear_run_queues();
+            let rp0 = make_test_proc(0, 0);
+            let rp1 = make_test_proc(1, 0);
+            enqueue(rp0);
+            enqueue(rp1);
+
+            // Stale state: rp1 is linked AND has PREEMPTED set (e.g. it was
+            // re-enqueued by SYS_SCHEDULE between the PREEMPTED marking and
+            // the syscall return). pick_proc does not dequeue, so the
+            // syscall-return PREEMPTED handling must remove_from_queue before
+            // enqueue — a plain enqueue would link rp1 a second time.
+            (*rp1)
+                .p_rts_flags
+                .store(RtsFlags::PREEMPTED.bits(), Ordering::Relaxed);
+            remove_from_queue(rp1);
+            (*rp1).p_rts_flags.store(0, Ordering::Relaxed);
+            enqueue(rp1);
+
+            // Queue must be consistent and hold each proc exactly once.
+            assert!(runqueues_ok());
+            let head = run_q_head_array();
+            assert!(!(*head)[0].is_null());
+            let mut count = 0usize;
+            let mut cur = (*head)[0];
+            while !cur.is_null() {
+                count += 1;
+                cur = (*cur).p_nextready;
+            }
+            assert_eq!(count, 2, "each proc linked exactly once");
         }
     }
 }

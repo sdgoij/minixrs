@@ -185,10 +185,12 @@ pub fn read_tsc() -> u64 {
 }
 
 pub unsafe fn read_tsc_ctr_switch() -> u64 {
-    0
+    crate::cpulocals::tsc_ctr_switch()
 }
 
-pub unsafe fn write_tsc_ctr_switch(_val: u64) {}
+pub unsafe fn write_tsc_ctr_switch(val: u64) {
+    unsafe { crate::cpulocals::set_tsc_ctr_switch(val) }
+}
 
 pub unsafe fn release_fpu(_proc: *mut core::ffi::c_void) {}
 

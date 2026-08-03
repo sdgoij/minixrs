@@ -15,10 +15,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::asm;
 
-
 /// IA32_APIC_BASE MSR.
 const IA32_APIC_BASE_MSR: u32 = 0x1B;
-
 
 #[allow(unused)]
 const APIC_ID_OFF: u32 = 0x20;
@@ -41,7 +39,6 @@ const APIC_TIMER_CURRCNT_OFF: u32 = 0x390;
 #[allow(unused)]
 const APIC_TIMER_DIV_OFF: u32 = 0x3E0;
 
-
 const IOAPIC_IOREGSEL: u64 = 0x00;
 const IOAPIC_IOWIN: u64 = 0x10;
 #[allow(unused)]
@@ -51,17 +48,14 @@ const IOAPIC_VERSION: u32 = 0x01;
 const IOAPIC_ARB: u32 = 0x02;
 const IOAPIC_REDIR_TBL: u32 = 0x10; // first RTE index
 
-
 /// Local APIC physical base address (typical).
 pub const DEFAULT_APIC_BASE: u64 = 0xFEE00000;
 
 /// I/O APIC physical base address (typical).
 pub const DEFAULT_IOAPIC_BASE: u64 = 0xFEC00000;
 
-
 const APIC_SVR_ENABLE: u32 = 0x100; // bit 8
 const APIC_SPURIOUS_VECTOR: u32 = 0xFF;
-
 
 /// The detected operating mode of the system's interrupt controllers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +67,6 @@ pub enum ApicMode {
     /// x2APIC mode (MSR-based register access).
     X2Apic,
 }
-
 
 /// APIC mode cell (wraps UnsafeCell for safe global access).
 struct ApicModeCell(UnsafeCell<ApicMode>);
@@ -91,7 +84,6 @@ static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 static APIC_MODE: ApicModeCell = ApicModeCell::new(ApicMode::PicOnly);
 static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
-
 
 /// Read an APIC MMIO register (xAPIC mode).
 ///
@@ -149,7 +141,6 @@ unsafe fn ioapic_write(reg: u32, val: u32) {
     }
 }
 
-
 /// Detect Local APIC base address from the IA32_APIC_BASE MSR.
 ///
 /// # Safety
@@ -198,7 +189,6 @@ pub unsafe fn apic_is_x2apic() -> bool {
     }
 }
 
-
 /// Version information from the APIC version register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApicVersionInfo {
@@ -240,7 +230,6 @@ pub fn lvt_is_nmi(lvt_val: u32) -> bool {
     (lvt_val >> 8) & 0x7 == 4
 }
 
-
 /// Reprogram LINT0 if it is configured for NMI or ExtINT delivery.
 ///
 /// On some systems LINT0 is pre-configured for ExtINT (legacy PIC mode)
@@ -262,7 +251,6 @@ pub unsafe fn reprogram_lint0() {
     }
 }
 
-
 /// Enable the local APIC and set the spurious interrupt vector.
 ///
 /// # Safety
@@ -277,7 +265,6 @@ pub unsafe fn setup_svr() {
         );
     }
 }
-
 
 /// Initialize the I/O APIC: mask all redirection table entries.
 ///
@@ -302,7 +289,6 @@ pub unsafe fn init_ioapic() -> u32 {
     }
 }
 
-
 /// Configure I/O APIC RTE 0 (IRQ 0, PIT timer) with the given vector.
 ///
 /// # Safety
@@ -318,7 +304,6 @@ pub unsafe fn setup_pit_irq(vector: u8) {
     }
 }
 
-
 /// Signal end-of-interrupt to the local APIC (or PIC fallback).
 ///
 /// # Safety
@@ -328,11 +313,15 @@ pub unsafe fn eoi() {
     unsafe {
         if APIC_ENABLED.load(Ordering::Relaxed) {
             apic_write(APIC_EOI_OFF, 0);
+        } else {
+            // PIC mode: EOI the master PIC. Without it the ISR bit for
+            // IRQ 0 stays set and the timer (and serial IRQ 4) stop
+            // firing after the first interrupt.
+            use crate::asm;
+            asm::outb(crate::interrupt::PIC_MASTER_CMD, crate::interrupt::PIC_EOI);
         }
     }
-    // When APIC is not enabled, the caller should write to the PIC instead.
 }
-
 
 /// Detect APIC mode and perform full initialization.
 ///
@@ -376,7 +365,6 @@ pub unsafe fn detect_and_init() {
         APIC_ENABLED.store(true, Ordering::Relaxed);
     }
 }
-
 
 /// I/O port delays for PIC programming (short I/O delay via `jmp`).
 ///
@@ -549,7 +537,6 @@ pub fn is_apic_enabled() -> bool {
     APIC_ENABLED.load(Ordering::Relaxed)
 }
 
-
 /// PIT I/O ports.
 pub const PIT_DATA0: u16 = 0x40;
 pub const PIT_CMD: u16 = 0x43;
@@ -572,7 +559,6 @@ pub unsafe fn init_pit(freq: u32) {
         asm::outb(PIT_DATA0, (divisor >> 8) as u8);
     }
 }
-
 
 /// Function pointer type for the timer interrupt handler.
 pub type TimerIsrFn = unsafe extern "C" fn();
@@ -603,7 +589,6 @@ pub unsafe fn set_timer_isr_handler(handler: TimerIsrFn) {
         core::ptr::write(TIMER_ISR_HANDLER.get(), Some(handler));
     }
 }
-
 
 /// CMOS I/O index port.
 const RTC_INDEX_PORT: u16 = 0x70;
@@ -688,7 +673,6 @@ pub unsafe fn arch_ack_profile_clock() {
         let _ = _reg_c;
     }
 }
-
 
 /// Function pointer type for the profile clock interrupt handler.
 pub type ProfileClockFn = unsafe extern "C" fn();
@@ -890,9 +874,9 @@ pub unsafe extern "C" fn timer_isr_c_handler() {
 /// 2. Calls `timer_isr_c_handler()` which calls the handler + EOI
 /// 3. Checks if we interrupted kernel mode (CS.RPL) or user mode
 /// 4. For kernel mode: restores GPRs, clears IF in saved RFLAGS, ret
-/// 5. For user mode: restores GPRs, iretq with hardcoded selectors
-///
-/// This matches the C MINIX `lapic_intr` pattern.
+/// 5. For user mode: context-switches — saves the interrupted context
+///    into the current process's p_reg, picks the next runnable process,
+///    and restores it (C MINIX `apic_hwint` → `switch_to_user`)
 ///
 /// # Safety
 ///
@@ -901,6 +885,7 @@ pub unsafe extern "C" fn timer_isr_c_handler() {
 /// disabled. Must be called in ring 0.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
+#[cfg(target_os = "none")]
 pub unsafe extern "C" fn timer_isr_entry() {
     core::arch::naked_asm!(
         // Save ALL general-purpose registers (15 pushes = 120 bytes).
@@ -920,13 +905,54 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "push r14",
         "push r15",
 
-        // Call the C handler (calls timer callback + EOI).
-        // This is a non-naked extern "C" function, so the compiler
-        // handles stack management correctly.
+        // Call the C handler (timer callback + EOI).
         "call   {c_handler}",
 
-        // After call returns, RSP is back to pointing at r15 save slot.
-        // Restore ALL GPRs.
+        // Check CS.RPL with GPRs still pushed — CS is at [rsp+128]
+        // (15 pushes = 120 bytes; CS is the 2nd slot of the CPU frame).
+        "mov    rdx, [rsp + 128]",
+        "and    rdx, 3",
+        "cmp    rdx, 0",
+        "je     1f",                    // kernel mode (RPL=0)
+
+        // User mode — this ISR is a context-switch point (C MINIX
+        // apic_hwint → switch_to_user): save the interrupted context
+        // into the current process's p_reg, pick the next runnable
+        // process, and restore it. Never iretq from the frame directly.
+        "mov    rdi, rsp",              // frame = ISR frame (15 GPRs + CPU frame)
+        "call   save_timer_context",   // rax = current proc
+        "add    rsp, 160",             // discard 15 GPRs + 40-byte CPU frame
+        "test   rax, rax",
+        "jz     2f",                    // no current proc: halt
+        "mov    r15, rax",             // r15 = current (callee-saved)
+        "call   pick_proc_raw",        // rax = next runnable or null
+        "test   rax, rax",
+        "cmovz  rax, r15",             // rax = next if runnable, else current
+        "mov    r12, rax",             // r12 = effective next (callee-saved)
+        // Deliver any staged message to the picked process before switching
+        // (mirrors the RISC-V/AArch64 timer callbacks). Without this a
+        // picked process resumes with the message stuck in p_delivermsg
+        // until its next syscall return.
+        "cmp    rax, r15",
+        "je     4f",                   // switching to the same process: skip
+        "mov    rdi, rax",
+        "call   isr_deliver_msg",
+        "4:",
+        "mov    rdi, r12",
+        "call   set_cpulocal_proc_asm",
+        "mov    rdi, rax",
+        "call   restore",              // never returns
+        "2:",
+        "cli",
+        "hlt",
+        "jmp    2b",
+
+        // Kernel mode: restore the 15 GPRs, clear IF in the saved RFLAGS
+        // (the interrupted kernel code had IF=1; do not re-enter the ISR
+        // before the next scheduling point), and ret. QEMU TCG pushes a
+        // 40-byte frame even for same-ring interrupts, so skip the
+        // old_RSP/old_SS slots.
+        "1:",
         "pop    r15",
         "pop    r14",
         "pop    r13",
@@ -942,38 +968,11 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "pop    rdx",
         "pop    rcx",
         "pop    rax",
-
-        // Now RSP points to the CPU-interrupt frame.
-        // Check CS.RPL to decide kernel vs user mode return.
-        // On x86-64, CS is at [RSP + 8] after popping all GPRs.
-        "mov    rdx, [rsp + 8]",        // CS
-        "and    rdx, 3",                // CS.RPL
-        "cmp    rdx, 0",
-        "je     1f",                    // kernel mode (RPL=0)
-
-        // Pop and rebuild with hardcoded selectors (QEMU SYSRETQ corrupts SS).
-        "pop    rcx",                   // RIP
-        "pop    rax",                   // CS (discard, use 0x001B)
-        "pop    r11",                   // RFLAGS
-        "pop    r10",                   // old_RSP
-        "add    rsp, 8",                // skip old_SS
-        "push   0x0013",                // SS = GUDATA_SEL | RPL=3
-        "push   r10",                   // old_RSP
-        "push   r11",                   // RFLAGS
-        "push   0x001B",                // CS = GUCODE_SEL | RPL=3
-        "push   rcx",                   // RIP
-        "iretq",
-
-        // Clear IF in the saved RFLAGS to prevent re-entering the timer
-        // ISR when returning to kernel code that had IF=1.
-        "1:",
-        // RFLAGS is at [RSP + 16]. Clear bit 9 (IF).
         "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
-        // Use ret to avoid QEMU TCG same-ring iretq bug.
-        // Pop RIP and CS, discard CS, then restore RFLAGS and ret.
         "pop    rcx",                   // RIP
         "add    rsp, 8",                // skip CS
         "pop    r11",                   // RFLAGS (IF cleared)
+        "add    rsp, 16",               // skip old_RSP/old_SS (QEMU TCG same-ring frame)
         "push   r11",
         "popfq",                        // restore RFLAGS (IF=0)
         "push   rcx",
@@ -1018,55 +1017,112 @@ pub unsafe fn set_serial_isr_handler(handler: SerialIsrFn) {
 ///
 /// 1. Calls the registered `SERIAL_ISR_HANDLER`
 /// 2. Sends EOI to the master PIC (port 0x20)
-/// 3. Returns via iretq
+/// 3. Checks if we interrupted kernel mode (CS.RPL) or user mode
+/// 4. For kernel mode: restores GPRs, clears IF in saved RFLAGS, ret
+/// 5. For user mode: context-switches like the timer ISR — every
+///    interrupt is a context-switch point in C MINIX (`apic_hwint`)
 ///
 /// # Safety
 ///
 /// Must be installed in the IDT at vector 0x24 with DPL 0.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
+#[cfg(target_os = "none")]
 pub unsafe extern "C" fn serial_isr_entry() {
     core::arch::naked_asm!(
-        // Save caller-saved registers.
+        // Save ALL general-purpose registers (15 pushes = 120 bytes).
         "push rax",
         "push rcx",
         "push rdx",
-        "push rdi",
+        "push rbx",
+        "push rbp",
         "push rsi",
+        "push rdi",
         "push r8",
         "push r9",
         "push r10",
         "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
 
         // Call the registered C handler.
-        "lea rax, [rip + {handler}]",
-        "mov rax, [rax]",
-        "test rax, rax",
-        "jz 2f",
-        "call rax",
-        "2:",
+        "lea    rax, [rip + {handler}]",
+        "mov    rax, [rax]",
+        "test   rax, rax",
+        "jz     3f",
+        "call   rax",
+        "3:",
 
         // Send EOI to master PIC (IRQ 0-7).
-        "mov al, 0x20",
-        "out 0x20, al",
+        "mov    al, 0x20",
+        "out    0x20, al",
 
-        // Restore caller-saved registers.
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rsi",
-        "pop rdi",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
+        // Check CS.RPL with GPRs still pushed — CS is at [rsp+128]
+        // (15 pushes = 120 bytes; CS is the 2nd slot of the CPU frame).
+        "mov    rdx, [rsp + 128]",
+        "and    rdx, 3",
+        "cmp    rdx, 0",
+        "je     1f",                    // kernel mode (RPL=0)
 
-        // Return from interrupt — iretq works for both modes:
-        // User mode: syscall_entry uses iretq (not sysretq), so SS is
-        // always correct (0x0013 with RPL=3).  No QEMU SYSRETQ bug.
-        // Kernel mode: serial ISR has no IST, so frame is 3 values
-        // (24 bytes).  iretq returns to ring 0 without issues.
-        "iretq",
+        // User mode — context-switch point, same as the timer ISR.
+        "mov    rdi, rsp",              // frame = ISR frame (15 GPRs + CPU frame)
+        "call   save_timer_context",   // rax = current proc
+        "add    rsp, 160",             // discard 15 GPRs + 40-byte CPU frame
+        "test   rax, rax",
+        "jz     2f",                    // no current proc: halt
+        "mov    r15, rax",             // r15 = current (callee-saved)
+        "call   pick_proc_raw",        // rax = next runnable or null
+        "test   rax, rax",
+        "cmovz  rax, r15",             // rax = next if runnable, else current
+        "mov    r12, rax",             // r12 = effective next (callee-saved)
+        // Deliver any staged message to the picked process before switching
+        // (mirrors the RISC-V/AArch64 timer callbacks). Without this a
+        // picked process resumes with the message stuck in p_delivermsg
+        // until its next syscall return.
+        "cmp    rax, r15",
+        "je     4f",                   // switching to the same process: skip
+        "mov    rdi, rax",
+        "call   isr_deliver_msg",
+        "4:",
+        "mov    rdi, r12",
+        "call   set_cpulocal_proc_asm",
+        "mov    rdi, rax",
+        "call   restore",              // never returns
+        "2:",
+        "cli",
+        "hlt",
+        "jmp    2b",
+
+        // Kernel mode: restore the 15 GPRs, clear IF in the saved RFLAGS,
+        // and ret (QEMU TCG same-ring 40-byte frame: skip old_RSP/old_SS).
+        "1:",
+        "pop    r15",
+        "pop    r14",
+        "pop    r13",
+        "pop    r12",
+        "pop    r11",
+        "pop    r10",
+        "pop    r9",
+        "pop    r8",
+        "pop    rdi",
+        "pop    rsi",
+        "pop    rbp",
+        "pop    rbx",
+        "pop    rdx",
+        "pop    rcx",
+        "pop    rax",
+        "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
+        "pop    rcx",                   // RIP
+        "add    rsp, 8",                // skip CS
+        "pop    r11",                   // RFLAGS (IF cleared)
+        "add    rsp, 16",               // skip old_RSP/old_SS (QEMU TCG same-ring frame)
+        "push   r11",
+        "popfq",                        // restore RFLAGS (IF=0)
+        "push   rcx",
+        "ret",
+
         handler = sym SERIAL_ISR_HANDLER,
     )
 }
@@ -1165,7 +1221,6 @@ pub unsafe fn test_remap_pic_qemu() {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_apic_mode_enum_values() {
         assert_eq!(ApicMode::PicOnly as u8, 0u8);
@@ -1197,7 +1252,6 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, ApicMode::PicOnly);
     }
-
 
     #[test]
     fn test_lvt_is_nmi_true() {
@@ -1241,7 +1295,6 @@ mod tests {
         assert!(lvt_is_nmi(0x400 | 0x2F));
     }
 
-
     #[test]
     fn test_apic_version_info_construction() {
         let info = ApicVersionInfo {
@@ -1261,7 +1314,6 @@ mod tests {
         assert_eq!(info.version, 0x14);
         assert_eq!(info.max_lvt, 6);
     }
-
 
     #[test]
     fn test_ia32_apic_base_msr() {
@@ -1310,7 +1362,6 @@ mod tests {
         assert_eq!(IOAPIC_REDIR_TBL, 0x10);
     }
 
-
     #[test]
     fn test_detect_apic_base_mask() {
         // Verify the mask: bits 12-35 are preserved, rest zeroed.
@@ -1349,7 +1400,6 @@ mod tests {
         assert_eq!(1u64 << 10, 0x400);
     }
 
-
     #[test]
     fn test_apic_version_info_from_raw() {
         // Simulate raw register: version=0x14, max_lvt=6
@@ -1373,7 +1423,6 @@ mod tests {
         assert_eq!(info.max_lvt, 0);
     }
 
-
     #[test]
     fn test_global_state_defaults() {
         // We can't safely read mutable statics in tests; verify the initial
@@ -1381,7 +1430,6 @@ mod tests {
         assert_eq!(DEFAULT_APIC_BASE, 0xFEE00000);
         assert_eq!(DEFAULT_IOAPIC_BASE, 0xFEC00000);
     }
-
 
     #[test]
     fn test_current_apic_mode_default() {
@@ -1392,7 +1440,6 @@ mod tests {
     fn test_is_apic_enabled_default() {
         assert!(!is_apic_enabled());
     }
-
 
     #[test]
     fn test_pic_imr_port_irq0_is_master() {
@@ -1421,7 +1468,6 @@ mod tests {
         assert_eq!(pic_imr_port(8), 0xA1);
         assert_ne!(pic_imr_port(7), pic_imr_port(8));
     }
-
 
     #[test]
     fn test_pic_imr_bit_irq0() {
@@ -1461,7 +1507,6 @@ mod tests {
         assert_eq!(seen, 0xFF); // all 8 bits set
     }
 
-
     #[test]
     fn test_ioapic_rte_index_irq0() {
         assert_eq!(ioapic_rte_index(0), IOAPIC_REDIR_TBL);
@@ -1484,7 +1529,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_set_irq_vector_noop_when_apic_disabled() {
         // APIC is disabled by default in tests.
@@ -1496,7 +1540,6 @@ mod tests {
         }
         // No assertion needed — if we reach here, the no-op path works.
     }
-
 
     #[test]
     fn test_apic_mode_debug() {

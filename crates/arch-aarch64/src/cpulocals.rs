@@ -96,6 +96,23 @@ pub unsafe fn set_bill_proc(proc: u64) {
     }
 }
 
+/// Get the cycle counter value at the last context switch (quantum
+/// accounting timestamp).
+pub fn tsc_ctr_switch() -> u64 {
+    unsafe { core::ptr::read_volatile(&raw const (*BOOT_CPU_STORAGE.get()).tsc_ctr_switch) }
+}
+
+/// Set the cycle counter value at the last context switch.
+///
+/// # Safety
+///
+/// Caller must ensure no concurrent access.
+pub unsafe fn set_tsc_ctr_switch(val: u64) {
+    unsafe {
+        core::ptr::write_volatile(&raw mut (*BOOT_CPU_STORAGE.get()).tsc_ctr_switch, val);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

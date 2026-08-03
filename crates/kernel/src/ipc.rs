@@ -64,14 +64,15 @@ pub fn ipc_status_has_flag(status: u32, flag: u32) -> bool {
 ///
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
-    unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        // C ipcconst.h: call stored in low 6 bits (IPC_STATUS_CALL_MASK = 0x3F)
-        // bit 6 (MF_DELIVERMSG = 0x40) and above are preserved.
-        let new_status =
-            (status & !(IPC_FLG_CALL_MASK as u32)) | ((call as u32) & IPC_FLG_CALL_MASK as u32);
-        (*rp).p_misc_flags.store(new_status, Ordering::Relaxed);
-    }
+    let _ = (rp, call);
+    // C MINIX stores IPC status in p_reg.IPC_STATUS_REG, NOT p_misc_flags
+    // (ipc.h `IPC_STATUS_ADD`). This port has no IPC_STATUS_REG slot, and
+    // the misc_flags low bits are real flags (REPLY_PEND=0x1,
+    // VIRT_TIMER=0x2, PROF_TIMER=0x4, KCALL_RESUME=0x8): a call number
+    // like SEND (46) or NOTIFY (45) sets VIRT_TIMER/PROF_TIMER on the
+    // receiver, so the next timer tick's vtimer_check causes a spurious
+    // SIGVTALRM/SIGPROF. Observed: mfs frozen on a phantom signal during
+    // init's execve, deadlocking the boot under the live timer.
 }
 
 /// Add a flag to a process's IPC status.
@@ -80,13 +81,10 @@ pub unsafe fn ipc_status_add_call(rp: *mut Proc, call: i32) {
 ///
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
-    unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        // C ipcconst.h: IPC_STATUS_FLAGS(flgs) = flgs << 16
-        (*rp)
-            .p_misc_flags
-            .store(status | ((flag as u32) << 16), Ordering::Relaxed);
-    }
+    let _ = (rp, flag);
+    // No IPC_STATUS_REG in this port; see ipc_status_add_call. Writing
+    // bits 16+ here would alias real MiscFlags (FLUSH_TLB, SENDA_VM_MISS,
+    // STEP, SYS_FWD_REPLY).
 }
 
 /// Clear a process's IPC status.
@@ -95,14 +93,9 @@ pub unsafe fn ipc_status_add_flags(rp: *mut Proc, flag: u16) {
 ///
 /// `rp` must point to a valid `Proc`.
 pub unsafe fn ipc_status_clear(rp: *mut Proc) {
-    unsafe {
-        let status = (*rp).p_misc_flags.load(Ordering::Relaxed);
-        // Clear call bits (0-5) AND flags bits (16+) matching C layout.
-        let clear_mask = (IPC_FLG_STATUS_MASK as u32) | (0xFFFFu32 << 16);
-        (*rp)
-            .p_misc_flags
-            .store(status & !clear_mask, Ordering::Relaxed);
-    }
+    let _ = rp;
+    // No IPC_STATUS_REG in this port; see ipc_status_add_call. Clearing
+    // misc_flags bits 0-5 here would destroy REPLY_PEND.
 }
 
 fn will_receive(dst_ptr: *mut Proc, src_e: i32) -> bool {

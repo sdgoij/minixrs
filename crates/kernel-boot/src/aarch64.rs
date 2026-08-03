@@ -368,10 +368,12 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     // Register timer callback for preemptive scheduling.
     unsafe fn aarch64_timer_callback(frame: &mut [u8; 288]) {
-        let mono = kernel::clock::get_monotonic();
-        kernel::clock::set_monotonic(mono + 1);
-        let real = kernel::clock::get_realtime();
-        kernel::clock::set_realtime(real + 1);
+        // Full per-tick accounting (monotonic/realtime, virtual timers, load
+        // average, quantum accounting via context_stop → proc_no_time →
+        // notify_scheduler) in BOTH kernel and user mode, matching x86's
+        // timer_int_handler. The SPSR check below then limits the
+        // save/pick/switch to user-mode interrupts.
+        unsafe { kernel::clock::timer_int_handler() };
 
         // Timer already acknowledged by IRQ handler via timer_irq_ack().
 
@@ -472,6 +474,13 @@ pub unsafe extern "C" fn kmain() -> ! {
             );
         }
         serial_write("  MMU enabled\r\n");
+
+        // Set CPU frequency so clock::ms_2_cpu_time converts ms to cntpct_el0
+        // cycles (QEMU virt generic timer = 62.5 MHz, matching
+        // arch_aarch64::timer::TIMER_FREQ_HZ). Without a non-zero frequency,
+        // p_cpu_time_left stays 0 after SYS_SCHEDULE and the first timer
+        // tick calls proc_no_time → notify_scheduler on every tick.
+        kernel::glo::cpu_set_freq(0, 62_500_000);
 
         // Initialize timer (uses CNTP system registers, no GIC needed).
         unsafe {

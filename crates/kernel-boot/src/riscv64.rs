@@ -442,10 +442,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Register timer callback for preemptive scheduling.
     unsafe {
         unsafe fn riscv_timer_callback(frame: &mut [u8; 296]) {
-            let mono = kernel::clock::get_monotonic();
-            kernel::clock::set_monotonic(mono + 1);
-            let real = kernel::clock::get_realtime();
-            kernel::clock::set_realtime(real + 1);
+            // Full per-tick accounting (monotonic/realtime, virtual timers,
+            // load average, quantum accounting via context_stop →
+            // proc_no_time → notify_scheduler) in BOTH kernel and user
+            // mode, matching x86's timer_int_handler. The SPP check below
+            // then limits the save/pick/switch to user-mode interrupts.
+            unsafe { kernel::clock::timer_int_handler() };
             // Preempt: if we interrupted user mode, save state and
             // potentially switch to another runnable process.
             let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
@@ -550,6 +552,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     #[cfg(not(feature = "integration-tests"))]
     {
+        // Set CPU frequency so clock::ms_2_cpu_time converts ms to rdtime
+        // cycles (QEMU virt CLINT timebase = 10 MHz). Without a non-zero
+        // frequency, p_cpu_time_left stays 0 after SYS_SCHEDULE and the
+        // first timer tick calls proc_no_time → notify_scheduler on every
+        // tick.
+        kernel::glo::cpu_set_freq(0, 10_000_000);
+
         // Initialize timer (100 Hz)
         unsafe {
             arch_riscv64::clint::init_timer(100);

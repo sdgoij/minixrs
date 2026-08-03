@@ -3855,9 +3855,16 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
             return crate::ipc::EFAULT;
         }
         if rts & RtsFlags::SIGNALED.bits() == 0 {
-            (*rp)
+            let new_rts = (*rp)
                 .p_rts_flags
-                .fetch_and(!RtsFlags::SIG_PENDING.bits(), Ordering::Relaxed);
+                .fetch_and(!RtsFlags::SIG_PENDING.bits(), Ordering::Relaxed)
+                & !RtsFlags::SIG_PENDING.bits();
+            // C's RTS_UNSET enqueues the process if it becomes runnable;
+            // without it a process whose last blocking flag was SIG_PENDING
+            // stays stranded (rts=0 but not in any run queue).
+            if new_rts == 0 {
+                crate::sched::enqueue(rp);
+            }
         }
         OK
     }

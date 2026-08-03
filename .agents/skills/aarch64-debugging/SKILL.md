@@ -92,6 +92,36 @@ memory read -s 8 -c 1 -f x $proc+288      # p_cr3 (should equal TTBR0_EL1)
 
 `memory read $proc+320` DOES evaluate the offset correctly (do not pre-subtract).
 
+## Re-derive every probe address after each rebuild (the stale-base trap)
+
+**Every** kernel symbol base moves between builds — not just function addresses:
+`BOOT_CPU_STORAGE`, `PROC_TABLE_ALIGNED`, `MONOTONIC`, the ser_input ring indices, handler
+addresses — everything you read from the running kernel. The shift is often tiny (a few
+bytes), so a stale base does not fail loudly: reads still return *values*, just values from
+the wrong addresses. The result is **plausible-looking fabricated state**.
+
+Real incident (x86, same kernel): after a relink, `CPU_LOCAL_VARS` moved 0x4a19d8 →
+0x4a19d0 and `MONOTONIC` 0x2537f8 → 0x253800. A probe using the old base read the run-queue
+head 8 bytes off and saw it "contain its own address" — a self-referencing run queue that
+looked like real queue corruption. The kernel was fine; the probe base was stale. An entire
+debugging session went down that path before the addresses were re-derived.
+
+Rules:
+
+1. After ANY rebuild (`just build aarch64`, `cargo build ... --release`, and `just test-*` —
+   test builds relink too), re-run and re-derive **every** base you probe:
+   `rust-nm -n target/aarch64-unknown-minix/release/kernel-boot-aarch64 | grep -iE "BOOT_CPU_STORAGE|PROC_TABLE_ALIGNED|MONOTONIC|ser_input"`.
+2. Validate a base before trusting its fields — cross-check against an independent source.
+   E.g. `current_proc` must point into a `PROC_TABLE_ALIGNED` slot whose `p_name`/
+   `p_endpoint` fit the running process, and a running proc's `p_cr3` (offset 288) must equal
+   the `ttbr0_el1` register. If the cross-check fails, re-derive the base.
+3. When a probe reports something implausible (a queue head pointing at its own storage, a
+   proc pointer landing mid-slot, magic numbers in the wrong place), suspect the probe
+   addresses FIRST — before theorizing about kernel bugs.
+4. Struct **field offsets within a type are stable** across rebuilds; only symbol bases move.
+   Re-derive bases, keep the offsets (still verify them against `crates/kernel/src/proc.rs`
+   when a struct changes).
+
 ## Tracing a syscall chain with kernel_call breakpoints
 
 When an IPC chain hangs (e.g., fork), break on the kernel's syscall handlers and read the
@@ -147,9 +177,11 @@ MiscFlags: REPLY_PEND=0x1, DELIVERMSG=0x40.
 
 Caveats that produced wrong conclusions this session:
 
-- **Re-derive `PROC_TABLE_ALIGNED`/`BOOT_CPU_STORAGE` from the current binary** — they move
-  between builds. An old probe base (0x400576c0 vs real 0x40057700) made every slot read
-  garbage ("no child slot exists" was wrong).
+- **Re-derive EVERY symbol base from the current binary** (see "Re-derive every probe
+  address after each rebuild" above) — bases move between builds. An old probe base
+  (0x400576c0 vs real 0x40057700) made every slot read garbage ("no child slot exists" was
+  wrong); on x86 an 8-byte-stale base fabricated a "self-referencing run queue" that did
+  not exist.
 - **Scan ALL 262 slots**, not just 0..42 — the fork child can land anywhere.
 - **`p_delivermsg` is a STALE buffer**: it holds the *last* message received, not the reason
   the process is currently blocked. A message sitting there + RECEIVING set does NOT mean the
