@@ -18,11 +18,11 @@
 //!
 //! Then add `total += run("my_feature", test_my_feature);` to `run_all()`.
 
-// Several test functions are intentionally unused: they are registered
-// in `run_all()` but their invocations are commented out due to a known
-// compiler-optimization issue (side-effect-free bodies get eliminated,
-// causing infinite loops). They will be re-enabled when LTO barriers
-// are added. Keep them until then.
+// This module is shared across architectures: x86_64, RISC-V64, and
+// AArch64 integration builds all call `run_all()`. It also hosts the
+// arch-agnostic tests that previously lived in kernel-boot's x86-only
+// test_runner (allocator, VM, grants, safecopy, scheduler, ELF, stack).
+// Tests that touch arch-specific hardware stay in the x86 test_runner.
 #![allow(dead_code)]
 
 use core::mem::size_of;
@@ -1151,9 +1151,1342 @@ fn test_do_sync_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
     }
 }
 
+// Shared QEMU integration tests — run on every architecture.
+//
+// These tests moved out of kernel-boot's x86-only test_runner so they also
+// run inside RISC-V/AArch64 integration builds. They use only kernel APIs
+// (hal/pagetable/vm/ipc/sched/clock), never arch-specific hardware.
+
+/// Clear all run queues for test isolation.
+unsafe fn clear_run_queues() {
+    unsafe {
+        crate::hal::init_cpulocals();
+        let head = crate::hal::sched_run_q_head();
+        let tail = crate::hal::sched_run_q_tail();
+        for q in 0..crate::hal::sched_nr_queues() {
+            (*head)[q] = core::ptr::null_mut();
+            (*tail)[q] = core::ptr::null_mut();
+        }
+    }
+}
+
+/// Initialize the kernel VM allocator with a small RAM-backed pool.
+///
+/// No-op if a pool already exists (the x86 runner installs its own
+/// sub-16MB pool before Phase H). The pool is carved from the real
+/// physical allocator so it lands in RAM on every arch (x86 low RAM,
+/// RISC-V 0x80000000+, AArch64 0x40000000+).
+unsafe fn init_vm_allocator() {
+    if crate::vm::total_pages() > 0 {
+        return;
+    }
+    if let Some(base) = crate::hal::alloc_phys_contig(1024) {
+        let chunk = crate::vm::MemoryChunk {
+            base: base / crate::vm::VM_PAGE_SIZE as u64,
+            size: 1024,
+        };
+        crate::vm::mem_init(&[chunk]);
+    }
+}
+
+/// Dummy timer callback — does nothing.
+unsafe fn dummy_timer_cb(_tp: *mut crate::r#priv::MinixTimer) {}
+
+/// Dummy IRQ handler that returns the hook's ID.
+unsafe fn test_irq_handler(hook: *mut crate::system::IrqHook) -> i32 {
+    unsafe { (*hook).id }
+}
+
+fn test_serial_output(ctx: &mut TestCtx) {
+    crate::hal::serial_write_byte(b'>');
+    crate::hal::serial_write_byte(b'\n');
+    ctx.assert(true, "serial output should not crash");
+}
+
+fn test_pt_map_unmap(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::pagetable::{map_page, unmap_page, walk};
+        // Fresh root page table so the test is self-contained on every
+        // arch (boot_cr3 is 0 in RISC-V/AArch64 integration builds).
+        let root = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc root page");
+                return;
+            }
+        };
+        core::ptr::write_bytes(root as *mut u8, 0, 4096);
+
+        let phys = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc_phys_page should succeed");
+                return;
+            }
+        };
+        ctx.assert(phys != 0, "allocated page should be non-zero");
+
+        let va: u64 = 0x4000_0000; // PML4 index 1 on x86; valid SV39/4K granule VA
+        let flags = crate::hal::pte_user_flags();
+
+        ctx.assert(
+            map_page(root, va, phys, flags).is_ok(),
+            "map_page should succeed",
+        );
+        match walk(root, va) {
+            Ok(wr) => {
+                ctx.assert(
+                    wr.pte_value & crate::pagetable::PG_P != 0,
+                    "mapped page should be present",
+                );
+                // The walk must resolve back to the mapped physical page.
+                // (Writability is encoded differently per arch — x86 has a
+                // RW bit, AArch64/RISC-V fold it into AP/perm fields — so it
+                // is not asserted here.)
+                let mapped_pa = crate::hal::pte_to_phys(wr.pte_value);
+                ctx.assert(
+                    mapped_pa == phys & crate::hal::pte_frame_mask(),
+                    "walk should resolve to the mapped physical page",
+                );
+            }
+            Err(_) => ctx.assert(false, "walk of mapped page should succeed"),
+        }
+
+        // Write through the identity mapping at the allocated physical page
+        // (the fresh root is not the active page table, so writes must go
+        // to the physical address, not the virtual one).
+        core::ptr::write_volatile(phys as *mut u32, 0xCAFEBABE);
+        let val = core::ptr::read_volatile(phys as *const u32);
+        ctx.assert(val == 0xCAFEBABE, "readback should match written value");
+
+        ctx.assert(unmap_page(root, va).is_ok(), "unmap_page should succeed");
+        match walk(root, va) {
+            Err(crate::pagetable::PageTableError::NotMapped) => {}
+            _ => ctx.assert(false, "unmapped page should be NotMapped"),
+        }
+    }
+}
+
+fn test_alloc_free_page(ctx: &mut TestCtx) {
+    unsafe {
+        let page = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc_phys_page should succeed");
+                return;
+            }
+        };
+        ctx.assert(page != 0, "allocated page should be non-zero");
+        ctx.assert(page & 0xFFF == 0, "allocated page should be 4K-aligned");
+
+        core::ptr::write_volatile(page as *mut u32, 0xDEADBEEF);
+        let val = core::ptr::read_volatile(page as *const u32);
+        ctx.assert(val == 0xDEADBEEF, "readback should match written value");
+
+        // Not freed: the physical allocator has no cross-arch free API.
+        let page2 = crate::hal::alloc_phys_page();
+        ctx.assert(page2.is_some(), "second alloc should succeed");
+    }
+}
+
+fn test_alloc_contig(ctx: &mut TestCtx) {
+    unsafe {
+        match crate::hal::alloc_phys_contig(4) {
+            Some(addr) => {
+                ctx.assert(addr & 0xFFF == 0, "contiguous alloc should be page-aligned");
+                for i in 0..4 {
+                    core::ptr::write_volatile((addr + i * 4096) as *mut u8, 0xAB);
+                }
+                for i in 0..4 {
+                    let val = core::ptr::read_volatile((addr + i * 4096) as *const u8);
+                    ctx.assert(val == 0xAB, "contiguous page write/readback should match");
+                }
+            }
+            None => ctx.assert(false, "alloc_contig(4) should succeed"),
+        }
+    }
+}
+
+fn test_vm_alloc_free(ctx: &mut TestCtx) {
+    unsafe {
+        let page = crate::vm::alloc_mem(1, 0);
+        ctx.assert(page != crate::vm::NO_MEM, "alloc_mem(1, 0) should succeed");
+        let phys = page * crate::vm::VM_PAGE_SIZE as u64;
+        core::ptr::write_volatile(phys as *mut u32, 0xF00DBABE);
+        let val = core::ptr::read_volatile(phys as *const u32);
+        ctx.assert(val == 0xF00DBABE, "VM page write/readback should match");
+        crate::vm::free_mem(page, 1);
+    }
+}
+
+fn test_vm_alloc_multi(ctx: &mut TestCtx) {
+    unsafe {
+        let base = crate::vm::alloc_mem(3, 0);
+        ctx.assert(base != crate::vm::NO_MEM, "alloc_mem(3, 0) should succeed");
+        let page_sz = crate::vm::VM_PAGE_SIZE as u64;
+        let phys_base = base * page_sz;
+        for i in 0..3 {
+            core::ptr::write_volatile((phys_base + i * page_sz) as *mut u8, (i + 1) as u8);
+        }
+        for i in 0..3 {
+            let val = core::ptr::read_volatile((phys_base + i * page_sz) as *const u8);
+            ctx.assert(
+                val == (i + 1) as u8,
+                "multi-page write/readback should match",
+            );
+        }
+        crate::vm::free_mem(base, 3);
+    }
+}
+
+fn test_is_empty_proc(ctx: &mut TestCtx) {
+    unsafe {
+        use arch_common::com::{CLOCK, PM_PROC_NR};
+        let clock_p = crate::table::proc_addr(CLOCK);
+        ctx.assert(
+            !crate::table::is_empty_proc(clock_p),
+            "CLOCK should not be empty",
+        );
+        let pm_p = crate::table::proc_addr(PM_PROC_NR);
+        ctx.assert(!crate::table::is_empty_proc(pm_p), "PM should not be empty");
+        let free_p = crate::table::proc_addr(50);
+        ctx.assert(
+            crate::table::is_empty_proc(free_p),
+            "slot 50 should be empty (SLOT_FREE)",
+        );
+    }
+}
+
+fn test_is_kernel_vs_user(ctx: &mut TestCtx) {
+    unsafe {
+        use arch_common::com::{CLOCK, INIT_PROC_NR, PM_PROC_NR, SYSTEM, VFS_PROC_NR};
+        let clock_p = crate::table::proc_addr(CLOCK);
+        ctx.assert(
+            crate::table::is_kernel_proc(clock_p),
+            "CLOCK should be kernel proc",
+        );
+        let sys_p = crate::table::proc_addr(SYSTEM);
+        ctx.assert(
+            crate::table::is_kernel_proc(sys_p),
+            "SYSTEM should be kernel proc",
+        );
+        let pm_p = crate::table::proc_addr(PM_PROC_NR);
+        ctx.assert(crate::table::is_user_proc(pm_p), "PM should be user proc");
+        let vfs_p = crate::table::proc_addr(VFS_PROC_NR);
+        ctx.assert(crate::table::is_user_proc(vfs_p), "VFS should be user proc");
+        let init_p = crate::table::proc_addr(INIT_PROC_NR);
+        ctx.assert(
+            crate::table::is_user_proc(init_p),
+            "INIT should be user proc",
+        );
+    }
+}
+
+fn test_grant_direct_valid(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::grants::*;
+        use crate::r#priv::{Priv, PrivFlags};
+        use core::sync::atomic::AtomicU32;
+
+        let mut grant_buf: [CpGrant; 8] = core::mem::zeroed();
+        let gp = &raw mut grant_buf as *mut CpGrant;
+        let entry = CpGrant {
+            cp_flags: CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ | CPF_WRITE,
+            cp_u: CpUnion {
+                cp_direct: CpDirect {
+                    cp_who_to: 42,
+                    cp_start: 0x1000,
+                    cp_len: 4096,
+                    cp_reserved: [0u8; 8],
+                },
+            },
+            cp_reserved: [0u8; 8],
+        };
+        *gp.add(0) = entry;
+
+        let priv_buf: [u8; 2048] = core::mem::zeroed();
+        let priv_ptr = priv_buf.as_ptr() as *mut Priv;
+        core::ptr::write_bytes(priv_ptr.cast::<u8>(), 0, 2048);
+        (*priv_ptr).s_grant_table = gp as u64;
+        (*priv_ptr).s_grant_pa = gp as u64;
+        (*priv_ptr).s_grant_entries = 8;
+        (*priv_ptr).s_flags = PrivFlags::empty();
+
+        let rp = crate::table::proc_addr(60);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(60) failed");
+            return;
+        }
+        core::ptr::write_bytes(
+            rp.cast::<u8>(),
+            0,
+            core::mem::size_of::<crate::proc::Proc>(),
+        );
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = crate::table::make_endpoint(0, 60);
+        (*rp).p_priv = priv_ptr;
+        (*rp).p_rts_flags = AtomicU32::new(crate::proc::RtsFlags::empty().bits());
+
+        let granter_ep = (*rp).p_endpoint;
+        match verify_grant(granter_ep, 42, 0, 4096, CPF_READ, 0) {
+            Ok((offset, e_granter, _flags)) => {
+                ctx.assert(offset == 0x1000, "direct grant offset must match start");
+                ctx.assert(e_granter == granter_ep, "e_granter must match granter");
+            }
+            Err(_e) => ctx.assert(false, "verify_grant direct should succeed"),
+        }
+        if verify_grant(granter_ep, 99, 0, 4096, CPF_WRITE, 0).is_err() {
+            // Expected: wrong grantee doesn't match cp_who_to
+        } else {
+            ctx.assert(false, "verify_grant with wrong grantee should fail");
+        }
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_grant_indirect(_ctx: &mut TestCtx) {
+    // Indirect grant chains are covered by kernel/src/grants.rs unit tests.
+}
+
+fn test_grant_invalid_id(ctx: &mut TestCtx) {
+    unsafe {
+        let result = crate::grants::verify_grant(
+            crate::table::make_endpoint(0, 0),
+            0,
+            -1, // GRANT_INVALID
+            4096,
+            arch_common::safecopies::CPF_READ,
+            0,
+        );
+        if result.is_err() {
+            // Expected: invalid grant ID
+        } else {
+            ctx.assert(false, "verify_grant with GRANT_INVALID should fail");
+        }
+    }
+}
+
+fn test_syscall_getpid(ctx: &mut TestCtx) {
+    unsafe {
+        let rp = crate::table::proc_addr(70);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(70) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 70;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let args = [0u64; 6];
+        let result = crate::syscall::dispatch_basic_syscall(rp, 20, &args);
+        ctx.assert(result == 70, "getpid must return the proc's endpoint");
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_syscall_write(ctx: &mut TestCtx) {
+    unsafe {
+        let rp = crate::table::proc_addr(71);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(71) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 71;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let mut buf = [0u8; 16];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = b'A' + i as u8;
+        }
+        let args = [1u64, buf.as_ptr() as u64, 5u64, 0, 0, 0];
+        let result = crate::syscall::dispatch_basic_syscall(rp, 3, &args);
+        ctx.assert(result == 5, "write should return count of bytes written");
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_syscall_brk(ctx: &mut TestCtx) {
+    unsafe {
+        let rp = crate::table::proc_addr(72);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(72) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 72;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let args = [0u64, 0, 0, 0, 0, 0];
+        let result = crate::syscall::dispatch_basic_syscall(rp, 36, &args);
+        ctx.assert(result >= 0x3FE00000, "initial brk should be in valid range");
+
+        let args2 = [0x3FE01000u64, 0, 0, 0, 0, 0];
+        let result2 = crate::syscall::dispatch_basic_syscall(rp, 36, &args2);
+        ctx.assert(result2 == 0x3FE01000, "brk should return new break value");
+
+        let args4 = [0x40000000u64, 0, 0, 0, 0, 0];
+        let result4 = crate::syscall::dispatch_basic_syscall(rp, 36, &args4);
+        ctx.assert(
+            result4 == -12,
+            "brk with invalid address should return ENOMEM",
+        );
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_syscall_exit(ctx: &mut TestCtx) {
+    unsafe {
+        let rp = crate::table::proc_addr(73);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(73) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 73;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+        (*rp).p_signal_received = 0;
+
+        let args = [42u64, 0, 0, 0, 0, 0];
+        let result = crate::syscall::dispatch_basic_syscall(rp, 0, &args);
+        ctx.assert(result == -203, "exit should return EDONTREPLY");
+        ctx.assert(
+            (*rp).p_signal_received == 42,
+            "exit status should be stored in p_signal_received",
+        );
+        let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            rts & crate::proc::RtsFlags::SLOT_FREE.bits() != 0,
+            "SLOT_FREE should be set after exit",
+        );
+    }
+}
+
+fn test_timer_set_and_expire(ctx: &mut TestCtx) {
+    unsafe {
+        let mut timer = crate::r#priv::MinixTimer::default();
+        let mut timer_list: *mut crate::r#priv::MinixTimer = core::ptr::null_mut();
+        let timers = &raw mut timer_list;
+        let cb = dummy_timer_cb as *const () as usize;
+
+        crate::clock::tmrs_settimer(timers, &raw mut timer, 10, cb, core::ptr::null_mut());
+        ctx.assert(
+            !timer_list.is_null(),
+            "timer list should not be empty after set",
+        );
+        ctx.assert(timer.tmr_exp_time == 10, "timer exp_time should be 10");
+
+        let count = crate::clock::tmrs_exptimers(timers, 5, core::ptr::null_mut());
+        ctx.assert(count == 0, "no timers should expire at tick 5");
+        ctx.assert(!timer_list.is_null(), "timer should still be in list");
+
+        let count = crate::clock::tmrs_exptimers(timers, 10, core::ptr::null_mut());
+        ctx.assert(count == 1, "one timer should expire at tick 10");
+        ctx.assert(
+            timer_list.is_null(),
+            "timer list should be empty after expiry",
+        );
+    }
+}
+
+fn test_timer_clear(ctx: &mut TestCtx) {
+    unsafe {
+        let mut timer = crate::r#priv::MinixTimer::default();
+        let mut timer_list: *mut crate::r#priv::MinixTimer = core::ptr::null_mut();
+        let timers = &raw mut timer_list;
+        let cb = dummy_timer_cb as *const () as usize;
+
+        crate::clock::tmrs_settimer(timers, &raw mut timer, 20, cb, core::ptr::null_mut());
+        ctx.assert(!timer_list.is_null(), "timer should be in list after set");
+        crate::clock::tmrs_clrtimer(timers, &raw mut timer, core::ptr::null_mut());
+        ctx.assert(
+            timer_list.is_null(),
+            "timer list should be empty after clear",
+        );
+        let count = crate::clock::tmrs_exptimers(timers, 100, core::ptr::null_mut());
+        ctx.assert(count == 0, "no timers should expire after clear");
+    }
+}
+
+fn test_timer_multiple(ctx: &mut TestCtx) {
+    unsafe {
+        let mut t1 = crate::r#priv::MinixTimer::default();
+        let mut t2 = crate::r#priv::MinixTimer::default();
+        let mut timer_list: *mut crate::r#priv::MinixTimer = core::ptr::null_mut();
+        let timers = &raw mut timer_list;
+        let cb = dummy_timer_cb as *const () as usize;
+
+        crate::clock::tmrs_settimer(timers, &raw mut t1, 5, cb, core::ptr::null_mut());
+        crate::clock::tmrs_settimer(timers, &raw mut t2, 10, cb, core::ptr::null_mut());
+
+        let count = crate::clock::tmrs_exptimers(timers, 6, core::ptr::null_mut());
+        ctx.assert(count == 1, "one timer should expire at tick 6");
+        ctx.assert(!timer_list.is_null(), "t2 should still be in list");
+
+        let count = crate::clock::tmrs_exptimers(timers, 10, core::ptr::null_mut());
+        ctx.assert(count == 1, "one timer should expire at tick 10");
+        ctx.assert(timer_list.is_null(), "timer list should be empty");
+    }
+}
+
+fn test_monotonic_advances(ctx: &mut TestCtx) {
+    unsafe {
+        // Directly invoke the timer interrupt handler to advance the
+        // monotonic clock (hardware timer interrupts are not wired in
+        // integration builds). timer_int_handler null-guards current_proc.
+        crate::clock::timer_int_handler();
+    }
+    let val = crate::clock::get_monotonic();
+    ctx.assert(val > 0, "monotonic clock should advance after timer tick");
+    ctx.assert(
+        val <= 100,
+        "monotonic shouldn't advance more than 100 ticks",
+    );
+}
+
+fn test_monotonic_timer_interval(ctx: &mut TestCtx) {
+    unsafe {
+        let start = crate::clock::get_monotonic();
+        for _ in 0..5 {
+            crate::clock::timer_int_handler();
+        }
+        let end = crate::clock::get_monotonic();
+        let elapsed = end - start;
+        if elapsed < 5 {
+            ctx.assert(false, "monotonic should advance by >=5 after 5 ticks");
+        }
+    }
+}
+
+fn test_irq_put_and_remove(ctx: &mut TestCtx) {
+    unsafe {
+        let hooks = crate::system::IRQ_HOOKS.get();
+        let hook = &raw mut (*hooks)[0];
+
+        (*hook).proc_nr_e = crate::system::NONE;
+        (*hook).next = core::ptr::null_mut();
+        (*hook).handler = None;
+
+        crate::interrupt::put_irq_handler(hook, 14, test_irq_handler);
+        ctx.assert((*hook).irq == 14, "hook irq should be 14");
+        ctx.assert((*hook).id >= 0, "hook should have valid id");
+        ctx.assert((*hook).handler.is_some(), "hook should have handler");
+
+        crate::interrupt::rm_irq_handler(hook);
+        ctx.assert(true, "rm_irq_handler completed without panic");
+
+        (*hook).next = core::ptr::null_mut();
+        (*hook).handler = None;
+        (*hook).irq = 0;
+        (*hook).id = 0;
+    }
+}
+
+fn test_elf_load_to_phys_pages(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::elf::{
+            ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, ET_EXEC, Elf64Ehdr, Elf64Phdr, PT_LOAD,
+            parse_elf_header,
+        };
+
+        let seg_content: &[u8] = b"Hello, ELF physical page!";
+        let elf_base_vaddr: u64 = 0x100_0000;
+        let phdr_offset: u64 = 64;
+        let data_offset: u64 = 64 + 56;
+
+        let mut buf = [0u8; 512];
+        let ehdr = Elf64Ehdr {
+            e_ident: [
+                ELF_MAGIC[0],
+                ELF_MAGIC[1],
+                ELF_MAGIC[2],
+                ELF_MAGIC[3],
+                ELFCLASS64,
+                ELFDATA2LSB,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            e_type: ET_EXEC,
+            e_machine: crate::hal::ELF_MACHINE,
+            e_version: 1,
+            e_entry: elf_base_vaddr,
+            e_phoff: phdr_offset,
+            e_shoff: 0,
+            e_flags: 0,
+            e_ehsize: 64,
+            e_phentsize: 56,
+            e_phnum: 1,
+            e_shentsize: 0,
+            e_shnum: 0,
+            e_shstrndx: 0,
+        };
+        core::ptr::copy_nonoverlapping(&ehdr as *const _ as *const u8, buf.as_mut_ptr(), 64);
+
+        let phdr = Elf64Phdr {
+            p_type: PT_LOAD,
+            p_flags: 4 | 2 | 1,
+            p_offset: data_offset,
+            p_vaddr: elf_base_vaddr,
+            p_paddr: elf_base_vaddr,
+            p_filesz: seg_content.len() as u64,
+            p_memsz: seg_content.len() as u64 + 16,
+            p_align: 0x1000,
+        };
+        core::ptr::copy_nonoverlapping(
+            &phdr as *const _ as *const u8,
+            buf.as_mut_ptr().add(64),
+            56,
+        );
+        buf[data_offset as usize..data_offset as usize + seg_content.len()]
+            .copy_from_slice(seg_content);
+
+        let total_size = (data_offset + seg_content.len() as u64) as usize;
+        let data = &buf[..total_size];
+        let ehdr_parsed = parse_elf_header(data);
+        ctx.assert(ehdr_parsed.is_ok(), "ELF header must parse");
+        let ehdr = ehdr_parsed.unwrap();
+        ctx.assert(ehdr.e_ehsize == 64, "ELF header size must be 64");
+        ctx.assert(ehdr.e_phnum == 1, "must have 1 program header");
+        ctx.assert(ehdr.e_phentsize == 56, "PHDR size must be 56");
+
+        let phdr_parsed = &*(data.as_ptr().add(ehdr.e_phoff as usize) as *const Elf64Phdr);
+        ctx.assert(phdr_parsed.p_type == PT_LOAD, "PHDR type must be PT_LOAD");
+        ctx.assert(
+            phdr_parsed.p_vaddr == elf_base_vaddr,
+            "PHDR vaddr must match",
+        );
+
+        let seg_top = phdr_parsed.p_vaddr + phdr_parsed.p_memsz;
+        let pages_needed = (seg_top.div_ceil(0x1000) - (elf_base_vaddr / 0x1000)) as usize;
+        let clicks_needed = pages_needed.div_ceil(4);
+
+        let click = crate::vm::alloc_mem(clicks_needed, 0);
+        ctx.assert(
+            click != crate::vm::NO_MEM,
+            "alloc_mem must succeed for ELF pages",
+        );
+        let page_sz = crate::vm::VM_PAGE_SIZE as u64;
+        let phys_base = click * page_sz;
+
+        let offset = phdr_parsed.p_vaddr.wrapping_sub(elf_base_vaddr);
+        let dst_addr = phys_base.wrapping_add(offset);
+        let dst = dst_addr as *mut u8;
+        if phdr_parsed.p_filesz > 0 {
+            let src = data.as_ptr().add(phdr_parsed.p_offset as usize);
+            core::ptr::copy_nonoverlapping(src, dst, phdr_parsed.p_filesz as usize);
+        }
+        let bss_size = phdr_parsed.p_memsz.saturating_sub(phdr_parsed.p_filesz);
+        if bss_size > 0 {
+            core::ptr::write_bytes(dst.add(phdr_parsed.p_filesz as usize), 0, bss_size as usize);
+        }
+
+        let mut readback = [0u8; 64];
+        core::ptr::copy_nonoverlapping(dst, readback.as_mut_ptr(), seg_content.len().min(64));
+        let expected = &seg_content[..seg_content.len().min(64)];
+        let actual = &readback[..expected.len()];
+        ctx.assert(actual == expected, "loaded ELF data must match source");
+
+        let bss_start = dst.add(phdr_parsed.p_filesz as usize);
+        for i in 0..16 {
+            let byte = core::ptr::read_volatile(bss_start.add(i));
+            ctx.assert(byte == 0, "BSS must be zero-filled");
+        }
+        ctx.assert(ehdr.e_entry == elf_base_vaddr, "entry point must match");
+        crate::vm::free_mem(click, clicks_needed as u64);
+    }
+}
+
+fn test_initramfs_all_executables_elf(ctx: &mut TestCtx) {
+    use crate::elf::parse_elf_header;
+
+    let binaries = [
+        "/sbin/init",
+        "/sbin/pm",
+        "/sbin/vfs",
+        "/sbin/vm",
+        "/sbin/rs",
+        "/sbin/ds",
+        "/sbin/sched",
+        "/sbin/tty",
+        "/sbin/mfs",
+        "/sbin/pfs",
+        "/sbin/ramdisk",
+        "/bin/sh",
+        "/bin/cat",
+        "/bin/echo",
+        "/bin/ls",
+        "/bin/mkdir",
+        "/bin/rm",
+        "/bin/cp",
+        "/bin/ln",
+        "/bin/chmod",
+        "/bin/sync",
+        "/sbin/mknod",
+        "/sbin/reboot",
+        "/sbin/fsck",
+    ];
+    for &name in &binaries {
+        let found = crate::initramfs::find_initramfs_file(name);
+        if found.is_none() {
+            ctx.assert(false, "binary missing from initramfs");
+            continue;
+        }
+        let (data, _mode) = found.unwrap();
+        match parse_elf_header(data) {
+            Ok(ehdr) => {
+                if ehdr.e_type != 2 {
+                    ctx.assert(false, "binary not ET_EXEC");
+                }
+                if ehdr.e_ident[4] != 2 {
+                    ctx.assert(false, "binary not 64-bit");
+                }
+                if ehdr.e_phnum == 0 {
+                    ctx.assert(false, "binary has no phdrs");
+                }
+            }
+            Err(_) => ctx.assert(false, "binary has bad ELF header"),
+        }
+    }
+}
+
+fn test_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
+    unsafe {
+        let src = crate::table::proc_addr(90);
+        let dst = crate::table::proc_addr(91);
+        if src.is_null() || dst.is_null() {
+            ctx.assert(false, "proc_addr failed");
+            return;
+        }
+        (*src).p_magic = crate::proc::PMAGIC;
+        (*src).p_nr = 90;
+        (*src).p_endpoint = crate::table::make_endpoint(0, 90);
+        (*src).p_rts_flags.store(0, Ordering::Relaxed);
+        (*src).p_caller_q = core::ptr::null_mut();
+        (*src).p_q_link = core::ptr::null_mut();
+        let boot_cr3 = crate::pagetable::boot_cr3();
+        (*src).p_seg.p_cr3 = boot_cr3;
+        (*dst).p_magic = crate::proc::PMAGIC;
+        (*dst).p_nr = 91;
+        (*dst).p_endpoint = crate::table::make_endpoint(0, 91);
+        (*dst).p_rts_flags.store(0, Ordering::Relaxed);
+        (*dst).p_caller_q = core::ptr::null_mut();
+        (*dst).p_q_link = core::ptr::null_mut();
+        (*dst).p_seg.p_cr3 = boot_cr3;
+
+        let src_ep = (*src).p_endpoint;
+        let test_val: i32 = 0x12345678;
+
+        let ep_bytes = src_ep.to_le_bytes();
+        let val_bytes = test_val.to_le_bytes();
+        core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), (*dst).p_delivermsg.as_mut_ptr(), 4);
+        core::ptr::copy_nonoverlapping(
+            val_bytes.as_ptr(),
+            (*dst).p_delivermsg.as_mut_ptr().add(4),
+            4,
+        );
+
+        let mut dst_buf = [0u8; crate::proc::MESSAGE_SIZE];
+        (*dst).p_delivermsg_vir = dst_buf.as_mut_ptr() as u64;
+        let dm_result = crate::ipc::delivermsg(dst);
+        ctx.assert(dm_result == 0, "delivermsg should return OK");
+
+        let delivered = i32::from_ne_bytes([dst_buf[4], dst_buf[5], dst_buf[6], dst_buf[7]]);
+        ctx.assert(
+            delivered == test_val,
+            "delivermsg should copy message to dst_buf",
+        );
+
+        (*src)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_pagetable_deep_walk(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::pagetable::{map_page, walk};
+        // Fresh root: self-contained on every arch.
+        let root = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc root page");
+                return;
+            }
+        };
+        core::ptr::write_bytes(root as *mut u8, 0, 4096);
+
+        let phys = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc data page");
+                return;
+            }
+        };
+        let flags = crate::hal::pte_user_flags();
+        ctx.assert(
+            map_page(root, 0x4000_0000, phys, flags).is_ok(),
+            "map_page should succeed",
+        );
+
+        match walk(root, 0x4000_0000) {
+            Ok(wr) => ctx.assert(
+                wr.pte_value & crate::pagetable::PG_P != 0,
+                "mapped PTE should be present",
+            ),
+            Err(_) => ctx.assert(false, "walk of mapped page should succeed"),
+        }
+
+        // Walk an unmapped address should fail
+        ctx.assert(
+            walk(root, 0x7fff_0000_0000).is_err(),
+            "walk of unmapped address should fail",
+        );
+    }
+}
+
+fn test_enqueue_priority(ctx: &mut TestCtx) {
+    unsafe {
+        clear_run_queues();
+
+        let high = crate::table::proc_addr(92);
+        let low = crate::table::proc_addr(93);
+        if high.is_null() || low.is_null() {
+            ctx.assert(false, "proc_addr failed");
+            return;
+        }
+        (*high).p_magic = crate::proc::PMAGIC;
+        (*high).p_endpoint = 92;
+        (*high).p_priority = 5;
+        (*high).p_cpu_time_left = 100;
+        (*high).p_rts_flags.store(0, Ordering::Relaxed);
+
+        (*low).p_magic = crate::proc::PMAGIC;
+        (*low).p_endpoint = 93;
+        (*low).p_priority = 7;
+        (*low).p_cpu_time_left = 100;
+        (*low).p_rts_flags.store(0, Ordering::Relaxed);
+
+        crate::sched::enqueue(high);
+        crate::sched::enqueue(low);
+
+        let picked = crate::sched::pick_proc();
+        ctx.assert(picked.is_some(), "pick_proc should return something");
+        if let Some(p) = picked {
+            ctx.assert((*p).p_endpoint == 92, "highest priority should run first");
+        }
+
+        (*high)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*low)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_quantum_exhaustion(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::proc::RtsFlags;
+
+        let rp = crate::table::proc_addr(94);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(94) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 94;
+        (*rp).p_priority = 6;
+        (*rp).p_cpu_time_left = 10;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let mut fake_priv = crate::r#priv::Priv::default();
+        fake_priv.s_proc_nr = 94;
+        fake_priv.s_flags = crate::r#priv::PrivFlags::PREEMPTIBLE;
+        (*rp).p_priv = &mut fake_priv;
+        let sched_rp = crate::table::proc_addr(4); // SCHED_PROC_NR
+        if !sched_rp.is_null() {
+            (*rp).p_scheduler = sched_rp;
+        }
+
+        crate::sched::enqueue(rp);
+        (*rp).p_cpu_time_left = 0;
+        crate::sched::proc_no_time(rp);
+
+        let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            rts & RtsFlags::NO_QUANTUM.bits() != 0,
+            "RTS_NO_QUANTUM should be set after quantum exhaustion",
+        );
+
+        (*rp).p_priv = core::ptr::null_mut();
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_dequeue_reordering(ctx: &mut TestCtx) {
+    unsafe {
+        clear_run_queues();
+
+        let p_a = crate::table::proc_addr(95);
+        let p_b = crate::table::proc_addr(96);
+        let p_c = crate::table::proc_addr(97);
+        if p_a.is_null() || p_b.is_null() || p_c.is_null() {
+            ctx.assert(false, "proc_addr failed");
+            return;
+        }
+        for (i, rp) in [p_a, p_b, p_c].iter().enumerate() {
+            (**rp).p_magic = crate::proc::PMAGIC;
+            (**rp).p_endpoint = 95 + i as i32;
+            (**rp).p_priority = 6;
+            (**rp).p_cpu_time_left = 100;
+            (**rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (**rp).p_q_link = core::ptr::null_mut();
+        }
+
+        crate::sched::enqueue(p_a);
+        crate::sched::enqueue(p_b);
+        crate::sched::enqueue(p_c);
+
+        (*p_b)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        crate::sched::dequeue(p_b);
+
+        let first = crate::sched::pick_proc();
+        ctx.assert(first.is_some(), "first pick should succeed");
+        if let Some(p) = first {
+            ctx.assert((*p).p_endpoint == 95, "first should be p_a");
+        }
+
+        (*p_a)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        crate::sched::dequeue(p_a);
+
+        let second = crate::sched::pick_proc();
+        ctx.assert(second.is_some(), "second pick should succeed");
+        if let Some(p) = second {
+            ctx.assert((*p).p_endpoint == 97, "second should be p_c");
+        }
+
+        for rp in [p_a, p_b, p_c] {
+            (*rp)
+                .p_rts_flags
+                .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+}
+
+fn test_runqueues_invariant(ctx: &mut TestCtx) {
+    unsafe {
+        clear_run_queues();
+
+        let rp = crate::table::proc_addr(98);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(98) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 98;
+        (*rp).p_priority = 6;
+        (*rp).p_cpu_time_left = 100;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let before = crate::sched::runqueues_ok();
+        crate::sched::enqueue(rp);
+        let mid = crate::sched::runqueues_ok();
+        ctx.assert(mid, "runqueues should be OK after enqueue");
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        crate::sched::dequeue(rp);
+        let after = crate::sched::runqueues_ok();
+        ctx.assert(after, "runqueues should be OK after dequeue");
+        if before {
+            ctx.assert(after, "runqueues invariant preserved");
+        }
+
+        (*rp)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
+fn test_safecopy_read(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::grants::*;
+        use crate::r#priv::Priv;
+
+        let mut grant: CpGrant = core::mem::zeroed();
+        grant.cp_flags = CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ;
+        grant.cp_u.cp_direct.cp_who_to = 88;
+        grant.cp_u.cp_direct.cp_start = 0x2000;
+        grant.cp_u.cp_direct.cp_len = 64;
+
+        let gp = &raw mut grant;
+        let mut priv_buf = core::mem::zeroed::<Priv>();
+        priv_buf.s_grant_table = gp as u64;
+        priv_buf.s_grant_pa = gp as u64;
+        priv_buf.s_grant_entries = 4;
+
+        let rp = crate::table::proc_addr(82);
+        if rp.is_null() {
+            ctx.assert(false, "no slot");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = crate::table::make_endpoint(0, 82);
+        (*rp).p_priv = &raw mut priv_buf;
+
+        let ep = (*rp).p_endpoint;
+        ctx.assert(
+            verify_grant(ep, 88, 0, 64, CPF_READ, 0).is_ok(),
+            "verify_grant read should succeed",
+        );
+
+        (*rp).p_rts_flags =
+            core::sync::atomic::AtomicU32::new(crate::proc::RtsFlags::SLOT_FREE.bits());
+    }
+}
+
+fn test_safecopy_write(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::grants::*;
+        use crate::r#priv::Priv;
+
+        let mut grant: CpGrant = core::mem::zeroed();
+        grant.cp_flags = CPF_USED | CPF_VALID | CPF_DIRECT | CPF_WRITE;
+        grant.cp_u.cp_direct.cp_who_to = 86;
+        grant.cp_u.cp_direct.cp_start = 0x1000;
+        grant.cp_u.cp_direct.cp_len = 64;
+
+        let grant_ptr = &raw mut grant;
+        let mut priv_buf = core::mem::zeroed::<Priv>();
+        priv_buf.s_grant_table = grant_ptr as u64;
+        priv_buf.s_grant_pa = grant_ptr as u64;
+        priv_buf.s_grant_entries = 4;
+
+        let rp = crate::table::proc_addr(83);
+        if rp.is_null() {
+            ctx.assert(false, "no slot");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = crate::table::make_endpoint(0, 83);
+        (*rp).p_priv = &raw mut priv_buf;
+
+        let ep = (*rp).p_endpoint;
+        ctx.assert(
+            verify_grant(ep, 86, 0, 16, CPF_WRITE, 0).is_ok(),
+            "CPF_WRITE grant should verify",
+        );
+        ctx.assert(
+            verify_grant(ep, 86, 0, 4, CPF_READ, 0).is_err(),
+            "CPF_READ on CPF_WRITE grant should fail",
+        );
+
+        (*rp).p_rts_flags =
+            core::sync::atomic::AtomicU32::new(crate::proc::RtsFlags::SLOT_FREE.bits());
+    }
+}
+
+fn test_safecopy_bounds(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::grants::*;
+        use crate::r#priv::Priv;
+
+        let mut grant: CpGrant = core::mem::zeroed();
+        grant.cp_flags = CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ;
+        grant.cp_u.cp_direct.cp_who_to = 84;
+        grant.cp_u.cp_direct.cp_start = 0x3000;
+        grant.cp_u.cp_direct.cp_len = 32;
+
+        let grant_ptr = &raw mut grant;
+        let mut priv_buf = core::mem::zeroed::<Priv>();
+        priv_buf.s_grant_table = grant_ptr as u64;
+        priv_buf.s_grant_pa = grant_ptr as u64;
+        priv_buf.s_grant_entries = 4;
+
+        let rp = crate::table::proc_addr(84);
+        if rp.is_null() {
+            ctx.assert(false, "no slot");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = crate::table::make_endpoint(0, 84);
+        (*rp).p_priv = &raw mut priv_buf;
+
+        let ep = (*rp).p_endpoint;
+        ctx.assert(
+            verify_grant(ep, 84, 0, 64, CPF_READ, 0).is_err(),
+            "beyond size should fail",
+        );
+        ctx.assert(
+            verify_grant(ep, 84, 0, 16, CPF_READ, 0).is_ok(),
+            "within size should succeed",
+        );
+
+        (*rp).p_rts_flags =
+            core::sync::atomic::AtomicU32::new(crate::proc::RtsFlags::SLOT_FREE.bits());
+    }
+}
+
+fn test_grant_revoke_reuse(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::grants::*;
+        use crate::r#priv::Priv;
+
+        let mut grants: [CpGrant; 2] = [
+            CpGrant {
+                cp_flags: CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ,
+                cp_u: CpUnion {
+                    cp_direct: CpDirect {
+                        cp_who_to: 85,
+                        cp_start: 0x4000,
+                        cp_len: 32,
+                        cp_reserved: [0u8; 8],
+                    },
+                },
+                cp_reserved: [0u8; 8],
+            },
+            core::mem::zeroed(),
+        ];
+
+        let gp = &raw mut grants as *mut CpGrant;
+        let mut priv_buf = core::mem::zeroed::<Priv>();
+        priv_buf.s_grant_table = gp as u64;
+        priv_buf.s_grant_pa = gp as u64;
+        priv_buf.s_grant_entries = 4;
+
+        let rp = crate::table::proc_addr(85);
+        if rp.is_null() {
+            ctx.assert(false, "no slot");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = crate::table::make_endpoint(0, 85);
+        (*rp).p_priv = &raw mut priv_buf;
+
+        let ep = (*rp).p_endpoint;
+        ctx.assert(
+            verify_grant(ep, 85, 0, 16, CPF_READ, 0).is_ok(),
+            "grant 0 valid",
+        );
+
+        let mut entry = core::ptr::read(gp.add(0));
+        entry.cp_flags &= !(CPF_USED | CPF_VALID);
+        core::ptr::write(gp.add(0), entry);
+        ctx.assert(
+            verify_grant(ep, 85, 0, 16, CPF_READ, 0).is_err(),
+            "grant 0 revoked",
+        );
+
+        core::ptr::write(
+            gp.add(1),
+            CpGrant {
+                cp_flags: CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ,
+                cp_u: CpUnion {
+                    cp_direct: CpDirect {
+                        cp_who_to: 85,
+                        cp_start: 0x5000,
+                        cp_len: 16,
+                        cp_reserved: [0u8; 8],
+                    },
+                },
+                cp_reserved: [0u8; 8],
+            },
+        );
+        ctx.assert(
+            verify_grant(ep, 85, 1, 16, CPF_READ, 0).is_ok(),
+            "slot 1 reused",
+        );
+
+        (*rp).p_rts_flags =
+            core::sync::atomic::AtomicU32::new(crate::proc::RtsFlags::SLOT_FREE.bits());
+    }
+}
+
+fn test_alloc_align64k(ctx: &mut TestCtx) {
+    unsafe {
+        let page = crate::vm::alloc_mem(1, crate::vm::PAF_ALIGN64K);
+        ctx.assert(
+            page != crate::vm::NO_MEM,
+            "alloc_mem with ALIGN64K should succeed",
+        );
+        let phys = page * crate::vm::VM_PAGE_SIZE as u64;
+        ctx.assert(
+            phys.is_multiple_of(64 * 1024),
+            "64K-aligned alloc should be 64K-aligned",
+        );
+        crate::vm::free_mem(page, 1);
+    }
+}
+
+fn test_stack_setup_zero(ctx: &mut TestCtx) {
+    unsafe {
+        let stack = [0u8; 4096];
+        let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
+        let rsp = crate::elf::setup_user_stack(stack_top, 4096, &[]);
+        match rsp {
+            Ok(sp) => {
+                ctx.assert(sp.is_multiple_of(16), "RSP should be 16-byte aligned");
+                let argc = core::ptr::read_volatile(sp as *const u64);
+                ctx.assert(argc == 0, "argc should be 0");
+                let argv0 = core::ptr::read_volatile((sp + 8) as *const u64);
+                ctx.assert(argv0 == 0, "argv[0] should be NULL");
+            }
+            Err(_e) => ctx.assert(false, "setup_user_stack with 0 args failed"),
+        }
+    }
+}
+
+fn test_stack_setup_five(ctx: &mut TestCtx) {
+    unsafe {
+        let stack = [0u8; 8192];
+        let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
+        let argv = &["/bin/echo", "arg1", "arg2", "arg3", "arg4"];
+        let rsp = crate::elf::setup_user_stack(stack_top, 8192, argv);
+        match rsp {
+            Ok(sp) => {
+                ctx.assert(sp.is_multiple_of(16), "RSP should be 16-byte aligned");
+                let argc = core::ptr::read_volatile(sp as *const u64);
+                ctx.assert(argc == 5, "argc should be 5");
+                for (i, expected) in argv.iter().enumerate() {
+                    let ptr = core::ptr::read_volatile((sp + 8 + i as u64 * 8) as *const u64);
+                    if ptr == 0 {
+                        ctx.assert(false, "argv pointer should not be NULL");
+                        continue;
+                    }
+                    let mut buf = [0u8; 32];
+                    for (buf_pos, j) in (0..31usize).enumerate() {
+                        let b = core::ptr::read_volatile((ptr as *const u8).add(j));
+                        buf[buf_pos] = b;
+                        if b == 0 {
+                            break;
+                        }
+                    }
+                    let s = core::str::from_utf8_unchecked(
+                        &buf[..buf.iter().position(|&b| b == 0).unwrap_or(31)],
+                    );
+                    ctx.assert(s == *expected, "argv string should match");
+                }
+                let term = core::ptr::read_volatile((sp + 8 + 5 * 8) as *const u64);
+                ctx.assert(term == 0, "argv terminator should be NULL");
+            }
+            Err(_e) => ctx.assert(false, "setup_user_stack with 5 args failed"),
+        }
+    }
+}
+
+fn test_sys_kill_invalid(ctx: &mut TestCtx) {
+    unsafe {
+        let result = crate::system::send_sig(9999, 9); // SIGKILL = 9
+        ctx.assert(result != 0, "send_sig to invalid proc should return error");
+    }
+}
+
+fn test_sys_schedule_roundtrip(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::system::sched_proc;
+        let rp = crate::table::proc_addr(99);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(99) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_priority = 0;
+        (*rp).p_cpu_time_left = 0;
+
+        let result = sched_proc(rp, 7, 50);
+        ctx.assert(result == 0, "sched_proc should set priority and quantum");
+        if (*rp).p_cpu_time_left == 0 {
+            ctx.assert((*rp).p_priority == 7, "priority should be 7");
+        } else {
+            ctx.assert((*rp).p_cpu_time_left > 0, "quantum should be non-zero");
+        }
+    }
+}
+
+fn test_sys_getksig_pending(ctx: &mut TestCtx) {
+    unsafe {
+        use crate::r#priv::Priv;
+
+        let ep = crate::table::proc_addr(79);
+        if ep.is_null() {
+            ctx.assert(false, "proc_addr(79) failed");
+            return;
+        }
+        core::ptr::write_bytes(
+            ep.cast::<u8>(),
+            0,
+            core::mem::size_of::<crate::proc::Proc>(),
+        );
+        (*ep).p_magic = crate::proc::PMAGIC;
+        (*ep).p_endpoint = 79;
+        (*ep).p_signal_received = 42;
+        (*ep).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let mut priv_buf = core::mem::zeroed::<Priv>();
+        priv_buf.s_proc_nr = 79;
+        priv_buf.s_sig_mgr = 0;
+        (*ep).p_priv = &raw mut priv_buf;
+
+        let sig_flags =
+            crate::proc::RtsFlags::SIGNALED.bits() | crate::proc::RtsFlags::SIG_PENDING.bits();
+        (*ep).p_rts_flags.fetch_or(sig_flags, Ordering::Relaxed);
+
+        let pm = crate::table::proc_addr(0);
+        if pm.is_null() {
+            ctx.assert(false, "proc_addr(0) failed");
+            return;
+        }
+
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        let result = crate::system::do_getksig_handler(pm, &mut msg);
+        ctx.assert(result == 0, "do_getksig_handler should return OK");
+
+        let found_ep = i32::from_ne_bytes([msg[16], msg[17], msg[18], msg[19]]);
+        ctx.assert(found_ep == 79, "getksig should find endpoint 79");
+        let found_sig = i32::from_ne_bytes([msg[24], msg[25], msg[26], msg[27]]);
+        ctx.assert(found_sig == 42, "getksig should return signal value 42");
+    }
+}
+
 /// Run all kernel unit tests inside QEMU. Returns the number of failures (0 = all passed).
 pub fn run_all() -> u32 {
     let mut total: u32 = 0;
+
+    // Shared integration tests need a VM pool (map_page, alloc_mem, brk).
+    // On x86 the runner installs its own pool before Phase H, so this is a
+    // no-op there; on RISC-V/AArch64 it carves one from the physical
+    // allocator so the pool lands in real RAM.
+    unsafe { init_vm_allocator() }
 
     // Pure logic + IPC tests. These run in the same slot/queue-safe pattern
     // as test_runner's Phase G (ipc_setup_proc): test procs use non-boot
@@ -1191,10 +2524,9 @@ pub fn run_all() -> u32 {
     total += run("proc_size", test_proc_size_key);
     total += run("proc_ptr_ok", test_proc_ptr_ok);
 
-    // Scheduler tests — sched_make_proc clears the run queues first, so
-    // they are isolated from whatever ran before. test_enqueue_dequeue
-    // re-runs proc_init, which is safe here: later phases re-initialize
-    // every slot they touch.
+    // Scheduler tests — clear_run_queues isolates them from whatever ran
+    // before. test_enqueue_dequeue re-runs proc_init, which is safe here:
+    // later phases re-initialize every slot they touch.
     total += run("enqueue_dequeue", test_enqueue_dequeue);
     total += run("sched_priority", test_sched_priority_ordering);
     total += run("sched_round_robin", test_sched_round_robin);
@@ -1213,6 +2545,52 @@ pub fn run_all() -> u32 {
     } else {
         ser_write("  SKIP do_sync_ipc_sendrec (x86_64 only)\n");
     }
+
+    // Shared integration tests (moved from test_runner.rs so they run on
+    // every architecture). Ordering: allocator/page-table tests first, then
+    // process/grant/syscall/timer/scheduler/safecopy/stack.
+    total += run("serial_output", test_serial_output);
+    total += run("pt_map_unmap", test_pt_map_unmap);
+    total += run("alloc_free_page", test_alloc_free_page);
+    total += run("alloc_contig", test_alloc_contig);
+    total += run("vm_alloc_free", test_vm_alloc_free);
+    total += run("vm_alloc_multi", test_vm_alloc_multi);
+    total += run("is_empty_proc", test_is_empty_proc);
+    total += run("is_kernel_vs_user", test_is_kernel_vs_user);
+    total += run("grant_direct_valid", test_grant_direct_valid);
+    total += run("grant_indirect", test_grant_indirect);
+    total += run("grant_invalid_id", test_grant_invalid_id);
+    total += run("syscall_getpid", test_syscall_getpid);
+    total += run("syscall_write", test_syscall_write);
+    total += run("syscall_brk", test_syscall_brk);
+    total += run("syscall_exit", test_syscall_exit);
+    total += run("timer_set_and_expire", test_timer_set_and_expire);
+    total += run("timer_clear", test_timer_clear);
+    total += run("timer_multiple", test_timer_multiple);
+    total += run("monotonic_advances", test_monotonic_advances);
+    total += run("irq_put_and_remove", test_irq_put_and_remove);
+    total += run("elf_load_to_phys_pages", test_elf_load_to_phys_pages);
+    total += run(
+        "initramfs_all_executables_elf",
+        test_initramfs_all_executables_elf,
+    );
+    total += run("ipc_sendrec_roundtrip", test_ipc_sendrec_roundtrip);
+    total += run("monotonic_timer_interval", test_monotonic_timer_interval);
+    total += run("pagetable_deep_walk", test_pagetable_deep_walk);
+    total += run("enqueue_priority", test_enqueue_priority);
+    total += run("quantum_exhaustion", test_quantum_exhaustion);
+    total += run("dequeue_reordering", test_dequeue_reordering);
+    total += run("runqueues_invariant", test_runqueues_invariant);
+    total += run("safecopy_read", test_safecopy_read);
+    total += run("safecopy_write", test_safecopy_write);
+    total += run("safecopy_bounds", test_safecopy_bounds);
+    total += run("grant_revoke_reuse", test_grant_revoke_reuse);
+    total += run("alloc_align64k", test_alloc_align64k);
+    total += run("stack_setup_zero", test_stack_setup_zero);
+    total += run("stack_setup_five", test_stack_setup_five);
+    total += run("sys_kill_invalid", test_sys_kill_invalid);
+    total += run("sys_schedule_roundtrip", test_sys_schedule_roundtrip);
+    total += run("sys_getksig_pending", test_sys_getksig_pending);
 
     total
 }

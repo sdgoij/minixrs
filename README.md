@@ -112,8 +112,8 @@ See `.agents/skills/` for domain deep-dives:
 - **QEMU integration:** `just test-qemu [arch]` — kernel tests running in QEMU
   (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants):
   - `just test-qemu` (x86_64) — 82 tests, exits with a real pass/fail code
-  - `just test-qemu riscv64` — 25 tests (4 arch-specific skips)
-  - `just test-qemu aarch64` — 23 tests (4 arch-specific skips)
+  - `just test-qemu riscv64` — 62 tests (4 arch-specific skips)
+  - `just test-qemu aarch64` — 62 tests (4 arch-specific skips)
 - **Boot tests:** `just test-boot [arch]` — multi-server verification after VFS
   mount_root on all three arches (server liveness, process-table consistency,
   brk/RAM-disk mappings, IPC, filesystem metadata, allocator)
