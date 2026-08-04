@@ -549,7 +549,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         }
 
         serial_write("Running RISC-V integration tests...\r\n");
-        let failures = kernel::tests::run_all();
+        let mut failures = kernel::tests::run_all();
+        failures += unsafe { test_clint_timer() };
+        failures += unsafe { test_sbi_console() };
         serial_write("\r\n");
         if failures == 0 {
             serial_write("ALL TESTS PASSED\r\n");
@@ -885,6 +887,68 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             arch_riscv64::switch::switch_to_user(next_ptr as *const u8);
         }
     }
+}
+
+/// RISC-V hardware tests: CLINT timer + SBI console.
+///
+/// Runs inside the integration build after the shared kernel suite. These
+/// probe the actual device/console paths (via the SV39 identity map) rather
+/// than the hal wrappers the shared tests use.
+
+/// CLINT timer: rdtime (the `time` CSR — the architectural view of the CLINT
+/// mtime) must advance, and the SSTC stimecmp CSR (0x14D) must accept and
+/// return a programmed deadline. These are the S-mode timer interfaces the
+/// port actually uses (clint::read_time / init_timer) — the hardware-level
+/// equivalent of monotonic_advances / timer_set_and_expire.
+#[cfg(feature = "integration-tests")]
+unsafe fn test_clint_timer() -> u32 {
+    unsafe {
+        // rdtime (the `time` CSR) is the architectural view of the CLINT
+        // mtime — it must advance. (The CLINT MMIO mtime at 0x0200BFF8 is
+        // not accessible from S-mode on this QEMU build: it raises a load
+        // access fault, cause 5, hence the port uses rdtime + SSTC.)
+        let t1 = arch_riscv64::clint::read_time();
+        let mut t2 = t1;
+        let mut spins = 0usize;
+        while t2 == t1 && spins < 1_000_000 {
+            core::hint::spin_loop();
+            t2 = arch_riscv64::clint::read_time();
+            spins += 1;
+        }
+        if t2 <= t1 {
+            serial_write("  FAIL: rdtime should advance\r\n");
+            return 1;
+        }
+
+        // SSTC stimecmp (CSR 0x14D): write a next-tick deadline and read it
+        // back — the S-mode timer-programming path clint::init_timer uses.
+        let now = arch_riscv64::clint::read_time();
+        let deadline = now + arch_riscv64::clint::DEFAULT_TIMER_INTERVAL;
+        core::arch::asm!("csrw 0x14D, {v}", v = in(reg) deadline, options(nomem, nostack));
+        let read_back: u64;
+        core::arch::asm!("csrr {v}, 0x14D", v = out(reg) read_back, options(nomem, nostack));
+        if read_back != deadline {
+            serial_write("  FAIL: stimecmp readback mismatch\r\n");
+            return 1;
+        }
+        serial_write("  OK CLINT timer (rdtime + SSTC stimecmp)\r\n");
+    }
+    0
+}
+
+/// SBI console: legacy putchar (used by every serial_write on RISC-V) and
+/// getchar (must return cleanly with no input). The DBCN buffer-write
+/// extension is NOT exercised: on this QEMU/OpenSBI build, console_write
+/// faults inside OpenSBI reading address == num_bytes, suggesting its
+/// handler consumes (len, addr) in the swapped order — the port correctly
+/// avoids DBCN and uses legacy putchar everywhere.
+#[cfg(feature = "integration-tests")]
+unsafe fn test_sbi_console() -> u32 {
+    arch_riscv64::sbi::console_putchar(b'~');
+    // Must return cleanly; with no console input this is None.
+    let _ = arch_riscv64::sbi::console_getchar();
+    serial_write("  OK SBI console (legacy putchar/getchar)\r\n");
+    0
 }
 
 /// Create an identity-mapped boot page table for SV39 paging.

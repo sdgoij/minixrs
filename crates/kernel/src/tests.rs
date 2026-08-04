@@ -1967,6 +1967,34 @@ fn test_pagetable_deep_walk(ctx: &mut TestCtx) {
     }
 }
 
+/// Marker whose address must be mapped by the ACTIVE boot page table on every
+/// arch (the kernel image is identity-mapped through boot_cr3).
+static BOOT_TABLE_WALK_MARKER: u64 = 0xDEAD_BEEF_CAFE_F00D;
+
+fn test_boot_table_walk(ctx: &mut TestCtx) {
+    // Verifies the ACTIVE boot page table (CR3 / SATP / TTBR0 via
+    // hal::boot_cr3) maps the running kernel's own image — the per-arch
+    // equivalent of test_runner's test_pt_walk_boot, shared across arches.
+    let cr3 = crate::hal::boot_cr3();
+    ctx.assert(cr3 != 0, "boot_cr3 should be non-zero");
+    ctx.assert(cr3 & 0xFFF == 0, "boot_cr3 should be page-aligned");
+
+    let va = &raw const BOOT_TABLE_WALK_MARKER as u64;
+    match unsafe { crate::pagetable::walk(cr3, va) } {
+        Ok(wr) => ctx.assert(
+            wr.pte_value & crate::pagetable::PG_P != 0,
+            "boot table should map a kernel static",
+        ),
+        Err(_) => ctx.assert(false, "walk of kernel static should succeed"),
+    }
+
+    // An unmapped high address must fail cleanly (not panic).
+    match unsafe { crate::pagetable::walk(cr3, 0x7fff_0000_0000) } {
+        Err(crate::pagetable::PageTableError::NotMapped) => {}
+        _ => ctx.assert(false, "unmapped address should be NotMapped"),
+    }
+}
+
 fn test_enqueue_priority(ctx: &mut TestCtx) {
     unsafe {
         clear_run_queues();
@@ -2571,6 +2599,7 @@ pub fn run_all() -> u32 {
     total += run("ipc_sendrec_roundtrip", test_ipc_sendrec_roundtrip);
     total += run("monotonic_timer_interval", test_monotonic_timer_interval);
     total += run("pagetable_deep_walk", test_pagetable_deep_walk);
+    total += run("boot_table_walk", test_boot_table_walk);
     total += run("enqueue_priority", test_enqueue_priority);
     total += run("quantum_exhaustion", test_quantum_exhaustion);
     total += run("dequeue_reordering", test_dequeue_reordering);

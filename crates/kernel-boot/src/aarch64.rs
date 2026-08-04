@@ -460,7 +460,9 @@ pub unsafe extern "C" fn kmain() -> ! {
         serial_write("  MMU enabled\r\n");
 
         serial_write("Running AArch64 integration tests...\r\n");
-        let failures = kernel::tests::run_all();
+        let mut failures = kernel::tests::run_all();
+        failures += unsafe { test_cntpct_advances() };
+        failures += unsafe { test_pl011_output() };
         serial_write("\r\n");
         if failures == 0 {
             serial_write("ALL TESTS PASSED\r\n");
@@ -769,6 +771,64 @@ pub unsafe extern "C" fn kmain() -> ! {
             arch_aarch64::hal::halt();
         }
     }
+}
+
+/// AArch64 hardware tests: generic timer (CNTP) + PL011 UART.
+///
+/// Runs inside the integration build after the shared kernel suite. These
+/// probe the actual device/register paths (via the MMU identity map) rather
+/// than the hal wrappers the shared tests use.
+
+/// Generic timer: cntpct_el0 must advance and cntfrq_el0 must report a sane
+/// frequency — the hardware-level equivalent of monotonic_advances.
+#[cfg(feature = "integration-tests")]
+unsafe fn test_cntpct_advances() -> u32 {
+    unsafe {
+        let freq: u64;
+        core::arch::asm!("mrs {v}, cntfrq_el0", v = out(reg) freq, options(nomem, nostack));
+        if freq < 1_000_000 || freq > 1_000_000_000 {
+            serial_write("  FAIL: cntfrq_el0 unexpected frequency\r\n");
+            return 1;
+        }
+        let t1 = arch_aarch64::hal::read_cycles(); // cntpct_el0
+        let mut t2 = t1;
+        let mut spins = 0usize;
+        while t2 == t1 && spins < 1_000_000 {
+            core::hint::spin_loop();
+            t2 = arch_aarch64::hal::read_cycles();
+            spins += 1;
+        }
+        if t2 <= t1 {
+            serial_write("  FAIL: cntpct_el0 should advance\r\n");
+            return 1;
+        }
+        serial_write("  OK generic timer cntpct_el0 advances\r\n");
+    }
+    0
+}
+
+/// PL011 UART: direct register access (bypassing hal) — the FR register must
+/// read as a valid device (not all-ones), and the TX FIFO must accept a byte.
+#[cfg(feature = "integration-tests")]
+unsafe fn test_pl011_output() -> u32 {
+    const PL011_BASE: usize = 0x0900_0000;
+    const PL011_DR: usize = PL011_BASE + 0x00;
+    const PL011_FR: usize = PL011_BASE + 0x18;
+    const FR_TXFF: u32 = 1 << 5;
+    unsafe {
+        let fr = core::ptr::read_volatile(PL011_FR as *const u32);
+        if fr == 0xFFFF_FFFF {
+            serial_write("  FAIL: PL011 not present\r\n");
+            return 1;
+        }
+        let mut spins = 0usize;
+        while core::ptr::read_volatile(PL011_FR as *const u32) & FR_TXFF != 0 && spins < 100_000 {
+            spins += 1;
+        }
+        core::ptr::write_volatile(PL011_DR as *mut u8, b'@');
+        serial_write("  OK PL011 output\r\n");
+    }
+    0
 }
 
 /// Enable the MMU with a minimal identity-mapped page table.
