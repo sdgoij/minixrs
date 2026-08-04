@@ -59,7 +59,7 @@ pub unsafe fn run_boot_tests() -> ! {
     // H: Physical memory allocator — kernel binary excluded from free pool
     failures += test_allocator();
 
-    // H2: Per-process mappings (brk heap, MFS RAM disk)
+    // H2: Per-process mappings (brk heap, boot image in ramdisk server)
     failures += test_brk_heap_mapped();
     failures += test_mfs_ramdisk_mapped();
 
@@ -990,24 +990,25 @@ fn test_brk_heap_mapped() -> u32 {
     failures
 }
 
-/// Verify the MFS RAM disk image is mapped at MFS_RAMDISK_VA.
+/// Verify the boot filesystem image is mapped in the ramdisk server's
+/// address space at RAMDISK_IMAGE_VA.
 fn test_mfs_ramdisk_mapped() -> u32 {
     unsafe {
-        let rp = kernel::table::proc_addr(MFS_PROC_NR);
+        let rp = kernel::table::proc_addr(RAMDISK_PROC_NR);
         if rp.is_null() {
-            serial_write("  FAIL: no MFS\r\n");
+            serial_write("  FAIL: no ramdisk server\r\n");
             return 1;
         }
         let cr3 = (*rp).p_seg.p_cr3;
         if cr3 == 0 {
-            serial_write("  FAIL: MFS no CR3\r\n");
+            serial_write("  FAIL: ramdisk server no CR3\r\n");
             return 1;
         }
-        if kernel::pagetable::walk(cr3, arch_common::com::MFS_RAMDISK_VA).is_err() {
-            serial_write("  FAIL: MFS RAM disk VA not mapped\r\n");
+        if kernel::pagetable::walk(cr3, arch_common::com::RAMDISK_IMAGE_VA).is_err() {
+            serial_write("  FAIL: ramdisk image VA not mapped\r\n");
             return 1;
         }
-        serial_write("  OK MFS RAM disk mapped\r\n");
+        serial_write("  OK ramdisk image mapped\r\n");
     }
     0
 }

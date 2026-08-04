@@ -632,8 +632,9 @@ pub unsafe extern "C" fn kmain() -> ! {
                 }
             }
 
-            // RAM disk mapping for MFS.
-            if proc_nr == MFS_PROC_NR {
+            // Boot image mapping for the ramdisk driver server (served to
+            // filesystem servers via the BDEV protocol).
+            if proc_nr == RAMDISK_PROC_NR {
                 let image = kernel::minixfs::minixfs_image();
                 let image_len = kernel::minixfs::minixfs_image_len();
                 if image_len > 0 {
@@ -654,7 +655,7 @@ pub unsafe extern "C" fn kmain() -> ! {
                     }
                     let user_flags = kernel::hal::pte_user_flags();
                     for j in 0..pages {
-                        let va = arch_common::com::MFS_RAMDISK_VA + (j as u64) * 4096;
+                        let va = arch_common::com::RAMDISK_IMAGE_VA + (j as u64) * 4096;
                         let pa = ramdisk_phys + (j as u64) * 4096;
                         if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }
                             .is_err()
@@ -663,7 +664,7 @@ pub unsafe extern "C" fn kmain() -> ! {
                             arch_aarch64::hal::halt();
                         }
                     }
-                    serial_write("  RAM disk mapped for MFS\r\n");
+                    serial_write("  RAM disk mapped for ramdisk server\r\n");
                 }
             }
 

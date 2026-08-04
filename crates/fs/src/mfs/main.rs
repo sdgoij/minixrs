@@ -5,10 +5,13 @@ use crate::mfs::glo;
 use crate::mfs::inode::*;
 use crate::mfs::misc::*;
 
-/// Virtual address of the RAM disk in MFS's address space.
-/// Set by the kernel boot code before MFS starts.
-const MFS_RAMDISK_VA: u64 = arch_common::com::MFS_RAMDISK_VA;
-const MFS_RAMDISK_SIZE: usize = arch_common::com::MFS_RAMDISK_SIZE;
+/// Virtual address of the boot filesystem image in the ramdisk driver
+/// server's address space (set up by the kernel boot code). Only used by the
+/// host test path, which fakes a direct-memory RAM disk at this address.
+#[cfg(not(target_os = "none"))]
+const RAMDISK_IMAGE_VA: u64 = arch_common::com::RAMDISK_IMAGE_VA;
+#[cfg(not(target_os = "none"))]
+const RAMDISK_IMAGE_SIZE: usize = arch_common::com::RAMDISK_IMAGE_SIZE;
 
 /// IPC receive/send syscall numbers.  Only used when compiling for the
 /// MINIX target; marked `#[allow(dead_code)]` because the library build
@@ -38,13 +41,21 @@ pub fn mfs_init() -> i32 {
         libs::libminixfs::cache::lmfs_buf_pool(crate::mfs::consts::DEFAULT_NR_BUFS as i32);
         libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
 
-        // Initialise the RAM disk from the well-known virtual address.
-        // The kernel boot code maps the MFS image into MFS's address space
-        // at MFS_RAMDISK_VA before the process starts.
-        crate::block_io::ram_disk_init(MFS_RAMDISK_VA as *const u8, MFS_RAMDISK_SIZE);
-
         // Register the block I/O callback.
-        libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+        #[cfg(target_os = "none")]
+        {
+            // Root-filesystem block I/O goes through the BDEV protocol to the
+            // ramdisk driver server, which serves the boot image mapped into
+            // its address space by the kernel boot code.
+            crate::block_io::bdev_init();
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::bdev_ram_disk_io);
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            // Host tests: direct-memory RAM disk (no driver server).
+            crate::block_io::ram_disk_init(RAMDISK_IMAGE_VA as *const u8, RAMDISK_IMAGE_SIZE);
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+        }
     }
     OK
 }

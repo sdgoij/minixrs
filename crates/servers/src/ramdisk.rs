@@ -3,6 +3,11 @@
 //! Handles `BDEV_OPEN`, `BDEV_CLOSE`, `BDEV_READ`, `BDEV_WRITE`, `BDEV_IOCTL`
 //! by dispatching to the underlying `drivers::storage::ramdisk` functions.
 //!
+//! Block data moves between the client and this server through the client's
+//! grant table: the client sends a direct grant naming this server, and the
+//! server pulls/pushes the bytes with `SYS_SAFECOPYFROM`/`SYS_SAFECOPYTO`.
+//! The granter endpoint is always the kernel-stamped `m_source`.
+//!
 //! Registered as endpoint `RAMDISK_PROC_NR` in the boot process table.
 //! MFS (and other FS servers) send BDEV messages to this endpoint.
 
@@ -33,9 +38,49 @@ const BDEV_REPLY: u32 = 0x580;
 /// Byte offsets in the message (match `minix-util/src/bdev.rs`).
 const OFF_MINOR: usize = 8; // i32
 const OFF_FLAGS: usize = 12; // i32
-const OFF_GRANT: usize = 16; // i64 (unused here)
+const OFF_GRANT: usize = 16; // i64 (grant ID in low 32 bits)
 const OFF_COUNT: usize = 24; // i64
 const OFF_ADDR: usize = 32; // i64 (position)
+
+// SYS_SAFECOPY kernel call numbers (arch_common::com::sys).
+const SYS_SAFECOPYFROM: i32 = 31;
+const SYS_SAFECOPYTO: i32 = 32;
+
+// SYS_SAFECOPY message offsets (payload starts at byte 8).
+const SAFE_GRANTER_OFF: usize = 8;
+const SAFE_GRANT_ID_OFF: usize = 12;
+const SAFE_OFFSET_OFF: usize = 16;
+const SAFE_ADDR_OFF: usize = 24;
+const SAFE_BYTES_OFF: usize = 32;
+
+/// Copy `data` into the client's granted buffer via `SYS_SAFECOPYTO`.
+///
+/// The granter is the client endpoint from the kernel-stamped `m_source`,
+/// never a payload field (confused-deputy rule). Returns the kernel call
+/// result: 0 on success, negative error code otherwise.
+fn safecopy_to_client(src_ep: i32, grant_id: i32, data: &[u8]) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[SAFE_GRANTER_OFF..SAFE_GRANTER_OFF + 4].copy_from_slice(&src_ep.to_ne_bytes());
+    kmsg[SAFE_GRANT_ID_OFF..SAFE_GRANT_ID_OFF + 4].copy_from_slice(&grant_id.to_ne_bytes());
+    kmsg[SAFE_OFFSET_OFF..SAFE_OFFSET_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+    kmsg[SAFE_ADDR_OFF..SAFE_ADDR_OFF + 8].copy_from_slice(&(data.as_ptr() as u64).to_ne_bytes());
+    kmsg[SAFE_BYTES_OFF..SAFE_BYTES_OFF + 8].copy_from_slice(&(data.len() as u64).to_ne_bytes());
+    minix_rt::kernel_call(SYS_SAFECOPYTO, &mut kmsg)
+}
+
+/// Copy `count` bytes from the client's granted buffer via `SYS_SAFECOPYFROM`.
+///
+/// Returns the kernel call result: 0 on success, negative error code otherwise.
+fn safecopy_from_client(src_ep: i32, grant_id: i32, data: &mut [u8]) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[SAFE_GRANTER_OFF..SAFE_GRANTER_OFF + 4].copy_from_slice(&src_ep.to_ne_bytes());
+    kmsg[SAFE_GRANT_ID_OFF..SAFE_GRANT_ID_OFF + 4].copy_from_slice(&grant_id.to_ne_bytes());
+    kmsg[SAFE_OFFSET_OFF..SAFE_OFFSET_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+    kmsg[SAFE_ADDR_OFF..SAFE_ADDR_OFF + 8]
+        .copy_from_slice(&(data.as_mut_ptr() as u64).to_ne_bytes());
+    kmsg[SAFE_BYTES_OFF..SAFE_BYTES_OFF + 8].copy_from_slice(&(data.len() as u64).to_ne_bytes());
+    minix_rt::kernel_call(SYS_SAFECOPYFROM, &mut kmsg)
+}
 
 fn msg_get_i32(msg: &Message, off: usize) -> i32 {
     unsafe {
@@ -72,10 +117,11 @@ fn build_reply(msg: &mut Message, status: i32) {
 }
 
 /// Handle a single BDEV message and write the reply.
-fn handle_bdev(msg: &mut Message, _ep: i32) {
+fn handle_bdev(msg: &mut Message, src_ep: i32) {
     let mtype = msg.m_type as u32;
     let minor = msg_get_i32(msg, OFF_MINOR) as usize;
     let _flags = msg_get_i32(msg, OFF_FLAGS) as u32;
+    let grant_id = msg_get_i32(msg, OFF_GRANT);
 
     match mtype {
         BDEV_OPEN => {
@@ -94,18 +140,30 @@ fn handle_bdev(msg: &mut Message, _ep: i32) {
             let mut buf = [0u8; 4096];
             let n = count.min(buf.len());
             match unsafe { ramdisk::ramdisk_read(minor, position, &mut buf[..n]) } {
-                Ok(bytes) => build_reply(msg, bytes as i32),
+                Ok(bytes) => {
+                    let r = safecopy_to_client(src_ep, grant_id, &buf[..bytes]);
+                    if r != 0 {
+                        build_reply(msg, r);
+                    } else {
+                        build_reply(msg, bytes as i32);
+                    }
+                }
                 Err(_) => build_reply(msg, -5),
             }
         }
         BDEV_WRITE => {
             let position = msg_get_i64(msg, OFF_ADDR) as u64;
             let count = msg_get_i64(msg, OFF_COUNT) as usize;
-            let buf = [0u8; 4096];
+            let mut buf = [0u8; 4096];
             let n = count.min(buf.len());
-            match unsafe { ramdisk::ramdisk_write(minor, position, &buf[..n]) } {
-                Ok(bytes) => build_reply(msg, bytes as i32),
-                Err(_) => build_reply(msg, -5),
+            let r = safecopy_from_client(src_ep, grant_id, &mut buf[..n]);
+            if r != 0 {
+                build_reply(msg, r);
+            } else {
+                match unsafe { ramdisk::ramdisk_write(minor, position, &buf[..n]) } {
+                    Ok(bytes) => build_reply(msg, bytes as i32),
+                    Err(_) => build_reply(msg, -5),
+                }
             }
         }
         BDEV_GATHER | BDEV_SCATTER => {
@@ -128,12 +186,19 @@ pub fn ramdisk_server_main() {
     #[cfg(target_os = "none")]
     {
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SEND_CALL: u64 = 46;
         const ANY: i32 = 0x0000ffff;
 
-        // Initialize the RAM disk hardware.
+        // Initialize the RAM disk hardware and point device 0 at the boot
+        // filesystem image mapped into this server's address space by the
+        // kernel boot code.
         unsafe {
             ramdisk::ramdisk_init();
+            let _ = ramdisk::ramdisk_set_image(
+                0,
+                arch_common::com::RAMDISK_IMAGE_VA,
+                arch_common::com::RAMDISK_IMAGE_SIZE as u64,
+            );
         }
 
         loop {
@@ -152,12 +217,13 @@ pub fn ramdisk_server_main() {
             }
             let src_ep = src as i32;
 
-            // Handle the BDEV message.
+            // Handle the BDEV message, then reply with a plain SEND (46),
+            // matching the MFS server's proven reply pattern (a SENDREC
+            // reply would immediately re-block this loop in RECEIVE).
             handle_bdev(&mut msg, src_ep);
 
-            // Send the reply.
             let _ = unsafe {
-                minix_rt::syscall2(SENDREC_CALL, src_ep as u64, &mut msg as *mut Message as u64)
+                minix_rt::syscall2(SEND_CALL, src_ep as u64, &mut msg as *mut Message as u64)
             };
         }
     }

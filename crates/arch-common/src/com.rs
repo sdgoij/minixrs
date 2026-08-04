@@ -168,14 +168,17 @@ pub mod sys {
     pub const EXEC_LOAD: u32 = KERNEL_CALL + 63;
 }
 
-/// Virtual address where the MFS RAM disk is mapped in MFS's address space.
+/// Virtual address where the boot filesystem image is mapped in the ramdisk
+/// driver server's address space. The kernel boot code maps the minixfs image
+/// here before the ramdisk server starts; filesystem servers reach the image
+/// by BDEV requests to that server.
 /// Must not conflict with code (0x1000000) or stack (0x0FE00000) on x86_64,
 /// or with the 0x80000000+ region on RISC-V.
-pub const MFS_RAMDISK_VA: u64 = 0x100000000;
+pub const RAMDISK_IMAGE_VA: u64 = 0x100000000;
 
-/// Size of the MFS filesystem image (2048 blocks x 4096 bytes).
+/// Size of the boot filesystem image (2048 blocks x 4096 bytes).
 /// Must match `total_blocks * BLOCK_SIZE` in `tools/mkminixfs.rs`.
-pub const MFS_RAMDISK_SIZE: usize = 2048 * 4096;
+pub const RAMDISK_IMAGE_SIZE: usize = 2048 * 4096;
 
 pub const NR_SYS_CALLS: u32 = 64;
 

@@ -107,6 +107,31 @@ pub unsafe fn ramdisk_init() {
     }
 }
 
+/// Point a RAM disk device at an externally mapped image.
+///
+/// Used by the ramdisk server to serve the boot filesystem image (mapped
+/// into the driver's address space by the kernel boot code) as device 0.
+/// Replaces the device's buffer pointer and size; a subsequent
+/// [`ramdisk_open`]/[`ramdisk_read`] on this device operates on the image.
+///
+/// # Safety
+///
+/// `base` must point to a valid, mapped region of at least `size` bytes
+/// that remains valid for the lifetime of the driver.
+pub unsafe fn ramdisk_set_image(minor: usize, base: u64, size: u64) -> Result<(), DriverError> {
+    unsafe {
+        if minor >= RAMDISKS || !RAM_INITIALIZED.load(Ordering::Relaxed) {
+            return Err(DriverError::NotFound);
+        }
+        let dev = &mut (*RAM_DISKS.get())[minor];
+        dev.base = 0;
+        dev.size = size;
+        dev.open_count = 0;
+        dev.data = base as *mut u8;
+        Ok(())
+    }
+}
+
 /// Open a RAM disk device.
 pub fn ramdisk_open(minor: usize) -> Result<(), DriverError> {
     unsafe {
@@ -267,6 +292,32 @@ mod tests {
             let (base, size) = ramdisk_geometry(0).unwrap();
             assert_eq!(base, 0);
             assert_eq!(size, RAMDISK_DEFAULT_SIZE as u64 / RAMDISKS as u64);
+        }
+    }
+
+    #[test]
+    fn test_ramdisk_set_image() {
+        unsafe {
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
+            ramdisk_init();
+            let image = [0x5Au8; 8192];
+            assert!(ramdisk_set_image(0, image.as_ptr() as u64, image.len() as u64).is_ok());
+            let mut buf = [0u8; 4096];
+            let n = ramdisk_read(0, 0, &mut buf).unwrap();
+            assert_eq!(n, 4096);
+            assert_eq!(buf, [0x5A; 4096]);
+            // Read past the image end returns 0 (EOF), not an error.
+            let n = ramdisk_read(0, 8192, &mut buf).unwrap();
+            assert_eq!(n, 0);
+        }
+    }
+
+    #[test]
+    fn test_ramdisk_set_image_invalid_minor() {
+        unsafe {
+            RAM_INITIALIZED.store(false, Ordering::Relaxed);
+            ramdisk_init();
+            assert!(ramdisk_set_image(99, 0, 4096).is_err());
         }
     }
 
