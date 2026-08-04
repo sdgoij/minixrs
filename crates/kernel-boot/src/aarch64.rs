@@ -443,6 +443,22 @@ pub unsafe extern "C" fn kmain() -> ! {
 
     #[cfg(feature = "integration-tests")]
     {
+        // Enable the MMU so copy_from_user / delivermsg perform real
+        // page-table walks (BOOT_CR3 non-zero) instead of silently skipping
+        // the copy. This unblocks the SENDREC payload assertions
+        // (sendrec_direct, sendrec_reply_cycle) on AArch64.
+        serial_write("  enabling MMU...\r\n");
+        unsafe {
+            enable_mmu();
+            let boot_ttbr0: u64;
+            core::arch::asm!("mrs {v}, ttbr0_el1", v = out(reg) boot_ttbr0, options(nomem, nostack));
+            arch_aarch64::BOOT_CR3.store(
+                boot_ttbr0 & 0x0000_FFFF_FFFF_F000,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        serial_write("  MMU enabled\r\n");
+
         serial_write("Running AArch64 integration tests...\r\n");
         let failures = kernel::tests::run_all();
         serial_write("\r\n");
@@ -757,7 +773,7 @@ pub unsafe extern "C" fn kmain() -> ! {
 
 /// Enable the MMU with a minimal identity-mapped page table.
 /// Uses 1GB blocks at PUD level — just 2 descriptors total.
-#[cfg(not(feature = "integration-tests"))]
+#[cfg(target_arch = "aarch64")]
 unsafe fn enable_mmu() {
     const TABLE_DESC: u64 = 0x3;
     const BLOCK_FLAGS: u64 = 0b01u64 | (0b11 << 8) | (1 << 10);

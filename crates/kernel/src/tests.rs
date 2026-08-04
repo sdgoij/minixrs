@@ -770,10 +770,10 @@ fn test_sched_round_robin(ctx: &mut TestCtx) {
 }
 
 fn test_sched_proc_no_time_preempts(ctx: &mut TestCtx) {
-    #[cfg(target_arch = "x86_64")]
     unsafe {
-        // x86_64-only: requires privilege structures + scheduler proc IPC
-        // which conflicts with RISC-V's HAL init_cpulocals behavior.
+        // Scheduler proc IPC (notify_scheduler → mini_send) runs on all
+        // arches; integration builds now enable paging so the FROM_KERNEL
+        // message copy performs a real walk through boot_cr3.
         let scheduler = sched_make_proc(114, 7);
         if scheduler.is_null() {
             ctx.assert(false, "sched_make_proc for scheduler failed");
@@ -875,13 +875,9 @@ fn test_sched_proc_no_time_preempts(ctx: &mut TestCtx) {
         (*lo)
             .p_rts_flags
             .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // RISC-V: skip — sched_make_proc + enqueue + pick_proc works
-        // for basic tests but the IPC notification path (scheduler proc,
-        // privilege structures) needs investigation.
-        ctx.assert(true, "skip on non-x86_64");
+        (*scheduler)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
     }
 }
 
@@ -1060,7 +1056,6 @@ fn test_sys_vircopy_self(ctx: &mut TestCtx) {
 
 #[inline(never)]
 fn test_do_sync_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
-    #[cfg(target_arch = "x86_64")]
     unsafe {
         use core::sync::atomic::Ordering;
 
@@ -1138,16 +1133,6 @@ fn test_do_sync_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
         (*server)
             .p_rts_flags
             .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
-        (*caller)
-            .p_rts_flags
-            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
-        (*server)
-            .p_rts_flags
-            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = ctx;
     }
 }
 
@@ -1668,6 +1653,21 @@ fn test_monotonic_timer_interval(ctx: &mut TestCtx) {
             ctx.assert(false, "monotonic should advance by >=5 after 5 ticks");
         }
     }
+}
+
+fn test_cycle_counter_advances(ctx: &mut TestCtx) {
+    // Verifies the arch's hardware cycle counter (rdtsc / rdtime /
+    // cntpct_el0 via hal::read_cycles) is readable and advances — a real
+    // hardware probe that catches a broken counter or a todo!() stub.
+    let t1 = crate::hal::read_cycles();
+    let mut t2 = t1;
+    let mut spins = 0usize;
+    while t2 == t1 && spins < 1_000_000 {
+        core::hint::spin_loop();
+        t2 = crate::hal::read_cycles();
+        spins += 1;
+    }
+    ctx.assert(t2 > t1, "cycle counter should advance");
 }
 
 fn test_irq_put_and_remove(ctx: &mut TestCtx) {
@@ -2530,21 +2530,14 @@ pub fn run_all() -> u32 {
     total += run("enqueue_dequeue", test_enqueue_dequeue);
     total += run("sched_priority", test_sched_priority_ordering);
     total += run("sched_round_robin", test_sched_round_robin);
-    // sched_proc_no_time and do_sync_ipc_sendrec exercise the x86 scheduler
-    // IPC path (privilege structures + scheduler proc); they are no-ops on
-    // RISC-V/AArch64 and would report a misleading OK, so skip them there.
-    if cfg!(target_arch = "x86_64") {
-        total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
-    } else {
-        ser_write("  SKIP sched_proc_no_time (x86_64 only)\n");
-    }
+    // sched_proc_no_time exercises quantum expiry + scheduler notification
+    // (proc_no_time → notify_scheduler → mini_send with FROM_KERNEL).
+    total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
 
-    // IPC roundtrip through do_sync_ipc (userspace IPC entry point)
-    if cfg!(target_arch = "x86_64") {
-        total += run("do_sync_ipc_sendrec", test_do_sync_ipc_sendrec_roundtrip);
-    } else {
-        ser_write("  SKIP do_sync_ipc_sendrec (x86_64 only)\n");
-    }
+    // IPC roundtrip through do_sync_ipc (userspace IPC entry point).
+    // Runs on all arches now that integration builds enable paging
+    // (copy_from_user performs real walks through boot_cr3).
+    total += run("do_sync_ipc_sendrec", test_do_sync_ipc_sendrec_roundtrip);
 
     // Shared integration tests (moved from test_runner.rs so they run on
     // every architecture). Ordering: allocator/page-table tests first, then
@@ -2568,6 +2561,7 @@ pub fn run_all() -> u32 {
     total += run("timer_clear", test_timer_clear);
     total += run("timer_multiple", test_timer_multiple);
     total += run("monotonic_advances", test_monotonic_advances);
+    total += run("cycle_counter_advances", test_cycle_counter_advances);
     total += run("irq_put_and_remove", test_irq_put_and_remove);
     total += run("elf_load_to_phys_pages", test_elf_load_to_phys_pages);
     total += run(

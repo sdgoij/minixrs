@@ -65,7 +65,16 @@ pub fn cpu_idle() {
 }
 
 pub fn read_cycles() -> u64 {
-    todo!("RISC-V cycle CSR (mcycle/cycle); see Phase 19.4");
+    // RISC-V has no rdtsc equivalent; the `time` CSR (read via `rdtime`)
+    // is the free-running counter that the clock code uses for CPU-time
+    // accounting (ms_2_cpu_time converts against cpu_freq, the CLINT
+    // timebase). The privileged `cycle` CSR is not guaranteed readable in
+    // S-mode, so use `rdtime` like clint::read_time does.
+    let time: u64;
+    unsafe {
+        core::arch::asm!("rdtime {time}", time = out(reg) time, options(nomem, nostack));
+    }
+    time
 }
 
 pub fn halt() -> ! {

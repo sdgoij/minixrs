@@ -44,9 +44,9 @@ const MSG_SOURCE_OFF: usize = 0;
 pub unsafe fn vfs_main() -> i32 {
     sef_local_startup();
 
-    // Note: SYS_BOOT_COMPLETE (syscall 60) is now called in
-    // sef_cb_init_fresh before mount_root, so boot tests run
-    // even when mount_root blocks.
+    // SYS_BOOT_COMPLETE (syscall 60) is called at the end of
+    // sef_cb_init_fresh, after mount_root, so boot tests observe
+    // post-mount state (VFS↔MFS readsuper IPC, root inode, etc.).
     loop {
         get_work();
         handle_work();
@@ -116,14 +116,6 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();
 
-    // Signal kernel that VFS init is complete (before blocking mount).
-    // Boot-test: kernel runs non-filesystem tests and exits QEMU.
-    // Normal boot: no handler registered, returns -38 (ENOSYS), ignored.
-    #[cfg(target_os = "none")]
-    unsafe {
-        let _ = minix_rt::syscall1(60, 0);
-    }
-
     let root_vp = mount::mount_root();
     if !root_vp.is_null() {
         // Set up root and working directories for all boot processes,
@@ -138,6 +130,15 @@ unsafe fn sef_cb_init_fresh() -> i32 {
                 rfp.fp_cdir = root_vp;
             }
         }
+    }
+
+    // Signal kernel that VFS init (including mount_root) is complete.
+    // Boot-test: kernel runs the boot suite against post-mount state and
+    // exits QEMU. Normal boot: no handler registered, returns -38
+    // (ENOSYS), ignored.
+    #[cfg(target_os = "none")]
+    unsafe {
+        let _ = minix_rt::syscall1(60, 0);
     }
 
     OK

@@ -530,6 +530,24 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
     #[cfg(feature = "integration-tests")]
     {
+        // Enable SV39 paging so copy_from_user / delivermsg perform real
+        // page-table walks (BOOT_CR3 non-zero) instead of silently skipping
+        // the copy. This unblocks the SENDREC payload assertions
+        // (sendrec_direct, sendrec_reply_cycle) on RISC-V.
+        serial_write("  enabling SV39 paging...\r\n");
+        unsafe {
+            if let Some(boot_pt) = create_boot_page_table() {
+                arch_riscv64::BOOT_CR3.store(boot_pt, core::sync::atomic::Ordering::Relaxed);
+                kernel::hal::write_cr3(boot_pt);
+                serial_write("  SV39 enabled\r\n");
+            } else {
+                serial_write("  FAILED: boot page table\r\n");
+                loop {
+                    core::arch::asm!("wfi", options(nomem, nostack));
+                }
+            }
+        }
+
         serial_write("Running RISC-V integration tests...\r\n");
         let failures = kernel::tests::run_all();
         serial_write("\r\n");
@@ -881,7 +899,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 ///
 /// Must be called after the physical allocator is initialized, before any
 /// virtual memory is active. The kernel must be running in Bare mode.
-#[cfg(all(target_arch = "riscv64", not(feature = "integration-tests")))]
+#[cfg(target_arch = "riscv64")]
 unsafe fn create_boot_page_table() -> Option<u64> {
     unsafe {
         // Try to allocate from the physical allocator first.

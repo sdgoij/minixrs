@@ -111,12 +111,16 @@ See `.agents/skills/` for domain deep-dives:
 - **Host tests:** `cargo test` — pure-logic unit and property tests
 - **QEMU integration:** `just test-qemu [arch]` — kernel tests running in QEMU
   (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants):
-  - `just test-qemu` (x86_64) — 82 tests, exits with a real pass/fail code
-  - `just test-qemu riscv64` — 62 tests (4 arch-specific skips)
-  - `just test-qemu aarch64` — 62 tests (4 arch-specific skips)
+  - `just test-qemu` (x86_64) — 83 tests, exits with a real pass/fail code
+  - `just test-qemu riscv64` — 67 tests (no skips), paging enabled
+  - `just test-qemu aarch64` — 67 tests (no skips), MMU enabled
+
+  RISC-V/AArch64 integration builds enable the MMU before running the shared
+  suite, so copy_from_user / delivermsg perform real page-table walks and the
+  SENDREC payload assertions run on all three arches.
 - **Boot tests:** `just test-boot [arch]` — multi-server verification after VFS
   mount_root on all three arches (server liveness, process-table consistency,
-  brk/RAM-disk mappings, IPC, filesystem metadata, allocator)
+  VFS→MFS readsuper IPC round-trip, brk/RAM-disk mappings, allocator, initramfs)
 
 RISC-V and AArch64 exit QEMU via SBI reset / PSCI (no exit-code device on
 this QEMU build), so their recipes pass/fail on the serial log markers.
