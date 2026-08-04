@@ -856,14 +856,23 @@ pub fn bss_end() -> u64 {
     core::ptr::addr_of!(__bss_end) as u64
 }
 
+/// Exit QEMU via PSCI SYSTEM_OFF (HVC conduit).
+///
+/// QEMU's virt machine routes `hvc` to PSCI and exits the emulator with
+/// status 0 on SYSTEM_OFF (there is no exit-code device and semihosting
+/// via `hvc #0xf000` is not intercepted in this QEMU build). Callers that
+/// need pass/fail detection must check the serial log for result markers.
 pub fn qemu_exit(code: u32) -> ! {
-    // QEMU virt: write to the semihosting "exit" call via a special address
-    // or use the ARM semihosting interface.
-    // For QEMU virt, use the ARM semihosting HLT 0xF000 approach.
-    // Actually, the simplest way: write to the QEMU test device.
-    // QEMU virt has a memory-mapped debug exit at a device address.
-    // Simpler: infinite loop with WFI.
     let _ = code;
+    unsafe {
+        core::arch::asm!(
+            "movz x0, #0x0008",
+            "movk x0, #0x8400, lsl #16", // PSCI_SYSTEM_OFF
+            "hvc #0",
+            options(nomem, nostack),
+        );
+    }
+    // SYSTEM_OFF never returns; if PSCI is unavailable, park the CPU.
     loop {
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack));

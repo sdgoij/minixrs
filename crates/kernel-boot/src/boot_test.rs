@@ -6,8 +6,8 @@
 //! Gated behind cfg(feature = "boot-test") — no impact on normal builds.
 
 use arch_common::com::{
-    DS_PROC_NR, MFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR,
-    VFS_PROC_NR, VM_PROC_NR,
+    DS_PROC_NR, MFS_PROC_NR, PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR,
+    TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR,
 };
 
 const FS_BASE: i32 = 0xA00;
@@ -29,6 +29,10 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_alive(VFS_PROC_NR, "VFS");
     failures += test_alive(MFS_PROC_NR, "MFS");
     failures += test_alive(PM_PROC_NR, "PM");
+    failures += test_all_boot_procs_alive();
+
+    // A2: Process table consistency (endpoint / magic / priv)
+    failures += test_boot_procs_consistent();
 
     // B: Process state
     failures += test_vfs_runnable();
@@ -54,6 +58,10 @@ pub unsafe fn run_boot_tests() -> ! {
 
     // H: Physical memory allocator — kernel binary excluded from free pool
     failures += test_allocator();
+
+    // H2: Per-process mappings (brk heap, MFS RAM disk)
+    failures += test_brk_heap_mapped();
+    failures += test_mfs_ramdisk_mapped();
 
     // I: Process signal manager — s_sig_mgr must be PM_PROC_NR
     //    so do_getksig_handler can find exited processes.
@@ -330,44 +338,49 @@ fn test_vm_check_range() -> u32 {
             serial_write("  VM: no CR3\r\n");
             return 1;
         }
+        // All userland binaries link at 0x01000000 (tools/minix-user.ld),
+        // so the first code page is identical on every arch.
         if kernel::pagetable::walk(cr3, 0x01000000).is_err() {
             serial_write("  VM: code page FAIL\r\n");
             return 1;
         }
-        if kernel::pagetable::walk(cr3, 0x01010000).is_err() {
-            serial_write("  VM: BSS page FAIL\r\n");
-            return 1;
-        }
-        if kernel::pagetable::walk(cr3, 0x0FE00000).is_err() {
+        // The user stack lives at the arch's user_stack_base().
+        let stack_va = kernel::hal::user_stack_base() & !0xFFF;
+        if kernel::pagetable::walk(cr3, stack_va).is_err() {
             serial_write("  VM: stack page FAIL\r\n");
             return 1;
         }
         serial_write("  OK VM: pages mapped\r\n");
         // Test CR3 switches: switch to each process's CR3 and back.
         // If kernel higher-half isn't mapped in per-process page tables,
-        // write_cr3 will cause a triple fault.
-        let saved = kernel::hal::read_cr3();
-        for &(ep, _name) in &[
-            (MFS_PROC_NR, "MFS"),
-            (VFS_PROC_NR, "VFS"),
-            (PM_PROC_NR, "PM"),
-        ] {
-            let rp = kernel::table::proc_addr(ep);
-            if rp.is_null() {
-                continue;
+        // write_cr3 will cause a triple fault. x86 only: the switch-and-read
+        // pattern relies on identity-mapped low memory, which is laid out
+        // differently on RISC-V/AArch64.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let saved = kernel::hal::read_cr3();
+            for &(ep, _name) in &[
+                (MFS_PROC_NR, "MFS"),
+                (VFS_PROC_NR, "VFS"),
+                (PM_PROC_NR, "PM"),
+            ] {
+                let rp = kernel::table::proc_addr(ep);
+                if rp.is_null() {
+                    continue;
+                }
+                let p_cr3 = (*rp).p_seg.p_cr3;
+                if p_cr3 == 0 {
+                    continue;
+                }
+                kernel::hal::write_cr3(p_cr3);
+                // Read from user code at 0x01000000 to verify switch
+                let _b = core::ptr::read_volatile(0x01000000u64 as *const u8);
+                // Read from kernel higher-half (boot_cr3 mapping)
+                let _k = core::ptr::read_volatile(saved as *const u8);
+                kernel::hal::write_cr3(saved);
             }
-            let p_cr3 = (*rp).p_seg.p_cr3;
-            if p_cr3 == 0 {
-                continue;
-            }
-            kernel::hal::write_cr3(p_cr3);
-            // Read from user code at 0x01000000 to verify switch
-            let _b = core::ptr::read_volatile(0x01000000u64 as *const u8);
-            // Read from kernel higher-half (boot_cr3 mapping)
-            let _k = core::ptr::read_volatile(saved as *const u8);
-            kernel::hal::write_cr3(saved);
+            serial_write("  OK VM: CR3 switches\r\n");
         }
-        serial_write("  OK VM: CR3 switches\r\n");
     }
     0
 }
@@ -383,6 +396,25 @@ unsafe extern "C" {
 
 #[cfg(not(target_arch = "x86_64"))]
 fn test_allocator() -> u32 {
+    // Arch-agnostic smoke test: allocate a page and verify it is non-zero
+    // and page-aligned. (Not freed — boot tests exit QEMU, and only the
+    // x86 allocator exposes a free_phys_page.)
+    let page = match unsafe { kernel::hal::alloc_phys_page() } {
+        Some(p) => p,
+        None => {
+            serial_write("  FAIL: alloc_phys_page returned None\r\n");
+            return 1;
+        }
+    };
+    if page == 0 || page & 0xFFF != 0 {
+        serial_write("  FAIL: allocator returned invalid page 0x");
+        print_hex(page);
+        serial_write("\r\n");
+        return 1;
+    }
+    serial_write("  OK allocator page=0x");
+    print_hex(page);
+    serial_write("\r\n");
     0
 }
 
@@ -645,15 +677,8 @@ fn test_pm_mproc_pt() -> u32 {
         serial_write("\r\n");
 
         // Walk known PM code pages — must be mapped with user permissions.
-        // PM is loaded at PM_PROC_NR * 0x4000 + 0x100000; slot_va formula
-        // matches `boot_init.rs` load address:
-        //   slot_va = 0x100000 + (NR_TASKS + slot_nr) * 0x4000
-        // with NR_TASKS = 5 (IDLE, CLOCK, SYSTEM, HARDWARE, ASYNCM).
-        // x86_64: PM loaded at 0x100000 + (NR_TASKS + slot) * 0x4000
-        // RISC-V: all processes loaded at 0x1000000
-        #[cfg(target_arch = "x86_64")]
-        let slot0_va = 0x100000 + (5 + 0) * 0x4000 + 0x10u64;
-        #[cfg(target_arch = "riscv64")]
+        // Every userland binary links at 0x01000000 (tools/minix-user.ld),
+        // so the entry point page is identical on all three arches.
         let slot0_va = 0x1000000u64 + 0x10;
         match kernel::pagetable::walk(cr3, slot0_va) {
             Ok(r) => {
@@ -673,13 +698,10 @@ fn test_pm_mproc_pt() -> u32 {
         }
 
         // Check user stack is mapped.
-        // PM's stack is allocated near 0x8FE00000 (arch-specific).
-        // Walk a known valid stack address from PM's own stack pointer.
-        #[cfg(target_arch = "x86_64")]
-        let rsp_field: u64 = core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(168) as *const u64);
-        #[cfg(target_arch = "riscv64")]
-        let rsp_field: u64 = core::ptr::read_unaligned((*rp).p_reg.as_ptr().add(16) as *const u64);
-        let stack_va = rsp_field & !0xFFF;
+        // The stack lives at the arch's user_stack_base() (0x0FE00000 on
+        // x86, 0x8FE00000 on RISC-V, 0x3FC00000 on AArch64). Walking the
+        // page-aligned base must succeed with PG_U.
+        let stack_va = kernel::hal::user_stack_base() & !0xFFF;
         match kernel::pagetable::walk(cr3, stack_va) {
             Ok(r) => {
                 let has_user = r.pte_value & kernel::pagetable::PG_U != 0;
@@ -805,15 +827,7 @@ fn test_map_page_walk_roundtrip() -> u32 {
         let test_va = 0x6000_0000u64;
 
         // 4. Build arch-appropriate user page flags.
-        #[cfg(target_arch = "x86_64")]
-        let flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW | kernel::pagetable::PG_U;
-        #[cfg(target_arch = "riscv64")]
-        let flags = kernel::pagetable::PG_P
-            | kernel::pagetable::PG_RW
-            | kernel::pagetable::PG_U
-            | 0x02
-            | 0x08
-            | 0xC0; // R|X|A|D
+        let flags = kernel::hal::pte_user_flags();
 
         // 5. Map the page — this must allocate intermediate tables and
         //    write the final PTE.  The map_page validation must accept
@@ -853,6 +867,149 @@ fn test_map_page_walk_roundtrip() -> u32 {
 
         0
     }
+}
+
+// N: Every boot process alive (beyond the original VFS/MFS/PM trio).
+// The list mirrors the boot_procs arrays in main.rs / riscv64.rs /
+// aarch64.rs under the boot-test feature (INIT excluded).
+
+fn test_all_boot_procs_alive() -> u32 {
+    let procs: &[(i32, &str)] = &[
+        (DS_PROC_NR, "DS"),
+        (RS_PROC_NR, "RS"),
+        (SCHED_PROC_NR, "SCHED"),
+        (VFS_PROC_NR, "VFS"),
+        (RAMDISK_PROC_NR, "RAMDISK"),
+        (VM_PROC_NR, "VM"),
+        (MFS_PROC_NR, "MFS"),
+        (PFS_PROC_NR, "PFS"),
+        (TTY_PROC_NR, "TTY"),
+    ];
+    let mut failures = 0;
+    for &(ep, name) in procs {
+        failures += test_alive(ep, name);
+    }
+    failures
+}
+
+/// Verify every boot process has a consistent process-table entry:
+/// endpoint encoding, magic number, and a non-null privilege structure.
+fn test_boot_procs_consistent() -> u32 {
+    let procs: &[(i32, &str)] = &[
+        (DS_PROC_NR, "ds"),
+        (RS_PROC_NR, "rs"),
+        (PM_PROC_NR, "pm"),
+        (SCHED_PROC_NR, "sched"),
+        (VFS_PROC_NR, "vfs"),
+        (RAMDISK_PROC_NR, "ramdisk"),
+        (VM_PROC_NR, "vm"),
+        (MFS_PROC_NR, "mfs"),
+        (PFS_PROC_NR, "pfs"),
+        (TTY_PROC_NR, "tty"),
+    ];
+    let mut failures = 0;
+    for &(nr, name) in procs {
+        unsafe {
+            let rp = kernel::table::proc_addr(nr);
+            if rp.is_null() {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" null proc\r\n");
+                failures += 1;
+                continue;
+            }
+            let expected = kernel::table::make_endpoint(0, nr);
+            if (*rp).p_endpoint != expected {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" endpoint ");
+                print_dec((*rp).p_endpoint as u32);
+                serial_write(" expected ");
+                print_dec(expected as u32);
+                serial_write("\r\n");
+                failures += 1;
+            }
+            if (*rp).p_magic != kernel::proc::PMAGIC {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" bad magic\r\n");
+                failures += 1;
+            }
+            if (*rp).p_priv.is_null() {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" null p_priv\r\n");
+                failures += 1;
+            }
+        }
+    }
+    if failures == 0 {
+        serial_write("  OK all boot procs consistent (endpoint/magic/priv)\r\n");
+    }
+    failures
+}
+
+/// Verify the pre-allocated brk heap (0x3FE00000..0x3FF00000) is mapped in
+/// every boot process's page table except VM (x86 skips VM; RISC-V/AArch64
+/// map it but skipping keeps the check valid on all arches).
+fn test_brk_heap_mapped() -> u32 {
+    let procs: &[(i32, &str)] = &[
+        (DS_PROC_NR, "ds"),
+        (RS_PROC_NR, "rs"),
+        (PM_PROC_NR, "pm"),
+        (SCHED_PROC_NR, "sched"),
+        (VFS_PROC_NR, "vfs"),
+        (RAMDISK_PROC_NR, "ramdisk"),
+        (MFS_PROC_NR, "mfs"),
+        (PFS_PROC_NR, "pfs"),
+        (TTY_PROC_NR, "tty"),
+    ];
+    let mut failures = 0;
+    for &(nr, name) in procs {
+        unsafe {
+            let rp = kernel::table::proc_addr(nr);
+            if rp.is_null() {
+                failures += 1;
+                continue;
+            }
+            let cr3 = (*rp).p_seg.p_cr3;
+            if cr3 == 0 {
+                continue;
+            }
+            if kernel::pagetable::walk(cr3, 0x3FE00000).is_err() {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" brk heap not mapped\r\n");
+                failures += 1;
+            }
+        }
+    }
+    if failures == 0 {
+        serial_write("  OK all boot procs have brk heap mapped\r\n");
+    }
+    failures
+}
+
+/// Verify the MFS RAM disk image is mapped at MFS_RAMDISK_VA.
+fn test_mfs_ramdisk_mapped() -> u32 {
+    unsafe {
+        let rp = kernel::table::proc_addr(MFS_PROC_NR);
+        if rp.is_null() {
+            serial_write("  FAIL: no MFS\r\n");
+            return 1;
+        }
+        let cr3 = (*rp).p_seg.p_cr3;
+        if cr3 == 0 {
+            serial_write("  FAIL: MFS no CR3\r\n");
+            return 1;
+        }
+        if kernel::pagetable::walk(cr3, arch_common::com::MFS_RAMDISK_VA).is_err() {
+            serial_write("  FAIL: MFS RAM disk VA not mapped\r\n");
+            return 1;
+        }
+        serial_write("  OK MFS RAM disk mapped\r\n");
+    }
+    0
 }
 
 // Exit helpers

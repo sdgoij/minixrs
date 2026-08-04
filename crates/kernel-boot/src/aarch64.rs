@@ -450,6 +450,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             serial_write("ALL TESTS PASSED\r\n");
         } else {
             serial_write("FAILURES: ");
+            // Print failure count as decimal digits
             let tens = failures / 10;
             let ones = failures % 10;
             if tens > 0 {
@@ -458,7 +459,9 @@ pub unsafe extern "C" fn kmain() -> ! {
             serial_putc(b'0' + (ones as u8));
             serial_write("\r\n");
         }
-        arch_aarch64::hal::halt();
+        // Exit QEMU via PSCI SYSTEM_OFF (HVC conduit); the exit code is
+        // always 0, so the recipe checks the serial log for the result.
+        arch_aarch64::hal::qemu_exit(failures);
     }
 
     #[cfg(not(feature = "integration-tests"))]
@@ -491,6 +494,9 @@ pub unsafe extern "C" fn kmain() -> ! {
 
         serial_write("  loading boot processes...\r\n");
 
+        // When boot-test is active, INIT is excluded so the test completes
+        // before any user process starts (same as x86 main.rs / riscv64.rs).
+        #[cfg(not(feature = "boot-test"))]
         let boot_procs: &[(&str, i32)] = &[
             ("/sbin/ds", DS_PROC_NR),
             ("/sbin/rs", RS_PROC_NR),
@@ -504,8 +510,25 @@ pub unsafe extern "C" fn kmain() -> ! {
             ("/sbin/tty", TTY_PROC_NR),
             ("/sbin/init", INIT_PROC_NR),
         ];
+        #[cfg(feature = "boot-test")]
+        let boot_procs: &[(&str, i32)] = &[
+            ("/sbin/ds", DS_PROC_NR),
+            ("/sbin/rs", RS_PROC_NR),
+            ("/sbin/pm", PM_PROC_NR),
+            ("/sbin/sched", SCHED_PROC_NR),
+            ("/sbin/vfs", VFS_PROC_NR),
+            ("/sbin/vm", VM_PROC_NR),
+            ("/sbin/ramdisk", RAMDISK_PROC_NR),
+            ("/sbin/mfs", MFS_PROC_NR),
+            ("/sbin/pfs", PFS_PROC_NR),
+            ("/sbin/tty", TTY_PROC_NR),
+        ];
 
+        #[cfg(not(feature = "boot-test"))]
         let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
+            unsafe { core::mem::zeroed() };
+        #[cfg(feature = "boot-test")]
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 10] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {
@@ -734,6 +757,7 @@ pub unsafe extern "C" fn kmain() -> ! {
 
 /// Enable the MMU with a minimal identity-mapped page table.
 /// Uses 1GB blocks at PUD level — just 2 descriptors total.
+#[cfg(not(feature = "integration-tests"))]
 unsafe fn enable_mmu() {
     const TABLE_DESC: u64 = 0x3;
     const BLOCK_FLAGS: u64 = 0b01u64 | (0b11 << 8) | (1 << 10);
@@ -806,6 +830,7 @@ unsafe fn enable_mmu() {
 }
 
 /// Enable GICv2 for timer (PPI 30) and UART (SPI 33) interrupts.
+#[cfg(not(feature = "integration-tests"))]
 unsafe fn enable_gic() {
     let gicd_base = 0x0800_0000usize;
     let gicc_base = 0x0801_0000usize;

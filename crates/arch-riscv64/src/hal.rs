@@ -980,14 +980,17 @@ pub unsafe fn tlb_flush() {
 
 /// Exit QEMU via sifive_test device (MMIO 0x100000 on virt machine).
 /// 0x5555 = pass (exit code 0), 0x3333 = fail (exit code 1).
+///
+/// Falls back to SBI SRST shutdown if no test-exit device is present
+/// (QEMU builds without `-device test-exit` treat the 0x100000 write as
+/// plain RAM). The exit code is then lost, so callers that need pass/fail
+/// detection must check the serial log for result markers.
 pub fn qemu_exit(code: u32) -> ! {
     unsafe {
         let val = if code == 0 { 0x5555u32 } else { 0x3333u32 };
         core::ptr::write_volatile(0x100000 as *mut u32, val);
     }
-    loop {
-        unsafe { core::arch::asm!("wfi") }
-    }
+    crate::sbi::system_reset(true)
 }
 
 /// Deep-copy user page table entries from parent to child for fork.

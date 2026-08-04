@@ -47,12 +47,15 @@ just test-qemu                # Run the QEMU integration tests
 # RISC-V64 (requires nightly)
 just build riscv64            # Build the RISC-V kernel
 just run riscv64              # Boot in QEMU (uses OpenSBI)
-just test-qemu riscv64        # Boot (no integration test runner on riscv64)
+just test-qemu riscv64        # Run the QEMU integration tests
+just test-boot riscv64        # Run the boot tests
 
 # AArch64 (requires nightly)
 just build aarch64            # Build the AArch64 kernel
 just run aarch64              # Boot in QEMU (virt machine)
 just debug aarch64            # Build and boot with GDB server on :1234
+just test-qemu aarch64        # Run the QEMU integration tests
+just test-boot aarch64        # Run the boot tests
 ```
 
 The Just recipes orchestrate plain `cargo` invocations; the initramfs CPIO
@@ -106,10 +109,17 @@ See `.agents/skills/` for domain deep-dives:
 ## Testing
 
 - **Host tests:** `cargo test` — pure-logic unit and property tests
-- **QEMU integration:** `just test-qemu` — 40 kernel tests running in-ring 0
-  (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants)
-- **Boot tests:** `just test-boot` — multi-server verification after VFS mount_root
-  (server liveness, IPC round-trips, filesystem metadata)
+- **QEMU integration:** `just test-qemu [arch]` — kernel tests running in QEMU
+  (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants):
+  - `just test-qemu` (x86_64) — 82 tests, exits with a real pass/fail code
+  - `just test-qemu riscv64` — 25 tests (4 arch-specific skips)
+  - `just test-qemu aarch64` — 23 tests (4 arch-specific skips)
+- **Boot tests:** `just test-boot [arch]` — multi-server verification after VFS
+  mount_root on all three arches (server liveness, process-table consistency,
+  brk/RAM-disk mappings, IPC, filesystem metadata, allocator)
+
+RISC-V and AArch64 exit QEMU via SBI reset / PSCI (no exit-code device on
+this QEMU build), so their recipes pass/fail on the serial log markers.
 
 See `minix-testing` skill in `.agents/skills/` for full patterns and isolation mechanisms.
 

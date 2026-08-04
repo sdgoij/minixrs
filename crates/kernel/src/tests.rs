@@ -916,91 +916,89 @@ fn test_proc_ptr_ok(ctx: &mut TestCtx) {
 }
 
 fn test_vfs_mfs_ipc_roundtrip(ctx: &mut TestCtx) {
-    unsafe {
-        // Simulate the MFS side of a VFS→MFS REQ_READSUPER exchange.
-        // VFS→MFS message format (from servers/src/vfs/request.rs):
-        //   m_type at offset 4: REQ_READSUPER = FS_BASE + 28 = 0xA10 + 28 = 0xA1C
-        //   PAYLOAD_OFF (8):    device (u32)
-        //   PAYLOAD_OFF + 4:    flags (u32)
-        //   PAYLOAD_OFF + 8:    label_len (u64)
-        //   PAYLOAD_OFF + 24:   grant_id (i32)
-        //
-        // MFS→VFS reply format:
-        //   m_type at offset 4: status (0 = OK)
-        //   PAYLOAD_OFF (8):    file_size (i64)
-        //   PAYLOAD_OFF + 8:    dev (u32)
-        //   PAYLOAD_OFF + 12:   inode_nr (u32)
-        //   PAYLOAD_OFF + 16:   flags (u32)
-        //   PAYLOAD_OFF + 20:   mode (u16)
-        fn mfs_readsuper_handler(
-            _caller: *mut crate::proc::Proc,
-            msg: &mut [u8; crate::proc::MESSAGE_SIZE],
-        ) -> i32 {
-            // Parse the request
-            let req_type = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-            let _device = u32::from_ne_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
-            let flags = u32::from_ne_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
-            let _label_len = u64::from_ne_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+    // Simulate the MFS side of a VFS→MFS REQ_READSUPER exchange.
+    // VFS→MFS message format (from servers/src/vfs/request.rs):
+    //   m_type at offset 4: REQ_READSUPER = FS_BASE + 28 = 0xA10 + 28 = 0xA1C
+    //   PAYLOAD_OFF (8):    device (u32)
+    //   PAYLOAD_OFF + 4:    flags (u32)
+    //   PAYLOAD_OFF + 8:    label_len (u64)
+    //   PAYLOAD_OFF + 24:   grant_id (i32)
+    //
+    // MFS→VFS reply format:
+    //   m_type at offset 4: status (0 = OK)
+    //   PAYLOAD_OFF (8):    file_size (i64)
+    //   PAYLOAD_OFF + 8:    dev (u32)
+    //   PAYLOAD_OFF + 12:   inode_nr (u32)
+    //   PAYLOAD_OFF + 16:   flags (u32)
+    //   PAYLOAD_OFF + 20:   mode (u16)
+    fn mfs_readsuper_handler(
+        _caller: *mut crate::proc::Proc,
+        msg: &mut [u8; crate::proc::MESSAGE_SIZE],
+    ) -> i32 {
+        // Parse the request
+        let req_type = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+        let _device = u32::from_ne_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+        let flags = u32::from_ne_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
+        let _label_len = u64::from_ne_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
 
-            // Verify it's a REQ_READSUPER
-            if req_type != 0xA1C {
-                msg[4..8].copy_from_slice(&(-5i32).to_ne_bytes()); // EIO
-                return 0;
-            }
-
-            // Build response: simulate a successful root filesystem mount
-            // Root inode: inode_nr=1, mode=directory(0x41FF), file_size=0, dev=matching, flags=0
-            let is_root = (flags & 2) != 0; // REQ_ISROOT = 2
-            let inode_nr: u32 = if is_root { 1 } else { 2 };
-            let mode: u16 = 0x41FF; // I_DIRECTORY | 0755
-            let file_size: i64 = 0;
-
-            msg[4..8].copy_from_slice(&0i32.to_ne_bytes()); // status = OK
-            msg[8..16].copy_from_slice(&file_size.to_ne_bytes()); // file_size
-            msg[16..20].copy_from_slice(&0u32.to_ne_bytes()); // dev
-            msg[20..24].copy_from_slice(&inode_nr.to_ne_bytes()); // inode_nr
-            msg[24..28].copy_from_slice(&0u32.to_ne_bytes()); // flags
-            msg[28..30].copy_from_slice(&mode.to_ne_bytes()); // mode
-            0
+        // Verify it's a REQ_READSUPER
+        if req_type != 0xA1C {
+            msg[4..8].copy_from_slice(&(-5i32).to_ne_bytes()); // EIO
+            return 0;
         }
 
-        // Build a REQ_READSUPER message (VFS→MFS mount request)
-        // Format matches req_readsuper in servers/src/vfs/request.rs
-        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        // Build response: simulate a successful root filesystem mount
+        // Root inode: inode_nr=1, mode=directory(0x41FF), file_size=0, dev=matching, flags=0
+        let is_root = (flags & 2) != 0; // REQ_ISROOT = 2
+        let inode_nr: u32 = if is_root { 1 } else { 2 };
+        let mode: u16 = 0x41FF; // I_DIRECTORY | 0755
+        let file_size: i64 = 0;
 
-        // Bytes 4-7: m_type = REQ_READSUPER = 0xA1C
-        msg[4..8].copy_from_slice(&0xA1Ci32.to_le_bytes());
-        // Byte 8-11: device = 1 (root device)
-        msg[8..12].copy_from_slice(&1u32.to_le_bytes());
-        // Byte 12-15: flags = REQ_ISROOT (2) | REQ_RDONLY (1) = 3
-        msg[12..16].copy_from_slice(&3u32.to_le_bytes());
-        // Byte 16-23: label_len = 0
-        msg[16..24].copy_from_slice(&0u64.to_le_bytes());
-        // Byte 24-27: grant_id = 0 (no label)
-        msg[24..28].copy_from_slice(&0i32.to_le_bytes());
-
-        // Hand the message to the MFS handler in place (the same shape the
-        // real IPC path uses — MFS replies into the caller's buffer).
-        let result = mfs_readsuper_handler(core::ptr::null_mut(), &mut msg);
-        ctx.assert(result == 0, "MFS readsuper handler must return OK");
-
-        // Parse the response
-        let status = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0xFF; 4]));
-        ctx.assert(status == 0, "MFS mount response status must be OK (0)");
-
-        let inode_nr = u32::from_ne_bytes(msg[20..24].try_into().unwrap_or([0; 4]));
-        ctx.assert(inode_nr == 1, "MFS root inode must be 1");
-
-        let mode = u16::from_ne_bytes(msg[28..30].try_into().unwrap_or([0; 2]));
-        // 0x41FF = I_DIRECTORY | 0x1FF (0777 permissions)
-        ctx.assert(
-            mode == 0x41FF,
-            "MFS root inode mode must be directory (0x41FF)",
-        );
-
-        let file_size = i64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0xFF; 8]));
-        ctx.assert(file_size == 0, "MFS root inode file_size must be 0");
+        msg[4..8].copy_from_slice(&0i32.to_ne_bytes()); // status = OK
+        msg[8..16].copy_from_slice(&file_size.to_ne_bytes()); // file_size
+        msg[16..20].copy_from_slice(&0u32.to_ne_bytes()); // dev
+        msg[20..24].copy_from_slice(&inode_nr.to_ne_bytes()); // inode_nr
+        msg[24..28].copy_from_slice(&0u32.to_ne_bytes()); // flags
+        msg[28..30].copy_from_slice(&mode.to_ne_bytes()); // mode
+        0
     }
+
+    // Build a REQ_READSUPER message (VFS→MFS mount request)
+    // Format matches req_readsuper in servers/src/vfs/request.rs
+    let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+
+    // Bytes 4-7: m_type = REQ_READSUPER = 0xA1C
+    msg[4..8].copy_from_slice(&0xA1Ci32.to_le_bytes());
+    // Byte 8-11: device = 1 (root device)
+    msg[8..12].copy_from_slice(&1u32.to_le_bytes());
+    // Byte 12-15: flags = REQ_ISROOT (2) | REQ_RDONLY (1) = 3
+    msg[12..16].copy_from_slice(&3u32.to_le_bytes());
+    // Byte 16-23: label_len = 0
+    msg[16..24].copy_from_slice(&0u64.to_le_bytes());
+    // Byte 24-27: grant_id = 0 (no label)
+    msg[24..28].copy_from_slice(&0i32.to_le_bytes());
+
+    // Hand the message to the MFS handler in place (the same shape the
+    // real IPC path uses — MFS replies into the caller's buffer).
+    let result = mfs_readsuper_handler(core::ptr::null_mut(), &mut msg);
+    ctx.assert(result == 0, "MFS readsuper handler must return OK");
+
+    // Parse the response
+    let status = i32::from_ne_bytes(msg[4..8].try_into().unwrap_or([0xFF; 4]));
+    ctx.assert(status == 0, "MFS mount response status must be OK (0)");
+
+    let inode_nr = u32::from_ne_bytes(msg[20..24].try_into().unwrap_or([0; 4]));
+    ctx.assert(inode_nr == 1, "MFS root inode must be 1");
+
+    let mode = u16::from_ne_bytes(msg[28..30].try_into().unwrap_or([0; 2]));
+    // 0x41FF = I_DIRECTORY | 0x1FF (0777 permissions)
+    ctx.assert(
+        mode == 0x41FF,
+        "MFS root inode mode must be directory (0x41FF)",
+    );
+
+    let file_size = i64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0xFF; 8]));
+    ctx.assert(file_size == 0, "MFS root inode file_size must be 0");
 }
 
 /// Test SYS_VIRCOPY with SELF endpoint resolution — simulates the exact
@@ -1020,25 +1018,32 @@ fn test_sys_vircopy_self(ctx: &mut TestCtx) {
         }
         let caller_ep = (*caller).p_endpoint;
 
+        use crate::system::{
+            COPY_DST_ADDR_OFF, COPY_DST_ENDPT_OFF, COPY_FLAGS_OFF, COPY_NR_BYTES_OFF,
+            COPY_SRC_ADDR_OFF, COPY_SRC_ENDPT_OFF,
+        };
+
         // Test: zero-length SYS_VIRCOPY with SELF as destination.
         // SELF should resolve to VFS's endpoint (caller of do_vircopy_handler).
         let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
-        msg[0..4].copy_from_slice(&caller_ep.to_ne_bytes());
-        msg[8..16].copy_from_slice(&0x1000u64.to_ne_bytes());
-        msg[16..20].copy_from_slice(&crate::system::SELF.to_ne_bytes());
-        msg[24..32].copy_from_slice(&0x2000u64.to_ne_bytes());
-        msg[32..40].copy_from_slice(&0u64.to_ne_bytes());
-        msg[40..44].copy_from_slice(&0x01i32.to_ne_bytes());
+        msg[COPY_SRC_ENDPT_OFF..COPY_SRC_ENDPT_OFF + 4].copy_from_slice(&caller_ep.to_ne_bytes());
+        msg[COPY_SRC_ADDR_OFF..COPY_SRC_ADDR_OFF + 8].copy_from_slice(&0x1000u64.to_ne_bytes());
+        msg[COPY_DST_ENDPT_OFF..COPY_DST_ENDPT_OFF + 4]
+            .copy_from_slice(&crate::system::SELF.to_ne_bytes());
+        msg[COPY_DST_ADDR_OFF..COPY_DST_ADDR_OFF + 8].copy_from_slice(&0x2000u64.to_ne_bytes());
+        msg[COPY_NR_BYTES_OFF..COPY_NR_BYTES_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+        msg[COPY_FLAGS_OFF..COPY_FLAGS_OFF + 4].copy_from_slice(&0x01i32.to_ne_bytes());
 
         let r = crate::system::do_vircopy_handler(vfs, &mut msg);
         ctx.assert(r == 0, "SYS_VIRCOPY SELF+zero bytes must return OK");
 
         // Test: invalid source endpoint must be rejected.
         let mut msg2 = [0u8; crate::proc::MESSAGE_SIZE];
-        msg2[0..4].copy_from_slice(&99999i32.to_ne_bytes());
-        msg2[16..20].copy_from_slice(&crate::system::SELF.to_ne_bytes());
-        msg2[32..40].copy_from_slice(&0u64.to_ne_bytes());
-        msg2[40..44].copy_from_slice(&0x01i32.to_ne_bytes());
+        msg2[COPY_SRC_ENDPT_OFF..COPY_SRC_ENDPT_OFF + 4].copy_from_slice(&99999i32.to_ne_bytes());
+        msg2[COPY_DST_ENDPT_OFF..COPY_DST_ENDPT_OFF + 4]
+            .copy_from_slice(&crate::system::SELF.to_ne_bytes());
+        msg2[COPY_NR_BYTES_OFF..COPY_NR_BYTES_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+        msg2[COPY_FLAGS_OFF..COPY_FLAGS_OFF + 4].copy_from_slice(&0x01i32.to_ne_bytes());
         let r2 = crate::system::do_vircopy_handler(vfs, &mut msg2);
         ctx.assert(r2 != 0, "SYS_VIRCOPY with bad src must return error");
 
@@ -1150,40 +1155,64 @@ fn test_do_sync_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
 pub fn run_all() -> u32 {
     let mut total: u32 = 0;
 
-    // These pass
+    // Pure logic + IPC tests. These run in the same slot/queue-safe pattern
+    // as test_runner's Phase G (ipc_setup_proc): test procs use non-boot
+    // slots, delivermsg skips CR3 switching when p_cr3 == 0, and
+    // copy_from_user falls back to boot_cr3.
     total += run("ehdr_size", test_ehdr_size);
     total += run("phdr_size", test_phdr_size);
     total += run("elf_constants", test_elf_constants);
     total += run("cpio_parse_simple", test_cpio_parse_simple);
+    total += run("mini_send_direct", test_mini_send_direct_delivery);
+    total += run("mini_send_queue", test_mini_send_queues_when_not_receiving);
+    total += run("mini_notify", test_mini_notify_receiving);
+    // The SENDREC payload assertions verify the copied message bytes, which
+    // requires a real page table (copy_from_user falls back to boot_cr3).
+    // RISC-V/AArch64 integration builds don't enable paging, so boot_cr3()==0
+    // and the copy is skipped — skip these two tests there.
+    if crate::hal::boot_cr3() != 0 {
+        total += run("sendrec_direct", test_sendrec_direct);
+        total += run("sendrec_reply_cycle", test_sendrec_reply_cycle);
+    } else {
+        ser_write("  SKIP sendrec_direct (no boot_cr3)\n");
+        ser_write("  SKIP sendrec_reply_cycle (no boot_cr3)\n");
+    }
+    total += run("proc_addr_tasks", test_proc_addr_valid_tasks);
+    total += run("proc_addr_oob", test_proc_addr_out_of_range);
+    total += run("endpoint_encoding", test_endpoint_encoding);
+    total += run("endpoint_lookup", test_endpoint_lookup);
+    total += run("is_ok_proc_nr", test_is_ok_proc_nr);
+    total += run("is_kernel_nr", test_is_kernel_nr);
+    total += run("tmr_never", test_tmr_never_value);
+    total += run("vfs_mfs_ipc", test_vfs_mfs_ipc_roundtrip);
+    total += run("vircopy_self", test_sys_vircopy_self);
+    total += run("priv_default", test_priv_default_proc_nr);
+    total += run("priv_flags", test_priv_flags_empty);
+    total += run("proc_size", test_proc_size_key);
+    total += run("proc_ptr_ok", test_proc_ptr_ok);
 
-    // Pre-existing hangs in IPC and scheduling tests (compiler optimization
-    // removes side-effect-free test bodies). Fix when LTO barriers are added.
-    // total += run("mini_send_direct", test_mini_send_direct_delivery);
-    // total += run("mini_send_queue", test_mini_send_queues_when_not_receiving);
-    // total += run("mini_notify", test_mini_notify_receiving);
-    // total += run("sendrec_direct", test_sendrec_direct);
-    // total += run("sendrec_reply_cycle", test_sendrec_reply_cycle);
-    // total += run("proc_addr_tasks", test_proc_addr_valid_tasks);
-    // total += run("proc_addr_oob", test_proc_addr_out_of_range);
-    // total += run("endpoint_encoding", test_endpoint_encoding);
-    // total += run("endpoint_lookup", test_endpoint_lookup);
-    // total += run("is_ok_proc_nr", test_is_ok_proc_nr);
-    // total += run("is_kernel_nr", test_is_kernel_nr);
-    // total += run("tmr_never", test_tmr_never_value);
-    // total += run("enqueue_dequeue", test_enqueue_dequeue);
-    // total += run("sched_priority", test_sched_priority_ordering);
-    // total += run("sched_round_robin", test_sched_round_robin);
-    // total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
-    // total += run("vfs_mfs_ipc", test_vfs_mfs_ipc_roundtrip);
-    // total += run("vircopy_self", test_sys_vircopy_self);
-    // total += run("priv_default", test_priv_default_proc_nr);
-    // total += run("priv_flags", test_priv_flags_empty);
-    // total += run("proc_size", test_proc_size_key);
-    // total += run("proc_ptr_ok", test_proc_ptr_ok);
+    // Scheduler tests — sched_make_proc clears the run queues first, so
+    // they are isolated from whatever ran before. test_enqueue_dequeue
+    // re-runs proc_init, which is safe here: later phases re-initialize
+    // every slot they touch.
+    total += run("enqueue_dequeue", test_enqueue_dequeue);
+    total += run("sched_priority", test_sched_priority_ordering);
+    total += run("sched_round_robin", test_sched_round_robin);
+    // sched_proc_no_time and do_sync_ipc_sendrec exercise the x86 scheduler
+    // IPC path (privilege structures + scheduler proc); they are no-ops on
+    // RISC-V/AArch64 and would report a misleading OK, so skip them there.
+    if cfg!(target_arch = "x86_64") {
+        total += run("sched_proc_no_time", test_sched_proc_no_time_preempts);
+    } else {
+        ser_write("  SKIP sched_proc_no_time (x86_64 only)\n");
+    }
 
     // IPC roundtrip through do_sync_ipc (userspace IPC entry point)
-    // Pre-existing hang — same issue as other IPC/scheduling tests above.
-    // total += run("do_sync_ipc_sendrec", test_do_sync_ipc_sendrec_roundtrip);
+    if cfg!(target_arch = "x86_64") {
+        total += run("do_sync_ipc_sendrec", test_do_sync_ipc_sendrec_roundtrip);
+    } else {
+        ser_write("  SKIP do_sync_ipc_sendrec (x86_64 only)\n");
+    }
 
     total
 }

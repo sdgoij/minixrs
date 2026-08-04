@@ -40,6 +40,7 @@ SECTIONS
 
     __kernel_end = .;
 
+    . = ALIGN(16);
     . = . + 65536;
     __stack_top = .;
 

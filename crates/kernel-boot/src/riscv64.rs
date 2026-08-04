@@ -609,25 +609,41 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
         // Define all boot processes: (path, proc_nr)
         // Order matches C MINIX kernel/table.c: ds first, then rs, pm, ...
+        // When boot-test is active, INIT is excluded so the test completes
+        // before any user process starts (same as x86 main.rs).
+        #[cfg(not(feature = "boot-test"))]
         let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/ds", DS_PROC_NR),           // Data Store
-            ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
-            ("/sbin/pm", PM_PROC_NR),           // Process Manager
-            ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
-            ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
-            ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
-            ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
-            ("/sbin/mfs", MFS_PROC_NR),         // Memory File System
-            ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
-            ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
-            ("/sbin/init", INIT_PROC_NR),       // init
+            ("/sbin/ds", DS_PROC_NR),
+            ("/sbin/rs", RS_PROC_NR),
+            ("/sbin/pm", PM_PROC_NR),
+            ("/sbin/sched", SCHED_PROC_NR),
+            ("/sbin/vfs", VFS_PROC_NR),
+            ("/sbin/vm", VM_PROC_NR),
+            ("/sbin/ramdisk", RAMDISK_PROC_NR),
+            ("/sbin/mfs", MFS_PROC_NR),
+            ("/sbin/pfs", PFS_PROC_NR),
+            ("/sbin/tty", TTY_PROC_NR),
+            ("/sbin/init", INIT_PROC_NR),
+        ];
+        #[cfg(feature = "boot-test")]
+        let boot_procs: &[(&str, i32)] = &[
+            ("/sbin/ds", DS_PROC_NR),
+            ("/sbin/rs", RS_PROC_NR),
+            ("/sbin/pm", PM_PROC_NR),
+            ("/sbin/sched", SCHED_PROC_NR),
+            ("/sbin/vfs", VFS_PROC_NR),
+            ("/sbin/vm", VM_PROC_NR),
+            ("/sbin/ramdisk", RAMDISK_PROC_NR),
+            ("/sbin/mfs", MFS_PROC_NR),
+            ("/sbin/pfs", PFS_PROC_NR),
+            ("/sbin/tty", TTY_PROC_NR),
         ];
 
-        // Load each boot process from initramfs, storing InitInfo for
-        // per-process page table creation.
-        // Note: boot_init's internal error messages use `print!` which is
-        // a no-op on RISC-V (x86_64 COM1 only), so we add our own diagnostics.
+        #[cfg(not(feature = "boot-test"))]
         let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
+            unsafe { core::mem::zeroed() };
+        #[cfg(feature = "boot-test")]
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 10] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {

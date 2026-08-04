@@ -158,6 +158,18 @@ pub fn run_integration_tests() -> ! {
         serial_puts("-- done --\r\n");
         qemu::qemu_exit_success();
     } else {
+        serial_puts("FAILURES: ");
+        let mut t = total;
+        if t >= 100 {
+            serial_putc(b'0' + (t / 100) as u8);
+            t %= 100;
+        }
+        if t >= 10 {
+            serial_putc(b'0' + (t / 10) as u8);
+            t %= 10;
+        }
+        serial_putc(b'0' + t as u8);
+        serial_puts("\r\n");
         qemu::qemu_exit_failure(total);
     }
 }
@@ -2406,7 +2418,7 @@ mod qemu {
         // LSR bit 5 (0x20) = THR empty. Reading LSR from COM1+5.
         const COM1_LSR: u16 = 0x3F8 + 5;
         unsafe {
-            for _ in 0..10000 {
+            for _ in 0..1000000 {
                 let lsr: u8;
                 core::arch::asm!("in al, dx", out("al") lsr, in("dx") COM1_LSR, options(nostack));
                 if lsr & 0x20 != 0 {

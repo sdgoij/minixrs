@@ -75,20 +75,54 @@ debug-aarch64: build-aarch64
 
 # ---------- tests ----------
 
+# RISC-V/AArch64 test builds (nightly + -Zbuild-std). The integration-tests
+# feature runs kernel::tests::run_all() in QEMU before any userspace starts;
+# boot-test runs the multi-server boot suite after VFS mount_root.
+
+build-riscv64-test: userland-riscv64
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-none-elf --features embed_initramfs,embed_minixfs,riscv64,integration-tests -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+
+build-aarch64-test: userland-aarch64
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix.json --features embed_initramfs,embed_minixfs,aarch64,integration-tests -Zunstable-options -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+
+build-riscv64-boot: userland-riscv64
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-none-elf --features embed_initramfs,embed_minixfs,riscv64,boot-test -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+
+build-aarch64-boot: userland-aarch64
+    rustup run nightly cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix.json --features embed_initramfs,embed_minixfs,aarch64,boot-test -Zunstable-options -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+
 test-qemu target="x86":
     @just test-qemu-{{target}}
 
 test-qemu-x86: build-x86-test
     qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
-test-qemu-riscv64: build-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+# RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so
+# pass/fail is determined from the serial log.
+test-qemu-riscv64: build-riscv64-test
+    timeout 180 qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64 > target/riscv64-qemu-test.log 2>&1; \
+    if grep -q "ALL TESTS PASSED" target/riscv64-qemu-test.log; then echo "RISC-V QEMU integration tests passed"; exit 0; else echo "RISC-V QEMU integration tests FAILED -- see target/riscv64-qemu-test.log"; exit 1; fi
+
+# AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 — no exit-code
+# device and no semihosting on this QEMU build), so pass/fail is determined
+# from the serial log like RISC-V.
+test-qemu-aarch64: build-aarch64-test
+    timeout 180 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64 > target/aarch64-qemu-test.log 2>&1; \
+    if grep -q "ALL TESTS PASSED" target/aarch64-qemu-test.log; then echo "AArch64 QEMU integration tests passed"; exit 0; else echo "AArch64 QEMU integration tests FAILED -- see target/aarch64-qemu-test.log"; exit 1; fi
 
 test-boot target="x86":
     @just test-boot-{{target}}
 
 test-boot-x86: build-x86-boot
     qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+
+test-boot-riscv64: build-riscv64-boot
+    timeout 180 qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64 > target/riscv64-boot-test.log 2>&1; \
+    if grep -q "ALL TESTS PASSED" target/riscv64-boot-test.log; then echo "RISC-V boot tests passed"; exit 0; else echo "RISC-V boot tests FAILED -- see target/riscv64-boot-test.log"; exit 1; fi
+
+test-boot-aarch64: build-aarch64-boot
+    timeout 180 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64 > target/aarch64-boot-test.log 2>&1; \
+    if grep -q "ALL TESTS PASSED" target/aarch64-boot-test.log; then echo "AArch64 boot tests passed"; exit 0; else echo "AArch64 boot tests FAILED -- see target/aarch64-boot-test.log"; exit 1; fi
 
 test target="x86":
     @just test-{{target}}
