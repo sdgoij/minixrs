@@ -91,34 +91,32 @@ pub struct ITimerVal {
     pub it_value: TimeSpec,
 }
 
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct SigAction {
-    pub sa_handler: Option<unsafe extern "C" fn(i32)>,
-    pub sa_mask: u64,
-    pub sa_flags: i32,
-    pub sa_restorer: Option<unsafe extern "C" fn()>,
-}
+const OFF_TYPE: usize = 4;
 
-const OFF_TYPE: usize = 8;
+// The PM message header: the call number lives in m_type at bytes 4-8
+// (payload starts at 8). The old OFF_TYPE = 8 wrote the call number into
+// m1i1, so PM read garbage as call 0 and every wrapper misdispatched.
 
 // CLOCK_GETTIME / CLOCK_GETRES
 const OFF_CLOCK_ID: usize = 12; // i32
 const OFF_CLOCK_SEC: usize = 16; // i64
 const OFF_CLOCK_NSEC: usize = 24; // i64
 
-// KILL
+// KILL (PM handle_kill: m1i1 = signo, m1i2 = pid)
 const OFF_KILL_PID: usize = 12; // i32
-const OFF_KILL_SIG: usize = 16; // i32
+const OFF_KILL_SIG: usize = 8; // i32
 
-// SIGACTION
-const OFF_SIGACT_SIG: usize = 12; // i32
-const OFF_SIGACT_ACT: usize = 16; // u64 — pointer to SigAction
-const OFF_SIGACT_OACT: usize = 24; // u64 — pointer to old SigAction
+// SIGACTION (PM do_sigaction: m1i1 = signo, m2l1 = act ptr, m2l2 = oact ptr,
+// m2l3 = sigreturn trampoline ptr)
+const OFF_SIGACT_SIG: usize = 8; // i32
+const OFF_SIGACT_ACT: usize = 24; // u64 — pointer to C-style sigaction
+const OFF_SIGACT_OACT: usize = 32; // u64 — pointer to old sigaction
+const OFF_SIGACT_RESTORER: usize = 40; // u64 — sigreturn trampoline address
 
-// SIGPROCMASK
-const OFF_SIGMASK_HOW: usize = 12; // i32
-const OFF_SIGMASK_SET: usize = 16; // u64
+// SIGPROCMASK (PM do_sigprocmask: m1i1 = how, m2l1 = set ptr, m2l2 = old ptr)
+const OFF_SIGMASK_HOW: usize = 8; // i32
+const OFF_SIGMASK_SET: usize = 24; // u64 — pointer to 16-byte mask
+const OFF_SIGMASK_OLD: usize = 32; // u64 — pointer to old mask
 
 // ITIMER
 const OFF_ITIMER_WHICH: usize = 12; // i32
@@ -261,15 +259,61 @@ pub fn nanosleep(req: &TimeSpec) -> Result<TimeSpec, MinixErr> {
 
 // Signal operations
 
+/// Encode a C-style 28-byte sigaction: handler u64 + mask 16 bytes + flags
+/// i32. This is the exact layout PM's `do_sigaction` reads via sys_vircopy
+/// (handler@0, mask@8, flags@24).
+pub fn encode_action(handler: u64, mask: u128, flags: i32) -> [u8; 28] {
+    let mut act = [0u8; 28];
+    act[0..8].copy_from_slice(&handler.to_ne_bytes());
+    act[8..24].copy_from_slice(&mask.to_ne_bytes());
+    act[24..28].copy_from_slice(&flags.to_ne_bytes());
+    act
+}
+
+/// Decode a C-style 28-byte sigaction into (handler, mask, flags).
+///
+/// Inverse of `encode_action`; used by the libc `sigaction` wrapper to
+/// translate a C `struct sigaction` (handler u64@0, mask 16 bytes@8,
+/// flags i32@24) into the minix-std raw-value form.
+pub fn decode_action(act: &[u8; 28]) -> (u64, u128, i32) {
+    let handler = u64::from_ne_bytes(act[0..8].try_into().unwrap());
+    let mask = u128::from_ne_bytes(act[8..24].try_into().unwrap());
+    let flags = i32::from_ne_bytes(act[24..28].try_into().unwrap());
+    (handler, mask, flags)
+}
+
+/// Build a PM_SIGACTION request (m_type@4, signo@8, act@24, oact@32,
+/// sigreturn trampoline@40).
+pub fn build_sigaction_msg(
+    signo: i32,
+    act_ptr: u64,
+    oact_ptr: u64,
+    restorer: u64,
+    msg: &mut [u8; 64],
+) {
+    msg_set_i32(msg, OFF_TYPE, PM_SIGACTION as i32);
+    msg_set_i32(msg, OFF_SIGACT_SIG, signo);
+    msg_set_u64(msg, OFF_SIGACT_ACT, act_ptr);
+    msg_set_u64(msg, OFF_SIGACT_OACT, oact_ptr);
+    msg_set_u64(msg, OFF_SIGACT_RESTORER, restorer);
+}
+
+/// Build a PM_KILL request (m_type@4, signo@8, pid@12).
+pub fn build_kill_msg(signo: i32, pid: i32, msg: &mut [u8; 64]) {
+    msg_set_i32(msg, OFF_TYPE, PM_KILL as i32);
+    msg_set_i32(msg, OFF_KILL_SIG, signo);
+    msg_set_i32(msg, OFF_KILL_PID, pid);
+}
+
 /// Send a signal to a process.
+///
+/// Message layout: m_type = PM_KILL, m1i1 = signo, m1i2 = pid (matches PM
+/// `handle_kill`).
 pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_KILL as i32);
-        msg_set_i32(&mut msg, OFF_KILL_PID, pid);
-        msg_set_i32(&mut msg, OFF_KILL_SIG, sig);
-
+        build_kill_msg(sig, pid, &mut msg);
         match pm_call(&mut msg) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -282,32 +326,21 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
     }
 }
 
-/// Examine and change a signal action.
+/// Examine or change a signal action (SIGNALS.md 2.1).
 ///
-/// # Safety
-///
-/// `act` and `old` must point to valid SigAction structs, or be null.
-pub unsafe fn sigaction(
-    sig: i32,
-    act: Option<&SigAction>,
-    old: Option<&mut SigAction>,
-) -> Result<(), MinixErr> {
+/// `handler` is SIG_DFL (0), SIG_IGN (1), or a handler address; `mask` is
+/// the new signal mask (low 128 bits); `flags` the sa_flags. The act is
+/// encoded in PM's 28-byte layout and the message uses PM's real offsets
+/// (m_type@4, signo@8, act@24, oact@32).
+pub fn sigaction(signo: i32, handler: u64, mask: u128, flags: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
+        let act = encode_action(handler, mask, flags);
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_SIGACTION as i32);
-        msg_set_i32(&mut msg, OFF_SIGACT_SIG, sig);
-        msg_set_u64(
-            &mut msg,
-            OFF_SIGACT_ACT,
-            act.map_or(0, |a| a as *const _ as u64),
-        );
-        msg_set_u64(
-            &mut msg,
-            OFF_SIGACT_OACT,
-            old.as_ref().map_or(0, |a| a as *const _ as u64),
-        );
-
+        // PM needs the caller's sigreturn trampoline address (m2l3@40) to
+        // build the sigframe for caught signals (SIGNALS.md Phase 4).
+        let restorer = minix_rt::sigreturn_trampoline_addr();
+        build_sigaction_msg(signo, act.as_ptr() as u64, 0, restorer, &mut msg);
         match pm_call(&mut msg) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -315,73 +348,43 @@ pub unsafe fn sigaction(
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (sig, act, old);
+        let _ = (signo, handler, mask, flags);
         Err(MinixErr::ENOSYS)
     }
 }
 
-/// A C-style 28-byte sigaction whose handler field is SIG_IGN (1).
-///
-/// Kept in the data segment (not on the stack): PM reads it via
-/// cross-address-space SYS_VIRCOPY, which resolves the pointer in the
-/// caller's page table. A stack-local buffer worked, but exec'd processes'
-/// stack pages read back as zeros through the copy path on this port, so
-/// the value must live somewhere the copy resolves reliably.
-static SIG_IGN_ACTION: [u8; 28] = [
-    1, 0, 0, 0, 0, 0, 0, 0, // handler = SIG_IGN
-    0, 0, 0, 0, 0, 0, 0, 0, // mask
-    0, 0, 0, 0, 0, 0, 0, 0, // mask (cont.) + flags
-    0, 0, 0, 0, // flags + restorer
-];
+/// POSIX `signal()`: set the disposition of `signo` to `handler`
+/// (SIG_DFL / SIG_IGN / a handler address).
+pub fn signal(signo: i32, handler: u64) -> Result<(), MinixErr> {
+    sigaction(signo, handler, 0, 0)
+}
 
 /// Ignore a signal: set its disposition to SIG_IGN.
 ///
-/// PM reads a C-style 28-byte sigaction from the act pointer (handler u64 +
-/// mask 16 + flags i32); SIG_IGN is the raw handler value 1.
-///
-/// The message is built against PM's actual layout (m_type at bytes 4-8,
-/// signo in m1i1 @8, act pointer in m2l1 @24, oact pointer in m2l2 @32),
-/// not the `OFF_TYPE = 8` used by the other (as-yet-unwired) minix-std PM
-/// wrappers, which PM would misread as call 0.
+/// Delegates to the general `sigaction`, which encodes the act in PM's
+/// 28-byte layout and uses PM's real message offsets. The act lives on the
+/// caller's stack; PM reads it via cross-address-space SYS_VIRCOPY, which
+/// resolves the caller's endpoint correctly (the minix_rt::SELF fix).
 pub fn sig_ignore(sig: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
-    unsafe {
-        let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, 4, PM_SIGACTION as i32);
-        msg_set_i32(&mut msg, 8, sig);
-        msg_set_u64(&mut msg, 24, SIG_IGN_ACTION.as_ptr() as u64);
-        msg_set_u64(&mut msg, 32, 0);
-        let _ = sendrec(PM_PROC_NR, &mut msg)?;
-        // PM replies with the status in m_type (bytes 4-8).
-        let mtype = msg_i32(&msg, 4);
-        if mtype < 0 {
-            Err(MinixErr::from_i32(mtype))
-        } else {
-            Ok(())
-        }
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = sig;
-        Err(MinixErr::ENOSYS)
-    }
+    sigaction(sig, SIG_IGN, 0, 0)
 }
 
 /// Examine and change the signal mask.
-pub fn sigprocmask(how: i32, set: u64) -> Result<u64, MinixErr> {
+///
+/// Message layout: m_type = PM_SIGPROCMASK, m1i1 = how, m2l1 = pointer to a
+/// 16-byte mask (matches PM `do_sigprocmask`).
+pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
+        let mut mask = [0u8; 16];
+        mask[0..8].copy_from_slice(&set.to_ne_bytes());
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_SIGPROCMASK as i32);
         msg_set_i32(&mut msg, OFF_SIGMASK_HOW, how);
-        msg_set_u64(&mut msg, OFF_SIGMASK_SET, set);
-
+        msg_set_u64(&mut msg, OFF_SIGMASK_SET, mask.as_ptr() as u64);
+        msg_set_u64(&mut msg, OFF_SIGMASK_OLD, 0);
         match pm_call(&mut msg) {
-            Ok(_) => {
-                // The old mask is returned in the message.
-                let old_mask = msg_u64(&msg, OFF_SIGMASK_SET);
-                Ok(old_mask)
-            }
+            Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -504,23 +507,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sig_ignore_message_layout() {
-        // The PM_SIGACTION request must carry the call number in m_type
-        // (bytes 4-8), signo in m1i1 (bytes 8-12), the act pointer in m2l1
-        // (bytes 24-32) and no oact pointer — matching PM's dispatch and
-        // do_sigaction offsets. The act buffer's handler field is SIG_IGN=1.
-        let mut act = [0u8; 28];
-        act[0..8].copy_from_slice(&SIG_IGN.to_ne_bytes());
+    fn test_sigaction_message_layout() {
+        // The PM_SIGACTION request via the production builders: m_type@4,
+        // signo@8, act pointer@24, oact@32, sigreturn trampoline@40 —
+        // matching PM's dispatch and do_sigaction offsets. The act encodes
+        // SIG_IGN (handler=1) at byte 0 of the 28-byte PM sigaction layout.
+        let act = encode_action(SIG_IGN, 0, 0);
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, 4, PM_SIGACTION as i32);
-        msg_set_i32(&mut msg, 8, SIGINT);
-        msg_set_u64(&mut msg, 24, act.as_ptr() as u64);
-        msg_set_u64(&mut msg, 32, 0);
+        build_sigaction_msg(
+            SIGINT,
+            act.as_ptr() as u64,
+            0,
+            0x1234_5678_9ABC_DEF0,
+            &mut msg,
+        );
 
-        assert_eq!(msg_i32(&msg, 4), PM_SIGACTION as i32);
-        assert_eq!(msg_i32(&msg, 8), SIGINT);
-        assert_eq!(msg_u64(&msg, 24), act.as_ptr() as u64);
-        assert_eq!(msg_u64(&msg, 32), 0);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), PM_SIGACTION as i32);
+        assert_eq!(msg_i32(&msg, OFF_SIGACT_SIG), SIGINT);
+        assert_eq!(msg_u64(&msg, OFF_SIGACT_ACT), act.as_ptr() as u64);
+        assert_eq!(msg_u64(&msg, OFF_SIGACT_OACT), 0);
+        assert_eq!(msg_u64(&msg, OFF_SIGACT_RESTORER), 0x1234_5678_9ABC_DEF0);
         assert_eq!(u64::from_ne_bytes(act[0..8].try_into().unwrap()), SIG_IGN);
     }
 
@@ -561,8 +567,30 @@ mod tests {
     }
 
     #[test]
-    fn test_sigaction_layout() {
-        assert_eq!(core::mem::size_of::<SigAction>(), 32);
+    fn test_encode_decode_action_roundtrip() {
+        let act = encode_action(0x0102_0304_0506_0708, 0x0807_0605_0403_0201, 0x04);
+        let (handler, mask, flags) = decode_action(&act);
+        assert_eq!(handler, 0x0102_0304_0506_0708);
+        assert_eq!(mask, 0x0807_0605_0403_0201);
+        assert_eq!(flags, 0x04);
+    }
+
+    #[test]
+    fn test_encode_action_layout() {
+        // PM's 28-byte sigaction: handler u64@0, mask 16 bytes@8, flags
+        // i32@24. A 64-bit mask lands in the low half of the 16-byte field.
+        let act = encode_action(0x1122_3344_5566_7788, 0xDEAD_BEEF_CAFE_BABE, 0x08);
+        assert_eq!(act.len(), 28);
+        assert_eq!(
+            u64::from_ne_bytes(act[0..8].try_into().unwrap()),
+            0x1122_3344_5566_7788
+        );
+        assert_eq!(
+            u64::from_ne_bytes(act[8..16].try_into().unwrap()),
+            0xDEAD_BEEF_CAFE_BABE
+        );
+        assert_eq!(u64::from_ne_bytes(act[16..24].try_into().unwrap()), 0);
+        assert_eq!(i32::from_ne_bytes(act[24..28].try_into().unwrap()), 0x08);
     }
 
     #[test]
@@ -584,32 +612,32 @@ mod tests {
         msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
         msg_set_i32(&mut msg, OFF_CLOCK_ID, CLOCK_REALTIME);
 
-        assert_eq!(msg_i32(&msg, 8), 0x022);
-        assert_eq!(msg_i32(&msg, 12), 0);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x022);
+        assert_eq!(msg_i32(&msg, OFF_CLOCK_ID), 0);
     }
 
     #[test]
     fn test_kill_message_format() {
+        // PM handle_kill reads m1i1 = signo@8, m1i2 = pid@12.
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_KILL as i32);
-        msg_set_i32(&mut msg, OFF_KILL_PID, 123);
-        msg_set_i32(&mut msg, OFF_KILL_SIG, SIGTERM);
+        build_kill_msg(SIGTERM, 123, &mut msg);
 
-        assert_eq!(msg_i32(&msg, 8), 0x00B);
-        assert_eq!(msg_i32(&msg, 12), 123);
-        assert_eq!(msg_i32(&msg, 16), 15);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), PM_KILL as i32);
+        assert_eq!(msg_i32(&msg, OFF_KILL_SIG), 15);
+        assert_eq!(msg_i32(&msg, OFF_KILL_PID), 123);
     }
 
     #[test]
     fn test_sigprocmask_message_format() {
+        // PM do_sigprocmask reads m1i1 = how@8, m2l1 = set ptr@24.
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_SIGPROCMASK as i32);
         msg_set_i32(&mut msg, OFF_SIGMASK_HOW, SIG_SETMASK);
         msg_set_u64(&mut msg, OFF_SIGMASK_SET, 0xFFFF);
 
-        assert_eq!(msg_i32(&msg, 8), 0x017);
-        assert_eq!(msg_i32(&msg, 12), 2);
-        assert_eq!(msg_u64(&msg, 16), 0xFFFF);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), PM_SIGPROCMASK as i32);
+        assert_eq!(msg_i32(&msg, OFF_SIGMASK_HOW), SIG_SETMASK);
+        assert_eq!(msg_u64(&msg, OFF_SIGMASK_SET), 0xFFFF);
     }
 
     #[test]
@@ -668,8 +696,19 @@ mod tests {
         assert!(r.is_err());
     }
 
-    type SignalHandler =
-        unsafe fn(i32, Option<&SigAction>, Option<&mut SigAction>) -> Result<(), MinixErr>;
+    #[test]
+    fn test_sigaction_returns_enosys_on_host() {
+        let r = sigaction(SIGINT, SIG_IGN, 0, 0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_signal_returns_enosys_on_host() {
+        let r = signal(SIGINT, SIG_IGN);
+        assert!(r.is_err());
+    }
+
+    type SignalHandler = fn(i32, u64, u128, i32) -> Result<(), MinixErr>;
 
     #[test]
     fn test_sigaction_signature() {

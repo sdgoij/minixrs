@@ -287,6 +287,91 @@ pub fn frame_default() -> [u8; 256] {
     [0u8; 256]
 }
 
+// Signal-delivery sigframe (SIGNALS.md Phase 4).
+//
+// RISC-V layout (296 bytes, arch_common::consts::sigframe):
+//   [0..256)   saved p_reg (sepc@0, ra@8, sp@16, a0@80, sstatus@248)
+//   [256..272) signal mask to restore on sigreturn
+//   [272..276) signal number
+//   [280..288) frame base (scp, for the trampoline)
+//   [288..296) SC_MAGIC
+// The kernel points sepc at the handler, sp at the frame, a0 at the signal
+// number, and ra at the trampoline; the handler's `ret` jumps to it with sp
+// still at the frame.
+
+/// Size of the signal frame on the target's stack.
+pub const fn sigframe_size() -> usize {
+    arch_common::consts::sigframe::SIZE
+}
+
+/// Compute the frame address below a saved stack pointer (16-aligned).
+pub const fn sigframe_addr(old_sp: u64) -> u64 {
+    (old_sp - arch_common::consts::sigframe::SIZE as u64) & !0xF
+}
+
+/// Read the user stack pointer (sp, x2@16) from a saved frame.
+///
+/// # Safety
+///
+/// `frame` must contain valid saved register state.
+pub unsafe fn read_frame_sp(frame: &[u8; 256]) -> u64 {
+    unsafe { read_frame_field(frame, 16) }
+}
+
+/// Build a signal frame in `dst` from the saved registers.
+///
+/// # Safety
+///
+/// `dst` must be `sigframe_size()` bytes; `saved` must be valid register
+/// state; `mask` must be 16 bytes.
+pub unsafe fn build_sigframe(
+    dst: &mut [u8],
+    saved: &[u8; 256],
+    signo: u32,
+    mask: &[u8; 16],
+    _trampoline: u64,
+    frame_addr: u64,
+) {
+    use arch_common::consts::sigframe as sf;
+    dst[sf::REGS_OFF..sf::REGS_OFF + 256].copy_from_slice(saved);
+    dst[sf::MASK_OFF..sf::MASK_OFF + 16].copy_from_slice(mask);
+    dst[sf::SIGNAL_OFF..sf::SIGNAL_OFF + 4].copy_from_slice(&signo.to_ne_bytes());
+    dst[sf::SC_P_OFF..sf::SC_P_OFF + 8].copy_from_slice(&frame_addr.to_ne_bytes());
+    dst[sf::MAGIC_OFF..sf::MAGIC_OFF + 8]
+        .copy_from_slice(&arch_common::consts::SC_MAGIC.to_ne_bytes());
+}
+
+/// Point a saved frame at the signal handler: sepc = handler, sp = frame,
+/// a0 = signo, ra = trampoline.
+///
+/// # Safety
+///
+/// `p_reg` must point to valid saved register state.
+pub unsafe fn sigframe_set_entry(
+    p_reg: &mut [u8; 256],
+    handler: u64,
+    frame: u64,
+    signo: u32,
+    trampoline: u64,
+) {
+    unsafe {
+        write_frame_field(p_reg, 0, handler); // sepc
+        write_frame_field(p_reg, 16, frame); // sp
+        write_frame_field(p_reg, 8, trampoline); // ra — handler returns to it
+        write_frame_field(p_reg, 80, signo as u64); // a0 = signo
+    }
+}
+
+/// Restore a saved frame's registers from a signal frame on sigreturn.
+///
+/// # Safety
+///
+/// `frame` must be a valid signal frame (`sigframe_size()` bytes).
+pub unsafe fn sigframe_restore(p_reg: &mut [u8; 256], frame: &[u8]) {
+    use arch_common::consts::sigframe as sf;
+    p_reg.copy_from_slice(&frame[sf::REGS_OFF..sf::REGS_OFF + 256]);
+}
+
 /// Initialize architecture-specific process state in the trap frame.
 ///
 /// Called from `do_exec_handler` (PM exec path) to set up a new process's

@@ -30,30 +30,32 @@ pub const PM_EXEC_NEW: u32 = PM_BASE + 43;
 
 // For PM calls, the message layout is:
 //   offset 0: dest endpoint (i32) — set by sendrec
-//   offset 4: source endpoint (i32) — set by kernel
-//   offset 8: call_nr / m_type (i32) — PM_* constant
-//   offset 12-xx: call-specific data
+//   offset 4: m_type / call number (i32) — PM_* constant (PM reads it here)
+//   offset 8-xx: call-specific data (m1i1, m2l1, ...)
+const OFF_TYPE: usize = 4;
 
-const OFF_TYPE: usize = 8;
+// PM_GETPID reply layout:
+//   m1i1 = pid (i32) at offset 8
+//   m1i2 = ppid (i32) at offset 12
+const OFF_PID: usize = 8;
+const OFF_PPID: usize = 12;
 
-// PM_GETPID result layout:
-//   offset 16: pid (i32) — low 32 bits of return
-//   offset 20: ppid (i32) — high 32 bits >> 32
-const OFF_PID: usize = 16;
-const OFF_PPID: usize = 20;
+// PM_FORK reply (via VFS_PM_FORK_REPLY): child pid in m1i1@8.
+const OFF_CHILD_PID: usize = 8;
 
-// PM_FORK result:
-//   offset 16: child_pid (i32)
-//   offset 20: child_endpoint (i32) — unused by user
-const OFF_CHILD_PID: usize = 16;
+// PM_EXIT arg: m1i1 = status@8 (PM handle_exit reads m1i1).
+const OFF_EXIT_STATUS: usize = 8;
 
-// PM_WAITPID args:
-//   offset 12: pid (i32) — child pid to wait for, or -1 for any
-//   offset 16: options (i32) — WNOHANG, WUNTRACED
-//   offset 20: status (i32) — returned status code
-const OFF_WAIT_PID: usize = 12;
-const OFF_WAIT_OPTIONS: usize = 16;
-const OFF_WAIT_STATUS: usize = 20;
+// PM_WAITPID args (matching PM's handle_waitpid):
+//   m1i1 = pid (i32) — child pid to wait for, or -1 for any
+//   m1i2 = options (i32) — WNOHANG, WUNTRACED
+// Reply: pid in m1i1, status in m1i2 (PM overwrites both).
+const OFF_WAIT_PID: usize = 8;
+const OFF_WAIT_OPTIONS: usize = 12;
+const OFF_WAIT_STATUS: usize = 12;
+
+/// Wait options: return immediately if no child has exited.
+pub const WNOHANG: i32 = 1;
 
 // PM_EXEC_NEW args:
 //   offset 12: exec_endpt (i32) — calling process endpoint, set by kernel
@@ -114,7 +116,7 @@ pub fn exit(status: i32) -> ! {
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_EXIT as i32);
-        msg_set_i32(&mut msg, OFF_CHILD_PID, status);
+        msg_set_i32(&mut msg, OFF_EXIT_STATUS, status);
         let _ = sendrec(PM_PROC_NR, &mut msg);
     }
     let _ = status;
@@ -127,21 +129,21 @@ pub fn exit(status: i32) -> ! {
 ///
 /// `pid` is the child PID to wait for, or -1 for any child.
 /// `options` can be 0 (blocking) or `WNOHANG` (non-blocking).
-pub fn waitpid(pid: i32, _options: i32) -> Result<(i32, i32), MinixErr> {
+pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_WAITPID as i32);
         msg_set_i32(&mut msg, OFF_WAIT_PID, pid);
-        msg_set_i32(&mut msg, OFF_WAIT_OPTIONS, _options);
+        msg_set_i32(&mut msg, OFF_WAIT_OPTIONS, options);
         let result = sendrec(PM_PROC_NR, &mut msg);
         match result {
-            Ok(r) => {
+            Ok(_) => {
                 let mtype = msg_i32(&msg, OFF_TYPE);
                 if mtype < 0 {
                     Err(MinixErr::from_i32(mtype))
                 } else {
-                    Ok((r, msg_i32(&msg, OFF_WAIT_STATUS)))
+                    Ok((msg_i32(&msg, OFF_WAIT_PID), msg_i32(&msg, OFF_WAIT_STATUS)))
                 }
             }
             Err(e) => Err(e),
@@ -149,7 +151,7 @@ pub fn waitpid(pid: i32, _options: i32) -> Result<(i32, i32), MinixErr> {
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = pid;
+        let _ = (pid, options);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -262,44 +264,47 @@ mod tests {
     fn test_fork_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_FORK as i32);
-        assert_eq!(msg_i32(&msg, 8), 0x002);
-        // All other fields should be zero
-        assert_eq!(msg_i32(&msg, 12), 0);
-        assert_eq!(msg_i32(&msg, 16), 0);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x002);
     }
 
     #[test]
     fn test_exit_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_EXIT as i32);
-        msg_set_i32(&mut msg, OFF_CHILD_PID, 42);
-        assert_eq!(msg_i32(&msg, 8), 0x001);
-        assert_eq!(msg_i32(&msg, 16), 42);
+        msg_set_i32(&mut msg, OFF_EXIT_STATUS, 42);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x001);
+        assert_eq!(msg_i32(&msg, OFF_EXIT_STATUS), 42);
     }
 
     #[test]
     fn test_waitpid_message_format() {
+        // PM handle_waitpid reads m1i1 = pid@8, m1i2 = options@12.
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_WAITPID as i32);
         msg_set_i32(&mut msg, OFF_WAIT_PID, 123);
-        msg_set_i32(&mut msg, OFF_WAIT_OPTIONS, 1); // WNOHANG
-        assert_eq!(msg_i32(&msg, 8), 0x003);
-        assert_eq!(msg_i32(&msg, 12), 123);
-        assert_eq!(msg_i32(&msg, 16), 1);
+        msg_set_i32(&mut msg, OFF_WAIT_OPTIONS, WNOHANG);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x003);
+        assert_eq!(msg_i32(&msg, OFF_WAIT_PID), 123);
+        assert_eq!(msg_i32(&msg, OFF_WAIT_OPTIONS), WNOHANG);
+    }
+
+    #[test]
+    fn test_wnohang_constant() {
+        assert_eq!(WNOHANG, 1);
     }
 
     #[test]
     fn test_getpid_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_GETPID as i32);
-        assert_eq!(msg_i32(&msg, 8), 0x004);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x004);
     }
 
     #[test]
     fn test_exec_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_EXEC_NEW as i32);
-        assert_eq!(msg_i32(&msg, 8), 0x02B);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x02B);
     }
 
     #[test]

@@ -123,6 +123,17 @@ fn will_receive_sendrec(dst_ptr: *mut Proc, src_e: i32) -> bool {
     unsafe {
         let mf = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed);
         if mf & MiscFlags::REPLY_PEND.bits() != 0 {
+            // A process in the SEND phase of a SENDREC (REPLY_PEND set
+            // AND SENDING set) must not receive any message: its SEND is
+            // still waiting for the destination to receive. p_getfrom_e is
+            // only written when the process blocks in RECEIVE and is never
+            // cleared, so a stale value here would otherwise let a stray
+            // reply (e.g. PM's duplicate waitpid reply) be delivered into
+            // the previous receive buffer, corrupting the process's stack.
+            let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
+            if rts & RtsFlags::SENDING.bits() != 0 {
+                return false;
+            }
             let from = (*dst_ptr).p_getfrom_e;
             return from == src_e;
         }
@@ -342,6 +353,12 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
                                 // Consume transient signal flags that
                                 // send_sig set alongside s_notify_pending.
+                                // No re-enqueue here: the caller is the
+                                // current process (still linked in its run
+                                // queue under this port's loose invariant),
+                                // so an unconditional enqueue would link it
+                                // twice (boot hang observed with PM's boot
+                                // notification).
                                 (*caller_ptr).p_rts_flags.fetch_and(
                                     !(RtsFlags::SIGNALED.bits() | RtsFlags::SIG_PENDING.bits()),
                                     Ordering::Relaxed,

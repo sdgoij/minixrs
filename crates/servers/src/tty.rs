@@ -1232,25 +1232,22 @@ fn send_kill(target: i32, sig: u8) {
     minix_rt::kernel_call(6, &mut msg);
 }
 
-/// Send a signal to the foreground process group of this TTY.
+/// Send a signal to the reader of this TTY.
 ///
 /// `sig` is the signal number (SIGINT, SIGQUIT, SIGHUP, etc.).
 /// `may_flush` controls whether input/output is flushed.
 ///
-/// Targets the controlling process group (`tty_pgrp`, set when the console
-/// is opened with CDEV_CTTY — the shell/session leader), falling back to the
-/// current reader (`tty_incaller`) when no controlling process is set.
-/// PM's process_ksig broadcasts INT/QUIT/WINCH/INFO to the target's process
-/// group, so ^C reaches the whole foreground job, not just the reader. When
-/// the signal can kill the reader, the pending read is released so VFS's
-/// worker is not left suspended on a reply that never comes; `do_read` turns
-/// this into an EINTR completion.
+/// v1 targets `tty_incaller` (the process blocked in CDEV_READ on the
+/// console) — with no job control that IS the foreground job, and the shell
+/// at the prompt. `tty_pgrp` (the CDEV_CTTY session leader) is not used:
+/// without setpgid it is the shell, which ignores SIGINT, so targeting it
+/// swallows every ^C (observed: sigtest hung in its read with the shell
+/// ignoring the signal). PM's process_ksig delivers INT/QUIT/WINCH/INFO to
+/// the reported endpoint only. When the signal can kill the reader, the
+/// pending read is released so VFS's worker is not left suspended on a
+/// reply that never comes; `do_read` turns this into an EINTR completion.
 pub fn sigchar(tp: &mut Tty, sig: u8, may_flush: bool) {
-    let target = if tp.tty_pgrp != 0 {
-        tp.tty_pgrp
-    } else {
-        tp.tty_incaller
-    };
+    let target = tp.tty_incaller;
     if target != NONE {
         #[cfg(not(test))]
         send_kill(target as i32, sig);

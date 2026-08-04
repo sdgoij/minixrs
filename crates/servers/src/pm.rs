@@ -25,6 +25,7 @@ pub const SIGFPE: i32 = 8;
 pub const SIGKILL: i32 = 9;
 pub const SIGBUS: i32 = 10;
 pub const SIGSEGV: i32 = 11;
+pub const SIGTERM: i32 = 15;
 pub const SIGCHLD: i32 = 18;
 pub const SIGSTOP: i32 = 19;
 pub const SIGCONT: i32 = 25;
@@ -75,6 +76,7 @@ pub const TAINTED: u32 = 0x40000;
 /// Error codes.
 pub const ENOSYS: i32 = -71;
 pub const EINVAL: i32 = -22;
+pub const EAGAIN: i32 = -11;
 
 // SigSet — signal set type (sigset_t equivalent)
 
@@ -216,6 +218,8 @@ pub struct MProc {
     pub mp_sigtrace: SigSet,
     // mp_sigact[_NSIG] skipped — Phase 12.3
     pub mp_sigreturn: u64,
+    /// Sigreturn trampoline address (passed at sigaction, m2l3@40).
+    pub mp_sigrestorer: u64,
     pub mp_timer: MinixTimer,
     pub mp_interval: [u64; NR_ITIMERS],
     pub mp_flags: u32,
@@ -257,6 +261,7 @@ impl MProc {
             mp_ksigpending: SigSet::new(),
             mp_sigtrace: SigSet::new(),
             mp_sigreturn: 0,
+            mp_sigrestorer: 0,
             mp_timer: MinixTimer {
                 tmr_next: core::ptr::null_mut(),
                 tmr_exp_time: 0,
@@ -1031,11 +1036,15 @@ pub unsafe fn cleanup(slot: usize) {
 
 /// Wait for a child process to exit.
 ///
+/// `wpid` is the child PID to wait for, or -1 for any child. With `options`
+/// & WNOHANG set, returns `Err(EAGAIN)` when no zombie child exists instead
+/// of blocking (the caller turns a non-WNOHANG miss into a suspended wait).
+///
 /// # Safety
 ///
 /// `parent` must be < `NR_PROCS` and refer to a valid in-use process. The
 /// caller must ensure exclusive access to the process table.
-pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
+pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32, i32), i32> {
     if parent >= NR_PROCS {
         return Err(EINVAL);
     }
@@ -1098,9 +1107,14 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
         }
     }
 
-    // No zombie child found. If WNOHANG was set, return EAGAIN.
-    // For now, always return EINTR since WNOHANG isn't wired.
-    Err(-4) // EINTR — no zombie child found
+    // No zombie child found. If WNOHANG was set, return EAGAIN so the
+    // caller can keep going; otherwise the caller suspends the process and
+    // waits for a child exit (EINTR marks the blocked-wait case).
+    if options & WNOHANG != 0 {
+        Err(EAGAIN)
+    } else {
+        Err(-4) // EINTR — no zombie child found
+    }
 }
 
 // Signal handling
@@ -1113,6 +1127,7 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32) -> Result<(i32, i32), i32> {
 /// function runs.
 pub unsafe fn check_sig(proc_id: i32, pgrp_ref: i32, signo: i32, ksig: bool) -> Result<(), i32> {
     let base = MPROC.as_ptr();
+    let mut sent = 0;
     for i in 0..NR_PROCS {
         // Safety: `i < NR_PROCS` holds by loop bound.
         let rmp = unsafe { &*base.add(i) };
@@ -1141,12 +1156,24 @@ pub unsafe fn check_sig(proc_id: i32, pgrp_ref: i32, signo: i32, ksig: bool) -> 
         if proc_id < -1 && rmp.mp_procgrp != -proc_id {
             continue;
         }
+        // A process matched — kill(2) on an existing process succeeds even
+        // if the disposition drops the signal. C counts matches and returns
+        // OK when count > 0, ESRCH when nothing matched.
+        sent += 1;
         // Send the signal.
         unsafe {
             sig_proc(i, signo, false, ksig);
         }
+        // Specific pid: only one process may be signaled.
+        if proc_id > 0 {
+            break;
+        }
     }
-    Ok(())
+    if sent > 0 {
+        Ok(())
+    } else {
+        Err(-3) // ESRCH
+    }
 }
 
 /// Deliver a signal to a process.
@@ -1223,14 +1250,29 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
         return;
     }
 
-    // Caught: no sigframe delivery in this port yet, so leave the signal
-    // pending rather than terminating the process.
+    // Caught: ask the kernel to run the handler (SIGNALS.md Phase 4).
     if !badignore && rmp.mp_catch.sigismember(signo) {
-        rmp.mp_sigpending.sigaddset(signo);
-        if ksig {
-            rmp.mp_ksigpending.sigaddset(signo);
+        // Can't deliver while the process is in a PM→VFS round-trip; pend
+        // and let restart_sigs deliver when the VFS reply arrives.
+        if rmp.mp_flags & VFS_CALL != 0 {
+            rmp.mp_sigpending.sigaddset(signo);
+            if ksig {
+                rmp.mp_ksigpending.sigaddset(signo);
+            }
+            return;
         }
-        return;
+        // Interrupt a blocked PM call (waitpid/sigsuspend) — matching C's
+        // unpause: the process is stopped and its call released with EINTR.
+        rmp.mp_flags &= !(WAITING | SIGSUSPENDED);
+        rmp.mp_flags |= PROC_STOPPED;
+        if unsafe { sig_send(slot, signo) } {
+            // The kernel set up the handler frame and resumed the process;
+            // clear PM's stop mark (matching C sig_send → try_resume_proc).
+            rmp.mp_flags &= !PROC_STOPPED;
+            return;
+        }
+        // Delivery failed (bad handler address, unwritable stack) — the
+        // process cannot catch the signal; fall through and terminate it.
     }
 
     // Default disposition is to ignore (SIGCHLD, SIGWINCH, SIGCONT, SIGINFO).
@@ -1244,6 +1286,55 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
     // Everything else terminates the process (SIGKILL reaches this point:
     // it can never be ignored, blocked, or caught).
     unsafe { sig_proc_exit(slot, signo) };
+}
+
+/// Ask the kernel to run a caught signal handler for a process.
+///
+/// Builds a 48-byte `struct sigmsg` (signo@0, mask@8, handler@24,
+/// trampoline@32 — matching the C layout) in PM's space and calls
+/// SYS_SIGSEND (kernel call 9). The target must be stopped (PROC_STOPPED);
+/// the kernel captures its registers into a sigframe and resumes it at the
+/// handler.
+///
+/// Returns `true` when the handler was set up; on failure the caller
+/// terminates the process.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to
+/// the process table.
+pub unsafe fn sig_send(slot: usize, signo: i32) -> bool {
+    if slot >= NR_PROCS {
+        return false;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return false;
+    }
+
+    let mut sigmsg = [0u8; arch_common::consts::SIGMSG_SIZE];
+    sigmsg[0..4].copy_from_slice(&(signo as u32).to_ne_bytes());
+    // Mask to restore on sigreturn: the current mask (the handled signal
+    // was added at registration unless SA_NODEFER).
+    let mask_bytes: [u8; 16] = rmp.mp_sigmask.bits[0].to_ne_bytes();
+    sigmsg[8..24].copy_from_slice(&mask_bytes);
+    sigmsg[24..32].copy_from_slice(&rmp.mp_sigreturn.to_ne_bytes());
+    sigmsg[32..40].copy_from_slice(&rmp.mp_sigrestorer.to_ne_bytes());
+
+    // The signal is no longer pending once delivered.
+    let rmp = unsafe { &mut *base.add(slot) };
+    rmp.mp_sigpending.sigdelset(signo);
+    rmp.mp_ksigpending.sigdelset(signo);
+    let endpoint = rmp.mp_endpoint;
+
+    let mut kmsg = [0u8; 64];
+    kmsg[arch_common::consts::SIGCALLS_ENDPT_OFF..arch_common::consts::SIGCALLS_ENDPT_OFF + 4]
+        .copy_from_slice(&endpoint.to_ne_bytes());
+    kmsg[arch_common::consts::SIGCALLS_SIGCTX_OFF..arch_common::consts::SIGCALLS_SIGCTX_OFF + 8]
+        .copy_from_slice(&(sigmsg.as_ptr() as u64).to_ne_bytes());
+    let r = minix_rt::kernel_call(9, &mut kmsg);
+    r == 0
 }
 
 /// Handle do_kill request.
@@ -1288,11 +1379,11 @@ const SIG_BLOCK: i32 = 0;
 const SIG_UNBLOCK: i32 = 1;
 const SIG_SETMASK: i32 = 2;
 const SIG_INQUIRE: i32 = 3;
-const SIG_DFL: u64 = 0;
-const SIG_IGN: u64 = 1;
-const SUSPEND: i32 = -998;
-const SA_NODEFER: i32 = 0x4000000;
-const SA_RESETHAND: i32 = 0x80000000u32 as i32;
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
+pub const SUSPEND: i32 = -998;
+/// WNOHANG for waitpid — return immediately when no child has exited.
+pub const WNOHANG: i32 = 1;
 
 /// Terminate a process due to a signal.
 ///
@@ -1447,15 +1538,13 @@ pub unsafe fn restart_sigs(rmp: &mut MProc) {
 
 /// Apply a parsed sigaction (raw handler, mask, flags) to a process's signal
 /// state. `SIG_IGN` sets `mp_ignore`, `SIG_DFL` clears both, anything else
-/// registers a catch handler (`mp_catch` + `mp_sigreturn`) and installs the
-/// new mask with `signo` added unless `SA_NODEFER` is set.
-fn apply_action(rmp: &mut MProc, signo: i32, handler: u64, mask_bits: u128, flags: i32) {
-    let mut new_mask = SigSet { bits: [mask_bits] };
-    // SA_NODEFER: don't add the signal being handled to the mask.
-    if flags & SA_NODEFER == 0 {
-        new_mask.sigaddset(signo);
-    }
-
+/// registers a catch handler (`mp_catch` + `mp_sigreturn`).
+///
+/// The client's `sa_mask` is NOT applied to `mp_sigmask` at registration:
+/// blocking the handled signal here would make it permanently undeliverable
+/// (delivery-time masking — sa_mask + signo during the handler — is a
+/// follow-up; the mask restores from the sigframe on sigreturn).
+fn apply_action(rmp: &mut MProc, signo: i32, handler: u64, _mask_bits: u128, _flags: i32) {
     rmp.mp_ignore.sigdelset(signo);
     rmp.mp_catch.sigdelset(signo);
 
@@ -1466,12 +1555,6 @@ fn apply_action(rmp: &mut MProc, signo: i32, handler: u64, mask_bits: u128, flag
     } else {
         rmp.mp_catch.sigaddset(signo);
         rmp.mp_sigreturn = handler;
-        rmp.mp_sigmask = new_mask;
-
-        // SA_RESETHAND: reset to SIG_DFL after first delivery.
-        if flags & SA_RESETHAND != 0 {
-            // Would need to track this per-signal; simplified for now.
-        }
     }
 }
 
@@ -1489,6 +1572,9 @@ pub unsafe fn do_sigaction(caller_slot: usize, msg: &mut Message) -> i32 {
     let signo = unsafe { msg.m_payload.m1.m1i1 };
     let nact_ptr = unsafe { msg.m_payload.m2.m2l1 };
     let oact_ptr = unsafe { msg.m_payload.m2.m2l2 };
+    // The sigreturn trampoline address (m2l3@40), passed by the client so
+    // PM can build the sigframe for caught signals (SIGNALS.md 4.4).
+    let restorer = unsafe { msg.m_payload.m2.m2l3 };
 
     // SIGKILL and SIGSTOP cannot have their action changed.
     if signo == 9 || signo == 19 {
@@ -1558,6 +1644,8 @@ pub unsafe fn do_sigaction(caller_slot: usize, msg: &mut Message) -> i32 {
         let flags = i32::from_ne_bytes(sa_buf[24..28].try_into().unwrap());
 
         apply_action(rmp, signo, handler, mask_bits, flags);
+        // The restorer is only meaningful for a caught handler.
+        rmp.mp_sigrestorer = restorer as u64;
     }
 
     OK
@@ -1735,27 +1823,55 @@ pub unsafe fn do_sigsuspend(caller_slot: usize, msg: &mut Message) -> i32 {
     SUSPEND
 }
 
-/// Handle PM_SIGRETURN — restore signal mask and kernel context.
+/// Handle PM_SIGRETURN — restore the signal mask and CPU context after a
+/// caught handler (SIGNALS.md Phase 4).
+///
+/// Message layout: m2l1 = pointer to the sigframe on the caller's stack.
+/// PM restores `mp_sigmask` from the frame, then calls SYS_SIGRETURN so the
+/// kernel restores the interrupted register state.
 ///
 /// # Safety
 ///
 /// `caller_slot` must be a valid, in-use process slot.
-pub unsafe fn do_sigreturn(caller_slot: usize, _msg: &mut Message) -> i32 {
+pub unsafe fn do_sigreturn(caller_slot: usize, msg: &mut Message) -> i32 {
     if caller_slot >= NR_PROCS {
         return EINVAL;
     }
     let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
     let rmp = unsafe { &mut *base.add(caller_slot) };
 
-    // Restore signal mask from sigmask2.
-    rmp.mp_sigmask = rmp.mp_sigmask2;
+    // The trampoline passes the sigframe address in m2l1.
+    let scp = unsafe { msg.m_payload.m2.m2l1 } as u64;
+    if scp == 0 {
+        return EINVAL;
+    }
+
+    // Restore the signal mask from the frame (mask@SIGFRAME_MASK_OFF).
+    let mut mask_buf = [0u8; 16];
+    let copy_r = minix_rt::sys_vircopy(
+        caller_ep,
+        scp + arch_common::consts::sigframe::MASK_OFF as u64,
+        minix_rt::SELF,
+        mask_buf.as_mut_ptr() as u64,
+        16,
+    );
+    if copy_r != 0 {
+        return copy_r;
+    }
+    rmp.mp_sigmask = SigSet {
+        bits: [u128::from_ne_bytes(mask_buf)],
+    };
     rmp.mp_sigmask2 = SigSet::new();
 
-    // Tell the kernel to restore CPU context (SYS_SIGRETURN = kernel call 10).
+    // Tell the kernel to restore the CPU context from the frame
+    // (SYS_SIGRETURN = kernel call 10, m_sigcalls: endpt@16, sigctx@24).
     let endpoint = rmp.mp_endpoint;
     let mut kmsg = [0u8; 64];
-    // SYS_SIGRETURN reads the endpoint from SIGCALLS_ENDPT_OFF = 16.
-    kmsg[16..20].copy_from_slice(&endpoint.to_le_bytes());
+    kmsg[arch_common::consts::SIGCALLS_ENDPT_OFF..arch_common::consts::SIGCALLS_ENDPT_OFF + 4]
+        .copy_from_slice(&endpoint.to_le_bytes());
+    kmsg[arch_common::consts::SIGCALLS_SIGCTX_OFF..arch_common::consts::SIGCALLS_SIGCTX_OFF + 8]
+        .copy_from_slice(&scp.to_le_bytes());
     let _ = minix_rt::kernel_call(10, &mut kmsg);
 
     // Deliver any pending signals that are now unmasked.
@@ -1783,23 +1899,17 @@ pub unsafe fn process_ksig(proc_nr_e: i32, signo: i32) -> i32 {
 
     match signo {
         2 | 3 | 28 | 29 => {
-            // SIGINT, SIGQUIT, SIGWINCH, SIGINFO: broadcast to the signaled
-            // process's GROUP, not systemwide (C process_ksig: check_sig(0,
-            // ...) with mp->mp_procgrp = rmp->mp_procgrp). A systemwide
-            // broadcast would hit every user process; the group is what the
-            // foreground ^C (tty sigchar -> SYS_KILL(tty_pgrp)) must reach.
-            let group = match unsafe { pm_isokendpt(proc_nr_e) } {
-                Some(slot) => unsafe { (*MPROC.as_ptr().add(slot)).mp_procgrp },
-                None => 0,
-            };
-            let _ = unsafe { check_sig(0, group, signo, true) };
-            // Count signaled processes by iterating.
-            let base = MPROC.as_ptr();
-            for i in 0..NR_PROCS {
-                let rmp = unsafe { &*base.add(i) };
-                if rmp.mp_flags & IN_USE != 0 && rmp.mp_sigpending.sigismember(signo) {
-                    count += 1;
-                }
+            // SIGINT, SIGQUIT, SIGWINCH, SIGINFO: the tty's sigchar already
+            // targeted the specific reader (SYS_KILL(tty_incaller)), so
+            // deliver to that process only. A group broadcast would also
+            // hit the shell (no setpgid yet — the child inherits the
+            // parent's pgrp), and delivering into the shell's waitpid
+            // clears its SENDING/RECEIVING via do_sigsend without
+            // completing the syscall, freezing it (observed: sigtest ^C
+            // froze the shell mid-waitpid with an empty run queue).
+            if let Some(slot) = unsafe { pm_isokendpt(proc_nr_e) } {
+                unsafe { sig_proc(slot, signo, false, true) };
+                count = 1;
             }
         }
         14 => {
@@ -2112,40 +2222,12 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
         )
     };
 
-    // Check if the parent is waiting for this child (via waitpid).
-    // The notification path (SYS_GETKSIG loop) can't handle this because
-    // PM_EXIT is a regular IPC message, not a kernel notification.
-    // Handle it here directly — matching C's check_parent().
-    let base = MPROC.as_ptr();
-    let child = unsafe { &*base.add(caller_slot) };
-    let pid = child.mp_pid;
-    let parent_slot = child.mp_parent;
-    if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
-        let parent_rmp = unsafe { &*base.add(parent_slot as usize) };
-        if parent_rmp.mp_flags & IN_USE != 0 {
-            let wp = parent_rmp.mp_wpid;
-            if wp == -1 || wp == pid {
-                let mut reply_msg = Message {
-                    m_source: 0,
-                    m_type: OK,
-                    m_payload: unsafe { core::mem::zeroed() },
-                };
-                reply_msg.m_payload.m1.m1i1 = pid;
-                reply_msg.m_payload.m1.m1i2 = status & 0xFF;
-                unsafe {
-                    minix_rt::syscall2(
-                        minix_rt::SENDNB_CALL,
-                        parent_rmp.mp_endpoint as u64,
-                        &mut reply_msg as *mut Message as u64,
-                    );
-                }
-                let parent_ptr = unsafe { base.add(parent_slot as usize) };
-                unsafe {
-                    (*parent_ptr).mp_wpid = 0;
-                }
-            }
-        }
-    }
+    // The waiting parent is replied to inside exit_proc (zombify →
+    // check_parent → tell_parent). A second reply here races with the
+    // parent's next SENDREC: the kernel can deliver it into the parent's
+    // stale receive buffer (REPLY_PEND set, p_getfrom_e stale), corrupting
+    // the parent's stack (observed: shell jumped to garbage after the
+    // second sigtest run). Matching C, exit_proc is the single reply path.
 
     // Matching C exit_proc / exit_restart: clean up kernel Proc entry
     // via SYS_CLEAR (kernel call 2). Without this, the kernel still
@@ -2172,7 +2254,20 @@ pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
     unsafe {
         // Message is 56 bytes, but kernel expects 64. Use a proper
         // 64-byte buffer to avoid stack corruption from the size mismatch.
-        let mut buf = [0u8; 64];
+        #[cfg(target_arch = "riscv64")]
+        let buf: &mut [u8; 64] = {
+            // On RISC-V a stack-local buffer here is clobbered between the
+            // kernel_call return and the copy-back: SYS_GETKSIG's reply
+            // decoded as zero (PM never saw the pending-signal map), so
+            // caught signals were silently dropped. A static buffer is out
+            // of the clobbered stack region. x86/aarch64 keep the stack
+            // local (x86's reply handling depends on it; a static buffer
+            // there broke GETKSIG decode too).
+            static mut BUF: [u8; 64] = [0u8; 64];
+            &mut *core::ptr::addr_of_mut!(BUF)
+        };
+        #[cfg(not(target_arch = "riscv64"))]
+        let buf: &mut [u8; 64] = &mut [0u8; 64];
         let msg_size = core::mem::size_of::<Message>();
         // Copy Message into 64-byte buffer (first msg_size bytes).
         core::ptr::copy_nonoverlapping(
@@ -2180,7 +2275,7 @@ pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
             buf.as_mut_ptr(),
             msg_size,
         );
-        let result = minix_rt::kernel_call(call_nr, &mut buf);
+        let result = minix_rt::kernel_call(call_nr, buf);
         // Copy back the first msg_size bytes (avoids reading garbage
         // from bytes 56-63 that the kernel may have overwritten).
         core::ptr::copy_nonoverlapping(buf.as_ptr(), msg as *mut Message as *mut u8, msg_size);
@@ -2332,7 +2427,8 @@ pub unsafe fn handle_fork(caller_slot: usize, _msg: &mut Message) -> i32 {
 #[allow(unused_unsafe)]
 pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
     let wpid = unsafe { msg.m_payload.m1.m1i1 };
-    match unsafe { do_waitpid(caller_slot, wpid) } {
+    let options = unsafe { msg.m_payload.m1.m1i2 };
+    match unsafe { do_waitpid(caller_slot, wpid, options) } {
         Ok((pid, status)) => {
             unsafe {
                 msg.m_payload.m1.m1i1 = pid;
@@ -2340,6 +2436,7 @@ pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
             }
             OK
         }
+        Err(EAGAIN) => EAGAIN,
         Err(_) => {
             // No zombie child found. Store the waitpid request and block.
             // Set mp_wpid so do_exit can find us when a child exits.
@@ -2687,48 +2784,15 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
             let exit_status = unsafe { kmsg.m_payload.m1.m1i5 };
             // Find the MProc slot for this endpoint.
             if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
-                let pid = unsafe {
-                    let base = MPROC.as_ptr();
-                    (*base.add(slot)).mp_pid
-                };
                 unsafe { exit_proc(slot, exit_status, false) };
 
                 // Check if any parent is waiting for this child (waitpid).
                 // The parent set mp_wpid in handle_waitpid when returning
-                // EDONTREPLY. If the parent is waiting for this child,
-                // send the waitpid reply now.
-                let parent_slot = unsafe {
-                    let base = MPROC.as_ptr();
-                    (*base.add(slot)).mp_parent
-                };
-                if parent_slot >= 0 && (parent_slot as usize) < NR_PROCS {
-                    unsafe {
-                        let base = MPROC.as_ptr();
-                        let parent_rmp = &*base.add(parent_slot as usize);
-                        if parent_rmp.mp_flags & IN_USE != 0 {
-                            let wp = parent_rmp.mp_wpid;
-                            if wp == -1 || wp == pid {
-                                // Parent is waiting for this child.
-                                // Send the waitpid reply via SENDREC.
-                                let mut reply_msg = Message {
-                                    m_source: 0,
-                                    m_type: OK,
-                                    m_payload: core::mem::zeroed(),
-                                };
-                                reply_msg.m_payload.m1.m1i1 = pid;
-                                reply_msg.m_payload.m1.m1i2 = (exit_status & 0xFF) as i32;
-                                minix_rt::syscall2(
-                                    minix_rt::SENDNB_CALL,
-                                    parent_rmp.mp_endpoint as u64,
-                                    &mut reply_msg as *mut Message as u64,
-                                );
-                                // Clear the waitpid request.
-                                let parent_ptr = base.add(parent_slot as usize);
-                                (*parent_ptr).mp_wpid = 0;
-                            }
-                        }
-                    }
-                }
+                // EDONTREPLY. The waiting parent is replied to inside
+                // exit_proc (zombify → check_parent → tell_parent), the
+                // single reply path — a second reply here would race with
+                // the parent's next SENDREC and corrupt its stale receive
+                // buffer (see handle_exit).
             }
         }
         return unsafe { no_sys(caller_slot, msg) };
@@ -2815,12 +2879,17 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
     //   endpoint = slot | 0x8000  (for gen-1 user processes)
     let proc_e = (proc_n as i32) | 0x8000;
 
-    let rmp = unsafe { &*base.add(proc_n) };
+    let _rmp = unsafe { &*base.add(proc_n) };
 
-    // Clear VFS_CALL flag (matching C: rmp->mp_flags &= ~VFS_CALL)
-    // Use raw pointer to modify the actual mproc entry
+    // Clear VFS_CALL and re-deliver any signals that pended while the
+    // process was in a PM→VFS round-trip (matching C: check_pending on the
+    // VFS reply). Without the re-delivery, a caught signal that arrived
+    // during the fork's VFS window was pended by sig_proc's VFS_CALL guard
+    // and never delivered — the child stayed blocked forever (RISC-V ^C
+    // on a freshly-forked sigtest hung: K/G/E fired but sigsend never ran).
     let rmp_mut = unsafe { &mut *base.add(proc_n) };
-    rmp_mut.mp_flags &= !VFS_CALL;
+    unsafe { restart_sigs(rmp_mut) };
+    let rmp = unsafe { &*base.add(proc_n) };
 
     match call_nr as u32 {
         arch_common::com::VFS_PM_FORK_REPLY => {
@@ -3498,6 +3567,9 @@ const _: () = {
 mod tests {
     use super::*;
 
+    // A pid that no test process table entry can ever hold (pids are 1..NR_PROCS).
+    const UNMATCHED_PID: i32 = 99999;
+
     #[test]
     fn test_sigset_new_is_empty() {
         let set = SigSet::new();
@@ -3690,20 +3762,15 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_action_catch_registers_handler_and_mask() {
+    fn test_apply_action_catch_registers_handler_no_mask() {
         let mut mp = MProc::zeroed();
         apply_action(&mut mp, SIGINT, 0x1000_2000, 0, 0);
         assert!(mp.mp_catch.sigismember(SIGINT));
         assert_eq!(mp.mp_sigreturn, 0x1000_2000);
-        assert!(mp.mp_sigmask.sigismember(SIGINT), "signo auto-masked");
-    }
-
-    #[test]
-    fn test_apply_action_nod_efer_keeps_signo_out_of_mask() {
-        let mut mp = MProc::zeroed();
-        apply_action(&mut mp, SIGINT, 0x1000_2000, 0, SA_NODEFER);
-        assert!(mp.mp_catch.sigismember(SIGINT));
-        assert!(!mp.mp_sigmask.sigismember(SIGINT));
+        // Registration must NOT block the handled signal — blocking it here
+        // would make it permanently undeliverable (the mask is applied at
+        // delivery and restored from the sigframe on sigreturn).
+        assert!(!mp.mp_sigmask.sigismember(SIGINT), "signo not auto-masked");
     }
 
     #[test]
@@ -3792,7 +3859,12 @@ mod tests {
     }
 
     #[test]
-    fn test_process_ksig_sigint_broadcast() {
+    fn test_process_ksig_sigint_direct_target() {
+        // v1: sigchar targets tty_incaller (the reader) and process_ksig
+        // delivers INT/QUIT/WINCH/INFO to the reported endpoint only. A
+        // group broadcast would also hit the shell (no setpgid yet), and
+        // delivering into the shell's waitpid without completing the syscall
+        // froze it (observed: sigtest ^C stranded the shell mid-waitpid).
         init_proc();
         test_sig_slot(12, 42, 100);
         test_sig_slot(13, 43, 101);
@@ -3803,7 +3875,10 @@ mod tests {
             (*base.add(13)).mp_sigmask.sigaddset(SIGINT);
             let count = process_ksig(42, SIGINT);
             assert!(!(*base.add(12)).mp_sigpending.sigismember(SIGINT));
-            assert!((*base.add(13)).mp_sigpending.sigismember(SIGINT));
+            assert!(
+                !(*base.add(13)).mp_sigpending.sigismember(SIGINT),
+                "other endpoint must not be signaled"
+            );
             assert_eq!(count, 1);
         }
     }
@@ -3832,7 +3907,10 @@ mod tests {
     }
 
     #[test]
-    fn test_process_ksig_sigint_broadcasts_to_target_group() {
+    fn test_process_ksig_sigint_does_not_broadcast_to_group() {
+        // With no job control, the reported endpoint is the only target — a
+        // pgrp broadcast has no meaning yet (all processes share the shell's
+        // group). See test_process_ksig_sigint_direct_target.
         init_proc();
         test_sig_slot(12, 42, 100);
         test_sig_slot(13, 43, 101);
@@ -3842,7 +3920,7 @@ mod tests {
             (*base.add(13)).mp_procgrp = 9;
             (*base.add(12)).mp_sigmask.sigaddset(SIGINT);
             (*base.add(13)).mp_sigmask.sigaddset(SIGINT);
-            // Signal the pgrp-5 process: the broadcast must stay in group 5.
+            // Signal the pgrp-5 process: only the reported endpoint moves.
             let count = process_ksig(42, SIGINT);
             assert!((*base.add(12)).mp_sigpending.sigismember(SIGINT));
             assert!(!(*base.add(13)).mp_sigpending.sigismember(SIGINT));
@@ -4110,8 +4188,66 @@ mod tests {
             let base = MPROC.as_ptr();
             (*base.add(parent)).mp_flags |= IN_USE;
         }
-        let r = unsafe { do_waitpid(parent, -1) };
+        let r = unsafe { do_waitpid(parent, -1, 0) };
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_do_waitpid_wnohang_no_children() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+        }
+        // No zombie + WNOHANG → EAGAIN (non-blocking miss).
+        let r = unsafe { do_waitpid(parent, -1, WNOHANG) };
+        assert_eq!(r, Err(EAGAIN));
+    }
+
+    #[test]
+    fn test_do_waitpid_wnohang_with_zombie() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            (*base.add(child)).mp_flags |= IN_USE | ZOMBIE;
+            (*base.add(child)).mp_pid = 2;
+            (*base.add(child)).mp_parent = parent as i32;
+            (*base.add(child)).mp_exitstatus = 9;
+        }
+        // Zombie present → reaped even with WNOHANG.
+        let r = unsafe { do_waitpid(parent, -1, WNOHANG) };
+        assert_eq!(r, Ok((2, 9)));
+    }
+
+    #[test]
+    fn test_handle_waitpid_wnohang_returns_eagain() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            // wpid = -1, options = WNOHANG (m1i2).
+            msg.m_payload.m1.m1i1 = -1;
+            msg.m_payload.m1.m1i2 = WNOHANG;
+        }
+        let result = unsafe { handle_waitpid(parent, &mut msg) };
+        assert_eq!(result, EAGAIN);
+        // The caller must not be marked WAITING on a WNOHANG miss.
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(parent)).mp_flags & WAITING, 0);
+        }
     }
 
     #[test]
@@ -4128,12 +4264,43 @@ mod tests {
             (*base.add(child)).mp_parent = parent as i32;
             (*base.add(child)).mp_exitstatus = 7;
         }
-        let r = unsafe { do_waitpid(parent, -1) };
+        let r = unsafe { do_waitpid(parent, -1, 0) };
         assert_eq!(r, Ok((2, 7)));
         // Child slot should be freed
         unsafe {
             let base = MPROC.as_ptr();
             assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
         }
+    }
+
+    #[test]
+    fn test_check_sig_unknown_pid_returns_esrch() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(caller)).mp_flags |= IN_USE;
+            (*base.add(caller)).mp_pid = 1;
+        }
+        // No process has this pid → kill(2) must return ESRCH.
+        let r = unsafe { check_sig(UNMATCHED_PID, 0, SIGTERM, false) };
+        assert_eq!(r, Err(-3)); // ESRCH
+    }
+
+    #[test]
+    fn test_check_sig_matching_pid_returns_ok() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let target = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(caller)).mp_flags |= IN_USE;
+            (*base.add(caller)).mp_pid = 1;
+            (*base.add(target)).mp_flags |= IN_USE;
+            (*base.add(target)).mp_pid = 2;
+        }
+        // SIGKILL to an existing process returns OK.
+        let r = unsafe { check_sig(2, 0, SIGKILL, false) };
+        assert_eq!(r, Ok(()));
     }
 }

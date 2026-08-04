@@ -213,11 +213,15 @@ unsafe fn freeblock(bp: *mut Buf) {
     // Mark clean (NO_DEV blocks may be marked dirty).
     unsafe { (*bp).lmfs_flags &= !VMMC_DIRTY };
 
+    // Keep the data allocation with the buffer: the buffer pool is
+    // fixed-size and lmfs_alloc_block reuses it on the next cache miss.
+    // The bump allocator cannot free, so dropping data_ptr here leaked one
+    // block per recycle (MFS heap exhausted after a couple of execs:
+    // "libminixfs: could not allocate block" on the second sigtest run).
+    // Fresh pool buffers (never allocated) still have lmfs_bytes == 0.
     if unsafe { (*bp).lmfs_bytes > 0 } {
         debug_assert!(!unsafe { (*bp).data_ptr.is_null() });
-        // TODO: actually free the mapped memory when allocator is available.
-        unsafe { (*bp).lmfs_bytes = 0 };
-        unsafe { (*bp).data_ptr = ptr::null_mut() };
+        debug_assert!(unsafe { (*bp).lmfs_bytes == static_read!(fs_block_size) });
     } else {
         debug_assert!(unsafe { (*bp).data_ptr.is_null() });
     }
@@ -321,10 +325,17 @@ unsafe fn cache_resize(blocksize: u32, bufs: usize) {
 /// `bp` must point to a valid `Buf` (typically freshly taken from the free
 /// list) with no existing data allocation.
 pub unsafe fn lmfs_alloc_block(bp: *mut Buf) {
+    let block_size = static_read!(fs_block_size);
+
+    // Reuse the block's retained data allocation when recycling (freeblock
+    // keeps it; the pool is fixed-size). Fresh buffers (from lmfs_buf_pool)
+    // still allocate here.
+    if !unsafe { (*bp).data_ptr.is_null() } && unsafe { (*bp).lmfs_bytes == block_size } {
+        unsafe { (*bp).lmfs_needsetcache = 1 };
+        return;
+    }
     debug_assert!(unsafe { (*bp).data_ptr.is_null() });
     debug_assert!(unsafe { (*bp).lmfs_bytes == 0 });
-
-    let block_size = static_read!(fs_block_size);
 
     let layout = alloc::alloc::Layout::from_size_align(block_size as usize, PAGE_SIZE as usize)
         .expect("bad block size alignment");
@@ -487,8 +498,6 @@ pub unsafe fn lmfs_get_block_ino(
     unsafe { ptr::write(buf_hash.add(b), bp) };
 
     debug_assert!(dev != NO_DEV);
-    debug_assert!(unsafe { (*bp).data_ptr.is_null() });
-    debug_assert!(unsafe { (*bp).lmfs_bytes == 0 });
 
     // Try VM secondary cache first.
     if static_read!(vmcache) != 0 {

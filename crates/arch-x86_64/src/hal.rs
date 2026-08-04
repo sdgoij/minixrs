@@ -465,6 +465,99 @@ pub unsafe fn copy_frame(dst: &mut [u8; 256], src: &[u8; 256]) {
     }
 }
 
+// Signal-delivery sigframe (SIGNALS.md Phase 4).
+//
+// x86_64 layout (296 bytes, arch_common::consts::sigframe):
+//   [0..8)     trampoline (the handler's return address — `ret` pops it)
+//   [8..264)   saved p_reg (the full 256-byte register file)
+//   [264..280) signal mask to restore on sigreturn
+//   [280..284) signal number
+//   [288..296) SC_MAGIC
+// The frame address is the scp; after the handler's `ret`, RSP = scp + 8,
+// so the trampoline computes scp = RSP - 8.
+
+/// Size of the signal frame on the target's stack.
+pub const fn sigframe_size() -> usize {
+    arch_common::consts::sigframe::SIZE
+}
+
+/// Compute the frame address below a saved stack pointer.
+///
+/// x86_64 SysV requires RSP ≡ 8 (mod 16) at function entry (the handler
+/// runs as if called with its return address on the stack), so the frame
+/// base sits 8 bytes below the 16-aligned slot.
+pub const fn sigframe_addr(old_sp: u64) -> u64 {
+    ((old_sp - arch_common::consts::sigframe::SIZE as u64) & !0xF) + 8
+}
+
+/// Read the user stack pointer from a saved frame (rsp@168).
+///
+/// # Safety
+///
+/// `frame` must contain valid saved register state.
+pub unsafe fn read_frame_sp(frame: &[u8; 256]) -> u64 {
+    unsafe { read_frame_field(frame, 168) }
+}
+
+/// Build a signal frame in `dst` from the saved registers.
+///
+/// x86_64 stores the trampoline at `[0..8)` — the slot the handler's `ret`
+/// pops as its return address; `frame_addr` is unused (the trampoline
+/// derives the frame base as RSP - 8 after the handler returns).
+///
+/// # Safety
+///
+/// `dst` must be `sigframe_size()` bytes; `saved` must be valid register
+/// state; `mask` must be 16 bytes.
+pub unsafe fn build_sigframe(
+    dst: &mut [u8],
+    saved: &[u8; 256],
+    signo: u32,
+    mask: &[u8; 16],
+    trampoline: u64,
+    _frame_addr: u64,
+) {
+    use arch_common::consts::sigframe as sf;
+    dst[0..8].copy_from_slice(&trampoline.to_ne_bytes());
+    dst[sf::REGS_OFF..sf::REGS_OFF + 256].copy_from_slice(saved);
+    dst[sf::MASK_OFF..sf::MASK_OFF + 16].copy_from_slice(mask);
+    dst[sf::SIGNAL_OFF..sf::SIGNAL_OFF + 4].copy_from_slice(&signo.to_ne_bytes());
+    dst[sf::MAGIC_OFF..sf::MAGIC_OFF + 8]
+        .copy_from_slice(&arch_common::consts::SC_MAGIC.to_ne_bytes());
+}
+
+/// Point a saved frame at the signal handler: RIP = handler, RSP = frame,
+/// RDI = signo (SysV arg 0), RSI = scp (for the trampoline). The trampoline
+/// address is already stored at the frame base by `build_sigframe`.
+///
+/// # Safety
+///
+/// `p_reg` must point to valid saved register state.
+pub unsafe fn sigframe_set_entry(
+    p_reg: &mut [u8; 256],
+    handler: u64,
+    frame: u64,
+    signo: u32,
+    _trampoline: u64,
+) {
+    unsafe {
+        write_frame_field(p_reg, 160, handler); // rip
+        write_frame_field(p_reg, 168, frame); // rsp
+        write_frame_field(p_reg, 40, signo as u64); // rdi = signo
+        write_frame_field(p_reg, 32, frame); // rsi = scp
+    }
+}
+
+/// Restore a saved frame's registers from a signal frame on sigreturn.
+///
+/// # Safety
+///
+/// `frame` must be a valid signal frame (`sigframe_size()` bytes).
+pub unsafe fn sigframe_restore(p_reg: &mut [u8; 256], frame: &[u8]) {
+    use arch_common::consts::sigframe as sf;
+    p_reg.copy_from_slice(&frame[sf::REGS_OFF..sf::REGS_OFF + 256]);
+}
+
 /// Zero-initialize a TrapFrame.
 pub fn frame_default() -> [u8; 256] {
     [0u8; 256]

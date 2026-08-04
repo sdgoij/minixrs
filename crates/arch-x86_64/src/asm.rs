@@ -655,9 +655,12 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
     );
 }
 
-/// #UD (invalid opcode) handler — prints 'U' and halts. Without an entry,
-/// init_idt leaves vector 6 at offset 0, so an unhandled #UD vectors to
-/// address 0 (the IVT) and executes garbage.
+/// #UD (invalid opcode) handler — prints 'U', then spins with interrupts
+/// enabled. A userland `ud2` (Rust panic/reachability) must not brick the
+/// whole OS with `cli; hlt` — the timer keeps firing, the scheduler keeps
+/// running the other servers, and the faulting process is simply left stuck
+/// in this handler (observed: sigtest-exit race panicked the shell, whose
+/// #UD previously froze the CPU with interrupts off, hanging every arch).
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
@@ -673,13 +676,14 @@ pub unsafe extern "C" fn exception_ud_entry() {
         "out    dx, al",
         "mov    al, 0x0A",
         "out    dx, al",
-        "cli",
+        "1:",
+        "sti",
         "hlt",
+        "jmp    1b",
     );
 }
 
-/// #DB (debug exception) handler — prints 'B' and halts. Without an entry,
-/// init_idt leaves vector 1 at offset 0 (see #UD comment).
+/// #DB (debug exception) handler — prints 'B' and spins (see #UD comment).
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "none")]
@@ -695,8 +699,10 @@ pub unsafe extern "C" fn exception_db_entry() {
         "out    dx, al",
         "mov    al, 0x0A",
         "out    dx, al",
-        "cli",
+        "1:",
+        "sti",
         "hlt",
+        "jmp    1b",
     );
 }
 
@@ -719,9 +725,12 @@ pub unsafe extern "C" fn exception_gpf_entry() {
         "mov    rdi, rbx",
         "mov    rsi, rsp",
         "call   rust_gpf_handler",
-        // Halt
-        "cli",
+        // Spin with interrupts enabled (see #UD comment) — a userland #GP
+        // (e.g. hlt at CPL3) must not freeze the CPU.
+        "1:",
+        "sti",
         "hlt",
+        "jmp    1b",
     );
 }
 

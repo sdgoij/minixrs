@@ -89,6 +89,16 @@ path = "src/bin/fsck.rs"
 test = false
 
 [[bin]]
+name = "kill"
+path = "src/bin/kill.rs"
+test = false
+
+[[bin]]
+name = "sigtest"
+path = "src/bin/sigtest.rs"
+test = false
+
+[[bin]]
 name = "sh"
 path = "src/bin/sh.rs"
 test = false

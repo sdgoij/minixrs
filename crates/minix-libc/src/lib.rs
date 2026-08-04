@@ -158,7 +158,44 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
     match minix_std::time::sigprocmask(how, set) {
-        Ok(_old) => 0,
+        Ok(()) => 0,
+        Err(e) => -(e.0),
+    }
+}
+
+/// POSIX `signal()`: set the disposition of `signum` to `handler`
+/// (SIG_DFL=0, SIG_IGN=1, or a handler address).
+///
+/// Returns the previous disposition on success (not fetched — the
+/// registration path only sets), or SIG_ERR (all-ones) on error.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn signal(signum: c_int, handler: u64) -> u64 {
+    match minix_std::time::signal(signum, handler) {
+        Ok(()) => 0,  // SIG_DFL
+        Err(_) => !0, // SIG_ERR
+    }
+}
+
+/// POSIX `sigaction()`: set a signal action from a C `struct sigaction`
+/// (handler u64@0, mask 16 bytes@8, flags i32@24 — 28 bytes).
+///
+/// `oldact` is accepted but not filled (the old action is not fetched).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaction(
+    signum: c_int,
+    act: *const c_void,
+    _oldact: *mut c_void,
+) -> c_int {
+    if act.is_null() {
+        return 0; // query-only; oldact not fetched
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(act as *const u8, 28) };
+    let act_arr: [u8; 28] = bytes.try_into().unwrap();
+    let (handler, mask, flags) = minix_std::time::decode_action(&act_arr);
+    match minix_std::time::sigaction(signum, handler, mask, flags) {
+        Ok(()) => 0,
         Err(e) => -(e.0),
     }
 }

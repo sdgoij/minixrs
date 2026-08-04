@@ -129,19 +129,31 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                     if e1 & PG_P == 0 || e1 & PG_U == 0 {
                         continue;
                     }
-                    // Only pages that were writable and are now RO (COW) need PhysBlocks.
-                    if e1 & PG_RW != 0 {
-                        continue;
-                    }
                     let phys = pte_to_phys(e1);
                     if phys == 0 {
                         continue;
                     }
 
-                    // Verify child also has this page mapped (non-RW).
+                    // Verify the child also maps this page.
                     let child_e1 = unsafe { core::ptr::read(child_p1.add(l1)) };
                     if child_e1 & PG_P == 0 {
                         continue;
+                    }
+
+                    // The CHILD's PTE is the COW marker: vm_paging_fork
+                    // cleared RW on the child's writable user PTEs (the
+                    // parent's stay RW). Gate on the child's RW bit — the
+                    // old check gated on the PARENT's RW bit, which is
+                    // never cleared by vm_paging_fork, so every shared
+                    // frame was skipped and got no PhysBlock. free_user_frame
+                    // then treats a missing PhysBlock as "not shared" and
+                    // frees the frame when the child exits — freeing the
+                    // parent's still-in-use text page (observed: the shell's
+                    // text page was freed and reallocated as a page-table
+                    // page on the second sigtest run, so the shell executed
+                    // page-table entries and #UD'd).
+                    if child_e1 & PG_RW != 0 {
+                        continue; // child not COW-protected — no sharing to track
                     }
 
                     // Set up PhysBlock with refcount=2

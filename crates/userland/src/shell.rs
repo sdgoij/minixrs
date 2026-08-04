@@ -11,6 +11,8 @@ use crate::{
     cat, chmod, chown, cp, echo, errstr, fsck, ln, ls, mkdir, mknod, reboot, rm, set_redirect_fd,
     sync,
 };
+#[cfg(target_os = "none")]
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 /// Sentinel for `exit` — must not overlap any valid exit status.
 #[allow(dead_code)]
@@ -70,12 +72,15 @@ pub fn sh(_args: &[&str]) -> i32 {
         if minix_std::time::sig_ignore(minix_std::time::SIGINT).is_err() {
             write_err(b"sh: warning: cannot ignore SIGINT\n");
         }
-        write_out(b"# ");
         let mut buf = [0u8; 256];
         loop {
+            // Reap finished background jobs before each prompt so `[pid]
+            // done` / `[pid] terminated (signal N)` reports appear in
+            // order. SIGNALS.md 3.4 — prompt-time reaping is the pattern.
+            reap_jobs();
+            write_out(b"# ");
             let line_len = read_line(&mut buf);
             if line_len == 0 {
-                write_out(b"# ");
                 continue;
             }
 
@@ -92,39 +97,179 @@ pub fn sh(_args: &[&str]) -> i32 {
             }
 
             if raw_argc == 0 {
-                write_out(b"# ");
                 continue;
             }
 
-            // Split on `&&` and run each sub-command (possibly a `|`
-            // pipeline) in sequence.
-            let mut cmd_start = 0usize;
-            let mut last_status = 0i32;
-            for i in 0..raw_argc {
-                if raw_tokens[i] == "&&" {
-                    if i > cmd_start {
-                        last_status = run_segment(&raw_tokens[cmd_start..i]);
-                        if last_status == SH_EXIT {
-                            return 0;
-                        }
-                        if last_status != 0 {
-                            break;
-                        }
-                    }
-                    cmd_start = i + 1;
+            // Background job: a trailing `&` runs the command chain in a
+            // forked child without waiting; the pid is recorded for
+            // prompt-time reaping.
+            let mut background = false;
+            if raw_tokens[raw_argc - 1] == "&" {
+                background = true;
+                raw_argc -= 1;
+                if raw_argc == 0 {
+                    continue;
                 }
             }
 
-            // Run the final (or only) sub-command.
-            if last_status == 0 && cmd_start < raw_argc {
-                last_status = run_segment(&raw_tokens[cmd_start..raw_argc]);
+            if background {
+                run_background(&raw_tokens[..raw_argc]);
+                continue;
+            }
+
+            // Run the command chain (`&&` splitting) in the foreground.
+            let status = run_chain(&raw_tokens, raw_argc);
+            if status == SH_EXIT {
+                return 0;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command chaining and background jobs
+// ---------------------------------------------------------------------------
+
+/// Run a token slice, splitting on `&&`. Each sub-command may be a `|`
+/// pipeline. Returns the last status, or `SH_EXIT` for `exit`.
+#[cfg(target_os = "none")]
+fn run_chain(raw_tokens: &[&str; 32], raw_argc: usize) -> i32 {
+    let mut cmd_start = 0usize;
+    let mut last_status = 0i32;
+    for i in 0..raw_argc {
+        if raw_tokens[i] == "&&" {
+            if i > cmd_start {
+                last_status = run_segment(&raw_tokens[cmd_start..i]);
                 if last_status == SH_EXIT {
-                    return 0;
+                    return SH_EXIT;
+                }
+                if last_status != 0 {
+                    return last_status;
                 }
             }
+            cmd_start = i + 1;
+        }
+    }
+    if last_status == 0 && cmd_start < raw_argc {
+        last_status = run_segment(&raw_tokens[cmd_start..raw_argc]);
+    }
+    last_status
+}
 
-            // Print the next prompt.
-            write_out(b"# ");
+/// Background job pids — a fixed table the shell reaps at each prompt.
+/// The child (post-fork) copy is inert: it runs one command and exits.
+#[cfg(target_os = "none")]
+const MAX_JOBS: usize = 16;
+#[cfg(target_os = "none")]
+static JOB_PIDS: [AtomicI32; MAX_JOBS] = [const { AtomicI32::new(0) }; MAX_JOBS];
+#[cfg(target_os = "none")]
+static JOB_NEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// Record a background job's pid.
+#[cfg(target_os = "none")]
+fn add_job(pid: i32) {
+    let idx = JOB_NEXT.fetch_add(1, Ordering::Relaxed) % MAX_JOBS;
+    JOB_PIDS[idx].store(pid, Ordering::Relaxed);
+}
+
+/// Write an unsigned decimal to stdout.
+#[cfg(target_os = "none")]
+fn write_dec(mut n: u32) {
+    let mut buf = [0u8; 12];
+    let mut i = 12;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    write_out(&buf[i..]);
+}
+
+/// Run a command chain in the background: fork, record the pid, return
+/// immediately. The child runs the chain and exits.
+#[cfg(target_os = "none")]
+fn run_background(tokens: &[&str]) {
+    let pid = minix_rt::fork();
+    if pid < 0 {
+        write_err(b"sh: fork failed\r\n");
+        return;
+    }
+    if pid == 0 {
+        // Child: run the chain (single commands exec in place so the job
+        // pid IS the command's process — `kill` targets it directly), then
+        // exit. The `&` token was already stripped by the caller.
+        let status = run_segment_bg(tokens);
+        minix_rt::exit(status);
+    }
+    add_job(pid);
+    write_out(b"[");
+    write_dec(pid as u32);
+    write_out(b"]\r\n");
+}
+
+/// Like `run_segment`, but a single command runs in place (exec for
+/// externals, inline for builtins) instead of forking a grandchild, so the
+/// background child itself is the command's process.
+#[cfg(target_os = "none")]
+fn run_segment_bg(tokens: &[&str]) -> i32 {
+    let mut commands = [ParsedCommand {
+        tokens: [""; 32],
+        argc: 0,
+        redirect_stdout: None,
+    }; MAX_PIPELINE];
+    let mut ncmds = 0usize;
+    let mut start = 0usize;
+    for i in 0..=tokens.len() {
+        if i == tokens.len() || tokens[i] == "|" {
+            if i > start && ncmds < MAX_PIPELINE {
+                commands[ncmds] = parse_command(&tokens[start..i], i - start);
+                ncmds += 1;
+            }
+            start = i + 1;
+        }
+    }
+    if ncmds == 0 {
+        return 0;
+    }
+    if ncmds == 1 {
+        return run_command_inline(&commands[0]);
+    }
+    run_pipeline(&commands[..ncmds])
+}
+
+/// Reap finished background jobs and report them at the prompt. A status
+/// >= 128 means the job died by signal N = status - 128 (sig_proc_exit
+/// encodes deaths as 0x80 | signo).
+#[cfg(target_os = "none")]
+fn reap_jobs() {
+    loop {
+        let (pid, status) = minix_rt::waitpid(-1, minix_std::process::WNOHANG);
+        if pid <= 0 {
+            break; // EAGAIN — nothing more to reap
+        }
+        // Report only jobs we launched; ignore stray reaped pids.
+        let mut found = false;
+        for slot in &JOB_PIDS {
+            if slot.load(Ordering::Relaxed) == pid {
+                slot.store(0, Ordering::Relaxed);
+                found = true;
+                break;
+            }
+        }
+        if found {
+            write_out(b"[");
+            write_dec(pid as u32);
+            write_out(b"] ");
+            if status >= 128 && status < 256 {
+                write_out(b"terminated (signal ");
+                write_dec((status - 128) as u32);
+                write_out(b")\r\n");
+            } else {
+                write_out(b"done\r\n");
+            }
         }
     }
 }
@@ -328,7 +473,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
     }
     let mut last_status = 0i32;
     for &pid in &pids[..n] {
-        let s = minix_rt::waitpid(pid);
+        let s = minix_rt::waitpid_status(pid);
         if s >= 0 {
             last_status = s;
         }
@@ -464,7 +609,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                 minix_rt::exit(status);
             }
             // Parent: wait.
-            let status = minix_rt::waitpid(pid);
+            let status = minix_rt::waitpid_status(pid);
             if status < 0 {
                 write_err(b"sh: waitpid failed\r\n");
                 1
@@ -575,7 +720,7 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
     }
 
     // Parent: wait.
-    let status = minix_rt::waitpid(pid);
+    let status = minix_rt::waitpid_status(pid);
     if status < 0 {
         write_err(b"sh: waitpid failed\r\n");
         1

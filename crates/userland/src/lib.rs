@@ -567,6 +567,67 @@ pub fn fsck(_args: &[&str]) -> i32 {
     0
 }
 
+/// Parse a signed decimal integer, or return `None`.
+pub fn parse_i32(s: &str) -> Option<i32> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let (neg, digits) = match bytes[0] {
+        b'-' => (true, &bytes[1..]),
+        b'+' => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut v: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (b - b'0') as i64;
+    }
+    let v = if neg { -v } else { v };
+    i32::try_from(v).ok()
+}
+
+/// kill — send a signal to a process: `kill pid [sig]`, default SIGTERM.
+///
+/// The kill-termination path is PM_KILL → do_kill → sig_proc → sig_proc_exit
+/// → zombie → parent reap (SIGNALS.md Phase 3). Negative pids (process
+/// groups) are a follow-up.
+pub fn kill(args: &[&str]) -> i32 {
+    if args.len() < 2 {
+        write_err(b"usage: kill pid [sig]\r\n");
+        return 1;
+    }
+    let Some(pid) = parse_i32(args[1]) else {
+        write_err(b"kill: invalid pid\r\n");
+        return 1;
+    };
+    let sig = if args.len() >= 3 {
+        match parse_i32(args[2]) {
+            Some(s) => s,
+            None => {
+                write_err(b"kill: invalid signal\r\n");
+                return 1;
+            }
+        }
+    } else {
+        minix_std::time::SIGTERM
+    };
+    match minix_std::time::kill(pid, sig) {
+        Ok(()) => 0,
+        Err(e) => {
+            write_err(b"kill: ");
+            write_err(errstr(e.0));
+            write_err(b"\r\n");
+            1
+        }
+    }
+}
+
 pub mod shell;
 pub use shell::sh;
 
@@ -575,6 +636,7 @@ pub fn errstr(err: i32) -> &'static [u8] {
     match err {
         1 => b"Operation not permitted",
         2 => b"No such file or directory",
+        3 => b"No such process",
         5 => b"I/O error",
         9 => b"Bad file descriptor",
         12 => b"Cannot allocate memory",
@@ -687,6 +749,27 @@ mod tests {
     fn test_echo() {
         assert_eq!(echo(&["echo", "hello"]), 0);
         assert_eq!(echo(&["echo"]), 0);
+    }
+
+    #[test]
+    fn test_parse_i32() {
+        assert_eq!(parse_i32("0"), Some(0));
+        assert_eq!(parse_i32("123"), Some(123));
+        assert_eq!(parse_i32("-9"), Some(-9));
+        assert_eq!(parse_i32("+7"), Some(7));
+        assert_eq!(parse_i32(""), None);
+        assert_eq!(parse_i32("-"), None);
+        assert_eq!(parse_i32("12a"), None);
+        assert_eq!(parse_i32("999999999999"), None); // overflows i32
+    }
+
+    #[test]
+    fn test_kill_usage_and_bad_args() {
+        // Host runs: the syscall path returns ENOSYS, so only arg
+        // validation is pinned here.
+        assert_eq!(kill(&["kill"]), 1); // usage
+        assert_eq!(kill(&["kill", "abc"]), 1); // invalid pid
+        assert_eq!(kill(&["kill", "1", "xyz"]), 1); // invalid signal
     }
 
     #[test]

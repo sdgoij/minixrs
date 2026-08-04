@@ -165,6 +165,7 @@ const CLEAR_ENDPT_OFF: usize = 8;
 const SIGCALLS_MAP_OFF: usize = 0;
 const SIGCALLS_ENDPT_OFF: usize = 16;
 const SIGCALLS_SIG_OFF: usize = 20;
+const SIGCALLS_SIGCTX_OFF: usize = 24;
 
 const FORK_REPLY_ENDPT_OFF: usize = 8;
 const FORK_REPLY_MSGADDR_OFF: usize = 16;
@@ -5239,20 +5240,24 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     }
 }
 
-/// Handle SYS_SIGSEND: deliver a signal (minimal version).
-/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_sigsend.c`
+/// Handle SYS_SIGSEND: set up a signal handler frame on the target's
+/// stack and enter the handler (SIGNALS.md Phase 4).
 ///
-/// Validates the target process and sets the pending signal.
-/// The full C implementation builds a sigframe on the target's stack;
-/// for now, we set the pending signal and let the signal manager handle it.
+/// The message (m_sigcalls) carries the target endpoint at offset 16 and
+/// a pointer to a 48-byte `struct sigmsg` (in the caller's address space)
+/// at offset 24. The sigmsg is copied in, the target's saved registers are
+/// captured into a sigframe just below its stack pointer, and the target's
+/// PC/SP are pointed at the handler. The target must be stopped (PM
+/// stopped it before sending); P_STOP is set for the duration so the
+/// register state cannot change underneath us.
 ///
 /// # Safety
 ///
 /// `caller` and `msg` must be valid.
-pub unsafe fn do_sigsend_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+pub unsafe fn do_sigsend_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let target_ep = msg_read_i32(msg, SIGCALLS_ENDPT_OFF);
-        let _sigctx = msg_read_u64(msg, 24); // sigctx at offset 24 in sigcalls
+        let sigctx = msg_read_u64(msg, SIGCALLS_SIGCTX_OFF);
 
         if !table::is_ok_endpoint(target_ep) {
             return crate::ipc::EINVAL;
@@ -5266,20 +5271,95 @@ pub unsafe fn do_sigsend_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
             return crate::ipc::EINVAL;
         }
 
-        // Set the pending signal so the signal manager picks it up.
-        // The full implementation would copy the sigmsg from the caller,
-        // build a sigframe on the target's stack, and set registers.
-        // For now, just mark pending and notify.
-        cause_sig(proc_nr, 6); // SIGABRT as a generic signal
+        // Copy the sigmsg from the caller (PM).
+        let mut smsg = [0u8; arch_common::consts::SIGMSG_SIZE];
+        let r = data_copy_from(
+            (*caller).p_endpoint,
+            sigctx,
+            smsg.as_mut_ptr() as u64,
+            arch_common::consts::SIGMSG_SIZE,
+        );
+        if r != 0 {
+            return r;
+        }
+        let signo = u32::from_ne_bytes(smsg[0..4].try_into().unwrap());
+        let mut mask = [0u8; 16];
+        mask.copy_from_slice(&smsg[8..24]);
+        let handler = u64::from_ne_bytes(smsg[24..32].try_into().unwrap());
+        let sigreturn = u64::from_ne_bytes(smsg[32..40].try_into().unwrap());
+
+        let frame_size = crate::hal::sigframe_size();
+
+        // Stop the target so its saved registers are stable while we read
+        // them (matching C: do_sigsend runs on a stopped process).
+        // C's RTS_SET dequeues when the process was runnable; without that,
+        // a runnable+queued target stays linked with P_STOP set and is
+        // skipped by pick_proc forever.
+        let old = (*rp)
+            .p_rts_flags
+            .fetch_or(RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+        if old == 0 {
+            crate::sched::dequeue(rp);
+        }
+
+        // Compute the frame address just below the saved stack pointer.
+        let old_sp = crate::hal::read_frame_sp(&(*rp).p_reg);
+        let frame = crate::hal::sigframe_addr(old_sp);
+
+        let mut frame_buf = [0u8; 512];
+        crate::hal::build_sigframe(
+            &mut frame_buf[..frame_size],
+            &(*rp).p_reg,
+            signo,
+            &mask,
+            sigreturn,
+            frame,
+        );
+
+        // Write the frame to the target's stack.
+        let w = crate::vm::virtual_copy(-1, frame_buf.as_ptr() as u64, proc_nr, frame, frame_size);
+        if w != 0 {
+            // C's RTS_UNSET: enqueue when the target becomes runnable
+            // again (it was dequeued by the P_STOP set above if runnable).
+            let old = (*rp)
+                .p_rts_flags
+                .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+            let new = old & !RtsFlags::P_STOP.bits();
+            if new == 0 {
+                crate::sched::enqueue(rp);
+            }
+            return w;
+        }
+
+        // Enter the handler on the next schedule.
+        crate::hal::sigframe_set_entry(&mut (*rp).p_reg, handler, frame, signo, sigreturn);
+        // Only P_STOP is toggled here — RECEIVING/SENDING are left intact so
+        // an in-flight syscall reply (e.g. the tty's EINTR after sigchar)
+        // still delivers to the target; clearing them strands the reply's
+        // sender in mini_send (VFS blocks in SENDING forever, observed as
+        // sigtest stuck in SEND with the handler never running). The target
+        // becomes runnable when the last of RECEIVING/SIG_PENDING clears:
+        // ENDKSIG clears SIG_PENDING (enqueueing at rts==0) and the reply
+        // delivery clears RECEIVING. C's do_sigsend does the same — it only
+        // redirects pc/sp on an already-stopped process.
+        let old = (*rp)
+            .p_rts_flags
+            .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+        let new = old & !RtsFlags::P_STOP.bits();
+        if new == 0 {
+            crate::sched::enqueue(rp);
+        }
+
         OK
     }
 }
 
-/// Handle SYS_SIGRETURN: return from a signal handler (minimal version).
-/// Source: `.refs/minix-3.3.0/minix/kernel/system/do_sigreturn.c`
+/// Handle SYS_SIGRETURN: restore registers from a signal frame
+/// (SIGNALS.md Phase 4).
 ///
-/// Validates the target process. The full C implementation restores
-/// registers from a sigcontext; for now, we clear the signal flags.
+/// The message (m_sigcalls) carries the target endpoint at offset 16 and
+/// the sigframe address at offset 24. The frame is copied in, validated,
+/// and its saved register file written back to the target's `p_reg`.
 ///
 /// # Safety
 ///
@@ -5287,6 +5367,7 @@ pub unsafe fn do_sigsend_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
 pub unsafe fn do_sigreturn_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let target_ep = msg_read_i32(msg, SIGCALLS_ENDPT_OFF);
+        let sigctx = msg_read_u64(msg, SIGCALLS_SIGCTX_OFF);
 
         if !table::is_ok_endpoint(target_ep) {
             return crate::ipc::EINVAL;
@@ -5300,13 +5381,28 @@ pub unsafe fn do_sigreturn_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             return crate::ipc::EINVAL;
         }
 
-        // Clear the signaled flags so the process can resume
-        let clear_flags = RtsFlags::SIGNALED | RtsFlags::SIG_PENDING;
-        (*rp)
-            .p_rts_flags
-            .fetch_and(!clear_flags.bits(), Ordering::Relaxed);
-        (*rp).p_pending = 0;
+        let frame_size = crate::hal::sigframe_size();
+        let mut frame_buf = [0u8; 512];
+        let r = crate::vm::virtual_copy(
+            proc_nr,
+            sigctx,
+            -1,
+            frame_buf.as_mut_ptr() as u64,
+            frame_size,
+        );
+        if r != 0 {
+            return r;
+        }
 
+        // Validate the magic.
+        let magic_off = arch_common::consts::sigframe::MAGIC_OFF;
+        let magic = u64::from_ne_bytes(frame_buf[magic_off..magic_off + 8].try_into().unwrap());
+        if magic != arch_common::consts::SC_MAGIC {
+            return crate::ipc::EINVAL;
+        }
+
+        // Restore the interrupted register state.
+        crate::hal::sigframe_restore(&mut (*rp).p_reg, &frame_buf[..frame_size]);
         OK
     }
 }

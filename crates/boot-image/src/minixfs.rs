@@ -472,13 +472,13 @@ mod tests {
             "console must be char-special"
         );
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(dev, (5u32 << 16) | 0, "console major 5 minor 0");
+        assert_eq!(dev, 5u32 << 16, "console major 5 minor 0");
 
         // /dev/tty00: major 3 minor 0.
         let tty00_off = itable_off + 6 * INODE_SIZE;
         let tty00_dev =
             u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
-        assert_eq!(tty00_dev, (3u32 << 16) | 0);
+        assert_eq!(tty00_dev, 3u32 << 16);
     }
 
     #[test]

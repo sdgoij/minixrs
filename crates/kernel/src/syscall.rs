@@ -269,6 +269,14 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // Store exit status in p_signal_received for PM to read via SYS_GETKSIG.
         (*caller).p_signal_received = exit_status as u64;
 
+        // A signal that pended (cause_sig) but was not yet delivered when the
+        // process exited is moot: once the exit reply is read, PM would
+        // otherwise treat the exit as a signal delivery, never zombify the
+        // process, and the parent's waitpid hangs (observed: sigtest's 3rd ^C
+        // racing its exit). Clear the map so an exit reply always has zero
+        // pending bits.
+        (*caller).p_pending = 0;
+
         // Set SIGNALED + SIG_PENDING so do_getksig_handler finds this process.
         // Matching C cause_sig(): RTS_SET(rp, RTS_SIGNALED | RTS_SIG_PENDING)
         // Also set SLOT_FREE so the slot can be reused after PM reads the exit.

@@ -55,6 +55,100 @@ pub const PM_EXEC_NEW: i32 = 0x002B;
 /// maps to a kernel-task slot, corrupting vircopy destinations.
 pub const SELF: i32 = 31742;
 
+/// PM_SIGRETURN message number — the trampoline sends it so PM restores the
+/// signal mask and then calls SYS_SIGRETURN to restore the CPU context.
+pub const PM_SIGRETURN: i32 = 24;
+
+/// Address of this process's sigreturn trampoline, passed to PM at sigaction
+/// time (SIGNALS.md Phase 4). Every userland image links minix-rt, so the
+/// symbol exists in each process; the address is used only within the process
+/// that registered it.
+pub fn sigreturn_trampoline_addr() -> u64 {
+    let f: unsafe extern "C" fn() -> ! = minix_sigreturn_trampoline;
+    f as usize as u64
+}
+
+/// The sigreturn trampoline: runs after a caught-signal handler returns.
+///
+/// Sends PM_SIGRETURN (message m_type@4 = 24, sigframe address in m2l1@24),
+/// which makes PM restore the process's signal mask and invoke SYS_SIGRETURN
+/// to restore the interrupted register state. Never returns.
+///
+/// # Safety
+///
+/// Must only be entered via the return-address slot of a signal frame built
+/// by the kernel's do_sigsend; it clobbers the caller's registers.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
+    core::arch::naked_asm!(
+        // The handler returned via `ret`, popping the trampoline address
+        // stored at the frame base; RSP = frame + 8, so scp = RSP - 8.
+        "lea    rdi, [rsp - 8]",
+        "sub    rsp, 64",
+        "mov    dword ptr [rsp + 4], 24", // PM_SIGRETURN @ m_type
+        "mov    [rsp + 24], rdi",         // m2l1 = sigframe address
+        "mov    rax, 48",                 // SENDREC_CALL
+        "mov    rdi, 0",                  // PM_PROC_NR
+        "mov    rsi, rsp",                // message
+        "syscall",
+        "hlt",
+    )
+}
+
+/// The sigreturn trampoline for RISC-V64: the kernel stored the frame base
+/// at `sigframe::SC_P_OFF` (280) in the frame; after the handler's `ret`
+/// (which pops `ra`), `sp` still points at the frame.
+///
+/// # Safety
+///
+/// Must only be entered via the return register set by the kernel's
+/// do_sigsend; it clobbers the caller's registers.
+#[cfg(target_arch = "riscv64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
+    core::arch::naked_asm!(
+        "ld     a0, 280(sp)", // scp from the frame
+        "addi   sp, sp, -64",
+        "li     t0, 24",     // PM_SIGRETURN
+        "sw     t0, 4(sp)",  // m_type
+        "sd     a0, 24(sp)", // m2l1 = sigframe address
+        "li     a7, 48",     // SENDREC_CALL
+        "li     a0, 0",      // PM_PROC_NR
+        "mv     a1, sp",     // message
+        "ecall",
+        "wfi",
+    )
+}
+
+/// The sigreturn trampoline for AArch64: the kernel stored the frame base
+/// at `sigframe::SC_P_OFF` (312) in the frame; after the handler's `ret`
+/// (which pops x30), `sp` still points at the frame.
+///
+/// # Safety
+///
+/// Must only be entered via the return register set by the kernel's
+/// do_sigsend; it clobbers the caller's registers.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
+    core::arch::naked_asm!(
+        "ldr    x0, [sp, #312]", // scp from the frame
+        "sub    sp, sp, #64",
+        "mov    w1, #24",       // PM_SIGRETURN
+        "str    w1, [sp, #4]",  // m_type
+        "str    x0, [sp, #24]", // m2l1 = sigframe address
+        "mov    x8, #48",       // SENDREC_CALL
+        "mov    x0, #0",        // PM_PROC_NR
+        "mov    x1, sp",        // message
+        "svc    #0",
+        "wfi",
+    )
+}
+
 /// IPC syscall numbers.
 pub const SEND_CALL: u64 = 46;
 pub const SENDNB_CALL: u64 = 51;
@@ -1030,21 +1124,36 @@ pub unsafe fn asynsend3(dst: i32, msg: *const u8, flags: u32) -> i32 {
 }
 
 /// Wait for a child process to exit via PM IPC.
-/// `child_pid` is the child's PID (returned by fork).
-/// Sends PM_WAITPID to the Process Manager.
-/// Returns the child's exit status on success, negative on error.
+///
+/// `child_pid` is the child's PID (returned by fork), or -1 for any child.
+/// `options` may be 0 (blocking) or WNOHANG (1, non-blocking: returns
+/// (negative, 0) immediately when no child has exited).
+///
+/// Sends PM_WAITPID to the Process Manager. Returns `(pid, status)` on
+/// success; on error the pid field is negative (EAGAIN for WNOHANG).
 #[inline(never)]
-pub fn waitpid(child_pid: i32) -> i32 {
+pub fn waitpid(child_pid: i32, options: i32) -> (i32, i32) {
     let mut msg = [0u8; 64];
-    // Set m_type = PM_WAITPID at bytes 4-7, wpid at m1i1 (bytes 8-11)
+    // m_type = PM_WAITPID at bytes 4-7, wpid at m1i1 (bytes 8-11),
+    // options at m1i2 (bytes 12-15) — matching PM's handle_waitpid.
     msg[4..8].copy_from_slice(&PM_WAITPID.to_le_bytes());
     msg[8..12].copy_from_slice(&child_pid.to_le_bytes());
+    msg[12..16].copy_from_slice(&options.to_le_bytes());
     let reply = unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64) };
     if reply < 0 {
-        return reply as i32;
+        return (reply as i32, 0);
     }
-    // Reply has status in m1i2 (bytes 12-15)
-    i32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]))
+    // Reply: pid in m1i1 (bytes 8-11), status in m1i2 (bytes 12-15).
+    let pid = i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+    let status = i32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
+    (pid, status)
+}
+
+/// Wait for a specific child, returning just the exit status (negative on
+/// error). Convenience wrapper for existing callers.
+#[inline(never)]
+pub fn waitpid_status(child_pid: i32) -> i32 {
+    waitpid(child_pid, 0).1
 }
 
 /// VM_BRK message type — IPC call number for brk requests to the VM server.
@@ -1501,7 +1610,7 @@ mod tests {
 
         // VFS call numbers from the same header
         let vfs_base: i32 = 0x100;
-        assert_eq!(VFS_READ, vfs_base + 0);
+        assert_eq!(VFS_READ, vfs_base);
         assert_eq!(VFS_OPEN, vfs_base + 3);
         assert_eq!(VFS_CLOSE, vfs_base + 5);
         assert_eq!(VFS_CHDIR, vfs_base + 8);
@@ -1610,7 +1719,6 @@ mod tests {
         let end = 0x3FF00000usize;
         assert!(start < end, "heap start must be below end");
         assert!(end - start == 0x100000, "heap size must be 1MB");
-        assert!(end <= usize::MAX, "heap end must not overflow");
     }
 
     #[test]

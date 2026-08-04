@@ -52,6 +52,40 @@ fn test_buf_is_locked() {
 }
 
 #[test]
+fn test_freeblock_retains_data_for_reuse() {
+    // The buffer pool is fixed-size; each buffer's data allocation must be
+    // retained across recycling. Dropping it leaked one block per cache
+    // miss (bump allocator cannot free) and exhausted MFS's heap after a
+    // couple of execs ("libminixfs: could not allocate block" on the second
+    // sigtest run).
+    unsafe {
+        init_pool(10);
+        let bp = super::lmfs_get_block(1, 100);
+        assert!(!bp.is_null());
+        let data = (*bp).data_ptr;
+        assert!(!data.is_null());
+        super::lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+        // Recycle the buffer (the pool reuse path).
+        super::freeblock(bp);
+        assert!(
+            !(*bp).data_ptr.is_null(),
+            "recycled buffer must keep its data allocation"
+        );
+        assert_eq!((*bp).lmfs_bytes, super::lmfs_fs_block_size());
+
+        // lmfs_alloc_block must reuse the retained allocation.
+        super::lmfs_alloc_block(bp);
+        assert_eq!(
+            (*bp).data_ptr,
+            data,
+            "data block must be reused, not reallocated"
+        );
+        assert_eq!((*bp).lmfs_bytes, super::lmfs_fs_block_size());
+    }
+}
+
+#[test]
 fn test_get_put_block_roundtrip() {
     unsafe {
         init_pool(10);

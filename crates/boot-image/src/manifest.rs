@@ -18,6 +18,8 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/ln", "ln"),
     ("/bin/chmod", "chmod"),
     ("/bin/sync", "sync"),
+    ("/bin/kill", "kill"),
+    ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),
     ("/sbin/reboot", "reboot"),
     ("/sbin/fsck", "fsck"),

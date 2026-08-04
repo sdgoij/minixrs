@@ -28,6 +28,60 @@ pub const NR_PTYS: usize = 4;
 /// Number of scheduling queues.
 pub const NR_SCHED_QUEUES: usize = 16;
 
+// Signal delivery (SIGNALS.md Phase 4)
+
+/// Magic value validating a sigframe on the target's stack.
+pub const SC_MAGIC: u64 = 0xC0FFEE1;
+
+// sigmsg (PM → kernel via SYS_SIGSEND), matching C `struct sigmsg`:
+//   signo@0 (i32), mask@8 (16 bytes), sighandler@24 (u64),
+//   sigreturn@32 (u64), stkptr@40 (u64) — 48 bytes total.
+pub const SIGMSG_SIGNO_OFF: usize = 0;
+pub const SIGMSG_MASK_OFF: usize = 8;
+pub const SIGMSG_HANDLER_OFF: usize = 24;
+pub const SIGMSG_SIGRETURN_OFF: usize = 32;
+pub const SIGMSG_STKPTR_OFF: usize = 40;
+pub const SIGMSG_SIZE: usize = 48;
+
+// SYS_SIGSEND / SYS_SIGRETURN message layout (m_sigcalls):
+//   endpt@16, sig@20, sigctx@24.
+pub const SIGCALLS_ENDPT_OFF: usize = 16;
+pub const SIGCALLS_SIG_OFF: usize = 20;
+pub const SIGCALLS_SIGCTX_OFF: usize = 24;
+
+// Sigframe on the target's stack. Layout differs per arch (the saved
+// register file is arch-specific); the shared fields (mask / signal /
+// magic) sit at the offsets below. The saved p_reg array occupies
+// `SIZE - MASK_OFF` bytes at `REGS_OFF`.
+#[cfg(target_arch = "x86_64")]
+pub mod sigframe {
+    pub const SIZE: usize = 296;
+    pub const REGS_OFF: usize = 8; // [8..264) = saved p_reg; [0..8) = handler return addr
+    pub const MASK_OFF: usize = 264;
+    pub const SIGNAL_OFF: usize = 280;
+    pub const MAGIC_OFF: usize = 288;
+}
+
+#[cfg(target_arch = "riscv64")]
+pub mod sigframe {
+    pub const SIZE: usize = 296;
+    pub const REGS_OFF: usize = 0; // [0..256) = saved p_reg
+    pub const MASK_OFF: usize = 256;
+    pub const SIGNAL_OFF: usize = 272;
+    pub const SC_P_OFF: usize = 280; // frame base, for the trampoline
+    pub const MAGIC_OFF: usize = 288;
+}
+
+#[cfg(target_arch = "aarch64")]
+pub mod sigframe {
+    pub const SIZE: usize = 328;
+    pub const REGS_OFF: usize = 0; // [0..288) = saved p_reg
+    pub const MASK_OFF: usize = 288;
+    pub const SIGNAL_OFF: usize = 304;
+    pub const SC_P_OFF: usize = 312; // frame base, for the trampoline
+    pub const MAGIC_OFF: usize = 320;
+}
+
 /// Number of I/O ranges per privilege.
 pub const NR_IO_RANGE: usize = 16;
 
