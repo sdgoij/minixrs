@@ -289,7 +289,20 @@ unsafe fn read_block(bp: *mut Buf) {
 
 /// Re-evaluate the cache size based on a heuristic.
 fn cache_heuristic_check(_major: i32) {
-    // Stub: VM stats (`fs_blockstats`, `vm_info_stats`) are not available yet.
+    // The C reference (libminixfs/cache.c lmfs_set_blocksize) resizes the
+    // pool to MINBUFS and then immediately re-expands it via the heuristic
+    // (fs_bufs_heuristic, based on VM memory stats). The Rust port's
+    // fs_bufs_heuristic returns a fixed 1024, so re-expand to that here;
+    // without this the cache stays at MINBUFS (6) and thrashes on every
+    // boot read, evicting dirty blocks before they are written back.
+    // SAFETY: reads global quiet flag only; no side effects.
+    let bufs = unsafe { fs_bufs_heuristic() } as usize;
+    let nr = static_read!(nr_bufs);
+    if bufs > nr {
+        // SAFETY: called from lmfs_set_blocksize during init with no
+        // buffers in use (cache_resize asserts this).
+        unsafe { cache_resize(static_read!(fs_block_size), bufs) };
+    }
 }
 
 /// Resize the buffer pool.

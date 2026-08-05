@@ -523,6 +523,7 @@ pub unsafe extern "C" fn kmain() -> ! {
             ("/sbin/vfs", VFS_PROC_NR),
             ("/sbin/vm", VM_PROC_NR),
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
+            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
@@ -537,16 +538,17 @@ pub unsafe extern "C" fn kmain() -> ! {
             ("/sbin/vfs", VFS_PROC_NR),
             ("/sbin/vm", VM_PROC_NR),
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
+            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
         ];
 
         #[cfg(not(feature = "boot-test"))]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 12] =
             unsafe { core::mem::zeroed() };
         #[cfg(feature = "boot-test")]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 10] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {
@@ -582,6 +584,7 @@ pub unsafe extern "C" fn kmain() -> ! {
                     info.stack_start,
                     info.stack_end,
                     info.phys_stack_base,
+                    proc_nr == VIRTIO_BLK_PROC_NR,
                 )
             };
             let pt_phys = match pt_phys {

@@ -276,18 +276,25 @@ const M1_P3_OFF: usize = 40;
 // Devio message offsets (Phase 8.8)
 //
 // mess_lsys_krn_sys_devio (for do_devio):
-//   offset  0: request  (int / i32)
-//   offset  4: port     (int / i32) — port_t fits in 16 bits
-//   offset  8: value    (u32)
+//   offset  8: request  (int / i32)
+//   offset 12: port     (int / i32) — port_t fits in 16 bits
+//   offset 16: value    (u32)
 //
 // mess_krn_lsys_sys_devio (reply for do_devio, input):
-//   offset  0: value    (u32)
-const DEVIO_REQUEST_OFF: usize = 0;
-const DEVIO_PORT_OFF: usize = 4;
+//   offset  8: value    (u32)
+//
+// These offsets are relative to the kernel-call message, whose first 8
+// bytes (m_source/m_type) are overwritten with the call number and source
+// endpoint by sys_kernel_call_handler. The payload starts at byte 8, so a
+// request placed at message offset 0 would be clobbered before the handler
+// runs (observed: the virtio-blk PCI probe read the call number as its
+// request and never found the device).
+const DEVIO_REQUEST_OFF: usize = 8;
+const DEVIO_PORT_OFF: usize = 12;
 #[allow(dead_code)]
-const DEVIO_VALUE_OFF: usize = 8;
+const DEVIO_VALUE_OFF: usize = 16;
 #[allow(dead_code)]
-const DEVIO_REPLY_VALUE_OFF: usize = 0;
+const DEVIO_REPLY_VALUE_OFF: usize = 8;
 
 // mess_lsys_krn_sys_vdevio (for do_vdevio):
 //   offset  0: request  (int / i32)
@@ -367,17 +374,21 @@ const MEMSET_PATTERN_OFF: usize = 16;
 const MEMSET_PROC_OFF: usize = 24;
 
 // mess_lsys_krn_sys_getinfo (for do_getinfo):
-//   offset  0: request    (int / i32)
-//   offset  4: endpt      (endpoint_t / i32)
-//   offset  8: val_ptr    (vir_bytes / u64)
-//   offset 16: val_len    (int / i32)
-//   offset 24: val_ptr2   (vir_bytes / u64)
-//   offset 32: val_len2_e (int / i32)
-const GETINFO_REQUEST_OFF: usize = 0;
-const GETINFO_VAL_PTR_OFF: usize = 8;
-const GETINFO_VAL_LEN_OFF: usize = 16;
-const GETINFO_VAL_PTR2_OFF: usize = 24;
-const GETINFO_VAL_LEN2_E_OFF: usize = 32;
+//   offset  8: request    (int / i32)
+//   offset 12: endpt      (endpoint_t / i32)
+//   offset 16: val_ptr    (vir_bytes / u64)
+//   offset 24: val_len    (int / i32)
+//   offset 32: val_ptr2   (vir_bytes / u64)
+//   offset 40: val_len2_e (int / i32)
+//
+// Like DEVIO above, these are kernel-call message offsets: the first 8
+// bytes are clobbered with the call number/source, so the request lives in
+// the payload (byte 8+).
+const GETINFO_REQUEST_OFF: usize = 8;
+const GETINFO_VAL_PTR_OFF: usize = 16;
+const GETINFO_VAL_LEN_OFF: usize = 24;
+const GETINFO_VAL_PTR2_OFF: usize = 32;
+const GETINFO_VAL_LEN2_E_OFF: usize = 40;
 
 // mess_krn_lsys_sys_getwhoami (reply for GET_WHOAMI):
 //   offset  0: endpt      (endpoint_t / i32)
@@ -5233,6 +5244,19 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                         core::cmp::min(params_size, val_len.max(0) as usize),
                     );
                 }
+                OK
+            }
+            arch_common::com::GET_PHYS_DELTA => {
+                // Reply with the caller's s_phys_delta (phys_code_base -
+                // code_start). DMA drivers use it to translate virtual
+                // buffer addresses into guest-physical addresses when
+                // programming device descriptors.
+                let delta = if !(*caller).p_priv.is_null() {
+                    (*(*caller).p_priv).s_phys_delta
+                } else {
+                    0
+                };
+                msg_write_i64(msg, 0, delta);
                 OK
             }
             _ => crate::ipc::ENOSYS,

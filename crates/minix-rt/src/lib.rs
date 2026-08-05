@@ -40,6 +40,7 @@ pub const VFS_OPEN: i32 = 0x103;
 pub const VFS_READ: i32 = 0x100;
 pub const VFS_CLOSE: i32 = 0x105;
 pub const VFS_GETDENTS: i32 = 0x11D; // VFS_BASE + 29
+pub const VFS_SYNC: i32 = 0x110; // VFS_BASE + 16
 
 /// PM message types (from callnr.h).
 pub const PM_FORK: i32 = 0x0002;
@@ -360,6 +361,7 @@ pub unsafe fn syscall0(nr: u64) -> i64 {
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -383,6 +385,7 @@ pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -407,6 +410,7 @@ pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -432,6 +436,7 @@ pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -458,6 +463,7 @@ pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -485,6 +491,7 @@ pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret
@@ -513,6 +520,7 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
             lateout("r11") _,
             lateout("rax") ret,
             options(nostack),
+            clobber_abi("sysv64"),
         );
     }
     ret

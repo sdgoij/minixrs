@@ -17,6 +17,31 @@ pub fn fs_readsuper() -> i32 {
         let mfs = glo::mfs_ptr();
         let dev = (*mfs).m_in.m_payload.m1.m1i1 as u32;
 
+        // Resolve the block driver for this device from the driver label
+        // VFS grants (label_len at payload+8, label grant at payload+24,
+        // granter = m_source). The resolved endpoint routes all block I/O
+        // for `dev` (libbdev bdev_driver).
+        #[cfg(target_os = "none")]
+        {
+            let label_len = (*mfs).m_in.m_payload.m1.m1i3 as usize;
+            let label_grant = i32::from_ne_bytes(
+                (&(*mfs).m_in.m_payload.raw)[24..28]
+                    .try_into()
+                    .unwrap_or([0u8; 4]),
+            );
+            if label_len > 0 && label_len < crate::mfs::consts::LABEL_MAX {
+                let mut label = [0u8; crate::mfs::consts::LABEL_MAX];
+                let r = crate::block_io::safecopy_from(
+                    (*mfs).m_in.m_source,
+                    label_grant,
+                    &mut label[..label_len],
+                );
+                if r == 0 {
+                    let _ = crate::block_io::bdev_driver(dev, &label[..label_len]);
+                }
+            }
+        }
+
         // fs_readsuper called
         for i in 0..8 {
             let sp = glo::get_super_ptr(i);

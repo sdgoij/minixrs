@@ -104,8 +104,22 @@ pub fn dmap_driver_match(proc_e: i32, major: i32) -> i32 {
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/dmap.c` (dmap_endpt_up)
 pub fn dmap_endpt_up(proc_nr: i32, is_blk: i32) {
-    let _ = (proc_nr, is_blk);
-    todo!("dmap_endpt_up: needs bdev_up / invalidate_filp; see PORTING_PLAN.md 10.4b")
+    if proc_nr < 0 {
+        return;
+    }
+    for major in 0..NR_DEVICES {
+        let dp = get_dmap_by_major(major as i32);
+        if dp.is_null() {
+            continue;
+        }
+        if unsafe { (*dp).dmap_driver } == proc_nr {
+            if is_blk != 0 {
+                crate::vfs::device::bdev_up(major as i32);
+            } else {
+                crate::vfs::device::invalidate_filp_by_char_major(major as i32);
+            }
+        }
+    }
 }
 
 /// Get the dmap entry for a driver endpoint.

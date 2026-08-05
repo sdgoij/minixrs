@@ -86,22 +86,23 @@ pub(crate) static BUF_REAR: OptionU16Cell = OptionU16Cell::new(None);
 pub unsafe fn pfs_init_globals() {
     // SAFETY: PFS_STORAGE is only accessed once here before any other code runs.
     let p: *mut PfsGlobal = PFS_STORAGE.get().cast();
+    // Zero the storage in place, then restore the non-zero defaults. The
+    // previous code built the inode/buffer arrays on the stack via
+    // `core::array::from_fn` and `p.write`, which overflowed the 1 MiB host
+    // main-thread stack in debug builds (STATUS_STACK_OVERFLOW on Windows).
+    core::ptr::write_bytes(p as *mut u8, 0, core::mem::size_of::<PfsGlobal>());
     // SAFETY: we have exclusive access at init time.
-    p.write(PfsGlobal {
-        err_code: 0,
-        caller_uid: 0,
-        caller_gid: 0,
-        req_nr: 0,
-        fs_dev: NO_DEV,
-        unmountdone: FALSE,
-        exitsignaled: 0,
-        m_in_type: 0,
-        m_in_data: [0u8; 48],
-        m_out_data: [0u8; 48],
-        inode_table: core::array::from_fn(|_| Inode::default()),
-        buf_pool: core::array::from_fn(|_| Buf::default()),
-        inodemap: [0; INODEMAP_CHUNKS],
-    });
+    (*p).fs_dev = NO_DEV;
+    (*p).unmountdone = FALSE;
+    for i in 0..PFS_NR_INODES {
+        let ino = get_inode_ptr(i);
+        (*ino).i_dev = NO_DEV;
+        (*ino).i_rdev = NO_DEV;
+    }
+    for i in 0..PIPE_NR_BUFS {
+        let bp = get_buf_ptr(i);
+        (*bp).b_dev = NO_DEV;
+    }
 }
 
 /// Get a raw pointer to PFS global state.

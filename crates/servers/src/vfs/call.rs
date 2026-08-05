@@ -957,7 +957,9 @@ pub fn do_sync() -> i32 {
         let vmnt_arr = core::ptr::addr_of!((*vfs_global()).vmnt) as *const Vmnt;
         for i in 0..NR_MNTS {
             let vmp = &*vmnt_arr.add(i);
-            if vmp.m_fs_e >= 0 && vmp.m_dev != 0 {
+            // Mounted check mirrors the C: m_fs_e != NONE and m_dev != NO_DEV.
+            // The root's device is 0, so m_dev != 0 would skip it.
+            if vmp.m_fs_e >= 0 && vmp.m_dev != u32::MAX {
                 let _ = crate::vfs::request::req_sync(vmp.m_fs_e);
             }
         }

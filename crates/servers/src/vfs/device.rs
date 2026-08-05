@@ -8,8 +8,11 @@
 
 use crate::vfs::consts::*;
 use crate::vfs::dmap;
+use crate::vfs::glo::vfs_global;
 use crate::vfs::request;
 use crate::vfs::types::*;
+
+use core::ptr::addr_of_mut;
 
 // CDEV message field offsets (absolute byte offsets in a 56-byte Message:
 // m_type @ 4, payload @ 8). The m2 fields are: m2i1 @ 8, m2i2 @ 12, m2i3 @ 16,
@@ -335,46 +338,68 @@ pub fn cdev_reply() {
 
 // Block device operations
 
+// BDEV message field offsets (absolute byte offsets in the 56-byte
+// Message, matching the block driver servers and minix-util/bdev.rs).
+const BDEV_MINOR_OFF: usize = 8; // m2_i1
+const BDEV_FLAGS_OFF: usize = 12; // m2_i2
+const BDEV_STATUS_OFF: usize = 24; // m2_l2 (reply status)
+
+// Access bits for BDEV_OPEN (minix/include/minix/bdev.h).
+const BDEV_R_BIT: i32 = 0x01;
+const BDEV_W_BIT: i32 = 0x02;
+
 /// Open a block device.
 ///
-/// Sends a \`BDEV_OPEN\` message to the block driver, requesting access
-/// according to the \`access\` flags (\`R_BIT\` / \`W_BIT\`).
+/// Sends a `BDEV_OPEN` message to the block driver, requesting access
+/// according to the `access` flags (`BDEV_R_BIT` / `BDEV_W_BIT`). The
+/// driver endpoint comes from the dmap table for `dev`'s major number.
+/// Returns the driver's status (0 on success, negative errno otherwise).
 ///
-/// C source: \`minix/servers/vfs/device.c\` — \`bdev_open()\` (line 44)
-///
-/// # Safety
-///
-/// Requires exclusive access to the global dmap table.
-///
-/// # TODO
-///
-/// Wire IPC:
-///   1. Lookup driver via \`dmap[major_dev]\`.
-///   2. Build \`BDEV_OPEN\` message with minor and access bits.
-///   3. Call \`block_io()\` (synchronous send/recv wrapper).
-///   4. Return the status from the driver reply.
+/// C source: `minix/servers/vfs/device.c` — `bdev_open()` (line 44)
 pub fn bdev_open(dev: u32, access: i32) -> i32 {
-    let _ = (dev, access);
-    ENOSYS
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, arch_common::com::BDEV_OPEN as i32);
+    request::w_i32(&mut msg, BDEV_MINOR_OFF, (dev & 0xFFFF) as i32);
+    request::w_i32(&mut msg, BDEV_FLAGS_OFF, access);
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r < 0 {
+        return r;
+    }
+    // The driver replies with m_type = BDEV_REPLY and the status in
+    // m2_l2 (absolute offset 24).
+    request::r_i32(&msg, BDEV_STATUS_OFF)
 }
 
 /// Close a block device.
 ///
-/// Sends a \`BDEV_CLOSE\` message to the block driver.
+/// Sends a `BDEV_CLOSE` message to the block driver.
 ///
-/// C source: \`minix/servers/vfs/device.c\` — \`bdev_close()\` (line 77)
-///
-/// # Safety
-///
-/// Requires exclusive access to the global dmap table.
-///
-/// # TODO
-///
-/// Wire IPC via \`block_io()\`: build \`BDEV_CLOSE\` message and send it
-/// synchronously to the driver.
+/// C source: `minix/servers/vfs/device.c` — `bdev_close()` (line 77)
 pub fn bdev_close(dev: u32) -> i32 {
-    let _ = dev;
-    ENOSYS
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return ENXIO;
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return ENXIO;
+    }
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, arch_common::com::BDEV_CLOSE as i32);
+    request::w_i32(&mut msg, BDEV_MINOR_OFF, (dev & 0xFFFF) as i32);
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r < 0 {
+        return r;
+    }
+    request::r_i32(&msg, BDEV_STATUS_OFF)
 }
 
 /// Process the result of a block driver request.
@@ -401,29 +426,85 @@ pub fn bdev_reply() {
     // sendrec buffer, and signal the waiting worker thread.
 }
 
-/// A block driver has been mapped in.
+/// A block driver has been mapped in (or restarted).
 ///
 /// Reopens all block-special files that were previously opened on the
 /// affected major device, and tells each mounted filesystem about the
-/// new driver endpoint via \`req_newdriver()\`.
+/// new driver endpoint via `req_newdriver()`.
 ///
-/// C source: \`minix/servers/vfs/device.c\` — \`bdev_up()\` (line 681)
-///
-/// # Safety
-///
-/// Requires exclusive access to the global filp, vmnt, and dmap tables.
-///
-/// # TODO
-///
-/// Wire the recovery flow:
-///   1. Scan the filp table for block-special files matching \`major\`.
-///   2. Call \`bdev_open()\` on each to re-establish the driver connection.
-///   3. Scan the vmnt table for mounted filesystems on this major and
-///      call \`req_newdriver()\` with the driver label.
-///   4. If any block-special file was open, also notify the root FS.
+/// C source: `minix/servers/vfs/device.c` — `bdev_up()` (line 681)
 pub fn bdev_up(major: i32) {
-    let _ = major;
-    // TODO: reopen block-special files and notify mounted filesystems.
+    unsafe {
+        let glob = vfs_global();
+        let filp_arr = addr_of_mut!((*glob).filp) as *mut Filp;
+
+        // Reopen block-special files on this major so the driver
+        // connection is re-established.
+        for i in 0..NR_FILPS {
+            let f = &*filp_arr.add(i);
+            if f.filp_mode == FILP_CLOSED {
+                continue;
+            }
+            let vp = f.filp_vno;
+            if vp.is_null() {
+                continue;
+            }
+            if (*vp).v_mode & S_IFMT == S_IFBLK && ((*vp).v_dev >> 16) as i32 == major {
+                // O_RDONLY = access mode 0 → read-only; otherwise r/w.
+                let access = if (f.filp_flags & 0o3) != 0 {
+                    BDEV_R_BIT | BDEV_W_BIT
+                } else {
+                    BDEV_R_BIT
+                };
+                let _ = bdev_open((*vp).v_dev, access);
+            }
+        }
+
+        // Tell each mounted filesystem on this major about the new
+        // driver endpoint (it re-resolves the driver label).
+        let dp = dmap::get_dmap_by_major(major);
+        if dp.is_null() {
+            return;
+        }
+        let label_buf = &(*dp).dmap_label;
+        let label_len = label_buf.iter().position(|&b| b == 0).unwrap_or(LABEL_MAX);
+        let label = &label_buf[..label_len];
+
+        let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+        for i in 0..NR_MNTS {
+            let vmp = &mut *vmnt_arr.add(i);
+            if vmp.m_dev != u32::MAX && ((vmp.m_dev >> 16) as i32) == major {
+                let _ = request::req_newdriver(vmp.m_fs_e, vmp.m_dev, label.as_ptr());
+            }
+        }
+    }
+}
+
+/// Invalidate all character-special files on `major` (driver went away).
+///
+/// Marks every open char-special filp on the major as closed. Used by
+/// `dmap_endpt_up` when a character driver restarts.
+///
+/// C source: `minix/servers/vfs/device.c` — `invalidate_filp_by_char_major()`
+pub fn invalidate_filp_by_char_major(major: i32) {
+    unsafe {
+        let glob = vfs_global();
+        let filp_arr = addr_of_mut!((*glob).filp) as *mut Filp;
+        for i in 0..NR_FILPS {
+            let f = &mut *filp_arr.add(i);
+            if f.filp_mode == FILP_CLOSED {
+                continue;
+            }
+            let vp = f.filp_vno;
+            if vp.is_null() {
+                continue;
+            }
+            if (*vp).v_mode & S_IFMT == S_IFCHR && ((*vp).v_dev >> 16) as i32 == major {
+                f.filp_mode = FILP_CLOSED;
+                f.filp_count = 0;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

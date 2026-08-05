@@ -967,6 +967,7 @@ pub unsafe fn req_rdlink(
 pub unsafe fn req_readsuper(
     _vmp: *mut crate::vfs::types::Vmnt,
     _label: *const u8,
+    _label_len: usize,
     dev: u32,
     readonly: i32,
     isroot: i32,
@@ -974,14 +975,13 @@ pub unsafe fn req_readsuper(
     #[cfg(target_os = "none")]
     {
         let fs_e = (*_vmp).m_fs_e;
-        let label_len = if _label.is_null() {
-            0
-        } else {
-            core::ffi::CStr::from_ptr(_label.cast::<core::ffi::c_char>())
-                .to_bytes()
-                .len()
-                + 1
-        };
+        // The label length is passed explicitly: the callers' labels are
+        // compile-time byte arrays (b"virtio_blk") that are NOT
+        // NUL-terminated, so CStr::from_ptr would read past the label into
+        // whatever follows in rodata (observed: "virtio_blk" merged with
+        // the next string, label_len ballooned, and MFS never matched the
+        // driver, silently routing block I/O to the ramdisk fallback).
+        let label_len = _label_len;
         let grant_id = crate::vfs::grant::cpf_grant_magic(
             arch_common::com::VFS_PROC_NR,
             fs_e,
@@ -1592,7 +1592,7 @@ mod tests {
         assert_eq!(s, ENOSYS);
 
         let (s, _det, _fl) =
-            unsafe { req_readsuper(core::ptr::null_mut(), core::ptr::null(), 0, 0, 0) };
+            unsafe { req_readsuper(core::ptr::null_mut(), core::ptr::null(), 0, 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
         let (s, _st) = unsafe { req_statvfs(0) };

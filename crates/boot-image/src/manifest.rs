@@ -33,6 +33,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/mfs", "mfs"),
     ("/sbin/pfs", "pfs"),
     ("/sbin/ramdisk", "ramdisk"),
+    ("/sbin/virtio_blk", "virtio_blk"),
 ];
 
 /// Device nodes to create in the initramfs: (path, mode, major, minor).

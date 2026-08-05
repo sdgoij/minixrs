@@ -27,6 +27,7 @@ pub const MFS_PROC_NR: Endpoint = 7;
 pub const VM_PROC_NR: Endpoint = 8;
 pub const PFS_PROC_NR: Endpoint = 9;
 pub const RAMDISK_PROC_NR: Endpoint = 11;
+pub const VIRTIO_BLK_PROC_NR: Endpoint = 12;
 
 pub const LAST_SPECIAL_PROC_NR: Endpoint = 10;
 pub const INIT_PROC_NR: Endpoint = LAST_SPECIAL_PROC_NR;
@@ -253,6 +254,7 @@ pub const GET_RANDOMNESS_BIN: u32 = 20;
 pub const GET_IDLETSC: u32 = 21;
 pub const GET_CPUINFO: u32 = 23;
 pub const GET_REGS: u32 = 24;
+pub const GET_PHYS_DELTA: u32 = 22;
 pub const GET_RUSAGE: u32 = 25;
 
 pub const SYS_PRIV_ALLOW: u32 = 1;

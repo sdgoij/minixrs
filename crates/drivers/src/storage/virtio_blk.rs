@@ -23,7 +23,7 @@
 
 use crate::DriverError;
 use crate::bus::virtio;
-use crate::bus::virtio::{VRING_DESC_F_WRITE, VirtioDevice, VirtioFeature, VirtioPhysBuf};
+use crate::bus::virtio::{VirtioDevice, VirtioFeature, VirtioPhysBuf};
 use core::cell::UnsafeCell;
 
 /// Virtio PCI vendor ID (Red Hat / QEMU).
@@ -601,9 +601,12 @@ pub unsafe fn virtio_blk_transfer(
     *status = 0xFF; // pre-fill with invalid
     let status_paddr = status as *const _ as u64;
 
-    // Data buffer: writable for read, readable for write.
-    let data_flags = if !write { VRING_DESC_F_WRITE as u64 } else { 0 };
-    let data_paddr = (buf.as_ptr() as u64) | data_flags;
+    // Data buffer: writable for read, readable for write. The transport
+    // (use_vring_desc) treats bit 0 of PhysBuf.addr as the writable flag;
+    // VRING_DESC_F_WRITE (= 2) is a descriptor-table flag, not the buffer
+    // convention — using it marks reads as readable and corrupts the
+    // address by +2.
+    let data_paddr = (buf.as_ptr() as u64) | if !write { 1 } else { 0 };
 
     let phys_bufs = [
         VirtioPhysBuf {

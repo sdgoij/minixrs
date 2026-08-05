@@ -275,6 +275,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR), // virtio-blk disk driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
             ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
@@ -289,6 +290,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
             ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR), // virtio-blk disk driver
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
             ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
@@ -325,6 +327,7 @@ pub extern "C" fn kmain_body() -> ! {
                     info.stack_start,
                     info.stack_end,
                     info.phys_stack_base,
+                    false, // low-GB user device window is AArch64-only
                 )
             };
             let pt_phys = match pt_phys {

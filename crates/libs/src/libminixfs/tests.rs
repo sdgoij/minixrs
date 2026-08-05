@@ -142,6 +142,50 @@ fn test_markdirty_isclean() {
 }
 
 #[test]
+fn test_put_block_dirty_inode_writes_immediately() {
+    unsafe {
+        init_pool(10);
+        static LAST_RW: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+        static LAST_BLOCK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        unsafe fn cb(
+            _dev: u32,
+            block: u64,
+            nblocks: usize,
+            _bufs: *const *mut u8,
+            _block_size: usize,
+            rw_flag: i32,
+        ) -> i32 {
+            LAST_RW.store(rw_flag, core::sync::atomic::Ordering::Relaxed);
+            LAST_BLOCK.store(block, core::sync::atomic::Ordering::Relaxed);
+            nblocks as i32
+        }
+        super::lmfs_set_block_io(cb);
+
+        // A dirty INODE_BLOCK (3) must be written back immediately.
+        let dev: u32 = 1;
+        let block: u64 = 5;
+        let bp = super::lmfs_get_block(dev, block);
+        assert!(!bp.is_null());
+        super::lmfs_markdirty(bp);
+        super::lmfs_put_block(bp, 3);
+        assert_eq!(
+            LAST_RW.load(core::sync::atomic::Ordering::Relaxed),
+            1,
+            "put_block(INODE_BLOCK) on a dirty block must write"
+        );
+        assert_eq!(
+            LAST_BLOCK.load(core::sync::atomic::Ordering::Relaxed),
+            block
+        );
+        assert_eq!(
+            super::lmfs_isclean(bp),
+            1,
+            "block must be clean after the immediate write"
+        );
+    }
+}
+
+#[test]
 fn test_invalidate() {
     unsafe {
         init_pool(10);

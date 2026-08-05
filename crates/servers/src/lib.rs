@@ -13,6 +13,7 @@ pub mod rs;
 pub mod sched;
 pub mod tty;
 pub mod vfs;
+pub mod virtio_blk;
 pub mod vm;
 
 #[cfg(test)]

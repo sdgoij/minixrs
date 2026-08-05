@@ -7,7 +7,7 @@
 
 use arch_common::com::{
     DS_PROC_NR, MFS_PROC_NR, PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR,
-    TTY_PROC_NR, VFS_PROC_NR, VM_PROC_NR,
+    TTY_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VM_PROC_NR,
 };
 
 const FS_BASE: i32 = 0xA00;
@@ -593,6 +593,7 @@ fn test_initramfs_boot_files() -> u32 {
         "/sbin/tty",
         "/sbin/mfs",
         "/sbin/ramdisk",
+        "/sbin/virtio_blk",
     ];
     let mut failures: u32 = 0;
     for &f in &files {
@@ -736,6 +737,7 @@ fn test_boot_procs_page_tables() -> u32 {
             (VFS_PROC_NR, "vfs"),
             (VM_PROC_NR, "vm"),
             (RAMDISK_PROC_NR, "ramdisk"),
+            (VIRTIO_BLK_PROC_NR, "virtio_blk"),
             (MFS_PROC_NR, "mfs"),
             (TTY_PROC_NR, "tty"),
         ];
@@ -880,6 +882,7 @@ fn test_all_boot_procs_alive() -> u32 {
         (SCHED_PROC_NR, "SCHED"),
         (VFS_PROC_NR, "VFS"),
         (RAMDISK_PROC_NR, "RAMDISK"),
+        (VIRTIO_BLK_PROC_NR, "VIRTIO_BLK"),
         (VM_PROC_NR, "VM"),
         (MFS_PROC_NR, "MFS"),
         (PFS_PROC_NR, "PFS"),
@@ -902,6 +905,7 @@ fn test_boot_procs_consistent() -> u32 {
         (SCHED_PROC_NR, "sched"),
         (VFS_PROC_NR, "vfs"),
         (RAMDISK_PROC_NR, "ramdisk"),
+        (VIRTIO_BLK_PROC_NR, "virtio_blk"),
         (VM_PROC_NR, "vm"),
         (MFS_PROC_NR, "mfs"),
         (PFS_PROC_NR, "pfs"),

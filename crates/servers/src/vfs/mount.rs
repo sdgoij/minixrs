@@ -308,6 +308,7 @@ pub fn do_mount() -> i32 {
         req_readsuper(
             vmp,
             core::ptr::null(),
+            0, /* label_len */
             0, /*dev*/
             readonly,
             1, /*isroot*/
@@ -449,13 +450,23 @@ pub fn mount_root() -> *mut Vnode {
         (*vmp).m_fs_e = fs_e;
     }
 
-    // Step 4: Call req_readsuper on MFS with dev=0 (RAM disk), isroot=1.
+    // Step 4: Call req_readsuper on MFS with dev=0, passing the label of
+    // the block driver that backs the root device. MFS resolves the label
+    // to a driver endpoint (bdev_driver) and routes root block I/O to it.
+    //
+    // The root filesystem lives on the attached virtio disk on every arch;
+    // MFS routes block I/O through the BDEV protocol to the virtio_blk
+    // driver server (x86_64 legacy PCI, RISC-V/AArch64 modern virtio-mmio).
+    #[cfg(target_os = "none")]
+    let driver_label: &[u8] = b"virtio_blk";
+
     #[cfg(target_os = "none")]
     let (r, node, _flags_reply) = unsafe {
         req_readsuper(
             vmp,
-            label.as_ptr(),
-            0, /* dev: RAM disk */
+            driver_label.as_ptr(),
+            driver_label.len(),
+            0, /* dev: root block device */
             0, /* readonly: writable */
             1, /* isroot */
         )

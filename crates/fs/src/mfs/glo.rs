@@ -167,3 +167,17 @@ pub unsafe fn get_super_ptr(idx: usize) -> *mut SuperBlock {
     let base = core::ptr::addr_of_mut!((*mfs).super_blocks[0]);
     base.add(idx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mfs_global_layout_offsets() {
+        // Byte offsets of protocol fields inside MfsGlobal (used by the
+        // QEMU-monitor debug probe; keep in sync with the struct).
+        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77568);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77560);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77552);
+    }
+}

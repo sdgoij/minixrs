@@ -176,8 +176,11 @@ pub fn cp(args: &[&str]) -> i32 {
         return 1;
     }
 
-    // Open/create destination O_WRONLY | O_CREAT | O_TRUNC = 0x201
-    let dst_fd = unsafe { minix_rt::syscall3(4, dst.as_ptr() as u64, dst.len() as u64, 0x201) };
+    // Open/create destination O_WRONLY | O_CREAT | O_TRUNC.
+    // O_WRONLY=1, O_CREAT=0o100=0x40, O_TRUNC=0o1000=0x200 → 0x241.
+    let dst_flags = minix_std::fs::O_WRONLY | minix_std::fs::O_CREAT | minix_std::fs::O_TRUNC;
+    let dst_fd =
+        unsafe { minix_rt::syscall3(4, dst.as_ptr() as u64, dst.len() as u64, dst_flags as u64) };
     if dst_fd < 0 {
         write_err(b"cp: cannot create ");
         write_err(dst.as_bytes());
@@ -197,8 +200,16 @@ pub fn cp(args: &[&str]) -> i32 {
             break;
         }
         // NR_WRITE = 3
-        unsafe {
-            minix_rt::syscall3(3, dst_fd as u64, buf.as_ptr() as u64, n as u64);
+        let w = unsafe { minix_rt::syscall3(3, dst_fd as u64, buf.as_ptr() as u64, n as u64) };
+        if w < 0 {
+            write_err(b"cp: write failed\n");
+            unsafe {
+                minix_rt::syscall1(5, src_fd as u64);
+            }
+            unsafe {
+                minix_rt::syscall1(5, dst_fd as u64);
+            }
+            return 1;
         }
     }
 
@@ -520,9 +531,37 @@ pub fn chown(args: &[&str]) -> i32 {
     exit_code
 }
 
-/// sync — synchronize cached writes.
+/// sync — flush cached filesystem writes to disk.
 pub fn sync(_args: &[&str]) -> i32 {
-    write_out(b"sync\n");
+    #[cfg(target_os = "none")]
+    {
+        // Send VFS_SYNC to VFS, which forwards REQ_SYNC to each mounted
+        // filesystem; MFS then writes dirty inodes and blocks to the device.
+        let mut msg = [0u8; 64];
+        msg[0..4].copy_from_slice(&minix_rt::VFS_PROC_NR.to_le_bytes());
+        msg[4..8].copy_from_slice(&minix_rt::VFS_SYNC.to_le_bytes());
+        let ret = unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                minix_rt::VFS_PROC_NR as u64,
+                msg.as_mut_ptr() as u64,
+            )
+        };
+        if ret < 0 {
+            write_err(b"sync: ");
+            write_err(errstr(-ret as i32));
+            write_err(b"\n");
+            return 1;
+        }
+        // Reply status is at bytes 4-7 (m_type set by VFS's reply()).
+        let status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+        if status < 0 {
+            write_err(b"sync: ");
+            write_err(errstr(-status));
+            write_err(b"\n");
+            return 1;
+        }
+    }
     0
 }
 

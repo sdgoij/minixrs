@@ -8,11 +8,6 @@ extern crate std;
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
-    // The server main is target-only: on host builds (cargo test bins) it
-    // would spin in the receive loop forever, so it is not called there.
-    #[cfg(target_os = "none")]
-    unsafe {
-        servers::vfs::main::vfs_main()
-    };
+    servers::virtio_blk::virtio_blk_server_main();
     0
 }

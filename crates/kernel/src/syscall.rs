@@ -140,8 +140,9 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 
 /// SYS_open (4) — open a file.
 /// args[0] = path pointer, args[1] = path length, args[2] = flags.
-/// Forwards to VFS via IPC. VFS's do_open reads:
-///   flags at offset 8, path_addr at offset 16, path_len at offset 24.
+/// Forwards to VFS via IPC. With O_CREAT it becomes VFS_CREAT (do_creat's
+/// layout: name @ 8, name_len @ 16, flags @ 24, mode @ 28); otherwise
+/// VFS_OPEN (do_open's layout: flags @ 8, path_addr @ 16, path_len @ 24).
 unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let path_ptr = args[0];
     let path_len = args[1] as u32;
@@ -153,10 +154,19 @@ unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
     msg.fill(0);
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-    msg[4..8].copy_from_slice(&0x103i32.to_le_bytes()); // VFS_OPEN = 0x103
-    msg[8..12].copy_from_slice(&flags.to_le_bytes());
-    msg[16..24].copy_from_slice(&path_ptr.to_le_bytes());
-    msg[24..28].copy_from_slice(&path_len.to_le_bytes());
+    if flags & 0o100 != 0 {
+        // O_CREAT set — the file may need to be created (VFS_CREAT).
+        msg[4..8].copy_from_slice(&0x104i32.to_le_bytes()); // VFS_CREAT = 0x104
+        msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
+        msg[16..20].copy_from_slice(&path_len.to_le_bytes());
+        msg[24..28].copy_from_slice(&flags.to_le_bytes());
+        msg[28..32].copy_from_slice(&0o644i32.to_le_bytes()); // default create mode
+    } else {
+        msg[4..8].copy_from_slice(&0x103i32.to_le_bytes()); // VFS_OPEN = 0x103
+        msg[8..12].copy_from_slice(&flags.to_le_bytes());
+        msg[16..24].copy_from_slice(&path_ptr.to_le_bytes());
+        msg[24..28].copy_from_slice(&path_len.to_le_bytes());
+    }
     unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
@@ -324,27 +334,11 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
     }
     if fd == 1 || fd == 2 {
         if !caller.is_null() && (*caller).p_fd_vfs & (1u32 << fd) != 0 {
-            // Forward the write to VFS. Build the request in the caller's
-            // per-process send buffer, NOT on the shared kernel stack: the
-            // SENDREC blocks the caller, and the next process to run reuses
-            // the same kernel stack. A reply delivered to a kernel-stack
-            // address would overwrite that process's live frame (its saved
-            // registers and return addresses) and crash the kernel.
-            let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
-            msg.fill(0);
-            msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-            msg[4..8].copy_from_slice(&0x101i32.to_le_bytes()); // VFS_WRITE = 0x101
-            msg[8..12].copy_from_slice(&fd.to_le_bytes());
-            msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
-            msg[24..32].copy_from_slice(&(count as u64).to_le_bytes());
-            msg[32..40].copy_from_slice(&0u64.to_le_bytes()); // position (unused)
-
-            // mini_receive re-points p_delivermsg_vir at m_ptr (p_sendmsg)
-            // before blocking, so the reply lands in the same per-process
-            // buffer. Set it up front too so a reply arriving during the
-            // send phase (before mini_receive runs) is also delivered there
-            return unsafe { crate::ipc::syscall_sendrec_status(caller, msg) };
+            // VFS-owned fd 1/2 (dup2'd redirect): the write must reach the
+            // redirect file, not the console.
+            return unsafe { forward_write_to_vfs(caller, fd, buf, count) };
         }
+        // Serial output shortcut for console writes.
         if count > 0 {
             for i in 0..count.min(256) {
                 let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
@@ -356,8 +350,41 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
         }
         count as i64
     } else {
-        -9 // EBADF
+        // fd 0 or regular files (fd >= 3): forward to VFS, mirroring
+        // sys_read_handler. Without this, fd >= 3 writes returned EBADF
+        // and cp silently dropped every copied byte.
+        unsafe { forward_write_to_vfs(caller, fd, buf, count) }
     }
+}
+
+/// Build a VFS_WRITE request in the caller's per-process send buffer and
+/// block on the reply. Used for VFS-owned fd 1/2 (dup2'd redirects) and
+/// for regular file descriptors (fd >= 3), whose writes must reach the
+/// filesystem rather than the serial console.
+///
+/// # Safety
+///
+/// `caller` must point to a valid Proc and `buf` must be readable for
+/// `count` bytes in the caller's address space.
+unsafe fn forward_write_to_vfs(
+    caller: *mut crate::proc::Proc,
+    fd: i32,
+    buf: *const u8,
+    count: usize,
+) -> i64 {
+    // The reply lands in the same per-process buffer: mini_receive re-points
+    // p_delivermsg_vir at m_ptr (p_sendmsg) before blocking, and setting it
+    // up front covers a reply arriving during the send phase.
+    let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
+    msg.fill(0);
+    msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+    msg[4..8].copy_from_slice(&0x101i32.to_le_bytes()); // VFS_WRITE = 0x101
+    msg[8..12].copy_from_slice(&fd.to_le_bytes());
+    msg[16..24].copy_from_slice(&(buf as u64).to_le_bytes());
+    msg[24..32].copy_from_slice(&(count as u64).to_le_bytes());
+    msg[32..40].copy_from_slice(&0u64.to_le_bytes()); // position (unused)
+
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_setfdvfs (53) — mark fd 0..2 as VFS-owned (on=1) or serial (on=0).
@@ -1050,12 +1077,14 @@ mod tests {
     }
 
     #[test]
-    fn test_write_bad_fd_returns_ebadf() {
+    fn test_write_regular_fd_null_buf_returns_efault() {
+        // Writes to regular fds (>= 3) forward to VFS, which validates the
+        // fd (VFS's do_write returns EBADF for a bad one). The kernel-side
+        // EFAULT check still applies before routing.
         unsafe {
-            let buf = [0u8; 10];
-            let args = [99u64, buf.as_ptr() as u64, 10u64, 0, 0, 0];
+            let args = [3u64, 0u64, 10u64, 0, 0, 0]; // fd 3, null buf
             let rp = crate::table::proc_addr(0);
-            assert_eq!(sys_write_handler(rp, &args), -9);
+            assert_eq!(sys_write_handler(rp, &args), -14);
         }
     }
 

@@ -10,7 +10,7 @@
 //! driver server exists, and by the MFS unit tests.
 
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 #[cfg(any(target_os = "none", test))]
 use arch_common::safecopies::{
@@ -19,6 +19,9 @@ use arch_common::safecopies::{
 
 /// Block size for the RAM disk (must match the FS block size — 4096 for Minix V3).
 pub const RAM_DISK_BLOCK_SIZE: usize = 4096;
+
+/// Success status (MINIX `OK`).
+const OK: i32 = 0;
 
 /// Static storage for the RAM disk base pointer and size.
 static BASE: AtomicUsize = AtomicUsize::new(0);
@@ -174,7 +177,7 @@ impl BdevGrantTable {
         GRANT_INVALID
     }
 
-    #[cfg(any(target_os = "none", test))]
+    /// Revoke a previously allocated grant, returning its slot to the pool.
     fn revoke(&self, grant_id: i32) {
         if grant_id < 0 || grant_id >= NR_BDEV_GRANTS as i32 {
             return;
@@ -184,6 +187,74 @@ impl BdevGrantTable {
             entries[grant_id as usize].cp_flags = 0;
         }
     }
+}
+
+/// Number of block-device majors MFS tracks a driver endpoint for.
+const NR_BDEV_MAJORS: usize = 16;
+
+/// Per-major block driver endpoint, resolved from the driver label by
+/// [`bdev_driver`] (called from `fs_readsuper`/`fs_new_driver`). Zero
+/// means "not set" — block I/O then falls back to the ramdisk driver.
+static DRIVER_ENDPOINTS: [AtomicI32; NR_BDEV_MAJORS] =
+    [const { AtomicI32::new(0) }; NR_BDEV_MAJORS];
+
+/// Map a known driver label to its endpoint. Labels from VFS arrive
+/// NUL-terminated (req_readsuper includes the terminator in label_len), so
+/// trailing NULs are stripped before comparing.
+fn endpoint_for_label(label: &[u8]) -> i32 {
+    let label = label.split(|&b| b == 0).next().unwrap_or(label);
+    if label == b"virtio_blk" {
+        arch_common::com::VIRTIO_BLK_PROC_NR
+    } else if label == b"ramdisk" {
+        arch_common::com::RAMDISK_PROC_NR
+    } else {
+        -1 // unknown label
+    }
+}
+
+/// Associate the driver named by `label` with `dev`'s major number
+/// (libbdev `bdev_driver`). Returns OK on success, or EINVAL for an
+/// out-of-range major or an unknown label.
+pub fn bdev_driver(dev: u32, label: &[u8]) -> i32 {
+    let major = (dev >> 16) as usize;
+    if major >= NR_BDEV_MAJORS {
+        return -22; // EINVAL
+    }
+    let ep = endpoint_for_label(label);
+    if ep < 0 {
+        return -22; // EINVAL
+    }
+    DRIVER_ENDPOINTS[major].store(ep, Ordering::Relaxed);
+    OK
+}
+
+/// Endpoint serving block I/O for `dev`, defaulting to the ramdisk driver.
+/// Available on the host so the label-resolution tests can assert the
+/// resolved endpoint.
+#[cfg(any(target_os = "none", test))]
+fn driver_endpoint(dev: u32) -> i32 {
+    let major = (dev >> 16) as usize;
+    if major < NR_BDEV_MAJORS {
+        let ep = DRIVER_ENDPOINTS[major].load(Ordering::Relaxed);
+        if ep != 0 {
+            return ep;
+        }
+    }
+    arch_common::com::RAMDISK_PROC_NR
+}
+
+/// Copy `len` bytes from the grant `grant_id` (granted by `granter`) into
+/// `dst` via `SYS_SAFECOPYFROM`. Used to read driver labels and other
+/// small payloads sent by VFS.
+#[cfg(target_os = "none")]
+pub fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&granter.to_ne_bytes());
+    kmsg[12..16].copy_from_slice(&grant_id.to_ne_bytes());
+    kmsg[16..24].copy_from_slice(&0u64.to_ne_bytes());
+    kmsg[24..32].copy_from_slice(&(dst.as_mut_ptr() as u64).to_ne_bytes());
+    kmsg[32..40].copy_from_slice(&(dst.len() as u64).to_ne_bytes());
+    minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
 #[cfg(target_os = "none")]
@@ -212,12 +283,8 @@ unsafe fn bdev_request(rw_flag: i32, dev: u32, block: u64, buf: *mut u8, block_s
         // READING: the driver writes into our buffer (CPF_WRITE).
         // WRITING: the driver reads our buffer (CPF_READ).
         let grant_write = rw_flag == 0;
-        let grant = BDEV_GRANT_TABLE.grant_direct(
-            arch_common::com::RAMDISK_PROC_NR,
-            buf as u64,
-            block_size,
-            grant_write,
-        );
+        let drv_e = driver_endpoint(dev);
+        let grant = BDEV_GRANT_TABLE.grant_direct(drv_e, buf as u64, block_size, grant_write);
         if grant == GRANT_INVALID {
             return -1;
         }
@@ -248,7 +315,7 @@ unsafe fn bdev_request(rw_flag: i32, dev: u32, block: u64, buf: *mut u8, block_s
 
         let r = minix_rt::syscall2(
             minix_rt::SENDREC_CALL,
-            arch_common::com::RAMDISK_PROC_NR as u64,
+            drv_e as u64,
             &mut msg as *mut arch_common::ipc::Message as u64,
         );
         BDEV_GRANT_TABLE.revoke(grant);
@@ -422,5 +489,48 @@ mod tests {
         let bufs = [buf.as_mut_ptr(); 1];
         let n = unsafe { bdev_ram_disk_io(0, 0, 1, bufs.as_ptr(), 4096, 0) };
         assert!(n < 0);
+    }
+
+    #[test]
+    fn test_endpoint_for_label_strips_trailing_nul() {
+        // VFS's req_readsuper sends label_len = strlen + 1, so the label
+        // MFS receives is NUL-terminated. Without stripping, bdev_driver
+        // never matched and block I/O silently fell back to the ramdisk
+        // driver (no persistence on the virtio disk).
+        assert_eq!(
+            endpoint_for_label(b"virtio_blk"),
+            arch_common::com::VIRTIO_BLK_PROC_NR
+        );
+        assert_eq!(
+            endpoint_for_label(b"virtio_blk\0"),
+            arch_common::com::VIRTIO_BLK_PROC_NR
+        );
+        assert_eq!(
+            endpoint_for_label(b"virtio_blk\0\0"),
+            arch_common::com::VIRTIO_BLK_PROC_NR
+        );
+        assert_eq!(
+            endpoint_for_label(b"ramdisk"),
+            arch_common::com::RAMDISK_PROC_NR
+        );
+        assert_eq!(
+            endpoint_for_label(b"ramdisk\0"),
+            arch_common::com::RAMDISK_PROC_NR
+        );
+        assert_eq!(endpoint_for_label(b"unknown"), -1);
+        assert_eq!(endpoint_for_label(b"unknown\0"), -1);
+    }
+
+    #[test]
+    fn test_bdev_driver_resolves_nul_terminated_label() {
+        // dev with major 1: after bdev_driver("virtio_blk\0"), block I/O
+        // for that major must resolve to the virtio-blk endpoint, not the
+        // ramdisk fallback.
+        let dev = 1u32 << 16;
+        assert_eq!(bdev_driver(dev, b"virtio_blk\0"), OK);
+        assert_eq!(driver_endpoint(dev), arch_common::com::VIRTIO_BLK_PROC_NR);
+        // An unknown label leaves the fallback in place.
+        assert_eq!(bdev_driver(dev, b"bogus\0"), -22);
+        assert_eq!(driver_endpoint(dev), arch_common::com::VIRTIO_BLK_PROC_NR);
     }
 }

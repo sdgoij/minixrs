@@ -285,6 +285,9 @@ impl MinixFs {
         self.data[1024..1024 + sb_bytes.len()].copy_from_slice(&sb_bytes);
 
         // Inode bitmap at block 2, zone bitmap after it.
+        // Bit 0 is reserved (there is no inode 0); MFS's alloc_bit starts at
+        // s_isearch and would otherwise hand out inode 0.
+        self.inode_bitmap[0] |= 1;
         let imap_block = 2usize;
         let imap_off = imap_block * BLOCK_SIZE;
         let imap_len = self.imap_blocks as usize * BLOCK_SIZE;
@@ -320,7 +323,14 @@ impl MinixFs {
     }
 
     fn set_inode_used(&mut self, ino: u32) {
-        let bit = (ino - 1) as usize;
+        // On-disk convention (MINIX `imap_bit`): inode N is bit N of the
+        // inode bitmap, and bit 0 is reserved (there is no inode 0). MFS's
+        // alloc_bit returns the bit number directly as the inode number, so
+        // inode 1 must be bit 1 — a bit N-1 mapping shifts every inode by one
+        // and makes MFS hand out the console's inode as free (observed:
+        // the first create reused /dev/console's inode 37 and every write
+        // went to the tty instead of the new file).
+        let bit = ino as usize;
         self.inode_bitmap[bit / 8] |= 1 << (bit % 8);
     }
 
@@ -539,5 +549,51 @@ mod tests {
         let ino = fs.add_file(zone, "x", b"123");
         assert_eq!(ino, 3, "inodes: 1=root, 2=bin, 3=x");
         let _ = fs.finalise();
+    }
+
+    #[test]
+    fn inode_bitmap_uses_on_disk_bit_numbering() {
+        // MFS (MINIX `imap_bit`) maps inode N to bit N of the inode bitmap,
+        // with bit 0 reserved. A bit N-1 mapping shifts every inode by one:
+        // MFS's alloc_bit then treats the console inode as free and reuses it
+        // on the first create, so new files inherit its S_IFCHR mode and all
+        // writes route to the tty (observed before the fix).
+        let empty: &[(&'static str, Vec<u8>)] = &[];
+        let image = build_minixfs(empty);
+
+        let imap_blocks = i16::from_le_bytes(image[1024 + 8..1024 + 10].try_into().unwrap());
+        let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
+        let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
+
+        // Console is inode 10 in the empty image (root, bin, sbin, etc, tmp,
+        // dev + tty00, tty01, null). Its imap bit (10) must be set, bit 0
+        // must be reserved, and bit 1 (inode 1, root) must be set.
+        let imap = &image[2 * BLOCK_SIZE..3 * BLOCK_SIZE];
+        assert_eq!(imap[0] & 1, 1, "bit 0 must be reserved (no inode 0)");
+        assert_eq!((imap[0] >> 1) & 1, 1, "inode 1 (root) must be in use");
+        assert_eq!(
+            (imap[10 / 8] >> (10 % 8)) & 1,
+            1,
+            "inode 10 (console) must be in use"
+        );
+
+        // Every inode in the table must be marked in use (bit N), so MFS's
+        // alloc_bit never hands out an inode that already has table data.
+        // The builder writes slot N-1 for inode N; walk the table.
+        let n_inodes = 10usize;
+        for ino in 1..=n_inodes {
+            assert_eq!(
+                (imap[ino / 8] >> (ino % 8)) & 1,
+                1,
+                "inode {ino} must be marked in use at bit {ino}"
+            );
+        }
+        // And the next bit (inode 11) is free — the first allocatable inode.
+        assert_eq!(
+            (imap[11 / 8] >> (11 % 8)) & 1,
+            0,
+            "inode 11 must be free for the first create"
+        );
+        let _ = itable_off;
     }
 }

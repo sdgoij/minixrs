@@ -68,6 +68,9 @@ pub const ISEEK: u8 = 1;
 /// PATH_MAX for user_path.
 pub const PATH_MAX: usize = 1024;
 
+/// Maximum driver label length (minix `const.h` LABEL_MAX).
+pub const LABEL_MAX: usize = 64;
+
 /// Number of FS call vector entries.
 pub const NREQS: usize = 34;
 

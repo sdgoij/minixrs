@@ -432,7 +432,10 @@ pub unsafe fn boot_create_restricted_page_table(
     stack_start: u64,
     stack_end: u64,
     stack_phys: u64,
+    map_low_gb_dev_user: bool,
 ) -> Option<u64> {
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = map_low_gb_dev_user;
     let boot_cr3_val = boot_cr3();
     if boot_cr3_val == 0 {
         return None;
@@ -621,6 +624,33 @@ pub unsafe fn boot_create_restricted_page_table(
             let pud1_flags = arch_aarch64::pte::PTE_VALID | arch_aarch64::pte::PTE_TYPE;
             let pud1_entry = kernel::hal::build_pte(user_pmd, pud1_flags);
             unsafe { core::ptr::write((private_pud as *mut u64).add(1), pud1_entry) };
+
+            // For driver processes, replace PUD[0] with a private PMD that
+            // maps the low 1GB identity: EL1-only blocks, except the
+            // virtio-mmio window (0x0a000000 on QEMU virt) which is EL0_RW
+            // so the driver can probe and drive the device from user mode.
+            // Kept separate from the shared boot table (PUD[0] is copied
+            // from it above); never split that shared block in place.
+            if map_low_gb_dev_user {
+                let pmd_low = unsafe { kernel::hal::alloc_phys_page()? };
+                for i in 0..(page_sz / 8) {
+                    unsafe { core::ptr::write_volatile((pmd_low as *mut u64).add(i), 0) };
+                }
+                const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
+                for i in 0..512usize {
+                    let va = (i as u64) * 0x20_0000;
+                    let flags = if va >= VIRTIO_MMIO_BASE && va < VIRTIO_MMIO_BASE + 0x20_0000 {
+                        PMD_BLOCK_USER
+                    } else {
+                        PMD_BLOCK_EL1
+                    };
+                    unsafe {
+                        core::ptr::write_volatile((pmd_low as *mut u64).add(i), va | flags);
+                    }
+                }
+                let pud0_entry = kernel::hal::build_pte(pmd_low, pud1_flags);
+                unsafe { core::ptr::write((private_pud as *mut u64).add(0), pud0_entry) };
+            }
 
             // Replace PGD[0] with private PUD.
             let flags = kernel::hal::pte_nonleaf_flags();

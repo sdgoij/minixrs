@@ -205,7 +205,7 @@ pub fn endpoint_lookup(ep: i32) -> *mut Proc {
 
 /// Boot-time process descriptor.
 /// Number of boot processes.
-pub const NR_BOOT_PROCS: usize = 17;
+pub const NR_BOOT_PROCS: usize = 18;
 
 /// Boot image entry.
 #[derive(Debug, Clone, Copy)]
@@ -292,6 +292,10 @@ pub static BOOT_IMAGE: [BootImage; NR_BOOT_PROCS] = [
         proc_nr: 11,
         name: "ramdisk",
     }, // RAMDISK_PROC_NR
+    BootImage {
+        proc_nr: 12,
+        name: "virtio_blk",
+    }, // VIRTIO_BLK_PROC_NR
 ];
 
 // Run queue
