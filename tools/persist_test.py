@@ -6,7 +6,8 @@ def boot(with_monitor, tag):
     q = ["qemu-system-x86_64", "-nographic", "-m", "256M", "-no-reboot",
          "-kernel", "target/trampoline.elf",
          "-device", "loader,file=target/kernel.bin,addr=0x200000",
-         "-drive", "if=virtio,format=raw,file=target/disk.img,cache=writethrough"]
+         "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+         "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0"]
     if with_monitor:
         q += ["-monitor", "tcp:127.0.0.1:5556,server,nowait"]
     log = open(f"target/persist_{tag}.log", "wb")

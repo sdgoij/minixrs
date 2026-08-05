@@ -37,16 +37,36 @@ pub enum VirtioTransport {
     Mmio,
 }
 
-/// Register offsets for legacy virtio PCI (I/O port BAR).
-pub const VIRTIO_HOST_F_OFF: u16 = 0x0000;
-pub const VIRTIO_GUEST_F_OFF: u16 = 0x0004;
-pub const VIRTIO_QADDR_OFF: u16 = 0x0008;
-pub const VIRTIO_QSIZE_OFF: u16 = 0x000C;
-pub const VIRTIO_QSEL_OFF: u16 = 0x000E;
-pub const VIRTIO_QNOTIFY_OFF: u16 = 0x0010;
-pub const VIRTIO_DEV_STATUS_OFF: u16 = 0x0012;
-pub const VIRTIO_ISR_STATUS_OFF: u16 = 0x0013;
-pub const VIRTIO_DEV_SPECIFIC_OFF: u16 = 0x0014;
+/// Register offsets for the modern virtio-pci (virtio 1.x) common config
+/// region — `virtio_pci_common_cfg` from `linux/virtio_pci.h`, which QEMU
+/// vendors verbatim. The region lives in a memory BAR located via the
+/// device's virtio capabilities.
+pub const VPCI_DEVICE_FEATURE_SEL: u16 = 0x00;
+pub const VPCI_DEVICE_FEATURE: u16 = 0x04;
+pub const VPCI_DRIVER_FEATURE_SEL: u16 = 0x08;
+pub const VPCI_DRIVER_FEATURE: u16 = 0x0C;
+// queue_select (0x16), queue_size (0x18), queue_enable (0x1C) per
+// linux/virtio_pci.h. queue_size is both the read-only max and the
+// configured size: reading it before writing yields the queue maximum.
+pub const VPCI_QUEUE_SEL: u16 = 0x16;
+pub const VPCI_QUEUE_NUM_MAX: u16 = 0x18;
+pub const VPCI_QUEUE_NUM: u16 = 0x18;
+pub const VPCI_QUEUE_READY: u16 = 0x1C;
+pub const VPCI_QUEUE_DESC_LOW: u16 = 0x20;
+pub const VPCI_QUEUE_DESC_HIGH: u16 = 0x24;
+pub const VPCI_QUEUE_AVAIL_LOW: u16 = 0x28;
+pub const VPCI_QUEUE_AVAIL_HIGH: u16 = 0x2C;
+pub const VPCI_QUEUE_USED_LOW: u16 = 0x30;
+pub const VPCI_QUEUE_USED_HIGH: u16 = 0x34;
+pub const VPCI_DEVICE_STATUS: u16 = 0x14;
+
+/// Virtio PCI vendor-specific capability types (`virtio_pci_cap.cfg_type`).
+pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
+pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
+pub const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
+pub const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
+/// PCI capability ID for vendor-specific capabilities.
+pub const VIRTIO_PCI_CAP_VNDR: u8 = 0x09;
 
 /// MSI offset compensation when MSI is enabled.
 pub const VIRTIO_MSI_ADD_OFF: u16 = 0x0004;
@@ -155,8 +175,17 @@ pub struct VirtioFeature {
 /// static vring storage, IRQ line, and initialization state.
 pub struct VirtioDevice {
     pub transport: VirtioTransport,
-    /// I/O port base (Pci) or MMIO base address (Mmio).
+    /// Common-config region address: MMIO base (Mmio) or the PA of the
+    /// `virtio_pci_common_cfg` region (Pci, identity-mapped by the kernel).
     pub base: u64,
+    /// Modern PCI: guest-physical address of the notify region.
+    pub notify: u64,
+    /// Modern PCI: notify offset multiplier (per queue index).
+    pub notify_off_mult: u32,
+    /// Modern PCI: guest-physical address of the ISR status region.
+    pub isr: u64,
+    /// Modern PCI: guest-physical address of the device config region.
+    pub devcfg: u64,
     pub name: &'static str,
     pub features: &'static [VirtioFeature],
     /// Bitmap of host-supported features (set during `exchange_features`).
@@ -282,6 +311,28 @@ unsafe fn mmio_write32(addr: u64, val: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
 }
 
+/// Write 16 bits to an MMIO register (device memory).
+///
+/// # Safety
+///
+/// `addr` must be a mapped device-MMIO address valid for writes.
+#[inline]
+unsafe fn mmio_write16(addr: u64, val: u16) {
+    // SAFETY: caller guarantees `addr` is a mapped device register.
+    unsafe { core::ptr::write_volatile(addr as *mut u16, val) }
+}
+
+/// Write 8 bits to an MMIO register (device memory).
+///
+/// # Safety
+///
+/// `addr` must be a mapped device-MMIO address valid for writes.
+#[inline]
+unsafe fn mmio_write8(addr: u64, val: u8) {
+    // SAFETY: caller guarantees `addr` is a mapped device register.
+    unsafe { core::ptr::write_volatile(addr as *mut u8, val) }
+}
+
 //
 // One contiguous, page-aligned vring for the single queue. Legacy virtio
 // hands the host a single queue base address and lets it derive the
@@ -368,32 +419,6 @@ unsafe fn devio(request: u32, port: u16, value: u32) -> u32 {
     hook(request, port, value)
 }
 
-/// Write 8 bits to an I/O port.
-#[inline]
-unsafe fn out8(port: u16, val: u8) {
-    #[cfg(target_os = "none")]
-    unsafe {
-        devio(arch_common::com::DIO_OUTPUT_BYTE, port, val as u32);
-    }
-    #[cfg(not(target_os = "none"))]
-    unsafe {
-        crate::hal::outb(port, val);
-    }
-}
-
-/// Write 16 bits to an I/O port.
-#[inline]
-unsafe fn out16(port: u16, val: u16) {
-    #[cfg(target_os = "none")]
-    unsafe {
-        devio(arch_common::com::DIO_OUTPUT_WORD, port, val as u32);
-    }
-    #[cfg(not(target_os = "none"))]
-    unsafe {
-        crate::hal::outw(port, val);
-    }
-}
-
 /// Write 32 bits to an I/O port.
 #[inline]
 unsafe fn out32(port: u16, val: u32) {
@@ -404,32 +429,6 @@ unsafe fn out32(port: u16, val: u32) {
     #[cfg(not(target_os = "none"))]
     unsafe {
         crate::hal::outl(port, val);
-    }
-}
-
-/// Read 8 bits from an I/O port.
-#[inline]
-unsafe fn in8(port: u16) -> u8 {
-    #[cfg(target_os = "none")]
-    {
-        unsafe { devio(arch_common::com::DIO_INPUT_BYTE, port, 0) as u8 }
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        unsafe { crate::hal::inb(port) }
-    }
-}
-
-/// Read 16 bits from an I/O port.
-#[inline]
-unsafe fn in16(port: u16) -> u16 {
-    #[cfg(target_os = "none")]
-    {
-        unsafe { devio(arch_common::com::DIO_INPUT_WORD, port, 0) as u16 }
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        unsafe { crate::hal::inw(port) }
     }
 }
 
@@ -488,81 +487,30 @@ unsafe fn pci_cfg_read32(bus: u8, dev: u8, func: u8, reg: u8) -> u32 {
     }
 }
 
-/// Read 32-bit from device register at `offset`.
-pub fn virtio_read32(dev: &VirtioDevice, offset: u16) -> u32 {
+/// Guest-physical address of the device-specific config region.
+fn dev_cfg_base(dev: &VirtioDevice) -> u64 {
     match dev.transport {
-        VirtioTransport::Pci => unsafe { in32(dev.base as u16 + offset) },
-        VirtioTransport::Mmio => unsafe { mmio_read32(dev.base + offset as u64) },
-    }
-}
-
-/// Read 16-bit from device register at `offset`.
-pub fn virtio_read16(dev: &VirtioDevice, offset: u16) -> u16 {
-    match dev.transport {
-        VirtioTransport::Pci => unsafe { in16(dev.base as u16 + offset) },
-        VirtioTransport::Mmio => unsafe { mmio_read32(dev.base + offset as u64) as u16 },
-    }
-}
-
-/// Read 8-bit from device register at `offset`.
-pub fn virtio_read8(dev: &VirtioDevice, offset: u16) -> u8 {
-    match dev.transport {
-        VirtioTransport::Pci => unsafe { in8(dev.base as u16 + offset) },
-        VirtioTransport::Mmio => unsafe { mmio_read32(dev.base + offset as u64) as u8 },
-    }
-}
-
-/// Write 32-bit to device register at `offset`.
-pub fn virtio_write32(dev: &VirtioDevice, offset: u16, val: u32) {
-    match dev.transport {
-        VirtioTransport::Pci => unsafe { out32(dev.base as u16 + offset, val) },
-        VirtioTransport::Mmio => unsafe { mmio_write32(dev.base + offset as u64, val) },
-    }
-}
-
-/// Write 16-bit to device register at `offset`.
-pub fn virtio_write16(dev: &VirtioDevice, offset: u16, val: u16) {
-    match dev.transport {
-        VirtioTransport::Pci => unsafe { out16(dev.base as u16 + offset, val) },
-        VirtioTransport::Mmio => unsafe { mmio_write32(dev.base + offset as u64, val as u32) },
-    }
-}
-
-/// Write 8-bit to device register at `offset`.
-pub fn virtio_write8(dev: &VirtioDevice, offset: u16, val: u8) {
-    match dev.transport {
-        VirtioTransport::Pci => unsafe { out8(dev.base as u16 + offset, val) },
-        VirtioTransport::Mmio => unsafe { mmio_write32(dev.base + offset as u64, val as u32) },
-    }
-}
-
-/// Offset of the device-specific config area for a transport.
-fn dev_specific_off(transport: VirtioTransport) -> u16 {
-    match transport {
-        VirtioTransport::Pci => VIRTIO_DEV_SPECIFIC_OFF,
-        VirtioTransport::Mmio => VIRTIO_MMIO_CONFIG,
+        VirtioTransport::Pci => dev.devcfg,
+        VirtioTransport::Mmio => dev.base + VIRTIO_MMIO_CONFIG as u64,
     }
 }
 
 /// Device-specific read 32-bit: adds the config base and MSI offset.
 pub fn virtio_sread32(dev: &VirtioDevice, offset: u16) -> u32 {
-    let off =
-        dev_specific_off(dev.transport) + if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
-    virtio_read32(dev, off)
+    let off = if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
+    unsafe { mmio_read32(dev_cfg_base(dev) + off as u64) }
 }
 
 /// Device-specific read 16-bit: adds the config base and MSI offset.
 pub fn virtio_sread16(dev: &VirtioDevice, offset: u16) -> u16 {
-    let off =
-        dev_specific_off(dev.transport) + if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
-    virtio_read16(dev, off)
+    let off = if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
+    unsafe { mmio_read32(dev_cfg_base(dev) + off as u64) as u16 }
 }
 
 /// Device-specific read 8-bit: adds the config base and MSI offset.
 pub fn virtio_sread8(dev: &VirtioDevice, offset: u16) -> u8 {
-    let off =
-        dev_specific_off(dev.transport) + if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
-    virtio_read8(dev, off)
+    let off = if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
+    unsafe { mmio_read32(dev_cfg_base(dev) + off as u64) as u8 }
 }
 
 /// Initialize a vring with the given descriptor table, avail, and used rings.
@@ -602,21 +550,30 @@ fn exchange_features(dev: &mut VirtioDevice) {
     }
 }
 
-/// Legacy PCI feature exchange: single 32-bit feature word.
+/// Modern PCI feature exchange: 64-bit feature space via the feature
+/// selector registers in the common config region. The high word carries
+/// `VIRTIO_F_VERSION_1`, which is mandatory for modern (virtio 1.x) devices.
 fn exchange_features_pci(dev: &mut VirtioDevice) {
-    let host_val = virtio_read32(dev, VIRTIO_HOST_F_OFF);
-    let mut guest_features: u32 = 0;
+    let base = dev.base;
+    unsafe {
+        // Read device features (two 32-bit words).
+        mmio_write32(base + VPCI_DEVICE_FEATURE_SEL as u64, 0);
+        let low = mmio_read32(base + VPCI_DEVICE_FEATURE as u64);
+        mmio_write32(base + VPCI_DEVICE_FEATURE_SEL as u64, 1);
+        let high = mmio_read32(base + VPCI_DEVICE_FEATURE as u64);
+        dev.host_features = ((high as u64) << 32) | low as u64;
 
-    for f in dev.features.iter() {
-        let bit = f.bit;
-        guest_features |= (f.guest_support as u32) << bit;
+        // Write the driver-selected low-word features.
+        let mut guest_low: u32 = 0;
+        for f in dev.features.iter() {
+            guest_low |= (f.guest_support as u32) << f.bit;
+        }
+        mmio_write32(base + VPCI_DRIVER_FEATURE_SEL as u64, 0);
+        mmio_write32(base + VPCI_DRIVER_FEATURE as u64, guest_low);
+        // High word: accept VIRTIO_F_VERSION_1.
+        mmio_write32(base + VPCI_DRIVER_FEATURE_SEL as u64, 1);
+        mmio_write32(base + VPCI_DRIVER_FEATURE as u64, VIRTIO_F_VERSION_1);
     }
-
-    // Store host features bitmap for later queries.
-    dev.host_features = host_val as u64;
-
-    // Write negotiated guest features to the device.
-    virtio_write32(dev, VIRTIO_GUEST_F_OFF, guest_features);
 }
 
 /// Modern MMIO feature exchange: 64-bit feature space via the selector
@@ -695,22 +652,41 @@ pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
     }
 }
 
-/// Legacy PCI queue setup: select queue 0 and write its page frame number.
+/// Modern PCI queue setup: select queue 0, program the descriptor/
+/// avail/used ring addresses in the common config region, then hand the
+/// queue to the host with `QueueReady`.
 fn alloc_queue_pci(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
-    // Select queue 0.
-    virtio_write16(dev, VIRTIO_QSEL_OFF, 0);
+    let base = dev.base;
+    unsafe {
+        // QueueSel/QueueNum/QueueReady are 16-bit registers in the PCI
+        // common config; QEMU ignores wider writes.
+        mmio_write16(base + VPCI_QUEUE_SEL as u64, 0);
+        let num_max = mmio_read32(base + VPCI_QUEUE_NUM_MAX as u64);
+        if num_max == 0 {
+            return Err(VirtioError);
+        }
+        let num = num_max.min(QUEUE_NUM as u32) as u16;
+        if num == 0 || num & (num - 1) != 0 {
+            return Err(VirtioError);
+        }
+        mmio_write16(base + VPCI_QUEUE_NUM as u64, num);
 
-    let qsize = virtio_read16(dev, VIRTIO_QSIZE_OFF);
-    if qsize == 0 || qsize & (qsize - 1) != 0 {
-        return Err(VirtioError);
+        let paddr = init_vring(dev, num);
+        let avail_pa = paddr + RING_AVAIL_OFF as u64;
+        let used_pa = paddr + RING_USED_OFF as u64;
+
+        mmio_write32(base + VPCI_QUEUE_DESC_LOW as u64, paddr as u32);
+        mmio_write32(base + VPCI_QUEUE_DESC_HIGH as u64, (paddr >> 32) as u32);
+        mmio_write32(base + VPCI_QUEUE_AVAIL_LOW as u64, avail_pa as u32);
+        mmio_write32(base + VPCI_QUEUE_AVAIL_HIGH as u64, (avail_pa >> 32) as u32);
+        mmio_write32(base + VPCI_QUEUE_USED_LOW as u64, used_pa as u32);
+        mmio_write32(base + VPCI_QUEUE_USED_HIGH as u64, (used_pa >> 32) as u32);
+
+        // The host must observe the ring addresses before the queue is
+        // marked ready.
+        crate::hal::mfence();
+        mmio_write16(base + VPCI_QUEUE_READY as u64, 1);
     }
-
-    let num = qsize.min(QUEUE_NUM);
-    let paddr = init_vring(dev, num);
-
-    // Write guest-physical page number (paddr >> 12) to host.
-    unsafe { out32(dev.base as u16 + VIRTIO_QADDR_OFF, (paddr >> 12) as u32) };
-
     dev.num_queues = 1;
     Ok(())
 }
@@ -764,7 +740,10 @@ fn alloc_queue_mmio(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
 /// Kick the device: notify it that the selected queue has new descriptors.
 fn queue_notify(dev: &VirtioDevice) {
     match dev.transport {
-        VirtioTransport::Pci => unsafe { out16(dev.base as u16 + VIRTIO_QNOTIFY_OFF, 0) },
+        // Modern PCI: notify address for queue 0 is `notify +
+        // 0 * notify_off_multiplier`; write the queue index (0) as a
+        // 16-bit value.
+        VirtioTransport::Pci => unsafe { mmio_write16(dev.notify, 0) },
         VirtioTransport::Mmio => unsafe {
             mmio_write32(dev.base + VIRTIO_MMIO_QUEUE_NOTIFY as u64, 0)
         },
@@ -972,8 +951,12 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
 /// for this device.
 pub fn virtio_had_irq(dev: &VirtioDevice) -> bool {
     match dev.transport {
-        VirtioTransport::Pci => virtio_read8(dev, VIRTIO_ISR_STATUS_OFF) & 1 != 0,
-        VirtioTransport::Mmio => virtio_read32(dev, VIRTIO_MMIO_INTERRUPT_STATUS) & 1 != 0,
+        // Modern PCI: reading the ISR status region also re-arms the
+        // interrupt.
+        VirtioTransport::Pci => unsafe { mmio_read32(dev.isr) & 1 != 0 },
+        VirtioTransport::Mmio => unsafe {
+            mmio_read32(dev.base + VIRTIO_MMIO_INTERRUPT_STATUS as u64) & 1 != 0
+        },
     }
 }
 
@@ -997,10 +980,10 @@ pub fn virtio_irq_disable(_dev: &mut VirtioDevice) {
 
 /// Probe for a virtio device with the given device ID.
 ///
-/// Dispatches to the platform transport: legacy PCI (x86_64) or modern
-/// virtio-mmio (RISC-V/AArch64). `subdevid` is the PCI subsystem device
-/// ID on the PCI path and the virtio device ID on the MMIO path (both
-/// are 2 for virtio-blk).
+/// Dispatches to the platform transport: modern virtio-pci (x86_64) or
+/// modern virtio-mmio (RISC-V/AArch64). `subdevid` is the PCI subsystem
+/// device ID on the PCI path and the virtio device ID on the MMIO path
+/// (both are 2 for virtio-blk).
 ///
 /// The `skip` parameter allows selecting the Nth matching device.
 pub fn virtio_probe(
@@ -1015,8 +998,8 @@ pub fn virtio_probe(
     }
 }
 
-/// The virtio transport for the current architecture: legacy PCI where
-/// I/O ports exist, modern MMIO elsewhere.
+/// The virtio transport for the current architecture: modern PCI where
+/// PCI config space exists, modern MMIO elsewhere.
 fn current_transport() -> VirtioTransport {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1028,8 +1011,9 @@ fn current_transport() -> VirtioTransport {
     }
 }
 
-/// Probe PCI bus 0 for a legacy virtio device with the given subsystem
-/// device ID. Returns an initialized `VirtioDevice` on success.
+/// Probe PCI bus 0 for a modern (virtio 1.x) virtio device with the
+/// given subsystem device ID. Returns an initialized `VirtioDevice` on
+/// success.
 fn pci_probe(
     subdevid: u16,
     name: &'static str,
@@ -1065,10 +1049,15 @@ fn pci_probe(
                 continue;
             }
 
-            // Read subsystem device ID (PCI offset 0x2E).
+            // Read subsystem device ID (PCI offset 0x2E) and the PCI device
+            // ID (offset 0x02). Modern (virtio 1.x) devices report
+            // 0x1040 + virtio device ID and leave the subsystem ID at the
+            // machine default, so match either.
             let sdid = unsafe { pci_cfg_read16(0, dev, func, 0x2E) };
+            let devid = unsafe { pci_cfg_read16(0, dev, func, 0x02) };
+            let modern_id = 0x1040u16.wrapping_add(subdevid);
 
-            if sdid != subdevid {
+            if sdid != subdevid && devid != modern_id {
                 if func == 0 {
                     let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
                     if header & 0x80 == 0 {
@@ -1084,13 +1073,59 @@ fn pci_probe(
                 continue;
             }
 
-            // Read BAR0: must be I/O space.
-            let bar0 = unsafe { pci_cfg_read32(0, dev, func, 0x10) };
-            if bar0 & 1 == 0 {
-                return Err(VirtioError);
+            // Modern virtio-pci: read all BARs and walk the PCI capability
+            // list to locate the transport regions. Each virtio
+            // capability names the BAR and offset of one region.
+            let mut bars = [0u32; 6];
+            for b in 0..6u8 {
+                bars[b as usize] = unsafe { pci_cfg_read32(0, dev, func, 0x10 + 4 * b) };
             }
 
-            let base = (bar0 & !0x3) as u64;
+            let mut common = 0u64;
+            let mut notify = 0u64;
+            let mut notify_off_mult = 0u32;
+            let mut isr = 0u64;
+            let mut devcfg = 0u64;
+
+            // Walk the PCI capability list (pointer at config offset 0x34).
+            let mut cap_ptr = unsafe { pci_cfg_read8(0, dev, func, 0x34) } as u32;
+            while cap_ptr != 0 {
+                let id = unsafe { pci_cfg_read8(0, dev, func, cap_ptr as u8) };
+                let next = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 1) as u8) } as u32;
+                let len = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 2) as u8) };
+                if id == VIRTIO_PCI_CAP_VNDR && len >= 12 {
+                    // `virtio_pci_cap` layout: cfg_type@3, bar@4, padding@5..7,
+                    // offset@8..11 (LE32), length@12..15. The notify
+                    // capability extends it with notify_off_multiplier@16..19.
+                    let cfg_type = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 3) as u8) };
+                    let bar = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 4) as u8) } as usize;
+                    let offset =
+                        unsafe { pci_cfg_read32(0, dev, func, (cap_ptr + 8) as u8) } as u64;
+                    let bar_pa = if bar < 6 {
+                        (bars[bar] & !0xF) as u64
+                    } else {
+                        0
+                    };
+                    match cfg_type {
+                        VIRTIO_PCI_CAP_COMMON_CFG => common = bar_pa + offset,
+                        VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                            notify = bar_pa + offset;
+                            if len >= 20 {
+                                notify_off_mult =
+                                    unsafe { pci_cfg_read32(0, dev, func, (cap_ptr + 16) as u8) };
+                            }
+                        }
+                        VIRTIO_PCI_CAP_ISR_CFG => isr = bar_pa + offset,
+                        VIRTIO_PCI_CAP_DEVICE_CFG => devcfg = bar_pa + offset,
+                        _ => {}
+                    }
+                }
+                cap_ptr = next;
+            }
+
+            if common == 0 || notify == 0 || isr == 0 || devcfg == 0 {
+                return Err(VirtioError);
+            }
 
             // Read IRQ line (PCI offset 0x3F).
             let irq = unsafe { pci_cfg_read8(0, dev, func, 0x3F) };
@@ -1098,7 +1133,11 @@ fn pci_probe(
             // Build a temporary device for register access.
             let mut device = VirtioDevice {
                 transport: VirtioTransport::Pci,
-                base,
+                base: common,
+                notify,
+                notify_off_mult,
+                isr,
+                devcfg,
                 name,
                 features,
                 host_features: 0,
@@ -1125,17 +1164,36 @@ fn pci_probe(
                 initialized: false,
             };
 
-            // Reset the device.
-            virtio_write8(&device, VIRTIO_DEV_STATUS_OFF, 0);
-
-            // Set ACK status.
-            virtio_write8(&device, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_ACK);
+            // Reset, then ACK → DRIVER → negotiate → FEATURES_OK. The
+            // PCI common-config DeviceStatus is an 8-bit register; QEMU
+            // ignores wider writes.
+            unsafe {
+                mmio_write8(device.base + VPCI_DEVICE_STATUS as u64, 0);
+                mmio_write8(device.base + VPCI_DEVICE_STATUS as u64, VIRTIO_STATUS_ACK);
+                mmio_write8(
+                    device.base + VPCI_DEVICE_STATUS as u64,
+                    VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRV,
+                );
+            }
 
             // Exchange features (needs mutable access).
             exchange_features(&mut device);
 
-            // Set DRV status.
-            virtio_write8(&device, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_DRV);
+            // The host validates the negotiated feature set when
+            // FEATURES_OK is set and clears the bit on failure.
+            unsafe {
+                crate::hal::mfence();
+                mmio_write8(
+                    device.base + VPCI_DEVICE_STATUS as u64,
+                    VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRV | VIRTIO_STATUS_FEATURES_OK,
+                );
+                if mmio_read32(device.base + VPCI_DEVICE_STATUS as u64)
+                    & VIRTIO_STATUS_FEATURES_OK as u32
+                    == 0
+                {
+                    return Err(VirtioError);
+                }
+            }
 
             device.initialized = true;
             return Ok(device);
@@ -1176,6 +1234,10 @@ fn mmio_probe(
             let mut device = VirtioDevice {
                 transport: VirtioTransport::Mmio,
                 base,
+                notify: 0,
+                notify_off_mult: 0,
+                isr: 0,
+                devcfg: 0,
                 name,
                 features,
                 host_features: 0,
@@ -1234,7 +1296,15 @@ fn mmio_probe(
 /// is fully operational.
 pub fn virtio_device_ready(dev: &mut VirtioDevice) {
     match dev.transport {
-        VirtioTransport::Pci => virtio_write8(dev, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_DRV_OK),
+        VirtioTransport::Pci => unsafe {
+            let base = dev.base;
+            let status = mmio_read32(base + VPCI_DEVICE_STATUS as u64);
+            // OR in DRV_OK, preserving the ACK|DRV|FEATURES_OK bits.
+            mmio_write8(
+                base + VPCI_DEVICE_STATUS as u64,
+                status as u8 | VIRTIO_STATUS_DRV_OK,
+            );
+        },
         VirtioTransport::Mmio => unsafe {
             let base = dev.base;
             let status = mmio_read32(base + VIRTIO_MMIO_STATUS as u64);
@@ -1252,7 +1322,7 @@ pub fn virtio_device_ready(dev: &mut VirtioDevice) {
 /// Clears the device status (writing 0), which triggers a device reset.
 pub fn virtio_reset_device(dev: &mut VirtioDevice) {
     match dev.transport {
-        VirtioTransport::Pci => virtio_write8(dev, VIRTIO_DEV_STATUS_OFF, 0),
+        VirtioTransport::Pci => unsafe { mmio_write8(dev.base + VPCI_DEVICE_STATUS as u64, 0) },
         VirtioTransport::Mmio => unsafe { mmio_write32(dev.base + VIRTIO_MMIO_STATUS as u64, 0) },
     }
     dev.initialized = false;
@@ -1289,15 +1359,27 @@ mod tests {
 
     #[test]
     fn test_virtio_constants() {
-        assert_eq!(VIRTIO_HOST_F_OFF, 0x0000);
-        assert_eq!(VIRTIO_GUEST_F_OFF, 0x0004);
-        assert_eq!(VIRTIO_QADDR_OFF, 0x0008);
-        assert_eq!(VIRTIO_QSIZE_OFF, 0x000C);
-        assert_eq!(VIRTIO_QSEL_OFF, 0x000E);
-        assert_eq!(VIRTIO_QNOTIFY_OFF, 0x0010);
-        assert_eq!(VIRTIO_DEV_STATUS_OFF, 0x0012);
-        assert_eq!(VIRTIO_ISR_STATUS_OFF, 0x0013);
-        assert_eq!(VIRTIO_DEV_SPECIFIC_OFF, 0x0014);
+        assert_eq!(VPCI_DEVICE_FEATURE_SEL, 0x00);
+        assert_eq!(VPCI_DEVICE_FEATURE, 0x04);
+        assert_eq!(VPCI_DRIVER_FEATURE_SEL, 0x08);
+        assert_eq!(VPCI_DRIVER_FEATURE, 0x0C);
+        assert_eq!(VPCI_QUEUE_SEL, 0x16);
+        assert_eq!(VPCI_QUEUE_NUM_MAX, 0x18);
+        assert_eq!(VPCI_QUEUE_NUM, 0x18);
+        assert_eq!(VPCI_QUEUE_READY, 0x1C);
+        assert_eq!(VPCI_QUEUE_DESC_LOW, 0x20);
+        assert_eq!(VPCI_QUEUE_DESC_HIGH, 0x24);
+        assert_eq!(VPCI_QUEUE_AVAIL_LOW, 0x28);
+        assert_eq!(VPCI_QUEUE_AVAIL_HIGH, 0x2C);
+        assert_eq!(VPCI_QUEUE_USED_LOW, 0x30);
+        assert_eq!(VPCI_QUEUE_USED_HIGH, 0x34);
+        assert_eq!(VPCI_DEVICE_STATUS, 0x14);
+
+        assert_eq!(VIRTIO_PCI_CAP_COMMON_CFG, 1);
+        assert_eq!(VIRTIO_PCI_CAP_NOTIFY_CFG, 2);
+        assert_eq!(VIRTIO_PCI_CAP_ISR_CFG, 3);
+        assert_eq!(VIRTIO_PCI_CAP_DEVICE_CFG, 4);
+        assert_eq!(VIRTIO_PCI_CAP_VNDR, 0x09);
 
         assert_eq!(VIRTIO_STATUS_ACK, 0x01);
         assert_eq!(VIRTIO_STATUS_DRV, 0x02);
@@ -1763,6 +1845,10 @@ mod tests {
         let dev = VirtioDevice {
             transport: VirtioTransport::Pci,
             base: 0,
+            notify: 0,
+            notify_off_mult: 0,
+            isr: 0,
+            devcfg: 0,
             name: "test",
             features: &[],
             host_features: 1u64 << 28,

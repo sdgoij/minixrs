@@ -437,6 +437,16 @@ pub extern "C" fn kmain_body() -> ! {
                     serial_write("  RAM disk mapped for ramdisk server\r\n");
                 }
             }
+
+            // If this is the virtio-blk driver process, identity-map the
+            // device's memory BARs into its page table so the modern
+            // (virtio 1.x) PCI transport can access the registers directly.
+            // The BAR addresses are assigned by firmware at boot, so they
+            // are discovered here via PCI config space.
+            if proc_nr == VIRTIO_BLK_PROC_NR && !unsafe { map_virtio_blk_bars(pt_phys, user_flags) }
+            {
+                serial_write("  WARN: virtio-blk BAR mapping failed\r\n");
+            }
         }
 
         #[cfg(target_os = "none")]
@@ -513,6 +523,97 @@ pub extern "C" fn kmain_body() -> ! {
             arch_x86_64::asm::restore(first_proc as *const u8);
         }
     }
+}
+
+/// Identity-map all memory BARs of the first virtio-blk device (vendor
+/// 0x1AF4, subsystem device ID 2) into `pt_phys` as EL0-RW pages, so the
+/// user-mode driver can access the modern (virtio 1.x) registers directly.
+///
+/// QEMU/firmware assign the BAR addresses at boot, so they cannot be known
+/// at compile time — discover them via PCI config space.
+///
+/// Returns `false` if the device was not found or a mapping failed.
+#[cfg(not(test))]
+unsafe fn map_virtio_blk_bars(pt_phys: u64, flags: u64) -> bool {
+    const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
+    const VIRTIO_BLK_SUBSYSTEM_ID: u16 = 0x0002;
+
+    use arch_x86_64::hal::{pci_cfg_read8, pci_cfg_read16, pci_cfg_read32, pci_cfg_write32};
+
+    for dev in 0..32u8 {
+        for func in 0..8u8 {
+            let vendor = unsafe { pci_cfg_read16(0, dev, func, 0x00) };
+            if vendor == 0xFFFF || vendor == 0 {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if vendor != VIRTIO_PCI_VENDOR {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Read the PCI device ID (offset 0x02) and subsystem device ID
+            // (offset 0x2E). Modern (virtio 1.x) devices report
+            // 0x1040 + virtio device ID and leave the subsystem ID at the
+            // machine default, so match either.
+            let devid = unsafe { pci_cfg_read16(0, dev, func, 0x02) };
+            let sdid = unsafe { pci_cfg_read16(0, dev, func, 0x2E) };
+            if sdid != VIRTIO_BLK_SUBSYSTEM_ID && devid != 0x1040 + VIRTIO_BLK_SUBSYSTEM_ID {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Found the virtio-blk device: map every memory BAR.
+            let mut skip_next = false;
+            for bar in 0..6u8 {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                let off = 0x10 + 4 * bar;
+                let val = unsafe { pci_cfg_read32(0, dev, func, off) };
+                if val & 0x4 != 0 {
+                    skip_next = true; // 64-bit BAR spans the next slot
+                }
+                if val & 1 != 0 {
+                    continue; // I/O BAR — modern devices have none
+                }
+                if val & 0xFFFF_FFFC == 0 {
+                    continue; // unassigned
+                }
+                // Discover the BAR size: write all-ones, read the mask,
+                // restore the original value.
+                unsafe { pci_cfg_write32(0, dev, func, off, 0xFFFF_FFFF) };
+                let mask = unsafe { pci_cfg_read32(0, dev, func, off) };
+                unsafe { pci_cfg_write32(0, dev, func, off, val) };
+                let size = (mask & 0xFFFF_FFF0).wrapping_neg() as u64;
+                let pa = (val & 0xFFFF_FFF0) as u64;
+                let pages = size.div_ceil(4096);
+                for p in 0..pages {
+                    let addr = pa + p * 4096;
+                    if unsafe { kernel::pagetable::map_page(pt_phys, addr, addr, flags) }.is_err() {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// Drain all available UART RX bytes into the ser_input ring.

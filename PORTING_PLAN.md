@@ -31,6 +31,28 @@ The port is composed of:
 
 The port preserves the **entire architectural design** — message-passing IPC, privilege separation, grant-based memory sharing, capability-based I/O permissions — but rewrites the implementation in Rust. The target is a **1:1 functional equivalent** running on the same x86 (and optionally ARM) hardware.
 
+### Current Status (2026-08)
+
+The port now boots **all three architectures — x86_64, RISC-V64, and AArch64 —
+to a full `#` shell prompt in QEMU**, with the complete server stack (DS, RS,
+PM, SCHED, VFS, VM, MFS, PFS, TTY, ramdisk, virtio_blk) running as user-space
+processes. The shell executes real userland binaries from the initramfs
+(`/bin/sh`, `/bin/echo`, ...) over real PM/VFS/MFS IPC.
+
+**Storage milestone M6 / M4R is complete:** MFS mounts its root filesystem
+from a real block device through the BDEV protocol. The root FS lives on an
+attached virtio disk image (built by `tools/mkfs.rs`, `just mkfs-*`), served
+by the `virtio_blk` driver server (direct grants + `SYS_SAFECOPYTO/FROM`), and
+**file persistence is verified on all three arches**: write a file, reboot
+QEMU, read it back (`python tools/persist_test*.py`, `PERSIST in disk
+image: 1`).
+
+All three arches use the **modern virtio 1.x transport** (the legacy
+I/O-port virtio-PCI path was replaced): virtio-pci with memory BARs + the PCI
+capability list on x86_64 (`-device virtio-blk-pci,disable-legacy=on`), and
+virtio-mmio on RISC-V64/AArch64 QEMU `virt` machines
+(`virtio-mmio.force-legacy=off`).
+
 ## Phase 0: Project Structure & Build System
 
 **Goal**: Establish the Rust project scaffolding and build system before touching any code.
@@ -41,8 +63,9 @@ The Rust port targets two architectures:
 
 | Target | Custom JSON spec | Notes |
 |--------|-----------------|-------|
-| **x86_64-pc-minix** (primary) | `x86_64-pc-minix.json` | 64-bit x86, UEFI or multiboot2. This is the main delivery target. |
-| **riscv64gc-unknown-minix** (bonus) | `riscv64gc-unknown-minix.json` | RISC-V64 with G extension (GC = IMACFD). Requires full arch layer from scratch. |
+| **x86_64-pc-minix** (primary) | `x86_64-pc-minix.json` | 64-bit x86, boots via SeaBIOS disk image or trampoline. Main delivery target. |
+| **riscv64gc-unknown-minix** | `riscv64gc-unknown-minix.json` | RISC-V64 with G extension (GC = IMACFD). Boots QEMU `virt`; fully implemented. |
+| **aarch64-unknown-minix** | `aarch64-unknown-minix.json` | AArch64. Boots QEMU `virt` (cortex-a57); third architecture, fully implemented. |
 
 ### Tasks
 
@@ -3411,6 +3434,11 @@ Created 13 files in `crates/servers/src/vfs/`:
 
 **Dependencies**: Requires PCI driver (11a.4) and I2C driver (11a.4) for storage controller enumeration.
 
+**Status: 100%** — all storage drivers ported; the virtio-blk path is wired
+**end-to-end on all three arches (M6/M4R)**: MFS mounts root from an attached
+virtio disk image through the BDEV protocol, and files persist across reboot
+(write → reboot → read back). See 11b.5.
+
 - [x] **11b.1 — `minix/drivers/storage/ahci/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/ahci/`
   - AHCI driver in `crates/drivers/src/storage/ahci.rs` (~500 lines, 20 tests)
@@ -3453,14 +3481,29 @@ Created 13 files in `crates/servers/src/vfs/`:
 - [x] **11b.5 — `minix/drivers/storage/virtio_blk/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/virtio_blk/`
   - Virtio block driver in `crates/drivers/src/storage/virtio_blk.rs` (~370 lines, 29 tests)
-  - Virtio PCI transport layer in `crates/drivers/src/bus/virtio.rs` (~580 lines, 13 tests)
-  - PCI probe for virtio device (vendor 0x1AF4, sub-device ID 0x0002), I/O port BAR0
-  - Device lifecycle: reset, ACK, DRV, feature exchange, DRV_OK
-  - Single virtqueue allocation, vring management from static storage
-  - Scatter-gather I/O: header + data + status descriptor chain submission
-  - Poll-based synchronous transfer (spin-wait with bounded iterations)
-  - Cache flush with barrier support
-  - Interrupt handling: ISR read, descriptor reap, IRQ re-enable
+  - Virtio transport in `crates/drivers/src/bus/virtio.rs` — **modern virtio 1.x on all three arches**
+    (the original legacy I/O-port virtio-PCI path was removed):
+    - **x86_64 — virtio-pci:** memory BARs + PCI vendor capability list
+      (`virtio_pci_cap`), common-config registers at the `linux/virtio_pci.h`
+      offsets (`queue_select`/`queue_size`/`queue_enable`/`device_status`),
+      64-bit feature exchange with `VIRTIO_F_VERSION_1`. QEMU runs with
+      `-device virtio-blk-pci,disable-legacy=on`. The kernel identity-maps
+      the device's memory BARs into the driver's page table at boot
+      (`map_virtio_blk_bars` in `crates/kernel-boot/src/main.rs`).
+    - **RISC-V64 / AArch64 — virtio-mmio:** fixed MMIO transports on the QEMU
+      `virt` machines (`0x10001000` stride 0x1000 on RISC-V,
+      `0x0a000000` stride 0x200 on AArch64), `-global virtio-mmio.force-legacy=off`.
+  - Shared vring/queue machinery for both transports: static 4096-aligned
+    ring storage (256 descriptors), guest-physical address translation via
+    `SYS_GETINFO` GET_PHYS_DELTA, single virtqueue with
+    [header|data|status] descriptor chains, poll-based synchronous transfer.
+  - **End-to-end (M6/M4R):** `crates/servers/src/virtio_blk.rs` implements the
+    BDEV server loop (open/close/read/write via direct grants +
+    `SYS_SAFECOPYTO`/`SYS_SAFECOPYFROM`); MFS block I/O routes through the
+    BDEV protocol (`crates/fs/src/block_io.rs`); VFS `mount_root` passes the
+    `"virtio_blk"` driver label to MFS, which resolves it via `bdev_driver`.
+    Verified on x86_64, RISC-V64, and AArch64: root mounts from a virtio disk
+    image and files persist across reboot (`tools/persist_test*.py`).
 
 - [x] **11b.6 — `minix/drivers/storage/vnd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/`
@@ -5855,11 +5898,11 @@ Key files and build commands are documented there.
 | M3 | Process fork + exec works (x86_64) | Phase 5 | ✅ |
 | M1c | **Multi-process context switch + scheduler** | **Phase 8 + 14.B** | ✅ |
 | **M2** | **Shell prompt (`#`) via init → exec** | **Phase 14.B** | ✅ |
-| **M2-IO** | **Interrupt-driven serial input for shell** | **Phase 11 + 14.B** | 🔄 |
+| **M2-IO** | **Interrupt-driven serial input for shell** | **Phase 11 + 14.B** | ✅ |
 | M7b | **System boots to full shell prompt on serial** | **Phase 14.B** | ✅ |
-| M4 | MFS filesystem serves files (x86_64) | Phase 9 | 🔄 |
+| M4 | MFS filesystem serves files (x86_64, root on virtio disk) | Phase 9 | ✅ |
 | M5 | VFS server routes requests (x86_64) | Phase 10 | ✅ |
-| M6 | IDE/Virtio driver reads disk (x86_64) | Phase 11b | ❌ |
+| M6 | **Virtio disk: MFS mounts root from a disk image + file persistence** (x86_64) | Phase 11b | ✅ |
 | M7 | Complete system boots to shell (x86_64) | Phase 14 | ✅ |
 | M8 | Network stack works (x86_64) | Phase 16 | ❌ |
 | M9 | Live Update works (x86_64) | Phase 15 | ❌ |
@@ -5875,9 +5918,22 @@ Key files and build commands are documented there.
 | M1T | 25 architecture-independent kernel unit tests pass on RISC-V64 QEMU via `just test-qemu-riscv` | Phase 19 | ✅ |
 | M2R | Two processes can IPC (RISC-V64) | Phase 4 (shared) | ✅ |
 | M3R | Process fork + exec works (RISC-V64) | Phase 5 (shared) | ✅ |
-| M4R | Virtio-blk reads disk (RISC-V64) | Phase 19 | ❌ |
+| M4R | Virtio-blk reads disk + file persistence (RISC-V64) | Phase 19 | ✅ |
 | M5R | Virtio-net sends/receives (RISC-V64) | Phase 19 | ❌ |
 | M6R | Complete system boots to shell (RISC-V64) | Phase 14 + 19 | ✅ |
+
+### AArch64 Milestones (third architecture)
+
+AArch64 was added as a third architecture after RISC-V64 and is now fully
+implemented. It shares the server stack and uses the same virtio-mmio
+transport as RISC-V64 (QEMU `virt` machine, cortex-a57).
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| M1A | Kernel boots in QEMU `virt`, prints banner | ✅ |
+| M2A | Full server stack + `#` shell prompt on serial | ✅ |
+| M3A | Virtio-blk reads disk; MFS mounts root via BDEV protocol | ✅ |
+| M4A | File persistence across reboot (write → reboot → read back) | ✅ |
 
 #### Known Issue: `sched_proc_no_time_preempts` on RISC-V64
 
@@ -5953,6 +6009,14 @@ Phase 19: RISC-V64 (bonus — parallelizable after Phase 8 x86_64 is working)
   EARLY BOOT TEST (RISC-V): Kernel boots in QEMU -M virt
   BASIC TEST (RISC-V): Process table works, basic IPC works
 ```
+
+**Current state (2026-08):** All three target arches are implemented and boot
+to a shell — x86_64 (Phase 8), RISC-V64 (Phase 19), and AArch64. The storage
+milestone (M6/M4R, Phase 11b) is complete: MFS mounts root from a virtio disk
+via the BDEV protocol on every arch, with verified file persistence. Remaining
+work is concentrated in the later phases: networking (Phase 16, M8), Live
+Update (Phase 15, M9), the remaining userland commands (Phase 14, M11), and
+full feature parity (M12).
 
 ---
 

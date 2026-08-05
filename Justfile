@@ -54,7 +54,7 @@ run target="x86":
     @just run-{{target}}
 
 run-x86: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=virtio,format=raw,file=target/disk.img
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0
 
 run-riscv64: build-riscv64 mkfs-riscv64
     qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
@@ -68,7 +68,7 @@ debug target="x86":
     @just debug-{{target}}
 
 debug-x86: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -s -S -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=virtio,format=raw,file=target/disk.img
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -s -S -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0
 
 debug-aarch64: build-aarch64
     qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -display none -serial stdio -no-reboot -s -S -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
@@ -95,7 +95,7 @@ test-qemu target="x86":
     @just test-qemu-{{target}}
 
 test-qemu-x86: build-x86-test mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=virtio,format=raw,file=target/disk.img; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 # RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so
 # pass/fail is determined from the serial log.
@@ -112,7 +112,7 @@ test-boot target="x86":
     @just test-boot-{{target}}
 
 test-boot-x86: build-x86-boot mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=virtio,format=raw,file=target/disk.img; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test-boot-riscv64: build-riscv64-boot mkfs-riscv64
     qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
