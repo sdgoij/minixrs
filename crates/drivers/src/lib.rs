@@ -13,6 +13,7 @@ pub mod bus;
 pub mod clock;
 pub mod eeprom;
 pub mod input;
+pub mod network;
 pub mod storage;
 pub mod system;
 pub mod tty;

@@ -154,6 +154,9 @@ const VIRTIO_F_VERSION_1: u32 = 1;
 /// Maximum number of descriptors per queue.
 const QUEUE_NUM: u16 = 256;
 
+/// Maximum number of virtqueues per device (RX + TX for virtio-net).
+pub const MAX_QUEUES: usize = 2;
+
 /// Virtio feature descriptor.
 ///
 /// Each feature is identified by a bit position. `host_support` is set
@@ -190,7 +193,7 @@ pub struct VirtioDevice {
     pub features: &'static [VirtioFeature],
     /// Bitmap of host-supported features (set during `exchange_features`).
     pub host_features: u64,
-    pub queues: [VirtioQueue; 1],
+    pub queues: [VirtioQueue; MAX_QUEUES],
     pub num_queues: usize,
     pub irq: u8,
     pub msi: bool,
@@ -375,6 +378,8 @@ impl Q0RingCell {
 }
 
 static Q0_RING: Q0RingCell = Q0RingCell::new();
+/// Second queue's ring storage (TX queue for virtio-net).
+static Q1_RING: Q0RingCell = Q0RingCell::new();
 struct Q0DataCell(UnsafeCell<[usize; QUEUE_NUM as usize]>);
 unsafe impl Sync for Q0DataCell {}
 impl Q0DataCell {
@@ -389,6 +394,32 @@ impl Q0DataCell {
 /// Token storage for the queue — maps descriptor-chain head to the
 /// opaque data token given via `virtio_to_queue`.
 static Q0_DATA: Q0DataCell = Q0DataCell::new();
+/// Token storage for queue 1 (TX).
+static Q1_DATA: Q0DataCell = Q0DataCell::new();
+
+/// Build an uninitialized queue slot for `qidx`, pointing its vring at
+/// that queue's ring storage. `init_vring` repopulates the vring during
+/// `alloc_queue`, so the initial contents are placeholders.
+fn queue_placeholder(qidx: usize) -> VirtioQueue {
+    let ring = if qidx == 0 {
+        Q0_RING.get() as usize
+    } else {
+        Q1_RING.get() as usize
+    };
+    VirtioQueue {
+        vring: Vring {
+            num: 0,
+            desc: &mut [],
+            avail: unsafe { &mut *((ring + RING_AVAIL_OFF) as *mut VringAvail) },
+            used: unsafe { &mut *((ring + RING_USED_OFF) as *mut VringUsed) },
+        },
+        paddr: 0,
+        free_num: 0,
+        free_head: 0,
+        free_tail: 0,
+        last_used: 0,
+    }
+}
 
 /// Port I/O callback: `fn(request, port, value) -> reply_value`.
 ///
@@ -607,18 +638,22 @@ fn exchange_features_mmio(dev: &mut VirtioDevice) {
 
 /// Initialize the shared vring storage for queue 0 and return the
 /// guest-physical address of the descriptor table.
-fn init_vring(dev: &mut VirtioDevice, num: u16) -> u64 {
+fn init_vring(dev: &mut VirtioDevice, qidx: usize, num: u16) -> u64 {
     // SAFETY: this is the only place we initialise the static vring
     // storage. We hold `&mut VirtioDevice` guaranteeing exclusive
     // access. Static storage is accessed via raw pointers.
     unsafe {
-        let ring = Q0_RING.get() as usize;
+        let ring = if qidx == 0 {
+            Q0_RING.get() as usize
+        } else {
+            Q1_RING.get() as usize
+        };
         let descs: &'static mut [VringDesc] =
             core::slice::from_raw_parts_mut(ring as *mut VringDesc, num as usize);
         let avail: &'static mut VringAvail = &mut *((ring + RING_AVAIL_OFF) as *mut VringAvail);
         let used: &'static mut VringUsed = &mut *((ring + RING_USED_OFF) as *mut VringUsed);
 
-        let q = &mut dev.queues[0];
+        let q = &mut dev.queues[qidx];
         vring_init(&mut q.vring, num, descs, avail, used);
 
         q.free_num = num;
@@ -631,7 +666,11 @@ fn init_vring(dev: &mut VirtioDevice, num: u16) -> u64 {
         q.paddr = (ring as u64).wrapping_add(phys_delta() as u64);
 
         // Clear token store.
-        let data: &mut [usize; QUEUE_NUM as usize] = &mut *Q0_DATA.get();
+        let data: &mut [usize; QUEUE_NUM as usize] = if qidx == 0 {
+            &mut *Q0_DATA.get()
+        } else {
+            &mut *Q1_DATA.get()
+        };
         for slot in data.iter_mut() {
             *slot = 0;
         }
@@ -645,22 +684,25 @@ fn init_vring(dev: &mut VirtioDevice, num: u16) -> u64 {
 /// device, validates it is a power of two, initialises the vring from
 /// static storage, tells the host about the queue, and resets the queue
 /// data token store.
-pub fn virtio_alloc_queue(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
+pub fn virtio_alloc_queue(dev: &mut VirtioDevice, qidx: usize) -> Result<(), VirtioError> {
+    if qidx >= MAX_QUEUES {
+        return Err(VirtioError);
+    }
     match dev.transport {
-        VirtioTransport::Pci => alloc_queue_pci(dev),
-        VirtioTransport::Mmio => alloc_queue_mmio(dev),
+        VirtioTransport::Pci => alloc_queue_pci(dev, qidx),
+        VirtioTransport::Mmio => alloc_queue_mmio(dev, qidx),
     }
 }
 
 /// Modern PCI queue setup: select queue 0, program the descriptor/
 /// avail/used ring addresses in the common config region, then hand the
 /// queue to the host with `QueueReady`.
-fn alloc_queue_pci(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
+fn alloc_queue_pci(dev: &mut VirtioDevice, qidx: usize) -> Result<(), VirtioError> {
     let base = dev.base;
     unsafe {
         // QueueSel/QueueNum/QueueReady are 16-bit registers in the PCI
         // common config; QEMU ignores wider writes.
-        mmio_write16(base + VPCI_QUEUE_SEL as u64, 0);
+        mmio_write16(base + VPCI_QUEUE_SEL as u64, qidx as u16);
         let num_max = mmio_read32(base + VPCI_QUEUE_NUM_MAX as u64);
         if num_max == 0 {
             return Err(VirtioError);
@@ -671,7 +713,7 @@ fn alloc_queue_pci(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
         }
         mmio_write16(base + VPCI_QUEUE_NUM as u64, num);
 
-        let paddr = init_vring(dev, num);
+        let paddr = init_vring(dev, qidx, num);
         let avail_pa = paddr + RING_AVAIL_OFF as u64;
         let used_pa = paddr + RING_USED_OFF as u64;
 
@@ -694,10 +736,10 @@ fn alloc_queue_pci(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
 /// Modern MMIO queue setup: select queue 0, program the descriptor/
 /// avail/used ring addresses, then hand the queue to the host with
 /// `QueueReady`.
-fn alloc_queue_mmio(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
+fn alloc_queue_mmio(dev: &mut VirtioDevice, qidx: usize) -> Result<(), VirtioError> {
     let base = dev.base;
     unsafe {
-        mmio_write32(base + VIRTIO_MMIO_QUEUE_SEL as u64, 0);
+        mmio_write32(base + VIRTIO_MMIO_QUEUE_SEL as u64, qidx as u32);
         let num_max = mmio_read32(base + VIRTIO_MMIO_QUEUE_NUM_MAX as u64);
         if num_max == 0 {
             return Err(VirtioError);
@@ -708,7 +750,7 @@ fn alloc_queue_mmio(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
         }
         mmio_write32(base + VIRTIO_MMIO_QUEUE_NUM as u64, num as u32);
 
-        let paddr = init_vring(dev, num);
+        let paddr = init_vring(dev, qidx, num);
         let avail_pa = paddr + RING_AVAIL_OFF as u64;
         let used_pa = paddr + RING_USED_OFF as u64;
 
@@ -738,14 +780,17 @@ fn alloc_queue_mmio(dev: &mut VirtioDevice) -> Result<(), VirtioError> {
 }
 
 /// Kick the device: notify it that the selected queue has new descriptors.
-fn queue_notify(dev: &VirtioDevice) {
+fn queue_notify(dev: &VirtioDevice, qidx: usize) {
     match dev.transport {
-        // Modern PCI: notify address for queue 0 is `notify +
-        // 0 * notify_off_multiplier`; write the queue index (0) as a
-        // 16-bit value.
-        VirtioTransport::Pci => unsafe { mmio_write16(dev.notify, 0) },
+        // Modern PCI: the notify address for queue `qidx` is
+        // `notify + qidx * notify_off_multiplier`; the value written is
+        // the queue index.
+        VirtioTransport::Pci => unsafe {
+            let addr = dev.notify + (qidx as u64) * dev.notify_off_mult as u64;
+            mmio_write16(addr, qidx as u16)
+        },
         VirtioTransport::Mmio => unsafe {
-            mmio_write32(dev.base + VIRTIO_MMIO_QUEUE_NOTIFY as u64, 0)
+            mmio_write32(dev.base + VIRTIO_MMIO_QUEUE_NOTIFY as u64, qidx as u32)
         },
     }
 }
@@ -809,10 +854,11 @@ fn fill_descriptors(vring: &mut Vring, start: u16, bufs: &[VirtioPhysBuf]) {
 /// host completes the descriptor chain.
 pub fn virtio_to_queue(
     dev: &mut VirtioDevice,
+    qidx: usize,
     bufs: &[VirtioPhysBuf],
     data: usize,
 ) -> Result<(), VirtioError> {
-    if dev.num_queues == 0 {
+    if qidx >= dev.num_queues {
         return Err(VirtioError);
     }
 
@@ -823,7 +869,7 @@ pub fn virtio_to_queue(
 
     // All queue operations in a single borrow scope to avoid aliasing.
     let need_kick = {
-        let q = &mut dev.queues[0];
+        let q = &mut dev.queues[qidx];
         if q.free_num < num_bufs as u16 {
             return Err(VirtioError);
         }
@@ -845,7 +891,12 @@ pub fn virtio_to_queue(
 
         // Store the data token.
         unsafe {
-            (*Q0_DATA.get())[head as usize] = data;
+            let cell = if qidx == 0 {
+                Q0_DATA.get()
+            } else {
+                Q1_DATA.get()
+            };
+            (*cell)[head as usize] = data;
         }
 
         // Memory barrier: host must see descriptor writes before
@@ -868,18 +919,19 @@ pub fn virtio_to_queue(
 
     // Kick outside the queue borrow to avoid aliasing with `dev`.
     if need_kick {
-        queue_notify(dev);
+        queue_notify(dev, qidx);
     }
 
     Ok(())
 }
 
-/// Reap a completed descriptor from queue 0.
+/// Reap a completed descriptor from the given queue.
 ///
-/// Returns the data token that was provided to `virtio_to_queue` if the
-/// host has processed a descriptor chain, or `None` if nothing is done.
-pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
-    if dev.num_queues == 0 {
+/// Returns `(token, used_len)` — the data token provided to
+/// `virtio_to_queue` and the number of bytes the host wrote for the
+/// chain — or `None` if nothing is done.
+pub fn virtio_from_queue(dev: &mut VirtioDevice, qidx: usize) -> Option<(usize, u32)> {
+    if qidx >= dev.num_queues {
         return None;
     }
 
@@ -890,7 +942,7 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
 
     // All queue operations in one borrow scope.
     {
-        let q = &mut dev.queues[0];
+        let q = &mut dev.queues[qidx];
         let vring = &mut q.vring;
         let num = vring.num;
 
@@ -904,6 +956,7 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
         // Get the used element at the current `last_used` position.
         let uel = &vring.used.ring[q.last_used as usize];
         q.last_used = (q.last_used + 1) % num;
+        let used_len = uel.len;
 
         let idx = (uel.id as u16) % num;
         let mut count: u16 = 0;
@@ -936,12 +989,16 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice) -> Option<usize> {
         q.free_num = q.free_num.wrapping_add(count);
 
         // Retrieve the data token.
-        let tok = unsafe { (*Q0_DATA.get())[idx as usize] };
         unsafe {
-            (*Q0_DATA.get())[idx as usize] = 0;
+            let cell = if qidx == 0 {
+                Q0_DATA.get()
+            } else {
+                Q1_DATA.get()
+            };
+            let tok = (*cell)[idx as usize];
+            (*cell)[idx as usize] = 0;
+            Some((tok, used_len))
         }
-
-        Some(tok)
     }
 }
 
@@ -1141,23 +1198,7 @@ fn pci_probe(
                 name,
                 features,
                 host_features: 0,
-                queues: [VirtioQueue {
-                    vring: Vring {
-                        num: 0,
-                        desc: &mut [],
-                        avail: unsafe {
-                            &mut *((Q0_RING.get() as usize + RING_AVAIL_OFF) as *mut VringAvail)
-                        },
-                        used: unsafe {
-                            &mut *((Q0_RING.get() as usize + RING_USED_OFF) as *mut VringUsed)
-                        },
-                    },
-                    paddr: 0,
-                    free_num: 0,
-                    free_head: 0,
-                    free_tail: 0,
-                    last_used: 0,
-                }],
+                queues: [queue_placeholder(0), queue_placeholder(1)],
                 num_queues: 0,
                 irq,
                 msi: false,
@@ -1241,19 +1282,7 @@ fn mmio_probe(
                 name,
                 features,
                 host_features: 0,
-                queues: [VirtioQueue {
-                    vring: Vring {
-                        num: 0,
-                        desc: &mut [],
-                        avail: &mut *((Q0_RING.get() as usize + RING_AVAIL_OFF) as *mut VringAvail),
-                        used: &mut *((Q0_RING.get() as usize + RING_USED_OFF) as *mut VringUsed),
-                    },
-                    paddr: 0,
-                    free_num: 0,
-                    free_head: 0,
-                    free_tail: 0,
-                    last_used: 0,
-                }],
+                queues: [queue_placeholder(0), queue_placeholder(1)],
                 num_queues: 0,
                 irq: 0,
                 msi: false,
@@ -1852,23 +1881,7 @@ mod tests {
             name: "test",
             features: &[],
             host_features: 1u64 << 28,
-            queues: [VirtioQueue {
-                vring: Vring {
-                    num: 0,
-                    desc: &mut [],
-                    avail: unsafe {
-                        &mut *((Q0_RING.get() as usize + RING_AVAIL_OFF) as *mut VringAvail)
-                    },
-                    used: unsafe {
-                        &mut *((Q0_RING.get() as usize + RING_USED_OFF) as *mut VringUsed)
-                    },
-                },
-                paddr: 0,
-                free_num: 0,
-                free_head: 0,
-                free_tail: 0,
-                last_used: 0,
-            }],
+            queues: [queue_placeholder(0), queue_placeholder(1)],
             num_queues: 0,
             irq: 0,
             msi: false,
@@ -1930,5 +1943,98 @@ mod tests {
         };
         assert_eq!(b.addr, 0xABCD0011);
         assert_eq!(b.size, 1024);
+    }
+
+    /// Build a test device with `num_queues` queues allocated.
+    fn test_device(num_queues: usize) -> VirtioDevice {
+        VirtioDevice {
+            transport: VirtioTransport::Mmio,
+            base: 0,
+            notify: 0,
+            notify_off_mult: 0,
+            isr: 0,
+            devcfg: 0,
+            name: "test",
+            features: &[],
+            host_features: 0,
+            queues: [queue_placeholder(0), queue_placeholder(1)],
+            num_queues,
+            irq: 0,
+            msi: false,
+            initialized: true,
+        }
+    }
+
+    /// Multi-queue transport behavior, exercised as one sequential test:
+    /// the queue rings and token stores are shared statics, so concurrent
+    /// tests would race on them.
+    #[test]
+    fn test_multi_queue_operations() {
+        // Queue 0 and queue 1 must have independent ring storage:
+        // submitting to one must not disturb the other's descriptors,
+        // avail index, or token store.
+        let mut dev = test_device(2);
+        init_vring(&mut dev, 0, 8);
+        init_vring(&mut dev, 1, 8);
+        // Suppress the kick: there is no device on the host, and the
+        // notify path would write to a null MMIO address.
+        dev.queues[0].vring.used.flags = VRING_USED_F_NO_NOTIFY;
+        dev.queues[1].vring.used.flags = VRING_USED_F_NO_NOTIFY;
+
+        let bufs0 = [VirtioPhysBuf {
+            addr: 0x1000,
+            size: 16,
+        }];
+        let bufs1 = [VirtioPhysBuf {
+            addr: 0x2000,
+            size: 32,
+        }];
+        virtio_to_queue(&mut dev, 0, &bufs0, 11).unwrap();
+        virtio_to_queue(&mut dev, 1, &bufs1, 22).unwrap();
+
+        let q0 = &dev.queues[0];
+        let q1 = &dev.queues[1];
+        // Each queue consumed one descriptor.
+        assert_eq!(q0.free_num, 7);
+        assert_eq!(q1.free_num, 7);
+        // Queue 0's slot 0 holds its own buffer, queue 1's its own.
+        assert_eq!(q0.vring.desc[0].addr, 0x1000);
+        assert_eq!(q1.vring.desc[0].addr, 0x2000);
+        // Both avail rings advanced independently.
+        assert_eq!(q0.vring.avail.idx, 1);
+        assert_eq!(q1.vring.avail.idx, 1);
+        // Tokens landed in separate data cells.
+        unsafe {
+            assert_eq!((*Q0_DATA.get())[0], 11);
+            assert_eq!((*Q1_DATA.get())[0], 22);
+        }
+
+        // A completed chain returns both its token and the number of
+        // bytes the host wrote (used length), which virtio-net needs to
+        // know the received packet size.
+        {
+            let q = &mut dev.queues[1];
+            q.vring.used.idx = 1;
+            q.vring.used.ring[0].id = 0;
+            q.vring.used.ring[0].len = 42;
+        }
+        let (tok, len) = virtio_from_queue(&mut dev, 1).unwrap();
+        assert_eq!(tok, 22);
+        assert_eq!(len, 42);
+        // Queue 0 sees nothing yet.
+        assert!(virtio_from_queue(&mut dev, 0).is_none());
+        // Second reap on queue 1 is empty.
+        assert!(virtio_from_queue(&mut dev, 1).is_none());
+
+        // Operations on a queue index that was never allocated must fail.
+        let mut dev1 = test_device(1); // only queue 0 allocated
+        init_vring(&mut dev1, 0, 8);
+        dev1.queues[0].vring.used.flags = VRING_USED_F_NO_NOTIFY;
+        let bufs = [VirtioPhysBuf {
+            addr: 0x3000,
+            size: 16,
+        }];
+        assert!(virtio_to_queue(&mut dev1, 1, &bufs, 0).is_err());
+        assert!(virtio_from_queue(&mut dev1, 1).is_none());
     }
 }

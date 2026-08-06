@@ -71,3 +71,8 @@ test = false
 name = "pfs"
 path = "src/bin/pfs.rs"
 test = false
+
+[[bin]]
+name = "virtio_net"
+path = "src/bin/virtio_net.rs"
+test = false

@@ -54,13 +54,13 @@ run target="x86":
     @just run-{{target}}
 
 run-x86: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
 
 run-riscv64: build-riscv64 mkfs-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
+    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -kernel target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64
 
 run-aarch64: build-aarch64 mkfs-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
 
 # ---------- debug (QEMU gdb stub on :1234) ----------
 

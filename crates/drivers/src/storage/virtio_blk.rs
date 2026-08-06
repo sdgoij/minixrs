@@ -360,7 +360,7 @@ fn poll_completion() -> bool {
     unsafe {
         let st = &mut *state_ptr();
         if let Some(ref mut dev) = st.dev
-            && let Some(_token) = virtio::virtio_from_queue(dev)
+            && let Some((_token, _len)) = virtio::virtio_from_queue(dev, 0)
         {
             // Status byte was written by the host at STATUS[0].
             return (*status_ptr())[0] == VIRTIO_BLK_S_OK;
@@ -440,7 +440,7 @@ pub unsafe fn virtio_blk_probe(instance: u16) -> Result<(), DriverError> {
     .map_err(|_| DriverError::NotFound)?;
 
     // 2. Allocate virtqueue.
-    virtio::virtio_alloc_queue(&mut dev).map_err(|_| DriverError::Io)?;
+    virtio::virtio_alloc_queue(&mut dev, 0).map_err(|_| DriverError::Io)?;
 
     // 3. Read device configuration.
     read_device_config(&dev, &mut st.config);
@@ -624,7 +624,7 @@ pub unsafe fn virtio_blk_transfer(
     ];
 
     // Submit to the queue.
-    virtio::virtio_to_queue(dev, &phys_bufs, 0).map_err(|_| DriverError::Io)?;
+    virtio::virtio_to_queue(dev, 0, &phys_bufs, 0).map_err(|_| DriverError::Io)?;
 
     // Wait for the host to complete the request.
     // Spin with a generous timeout (100M iterations ≈ ~100ms at 1GHz).
@@ -668,7 +668,7 @@ fn virtio_blk_flush_inner() -> Result<(), DriverError> {
             },
         ];
 
-        virtio::virtio_to_queue(dev, &phys_bufs, 0).map_err(|_| DriverError::Io)?;
+        virtio::virtio_to_queue(dev, 0, &phys_bufs, 0).map_err(|_| DriverError::Io)?;
         wait_for_completion(100_000_000)?;
 
         Ok(())
@@ -694,7 +694,7 @@ pub fn virtio_blk_intr() {
             && virtio::virtio_had_irq(dev)
         {
             // Reap all available completed descriptors.
-            while virtio::virtio_from_queue(dev).is_some() {
+            while virtio::virtio_from_queue(dev, 0).is_some() {
                 // The waiting caller will pick up the status byte.
             }
             virtio::virtio_irq_enable(dev);

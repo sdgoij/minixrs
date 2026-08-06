@@ -641,6 +641,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/vm", VM_PROC_NR),
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
+            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
@@ -656,16 +657,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/vm", VM_PROC_NR),
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
+            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
         ];
 
         #[cfg(not(feature = "boot-test"))]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 12] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 13] =
             unsafe { core::mem::zeroed() };
         #[cfg(feature = "boot-test")]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 11] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 12] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {
@@ -829,12 +831,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 }
             }
 
-            // virtio-blk driver: map the virtio-mmio device window into
-            // this process's page table so it can probe the device from
-            // user mode. RISC-V QEMU virt places the eight transports at
-            // 0x10001000, 0x1000 apart (the device can be at any of them),
-            // so map the whole 32KB region.
-            if proc_nr == VIRTIO_BLK_PROC_NR {
+            // virtio drivers (blk/net): map the virtio-mmio device window
+            // into this process's page table so it can probe the device
+            // from user mode. RISC-V QEMU virt places the eight transports
+            // at 0x10001000, 0x1000 apart (the device can be at any of
+            // them), so map the whole 32KB region.
+            if proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR {
                 const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
                 for j in 0..8u64 {
                     let va = VIRTIO_MMIO_BASE + j * 0x1000;
