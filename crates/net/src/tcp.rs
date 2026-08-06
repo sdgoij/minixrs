@@ -1,0 +1,151 @@
+//! `/dev/tcp` ioctl protocol — `nwio_tcpconf_t`, `nwio_tcpcl_t` and flags.
+//!
+//! Mirrors `.refs/minix-3.3.0/minix/include/net/gen/tcp_io.h` byte-for-byte
+//! (both structs are 16/8 bytes on the reference's ILP32 ABI).
+
+use crate::ioc_encode;
+
+/// TCP socket configuration (reference `struct nwio_tcpconf`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NwioTcpConf {
+    pub nwtc_flags: u32,
+    pub nwtc_locaddr: u32,
+    pub nwtc_remaddr: u32,
+    pub nwtc_locport: u16,
+    pub nwtc_remport: u16,
+}
+
+impl NwioTcpConf {
+    /// Wire size: 4 + 4 + 4 + 2 + 2 = 16 bytes.
+    pub const SIZE: usize = 16;
+
+    /// Serialize into `out` (at least [`NwioTcpConf::SIZE`] bytes).
+    pub fn write_to(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.nwtc_flags.to_ne_bytes());
+        out[4..8].copy_from_slice(&self.nwtc_locaddr.to_ne_bytes());
+        out[8..12].copy_from_slice(&self.nwtc_remaddr.to_ne_bytes());
+        out[12..14].copy_from_slice(&self.nwtc_locport.to_ne_bytes());
+        out[14..16].copy_from_slice(&self.nwtc_remport.to_ne_bytes());
+    }
+
+    /// Parse from `src` (at least [`NwioTcpConf::SIZE`] bytes).
+    pub fn read_from(src: &[u8]) -> Self {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&src[0..4]);
+        let flags = u32::from_ne_bytes(bytes);
+        bytes.copy_from_slice(&src[4..8]);
+        let locaddr = u32::from_ne_bytes(bytes);
+        bytes.copy_from_slice(&src[8..12]);
+        let remaddr = u32::from_ne_bytes(bytes);
+        Self {
+            nwtc_flags: flags,
+            nwtc_locaddr: locaddr,
+            nwtc_remaddr: remaddr,
+            nwtc_locport: u16::from_ne_bytes([src[12], src[13]]),
+            nwtc_remport: u16::from_ne_bytes([src[14], src[15]]),
+        }
+    }
+}
+
+/// TCP connect parameters (reference `struct nwio_tcpcl`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NwioTcpCl {
+    pub nwtcl_flags: u32,
+    pub nwtcl_ttl: u32,
+}
+
+impl NwioTcpCl {
+    /// Wire size: 4 + 4 = 8 bytes.
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.nwtcl_flags.to_ne_bytes());
+        out[4..8].copy_from_slice(&self.nwtcl_ttl.to_ne_bytes());
+    }
+
+    pub fn read_from(src: &[u8]) -> Self {
+        Self {
+            nwtcl_flags: u32::from_ne_bytes([src[0], src[1], src[2], src[3]]),
+            nwtcl_ttl: u32::from_ne_bytes([src[4], src[5], src[6], src[7]]),
+        }
+    }
+}
+
+// ---- ioctl request codes ----
+
+/// `_IOW('n', 48, struct nwio_tcpconf)` — set TCP configuration.
+pub const NWIOSTCPCONF: u32 = ioc_encode(0x8000_0000, b'n', 48, NwioTcpConf::SIZE);
+/// `_IOR('n', 49, struct nwio_tcpconf)` — get TCP configuration.
+pub const NWIOGTCPCONF: u32 = ioc_encode(0x4000_0000, b'n', 49, NwioTcpConf::SIZE);
+/// `_IOW('n', 50, struct nwio_tcpcl)` — initiate a connection.
+pub const NWIOTCPCONN: u32 = ioc_encode(0x8000_0000, b'n', 50, NwioTcpCl::SIZE);
+
+// ---- NWTC_* flag bits (reference `net/gen/tcp_io.h`) ----
+
+pub const NWTC_NOFLAGS: u32 = 0x0000;
+pub const NWTC_ACC_MASK: u32 = 0x0003;
+pub const NWTC_EXCL: u32 = 0x0001;
+pub const NWTC_SHARED: u32 = 0x0002;
+pub const NWTC_COPY: u32 = 0x0003;
+pub const NWTC_LOCPORT_MASK: u32 = 0x0030;
+pub const NWTC_LP_UNSET: u32 = 0x0010;
+pub const NWTC_LP_SET: u32 = 0x0020;
+pub const NWTC_LP_SEL: u32 = 0x0030;
+pub const NWTC_REMADDR_MASK: u32 = 0x0100;
+pub const NWTC_SET_RA: u32 = 0x0100;
+pub const NWTC_UNSET_RA: u32 = 0x0100_0000;
+pub const NWTC_REMPORT_MASK: u32 = 0x0200;
+pub const NWTC_SET_RP: u32 = 0x0200;
+pub const NWTC_UNSET_RP: u32 = 0x0200_0000;
+
+// ---- TCF_* connect flags ----
+
+/// Blocking connect: return once the connection is established.
+pub const TCF_DEFAULT: u32 = 0;
+/// Asynchronous (non-blocking) connect.
+pub const TCF_ASYNCH: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcpconf_round_trips_through_bytes() {
+        let conf = NwioTcpConf {
+            nwtc_flags: NWTC_LP_SEL | NWTC_SET_RA | NWTC_SET_RP,
+            nwtc_locaddr: 0,
+            nwtc_remaddr: 0x0a00_0202, // 10.0.2.2
+            nwtc_locport: 0,
+            nwtc_remport: 18080,
+        };
+        let mut bytes = [0u8; NwioTcpConf::SIZE];
+        conf.write_to(&mut bytes);
+        assert_eq!(NwioTcpConf::read_from(&bytes), conf);
+    }
+
+    #[test]
+    fn tcpconf_byte_layout_matches_c_struct() {
+        assert_eq!(core::mem::size_of::<NwioTcpConf>(), 16);
+        assert_eq!(core::mem::size_of::<NwioTcpCl>(), 8);
+    }
+
+    #[test]
+    fn tcp_ioctl_codes_match_reference_encoding() {
+        // _IOW('n', 48, ...) size 16, _IOR('n', 49, ...) size 16,
+        // _IOW('n', 50, ...) size 8.
+        assert_eq!(
+            NWIOSTCPCONF,
+            0x8000_0000 | (16 << 16) | ((b'n' as u32) << 8) | 48
+        );
+        assert_eq!(
+            NWIOGTCPCONF,
+            0x4000_0000 | (16 << 16) | ((b'n' as u32) << 8) | 49
+        );
+        assert_eq!(
+            NWIOTCPCONN,
+            0x8000_0000 | (8 << 16) | ((b'n' as u32) << 8) | 50
+        );
+    }
+}

@@ -51,8 +51,10 @@ use arch_common::safecopies::{
     CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CPF_WRITE, CpDirect, CpGrant, CpUnion, GRANT_INVALID,
 };
 use net::{
-    NWIOGUDPOPT, NWIOSUDPOPT, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY, NWUO_RA_SET,
-    NWUO_RP_ANY, NWUO_RP_SET, NWUO_RWDATALL, NwioUdpOpt,
+    NWIOGTCPCONF, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPCONN, NWTC_LOCPORT_MASK,
+    NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA, NWTC_SET_RP, NWTC_UNSET_RA, NWTC_UNSET_RP, NWUO_EN_LOC,
+    NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY, NWUO_RA_SET, NWUO_RP_ANY, NWUO_RP_SET, NWUO_RWDATALL,
+    NwioTcpCl, NwioTcpConf, NwioUdpOpt,
 };
 
 /// Our IP on the SLIRP network (10.0.2.15).
@@ -68,21 +70,45 @@ const ETH_TYPE_IP: u16 = 0x0800;
 const IP_PROTO_ICMP: u8 = 1;
 /// IP protocol number for UDP.
 const IP_PROTO_UDP: u8 = 17;
+/// IP protocol number for TCP.
+const IP_PROTO_TCP: u8 = 6;
 
 /// UDP header length (src port, dst port, length, checksum).
 const UDP_HDR_LEN: usize = 8;
+/// TCP header length without options.
+const TCP_HDR_LEN: usize = 20;
 
 /// Static (non-cloned) minor for /dev/ip.
 const IP_DEV_MINOR: i32 = 0;
 /// Static minor for /dev/udp — each open clones to a fresh socket minor.
 const UDP_DEV_MINOR: i32 = 1;
+/// Static minor for /dev/tcp — each open clones to a fresh socket minor.
+const TCP_DEV_MINOR: i32 = 2;
 
 /// First clone minor handed out for UDP sockets.
 const SOCKET_MINOR_BASE: i32 = 0x10;
+/// First clone minor handed out for TCP sockets.
+const TCP_SOCKET_MINOR_BASE: i32 = 0x20;
 /// Number of concurrent UDP sockets.
 const NR_SOCKETS: usize = 8;
+/// Number of concurrent TCP sockets.
+const NR_TCP_SOCKETS: usize = 8;
 /// Start of the ephemeral local-port range for auto-bound sockets.
 const EPHEMERAL_PORT_BASE: u16 = 32768;
+
+// TCP header flag bits (RFC 793).
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+
+// Errnos used by the TCP paths (positive magnitudes, negative returns).
+const ENOTCONN: i32 = -107;
+const EISCONN: i32 = -106;
+const ETIMEDOUT: i32 = -110;
+const ECONNREFUSED: i32 = -111;
+const EINPROGRESS: i32 = -115;
 
 /// ICMP echo request / reply types.
 const ICMP_ECHO_REQUEST: u8 = 8;
@@ -335,6 +361,111 @@ fn socket_for_minor(minor: i32) -> Option<&'static mut UdpSock> {
     }
 }
 
+// ---- TCP socket table ----
+
+/// TCP connection state (a minimal subset of RFC 793).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum TcpState {
+    /// No connection (fresh socket or after RST/timeout).
+    Closed,
+    /// SYN sent, waiting for the SYN-ACK.
+    SynSent,
+    /// Connection established, data flowing.
+    Established,
+}
+
+/// One TCP socket, keyed by its cloned minor number.
+///
+/// The connection is a byte stream: `write` stages up to one segment of
+/// user data and sends it immediately (no retransmission — the milestone
+/// runs on QEMU's lossless virtio path), and `read` returns whatever has
+/// been received and ACKed.
+#[repr(C)]
+struct TcpSock {
+    in_use: bool,
+    minor: i32,
+    /// Current `nwio_tcpconf_t` flags (NWTC_*).
+    flags: u32,
+    loc_port: u16,
+    rem_port: u16,
+    loc_addr: [u8; 4],
+    rem_addr: [u8; 4],
+    /// Peer MAC captured at connect time (for ACKs during demux).
+    rem_mac: [u8; 6],
+    state: TcpState,
+    /// Initial send sequence number.
+    iss: u32,
+    /// Next sequence number to send.
+    snd_nxt: u32,
+    /// Next sequence number expected from the peer.
+    rcv_nxt: u32,
+    /// Error recorded by demux (e.g. ECONNREFUSED on RST).
+    err: i32,
+    /// Received byte stream.
+    rx_len: usize,
+    rx_buf: [u8; RX_BUF_SIZE],
+}
+
+impl TcpSock {
+    const fn init(minor: i32, in_use: bool) -> Self {
+        Self {
+            in_use,
+            minor,
+            flags: 0,
+            loc_port: 0,
+            rem_port: 0,
+            loc_addr: [0; 4],
+            rem_addr: [0; 4],
+            rem_mac: [0; 6],
+            state: TcpState::Closed,
+            iss: 0,
+            snd_nxt: 0,
+            rcv_nxt: 0,
+            err: 0,
+            rx_len: 0,
+            rx_buf: [0; RX_BUF_SIZE],
+        }
+    }
+}
+
+struct TcpSocketTableCell(UnsafeCell<[TcpSock; NR_TCP_SOCKETS]>);
+unsafe impl Sync for TcpSocketTableCell {}
+impl TcpSocketTableCell {
+    const fn new() -> Self {
+        const EMPTY: TcpSock = TcpSock::init(0, false);
+        Self(UnsafeCell::new([EMPTY; NR_TCP_SOCKETS]))
+    }
+    fn get(&self) -> *mut [TcpSock; NR_TCP_SOCKETS] {
+        self.0.get()
+    }
+}
+static TCP_SOCKETS: TcpSocketTableCell = TcpSocketTableCell::new();
+
+/// Find the live TCP socket for a cloned minor number.
+fn tcp_socket_for_minor(minor: i32) -> Option<&'static mut TcpSock> {
+    unsafe {
+        let socks = &mut *TCP_SOCKETS.get();
+        socks.iter_mut().find(|s| s.in_use && s.minor == minor)
+    }
+}
+
+/// True if `minor` is a cloned TCP socket minor.
+fn minor_is_tcp(minor: i32) -> bool {
+    (TCP_SOCKET_MINOR_BASE..TCP_SOCKET_MINOR_BASE + NR_TCP_SOCKETS as i32).contains(&minor)
+}
+
+/// True if `minor` is a cloned UDP socket minor.
+fn minor_is_udp(minor: i32) -> bool {
+    (SOCKET_MINOR_BASE..SOCKET_MINOR_BASE + NR_SOCKETS as i32).contains(&minor)
+}
+
+/// Next TCP initial send sequence number.
+fn next_iss() -> u32 {
+    static SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x2000);
+    SEQ.fetch_add(0x1024, core::sync::atomic::Ordering::Relaxed)
+}
+
 // ---- DL protocol helpers ----
 
 /// Build a DL request message and SENDREC it to virtio_net. Returns the
@@ -494,6 +625,12 @@ fn read_be16(b: &[u8]) -> u16 {
 fn write_be16(b: &mut [u8], v: u16) {
     b[..2].copy_from_slice(&v.to_be_bytes());
 }
+fn read_be32(b: &[u8]) -> u32 {
+    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+fn write_be32(b: &mut [u8], v: u32) {
+    b[..4].copy_from_slice(&v.to_be_bytes());
+}
 
 /// Internet checksum over `data` (RFC 1071, one's complement).
 fn checksum(data: &[u8]) -> u16 {
@@ -566,6 +703,72 @@ fn udp_demux(pkt: &[u8], ihl: usize) {
     }
 }
 
+/// Demux an inbound TCP segment to the matching socket: completes the
+/// SYN handshake, delivers in-order data to the RX stream (ACKing it), and
+/// records RST as a connection failure (ECONNREFUSED) for a pending
+/// connect.
+fn tcp_demux(pkt: &[u8], ihl: usize) {
+    let tcp = &pkt[ihl..];
+    if tcp.len() < TCP_HDR_LEN {
+        return;
+    }
+    let src_port = read_be16(&tcp[0..2]);
+    let dst_port = read_be16(&tcp[2..4]);
+    let seq = read_be32(&tcp[4..8]);
+    let ack = read_be32(&tcp[8..12]);
+    let data_off = ((tcp[12] >> 4) as usize) * 4;
+    if data_off < TCP_HDR_LEN || data_off > tcp.len() {
+        return;
+    }
+    let flags = tcp[13];
+    let payload = &tcp[data_off..];
+    let src_ip: [u8; 4] = pkt[12..16].try_into().unwrap_or([0; 4]);
+    unsafe {
+        let socks = &mut *TCP_SOCKETS.get();
+        for s in socks.iter_mut() {
+            if !s.in_use {
+                continue;
+            }
+            if s.loc_port != dst_port || s.rem_port != src_port {
+                continue;
+            }
+            if s.rem_addr != [0; 4] && s.rem_addr != src_ip {
+                continue;
+            }
+            if flags & TCP_RST != 0 {
+                // Peer aborted — fail a pending connect, drop a live one.
+                s.state = TcpState::Closed;
+                s.err = ECONNREFUSED;
+                return;
+            }
+            match s.state {
+                TcpState::SynSent => {
+                    // SYN-ACK validating our SYN (ack == snd_nxt = iss + 1).
+                    if flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK && ack == s.snd_nxt {
+                        s.rcv_nxt = seq.wrapping_add(1);
+                        s.state = TcpState::Established;
+                        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+                    }
+                }
+                TcpState::Established => {
+                    if payload.is_empty() {
+                        return; // pure ACK — nothing to deliver
+                    }
+                    if seq == s.rcv_nxt {
+                        let n = payload.len().min(s.rx_buf.len() - s.rx_len);
+                        s.rx_buf[s.rx_len..s.rx_len + n].copy_from_slice(&payload[..n]);
+                        s.rx_len += n;
+                        s.rcv_nxt = s.rcv_nxt.wrapping_add(n as u32);
+                        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+                    }
+                }
+                TcpState::Closed => {}
+            }
+            return;
+        }
+    }
+}
+
 /// Convert a network-order u32 (as stored in `nwio_udpopt_t`) to an IP.
 fn u32_to_ip(v: u32) -> [u8; 4] {
     v.to_be_bytes()
@@ -631,6 +834,82 @@ fn build_udp_datagram(out: &mut [u8], s: &UdpSock, payload_len: usize) {
     csum_add(&mut sum, &out[u + UDP_HDR_LEN..total]);
     let udp_csum = csum_done(sum);
     write_be16(&mut out[u + 6..u + 8], udp_csum);
+}
+
+/// Build IP + TCP headers around a payload already present at
+/// `out[IP_HDR_LEN + TCP_HDR_LEN..]` (for `payload_len` bytes). Returns the
+/// total datagram length. The TCP checksum covers the pseudo-header + the
+/// TCP header + payload (RFC 793).
+fn build_tcp_datagram(
+    out: &mut [u8],
+    s: &TcpSock,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload_len: usize,
+) -> usize {
+    let total = IP_HDR_LEN + TCP_HDR_LEN + payload_len;
+    let src_ip = if s.loc_addr == [0; 4] {
+        OUR_IP
+    } else {
+        s.loc_addr
+    };
+
+    // IP header.
+    out[0] = 0x45; // version 4, IHL 5
+    out[1] = 0;
+    write_be16(&mut out[2..4], total as u16);
+    write_be16(&mut out[4..6], next_ip_id());
+    write_be16(&mut out[6..8], 0); // frag
+    out[8] = 64; // TTL
+    out[9] = IP_PROTO_TCP;
+    write_be16(&mut out[10..12], 0); // checksum (filled below)
+    out[12..16].copy_from_slice(&src_ip);
+    out[16..20].copy_from_slice(&s.rem_addr);
+    let ip_csum = checksum(&out[..IP_HDR_LEN]);
+    write_be16(&mut out[10..12], ip_csum);
+
+    // TCP header (checksum field starts zero, filled below).
+    let t = IP_HDR_LEN;
+    write_be16(&mut out[t..t + 2], s.loc_port);
+    write_be16(&mut out[t + 2..t + 4], s.rem_port);
+    write_be32(&mut out[t + 4..t + 8], seq);
+    write_be32(&mut out[t + 8..t + 12], ack);
+    out[t + 12] = 0x50; // data offset 5 (20 bytes), reserved 0
+    out[t + 13] = flags;
+    write_be16(&mut out[t + 14..t + 16], 0xFFFF); // window
+    write_be16(&mut out[t + 16..t + 18], 0); // checksum
+    write_be16(&mut out[t + 18..t + 20], 0); // urgent
+
+    let mut sum = 0u32;
+    csum_add(&mut sum, &src_ip);
+    csum_add(&mut sum, &s.rem_addr);
+    csum_add(&mut sum, &[0, IP_PROTO_TCP]); // zero byte + protocol
+    csum_add(
+        &mut sum,
+        &(TCP_HDR_LEN as u16 + payload_len as u16).to_be_bytes(),
+    );
+    csum_add(&mut sum, &out[t..t + TCP_HDR_LEN]);
+    csum_add(&mut sum, &out[t + TCP_HDR_LEN..total]);
+    let tcp_csum = csum_done(sum);
+    write_be16(&mut out[t + 16..t + 18], tcp_csum);
+    total
+}
+
+/// Frame and transmit a TCP segment for `s` (SYN/ACK/data) via the peer
+/// MAC stored on the socket. Returns 0 on success.
+fn tcp_send_segment(s: &TcpSock, seq: u32, ack: u32, flags: u8, payload_len: usize) -> i32 {
+    if s.rem_mac == [0; 6] {
+        return -5;
+    }
+    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+    let total = build_tcp_datagram(&mut ip_pkt, s, seq, ack, flags, payload_len);
+    let tx = unsafe { &mut *TX_BUF.get() };
+    let n = build_eth_frame(tx, &s.rem_mac, ETH_TYPE_IP, &ip_pkt[..total]);
+    if dl_write_frame(&tx[..n]) != 0 {
+        return -5;
+    }
+    0
 }
 
 /// Build an ethernet frame for `payload` (ARP or IP) into `out`.
@@ -798,6 +1077,21 @@ fn handle_ip(st: &mut NetState, pkt: &[u8]) -> bool {
     }
     let ihl = (pkt[0] & 0x0F) as usize * 4;
     if pkt.len() < ihl + ICMP_HDR_LEN {
+        return false;
+    }
+    // Trim Ethernet padding: virtio-net pads short frames to the 60-byte
+    // minimum, but the IP total length (bytes 2..4) is the true datagram
+    // size. Without this, a padded pure-ACK TCP frame would deliver its
+    // padding as data (UDP is unaffected — udp_demux trusts the UDP
+    // length field; TCP has none).
+    let ip_total = read_be16(&pkt[2..4]) as usize;
+    let pkt = if ip_total >= ihl && ip_total <= pkt.len() {
+        &pkt[..ip_total]
+    } else {
+        pkt
+    };
+    if pkt[9] == IP_PROTO_TCP {
+        tcp_demux(pkt, ihl);
         return false;
     }
     if pkt[9] == IP_PROTO_UDP {
@@ -986,9 +1280,9 @@ fn handle_cdev_request(msg: &mut Message, call_type: u32) -> i32 {
 
 // ---- UDP socket CDEV handlers ----
 
-/// CDEV_OPEN: minor 0 (/dev/ip) is a plain open; minor 1 (/dev/udp)
-/// allocates a socket slot and replies with a cloned minor, flagged as a
-/// datagram channel.
+/// CDEV_OPEN: minor 0 (/dev/ip) is a plain open; minor 1 (/dev/udp) and
+/// minor 2 (/dev/tcp) allocate a socket slot and reply with a cloned
+/// minor, flagged as a vircopy-I/O channel.
 fn cdev_open_net(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     match minor {
@@ -1004,6 +1298,17 @@ fn cdev_open_net(msg: &mut Message) -> i32 {
             }
             -24 // EMFILE
         },
+        TCP_DEV_MINOR => unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            for (i, slot) in socks.iter_mut().enumerate() {
+                if !slot.in_use {
+                    let clone_minor = TCP_SOCKET_MINOR_BASE + i as i32;
+                    *slot = TcpSock::init(clone_minor, true);
+                    return (CDEV_CLONED | CDEV_DGRAM_OPEN | clone_minor as u32) as i32;
+                }
+            }
+            -24 // EMFILE
+        },
         _ => -19, // ENODEV
     }
 }
@@ -1012,6 +1317,15 @@ fn cdev_open_net(msg: &mut Message) -> i32 {
 fn cdev_close_net(minor: i32) -> i32 {
     if minor == IP_DEV_MINOR {
         return 0;
+    }
+    if minor_is_tcp(minor) {
+        return match tcp_socket_for_minor(minor) {
+            Some(s) => {
+                s.in_use = false;
+                0
+            }
+            None => -9, // EBADF
+        };
     }
     match socket_for_minor(minor) {
         Some(s) => {
@@ -1022,9 +1336,19 @@ fn cdev_close_net(minor: i32) -> i32 {
     }
 }
 
-/// CDEV_IOCTL: NWIOSUDPOPT / NWIOGUDPOPT. The `nwio_udpopt_t` struct
-/// travels at payload bytes 16..32 (VFS's m2_l1 data area).
+/// CDEV_IOCTL: route to the TCP or UDP ioctl handler by minor range.
 fn cdev_ioctl_net(msg: &mut Message) -> i32 {
+    let minor = msg_i32(msg, 0);
+    if minor_is_tcp(minor) {
+        tcp_ioctl(msg)
+    } else {
+        udp_ioctl(msg)
+    }
+}
+
+/// UDP ioctls: NWIOSUDPOPT / NWIOGUDPOPT. The `nwio_udpopt_t` struct
+/// travels at payload bytes 16..32 (VFS's m2_l1 data area).
+fn udp_ioctl(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let request = msg_u32(msg, 4);
     let s = match socket_for_minor(minor) {
@@ -1086,13 +1410,16 @@ fn udp_getopt(s: &UdpSock) -> NwioUdpOpt {
     }
 }
 
-/// CDEV_WRITE (datagram): copy the user's payload, frame it as
-/// IP/UDP/Ethernet and transmit. Requires a bound, connected socket.
+/// CDEV_WRITE (vircopy I/O): UDP writes a whole datagram; TCP writes a
+/// byte-stream segment. Requires a bound, connected socket.
 fn cdev_write_dgram(msg: &Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let user = msg_i32(msg, 8);
     let va = msg_u64(msg, 16);
     let len = msg_u64(msg, 24);
+    if minor_is_tcp(minor) {
+        return tcp_write(minor, user, va, len);
+    }
     let s = match socket_for_minor(minor) {
         Some(s) => s,
         None => return -9, // EBADF
@@ -1131,8 +1458,9 @@ fn cdev_write_dgram(msg: &Message) -> i32 {
     len as i32
 }
 
-/// CDEV_READ (datagram): poll the NIC until a datagram for this socket
-/// arrives, then vircopy the payload into the user's buffer.
+/// CDEV_READ (vircopy I/O): UDP returns one datagram; TCP returns the
+/// next chunk of the received byte stream. Polls the NIC for a bounded
+/// time, then copies the result into the user's buffer.
 fn cdev_read_dgram(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let user = msg_i32(msg, 8);
@@ -1140,6 +1468,9 @@ fn cdev_read_dgram(msg: &mut Message) -> i32 {
     let count = msg_u64(msg, 24);
     if count == 0 {
         return 0;
+    }
+    if minor_is_tcp(minor) {
+        return tcp_read(minor, user, va, count);
     }
 
     for _ in 0..READ_POLL_ROUNDS {
@@ -1184,6 +1515,263 @@ fn cdev_read_dgram(msg: &mut Message) -> i32 {
         if r != 0 {
             return r;
         }
+        return n as i32;
+    }
+    0
+}
+
+// ---- TCP socket handlers ----
+
+/// TCP ioctls: NWIOGTCPCONF / NWIOSTCPCONF / NWIOTCPCONN. The conf struct
+/// travels at payload bytes 16..32, the connect struct at 16..24.
+fn tcp_ioctl(msg: &mut Message) -> i32 {
+    let minor = msg_i32(msg, 0);
+    let request = msg_u32(msg, 4);
+    let s = match tcp_socket_for_minor(minor) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    match request {
+        NWIOSTCPCONF => {
+            let conf = NwioTcpConf::read_from(unsafe { &msg.m_payload.raw[16..32] });
+            tcp_setconf(s, &conf)
+        }
+        NWIOGTCPCONF => {
+            let conf = NwioTcpConf {
+                nwtc_flags: s.flags,
+                nwtc_locaddr: ip_to_u32(&s.loc_addr),
+                nwtc_remaddr: ip_to_u32(&s.rem_addr),
+                nwtc_locport: s.loc_port,
+                nwtc_remport: s.rem_port,
+            };
+            conf.write_to(unsafe { &mut msg.m_payload.raw[16..32] });
+            0
+        }
+        NWIOTCPCONN => {
+            // The connect struct carries TCF_* flags; only the blocking
+            // TCF_DEFAULT connect is implemented (the ioctl blocks until
+            // the connection is established or fails).
+            let _cl = NwioTcpCl::read_from(unsafe { &msg.m_payload.raw[16..24] });
+            tcp_connect(minor)
+        }
+        _ => -25, // ENOTTY
+    }
+}
+
+/// Apply a NWIOSTCPCONF struct to a socket. Flag groups update only the
+/// fields whose mask bits are set, so connect() after socket() only
+/// touches the remote address/port and the auto local port.
+fn tcp_setconf(s: &mut TcpSock, conf: &NwioTcpConf) -> i32 {
+    let f = conf.nwtc_flags;
+    // NWTC_LP_SEL (0x30) includes the LP_SET bit (0x20), so discriminate
+    // the local-port mode via the mask, not a single bit test.
+    match f & NWTC_LOCPORT_MASK {
+        NWTC_LP_SET => s.loc_port = conf.nwtc_locport,
+        NWTC_LP_SEL => {
+            // Auto local port: unique per socket slot.
+            s.loc_port = EPHEMERAL_PORT_BASE + (s.minor - TCP_SOCKET_MINOR_BASE) as u16;
+        }
+        _ => {}
+    }
+    if f & NWTC_SET_RA != 0 {
+        s.rem_addr = u32_to_ip(conf.nwtc_remaddr);
+    } else if f & NWTC_UNSET_RA != 0 {
+        s.rem_addr = [0; 4];
+    }
+    if f & NWTC_SET_RP != 0 {
+        s.rem_port = conf.nwtc_remport;
+    } else if f & NWTC_UNSET_RP != 0 {
+        s.rem_port = 0;
+    }
+    s.flags = f;
+    0
+}
+
+/// NWIOTCPCONN: run the three-way handshake (SYN → SYN-ACK → ACK) and
+/// block until the connection is established. Returns 0, or a negative
+/// errno (ECONNREFUSED on RST, ETIMEDOUT when no SYN-ACK arrives).
+fn tcp_connect(minor: i32) -> i32 {
+    // Initialize the connection state.
+    {
+        let s = match tcp_socket_for_minor(minor) {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        if s.state != TcpState::Closed {
+            return EISCONN;
+        }
+        if s.rem_addr == [0; 4] || s.rem_port == 0 || s.loc_port == 0 {
+            return ENOTCONN;
+        }
+        s.iss = next_iss();
+        s.snd_nxt = s.iss.wrapping_add(1);
+        s.rcv_nxt = 0;
+        s.err = 0;
+        s.state = TcpState::SynSent;
+    }
+
+    // Resolve the peer and send the SYN.
+    let send_r = {
+        let s = match tcp_socket_for_minor(minor) {
+            Some(s) => s,
+            None => return -9,
+        };
+        let mac = match arp_resolve(&s.rem_addr) {
+            Some(m) => m,
+            None => {
+                s.state = TcpState::Closed;
+                return -5; // EIO: ARP resolution failed / no NIC
+            }
+        };
+        s.rem_mac = mac;
+        let mut ip_pkt = [0u8; RX_BUF_SIZE];
+        let total = build_tcp_datagram(&mut ip_pkt, s, s.iss, 0, TCP_SYN, 0);
+        let tx = unsafe { &mut *TX_BUF.get() };
+        let n = build_eth_frame(tx, &mac, ETH_TYPE_IP, &ip_pkt[..total]);
+        dl_write_frame(&tx[..n])
+    };
+    if send_r != 0 {
+        if let Some(s) = tcp_socket_for_minor(minor) {
+            s.state = TcpState::Closed;
+        }
+        return -5;
+    }
+
+    // Poll for the SYN-ACK (tcp_demux completes the handshake).
+    for _ in 0..READ_POLL_ROUNDS {
+        {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9,
+            };
+            match s.state {
+                TcpState::Established => return 0,
+                TcpState::Closed => return if s.err != 0 { s.err } else { ETIMEDOUT },
+                TcpState::SynSent => {}
+            }
+        }
+        let got = dl_read_frames();
+        if got == 0 {
+            continue;
+        }
+        unsafe {
+            let bufs = &*RX_BUFFERS.get();
+            handle_frame(&bufs[0][..got]);
+        }
+    }
+    let s = match tcp_socket_for_minor(minor) {
+        Some(s) => s,
+        None => return -9,
+    };
+    match s.state {
+        TcpState::Established => 0,
+        _ => {
+            let e = if s.err != 0 { s.err } else { ETIMEDOUT };
+            s.state = TcpState::Closed;
+            e
+        }
+    }
+}
+
+/// TCP stream write: copy up to one segment of user data and transmit it
+/// (seq = snd_nxt). Returns the bytes sent — a short write is fine for a
+/// stream. No retransmission: the milestone runs on QEMU's lossless
+/// virtio path.
+fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
+    let s = match tcp_socket_for_minor(minor) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    if s.state != TcpState::Established {
+        return ENOTCONN;
+    }
+    if s.rem_mac == [0; 6] {
+        return ENOTCONN;
+    }
+    let max_payload = (RX_BUF_SIZE - IP_HDR_LEN - TCP_HDR_LEN) as u64;
+    if count == 0 {
+        return 0;
+    }
+    let n = count.min(max_payload) as usize;
+    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+    let copy_r = minix_rt::sys_vircopy(
+        user,
+        va,
+        minix_rt::SELF,
+        ip_pkt.as_mut_ptr() as u64 + (IP_HDR_LEN + TCP_HDR_LEN) as u64,
+        n,
+    );
+    if copy_r != 0 {
+        return copy_r;
+    }
+    let seq = s.snd_nxt;
+    let total = build_tcp_datagram(
+        &mut ip_pkt[..IP_HDR_LEN + TCP_HDR_LEN + n],
+        s,
+        seq,
+        s.rcv_nxt,
+        TCP_ACK | TCP_PSH,
+        n,
+    );
+    s.snd_nxt = s.snd_nxt.wrapping_add(n as u32);
+    let mac = s.rem_mac;
+    let tx = unsafe { &mut *TX_BUF.get() };
+    let flen = build_eth_frame(tx, &mac, ETH_TYPE_IP, &ip_pkt[..total]);
+    if dl_write_frame(&tx[..flen]) != 0 {
+        return -5;
+    }
+    n as i32
+}
+
+/// TCP stream read: return the next chunk of the received byte stream
+/// (acknowledged data), polling the NIC for a bounded time first.
+fn tcp_read(minor: i32, user: i32, va: u64, count: u64) -> i32 {
+    if count == 0 {
+        return 0;
+    }
+    for _ in 0..READ_POLL_ROUNDS {
+        let (ready, n) = {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            (s.rx_len > 0, s.rx_len.min(count as usize))
+        };
+        if ready {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9,
+            };
+            let r = minix_rt::sys_vircopy(minix_rt::SELF, s.rx_buf.as_ptr() as u64, user, va, n);
+            if r != 0 {
+                return r;
+            }
+            s.rx_buf.copy_within(n..s.rx_len, 0);
+            s.rx_len -= n;
+            return n as i32;
+        }
+        let got = dl_read_frames();
+        if got == 0 {
+            continue;
+        }
+        unsafe {
+            let bufs = &*RX_BUFFERS.get();
+            handle_frame(&bufs[0][..got]);
+        }
+    }
+    // Final check after the poll window.
+    let s = match tcp_socket_for_minor(minor) {
+        Some(s) => s,
+        None => return -9,
+    };
+    if s.rx_len > 0 {
+        let n = s.rx_len.min(count as usize);
+        let r = minix_rt::sys_vircopy(minix_rt::SELF, s.rx_buf.as_ptr() as u64, user, va, n);
+        if r != 0 {
+            return r;
+        }
+        s.rx_buf.copy_within(n..s.rx_len, 0);
+        s.rx_len -= n;
         return n as i32;
     }
     0

@@ -1,11 +1,12 @@
-//! Socket API over the MINIX `/dev/udp` (and `/dev/ip`) datagram devices.
+//! Socket API over the MINIX `/dev/udp`, `/dev/tcp` and `/dev/ip` devices.
 //!
 //! Phase 16.1: real `socket`/`bind`/`connect`/`send`/`recv` over the net
-//! server's clone-minor `/dev/udp` device. A socket is an
-//! `open("/dev/udp")`, `bind()`/`connect()` are `NWIOSUDPOPT` ioctls
-//! carrying a `nwio_udpopt_t`, and `send`/`recv` are `write`/`read` of
-//! whole datagrams (NWUO_RWDATONLY — data only), mirroring the reference
-//! libc socket layer (`minix/lib/libc/sys/socket.c`).
+//! server's clone-minor devices. A socket is an `open("/dev/udp")` or
+//! `open("/dev/tcp")`; `bind()`/`connect()` are the reference `NWIO*`
+//! ioctls carrying `nwio_udpopt_t`/`nwio_tcpconf_t`; `send`/`recv` are
+//! `write`/`read` (whole datagrams for UDP, a byte stream for TCP),
+//! mirroring the reference libc socket layer
+//! (`minix/lib/libc/sys/socket.c`).
 //!
 //! The address-family / socket-type / protocol constants match the
 //! reference `<sys/socket.h>` and `<netinet/in.h>`.
@@ -13,8 +14,9 @@
 use crate::fs::{O_RDWR, ioctl, open, read, write};
 use crate::{EIO, MinixErr};
 use net::{
-    NWIOSUDPOPT, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_SET, NWUO_RP_SET, NWUO_RWDATONLY,
-    NwioUdpOpt,
+    NWIOGTCPCONF, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPCONN, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA,
+    NWTC_SET_RP, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_SET, NWUO_RP_SET, NWUO_RWDATONLY,
+    NwioTcpCl, NwioTcpConf, NwioUdpOpt, TCF_DEFAULT,
 };
 
 // ---- Address families (sys/socket.h) ----
@@ -63,21 +65,28 @@ pub const SO_ERROR: i32 = 0x1007;
 ///
 /// - `(AF_INET, SOCK_DGRAM, IPPROTO_UDP|0)` — a `/dev/udp` socket, implicitly
 ///   bound to an ephemeral local port on the local address
+/// - `(AF_INET, SOCK_STREAM, IPPROTO_TCP|0)` — a `/dev/tcp` socket; the
+///   local port is picked at connect time
 /// - `(AF_INET, SOCK_RAW, IPPROTO_ICMP|0)` — a raw `/dev/ip` descriptor (the
 ///   ping-style protocol: write an 8-byte `{dst_ip,id,seq}` request, read the
 ///   matching reply as a raw IP datagram)
-///
-/// `AF_INET`/`SOCK_STREAM` (TCP) is not implemented yet.
 ///
 /// Returns the file descriptor.
 pub fn socket(domain: i32, type_: i32, protocol: i32) -> Result<i32, MinixErr> {
     let sock_type = type_ & !0xF;
     match (domain, sock_type, protocol) {
         (AF_INET, SOCK_DGRAM, IPPROTO_UDP | IPPROTO_IP) => udp_socket(),
+        (AF_INET, SOCK_STREAM, IPPROTO_TCP | IPPROTO_IP) => tcp_socket(),
         (AF_INET, SOCK_RAW, IPPROTO_ICMP | IPPROTO_IP) => raw_icmp_socket(),
-        (AF_INET, SOCK_STREAM, _) => Err(MinixErr::from_i32(crate::EPROTONOSUPPORT)),
-        (_, _, _) => Err(MinixErr::from_i32(crate::EAFNOSUPPORT)),
+        (_, _, _) => Err(MinixErr::from_i32(crate::EPROTONOSUPPORT)),
     }
+}
+
+/// Open a TCP socket (`/dev/tcp`). The local port is auto-assigned when
+/// the socket is connected.
+pub fn tcp_socket() -> Result<i32, MinixErr> {
+    let fd = unsafe { open("/dev/tcp", O_RDWR, 0) }?;
+    Ok(fd)
 }
 
 /// Open a UDP socket and implicitly bind it to an ephemeral local port on
@@ -107,31 +116,81 @@ fn raw_icmp_socket() -> Result<i32, MinixErr> {
     Ok(fd)
 }
 
-/// Bind a UDP socket to `addr:port` (`addr` = `[0; 4]` for INADDR_ANY).
+/// Bind a socket to `addr:port` (`addr` = `[0; 4]` for INADDR_ANY). The
+/// socket type is discovered the reference way: probe `NWIOGTCPCONF`, fall
+/// back to the UDP option ioctl on ENOTTY.
 pub fn bind(fd: i32, addr: [u8; 4], port: u16) -> Result<(), MinixErr> {
-    let opt = NwioUdpOpt {
-        nwuo_flags: NWUO_LP_SET | NWUO_EN_LOC | NWUO_RWDATONLY,
-        nwuo_locport: port,
-        nwuo_remport: 0,
-        nwuo_locaddr: u32::from_be_bytes(addr),
-        nwuo_remaddr: 0,
-    };
-    unsafe { ioctl(fd, NWIOSUDPOPT, &opt as *const NwioUdpOpt as *mut u8) }?;
-    Ok(())
+    let mut probe = NwioTcpConf::default();
+    let r = unsafe { ioctl(fd, NWIOGTCPCONF, &mut probe as *mut NwioTcpConf as *mut u8) };
+    match r {
+        Ok(_) => {
+            let conf = NwioTcpConf {
+                nwtc_flags: NWTC_LP_SET,
+                nwtc_locaddr: 0,
+                nwtc_remaddr: 0,
+                nwtc_locport: port,
+                nwtc_remport: 0,
+            };
+            unsafe { ioctl(fd, NWIOSTCPCONF, &conf as *const NwioTcpConf as *mut u8) }?;
+            Ok(())
+        }
+        Err(e) if e.0 == 25 => {
+            // ENOTTY — a UDP socket.
+            let opt = NwioUdpOpt {
+                nwuo_flags: NWUO_LP_SET | NWUO_EN_LOC | NWUO_RWDATONLY,
+                nwuo_locport: port,
+                nwuo_remport: 0,
+                nwuo_locaddr: u32::from_be_bytes(addr),
+                nwuo_remaddr: 0,
+            };
+            unsafe { ioctl(fd, NWIOSUDPOPT, &opt as *const NwioUdpOpt as *mut u8) }?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
-/// Connect a UDP socket to `addr:port`: the default destination for
-/// [`send`] and the filter for datagrams delivered by [`recv`].
+/// Connect a socket to `addr:port`. For TCP this runs the three-way
+/// handshake (blocking until established); for UDP it sets the default
+/// destination and the filter for received datagrams. The socket type is
+/// discovered the reference way: probe `NWIOGTCPCONF`, fall back to the
+/// UDP option ioctl on ENOTTY.
 pub fn connect(fd: i32, addr: [u8; 4], port: u16) -> Result<(), MinixErr> {
-    let opt = NwioUdpOpt {
-        nwuo_flags: NWUO_RP_SET | NWUO_RA_SET | NWUO_RWDATONLY,
-        nwuo_locport: 0,
-        nwuo_remport: port,
-        nwuo_locaddr: 0,
-        nwuo_remaddr: u32::from_be_bytes(addr),
-    };
-    unsafe { ioctl(fd, NWIOSUDPOPT, &opt as *const NwioUdpOpt as *mut u8) }?;
-    Ok(())
+    let mut probe = NwioTcpConf::default();
+    let r = unsafe { ioctl(fd, NWIOGTCPCONF, &mut probe as *mut NwioTcpConf as *mut u8) };
+    match r {
+        Ok(_) => {
+            // TCP: set the remote address/port (auto local port), then
+            // run the handshake.
+            let conf = NwioTcpConf {
+                nwtc_flags: NWTC_LP_SEL | NWTC_SET_RA | NWTC_SET_RP,
+                nwtc_locaddr: 0,
+                nwtc_remaddr: u32::from_be_bytes(addr),
+                nwtc_locport: 0,
+                nwtc_remport: port,
+            };
+            unsafe { ioctl(fd, NWIOSTCPCONF, &conf as *const NwioTcpConf as *mut u8) }?;
+            let cl = NwioTcpCl {
+                nwtcl_flags: TCF_DEFAULT,
+                nwtcl_ttl: 0,
+            };
+            unsafe { ioctl(fd, NWIOTCPCONN, &cl as *const NwioTcpCl as *mut u8) }?;
+            Ok(())
+        }
+        Err(e) if e.0 == 25 => {
+            // ENOTTY — a UDP socket.
+            let opt = NwioUdpOpt {
+                nwuo_flags: NWUO_RP_SET | NWUO_RA_SET | NWUO_RWDATONLY,
+                nwuo_locport: 0,
+                nwuo_remport: port,
+                nwuo_locaddr: 0,
+                nwuo_remaddr: u32::from_be_bytes(addr),
+            };
+            unsafe { ioctl(fd, NWIOSUDPOPT, &opt as *const NwioUdpOpt as *mut u8) }?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Send one datagram to the connected peer. The whole buffer is one

@@ -18,7 +18,7 @@ The port is composed of:
 | **Filesystems** | MINIX FS, ext2, MFS, etc. | `.refs/minix-3.3.0/minix/fs/` | Port |
 | **Userland** | ~145 commands | `.refs/minix-3.3.0/bin/`, `usr.bin/`, `usr.sbin/`, `sbin/`, `minix/commands/` | Port |
 | **Libraries** | libc, libm, libutil, libz, etc. | `.refs/minix-3.3.0/lib/`, `.refs/minix-3.3.0/minix/lib/` | Port |
-| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP (M8) + UDP sockets over /dev/udp (16.1a) |
+| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP (M8) + UDP/TCP sockets over /dev/udp,/dev/tcp (16.1a/b) |
 
 - A **kernel** (`sys/arch/*/compile/GENERIC` + `minix/kernel/`)
 - **System servers** as user-space processes (VM, VFS, SCHED, RS, PM, DS, IPC, TTY)
@@ -76,7 +76,17 @@ and RX demux by local port with per-socket remote filtering. Verified with
 a real UDP round trip on **all three arches**: `/bin/udp example.com` opens
 a socket, sends a DNS query to SLIRP's DNS (10.0.2.3:53), and prints the
 returned A records (`udp: example.com = 172.66.147.243 104.20.23.154`).
-TCP and the rest of the reference `minix/net` stack remain (16.1-16.4).
+
+**Minimal TCP follows the same model (Phase 16.1b):** `socket()` opens
+`/dev/tcp`, `connect()` runs the three-way handshake via
+`NWIOSTCPCONF`+`NWIOTCPCONN` (blocking until established), and `send`/`recv`
+move a byte stream with sequence tracking and ACKs (no retransmission yet —
+the lossless QEMU virtio path). `bind()`/`connect()` dispatch the reference
+way: probe `NWIOGTCPCONF`, fall back to the UDP ioctls on ENOTTY. Verified
+with a real TCP exchange on **all three arches**: `/bin/tcp 10.0.2.2 <port>`
+connects through QEMU `hostfwd` to a host echo server and prints the full
+echo (`tcp: [27 bytes] host says: hello-from-minix`). The rest of the
+reference `minix/net` stack remains (16.1-16.4).
 
 Supporting fixes in the same milestone: the virtio-net driver now uses the
 correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
@@ -3819,8 +3829,8 @@ transport, DMA, interrupt routing needed for them).**
     present), not 10 — a 2-byte shift corrupted every frame
   - Verified: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
     and AArch64 (QEMU SLIRP, guest 10.0.2.15 / gateway 10.0.2.2)
-  - The same `net` server also hosts the **UDP socket layer** (Phase 16.1a)
-    on `/dev/udp`; see the Phase 16 task list
+  - The same `net` server also hosts the **UDP/TCP socket layer** (Phase
+    16.1a/b) on `/dev/udp` and `/dev/tcp`; see the Phase 16 task list
 
 ### Phase 11d: Input & display drivers
 
@@ -4659,22 +4669,25 @@ userspace crate
     (SIGHUP=1 through SIGSYS=31) and sa_flags (SA_NOCLDSTOP through SA_NODEFER)
   - 23 tests, 121 total minix-std tests pass, clippy clean
 
-- [x] **13.7 — Networking (socket layer, Phase 16.1a)**
+- [x] **13.7 — Networking (socket layer, Phase 16.1a/b)**
   - `socket`: real dispatch — `(AF_INET, SOCK_DGRAM, IPPROTO_UDP)` opens
-    `/dev/udp` with an implicit ephemeral bind; `(AF_INET, SOCK_RAW,
-    IPPROTO_ICMP)` opens `/dev/ip`; `SOCK_STREAM` returns EPROTONOSUPPORT
-    until TCP lands
-  - `bind` / `connect`: `NWIOSUDPOPT` ioctls carrying `nwio_udpopt_t`
-    (local port/addr set, remote addr/port filter)
-  - `send` / `recv`: whole-datagram `write`/`read` (NWUO_RWDATONLY)
+    `/dev/udp` with an implicit ephemeral bind; `(AF_INET, SOCK_STREAM,
+    IPPROTO_TCP)` opens `/dev/tcp`; `(AF_INET, SOCK_RAW, IPPROTO_ICMP)`
+    opens `/dev/ip`
+  - `bind` / `connect`: dispatch by reference-style probing — try
+    `NWIOGTCPCONF`, fall back to `NWIOSUDPOPT`/`NWIOGUDPOPT` on ENOTTY.
+    TCP connect runs the three-way handshake (`NWIOTCPCONN`, blocking)
+  - `send` / `recv`: `write`/`read` — whole datagrams for UDP, a byte
+    stream for TCP
   - `close`: frees the net server's clone-minor socket slot
   - `listen` / `accept` / `getsockopt` / `setsockopt`: not implemented —
-    TCP and the full reference inet stack are Phase 16.1+
+    the server-side TCP and the full reference inet stack are Phase 16.1+
   - Implemented in `crates/minix-std/src/net.rs` with socket constants
     (AF_INET=2, SOCK_STREAM=1, IPPROTO_TCP=6, SOL_SOCKET=1,
     SO_REUSEADDR=0x04, SO_KEEPALIVE=0x08, etc.)
-  - Verified end to end: `/bin/udp example.com` resolves A records via
-    SLIRP's DNS on all three arches
+  - Verified end to end: `/bin/udp example.com` resolves A records and
+    `/bin/tcp 10.0.2.2 <port>` round-trips an echo via QEMU hostfwd, on
+    all three arches
   - Tests, clippy clean
 
 - [x] **13.8 — Minimal `libc` for FFI**
@@ -5634,13 +5647,15 @@ IS server and SEF framework not ported.
 
 ## Phase 16: Networking Stack
 
-**Goal**: Port the networking infrastructure. **Status: 🏗️ M8 + socket layer
-complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14) drives the
-`virtio_net` driver server over the DL protocol; `ping 10.0.2.2` works on all
-three arches with real-PID ICMP identifiers; and **UDP sockets work end to
-end** (`socket`/`bind`/`connect`/`send`/`recv` over `/dev/udp`, verified by a
-DNS round trip on all three arches). TCP/UDP beyond datagrams and the full
-reference inet stack (16.1-16.4 below) are NOT STARTED.
+**Goal**: Port the networking infrastructure. **Status: 🏗️ M8 + UDP + TCP
+sockets complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14)
+drives the `virtio_net` driver server over the DL protocol; `ping 10.0.2.2`
+works on all three arches with real-PID ICMP identifiers; **UDP sockets
+(socket/bind/connect/send/recv over `/dev/udp`) and minimal TCP
+(`/dev/tcp`, RFC 793 handshake + stream data) work end to end**, verified
+by a DNS round trip and a host-echo TCP exchange on all three arches.
+Retransmission, the full reference inet stack, and IPv6 (16.1-16.4 below)
+are NOT STARTED.
 
 ### Tasks
 
@@ -5676,6 +5691,29 @@ reference inet stack (16.1-16.4 below) are NOT STARTED.
   - `/dev/udp` (major 14, minor 1) in the boot manifest
   - Tests: `udp example.com` → real A records on x86_64, RISC-V64, AArch64;
     net crate protocol tests; userland DNS build/parse tests
+
+- [x] **16.1b — TCP sockets: `/dev/tcp` + minimal RFC 793 connection**
+  - `crates/net`: `nwio_tcpconf_t`/`nwio_tcpcl_t` (byte-identical to the
+    reference `net/gen/tcp_io.h`), `NWIOSTCPCONF`/`NWIOGTCPCONF`/
+    `NWIOTCPCONN` ioctl codes, `NWTC_*`/`TCF_*` flags
+  - `servers/src/net.rs`: TCP sockets — clone-minor `/dev/tcp` (minor 2),
+    three-way handshake (`NWIOTCPCONN` blocks until established;
+    SYN → SYN-ACK → ACK), stream write (one segment, seq-tracked) and
+    stream read (in-order delivery + ACK), RX demux completing the
+    handshake and delivering data, RST recorded as ECONNREFUSED for a
+    pending connect. No retransmission yet (lossless virtio path)
+  - Ethernet-padding fix: inbound IP datagrams are trimmed to the IP total
+    length so a padded pure-ACK frame can't deliver padding as TCP data
+    (UDP was already immune via its length field)
+  - `crates/minix-std/src/net.rs`: `tcp_socket()`; `bind()`/`connect()`
+    dispatch by reference-style probing (`NWIOGTCPCONF`, falling back to
+    `NWIOGUDPOPT` on ENOTTY); `socket()` now accepts SOCK_STREAM
+  - `userland/src/bin/tcp.rs`: connect to a hostfwd'd port, send a message,
+    print the echoed reply
+  - `/dev/tcp` (major 14, minor 2) in the boot manifest
+  - Tests: `tcp 10.0.2.2 <port> hello` → full echo round trip on x86_64,
+    RISC-V64, AArch64 (QEMU `hostfwd` to a host echo server); net crate
+    TCP protocol tests
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`

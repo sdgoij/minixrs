@@ -993,6 +993,85 @@ fn build_dns_query(out: &mut [u8], id: u16, name: &str) -> usize {
     n + 4
 }
 
+/// tcp — TCP socket smoke test over `/dev/tcp`: connect to a host (default
+/// 10.0.2.2:18080, QEMU SLIRP `hostfwd` to the host), send a message, and
+/// print the reply. Exercises the full socket path: clone-minor open,
+/// NWIOSTCPCONF + NWIOTCPCONN handshake, stream send, stream recv.
+pub fn tcp(args: &[&str]) -> i32 {
+    let host = if args.len() > 1 { args[1] } else { "10.0.2.2" };
+    let ip = match parse_ipv4(host) {
+        Some(ip) => ip,
+        None => {
+            write_err(b"tcp: bad address\n");
+            return -1;
+        }
+    };
+    let port = if args.len() > 2 {
+        parse_i32(args[2]).unwrap_or(18080) as u16
+    } else {
+        18080
+    };
+    let msg = if args.len() > 3 {
+        args[3]
+    } else {
+        "hello from minix"
+    };
+
+    let fd = match minix_std::net::tcp_socket() {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"tcp: cannot open /dev/tcp\n");
+            return -5;
+        }
+    };
+
+    match minix_std::net::connect(fd, ip, port) {
+        Ok(()) => {}
+        Err(e) => {
+            write_err(b"tcp: connect failed (");
+            print_dec(e.0 as u32);
+            write_err(b")\n");
+            let _ = minix_std::net::close(fd);
+            return -5;
+        }
+    }
+
+    let w = unsafe { minix_std::net::send(fd, msg.as_bytes()) };
+    if w != Ok(msg.len() as i64) {
+        write_err(b"tcp: send failed\n");
+        let _ = minix_std::net::close(fd);
+        return -5;
+    }
+
+    // Collect the reply (the echo fits in a few reads; each read polls the
+    // NIC until data arrives or the poll window closes).
+    let mut buf = [0u8; 1024];
+    let mut total = 0usize;
+    for _ in 0..4 {
+        let n = unsafe { minix_std::net::recv(fd, &mut buf[total..]) };
+        match n {
+            Ok(n) if n > 0 => {
+                total += n as usize;
+                if total >= buf.len() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let _ = minix_std::net::close(fd);
+    if total == 0 {
+        write_err(b"tcp: no reply\n");
+        return -5;
+    }
+    write_out(b"tcp: [");
+    print_dec(total as u32);
+    write_out(b" bytes] ");
+    write_out(&buf[..total]);
+    write_out(b"\n");
+    0
+}
+
 /// Skip a (possibly compressed) DNS name starting at `off`; returns the
 /// offset just past it, clamped to the message length.
 fn skip_dns_name(msg: &[u8], mut off: usize) -> usize {

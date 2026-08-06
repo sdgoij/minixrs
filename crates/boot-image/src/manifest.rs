@@ -20,6 +20,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/sync", "sync"),
     ("/bin/ping", "ping"),
     ("/bin/udp", "udp"),
+    ("/bin/tcp", "tcp"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),
@@ -48,6 +49,7 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/console", 0o020600, 5, 0), // char device, major=5 (console), minor=0
     ("/dev/ip", 0o020600, 14, 0),   // char device, major=14 (net), minor=0
     ("/dev/udp", 0o020600, 14, 1),  // char device, major=14 (net), minor=1 — UDP socket
+    ("/dev/tcp", 0o020600, 14, 2),  // char device, major=14 (net), minor=2 — TCP socket
 ];
 
 #[cfg(test)]

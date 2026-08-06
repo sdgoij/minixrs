@@ -84,6 +84,11 @@ path = "src/bin/udp.rs"
 test = false
 
 [[bin]]
+name = "tcp"
+path = "src/bin/tcp.rs"
+test = false
+
+[[bin]]
 name = "mknod"
 path = "src/bin/mknod.rs"
 test = false
