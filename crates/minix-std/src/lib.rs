@@ -126,8 +126,10 @@ pub const ENOSPC: i32 = -28;
 pub const EDOM: i32 = -33;
 pub const ERANGE: i32 = -34;
 pub const ENOSYS: i32 = -71;
+pub const EMSGSIZE: i32 = -90;
 pub const EPROTONOSUPPORT: i32 = -93;
 pub const EAFNOSUPPORT: i32 = -97;
+pub const ENOTCONN: i32 = -107;
 pub const EDONTREPLY: i32 = -201;
 pub const SUSPEND: i32 = -998;
 

@@ -949,6 +949,65 @@ pub fn udp(args: &[&str]) -> i32 {
     print_dns_reply(&reply[..n], name)
 }
 
+/// udp_echo — UDP echo server over `/dev/udp` using the unconnected
+/// `sendto`/`recvfrom` protocol: bind `port` and echo every datagram back
+/// to its sender. Exercises the `NWUO_RWDATALL` wire mode end to end —
+/// the io-header prefix the net server prepends to received datagrams and
+/// parses from sent ones (a connected RWDATONLY socket cannot do this).
+pub fn udp_echo(args: &[&str]) -> i32 {
+    let port = if args.len() > 1 {
+        parse_i32(args[1]).unwrap_or(20000) as u16
+    } else {
+        20000
+    };
+
+    let sock = match minix_std::net::UdpSocket::bind(minix_std::net::SocketAddr::new([0; 4], port))
+    {
+        Ok(s) => s,
+        Err(e) => {
+            write_err(b"udp_echo: bind failed (");
+            print_dec(e.0 as u32);
+            write_err(b")\n");
+            return -5;
+        }
+    };
+    write_out(b"udp_echo: listening on udp port ");
+    print_dec(port as u32);
+    write_out(b"\n");
+
+    let mut buf = [0u8; 512];
+    loop {
+        let (n, from) = match sock.recv_from(&mut buf) {
+            Ok((0, _)) => continue, // no datagram within the poll window
+            Ok((n, from)) => (n, from),
+            Err(e) => {
+                write_err(b"udp_echo: recv_from failed (");
+                print_dec(e.0 as u32);
+                write_err(b")\n");
+                break;
+            }
+        };
+        write_out(b"udp_echo: ");
+        print_dec(n as u32);
+        write_out(b" bytes from ");
+        print_dec(from.ip[0] as u32);
+        write_out(b".");
+        print_dec(from.ip[1] as u32);
+        write_out(b".");
+        print_dec(from.ip[2] as u32);
+        write_out(b".");
+        print_dec(from.ip[3] as u32);
+        write_out(b":");
+        print_dec(from.port as u32);
+        write_out(b"\n");
+        if sock.send_to(&buf[..n], from).is_err() {
+            write_err(b"udp_echo: send_to failed\n");
+            break;
+        }
+    }
+    -5
+}
+
 fn write_be16(out: &mut [u8], v: u16) {
     out[..2].copy_from_slice(&v.to_be_bytes());
 }

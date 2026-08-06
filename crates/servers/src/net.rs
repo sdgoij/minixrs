@@ -51,11 +51,13 @@ use arch_common::safecopies::{
     CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CPF_WRITE, CpDirect, CpGrant, CpUnion, GRANT_INVALID,
 };
 use net::{
-    NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPACCEPTTO,
-    NWIOTCPCONN, NWIOTCPLISTENQ, NWTC_LOCPORT_MASK, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA,
-    NWTC_SET_RP, NWTC_UNSET_RA, NWTC_UNSET_RP, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY,
-    NWUO_RA_SET, NWUO_RP_ANY, NWUO_RP_SET, NWUO_RWDATALL, NwioTcpCl, NwioTcpConf, NwioUdpOpt,
-    TcpCookie,
+    FIONREAD, NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT,
+    NWIOTCPACCEPTTO, NWIOTCPCONN, NWIOTCPGERROR, NWIOTCPLISTENQ, NWIOTCPPUSH, NWIOTCPSHUTDOWN,
+    NWTC_LOCPORT_MASK, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA, NWTC_SET_RP, NWTC_UNSET_RA,
+    NWTC_UNSET_RP, NWUO_ACC_MASK, NWUO_BROAD_MASK, NWUO_EN_LOC, NWUO_IPOPT_MASK, NWUO_LOCADDR_MASK,
+    NWUO_LOCPORT_MASK, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY, NWUO_RA_SET, NWUO_REMADDR_MASK,
+    NWUO_REMPORT_MASK, NWUO_RP_ANY, NWUO_RP_SET, NWUO_RW_MASK, NWUO_RWDATALL, NwioTcpCl,
+    NwioTcpConf, NwioUdpOpt, TcpCookie, UdpIoHdr,
 };
 
 /// Our IP on the SLIRP network (10.0.2.15).
@@ -111,6 +113,8 @@ const EAGAIN: i32 = -11;
 const ETIMEDOUT: i32 = -110;
 const ECONNREFUSED: i32 = -111;
 const EINPROGRESS: i32 = -115;
+/// Write to a socket after `shutdown(SHUT_WR)` (POSIX EPIPE).
+const EPIPE: i32 = -32;
 
 /// Max pending connections per listening socket (backlog ceiling).
 const ACCEPT_QUEUE_MAX: usize = 4;
@@ -124,6 +128,9 @@ const SYN_RETRY_EVERY: u32 = 5;
 /// ICMP echo request / reply types.
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_ECHO_REPLY: u8 = 0;
+/// ICMP destination-unreachable type and its port-unreachable code.
+const ICMP_DST_UNREACH: u8 = 3;
+const ICMP_PORT_UNREACH: u8 = 3;
 
 /// Number of RX packet buffers provided per DL_READV_S.
 const RX_BUFS: usize = 4;
@@ -136,6 +143,8 @@ const READ_POLL_ROUNDS: u32 = 20;
 const IP_HDR_LEN: usize = 20;
 /// ICMP echo header length (type, code, checksum, id, seq).
 const ICMP_HDR_LEN: usize = 8;
+/// `udp_io_hdr_t` prefix size in `NWUO_RWDATALL` datagrams (16 bytes).
+const UDP_IO_HDR_SIZE: usize = UdpIoHdr::SIZE;
 
 // ---- Grant table (client-side, mirrors fs/src/block_io.rs) ----
 
@@ -315,6 +324,19 @@ static STATE: StateCell = StateCell::new();
 
 // ---- UDP socket table ----
 
+/// UDP socket flags whose masked groups are merged by `udp_setopt` (the
+/// reference `udp_setopt` only applies groups the new struct carries).
+const UDP_FLAG_GROUPS: [u32; 8] = [
+    NWUO_ACC_MASK,
+    NWUO_LOCPORT_MASK,
+    NWUO_LOCADDR_MASK,
+    NWUO_BROAD_MASK,
+    NWUO_REMPORT_MASK,
+    NWUO_REMADDR_MASK,
+    NWUO_RW_MASK,
+    NWUO_IPOPT_MASK,
+];
+
 /// One UDP socket, keyed by its cloned minor number.
 #[repr(C)]
 struct UdpSock {
@@ -330,6 +352,14 @@ struct UdpSock {
     loc_addr: [u8; 4],
     /// Connected remote address (0.0.0.0 = any).
     rem_addr: [u8; 4],
+    /// Error recorded by demux (e.g. ECONNREFUSED on ICMP port-unreachable).
+    err: i32,
+    /// Source/destination of the buffered datagram (for NWUO_RWDATALL
+    /// reads — `recvfrom` reports the sender).
+    rx_src_addr: [u8; 4],
+    rx_src_port: u16,
+    rx_dst_addr: [u8; 4],
+    rx_dst_port: u16,
     /// One pending received datagram payload (data-only, like NWUO_RWDATONLY).
     rx_len: usize,
     rx_buf: [u8; RX_BUF_SIZE],
@@ -345,6 +375,11 @@ impl UdpSock {
             rem_port: 0,
             loc_addr: [0; 4],
             rem_addr: [0; 4],
+            err: 0,
+            rx_src_addr: [0; 4],
+            rx_src_port: 0,
+            rx_dst_addr: [0; 4],
+            rx_dst_port: 0,
             rx_len: 0,
             rx_buf: [0; RX_BUF_SIZE],
         }
@@ -474,6 +509,8 @@ struct TcpSock {
     /// The peer sent its FIN (half-close); `read` reports EOF once the
     /// RX stream is drained.
     peer_closed: bool,
+    /// `shutdown(SHUT_WR)` sent our FIN; the socket still receives.
+    shutdown_wr: bool,
 }
 
 impl TcpSock {
@@ -507,6 +544,7 @@ impl TcpSock {
             backlog: 0,
             accept_queue: [EMPTY_PENDING; ACCEPT_QUEUE_MAX],
             peer_closed: false,
+            shutdown_wr: false,
         }
     }
 }
@@ -816,6 +854,12 @@ fn udp_demux(pkt: &[u8], ihl: usize) {
             let n = payload.len().min(RX_BUF_SIZE);
             s.rx_buf[..n].copy_from_slice(&payload[..n]);
             s.rx_len = n;
+            // Record the datagram's 4-tuple for NWUO_RWDATALL reads
+            // (`recvfrom` reports the sender).
+            s.rx_src_addr = src_ip;
+            s.rx_src_port = src_port;
+            s.rx_dst_addr = pkt[16..20].try_into().unwrap_or([0; 4]);
+            s.rx_dst_port = dst_port;
             return;
         }
     }
@@ -880,6 +924,15 @@ fn tcp_demux(pkt: &[u8], ihl: usize, src_mac: &[u8; 6]) {
                     }
                 }
                 TcpState::Established => tcp_established_demux(s, ack, seq, flags, payload),
+                TcpState::FinSent if s.shutdown_wr => {
+                    // Half-close (shutdown(SHUT_WR)): keep delivering the
+                    // peer's data (the reference keeps the read half open);
+                    // reap once the peer's FIN completes the close.
+                    tcp_established_demux(s, ack, seq, flags, payload);
+                    if s.peer_closed {
+                        s.in_use = false;
+                    }
+                }
                 TcpState::FinSent => tcp_fin_demux(s, ack, seq, flags, payload),
                 TcpState::Closed | TcpState::Listening => {}
             }
@@ -1132,8 +1185,15 @@ fn next_ip_id() -> u16 {
 
 /// Build an IP/UDP datagram into `out` (IP header + UDP header + payload
 /// already present after byte 28). Returns nothing; `out` must be at least
-/// `IP_HDR_LEN + UDP_HDR_LEN + payload_len` bytes.
-fn build_udp_datagram(out: &mut [u8], s: &UdpSock, payload_len: usize) {
+/// `IP_HDR_LEN + UDP_HDR_LEN + payload_len` bytes. `dst_ip`/`dst_port` are
+/// explicit so a sendto() on an unconnected socket can address any peer.
+fn build_udp_datagram(
+    out: &mut [u8],
+    s: &UdpSock,
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    payload_len: usize,
+) {
     let total = IP_HDR_LEN + UDP_HDR_LEN + payload_len;
     let src_ip = if s.loc_addr == [0; 4] {
         OUR_IP
@@ -1151,21 +1211,21 @@ fn build_udp_datagram(out: &mut [u8], s: &UdpSock, payload_len: usize) {
     out[9] = IP_PROTO_UDP;
     write_be16(&mut out[10..12], 0); // checksum (filled below)
     out[12..16].copy_from_slice(&src_ip);
-    out[16..20].copy_from_slice(&s.rem_addr);
+    out[16..20].copy_from_slice(dst_ip);
     let ip_csum = checksum(&out[..IP_HDR_LEN]);
     write_be16(&mut out[10..12], ip_csum);
 
     // UDP header (checksum field starts zero, filled below).
     let u = IP_HDR_LEN;
     write_be16(&mut out[u..u + 2], s.loc_port);
-    write_be16(&mut out[u + 2..u + 4], s.rem_port);
+    write_be16(&mut out[u + 2..u + 4], dst_port);
     write_be16(&mut out[u + 4..u + 6], (UDP_HDR_LEN + payload_len) as u16);
     write_be16(&mut out[u + 6..u + 8], 0);
 
     // UDP checksum over the pseudo-header + UDP header + payload.
     let mut sum = 0u32;
     csum_add(&mut sum, &src_ip);
-    csum_add(&mut sum, &s.rem_addr);
+    csum_add(&mut sum, dst_ip);
     csum_add(&mut sum, &[0, IP_PROTO_UDP]); // zero byte + protocol
     csum_add(
         &mut sum,
@@ -1515,6 +1575,41 @@ fn handle_ip(st: &mut NetState, pkt: &[u8], src_mac: &[u8; 6]) -> bool {
     let seq = read_be16(&icmp[6..8]);
     let total = ihl + icmp.len();
 
+    if icmp_type == ICMP_DST_UNREACH && icmp[1] == ICMP_PORT_UNREACH {
+        // SLIRP reports a UDP send to a closed port as an ICMP
+        // destination-unreachable carrying the original IP+UDP header. The
+        // offending UDP header sits after the embedded IP header (icmp[8..]);
+        // its src/dst ports identify our socket. Record ECONNREFUSED so the
+        // next read surfaces it.
+        let orig_ihl = ((icmp.get(8).copied().unwrap_or(0) & 0x0F) as usize) * 4;
+        let udp_off = 8 + orig_ihl;
+        if icmp.len() >= udp_off + UDP_HDR_LEN {
+            let loc_port = read_be16(&icmp[udp_off..udp_off + 2]);
+            let rem_port = read_be16(&icmp[udp_off + 2..udp_off + 4]);
+            let rem_ip: [u8; 4] = icmp
+                .get(12..16)
+                .map(|s| s.try_into().unwrap_or([0; 4]))
+                .unwrap_or([0; 4]);
+            unsafe {
+                let socks = &mut *SOCKETS.get();
+                for s in socks.iter_mut() {
+                    if !s.in_use || s.loc_port != loc_port {
+                        continue;
+                    }
+                    if s.rem_port != 0 && s.rem_port != rem_port {
+                        continue;
+                    }
+                    if s.rem_addr != [0; 4] && s.rem_addr != rem_ip {
+                        continue;
+                    }
+                    s.err = ECONNREFUSED;
+                    break;
+                }
+            }
+        }
+        return false;
+    }
+
     if icmp_type == ICMP_ECHO_REQUEST {
         // Reply automatically: swap src/dst, set type to reply.
         let tx = unsafe { &mut *TX_BUF.get() };
@@ -1779,8 +1874,9 @@ fn cdev_ioctl_net(msg: &mut Message) -> i32 {
     }
 }
 
-/// UDP ioctls: NWIOSUDPOPT / NWIOGUDPOPT. The `nwio_udpopt_t` struct
-/// travels at payload bytes 16..32 (VFS's m2_l1 data area).
+/// UDP ioctls: NWIOSUDPOPT / NWIOGUDPOPT / FIONREAD. The `nwio_udpopt_t`
+/// struct travels at payload bytes 16..32 (VFS's m2_l1 data area); the
+/// FIONREAD int at 16..20.
 fn udp_ioctl(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let request = msg_u32(msg, 4);
@@ -1797,13 +1893,20 @@ fn udp_ioctl(msg: &mut Message) -> i32 {
             udp_getopt(s).write_to(unsafe { &mut msg.m_payload.raw[16..32] });
             0
         }
+        FIONREAD => {
+            unsafe {
+                msg.m_payload.raw[16..20].copy_from_slice(&(s.rx_len as i32).to_ne_bytes());
+            }
+            0
+        }
         _ => -25, // ENOTTY
     }
 }
 
 /// Apply a NWIOSUDPOPT option struct to a socket (bind/connect).
-/// Flag groups update only the fields whose mask bits are set, so a
-/// connect() after bind() only touches the remote address/port.
+/// Flag groups update only the fields whose mask bits are set (the
+/// reference `udp_setopt` semantics), so a connect() after bind() only
+/// touches the remote address/port and the RW mode.
 fn udp_setopt(s: &mut UdpSock, opt: &NwioUdpOpt) -> i32 {
     let f = opt.nwuo_flags;
     if f & NWUO_LP_SEL != 0 {
@@ -1825,10 +1928,13 @@ fn udp_setopt(s: &mut UdpSock, opt: &NwioUdpOpt) -> i32 {
     } else if f & NWUO_RA_ANY != 0 {
         s.rem_addr = [0; 4];
     }
-    if f & NWUO_RWDATALL != 0 {
-        return -95; // EOPNOTSUPP: header-inclusive datagrams are not supported
+    // Merge each masked group the struct carries; groups it omits keep
+    // their current value (so bind() then connect() preserve LP/EN_LOC).
+    for g in UDP_FLAG_GROUPS {
+        if f & g != 0 {
+            s.flags = (s.flags & !g) | (f & g);
+        }
     }
-    s.flags = f;
     0
 }
 
@@ -1844,7 +1950,10 @@ fn udp_getopt(s: &UdpSock) -> NwioUdpOpt {
 }
 
 /// CDEV_WRITE (vircopy I/O): UDP writes a whole datagram; TCP writes a
-/// byte-stream segment. Requires a bound, connected socket.
+/// byte-stream segment. A UDP socket in `NWUO_RWDATALL` mode (unconnected,
+/// the `sendto` protocol) expects the 16-byte `udp_io_hdr_t` prefix and
+/// takes the destination from it; `NWUO_RWDATONLY` (connected) sends to
+/// the socket's remote address.
 fn cdev_write_dgram(msg: &Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let user = msg_i32(msg, 8);
@@ -1857,38 +1966,82 @@ fn cdev_write_dgram(msg: &Message) -> i32 {
         Some(s) => s,
         None => return -9, // EBADF
     };
-    if s.rem_addr == [0; 4] || s.rem_port == 0 || s.loc_port == 0 {
-        return -107; // ENOTCONN
+    if s.loc_port == 0 {
+        return -107; // ENOTCONN: no local port bound
     }
     let max_payload = (RX_BUF_SIZE - IP_HDR_LEN - UDP_HDR_LEN) as u64;
-    if len == 0 || len > max_payload {
-        return -90; // EMSGSIZE
+
+    // Resolve the destination: RWDATALL takes it from the write header
+    // (or the connected remote when set), RWDATONLY from the socket.
+    let (dst_ip, dst_port, payload_off, payload_len) = if s.flags & NWUO_RWDATALL != 0 {
+        if len < UDP_IO_HDR_SIZE as u64 {
+            return -22; // EINVAL: missing io header
+        }
+        let payload_len = len - UDP_IO_HDR_SIZE as u64;
+        if payload_len > max_payload {
+            return -90; // EMSGSIZE
+        }
+        // The header is copied into a scratch buffer first, then parsed.
+        let mut hdr = [0u8; UDP_IO_HDR_SIZE];
+        let copy_r = minix_rt::sys_vircopy(
+            user,
+            va,
+            minix_rt::SELF,
+            hdr.as_mut_ptr() as u64,
+            UDP_IO_HDR_SIZE,
+        );
+        if copy_r != 0 {
+            return copy_r;
+        }
+        let hdr = UdpIoHdr::read_from(&hdr);
+        let dst_ip = if s.flags & NWUO_RA_SET != 0 {
+            s.rem_addr
+        } else {
+            hdr.uih_dst_addr
+        };
+        let dst_port = if s.flags & NWUO_RP_SET != 0 {
+            s.rem_port
+        } else {
+            hdr.uih_dst_port
+        };
+        (dst_ip, dst_port, UDP_IO_HDR_SIZE, payload_len as usize)
+    } else {
+        if len == 0 || len > max_payload {
+            return -90; // EMSGSIZE
+        }
+        if s.rem_addr == [0; 4] || s.rem_port == 0 {
+            return -107; // ENOTCONN: not connected
+        }
+        (s.rem_addr, s.rem_port, 0, len as usize)
+    };
+    if dst_ip == [0; 4] || dst_port == 0 {
+        return -107; // ENOTCONN: no destination
     }
-    let total = IP_HDR_LEN + UDP_HDR_LEN + len as usize;
+    let total = IP_HDR_LEN + UDP_HDR_LEN + payload_len;
 
     let mut ip_pkt = [0u8; RX_BUF_SIZE];
     let copy_r = minix_rt::sys_vircopy(
         user,
-        va,
+        va + payload_off as u64,
         minix_rt::SELF,
         ip_pkt.as_mut_ptr() as u64 + (IP_HDR_LEN + UDP_HDR_LEN) as u64,
-        len as usize,
+        payload_len,
     );
     if copy_r != 0 {
         return copy_r;
     }
 
-    let mac = match arp_resolve(&s.rem_addr) {
+    let mac = match arp_resolve(&dst_ip) {
         Some(m) => m,
         None => return -5, // EIO: ARP resolution failed / no NIC
     };
-    build_udp_datagram(&mut ip_pkt[..total], s, len as usize);
+    build_udp_datagram(&mut ip_pkt[..total], s, &dst_ip, dst_port, payload_len);
     let tx = unsafe { &mut *TX_BUF.get() };
     let n = build_eth_frame(tx, &mac, ETH_TYPE_IP, &ip_pkt[..total]);
     if dl_write_frame(&tx[..n]) != 0 {
         return -5;
     }
-    len as i32
+    payload_len as i32
 }
 
 /// CDEV_READ (vircopy I/O): UDP returns one datagram; TCP returns the
@@ -1906,25 +2059,47 @@ fn cdev_read_dgram(msg: &mut Message) -> i32 {
         return tcp_read(minor, user, va, count);
     }
 
+    // An async error (ICMP port-unreachable) fails the next read.
+    {
+        let s = match socket_for_minor(minor) {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        if s.err != 0 {
+            let e = s.err;
+            s.err = 0;
+            return e;
+        }
+    }
+
+    let datall = {
+        let s = match socket_for_minor(minor) {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        s.flags & NWUO_RWDATALL != 0
+    };
+    // RWDATALL reads return the 16-byte `udp_io_hdr_t` prefix plus the
+    // payload; the libc strips it and reports the sender.
+    let max_data = if datall {
+        (count as usize).saturating_sub(UDP_IO_HDR_SIZE)
+    } else {
+        count as usize
+    };
+    if datall && count < UDP_IO_HDR_SIZE as u64 {
+        return -22; // EINVAL: buffer too small for the io header
+    }
+
     for _ in 0..READ_POLL_ROUNDS {
         let (ready, n) = {
             let s = match socket_for_minor(minor) {
                 Some(s) => s,
                 None => return -9, // EBADF
             };
-            (s.rx_len > 0, s.rx_len.min(count as usize))
+            (s.rx_len > 0, s.rx_len.min(max_data))
         };
         if ready {
-            let s = match socket_for_minor(minor) {
-                Some(s) => s,
-                None => return -9,
-            };
-            let r = minix_rt::sys_vircopy(minix_rt::SELF, s.rx_buf.as_ptr() as u64, user, va, n);
-            s.rx_len = 0;
-            if r != 0 {
-                return r;
-            }
-            return n as i32;
+            return udp_read_copy(minor, user, va, n, datall);
         }
         let got = dl_read_frames();
         if got == 0 {
@@ -1942,15 +2117,60 @@ fn cdev_read_dgram(msg: &mut Message) -> i32 {
         None => return -9,
     };
     if s.rx_len > 0 {
-        let n = s.rx_len.min(count as usize);
-        let r = minix_rt::sys_vircopy(minix_rt::SELF, s.rx_buf.as_ptr() as u64, user, va, n);
-        s.rx_len = 0;
-        if r != 0 {
-            return r;
-        }
-        return n as i32;
+        let n = s.rx_len.min(max_data);
+        return udp_read_copy(minor, user, va, n, datall);
     }
     0
+}
+
+/// Copy `n` payload bytes (plus the 16-byte io header in RWDATALL mode)
+/// from the UDP socket's RX slot to the user's buffer, then consume the
+/// datagram.
+fn udp_read_copy(minor: i32, user: i32, va: u64, n: usize, datall: bool) -> i32 {
+    let s = match socket_for_minor(minor) {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    if datall {
+        let mut hdr = [0u8; UDP_IO_HDR_SIZE];
+        UdpIoHdr {
+            uih_src_addr: s.rx_src_addr,
+            uih_dst_addr: s.rx_dst_addr,
+            uih_src_port: s.rx_src_port,
+            uih_dst_port: s.rx_dst_port,
+            uih_ip_opt_len: 0,
+            uih_data_len: n as u16,
+        }
+        .write_to(&mut hdr);
+        let r1 = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            hdr.as_ptr() as u64,
+            user,
+            va,
+            UDP_IO_HDR_SIZE,
+        );
+        if r1 != 0 {
+            return r1;
+        }
+        let r2 = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            s.rx_buf.as_ptr() as u64,
+            user,
+            va + UDP_IO_HDR_SIZE as u64,
+            n,
+        );
+        s.rx_len = 0;
+        if r2 != 0 {
+            return r2;
+        }
+        return (UDP_IO_HDR_SIZE + n) as i32;
+    }
+    let r = minix_rt::sys_vircopy(minix_rt::SELF, s.rx_buf.as_ptr() as u64, user, va, n);
+    s.rx_len = 0;
+    if r != 0 {
+        return r;
+    }
+    n as i32
 }
 
 // ---- TCP socket handlers ----
@@ -2022,8 +2242,69 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
             let cookie = TcpCookie::read_from(unsafe { &msg.m_payload.raw[16..32] });
             tcp_acceptto(minor, cookie)
         }
+        NWIOTCPSHUTDOWN => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            tcp_shutdown_wr(s)
+        }
+        NWIOTCPPUSH => {
+            // We transmit immediately, so push is a no-op; the reference
+            // still requires a connected socket.
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            if s.state != TcpState::Established {
+                return ENOTCONN;
+            }
+            0
+        }
+        NWIOTCPGERROR => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            let e = s.err;
+            s.err = 0;
+            unsafe {
+                msg.m_payload.raw[16..20].copy_from_slice(&e.to_ne_bytes());
+            }
+            0
+        }
+        FIONREAD => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            unsafe {
+                msg.m_payload.raw[16..20].copy_from_slice(&(s.rx_len as i32).to_ne_bytes());
+            }
+            0
+        }
         _ => -25, // ENOTTY
     }
+}
+
+/// NWIOTCPSHUTDOWN (shutdown(2) with SHUT_WR): flush and send our FIN like
+/// close(), but keep the socket usable for reading (the reference semantics
+/// — the read half stays open until the peer closes).
+fn tcp_shutdown_wr(s: &mut TcpSock) -> i32 {
+    if s.state != TcpState::Established || s.rem_mac == [0; 6] {
+        return ENOTCONN;
+    }
+    let seq = s.snd_nxt;
+    let ack = s.rcv_nxt;
+    let peer = TcpPeer::from_sock(s);
+    s.snd_nxt = s.snd_nxt.wrapping_add(1);
+    s.state = TcpState::FinSent;
+    s.err = 0;
+    s.retx_rounds = 0;
+    s.shutdown_wr = true;
+    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+    let _ = tcp_send_raw(&mut ip_pkt, &peer, seq, ack, TCP_FIN | TCP_ACK, 0);
+    0
 }
 
 /// NWIOTCPLISTENQ: put the socket into the listening state with a bounded
@@ -2308,6 +2589,9 @@ fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
         Some(s) => s,
         None => return -9, // EBADF
     };
+    if s.shutdown_wr {
+        return EPIPE; // write after shutdown(SHUT_WR)
+    }
     if s.state != TcpState::Established {
         return ENOTCONN;
     }
@@ -2510,8 +2794,14 @@ mod tests {
         assert_eq!(core::mem::offset_of!(UdpSock, rem_port), 14);
         assert_eq!(core::mem::offset_of!(UdpSock, loc_addr), 16);
         assert_eq!(core::mem::offset_of!(UdpSock, rem_addr), 20);
-        assert_eq!(core::mem::offset_of!(UdpSock, rx_len), 24);
-        assert_eq!(core::mem::size_of::<UdpSock>(), 2080);
+        assert_eq!(core::mem::offset_of!(UdpSock, err), 24);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_src_addr), 28);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_src_port), 32);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_dst_addr), 34);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_dst_port), 38);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_len), 40);
+        assert_eq!(core::mem::offset_of!(UdpSock, rx_buf), 48);
+        assert_eq!(core::mem::size_of::<UdpSock>(), 2096);
 
         assert_eq!(core::mem::offset_of!(TcpSock, in_use), 0);
         assert_eq!(core::mem::offset_of!(TcpSock, minor), 4);
@@ -2531,6 +2821,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TcpSock, backlog), 4192);
         assert_eq!(core::mem::offset_of!(TcpSock, accept_queue), 4200);
         assert_eq!(core::mem::offset_of!(TcpSock, peer_closed), 12552);
+        assert_eq!(core::mem::offset_of!(TcpSock, shutdown_wr), 12553);
         assert_eq!(core::mem::offset_of!(PendingConn, in_use), 0);
         assert_eq!(core::mem::offset_of!(PendingConn, established), 1);
         assert_eq!(core::mem::offset_of!(PendingConn, rem_port), 6);

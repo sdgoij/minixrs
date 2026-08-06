@@ -22,6 +22,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/udp", "udp"),
     ("/bin/tcp", "tcp"),
     ("/bin/tcpserver", "tcpserver"),
+    ("/bin/udp_echo", "udp_echo"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

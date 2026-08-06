@@ -53,12 +53,65 @@ impl NwioUdpOpt {
     }
 }
 
+/// UDP datagram I/O header (reference `struct udp_io_hdr`, 16 bytes).
+///
+/// Prefixed to each datagram when the socket is in `NWUO_RWDATALL` mode:
+/// the sender fills the destination (and optionally source) fields, the
+/// receiver reads the source. Addresses are raw network-order bytes; ports
+/// and the two length fields are big-endian on the wire (the reference's
+/// `CONF_UDP_IO_NW_BYTE_ORDER` layout).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UdpIoHdr {
+    pub uih_src_addr: [u8; 4],
+    pub uih_dst_addr: [u8; 4],
+    pub uih_src_port: u16,
+    pub uih_dst_port: u16,
+    pub uih_ip_opt_len: u16,
+    pub uih_data_len: u16,
+}
+
+impl UdpIoHdr {
+    /// Wire size: 4 + 4 + 2 + 2 + 2 + 2 = 16 bytes.
+    pub const SIZE: usize = 16;
+
+    /// Serialize into `out` (must be at least [`UdpIoHdr::SIZE`] bytes).
+    pub fn write_to(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.uih_src_addr);
+        out[4..8].copy_from_slice(&self.uih_dst_addr);
+        out[8..10].copy_from_slice(&self.uih_src_port.to_be_bytes());
+        out[10..12].copy_from_slice(&self.uih_dst_port.to_be_bytes());
+        out[12..14].copy_from_slice(&self.uih_ip_opt_len.to_be_bytes());
+        out[14..16].copy_from_slice(&self.uih_data_len.to_be_bytes());
+    }
+
+    /// Parse from `src` (must be at least [`UdpIoHdr::SIZE`] bytes).
+    pub fn read_from(src: &[u8]) -> Self {
+        let mut src_addr = [0u8; 4];
+        src_addr.copy_from_slice(&src[0..4]);
+        let mut dst_addr = [0u8; 4];
+        dst_addr.copy_from_slice(&src[4..8]);
+        Self {
+            uih_src_addr: src_addr,
+            uih_dst_addr: dst_addr,
+            uih_src_port: u16::from_be_bytes([src[8], src[9]]),
+            uih_dst_port: u16::from_be_bytes([src[10], src[11]]),
+            uih_ip_opt_len: u16::from_be_bytes([src[12], src[13]]),
+            uih_data_len: u16::from_be_bytes([src[14], src[15]]),
+        }
+    }
+}
+
 // ---- ioctl request codes ----
 
 /// `_IOW('n', 64, struct nwio_udpopt)` — set UDP socket options.
 pub const NWIOSUDPOPT: u32 = ioc_encode(0x8000_0000, b'n', 64, NwioUdpOpt::SIZE);
 /// `_IOR('n', 65, struct nwio_udpopt)` — get UDP socket options.
 pub const NWIOGUDPOPT: u32 = ioc_encode(0x4000_0000, b'n', 65, NwioUdpOpt::SIZE);
+
+/// `_IOR('f', 1, int)` — bytes available for reading (generic, reference
+/// `sys/ioc_file.h`).
+pub const FIONREAD: u32 = ioc_encode(0x4000_0000, b'f', 1, 4);
 
 // ---- NWUO_* flag bits (reference `net/gen/udp_io.h`) ----
 
@@ -93,6 +146,26 @@ pub const NWUO_DI_IPOPT: u32 = 0x2000_0000;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_io_hdr_round_trips_through_bytes() {
+        let hdr = UdpIoHdr {
+            uih_src_addr: [10, 0, 2, 15],
+            uih_dst_addr: [10, 0, 2, 3],
+            uih_src_port: 12345,
+            uih_dst_port: 53,
+            uih_ip_opt_len: 0,
+            uih_data_len: 512,
+        };
+        let mut bytes = [0u8; UdpIoHdr::SIZE];
+        hdr.write_to(&mut bytes);
+        // Ports and lengths are big-endian on the wire.
+        assert_eq!(&bytes[8..10], &[0x30, 0x39]); // 12345
+        assert_eq!(&bytes[10..12], &[0x00, 0x35]); // 53
+        assert_eq!(&bytes[14..16], &[0x02, 0x00]); // 512
+        assert_eq!(UdpIoHdr::read_from(&bytes), hdr);
+        assert_eq!(core::mem::size_of::<UdpIoHdr>(), 16);
+    }
 
     #[test]
     fn udpopt_round_trips_through_bytes() {

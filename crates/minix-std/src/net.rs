@@ -12,12 +12,13 @@
 //! reference `<sys/socket.h>` and `<netinet/in.h>`.
 
 use crate::fs::{O_RDWR, ioctl, open, read, write};
-use crate::{EAGAIN, EIO, MinixErr};
+use crate::{EAGAIN, EIO, EMSGSIZE, ENOTCONN, MinixErr};
 use net::{
-    NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPACCEPTTO, NWIOTCPCONN,
-    NWIOTCPLISTENQ, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA, NWTC_SET_RP, NWUO_EN_LOC, NWUO_LP_SEL,
-    NWUO_LP_SET, NWUO_RA_SET, NWUO_RP_SET, NWUO_RWDATONLY, NwioTcpCl, NwioTcpConf, NwioUdpOpt,
-    TCF_DEFAULT, TcpCookie,
+    NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPACCEPTTO,
+    NWIOTCPCONN, NWIOTCPLISTENQ, NWIOTCPSHUTDOWN, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA,
+    NWTC_SET_RP, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY, NWUO_RA_SET, NWUO_RP_ANY,
+    NWUO_RP_SET, NWUO_RWDATALL, NWUO_RWDATONLY, NwioTcpCl, NwioTcpConf, NwioUdpOpt, TCF_DEFAULT,
+    TcpCookie, UdpIoHdr,
 };
 
 // ---- Address families (sys/socket.h) ----
@@ -59,6 +60,16 @@ pub const SO_SNDBUF: i32 = 0x1001;
 pub const SO_RCVBUF: i32 = 0x1002;
 pub const SO_ERROR: i32 = 0x1007;
 
+// ---- shutdown(2) `how` values (sys/socket.h) ----
+
+/// Disable further reads (not supported by the net server — the reference
+/// returns ENOSYS for SHUT_RD).
+pub const SHUT_RD: i32 = 0;
+/// Disable further writes: send our FIN, keep reading.
+pub const SHUT_WR: i32 = 1;
+/// Disable both directions (mapped to SHUT_WR here).
+pub const SHUT_RDWR: i32 = 2;
+
 // ---- Socket creation ----
 
 /// Create a socket. Only the protocols the net server implements are
@@ -92,11 +103,14 @@ pub fn tcp_socket() -> Result<i32, MinixErr> {
 
 /// Open a UDP socket and implicitly bind it to an ephemeral local port on
 /// the local address (like `socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)`).
-/// Returns the file descriptor.
+/// The socket starts unconnected in `NWUO_RWDATALL` mode, so `sendto`/
+/// `recvfrom` work without a prior `connect` (the reference `socket(2)`
+/// defaults); `connect` switches it to `NWUO_RWDATONLY`. Returns the file
+/// descriptor.
 pub fn udp_socket() -> Result<i32, MinixErr> {
     let fd = unsafe { open("/dev/udp", O_RDWR, 0) }?;
     let opt = NwioUdpOpt {
-        nwuo_flags: NWUO_LP_SEL | NWUO_EN_LOC | NWUO_RWDATONLY,
+        nwuo_flags: NWUO_LP_SEL | NWUO_EN_LOC | NWUO_RWDATALL | NWUO_RA_ANY | NWUO_RP_ANY,
         nwuo_locport: 0,
         nwuo_remport: 0,
         nwuo_locaddr: 0, // INADDR_ANY
@@ -136,9 +150,11 @@ pub fn bind(fd: i32, addr: [u8; 4], port: u16) -> Result<(), MinixErr> {
             Ok(())
         }
         Err(e) if e.0 == 25 => {
-            // ENOTTY — a UDP socket.
+            // ENOTTY — a UDP socket. Only the local-port group is touched
+            // (the reference `bind(2)` semantics); the socket's RW mode and
+            // remote ANY filters from socket()/connect() are preserved.
             let opt = NwioUdpOpt {
-                nwuo_flags: NWUO_LP_SET | NWUO_EN_LOC | NWUO_RWDATONLY,
+                nwuo_flags: NWUO_LP_SET | NWUO_EN_LOC,
                 nwuo_locport: port,
                 nwuo_remport: 0,
                 nwuo_locaddr: u32::from_be_bytes(addr),
@@ -191,6 +207,105 @@ pub fn connect(fd: i32, addr: [u8; 4], port: u16) -> Result<(), MinixErr> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Read the current UDP socket options (NWIOGUDPOPT). `sendto`/`recvfrom`
+/// use the RW mode to pick between the connected (RWDATONLY) and header
+/// (RWDATALL) wire protocols.
+fn udp_getopt(fd: i32) -> Result<NwioUdpOpt, MinixErr> {
+    let mut opt = NwioUdpOpt::default();
+    unsafe { ioctl(fd, NWIOGUDPOPT, &mut opt as *mut NwioUdpOpt as *mut u8) }?;
+    Ok(opt)
+}
+
+/// `sendto(2)`: send one datagram, optionally to an explicit destination.
+///
+/// On a connected socket (`NWUO_RWDATONLY`) `dest` is ignored and the data
+/// goes to the connected peer; on an unconnected socket the reference
+/// protocol prefixes a 16-byte `udp_io_hdr_t` naming the destination, and
+/// `dest` is required (ENOTCONN otherwise).
+///
+/// # Safety
+///
+/// `data` must be a valid byte slice.
+pub unsafe fn sendto(fd: i32, data: &[u8], dest: Option<SocketAddr>) -> Result<i64, MinixErr> {
+    let opt = udp_getopt(fd)?;
+    if opt.nwuo_flags & NWUO_RWDATONLY != 0 {
+        return unsafe { write(fd, data) };
+    }
+    let dest = match dest {
+        Some(d) => d,
+        None => return Err(MinixErr::from_i32(ENOTCONN)),
+    };
+    const MAX_PAYLOAD: usize = 2020; // RX_BUF_SIZE - IP - UDP headers
+    if data.len() > MAX_PAYLOAD {
+        return Err(MinixErr::from_i32(EMSGSIZE));
+    }
+    let mut buf = [0u8; UdpIoHdr::SIZE + MAX_PAYLOAD];
+    let mut hdr = UdpIoHdr {
+        uih_src_addr: [0; 4],
+        uih_dst_addr: [0; 4],
+        uih_src_port: 0,
+        uih_dst_port: 0,
+        uih_ip_opt_len: 0,
+        uih_data_len: 0,
+    };
+    if opt.nwuo_flags & NWUO_RA_ANY != 0 {
+        hdr.uih_dst_addr = dest.ip;
+    }
+    if opt.nwuo_flags & NWUO_RP_ANY != 0 {
+        hdr.uih_dst_port = dest.port;
+    }
+    hdr.write_to(&mut buf[..UdpIoHdr::SIZE]);
+    buf[UdpIoHdr::SIZE..UdpIoHdr::SIZE + data.len()].copy_from_slice(data);
+    unsafe { write(fd, &buf[..UdpIoHdr::SIZE + data.len()]) }
+}
+
+/// `recvfrom(2)`: receive one datagram; returns the payload and the sender.
+///
+/// On a connected socket (`NWUO_RWDATONLY`) the sender is the connected
+/// peer; on an unconnected socket the reference protocol prefixes a 16-byte
+/// `udp_io_hdr_t` carrying the sender's address, which is stripped here.
+/// `Ok((0, _))` means no datagram arrived within the server's poll window.
+///
+/// # Safety
+///
+/// `buf` must be a valid mutable byte slice.
+pub unsafe fn recvfrom(fd: i32, buf: &mut [u8]) -> Result<(i64, SocketAddr), MinixErr> {
+    let opt = udp_getopt(fd)?;
+    if opt.nwuo_flags & NWUO_RWDATONLY != 0 {
+        let n = unsafe { read(fd, buf) }?;
+        let src = SocketAddr {
+            ip: u32::to_be_bytes(opt.nwuo_remaddr),
+            port: opt.nwuo_remport,
+        };
+        return Ok((n, src));
+    }
+    let mut scratch = [0u8; UdpIoHdr::SIZE + 2048];
+    let n = unsafe { read(fd, &mut scratch) }?;
+    if n < UdpIoHdr::SIZE as i64 {
+        return Ok((0, SocketAddr::ANY));
+    }
+    let hdr = UdpIoHdr::read_from(&scratch[..UdpIoHdr::SIZE]);
+    let n = ((n as usize) - UdpIoHdr::SIZE).min(buf.len());
+    buf[..n].copy_from_slice(&scratch[UdpIoHdr::SIZE..UdpIoHdr::SIZE + n]);
+    let src = SocketAddr {
+        ip: hdr.uih_src_addr,
+        port: hdr.uih_src_port,
+    };
+    Ok((n as i64, src))
+}
+
+/// `shutdown(2)`: SHUT_WR/SHUT_RDWR send our FIN (the socket keeps
+/// reading); SHUT_RD is not supported by the net server (ENOSYS, like the
+/// reference `_tcp_shutdown`).
+pub fn shutdown(fd: i32, how: i32) -> Result<(), MinixErr> {
+    match how {
+        SHUT_WR | SHUT_RDWR => {
+            unsafe { ioctl(fd, NWIOTCPSHUTDOWN, core::ptr::null_mut()) }.map(|_| ())
+        }
+        _ => Err(MinixErr::from_i32(crate::ENOSYS)),
     }
 }
 
@@ -428,6 +543,12 @@ impl TcpStream {
         getpeername(self.fd).map(|(ip, port)| SocketAddr { ip, port })
     }
 
+    /// Half-close the write side (`shutdown(2)` with SHUT_WR): send our
+    /// FIN but keep reading the peer's remaining data.
+    pub fn shutdown(&self) -> Result<(), MinixErr> {
+        crate::net::shutdown(self.fd, SHUT_WR)
+    }
+
     /// Close the stream (sends FIN; the net server completes the close
     /// handshake in the background).
     pub fn close(self) -> Result<(), MinixErr> {
@@ -498,14 +619,28 @@ impl UdpSocket {
         crate::net::connect(self.fd, addr.ip, addr.port)
     }
 
-    /// Send one whole datagram to the connected peer.
+    /// Send one whole datagram to the connected peer. On an unconnected
+    /// socket this is ENOTCONN (no destination — use [`UdpSocket::send_to`]).
     pub fn send(&self, data: &[u8]) -> Result<usize, MinixErr> {
-        unsafe { crate::net::send(self.fd, data) }.map(|n| n as usize)
+        unsafe { crate::net::sendto(self.fd, data, None) }.map(|n| n as usize)
     }
 
-    /// Receive one datagram payload.
+    /// Receive one datagram payload (from the connected peer, or from any
+    /// sender on an unconnected socket). `Ok(0)` means no datagram arrived
+    /// within the server's bounded poll window.
     pub fn recv(&self, buf: &mut [u8]) -> Result<usize, MinixErr> {
-        unsafe { crate::net::recv(self.fd, buf) }.map(|n| n as usize)
+        unsafe { crate::net::recvfrom(self.fd, buf) }.map(|(n, _)| n as usize)
+    }
+
+    /// Send one whole datagram to `dest` (`sendto(2)` — works without
+    /// `connect`).
+    pub fn send_to(&self, data: &[u8], dest: SocketAddr) -> Result<usize, MinixErr> {
+        unsafe { crate::net::sendto(self.fd, data, Some(dest)) }.map(|n| n as usize)
+    }
+
+    /// Receive one datagram and the sender's address (`recvfrom(2)`).
+    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), MinixErr> {
+        unsafe { crate::net::recvfrom(self.fd, buf) }.map(|(n, a)| (n as usize, a))
     }
 
     pub fn close(self) -> Result<(), MinixErr> {

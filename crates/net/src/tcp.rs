@@ -89,6 +89,13 @@ pub const NWIOGTCPCOOKIE: u32 = ioc_encode(0x4000_0000, b'n', 58, TcpCookie::SIZ
 /// `_IOW('n', 59, struct tcp_cookie)` — on the listening socket, transfer
 /// the next pending connection to the cookie-identified socket.
 pub const NWIOTCPACCEPTTO: u32 = ioc_encode(0x8000_0000, b'n', 59, TcpCookie::SIZE);
+/// `_IO('n', 53)` — shutdown (send FIN); the libc only calls it for
+/// SHUT_WR/SHUT_RDWR.
+pub const NWIOTCPSHUTDOWN: u32 = ioc_encode(0, b'n', 53, 0);
+/// `_IO('n', 56)` — push buffered data (no-op here: we transmit immediately).
+pub const NWIOTCPPUSH: u32 = ioc_encode(0, b'n', 56, 0);
+/// `_IOR('n', 60, int)` — fetch and clear the socket error (SO_ERROR).
+pub const NWIOTCPGERROR: u32 = ioc_encode(0x4000_0000, b'n', 60, 4);
 
 /// Accept cookie (reference `struct tcp_cookie`): a per-socket handle the
 /// listener uses to name the fresh socket that accept() opened.
@@ -207,6 +214,13 @@ mod tests {
         assert_eq!(
             NWIOTCPACCEPTTO,
             0x8000_0000 | (16 << 16) | ((b'n' as u32) << 8) | 59
+        );
+        // shutdown (no arg), push (no arg) and SO_ERROR (int).
+        assert_eq!(NWIOTCPSHUTDOWN, ((b'n' as u32) << 8) | 53);
+        assert_eq!(NWIOTCPPUSH, ((b'n' as u32) << 8) | 56);
+        assert_eq!(
+            NWIOTCPGERROR,
+            0x4000_0000 | (4 << 16) | ((b'n' as u32) << 8) | 60
         );
     }
 }

@@ -301,6 +301,82 @@ pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32)
     }
 }
 
+/// `sendto(2)`: send one datagram, optionally to an explicit destination
+/// (a `struct sockaddr_in`). Only `flags == 0` is supported; on a
+/// connected socket `dest_addr` is ignored.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sendto(
+    sock: c_int,
+    buf: *const c_void,
+    len: usize,
+    flags: c_int,
+    dest_addr: *const c_void,
+    dest_len: u32,
+) -> isize {
+    if flags != 0 {
+        return -95; // EOPNOTSUPP
+    }
+    if buf.is_null() {
+        return -22; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    let dest = if dest_addr.is_null() {
+        None
+    } else {
+        match unsafe { decode_sockaddr_in(dest_addr as *const u8, dest_len) } {
+            Ok((ip, port)) => Some(minix_std::net::SocketAddr { ip, port }),
+            Err(e) => return e,
+        }
+    };
+    match unsafe { minix_std::net::sendto(sock, slice, dest) } {
+        Ok(n) => n as isize,
+        Err(e) => -(e.0 as isize),
+    }
+}
+
+/// `recvfrom(2)`: receive one datagram and, when `src_addr`/`src_len` are
+/// given, the sender's `struct sockaddr_in`. Only `flags == 0` is
+/// supported.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recvfrom(
+    sock: c_int,
+    buf: *mut c_void,
+    len: usize,
+    flags: c_int,
+    src_addr: *mut c_void,
+    src_len: *mut u32,
+) -> isize {
+    if flags != 0 {
+        return -95; // EOPNOTSUPP
+    }
+    if buf.is_null() {
+        return -22; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+    match unsafe { minix_std::net::recvfrom(sock, slice) } {
+        Ok((n, addr)) => {
+            if !src_addr.is_null() && !src_len.is_null() && n > 0 {
+                unsafe { encode_sockaddr_in(src_addr as *mut u8, src_len, addr.ip, addr.port) };
+            }
+            n as isize
+        }
+        Err(e) => -(e.0 as isize),
+    }
+}
+
+/// `shutdown(2)`: SHUT_WR/SHUT_RDWR send our FIN and keep reading;
+/// SHUT_RD is ENOSYS (the net server cannot close the read half).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
+    match minix_std::net::shutdown(sock, how) {
+        Ok(()) => 0,
+        Err(e) => -(e.0),
+    }
+}
+
 /// `send(2)`: write the byte stream (TCP) or one datagram (UDP). Only
 /// `flags == 0` is supported.
 #[cfg(target_os = "none")]
@@ -652,9 +728,39 @@ mod tests {
         fn _iomut(f: unsafe extern "C" fn(c_int, *mut c_void, usize, c_int) -> isize) {
             let _ = f;
         }
+        fn _sendto(
+            f: unsafe extern "C" fn(
+                c_int,
+                *const c_void,
+                usize,
+                c_int,
+                *const c_void,
+                u32,
+            ) -> isize,
+        ) {
+            let _ = f;
+        }
+        fn _recvfrom(
+            f: unsafe extern "C" fn(
+                c_int,
+                *mut c_void,
+                usize,
+                c_int,
+                *mut c_void,
+                *mut u32,
+            ) -> isize,
+        ) {
+            let _ = f;
+        }
+        fn _shutdown(f: extern "C" fn(c_int, c_int) -> c_int) {
+            let _ = f;
+        }
         _socket(socket);
         _addr_in(bind);
         _addr_in(connect);
+        _sendto(sendto);
+        _recvfrom(recvfrom);
+        _shutdown(shutdown);
         _io(send);
         _iomut(recv);
         _addr_in(listen);

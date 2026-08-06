@@ -5675,9 +5675,10 @@ works on all three arches with real-PID ICMP identifiers; **UDP sockets
 (`/dev/tcp`) work end to end on all three arches, both as a client
 (RFC 793 handshake + stream data) and as a server (listen/accept with a
 cookie transfer), with data-segment retransmission, a single-segment send
-window, graceful FIN close, SYN retry on connect, and RST for closed
-ports**. The full reference inet stack and IPv6 (16.1-16.4 below) are
-NOT STARTED.
+window, graceful FIN close, SYN retry on connect, RST for closed ports,
+and unconnected `sendto`/`recvfrom` (reference `NWUO_RWDATALL` header
+protocol), `shutdown(SHUT_WR)` half-close, `FIONREAD`, and SO_ERROR**.
+The full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
 
 ### Tasks
 
@@ -5812,6 +5813,59 @@ NOT STARTED.
     handshake) plus a **closed-guest-port probe** (fast RST, no hang) on
     x86_64, RISC-V64 and AArch64; `tcp` client regression and `ping` still
     pass; frame capture (`tools/pcap_decode.py`) shows a clean 4-way close
+
+- [x] **16.1e — Socket-layer gaps: unconnected UDP, TCP shutdown, FIONREAD**
+  - **`NWUO_RWDATALL`** (reference `udp_io_hdr_t`, 16 bytes) — the wire
+    protocol for unconnected `sendto`/`recvfrom`:
+    - `crates/net`: `UdpIoHdr` struct (BE ports/lengths, `CONF_UDP_IO_NW_BYTE_ORDER`
+      layout) + host round-trip tests
+    - net server `cdev_write_dgram`: in RWDATALL mode the write buffer
+      carries the io header; the destination comes from `uih_dst_*` unless
+      `NWUO_RA_SET`/`NWUO_RP_SET` name a connected peer (reference
+      `restart_write_fd` semantics); `build_udp_datagram` takes an explicit
+      destination so one socket can address any peer
+    - net server `cdev_read_dgram`: in RWDATALL mode reads return the
+      header + payload; the demux records the datagram's 4-tuple
+      (`rx_src_*`/`rx_dst_*`) so `recvfrom` reports the sender
+    - `crates/minix-std`: `udp_socket()` now defaults to the reference
+      mode (`RWDATALL | RA_ANY | RP_ANY`, unconnected); `connect()` switches
+      to `RWDATONLY`; `bind()` only touches the local-port group. New
+      `sendto`/`recvfrom` probe the socket's RW mode per call and build/
+      strip the header as needed; `UdpSocket` gains `send_to`/`recv_from`
+      and its `send`/`recv` now reject no-destination sends (ENOTCONN)
+    - `crates/minix-libc`: extern "C" `sendto`/`recvfrom` (sockaddr_in
+      decode/encode, flags != 0 → EOPNOTSUPP) + signature tests
+  - **`udp_setopt` masked-group merge** — the reference only applies flag
+    groups the new struct carries, so `connect()` after `bind()` preserves
+    the local port/address; previously each setopt replaced the flags
+    wholesale (and RWDATALL was rejected with EOPNOTSUPP)
+  - **ICMP port-unreachable → ECONNREFUSED** — `handle_ip` decodes SLIRP's
+    destination-unreachable (type 3, code 3): the embedded IP header's
+    IHL locates the original UDP header, whose ports/address match a
+    socket and set its `err`; the next UDP read fails with ECONNREFUSED
+  - **TCP `shutdown(SHUT_WR)`** — `NWIOTCPSHUTDOWN` (no-arg ioctl, libc
+    `shutdown.c` semantics): requires an established socket (ENOTCONN
+    otherwise), sends FIN like `close()` but sets `shutdown_wr` so the
+    read half stays open; the demux keeps delivering the peer's data in
+    the half-closed state (reference keeps reading after SHUT_WR) and
+    reaps the slot once the peer's FIN completes the close; `write` after
+    shutdown returns EPIPE; `NWIOTCPPUSH` is a connected no-op (we
+    transmit immediately)
+  - **`FIONREAD`** (`_IOR('f',1,int)`) on UDP and TCP returns the buffered
+    bytes; **`NWIOTCPGERROR`** (`_IOR('n',60,int)`) returns and clears the
+    socket error (SO_ERROR semantics — negative errno, reference
+    `getsockopt.c`)
+  - `crates/minix-std`: `shutdown()` (SHUT_WR/SHUT_RDWR → ioctl,
+    SHUT_RD → ENOSYS), `SHUT_*` constants, `TcpStream::shutdown`;
+    `crates/minix-libc`: extern "C" `shutdown`
+  - `userland/src/bin/udp_echo.rs`: UDP echo server on an unconnected
+    socket — bind, `recv_from`, print the sender, `send_to` the echo back
+    (exercises the RWDATALL header round trip end to end); added to the
+    boot manifest
+  - Host tests: `probe_offsets` updated for the new `UdpSock` (err +
+    rx_src/rx_dst fields) and `TcpSock` (`shutdown_wr`) layouts; UdpIoHdr
+    byte round trip; `cargo test --workspace` + `cargo clippy --workspace
+    -- -D warnings` green
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`
