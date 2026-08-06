@@ -105,8 +105,12 @@ connects through `hostfwd`, sends, and gets its bytes echoed back).
 once the close completes, so connections can be opened back-to-back —
 verified with three sequential host connections, each echoed cleanly),
 `connect()` retries a dropped SYN, and a SYN for a closed local port is
-answered with RST so clients fail fast. The rest of the reference
-`minix/net` stack remains (16.1-16.4).
+answered with RST so clients fail fast. **Phase 16.1e closes the socket
+layer gaps** — unconnected `sendto`/`recvfrom` (the reference
+`NWUO_RWDATALL` io-header protocol), `shutdown(SHUT_WR)` half-close,
+`FIONREAD`, SO_ERROR, and ICMP port-unreachable → ECONNREFUSED. The
+reference inet/lwIP stack is not ported (we keep our own stack); IPv6
+is planned as Phase 16.4a–16.4e.
 
 Supporting fixes in the same milestone: the virtio-net driver now uses the
 correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
@@ -5678,7 +5682,9 @@ cookie transfer), with data-segment retransmission, a single-segment send
 window, graceful FIN close, SYN retry on connect, RST for closed ports,
 and unconnected `sendto`/`recvfrom` (reference `NWUO_RWDATALL` header
 protocol), `shutdown(SHUT_WR)` half-close, `FIONREAD`, and SO_ERROR**.
-The full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
+Porting the reference inet/lwIP stack is **explicitly abandoned** (keep
+our own stack and fill its gaps); IPv6 (16.4a–16.4e below) is planned,
+NOT STARTED.
 
 ### Tasks
 
@@ -5867,24 +5873,83 @@ The full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
     byte round trip; `cargo test --workspace` + `cargo clippy --workspace
     -- -D warnings` green
 
-- [ ] **16.1 — Port `minix/net/`**
-  - Source: `.refs/minix-3.3.0/minix/net/`
-  - Network protocol abstractions, socket interface
-  - Tests: Network protocol round-trips; socket operations; route table management
+- [ ] **16.4 — IPv6 (own-stack extension)** — replaces the abandoned
+  reference-stack tasks (old 16.1 `minix/net`, 16.2 `sys/net`, 16.3
+  `sys/netinet` — decision: keep our own stack and fill its gaps; the
+  reference 3.3.0 tree has no inet6, only lwIP, which we are not
+  porting). IPv6 extends the net server's own ARP/ICMP/UDP/TCP
+  implementation. Design decisions:
+  - **Separate v6 devices, not widened structs**: `/dev/udp6` + `/dev/tcp6`
+    (new clone-minor ranges in the existing CDEV machinery) with new
+    40-byte ioctl structs `nwio_udpopt6_t`/`nwio_tcpconf6_t` (flags +
+    ports, then two 16-byte addresses) and `NWIO*6` ioctl codes — the v4
+    wire protocol stays byte-identical to the reference; the net server
+    infers family from the minor range, as it already infers TCP vs UDP
+  - **16-byte internal addresses**; v4-mapped `::ffff:a.b.c.d` deferred
+  - **NDP instead of ARP** for L2 resolution (ICMPv6 NS/NA + neighbor
+    cache mirroring `arp_cache`)
+  - **Hardcoded v6 address like v4** (SLIRP `fec0::/64`, gateway
+    `fec0::2`); minimal SLAAC (parse the router advertisement) as a
+    follow-up
 
-- [ ] **16.2 — Port `sys/net/` — NetBSD networking kernel code**
-  - Source: `.refs/minix-3.3.0/sys/net/`
-  - TCP/IP, UDP, IP, ARP protocols, route table management
-  - Tests: Network protocol round-trips; socket operations; route table management
+  - [ ] **16.4a — Address model & protocol plumbing (foundation)**
+    - `crates/net`: `Ipv6Addr = [u8; 16]`, `NwioUdpOpt6`/`NwioTcpConf6` +
+      `NWIOSUDPOPT6`/`NWIOGUDPOPT6`/`NWIOSTCPCONF6`/`NWIOGTCPCONF6`
+      ioctl codes; host layout tests (like
+      `udpopt_byte_layout_matches_c_struct`)
+    - `crates/servers/src/net.rs`: `ETH_TYPE_IPV6` (0x86DD), `OUR_IP6`/
+      `GATEWAY_IP6`, `IP6_HDR_LEN` (40, fixed — no IHL), `handle_frame`
+      dispatches by ethertype, `handle_ip6` alongside `handle_ip`
+    - `crates/minix-libc`: `sockaddr_in6` FFI layout (24 bytes: sin6_len,
+      family, port BE, flowinfo, 16-byte addr, scope_id) + encode/decode
+      + byte-layout host tests
 
-- [ ] **16.3 — Port `sys/netinet/` — Internet protocols**
-  - Source: `.refs/minix-3.3.0/sys/netinet/`
-  - TCP, UDP, IP, ICMP implementations
-  - Tests: Network protocol round-trips; socket operations; route table management
+  - [ ] **16.4b — L2/L3: NDP, ICMPv6, IPv6 header**
+    - IPv6 header build/parse (fixed 40 bytes, no header checksum)
+    - ICMPv6 echo request/reply (128/129) with the v6 pseudo-header
+      checksum (mandatory in v6); auto-reply to inbound echoes like v4
+    - dest-unreachable (type 1, code 4 = port unreachable) →
+      ECONNREFUSED on the matching UDP6 socket (the offending header
+      offset differs from v4: ICMPv6 has a 4-byte unused field, then the
+      40-byte v6 header, vs the v4 IHL walk)
+    - NDP: NS → solicited-node multicast (`ff02::1:ffxx:xxxx`, ethernet
+      `33:33:ff:xx:xx:xx`), NA → neighbor cache; reply to inbound NS so
+      SLIRP can reach us; ARP-style request/retry/poll flow
 
-- [ ] **16.4 — Port `sys/netinet6/` — IPv6**
-  - Source: `.refs/minix-3.3.0/sys/netinet6/`
-  - Tests: Network protocol round-trips; socket operations; route table management
+  - [ ] **16.4c — Transport: UDP6/TCP6 + demux**
+    - v6 UDP/TCP checksums use the 128-bit pseudo-header **with a 32-bit
+      upper-layer length** (v4 uses a 16-bit length — the classic v6
+      checksum gotcha)
+    - new clone-minor ranges + `Udp6Sock`/`Tcp6Sock`; demux keyed on
+      family + 4-tuple; the RST-for-closed-port check reads the v6 src at
+      bytes 8..24 instead of 16..20
+    - TCP cookie/accept protocol is family-agnostic — reuse as-is
+
+  - [ ] **16.4d — Socket API: AF_INET6, wrappers, libc**
+    - `minix-std`: `socket(AF_INET6, ...)` → `/dev/udp6`/`/dev/tcp6`;
+      AF_INET6 value decision (reference `net/gen/socket.h` = 23, ours
+      currently 10)
+    - `SocketAddr6` (or family-aware `SocketAddr`) with v6 parse
+      (`"[fe80::1]:port"` / bare) + formatter; `UdpSocket6`/`TcpStream6`/
+      `TcpListener6` wrappers mirroring the v4 API
+    - `minix-libc`: sockaddr_in6 encode/decode; family dispatch in
+      socket/bind/connect/sendto/recvfrom/accept/getpeername/getsockname
+
+  - [ ] **16.4e — Userland + verification (all three arches)**
+    - `/bin/ping6`: ICMPv6 echo to `fec0::2`, real-PID id like `ping`
+    - `/bin/udp_echo6` (or a family flag on `udp_echo`): RWDATALL round
+      trip over v6
+    - QEMU `-netdev user` has IPv6 on by default (prefix `fec0::/64`,
+      gateway `fec0::2`, DNS `fec0::3`); confirm the guest address from
+      an RA capture or hardcode it; `hostfwd` works for v6, so the
+      `tcp_accept_verify.py`-style host probes extend directly
+    - Host tests: v6 header/checksum/NDP builders, RFC 8200 pseudo-header
+      checksum vectors; `cargo test --workspace` + `cargo clippy
+      --workspace -- -D warnings` green; boot-verify ping6/udp_echo6 on
+      x86_64, RISC-V64, AArch64
+
+  - Out of scope for v1: v4-mapped addresses, link-local scope IDs,
+    MLD/multicast beyond solicited-node, fragmentation, route tables
 
 - [ ] **16.5 — Network drivers** (Phase 11c)
   - Tests: Network protocol round-trips; socket operations; route table management
