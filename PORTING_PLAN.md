@@ -80,13 +80,26 @@ returned A records (`udp: example.com = 172.66.147.243 104.20.23.154`).
 **Minimal TCP follows the same model (Phase 16.1b):** `socket()` opens
 `/dev/tcp`, `connect()` runs the three-way handshake via
 `NWIOSTCPCONF`+`NWIOTCPCONN` (blocking until established), and `send`/`recv`
-move a byte stream with sequence tracking and ACKs (no retransmission yet —
-the lossless QEMU virtio path). `bind()`/`connect()` dispatch the reference
-way: probe `NWIOGTCPCONF`, fall back to the UDP ioctls on ENOTTY. Verified
-with a real TCP exchange on **all three arches**: `/bin/tcp 10.0.2.2 <port>`
-connects through QEMU `hostfwd` to a host echo server and prints the full
-echo (`tcp: [27 bytes] host says: hello-from-minix`). The rest of the
-reference `minix/net` stack remains (16.1-16.4).
+move a byte stream with sequence tracking and ACKs. `bind()`/`connect()`
+dispatch the reference way: probe `NWIOGTCPCONF`, fall back to the UDP
+ioctls on ENOTTY. Verified with a real TCP exchange on **all three arches**:
+`/bin/tcp 10.0.2.2 <port>` connects through QEMU `hostfwd` to a host echo
+server and prints the full echo (`tcp: [27 bytes] host says:
+hello-from-minix`).
+
+**Server-side TCP + retransmission (Phase 16.1c) extends it:** `listen()`
+puts a bound socket into the listening state with a bounded backlog, inbound
+SYNs are answered with a SYN-ACK and parked in a per-listener accept queue
+(their data is buffered pre-accept), and `accept()` — the reference cookie
+protocol: fresh `/dev/tcp` fd → `NWIOGTCPCOOKIE` → `NWIOTCPACCEPTTO` —
+transfers the pending connection to the fresh socket, with `getpeername()`
+reporting the peer. Data sends now keep a single-segment window
+(`snd_una`/`tx_buf`): ACKs free the buffer, stale unacked data is
+retransmitted after a poll-round threshold, and a `TEST_DROP_TX` hook forces
+that path on the lossless link (verified by host unit tests; a `tcpserver`
+echo binary is verified end to end on all three arches: a host client
+connects through `hostfwd`, sends, and gets its bytes echoed back). The
+rest of the reference `minix/net` stack remains (16.1-16.4).
 
 Supporting fixes in the same milestone: the virtio-net driver now uses the
 correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
@@ -5651,11 +5664,12 @@ IS server and SEF framework not ported.
 sockets complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14)
 drives the `virtio_net` driver server over the DL protocol; `ping 10.0.2.2`
 works on all three arches with real-PID ICMP identifiers; **UDP sockets
-(socket/bind/connect/send/recv over `/dev/udp`) and minimal TCP
-(`/dev/tcp`, RFC 793 handshake + stream data) work end to end**, verified
-by a DNS round trip and a host-echo TCP exchange on all three arches.
-Retransmission, the full reference inet stack, and IPv6 (16.1-16.4 below)
-are NOT STARTED.
+(socket/bind/connect/send/recv over `/dev/udp`) and TCP sockets
+(`/dev/tcp`) work end to end on all three arches, both as a client
+(RFC 793 handshake + stream data) and as a server (listen/accept with a
+cookie transfer, verified by a host-initiated echo exchange), with data-
+segment retransmission and a single-segment send window**. The
+full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
 
 ### Tasks
 
@@ -5714,6 +5728,40 @@ are NOT STARTED.
   - Tests: `tcp 10.0.2.2 <port> hello` → full echo round trip on x86_64,
     RISC-V64, AArch64 (QEMU `hostfwd` to a host echo server); net crate
     TCP protocol tests
+
+- [x] **16.1c — Server-side TCP (listen/accept) + retransmission**
+  - `crates/net`: `tcp_cookie_t` (16 bytes) + `NWIOTCPLISTENQ` (57) /
+    `NWIOGTCPCOOKIE` (58) / `NWIOTCPACCEPTTO` (59) ioctl codes, matching
+    the reference `sys/ioc_net.h`/`net/gen/tcp_io.h`
+  - `servers/src/net.rs`: `TcpState::Listening` with a per-socket accept
+    queue (`ACCEPT_QUEUE_MAX` pending conns, each with its own sequence
+    state and RX buffer); the demux routes inbound SYNs to the queue
+    (SYN-ACK from the frame's source MAC — no ARP round trip), buffers
+    data sent right after connect, and marks the entry established on the
+    handshake's final ACK; `NWIOTCPACCEPTTO` blocks (bounded poll, EAGAIN
+    on expiry) and moves the pending connection to the fresh socket named
+    by the cookie (ref = clone minor + per-socket secret); `listen`
+    requires a bound local port (EINVAL otherwise)
+  - Retransmission: each socket keeps a single-segment send window
+    (`snd_una`/`snd_nxt`/`tx_buf`) — demux ACKs drop acked bytes, stale
+    unacked data is resent from the buffer after `RETX_AFTER_ROUNDS` poll
+    rounds, and duplicate RX data is re-ACKed (lost-ACK recovery)
+  - Test hooks: `TEST_DROP_TX` silently drops the next data transmit
+    (forces the retransmit path), `STAT_TX_RETRANS` counts retransmissions
+    — both poked/read from the QEMU monitor
+  - `crates/minix-std/src/net.rs`: `listen()`, `accept()` (fresh `/dev/tcp`
+    fd → `NWIOGTCPCOOKIE` → `NWIOTCPACCEPTTO`, retrying EAGAIN), and
+    `getpeername()`
+  - `userland/src/bin/tcpserver.rs`: TCP echo server — bind, listen,
+    accept loop with `getpeername`, per-connection echo
+  - Host tests: seq-space ordering, listen preconditions, ACK processing
+    frees the unacked buffer, stale segments are retransmitted, the drop
+    hook forces a retransmit, SYN seeds the accept queue, the handshake
+    ACK establishes it, and accept transfers the connection + RX data to
+    the fresh socket (bad cookies rejected)
+  - Tests: `tcpserver` + hostfwd'd host client → full echo round trip on
+    x86_64, RISC-V64 and AArch64 (`tools/tcp_accept_verify.py`); `tcp`
+    client regression and `ping` still pass on all three arches
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`

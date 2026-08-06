@@ -81,6 +81,42 @@ pub const NWIOSTCPCONF: u32 = ioc_encode(0x8000_0000, b'n', 48, NwioTcpConf::SIZ
 pub const NWIOGTCPCONF: u32 = ioc_encode(0x4000_0000, b'n', 49, NwioTcpConf::SIZE);
 /// `_IOW('n', 50, struct nwio_tcpcl)` — initiate a connection.
 pub const NWIOTCPCONN: u32 = ioc_encode(0x8000_0000, b'n', 50, NwioTcpCl::SIZE);
+/// `_IOW('n', 57, int)` — listen with a backlog.
+pub const NWIOTCPLISTENQ: u32 = ioc_encode(0x8000_0000, b'n', 57, 4);
+/// `_IOR('n', 58, struct tcp_cookie)` — get an accept cookie for this
+/// (fresh) socket.
+pub const NWIOGTCPCOOKIE: u32 = ioc_encode(0x4000_0000, b'n', 58, TcpCookie::SIZE);
+/// `_IOW('n', 59, struct tcp_cookie)` — on the listening socket, transfer
+/// the next pending connection to the cookie-identified socket.
+pub const NWIOTCPACCEPTTO: u32 = ioc_encode(0x8000_0000, b'n', 59, TcpCookie::SIZE);
+
+/// Accept cookie (reference `struct tcp_cookie`): a per-socket handle the
+/// listener uses to name the fresh socket that accept() opened.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpCookie {
+    pub tc_ref: u32,
+    pub tc_secret: [u8; 12],
+}
+
+impl TcpCookie {
+    /// Wire size: 4 + 12 = 16 bytes.
+    pub const SIZE: usize = 16;
+
+    pub fn write_to(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.tc_ref.to_ne_bytes());
+        out[4..16].copy_from_slice(&self.tc_secret);
+    }
+
+    pub fn read_from(src: &[u8]) -> Self {
+        let mut secret = [0u8; 12];
+        secret.copy_from_slice(&src[4..16]);
+        Self {
+            tc_ref: u32::from_ne_bytes([src[0], src[1], src[2], src[3]]),
+            tc_secret: secret,
+        }
+    }
+}
 
 // ---- NWTC_* flag bits (reference `net/gen/tcp_io.h`) ----
 
@@ -132,6 +168,18 @@ mod tests {
     }
 
     #[test]
+    fn cookie_round_trips_through_bytes() {
+        let cookie = TcpCookie {
+            tc_ref: 0x0102_0304,
+            tc_secret: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        };
+        let mut bytes = [0u8; TcpCookie::SIZE];
+        cookie.write_to(&mut bytes);
+        assert_eq!(TcpCookie::read_from(&bytes), cookie);
+        assert_eq!(core::mem::size_of::<TcpCookie>(), 16);
+    }
+
+    #[test]
     fn tcp_ioctl_codes_match_reference_encoding() {
         // _IOW('n', 48, ...) size 16, _IOR('n', 49, ...) size 16,
         // _IOW('n', 50, ...) size 8.
@@ -146,6 +194,19 @@ mod tests {
         assert_eq!(
             NWIOTCPCONN,
             0x8000_0000 | (8 << 16) | ((b'n' as u32) << 8) | 50
+        );
+        // listen(2) backlog (int, 4 bytes) and the accept cookie (16 bytes).
+        assert_eq!(
+            NWIOTCPLISTENQ,
+            0x8000_0000 | (4 << 16) | ((b'n' as u32) << 8) | 57
+        );
+        assert_eq!(
+            NWIOGTCPCOOKIE,
+            0x4000_0000 | (16 << 16) | ((b'n' as u32) << 8) | 58
+        );
+        assert_eq!(
+            NWIOTCPACCEPTTO,
+            0x8000_0000 | (16 << 16) | ((b'n' as u32) << 8) | 59
         );
     }
 }

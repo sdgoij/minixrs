@@ -1072,6 +1072,91 @@ pub fn tcp(args: &[&str]) -> i32 {
     0
 }
 
+/// tcpserver — TCP echo server over `/dev/tcp`: bind `port`, listen with a
+/// small backlog, and echo every byte received on each accepted connection
+/// back to the client. Exercises the full server-side socket path:
+/// bind + NWIOTCPLISTENQ, cookie-based accept, and stream recv/send on the
+/// accepted socket. Exits on the first accept error.
+pub fn tcpserver(args: &[&str]) -> i32 {
+    let port = if args.len() > 1 {
+        parse_i32(args[1]).unwrap_or(20000) as u16
+    } else {
+        20000
+    };
+
+    let fd = match minix_std::net::tcp_socket() {
+        Ok(fd) => fd,
+        Err(e) => {
+            write_err(b"tcpserver: cannot open /dev/tcp (");
+            print_dec(e.0 as u32);
+            write_err(b")\n");
+            return -5;
+        }
+    };
+    if let Err(e) = minix_std::net::bind(fd, [0; 4], port) {
+        write_err(b"tcpserver: bind failed (");
+        print_dec(e.0 as u32);
+        write_err(b")\n");
+        let _ = minix_std::net::close(fd);
+        return -5;
+    }
+    if let Err(e) = minix_std::net::listen(fd, 4) {
+        write_err(b"tcpserver: listen failed (");
+        print_dec(e.0 as u32);
+        write_err(b")\n");
+        let _ = minix_std::net::close(fd);
+        return -5;
+    }
+    write_out(b"tcpserver: listening on port ");
+    print_dec(port as u32);
+    write_out(b"\n");
+
+    let mut buf = [0u8; 1024];
+    loop {
+        let c = match minix_std::net::accept(fd) {
+            Ok(c) => c,
+            Err(e) => {
+                write_err(b"tcpserver: accept failed (");
+                print_dec(e.0 as u32);
+                write_err(b")\n");
+                break;
+            }
+        };
+        let (peer, _) = minix_std::net::getpeername(c).unwrap_or_default();
+        write_out(b"tcpserver: accepted ");
+        print_dec(peer[0] as u32);
+        write_out(b".");
+        print_dec(peer[1] as u32);
+        write_out(b".");
+        print_dec(peer[2] as u32);
+        write_out(b".");
+        print_dec(peer[3] as u32);
+        write_out(b"\n");
+
+        // Echo loop: read a chunk, write it back. A zero write (send
+        // window busy) is retried after a short recv poll drives the ACK.
+        loop {
+            let n = match unsafe { minix_std::net::recv(c, &mut buf) } {
+                Ok(n) if n > 0 => n as usize,
+                _ => break,
+            };
+            let mut off = 0usize;
+            while off < n {
+                match unsafe { minix_std::net::send(c, &buf[off..n]) } {
+                    Ok(w) if w > 0 => off += w as usize,
+                    _ => {
+                        let mut tmp = [0u8; 64];
+                        let _ = unsafe { minix_std::net::recv(c, &mut tmp) };
+                    }
+                }
+            }
+        }
+        let _ = minix_std::net::close(c);
+    }
+    let _ = minix_std::net::close(fd);
+    0
+}
+
 /// Skip a (possibly compressed) DNS name starting at `off`; returns the
 /// offset just past it, clamped to the message length.
 fn skip_dns_name(msg: &[u8], mut off: usize) -> usize {

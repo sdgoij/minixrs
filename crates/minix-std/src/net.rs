@@ -12,11 +12,12 @@
 //! reference `<sys/socket.h>` and `<netinet/in.h>`.
 
 use crate::fs::{O_RDWR, ioctl, open, read, write};
-use crate::{EIO, MinixErr};
+use crate::{EAGAIN, EIO, MinixErr};
 use net::{
-    NWIOGTCPCONF, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPCONN, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA,
-    NWTC_SET_RP, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_SET, NWUO_RP_SET, NWUO_RWDATONLY,
-    NwioTcpCl, NwioTcpConf, NwioUdpOpt, TCF_DEFAULT,
+    NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPACCEPTTO, NWIOTCPCONN,
+    NWIOTCPLISTENQ, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA, NWTC_SET_RP, NWUO_EN_LOC, NWUO_LP_SEL,
+    NWUO_LP_SET, NWUO_RA_SET, NWUO_RP_SET, NWUO_RWDATONLY, NwioTcpCl, NwioTcpConf, NwioUdpOpt,
+    TCF_DEFAULT, TcpCookie,
 };
 
 // ---- Address families (sys/socket.h) ----
@@ -210,6 +211,48 @@ pub unsafe fn send(fd: i32, data: &[u8]) -> Result<i64, MinixErr> {
 /// `buf` must be a valid mutable byte slice.
 pub unsafe fn recv(fd: i32, buf: &mut [u8]) -> Result<i64, MinixErr> {
     unsafe { read(fd, buf) }
+}
+
+/// Mark a TCP socket as a listener with the given backlog, mirroring the
+/// reference `listen(2)` (`NWIOTCPLISTENQ`). The socket must already be
+/// bound to a local port.
+pub fn listen(fd: i32, backlog: i32) -> Result<(), MinixErr> {
+    unsafe { ioctl(fd, NWIOTCPLISTENQ, &backlog as *const i32 as *mut u8) }?;
+    Ok(())
+}
+
+/// Accept the next pending connection on a listening TCP socket, mirroring
+/// the reference `accept(2)`: open a fresh `/dev/tcp` fd, obtain its accept
+/// cookie, and transfer the pending connection to it. Blocks (retrying
+/// EAGAIN, which the net server returns when its bounded accept poll
+/// expires) until a connection arrives. Returns the new socket fd.
+pub fn accept(fd: i32) -> Result<i32, MinixErr> {
+    let s1 = tcp_socket()?;
+    let mut cookie = TcpCookie::default();
+    let r = unsafe { ioctl(s1, NWIOGTCPCOOKIE, &mut cookie as *mut TcpCookie as *mut u8) };
+    if let Err(e) = r {
+        let _ = crate::fs::close(s1);
+        return Err(e);
+    }
+    loop {
+        match unsafe { ioctl(fd, NWIOTCPACCEPTTO, &cookie as *const TcpCookie as *mut u8) } {
+            Ok(_) => return Ok(s1),
+            // MinixErr stores errno positive; EAGAIN = -11 raw.
+            Err(e) if e.0 == -EAGAIN => continue,
+            Err(e) => {
+                let _ = crate::fs::close(s1);
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Return the peer address of a connected TCP socket, mirroring the
+/// reference `getpeername(2)` (reads `NWIOGTCPCONF` back).
+pub fn getpeername(fd: i32) -> Result<([u8; 4], u16), MinixErr> {
+    let mut conf = NwioTcpConf::default();
+    unsafe { ioctl(fd, NWIOGTCPCONF, &mut conf as *mut NwioTcpConf as *mut u8) }?;
+    Ok((u32::to_be_bytes(conf.nwtc_remaddr), conf.nwtc_remport))
 }
 
 /// Close a socket (frees the net server's socket slot).

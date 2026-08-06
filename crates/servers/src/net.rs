@@ -51,10 +51,11 @@ use arch_common::safecopies::{
     CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CPF_WRITE, CpDirect, CpGrant, CpUnion, GRANT_INVALID,
 };
 use net::{
-    NWIOGTCPCONF, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPCONN, NWTC_LOCPORT_MASK,
-    NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA, NWTC_SET_RP, NWTC_UNSET_RA, NWTC_UNSET_RP, NWUO_EN_LOC,
-    NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY, NWUO_RA_SET, NWUO_RP_ANY, NWUO_RP_SET, NWUO_RWDATALL,
-    NwioTcpCl, NwioTcpConf, NwioUdpOpt,
+    NWIOGTCPCONF, NWIOGTCPCOOKIE, NWIOGUDPOPT, NWIOSTCPCONF, NWIOSUDPOPT, NWIOTCPACCEPTTO,
+    NWIOTCPCONN, NWIOTCPLISTENQ, NWTC_LOCPORT_MASK, NWTC_LP_SEL, NWTC_LP_SET, NWTC_SET_RA,
+    NWTC_SET_RP, NWTC_UNSET_RA, NWTC_UNSET_RP, NWUO_EN_LOC, NWUO_LP_SEL, NWUO_LP_SET, NWUO_RA_ANY,
+    NWUO_RA_SET, NWUO_RP_ANY, NWUO_RP_SET, NWUO_RWDATALL, NwioTcpCl, NwioTcpConf, NwioUdpOpt,
+    TcpCookie,
 };
 
 /// Our IP on the SLIRP network (10.0.2.15).
@@ -106,9 +107,17 @@ const TCP_ACK: u8 = 0x10;
 // Errnos used by the TCP paths (positive magnitudes, negative returns).
 const ENOTCONN: i32 = -107;
 const EISCONN: i32 = -106;
+const EAGAIN: i32 = -11;
 const ETIMEDOUT: i32 = -110;
 const ECONNREFUSED: i32 = -111;
 const EINPROGRESS: i32 = -115;
+
+/// Max pending connections per listening socket (backlog ceiling).
+const ACCEPT_QUEUE_MAX: usize = 4;
+/// Poll-round groups before unacked data is retransmitted (~1 group per
+/// `dl_read_frames` round; on the lossless QEMU path the ACK always lands
+/// within one, so this never fires spuriously).
+const RETX_AFTER_ROUNDS: u32 = 3;
 
 /// ICMP echo request / reply types.
 const ICMP_ECHO_REQUEST: u8 = 8;
@@ -364,7 +373,7 @@ fn socket_for_minor(minor: i32) -> Option<&'static mut UdpSock> {
 // ---- TCP socket table ----
 
 /// TCP connection state (a minimal subset of RFC 793).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 enum TcpState {
     /// No connection (fresh socket or after RST/timeout).
@@ -373,14 +382,53 @@ enum TcpState {
     SynSent,
     /// Connection established, data flowing.
     Established,
+    /// `listen()` was called; inbound SYNs join the accept queue.
+    Listening,
+}
+
+/// One inbound connection waiting on a listening socket: the handshake ran
+/// to completion (or is waiting for its final ACK) but `accept()` has not
+/// yet moved it to a fresh socket. It carries its own sequence state so the
+/// listener's backlog can buffer data sent right after connect.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PendingConn {
+    in_use: bool,
+    /// Handshake complete (`ACK == snd_nxt` seen) — ready for accept.
+    established: bool,
+    rem_addr: [u8; 4],
+    rem_port: u16,
+    rem_mac: [u8; 6],
+    iss: u32,
+    snd_nxt: u32,
+    rcv_nxt: u32,
+    rx_len: usize,
+    rx_buf: [u8; RX_BUF_SIZE],
+}
+
+impl PendingConn {
+    const fn init() -> Self {
+        Self {
+            in_use: false,
+            established: false,
+            rem_addr: [0; 4],
+            rem_port: 0,
+            rem_mac: [0; 6],
+            iss: 0,
+            snd_nxt: 0,
+            rcv_nxt: 0,
+            rx_len: 0,
+            rx_buf: [0; RX_BUF_SIZE],
+        }
+    }
 }
 
 /// One TCP socket, keyed by its cloned minor number.
 ///
-/// The connection is a byte stream: `write` stages up to one segment of
-/// user data and sends it immediately (no retransmission — the milestone
-/// runs on QEMU's lossless virtio path), and `read` returns whatever has
-/// been received and ACKed.
+/// The connection is a byte stream: `write` stages one segment of user
+/// data, keeps a copy for retransmission until it is ACKed, and `read`
+/// returns whatever has been received and ACKed. A listening socket holds
+/// its pending connections in [`TcpSock::accept_queue`].
 #[repr(C)]
 struct TcpSock {
     in_use: bool,
@@ -398,6 +446,8 @@ struct TcpSock {
     iss: u32,
     /// Next sequence number to send.
     snd_nxt: u32,
+    /// Oldest unacknowledged sequence number (first byte in `tx_buf`).
+    snd_una: u32,
     /// Next sequence number expected from the peer.
     rcv_nxt: u32,
     /// Error recorded by demux (e.g. ECONNREFUSED on RST).
@@ -405,10 +455,22 @@ struct TcpSock {
     /// Received byte stream.
     rx_len: usize,
     rx_buf: [u8; RX_BUF_SIZE],
+    /// Unacknowledged outgoing bytes (retransmission buffer).
+    tx_len: usize,
+    tx_buf: [u8; RX_BUF_SIZE],
+    /// Poll rounds since the last send/ACK; drives retransmission.
+    retx_rounds: u32,
+    /// Accept cookie (fresh sockets only) and whether it was issued.
+    cookie: TcpCookie,
+    cookie_set: bool,
+    /// `listen()` backlog and the pending connections themselves.
+    backlog: usize,
+    accept_queue: [PendingConn; ACCEPT_QUEUE_MAX],
 }
 
 impl TcpSock {
     const fn init(minor: i32, in_use: bool) -> Self {
+        const EMPTY_PENDING: PendingConn = PendingConn::init();
         Self {
             in_use,
             minor,
@@ -421,10 +483,21 @@ impl TcpSock {
             state: TcpState::Closed,
             iss: 0,
             snd_nxt: 0,
+            snd_una: 0,
             rcv_nxt: 0,
             err: 0,
             rx_len: 0,
             rx_buf: [0; RX_BUF_SIZE],
+            tx_len: 0,
+            tx_buf: [0; RX_BUF_SIZE],
+            retx_rounds: 0,
+            cookie: TcpCookie {
+                tc_ref: 0,
+                tc_secret: [0; 12],
+            },
+            cookie_set: false,
+            backlog: 0,
+            accept_queue: [EMPTY_PENDING; ACCEPT_QUEUE_MAX],
         }
     }
 }
@@ -441,6 +514,31 @@ impl TcpSocketTableCell {
     }
 }
 static TCP_SOCKETS: TcpSocketTableCell = TcpSocketTableCell::new();
+
+/// Test hook: when non-zero, the next data-segment transmit is silently
+/// dropped (counted as sent, nothing leaves the NIC). Poked from the QMP
+/// monitor to force the retransmission path on the lossless QEMU link.
+static TEST_DROP_TX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Count of data-segment retransmissions (for the QMP verify probe).
+static STAT_TX_RETRANS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Per-socket cookie secret: pseudo-random-looking, stable for the lifetime
+/// of the socket (both NWIOGTCPCOOKIE and NWIOTCPACCEPTTO see the same
+/// bytes). The reference draws from a kernel RNG; the counter mix is
+/// sufficient for the clone-minor protocol where the cookie names a socket
+/// slot the caller already holds open.
+fn next_cookie_secret() -> [u8; 12] {
+    static SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x5EED_0001);
+    let v = SEQ.fetch_add(0x9E37_79B9, core::sync::atomic::Ordering::Relaxed);
+    let mut secret = [0u8; 12];
+    for (i, b) in secret.iter_mut().enumerate() {
+        *b = ((v >> ((i % 4) * 8)) as u8)
+            .wrapping_mul(0x5D)
+            .wrapping_add(i as u8);
+    }
+    secret
+}
 
 /// Find the live TCP socket for a cloned minor number.
 fn tcp_socket_for_minor(minor: i32) -> Option<&'static mut TcpSock> {
@@ -471,14 +569,25 @@ fn next_iss() -> u32 {
 /// Build a DL request message and SENDREC it to virtio_net. Returns the
 /// sender endpoint (>= 0) or a negative error.
 fn dl_sendrec(msg: &mut Message, mtype: u32) -> i32 {
-    msg.m_source = 0;
-    msg.m_type = mtype as i32;
-    unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDREC_CALL,
-            VIRTIO_NET_PROC_NR as u64,
-            msg as *mut Message as u64,
-        ) as i32
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host builds have no virtio_net peer; a raw `syscall` here would
+        // invoke an arbitrary host syscall. Tests drive the TCP logic
+        // directly, so a clean failure is correct.
+        let _ = (msg, mtype);
+        -1
+    }
+    #[cfg(target_os = "none")]
+    {
+        msg.m_source = 0;
+        msg.m_type = mtype as i32;
+        unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                VIRTIO_NET_PROC_NR as u64,
+                msg as *mut Message as u64,
+            ) as i32
+        }
     }
 }
 
@@ -703,11 +812,17 @@ fn udp_demux(pkt: &[u8], ihl: usize) {
     }
 }
 
-/// Demux an inbound TCP segment to the matching socket: completes the
-/// SYN handshake, delivers in-order data to the RX stream (ACKing it), and
-/// records RST as a connection failure (ECONNREFUSED) for a pending
-/// connect.
-fn tcp_demux(pkt: &[u8], ihl: usize) {
+/// True if `a` is strictly behind `b` in TCP sequence space (window ≤ 2³¹).
+fn seq_lt(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) < 0
+}
+
+/// Demux an inbound TCP segment: completes the SYN handshake, delivers
+/// in-order data to the RX stream (ACKing it), records RST as a connection
+/// failure (ECONNREFUSED) for a pending connect, and routes SYNs/data for
+/// listening sockets into their accept queues. `src_mac` is the ethernet
+/// source MAC, used to reply to a SYN from a peer we have not ARP-resolved.
+fn tcp_demux(pkt: &[u8], ihl: usize, src_mac: &[u8; 6]) {
     let tcp = &pkt[ihl..];
     if tcp.len() < TCP_HDR_LEN {
         return;
@@ -725,11 +840,11 @@ fn tcp_demux(pkt: &[u8], ihl: usize) {
     let src_ip: [u8; 4] = pkt[12..16].try_into().unwrap_or([0; 4]);
     unsafe {
         let socks = &mut *TCP_SOCKETS.get();
+        // Pass 1: connected/connecting sockets (exact 4-tuple match). A
+        // listener and an accepted socket share the local port, so the
+        // listener must not shadow the established connection.
         for s in socks.iter_mut() {
-            if !s.in_use {
-                continue;
-            }
-            if s.loc_port != dst_port || s.rem_port != src_port {
+            if !s.in_use || s.loc_port != dst_port || s.rem_port != src_port {
                 continue;
             }
             if s.rem_addr != [0; 4] && s.rem_addr != src_ip {
@@ -750,23 +865,172 @@ fn tcp_demux(pkt: &[u8], ihl: usize) {
                         let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
                     }
                 }
-                TcpState::Established => {
-                    if payload.is_empty() {
-                        return; // pure ACK — nothing to deliver
-                    }
-                    if seq == s.rcv_nxt {
-                        let n = payload.len().min(s.rx_buf.len() - s.rx_len);
-                        s.rx_buf[s.rx_len..s.rx_len + n].copy_from_slice(&payload[..n]);
-                        s.rx_len += n;
-                        s.rcv_nxt = s.rcv_nxt.wrapping_add(n as u32);
-                        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
-                    }
-                }
-                TcpState::Closed => {}
+                TcpState::Established => tcp_established_demux(s, ack, seq, payload),
+                TcpState::Closed | TcpState::Listening => {}
+            }
+            return;
+        }
+        // Pass 2: listening sockets. A SYN opens a pending connection; any
+        // other segment belongs to a pending connection already in the
+        // queue (data buffered, final handshake ACK completing it).
+        for s in socks.iter_mut() {
+            if !s.in_use || s.loc_port != dst_port || s.state != TcpState::Listening {
+                continue;
+            }
+            if flags & TCP_SYN != 0 {
+                tcp_listen_syn(s, src_ip, src_port, seq, src_mac);
+            } else {
+                tcp_listen_data(s, src_ip, src_port, seq, ack, flags, payload);
             }
             return;
         }
     }
+}
+
+/// Established-socket segment handling: acknowledge sent data (drop acked
+/// bytes from the retransmission buffer) and deliver in-order received
+/// data, re-ACKing duplicates so a lost ACK does not wedge the peer.
+fn tcp_established_demux(s: &mut TcpSock, ack: u32, seq: u32, payload: &[u8]) {
+    // ACK progress on our unacked data (single-segment window, so at most
+    // the one buffered segment is freed).
+    let acked = ack.wrapping_sub(s.snd_una);
+    let outstanding = s.snd_nxt.wrapping_sub(s.snd_una);
+    if acked != 0 && acked <= outstanding {
+        s.tx_buf.copy_within(acked as usize..s.tx_len, 0);
+        s.tx_len -= acked as usize;
+        s.snd_una = ack;
+        s.retx_rounds = 0;
+    }
+    if payload.is_empty() {
+        return; // pure ACK — nothing to deliver
+    }
+    if seq == s.rcv_nxt {
+        let n = payload.len().min(s.rx_buf.len() - s.rx_len);
+        s.rx_buf[s.rx_len..s.rx_len + n].copy_from_slice(&payload[..n]);
+        s.rx_len += n;
+        s.rcv_nxt = s.rcv_nxt.wrapping_add(n as u32);
+        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+    } else if seq_lt(seq, s.rcv_nxt) {
+        // Duplicate of already-acked data: re-ACK so the peer stops.
+        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+    }
+}
+
+/// A SYN for a listening socket: create a pending connection (sending the
+/// SYN-ACK) or re-send the SYN-ACK for a duplicate SYN. The accept queue
+/// entry is marked established when the handshake's final ACK arrives.
+fn tcp_listen_syn(s: &mut TcpSock, src_ip: [u8; 4], src_port: u16, seq: u32, src_mac: &[u8; 6]) {
+    for p in s.accept_queue.iter_mut() {
+        if p.in_use && p.rem_port == src_port && p.rem_addr == src_ip {
+            if !p.established {
+                let peer = TcpPeer {
+                    loc_port: s.loc_port,
+                    rem_port: p.rem_port,
+                    loc_addr: s.loc_addr,
+                    rem_addr: p.rem_addr,
+                    rem_mac: p.rem_mac,
+                };
+                let mut ip_pkt = [0u8; RX_BUF_SIZE];
+                let _ = tcp_send_raw(&mut ip_pkt, &peer, p.iss, p.rcv_nxt, TCP_SYN | TCP_ACK, 0);
+            }
+            return;
+        }
+    }
+    let p = match s.accept_queue.iter_mut().find(|p| !p.in_use) {
+        Some(p) => p,
+        None => return, // backlog full — drop the SYN
+    };
+    // Learn the peer MAC from the frame itself (no ARP round-trip needed).
+    unsafe {
+        let st = &mut *STATE.get();
+        cache_arp(st, src_ip, *src_mac);
+    }
+    p.in_use = true;
+    p.established = false;
+    p.rem_addr = src_ip;
+    p.rem_port = src_port;
+    p.rem_mac = *src_mac;
+    p.iss = next_iss();
+    p.snd_nxt = p.iss.wrapping_add(1);
+    p.rcv_nxt = seq.wrapping_add(1);
+    p.rx_len = 0;
+    let peer = TcpPeer {
+        loc_port: s.loc_port,
+        rem_port: p.rem_port,
+        loc_addr: s.loc_addr,
+        rem_addr: p.rem_addr,
+        rem_mac: p.rem_mac,
+    };
+    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+    let _ = tcp_send_raw(&mut ip_pkt, &peer, p.iss, p.rcv_nxt, TCP_SYN | TCP_ACK, 0);
+}
+
+/// Any non-SYN segment to a listening socket: it belongs to a pending
+/// connection. The handshake's final ACK marks the entry established
+/// (ready for `accept`); data is buffered into the entry's RX stream.
+fn tcp_listen_data(
+    s: &mut TcpSock,
+    src_ip: [u8; 4],
+    src_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+) {
+    let p = match s
+        .accept_queue
+        .iter_mut()
+        .find(|p| p.in_use && p.rem_port == src_port && p.rem_addr == src_ip)
+    {
+        Some(p) => p,
+        None => return, // no such pending connection
+    };
+    if flags & TCP_ACK != 0 && !p.established && ack == p.snd_nxt {
+        p.established = true;
+    }
+    if payload.is_empty() {
+        return;
+    }
+    if seq == p.rcv_nxt {
+        let n = payload.len().min(p.rx_buf.len() - p.rx_len);
+        p.rx_buf[p.rx_len..p.rx_len + n].copy_from_slice(&payload[..n]);
+        p.rx_len += n;
+        p.rcv_nxt = p.rcv_nxt.wrapping_add(n as u32);
+        let peer = TcpPeer {
+            loc_port: s.loc_port,
+            rem_port: p.rem_port,
+            loc_addr: s.loc_addr,
+            rem_addr: p.rem_addr,
+            rem_mac: p.rem_mac,
+        };
+        let mut ip_pkt = [0u8; RX_BUF_SIZE];
+        let _ = tcp_send_raw(&mut ip_pkt, &peer, p.snd_nxt, p.rcv_nxt, TCP_ACK, 0);
+    }
+}
+
+/// Retransmit unacked data when it has survived `RETX_AFTER_ROUNDS` poll
+/// rounds (no timer exists in the net server — the poll loops drive it).
+fn maybe_retransmit(s: &mut TcpSock) {
+    if s.tx_len == 0 || s.state != TcpState::Established {
+        s.retx_rounds = 0;
+        return;
+    }
+    if s.retx_rounds < RETX_AFTER_ROUNDS {
+        return;
+    }
+    s.retx_rounds = 0;
+    STAT_TX_RETRANS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+    ip_pkt[IP_HDR_LEN + TCP_HDR_LEN..IP_HDR_LEN + TCP_HDR_LEN + s.tx_len]
+        .copy_from_slice(&s.tx_buf[..s.tx_len]);
+    let _ = tcp_send_raw(
+        &mut ip_pkt[..IP_HDR_LEN + TCP_HDR_LEN + s.tx_len],
+        &TcpPeer::from_sock(s),
+        s.snd_una,
+        s.rcv_nxt,
+        TCP_ACK | TCP_PSH,
+        s.tx_len,
+    );
 }
 
 /// Convert a network-order u32 (as stored in `nwio_udpopt_t`) to an IP.
@@ -836,6 +1100,30 @@ fn build_udp_datagram(out: &mut [u8], s: &UdpSock, payload_len: usize) {
     write_be16(&mut out[u + 6..u + 8], udp_csum);
 }
 
+/// Connection endpoints + peer MAC, the parameter bundle for the low-level
+/// TCP builders (they are shared by socket sends and accept-queue sends,
+/// which have no `TcpSock` of their own yet).
+#[derive(Clone, Copy)]
+struct TcpPeer {
+    loc_port: u16,
+    rem_port: u16,
+    loc_addr: [u8; 4],
+    rem_addr: [u8; 4],
+    rem_mac: [u8; 6],
+}
+
+impl TcpPeer {
+    fn from_sock(s: &TcpSock) -> Self {
+        Self {
+            loc_port: s.loc_port,
+            rem_port: s.rem_port,
+            loc_addr: s.loc_addr,
+            rem_addr: s.rem_addr,
+            rem_mac: s.rem_mac,
+        }
+    }
+}
+
 /// Build IP + TCP headers around a payload already present at
 /// `out[IP_HDR_LEN + TCP_HDR_LEN..]` (for `payload_len` bytes). Returns the
 /// total datagram length. The TCP checksum covers the pseudo-header + the
@@ -848,11 +1136,25 @@ fn build_tcp_datagram(
     flags: u8,
     payload_len: usize,
 ) -> usize {
+    build_tcp_datagram_to(out, &TcpPeer::from_sock(s), seq, ack, flags, payload_len)
+}
+
+/// [`build_tcp_datagram`] with explicit connection parameters, so segments
+/// for pending (not yet accepted) connections can be built from the
+/// listener's local side and the pending conn's remote side.
+fn build_tcp_datagram_to(
+    out: &mut [u8],
+    peer: &TcpPeer,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload_len: usize,
+) -> usize {
     let total = IP_HDR_LEN + TCP_HDR_LEN + payload_len;
-    let src_ip = if s.loc_addr == [0; 4] {
+    let src_ip = if peer.loc_addr == [0; 4] {
         OUR_IP
     } else {
-        s.loc_addr
+        peer.loc_addr
     };
 
     // IP header.
@@ -865,14 +1167,14 @@ fn build_tcp_datagram(
     out[9] = IP_PROTO_TCP;
     write_be16(&mut out[10..12], 0); // checksum (filled below)
     out[12..16].copy_from_slice(&src_ip);
-    out[16..20].copy_from_slice(&s.rem_addr);
+    out[16..20].copy_from_slice(&peer.rem_addr);
     let ip_csum = checksum(&out[..IP_HDR_LEN]);
     write_be16(&mut out[10..12], ip_csum);
 
     // TCP header (checksum field starts zero, filled below).
     let t = IP_HDR_LEN;
-    write_be16(&mut out[t..t + 2], s.loc_port);
-    write_be16(&mut out[t + 2..t + 4], s.rem_port);
+    write_be16(&mut out[t..t + 2], peer.loc_port);
+    write_be16(&mut out[t + 2..t + 4], peer.rem_port);
     write_be32(&mut out[t + 4..t + 8], seq);
     write_be32(&mut out[t + 8..t + 12], ack);
     out[t + 12] = 0x50; // data offset 5 (20 bytes), reserved 0
@@ -883,7 +1185,7 @@ fn build_tcp_datagram(
 
     let mut sum = 0u32;
     csum_add(&mut sum, &src_ip);
-    csum_add(&mut sum, &s.rem_addr);
+    csum_add(&mut sum, &peer.rem_addr);
     csum_add(&mut sum, &[0, IP_PROTO_TCP]); // zero byte + protocol
     csum_add(
         &mut sum,
@@ -896,6 +1198,26 @@ fn build_tcp_datagram(
     total
 }
 
+/// Frame and transmit a TCP segment built into `ip_pkt` (payload already at
+/// `ip_pkt[IP_HDR_LEN + TCP_HDR_LEN..]`) to `peer.rem_mac`. Returns 0 on
+/// success.
+fn tcp_send_raw(
+    ip_pkt: &mut [u8],
+    peer: &TcpPeer,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload_len: usize,
+) -> i32 {
+    let total = build_tcp_datagram_to(ip_pkt, peer, seq, ack, flags, payload_len);
+    let tx = unsafe { &mut *TX_BUF.get() };
+    let n = build_eth_frame(tx, &peer.rem_mac, ETH_TYPE_IP, &ip_pkt[..total]);
+    if dl_write_frame(&tx[..n]) != 0 {
+        return -5;
+    }
+    0
+}
+
 /// Frame and transmit a TCP segment for `s` (SYN/ACK/data) via the peer
 /// MAC stored on the socket. Returns 0 on success.
 fn tcp_send_segment(s: &TcpSock, seq: u32, ack: u32, flags: u8, payload_len: usize) -> i32 {
@@ -903,13 +1225,14 @@ fn tcp_send_segment(s: &TcpSock, seq: u32, ack: u32, flags: u8, payload_len: usi
         return -5;
     }
     let mut ip_pkt = [0u8; RX_BUF_SIZE];
-    let total = build_tcp_datagram(&mut ip_pkt, s, seq, ack, flags, payload_len);
-    let tx = unsafe { &mut *TX_BUF.get() };
-    let n = build_eth_frame(tx, &s.rem_mac, ETH_TYPE_IP, &ip_pkt[..total]);
-    if dl_write_frame(&tx[..n]) != 0 {
-        return -5;
-    }
-    0
+    tcp_send_raw(
+        &mut ip_pkt,
+        &TcpPeer::from_sock(s),
+        seq,
+        ack,
+        flags,
+        payload_len,
+    )
 }
 
 /// Build an ethernet frame for `payload` (ARP or IP) into `out`.
@@ -962,9 +1285,12 @@ fn handle_frame(frame: &[u8]) -> bool {
     let st = unsafe { &mut *STATE.get() };
     let ethertype = read_be16(&frame[12..14]);
     let payload = &frame[14..];
+    // The frame's source MAC is the peer's — needed to answer a SYN for a
+    // listening socket without an ARP round-trip.
+    let src_mac: [u8; 6] = frame[6..12].try_into().unwrap_or([0; 6]);
     match ethertype {
         ETH_TYPE_ARP => handle_arp(st, payload),
-        ETH_TYPE_IP => handle_ip(st, payload),
+        ETH_TYPE_IP => handle_ip(st, payload, &src_mac),
         _ => false,
     }
 }
@@ -1071,7 +1397,7 @@ fn arp_resolve(ip: &[u8; 4]) -> Option<[u8; 6]> {
 
 /// Handle a received IP datagram. Auto-replies to echo requests; captures
 /// a matching echo reply for the last ping.
-fn handle_ip(st: &mut NetState, pkt: &[u8]) -> bool {
+fn handle_ip(st: &mut NetState, pkt: &[u8], src_mac: &[u8; 6]) -> bool {
     if pkt.len() < IP_HDR_LEN {
         return false;
     }
@@ -1091,7 +1417,7 @@ fn handle_ip(st: &mut NetState, pkt: &[u8]) -> bool {
         pkt
     };
     if pkt[9] == IP_PROTO_TCP {
-        tcp_demux(pkt, ihl);
+        tcp_demux(pkt, ihl, src_mac);
         return false;
     }
     if pkt[9] == IP_PROTO_UDP {
@@ -1522,21 +1848,27 @@ fn cdev_read_dgram(msg: &mut Message) -> i32 {
 
 // ---- TCP socket handlers ----
 
-/// TCP ioctls: NWIOGTCPCONF / NWIOSTCPCONF / NWIOTCPCONN. The conf struct
-/// travels at payload bytes 16..32, the connect struct at 16..24.
+/// TCP ioctls: NWIOGTCPCONF / NWIOSTCPCONF / NWIOTCPCONN / NWIOTCPLISTENQ
+/// / NWIOGTCPCOOKIE / NWIOTCPACCEPTTO. The conf struct travels at payload
+/// bytes 16..32, the connect struct at 16..24, the listen backlog at
+/// 16..20 and the accept cookie at 16..32.
 fn tcp_ioctl(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let request = msg_u32(msg, 4);
-    let s = match tcp_socket_for_minor(minor) {
-        Some(s) => s,
-        None => return -9, // EBADF
-    };
     match request {
         NWIOSTCPCONF => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
             let conf = NwioTcpConf::read_from(unsafe { &msg.m_payload.raw[16..32] });
             tcp_setconf(s, &conf)
         }
         NWIOGTCPCONF => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
             let conf = NwioTcpConf {
                 nwtc_flags: s.flags,
                 nwtc_locaddr: ip_to_u32(&s.loc_addr),
@@ -1554,8 +1886,161 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
             let _cl = NwioTcpCl::read_from(unsafe { &msg.m_payload.raw[16..24] });
             tcp_connect(minor)
         }
+        NWIOTCPLISTENQ => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            let backlog = i32::from_ne_bytes(
+                unsafe { &msg.m_payload.raw[16..20] }
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            tcp_listenq(s, backlog)
+        }
+        NWIOGTCPCOOKIE => {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            if !s.cookie_set {
+                s.cookie.tc_ref = minor as u32;
+                s.cookie.tc_secret = next_cookie_secret();
+                s.cookie_set = true;
+            }
+            s.cookie.write_to(unsafe { &mut msg.m_payload.raw[16..32] });
+            0
+        }
+        NWIOTCPACCEPTTO => {
+            let cookie = TcpCookie::read_from(unsafe { &msg.m_payload.raw[16..32] });
+            tcp_acceptto(minor, cookie)
+        }
         _ => -25, // ENOTTY
     }
+}
+
+/// NWIOTCPLISTENQ: put the socket into the listening state with a bounded
+/// backlog. The local port must already be bound (NWIOSTCPCONF with
+/// NWTC_LP_SET), mirroring the reference's requirement that the config be
+/// set before listen.
+fn tcp_listenq(s: &mut TcpSock, backlog: i32) -> i32 {
+    if s.state != TcpState::Closed {
+        return EISCONN;
+    }
+    if s.loc_port == 0 {
+        return -22; // EINVAL: no local port bound
+    }
+    s.backlog = (backlog as usize).clamp(1, ACCEPT_QUEUE_MAX);
+    s.state = TcpState::Listening;
+    0
+}
+
+/// Index of the first established pending connection on the listening
+/// socket `minor`, if any.
+fn ready_pending(minor: i32) -> Option<usize> {
+    let s = tcp_socket_for_minor(minor)?;
+    s.accept_queue
+        .iter()
+        .position(|p| p.in_use && p.established)
+}
+
+/// NWIOTCPACCEPTTO: block (bounded poll) until the listener has an
+/// established pending connection, then move it to the fresh socket named
+/// by `cookie` (its clone minor plus the per-socket secret). Returns 0, or
+/// EAGAIN when no connection completed within the poll window (the libc
+/// `accept` retries).
+fn tcp_acceptto(minor: i32, cookie: TcpCookie) -> i32 {
+    {
+        let s = match tcp_socket_for_minor(minor) {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        if s.state != TcpState::Listening {
+            return -22; // EINVAL: not listening
+        }
+    }
+    for _ in 0..READ_POLL_ROUNDS {
+        if let Some(i) = ready_pending(minor) {
+            return move_pending(minor, i, cookie);
+        }
+        let got = dl_read_frames();
+        if got == 0 {
+            continue;
+        }
+        unsafe {
+            let bufs = &*RX_BUFFERS.get();
+            handle_frame(&bufs[0][..got]);
+        }
+    }
+    // Final check after the poll window (a SYN may have completed in the
+    // last round without a re-check).
+    if let Some(i) = ready_pending(minor) {
+        return move_pending(minor, i, cookie);
+    }
+    EAGAIN
+}
+
+/// Move the pending connection at queue index `qi` of the listening socket
+/// `minor` onto the fresh socket named by `cookie`, transferring the
+/// connection state (peer, sequence numbers, buffered RX data). The fresh
+/// socket becomes `Established`.
+fn move_pending(minor: i32, qi: usize, cookie: TcpCookie) -> i32 {
+    unsafe {
+        let socks = &mut *TCP_SOCKETS.get();
+        let dst_pos = match socks
+            .iter()
+            .position(|s| s.in_use && s.minor == cookie.tc_ref as i32)
+        {
+            Some(p) => p,
+            None => return -22, // EINVAL: no such fresh socket
+        };
+        let lst_pos = match socks.iter().position(|s| s.in_use && s.minor == minor) {
+            Some(p) => p,
+            None => return -9, // EBADF
+        };
+        // Validate before mutating anything.
+        if !socks[dst_pos].cookie_set
+            || socks[dst_pos].cookie != cookie
+            || socks[dst_pos].state != TcpState::Closed
+        {
+            return -22; // EINVAL: bad cookie or busy fresh socket
+        }
+        if socks[lst_pos].state != TcpState::Listening || qi >= socks[lst_pos].accept_queue.len() {
+            return -22; // EINVAL
+        }
+        if !socks[lst_pos].accept_queue[qi].in_use || !socks[lst_pos].accept_queue[qi].established {
+            return EAGAIN;
+        }
+        // Snapshot the pending connection (plus the listener's local side,
+        // which the accepted socket inherits), then free the queue slot.
+        let (loc_port, loc_addr) = (socks[lst_pos].loc_port, socks[lst_pos].loc_addr);
+        let (rem_addr, rem_port, rem_mac, iss, snd_nxt, rcv_nxt, rx_len, rx_buf) = {
+            let p = &mut socks[lst_pos].accept_queue[qi];
+            let r = (
+                p.rem_addr, p.rem_port, p.rem_mac, p.iss, p.snd_nxt, p.rcv_nxt, p.rx_len, p.rx_buf,
+            );
+            p.in_use = false;
+            p.established = false;
+            r
+        };
+        let dst = &mut socks[dst_pos];
+        dst.loc_port = loc_port;
+        dst.loc_addr = loc_addr;
+        dst.rem_addr = rem_addr;
+        dst.rem_port = rem_port;
+        dst.rem_mac = rem_mac;
+        dst.iss = iss;
+        dst.snd_nxt = snd_nxt;
+        dst.snd_una = snd_nxt; // our SYN was consumed by the handshake
+        dst.rcv_nxt = rcv_nxt;
+        dst.rx_len = rx_len;
+        dst.rx_buf[..rx_len].copy_from_slice(&rx_buf[..rx_len]);
+        dst.tx_len = 0;
+        dst.err = 0;
+        dst.retx_rounds = 0;
+        dst.state = TcpState::Established;
+    }
+    0
 }
 
 /// Apply a NWIOSTCPCONF struct to a socket. Flag groups update only the
@@ -1605,6 +2090,7 @@ fn tcp_connect(minor: i32) -> i32 {
         }
         s.iss = next_iss();
         s.snd_nxt = s.iss.wrapping_add(1);
+        s.snd_una = s.snd_nxt;
         s.rcv_nxt = 0;
         s.err = 0;
         s.state = TcpState::SynSent;
@@ -1647,7 +2133,7 @@ fn tcp_connect(minor: i32) -> i32 {
             match s.state {
                 TcpState::Established => return 0,
                 TcpState::Closed => return if s.err != 0 { s.err } else { ETIMEDOUT },
-                TcpState::SynSent => {}
+                TcpState::SynSent | TcpState::Listening => {}
             }
         }
         let got = dl_read_frames();
@@ -1673,11 +2159,34 @@ fn tcp_connect(minor: i32) -> i32 {
     }
 }
 
-/// TCP stream write: copy up to one segment of user data and transmit it
-/// (seq = snd_nxt). Returns the bytes sent — a short write is fine for a
-/// stream. No retransmission: the milestone runs on QEMU's lossless
-/// virtio path.
+/// TCP stream write: copy up to one segment of user data, buffer it for
+/// retransmission, and transmit it (seq = snd_nxt). A single-segment send
+/// window: while a previous segment is unacked, a short drain reclaims the
+/// window and the write returns 0 (a stream short write — the caller
+/// retries). Returns the bytes sent.
 fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
+    // Reclaim the window / drive retransmission before accepting new data.
+    for _ in 0..2 {
+        let has_unacked = {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9, // EBADF
+            };
+            maybe_retransmit(s);
+            s.tx_len > 0
+        };
+        if !has_unacked {
+            break;
+        }
+        let got = dl_read_frames();
+        if got == 0 {
+            continue;
+        }
+        unsafe {
+            let bufs = &*RX_BUFFERS.get();
+            handle_frame(&bufs[0][..got]);
+        }
+    }
     let s = match tcp_socket_for_minor(minor) {
         Some(s) => s,
         None => return -9, // EBADF
@@ -1688,10 +2197,14 @@ fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
     if s.rem_mac == [0; 6] {
         return ENOTCONN;
     }
-    let max_payload = (RX_BUF_SIZE - IP_HDR_LEN - TCP_HDR_LEN) as u64;
     if count == 0 {
         return 0;
     }
+    if s.tx_len > 0 {
+        // Unacked data still in flight after the drain — no window.
+        return 0;
+    }
+    let max_payload = (RX_BUF_SIZE - IP_HDR_LEN - TCP_HDR_LEN) as u64;
     let n = count.min(max_payload) as usize;
     let mut ip_pkt = [0u8; RX_BUF_SIZE];
     let copy_r = minix_rt::sys_vircopy(
@@ -1705,18 +2218,27 @@ fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
         return copy_r;
     }
     let seq = s.snd_nxt;
-    let total = build_tcp_datagram(
+    let ack = s.rcv_nxt;
+    let peer = TcpPeer::from_sock(s);
+    s.tx_buf[..n].copy_from_slice(&ip_pkt[IP_HDR_LEN + TCP_HDR_LEN..IP_HDR_LEN + TCP_HDR_LEN + n]);
+    s.tx_len = n;
+    s.snd_nxt = s.snd_nxt.wrapping_add(n as u32);
+    s.retx_rounds = 0;
+    // TEST_DROP_TX: count the segment as sent without transmitting it — no
+    // ACK will come, so the poll loops retransmit from tx_buf.
+    if TEST_DROP_TX.fetch_sub(1, core::sync::atomic::Ordering::Relaxed) > 0 {
+        return n as i32;
+    }
+    let total = build_tcp_datagram_to(
         &mut ip_pkt[..IP_HDR_LEN + TCP_HDR_LEN + n],
-        s,
+        &peer,
         seq,
-        s.rcv_nxt,
+        ack,
         TCP_ACK | TCP_PSH,
         n,
     );
-    s.snd_nxt = s.snd_nxt.wrapping_add(n as u32);
-    let mac = s.rem_mac;
     let tx = unsafe { &mut *TX_BUF.get() };
-    let flen = build_eth_frame(tx, &mac, ETH_TYPE_IP, &ip_pkt[..total]);
+    let flen = build_eth_frame(tx, &peer.rem_mac, ETH_TYPE_IP, &ip_pkt[..total]);
     if dl_write_frame(&tx[..flen]) != 0 {
         return -5;
     }
@@ -1724,7 +2246,8 @@ fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
 }
 
 /// TCP stream read: return the next chunk of the received byte stream
-/// (acknowledged data), polling the NIC for a bounded time first.
+/// (acknowledged data), polling the NIC for a bounded time first. The poll
+/// also drives retransmission of unacked data and reclaims the send window.
 fn tcp_read(minor: i32, user: i32, va: u64, count: u64) -> i32 {
     if count == 0 {
         return 0;
@@ -1735,6 +2258,7 @@ fn tcp_read(minor: i32, user: i32, va: u64, count: u64) -> i32 {
                 Some(s) => s,
                 None => return -9, // EBADF
             };
+            maybe_retransmit(s);
             (s.rx_len > 0, s.rx_len.min(count as usize))
         };
         if ready {
@@ -1856,5 +2380,209 @@ mod tests {
         assert_eq!(core::mem::offset_of!(UdpSock, rem_addr), 20);
         assert_eq!(core::mem::offset_of!(UdpSock, rx_len), 24);
         assert_eq!(core::mem::size_of::<UdpSock>(), 2080);
+
+        assert_eq!(core::mem::offset_of!(TcpSock, in_use), 0);
+        assert_eq!(core::mem::offset_of!(TcpSock, minor), 4);
+        assert_eq!(core::mem::offset_of!(TcpSock, state), 30);
+        assert_eq!(core::mem::offset_of!(TcpSock, iss), 32);
+        assert_eq!(core::mem::offset_of!(TcpSock, snd_nxt), 36);
+        assert_eq!(core::mem::offset_of!(TcpSock, snd_una), 40);
+        assert_eq!(core::mem::offset_of!(TcpSock, rcv_nxt), 44);
+        assert_eq!(core::mem::offset_of!(TcpSock, err), 48);
+        assert_eq!(core::mem::offset_of!(TcpSock, rx_len), 56);
+        assert_eq!(core::mem::offset_of!(TcpSock, rx_buf), 64);
+        assert_eq!(core::mem::offset_of!(TcpSock, tx_len), 2112);
+        assert_eq!(core::mem::offset_of!(TcpSock, tx_buf), 2120);
+        assert_eq!(core::mem::offset_of!(TcpSock, retx_rounds), 4168);
+        assert_eq!(core::mem::offset_of!(TcpSock, cookie), 4172);
+        assert_eq!(core::mem::offset_of!(TcpSock, cookie_set), 4188);
+        assert_eq!(core::mem::offset_of!(TcpSock, backlog), 4192);
+        assert_eq!(core::mem::offset_of!(TcpSock, accept_queue), 4200);
+        assert_eq!(core::mem::offset_of!(PendingConn, in_use), 0);
+        assert_eq!(core::mem::offset_of!(PendingConn, established), 1);
+        assert_eq!(core::mem::offset_of!(PendingConn, rem_port), 6);
+        assert_eq!(core::mem::offset_of!(PendingConn, rcv_nxt), 24);
+        assert_eq!(core::mem::offset_of!(PendingConn, rx_len), 32);
+        assert_eq!(core::mem::offset_of!(PendingConn, rx_buf), 40);
+    }
+
+    /// Sequence-space ordering helper (RFC 1982 semantics for a 2³¹ window).
+    #[test]
+    fn seq_lt_orders_wrapping_sequences() {
+        assert!(seq_lt(5, 10));
+        assert!(!seq_lt(10, 5));
+        assert!(!seq_lt(5, 5));
+        // Wraparound: a small seq is ahead of a near-u32::MAX one.
+        assert!(seq_lt(u32::MAX - 3, 5));
+        assert!(!seq_lt(5, u32::MAX - 3));
+    }
+
+    /// Listen requires a bound local port; a bound socket enters Listening.
+    /// Uses a local socket, so no shared state is touched.
+    #[test]
+    fn listen_requires_bound_port() {
+        let mut s = TcpSock::init(0, true);
+        assert_eq!(tcp_listenq(&mut s, 4), -22); // EINVAL: not bound
+        s.loc_port = 20000;
+        assert_eq!(tcp_listenq(&mut s, 4), 0);
+        assert_eq!(s.state, TcpState::Listening);
+        assert_eq!(s.backlog, 4);
+        // Listening again is a busy-socket error, like connect.
+        assert_eq!(tcp_listenq(&mut s, 2), EISCONN);
+    }
+
+    /// The retransmission and accept-queue machinery, exercised on one
+    /// thread (they share the net server's statics, so they must not run
+    /// in parallel with each other): ACKs free the unacked buffer, a stale
+    /// segment is retransmitted, a SYN seeds the accept queue, the final
+    /// handshake ACK establishes it, and accept moves it to a fresh socket.
+    #[test]
+    fn tcp_retransmit_and_accept_queue_logic() {
+        // --- ACK processing frees the unacked buffer ---
+        let mut s = TcpSock::init(0, true);
+        s.state = TcpState::Established;
+        s.rem_mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        s.iss = 0x2000;
+        s.snd_nxt = s.iss.wrapping_add(1);
+        s.snd_una = s.snd_nxt;
+        s.rcv_nxt = 0x1234;
+        s.tx_buf[..5].copy_from_slice(b"hello");
+        s.tx_len = 5;
+        s.snd_nxt = s.snd_una.wrapping_add(5);
+        s.retx_rounds = 0;
+        // Pure ACK covering all 5 bytes: buffer freed, window reclaimed.
+        let ack = s.snd_una.wrapping_add(5);
+        tcp_established_demux(&mut s, ack, 0, &[]);
+        assert_eq!(s.tx_len, 0);
+        assert_eq!(s.snd_una, s.iss.wrapping_add(6));
+        assert_eq!(s.retx_rounds, 0);
+        // Partial ACK leaves the remainder for retransmission.
+        s.tx_buf[..5].copy_from_slice(b"hello");
+        s.tx_len = 5;
+        s.snd_una = s.iss.wrapping_add(6);
+        s.snd_nxt = s.snd_una.wrapping_add(5);
+        let ack = s.snd_una.wrapping_add(2);
+        tcp_established_demux(&mut s, ack, 0, &[]);
+        assert_eq!(s.tx_len, 3);
+        assert_eq!(s.snd_una, s.iss.wrapping_add(8));
+
+        // --- Stale unacked data is retransmitted ---
+        let before = STAT_TX_RETRANS.load(core::sync::atomic::Ordering::Relaxed);
+        s.retx_rounds = RETX_AFTER_ROUNDS - 1;
+        maybe_retransmit(&mut s);
+        assert_eq!(
+            STAT_TX_RETRANS.load(core::sync::atomic::Ordering::Relaxed),
+            before,
+            "below the threshold nothing is resent"
+        );
+        s.retx_rounds = RETX_AFTER_ROUNDS;
+        maybe_retransmit(&mut s);
+        assert_eq!(
+            STAT_TX_RETRANS.load(core::sync::atomic::Ordering::Relaxed),
+            before + 1,
+            "a stale segment is retransmitted"
+        );
+        assert_eq!(s.retx_rounds, 0);
+
+        // --- The drop hook leaves data unacked, forcing the retransmit ---
+        let drop_before = TEST_DROP_TX.load(core::sync::atomic::Ordering::Relaxed);
+        TEST_DROP_TX.store(drop_before + 1, core::sync::atomic::Ordering::Relaxed);
+        s.tx_len = 0;
+        s.snd_una = s.iss.wrapping_add(8);
+        s.snd_nxt = s.snd_una;
+        let retrans_before = STAT_TX_RETRANS.load(core::sync::atomic::Ordering::Relaxed);
+        // Simulate the write path's drop: buffer + advance snd_nxt without
+        // transmitting (as tcp_write does when TEST_DROP_TX fires).
+        s.tx_buf[..3].copy_from_slice(b"abc");
+        s.tx_len = 3;
+        s.snd_nxt = s.snd_nxt.wrapping_add(3);
+        s.retx_rounds = RETX_AFTER_ROUNDS;
+        maybe_retransmit(&mut s);
+        assert_eq!(
+            STAT_TX_RETRANS.load(core::sync::atomic::Ordering::Relaxed),
+            retrans_before + 1,
+            "dropped data is retransmitted from the buffer"
+        );
+        TEST_DROP_TX.store(drop_before, core::sync::atomic::Ordering::Relaxed);
+
+        // --- A SYN seeds the listener's accept queue ---
+        let mut listener = TcpSock::init(0, true);
+        listener.loc_port = 20000;
+        listener.state = TcpState::Listening;
+        let mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        tcp_listen_syn(&mut listener, [10, 0, 2, 2], 40000, 0x1000, &mac);
+        let pending_snd = listener.accept_queue[0].snd_nxt;
+        let pending_rcv = listener.accept_queue[0].rcv_nxt;
+        assert!(listener.accept_queue[0].in_use);
+        assert!(!listener.accept_queue[0].established);
+        assert_eq!(listener.accept_queue[0].rem_addr, [10, 0, 2, 2]);
+        assert_eq!(listener.accept_queue[0].rem_port, 40000);
+        assert_eq!(listener.accept_queue[0].rem_mac, mac);
+        assert_eq!(pending_rcv, 0x1001);
+        assert_eq!(pending_snd, listener.accept_queue[0].iss.wrapping_add(1));
+        // The final handshake ACK establishes the pending connection.
+        tcp_listen_data(
+            &mut listener,
+            [10, 0, 2, 2],
+            40000,
+            pending_rcv,
+            pending_snd,
+            TCP_ACK,
+            &[],
+        );
+        assert!(listener.accept_queue[0].established);
+        // Data arriving before accept is buffered in the pending conn.
+        let data_seq = listener.accept_queue[0].rcv_nxt;
+        tcp_listen_data(
+            &mut listener,
+            [10, 0, 2, 2],
+            40000,
+            data_seq,
+            pending_snd,
+            TCP_ACK | TCP_PSH,
+            b"hi",
+        );
+        assert_eq!(listener.accept_queue[0].rx_len, 2);
+        assert_eq!(&listener.accept_queue[0].rx_buf[..2], b"hi");
+        assert_eq!(listener.accept_queue[0].rcv_nxt, 0x1001 + 2);
+
+        // --- accept moves the pending connection to the fresh socket ---
+        unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            for slot in socks.iter_mut() {
+                *slot = TcpSock::init(0, false);
+            }
+            socks[0] = TcpSock::init(100, true);
+            socks[0].loc_port = 20000;
+            socks[0].state = TcpState::Listening;
+            socks[0].accept_queue[0] = listener.accept_queue[0];
+            socks[1] = TcpSock::init(101, true);
+            socks[1].cookie.tc_ref = 101;
+            socks[1].cookie.tc_secret = [7; 12];
+            socks[1].cookie_set = true;
+        }
+        let cookie = TcpCookie {
+            tc_ref: 101,
+            tc_secret: [7; 12],
+        };
+        assert_eq!(move_pending(100, 0, cookie), 0);
+        unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            let dst = &socks[1];
+            assert_eq!(dst.state, TcpState::Established);
+            assert_eq!(dst.rem_addr, [10, 0, 2, 2]);
+            assert_eq!(dst.rem_port, 40000);
+            assert_eq!(dst.rcv_nxt, 0x1003);
+            assert_eq!(dst.rx_len, 2);
+            assert_eq!(&dst.rx_buf[..2], b"hi");
+            assert_eq!(dst.snd_una, dst.snd_nxt);
+            assert!(!socks[0].accept_queue[0].in_use, "queue slot freed");
+        }
+        // A mismatched secret is rejected without mutating anything.
+        let bad = TcpCookie {
+            tc_ref: 101,
+            tc_secret: [8; 12],
+        };
+        assert_eq!(move_pending(100, 0, bad), -22);
     }
 }

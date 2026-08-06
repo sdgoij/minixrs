@@ -89,6 +89,11 @@ path = "src/bin/tcp.rs"
 test = false
 
 [[bin]]
+name = "tcpserver"
+path = "src/bin/tcpserver.rs"
+test = false
+
+[[bin]]
 name = "mknod"
 path = "src/bin/mknod.rs"
 test = false
