@@ -113,6 +113,13 @@ pub struct Filp {
     pub filp_pipe_select_ops: u32,
     pub filp_pipe_select_ep: [i32; 2],
     pub filp_pipe_ino: u32,
+    /// Device number used for character-device I/O: the vnode's `v_dev`,
+    /// or the cloned minor device returned by a socket driver's
+    /// `CDEV_CLONED` open reply.
+    pub filp_dev: u32,
+    /// `CDEV_DGRAM` if this filp is a datagram (socket) channel — set from
+    /// the driver's `CDEV_DGRAM_OPEN` open reply.
+    pub filp_dgram: u32,
 }
 
 impl Default for Filp {
@@ -132,6 +139,8 @@ impl Default for Filp {
             filp_pipe_select_ops: 0,
             filp_pipe_select_ep: [-1; 2],
             filp_pipe_ino: 0,
+            filp_dev: 0,
+            filp_dgram: 0,
         }
     }
 }

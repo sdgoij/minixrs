@@ -182,14 +182,19 @@ pub fn do_open() -> i32 {
     // Character devices: route the open to the registered driver before
     // wiring a filp. The filp still references the device vnode so that
     // close/dup/fcntl behave normally; reads, writes and close dispatch on
-    // the vnode mode.
+    // the vnode mode. Socket drivers reply CDEV_CLONED with a fresh minor —
+    // the filp records the resulting device number and datagram-ness.
+    let mut dev = unsafe { (*vp).v_dev };
+    let mut open_flags = 0u32;
     if unsafe { (*vp).v_mode & S_IFMT } == S_IFCHR {
-        let r = unsafe { crate::vfs::device::cdev_open((*vp).v_dev, flags as i32) };
+        let r =
+            unsafe { crate::vfs::device::cdev_open((*vp).v_dev, flags as i32, &mut open_flags) };
         if r < 0 {
             unsafe { mount::put_vnode(vp) };
             fp.fp_filp[fd as usize] = -1;
             return r;
         }
+        dev = r as u32;
     }
 
     // Allocate a filp entry.
@@ -220,6 +225,14 @@ pub fn do_open() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
         (*filp_arr.add(filp_idx as usize)).filp_flags = flags;
         (*filp_arr.add(filp_idx as usize)).filp_mode = mode_bits;
+        (*filp_arr.add(filp_idx as usize)).filp_dev = dev;
+        // The open reply flags the datagram channel with CDEV_DGRAM_OPEN;
+        // convert it to the request flag cdev_io checks (CDEV_DGRAM).
+        (*filp_arr.add(filp_idx as usize)).filp_dgram = if open_flags & CDEV_DGRAM_OPEN != 0 {
+            CDEV_DGRAM
+        } else {
+            0
+        };
     }
 
     // Release the vnode reference (the filp now holds it).
@@ -466,12 +479,12 @@ pub fn do_read() -> i32 {
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {
             return crate::vfs::device::cdev_io(
                 crate::vfs::consts::CDEV_READ,
-                (*vp).v_dev,
+                filp.filp_dev,
                 fp.fp_endpoint,
                 buf_addr,
                 filp.filp_pos,
                 count as u64,
-                filp.filp_flags as i32,
+                filp.filp_dgram as i32,
             );
         }
         // Call the FS request layer to perform the read.
@@ -531,12 +544,12 @@ pub fn do_write() -> i32 {
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {
             return crate::vfs::device::cdev_io(
                 crate::vfs::consts::CDEV_WRITE,
-                (*vp).v_dev,
+                filp.filp_dev,
                 fp.fp_endpoint,
                 buf_addr,
                 filp.filp_pos,
                 count as u64,
-                filp.filp_flags as i32,
+                filp.filp_dgram as i32,
             );
         }
         let (r, new_pos) = crate::vfs::request::req_write(
@@ -729,7 +742,7 @@ pub fn do_ioctl() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        let dev = (*vp).v_dev;
+        let dev = filp.filp_dev;
         crate::vfs::device::cdev_io(
             CDEV_IOCTL,
             dev,

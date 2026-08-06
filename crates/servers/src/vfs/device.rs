@@ -42,6 +42,11 @@ const INLINE_READ_MAX: usize = 48;
 /// Max bytes the tty accepts inline per CDEV_WRITE (m2_l3 = last 8 payload bytes).
 const INLINE_WRITE_MAX: usize = 8;
 
+/// Max bytes an ioctl arg struct travels in the CDEV_IOCTL data area
+/// (absolute bytes 24..56 of the message: m2_l1/m2_l2/m2_l3, unused by
+/// ioctls). Socket option structs (nwio_udpopt_t = 16 bytes) fit easily.
+const IOCTL_DATA_MAX: usize = 32;
+
 /// Convert open(2) flags to the tty server's CDEV access bits.
 /// O_RDONLY=0, O_WRONLY=1, O_RDWR=2 (access mode in the low two bits).
 fn open_access_flags(flags: i32) -> i32 {
@@ -73,22 +78,23 @@ fn build_open_close_msg(op: i32, dev: u32, access: i32, user_ep: i32) -> [u8; 56
 
 /// Open a character device.
 ///
-/// Sends a \`CDEV_OPEN\` message to the device driver endpoint found via the
-/// dmap table for the given \`dev\`'s major number. On a \`CDEV_CTTY\` reply
+/// Sends a `CDEV_OPEN` message to the device driver endpoint found via the
+/// dmap table for the given `dev`'s major number. On a `CDEV_CTTY` reply
 /// the device becomes the caller's controlling terminal.
 ///
-/// C source: \`minix/servers/vfs/device.c\` — \`cdev_open()\` (line 484)
+/// Returns the device number to use for subsequent I/O on this filp — the
+/// input `dev` for ordinary devices, or `(major << 16) | new_minor` when the
+/// driver replied `CDEV_CLONED` (sockets allocate a fresh minor per open).
+/// `reply_flags` receives the `CDEV_CTTY` / `CDEV_DGRAM_OPEN` reply bits.
+///
+/// C source: `minix/servers/vfs/device.c` — `cdev_open()` (line 484)
 ///
 /// # Safety
 ///
 /// Requires exclusive access to the global fproc/dmap tables.
-pub unsafe fn cdev_open(dev: u32, flags: i32) -> i32 {
+pub unsafe fn cdev_open(dev: u32, flags: i32, reply_flags: *mut u32) -> i32 {
     let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
     if dp.is_null() {
-        return ENXIO;
-    }
-    let drv_e = unsafe { (*dp).dmap_ep };
-    if drv_e < 0 {
         return ENXIO;
     }
     let drv_e = unsafe { (*dp).dmap_ep };
@@ -105,12 +111,26 @@ pub unsafe fn cdev_open(dev: u32, flags: i32) -> i32 {
     if r < 0 {
         return r;
     }
-    // A CDEV_CTTY bit in the reply means the open made this device the
-    // controlling terminal (C cdev_opcl: fp->fp_tty = dev).
-    if r & CDEV_CTTY != 0 {
+    let mut flags_out = 0u32;
+    let mut out_dev = dev;
+    if (r as u32) & CDEV_CLONED != 0 {
+        // Socket drivers allocate a fresh minor per open; the filp must
+        // use it for all subsequent I/O (C: cdev_clone swaps the vnode).
+        // Clone minors live in the low bits, so skip the CTTY check (bit 1
+        // of a clone reply is part of the minor, not a CTTY flag).
+        let new_minor = r & 0xFFFF;
+        out_dev = (dev & 0xFFFF_0000) | new_minor as u32;
+        if (r as u32) & CDEV_DGRAM_OPEN != 0 {
+            flags_out |= CDEV_DGRAM_OPEN;
+        }
+    } else if (r as u32) & CDEV_CTTY as u32 != 0 {
+        // A CDEV_CTTY bit in the reply means the open made this device the
+        // controlling terminal (C cdev_opcl: fp->fp_tty = dev).
         unsafe { (*crate::vfs::glo::current_fp()).fp_tty = dev as i32 };
+        flags_out |= CDEV_CTTY as u32;
     }
-    OK
+    unsafe { *reply_flags = flags_out };
+    out_dev as i32
 }
 
 /// Close a character device.
@@ -156,7 +176,23 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     }
     let minor = (dev & 0xFFFF) as i32;
 
+    // Datagram (socket) devices: the whole buffer is one unit and travels
+    // by vircopy — the driver copies user bytes itself using the user
+    // endpoint (m2_i3) and VA (m2_l1). `flags` carries CDEV_DGRAM.
+    let dgram = _flags & CDEV_DGRAM as i32 != 0;
+
     if op == CDEV_WRITE {
+        if dgram {
+            // One message per datagram: user VA in m2_l1, full length in m2_l2.
+            let mut msg = [0u8; 56];
+            request::w_i32(&mut msg, 4, CDEV_WRITE);
+            request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+            request::w_i32(&mut msg, CDEV_FLAGS_OFF, CDEV_DGRAM as i32);
+            request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+            request::w_i64(&mut msg, CDEV_POS_OFF, buf as i64);
+            request::w_u64(&mut msg, CDEV_COUNT_OFF, bytes);
+            return unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        }
         // Writes travel inline in m2_l3 (last 8 payload bytes); loop so
         // arbitrary user buffer lengths are written in full.
         let mut written: u64 = 0;
@@ -193,6 +229,19 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     }
 
     if op == CDEV_READ {
+        if dgram {
+            // One message per datagram: user VA in m2_l1, max bytes in m2_l2.
+            // The driver vircopy's the packet into the user buffer; the reply
+            // status is the number of bytes copied.
+            let mut msg = [0u8; 56];
+            request::w_i32(&mut msg, 4, CDEV_READ);
+            request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+            request::w_i32(&mut msg, CDEV_FLAGS_OFF, CDEV_DGRAM as i32);
+            request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+            request::w_i64(&mut msg, CDEV_POS_OFF, buf as i64);
+            request::w_u64(&mut msg, CDEV_COUNT_OFF, bytes);
+            return unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        }
         // The tty replies with data inline in the payload; request at most
         // what the 48-byte payload can carry per round trip. A short read is
         // fine (blocking reads return when a line/queue is ready).
@@ -226,14 +275,46 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
         return r;
     }
 
-    // CDEV_IOCTL: request code in m2_i2, reply status only (grant data path
-    // is not wired).
+    // CDEV_IOCTL: request code in m2_i2; the arg struct travels in the
+    // m2_l1/m2_l2/m2_l3 data area (absolute 24..56), sized by the ioctl's
+    // NetBSD _IOC size field. _IOR ioctls get the struct copied back.
+    let request = bytes as u32;
+    let data_len = net::ioc_size(request).min(IOCTL_DATA_MAX);
     let mut msg = [0u8; 56];
     request::w_i32(&mut msg, 4, op);
     request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
-    request::w_i32(&mut msg, CDEV_FLAGS_OFF, bytes as i32); // ioctl request
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, request as i32);
     request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
-    unsafe { request::fs_sendrec(drv_e, &mut msg) }
+    if data_len > 0 {
+        let copy_r = unsafe {
+            crate::vfs::call::sys_vircopy(
+                proc_e,
+                buf,
+                crate::vfs::call::SELF,
+                msg.as_mut_ptr() as u64 + CDEV_POS_OFF as u64,
+                data_len,
+            )
+        };
+        if copy_r != 0 {
+            return copy_r;
+        }
+    }
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r >= 0 && data_len > 0 && net::ioc_is_out(request) {
+        let copy_r = unsafe {
+            crate::vfs::call::sys_vircopy(
+                crate::vfs::call::SELF,
+                msg.as_ptr() as u64 + CDEV_POS_OFF as u64,
+                proc_e,
+                buf,
+                data_len,
+            )
+        };
+        if copy_r != 0 {
+            return copy_r;
+        }
+    }
+    r
 }
 
 /// Map a character device to a different device number.

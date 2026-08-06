@@ -180,10 +180,11 @@ pub unsafe fn close_filp(filp_idx: i32) -> i32 {
 
     if f.filp_count == 0 {
         // Last reference: tell the driver about character-device closes.
+        // Use the filp's device number so socket clone minors are released.
         let vp = f.filp_vno;
-        if !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFCHR {
+        if f.filp_dev != 0 && !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFCHR {
             unsafe {
-                crate::vfs::device::cdev_close((*vp).v_dev);
+                crate::vfs::device::cdev_close(f.filp_dev);
             }
         }
         *f = Filp::default();

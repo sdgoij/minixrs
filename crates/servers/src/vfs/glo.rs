@@ -161,6 +161,8 @@ const fn new_filp_array() -> [Filp; NR_FILPS] {
         filp_pipe_select_ops: 0,
         filp_pipe_select_ep: [-1; 2],
         filp_pipe_ino: 0,
+        filp_dev: 0,
+        filp_dgram: 0,
     }; NR_FILPS]
 }
 
@@ -281,9 +283,10 @@ mod tests {
     #[test]
     fn vfs_global_fs_m_in_offset() {
         // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
-        // probe anchors; keep in sync with the struct).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 312384);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 312400);
+        // probe anchors; keep in sync with the struct). Filp gained
+        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift).
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 320576);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 320592);
     }
 }
 

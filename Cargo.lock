@@ -103,6 +103,7 @@ name = "minix-std"
 version = "0.1.0"
 dependencies = [
  "minix-rt",
+ "net",
 ]
 
 [[package]]
@@ -126,6 +127,7 @@ dependencies = [
  "kernel",
  "minix-rt",
  "minix-std",
+ "net",
 ]
 
 [[package]]

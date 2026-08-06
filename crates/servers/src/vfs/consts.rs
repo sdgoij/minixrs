@@ -394,3 +394,12 @@ pub const CDEV_WRITE: i32 = 0x403;
 pub const CDEV_IOCTL: i32 = 0x404;
 pub const CDEV_CANCEL: i32 = 0x405;
 pub const CDEV_SELECT: i32 = 0x406;
+
+/// CDEV_OPEN reply bit: the driver allocated a new minor for this open
+/// (sockets). The new minor is in the reply's low 16 bits.
+pub const CDEV_CLONED: u32 = 0x2000_0000;
+/// CDEV_OPEN reply bit: the opened device is a datagram (socket) channel.
+pub const CDEV_DGRAM_OPEN: u32 = 0x1000_0000;
+/// CDEV_READ/CDEV_WRITE request flag: one datagram per request, carried by
+/// vircopy (user VA in m2_l1, byte count in m2_l2) instead of inline chunks.
+pub const CDEV_DGRAM: u32 = 0x08;

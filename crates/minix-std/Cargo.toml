@@ -14,3 +14,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 minix-rt = { path = "../minix-rt" }
+net = { path = "../net" }

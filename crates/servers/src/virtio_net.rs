@@ -70,8 +70,12 @@ const SAFE_BYTES_OFF: usize = 32;
 
 /// Maximum iovecs per DL read/write request.
 const MAX_IOVECS: usize = 16;
-/// Bounded RX poll window in the DL_READV_S handler (~50ms of spinning).
-const RX_POLL_SPINS: u32 = 50_000_000;
+/// Bounded RX poll window in the DL_READV_S handler. The comment intent
+/// was ~50ms of spinning; 50M iterations is seconds in QEMU TCG, which
+/// makes no-packet reads (e.g. the net server's datagram recv poll) look
+/// like hangs. 2M iterations is roughly the native ~50ms target while
+/// keeping TCG responsive.
+const RX_POLL_SPINS: u32 = 2_000_000;
 
 /// One iovec element (`iovec_s_t`): a grant for a packet buffer plus its
 /// size. 8 bytes, matching the C layout's fields.

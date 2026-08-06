@@ -572,6 +572,17 @@ pub const CDEV_R_BIT: u32 = 0x01;
 pub const CDEV_W_BIT: u32 = 0x02;
 pub const CDEV_NOCTTY: u32 = 0x04;
 
+/// Datagram I/O flag for CDEV_READ/CDEV_WRITE: the whole buffer is one
+/// unit (a packet) and travels by vircopy (user VA in `m2_l1`, byte count
+/// in `m2_l2`) instead of the inline chunk loop. Used by socket devices
+/// (e.g. /dev/udp) whose messages must not be split across requests.
+pub const CDEV_DGRAM: u32 = 0x08;
+
+/// CDEV_OPEN reply bit: the device is a datagram (socket) channel, so VFS
+/// must use the datagram read/write path for this filp. Set alongside
+/// [`CDEV_CLONED`] by socket drivers.
+pub const CDEV_DGRAM_OPEN: u32 = 0x10000000;
+
 pub const CDEV_NOFLAGS: u32 = 0x00;
 pub const CDEV_NONBLOCK: u32 = 0x01;
 

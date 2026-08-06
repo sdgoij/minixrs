@@ -13,6 +13,8 @@ workspace = true
 workspace = true
 
 [dependencies]
+net = { path = "../net" }
+
 kernel = { path = "../kernel" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }

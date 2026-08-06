@@ -878,6 +878,199 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     Some(out)
 }
 
+/// udp — UDP socket smoke test over `/dev/udp`: resolve a hostname through
+/// SLIRP's DNS server (10.0.2.3:53) and print the A records. Exercises the
+/// full socket path: open/bind (ephemeral), connect, datagram send, and
+/// datagram recv with demux back to the socket.
+pub fn udp(args: &[&str]) -> i32 {
+    let name = if args.len() > 1 {
+        args[1]
+    } else {
+        "example.com"
+    };
+    if name.is_empty() || name.len() > 200 {
+        write_err(b"udp: bad name\n");
+        return -1;
+    }
+
+    let fd = match minix_std::net::udp_socket() {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"udp: cannot open /dev/udp\n");
+            return -5;
+        }
+    };
+
+    // SLIRP's DNS server lives at 10.0.2.3:53.
+    let dns: [u8; 4] = [10, 0, 2, 3];
+    if minix_std::net::connect(fd, dns, 53).is_err() {
+        write_err(b"udp: connect failed\n");
+        let _ = minix_std::net::close(fd);
+        return -5;
+    }
+
+    let mut q = [0u8; 256];
+    let qlen = build_dns_query(&mut q, (minix_rt::getpid() & 0xffff) as u16, name);
+    if qlen == 0 {
+        write_err(b"udp: bad name\n");
+        let _ = minix_std::net::close(fd);
+        return -1;
+    }
+    let w = unsafe { minix_std::net::send(fd, &q[..qlen]) };
+    if w != Ok(qlen as i64) {
+        write_err(b"udp: send failed (");
+        print_dec(match w {
+            Ok(v) => v as u32,
+            Err(e) => e.0 as u32,
+        });
+        write_err(b")\n");
+        let _ = minix_std::net::close(fd);
+        return -5;
+    }
+
+    let mut reply = [0u8; 512];
+    let n = unsafe { minix_std::net::recv(fd, &mut reply) };
+    let _ = minix_std::net::close(fd);
+    let n = match n {
+        Ok(n) if n > 0 => n as usize,
+        Ok(n) => {
+            write_err(b"udp: recv returned 0 (");
+            print_dec(n as u32);
+            write_err(b")\n");
+            return -5;
+        }
+        Err(e) => {
+            write_err(b"udp: recv failed (");
+            print_dec(e.0 as u32);
+            write_err(b")\n");
+            return -5;
+        }
+    };
+    print_dns_reply(&reply[..n], name)
+}
+
+fn write_be16(out: &mut [u8], v: u16) {
+    out[..2].copy_from_slice(&v.to_be_bytes());
+}
+
+fn read_be16(b: &[u8]) -> u16 {
+    u16::from_be_bytes([b[0], b[1]])
+}
+
+/// Build a DNS A query for `name` into `out`; returns the query length, or
+/// 0 if the name is invalid or does not fit.
+fn build_dns_query(out: &mut [u8], id: u16, name: &str) -> usize {
+    let mut n = 0usize;
+    if out.len() < 12 {
+        return 0;
+    }
+    write_be16(&mut out[n..], id);
+    write_be16(&mut out[n + 2..], 0x0100); // flags: RD
+    write_be16(&mut out[n + 4..], 1); // QDCOUNT
+    write_be16(&mut out[n + 6..], 0); // ANCOUNT
+    write_be16(&mut out[n + 8..], 0); // NSCOUNT
+    write_be16(&mut out[n + 10..], 0); // ARCOUNT
+    n = 12;
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return 0;
+        }
+        if n + 1 + label.len() > out.len() {
+            return 0;
+        }
+        out[n] = label.len() as u8;
+        n += 1;
+        out[n..n + label.len()].copy_from_slice(label.as_bytes());
+        n += label.len();
+    }
+    if n + 5 > out.len() {
+        return 0;
+    }
+    out[n] = 0; // root label
+    n += 1;
+    write_be16(&mut out[n..], 1); // QTYPE: A
+    write_be16(&mut out[n + 2..], 1); // QCLASS: IN
+    n + 4
+}
+
+/// Skip a (possibly compressed) DNS name starting at `off`; returns the
+/// offset just past it, clamped to the message length.
+fn skip_dns_name(msg: &[u8], mut off: usize) -> usize {
+    loop {
+        if off >= msg.len() {
+            return msg.len();
+        }
+        let len = msg[off] as usize;
+        if len == 0 {
+            return off + 1;
+        }
+        if len & 0xC0 == 0xC0 {
+            return off + 2; // compression pointer
+        }
+        if len > 63 {
+            return msg.len();
+        }
+        off += 1 + len;
+    }
+}
+
+/// Parse a DNS reply and print the A records for `name`.
+fn print_dns_reply(reply: &[u8], name: &str) -> i32 {
+    if reply.len() < 12 {
+        write_err(b"udp: short reply\n");
+        return -1;
+    }
+    let flags = read_be16(&reply[2..4]);
+    if flags & 0x8000 == 0 {
+        write_err(b"udp: not a response\n");
+        return -1;
+    }
+    if flags & 0x000F != 0 {
+        write_err(b"udp: server error\n");
+        return -1;
+    }
+    let ancount = read_be16(&reply[6..8]);
+    let mut off = skip_dns_name(reply, 12); // question name
+    off = off.saturating_add(4); // QTYPE + QCLASS
+    if ancount == 0 {
+        write_out(b"udp: no answers\n");
+        return 0;
+    }
+    write_out(b"udp: ");
+    write_out(name.as_bytes());
+    write_out(b" = ");
+    let mut printed = 0;
+    for _ in 0..ancount {
+        off = skip_dns_name(reply, off);
+        if off + 10 > reply.len() {
+            break;
+        }
+        let rtype = read_be16(&reply[off..off + 2]);
+        let rdlen = read_be16(&reply[off + 8..off + 10]) as usize;
+        off += 10;
+        if rtype == 1 && rdlen == 4 && off + 4 <= reply.len() {
+            if printed > 0 {
+                write_out(b" ");
+            }
+            print_dec(reply[off] as u32);
+            write_out(b".");
+            print_dec(reply[off + 1] as u32);
+            write_out(b".");
+            print_dec(reply[off + 2] as u32);
+            write_out(b".");
+            print_dec(reply[off + 3] as u32);
+            printed += 1;
+        }
+        off = off.saturating_add(rdlen);
+    }
+    write_out(b"\n");
+    if printed == 0 {
+        write_err(b"udp: no A record in reply\n");
+        return -1;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +1079,47 @@ mod tests {
     fn test_echo() {
         assert_eq!(echo(&["echo", "hello"]), 0);
         assert_eq!(echo(&["echo"]), 0);
+    }
+
+    #[test]
+    fn test_dns_query_bytes() {
+        // The query the udp command sends: id, RD flag, one question for
+        // example.com (A/IN), no answers section.
+        let mut q = [0u8; 256];
+        let n = build_dns_query(&mut q, 0x1234, "example.com");
+        assert!(n > 12);
+        assert_eq!(&q[0..2], &[0x12, 0x34]);
+        assert_eq!(&q[2..4], &[0x01, 0x00]); // RD
+        assert_eq!(&q[4..6], &[0x00, 0x01]); // QDCOUNT
+        assert_eq!(&q[6..12], &[0, 0, 0, 0, 0, 0]);
+        // QNAME: \x07example\x03com\x00
+        assert_eq!(&q[12..12 + 13], b"\x07example\x03com\x00");
+        assert_eq!(&q[25..27], &[0x00, 0x01]); // QTYPE A
+        assert_eq!(&q[27..29], &[0x00, 0x01]); // QCLASS IN
+        assert_eq!(n, 29);
+        // Oversized labels are rejected, not truncated.
+        assert_eq!(build_dns_query(&mut q, 1, &"x".repeat(64)), 0);
+    }
+
+    #[test]
+    fn test_dns_reply_parse() {
+        // A synthetic reply: id=0x1234, QR+RD, one A answer 172.66.147.243.
+        let mut reply = [0u8; 64];
+        reply[0..2].copy_from_slice(&[0x12, 0x34]);
+        reply[2..4].copy_from_slice(&[0x81, 0x80]); // QR + RD + RA
+        reply[4..6].copy_from_slice(&[0x00, 0x01]); // QDCOUNT
+        reply[6..8].copy_from_slice(&[0x00, 0x01]); // ANCOUNT
+        // Question: pointer to name not needed for the answer scan.
+        reply[12] = 0; // root name
+        reply[13..17].copy_from_slice(&[0, 1, 0, 1]); // QTYPE A, QCLASS IN
+        // Answer: name pointer 0xC00C, type A, class IN, ttl, rdlen=4.
+        reply[17..19].copy_from_slice(&[0xC0, 0x0C]);
+        reply[19..21].copy_from_slice(&[0x00, 0x01]); // type A
+        reply[21..23].copy_from_slice(&[0x00, 0x01]); // class IN
+        reply[23..27].copy_from_slice(&[0, 0, 0, 0]); // ttl
+        reply[27..29].copy_from_slice(&[0x00, 0x04]); // rdlen 4
+        reply[29..33].copy_from_slice(&[172, 66, 147, 243]);
+        assert_eq!(print_dns_reply(&reply[..33], "example.com"), 0);
     }
 
     #[test]

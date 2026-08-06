@@ -18,7 +18,7 @@ The port is composed of:
 | **Filesystems** | MINIX FS, ext2, MFS, etc. | `.refs/minix-3.3.0/minix/fs/` | Port |
 | **Userland** | ~145 commands | `.refs/minix-3.3.0/bin/`, `usr.bin/`, `usr.sbin/`, `sbin/`, `minix/commands/` | Port |
 | **Libraries** | libc, libm, libutil, libz, etc. | `.refs/minix-3.3.0/lib/`, `.refs/minix-3.3.0/minix/lib/` | Port |
-| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP + DL protocol (M8) |
+| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP (M8) + UDP sockets over /dev/udp (16.1a) |
 
 - A **kernel** (`sys/arch/*/compile/GENERIC` + `minix/kernel/`)
 - **System servers** as user-space processes (VM, VFS, SCHED, RS, PM, DS, IPC, TTY)
@@ -62,6 +62,21 @@ and the ICMP echo identifier is the process's **real PID** —
 `minix_rt::getpid()` now routes `PM_GETPID` through PM's `mp_pid` instead of
 the kernel's syscall-20 endpoint shortcut, so consecutive invocations report
 consecutive ids (`reply id=12`, `reply id=13`).
+
+**The socket layer (Phase 16.1, UDP first) is in place:** `socket()` is an
+`open("/dev/udp")` with MINIX clone-minor semantics — the net server replies
+`CDEV_CLONED|CDEV_DGRAM_OPEN` with a fresh minor per open, and VFS records
+it in the filp (`filp_dev`/`filp_dgram`). `bind()`/`connect()` are the
+reference `NWIOSUDPOPT`/`NWIOGUDPOPT` ioctls carrying `nwio_udpopt_t`
+(shared `net` crate, NetBSD-style ioctl encoding), and `send`/`recv` are
+whole-datagram `write`/`read` over a new vircopy-based CDEV datagram path
+(the driver copies the user buffer directly via `SYS_VIRCOPY`). The net
+server's UDP implementation does header/checksum build, ARP resolution,
+and RX demux by local port with per-socket remote filtering. Verified with
+a real UDP round trip on **all three arches**: `/bin/udp example.com` opens
+a socket, sends a DNS query to SLIRP's DNS (10.0.2.3:53), and prints the
+returned A records (`udp: example.com = 172.66.147.243 104.20.23.154`).
+TCP and the rest of the reference `minix/net` stack remain (16.1-16.4).
 
 Supporting fixes in the same milestone: the virtio-net driver now uses the
 correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
@@ -3682,6 +3697,11 @@ transport, DMA, interrupt routing needed for them).**
     - `drivers` crate Cargo.toml: virtio dep enables `x86` feature
   - **Tests**: 58 pass (8 new), 3 ignored
   - ~680 lines C source → ~1800+ lines Rust
+  - **Socket-layer support (16.1a):** the DL server now also feeds the net
+    server's UDP sockets — no-packet `DL_READV_S` rounds return quickly
+    (`RX_POLL_SPINS` 50M → 2M; the old window took seconds in QEMU TCG and
+    made datagram recv polls look like hangs), so socket reads poll the
+    NIC without stalling the whole server
 
 - [ ] **11c.3 — `crates/drivers/src/network/atl2.rs`** (full implementation)
   - Source: `.refs/minix-3.3.0/minix/drivers/net/atl2/`
@@ -3799,6 +3819,8 @@ transport, DMA, interrupt routing needed for them).**
     present), not 10 — a 2-byte shift corrupted every frame
   - Verified: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
     and AArch64 (QEMU SLIRP, guest 10.0.2.15 / gateway 10.0.2.2)
+  - The same `net` server also hosts the **UDP socket layer** (Phase 16.1a)
+    on `/dev/udp`; see the Phase 16 task list
 
 ### Phase 11d: Input & display drivers
 
@@ -4637,17 +4659,23 @@ userspace crate
     (SIGHUP=1 through SIGSYS=31) and sa_flags (SA_NOCLDSTOP through SA_NODEFER)
   - 23 tests, 121 total minix-std tests pass, clippy clean
 
-- [x] **13.7 — Networking (LWIP protocol)**
-  - `socket`: create endpoint (stub — Phase 16 networking stack)
-  - `bind` / `listen` / `accept`: server socket (stubs)
-  - `connect`: client socket (stub)
-  - `send` / `recv`: data transfer (stubs)
-  - `getsockopt` / `setsockopt`: socket options (stubs)
+- [x] **13.7 — Networking (socket layer, Phase 16.1a)**
+  - `socket`: real dispatch — `(AF_INET, SOCK_DGRAM, IPPROTO_UDP)` opens
+    `/dev/udp` with an implicit ephemeral bind; `(AF_INET, SOCK_RAW,
+    IPPROTO_ICMP)` opens `/dev/ip`; `SOCK_STREAM` returns EPROTONOSUPPORT
+    until TCP lands
+  - `bind` / `connect`: `NWIOSUDPOPT` ioctls carrying `nwio_udpopt_t`
+    (local port/addr set, remote addr/port filter)
+  - `send` / `recv`: whole-datagram `write`/`read` (NWUO_RWDATONLY)
+  - `close`: frees the net server's clone-minor socket slot
+  - `listen` / `accept` / `getsockopt` / `setsockopt`: not implemented —
+    TCP and the full reference inet stack are Phase 16.1+
   - Implemented in `crates/minix-std/src/net.rs` with socket constants
     (AF_INET=2, SOCK_STREAM=1, IPPROTO_TCP=6, SOL_SOCKET=1,
-    SO_REUSEADDR=0x04, SO_KEEPALIVE=0x08, etc.) and `SockAddrIn` struct
-  - All functions return ENOSYS — real implementation deferred to Phase 16
-  - 15 tests, 136 total minix-std tests pass, clippy clean
+    SO_REUSEADDR=0x04, SO_KEEPALIVE=0x08, etc.)
+  - Verified end to end: `/bin/udp example.com` resolves A records via
+    SLIRP's DNS on all three arches
+  - Tests, clippy clean
 
 - [x] **13.8 — Minimal `libc` for FFI**
   - Thin wrappers over `minix-std` with C ABI
@@ -5606,11 +5634,13 @@ IS server and SEF framework not ported.
 
 ## Phase 16: Networking Stack
 
-**Goal**: Port the networking infrastructure. **Status: 🏗️ minimal milestone
-(M8) complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14) drives
-the `virtio_net` driver server over the DL protocol, and `ping 10.0.2.2`
-works on all three arches with real-PID ICMP identifiers. The full socket /
-TCP/UDP/IP stack (16.1-16.5 below) is NOT STARTED.
+**Goal**: Port the networking infrastructure. **Status: 🏗️ M8 + socket layer
+complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14) drives the
+`virtio_net` driver server over the DL protocol; `ping 10.0.2.2` works on all
+three arches with real-PID ICMP identifiers; and **UDP sockets work end to
+end** (`socket`/`bind`/`connect`/`send`/`recv` over `/dev/udp`, verified by a
+DNS round trip on all three arches). TCP/UDP beyond datagrams and the full
+reference inet stack (16.1-16.4 below) are NOT STARTED.
 
 ### Tasks
 
@@ -5627,6 +5657,25 @@ TCP/UDP/IP stack (16.1-16.5 below) is NOT STARTED.
     boot manifest; `/sbin/net` added to `boot_procs` on all three arches
   - Tests: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
     AArch64
+
+- [x] **16.1a — UDP sockets: clone-minor `/dev/udp` + datagram CDEV path**
+  - `crates/net`: shared NWIO protocol — `nwio_udpopt_t` (16 bytes, matches
+    the reference `net/gen/udp_io.h`), `NWIOSUDPOPT`/`NWIOGUDPOPT` ioctl
+    codes, `NWUO_*` flags, NetBSD-style ioctl size/direction encoding
+  - VFS: clone-minor opens (`CDEV_CLONED|CDEV_DGRAM_OPEN` reply, per-filp
+    `filp_dev`/`filp_dgram`), whole-datagram CDEV reads/writes (user VA +
+    count in m2_l1/m2_l2, driver copies via `SYS_VIRCOPY`), and an ioctl
+    data path that carries the arg struct in both directions
+  - `servers/src/net.rs`: UDP sockets — open/close/ioctl (`NWIOSUDPOPT`
+    bind/connect, `NWIOGUDPOPT` get), IP/UDP header + checksum build,
+    ARP-resolved TX, RX demux by local port with per-socket remote filter
+  - `crates/minix-std/src/net.rs`: `udp_socket()` (open + implicit bind),
+    `bind()`, `connect()`, `send()`, `recv()`, `close()`
+  - `userland/src/bin/udp.rs`: DNS query to SLIRP's DNS (10.0.2.3:53),
+    prints the A records from the reply
+  - `/dev/udp` (major 14, minor 1) in the boot manifest
+  - Tests: `udp example.com` → real A records on x86_64, RISC-V64, AArch64;
+    net crate protocol tests; userland DNS build/parse tests
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`
