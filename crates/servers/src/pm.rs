@@ -3503,9 +3503,7 @@ pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    let realtime = kernel::clock::get_realtime();
-    let boottime = kernel::clock::get_boottime();
-    let hz = kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64;
+    let (_ticks, realtime, boottime, hz) = kernel_clock();
 
     let (sec, nsec) = clock_ticks_to_sec_nsec(realtime, boottime, hz);
     // Reply mess_pm_lc_time (C ipc.h): sec @ payload 0, nsec @ payload 8.
@@ -3520,6 +3518,59 @@ pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
 /// `CLOCK_REALTIME` / `CLOCK_MONOTONIC`).
 const CLOCK_REALTIME: i32 = 0;
 const CLOCK_MONOTONIC: i32 = 1;
+
+/// Decode the SYS_TIMES reply message. The kernel `do_times_handler`
+/// writes: real @ msg[0..8], boot_ticks @ msg[8..16], boottime @
+/// msg[16..24], user @ 24, system @ 32, hz @ 40. Bytes 0-7 straddle
+/// m_source/m_type and are clobbered by the kernel_call trampoline, so
+/// realtime must be reconstructed like the SYS_GETKSIG bitmask.
+///
+/// Returns (ticks, realtime, boottime, hz).
+#[cfg(any(target_os = "none", test))]
+fn parse_times_reply(msg: &Message) -> (u64, u64, i64, u64) {
+    let realtime = (msg.m_source as u32 as u64) | ((msg.m_type as u32 as u64) << 32);
+    let ticks = unsafe { u64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap_or([0; 8])) };
+    let boottime =
+        unsafe { i64::from_le_bytes(msg.m_payload.raw[8..16].try_into().unwrap_or([0; 8])) };
+    let hz = unsafe {
+        u32::from_le_bytes(msg.m_payload.raw[32..36].try_into().unwrap_or([0; 4])) as u64
+    };
+    (ticks, realtime, boottime, hz)
+}
+
+/// Fetch (uptime ticks, realtime ticks, boottime, system_hz) from the
+/// kernel via SYS_TIMES (kernel call 25) — matching C `getuptime()`
+/// (libsys), which reads the same fields from the SYS_TIMES reply.
+/// PM runs in its own address space, so its linked copy of the kernel
+/// crate's clock statics is never updated by the timer interrupt;
+/// reading them directly would return a frozen zero clock.
+///
+/// On host builds there is no kernel to ask, so read the kernel crate's
+/// clock state directly; tests set it to simulate a booted kernel.
+fn kernel_clock() -> (u64, u64, i64, u64) {
+    #[cfg(target_os = "none")]
+    {
+        let mut kmsg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let result = send_kernel_call(25, &mut kmsg); // SYS_TIMES
+        if result != 0 {
+            return (0, 0, 0, 0);
+        }
+        parse_times_reply(&kmsg)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        (
+            kernel::clock::get_monotonic(),
+            kernel::clock::get_realtime(),
+            kernel::clock::get_boottime(),
+            kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64,
+        )
+    }
+}
 
 /// Convert a tick count to (sec, nsec) since boot — the pure arithmetic
 /// behind both `do_time` and `do_gettime`. Matching C `do_time()` /
@@ -3576,10 +3627,7 @@ pub unsafe fn do_gettime(caller_slot: usize, msg: &mut Message) -> i32 {
     let clk_id =
         unsafe { i32::from_le_bytes(msg.m_payload.raw[8..12].try_into().unwrap_or([0; 4])) };
 
-    let ticks = kernel::clock::get_monotonic();
-    let realtime = kernel::clock::get_realtime();
-    let boottime = kernel::clock::get_boottime();
-    let hz = kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64;
+    let (ticks, realtime, boottime, hz) = kernel_clock();
 
     let (sec, nsec) = match clock_gettime_reply(clk_id, ticks, realtime, boottime, hz) {
         Ok(v) => v,
@@ -4476,6 +4524,27 @@ mod tests {
             clock_ticks_to_sec_nsec(12345, 1000, 1000),
             (1012, 345_000_000)
         );
+    }
+
+    #[test]
+    fn test_parse_times_reply() {
+        // Kernel do_times_handler reply layout: real @ msg[0..8] straddling
+        // m_source/m_type, boot_ticks @ payload[0..8], boottime @
+        // payload[8..16], hz @ payload[32..36].
+        let mut msg = Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let realtime: u64 = 12345;
+        msg.m_source = (realtime & 0xFFFF_FFFF) as i32;
+        msg.m_type = ((realtime >> 32) & 0xFFFF_FFFF) as i32;
+        unsafe {
+            msg.m_payload.raw[0..8].copy_from_slice(&250u64.to_le_bytes());
+            msg.m_payload.raw[8..16].copy_from_slice(&1000i64.to_le_bytes());
+            msg.m_payload.raw[32..36].copy_from_slice(&100u32.to_le_bytes());
+        }
+        assert_eq!(parse_times_reply(&msg), (250, 12345, 1000, 100));
     }
 
     #[test]

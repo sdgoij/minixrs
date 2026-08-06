@@ -233,6 +233,19 @@ pub extern "C" fn kmain_body() -> ! {
         arch_x86_64::apic::unmask_serial_irq();
     }
 
+    // 9. Initialize the wall clock: read the CMOS RTC and store the
+    // boot time (seconds since epoch) so PM's CLOCK_GETTIME/GETTIMEOFDAY
+    // return real wall-clock time instead of the epoch. QEMU defaults to
+    // `-rtc base=utc`, so the RTC time is treated as UTC. Also record the
+    // actual tick rate — the PIT above was programmed at 100 Hz, while
+    // SYSTEM_HZ defaults to 60, which would make tick-based time run fast.
+    unsafe {
+        if let Ok(rtc_time) = drivers::clock::rtc::rtc_get_time() {
+            kernel::clock::set_boottime(rtc_time.to_epoch());
+        }
+        kernel::clock::set_system_hz(100);
+    }
+
     #[cfg(feature = "integration-tests")]
     {
         serial_write("Running integration tests...\r\n");

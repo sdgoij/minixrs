@@ -105,8 +105,9 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset  0: endpt   (endpoint_t / i32) — child endpoint
 //   offset  8: msgaddr (vir_bytes / u64)  — parent's message delivery addr
 //
-// mess_lsys_krn_sys_times (for do_times):
-//   offset 0: endpt (endpoint_t / i32)
+// SYS_TIMES (for do_times): the request endpt field (offset 0) is
+// overwritten with the call number by sys_kernel_call_handler, so the
+// handler always reports the caller's own timings (SELF).
 //
 // mess_krn_lsys_sys_times (reply for do_times):
 //   offset  0: real_ticks   (u64)
@@ -114,6 +115,7 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset 16: boot_time    (u64)
 //   offset 24: user_time    (u64)
 //   offset 32: system_time  (u64)
+//   offset 40: system_hz    (u64)
 //
 // mess_lsys_krn_sys_setalarm (for do_setalarm):
 //   offset  0: exp_time   (u64)
@@ -170,12 +172,12 @@ const SIGCALLS_SIGCTX_OFF: usize = 24;
 const FORK_REPLY_ENDPT_OFF: usize = 8;
 const FORK_REPLY_MSGADDR_OFF: usize = 16;
 
-const TIMES_ENDPT_OFF: usize = 0;
 const TIMES_REPLY_REAL_OFF: usize = 0;
 const TIMES_REPLY_BOOTTICKS_OFF: usize = 8;
 const TIMES_REPLY_BOOTTIME_OFF: usize = 16;
 const TIMES_REPLY_USER_OFF: usize = 24;
 const TIMES_REPLY_SYSTEM_OFF: usize = 32;
+const TIMES_REPLY_HZ_OFF: usize = 40;
 
 const ABORT_HOW_OFF: usize = 0;
 
@@ -4180,29 +4182,37 @@ pub unsafe fn do_abort_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 /// Handle SYS_TIMES: retrieve process timing info.
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_times.c`
 ///
+/// Reports the caller's user/system time plus the kernel clock state
+/// (realtime ticks, monotonic ticks, boottime, tick rate). PM's
+/// `getuptime` reads these to answer CLOCK_GETTIME / GETTIMEOFDAY.
+/// The request's endpt field (offset 0) is overwritten with the call
+/// number by `sys_kernel_call_handler`, so this always reports the
+/// caller's own timings (SELF).
+///
 /// # Safety
 ///
 /// `caller` and `msg` must be valid.
 pub unsafe fn do_times_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
-        let e_proc_nr = msg_read_i32(msg, TIMES_ENDPT_OFF);
-        let target_ep = if e_proc_nr == SELF {
-            (*caller).p_endpoint
-        } else {
-            e_proc_nr
-        };
-        if target_ep != NONE && table::is_ok_endpoint(target_ep) {
-            let p = table::endpoint_slot(target_ep);
-            let rp = proc_addr(p);
-            if !rp.is_null() {
-                msg_write_u64(msg, TIMES_REPLY_USER_OFF, (*rp).p_user_time);
-                msg_write_u64(msg, TIMES_REPLY_SYSTEM_OFF, (*rp).p_sys_time);
-            }
-        }
-        // Clock values are zero until the clock task is running
-        msg_write_u64(msg, TIMES_REPLY_BOOTTICKS_OFF, 0);
-        msg_write_u64(msg, TIMES_REPLY_REAL_OFF, 0);
-        msg_write_u64(msg, TIMES_REPLY_BOOTTIME_OFF, 0);
+        let rp = caller;
+        msg_write_u64(msg, TIMES_REPLY_USER_OFF, (*rp).p_user_time);
+        msg_write_u64(msg, TIMES_REPLY_SYSTEM_OFF, (*rp).p_sys_time);
+        msg_write_u64(msg, TIMES_REPLY_REAL_OFF, crate::clock::get_realtime());
+        msg_write_u64(
+            msg,
+            TIMES_REPLY_BOOTTICKS_OFF,
+            crate::clock::get_monotonic(),
+        );
+        msg_write_u64(
+            msg,
+            TIMES_REPLY_BOOTTIME_OFF,
+            crate::clock::get_boottime() as u64,
+        );
+        msg_write_u64(
+            msg,
+            TIMES_REPLY_HZ_OFF,
+            crate::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64,
+        );
         OK
     }
 }
@@ -5587,6 +5597,29 @@ mod tests {
             // properly sets p_scheduler, restore the EPERM assertion:
             //   assert_eq!(result, crate::ipc::EPERM);
             assert_eq!(result, crate::ipc::OK);
+        }
+    }
+
+    #[test]
+    fn test_do_times_handler_reports_clock() {
+        unsafe {
+            proc_init();
+            // Simulate kernel clock state.
+            crate::clock::set_boottime(1000);
+            crate::clock::set_realtime(12345);
+            crate::clock::set_monotonic(250);
+            crate::clock::set_system_hz(100);
+
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            let result = do_times_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::OK);
+            // Reply layout: real @ 0, boot_ticks @ 8, boottime @ 16,
+            // user @ 24, system @ 32, hz @ 40.
+            assert_eq!(u64::from_ne_bytes(msg[0..8].try_into().unwrap()), 12345);
+            assert_eq!(u64::from_ne_bytes(msg[8..16].try_into().unwrap()), 250);
+            assert_eq!(u64::from_ne_bytes(msg[16..24].try_into().unwrap()), 1000);
+            assert_eq!(u64::from_ne_bytes(msg[40..48].try_into().unwrap()), 100);
         }
     }
 

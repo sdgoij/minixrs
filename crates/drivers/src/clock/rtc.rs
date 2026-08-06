@@ -12,7 +12,6 @@
 
 use crate::DriverError;
 
-
 /// CMOS I/O index port (bit 7 = NMI enable).
 const RTC_INDEX: u16 = 0x70;
 
@@ -46,7 +45,6 @@ const RTC_REG_B: u8 = 0x0B;
 /// Status register C.
 const RTC_REG_C: u8 = 0x0C;
 
-
 /// Update in progress.
 const RTC_A_UIP: u8 = 0x80;
 /// Divider bits mask.
@@ -59,7 +57,6 @@ const RTC_A_DV_STOP: u8 = 0x70;
 const RTC_A_RS: u8 = 0x0F;
 /// Default interrupt rate (1024 Hz).
 const RTC_A_RS_DEF: u8 = 6;
-
 
 /// Inhibit updates (SET bit).
 const RTC_B_SET: u8 = 0x80;
@@ -78,7 +75,6 @@ const RTC_B_24: u8 = 0x02;
 /// Daylight savings enable.
 const RTC_B_DSE: u8 = 0x01;
 
-
 /// Chip lost power.
 const CS_LOST_POWER: u8 = 0x80;
 /// Checksum incorrect.
@@ -92,9 +88,7 @@ const CS_BAD_HD: u8 = 0x08;
 /// CMOS time is invalid.
 const CS_BAD_TIME: u8 = 0x04;
 
-
 const KBD_CTRL_PORT_B: u16 = 0x64;
-
 
 /// Read a CMOS register value.
 unsafe fn cmos_read(reg: u8) -> u8 {
@@ -106,7 +100,6 @@ unsafe fn cmos_write(reg: u8, val: u8) {
     unsafe { crate::hal::cmos_write(reg, val) }
 }
 
-
 /// Convert BCD to decimal.
 const fn bcd_to_dec(bcd: u8) -> u8 {
     (bcd >> 4) * 10 + (bcd & 0x0F)
@@ -116,7 +109,6 @@ const fn bcd_to_dec(bcd: u8) -> u8 {
 const fn dec_to_bcd(dec: u8) -> u8 {
     ((dec / 10) << 4) | (dec % 10)
 }
-
 
 /// Broken-down time from the CMOS RTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +134,44 @@ impl RtcTime {
             second: 0,
         }
     }
+
+    /// Convert to seconds since the Unix epoch, treating the RTC time as
+    /// UTC (QEMU's default `-rtc base=utc`). The kernel stores this as
+    /// `boottime`; wall-clock time is then `boottime + ticks/system_hz`.
+    pub fn to_epoch(&self) -> i64 {
+        let year = self.year as i64;
+        let month = self.month as i64;
+        let day = self.day as i64;
+        days_from_civil(year, month, day) * 86_400
+            + (self.hour as i64) * 3_600
+            + (self.minute as i64) * 60
+            + (self.second as i64)
+    }
 }
 
+/// Number of days from 1970-01-01 to (year, month, day).
+/// Same algorithm as `fs::iso9660::utility::days_from_ymd`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - 1;
+    let total = y * 365 + y / 4 - y / 100 + y / 400;
+
+    const DAYS_IN_MONTH: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: i64 = (1..month).map(|m| DAYS_IN_MONTH[(m - 1) as usize]).sum();
+    let leap_extra = if month > 2 && is_leap_year(year) {
+        1
+    } else {
+        0
+    };
+    let total = total + month_days + leap_extra + day - 1;
+
+    // Days from year 0 to 1970-01-01.
+    let epoch_start = 1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400;
+    total - epoch_start
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
 
 /// Initialize the RTC driver.
 ///
@@ -415,6 +443,58 @@ mod tests {
     fn test_rtc_time_struct_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<RtcTime>();
+    }
+
+    #[test]
+    fn test_to_epoch_epoch() {
+        // 1970-01-01 00:00:00 UTC is epoch 0.
+        let t = RtcTime {
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(t.to_epoch(), 0);
+    }
+
+    #[test]
+    fn test_to_epoch_known_dates() {
+        // 2024-01-01 00:00:00 UTC = 1704067200.
+        let t = RtcTime {
+            year: 2024,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(t.to_epoch(), 1704067200);
+        // 2026-01-01 00:00:00 UTC = 1767225600 (2024 was a leap year).
+        let t = RtcTime {
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(t.to_epoch(), 1767225600);
+    }
+
+    #[test]
+    fn test_to_epoch_leap_day() {
+        // 2024-02-29 12:00:00 UTC = 1709164800 + 12h = 1709208000.
+        let t = RtcTime {
+            year: 2024,
+            month: 2,
+            day: 29,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(t.to_epoch(), 1709208000);
     }
 
     #[test]
