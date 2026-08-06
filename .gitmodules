@@ -1,3 +1,7 @@
 [submodule ".refs/minix-3.3.0"]
 	path = .refs/minix-3.3.0
 	url = https://github.com/sdgoij/minix-3.3.0
+[submodule "rust"]
+	path = rust
+	url = git@github.com:sdgoij/rust.git
+	branch = feature/platform-minixrs
