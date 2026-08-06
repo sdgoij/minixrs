@@ -2696,6 +2696,15 @@ pub unsafe fn handle_time(caller_slot: usize, msg: &mut Message) -> i32 {
     unsafe { do_time(caller_slot, msg) }
 }
 
+/// Handler for PM_CLOCK_GETTIME — return a clock value (sec/nsec).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot.
+pub unsafe fn handle_clock_gettime(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe { do_gettime(caller_slot, msg) }
+}
+
 /// Handler for PM_GETRUSAGE — return resource usage.
 ///
 /// # Safety
@@ -2828,6 +2837,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         29 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEUID
         30 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEGID
         32 => unsafe { no_sys(caller_slot, msg) }, // PM_GETSID
+        34 => unsafe { handle_clock_gettime(caller_slot, msg) }, // PM_CLOCK_GETTIME
         35 => unsafe { handle_clock_settime(caller_slot, msg) }, // PM_CLOCK_SETTIME
         36 => unsafe { handle_rusage(caller_slot, msg) }, // PM_GETRUSAGE
         37 => unsafe { handle_reboot(caller_slot, msg) }, // PM_REBOOT
@@ -3475,10 +3485,14 @@ pub unsafe fn do_execrestart(caller_slot: usize, msg: &mut Message) -> i32 {
 
 /// Return current realtime clock — PM_GETTIMEOFDAY handler.
 ///
+/// Matching C: `do_time()` in `minix/servers/pm/time.c`. Computes the
+/// wall clock from the realtime tick count and replies with the C
+/// `mess_pm_lc_time` layout (sec @ payload[0..8], nsec @ payload[8..16]).
+///
 /// # Safety
 ///
-/// `caller_slot` must be a valid process slot.
-#[cfg(target_os = "none")]
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
 pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
     if caller_slot >= NR_PROCS {
         return EINVAL;
@@ -3490,23 +3504,93 @@ pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
     }
 
     let realtime = kernel::clock::get_realtime();
-    let tv_sec = (realtime / 1_000_000) as i64;
-    let tv_usec = (realtime % 1_000_000) as i64;
-    // Write timeval to msg: m2l1 = tv_sec, m2l2 = tv_usec.
-    msg.m_payload.m2.m2l1 = tv_sec as i64;
-    msg.m_payload.m2.m2l2 = tv_usec as i64;
+    let boottime = kernel::clock::get_boottime();
+    let hz = kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64;
+
+    let (sec, nsec) = clock_ticks_to_sec_nsec(realtime, boottime, hz);
+    // Reply mess_pm_lc_time (C ipc.h): sec @ payload 0, nsec @ payload 8.
+    unsafe {
+        msg.m_payload.raw[0..8].copy_from_slice(&sec.to_le_bytes());
+        msg.m_payload.raw[8..16].copy_from_slice(&nsec.to_le_bytes());
+    }
     OK
 }
 
-/// Stub for host builds. Returns ENOSYS since realtime clock requires
-/// a running kernel.
+/// Clock IDs for the PM time calls (matching `minix-std`'s
+/// `CLOCK_REALTIME` / `CLOCK_MONOTONIC`).
+const CLOCK_REALTIME: i32 = 0;
+const CLOCK_MONOTONIC: i32 = 1;
+
+/// Convert a tick count to (sec, nsec) since boot — the pure arithmetic
+/// behind both `do_time` and `do_gettime`. Matching C `do_time()` /
+/// `do_gettime()` in `minix/servers/pm/time.c`: `sec = boottime +
+/// clock/hz` and `nsec = (clock % hz) * 1e9 / hz`.
+fn clock_ticks_to_sec_nsec(clock: u64, boottime: i64, hz: u64) -> (i64, i64) {
+    (
+        boottime + (clock / hz) as i64,
+        ((clock % hz) * 1_000_000_000 / hz) as i64,
+    )
+}
+
+/// Compute the `mess_pm_lc_time` reply values for `do_gettime` — pure
+/// logic, host-testable. `clock` is the realtime tick count for
+/// `CLOCK_REALTIME` and the uptime tick count for `CLOCK_MONOTONIC`.
+fn clock_gettime_reply(
+    clk_id: i32,
+    ticks: u64,
+    realtime: u64,
+    boottime: i64,
+    hz: u64,
+) -> Result<(i64, i64), i32> {
+    let clock = match clk_id {
+        CLOCK_REALTIME => realtime,
+        CLOCK_MONOTONIC => ticks,
+        _ => return Err(EINVAL),
+    };
+    Ok(clock_ticks_to_sec_nsec(clock, boottime, hz))
+}
+
+/// Return a clock value — PM_CLOCK_GETTIME handler.
+///
+/// Matching C: `do_gettime()` in `minix/servers/pm/time.c`. The request
+/// carries the C `mess_lc_pm_time` layout (clk_id @ payload[8..12]); the
+/// reply is the C `mess_pm_lc_time` layout (sec @ payload[0..8],
+/// nsec @ payload[8..16]).
 ///
 /// # Safety
 ///
-/// `_caller_slot` must be a valid process slot.
-#[cfg(not(target_os = "none"))]
-pub unsafe fn do_time(_caller_slot: usize, _msg: &mut Message) -> i32 {
-    ENOSYS
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn do_gettime(caller_slot: usize, msg: &mut Message) -> i32 {
+    if caller_slot >= NR_PROCS {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return EINVAL;
+    }
+
+    // mess_lc_pm_time (C ipc.h): sec @ payload 0, clk_id @ payload 8,
+    // now @ payload 12, nsec @ payload 16.
+    let clk_id =
+        unsafe { i32::from_le_bytes(msg.m_payload.raw[8..12].try_into().unwrap_or([0; 4])) };
+
+    let ticks = kernel::clock::get_monotonic();
+    let realtime = kernel::clock::get_realtime();
+    let boottime = kernel::clock::get_boottime();
+    let hz = kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64;
+
+    let (sec, nsec) = match clock_gettime_reply(clk_id, ticks, realtime, boottime, hz) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // Reply mess_pm_lc_time (C ipc.h): sec @ payload 0, nsec @ payload 8.
+    unsafe {
+        msg.m_payload.raw[0..8].copy_from_slice(&sec.to_le_bytes());
+        msg.m_payload.raw[8..16].copy_from_slice(&nsec.to_le_bytes());
+    }
+    OK
 }
 
 /// Handler for PM_CLOCK_SETTIME — set the realtime clock via SYS_SETTIME.
@@ -4348,5 +4432,182 @@ mod tests {
         // SIGKILL to an existing process returns OK.
         let r = unsafe { check_sig(2, 0, SIGKILL, false) };
         assert_eq!(r, Ok(()));
+    }
+
+    #[test]
+    fn test_clock_gettime_reply_realtime() {
+        // C do_gettime: sec = boottime + realtime/hz,
+        // nsec = (realtime % hz) * 1e9 / hz.
+        assert_eq!(
+            clock_gettime_reply(CLOCK_REALTIME, 0, 12345, 1000, 100).unwrap(),
+            (1123, 450_000_000)
+        );
+        // Zero ticks: only the boottime remains.
+        assert_eq!(
+            clock_gettime_reply(CLOCK_REALTIME, 0, 0, 42, 100).unwrap(),
+            (42, 0)
+        );
+    }
+
+    #[test]
+    fn test_clock_gettime_reply_monotonic() {
+        // CLOCK_MONOTONIC uses the uptime tick count (C: clock = ticks).
+        assert_eq!(
+            clock_gettime_reply(CLOCK_MONOTONIC, 250, 999, 5, 100).unwrap(),
+            (7, 500_000_000)
+        );
+    }
+
+    #[test]
+    fn test_clock_gettime_reply_invalid_clock() {
+        // Unsupported clock ids return EINVAL, like the C switch default.
+        assert_eq!(clock_gettime_reply(42, 0, 0, 0, 100), Err(EINVAL));
+    }
+
+    #[test]
+    fn test_clock_ticks_to_sec_nsec() {
+        // sec = boottime + clock/hz; nsec = (clock % hz) * 1e9 / hz.
+        assert_eq!(clock_ticks_to_sec_nsec(0, 42, 100), (42, 0));
+        assert_eq!(
+            clock_ticks_to_sec_nsec(12345, 1000, 100),
+            (1123, 450_000_000)
+        );
+        assert_eq!(
+            clock_ticks_to_sec_nsec(12345, 1000, 1000),
+            (1012, 345_000_000)
+        );
+    }
+
+    #[test]
+    fn test_do_time_writes_mess_pm_lc_time() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_pid = slot as i32 + 1;
+        }
+        // Kernel clock state: boottime 1000 s, realtime 12345 ticks @ 100 Hz.
+        kernel::clock::set_boottime(1000);
+        kernel::clock::set_realtime(12345);
+        kernel::clock::set_system_hz(100);
+
+        let mut msg = Message {
+            m_source: 0,
+            m_type: PM_GETTIMEOFDAY,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+
+        let status = unsafe { do_time(slot, &mut msg) };
+        assert_eq!(status, OK);
+        unsafe {
+            let sec = i64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(msg.m_payload.raw[8..16].try_into().unwrap());
+            assert_eq!(sec, 1123);
+            assert_eq!(nsec, 450_000_000);
+        }
+    }
+
+    #[test]
+    fn test_pm_dispatch_gettimeofday_routes_to_handler() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_pid = slot as i32 + 1;
+        }
+        // Call 28 replies with the wall clock in mess_pm_lc_time layout,
+        // not the old m2l1/m2l2 timeval at payload[16..32].
+        kernel::clock::set_boottime(1000);
+        kernel::clock::set_realtime(12345);
+        kernel::clock::set_system_hz(100);
+
+        let mut msg = Message {
+            m_source: 0,
+            m_type: PM_GETTIMEOFDAY,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+
+        let status = pm_dispatch(slot, &mut msg);
+        assert_eq!(status, OK);
+        unsafe {
+            let sec = i64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(msg.m_payload.raw[8..16].try_into().unwrap());
+            assert_eq!(sec, 1123);
+            assert_eq!(nsec, 450_000_000);
+            // The old m2l1/m2l2 timeval slots must not carry the reply.
+            assert_eq!(msg.m_payload.raw[16..24], [0; 8]);
+            assert_eq!(msg.m_payload.raw[24..32], [0; 8]);
+        }
+    }
+
+    #[test]
+    fn test_do_gettime_writes_mess_pm_lc_time() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_pid = slot as i32 + 1;
+        }
+        // Kernel clock state: boottime 1000 s, realtime 12345 ticks @ 100 Hz.
+        kernel::clock::set_boottime(1000);
+        kernel::clock::set_realtime(12345);
+        kernel::clock::set_monotonic(0);
+        kernel::clock::set_system_hz(100);
+
+        let mut msg = Message {
+            m_source: 0,
+            m_type: PM_CLOCK_GETTIME,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // mess_lc_pm_time: clk_id @ payload[8..12].
+        unsafe {
+            msg.m_payload.raw[8..12].copy_from_slice(&CLOCK_REALTIME.to_le_bytes());
+        }
+
+        let status = unsafe { do_gettime(slot, &mut msg) };
+        assert_eq!(status, OK);
+        unsafe {
+            let sec = i64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(msg.m_payload.raw[8..16].try_into().unwrap());
+            assert_eq!(sec, 1123);
+            assert_eq!(nsec, 450_000_000);
+        }
+    }
+
+    #[test]
+    fn test_pm_dispatch_clock_gettime_routes_to_handler() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_pid = slot as i32 + 1;
+        }
+        // Without a handler, call 34 fell through to no_sys (ENOSYS).
+        kernel::clock::set_boottime(0);
+        kernel::clock::set_realtime(12345);
+        kernel::clock::set_monotonic(0);
+        kernel::clock::set_system_hz(100);
+
+        let mut msg = Message {
+            m_source: 0,
+            m_type: PM_CLOCK_GETTIME,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            msg.m_payload.raw[8..12].copy_from_slice(&CLOCK_REALTIME.to_le_bytes());
+        }
+
+        let status = pm_dispatch(slot, &mut msg);
+        assert_eq!(status, OK);
+        unsafe {
+            let sec = i64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(msg.m_payload.raw[8..16].try_into().unwrap());
+            assert_eq!(sec, 123);
+            assert_eq!(nsec, 450_000_000);
+        }
     }
 }

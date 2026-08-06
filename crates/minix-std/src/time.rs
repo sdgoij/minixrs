@@ -18,9 +18,9 @@
 //! PM_GETTIMEOFDAY  = 0x01C
 //! ```
 //!
-//! Note: the PM server implements `PM_GETTIMEOFDAY` (0x01C) but has no
-//! handler for `PM_CLOCK_GETTIME` (0x022) — dispatch falls through to
-//! `no_sys`. `clock_gettime` therefore routes through `PM_GETTIMEOFDAY`,
+//! Note: `clock_gettime` sends `PM_CLOCK_GETTIME` (0x022) and reads the
+//! `mess_pm_lc_time` reply (sec @ 8, nsec @ 16). `PM_GETTIMEOFDAY` (0x01C)
+//! remains implemented by PM for the legacy `gettimeofday` call.
 
 #![allow(dead_code)]
 
@@ -108,12 +108,10 @@ const OFF_CLOCK_ID: usize = 16; // i32 (clockid_t)
 const OFF_CLOCK_NOW: usize = 20; // i32 (1 = set, 0 = adjtime)
 const OFF_CLOCK_NSEC: usize = 24; // i64 (long)
 
-// GETTIMEOFDAY — the PM call that actually answers clock_gettime. Reply
-// layout: m2l1 = tv_sec, m2l2 = tv_usec. The M2 member starts at payload
-// offset 8; m2l1 lands at absolute 24, m2l2 at absolute 32 (same as the
-// SIGACTION m2l1/m2l2/m2l3 offsets below).
-const OFF_TIMEVAL_SEC: usize = 24; // i64 (m2l1)
-const OFF_TIMEVAL_USEC: usize = 32; // i64 (m2l2)
+// GETTIMEOFDAY (PM_GETTIMEOFDAY) reply — mess_pm_lc_time layout (C ipc.h):
+//   sec @ 8 (time_t i64), nsec @ 16 (long i64), same as CLOCK_GETTIME.
+const OFF_GETTIME_SEC: usize = 8; // i64 (time_t)
+const OFF_GETTIME_NSEC: usize = 16; // i64 (long)
 
 // KILL (PM handle_kill: m1i1 = signo, m1i2 = pid)
 const OFF_KILL_PID: usize = 12; // i32
@@ -180,25 +178,24 @@ unsafe fn pm_call(msg: &mut Message) -> Result<i32, MinixErr> {
 
 /// Get the current time for the given clock.
 ///
-/// The PM server has no `PM_CLOCK_GETTIME` (34) handler — dispatch falls
-/// through to `no_sys` — so this routes through `PM_GETTIMEOFDAY` (28),
-/// which answers with `m2l1 = tv_sec`, `m2l2 = tv_usec`. The microseconds
-/// are converted to nanoseconds to fill `TimeSpec`.
+/// The request uses the C `mess_lc_pm_time` layout (sec @ 8, clk_id @ 16);
+/// PM answers with `mess_pm_lc_time` (sec @ 8, nsec @ 16), matching
+/// `do_gettime()` in `minix/servers/pm/time.c`. Only `CLOCK_REALTIME` and
+/// `CLOCK_MONOTONIC` are supported; PM returns `EINVAL` for other ids.
 pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
-        // PM exposes a single realtime clock; the clock id is not honored.
-        let _ = clock_id;
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_GETTIMEOFDAY as i32);
+        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
+        msg_set_i32(&mut msg, OFF_CLOCK_ID, clock_id);
 
         match pm_call(&mut msg) {
             Ok(_) => {
-                let sec = msg_i64(&msg, OFF_TIMEVAL_SEC);
-                let usec = msg_i64(&msg, OFF_TIMEVAL_USEC);
+                let sec = msg_i64(&msg, OFF_GETTIME_SEC);
+                let nsec = msg_i64(&msg, OFF_GETTIME_NSEC);
                 Ok(TimeSpec {
                     tv_sec: sec,
-                    tv_nsec: usec * 1_000,
+                    tv_nsec: nsec,
                 })
             }
             Err(e) => Err(e),
@@ -213,9 +210,8 @@ pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
 
 /// Get the resolution of the given clock.
 ///
-/// The PM server exposes a single microsecond-resolution clock (its
-/// `PM_GETTIMEOFDAY` reply carries `tv_usec`), so the resolution is fixed
-/// at 1 µs and no IPC is needed.
+/// The PM clock resolution is one tick (1/`system_hz` s), reported as a
+/// fixed 1 µs without IPC for now.
 pub fn clock_getres(_clock_id: i32) -> Result<TimeSpec, MinixErr> {
     #[cfg(target_os = "none")]
     {
@@ -624,13 +620,17 @@ mod tests {
 
     #[test]
     fn test_clock_gettime_message_format() {
-        // clock_gettime routes through PM_GETTIMEOFDAY (0x01C): PM has no
-        // PM_CLOCK_GETTIME (0x022) handler, so the reply comes from
-        // do_time (m2l1 = tv_sec @ 24, m2l2 = tv_usec @ 32).
+        // clock_gettime sends PM_CLOCK_GETTIME (0x022) with clk_id in the
+        // mess_lc_pm_time slot (clk_id @ 16); PM replies with mess_pm_lc_time
+        // (sec @ 8, nsec @ 16).
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_GETTIMEOFDAY as i32);
+        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
+        msg_set_i32(&mut msg, OFF_CLOCK_ID, CLOCK_MONOTONIC);
 
-        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x01C);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x022);
+        assert_eq!(msg_i32(&msg, OFF_CLOCK_ID), 1);
+        assert_eq!(OFF_GETTIME_SEC, 8);
+        assert_eq!(OFF_GETTIME_NSEC, 16);
     }
 
     #[test]
