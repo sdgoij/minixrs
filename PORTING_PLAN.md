@@ -5792,6 +5792,21 @@ NOT STARTED.
   - Host tests: FIN-on-close enters FinSent and consumes a sequence number,
     peer ACK/FIN/RST each reap the closing slot, an established socket ACKs
     a contiguous peer FIN, and accept inherits the local port/address
+  - `crates/minix-std/src/net.rs` application-facing wrappers: `SocketAddr`
+    (parse/`Display`/`ANY`), `TcpStream` (connect/read with EOF, write-all
+    with short-write retry, peer_addr), `TcpListener` (bind/listen/accept
+    returning the peer), `UdpSocket`; `/bin/tcp` and `/bin/tcpserver` now
+    use them (the echo loop's hand-rolled short-write retry is gone)
+  - `peer_closed` on `TcpSock` makes `read` report EOF the moment the peer
+    FIN is demuxed instead of burning the poll window — closing promptly
+    keeps the FinSent slot from shadowing the next connection that reuses
+    the ephemeral port (fixed a RISC-V-only flake in the 3rd connection)
+  - `crates/minix-libc/src/lib.rs` C ABI socket wrappers for FFI:
+    `socket`/`bind`/`connect`/`send`/`recv`/`listen`/`accept`/
+    `getpeername`/`getsockname` with a 16-byte `sockaddr_in`
+    decode/encode (network-order port/addr, reference `getpeername`
+    copy semantics); `getsockname` added to `minix-std`; host tests
+    cover the sockaddr byte math and signature tests the extern ABIs
   - Tests: `tools/tcp_accept_verify.py` drives **three sequential host
     connections** (each gets its echo, exercising slot recycling + the FIN
     handshake) plus a **closed-guest-port probe** (fast RST, no hang) on

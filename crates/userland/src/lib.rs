@@ -998,18 +998,18 @@ fn build_dns_query(out: &mut [u8], id: u16, name: &str) -> usize {
 /// print the reply. Exercises the full socket path: clone-minor open,
 /// NWIOSTCPCONF + NWIOTCPCONN handshake, stream send, stream recv.
 pub fn tcp(args: &[&str]) -> i32 {
-    let host = if args.len() > 1 { args[1] } else { "10.0.2.2" };
-    let ip = match parse_ipv4(host) {
-        Some(ip) => ip,
-        None => {
-            write_err(b"tcp: bad address\n");
-            return -1;
-        }
-    };
     let port = if args.len() > 2 {
         parse_i32(args[2]).unwrap_or(18080) as u16
     } else {
         18080
+    };
+    let host = if args.len() > 1 { args[1] } else { "10.0.2.2" };
+    let addr = match minix_std::net::SocketAddr::parse(host, port) {
+        Some(a) => a,
+        None => {
+            write_err(b"tcp: bad address\n");
+            return -1;
+        }
     };
     let msg = if args.len() > 3 {
         args[3]
@@ -1017,49 +1017,38 @@ pub fn tcp(args: &[&str]) -> i32 {
         "hello from minix"
     };
 
-    let fd = match minix_std::net::tcp_socket() {
-        Ok(fd) => fd,
-        Err(_) => {
-            write_err(b"tcp: cannot open /dev/tcp\n");
-            return -5;
-        }
-    };
-
-    match minix_std::net::connect(fd, ip, port) {
-        Ok(()) => {}
+    let stream = match minix_std::net::TcpStream::connect(addr) {
+        Ok(s) => s,
         Err(e) => {
             write_err(b"tcp: connect failed (");
             print_dec(e.0 as u32);
             write_err(b")\n");
-            let _ = minix_std::net::close(fd);
             return -5;
         }
-    }
+    };
 
-    let w = unsafe { minix_std::net::send(fd, msg.as_bytes()) };
-    if w != Ok(msg.len() as i64) {
+    if stream.write(msg.as_bytes()) != Ok(msg.len()) {
         write_err(b"tcp: send failed\n");
-        let _ = minix_std::net::close(fd);
         return -5;
     }
 
-    // Collect the reply (the echo fits in a few reads; each read polls the
-    // NIC until data arrives or the poll window closes).
+    // Collect the reply (the echo fits in a few reads; the wrapper retries
+    // the no-data polls until data arrives or the peer closes).
     let mut buf = [0u8; 1024];
     let mut total = 0usize;
     for _ in 0..4 {
-        let n = unsafe { minix_std::net::recv(fd, &mut buf[total..]) };
-        match n {
-            Ok(n) if n > 0 => {
-                total += n as usize;
+        match stream.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
                 if total >= buf.len() {
                     break;
                 }
             }
-            _ => break,
+            Err(_) => break,
         }
     }
-    let _ = minix_std::net::close(fd);
+    let _ = stream.close();
     if total == 0 {
         write_err(b"tcp: no reply\n");
         return -5;
@@ -1084,27 +1073,20 @@ pub fn tcpserver(args: &[&str]) -> i32 {
         20000
     };
 
-    let fd = match minix_std::net::tcp_socket() {
-        Ok(fd) => fd,
-        Err(e) => {
-            write_err(b"tcpserver: cannot open /dev/tcp (");
-            print_dec(e.0 as u32);
-            write_err(b")\n");
-            return -5;
-        }
-    };
-    if let Err(e) = minix_std::net::bind(fd, [0; 4], port) {
-        write_err(b"tcpserver: bind failed (");
-        print_dec(e.0 as u32);
-        write_err(b")\n");
-        let _ = minix_std::net::close(fd);
-        return -5;
-    }
-    if let Err(e) = minix_std::net::listen(fd, 4) {
+    let listener =
+        match minix_std::net::TcpListener::bind(minix_std::net::SocketAddr::new([0; 4], port)) {
+            Ok(l) => l,
+            Err(e) => {
+                write_err(b"tcpserver: bind failed (");
+                print_dec(e.0 as u32);
+                write_err(b")\n");
+                return -5;
+            }
+        };
+    if let Err(e) = listener.listen(4) {
         write_err(b"tcpserver: listen failed (");
         print_dec(e.0 as u32);
         write_err(b")\n");
-        let _ = minix_std::net::close(fd);
         return -5;
     }
     write_out(b"tcpserver: listening on port ");
@@ -1113,8 +1095,8 @@ pub fn tcpserver(args: &[&str]) -> i32 {
 
     let mut buf = [0u8; 1024];
     loop {
-        let c = match minix_std::net::accept(fd) {
-            Ok(c) => c,
+        let (stream, peer) = match listener.accept() {
+            Ok(p) => p,
             Err(e) => {
                 write_err(b"tcpserver: accept failed (");
                 print_dec(e.0 as u32);
@@ -1122,40 +1104,31 @@ pub fn tcpserver(args: &[&str]) -> i32 {
                 break;
             }
         };
-        let (peer, port) = minix_std::net::getpeername(c).unwrap_or_default();
         write_out(b"tcpserver: accepted ");
-        print_dec(peer[0] as u32);
+        print_dec(peer.ip[0] as u32);
         write_out(b".");
-        print_dec(peer[1] as u32);
+        print_dec(peer.ip[1] as u32);
         write_out(b".");
-        print_dec(peer[2] as u32);
+        print_dec(peer.ip[2] as u32);
         write_out(b".");
-        print_dec(peer[3] as u32);
+        print_dec(peer.ip[3] as u32);
         write_out(b":");
-        print_dec(port as u32);
+        print_dec(peer.port as u32);
         write_out(b"\n");
 
-        // Echo loop: read a chunk, write it back. A zero write (send
-        // window busy) is retried after a short recv poll drives the ACK.
+        // Echo loop: read a chunk, write it back (the wrapper retries
+        // short writes and reports 0 as EOF).
         loop {
-            let n = match unsafe { minix_std::net::recv(c, &mut buf) } {
-                Ok(n) if n > 0 => n as usize,
+            let n = match stream.read(&mut buf) {
+                Ok(n) if n > 0 => n,
                 _ => break,
             };
-            let mut off = 0usize;
-            while off < n {
-                match unsafe { minix_std::net::send(c, &buf[off..n]) } {
-                    Ok(w) if w > 0 => off += w as usize,
-                    _ => {
-                        let mut tmp = [0u8; 64];
-                        let _ = unsafe { minix_std::net::recv(c, &mut tmp) };
-                    }
-                }
+            if stream.write(&buf[..n]) != Ok(n) {
+                break;
             }
         }
-        let _ = minix_std::net::close(c);
+        let _ = stream.close(); // sends FIN; the net server finishes the close
     }
-    let _ = minix_std::net::close(fd);
     0
 }
 

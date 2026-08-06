@@ -255,7 +255,318 @@ pub fn getpeername(fd: i32) -> Result<([u8; 4], u16), MinixErr> {
     Ok((u32::to_be_bytes(conf.nwtc_remaddr), conf.nwtc_remport))
 }
 
+/// Return the local address of a socket, mirroring the reference
+/// `getsockname(2)` (reads `NWIOGTCPCONF` back; the local address is
+/// `0.0.0.0` when bound to INADDR_ANY).
+pub fn getsockname(fd: i32) -> Result<([u8; 4], u16), MinixErr> {
+    let mut conf = NwioTcpConf::default();
+    unsafe { ioctl(fd, NWIOGTCPCONF, &mut conf as *mut NwioTcpConf as *mut u8) }?;
+    Ok((u32::to_be_bytes(conf.nwtc_locaddr), conf.nwtc_locport))
+}
+
 /// Close a socket (frees the net server's socket slot).
 pub fn close(fd: i32) -> Result<(), MinixErr> {
     crate::fs::close(fd)
+}
+
+// ---- Application-facing wrappers ----
+
+/// IPv4 socket address: network-order address bytes + host-order port,
+/// mirroring `sockaddr_in` semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SocketAddr {
+    pub ip: [u8; 4],
+    pub port: u16,
+}
+
+/// Bound retries when the net server reports "no data" (its bounded RX
+/// poll expired). The server returns 0 both for that and for peer FIN, so
+/// the stream wrapper retries the no-data case a few times before
+/// reporting EOF.
+const READ_RETRIES: u32 = 4;
+/// Short-write retries before `TcpStream::write` reports a partial write
+/// (the single-segment send window returns 0 while unacked data is in
+/// flight; a short recv poll drives the ACKs).
+const WRITE_STALL_MAX: u32 = 8;
+
+impl SocketAddr {
+    /// INADDR_ANY: bind to all local addresses (with port 0 = ephemeral).
+    pub const ANY: SocketAddr = SocketAddr {
+        ip: [0; 4],
+        port: 0,
+    };
+
+    pub const fn new(ip: [u8; 4], port: u16) -> Self {
+        Self { ip, port }
+    }
+
+    /// Parse `"10.0.2.2:18080"`, or a bare `"10.0.2.2"` using
+    /// `default_port`. Returns `None` on malformed input.
+    pub fn parse(s: &str, default_port: u16) -> Option<Self> {
+        let (ip_part, port_part) = match s.rsplit_once(':') {
+            Some((ip, port)) => (ip, Some(port)),
+            None => (s, None),
+        };
+        let ip = parse_ipv4(ip_part)?;
+        let port = match port_part {
+            Some(p) => p.parse::<u16>().ok()?,
+            None => default_port,
+        };
+        Some(Self { ip, port })
+    }
+
+    pub fn is_any(&self) -> bool {
+        self.ip == [0; 4]
+    }
+}
+
+impl core::fmt::Display for SocketAddr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}:{}",
+            self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port
+        )
+    }
+}
+
+/// Parse a dotted-quad IPv4 string into four bytes.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut part = 0usize;
+    let mut val = 0u32;
+    let mut digits = false;
+    for &b in s.as_bytes() {
+        match b {
+            b'.' => {
+                if !digits || val > 255 || part >= 3 {
+                    return None;
+                }
+                out[part] = val as u8;
+                part += 1;
+                val = 0;
+                digits = false;
+            }
+            b'0'..=b'9' => {
+                val = val * 10 + (b - b'0') as u32;
+                if val > 255 {
+                    return None;
+                }
+                digits = true;
+            }
+            _ => return None,
+        }
+    }
+    if !digits || part != 3 {
+        return None;
+    }
+    out[3] = val as u8;
+    Some(out)
+}
+
+/// A connected TCP byte stream.
+#[derive(Debug)]
+pub struct TcpStream {
+    fd: i32,
+}
+
+impl TcpStream {
+    /// Open a `/dev/tcp` socket and run the three-way handshake to `addr`
+    /// (blocking until established).
+    pub fn connect(addr: SocketAddr) -> Result<Self, MinixErr> {
+        let fd = tcp_socket()?;
+        if let Err(e) = crate::net::connect(fd, addr.ip, addr.port) {
+            let _ = crate::net::close(fd);
+            return Err(e);
+        }
+        Ok(Self { fd })
+    }
+
+    /// Read up to `buf.len()` bytes; `Ok(0)` means the peer closed (EOF).
+    /// The server's bounded RX poll makes a no-data recv return 0 too, so
+    /// the no-data case is retried a few times before EOF is reported.
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, MinixErr> {
+        for _ in 0..READ_RETRIES {
+            match unsafe { crate::net::recv(self.fd, buf) } {
+                Ok(0) => continue,
+                Ok(n) => return Ok(n as usize),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(0)
+    }
+
+    /// Write all of `buf`. The single-segment send window can report 0
+    /// while a previous segment is unacked, so short writes are retried
+    /// (a short recv poll drives the ACKs); after `WRITE_STALL_MAX` stalls
+    /// the partial count is returned.
+    pub fn write(&self, buf: &[u8]) -> Result<usize, MinixErr> {
+        let mut off = 0usize;
+        let mut stalls = 0u32;
+        while off < buf.len() {
+            match unsafe { crate::net::send(self.fd, &buf[off..]) } {
+                Ok(n) if n > 0 => {
+                    off += n as usize;
+                    stalls = 0;
+                }
+                Ok(_) => {
+                    stalls += 1;
+                    if stalls > WRITE_STALL_MAX {
+                        break;
+                    }
+                    let mut tmp = [0u8; 64];
+                    let _ = unsafe { crate::net::recv(self.fd, &mut tmp) };
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(off)
+    }
+
+    /// The peer's address.
+    pub fn peer_addr(&self) -> Result<SocketAddr, MinixErr> {
+        getpeername(self.fd).map(|(ip, port)| SocketAddr { ip, port })
+    }
+
+    /// Close the stream (sends FIN; the net server completes the close
+    /// handshake in the background).
+    pub fn close(self) -> Result<(), MinixErr> {
+        crate::net::close(self.fd)
+    }
+}
+
+/// A listening TCP socket.
+#[derive(Debug)]
+pub struct TcpListener {
+    fd: i32,
+}
+
+impl TcpListener {
+    /// Open a `/dev/tcp` socket and bind it to `addr` (use
+    /// [`SocketAddr::ANY`]-style `ip = [0; 4]` for INADDR_ANY).
+    pub fn bind(addr: SocketAddr) -> Result<Self, MinixErr> {
+        let fd = tcp_socket()?;
+        if let Err(e) = crate::net::bind(fd, addr.ip, addr.port) {
+            let _ = crate::net::close(fd);
+            return Err(e);
+        }
+        Ok(Self { fd })
+    }
+
+    /// Put the socket into the listening state with the given backlog.
+    pub fn listen(&self, backlog: i32) -> Result<(), MinixErr> {
+        crate::net::listen(self.fd, backlog)
+    }
+
+    /// Block until a connection arrives; returns the accepted stream and
+    /// its peer address (via `getpeername`, like the reference
+    /// `accept(2)`).
+    pub fn accept(&self) -> Result<(TcpStream, SocketAddr), MinixErr> {
+        let fd = accept(self.fd)?;
+        let peer = match getpeername(fd) {
+            Ok((ip, port)) => SocketAddr { ip, port },
+            Err(_) => SocketAddr::ANY,
+        };
+        Ok((TcpStream { fd }, peer))
+    }
+
+    pub fn close(self) -> Result<(), MinixErr> {
+        crate::net::close(self.fd)
+    }
+}
+
+/// A UDP datagram socket.
+#[derive(Debug)]
+pub struct UdpSocket {
+    fd: i32,
+}
+
+impl UdpSocket {
+    /// Open a `/dev/udp` socket bound to `addr` (`ip = [0; 4]` for
+    /// INADDR_ANY).
+    pub fn bind(addr: SocketAddr) -> Result<Self, MinixErr> {
+        let fd = udp_socket()?;
+        if let Err(e) = crate::net::bind(fd, addr.ip, addr.port) {
+            let _ = crate::net::close(fd);
+            return Err(e);
+        }
+        Ok(Self { fd })
+    }
+
+    /// Set the default destination and the filter for received datagrams.
+    pub fn connect(&self, addr: SocketAddr) -> Result<(), MinixErr> {
+        crate::net::connect(self.fd, addr.ip, addr.port)
+    }
+
+    /// Send one whole datagram to the connected peer.
+    pub fn send(&self, data: &[u8]) -> Result<usize, MinixErr> {
+        unsafe { crate::net::send(self.fd, data) }.map(|n| n as usize)
+    }
+
+    /// Receive one datagram payload.
+    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, MinixErr> {
+        unsafe { crate::net::recv(self.fd, buf) }.map(|n| n as usize)
+    }
+
+    pub fn close(self) -> Result<(), MinixErr> {
+        crate::net::close(self.fd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_addr_parses_dotted_quad_with_port() {
+        assert_eq!(
+            SocketAddr::parse("10.0.2.2:18080", 0),
+            Some(SocketAddr {
+                ip: [10, 0, 2, 2],
+                port: 18080,
+            })
+        );
+    }
+
+    #[test]
+    fn socket_addr_parses_bare_ip_with_default_port() {
+        assert_eq!(
+            SocketAddr::parse("10.0.2.2", 20000),
+            Some(SocketAddr {
+                ip: [10, 0, 2, 2],
+                port: 20000,
+            })
+        );
+    }
+
+    #[test]
+    fn socket_addr_rejects_malformed_input() {
+        assert_eq!(SocketAddr::parse("", 1), None);
+        assert_eq!(SocketAddr::parse("10.0.2", 1), None);
+        assert_eq!(SocketAddr::parse("10.0.2.2.3", 1), None);
+        assert_eq!(SocketAddr::parse("10.0.2.256", 1), None);
+        assert_eq!(SocketAddr::parse("10.0.2.2:70000", 1), None);
+        assert_eq!(SocketAddr::parse("a.b.c.d", 1), None);
+        assert_eq!(SocketAddr::parse("10.0.2.2:", 1), None);
+    }
+
+    #[test]
+    fn socket_addr_formats_and_compares() {
+        struct FmtBuf([u8; 32], usize);
+        impl core::fmt::Write for FmtBuf {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let n = s.len().min(self.0.len() - self.1);
+                self.0[self.1..self.1 + n].copy_from_slice(s.as_bytes());
+                self.1 += n;
+                Ok(())
+            }
+        }
+        let a = SocketAddr::new([10, 0, 2, 15], 20000);
+        let mut b = FmtBuf([0; 32], 0);
+        core::fmt::Write::write_fmt(&mut b, format_args!("{a}")).unwrap();
+        assert_eq!(&b.0[..b.1], b"10.0.2.15:20000");
+        assert!(!a.is_any());
+        assert!(SocketAddr::ANY.is_any());
+        assert_eq!(a, SocketAddr::parse("10.0.2.15:20000", 0).unwrap());
+    }
 }

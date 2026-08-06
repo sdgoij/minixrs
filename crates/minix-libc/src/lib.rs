@@ -200,6 +200,202 @@ pub unsafe extern "C" fn sigaction(
     }
 }
 
+// Sockets
+
+/// C `struct sockaddr_in` (reference `net/gen/socket.h`): length, family,
+/// network-order port and address, then padding. 16 bytes. The port/address
+/// fields are byte arrays so the network-order layout is endianness-explicit
+/// (layout-identical to the C `u16`/`u32` fields).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SockAddrIn {
+    sin_len: u8,
+    sin_family: u8,
+    sin_port: [u8; 2], // network byte order
+    sin_addr: [u8; 4], // network byte order
+    sin_zero: [u8; 8],
+}
+
+/// Decode a C `struct sockaddr_in` into the address bytes + host-order port
+/// the `minix-std` net layer expects. Errors are negated errnos
+/// (EAFNOSUPPORT for a non-AF_INET family or a too-short buffer).
+///
+/// # Safety
+///
+/// `addr` must point to at least `addrlen` bytes of a `sockaddr_in`.
+unsafe fn decode_sockaddr_in(addr: *const u8, addrlen: u32) -> Result<([u8; 4], u16), i32> {
+    if addr.is_null() || addrlen < 16 {
+        return Err(-97); // EAFNOSUPPORT
+    }
+    let s = unsafe { &*(addr as *const SockAddrIn) };
+    if s.sin_family != 2 {
+        // AF_INET
+        return Err(-97); // EAFNOSUPPORT
+    }
+    Ok((s.sin_addr, u16::from_be_bytes(s.sin_port)))
+}
+
+/// Fill a C `struct sockaddr_in` (reference getpeername semantics: family
+/// AF_INET, network-order port/address, sin_len = 16; copy at most
+/// `*addrlen` bytes and update it).
+///
+/// # Safety
+///
+/// `addr`/`addrlen` must be valid for the sizes the C caller declared.
+unsafe fn encode_sockaddr_in(addr: *mut u8, addrlen: *mut u32, ip: [u8; 4], port: u16) {
+    if addr.is_null() || addrlen.is_null() {
+        return;
+    }
+    let len = unsafe { *addrlen }.min(16);
+    let s = SockAddrIn {
+        sin_len: 16,
+        sin_family: 2, // AF_INET
+        sin_port: port.to_be_bytes(),
+        sin_addr: ip,
+        sin_zero: [0; 8],
+    };
+    unsafe {
+        core::ptr::copy_nonoverlapping(&s as *const SockAddrIn as *const u8, addr, len as usize);
+        *addrlen = len;
+    }
+}
+
+/// `socket(2)`: create an endpoint — AF_INET/SOCK_STREAM → `/dev/tcp`,
+/// AF_INET/SOCK_DGRAM → `/dev/udp`, AF_INET/SOCK_RAW+ICMP → `/dev/ip`.
+/// Returns the file descriptor.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int {
+    match minix_std::net::socket(domain, type_, protocol) {
+        Ok(fd) => fd,
+        Err(e) => -(e.0),
+    }
+}
+
+/// `bind(2)`: bind a socket to a `struct sockaddr_in` (AF_INET).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
+    let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    match minix_std::net::bind(sock, ip, port) {
+        Ok(()) => 0,
+        Err(e) => -(e.0),
+    }
+}
+
+/// `connect(2)`: run the TCP three-way handshake, or set the UDP default
+/// destination and receive filter.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
+    let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    match minix_std::net::connect(sock, ip, port) {
+        Ok(()) => 0,
+        Err(e) => -(e.0),
+    }
+}
+
+/// `send(2)`: write the byte stream (TCP) or one datagram (UDP). Only
+/// `flags == 0` is supported.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
+    if flags != 0 {
+        return -95; // EOPNOTSUPP
+    }
+    if buf.is_null() {
+        return -22; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
+    match unsafe { minix_std::net::send(sock, slice) } {
+        Ok(n) => n as isize,
+        Err(e) => -(e.0 as isize),
+    }
+}
+
+/// `recv(2)`: read the byte stream (TCP) or one datagram (UDP). Only
+/// `flags == 0` is supported; 0 means EOF for a stream.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
+    if flags != 0 {
+        return -95; // EOPNOTSUPP
+    }
+    if buf.is_null() {
+        return -22; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+    match unsafe { minix_std::net::recv(sock, slice) } {
+        Ok(n) => n as isize,
+        Err(e) => -(e.0 as isize),
+    }
+}
+
+/// `listen(2)`: mark a bound socket as a listener with the given backlog.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
+    match minix_std::net::listen(sock, backlog) {
+        Ok(()) => 0,
+        Err(e) => -(e.0),
+    }
+}
+
+/// `accept(2)`: accept the next pending connection. Fills `address` (a
+/// `struct sockaddr_in`) when non-NULL, like the reference accept(2).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+    let newfd = match minix_std::net::accept(sock) {
+        Ok(fd) => fd,
+        Err(e) => return -(e.0),
+    };
+    if !address.is_null() && !address_len.is_null() {
+        if let Ok((ip, port)) = minix_std::net::getpeername(newfd) {
+            unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
+        }
+    }
+    newfd
+}
+
+/// `getpeername(2)`: fill `address` with the connected peer.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+    if address.is_null() || address_len.is_null() {
+        return -22; // EINVAL
+    }
+    match minix_std::net::getpeername(sock) {
+        Ok((ip, port)) => {
+            unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
+            0
+        }
+        Err(e) => -(e.0),
+    }
+}
+
+/// `getsockname(2)`: fill `address` with the local bound address.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+    if address.is_null() || address_len.is_null() {
+        return -22; // EINVAL
+    }
+    match minix_std::net::getsockname(sock) {
+        Ok((ip, port)) => {
+            unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
+            0
+        }
+        Err(e) => -(e.0),
+    }
+}
+
 // Utility
 
 /// Simple strlen for C strings.
@@ -260,8 +456,57 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "none")]
     use super::*;
+
+    // Host-runnable: the sockaddr_in byte math (network-order port/addr).
+    #[test]
+    fn sockaddr_in_decode_matches_c_network_order_layout() {
+        // sin_len=16, sin_family=AF_INET(2), sin_port=18080 (BE),
+        // sin_addr=10.0.2.2 (BE bytes), sin_zero.
+        let bytes: [u8; 16] = [16, 2, 0x46, 0xA0, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (ip, port) = unsafe { decode_sockaddr_in(bytes.as_ptr(), 16) }.unwrap();
+        assert_eq!(ip, [10, 0, 2, 2]);
+        assert_eq!(port, 18080);
+    }
+
+    #[test]
+    fn sockaddr_in_encode_writes_c_network_order() {
+        let mut bytes = [0xFFu8; 16];
+        let mut len: u32 = 16;
+        unsafe {
+            encode_sockaddr_in(bytes.as_mut_ptr(), &mut len, [10, 0, 2, 2], 20000);
+        }
+        // 20000 = 0x4E20.
+        assert_eq!(
+            bytes,
+            [16, 2, 0x4E, 0x20, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(len, 16);
+    }
+
+    #[test]
+    fn sockaddr_in_decode_rejects_bad_family_and_short_len() {
+        let bad_family: [u8; 16] = [16, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            unsafe { decode_sockaddr_in(bad_family.as_ptr(), 16) },
+            Err(-97)
+        );
+        assert_eq!(
+            unsafe { decode_sockaddr_in(bad_family.as_ptr(), 8) },
+            Err(-97)
+        );
+    }
+
+    #[test]
+    fn sockaddr_in_encode_respects_caller_buffer_size() {
+        let mut bytes = [0xFFu8; 16];
+        let mut len: u32 = 8;
+        unsafe {
+            encode_sockaddr_in(bytes.as_mut_ptr(), &mut len, [10, 0, 2, 2], 20000);
+        }
+        assert_eq!(len, 8); // truncated, like the reference getpeername
+        assert_eq!(&bytes[..4], &[16, 2, 0x4E, 0x20]);
+    }
 
     #[cfg(target_os = "none")]
     #[test]
@@ -387,5 +632,34 @@ mod tests {
             let _ = f;
         }
         _check(kill);
+    }
+
+    #[cfg(target_os = "none")]
+    #[test]
+    fn test_socket_signatures() {
+        fn _socket(f: extern "C" fn(c_int, c_int, c_int) -> c_int) {
+            let _ = f;
+        }
+        fn _addr_in(f: extern "C" fn(c_int, *const c_void, u32) -> c_int) {
+            let _ = f;
+        }
+        fn _addr_out(f: extern "C" fn(c_int, *mut c_void, *mut u32) -> c_int) {
+            let _ = f;
+        }
+        fn _io(f: unsafe extern "C" fn(c_int, *const c_void, usize, c_int) -> isize) {
+            let _ = f;
+        }
+        fn _iomut(f: unsafe extern "C" fn(c_int, *mut c_void, usize, c_int) -> isize) {
+            let _ = f;
+        }
+        _socket(socket);
+        _addr_in(bind);
+        _addr_in(connect);
+        _io(send);
+        _iomut(recv);
+        _addr_in(listen);
+        _addr_out(accept);
+        _addr_out(getpeername);
+        _addr_out(getsockname);
     }
 }

@@ -471,6 +471,9 @@ struct TcpSock {
     /// `listen()` backlog and the pending connections themselves.
     backlog: usize,
     accept_queue: [PendingConn; ACCEPT_QUEUE_MAX],
+    /// The peer sent its FIN (half-close); `read` reports EOF once the
+    /// RX stream is drained.
+    peer_closed: bool,
 }
 
 impl TcpSock {
@@ -503,6 +506,7 @@ impl TcpSock {
             cookie_set: false,
             backlog: 0,
             accept_queue: [EMPTY_PENDING; ACCEPT_QUEUE_MAX],
+            peer_closed: false,
         }
     }
 }
@@ -947,9 +951,11 @@ fn tcp_established_demux(s: &mut TcpSock, ack: u32, seq: u32, flags: u8, payload
         }
     }
     // Peer half-close: ACK the FIN (it consumes one sequence number after
-    // the payload) when it is contiguous with what we have received.
+    // the payload) when it is contiguous with what we have received, and
+    // mark EOF so `read` returns 0 without burning the poll window.
     if flags & TCP_FIN != 0 && seq.wrapping_add(payload.len() as u32) == s.rcv_nxt {
         s.rcv_nxt = s.rcv_nxt.wrapping_add(1);
+        s.peer_closed = true;
         let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
     }
 }
@@ -2396,6 +2402,18 @@ fn tcp_read(minor: i32, user: i32, va: u64, count: u64) -> i32 {
             let bufs = &*RX_BUFFERS.get();
             handle_frame(&bufs[0][..got]);
         }
+        // Peer FIN was demuxed: EOF — return 0 now instead of burning the
+        // rest of the poll window (the stream wrapper reads 0 as EOF).
+        let eof = {
+            let s = match tcp_socket_for_minor(minor) {
+                Some(s) => s,
+                None => return -9,
+            };
+            s.peer_closed && s.rx_len == 0
+        };
+        if eof {
+            return 0;
+        }
     }
     // Final check after the poll window.
     let s = match tcp_socket_for_minor(minor) {
@@ -2512,6 +2530,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TcpSock, cookie_set), 4188);
         assert_eq!(core::mem::offset_of!(TcpSock, backlog), 4192);
         assert_eq!(core::mem::offset_of!(TcpSock, accept_queue), 4200);
+        assert_eq!(core::mem::offset_of!(TcpSock, peer_closed), 12552);
         assert_eq!(core::mem::offset_of!(PendingConn, in_use), 0);
         assert_eq!(core::mem::offset_of!(PendingConn, established), 1);
         assert_eq!(core::mem::offset_of!(PendingConn, rem_port), 6);
@@ -2795,5 +2814,6 @@ mod tests {
         e.rcv_nxt = 0x8000;
         tcp_established_demux(&mut e, 0x7001, 0x8000, TCP_FIN | TCP_ACK, &[]);
         assert_eq!(e.rcv_nxt, 0x8001, "FIN advances rcv_nxt");
+        assert!(e.peer_closed, "peer FIN marks EOF");
     }
 }
