@@ -3668,172 +3668,74 @@ virtio disk image through the BDEV protocol, and files persist across reboot
 
 ### Phase 11c: Network drivers
 
-**Status: virtio_net fully working — it drives ICMP ping on all three arches
-via the DL protocol (M8). The other 12 network driver stubs remain (PCI
-transport, DMA, interrupt routing needed for them).**
+**Status: ✅ virtio-net is the whole live path** —
+`crates/drivers/src/network/virtio_net.rs` (virtio 1.x NIC driver) +
+`crates/servers/src/virtio_net.rs` (DL driver server) +
+`crates/servers/src/net.rs` (net server) drive ICMP ping and the UDP/TCP
+socket layer on all three arches (M8, 16.1a–e). The other 12 reference
+NIC drivers (11c.3–11c.14) have **no code in the tree** — the plan's
+earlier “13 stubs created, 403+ tests pass” claims were stale and are
+removed. QEMU only ever presents virtio-net to the guest on all three
+arches, so the legacy ISA/PCI/wireless NICs are out of scope for the
+current target; they stay listed below as deferred, with the reference
+sources in `.refs/minix-3.3.0/minix/drivers/net/`.
 
-**Dependencies**: Requires PCI driver (11a.4) for network device enumeration, DMA API (11b.12), PIC wiring (11b.11).
+**Dependencies**: PCI driver (11a.4), DMA API (11b.12), PIC wiring
+(11b.11) — only needed for the legacy drivers; virtio-net uses the virtio
+MMIO transport (no PCI).
 
-- [ ] **11c.infra — Network driver infrastructure** (724 lines, 50 tests)
-  - `crates/arch-x86_64/src/mmio.rs` — 194 lines, 6 tests
-    - `mmio_read8/16/32/64()`, `mmio_write8/16/32/64()` — volatile MMIO access
-    - `mmio_write32_le()`, `mmio_read32_le()` — little-endian byte-wise access
-    - `mmio_read8_safe()` — read with error flag
-  - `crates/arch-x86_64/src/irq.rs` — 220 lines, 4 tests
-    - `irq_enable()`, `irq_disable()`, `irq_ack()` — high-level IRQ management
-    - `io_read32/16/8()`, `io_write32/16/8()` — I/O port helpers for rtl8139/dp8390
-    - `IrqState` — per-device IRQ state tracker
-  - `crates/virtio/` (new crate) — 671 lines, 10 tests
-    - **`lib.rs`** (497 lines): `VirtioDeviceType` (22 types), feature flags, status bits, `VirtioDevice` trait, `QueueAlloc`/`QueueState`/`VirtioQueue`, notification helpers
-    - **`x86.rs`** (174 lines): MMIO register offsets, hardware primitives for virtio backend
-  - **Stub fixes** (7 → 0 failures):
-    - `dec21140A`: Fixed `TEST_SROM` — MAC was at byte 5 instead of offset 20
-    - `e1000`: Fixed `eeprom_bits` masks — `0xFFFF0000` for DATA, `0x0000FF00` for ADDR
-    - `rtl8139`: Fixed `interrupt_bits` — changed `& != 0` to `& == 0` (different bits don't overlap)
-    - `rtl8169`: Same fix as rtl8139
-  - **All stubs**: Created with driver-specific constants/structs, `#[expect(...)]` for naming conventions, comprehensive test modules
+- [x] **11c.infra — virtio transport (✅ DONE)** — the plan's claimed
+  `crates/arch-x86_64/src/mmio.rs`, `irq.rs` and `crates/virtio/` crate do
+  not exist; the transport lives in the drivers crate:
+  - `crates/drivers/src/bus/virtio.rs` (2040 lines) — shared by virtio-net
+    and virtio-blk: `VirtioTransport` enum (legacy virtio-pci via
+    0xCF8/0xCFC on x86_64, modern virtio-mmio on RISC-V/AArch64 at the
+    QEMU `virt` machine bases), device/feature negotiation (status bits,
+    feature flags), queue setup (descriptor/avail/used rings,
+    `QueueAlloc`), notifications, ISR handling, the virtio-mmio register
+    offsets, and its own `mmio_read32`/`mmio_write32`/16/8 volatile
+    primitives
 
-- [ ] **11c.1 — Network stubs (13 drivers)** — all stubs created, 403+ driver tests pass
-  - `crates/drivers/src/network/virtio_net.rs` — 812 lines (stub with full constants/features)
-  - `crates/drivers/src/network/atl2.rs` — 363 lines
-  - `crates/drivers/src/network/dec21140A.rs` — 649 lines (full constants/register offsets)
-  - `crates/drivers/src/network/e1000.rs` — 442 lines
-  - `crates/drivers/src/network/fxp.rs` — 453 lines
-  - `crates/drivers/src/network/lance.rs` — 430 lines
-  - `crates/drivers/src/network/rtl8139.rs` — 421 lines
-  - `crates/drivers/src/network/rtl8169.rs` — 572 lines
-  - `crates/drivers/src/network/dp8390.rs` — 436 lines
-  - `crates/drivers/src/network/dpeth.rs` — 323 lines
-  - `crates/drivers/src/network/uds.rs` — 395 lines
-  - `crates/drivers/src/network/orinoco.rs` — 338 lines
-  - `crates/drivers/src/network/lan8710a.rs` — 457 lines
-  - `crates/drivers/src/network/mod.rs` — module declarations
+- [x] **11c.1 — Network driver module (✅ DONE)** — the plan's “13 stubs,
+  403+ tests” claim was stale; `crates/drivers/src/network/` contains only
+  `mod.rs` + the real `virtio_net.rs`. No stub files exist for the other
+  12 drivers (and none are planned — see 11c.3–11c.14).
 
-- [x] **11c.2 — `crates/drivers/src/network/virtio_net.rs`** (full implementation — ✅ DONE, drives ICMP ping on all 3 arches)
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/virtio_net/`
-  - Depends on: virtio transport layer (11c.infra)
-  - **Hardware-specific features:**
-    - `impl VirtioDevice for VirtioNetDevice` — bridges stub with virtio transport
-    - `init()` — full virtio device status transitions (RESET → ACKNOWLEDGE → FEATURES_OK → DRIVER_OK), MMIO feature negotiation via `virtio::x86` primitives
-    - `open()` — DMA queue ring allocation (`alloc_dma_buf`), per-queue `QueueAlloc` setup with descriptor/avail/used ring offsets, device ready status
-    - `close()` — DMA buffer cleanup, device reset (FAILED → RESET)
-    - `allocate_queues()` — RX/TX/CTRL queue setup with proper ring layout, DMA allocation, and MMIO queue size programming
-    - `handle_irq()` — `has_irq()` check + `ack_irq()` via MMIO
-    - `refill_rx_queue()` — submits up to BUF_PACKETS/2 free packets to RX
-    - `check_queues()` — processes completed RX/TX operations
-    - `handle_write()` — DL_WRITEV_S handler
-    - `handle_read()` — DL_READV_S handler
-    - `handle_conf()` — DL_CONF handler, sets DRIVER_OK status
-    - `handle_getstat()` — DL_GETSTAT_S handler
-    - `main_loop()` — main event loop (refill + receive dispatch stub)
-  - **Infrastructure changes:**
-    - `virtio` crate: `pub mod x86` (was private), `Debug` on `VirtioQueue`
-    - `drivers` crate Cargo.toml: virtio dep enables `x86` feature
-  - **Tests**: 58 pass (8 new), 3 ignored
-  - ~680 lines C source → ~1800+ lines Rust
-  - **Socket-layer support (16.1a):** the DL server now also feeds the net
-    server's UDP sockets — no-packet `DL_READV_S` rounds return quickly
-    (`RX_POLL_SPINS` 50M → 2M; the old window took seconds in QEMU TCG and
-    made datagram recv polls look like hangs), so socket reads poll the
-    NIC without stalling the whole server
+- [x] **11c.2 — `crates/drivers/src/network/virtio_net.rs` (✅ DONE)**
+  - Modern virtio 1.x driver (560 lines): one RX queue (0) + one TX queue
+    (1), no offload features (zeroed 12-byte `virtio_net_hdr`, software
+    checksums), static DMA buffers addressed via `SYS_GETINFO` phys delta,
+    RX pool refilled only after packets are consumed, serialized TX
+  - Wrapped by `crates/servers/src/virtio_net.rs` (346 lines), the DL
+    driver server (see 11c.15)
+  - Verified: `ping 10.0.2.2` → `reply id=<pid> seq=1` plus the UDP/TCP
+    socket layer (16.1a–e) on x86_64, RISC-V64, AArch64
 
-- [ ] **11c.3 — `crates/drivers/src/network/atl2.rs`** (full implementation)
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/atl2/`
-  - Intel 82573E / Attansic L2 driver
-  - **Implemented:**
-    - `init()` — MMIO base setup, VPD MAC read stub
-    - `stop()` — disable interrupts, stop MAC RX/TX
-    - `reset()` — soft reset with wait loop
-    - `setup()` — PCIE init, PHY enable, ring buffer config, MAC setup
-    - `tx_advance()` — TX descriptor/status ring processing, packet count
-    - `rx_advance()` — RX descriptor ring processing, packet availability
-    - `handle_irq()` — ISR read, TX/RX processing, ISR clear
-    - `get_link_status()` — PHY stat read, autonegotiation check
-    - `set_mode()` — promiscuous/multicast/broadcast configuration
-    - MMIO helpers (volatile read8/16/32, write8/16/32)
-  - **New types:**
-    - `Atl2TxStatus` — TX status descriptor (64-bit)
-    - `Atl2TxDesc` — TX descriptor (16 bytes)
-    - `Atl2RxD` — RX descriptor (8 bytes)
-    - `Atl2DmaBuf` — DMA buffer tracking
-    - `Atl2RingState` — per-ring tail/count management
-    - `Atl2Stats` — full network statistics struct
-  - **New constants:** 100+ register offsets, bit masks, PHY registers
-  - **Tests:** 19 pass
-  - ~1293 lines C source → ~1300+ lines Rust
+- [ ] **11c.3 — `crates/drivers/src/network/atl2.rs` (not implemented)**
+  - Reference: `.refs/minix-3.3.0/minix/drivers/net/atl2/` (Intel
+    82573E / Attansic L2)
+  - The plan's “Implemented: …” list (rings, descriptors, stats, 19
+    tests) was stale — no file exists in the tree. Out of scope: QEMU
+    never presents this NIC. Deferred unless real-hardware support is
+    ever wanted.
 
-- [ ] **11c.4 — `crates/drivers/src/network/e1000.rs`** (full implementation)
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/e1000/e1000.c` (~1208 lines C source)
-  - Intel Pro/1000 Gigabit Ethernet driver
-  - **Implemented:**
-    - `init()` — MMIO base setup, hardware init
-    - `stop()` — reset HW, disable interrupts
-    - `reset_hw()` — soft reset with wait loop
-    - `setup()` — clear MTA, clear stats, enable ASDE, configure flow control, init_addr, init_buf, enable interrupts
-    - `tx_advance()` — TX descriptor ring processing, packet count
-    - `rx_advance()` — RX descriptor ring processing, packet availability
-    - `handle_irq()` — ICR read, LSC/TX/RX processing, ICR clear (W1C)
-    - `get_link_status()` — status register read, link speed decoding
-    - `set_mode()` — promiscuous/multicast/broadcast configuration via RCTL
-    - `get_stats()` — hardware counter reads (CRCERRS, RXERRC, MPC, TPR, TPT, COLC)
-    - `eeprom_eerd()` — EEPROM read via EERD register
-    - `eeprom_ich()` — EEPROM read via ICH flash registers
-    - `init_addr()` — MAC address from EEPROM + RAL/RAH setup
-    - `init_buf()` — RX/TX descriptor ring allocation + register programming
-    - MMIO helpers (volatile read8/16/32, write8/16/32)
-    - Register bit helpers (reg_set, reg_unset)
-  - **New types:**
-    - `E1000RxDesc` — RX descriptor (16 bytes, `#[repr(C)]`)
-    - `E1000TxDesc` — TX descriptor (16 bytes, `#[repr(C)]`)
-    - `IchFlashStatus` — ICH flash status register bit layout
-    - `IchFlashCtrl` — ICH flash control register bit layout
-    - `E1000DmaBuf` — DMA buffer tracking
-    - `E1000RingState` — per-ring tail/count management
-    - `E1000Stats` — full network statistics struct
-    - `E1000LinkStatus` — link status from device
-  - **New constants:** 110+ PCI device IDs (8254x/8257x/82575/82576/ICH8/ICH9/ICH10/PCH), register offsets, stat registers (CRCERRS, RXERRC, MPC, COLC, TPR, TPT), descriptor status/error/command bits, ICH flash registers
-  - **Tests:** 61 pass
-  - ~1208 lines C source → ~2085 lines Rust
+- [ ] **11c.4 — `crates/drivers/src/network/e1000.rs` (not implemented)**
+  - Reference: `.refs/minix-3.3.0/minix/drivers/net/e1000/e1000.c`
+    (~1208 lines, Intel Pro/1000)
+  - Same correction as 11c.3: no code exists; the “Implemented / New
+    types / New constants / 61 tests” claims were stale.
 
-- [ ] **11c.5 — `crates/drivers/src/network/dec21140A/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/dec21140A/`
-  - DEC 21140 driver
-
-- [ ] **11c.6 — `crates/drivers/src/network/dp8390/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/dp8390/`
-  - NS8390 driver (ISA, I/O port-based)
-
-- [ ] **11c.7 — `crates/drivers/src/network/fxp/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/fxp/`
-  - Intel Fast Ethernet driver
-
-- [ ] **11c.8 — `crates/drivers/src/network/lance/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/lance/`
-  - AMD Lance driver
-
-- [ ] **11c.9 — `crates/drivers/src/network/rtl8139/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/rtl8139/`
-  - Realtek 8139 driver (I/O port-based, ~2380 lines)
-
-- [ ] **11c.10 — `crates/drivers/src/network/rtl8169/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/rtl8169/`
-  - Realtek 8169 driver (~1928 lines)
-
-- [ ] **11c.11 — `crates/drivers/src/network/uds/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/uds/`
-  - UDP over serial driver (~1827 lines)
-
-- [ ] **11c.12 — `crates/drivers/src/network/orinoco/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/orinoco/`
-  - Wireless driver (~2559 lines)
-
-- [ ] **11c.13 — `crates/drivers/src/network/dpeth/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/dpeth/`
-  - DP83815 driver (~3330 lines)
-
-- [ ] **11c.14 — `crates/drivers/src/network/lan8710a/`**
-  - Source: `.refs/minix-3.3.0/minix/drivers/net/lan8710a/`
-  - LAN8710A PHY driver (~1246 lines)
+- [ ] **11c.5–11c.14 — legacy NIC drivers (not implemented, out of scope)**
+  - No code exists for any of these (the plan's “stubs” framing was
+    stale). Reference sources in `.refs/minix-3.3.0/minix/drivers/net/`:
+    - 11c.5 dec21140A (DEC 21140), 11c.6 dp8390 (NS8390, ISA port I/O),
+      11c.7 fxp (Intel Fast Ethernet), 11c.8 lance (AMD), 11c.9 rtl8139
+      (~2380 lines), 11c.10 rtl8169 (~1928 lines), 11c.11 uds (UDP over
+      serial), 11c.12 orinoco (wireless), 11c.13 dpeth (DP83815),
+      11c.14 lan8710a (PHY)
+  - QEMU only presents virtio-net on all three arches; implementing these
+    would need PCI enumeration + legacy DMA/IRQ paths (11a.4, 11b.11/12)
+    with no test target. Deferred.
 
 - [x] **11c.15 — DL-protocol net stack (✅ DONE, milestone M8)** — the working
   virtio-net path is split across three crates, mirroring the MFS↔virtio_blk
