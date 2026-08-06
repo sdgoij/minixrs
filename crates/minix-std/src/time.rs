@@ -17,6 +17,10 @@
 //! PM_CLOCK_SETTIME = 0x023
 //! PM_GETTIMEOFDAY  = 0x01C
 //! ```
+//!
+//! Note: the PM server implements `PM_GETTIMEOFDAY` (0x01C) but has no
+//! handler for `PM_CLOCK_GETTIME` (0x022) — dispatch falls through to
+//! `no_sys`. `clock_gettime` therefore routes through `PM_GETTIMEOFDAY`,
 
 #![allow(dead_code)]
 
@@ -97,10 +101,19 @@ const OFF_TYPE: usize = 4;
 // (payload starts at 8). The old OFF_TYPE = 8 wrote the call number into
 // m1i1, so PM read garbage as call 0 and every wrapper misdispatched.
 
-// CLOCK_GETTIME / CLOCK_GETRES
-const OFF_CLOCK_ID: usize = 12; // i32
-const OFF_CLOCK_SEC: usize = 16; // i64
-const OFF_CLOCK_NSEC: usize = 24; // i64
+// CLOCK_SETTIME (PM_CLOCK_SETTIME) — mess_lc_pm_time layout (C ipc.h):
+//   sec @ 8 (time_t i64), clk_id @ 16 (i32), now @ 20 (i32), nsec @ 24 (i64).
+const OFF_CLOCK_SEC: usize = 8; // i64 (time_t)
+const OFF_CLOCK_ID: usize = 16; // i32 (clockid_t)
+const OFF_CLOCK_NOW: usize = 20; // i32 (1 = set, 0 = adjtime)
+const OFF_CLOCK_NSEC: usize = 24; // i64 (long)
+
+// GETTIMEOFDAY — the PM call that actually answers clock_gettime. Reply
+// layout: m2l1 = tv_sec, m2l2 = tv_usec. The M2 member starts at payload
+// offset 8; m2l1 lands at absolute 24, m2l2 at absolute 32 (same as the
+// SIGACTION m2l1/m2l2/m2l3 offsets below).
+const OFF_TIMEVAL_SEC: usize = 24; // i64 (m2l1)
+const OFF_TIMEVAL_USEC: usize = 32; // i64 (m2l2)
 
 // KILL (PM handle_kill: m1i1 = signo, m1i2 = pid)
 const OFF_KILL_PID: usize = 12; // i32
@@ -166,20 +179,26 @@ unsafe fn pm_call(msg: &mut Message) -> Result<i32, MinixErr> {
 // Clock operations
 
 /// Get the current time for the given clock.
+///
+/// The PM server has no `PM_CLOCK_GETTIME` (34) handler — dispatch falls
+/// through to `no_sys` — so this routes through `PM_GETTIMEOFDAY` (28),
+/// which answers with `m2l1 = tv_sec`, `m2l2 = tv_usec`. The microseconds
+/// are converted to nanoseconds to fill `TimeSpec`.
 pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
+        // PM exposes a single realtime clock; the clock id is not honored.
+        let _ = clock_id;
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
-        msg_set_i32(&mut msg, OFF_CLOCK_ID, clock_id);
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETTIMEOFDAY as i32);
 
         match pm_call(&mut msg) {
             Ok(_) => {
-                let sec = msg_i64(&msg, OFF_CLOCK_SEC);
-                let nsec = msg_i64(&msg, OFF_CLOCK_NSEC);
+                let sec = msg_i64(&msg, OFF_TIMEVAL_SEC);
+                let usec = msg_i64(&msg, OFF_TIMEVAL_USEC);
                 Ok(TimeSpec {
                     tv_sec: sec,
-                    tv_nsec: nsec,
+                    tv_nsec: usec * 1_000,
                 })
             }
             Err(e) => Err(e),
@@ -193,40 +212,37 @@ pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
 }
 
 /// Get the resolution of the given clock.
-pub fn clock_getres(clock_id: i32) -> Result<TimeSpec, MinixErr> {
+///
+/// The PM server exposes a single microsecond-resolution clock (its
+/// `PM_GETTIMEOFDAY` reply carries `tv_usec`), so the resolution is fixed
+/// at 1 µs and no IPC is needed.
+pub fn clock_getres(_clock_id: i32) -> Result<TimeSpec, MinixErr> {
     #[cfg(target_os = "none")]
-    unsafe {
-        let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETRES as i32);
-        msg_set_i32(&mut msg, OFF_CLOCK_ID, clock_id);
-
-        match pm_call(&mut msg) {
-            Ok(_) => {
-                let sec = msg_i64(&msg, OFF_CLOCK_SEC);
-                let nsec = msg_i64(&msg, OFF_CLOCK_NSEC);
-                Ok(TimeSpec {
-                    tv_sec: sec,
-                    tv_nsec: nsec,
-                })
-            }
-            Err(e) => Err(e),
-        }
+    {
+        Ok(TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 1_000,
+        })
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = clock_id;
         Err(MinixErr::ENOSYS)
     }
 }
 
 /// Set the time of the given clock.
+///
+/// Only `CLOCK_REALTIME` is settable, and only by root — PM answers
+/// `EPERM` otherwise. The request uses the C `mess_lc_pm_time` layout
+/// with `now = 1` (set, not adjtime).
 pub fn clock_settime(clock_id: i32, tp: &TimeSpec) -> Result<(), MinixErr> {
     #[cfg(target_os = "none")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_SETTIME as i32);
-        msg_set_i32(&mut msg, OFF_CLOCK_ID, clock_id);
         msg_set_i64(&mut msg, OFF_CLOCK_SEC, tp.tv_sec);
+        msg_set_i32(&mut msg, OFF_CLOCK_ID, clock_id);
+        msg_set_i32(&mut msg, OFF_CLOCK_NOW, 1); // now = 1: set the clock
         msg_set_i64(&mut msg, OFF_CLOCK_NSEC, tp.tv_nsec);
 
         match pm_call(&mut msg) {
@@ -608,12 +624,30 @@ mod tests {
 
     #[test]
     fn test_clock_gettime_message_format() {
+        // clock_gettime routes through PM_GETTIMEOFDAY (0x01C): PM has no
+        // PM_CLOCK_GETTIME (0x022) handler, so the reply comes from
+        // do_time (m2l1 = tv_sec @ 24, m2l2 = tv_usec @ 32).
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
-        msg_set_i32(&mut msg, OFF_CLOCK_ID, CLOCK_REALTIME);
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETTIMEOFDAY as i32);
 
-        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x022);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x01C);
+    }
+
+    #[test]
+    fn test_clock_settime_message_format() {
+        // mess_lc_pm_time layout: sec @ 8, clk_id @ 16, now @ 20, nsec @ 24.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_SETTIME as i32);
+        msg_set_i64(&mut msg, OFF_CLOCK_SEC, 42);
+        msg_set_i32(&mut msg, OFF_CLOCK_ID, CLOCK_REALTIME);
+        msg_set_i32(&mut msg, OFF_CLOCK_NOW, 1);
+        msg_set_i64(&mut msg, OFF_CLOCK_NSEC, 500);
+
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x023);
+        assert_eq!(msg_i64(&msg, OFF_CLOCK_SEC), 42);
         assert_eq!(msg_i32(&msg, OFF_CLOCK_ID), 0);
+        assert_eq!(msg_i32(&msg, OFF_CLOCK_NOW), 1);
+        assert_eq!(msg_i64(&msg, OFF_CLOCK_NSEC), 500);
     }
 
     #[test]

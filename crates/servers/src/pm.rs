@@ -77,6 +77,7 @@ pub const TAINTED: u32 = 0x40000;
 pub const ENOSYS: i32 = -71;
 pub const EINVAL: i32 = -22;
 pub const EAGAIN: i32 = -11;
+pub const EPERM: i32 = -1;
 
 // SigSet — signal set type (sigset_t equivalent)
 
@@ -2827,6 +2828,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         29 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEUID
         30 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEGID
         32 => unsafe { no_sys(caller_slot, msg) }, // PM_GETSID
+        35 => unsafe { handle_clock_settime(caller_slot, msg) }, // PM_CLOCK_SETTIME
         36 => unsafe { handle_rusage(caller_slot, msg) }, // PM_GETRUSAGE
         37 => unsafe { handle_reboot(caller_slot, msg) }, // PM_REBOOT
         42 => unsafe { handle_srv_kill(caller_slot, msg) }, // PM_SRV_KILL
@@ -3505,6 +3507,50 @@ pub unsafe fn do_time(caller_slot: usize, msg: &mut Message) -> i32 {
 #[cfg(not(target_os = "none"))]
 pub unsafe fn do_time(_caller_slot: usize, _msg: &mut Message) -> i32 {
     ENOSYS
+}
+
+/// Handler for PM_CLOCK_SETTIME — set the realtime clock via SYS_SETTIME.
+///
+/// Matching C: `do_settime()` in `minix/servers/pm/time.c`. Only root may
+/// set the clock and only `CLOCK_REALTIME` is settable (the kernel enforces
+/// the latter). The request carries the C `mess_lc_pm_time` layout (sec @ 8,
+/// clk_id @ 16, now @ 20, nsec @ 24); it is forwarded to the kernel as
+/// `mess_lsys_krn_sys_settime` (SYS_SETTIME, kernel call 40).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+#[allow(unused_unsafe)]
+pub unsafe fn handle_clock_settime(caller_slot: usize, msg: &mut Message) -> i32 {
+    unsafe {
+        if caller_slot >= NR_PROCS {
+            return EINVAL;
+        }
+        let base = MPROC.as_ptr();
+        let rmp = &*base.add(caller_slot);
+        if rmp.mp_flags & IN_USE == 0 {
+            return EINVAL;
+        }
+        // Only root (uid 0) may set the clock (C: mp->mp_effuid != SUPER_USER).
+        if rmp.mp_effuid != 0 {
+            return EPERM;
+        }
+
+        // mess_lc_pm_time (C ipc.h): sec @ 8, clk_id @ 16, now @ 20, nsec @ 24.
+        let sec = i64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap_or([0; 8]));
+        let clock_id = i32::from_le_bytes(msg.m_payload.raw[8..12].try_into().unwrap_or([0; 4]));
+        let now = i32::from_le_bytes(msg.m_payload.raw[12..16].try_into().unwrap_or([0; 4]));
+        let nsec = i64::from_le_bytes(msg.m_payload.raw[16..24].try_into().unwrap_or([0; 8]));
+
+        // SYS_SETTIME (kernel call 40): payload @ 8 — sec, nsec, now, clock_id.
+        let mut sys_msg = [0u8; 64];
+        sys_msg[8..16].copy_from_slice(&sec.to_le_bytes());
+        sys_msg[16..24].copy_from_slice(&nsec.to_le_bytes());
+        sys_msg[24..28].copy_from_slice(&now.to_le_bytes());
+        sys_msg[28..32].copy_from_slice(&clock_id.to_le_bytes());
+        minix_rt::kernel_call(40, &mut sys_msg)
+    }
 }
 
 /// Return resource usage — PM_GETRUSAGE handler.

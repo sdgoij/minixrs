@@ -420,15 +420,17 @@ const SETALARM_ABS_TIME_OFF: usize = 16;
 //   offset 0: boot_time (time_t / i64)
 const STIME_BOOT_TIME_OFF: usize = 0;
 
-// mess_lsys_krn_sys_settime (for do_settime):
-//   offset  0: sec       (time_t / i64)
-//   offset  8: nsec      (long / i64)
-//   offset 16: now       (int / i32)
-//   offset 20: clock_id  (clockid_t / i32)
-const SETTIME_SEC_OFF: usize = 0;
-const SETTIME_NSEC_OFF: usize = 8;
-const SETTIME_NOW_OFF: usize = 16;
-const SETTIME_CLOCK_ID_OFF: usize = 20;
+// mess_lsys_krn_sys_settime (for do_settime). kbuf[0..4] = call number,
+// kbuf[4..8] = source endpoint (set by sys_kernel_call_handler), so the
+// payload starts at offset 8 like every other SYS_* handler:
+//   offset  8: sec       (time_t / i64)
+//   offset 16: nsec      (long / i64)
+//   offset 24: now       (int / i32)
+//   offset 28: clock_id  (clockid_t / i32)
+const SETTIME_SEC_OFF: usize = 8;
+const SETTIME_NSEC_OFF: usize = 16;
+const SETTIME_NOW_OFF: usize = 24;
+const SETTIME_CLOCK_ID_OFF: usize = 28;
 
 // mess_2 offsets (for do_vtimer):
 //   offset  0: m2ll1 (i64)
