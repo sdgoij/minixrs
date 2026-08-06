@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This plan describes a phased, incremental port of the [Minix 3.3.0](https://www.minix3.org/) microkernel operating system from C to Rust. Minix 3.3.0 targets x86 (i386) and ARM. The Rust port adds **x86_64 as the primary target** (not just i386) with **RISC-V64 as a bonus second architecture**.
+This plan describes a phased, incremental port of the [Minix 3.3.0](https://www.minix3.org/) microkernel operating system from C to Rust. Minix 3.3.0 targets x86 (i386) and ARM. The Rust port adds **x86_64 as the primary target** (not just i386), with **RISC-V64** and **AArch64** as fully implemented additional architectures — all three boot to a shell in QEMU.
 
 The port is composed of:
 
@@ -18,7 +18,7 @@ The port is composed of:
 | **Filesystems** | MINIX FS, ext2, MFS, etc. | `.refs/minix-3.3.0/minix/fs/` | Port |
 | **Userland** | ~145 commands | `.refs/minix-3.3.0/bin/`, `usr.bin/`, `usr.sbin/`, `sbin/`, `minix/commands/` | Port |
 | **Libraries** | libc, libm, libutil, libz, etc. | `.refs/minix-3.3.0/lib/`, `.refs/minix-3.3.0/minix/lib/` | Port |
-| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP (M8) + UDP/TCP sockets over /dev/udp,/dev/tcp (16.1a/b) |
+| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — own-stack ARP/ICMP + UDP/TCP sockets (16.0–16.1e); the reference inet/lwIP stack is not ported, IPv6 is planned (16.4) |
 
 - A **kernel** (`sys/arch/*/compile/GENERIC` + `minix/kernel/`)
 - **System servers** as user-space processes (VM, VFS, SCHED, RS, PM, DS, IPC, TTY)
@@ -29,7 +29,7 @@ The port is composed of:
 - **Driver libraries** (`minix/lib/lib*driver*`)
 - **Network stack** (`sys/net/`, `sys/netinet/`, `sys/netinet6/`)
 
-The port preserves the **entire architectural design** — message-passing IPC, privilege separation, grant-based memory sharing, capability-based I/O permissions — but rewrites the implementation in Rust. The target is a **1:1 functional equivalent** running on the same x86 (and optionally ARM) hardware.
+The port preserves the **entire architectural design** — message-passing IPC, privilege separation, grant-based memory sharing, capability-based I/O permissions — but rewrites the implementation in Rust. The target is a **1:1 functional equivalent** running on all three target architectures (x86_64, RISC-V64, AArch64).
 
 ### Current Status (2026-08)
 
@@ -125,7 +125,7 @@ a dedicated `Proc.p_t6` slot (the old layout lost it to `sstatus`).
 
 ### Targets
 
-The Rust port targets two architectures:
+The Rust port targets three architectures:
 
 | Target | Custom JSON spec | Notes |
 |--------|-----------------|-------|
@@ -142,16 +142,24 @@ The Rust port targets two architectures:
     minixrs/
     ├── Cargo.toml                  # workspace root (edition = "2024", rust-version = "1.96")
     ├── x86_64-pc-minix.json        # x86_64 custom target (primary)
-    ├── riscv64gc-unknown-minix.json # RISC-V64 GC custom target (bonus)
+    ├── riscv64gc-unknown-minix.json # RISC-V64 GC custom target
+    ├── aarch64-unknown-minix.json  # AArch64 custom target
     ├── crates/
     │   ├── arch-common/            # arch-independent kernel primitives
     │   ├── arch-x86_64/            # x86_64-specific kernel code
-    │   ├── arch-riscv64/           # RISC-V64-specific kernel code (bonus)
+    │   ├── arch-riscv64/           # RISC-V64-specific kernel code
+    │   ├── arch-aarch64/           # AArch64-specific kernel code
+    │   ├── boot-image/             # initramfs/minixfs image builders + boot manifest
     │   ├── drivers/                # driver framework + individual drivers
     │   ├── fs/                     # filesystem crates
     │   ├── kernel/                 # core kernel (processes, scheduling, IPC, VM)
-    │   ├── libs/                   # libc, libm, libutil, etc.
-    │   ├── net/                    # networking stack
+    │   ├── kernel-boot/            # boot binary crate (trampoline → kmain)
+    │   ├── libs/                   # libminixfs, vtreefs, etc.
+    │   ├── minix-rt/               # userspace runtime (_start, allocator, syscalls)
+    │   ├── minix-std/              # userspace std-like API over server IPC
+    │   ├── minix-libc/             # minimal C ABI FFI wrappers
+    │   ├── minix-util/             # device/FS client helpers (bdev, cdev, ds, devman)
+    │   ├── net/                    # networking protocol definitions
     │   ├── servers/                # system server crates
     │   └── userland/               # userland command binaries
     └── tools/                      # build tools, linker scripts
@@ -1028,88 +1036,11 @@ Implement each `do_*` function in `.refs/minix-3.3.0/minix/kernel/system/`:
 
 ### Implementation notes
 
-**Group 1 (tasks 5.1–5.4): Stub handlers registered in `system_init()`.**
-
-`do_exit` has a minimal working body (causes SIGABRT, returns EDONTREPLY).
-The others (`do_fork`, `do_exec`, `do_clear`) are full skeleton stubs —
-they return a constant and have detailed doc comments mapping each C line
-to its Rust counterpart. Full bodies wait for VM server and IPC msg access.
-
-**Group 2 (tasks 5.5–5.9): `todo!()` stubs registered in `system_init()`.**
-
-These use `todo!()` so they panic at runtime — impossible to miss during
-debugging. Each `todo!()` message explains the missing dependency:
-
-- `do_copy` — needs `virtual_copy` / `virtual_copy_vmcheck` from vm module
-- `do_umap` — delegates to `do_umap_remote`
-- `do_umap_remote` — needs `vm_lookup`, `vm_lookup_range`, `verify_grant`
-- `do_vumap` — needs vector processing + `vm_lookup_range` + `verify_grant`
-- `do_memset` — needs `vm_memset` from vm module
-
-All 5 are registered in `CALL_VEC` via `map_syscall()`, so dispatch works
-and only the runtime call path fails when invoked.
-
-**Group 3 (tasks 5.10–5.11): Stub handlers registered in `system_init()`.**
-
-- `do_abort` — calls `prepare_shutdown(how)`, returns OK
-- `do_getinfo` — large switch with ~20 request types (GET_MACHINE, GET_KINFO,
-  GET_PROCTAB, GET_PROC, GET_PRIV, GET_REGS, GET_WHOAMI, GET_RUSAGE,
-  GET_RANDOMNESS, etc.), each setting src_vir and length for data_copy
-
-**Group 4 (tasks 5.12–5.14, 5.17):**
-
-- `do_privctl` — stub with `todo!()`, needs data_copy + 10+ privilege handlers
-- `do_irqctl` — stub with `todo!()`, needs irq_hooks + put_irq_handler
-- `do_devio` — stub with `todo!()`, needs priv() macro + inb/outb etc.
-- `do_kill` — **REAL implementation** (not a stub). Validates endpoint,
-  signal range, rejects kernel targets, calls cause_sig. Includes 3 tests:
-  `test_do_kill_invalid_endpoint`, `test_do_kill_signal_number_bounds`,
-  `test_do_kill_kernel_target_rejected`
-
-**Group 5 (tasks 5.15–5.16, 5.18–5.21): `todo!()` stubs registered in `system_init()`.**
-
-- `do_sdevio` — single device I/O, needs `priv()` + CHECK_IO_PORT + inb/outb
-- `do_vdevio` — vectored device I/O, same deps + `data_copy` + loop over entries
-- `do_getksig` — signal manager query, needs proc table iteration + sig_mgr check
-- `do_endksig` — end kernel signal, needs sig_mgr check + RTS_SIG_PENDING
-- `do_sigsend` — POSIX signal send, needs `data_copy_vmcheck` + sigframe setup
-- `do_sigreturn` — signal return, needs `arch_proc_setcontext` + sigcontext restore
-
-**Group 6 (tasks 5.22–5.28): `todo!()` stubs registered in `system_init()`.**
-
-- `do_times` — timing info, needs proc accounting fields + monotonic/realtime
-- `do_setalarm` — alarm timer, needs `priv()` + s_alarm_timer + timer APIs
-- `do_vtimer` — virtual timer, needs MF_VIRT/MF_PROF flags + tick-left fields
-- `do_runctl` — process stop/resume, needs RTS_PROC_STOP + RC_DELAY logic
-- `do_statectl` — state control, needs `clear_ipc_refs` dispatch
-- `do_schedule` — process scheduling, needs RTS_NEEDS_SCHEDULE + enqueue
-- `do_schedctl` — scheduling control, needs SCHEDCTL_FLAG_KERNEL + params
-
-**Group 7 (tasks 5.29–5.32): `todo!()` stubs registered in `system_init()`.**
-
-- `do_setgrant` — grant table setup, needs `priv()` + _K_SET_GRANT_TABLE
-- `do_trace` — ptrace (15+ commands), needs vmcheck + ptrace dispatch
-- `do_safecopy_from` — safe copy from, needs verify_grant + virtual_copy
-- `do_safecopy_to` — safe copy to, needs verify_grant + virtual_copy
-- `do_vsafecopy` — vectored safe copy, needs vector loop + safecopy
-
-**Group 8 (tasks 5.33–5.39): `todo!()` stubs registered in `system_init()`.**
-
-- `do_vmctl` — VM control, needs VM parameter dispatch + arch_phys_map
-- `do_settime` / `do_stime` — time of day, needs clock time update
-- `do_getmcontext` / `do_setmcontext` — machine context, needs proc_addr + copy
-- `do_diagctl` — diagnostic control, needs DIAGCTL_CODE dispatch + buffer
-  - `DIAGCTL_CODE_STACKTRACE` deferred to Phase 8.9 when `proc_stacktrace()` is
-    available (arch-specific stack frame walk)
-- `do_cprofile` / `do_profbuf` — call profiling, needs profile buffer control
-- `do_update` — live update, needs update handshake
-- `do_safememset` — grant-based memset, needs verify_grant + vm_memset
-
-All remaining Phase 5 syscalls (5.5–5.16, 5.18–5.39) are registered in `CALL_VEC`
-via `map_call()` and use `stub_handler!` or `todo!()` stubs with detailed
-documentation of the C-line-by-line porting logic. Each stub clearly states its
-dependencies so future implementers know what's needed.
-  - Tests: Unit test for the syscall handler; verify return codes; test with userspace program that issues the syscall
+All handlers (5.1–5.41) are implemented with real bodies — the historical
+"stub handler" / "`todo!()` stub" groupings below were removed in the
+Phase 5 completion pass. Per-syscall implementation details, QA fixes and
+test counts are recorded in the individual task entries above and in the
+Phase 5 Status below.
 
 **Phase 5 Status**: ALL syscalls implemented with real handlers.
 All ~50 syscall handlers are live (SYS_FORK through SYS_SPROF).
@@ -1372,8 +1303,9 @@ do_physcopy) has a real implementation.
     chunk size for 4KB/2MB/1GB pages, 0 if unmapped.
   - Tests: 253 kernel tests pass (vm_lookup_range error paths + vumap handler)
 
-**Phase 6 Status**: All 17 tasks complete (6.1-6.17).
-and stack pages, preventing one process from reading or writing another's memory.
+**Phase 6 Status**: All 17 tasks complete (6.1-6.17). Per-process page
+tables give each process its own kernel page permissions, preventing one
+process from reading or writing another's memory.
 This spans VM (page table construction via `kernel::pagetable`), arch-x86_64 (CR3
 save/restore via `arch_x86_64::asm::read_cr3`/`write_cr3`), and IPC (message delivery
 under target's CR3 via `kernel::ipc`).
@@ -1566,7 +1498,7 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - Bugfix: `tmrs_settimer` was incorrectly clearing `tmr_arg`, breaking do_setalarm
   - Tests: 279 kernel tests pass (all handlers replaced stubs)
 
-- [x] **7.3 — Port `minix/kernel/smp.c`**
+- [x] **7.3b — Port `minix/kernel/smp.c`**
   - Source: `.refs/minix-3.3.0/minix/kernel/smp.c`
   - SMP boot, IPI handling, per-CPU lock management
   - Implementation: `crates/kernel/src/smp.rs` (340 lines)
@@ -1587,10 +1519,12 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - Time resolution queries, alarm timer management
   - 13 tests covering resolution, time specs, tick advancement, adjtime
 
-- [x] **7.5 — Port `minix/servers/pm/` Power Manager** (types + infra)
+- [x] **7.5 — Port `minix/servers/pm/` Power Manager** (full server)
   - Source: `.refs/minix-3.3.0/minix/servers/pm/` (all `.c` files)
   - Power management protocol, ACPI integration
-  - Implementation: `crates/servers/src/pm.rs` (480 lines)
+  - Implementation: `crates/servers/src/pm.rs` (~4,700 lines) — the full
+    Process Manager: fork/exit/waitpid, signals, exec, process table
+    (see also 12.3, 12.25, 14.C)
   - `SigSet` for signal masks (128-bit, 6 operations)
   - `Itimerval`/`TimeVal` for interval timers with ITIMER_REAL/VIRTUAL/PROF
   - `MProc` process manager slot with 40 fields matching `mproc.h` layout
@@ -1599,6 +1533,7 @@ so their saved value is BOOT_CR3 and the restore is a no-op.
   - Alarm management: `set_alarm`, `alarm_is_active`, `cancel_alarm`
   - Bug fix: `free_proc` correctly decrements `PROCS_IN_USE`
   - 22 tests covering sigset ops, process allocation, alarm lifecycle
+    (57 test functions in the current file)
 
 ---
 
@@ -1938,7 +1873,7 @@ from the same source, with architecture-specific code cleanly separated.
 - CLINT (Core-Local Interrupt Controller) for timer interrupts
 - PLIC (Platform-Level Interrupt Controller) for device interrupts
 - NS16550a UART at 0x10000000
-- Virtio block/network (future)
+- Virtio block/network (implemented, Phase 11b/11c)
 
 **Reference ports in `.refs/minix-3.3.0`:**
 - `minix/kernel/arch/earm/` — ARM trap handling, context switch, page tables
@@ -2553,12 +2488,12 @@ step, `cargo check -p kernel --target x86_64-pc-minix` must pass and
 | M-RV5 ✅ | Full multi-process boot (PM/RS/VFS/init) | `init: booting MINIX/Rust` printed |
 | M-RV6 ✅ | ECALL sepc increment (prevents ecall loop) | `init: pid=10; starting shell...` |
 | M-RV7 ✅ | Shell prompt (`#`) | `just run-riscv64` shows shell |
-| M-RV8 🏗️ | External commands work | fork/exec + VFS support |
+| M-RV8 ✅ | External commands work | fork/exec + VFS support |
 
-**Stretch goals (after M-RV3):**
-- Run the x86_64 userland binaries (same initramfs, different ELF target)
-- RISC-V MFS + VFS for filesystem-backed binaries
-- RISC-V TTY server for keyboard input
+**Stretch goals (all completed):**
+- x86_64 and RISC-V userland binaries in the same initramfs (per-arch builds)
+- RISC-V MFS + VFS for filesystem-backed binaries (Phase 9/10, shared code)
+- RISC-V TTY server for keyboard input (Phase 12.7, shared code)
 
 
 
@@ -3756,7 +3691,7 @@ MMIO transport (no PCI).
   - Verified: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
     and AArch64 (QEMU SLIRP, guest 10.0.2.15 / gateway 10.0.2.2)
   - The same `net` server also hosts the **UDP/TCP socket layer** (Phase
-    16.1a/b) on `/dev/udp` and `/dev/tcp`; see the Phase 16 task list
+    16.1a–e) on `/dev/udp` and `/dev/tcp`; see the Phase 16 task list
 
 ### Phase 11d: Input & display drivers
 
@@ -4442,10 +4377,10 @@ be replaced with real implementations.
   3. **`reply()`** — writes result code into `fs_m_out[4..8]` and calls
      `minix_rt::syscall2(SENDREC_CALL=48, dest, &fs_m_out)` to send reply.
      No-op on host builds.
-  
-  **Follow-up:** All VFS call handlers (do_open, do_read, do_getdents, etc.)
-  still return ENOSYS — they need FS request layer implementations that
-  talk to underlying filesystem servers (MFS, PFS, ProcFS).
+  **Follow-up complete:** all VFS call handlers (do_open, do_read,
+  do_getdents, etc.) are wired through the FS request layer to the
+  filesystem servers — verified by `ls`/`cat` on a mounted MFS root
+  (M4/M5/M7 milestones).
 
 - [x] **12.27 — Route VFS syscalls from kernel to VFS server** (`kernel/src/syscall.rs`)
   **Depends on:** VFS server message loop (12.26), IPC syscall handlers
@@ -4595,7 +4530,7 @@ userspace crate
     (SIGHUP=1 through SIGSYS=31) and sa_flags (SA_NOCLDSTOP through SA_NODEFER)
   - 23 tests, 121 total minix-std tests pass, clippy clean
 
-- [x] **13.7 — Networking (socket layer, Phase 16.1a/b)**
+- [x] **13.7 — Networking (socket layer, Phase 16.1a–e)**
   - `socket`: real dispatch — `(AF_INET, SOCK_DGRAM, IPPROTO_UDP)` opens
     `/dev/udp` with an implicit ephemeral bind; `(AF_INET, SOCK_STREAM,
     IPPROTO_TCP)` opens `/dev/tcp`; `(AF_INET, SOCK_RAW, IPPROTO_ICMP)`
@@ -4606,8 +4541,9 @@ userspace crate
   - `send` / `recv`: `write`/`read` — whole datagrams for UDP, a byte
     stream for TCP
   - `close`: frees the net server's clone-minor socket slot
-  - `listen` / `accept` / `getsockopt` / `setsockopt`: not implemented —
-    the server-side TCP and the full reference inet stack are Phase 16.1+
+  - `listen` / `accept` — implemented (16.1c): `NWIOTCPLISTENQ` + cookie
+    transfer; `getsockopt` / `setsockopt` not implemented (only the
+    `NWIOTCPGERROR` SO_ERROR read via ioctl)
   - Implemented in `crates/minix-std/src/net.rs` with socket constants
     (AF_INET=2, SOCK_STREAM=1, IPPROTO_TCP=6, SOL_SOCKET=1,
     SO_REUSEADDR=0x04, SO_KEEPALIVE=0x08, etc.)
@@ -4618,13 +4554,15 @@ userspace crate
 
 - [x] **13.8 — Minimal `libc` for FFI**
   - Thin wrappers over `minix-std` with C ABI
-  - `open`, `read`, `write`, `close`, `lseek`
-  - `fork`, `exit`, `waitpid`, `execve`
-  - `mmap`, `munmap`, `brk`
-  - `clock_gettime`, `nanosleep`
-  - `sigaction`, `kill`, `sigprocmask`
-  - `getpid`, `getuid`, `getgid`
-  - Tests: each function called from Rust `extern "C"` wrappers
+  - File I/O: `open`, `read`, `write`, `close`, `lseek`
+  - Process: `fork`, `exit`, `getpid`
+  - Memory: `mmap`, `munmap`
+  - Time: `clock_gettime`; signals: `kill`, `sigprocmask`, `signal`, `sigaction`
+  - Sockets: `socket`, `bind`, `connect`, `sendto`, `recvfrom`, `shutdown`,
+    `send`, `recv`, `listen`, `accept`, `getpeername`, `getsockname`
+  - Utility: `strlen`, `memset`, `memcpy`, `memmove`
+  - Tests: each function called from Rust `extern "C"` wrappers; signature
+    checks for the socket/sendto/recvfrom/shutdown ABIs
 
 - [x] **13.9 — `crates/minix-util` utility crate** (`crates/minix-util/`)
   - Device manager client (`devman.rs`): add/del/bind/unbind devices, add devfiles
@@ -4770,65 +4708,10 @@ reliable cross-function test patterns.
   Only 3 test-local `static mut` instances remain (permitted by `.rules` exception).
   `cargo clippy --workspace --all-targets -- -D warnings` — 0 Rust warnings.
 
-**Goal**: Port userland commands. These are pure C with no kernel dependencies beyond libc.
-
-### Priority 1 — Boot critical (need to boot the system)
-
-- [ ] **14.1** — `bin/cat` (`.refs/minix-3.3.0/bin/cat/`)
-  - Reads files specified as args (or stdin if none), writes to stdout
-  - 8192-byte buffer, handles errors per-file
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.2** — `bin/cp` (`.refs/minix-3.3.0/bin/cp/`)
-  - Copies source file to destination via open/read/write loop with 8192-byte buffer
-  - Creates destination with O_WRONLY | O_CREAT | O_TRUNC, mode 0644
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.3** — `bin/rm` (`.refs/minix-3.3.0/bin/rm/`)
-  - Removes files via `fs::unlink()`, reports error per path
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.4** — `bin/mkdir` (`.refs/minix-3.3.0/bin/mkdir/`)
-  - Creates directories via `fs::mkdir()` with mode 0755
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.5** — `bin/ln` (`.refs/minix-3.3.0/bin/ln/`)
-  - Creates hard links via `fs::link()`
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.6** — `bin/chmod` (`.refs/minix-3.3.0/bin/chmod/`)
-  - Changes file mode via `fs::chmod()`, parses octal mode from args
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.7** — `sbin/chown` (`.refs/minix-3.3.0/sbin/chown/`)
-  - Changes file owner via `fs::chown()`
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.8** — `bin/ls` (`.refs/minix-3.3.0/bin/ls/`)
-  - Lists directory contents via `fs::getdents()`, parses dirent structs
-  - Filters `.` and `..`, sorts alphabetically, 2-column layout
-  - `DirEntry` parser with full dirent field parsing
-  - Tests: Compare output against reference C version; argument parsing; error handling; edge cases
-- [ ] **14.9** — `bin/echo` (`.refs/minix-3.3.0/bin/echo/`)
-  - Joins args with spaces, appends newline, writes to stdout
-  - Tests: Compare output against reference C version; argument parsing; error handling; edge cases
-- [ ] **14.10** — `bin/sh` — shell (`.refs/minix-3.3.0/bin/sh/`)
-  - Minimal shell: line input with editing, split_line parser, PATH lookup,
-    built-in cd/exit, fork+exec+waitpid for external commands
-  - 6 tests: split_line, search_path
-- [ ] **14.11** — `bin/sync` (`.refs/minix-3.3.0/bin/sync/`)
-  - Flushes filesystem buffers via `fs::sync()`
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.12** — `sbin/init` (`.refs/minix-3.3.0/sbin/init/`)
-  - First userspace process: forks /bin/sh, reaps zombies, respawns shell on exit
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.13** — `sbin/mknod` (`.refs/minix-3.3.0/sbin/mknod/`)
-  - Creates device nodes via `fs::mknod()` (new minix-std wrapper)
-  - Parses type (b/c), major, minor from args
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.14** — `sbin/fsck` (`.refs/minix-3.3.0/sbin/fsck/`)
-  - Minimal fsck: reads superblock, validates MFS magic number at offset 0x218
-  - 2 tests
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.15** — `sbin/reboot` (`.refs/minix-3.3.0/sbin/reboot/`)
-  - Reboots the system via `process::reboot()` (new minix-std wrapper)
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.16** — `sbin/shutdown` (`.refs/minix-3.3.0/sbin/shutdown/`)
-  - Halts the system via `process::halt()` (new minix-std wrapper)
-  - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
+**Goal**: Port userland commands. These are pure C with no kernel
+dependencies beyond libc. All boot-critical and essential commands below
+are implemented in `crates/userland/` (see the checkboxes and the boot
+manifest).
 
 ---
 
@@ -4878,8 +4761,10 @@ with command execution, timer preemption, and multi-process scheduling.
   - 11 tests: kernel entry points, selectors, RFLAGS, stack pool
 
 - [x] **14.B.5 — initramfs/ramdisk with binaries**
-  - ✅ `tools/mkinitramfs.rs` — CPIO newc archive with 21 boot-critical binaries
-    (14 userland + 7 system servers: pm, vfs, vm, rs, ds, sched, tty)
+  - ✅ `tools/mkinitramfs.rs` — CPIO newc archive with 34 boot-critical
+    binaries (21 userland + 13 servers/drivers: pm, vfs, vm, rs, ds, sched,
+    tty, mfs, pfs, ramdisk, virtio_blk, virtio_net, net) — see
+    `crates/boot-image/src/manifest.rs` for the live list
   - ✅ `tools/mkboot.rs` invokes mkinitramfs after kernel build
   - ✅ `kernel::initramfs` module — CPIO newc parser, `find_initramfs_file()`
   - ✅ `tools/minix-raw.ld` — `.initramfs` section with `__initramfs_start/__initramfs_end`
@@ -4962,7 +4847,7 @@ with command execution, timer preemption, and multi-process scheduling.
   - ✅ 8 VFS kernel syscall stubs registered (40=mkdir through 47=getdents)
     returning ENOSYS — see task 12.27 for VFS IPC routing
   - ✅ 8 minix-rt syscall wrappers added (mkdir, unlink, rmdir, link,
-    chmod, chown, mknod, close) plus NR_* constants The bare-metal
+    chmod, chown, mknod, close) plus NR_* constants. The bare-metal
 test suite (Phase E) proves ring-3 transition works by running a synthetic test
 that jumps to ring-3 and writes the QEMU exit port.
 
@@ -5232,7 +5117,7 @@ Remaining Priority 2 commands (not yet ported):
   - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
 - [ ] **14.71** — `usr.bin/man` (`.refs/minix-3.3.0/usr.bin/man/`)
   - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
-- [ ] **14.72** — `usr.bin/clean` (`.refs/minix-3.3.0/usr.bin/col/`)
+- [ ] **14.72** — `usr.bin/clean` (`.refs/minix-3.3.0/usr.bin/clean/`)
   - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
 - [ ] **14.73** — `usr.bin/colrm` (`.refs/minix-3.3.0/usr.bin/colrm/`)
   - Tests: Compare output against C version with identical inputs; command-line argument parsing; error handling; edge cases
@@ -5853,8 +5738,9 @@ NOT STARTED.
   - Out of scope for v1: v4-mapped addresses, link-local scope IDs,
     MLD/multicast beyond solicited-node, fragmentation, route tables
 
-- [ ] **16.5 — Network drivers** (Phase 11c)
-  - Tests: Network protocol round-trips; socket operations; route table management
+- [x] **16.5 — Network drivers** — done: virtio-net on all three arches via
+  the DL protocol (see Phase 11c.15); legacy NIC drivers are out of scope
+  (11c.3–11c.14)
 
 ---
 
@@ -5864,17 +5750,17 @@ NOT STARTED.
 
 ### Tasks
 
-- [ ] **17.1 — Port `tools/` — Minix build tools**
-  - Source: `.refs/minix-3.3.0/tools/`
-  - Kernel configuration generator, assembly listing tools, `bumpversion`, `checkoldver`, `checkver`, `checkvers`, kernel module tools, `genassym`
+- [ ] **17.1 — Port `tools/` — Minix build tools** — obsolete: the C build
+toolchain is replaced by the Rust pipeline (cargo + `jsh`); the reference
+tools are not ported.
   - Tests: Build tool output matches expected format; linker script produces correct ELF layout
 
-- [ ] **17.2 — Port `releasetools/` — Release engineering**
+- [ ] **17.2 — Port `releasetools/` — Release engineering** — obsolete (see 17.1).
   - Source: `.refs/minix-3.3.0/releasetools/`
   - `build.sh`, snapshot building, distribution packaging
   - Tests: Build tool output matches expected format; linker script produces correct ELF layout
 
-- [ ] **17.3 — Port Makefile.inc patterns**
+- [ ] **17.3 — Port Makefile.inc patterns** — obsolete (see 17.1).
   - Source: `.refs/minix-3.3.0/Makefile.inc`
   - NetBSD Makefile macros, `bsd.*.mk` files
   - Tests: Build tool output matches expected format; linker script produces correct ELF layout
@@ -5887,7 +5773,7 @@ NOT STARTED.
     Rust build tool. `jsh build`, `jsh run`, `jsh test-qemu` available.
   - Tests: Build tool output matches expected format; linker script produces correct ELF layout
 
-- [ ] **17.5 — Userland linker script + build pipeline**
+- [x] **17.5 — Userland linker script + build pipeline**
   - Created `tools/minix-user.ld` — userland linker script linked at 0x01000000:
     - `.text`, `.rodata`, `.data` (with GOT/GOT.PLT/PLT), `.bss` sections
     - `/DISCARD/` for `.eh_frame`, `.note`, `.comment`
@@ -5923,14 +5809,14 @@ NOT STARTED.
   - Tests: Doc tests pass; integration tests for each server; driver mock tests; build-time verification checks
 - [ ] **18.7** — Update README and porting status
   - Tests: Doc tests pass; integration tests per server; driver mock tests; build-time verification
-- [ ] **18.8 — Static MSR constant verification against Intel SDM**
+- [x] **18.8 — Static MSR constant verification against Intel SDM**
   - `msr_constants` test now asserts `IA32_KERNEL_GS_BASE == 0xC0000102` with
     Intel SDM Vol 4 Table 2-7 reference comment.
-- [ ] **18.9 — Static assertion for user stack address within RAM**
+- [x] **18.9 — Static assertion for user stack address within RAM**
   - `user_stack_within_ram` test in kernel-boot asserts stack end < RAM_TOP
     (0x10000000 for 256MB config) and stack base > kernel end.
   - Same constants used by both `boot_init.rs` and `ipc.rs` exec handler.
-- [ ] **18.10 — GDT descriptor runtime verification**
+- [x] **18.10 — GDT descriptor runtime verification**
   - `gdt_kernel_code_matches_trampoline` and `gdt_user_code_matches_trampoline`
     verify full 8-byte descriptors have L=1, D/B=0, G=1 with spec references.
   - `gdt_decode_byte6()` corrected to use Intel SDM bit positions.
@@ -6061,10 +5947,10 @@ scheduler loop. All 8 boot processes (7 servers + init) are loaded into
 memory and enqueued. The kernel's timer ISR triggers round-robin scheduling
 via `proc_no_time()`. Each process gets a turn on the CPU.
 
-**Current blocker:** `kmain` calls `boot_jump_to_user()` which executes
-`sysretq` directly to init and never returns. There is no `restore()`
-function that can context-switch from kernel to an arbitrary user process,
-and no scheduler loop that alternates between processes.
+**Status: ✅ complete** — `kmain` enqueues all 8 boot processes, the PIT
+timer drives preemptive scheduling via `proc_no_time()`, and `restore()`
+context-switches between kernel and arbitrary user processes (see the
+completed CSW1–CSW4 tasks below).
 
 #### Kernel infrastructure
 
@@ -6169,7 +6055,7 @@ Key files and build commands are documented there.
 | M11 | All userland commands functional (x86_64) | Phase 14 | ❌ |
 | M12 | 100% feature parity with C Minix (x86_64) | Phase 18 | ❌ |
 
-### RISC-V64 Milestones (bonus)
+### RISC-V64 Milestones
 
 | Milestone | Description | Target Phase | Status |
 |-----------|-------------|-------------|--------|
@@ -6180,6 +6066,12 @@ Key files and build commands are documented there.
 | M4R | Virtio-blk reads disk + file persistence (RISC-V64) | Phase 19 | ✅ |
 | M5R | Virtio-net sends/receives — ICMP ping works (RISC-V64) | Phase 19 | ✅ |
 | M6R | Complete system boots to shell (RISC-V64) | Phase 14 + 19 | ✅ |
+
+> **Scheduler preemption test:** `test_sched_proc_no_time_preempts` runs in
+> the shared kernel host test harness (`crates/kernel/src/tests.rs`) on all
+> arches — the earlier "RISC-V gating" concern (preemption path returning
+> `None` from `pick_proc`) is resolved and the test is no longer
+> architecture-gated.
 
 ### AArch64 Milestones (third architecture)
 
@@ -6194,35 +6086,6 @@ transport as RISC-V64 (QEMU `virt` machine, cortex-a57).
 | M3A | Virtio-blk reads disk; MFS mounts root via BDEV protocol | ✅ |
 | M4A | File persistence across reboot (write → reboot → read back) | ✅ |
 | M5A | Virtio-net + ICMP ping over SLIRP (real-PID ids) | ✅ |
-
-#### Known Issue: `sched_proc_no_time_preempts` on RISC-V64
-
-**Issue:** The `test_sched_proc_no_time_preempts` test (which validates
-`proc_no_time` → `notify_scheduler` → `mini_send` IPC to a user-space
-scheduler process) is gated on `#[cfg(target_arch = "x86_64")]`.
-On RISC-V64, `sched_make_proc` + `enqueue` + `pick_proc` works for basic
-scheduler tests but the full preemption path causes `pick_proc` to return
-`None` after a successful `enqueue`, suggesting a run-queue state corruption.
-
-**Root cause (suspected):** RISC-V's `init_cpulocals` sets the `tp` register
-to the address of `BOOT_CPU_STORAGE` but does NOT reinitialize the run queue
-arrays beyond what `sched_make_proc` clears. The `proc_no_time` test involves
-privilege structures (Priv, PrivFlags) and scheduler-process IPC delivery
-that may interact differently with the RISC-V HAL's `sched_run_q_head`
-implementation (which reads via `tp`-relative addressing into `PerCpuStorage`).
-
-**Workaround:** The test is conditionally compiled with
-`#[cfg(target_arch = "x86_64")]` and is a no-op on RISC-V (`assert(true)`).
-All other scheduler tests (enqueue/dequeue, priority ordering, round-robin
-cycling) pass on both architectures.
-
-**Fix plan:** One of:
-1. Debug the RISC-V `tp` register handling — ensure `init_cpulocals`
-   properly resets the full `PerCpuStorage` state including run queues.
-2. Refactor `proc_no_time`/`notify_scheduler` to not depend on
-   `init_cpulocals` being called before every use of run queues.
-3. Use the kernel's internal scheduler (`p_scheduler = null`) for the
-   test instead of setting up a user-space scheduler proc.
 
 ---
 
@@ -6264,7 +6127,7 @@ Phase 15: Live Update
 Phase 16: Networking
 Phase 17: Tools & build
 Phase 18: Documentation & testing
-Phase 19: RISC-V64 (bonus — parallelizable after Phase 8 x86_64 is working)
+Phase 19: RISC-V64 and AArch64 (added after Phase 8; both fully implemented)
   ──────────────────────────────
   EARLY BOOT TEST (RISC-V): Kernel boots in QEMU -M virt
   BASIC TEST (RISC-V): Process table works, basic IPC works
