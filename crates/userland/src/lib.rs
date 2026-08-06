@@ -780,6 +780,104 @@ pub fn init(_args: &[&str]) -> i32 {
     }
 }
 
+/// ping — send an ICMP echo request to an IPv4 address via `/dev/ip` and
+/// report whether the host replied.
+///
+/// The net server's `/dev/ip` write protocol takes a compact 8-byte
+/// request: `dst_ip[4] id[2] seq[2]` (big-endian). The read returns the
+/// matching echo reply as a raw IP datagram.
+pub fn ping(args: &[&str]) -> i32 {
+    let target = if args.len() > 1 { args[1] } else { "10.0.2.2" };
+    let ip = match parse_ipv4(target) {
+        Some(ip) => ip,
+        None => {
+            write_err(b"ping: bad address\n");
+            return -1;
+        }
+    };
+
+    // open /dev/ip (chardev major 14) read-write.
+    let fd = minix_rt::open(b"/dev/ip", 0o2); // O_RDWR
+    if fd < 0 {
+        write_err(b"ping: cannot open /dev/ip\n");
+        return fd as i32;
+    }
+    let fd = fd as i32;
+
+    // 8-byte request: dst_ip[4] id[2] seq[2] (big-endian). The ICMP
+    // identifier is our process ID (masked to 16 bits), so concurrent
+    // ping invocations are distinguishable — matching real ping
+    // behavior. The sequence starts at 1 for this session.
+    let mut req = [0u8; 8];
+    req[0..4].copy_from_slice(&ip);
+    req[4..6].copy_from_slice(&(minix_rt::getpid() as u16).to_be_bytes());
+    req[6..8].copy_from_slice(&1u16.to_be_bytes());
+
+    let w = unsafe { minix_rt::write(fd, req.as_ptr(), req.len()) };
+    if w != req.len() as i64 {
+        write_err(b"ping: write failed\n");
+        return -5;
+    }
+
+    // Read the reply (IP + ICMP echo reply, ~28 bytes).
+    let mut rbuf = [0u8; 64];
+    let n = minix_rt::read(fd, &mut rbuf);
+    if n <= 0 {
+        write_err(b"ping: no reply\n");
+        return -5;
+    }
+    let n = n as usize;
+
+    write_out(b"ping: ");
+    write_out(target.as_bytes());
+    write_out(b" alive");
+    // ICMP is at IP header (20 bytes, no options); type@20, id@24, seq@26.
+    if n >= 28 && rbuf[20] == 0 {
+        // type 0 = echo reply
+        write_out(b" (reply id=");
+        print_dec(u16::from_be_bytes([rbuf[24], rbuf[25]]) as u32);
+        write_out(b" seq=");
+        print_dec(u16::from_be_bytes([rbuf[26], rbuf[27]]) as u32);
+        write_out(b")");
+    }
+    write_out(b"\n");
+    0
+}
+
+/// Parse "a.b.c.d" into four bytes; None on failure.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut part = 0usize;
+    let mut val = 0u32;
+    let mut digits = false;
+    for &b in s.as_bytes() {
+        match b {
+            b'.' => {
+                if !digits || val > 255 || part >= 3 {
+                    return None;
+                }
+                out[part] = val as u8;
+                part += 1;
+                val = 0;
+                digits = false;
+            }
+            b'0'..=b'9' => {
+                digits = true;
+                val = val * 10 + (b - b'0') as u32;
+                if val > 255 {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    if !digits || val > 255 || part != 3 {
+        return None;
+    }
+    out[3] = val as u8;
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

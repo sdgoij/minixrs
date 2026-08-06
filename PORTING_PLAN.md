@@ -18,7 +18,7 @@ The port is composed of:
 | **Filesystems** | MINIX FS, ext2, MFS, etc. | `.refs/minix-3.3.0/minix/fs/` | Port |
 | **Userland** | ~145 commands | `.refs/minix-3.3.0/bin/`, `usr.bin/`, `usr.sbin/`, `sbin/`, `minix/commands/` | Port |
 | **Libraries** | libc, libm, libutil, libz, etc. | `.refs/minix-3.3.0/lib/`, `.refs/minix-3.3.0/minix/lib/` | Port |
-| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Port |
+| **Network stack** | TCP/IP, UDP, IP, ARP | `.refs/minix-3.3.0/sys/net/`, `netinet/`, `netinet6/` | Partial — ARP/ICMP + DL protocol (M8) |
 
 - A **kernel** (`sys/arch/*/compile/GENERIC` + `minix/kernel/`)
 - **System servers** as user-space processes (VM, VFS, SCHED, RS, PM, DS, IPC, TTY)
@@ -52,6 +52,23 @@ I/O-port virtio-PCI path was replaced): virtio-pci with memory BARs + the PCI
 capability list on x86_64 (`-device virtio-blk-pci,disable-legacy=on`), and
 virtio-mmio on RISC-V64/AArch64 QEMU `virt` machines
 (`virtio-mmio.force-legacy=off`).
+
+**Networking milestone M8 (minimal form) is complete:** a `net` server
+(`/sbin/net`) implements ARP/ICMP as a character driver for `/dev/ip` (major
+14, registered in VFS's dmap), talking the DL protocol to the `virtio_net`
+driver server over grants + SENDREC (the same pattern as MFS↔`virtio_blk`).
+`ping 10.0.2.2` works on **all three arches** against QEMU's SLIRP network,
+and the ICMP echo identifier is the process's **real PID** —
+`minix_rt::getpid()` now routes `PM_GETPID` through PM's `mp_pid` instead of
+the kernel's syscall-20 endpoint shortcut, so consecutive invocations report
+consecutive ids (`reply id=12`, `reply id=13`).
+
+Supporting fixes in the same milestone: the virtio-net driver now uses the
+correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
+the modern header, not 10 bytes), AArch64 syscall/IRQ handlers save and
+restore the caller-saved SIMD/FP registers (kernel IPC message copies were
+clobbering user FP state), and RISC-V context switches preserve `t6`/x31 in
+a dedicated `Proc.p_t6` slot (the old layout lost it to `sstatus`).
 
 ## Phase 0: Project Structure & Build System
 
@@ -3602,8 +3619,9 @@ virtio disk image through the BDEV protocol, and files persist across reboot
 
 ### Phase 11c: Network drivers
 
-**Status: Stubs only (13 driver stubs, 2 partial implementations)** — 403+ tests pass.
-Full implementations deferred (PCI transport, DMA, interrupt routing needed).
+**Status: virtio_net fully working — it drives ICMP ping on all three arches
+via the DL protocol (M8). The other 12 network driver stubs remain (PCI
+transport, DMA, interrupt routing needed for them).**
 
 **Dependencies**: Requires PCI driver (11a.4) for network device enumeration, DMA API (11b.12), PIC wiring (11b.11).
 
@@ -3642,7 +3660,7 @@ Full implementations deferred (PCI transport, DMA, interrupt routing needed).
   - `crates/drivers/src/network/lan8710a.rs` — 457 lines
   - `crates/drivers/src/network/mod.rs` — module declarations
 
-- [ ] **11c.2 — `crates/drivers/src/network/virtio_net.rs`** (full implementation)
+- [x] **11c.2 — `crates/drivers/src/network/virtio_net.rs`** (full implementation — ✅ DONE, drives ICMP ping on all 3 arches)
   - Source: `.refs/minix-3.3.0/minix/drivers/net/virtio_net/`
   - Depends on: virtio transport layer (11c.infra)
   - **Hardware-specific features:**
@@ -3762,6 +3780,25 @@ Full implementations deferred (PCI transport, DMA, interrupt routing needed).
 - [ ] **11c.14 — `crates/drivers/src/network/lan8710a/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/net/lan8710a/`
   - LAN8710A PHY driver (~1246 lines)
+
+- [x] **11c.15 — DL-protocol net stack (✅ DONE, milestone M8)** — the working
+  virtio-net path is split across three crates, mirroring the MFS↔virtio_blk
+  BDEV pattern:
+  - `crates/servers/src/virtio_net.rs` — **virtio-net driver server**: serves
+    `DL_WRITEV_S`/`DL_READV_S`/`DL_CONF`/`DL_GETSTAT_S` over grants + SAFECOPY,
+    one packet per `DL_READV_S` split across the client's iovecs with a
+    byte-count `DL_TASK_REPLY`, RX queue refilled at init (`virtio_net_open`)
+  - `crates/servers/src/net.rs` — **net server**: ARP cache/resolution, ICMP
+    echo framing and TX, bounded `DL_READV_S` RX polling, auto-reply to
+    inbound echo requests; character driver for `/dev/ip` (major 14,
+    `NET_MAJOR`), registered in VFS dmap
+  - `crates/userland/src/bin/ping.rs` — ICMP echo client: opens `/dev/ip`,
+    sends one echo request with `minix_rt::getpid()` as the identifier,
+    prints the reply id/seq
+  - Driver fix: virtio 1.x packet header is **12 bytes** (`num_buffers` always
+    present), not 10 — a 2-byte shift corrupted every frame
+  - Verified: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
+    and AArch64 (QEMU SLIRP, guest 10.0.2.15 / gateway 10.0.2.2)
 
 ### Phase 11d: Input & display drivers
 
@@ -5569,11 +5606,27 @@ IS server and SEF framework not ported.
 
 ## Phase 16: Networking Stack
 
-**Goal**: Port the networking infrastructure. **Status: ❌ NOT STARTED** —
-Socket stubs exist in minix-std (13.7) but no LWIP protocol porting.
-Network driver stubs exist (11c) but no real implementations.
+**Goal**: Port the networking infrastructure. **Status: 🏗️ minimal milestone
+(M8) complete** — a `net` server (ARP/ICMP, `/dev/ip` chardev major 14) drives
+the `virtio_net` driver server over the DL protocol, and `ping 10.0.2.2`
+works on all three arches with real-PID ICMP identifiers. The full socket /
+TCP/UDP/IP stack (16.1-16.5 below) is NOT STARTED.
 
 ### Tasks
+
+- [x] **16.0 — Minimal networking (M8): net server + virtio-net DL path**
+  - `servers/src/net.rs`: ARP cache + resolution, ICMP echo request/reply,
+    `DL_READV_S`/`DL_WRITEV_S` via grants, bounded RX polling, auto-reply to
+    inbound echo requests (guest 10.0.2.15, gateway 10.0.2.2 on QEMU SLIRP)
+  - `servers/src/virtio_net.rs`: DL driver server — one packet per
+    `DL_READV_S` split across iovecs with a byte-count reply, RX queue
+    refilled at init
+  - `userland/src/bin/ping.rs`: opens `/dev/ip`, sends one echo request,
+    prints reply id/seq; id = `minix_rt::getpid()` (real PID via PM)
+  - VFS dmap: `net` registered as chardev major 14; `/dev/ip` added to the
+    boot manifest; `/sbin/net` added to `boot_procs` on all three arches
+  - Tests: `ping 10.0.2.2` → `reply id=<pid> seq=1` on x86_64, RISC-V64,
+    AArch64
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`
@@ -5904,7 +5957,7 @@ Key files and build commands are documented there.
 | M5 | VFS server routes requests (x86_64) | Phase 10 | ✅ |
 | M6 | **Virtio disk: MFS mounts root from a disk image + file persistence** (x86_64) | Phase 11b | ✅ |
 | M7 | Complete system boots to shell (x86_64) | Phase 14 | ✅ |
-| M8 | Network stack works (x86_64) | Phase 16 | ❌ |
+| M8 | Network stack works (x86_64) — ICMP ping over virtio-net, real-PID ids | Phase 16 | ✅ |
 | M9 | Live Update works (x86_64) | Phase 15 | ❌ |
 | M10 | All drivers functional (x86_64) | Phase 11 | ❌ |
 | M11 | All userland commands functional (x86_64) | Phase 14 | ❌ |
@@ -5919,7 +5972,7 @@ Key files and build commands are documented there.
 | M2R | Two processes can IPC (RISC-V64) | Phase 4 (shared) | ✅ |
 | M3R | Process fork + exec works (RISC-V64) | Phase 5 (shared) | ✅ |
 | M4R | Virtio-blk reads disk + file persistence (RISC-V64) | Phase 19 | ✅ |
-| M5R | Virtio-net sends/receives (RISC-V64) | Phase 19 | ❌ |
+| M5R | Virtio-net sends/receives — ICMP ping works (RISC-V64) | Phase 19 | ✅ |
 | M6R | Complete system boots to shell (RISC-V64) | Phase 14 + 19 | ✅ |
 
 ### AArch64 Milestones (third architecture)
@@ -5934,6 +5987,7 @@ transport as RISC-V64 (QEMU `virt` machine, cortex-a57).
 | M2A | Full server stack + `#` shell prompt on serial | ✅ |
 | M3A | Virtio-blk reads disk; MFS mounts root via BDEV protocol | ✅ |
 | M4A | File persistence across reboot (write → reboot → read back) | ✅ |
+| M5A | Virtio-net + ICMP ping over SLIRP (real-PID ids) | ✅ |
 
 #### Known Issue: `sched_proc_no_time_preempts` on RISC-V64
 
@@ -6013,10 +6067,13 @@ Phase 19: RISC-V64 (bonus — parallelizable after Phase 8 x86_64 is working)
 **Current state (2026-08):** All three target arches are implemented and boot
 to a shell — x86_64 (Phase 8), RISC-V64 (Phase 19), and AArch64. The storage
 milestone (M6/M4R, Phase 11b) is complete: MFS mounts root from a virtio disk
-via the BDEV protocol on every arch, with verified file persistence. Remaining
-work is concentrated in the later phases: networking (Phase 16, M8), Live
-Update (Phase 15, M9), the remaining userland commands (Phase 14, M11), and
-full feature parity (M12).
+via the BDEV protocol on every arch, with verified file persistence. The
+minimal networking milestone (M8, Phase 16) is also complete: a `net` server
+answers ICMP ping over virtio-net on every arch, with the ICMP identifier
+taken from the process's real PID. Remaining work is concentrated in the
+later phases: the full TCP/IP socket stack (Phase 16), Live Update (Phase 15,
+M9), the remaining userland commands (Phase 14, M11), and full feature
+parity (M12).
 
 ---
 

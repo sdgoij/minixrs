@@ -579,8 +579,10 @@ mod tests {
 
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
-        // The builder writes slot N-1 for inode N; walk the table.
-        let n_inodes = 10usize;
+        // The builder writes slot N-1 for inode N; walk the table. The
+        // empty image has 6 dirs (root, bin, sbin, etc, tmp, dev) + 5
+        // devices (tty00, tty01, null, console, ip) = 11 inodes.
+        let n_inodes = 11usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -588,11 +590,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 11) is free — the first allocatable inode.
+        // And the next bit (inode 12) is free — the first allocatable inode.
         assert_eq!(
-            (imap[11 / 8] >> (11 % 8)) & 1,
+            (imap[12 / 8] >> (12 % 8)) & 1,
             0,
-            "inode 11 must be free for the first create"
+            "inode 12 must be free for the first create"
         );
         let _ = itable_off;
     }

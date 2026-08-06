@@ -261,6 +261,10 @@ pub struct Proc {
     pub p_reg: [u8; 256],
     #[cfg(target_arch = "aarch64")]
     pub p_reg: [u8; 288],
+    /// RISC-V: x31 (t6) does not fit the 256-byte p_reg (sepc + x1..x30 +
+    /// sstatus fills it exactly), so context switches must keep it here.
+    #[cfg(target_arch = "riscv64")]
+    pub p_t6: u64,
     /// Segment descriptors (page table root, FPU state).
     pub p_seg: SegFrame,
     /// Process number (for fast access).
@@ -365,6 +369,8 @@ impl Default for Proc {
     fn default() -> Self {
         Self {
             p_reg: hal::frame_default(),
+            #[cfg(target_arch = "riscv64")]
+            p_t6: 0,
             p_seg: SegFrame::default(),
             p_nr: 0,
             p_priv: core::ptr::null_mut(),

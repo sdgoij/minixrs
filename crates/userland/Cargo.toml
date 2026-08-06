@@ -74,6 +74,11 @@ path = "src/bin/sync.rs"
 test = false
 
 [[bin]]
+name = "ping"
+path = "src/bin/ping.rs"
+test = false
+
+[[bin]]
 name = "mknod"
 path = "src/bin/mknod.rs"
 test = false

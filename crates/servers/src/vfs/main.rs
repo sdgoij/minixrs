@@ -112,6 +112,16 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         dmap::map_driver(b"tty", 5, arch_common::com::TTY_PROC_NR);
     }
 
+    // Register the net server as the /dev/ip (major 14) character driver
+    // so opening /dev/ip routes read/write to the ARP/ICMP server.
+    unsafe {
+        dmap::map_driver(
+            b"net",
+            arch_common::com::NET_MAJOR as i32,
+            arch_common::com::NET_PROC_NR,
+        );
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();

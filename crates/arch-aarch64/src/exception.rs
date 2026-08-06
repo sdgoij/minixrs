@@ -173,7 +173,7 @@ global_asm!(
 el1_irq_handler:
     // Build a full context frame on the kernel stack.
     // We were in either EL0 or EL1.  Save the interrupted context.
-    sub     sp, sp, #288
+    sub     sp, sp, #672
 
     // Save GPRs x0-x30
     stp     x0,  x1,  [sp, #0]
@@ -204,9 +204,41 @@ el1_irq_handler:
     mrs     x0, sp_el0
     str     x0, [sp, #248]
 
+    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31). The
+    // kernel's C code (memcpy/memset for IPC message copies) uses SIMD
+    // registers, which would otherwise clobber the interrupted user's
+    // FP state. q8-q15 are callee-saved (preserved by the C ABI), so
+    // they need no save here.
+    stp     q0, q1,   [sp, #288]
+    stp     q2, q3,   [sp, #320]
+    stp     q4, q5,   [sp, #352]
+    stp     q6, q7,   [sp, #384]
+    stp     q16, q17, [sp, #416]
+    stp     q18, q19, [sp, #448]
+    stp     q20, q21, [sp, #480]
+    stp     q22, q23, [sp, #512]
+    stp     q24, q25, [sp, #544]
+    stp     q26, q27, [sp, #576]
+    stp     q28, q29, [sp, #608]
+    stp     q30, q31, [sp, #640]
+
     // Call the C-level IRQ handler with frame pointer in x0.
     mov     x0, sp
     bl      el1_irq_handler_c
+
+    // Restore caller-saved SIMD/FP registers before the GPRs.
+    ldp     q0, q1,   [sp, #288]
+    ldp     q2, q3,   [sp, #320]
+    ldp     q4, q5,   [sp, #352]
+    ldp     q6, q7,   [sp, #384]
+    ldp     q16, q17, [sp, #416]
+    ldp     q18, q19, [sp, #448]
+    ldp     q20, q21, [sp, #480]
+    ldp     q22, q23, [sp, #512]
+    ldp     q24, q25, [sp, #544]
+    ldp     q26, q27, [sp, #576]
+    ldp     q28, q29, [sp, #608]
+    ldp     q30, q31, [sp, #640]
 
     // Return from IRQ: the C handler may have modified the frame
     // (in particular: ELR_EL1, SPSR_EL1, and SP_EL0).
@@ -241,7 +273,7 @@ el1_irq_handler:
     // Load x10, x11 last (they may have been used as scratch)
     ldp     x10, x11, [sp, #80]
 
-    add     sp, sp, #288
+    add     sp, sp, #672
     eret
 "#
 );
@@ -284,7 +316,7 @@ global_asm!(
 el0_sync_handler:
     // On entry from EL0: SP = SP_EL1 (kernel stack).
     // Save full context on kernel stack.
-    sub     sp, sp, #288
+    sub     sp, sp, #672
 
     // Save GPRs x0-x30
     stp     x0,  x1,  [sp, #0]
@@ -312,6 +344,26 @@ el0_sync_handler:
     mrs     x0, elr_el1
     mrs     x1, spsr_el1
     stp     x0, x1, [sp, #256]
+
+    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31). The
+    // kernel's C code (memcpy/memset for IPC message copies) uses SIMD
+    // registers, which would otherwise clobber the user's FP state
+    // across the syscall (observed: the virtio_net driver's memset
+    // wrote garbage into its safecopy message after a RECEIVE).
+    // q8-q15 are callee-saved (preserved by the C ABI), so they need
+    // no save here.
+    stp     q0, q1,   [sp, #288]
+    stp     q2, q3,   [sp, #320]
+    stp     q4, q5,   [sp, #352]
+    stp     q6, q7,   [sp, #384]
+    stp     q16, q17, [sp, #416]
+    stp     q18, q19, [sp, #448]
+    stp     q20, q21, [sp, #480]
+    stp     q22, q23, [sp, #512]
+    stp     q24, q25, [sp, #544]
+    stp     q26, q27, [sp, #576]
+    stp     q28, q29, [sp, #608]
+    stp     q30, q31, [sp, #640]
 
     // Read ESR_EL1 to determine exception class
     mrs     x0, esr_el1
@@ -352,6 +404,21 @@ el0_sync_handler:
 
 // Common return path from EL0 exception.
 el0_sync_return:
+    // Restore caller-saved SIMD/FP registers first (sp still points at
+    // the frame base; only GPRs are used below).
+    ldp     q0, q1,   [sp, #288]
+    ldp     q2, q3,   [sp, #320]
+    ldp     q4, q5,   [sp, #352]
+    ldp     q6, q7,   [sp, #384]
+    ldp     q16, q17, [sp, #416]
+    ldp     q18, q19, [sp, #448]
+    ldp     q20, q21, [sp, #480]
+    ldp     q22, q23, [sp, #512]
+    ldp     q24, q25, [sp, #544]
+    ldp     q26, q27, [sp, #576]
+    ldp     q28, q29, [sp, #608]
+    ldp     q30, q31, [sp, #640]
+
     // Restore GPRs (except scratch)
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
@@ -383,7 +450,7 @@ el0_sync_return:
     // Load x10, x11
     ldp     x10, x11, [sp, #80]
 
-    add     sp, sp, #288
+    add     sp, sp, #672
     eret
 "#
 );

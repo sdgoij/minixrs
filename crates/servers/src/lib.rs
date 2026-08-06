@@ -7,6 +7,7 @@ pub mod devman;
 pub mod ds;
 pub mod ipc;
 pub mod mutex;
+pub mod net;
 pub mod pm;
 pub mod ramdisk;
 pub mod rs;

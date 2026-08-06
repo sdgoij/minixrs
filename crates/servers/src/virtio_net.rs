@@ -51,7 +51,8 @@ const DL_PACK_RECV: u32 = arch_common::com::DL_PACK_RECV;
 
 /// Payload offsets (within `m_payload.raw`).
 const OFF_GRANT: usize = 0; // i32
-const OFF_COUNT: usize = 4; // i32
+const OFF_COUNT: usize = 4; // i32 (request side)
+const OFF_REPLY_COUNT: usize = 0; // i32 (DL_TASK_REPLY count)
 const OFF_FLAGS: usize = 4; // u32
 const OFF_STAT: usize = 0; // i32
 const OFF_MAC: usize = 4; // 6 bytes
@@ -152,9 +153,12 @@ fn copy_iovecs(src_ep: i32, grant: i32, count: usize, iovs: &mut [IovecGrant]) -
 }
 
 /// Reply to the current request.
+///
+/// `DL_TASK_REPLY` layout (matches C `mess_netdrv_net_dl_task`):
+/// `count` i32 at payload 0, `flags` u32 at payload 4.
 fn reply(msg: &mut Message, mtype: u32, count: i32, flags: u32) {
     msg.m_type = mtype as i32;
-    set_pld_i32(msg, OFF_COUNT, count);
+    set_pld_i32(msg, OFF_REPLY_COUNT, count);
     set_pld_u32(msg, OFF_FLAGS, flags);
 }
 
@@ -226,26 +230,34 @@ fn handle_dl(msg: &mut Message, src_ep: i32) {
                 reply(msg, DL_TASK_REPLY, -22, 0);
                 return;
             }
-            // Serve up to `count` packets, one per iovec. Wait briefly for
-            // each packet before giving up so the caller can retry.
-            let staging = unsafe { &mut *STAGING.get() };
-            let mut served = 0u32;
-            for iov in iovs.iter().take(count as usize) {
-                let mut spins = 0;
-                while virtio_net::virtio_net_rx_pending() == 0 && spins < RX_POLL_SPINS {
-                    spins += 1;
-                }
-                let n = virtio_net::virtio_net_receive(staging);
-                if n == 0 {
-                    break;
-                }
-                let size = n.min(iov.iov_size as usize);
-                if safecopy_to_client(src_ep, iov.iov_grant, &staging[..size]) != 0 {
-                    break;
-                }
-                served += 1;
+            // Serve one packet per request, split across the iovecs
+            // (MINIX semantics: the reply `count` is the number of bytes
+            // copied). Wait briefly for a packet before giving up so the
+            // caller can retry.
+            let mut spins = 0;
+            while virtio_net::virtio_net_rx_pending() == 0 && spins < RX_POLL_SPINS {
+                spins += 1;
             }
-            reply(msg, DL_TASK_REPLY, served as i32, DL_PACK_RECV);
+            let staging = unsafe { &mut *STAGING.get() };
+            let n = virtio_net::virtio_net_receive(staging);
+            let mut left = n;
+            let mut bytes = 0usize;
+            for iov in iovs.iter().take(count as usize) {
+                if left == 0 {
+                    break;
+                }
+                let size = left.min(iov.iov_size as usize);
+                if size == 0 {
+                    break;
+                }
+                if safecopy_to_client(src_ep, iov.iov_grant, &staging[bytes..bytes + size]) != 0 {
+                    break;
+                }
+                left -= size;
+                bytes += size;
+            }
+            let flags = if bytes > 0 { DL_PACK_RECV } else { 0 };
+            reply(msg, DL_TASK_REPLY, bytes as i32, flags);
         }
         _ => {
             reply(msg, DL_TASK_REPLY, -22, 0);
@@ -293,6 +305,13 @@ pub fn virtio_net_server_main() {
         // Probe PCI for the virtio-net device. Without an attached NIC
         // the server still runs and answers DL_* with errors.
         let _ = unsafe { virtio_net::virtio_net_probe(0) };
+
+        // Chain the RX buffers into the device so inbound packets (ARP
+        // replies, echo replies) can be delivered — MINIX's driver runs
+        // virtio_net_refill_rx_queue in its main loop for the same reason.
+        // Consumed slots are refilled by virtio_net_receive, so one
+        // initial refill keeps the queue fed.
+        let _ = virtio_net::virtio_net_open();
 
         loop {
             let mut msg = Message {

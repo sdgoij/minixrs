@@ -277,6 +277,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR), // virtio-blk disk driver
             ("/sbin/virtio_net", VIRTIO_NET_PROC_NR), // virtio-net NIC driver
+            ("/sbin/net", NET_PROC_NR),         // network server (ARP/ICMP)
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
             ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
@@ -293,6 +294,7 @@ pub extern "C" fn kmain_body() -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR), // virtio-blk disk driver
             ("/sbin/virtio_net", VIRTIO_NET_PROC_NR), // virtio-net NIC driver
+            ("/sbin/net", NET_PROC_NR),         // network server (ARP/ICMP)
             ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
             ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
             ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System

@@ -606,6 +606,45 @@ pub unsafe fn aarch64_syscall(
             in("x4") a4,
             in("x5") a5,
             in("x8") nr,
+            // The kernel's C code (IPC message copies) uses the SIMD/FP
+            // registers, and the AArch64 kernel does not save user FP
+            // state across context switches. Declare the SIMD registers
+            // clobbered so the compiler spills/reloads live FP values
+            // around the syscall instead of reusing them across it
+            // (observed: virtio_net's memset wrote garbage into its
+            // safecopy message after a blocking RECEIVE).
+            lateout("v0") _,
+            lateout("v1") _,
+            lateout("v2") _,
+            lateout("v3") _,
+            lateout("v4") _,
+            lateout("v5") _,
+            lateout("v6") _,
+            lateout("v7") _,
+            lateout("v8") _,
+            lateout("v9") _,
+            lateout("v10") _,
+            lateout("v11") _,
+            lateout("v12") _,
+            lateout("v13") _,
+            lateout("v14") _,
+            lateout("v15") _,
+            lateout("v16") _,
+            lateout("v17") _,
+            lateout("v18") _,
+            lateout("v19") _,
+            lateout("v20") _,
+            lateout("v21") _,
+            lateout("v22") _,
+            lateout("v23") _,
+            lateout("v24") _,
+            lateout("v25") _,
+            lateout("v26") _,
+            lateout("v27") _,
+            lateout("v28") _,
+            lateout("v29") _,
+            lateout("v30") _,
+            lateout("v31") _,
             options(nostack),
         );
     }
@@ -757,8 +796,30 @@ pub fn mknod(path: &[u8], mode: u32, dev: u64) -> i64 {
 }
 
 /// Get the current process ID.
+/// Return this process's real PID, as assigned by PM.
+///
+/// Routes through PM's `PM_GETPID` handler, which answers from its
+/// process table (`mp_pid`). The kernel's syscall-20 shortcut returns the
+/// caller's endpoint (with the fork flag bit for children), which is not
+/// the PID — so `ps`/`kill`/ICMP echo identifiers would not match.
+#[cfg(target_os = "none")]
 pub fn getpid() -> i32 {
-    unsafe { syscall0(NR_GETPID) as i32 }
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&4i32.to_le_bytes()); // PM_GETPID = PM_BASE + 4
+        let r = syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_mut_ptr() as u64);
+        if r < 0 {
+            return r as i32;
+        }
+        // PM replies with pid in m1i1 (message bytes 8..12), ppid in m1i2.
+        i32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]))
+    }
+}
+
+/// Host stub — no PM to ask.
+#[cfg(not(target_os = "none"))]
+pub fn getpid() -> i32 {
+    -1 // ENOSYS
 }
 
 /// Change the working directory.

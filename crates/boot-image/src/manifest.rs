@@ -18,6 +18,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/ln", "ln"),
     ("/bin/chmod", "chmod"),
     ("/bin/sync", "sync"),
+    ("/bin/ping", "ping"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),
@@ -35,6 +36,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/ramdisk", "ramdisk"),
     ("/sbin/virtio_blk", "virtio_blk"),
     ("/sbin/virtio_net", "virtio_net"),
+    ("/sbin/net", "net"),
 ];
 
 /// Device nodes to create in the initramfs: (path, mode, major, minor).
@@ -43,6 +45,7 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/tty01", 0o020777, 3, 1), // char device, major=3, minor=1
     ("/dev/null", 0o020666, 1, 3),  // char device, major=1 (mem), minor=3
     ("/dev/console", 0o020600, 5, 0), // char device, major=5 (console), minor=0
+    ("/dev/ip", 0o020600, 14, 0),   // char device, major=14 (net), minor=0
 ];
 
 #[cfg(test)]

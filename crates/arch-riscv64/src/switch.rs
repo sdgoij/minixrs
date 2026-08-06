@@ -9,7 +9,8 @@
 /// Takes a pointer to the `Proc` struct; reads sepc from offset 0
 /// (x0 slot, set by `hal::set_initial_regs`) and sstatus from offset 248
 /// (t6 slot). Also loads the per-process page table from p_seg.p_cr3
-/// (offset 256) and writes SATP with SV39 mode before sret.
+/// (offset 264 — p_reg is 256 bytes plus the riscv64-only p_t6 slot)
+/// and writes SATP with SV39 mode before sret.
 ///
 /// # Safety
 ///
@@ -27,9 +28,9 @@ pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
         "ld      t0, 0(t6)",
         "csrw    sepc, t0",
 
-        // Set SATP from p_seg.p_cr3 at offset 256.
+        // Set SATP from p_seg.p_cr3 at offset 264 (after p_reg + p_t6).
         // SATP = (8 << 60) | (cr3 >> 12)  [SV39 mode]
-        "ld      t0, 256(t6)",
+        "ld      t0, 264(t6)",
         "srli    t0, t0, 12",        // PPN = cr3 >> 12
         "li      t1, 8",
         "slli    t1, t1, 60",        // MODE = 8 (SV39)

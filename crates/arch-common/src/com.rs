@@ -29,6 +29,10 @@ pub const PFS_PROC_NR: Endpoint = 9;
 pub const RAMDISK_PROC_NR: Endpoint = 11;
 pub const VIRTIO_BLK_PROC_NR: Endpoint = 12;
 pub const VIRTIO_NET_PROC_NR: Endpoint = 13;
+pub const NET_PROC_NR: Endpoint = 14;
+
+/// Character-device major for the net server's /dev/ip (dmap key).
+pub const NET_MAJOR: u32 = 14;
 
 pub const LAST_SPECIAL_PROC_NR: Endpoint = 10;
 pub const INIT_PROC_NR: Endpoint = LAST_SPECIAL_PROC_NR;

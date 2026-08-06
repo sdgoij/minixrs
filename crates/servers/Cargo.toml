@@ -76,3 +76,8 @@ test = false
 name = "virtio_net"
 path = "src/bin/virtio_net.rs"
 test = false
+
+[[bin]]
+name = "net"
+path = "src/bin/net.rs"
+test = false

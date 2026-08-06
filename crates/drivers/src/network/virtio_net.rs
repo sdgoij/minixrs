@@ -37,10 +37,12 @@ static VIRTIO_NET_FEATURES: &[virtio::VirtioFeature] = &[virtio::VirtioFeature {
     guest_support: 1,
 }];
 
-/// Size of the `virtio_net_hdr` prepended to every packet. Without
-/// VIRTIO_NET_F_MRG_RXBUF the header is 10 bytes (`flags`, `gso_type`,
-/// and four u16 fields); the mergeable variant adds `num_buffers`.
-pub const VIRTIO_NET_HDR_SIZE: usize = 10;
+/// Size of the `virtio_net_hdr` prepended to every packet. The modern
+/// (virtio 1.x) header is 12 bytes (`flags`, `gso_type`, four u16 fields,
+/// and `num_buffers`); QEMU's virtio-net uses this size for the 1.x
+/// guest header regardless of VIRTIO_NET_F_MRG_RXBUF, so the driver must
+/// match it or the device shifts every frame by 2 bytes.
+pub const VIRTIO_NET_HDR_SIZE: usize = 12;
 
 /// `virtio_net_hdr.gso_type` for a packet with no offload.
 pub const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
@@ -56,7 +58,7 @@ pub const RX_BUF_SIZE: usize = 2048;
 /// TX staging buffer size.
 pub const TX_BUF_SIZE: usize = 2048;
 
-/// Modern `virtio_net_hdr` (12 bytes).
+/// Modern `virtio_net_hdr` (12 bytes, virtio 1.x).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VirtioNetHdr {
@@ -66,10 +68,11 @@ pub struct VirtioNetHdr {
     pub gso_size: u16,
     pub csum_start: u16,
     pub csum_offset: u16,
+    pub num_buffers: u16,
 }
 
 impl VirtioNetHdr {
-    /// A zeroed header: no checksum offload or GSO is negotiated.
+    /// A zeroed header: no checksum offload, GSO, or mergeable buffers.
     pub const fn new() -> Self {
         Self {
             flags: 0,
@@ -78,6 +81,7 @@ impl VirtioNetHdr {
             gso_size: 0,
             csum_start: 0,
             csum_offset: 0,
+            num_buffers: 0,
         }
     }
 }
@@ -448,7 +452,7 @@ mod tests {
         assert_eq!(VIRTIO_ID_NET, 1);
         assert_eq!(VIRTIO_NET_F_MAC, 5);
         assert_eq!(VIRTIO_NET_F_STATUS, 16);
-        assert_eq!(VIRTIO_NET_HDR_SIZE, 10);
+        assert_eq!(VIRTIO_NET_HDR_SIZE, 12);
         assert_eq!(VIRTIO_NET_HDR_GSO_NONE, 0);
         assert_eq!(RXQ, 0);
         assert_eq!(TXQ, 1);
@@ -466,7 +470,7 @@ mod tests {
         assert_eq!(h.gso_size, 0);
         assert_eq!(h.csum_start, 0);
         assert_eq!(h.csum_offset, 0);
-        // 10 bytes, matching the wire format without MRG_RXBUF.
+        // 12 bytes, matching the virtio 1.x wire format.
         assert_eq!(core::mem::size_of::<VirtioNetHdr>(), VIRTIO_NET_HDR_SIZE);
     }
 

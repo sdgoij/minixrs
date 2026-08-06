@@ -178,6 +178,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         frame.as_mut_ptr(),
                         256,
                     );
+                    // Restore t6 (x31) from its dedicated slot.
+                    frame[248..256].copy_from_slice(&(*caller).p_t6.to_ne_bytes());
                     let p_reg = &raw const (*caller).p_reg;
                     let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
                     frame[256..264].copy_from_slice(&sepc_bytes);
@@ -241,7 +243,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 //    But frame[0..8] = x0 (0), which overwrites p_reg sepc!
                 //    Fixed below.
                 // 2. frame[248..256] = t6 (x31) overwrites p_reg[248..256] (sstatus!)
-                //    Fixed below.
+                //    Fixed below — t6 is kept in the dedicated p_t6 slot.
                 // 3. frame[256..264] = sepc → p_reg[0..8]
                 // 4. frame[264..272] = sstatus → p_reg[248..256]
                 unsafe {
@@ -250,6 +252,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         &raw mut (*caller).p_reg as *mut u8,
                         256,
                     );
+                    // Save t6 (x31) — p_reg[248..256] holds sstatus, not t6.
+                    (*caller).p_t6 = u64::from_ne_bytes(frame[248..256].try_into().unwrap());
                     // Save sepc from frame[256..264] into p_reg[0..8]
                     core::ptr::copy_nonoverlapping(
                         frame.as_ptr().add(256),
@@ -296,6 +300,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             frame.as_mut_ptr(),
                             256,
                         );
+                        // Restore t6 (x31) from its dedicated slot.
+                        frame[248..256].copy_from_slice(&(*next_proc).p_t6.to_ne_bytes());
                         // Copy sepc from p_reg[0..8] to frame[256..264]
                         let p_reg = &raw const (*next_proc).p_reg;
                         let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
@@ -329,6 +335,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             &raw mut (*caller).p_reg as *mut u8,
                             256,
                         );
+                        // Save t6 (x31) — p_reg[248..256] holds sstatus, not t6.
+                        (*caller).p_t6 = u64::from_ne_bytes(frame[248..256].try_into().unwrap());
                         // Save sepc from frame[256..264] into p_reg[0..8] (x0 slot)
                         core::ptr::copy_nonoverlapping(
                             frame.as_ptr().add(256),
@@ -378,6 +386,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                                     frame.as_mut_ptr(),
                                     256,
                                 );
+                                // Restore t6 (x31) from its dedicated slot.
+                                frame[248..256].copy_from_slice(&(*next_proc).p_t6.to_ne_bytes());
                                 let p_reg = &raw const (*next_proc).p_reg;
                                 let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
                                 frame[256..264].copy_from_slice(&sepc_bytes);
@@ -464,6 +474,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                     &raw mut (*caller).p_reg as *mut u8,
                     256,
                 );
+                // Save t6 (x31) — p_reg[248..256] holds sstatus, not t6.
+                (*caller).p_t6 = u64::from_ne_bytes(frame[248..256].try_into().unwrap());
                 core::ptr::copy_nonoverlapping(
                     frame.as_ptr().add(256),
                     &raw mut (*caller).p_reg as *mut u8,
@@ -500,6 +512,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             frame.as_mut_ptr(),
                             256,
                         );
+                        // Restore t6 (x31) from its dedicated slot.
+                        frame[248..256].copy_from_slice(&(*next_proc).p_t6.to_ne_bytes());
                         let p_reg = &raw const (*next_proc).p_reg;
                         let sepc_bytes = core::ptr::read(p_reg as *const [u8; 8]);
                         frame[256..264].copy_from_slice(&sepc_bytes);
@@ -642,6 +656,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
             ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
+            ("/sbin/net", NET_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
@@ -658,16 +673,17 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             ("/sbin/ramdisk", RAMDISK_PROC_NR),
             ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
             ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
+            ("/sbin/net", NET_PROC_NR),
             ("/sbin/mfs", MFS_PROC_NR),
             ("/sbin/pfs", PFS_PROC_NR),
             ("/sbin/tty", TTY_PROC_NR),
         ];
 
         #[cfg(not(feature = "boot-test"))]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 13] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 14] =
             unsafe { core::mem::zeroed() };
         #[cfg(feature = "boot-test")]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 12] =
+        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 13] =
             unsafe { core::mem::zeroed() };
         for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
             let info = match unsafe {
