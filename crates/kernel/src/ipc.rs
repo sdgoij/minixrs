@@ -22,6 +22,7 @@ pub const RECEIVE: i32 = 0x02;
 pub const SENDREC: i32 = 0x03;
 pub const NOTIFY: i32 = 0x04;
 pub const SENDNB: i32 = 0x05;
+pub const SENDA: i32 = 0x06;
 
 pub const IPC_FLG_MSG_FROM_KERNEL: u16 = 0x0001;
 // C ipcconst.h: IPC_STATUS_CALL_MASK = 0x3F (6 bits, bits 0-5)
@@ -733,12 +734,23 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
             return crate::system::ECALLDENIED;
         }
 
-        // C: check may_send_to (L471-479)
-        // Check if caller has IPC permission to send to destination
-        // NOTE: may_send_to is currently broken (s_ipc_to never filled).
-        // All IPC attempts from user processes would fail with ECALLDENIED.
-        // Disabled until privilege system is fixed.
-        // may_send_to disabled (privilege system incomplete)
+        // C: check trap_mask — the caller's priv slot must permit this IPC
+        // primitive (MINIX do_sync_ipc: USR_T allows SENDREC only, SRV_T
+        // everything).
+        if !(*caller_ptr).p_priv.is_null() {
+            let trap_mask = (*(*caller_ptr).p_priv).s_trap_mask as u16;
+            let bit = 1u16 << (call as u16);
+            if trap_mask & bit == 0 {
+                return crate::system::ETRAPDENIED;
+            }
+        }
+
+        // C: check may_send_to (L471-479) — the caller's s_ipc_to must name
+        // the destination's priv ID. RECEIVE has no destination and is
+        // unrestricted.
+        if call != RECEIVE && !crate::r#priv::may_send_to(&*caller_ptr, ep) {
+            return crate::system::ECALLDENIED;
+        }
 
         match call {
             SENDREC => {
@@ -1295,6 +1307,12 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
             return crate::grants::EPERM;
         }
 
+        // Trap-mask gate (MINIX gates SENDA like every IPC primitive):
+        // user processes (USR_T) may not asynsend.
+        if (*privp).s_trap_mask as u16 & (1u16 << SENDA) == 0 {
+            return crate::system::ETRAPDENIED;
+        }
+
         // Clear the pending async table reference
         (*privp).s_asyntab = 0;
         (*privp).s_asynsize = 0;
@@ -1363,11 +1381,7 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
             if !is_ok_endpoint_f(dst, &mut dst_p, false) {
                 r = EDEADSRCDST;
             } else if crate::table::is_kernel_nr(dst_p)
-            // NOTE: may_send_to is currently broken (s_ipc_to never filled
-            // for boot processes). All async sends from user processes
-            // would fail with ECALLDENIED. Disabled until the privilege
-            // system is fixed (matching do_sync_ipc).
-            // || !crate::r#priv::may_send_to(&*(caller_ptr as *const Proc), dst_p)
+                || !crate::r#priv::may_send_to(&*(caller_ptr as *const Proc), dst_p)
             {
                 r = crate::system::ECALLDENIED;
             }

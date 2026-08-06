@@ -31,6 +31,18 @@ pub const LAST_SPECIAL_PROC_NR: usize = 10;
 /// C: `USER_PRIV_ID = static_priv_id(ROOT_USR_PROC_NR) = NR_TASKS + INIT_PROC_NR`
 pub const USER_PRIV_ID: usize = NR_TASKS + LAST_SPECIAL_PROC_NR;
 
+// Trap masks (`Priv::s_trap_mask`). Bit `i` permits IPC primitive `i`
+// (SEND=1, RECEIVE=2, SENDREC=3, NOTIFY=4, SENDNB=5 — `crate::ipc`).
+
+/// Kernel-task trap mask — no IPC traps (HARDWARE, IDLE, ASYNCM).
+pub const TSK_T: i16 = 0;
+/// Constrained kernel-task trap mask — RECEIVE only (CLOCK, SYSTEM).
+pub const CSK_T: i16 = (1i32 << crate::ipc::RECEIVE) as i16;
+/// User-process trap mask — SENDREC only (MINIX `USR_T`).
+pub const USR_T: i16 = (1i32 << crate::ipc::SENDREC) as i16;
+/// System-server trap mask — every IPC primitive (MINIX `SRV_T`).
+pub const SRV_T: i16 = -1;
+
 /// Stack guard value for x86_64 (sizeof(reg_t) == 8).
 pub const STACK_GUARD: u64 = 0xDEAD_BEEF;
 
@@ -432,23 +444,32 @@ pub fn priv_addr_mut(i: usize) -> &'static mut Priv {
     unsafe { &mut *(*PPRIV_ADDR.get())[i] }
 }
 
-/// Get the privilege ID of a process from its Proc's p_priv pointer.
-pub fn priv_id(rp: &crate::proc::Proc) -> i16 {
-    unsafe { (*rp.p_priv).s_id }
-}
-
 /// Look up process number from privilege ID.
 pub fn id_to_nr(id: usize) -> i32 {
     priv_addr(id).s_proc_nr
 }
 
-/// Check whether process `rp` may send to process with endpoint `proc_nr_e`.
-pub fn may_send_to(rp: &crate::proc::Proc, _proc_nr_e: i32) -> bool {
-    // Get the privilege ID of the target process
-    // This requires the process table, which is in task 3.3
-    // For now, just check if the IPC map has the bit set
-    let priv_id = priv_id(rp) as usize;
-    unsafe { (*rp.p_priv).s_ipc_to.test(priv_id) }
+/// Check whether process `rp` may send to the process with endpoint `dst_e`.
+///
+/// The caller's `s_ipc_to` bitmap must contain the destination's privilege
+/// ID (MINIX `may_send_to`: `get_sys_bit(&priv(rp)->s_ipc_to, priv_id(dst))`).
+/// Privilege-less processes (kernel tasks, test procs) are reachable from
+/// anywhere; a target without a priv slot is likewise treated as reachable.
+pub fn may_send_to(rp: &crate::proc::Proc, dst_e: i32) -> bool {
+    let caller_priv = rp.p_priv;
+    if caller_priv.is_null() {
+        return true;
+    }
+    let dst_nr = crate::table::endpoint_slot(dst_e);
+    let dst_proc = crate::table::proc_addr(dst_nr);
+    if dst_proc.is_null() {
+        return false;
+    }
+    let dst_priv = unsafe { (*dst_proc).p_priv };
+    if dst_priv.is_null() {
+        return true;
+    }
+    unsafe { (*caller_priv).s_ipc_to.test((*dst_priv).s_id as usize) }
 }
 
 // Address constants (as functions, since they reference statics)

@@ -483,6 +483,7 @@ pub const VMSUSPEND: i32 = -996;
 pub const EDONTREPLY: i32 = -203; // pseudo-code: don't send a reply
 pub const EBADREQUEST: i32 = -212;
 pub const ECALLDENIED: i32 = -210;
+pub const ETRAPDENIED: i32 = -211; // caller's trap mask forbids this IPC primitive
 pub const ENOSPC: i32 = -28;
 
 /// Maximum number of IRQ vectors.
@@ -1395,8 +1396,13 @@ pub unsafe fn get_priv(rp: *mut Proc) -> Option<usize> {
     unsafe {
         let base = crate::r#priv::PRIV.get() as *mut Priv;
 
-        // Try to allocate a privilege structure
+        // Try to allocate a privilege structure. The shared USER slot is
+        // skipped: it is owned by no single process and must never be
+        // handed to a server.
         for i in 0..NR_SYS_PROCS {
+            if i == crate::r#priv::USER_PRIV_ID {
+                continue; // shared user slot — never allocated to a server
+            }
             let sp = base.add(i);
             if (*sp).s_proc_nr == NONE {
                 // Found a free slot
@@ -4023,17 +4029,15 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         // C: reset_proc_accounting(rpc);
         crate::sched::reset_proc_accounting(rpc);
 
-        // C: if parent is SYS_PROC, downgrade child to USER_PRIV_ID
         // C: rpc->p_priv = priv_addr(USER_PRIV_ID); rpc->p_rts_flags |= RTS_NO_PRIV;
-        if !(*rpp).p_priv.is_null() {
-            let priv_flags = (*(*rpp).p_priv).s_flags;
-            if priv_flags.contains(crate::r#priv::PrivFlags::SYS_PROC) {
-                (*rpc).p_priv = crate::r#priv::priv_addr_mut(crate::r#priv::USER_PRIV_ID);
-                (*rpc)
-                    .p_rts_flags
-                    .fetch_or(crate::proc::RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
-            }
-        }
+        // Every forked child is an ordinary user process on the shared USER
+        // slot (MINIX do_fork: only RS promotes processes to server slots,
+        // via SYS_PRIVCTL, never the fork path). The child's byte-copied
+        // p_priv (the parent's dedicated slot) is replaced here.
+        (*rpc).p_priv = crate::r#priv::priv_addr_mut(crate::r#priv::USER_PRIV_ID);
+        (*rpc)
+            .p_rts_flags
+            .fetch_or(crate::proc::RtsFlags::NO_PRIV.bits(), Ordering::Relaxed);
         // C: rpc->p_signal_received = 0
         (*rpc).p_signal_received = 0;
 
@@ -5447,6 +5451,14 @@ pub unsafe fn do_setgrant_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
 
         let rts = (*caller).p_rts_flags.load(Ordering::Relaxed);
         if rts & RtsFlags::NO_PRIV.bits() != 0 {
+            return crate::ipc::EPERM;
+        }
+
+        // A grant table must be owned by exactly one process (MINIX
+        // do_setgrant rejects a shared slot: it has no single owner). The
+        // shared USER slot has s_proc_nr = NONE, so this check rejects it
+        // even if NO_PRIV was cleared by the scheduler.
+        if !(*caller).p_priv.is_null() && (*(*caller).p_priv).s_proc_nr != (*caller).p_nr {
             return crate::ipc::EPERM;
         }
 

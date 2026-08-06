@@ -1076,8 +1076,14 @@ fn test_do_sync_ipc_sendrec_roundtrip(ctx: &mut TestCtx) {
         let mut server_priv_buf: crate::r#priv::Priv = core::mem::zeroed();
         let server_priv: *mut crate::r#priv::Priv = &raw mut server_priv_buf;
         (*caller_priv).s_k_call_mask = [!0u32; crate::r#priv::SYS_CALL_MASK_SIZE];
+        (*caller_priv).s_id = 1;
+        (*caller_priv).s_trap_mask = crate::r#priv::SRV_T;
+        (*caller_priv).s_ipc_to = crate::r#priv::SysMap::new();
+        (*caller_priv).s_ipc_to.set(2); // may send to the server
         (*caller).p_priv = caller_priv;
         (*server_priv).s_k_call_mask = [!0u32; crate::r#priv::SYS_CALL_MASK_SIZE];
+        (*server_priv).s_id = 2;
+        (*server_priv).s_trap_mask = crate::r#priv::SRV_T;
         (*server).p_priv = server_priv;
 
         // Set CR3 to boot_cr3 so copy_from_user can read the test message

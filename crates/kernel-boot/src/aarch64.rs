@@ -599,7 +599,12 @@ pub unsafe extern "C" fn kmain() -> ! {
 
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                let _ = kernel::system::get_priv(rp);
+                // proc_init already assigned a priv slot for every boot
+                // image entry; get_priv is only a fallback for processes
+                // without one. init keeps the shared USER slot.
+                if (*rp).p_priv.is_null() {
+                    let _ = kernel::system::get_priv(rp);
+                }
                 if !(*rp).p_priv.is_null() {
                     (*(*rp).p_priv).s_phys_delta =
                         (info.phys_code_base as i64) - (info.code_start as i64);
@@ -729,8 +734,17 @@ pub unsafe extern "C" fn kmain() -> ! {
                     .load(core::sync::atomic::Ordering::Relaxed);
                 let cleared = old_flags
                     & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
-                        | kernel::proc::RtsFlags::SLOT_FREE.bits());
+                        | kernel::proc::RtsFlags::SLOT_FREE.bits()
+                        | kernel::proc::RtsFlags::NO_PRIV.bits());
                 if cleared == 0 {
+                    // NO_PRIV (the user-proc marker proc_init sets on init)
+                    // does not block scheduling; x86's boot enqueue clears
+                    // it the same way. Clear before enqueue — this port's
+                    // enqueue requires p_rts_flags == 0.
+                    (*rp).p_rts_flags.store(
+                        old_flags & !kernel::proc::RtsFlags::NO_PRIV.bits(),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     kernel::sched::enqueue(rp);
                 }
             }

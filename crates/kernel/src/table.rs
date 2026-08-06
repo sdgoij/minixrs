@@ -441,6 +441,23 @@ pub unsafe fn proc_init() {
     }
 
     unsafe {
+        // The shared USER priv slot may SENDREC to PM, VFS, and VM only.
+        // PM/VFS: MINIX `USER_IPC_TO` (process lifecycle + files). VM:
+        // this port's userland `brk()` sends VM_BRK directly to the VM
+        // server (minix-rt `brk`), so it must be reachable too.
+        let pm_priv = BOOT_IMAGE
+            .iter()
+            .position(|bi| bi.proc_nr == arch_common::com::PM_PROC_NR)
+            .unwrap_or(0);
+        let vfs_priv = BOOT_IMAGE
+            .iter()
+            .position(|bi| bi.proc_nr == arch_common::com::VFS_PROC_NR)
+            .unwrap_or(0);
+        let vm_priv = BOOT_IMAGE
+            .iter()
+            .position(|bi| bi.proc_nr == arch_common::com::VM_PROC_NR)
+            .unwrap_or(0);
+
         for (i, bi) in BOOT_IMAGE.iter().enumerate() {
             if i >= NR_SYS_PROCS {
                 break;
@@ -449,10 +466,49 @@ pub unsafe fn proc_init() {
             if priv_ptr.is_null() {
                 continue;
             }
-            // Set up basic privilege fields
+
+            // init is an ordinary user process: it shares the USER priv
+            // slot (its would-be slot — MINIX `static_priv_id(INIT)`),
+            // which has no single owner, USR_T traps (SENDREC only), an
+            // `ipc_to` of {PM, VFS}, and an empty kernel-call mask.
+            if bi.proc_nr == arch_common::com::INIT_PROC_NR {
+                debug_assert_eq!(i, crate::r#priv::USER_PRIV_ID);
+                (*priv_ptr).s_proc_nr = crate::system::NONE; // shared slot
+                (*priv_ptr).s_id = i as i16;
+                (*priv_ptr).s_flags = PrivFlags::PREEMPTIBLE | PrivFlags::BILLABLE;
+                (*priv_ptr).s_trap_mask = crate::r#priv::USR_T;
+                (*priv_ptr).s_ipc_to = crate::r#priv::SysMap::new();
+                (*priv_ptr).s_ipc_to.set(pm_priv);
+                (*priv_ptr).s_ipc_to.set(vfs_priv);
+                (*priv_ptr).s_ipc_to.set(vm_priv);
+                for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
+                    *chunk = 0;
+                }
+                (*priv_ptr).s_sig_mgr = PM_PROC_NR;
+                let rp = proc_addr(bi.proc_nr);
+                if !rp.is_null() {
+                    (*rp).p_priv = priv_ptr;
+                    (*rp).p_rts_flags.fetch_or(
+                        RtsFlags::NO_PRIV.bits(),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                continue;
+            }
+
+            // System server / kernel task: dedicated slot. Servers may
+            // SENDREC to every active slot (MINIX boot fills bits
+            // [0, n_active)) and issue every kernel call; RS refines the
+            // masks later via SYS_PRIVCTL.
             (*priv_ptr).s_proc_nr = bi.proc_nr;
             (*priv_ptr).s_id = i as i16;
-            (*priv_ptr).s_flags = PrivFlags::SYS_PROC | PrivFlags::PREEMPTIBLE;
+            (*priv_ptr).s_flags =
+                PrivFlags::SYS_PROC | PrivFlags::PREEMPTIBLE | PrivFlags::BILLABLE;
+            (*priv_ptr).s_trap_mask = crate::r#priv::SRV_T;
+            (*priv_ptr).s_ipc_to = crate::r#priv::SysMap::new();
+            for id in 0..NR_BOOT_PROCS {
+                (*priv_ptr).s_ipc_to.set(id);
+            }
             // Allow all kernel calls (IPC, safecopy, etc.) for boot processes.
             for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
                 *chunk = !0u32;

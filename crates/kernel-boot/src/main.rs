@@ -343,13 +343,12 @@ pub extern "C" fn kmain_body() -> ! {
             unsafe {
                 core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
                 // Set up privilege structure for this boot process.
-                // Without this, p_priv is null, which causes:
-                // - Notifications to be silently dropped (mini_notify checks
-                //   p_priv before setting the pending bit)
-                // - kernel_call_dispatch to UB when dereferencing null for
-                //   the k_call_mask permission check
-                // get_priv allocates a Priv entry with all kernel calls allowed.
-                let _ = kernel::system::get_priv(rp);
+                // proc_init already assigned a priv slot for every boot
+                // image entry; get_priv is only a fallback for processes
+                // without one. init keeps the shared USER slot.
+                if (*rp).p_priv.is_null() {
+                    let _ = kernel::system::get_priv(rp);
+                }
                 // Store physical delta for PA translation in verify_grant.
                 // Boot processes have per-process page tables that remap
                 // VA 0x1000000 → loaded PA. s_phys_delta = PA - VA.
