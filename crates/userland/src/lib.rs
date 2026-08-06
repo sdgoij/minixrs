@@ -1122,7 +1122,7 @@ pub fn tcpserver(args: &[&str]) -> i32 {
                 break;
             }
         };
-        let (peer, _) = minix_std::net::getpeername(c).unwrap_or_default();
+        let (peer, port) = minix_std::net::getpeername(c).unwrap_or_default();
         write_out(b"tcpserver: accepted ");
         print_dec(peer[0] as u32);
         write_out(b".");
@@ -1131,6 +1131,8 @@ pub fn tcpserver(args: &[&str]) -> i32 {
         print_dec(peer[2] as u32);
         write_out(b".");
         print_dec(peer[3] as u32);
+        write_out(b":");
+        print_dec(port as u32);
         write_out(b"\n");
 
         // Echo loop: read a chunk, write it back. A zero write (send

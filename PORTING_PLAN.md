@@ -98,8 +98,15 @@ reporting the peer. Data sends now keep a single-segment window
 retransmitted after a poll-round threshold, and a `TEST_DROP_TX` hook forces
 that path on the lossless link (verified by host unit tests; a `tcpserver`
 echo binary is verified end to end on all three arches: a host client
-connects through `hostfwd`, sends, and gets its bytes echoed back). The
-rest of the reference `minix/net` stack remains (16.1-16.4).
+connects through `hostfwd`, sends, and gets its bytes echoed back).
+
+**TCP lifecycle polish (Phase 16.1d) completes the socket layer:**
+`close()` sends a FIN and runs the close handshake (the slot is reaped
+once the close completes, so connections can be opened back-to-back —
+verified with three sequential host connections, each echoed cleanly),
+`connect()` retries a dropped SYN, and a SYN for a closed local port is
+answered with RST so clients fail fast. The rest of the reference
+`minix/net` stack remains (16.1-16.4).
 
 Supporting fixes in the same milestone: the virtio-net driver now uses the
 correct 12-byte virtio 1.x packet header (`num_buffers` is always present in
@@ -5667,9 +5674,10 @@ works on all three arches with real-PID ICMP identifiers; **UDP sockets
 (socket/bind/connect/send/recv over `/dev/udp`) and TCP sockets
 (`/dev/tcp`) work end to end on all three arches, both as a client
 (RFC 793 handshake + stream data) and as a server (listen/accept with a
-cookie transfer, verified by a host-initiated echo exchange), with data-
-segment retransmission and a single-segment send window**. The
-full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
+cookie transfer), with data-segment retransmission, a single-segment send
+window, graceful FIN close, SYN retry on connect, and RST for closed
+ports**. The full reference inet stack and IPv6 (16.1-16.4 below) are
+NOT STARTED.
 
 ### Tasks
 
@@ -5762,6 +5770,33 @@ full reference inet stack and IPv6 (16.1-16.4 below) are NOT STARTED.
   - Tests: `tcpserver` + hostfwd'd host client → full echo round trip on
     x86_64, RISC-V64 and AArch64 (`tools/tcp_accept_verify.py`); `tcp`
     client regression and `ping` still pass on all three arches
+
+- [x] **16.1d — TCP lifecycle: graceful close (FIN), SYN retry, RST**
+  - `close()` on an established socket sends FIN and keeps the slot in a
+    new `TcpState::FinSent` until the close completes: the peer's FIN (or a
+    pure ACK of ours — the close is then done) reaps the slot, RST reaps
+    immediately, and a lost FIN is re-sent. Reaping as soon as our FIN is
+    acknowledged prevents a lingering closing socket from shadowing a new
+    connection that reuses the same 4-tuple
+  - Established sockets ACK a contiguous peer FIN (next `read` reports
+    EOF); `recv` sees EOF as a zero return after the poll window
+  - `connect()` re-sends the SYN every `SYN_RETRY_EVERY` poll rounds so a
+    dropped SYN is recovered instead of failing the connect
+  - The demux RSTs a SYN for a closed local port (RFC 793, dst = us) so
+    the client fails fast instead of timing out
+  - Fixes: `move_pending` now inherits the listener's `loc_port`/`loc_addr`
+    onto the accepted socket (previously 0, so every segment it sent —
+    data ACKs, echo, FIN — went out with src port 0 and was dropped/RST'd
+    by the peer); `TEST_DROP_TX` no longer wraps a zero counter to
+    `u32::MAX` and drops every later write
+  - Host tests: FIN-on-close enters FinSent and consumes a sequence number,
+    peer ACK/FIN/RST each reap the closing slot, an established socket ACKs
+    a contiguous peer FIN, and accept inherits the local port/address
+  - Tests: `tools/tcp_accept_verify.py` drives **three sequential host
+    connections** (each gets its echo, exercising slot recycling + the FIN
+    handshake) plus a **closed-guest-port probe** (fast RST, no hang) on
+    x86_64, RISC-V64 and AArch64; `tcp` client regression and `ping` still
+    pass; frame capture (`tools/pcap_decode.py`) shows a clean 4-way close
 
 - [ ] **16.1 — Port `minix/net/`**
   - Source: `.refs/minix-3.3.0/minix/net/`

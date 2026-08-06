@@ -118,6 +118,8 @@ const ACCEPT_QUEUE_MAX: usize = 4;
 /// `dl_read_frames` round; on the lossless QEMU path the ACK always lands
 /// within one, so this never fires spuriously).
 const RETX_AFTER_ROUNDS: u32 = 3;
+/// Poll rounds between SYN retransmissions during a blocking connect.
+const SYN_RETRY_EVERY: u32 = 5;
 
 /// ICMP echo request / reply types.
 const ICMP_ECHO_REQUEST: u8 = 8;
@@ -384,6 +386,9 @@ enum TcpState {
     Established,
     /// `listen()` was called; inbound SYNs join the accept queue.
     Listening,
+    /// `close()` sent a FIN; waiting for the peer's FIN to complete the
+    /// close handshake before the slot is reaped.
+    FinSent,
 }
 
 /// One inbound connection waiting on a listening socket: the handshake ran
@@ -851,9 +856,14 @@ fn tcp_demux(pkt: &[u8], ihl: usize, src_mac: &[u8; 6]) {
                 continue;
             }
             if flags & TCP_RST != 0 {
-                // Peer aborted — fail a pending connect, drop a live one.
-                s.state = TcpState::Closed;
-                s.err = ECONNREFUSED;
+                // Peer aborted — fail a pending connect, drop a live one,
+                // or reap a closing socket immediately.
+                if s.state == TcpState::FinSent {
+                    s.in_use = false;
+                } else {
+                    s.state = TcpState::Closed;
+                    s.err = ECONNREFUSED;
+                }
                 return;
             }
             match s.state {
@@ -865,7 +875,8 @@ fn tcp_demux(pkt: &[u8], ihl: usize, src_mac: &[u8; 6]) {
                         let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
                     }
                 }
-                TcpState::Established => tcp_established_demux(s, ack, seq, payload),
+                TcpState::Established => tcp_established_demux(s, ack, seq, flags, payload),
+                TcpState::FinSent => tcp_fin_demux(s, ack, seq, flags, payload),
                 TcpState::Closed | TcpState::Listening => {}
             }
             return;
@@ -884,13 +895,35 @@ fn tcp_demux(pkt: &[u8], ihl: usize, src_mac: &[u8; 6]) {
             }
             return;
         }
+        // No socket for this segment: a SYN for a closed local port is
+        // answered with RST so the client fails fast (RFC 793) instead of
+        // timing out on a silently dropped SYN.
+        if flags & TCP_SYN != 0 && pkt[16..20] == OUR_IP {
+            let peer = TcpPeer {
+                loc_port: dst_port,
+                rem_port: src_port,
+                loc_addr: OUR_IP,
+                rem_addr: src_ip,
+                rem_mac: *src_mac,
+            };
+            let mut ip_pkt = [0u8; RX_BUF_SIZE];
+            let _ = tcp_send_raw(
+                &mut ip_pkt,
+                &peer,
+                0,
+                seq.wrapping_add(1),
+                TCP_RST | TCP_ACK,
+                0,
+            );
+        }
     }
 }
 
 /// Established-socket segment handling: acknowledge sent data (drop acked
-/// bytes from the retransmission buffer) and deliver in-order received
-/// data, re-ACKing duplicates so a lost ACK does not wedge the peer.
-fn tcp_established_demux(s: &mut TcpSock, ack: u32, seq: u32, payload: &[u8]) {
+/// bytes from the retransmission buffer), deliver in-order received data
+/// (re-ACKing duplicates so a lost ACK does not wedge the peer), and ACK a
+/// peer FIN once the stream is contiguous (the next `read` reports EOF).
+fn tcp_established_demux(s: &mut TcpSock, ack: u32, seq: u32, flags: u8, payload: &[u8]) {
     // ACK progress on our unacked data (single-segment window, so at most
     // the one buffered segment is freed).
     let acked = ack.wrapping_sub(s.snd_una);
@@ -901,18 +934,56 @@ fn tcp_established_demux(s: &mut TcpSock, ack: u32, seq: u32, payload: &[u8]) {
         s.snd_una = ack;
         s.retx_rounds = 0;
     }
-    if payload.is_empty() {
-        return; // pure ACK — nothing to deliver
+    if !payload.is_empty() {
+        if seq == s.rcv_nxt {
+            let n = payload.len().min(s.rx_buf.len() - s.rx_len);
+            s.rx_buf[s.rx_len..s.rx_len + n].copy_from_slice(&payload[..n]);
+            s.rx_len += n;
+            s.rcv_nxt = s.rcv_nxt.wrapping_add(n as u32);
+            let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+        } else if seq_lt(seq, s.rcv_nxt) {
+            // Duplicate of already-acked data: re-ACK so the peer stops.
+            let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+        }
     }
-    if seq == s.rcv_nxt {
-        let n = payload.len().min(s.rx_buf.len() - s.rx_len);
-        s.rx_buf[s.rx_len..s.rx_len + n].copy_from_slice(&payload[..n]);
-        s.rx_len += n;
-        s.rcv_nxt = s.rcv_nxt.wrapping_add(n as u32);
+    // Peer half-close: ACK the FIN (it consumes one sequence number after
+    // the payload) when it is contiguous with what we have received.
+    if flags & TCP_FIN != 0 && seq.wrapping_add(payload.len() as u32) == s.rcv_nxt {
+        s.rcv_nxt = s.rcv_nxt.wrapping_add(1);
         let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
-    } else if seq_lt(seq, s.rcv_nxt) {
-        // Duplicate of already-acked data: re-ACK so the peer stops.
-        let _ = tcp_send_segment(s, s.snd_nxt, s.rcv_nxt, TCP_ACK, 0);
+    }
+}
+
+/// Closing-socket segment handling after `close()` sent our FIN: the peer's
+/// FIN completes the handshake (ACK it and reap the slot); a pure ACK of
+/// our FIN means the close is complete — the peer's own FIN was already
+/// handled in `Established` (host-closes-first) or arrives piggybacked on
+/// this ACK — so reap immediately and stop shadowing the 4-tuple (the
+/// peer may reuse the ephemeral port for a fresh connection). Anything else
+/// re-sends the FIN so the close completes.
+fn tcp_fin_demux(s: &mut TcpSock, ack: u32, seq: u32, flags: u8, payload: &[u8]) {
+    if flags & TCP_RST != 0 {
+        // Peer gave up on the close — reap immediately.
+        s.in_use = false;
+    } else if flags & TCP_FIN != 0 {
+        // Both FINs exchanged: ACK the peer's FIN and free the slot.
+        let ack = seq.wrapping_add(payload.len() as u32).wrapping_add(1);
+        let _ = tcp_send_segment(s, s.snd_nxt, ack, TCP_ACK, 0);
+        s.in_use = false;
+    } else if flags & TCP_ACK != 0 && ack == s.snd_nxt {
+        // Our FIN fully acknowledged — the close is done.
+        s.in_use = false;
+    } else {
+        // Our FIN has not been seen yet (or the peer is still sending data
+        // before closing): re-send it. A duplicate FIN is ignored by the
+        // peer, so this is idempotent.
+        let _ = tcp_send_segment(
+            s,
+            s.snd_nxt.wrapping_sub(1),
+            s.rcv_nxt,
+            TCP_FIN | TCP_ACK,
+            0,
+        );
     }
 }
 
@@ -1633,23 +1704,53 @@ fn cdev_open_net(msg: &mut Message) -> i32 {
                     return (CDEV_CLONED | CDEV_DGRAM_OPEN | clone_minor as u32) as i32;
                 }
             }
+            // No free slot: reap a closing socket whose FIN handshake was
+            // already in flight (the peer retries its FIN if it needs a
+            // final ACK; the slot is worth more than the straggler).
+            for (i, slot) in socks.iter_mut().enumerate() {
+                if slot.in_use && slot.state == TcpState::FinSent {
+                    slot.in_use = false;
+                    let clone_minor = TCP_SOCKET_MINOR_BASE + i as i32;
+                    *slot = TcpSock::init(clone_minor, true);
+                    return (CDEV_CLONED | CDEV_DGRAM_OPEN | clone_minor as u32) as i32;
+                }
+            }
             -24 // EMFILE
         },
         _ => -19, // ENODEV
     }
 }
 
-/// CDEV_CLOSE: free the socket slot for a cloned minor.
+/// CDEV_CLOSE: an established TCP socket starts the graceful close (send
+/// FIN, keep the slot until the peer's FIN completes the handshake);
+/// everything else frees the slot immediately.
 fn cdev_close_net(minor: i32) -> i32 {
     if minor == IP_DEV_MINOR {
         return 0;
     }
     if minor_is_tcp(minor) {
         return match tcp_socket_for_minor(minor) {
-            Some(s) => {
-                s.in_use = false;
-                0
-            }
+            Some(s) => match s.state {
+                TcpState::Established if s.rem_mac != [0; 6] => {
+                    // Send FIN after any buffered data; the slot lingers in
+                    // FinSent until the peer's FIN-ACK is demuxed.
+                    let seq = s.snd_nxt;
+                    let ack = s.rcv_nxt;
+                    let peer = TcpPeer::from_sock(s);
+                    s.snd_nxt = s.snd_nxt.wrapping_add(1);
+                    s.state = TcpState::FinSent;
+                    s.err = 0;
+                    s.retx_rounds = 0;
+                    let mut ip_pkt = [0u8; RX_BUF_SIZE];
+                    let _ = tcp_send_raw(&mut ip_pkt, &peer, seq, ack, TCP_FIN | TCP_ACK, 0);
+                    0
+                }
+                TcpState::FinSent => 0, // already closing
+                _ => {
+                    s.in_use = false;
+                    0
+                }
+            },
             None => -9, // EBADF
         };
     }
@@ -2123,8 +2224,10 @@ fn tcp_connect(minor: i32) -> i32 {
         return -5;
     }
 
-    // Poll for the SYN-ACK (tcp_demux completes the handshake).
-    for _ in 0..READ_POLL_ROUNDS {
+    // Poll for the SYN-ACK (tcp_demux completes the handshake), re-sending
+    // the SYN every SYN_RETRY_EVERY rounds so a dropped SYN is recovered
+    // instead of failing the connect.
+    for round in 0..READ_POLL_ROUNDS {
         {
             let s = match tcp_socket_for_minor(minor) {
                 Some(s) => s,
@@ -2133,7 +2236,15 @@ fn tcp_connect(minor: i32) -> i32 {
             match s.state {
                 TcpState::Established => return 0,
                 TcpState::Closed => return if s.err != 0 { s.err } else { ETIMEDOUT },
-                TcpState::SynSent | TcpState::Listening => {}
+                TcpState::SynSent => {
+                    if round > 0 && round % SYN_RETRY_EVERY == 0 {
+                        let peer = TcpPeer::from_sock(s);
+                        let iss = s.iss;
+                        let mut ip_pkt = [0u8; RX_BUF_SIZE];
+                        let _ = tcp_send_raw(&mut ip_pkt, &peer, iss, 0, TCP_SYN, 0);
+                    }
+                }
+                TcpState::Listening | TcpState::FinSent => {}
             }
         }
         let got = dl_read_frames();
@@ -2225,8 +2336,11 @@ fn tcp_write(minor: i32, user: i32, va: u64, count: u64) -> i32 {
     s.snd_nxt = s.snd_nxt.wrapping_add(n as u32);
     s.retx_rounds = 0;
     // TEST_DROP_TX: count the segment as sent without transmitting it — no
-    // ACK will come, so the poll loops retransmit from tx_buf.
-    if TEST_DROP_TX.fetch_sub(1, core::sync::atomic::Ordering::Relaxed) > 0 {
+    // ACK will come, so the poll loops retransmit from tx_buf. The counter
+    // is only decremented when armed: a plain fetch_sub on the zeroed
+    // counter would wrap it to u32::MAX and drop every later write.
+    if TEST_DROP_TX.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+        TEST_DROP_TX.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         return n as i32;
     }
     let total = build_tcp_datagram_to(
@@ -2452,7 +2566,7 @@ mod tests {
         s.retx_rounds = 0;
         // Pure ACK covering all 5 bytes: buffer freed, window reclaimed.
         let ack = s.snd_una.wrapping_add(5);
-        tcp_established_demux(&mut s, ack, 0, &[]);
+        tcp_established_demux(&mut s, ack, 0, TCP_ACK, &[]);
         assert_eq!(s.tx_len, 0);
         assert_eq!(s.snd_una, s.iss.wrapping_add(6));
         assert_eq!(s.retx_rounds, 0);
@@ -2462,7 +2576,7 @@ mod tests {
         s.snd_una = s.iss.wrapping_add(6);
         s.snd_nxt = s.snd_una.wrapping_add(5);
         let ack = s.snd_una.wrapping_add(2);
-        tcp_established_demux(&mut s, ack, 0, &[]);
+        tcp_established_demux(&mut s, ack, 0, TCP_ACK, &[]);
         assert_eq!(s.tx_len, 3);
         assert_eq!(s.snd_una, s.iss.wrapping_add(8));
 
@@ -2570,6 +2684,11 @@ mod tests {
             let socks = &mut *TCP_SOCKETS.get();
             let dst = &socks[1];
             assert_eq!(dst.state, TcpState::Established);
+            assert_eq!(dst.loc_port, 20000, "listener's local port is inherited");
+            assert_eq!(
+                dst.loc_addr, [0; 4],
+                "listener's local address is inherited"
+            );
             assert_eq!(dst.rem_addr, [10, 0, 2, 2]);
             assert_eq!(dst.rem_port, 40000);
             assert_eq!(dst.rcv_nxt, 0x1003);
@@ -2584,5 +2703,97 @@ mod tests {
             tc_secret: [8; 12],
         };
         assert_eq!(move_pending(100, 0, bad), -22);
+
+        // --- close() sends a FIN and the peer's FIN reaps the slot ---
+        unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            for slot in socks.iter_mut() {
+                *slot = TcpSock::init(0, false);
+            }
+            socks[0] = TcpSock::init(0x20, true); // valid clone minor
+            socks[0].loc_port = 20000;
+            socks[0].rem_port = 40000;
+            socks[0].rem_addr = [10, 0, 2, 2];
+            socks[0].rem_mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+            socks[0].state = TcpState::Established;
+            socks[0].iss = 0x5000;
+            socks[0].snd_nxt = socks[0].iss.wrapping_add(1);
+            socks[0].snd_una = socks[0].snd_nxt;
+            socks[0].rcv_nxt = 0x6000;
+        }
+        let fin_seq = {
+            let s = tcp_socket_for_minor(0x20).unwrap();
+            s.snd_nxt
+        };
+        assert_eq!(cdev_close_net(0x20), 0);
+        {
+            let s = tcp_socket_for_minor(0x20).unwrap();
+            assert!(s.in_use, "slot lingers for the close handshake");
+            assert_eq!(s.state, TcpState::FinSent);
+            assert_eq!(s.snd_nxt, fin_seq.wrapping_add(1), "FIN consumes a seq");
+        }
+        // Peer ACKs our FIN: the close is complete — slot reaped so it no
+        // longer shadows a future connection reusing the same 4-tuple.
+        {
+            let s = tcp_socket_for_minor(0x20).unwrap();
+            tcp_fin_demux(s, fin_seq.wrapping_add(1), 0x7000, TCP_ACK, &[]);
+        }
+        assert!(
+            tcp_socket_for_minor(0x20).is_none(),
+            "slot reaped once our FIN is acknowledged"
+        );
+        // Peer FIN before our FIN is ACKed: ACK it and reap.
+        unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            socks[0].in_use = true;
+            socks[0].minor = 0x20;
+            socks[0].loc_port = 20000;
+            socks[0].rem_port = 40000;
+            socks[0].rem_addr = [10, 0, 2, 2];
+            socks[0].rem_mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+            socks[0].state = TcpState::FinSent;
+            socks[0].iss = 0x5000;
+            socks[0].snd_nxt = fin_seq.wrapping_add(1);
+            socks[0].rcv_nxt = 0x6000;
+        }
+        {
+            let s = tcp_socket_for_minor(0x20).unwrap();
+            tcp_fin_demux(s, 0, 0x7000, TCP_FIN | TCP_ACK, &[]);
+        }
+        assert!(
+            tcp_socket_for_minor(0x20).is_none(),
+            "slot reaped on peer FIN"
+        );
+        assert!(
+            tcp_socket_for_minor(0x20).is_none(),
+            "slot reaped on full close"
+        );
+        // RST during the close reaps immediately.
+        unsafe {
+            let socks = &mut *TCP_SOCKETS.get();
+            socks[0].in_use = true;
+            socks[0].minor = 0x21;
+            socks[0].state = TcpState::FinSent;
+            socks[0].loc_port = 20001;
+            socks[0].rem_port = 40001;
+            socks[0].rem_addr = [10, 0, 2, 2];
+            socks[0].rem_mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        }
+        {
+            let s = tcp_socket_for_minor(0x21).unwrap();
+            tcp_fin_demux(s, 0, 0, TCP_RST, &[]);
+        }
+        assert!(tcp_socket_for_minor(0x21).is_none());
+
+        // --- an Established socket ACKs a contiguous peer FIN (EOF) ---
+        let mut e = TcpSock::init(0, true);
+        e.state = TcpState::Established;
+        e.rem_mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        e.iss = 0x7000;
+        e.snd_nxt = 0x7001;
+        e.snd_una = 0x7001;
+        e.rcv_nxt = 0x8000;
+        tcp_established_demux(&mut e, 0x7001, 0x8000, TCP_FIN | TCP_ACK, &[]);
+        assert_eq!(e.rcv_nxt, 0x8001, "FIN advances rcv_nxt");
     }
 }
