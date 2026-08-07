@@ -619,6 +619,50 @@ unsafe fn sys_ipc_senda_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
     }
 }
 
+// Thread syscalls (54, 55, 58, 59)
+
+/// SYS_thread_create (54) — create a thread in the calling process.
+/// args: [0] = entry, [1] = stack top, [2] = arg (first argument register).
+/// Returns the new thread's tid (> 0) or a negative errno.
+unsafe fn sys_thread_create_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38; // ENOSYS
+    }
+    unsafe { crate::thread::create(caller, args[0], args[1], args[2]) as i64 }
+}
+
+/// SYS_thread_exit (55) — terminate the calling thread. The main thread
+/// (tid 0) calling this exits the whole process (status in args[0]).
+unsafe fn sys_thread_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    unsafe {
+        if (*caller).p_tid == 0 {
+            return sys_exit_handler(caller, args);
+        }
+        crate::thread::exit(caller) as i64
+    }
+}
+
+/// SYS_thread_join (58) — wait for a thread of the calling process to exit.
+/// args[0] = tid. Returns 0 when the thread has exited, or a negative errno.
+unsafe fn sys_thread_join_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    unsafe { crate::thread::join(caller, args[0] as u32) as i64 }
+}
+
+/// SYS_thread_yield (59) — yield the CPU to another runnable thread.
+unsafe fn sys_thread_yield_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    unsafe { crate::thread::yield_self(caller) };
+    0
+}
+
 /// SYS_KERNEL_CALL (50) — invoke a kernel call on the SYSTEM task.
 ///
 /// args[0] = call_nr (kernel call number, e.g. 0 for SYS_FORK)
@@ -1046,6 +1090,11 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(51, sys_ipc_sendnb_handler); // SENDNB
         register_basic_syscall(52, sys_ipc_senda_handler); // SENDA
         register_basic_syscall(53, sys_setfdvfs_handler); // NR_SETFDVFS
+        // Thread syscalls
+        register_basic_syscall(54, sys_thread_create_handler); // NR_THREAD_CREATE
+        register_basic_syscall(55, sys_thread_exit_handler); // NR_THREAD_EXIT
+        register_basic_syscall(58, sys_thread_join_handler); // NR_THREAD_JOIN
+        register_basic_syscall(59, sys_thread_yield_handler); // NR_THREAD_YIELD
     }
 }
 

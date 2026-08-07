@@ -191,6 +191,14 @@ const NR_GETDENTS: u64 = 57;
 pub const NR_KERNEL_CALL: u64 = 50;
 /// Mark fd 0..2 as VFS-owned (1) or serial (0).
 pub const NR_SETFDVFS: u64 = 53;
+/// Create a thread in the calling process (kernel: SYS_thread_create).
+pub const NR_THREAD_CREATE: u64 = 54;
+/// Terminate the calling thread (kernel: SYS_thread_exit).
+pub const NR_THREAD_EXIT: u64 = 55;
+/// Wait for a thread of this process to exit (kernel: SYS_thread_join).
+pub const NR_THREAD_JOIN: u64 = 58;
+/// Yield the CPU to another runnable thread (kernel: SYS_thread_yield).
+pub const NR_THREAD_YIELD: u64 = 59;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
@@ -707,6 +715,43 @@ pub fn exit(status: i32) -> ! {
         unsafe {
             core::arch::asm!("wfi")
         };
+    }
+}
+
+// Thread primitives (1:1 kernel threads; see THREADS.md)
+
+/// Create a new thread in this process.
+///
+/// `entry` is the start function, called with `arg` in the first argument
+/// register; `stack` is the top of the new thread's user stack (the caller
+/// allocates it — the kernel only records it in the frame).
+///
+/// Returns the new thread's tid (> 0) or a negative errno.
+pub fn thread_create(entry: usize, stack: usize, arg: usize) -> i32 {
+    unsafe { syscall3(NR_THREAD_CREATE, entry as u64, stack as u64, arg as u64) as i32 }
+}
+
+/// Terminate the calling thread. The main thread (tid 0) calling this
+/// exits the whole process with `status`. Never returns.
+pub fn thread_exit(status: i32) -> ! {
+    unsafe {
+        syscall1(NR_THREAD_EXIT, status as u64);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Wait for a thread of this process to exit. Returns 0 on success or a
+/// negative errno (EINVAL for a self-join / main-thread join).
+pub fn thread_join(tid: i32) -> i32 {
+    unsafe { syscall1(NR_THREAD_JOIN, tid as u64) as i32 }
+}
+
+/// Yield the CPU to another runnable thread.
+pub fn thread_yield() {
+    unsafe {
+        syscall0(NR_THREAD_YIELD);
     }
 }
 

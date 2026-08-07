@@ -36,6 +36,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ctest` is the second C smoke test: uses the full libc (errno,
     // malloc family, printf/stdio, strings). Same build path as helloc.
     ("/bin/ctest", "ctest"),
+    // `/bin/threadtest` is the thread smoke test: spawns kernel threads
+    // that share the process address space, do PM IPC, and are joined back.
+    ("/bin/threadtest", "threadtest"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

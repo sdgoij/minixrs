@@ -2621,5 +2621,138 @@ pub fn run_all() -> u32 {
     total += run("sys_schedule_roundtrip", test_sys_schedule_roundtrip);
     total += run("sys_getksig_pending", test_sys_getksig_pending);
 
+    // Threads: 1:1 kernel threads as Proc slots — lifecycle (create/join/
+    // exit) and wake-one IPC delivery.
+    total += run("thread_lifecycle", test_thread_lifecycle);
+    total += run("thread_wake_one", test_thread_wake_one);
+
     total
+}
+
+// Threads (slice 0)
+
+/// Claim a user-range slot as a runnable single-threaded main process.
+unsafe fn thread_make_main(nr: i32) -> *mut crate::proc::Proc {
+    unsafe {
+        let main = make_test_proc(nr);
+        if !main.is_null() {
+            (*main).p_priority = 5;
+            (*main).p_cpu_time_left = 1_000_000;
+            (*main).p_tid = 0;
+            (*main).p_t_next = core::ptr::null_mut();
+            (*main).p_group = core::ptr::null_mut();
+            (*main).p_join_waiter = core::ptr::null_mut();
+        }
+        main
+    }
+}
+
+fn test_thread_lifecycle(ctx: &mut TestCtx) {
+    unsafe {
+        crate::table::proc_init();
+        clear_run_queues();
+        let main = thread_make_main(200);
+        if main.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        let tid = crate::thread::create(main, 0x401000, 0x7fff_f000, 0x7);
+        ctx.assert(tid == 1, "first thread gets tid 1");
+        let thread = (*main).p_t_next;
+        ctx.assert(!thread.is_null(), "thread linked on main slot");
+        if thread.is_null() {
+            return;
+        }
+        ctx.assert((*thread).p_tid == 1, "thread tid matches");
+        ctx.assert(
+            (*thread).p_endpoint == (*main).p_endpoint,
+            "thread shares process endpoint",
+        );
+        ctx.assert((*thread).is_runnable(), "thread is runnable");
+
+        // Join blocks the main slot; exit wakes it.
+        ctx.assert(
+            crate::thread::join(main, 1) == crate::ipc::OK,
+            "join registers the waiter",
+        );
+        ctx.assert(
+            (*main).rts_isset(crate::proc::RtsFlags::JOINING),
+            "joiner blocked with JOINING",
+        );
+        ctx.assert(
+            crate::thread::exit(thread) == crate::system::EDONTREPLY,
+            "exit returns EDONTREPLY",
+        );
+        ctx.assert((*main).is_runnable(), "joiner woken by exit");
+        ctx.assert((*main).p_t_next.is_null(), "thread list empty after exit");
+        ctx.assert((*thread).is_empty(), "exited slot freed");
+        ctx.assert(
+            crate::thread::join(main, 1) == crate::ipc::OK,
+            "join of an exited thread succeeds at once",
+        );
+
+        (*main)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
+}
+
+fn test_thread_wake_one(ctx: &mut TestCtx) {
+    unsafe {
+        crate::table::proc_init();
+        clear_run_queues();
+        let main = thread_make_main(202);
+        let src = make_test_proc(203);
+        if main.is_null() || src.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        let tid = crate::thread::create(main, 0x401000, 0x7fff_f000, 0);
+        ctx.assert(tid == 1, "thread created");
+        let thread = (*main).p_t_next;
+        if thread.is_null() {
+            ctx.assert(false, "no thread slot");
+            return;
+        }
+        let src_ep = (*src).p_endpoint;
+        let dst_ep = (*main).p_endpoint;
+
+        // The sibling is blocked in RECEIVE from src; main is running.
+        (*thread)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*thread).p_getfrom_e = src_ep;
+        (*thread).p_delivermsg_vir = 0;
+
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&77i32.to_ne_bytes());
+        ctx.assert(
+            crate::ipc::mini_send(src, dst_ep, msg.as_ptr(), 0) == crate::ipc::OK,
+            "mini_send direct delivery",
+        );
+
+        // Wake-one: exactly the sibling is woken; main untouched.
+        let trts = (*thread).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            trts & crate::proc::RtsFlags::RECEIVING.bits() == 0,
+            "sibling woken",
+        );
+        ctx.assert((*thread).is_runnable(), "sibling runnable");
+        let mrts = (*main).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(mrts == 0, "main untouched");
+
+        // Cleanup: the sibling is on the run queue; unlink and free.
+        (*main).p_t_next = core::ptr::null_mut();
+        (*thread)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*main)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*src)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
 }

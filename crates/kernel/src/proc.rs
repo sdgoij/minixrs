@@ -182,6 +182,8 @@ bitflags::bitflags! {
         const VMREQTARGET    = 0x01000;
         /// Process was preempted by a higher priority process.
         const PREEMPTED      = 0x04000;
+        /// Thread blocked in `thread_join` waiting for another thread.
+        const JOINING        = 0x02000;
         /// Process ran out of its quantum.
         const NO_QUANTUM     = 0x08000;
         /// Not ready until VM has made it.
@@ -363,6 +365,25 @@ pub struct Proc {
     /// are forwarded to VFS instead of the serial console shortcut. Set by
     /// `set_fd_vfs` after the shell dup2's a redirect file onto fd 0..2.
     pub p_fd_vfs: u32,
+
+    /// Thread id within the process; 0 = main thread (the process slot).
+    /// Non-zero slots are extra threads sharing the process's endpoint, page
+    /// table, and privilege structure (see `crates/kernel/src/thread.rs`).
+    ///
+    /// Appended at the END of `Proc`: `restore()`/`switch_to_user` read
+    /// `p_seg.p_cr3` at hardcoded byte offsets (x86 +256, riscv +264,
+    /// aarch64 +288), so fields may only be added after `p_fd_vfs`.
+    pub p_tid: u32,
+    /// Link to the next thread of the same process. The main slot heads the
+    /// singly-linked thread list; null terminates it.
+    pub p_t_next: *mut Proc,
+    /// Pointer to the process's main slot (the endpoint owner). Self for the
+    /// main thread; null for a slot that is not part of any thread group
+    /// (e.g. a freshly initialized or forked process).
+    pub p_group: *mut Proc,
+    /// Thread blocked in `thread_join` waiting for THIS slot's thread to
+    /// exit; cleared and woken by `thread::exit`. Single waiter per thread.
+    pub p_join_waiter: *mut Proc,
 }
 
 impl Default for Proc {
@@ -411,6 +432,10 @@ impl Default for Proc {
             p_signal_received: 0,
             p_cr3_saved: 0,
             p_fd_vfs: 0,
+            p_tid: 0,
+            p_t_next: core::ptr::null_mut(),
+            p_group: core::ptr::null_mut(),
+            p_join_waiter: core::ptr::null_mut(),
         }
     }
 }
@@ -493,6 +518,21 @@ impl Proc {
     /// Check if the process slot is free.
     pub fn is_empty(&self) -> bool {
         self.p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) == RtsFlags::SLOT_FREE.bits()
+    }
+
+    /// Is this slot a non-main thread of its process?
+    pub fn is_thread(&self) -> bool {
+        self.p_tid != 0
+    }
+
+    /// The process's main slot (the endpoint owner). Returns self when
+    /// `p_group` is null (fresh, forked, or boot processes have no group).
+    pub fn group(&self) -> *mut Proc {
+        if self.p_group.is_null() {
+            self as *const Proc as *mut Proc
+        } else {
+            self.p_group
+        }
     }
 }
 

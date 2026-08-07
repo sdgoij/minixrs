@@ -3957,6 +3957,14 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         // C: rpc->p_nr = slot (obliterated by copy, restore it)
         (*rpc).p_nr = child_slot;
         (*rpc).p_endpoint = table::make_endpoint(new_gen, child_slot);
+        // POSIX fork: only the calling thread survives. The child is a
+        // fresh single-threaded process — clear the inherited thread-list
+        // links so it cannot resume the parent's threads (whose slots are
+        // not copied and would dangle).
+        (*rpc).p_tid = 0;
+        (*rpc).p_t_next = core::ptr::null_mut();
+        (*rpc).p_group = core::ptr::null_mut();
+        (*rpc).p_join_waiter = core::ptr::null_mut();
         // C: rpc->p_reg.retreg = 0 (child sees pid=0)
         crate::hal::write_retval(&mut (*rpc).p_reg, 0);
 

@@ -142,6 +142,58 @@ fn will_receive_sendrec(dst_ptr: *mut Proc, src_e: i32) -> bool {
     }
 }
 
+/// Find a thread of the process rooted at `main` that is blocked in RECEIVE
+/// and will accept a message from `src_e` right now. Returns the receiving
+/// thread slot, or null. The main slot is the only thread for
+/// single-threaded processes, so behavior there is unchanged.
+///
+/// # Safety
+///
+/// `main` must be the process's main slot with a consistent thread list.
+unsafe fn find_receiver(main: *mut Proc, src_e: i32) -> *mut Proc {
+    unsafe {
+        let mut t = main;
+        loop {
+            if will_receive_sendrec(t, src_e) {
+                return t;
+            }
+            t = (*t).p_t_next;
+            if t.is_null() {
+                return core::ptr::null_mut();
+            }
+        }
+    }
+}
+
+/// Like `find_receiver` but with the stricter notification predicate: the
+/// thread must be blocked in RECEIVE with no REPLY_PEND and a matching
+/// source (a notification must not satisfy the RECEIVE phase of a SENDREC).
+///
+/// # Safety
+///
+/// `main` must be the process's main slot with a consistent thread list.
+unsafe fn find_notify_receiver(main: *mut Proc, src_e: i32) -> *mut Proc {
+    unsafe {
+        let mut t = main;
+        loop {
+            let rts = (*t).p_rts_flags.load(Ordering::Relaxed);
+            let has_reply_pend = (*t).p_misc_flags.load(Ordering::Relaxed)
+                & crate::proc::MiscFlags::REPLY_PEND.bits()
+                != 0;
+            if rts & RtsFlags::RECEIVING.bits() != 0
+                && !has_reply_pend
+                && ((*t).p_getfrom_e == crate::system::NONE || (*t).p_getfrom_e == src_e)
+            {
+                return t;
+            }
+            t = (*t).p_t_next;
+            if t.is_null() {
+                return core::ptr::null_mut();
+            }
+        }
+    }
+}
+
 /// Send a message from `caller_ptr` to `dst_e`.
 ///
 /// # Safety
@@ -170,14 +222,18 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
         // same priority (USER_Q=5), so PM's sched_init can be interrupted
         // by the shell's fork message. In C MINIX, PM has higher priority
         // and completes sched_init before the shell ever runs.
-        let will_recv = will_receive_sendrec(dst_ptr, (*caller_ptr).p_endpoint);
-        if will_recv {
+        // A thread of the destination process must be blocked in RECEIVE
+        // with a matching source for the fast path. With threads, any
+        // thread of the group can be the receiver; for single-threaded
+        // processes this is exactly the old single-slot check.
+        let recv_ptr = find_receiver(dst_ptr, (*caller_ptr).p_endpoint);
+        if !recv_ptr.is_null() {
             // Direct delivery.
             // Note: dest may have REPLY_PEND set if it was in SENDREC waiting
             // for OUR message (we ARE the SENDREC target replying).  The C
             // code handles this by clearing REPLY_PEND before RECEIVING.
 
-            let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*dst_ptr).p_delivermsg;
+            let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*recv_ptr).p_delivermsg;
             let _ = crate::ipc::copy_from_user(
                 caller_ptr,
                 m_ptr as u64,
@@ -191,7 +247,7 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // original C: dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint
             core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), dst_msg.as_mut_ptr().add(0), 4);
 
-            (*dst_ptr)
+            (*recv_ptr)
                 .p_misc_flags
                 .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
 
@@ -199,8 +255,8 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // When a process is woken via SENDNB (not through syscall
             // return), syscall_handler_c's deliver_msg is never called.
             // delivermsg switches to the receiver's CR3 for the copy.
-            crate::ipc::delivermsg(dst_ptr);
-            (*dst_ptr)
+            crate::ipc::delivermsg(recv_ptr);
+            (*recv_ptr)
                 .p_misc_flags
                 .fetch_and(!MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
 
@@ -214,13 +270,14 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             } else {
                 SEND
             };
-            ipc_status_add_call(dst_ptr, call);
+            ipc_status_add_call(recv_ptr, call);
 
             // C: If the destination has REPLY_PEND set, it was waiting in
             // SENDREC for our reply. Clear REPLY_PEND before clearing
             // RECEIVING so the receiver becomes fully runnable.
-            if (*dst_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0 {
-                (*dst_ptr)
+            if (*recv_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0
+            {
+                (*recv_ptr)
                     .p_misc_flags
                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
             }
@@ -234,23 +291,23 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // reach the caller's return register.
             // Uses write_retval which knows the arch-specific offset
             // (RAX at +0 on x86_64, a0 at +80 on RISC-V).
-            let mf = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed);
+            let mf = (*recv_ptr).p_misc_flags.load(Ordering::Relaxed);
             if mf & MiscFlags::SYS_FWD_REPLY.bits() != 0 {
                 let status = i32::from_le_bytes(dst_msg[4..8].try_into().unwrap_or([0; 4]));
-                crate::hal::write_retval(&mut (*dst_ptr).p_reg, status as u64);
-                (*dst_ptr)
+                crate::hal::write_retval(&mut (*recv_ptr).p_reg, status as u64);
+                (*recv_ptr)
                     .p_misc_flags
                     .fetch_and(!MiscFlags::SYS_FWD_REPLY.bits(), Ordering::Relaxed);
             } else {
-                crate::hal::write_retval(&mut (*dst_ptr).p_reg, (*caller_ptr).p_endpoint as u64);
+                crate::hal::write_retval(&mut (*recv_ptr).p_reg, (*caller_ptr).p_endpoint as u64);
             }
 
-            let old = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
+            let old = (*recv_ptr).p_rts_flags.load(Ordering::Relaxed);
             let new = old & !RtsFlags::RECEIVING.bits();
-            (*dst_ptr).p_rts_flags.store(new, Ordering::SeqCst);
+            (*recv_ptr).p_rts_flags.store(new, Ordering::SeqCst);
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
             if new == 0 {
-                enqueue(dst_ptr);
+                enqueue(recv_ptr);
             }
         } else {
             if flags & NON_BLOCKING != 0 {
@@ -391,8 +448,12 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                 }
             }
 
-            // Check caller queue for pending messages.
-            let mut xpp: *mut *mut Proc = &mut (*caller_ptr).p_caller_q;
+            // Check caller queue for pending messages. The queue head lives
+            // on the process's main slot: senders link onto the destination
+            // process's queue (mini_send's slow path), and any thread of the
+            // process may dequeue the head message.
+            let main = crate::thread::group(caller_ptr);
+            let mut xpp: *mut *mut Proc = &mut (*main).p_caller_q;
             while !(*xpp).is_null() {
                 let send_ptr = *xpp;
                 let send_ep = (*send_ptr).p_endpoint;
@@ -518,38 +579,31 @@ pub unsafe fn mini_notify(src_e: i32, dst_e: i32) -> i32 {
             priv_find_proc_id(src_e).unwrap_or(0)
         };
 
-        let rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
-        // C (L1069-1070): WILLRECEIVE(dst, src) && !(MF_REPLY_PEND). A
-        // notification must not satisfy the RECEIVE phase of a SENDREC.
-        let has_reply_pend = (*dst_ptr).p_misc_flags.load(Ordering::Relaxed)
-            & crate::proc::MiscFlags::REPLY_PEND.bits()
-            != 0;
-        if rts & RtsFlags::RECEIVING.bits() != 0
-            && !has_reply_pend
-            && ((*dst_ptr).p_getfrom_e == crate::system::NONE || (*dst_ptr).p_getfrom_e == src_e)
-        {
-            // Direct delivery: build notification message in destination's buffer.
-            build_notify_message(&mut (*dst_ptr).p_delivermsg, src_e, dst_ptr);
-            (*dst_ptr)
+        let recv_ptr = find_notify_receiver(dst_ptr, src_e);
+        if !recv_ptr.is_null() {
+            // Direct delivery: build notification message in the receiving
+            // thread's buffer.
+            build_notify_message(&mut (*recv_ptr).p_delivermsg, src_e, recv_ptr);
+            (*recv_ptr)
                 .p_misc_flags
                 .fetch_or(crate::proc::MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
             // Deliver immediately. The destination may be resumed by the
             // page-fault handler's restore path, which does not run
             // syscall_handler_c's deliver_msg (matching mini_send's direct
             // delivery for the same reason).
-            delivermsg(dst_ptr);
-            (*dst_ptr).p_misc_flags.fetch_and(
+            delivermsg(recv_ptr);
+            (*recv_ptr).p_misc_flags.fetch_and(
                 !crate::proc::MiscFlags::DELIVERMSG.bits(),
                 Ordering::Relaxed,
             );
             // RECEIVE returns the notification's m_source (0), matching what
             // deliver_msg would set on the normal syscall-return path.
-            crate::hal::write_retval(&mut (*dst_ptr).p_reg, 0);
-            let new = rts & !RtsFlags::RECEIVING.bits();
+            crate::hal::write_retval(&mut (*recv_ptr).p_reg, 0);
+            let new = (*recv_ptr).p_rts_flags.load(Ordering::Relaxed) & !RtsFlags::RECEIVING.bits();
 
-            (*dst_ptr).p_rts_flags.store(new, Ordering::Relaxed);
+            (*recv_ptr).p_rts_flags.store(new, Ordering::Relaxed);
             if new == 0 {
-                enqueue(dst_ptr);
+                enqueue(recv_ptr);
             }
         } else {
             // C (L1087-1093): destination is not ready — just record the
@@ -1766,6 +1820,129 @@ mod tests {
                 0,
                 "notification should wake RECEIVING process"
             );
+        }
+    }
+
+    /// Wire a sibling thread slot onto a main slot for the wake-one tests.
+    unsafe fn setup_thread(main: *mut Proc, nr: i32) -> *mut Proc {
+        unsafe {
+            let t = setup_proc(nr);
+            (*t).p_tid = 1;
+            (*t).p_group = main;
+            (*t).p_t_next = core::ptr::null_mut();
+            (*main).p_t_next = t;
+            t
+        }
+    }
+
+    #[test]
+    fn test_find_receiver_wake_one() {
+        unsafe {
+            proc_init();
+            let main = setup_proc(0);
+            let src = setup_proc(1);
+            let t = setup_thread(main, 120);
+            let src_ep = (*src).p_endpoint;
+
+            // Only the sibling is blocked in RECEIVE from src.
+            (*main).p_rts_flags.store(0, Ordering::Relaxed);
+            (*t).p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*t).p_getfrom_e = src_ep;
+            assert_eq!(find_receiver(main, src_ep), t);
+
+            // Main blocked on ANY is found first (it heads the list).
+            (*main)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*main).p_getfrom_e = crate::system::NONE;
+            (*t).p_rts_flags.store(0, Ordering::Relaxed);
+            assert_eq!(find_receiver(main, src_ep), main);
+
+            // No receiver at all: null.
+            (*main).p_rts_flags.store(0, Ordering::Relaxed);
+            assert!(find_receiver(main, src_ep).is_null());
+
+            (*main).p_t_next = core::ptr::null_mut();
+            (*t).p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_mini_send_wakes_sibling_thread() {
+        unsafe {
+            proc_init();
+            let main = setup_proc(0);
+            let src = setup_proc(1);
+            let t = setup_thread(main, 120);
+            let src_ep = (*src).p_endpoint;
+            let dst_ep = (*main).p_endpoint; // process endpoint = main's
+
+            // Sibling blocked in RECEIVE from src; main is running.
+            (*t).p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*t).p_getfrom_e = src_ep;
+            (*t).p_delivermsg_vir = 0;
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg[4..8].copy_from_slice(&99i32.to_ne_bytes());
+            assert_eq!(mini_send(src, dst_ep, msg.as_ptr(), 0), OK);
+
+            // Wake-one: exactly the sibling is woken (RECEIVING cleared),
+            // main is untouched.
+            let t_rts = (*t).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(
+                t_rts & RtsFlags::RECEIVING.bits(),
+                0,
+                "sibling thread should be woken"
+            );
+            let m_rts = (*main).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(m_rts, 0, "main thread should be untouched");
+
+            (*main).p_t_next = core::ptr::null_mut();
+            (*t).p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_mini_receive_thread_scans_main_caller_q() {
+        unsafe {
+            proc_init();
+            let main = setup_proc(0);
+            let src = setup_proc(1);
+            let t = setup_thread(main, 120);
+            let src_ep = (*src).p_endpoint;
+            let dst_ep = (*main).p_endpoint;
+
+            // Sender blocked on the process's caller queue (head on the
+            // main slot).
+            (*src)
+                .p_rts_flags
+                .store(RtsFlags::SENDING.bits(), Ordering::Relaxed);
+            (*src).p_sendto_e = dst_ep;
+            (*src).p_q_link = core::ptr::null_mut();
+            (&mut (*src).p_sendmsg)[0..4].copy_from_slice(&99i32.to_ne_bytes());
+            (*main).p_caller_q = src;
+
+            // The SIBLING thread receives: it must find the sender queued
+            // on the main slot's caller_q.
+            let mut buf = [0u8; MESSAGE_SIZE];
+            // mini_receive returns the sender's endpoint (m_source).
+            assert_eq!(
+                mini_receive(t, crate::system::NONE, buf.as_mut_ptr(), 0),
+                src_ep
+            );
+            // Sender unblocked; queue empty; message delivered to the thread.
+            let sr = (*src).p_rts_flags.load(Ordering::Relaxed);
+            assert_eq!(sr & RtsFlags::SENDING.bits(), 0);
+            assert!((*main).p_caller_q.is_null());
+            assert_eq!(i32::from_ne_bytes(buf[..4].try_into().unwrap()), src_ep);
+
+            (*main).p_t_next = core::ptr::null_mut();
+            (*t).p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
         }
     }
 

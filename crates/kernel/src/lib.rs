@@ -25,6 +25,7 @@ pub mod smp;
 pub mod syscall;
 pub mod system;
 pub mod table;
+pub mod thread;
 pub mod vm;
 
 // Include the generated initramfs data when embed_initramfs is active.

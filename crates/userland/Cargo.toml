@@ -128,5 +128,10 @@ name = "sh"
 path = "src/bin/sh.rs"
 test = false
 
+[[bin]]
+name = "threadtest"
+path = "src/bin/threadtest.rs"
+test = false
+
 [lints]
 workspace = true
