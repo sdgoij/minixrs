@@ -276,8 +276,18 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         let exit_status = args[0] as i32;
         let endpoint = (*caller).p_endpoint;
 
+        // Group exit: every thread of the process dies with it (main-thread
+        // exit, `exit()` from any thread, or a fatal signal all end here).
+        // Free the worker threads — including the caller when a worker
+        // called exit() — then run the exit bookkeeping on the main slot:
+        // PM finds the exit via SYS_GETKSIG on the process's endpoint, so
+        // the SIGNALED/SIG_PENDING flags must live on the main slot.
+        let main = crate::thread::group(caller);
+        crate::thread::sweep_group(main);
+        let rp = main;
+
         // Store exit status in p_signal_received for PM to read via SYS_GETKSIG.
-        (*caller).p_signal_received = exit_status as u64;
+        (*rp).p_signal_received = exit_status as u64;
 
         // A signal that pended (cause_sig) but was not yet delivered when the
         // process exited is moot: once the exit reply is read, PM would
@@ -285,7 +295,7 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // process, and the parent's waitpid hangs (observed: sigtest's 3rd ^C
         // racing its exit). Clear the map so an exit reply always has zero
         // pending bits.
-        (*caller).p_pending = 0;
+        (*rp).p_pending = 0;
 
         // Set SIGNALED + SIG_PENDING so do_getksig_handler finds this process.
         // Matching C cause_sig(): RTS_SET(rp, RTS_SIGNALED | RTS_SIG_PENDING)
@@ -293,9 +303,15 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         let sig_flags = crate::proc::RtsFlags::SIGNALED.bits()
             | crate::proc::RtsFlags::SIG_PENDING.bits()
             | crate::proc::RtsFlags::SLOT_FREE.bits();
-        (*caller)
+        (*rp)
             .p_rts_flags
             .fetch_or(sig_flags, core::sync::atomic::Ordering::Relaxed);
+
+        // Unlink the main slot from any caller queue it is blocked on as a
+        // sender (a worker may have called exit while the main thread sat
+        // in SEND to a server; that server's later receive must not wake a
+        // dead slot). No-op when the main thread was not blocked.
+        crate::system::clear_ipc(rp);
 
         // Push to pending exit queue.
         push_pending_exit(endpoint, exit_status);
@@ -303,11 +319,11 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // Remove from run queue so pick_proc doesn't find a dead process.
         // RTS_SET above already dequeues if was runnable, but dequeue
         // again for safety (no-op if already dequeued).
-        crate::sched::dequeue(caller);
+        crate::sched::dequeue(rp);
 
         // Notify PM (the signal manager) that this process has exited.
         // Matching C: cause_sig() -> send_sig() -> mini_notify(proc_addr(SYSTEM), rp->p_endpoint)
-        if let Some(sig_mgr_ep) = get_sig_manager(caller) {
+        if let Some(sig_mgr_ep) = get_sig_manager(rp) {
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, sig_mgr_ep);
         } else {
             let _ = crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::PM_PROC_NR);

@@ -2625,6 +2625,10 @@ pub fn run_all() -> u32 {
     // exit) and wake-one IPC delivery.
     total += run("thread_lifecycle", test_thread_lifecycle);
     total += run("thread_wake_one", test_thread_wake_one);
+    // Group semantics: process death sweeps every thread; a worker calling
+    // exit() kills the whole group via the main slot's bookkeeping.
+    total += run("thread_group_sweep", test_thread_group_sweep);
+    total += run("thread_exit_kills_group", test_thread_exit_kills_group);
 
     total
 }
@@ -2751,6 +2755,105 @@ fn test_thread_wake_one(ctx: &mut TestCtx) {
             .p_rts_flags
             .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
         (*src)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
+}
+
+fn test_thread_group_sweep(ctx: &mut TestCtx) {
+    unsafe {
+        crate::table::proc_init();
+        clear_run_queues();
+        let main = thread_make_main(206);
+        if main.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        ctx.assert(
+            crate::thread::create(main, 0x401000, 0x7fff_f000, 0) == 1,
+            "thread 1 created",
+        );
+        let t1 = (*main).p_t_next;
+        ctx.assert(
+            crate::thread::create(main, 0x402000, 0x7fff_e000, 0) == 2,
+            "thread 2 created",
+        );
+        let t2 = (*t1).p_t_next;
+        ctx.assert(!t1.is_null() && !t2.is_null(), "two threads linked");
+
+        // t2 blocked as a sender on a destination's caller queue; t1
+        // blocked in RECEIVE (not linked anywhere).
+        let dst = make_test_proc(207);
+        (*t2)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SENDING.bits(), Ordering::Relaxed);
+        (*t2).p_sendto_e = (*dst).p_endpoint;
+        (*t2).p_q_link = core::ptr::null_mut();
+        (*dst).p_caller_q = t2;
+        (*t1)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*t1).p_getfrom_e = crate::system::NONE;
+
+        crate::thread::sweep_group(main);
+        ctx.assert((*t1).is_empty(), "thread 1 freed");
+        ctx.assert((*t2).is_empty(), "thread 2 freed");
+        ctx.assert((*main).p_t_next.is_null(), "thread list empty");
+        ctx.assert((*dst).p_caller_q.is_null(), "caller queue unlinked");
+        ctx.assert((*main).is_runnable(), "main slot untouched");
+
+        (*main)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*dst)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
+}
+
+fn test_thread_exit_kills_group(ctx: &mut TestCtx) {
+    unsafe {
+        crate::table::proc_init();
+        clear_run_queues();
+        let main = thread_make_main(208);
+        if main.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        ctx.assert(
+            crate::thread::create(main, 0x401000, 0x7fff_f000, 0) == 1,
+            "thread created",
+        );
+        let worker = (*main).p_t_next;
+        ctx.assert(!worker.is_null(), "worker linked");
+        if worker.is_null() {
+            return;
+        }
+
+        // A worker calls exit(42): the whole group dies. The exit
+        // bookkeeping lands on the main slot (PM finds it via SYS_GETKSIG);
+        // the worker's own slot is freed.
+        let args = [42u64, 0, 0, 0, 0, 0];
+        let result = crate::syscall::dispatch_basic_syscall(worker, 0, &args);
+        ctx.assert(
+            result == crate::system::EDONTREPLY as i64,
+            "exit returns EDONTREPLY",
+        );
+        ctx.assert((*worker).is_empty(), "worker slot freed");
+        ctx.assert((*main).p_t_next.is_null(), "thread list empty");
+        ctx.assert(
+            (*main).p_signal_received == 42,
+            "exit status stored on main slot",
+        );
+        let m_rts = (*main).p_rts_flags.load(Ordering::Relaxed);
+        ctx.assert(
+            m_rts & crate::proc::RtsFlags::SIGNALED.bits() != 0,
+            "main slot SIGNALED for PM",
+        );
+
+        (*main)
             .p_rts_flags
             .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
         clear_run_queues();

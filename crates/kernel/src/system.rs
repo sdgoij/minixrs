@@ -1625,6 +1625,10 @@ pub unsafe fn clear_ipc(rp: *mut Proc) {
 /// Process must be valid.
 pub unsafe fn clear_endpoint(rp: *mut Proc) {
     unsafe {
+        // Free the process's threads first — they die with it. Their slots
+        // become SLOT_FREE, so the clear_ipc_refs walk below skips them.
+        crate::thread::sweep_group(rp);
+
         // Mark as having no endpoint AND free the slot for reuse.
         // Matching C: clear_endpoint in do_clear.c sets SLOT_FREE
         // after release_address_space, so the slot can be reused.
@@ -3328,6 +3332,10 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
         // set_exec_target to switch to new binary on return
         crate::ipc::set_exec_target(rp, ip, stack);
 
+        // The image is replaced: extra threads of the process die with the
+        // old image (POSIX exec).
+        crate::thread::sweep_group(rp);
+
         EDONTREPLY
     }
 }
@@ -3443,6 +3451,10 @@ pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             crate::sched::enqueue(rp);
         }
 
+        // The image is replaced: any extra threads of the process die with
+        // the old image (POSIX exec). Their slots are freed and unlinked.
+        crate::thread::sweep_group(rp);
+
         // Return entry point + stack pointer to VFS for the PM reply.
         msg_write_u64(msg, EXEC_LOAD_PC_OFF, loaded.entry);
         msg_write_u64(msg, EXEC_LOAD_NEWSP_OFF, loaded.rsp);
@@ -3485,6 +3497,10 @@ pub unsafe fn do_exec_finish_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
 
         // Set up trap frame for sysretq return to userspace:
         crate::hal::set_initial_regs(&mut (*rp).p_reg, entry, user_stack, 0);
+
+        // The image is replaced: extra threads of the process die with the
+        // old image (POSIX exec). Their slots are freed and unlinked.
+        crate::thread::sweep_group(rp);
 
         OK
     }
@@ -3917,9 +3933,19 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         if !table::is_ok_endpoint(parent_ep) {
             return crate::ipc::EFAULT;
         }
-        let rpp = proc_addr(table::endpoint_slot(parent_ep));
+        let mut rpp = proc_addr(table::endpoint_slot(parent_ep));
         if rpp.is_null() || table::is_empty_proc(rpp) {
             return crate::ipc::EFAULT;
+        }
+
+        // POSIX fork: the child is a copy of the CALLING thread, not of the
+        // main thread. The caller is the thread blocked in the RECEIVE phase
+        // of its PM_FORK sendrec; recover it so the child resumes at the
+        // forking thread's fork() return. Falls back to the main slot for
+        // single-threaded processes (identical result) or an ambiguous scan.
+        let forking = crate::thread::find_forking_thread(rpp);
+        if !forking.is_null() {
+            rpp = forking;
         }
 
         // C: assert(!(rpp->p_misc_flags & MF_DELIVERMSG))
@@ -3928,7 +3954,7 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
 
         // C: if(!RTS_ISSET(rpp, RTS_RECEIVING)) { return EINVAL; }
-        // Parent must be in RECEIVE mode (SENDREC from usermode fork()).
+        // The forking thread must be in RECEIVE mode (SENDREC from usermode fork()).
         if (*rpp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::RECEIVING.bits() == 0 {
             return crate::ipc::EINVAL;
         }
