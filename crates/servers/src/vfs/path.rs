@@ -277,8 +277,10 @@ mod tests {
     fn last_dir_root_path_returns_root_vnode() {
         unsafe {
             let root_vp = setup_vnode(0, 1, 1);
-            let mut rfp = Fproc::default();
-            rfp.fp_rdir = root_vp;
+            let rfp = Fproc {
+                fp_rdir: root_vp,
+                ..Default::default()
+            };
 
             let mut resolve = Lookup::default();
             resolve.l_path[0] = b'/';
@@ -293,8 +295,10 @@ mod tests {
     fn last_dir_absolute_single_component_returns_root() {
         unsafe {
             let root_vp = setup_vnode(0, 1, 1);
-            let mut rfp = Fproc::default();
-            rfp.fp_rdir = root_vp;
+            let rfp = Fproc {
+                fp_rdir: root_vp,
+                ..Default::default()
+            };
 
             // Path "/x" — the parent of "x" is "/"
             let mut resolve = Lookup::default();
@@ -311,8 +315,10 @@ mod tests {
     fn last_dir_relative_no_slash_uses_cwd() {
         unsafe {
             let cwd_vp = setup_vnode(1, 2, 1);
-            let mut rfp = Fproc::default();
-            rfp.fp_cdir = cwd_vp;
+            let rfp = Fproc {
+                fp_cdir: cwd_vp,
+                ..Default::default()
+            };
 
             // Path "x" — no slash, parent is cwd
             let mut resolve = Lookup::default();
@@ -350,8 +356,10 @@ mod tests {
     fn last_dir_nested_path_falls_through_to_advance() {
         unsafe {
             let root_vp = setup_vnode(0, 1, 1);
-            let mut rfp = Fproc::default();
-            rfp.fp_rdir = root_vp;
+            let rfp = Fproc {
+                fp_rdir: root_vp,
+                ..Default::default()
+            };
 
             // Path "/tmp/x" — parent "/tmp" requires advance() → lookup() IPC.
             // Without a real FS process, lookup() fails and advance() returns null.

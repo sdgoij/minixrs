@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(TXQ, 1);
         assert_eq!(RX_BUF_COUNT, 64);
         assert_eq!(RX_BUF_SIZE, 2048);
-        assert!(RX_BUF_SIZE >= 1514); // fits a maximum ethernet frame
+        const { assert!(RX_BUF_SIZE >= 1514) }; // fits a maximum ethernet frame
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
         // Pop one, push again (wrap-around reuse of the slot).
         fifo_pop(&mut st);
         assert!(fifo_push(&mut st, RxEntry { slot: 99, len: 1 }));
-        assert_eq!(fifo_len(&mut st), RX_BUF_COUNT);
+        assert_eq!(fifo_len(&st), RX_BUF_COUNT);
     }
 
     #[test]

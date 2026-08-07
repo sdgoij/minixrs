@@ -180,13 +180,13 @@ mod tests {
     use crate::vfs::types::Vnode;
 
     fn make_fproc(uid: i32, gid: i32) -> Fproc {
-        let mut fp = Fproc::default();
-        fp.fp_effuid = uid as u16;
-        fp.fp_effgid = gid as u16;
-        fp.fp_realuid = uid as u16;
-        fp.fp_realgid = gid as u16;
-        fp.fp_ngroups = 0;
-        fp
+        Fproc {
+            fp_effuid: uid as u16,
+            fp_effgid: gid as u16,
+            fp_realuid: uid as u16,
+            fp_realgid: gid as u16,
+            ..Default::default()
+        }
     }
 
     fn make_vnode(uid: i32, gid: i32, mode: u32) -> Vnode {
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn test_forbidden_superuser_dir() {
         let fp = make_fproc(0, 0);
-        let vn = make_vnode(100, 50, S_IFDIR | 0o000);
+        let vn = make_vnode(100, 50, S_IFDIR);
         assert_eq!(forbidden(&fp, &vn, R_BIT | W_BIT | X_BIT, false), OK);
     }
 

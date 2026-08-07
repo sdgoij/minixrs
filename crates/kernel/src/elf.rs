@@ -770,13 +770,11 @@ mod tests {
         // Place strings at the END of the frame, going down: argv then envp.
         let mut str_pos = frame.len();
         let mut offsets = [0usize; 16];
-        let mut si = 0usize;
-        for s in argv.iter().chain(envp.iter()) {
+        for (si, s) in argv.iter().chain(envp.iter()).enumerate() {
             str_pos -= s.len() + 1;
             frame[str_pos..str_pos + s.len()].copy_from_slice(s.as_bytes());
             frame[str_pos + s.len()] = 0;
             offsets[si] = str_pos;
-            si += 1;
         }
         let mut oi = 0usize;
         for _ in argv {

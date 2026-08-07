@@ -324,7 +324,7 @@ pub unsafe extern "C" fn sendto(
     } else {
         match unsafe { decode_sockaddr_in(dest_addr as *const u8, dest_len) } {
             Ok((ip, port)) => Some(minix_std::net::SocketAddr { ip, port }),
-            Err(e) => return e,
+            Err(e) => return e as isize,
         }
     };
     match unsafe { minix_std::net::sendto(sock, slice, dest) } {

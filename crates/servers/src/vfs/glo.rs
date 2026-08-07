@@ -276,20 +276,6 @@ pub unsafe fn get_fproc(ep: i32) -> *mut Fproc {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn vfs_global_fs_m_in_offset() {
-        // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
-        // probe anchors; keep in sync with the struct). Filp gained
-        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 320576);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 320592);
-    }
-}
-
 /// Get the current `Fproc` pointer.
 ///
 /// # Safety
@@ -355,5 +341,19 @@ pub unsafe fn vfs_init() {
         (*fp).fp_blocked_on = FP_BLOCKED_ON_NONE;
         (*fp).fp_task = -1;
         (*fp).fp_suspended_ep = -1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vfs_global_fs_m_in_offset() {
+        // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
+        // probe anchors; keep in sync with the struct). Filp gained
+        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift).
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 320576);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 320592);
     }
 }

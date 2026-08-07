@@ -624,7 +624,7 @@ mod tests {
         // The tty server reads m2_i1 (minor @8), m2_i2 (access @12),
         // m2_i3 (user endpoint @16) and m_type @4. Verify our builder
         // matches that contract.
-        let dev = (5u32 << 16) | 0; // major 5 (console), minor 0
+        let dev = 5u32 << 16; // major 5 (console), minor 0
         let msg = build_open_close_msg(CDEV_OPEN, dev, CDEV_R_BIT | CDEV_W_BIT, 42);
         assert_eq!(request::r_i32(&msg, 4), CDEV_OPEN);
         assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 0);

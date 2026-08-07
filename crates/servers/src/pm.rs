@@ -3826,7 +3826,7 @@ mod tests {
         let pending_bits = 1u128 << 2; // kernel set bit for SIGINT
         let mut decoded = 0i32;
         for signo in 1.._NSIG {
-            if pending_bits & (1u128 << (signo as usize)) != 0 {
+            if pending_bits & (1u128 << signo) != 0 {
                 decoded = signo as i32;
                 break;
             }
@@ -3836,7 +3836,7 @@ mod tests {
         // SIGHUP (1) sits at bit 1; a signal at bit 3 is SIGQUIT (3).
         let pending = 1u128 << 1;
         for signo in 1.._NSIG {
-            if pending & (1u128 << (signo as usize)) != 0 {
+            if pending & (1u128 << signo) != 0 {
                 assert_eq!(signo as i32, 1);
                 break;
             }
