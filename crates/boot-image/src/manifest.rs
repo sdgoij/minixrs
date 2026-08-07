@@ -29,6 +29,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // against the fork's std), then re-run `target/mkboot` + `target/mkfs`
     // to embed it.
     ("/bin/hello", "hello"),
+    // `/bin/helloc` is the C smoke-test binary: freestanding C linked
+    // against `minix-libc`. Rebuild it with `tools/build-c-hello.py`
+    // (clang + the fork's stage1 rustc), then re-assemble the images.
+    ("/bin/helloc", "helloc"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

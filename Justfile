@@ -184,6 +184,19 @@ mkfs-aarch64:
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
     target/mkfs aarch64
 
+# Rebuild the C smoke-test binary (/bin/helloc) from tools/hello.c +
+# tools/crt0-x86_64.S (clang freestanding + minix-libc, linked with the fork
+# rustc), then re-embed it in the initramfs and disk image. Requires
+# `just build-x86` once so target/mkboot exists.
+build-c-hello:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    python tools/build-c-hello.py
+    @test -x target/mkboot || (echo 'error: target/mkboot missing — run `just build-x86` once' >&2 && exit 1)
+    target/mkboot embed_initramfs,embed_minixfs
+    rm -f target/mkfs target/mkfs.exe
+    "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
+    target/mkfs x86_64
+
 # ---------- check ----------
 
 # Host clippy + riscv64 compilation check (fork stage1 compiler).

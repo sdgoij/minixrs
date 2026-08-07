@@ -714,10 +714,16 @@ pub fn exit(status: i32) -> ! {
 /// Returns the number of bytes written, or a negative error code.
 /// Uses extern "C" for a stable ABI across crate boundaries.
 ///
+/// The C symbol is only exported when this crate is the standalone runtime
+/// (`rt` feature, as in the userland binaries). When embedded in `std` or
+/// `minix-libc` (rt off) the function stays callable by path but the symbol
+/// is not exported — `minix-libc` provides the C ABI `write`, and a duplicate
+/// symbol would break the link.
+///
 /// # Safety
 ///
 /// `buf` must point to at least `len` valid bytes in the process's address space.
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "rt", unsafe(no_mangle))]
 pub unsafe extern "C" fn write(fd: i32, buf: *const u8, len: usize) -> i64 {
     unsafe { syscall3(NR_WRITE, fd as u64, buf as u64, len as u64) }
 }
@@ -1322,7 +1328,12 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(not(test), target_os = "minix", feature = "rt", target_arch = "riscv64"))]
+#[cfg(all(
+    not(test),
+    target_os = "minix",
+    feature = "rt",
+    target_arch = "riscv64"
+))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -1338,7 +1349,12 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(not(test), target_os = "minix", feature = "rt", target_arch = "aarch64"))]
+#[cfg(all(
+    not(test),
+    target_os = "minix",
+    feature = "rt",
+    target_arch = "aarch64"
+))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
