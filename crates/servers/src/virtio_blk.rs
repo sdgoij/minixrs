@@ -246,7 +246,7 @@ fn handle_bdev(msg: &mut Message, src_ep: i32) {
 /// Initializes the virtio transport (phys delta, PCI probe), then enters
 /// the message loop: receive a BDEV message → dispatch → reply.
 pub fn virtio_blk_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         const RECEIVE_CALL: u64 = 47;
         const SEND_CALL: u64 = 46;
@@ -286,7 +286,7 @@ pub fn virtio_blk_server_main() {
             };
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly
     }

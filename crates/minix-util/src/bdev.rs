@@ -84,7 +84,7 @@ fn check_result(msg: &Message) -> Result<i32, MinixErr> {
 ///
 /// `endpoint` is the block driver's endpoint (e.g., `AT_WINI`).
 pub fn bdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(BDEV_OPEN);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -92,7 +92,7 @@ pub fn bdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr>
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, flags);
         Err(MinixErr(71))
@@ -101,14 +101,14 @@ pub fn bdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr>
 
 /// Close a block device.
 pub fn bdev_close(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(BDEV_CLOSE);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor);
         Err(MinixErr(71))
@@ -119,7 +119,7 @@ pub fn bdev_close(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
 ///
 /// Returns the number of bytes read.
 pub fn bdev_read(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(BDEV_READ);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -130,7 +130,7 @@ pub fn bdev_read(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i3
         // On success, status field holds bytes transferred.
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, pos, count);
         Err(MinixErr(71))
@@ -141,7 +141,7 @@ pub fn bdev_read(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i3
 ///
 /// Returns the number of bytes written.
 pub fn bdev_write(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(BDEV_WRITE);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -151,7 +151,7 @@ pub fn bdev_write(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, pos, count);
         Err(MinixErr(71))
@@ -160,7 +160,7 @@ pub fn bdev_write(endpoint: i32, minor: i32, pos: i64, count: usize) -> Result<i
 
 /// Perform a device ioctl.
 pub fn bdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(BDEV_IOCTL);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -169,7 +169,7 @@ pub fn bdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Resul
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, request, _grant);
         Err(MinixErr(71))

@@ -187,7 +187,7 @@ pub extern "C" fn kmain_body() -> ! {
         }
         arch_x86_64::apic::set_timer_isr_handler(timer_callback);
 
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         {
             let handler_addr = arch_x86_64::apic::timer_isr_entry as *const () as u64;
             (*arch_x86_64::idt::IDT.get()).set_handler(
@@ -214,7 +214,7 @@ pub extern "C" fn kmain_body() -> ! {
         arch_x86_64::apic::set_serial_isr_handler(serial_callback);
 
         // 7. Install the serial ISR in the IDT (IRQ 4 → vector 0x24).
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         {
             let serial_handler_addr = arch_x86_64::apic::serial_isr_entry as *const () as u64;
             (*arch_x86_64::idt::IDT.get()).set_handler(
@@ -473,7 +473,7 @@ pub extern "C" fn kmain_body() -> ! {
             }
         }
 
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         unsafe {
             arch_x86_64::asm::syscall_abi::set_syscall_handler(syscall_handler_c);
             let entry = arch_x86_64::asm::syscall_abi::syscall_entry as *const () as u64;
@@ -747,10 +747,10 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
         // RSP = SAVED_USER_RSP (written by syscall_entry naked asm
         // before switching to kernel stack, so it reflects the exact
         // user RSP at the time of syscall).
-        // Use cfg guard: syscall_abi module only exists on target_os = "none".
-        #[cfg(target_os = "none")]
+        // Use cfg guard: syscall_abi module only exists on target_os = "minix".
+        #[cfg(target_os = "minix")]
         let rsp = arch_x86_64::asm::syscall_abi::saved_user_rsp();
-        #[cfg(not(target_os = "none"))]
+        #[cfg(not(target_os = "minix"))]
         let rsp: u64 = 0;
         for (i, b) in rsp.to_ne_bytes().iter().enumerate() {
             core::ptr::write_volatile(frame.as_mut_ptr().add(168 + i), *b);

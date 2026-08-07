@@ -12,7 +12,7 @@
 use core::ptr;
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 use arch_common::safecopies::{
     CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CPF_WRITE, CpDirect, CpGrant, CpUnion, GRANT_INVALID,
 };
@@ -110,7 +110,7 @@ pub unsafe fn ram_disk_io(
 // ---- Grant-based BDEV path (MINIX target) ----
 
 /// Number of grant entries in the block I/O grant table.
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 const NR_BDEV_GRANTS: usize = 16;
 
 /// Direct-grant table registered with the kernel via `SYS_SETGRANT`.
@@ -120,15 +120,15 @@ const NR_BDEV_GRANTS: usize = 16;
 /// Only accessed from the single-threaded filesystem server. The address is
 /// registered with the kernel so that the block driver can resolve grants
 /// during `SYS_SAFECOPYTO`/`SYS_SAFECOPYFROM`.
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 struct BdevGrantTable {
     entries: core::cell::UnsafeCell<[CpGrant; NR_BDEV_GRANTS]>,
 }
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 unsafe impl Sync for BdevGrantTable {}
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 impl BdevGrantTable {
     const fn new() -> Self {
         const ENTRY: CpGrant = CpGrant {
@@ -149,7 +149,7 @@ impl BdevGrantTable {
     }
 
     /// Address of the table, registered with the kernel via `SYS_SETGRANT`.
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     fn as_ptr(&self) -> u64 {
         self.entries.get() as u64
     }
@@ -231,7 +231,7 @@ pub fn bdev_driver(dev: u32, label: &[u8]) -> i32 {
 /// Endpoint serving block I/O for `dev`, defaulting to the ramdisk driver.
 /// Available on the host so the label-resolution tests can assert the
 /// resolved endpoint.
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 fn driver_endpoint(dev: u32) -> i32 {
     let major = (dev >> 16) as usize;
     if major < NR_BDEV_MAJORS {
@@ -246,7 +246,7 @@ fn driver_endpoint(dev: u32) -> i32 {
 /// Copy `len` bytes from the grant `grant_id` (granted by `granter`) into
 /// `dst` via `SYS_SAFECOPYFROM`. Used to read driver labels and other
 /// small payloads sent by VFS.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
     let mut kmsg = [0u8; 64];
     kmsg[8..12].copy_from_slice(&granter.to_ne_bytes());
@@ -257,13 +257,13 @@ pub fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
     minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BDEV_GRANT_TABLE: BdevGrantTable = BdevGrantTable::new();
 
 /// Register the block I/O grant table with the kernel (`SYS_SETGRANT`).
 ///
 /// Must be called once during filesystem server init, before any block I/O.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub fn bdev_init() {
     let mut msg = [0u8; 64];
     msg[8..16].copy_from_slice(&BDEV_GRANT_TABLE.as_ptr().to_le_bytes());
@@ -277,7 +277,7 @@ pub fn bdev_init() {
 /// # Safety
 ///
 /// `buf` must be valid for `block_size` bytes.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn bdev_request(rw_flag: i32, dev: u32, block: u64, buf: *mut u8, block_size: usize) -> i32 {
     unsafe {
         // READING: the driver writes into our buffer (CPF_WRITE).
@@ -345,7 +345,7 @@ pub unsafe fn bdev_ram_disk_io(
     block_size: usize,
     rw_flag: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         for i in 0..nblocks {
             let buf = unsafe { *bufs.add(i) };
@@ -359,7 +359,7 @@ pub unsafe fn bdev_ram_disk_io(
         }
         nblocks as i32
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (dev, block, nblocks, bufs, block_size, rw_flag);
         -5 // EIO — no driver server on the host

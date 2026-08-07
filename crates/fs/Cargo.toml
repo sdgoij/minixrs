@@ -16,3 +16,6 @@ workspace = true
 libs = { path = "../libs" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }
+
+[lints]
+workspace = true

@@ -83,3 +83,6 @@ test = false
 name = "net"
 path = "src/bin/net.rs"
 test = false
+
+[lints]
+workspace = true

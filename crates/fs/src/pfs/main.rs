@@ -38,7 +38,7 @@ pub fn pfs_init() -> i32 {
 pub fn pfs_main() -> i32 {
     pfs_init();
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         use arch_common::ipc::Message;
         const RECEIVE_CALL: u64 = 47;

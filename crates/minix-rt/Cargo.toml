@@ -31,3 +31,6 @@ core = { path = "../../rust/library/core", optional = true }
 # rustc injects `compiler_builtins` into every crate's graph; the real
 # `core` path dep above doesn't pull it in, so enable it explicitly.
 compiler_builtins = { path = "../../rust/library/compiler-builtins/compiler-builtins", optional = true }
+
+[lints]
+workspace = true

@@ -66,7 +66,7 @@ fn check_result(msg: &Message) -> Result<(), MinixErr> {
 
 /// Add a device to the device tree.
 pub fn devman_add_device(endpoint: i32, _name: &str) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_ADD_DEV);
         msg_set_i32(&mut msg, OFF_M4_L3, endpoint);
@@ -74,7 +74,7 @@ pub fn devman_add_device(endpoint: i32, _name: &str) -> Result<i32, MinixErr> {
         check_result(&msg)?;
         Ok(msg_get_i32(&msg, OFF_M4_L1))
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, _name);
         Err(MinixErr(71))
@@ -83,14 +83,14 @@ pub fn devman_add_device(endpoint: i32, _name: &str) -> Result<i32, MinixErr> {
 
 /// Remove a device from the device tree by ID.
 pub fn devman_del_device(dev_id: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_DEL_DEV);
         msg_set_i32(&mut msg, OFF_M4_L2, dev_id);
         unsafe { minix_std::sendrec(dev_id, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = dev_id;
         Err(MinixErr(71))
@@ -99,14 +99,14 @@ pub fn devman_del_device(dev_id: i32) -> Result<(), MinixErr> {
 
 /// Add a bus to the device tree.
 pub fn devman_add_bus(_name: &str) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_ADD_BUS);
         unsafe { minix_std::sendrec(0, &mut msg) }?;
         check_result(&msg)?;
         Ok(msg_get_i32(&msg, OFF_M4_L1))
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = _name;
         Err(MinixErr(71))
@@ -115,14 +115,14 @@ pub fn devman_add_bus(_name: &str) -> Result<i32, MinixErr> {
 
 /// Add a device file entry.
 pub fn devman_add_devfile(dev_id: i32, _devfile: &str) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_ADD_DEVFILE);
         msg_set_i32(&mut msg, OFF_M4_L2, dev_id);
         unsafe { minix_std::sendrec(dev_id, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (dev_id, _devfile);
         Err(MinixErr(71))
@@ -131,7 +131,7 @@ pub fn devman_add_devfile(dev_id: i32, _devfile: &str) -> Result<(), MinixErr> {
 
 /// Bind a driver to a device.
 pub fn devman_bind(dev_id: i32, _driver_endpoint: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_BIND);
         msg_set_i32(&mut msg, OFF_M4_L2, dev_id);
@@ -139,7 +139,7 @@ pub fn devman_bind(dev_id: i32, _driver_endpoint: i32) -> Result<(), MinixErr> {
         unsafe { minix_std::sendrec(dev_id, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (dev_id, _driver_endpoint);
         Err(MinixErr(71))
@@ -148,14 +148,14 @@ pub fn devman_bind(dev_id: i32, _driver_endpoint: i32) -> Result<(), MinixErr> {
 
 /// Unbind a driver from a device.
 pub fn devman_unbind(dev_id: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DEVMAN_UNBIND);
         msg_set_i32(&mut msg, OFF_M4_L2, dev_id);
         unsafe { minix_std::sendrec(dev_id, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = dev_id;
         Err(MinixErr(71))

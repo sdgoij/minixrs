@@ -1,6 +1,6 @@
 //! RISC-V64 kernel boot binary entry point.
 //!
-//! Build with: `cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-none-elf`
+//! Build with: `cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix`
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]

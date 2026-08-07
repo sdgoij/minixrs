@@ -22,7 +22,7 @@
 
 #![allow(dead_code)]
 
-#[cfg(minix_userspace)]
+#[cfg(target_os = "minix")]
 use crate::{Message, MinixErr, VM_PROC_NR, sendrec};
 
 pub const VM_RQ_BASE: u32 = 0xC00;
@@ -110,7 +110,7 @@ fn msg_set_u64(msg: &mut [u8; 64], off: usize, val: u64) {
 }
 
 /// Send a VM call and validate the reply.
-#[cfg(minix_userspace)]
+#[cfg(target_os = "minix")]
 unsafe fn vm_call(msg: &mut Message) -> Result<i64, MinixErr> {
     unsafe {
         // The VM_PROC_NR is 8, messages go via sendrec.
@@ -125,7 +125,7 @@ unsafe fn vm_call(msg: &mut Message) -> Result<i64, MinixErr> {
 }
 
 /// Send an IPC server call (for shared memory).
-#[cfg(minix_userspace)]
+#[cfg(target_os = "minix")]
 unsafe fn ipc_call(msg: &mut Message) -> Result<i32, MinixErr> {
     unsafe {
         // IPC server is at a well-known endpoint.
@@ -167,7 +167,7 @@ pub unsafe fn mmap(
     fd: i32,
     offset: i64,
 ) -> *mut u8 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, VM_MMAP as i32);
@@ -185,7 +185,7 @@ pub unsafe fn mmap(
             Err(_) => MAP_FAILED,
         }
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (addr, length, prot, flags, fd, offset);
         MAP_FAILED
@@ -201,7 +201,7 @@ pub unsafe fn mmap(
 ///
 /// The address range must have been previously mapped by `mmap`.
 pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, VM_MUNMAP as i32);
@@ -213,7 +213,7 @@ pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
             Err(_) => -1,
         }
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (addr, length);
         -1
@@ -233,7 +233,7 @@ pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
 /// `key` must be a valid IPC key. The caller must ensure that the IPC
 /// server endpoint is running and accessible.
 pub unsafe fn shmget(key: i32, size: usize, flags: i32) -> i32 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, IPC_SHMGET as i32);
@@ -243,7 +243,7 @@ pub unsafe fn shmget(key: i32, size: usize, flags: i32) -> i32 {
 
         ipc_call(&mut msg).unwrap_or(-1)
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (key, size, flags);
         -1
@@ -261,7 +261,7 @@ pub unsafe fn shmget(key: i32, size: usize, flags: i32) -> i32 {
 /// The address must not conflict with existing mappings (unless SHM_RND
 /// alignment is used).
 pub unsafe fn shmat(id: i32, addr: *mut u8, flags: i32) -> *mut u8 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, IPC_SHMAT as i32);
@@ -278,7 +278,7 @@ pub unsafe fn shmat(id: i32, addr: *mut u8, flags: i32) -> *mut u8 {
             Err(_) => MAP_FAILED,
         }
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (id, addr, flags);
         MAP_FAILED
@@ -294,7 +294,7 @@ pub unsafe fn shmat(id: i32, addr: *mut u8, flags: i32) -> *mut u8 {
 ///
 /// The address must have been returned by a previous `shmat` call.
 pub unsafe fn shmdt(addr: *mut u8) -> i32 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, IPC_SHMDT as i32);
@@ -305,7 +305,7 @@ pub unsafe fn shmdt(addr: *mut u8) -> i32 {
             Err(_) => -1,
         }
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = addr;
         -1
@@ -323,7 +323,7 @@ pub unsafe fn shmdt(addr: *mut u8) -> i32 {
 ///
 /// `buf` must be a valid pointer if `cmd` requires a buffer.
 pub unsafe fn shmctl(id: i32, cmd: i32, _buf: *mut u8) -> i32 {
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, IPC_SHMCTL as i32);
@@ -336,7 +336,7 @@ pub unsafe fn shmctl(id: i32, cmd: i32, _buf: *mut u8) -> i32 {
             Err(_) => -1,
         }
     }
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (id, cmd);
         -1

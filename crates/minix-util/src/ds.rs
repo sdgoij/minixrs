@@ -1,7 +1,7 @@
 //! Data Store (DS) client — publish, retrieve, subscribe, and delete keys.
 //!
 //! Thin wrappers over IPC `sendrec` to the DS server (`DS_PROC_NR` = 6).
-//! All functions return `Err(MinixErr((71,)))` on host (`cfg(not(target_os = "none"))`).
+//! All functions return `Err(MinixErr((71,)))` on host (`cfg(not(target_os = "minix"))`).
 
 #![allow(dead_code)]
 
@@ -58,7 +58,7 @@ fn check_result(msg: &Message) -> Result<(), MinixErr> {
 
 /// Publish an unsigned 32-bit value under `key`.
 pub fn ds_publish_u32(key: &[u8], value: u32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_PUBLISH);
         msg_set_i32(&mut msg, OFF_M2_I1, key.len() as i32);
@@ -66,7 +66,7 @@ pub fn ds_publish_u32(key: &[u8], value: u32) -> Result<(), MinixErr> {
         unsafe { minix_std::sendrec(DS_ENDPOINT, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (key, value);
         Err(MinixErr(71))
@@ -75,7 +75,7 @@ pub fn ds_publish_u32(key: &[u8], value: u32) -> Result<(), MinixErr> {
 
 /// Retrieve the unsigned 32-bit value at `key`.
 pub fn ds_retrieve_u32(key: &[u8]) -> Result<u32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_RETRIEVE);
         msg_set_i32(&mut msg, OFF_M2_I1, key.len() as i32);
@@ -83,7 +83,7 @@ pub fn ds_retrieve_u32(key: &[u8]) -> Result<u32, MinixErr> {
         check_result(&msg)?;
         Ok(msg_get_i32(&msg, OFF_M2_I2) as u32)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = key;
         Err(MinixErr(71))
@@ -92,7 +92,7 @@ pub fn ds_retrieve_u32(key: &[u8]) -> Result<u32, MinixErr> {
 
 /// Publish a label (endpoint mapping) under `key`.
 pub fn ds_publish_label(key: &[u8], endpoint: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_PUBLISH);
         msg_set_i32(&mut msg, OFF_M2_I1, key.len() as i32);
@@ -100,7 +100,7 @@ pub fn ds_publish_label(key: &[u8], endpoint: i32) -> Result<(), MinixErr> {
         unsafe { minix_std::sendrec(DS_ENDPOINT, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (key, endpoint);
         Err(MinixErr(71))
@@ -109,7 +109,7 @@ pub fn ds_publish_label(key: &[u8], endpoint: i32) -> Result<(), MinixErr> {
 
 /// Retrieve the endpoint (label) at `key`.
 pub fn ds_retrieve_label(key: &[u8]) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_RETRIEVE);
         msg_set_i32(&mut msg, OFF_M2_I1, key.len() as i32);
@@ -117,7 +117,7 @@ pub fn ds_retrieve_label(key: &[u8]) -> Result<i32, MinixErr> {
         check_result(&msg)?;
         Ok(msg_get_i32(&msg, OFF_M2_I2))
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = key;
         Err(MinixErr(71))
@@ -126,7 +126,7 @@ pub fn ds_retrieve_label(key: &[u8]) -> Result<i32, MinixErr> {
 
 /// Subscribe to keys matching `pattern`.
 pub fn ds_subscribe(pattern: &[u8], overwrite: bool) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_SUBSCRIBE);
         msg_set_i32(&mut msg, OFF_M2_I1, pattern.len() as i32);
@@ -134,7 +134,7 @@ pub fn ds_subscribe(pattern: &[u8], overwrite: bool) -> Result<(), MinixErr> {
         unsafe { minix_std::sendrec(DS_ENDPOINT, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (pattern, overwrite);
         Err(MinixErr(71))
@@ -143,14 +143,14 @@ pub fn ds_subscribe(pattern: &[u8], overwrite: bool) -> Result<(), MinixErr> {
 
 /// Delete a key from the store.
 pub fn ds_delete(key: &[u8]) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(DS_DELETE);
         msg_set_i32(&mut msg, OFF_M2_I1, key.len() as i32);
         unsafe { minix_std::sendrec(DS_ENDPOINT, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = key;
         Err(MinixErr(71))

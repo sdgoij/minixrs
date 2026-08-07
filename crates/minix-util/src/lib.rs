@@ -7,8 +7,8 @@
 //! - **BDEV client** (`bdev`): Block device I/O
 //! - **CDEV client** (`cdev`): Character device I/O
 //!
-//! All functions return `Err(MinixErr(71))` on host (`cfg(not(target_os = "none"))`).
-//! Real implementations use `minix_std::sendrec` when `target_os = "none"`.
+//! All functions return `Err(MinixErr(71))` on host (`cfg(not(target_os = "minix"))`).
+//! Real implementations use `minix_std::sendrec` when `target_os = "minix"`.
 
 #![no_std]
 

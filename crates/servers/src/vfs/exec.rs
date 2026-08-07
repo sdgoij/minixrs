@@ -10,79 +10,79 @@
 //! have yet.
 
 use crate::vfs::consts::*;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::glo::vfs_global;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::mount::put_vnode;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::path;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::request::req_read;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::types::{Fproc, Lookup};
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use arch_common::com::VFS_PROC_NR;
 
 /// Size of the VFS Fproc table (`glo::NR_PROCS`).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const NR_FPROCS: usize = 256;
 
 /// SELF endpoint constant used by kernel calls (kernel::system::SELF).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const SELF: i32 = 31742;
 
 /// SYS_VIRCOPY kernel call number.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const SYS_VIRCOPY: i32 = 15;
 /// SYS_EXEC_LOAD kernel call number (arch-common::sys::EXEC_LOAD - KERNEL_CALL).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const SYS_EXEC_LOAD: i32 = 63;
 
 // Copy message offsets (match kernel do_copy_common).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_SRC_ENDPT_OFF: usize = 48;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_SRC_ADDR_OFF: usize = 8;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_DST_ENDPT_OFF: usize = 16;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_DST_ADDR_OFF: usize = 24;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_NR_BYTES_OFF: usize = 32;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const COPY_FLAGS_OFF: usize = 40;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const CP_FLAG_TRY: i32 = 0x80;
 
 // SYS_EXEC_LOAD message offsets (match kernel do_exec_load_handler).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_ENDPT_OFF: usize = 8;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_ELF_PTR_OFF: usize = 16;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_ELF_LEN_OFF: usize = 24;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_FRAME_PTR_OFF: usize = 32;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_FRAME_LEN_OFF: usize = 40;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_PC_OFF: usize = 16;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_LOAD_NEWSP_OFF: usize = 24;
 
 /// Upper bound for the exec stack frame (matches C's `ARG_MAX`-style limit).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_FRAME_MAX: usize = 16384;
 /// Upper bound for an executable image read by VFS.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const EXEC_ELF_MAX: usize = 1024 * 1024;
 
 // Scratch buffers (VFS is effectively single-threaded; C uses a static
 // `mbuf[ARG_MAX]` for the same purpose).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static mut EXEC_FRAME_BUF: [u8; EXEC_FRAME_MAX] = [0u8; EXEC_FRAME_MAX];
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static mut EXEC_ELF_BUF: [u8; EXEC_ELF_MAX] = [0u8; EXEC_ELF_MAX];
 
 /// Result of a VFS exec attempt.
@@ -103,7 +103,7 @@ pub struct ExecResult {
 ///
 /// `path_ptr`/`frame_ptr` must be valid user VAs in the target process's
 /// address space.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe fn pm_exec(
     proc_e: i32,
     path_ptr: u64,
@@ -261,8 +261,8 @@ pub unsafe fn pm_exec(
 /// # Safety
 ///
 /// All parameters are ignored in this host stub; the function is `unsafe`
-/// only to mirror the `target_os = "none"` signature.
-#[cfg(not(target_os = "none"))]
+/// only to mirror the `target_os = "minix"` signature.
+#[cfg(not(target_os = "minix"))]
 pub unsafe fn pm_exec(
     _proc_e: i32,
     _path_ptr: u64,
@@ -284,7 +284,7 @@ pub unsafe fn pm_exec(
 ///
 /// `src_addr`/`dst_addr` must be valid for `bytes` in their respective
 /// address spaces.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn sys_vircopy(
     src_endpt: i32,
     src_addr: u64,

@@ -21,7 +21,7 @@ pub fn fs_readsuper() -> i32 {
         // VFS grants (label_len at payload+8, label grant at payload+24,
         // granter = m_source). The resolved endpoint routes all block I/O
         // for `dev` (libbdev bdev_driver).
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         {
             let label_len = (*mfs).m_in.m_payload.m1.m1i3 as usize;
             let label_grant = i32::from_ne_bytes(

@@ -22,7 +22,9 @@ See `.agents/skills/` for domain-specific documentation and
 
 ### Prerequisites
 
-- Rust toolchain (MSRV: **1.96**, edition: **2024**) + **nightly** (`-Zbuild-std`)
+- Rust toolchain (MSRV: **1.96**, edition: **2024**) — the OS is built with
+  the forked Rust compiler in the `rust/` submodule; `just bootstrap` builds
+  its stage1 compiler + the minix std sysroots (first run needs network)
 - bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
 - QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
 - `rust-objcopy`, `rust-nm`, `rust-lld` (from `rust-src` component)
@@ -38,19 +40,23 @@ See `.agents/skills/` for domain-specific documentation and
 ### Usage
 
 ```bash
+# One-time setup: fetch the rust fork submodule, build its stage1 compiler
+# + std for all minix targets, and the /bin/hello std smoke test
+just bootstrap
+
 # x86_64
 just build                    # Build the kernel + boot images
 just run                      # Build and boot in QEMU
 just debug                    # Build and boot with GDB server on :1234
 just test-qemu                # Run the QEMU integration tests
 
-# RISC-V64 (requires nightly)
+# RISC-V64
 just build riscv64            # Build the RISC-V kernel
 just run riscv64              # Boot in QEMU (uses OpenSBI)
 just test-qemu riscv64        # Run the QEMU integration tests
 just test-boot riscv64        # Run the boot tests
 
-# AArch64 (requires nightly)
+# AArch64
 just build aarch64            # Build the AArch64 kernel
 just run aarch64              # Boot in QEMU (virt machine)
 just debug aarch64            # Build and boot with GDB server on :1234
@@ -139,7 +145,9 @@ The original C reference source is at `.refs/minix-3.3.0/` (git submodule).
   - `embed_initramfs` — embed initramfs in the kernel binary
   - `embed_minixfs` — embed minixfs driver in the kernel
   - `qemu-tests` — enable QEMU integration test infrastructure
-- **RISC-V64 and AArch64** require the nightly toolchain (`-Zbuild-std`)
+- All three arches build with the fork's stage1 compiler and in-tree minix
+  targets (`x86_64-pc-minix`, `riscv64gc-unknown-minix`, `aarch64-unknown-minix`)
+  — no `-Zbuild-std`, no JSON specs. `just bootstrap` builds the compiler once.
 
 ## License
 

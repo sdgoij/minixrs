@@ -2251,7 +2251,7 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
 /// On success, `msg.m_payload` contains the kernel's reply.
 /// Returns 0 on success, negative error code on failure.
 pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         // Message is 56 bytes, but kernel expects 64. Use a proper
         // 64-byte buffer to avoid stack corruption from the size mismatch.
@@ -2282,7 +2282,7 @@ pub fn send_kernel_call(call_nr: i32, msg: &mut Message) -> i32 {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), msg as *mut Message as *mut u8, msg_size);
         result
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (call_nr, msg);
         -12 // ENOMEM on host builds
@@ -2652,7 +2652,7 @@ pub unsafe fn handle_getpgrp(caller_slot: usize, msg: &mut Message) -> i32 {
 /// `caller_slot` must be a valid process slot. `_msg` must point to
 /// a valid message buffer.
 pub unsafe fn handle_reboot(_caller_slot: usize, _msg: &mut Message) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         // syscall1(NR_ABORT=27, 1) — kernel do_abort_handler with reboot.
         minix_rt::syscall1(27, 1);
@@ -2984,7 +2984,7 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
 /// # Safety
 ///
 /// Must be called after MProc table is populated and IPC is available.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe fn sched_init() {
     let base = MPROC.as_ptr();
     let sched_ep = arch_common::com::SCHED_PROC_NR;
@@ -3031,7 +3031,7 @@ pub unsafe fn sched_init() {
 /// On host builds (testing), this is a no-op — the dispatch logic is
 /// exercised through unit tests instead.
 pub fn pm_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // Initialize PM's process table.
         init_proc();
@@ -3187,7 +3187,7 @@ pub fn pm_server_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly
     }
@@ -3526,7 +3526,7 @@ const CLOCK_MONOTONIC: i32 = 1;
 /// realtime must be reconstructed like the SYS_GETKSIG bitmask.
 ///
 /// Returns (ticks, realtime, boottime, hz).
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "minix", test))]
 fn parse_times_reply(msg: &Message) -> (u64, u64, i64, u64) {
     let realtime = (msg.m_source as u32 as u64) | ((msg.m_type as u32 as u64) << 32);
     let ticks = unsafe { u64::from_le_bytes(msg.m_payload.raw[0..8].try_into().unwrap_or([0; 8])) };
@@ -3548,7 +3548,7 @@ fn parse_times_reply(msg: &Message) -> (u64, u64, i64, u64) {
 /// On host builds there is no kernel to ask, so read the kernel crate's
 /// clock state directly; tests set it to simulate a booted kernel.
 fn kernel_clock() -> (u64, u64, i64, u64) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut kmsg = Message {
             m_source: 0,
@@ -3561,7 +3561,7 @@ fn kernel_clock() -> (u64, u64, i64, u64) {
         }
         parse_times_reply(&kmsg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         (
             kernel::clock::get_monotonic(),
@@ -4291,7 +4291,7 @@ mod tests {
 
     #[test]
     fn test_send_kernel_call_host_build() {
-        // On host builds (not target_os = "none"), send_kernel_call
+        // On host builds (not target_os = "minix"), send_kernel_call
         // returns ENOMEM (-12) without calling the kernel.
         let mut msg = Message {
             m_source: 0,

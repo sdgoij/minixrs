@@ -8,8 +8,31 @@
 // Usage: rustc tools/mkboot.rs --edition 2024 -o target/mkboot
 //        target/mkboot [features]     (default: embed_initramfs,embed_minixfs)
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Locate the rust fork's stage1 rustc (`rust/build/<host-triple>/stage1/`),
+/// built by `just bootstrap`, via the default toolchain's host triple.
+fn find_stage1_rustc(workspace: &Path) -> PathBuf {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("rustc -vV failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let host = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("host triple not found in rustc -vV")
+        .to_string();
+    let exe = if cfg!(windows) { "rustc.exe" } else { "rustc" };
+    workspace
+        .join("rust")
+        .join("build")
+        .join(host)
+        .join("stage1")
+        .join("bin")
+        .join(exe)
+}
 
 fn main() {
     let workspace = Path::new(".");
@@ -30,21 +53,23 @@ fn main() {
     };
     println!("Features: {}", features);
 
-    // 1. Build the kernel (the linker script comes from .cargo/config.toml).
-    let status = Command::new("rustup")
+    // 1. Build the kernel with the rust fork's stage1 compiler (built by
+    //    `just bootstrap`); the in-tree target provides core/alloc/std from
+    //    its sysroot, and the linker script comes from .cargo/config.toml.
+    let stage1_rustc = find_stage1_rustc(workspace);
+    assert!(
+        stage1_rustc.exists(),
+        "stage1 rustc not found at {} — run `just bootstrap` first",
+        stage1_rustc.display()
+    );
+    let status = Command::new("cargo")
+        .env("RUSTC", &stage1_rustc)
         .args([
-            "run",
-            "nightly",
-            "cargo",
             "build",
             "-p",
             "kernel-boot",
             "--target",
-            "x86_64-pc-minix.json",
-            "-Zunstable-options",
-            "-Zjson-target-spec",
-            "-Zbuild-std=core,alloc",
-            "-Zbuild-std-features=compiler-builtins-mem",
+            "x86_64-pc-minix",
             "--features",
             &features,
             "--release",

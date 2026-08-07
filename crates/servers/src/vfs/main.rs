@@ -146,7 +146,7 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     // Boot-test: kernel runs the boot suite against post-mount state and
     // exits QEMU. Normal boot: no handler registered, returns -38
     // (ENOSYS), ignored.
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         let _ = minix_rt::syscall1(60, 0);
     }
@@ -164,7 +164,7 @@ unsafe fn get_work() {
     let glob = vfs_global();
     let buf = &mut (*glob).fs_m_in as *mut [u8; 64];
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         const RECEIVE_CALL: u64 = 47;
         const ANY: i32 = 0x0000ffff;
@@ -174,7 +174,7 @@ unsafe fn get_work() {
             core::ptr::copy_nonoverlapping(src_bytes.as_ptr(), buf as *mut u8, 4);
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = buf;
     }
@@ -242,7 +242,7 @@ unsafe fn handle_work() {
 /// caller's Fproc slot; if null, the reply is skipped.
 #[allow(unused_variables)]
 unsafe fn reply(who: *mut Fproc, _result: i32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         if who.is_null() {
             return;

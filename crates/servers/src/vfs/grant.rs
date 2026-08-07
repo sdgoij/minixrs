@@ -139,7 +139,7 @@ impl GrantTable {
     /// Must be called once during VFS init, before any FS requests.
     /// On host (test mode), this is a no-op.
     pub fn register_with_kernel(&self) {
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         {
             let addr = self.as_ptr();
             let nr = VFS_NR_GRANTS as i32;
@@ -150,7 +150,7 @@ impl GrantTable {
             msg[16..20].copy_from_slice(&nr.to_le_bytes());
             let _r = minix_rt::kernel_call(34, &mut msg);
         }
-        #[cfg(not(target_os = "none"))]
+        #[cfg(not(target_os = "minix"))]
         {
             // No-op on host — no real kernel to register with.
         }

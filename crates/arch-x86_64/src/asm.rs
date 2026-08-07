@@ -525,7 +525,7 @@ pub unsafe fn hlt() {
 ///
 /// `next` must be a valid Proc pointer or null.
 #[unsafe(no_mangle)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe extern "C" fn set_cpulocal_proc_asm(
     next: *mut core::ffi::c_void,
 ) -> *mut core::ffi::c_void {
@@ -542,7 +542,7 @@ pub unsafe extern "C" fn set_cpulocal_proc_asm(
 /// CR2 holds the faulting linear address.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -637,7 +637,7 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
 /// Uses IST2 (TSS.IST[2]) for a reliable stack.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn exception_double_fault_entry() {
 /// #UD previously froze the CPU with interrupts off, hanging every arch).
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -686,7 +686,7 @@ pub unsafe extern "C" fn exception_ud_entry() {
 /// #DB (debug exception) handler — prints 'B' and spins (see #UD comment).
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -709,7 +709,7 @@ pub unsafe extern "C" fn exception_db_entry() {
 /// General protection fault handler — prints 'G' and diagnostic info, then halts.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -740,7 +740,7 @@ pub unsafe extern "C" fn exception_gpf_entry() {
 ///
 /// Called from the naked asm #GP entry. `frame_ptr` must point to the iretq
 /// frame on the stack: [RIP(8), CS(8), RFLAGS(8), old_RSP(8), old_SS(8)].
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_gpf_handler(error_code: u64, frame_ptr: *const u64) {
     unsafe {
@@ -802,7 +802,7 @@ pub unsafe extern "C" fn rust_gpf_handler(error_code: u64, frame_ptr: *const u64
 /// Used for testing whether the ring-3 context switch itself works.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 /// # Safety
 ///
 /// Must be called only during early boot on the BSP, before SMP is initialized.
@@ -972,7 +972,7 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
 
 // The syscall entry point and handler pointer are only available on the
 // kernel target (x86_64-pc-minix), not on the host build (Windows tests).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub mod syscall_abi {
     use core::sync::atomic::AtomicU64;
 

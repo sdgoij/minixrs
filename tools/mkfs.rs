@@ -22,7 +22,7 @@ fn main() {
 
     let out_dir = match arch.as_str() {
         "x86_64" => "x86_64-pc-minix",
-        "riscv64" => "riscv64gc-unknown-none-elf",
+        "riscv64" => "riscv64gc-unknown-minix",
         "aarch64" => "aarch64-unknown-minix",
         other => {
             eprintln!("mkfs: unknown arch {other:?} (expected x86_64|riscv64|aarch64)");

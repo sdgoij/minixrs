@@ -810,7 +810,7 @@ unsafe fn ds_getprocname_by_name(name: &[u8]) -> Option<i32> {
 /// On host builds (testing), this is a no-op — the store operations are
 /// exercised through unit tests directly.
 pub fn ds_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         const RECEIVE_CALL: u64 = 47;
         const SENDREC_CALL: u64 = 48;
@@ -1046,7 +1046,7 @@ pub fn ds_server_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly
     }

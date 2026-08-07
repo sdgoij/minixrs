@@ -5,16 +5,16 @@ Usage: python tools/build-std-hello.py [all|x86|riscv64|aarch64|<triple>]
                                        (default: x86_64-pc-minix)
 
 Arch names and triples are both accepted:
+`target` is one of the fork's in-tree minix triples (default
+`x86_64-pc-minix`):
 
-  x86 / x86_64-pc-minix            -> target/x86_64-pc-minix/release/hello
-  riscv64 / riscv64gc-unknown-minix -> target/riscv64gc-unknown-none-elf/release/hello
-  aarch64 / aarch64-unknown-minix  -> target/aarch64-unknown-minix/release/hello
-  all                              -> build all of the above
+  - x86_64-pc-minix          -> target/x86_64-pc-minix/release/hello
+  - riscv64gc-unknown-minix  -> target/riscv64gc-unknown-minix/release/hello
+  - aarch64-unknown-minix    -> target/aarch64-unknown-minix/release/hello
 
-The riscv64 output dir differs from the rustc triple because the OS builds
-riscv64 against the upstream `riscv64gc-unknown-none-elf` target (see
-`crates/boot-image/src/targets.rs`); the std smoke test still uses the
-fork's in-tree spec, which carries a built std.
+The OS release output directory is the triple itself for all three (see
+`crates/boot-image/src/targets.rs`); the std smoke test uses the fork's
+in-tree spec, which carries a built std.
 
 Prerequisites:
   1. The fork's std for the chosen target must be built first:
@@ -48,7 +48,7 @@ ARCHES = {
 # `crates/kernel/build.rs` reads userland binaries from).
 TARGETS = {
     "x86_64-pc-minix": "x86_64-pc-minix",
-    "riscv64gc-unknown-minix": "riscv64gc-unknown-none-elf",
+    "riscv64gc-unknown-minix": "riscv64gc-unknown-minix",
     "aarch64-unknown-minix": "aarch64-unknown-minix",
 }
 

@@ -4,14 +4,14 @@
 
 use crate::write_out;
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::write_err;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::{
     cat, chmod, chown, cp, echo, errstr, fsck, ln, ls, mkdir, mknod, reboot, rm, set_redirect_fd,
     sync,
 };
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 /// Sentinel for `exit` — must not overlap any valid exit status.
@@ -28,11 +28,11 @@ struct ParsedCommand<'a> {
 }
 
 /// Maximum number of commands in a single `|` pipeline.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const MAX_PIPELINE: usize = 8;
 
 /// True if `cmd` is a shell builtin (run in-process).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn is_builtin_cmd(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -59,12 +59,12 @@ fn is_builtin_cmd(cmd: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn sh(_args: &[&str]) -> i32 {
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         write_out(b"sh: stub (no MINIX syscall ABI on host)\n");
         0
     }
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // Ignore SIGINT: the tty's sigchar sends it on ^C, and the shell
         // must survive it at the prompt (read_line just gets EINTR and the
@@ -132,7 +132,7 @@ pub fn sh(_args: &[&str]) -> i32 {
 
 /// Run a token slice, splitting on `&&`. Each sub-command may be a `|`
 /// pipeline. Returns the last status, or `SH_EXIT` for `exit`.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_chain(raw_tokens: &[&str; 32], raw_argc: usize) -> i32 {
     let mut cmd_start = 0usize;
     let mut last_status = 0i32;
@@ -158,22 +158,22 @@ fn run_chain(raw_tokens: &[&str; 32], raw_argc: usize) -> i32 {
 
 /// Background job pids — a fixed table the shell reaps at each prompt.
 /// The child (post-fork) copy is inert: it runs one command and exits.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const MAX_JOBS: usize = 16;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static JOB_PIDS: [AtomicI32; MAX_JOBS] = [const { AtomicI32::new(0) }; MAX_JOBS];
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static JOB_NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// Record a background job's pid.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn add_job(pid: i32) {
     let idx = JOB_NEXT.fetch_add(1, Ordering::Relaxed) % MAX_JOBS;
     JOB_PIDS[idx].store(pid, Ordering::Relaxed);
 }
 
 /// Write an unsigned decimal to stdout.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn write_dec(mut n: u32) {
     let mut buf = [0u8; 12];
     let mut i = 12;
@@ -190,7 +190,7 @@ fn write_dec(mut n: u32) {
 
 /// Run a command chain in the background: fork, record the pid, return
 /// immediately. The child runs the chain and exits.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_background(tokens: &[&str]) {
     let pid = minix_rt::fork();
     if pid < 0 {
@@ -213,7 +213,7 @@ fn run_background(tokens: &[&str]) {
 /// Like `run_segment`, but a single command runs in place (exec for
 /// externals, inline for builtins) instead of forking a grandchild, so the
 /// background child itself is the command's process.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_segment_bg(tokens: &[&str]) -> i32 {
     let mut commands = [ParsedCommand {
         tokens: [""; 32],
@@ -243,7 +243,7 @@ fn run_segment_bg(tokens: &[&str]) -> i32 {
 /// Reap finished background jobs and report them at the prompt. A status
 /// >= 128 means the job died by signal N = status - 128 (sig_proc_exit
 /// encodes deaths as 0x80 | signo).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn reap_jobs() {
     loop {
         let (pid, status) = minix_rt::waitpid(-1, minix_std::process::WNOHANG);
@@ -285,7 +285,7 @@ fn reap_jobs() {
 /// and line editing; this only accumulates bytes until the line ends. The
 /// first read blocks until a line is available, so a ^C (EINTR) at an empty
 /// prompt yields an empty line and the caller reprints the prompt.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn read_line(buf: &mut [u8]) -> usize {
     let mut total = 0usize;
     loop {
@@ -314,7 +314,7 @@ fn read_line(buf: &mut [u8]) -> usize {
 
 /// Scan `raw_tokens[0..raw_argc]` for `>` and split off the redirect filename.
 /// The returned `ParsedCommand` contains only the non-redirect tokens.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn parse_command<'a>(raw_tokens: &[&'a str], raw_argc: usize) -> ParsedCommand<'a> {
     let mut tokens = [""; 32];
     let mut argc = 0;
@@ -345,7 +345,7 @@ fn parse_command<'a>(raw_tokens: &[&'a str], raw_argc: usize) -> ParsedCommand<'
 
 /// Split a token slice on `|` and run the resulting pipeline.
 /// Returns the exit status of the last command, or `SH_EXIT`.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_segment(tokens: &[&str]) -> i32 {
     let mut commands = [ParsedCommand {
         tokens: [""; 32],
@@ -383,7 +383,7 @@ fn run_segment(tokens: &[&str]) -> i32 {
 /// Each pipe gets its own pair (pipe i -> fds 62-2i/63-2i) so multi-stage
 /// pipelines don't collide: a later pipe() would otherwise re-lift onto an
 /// already-occupied fd and close the earlier pipe's end.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn lift_pipe_fds(r: i32, w: i32, pipe_index: usize) -> (i32, i32) {
     let mut r = r;
     let mut w = w;
@@ -407,7 +407,7 @@ fn lift_pipe_fds(r: i32, w: i32, pipe_index: usize) -> (i32, i32) {
 ///
 /// Children are forked in order (left to right) so the writer generally runs
 /// before the reader; the parent closes its pipe ends and reaps each child.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
     let n = commands.len();
     if n < 2 || n > MAX_PIPELINE {
@@ -484,7 +484,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
 /// Run one command in the current process (used by pipeline children, which
 /// are already forked). Builtins run directly; external commands exec in
 /// place. Handles an optional stdout file redirect.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_command_inline(parsed: &ParsedCommand) -> i32 {
     let cmd = parsed.tokens[0];
     let args = &parsed.tokens[..parsed.argc];
@@ -541,7 +541,7 @@ fn run_command_inline(parsed: &ParsedCommand) -> i32 {
 /// Run a fully-parsed command.
 ///
 /// Returns the exit status (0 = success), or `SH_EXIT` for the `exit` builtin.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
     if parsed.argc == 0 {
         return 0;
@@ -633,7 +633,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
 // cd (always in-process)
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_cd(args: &[&str]) -> i32 {
     if args.len() < 2 {
         write_err(b"sh: cd: missing argument\r\n");
@@ -657,7 +657,7 @@ fn run_cd(args: &[&str]) -> i32 {
 // Builtins
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
     match cmd {
         "echo" => echo(args),
@@ -690,7 +690,7 @@ fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
 // External commands (fork + exec)
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn run_external(cmd: &str, args: &[&str]) -> i32 {
     // Use stack buffer (NOT static mut) to avoid COW page faults after fork
     // and potential aliasing issues.
@@ -731,7 +731,7 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
 
 /// Build the first candidate path for `cmd_bytes` into `cmd_path`.
 /// Returns the length (including null terminator), or 0 on overflow.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn build_path(cmd_bytes: &[u8], cmd_path: &mut [u8; 256]) -> usize {
     if cmd_bytes.starts_with(b"/") {
         let len = (cmd_bytes.len() + 1).min(cmd_path.len());
@@ -750,7 +750,7 @@ fn build_path(cmd_bytes: &[u8], cmd_path: &mut [u8; 256]) -> usize {
 
 /// In the child process, try to exec the command.
 /// Falls through if exec fails, so the caller can retry `/sbin/<cmd>`.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
     let child_path_len = cmd_path.iter().position(|&b| b == 0).unwrap_or(255) + 1;
     let cmd_end = child_path_len - 1;
@@ -813,7 +813,7 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
 
 /// In the child process: close fd 1, open `outfile` for writing on fd 1.
 /// Exits the child on failure.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 fn setup_redirect(outfile: &str) -> i32 {
     // Open the file WITHOUT closing fd 1.
     // The returned fd (>= 3) avoids the kernel's serial shortcut

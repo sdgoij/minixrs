@@ -438,7 +438,7 @@ pub fn virtio_set_devio(hook: DevioFn) {
 }
 
 /// Execute one port I/O operation through the registered hook.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn devio(request: u32, port: u16, value: u32) -> u32 {
     let raw = DEVIO_FN.load(core::sync::atomic::Ordering::Relaxed);
     if raw == 0 {
@@ -453,11 +453,11 @@ unsafe fn devio(request: u32, port: u16, value: u32) -> u32 {
 /// Write 32 bits to an I/O port.
 #[inline]
 unsafe fn out32(port: u16, val: u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         devio(arch_common::com::DIO_OUTPUT_LONG, port, val);
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     unsafe {
         crate::hal::outl(port, val);
     }
@@ -466,11 +466,11 @@ unsafe fn out32(port: u16, val: u32) {
 /// Read 32 bits from an I/O port.
 #[inline]
 unsafe fn in32(port: u16) -> u32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         unsafe { devio(arch_common::com::DIO_INPUT_LONG, port, 0) }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         unsafe { crate::hal::inl(port) }
     }

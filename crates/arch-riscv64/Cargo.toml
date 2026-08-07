@@ -14,3 +14,6 @@ workspace = true
 
 [dependencies]
 arch-common = { path = "../arch-common" }
+
+[lints]
+workspace = true

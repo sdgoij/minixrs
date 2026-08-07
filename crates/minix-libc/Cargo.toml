@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 minix-std = { path = "../minix-std" }
+
+[lints]
+workspace = true

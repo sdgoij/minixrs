@@ -28,3 +28,6 @@ compiler_builtins = { path = "../../rust/library/compiler-builtins/compiler-buil
 # pieces (`_start`, panic handler, global allocator) — std provides its own.
 minix-rt = { path = "../minix-rt", default-features = false }
 net = { path = "../net" }
+
+[lints]
+workspace = true

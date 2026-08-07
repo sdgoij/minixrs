@@ -457,10 +457,10 @@ pub fn mount_root() -> *mut Vnode {
     // The root filesystem lives on the attached virtio disk on every arch;
     // MFS routes block I/O through the BDEV protocol to the virtio_blk
     // driver server (x86_64 legacy PCI, RISC-V/AArch64 modern virtio-mmio).
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     let driver_label: &[u8] = b"virtio_blk";
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     let (r, node, _flags_reply) = unsafe {
         req_readsuper(
             vmp,
@@ -471,7 +471,7 @@ pub fn mount_root() -> *mut Vnode {
             1, /* isroot */
         )
     };
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     let (r, node, _flags_reply) = (ENOSYS, crate::vfs::types::NodeDetails::default(), 0);
 
     if r != OK {

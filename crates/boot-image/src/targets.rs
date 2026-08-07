@@ -13,27 +13,27 @@ use std::path::{Path, PathBuf};
 pub struct BuildTarget {
     /// Short arch name used by the CLIs ("x86_64", "riscv64", "aarch64").
     pub arch: &'static str,
-    /// Cargo `--target` value (built-in triple or a `.json` spec path).
+    /// Cargo `--target` value (in-tree rust fork triple).
     pub spec: &'static str,
-    /// Cargo target output sub-directory (spec without `.json`).
+    /// Cargo target output sub-directory (same as the triple).
     pub out_dir: &'static str,
 }
 
 pub const X86_64: BuildTarget = BuildTarget {
     arch: "x86_64",
-    spec: "x86_64-pc-minix.json",
+    spec: "x86_64-pc-minix",
     out_dir: "x86_64-pc-minix",
 };
 
 pub const RISCV64: BuildTarget = BuildTarget {
     arch: "riscv64",
-    spec: "riscv64gc-unknown-none-elf",
-    out_dir: "riscv64gc-unknown-none-elf",
+    spec: "riscv64gc-unknown-minix",
+    out_dir: "riscv64gc-unknown-minix",
 };
 
 pub const AARCH64: BuildTarget = BuildTarget {
     arch: "aarch64",
-    spec: "aarch64-unknown-minix.json",
+    spec: "aarch64-unknown-minix",
     out_dir: "aarch64-unknown-minix",
 };
 
@@ -66,9 +66,12 @@ mod tests {
     #[test]
     fn target_resolution() {
         assert_eq!(target_from_rustc_target("x86_64-pc-minix"), Some(X86_64));
-        assert_eq!(target_from_rustc_target("aarch64-unknown-minix"), Some(AARCH64));
         assert_eq!(
-            target_from_rustc_target("riscv64gc-unknown-none-elf"),
+            target_from_rustc_target("aarch64-unknown-minix"),
+            Some(AARCH64)
+        );
+        assert_eq!(
+            target_from_rustc_target("riscv64gc-unknown-minix"),
             Some(RISCV64)
         );
         assert_eq!(target_from_rustc_target("x86_64-pc-windows-msvc"), None);

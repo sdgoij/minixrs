@@ -885,7 +885,7 @@ pub unsafe extern "C" fn timer_isr_c_handler() {
 /// disabled. Must be called in ring 0.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe extern "C" fn timer_isr_entry() {
     core::arch::naked_asm!(
         // Save ALL general-purpose registers (15 pushes = 120 bytes).
@@ -1027,7 +1027,7 @@ pub unsafe fn set_serial_isr_handler(handler: SerialIsrFn) {
 /// Must be installed in the IDT at vector 0x24 with DPL 0.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe extern "C" fn serial_isr_entry() {
     core::arch::naked_asm!(
         // Save ALL general-purpose registers (15 pushes = 120 bytes).

@@ -7,14 +7,14 @@
 //!
 //! Ported from `minix/servers/vfs/request.c`.
 
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 use crate::vfs::consts::ENOSYS;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::consts::PATH_MAX;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use crate::vfs::grant::{cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
 use crate::vfs::types::{Lookup, LookupRes, NodeDetails, Statvfs, off_t};
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use arch_common::com::VFS_PROC_NR;
 
 // FS_BASE and REQ_* constants (from minix/include/minix/vfsif.h)
@@ -183,7 +183,7 @@ fn r_u64(buf: &MsgBuf, off: usize) -> u64 {
 ///
 /// `msg` must point to a valid, mutable 56-byte message buffer.
 pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // MsgBuf is 56 bytes; minix_std::Message is 64 bytes.
         // Copy into a 64-byte buffer for sendrec, then copy back.
@@ -199,7 +199,7 @@ pub unsafe fn fs_sendrec(fs_e: i32, msg: &mut MsgBuf) -> i32 {
             Err(e) => e.0,
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, msg);
         -(crate::vfs::consts::ENOSYS)
@@ -226,7 +226,7 @@ pub unsafe fn req_breadwrite(
     _user_addr: *const u8,
     rw_flag: i32,
 ) -> (i32, off_t, u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(
@@ -264,7 +264,7 @@ pub unsafe fn req_breadwrite(
         let cum_iop = r_u64(&msg, PAYLOAD_OFF + 8) as u32; // nbytes (reply)
         (r, new_pos, cum_iop)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, _user_e, dev, pos, num_of_bytes, _user_addr, rw_flag);
         (ENOSYS, 0, 0)
@@ -277,7 +277,7 @@ pub unsafe fn req_breadwrite(
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_BPEEK);
@@ -287,7 +287,7 @@ pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i
 
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, dev, pos, num_of_bytes);
         ENOSYS
@@ -304,7 +304,7 @@ pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_chmod(fs_e: i32, inode_nr: u32, rmode: u32) -> (i32, u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_CHMOD);
@@ -315,7 +315,7 @@ pub unsafe fn req_chmod(fs_e: i32, inode_nr: u32, rmode: u32) -> (i32, u32) {
         let new_mode = r_u16(&msg, PAYLOAD_OFF) as u32; // mode (reply)
         (r, new_mode)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, rmode);
         (ENOSYS, 0)
@@ -330,7 +330,7 @@ pub unsafe fn req_chmod(fs_e: i32, inode_nr: u32, rmode: u32) -> (i32, u32) {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_chown(fs_e: i32, inode_nr: u32, newuid: u16, newgid: u16) -> (i32, u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_CHOWN);
@@ -342,7 +342,7 @@ pub unsafe fn req_chown(fs_e: i32, inode_nr: u32, newuid: u16, newgid: u16) -> (
         let new_mode = r_u16(&msg, PAYLOAD_OFF) as u32; // mode (reply)
         (r, new_mode)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, newuid, newgid);
         (ENOSYS, 0)
@@ -367,7 +367,7 @@ pub unsafe fn req_create(
     gid: u16,
     _path: *const u8,
 ) -> (i32, NodeDetails) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_bytes = if _path.is_null() {
             &[]
@@ -408,7 +408,7 @@ pub unsafe fn req_create(
             },
         )
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, omode, uid, gid, _path);
         (ENOSYS, NodeDetails::default())
@@ -421,14 +421,14 @@ pub unsafe fn req_create(
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_flush(fs_e: i32, dev: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_FLUSH);
         w_u32(&mut msg, PAYLOAD_OFF, dev); // device
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, dev);
         ENOSYS
@@ -443,7 +443,7 @@ pub unsafe fn req_flush(fs_e: i32, dev: u32) -> i32 {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_statvfs(fs_e: i32) -> (i32, Statvfs) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_STATVFS);
@@ -456,7 +456,7 @@ pub unsafe fn req_statvfs(fs_e: i32) -> (i32, Statvfs) {
 
         (r, Statvfs::default())
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = fs_e;
         (ENOSYS, Statvfs::default())
@@ -469,7 +469,7 @@ pub unsafe fn req_statvfs(fs_e: i32) -> (i32, Statvfs) {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_ftrunc(fs_e: i32, inode_nr: u32, start: off_t, end: off_t) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_FTRUNC);
@@ -478,7 +478,7 @@ pub unsafe fn req_ftrunc(fs_e: i32, inode_nr: u32, start: off_t, end: off_t) -> 
         w_i64(&mut msg, PAYLOAD_OFF + 16, end); // trc_end
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, start, end);
         ENOSYS
@@ -502,7 +502,7 @@ pub unsafe fn req_getdents(
     _direct: i32,
     user_e: i32,
 ) -> (i32, off_t) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_GETDENTS);
@@ -525,7 +525,7 @@ pub unsafe fn req_getdents(
         let nbytes = r_i32(&msg, PAYLOAD_OFF + 8); // buf_offset from MFS
         (nbytes, new_pos)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, pos, buf, size, _direct, user_e);
         (ENOSYS, 0)
@@ -538,14 +538,14 @@ pub unsafe fn req_getdents(
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_inhibread(fs_e: i32, inode_nr: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_INHIBREAD);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr);
         ENOSYS
@@ -561,7 +561,7 @@ pub unsafe fn req_inhibread(fs_e: i32, inode_nr: u32) -> i32 {
 /// `lastc` must point to a valid NUL-terminated string.  Caller must ensure
 /// `fs_e` is a valid FS endpoint.
 pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_file: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_len = if _lastc.is_null() {
             0
@@ -589,7 +589,7 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
         crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, link_parent, _lastc, linked_file);
         ENOSYS
@@ -614,7 +614,7 @@ pub unsafe fn req_lookup(
     _gid: u16,
     resolve: &Lookup,
 ) -> (i32, LookupRes) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let flags: u32 = resolve.l_flags;
 
@@ -630,9 +630,9 @@ pub unsafe fn req_lookup(
         w_u64(&mut msg, PAYLOAD_OFF + 8, root_ino as u64);
         w_u32(&mut msg, PAYLOAD_OFF + 16, flags);
 
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         let path_len = resolve.l_path_len.min(PATH_MAX - 1);
-        #[cfg(not(target_os = "none"))]
+        #[cfg(not(target_os = "minix"))]
         let path_len = resolve.l_path_len;
         w_u32(&mut msg, PAYLOAD_OFF + 20, path_len as u32);
 
@@ -669,7 +669,7 @@ pub unsafe fn req_lookup(
 
         (r, res)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, dir_ino, root_ino, _uid, _gid, resolve);
         (ENOSYS, LookupRes::default())
@@ -692,7 +692,7 @@ pub unsafe fn req_mkdir(
     gid: u16,
     dmode: u32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_bytes = if _lastc.is_null() {
             &[]
@@ -719,7 +719,7 @@ pub unsafe fn req_mkdir(
 
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _lastc, uid, gid, dmode);
         ENOSYS
@@ -742,7 +742,7 @@ pub unsafe fn req_mknod(
     dmode: u32,
     dev: u32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_len = if _lastc.is_null() {
             0
@@ -773,7 +773,7 @@ pub unsafe fn req_mknod(
         crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _lastc, uid, gid, dmode, dev);
         ENOSYS
@@ -786,14 +786,14 @@ pub unsafe fn req_mknod(
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_mountpoint(fs_e: i32, inode_nr: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_MOUNTPOINT);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr);
         ENOSYS
@@ -814,7 +814,7 @@ pub unsafe fn req_newnode(
     dmode: u32,
     dev: u32,
 ) -> (i32, NodeDetails) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_NEWNODE);
@@ -839,7 +839,7 @@ pub unsafe fn req_newnode(
             },
         )
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, uid, gid, dmode, dev);
         (ENOSYS, NodeDetails::default())
@@ -853,7 +853,7 @@ pub unsafe fn req_newnode(
 /// `label` must point to a valid NUL-terminated string.  Caller must ensure
 /// `fs_e` is a valid FS endpoint.
 pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_len = if _label.is_null() {
             0
@@ -880,7 +880,7 @@ pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
         crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, dev, _label);
         ENOSYS
@@ -895,7 +895,7 @@ pub unsafe fn req_newdriver(fs_e: i32, dev: u32, _label: *const u8) -> i32 {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_putnode(fs_e: i32, inode_nr: u32, count: i32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_PUTNODE);
@@ -903,7 +903,7 @@ pub unsafe fn req_putnode(fs_e: i32, inode_nr: u32, count: i32) -> i32 {
         w_u32(&mut msg, PAYLOAD_OFF + 8, inode_nr); // inode
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, count);
         ENOSYS
@@ -926,7 +926,7 @@ pub unsafe fn req_rdlink(
     len: usize,
     _direct: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_RDLINK);
@@ -946,7 +946,7 @@ pub unsafe fn req_rdlink(
             r
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _proc_e, _buf, len, _direct);
         ENOSYS
@@ -972,7 +972,7 @@ pub unsafe fn req_readsuper(
     readonly: i32,
     isroot: i32,
 ) -> (i32, crate::vfs::types::NodeDetails, u32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let fs_e = (*_vmp).m_fs_e;
         // The label length is passed explicitly: the callers' labels are
@@ -1021,7 +1021,7 @@ pub unsafe fn req_readsuper(
             r_u32(&msg, PAYLOAD_OFF + 16), // flags (reply)
         )
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (_vmp, _label, dev, readonly, isroot);
         (ENOSYS, crate::vfs::types::NodeDetails::default(), 0)
@@ -1043,7 +1043,7 @@ pub unsafe fn req_rename(
     new_parent: u32,
     _new_name: *const u8,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let len_old = if _old_name.is_null() {
             0
@@ -1088,7 +1088,7 @@ pub unsafe fn req_rename(
         crate::vfs::grant::cpf_revoke(gid_new);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, old_parent, _old_name, new_parent, _new_name);
         ENOSYS
@@ -1102,7 +1102,7 @@ pub unsafe fn req_rename(
 /// `lastc` must point to a valid NUL-terminated string.  Caller must ensure
 /// `fs_e` is a valid FS endpoint.
 pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_len = if _lastc.is_null() {
             0
@@ -1129,7 +1129,7 @@ pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _lastc);
         ENOSYS
@@ -1152,7 +1152,7 @@ pub unsafe fn req_slink(
     gid: u16,
     _path: *const u8,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let len_name = if _lastc.is_null() {
             0
@@ -1198,7 +1198,7 @@ pub unsafe fn req_slink(
         crate::vfs::grant::cpf_revoke(gid_buf);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _lastc, uid, gid, _path);
         ENOSYS
@@ -1214,7 +1214,7 @@ pub unsafe fn req_slink(
 /// `buf` must point to a valid buffer of at least `len` bytes.  Caller must
 /// ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _len: usize) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_STAT);
@@ -1228,7 +1228,7 @@ pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _le
         cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _who_e, _buf, _len);
         ENOSYS
@@ -1243,13 +1243,13 @@ pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _le
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_sync(fs_e: i32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_SYNC);
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = fs_e;
         ENOSYS
@@ -1265,7 +1265,7 @@ pub unsafe fn req_sync(fs_e: i32) -> i32 {
 /// `lastc` must point to a valid NUL-terminated string.  Caller must ensure
 /// `fs_e` is a valid FS endpoint.
 pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let path_len = if _lastc.is_null() {
             0
@@ -1292,7 +1292,7 @@ pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
         crate::vfs::grant::cpf_revoke(grant_id);
         r
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _lastc);
         ENOSYS
@@ -1305,13 +1305,13 @@ pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_unmount(fs_e: i32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_UNMOUNT);
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = fs_e;
         ENOSYS
@@ -1326,7 +1326,7 @@ pub unsafe fn req_unmount(fs_e: i32) -> i32 {
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_UTIME);
@@ -1336,7 +1336,7 @@ pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t)
         // acnsec and modnsec default to 0 (buffer is zeroed)
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, actime, modtime);
         ENOSYS
@@ -1356,7 +1356,7 @@ pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t)
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
 pub unsafe fn req_peek(fs_e: i32, inode_nr: u32, pos: off_t, bytes: u32) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_PEEK);
@@ -1366,7 +1366,7 @@ pub unsafe fn req_peek(fs_e: i32, inode_nr: u32, pos: off_t, bytes: u32) -> i32 
         w_u64(&mut msg, PAYLOAD_OFF + 24, bytes as u64);
         fs_sendrec(fs_e, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, pos, bytes);
         ENOSYS
@@ -1390,7 +1390,7 @@ pub unsafe fn req_read(
     user_e: i32,
     _direct: i32,
 ) -> (i32, off_t) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_READ);
@@ -1411,7 +1411,7 @@ pub unsafe fn req_read(
         let new_pos = r_i64(&msg, PAYLOAD_OFF);
         (r, new_pos)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, buf, pos, size, user_e, _direct);
         (ENOSYS, 0)
@@ -1435,7 +1435,7 @@ pub unsafe fn req_write(
     _user_e: i32,
     _direct: i32,
 ) -> (i32, off_t) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_WRITE);
@@ -1457,7 +1457,7 @@ pub unsafe fn req_write(
         let new_pos = r_i64(&msg, PAYLOAD_OFF); // seek_pos (reply)
         (r, new_pos)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fs_e, inode_nr, _buf, pos, size, _user_e, _direct);
         (ENOSYS, 0)

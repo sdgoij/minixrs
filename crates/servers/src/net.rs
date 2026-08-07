@@ -616,7 +616,7 @@ fn next_iss() -> u32 {
 /// Build a DL request message and SENDREC it to virtio_net. Returns the
 /// sender endpoint (>= 0) or a negative error.
 fn dl_sendrec(msg: &mut Message, mtype: u32) -> i32 {
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // Host builds have no virtio_net peer; a raw `syscall` here would
         // invoke an arbitrary host syscall. Tests drive the TCP logic
@@ -624,7 +624,7 @@ fn dl_sendrec(msg: &mut Message, mtype: u32) -> i32 {
         let _ = (msg, mtype);
         -1
     }
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         msg.m_source = 0;
         msg.m_type = mtype as i32;
@@ -2727,7 +2727,7 @@ fn register_grants() {
 
 /// Main entry point for the net server process.
 pub fn net_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         const ANY: i32 = 0x0000ffff;
 
@@ -2767,7 +2767,7 @@ pub fn net_server_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly.
     }

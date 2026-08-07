@@ -649,7 +649,7 @@ fn do_upd_ready(_msg: &Message) -> i32 {
 ///
 /// Receives messages from clients and dispatches RS requests.
 pub fn rs_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // Initialize RS's process table.
         unsafe {
@@ -727,7 +727,7 @@ pub fn rs_server_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds.
     }

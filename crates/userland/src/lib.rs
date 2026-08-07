@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 static REDIRECT_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// Route subsequent `write_out` calls to `fd` (>= 0) or back to serial (-1).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub fn set_redirect_fd(fd: i32) {
     REDIRECT_FD.store(fd, Ordering::Relaxed);
 }
@@ -533,7 +533,7 @@ pub fn chown(args: &[&str]) -> i32 {
 
 /// sync — flush cached filesystem writes to disk.
 pub fn sync(_args: &[&str]) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // Send VFS_SYNC to VFS, which forwards REQ_SYNC to each mounted
         // filesystem; MFS then writes dirty inodes and blocks to the device.
@@ -746,9 +746,9 @@ pub fn init(_args: &[&str]) -> i32 {
     }
 
     // Build argv: ["/bin/sh", null]
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     let ret = unsafe {
         minix_rt::execve(
             c"/bin/sh".as_ptr() as *const u8,
@@ -757,7 +757,7 @@ pub fn init(_args: &[&str]) -> i32 {
             core::ptr::null(),
         ) as i64
     };
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     let ret = -38i64; // ENOSYS on host
     // If exec fails, print error and loop.
     write_err(b"init: exec failed: err=");

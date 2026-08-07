@@ -79,7 +79,7 @@ fn check_result(msg: &Message) -> Result<i32, MinixErr> {
 
 /// Open a character device.
 pub fn cdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_OPEN);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -87,7 +87,7 @@ pub fn cdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr>
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, flags);
         Err(MinixErr(71))
@@ -96,14 +96,14 @@ pub fn cdev_open(endpoint: i32, minor: i32, flags: u32) -> Result<i32, MinixErr>
 
 /// Close a character device.
 pub fn cdev_close(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_CLOSE);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor);
         Err(MinixErr(71))
@@ -114,7 +114,7 @@ pub fn cdev_close(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
 ///
 /// Returns the number of bytes read on success.
 pub fn cdev_read(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_READ);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -124,7 +124,7 @@ pub fn cdev_read(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Result
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, count, _grant);
         Err(MinixErr(71))
@@ -135,7 +135,7 @@ pub fn cdev_read(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Result
 ///
 /// Returns the number of bytes written on success.
 pub fn cdev_write(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_WRITE);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -145,7 +145,7 @@ pub fn cdev_write(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Resul
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, count, _grant);
         Err(MinixErr(71))
@@ -154,7 +154,7 @@ pub fn cdev_write(endpoint: i32, minor: i32, count: usize, _grant: u32) -> Resul
 
 /// Perform a device ioctl.
 pub fn cdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_IOCTL);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -163,7 +163,7 @@ pub fn cdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Resul
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, request, _grant);
         Err(MinixErr(71))
@@ -172,14 +172,14 @@ pub fn cdev_ioctl(endpoint: i32, minor: i32, request: u32, _grant: u32) -> Resul
 
 /// Cancel an outstanding I/O request.
 pub fn cdev_cancel(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_CANCEL);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
         unsafe { minix_std::sendrec(endpoint, &mut msg) }?;
         check_result(&msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor);
         Err(MinixErr(71))
@@ -188,7 +188,7 @@ pub fn cdev_cancel(endpoint: i32, minor: i32) -> Result<i32, MinixErr> {
 
 /// Check if a character device is ready for I/O.
 pub fn cdev_select(endpoint: i32, minor: i32, ops: u32) -> Result<u32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = build_msg(CDEV_SELECT);
         msg_set_i32(&mut msg, OFF_MINOR, minor);
@@ -201,7 +201,7 @@ pub fn cdev_select(endpoint: i32, minor: i32, ops: u32) -> Result<u32, MinixErr>
             Ok(mtype as u32)
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (endpoint, minor, ops);
         Err(MinixErr(71))

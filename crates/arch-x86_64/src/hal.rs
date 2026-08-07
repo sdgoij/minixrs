@@ -1165,14 +1165,14 @@ pub fn stop_profile_clock() {
 // These stubs prevent unresolved symbol errors in dev/test builds.
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "none", not(target_vendor = "pc"))
+    all(target_os = "minix", not(target_vendor = "pc"))
 ))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
 #[cfg(any(
     target_os = "windows",
-    all(target_os = "none", not(target_vendor = "pc"))
+    all(target_os = "minix", not(target_vendor = "pc"))
 ))]
 #[used]
 #[unsafe(no_mangle)]

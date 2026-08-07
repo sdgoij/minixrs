@@ -11,12 +11,12 @@
 #![no_std]
 #![allow(dead_code)]
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use core::ffi::{c_char, c_int, c_void};
 
 // File I/O
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
     if path.is_null() {
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) ->
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize {
     if buf.is_null() {
@@ -44,7 +44,7 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isiz
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: usize) -> isize {
     if buf.is_null() {
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: usize) -> i
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
     match minix_std::fs::close(fd) {
@@ -66,7 +66,7 @@ pub extern "C" fn close(fd: c_int) -> c_int {
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     match minix_std::fs::lseek(fd, offset, whence) {
@@ -77,7 +77,7 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 
 // Process lifecycle
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> c_int {
     match unsafe { minix_std::process::fork() } {
@@ -86,13 +86,13 @@ pub unsafe extern "C" fn fork() -> c_int {
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(status: c_int) -> ! {
     minix_std::process::exit(status);
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn getpid() -> c_int {
     match minix_std::process::getpid() {
@@ -103,7 +103,7 @@ pub extern "C" fn getpid() -> c_int {
 
 // Memory management
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
     addr: *mut c_void,
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn mmap(
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
     unsafe { minix_std::vmem::munmap(addr as *mut u8, length) }
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
 
 // Time
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeSpec) -> c_int {
     if tp.is_null() {
@@ -143,7 +143,7 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeS
 
 // Signals
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     match minix_std::time::kill(pid, sig) {
@@ -152,7 +152,7 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
     match minix_std::time::sigprocmask(how, set) {
@@ -166,7 +166,7 @@ pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
 ///
 /// Returns the previous disposition on success (not fetched — the
 /// registration path only sets), or SIG_ERR (all-ones) on error.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn signal(signum: c_int, handler: u64) -> u64 {
     match minix_std::time::signal(signum, handler) {
@@ -179,7 +179,7 @@ pub extern "C" fn signal(signum: c_int, handler: u64) -> u64 {
 /// (handler u64@0, mask 16 bytes@8, flags i32@24 — 28 bytes).
 ///
 /// `oldact` is accepted but not filled (the old action is not fetched).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -261,7 +261,7 @@ unsafe fn encode_sockaddr_in(addr: *mut u8, addrlen: *mut u32, ip: [u8; 4], port
 /// `socket(2)`: create an endpoint — AF_INET/SOCK_STREAM → `/dev/tcp`,
 /// AF_INET/SOCK_DGRAM → `/dev/udp`, AF_INET/SOCK_RAW+ICMP → `/dev/ip`.
 /// Returns the file descriptor.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int {
     match minix_std::net::socket(domain, type_, protocol) {
@@ -271,7 +271,7 @@ pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int 
 }
 
 /// `bind(2)`: bind a socket to a `struct sockaddr_in` (AF_INET).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
@@ -286,7 +286,7 @@ pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) ->
 
 /// `connect(2)`: run the TCP three-way handshake, or set the UDP default
 /// destination and receive filter.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
@@ -302,7 +302,7 @@ pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32)
 /// `sendto(2)`: send one datagram, optionally to an explicit destination
 /// (a `struct sockaddr_in`). Only `flags == 0` is supported; on a
 /// connected socket `dest_addr` is ignored.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendto(
     sock: c_int,
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn sendto(
 /// `recvfrom(2)`: receive one datagram and, when `src_addr`/`src_len` are
 /// given, the sender's `struct sockaddr_in`. Only `flags == 0` is
 /// supported.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvfrom(
     sock: c_int,
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn recvfrom(
 
 /// `shutdown(2)`: SHUT_WR/SHUT_RDWR send our FIN and keep reading;
 /// SHUT_RD is ENOSYS (the net server cannot close the read half).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
     match minix_std::net::shutdown(sock, how) {
@@ -377,7 +377,7 @@ pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
 
 /// `send(2)`: write the byte stream (TCP) or one datagram (UDP). Only
 /// `flags == 0` is supported.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
     if flags != 0 {
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags
 
 /// `recv(2)`: read the byte stream (TCP) or one datagram (UDP). Only
 /// `flags == 0` is supported; 0 means EOF for a stream.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
     if flags != 0 {
@@ -412,7 +412,7 @@ pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: 
 }
 
 /// `listen(2)`: mark a bound socket as a listener with the given backlog.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
     match minix_std::net::listen(sock, backlog) {
@@ -423,7 +423,7 @@ pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
 
 /// `accept(2)`: accept the next pending connection. Fills `address` (a
 /// `struct sockaddr_in`) when non-NULL, like the reference accept(2).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     let newfd = match minix_std::net::accept(sock) {
@@ -439,7 +439,7 @@ pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u3
 }
 
 /// `getpeername(2)`: fill `address` with the connected peer.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     if address.is_null() || address_len.is_null() {
@@ -455,7 +455,7 @@ pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *m
 }
 
 /// `getsockname(2)`: fill `address` with the local bound address.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     if address.is_null() || address_len.is_null() {
@@ -473,7 +473,7 @@ pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *m
 // Utility
 
 /// Simple strlen for C strings.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
     if s.is_null() {
@@ -487,7 +487,7 @@ pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
 }
 
 /// Simple memset.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void {
     if s.is_null() {
@@ -501,7 +501,7 @@ pub unsafe extern "C" fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_vo
 }
 
 /// Simple memcpy.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dest.is_null() || src.is_null() {
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
 }
 
 /// Simple memmove (handles overlap).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dest.is_null() || src.is_null() {
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(&bytes[..4], &[16, 2, 0x4E, 0x20]);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_strlen() {
         unsafe {
@@ -594,7 +594,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_memset() {
         let mut buf = [0xFFu8; 10];
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(buf, [0; 10]);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_memcpy() {
         let src = [1u8, 2, 3, 4, 5];
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(dst, [1, 2, 3, 4, 5]);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_memmove() {
         let mut buf = [1u8, 2, 3, 4, 5];
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(buf, [1, 2, 1, 2, 3]);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_open_signature() {
         fn _check(f: unsafe extern "C" fn(*const c_char, c_int, c_int) -> c_int) {
@@ -643,7 +643,7 @@ mod tests {
         _check(open);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_read_signature() {
         fn _check(f: unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize) {
@@ -652,7 +652,7 @@ mod tests {
         _check(read);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_write_signature() {
         fn _check(f: unsafe extern "C" fn(c_int, *const c_void, usize) -> isize) {
@@ -661,7 +661,7 @@ mod tests {
         _check(write);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_close_signature() {
         fn _check(f: extern "C" fn(c_int) -> c_int) {
@@ -670,7 +670,7 @@ mod tests {
         _check(close);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_fork_signature() {
         fn _check(f: unsafe extern "C" fn() -> c_int) {
@@ -679,7 +679,7 @@ mod tests {
         _check(fork);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_exit_signature() {
         fn _check(f: extern "C" fn(c_int) -> !) {
@@ -688,7 +688,7 @@ mod tests {
         _check(exit);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_mmap_signature() {
         fn _check(
@@ -699,7 +699,7 @@ mod tests {
         _check(mmap);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_kill_signature() {
         fn _check(f: extern "C" fn(c_int, c_int) -> c_int) {
@@ -708,7 +708,7 @@ mod tests {
         _check(kill);
     }
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     #[test]
     fn test_socket_signatures() {
         fn _socket(f: extern "C" fn(c_int, c_int, c_int) -> c_int) {

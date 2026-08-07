@@ -499,7 +499,7 @@ mod tests {
     // bare-metal or QEMU execution; gated from host test runner."
 
     #[test]
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     fn test_pt_mapkernel_unmapped_address() {
         unsafe {
             init_vm();
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     fn test_pt_mapkernel_splits_hugepage() {
         unsafe {
             init_vm();

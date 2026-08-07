@@ -24,7 +24,7 @@ pub fn fs_sync() -> i32 {
 }
 
 pub fn fs_new_driver() -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // FS_NEW_DRIVER (REQ_NEW_DRIVER) message layout (VFS req_newdriver):
         //   payload raw[0..4]   = device (u32)
@@ -53,7 +53,7 @@ pub fn fs_new_driver() -> i32 {
         }
         crate::block_io::bdev_driver(dev, &label[..copy_len])
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         OK
     }

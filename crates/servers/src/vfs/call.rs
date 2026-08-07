@@ -37,7 +37,7 @@ const LSEEK_OFF_OFF: usize = 12;
 /// SELF endpoint constant (from kernel::system::SELF).
 pub(crate) const SELF: i32 = 31742;
 /// SYS_VIRCOPY kernel call number.
-#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
 const SYS_VIRCOPY: i32 = 15;
 /// O_EXCL open flag (from `minix/include/fcntl.h`).
 const O_EXCL: u32 = 0o200;
@@ -73,11 +73,11 @@ pub(crate) unsafe fn sys_vircopy(
     msg[COPY_DST_ADDR_OFF..COPY_DST_ADDR_OFF + 8].copy_from_slice(&dst_addr.to_ne_bytes());
     msg[COPY_NR_BYTES_OFF..COPY_NR_BYTES_OFF + 8].copy_from_slice(&(bytes as u64).to_ne_bytes());
     msg[COPY_FLAGS_OFF..COPY_FLAGS_OFF + 4].copy_from_slice(&CP_FLAG_TRY.to_ne_bytes());
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         minix_rt::kernel_call(SYS_VIRCOPY, &mut msg)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = &msg;
         -38 // ENOSYS

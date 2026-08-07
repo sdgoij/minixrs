@@ -14,7 +14,7 @@
 
 #![no_std]
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -79,11 +79,11 @@ pub fn init() {
 /// operations (e.g. the exec loader's page-table walk + stack setup) exceed
 /// the previous 4 KiB, overflowing into adjacent kernel data and corrupting
 /// caller registers.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 struct BootStackCell<const N: usize>(UnsafeCell<[u8; N]>);
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe impl<const N: usize> Sync for BootStackCell<N> {}
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 impl<const N: usize> BootStackCell<N> {
     const fn new(val: [u8; N]) -> Self {
         Self(UnsafeCell::new(val))
@@ -95,20 +95,20 @@ impl<const N: usize> BootStackCell<N> {
         N
     }
 }
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BOOT_KSTACK: BootStackCell<65536> = BootStackCell::new([0u8; 65536]);
 /// IST1 stack for page fault handler.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BOOT_IST1_STACK: BootStackCell<4096> = BootStackCell::new([0u8; 4096]);
 /// IST2 stack for double fault handler.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BOOT_IST2_STACK: BootStackCell<4096> = BootStackCell::new([0u8; 4096]);
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 struct BootTssCell(UnsafeCell<crate::tss::Tss64>);
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe impl Sync for BootTssCell {}
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 impl BootTssCell {
     const fn new(val: crate::tss::Tss64) -> Self {
         Self(UnsafeCell::new(val))
@@ -118,14 +118,14 @@ impl BootTssCell {
     }
 }
 /// Boot TSS.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BOOT_TSS: BootTssCell = BootTssCell::new(crate::tss::Tss64::new_zeroed());
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 struct BootGdtCell(UnsafeCell<[u64; segments::NGDT as usize]>);
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe impl Sync for BootGdtCell {}
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 impl BootGdtCell {
     const fn new(val: [u64; segments::NGDT as usize]) -> Self {
         Self(UnsafeCell::new(val))
@@ -135,7 +135,7 @@ impl BootGdtCell {
     }
 }
 /// Boot GDT (16 entries).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 static BOOT_GDT: BootGdtCell = BootGdtCell::new([
     0x0000000000000000, // 0: NULL
     0x00AF9A0000000000, // 1: kernel code (sel 0x08)
@@ -162,7 +162,7 @@ static BOOT_GDT: BootGdtCell = BootGdtCell::new([
 /// # Safety
 ///
 /// Must be called in ring 0.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub unsafe fn init_tss_for_boot() {
     use core::ptr;
     use segments::GTSS_SEL;

@@ -25,7 +25,7 @@
 
 #![allow(dead_code)]
 
-#[cfg(minix_userspace)]
+#[cfg(target_os = "minix")]
 use crate::sendrec;
 use crate::{MinixErr, VFS_PROC_NR};
 
@@ -257,7 +257,7 @@ fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
 ///
 /// Returns `Ok(m_type)` on success (m_type >= 0) or `Err(MinixErr)` when the
 /// VFS server returned a negative error code.
-#[cfg(minix_userspace)]
+#[cfg(target_os = "minix")]
 unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
     unsafe { sendrec(VFS_PROC_NR, msg)? };
     let mtype = msg_i32(msg, OFF_CALL);
@@ -283,12 +283,12 @@ unsafe fn vfs_call(msg: &mut [u8; 64]) -> Result<i32, MinixErr> {
 ///
 /// `path` must be a valid byte slice in the caller's address space.
 pub unsafe fn open(path: &[u8], flags: i32, mode: u32) -> Result<i32, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (path, flags, mode, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         if flags & O_CREAT != 0 {
@@ -320,12 +320,12 @@ pub unsafe fn open(path: &[u8], flags: i32, mode: u32) -> Result<i32, MinixErr> 
 
 /// Close a file descriptor.
 pub fn close(fd: i32) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_CLOSE as i32);
@@ -338,12 +338,12 @@ pub fn close(fd: i32) -> Result<(), MinixErr> {
 /// Duplicate `fd` onto `newfd` (POSIX `dup2`): closes `newfd` first if it is
 /// open. Returns `newfd` on success.
 pub fn dup2(fd: i32, newfd: i32) -> Result<i32, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, newfd, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_DUP2 as i32);
@@ -359,11 +359,11 @@ pub fn dup2(fd: i32, newfd: i32) -> Result<i32, MinixErr> {
 /// VFS's `do_pipe2` replies with fd0 at message offset 8 and fd1 at
 /// offset 12 (matching `m_lc_vfs_pipe2`).
 pub fn pipe() -> Result<(i32, i32), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_PIPE2 as i32);
@@ -377,12 +377,12 @@ pub fn pipe() -> Result<(i32, i32), MinixErr> {
 
 /// Create a directory.
 pub fn mkdir(path: &[u8], mode: u32) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (path, mode, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         // VFS_MKDIR (0x109) — do_mkdir expects:
@@ -400,12 +400,12 @@ pub fn mkdir(path: &[u8], mode: u32) -> Result<(), MinixErr> {
 
 /// Remove a file.
 pub fn unlink(path: &[u8]) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (path, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         // VFS_UNLINK (0x107) — do_unlink expects:
@@ -421,12 +421,12 @@ pub fn unlink(path: &[u8]) -> Result<(), MinixErr> {
 
 /// Remove a directory.
 pub fn rmdir(path: &[u8]) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (path, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         // VFS_RMDIR (0x112) — do_rmdir expects:
@@ -443,12 +443,12 @@ pub fn rmdir(path: &[u8]) -> Result<(), MinixErr> {
 /// Duplicate `fd` (POSIX `fcntl(fd, F_DUPFD, arg)`): returns the lowest
 /// available fd >= `arg`. Returns the new descriptor on success.
 pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> Result<i32, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, cmd, arg, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         // VFS_FCNTL (0x119) — do_fcntl expects:
@@ -473,12 +473,12 @@ pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> Result<i32, MinixErr> {
 ///
 /// `buf` must be a valid, mutable byte slice in the caller's address space.
 pub unsafe fn read(fd: i32, buf: &mut [u8]) -> Result<i64, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, buf, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_READ as i32);
@@ -500,12 +500,12 @@ pub unsafe fn read(fd: i32, buf: &mut [u8]) -> Result<i64, MinixErr> {
 ///
 /// `buf` must be a valid byte slice in the caller's address space.
 pub unsafe fn write(fd: i32, buf: &[u8]) -> Result<i64, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, buf, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_WRITE as i32);
@@ -523,12 +523,12 @@ pub unsafe fn write(fd: i32, buf: &[u8]) -> Result<i64, MinixErr> {
 /// `whence` is one of `SEEK_SET`, `SEEK_CUR`, or `SEEK_END`.
 /// Returns the resulting file position relative to the beginning of the file.
 pub fn lseek(fd: i32, offset: i64, whence: i32) -> Result<i64, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, offset, whence, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_LSEEK as i32);
@@ -542,12 +542,12 @@ pub fn lseek(fd: i32, offset: i64, whence: i32) -> Result<i64, MinixErr> {
 
 /// Get file status for an open file descriptor.
 pub fn fstat(fd: i32) -> Result<Stat, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
         let mut msg = [0u8; 64];
@@ -566,12 +566,12 @@ pub fn fstat(fd: i32) -> Result<Stat, MinixErr> {
 /// `arg` must be a valid pointer to a buffer whose interpretation depends
 /// on `request`.
 pub unsafe fn ioctl(fd: i32, request: u32, arg: *mut u8) -> Result<i32, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, request, arg, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_IOCTL as i32);
@@ -588,12 +588,12 @@ pub unsafe fn ioctl(fd: i32, request: u32, arg: *mut u8) -> Result<i32, MinixErr
 /// Fills `buf` with `struct dirent` entries. Returns the number of bytes
 /// written into `buf`, or 0 at end of directory.
 pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<i32, MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, buf, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_GETDENTS as i32);
@@ -607,12 +607,12 @@ pub fn getdents(fd: i32, buf: &mut [u8]) -> Result<i32, MinixErr> {
 
 /// Synchronize a file's in-core state with storage device.
 pub fn fsync(fd: i32) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_FSYNC as i32);
@@ -624,12 +624,12 @@ pub fn fsync(fd: i32) -> Result<(), MinixErr> {
 
 /// Truncate a file to a specified length.
 pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
-    #[cfg(not(minix_userspace))]
+    #[cfg(not(target_os = "minix"))]
     {
         let _ = (fd, length, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(minix_userspace)]
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_TRUNCATE as i32);

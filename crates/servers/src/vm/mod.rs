@@ -517,7 +517,7 @@ pub fn vm_main() {
     // Initialize the PhysicalAllocator for this server's copy of the
     // kernel crate (which contains arch-specific code). Each server
     // binary has its own copy; the kernel's copy was init'd in kmain.
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     unsafe {
         // Physical memory range for page table allocation.
         // On x86_64: RAM is identity-mapped at 0x400000-0x10000000.
@@ -532,7 +532,7 @@ pub fn vm_main() {
     }
     init_vm();
 
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         const RECEIVE_CALL: u64 = 47;
         #[allow(dead_code)]
@@ -574,7 +574,7 @@ pub fn vm_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly
     }

@@ -8,19 +8,19 @@ use crate::mfs::misc::*;
 /// Virtual address of the boot filesystem image in the ramdisk driver
 /// server's address space (set up by the kernel boot code). Only used by the
 /// host test path, which fakes a direct-memory RAM disk at this address.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 const RAMDISK_IMAGE_VA: u64 = arch_common::com::RAMDISK_IMAGE_VA;
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 const RAMDISK_IMAGE_SIZE: usize = arch_common::com::RAMDISK_IMAGE_SIZE;
 
 /// IPC receive/send syscall numbers.  Only used when compiling for the
 /// MINIX target; marked `#[allow(dead_code)]` because the library build
-/// (`cargo check`) compiles without `target_os = "none"`.
-#[cfg(target_os = "none")]
+/// (`cargo check`) compiles without `target_os = "minix"`.
+#[cfg(target_os = "minix")]
 const RECEIVE_CALL: u64 = 47;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const SEND_CALL: u64 = 46;
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 #[allow(dead_code)]
 const SENDREC_CALL: u64 = 48;
 #[allow(dead_code)]
@@ -42,7 +42,7 @@ pub fn mfs_init() -> i32 {
         libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
 
         // Register the block I/O callback.
-        #[cfg(target_os = "none")]
+        #[cfg(target_os = "minix")]
         {
             // Root-filesystem block I/O goes through the BDEV protocol to the
             // ramdisk driver server, which serves the boot image mapped into
@@ -50,7 +50,7 @@ pub fn mfs_init() -> i32 {
             crate::block_io::bdev_init();
             libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::bdev_ram_disk_io);
         }
-        #[cfg(not(target_os = "none"))]
+        #[cfg(not(target_os = "minix"))]
         {
             // Host tests: direct-memory RAM disk (no driver server).
             crate::block_io::ram_disk_init(RAMDISK_IMAGE_VA as *const u8, RAMDISK_IMAGE_SIZE);
@@ -62,7 +62,7 @@ pub fn mfs_init() -> i32 {
 
 // Reference: main.c main()
 pub fn mfs_main() -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         mfs_init();
 
@@ -237,7 +237,7 @@ pub fn mfs_main() -> i32 {
             };
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         mfs_init();
         OK

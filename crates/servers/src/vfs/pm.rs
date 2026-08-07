@@ -11,7 +11,7 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::misc::*;
 
 // PM_PROC_NR is only needed by the MINIX-target send helpers.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 use arch_common::com::PM_PROC_NR;
 
 // PM↔VFS message types (from com.h)
@@ -74,7 +74,7 @@ fn w_u64(buf: &mut [u8; 64], off: usize, val: u64) {
 
 /// SEND syscall number.
 /// Only used on the MINIX target (host build SEND is a no-op).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 const SEND_CALL_NR: u64 = 46;
 
 /// Helper: send a reply message to PM via SEND syscall.
@@ -82,7 +82,7 @@ const SEND_CALL_NR: u64 = 46;
 /// Only available on the MINIX target (not host tests).
 /// Matching C: `ipc_send(PM_PROC_NR, &m_out)` in `service_pm()`.
 /// Builds a 64-byte buffer with the given m_type and endpoint.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn reply_to_pm(m_type: i32, endpoint: i32) {
     let mut buf = [0u8; 64];
     buf[4..8].copy_from_slice(&m_type.to_le_bytes());
@@ -91,7 +91,7 @@ unsafe fn reply_to_pm(m_type: i32, endpoint: i32) {
 }
 
 /// SEND a raw buffer to PM (MINIX target only).
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn send_raw_to_pm(buf: &[u8; 64]) {
     minix_rt::syscall2(SEND_CALL_NR, PM_PROC_NR as u64, buf.as_ptr() as u64);
 }
@@ -116,7 +116,7 @@ pub fn service_pm() -> i32 {
             let euid = r_i32(&glob.fs_m_in, PM_EID_OFF);
             let ruid = r_i32(&glob.fs_m_in, PM_RID_OFF);
             pm_setuid(proc_e, euid, ruid);
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             unsafe {
                 reply_to_pm(VFS_PM_RS_BASE + 1, proc_e)
             };
@@ -128,7 +128,7 @@ pub fn service_pm() -> i32 {
             let egid = r_i32(&glob.fs_m_in, PM_EID_OFF);
             let rgid = r_i32(&glob.fs_m_in, PM_RID_OFF);
             pm_setgid(proc_e, egid, rgid);
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             unsafe {
                 reply_to_pm(VFS_PM_RS_BASE + 2, proc_e)
             };
@@ -138,7 +138,7 @@ pub fn service_pm() -> i32 {
         VFS_PM_SETSID => {
             let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
             pm_setsid(proc_e);
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             unsafe {
                 reply_to_pm(VFS_PM_RS_BASE + 3, proc_e)
             };
@@ -161,7 +161,7 @@ pub fn service_pm() -> i32 {
             };
 
             // Build reply: VFS_PM_EXEC_REPLY with endpt, status, pc, newsp.
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             {
                 let mut buf = [0u8; 64];
                 buf[4..8].copy_from_slice(&VFS_PM_EXEC_REPLY.to_le_bytes());
@@ -172,7 +172,7 @@ pub fn service_pm() -> i32 {
                 buf[36..44].copy_from_slice(&result.newsp.to_le_bytes());
                 unsafe { send_raw_to_pm(&buf) };
             }
-            #[cfg(not(target_os = "none"))]
+            #[cfg(not(target_os = "minix"))]
             let _ = result;
             OK
         }
@@ -184,7 +184,7 @@ pub fn service_pm() -> i32 {
                 // the current fp: for PM-sourced messages glob.fp is PM's
                 // own fproc slot (endpoint 0), not the exiting process.
                 pm_exit_endpoint(proc_e);
-                #[cfg(target_os = "none")]
+                #[cfg(target_os = "minix")]
                 unsafe {
                     reply_to_pm(VFS_PM_EXIT_REPLY, proc_e)
                 };
@@ -209,7 +209,7 @@ pub fn service_pm() -> i32 {
                 VFS_PM_RS_BASE + 7
             };
             // Build reply directly and send to PM (matching C pattern).
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             {
                 let mut buf = [0u8; 64];
                 buf[4..8].copy_from_slice(&_reply_type.to_le_bytes());
@@ -221,7 +221,7 @@ pub fn service_pm() -> i32 {
 
         VFS_PM_REBOOT => {
             pm_reboot();
-            #[cfg(target_os = "none")]
+            #[cfg(target_os = "minix")]
             unsafe {
                 reply_to_pm(VFS_PM_RS_BASE + 10, 0)
             };

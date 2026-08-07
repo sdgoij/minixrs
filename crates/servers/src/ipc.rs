@@ -411,13 +411,13 @@ unsafe fn sem_find_id(id: i32) -> Option<*mut SemStruct> {
 ///
 /// `who` must be a valid endpoint.
 unsafe fn send_message_to_process(who: i32, ret: i32) {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; MESSAGE_SIZE];
         msg_set_i32(&mut msg, MSG_OFF_CALLTYPE, ret);
         let _ = sendnb(who, &mut msg);
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     let _ = (who, ret);
 }
 
@@ -642,46 +642,46 @@ unsafe fn vm_query_exit_stub() -> Option<i32> {
 ///
 /// On target, delegates to `vm_remap` which sends IPC to VM server.
 /// On host, returns ENOSYS.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 unsafe fn vm_remap_stub(_who: i32, _addr: u64, _page: u64, _size: usize) -> Result<u64, i32> {
     Err(enosys())
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn vm_remap_stub(who: i32, addr: u64, page: u64, size: usize) -> Result<u64, i32> {
     vm_remap(who, addr, page, size)
 }
 
 /// Stub: unmap a shared memory page from a process.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 unsafe fn vm_unmap_stub(_who: i32, _addr: u64) -> Result<(), i32> {
     Err(enosys())
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn vm_unmap_stub(who: i32, addr: u64) -> Result<(), i32> {
     vm_unmap(who, addr)
 }
 
 /// Stub: get physical address of a page.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 unsafe fn vm_getphys_stub(_who: i32, _addr: u64) -> i32 {
     0
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn vm_getphys_stub(who: i32, addr: u64) -> i32 {
     vm_getphys(who, addr)
 }
 
 /// Stub: get reference count of a physical region.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 unsafe fn vm_getrefcount_stub(_who: i32, _addr: u64) -> u8 {
     // Return 2 (self + 1 attach) to prevent premature destruction.
     2
 }
 
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 unsafe fn vm_getrefcount_stub(who: i32, addr: u64) -> u8 {
     vm_getrefcount(who, addr)
 }
@@ -1558,7 +1558,7 @@ const IPC_CALLS: [Option<IpcHandler>; 7] = [
 const NEEDS_REPLY: [bool; 7] = [true, true, true, true, true, true, true];
 
 /// IPC server main loop.
-#[cfg(target_os = "none")]
+#[cfg(target_os = "minix")]
 pub fn ipc_server_main() {
     loop {
         let mut msg = [0u8; MESSAGE_SIZE];
@@ -1595,7 +1595,7 @@ pub fn ipc_server_main() {
     }
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(not(target_os = "minix"))]
 pub fn ipc_server_main() {
     // No-op on host (no IPC infrastructure)
 }

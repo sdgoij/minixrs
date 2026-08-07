@@ -459,7 +459,7 @@ pub unsafe fn sched_proc(proc_nr: usize) -> &'static SchedProc {
 /// On host builds (testing), this is a no-op — the scheduling logic is
 /// exercised through unit tests directly.
 pub fn sched_server_main() {
-    #[cfg(target_os = "none")]
+    #[cfg(target_os = "minix")]
     {
         // Syscall numbers for IPC.
         const RECEIVE_CALL: u64 = 47;
@@ -578,7 +578,7 @@ pub fn sched_server_main() {
             }
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(target_os = "minix"))]
     {
         // No-op on host builds — dispatch is tested directly
     }

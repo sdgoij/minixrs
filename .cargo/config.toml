@@ -1,4 +1,4 @@
-[target.riscv64gc-unknown-none-elf]
+[target.riscv64gc-unknown-minix]
 rustflags = ["-C", "link-arg=-Ttools/minix-raw-riscv64.ld"]
 
 [target.aarch64-unknown-minix]

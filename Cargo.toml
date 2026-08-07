@@ -37,6 +37,11 @@ license = "GPL2.0"
 [workspace.dependencies]
 bitflags = { version = "2", default-features = false }
 
+# The host toolchain (rustup) has no minix target, so `target_os = "minix"`
+# would trip `unexpected_cfgs`; the fork's rustc knows the value natively.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(target_os, values(\"minix\"))"] }
+
 [profile.release]
 panic = "abort"
 

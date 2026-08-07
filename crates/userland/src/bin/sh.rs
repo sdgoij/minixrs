@@ -2,7 +2,7 @@
 #![no_main]
 
 /// Host-only panic handler — required for clippy/lint compilation.
-#[cfg(all(not(test), not(target_os = "none")))]
+#[cfg(all(not(test), not(target_os = "minix")))]
 #[panic_handler]
 fn host_panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
