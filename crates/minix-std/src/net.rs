@@ -97,7 +97,7 @@ pub fn socket(domain: i32, type_: i32, protocol: i32) -> Result<i32, MinixErr> {
 /// Open a TCP socket (`/dev/tcp`). The local port is auto-assigned when
 /// the socket is connected.
 pub fn tcp_socket() -> Result<i32, MinixErr> {
-    let fd = unsafe { open("/dev/tcp", O_RDWR, 0) }?;
+    let fd = unsafe { open(b"/dev/tcp", O_RDWR, 0) }?;
     Ok(fd)
 }
 
@@ -108,7 +108,7 @@ pub fn tcp_socket() -> Result<i32, MinixErr> {
 /// defaults); `connect` switches it to `NWUO_RWDATONLY`. Returns the file
 /// descriptor.
 pub fn udp_socket() -> Result<i32, MinixErr> {
-    let fd = unsafe { open("/dev/udp", O_RDWR, 0) }?;
+    let fd = unsafe { open(b"/dev/udp", O_RDWR, 0) }?;
     let opt = NwioUdpOpt {
         nwuo_flags: NWUO_LP_SEL | NWUO_EN_LOC | NWUO_RWDATALL | NWUO_RA_ANY | NWUO_RP_ANY,
         nwuo_locport: 0,
@@ -127,7 +127,7 @@ pub fn udp_socket() -> Result<i32, MinixErr> {
 /// the next matching echo reply; writes take the 8-byte
 /// `{dst_ip[4] id[2] seq[2]}` echo request used by `/bin/ping`.
 fn raw_icmp_socket() -> Result<i32, MinixErr> {
-    let fd = unsafe { open("/dev/ip", O_RDWR, 0) }?;
+    let fd = unsafe { open(b"/dev/ip", O_RDWR, 0) }?;
     Ok(fd)
 }
 

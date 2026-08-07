@@ -820,7 +820,7 @@ fn setup_redirect(outfile: &str) -> i32 {
     // for fd 1/2, so writes go through VFS to the filesystem.
     match unsafe {
         minix_std::fs::open(
-            outfile,
+            outfile.as_bytes(),
             minix_std::fs::O_WRONLY | minix_std::fs::O_CREAT | minix_std::fs::O_TRUNC,
             0o644,
         )

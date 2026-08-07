@@ -2,14 +2,19 @@
 name = "net"
 version = "0.1.0"
 description = "Networking stack"
+# Literal values (not `workspace = true`) so the crate is consumable as a
+# path dependency from outside the minixrs workspace (e.g. via `minix-std`).
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
 
-[package.edition]
-workspace = true
-
-[package.rust-version]
-workspace = true
-
-[package.license]
-workspace = true
+[lib]
+crate-type = ["rlib"]
 
 [dependencies]
+# See `minix-rt/Cargo.toml` — optional `core` wiring for rustc's std build.
+core = { path = "../../rust/library/core", optional = true }
+compiler_builtins = { path = "../../rust/library/compiler-builtins/compiler-builtins", optional = true }
+
+[features]
+rustc-dep-of-std = ["dep:core", "dep:compiler_builtins"]

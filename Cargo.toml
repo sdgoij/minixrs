@@ -3,6 +3,10 @@ resolver = "3"
 
 exclude = [
     "crates/kernel-tests",
+    # The rust fork is a nested repository with its own workspace; exclude it
+    # so cargo operations inside `rust/` (e.g. the bootstrap build) don't
+    # resolve to this workspace.
+    "rust",
 ]
 
 members = [

@@ -38,6 +38,14 @@ name = "boot-image"
 version = "0.1.0"
 
 [[package]]
+name = "compiler_builtins"
+version = "0.1.160"
+
+[[package]]
+name = "core"
+version = "0.0.0"
+
+[[package]]
 name = "drivers"
 version = "0.1.0"
 dependencies = [
@@ -97,11 +105,17 @@ dependencies = [
 [[package]]
 name = "minix-rt"
 version = "0.1.0"
+dependencies = [
+ "compiler_builtins",
+ "core",
+]
 
 [[package]]
 name = "minix-std"
 version = "0.1.0"
 dependencies = [
+ "compiler_builtins",
+ "core",
  "minix-rt",
  "net",
 ]
@@ -116,6 +130,10 @@ dependencies = [
 [[package]]
 name = "net"
 version = "0.1.0"
+dependencies = [
+ "compiler_builtins",
+ "core",
+]
 
 [[package]]
 name = "servers"

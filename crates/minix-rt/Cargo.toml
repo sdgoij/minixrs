@@ -2,17 +2,32 @@
 name = "minix-rt"
 version = "0.1.0"
 description = "Minix userspace runtime: _start entry, panic handler, bump allocator, syscall wrappers"
-
-[package.edition]
-workspace = true
-
-[package.rust-version]
-workspace = true
-
-[package.license]
-workspace = true
+# Literal values (not `workspace = true`) so the crate is consumable as a
+# path dependency from outside the minixrs workspace (e.g. `library/std`).
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
 
 [lib]
 crate-type = ["rlib"]
 
+[features]
+# Standalone runtime pieces: `_start`, panic handler and the global
+# allocator. Off when the crate is embedded in `std` (std provides its own
+# entry, panic runtime and allocator).
+default = ["rt"]
+rt = []
+# When built as part of rustc's `std` for a Minix target, the target's
+# sysroot is empty during the std build (the minix targets are missing from
+# the stage0 compiler), so `core` must be wired as an explicit path
+# dependency into the rust library workspace instead of found via the
+# sysroot.
+rustc-dep-of-std = ["dep:core", "dep:compiler_builtins"]
+
 [dependencies]
+# Optional so normal builds (host tests, JSON-target userland) keep using
+# the sysroot `core`; enabled only via `rustc-dep-of-std` above.
+core = { path = "../../rust/library/core", optional = true }
+# rustc injects `compiler_builtins` into every crate's graph; the real
+# `core` path dep above doesn't pull it in, so enable it explicitly.
+compiler_builtins = { path = "../../rust/library/compiler-builtins/compiler-builtins", optional = true }

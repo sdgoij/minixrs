@@ -25,7 +25,7 @@
 #![allow(dead_code)]
 
 use crate::MinixErr;
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 use crate::{Message, PM_PROC_NR, sendrec};
 
 pub const PM_BASE: u32 = 0x000;
@@ -161,7 +161,7 @@ fn msg_set_u64(msg: &mut [u8; 64], off: usize, val: u64) {
 }
 
 /// Send a PM call and return the reply type on success.
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 unsafe fn pm_call(msg: &mut Message) -> Result<i32, MinixErr> {
     unsafe {
         let _ = sendrec(PM_PROC_NR, msg);
@@ -183,7 +183,7 @@ unsafe fn pm_call(msg: &mut Message) -> Result<i32, MinixErr> {
 /// `do_gettime()` in `minix/servers/pm/time.c`. Only `CLOCK_REALTIME` and
 /// `CLOCK_MONOTONIC` are supported; PM returns `EINVAL` for other ids.
 pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_GETTIME as i32);
@@ -201,7 +201,7 @@ pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = clock_id;
         Err(MinixErr::ENOSYS)
@@ -213,14 +213,14 @@ pub fn clock_gettime(clock_id: i32) -> Result<TimeSpec, MinixErr> {
 /// The PM clock resolution is one tick (1/`system_hz` s), reported as a
 /// fixed 1 µs without IPC for now.
 pub fn clock_getres(_clock_id: i32) -> Result<TimeSpec, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     {
         Ok(TimeSpec {
             tv_sec: 0,
             tv_nsec: 1_000,
         })
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         Err(MinixErr::ENOSYS)
     }
@@ -232,7 +232,7 @@ pub fn clock_getres(_clock_id: i32) -> Result<TimeSpec, MinixErr> {
 /// `EPERM` otherwise. The request uses the C `mess_lc_pm_time` layout
 /// with `now = 1` (set, not adjtime).
 pub fn clock_settime(clock_id: i32, tp: &TimeSpec) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_CLOCK_SETTIME as i32);
@@ -246,7 +246,7 @@ pub fn clock_settime(clock_id: i32, tp: &TimeSpec) -> Result<(), MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (clock_id, tp);
         Err(MinixErr::ENOSYS)
@@ -255,14 +255,14 @@ pub fn clock_settime(clock_id: i32, tp: &TimeSpec) -> Result<(), MinixErr> {
 
 /// Sleep for the specified duration.
 pub fn nanosleep(req: &TimeSpec) -> Result<TimeSpec, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     {
         // nanosleep is implemented via PM_ITIMER with a one-shot timer.
         // For now, use a busy-wait / stub approach.
         let _ = req;
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = req;
         Err(MinixErr::ENOSYS)
@@ -322,7 +322,7 @@ pub fn build_kill_msg(signo: i32, pid: i32, msg: &mut [u8; 64]) {
 /// Message layout: m_type = PM_KILL, m1i1 = signo, m1i2 = pid (matches PM
 /// `handle_kill`).
 pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         build_kill_msg(sig, pid, &mut msg);
@@ -331,7 +331,7 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (pid, sig);
         Err(MinixErr::ENOSYS)
@@ -345,7 +345,7 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
 /// encoded in PM's 28-byte layout and the message uses PM's real offsets
 /// (m_type@4, signo@8, act@24, oact@32).
 pub fn sigaction(signo: i32, handler: u64, mask: u128, flags: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let act = encode_action(handler, mask, flags);
         let mut msg = [0u8; 64];
@@ -358,7 +358,7 @@ pub fn sigaction(signo: i32, handler: u64, mask: u128, flags: i32) -> Result<(),
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (signo, handler, mask, flags);
         Err(MinixErr::ENOSYS)
@@ -386,7 +386,7 @@ pub fn sig_ignore(sig: i32) -> Result<(), MinixErr> {
 /// Message layout: m_type = PM_SIGPROCMASK, m1i1 = how, m2l1 = pointer to a
 /// 16-byte mask (matches PM `do_sigprocmask`).
 pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut mask = [0u8; 16];
         mask[0..8].copy_from_slice(&set.to_ne_bytes());
@@ -400,7 +400,7 @@ pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (how, set);
         Err(MinixErr::ENOSYS)
@@ -409,7 +409,7 @@ pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
 
 /// Set an interval timer.
 pub fn setitimer(which: i32, value: Option<&ITimerVal>) -> Result<ITimerVal, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_ITIMER as i32);
@@ -438,7 +438,7 @@ pub fn setitimer(which: i32, value: Option<&ITimerVal>) -> Result<ITimerVal, Min
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (which, value);
         Err(MinixErr::ENOSYS)
@@ -447,7 +447,7 @@ pub fn setitimer(which: i32, value: Option<&ITimerVal>) -> Result<ITimerVal, Min
 
 /// Request SIGALRM after `seconds` seconds.
 pub fn alarm(seconds: u32) -> u32 {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     {
         let itv = ITimerVal {
             it_interval: TimeSpec {
@@ -464,7 +464,7 @@ pub fn alarm(seconds: u32) -> u32 {
             Err(_) => 0,
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = seconds;
         0

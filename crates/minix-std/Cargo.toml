@@ -2,16 +2,29 @@
 name = "minix-std"
 version = "0.1.0"
 description = "Minix userspace syscall layer: IPC, endpoints, errors, grants"
-
-[package.edition]
-workspace = true
-
-[package.license]
-workspace = true
+# Literal values (not `workspace = true`) so the crate is consumable as a
+# path dependency from outside the minixrs workspace (e.g. `library/std`).
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
 
 [lib]
 crate-type = ["rlib"]
 
+[features]
+# See `minix-rt/Cargo.toml` — forward the `core` wiring to the whole
+# minixrs crate chain when built as part of rustc's `std`.
+rustc-dep-of-std = [
+    "dep:core",
+    "dep:compiler_builtins",
+    "minix-rt/rustc-dep-of-std",
+    "net/rustc-dep-of-std",
+]
+
 [dependencies]
-minix-rt = { path = "../minix-rt" }
+core = { path = "../../rust/library/core", optional = true }
+compiler_builtins = { path = "../../rust/library/compiler-builtins/compiler-builtins", optional = true }
+# `default-features = false`: the std build must not get minix-rt's `rt`
+# pieces (`_start`, panic handler, global allocator) — std provides its own.
+minix-rt = { path = "../minix-rt", default-features = false }
 net = { path = "../net" }

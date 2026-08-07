@@ -167,12 +167,12 @@ pub type Message = [u8; MESSAGE_SIZE];
 /// `msg` must point to a valid `Message`. The syscall may fail if `dest`
 /// is invalid or the target is not ready to receive.
 pub unsafe fn send(dest: i32, msg: &Message) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let ret = minix_rt::syscall2(SEND_CALL, dest as u64, msg.as_ptr() as u64);
         MinixErr::from_syscall(ret as i32).map(|_| ())
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (dest, msg);
         Err(MinixErr(ENOSYS))
@@ -188,12 +188,12 @@ pub unsafe fn send(dest: i32, msg: &Message) -> Result<(), MinixErr> {
 ///
 /// `msg` must point to a valid, mutable `Message`.
 pub unsafe fn receive(src: i32, msg: &mut Message) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let ret = minix_rt::syscall2(RECEIVE_CALL, src as u64, msg.as_mut_ptr() as u64);
         MinixErr::from_syscall(ret as i32)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (src, msg);
         Err(MinixErr(ENOSYS))
@@ -210,12 +210,12 @@ pub unsafe fn receive(src: i32, msg: &mut Message) -> Result<i32, MinixErr> {
 /// `msg` must point to a valid, mutable `Message`. The destination must
 /// be placed in `msg[0..4]` before the call.
 pub unsafe fn sendrec(dest: i32, msg: &mut Message) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let ret = minix_rt::syscall2(SENDREC_CALL, dest as u64, msg.as_mut_ptr() as u64);
         MinixErr::from_syscall(ret as i32)
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (dest, msg);
         Err(MinixErr(ENOSYS))
@@ -227,12 +227,12 @@ pub unsafe fn sendrec(dest: i32, msg: &mut Message) -> Result<i32, MinixErr> {
 /// Notifications carry no data payload; only the fact of notification is
 /// delivered.
 pub fn notify(dest: i32) -> Result<(), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let ret = minix_rt::syscall1(NOTIFY_CALL, dest as u64);
         MinixErr::from_syscall(ret as i32).map(|_| ())
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = dest;
         Err(MinixErr(ENOSYS))

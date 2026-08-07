@@ -10,6 +10,23 @@
 # (initramfs CPIO + MinixFS) lives in `crates/kernel/build.rs`. x86
 # post-link work (trampoline + kernel.bin) lives in `tools/mkboot.rs`.
 
+# Fetches the rust fork submodule first when it's missing
+# (`git submodule update --init rust` is a no-op when it's already present
+# and at the pinned commit), regenerates `rust/config.toml` via
+# `tools/rust-config.py` for the requested arch, then runs x.py and builds
+# the `/bin/hello` std smoke-test binary with `tools/build-std-hello.py`.
+# Note: per-arch runs rebuild only that arch's std — x.py prunes the other
+# arches from the stage1 sysroot — so `all` (the default) is the complete
+# setup. Incremental afterwards; the first run downloads the stage0
+# toolchain and CI LLVM (needs network).
+# Build the stage1 compiler + std + /bin/hello for a minix target (all by default).
+bootstrap target="all":
+    git submodule update --init rust
+    python tools/rust-config.py {{target}}
+    cd rust && python x.py build library/std
+    python tools/build-std-hello.py {{target}}
+    @echo "stage1 compiler + /bin/hello ready. Re-assemble images: target/mkboot embed_initramfs,embed_minixfs && target/mkfs <arch>"
+
 # Userland + server binaries for a target, built into the shared cargo
 # target dir (fast incremental; required before the kernel build, whose
 # build.rs assembles the images from them).

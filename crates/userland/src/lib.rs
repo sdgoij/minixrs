@@ -136,7 +136,7 @@ pub fn cat(args: &[&str]) -> i32 {
     }
 
     for path in &args[1..] {
-        let fd = match unsafe { minix_std::fs::open(path, minix_std::fs::O_RDONLY, 0) } {
+        let fd = match unsafe { minix_std::fs::open(path.as_bytes(), minix_std::fs::O_RDONLY, 0) } {
             Ok(fd) => fd,
             Err(_) => {
                 write_err(b"cat: ");
@@ -239,7 +239,7 @@ const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 pub fn ls(args: &[&str]) -> i32 {
     let dir = if args.len() > 1 { args[1] } else { "." };
     // Use IPC-based open via minix_std (routes to VFS)
-    let fd = match unsafe { minix_std::fs::open(dir, 0, 0) } {
+    let fd = match unsafe { minix_std::fs::open(dir.as_bytes(), 0, 0) } {
         Ok(fd) => fd,
         Err(e) => {
             write_err(b"ls: cannot access ");
@@ -298,7 +298,7 @@ pub fn mkdir(args: &[&str]) -> i32 {
     }
     let mut exit_code = 0;
     for path in &args[1..] {
-        let ret = minix_std::fs::mkdir(path, 0o755);
+        let ret = minix_std::fs::mkdir(path.as_bytes(), 0o755);
         if let Err(e) = ret {
             write_err(b"mkdir: ");
             write_err(path.as_bytes());
@@ -1296,7 +1296,7 @@ mod tests {
         assert_eq!(&q[27..29], &[0x00, 0x01]); // QCLASS IN
         assert_eq!(n, 29);
         // Oversized labels are rejected, not truncated.
-        assert_eq!(build_dns_query(&mut q, 1, &"x".repeat(64)), 0);
+        assert_eq!(build_dns_query(&mut q, 1, "x".repeat(64).as_str()), 0);
     }
 
     #[test]

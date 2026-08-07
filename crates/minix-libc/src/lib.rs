@@ -23,11 +23,9 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) ->
         return -22; // EINVAL
     }
     let path_str = unsafe { core::ffi::CStr::from_ptr(path) };
-    let path = match path_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return -22, // EINVAL
-    };
-    match unsafe { minix_std::fs::open(path, flags, mode as u32) } {
+    // C paths are byte strings, not necessarily UTF-8.
+    let path_bytes = path_str.to_bytes();
+    match unsafe { minix_std::fs::open(path_bytes, flags, mode as u32) } {
         Ok(fd) => fd,
         Err(e) => -(e.0),
     }

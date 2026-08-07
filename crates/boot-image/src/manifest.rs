@@ -23,6 +23,12 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/tcp", "tcp"),
     ("/bin/tcpserver", "tcpserver"),
     ("/bin/udp_echo", "udp_echo"),
+    // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`
+    // cargo bin. Rebuild it with `tools/build-std-hello.py [target]`
+    // (compiles `tools/std-hello.rs` with the rust fork's stage1 compiler
+    // against the fork's std), then re-run `target/mkboot` + `target/mkfs`
+    // to embed it.
+    ("/bin/hello", "hello"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

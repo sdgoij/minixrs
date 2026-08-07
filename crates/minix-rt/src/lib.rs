@@ -195,11 +195,11 @@ pub const NR_SETFDVFS: u64 = 53;
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
 // The exec frame's pointer arithmetic depends on this value.
-#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+#[cfg(all(minix_userspace, target_arch = "x86_64"))]
 const USER_STACK_TOP: u64 = 0x0FE1_0000;
-#[cfg(all(target_os = "none", target_arch = "riscv64"))]
+#[cfg(all(minix_userspace, target_arch = "riscv64"))]
 const USER_STACK_TOP: u64 = 0x8FE1_0000;
-#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+#[cfg(all(minix_userspace, target_arch = "aarch64"))]
 const USER_STACK_TOP: u64 = 0x3FD0_0000;
 
 /// Execute a new program via the PM→VFS chain (matching C `execve` in
@@ -216,7 +216,7 @@ const USER_STACK_TOP: u64 = 0x3FD0_0000;
 /// # Safety
 ///
 /// `path`, `argv` and `envp` must point to valid memory as described above.
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 pub unsafe fn execve(
     path: *const u8,
     path_len: usize,
@@ -333,7 +333,7 @@ pub unsafe fn execve(
 /// # Safety
 ///
 /// `p` must point to a valid NUL-terminated string.
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 unsafe fn cstr_len(p: *const u8) -> usize {
     let mut len = 0usize;
     while unsafe { *p.add(len) } != 0 {
@@ -802,7 +802,7 @@ pub fn mknod(path: &[u8], mode: u32, dev: u64) -> i64 {
 /// process table (`mp_pid`). The kernel's syscall-20 shortcut returns the
 /// caller's endpoint (with the fork flag bit for children), which is not
 /// the PID — so `ps`/`kill`/ICMP echo identifiers would not match.
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 pub fn getpid() -> i32 {
     unsafe {
         let mut msg = [0u8; 64];
@@ -817,7 +817,7 @@ pub fn getpid() -> i32 {
 }
 
 /// Host stub — no PM to ask.
-#[cfg(not(target_os = "none"))]
+#[cfg(not(minix_userspace))]
 pub fn getpid() -> i32 {
     -1 // ENOSYS
 }
@@ -1286,13 +1286,13 @@ pub unsafe fn sbrk(increment: isize) -> i64 {
 // Entry point
 
 // External main function defined by the user program.
-#[cfg(target_os = "none")]
+#[cfg(all(minix_userspace, feature = "rt"))]
 unsafe extern "Rust" {
     fn main(argc: i32, argv: *const *const u8) -> i32;
 }
 
 // Program arguments passed by the kernel.
-#[cfg(target_os = "none")]
+#[cfg(all(minix_userspace, feature = "rt"))]
 unsafe extern "C" {
     static __executable_start: u8;
 }
@@ -1306,7 +1306,7 @@ unsafe extern "C" {
 /// Must be called as the process entry point by the kernel exec loader.
 /// The stack must be set up per SysV ABI with `argc` at `[rsp]` followed
 /// by `argv` pointers and a null terminator.
-#[cfg(all(not(test), target_os = "none", target_arch = "x86_64"))]
+#[cfg(all(not(test), minix_userspace, feature = "rt", target_arch = "x86_64"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -1322,7 +1322,7 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(not(test), target_os = "none", target_arch = "riscv64"))]
+#[cfg(all(not(test), minix_userspace, feature = "rt", target_arch = "riscv64"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -1338,7 +1338,7 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(not(test), target_os = "none", target_arch = "aarch64"))]
+#[cfg(all(not(test), minix_userspace, feature = "rt", target_arch = "aarch64"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -1358,7 +1358,7 @@ pub unsafe extern "C" fn _start() -> ! {
 // Panic handler
 
 /// Panic handler — writes the panic message to stderr and aborts.
-#[cfg(all(not(test), target_os = "none"))]
+#[cfg(all(not(test), minix_userspace, feature = "rt"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // Format panic message into a stack buffer and write to stderr.
@@ -1536,7 +1536,7 @@ impl Default for BrkAllocator {
 }
 
 /// The global allocator instance.
-#[cfg(target_os = "none")]
+#[cfg(all(minix_userspace, feature = "rt"))]
 #[global_allocator]
 static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 
@@ -1558,7 +1558,7 @@ static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 /// # Safety
 ///
 /// `layout` must have non-zero size.
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static BPTR: AtomicUsize = AtomicUsize::new(0);
@@ -1880,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "none")]
+    #[cfg(all(minix_userspace, feature = "rt"))]
     fn test_global_allocator_impl() {
         // Verify the global allocator trait is implemented.
         fn _check<T: core::alloc::GlobalAlloc>(_: &T) {}

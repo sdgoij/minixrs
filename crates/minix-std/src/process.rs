@@ -16,7 +16,7 @@
 
 #![allow(dead_code)]
 
-#[cfg(target_os = "none")]
+#[cfg(minix_userspace)]
 use crate::sendrec;
 use crate::{MinixErr, PM_PROC_NR};
 
@@ -86,12 +86,12 @@ fn msg_set_i32(msg: &mut [u8; 64], off: usize, val: i32) {
 /// Must be called in a context where the PM server is running and can
 /// process fork requests.
 pub unsafe fn fork() -> Result<i32, MinixErr> {
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (PM_FORK, PM_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_FORK as i32);
@@ -112,7 +112,7 @@ pub unsafe fn fork() -> Result<i32, MinixErr> {
 
 /// Exit the current process with the given status.
 pub fn exit(status: i32) -> ! {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_EXIT as i32);
@@ -130,7 +130,7 @@ pub fn exit(status: i32) -> ! {
 /// `pid` is the child PID to wait for, or -1 for any child.
 /// `options` can be 0 (blocking) or `WNOHANG` (non-blocking).
 pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_WAITPID as i32);
@@ -149,7 +149,7 @@ pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (pid, options);
         Err(MinixErr::ENOSYS)
@@ -160,15 +160,15 @@ pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
 ///
 /// `path` is the binary path, `argv` is the null-terminated argument list.
 /// On success, does not return (the process is replaced).
-pub fn exec(path: &str, argv: &[*const u8]) -> Result<i32, MinixErr> {
-    #[cfg(target_os = "none")]
+pub fn exec(path: &[u8], argv: &[*const u8]) -> Result<i32, MinixErr> {
+    #[cfg(minix_userspace)]
     unsafe {
         // Delegate to the PM→VFS exec chain (minix_rt::execve). Build a
         // NUL-terminated path and a null-terminated argv array on the stack
         // since execve requires both.
         let mut path_buf = [0u8; 256];
         let n = path.len().min(path_buf.len() - 1);
-        path_buf[..n].copy_from_slice(&path.as_bytes()[..n]);
+        path_buf[..n].copy_from_slice(&path[..n]);
         let mut argv_buf = [core::ptr::null(); 64];
         let argc = argv.len().min(argv_buf.len() - 1);
         argv_buf[..argc].copy_from_slice(&argv[..argc]);
@@ -186,7 +186,7 @@ pub fn exec(path: &str, argv: &[*const u8]) -> Result<i32, MinixErr> {
             Err(MinixErr(0))
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         let _ = (path, argv);
         Err(MinixErr::ENOSYS)
@@ -197,7 +197,7 @@ pub fn exec(path: &str, argv: &[*const u8]) -> Result<i32, MinixErr> {
 ///
 /// Returns `(pid, ppid)` on success.
 pub fn getpid() -> Result<(i32, i32), MinixErr> {
-    #[cfg(target_os = "none")]
+    #[cfg(minix_userspace)]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_GETPID as i32);
@@ -217,7 +217,7 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
             Err(e) => Err(e),
         }
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(not(minix_userspace))]
     {
         Err(MinixErr::ENOSYS)
     }
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_exec_returns_enosys_on_host() {
-        let result = exec("/bin/sh", &[]);
+        let result = exec(b"/bin/sh", &[]);
         assert!(result.is_err());
     }
 
