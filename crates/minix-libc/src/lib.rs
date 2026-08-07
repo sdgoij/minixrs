@@ -3,10 +3,9 @@
 //! Provides `extern "C"` functions that wrap the Rust-native `minix-std` and
 //! `minix-rt` APIs so that any remaining C code can link against them.
 //!
-//! All functions follow the POSIX convention: return -1 on error and set
-//! `errno` (stored in thread-local or a static). For simplicity in this
-//! minimal implementation, functions return the negated errno directly
-//! (MINIX kernel convention) or 0/positive on success.
+//! All functions follow the POSIX convention: return -1 on error (or
+//! `MAP_FAILED`/`SIG_ERR` where POSIX says so) and set `errno` (via
+//! `__errno_location`). The OS is single-threaded, so a plain static suffices.
 
 #![no_std]
 #![allow(dead_code)]
@@ -14,20 +13,219 @@
 #[cfg(target_os = "minix")]
 use core::ffi::{c_char, c_int, c_void};
 
+// ---- errno ----
+
+static mut ERRNO: i32 = 0;
+
+/// POSIX `errno` accessor. The OS has no threads, so a plain static suffices.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __errno_location() -> *mut c_int {
+    // SAFETY: single-threaded; the pointer is only used by C `errno` reads.
+    core::ptr::addr_of_mut!(ERRNO)
+}
+
+#[inline]
+fn set_errno(e: i32) {
+    // SAFETY: single-threaded.
+    unsafe { ERRNO = e };
+}
+
+/// Standard POSIX error return: record `errno` and return -1.
+#[inline]
+fn fail(e: i32) -> i32 {
+    set_errno(e);
+    -1
+}
+
+// ---- C heap (malloc family) over the program break ----
+
+// First-fit allocator over `sbrk`. Blocks are contiguous from `HEAP_START` to
+// the current break; each block carries a 16-byte header ([size, flags]) and
+// the user pointer is 16-byte aligned. `free` coalesces with the neighbours.
+
+const HDR: usize = 16; // [size: usize][flags: usize]
+const ALIGN: usize = 16;
+const USED: usize = 1;
+
+static mut HEAP_START: usize = 0;
+
+#[inline]
+unsafe fn hdr_size(p: *mut u8) -> usize {
+    // SAFETY: `p` is a block start within the heap.
+    unsafe { *(p as *mut usize) }
+}
+
+#[inline]
+unsafe fn hdr_flags(p: *mut u8) -> usize {
+    // SAFETY: `p` is a block start within the heap.
+    unsafe { *((p as *mut usize).add(1)) }
+}
+
+#[inline]
+unsafe fn set_hdr(p: *mut u8, size: usize, flags: usize) {
+    // SAFETY: `p` is a block start within the heap.
+    unsafe {
+        *(p as *mut usize) = size;
+        *((p as *mut usize).add(1)) = flags;
+    }
+}
+
+#[inline]
+fn align_up(n: usize, a: usize) -> usize {
+    (n + a - 1) & !(a - 1)
+}
+
+/// Current program break (0 on error).
+#[cfg(target_os = "minix")]
+unsafe fn current_break() -> usize {
+    let r = unsafe { minix_rt::brk(core::ptr::null()) };
+    if r < 0 { 0 } else { r as usize }
+}
+
+/// `malloc(size)`: allocate `size` bytes, 16-byte aligned.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    let need = align_up(size.max(1), ALIGN) + HDR;
+    unsafe {
+        let heap = HEAP_START;
+        if heap == 0 {
+            // First allocation: extend the break and start the heap there.
+            let base = minix_rt::sbrk(need as isize);
+            if base < 0 {
+                set_errno(-base as i32);
+                return core::ptr::null_mut();
+            }
+            HEAP_START = base as usize;
+            set_hdr(base as *mut u8, need, USED);
+            return (base as usize + HDR) as *mut c_void;
+        }
+
+        // First-fit over the existing blocks.
+        let end = current_break();
+        let mut p = heap;
+        let mut last = 0usize;
+        while p < end {
+            let sz = hdr_size(p as *mut u8);
+            if hdr_flags(p as *mut u8) == 0 && sz >= need {
+                if sz >= need + HDR + ALIGN {
+                    // Split off a free remainder.
+                    set_hdr(p as *mut u8, need, USED);
+                    set_hdr((p + need) as *mut u8, sz - need, 0);
+                } else {
+                    set_hdr(p as *mut u8, sz, USED);
+                }
+                return (p + HDR) as *mut c_void;
+            }
+            last = p;
+            p += sz;
+        }
+
+        // Nothing fit: grow the trailing free block or extend the break.
+        let base = if last != 0 && hdr_flags(last as *mut u8) == 0 {
+            let sz = hdr_size(last as *mut u8);
+            let extra = need - sz;
+            let r = minix_rt::sbrk(extra as isize);
+            if r < 0 {
+                set_errno(-r as i32);
+                return core::ptr::null_mut();
+            }
+            set_hdr(last as *mut u8, sz + extra, USED);
+            last
+        } else {
+            let r = minix_rt::sbrk(need as isize);
+            if r < 0 {
+                set_errno(-r as i32);
+                return core::ptr::null_mut();
+            }
+            let b = r as usize;
+            set_hdr(b as *mut u8, need, USED);
+            b
+        };
+        (base + HDR) as *mut c_void
+    }
+}
+
+/// `free(ptr)`: mark the block free and coalesce with adjacent free blocks.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let block = ptr as usize - HDR;
+        let mut sz = hdr_size(block as *mut u8);
+        set_hdr(block as *mut u8, sz, 0);
+        // Coalesce with the next block.
+        let next = block + sz;
+        if next < current_break() && hdr_flags(next as *mut u8) == 0 {
+            sz += hdr_size(next as *mut u8);
+            set_hdr(block as *mut u8, sz, 0);
+        }
+        // Coalesce with the previous block (walk from the heap start).
+        let mut prev = HEAP_START;
+        while prev < block {
+            let psz = hdr_size(prev as *mut u8);
+            if prev + psz == block && hdr_flags(prev as *mut u8) == 0 {
+                set_hdr(prev as *mut u8, psz + sz, 0);
+                break;
+            }
+            prev += psz;
+        }
+    }
+}
+
+/// `calloc(nmemb, size)`: zero-initialized allocation.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+    let total = nmemb.saturating_mul(size);
+    let p = unsafe { malloc(total) };
+    if !p.is_null() {
+        // SAFETY: `p` holds `total` bytes from `malloc`.
+        unsafe { core::ptr::write_bytes(p as *mut u8, 0, total) };
+    }
+    p
+}
+
+/// `realloc(ptr, size)`: grow/shrink an allocation. Shrinks keep the block
+/// (no split); grows allocate fresh and copy.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    if ptr.is_null() {
+        return unsafe { malloc(size) };
+    }
+    unsafe {
+        let old = hdr_size(ptr as *mut u8) - HDR;
+        if size <= old {
+            return ptr;
+        }
+        let np = malloc(size);
+        if !np.is_null() {
+            core::ptr::copy_nonoverlapping(ptr as *const u8, np as *mut u8, old);
+            free(ptr);
+        }
+        np
+    }
+}
+
 // File I/O
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
     if path.is_null() {
-        return -22; // EINVAL
+        return fail(22); // EINVAL
     }
     let path_str = unsafe { core::ffi::CStr::from_ptr(path) };
     // C paths are byte strings, not necessarily UTF-8.
     let path_bytes = path_str.to_bytes();
     match unsafe { minix_std::fs::open(path_bytes, flags, mode as u32) } {
         Ok(fd) => fd,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -35,12 +233,12 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize {
     if buf.is_null() {
-        return -(22); // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
     match unsafe { minix_std::fs::read(fd, slice) } {
         Ok(n) => n as isize,
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -48,12 +246,12 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isiz
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: usize) -> isize {
     if buf.is_null() {
-        return -(22); // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
     match unsafe { minix_std::fs::write(fd, slice) } {
         Ok(n) => n as isize,
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -62,7 +260,7 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: usize) -> i
 pub extern "C" fn close(fd: c_int) -> c_int {
     match minix_std::fs::close(fd) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -71,7 +269,7 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     match minix_std::fs::lseek(fd, offset, whence) {
         Ok(pos) => pos,
-        Err(e) => -(e.0 as i64),
+        Err(e) => fail(e.0) as i64,
     }
 }
 
@@ -82,7 +280,7 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 pub unsafe extern "C" fn fork() -> c_int {
     match unsafe { minix_std::process::fork() } {
         Ok(pid) => pid,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -114,14 +312,24 @@ pub unsafe extern "C" fn mmap(
     offset: i64,
 ) -> *mut c_void {
     unsafe {
-        minix_std::vmem::mmap(addr as *mut u8, length, prot, flags, fd, offset) as *mut c_void
+        let r =
+            minix_std::vmem::mmap(addr as *mut u8, length, prot, flags, fd, offset) as *mut c_void;
+        if (r as usize) == usize::MAX {
+            // MAP_FAILED; the vmem layer discards the errno, so use a generic.
+            set_errno(12); // ENOMEM
+        }
+        r
     }
 }
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
-    unsafe { minix_std::vmem::munmap(addr as *mut u8, length) }
+    let r = unsafe { minix_std::vmem::munmap(addr as *mut u8, length) };
+    if r < 0 {
+        set_errno(12); // ENOMEM (vmem discards the errno)
+    }
+    r
 }
 
 // Time
@@ -130,14 +338,14 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeSpec) -> c_int {
     if tp.is_null() {
-        return -(22); // EINVAL
+        return fail(22); // EINVAL
     }
     match minix_std::time::clock_gettime(clock_id) {
         Ok(ts) => {
             unsafe { *tp = ts };
             0
         }
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -148,7 +356,7 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeS
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     match minix_std::time::kill(pid, sig) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -157,7 +365,7 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
 pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
     match minix_std::time::sigprocmask(how, set) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -170,8 +378,11 @@ pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn signal(signum: c_int, handler: u64) -> u64 {
     match minix_std::time::signal(signum, handler) {
-        Ok(()) => 0,  // SIG_DFL
-        Err(_) => !0, // SIG_ERR
+        Ok(()) => 0, // SIG_DFL
+        Err(e) => {
+            set_errno(e.0);
+            !0 // SIG_ERR
+        }
     }
 }
 
@@ -194,7 +405,7 @@ pub unsafe extern "C" fn sigaction(
     let (handler, mask, flags) = minix_std::time::decode_action(&act_arr);
     match minix_std::time::sigaction(signum, handler, mask, flags) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -266,7 +477,7 @@ unsafe fn encode_sockaddr_in(addr: *mut u8, addrlen: *mut u32, ip: [u8; 4], port
 pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int {
     match minix_std::net::socket(domain, type_, protocol) {
         Ok(fd) => fd,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -276,11 +487,11 @@ pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int 
 pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
         Ok(a) => a,
-        Err(e) => return e,
+        Err(e) => return fail(-e),
     };
     match minix_std::net::bind(sock, ip, port) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -291,11 +502,11 @@ pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) ->
 pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
         Ok(a) => a,
-        Err(e) => return e,
+        Err(e) => return fail(-e),
     };
     match minix_std::net::connect(sock, ip, port) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -313,10 +524,10 @@ pub unsafe extern "C" fn sendto(
     dest_len: u32,
 ) -> isize {
     if flags != 0 {
-        return -95; // EOPNOTSUPP
+        return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
-        return -22; // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
     let dest = if dest_addr.is_null() {
@@ -324,12 +535,12 @@ pub unsafe extern "C" fn sendto(
     } else {
         match unsafe { decode_sockaddr_in(dest_addr as *const u8, dest_len) } {
             Ok((ip, port)) => Some(minix_std::net::SocketAddr { ip, port }),
-            Err(e) => return e as isize,
+            Err(e) => return fail(-e) as isize,
         }
     };
     match unsafe { minix_std::net::sendto(sock, slice, dest) } {
         Ok(n) => n as isize,
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -347,10 +558,10 @@ pub unsafe extern "C" fn recvfrom(
     src_len: *mut u32,
 ) -> isize {
     if flags != 0 {
-        return -95; // EOPNOTSUPP
+        return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
-        return -22; // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
     match unsafe { minix_std::net::recvfrom(sock, slice) } {
@@ -360,7 +571,7 @@ pub unsafe extern "C" fn recvfrom(
             }
             n as isize
         }
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -371,7 +582,7 @@ pub unsafe extern "C" fn recvfrom(
 pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
     match minix_std::net::shutdown(sock, how) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -381,15 +592,15 @@ pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
     if flags != 0 {
-        return -95; // EOPNOTSUPP
+        return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
-        return -22; // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len) };
     match unsafe { minix_std::net::send(sock, slice) } {
         Ok(n) => n as isize,
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -399,15 +610,15 @@ pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
     if flags != 0 {
-        return -95; // EOPNOTSUPP
+        return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
-        return -22; // EINVAL
+        return fail(22) as isize; // EINVAL
     }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
     match unsafe { minix_std::net::recv(sock, slice) } {
         Ok(n) => n as isize,
-        Err(e) => -(e.0 as isize),
+        Err(e) => fail(e.0) as isize,
     }
 }
 
@@ -417,7 +628,7 @@ pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: 
 pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
     match minix_std::net::listen(sock, backlog) {
         Ok(()) => 0,
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -428,7 +639,7 @@ pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
 pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     let newfd = match minix_std::net::accept(sock) {
         Ok(fd) => fd,
-        Err(e) => return -(e.0),
+        Err(e) => return fail(e.0),
     };
     if !address.is_null() && !address_len.is_null() {
         if let Ok((ip, port)) = minix_std::net::getpeername(newfd) {
@@ -443,14 +654,14 @@ pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u3
 #[unsafe(no_mangle)]
 pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     if address.is_null() || address_len.is_null() {
-        return -22; // EINVAL
+        return fail(22); // EINVAL
     }
     match minix_std::net::getpeername(sock) {
         Ok((ip, port)) => {
             unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
             0
         }
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -459,14 +670,14 @@ pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *m
 #[unsafe(no_mangle)]
 pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     if address.is_null() || address_len.is_null() {
-        return -22; // EINVAL
+        return fail(22); // EINVAL
     }
     match minix_std::net::getsockname(sock) {
         Ok((ip, port)) => {
             unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
             0
         }
-        Err(e) => -(e.0),
+        Err(e) => fail(e.0),
     }
 }
 
@@ -632,6 +843,31 @@ mod tests {
             );
         }
         assert_eq!(buf, [1, 2, 1, 2, 3]);
+    }
+
+    #[cfg(target_os = "minix")]
+    #[test]
+    fn test_malloc_signatures() {
+        fn _malloc(f: unsafe extern "C" fn(usize) -> *mut c_void) {
+            let _ = f;
+        }
+        fn _free(f: unsafe extern "C" fn(*mut c_void)) {
+            let _ = f;
+        }
+        fn _calloc(f: unsafe extern "C" fn(usize, usize) -> *mut c_void) {
+            let _ = f;
+        }
+        fn _realloc(f: unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void) {
+            let _ = f;
+        }
+        fn _errno(f: extern "C" fn() -> *mut c_int) {
+            let _ = f;
+        }
+        _malloc(malloc);
+        _free(free);
+        _calloc(calloc);
+        _realloc(realloc);
+        _errno(__errno_location);
     }
 
     #[cfg(target_os = "minix")]

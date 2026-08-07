@@ -33,6 +33,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // against `minix-libc`. Rebuild it with `tools/build-c-hello.py`
     // (clang + the fork's stage1 rustc), then re-assemble the images.
     ("/bin/helloc", "helloc"),
+    // `/bin/ctest` is the second C smoke test: uses the full libc (errno,
+    // malloc family, printf/stdio, strings). Same build path as helloc.
+    ("/bin/ctest", "ctest"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

@@ -99,6 +99,7 @@ dependencies = [
 name = "minix-libc"
 version = "0.1.0"
 dependencies = [
+ "minix-rt",
  "minix-std",
 ]
 

@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 minix-std = { path = "../minix-std" }
+# rt off: syscall wrappers only (sbrk/brk for the C heap); no `_start`/
+# panic handler/allocator — those belong to the standalone userland runtime.
+minix-rt = { path = "../minix-rt", default-features = false }
 
 [lints]
 workspace = true
