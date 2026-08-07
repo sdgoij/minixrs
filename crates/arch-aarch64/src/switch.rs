@@ -1,5 +1,22 @@
 //! AArch64 context switch — switch_to_user function.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Byte offset of `Proc::p_tls` within the `Proc` struct, registered by the
+/// kernel at boot (0 = TLS support disabled). `switch_to_user` reads it to
+/// load the new thread's tpidr_el0 (thread pointer) on every switch.
+static TLS_TPIDR_OFF: AtomicU64 = AtomicU64::new(0);
+
+/// Register the byte offset of `Proc::p_tls` (set once during boot, before
+/// any thread can run).
+///
+/// # Safety
+///
+/// Must be called exactly once during boot.
+pub unsafe fn set_tls_tpidr_offset(off: u64) {
+    TLS_TPIDR_OFF.store(off, Ordering::Relaxed);
+}
+
 /// Switch to user mode for the given process and never return.
 ///
 /// # Safety
@@ -8,6 +25,7 @@
 /// `p_reg`, `p_seg.p_cr3`, and per-process page table mappings.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
+    let tls_off = TLS_TPIDR_OFF.load(Ordering::Relaxed);
     unsafe {
         core::arch::asm!(
             "mov     x20, {proc}",
@@ -50,9 +68,19 @@ pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
             "ldr     x30,      [x20, #0xF0]",
             "ldp     x20, x21, [x20, #0xA0]",
 
+            // Load the new thread's tpidr_el0 (TLS thread pointer) from
+            // Proc.p_tls at the registered offset. x21 is clobbered here and
+            // reloaded from the frame above; the offset register is the
+            // caller-provided operand.
+            "ldr     x21, [x20, {tls_off}]",
+            "cbz     x21, 1f",
+            "msr     tpidr_el0, x21",
+            "1:",
+
             "eret",
 
             proc = in(reg) proc_ptr,
+            tls_off = in(reg) tls_off,
             options(noreturn),
         );
     }

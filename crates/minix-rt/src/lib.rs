@@ -199,6 +199,12 @@ pub const NR_THREAD_EXIT: u64 = 55;
 pub const NR_THREAD_JOIN: u64 = 58;
 /// Yield the CPU to another runnable thread (kernel: SYS_thread_yield).
 pub const NR_THREAD_YIELD: u64 = 59;
+/// Set this thread's thread pointer / TLS base (kernel: SYS_thread_set_tls).
+pub const NR_THREAD_SET_TLS: u64 = 60;
+/// Block this thread until a wake on the same address (kernel: SYS_futex_wait).
+pub const NR_FUTEX_WAIT: u64 = 61;
+/// Wake threads blocked on an address (kernel: SYS_futex_wake).
+pub const NR_FUTEX_WAKE: u64 = 62;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
@@ -753,6 +759,32 @@ pub fn thread_yield() {
     unsafe {
         syscall0(NR_THREAD_YIELD);
     }
+}
+
+/// Set this thread's thread pointer (TLS base): the FS base on x86_64,
+/// tpidr_el0 on AArch64, a no-op on RISC-V (tp is a GPR the thread library
+/// sets directly). Stored per-thread by the kernel and reloaded on every
+/// context switch; also applied to the calling thread immediately.
+pub fn thread_set_tls(addr: usize) {
+    unsafe {
+        syscall1(NR_THREAD_SET_TLS, addr as u64);
+    }
+}
+
+/// Block this thread until a `futex_wake` on `addr`. Returns 0 when woken,
+/// -EAGAIN when `*addr != expected` (retry the compare-and-set).
+///
+/// # Safety
+///
+/// `addr` must point to a readable `u32` in this process's address space.
+pub unsafe fn futex_wait(addr: *const u32, expected: u32) -> i32 {
+    unsafe { syscall2(NR_FUTEX_WAIT, addr as u64, expected as u64) as i32 }
+}
+
+/// Wake up to `count` threads blocked in `futex_wait` on `addr`. Returns
+/// the number woken.
+pub fn futex_wake(addr: *const u32, count: u32) -> i32 {
+    unsafe { syscall2(NR_FUTEX_WAKE, addr as u64, count as u64) as i32 }
 }
 
 /// Write `buf` to file descriptor `fd`.
@@ -1311,15 +1343,67 @@ pub unsafe fn brk(addr: *const u8) -> i64 {
     }
 }
 
+/// Serializes break operations across threads.
+///
+/// `sbrk` is two separate VM requests (`brk(null)` then `brk(new)`); if
+/// another thread advances the break between them (thread stacks and TLS
+/// blocks are allocated with `sbrk` too), the second `brk` lands below the
+/// real break and the VM server treats it as a heap shrink — unmapping live
+/// pages (thread stacks, TLS blocks) that a later kernel-mode IPC delivery
+/// writes into. Serializing the query+set makes every allocation atomic
+/// against the other break users.
+struct BrkLock {
+    locked: AtomicUsize,
+}
+
+impl BrkLock {
+    const fn new() -> Self {
+        Self {
+            locked: AtomicUsize::new(0),
+        }
+    }
+
+    fn lock(&self) {
+        while self.locked.swap(1, Ordering::Acquire) != 0 {
+            unsafe {
+                futex_wait(core::ptr::addr_of!(self.locked).cast::<u32>(), 1);
+            }
+        }
+    }
+
+    fn unlock(&self) {
+        self.locked.store(0, Ordering::Release);
+        unsafe {
+            futex_wake(core::ptr::addr_of!(self.locked).cast::<u32>(), 1);
+        }
+    }
+}
+
+static BRK_LOCK: BrkLock = BrkLock::new();
+
+/// RAII release of [`BRK_LOCK`]; dropped on every `sbrk` exit path.
+struct BrkLockGuard;
+
+impl Drop for BrkLockGuard {
+    fn drop(&mut self) {
+        BRK_LOCK.unlock();
+    }
+}
+
 /// Increase the program break by `increment` bytes and return the old break,
 /// or return a negative error code on failure.
 ///
+/// The query+set pair is serialized against other `sbrk` callers (thread
+/// stacks, TLS blocks, the std allocator) so the returned base can never
+/// overlap a concurrent allocation.
+///
 /// # Safety
 ///
-/// The caller must ensure no other code concurrently modifies the program break.
 /// The `increment` must not cause the break to overflow the address space.
 pub unsafe fn sbrk(increment: isize) -> i64 {
     unsafe {
+        BRK_LOCK.lock();
+        let _guard = BrkLockGuard;
         // Get current break.
         let old = brk(core::ptr::null());
         if old < 0 {

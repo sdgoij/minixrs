@@ -194,6 +194,21 @@ pub unsafe fn write_tsc_ctr_switch(val: u64) {
 
 pub unsafe fn release_fpu(_proc: *mut core::ffi::c_void) {}
 
+/// Set the calling thread's tpidr_el0 (the AArch64 thread pointer for TLS).
+///
+/// # Safety
+///
+/// `tls` must be a valid user-space address in the current process, or 0.
+pub unsafe fn set_tls_current(tls: u64) {
+    unsafe {
+        core::arch::asm!(
+            "msr tpidr_el0, {t}",
+            t = in(reg) tls,
+            options(nomem, nostack),
+        );
+    }
+}
+
 pub unsafe fn tlb_flush() {
     unsafe {
         core::arch::asm!("tlbi vmalle1; dsb ish; isb", options(nomem, nostack));

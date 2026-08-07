@@ -976,6 +976,15 @@ pub unsafe fn write_tsc_ctr_switch(val: u64) {
 /// `_proc` must point to a valid process or be null.
 pub unsafe fn release_fpu(_proc: *mut core::ffi::c_void) {}
 
+/// Set the calling thread's thread pointer. On RISC-V the thread pointer is
+/// the `tp` (x4) general register, saved/restored with the register frame;
+/// the thread library sets it directly in user mode, so this is a no-op.
+///
+/// # Safety
+///
+/// No-op.
+pub unsafe fn set_tls_current(_tls: u64) {}
+
 /// Flush the entire TLB.
 ///
 /// # Safety

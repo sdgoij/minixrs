@@ -99,7 +99,19 @@ def build(target: str) -> int:
 
     out = ROOT / "target" / out_dir / "release" / "hello"
     out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [str(rustc), "--target", target, "--edition", "2024", "-o", str(out), str(SOURCE)]
+    # The same linker script the userland/server recipes use: it lays the
+    # sections out page-aligned for the kernel exec loader and defines the
+    # TLS block symbols (`__tls_start`/`__tdata_end`/`__tls_end`) the std
+    # runtime needs to build per-thread TLS blocks.
+    cmd = [
+        str(rustc),
+        "--target", target,
+        "--edition", "2024",
+        "-C", f"link-arg=-T{ROOT / 'tools' / 'minix-user.ld'}",
+        "-C", "link-arg=--no-eh-frame-hdr",
+        "-o", str(out),
+        str(SOURCE),
+    ]
     print("running:", " ".join(cmd))
     result = subprocess.run(cmd)
     if result.returncode != 0:

@@ -159,6 +159,14 @@ pub unsafe extern "C" fn kmain() -> ! {
         kernel::system::system_init();
     }
 
+    // Register the Proc.p_tls offset so switch_to_user loads each thread's
+    // tpidr_el0 (TLS thread pointer) on context switch.
+    unsafe {
+        arch_aarch64::switch::set_tls_tpidr_offset(
+            core::mem::offset_of!(kernel::proc::Proc, p_tls) as u64,
+        );
+    }
+
     // Initialize basic userspace syscall handlers.
     unsafe {
         kernel::syscall::init_basic_syscalls();

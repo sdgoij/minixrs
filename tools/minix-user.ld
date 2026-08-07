@@ -23,6 +23,20 @@ SECTIONS
         *(.got.plt .got.plt.*)
     }
 
+    /* Thread-local storage: the runtime copies `__tls_start..__tdata_end`
+       (init image) into a per-thread block and zeroes up to `__tls_end`;
+       the thread pointer (FS base / tpidr_el0 / tp) points at the block. */
+    .tdata : ALIGN(16) {
+        __tls_start = .;
+        *(.tdata .tdata.*)
+        __tdata_end = .;
+    }
+    .tbss : ALIGN(16) {
+        *(.tbss .tbss.*)
+        *(.tcommon)
+        __tls_end = .;
+    }
+
     .bss : ALIGN(0x1000) {
         __bss_start = .;
         *(.bss .bss.*)

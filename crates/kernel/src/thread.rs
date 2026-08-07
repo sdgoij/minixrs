@@ -84,7 +84,7 @@ pub unsafe fn create(caller: *mut Proc, entry: u64, stack: u64, arg: u64) -> i32
             }
         }
         if tid > MAX_THREADS_PER_PROC {
-            return -crate::ipc::EAGAIN;
+            return crate::ipc::EAGAIN;
         }
 
         // Find a free slot. Thread slots are ordinary SLOT_FREE entries
@@ -134,7 +134,7 @@ pub unsafe fn create(caller: *mut Proc, entry: u64, stack: u64, arg: u64) -> i32
             enqueue(rp);
             return tid as i32;
         }
-        -crate::ipc::ENOMEM
+        crate::ipc::ENOMEM
     }
 }
 
@@ -214,16 +214,16 @@ pub unsafe fn join(rp: *mut Proc, tid: u32) -> i32 {
         let main = group(rp);
         if tid == 0 {
             // Joining the process itself would deadlock.
-            return -crate::ipc::EINVAL;
+            return crate::ipc::EINVAL;
         }
         let mut t = (*main).p_t_next;
         while !t.is_null() {
             if (*t).p_tid == tid {
                 if t == rp {
-                    return -crate::ipc::EINVAL; // self-join
+                    return crate::ipc::EINVAL; // self-join
                 }
                 if !(*t).p_join_waiter.is_null() {
-                    return -crate::ipc::EINVAL; // already joined by another thread
+                    return crate::ipc::EINVAL; // already joined by another thread
                 }
                 (*t).p_join_waiter = rp;
                 let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
@@ -254,6 +254,76 @@ pub unsafe fn yield_self(rp: *mut Proc) {
         (*rp)
             .p_rts_flags
             .fetch_or(RtsFlags::PREEMPTED.bits(), Ordering::Relaxed);
+    }
+}
+
+/// Block `rp` on the user-space futex at `addr` until `futex_wake` on the
+/// same address. Returns OK when blocked, or -EAGAIN when `*addr` no longer
+/// equals `expected` (the caller must retry its compare-and-set).
+///
+/// The check-and-block is atomic on this single-CPU kernel: syscalls run
+/// with interrupts disabled, so no `futex_wake` can run between the value
+/// load and the FUTEX_WAIT flag being set — a wakeup cannot be lost.
+///
+/// # Safety
+///
+/// `rp` must be the currently running thread; `addr` must be a readable
+/// user-space address in its address space.
+pub unsafe fn futex_wait(rp: *mut Proc, addr: u64, expected: u64) -> i32 {
+    unsafe {
+        let mut val = [0u8; 4];
+        let r = crate::ipc::copy_from_user(rp, addr, val.as_mut_ptr(), 4);
+        if r != 0 {
+            return crate::ipc::EFAULT;
+        }
+        if u32::from_ne_bytes(val) != expected as u32 {
+            return crate::ipc::EAGAIN;
+        }
+        (*rp).p_futex_addr = addr;
+        let old = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        (*rp)
+            .p_rts_flags
+            .store(old | RtsFlags::FUTEX_WAIT.bits(), Ordering::Relaxed);
+        if old == 0 {
+            dequeue(rp);
+        }
+        crate::ipc::OK
+    }
+}
+
+/// Wake up to `count` threads blocked in `futex_wait` on `addr`. Returns
+/// the number woken. The waiters are found by scanning the process table
+/// for threads with FUTEX_WAIT set and a matching `p_futex_addr` (fine for
+/// our table size; single-CPU so no locking needed).
+///
+/// # Safety
+///
+/// `addr` must be a user-space address (unmapped addresses simply wake
+/// nobody).
+pub unsafe fn futex_wake(addr: u64, count: u32) -> i32 {
+    unsafe {
+        let base = crate::table::proc_table_base();
+        let mut woken: i32 = 0;
+        for i in 0..crate::proc::NR_PROCS_TOTAL {
+            if woken >= count as i32 {
+                break;
+            }
+            let p = base.add(i);
+            if (*p).is_empty() {
+                continue;
+            }
+            let rts = (*p).p_rts_flags.load(Ordering::Relaxed);
+            if rts & RtsFlags::FUTEX_WAIT.bits() != 0 && (*p).p_futex_addr == addr {
+                let new = rts & !RtsFlags::FUTEX_WAIT.bits();
+                (*p).p_rts_flags.store(new, Ordering::Relaxed);
+                crate::hal::write_retval(&mut (*p).p_reg, 0);
+                if new == 0 {
+                    enqueue(p);
+                }
+                woken += 1;
+            }
+        }
+        woken
     }
 }
 
@@ -500,7 +570,7 @@ mod tests {
             // No threads: joining any tid succeeds immediately.
             assert_eq!(join(main, 7), crate::ipc::OK);
             // Joining the main thread itself is rejected.
-            assert_eq!(join(main, 0), -crate::ipc::EINVAL);
+            assert_eq!(join(main, 0), crate::ipc::EINVAL);
         }
     }
 
@@ -513,7 +583,7 @@ mod tests {
             let tid = create(main, 0x401000, 0x7fff_f000, 0);
             let target = (*main).p_t_next;
             // The target joining itself is rejected.
-            assert_eq!(join(target, tid as u32), -crate::ipc::EINVAL);
+            assert_eq!(join(target, tid as u32), crate::ipc::EINVAL);
             // Cleanup.
             (*main).p_t_next = core::ptr::null_mut();
             (*target)
@@ -539,6 +609,83 @@ mod tests {
             // Cleanup.
             (*main).p_t_next = core::ptr::null_mut();
             (*t).p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_futex_wait_blocks_and_wake() {
+        let _l = ThreadTestLock::acquire();
+        unsafe {
+            reset_state();
+            let main = make_main(114);
+            // Futex word in kernel memory; host copy_from_user is a no-op,
+            // so the read-back value is 0.
+            let word: u32 = 0;
+            let addr = core::ptr::addr_of!(word) as u64;
+
+            // Matching value: blocks with FUTEX_WAIT, dequeued.
+            assert_eq!(futex_wait(main, addr, 0), crate::ipc::OK);
+            assert!((*main).rts_isset(RtsFlags::FUTEX_WAIT));
+            assert!(!(*main).is_runnable());
+
+            // Mismatched value: EAGAIN, flags untouched.
+            assert_eq!(futex_wait(main, addr, 1), crate::ipc::EAGAIN);
+            assert!((*main).rts_isset(RtsFlags::FUTEX_WAIT));
+
+            // Wake: runnable again, flag cleared.
+            assert_eq!(futex_wake(addr, 1), 1);
+            assert!((*main).is_runnable());
+            assert!(!(*main).rts_isset(RtsFlags::FUTEX_WAIT));
+
+            // No waiters: nothing woken.
+            assert_eq!(futex_wake(addr, 1), 0);
+
+            (*main)
+                .p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_futex_wake_respects_count() {
+        let _l = ThreadTestLock::acquire();
+        unsafe {
+            reset_state();
+            let main = make_main(115);
+            assert_eq!(create(main, 0x401000, 0x7fff_f000, 0), 1);
+            let t1 = (*main).p_t_next;
+            assert_eq!(create(main, 0x402000, 0x7fff_e000, 0), 2);
+            let t2 = (*t1).p_t_next;
+            let addr = 0x1234_0000u64; // never dereferenced in wake
+
+            // Both waiters blocked.
+            for t in [main, t1, t2] {
+                (*t).p_futex_addr = addr;
+                (*t).p_rts_flags
+                    .store(RtsFlags::FUTEX_WAIT.bits(), Ordering::Relaxed);
+            }
+
+            // Wake one: exactly one becomes runnable.
+            assert_eq!(futex_wake(addr, 1), 1);
+            let mut woken = 0;
+            for t in [main, t1, t2] {
+                if (*t).is_runnable() {
+                    woken += 1;
+                }
+            }
+            assert_eq!(woken, 1);
+
+            // Wake all: the remaining two.
+            assert_eq!(futex_wake(addr, i32::MAX as u32), 2);
+
+            // Cleanup.
+            (*main).p_t_next = core::ptr::null_mut();
+            (*t1)
+                .p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+            (*t2)
+                .p_rts_flags
                 .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
         }
     }

@@ -184,6 +184,8 @@ bitflags::bitflags! {
         const PREEMPTED      = 0x04000;
         /// Thread blocked in `thread_join` waiting for another thread.
         const JOINING        = 0x02000;
+        /// Thread blocked in `futex_wait` on a user-space address.
+        const FUTEX_WAIT     = 0x20000;
         /// Process ran out of its quantum.
         const NO_QUANTUM     = 0x08000;
         /// Not ready until VM has made it.
@@ -384,6 +386,13 @@ pub struct Proc {
     /// Thread blocked in `thread_join` waiting for THIS slot's thread to
     /// exit; cleared and woken by `thread::exit`. Single waiter per thread.
     pub p_join_waiter: *mut Proc,
+    /// Thread pointer (TLS base): the FS base on x86_64, tpidr_el0 on
+    /// AArch64; unused on RISC-V (tp is a saved GPR in the frame). Set by
+    /// `SYS_thread_set_tls` and reloaded on every context switch
+    /// (`restore()`/`switch_to_user`). 0 = no TLS configured.
+    pub p_tls: u64,
+    /// User-space futex address this thread is blocked on (RtsFlags::FUTEX_WAIT).
+    pub p_futex_addr: u64,
 }
 
 impl Default for Proc {
@@ -436,6 +445,8 @@ impl Default for Proc {
             p_t_next: core::ptr::null_mut(),
             p_group: core::ptr::null_mut(),
             p_join_waiter: core::ptr::null_mut(),
+            p_tls: 0,
+            p_futex_addr: 0,
         }
     }
 }

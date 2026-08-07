@@ -679,6 +679,43 @@ unsafe fn sys_thread_yield_handler(caller: *mut crate::proc::Proc, _args: &[u64;
     0
 }
 
+/// SYS_thread_set_tls (60) — set this thread's thread pointer (TLS base).
+/// args[0] = the TLS base: FS base on x86_64, tpidr_el0 on AArch64; unused
+/// on RISC-V (tp is a saved GPR the thread library sets directly). Stored
+/// per-thread and reloaded on every context switch; also applied to the
+/// calling thread immediately.
+unsafe fn sys_thread_set_tls_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    let tls = args[0];
+    unsafe {
+        (*caller).p_tls = tls;
+        crate::hal::set_tls_current(tls);
+    }
+    0
+}
+
+/// SYS_futex_wait (61) — block this thread until `SYS_futex_wake` on the
+/// same address. args[0] = user futex address, args[1] = expected value.
+/// Returns 0 when woken, -EAGAIN when `*addr != expected`, -EFAULT for an
+/// unmapped address.
+unsafe fn sys_futex_wait_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    unsafe { crate::thread::futex_wait(caller, args[0], args[1]) as i64 }
+}
+
+/// SYS_futex_wake (62) — wake up to args[1] threads blocked in
+/// `SYS_futex_wait` on the address args[0]. Returns the number woken.
+unsafe fn sys_futex_wake_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38;
+    }
+    unsafe { crate::thread::futex_wake(args[0], args[1] as u32) as i64 }
+}
+
 /// SYS_KERNEL_CALL (50) — invoke a kernel call on the SYSTEM task.
 ///
 /// args[0] = call_nr (kernel call number, e.g. 0 for SYS_FORK)
@@ -1111,6 +1148,9 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(55, sys_thread_exit_handler); // NR_THREAD_EXIT
         register_basic_syscall(58, sys_thread_join_handler); // NR_THREAD_JOIN
         register_basic_syscall(59, sys_thread_yield_handler); // NR_THREAD_YIELD
+        register_basic_syscall(60, sys_thread_set_tls_handler); // NR_THREAD_SET_TLS
+        register_basic_syscall(61, sys_futex_wait_handler); // NR_FUTEX_WAIT
+        register_basic_syscall(62, sys_futex_wake_handler); // NR_FUTEX_WAKE
     }
 }
 

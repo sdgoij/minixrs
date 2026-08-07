@@ -310,6 +310,35 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
     }
 }
 
+/// Byte offset of `Proc::p_tls` within the `Proc` struct, registered by the
+/// kernel at boot (0 = TLS support disabled). `restore()` reads it to load
+/// the new thread's FS base (thread pointer) on every context switch.
+#[unsafe(no_mangle)]
+pub static mut TLS_FS_BASE_OFF: u64 = 0;
+
+/// Register the byte offset of `Proc::p_tls` (set once during boot, before
+/// any thread can run).
+///
+/// # Safety
+///
+/// Must be called exactly once during boot.
+pub unsafe fn set_tls_fs_base_offset(off: u64) {
+    unsafe {
+        core::ptr::write_volatile(&raw mut TLS_FS_BASE_OFF, off);
+    }
+}
+
+/// Set the calling thread's FS base (the x86_64 thread pointer for TLS).
+///
+/// # Safety
+///
+/// `tls` must be a valid user-space address in the current process, or 0.
+pub unsafe fn set_tls_current(tls: u64) {
+    unsafe {
+        wrmsr(crate::cpu_msr::msr::FS_BASE, tls);
+    }
+}
+
 // Context switch
 
 /// Save callee-saved registers and switch stacks.
@@ -924,6 +953,22 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "in     al, 0x21",
         "or     al, 0x01",
         "out    0x21, al",
+        // Load the new thread's FS base (TLS thread pointer) from
+        // Proc.p_tls at the registered offset. Skipped when the offset is
+        // unset or the value is 0. Clobbers rax/rcx/rdx, which are reloaded
+        // from p_reg below.
+        "lea    rax, [rip + {tls_off}]",
+        "mov    rax, [rax]",
+        "test   rax, rax",
+        "jz     3f",
+        "mov    rdx, [r15 + rax]",
+        "test   rdx, rdx",
+        "jz     3f",
+        "mov    ecx, 0xC0000100",   // IA32_FS_BASE
+        "mov    rax, rdx",
+        "shr    rdx, 32",
+        "wrmsr",
+        "3:",
         // Load CR3 from p_seg.p_cr3 at offset 256.
         "mov    rdi, [r15 + 256]",
         "mov    cr3, rdi",
@@ -967,6 +1012,7 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "out    0x21, al",
         "pop    rax",
         "iretq",
+        tls_off = sym TLS_FS_BASE_OFF,
     );
 }
 

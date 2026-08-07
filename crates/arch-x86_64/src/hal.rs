@@ -254,6 +254,15 @@ pub unsafe fn release_fpu(proc: *mut core::ffi::c_void) {
     unsafe { crate::hw::release_fpu(proc) }
 }
 
+/// Set the calling thread's FS base (the x86_64 thread pointer for TLS).
+///
+/// # Safety
+///
+/// `tls` must be a valid user-space address in the current process, or 0.
+pub unsafe fn set_tls_current(tls: u64) {
+    unsafe { crate::asm::set_tls_current(tls) }
+}
+
 /// Flush the entire TLB.
 ///
 /// # Safety

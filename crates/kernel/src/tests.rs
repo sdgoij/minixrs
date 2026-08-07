@@ -2629,6 +2629,10 @@ pub fn run_all() -> u32 {
     // exit() kills the whole group via the main slot's bookkeeping.
     total += run("thread_group_sweep", test_thread_group_sweep);
     total += run("thread_exit_kills_group", test_thread_exit_kills_group);
+    // TLS: thread_set_tls stores the per-thread thread pointer.
+    total += run("syscall_set_tls", test_syscall_set_tls);
+    // Futex: block + wake via the syscalls (the sync primitives' base).
+    total += run("syscall_futex", test_syscall_futex);
 
     total
 }
@@ -2696,6 +2700,73 @@ fn test_thread_lifecycle(ctx: &mut TestCtx) {
         );
 
         (*main)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
+}
+
+fn test_syscall_set_tls(ctx: &mut TestCtx) {
+    unsafe {
+        let rp = crate::table::proc_addr(80);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(80) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 80;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+        (*rp).p_tls = 0;
+
+        let args = [0x7fff_0000u64, 0, 0, 0, 0, 0];
+        let result = crate::syscall::dispatch_basic_syscall(rp, 60, &args);
+        ctx.assert(result == 0, "thread_set_tls returns 0");
+        ctx.assert((*rp).p_tls == 0x7fff_0000, "p_tls stored per-thread");
+    }
+}
+
+fn test_syscall_futex(ctx: &mut TestCtx) {
+    unsafe {
+        // Futex word in kernel memory: identity-mapped under boot_cr3, so
+        // the fabricated test proc's copy_from_user can read it.
+        static WORD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let addr = core::ptr::addr_of!(WORD) as u64;
+
+        let rp = crate::table::proc_addr(82);
+        if rp.is_null() {
+            ctx.assert(false, "proc_addr(82) failed");
+            return;
+        }
+        (*rp).p_magic = crate::proc::PMAGIC;
+        (*rp).p_endpoint = 82;
+        (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+
+        // Mismatched value: EAGAIN, not blocked.
+        let args = [addr, 1u64, 0, 0, 0, 0];
+        let r = crate::syscall::dispatch_basic_syscall(rp, 61, &args);
+        ctx.assert(
+            r == crate::ipc::EAGAIN as i64,
+            "futex_wait EAGAIN on mismatch",
+        );
+
+        // Matching value: blocks (FUTEX_WAIT set, not runnable).
+        let args = [addr, 0u64, 0, 0, 0, 0];
+        let r = crate::syscall::dispatch_basic_syscall(rp, 61, &args);
+        ctx.assert(r == 0, "futex_wait returns 0 when blocked");
+        ctx.assert(
+            (*rp).rts_isset(crate::proc::RtsFlags::FUTEX_WAIT),
+            "FUTEX_WAIT set",
+        );
+
+        // Wake it: runnable again, flag cleared.
+        let args = [addr, 1u64, 0, 0, 0, 0];
+        let r = crate::syscall::dispatch_basic_syscall(rp, 62, &args);
+        ctx.assert(r == 1, "futex_wake wakes one");
+        ctx.assert((*rp).is_runnable(), "woken thread runnable");
+
+        // Cleanup: the woken proc is on the run queue; unlink it before the
+        // live timer can pick a fabricated frame.
+        (*rp)
             .p_rts_flags
             .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
         clear_run_queues();

@@ -483,6 +483,13 @@ pub extern "C" fn kmain_body() -> ! {
             // Set up TSS and GDT for ring-3 interrupts and exception handlers.
             arch_x86_64::init_tss_for_boot();
 
+            // Register the Proc.p_tls offset so restore() loads each thread's
+            // FS base (TLS thread pointer) on context switch.
+            arch_x86_64::asm::set_tls_fs_base_offset(core::mem::offset_of!(
+                kernel::proc::Proc,
+                p_tls
+            ) as u64);
+
             // Install exception handlers: page fault, GPF, double fault.
             // These use IST stacks for reliability. #UD/#DB get plain
             // entries that print and halt — without them init_idt leaves
