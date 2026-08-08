@@ -139,6 +139,16 @@ pub fn total_pages() -> usize {
     unsafe { read_field(&raw const (*state).total_pages) }
 }
 
+/// Size (bytes) of the *usable* free-RAM window — the allocator's bitmap
+/// lives at the top of the window, and aliases must never wrap onto it.
+/// Equals `bitmap_addr - base`.
+pub fn usable_size() -> u64 {
+    let state = ALLOC.get();
+    let bitmap_addr = unsafe { read_field(&raw const (*state).bitmap_ptr) } as u64;
+    let base = unsafe { read_field(&raw const (*state).base) };
+    bitmap_addr.saturating_sub(base)
+}
+
 pub fn base() -> u64 {
     let state = ALLOC.get();
     unsafe { read_field(&raw const (*state).base) }

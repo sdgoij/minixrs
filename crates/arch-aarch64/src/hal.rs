@@ -610,15 +610,15 @@ pub const fn pte_to_phys(pte: u64) -> u64 {
 /// Decide whether a user leaf PTE at `va` maps a frame owned by the process.
 ///
 /// AArch64 per-process tables split the low-GB 2MB alias blocks into 4KB
-/// entries that wrap phys = RAM_BASE + (va & (RAM_SIZE - 1)); the device
-/// MMIO window (0x08000000-0x10000000) is identity-mapped (phys == va).
-/// Those shared alias/identity frames must never be freed when a process
-/// exits. Real per-process allocations always map at a phys != va.
-pub const fn pte_user_owned(pte: u64, va: u64) -> bool {
-    const RAM_BASE: u64 = 0x4000_0000;
-    const RAM_SIZE: u64 = 0x1000_0000;
+/// entries that wrap phys = win_base + ((va - user_low) % win_size) (see
+/// `create_low_gb_pmd_table`); the device MMIO window (0x08000000-
+/// 0x10000000) is identity-mapped (phys == va). Those shared alias/identity
+/// frames must never be freed when a process exits. Real per-process
+/// allocations always map at a phys != va and != the alias frame.
+pub fn pte_user_owned(pte: u64, va: u64) -> bool {
     const DEV_BASE: u64 = 0x0800_0000;
     const DEV_END: u64 = 0x1000_0000;
+    const USER_LOW: u64 = 0x100_0000;
     let user_present = pte_present() | pte_user();
     if pte & user_present != user_present {
         return false;
@@ -627,7 +627,19 @@ pub const fn pte_user_owned(pte: u64, va: u64) -> bool {
     if frame == va || (va >= DEV_BASE && va < DEV_END) {
         return false; // identity mapping (RAM identity or device MMIO)
     }
-    frame != RAM_BASE + (va & (RAM_SIZE - 1))
+    if va >= USER_LOW {
+        // Alias frames from the low-GB window (create_low_gb_pmd_table)
+        // belong to no process; freeing them would double-free live
+        // allocator frames. Real allocations coincide with an alias frame
+        // only at the window base (first boot servers), which are never
+        // destroyed.
+        let win_base = crate::alloc::base();
+        let win_size = crate::alloc::total_pages() as u64 * 4096;
+        if win_size != 0 && frame == win_base + ((va - USER_LOW) % win_size) {
+            return false;
+        }
+    }
+    true
 }
 
 pub const fn kern_vaddr() -> u64 {
@@ -804,6 +816,18 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
     crate::alloc::alloc_phys_contig(count)
 }
 
+/// Base of the physical allocator's free-RAM window (just past the kernel
+/// image). The per-process kernel identity PMD table wraps within this
+/// window, so boot uses it to bound the identity map to real RAM.
+pub fn phys_alloc_base() -> u64 {
+    crate::alloc::base()
+}
+
+/// Total pages in the physical allocator's free-RAM window.
+pub fn phys_alloc_total_pages() -> usize {
+    crate::alloc::total_pages()
+}
+
 /// Free contiguous physical pages.
 pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
@@ -954,9 +978,15 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
         // and the gap under the image) are unmapped so accesses fault.
         let user_low: u64 = 0x100_0000;
         // Free RAM starts just past the kernel image (the allocator base);
-        // the low-GB alias wraps within it.
+        // the low-GB alias wraps within it. Cap the window at the
+        // *usable* (bitmap-excluded) region, rounded down to 2 MiB so every
+        // alias block lands wholly inside it: at large RAM sizes the
+        // un-capped window's top blocks wrapped onto the allocator bitmap,
+        // and splitting such a block (exec maps the brk at 0x3FE00000,
+        // which at 1 GiB sits in the wrap tail) exposed the bitmap as
+        // user-writable alias leaves — corrupting allocation state.
         let win_base: u64 = crate::alloc::base();
-        let win_size: u64 = crate::alloc::total_pages() as u64 * 4096;
+        let win_size: u64 = (crate::alloc::usable_size() / 0x20_0000) * 0x20_0000;
         for i in 0..512usize {
             let va = (i as u64) * 0x20_0000;
             let pa = if va >= dev_base && va < dev_end {

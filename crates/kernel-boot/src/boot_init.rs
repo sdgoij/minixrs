@@ -599,24 +599,34 @@ pub unsafe fn boot_create_restricted_page_table(
             const PMD_BLOCK_EL1: u64 = 0b01u64 | (0b11u64 << 8) | (1u64 << 10); // 0x701, AP=EL1 only
             const PMD_BLOCK_USER: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741, AP=EL0_RW
             let ram_base: u64 = 0x4000_0000;
-            let ram_size: u64 = 0x1000_0000; // 256MB
+            // Identity-map VA == PA across the *detected* RAM window: the
+            // physical allocator's range is [base, base + total_pages*4096)
+            // and RAM starts at 0x40000000, so its end is the RAM top. The
+            // previous code hardcoded 256 MB and derived the PA from a
+            // 0-based index (`ram_base + (index & 0xFFFFFFF)`), which wrapped
+            // VAs above 0x50000000 onto the first 256 MB whenever a boot
+            // process's page table was loaded — silently corrupting kernel
+            // state (allocator bitmap, page tables, VM phys access) at 512MB+.
+            let ram_end = kernel::hal::phys_alloc_base()
+                + (kernel::hal::phys_alloc_total_pages() as u64) * 4096;
             for i in 0..512usize {
-                let va = (i as u64) * 0x20_0000; // 2MB per PMD entry
-                let pa = if va >= ram_base && va < ram_base + ram_size {
-                    va
+                // This PMD table sits under PUD[1], so entry i covers the
+                // actual VA 0x40000000 + i*2MB.
+                let va = ram_base + (i as u64) * 0x20_0000;
+                let entry = if va < ram_end {
+                    // PMD entry 0 contains the exception vector table;
+                    // use EL1-only to avoid QEMU Cortex-A57 prefetch abort.
+                    let flags = if i == 0 {
+                        PMD_BLOCK_EL1
+                    } else {
+                        PMD_BLOCK_USER
+                    };
+                    va | flags
                 } else {
-                    // Alias non-RAM VAs to RAM (wrap around)
-                    ram_base + (va & (ram_size - 1))
-                };
-                // PMD entry 0 contains the exception vector table;
-                // use EL1-only to avoid QEMU Cortex-A57 prefetch abort.
-                let flags = if i == 0 {
-                    PMD_BLOCK_EL1
-                } else {
-                    PMD_BLOCK_USER
+                    0 // not RAM: leave unmapped (faults loudly, never aliases)
                 };
                 unsafe {
-                    core::ptr::write_volatile((user_pmd as *mut u64).add(i), pa | flags);
+                    core::ptr::write_volatile((user_pmd as *mut u64).add(i), entry);
                 }
             }
 
