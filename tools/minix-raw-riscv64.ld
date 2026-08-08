@@ -25,6 +25,10 @@ SECTIONS
 
     .bss : ALIGN(8) {
             __bss_start = .;
+            . = ALIGN(16);
+            __boot_stack_start = .;
+            . += 0x10000;
+            __boot_stack_top = .;
             *(.bss .bss.*)
             *(.sbss .sbss.*)
             __bss_end = .;

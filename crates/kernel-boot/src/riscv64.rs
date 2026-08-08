@@ -20,8 +20,10 @@ global_asm!(
 .globl _start
 
 _start:
-    # Set up a stack near the top of RAM (256MB QEMU virt).
-    li      sp, 0x8FC00000
+    # Set up the boot/trap kernel stack (64 KiB reserved at the start of
+    # .bss, so it is in RAM for any guest size). The old fixed 0x8FC00000
+    # sat at 252 MiB and faulted before any output below 256 MiB RAM.
+    la      sp, __boot_stack_top
 
     # Clear BSS
     la      t0, __bss_start

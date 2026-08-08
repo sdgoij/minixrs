@@ -799,7 +799,13 @@ pub const fn user_stack_base() -> u64 {
 
 /// User stack size in bytes.
 pub const fn user_stack_size() -> usize {
-    65536
+    // 1MB: server binaries allocate large stack frames (e.g. pfs_main's
+    // inlined init uses ~340KB) that underflow a 64KB stack into the
+    // identity-mapped RAM below it. That region only exists when RAM is
+    // >= 256 MiB (stack VA 0x0FE00000 + underflow), so give every process
+    // a stack large enough for the biggest frame — same rationale as the
+    // AArch64 HAL.
+    0x100_000
 }
 
 /// Base of the anonymous-mmap search range, above the brk heap

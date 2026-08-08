@@ -137,48 +137,31 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         }
     };
 
-    let mut user_rsp;
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        user_rsp = 0;
-        let _ = user_rsp;
-
-        let stack_top = user_stack_base + user_stack_size as u64;
-        user_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
-            Ok(rsp) => rsp,
-            Err(_) => {
-                print!("  ");
-                print!(path);
-                print!(": stack setup failed\r\n");
-                return None;
-            }
-        };
-        // Copy identity-mapped stack data to the allocated physical pages.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                user_stack_base as *const u8,
-                phys_stack_base as *mut u8,
-                user_stack_size,
-            );
+    // Write the stack frame directly into the allocated physical pages,
+    // which are always real RAM. Writing at the user-stack VA through the
+    // boot identity map instead would land beyond RAM below 256 MiB on x86
+    // (stack VA 0x0FE00000) and below that on RISC-V (stack VA 0x8FE00000),
+    // producing a garbage frame. The RSP and argv pointers are then
+    // converted from their physical addresses to the user stack VA.
+    let stack_top_phys = phys_stack_base + user_stack_size as u64;
+    let phys_rsp = match unsafe { setup_user_stack(stack_top_phys, user_stack_size, argv) } {
+        Ok(rsp) => rsp,
+        Err(_) => {
+            print!("  ");
+            print!(path);
+            print!(": stack setup failed\r\n");
+            return None;
         }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // Write stack setup directly to the physical pages.
-        // phys_stack_base is in the identity-mapped range (PUD[1]).
-        let stack_top_virt = phys_stack_base + user_stack_size as u64;
-        user_rsp = match unsafe { setup_user_stack(stack_top_virt, user_stack_size, argv) } {
-            Ok(rsp) => rsp,
-            Err(_) => {
-                print!("  ");
-                print!(path);
-                print!(": stack setup failed\r\n");
-                return None;
-            }
-        };
-        // Convert physical RSP to virtual RSP for the user process.
-        let phys_rsp = user_rsp;
-        user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
+    };
+    let user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
+    let delta = user_stack_base.wrapping_sub(phys_stack_base);
+    let argc = argv.len().min(63);
+    for i in 0..argc {
+        let slot = phys_rsp + 8 + (i as u64) * 8;
+        let val = unsafe { core::ptr::read_volatile(slot as *mut u64) };
+        unsafe {
+            core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
+        }
     }
 
     // Step 6: Store the physical code base in the new TrapFrame.
@@ -928,8 +911,10 @@ mod tests {
 
     #[test]
     fn init_stack_size_is_reasonable() {
-        // 64 KB user stack (16 pages)
-        assert_eq!(65536 % 4096, 0, "stack must be page-aligned");
-        assert_eq!(65536 / 4096, 16, "stack must be exactly 16 pages");
+        // 1 MB user stack (256 pages), matching the AArch64 HAL: server
+        // binaries allocate frames (e.g. pfs_main ~340KB) that underflow a
+        // 64 KB stack.
+        assert_eq!(0x100_000 % 4096, 0, "stack must be page-aligned");
+        assert_eq!(0x100_000 / 4096, 256, "stack must be exactly 256 pages");
     }
 }

@@ -208,11 +208,12 @@ pub const NR_FUTEX_WAKE: u64 = 62;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
-// The exec frame's pointer arithmetic depends on this value.
+// The exec frame's pointer arithmetic depends on this value. 1MB stacks
+// (x86 base 0x0FE00000, riscv base 0x8FE00000, aarch64 base 0x3FC00000).
 #[cfg(all(target_os = "minix", target_arch = "x86_64"))]
-const USER_STACK_TOP: u64 = 0x0FE1_0000;
+const USER_STACK_TOP: u64 = 0x0FF0_0000;
 #[cfg(all(target_os = "minix", target_arch = "riscv64"))]
-const USER_STACK_TOP: u64 = 0x8FE1_0000;
+const USER_STACK_TOP: u64 = 0x8FF0_0000;
 #[cfg(all(target_os = "minix", target_arch = "aarch64"))]
 const USER_STACK_TOP: u64 = 0x3FD0_0000;
 

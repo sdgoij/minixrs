@@ -858,53 +858,6 @@ pub unsafe fn exec_elf_for_target(
         // Architecture-specific user stack base.
         let user_stack_base: u64 = crate::hal::user_stack_base();
         let user_stack_size: usize = crate::hal::user_stack_size();
-        #[cfg(not(target_arch = "aarch64"))]
-        let stack_top = user_stack_base + user_stack_size as u64;
-
-        // Setup user stack.
-        // On AArch64, the user stack VA (0x3FC00000) is below RAM start
-        // (0x40000000), so writing via the boot identity map hits
-        // non-existent PA. Use a RAM-backed temp VA in the PUD[1] range
-        // instead, then convert the resulting RSP to the user VA.
-        #[cfg(target_arch = "aarch64")]
-        let user_rsp = {
-            let saved_cr3 = crate::hal::read_cr3();
-            let temp_stack_top = 0x4FC0_0000u64 + user_stack_size as u64;
-            crate::hal::write_cr3(boot_cr3_val);
-            let rsp = match crate::elf::setup_user_stack_full(
-                temp_stack_top,
-                user_stack_size,
-                argv_strs,
-                envp_strs,
-            ) {
-                Ok(rsp) => rsp,
-                Err(_) => {
-                    crate::hal::write_cr3(saved_cr3);
-                    return Err(-38);
-                }
-            };
-            crate::hal::write_cr3(saved_cr3);
-            user_stack_base + (rsp - 0x4FC0_0000u64)
-        };
-        #[cfg(not(target_arch = "aarch64"))]
-        let user_rsp = {
-            let saved_cr3 = crate::hal::read_cr3();
-            crate::hal::write_cr3(boot_cr3_val);
-            let rsp = match crate::elf::setup_user_stack_full(
-                stack_top,
-                user_stack_size,
-                argv_strs,
-                envp_strs,
-            ) {
-                Ok(rsp) => rsp,
-                Err(_) => {
-                    crate::hal::write_cr3(saved_cr3);
-                    return Err(-38);
-                }
-            };
-            crate::hal::write_cr3(saved_cr3);
-            rsp
-        };
 
         let code_start = loaded.base & !0xFFF;
         let code_end = (loaded.top + 0xFFF) & !0xFFF;
@@ -945,49 +898,49 @@ pub unsafe fn exec_elf_for_target(
             }
         }
 
-        // Allocate physical pages for the stack.
+        // Allocate physical pages for the stack and write the exec frame
+        // directly into them under the boot identity map. Writing at the
+        // user-stack VA would land beyond RAM below 256 MiB on x86
+        // (0x0FE00000), 2.3 GiB on RISC-V and 252 MiB on AArch64, so the
+        // frame is built at the allocated physical pages and the RSP plus
+        // the argv/envp string pointers are converted to the user VA.
         let stack_pages = ((stack_end - stack_start) / 4096) as usize;
         let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
             Some(b) => b,
             None => return Err(-12),
         };
-        // Copy stack data to allocated pages.
-        #[cfg(target_arch = "aarch64")]
-        {
-            // Stack was written at temp PA 0x4FC00000 via boot identity map.
-            let saved = crate::hal::read_cr3();
-            crate::hal::write_cr3(boot_cr3_val);
-            core::ptr::copy_nonoverlapping(
-                0x4FC0_0000u64 as *const u8,
-                phys_stack_base as *mut u8,
-                user_stack_size,
-            );
-            // setup_user_stack_full stored the argv/envp string pointers as
-            // absolute addresses in the temp frame (0x4FC0_0000). The stack is
-            // remapped at user_stack_base for the new process, so convert
-            // each pointer value by the frame offset before user code
-            // dereferences them (e.g. parse_args -> strlen(argv[0])).
-            let frame_delta = 0x4FC0_0000u64 - user_stack_base;
-            let total_ptrs = argv_strs.len() + envp_strs.len();
-            for i in 0..total_ptrs {
-                let slot_va = user_rsp + 8 + (i as u64) * 8;
-                let slot = (phys_stack_base + (slot_va - user_stack_base)) as *mut u64;
-                let val = core::ptr::read_volatile(slot);
-                core::ptr::write_volatile(slot, val - frame_delta);
+        let saved_cr3 = crate::hal::read_cr3();
+        crate::hal::write_cr3(boot_cr3_val);
+        let phys_rsp = match crate::elf::setup_user_stack_full(
+            phys_stack_base + user_stack_size as u64,
+            user_stack_size,
+            argv_strs,
+            envp_strs,
+        ) {
+            Ok(rsp) => rsp,
+            Err(_) => {
+                crate::hal::write_cr3(saved_cr3);
+                return Err(-38);
             }
-            crate::hal::write_cr3(saved);
+        };
+        let user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
+        // setup_user_stack_full stored the string pointers as absolute
+        // addresses in the phys frame; remap them to the user stack VA.
+        let delta = user_stack_base.wrapping_sub(phys_stack_base);
+        let argc = argv_strs.len().min(63);
+        for i in 0..argc {
+            let slot = phys_rsp + 8 + (i as u64) * 8;
+            let val = core::ptr::read_volatile(slot as *mut u64);
+            core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
         }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            let saved = crate::hal::read_cr3();
-            crate::hal::write_cr3(boot_cr3_val);
-            core::ptr::copy_nonoverlapping(
-                user_stack_base as *const u8,
-                phys_stack_base as *mut u8,
-                user_stack_size,
-            );
-            crate::hal::write_cr3(saved);
+        let argv_null = phys_rsp + 8 + (argc as u64) * 8;
+        let envc = envp_strs.len().min(63);
+        for j in 0..envc {
+            let slot = argv_null + 8 + (j as u64) * 8;
+            let val = core::ptr::read_volatile(slot as *mut u64);
+            core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
         }
+        crate::hal::write_cr3(saved_cr3);
 
         // Map user code and stack: VA → allocated PA.
         let user_flags = crate::hal::pte_user_flags();
