@@ -30,7 +30,18 @@ bootstrap target="all":
     git submodule update --init rust
     python tools/rust-config.py {{target}}
     cd rust && python x.py build library/std
+    # x.py rebuilt the stage1 rustc, but cargo fingerprints the compiler by
+    # version string — an incremental rebuild keeps the same string, so the
+    # old rlib cache stays "fresh" and the next userland build fails with
+    # E0463 ("can't find crate for ...") when rustc cannot read the stale
+    # metadata. Drop the cargo cache; the smoke-test binaries under target/
+    # are rebuilt below.
+    cargo clean
     python tools/build-std-hello.py {{target}}
+    # The C smoke-test binaries (helloc/ctest) also live under target/ and
+    # are wiped by the clean; rebuild them for x86 (build-c-hello.py is
+    # x86-only — riscv64/aarch64 C binaries are not yet supported).
+    if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py; fi
     @echo "stage1 compiler + /bin/hello ready. Re-assemble images: target/mkboot embed_initramfs,embed_minixfs && target/mkfs <arch>"
 
 # Userland + server binaries for a target, built into the shared cargo
