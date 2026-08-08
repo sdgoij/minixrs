@@ -92,6 +92,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     #[cfg(feature = "integration-tests")]
     let (mem_base, mem_size) = (0x80000000u64, 256 * 1024 * 1024);
 
+    // Cap at the boot identity map (4 GiB of 1 GiB huge pages); anything the
+    // FDT reports above that isn't mapped and would fault on access.
+    let mem_size = mem_size.min(0x1_0000_0000 - mem_base);
+
     // Page-aligned end-of-kernel estimate.
     // The kernel binary with embedded initramfs and minixfs is ~11 MB.
     // Pad to 14 MB for safety (avoids overlapping the allocator with the
@@ -105,6 +109,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     unsafe {
         arch_riscv64::alloc::init_allocator(&mmap);
     }
+
+    serial_write("memory: ");
+    kernel_boot::serial_write_u64_dec(mem_size / (1024 * 1024));
+    serial_write(" MiB\r\n");
 
     // Set up STVEC to point to the trap vector
     let trap_vec = arch_riscv64::trap_asm::trap_vector_addr();

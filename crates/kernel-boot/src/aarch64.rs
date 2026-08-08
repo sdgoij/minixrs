@@ -22,6 +22,9 @@ global_asm!(
 .globl _start
 
 _start:
+    // Preserve the DTB pointer (x0) from QEMU; x0/x1 are clobbered below.
+    mov     x19, x0
+
     // Set up a stack near the top of RAM (256MB QEMU virt, top at 0x50000000).
     ldr     x0, =__stack_top
     mov     sp, x0
@@ -37,7 +40,8 @@ _start:
     b.lt    1b
 2:
 
-    // Call kmain()
+    // Call kmain(dtb_ptr)
+    mov     x0, x19
     bl      kmain
 
     // Should never reach here
@@ -89,10 +93,13 @@ fn serial_putc(c: u8) {
 /// Must be called once on the boot CPU in EL1 (or EL2), with MMU disabled.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kmain() -> ! {
-    // QEMU virt may start in EL2. Drop to EL1 if needed.
+pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
+    // QEMU virt may start in EL2. Drop to EL1 if needed, preserving the DTB
+    // pointer (x0) across the drop.
+    let dtb_ptr: u64;
     unsafe {
         core::arch::asm!(
+            "mov {dtb}, x0",
             "mrs x0, CurrentEL",
             "cmp x0, #8",       // Check if EL2 (0b1000 = 8)
             "b.ne 1f",
@@ -103,7 +110,9 @@ pub unsafe extern "C" fn kmain() -> ! {
             "msr elr_el2, x1",
             "eret",
             "1:",
-            out("x0") _, out("x1") _,
+            dtb = out(reg) dtb_ptr,
+            inlateout("x0") arg_dtb => _,
+            out("x1") _,
         );
     }
 
@@ -112,11 +121,21 @@ pub unsafe extern "C" fn kmain() -> ! {
         core::arch::asm!("msr cpacr_el1, {val}", val = in(reg) (3u64 << 20), options(nomem, nostack));
     }
 
-    // QEMU virt machine: 256MB RAM at 0x40000000.
-    // The kernel image is loaded at 0x40000000.
-    let mem_base: u64 = 0x4000_0000;
-    let mem_size: u64 = 256 * 1024 * 1024;
-    let mem_end = mem_base + mem_size;
+    // Detect RAM from the DTB (QEMU virt passes it in x0); cap at the boot
+    // identity map, which covers 0..2 GiB (two 1 GiB blocks in enable_mmu),
+    // so RAM at 0x40000000 is detectable up to 1 GiB.
+    #[cfg(not(feature = "integration-tests"))]
+    let (mem_base, mem_size) =
+        if let Some(info) = unsafe { arch_common::fdt::parse_fdt_memory(dtb_ptr as *const u8) } {
+            info
+        } else {
+            // Fallback: assume standard QEMU virt layout with 256MB RAM
+            (0x40000000u64, 256 * 1024 * 1024)
+        };
+    #[cfg(feature = "integration-tests")]
+    let (mem_base, mem_size) = (0x40000000u64, 256 * 1024 * 1024);
+    let _ = dtb_ptr;
+    let mem_size = mem_size.min(0x8000_0000u64.saturating_sub(mem_base));
 
     // Page-aligned end-of-kernel estimate.
     // The linker script places the kernel at 0x40080000 (512KB into RAM)
@@ -127,12 +146,15 @@ pub unsafe extern "C" fn kmain() -> ! {
     // Initialize physical memory allocator.
     serial_write("initializing allocator...\r\n");
     let mut mmap = arch_aarch64::alloc::PhysicalMemoryMap::new();
-    if kernel_end < mem_end {
-        mmap.add(kernel_end, mem_end);
+    if kernel_end < mem_base + mem_size {
+        mmap.add(kernel_end, mem_base + mem_size);
     }
     unsafe {
         arch_aarch64::alloc::init_allocator(&mmap);
     }
+    serial_write("memory: ");
+    kernel_boot::serial_write_u64_dec(mem_size / (1024 * 1024));
+    serial_write(" MiB\r\n");
     serial_write("allocator ready\r\n");
 
     // Set up VBAR_EL1 (exception vector table).

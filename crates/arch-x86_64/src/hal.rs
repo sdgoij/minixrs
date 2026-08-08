@@ -720,7 +720,7 @@ pub const fn pte_flags_mask() -> u64 {
 
 /// Validate a physical address is within the identity-mapped range.
 pub const fn pte_is_valid_phys(phys: u64) -> bool {
-    phys < 0x1000_0000 && (phys >> 48) == 0
+    phys < 0x4000_0000 && (phys >> 48) == 0
 }
 
 /// Flags for a non-leaf (branch) page table entry.

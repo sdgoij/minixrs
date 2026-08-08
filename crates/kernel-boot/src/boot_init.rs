@@ -877,7 +877,7 @@ mod tests {
         // Use arch-specific values from HAL
         let stack_base = kernel::hal::user_stack_base();
         let stack_size = kernel::hal::user_stack_size() as u64;
-        let ram_top = kernel::hal::kern_vaddr() + 0x10000000; // assume 256MB RAM
+        let ram_top = kernel::hal::kern_vaddr() + 0x40000000; // assume 1 GB RAM
 
         let stack_end = stack_base + stack_size;
         assert!(

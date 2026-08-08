@@ -90,6 +90,26 @@ pub fn serial_write(s: &str) {
     let _ = s;
 }
 
+/// Write an unsigned integer in decimal to the boot console.
+pub fn serial_write_u64_dec(mut v: u64) {
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+        if v == 0 {
+            break;
+        }
+    }
+    let mut s = [0u8; 20];
+    for i in 0..n {
+        s[i] = digits[n - 1 - i];
+    }
+    // SAFETY: all bytes are ASCII digits.
+    serial_write(unsafe { core::str::from_utf8_unchecked(&s[..n]) });
+}
+
 /// Write a single byte to the boot console.
 ///
 /// On x86_64: COM1 serial port via port I/O.

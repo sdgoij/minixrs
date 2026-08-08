@@ -9,8 +9,8 @@
 .align 4
 multiboot_header:
 .long 0x1BADB002
-.long 0
-.long -0x1BADB002
+.long 0x2                 // MULTIBOOT_MEMORY_INFO: request mem_upper + memory map
+.long -0x1BADB004
 
 _start:
     // Save multiboot args to memory (registers get clobbered below)

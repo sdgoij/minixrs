@@ -15,6 +15,8 @@ use kernel_boot::boot_init;
 
 #[cfg(not(test))]
 use kernel_boot::serial_write;
+#[cfg(not(test))]
+use kernel_boot::serial_write_u64_dec;
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
@@ -22,7 +24,9 @@ use kernel_boot::serial_write;
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    kmain_body()
+    // Never reached on the normal boot path (the trampoline jumps to `kmain`
+    // directly); (0, 0) selects the conservative memory fallback.
+    kmain_body(0, 0)
 }
 
 // Linker symbol: byte just past the end of the kernel binary
@@ -32,7 +36,149 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-/// Asm entry point: adjust RSP by 8 for the jmp-entry ABI mismatch.
+/// Physical memory detection (x86_64).
+///
+/// The trampoline's identity map covers 0..1 GiB (512 × 2 MiB PD entries), so
+/// detected memory is capped there. QEMU's multiboot loader reports the size
+/// via `mem_upper` (KiB above 1 MiB) always, and an E820-style map when the
+/// trampoline header requests it (flag bit 1, see `trampoline.S`).
+const IDENTITY_MAP_TOP: u64 = 0x4000_0000; // 1 GiB
+/// Used when no valid multiboot info is available (e.g. tests or exotic
+/// loaders): conservative 256 MiB, matching the historic default.
+const FALLBACK_MEM_TOP: u64 = 0x1000_0000;
+/// QEMU reserves a window near the top of a 1 GiB guest for ACPI tables,
+/// PIIX4 PM registers and PCI config space. Only applied on the `mem_upper`
+/// fallback path — the memory map already marks it reserved.
+const FALLBACK_ACPI_CUT_START: u64 = 0x3FE0_0000;
+const FALLBACK_ACPI_CUT_END: u64 = 0x3FF0_0000;
+const MAX_MMAP_ENTRIES: usize = 32;
+
+/// Detect usable RAM from the multiboot info and build the physical map.
+/// Returns `(top_of_ram, map)`; the map is never empty (it always contains at
+/// least the fallback range so `init_allocator` can be called unconditionally).
+fn build_memory_map(
+    magic: u32,
+    info_ptr: u32,
+    kernel_end: u64,
+) -> (u64, arch_x86_64::alloc::PhysicalMemoryMap) {
+    let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
+    let (top, have_regions) =
+        if magic == arch_x86_64::multiboot::MULTIBOOT_BOOTLOADER_MAGIC && info_ptr != 0 {
+            // SAFETY: a compliant bootloader passes a valid multiboot info
+            // structure in low (identity-mapped) memory.
+            let info = unsafe { &*(info_ptr as *const arch_x86_64::multiboot::MultibootInfo) };
+            let flags = unsafe { core::ptr::read_volatile(&info.flags) };
+            if flags & arch_x86_64::multiboot::MULTIBOOT_INFO_MEM_MAP != 0 {
+                let len = unsafe { core::ptr::read_volatile(&info.mmap_length) } as usize;
+                let base = unsafe { core::ptr::read_volatile(&info.mmap_addr) } as u64;
+                let mut entries = [arch_x86_64::multiboot::MultibootMmapEntry {
+                    size: 0,
+                    addr: 0,
+                    len: 0,
+                    typ: 0,
+                }; MAX_MMAP_ENTRIES];
+                let n = copy_mmap_entries(base, len, &mut entries);
+                let top = apply_mmap_entries(&entries[..n], kernel_end, &mut mmap);
+                (top, top != 0)
+            } else if flags & arch_x86_64::multiboot::MULTIBOOT_INFO_MEMORY != 0 {
+                let mem_upper = unsafe { core::ptr::read_volatile(&info.mem_upper) } as u64;
+                let top = mem_upper_top(mem_upper);
+                if kernel_end < top {
+                    mmap.add(kernel_end, top);
+                }
+                // Without the map we don't know the reserved holes; fall back
+                // to the known QEMU 1 GiB window.
+                mmap.cut(FALLBACK_ACPI_CUT_START, FALLBACK_ACPI_CUT_END);
+                (top, true)
+            } else {
+                (FALLBACK_MEM_TOP, false)
+            }
+        } else {
+            (FALLBACK_MEM_TOP, false)
+        };
+    if !have_regions && kernel_end < top {
+        mmap.add(kernel_end, top);
+    }
+    (top, mmap)
+}
+
+/// Top of RAM from the multiboot `mem_upper` field (KiB above 1 MiB), capped
+/// at the identity-map limit.
+fn mem_upper_top(mem_upper: u64) -> u64 {
+    mem_upper
+        .saturating_add(1024)
+        .saturating_mul(1024)
+        .min(IDENTITY_MAP_TOP)
+}
+
+/// Copy the bootloader's mmap entries into a fixed buffer (volatile reads
+/// from low physical memory). Returns the entry count.
+///
+/// The multiboot spec packs each entry as `size, base_low, base_high,
+/// len_low, len_high, type` (six u32s); `MultibootMmapEntry` is the parsed
+/// form, so the raw fields are read here.
+fn copy_mmap_entries(
+    base: u64,
+    len: usize,
+    out: &mut [arch_x86_64::multiboot::MultibootMmapEntry],
+) -> usize {
+    let mut cur = base;
+    let limit = base + len as u64;
+    let mut n = 0;
+    while cur + 4 <= limit && n < out.len() {
+        // SAFETY: `cur` stays within the bootloader's mmap region in low
+        // identity-mapped memory.
+        let p = cur as *const u8;
+        let size = unsafe { core::ptr::read_volatile(p as *const u32) };
+        if size < 20 {
+            break; // malformed entry
+        }
+        if cur + 4 + size as u64 > limit {
+            break;
+        }
+        let read32 = |off: usize| unsafe { core::ptr::read_volatile(p.add(off) as *const u32) };
+        let base_low = read32(4) as u64;
+        let base_high = read32(8) as u64;
+        let len_low = read32(12) as u64;
+        let len_high = read32(16) as u64;
+        out[n] = arch_x86_64::multiboot::MultibootMmapEntry {
+            size,
+            addr: (base_high << 32) | base_low,
+            len: (len_high << 32) | len_low,
+            typ: read32(20),
+        };
+        n += 1;
+        // `size` counts the fields after `size` itself.
+        cur += 4 + size as u64;
+    }
+    n
+}
+
+/// Add available mmap entries (intersected with `[kernel_end, cap)`) to the
+/// map and return the highest usable address.
+fn apply_mmap_entries(
+    entries: &[arch_x86_64::multiboot::MultibootMmapEntry],
+    kernel_end: u64,
+    mmap: &mut arch_x86_64::alloc::PhysicalMemoryMap,
+) -> u64 {
+    let mut top = 0;
+    for e in entries {
+        if e.typ != arch_x86_64::multiboot::MULTIBOOT_MEMORY_AVAILABLE {
+            continue;
+        }
+        let start = e.addr.max(kernel_end);
+        let end = e.addr.saturating_add(e.len).min(IDENTITY_MAP_TOP);
+        if start < end {
+            mmap.add(start, end);
+            top = top.max(end);
+        }
+    }
+    top
+}
+
+/// Asm entry point: adjust RSP by 8 for the jmp-entry ABI mismatch. The
+/// trampoline passes the multiboot magic in EDI and the info pointer in ESI;
+/// both flow through unchanged into `kmain_body`'s arguments.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -44,7 +190,7 @@ pub unsafe extern "C" fn kmain() -> ! {
 /// Kernel main entry point.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain_body() -> ! {
+pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
     // Enable SSE (required by compiler_builtins memset/memcpy which use
     // SSE instructions like movdqa). CR4.OSFXSR = bit 9, OSXMMEXCPT = bit 10.
     unsafe {
@@ -97,16 +243,8 @@ pub extern "C" fn kmain_body() -> ! {
         // minix-raw.ld (ALIGN(4096) after .initramfs).
         let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
 
-        // Build the physical memory map following the MINIX pattern
-        // (see pre_init.c get_parameters + kmain):
-        //
-        //   1. Add AVAILABLE regions as reported by the platform.
-        //   2. Remove occupied regions (kernel + boot modules).
-        //   3. (After bootstrap) Release bootstrap memory back to pool.
-        //
-        // Without a multiboot-provided memory map, we use the known
-        // QEMU `-m 256M` physical layout. Everything BELOW kernel_end is
-        // occupied by one of:
+        // Everything BELOW kernel_end is occupied and must stay out of the
+        // free pool:
         //
         //   0x000000 - 0x09FFFF   Conventional (640 KB) — may contain
         //                          real-mode IVT/BDA/EBDA from SeaBIOS
@@ -119,33 +257,25 @@ pub extern "C" fn kmain_body() -> ! {
         //   0x200000 - kernel_end  Kernel binary (loaded by -device loader).
         //
         // The free pool starts at kernel_end (after all occupied ranges).
-        //
-        const PHYS_MEM_TOP: u64 = 0x1000_0000; // 256 MB
 
-        let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-
-        // Step 1: Add memory from kernel binary end to top of RAM.
-        // This is unequivocally free — the trampoline and kernel occupy
-        // everything below, and QEMU provides contiguous RAM from 0.
-        if kernel_end < PHYS_MEM_TOP {
-            mmap.add(kernel_end, PHYS_MEM_TOP);
-        }
-
-        // Step 2: Remove platform-specific reserved region near top.
-        // QEMU reserves a window for ACPI tables, PIIX4 PM registers,
-        // and PCI config space at the top of the 256 MB range.
-        mmap.cut(0x0FE0_0000, 0x0FF0_0000);
-
+        // Detect physical memory from the multiboot info (QEMU provides
+        // mem_upper + an E820-style map; the trampoline passes the pointer
+        // through kmain). The identity map covers 0..1 GiB, so anything the
+        // bootloader reports above that is capped away.
+        let (mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
         arch_x86_64::alloc::init_allocator(&mmap);
+
+        serial_write("memory: ");
+        serial_write_u64_dec(mem_top / (1024 * 1024));
+        serial_write(" MiB\r\n");
 
         // Initialize the kernel::vm physical page allocator (separate bitmap
         // from arch_x86_64::alloc). This allocator is used by kernel call 62
         // (VM_PAGING_ALLOC) which VM servers use to allocate physical pages.
         // Without this, vm_alloc_pages() returns 0 and every fork fails.
         unsafe {
-            let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
             let kernel_end_page = kernel_end.div_ceil(4096);
-            let total_pages = 256 * 1024 * 1024 / 4096;
+            let total_pages = (mem_top / 4096).max(kernel_end_page);
             if kernel_end_page < total_pages {
                 let free_chunks = [kernel::vm::MemoryChunk {
                     base: kernel_end_page,
@@ -1146,4 +1276,131 @@ fn init_serial() {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     kernel::panic::handle(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arch_x86_64::alloc::PhysicalMemoryMap;
+    use arch_x86_64::multiboot::MultibootMmapEntry;
+
+    #[test]
+    fn mem_upper_top_matches_guest_sizes() {
+        // 256 MiB guest: mem_upper = 261120 KiB above 1 MiB.
+        assert_eq!(mem_upper_top(261120), 0x1000_0000);
+        // 1 GiB guest: mem_upper = 1023 MiB in KiB.
+        assert_eq!(mem_upper_top(1024 * 1024 - 1024), IDENTITY_MAP_TOP);
+    }
+
+    #[test]
+    fn mem_upper_top_caps_at_identity_limit() {
+        assert_eq!(mem_upper_top(u64::MAX - 4096), IDENTITY_MAP_TOP);
+    }
+
+    #[test]
+    fn apply_mmap_entries_adds_available_only() {
+        let mut mmap = PhysicalMemoryMap::new();
+        let entries = [
+            MultibootMmapEntry {
+                size: 20,
+                addr: 0x100000,
+                len: 0xF00000,
+                typ: 1,
+            },
+            // Reserved hole between the two available ranges.
+            MultibootMmapEntry {
+                size: 20,
+                addr: 0x1000000,
+                len: 0x1000,
+                typ: 2,
+            },
+            MultibootMmapEntry {
+                size: 20,
+                addr: 0x1001000,
+                len: 0xFFF000,
+                typ: 1,
+            },
+        ];
+        let top = apply_mmap_entries(&entries, 0x300000, &mut mmap);
+        assert_eq!(top, 0x2000000);
+        assert_eq!(mmap.highest_phys(), 0x2000000);
+        // [3 MiB, 16 MiB) + [16 MiB + 4 KiB, 32 MiB) — the reserved hole is
+        // not merged away.
+        assert_eq!(mmap.total_available(), 0xD00000 + 0xFFF000);
+    }
+
+    #[test]
+    fn apply_mmap_entries_clips_below_kernel_end_and_caps() {
+        let mut mmap = PhysicalMemoryMap::new();
+        let entries = [
+            // Entirely below the kernel: clipped away.
+            MultibootMmapEntry {
+                size: 20,
+                addr: 0x100000,
+                len: 0x100000,
+                typ: 1,
+            },
+            // Above the identity-map cap: truncated.
+            MultibootMmapEntry {
+                size: 20,
+                addr: IDENTITY_MAP_TOP - 0x200000,
+                len: 0x400000,
+                typ: 1,
+            },
+        ];
+        let top = apply_mmap_entries(&entries, 0x300000, &mut mmap);
+        assert_eq!(top, IDENTITY_MAP_TOP);
+        assert_eq!(mmap.total_available(), 0x200000);
+    }
+
+    #[test]
+    fn build_memory_map_falls_back_without_info() {
+        for (magic, info_ptr) in [
+            (0, 0),
+            (0, 1),
+            (arch_x86_64::multiboot::MULTIBOOT_BOOTLOADER_MAGIC, 0),
+        ] {
+            let (top, mmap) = build_memory_map(magic, info_ptr, 0x300000);
+            assert_eq!(top, FALLBACK_MEM_TOP);
+            assert_eq!(mmap.total_available(), FALLBACK_MEM_TOP - 0x300000);
+        }
+    }
+
+    #[test]
+    fn copy_mmap_entries_parses_spec_packed_layout() {
+        // The multiboot spec packs entries as six u32s: size, base_low,
+        // base_high, len_low, len_high, type. Regression: the repr(C) struct
+        // places `addr: u64` at offset 8, which does NOT match this layout.
+        let mut buf = Vec::new();
+        for (base_low, len_low, typ) in
+            [(0x100000u32, 0xF00000u32, 1u32), (0x2000000, 0x1000000, 1)]
+        {
+            buf.extend_from_slice(&20u32.to_le_bytes()); // size
+            buf.extend_from_slice(&base_low.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes()); // base_high
+            buf.extend_from_slice(&len_low.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes()); // len_high
+            buf.extend_from_slice(&typ.to_le_bytes());
+        }
+        let mut out = [MultibootMmapEntry {
+            size: 0,
+            addr: 0,
+            len: 0,
+            typ: 0,
+        }; 8];
+        let n = copy_mmap_entries(buf.as_ptr() as u64, buf.len(), &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(
+            (out[0].addr, out[0].len, out[0].typ),
+            (0x100000, 0xF00000, 1)
+        );
+        assert_eq!(
+            (out[1].addr, out[1].len, out[1].typ),
+            (0x2000000, 0x1000000, 1)
+        );
+
+        let mut mmap = PhysicalMemoryMap::new();
+        let top = apply_mmap_entries(&out[..n], 0x300000, &mut mmap);
+        assert_eq!(top, 0x3000000);
+    }
 }

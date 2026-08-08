@@ -9,6 +9,7 @@ pub mod consts;
 pub mod devio;
 pub mod dmap;
 pub mod endpoint;
+pub mod fdt;
 pub mod ipc;
 pub mod ipcconst;
 pub mod safecopies;

@@ -520,10 +520,11 @@ pub fn vm_main() {
     #[cfg(target_os = "minix")]
     unsafe {
         // Physical memory range for page table allocation.
-        // On x86_64: RAM is identity-mapped at 0x400000-0x10000000.
+        // On x86_64: RAM is identity-mapped at 0x400000-0x40000000 (1 GB);
+        // stop below the ACPI/reserved window at the top of the range.
         // On RISC-V (QEMU virt): RAM starts at 0x80000000.
         #[cfg(target_arch = "x86_64")]
-        let range = (0x400000u64, 0x0FE00000u64);
+        let range = (0x400000u64, 0x3FA00000u64);
         #[cfg(target_arch = "riscv64")]
         let range = (0x81000000u64, 0x0F000000u64);
         #[cfg(target_arch = "aarch64")]
