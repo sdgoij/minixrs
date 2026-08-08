@@ -25,6 +25,8 @@ fn main() {
     println!("hello from minix std");
     println!("pid={}", std::process::id());
 
+    alloc_stress();
+
     let shared = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     for i in 0..4 {
@@ -45,4 +47,42 @@ fn main() {
     if total != 4 {
         std::process::exit(1);
     }
+}
+
+/// Exercise the mmap-backed free-list allocator: small-block churn that
+/// reuses the free list, a large buffer that grows via `realloc` across
+/// chunk boundaries, a high-alignment allocation, and a full-chunk free
+/// that returns memory to the kernel with `munmap`.
+fn alloc_stress() {
+    // Small-block churn: allocate/free in a loop so blocks cycle through
+    // the free list (and the payload contents stay intact).
+    let mut v: Vec<Box<[u8; 64]>> = Vec::new();
+    for i in 0..200u8 {
+        v.push(Box::new([i; 64]));
+    }
+    for (i, b) in v.iter().enumerate() {
+        assert_eq!(b[0], i as u8);
+        assert_eq!(b[63], i as u8);
+    }
+    drop(v);
+
+    // Grow a buffer through many reallocs (Vec doubling) up to ~1 MiB;
+    // verify the contents survive the moves, then free the whole chunk.
+    let mut big: Vec<u8> = Vec::with_capacity(16);
+    for i in 0..1_000_000u32 {
+        big.push((i % 251) as u8);
+    }
+    assert_eq!(big.len(), 1_000_000);
+    assert_eq!(big[0], 0);
+    assert_eq!(big[999_999], (999_999u32 % 251) as u8);
+    drop(big);
+
+    // High alignment: the allocator must align the payload to 4096.
+    #[repr(align(4096))]
+    struct Aligned([u8; 8192]);
+    let a = Box::new(Aligned([0u8; 8192]));
+    assert_eq!(core::ptr::addr_of!(*a).align_offset(4096), 0);
+    drop(a);
+
+    println!("alloc: churn + realloc + align ok");
 }

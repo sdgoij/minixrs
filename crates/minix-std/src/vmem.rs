@@ -60,11 +60,15 @@ pub const IPC_PRIVATE: i32 = 0;
 pub const SHM_RDONLY: i32 = 0o010000;
 pub const SHM_RND: i32 = 0o020000;
 
-const OFF_TYPE: usize = 8;
+// The kernel `Message` layout (see `crates/arch-common/src/ipc.rs`):
+//   [0..4] = m_source (filled by the kernel), [4..8] = m_type,
+//   [8..56] = m_payload (m1 fields at payload offset 0..).
+const OFF_TYPE: usize = 4;
 
 // VM_MMAP / VM_MUNMAP — message layout matching VM server protocol
-// The VM server uses the m1/m9 message fields; these offsets match
-// the generic Message struct's m1 payload.
+// (offsets are absolute message-byte offsets; the VM server reads them
+// relative to `m_payload.raw`, which starts at byte 8).
+const OFF_VM_RET: usize = 8; // u64 — reply: mapped address in m1i1|m1i2
 const OFF_VM_PROT: usize = 12; // i32 — protection flags
 const OFF_VM_FLAGS: usize = 16; // i32 — mapping flags (uses bytes 16-19)
 const OFF_VM_LEN: usize = 20; // u64 — length (uses bytes 20-27)
@@ -109,24 +113,26 @@ fn msg_set_u64(msg: &mut [u8; 64], off: usize, val: u64) {
     msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
 }
 
-/// Send a VM call and validate the reply.
+/// Send a VM call and validate the reply status (`m_type` at byte 4:
+/// 0 = OK, negative = errno). The reply payload (e.g. a mapped address
+/// for `mmap`) stays in the message buffer for the caller to read.
 #[cfg(target_os = "minix")]
-unsafe fn vm_call(msg: &mut Message) -> Result<i64, MinixErr> {
+unsafe fn vm_call(msg: &mut Message) -> Result<(), MinixErr> {
     unsafe {
         // The VM_PROC_NR is 8, messages go via sendrec.
         let _ = sendrec(VM_PROC_NR, msg);
-        let mtype = msg_i32(msg, OFF_TYPE);
-        if mtype < 0 {
-            Err(MinixErr::from_i32(mtype))
+        let status = msg_i32(msg, OFF_TYPE);
+        if status < 0 {
+            Err(MinixErr::from_i32(status))
         } else {
-            Ok(mtype as i64)
+            Ok(())
         }
     }
 }
 
 /// Send an IPC server call (for shared memory).
 #[cfg(target_os = "minix")]
-unsafe fn ipc_call(msg: &mut Message) -> Result<i32, MinixErr> {
+unsafe fn ipc_call(msg: &mut Message) -> Result<(), MinixErr> {
     unsafe {
         // IPC server is at a well-known endpoint.
         // In MINIX, user programs call IPC server via _syscall to the IPC endpoint.
@@ -135,11 +141,11 @@ unsafe fn ipc_call(msg: &mut Message) -> Result<i32, MinixErr> {
         // will be wired when the IPC server is running.
         let ipc_endpt: i32 = 10; // TODO: IPC_PROC_NR when defined
         let _ = sendrec(ipc_endpt, msg);
-        let mtype = msg_i32(msg, OFF_TYPE);
-        if mtype < 0 {
-            Err(MinixErr::from_i32(mtype))
+        let status = msg_i32(msg, OFF_TYPE);
+        if status < 0 {
+            Err(MinixErr::from_i32(status))
         } else {
-            Ok(mtype)
+            Ok(())
         }
     }
 }
@@ -179,10 +185,12 @@ pub unsafe fn mmap(
         // offset is stored at offset 40 (after fd at 36)
         msg[40..48].copy_from_slice(&offset.to_ne_bytes());
 
-        let result = vm_call(&mut msg);
-        match result {
-            Ok(r) => r as *mut u8,
-            Err(_) => MAP_FAILED,
+        if vm_call(&mut msg).is_ok() {
+            // The reply carries the mapped address as a u64 in m1i1|m1i2
+            // (message bytes 8..16).
+            msg_u64(&msg, OFF_VM_RET) as *mut u8
+        } else {
+            MAP_FAILED
         }
     }
     #[cfg(not(target_os = "minix"))]
@@ -209,7 +217,7 @@ pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
         msg_set_u64(&mut msg, OFF_VM_LEN, length as u64);
 
         match vm_call(&mut msg) {
-            Ok(_) => 0,
+            Ok(()) => 0,
             Err(_) => -1,
         }
     }
@@ -241,7 +249,11 @@ pub unsafe fn shmget(key: i32, size: usize, flags: i32) -> i32 {
         msg_set_i32(&mut msg, OFF_SHM_SIZE, size as i32);
         msg_set_i32(&mut msg, OFF_SHM_FLAGS, flags);
 
-        ipc_call(&mut msg).unwrap_or(-1)
+        // The reply carries the segment id in m1i4 (message bytes 24..28).
+        match ipc_call(&mut msg) {
+            Ok(()) => msg_i32(&msg, OFF_SHM_RETID),
+            Err(_) => -1,
+        }
     }
     #[cfg(not(target_os = "minix"))]
     {
@@ -269,12 +281,9 @@ pub unsafe fn shmat(id: i32, addr: *mut u8, flags: i32) -> *mut u8 {
         msg_set_u64(&mut msg, OFF_SHMAT_ADDR, addr as u64);
         msg_set_i32(&mut msg, OFF_SHMAT_FLAGS, flags);
 
+        // The reply carries the attached address in m2l1 (message bytes 28..36).
         match ipc_call(&mut msg) {
-            Ok(_addr) => {
-                // The returned address is in the message payload.
-                // For the stub, return the requested address.
-                addr
-            }
+            Ok(()) => msg_u64(&msg, OFF_SHMAT_RET) as *mut u8,
             Err(_) => MAP_FAILED,
         }
     }
@@ -301,7 +310,7 @@ pub unsafe fn shmdt(addr: *mut u8) -> i32 {
         msg_set_u64(&mut msg, OFF_SHMDT_ADDR, addr as u64);
 
         match ipc_call(&mut msg) {
-            Ok(_) => 0,
+            Ok(()) => 0,
             Err(_) => -1,
         }
     }
@@ -332,7 +341,7 @@ pub unsafe fn shmctl(id: i32, cmd: i32, _buf: *mut u8) -> i32 {
         msg_set_u64(&mut msg, OFF_SHMCTL_BUF, _buf as u64);
 
         match ipc_call(&mut msg) {
-            Ok(_) => 0,
+            Ok(()) => 0,
             Err(_) => -1,
         }
     }
@@ -418,7 +427,7 @@ mod tests {
         msg_set_i32(&mut msg, OFF_VM_FD, -1);
         msg[40..48].copy_from_slice(&0i64.to_ne_bytes()); // offset at 40
 
-        assert_eq!(msg_i32(&msg, 8), 0xC0A);
+        assert_eq!(msg_i32(&msg, 4), 0xC0A);
         assert_eq!(msg_u64(&msg, 28), 0x7F000000);
         assert_eq!(msg_u64(&msg, 20), 4096);
         assert_eq!(msg_i32(&msg, 12), 0x03); // PROT_READ | PROT_WRITE
@@ -433,7 +442,7 @@ mod tests {
         msg_set_u64(&mut msg, OFF_VM_ADDR, 0x7F000000);
         msg_set_u64(&mut msg, OFF_VM_LEN, 0x10000);
 
-        assert_eq!(msg_i32(&msg, 8), 0xC11);
+        assert_eq!(msg_i32(&msg, 4), 0xC11);
         assert_eq!(msg_u64(&msg, 28), 0x7F000000);
         assert_eq!(msg_u64(&msg, 20), 0x10000);
     }
@@ -446,7 +455,7 @@ mod tests {
         msg_set_i32(&mut msg, OFF_SHM_SIZE, 4096);
         msg_set_i32(&mut msg, OFF_SHM_FLAGS, IPC_CREAT | 0o600);
 
-        assert_eq!(msg_i32(&msg, 8), 0xD01);
+        assert_eq!(msg_i32(&msg, 4), 0xD01);
         assert_eq!(msg_i32(&msg, 12), 0x1234);
         assert_eq!(msg_i32(&msg, 16), 4096);
         assert_eq!(msg_i32(&msg, 20), IPC_CREAT | 0o600);
@@ -460,7 +469,7 @@ mod tests {
         msg_set_u64(&mut msg, OFF_SHMAT_ADDR, 0x10000000);
         msg_set_i32(&mut msg, OFF_SHMAT_FLAGS, SHM_RDONLY);
 
-        assert_eq!(msg_i32(&msg, 8), 0xD02);
+        assert_eq!(msg_i32(&msg, 4), 0xD02);
         assert_eq!(msg_i32(&msg, 12), 42);
         assert_eq!(msg_u64(&msg, 16), 0x10000000);
         // SHM_RDONLY is at offset 24 in the 32-bit layout (after id/addr/flags)
@@ -473,7 +482,7 @@ mod tests {
         msg_set_i32(&mut msg, OFF_TYPE, IPC_SHMDT as i32);
         msg_set_u64(&mut msg, OFF_SHMDT_ADDR, 0x10000000);
 
-        assert_eq!(msg_i32(&msg, 8), 0xD03);
+        assert_eq!(msg_i32(&msg, 4), 0xD03);
         assert_eq!(msg_u64(&msg, 16), 0x10000000);
     }
 
@@ -484,7 +493,7 @@ mod tests {
         msg_set_i32(&mut msg, OFF_SHMCTL_ID, 42);
         msg_set_i32(&mut msg, OFF_SHMCTL_CMD, IPC_STAT);
 
-        assert_eq!(msg_i32(&msg, 8), 0xD04);
+        assert_eq!(msg_i32(&msg, 4), 0xD04);
         assert_eq!(msg_i32(&msg, 12), 42);
         assert_eq!(msg_i32(&msg, 16), IPC_STAT);
     }

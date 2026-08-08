@@ -1225,6 +1225,41 @@ const MMAP_LEN: usize = 12; // u64 — bytes 20-27
 const MMAP_ADDR: usize = 20; // u64 — bytes 28-35
 const MMAP_FD: usize = 28; // i32 — bytes 36-39
 
+// MAP_FIXED (matches `minix-std::vmem::MAP_FIXED`): map at the exact
+// requested address.
+const MAP_FIXED: u32 = 0x10;
+
+// Anonymous-mmap search base: 1 GiB, above the brk range
+// (0x3FE00000..0x3FF00000) and the exec/stack regions.
+const MMAP_BASE: u64 = 0x4000_0000;
+
+/// Find the first free virtual range of `len_aligned` bytes at or above
+/// [`MMAP_BASE`], skipping all existing regions of the process.
+///
+/// Regions don't overlap (the list enforces that on insert), so a range is
+/// free iff no region overlaps it; the scan jumps past the end of any
+/// blocking region on each iteration.
+fn mmap_find_hole(regions: &region::RegionList, len_aligned: u64) -> Option<u64> {
+    let mut candidate = MMAP_BASE;
+    loop {
+        let end = candidate + len_aligned;
+        if end > kernel::pagetable::MAX_USER_ADDRESS || end < candidate {
+            return None;
+        }
+        let blocking_end = regions
+            .regions
+            .iter()
+            .flatten()
+            .filter(|r| r.vaddr < end && candidate < r.end())
+            .map(|r| r.end())
+            .max();
+        match blocking_end {
+            Some(e) => candidate = (e + PAGE_SIZE - 1) & !(PAGE_SIZE - 1),
+            None => return Some(candidate),
+        }
+    }
+}
+
 /// Handle VM_MMAP — map memory into a process.
 ///
 /// Message format (from minix-std vmem.rs):
@@ -1235,7 +1270,8 @@ const MMAP_FD: usize = 28; // i32 — bytes 36-39
 ///   raw[28..32] = fd (i32, -1 for anonymous)
 ///   raw[32..40] = file offset (i64)
 ///
-/// Return: m1i1 = mapped address on success.
+/// Return: m1i1|m1i2 (message bytes 8..16, u64) = mapped address on
+/// success, m_type = errno on failure.
 fn do_mmap(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
     if !is_user_ep(ep) {
@@ -1262,22 +1298,21 @@ fn do_mmap(msg: &mut Message) -> i32 {
     // Round length up to page boundary.
     let len_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    // Determine virtual address.
-    let vaddr = if addr == 0 || (map_flags & 0x10) == 0 {
-        // MAP_FIXED = 0x10, if not set and addr is 0, find a free range.
-        // For Phase 3, use a simple heuristic: start searching from a
-        // high user address (below the data segment) downward.
-        // TODO: Phase 5 — proper free-range search with AVL tree.
-        // For Phase 3, only support MAP_FIXED or explicit addr.
-        if addr == 0 {
-            // Anonymous mmap with no fixed address needs address allocation.
-            // For now, place at 0x40000000 (1 GB) — above the boot heap.
-            0x40000000u64
-        } else {
-            addr
-        }
-    } else {
+    // Determine virtual address: an explicit hint (with or without
+    // MAP_FIXED) is honored, an anonymous request finds the first free hole.
+    let vaddr = if addr != 0 {
         addr
+    } else if map_flags as u32 & MAP_FIXED != 0 {
+        return EINVAL;
+    } else {
+        let vmp = match unsafe { proc::vmproc_lookup(ep) } {
+            Some(vmp) => vmp,
+            None => return EINVAL,
+        };
+        match mmap_find_hole(&vmp.vm_regions, len_aligned) {
+            Some(va) => va,
+            None => return EINVAL,
+        }
     };
 
     // Page-align the address.
@@ -1296,7 +1331,7 @@ fn do_mmap(msg: &mut Message) -> i32 {
             return EINVAL;
         }
         // Insert the region (lazy — no physical pages allocated yet).
-        // Physical pages are allocated on page fault (Phase 5).
+        // Physical pages are allocated on page fault.
         let mut region = new_r;
         region.flags |= region::VR_READABLE;
         if _prot & 0x02 != 0 {
@@ -1310,8 +1345,10 @@ fn do_mmap(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // Write mapped address into m1i1 for vm_call to read.
-    msg.m_payload.m1.m1i1 = page_addr as i32;
+    // Write mapped address into m1i1|m1i2 (u64 at message bytes 8..16)
+    // for vm_call to read.
+    msg.m_payload.m1.m1i1 = (page_addr & 0xFFFF_FFFF) as i32;
+    msg.m_payload.m1.m1i2 = (page_addr >> 32) as i32;
     OK
 }
 
