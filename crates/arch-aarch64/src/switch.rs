@@ -66,16 +66,19 @@ pub unsafe fn switch_to_user(proc_ptr: *const u8) -> ! {
             "ldp     x26, x27, [x20, #0xD0]",
             "ldp     x28, x29, [x20, #0xE0]",
             "ldr     x30,      [x20, #0xF0]",
-            "ldp     x20, x21, [x20, #0xA0]",
 
             // Load the new thread's tpidr_el0 (TLS thread pointer) from
-            // Proc.p_tls at the registered offset. x21 is clobbered here and
-            // reloaded from the frame above; the offset register is the
-            // caller-provided operand.
+            // Proc.p_tls at the registered offset, using x21 as scratch. x20
+            // is still the proc pointer here; the user's x20/x21 are restored
+            // from the frame by the ldp below, AFTER the TLS load, so the
+            // thread resumes with its own register values (loading them
+            // earlier would read p_tls through the user's x20). Skipped when
+            // the value is 0 (TLS not configured).
             "ldr     x21, [x20, {tls_off}]",
             "cbz     x21, 1f",
             "msr     tpidr_el0, x21",
             "1:",
+            "ldp     x20, x21, [x20, #0xA0]",
 
             "eret",
 

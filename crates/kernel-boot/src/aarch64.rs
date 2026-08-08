@@ -293,6 +293,15 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
+                    // tpidr_el0 is not part of the trap frame: reload the
+                    // new thread's thread pointer on every switch so its
+                    // TLS accesses land in its own block (matches x86's
+                    // FS_BASE reload in restore() and RISC-V's tp in the
+                    // frame). Skipped when unset, mirroring switch_to_user.
+                    let tls = (*next_proc).p_tls;
+                    if tls != 0 {
+                        arch_aarch64::hal::set_tls_current(tls);
+                    }
                     (*next_proc).p_misc_flags.fetch_and(
                         !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
                         core::sync::atomic::Ordering::SeqCst,
@@ -341,6 +350,10 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                                 frame.as_mut_ptr(),
                                 288,
                             );
+                            let tls = (*next_proc).p_tls;
+                            if tls != 0 {
+                                arch_aarch64::hal::set_tls_current(tls);
+                            }
                             (*next_proc).p_misc_flags.fetch_and(
                                 !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
                                 core::sync::atomic::Ordering::SeqCst,
@@ -450,6 +463,10 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
+                    let tls = (*next_proc).p_tls;
+                    if tls != 0 {
+                        arch_aarch64::hal::set_tls_current(tls);
+                    }
                     (*next_proc).p_misc_flags.fetch_and(
                         !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
                         core::sync::atomic::Ordering::SeqCst,

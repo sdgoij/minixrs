@@ -17,16 +17,23 @@ pub use crate::mcontext::Mcontext;
 const UART_BASE: usize = 0x0900_0000;
 const UART_DR: usize = UART_BASE + 0x00;
 const UART_FR: usize = UART_BASE + 0x18;
+const UART_LCR_H: usize = UART_BASE + 0x2C;
 const UART_CR: usize = UART_BASE + 0x30;
 const UART_IMSC: usize = UART_BASE + 0x38; // Interrupt Mask Set/Clear
 const UART_ICR: usize = UART_BASE + 0x44; // Interrupt Clear
 const FR_RXFE: u32 = 1 << 4; // Receive FIFO empty
 const FR_TXFF: u32 = 1 << 5; // Transmit FIFO full
 const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
+const LCR_FEN: u32 = 1 << 4; // FIFO enable
+const LCR_WLEN_8: u32 = 3 << 5; // 8-bit word length
 
 /// Initialize the PL011 UART.
 pub fn uart_init() {
     unsafe {
+        // 8-bit, FIFO enabled (LCR_H.FEN). Without FEN the PL011 runs in
+        // single-byte mode (RX depth 1): a piped burst overruns and only the
+        // first byte survives, which stalls the shell on burst console input.
+        core::ptr::write_volatile(UART_LCR_H as *mut u32, LCR_FEN | LCR_WLEN_8);
         // Enable UART: UARTEN | TXE | RXE
         let cr: u32 = core::ptr::read_volatile(UART_CR as *const u32);
         core::ptr::write_volatile(UART_CR as *mut u32, cr | (1 << 0) | (1 << 8) | (1 << 9));
@@ -543,6 +550,19 @@ pub const fn pte_nonleaf_flags() -> u64 {
     crate::pte::PTE_TABLE
 }
 
+/// Fixed flags for a leaf page descriptor, OR'd into the flags the caller
+/// passed to `map_page`. AArch64's L3 page descriptor needs bits[1:0] =
+/// 0b11 (VALID|TYPE) plus AF/SH/attr/NG; the generic `map_page` would
+/// otherwise emit VALID|AP = 0b01, which is a reserved block descriptor at
+/// L3 and faults on access.
+pub const fn pte_leaf_flags() -> u64 {
+    crate::pte::PTE_TYPE
+        | crate::pte::PTE_AF
+        | crate::pte::PTE_SH_INNER
+        | crate::pte::PTE_ATTR_NORMAL
+        | crate::pte::PTE_NG
+}
+
 pub const fn pte_split_flags(source_pte: u64, next_level: u32) -> u64 {
     // Preserve attributes except the block/page type bits.
     // Keep AP, SH, AF, AttrIndx — clear type bits and address.
@@ -620,6 +640,13 @@ pub const fn user_stack_base() -> u64 {
     0x3FC0_0000u64
 }
 
+/// Base of the anonymous-mmap search range. Must stay in the user-accessible
+/// low 1 GiB (PUD[0]): everything at/above 0x40000000 is the kernel's
+/// EL1-only identity map and cannot be mapped for user access.
+pub const fn mmap_base() -> u64 {
+    0x3000_0000
+}
+
 pub const fn user_stack_size() -> usize {
     // 1MB: the current server binaries allocate large stack frames (e.g.
     // pfs_main's inlined init uses ~340KB), which would underflow a 64KB
@@ -630,6 +657,7 @@ pub const fn user_stack_size() -> usize {
 }
 
 pub const MAP_PRESENT: u64 = crate::pte::PTE_VALID;
+pub const MAP_READ: u64 = 0; // aarch64: no separate read bit; AP bits encode R/W
 pub const MAP_WRITE: u64 = 0;
 pub const MAP_USER: u64 = crate::pte::PTE_AP_EL0_RW;
 pub const MAP_NX: u64 = 0;
@@ -905,6 +933,14 @@ pub use crate::fork::vm_paging_fork;
 /// device access keeps working while this process's page table is loaded.
 /// map_page() later splits the user code/stack pages out of this table.
 ///
+/// The alias window maps onto *free* RAM above the kernel image (the
+/// physical allocator's range, which boot sets to start just past the
+/// kernel), never onto the kernel image itself: the first 16 MiB of the low
+/// GB (the NULL page and the gap below the image base 0x1000000) is left
+/// unmapped, and every other VA wraps within the free-RAM window. This keeps
+/// a stray user (or kernel copy) write to a low user VA from corrupting
+/// kernel text at PA 0x40000000.
+///
 /// # Safety
 ///
 /// Caller must be in a context where physical allocation is allowed.
@@ -912,18 +948,23 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
     unsafe {
         let pmd_low = alloc_phys_page()?;
         const PMD_BLOCK: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741
-        let ram_base: u64 = 0x4000_0000;
-        let ram_size: u64 = 0x1000_0000;
         let dev_base: u64 = 0x0800_0000;
         let dev_end: u64 = 0x1000_0000;
+        // User binaries load at VA 0x1000000; VAs below that (the NULL page
+        // and the gap under the image) are unmapped so accesses fault.
+        let user_low: u64 = 0x100_0000;
+        // Free RAM starts just past the kernel image (the allocator base);
+        // the low-GB alias wraps within it.
+        let win_base: u64 = crate::alloc::base();
+        let win_size: u64 = crate::alloc::total_pages() as u64 * 4096;
         for i in 0..512usize {
             let va = (i as u64) * 0x20_0000;
             let pa = if va >= dev_base && va < dev_end {
                 va // identity: device MMIO
-            } else if va >= ram_base && va < ram_base + ram_size {
-                va
+            } else if va < user_low || win_size == 0 {
+                0 // unmapped: NULL page + gap below the image
             } else {
-                ram_base + (va & (ram_size - 1))
+                win_base + ((va - user_low) % win_size)
             };
             core::ptr::write_volatile((pmd_low as *mut u64).add(i), pa | PMD_BLOCK);
         }

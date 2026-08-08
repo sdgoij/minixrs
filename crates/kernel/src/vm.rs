@@ -689,7 +689,14 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
 
         // Forward all user-mode page faults to VM for resolution.
         if user {
-            let slot = (*rp).p_nr as usize;
+            // Record the fault under the process's main slot: VM queries by
+            // endpoint (which maps to the main slot), so a fault from a
+            // worker thread would otherwise be invisible to it. The PAGEFAULT
+            // flag stays on the faulting thread so only that thread blocks;
+            // VMCTL_CLEAR_PAGEFAULT sweeps the whole group, letting each
+            // still-unresolved thread re-fault and get its turn.
+            let main = (*rp).group();
+            let slot = (*main).p_nr as usize;
             if slot < PF_INFO_SLOTS {
                 let info = &mut (*PAGE_FAULT_INFO.get())[slot];
                 info.fault_addr = fault_addr;

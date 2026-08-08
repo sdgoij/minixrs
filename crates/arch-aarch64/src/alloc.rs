@@ -134,12 +134,12 @@ unsafe fn bitmap_slice() -> &'static mut [u64] {
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
 }
 
-fn total_pages() -> usize {
+pub fn total_pages() -> usize {
     let state = ALLOC.get();
     unsafe { read_field(&raw const (*state).total_pages) }
 }
 
-fn base() -> u64 {
+pub fn base() -> u64 {
     let state = ALLOC.get();
     unsafe { read_field(&raw const (*state).base) }
 }

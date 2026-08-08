@@ -261,18 +261,20 @@ pub unsafe fn write_frame_ip(_frame: &mut [u8; 256], _ip: u64) {
 /// # Safety
 ///
 /// `frame` must be a valid, writable trap frame.
-pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _arg: u64) {
+pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: u64) {
     // RISC-V: set up initial register state for new process.
     // sepc = entry (stored at offset 0 = x0 slot, never loaded as GPR)
     // sp = stack pointer (x2 at offset 16)
-    // a0 = arg (x10 at offset 80) = 0
+    // a0 = arg (x10 at offset 80): the spawned-thread entry (thread_start)
+    //     receives its ThreadInit box pointer here. Exec/boot entries read
+    //     argc/argv from the stack and ignore a0.
     // sstatus = SPIE | FS_INITIAL (SIE=0, SPIE=1, SPP=0, FS=initial)
     // SIE=0 is CRITICAL: prevents supervisor interrupts from firing between
     // `csrw sstatus` and `sret` in switch_to_user.
     unsafe {
         write_frame_field(frame, 0, entry); // sepc in x0 slot
         write_frame_field(frame, 16, sp); // sp (x2 at offset 16)
-        write_frame_field(frame, 80, 0); // a0 (x10) = 0
+        write_frame_field(frame, 80, arg); // a0 (x10) = arg
         write_frame_field(
             frame,
             248,
@@ -492,6 +494,12 @@ pub const fn pte_nonleaf_flags() -> u64 {
     pte_present()
 }
 
+/// Fixed leaf flags for `map_page` (none on x86: PG_P is added by the
+/// caller and PG_RW/PG_U come in the flags).
+pub const fn pte_leaf_flags() -> u64 {
+    0
+}
+
 /// Extract permission flags from a huge-page PTE when splitting into
 /// sub-entries. RISC-V preserves all flags except the frame mask.
 pub const fn pte_split_flags(source_pte: u64, _next_level: u32) -> u64 {
@@ -559,11 +567,25 @@ pub const fn user_stack_size() -> usize {
     65536
 }
 
+/// Base of the anonymous-mmap search range, above the brk heap
+/// (0x3FE00000..0x3FF00000) and below the kernel at 0x80200000.
+pub const fn mmap_base() -> u64 {
+    0x4000_0000
+}
+
 pub const MAP_PRESENT: u64 = pte::PTE_V;
-pub const MAP_WRITE: u64 = pte::PTE_W;
+pub const MAP_READ: u64 = pte::PTE_R;
+// SV39 requires W to imply R: a leaf with W=1,R=0 is reserved and faults
+// on access, so the VM-facing "writable" flag carries both bits.
+pub const MAP_WRITE: u64 = pte::PTE_R | pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;
 pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
-pub const MAX_USER_ADDRESS: u64 = 0x0000003FFFFFFFFFFF;
+// SV39 user space is 2^38 bytes: bit 38 must be clear in U-mode, so the
+// first non-user address is 0x4000000000 (exclusive bound, like x86's
+// 0x800000000000). The old value (0x3FFFFFFFFFFF) admitted non-canonical
+// SV39 addresses, which the kernel then happily "mapped" — but the CPU
+// faults on access.
+pub const MAX_USER_ADDRESS: u64 = 0x40_0000_0000;
 
 pub fn boot_cr3() -> u64 {
     crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)

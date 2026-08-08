@@ -4712,15 +4712,23 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         match param as u32 {
             arch_common::com::VMCTL_CLEAR_PAGEFAULT => {
                 // RTS_UNSET semantics: clear flag, enqueue if becomes runnable.
-                let old = (*p)
-                    .p_rts_flags
-                    .fetch_and(!RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
-                // Was not runnable (old had flags set), is now runnable
-                // (only PAGEFAULT was the blocking flag and it's now
-                // cleared). Check with is_runnable() rather than assuming
-                // PAGEFAULT was the sole flag.
-                if old != 0 && (*p).is_runnable() {
-                    crate::sched::enqueue(p);
+                // Sweep the whole thread group: the fault info is recorded
+                // under the main slot, but the PAGEFAULT flag lives on the
+                // faulting thread slot. Threads whose fault is not yet
+                // resolved re-fault on resume and are handled one at a time.
+                let mut t = p;
+                while !t.is_null() {
+                    let old = (*t)
+                        .p_rts_flags
+                        .fetch_and(!RtsFlags::PAGEFAULT.bits(), Ordering::Relaxed);
+                    // Was not runnable (old had flags set), is now runnable
+                    // (only PAGEFAULT was the blocking flag and it's now
+                    // cleared). Check with is_runnable() rather than assuming
+                    // PAGEFAULT was the sole flag.
+                    if old != 0 && (*t).is_runnable() {
+                        crate::sched::enqueue(t);
+                    }
+                    t = (*t).p_t_next;
                 }
                 OK
             }

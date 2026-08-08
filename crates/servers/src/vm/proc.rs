@@ -384,7 +384,12 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
         use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
         use kernel::hal::{pte_to_phys, pte_user_owned};
         use kernel::pagetable::{PG_P, PG_PS};
-        let map_flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
+        // Map table pages readable (see cow.rs): on SV39 a V|U-only leaf is
+        // a table pointer, so reading the PTEs would fault. MAP_READ is 0 on
+        // x86/aarch64 and PTE_R on RISC-V.
+        let map_flags = kernel::pagetable::MAP_PRESENT
+            | kernel::pagetable::MAP_USER
+            | kernel::pagetable::MAP_READ;
 
         unsafe fn with_table<F, R>(phys: u64, flags: u64, f: F) -> Option<R>
         where

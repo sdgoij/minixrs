@@ -32,7 +32,12 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
     // VM's virtual address space before dereferencing them — VM does
     // NOT have an identity map.
     use crate::vm::{vm_mappage, vm_unmappage};
-    let flags = kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER;
+    // Map page-table pages readable: MAP_PRESENT|MAP_USER alone produces a
+    // V|U PTE that SV39 decodes as a table pointer (R=W=X=0), so the PTE
+    // reads below fault. MAP_READ is 0 on x86/aarch64 (no read bit) and
+    // PTE_R on RISC-V.
+    let flags =
+        kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER | kernel::pagetable::MAP_READ;
 
     let parent_va = vm_mappage(parent_cr3, flags);
     if parent_va == 0 {
@@ -48,11 +53,15 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
 
     for l4 in 0..USER_ENTRIES {
         let e4 = unsafe { core::ptr::read(parent.add(l4)) };
-        if e4 & PG_P == 0 {
+        // Skip huge pages at the root: SV39 keeps 1 GiB identity blocks
+        // (supervisor, no U) directly in the PGD, and a 4-level walk would
+        // otherwise treat them as table pointers, map garbage physical
+        // memory, and fault on the reads below.
+        if e4 & PG_P == 0 || e4 & PG_PS != 0 {
             continue;
         }
         let child_e4 = unsafe { core::ptr::read(child.add(l4)) };
-        if child_e4 & PG_P == 0 {
+        if child_e4 & PG_P == 0 || child_e4 & PG_PS != 0 {
             continue;
         }
 

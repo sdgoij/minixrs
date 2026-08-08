@@ -728,6 +728,12 @@ pub const fn pte_nonleaf_flags() -> u64 {
     pte_present() | pte_writable() | pte_user()
 }
 
+/// Fixed leaf flags for `map_page` (none on x86: PG_P is added by the
+/// caller and PG_RW/PG_U come in the flags).
+pub const fn pte_leaf_flags() -> u64 {
+    0
+}
+
 /// Extract permission flags from a huge-page PTE when splitting into
 /// sub-entries at `next_level` (0 = leaf 4KB, >0 = further non-leaf).
 pub const fn pte_split_flags(source_pte: u64, next_level: u32) -> u64 {
@@ -796,8 +802,15 @@ pub const fn user_stack_size() -> usize {
     65536
 }
 
+/// Base of the anonymous-mmap search range, above the brk heap
+/// (0x3FE00000..0x3FF00000) and the user stack.
+pub const fn mmap_base() -> u64 {
+    0x4000_0000
+}
+
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
+pub const MAP_READ: u64 = 0; // x86 has no read bit; absence of PG_RW is read-only
 pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW
 pub const MAP_USER: u64 = 0x0000000000000004; // PG_U
 pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX

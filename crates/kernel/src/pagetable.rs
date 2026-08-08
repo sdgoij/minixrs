@@ -5,7 +5,8 @@
 
 // Re-export page table constants and basic operations from hal
 pub use crate::hal::{
-    MAP_NX, MAP_PRESENT, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3, write_cr3,
+    MAP_NX, MAP_PRESENT, MAP_READ, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3,
+    write_cr3,
 };
 
 /// Page table entry type (arch-specific, provided by HAL).
@@ -162,7 +163,7 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), PageTableError> {
     unsafe {
         let levels = crate::hal::pt_levels();
-        let pte_flags = (flags & PG_PTEMASK) | PG_P;
+        let pte_flags = (flags & PG_PTEMASK) | PG_P | crate::hal::pte_leaf_flags();
         let pte_val = crate::hal::build_pte(pa, pte_flags);
         let mut table_phys = cr3;
 

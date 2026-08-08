@@ -762,12 +762,17 @@ pub fn thread_yield() {
 }
 
 /// Set this thread's thread pointer (TLS base): the FS base on x86_64,
-/// tpidr_el0 on AArch64, a no-op on RISC-V (tp is a GPR the thread library
-/// sets directly). Stored per-thread by the kernel and reloaded on every
-/// context switch; also applied to the calling thread immediately.
+/// tpidr_el0 on AArch64, the `tp` GPR on RISC-V. Stored per-thread by the
+/// kernel and reloaded on every context switch; also applied to the calling
+/// thread immediately. On RISC-V the kernel keeps `p_tls` for the frame but
+/// cannot write `tp` for us (it is a plain GPR in user mode), so the runtime
+/// sets it here, after the syscall returns (the trap epilogue would otherwise
+/// restore the pre-syscall value from the saved frame).
 pub fn thread_set_tls(addr: usize) {
     unsafe {
         syscall1(NR_THREAD_SET_TLS, addr as u64);
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!("mv tp, {addr}", addr = in(reg) addr, options(nomem, nostack));
     }
 }
 

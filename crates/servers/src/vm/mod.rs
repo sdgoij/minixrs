@@ -128,7 +128,20 @@ pub static VM_SELF_CR3: AtomicU64 = AtomicU64::new(0);
 /// Starts at 0x7F0000000000 — well above the heap (0x3FE00000) and
 /// below the kernel half (0xFFFF800000000000). Each call to `vm_find_hole`
 /// bumps this by the requested number of pages.
-static VM_NEXT_MAP_VA: AtomicU64 = AtomicU64::new(0x7F0000000000);
+///
+/// Base is per-arch: just below the arch's user-space top so the scratch
+/// mappings never collide with code/heap/mmap/stack (which all live in the
+/// low GiBs). 4 GiB of headroom = 1M transient mappings. The old fixed
+/// 0x7F0000000000 was x86-only and above riscv64's SV39 user top
+/// (0x4000000000), so every self-map on riscv64 was rejected by the
+/// kernel's MAP bounds check and demand-paging bailed. Page-aligned:
+/// aarch64's MAX_USER_ADDRESS (2^44 - 1) ends in 0xFFF, so the raw
+/// subtraction would hand out misaligned scratch VAs — map_page maps the
+/// page containing the VA, and a 4KB read from the returned VA would cross
+/// into an unmapped page (observed: vm_destroy's page-table walk faulted
+/// and VM deadlocked with PAGEFAULT on hello exit).
+static VM_NEXT_MAP_VA: AtomicU64 =
+    AtomicU64::new((kernel::pagetable::MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF);
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -750,7 +763,13 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     // the new binary's mappings. Walking the PTE directly is authoritative.
     if is_prot_fault && is_write {
         let pte_val = crate::vm::vm_walk_page(cr3, addr);
-        if pte_val & (kernel::pagetable::PG_P | kernel::pagetable::PG_U) != 0
+        // Only a present *user* page with a write fault is a COW candidate.
+        // A present page without the user bit (e.g. the kernel's
+        // supervisor-only identity huge pages the exec'd page table copies
+        // on RISC-V) falls through to the normal demand-paging path below,
+        // which maps a fresh user page over it.
+        if pte_val & (kernel::pagetable::PG_P | kernel::pagetable::PG_U)
+            == (kernel::pagetable::PG_P | kernel::pagetable::PG_U)
             && pte_val & kernel::pagetable::PG_RW == 0
         {
             // Present, user, read-only with write fault → COW.
@@ -762,12 +781,17 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
             }
             return;
         }
-        // PTE is read-only → SIGSEGV (write to non-writable page)
-        sys_kill(ep, SIGSEGV);
-        unsafe {
-            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-        }
-        return;
+        // Not a COW candidate. Two cases land here and must fall through
+        // to the demand-paging path below rather than SIGSEGV:
+        //  1. Not-present pages: the RISC-V trap always sets the "present"
+        //     bit in the synthesized error code, so not-present store
+        //     faults arrive with is_prot_fault set (and aarch64's raw ESR
+        //     sets both flag bits for leaf-level faults).
+        //  2. Supervisor-only identity pages the exec'd page table copies
+        //     on RISC-V (and the low-GB alias on aarch64): writing the
+        //     mmap heap at mmap_base() hits one of these blocks.
+        // The region lookup below then maps a fresh user page over the
+        // address when a region covers it, and SIGSEGVs otherwise.
     }
 
     // Non-COW fault: find region for demand paging.
@@ -1229,18 +1253,18 @@ const MMAP_FD: usize = 28; // i32 — bytes 36-39
 // requested address.
 const MAP_FIXED: u32 = 0x10;
 
-// Anonymous-mmap search base: 1 GiB, above the brk range
-// (0x3FE00000..0x3FF00000) and the exec/stack regions.
-const MMAP_BASE: u64 = 0x4000_0000;
+// Anonymous-mmap search base, above the brk range (0x3FE00000..0x3FF00000)
+// and the exec/stack regions; per-arch so it stays clear of the kernel's
+// identity map (aarch64: user space is the low 1 GiB, PUD[0]).
 
 /// Find the first free virtual range of `len_aligned` bytes at or above
-/// [`MMAP_BASE`], skipping all existing regions of the process.
+/// [`kernel::hal::mmap_base`], skipping all existing regions of the process.
 ///
 /// Regions don't overlap (the list enforces that on insert), so a range is
 /// free iff no region overlaps it; the scan jumps past the end of any
 /// blocking region on each iteration.
 fn mmap_find_hole(regions: &region::RegionList, len_aligned: u64) -> Option<u64> {
-    let mut candidate = MMAP_BASE;
+    let mut candidate = kernel::hal::mmap_base();
     loop {
         let end = candidate + len_aligned;
         if end > kernel::pagetable::MAX_USER_ADDRESS || end < candidate {
@@ -1459,7 +1483,22 @@ fn do_exec_newmem(msg: &mut Message) -> i32 {
             for i in 0..crate::vm::region::MAX_REGIONS {
                 vmp.vm_regions.regions[i] = None;
             }
-            vmp.vm_region_top = 0;
+            // Re-establish the pre-allocated brk heap (the kernel's exec
+            // path maps 0x3FE00000..0x3FF00000 with physical pages before
+            // the image runs) so `brk`/`sbrk` keep returning heap addresses
+            // and faults inside the heap can be demand-paged. Mirrors
+            // `vm_init_boot`'s setup for boot processes.
+            let heap_region = crate::vm::region::VirRegion::new(
+                0x3FE00000u64,
+                0x100000u64, // 1 MB
+                crate::vm::region::VR_READABLE
+                    | crate::vm::region::VR_WRITABLE
+                    | crate::vm::region::VR_ANON
+                    | crate::vm::region::VR_PRESENT
+                    | crate::vm::region::VR_DATA,
+            );
+            let _ = vmp.vm_regions.insert(heap_region);
+            vmp.vm_region_top = 0x3FF00000u64;
         }
     }
 
