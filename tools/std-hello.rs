@@ -81,7 +81,8 @@ fn alloc_stress() {
     #[repr(align(4096))]
     struct Aligned([u8; 8192]);
     let a = Box::new(Aligned([0u8; 8192]));
-    assert_eq!(core::ptr::addr_of!(*a).align_offset(4096), 0);
+    let payload = core::ptr::addr_of!((*a).0);
+    assert_eq!(payload.align_offset(4096), 0);
     drop(a);
 
     println!("alloc: churn + realloc + align ok");
