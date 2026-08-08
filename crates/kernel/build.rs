@@ -61,6 +61,12 @@ fn assemble(
     // top-level `just build <target>` recipes).
     let mut bins = Vec::new();
     for &(dest, bin_name) in manifest::BOOT_BINS {
+        // The C smoke-test binaries (helloc/ctest) are only built for
+        // x86_64 today (tools/build-c-hello.py is x86-only); skip them on
+        // other arches until the build script grows target support.
+        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+            continue;
+        }
         let src = release.join(bin_name);
         let data = match std::fs::read(&src) {
             Ok(d) => d,

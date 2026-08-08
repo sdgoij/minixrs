@@ -32,6 +32,8 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/helloc` is the C smoke-test binary: freestanding C linked
     // against `minix-libc`. Rebuild it with `tools/build-c-hello.py`
     // (clang + the fork's stage1 rustc), then re-assemble the images.
+    // Built for x86_64 only today (build-c-hello.py is x86-only); the
+    // kernel build.rs skips them on other arches.
     ("/bin/helloc", "helloc"),
     // `/bin/ctest` is the second C smoke test: uses the full libc (errno,
     // malloc family, printf/stdio, strings). Same build path as helloc.

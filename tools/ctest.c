@@ -1,4 +1,5 @@
-/* C smoke test for the minix libc: errno, malloc family, stdio, strings.
+/* C smoke test for the minix libc: errno, malloc family, stdio, strings,
+ * pthreads (1:1 kernel threads) with per-thread errno.
  * Built by tools/build-c-hello.py and embedded as /bin/ctest.
  */
 
@@ -8,6 +9,24 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
+
+static int counter = 0;
+static pthread_mutex_t counter_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *worker(void *arg) {
+    long id = (long)arg;
+    /* per-thread errno: each thread must see its own slot */
+    errno = 100 + (int)id;
+    int my_errno = errno;
+    pthread_mutex_lock(&counter_lock);
+    counter++;
+    int c = counter;
+    pthread_mutex_unlock(&counter_lock);
+    printf("  worker %ld: errno=%d tid=%lu counter=%d\n", id, my_errno,
+           pthread_self(), c);
+    return (void *)(id * 7);
+}
 
 int main(int argc, char **argv) {
     printf("ctest: argc=%d argv0=%s\n", argc, argv[0]);
@@ -51,6 +70,28 @@ int main(int argc, char **argv) {
     printf("fmt: %d %u %x %X %ld %zu %p %c %%\n", -42, 300u, 0xbeef,
            0xbeef, -7L, (size_t)3, (void *)p, 'Q');
     printf("%05d|%-5d|\n", 42, 42);
+
+    /* pthreads: 4 threads, per-thread errno, mutex-protected counter */
+    {
+        pthread_t th[4];
+        for (long i = 0; i < 4; i++) {
+            if (pthread_create(&th[i], NULL, worker, (void *)i) != 0) {
+                printf("pthread_create(%ld) failed errno=%d\n", i, errno);
+                return 1;
+            }
+        }
+        errno = 0;
+        for (int i = 0; i < 4; i++) {
+            void *ret = NULL;
+            if (pthread_join(th[i], &ret) != 0) {
+                printf("pthread_join(%d) failed errno=%d\n", i, errno);
+                return 1;
+            }
+            printf("  joined %d ret=%ld\n", i, (long)ret);
+        }
+        printf("pthread: counter=%d (expected 4) main_errno=%d %s\n", counter,
+               errno, counter == 4 && errno == 0 ? "ok" : "FAIL");
+    }
 
     puts("ctest done");
     return 0;

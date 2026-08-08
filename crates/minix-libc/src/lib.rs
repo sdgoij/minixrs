@@ -9,26 +9,119 @@
 
 #![no_std]
 #![allow(dead_code)]
+// `#[thread_local]` on statics is feature-gated in this toolchain line;
+// the std crate declares the same feature for its TLS statics.
+#![feature(thread_local)]
+
+#[cfg(target_os = "minix")]
+mod pthread;
 
 #[cfg(target_os = "minix")]
 use core::ffi::{c_char, c_int, c_void};
 
 // ---- errno ----
 
-static mut ERRNO: i32 = 0;
+/// Per-thread errno in native TLS. `crt0` (and the pthread trampoline) sets
+/// up the thread pointer (FS base) before `main`, so this is genuinely
+/// per-thread: each C thread sees its own `errno`.
+#[thread_local]
+static ERRNO: core::cell::UnsafeCell<i32> = core::cell::UnsafeCell::new(0);
 
-/// POSIX `errno` accessor. The OS has no threads, so a plain static suffices.
+/// POSIX `errno` accessor: returns this thread's TLS errno slot.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __errno_location() -> *mut c_int {
-    // SAFETY: single-threaded; the pointer is only used by C `errno` reads.
-    core::ptr::addr_of_mut!(ERRNO)
+    // SAFETY: the pointer is only used by C `errno` reads and stays valid for
+    // the thread's lifetime.
+    ERRNO.get().cast::<c_int>()
 }
 
 #[inline]
 fn set_errno(e: i32) {
-    // SAFETY: single-threaded.
-    unsafe { ERRNO = e };
+    // SAFETY: only this thread touches its own TLS errno slot.
+    unsafe { *ERRNO.get() = e };
+}
+
+// ---- per-thread TLS runtime ----
+
+// The TLS block image bounds, defined by `tools/minix-user.ld`: `.tdata`
+// holds the initialized image, `.tbss` follows it zeroed. The runtime copies
+// the image into a per-thread block and sets the thread pointer at the block
+// (FS base on x86_64, tpidr_el0 on AArch64, tp on RISC-V).
+#[cfg(target_os = "minix")]
+unsafe extern "C" {
+    static __tls_start: u8;
+    static __tdata_end: u8;
+    static __tls_end: u8;
+}
+
+/// Allocate and initialize a TLS block for a new thread, returning the
+/// thread pointer to install via `minix_rt::thread_set_tls` (0 on failure).
+///
+/// Runs on the main thread — the C heap is single-threaded and worker
+/// threads must not call `sbrk` — so `pthread_create` prepares the block
+/// here and the trampoline only issues the `thread_set_tls` syscall.
+#[cfg(target_os = "minix")]
+pub(crate) fn tls_block_alloc() -> usize {
+    unsafe {
+        let start = core::ptr::addr_of!(__tls_start).addr();
+        let tdata_end = core::ptr::addr_of!(__tdata_end).addr();
+        let end = core::ptr::addr_of!(__tls_end).addr();
+        let size = end - start;
+        if size == 0 {
+            return 0;
+        }
+        // Allocate size + 32 so the block can be 16-aligned, and so there is
+        // room for the x86_64 TCB self-pointer just past the TLS image (the
+        // thread pointer may sit up to 15 bytes above `block + size`).
+        let alloc = minix_rt::sbrk(size as isize + 32);
+        if alloc < 0 {
+            return 0;
+        }
+        let block = ((alloc as usize) + 15) & !15;
+        // Copy the `.tdata` init image, zero the `.tbss` tail.
+        core::ptr::copy_nonoverlapping(
+            core::ptr::with_exposed_provenance::<u8>(start),
+            core::ptr::with_exposed_provenance_mut::<u8>(block),
+            tdata_end - start,
+        );
+        core::ptr::write_bytes(
+            core::ptr::with_exposed_provenance_mut::<u8>(block + (tdata_end - start)),
+            0,
+            end - tdata_end,
+        );
+        // Thread-pointer convention per arch: x86_64 uses the negative-offset
+        // TLS layout (TP past the end of the image, 16-aligned, self-pointer
+        // at [TP]); aarch64/riscv64 point at the block start.
+        #[cfg(target_arch = "x86_64")]
+        let tp = {
+            let tp = (block + size + 15) & !15;
+            core::ptr::write(core::ptr::with_exposed_provenance_mut::<u64>(tp), tp as u64);
+            tp
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let tp = block;
+        tp
+    }
+}
+
+/// Initialize the calling thread's TLS block and thread pointer. Called by
+/// `crt0` before `main` and by the pthread trampoline for new threads, so
+/// any `#[thread_local]` access (errno, the pthread handle) works.
+///
+/// Best effort: on heap failure the thread pointer is left unset and TLS
+/// accesses will fault.
+///
+/// # Safety
+///
+/// Must be called exactly once per thread, before any TLS access on it.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_libc_tls_init() {
+    let tp = tls_block_alloc();
+    if tp != 0 {
+        minix_rt::thread_set_tls(tp);
+    }
 }
 
 /// Standard POSIX error return: record `errno` and return -1.
@@ -49,6 +142,12 @@ const ALIGN: usize = 16;
 const USED: usize = 1;
 
 static mut HEAP_START: usize = 0;
+/// Exact end of the heap (past the last block). The program break may be
+/// higher — the VM server rounds it to pages, and thread stacks are sbrk'd
+/// beyond it — so the free-list walk must not use `current_break()`: it
+/// would cross into the zeroed/rounded gap or the thread-stack region and
+/// read a size-0 header (infinite loop).
+static mut HEAP_END: usize = 0;
 
 #[inline]
 unsafe fn hdr_size(p: *mut u8) -> usize {
@@ -76,13 +175,6 @@ fn align_up(n: usize, a: usize) -> usize {
     (n + a - 1) & !(a - 1)
 }
 
-/// Current program break (0 on error).
-#[cfg(target_os = "minix")]
-unsafe fn current_break() -> usize {
-    let r = unsafe { minix_rt::brk(core::ptr::null()) };
-    if r < 0 { 0 } else { r as usize }
-}
-
 /// `malloc(size)`: allocate `size` bytes, 16-byte aligned.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -98,14 +190,14 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
                 return core::ptr::null_mut();
             }
             HEAP_START = base as usize;
+            HEAP_END = HEAP_START + need;
             set_hdr(base as *mut u8, need, USED);
-            return (base as usize + HDR) as *mut c_void;
+            return (HEAP_START + HDR) as *mut c_void;
         }
 
         // First-fit over the existing blocks.
-        let end = current_break();
+        let end = HEAP_END;
         let mut p = heap;
-        let mut last = 0usize;
         while p < end {
             let sz = hdr_size(p as *mut u8);
             if hdr_flags(p as *mut u8) == 0 && sz >= need {
@@ -118,32 +210,26 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
                 }
                 return (p + HDR) as *mut c_void;
             }
-            last = p;
+            // A zeroed or out-of-range header means the walk left the real
+            // heap (thread stacks sit in the same break region); stop here.
+            if sz == 0 || p + sz > end {
+                break;
+            }
             p += sz;
         }
 
-        // Nothing fit: grow the trailing free block or extend the break.
-        let base = if last != 0 && hdr_flags(last as *mut u8) == 0 {
-            let sz = hdr_size(last as *mut u8);
-            let extra = need - sz;
-            let r = minix_rt::sbrk(extra as isize);
-            if r < 0 {
-                set_errno(-r as i32);
-                return core::ptr::null_mut();
-            }
-            set_hdr(last as *mut u8, sz + extra, USED);
-            last
-        } else {
-            let r = minix_rt::sbrk(need as isize);
-            if r < 0 {
-                set_errno(-r as i32);
-                return core::ptr::null_mut();
-            }
-            let b = r as usize;
-            set_hdr(b as *mut u8, need, USED);
-            b
-        };
-        (base + HDR) as *mut c_void
+        // Nothing fit: extend the break and place a fresh block there (it
+        // may not be contiguous with the old heap — pthread stacks were
+        // sbrk'd in between — so track the new end explicitly).
+        let r = minix_rt::sbrk(need as isize);
+        if r < 0 {
+            set_errno(-r as i32);
+            return core::ptr::null_mut();
+        }
+        let b = r as usize;
+        set_hdr(b as *mut u8, need, USED);
+        HEAP_END = b + need;
+        (b + HDR) as *mut c_void
     }
 }
 
@@ -160,7 +246,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
         set_hdr(block as *mut u8, sz, 0);
         // Coalesce with the next block.
         let next = block + sz;
-        if next < current_break() && hdr_flags(next as *mut u8) == 0 {
+        if next < HEAP_END && hdr_flags(next as *mut u8) == 0 {
             sz += hdr_size(next as *mut u8);
             set_hdr(block as *mut u8, sz, 0);
         }
@@ -170,6 +256,9 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
             let psz = hdr_size(prev as *mut u8);
             if prev + psz == block && hdr_flags(prev as *mut u8) == 0 {
                 set_hdr(prev as *mut u8, psz + sz, 0);
+                break;
+            }
+            if psz == 0 || prev + psz > HEAP_END {
                 break;
             }
             prev += psz;
@@ -718,8 +807,16 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
     if dest.is_null() || src.is_null() {
         return dest;
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(src as *const u8, dest as *mut u8, n);
+    // Byte-by-byte volatile copy: `copy_nonoverlapping` lowers to a call to
+    // `memcpy` itself on this target (LLVM emits a libcall for the memcpy
+    // intrinsic, which tail-call-optimizes into an infinite loop). Volatile
+    // accesses cannot be turned into a libcall.
+    let d = dest as *mut u8;
+    let s = src as *const u8;
+    for i in 0..n {
+        unsafe {
+            core::ptr::write_volatile(d.add(i), core::ptr::read_volatile(s.add(i)));
+        }
     }
     dest
 }
@@ -731,8 +828,20 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
     if dest.is_null() || src.is_null() {
         return dest;
     }
+    // Same volatile-byte-loop rationale as `memcpy`; copy backward when the
+    // destination overlaps the source from above so the copy stays correct.
+    let d = dest as *mut u8;
+    let s = src as *const u8;
     unsafe {
-        core::ptr::copy(src as *const u8, dest as *mut u8, n);
+        if (dest as usize) <= (src as usize) {
+            for i in 0..n {
+                core::ptr::write_volatile(d.add(i), core::ptr::read_volatile(s.add(i)));
+            }
+        } else {
+            for i in (0..n).rev() {
+                core::ptr::write_volatile(d.add(i), core::ptr::read_volatile(s.add(i)));
+            }
+        }
     }
     dest
 }
