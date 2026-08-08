@@ -928,17 +928,19 @@ fn do_remap(msg: &mut Message) -> i32 {
     }
 
     // Walk the source page table to get the physical address of src_addr.
-    let walk_result = unsafe { kernel::pagetable::walk(src_cr3, src_addr) };
-    let src_pa = match walk_result {
-        Ok(r) => r.pte_value & 0x000FFFFFFFFFF000,
-        Err(_) => return EINVAL,
-    };
+    // Via the kernel (ring 0): a direct `kernel::pagetable::walk` is fine,
+    // but `map_page`/`tlb_flush_page` below execute `invlpg`, which is
+    // privileged and #GPs from VM's user context.
+    let src_pa = crate::vm::vm_walk_page(src_cr3, src_addr) & 0x000FFFFFFFFFF000;
+    if src_pa == 0 {
+        return EINVAL;
+    }
 
     // Map the source physical page into the destination at the same
     // virtual address (standard shared-memory remap).
     let flags =
         kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE;
-    if unsafe { kernel::pagetable::map_page(dst_cr3, src_addr, src_pa, flags) }.is_err() {
+    if crate::vm::vm_map_page_in(dst_cr3, src_addr, src_pa, flags) != 0 {
         return EINVAL;
     }
 
@@ -988,9 +990,10 @@ fn do_map_phys(msg: &mut Message) -> i32 {
 
     let mapped_vaddr = vaddr;
     for offset in (0..rounded_len).step_by(page_size as usize) {
-        if unsafe { kernel::pagetable::map_page(cr3, vaddr + offset, phys + offset, flags) }
-            .is_err()
-        {
+        // Via the kernel (ring 0): `kernel::pagetable::map_page` calls
+        // `tlb_flush_page` (`invlpg`), which is privileged and #GPs from
+        // VM's user context.
+        if crate::vm::vm_map_page_in(cr3, vaddr + offset, phys + offset, flags) != 0 {
             return EINVAL;
         }
     }
@@ -1017,19 +1020,11 @@ fn do_get_phys(msg: &mut Message) -> i32 {
     }
 
     // Walk the page table to get the physical address of the given
-    // virtual address.
-    let result = unsafe { kernel::pagetable::walk(cr3, addr) };
-    match result {
-        Ok(r) => {
-            let pa = r.pte_value & 0x000FFFFFFFFFF000;
-            msg.m_payload.m1.m1i1 = pa as i32;
-            OK
-        }
-        Err(_) => {
-            msg.m_payload.m1.m1i1 = 0;
-            OK
-        }
-    }
+    // virtual address (via the kernel).
+    let pte = crate::vm::vm_walk_page(cr3, addr);
+    let pa = pte & 0x000FFFFFFFFFF000;
+    msg.m_payload.m1.m1i1 = pa as i32;
+    OK
 }
 
 /// Handle VM_GETREF — get reference count of a region.
@@ -1108,9 +1103,13 @@ fn do_munmap(msg: &mut Message) -> i32 {
         }
     }
 
-    // Unmap pages from the page table.
-    unsafe {
-        let _ = kernel::pagetable::unmap_range(cr3, addr, len_aligned);
+    // Unmap pages from the page table, one at a time via the kernel (ring
+    // 0). `kernel::pagetable::unmap_range` calls `tlb_flush_page`
+    // (`invlpg`), which is privileged and #GPs from VM's user context.
+    let mut va = addr;
+    while va < addr + len_aligned {
+        let _ = crate::vm::vm_unmap_page_in(cr3, va);
+        va += PAGE_SIZE;
     }
 
     // Free any physical pages that were allocated.
