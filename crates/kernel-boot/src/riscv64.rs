@@ -94,9 +94,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     #[cfg(feature = "integration-tests")]
     let (mem_base, mem_size) = (0x80000000u64, 256 * 1024 * 1024);
 
-    // Cap at the boot identity map (4 GiB of 1 GiB huge pages); anything the
+    // Cap at the boot identity map (32 GiB of 1 GiB huge pages); anything the
     // FDT reports above that isn't mapped and would fault on access.
-    let mem_size = mem_size.min(0x1_0000_0000 - mem_base);
+    let mem_size = mem_size.min(0x8_0000_0000 - mem_base);
 
     // Page-aligned end-of-kernel estimate.
     // The kernel binary with embedded initramfs and minixfs is ~11 MB.
@@ -112,9 +112,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         arch_riscv64::alloc::init_allocator(&mmap);
     }
 
-    serial_write("memory: ");
-    kernel_boot::serial_write_u64_dec(mem_size / (1024 * 1024));
-    serial_write(" MiB\r\n");
+    kernel_boot::print_memory_banner(mem_size, mmap.total_available());
 
     // Set up STVEC to point to the trap vector
     let trap_vec = arch_riscv64::trap_asm::trap_vector_addr();
@@ -1049,19 +1047,15 @@ unsafe fn create_boot_page_table() -> Option<u64> {
             | arch_riscv64::pte::PTE_W
             | arch_riscv64::pte::PTE_X;
 
-        // Map using 1GB huge pages at L2 level:
-        // - L2[0]: VA 0x00000000-0x3FFFFFFF → PA 0x00000000 (covers devices, CLINT)
-        // - L2[1]: VA 0x40000000-0x7FFFFFFF → PA 0x40000000
-        // - L2[2]: VA 0x80000000-0xBFFFFFFF → PA 0x80000000 (covers RAM, kernel)
-        // - L2[3]: VA 0xC0000000-0xFFFFFFFF → PA 0xC0000000
+        // Map 1 GiB huge pages at L2, identity 0..32 GiB:
+        // - L2[i] covers VA [i<<30, (i+1)<<30) → PA i<<30.
+        // Per-process tables copy these supervisor-only entries, so the
+        // kernel keeps identity access to all of RAM under any page table.
         let root = root_phys as *mut u64;
-        for (i, base) in [0x00000000u64, 0x40000000, 0x80000000, 0xC0000000]
-            .iter()
-            .enumerate()
-        {
+        for i in 0..32u64 {
             // build_pte encodes PPN = pa >> 12 correctly for SV39
-            let pte = arch_riscv64::hal::build_pte(*base, flags);
-            core::ptr::write(root.add(i), pte);
+            let pte = arch_riscv64::hal::build_pte(i << 30, flags);
+            core::ptr::write(root.add(i as usize), pte);
         }
 
         Some(root_phys)

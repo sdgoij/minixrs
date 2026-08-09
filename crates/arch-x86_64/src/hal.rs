@@ -720,7 +720,8 @@ pub const fn pte_flags_mask() -> u64 {
 
 /// Validate a physical address is within the identity-mapped range.
 pub const fn pte_is_valid_phys(phys: u64) -> bool {
-    phys < 0x4000_0000 && (phys >> 48) == 0
+    // Must be within the boot identity map (0..32 GiB).
+    phys < 0x8_0000_0000 && (phys >> 48) == 0
 }
 
 /// Flags for a non-leaf (branch) page table entry.
@@ -1388,29 +1389,42 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             None => return 0,
         };
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
-        let boot_pml4 = boot_cr3 as *const u64;
-        let pml4e0 = core::ptr::read(boot_pml4);
-        let pdpt_phys = pml4e0 & PG_FRAME;
-        let boot_pdpt = pdpt_phys as *const u64;
-        let pdpte0 = core::ptr::read(boot_pdpt);
-        let pd_phys = pdpte0 & PG_FRAME;
-        let boot_pd = pd_phys as *const u64;
         let pdpt_page = match alloc_phys_page() {
             Some(p) => p,
             None => return 0,
         };
-        let pd_page = match alloc_phys_page() {
-            Some(p) => p,
-            None => return 0,
-        };
         core::ptr::write_bytes(pdpt_page as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pd_page as *mut u8, 0, 4096);
+        // One PD per 1 GiB window of the boot identity map (0..32 GiB).
+        let mut pd_pages = [0u64; 32];
+        for pd in pd_pages.iter_mut() {
+            *pd = match alloc_phys_page() {
+                Some(p) => p,
+                None => return 0,
+            };
+            core::ptr::write_bytes(*pd as *mut u8, 0, 4096);
+        }
         let flags = PG_P | PG_RW | PG_U;
         core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
-        core::ptr::write(pdpt_page as *mut u64, pd_page | flags);
-        for i in 0usize..512 {
-            let e = core::ptr::read(boot_pd.add(i));
-            core::ptr::write((pd_page as *mut u64).add(i), e);
+        let boot_pml4 = boot_cr3 as *const u64;
+        let boot_pdpt = (core::ptr::read(boot_pml4) & PG_FRAME) as *const u64;
+        for (i, new_pd) in pd_pages.iter().enumerate() {
+            let pdpte = core::ptr::read(boot_pdpt.add(i));
+            if pdpte & PG_P == 0 {
+                continue;
+            }
+            let boot_pd = (pdpte & PG_FRAME) as *const u64;
+            let new_pd = *new_pd as *mut u64;
+            for j in 0usize..512 {
+                let mut e = core::ptr::read(boot_pd.add(j));
+                // Windows above 1 GiB stay supervisor-only so the
+                // anonymous-mmap heap at mmap_base() (1 GiB) faults and VM
+                // maps real pages instead of aliasing identity memory.
+                if i > 0 {
+                    e &= !PG_U;
+                }
+                core::ptr::write(new_pd.add(j), e);
+            }
+            core::ptr::write((pdpt_page as *mut u64).add(i), pd_pages[i] | flags);
         }
         for i in 256usize..512 {
             let e = core::ptr::read(boot_pml4.add(i));

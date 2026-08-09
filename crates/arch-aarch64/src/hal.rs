@@ -542,7 +542,7 @@ pub const fn pte_flags_mask() -> u64 {
 }
 
 pub const fn pte_is_valid_phys(phys: u64) -> bool {
-    phys < 0x1_0000_0000
+    phys < 0x8_0000_0000
 }
 
 /// Flags for a non-leaf (branch) page table entry.
@@ -1030,6 +1030,14 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         let boot_pud_phys = pte_to_phys(boot_pgd0);
         let kern_entry = core::ptr::read((boot_pud_phys as *const u64).add(1));
         core::ptr::write((private_pud as *mut u64).add(1), kern_entry);
+
+        // PUD[2..32] = 1 GB EL1-only blocks (RAM above 2 GiB) so the kernel
+        // keeps identity access to high physical memory under this process's
+        // page table; user mappings never land there.
+        for i in 2..32usize {
+            let e = core::ptr::read((boot_pud_phys as *const u64).add(i));
+            core::ptr::write((private_pud as *mut u64).add(i), e);
+        }
 
         // PUD[0] = user-accessible low-GB PMD table (see create_low_gb_pmd_table).
         let pmd_low = match create_low_gb_pmd_table() {

@@ -33,6 +33,13 @@ impl PhysicalMemoryMap {
             self.count += 1;
         }
     }
+
+    pub fn total_available(&self) -> u64 {
+        self.ranges[..self.count]
+            .iter()
+            .map(|r| r.end - r.start)
+            .sum()
+    }
 }
 
 impl Default for PhysicalMemoryMap {

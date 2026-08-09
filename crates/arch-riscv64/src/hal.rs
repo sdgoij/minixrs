@@ -486,7 +486,7 @@ pub const fn pte_flags_mask() -> u64 {
 
 /// Validate a physical address is within the identity-mapped range.
 pub const fn pte_is_valid_phys(phys: u64) -> bool {
-    phys < 0x1_0000_0000
+    phys < 0x8_0000_0000
 }
 
 /// Flags for a non-leaf (branch) page table entry.
@@ -1226,7 +1226,9 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         };
         core::ptr::write_bytes(new_root as *mut u8, 0, PAGE_SIZE as usize);
         let boot_root = boot_cr3 as *const u64;
-        for i in 0usize..4 {
+        // Copy the full identity map (0..32 GiB, one 1 GiB block per L2
+        // entry); the entries are supervisor-only, matching the boot table.
+        for i in 0usize..32 {
             let e = core::ptr::read(boot_root.add(i));
             core::ptr::write((new_root as *mut u64).add(i), e);
         }

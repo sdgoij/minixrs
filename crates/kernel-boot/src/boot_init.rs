@@ -428,11 +428,16 @@ pub unsafe fn boot_create_restricted_page_table(
 
     // Walk the boot page table to find the bottom-level page directory (level 1).
     // On x86_64 with 4 levels, walks from PML4(3) down to PD(2), finding PD.
-    // On RISC-V SV39 with 3 levels, walks from L2(2) down to L1(1)...
+    // On RISC-V SV39 with 3 levels, walks from L2(2) down to L1(1)…
     // but our boot page table uses 1GB huge pages at L2 (leaf entries).
     // In that case, there is no L1-level table to copy from.
+    // x86_64 skips the walk: it deep-copies the boot PDP's four PD windows
+    // directly (see below).
+    #[cfg(not(target_arch = "x86_64"))]
     let mut table_phys = boot_cr3_val;
+    #[cfg(not(target_arch = "x86_64"))]
     let mut found_boot_pd = false;
+    #[cfg(not(target_arch = "x86_64"))]
     for lvl in (2..levels).rev() {
         let table = table_phys as *const u64;
         let idx = kernel::hal::pt_index(0, lvl);
@@ -456,12 +461,17 @@ pub unsafe fn boot_create_restricted_page_table(
         table_phys = kernel::hal::pte_to_phys(entry);
         found_boot_pd = true;
     }
-    // If we walked all the way down, the last table is the boot PD.
+    #[cfg(not(target_arch = "x86_64"))]
     let boot_pd_phys = if found_boot_pd { table_phys } else { 0 };
 
-    // Allocate (levels-1) pages: root + intermediate levels (PD is last).
+    // Allocate the hierarchy pages. RISC-V/AArch64 need (levels-1): root +
+    // intermediate levels + the bottom-level PD. x86_64 needs 31 more:
+    // one PD copy per 1 GiB window of the 0..32 GiB boot identity map.
+    #[cfg(target_arch = "x86_64")]
+    let n_pages = (levels - 1) as usize + 31;
+    #[cfg(not(target_arch = "x86_64"))]
     let n_pages = (levels - 1) as usize;
-    let mut pages = [0u64; 4];
+    let mut pages = [0u64; 40];
     for entry in pages.iter_mut().take(n_pages) {
         *entry = unsafe { kernel::hal::alloc_phys_page()? };
         #[cfg(not(target_arch = "aarch64"))]
@@ -477,6 +487,7 @@ pub unsafe fn boot_create_restricted_page_table(
     // Link hierarchy: root[0] → next[0] → ... → PD.
     // On RISC-V SV39: non-leaf (branching) PTEs must have V=1 and R=W=X=0.
     // On x86_64: non-leaf entries can have R/W and U/S bits.
+    // On AArch64: PTE_TABLE (bits[1:0] = 0b11) for non-leaf entries.
     #[cfg(target_arch = "x86_64")]
     let flags = kernel::hal::pte_present() | kernel::hal::pte_writable() | kernel::hal::pte_user();
     // Non-leaf (branching) PTEs on RISC-V SV39 must have V=1 and R=W=X=0.
@@ -487,35 +498,78 @@ pub unsafe fn boot_create_restricted_page_table(
     // AArch64 non-leaf: PTE_TABLE (bits[1:0] = 0b11, no AP/AF/SH).
     #[cfg(target_arch = "aarch64")]
     let flags = kernel::hal::pte_present(); // PTE_TABLE for AArch64 non-leaf entries
-    for i in 0..(n_pages - 1) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // PML4[0] → PDP, then deep-copy all 32 boot PDs (identity 0..32 GiB)
+        // and link PDP[0..31] → the copies, so kernel phys access stays mapped
+        // under this CR3 at any RAM size. map_page splits the 2 MiB huge
+        // pages for the user's code/stack/brk pages below.
+        // The 0..1 GiB window keeps its user bit (boot processes access the
+        // low identity); windows above 1 GiB are supervisor-only so the
+        // anonymous-mmap heap at mmap_base() (1 GiB) faults and VM maps real
+        // pages instead of aliasing identity memory (AArch64/RISC-V already
+        // keep the high identity EL1/S-mode only).
         unsafe {
-            let pte = kernel::hal::build_pte(pages[i + 1], flags);
-            core::ptr::write(pages[i] as *mut u64, pte);
+            core::ptr::write(
+                pages[0] as *mut u64,
+                kernel::hal::build_pte(pages[1], flags),
+            );
+            let boot_pdp_phys =
+                kernel::hal::pte_to_phys(core::ptr::read(boot_cr3_val as *const u64));
+            let boot_pdp = boot_pdp_phys as *const u64;
+            for i in 0..32usize {
+                let e = core::ptr::read(boot_pdp.add(i));
+                if e & kernel::hal::pte_present() == 0 {
+                    continue;
+                }
+                let boot_pd = kernel::hal::pte_to_phys(e) as *const u64;
+                let new_pd = pages[2 + i] as *mut u64;
+                for j in 0..512usize {
+                    let mut entry = core::ptr::read(boot_pd.add(j));
+                    if i > 0 {
+                        entry &= !kernel::hal::pte_user();
+                    }
+                    core::ptr::write(new_pd.add(j), entry);
+                }
+                core::ptr::write(
+                    (pages[1] as *mut u64).add(i),
+                    kernel::hal::build_pte(pages[2 + i], flags),
+                );
+            }
         }
     }
-
-    if found_boot_pd && boot_pd_phys != 0 {
-        // Deep-copy all 512 bottom-level entries from boot PD (identity map).
-        // This applies when boot page table has a non-leaf PD-level table
-        // (e.g., x86_64 boot with 2MB huge pages split into PT entries).
-        unsafe {
-            let new_pd = pages[n_pages - 1] as *mut u64;
-            for i in 0..512 {
-                let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
-                core::ptr::write(new_pd.add(i), entry);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for i in 0..(n_pages - 1) {
+            unsafe {
+                let pte = kernel::hal::build_pte(pages[i + 1], flags);
+                core::ptr::write(pages[i] as *mut u64, pte);
             }
+        }
 
-            // Remove PG_U from kernel PD entries to prevent user-space access to
-            // kernel code/data.  Matches C pg_mapkernel() which maps kernel virtual
-            // addresses without I386_VM_USER, while keeping the identity map entries
-            // separate.  The kernel binary is at 0x200000, so the first relevant PD
-            // index is 1 (each 2MB entry covers 0x200000 bytes).
-            // Userspace split on these PD entries (via map_page for code/stack)
-            // will re-add PG_U to the specific 4KB pages that belong to the process.
-            // NOTE: PG_U is NOT cleared here because boot processes (PM, VFS, VM,
-            // etc.) need user-mode access to kernel identity-mapped pages. The
-            // original C MINIX has all boot processes share the kernel page table,
-            // so kernel pages are user-accessible.
+        if found_boot_pd && boot_pd_phys != 0 {
+            // Deep-copy all 512 bottom-level entries from boot PD (identity map).
+            // This applies when boot page table has a non-leaf PD-level table
+            // (e.g., x86_64 boot with 2MB huge pages split into PT entries).
+            unsafe {
+                let new_pd = pages[n_pages - 1] as *mut u64;
+                for i in 0..512 {
+                    let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
+                    core::ptr::write(new_pd.add(i), entry);
+                }
+
+                // Remove PG_U from kernel PD entries to prevent user-space access to
+                // kernel code/data.  Matches C pg_mapkernel() which maps kernel virtual
+                // addresses without I386_VM_USER, while keeping the identity map entries
+                // separate.  The kernel binary is at 0x200000, so the first relevant PD
+                // index is 1 (each 2MB entry covers 0x200000 bytes).
+                // Userspace split on these PD entries (via map_page for code/stack)
+                // will re-add PG_U to the specific 4KB pages that belong to the process.
+                // NOTE: PG_U is NOT cleared here because boot processes (PM, VFS, VM,
+                // etc.) need user-mode access to kernel identity-mapped pages. The
+                // original C MINIX has all boot processes share the kernel page table,
+                // so kernel pages are user-accessible.
+            }
         }
     }
 
@@ -566,7 +620,10 @@ pub unsafe fn boot_create_restricted_page_table(
             for i in 0..(page_sz / 8) {
                 unsafe { core::ptr::write_volatile((private_pud as *mut u64).add(i), 0) };
             }
-            // Copy boot PUD entries as-is (PUD[0] only — PUD[1] replaced below).
+            // Copy boot PUD entries as-is: PUD[0] and the 1 GiB EL1-only
+            // identity blocks PUD[2..32] (0x80000000..0x7FFFFFFFFF) so kernel
+            // phys access to RAM above 2 GiB stays mapped under this
+            // per-process table at large RAM sizes. PUD[1] is replaced below.
             let entry0 = unsafe { core::ptr::read((boot_pud_phys as *const u64).add(0)) };
             unsafe { core::ptr::write((private_pud as *mut u64).add(0), entry0) };
 
@@ -617,6 +674,14 @@ pub unsafe fn boot_create_restricted_page_table(
             let pud1_flags = arch_aarch64::pte::PTE_VALID | arch_aarch64::pte::PTE_TYPE;
             let pud1_entry = kernel::hal::build_pte(user_pmd, pud1_flags);
             unsafe { core::ptr::write((private_pud as *mut u64).add(1), pud1_entry) };
+
+            // Copy the remaining boot PUD blocks (2..32) — 1 GiB EL1-only
+            // identity windows above 2 GiB. User mappings never land there
+            // (the user mmap heap is at 0x30000000), so EL1-only is safe.
+            for i in 2..32usize {
+                let e = unsafe { core::ptr::read((boot_pud_phys as *const u64).add(i)) };
+                unsafe { core::ptr::write((private_pud as *mut u64).add(i), e) };
+            }
 
             // For driver processes, replace PUD[0] with a private PMD that
             // maps the low 1GB identity: EL1-only blocks, except the

@@ -1159,7 +1159,17 @@ fn pci_probe(
                     let offset =
                         unsafe { pci_cfg_read32(0, dev, func, (cap_ptr + 8) as u8) } as u64;
                     let bar_pa = if bar < 6 {
-                        (bars[bar] & !0xF) as u64
+                        let low = (bars[bar] & !0xF) as u64;
+                        // 64-bit BARs span two config slots; the capability
+                        // references the low slot and the address lives in the
+                        // high dword. QEMU places these above 4 GiB when the
+                        // guest RAM exceeds the 32-bit PCI window (e.g. 4G+).
+                        let high = if bars[bar] & 0x4 != 0 && bar + 1 < 6 {
+                            (bars[bar + 1] as u64) << 32
+                        } else {
+                            0
+                        };
+                        low | high
                     } else {
                         0
                     };

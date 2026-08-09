@@ -4,8 +4,8 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 pub const VM_PAGE_SIZE: usize = 4096;
-pub const NR_PHYS_PAGES: usize = 0x100000000 / VM_PAGE_SIZE;
-pub const TOTAL_PHYS_MEM: u64 = 0x100000000;
+pub const NR_PHYS_PAGES: usize = 0x8_0000_0000 / VM_PAGE_SIZE;
+pub const TOTAL_PHYS_MEM: u64 = 0x8_0000_0000;
 pub const NR_MEMS: usize = 8;
 const BITCHUNK_BITS: usize = 32;
 const PAGE_BITMAP_CHUNKS: usize = NR_PHYS_PAGES.div_ceil(BITCHUNK_BITS);

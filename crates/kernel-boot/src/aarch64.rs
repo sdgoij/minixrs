@@ -122,8 +122,8 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     }
 
     // Detect RAM from the DTB (QEMU virt passes it in x0); cap at the boot
-    // identity map, which covers 0..2 GiB (two 1 GiB blocks in enable_mmu),
-    // so RAM at 0x40000000 is detectable up to 1 GiB.
+    // identity map, which covers 0..32 GiB (32 one-GiB blocks in enable_mmu),
+    // so RAM at 0x40000000 is detectable up to 31 GiB.
     #[cfg(not(feature = "integration-tests"))]
     let (mem_base, mem_size) =
         if let Some(info) = unsafe { arch_common::fdt::parse_fdt_memory(dtb_ptr as *const u8) } {
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     #[cfg(feature = "integration-tests")]
     let (mem_base, mem_size) = (0x40000000u64, 256 * 1024 * 1024);
     let _ = dtb_ptr;
-    let mem_size = mem_size.min(0x8000_0000u64.saturating_sub(mem_base));
+    let mem_size = mem_size.min(0x8_0000_0000u64.saturating_sub(mem_base));
 
     // Page-aligned end-of-kernel estimate.
     // The linker script places the kernel at 0x40080000 (512KB into RAM)
@@ -152,9 +152,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     unsafe {
         arch_aarch64::alloc::init_allocator(&mmap);
     }
-    serial_write("memory: ");
-    kernel_boot::serial_write_u64_dec(mem_size / (1024 * 1024));
-    serial_write(" MiB\r\n");
+    kernel_boot::print_memory_banner(mem_size, mmap.total_available());
     serial_write("allocator ready\r\n");
 
     // Set up VBAR_EL1 (exception vector table).
@@ -901,7 +899,7 @@ unsafe fn test_pl011_output() -> u32 {
 }
 
 /// Enable the MMU with a minimal identity-mapped page table.
-/// Uses 1GB blocks at PUD level — just 2 descriptors total.
+/// Uses 1GB blocks at PUD level — 32 descriptors covering 0..32 GiB.
 #[cfg(target_arch = "aarch64")]
 unsafe fn enable_mmu() {
     const TABLE_DESC: u64 = 0x3;
@@ -936,14 +934,13 @@ unsafe fn enable_mmu() {
         core::ptr::write_volatile(pgd as *mut u64, pud | TABLE_DESC);
     }
 
-    // PUD[0] = 1 GB normal-memory block at PA 0x0000_0000.
-    unsafe {
-        core::ptr::write_volatile(pud as *mut u64, BLOCK_FLAGS);
-    }
-
-    // PUD[1] = 1 GB normal-memory block at PA 0x4000_0000.
-    unsafe {
-        core::ptr::write_volatile((pud as *mut u64).add(1), 0x4000_0000u64 | BLOCK_FLAGS);
+    // PUD[i] = 1 GB normal-memory block at PA i<<30, covering 0..32 GiB.
+    // The kernel runs identity-mapped, so this window bounds the physical
+    // memory the allocator can hand out (pte_is_valid_phys checks it).
+    for i in 0..32u64 {
+        unsafe {
+            core::ptr::write_volatile((pud as *mut u64).add(i as usize), (i << 30) | BLOCK_FLAGS);
+        }
     }
 
     // Barriers + TLB invalidation + set TTBR0 + enable MMU.

@@ -51,7 +51,7 @@ impl PhysicalMemoryMap {
         &self.regions[..self.count]
     }
 
-    pub fn total_size(&self) -> u64 {
+    pub fn total_available(&self) -> u64 {
         self.regions[..self.count]
             .iter()
             .map(|r| r.end - r.start)
@@ -59,19 +59,19 @@ impl PhysicalMemoryMap {
     }
 }
 
-struct AllocBitmapCell(UnsafeCell<[u32; 65536]>);
+struct AllocBitmapCell(UnsafeCell<[u32; 262144]>);
 unsafe impl Sync for AllocBitmapCell {}
 impl AllocBitmapCell {
-    const fn new(val: [u32; 65536]) -> Self {
+    const fn new(val: [u32; 262144]) -> Self {
         Self(UnsafeCell::new(val))
     }
-    fn get(&self) -> *mut [u32; 65536] {
+    fn get(&self) -> *mut [u32; 262144] {
         self.0.get()
     }
 }
 
-/// Bitmap allocator state (covers up to 8 GB: 65536 × 32 × 4096).
-static ALLOC_BITMAP: AllocBitmapCell = AllocBitmapCell::new([0u32; 65536]);
+/// Bitmap allocator state (covers up to 32 GB: 262144 × 32 × 4096).
+static ALLOC_BITMAP: AllocBitmapCell = AllocBitmapCell::new([0u32; 262144]);
 static ALLOC_START: AtomicU64 = AtomicU64::new(0);
 static ALLOC_END: AtomicU64 = AtomicU64::new(0);
 static ALLOC_INIT: AtomicBool = AtomicBool::new(false);
@@ -124,7 +124,7 @@ pub fn alloc_phys_page() -> Option<u64> {
     let start = ALLOC_START.load(Ordering::Relaxed);
     let end = ALLOC_END.load(Ordering::Relaxed);
     let npages = ((end - start) / 4096) as usize;
-    let max_chunks = npages.div_ceil(32).min(65536);
+    let max_chunks = npages.div_ceil(32).min(262144);
 
     for chunk in 0..max_chunks {
         let bits = unsafe { read_bitmap(chunk) };
@@ -160,7 +160,7 @@ pub fn alloc_phys_contig(pages: usize) -> Option<u64> {
     if pages > npages {
         return None;
     }
-    let max_chunks = npages.div_ceil(32).min(65536);
+    let max_chunks = npages.div_ceil(32).min(262144);
 
     // Scan all pages linearly (across chunk boundaries) for a free run.
     let mut run_start = 0usize;
@@ -210,7 +210,7 @@ pub unsafe fn free_phys_page(addr: u64) {
     let page_idx = ((addr - start) / 4096) as usize;
     let chunk = page_idx / 32;
     let bit = page_idx % 32;
-    if chunk < 65536 {
+    if chunk < 262144 {
         let bits = unsafe { read_bitmap(chunk) };
         unsafe { write_bitmap(chunk, bits & !(1u32 << bit)) };
     }
@@ -249,7 +249,7 @@ mod tests {
         let mut mmap = PhysicalMemoryMap::new();
         mmap.add(0x80000000, 0x88000000);
         assert_eq!(mmap.regions().len(), 1);
-        assert_eq!(mmap.total_size(), 128 * 1024 * 1024);
+        assert_eq!(mmap.total_available(), 128 * 1024 * 1024);
     }
 
     #[test]

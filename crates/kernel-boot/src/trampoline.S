@@ -46,22 +46,49 @@ _start:
     orl  $0x07, %ebx
     movl %ebx, pml4
 
-    // PDP[0] = &pd | 0x07 (Present|Write|User)
-    movl $pd, %ebx
+    // PDP[0..31] = &pd0..pd31 | 0x07 (Present|Write|User)
+    movl $pd0, %edi
+    movl $pdp, %esi
+    movl $32, %ebp
+3:
+    movl %edi, %ebx
     orl  $0x07, %ebx
-    movl %ebx, pdp
+    movl %ebx, (%esi)
+    addl $8, %esi
+    addl $4096, %edi
+    decl %ebp
+    jnz 3b
 
-    // Fill PD with 2 MB huge-page entries (identity map)
-    movl $pd, %edi
+    // Fill 32 PDs with 2 MB huge-page entries (identity map, 0..32 GiB).
+    // 64-bit PTEs: PA = (window << 30) | (index << 21). The window base
+    // exceeds 32 bits above 16 GiB, so the high dword is window >> 2 plus
+    // the carry out of the low-dword add. SHR clobbers CF, so capture the
+    // carry with SETcc before computing the high dword.
+    movl $pd0, %edi
+    xorl %esi, %esi        // window index (0..31)
+    movl $32, %ebp         // PD count
+1:
     xorl %eax, %eax
-    movl $512, %ecx
-0:  movl %eax, %ebx
-    shll $21, %ebx
-    orl  $0x87, %ebx    // Present|Write|User|Huge (2MB page)
+2:  movl %eax, %ebx
+    shll $21, %ebx         // index * 2 MiB (fits in 32 bits)
+    movl %esi, %edx
+    shll $30, %edx         // low dword of window * 1 GiB
+    addl %edx, %ebx        // low dword of PA; CF = carry out
+    setc %dl               // dl = carry (0/1)
+    movzbl %dl, %edx       // edx = carry
+    movl %esi, %ecx
+    shrl $2, %ecx          // high dword of window * 1 GiB
+    addl %edx, %ecx        // + carry from the low add
+    orl  $0x87, %ebx       // Present|Write|User|Huge (2MB page)
     movl %ebx, (%edi, %eax, 8)
+    movl %ecx, 4(%edi, %eax, 8)
     incl %eax
-    cmpl %ecx, %eax
-    jb 0b
+    cmpl $512, %eax
+    jb 2b
+    incl %esi              // next window
+    addl $4096, %edi       // next PD
+    decl %ebp
+    jnz 1b
 
     // Enable PAE (bit 5) + PGE (bit 7)
     movl %cr4, %eax
@@ -118,7 +145,7 @@ halt:
 .align 4096
 pml4: .space 4096
 pdp:  .space 4096
-pd:   .space 4096
+pd0:  .space 131072   // 32 PDs (0..32 GiB identity)
 trampoline_stack: .space 32768
 
 // 64-bit GDT and saved multiboot args

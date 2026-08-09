@@ -110,6 +110,16 @@ pub fn serial_write_u64_dec(mut v: u64) {
     serial_write(unsafe { core::str::from_utf8_unchecked(&s[..n]) });
 }
 
+/// Print the boot memory banner: the detected guest RAM total and the
+/// usable (allocatable) amount, both in MiB.
+pub fn print_memory_banner(detected: u64, usable: u64) {
+    serial_write("memory: ");
+    serial_write_u64_dec(detected / (1024 * 1024));
+    serial_write(" MiB detected (");
+    serial_write_u64_dec(usable / (1024 * 1024));
+    serial_write(" MiB usable)\r\n");
+}
+
 /// Write a single byte to the boot console.
 ///
 /// On x86_64: COM1 serial port via port I/O.

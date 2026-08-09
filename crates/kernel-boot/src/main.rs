@@ -14,9 +14,9 @@ use core::panic::PanicInfo;
 use kernel_boot::boot_init;
 
 #[cfg(not(test))]
-use kernel_boot::serial_write;
+use kernel_boot::print_memory_banner;
 #[cfg(not(test))]
-use kernel_boot::serial_write_u64_dec;
+use kernel_boot::serial_write;
 
 /// Dummy entry point to prevent --gc-sections from discarding all code.
 /// The actual entry is through the multiboot trampoline which jumps
@@ -38,11 +38,12 @@ unsafe extern "C" {
 
 /// Physical memory detection (x86_64).
 ///
-/// The trampoline's identity map covers 0..1 GiB (512 × 2 MiB PD entries), so
-/// detected memory is capped there. QEMU's multiboot loader reports the size
-/// via `mem_upper` (KiB above 1 MiB) always, and an E820-style map when the
-/// trampoline header requests it (flag bit 1, see `trampoline.S`).
-const IDENTITY_MAP_TOP: u64 = 0x4000_0000; // 1 GiB
+/// The trampoline's identity map covers 0..32 GiB (32 × 512 × 2 MiB PD
+/// entries), so detected memory is capped there. QEMU's multiboot loader
+/// reports the size via `mem_upper` (KiB above 1 MiB) always, and an
+/// E820-style map when the trampoline header requests it (flag bit 1, see
+/// `trampoline.S`).
+const IDENTITY_MAP_TOP: u64 = 0x8_0000_0000; // 32 GiB
 /// Used when no valid multiboot info is available (e.g. tests or exotic
 /// loaders): conservative 256 MiB, matching the historic default.
 const FALLBACK_MEM_TOP: u64 = 0x1000_0000;
@@ -53,16 +54,32 @@ const FALLBACK_ACPI_CUT_START: u64 = 0x3FE0_0000;
 const FALLBACK_ACPI_CUT_END: u64 = 0x3FF0_0000;
 const MAX_MMAP_ENTRIES: usize = 32;
 
+/// Physical ranges shadowed by user mappings in every per-process page
+/// table: the user stack (0x0FE00000, 1 MiB) and the pre-boot brk heap
+/// (0x3FE00000, 1 MiB). Once a process maps its stack/heap, the per-process
+/// table no longer identity-maps those VAs, so page-table pages placed
+/// there by a top-down allocator become unreadable to the kernel's
+/// identity-based walks. With the 32-PD per-process tables (~2 MiB of
+/// top-down pages per boot), RAM near these windows (e.g. 256 MiB, 1 GiB)
+/// would otherwise place the last processes' tables inside them. Reserve
+/// the windows from both physical allocators.
+#[cfg(all(not(test), target_arch = "x86_64"))]
+const USER_STACK_WIN: (u64, u64) = (0x0FE0_0000, 0x0FF0_0000);
+#[cfg(all(not(test), target_arch = "x86_64"))]
+const BRK_HEAP_WIN: (u64, u64) = (0x3FE0_0000, 0x3FF0_0000);
+
 /// Detect usable RAM from the multiboot info and build the physical map.
-/// Returns `(top_of_ram, map)`; the map is never empty (it always contains at
-/// least the fallback range so `init_allocator` can be called unconditionally).
+/// Returns `(detected, top_of_ram, map)`: `detected` is the sum of the
+/// available regions (the RAM the guest was given), `top` the highest
+/// usable address; the map is never empty (it always contains at least the
+/// fallback range so `init_allocator` can be called unconditionally).
 fn build_memory_map(
     magic: u32,
     info_ptr: u32,
     kernel_end: u64,
-) -> (u64, arch_x86_64::alloc::PhysicalMemoryMap) {
+) -> (u64, u64, arch_x86_64::alloc::PhysicalMemoryMap) {
     let mut mmap = arch_x86_64::alloc::PhysicalMemoryMap::new();
-    let (top, have_regions) =
+    let (detected, top, have_regions) =
         if magic == arch_x86_64::multiboot::MULTIBOOT_BOOTLOADER_MAGIC && info_ptr != 0 {
             // SAFETY: a compliant bootloader passes a valid multiboot info
             // structure in low (identity-mapped) memory.
@@ -78,8 +95,8 @@ fn build_memory_map(
                     typ: 0,
                 }; MAX_MMAP_ENTRIES];
                 let n = copy_mmap_entries(base, len, &mut entries);
-                let top = apply_mmap_entries(&entries[..n], kernel_end, &mut mmap);
-                (top, top != 0)
+                let (top, detected) = apply_mmap_entries(&entries[..n], kernel_end, &mut mmap);
+                (detected, top, top != 0)
             } else if flags & arch_x86_64::multiboot::MULTIBOOT_INFO_MEMORY != 0 {
                 let mem_upper = unsafe { core::ptr::read_volatile(&info.mem_upper) } as u64;
                 let top = mem_upper_top(mem_upper);
@@ -89,17 +106,17 @@ fn build_memory_map(
                 // Without the map we don't know the reserved holes; fall back
                 // to the known QEMU 1 GiB window.
                 mmap.cut(FALLBACK_ACPI_CUT_START, FALLBACK_ACPI_CUT_END);
-                (top, true)
+                (top, top, true)
             } else {
-                (FALLBACK_MEM_TOP, false)
+                (FALLBACK_MEM_TOP, FALLBACK_MEM_TOP, false)
             }
         } else {
-            (FALLBACK_MEM_TOP, false)
+            (FALLBACK_MEM_TOP, FALLBACK_MEM_TOP, false)
         };
     if !have_regions && kernel_end < top {
         mmap.add(kernel_end, top);
     }
-    (top, mmap)
+    (detected, top, mmap)
 }
 
 /// Top of RAM from the multiboot `mem_upper` field (KiB above 1 MiB), capped
@@ -155,25 +172,30 @@ fn copy_mmap_entries(
 }
 
 /// Add available mmap entries (intersected with `[kernel_end, cap)`) to the
-/// map and return the highest usable address.
+/// map and return the highest usable address and the detected RAM total (the
+/// sum of the available region spans, capped at the identity map).
 fn apply_mmap_entries(
     entries: &[arch_x86_64::multiboot::MultibootMmapEntry],
     kernel_end: u64,
     mmap: &mut arch_x86_64::alloc::PhysicalMemoryMap,
-) -> u64 {
+) -> (u64, u64) {
     let mut top = 0;
+    let mut detected = 0;
     for e in entries {
         if e.typ != arch_x86_64::multiboot::MULTIBOOT_MEMORY_AVAILABLE {
             continue;
         }
-        let start = e.addr.max(kernel_end);
         let end = e.addr.saturating_add(e.len).min(IDENTITY_MAP_TOP);
+        if end > e.addr {
+            detected += end - e.addr;
+        }
+        let start = e.addr.max(kernel_end);
         if start < end {
             mmap.add(start, end);
             top = top.max(end);
         }
     }
-    top
+    (top, detected)
 }
 
 /// Asm entry point: adjust RSP by 8 for the jmp-entry ABI mismatch. The
@@ -260,14 +282,28 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
 
         // Detect physical memory from the multiboot info (QEMU provides
         // mem_upper + an E820-style map; the trampoline passes the pointer
-        // through kmain). The identity map covers 0..1 GiB, so anything the
+        // through kmain). The identity map covers 0..32 GiB, so anything the
         // bootloader reports above that is capped away.
-        let (mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
+        let (detected, mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
+        // Keep top-down page-table pages out of the user stack/brk VA
+        // windows (see USER_STACK_WIN/BRK_HEAP_WIN). x86 only: RISC-V and
+        // AArch64 per-process tables are small enough that top-down
+        // allocations never reach their user VA windows.
+        #[cfg(target_arch = "x86_64")]
+        let mmap = {
+            let mut m = mmap;
+            m.cut(USER_STACK_WIN.0, USER_STACK_WIN.1);
+            m.cut(BRK_HEAP_WIN.0, BRK_HEAP_WIN.1);
+            m
+        };
         arch_x86_64::alloc::init_allocator(&mmap);
 
-        serial_write("memory: ");
-        serial_write_u64_dec(mem_top / (1024 * 1024));
-        serial_write(" MiB\r\n");
+        // Report both the guest-detected RAM total and the usable
+        // (allocatable) amount. A 4 GiB guest splits into a sub-4 GiB region
+        // plus a high region above the PCI hole, so the highest region end
+        // reads ~5 GiB while usable RAM is ~4 GiB; `detected` sums the
+        // available regions instead of the region end.
+        print_memory_banner(detected, mmap.total_available());
 
         // Initialize the kernel::vm physical page allocator (separate bitmap
         // from arch_x86_64::alloc). This allocator is used by kernel call 62
@@ -277,11 +313,42 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
             let kernel_end_page = kernel_end.div_ceil(4096);
             let total_pages = (mem_top / 4096).max(kernel_end_page);
             if kernel_end_page < total_pages {
-                let free_chunks = [kernel::vm::MemoryChunk {
-                    base: kernel_end_page,
-                    size: total_pages - kernel_end_page,
-                }];
-                kernel::vm::mem_init(&free_chunks);
+                // Split the free range around the user-mapped windows so VM
+                // never hands out page-table pages inside them (same shadowing
+                // reason as the arch allocator cut above). Boundaries in page
+                // units; empty when the window is beyond detected RAM.
+                let mut chunks = [kernel::vm::MemoryChunk { base: 0, size: 0 }; 3];
+                let mut n = 0;
+                let mut cur = kernel_end_page;
+                #[cfg(target_arch = "x86_64")]
+                let bounds = [
+                    USER_STACK_WIN.0 / 4096,
+                    USER_STACK_WIN.1 / 4096,
+                    BRK_HEAP_WIN.0 / 4096,
+                    BRK_HEAP_WIN.1 / 4096,
+                ];
+                #[cfg(not(target_arch = "x86_64"))]
+                let bounds: [u64; 0] = [];
+                for b in bounds.chunks(2) {
+                    let start = b[0].min(total_pages);
+                    let end = b[1].min(total_pages);
+                    if cur < start {
+                        chunks[n] = kernel::vm::MemoryChunk {
+                            base: cur,
+                            size: start - cur,
+                        };
+                        n += 1;
+                    }
+                    cur = cur.max(end);
+                }
+                if cur < total_pages {
+                    chunks[n] = kernel::vm::MemoryChunk {
+                        base: cur,
+                        size: total_pages - cur,
+                    };
+                    n += 1;
+                }
+                kernel::vm::mem_init(&chunks[..n]);
             }
         }
     }
@@ -746,13 +813,22 @@ unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) ->
                 }
                 let off = 0x10 + 4 * bar;
                 let val = unsafe { pci_cfg_read32(0, dev, func, off) };
-                if val & 0x4 != 0 {
+                let is_64bit = val & 0x4 != 0;
+                if is_64bit {
                     skip_next = true; // 64-bit BAR spans the next slot
                 }
                 if val & 1 != 0 {
                     continue; // I/O BAR — modern devices have none
                 }
-                if val & 0xFFFF_FFFC == 0 {
+                // The full 32-bit-aligned address. For a 64-bit BAR the low
+                // dword can be 0 (QEMU places these above 4 GiB when RAM
+                // exceeds the 32-bit PCI window), so the high dword must be
+                // combined before the unassigned check.
+                let mut pa = (val & 0xFFFF_FFF0) as u64;
+                if is_64bit {
+                    pa |= (unsafe { pci_cfg_read32(0, dev, func, off + 4) } as u64) << 32;
+                }
+                if pa == 0 {
                     continue; // unassigned
                 }
                 // Discover the BAR size: write all-ones, read the mask,
@@ -761,7 +837,6 @@ unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) ->
                 let mask = unsafe { pci_cfg_read32(0, dev, func, off) };
                 unsafe { pci_cfg_write32(0, dev, func, off, val) };
                 let size = (mask & 0xFFFF_FFF0).wrapping_neg() as u64;
-                let pa = (val & 0xFFFF_FFF0) as u64;
                 let pages = size.div_ceil(4096);
                 for p in 0..pages {
                     let addr = pa + p * 4096;
@@ -1289,7 +1364,9 @@ mod tests {
         // 256 MiB guest: mem_upper = 261120 KiB above 1 MiB.
         assert_eq!(mem_upper_top(261120), 0x1000_0000);
         // 1 GiB guest: mem_upper = 1023 MiB in KiB.
-        assert_eq!(mem_upper_top(1024 * 1024 - 1024), IDENTITY_MAP_TOP);
+        assert_eq!(mem_upper_top(1024 * 1024 - 1024), 0x4000_0000);
+        // 4 GiB guest: mem_upper = 4095 MiB in KiB.
+        assert_eq!(mem_upper_top(4 * 1024 * 1024 - 1024), 0x1_0000_0000);
     }
 
     #[test]
@@ -1321,9 +1398,11 @@ mod tests {
                 typ: 1,
             },
         ];
-        let top = apply_mmap_entries(&entries, 0x300000, &mut mmap);
+        let (top, detected) = apply_mmap_entries(&entries, 0x300000, &mut mmap);
         assert_eq!(top, 0x2000000);
         assert_eq!(mmap.highest_phys(), 0x2000000);
+        // Detected counts the full available spans (no kernel-end clip).
+        assert_eq!(detected, 0xF00000 + 0xFFF000);
         // [3 MiB, 16 MiB) + [16 MiB + 4 KiB, 32 MiB) — the reserved hole is
         // not merged away.
         assert_eq!(mmap.total_available(), 0xD00000 + 0xFFF000);
@@ -1348,8 +1427,12 @@ mod tests {
                 typ: 1,
             },
         ];
-        let top = apply_mmap_entries(&entries, 0x300000, &mut mmap);
+        let (top, detected) = apply_mmap_entries(&entries, 0x300000, &mut mmap);
         assert_eq!(top, IDENTITY_MAP_TOP);
+        // The first entry is below the kernel end: not allocatable, but it is
+        // RAM, so it still counts toward the detected total; the second is
+        // truncated at the identity-map cap.
+        assert_eq!(detected, 0x100000 + 0x200000);
         assert_eq!(mmap.total_available(), 0x200000);
     }
 
@@ -1360,8 +1443,9 @@ mod tests {
             (0, 1),
             (arch_x86_64::multiboot::MULTIBOOT_BOOTLOADER_MAGIC, 0),
         ] {
-            let (top, mmap) = build_memory_map(magic, info_ptr, 0x300000);
+            let (detected, top, mmap) = build_memory_map(magic, info_ptr, 0x300000);
             assert_eq!(top, FALLBACK_MEM_TOP);
+            assert_eq!(detected, FALLBACK_MEM_TOP);
             assert_eq!(mmap.total_available(), FALLBACK_MEM_TOP - 0x300000);
         }
     }
@@ -1400,7 +1484,8 @@ mod tests {
         );
 
         let mut mmap = PhysicalMemoryMap::new();
-        let top = apply_mmap_entries(&out[..n], 0x300000, &mut mmap);
+        let (top, detected) = apply_mmap_entries(&out[..n], 0x300000, &mut mmap);
         assert_eq!(top, 0x3000000);
+        assert_eq!(detected, 0xF00000 + 0x1000000);
     }
 }
