@@ -1554,6 +1554,15 @@ impl core::fmt::Write for BufWriter<'_> {
 
 // Bump allocator
 
+/// End of the userland bump-heap VA range (exclusive).
+///
+/// The heap starts at `0x3FE00000` (the kernel pre-maps this window at
+/// exec) and grows upward through VM's brk, which demand-maps pages.
+/// Raised from the historical 1 MiB window to 4 GiB so MFS's block cache
+/// (~4 MiB) and other heap users fit; on x86/riscv the anonymous-mmap
+/// base sits at the same 4 GiB mark so heap and mmap cannot collide.
+pub const HEAP_LIMIT: usize = 0x1_0000_0000;
+
 /// A simple bump allocator backed by the `brk` syscall.
 ///
 /// Allocations are made by incrementing a pointer into the heap.
@@ -1585,9 +1594,7 @@ impl BrkAllocator {
         let size = layout.size();
         let align = layout.align();
 
-        // On first call, self.ptr is 0. Jump to the start of the valid
-        // brk range (0x3FE00000..0x3FF00000). The kernel rejects brk
-        // calls outside this range.
+        // On first call, self.ptr is 0. Jump to the start of the heap.
         let current = self.ptr.load(Ordering::Relaxed);
         if current == 0 {
             let init_brk = 0x3FE00000usize;
@@ -1604,7 +1611,7 @@ impl BrkAllocator {
 
         let new_end = aligned + size;
 
-        if new_end > 0x3FF00000 {
+        if new_end > HEAP_LIMIT {
             // Out of heap space.
             return core::ptr::null_mut();
         }
@@ -1691,24 +1698,18 @@ impl Default for BrkAllocator {
 #[global_allocator]
 static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 
-/// Allocate zeroed memory via the BrkAllocator, bypassing the Rust alloc
-/// crate's GlobalAlloc chain. This is a workaround for cross-compiled server
-/// binaries where `alloc::alloc::alloc_zeroed` may not route correctly.
+/// Allocate zeroed memory for direct-heap users (e.g. the MFS block
+/// cache), bypassing the Rust alloc crate's GlobalAlloc chain.
+///
+/// This is a workaround for cross-compiled server binaries where
+/// `alloc::alloc::alloc_zeroed` may not route correctly. Uses a simple
+/// bump scheme starting at `0x3FE00000`; growth goes through VM's brk,
+/// which demand-maps the pages.
 ///
 /// # Safety
 ///
 /// `layout` must have non-zero size. The returned pointer must be freed
 /// with `minix_dealloc` using the same layout.
-/// Allocate zeroed memory via direct brk syscall, bypassing the Rust alloc
-/// crate's GlobalAlloc chain. This is a workaround for cross-compiled server
-/// binaries where `alloc::alloc::alloc_zeroed` may not route correctly.
-///
-/// Uses a simple bump scheme starting at 0x3FE00000, matching the kernel's
-/// brk range.
-///
-/// # Safety
-///
-/// `layout` must have non-zero size.
 #[cfg(target_os = "minix")]
 pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1726,77 +1727,20 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
     let aligned = (base + align - 1) & !(align - 1);
     let new_end = aligned + size;
 
-    if new_end > 0x3FF00000 {
+    if new_end > HEAP_LIMIT {
         return core::ptr::null_mut();
     }
 
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Call brk syscall directly: syscall1(36, new_end)
-        let brk_result: i64;
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                in("rax") 36u64,
-                in("rdi") new_end as u64,
-                lateout("rcx") _,
-                lateout("r11") _,
-                lateout("r12") _,
-                lateout("r13") _,
-                lateout("r14") _,
-                lateout("r15") _,
-                lateout("rax") brk_result,
-                options(nostack),
-            );
-        }
-        if brk_result < 0 {
-            return core::ptr::null_mut();
-        }
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    {
-        let brk_result: isize;
-        unsafe {
-            core::arch::asm!(
-                "li a7, 36",
-                "ecall",
-                in("a0") new_end as usize,
-                lateout("a0") brk_result,
-                // The `li a7, 36` clobbers a7; declare it so the compiler
-                // does not keep a live value in a7 across the ecall.
-                lateout("a7") _,
-                options(nostack),
-            );
-        }
-        if brk_result < 0 {
-            return core::ptr::null_mut();
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        let brk_result: i64;
-        unsafe {
-            core::arch::asm!(
-                "mov x8, #36",
-                "svc #0",
-                in("x0") new_end as u64,
-                lateout("x0") brk_result,
-                // The `mov x8, #36` clobbers x8; declare it so the compiler
-                // does not keep a live value in x8 across the svc.
-                lateout("x8") _,
-                options(nostack),
-            );
-        }
-        if brk_result < 0 {
-            return core::ptr::null_mut();
-        }
+    // Grow the heap through VM: brk demand-maps the new pages. The
+    // kernel's own brk syscall is a stub that maps nothing, so growth
+    // beyond the pre-mapped window would fault without this.
+    if unsafe { brk(new_end as *const u8) } < 0 {
+        return core::ptr::null_mut();
     }
 
     BPTR.store(aligned + size, Ordering::Relaxed);
 
-    // Volatile-zero the allocated memory
+    // Volatile-zero the allocated memory.
     let ptr = aligned as *mut u8;
     for i in 0..size {
         unsafe {

@@ -109,7 +109,53 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
 
             for l2 in 0..ALL_ENTRIES {
                 let e2 = unsafe { core::ptr::read(parent_p2.add(l2)) };
-                if e2 & PG_P == 0 || e2 & PG_PS != 0 {
+                if e2 & PG_P == 0 {
+                    continue;
+                }
+                // RISC-V SV39 has 3 levels, so this (L0) loop holds the
+                // 4KB leaves, and PG_PS (R|W|X) is set on every leaf — the
+                // unconditional skip below never reached the registration
+                // on riscv. Shared COW pages then got no PhysBlock, so
+                // free_user_frame treated them as private and freed them
+                // when the child exited — freeing the parent's still-in-use
+                // text page (the shell's text page was reallocated as a
+                // page-table page and the shell executed PTEs, #UD).
+                // x86/AArch64 have 4 levels: leaves live one level deeper
+                // (the l1 loop), so handle only the 3-level case here.
+                if e2 & PG_PS != 0 {
+                    if kernel::hal::pt_levels() == 3 {
+                        if e2 & PG_U == 0 {
+                            continue;
+                        }
+                        let phys = pte_to_phys(e2);
+                        if phys == 0 {
+                            continue;
+                        }
+                        // The CHILD's PTE is the COW marker (vm_paging_fork
+                        // cleared W on the child's writable user PTEs; the
+                        // parent's stay writable). Skip pages the child was
+                        // not COW-protected on.
+                        let child_e2 = unsafe { core::ptr::read(child_p2.add(l2)) };
+                        if child_e2 & PG_P == 0 || child_e2 & PG_RW != 0 {
+                            continue;
+                        }
+                        let pb_idx = match pb::pb_find(phys) {
+                            Some(idx) => {
+                                pb::pb_ref(idx);
+                                Some(idx)
+                            }
+                            None => pb::pb_new(phys),
+                        };
+                        let Some(pb_idx) = pb_idx else {
+                            continue;
+                        };
+                        match pb::pb_get(pb_idx) {
+                            Some(block) if block.refcount < 2 => {
+                                pb::pb_ref(pb_idx);
+                            }
+                            _ => {}
+                        }
+                    }
                     continue;
                 }
                 let child_e2 = unsafe { core::ptr::read(child_p2.add(l2)) };

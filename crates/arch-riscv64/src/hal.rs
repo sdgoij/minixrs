@@ -573,10 +573,10 @@ pub const fn user_stack_size() -> usize {
     0x100_000
 }
 
-/// Base of the anonymous-mmap search range, above the brk heap
-/// (0x3FE00000..0x3FF00000) and below the kernel at 0x80200000.
+/// Base of the anonymous-mmap search range, at the top of the brk heap
+/// (0x3FE00000..0x100000000) so heap growth and mmap never collide.
 pub const fn mmap_base() -> u64 {
-    0x4000_0000
+    0x1_0000_0000
 }
 
 pub const MAP_PRESENT: u64 = pte::PTE_V;

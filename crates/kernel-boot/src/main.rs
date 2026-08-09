@@ -55,18 +55,19 @@ const FALLBACK_ACPI_CUT_END: u64 = 0x3FF0_0000;
 const MAX_MMAP_ENTRIES: usize = 32;
 
 /// Physical ranges shadowed by user mappings in every per-process page
-/// table: the user stack (0x0FE00000, 1 MiB) and the pre-boot brk heap
-/// (0x3FE00000, 1 MiB). Once a process maps its stack/heap, the per-process
-/// table no longer identity-maps those VAs, so page-table pages placed
-/// there by a top-down allocator become unreadable to the kernel's
-/// identity-based walks. With the 32-PD per-process tables (~2 MiB of
-/// top-down pages per boot), RAM near these windows (e.g. 256 MiB, 1 GiB)
-/// would otherwise place the last processes' tables inside them. Reserve
-/// the windows from both physical allocators.
+/// table: the user stack (0x0FE00000, 1 MiB) and the brk heap plus its
+/// growth range (0x3FE00000..0x100000000). Once a process maps its
+/// stack/heap, the per-process table no longer identity-maps those VAs,
+/// so page-table pages placed there by a top-down allocator become
+/// unreadable to the kernel's identity-based walks. With the 32-PD
+/// per-process tables (~2 MiB of top-down pages per boot), RAM near these
+/// windows (e.g. 256 MiB, 1 GiB) would otherwise place the last
+/// processes' tables inside them. Reserve the windows from both physical
+/// allocators.
 #[cfg(all(not(test), target_arch = "x86_64"))]
 const USER_STACK_WIN: (u64, u64) = (0x0FE0_0000, 0x0FF0_0000);
 #[cfg(all(not(test), target_arch = "x86_64"))]
-const BRK_HEAP_WIN: (u64, u64) = (0x3FE0_0000, 0x3FF0_0000);
+const BRK_HEAP_WIN: (u64, u64) = (0x3FE0_0000, 0x1_0000_0000);
 
 /// Detect usable RAM from the multiboot info and build the physical map.
 /// Returns `(detected, top_of_ram, map)`: `detected` is the sum of the
