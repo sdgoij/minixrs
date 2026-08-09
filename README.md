@@ -1,8 +1,5 @@
 # minixrs
 
-> **⚠️ Research project — not production-ready.**  
-> If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
-
 A Rust port of [MINIX 3.3.0](https://www.minix3.org/), written from scratch.
 
 This project implements the full MINIX 3 stack in Rust — kernel, architecture-specific code, device drivers, filesystem servers, networking, system servers, and userland programs — targeting **x86_64**, **RISC-V64**, and **AArch64**.
@@ -17,6 +14,21 @@ Pipes are not wired into the shell parser yet.
 
 See `.agents/skills/` for domain-specific documentation and
 [PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
+
+> **⚠️ Research project — not production-ready.**  
+> If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
+
+## Recent work
+
+The last few days moved the project from "boots a shell" to "a real toolchain target":
+
+- **1:1 kernel threads** — every thread is a schedulable Proc slot: `thread_create`/`exit`/`join`/`yield`, wake-one IPC delivery, group sweep on exit/exec/fork, per-thread TLS. MINIX proper had no native threads; this port does.
+- **A working `std` port** — the forked rustc's std PAL for minix (`sys/pal/minix`) runs on the OS: `/bin/hello` is a std-linked binary that spawns threads with TLS and exits cleanly.
+- **Networking that works** — virtio-net plus DNS: `/bin/udp nos.nl` resolves hostnames from inside QEMU.
+- **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three architectures (x86_64, RISC-V64, AArch64).
+- **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
+- **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
+- **uutils/coreutils builds for minix** — the `echo` util compiles and links for `x86_64-pc-minix` against the fork's std (the `coreutils` submodule tracks the port; not yet booted on the OS).
 
 ## Quick Start
 
