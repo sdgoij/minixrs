@@ -64,7 +64,11 @@ fn assemble(
         // The C smoke-test binaries (helloc/ctest) are only built for
         // x86_64 today (tools/build-c-hello.py is x86-only); skip them on
         // other arches until the build script grows target support.
-        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+        if matches!(
+            dest,
+            "/bin/helloc" | "/bin/ctest" | "/bin/coreutils"
+        ) && t.arch != "x86_64"
+        {
             continue;
         }
         let src = release.join(bin_name);

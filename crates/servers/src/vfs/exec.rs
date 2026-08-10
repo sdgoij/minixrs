@@ -74,16 +74,18 @@ const EXEC_LOAD_NEWSP_OFF: usize = 24;
 /// Upper bound for the exec stack frame (matches C's `ARG_MAX`-style limit).
 #[cfg(target_os = "minix")]
 const EXEC_FRAME_MAX: usize = 16384;
-/// Upper bound for an executable image read by VFS.
+/// Sanity cap for an executable image read by VFS; matches the kernel's
+/// SYS_EXEC_LOAD bound. Not a hard limit — the buffer itself is allocated
+/// per-exec from the heap (see `pm_exec`).
 #[cfg(target_os = "minix")]
-const EXEC_ELF_MAX: usize = 1024 * 1024;
+const EXEC_ELF_MAX: usize = 16 * 1024 * 1024;
 
-// Scratch buffers (VFS is effectively single-threaded; C uses a static
-// `mbuf[ARG_MAX]` for the same purpose).
+// Scratch frame buffer (VFS is effectively single-threaded; C uses a static
+// `mbuf[ARG_MAX]` for the same purpose). The ELF image buffer is NOT static:
+// a large fixed BSS array bloats VFS's image and breaks its own exec, and
+// the image is read into a per-exec heap allocation instead (see below).
 #[cfg(target_os = "minix")]
 static mut EXEC_FRAME_BUF: [u8; EXEC_FRAME_MAX] = [0u8; EXEC_FRAME_MAX];
-#[cfg(target_os = "minix")]
-static mut EXEC_ELF_BUF: [u8; EXEC_ELF_MAX] = [0u8; EXEC_ELF_MAX];
 
 /// Result of a VFS exec attempt.
 #[derive(Debug, Clone, Copy)]
@@ -189,14 +191,33 @@ pub unsafe fn pm_exec(
     let inode_nr = unsafe { (*vp).v_inode_nr };
     let file_size = unsafe { (*vp).v_size };
     let vp_ok = file_size > 0 && (file_size as usize) <= EXEC_ELF_MAX;
+    let mut elf_buf: *mut u8 = core::ptr::null_mut();
     if vp_ok {
-        // Read the whole binary into the ELF buffer (C reads the segments via
-        // libexec; we read the file and let the kernel do the segment copy).
+        // Read the whole binary into a heap buffer and let the kernel do the
+        // segment copy. The buffer must be backed by *present* pages: both
+        // MFS's grant write (req_read) and the kernel's SYS_EXEC_LOAD copy
+        // run in kernel mode, where a page fault on a lazy (mmap) page is
+        // fatal. The bump heap grows through VM's brk, which maps each page
+        // eagerly, so heap-backed buffers are safe. The bump allocator never
+        // frees, so each exec leaves the image size behind — acceptable
+        // (HEAP_LIMIT is 4 GiB).
+        let layout = match core::alloc::Layout::from_size_align(file_size as usize, 1) {
+            Ok(l) => l,
+            Err(_) => {
+                unsafe { put_vnode(vp) };
+                return err(EINVAL);
+            }
+        };
+        elf_buf = unsafe { minix_rt::minix_alloc_zeroed(layout) };
+        if elf_buf.is_null() {
+            unsafe { put_vnode(vp) };
+            return err(ENOMEM);
+        }
         let (r, _pos) = unsafe {
             req_read(
                 fs_e,
                 inode_nr,
-                core::ptr::addr_of_mut!(EXEC_ELF_BUF) as *mut u8,
+                elf_buf,
                 0,
                 file_size as u32,
                 VFS_PROC_NR as i32,
@@ -218,7 +239,7 @@ pub unsafe fn pm_exec(
     let mut kmsg = [0u8; 64];
     kmsg[EXEC_LOAD_ENDPT_OFF..EXEC_LOAD_ENDPT_OFF + 4].copy_from_slice(&proc_e.to_le_bytes());
     kmsg[EXEC_LOAD_ELF_PTR_OFF..EXEC_LOAD_ELF_PTR_OFF + 8]
-        .copy_from_slice(&(core::ptr::addr_of!(EXEC_ELF_BUF) as *const u8 as u64).to_le_bytes());
+        .copy_from_slice(&(elf_buf as u64).to_le_bytes());
     kmsg[EXEC_LOAD_ELF_LEN_OFF..EXEC_LOAD_ELF_LEN_OFF + 8]
         .copy_from_slice(&(file_size as u64).to_le_bytes());
     kmsg[EXEC_LOAD_FRAME_PTR_OFF..EXEC_LOAD_FRAME_PTR_OFF + 8]

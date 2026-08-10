@@ -5,3 +5,7 @@
 	path = rust
 	url = git@github.com:sdgoij/rust.git
 	branch = feature/platform-minixrs
+[submodule "coreutils"]
+	path = coreutils
+	url = git@github.com:sdgoij/coreutils.git
+	branch = feature/platform-minixrs
