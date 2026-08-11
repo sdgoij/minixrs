@@ -6,7 +6,7 @@ import subprocess, time
 QEMU = [
     "qemu-system-riscv64", "-machine", "virt", "-m", "256M", "-nographic",
     "-global", "virtio-mmio.force-legacy=off",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-device,drive=disk0",
     "-kernel", "target/riscv64gc-unknown-none-elf/release/kernel-boot-riscv64",
 ]
@@ -33,7 +33,7 @@ p.kill()
 p.wait(timeout=5)
 log.close()
 
-d = open("target/disk.img", "rb").read()
+d = open("target/images/riscv64gc-unknown-minix/disk.img", "rb").read()
 print("PERSIST in disk image:", d.count(b"PERSIST"))
 
 # Session 2: read back.

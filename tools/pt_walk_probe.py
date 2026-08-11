@@ -45,7 +45,7 @@ qemu = subprocess.Popen(
         "-qmp", "tcp:127.0.0.1:4444,server,nowait",
         "-kernel", "target/trampoline.elf",
         "-device", "loader,file=target/kernel.bin,addr=0x200000",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
     ],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

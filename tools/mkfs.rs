@@ -1,10 +1,12 @@
 //! Write the MFS root filesystem image to a raw disk file for QEMU.
 //!
 //! The kernel build mirrors the embedded MFS blob (the root filesystem)
-//! to `target/images/<target>/minixfs.img`. This tool copies it to
-//! `target/disk.img`, which QEMU attaches as a virtio-blk drive so MFS
-//! mounts its root from a real block device. The kernel and server
-//! binaries still come from the embedded initramfs.
+//! to `target/images/<target>/minixfs.img`. This tool copies it to the
+//! per-arch `target/images/<target>/disk.img`, which QEMU attaches as a
+//! virtio-blk drive so MFS mounts its root from a real block device. The
+//! disk image is kept per-target (like the kernel and userland binaries) so
+//! building one arch never clobbers another arch's disk. The kernel and
+//! server binaries still come from the embedded initramfs.
 //!
 //! Usage: rustc tools/mkfs.rs --edition 2021 -o target/mkfs
 //!        && target/mkfs [x86_64|riscv64|aarch64]
@@ -46,7 +48,10 @@ fn main() {
         }
     };
 
-    let dst = Path::new("target").join("disk.img");
+    let dst = Path::new("target")
+        .join("images")
+        .join(out_dir)
+        .join("disk.img");
     if let Err(e) = fs::write(&dst, &bytes) {
         eprintln!("mkfs: writing {} failed: {e}", dst.display());
         std::process::exit(1);

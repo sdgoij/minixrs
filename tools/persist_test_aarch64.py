@@ -7,7 +7,7 @@ QEMU = [
     "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-m", "256M",
     "-nographic", "-no-reboot",
     "-global", "virtio-mmio.force-legacy=off",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-device,drive=disk0",
     "-kernel", "target/aarch64-unknown-minix/release/kernel-boot-aarch64",
 ]
@@ -34,7 +34,7 @@ p.kill()
 p.wait(timeout=5)
 log.close()
 
-d = open("target/disk.img", "rb").read()
+d = open("target/images/aarch64-unknown-minix/disk.img", "rb").read()
 print("PERSIST in disk image:", d.count(b"PERSIST"))
 
 # Session 2: read back.

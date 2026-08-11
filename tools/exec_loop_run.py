@@ -10,9 +10,10 @@ Usage:
   python3 tools/exec_loop_run.py riscv64 1G
   python3 tools/exec_loop_run.py aarch64 4G
 
-Requires the arch's image to be current: `just mkfs-<arch>` (target/disk.img)
-and the kernel build for that arch (target/trampoline.elf + kernel.bin for
-x86; target/<triple>/release/kernel-boot-<arch> otherwise).
+Requires the arch's image to be current: `just mkfs-<arch>` (writes the
+per-arch target/images/<triple>/disk.img) and the kernel build for that
+arch (target/trampoline.elf + kernel.bin for x86;
+target/<triple>/release/kernel-boot-<arch> otherwise).
 
 A background thread pumps QEMU's serial output into a buffer so no wait ever
 blocks on the pipe (Python's select does not support pipes on Windows) and
@@ -38,13 +39,13 @@ BASE = [
     "-m", MEM, "-no-reboot",
     "-kernel", "target/trampoline.elf",
     "-device", "loader,file=target/kernel.bin,addr=0x200000",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
 ]
 RISCV = [
     "qemu-system-riscv64", "-machine", "virt", "-m", MEM, "-nographic",
     "-global", "virtio-mmio.force-legacy=off",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-device,drive=disk0",
     "-netdev", "user,id=net0", "-device", "virtio-net-device,netdev=net0",
     "-kernel", "target/riscv64gc-unknown-minix/release/kernel-boot-riscv64",
@@ -53,7 +54,7 @@ AARCH64 = [
     "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57",
     "-m", MEM, "-nographic", "-no-reboot",
     "-global", "virtio-mmio.force-legacy=off",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-device,drive=disk0",
     "-netdev", "user,id=net0", "-device", "virtio-net-device,netdev=net0",
     "-kernel", "target/aarch64-unknown-minix/release/kernel-boot-aarch64",

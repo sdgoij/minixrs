@@ -8,7 +8,7 @@ QEMU = [
     "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-m", "256M",
     "-nographic", "-no-reboot",
     "-global", "virtio-mmio.force-legacy=off",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-device,drive=disk0",
     "-netdev", "user,id=net0",
     "-device", "virtio-net-device,netdev=net0",

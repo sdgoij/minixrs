@@ -33,7 +33,7 @@ if ARCH == "riscv64":
     qemu_cmd = [
         "qemu-system-riscv64", "-machine", "virt", "-m", MEM, "-nographic",
         "-global", "virtio-mmio.force-legacy=off",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-device,drive=disk0",
         "-kernel", "target/riscv64gc-unknown-minix/release/kernel-boot-riscv64",
     ]
@@ -42,7 +42,7 @@ elif ARCH == "aarch64":
         "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57",
         "-m", MEM, "-nographic", "-no-reboot",
         "-global", "virtio-mmio.force-legacy=off",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-device,drive=disk0",
         "-kernel", "target/aarch64-unknown-minix/release/kernel-boot-aarch64",
     ]
@@ -52,7 +52,7 @@ else:
         "-m", MEM, "-no-reboot",
         "-kernel", "target/trampoline.elf",
         "-device", "loader,file=target/kernel.bin,addr=0x200000",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
     ]
 

@@ -6,7 +6,7 @@ def boot(with_monitor, tag):
     q = ["qemu-system-x86_64", "-nographic", "-m", "256M", "-no-reboot",
          "-kernel", "target/trampoline.elf",
          "-device", "loader,file=target/kernel.bin,addr=0x200000",
-         "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+         "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
          "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0"]
     if with_monitor:
         q += ["-monitor", "tcp:127.0.0.1:5556,server,nowait"]
@@ -31,7 +31,7 @@ p.kill()
 p.wait(timeout=5)
 log.close()
 
-d = open("target/disk.img", "rb").read()
+d = open("target/images/x86_64-pc-minix/disk.img", "rb").read()
 print("PERSIST in disk image:", d.count(b"PERSIST"))
 
 # Session 2: read back.

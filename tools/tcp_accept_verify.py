@@ -60,7 +60,7 @@ if ARCH == "aarch64":
     QEMU = [
         "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-m", "256M",
         "-nographic", "-no-reboot", "-global", "virtio-mmio.force-legacy=off",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-device,drive=disk0",
         "-netdev", "user,id=net0,"
         f"hostfwd=tcp::{HOST_PORT}-:{GUEST_PORT},hostfwd=tcp::{CLOSED_HOST_PORT}-:20001",
@@ -71,7 +71,7 @@ elif ARCH == "riscv64":
     QEMU = [
         "qemu-system-riscv64", "-machine", "virt", "-m", "256M", "-nographic", "-no-reboot",
         "-global", "virtio-mmio.force-legacy=off",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-device,drive=disk0",
         "-netdev", "user,id=net0,"
         f"hostfwd=tcp::{HOST_PORT}-:{GUEST_PORT},hostfwd=tcp::{CLOSED_HOST_PORT}-:20001",
@@ -83,7 +83,7 @@ else:  # x86
         "qemu-system-x86_64", "-nographic", "-m", "256M", "-no-reboot",
         "-kernel", "target/trampoline.elf",
         "-device", "loader,file=target/kernel.bin,addr=0x200000",
-        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
         "-netdev", "user,id=net0,"
         f"hostfwd=tcp::{HOST_PORT}-:{GUEST_PORT},hostfwd=tcp::{CLOSED_HOST_PORT}-:20001",

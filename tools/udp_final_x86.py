@@ -5,7 +5,7 @@ QEMU = [
     "qemu-system-x86_64", "-nographic", "-m", "256M", "-no-reboot",
     "-kernel", "target/trampoline.elf",
     "-device", "loader,file=target/kernel.bin,addr=0x200000",
-    "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+    "-drive", "if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough",
     "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
     "-netdev", "user,id=net0",
     "-device", "virtio-net-pci,disable-legacy=on,netdev=net0",
