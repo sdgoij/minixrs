@@ -925,7 +925,8 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
     // p_reg TrapFrame byte offsets (matching restore() iretq layout):
     //   0=rax, 8=rbx, 16=rcx, 24=rdx, 32=rsi, 40=rdi,
     //   48=r8, 56=r9, 64=r10, 72=r11, 80=r12,
-    //   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags.
+    //   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags,
+    //   184=resume CS (user 0x1B), 192=saved user RSP (kernel-fault resume).
     //   The syscall convention stores user RIP in the rcx slot (16) and user
     //   RFLAGS in the r11 slot (72) — the `syscall` instruction does the same
     //   — so restore() loads rcx/r11 from those slots, while iretq reads the
@@ -950,6 +951,7 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
             (112usize, *saved.add(14)), // rbp = saved[14] (pushed first, highest addr)
             (160usize, *saved.add(2)),  // dedicated rip slot = user RIP (syscall return address)
             (176usize, *saved.add(9)),  // dedicated rflags slot = user RFLAGS
+            (184usize, 0x001B), // resume CS = user code (restore() picks the mode from its RPL)
         ];
         for (offset, val) in regs {
             let bytes = val.to_ne_bytes();
@@ -985,7 +987,10 @@ unsafe fn save_proc_regs(rp: *mut kernel::proc::Proc, saved: *const u64) {
 /// p_reg TrapFrame byte offsets (matching restore() iretq layout):
 ///   0=rax, 8=rbx, 16=rcx, 24=rdx, 32=rsi, 40=rdi,
 ///   48=r8, 56=r9, 64=r10, 72=r11, 80=r12,
-///   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags.
+///   88=r13, 96=r14, 104=r15, 112=rbp, 160=rip, 168=rsp, 176=rflags,
+///   184=resume CS (user 0x1B / kernel 0x08 — restore() picks the resume
+///   mode from its RPL), 192=saved user RSP (kernel-fault resume — the
+///   interrupted syscall's user RSP, written back by restore()).
 ///   Unlike the syscall path, rcx (16) and r11 (72) hold the user's REAL
 ///   registers (a #PF does not clobber them); the faulting RIP/RFLAGS go in
 ///   the dedicated 160/176 slots.
@@ -1023,6 +1028,7 @@ pub unsafe extern "C" fn save_fault_context(frame: *const u64) {
             (160usize, *frame.add(16)), // dedicated rip slot = faulting RIP (CPU frame)
             (168usize, *frame.add(19)), // user RSP (CPU frame)
             (176usize, *frame.add(18)), // dedicated rflags slot = faulting RFLAGS (CPU frame)
+            (184usize, *frame.add(17)), // resume CS = faulting CS (user 0x1B / kernel 0x08 — restore() picks the mode from its RPL)
         ];
         let p_reg = &mut (*rp).p_reg;
         for (offset, val) in regs {
@@ -1030,6 +1036,19 @@ pub unsafe extern "C" fn save_fault_context(frame: *const u64) {
             for (i, b) in bytes.iter().enumerate() {
                 core::ptr::write_volatile(p_reg.as_mut_ptr().add(offset + i), *b);
             }
+        }
+        // Preserve the interrupted syscall's user RSP at p_reg[192]. At
+        // fault time SAVED_USER_RSP is still the faulting process's own
+        // user RSP (no other process has run since its syscall entry);
+        // restore()'s kernel-mode resume writes it back before the syscall
+        // exits, because other processes' syscalls overwrite the global
+        // while this process is blocked on the page fault.
+        #[cfg(target_os = "minix")]
+        let user_rsp = arch_x86_64::asm::syscall_abi::saved_user_rsp();
+        #[cfg(not(target_os = "minix"))]
+        let user_rsp: u64 = 0;
+        for (i, b) in user_rsp.to_ne_bytes().iter().enumerate() {
+            core::ptr::write_volatile(p_reg.as_mut_ptr().add(192 + i), *b);
         }
     }
 }
@@ -1083,6 +1102,7 @@ pub unsafe extern "C" fn save_timer_context(frame: *const u64) -> *mut core::ffi
             (160usize, *frame.add(15)), // dedicated rip slot = interrupted RIP (CPU frame)
             (168usize, *frame.add(18)), // user RSP (CPU frame)
             (176usize, *frame.add(17)), // dedicated rflags slot = interrupted RFLAGS (CPU frame)
+            (184usize, 0x001B), // resume CS = user code (timer ISR only switches from user mode)
         ];
         let p_reg = &mut (*rp).p_reg;
         for (offset, val) in regs {

@@ -292,9 +292,10 @@ fn cache_heuristic_check(_major: i32) {
     // The C reference (libminixfs/cache.c lmfs_set_blocksize) resizes the
     // pool to MINBUFS and then immediately re-expands it via the heuristic
     // (fs_bufs_heuristic, based on VM memory stats). The Rust port's
-    // fs_bufs_heuristic returns a fixed 1024, so re-expand to that here;
-    // without this the cache stays at MINBUFS (6) and thrashes on every
-    // boot read, evicting dirty blocks before they are written back.
+    // heuristic returns a fixed pool size sized to the pre-mapped heap
+    // window; without the expansion the cache stays at MINBUFS (6) and
+    // thrashes on every boot read, evicting dirty blocks before they are
+    // written back.
     // SAFETY: reads global quiet flag only; no side effects.
     let bufs = unsafe { fs_bufs_heuristic() } as usize;
     let nr = static_read!(nr_bufs);
@@ -1080,10 +1081,14 @@ pub unsafe fn lmfs_setquiet(q: i32) {
 ///
 /// This function accesses global mutable state.
 pub unsafe fn fs_bufs_heuristic() -> u32 {
-    if static_read!(quiet) == 0 {
-        // printf("fslib: heuristic info fail: default to %d bufs\n", 1024);
-    }
-    1024
+    // The block cache lives in the server's bump heap. Its data buffers
+    // (4 KiB each) must stay inside the kernel's pre-mapped 1 MiB heap
+    // window (0x3FE00000..0x3FF00000): minix_alloc_zeroed only calls VM's
+    // brk beyond that window, and VM cannot service brk while it is blocked
+    // on a file-region FDIO request (VM→VFS→MFS with MFS's brk forming a
+    // cycle the deadlock detector rejects). 160 buffers = 640 KiB of data
+    // plus the pool arrays, comfortably inside the window.
+    160
 }
 
 // Tests

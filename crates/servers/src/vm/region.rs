@@ -15,7 +15,7 @@ pub struct VirRegion {
     pub vaddr: u64,
     /// Size in bytes (multiple of PAGE_SIZE).
     pub length: u64,
-    /// Region flags (VR_WRITABLE, VR_ANON, VR_DIRECT, VR_PRESENT).
+    /// Region flags (VR_WRITABLE, VR_ANON, VR_DIRECT, VR_PRESENT, VR_FILE).
     pub flags: u32,
     /// Number of physical pages backing this region.
     pub npages: u32,
@@ -24,6 +24,22 @@ pub struct VirRegion {
     /// For anonymous regions with lazy allocation, phys_pages may be
     /// mostly zero until page faults trigger allocation.
     pub phys_pages: [u64; MAX_PHYS_PAGES],
+    /// For VR_FILE regions: device of the backing file (from FDLOOKUP).
+    pub dev: u32,
+    /// For VR_FILE regions: inode number of the backing file.
+    pub ino: u32,
+    /// For VR_FILE regions: VM file descriptor (dup'd into VFS's own fproc
+    /// by FDLOOKUP); FDIO reads use it and teardown closes it via FDCLOSE.
+    pub fd: i32,
+    /// For VR_FILE regions: page-aligned file offset of the first mapped
+    /// byte (region.vaddr + i*PAGE maps file bytes file_offset + i*PAGE).
+    pub file_offset: u64,
+    /// For VR_FILE regions: absolute file offset at which this region's
+    /// file content ends (file_offset + filesz for exec segments;
+    /// min(mapped-end, EOF) for user mmap). Pages whose file offset is at
+    /// or past this are supplied as zero pages (bss tails, holes, beyond
+    /// EOF) instead of being read from the file.
+    pub file_size: u64,
 }
 
 /// Maximum physical pages tracked inline per region.
@@ -44,6 +60,13 @@ pub const VR_DIRECT: u32 = 0x08;
 pub const VR_PRESENT: u32 = 0x10;
 /// Region is a data segment (brk heap).
 pub const VR_DATA: u32 = 0x20;
+/// Region is backed by a file; pages fault in from the file via the
+/// VM↔VFS FDIO protocol instead of being allocated from the heap.
+pub const VR_FILE: u32 = 0x40;
+/// Region is executable (exec text segment). Non-executable file
+/// regions (rodata/data) are pre-faulted at exec so VFS's kernel-mode
+/// copies of the image (vircopy of user buffers) hit present pages.
+pub const VR_EXEC: u32 = 0x80;
 
 impl VirRegion {
     /// Create a new region descriptor.
@@ -54,7 +77,45 @@ impl VirRegion {
             flags,
             npages: 0,
             phys_pages: [0u64; MAX_PHYS_PAGES],
+            dev: 0,
+            ino: 0,
+            fd: -1,
+            file_offset: 0,
+            file_size: 0,
         }
+    }
+
+    /// Create a new file-backed region descriptor.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_file(
+        vaddr: u64,
+        length: u64,
+        flags: u32,
+        dev: u32,
+        ino: u32,
+        fd: i32,
+        file_offset: u64,
+        file_size: u64,
+    ) -> Self {
+        Self {
+            vaddr,
+            length,
+            flags,
+            npages: 0,
+            phys_pages: [0u64; MAX_PHYS_PAGES],
+            dev,
+            ino,
+            fd,
+            file_offset,
+            file_size,
+        }
+    }
+
+    /// File offset of the page containing `addr` within this file region.
+    pub const fn file_offset_at(&self, addr: u64) -> u64 {
+        let page_size: u64 = 4096;
+        let page = (addr - self.vaddr) & !(page_size - 1);
+        self.file_offset + page
     }
 
     /// End address (exclusive).
@@ -267,5 +328,42 @@ mod tests {
         assert_eq!(VR_DIRECT, 0x08);
         assert_eq!(VR_PRESENT, 0x10);
         assert_eq!(VR_DATA, 0x20);
+        assert_eq!(VR_FILE, 0x40);
+    }
+
+    #[test]
+    fn test_region_new_file_fields() {
+        let r = VirRegion::new_file(
+            0x1000,
+            0x4000,
+            VR_READABLE | VR_FILE,
+            0x100,
+            42,
+            7,
+            0x2000,
+            0x10000,
+        );
+        assert_eq!(r.dev, 0x100);
+        assert_eq!(r.ino, 42);
+        assert_eq!(r.fd, 7);
+        assert_eq!(r.file_offset, 0x2000);
+        assert_eq!(r.file_size, 0x10000);
+        assert_eq!(r.flags & VR_FILE, VR_FILE);
+        // Anonymous regions get neutral file fields.
+        let anon = VirRegion::new(0x1000, 0x4000, VR_ANON);
+        assert_eq!(anon.fd, -1);
+        assert_eq!(anon.file_offset, 0);
+        assert_eq!(anon.file_size, 0);
+    }
+
+    #[test]
+    fn test_region_file_offset_at() {
+        let r = VirRegion::new_file(0x1000, 0x4000, VR_FILE, 0, 0, 0, 0x2000, 0x10000);
+        // First page of the region maps file bytes at file_offset.
+        assert_eq!(r.file_offset_at(0x1000), 0x2000);
+        // Page-aligned faults anywhere inside a page resolve to that page.
+        assert_eq!(r.file_offset_at(0x1FFF), 0x2000);
+        assert_eq!(r.file_offset_at(0x2000), 0x3000);
+        assert_eq!(r.file_offset_at(0x4FFF), 0x5000);
     }
 }

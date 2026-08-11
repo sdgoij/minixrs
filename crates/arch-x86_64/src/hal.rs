@@ -392,6 +392,7 @@ pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _argc: 
         write_frame_field(frame, 72, 0x0202); // r11 = user-mode (IF|IOPL=0)
         write_frame_field(frame, 176, 0x0202); // dedicated rflags slot = PSL_USERSET
         write_frame_field(frame, 168, sp); // rsp = sp
+        write_frame_field(frame, 184, 0x001B); // resume CS = user code (restore() picks the mode from its RPL)
         core::arch::asm!("mfence", options(nostack, preserves_flags));
     }
 }
@@ -460,6 +461,7 @@ pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: 
         write_frame_field(frame, 176, 0x0202); // dedicated rflags slot = PSL_USERSET
         write_frame_field(frame, 168, sp); // rsp
         write_frame_field(frame, 40, arg); // rdi = arg0
+        write_frame_field(frame, 184, 0x001B); // resume CS = user code (restore() picks the mode from its RPL)
     }
 }
 
@@ -590,6 +592,7 @@ pub unsafe fn arch_proc_init(
         // arch_proc_init function.
         let tf = frame.as_mut_ptr() as *mut crate::frame::TrapFrame;
         crate::arch_proc::arch_proc_init(tf, entry, stack, name, ps_str);
+        write_frame_field(frame, 184, 0x001B); // resume CS = user code (restore() picks the mode from its RPL)
     }
 }
 
@@ -809,6 +812,18 @@ pub const fn user_stack_size() -> usize {
     0x100_000
 }
 
+/// Base of the userland brk heap: a 1 MiB window pre-mapped at exec,
+/// grown upward through VM's brk. The mmap base (4 GiB) is the growth
+/// limit, matching the historical minix-rt HEAP_LIMIT.
+pub const fn user_heap_base() -> u64 {
+    0x3FE00000u64
+}
+
+/// Exclusive upper bound for brk growth (the anonymous-mmap base).
+pub const fn user_heap_limit() -> u64 {
+    0x1_0000_0000
+}
+
 /// Base of the anonymous-mmap search range, at the top of the brk heap
 /// (0x3FE00000..0x100000000) so heap growth and mmap never collide.
 pub const fn mmap_base() -> u64 {
@@ -820,6 +835,7 @@ pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
 pub const MAP_READ: u64 = 0; // x86 has no read bit; absence of PG_RW is read-only
 pub const MAP_WRITE: u64 = 0x0000000000000002; // PG_RW
 pub const MAP_USER: u64 = 0x0000000000000004; // PG_U
+pub const MAP_EXEC: u64 = 0; // x86 has no execute bit; absence of PG_NX is executable
 pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
 
 /// Maximum user address (48-bit VA, top half reserved for kernel).

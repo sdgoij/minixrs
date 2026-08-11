@@ -1556,12 +1556,28 @@ impl core::fmt::Write for BufWriter<'_> {
 
 /// End of the userland bump-heap VA range (exclusive).
 ///
-/// The heap starts at `0x3FE00000` (the kernel pre-maps this window at
+/// The heap starts at [`HEAP_BASE`] (the kernel pre-maps a 1 MiB window at
 /// exec) and grows upward through VM's brk, which demand-maps pages.
-/// Raised from the historical 1 MiB window to 4 GiB so MFS's block cache
-/// (~4 MiB) and other heap users fit; on x86/riscv the anonymous-mmap
-/// base sits at the same 4 GiB mark so heap and mmap cannot collide.
-pub const HEAP_LIMIT: usize = 0x1_0000_0000;
+/// Raised from the historical 1 MiB window so MFS's block cache (~4 MiB)
+/// and other heap users fit; on x86/riscv the anonymous-mmap base sits at
+/// the same 4 GiB mark so heap and mmap cannot collide. On aarch64 user
+/// space is only the low 1 GiB (the kernel's EL1-only identity map starts
+/// at 0x40000000), so the heap lives below the mmap base (0x30000000)
+/// instead.
+pub const HEAP_BASE: usize = if cfg!(target_arch = "aarch64") {
+    0x2000_0000
+} else {
+    0x3FE0_0000
+};
+
+/// Exclusive upper bound for the bump heap. Matches each arch's
+/// anonymous-mmap base so heap growth (up) and mmap regions (up from the
+/// mmap base) cannot overlap.
+pub const HEAP_LIMIT: usize = if cfg!(target_arch = "aarch64") {
+    0x3000_0000
+} else {
+    0x1_0000_0000
+};
 
 /// A simple bump allocator backed by the `brk` syscall.
 ///
@@ -1597,7 +1613,7 @@ impl BrkAllocator {
         // On first call, self.ptr is 0. Jump to the start of the heap.
         let current = self.ptr.load(Ordering::Relaxed);
         if current == 0 {
-            let init_brk = 0x3FE00000usize;
+            let init_brk = HEAP_BASE;
             let result = unsafe { brk(init_brk as *const u8) };
             if result < 0 {
                 return core::ptr::null_mut();
@@ -1618,7 +1634,7 @@ impl BrkAllocator {
 
         // Extend the heap if needed.
         let heap_end = (unsafe { brk(core::ptr::null()) }) as usize;
-        if new_end > heap_end.max(0x3FE00000) {
+        if new_end > heap_end.max(HEAP_BASE) {
             // Need to extend the heap.
             let result = unsafe { brk(new_end as *const u8) };
             if result < 0 {
@@ -1703,7 +1719,7 @@ static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 ///
 /// This is a workaround for cross-compiled server binaries where
 /// `alloc::alloc::alloc_zeroed` may not route correctly. Uses a simple
-/// bump scheme starting at `0x3FE00000`; growth goes through VM's brk,
+/// bump scheme starting at [`HEAP_BASE`]; growth goes through VM's brk,
 /// which demand-maps the pages.
 ///
 /// # Safety
@@ -1719,11 +1735,7 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
     let align = layout.align();
 
     let current = BPTR.load(Ordering::Relaxed);
-    let base = if current == 0 {
-        0x3FE00000usize
-    } else {
-        current
-    };
+    let base = if current == 0 { HEAP_BASE } else { current };
     let aligned = (base + align - 1) & !(align - 1);
     let new_end = aligned + size;
 
@@ -1731,10 +1743,15 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // Grow the heap through VM: brk demand-maps the new pages. The
-    // kernel's own brk syscall is a stub that maps nothing, so growth
-    // beyond the pre-mapped window would fault without this.
-    if unsafe { brk(new_end as *const u8) } < 0 {
+    // The first 1 MiB (HEAP_BASE..HEAP_BASE+1 MiB) is pre-mapped by the
+    // kernel at boot, so allocations inside it need no VM call. Growth
+    // beyond it goes through VM's brk, which cannot be serviced while VM is
+    // blocked (e.g. on a file-region FDIO request: VM→VFS→MFS with MFS's
+    // brk forming a cycle that the kernel's deadlock detector rejects with
+    // ELOCKED). Servers whose hot path allocates while VM may be blocked
+    // (the libminixfs block cache) must stay inside this window.
+    const PREMAPPED_HEAP_END: usize = HEAP_BASE + 0x100000;
+    if new_end > PREMAPPED_HEAP_END && unsafe { brk(new_end as *const u8) } < 0 {
         return core::ptr::null_mut();
     }
 
@@ -1877,12 +1894,13 @@ mod tests {
 
     #[test]
     fn test_allocator_heap_bounds() {
-        // The bump allocator uses the 0x3FE00000 - 0x3FF00000 region.
+        // The bump allocator uses the HEAP_BASE..HEAP_BASE+1 MiB region.
         // Verify the bounds don't overflow or wrap.
-        let start = 0x3FE00000usize;
-        let end = 0x3FF00000usize;
+        let start = HEAP_BASE;
+        let end = HEAP_BASE + 0x100000;
         assert!(start < end, "heap start must be below end");
         assert!(end - start == 0x100000, "heap size must be 1MB");
+        assert!(HEAP_LIMIT > end, "heap limit must be above the prealloc");
     }
 
     #[test]

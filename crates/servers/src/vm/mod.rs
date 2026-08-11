@@ -37,6 +37,9 @@ const EINVAL: i32 = -5;
 /// Resource temporarily unavailable (EAGAIN).
 const EAGAIN: i32 = -11;
 
+/// Cannot allocate memory (ENOMEM).
+const ENOMEM: i32 = -12;
+
 /// True if `ep` is a valid user-process endpoint of any generation.
 ///
 /// Endpoints encode `(generation << 16) | slot`, so forked children (which
@@ -67,6 +70,7 @@ const VM_PAGING_UNMAP: i32 = 4;
 const VM_PAGING_COPY: i32 = 6;
 const VM_PAGING_FORK: i32 = 7;
 const VM_PAGING_WALK_PAGE: i32 = 8;
+const VM_PAGING_CLEAR: i32 = 9;
 
 /// Walk the page table identified by `cr3` at virtual address `va`
 /// and return the PTE value. Runs in ring 0 via kernel call so it can
@@ -269,6 +273,22 @@ pub fn vm_unmap_page_in(cr3: u64, va: u64) -> i32 {
         .copy_from_slice(&VM_PAGING_UNMAP.to_le_bytes());
     msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&cr3.to_le_bytes());
     msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+}
+
+/// Split any identity huge pages covering `[va, va + pages*4096)` and clear
+/// every 4KB entry in the range, so any access (user or kernel mode) faults.
+/// Per-process page tables copy the kernel's identity map; without clearing,
+/// a lazy region above 1 GiB silently aliases the supervisor identity page
+/// (writes land beyond RAM, reads return garbage).
+pub fn vm_clear_range(cr3: u64, va: u64, pages: u64) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+        .copy_from_slice(&VM_PAGING_CLEAR.to_le_bytes());
+    msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&cr3.to_le_bytes());
+    msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
+    msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+        .copy_from_slice(&(pages as i32).to_le_bytes());
     minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
 }
 
@@ -503,11 +523,11 @@ fn vm_init_boot() {
         }
 
         if let Some(vmp) = unsafe { proc::vmproc_alloc(ep) } {
-            vmp.vm_region_top = 0x3FE00000u64;
+            vmp.vm_region_top = kernel::hal::user_heap_base();
             vmp.vm_pml4_phys = cr3;
             // Create a data segment region for the pre-allocated brk heap.
             let data_region = region::VirRegion::new(
-                0x3FE00000u64,
+                kernel::hal::user_heap_base(),
                 0x100000u64, // 1 MB
                 region::VR_READABLE
                     | region::VR_WRITABLE
@@ -807,6 +827,29 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         }
     };
 
+    // File-backed region: demand the page from the file instead of the
+    // zero-fill heap path below. The first fault after exec pre-faults the
+    // non-executable file regions (rodata/data) so VFS's kernel-mode copies
+    // of the image (vircopy of user buffers) hit present pages.
+    if region.flags & region::VR_FILE != 0 {
+        if vmp.prefault_exec {
+            vmp.prefault_exec = false;
+            // The pre-fault covers the faulting page when it lies in a
+            // non-executable region; map_file_page skips present pages, so
+            // the call below only maps the page when it is still absent
+            // (a VR_EXEC text page, which the pre-fault leaves lazy).
+            if !prefault_vfs_file_regions(ep, vmp, cr3) {
+                return;
+            }
+        }
+        if map_file_page(ep, vmp, cr3, addr) {
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+        }
+        return;
+    }
+
     // Demand-paging: allocate a physical page, zero-fill, and map it.
     // Physical memory is managed by the kernel; route through kernel call 62
     // (VM_PAGING) rather than calling kernel functions directly, which would
@@ -844,6 +887,9 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     if region.flags & region::VR_WRITABLE != 0 {
         pt_flags |= kernel::pagetable::MAP_WRITE;
     }
+    if region.flags & region::VR_EXEC != 0 {
+        pt_flags |= kernel::pagetable::MAP_EXEC;
+    }
 
     if crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags) == 0 {
         pb::pb_new(pa);
@@ -862,6 +908,197 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
             mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
     }
+}
+
+/// Map one page of a file-backed region: allocate a fresh page, map it
+/// writable at the VA, ask VFS to read the file block into it (FDIO — the
+/// magic grant write lands in the target's CR3), then downgrade to the
+/// region's permissions. Pages at or past EOF (holes, `.bss` tails) stay
+/// zero-filled; the FDIO read only fills the in-file portion. Shared by the
+/// demand-fault path and the exec pre-fault; the caller resolves the fault
+/// with VMCTL_CLEAR_PAGEFAULT on success. Returns false if the process was
+/// SIGSEGV'd (kill + fault-clear already done).
+fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
+    let page_size: u64 = 4096;
+    let page_addr = addr & !(page_size - 1);
+
+    // The exec pre-fault may have mapped this page already (the faulting
+    // page lies in a non-executable region it covered); skip it so the page
+    // isn't double-allocated. In the plain demand-fault path only PROT
+    // faults arrive with a present page, which map as before.
+    if crate::vm::vm_walk_page(cr3, page_addr) & kernel::pagetable::PG_P != 0 {
+        return true;
+    }
+
+    // Extract the fields we need up front so the region borrow ends before
+    // the blocking FDIO request.
+    let (fd, file_off, file_size, writable, exec) = {
+        let region = match vmp.vm_regions.find_mut(page_addr) {
+            Some(r) => r,
+            None => {
+                sys_kill(ep, SIGSEGV);
+                unsafe {
+                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+                }
+                return false;
+            }
+        };
+        (
+            region.fd,
+            region.file_offset_at(page_addr),
+            region.file_size,
+            region.flags & region::VR_WRITABLE != 0,
+            region.flags & region::VR_EXEC != 0,
+        )
+    };
+
+    let pa = crate::vm::vm_alloc_pages(1);
+    if pa == 0 {
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+        return false;
+    }
+
+    // Zero-fill the page via a temporary mapping in VM's own address space.
+    let tmp_va = crate::vm::vm_mappage(
+        pa,
+        kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+    );
+    if tmp_va == 0 {
+        crate::vm::vm_free_pages(pa, 1);
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+        return false;
+    }
+    unsafe {
+        core::ptr::write_bytes(tmp_va as *mut u8, 0, page_size as usize);
+    }
+    crate::vm::vm_unmappage(tmp_va);
+
+    // Map writable so MFS's SAFECOPYTO (through the target's CR3) lands in
+    // the page, then downgrade to the region's permissions below.
+    if crate::vm::vm_map_page_in(
+        cr3,
+        page_addr,
+        pa,
+        kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+    ) != 0
+    {
+        crate::vm::vm_free_pages(pa, 1);
+        sys_kill(ep, SIGSEGV);
+        unsafe {
+            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+        return false;
+    }
+
+    if file_off < file_size {
+        let mut reply = [0u8; 64];
+        let r = vfs_request_sync(
+            arch_common::com::VMVFSREQ_FDIO as i32,
+            fd,
+            ep,
+            file_off,
+            page_addr,
+            page_size as u32,
+            &mut reply,
+        );
+        if r != 0 {
+            let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+            crate::vm::vm_free_pages(pa, 1);
+            sys_kill(ep, SIGSEGV);
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+            return false;
+        }
+        // The region's in-file end can fall mid-page (a segment whose
+        // filesz is not page-aligned, or a file shorter than the mapped
+        // view): FDIO filled the whole page from the file, whose tail
+        // sections (.strtab, next segment) are not part of the memory
+        // image. Zero everything past the in-file end.
+        let in_file = file_size - file_off;
+        if in_file < page_size {
+            let tmp_va = crate::vm::vm_mappage(
+                pa,
+                kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+            );
+            if tmp_va == 0 {
+                let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+                crate::vm::vm_free_pages(pa, 1);
+                sys_kill(ep, SIGSEGV);
+                unsafe {
+                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+                }
+                return false;
+            }
+            unsafe {
+                core::ptr::write_bytes(
+                    (tmp_va + in_file) as *mut u8,
+                    0,
+                    (page_size - in_file) as usize,
+                );
+            }
+            crate::vm::vm_unmappage(tmp_va);
+        }
+    }
+
+    // Downgrade to the region's permissions (read-only exec pages must not
+    // stay writable; writable MAP_PRIVATE segments keep MAP_WRITE; exec
+    // segments keep the execute bit, which SV39 requires for instruction
+    // fetch — a text page without X faults forever on RISC-V).
+    let mut pt_flags = kernel::pagetable::MAP_USER;
+    if writable {
+        pt_flags |= kernel::pagetable::MAP_WRITE;
+    }
+    if exec {
+        pt_flags |= kernel::pagetable::MAP_EXEC;
+    }
+    let _ = crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags);
+
+    pb::pb_new(pa);
+    if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+        && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+    {
+        r.add_page(page_addr, pa);
+    }
+    true
+}
+
+/// Pre-fault every non-executable file region of an exec'd image (rodata,
+/// data, bss) so VFS's kernel-mode copies of the image (vircopy of user
+/// buffers, e.g. the shell's `# ` prompt in rodata) hit present pages.
+/// Text stays lazy — its faults are user-mode instruction fetches, which
+/// have a working resume path. Runs once, on the first file-region fault
+/// after exec. Returns false if a page failed and the process was
+/// SIGSEGV'd.
+fn prefault_vfs_file_regions(ep: i32, vmp: &mut proc::Vmproc, cr3: u64) -> bool {
+    let page_size: u64 = 4096;
+    let mut ranges: [(u64, u64); region::MAX_REGIONS] = [(0, 0); region::MAX_REGIONS];
+    let mut n = 0usize;
+    for r in vmp.vm_regions.regions.iter().flatten() {
+        if r.flags & region::VR_FILE != 0
+            && r.flags & region::VR_EXEC == 0
+            && n < region::MAX_REGIONS
+        {
+            ranges[n] = (r.vaddr, r.end());
+            n += 1;
+        }
+    }
+    for &(start, end) in &ranges[..n] {
+        let mut page = start;
+        while page < end {
+            if !map_file_page(ep, vmp, cr3, page) {
+                return false;
+            }
+            page += page_size;
+        }
+    }
+    true
 }
 
 /// Send a signal to a process via the kernel.
@@ -1123,8 +1360,13 @@ fn do_munmap(msg: &mut Message) -> i32 {
     // Find and remove the region at this address.
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(ep) {
-            // Remove the region from tracking.
-            let _removed = vmp.vm_regions.remove(addr);
+            // Remove the region from tracking; close a file region's vmfd
+            // once no other process's region references the same file.
+            if let Some(removed) = vmp.vm_regions.remove(addr)
+                && removed.flags & region::VR_FILE != 0
+            {
+                fdref_close_if_unused(removed.dev, removed.ino, removed.fd);
+            }
         }
     }
 
@@ -1137,18 +1379,11 @@ fn do_munmap(msg: &mut Message) -> i32 {
         va += PAGE_SIZE;
     }
 
-    // Free any physical pages that were allocated.
+    // Return the region's physical pages to the allocator. The region was
+    // removed above; walk the page table to find the frames (COW-shared
+    // frames and shared identity leaves are kept by the walk).
     unsafe {
-        if let Some(vmp) = proc::vmproc_lookup(ep) {
-            if let Some(region) = vmp.vm_regions.find(addr) {
-                // The region wasn't removed above if it wasn't at exact vaddr match.
-                // (remove uses vaddr exact match.)
-            } else {
-                // Region was removed, which means we need to clean up phys pages.
-                // For Phase 3 (lazy allocation), no pages were pre-allocated,
-                // so no free is needed. Phase 5 will add page-free logic here.
-            }
-        }
+        crate::vm::proc::free_user_range(cr3, addr, addr + len_aligned);
     }
 
     // Set m1i1 = 0 so vm_call reads a positive result (0 = success).
@@ -1213,6 +1448,10 @@ fn do_exit(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
+    // Close file-region vmfds that no other process references before
+    // destroying the address space (fork children may share them).
+    fdref_close_regions(ep);
+
     // Destroy the process's address space.
     unsafe {
         proc::vm_destroy(ep);
@@ -1253,9 +1492,129 @@ const MMAP_FD: usize = 28; // i32 — bytes 36-39
 // requested address.
 const MAP_FIXED: u32 = 0x10;
 
-// Anonymous-mmap search base, above the brk range (0x3FE00000..0x3FF00000)
-// and the exec/stack regions; per-arch so it stays clear of the kernel's
-// identity map (aarch64: user space is the low 1 GiB, PUD[0]).
+// MAP_ANONYMOUS (matches `minix-std::vmem::MAP_ANONYMOUS`).
+const MAP_ANONYMOUS: u32 = 0x20;
+
+// VM_MMAP file-offset field (i64 at absolute byte 40 = payload offset 32).
+const MMAP_OFFSET: usize = 32;
+
+// VMâ†’VFS request protocol (VFS_VMCALL message; M10 layout, absolute
+// message-byte offsets — matches `vfs/consts.rs`).
+const VFS_VMCALL: i32 = 0x100 + 38; // VFS_BASE + 38
+const VMCALL_REQ_OFF: usize = 16;
+const VMCALL_FD_OFF: usize = 20;
+const VMCALL_REQID_OFF: usize = 24;
+const VMCALL_ENDPOINT_OFF: usize = 28;
+const VMCALL_OFFSET_OFF: usize = 8;
+const VMCALL_FAULTVA_OFF: usize = 32;
+const VMCALL_LENGTH_OFF: usize = 48;
+
+// Reply (VM_VFS_REPLY) payload offsets.
+const VMV_RESULT_OFF: usize = 20;
+const VMV_DEV_OFF: usize = 28;
+const VMV_INO_OFF: usize = 32;
+const VMV_FD_OFF: usize = 40;
+const VMV_SIZE_PAGES_OFF: usize = 48;
+
+/// Send a synchronous VMâ†’VFS request (FDLOOKUP/FDCLOSE/FDIO) and wait for
+/// the VM_VFS_REPLY. VM is single-threaded, so blocking inside a handler is
+/// safe: VFS processes the request (forwarding to MFS if needed) and
+/// replies, waking VM's SENDREC. This replaces C MINIX's async
+/// request/callback machinery with a synchronous call.
+///
+/// Returns the reply's VMV_RESULT; on OK the full reply is left in `reply`
+/// for the caller to read the remaining VMV_* fields.
+fn vfs_request_sync(
+    req: i32,
+    fd: i32,
+    ep: i32,
+    offset: u64,
+    fault_va: u64,
+    length: u32,
+    reply: &mut [u8; 64],
+) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
+    msg[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4].copy_from_slice(&req.to_le_bytes());
+    msg[VMCALL_FD_OFF..VMCALL_FD_OFF + 4].copy_from_slice(&fd.to_le_bytes());
+    msg[VMCALL_REQID_OFF..VMCALL_REQID_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+    msg[VMCALL_ENDPOINT_OFF..VMCALL_ENDPOINT_OFF + 4].copy_from_slice(&ep.to_le_bytes());
+    msg[VMCALL_OFFSET_OFF..VMCALL_OFFSET_OFF + 8].copy_from_slice(&offset.to_le_bytes());
+    msg[VMCALL_FAULTVA_OFF..VMCALL_FAULTVA_OFF + 8].copy_from_slice(&fault_va.to_le_bytes());
+    msg[VMCALL_LENGTH_OFF..VMCALL_LENGTH_OFF + 4].copy_from_slice(&length.to_le_bytes());
+    let r = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::VFS_PROC_NR as u64,
+            msg.as_mut_ptr() as u64,
+        )
+    };
+    if r < 0 {
+        return r as i32;
+    }
+    reply.copy_from_slice(&msg);
+    i32::from_le_bytes(
+        msg[VMV_RESULT_OFF..VMV_RESULT_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    )
+}
+
+/// Close a VM file descriptor (FDCLOSE) once no region in any process
+/// references its (dev, ino, fd) — a lightweight fdref: fork clones regions
+/// verbatim, so the same vmfd is shared until the last user goes away.
+fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    let mut referenced = false;
+    unsafe {
+        proc::for_each_active_vmproc(|vmp| {
+            for r in vmp.vm_regions.regions.iter().flatten() {
+                if r.flags & region::VR_FILE != 0 && r.dev == dev && r.ino == ino && r.fd == fd {
+                    referenced = true;
+                    break;
+                }
+            }
+        });
+    }
+    if !referenced {
+        let mut reply = [0u8; 64];
+        let _ = vfs_request_sync(
+            arch_common::com::VMVFSREQ_FDCLOSE as i32,
+            fd,
+            arch_common::com::VFS_PROC_NR,
+            0,
+            0,
+            0,
+            &mut reply,
+        );
+    }
+}
+
+/// Close every file region of `ep` that no other process references.
+/// Used on exec (region list reset) and process exit.
+fn fdref_close_regions(ep: i32) {
+    let mut to_close: [(u32, u32, i32); region::MAX_REGIONS] = [(0, 0, -1); region::MAX_REGIONS];
+    let mut n = 0usize;
+    unsafe {
+        if let Some(vmp) = proc::vmproc_lookup(ep) {
+            for r in vmp.vm_regions.regions.iter().flatten() {
+                if r.flags & region::VR_FILE != 0 && n < region::MAX_REGIONS {
+                    to_close[n] = (r.dev, r.ino, r.fd);
+                    n += 1;
+                }
+            }
+        }
+    }
+    for &(dev, ino, fd) in &to_close[..n] {
+        fdref_close_if_unused(dev, ino, fd);
+    }
+}
+
+// Anonymous-mmap search base, above the brk heap and the exec/stack
+// regions; per-arch so it stays clear of the kernel's identity map
+// (aarch64: user space is the low 1 GiB, PUD[0]).
 
 /// Find the first free virtual range of `len_aligned` bytes at or above
 /// [`kernel::hal::mmap_base`], skipping all existing regions of the process.
@@ -1308,12 +1667,17 @@ fn do_mmap(msg: &mut Message) -> i32 {
     }
 
     let raw = unsafe { &msg.m_payload.raw };
-    let _prot = i32::from_ne_bytes(raw[MMAP_PROT..MMAP_PROT + 4].try_into().unwrap_or([0; 4]));
+    let prot = i32::from_ne_bytes(raw[MMAP_PROT..MMAP_PROT + 4].try_into().unwrap_or([0; 4]));
     let map_flags =
         i32::from_ne_bytes(raw[MMAP_FLAGS..MMAP_FLAGS + 4].try_into().unwrap_or([0; 4]));
     let length = u64::from_ne_bytes(raw[MMAP_LEN..MMAP_LEN + 8].try_into().unwrap_or([0; 8]));
     let addr = u64::from_ne_bytes(raw[MMAP_ADDR..MMAP_ADDR + 8].try_into().unwrap_or([0; 8]));
-    let _fd = i32::from_ne_bytes(raw[MMAP_FD..MMAP_FD + 4].try_into().unwrap_or([0; 4]));
+    let fd = i32::from_ne_bytes(raw[MMAP_FD..MMAP_FD + 4].try_into().unwrap_or([0; 4]));
+    let file_offset = i64::from_ne_bytes(
+        raw[MMAP_OFFSET..MMAP_OFFSET + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
 
     if length == 0 || length > kernel::pagetable::MAX_USER_ADDRESS {
         return EINVAL;
@@ -1342,6 +1706,22 @@ fn do_mmap(msg: &mut Message) -> i32 {
     // Page-align the address.
     let page_addr = vaddr & !(PAGE_SIZE - 1);
 
+    // File-backed mapping: fd >= 0 without MAP_ANONYMOUS (matching C's
+    // do_mmap: `fd == -1 || (flags & MAP_ANON)` selects anonymous).
+    if fd >= 0 && map_flags as u32 & MAP_ANONYMOUS == 0 {
+        return do_mmap_file(
+            ep,
+            cr3,
+            prot,
+            map_flags as u32,
+            len_aligned,
+            page_addr,
+            fd,
+            file_offset,
+            msg,
+        );
+    }
+
     // Validate the address range is within bounds.
     let end_addr = page_addr + len_aligned;
     if end_addr > kernel::pagetable::MAX_USER_ADDRESS || end_addr < page_addr {
@@ -1354,12 +1734,13 @@ fn do_mmap(msg: &mut Message) -> i32 {
         if vmp.vm_regions.find(page_addr).is_some() || vmp.vm_regions.find(end_addr - 1).is_some() {
             return EINVAL;
         }
-        // Insert the region (lazy — no physical pages allocated yet).
-        // Physical pages are allocated on page fault.
         let mut region = new_r;
         region.flags |= region::VR_READABLE;
-        if _prot & 0x02 != 0 {
+        if prot & 0x02 != 0 {
             region.flags |= region::VR_WRITABLE;
+        }
+        if prot & 0x04 != 0 {
+            region.flags |= region::VR_EXEC;
         }
 
         if vmp.vm_regions.insert(region).is_some() {
@@ -1369,10 +1750,153 @@ fn do_mmap(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
+    // Lazy region: no physical pages are allocated at map time. Pages are
+    // faulted in on access (user-mode faults, and kernel-mode faults via the
+    // Phase 1-4 fault machinery). The per-process page tables copy the
+    // kernel's 0..32 GiB identity map; windows above 1 GiB are supervisor-
+    // only, so without clearing them a kernel-mode copy into the region
+    // would silently alias the identity mapping (writes land beyond RAM,
+    // reads return garbage) instead of faulting. Clear the region's entries
+    // so every access — user or kernel — faults and VM maps a real page.
+    let _ = crate::vm::vm_clear_range(cr3, page_addr, len_aligned / PAGE_SIZE);
+
     // Write mapped address into m1i1|m1i2 (u64 at message bytes 8..16)
     // for vm_call to read.
     msg.m_payload.m1.m1i1 = (page_addr & 0xFFFF_FFFF) as i32;
     msg.m_payload.m1.m1i2 = (page_addr >> 32) as i32;
+    OK
+}
+
+/// File-backed VM_MMAP: resolve the fd via FDLOOKUP, create a lazy VR_FILE
+/// region, and return the mapped address (page-aligned base plus the
+/// unaligned file-offset head).
+#[allow(clippy::too_many_arguments)]
+fn do_mmap_file(
+    ep: i32,
+    cr3: u64,
+    prot: i32,
+    map_flags: u32,
+    len_aligned: u64,
+    page_addr: u64,
+    fd: i32,
+    file_offset: i64,
+    msg: &mut Message,
+) -> i32 {
+    // Resolve the fd to a VM fd + file identity via VFS.
+    let mut reply = [0u8; 64];
+    let r = vfs_request_sync(
+        arch_common::com::VMVFSREQ_FDLOOKUP as i32,
+        fd,
+        ep,
+        0,
+        0,
+        0,
+        &mut reply,
+    );
+    if r != 0 {
+        return r;
+    }
+    let vmfd = i32::from_le_bytes(
+        reply[VMV_FD_OFF..VMV_FD_OFF + 4]
+            .try_into()
+            .unwrap_or([0xFF; 4]),
+    );
+    let dev = u32::from_le_bytes(
+        reply[VMV_DEV_OFF..VMV_DEV_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let ino = u32::from_le_bytes(
+        reply[VMV_INO_OFF..VMV_INO_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let size_pages = u64::from_le_bytes(
+        reply[VMV_SIZE_PAGES_OFF..VMV_SIZE_PAGES_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let file_size = size_pages.saturating_mul(PAGE_SIZE);
+
+    // Align the file offset down to a page; the caller's view starts
+    // file_page_off bytes into the region's first page (C mmap_file).
+    let file_off = file_offset.max(0) as u64;
+    let file_page_off = file_off & (PAGE_SIZE - 1);
+    let file_off_aligned = file_off - file_page_off;
+
+    // The region must cover the unaligned head too.
+    let region_len = len_aligned + if file_page_off != 0 { PAGE_SIZE } else { 0 };
+    let end_addr = page_addr + region_len;
+    if end_addr > kernel::pagetable::MAX_USER_ADDRESS || end_addr < page_addr {
+        return EINVAL;
+    }
+
+    // In-file end for the region's mapped view: file bytes exist only up
+    // to the whole file's size; pages at or past that are zero-filled.
+    let infile_end = (file_off_aligned + region_len).min(file_size);
+
+    let mut flags = region::VR_READABLE | region::VR_FILE;
+    if prot & 0x02 != 0 {
+        flags |= region::VR_WRITABLE;
+    }
+    if prot & 0x04 != 0 {
+        flags |= region::VR_EXEC;
+    }
+    let new_r = region::VirRegion::new_file(
+        page_addr,
+        region_len,
+        flags,
+        dev,
+        ino,
+        vmfd,
+        file_off_aligned,
+        infile_end,
+    );
+
+    unsafe {
+        if let Some(vmp) = proc::vmproc_lookup(ep) {
+            // MAP_FIXED semantics (C mmap_region → map_unmap_range):
+            // existing regions overlapping the new range are replaced, not
+            // rejected, so mmap(MAP_FIXED) over an old mapping works.
+            let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
+                [None; region::MAX_REGIONS];
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i < region::MAX_REGIONS {
+                let overlaps = vmp.vm_regions.regions[i]
+                    .as_ref()
+                    .is_some_and(|r| r.overlaps(&new_r));
+                if overlaps {
+                    if let Some(r) = vmp.vm_regions.regions[i].take()
+                        && n < region::MAX_REGIONS
+                    {
+                        removed[n] = Some(r);
+                        n += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            if vmp.vm_regions.insert(new_r).is_some() {
+                return EAGAIN;
+            }
+            for r in removed[..n].iter().flatten() {
+                if r.flags & region::VR_FILE != 0 {
+                    fdref_close_if_unused(r.dev, r.ino, r.fd);
+                }
+            }
+        } else {
+            return EINVAL;
+        }
+    }
+
+    // Clear identity PTEs so the lazy file pages fault (no-op on page
+    // tables without a low-window identity copy, e.g. exec'd images).
+    let _ = crate::vm::vm_clear_range(cr3, page_addr, region_len / PAGE_SIZE);
+
+    let mapped = page_addr + file_page_off;
+    msg.m_payload.m1.m1i1 = (mapped & 0xFFFF_FFFF) as i32;
+    msg.m_payload.m1.m1i2 = (mapped >> 32) as i32;
     OK
 }
 
@@ -1464,32 +1988,36 @@ fn do_fork(msg: &mut Message) -> i32 {
 
 /// Handle VM_EXEC_NEWMEM — create a new address space for exec.
 ///
-/// Allocates a fresh page table for the caller (PM server endpoint).
-/// The PM server will later map segments into the new address space.
+/// Clears the target's old region list (closing file-region vmfds that no
+/// other process shares) and re-establishes the pre-allocated brk heap so
+/// the exec chain's VM_VFS_MMAPs land cleanly. The page table itself is
+/// built by the kernel's SYS_EXEC_LOAD (`exec_create_root` + cleared code
+/// range): a VM-side `pt_new` table only carries the kernel's high half and
+/// cannot host the kernel's low-half identity code, so it must NOT be bound
+/// here.
 fn do_exec_newmem(msg: &mut Message) -> i32 {
-    let ep = msg.m_source;
+    let ep = unsafe { msg.m_payload.m1.m1i1 };
     if !is_user_ep(ep) {
         return EINVAL;
     }
 
-    unsafe {
-        if proc::pt_new(ep) != 0 {
-            // Allocation of the new page table failed
-            return EAGAIN;
-        }
+    // Old file regions die with the old image; close their vmfds unless a
+    // fork sibling still uses them.
+    fdref_close_regions(ep);
 
-        // Clear old regions — the process has a fresh page table.
+    unsafe {
+        // Clear old regions — the exec'd image registers its own below.
         if let Some(vmp) = proc::vmproc_lookup(ep) {
             for i in 0..crate::vm::region::MAX_REGIONS {
                 vmp.vm_regions.regions[i] = None;
             }
             // Re-establish the pre-allocated brk heap (the kernel's exec
-            // path maps 0x3FE00000..0x3FF00000 with physical pages before
+            // path maps heap base .. base + 1 MiB with physical pages before
             // the image runs) so `brk`/`sbrk` keep returning heap addresses
             // and faults inside the heap can be demand-paged. Mirrors
             // `vm_init_boot`'s setup for boot processes.
             let heap_region = crate::vm::region::VirRegion::new(
-                0x3FE00000u64,
+                kernel::hal::user_heap_base(),
                 0x100000u64, // 1 MB
                 crate::vm::region::VR_READABLE
                     | crate::vm::region::VR_WRITABLE
@@ -1498,7 +2026,7 @@ fn do_exec_newmem(msg: &mut Message) -> i32 {
                     | crate::vm::region::VR_DATA,
             );
             let _ = vmp.vm_regions.insert(heap_region);
-            vmp.vm_region_top = 0x3FF00000u64;
+            vmp.vm_region_top = kernel::hal::user_heap_base() + 0x100000u64;
         }
     }
 
@@ -1525,8 +2053,10 @@ fn do_brk(msg: &mut Message) -> i32 {
         return OK;
     }
 
-    // Validate: break must be within the user address space.
-    if new_brk > kernel::pagetable::MAX_USER_ADDRESS {
+    // Validate: break must be within the user address space and below the
+    // per-arch heap limit (on aarch64 the kernel's EL1-only identity map
+    // starts at 0x40000000, so the heap must stop before it).
+    if new_brk > kernel::pagetable::MAX_USER_ADDRESS || new_brk > kernel::hal::user_heap_limit() {
         return EINVAL;
     }
 
@@ -1550,7 +2080,7 @@ fn do_brk(msg: &mut Message) -> i32 {
         // Pages in the pre-allocated range (0x3FE00000..0x3FF00000) are
         // already mapped by the kernel during boot. Only allocate pages
         // beyond that range.
-        let prealloc_end: u64 = 0x3FF00000;
+        let prealloc_end: u64 = kernel::hal::user_heap_base() + 0x100000;
         let alloc_start = if current_top < prealloc_end {
             prealloc_end
         } else {
@@ -1573,7 +2103,7 @@ fn do_brk(msg: &mut Message) -> i32 {
     } else if target < current_top {
         // Shrink heap: unmap pages.
         // Don't unmap pages within the pre-allocated range.
-        let prealloc_start: u64 = 0x3FE00000;
+        let prealloc_start: u64 = kernel::hal::user_heap_base();
         let unmap_end = current_top;
         let unmap_start = target.max(prealloc_start);
         if unmap_end > unmap_start {
@@ -1627,14 +2157,116 @@ fn do_vfs_reply(msg: &mut Message) -> i32 {
 }
 
 fn do_vfs_mmap(msg: &mut Message) -> i32 {
-    let _ep = msg.m_source;
-    let _addr = unsafe { msg.m_payload.m1.m1i1 } as u64;
-    let _len = unsafe { msg.m_payload.m1.m1i2 } as u64;
-    let _flags = unsafe { msg.m_payload.m1.m1i3 } as u32;
+    // VM_VFS_MMAP (VFS → VM): create a lazy file-backed region for one
+    // exec'd PT_LOAD segment. The fd is a VM fd in VFS's own fproc, so no
+    // FDLOOKUP round-trip is needed (matching C's mmap_file for exec).
+    let raw = unsafe { &msg.m_payload.raw };
+    let who = i32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0; 4]));
+    let fd = i32::from_ne_bytes(raw[4..8].try_into().unwrap_or([0xFF; 4]));
+    let protflags = i32::from_ne_bytes(raw[8..12].try_into().unwrap_or([0; 4]));
+    let len = u64::from_ne_bytes(raw[12..20].try_into().unwrap_or([0; 8]));
+    let vaddr = u64::from_ne_bytes(raw[20..28].try_into().unwrap_or([0; 8]));
+    let foffset = u64::from_ne_bytes(raw[28..36].try_into().unwrap_or([0; 8]));
+    // In-file end for the segment (p_offset + p_filesz, sent by VFS):
+    // pages at or past this are zero-filled (bss), not read from the file.
+    let infile_end = u64::from_ne_bytes(raw[36..44].try_into().unwrap_or([0; 8]));
+    let dev = u32::from_ne_bytes(raw[44..48].try_into().unwrap_or([0; 4]));
+    let ino = u32::from_ne_bytes(raw[48..52].try_into().unwrap_or([0; 4]));
 
-    // TODO: Phase 13 — implement file-backed mmap by calling VFS
-    // to read file data into allocated physical pages, then mapping
-    // them into the process's address space.
+    if !is_user_ep(who) || fd < 0 {
+        return EINVAL;
+    }
+    let cr3 = unsafe { proc::vm_get_addrspace(who) };
+    if cr3 == 0 {
+        return EINVAL;
+    }
+    if len == 0 || len > kernel::pagetable::MAX_USER_ADDRESS {
+        return EINVAL;
+    }
+
+    // Page-align the file offset; the region base is the page-aligned
+    // segment vaddr and the mapping view starts file_page_off bytes in
+    // (ELF guarantees p_vaddr % PAGE == p_offset % PAGE).
+    let page_size: u64 = 4096;
+    let file_page_off = foffset & (page_size - 1);
+    let file_off_aligned = foffset - file_page_off;
+    let page_addr = vaddr & !(page_size - 1);
+    // Region length must be page-aligned so the last partial page's faults
+    // (up to the rounded-up end) still fall inside the region.
+    let region_len = (len + file_page_off + page_size - 1) & !(page_size - 1);
+    let end_addr = page_addr + region_len;
+    if end_addr > kernel::pagetable::MAX_USER_ADDRESS || end_addr < page_addr {
+        return EINVAL;
+    }
+
+    let mut flags = region::VR_READABLE | region::VR_FILE;
+    if protflags & 0x02 != 0 {
+        flags |= region::VR_WRITABLE;
+    }
+    if protflags & 0x04 != 0 {
+        flags |= region::VR_EXEC;
+    }
+    let new_r = region::VirRegion::new_file(
+        page_addr,
+        region_len,
+        flags,
+        dev,
+        ino,
+        fd,
+        file_off_aligned,
+        infile_end,
+    );
+
+    unsafe {
+        if let Some(vmp) = proc::vmproc_lookup(who) {
+            // C's mmap_region with MAP_FIXED calls map_unmap_range first:
+            // remove any existing regions overlapping the new range so
+            // adjacent PT_LOAD segments (a tiny segment sharing pages with
+            // a larger one) can map. The new region references the same
+            // fd, so fdref_close_if_unused keeps the vmfd alive until the
+            // last user is gone.
+            let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
+                [None; region::MAX_REGIONS];
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i < region::MAX_REGIONS {
+                let overlaps = vmp.vm_regions.regions[i]
+                    .as_ref()
+                    .is_some_and(|r| r.overlaps(&new_r));
+                if overlaps {
+                    if let Some(r) = vmp.vm_regions.regions[i].take()
+                        && n < region::MAX_REGIONS
+                    {
+                        removed[n] = Some(r);
+                        n += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            if vmp.vm_regions.insert(new_r).is_some() {
+                return EAGAIN;
+            }
+            // Executed image: the first fault pre-faults the non-executable
+            // file regions (rodata/data) so VFS's kernel-mode copies of the
+            // image (vircopy of user buffers) hit present pages.
+            vmp.prefault_exec = true;
+            for r in removed[..n].iter().flatten() {
+                if r.flags & region::VR_FILE != 0 {
+                    fdref_close_if_unused(r.dev, r.ino, r.fd);
+                }
+            }
+        } else {
+            return EINVAL;
+        }
+    }
+
+    // Clear identity PTEs so the lazy file pages fault (no-op on exec'd
+    // page tables, which have no low-window identity copy).
+    let _ = crate::vm::vm_clear_range(cr3, page_addr, region_len / page_size);
+
+    msg.m_payload.m1.m1i1 = (page_addr & 0xFFFF_FFFF) as i32;
+    msg.m_payload.m1.m1i2 = (page_addr >> 32) as i32;
     OK
 }
 
@@ -1964,9 +2596,10 @@ mod tests {
         assert_eq!(do_procctl(&mut msg, 0), EINVAL);
         assert_eq!(do_procctl_notrans(&mut msg), EINVAL);
 
-        // VFS — now return OK instead of ENOSYS
+        // VFS — do_vfs_reply is a no-op OK; do_vfs_mmap is a real handler
+        // now (needs a valid target endpoint, which a zeroed message lacks).
         assert_eq!(do_vfs_reply(&mut msg), OK);
-        assert_eq!(do_vfs_mmap(&mut msg), OK);
+        assert_eq!(do_vfs_mmap(&mut msg), EINVAL);
 
         // RS — now return OK instead of ENOSYS
         assert_eq!(do_rs_set_priv(&mut msg), OK);

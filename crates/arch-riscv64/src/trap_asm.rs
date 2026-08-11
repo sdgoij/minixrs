@@ -12,12 +12,37 @@ global_asm!(
 .align 2
 
 trap_vector:
-    # ALWAYS swap sp with sscratch, regardless of SPP.
-    csrrw   sp, sscratch, sp
-    # Allocate trap frame
-    addi    sp, sp, -296
+    # Swap t0 with sscratch: sscratch = the interrupted t0 (preserved for the
+    # frame), t0 = the old sscratch value. The old sscratch value itself is
+    # irrelevant — this entry no longer swaps SP (see below) — so t0 is free
+    # to be clobbered by the SPP check.
+    csrrw   t0, sscratch, t0
+    # Trap source from sstatus.SPP (the CPU sets it on entry): 0 = U-mode,
+    # 1 = S-mode. A U-mode trap runs on the kernel stack (__boot_stack_top).
+    # An S-mode fault taken mid-syscall keeps the interrupted kernel SP — the
+    # frame goes BELOW it so the syscall's own stack and its U-mode trap frame
+    # (at the kernel stack top) stay intact for the eventual syscall-exit
+    # sret. The interrupted SP is spilled below the frame in both cases.
+    csrr    t0, sstatus
+    srli    t0, t0, 8
+    andi    t0, t0, 1
+    bnez    t0, 1f
+    # U-mode: kernel stack = __boot_stack_top (fixed symbol).
+    la      t0, __boot_stack_top
+    addi    t0, t0, -296            # t0 = frame base (top - 296)
+    sd      sp, -24(t0)             # interrupted user sp, below the frame
+    mv      sp, t0
+    j       2f
+1:  # S-mode: keep the interrupted kernel SP; frame 296 bytes below it, with
+    # the interrupted SP spilled in the 24 bytes below the frame.
+    addi    t0, sp, -320            # t0 = frame base (sp - 296 - 24)
+    sd      sp, -24(t0)             # interrupted kernel sp, below the frame
+    mv      sp, t0
+2:  # sp = frame base; [sp-24, sp) holds the interrupted SP.
 
-    # Save all 32 GPRs
+    # Save all 32 GPRs (t0's slot is fixed up below; sp is saved from the
+    # spill; every other register holds its interrupted value — nothing was
+    # clobbered before this point except t0, whose value is in sscratch).
     sd      zero, 0(sp)
     sd      ra,   8(sp)
     sd      gp,   24(sp)
@@ -62,15 +87,13 @@ trap_vector:
     csrr    t0, scause
     sd      t0, 272(sp)
 
-    # Save the original SP (before trap allocation).
-    # For U-mode traps: user sp ends up in sscratch after csrrw swap.
-    # For re-injected S-mode traps: original sp was OpenSBI's M-mode stack.
-    csrr    t0, sscratch
-    sd      t0, 16(sp)
-
-    # Save the kernel stack pointer at offset 280 for restoring sscratch later.
-    addi    t0, sp, 296             # t0 = kernel sp BEFORE trap allocation
-    sd      t0, 280(sp)
+    # Fix-ups: the interrupted SP (from the spill) into slot 16 (and 280 for
+    # debug), and the interrupted t0 (from sscratch) into slot 40.
+    ld      t4, -24(sp)
+    sd      t4, 16(sp)
+    sd      t4, 280(sp)
+    csrr    t4, sscratch
+    sd      t4, 40(sp)
 
     # Call trap_handler(frame)
     mv      a0, sp
@@ -82,8 +105,10 @@ trap_vector:
     ld      t0, 264(sp)
     csrw    sstatus, t0
 
-    # Restore kernel stack pointer into sscratch (for next U-mode trap)
-    ld      t0, 280(sp)
+    # Re-arm sscratch for the next trap: the U-mode kernel stack. (S-mode
+    # resumes don't swap SP — their frames go below the interrupted SP — so
+    # sscratch's value is only used as the interrupted-t0 spill slot.)
+    la      t0, __boot_stack_top
     csrw    sscratch, t0
 
     # Restore GPRs (except sp)

@@ -46,6 +46,11 @@ pub(crate) struct Vmproc {
     pub vm_minor_page_fault: u64,
     /// Major page fault counter.
     pub vm_major_page_fault: u64,
+    /// Set by do_vfs_mmap (exec) and cleared after the non-executable
+    /// file regions are pre-faulted on the first fault. Keeps VFS's
+    /// kernel-mode copies of the image (vircopy of user buffers, e.g.
+    /// the shell's write buffer in rodata) from faulting on lazy pages.
+    pub prefault_exec: bool,
 }
 
 /// Flags for Vmproc.vm_flags.
@@ -161,6 +166,7 @@ pub(crate) unsafe fn vmproc_alloc(ep: Endpoint) -> Option<&'static mut Vmproc> {
             vm_regions: RegionList::new(),
             vm_minor_page_fault: 0,
             vm_major_page_fault: 0,
+            prefault_exec: false,
         };
         table[slot] = Some(vmp);
         table[slot].as_mut()
@@ -476,6 +482,125 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
 
         // Reset the Vmproc entry.
         vmproc_free(ep);
+    }
+}
+
+/// Free the physical frames mapped in `[va_start, va_end)` of the page
+/// table rooted at `cr3` (user half only). Used by `do_munmap` to return
+/// a region's pages to the allocator. Mirrors the walk in [`vm_destroy`]:
+/// COW-shared frames (pb refcount > 1) are kept, shared identity/alias
+/// leaves are skipped, and per-process table pages are left in place
+/// (they are reused by later mappings in the same range).
+///
+/// # Safety
+///
+/// The caller must ensure `cr3` is a valid page-table root and that the
+/// owning process is not concurrently running.
+pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
+    unsafe {
+        use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
+        use kernel::hal::{pte_to_phys, pte_user_owned};
+        // Map table pages readable (see cow.rs): on SV39 a V|U-only leaf is
+        // a table pointer, so reading the PTEs would fault. MAP_READ is 0 on
+        // x86/aarch64 and PTE_R on RISC-V.
+        let map_flags = kernel::pagetable::MAP_PRESENT
+            | kernel::pagetable::MAP_USER
+            | kernel::pagetable::MAP_READ;
+
+        unsafe fn with_table<F, R>(phys: u64, flags: u64, f: F) -> Option<R>
+        where
+            F: FnOnce(&[u64; 512]) -> R,
+        {
+            let va = vm_mappage(phys, flags);
+            if va == 0 {
+                return None;
+            }
+            // SAFETY: the VA was just mapped to `phys` by vm_mappage.
+            let table = unsafe { &*(va as *const [u64; 512]) };
+            let r = f(table);
+            let _ = vm_unmappage(va);
+            Some(r)
+        }
+
+        fn free_frame(frame: u64) {
+            if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
+                let refcount = crate::vm::pb::pb_get(pb_idx).map_or(1, |b| b.refcount);
+                crate::vm::pb::pb_unref(pb_idx);
+                if refcount > 1 {
+                    return; // still COW-shared with another process
+                }
+            }
+            let _ = vm_free_pages(frame, 1);
+        }
+
+        unsafe fn walk_table(
+            phys: u64,
+            level: u32,
+            va_base: u64,
+            flags: u64,
+            va_start: u64,
+            va_end: u64,
+        ) {
+            let step = PAGE_SIZE << (level * 9);
+            // Skip tables whose whole span lies outside the range.
+            if va_base + 512 * step <= va_start || va_base >= va_end {
+                return;
+            }
+            if let Some(table) = unsafe { with_table(phys, flags, |t| *t) } {
+                for (idx, &e) in table.iter().enumerate() {
+                    if e & PG_P == 0 {
+                        continue;
+                    }
+                    let entry_va = va_base + (idx as u64) * step;
+                    if entry_va + step <= va_start || entry_va >= va_end {
+                        continue;
+                    }
+                    if level == 0 {
+                        // Bottom level: 4KB pages. The arch decides which
+                        // user leaves map frames owned by the process.
+                        if pte_user_owned(e, entry_va) {
+                            let frame = pte_to_phys(e);
+                            if frame != 0 {
+                                free_frame(frame);
+                            }
+                        }
+                        continue;
+                    }
+                    if e & PG_PS != 0 {
+                        continue; // block/huge leaf — shared identity
+                    }
+                    unsafe {
+                        walk_table(pte_to_phys(e), level - 1, entry_va, flags, va_start, va_end);
+                    }
+                }
+            }
+        }
+
+        // Walk only the user half of the root (indices 0..USER_PML4_ENTRIES).
+        let top = kernel::hal::pt_levels() - 1;
+        let root_step = PAGE_SIZE << (top * 9);
+        if let Some(root) = with_table(cr3, map_flags, |t| *t) {
+            for (idx, &e) in root.iter().enumerate().take(USER_PML4_ENTRIES) {
+                if e & PG_P == 0 {
+                    continue;
+                }
+                if e & PG_PS != 0 {
+                    continue; // block/huge leaf — shared identity
+                }
+                let entry_va = (idx as u64) * root_step;
+                if entry_va + root_step <= va_start || entry_va >= va_end {
+                    continue;
+                }
+                walk_table(
+                    pte_to_phys(e),
+                    top - 1,
+                    entry_va,
+                    map_flags,
+                    va_start,
+                    va_end,
+                );
+            }
+        }
     }
 }
 

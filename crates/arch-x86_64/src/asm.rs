@@ -601,7 +601,16 @@ pub unsafe extern "C" fn exception_page_fault_entry() {
     // misaligned stack, so align RSP by 8 before the calls. This shifts
     // the CPU-frame-relative reads by 8 (error code at [RSP+128]).
     core::arch::naked_asm!(
+        // Conditional swapgs: only swap when the fault was taken from user
+        // mode (faulting CS.RPL == 3, CS at [rsp+16] of the CPU frame). A
+        // fault taken mid-syscall (kernel mode) already has the kernel GS
+        // active — swapping again would restore the user GS and corrupt
+        // kernel GS access. test/jz clobber only RFLAGS, which is saved in
+        // the CPU frame; no GPR is disturbed.
+        "test   qword ptr [rsp + 16], 3",
+        "jz     0f",
         "swapgs",
+        "0:",
         // Save all 15 user registers (syscall_entry push order).
         "push   rbp",
         "push   r15",
@@ -922,11 +931,15 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
 /// Restore a process context and jump to it via iretq.
 ///
 /// Takes a pointer to a `Proc` struct in `rdi` (System V AMD64 ABI),
-/// loads CR3 from `p_seg.p_cr3` and user RIP/RFLAGS/RSP from the p_reg
+/// loads CR3 from `p_seg.p_cr3` and RIP/RFLAGS/RSP from the p_reg
 /// dedicated slots (rip@160, rflags@176, rsp@168), then loads all GPRs —
 /// including rcx from the rcx slot (16) and r11 from the r11 slot (72),
 /// which the save paths populate per the syscall convention — and iretq's
-/// into ring 3. Never returns.
+/// to the saved context. The resume mode comes from the saved CS slot
+/// (p_reg[184]): RPL 3 iretq's into ring 3 (the normal scheduler switch);
+/// RPL 0 iretq's back into kernel mode at the faulting instruction with
+/// the interrupted syscall's kernel stack (a page fault taken mid-syscall,
+/// resolved by VM and now retryable). Never returns.
 ///
 /// This is the atomic "switch to process" primitive for the scheduler.
 /// The caller MUST save the outgoing process's register state into its
@@ -935,8 +948,9 @@ pub unsafe extern "C" fn sysretq_direct() -> ! {
 /// # Safety
 ///
 /// `proc_ptr` must point to a valid `Proc` whose `p_reg` and `p_seg`
-/// contain valid user-space register values. Must be called in ring 0
-/// with interrupts disabled. Never returns.
+/// contain valid register values for the saved resume mode (user or
+/// kernel). Must be called in ring 0 with interrupts disabled. Never
+/// returns.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
@@ -972,14 +986,37 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         // Load CR3 from p_seg.p_cr3 at offset 256.
         "mov    rdi, [r15 + 256]",
         "mov    cr3, rdi",
-        // Build iretq frame (push order: SS, RSP, RFLAGS, CS, RIP).
-        // RIP/RFLAGS come from the dedicated p_reg slots (160/176) so the
-        // GPR rcx/r11 loads below (16/72) keep the user's real registers.
-        "push   0x0013",
-        "push   qword ptr [r15 + 168]",
-        "push   qword ptr [r15 + 176]",
-        "push   0x001B",
-        "push   qword ptr [r15 + 160]",
+        // Build the iretq frame. The resume mode comes from p_reg[184] (the
+        // CS saved by the context-save path): RPL 3 iretq's into ring 3 with
+        // the user selectors (5-entry frame); RPL 0 iretq's back into kernel
+        // mode at the faulting instruction — switch to the interrupted
+        // kernel stack and build a 3-entry frame (a same-privilege iretq
+        // pops only RIP/CS/RFLAGS, leaving RSP at the fault-time kernel
+        // stack position with the interrupted syscall's state intact below).
+        "mov    rax, [r15 + 184]",
+        "test   rax, 3",
+        "jz     4f",
+        "push   0x0013",                    // SS (user data)
+        "push   qword ptr [r15 + 168]",     // user RSP
+        "push   qword ptr [r15 + 176]",     // RFLAGS
+        "push   0x001B",                    // CS (user code)
+        "push   qword ptr [r15 + 160]",     // RIP
+        "jmp    5f",
+        "4:",
+        "mov    rsp, [r15 + 168]",          // kernel RSP at fault time
+        "push   qword ptr [r15 + 176]",     // RFLAGS
+        "push   0x0008",                    // CS (kernel code)
+        "push   qword ptr [r15 + 160]",     // RIP (faulting kernel instruction)
+        "5:",
+        // Conditional swapgs: a user resume swaps (kernel GS → user GS); a
+        // kernel resume keeps the kernel GS that was active mid-syscall.
+        // rax is scratch here and immediately overwritten by the register
+        // loads below.
+        "mov    rax, [r15 + 184]",
+        "test   rax, 3",
+        "jz     6f",
+        "swapgs",
+        "6:",
         // Load user registers from p_reg via r15.
         "mov    rax, [r15]",
         "mov    rbx, [r15 + 8]",
@@ -996,7 +1033,6 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "mov    r14, [r15 + 96]",
         "mov    rbp, [r15 + 112]",
         "mov    r15, [r15 + 104]",
-        "swapgs",
         // Disable interrupts before unmasking the timer to prevent
         // a timer interrupt from firing in kernel mode between the
         // unmask and iretq. The iretq restores IF from the frame's

@@ -795,107 +795,62 @@ pub struct ExecLoadResult {
 }
 
 /// Load a raw ELF binary into a target process, replacing its image.
+/// Install a new executable image into `rp`'s address space.
 ///
-/// This is the shared core of the kernel exec paths: it builds a fresh page
-/// table, copies PT_LOAD segments into newly allocated pages, sets up the
-/// user stack from `argv_strs`/`envp_strs`, and programs the target's
-/// registers (entry, RSP, argc, argv). It does NOT make the target runnable
-/// — the caller decides when the process resumes at the new entry point.
+/// VM has registered the executable's PT_LOAD segments as lazy file-backed
+/// regions (VM_EXEC_NEWMEM + VM_VFS_MMAP). The kernel builds a fresh page
+/// table rooted at a copy of the boot identity map (`exec_create_root`),
+/// clears the code range `[code_start, code_end)` so the file regions fault
+/// on first touch instead of aliasing identity RAM, maps the stack and brk
+/// heap into it, builds the user stack frame from `argv_strs`/`envp_strs`,
+/// and programs the target's registers (entry, RSP, argc, argv). It does
+/// NOT make the target runnable — the caller decides when the process
+/// resumes at the new entry point.
 ///
 /// Returns the entry point and stack pointer on success, or a negative
 /// errno.
 ///
 /// # Safety
 ///
-/// `rp` must point to a valid, in-use `Proc`. `data` must contain a valid
-/// ELF64 binary for the running architecture.
+/// `rp` must point to a valid, in-use `Proc`. `code_start`/`code_end` must
+/// be page-aligned and cover every PT_LOAD segment.
 pub unsafe fn exec_elf_for_target(
     rp: *mut crate::proc::Proc,
-    data: &[u8],
+    entry: u64,
+    code_start: u64,
+    code_end: u64,
     argv_strs: &[&str],
     envp_strs: &[&str],
 ) -> Result<ExecLoadResult, i64> {
     unsafe {
-        let ehdr = match crate::elf::parse_elf_header(data) {
-            Ok(e) => e,
-            Err(_) => return Err(-38),
-        };
-
-        // Parse ELF to get bounds (no identity-mapped writes that would
-        // corrupt boot process code at 0x1000000).
-        let boot_cr3_val = crate::pagetable::boot_cr3();
-        let loaded = {
-            let ehdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
-            let phoff = ehdr.e_phoff as usize;
-            let phnum = ehdr.e_phnum as usize;
-            let phentsize = ehdr.e_phentsize as usize;
-            let mut base = u64::MAX;
-            let mut top = 0u64;
-            for i in 0..phnum {
-                let phdr =
-                    &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
-                if phdr.p_type != crate::elf::PT_LOAD {
-                    continue;
-                }
-                if phdr.p_vaddr < base {
-                    base = phdr.p_vaddr;
-                }
-                let seg_top = phdr.p_vaddr + phdr.p_memsz;
-                if seg_top > top {
-                    top = seg_top;
-                }
-            }
-            if base == u64::MAX {
-                return Err(-38);
-            }
-            crate::elf::LoadedElf {
-                base,
-                top,
-                entry: ehdr.e_entry,
-            }
-        };
+        if code_end <= code_start || code_start & 0xFFF != 0 || code_end & 0xFFF != 0 {
+            return Err(-22); // EINVAL
+        }
 
         // Architecture-specific user stack base.
         let user_stack_base: u64 = crate::hal::user_stack_base();
         let user_stack_size: usize = crate::hal::user_stack_size();
 
-        let code_start = loaded.base & !0xFFF;
-        let code_end = (loaded.top + 0xFFF) & !0xFFF;
         let stack_start = user_stack_base & !0xFFF;
         let stack_end = (user_stack_base + user_stack_size as u64 + 0xFFF) & !0xFFF;
 
-        // Build new page table root (arch-specific layout).
+        // Build new page table root (arch-specific layout; copies the boot
+        // identity map so the kernel stays executable on this CR3).
+        let boot_cr3_val = crate::pagetable::boot_cr3();
         let root = match crate::hal::exec_create_root(boot_cr3_val) {
             0 => return Err(-12),
             r => r,
         };
 
-        // Allocate physical pages for the code and load ELF segments.
-        let code_pages = ((code_end - code_start) / 4096) as usize;
-        let phys_code_base = match crate::hal::alloc_phys_contig(code_pages) {
-            Some(b) => b,
-            None => return Err(-12),
-        };
-        let elf_hdr = &*(data.as_ptr() as *const crate::elf::Elf64Ehdr);
-        let phoff = elf_hdr.e_phoff as usize;
-        let phnum = elf_hdr.e_phnum as usize;
-        let phentsize = elf_hdr.e_phentsize as usize;
-        for i in 0..phnum {
-            let phdr = &*(data.as_ptr().add(phoff + i * phentsize) as *const crate::elf::Elf64Phdr);
-            if phdr.p_type != crate::elf::PT_LOAD {
-                continue;
-            }
-            let seg_vaddr = phdr.p_vaddr;
-            let seg_offset = seg_vaddr - code_start;
-            let dst = (phys_code_base + seg_offset) as *mut u8;
-            if phdr.p_filesz > 0 {
-                let src = data.as_ptr().add(phdr.p_offset as usize);
-                core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
-            }
-            let bss = phdr.p_memsz - phdr.p_filesz;
-            if bss > 0 {
-                core::ptr::write_bytes(dst.add(phdr.p_filesz as usize), 0, bss as usize);
-            }
+        // Clear the code range in the fresh table: exec_create_root copies
+        // the identity map with user access in the low window, so without
+        // clearing, the lazy file regions would silently alias identity RAM
+        // (no fault fires). Each access now faults and VM demand-pages from
+        // the file regions.
+        let mut va = code_start;
+        while va < code_end {
+            let _ = crate::pagetable::clear_page(root, va);
+            va += 0x1000;
         }
 
         // Allocate physical pages for the stack and write the exec frame
@@ -942,17 +897,8 @@ pub unsafe fn exec_elf_for_target(
         }
         crate::hal::write_cr3(saved_cr3);
 
-        // Map user code and stack: VA → allocated PA.
+        // Map the user stack into the new root: VA → allocated PA.
         let user_flags = crate::hal::pte_user_flags();
-        let mut va = code_start;
-        let mut pa = phys_code_base;
-        while va < code_end {
-            if crate::pagetable::map_page(root, va, pa, user_flags).is_err() {
-                return Err(-12);
-            }
-            va += 0x1000;
-            pa += 0x1000;
-        }
         let mut va = stack_start;
         let mut pa = phys_stack_base;
         while va < stack_end {
@@ -963,14 +909,13 @@ pub unsafe fn exec_elf_for_target(
             pa += 0x1000;
         }
 
-        // Map the brk heap range (0x3FE00000..0x3FF00000) with private
+        // Map the brk heap range (heap base .. base + 1 MiB) with private
         // physical pages so the exec'd process's bump allocator (minix-rt
-        // hardcodes this range) has real backing. The page-table copy in
-        // exec_create_root does not provide a user-accessible heap mapping on
-        // every arch: RISC-V copies a supervisor-only identity 1GB page whose
-        // low-GB PAs are below RAM, so user heap writes fault forever.
-        let brk_start = 0x3FE00000u64;
-        let brk_end = 0x3FF00000u64;
+        // hardcodes this range) has real backing. VM registered the matching
+        // VR_DATA region at VM_EXEC_NEWMEM time, so heap faults are resolved
+        // by VM's demand-paging as the brk grows.
+        let brk_start = crate::hal::user_heap_base();
+        let brk_end = brk_start + 0x100000u64;
         let brk_pages = ((brk_end - brk_start) / 4096) as usize;
         if let Some(brk_phys) = crate::hal::alloc_phys_contig(brk_pages) {
             let mut brk_va = brk_start;
@@ -996,7 +941,7 @@ pub unsafe fn exec_elf_for_target(
         let argc = argv_strs.len() as u64;
         let argv_ptr = rsp_fb + 8;
 
-        crate::hal::exec_init_regs(&mut (*rp).p_reg, ehdr.e_entry, rsp_fb, argc, argv_ptr);
+        crate::hal::exec_init_regs(&mut (*rp).p_reg, entry, rsp_fb, argc, argv_ptr);
         (*rp).p_misc_flags.fetch_or(
             crate::proc::MiscFlags::CONTEXT_SET.bits(),
             core::sync::atomic::Ordering::SeqCst,
@@ -1024,10 +969,7 @@ pub unsafe fn exec_elf_for_target(
             crate::hal::release_fpu(rp as *mut core::ffi::c_void);
         }
 
-        Ok(ExecLoadResult {
-            entry: ehdr.e_entry,
-            rsp: rsp_fb,
-        })
+        Ok(ExecLoadResult { entry, rsp: rsp_fb })
     }
 }
 

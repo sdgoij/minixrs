@@ -663,12 +663,18 @@ pub fn pf_info_clear(slot: usize) {
 
 /// Called from the #PF assembly handler (IST1, interrupts disabled).
 ///
-/// For user-mode page faults, stores the fault info, sets
-/// `RTS_PAGEFAULT` on the faulting process (blocking it), and
-/// sends a notification to the VM server. Returns 0 (handled).
+/// For page faults on user-range addresses (below `MAX_USER_ADDRESS`),
+/// stores the fault info, sets `RTS_PAGEFAULT` on the faulting process
+/// (blocking it), and sends a notification to the VM server. Returns 0
+/// (handled).
 ///
-/// For kernel-mode or non-forwardable faults, returns -1 (fatal),
-/// causing the asm handler to cli + hlt.
+/// The gate is address-based, not mode-based: the kernel copies user
+/// memory from kernel mode (grant writes, the SYS_EXEC_LOAD image copy,
+/// vircopy), and a page fault taken there must be resolved by VM and the
+/// faulting instruction retried rather than treated as fatal.
+///
+/// For kernel-address faults (kernel BSS, stacks, device regions), returns
+/// -1 (fatal), causing the asm handler to cli + hlt.
 ///
 /// # Safety
 ///
@@ -683,12 +689,12 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
             return -1;
         }
 
-        let _present = error_code & 0x1 != 0;
-        let _write = error_code & 0x2 != 0;
-        let user = error_code & 0x4 != 0;
-
-        // Forward all user-mode page faults to VM for resolution.
-        if user {
+        // Forward page faults on user-range addresses to VM for resolution,
+        // regardless of the mode that took them. The kernel copies user
+        // memory from kernel mode (grant writes, the SYS_EXEC_LOAD image
+        // copy, vircopy); those faults must be resolved by VM and the
+        // faulting instruction retried, not treated as fatal.
+        if fault_addr < crate::hal::MAX_USER_ADDRESS {
             // Record the fault under the process's main slot: VM queries by
             // endpoint (which maps to the main slot), so a fault from a
             // worker thread would otherwise be invisible to it. The PAGEFAULT
@@ -719,7 +725,7 @@ pub unsafe extern "C" fn handle_page_fault(fault_addr: u64, error_code: u32) -> 
             return 0; // handled — scheduler will switch to another process
         }
 
-        // Kernel-mode page fault: fatal.
+        // Kernel-address page fault: fatal.
         -1
     }
 }
@@ -919,6 +925,57 @@ mod tests {
             // With zero CR3 (kernel task without per-process PT), returns true
             (*rp).p_seg.p_cr3 = 0;
             assert!(vm_check_range(rp, 0x1000, 64));
+        }
+    }
+
+    /// Set up a minimal current process so `handle_page_fault` reaches its
+    /// forwarding gate (mirrors `ipc.rs`'s `setup_proc`).
+    unsafe fn setup_faulting_proc(nr: i32) -> *mut crate::proc::Proc {
+        unsafe {
+            crate::table::proc_init();
+            crate::hal::init_cpulocals();
+            let rp = crate::table::proc_addr(nr);
+            (*rp)
+                .p_rts_flags
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+            (*rp)
+                .p_misc_flags
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+            (*rp).p_nr = nr;
+            (*rp).p_endpoint = nr;
+            (*rp).p_group = core::ptr::null_mut();
+            crate::ipc::set_current_proc(rp);
+            rp
+        }
+    }
+
+    #[test]
+    fn test_page_fault_gate_is_address_based() {
+        unsafe {
+            let rp = setup_faulting_proc(5);
+            let _ = rp;
+
+            // A kernel-mode fault (error code WITHOUT the user bit) on a
+            // user-range address is forwarded to VM, not fatal — this is the
+            // Phase 1 change: the gate keys on the faulting address, not the
+            // mode that took the fault.
+            let r = handle_page_fault(0x1000, 0x2);
+            assert_eq!(r, 0);
+            assert_eq!(pf_info_read(5), Some((0x1000, 0x2)));
+            pf_info_clear(5);
+
+            // A fault at the user/kernel boundary (just below the split) is
+            // also forwardable, even with a bare error code.
+            let r = handle_page_fault(crate::hal::MAX_USER_ADDRESS - 1, 0x0);
+            assert_eq!(r, 0);
+            pf_info_clear(5);
+
+            // A fault on a kernel-range address stays fatal even with the
+            // user bit set — real kernel bugs are not papered over.
+            let r = handle_page_fault(crate::hal::MAX_USER_ADDRESS, 0x7);
+            assert_eq!(r, -1);
+
+            crate::ipc::set_current_proc(core::ptr::null_mut());
         }
     }
 }

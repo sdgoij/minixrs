@@ -5,8 +5,8 @@
 
 // Re-export page table constants and basic operations from hal
 pub use crate::hal::{
-    MAP_NX, MAP_PRESENT, MAP_READ, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE, boot_cr3,
-    write_cr3,
+    MAP_EXEC, MAP_NX, MAP_PRESENT, MAP_READ, MAP_USER, MAP_WRITE, MAX_USER_ADDRESS, PAGE_SIZE,
+    boot_cr3, write_cr3,
 };
 
 /// Page table entry type (arch-specific, provided by HAL).
@@ -253,6 +253,77 @@ pub unsafe fn unmap_page(cr3: u64, va: u64) -> Result<u64, PageTableError> {
     }
 }
 
+/// Clear the page-table entry for a 4KB page, splitting any covering huge
+/// page into 4KB entries first. Unlike `unmap_page`, which rejects huge
+/// pages, this leaves the range genuinely unmapped so any later access
+/// (user or kernel mode) faults.
+///
+/// Used by lazy mmap: per-process page tables copy the kernel's identity
+/// map, and windows above 1 GiB are supervisor-only. A kernel-mode copy
+/// into such a page does not fault — it silently aliases the identity
+/// mapping (writes land beyond RAM, reads return garbage). Splitting and
+/// clearing the entries makes the region fault on every access.
+///
+/// Returns `Ok` if the page was already unmapped.
+///
+/// # Safety
+///
+/// `cr3` must point to a valid root page table.
+pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
+    unsafe {
+        let levels = crate::hal::pt_levels();
+        let mut table_phys = cr3;
+
+        // Walk from the top non-leaf level down to level 1, splitting any
+        // huge page that covers `va` into its children on the way down.
+        for level in (1..levels).rev() {
+            if !crate::hal::pte_is_valid_phys(table_phys) {
+                return Err(PageTableError::InvalidArgument);
+            }
+            let table = table_phys as *mut u64;
+            let idx = crate::hal::pt_index(va, level);
+            let pte_addr = table.add(idx);
+            let pte = read_pte(pte_addr as *const PtEntry);
+
+            if pte & PG_P == 0 {
+                // Nothing mapped here — already clear.
+                return Ok(());
+            }
+
+            if pte & PG_PS != 0 {
+                // Huge page covering va: split into 512 children, preserving
+                // the original page's flags (mirrors map_page's split).
+                let pt_phys = alloc_pt_page()?;
+                let base_pa = crate::hal::pte_to_phys(pte);
+                let next_level = level - 1;
+                let step = crate::hal::PAGE_SIZE << (next_level * 9);
+                let pte_flags_src = crate::hal::pte_split_flags(pte, next_level);
+                let pt_virt = pt_phys as *mut u64;
+                for i in 0..512u64 {
+                    write_pte(
+                        pt_virt.add(i as usize),
+                        crate::hal::build_pte(base_pa + i * step, pte_flags_src),
+                    );
+                }
+                write_pte(
+                    pte_addr,
+                    crate::hal::build_pte(pt_phys, crate::hal::pte_nonleaf_flags()),
+                );
+                table_phys = pt_phys;
+            } else {
+                table_phys = crate::hal::pte_to_phys(pte);
+            }
+        }
+
+        // Level 0 — clear the leaf entry.
+        let pt = table_phys as *mut u64;
+        let idx = crate::hal::pt_index(va, 0);
+        write_pte(pt.add(idx), 0);
+        crate::hal::tlb_flush_page(va);
+        Ok(())
+    }
+}
+
 /// Unmap a range of pages.
 ///
 /// # Safety
@@ -419,6 +490,10 @@ mod tests {
         assert_eq!(MAP_PRESENT, 0x001);
         assert_eq!(MAP_WRITE, 0x002);
         assert_eq!(MAP_USER, 0x004);
+        #[cfg(target_arch = "riscv64")]
+        assert_eq!(MAP_EXEC, 0x008);
+        #[cfg(not(target_arch = "riscv64"))]
+        assert_eq!(MAP_EXEC, 0);
         assert_eq!(PF_PRESENT, 0x01);
         assert_eq!(PF_WRITE, 0x02);
         assert_eq!(PF_USER, 0x04);

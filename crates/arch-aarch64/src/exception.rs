@@ -28,7 +28,7 @@ exception_vector_table:
     b   .           // SError
 
 .balign 0x80
-    b   el1_sync_handler       // Synchronous (page faults in kernel)
+    b   el1_sync_vector         // Synchronous (page faults in kernel)
 .balign 0x80
     b   el1_irq_handler        // IRQ (timer, UART)
 .balign 0x80
@@ -131,35 +131,218 @@ fn esr_ec(esr: u64) -> u64 {
     (esr >> 26) & 0x3F
 }
 
+/// Synthesize an x86-format page-fault error code from ESR_EL1.
+///
+/// x86 format: bit 0 = present (1 = protection violation), bit 1 = write,
+/// bit 2 = user, bit 4 = instruction fetch. ESR_EL1 encodes faults
+/// differently: DFSC[5:0] (12-15 = permission fault, 4-7 = translation
+/// fault), WnR (bit 6 = write for data aborts), and the exception class
+/// selects instruction vs data. The raw ESR's bit 1 does NOT mean "write",
+/// so it cannot be passed through — VM's COW/demand-paging logic keys on
+/// the x86 bits.
+fn synth_pf_error_code(esr: u64, el0: bool) -> u32 {
+    let ec = esr_ec(esr);
+    let is_instr = ec == esr::EC_INSTR_ABT_EL0 || ec == esr::EC_INSTR_ABT_EL1;
+    let dfsc = esr & 0x3F;
+    let mut code = 0u32;
+    if (12..=15).contains(&dfsc) {
+        code |= 0x1; // permission fault → page was present
+    }
+    if !is_instr && esr & (1 << 6) != 0 {
+        code |= 0x2; // data abort store (WnR)
+    }
+    if el0 {
+        code |= 0x4;
+    }
+    if is_instr {
+        code |= 0x10;
+    }
+    code
+}
+
+// Assembly entry for EL1 synchronous exceptions (kernel-mode faults).
+// Saves a full context frame on the kernel stack (mirroring
+// el0_sync_handler), dispatches data/instr aborts to el1_pf_handler, and
+// returns via the common el1_sync_return. Frame layout identical to
+// el0_sync_handler, plus the interrupted kernel SP captured at [272..288)
+// (a free slot between SPSR@264 and the SIMD block@288) so a kernel-mode
+// fault can be retried with the original stack.
+
+global_asm!(
+    r#"
+.globl el1_sync_vector
+el1_sync_vector:
+    // On entry from EL1: SP = SP_EL1 (kernel stack). The frame is
+    // allocated BELOW the interrupted context (free stack), so no
+    // exception-stack switch is needed.
+    sub     sp, sp, #672
+
+    // Save GPRs x0-x30
+    stp     x0,  x1,  [sp, #0]
+    stp     x2,  x3,  [sp, #16]
+    stp     x4,  x5,  [sp, #32]
+    stp     x6,  x7,  [sp, #48]
+    stp     x8,  x9,  [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    str     x30,      [sp, #240]
+
+    // Capture the interrupted kernel SP (frame base + 672) at frame[272]
+    // so a kernel-mode resume can restore it before eret. Done after the
+    // GPR stores (x10's interrupted value is already in the frame).
+    add     x10, sp, #672
+    str     x10, [sp, #272]
+
+    // Save SP_EL0 (the syscalling process's user SP)
+    mrs     x0, sp_el0
+    str     x0, [sp, #248]
+
+    // Save ELR_EL1 and SPSR_EL1
+    mrs     x0, elr_el1
+    mrs     x1, spsr_el1
+    stp     x0, x1, [sp, #256]
+
+    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31).
+    stp     q0, q1,   [sp, #288]
+    stp     q2, q3,   [sp, #320]
+    stp     q4, q5,   [sp, #352]
+    stp     q6, q7,   [sp, #384]
+    stp     q16, q17, [sp, #416]
+    stp     q18, q19, [sp, #448]
+    stp     q20, q21, [sp, #480]
+    stp     q22, q23, [sp, #512]
+    stp     q24, q25, [sp, #544]
+    stp     q26, q27, [sp, #576]
+    stp     q28, q29, [sp, #608]
+    stp     q30, q31, [sp, #640]
+
+    // Read ESR_EL1 to determine the exception class.
+    mrs     x0, esr_el1
+    lsr     x0, x0, #26       // EC = ESR[31:26]
+
+    cmp     x0, #0x21          // EC_INSTR_ABT_EL1
+    b.eq    1f
+    cmp     x0, #0x25          // EC_DATA_ABT_EL1
+    b.eq    1f
+
+    // Unknown EL1 exception — print 'X' and hang.
+    mov     x9, #0x09000000
+    mov     w10, #'X'
+    str     w10, [x9]
+    b       .
+
+1:  // Data/instr abort from EL1
+    mov     x0, sp
+    bl      el1_pf_handler
+    b       el1_sync_return
+
+// Common return path from EL1 exception.
+el1_sync_return:
+    // Restore caller-saved SIMD/FP registers first.
+    ldp     q0, q1,   [sp, #288]
+    ldp     q2, q3,   [sp, #320]
+    ldp     q4, q5,   [sp, #352]
+    ldp     q6, q7,   [sp, #384]
+    ldp     q16, q17, [sp, #416]
+    ldp     q18, q19, [sp, #448]
+    ldp     q20, q21, [sp, #480]
+    ldp     q22, q23, [sp, #512]
+    ldp     q24, q25, [sp, #544]
+    ldp     q26, q27, [sp, #576]
+    ldp     q28, q29, [sp, #608]
+    ldp     q30, q31, [sp, #640]
+
+    // Restore GPRs (x10-x11 loaded after the MSRs).
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldr     x30,      [sp, #240]
+
+    // Restore SP_EL0
+    ldr     x10, [sp, #248]
+    msr     sp_el0, x10
+
+    // Restore ELR_EL1 and SPSR_EL1
+    ldr     x10, [sp, #256]
+    msr     elr_el1, x10
+    ldr     x10, [sp, #264]
+    msr     spsr_el1, x10
+
+    // Resume-mode SP selection (x10 is scratch — x10/x11 are restored
+    // in each branch below, so the decision cannot clobber them).
+    // A kernel-mode resume (SPSR M = EL1h) restores SP_EL1 from
+    // frame[272] (the interrupted kernel stack); a user-mode resume
+    // unwinds the frame on the shared kernel stack.
+    ldr     x10, [sp, #264]
+    and     x10, x10, #0xF
+    cmp     x10, #4
+    b.ne    8f
+    // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
+    // frame (now 672 bytes below the restored SP_EL1).
+    ldr     x10, [sp, #272]
+    msr     sp_el1, x10
+    sub     x10, sp, #592
+    ldr     x10, [x10]
+    sub     x11, sp, #584
+    ldr     x11, [x11]
+    eret
+8:  // User resume: restore x10/x11, then unwind the frame.
+    ldp     x10, x11, [sp, #80]
+    add     sp, sp, #672
+    eret
+"#
+);
+
+/// C-level EL1 page fault handler.
+///
+/// # Safety
+///
+/// Called from assembly with frame pointer in x0.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn el1_sync_handler() {
-    let esr: u64;
+unsafe extern "C" fn el1_pf_handler(_frame: *mut u8) {
     let far: u64;
+    let esr: u64;
     unsafe {
         core::arch::asm!(
-            "mrs {esr}, esr_el1",
             "mrs {far}, far_el1",
-            esr = out(reg) esr,
+            "mrs {esr}, esr_el1",
             far = out(reg) far,
+            esr = out(reg) esr,
         );
     }
-    let ec = esr_ec(esr);
-
-    match ec {
-        esr::EC_DATA_ABT_EL1 | esr::EC_INSTR_ABT_EL1 => {
-            // Page fault in kernel mode — forward to VM handler.
-            let status = if let Some(handler) = unsafe { PF_HANDLER } {
-                unsafe { handler(far, esr as u32) }
-            } else {
-                -1
-            };
-            if status != 0 {
-                crate::hal::halt();
-            }
-            // eret will return to the faulting instruction to retry.
-        }
-        _ => {
+    let error_code = synth_pf_error_code(esr, false); // EL1: no user bit
+    if let Some(handler) = unsafe { PF_HANDLER } {
+        let status = unsafe { handler(far, error_code) };
+        if status != 0 {
             crate::hal::halt();
+        } else {
+            // Handled: process blocked with RTS_PAGEFAULT. Switch to
+            // another process via the post-syscall hook, which saves the
+            // fault context (ELR/SPSR/SP_EL0/SP_EL1) into the process's
+            // p_reg — the resume erets the same mode.
+            let frame_arr: &mut [u8; 288] = unsafe { &mut *(_frame as *mut [u8; 288]) };
+            if let Some(hook) = unsafe { POST_SYSCALL_HOOK } {
+                unsafe { hook(frame_arr) };
+            }
         }
     }
 }
@@ -192,6 +375,12 @@ el1_irq_handler:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     str     x30,      [sp, #240]
+
+    // Capture the interrupted kernel SP (frame base + 672) at frame[272]
+    // so a kernel-mode resume can restore it before eret. Done after the
+    // GPR stores (x10's interrupted value is already in the frame).
+    add     x10, sp, #672
+    str     x10, [sp, #272]
 
     // Read ELR_EL1 and SPSR_EL1
     mrs     x0, elr_el1
@@ -273,6 +462,26 @@ el1_irq_handler:
     // Load x10, x11 last (they may have been used as scratch)
     ldp     x10, x11, [sp, #80]
 
+    // Resume-mode SP selection (x10 is scratch — the user path below
+    // reloads x10/x11 from the frame, so this decision cannot clobber
+    // them). A kernel-mode resume (SPSR M = EL1h — an IRQ taken in the
+    // idle loop) restores SP_EL1 from frame[272] (the interrupted kernel
+    // stack); a user-mode resume unwinds the frame on the shared stack.
+    ldr     x10, [sp, #264]
+    and     x10, x10, #0xF
+    cmp     x10, #4
+    b.ne    8f
+    // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
+    // frame (now 672 bytes below the restored SP_EL1).
+    ldr     x10, [sp, #272]
+    msr     sp_el1, x10
+    sub     x10, sp, #592
+    ldr     x10, [x10]
+    sub     x11, sp, #584
+    ldr     x11, [x11]
+    eret
+8:  // User resume: reload x10/x11, then unwind the frame.
+    ldp     x10, x11, [sp, #80]
     add     sp, sp, #672
     eret
 "#
@@ -447,9 +656,27 @@ el0_sync_return:
     ldr     x10, [sp, #264]
     msr     spsr_el1, x10
 
-    // Load x10, x11
+    // Resume-mode SP selection (x10 is scratch — x10/x11 are restored
+    // in each branch below, so the decision cannot clobber them).
+    // A kernel-mode resume (SPSR M = EL1h — a frame swapped in by the
+    // post-syscall hook for a process that faulted in kernel mode)
+    // restores SP_EL1 from frame[272] (the interrupted kernel stack); a
+    // user-mode resume unwinds the frame on the shared kernel stack.
+    ldr     x10, [sp, #264]
+    and     x10, x10, #0xF
+    cmp     x10, #4
+    b.ne    8f
+    // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
+    // frame (now 672 bytes below the restored SP_EL1).
+    ldr     x10, [sp, #272]
+    msr     sp_el1, x10
+    sub     x10, sp, #592
+    ldr     x10, [x10]
+    sub     x11, sp, #584
+    ldr     x11, [x11]
+    eret
+8:  // User resume: restore x10/x11, then unwind the frame.
     ldp     x10, x11, [sp, #80]
-
     add     sp, sp, #672
     eret
 "#
@@ -529,7 +756,7 @@ unsafe extern "C" fn el0_pf_handler(_frame: *mut u8) {
         );
     }
     if let Some(handler) = unsafe { PF_HANDLER } {
-        let status = unsafe { handler(far, esr as u32) };
+        let status = unsafe { handler(far, synth_pf_error_code(esr, true)) };
         if status != 0 {
             crate::hal::halt();
         } else {
@@ -538,5 +765,38 @@ unsafe extern "C" fn el0_pf_handler(_frame: *mut u8) {
                 unsafe { hook(frame_arr) };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_synth_pf_error_code_present_write_user() {
+        // DFSC 15 (permission fault level 3) + WnR + EL0.
+        let esr = (0x24u64 << 26) | (1 << 6) | 0b1111;
+        assert_eq!(synth_pf_error_code(esr, true), 0x7);
+    }
+
+    #[test]
+    fn test_synth_pf_error_code_translation_fault() {
+        // DFSC 7 (translation fault level 3), no WnR, EL0.
+        let esr = (0x24u64 << 26) | 0b111;
+        assert_eq!(synth_pf_error_code(esr, true), 0x4);
+    }
+
+    #[test]
+    fn test_synth_pf_error_code_kernel_store() {
+        // EL1 data abort, WnR set.
+        let esr = (0x25u64 << 26) | (1 << 6) | 0b1111;
+        assert_eq!(synth_pf_error_code(esr, false), 0x3);
+    }
+
+    #[test]
+    fn test_synth_pf_error_code_instr() {
+        // EL1 instruction abort, DFSC 7.
+        let esr = (0x21u64 << 26) | 0b111;
+        assert_eq!(synth_pf_error_code(esr, false), 0x10);
     }
 }

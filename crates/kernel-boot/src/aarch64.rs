@@ -663,13 +663,13 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
             }
 
-            // Map brk range heap (0x3FE00000-0x3FF00000 = 1MB) for every boot
-            // process. Servers allocate from this range via the brk syscall
-            // (minix_alloc_zeroed), so the pages must be present.
+            // Map the pre-allocated brk heap window (heap base .. +1 MiB) for
+            // every boot process. Servers allocate from this range via the brk
+            // syscall (minix_alloc_zeroed), so the pages must be present.
             {
                 let user_flags = kernel::hal::pte_user_flags();
-                let brk_va_start = 0x3FE00000u64;
-                let brk_va_end = 0x3FF00000u64;
+                let brk_va_start = kernel::hal::user_heap_base();
+                let brk_va_end = brk_va_start + 0x100000u64;
                 let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
                 let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
                     Some(base) => base,

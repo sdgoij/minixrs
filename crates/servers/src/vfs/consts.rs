@@ -353,24 +353,31 @@ pub const VMVFSREQ_FDIO: i32 = 103;
 pub const VM_RQ_BASE: i32 = 0xC00;
 pub const VM_VFS_REPLY: i32 = VM_RQ_BASE + 30;
 
-/// VMCALL message field offsets (M10 layout in 64-byte fs_m_in).
-/// m10_i1 at byte 0, m10_i2 at byte 4, m10_i3 at byte 8, m10_i4 at byte 12
-/// m10_ull1 at byte 16, m10_l2 at byte 24, m10_l3 at byte 32
-pub const VMCALL_REQ_OFF: usize = 0;
-pub const VMCALL_FD_OFF: usize = 4;
-pub const VMCALL_REQID_OFF: usize = 8;
-pub const VMCALL_ENDPOINT_OFF: usize = 12;
-pub const VMCALL_OFFSET_OFF: usize = 16;
-pub const VMCALL_LENGTH_OFF: usize = 24;
+/// VMCALL message field offsets (M10 layout in the 64-byte message).
+/// The message starts with m_source (0..4) + m_type (4..8); the M10
+/// payload begins at byte 8: m10_ull1 at 8, then m10_i1..m10_i4 at
+/// 16/20/24/28, then m10_l1/m10_l2/m10_l3 at 32/40/48. These match the
+/// C `VFS_VMCALL_*` field offsets in `<minix/com.h>`.
+pub const VMCALL_REQ_OFF: usize = 16;
+pub const VMCALL_FD_OFF: usize = 20;
+pub const VMCALL_REQID_OFF: usize = 24;
+pub const VMCALL_ENDPOINT_OFF: usize = 28;
+pub const VMCALL_OFFSET_OFF: usize = 8;
+/// Port extension (no C equivalent): the faulting virtual address in the
+/// target process that FDIO must fill. Carried in m10_l1.
+pub const VMCALL_FAULTVA_OFF: usize = 32;
+pub const VMCALL_LENGTH_OFF: usize = 48;
 
-/// VM↔VFS reply field offsets (M10 layout in 64-byte fs_m_out).
-pub const VMV_ENDPOINT_OFF: usize = 0;
-pub const VMV_RESULT_OFF: usize = 4;
-pub const VMV_REQID_OFF: usize = 8;
-pub const VMV_DEV_OFF: usize = 12;
-pub const VMV_INO_OFF: usize = 16;
-pub const VMV_FD_OFF: usize = 24;
-pub const VMV_SIZE_PAGES_OFF: usize = 32;
+/// VM↔VFS reply field offsets (M10 layout in the 64-byte message).
+/// m_type (byte 4) is VM_VFS_REPLY; the payload fields match the C
+/// `VMV_*` offsets in `<minix/com.h>`.
+pub const VMV_ENDPOINT_OFF: usize = 16;
+pub const VMV_RESULT_OFF: usize = 20;
+pub const VMV_REQID_OFF: usize = 24;
+pub const VMV_DEV_OFF: usize = 28;
+pub const VMV_INO_OFF: usize = 32;
+pub const VMV_FD_OFF: usize = 40;
+pub const VMV_SIZE_PAGES_OFF: usize = 48;
 
 /// Named pipe mode for req_newnode.
 pub const I_NAMED_PIPE: u32 = 0o010000;

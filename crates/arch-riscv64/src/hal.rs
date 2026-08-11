@@ -494,10 +494,13 @@ pub const fn pte_nonleaf_flags() -> u64 {
     pte_present()
 }
 
-/// Fixed leaf flags for `map_page` (none on x86: PG_P is added by the
-/// caller and PG_RW/PG_U come in the flags).
+/// Fixed leaf flags for `map_page` (PG_P and the caller's R/W/X/U bits are
+/// added on top). SV39 requires a leaf to be readable: a PTE with R=W=X=0
+/// is a page-table pointer, so a "read-only" user page must still set R
+/// (exec-on-fetch of text/rodata would otherwise walk past the leaf and
+/// fault on every access).
 pub const fn pte_leaf_flags() -> u64 {
-    0
+    pte::PTE_R
 }
 
 /// Extract permission flags from a huge-page PTE when splitting into
@@ -573,6 +576,18 @@ pub const fn user_stack_size() -> usize {
     0x100_000
 }
 
+/// Base of the userland brk heap: a 1 MiB window pre-mapped at exec,
+/// grown upward through VM's brk. The mmap base (4 GiB) is the growth
+/// limit, matching the historical minix-rt HEAP_LIMIT.
+pub const fn user_heap_base() -> u64 {
+    0x3FE00000u64
+}
+
+/// Exclusive upper bound for brk growth (the anonymous-mmap base).
+pub const fn user_heap_limit() -> u64 {
+    0x1_0000_0000
+}
+
 /// Base of the anonymous-mmap search range, at the top of the brk heap
 /// (0x3FE00000..0x100000000) so heap growth and mmap never collide.
 pub const fn mmap_base() -> u64 {
@@ -585,6 +600,7 @@ pub const MAP_READ: u64 = pte::PTE_R;
 // on access, so the VM-facing "writable" flag carries both bits.
 pub const MAP_WRITE: u64 = pte::PTE_R | pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;
+pub const MAP_EXEC: u64 = pte::PTE_X; // SV39: executable pages must set X
 pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 // SV39 user space is 2^38 bytes: bit 38 must be clear in U-mode, so the
 // first non-user address is 0x4000000000 (exclusive bound, like x86's

@@ -245,41 +245,50 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 };
                 let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
 
-                // Check if the fault was in user mode (SPP=0 in saved sstatus).
+                // Check the mode the fault was taken in (SPP bit in the saved
+                // sstatus) to synthesize the correct error code — the fault
+                // itself is forwarded to VM regardless of mode (the kernel's
+                // handle_page_fault gate is address-based).
                 let saved_sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
                 let spp = (saved_sstatus >> 8) & 1;
 
-                if spp == 0 {
-                    // User-mode page fault: forward to VM if handler registered.
-                    // Build error_code matching x86_64 format:
-                    //   bit 0: present (1 = page-protection violation)
-                    //   bit 1: write
-                    //   bit 2: user
-                    //   bit 4: instruction fetch
-                    let error_code = match code {
-                        cause::INSTR_PAGE_FAULT => 0x14, // user | instruction
-                        cause::STORE_PAGE_FAULT => 0x07, // present | write | user
-                        _ => 0x05,                       // load: present | user
-                    };
+                // Build error_code matching x86_64 format:
+                //   bit 0: present (1 = page-protection violation)
+                //   bit 1: write
+                //   bit 2: user
+                //   bit 4: instruction fetch
+                // Kernel-mode faults omit the user bit; the write bit is kept
+                // so VM's COW/demand-paging makes the page writable and the
+                // retried store succeeds.
+                let error_code = match (code, spp) {
+                    (cause::INSTR_PAGE_FAULT, 0) => 0x14, // user | instruction
+                    (cause::INSTR_PAGE_FAULT, _) => 0x10, // instruction
+                    (cause::STORE_PAGE_FAULT, 0) => 0x07, // present | write | user
+                    (cause::STORE_PAGE_FAULT, _) => 0x03, // present | write
+                    (_, 0) => 0x05,                       // load: present | user
+                    _ => 0x01,                            // load: present
+                };
 
-                    match unsafe { *PF_HANDLER.get() } {
-                        Some(handler) => {
-                            let ret = unsafe { handler(stval, error_code) };
-                            if ret == 0 {
-                                // Handled: process blocked with RTS_PAGEFAULT.
-                                // Switch to another process via post-syscall hook.
-                                if let Some(hook) = unsafe { *POST_SYSCALL_HOOK.get() } {
-                                    unsafe { hook(frame) };
-                                }
-                                // Frame now holds the next process's state.
-                                // sret in trap_asm.S returns to that process.
-                                return;
+                match unsafe { *PF_HANDLER.get() } {
+                    Some(handler) => {
+                        let ret = unsafe { handler(stval, error_code) };
+                        if ret == 0 {
+                            // Handled: process blocked with RTS_PAGEFAULT.
+                            // Switch to another process via post-syscall hook,
+                            // which saves the fault context (sepc/sstatus/SP)
+                            // into the process's p_reg — sret later resumes it
+                            // in the same mode (U or S).
+                            if let Some(hook) = unsafe { *POST_SYSCALL_HOOK.get() } {
+                                unsafe { hook(frame) };
                             }
-                            // Fatal: handler returned -1.
+                            // Frame now holds the next process's state.
+                            // sret in trap_asm returns to that process.
+                            return;
                         }
-                        None => {
-                            // No handler registered — fall through to halt.
-                        }
+                        // Fatal: handler returned -1.
+                    }
+                    None => {
+                        // No handler registered — fall through to halt.
                     }
                 }
 

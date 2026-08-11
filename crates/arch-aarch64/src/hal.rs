@@ -668,10 +668,26 @@ pub const fn user_stack_size() -> usize {
     0x100_000
 }
 
+/// Base of the userland brk heap. AArch64 user space is only the low 1 GiB
+/// (PUD[0]): the kernel's EL1-only identity map starts at 0x40000000, so a
+/// heap at the top of the range (0x3FE00000, as on x86/riscv) would collide
+/// with the kernel block after ~2 MiB of growth. The heap sits below the
+/// anonymous-mmap base (0x30000000) so heap growth (up) and mmap regions
+/// (up from the mmap base) cannot overlap.
+pub const fn user_heap_base() -> u64 {
+    0x2000_0000
+}
+
+/// Exclusive upper bound for brk growth — the anonymous-mmap base.
+pub const fn user_heap_limit() -> u64 {
+    0x3000_0000
+}
+
 pub const MAP_PRESENT: u64 = crate::pte::PTE_VALID;
 pub const MAP_READ: u64 = 0; // aarch64: no separate read bit; AP bits encode R/W
 pub const MAP_WRITE: u64 = 0;
 pub const MAP_USER: u64 = crate::pte::PTE_AP_EL0_RW;
+pub const MAP_EXEC: u64 = 0; // aarch64: no separate execute bit; absence of UXN/PXN is executable
 pub const MAP_NX: u64 = 0;
 pub const MAX_USER_ADDRESS: u64 = 0x0000_0FFF_FFFF_FFFF;
 

@@ -25,7 +25,6 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::mount;
 use crate::vfs::path;
 use crate::vfs::path::PATH_RET_SYMLINK;
-use crate::vfs::stadir;
 use crate::vfs::stadir::close_fd;
 use crate::vfs::types::*;
 
@@ -2283,25 +2282,31 @@ pub fn do_getsysinfo() -> i32 {
 /// Handle a VM call to VFS.
 ///
 /// VMâ†”VFS protocol: VM sends requests (FDLOOKUP/FDCLOSE/FDIO) to VFS
-/// through the SYS_VMCALL path. VFS must reply with VM_VFS_REPLY
-/// so VM can distinguish replies from new requests.
+/// with m_type = VFS_VMCALL; VFS must reply with m_type = VM_VFS_REPLY
+/// (and the result in VMV_RESULT) so VM can tell the difference between a
+/// request from VFS and a reply to this call. The reply payload uses the
+/// M10 layout (VMV_* offsets in `consts.rs`).
 ///
 /// C source: `minix/servers/vfs/misc.c` â€” `do_vm_call()` (line 359)
 pub fn do_vm_call() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let req = r_i32(&glob.fs_m_in, VMCALL_REQ_OFF);
     let req_fd = r_i32(&glob.fs_m_in, VMCALL_FD_OFF);
-    let _req_id = r_u32(&glob.fs_m_in, VMCALL_REQID_OFF);
+    let req_id = r_u32(&glob.fs_m_in, VMCALL_REQID_OFF);
     let ep = r_i32(&glob.fs_m_in, VMCALL_ENDPOINT_OFF);
     let offset = r_u64(&glob.fs_m_in, VMCALL_OFFSET_OFF) as i64;
+    let fault_va = r_u64(&glob.fs_m_in, VMCALL_FAULTVA_OFF);
     let length = r_u32(&glob.fs_m_in, VMCALL_LENGTH_OFF);
 
-    match req {
+    let result = match req {
         VMVFSREQ_FDLOOKUP => {
+            // Look up `req_fd` in the referenced process's fd table and dup
+            // it into VFS's own fproc (the vmfd), so later FDIO/FDCLOSE
+            // requests can resolve the file from VFS's own fd table alone.
             let slot = crate::vfs::misc::endpoint_to_slot(ep);
             let slot = match slot {
                 Some(s) => s,
-                None => return ESRCH,
+                None => return vm_call_reply(ep, ESRCH, req_id),
             };
             unsafe {
                 let fproc_arr = core::ptr::addr_of_mut!((*vfs_global()).fproc) as *mut Fproc;
@@ -2309,7 +2314,7 @@ pub fn do_vm_call() -> i32 {
                 let mut vmfd = 0i32;
                 let r = crate::vfs::misc::dupvm(rfp, req_fd, &mut vmfd);
                 if r != OK {
-                    return r;
+                    return vm_call_reply(ep, r, req_id);
                 }
 
                 let filp_idx = rfp.fp_filp[req_fd as usize];
@@ -2318,81 +2323,106 @@ pub fn do_vm_call() -> i32 {
                 let vp = filp.filp_vno;
 
                 let glob_mut = &mut *vfs_global();
-                glob_mut.fs_m_out[VMV_ENDPOINT_OFF..][..4].copy_from_slice(&ep.to_le_bytes());
-                glob_mut.fs_m_out[VMV_RESULT_OFF..][..4].copy_from_slice(&OK.to_le_bytes());
+                // VMV_FD carries the vmfd; VMV_DEV/INO/SIZE_PAGES describe the
+                // backing file. Only regular files are supported (dupvm
+                // rejects block devices and non-files).
                 glob_mut.fs_m_out[VMV_FD_OFF..][..8].copy_from_slice(&(vmfd as u64).to_le_bytes());
                 glob_mut.fs_m_out[VMV_DEV_OFF..][..4].copy_from_slice(&(*vp).v_dev.to_le_bytes());
                 glob_mut.fs_m_out[VMV_INO_OFF..][..8]
                     .copy_from_slice(&((*vp).v_inode_nr as u64).to_le_bytes());
-                glob_mut.fs_m_out[0..4].copy_from_slice(&VM_VFS_REPLY.to_le_bytes());
+                let size_pages = if (*vp).v_size > 0 {
+                    ((*vp).v_size as u64).div_ceil(4096)
+                } else {
+                    0
+                };
+                glob_mut.fs_m_out[VMV_SIZE_PAGES_OFF..][..8]
+                    .copy_from_slice(&size_pages.to_le_bytes());
             }
             OK
         }
         VMVFSREQ_FDCLOSE => {
-            let slot = crate::vfs::misc::endpoint_to_slot(ep);
-            let slot = match slot {
-                Some(s) => s,
-                None => return ESRCH,
-            };
+            // The vmfd lives in VFS's own fproc (the current fp — VM's
+            // fproc slot, which dupvm filled), not in the target's table.
+            let fp = unsafe { crate::vfs::glo::current_fp() };
+            if fp.is_null() {
+                return vm_call_reply(ep, ESRCH, req_id);
+            }
             unsafe {
-                let fproc_arr = core::ptr::addr_of_mut!((*vfs_global()).fproc) as *mut Fproc;
-                let rfp = &mut *fproc_arr.add(slot);
-                let _ = stadir::close_fd(rfp, req_fd);
-                let glob_mut = &mut *vfs_global();
-                glob_mut.fs_m_out[VMV_ENDPOINT_OFF..][..4].copy_from_slice(&ep.to_le_bytes());
-                glob_mut.fs_m_out[VMV_RESULT_OFF..][..4].copy_from_slice(&OK.to_le_bytes());
-                glob_mut.fs_m_out[0..4].copy_from_slice(&VM_VFS_REPLY.to_le_bytes());
+                let r = close_fd(&mut *fp, req_fd);
+                if r != OK {
+                    return vm_call_reply(ep, r, req_id);
+                }
             }
             OK
         }
         VMVFSREQ_FDIO => {
-            // Peek at file data (for VM pagefault handling).
-            // Seek to the offset, then read without consuming.
-            let slot = crate::vfs::misc::endpoint_to_slot(ep);
-            let slot = match slot {
-                Some(s) => s,
-                None => return ESRCH,
-            };
-
+            // Read a block of the vmfd's file directly into the faulting
+            // page at `fault_va` in the target process's address space.
+            // req_read's magic grant (cp_who_from = ep) makes the kernel
+            // write through the target's CR3, so MFS's SAFECOPYTO lands in
+            // the page VM just mapped there.
+            let fp = unsafe { crate::vfs::glo::current_fp() };
+            if fp.is_null() {
+                return vm_call_reply(ep, ESRCH, req_id);
+            }
             unsafe {
-                let fproc_arr = core::ptr::addr_of_mut!((*vfs_global()).fproc) as *mut Fproc;
-                let rfp = &mut *fproc_arr.add(slot);
                 if req_fd < 0 || (req_fd as usize) >= OPEN_MAX {
-                    return EBADF;
+                    return vm_call_reply(ep, EBADF, req_id);
                 }
-                let filp_idx = rfp.fp_filp[req_fd as usize];
+                let fp_mut = &mut *fp;
+                let filp_idx = fp_mut.fp_filp[req_fd as usize];
                 if filp_idx < 0 {
-                    return EBADF;
+                    return vm_call_reply(ep, EBADF, req_id);
                 }
 
                 let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
                 let filp = &mut *filp_arr.add(filp_idx as usize);
                 let vp = filp.filp_vno;
                 if vp.is_null() {
-                    return EBADF;
+                    return vm_call_reply(ep, EBADF, req_id);
                 }
 
-                // Seek to offset.
-                let old_pos = filp.filp_pos;
-                filp.filp_pos = offset;
-
-                // Peek at file data (read without consuming/advancing position).
+                // Do not disturb the file position: reads are positional
+                // (the FS request carries the offset), so nothing to save.
                 let fs_e = (*vp).v_fs_e;
                 let inode_nr = (*vp).v_inode_nr;
-                let r = crate::vfs::request::req_peek(fs_e, inode_nr, offset, length);
-
-                // Always restore position â€” peek does not consume data.
-                filp.filp_pos = old_pos;
-
-                let glob_mut = &mut *vfs_global();
-                glob_mut.fs_m_out[VMV_ENDPOINT_OFF..][..4].copy_from_slice(&ep.to_le_bytes());
-                glob_mut.fs_m_out[VMV_RESULT_OFF..][..4].copy_from_slice(&r.to_le_bytes());
-                glob_mut.fs_m_out[0..4].copy_from_slice(&VM_VFS_REPLY.to_le_bytes());
-                r
+                let (r, _new_pos) = crate::vfs::request::req_read(
+                    fs_e,
+                    inode_nr,
+                    fault_va as *mut u8,
+                    offset,
+                    length,
+                    ep,
+                    0,
+                );
+                // Normalize the reply result: this port's req_read returns the
+                // FS reply's m_type (the byte count, e.g. 4096) on success, but
+                // VM's map_file_page treats any non-zero result as a
+                // failure (C: `actual_read_write_peek` returns OK and the byte
+                // count travels in the payload). Reply OK on a non-negative
+                // result so a successful fill of the faulting page is not
+                // mistaken for an error.
+                if r < 0 { r } else { OK }
             }
         }
         _ => EINVAL,
+    };
+
+    vm_call_reply(ep, result, req_id)
+}
+
+/// Fill the VM_VFS_REPLY message and return its m_type so the generic
+/// `reply()` path sends it. The result code goes in VMV_RESULT; the fixed
+/// m_type (written at byte 4 both here and by `reply()`) is VM_VFS_REPLY.
+fn vm_call_reply(ep: i32, result: i32, req_id: u32) -> i32 {
+    unsafe {
+        let glob_mut = &mut *vfs_global();
+        glob_mut.fs_m_out[VMV_ENDPOINT_OFF..][..4].copy_from_slice(&ep.to_le_bytes());
+        glob_mut.fs_m_out[VMV_RESULT_OFF..][..4].copy_from_slice(&result.to_le_bytes());
+        glob_mut.fs_m_out[VMV_REQID_OFF..][..4].copy_from_slice(&req_id.to_le_bytes());
+        glob_mut.fs_m_out[4..8].copy_from_slice(&VM_VFS_REPLY.to_le_bytes());
     }
+    VM_VFS_REPLY
 }
 
 /// Perform the `getrusage(who, buf)` system call.
@@ -3114,7 +3144,17 @@ mod tests {
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4].copy_from_slice(&999i32.to_le_bytes());
         }
-        assert_eq!(do_vm_call(), EINVAL);
+        // do_vm_call always replies with the fixed VM_VFS_REPLY type; the
+        // result code travels in VMV_RESULT so VM can distinguish a reply
+        // from a new request.
+        assert_eq!(do_vm_call(), VM_VFS_REPLY);
+        unsafe {
+            let glob = vfs_global();
+            let out = &(*glob).fs_m_out;
+            let result =
+                i32::from_le_bytes(out[VMV_RESULT_OFF..VMV_RESULT_OFF + 4].try_into().unwrap());
+            assert_eq!(result, EINVAL);
+        }
     }
 
     #[test]

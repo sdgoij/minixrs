@@ -239,13 +239,16 @@ const EXEC_PS_STR_OFF: usize = 40;
 //   offset 24: frame_ptr  (vir_bytes / u64) — exec frame in caller's space
 //   offset 32: frame_len  (vir_bytes / u64)
 // Reply fields:
-//   offset 16: pc         (vir_bytes / u64) — entry point of the new image
-//   offset 24: newsp      (vir_bytes / u64) — new user stack pointer
+//   offset 16: entry      (u64) — entry point of the new image
+//   offset 24: newsp      (u64) — new user stack pointer (reply)
+//   offset 24: code_start (u64) — page-aligned code range start (request)
+//   offset 32: code_end   (u64) — page-aligned code range end (request)
 const EXEC_LOAD_ENDPT_OFF: usize = 8;
-const EXEC_LOAD_ELF_PTR_OFF: usize = 16;
-const EXEC_LOAD_ELF_LEN_OFF: usize = 24;
-const EXEC_LOAD_FRAME_PTR_OFF: usize = 32;
-const EXEC_LOAD_FRAME_LEN_OFF: usize = 40;
+const EXEC_LOAD_ENTRY_OFF: usize = 16;
+const EXEC_LOAD_CODE_START_OFF: usize = 24;
+const EXEC_LOAD_CODE_END_OFF: usize = 32;
+const EXEC_LOAD_FRAME_PTR_OFF: usize = 40;
+const EXEC_LOAD_FRAME_LEN_OFF: usize = 48;
 const EXEC_LOAD_PC_OFF: usize = 16;
 const EXEC_LOAD_NEWSP_OFF: usize = 24;
 
@@ -476,6 +479,8 @@ pub const VM_PAGING_QUERY_PROC: i32 = 5;
 pub const VM_PAGING_COPY: i32 = 6;
 pub const VM_PAGING_FORK: i32 = 7;
 pub const VM_PAGING_WALK_PAGE: i32 = 8;
+/// Split huge pages and clear the 4KB entries in a range (lazy mmap).
+pub const VM_PAGING_CLEAR: i32 = 9;
 
 // Constants
 
@@ -3340,16 +3345,17 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
     }
 }
 
-/// Handle SYS_EXEC_LOAD (kernel call 63) — load a new executable image into a
-/// target process from ELF bytes and an exec frame supplied by VFS.
+/// Handle SYS_EXEC_LOAD (kernel call 63) — install a new executable image
+/// into a target process from an entry point and an exec frame supplied by
+/// VFS.
 ///
-/// This is the kernel half of the PM→VFS exec chain. VFS reads the binary
-/// from the filesystem into buffers in its own address space and passes
-/// pointers to them (kernel calls run with the caller's page table active).
-/// The kernel copies the ELF and the frame into kernel buffers, parses
-/// argv/envp out of the frame (libc `minix_stack_fill` layout), replaces the
-/// target's image via [`crate::syscall::exec_elf_for_target`], and makes the
-/// target runnable at the new entry point.
+/// This is the kernel half of the PM→VFS exec chain. VFS parses the ELF
+/// headers and maps the PT_LOAD segments as file-backed VM regions
+/// (VM_EXEC_NEWMEM + VM_VFS_MMAP); the kernel only maps the stack and brk
+/// heap into VM's fresh page table, sets up the frame/registers, and makes
+/// the target runnable. There is no whole-image transfer left, so
+/// executables are no longer capped (the old 16 MiB `E2BIG` bound and the
+/// `alloc_phys_contig` of the entire ELF are gone).
 ///
 /// On success the entry point (PC) and new stack pointer are written back
 /// into the message so VFS can report them to PM.
@@ -3360,16 +3366,18 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
 pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let endpt = msg_read_i32(msg, EXEC_LOAD_ENDPT_OFF);
-        let elf_ptr = msg_read_u64(msg, EXEC_LOAD_ELF_PTR_OFF);
-        let elf_len = msg_read_u64(msg, EXEC_LOAD_ELF_LEN_OFF);
+        let entry = msg_read_u64(msg, EXEC_LOAD_ENTRY_OFF);
+        let code_start = msg_read_u64(msg, EXEC_LOAD_CODE_START_OFF);
+        let code_end = msg_read_u64(msg, EXEC_LOAD_CODE_END_OFF);
         let frame_ptr = msg_read_u64(msg, EXEC_LOAD_FRAME_PTR_OFF);
         let frame_len = msg_read_u64(msg, EXEC_LOAD_FRAME_LEN_OFF);
 
-        // Bounds: executables up to 16 MiB, frames bounded by ARG_MAX.
-        if elf_len > 16 * 1024 * 1024 || frame_len > 1024 * 1024 {
+        // Frames bounded by ARG_MAX. No ELF bound: the image is
+        // file-mapped, so the executable size is unlimited.
+        if frame_len == 0 || frame_len > 1024 * 1024 {
             return crate::ipc::E2BIG;
         }
-        if elf_ptr == 0 || elf_len == 0 {
+        if frame_ptr == 0 {
             return crate::ipc::EINVAL;
         }
 
@@ -3382,33 +3390,24 @@ pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             return crate::ipc::EINVAL;
         }
 
-        // Copy the ELF and frame from the caller (VFS) into kernel buffers.
-        // alloc_phys_contig returns identity-mapped physical pages, writable
-        // under any CR3.
-        let elf_pages = (elf_len as usize).div_ceil(0x1000).max(1);
-        let elf_base = match crate::hal::alloc_phys_contig(elf_pages) {
-            Some(b) => b,
-            None => return crate::ipc::ENOMEM,
-        };
+        // Copy the frame into a kernel buffer (the only remaining
+        // whole-image transfer; the ELF itself is demand-paged from the
+        // file by VM). alloc_phys_contig returns identity-mapped physical
+        // pages, writable under any CR3.
         let frame_pages = (frame_len as usize).div_ceil(0x1000).max(1);
         let frame_base = match crate::hal::alloc_phys_contig(frame_pages) {
             Some(b) => b,
-            None => {
-                crate::hal::free_phys_contig(elf_base, elf_pages);
-                return crate::ipc::ENOMEM;
-            }
+            None => return crate::ipc::ENOMEM,
         };
 
         // Kernel runs with the caller's page table active during a kernel
-        // call, so the caller's buffer VAs are directly readable.
-        core::ptr::copy_nonoverlapping(elf_ptr as *const u8, elf_base as *mut u8, elf_len as usize);
+        // call, so the caller's buffer VA is directly readable.
         core::ptr::copy_nonoverlapping(
             frame_ptr as *const u8,
             frame_base as *mut u8,
             frame_len as usize,
         );
 
-        let elf_slice = core::slice::from_raw_parts(elf_base as *const u8, elf_len as usize);
         let frame_slice = core::slice::from_raw_parts(frame_base as *const u8, frame_len as usize);
 
         // Parse argv/envp out of the frame.
@@ -3416,29 +3415,31 @@ pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
         let args = match crate::elf::parse_exec_frame(frame_slice, user_stack_top) {
             Ok(a) => a,
             Err(_) => {
-                crate::hal::free_phys_contig(elf_base, elf_pages);
                 crate::hal::free_phys_contig(frame_base, frame_pages);
                 return crate::ipc::EINVAL;
             }
         };
 
-        // Load the new image (builds fresh page tables, copies segments,
-        // sets up the stack and registers).
+        // Install the new image: VM registered the executable's PT_LOAD
+        // segments as lazy file regions (VM_EXEC_NEWMEM + VM_VFS_MMAP); the
+        // kernel builds the fresh page table, clears the code range so the
+        // file regions fault on first touch, maps stack + brk into it, and
+        // sets up the frame and registers.
         let loaded = match crate::syscall::exec_elf_for_target(
             rp,
-            elf_slice,
+            entry,
+            code_start,
+            code_end,
             &args.argv[..args.argc],
             &args.envp[..args.envc],
         ) {
             Ok(l) => l,
             Err(e) => {
-                crate::hal::free_phys_contig(elf_base, elf_pages);
                 crate::hal::free_phys_contig(frame_base, frame_pages);
                 return e as i32;
             }
         };
 
-        crate::hal::free_phys_contig(elf_base, elf_pages);
         crate::hal::free_phys_contig(frame_base, frame_pages);
 
         // Make the target runnable at the new entry point: it is blocked in
@@ -4902,6 +4903,28 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     Ok(_) => OK,
                     Err(_) => crate::ipc::EINVAL,
                 }
+            }
+            VM_PAGING_CLEAR => {
+                // Split any identity huge pages covering the range and clear
+                // every 4KB entry. Lazy mmap regions must be genuinely
+                // unmapped so kernel-mode copies fault instead of silently
+                // aliasing the supervisor identity map above 1 GiB.
+                let cr3 = msg_read_u64(msg, VM_PAGING_CR3_OFF);
+                let va = msg_read_u64(msg, VM_PAGING_VA_OFF);
+                let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
+                if cr3 == 0 || count <= 0 || va > crate::pagetable::MAX_USER_ADDRESS {
+                    return crate::ipc::EINVAL;
+                }
+                let start = va & !0xFFF;
+                let mut cur = start;
+                for _ in 0..count {
+                    if cur > crate::pagetable::MAX_USER_ADDRESS {
+                        break;
+                    }
+                    let _ = crate::pagetable::clear_page(cr3, cur);
+                    cur += 0x1000;
+                }
+                OK
             }
             VM_PAGING_QUERY_PROC => {
                 // Return boot process info for a given slot:
