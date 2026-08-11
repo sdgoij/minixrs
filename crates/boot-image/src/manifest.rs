@@ -44,6 +44,11 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/threadtest` is the thread smoke test: spawns kernel threads
     // that share the process address space, do PM IPC, and are joined back.
     ("/bin/threadtest", "threadtest"),
+    // `/bin/mmapfd` is the file-backed mmap test: maps a file with
+    // MAP_PRIVATE, verifies the mapping matches the file page-by-page
+    // (exercising VM's FDIO demand path), and checks private writes do not
+    // modify the file.
+    ("/bin/mmapfd", "mmapfd"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

@@ -158,6 +158,133 @@ pub fn cat(args: &[&str]) -> i32 {
     exit_code
 }
 
+/// mmapfd — file-backed mmap test: map a file with MAP_PRIVATE, verify the
+/// mapping matches the file content page-by-page (faulting every page in
+/// through VM's FDIO demand path, including the partial last page), then
+/// verify a writable private mapping takes writes without modifying the
+/// file. Takes an optional path (default /bin/hello).
+pub fn mmapfd(args: &[&str]) -> i32 {
+    let path = args.get(1).copied().unwrap_or("/bin/hello");
+    // Two independent fds: one backs the mmap, the other is used for direct
+    // reads to compare against the mapping (avoids file-position coupling).
+    let map_fd = match unsafe { minix_std::fs::open(path.as_bytes(), minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"mmapfd: cannot open ");
+            write_err(path.as_bytes());
+            write_err(b"\n");
+            return 1;
+        }
+    };
+    let cmp_fd = match unsafe { minix_std::fs::open(path.as_bytes(), minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"mmapfd: cannot open (compare fd)\n");
+            return 1;
+        }
+    };
+    let size = match minix_std::fs::lseek(map_fd, 0, minix_std::fs::SEEK_END) {
+        Ok(sz) if sz > 0 => sz as usize,
+        _ => {
+            write_err(b"mmapfd: size query failed\n");
+            return 1;
+        }
+    };
+
+    // Direct-read helper at a file offset (positional via lseek).
+    let file_byte = |off: usize| -> Option<u8> {
+        if minix_std::fs::lseek(cmp_fd, off as i64, minix_std::fs::SEEK_SET).is_err() {
+            return None;
+        }
+        let mut b = [0u8; 1];
+        match unsafe { minix_std::fs::read(cmp_fd, &mut b) } {
+            Ok(1) => Some(b[0]),
+            _ => None,
+        }
+    };
+
+    // Read-only private mapping: pages demand-fault in from the file.
+    let p = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            size,
+            minix_std::vmem::PROT_READ,
+            minix_std::vmem::MAP_PRIVATE,
+            map_fd,
+            0,
+        )
+    };
+    if p == minix_std::vmem::MAP_FAILED {
+        write_err(b"mmapfd: mmap READ failed\n");
+        return 1;
+    }
+
+    // Fault every page in and compare against the file content.
+    let mut checked = 0usize;
+    let mut off = 0usize;
+    while off < size {
+        let expected = match file_byte(off) {
+            Some(b) => b,
+            None => {
+                write_err(b"mmapfd: direct read failed\n");
+                return 1;
+            }
+        };
+        if unsafe { *p.add(off) } != expected {
+            write_err(b"mmapfd: mapping mismatch at page offset\n");
+            return 1;
+        }
+        checked += 1;
+        off += 4096;
+    }
+    // Last byte: the partial-page tail past the last full page, which
+    // exercises the in-file-end zero/read boundary in map_file_page.
+    let last_off = size - 1;
+    if unsafe { *p.add(last_off) } != file_byte(last_off).unwrap_or(0) {
+        write_err(b"mmapfd: mapping mismatch at last byte\n");
+        return 1;
+    }
+    let first = unsafe { *p.add(0) };
+
+    // Writable private mapping: writes land in the private page and the
+    // file must be unchanged (MAP_PRIVATE — no write-through to the file).
+    let q = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            size,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_PRIVATE,
+            map_fd,
+            0,
+        )
+    };
+    if q == minix_std::vmem::MAP_FAILED {
+        write_err(b"mmapfd: mmap WRITE failed\n");
+        return 1;
+    }
+    unsafe { *q.add(0) = 0xAA };
+    if unsafe { *q.add(0) } != 0xAA {
+        write_err(b"mmapfd: write did not persist in mapping\n");
+        return 1;
+    }
+    if file_byte(0) != Some(first) {
+        write_err(b"mmapfd: file modified by private write\n");
+        return 1;
+    }
+
+    unsafe {
+        let _ = minix_std::vmem::munmap(p, size);
+        let _ = minix_std::vmem::munmap(q, size);
+        let _ = minix_std::fs::close(map_fd);
+        let _ = minix_std::fs::close(cmp_fd);
+    }
+
+    write_out(b"mmapfd: ok, file-backed mmap verified (");
+    print_dec(checked as u32 + 1);
+    write_out(b" pages + tail)\n");
+    0
+}
+
 /// cp — copy file src to dst.
 pub fn cp(args: &[&str]) -> i32 {
     if args.len() < 3 {

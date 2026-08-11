@@ -98,11 +98,15 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // FDT reports above that isn't mapped and would fault on access.
     let mem_size = mem_size.min(0x8_0000_0000 - mem_base);
 
-    // Page-aligned end-of-kernel estimate.
-    // The kernel binary with embedded initramfs and minixfs is ~11 MB.
-    // Pad to 14 MB for safety (avoids overlapping the allocator with the
-    // kernel image).
-    let kernel_end = 0x80200000u64 + 0xE00000u64;
+    // Page-aligned end-of-kernel: the embedded initramfs/minixfs can be
+    // tens of MiB (the root image), so a fixed pad would hand the allocator
+    // pages inside the kernel image. minix-raw-riscv64.ld places __kernel_end
+    // right after the .minixfs section; the allocator must not touch below it.
+    unsafe extern "C" {
+        static __kernel_end: u8;
+    }
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+    let kernel_end = kernel_end.div_ceil(4096) * 4096;
 
     let mut mmap = arch_riscv64::alloc::PhysicalMemoryMap::new();
     if kernel_end < mem_base + mem_size {

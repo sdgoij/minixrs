@@ -64,11 +64,7 @@ fn assemble(
         // The C smoke-test binaries (helloc/ctest) are only built for
         // x86_64 today (tools/build-c-hello.py is x86-only); skip them on
         // other arches until the build script grows target support.
-        if matches!(
-            dest,
-            "/bin/helloc" | "/bin/ctest" | "/bin/coreutils"
-        ) && t.arch != "x86_64"
-        {
+        if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/coreutils") && t.arch != "x86_64" {
             continue;
         }
         let src = release.join(bin_name);
@@ -87,6 +83,37 @@ fn assemble(
         println!("cargo:rerun-if-changed={}", src.display());
     }
 
+    // Test hook: MINIXFS_EXTRA injects extra "dest=path" binaries into the
+    // DISK filesystem image (entries separated by ';') and MINIXFS_BLOCKS
+    // overrides its size (see boot-image::minixfs). Both default to nothing —
+    // used by the large-binary verification (tools/std-big.rs), which needs a
+    // filesystem large enough for a >=32 MiB executable. Extras go to the
+    // disk image only: embedding a huge binary in the initramfs (which lives
+    // in the kernel image) would bloat the kernel past the memory budget at
+    // 256M.
+    let mut disk_bins = bins.clone();
+    if let Ok(extra) = std::env::var("MINIXFS_EXTRA") {
+        for entry in extra.split(';').filter(|s| !s.is_empty()) {
+            let (dest, path) = entry
+                .split_once('=')
+                .expect("MINIXFS_EXTRA entry must be dest=path");
+            // The bins list wants &'static str; the env string is transient,
+            // so leak each dest (build scripts run once per build).
+            let dest: &'static str = Box::leak(dest.to_owned().into_boxed_str());
+            let path = Path::new(path);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace.join(path)
+            };
+            let data = std::fs::read(&path).unwrap_or_else(|e| {
+                panic!("MINIXFS_EXTRA: reading {} failed ({e})", path.display())
+            });
+            println!("cargo:rerun-if-changed={}", path.display());
+            disk_bins.push((dest, data));
+        }
+    }
+
     // Mirror the assembled images to a stable, per-target path for host
     // inspection (e.g. `od -A x target/images/x86_64-pc-minix/minixfs.img`).
     let mirror_dir = workspace.join("target").join("images").join(t.out_dir);
@@ -102,7 +129,7 @@ fn assemble(
     }
 
     if embed_minixfs {
-        let img_bytes = minixfs::build_minixfs(&bins);
+        let img_bytes = minixfs::build_minixfs(&disk_bins);
         let img_path = out_dir.join("minixfs.img");
         write_if_changed(&img_path, &img_bytes);
         write_minixfs_stub(out_dir, img_bytes.len());

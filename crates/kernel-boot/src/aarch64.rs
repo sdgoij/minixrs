@@ -137,11 +137,15 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     let _ = dtb_ptr;
     let mem_size = mem_size.min(0x8_0000_0000u64.saturating_sub(mem_base));
 
-    // Page-aligned end-of-kernel estimate.
-    // The linker script places the kernel at 0x40080000 (512KB into RAM)
-    // The kernel binary with embedded initramfs and minixfs is ~12 MB.
-    // Pad to 16 MB for safety.
-    let kernel_end = 0x4008_0000u64 + 0x100_0000u64; // +16MB
+    // Page-aligned end-of-kernel: the embedded initramfs/minixfs can be
+    // tens of MiB (the root image), so a fixed pad would hand the allocator
+    // pages inside the kernel image. minix-raw-aarch64.ld places __kernel_end
+    // right after the .minixfs section; the allocator must not touch below it.
+    unsafe extern "C" {
+        static __kernel_end: u8;
+    }
+    let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+    let kernel_end = kernel_end.div_ceil(4096) * 4096;
 
     // Initialize physical memory allocator.
     serial_write("initializing allocator...\r\n");

@@ -225,20 +225,46 @@ impl MinixFs {
         let ino = self.alloc_inode(I_REGULAR | RWX_ALL, data.len() as u32);
         let idx = (ino - 1) as usize;
         if idx < self.inode_table.len() {
-            // Zone map: 7 direct zones, then a single-indirect block.
-            // MFS read_map resolves i_ndzones=7 direct + i_nindirs indirect
-            // entries, so files larger than 7 blocks read as holes unless
-            // zone[7] is set.
+            // Zone map: 7 direct zones, then single/double-indirect blocks
+            // (zone_size/4 = 1024 entries each). MFS read_map resolves
+            // i_ndzones=7 direct + i_nindirs indirect + nindirs^2
+            // double-indirect zones, so files larger than 7 + 1024 blocks
+            // (the builder's old single-indirect-only ceiling, ~4 MiB)
+            // need the zone[8] double-indirect chain.
+            let indir_entries = self.zone_size() / 4; // u32 zone numbers
             let n_direct = zones_needed.min(7);
             self.inode_table[idx].d2_zone[..n_direct].copy_from_slice(&zones[..n_direct]);
-            if zones_needed > 7 {
+            let mut next = n_direct;
+            if next < zones_needed {
                 let indir_zone = self.alloc_zone();
                 let mut indir_data = vec![0u8; self.zone_size()];
-                for (j, z) in zones.iter().skip(7).enumerate() {
+                let n_single = (zones_needed - next).min(indir_entries);
+                for (j, z) in zones.iter().skip(next).take(n_single).enumerate() {
                     indir_data[j * 4..j * 4 + 4].copy_from_slice(&z.to_le_bytes());
                 }
                 self.write_zone(indir_zone, &indir_data);
                 self.inode_table[idx].d2_zone[7] = indir_zone;
+                next += n_single;
+            }
+            if next < zones_needed {
+                let dindir_zone = self.alloc_zone();
+                let mut dindir_data = vec![0u8; self.zone_size()];
+                let mut d_idx = 0usize;
+                while next < zones_needed {
+                    let sindir_zone = self.alloc_zone();
+                    let mut sdata = vec![0u8; self.zone_size()];
+                    let n = (zones_needed - next).min(indir_entries);
+                    for (j, z) in zones.iter().skip(next).take(n).enumerate() {
+                        sdata[j * 4..j * 4 + 4].copy_from_slice(&z.to_le_bytes());
+                    }
+                    self.write_zone(sindir_zone, &sdata);
+                    dindir_data[d_idx * 4..d_idx * 4 + 4]
+                        .copy_from_slice(&sindir_zone.to_le_bytes());
+                    next += n;
+                    d_idx += 1;
+                }
+                self.write_zone(dindir_zone, &dindir_data);
+                self.inode_table[idx].d2_zone[8] = dindir_zone;
             }
             self.inode_table[idx].d2_size = data.len() as i32;
         }
@@ -406,11 +432,17 @@ impl MinixFs {
     }
 }
 
-/// Build the standard root filesystem image (8 MiB) containing `files`
-/// (destination path → content). The parent directories /bin and /sbin
-/// are created automatically; anything else lands in the root.
+/// Build the standard root filesystem image containing `files` (destination
+/// path → content). The parent directories /bin and /sbin are created
+/// automatically; anything else lands in the root. 2048 blocks (8 MiB) by
+/// default; the `MINIXFS_BLOCKS` env var overrides the size (used by the
+/// large-binary verification, which needs a filesystem big enough for a
+/// ≥32 MiB executable).
 pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
-    let total_blocks = 2048u32; // 2048 * 4096 = 8 MB
+    let total_blocks = std::env::var("MINIXFS_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(2048u32);
     let mut fs = MinixFs::new(total_blocks, INODES);
 
     let root_zone = fs.create_directory(ROOT_INODE, ROOT_INODE);
@@ -425,10 +457,15 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             continue;
         }
         let bin_name = Path::new(dest).file_name().unwrap().to_str().unwrap();
-        let parent_zone = match Path::new(dest).parent().and_then(|p| p.to_str()) {
-            Some("/bin") => bin_zone,
-            Some("/sbin") => sbin_zone,
-            _ => root_zone,
+        // String match, not Path::parent(): on Windows a POSIX-style dest
+        // ("MINIXFS_EXTRA=/bin/big=..." through MSYS) can parse to a
+        // Windows root-relative path whose parent() is not "/bin".
+        let parent_zone = if dest.starts_with("/bin/") {
+            bin_zone
+        } else if dest.starts_with("/sbin/") {
+            sbin_zone
+        } else {
+            root_zone
         };
         fs.add_file(parent_zone, bin_name, data);
     }
