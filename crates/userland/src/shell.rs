@@ -8,8 +8,8 @@ use crate::write_out;
 use crate::write_err;
 #[cfg(target_os = "minix")]
 use crate::{
-    cat, chmod, chown, cp, echo, errstr, fsck, ln, ls, mkdir, mknod, reboot, rm, set_redirect_fd,
-    sync,
+    cat, chmod, chown, cp, echo, errstr, fsck, hangdump, ln, ls, memstat, mkdir, mknod, reboot, rm,
+    set_redirect_fd, sync,
 };
 #[cfg(target_os = "minix")]
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -49,6 +49,8 @@ fn is_builtin_cmd(cmd: &str) -> bool {
             | "mknod"
             | "reboot"
             | "fsck"
+            | "memstat"
+            | "hangdump"
             | "help"
             | "clear"
     )
@@ -673,9 +675,11 @@ fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
         "mknod" => mknod(args),
         "reboot" => reboot(args),
         "fsck" => fsck(args),
+        "memstat" => memstat(args),
+        "hangdump" => hangdump(args),
         "help" => {
             write_out(b"available commands: echo cat cp ls mkdir rm ln");
-            write_out(b" chmod chown sync mknod reboot fsck help clear\r\n");
+            write_out(b" chmod chown sync mknod reboot fsck memstat help clear\r\n");
             0
         }
         "clear" => {

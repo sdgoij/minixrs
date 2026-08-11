@@ -30,6 +30,12 @@ pub const VM_MMAP: u32 = VM_RQ_BASE + 10; // 0xC0A
 pub const VM_MUNMAP: u32 = VM_RQ_BASE + 17; // 0xC11
 pub const VM_BRK: u32 = VM_RQ_BASE + 2; // 0xC02
 pub const VM_MAP_PHYS: u32 = VM_RQ_BASE + 15; // 0xC0F
+pub const VM_INFO: u32 = VM_RQ_BASE + 40; // 0xC28
+
+// VM_INFO subcodes (VMIW_*).
+pub const VMIW_STATS: i32 = 1;
+pub const VMIW_USAGE: i32 = 2;
+pub const VMIW_REGION: i32 = 3;
 
 pub const IPC_BASE: u32 = 0xD00;
 pub const IPC_SHMGET: u32 = IPC_BASE + 1; // 0xD01
@@ -127,6 +133,23 @@ unsafe fn vm_call(msg: &mut Message) -> Result<(), MinixErr> {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Query VM's memory stats (VMIW_STATS): returns `(page_size, total_pages,
+/// free_pages)` on success.
+#[cfg(target_os = "minix")]
+pub fn mem_info() -> Result<(u32, u32, u32), MinixErr> {
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, VM_INFO as i32);
+        msg_set_i32(&mut msg, 8, VMIW_STATS); // m1i1 = subcode
+        vm_call(&mut msg)?;
+        Ok((
+            msg_i32(&msg, 8) as u32,
+            msg_i32(&msg, 12) as u32,
+            msg_i32(&msg, 16) as u32,
+        ))
     }
 }
 

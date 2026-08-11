@@ -205,6 +205,9 @@ pub const NR_THREAD_SET_TLS: u64 = 60;
 pub const NR_FUTEX_WAIT: u64 = 61;
 /// Wake threads blocked on an address (kernel: SYS_futex_wake).
 pub const NR_FUTEX_WAKE: u64 = 62;
+/// Print the kernel's per-process IPC state to the serial console
+/// (kernel: SYS_hangdump) — diagnostic for wedged-server hangs.
+pub const NR_HANGDUMP: u64 = 63;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
@@ -830,6 +833,13 @@ pub fn read(fd: i32, buf: &mut [u8]) -> i64 {
 /// `fd` must be in 0..=2; other values are rejected with `EBADF`.
 pub unsafe fn set_fd_vfs(fd: i32, on: i32) -> i64 {
     unsafe { syscall2(NR_SETFDVFS, fd as u64, on as u64) }
+}
+
+/// Ask the kernel to print every process's IPC state to the serial console.
+pub fn hang_dump() {
+    unsafe {
+        syscall1(NR_HANGDUMP, 0);
+    }
 }
 
 /// Open a file.

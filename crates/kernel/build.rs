@@ -91,6 +91,8 @@ fn assemble(
     // disk image only: embedding a huge binary in the initramfs (which lives
     // in the kernel image) would bloat the kernel past the memory budget at
     // 256M.
+    println!("cargo:rerun-if-env-changed=MINIXFS_EXTRA");
+    println!("cargo:rerun-if-env-changed=MINIXFS_BLOCKS");
     let mut disk_bins = bins.clone();
     if let Ok(extra) = std::env::var("MINIXFS_EXTRA") {
         for entry in extra.split(';').filter(|s| !s.is_empty()) {

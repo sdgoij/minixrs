@@ -164,6 +164,66 @@ is stuck forever. Check whether:
 
 If fixing one thing doesn't fix the symptom, **don't escalate complexity** - look for another simple bug at the same layer. In this session, `rw_inode` was missing AND the builder didn't populate mode/size. Either alone caused the same symptom. 
 
+## Repeated-Exec Leak Hunting
+
+When a `hello`-style exec loop degrades over time (free pages dropping a
+few KiB per exec, or a wedge at a suspiciously round exec count), the
+cause is a per-exec allocation that is never freed. These three traps
+keep recurring:
+
+### 1. VM's temporary self-map VAs are not free
+
+`vm_find_hole` (servers/src/vm/mod.rs) bumps a counter for every
+temporary self-map (COW walks, page-table walks, zero-fill). The kernel's
+`unmap_page` never frees intermediate table pages, so every 512 self-maps
+leak one physical PT page (~1.2 pages per `hello` exec — orphaned single
+pages near the top of the allocator, mapped by no process).
+
+**Check:** read `VM_NEXT_MAP_VA` (a `D`-class static in the `vm` server
+ELF; physical = load base + (VA - 0x1000000)) before/after a run. If it
+marches by hundreds of pages per exec, the mapping VAs are not reused.
+Self-map VAs must be recycled — the fix is a small LIFO of unmapped VAs
+pushed by `vm_unmappage` and popped by `vm_find_hole`.
+
+### 2. Reference scans self-match the dying process
+
+Any "release X when no process still references it" scan that runs while
+the target's own entries are still present always finds itself and never
+releases X. VM's `fdref_close_regions` (exec/exit) walked every live
+Vmproc including the dying one, so VFS's vmfd table filled 1 fd/exec and
+the loop wedged at ~OPEN_MAX execs.
+
+**Check:** when a loop wedges at a round number near a table size (64,
+128...), dump that table; if a resource climbs exactly 1/exec, look for a
+self-referencing scan and exclude the dying endpoint.
+
+### 3. Probe drivers must match markers positionally
+
+"Wait until `marker` appears in the last N bytes of output" lets the
+driver stale-match the *previous* exec's output and run 1-2 execs ahead
+of the guest. A memstat/command then lands mid-exec and its late reply
+looks like an 8s hang (the hangdump sent afterwards "confirms" it, but
+the guest was never stuck).
+
+**Check:** capture the output length before each send and match markers
+only in the bytes appended after it; sync on the shell's bare `# ` prompt
+(no trailing newline — the typed command echoes on the same line) after
+each exec.
+
+### Pinpointing a leak: diff the kernel allocator bitmap
+
+The arch allocator's bitmap is a plain in-RAM array — read it with QEMU
+`pmemsave` and diff two samples (boot vs. after N execs) to see exactly
+which physical pages leaked. `target/x86_64-pc-minix/release/kernel-boot`
+symbol addresses are physical (the kernel is linked at 0x200000), so a
+symbol address is directly pmemsave-able: `ALLOC_INSTANCE` holds
+`{bitmap ptr, bitmap_len, top_page, free_pages}`; `phys_free_pages()`
+(memstat) is the same free counter. Group leaked pages by 1 MiB window,
+then walk every live process's CR3 (proc table at `PROC_TABLE_ALIGNED`,
+Proc stride 880, p_cr3 @ +256, p_magic @ +788 = 0xC0FFEE1) to see whether
+anyone still maps them — a page mapped by nobody is a kernel/VM-side
+allocation that lost its reference.
+
 ## Quick Reference: Boot Test Infrastructure
 
 ```

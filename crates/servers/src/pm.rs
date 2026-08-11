@@ -768,14 +768,12 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
 
     let rmp = unsafe { &mut *base.add(slot) };
     if rmp.mp_flags & PRIV_PROC == 0 {
-        // SYS_CLEAR (kernel call 2) — free kernel Proc entry.
-        let mut clear_msg = [0u8; 64];
-        clear_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
-        let _ = minix_rt::kernel_call(2, &mut clear_msg);
-
-        // VM_EXIT — notify VM to free address space. Matching C
-        // exit_restart()'s vm_exit() (_taskcall, synchronous) so the
-        // notification is never dropped when VM is busy.
+        // VM_EXIT — notify VM to free the address space BEFORE SYS_CLEAR
+        // zeroes the kernel's p_cr3. VM's vm_destroy resolves the table
+        // from the kernel's CR3 (exec replaces it with a fresh root), so
+        // the clear must not have run yet. Matching C exit_restart()'s
+        // vm_exit() (_taskcall, synchronous) so the notification is never
+        // dropped when VM is busy.
         let mut vm_exit_msg = [0u8; 64];
         vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
         vm_exit_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
@@ -786,6 +784,11 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
                 vm_exit_msg.as_mut_ptr() as u64,
             )
         };
+
+        // SYS_CLEAR (kernel call 2) — free kernel Proc entry.
+        let mut clear_msg = [0u8; 64];
+        clear_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
+        let _ = minix_rt::kernel_call(2, &mut clear_msg);
     }
 
     if traced {
@@ -1082,12 +1085,10 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
             unsafe {
                 free_proc(i);
             }
-            // Call SYS_CLEAR (kernel call 2) to free the kernel Proc entry
-            // and page tables.  Matching C: cleanup() in forkexit.c.
-            let mut clear_msg = [0u8; 64];
-            clear_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
-            let _ = minix_rt::kernel_call(2, &mut clear_msg);
-            // Notify VM to free its Vmproc entry. Matching C: exit_restart()
+            // Notify VM to free its Vmproc entry BEFORE SYS_CLEAR zeroes
+            // the kernel's p_cr3: VM's vm_destroy resolves the table from
+            // the kernel's CR3 (exec replaces it with a fresh root), so
+            // the clear must not have run yet. Matching C: exit_restart()
             // calls vm_exit() (libsys/vm_exit.c) which uses _taskcall — a
             // synchronous SENDREC, so the notification is never dropped. A
             // SENDNB here fails silently (ENOTREADY) whenever VM is busy
@@ -1104,6 +1105,11 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
                     vm_exit_msg.as_mut_ptr() as u64,
                 )
             };
+            // Call SYS_CLEAR (kernel call 2) to free the kernel Proc entry
+            // and page tables.  Matching C: cleanup() in forkexit.c.
+            let mut clear_msg = [0u8; 64];
+            clear_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
+            let _ = minix_rt::kernel_call(2, &mut clear_msg);
             return Ok((pid, status));
         }
     }

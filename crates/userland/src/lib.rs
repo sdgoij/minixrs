@@ -733,6 +733,67 @@ pub fn fsck(_args: &[&str]) -> i32 {
     0
 }
 
+/// memstat — report physical memory usage (page size, total, free) from VM.
+pub fn memstat(_args: &[&str]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        match minix_std::vmem::mem_info() {
+            Ok((psize, total, free)) => {
+                write_out(b"mem: page ");
+                print_dec_u32(psize);
+                write_out(b" total ");
+                print_dec_u32(total);
+                write_out(b" pages free ");
+                print_dec_u32(free);
+                write_out(b" (");
+                print_dec_u32(free * 4 / 1024); // MiB (4 KiB pages)
+                write_out(b" MiB)\r\n");
+                0
+            }
+            Err(e) => {
+                write_err(b"memstat: VM info failed: ");
+                write_err(&[b'0' + ((-e.0) % 10) as u8]);
+                write_err(b"\r\n");
+                1
+            }
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        write_out(b"memstat: host stub\n");
+        0
+    }
+}
+
+/// hangdump — ask the kernel to print every process's IPC state to the
+/// serial console (who is blocked on whom). Diagnostic for wedged servers.
+pub fn hangdump(_args: &[&str]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        minix_rt::hang_dump();
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        write_out(b"hangdump: host stub\n");
+    }
+    0
+}
+
+/// Print an unsigned decimal to stdout (helper for memstat).
+pub fn print_dec_u32(mut n: u32) {
+    let mut buf = [0u8; 12];
+    let mut i = 12;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    write_out(&buf[i..]);
+}
+
 /// Parse a signed decimal integer, or return `None`.
 pub fn parse_i32(s: &str) -> Option<i32> {
     let bytes = s.as_bytes();

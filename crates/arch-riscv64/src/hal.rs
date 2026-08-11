@@ -747,6 +747,11 @@ pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
 }
 
+/// Number of free physical pages (diagnostics).
+pub fn phys_free_pages() -> usize {
+    crate::alloc::phys_free_pages()
+}
+
 /// Whether port I/O is available on this architecture.
 pub const fn has_port_io() -> bool {
     false

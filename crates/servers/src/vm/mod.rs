@@ -24,7 +24,7 @@ use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
 use arch_common::ipc::{EDONTREPLY, Message};
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const OK: i32 = 0;
 
@@ -71,6 +71,7 @@ const VM_PAGING_COPY: i32 = 6;
 const VM_PAGING_FORK: i32 = 7;
 const VM_PAGING_WALK_PAGE: i32 = 8;
 const VM_PAGING_CLEAR: i32 = 9;
+const VM_PAGING_MEMSTAT: i32 = 10;
 
 /// Walk the page table identified by `cr3` at virtual address `va`
 /// and return the PTE value. Runs in ring 0 via kernel call so it can
@@ -123,6 +124,31 @@ pub fn vm_free_pages(pa: u64, count: usize) -> i32 {
     minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
 }
 
+/// Query the kernel allocator's free physical page count (memstat). VM's
+/// own copy of the arch allocator covers the whole identity window and is
+/// not authoritative; the kernel's is the real one.
+pub fn vm_free_pages_query() -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_MEMSTAT.to_le_bytes());
+        let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+        if r != 0 {
+            return -1;
+        }
+        i32::from_le_bytes(
+            msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+                .try_into()
+                .unwrap_or([0; 4]),
+        )
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        0 // host tests have no kernel to query
+    }
+}
+
 /// VM's own page table root (CR3 physical address).
 /// Set during `vm_init_boot` and used by `vm_mappages`/`vm_unmappages`
 /// to map physical pages into VM's address space for direct access.
@@ -147,16 +173,36 @@ pub static VM_SELF_CR3: AtomicU64 = AtomicU64::new(0);
 static VM_NEXT_MAP_VA: AtomicU64 =
     AtomicU64::new((kernel::pagetable::MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF);
 
+/// LIFO of temporary-mapping VAs released by [`vm_unmappage`], so the
+/// kernel's intermediate table pages for VM's own address space are reused
+/// instead of every map marching `VM_NEXT_MAP_VA` upward through a fresh
+/// page-table page. The kernel's `unmap_page` keeps intermediate tables
+/// allocated, so without reuse each 512 self-maps leaked one physical PT
+/// page (≈1.2 pages per `hello` exec). VM is single-threaded, so the list
+/// needs no locking; single-page maps dominate (vm_mappages is unused).
+const VM_MAP_VA_FREELIST_CAP: usize = 64;
+static VM_MAP_VA_FREELIST: [AtomicU64; VM_MAP_VA_FREELIST_CAP] =
+    [const { AtomicU64::new(0) }; VM_MAP_VA_FREELIST_CAP];
+static VM_MAP_VA_FREELIST_LEN: AtomicUsize = AtomicUsize::new(0);
+
 const PAGE_SIZE: u64 = 4096;
 
 /// Find a range of `pages` consecutive virtual addresses in VM's own
 /// address space for temporary physical page mappings.
 ///
-/// Returns the starting VA. This is a simple bump allocator — pages
-/// are unmapped (freed) by returning them to the allocator, but for
-/// the fork workload the mappings are short-lived and the VA space is
-/// large enough (100+ MB) to never wrap.
+/// Returns the starting VA. Single-page requests first reuse a VA returned
+/// by a previous [`vm_unmappage`] (bounded by [`VM_MAP_VA_FREELIST_CAP`]);
+/// multi-page requests (and a full free list) bump `VM_NEXT_MAP_VA`. The
+/// 4 GiB headroom below the arch user top bounds the never-wrapping march.
 pub fn vm_find_hole(pages: usize) -> u64 {
+    if pages == 1 {
+        let len = VM_MAP_VA_FREELIST_LEN.load(Ordering::Relaxed);
+        if len > 0 {
+            let va = VM_MAP_VA_FREELIST[len - 1].load(Ordering::Relaxed);
+            VM_MAP_VA_FREELIST_LEN.store(len - 1, Ordering::Relaxed);
+            return va;
+        }
+    }
     let bytes = (pages as u64) * PAGE_SIZE;
     VM_NEXT_MAP_VA.fetch_add(bytes, Ordering::Relaxed)
 }
@@ -187,7 +233,8 @@ pub fn vm_mappage(phys: u64, flags: u64) -> u64 {
     va
 }
 
-/// Unmap a page from VM's address space at `va`.
+/// Unmap a page from VM's address space at `va` and return it to the
+/// temporary-mapping VA pool for reuse.
 pub fn vm_unmappage(va: u64) -> i32 {
     let self_cr3 = VM_SELF_CR3.load(Ordering::Relaxed);
     if self_cr3 == 0 {
@@ -198,7 +245,15 @@ pub fn vm_unmappage(va: u64) -> i32 {
         .copy_from_slice(&VM_PAGING_UNMAP.to_le_bytes());
     msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8].copy_from_slice(&self_cr3.to_le_bytes());
     msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8].copy_from_slice(&va.to_le_bytes());
-    minix_rt::kernel_call(VM_PAGING_CALL, &mut msg)
+    let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+    if r == 0 && va != 0 {
+        let len = VM_MAP_VA_FREELIST_LEN.load(Ordering::Relaxed);
+        if len < VM_MAP_VA_FREELIST_CAP {
+            VM_MAP_VA_FREELIST[len].store(va, Ordering::Relaxed);
+            VM_MAP_VA_FREELIST_LEN.store(len + 1, Ordering::Relaxed);
+        }
+    }
+    r
 }
 
 /// Map `count` consecutive physical pages into VM's address space.
@@ -1365,9 +1420,18 @@ fn do_munmap(msg: &mut Message) -> i32 {
             if let Some(removed) = vmp.vm_regions.remove(addr)
                 && removed.flags & region::VR_FILE != 0
             {
-                fdref_close_if_unused(removed.dev, removed.ino, removed.fd);
+                fdref_close_if_unused(removed.dev, removed.ino, removed.fd, -1);
             }
         }
+    }
+
+    // Return the region's physical pages to the allocator BEFORE unmapping
+    // the PTEs: free_user_range walks the page table to find the frames
+    // (COW-shared frames and shared identity leaves are kept by the walk),
+    // so the entries must still be present when it runs. The unmap loop
+    // below then clears the PTEs so a later fault cannot map a freed frame.
+    unsafe {
+        crate::vm::proc::free_user_range(cr3, addr, addr + len_aligned);
     }
 
     // Unmap pages from the page table, one at a time via the kernel (ring
@@ -1377,13 +1441,6 @@ fn do_munmap(msg: &mut Message) -> i32 {
     while va < addr + len_aligned {
         let _ = crate::vm::vm_unmap_page_in(cr3, va);
         va += PAGE_SIZE;
-    }
-
-    // Return the region's physical pages to the allocator. The region was
-    // removed above; walk the page table to find the frames (COW-shared
-    // frames and shared identity leaves are kept by the walk).
-    unsafe {
-        crate::vm::proc::free_user_range(cr3, addr, addr + len_aligned);
     }
 
     // Set m1i1 = 0 so vm_call reads a positive result (0 = success).
@@ -1560,16 +1617,18 @@ fn vfs_request_sync(
     )
 }
 
-/// Close a VM file descriptor (FDCLOSE) once no region in any process
-/// references its (dev, ino, fd) — a lightweight fdref: fork clones regions
-/// verbatim, so the same vmfd is shared until the last user goes away.
-fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32) {
-    if fd < 0 {
-        return;
-    }
+/// True if any active process other than `exclude_ep` has a file region
+/// referencing (dev, ino, fd). fork clones regions verbatim, so a fork
+/// sibling's region keeps the shared vmfd alive; the dying process's own
+/// regions must not (they are about to be destroyed and would otherwise
+/// keep the vmfd open forever).
+fn vmfd_is_referenced(dev: u32, ino: u32, fd: i32, exclude_ep: i32) -> bool {
     let mut referenced = false;
     unsafe {
         proc::for_each_active_vmproc(|vmp| {
+            if vmp.vm_endpoint == exclude_ep {
+                return;
+            }
             for r in vmp.vm_regions.regions.iter().flatten() {
                 if r.flags & region::VR_FILE != 0 && r.dev == dev && r.ino == ino && r.fd == fd {
                     referenced = true;
@@ -1578,7 +1637,21 @@ fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32) {
             }
         });
     }
-    if !referenced {
+    referenced
+}
+
+/// Close a VM file descriptor (FDCLOSE) once no region in any process other
+/// than `exclude_ep` references its (dev, ino, fd) — a lightweight fdref:
+/// fork clones regions verbatim, so the same vmfd is shared until the last
+/// user goes away. The exec/exit path passes the dying endpoint as
+/// `exclude_ep` because its own regions are still present while the scan
+/// runs and would otherwise keep the vmfd alive forever (VFS's vmfd table
+/// fills 1 fd per exec). Callers that already removed the region pass -1.
+fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32, exclude_ep: i32) {
+    if fd < 0 {
+        return;
+    }
+    if !vmfd_is_referenced(dev, ino, fd, exclude_ep) {
         let mut reply = [0u8; 64];
         let _ = vfs_request_sync(
             arch_common::com::VMVFSREQ_FDCLOSE as i32,
@@ -1608,7 +1681,7 @@ fn fdref_close_regions(ep: i32) {
         }
     }
     for &(dev, ino, fd) in &to_close[..n] {
-        fdref_close_if_unused(dev, ino, fd);
+        fdref_close_if_unused(dev, ino, fd, ep);
     }
 }
 
@@ -1882,7 +1955,7 @@ fn do_mmap_file(
             }
             for r in removed[..n].iter().flatten() {
                 if r.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(r.dev, r.ino, r.fd);
+                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
                 }
             }
         } else {
@@ -2004,6 +2077,15 @@ fn do_exec_newmem(msg: &mut Message) -> i32 {
     // Old file regions die with the old image; close their vmfds unless a
     // fork sibling still uses them.
     fdref_close_regions(ep);
+
+    // Reclaim the old address space: the kernel's SYS_EXEC_LOAD builds a
+    // fresh root (exec_create_root) and overwrites p_cr3 without touching
+    // the Vmproc, so without this the pre-exec table (a fork COW copy or
+    // the boot table) would leak and its PhysBlock refs would pin the
+    // parent's pages for the child's whole lifetime.
+    unsafe {
+        proc::free_exec_old_addrspace(ep);
+    }
 
     unsafe {
         // Clear old regions — the exec'd image registers its own below.
@@ -2253,7 +2335,7 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
             vmp.prefault_exec = true;
             for r in removed[..n].iter().flatten() {
                 if r.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(r.dev, r.ino, r.fd);
+                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
                 }
             }
         } else {
@@ -2313,12 +2395,13 @@ fn do_info(msg: &mut Message) -> i32 {
 
     match subcode {
         VMIW_STATS => {
-            // Populate VmStatsInfo: page size, total pages, free/cached stats
+            // Populate VmStatsInfo: page size, total pages, free pages.
             msg.m_payload.m1.m1i1 = kernel::vm::VM_PAGE_SIZE as i32;
             msg.m_payload.m1.m1i2 = kernel::vm::total_pages();
-            // Estimate free pages: use total_pages minus a placeholder.
-            // The real implementation calls memstats() from the kernel.
-            msg.m_payload.m1.m1i3 = 0; // free pages placeholder
+            // Free pages from the kernel's real allocator (VM's own copy of
+            // the arch allocator covers the whole identity window and is not
+            // authoritative).
+            msg.m_payload.m1.m1i3 = vm_free_pages_query();
             OK
         }
         VMIW_USAGE => {
@@ -2461,6 +2544,7 @@ mod tests {
         NR_VM_CALLS, VM_MMAP, VM_PAGEFAULT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE, VM_SHM_UNMAP,
         VM_UNMAP_PHYS,
     };
+    use arch_common::types::Endpoint;
 
     #[test]
     fn test_call_number_in_range() {
@@ -2631,6 +2715,138 @@ mod tests {
     #[test]
     fn test_vm_calls_table_size() {
         assert_eq!(NR_VM_CALLS, 48);
+    }
+
+    #[test]
+    fn test_do_exec_newmem_resets_stale_table_and_reestablishes_heap() {
+        unsafe {
+            let ep: Endpoint = 89;
+            // Build a Vmproc by hand (host has no boot CR3, so vm_create
+            // cannot be used): give it a stale pre-exec root and an old
+            // image's file region, as a forked child about to exec would
+            // have.
+            let vmp = proc::vmproc_alloc(ep).expect("vmproc alloc");
+            vmp.vm_pml4_phys = 0x12345000;
+            let old = crate::vm::region::VirRegion::new(
+                0x1000000,
+                0x200000,
+                crate::vm::region::VR_READABLE
+                    | crate::vm::region::VR_WRITABLE
+                    | crate::vm::region::VR_FILE
+                    | crate::vm::region::VR_PRESENT,
+            );
+            let _ = vmp.vm_regions.insert(old);
+
+            let mut msg = Message {
+                m_source: arch_common::com::PM_PROC_NR,
+                m_type: arch_common::com::VM_EXEC_NEWMEM as i32,
+                m_payload: core::mem::zeroed(),
+            };
+            msg.m_payload.m1.m1i1 = ep;
+            let r = do_exec_newmem(&mut msg);
+            assert_eq!(r, OK);
+
+            let vmp = proc::vmproc_lookup(ep).expect("vmproc after exec_newmem");
+            // The pre-exec table is reclaimed (kernel CR3 query returns 0
+            // on host, so only the recorded root is observable): it must not
+            // dangle for a later vm_destroy to double-free.
+            assert_eq!(vmp.vm_pml4_phys, 0, "stale root must be cleared");
+            let mut heap_seen = false;
+            let mut file_seen = false;
+            for r in vmp.vm_regions.regions.iter().flatten() {
+                if r.flags & crate::vm::region::VR_DATA != 0 {
+                    heap_seen = true;
+                }
+                if r.flags & crate::vm::region::VR_FILE != 0 {
+                    file_seen = true;
+                }
+            }
+            assert!(heap_seen, "heap region must be re-established");
+            assert!(!file_seen, "old image's file regions must be cleared");
+            proc::vmproc_free(ep);
+        }
+    }
+
+    #[test]
+    fn test_vm_find_hole_reuses_released_va() {
+        // Single-page holes march upward until a VA is released back;
+        // the next request must reuse it instead of bumping VM_NEXT_MAP_VA
+        // (which would otherwise consume a fresh kernel PT page per 512
+        // self-maps — the per-exec leak).
+        let a = vm_find_hole(1);
+        let b = vm_find_hole(1);
+        assert_eq!(b, a + PAGE_SIZE, "unreleased holes march upward");
+
+        // Simulate vm_unmappage's release (host has no kernel to unmap).
+        let len = VM_MAP_VA_FREELIST_LEN.load(Ordering::Relaxed);
+        assert!(len < VM_MAP_VA_FREELIST_CAP);
+        VM_MAP_VA_FREELIST[len].store(b, Ordering::Relaxed);
+        VM_MAP_VA_FREELIST_LEN.store(len + 1, Ordering::Relaxed);
+
+        let c = vm_find_hole(1);
+        assert_eq!(c, b, "released VA must be reused before the bump allocator");
+    }
+
+    #[test]
+    fn test_fdref_scan_excludes_the_dying_process() {
+        unsafe {
+            let a: Endpoint = 71;
+            let b: Endpoint = 72;
+            proc::vmproc_alloc(a).expect("vmproc A");
+            proc::vmproc_alloc(b).expect("vmproc B");
+            // A and B are fork siblings sharing vmfd 3 for file (dev 7,
+            // ino 9); B also mapped the same file later through a fresh
+            // vmfd 4. Regions stay in the list while the processes live.
+            let file = |vaddr: u64, fd: i32| {
+                crate::vm::region::VirRegion::new_file(
+                    vaddr,
+                    0x1000,
+                    crate::vm::region::VR_READABLE | crate::vm::region::VR_FILE,
+                    7,
+                    9,
+                    fd,
+                    0,
+                    0x1000,
+                )
+            };
+            proc::vmproc_lookup(a)
+                .unwrap()
+                .vm_regions
+                .insert(file(0x2000000, 3));
+            proc::vmproc_lookup(a)
+                .unwrap()
+                .vm_regions
+                .insert(file(0x2000000, 3));
+            {
+                let vmp = proc::vmproc_lookup(b).unwrap();
+                vmp.vm_regions.insert(file(0x3000000, 3));
+                vmp.vm_regions.insert(file(0x4000000, 4));
+            }
+
+            // A and B share fd 3 (fork clones regions verbatim): each keeps
+            // it alive for the other, so neither's own region is treated as
+            // the sole reference when the other dies.
+            assert!(
+                vmfd_is_referenced(7, 9, 3, a),
+                "sibling B must keep the shared vmfd alive when A dies"
+            );
+            assert!(
+                vmfd_is_referenced(7, 9, 3, b),
+                "sibling A must keep the shared vmfd alive when B dies"
+            );
+            // fd 4 belongs to B alone: excluding B means nobody references
+            // it, so the exec/exit path would send FDCLOSE.
+            assert!(
+                !vmfd_is_referenced(7, 9, 4, b),
+                "B's sole region must not self-reference"
+            );
+            assert!(
+                vmfd_is_referenced(7, 9, 4, -1),
+                "B's own region references fd 4 when not excluded"
+            );
+            proc::vmproc_free(a);
+            proc::vmproc_free(b);
+        }
     }
 
     #[test]

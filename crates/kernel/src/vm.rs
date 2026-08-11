@@ -69,6 +69,14 @@ pub fn total_pages() -> i32 {
     TOTAL.load(Ordering::Relaxed)
 }
 
+/// Number of physical pages currently free, from the arch allocator that
+/// actually backs all runtime allocations (the BITS bitmap above is the
+/// ported VM-server allocator; runtime allocs go through `hal`). Used for
+/// the `memstat` diagnostics and the per-exec leak checks.
+pub fn phys_free_pages() -> usize {
+    crate::hal::phys_free_pages()
+}
+
 fn page_free(p: usize) -> bool {
     if p >= NR_PHYS_PAGES {
         return false;

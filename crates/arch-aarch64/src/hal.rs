@@ -849,6 +849,11 @@ pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
 }
 
+/// Number of free physical pages (diagnostics).
+pub fn phys_free_pages() -> usize {
+    crate::alloc::stats().1
+}
+
 /// Initialize the physical page allocator.
 ///
 /// No-op on AArch64: the bitmap allocator places its bitmap at the top of

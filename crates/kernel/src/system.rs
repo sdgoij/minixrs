@@ -481,6 +481,8 @@ pub const VM_PAGING_FORK: i32 = 7;
 pub const VM_PAGING_WALK_PAGE: i32 = 8;
 /// Split huge pages and clear the 4KB entries in a range (lazy mmap).
 pub const VM_PAGING_CLEAR: i32 = 9;
+/// Report the kernel allocator's free physical page count (memstat).
+pub const VM_PAGING_MEMSTAT: i32 = 10;
 
 // Constants
 
@@ -4924,6 +4926,16 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     let _ = crate::pagetable::clear_page(cr3, cur);
                     cur += 0x1000;
                 }
+                OK
+            }
+            VM_PAGING_MEMSTAT => {
+                // Report the kernel allocator's free physical page count
+                // (VM's own copy of the allocator is not authoritative).
+                msg_write_i32(
+                    msg,
+                    VM_PAGING_COUNT_OFF,
+                    crate::hal::phys_free_pages() as i32,
+                );
                 OK
             }
             VM_PAGING_QUERY_PROC => {

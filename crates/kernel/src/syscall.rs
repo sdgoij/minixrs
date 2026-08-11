@@ -332,6 +332,105 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     crate::system::EDONTREPLY as i64
 }
 
+/// SYS_hangdump (63) — print each live process's IPC state to the serial
+/// console. Diagnostic for wedged-server hangs: shows who is blocked on
+/// whom (SENDING → p_sendto_e, RECEIVING → p_getfrom_e) so a deadlocked
+/// server chain is visible from the shell.
+unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    unsafe {
+        use crate::proc::RtsFlags;
+
+        fn put(b: u8) {
+            crate::hal::serial_write_byte(b);
+        }
+        fn puts(s: &[u8]) {
+            for &b in s {
+                put(b);
+            }
+        }
+        fn put_hex(v: i32) {
+            for i in (0..8).rev() {
+                put(b"0123456789abcdef"[((v >> (i * 4)) & 0xF) as usize]);
+            }
+        }
+        fn put_hex64(v: u64) {
+            for i in (0..16).rev() {
+                put(b"0123456789abcdef"[((v >> (i * 4)) & 0xF) as usize]);
+            }
+        }
+
+        // x86_64 TrapFrame layout: rip @ 160, rsp @ 168 (other arches save
+        // the same fields at the same byte offsets in their own p_reg).
+        fn frame_rip(rp: *const crate::proc::Proc) -> u64 {
+            // SAFETY: `rp` is a live Proc; p_reg is a plain byte array.
+            unsafe {
+                let p = &(*(rp)).p_reg;
+                u64::from_ne_bytes(p[160..168].try_into().unwrap_or([0; 8]))
+            }
+        }
+        fn frame_rsp(rp: *const crate::proc::Proc) -> u64 {
+            // SAFETY: `rp` is a live Proc; p_reg is a plain byte array.
+            unsafe {
+                let p = &(*(rp)).p_reg;
+                u64::from_ne_bytes(p[168..176].try_into().unwrap_or([0; 8]))
+            }
+        }
+
+        puts(b"--- hangdump ---\r\n");
+        puts(b"  runq:");
+        crate::sched::dump_queues(|ep| {
+            put(b' ');
+            put_hex(ep);
+        });
+        puts(b" free=");
+        // Reuse the memstat plumbing: phys_free_pages is only callable from
+        // ring 0, which we are in.
+        put_hex(crate::vm::phys_free_pages() as i32);
+        puts(b"\r\n");
+        for i in 0..crate::proc::NR_PROCS_TOTAL {
+            let rp = crate::table::proc_addr(i as i32);
+            if rp.is_null() || (*rp).is_empty() {
+                continue;
+            }
+            let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+            puts(b"  ");
+            for &b in &(*rp).p_name {
+                if b == 0 {
+                    break;
+                }
+                put(b);
+            }
+            puts(b" ep=");
+            put_hex((*rp).p_endpoint);
+            puts(b" rts=");
+            put_hex(rts as i32);
+            let mf = (*rp).p_misc_flags.load(Ordering::Relaxed);
+            if mf != 0 {
+                puts(b" mf=");
+                put_hex(mf as i32);
+            }
+            if rts & RtsFlags::SENDING.bits() != 0 {
+                puts(b" SENDTO=");
+                put_hex((*rp).p_sendto_e);
+            }
+            if rts & RtsFlags::RECEIVING.bits() != 0 {
+                puts(b" GETFROM=");
+                put_hex((*rp).p_getfrom_e);
+            }
+            if rts & RtsFlags::SLOT_FREE.bits() == 0 && rts & RtsFlags::SIGNALED.bits() != 0 {
+                puts(b" SIGNALED");
+            }
+            puts(b" rip=");
+            put_hex64(frame_rip(rp));
+            puts(b" rsp=");
+            put_hex64(frame_rsp(rp));
+            puts(b"\r\n");
+        }
+        puts(b"--- end hangdump ---\r\n");
+    }
+    0
+}
+
 /// SYS_write (3) — write to a file descriptor.
 /// fd=1 (stdout), fd=2 (stderr) go to serial output, unless the process
 /// VFS-owns them (dup2'd redirect), in which case the write is forwarded
@@ -1046,6 +1145,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(60, sys_thread_set_tls_handler); // NR_THREAD_SET_TLS
         register_basic_syscall(61, sys_futex_wait_handler); // NR_FUTEX_WAIT
         register_basic_syscall(62, sys_futex_wake_handler); // NR_FUTEX_WAKE
+        register_basic_syscall(63, sys_hang_dump_handler); // NR_HANGDUMP
     }
 }
 

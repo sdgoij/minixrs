@@ -233,6 +233,29 @@ pub fn global_allocator() -> *mut core::ffi::c_void {
     core::ptr::null_mut()
 }
 
+/// Number of free physical pages (bitmap clear bits within the init range).
+pub fn phys_free_pages() -> usize {
+    if !ALLOC_INIT.load(Ordering::Acquire) {
+        return 0;
+    }
+    let start = ALLOC_START.load(Ordering::Relaxed);
+    let end = ALLOC_END.load(Ordering::Relaxed);
+    let npages = ((end - start) / 4096) as usize;
+    let max_chunks = npages.div_ceil(32).min(262144);
+    let mut free = 0usize;
+    for chunk in 0..max_chunks {
+        let bits = unsafe { read_bitmap(chunk) };
+        free += (!bits
+            & (if chunk * 32 + 32 <= npages {
+                u32::MAX
+            } else {
+                (1u32 << (npages - chunk * 32)) - 1
+            }))
+        .count_ones() as usize;
+    }
+    free
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -427,6 +427,11 @@ pub fn free_phys_contig(addr: u64, count: usize) {
     }
 }
 
+/// Number of physical pages currently free (diagnostics / memstat).
+pub fn phys_free_pages() -> usize {
+    unsafe { (*global_allocator()).free_count() }
+}
+
 // Tests — use a small bitmap (256 bits = 256 pages = 1 MB)
 
 #[cfg(test)]
@@ -537,7 +542,6 @@ mod tests {
         assert!(a.bitmap_len() > 0);
     }
 
-
     #[test]
     fn test_mmap_cut_no_overlap() {
         // Cut on range that doesn't intersect any region — should be no-op.
@@ -599,7 +603,6 @@ mod tests {
         // entries won't merge, so this exercises the `self.count >= MAX` guard).
         assert!(mm.count <= MAX_MMAP_ENTRIES);
     }
-
 
     #[test]
     fn test_alloc_from_empty_mmap() {

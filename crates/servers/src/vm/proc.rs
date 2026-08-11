@@ -222,23 +222,33 @@ unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
     if !kernel::table::is_ok_endpoint(ep) {
         return 0;
     }
-    // Query the real kernel's Proc table via kernel call.
-    // VM's own copy of the kernel crate has a separate BSS with
-    // zeroed Proc entries — we cannot read p_seg.p_cr3 directly.
-    const VMC: i32 = 62;
-    const QP: i32 = 5;
-    const SO: usize = 8;
-    const CO: usize = 12;
-    // PA_OFF = 40 holds CR3 in QUERY_PROC reply
-    const PAO: usize = 40;
-    let mut msg = [0u8; 64];
-    msg[SO..SO + 4].copy_from_slice(&QP.to_le_bytes());
-    msg[CO..CO + 4].copy_from_slice(&endpoint_slot(ep).to_le_bytes());
-    let r = minix_rt::kernel_call(VMC, &mut msg);
-    if r != 0 {
-        return 0;
+    #[cfg(target_os = "minix")]
+    {
+        // Query the real kernel's Proc table via kernel call.
+        // VM's own copy of the kernel crate has a separate BSS with
+        // zeroed Proc entries — we cannot read p_seg.p_cr3 directly.
+        const VMC: i32 = 62;
+        const QP: i32 = 5;
+        const SO: usize = 8;
+        const CO: usize = 12;
+        // PA_OFF = 40 holds CR3 in QUERY_PROC reply
+        const PAO: usize = 40;
+        let mut msg = [0u8; 64];
+        msg[SO..SO + 4].copy_from_slice(&QP.to_le_bytes());
+        msg[CO..CO + 4].copy_from_slice(&endpoint_slot(ep).to_le_bytes());
+        let r = minix_rt::kernel_call(VMC, &mut msg);
+        if r != 0 {
+            return 0;
+        }
+        u64::from_le_bytes(msg[PAO..PAO + 8].try_into().unwrap_or([0; 8]))
     }
-    u64::from_le_bytes(msg[PAO..PAO + 8].try_into().unwrap_or([0; 8]))
+    #[cfg(not(target_os = "minix"))]
+    {
+        // Host tests have no kernel to query; 0 means "no table", which
+        // makes vm_get_addrspace fall back to the Vmproc's recorded root.
+        let _ = ep;
+        0
+    }
 }
 
 /// Allocate a new PML4 for a process.
@@ -345,48 +355,37 @@ pub unsafe fn vm_create(ep: Endpoint) -> i32 {
     }
 }
 
-/// Release a process's address space, freeing all page table pages.
+/// Free every frame and table page of the user half of the page table
+/// rooted at `cr3`, then return the root itself to the allocator.
+///
+/// Walks the user half and frees the process's memory. VM is a user
+/// process without a user-visible identity map, so physical table pages
+/// must be mapped into VM's address space via the kernel (VM_PAGING_MAP)
+/// before dereferencing them — same pattern as cow_setup_fork. The old
+/// direct phys-pointer walk worked on x86 (its identity map is
+/// user-visible) but faulted on RISC-V/AArch64, where the identity leaves
+/// are supervisor-only.
+///
+/// Page-table format details (present/leaf/user bits, physical address
+/// extraction, level count) come from the arch crate via kernel::hal, so
+/// this walk is arch-independent:
+///   - entries without the present bit are skipped,
+///   - block/huge leaves above the bottom level are shared identity
+///     mappings and are never freed,
+///   - at the bottom level, hal::pte_user_owned decides which user
+///     leaves map frames the process owns (private allocations freed
+///     with COW refcounting); shared identity/alias frames left by
+///     huge-page splits are not freed,
+///   - table pages are returned to the kernel allocator after their
+///     children are walked (per-process table pages are private copies
+///     on every arch).
 ///
 /// # Safety
 ///
-/// The caller must ensure `ep` refers to a valid process and that no
-/// other code is concurrently accessing its address space.
-pub unsafe fn vm_destroy(ep: Endpoint) {
+/// `cr3` must be the root of an address space no other code is
+/// concurrently accessing (the owning process must not be running).
+pub(crate) unsafe fn free_address_space(cr3: u64) {
     unsafe {
-        let vmp = match vmproc_lookup(ep) {
-            Some(vmp) => vmp as *mut Vmproc,
-            None => return,
-        };
-
-        let cr3 = (*vmp).vm_pml4_phys;
-        if cr3 == 0 {
-            vmproc_free(ep);
-            return;
-        }
-
-        // Walk the user half of the page table and free the process's
-        // memory. VM is a user process without a user-visible identity
-        // map, so physical table pages must be mapped into VM's address
-        // space via the kernel (VM_PAGING_MAP) before dereferencing
-        // them — same pattern as cow_setup_fork. The old direct
-        // phys-pointer walk worked on x86 (its identity map is
-        // user-visible) but faulted on RISC-V/AArch64, where the
-        // identity leaves are supervisor-only.
-        //
-        // Page-table format details (present/leaf/user bits, physical
-        // address extraction, level count) come from the arch crate via
-        // kernel::hal, so this walk is arch-independent:
-        //   - entries without the present bit are skipped,
-        //   - block/huge leaves above the bottom level are shared
-        //     identity mappings and are never freed,
-        //   - at the bottom level, hal::pte_user_owned decides which
-        //     user leaves map frames the process owns (private
-        //     allocations freed with COW refcounting); shared
-        //     identity/alias frames left by huge-page splits are not
-        //     freed,
-        //   - table pages are returned to the kernel allocator after
-        //     their children are walked (per-process table pages are
-        //     private copies on every arch).
         use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
         use kernel::hal::{pte_to_phys, pte_user_owned};
         use kernel::pagetable::{PG_P, PG_PS};
@@ -476,12 +475,71 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
             }
         }
         let _ = vm_free_pages(cr3, 1);
+    }
+}
+
+/// Release a process's address space, freeing all page table pages.
+///
+/// Frees the process's CURRENT address space as seen by the kernel:
+/// exec (`SYS_EXEC_LOAD`) replaces the kernel's `p_cr3` with a fresh
+/// table built by `exec_create_root` without updating the Vmproc's
+/// `vm_pml4_phys`, so that field can be stale — the kernel's CR3 is
+/// authoritative (see `vm_get_addrspace`). The stale pre-exec table is
+/// reclaimed at exec time by [`free_exec_old_addrspace`], so nothing
+/// leaks and no table is walked twice.
+///
+/// # Safety
+///
+/// The caller must ensure `ep` refers to a valid process and that no
+/// other code is concurrently accessing its address space.
+pub unsafe fn vm_destroy(ep: Endpoint) {
+    unsafe {
+        let vmp = match vmproc_lookup(ep) {
+            Some(vmp) => vmp as *mut Vmproc,
+            None => return,
+        };
+
+        // Free the current address space (kernel CR3 preferred; falls back
+        // to the Vmproc's recorded root when the kernel slot was already
+        // cleared — e.g. PM's exit_restart path sends VM_EXIT after
+        // SYS_CLEAR).
+        let cr3 = vm_get_addrspace(ep);
+        if cr3 != 0 {
+            free_address_space(cr3);
+        }
 
         // Clear the region tracking.
         (*vmp).vm_regions = crate::vm::region::RegionList::new();
 
         // Reset the Vmproc entry.
         vmproc_free(ep);
+    }
+}
+
+/// Reclaim the address space a process had before exec replaced it.
+///
+/// Called from `do_exec_newmem` (before `SYS_EXEC_LOAD` builds the fresh
+/// root), when the kernel's `p_cr3` still points at the old table. Frees
+/// that table (its frames are COW-shared with the parent, so only the
+/// refcounts are dropped) and clears the Vmproc's recorded root so a
+/// later `vm_destroy` cannot double-free it — `vm_pml4_phys` is only the
+/// current table until the first exec.
+///
+/// # Safety
+///
+/// The caller must ensure `ep` refers to a valid process that is not
+/// running and whose address space is not otherwise in use.
+pub(crate) unsafe fn free_exec_old_addrspace(ep: Endpoint) {
+    unsafe {
+        let vmp = match vmproc_lookup(ep) {
+            Some(vmp) => vmp as *mut Vmproc,
+            None => return,
+        };
+        let old = vm_get_addrspace(ep);
+        if old != 0 {
+            free_address_space(old);
+        }
+        (*vmp).vm_pml4_phys = 0;
     }
 }
 
@@ -962,6 +1020,40 @@ mod tests {
             // Use a large endpoint that still resolves to a valid slot
             // but is not in the Vmproc table.
             assert!(vmproc_lookup(NR_PROCS as i32).is_none());
+        }
+    }
+
+    #[test]
+    fn test_free_exec_old_addrspace_clears_recorded_root() {
+        unsafe {
+            let ep: Endpoint = 51;
+            assert!(vmproc_alloc(ep).is_some());
+            // Simulate a pre-exec table (a fork COW copy / boot table): the
+            // recorded root goes stale the moment SYS_EXEC_LOAD swaps the
+            // kernel's p_cr3 to a fresh root. On host there is no kernel to
+            // query, so vm_get_addrspace falls back to the recorded root
+            // and free_exec_old_addrspace must still clear it — otherwise a
+            // later vm_destroy would walk a table that exec already freed.
+            let vmp = vmproc_lookup(ep).unwrap();
+            vmp.vm_pml4_phys = 0x12345000;
+
+            free_exec_old_addrspace(ep);
+
+            let vmp = vmproc_lookup(ep).expect("vmproc must survive exec teardown");
+            assert_eq!(vmp.vm_pml4_phys, 0, "stale root must be cleared");
+            vmproc_free(ep);
+        }
+    }
+
+    #[test]
+    fn test_vm_destroy_without_table_frees_slot() {
+        unsafe {
+            let ep: Endpoint = 52;
+            assert!(vmproc_alloc(ep).is_some());
+            // No table ever bound: vm_destroy must free the slot without
+            // walking anything (kernel query returns 0 on host).
+            vm_destroy(ep);
+            assert!(vmproc_lookup(ep).is_none());
         }
     }
 

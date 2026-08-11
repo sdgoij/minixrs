@@ -5,9 +5,14 @@
 //! Multiple `VirRegion` entries (in the same or different processes)
 //! can share a `PhysBlock`, enabling Copy-on-Write (COW) after fork.
 //!
-//! The table holds up to 1024 entries, which is sufficient for typical
-//! boot and fork workloads. Entries are never moved after allocation;
-//! the index returned by `pb_new` remains valid until `pb_unref` frees it.
+//! The table holds up to 16384 entries, sized for the COW working set of
+//! the long-lived processes: every writable user page of a live process
+//! that has ever been forked keeps a refcount >= 1 entry (the process's
+//! own reference), so the table must hold the sum of those pages, not just
+//! the transient fork-shared ones. The reference design (pb.c) allocates
+//! phys blocks from a dynamic slab; a static table needs this headroom.
+//! Entries are never moved after allocation; the index returned by
+//! `pb_new` remains valid until `pb_unref` frees it.
 
 /// A reference-counted physical page.
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +25,7 @@ pub struct PhysBlock {
 
 /// A fixed-capacity table of `PhysBlock` entries.
 pub struct PhysBlockTable {
-    blocks: [Option<PhysBlock>; 1024],
+    blocks: [Option<PhysBlock>; 16384],
     count: u16,
 }
 
@@ -28,7 +33,7 @@ impl PhysBlockTable {
     /// Create an empty table.
     pub const fn new() -> Self {
         Self {
-            blocks: [None; 1024],
+            blocks: [None; 16384],
             count: 0,
         }
     }
@@ -213,7 +218,7 @@ mod tests {
     #[test]
     fn test_pb_table_full() {
         let mut table = PhysBlockTable::new();
-        for i in 0..1024 {
+        for i in 0..16384 {
             let phys = (i as u64 + 1) * 0x1000;
             assert!(table.alloc(phys).is_some(), "slot {} should accept", i);
         }

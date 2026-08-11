@@ -1363,6 +1363,11 @@ pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     crate::alloc::free_phys_contig(addr, count)
 }
 
+/// Number of free physical pages (diagnostics).
+pub fn phys_free_pages() -> usize {
+    crate::alloc::phys_free_pages()
+}
+
 /// Initialize the physical page allocator with a memory range [base, base+size).
 ///
 /// # Safety

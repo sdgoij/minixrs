@@ -362,22 +362,39 @@ completions via QEMU `-trace`):
   follow-up: profile MFS's cache/read-ahead against the virtio request
   stream.
 
-Region-stability stress — **new finding**: the 20× exec loop passes
-everywhere, but a 100× loop degrades and hangs: `hello` stops completing
-at ≈44 execs at `-m 256M` and ≈63 at `-m 4G` on x86 (memory-dependent).
-This points at a per-exec leak — prime suspect the 4 kernel thread stacks
-`hello` spawns not being reclaimed at process exit (176–252 stacks × ~1
-MiB before the hang). Follow-up: dump kernel memory at the hang (free-pool
-size, thread-stack usage) to confirm.
+Region-stability stress — **resolved**: the 100× loop used to degrade and
+hang (`hello` stopped completing at ≈44 execs at `-m 256M`). Root-caused
+and fixed as a cascade of per-exec leaks:
+
+- **VM fdref self-reference** — `fdref_close_regions` (exec/exit) closed
+  vmfds only when *no process* referenced the (dev, ino, fd), but the
+  dying process's own still-present regions always matched, so VFS's
+  `fp_filp[64]` never got its FDCLOSE and filled 1 fd/exec (wedge at
+  ~OPEN_MAX execs). The scan now excludes the dying endpoint; VFS fd count
+  is flat (1-2) across the loop. (`fdref_close_if_unused` gains an
+  `exclude_ep`; `vmfd_is_referenced` extracted; host test
+  `test_fdref_scan_excludes_the_dying_process`.)
+- **VM self-map VA march** — `vm_find_hole` bumped a monotonic counter on
+  every temporary map (cow walks, page-table walks, zero-fill), so VM's
+  own address space consumed a fresh kernel PT page per 512 maps (~1.2
+  pages/exec; the kernel's `unmap_page` keeps intermediate tables). The
+  unmapped VAs are now returned to a small LIFO and reused
+  (`VM_MAP_VA_FREELIST`), bounding VM's mapping region to the peak
+  concurrent mappings. Host test `test_vm_find_hole_reuses_released_va`.
+
+Verification (`tools/exec_loop_mem.py 400 256M 25` and repeated 200×
+runs): free pages are **flat** — 48713 at boot and after 400 execs, leak
+0.0 KiB/exec. The driver was also hardened against its own false-wedge
+(stale last-N-bytes pid=/threadstd matches let memstat land mid-exec and
+report an 8s timeout as a hang): it now matches markers positionally
+after each send and syncs on the shell's prompt. The bitmap-level check
+is automated in `tools/alloc_probe.py` (dumps the kernel allocator
+bitmap via QMP and diffs intervals).
 
 Remaining:
 
-- Region/page-count stability sweep: the 100× stress above replaces the
-  not-automated `qmp_state.py`-style count check, and it exposed the
-  exec-leak follow-up. A per-exec count check is still worth automating
-  once the leak is fixed.
 - VM block cache (v2): the current design has no cache — each fault allocates
   a private page — so eviction/LRU only applies once `do_mapcache`/
   `do_setcache`/`do_clearcache` land (§6).
-- MFS read-path I/O amplification (above) and the exec-leak (above).
+- MFS read-path I/O amplification (above); the exec-leak is resolved.
 - `mmap(fd)` MAP_SHARED semantics (v2, no consumer yet).
