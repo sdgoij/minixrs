@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Drive x86 QEMU: run N `hello` execs, sampling `memstat` every K execs.
+"""Drive QEMU: run N `hello` execs, sampling `memstat` every K execs.
 
 No gdb stub / QMP (they corrupt piped serial input), so this is the clean
 way to measure the repeated-exec leak: the kernel's free-page count as
 reported by the memstat shell builtin.
 
 Usage:
-  python3 tools/exec_loop_mem.py [N] [MEM] [K]
+  python3 tools/exec_loop_mem.py [N] [MEM] [K] [CMD] [MARKER] [COMPLETE] [ARCH]
+
+ARCH = x86 (default) | riscv64 | aarch64. Note riscv64/aarch64 must NOT
+use `-monitor none` (it drops UART input bytes on those machines — see
+RISCV.md), so the QEMU invocation is per-arch.
 
 The guest is deemed hung when an exec (or memstat) does not answer within
 the wait window; the driver then reports the last known free count.
@@ -23,16 +27,37 @@ K = int(sys.argv[3]) if len(sys.argv) > 3 else 10
 CMD = sys.argv[4] if len(sys.argv) > 4 else "hello"
 MARKER = sys.argv[5] if len(sys.argv) > 5 else "pid="
 COMPLETE = sys.argv[6] if len(sys.argv) > 6 else "threadstd"
+ARCH = sys.argv[7] if len(sys.argv) > 7 else "x86"
 
-qemu = subprocess.Popen(
-    [
+if ARCH == "riscv64":
+    qemu_cmd = [
+        "qemu-system-riscv64", "-machine", "virt", "-m", MEM, "-nographic",
+        "-global", "virtio-mmio.force-legacy=off",
+        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-device", "virtio-blk-device,drive=disk0",
+        "-kernel", "target/riscv64gc-unknown-minix/release/kernel-boot-riscv64",
+    ]
+elif ARCH == "aarch64":
+    qemu_cmd = [
+        "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57",
+        "-m", MEM, "-nographic", "-no-reboot",
+        "-global", "virtio-mmio.force-legacy=off",
+        "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
+        "-device", "virtio-blk-device,drive=disk0",
+        "-kernel", "target/aarch64-unknown-minix/release/kernel-boot-aarch64",
+    ]
+else:
+    qemu_cmd = [
         "qemu-system-x86_64", "-nographic", "-monitor", "none",
         "-m", MEM, "-no-reboot",
         "-kernel", "target/trampoline.elf",
         "-device", "loader,file=target/kernel.bin,addr=0x200000",
         "-drive", "if=none,id=disk0,file=target/disk.img,format=raw,cache=writethrough",
         "-device", "virtio-blk-pci,disable-legacy=on,drive=disk0",
-    ],
+    ]
+
+qemu = subprocess.Popen(
+    qemu_cmd,
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
 )
 

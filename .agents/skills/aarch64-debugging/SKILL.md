@@ -78,7 +78,9 @@ p_delivermsg @ 612 (64B), p_delivermsg_vir @ 676.
 
 **Verify offsets against `crates/kernel/src/proc.rs` before probing.** The u128 `p_pending`
 field forces 16-byte alignment, pushing `p_name` to 528 and `p_endpoint` to 544 — earlier
-probes used 520/536 and read garbage. `proc_addr(n) = PROC_TABLE_ALIGNED + (NR_TASKS(5) + n) * 0x360`.
+probes used 520/536 and read garbage. `proc_addr(n) = PROC_TABLE_ALIGNED + (NR_TASKS(5) + n) * 0x390`
+(the empirical stride is 0x390 = 912 B, not the older 0x360; re-derive from the slot
+deltas in a live dump if in doubt).
 
 In LLDB (note: `expr printf` output is garbled in batch mode — prefer `memory read` with
 precomputed absolute addresses):
@@ -271,3 +273,37 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
    as a 1GB block (AP=EL1-only) and PUD[0] as a low-GB PMD table (device MMIO 0x08000000-
    0x10000000 identity-mapped, RAM alias otherwise). Generic 4-level walks must handle both:
    block entries are shared/shared-with-fork-verbatim, table entries are deep-copied.
+
+10. **The low-GB alias window is defined by the KERNEL's allocator, and VM's teardown walks
+    must use the same window** (`pte_user_owned` in `crates/arch-aarch64/src/hal.rs`). The
+    kernel builds `create_low_gb_pmd_table` from `__kernel_end` (allocator base) and the
+    usable size rounded down to 2 MiB. VM's own copy of the arch allocator is NEVER
+    initialized (`init_phys_alloc` is a no-op on aarch64), so in VM's binary
+    `crate::alloc::base()`/`usable_size()` read ZEROS — an alias check that falls back to
+    them silently disables itself (`win_size == 0`) and every alias leaf in a split block
+    is freed as if owned. That double-freed live boot-server text (virtio_blk/virtio_net,
+    the block-257 alias leaves at base+14..16 MiB) on the second `hello` exec: the frames
+    were re-allocated as page-table pages (zeroed) and virtio_blk #UD'd on zeros. The fix:
+    both sides read a cached window — the kernel sets it after `init_allocator`, VM queries
+    it via kernel call 62 / `VM_PAGING_MEMINFO` (11) in `vm_main` and calls
+    `kernel::hal::set_alias_window`. If a teardown walk starts freeing low-RAM frames
+    (0x40cf7000..0x41xxxxxx, the boot-server text region), suspect this cache first.
+
+11. **AArch64 fork is COW, sharing frames via AP = read-only (child only).**
+    `vm_paging_fork` (`crates/arch-aarch64/src/fork.rs`) walks PGD → PUD →
+    PMD → PTE, deep-copies the table pages, then for each EL0-accessible
+    owned 4KB leaf writes the child's copy with AP[2:1] = `PTE_AP_RO`
+    (same frame, read-only) — the parent's PTE stays writable and
+    untouched. The shared low-GB alias/device-identity leaves (checked via
+    `alloc::is_alias_frame`, the same predicate `pte_user_owned` uses) are
+    shared verbatim like the unsplit 2 MiB alias blocks — never copied,
+    never COW'd. Writable-access is a 2-bit field (AP[2:1]), not a single
+    RW bit: `PG_RW == 0` on aarch64, so the shared COW code must use the
+    HAL helpers `pte_is_writable` / `pte_set_writable` / `pte_is_user`
+    (and teardown's `pte_user_owned` recognizes AP=11 leaves so COW frames
+    are unref'd, not leaked). VM's `cow_setup_fork` + the message-buffer
+    prefault are active; the prefault resolves the child's COW'd msg page
+    before the kernel delivers the fork reply (the aarch64 analogue of
+    x86's CR0.WP=0), which is what lets `virtual_copy` write it. A kernel
+    write through a still-COW'd leaf is an EL1 data abort (loud). Verify
+    with `/bin/forktest` (fork + write isolation).

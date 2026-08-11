@@ -6,8 +6,8 @@
 
 use crate::vm::pb;
 use crate::vm::proc::Vmproc;
-use kernel::hal::pte_to_phys;
-use kernel::pagetable::{PG_P, PG_PS, PG_PTEMASK, PG_RW, PG_U};
+use kernel::hal::{pte_is_user, pte_is_writable, pte_set_writable, pte_to_phys};
+use kernel::pagetable::{PG_P, PG_PS};
 
 /// Set up COW for a fork: create PhysBlock entries for all shared
 /// user-writable pages with refcount=2.
@@ -124,7 +124,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                 // (the l1 loop), so handle only the 3-level case here.
                 if e2 & PG_PS != 0 {
                     if kernel::hal::pt_levels() == 3 {
-                        if e2 & PG_U == 0 {
+                        if !pte_is_user(e2) {
                             continue;
                         }
                         let phys = pte_to_phys(e2);
@@ -136,7 +136,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                         // parent's stay writable). Skip pages the child was
                         // not COW-protected on.
                         let child_e2 = unsafe { core::ptr::read(child_p2.add(l2)) };
-                        if child_e2 & PG_P == 0 || child_e2 & PG_RW != 0 {
+                        if child_e2 & PG_P == 0 || pte_is_writable(child_e2) {
                             continue;
                         }
                         let pb_idx = match pb::pb_find(phys) {
@@ -181,7 +181,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
 
                 for l1 in 0..ALL_ENTRIES {
                     let e1 = unsafe { core::ptr::read(parent_p1.add(l1)) };
-                    if e1 & PG_P == 0 || e1 & PG_U == 0 {
+                    if e1 & PG_P == 0 || !pte_is_user(e1) {
                         continue;
                     }
                     let phys = pte_to_phys(e1);
@@ -197,8 +197,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
 
                     // The CHILD's PTE is the COW marker: vm_paging_fork
                     // cleared RW on the child's writable user PTEs (the
-                    // parent's stay RW). Gate on the child's RW bit — the
-                    // old check gated on the PARENT's RW bit, which is
+                    // parent's stay RW). Gate on the child's writability —
+                    // the old check gated on the PARENT's RW bit, which is
                     // never cleared by vm_paging_fork, so every shared
                     // frame was skipped and got no PhysBlock. free_user_frame
                     // then treats a missing PhysBlock as "not shared" and
@@ -207,7 +207,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                     // text page was freed and reallocated as a page-table
                     // page on the second sigtest run, so the shell executed
                     // page-table entries and #UD'd).
-                    if child_e1 & PG_RW != 0 {
+                    if pte_is_writable(child_e1) {
                         continue; // child not COW-protected — no sharing to track
                     }
 
@@ -273,7 +273,7 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
     if pte_val == 0 || pte_val & PG_P == 0 {
         return -1;
     }
-    if pte_val & PG_RW != 0 {
+    if pte_is_writable(pte_val) {
         // Already writable — nothing to do.
         return 0;
     }
@@ -295,35 +295,20 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
             let new_phys = crate::vm::vm_alloc_pages(1);
             if new_phys == 0 {
                 // Can't allocate — fall back to making shared page writable
-                crate::vm::vm_map_page_in(
-                    cr3,
-                    page_addr,
-                    phys_addr,
-                    (pte_val & PG_PTEMASK) | PG_RW,
-                );
+                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
                 return 0;
             }
             let copy_result = crate::vm::vm_copy_pages(phys_addr, new_phys, 1);
             if copy_result != 0 {
                 crate::vm::vm_free_pages(new_phys, 1);
-                crate::vm::vm_map_page_in(
-                    cr3,
-                    page_addr,
-                    phys_addr,
-                    (pte_val & PG_PTEMASK) | PG_RW,
-                );
+                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
                 return 0;
             }
             let map_result =
-                crate::vm::vm_map_page_in(cr3, page_addr, new_phys, (pte_val & PG_PTEMASK) | PG_RW);
+                crate::vm::vm_map_page_in(cr3, page_addr, new_phys, pte_set_writable(pte_val));
             if map_result != 0 {
                 crate::vm::vm_free_pages(new_phys, 1);
-                crate::vm::vm_map_page_in(
-                    cr3,
-                    page_addr,
-                    phys_addr,
-                    (pte_val & PG_PTEMASK) | PG_RW,
-                );
+                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
                 return 0;
             }
             // No PhysBlock to track — the old shared page still belongs
@@ -344,7 +329,7 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
 
     if refcount == 1 {
         // 3. Last reference — just mark writable, no copy needed.
-        let new_flags = (pte_val & PG_PTEMASK) | PG_RW;
+        let new_flags = pte_set_writable(pte_val);
         crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, new_flags)
     } else {
         // 4. Refcount > 1 — allocate a new page and copy.
@@ -366,7 +351,7 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
         }
 
         // Remap the new page as writable via kernel call.
-        let new_flags = (pte_val & PG_PTEMASK) | PG_RW;
+        let new_flags = pte_set_writable(pte_val);
         let map_result = crate::vm::vm_map_page_in(cr3, page_addr, new_phys, new_flags);
 
         if map_result != 0 {

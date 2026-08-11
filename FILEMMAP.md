@@ -391,10 +391,65 @@ after each send and syncs on the shell's prompt. The bitmap-level check
 is automated in `tools/alloc_probe.py` (dumps the kernel allocator
 bitmap via QMP and diffs intervals).
 
+AArch64 exec-2 hang — **resolved**: the second `hello` exec always hung
+with an unknown-EL1 `X` (EC 0x00 UDF) while virtio_blk was scheduled; its
+text frame 0x41bb2000 was zero-filled and marked free in the bitmap. Root
+cause: `pte_user_owned` reads the low-GB alias window from
+`crate::alloc::base()`/`usable_size()`, but VM's copy of the arch
+allocator is never initialized (`init_phys_alloc` is a no-op on aarch64),
+so in VM's binary both read ZEROS — `win_size == 0` disabled the alias
+check and every alias leaf in a split block was freed as process-owned.
+Once hello's heap grew into block 257 (VA 0x20200000, alias frames
+base+14..16 MiB), teardown freed virtio_blk's and virtio_net's live text;
+the next exec re-allocated those frames as zeroed table pages and
+virtio_blk #UD'd. Fix: both kernel and VM now use a cached window — the
+kernel sets it after `init_allocator` (`set_alias_window`), VM queries it
+via kernel call 62 / `VM_PAGING_MEMINFO` (11) in `vm_main`.
+Verification: `exec_loop_mem.py` at `-m 256M`/`1G`/`4G` — all execs
+complete and the leak is **0** on all three arches. The initial aarch64
+run showed a 3 pages/exec residual; it was traced to the aarch64 fork
+deep-copying the shared low-GB alias leaves (~1400 pages/exec of
+boot-server code/data into frames freed again at exec) plus the dead
+`cow_setup_fork` walk (aarch64 forks are deep copies, so the COW setup
+registers nothing). The fork now shares alias leaves verbatim; then, with
+the COW fork landed (next paragraph), the COW setup is active on aarch64
+too; `just test-boot-aarch64` green.
+
+AArch64 COW fork — **implemented** (replaces the deep-copy shortcut; plan
+in `AARCH64_COW.md`): `vm_paging_fork` now shares frames and marks only
+the child's view read-only (AP = `PTE_AP_RO`, the parent's PTE untouched);
+alias leaves stay shared verbatim; VM's `cow_setup_fork` + the COW
+message-buffer prefault are active on aarch64. Because AP[2:1] is a 2-bit
+field (not a single RW bit, `PG_RW == 0` on aarch64), writability now goes
+through HAL helpers (`pte_is_writable`/`pte_set_writable`/`pte_is_user`),
+and teardown's `pte_user_owned` recognizes AP=11 leaves so COW frames are
+unref'd at exit instead of pinned. New userland verification binary
+`/bin/forktest` (fork + write isolation: child writes 0xBB to a shared
+`.data` page, parent's view stays 0xAA, parent writes 0xCC) — **PASS on
+all three arches**; the exec loop stays flat (leak 0) at 256M/1G/4G.
+
+Two cross-arch bugs found while landing it (both fixed):
+
+- `do_vfs_mmap` removed a whole overlapping region when a later PT_LOAD
+segment shared its rounded-up tail page (a `.data` segment whose memsz
+rounds to a second page that the `.bss` start page also claims) — the
+`.data` first page ended up with no region and every fault on it
+looped. It now trims the old region to its non-overlapping part.
+(`crates/servers/src/vm/mod.rs::do_vfs_mmap`)
+- VM's `sys_kill` called `send_sig` (records the bit in `s_sig_pending`,
+notifies SYSTEM — never PM), so a fault with no matching region left
+the process alive and re-faulting forever (VM spun in a memreq_get /
+handle_pagefault_for livelock). It now uses `cause_sig` (RTS_SIGNALED
++ PM notification), so an unhandleable fault kills the process.
+(`crates/servers/src/vm/mod.rs::sys_kill`)
+
 Remaining:
 
 - VM block cache (v2): the current design has no cache — each fault allocates
   a private page — so eviction/LRU only applies once `do_mapcache`/
   `do_setcache`/`do_clearcache` land (§6).
-- MFS read-path I/O amplification (above); the exec-leak is resolved.
+- MFS read-path I/O amplification (above); the exec-leak is resolved on
+  all three arches (x86/riscv 0 KiB/exec; aarch64 reached 0 after the
+  fork stopped deep-copying alias leaves — see the aarch64 paragraph
+  above).
 - `mmap(fd)` MAP_SHARED semantics (v2, no consumer yet).

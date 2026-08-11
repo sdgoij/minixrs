@@ -518,9 +518,28 @@ pub const fn pte_present() -> u64 {
     crate::pte::PTE_VALID
 }
 pub const fn pte_writable() -> u64 {
-    // Writable is implicit: AP[2:1] controls access.
-    // Use a pseudo-flag; the pagetable.rs uses PG_RW for flags.
+    // AArch64 encodes access in AP[2:1], not a single bit: "writable" is
+    // AP = PTE_AP_EL0_RW. Return 0 so the mask-style PG_RW checks in shared
+    // code are never accidentally satisfied; shared code must use
+    // pte_is_writable / pte_set_writable instead.
     0
+}
+/// Whether a leaf PTE is writable (AP[2:1] == 0b01, the only writable form).
+pub const fn pte_is_writable(pte: u64) -> bool {
+    (pte & crate::pte::PTE_AP_MASK) == crate::pte::PTE_AP_EL0_RW
+}
+/// Set a leaf PTE writable: replace AP[2:1] with 0b01, keep all other bits.
+pub const fn pte_set_writable(pte: u64) -> u64 {
+    (pte & !crate::pte::PTE_AP_MASK) | crate::pte::PTE_AP_EL0_RW
+}
+/// Set a leaf PTE read-only: AP[2:1] = 0b11 (EL1/0 RO), keep all other bits.
+pub const fn pte_set_readonly(pte: u64) -> u64 {
+    (pte & !crate::pte::PTE_AP_MASK) | crate::pte::PTE_AP_RO
+}
+/// Whether a leaf PTE is EL0-accessible (AP[2:1] == 0b01 or 0b11).
+/// EL1-only pages (AP == 0) are not user pages.
+pub const fn pte_is_user(pte: u64) -> bool {
+    (pte & crate::pte::PTE_AP_MASK) != 0
 }
 pub const fn pte_user() -> u64 {
     crate::pte::PTE_AP_EL0_RW
@@ -616,30 +635,35 @@ pub const fn pte_to_phys(pte: u64) -> u64 {
 /// frames must never be freed when a process exits. Real per-process
 /// allocations always map at a phys != va and != the alias frame.
 pub fn pte_user_owned(pte: u64, va: u64) -> bool {
-    const DEV_BASE: u64 = 0x0800_0000;
-    const DEV_END: u64 = 0x1000_0000;
-    const USER_LOW: u64 = 0x100_0000;
-    let user_present = pte_present() | pte_user();
-    if pte & user_present != user_present {
+    // EL0-accessible includes the COW form (AP[2:1] = 0b11, read-only) so
+    // teardown unrefs COW-shared frames; EL1-only (AP = 0) pages are not
+    // user-owned.
+    if pte & crate::pte::PTE_VALID == 0 || !pte_is_user(pte) {
         return false;
     }
     let frame = pte_to_phys(pte);
-    if frame == va || (va >= DEV_BASE && va < DEV_END) {
-        return false; // identity mapping (RAM identity or device MMIO)
-    }
-    if va >= USER_LOW {
-        // Alias frames from the low-GB window (create_low_gb_pmd_table)
-        // belong to no process; freeing them would double-free live
-        // allocator frames. Real allocations coincide with an alias frame
-        // only at the window base (first boot servers), which are never
-        // destroyed.
-        let win_base = crate::alloc::base();
-        let win_size = crate::alloc::total_pages() as u64 * 4096;
-        if win_size != 0 && frame == win_base + ((va - USER_LOW) % win_size) {
-            return false;
-        }
-    }
-    true
+    !crate::alloc::is_alias_frame(frame, va)
+}
+
+/// Size of the low-GB alias window: usable free RAM (bitmap-excluded)
+/// rounded down to 2 MiB, so every alias block in `create_low_gb_pmd_table`
+/// lands wholly inside RAM. `pte_user_owned` must agree with the table
+/// builder: a mismatch (e.g. the full-RAM window, which includes the
+/// bitmap) makes teardown walks misclassify real alias leaves as owned and
+/// free their frames — double-freeing live allocator frames.
+///
+/// Reads the cached window (set by the kernel at boot and by VM via
+/// VM_PAGING_MEMINFO): the kernel's allocator state is authoritative, and
+/// VM's copy of the allocator is never initialized.
+fn low_gb_window_size() -> u64 {
+    (crate::alloc::alias_window().1 / 0x20_0000) * 0x20_0000
+}
+
+/// Record the low-GB alias window (kernel allocator geometry) for use by
+/// `create_low_gb_pmd_table` and `pte_user_owned` in every binary (kernel
+/// and servers) that links the arch crate.
+pub fn set_alias_window(base: u64, usable: u64) {
+    crate::alloc::set_alias_window(base, usable);
 }
 
 pub const fn kern_vaddr() -> u64 {
@@ -844,6 +868,13 @@ pub fn phys_alloc_total_pages() -> usize {
     crate::alloc::total_pages()
 }
 
+/// Size (bytes) of the allocator's usable window (bitmap-excluded). The
+/// low-GB alias tables wrap within this, so VM queries it (via
+/// VM_PAGING_MEMINFO) to recognize alias leaves during teardown.
+pub fn phys_alloc_usable_size() -> u64 {
+    crate::alloc::usable_size()
+}
+
 /// Free contiguous physical pages.
 pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
@@ -1006,8 +1037,8 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
         // and splitting such a block (exec maps the brk at 0x3FE00000,
         // which at 1 GiB sits in the wrap tail) exposed the bitmap as
         // user-writable alias leaves — corrupting allocation state.
-        let win_base: u64 = crate::alloc::base();
-        let win_size: u64 = (crate::alloc::usable_size() / 0x20_0000) * 0x20_0000;
+        let win_base: u64 = crate::alloc::alias_window().0;
+        let win_size: u64 = low_gb_window_size();
         for i in 0..512usize {
             let va = (i as u64) * 0x20_0000;
             let pa = if va >= dev_base && va < dev_end {
@@ -1104,9 +1135,59 @@ mod tests {
 
     #[test]
     fn test_pt_index() {
-        assert_eq!(pt_index(0, 0), 0);
-        assert_eq!(pt_index(0x1000, 0), 1);
+        assert_eq!(pt_index(0x4000, 0), 4);
         assert_eq!(pt_index(0x200000, 1), 1);
         assert_eq!(pt_index(0x40000000, 2), 1);
+    }
+
+    #[test]
+    fn test_pte_writability_helpers_roundtrip() {
+        let rw = crate::pte::PTE_VALID
+            | crate::pte::PTE_TYPE
+            | crate::pte::PTE_AP_EL0_RW
+            | crate::pte::PTE_AF
+            | crate::pte::PTE_SH_INNER
+            | crate::pte::PTE_NG;
+        let ro = pte_set_readonly(rw);
+        // Read-only form: AP[2:1] = 0b11, everything else preserved.
+        assert!(!pte_is_writable(ro));
+        assert!(pte_is_user(ro), "EL1/0 RO leaves are still EL0-accessible");
+        assert_eq!(ro & !crate::pte::PTE_AP_MASK, rw & !crate::pte::PTE_AP_MASK);
+        assert_eq!(ro & crate::pte::PTE_AP_MASK, crate::pte::PTE_AP_RO);
+        // Back to writable: AP[2:1] = 0b01, everything else preserved.
+        let back = pte_set_writable(ro);
+        assert!(pte_is_writable(back));
+        assert_eq!(back, rw);
+        // EL1-only pages are not user pages and not writable by the helpers.
+        let el1 = crate::pte::PTE_VALID | crate::pte::PTE_TYPE | crate::pte::PTE_AF;
+        assert!(!pte_is_user(el1));
+        assert!(!pte_is_writable(el1));
+        assert!(pte_is_writable(pte_set_writable(el1)));
+    }
+
+    #[test]
+    fn test_pte_user_owned_includes_cow_leaves() {
+        let _guard = crate::alloc::WINDOW_TEST_LOCK.lock();
+        let frame = 0x40_0000_0000u64;
+        crate::alloc::set_alias_window(0, 0);
+        let rw = crate::pte::PTE_VALID
+            | crate::pte::PTE_TYPE
+            | crate::pte::PTE_AP_EL0_RW
+            | crate::pte::PTE_AF
+            | crate::pte::PTE_SH_INNER
+            | crate::pte::PTE_NG;
+        // RW and RO (COW) user leaves are both owned; EL1-only is not.
+        assert!(pte_user_owned(crate::pte::make_pte(frame, rw), 0x2000_0000));
+        assert!(
+            pte_user_owned(
+                crate::pte::make_pte(frame, pte_set_readonly(rw)),
+                0x2000_0000
+            ),
+            "COW leaf (AP=11) must still be user-owned for teardown"
+        );
+        assert!(!pte_user_owned(
+            crate::pte::make_pte(frame, crate::pte::PTE_VALID | crate::pte::PTE_TYPE),
+            0x2000_0000
+        ));
     }
 }

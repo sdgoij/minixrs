@@ -156,6 +156,15 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     unsafe {
         arch_aarch64::alloc::init_allocator(&mmap);
     }
+    // Cache the allocator geometry for the low-GB alias window: the kernel
+    // builds the per-process alias tables from these values, and VM's
+    // teardown walks must use the same window (VM's own copy of the arch
+    // allocator is never initialized, so it queries this via kernel call
+    // 62 / VM_PAGING_MEMINFO).
+    arch_aarch64::alloc::set_alias_window(
+        arch_aarch64::alloc::base(),
+        arch_aarch64::alloc::usable_size(),
+    );
     kernel_boot::print_memory_banner(mem_size, mmap.total_available());
     serial_write("allocator ready\r\n");
 

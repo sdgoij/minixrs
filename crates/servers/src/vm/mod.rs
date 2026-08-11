@@ -619,6 +619,37 @@ pub fn vm_main() {
         let range = (0x41000000u64, 0x0F000000u64); // 256MB RAM: 16MB kernel, 240MB free
         kernel::hal::init_phys_alloc(range.0, range.1);
     }
+    // On aarch64 the server-side copy of the arch allocator is never
+    // initialized (init_phys_alloc is a no-op), yet the teardown walks
+    // (free_address_space / free_user_range) consult the low-GB alias
+    // window to avoid freeing shared alias frames. The window is defined by
+    // the KERNEL's allocator (the per-process tables are built from it), so
+    // query it via kernel call 62 / VM_PAGING_MEMINFO and cache it.
+    #[cfg(all(target_os = "minix", target_arch = "aarch64"))]
+    {
+        const VM_PAGING_CALL: i32 = 62;
+        const VM_PAGING_MEMINFO: i32 = 11;
+        const VM_PAGING_SUBCMD_OFF: usize = 8;
+        const VM_PAGING_CR3_OFF: usize = 24;
+        const VM_PAGING_VA_OFF: usize = 32;
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_MEMINFO.to_le_bytes());
+        let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
+        if r == 0 {
+            let base = u64::from_le_bytes(
+                msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            let usable = u64::from_le_bytes(
+                msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            kernel::hal::set_alias_window(base, usable);
+        }
+    }
     init_vm();
 
     #[cfg(target_os = "minix")]
@@ -842,10 +873,13 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         // A present page without the user bit (e.g. the kernel's
         // supervisor-only identity huge pages the exec'd page table copies
         // on RISC-V) falls through to the normal demand-paging path below,
-        // which maps a fresh user page over it.
-        if pte_val & (kernel::pagetable::PG_P | kernel::pagetable::PG_U)
-            == (kernel::pagetable::PG_P | kernel::pagetable::PG_U)
-            && pte_val & kernel::pagetable::PG_RW == 0
+        // which maps a fresh user page over it. The user/writable checks go
+        // through HAL helpers because aarch64 encodes access in AP[2:1], not
+        // in separate U/RW bits (a COW leaf is AP=11 — EL0-accessible,
+        // read-only).
+        if pte_val & kernel::pagetable::PG_P != 0
+            && kernel::hal::pte_is_user(pte_val)
+            && !kernel::hal::pte_is_writable(pte_val)
         {
             // Present, user, read-only with write fault → COW.
             if cow::handle_cow_fault(vmp, addr) != 0 {
@@ -1165,7 +1199,16 @@ pub fn sys_kill(ep: i32, sig: i32) -> i32 {
         return EINVAL;
     }
     let slot = kernel::table::endpoint_slot(ep);
-    unsafe { kernel::system::send_sig(slot, sig) }
+    // cause_sig (not send_sig): the target is a user process, so the
+    // signal must go through its signal manager — set RTS_SIGNALED |
+    // RTS_SIG_PENDING and notify PM (SIGKSIG). send_sig only records
+    // the bit in s_sig_pending and notifies SYSTEM, so a SIGSEGV'd
+    // process would keep running (and re-faulting) forever.
+    #[cfg(target_os = "minix")]
+    unsafe {
+        kernel::system::cause_sig(slot, sig);
+    }
+    OK
 }
 
 /// Clear the page fault flag on a process, reactivating it.
@@ -2027,15 +2070,20 @@ fn do_fork(msg: &mut Message) -> i32 {
         if child_cr3 != 0 {
             let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
         }
+        // COW bookkeeping: the fork COW-protects the child's shared frames
+        // (aarch64 now included), so walk the tables and register the shared
+        // frames in the PhysBlock table before the child runs.
         let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
         if parent_cr3_val != 0 && child_cr3 != 0 {
             let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3) };
         }
     }
 
-    // Handle memory for the message buffer — pre-fault COW pages
-    // Matching C: handle_memory_once() after fork
-    #[allow(clippy::const_is_empty)]
+    // Handle memory for the message buffer — pre-fault COW pages so the
+    // kernel's fork-reply copy lands in a private writable page, not a
+    // read-only shared frame (matches C's handle_memory_once after fork).
+    // On aarch64 this is what lets virtual_copy write the child's msg page
+    // without faulting on the AP=11 COW leaf.
     if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
         const PAGE_SIZE: u64 = 4096;
         let msg_va = msgaddr;
@@ -2302,11 +2350,15 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(who) {
             // C's mmap_region with MAP_FIXED calls map_unmap_range first:
-            // remove any existing regions overlapping the new range so
-            // adjacent PT_LOAD segments (a tiny segment sharing pages with
-            // a larger one) can map. The new region references the same
-            // fd, so fdref_close_if_unused keeps the vmfd alive until the
-            // last user is gone.
+            // carve the new range out of any overlapping region so adjacent
+            // PT_LOAD segments (a tiny segment sharing pages with a larger
+            // one) can map. Trim instead of dropping the whole region:
+            // adjacent segments legitimately share the last partial page (a
+            // data segment whose memsz rounding spans the bss start page),
+            // and removing the whole region would leave its exclusive pages
+            // (the .data first page) with no region — the next fault on them
+            // SIGSEGVs. Fully-covered regions are dropped and their vmfd
+            // released; the trimmed region keeps its fd (same file).
             let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
                 [None; region::MAX_REGIONS];
             let mut n = 0usize;
@@ -2315,14 +2367,47 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
                 let overlaps = vmp.vm_regions.regions[i]
                     .as_ref()
                     .is_some_and(|r| r.overlaps(&new_r));
-                if overlaps {
-                    if let Some(r) = vmp.vm_regions.regions[i].take()
-                        && n < region::MAX_REGIONS
-                    {
-                        removed[n] = Some(r);
-                        n += 1;
-                    }
+                if !overlaps {
+                    i += 1;
                     continue;
+                }
+                // SAFETY: overlaps() above established the entry is Some.
+                let r = vmp.vm_regions.regions[i].as_mut().unwrap();
+                if new_r.vaddr <= r.vaddr {
+                    // The new region covers the old region's head.
+                    if new_r.end() >= r.end() {
+                        // Fully covered — replace it.
+                        let old = vmp.vm_regions.regions[i].take().unwrap();
+                        if n < region::MAX_REGIONS {
+                            removed[n] = Some(old);
+                            n += 1;
+                        }
+                    } else {
+                        // Trim the head (not exercised by exec's ascending
+                        // segment order; kept for completeness).
+                        let cut = new_r.end() - r.vaddr;
+                        let pages = (cut / 4096) as usize;
+                        r.vaddr = new_r.end();
+                        r.length -= cut;
+                        r.npages = r.npages.saturating_sub(pages as u32);
+                        for j in 0..r.npages as usize {
+                            r.phys_pages[j] = r.phys_pages[j + pages];
+                        }
+                        for j in r.npages as usize..region::MAX_PHYS_PAGES {
+                            r.phys_pages[j] = 0;
+                        }
+                    }
+                } else {
+                    // The new region starts inside the old one — trim the
+                    // old region's tail up to the new region's start.
+                    r.length = new_r.vaddr - r.vaddr;
+                    if r.length == 0 {
+                        let old = vmp.vm_regions.regions[i].take().unwrap();
+                        if n < region::MAX_REGIONS {
+                            removed[n] = Some(old);
+                            n += 1;
+                        }
+                    }
                 }
                 i += 1;
             }

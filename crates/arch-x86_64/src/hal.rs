@@ -700,6 +700,18 @@ pub const fn pte_present() -> u64 {
 pub const fn pte_writable() -> u64 {
     0x0000000000000002 // PG_RW
 }
+/// Whether a leaf PTE is writable.
+pub const fn pte_is_writable(pte: u64) -> bool {
+    (pte & pte_writable()) != 0
+}
+/// Set a leaf PTE writable.
+pub const fn pte_set_writable(pte: u64) -> u64 {
+    pte | pte_writable()
+}
+/// Whether a leaf PTE is user-accessible.
+pub const fn pte_is_user(pte: u64) -> bool {
+    (pte & pte_user()) != 0
+}
 /// PTE flag: user-accessible.
 pub const fn pte_user() -> u64 {
     0x0000000000000004 // PG_U
@@ -1363,6 +1375,17 @@ pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     crate::alloc::free_phys_contig(addr, count)
 }
 
+/// Base of the physical allocator's window (page 0 — x86 indexes the bitmap
+/// by physical page number, so the base is 0).
+pub fn phys_alloc_base() -> u64 {
+    0
+}
+
+/// Size (bytes) of the physical allocator's usable window.
+pub fn phys_alloc_usable_size() -> u64 {
+    unsafe { (*crate::alloc::global_allocator()).total_pages() as u64 * 4096 }
+}
+
 /// Number of free physical pages (diagnostics).
 pub fn phys_free_pages() -> usize {
     crate::alloc::phys_free_pages()
@@ -1606,5 +1629,20 @@ mod tests {
             unsafe { write_frame_field(&mut f, 252, 0) };
         }));
         assert!(result.is_err(), "offset 252+8 > 256 should panic");
+    }
+
+    #[test]
+    fn pte_writability_helpers_roundtrip() {
+        let pte = pte_present() | pte_user() | pte_writable() | 0x1000;
+        assert!(pte_is_writable(pte));
+        assert!(pte_is_user(pte));
+        let ro = pte_set_writable(0); // no-op check on the OR-form
+        assert!(pte_is_writable(ro));
+        // pte_set_writable is OR-form on x86: preserves everything.
+        assert_eq!(pte_set_writable(pte), pte);
+        let rw = pte_present() | pte_user();
+        assert!(!pte_is_writable(rw));
+        assert!(pte_is_writable(pte_set_writable(rw)));
+        assert_eq!(pte_set_writable(rw), rw | pte_writable());
     }
 }

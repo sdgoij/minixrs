@@ -483,6 +483,11 @@ pub const VM_PAGING_WALK_PAGE: i32 = 8;
 pub const VM_PAGING_CLEAR: i32 = 9;
 /// Report the kernel allocator's free physical page count (memstat).
 pub const VM_PAGING_MEMSTAT: i32 = 10;
+/// Report the kernel physical allocator's (base, usable) geometry — the
+/// low-GB alias window the per-process tables were built with. VM's own
+/// copy of the arch allocator is never initialized, so VM must query this
+/// to recognize alias leaves during teardown walks.
+pub const VM_PAGING_MEMINFO: i32 = 11;
 
 // Constants
 
@@ -4936,6 +4941,16 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     VM_PAGING_COUNT_OFF,
                     crate::hal::phys_free_pages() as i32,
                 );
+                OK
+            }
+            VM_PAGING_MEMINFO => {
+                // Report the low-GB alias window geometry (base, usable) of
+                // the kernel's physical allocator. VM needs the same window
+                // the per-process alias tables were built with to recognize
+                // alias leaves during teardown walks; its own copy of the
+                // arch allocator is never initialized.
+                msg_write_u64(msg, VM_PAGING_CR3_OFF, crate::hal::phys_alloc_base());
+                msg_write_u64(msg, VM_PAGING_VA_OFF, crate::hal::phys_alloc_usable_size());
                 OK
             }
             VM_PAGING_QUERY_PROC => {

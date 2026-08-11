@@ -1,17 +1,17 @@
 //! Fork page-table construction for AArch64.
 //!
-//! `vm_paging_fork` deep-copies a parent process's page table into a fresh
-//! child root. It lives in its own module (not `hal`, which is gated to the
+//! `vm_paging_fork` builds a fresh child root from a parent process's page
+//! table. It lives in its own module (not `hal`, which is gated to the
 //! aarch64 target) so it compiles and is unit-testable on the host.
 
-use crate::pte::{PTE_ADDR_MASK, PTE_AP_EL0_RW, PTE_ATTR_MASK, PTE_BLOCK, PTE_VALID};
+use crate::pte::{PTE_ADDR_MASK, PTE_AP_MASK, PTE_AP_RO, PTE_ATTR_MASK, PTE_BLOCK, PTE_VALID};
 
-/// Deep-copy the parent's page table into a freshly-allocated child root
-/// for fork. Walks PGD -> PUD -> PMD -> PTE, giving the child its own
-/// copy of every table page and a private copy of each user (AP=EL0_RW)
-/// 4KB page. Block mappings and kernel pages are shared verbatim so the
-/// child keeps the same access to the kernel identity map, device MMIO,
-/// and low-GB RAM alias as the parent.
+/// Build the child's page table for fork. Walks PGD -> PUD -> PMD -> PTE,
+/// giving the child its own copy of every table page, then COW-protects the
+/// child's view of each owned user 4KB page (same frame, AP = read-only) —
+/// the parent's PTE stays writable and untouched. Block mappings and kernel
+/// pages are shared verbatim so the child keeps the same access to the
+/// kernel identity map, device MMIO, and low-GB RAM alias as the parent.
 ///
 /// Returns 0 on success, -12 (ENOMEM) on allocation failure.
 ///
@@ -20,8 +20,6 @@ use crate::pte::{PTE_ADDR_MASK, PTE_AP_EL0_RW, PTE_ATTR_MASK, PTE_BLOCK, PTE_VAL
 /// `parent_cr3` must be a valid page table root and `child_cr3` a freshly
 /// allocated zero-filled root page.
 pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64]) -> i32 {
-    const PAGE_SZ: usize = 4096;
-
     unsafe {
         let parent_root = parent_cr3 as *const u64;
         let child_root = child_cr3 as *mut u64;
@@ -76,27 +74,32 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         (child_pt as u64) | (pmd_e & PTE_ATTR_MASK),
                     );
 
-                    // Give the child a private copy of each user 4KB page.
-                    // Kernel pages (no EL0 access) stay shared verbatim.
+                    // COW-share each EL0-accessible user 4KB page: the
+                    // child maps the SAME frame read-only; the parent's PTE
+                    // is never modified. Kernel pages (AP = EL1 only) stay
+                    // shared verbatim.
                     for pt_idx in 0..512 {
                         let pte = core::ptr::read(parent_pt.add(pt_idx));
-                        if pte & PTE_VALID == 0 || pte & PTE_AP_EL0_RW == 0 {
+                        if pte & PTE_VALID == 0 || pte & PTE_AP_MASK == 0 {
                             continue;
                         }
                         let parent_pa = pte & PTE_ADDR_MASK;
                         if parent_pa == 0 {
                             continue;
                         }
-                        let child_pa = match crate::alloc::alloc_phys_page() {
-                            Some(pa) => pa,
-                            None => return -12,
-                        };
-                        core::ptr::copy_nonoverlapping(
-                            parent_pa as *const u8,
-                            child_pa as *mut u8,
-                            PAGE_SZ,
-                        );
-                        core::ptr::write(child_pt.add(pt_idx), child_pa | (pte & PTE_ATTR_MASK));
+                        let leaf_va =
+                            (pgd_idx << 39) | (pud_idx << 30) | (pmd_idx << 21) | (pt_idx << 12);
+                        // Shared low-GB alias / device-identity leaves (the
+                        // leftover 4KB entries of a split 2MB alias block)
+                        // belong to no process — keep them shared verbatim,
+                        // exactly like the unsplit 2MB alias blocks above.
+                        // COW-protecting them would make every boot server's
+                        // live frame read-only in the child.
+                        if crate::alloc::is_alias_frame(parent_pa, leaf_va as u64) {
+                            core::ptr::write(child_pt.add(pt_idx), pte);
+                            continue;
+                        }
+                        core::ptr::write(child_pt.add(pt_idx), (pte & !PTE_AP_MASK) | PTE_AP_RO);
                     }
                 }
             }
@@ -109,7 +112,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
 mod tests {
     use super::*;
     use crate::alloc::{PhysicalMemoryMap, init_allocator};
-    use crate::pte::{PTE_AF, PTE_NG, PTE_SH_INNER, PTE_TABLE, PTE_TYPE, make_pte, pte_phys};
+    use crate::pte::{
+        PTE_AF, PTE_AP_EL0_RW, PTE_AP_MASK, PTE_AP_RO, PTE_NG, PTE_SH_INNER, PTE_TABLE, PTE_TYPE,
+        make_pte, pte_phys,
+    };
 
     #[repr(align(4096))]
     struct PageAligned([u8; 0x40000]);
@@ -178,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vm_paging_fork_deep_copies_user_pages() {
+    fn test_vm_paging_fork_cow_shares_user_pages() {
         init_fake_allocator();
         unsafe {
             let (parent_pgd, pte) = build_parent();
@@ -225,24 +231,28 @@ mod tests {
             let child_pte = pte_phys(rd(child_pmd, 0));
             assert_ne!(child_pte, pte, "child must have its own PTE table");
 
-            // User page: private copy with data preserved.
+            // User page: COW-shared — same frame, child read-only, parent RW.
             let parent_user_pte = rd(pte, 0);
             let child_user_pte = rd(child_pte, 0);
-            let child_user_pa = pte_phys(child_user_pte);
-            assert_ne!(
-                child_user_pa,
+            assert_eq!(
+                pte_phys(child_user_pte),
                 pte_phys(parent_user_pte),
-                "user page must be a private copy"
+                "user page must share the parent's frame (COW)"
             );
             assert_eq!(
-                core::ptr::read_volatile(child_user_pa as *const u64),
-                0xDEADBEEF_CAFEBABE,
-                "user page data must be copied"
+                child_user_pte & PTE_AP_MASK,
+                PTE_AP_RO,
+                "child's user page must be read-only"
             );
             assert_eq!(
-                child_user_pte & 0xFFF,
-                parent_user_pte & 0xFFF,
-                "user PTE flags must be preserved"
+                parent_user_pte & PTE_AP_MASK,
+                PTE_AP_EL0_RW,
+                "parent's user page stays writable"
+            );
+            assert_eq!(
+                child_user_pte & !PTE_AP_MASK,
+                parent_user_pte & !PTE_AP_MASK,
+                "child PTE preserves all non-AP attributes"
             );
 
             // Kernel page shared verbatim.
@@ -268,6 +278,100 @@ mod tests {
             let mut msg = [0u8; 64];
             let r = vm_paging_fork(parent_pgd, child_pgd, &mut msg);
             assert_eq!(r, -12, "fork must fail with ENOMEM when out of pages");
+        }
+    }
+
+    #[test]
+    fn test_vm_paging_fork_shares_alias_leaves_verbatim() {
+        let _guard = crate::alloc::WINDOW_TEST_LOCK.lock();
+        init_fake_allocator();
+        unsafe {
+            let base = &raw mut FAKE_RAM.0 as *mut u8 as u64;
+            // 16 MiB usable -> alias window 0x1000000, base = the fake RAM.
+            crate::alloc::set_alias_window(base, 0x1000_0000);
+
+            // Parent with the PTE table under PMD[8] (VA 0x1000000..0x1200000):
+            // PTE[0] = a real user page (COW-shared, child read-only), PTE[1] = an
+            // alias leaf (frame = base + ((0x1010000-USER_LOW) % win) = base+0x10000,
+            // must be shared verbatim, never COW-protected).
+            let pgd = alloc_page();
+            let pud = alloc_page();
+            let pmd = alloc_page();
+            let pte = alloc_page();
+            let user_page = alloc_page();
+            zero_page(pgd);
+            zero_page(pud);
+            zero_page(pmd);
+            zero_page(pte);
+            wr(pud, 1, KERNEL_BLOCK);
+            // PTE[1] VA = 0x1000000 (block 8) + 0x1000 = 0x1001000; its alias
+            // frame = base + ((0x1001000 - USER_LOW) % win) = base + 0x1000.
+            let alias_frame = base + 0x1000;
+            wr(pte, 0, make_pte(user_page, USER_PTE_FLAGS));
+            wr(pte, 1, make_pte(alias_frame, USER_PTE_FLAGS));
+            core::ptr::write_volatile(user_page as *mut u64, 0xDEADBEEF_CAFEBABE);
+            wr(pgd, 0, make_pte(pud, PTE_TABLE));
+            wr(pud, 0, make_pte(pmd, PTE_TABLE));
+            wr(pmd, 8, make_pte(pte, PTE_TABLE));
+
+            // Replicate the fork's per-leaf inputs before calling it, to
+            // isolate a window/VA mismatch.
+            let parent_p1_pre = rd(pte, 1);
+            let leaf_va_pre = (0usize << 39) | (0usize << 30) | (8usize << 21) | (1usize << 12);
+            assert_eq!(
+                leaf_va_pre, 0x100_1000usize,
+                "leaf VA decode: got {:#x}",
+                leaf_va_pre
+            );
+            assert!(
+                crate::alloc::is_alias_frame(
+                    parent_p1_pre & crate::pte::PTE_ADDR_MASK,
+                    leaf_va_pre as u64
+                ),
+                "pre-fork is_alias_frame must hold: pte={:#x}",
+                parent_p1_pre
+            );
+
+            let child_pgd = alloc_page();
+            zero_page(child_pgd);
+            let mut msg = [0u8; 64];
+            assert_eq!(vm_paging_fork(pgd, child_pgd, &mut msg), 0);
+
+            let child_pud = pte_phys(rd(child_pgd, 0));
+            let child_pmd = pte_phys(rd(child_pud, 0));
+            let child_pte = pte_phys(rd(child_pmd, 8));
+
+            // Real page: COW-shared — same frame, read-only in the child.
+            let child_p0 = rd(child_pte, 0);
+            let parent_p0 = rd(pte, 0);
+            assert_eq!(
+                pte_phys(child_p0),
+                pte_phys(parent_p0),
+                "real user page must share the parent's frame (COW)"
+            );
+            assert_eq!(
+                child_p0 & PTE_AP_MASK,
+                PTE_AP_RO,
+                "real user page must be read-only in the child"
+            );
+            assert_eq!(
+                parent_p0 & PTE_AP_MASK,
+                PTE_AP_EL0_RW,
+                "real user page stays writable in the parent"
+            );
+            // Alias leaf: shared verbatim (same frame, same PTE).
+            let child_p1 = rd(child_pte, 1);
+            let parent_p1 = rd(pte, 1);
+            assert_eq!(
+                child_p1,
+                parent_p1,
+                "alias leaf shared: child={:#x} parent={:#x} base={:#x} alias={:#x} is_alias={}",
+                child_p1,
+                parent_p1,
+                base,
+                alias_frame,
+                crate::alloc::is_alias_frame(alias_frame, 0x100_1000),
+            );
         }
     }
 }

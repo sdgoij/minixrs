@@ -8,7 +8,6 @@
 /// AArch64 page table entry (8 bytes).
 pub type PtEntry = u64;
 
-
 /// Valid bit (bit 0). Always set for valid descriptors.
 pub const PTE_VALID: u64 = 1 << 0;
 /// Type bit (bit 1). Combined with bit 0:
@@ -21,7 +20,6 @@ pub const PTE_TABLE: u64 = PTE_VALID | PTE_TYPE;
 /// Block descriptor: bits[1:0] = 0b01 (valid only).
 pub const PTE_BLOCK: u64 = PTE_VALID;
 
-
 /// Memory attribute index (MAIR_EL1). 3 bits at [4:2].
 /// Index 0 = normal memory (WB/WA), index 1 = device nGnRE.
 pub const PTE_ATTR_INDX_SHIFT: u32 = 2;
@@ -31,6 +29,7 @@ pub const PTE_ATTR_DEVICE: u64 = 1 << PTE_ATTR_INDX_SHIFT;
 /// Access Permission bits [7:6].
 /// AP[2:1] = 01 → EL0 read/write, 00 → EL1 only, 11 → EL1/0 read-only.
 pub const PTE_AP_SHIFT: u32 = 6;
+pub const PTE_AP_MASK: u64 = 0b11 << PTE_AP_SHIFT;
 pub const PTE_AP_EL0_RW: u64 = 1 << PTE_AP_SHIFT; // AP[2:1]=01
 pub const PTE_AP_EL1_ONLY: u64 = 0 << PTE_AP_SHIFT; // AP[2:1]=00
 pub const PTE_AP_RO: u64 = 3 << PTE_AP_SHIFT; // AP[2:1]=11
@@ -47,7 +46,6 @@ pub const PTE_AF: u64 = 1 << 10;
 /// Not-Global bit (bit 11). nG=0 means global (not flushed on TLBI).
 pub const PTE_NG: u64 = 1 << 11;
 
-
 /// Output address mask: bits [47:12].
 pub const PTE_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 /// Lower attribute mask: bits [11:0].
@@ -56,7 +54,6 @@ pub const PTE_ATTR_MASK: u64 = 0x0000_0000_0000_0FFF;
 /// For a 2MB block at level 2, the output address field is bits [47:21].
 /// Block address mask (level 2, 2MB): bits [47:21].
 pub const PTE_BLOCK_ADDR_MASK: u64 = 0x0000_FFFF_FFE0_0000;
-
 
 /// Level 0 index (bits 39-47): maps 512GB.
 pub const fn l0_index(va: u64) -> usize {
@@ -77,7 +74,6 @@ pub const fn l2_index(va: u64) -> usize {
 pub const fn l3_index(va: u64) -> usize {
     ((va >> 12) & 0x1FF) as usize
 }
-
 
 /// Build a PTE from a physical address and flags.
 /// AArch64 stores the PA directly in bits [47:12].
@@ -117,6 +113,8 @@ mod tests {
         assert_eq!(PTE_BLOCK, 1);
         assert_eq!(PTE_AF, 0x400);
         assert_eq!(PTE_AP_EL0_RW, 0x40);
+        assert_eq!(PTE_AP_MASK, 0xC0);
+        assert_eq!(PTE_AP_RO, 0xC0);
         assert_eq!(PTE_SH_INNER, 0x300);
         assert_eq!(PTE_NG, 0x800);
     }

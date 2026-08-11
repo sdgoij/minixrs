@@ -463,6 +463,18 @@ pub const fn pte_present() -> u64 {
 pub const fn pte_writable() -> u64 {
     pte::PTE_W
 }
+/// Whether a leaf PTE is writable.
+pub const fn pte_is_writable(pte: u64) -> bool {
+    (pte & pte::PTE_W) != 0
+}
+/// Set a leaf PTE writable.
+pub const fn pte_set_writable(pte: u64) -> u64 {
+    pte | pte::PTE_W
+}
+/// Whether a leaf PTE is user-accessible.
+pub const fn pte_is_user(pte: u64) -> bool {
+    (pte & pte::PTE_U) != 0
+}
 /// PTE flag: user-accessible.
 pub const fn pte_user() -> u64 {
     pte::PTE_U
@@ -745,6 +757,16 @@ pub unsafe fn alloc_phys_contig(count: usize) -> Option<u64> {
 /// `addr` must have been previously allocated via `alloc_phys_contig`.
 pub unsafe fn free_phys_contig(addr: u64, count: usize) {
     unsafe { crate::alloc::free_phys_contig(addr, count) }
+}
+
+/// Base of the physical allocator's window.
+pub fn phys_alloc_base() -> u64 {
+    crate::alloc::alloc_start()
+}
+
+/// Size (bytes) of the physical allocator's usable window.
+pub fn phys_alloc_usable_size() -> u64 {
+    crate::alloc::alloc_end() - crate::alloc::alloc_start()
 }
 
 /// Number of free physical pages (diagnostics).
@@ -1282,5 +1304,19 @@ mod tests {
             write_frame_field(&mut f, 0, 42);
             assert_eq!(read_frame_field(&f, 0), 42);
         }
+    }
+
+    #[test]
+    fn pte_writability_helpers_roundtrip() {
+        let rw = pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_U | pte::PTE_A | pte::PTE_D;
+        assert!(pte_is_writable(rw));
+        assert!(pte_is_user(rw));
+        let ro = pte::PTE_V | pte::PTE_R | pte::PTE_U | pte::PTE_A | pte::PTE_D;
+        assert!(!pte_is_writable(ro));
+        assert!(pte_is_user(ro));
+        assert_eq!(pte_set_writable(ro), ro | pte::PTE_W);
+        assert!(pte_is_writable(pte_set_writable(ro)));
+        let k = pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_A | pte::PTE_D;
+        assert!(!pte_is_user(k));
     }
 }

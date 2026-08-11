@@ -209,6 +209,58 @@ pub fn alloc_phys_contig(count: usize) -> Option<u64> {
     None
 }
 
+/// Cached low-GB alias window geometry. The kernel builds the alias tables
+/// from its own physical allocator (`create_low_gb_pmd_table`), and VM's
+/// teardown walks must use the SAME window to recognize alias leaves. VM's
+/// copy of the arch allocator is never initialized (aarch64 `init_phys_alloc`
+/// is a no-op), so `crate::alloc::base()`/`usable_size()` read zeros there;
+/// both sides therefore read this cache, set by the kernel at boot and by VM
+/// via the VM_PAGING_MEMINFO kernel call.
+static ALIAS_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static ALIAS_USABLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record the low-GB alias window: `base` is the kernel allocator's first
+/// frame, `usable` its bitmap-excluded size. Must be called by the kernel
+/// after `init_allocator` and by VM after querying the kernel.
+pub fn set_alias_window(base: u64, usable: u64) {
+    ALIAS_BASE.store(base, core::sync::atomic::Ordering::Relaxed);
+    ALIAS_USABLE.store(usable, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Return the cached (base, usable) alias window.
+pub fn alias_window() -> (u64, u64) {
+    (
+        ALIAS_BASE.load(core::sync::atomic::Ordering::Relaxed),
+        ALIAS_USABLE.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// True when `frame` is a shared low-GB alias/identity frame for user VA
+/// `va` — a frame no process owns: the device-MMIO identity window
+/// (0x08000000..0x10000000), the RAM identity case (frame == va), or a RAM
+/// alias frame from `create_low_gb_pmd_table`. Single source of truth for
+/// `pte_user_owned` (teardown walks must not free these) and the aarch64
+/// fork (alias leaves are shared verbatim, not deep-copied). Returns false
+/// when the window is unknown (host builds — the cache is never set), so
+/// callers fall back to treating the page as process-owned.
+pub fn is_alias_frame(frame: u64, va: u64) -> bool {
+    const DEV_BASE: u64 = 0x0800_0000;
+    const DEV_END: u64 = 0x1000_0000;
+    const USER_LOW: u64 = 0x100_0000;
+    if frame == va {
+        return true; // identity mapping (RAM identity or device MMIO)
+    }
+    if (DEV_BASE..DEV_END).contains(&va) {
+        return true; // device MMIO window
+    }
+    if va < USER_LOW {
+        return false;
+    }
+    let (win_base, usable) = alias_window();
+    let win_size = (usable / 0x20_0000) * 0x20_0000;
+    win_size != 0 && frame == win_base + ((va - USER_LOW) % win_size)
+}
+
 /// Free `count` contiguous physical pages.
 ///
 /// # Safety
@@ -238,6 +290,39 @@ pub fn stats() -> (usize, usize) {
     (total, free)
 }
 
+/// Serializes tests that mutate the shared alias-window cache (the cache is
+/// a process-global, and cargo runs the crate's tests in parallel).
+/// no_std-compatible spinlock with a Drop guard (a panic releases it).
+#[cfg(test)]
+pub(crate) struct WindowTestLock(core::sync::atomic::AtomicBool);
+
+#[cfg(test)]
+impl WindowTestLock {
+    pub(crate) const fn new() -> Self {
+        Self(core::sync::atomic::AtomicBool::new(false))
+    }
+
+    pub(crate) fn lock(&self) -> WindowTestGuard<'_> {
+        while self.0.swap(true, core::sync::atomic::Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        WindowTestGuard(self)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct WindowTestGuard<'a>(&'a WindowTestLock);
+
+#[cfg(test)]
+impl Drop for WindowTestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.0.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+pub(crate) static WINDOW_TEST_LOCK: WindowTestLock = WindowTestLock::new();
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +334,42 @@ mod tests {
         assert_eq!(mmap.count, 1);
         assert_eq!(mmap.ranges[0].start, 0x40000000);
         assert_eq!(mmap.ranges[0].end, 0x50000000);
+    }
+
+    #[test]
+    fn test_is_alias_frame() {
+        let _guard = super::WINDOW_TEST_LOCK.lock();
+        // Unknown window (host default) — nothing is an alias.
+        set_alias_window(0, 0);
+        assert!(!is_alias_frame(0x5000, 0x1000000));
+        assert!(!is_alias_frame(0x5000, 0x20000000));
+
+        let base = 0x40_0000_0000u64;
+        let usable = 0x1000_0000u64; // 256 MiB -> window 0x10000000
+        set_alias_window(base, usable);
+
+        // RAM alias frame: win_base + ((va - USER_LOW) % win_size).
+        let va = 0x2000_0000u64;
+        let alias = base + ((va - 0x100_0000) % 0x1000_0000);
+        assert!(is_alias_frame(alias, va));
+        assert!(
+            !is_alias_frame(alias + 0x1000, va),
+            "neighbor frame is owned"
+        );
+
+        // Device MMIO window: any leaf in it is shared.
+        assert!(is_alias_frame(0x900_0000, 0x900_0000));
+        assert!(
+            is_alias_frame(0x7000, 0x900_0000),
+            "dev window, other frame"
+        );
+
+        // Identity (frame == va) is shared.
+        assert!(is_alias_frame(0x1234_000, 0x1234_000));
+
+        // Below USER_LOW: never an alias.
+        assert!(!is_alias_frame(base, 0x1000));
+
+        set_alias_window(0, 0);
     }
 }

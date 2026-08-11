@@ -133,5 +133,18 @@ name = "threadtest"
 path = "src/bin/threadtest.rs"
 test = false
 
+# mmapfd / forktest are test binaries autodiscovered from src/bin/; they are
+# #![no_std] / #![no_main] embedded MINIX binaries that cannot run as
+# host-native test harnesses.
+[[bin]]
+name = "mmapfd"
+path = "src/bin/mmapfd.rs"
+test = false
+
+[[bin]]
+name = "forktest"
+path = "src/bin/forktest.rs"
+test = false
+
 [lints]
 workspace = true

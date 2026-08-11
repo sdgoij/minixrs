@@ -234,6 +234,7 @@ pub fn global_allocator() -> *mut core::ffi::c_void {
 }
 
 /// Number of free physical pages (bitmap clear bits within the init range).
+/// Number of free physical pages (diagnostics).
 pub fn phys_free_pages() -> usize {
     if !ALLOC_INIT.load(Ordering::Acquire) {
         return 0;
@@ -254,6 +255,16 @@ pub fn phys_free_pages() -> usize {
         .count_ones() as usize;
     }
     free
+}
+
+/// Base of the allocator's free-RAM window.
+pub fn alloc_start() -> u64 {
+    ALLOC_START.load(Ordering::Relaxed)
+}
+
+/// End (exclusive) of the allocator's free-RAM window.
+pub fn alloc_end() -> u64 {
+    ALLOC_END.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
