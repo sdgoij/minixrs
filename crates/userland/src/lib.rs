@@ -765,6 +765,35 @@ pub fn memstat(_args: &[&str]) -> i32 {
     }
 }
 
+/// regions — report VM-wide region accounting (count + backing pages).
+/// Used by the per-exec leak probe to assert regions/pages stay flat.
+pub fn regions(_args: &[&str]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        match minix_std::vmem::region_info() {
+            Ok((count, pages)) => {
+                write_out(b"regions ");
+                print_dec_u32(count);
+                write_out(b" pages ");
+                print_dec_u32(pages);
+                write_out(b"\r\n");
+                0
+            }
+            Err(e) => {
+                write_err(b"regions: VM info failed: ");
+                write_err(&[b'0' + ((-e.0) % 10) as u8]);
+                write_err(b"\r\n");
+                1
+            }
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        write_out(b"regions: host stub\n");
+        0
+    }
+}
+
 /// hangdump — ask the kernel to print every process's IPC state to the
 /// serial console (who is blocked on whom). Diagnostic for wedged servers.
 pub fn hangdump(_args: &[&str]) -> i32 {

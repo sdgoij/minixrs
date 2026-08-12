@@ -2514,12 +2514,41 @@ fn do_info(msg: &mut Message) -> i32 {
             OK
         }
         VMIW_REGION => {
-            // Walk region array, write VmRegionInfo structs to output buffer
-            // Stubbed for now — real impl needs region AVL tree
-            if !is_user_ep(target_ep) {
-                return EINVAL;
-            }
-            msg.m_payload.m1.m1i1 = 0; // count of regions
+            // Return region accounting for leak checks: m1i1 = region
+            // count, m1i2 = total backing pages. target_ep 0 sums all
+            // active processes (the per-exec leak probe path).
+            let (count, pages) = if target_ep == 0 {
+                let mut count = 0u32;
+                let mut pages = 0u32;
+                unsafe {
+                    proc::for_each_active_vmproc(|vmp| {
+                        count += vmp.vm_regions.len() as u32;
+                        for r in vmp.vm_regions.regions.iter().flatten() {
+                            pages += r.npages;
+                        }
+                    });
+                }
+                (count, pages)
+            } else {
+                if !is_user_ep(target_ep) {
+                    return EINVAL;
+                }
+                match unsafe { proc::vmproc_lookup(target_ep) } {
+                    Some(vmp) => {
+                        let pages = vmp
+                            .vm_regions
+                            .regions
+                            .iter()
+                            .flatten()
+                            .map(|r| r.npages)
+                            .sum();
+                        (vmp.vm_regions.len() as u32, pages)
+                    }
+                    None => (0, 0),
+                }
+            };
+            msg.m_payload.m1.m1i1 = count as i32;
+            msg.m_payload.m1.m1i2 = pages as i32;
             OK
         }
         _ => ENOSYS,
@@ -2974,7 +3003,39 @@ mod tests {
             m_payload: unsafe { core::mem::zeroed() },
         };
         msg.m_payload.m1.m1i1 = VMIW_REGION as i32;
+        // target_ep 0 = VM-wide sum; must return a non-negative count.
         assert_eq!(do_info(&mut msg), OK);
+        unsafe {
+            assert!(msg.m_payload.m1.m1i1 >= 0, "region count must be populated");
+            assert!(msg.m_payload.m1.m1i2 >= 0, "page count must be populated");
+        }
+    }
+
+    #[test]
+    fn test_do_info_vmiw_region_per_process() {
+        // A vmproc with regions reports its own count + pages.
+        unsafe {
+            let vmp = crate::vm::proc::vmproc_alloc(43).expect("alloc");
+            let mut r = crate::vm::region::VirRegion::new(0x1000, 0x2000, 0);
+            r.npages = 2;
+            let inserted = vmp.vm_regions.insert(r);
+            assert!(inserted.is_none());
+        }
+        let mut msg = Message {
+            m_source: 0,
+            m_type: VM_INFO as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        msg.m_payload.m1.m1i1 = VMIW_REGION as i32;
+        msg.m_payload.m1.m1i2 = 43;
+        assert_eq!(do_info(&mut msg), OK);
+        unsafe {
+            assert_eq!(msg.m_payload.m1.m1i1, 1, "one region");
+            assert_eq!(msg.m_payload.m1.m1i2, 2, "two pages");
+        }
+        unsafe {
+            crate::vm::proc::vmproc_free(43);
+        }
     }
 
     #[test]

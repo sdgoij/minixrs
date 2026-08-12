@@ -205,11 +205,40 @@ pub fn dispatch_clock(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
             OK
         }
         CLOCK_SETTIME => {
-            // Would set the clock — stub for now.
+            // Set the kernel realtime clock. Only CLOCK_REALTIME is
+            // settable; the kernel rejects other clock ids.
+            let sec = msg_i64(msg, MSG_OFF_SEC);
+            let nsec = msg_i64(msg, MSG_OFF_NSEC);
+            let r = kernel_settime(sec, nsec, true);
+            if r != 0 {
+                return r;
+            }
             OK
         }
         _ => EINVAL,
     }
+}
+
+/// Build the SYS_SETTIME kernel-call message (kernel call 40).
+///
+/// Layout matches the kernel's `do_settime_handler`: sec @ 8, nsec @ 16,
+/// now @ 24, clock_id @ 28.
+fn build_settime_msg(sec: i64, nsec: i64, now: bool) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg[8..16].copy_from_slice(&sec.to_ne_bytes());
+    msg[16..24].copy_from_slice(&nsec.to_ne_bytes());
+    msg[24..28].copy_from_slice(&(now as i32).to_ne_bytes());
+    msg[28..32].copy_from_slice(&0i32.to_ne_bytes()); // CLOCK_REALTIME
+    msg
+}
+
+/// Set the kernel realtime clock via SYS_SETTIME (kernel call 40).
+///
+/// `now = true` sets the clock; `false` applies an adjtime delta. Returns
+/// OK or a negative errno from the kernel handler.
+fn kernel_settime(sec: i64, nsec: i64, now: bool) -> i32 {
+    let mut msg = build_settime_msg(sec, nsec, now);
+    minix_rt::kernel_call(40, &mut msg) // SYS_SETTIME
 }
 
 /// Read the kernel clock via SYS_TIMES (kernel call 25).
@@ -258,6 +287,11 @@ fn clock_time_to_ts(
 /// Read an i32 from a message buffer.
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
     i32::from_ne_bytes(msg[off..off + 4].try_into().unwrap())
+}
+
+/// Read an i64 from a message buffer.
+fn msg_i64(msg: &[u8; 64], off: usize) -> i64 {
+    i64::from_ne_bytes(msg[off..off + 8].try_into().unwrap())
 }
 
 /// Write an i32 into a message buffer.
@@ -523,10 +557,29 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_settime_returns_ok() {
+    fn test_build_settime_msg_layout() {
+        // Matches the kernel's do_settime_handler readers:
+        // sec @ 8, nsec @ 16, now @ 24, clock_id @ 28.
+        let msg = build_settime_msg(1234, 5678, true);
+        assert_eq!(i64::from_ne_bytes(msg[8..16].try_into().unwrap()), 1234);
+        assert_eq!(i64::from_ne_bytes(msg[16..24].try_into().unwrap()), 5678);
+        assert_eq!(i32::from_ne_bytes(msg[24..28].try_into().unwrap()), 1); // now
+        assert_eq!(i32::from_ne_bytes(msg[28..32].try_into().unwrap()), 0); // CLOCK_REALTIME
+
+        let msg2 = build_settime_msg(0, 0, false);
+        assert_eq!(i32::from_ne_bytes(msg2[24..28].try_into().unwrap()), 0); // adjtime
+    }
+
+    #[test]
+    fn test_dispatch_settime_forwards_to_kernel() {
+        // CLOCK_SETTIME reads sec/nsec from the request message and forwards
+        // them to the kernel. On host there is no kernel, so the call fails
+        // with a negative status instead of the stub's unconditional OK.
         let mut msg = [0u8; 64];
+        msg[12..20].copy_from_slice(&1000i64.to_ne_bytes());
+        msg[20..28].copy_from_slice(&0i64.to_ne_bytes());
         let r = dispatch_clock(CLOCK_SETTIME as i32, &mut msg);
-        assert_eq!(r, OK);
+        assert!(r != OK, "settime must reach the kernel, not be a no-op");
     }
 
     #[test]

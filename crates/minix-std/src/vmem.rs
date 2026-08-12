@@ -153,6 +153,21 @@ pub fn mem_info() -> Result<(u32, u32, u32), MinixErr> {
     }
 }
 
+/// Query VM region accounting (VMIW_REGION): returns `(region_count,
+/// total_backing_pages)` across all processes (target endpoint 0). Used by
+/// the per-exec leak probe to assert regions/pages stay flat.
+#[cfg(target_os = "minix")]
+pub fn region_info() -> Result<(u32, u32), MinixErr> {
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, VM_INFO as i32);
+        msg_set_i32(&mut msg, 8, VMIW_REGION); // m1i1 = subcode
+        msg_set_i32(&mut msg, 12, 0); // m1i2 = target (0 = all)
+        vm_call(&mut msg)?;
+        Ok((msg_i32(&msg, 8) as u32, msg_i32(&msg, 12) as u32))
+    }
+}
+
 /// Send an IPC server call (for shared memory).
 #[cfg(target_os = "minix")]
 unsafe fn ipc_call(msg: &mut Message) -> Result<(), MinixErr> {

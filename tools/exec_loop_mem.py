@@ -153,6 +153,28 @@ def run_memstat(tag):
     return -1
 
 
+def run_regions(tag):
+    """Send `regions`, wait for the NEXT 'regions N pages M' line, return
+    (region_count, total_pages) or None on timeout."""
+    with lock:
+        start = len(out)
+    if not send("regions"):
+        print("regions[%s] WRITE BLOCKED" % tag, file=sys.stderr, flush=True)
+        return None
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        with lock:
+            m = re.search(rb"regions (\d+) pages (\d+)", bytes(out[start:]))
+            if m:
+                vals = (int(m.group(1)), int(m.group(2)))
+                print("regions[%s] regions=%d pages=%d" % (tag, vals[0], vals[1]),
+                      file=sys.stderr, flush=True)
+                return vals
+        time.sleep(0.05)
+    print("regions[%s] TIMEOUT" % tag, file=sys.stderr, flush=True)
+    return None
+
+
 try:
     saw_prompt = wait_for(lambda: b"# " in out[-80:], 60)
     print("prompt: %s" % saw_prompt, file=sys.stderr, flush=True)
@@ -161,6 +183,7 @@ try:
     time.sleep(0.5)
     baseline = run_memstat("boot")
     points = [(0, baseline)]
+    region_points = [(0, run_regions("boot"))]
     hung = None
     for i in range(N):
         if not send(CMD):
@@ -206,6 +229,11 @@ try:
                 time.sleep(3)
                 break
             points.append((i + 1, f))
+            r = run_regions("exec %d" % (i + 1))
+            if r is None:
+                time.sleep(2)
+                r = run_regions("exec %d retry" % (i + 1))
+            region_points.append((i + 1, r))
 
     if hung is not None:
         f = run_memstat("hang")
@@ -219,13 +247,25 @@ try:
             points.append((hung, f))
 
     print("=== points: %s ===" % points, file=sys.stderr, flush=True)
+    print("=== region points: %s ===" % region_points, file=sys.stderr, flush=True)
     if len(points) >= 2 and points[-1][1] >= 0:
         (e0, f0), (e1, f1) = points[0], points[-1]
         d = f0 - f1
         per = d / (e1 - e0) if e1 > e0 else 0
         print("=== RESULT: %d execs done, leak %d pages (%.1f MiB), %.1f KiB/exec ===" % (
             N if hung is None else hung, d, d * 4 / 1024, per * 4), file=sys.stderr, flush=True)
-        ok = hung is None and per < 16  # < 64 KiB/exec
+        # Region accounting: assert the VM-wide region/page counts stay flat
+        # (the per-exec leak check). A missing sample is not a failure by
+        # itself — the memstat verdict already covers hangs.
+        region_ok = True
+        if len(region_points) >= 2 and region_points[-1][1] is not None:
+            (re0, (rc0, rp0)), (re1, (rc1, rp1)) = region_points[0], region_points[-1]
+            rc_per = (rc1 - rc0) / (re1 - re0) if re1 > re0 else 0
+            rp_per = (rp1 - rp0) / (re1 - re0) if re1 > re0 else 0
+            print("=== REGIONS: %d regions (%.2f/exec), %d pages (%.2f/exec) ===" % (
+                rc1 - rc0, rc_per, rp1 - rp0, rp_per), file=sys.stderr, flush=True)
+            region_ok = rc_per < 4 and rp_per < 16  # slack for transient churn
+        ok = hung is None and per < 16 and region_ok  # < 64 KiB/exec
         print("=== VERDICT: %s ===" % ("PASS" if ok else "FAIL"), file=sys.stderr, flush=True)
 finally:
     qemu.kill()

@@ -83,9 +83,11 @@ build-x86-boot: userland-x86
     target/mkboot embed_initramfs,embed_minixfs,boot-test
 
 build-riscv64: userland-riscv64
+    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
 build-aarch64: userland-aarch64
+    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release
 
 # ---------- run ----------
@@ -121,16 +123,27 @@ debug-aarch64: build-aarch64
 # mount_root.
 
 build-riscv64-test: userland-riscv64
+    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
+    # Copy to a distinct name so a later normal build is not fooled by this
+    # artifact (cargo skips relinking when the output file is newer than its
+    # fingerprint — the shared path would otherwise keep the test kernel).
+    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test
 
 build-aarch64-test: userland-aarch64
+    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
+    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/aarch64-unknown-minix/release/kernel-boot-aarch64-test
 
 build-riscv64-boot: userland-riscv64
+    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
+    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot
 
 build-aarch64-boot: userland-aarch64
+    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
+    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot
 
 test-qemu target="x86":
     @just test-qemu-{{target}}
@@ -141,13 +154,13 @@ test-qemu-x86: build-x86-test mkfs-x86
 # RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so
 # pass/fail is determined from the serial log.
 test-qemu-riscv64: build-riscv64-test
-    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 # AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 — no exit-code
 # device and no semihosting on this QEMU build), so pass/fail is determined
 # from the serial log like RISC-V.
 test-qemu-aarch64: build-aarch64-test
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test-boot target="x86":
     @just test-boot-{{target}}
@@ -156,10 +169,10 @@ test-boot-x86: build-x86-boot mkfs-x86
     qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test-boot-riscv64: build-riscv64-boot mkfs-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test-boot-aarch64: build-aarch64-boot mkfs-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test target="x86":
     @just test-{{target}}
@@ -183,19 +196,21 @@ mkfs-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs x86_64
+    # MSYS mangles POSIX-style MINIXFS_EXTRA values (dest=path); exclude it
+    # from path conversion so mkfs.exe sees the value verbatim.
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs x86_64
 
 mkfs-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs riscv64
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs riscv64
 
 mkfs-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs aarch64
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs aarch64
 
 # Rebuild the C smoke-test binary (/bin/helloc) from tools/hello.c +
 # tools/crt0-x86_64.S (clang freestanding + minix-libc, linked with the fork
