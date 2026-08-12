@@ -12,6 +12,7 @@ use crate::mfs::open::*;
 use crate::mfs::path::*;
 use crate::mfs::protect::*;
 use crate::mfs::read::*;
+use crate::mfs::stadir::*;
 use crate::mfs::time::*;
 use crate::mfs::utility::*;
 use crate::mfs::write::*;
@@ -29,7 +30,7 @@ pub static FS_CALL_VEC: [fn() -> i32; NREQS] = [
     fs_inhibread,  //  7 (FS_BASE + 7)
     no_sys,        //  8 (FS_BASE + 8)  fs_stat
     fs_utime,      //  9 (FS_BASE + 9)
-    no_sys,        // 10 (FS_BASE + 10) fs_statvfs
+    fs_statvfs,    // 10 (FS_BASE + 10)
     fs_breadwrite, // 11 (FS_BASE + 11)
     fs_breadwrite, // 12 (FS_BASE + 12)
     fs_unlink,     // 13 (FS_BASE + 13)

@@ -222,9 +222,7 @@ pub fn alloc_bit(sp: &mut SuperBlock, map: i32, origin: u32) -> u32 {
             }
 
             // Bit number from the start of the bit map
-            let b = block * bits_per_block
-                + (wptr_idx as u32) * FS_BITCHUNK_BITS as u32
-                + i;
+            let b = block * bits_per_block + (wptr_idx as u32) * FS_BITCHUNK_BITS as u32 + i;
 
             // Don't allocate bits beyond the end of the map
             if b >= map_bits {
@@ -283,9 +281,8 @@ pub fn free_bit(sp: &mut SuperBlock, map: i32, bit_returned: u32) {
     }
 
     let data_ptr = unsafe { (*bp).data_ptr };
-    let wptr = unsafe {
-        &mut *(data_ptr.add(word * core::mem::size_of::<BitchunkT>()) as *mut BitchunkT)
-    };
+    let wptr =
+        unsafe { &mut *(data_ptr.add(word * core::mem::size_of::<BitchunkT>()) as *mut BitchunkT) };
 
     let mut k = conv4(sp.s_native, *wptr as i64) as BitchunkT;
 
@@ -307,12 +304,11 @@ pub fn free_bit(sp: &mut SuperBlock, map: i32, bit_returned: u32) {
 }
 
 // Reference: super.c get_used_blocks()
-// Returns the number of used blocks. For MFS this requires bitmap scanning
-// which needs the buffer cache. Returns 0 for now (TODO: implement when
-// buffer cache is available). The C code computes this from superblock fields.
-pub fn get_used_blocks(_sp: &mut SuperBlock) -> u32 {
-    // TODO: compute from bitmap when buffer cache is wired
-    0
+// Returns the number of used blocks by scanning the zone bitmap.
+// (The C code caches the result in statics; we recompute on each call,
+// which is correct and only costs one bitmap scan per statvfs.)
+pub fn get_used_blocks(sp: &mut SuperBlock) -> u32 {
+    sp.s_zones - crate::mfs::stats::count_free_bits(sp, ZMAP)
 }
 
 #[cfg(test)]

@@ -257,6 +257,27 @@ pub fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
     minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
+/// Copy `src` into the grant `grant_id` (granted by `granter`) via
+/// `SYS_SAFECOPYTO`. Used to write reply payloads (e.g. stat buffers)
+/// into the granter's granted memory.
+#[cfg(target_os = "minix")]
+pub fn safecopy_to(granter: i32, grant_id: i32, src: &[u8]) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&granter.to_ne_bytes());
+    kmsg[12..16].copy_from_slice(&grant_id.to_ne_bytes());
+    kmsg[16..24].copy_from_slice(&0u64.to_ne_bytes());
+    kmsg[24..32].copy_from_slice(&(src.as_ptr() as u64).to_ne_bytes());
+    kmsg[32..40].copy_from_slice(&(src.len() as u64).to_ne_bytes());
+    minix_rt::kernel_call(32, &mut kmsg) // SYS_SAFECOPYTO
+}
+
+/// Host build: there is no kernel to perform the copy, so report
+/// `ENOSYS` rather than silently succeeding without writing the data.
+#[cfg(not(target_os = "minix"))]
+pub fn safecopy_to(_granter: i32, _grant_id: i32, _src: &[u8]) -> i32 {
+    libs::libminixfs::errors::ENOSYS
+}
+
 #[cfg(target_os = "minix")]
 static BDEV_GRANT_TABLE: BdevGrantTable = BdevGrantTable::new();
 

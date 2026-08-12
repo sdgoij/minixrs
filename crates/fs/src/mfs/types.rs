@@ -30,6 +30,45 @@ pub struct Direct {
 pub const DIR_ENTRY_SIZE: usize = core::mem::size_of::<Direct>();
 pub const MFS_DIRSIZ: usize = MFS_NAME_MAX;
 
+/// File status — mirrors the userland `Stat` in `minix-std` (88 bytes on
+/// 64-bit). Must stay byte-identical: MFS writes this layout into the
+/// caller's buffer through the grant created by VFS.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_mtime: i64,
+    pub st_ctime: i64,
+}
+
+/// Filesystem statistics — mirrors `Statvfs` in the VFS server.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statvfs {
+    pub f_flags: u64,
+    pub f_bsize: u32,
+    pub f_frsize: u32,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_favail: u64,
+    pub f_fsid: u64,
+    pub f_flag: u64,
+    pub f_namemax: u64,
+}
+
 /// Super block (in-memory + on-disk).
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -257,4 +296,37 @@ pub fn fs_bitmap_chunks(block_size: usize) -> usize {
 
 pub fn fs_bits_per_block(block_size: usize) -> usize {
     fs_bitmap_chunks(block_size) * FS_BITCHUNK_BITS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stat_layout_matches_userland() {
+        // Must match minix-std `Stat` (see its test_stat_struct_layout):
+        // 88 bytes on 64-bit, u32 fields packed at offsets 16..32.
+        assert_eq!(core::mem::size_of::<Stat>(), 88);
+        assert_eq!(core::mem::offset_of!(Stat, st_dev), 0);
+        assert_eq!(core::mem::offset_of!(Stat, st_ino), 8);
+        assert_eq!(core::mem::offset_of!(Stat, st_mode), 16);
+        assert_eq!(core::mem::offset_of!(Stat, st_nlink), 20);
+        assert_eq!(core::mem::offset_of!(Stat, st_uid), 24);
+        assert_eq!(core::mem::offset_of!(Stat, st_gid), 28);
+        assert_eq!(core::mem::offset_of!(Stat, st_rdev), 32);
+        assert_eq!(core::mem::offset_of!(Stat, st_size), 40);
+        assert_eq!(core::mem::offset_of!(Stat, st_blksize), 48);
+        assert_eq!(core::mem::offset_of!(Stat, st_blocks), 56);
+        assert_eq!(core::mem::offset_of!(Stat, st_atime), 64);
+        assert_eq!(core::mem::offset_of!(Stat, st_mtime), 72);
+        assert_eq!(core::mem::offset_of!(Stat, st_ctime), 80);
+    }
+
+    #[test]
+    fn test_statvfs_layout() {
+        // Must match the VFS server's `Statvfs`.
+        assert_eq!(core::mem::size_of::<Statvfs>(), 88);
+        assert_eq!(core::mem::offset_of!(Statvfs, f_blocks), 16);
+        assert_eq!(core::mem::offset_of!(Statvfs, f_namemax), 80);
+    }
 }

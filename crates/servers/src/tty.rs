@@ -1399,7 +1399,8 @@ fn dev_ioctl(tp: &mut Tty) {
     }
 
     tp.tty_ioreq = 0;
-    // TODO: Phase 13 — chardriver_reply_task(tp.tty_iocaller, tp.tty_ioid, OK)
+    // Reply to the suspended ioctl caller (TIOCDRAIN completion).
+    chardriver_reply_task(tp.tty_iocaller as i32, tp.tty_ioid, OK);
     tp.tty_iocaller = NONE;
 }
 
@@ -1494,8 +1495,7 @@ fn select_retry(tp: &mut Tty) -> i32 {
     if tp.tty_select_ops != 0 {
         let ops = select_try(tp, tp.tty_select_ops);
         if ops != 0 {
-            // TODO: Phase 13 — chardriver_reply_select(tp.tty_select_proc,
-            //       tp.tty_select_minor, ops)
+            chardriver_reply_select(tp.tty_select_proc as i32, tp.tty_select_minor, ops as i32);
             tp.tty_select_ops &= !ops;
         }
     }
@@ -2068,6 +2068,92 @@ pub fn do_select(minor: DevMinor, mut ops: u32, endpt: Endpoint) -> i32 {
     }
 
     ready_ops as i32
+}
+
+// Chardriver primitives (Phase 13 replacements)
+
+/// Build a SYS_SAFECOPYFROM/TO message for the given parameters.
+///
+/// Both kernel calls share the layout: granter @ 8, grant id @ 12, offset
+/// @ 16, address @ 24, byte count @ 32 (matches the kernel's
+/// `do_safecopy_to`/`do_safecopy_from`).
+fn build_safecopy_msg(granter: i32, grant_id: u32, offset: u64, addr: u64, len: usize) -> [u8; 64] {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&granter.to_ne_bytes());
+    kmsg[12..16].copy_from_slice(&(grant_id as i32).to_ne_bytes());
+    kmsg[16..24].copy_from_slice(&offset.to_ne_bytes());
+    kmsg[24..32].copy_from_slice(&addr.to_ne_bytes());
+    kmsg[32..40].copy_from_slice(&(len as u64).to_ne_bytes());
+    kmsg
+}
+
+/// Copy `dst.len()` bytes from the grant `grant_id` (granted by `granter`)
+/// into `dst` via `SYS_SAFECOPYFROM`. Used to read ioctl args from the
+/// caller's buffer.
+pub fn sys_safecopyfrom(granter: i32, grant_id: u32, offset: u64, dst: &mut [u8]) -> i32 {
+    let mut kmsg = build_safecopy_msg(
+        granter,
+        grant_id,
+        offset,
+        dst.as_mut_ptr() as u64,
+        dst.len(),
+    );
+    minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
+}
+
+/// Copy `src` into the grant `grant_id` (granted by `granter`) via
+/// `SYS_SAFECOPYTO`. Used to write ioctl results to the caller's buffer.
+pub fn sys_safecopyto(granter: i32, grant_id: u32, offset: u64, src: &[u8]) -> i32 {
+    let mut kmsg = build_safecopy_msg(granter, grant_id, offset, src.as_ptr() as u64, src.len());
+    minix_rt::kernel_call(32, &mut kmsg) // SYS_SAFECOPYTO
+}
+
+/// Reply to a suspended read/write/ioctl request (`CDEV_REPLY`).
+///
+/// Message layout matches the C `m_lchardriver_vfs_reply`: status at
+/// payload offset 0, request id at payload offset 4.
+pub fn chardriver_reply_task(endpt: i32, id: u32, status: i32) -> i32 {
+    let mut reply = arch_common::ipc::Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_REPLY as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    unsafe {
+        reply.m_payload.m2.m2i1 = status;
+        reply.m_payload.m2.m2i2 = id as i32;
+    }
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDNB_CALL,
+            endpt as u64,
+            &mut reply as *mut arch_common::ipc::Message as u64,
+        )
+    };
+    0
+}
+
+/// Reply to a select request with a status update (`CDEV_SEL2_REPLY`).
+///
+/// Message layout matches the C `m_lchardriver_vfs_sel2`: status at
+/// payload offset 0, minor at payload offset 4.
+pub fn chardriver_reply_select(endpt: i32, minor: u32, status: i32) -> i32 {
+    let mut reply = arch_common::ipc::Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_SEL2_REPLY as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    unsafe {
+        reply.m_payload.m2.m2i1 = status;
+        reply.m_payload.m2.m2i2 = minor as i32;
+    }
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDNB_CALL,
+            endpt as u64,
+            &mut reply as *mut arch_common::ipc::Message as u64,
+        )
+    };
+    0
 }
 
 // Server main loop stub
@@ -3377,5 +3463,59 @@ mod tests {
 
         let ready = select_try(&mut tp, CDEV_OP_RD | CDEV_OP_WR);
         assert_eq!(ready, CDEV_OP_RD | CDEV_OP_WR);
+    }
+
+    #[test]
+    fn test_build_safecopy_msg_layout() {
+        // Matches the kernel's do_safecopy_to/from readers:
+        // granter @ 8, grant @ 12, offset @ 16, addr @ 24, bytes @ 32.
+        let msg = build_safecopy_msg(1234, 7, 8, 0x5000, 44);
+        assert_eq!(i32::from_ne_bytes(msg[8..12].try_into().unwrap()), 1234);
+        assert_eq!(i32::from_ne_bytes(msg[12..16].try_into().unwrap()), 7);
+        assert_eq!(u64::from_ne_bytes(msg[16..24].try_into().unwrap()), 8);
+        assert_eq!(u64::from_ne_bytes(msg[24..32].try_into().unwrap()), 0x5000);
+        assert_eq!(u64::from_ne_bytes(msg[32..40].try_into().unwrap()), 44);
+    }
+
+    #[test]
+    fn test_chardriver_reply_task_layout() {
+        // C mess_lchardriver_vfs_reply: status @ payload 0, id @ payload 4;
+        // m_type = CDEV_REPLY.
+        let mut reply = arch_common::ipc::Message {
+            m_source: 0,
+            m_type: arch_common::com::CDEV_REPLY as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            reply.m_payload.m2.m2i1 = 7;
+            reply.m_payload.m2.m2i2 = 42;
+        }
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&reply as *const arch_common::ipc::Message as *const u8, 64)
+        };
+        assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x480);
+        assert_eq!(i32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 7);
+        assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 42);
+    }
+
+    #[test]
+    fn test_chardriver_reply_select_layout() {
+        // C mess_lchardriver_vfs_sel2: status @ payload 0, minor @ payload 4;
+        // m_type = CDEV_SEL2_REPLY.
+        let mut reply = arch_common::ipc::Message {
+            m_source: 0,
+            m_type: arch_common::com::CDEV_SEL2_REPLY as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            reply.m_payload.m2.m2i1 = 3;
+            reply.m_payload.m2.m2i2 = 5;
+        }
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&reply as *const arch_common::ipc::Message as *const u8, 64)
+        };
+        assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x482);
+        assert_eq!(i32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 3);
+        assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 5);
     }
 }

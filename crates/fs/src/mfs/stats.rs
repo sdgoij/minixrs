@@ -68,6 +68,24 @@ pub fn count_free_bits(sp: &SuperBlock, map: i32) -> u32 {
     free_bits
 }
 
+// Reference: stats.c fs_blockstats()
+/// Fill `blocks` / `free` / `used` with filesystem-wide zone counts.
+pub fn fs_blockstats(blocks: &mut u64, free: &mut u64, used: &mut u64) {
+    unsafe {
+        let mfs = crate::mfs::glo::mfs_ptr();
+        let sp = crate::mfs::super_block::get_super((*mfs).fs_dev);
+        if sp.is_null() {
+            *blocks = 0;
+            *free = 0;
+            *used = 0;
+            return;
+        }
+        *blocks = (*sp).s_zones as u64;
+        *used = crate::mfs::super_block::get_used_blocks(&mut *sp) as u64;
+        *free = *blocks - *used;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

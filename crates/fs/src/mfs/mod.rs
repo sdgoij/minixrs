@@ -38,6 +38,7 @@
 //! | `protect` | protect.c | Permission checks, chmod/chown |
 //! | `misc` | misc.c | Sync/flush/new_driver/bpeek |
 //! | `stats` | stats.c | Free bit counting |
+//! | `stadir` | stadir.c | stat/statvfs |
 //! | `time` | time.c | utimensat |
 //! | `table` | table.c | VFS dispatch table |
 //! | `main` | main.c | Server init and main loop |
@@ -54,6 +55,7 @@ pub mod open;
 pub mod path;
 pub mod protect;
 pub mod read;
+pub mod stadir;
 pub mod stats;
 pub mod super_block;
 pub mod table;
@@ -61,7 +63,6 @@ pub mod time;
 pub mod types;
 pub mod utility;
 pub mod write;
-
 
 pub use cache::*;
 pub use inode::*;
@@ -73,6 +74,7 @@ pub use open::*;
 pub use path::*;
 pub use protect::*;
 pub use read::*;
+pub use stadir::*;
 pub use stats::*;
 pub use super_block::*;
 pub use table::*;

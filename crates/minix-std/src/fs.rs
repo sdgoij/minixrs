@@ -44,6 +44,7 @@ pub const VFS_RMDIR: u32 = VFS_BASE + 18;
 pub const VFS_MKDIR: u32 = VFS_BASE + 9;
 pub const VFS_STAT: u32 = VFS_BASE + 21;
 pub const VFS_FSTAT: u32 = VFS_BASE + 22;
+pub const VFS_LSTAT: u32 = VFS_BASE + 23;
 pub const VFS_IOCTL: u32 = VFS_BASE + 24;
 pub const VFS_FCNTL: u32 = VFS_BASE + 25;
 pub const VFS_GETDENTS: u32 = VFS_BASE + 29;
@@ -159,12 +160,21 @@ const OFF_LSEEK_FD: usize = 8;
 const OFF_LSEEK_OFFSET: usize = 12;
 const OFF_LSEEK_WHENCE: usize = 20;
 
-// VFS_STAT / VFS_FSTAT (matches do_stat/do_fstat):
-//   offset 8:  name/fd (i32)
+// VFS_FSTAT (matches do_fstat):
+//   offset 8:  fd (i32)
 //   offset 12: stat buffer (u64)
 
-const OFF_STAT_NAME_FD: usize = 8;
-const OFF_STAT_BUF: usize = 12;
+const OFF_FSTAT_FD: usize = 8;
+const OFF_FSTAT_BUF: usize = 12;
+
+// VFS_STAT / VFS_LSTAT (matches do_stat/do_lstat):
+//   offset 8:  name (u64)
+//   offset 16: name length (u32)
+//   offset 24: stat buffer (u64)
+
+const OFF_STAT_NAME: usize = 8;
+const OFF_STAT_NAME_LEN: usize = 16;
+const OFF_STAT_BUF: usize = 24;
 
 // VFS_IOCTL (matches do_ioctl):
 //   offset 8:  fd (i32)
@@ -552,7 +562,40 @@ pub fn fstat(fd: i32) -> Result<Stat, MinixErr> {
         let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_FSTAT as i32);
-        msg_set_i32(&mut msg, OFF_STAT_NAME_FD, fd);
+        msg_set_i32(&mut msg, OFF_FSTAT_FD, fd);
+        msg_set_u64(&mut msg, OFF_FSTAT_BUF, stat_buf.as_mut_ptr() as u64);
+        let _ = vfs_call(&mut msg)?;
+        Ok(stat_buf.assume_init())
+    }
+}
+
+/// Get file status for a path (does not follow symlinks).
+///
+/// `lstat` uses the same message layout as `stat`; only the call number
+/// differs.
+pub fn lstat(path: &str) -> Result<Stat, MinixErr> {
+    stat_impl(VFS_LSTAT, path)
+}
+
+/// Get file status for a path.
+pub fn stat(path: &str) -> Result<Stat, MinixErr> {
+    stat_impl(VFS_STAT, path)
+}
+
+/// Shared implementation of `stat`/`lstat`.
+fn stat_impl(call_nr: u32, path: &str) -> Result<Stat, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (call_nr, path, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, call_nr as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
         msg_set_u64(&mut msg, OFF_STAT_BUF, stat_buf.as_mut_ptr() as u64);
         let _ = vfs_call(&mut msg)?;
         Ok(stat_buf.assume_init())
@@ -800,12 +843,28 @@ mod tests {
         let mut msg = [0u8; 64];
         let stat_buf: Stat = unsafe { core::mem::zeroed() };
         msg_set_i32(&mut msg, OFF_CALL, VFS_FSTAT as i32);
-        msg_set_i32(&mut msg, OFF_STAT_NAME_FD, 3);
-        msg_set_u64(&mut msg, OFF_STAT_BUF, &stat_buf as *const Stat as u64);
+        msg_set_i32(&mut msg, OFF_FSTAT_FD, 3);
+        msg_set_u64(&mut msg, OFF_FSTAT_BUF, &stat_buf as *const Stat as u64);
 
         assert_eq!(msg_i32(&msg, 4), 0x116);
         assert_eq!(msg_i32(&msg, 8), 3);
         assert_eq!(msg_u64(&msg, 12), &stat_buf as *const Stat as u64);
+    }
+
+    #[test]
+    fn test_stat_message_format() {
+        let mut msg = [0u8; 64];
+        let stat_buf: Stat = unsafe { core::mem::zeroed() };
+        let path = b"/bin/ls";
+        msg_set_i32(&mut msg, OFF_CALL, VFS_STAT as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        msg_set_u64(&mut msg, OFF_STAT_BUF, &stat_buf as *const Stat as u64);
+
+        assert_eq!(msg_i32(&msg, 4), 0x115);
+        assert_eq!(msg_u64(&msg, 8), path.as_ptr() as u64);
+        assert_eq!(msg_u32(&msg, 16), path.len() as u32);
+        assert_eq!(msg_u64(&msg, 24), &stat_buf as *const Stat as u64);
     }
 
     #[test]

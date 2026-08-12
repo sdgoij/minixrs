@@ -1212,9 +1212,11 @@ pub fn sys_kill(ep: i32, sig: i32) -> i32 {
 }
 
 /// Clear the page fault flag on a process, reactivating it.
-pub fn clear_pagefault(_ep: i32) -> i32 {
-    // TODO: Phase 6.9 full — issue VMCTL_CLEAR_PAGEFAULT via kernel syscall.
-    OK
+pub fn clear_pagefault(ep: i32) -> i32 {
+    // Forward VMCTL_CLEAR_PAGEFAULT to the kernel: the kernel's
+    // do_vmctl_handler clears RTS_PAGEFAULT on the real Proc struct and
+    // re-enqueues the faulting process if it becomes runnable.
+    unsafe { mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0) }
 }
 
 // Phase 6.10 — Shared memory (shm.c)
@@ -2275,15 +2277,15 @@ fn do_notify_sig(msg: &mut Message) -> i32 {
 }
 
 fn do_vfs_reply(msg: &mut Message) -> i32 {
-    // VFS reply handling — receives the result of a VFS operation
-    // that was forwarded by VM.  Stored in m1i1 (result) and m1i2
-    // (transaction ID / status).
-    let _result = unsafe { msg.m_payload.m1.m1i1 };
-    let _status = unsafe { msg.m_payload.m1.m1i2 };
-
-    // TODO: Phase 13 — route the VFS reply back to the waiting
-    // process via the PENDING transaction table.
-    OK
+    // VM→VFS requests in this port are synchronous: vfs_request_sync blocks
+    // in sendrec, so VFS's VM_VFS_REPLY is consumed inline by that call and
+    // never arrives here as a fresh message. The C design routes async
+    // replies through a PENDING transaction table (vfs.c do_vfs_reply); the
+    // sync design deliberately has no such table, so an out-of-band reply is
+    // a protocol error. Decline to answer it (SUSPEND), matching C's
+    // "don't reply to the reply" convention.
+    let _ = msg;
+    SUSPEND
 }
 
 fn do_vfs_mmap(msg: &mut Message) -> i32 {
@@ -2765,9 +2767,11 @@ mod tests {
         assert_eq!(do_procctl(&mut msg, 0), EINVAL);
         assert_eq!(do_procctl_notrans(&mut msg), EINVAL);
 
-        // VFS — do_vfs_reply is a no-op OK; do_vfs_mmap is a real handler
-        // now (needs a valid target endpoint, which a zeroed message lacks).
-        assert_eq!(do_vfs_reply(&mut msg), OK);
+        // VFS — do_vfs_reply rejects out-of-band replies (SUSPEND = no
+        // reply; the sync protocol never leaves a pending async request);
+        // do_vfs_mmap is a real handler (needs a valid target endpoint,
+        // which a zeroed message lacks).
+        assert_eq!(do_vfs_reply(&mut msg), SUSPEND);
         assert_eq!(do_vfs_mmap(&mut msg), EINVAL);
 
         // RS — now return OK instead of ENOSYS
@@ -2998,9 +3002,11 @@ mod tests {
         // test context (no valid priv structure for random proc numbers).
         // Just verify it doesn't panic.
         let _ = sys_kill(42, SIGSEGV);
-        // clear_pagefault should return OK (stub)
-        assert_eq!(clear_pagefault(0), OK);
-        assert_eq!(clear_pagefault(1), OK);
+        // clear_pagefault forwards VMCTL_CLEAR_PAGEFAULT to the kernel.
+        // On host there is no kernel, so it reports failure (-1) instead
+        // of the OK it returns on target.
+        assert_eq!(clear_pagefault(0), -1);
+        assert_eq!(clear_pagefault(1), -1);
     }
 
     #[test]
@@ -3129,15 +3135,30 @@ mod tests {
     #[test]
     fn test_dispatch_vfs_transaction_returns_enosys() {
         init_vm();
-        // VFS_TRANSACTION_BASE = 0x200, a VFS transaction ID is in that range
+        // A VFS transaction ID is in the 0xB00..0xBFF range
+        // (VFS_TRANSACTION_BASE).
         let mut msg = Message {
             m_source: VFS_PROC_NR,
-            m_type: 0x200, // VFS_TRANSACTION_BASE
+            m_type: 0xB00, // VFS_TRANSACTION_BASE
             m_payload: unsafe { core::mem::zeroed() },
         };
         let r = dispatch_message(&mut msg, 0);
         assert_eq!(r, ENOSYS);
         assert_eq!(msg.m_type, ENOSYS);
+    }
+
+    #[test]
+    fn test_do_vfs_reply_returns_suspend() {
+        // The sync VM→VFS protocol never leaves a pending async request,
+        // so an out-of-band VM_VFS_REPLY is rejected without replying.
+        init_vm();
+        let mut msg = Message {
+            m_source: VFS_PROC_NR,
+            m_type: VM_VFS_REPLY as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let r = dispatch_message(&mut msg, 0);
+        assert_eq!(r, SUSPEND);
     }
 
     #[test]

@@ -13,9 +13,7 @@ use crate::vfs::consts::ENOSYS;
 use crate::vfs::consts::PATH_MAX;
 #[cfg(target_os = "minix")]
 use crate::vfs::grant::{cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
-use crate::vfs::types::{Lookup, LookupRes, NodeDetails, Statvfs, off_t};
-#[cfg(target_os = "minix")]
-use arch_common::com::VFS_PROC_NR;
+use crate::vfs::types::{Lookup, LookupRes, NodeDetails, off_t};
 
 // FS_BASE and REQ_* constants (from minix/include/minix/vfsif.h)
 
@@ -435,31 +433,31 @@ pub unsafe fn req_flush(fs_e: i32, dev: u32) -> i32 {
     }
 }
 
-/// Get filesystem statistics (statvfs).
-///
-/// Returns `(status, statvfs)`.
+/// Get filesystem statistics (statvfs) — the FS writes `struct statvfs`
+/// into a user-provided buffer.
 ///
 /// # Safety
 ///
-/// Caller must ensure `fs_e` is a valid FS endpoint.
-pub unsafe fn req_statvfs(fs_e: i32) -> (i32, Statvfs) {
+/// `buf` must point to a valid buffer of at least `len` bytes.  Caller must
+/// ensure `fs_e` is a valid FS endpoint.
+pub unsafe fn req_statvfs(fs_e: i32, who_e: i32, buf: *mut u8, len: usize) -> i32 {
     #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_STATVFS);
 
-        let grant_id = cpf_grant_magic_write(VFS_PROC_NR, fs_e, 0, core::mem::size_of::<Statvfs>());
+        // FS writes statvfs data to user buffer → CPF_WRITE
+        let grant_id = cpf_grant_magic_write(who_e, fs_e, buf as u64, len);
         w_i32(&mut msg, PAYLOAD_OFF, grant_id);
 
         let r = fs_sendrec(fs_e, &mut msg);
         cpf_revoke(grant_id);
-
-        (r, Statvfs::default())
+        r
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = fs_e;
-        (ENOSYS, Statvfs::default())
+        let _ = (fs_e, who_e, buf, len);
+        ENOSYS
     }
 }
 
@@ -1213,7 +1211,7 @@ pub unsafe fn req_slink(
 ///
 /// `buf` must point to a valid buffer of at least `len` bytes.  Caller must
 /// ensure `fs_e` is a valid FS endpoint.
-pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _len: usize) -> i32 {
+pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, who_e: i32, buf: *mut u8, len: usize) -> i32 {
     #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
@@ -1221,7 +1219,7 @@ pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _le
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
 
         // FS writes stat data to user buffer → CPF_WRITE
-        let grant_id = cpf_grant_magic_write(_who_e, fs_e, _buf as u64, _len);
+        let grant_id = cpf_grant_magic_write(who_e, fs_e, buf as u64, len);
         w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
 
         let r = fs_sendrec(fs_e, &mut msg);
@@ -1230,7 +1228,7 @@ pub unsafe fn req_stat(fs_e: i32, inode_nr: u32, _who_e: i32, _buf: *mut u8, _le
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, inode_nr, _who_e, _buf, _len);
+        let _ = (fs_e, inode_nr, who_e, buf, len);
         ENOSYS
     }
 }
@@ -1585,7 +1583,7 @@ mod tests {
 
     #[test]
     fn test_tuple_returns_are_enosys_on_host() {
-        let (s, _det) = unsafe { req_create(0, 0, 0, 0, 0, core::ptr::null()) };
+        let (s, _st) = unsafe { req_create(0, 0, 0, 0, 0, core::ptr::null()) };
         assert_eq!(s, ENOSYS);
 
         let (s, _det) = unsafe { req_newnode(0, 0, 0, 0, 0) };
@@ -1595,7 +1593,7 @@ mod tests {
             unsafe { req_readsuper(core::ptr::null_mut(), core::ptr::null(), 0, 0, 0, 0) };
         assert_eq!(s, ENOSYS);
 
-        let (s, _st) = unsafe { req_statvfs(0) };
+        let s = unsafe { req_statvfs(0, 0, core::ptr::null_mut(), 0) };
         assert_eq!(s, ENOSYS);
 
         let (s, _pos) = unsafe { req_getdents(0, 0, 0, core::ptr::null_mut(), 0, 0, 0) };

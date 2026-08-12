@@ -27,6 +27,7 @@ use crate::vfs::path;
 use crate::vfs::path::PATH_RET_SYMLINK;
 use crate::vfs::stadir::close_fd;
 use crate::vfs::types::*;
+use minix_std::fs::Stat;
 
 /// Common: fd field offset in payload.
 const FD_OFF: usize = 8;
@@ -1216,7 +1217,7 @@ pub fn do_stat() -> i32 {
     // Parse path from message.
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let _buf_addr = r_u64(&glob.fs_m_in, 24);
+    let buf_addr = r_u64(&glob.fs_m_in, 24);
 
     // Copy path from userspace.
     let mut path_buf = [0u8; PATH_MAX];
@@ -1249,7 +1250,13 @@ pub fn do_stat() -> i32 {
     let fs_e = unsafe { (*vp).v_fs_e };
     let inode_nr = unsafe { (*vp).v_inode_nr };
     let r = unsafe {
-        crate::vfs::request::req_stat(fs_e, inode_nr, fp.fp_endpoint, core::ptr::null_mut(), 0)
+        crate::vfs::request::req_stat(
+            fs_e,
+            inode_nr,
+            fp.fp_endpoint,
+            buf_addr as *mut u8,
+            core::mem::size_of::<Stat>(),
+        )
     };
     unsafe { mount::put_vnode(vp) };
     r
@@ -1265,7 +1272,7 @@ pub fn do_fstat() -> i32 {
     };
     let glob = unsafe { &*vfs_global() };
     let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _buf_addr = r_u64(&glob.fs_m_in, 12);
+    let buf_addr = r_u64(&glob.fs_m_in, 12);
 
     if fd < 0 || (fd as usize) >= OPEN_MAX {
         return EBADF;
@@ -1286,8 +1293,8 @@ pub fn do_fstat() -> i32 {
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
             fp.fp_endpoint,
-            core::ptr::null_mut(),
-            0,
+            buf_addr as *mut u8,
+            core::mem::size_of::<Stat>(),
         )
     }
 }
@@ -1305,7 +1312,7 @@ pub fn do_lstat() -> i32 {
     // Parse path from message.
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let _buf_addr = r_u64(&glob.fs_m_in, 24);
+    let buf_addr = r_u64(&glob.fs_m_in, 24);
 
     // Copy path from userspace.
     let mut path_buf = [0u8; PATH_MAX];
@@ -1338,7 +1345,13 @@ pub fn do_lstat() -> i32 {
     let fs_e = unsafe { (*vp).v_fs_e };
     let inode_nr = unsafe { (*vp).v_inode_nr };
     let r = unsafe {
-        crate::vfs::request::req_stat(fs_e, inode_nr, fp.fp_endpoint, core::ptr::null_mut(), 0)
+        crate::vfs::request::req_stat(
+            fs_e,
+            inode_nr,
+            fp.fp_endpoint,
+            buf_addr as *mut u8,
+            core::mem::size_of::<Stat>(),
+        )
     };
     unsafe { mount::put_vnode(vp) };
     r
@@ -1355,6 +1368,7 @@ pub fn do_statvfs() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
+    let buf_addr = r_u64(&glob.fs_m_in, 24);
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
@@ -1381,7 +1395,14 @@ pub fn do_statvfs() -> i32 {
         return ENOENT;
     }
     let fs_e = unsafe { (*vp).v_fs_e };
-    let (r, _stat) = unsafe { crate::vfs::request::req_statvfs(fs_e) };
+    let r = unsafe {
+        crate::vfs::request::req_statvfs(
+            fs_e,
+            fp.fp_endpoint,
+            buf_addr as *mut u8,
+            core::mem::size_of::<Statvfs>(),
+        )
+    };
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -1396,6 +1417,7 @@ pub fn do_fstatvfs() -> i32 {
     };
     let glob = unsafe { &*vfs_global() };
     let fd = r_i32(&glob.fs_m_in, FD_OFF);
+    let buf_addr = r_u64(&glob.fs_m_in, 16);
     if fd < 0 || (fd as usize) >= OPEN_MAX {
         return EBADF;
     }
@@ -1410,8 +1432,12 @@ pub fn do_fstatvfs() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        let (r, _stat) = crate::vfs::request::req_statvfs((*vp).v_fs_e);
-        r
+        crate::vfs::request::req_statvfs(
+            (*vp).v_fs_e,
+            fp.fp_endpoint,
+            buf_addr as *mut u8,
+            core::mem::size_of::<Statvfs>(),
+        )
     }
 }
 
@@ -1423,15 +1449,21 @@ pub fn do_getvfsstat() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let _buf_addr = r_u64(&glob.fs_m_in, 8);
     let _size = r_u64(&glob.fs_m_in, 16);
-    // Would iterate vmnt table, call req_statvfs for each, and copy to user.
-    // Just stat all mounted filesystems.
+    // Would iterate vmnt table and copy the full statvfs array to user.
+    // Count mounted filesystems, refreshing each one's stats via the FS.
     let mut stat_count = 0;
     unsafe {
         let vmnt_arr = core::ptr::addr_of!((*vfs_global()).vmnt) as *const Vmnt;
         for i in 0..NR_MNTS {
             let vmp = &*vmnt_arr.add(i);
             if vmp.m_fs_e >= 0 && vmp.m_dev != 0 {
-                let (_r, _stat) = crate::vfs::request::req_statvfs(vmp.m_fs_e);
+                let mut buf = Statvfs::default();
+                crate::vfs::request::req_statvfs(
+                    vmp.m_fs_e,
+                    arch_common::com::VFS_PROC_NR,
+                    &mut buf as *mut Statvfs as *mut u8,
+                    core::mem::size_of::<Statvfs>(),
+                );
                 stat_count += 1;
             }
         }

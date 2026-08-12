@@ -4,7 +4,6 @@
 //! and clock resolution queries. A full IPC server loop is deferred until
 //! the scheduler and PM are running (Phase 12+).
 
-
 /// Clock RQ base (0xE00), matching com.h conventions.
 pub const CLOCK_RQ_BASE: u32 = 0xE00;
 
@@ -18,8 +17,9 @@ pub const CLOCK_SETTIME: u32 = CLOCK_RQ_BASE + 1;
 pub const CLOCK_GETRES: u32 = CLOCK_RQ_BASE + 2;
 
 /// Message offsets for clock requests (64-byte message buffer).
-const _MSG_OFF_TYPE: usize = 0;
-const _MSG_OFF_SOURCE: usize = 4;
+/// The standard MINIX message layout is source@0, type@4, payload@8.
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+const MSG_OFF_TYPE: usize = 4;
 pub const MSG_OFF_CLOCK_ID: usize = 8; // i32 — ClockId
 pub const MSG_OFF_SEC: usize = 12; // i64 — tv_sec
 pub const MSG_OFF_NSEC: usize = 20; // i64 — tv_nsec
@@ -141,21 +141,39 @@ pub fn clock_getres(_clock_id: ClockId) -> ClockTimeSpec {
 /// Clock server main loop.
 ///
 /// Receives messages from clients and dispatches clock requests.
-/// Supports CLOCK_GETTIME, CLOCK_SETTIME, and CLOCK_GETRES.
-///
-/// The IPC receive call is stubbed — real IPC comes in Phase 13.
+/// Supports CLOCK_GETTIME, CLOCK_SETTIME, and CLOCK_GETRES. Replies carry
+/// the result code in `m_type` (offset 4); GETTIME/GETRES responses travel
+/// in the `sec`/`nsec` payload fields.
 pub fn clock_server_main() {
-    // TODO: Phase 13 — replace with real sef_receive + ipc_send loop:
-    //
-    //   loop {
-    //       let mut msg = [0u8; 64];
-    //       let r = sef_receive(ANY, &mut msg, &mut ipc_status);
-    //       if r != OK { continue; }
-    //       let call_nr = msg_i32(&msg, MSG_OFF_TYPE);
-    //       let result = dispatch_clock(call_nr, &mut msg);
-    //       msg_set_i32(&mut msg, MSG_OFF_TYPE, result);
-    //       ipc_send(msg_i32(&msg, MSG_OFF_SOURCE), &mut msg);
-    //   }
+    #[cfg(target_os = "minix")]
+    {
+        const ANY: i32 = 0x0000ffff;
+
+        loop {
+            let mut msg = [0u8; 64];
+            let src = unsafe {
+                minix_rt::syscall2(minix_rt::RECEIVE_CALL, ANY as u64, msg.as_mut_ptr() as u64)
+            };
+            if src < 0 {
+                continue;
+            }
+            let src_ep = src as i32;
+            let call_nr = msg_i32(&msg, MSG_OFF_TYPE);
+            let result = dispatch_clock(call_nr, &mut msg);
+            msg_set_i32(&mut msg, MSG_OFF_TYPE, result);
+            unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDNB_CALL,
+                    src_ep as u64,
+                    msg.as_mut_ptr() as u64,
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        // No kernel IPC on host builds — dispatch is tested directly.
+    }
 }
 
 /// Dispatch a single clock request.
@@ -163,7 +181,18 @@ pub fn clock_server_main() {
 /// Returns the result code and modifies `msg` with response data.
 pub fn dispatch_clock(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
     match call_nr as u32 {
-        CLOCK_GETTIME | CLOCK_GETRES => {
+        CLOCK_GETTIME => {
+            let clock_id = msg_i32(msg, MSG_OFF_CLOCK_ID);
+            let (realtime, monotonic, boottime, hz) = kernel_clock();
+            let ts = match clock_time_to_ts(clock_id, realtime, monotonic, boottime, hz) {
+                Ok(ts) => ts,
+                Err(e) => return e,
+            };
+            msg_set_i64(msg, MSG_OFF_SEC, ts.tv_sec);
+            msg_set_i64(msg, MSG_OFF_NSEC, ts.tv_nsec);
+            OK
+        }
+        CLOCK_GETRES => {
             let clock_id = msg_i32(msg, MSG_OFF_CLOCK_ID);
             let clock = match clock_id {
                 0 => ClockId::Realtime,
@@ -183,9 +212,58 @@ pub fn dispatch_clock(call_nr: i32, msg: &mut [u8; 64]) -> i32 {
     }
 }
 
+/// Read the kernel clock via SYS_TIMES (kernel call 25).
+///
+/// Returns `(realtime_ticks, monotonic_ticks, boottime_sec, hz)`. On host
+/// (no kernel) returns all zeros with the default 100 Hz tick rate.
+fn kernel_clock() -> (u64, u64, i64, u64) {
+    let mut msg = [0u8; 64];
+    let r = minix_rt::kernel_call(25, &mut msg); // SYS_TIMES
+    if r != 0 {
+        return (0, 0, 0, 100);
+    }
+    let realtime = u64::from_ne_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
+    let monotonic = u64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0; 8]));
+    let boottime = i64::from_ne_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+    let hz = u64::from_ne_bytes(msg[40..48].try_into().unwrap_or([0; 8]));
+    (realtime, monotonic, boottime, hz)
+}
+
+/// Convert raw kernel clock values to a `ClockTimeSpec` for `clock_id`.
+///
+/// Realtime wall time is `boottime + realtime/hz` (the kernel stores
+/// realtime as ticks since boot, with boottime in seconds since the epoch).
+fn clock_time_to_ts(
+    clock_id: i32,
+    realtime: u64,
+    monotonic: u64,
+    boottime: i64,
+    hz: u64,
+) -> Result<ClockTimeSpec, i32> {
+    let hz = if hz == 0 { 100 } else { hz };
+    match clock_id {
+        0 => {
+            let sec = boottime + (realtime / hz) as i64;
+            let nsec = ((realtime % hz) * (NSEC_PER_SEC as u64 / hz)) as i64;
+            Ok(ClockTimeSpec {
+                tv_sec: sec,
+                tv_nsec: nsec,
+            })
+        }
+        1 => Ok(ClockTimeSpec::from_ticks(monotonic, hz)),
+        _ => Err(EINVAL),
+    }
+}
+
 /// Read an i32 from a message buffer.
 fn msg_i32(msg: &[u8; 64], off: usize) -> i32 {
     i32::from_ne_bytes(msg[off..off + 4].try_into().unwrap())
+}
+
+/// Write an i32 into a message buffer.
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+fn msg_set_i32(msg: &mut [u8; 64], off: usize, val: i32) {
+    msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
 }
 
 /// Write an i64 into a message buffer.
@@ -352,10 +430,38 @@ mod tests {
 
     #[test]
     fn test_clock_server_main_callable() {
-        // Stub must not panic
+        // Must not panic or hang on host (the minix loop is cfg-gated).
         clock_server_main();
     }
 
+    #[test]
+    fn test_clock_time_to_ts_realtime() {
+        // boottime=1000s, realtime=12345 ticks @ 100 Hz → 1123.45s.
+        let ts = clock_time_to_ts(0, 12345, 0, 1000, 100).unwrap();
+        assert_eq!(ts.tv_sec, 1123);
+        assert_eq!(ts.tv_nsec, 450_000_000);
+    }
+
+    #[test]
+    fn test_clock_time_to_ts_monotonic() {
+        // 250 ticks @ 100 Hz → 2.5s.
+        let ts = clock_time_to_ts(1, 999, 250, 5, 100).unwrap();
+        assert_eq!(ts.tv_sec, 2);
+        assert_eq!(ts.tv_nsec, 500_000_000);
+    }
+
+    #[test]
+    fn test_clock_time_to_ts_invalid_clock() {
+        assert_eq!(clock_time_to_ts(42, 0, 0, 0, 100), Err(EINVAL));
+    }
+
+    #[test]
+    fn test_clock_time_to_ts_zero_hz_falls_back() {
+        // A zero hz from the kernel must not panic; treat it as 100 Hz.
+        let ts = clock_time_to_ts(1, 50, 50, 0, 0).unwrap();
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 500_000_000);
+    }
 
     #[test]
     fn test_dispatch_getres_realtime() {

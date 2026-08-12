@@ -147,6 +147,8 @@ pub const REQ_BREAD: i32 = FS_BASE + 11;
 pub const REQ_BWRITE: i32 = FS_BASE + 12;
 pub const REQ_UNLINK: i32 = FS_BASE + 13;
 pub const REQ_RMDIR: i32 = FS_BASE + 14;
+pub const REQ_STAT: i32 = FS_BASE + 8;
+pub const REQ_STATVFS: i32 = FS_BASE + 10;
 
 pub const UTIME_NOW: i64 = -1;
 pub const UTIME_OMIT: i64 = -2;
