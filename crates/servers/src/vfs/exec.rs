@@ -106,10 +106,26 @@ static mut EXEC_FRAME_BUF: [u8; EXEC_FRAME_MAX] = [0u8; EXEC_FRAME_MAX];
 pub struct ExecResult {
     /// OK or a negative errno.
     pub status: i32,
+    /// True when the failure happened after the old image was torn down
+    /// (`VM_EXEC_NEWMEM` succeeded) — the process cannot continue and PM
+    /// must kill it instead of replying the error.
+    pub partial: bool,
     /// Entry point of the new image (valid on success).
     pub pc: u64,
     /// New user stack pointer (valid on success).
     pub newsp: u64,
+}
+
+/// An exec failure after the address space was replaced: PM must kill the
+/// process.
+#[cfg(target_os = "minix")]
+fn err_partial(s: i32) -> ExecResult {
+    ExecResult {
+        status: s,
+        partial: true,
+        pc: 0,
+        newsp: 0,
+    }
 }
 
 /// Perform the exec of `path` for process `proc_e`, whose userland built a
@@ -130,6 +146,7 @@ pub unsafe fn pm_exec(
 ) -> ExecResult {
     let err = |s: i32| ExecResult {
         status: s,
+        partial: false,
         pc: 0,
         newsp: 0,
     };
@@ -357,7 +374,7 @@ pub unsafe fn pm_exec(
             off + filesz,
         );
         if r != 0 {
-            return fail(r);
+            return err_partial(r);
         }
         mapped_any = true;
     }
@@ -379,7 +396,7 @@ pub unsafe fn pm_exec(
         .copy_from_slice(&(frame_len as u64).to_le_bytes());
     let kresult = minix_rt::kernel_call(SYS_EXEC_LOAD, &mut kmsg);
     if kresult != 0 {
-        return fail(kresult);
+        return err_partial(kresult);
     }
 
     let pc = u64::from_le_bytes(
@@ -408,6 +425,7 @@ pub unsafe fn pm_exec(
 
     ExecResult {
         status: OK,
+        partial: false,
         pc,
         newsp,
     }
@@ -454,6 +472,7 @@ pub unsafe fn pm_exec(
 ) -> ExecResult {
     ExecResult {
         status: ENOSYS,
+        partial: false,
         pc: 0,
         newsp: 0,
     }

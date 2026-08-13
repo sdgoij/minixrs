@@ -160,13 +160,15 @@ pub fn service_pm() -> i32 {
                 crate::vfs::exec::pm_exec(proc_e, path, path_len, frame, frame_len, ps_str)
             };
 
-            // Build reply: VFS_PM_EXEC_REPLY with endpt, status, pc, newsp.
+            // Build reply: VFS_PM_EXEC_REPLY with endpt, status, partial,
+            // pc, newsp.
             #[cfg(target_os = "minix")]
             {
                 let mut buf = [0u8; 64];
                 buf[4..8].copy_from_slice(&VFS_PM_EXEC_REPLY.to_le_bytes());
                 buf[8..12].copy_from_slice(&proc_e.to_le_bytes());
                 buf[12..16].copy_from_slice(&result.status.to_le_bytes());
+                buf[16..20].copy_from_slice(&(result.partial as i32).to_le_bytes());
                 buf[24..32].copy_from_slice(&0u64.to_le_bytes()); // NEWPS_STR
                 buf[28..36].copy_from_slice(&result.pc.to_le_bytes());
                 buf[36..44].copy_from_slice(&result.newsp.to_le_bytes());

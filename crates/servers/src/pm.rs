@@ -2324,8 +2324,9 @@ const VFS_M7_P1_OFF: usize = 28;
 const VFS_M7_P2_OFF: usize = 36;
 
 // VFS_PM_EXEC_REPLY field offsets (VFS→PM, same packed convention):
-//   type@4, endpt@8, status@12, pc@28 (u64), newsp@36 (u64)
+//   type@4, endpt@8, status@12, partial@16, pc@28 (u64), newsp@36 (u64)
 const EXEC_REPLY_STATUS_OFF: usize = 12;
+const EXEC_REPLY_PARTIAL_OFF: usize = 16;
 const EXEC_REPLY_PC_OFF: usize = 28;
 const EXEC_REPLY_NEWSP_OFF: usize = 36;
 
@@ -3252,9 +3253,11 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
 
     let caller_ep = rmp.mp_endpoint;
 
-    // Matching C `do_exec`: remember the frame for procfs bookkeeping and
-    // mark the process as mid-exec.
-    rmp.mp_flags |= PARTIAL_EXEC;
+    // Remember the frame for procfs bookkeeping. PARTIAL_EXEC is NOT set
+    // here: it must only be set once the old image is actually being
+    // replaced (VFS reports that via the reply's partial flag), otherwise a
+    // clean failure like ENOENT would kill the caller instead of replying
+    // the error (observed: the shell silently dropped unknown commands).
     rmp.mp_frame_addr = frame_ptr;
     rmp.mp_frame_len = frame_len as u64;
 
@@ -3299,6 +3302,11 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
             .try_into()
             .unwrap_or([0; 4]),
     );
+    let partial = i32::from_le_bytes(
+        vfs_msg[EXEC_REPLY_PARTIAL_OFF..EXEC_REPLY_PARTIAL_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    ) != 0;
     let pc = u64::from_le_bytes(
         vfs_msg[EXEC_REPLY_PC_OFF..EXEC_REPLY_PC_OFF + 8]
             .try_into()
@@ -3311,7 +3319,7 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     );
 
     // exec_restart is unsafe: it mutates shared mproc state.
-    unsafe { exec_restart(caller_slot, status, pc, newsp) }
+    unsafe { exec_restart(caller_slot, status, partial, pc, newsp) }
 }
 
 /// Finish an exec after VFS has loaded the image — matching C `exec_restart()`
@@ -3330,7 +3338,13 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
 /// # Safety
 ///
 /// `caller_slot` must be a valid, in-use process slot.
-pub unsafe fn exec_restart(caller_slot: usize, status: i32, _pc: u64, _newsp: u64) -> i32 {
+pub unsafe fn exec_restart(
+    caller_slot: usize,
+    status: i32,
+    partial: bool,
+    _pc: u64,
+    _newsp: u64,
+) -> i32 {
     // pc/newsp are used by the C flow's sys_exec; the kernel's SYS_EXEC_LOAD
     // already set the registers when it replaced the image.
     if caller_slot >= NR_PROCS {
@@ -3343,8 +3357,9 @@ pub unsafe fn exec_restart(caller_slot: usize, status: i32, _pc: u64, _newsp: u6
     }
 
     if status != OK {
-        if rmp.mp_flags & PARTIAL_EXEC != 0 {
-            // The image was partially replaced — the process cannot continue.
+        if partial {
+            // The image was already replaced (VFS tore it down with
+            // VM_EXEC_NEWMEM) — the process cannot continue.
             unsafe { sig_proc(caller_slot, 9, false, true) };
         } else {
             // Exec failed before anything was touched — reply the error.
@@ -3362,11 +3377,8 @@ pub unsafe fn exec_restart(caller_slot: usize, status: i32, _pc: u64, _newsp: u6
                 );
             }
         }
-        rmp.mp_flags &= !PARTIAL_EXEC;
         return EDONTREPLY;
     }
-
-    rmp.mp_flags &= !PARTIAL_EXEC;
 
     // Reset caught/ignored signals to default (matching C).
     rmp.mp_catch.sigemptyset();
