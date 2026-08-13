@@ -15,6 +15,12 @@ const LOG_ZONE_SIZE: i16 = 0;
 pub const INODES: u32 = 128;
 pub const NAMESIZE: usize = 60;
 
+/// Default root-image size in blocks (16 MiB): the uutils coreutils
+/// multicall is ~6 MiB stripped, and the rest of /bin + /sbin is ~6 MiB
+/// more. `MINIXFS_BLOCKS` overrides it (the large-binary verification
+/// needs a filesystem big enough for a ≥32 MiB executable).
+const DEFAULT_BLOCKS: u32 = 4096;
+
 pub const I_DIRECTORY: u16 = 0o040000;
 pub const I_REGULAR: u16 = 0o100000;
 pub const I_CHAR_SPECIAL: u16 = 0o020000;
@@ -434,16 +440,15 @@ impl MinixFs {
 
 /// Build the standard root filesystem image containing `files` (destination
 /// path → content). The parent directories /bin and /sbin are created
-/// automatically; anything else lands in the root. 4096 blocks (16 MiB) by
-/// default: the uutils coreutils multicall is ~6 MiB stripped, and the rest
-/// of /bin + /sbin is ~6 MiB more. The `MINIXFS_BLOCKS` env var overrides the
-/// size (used by the large-binary verification, which needs a filesystem big
+/// automatically; anything else lands in the root. Sized by
+/// [`DEFAULT_BLOCKS`] unless the `MINIXFS_BLOCKS` env var overrides it
+/// (used by the large-binary verification, which needs a filesystem big
 /// enough for a ≥32 MiB executable).
 pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let total_blocks = std::env::var("MINIXFS_BLOCKS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(4096u32);
+        .unwrap_or(DEFAULT_BLOCKS);
     let mut fs = MinixFs::new(total_blocks, INODES);
 
     let root_zone = fs.create_directory(ROOT_INODE, ROOT_INODE);
@@ -490,7 +495,7 @@ mod tests {
     fn superblock_magic_and_size() {
         let empty: &[(&'static str, Vec<u8>)] = &[];
         let image = build_minixfs(empty);
-        assert_eq!(image.len(), 2048 * BLOCK_SIZE);
+        assert_eq!(image.len(), DEFAULT_BLOCKS as usize * BLOCK_SIZE);
         // Superblock magic at offset 1024 + 28 (s_magic field).
         let magic = u16::from_le_bytes(image[1024 + 28..1024 + 30].try_into().unwrap());
         assert_eq!(magic, SUPER_MAGIC_V3);
