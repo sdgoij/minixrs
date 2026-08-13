@@ -950,8 +950,17 @@ pub unsafe extern "C" fn timer_isr_entry() {
         // Kernel mode: restore the 15 GPRs, clear IF in the saved RFLAGS
         // (the interrupted kernel code had IF=1; do not re-enter the ISR
         // before the next scheduling point), and ret. QEMU TCG pushes a
-        // 40-byte frame even for same-ring interrupts, so skip the
-        // old_RSP/old_SS slots.
+        // 40-byte frame even for same-ring interrupts, so the frame is
+        // [RIP, CS, RFLAGS, old_RSP, old_SS] with old_RSP at [rsp+24].
+        //
+        // The return is built purely on the stack — no GPR is clobbered.
+        // (The previous code popped RIP into rcx and RFLAGS into r11 to
+        // rebuild the return, corrupting rcx/r11 for the interrupted
+        // kernel code. With the console-read halt (IF=1 in kernel mode) a
+        // serial IRQ can fire mid-loop, and the clobbered rcx — which held
+        // the read buffer pointer — made try_read's store write the byte
+        // into kernel text at the interrupted RIP, corrupting code and
+        // causing an observed ud2 at RIP=0x13.)
         "1:",
         "pop    r15",
         "pop    r14",
@@ -969,13 +978,10 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "pop    rcx",
         "pop    rax",
         "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
-        "pop    rcx",                   // RIP
-        "add    rsp, 8",                // skip CS
-        "pop    r11",                   // RFLAGS (IF cleared)
-        "add    rsp, 16",               // skip old_RSP/old_SS (QEMU TCG same-ring frame)
-        "push   r11",
-        "popfq",                        // restore RFLAGS (IF=0)
-        "push   rcx",
+        "push   qword ptr [rsp + 16]",
+        "popfq",
+        "mov    rsp, [rsp + 24]",
+        "push   qword ptr [rsp - 40]",
         "ret",
 
         c_handler = sym timer_isr_c_handler,
@@ -1096,7 +1102,10 @@ pub unsafe extern "C" fn serial_isr_entry() {
         "jmp    2b",
 
         // Kernel mode: restore the 15 GPRs, clear IF in the saved RFLAGS,
-        // and ret (QEMU TCG same-ring 40-byte frame: skip old_RSP/old_SS).
+        // and ret without clobbering any GPR (same rationale as the timer
+        // ISR: QEMU TCG same-ring frames are 40 bytes, and the return is
+        // built on the stack so rcx/r11 survive for the interrupted kernel
+        // code).
         "1:",
         "pop    r15",
         "pop    r14",
@@ -1114,13 +1123,10 @@ pub unsafe extern "C" fn serial_isr_entry() {
         "pop    rcx",
         "pop    rax",
         "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
-        "pop    rcx",                   // RIP
-        "add    rsp, 8",                // skip CS
-        "pop    r11",                   // RFLAGS (IF cleared)
-        "add    rsp, 16",               // skip old_RSP/old_SS (QEMU TCG same-ring frame)
-        "push   r11",
-        "popfq",                        // restore RFLAGS (IF=0)
-        "push   rcx",
+        "push   qword ptr [rsp + 16]",
+        "popfq",
+        "mov    rsp, [rsp + 24]",
+        "push   qword ptr [rsp - 40]",
         "ret",
 
         handler = sym SERIAL_ISR_HANDLER,

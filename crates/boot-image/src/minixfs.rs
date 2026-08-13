@@ -434,15 +434,16 @@ impl MinixFs {
 
 /// Build the standard root filesystem image containing `files` (destination
 /// path → content). The parent directories /bin and /sbin are created
-/// automatically; anything else lands in the root. 2048 blocks (8 MiB) by
-/// default; the `MINIXFS_BLOCKS` env var overrides the size (used by the
-/// large-binary verification, which needs a filesystem big enough for a
-/// ≥32 MiB executable).
+/// automatically; anything else lands in the root. 4096 blocks (16 MiB) by
+/// default: the uutils coreutils multicall is ~6 MiB stripped, and the rest
+/// of /bin + /sbin is ~6 MiB more. The `MINIXFS_BLOCKS` env var overrides the
+/// size (used by the large-binary verification, which needs a filesystem big
+/// enough for a ≥32 MiB executable).
 pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let total_blocks = std::env::var("MINIXFS_BLOCKS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(2048u32);
+        .unwrap_or(4096u32);
     let mut fs = MinixFs::new(total_blocks, INODES);
 
     let root_zone = fs.create_directory(ROOT_INODE, ROOT_INODE);

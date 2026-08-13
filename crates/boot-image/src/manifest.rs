@@ -23,8 +23,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/tcp", "tcp"),
     ("/bin/tcpserver", "tcpserver"),
     ("/bin/udp_echo", "udp_echo"),
-    // `/bin/coreutils` is the uutils multicall binary (echo/cat/true/false
-    // for now), built from the coreutils submodule for x86_64 only so far.
+    // `/bin/coreutils` is the uutils multicall binary, built from the
+    // coreutils submodule for x86_64 only so far. `just coreutils-x86` builds
+    // the `feat_minix` feature set (56 utilities: text tools, checksums,
+    // filesystem basics); the kernel build.rs skips it on other arches.
     ("/bin/coreutils", "coreutils"),
     // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`
     // cargo bin. Rebuild it with `tools/build-std-hello.py [target]`

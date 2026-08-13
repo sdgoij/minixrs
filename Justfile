@@ -62,6 +62,30 @@ userland-aarch64:
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p userland --bins --target aarch64-unknown-minix --release
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p servers --bins --target aarch64-unknown-minix --release
 
+# uutils coreutils multicall (/bin/coreutils) for a minix target, built from
+# the coreutils submodule with the feat_minix feature set. -C strip=symbols
+# and -C opt-level=z keep the 56-tool binary ~6 MiB so it fits the default
+# 16 MiB minixfs. The getrandom backend cfg routes rand users (shuf/sort/
+# factor) to the weak RNG registered in src/bin/coreutils.rs until the OS
+# grows a kernel entropy source.
+#
+# NB: cargo chdirs into the submodule for --manifest-path builds, so lld
+# resolves the linker script relative to coreutils/ (-T../tools/...) and the
+# binary lands in coreutils/target — copy it into the shared target dir the
+# kernel build.rs embeds from.
+coreutils-x86:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target x86_64-pc-minix --no-default-features --features feat_minix
+    cp coreutils/target/x86_64-pc-minix/release/coreutils target/x86_64-pc-minix/release/coreutils
+
+coreutils-riscv64:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target riscv64gc-unknown-minix --no-default-features --features feat_minix
+
+coreutils-aarch64:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
+
 # ---------- build ----------
 
 build target="x86":

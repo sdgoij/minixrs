@@ -79,16 +79,29 @@ pub fn poll_console() -> Option<u8> {
     serial_try_read_byte()
 }
 
-/// Arch-specific CPU idle hint (PAUSE on x86_64).
+/// Arch-specific CPU idle: PAUSE busy-wait with interrupts disabled.
 ///
-/// Note: this deliberately does NOT enable interrupts: enabling IF here
-/// would let the timer ISR fire in kernel mode and burn the waiting
-/// process's quantum (`context_stop` runs per tick in this port, unlike
-/// C MINIX which accounts at context-switch time). Burst input is instead
-/// captured by the serial ISR plus the timer-tick UART drain (see
-/// `drain_uart_input` in kernel-boot).
+/// The console read wait (`ser_input::read_blocking`) spins with IF=0, so
+/// no interrupt can disturb the blocked syscall. The original `sti;hlt`
+/// variant (matching AArch64/RISC-V's halt-wait) lets the timer ISR fire
+/// mid-syscall; the per-tick quantum accounting (`proc_no_time` →
+/// RTS_NO_QUANTUM) then corrupts the blocked console read's return path,
+/// and the tty server starts issuing aborted `read(0)` syscalls that return
+/// 0x00 — the console floods with ECHOCTL "^@" and command output is lost.
+/// The PAUSE spin is safe with the GPR-clobber-free ISR returns below: the
+/// ud2 crashes (the original motivation for the halt) came from those ISRs
+/// clobbering rcx/r11, not from the spin itself.
+///
+/// The kernel-mode return paths of the timer/serial ISRs used to clobber
+/// rcx/r11 (the RIP was popped into rcx to rebuild the return), which
+/// corrupted the interrupted kernel code — the console-read loop's buffer
+/// pointer in rcx made try_read write the byte into kernel text. The ISRs
+/// now rebuild the return on the stack without touching any GPR, so the
+/// PAUSE spin is safe.
 pub fn cpu_idle() {
-    pause();
+    unsafe {
+        core::arch::asm!("pause", options(nomem, nostack));
+    }
 }
 
 /// Try to read a byte from COM1 without blocking.
