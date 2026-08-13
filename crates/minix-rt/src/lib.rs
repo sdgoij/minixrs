@@ -3,8 +3,8 @@
 //! Provides the runtime environment for userspace executables:
 //! - `_start` entry point (naked asm, ABI-compatible with kernel exec)
 //! - Panic handler (format + write to stderr, abort)
-//! - Bump allocator backed by `brk` syscall (`BrkAllocator`)
-//! - Syscall wrappers (`syscall0`–`syscall6` via `syscall` instruction)
+//! - Mmap-backed free-list global allocator (`allocator` module)
+//! - VM memory ops (`vmem` module) + syscall wrappers
 //! - `exit()`, `write()`, `getpid()`, `sbrk()` primitives
 //!
 //! On x86_64, userspace syscalls use the `syscall` instruction:
@@ -17,8 +17,10 @@
 #![no_std]
 #![allow(dead_code, unused_unsafe)]
 
-use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+pub mod allocator;
+pub mod vmem;
 
 // Syscall numbers (from `.refs/minix-3.3.0/minix/include/minix/callnr.h`)
 
@@ -1379,7 +1381,7 @@ impl BrkLock {
         }
     }
 
-    fn lock(&self) {
+    pub(crate) fn lock(&self) {
         while self.locked.swap(1, Ordering::Acquire) != 0 {
             unsafe {
                 futex_wait(core::ptr::addr_of!(self.locked).cast::<u32>(), 1);
@@ -1387,7 +1389,7 @@ impl BrkLock {
         }
     }
 
-    fn unlock(&self) {
+    pub(crate) fn unlock(&self) {
         self.locked.store(0, Ordering::Release);
         unsafe {
             futex_wake(core::ptr::addr_of!(self.locked).cast::<u32>(), 1);
@@ -1562,7 +1564,10 @@ impl core::fmt::Write for BufWriter<'_> {
     }
 }
 
-// Bump allocator
+// Bump-heap VA layout for `minix_alloc_zeroed` (the MFS block cache) and
+// the `sbrk` users (exec frame, thread stacks, TLS blocks). The global
+// allocator itself is mmap-backed (see `allocator` module) and does not
+// use this window.
 
 /// End of the userland bump-heap VA range (exclusive).
 ///
@@ -1588,141 +1593,6 @@ pub const HEAP_LIMIT: usize = if cfg!(target_arch = "aarch64") {
 } else {
     0x1_0000_0000
 };
-
-/// A simple bump allocator backed by the `brk` syscall.
-///
-/// Allocations are made by incrementing a pointer into the heap.
-/// Deallocation is a no-op — memory is reclaimed only on process exit.
-pub struct BrkAllocator {
-    /// Current bump pointer (next allocation address).
-    ptr: AtomicUsize,
-}
-
-impl BrkAllocator {
-    /// Create a new bump allocator.
-    ///
-    /// Initializes the bump pointer to the current program break.
-    pub const fn new() -> Self {
-        Self {
-            ptr: AtomicUsize::new(0),
-        }
-    }
-
-    /// Allocate memory with the given layout.
-    ///
-    /// Returns a pointer to the allocated memory, or null on failure.
-    ///
-    /// # Safety
-    ///
-    /// `layout` must have non-zero size. The caller must ensure that
-    /// concurrent calls to `alloc` or `dealloc` are properly synchronized.
-    pub fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align();
-
-        // On first call, self.ptr is 0. Jump to the start of the heap.
-        let current = self.ptr.load(Ordering::Relaxed);
-        if current == 0 {
-            let init_brk = HEAP_BASE;
-            let result = unsafe { brk(init_brk as *const u8) };
-            if result < 0 {
-                return core::ptr::null_mut();
-            }
-            self.ptr.store(init_brk, Ordering::Relaxed);
-        }
-
-        // Round up the current pointer to the required alignment.
-        let current = self.ptr.load(Ordering::Relaxed);
-        let aligned = (current + align - 1) & !(align - 1);
-
-        let new_end = aligned + size;
-
-        if new_end > HEAP_LIMIT {
-            // Out of heap space.
-            return core::ptr::null_mut();
-        }
-
-        // Extend the heap if needed.
-        let heap_end = (unsafe { brk(core::ptr::null()) }) as usize;
-        if new_end > heap_end.max(HEAP_BASE) {
-            // Need to extend the heap.
-            let result = unsafe { brk(new_end as *const u8) };
-            if result < 0 {
-                return core::ptr::null_mut();
-            }
-        }
-
-        self.ptr.store(aligned + size, Ordering::Relaxed);
-        aligned as *mut u8
-    }
-
-    /// Deallocate memory — no-op for bump allocator.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must have been allocated by this allocator with the given layout.
-    pub unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator: no-op.
-    }
-}
-
-unsafe impl Send for BrkAllocator {}
-unsafe impl Sync for BrkAllocator {}
-
-unsafe impl core::alloc::GlobalAlloc for BrkAllocator {
-    /// Allocate memory with the given layout.
-    ///
-    /// # Safety
-    ///
-    /// `layout` must have non-zero size.
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        BrkAllocator::alloc(self, layout)
-    }
-
-    /// Allocate zero-initialized memory.
-    ///
-    /// Override the default `alloc_zeroed` (which may be optimized into a
-    /// `__rust_alloc_zeroed` call that doesn't exist in bare-metal) with
-    /// an explicit alloc + volatile memset that cannot be optimized away.
-    ///
-    /// # Safety
-    ///
-    /// `layout` must have non-zero size.
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = self.alloc(layout);
-        if !ptr.is_null() {
-            // Volatile byte-by-byte memset prevents LLVM from optimizing
-            // alloc + memset back into __rust_alloc_zeroed. Each volatile
-            // write is a compiler barrier that cannot be reordered or elided.
-            let len = layout.size();
-            for i in 0..len {
-                unsafe { core::ptr::write_volatile(ptr.add(i), 0u8) };
-            }
-        }
-        ptr
-    }
-
-    /// Deallocate memory previously allocated by this allocator.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must be a pointer returned by `alloc` with the same `layout`.
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { BrkAllocator::dealloc(self, ptr, layout) }
-    }
-}
-
-// Provide a Default impl for generic code that requests #[global_allocator].
-impl Default for BrkAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// The global allocator instance.
-#[cfg(all(target_os = "minix", feature = "rt"))]
-#[global_allocator]
-static ALLOCATOR: BrkAllocator = BrkAllocator::new();
 
 /// Allocate zeroed memory for direct-heap users (e.g. the MFS block
 /// cache), bypassing the Rust alloc crate's GlobalAlloc chain.
@@ -1904,8 +1774,9 @@ mod tests {
 
     #[test]
     fn test_allocator_heap_bounds() {
-        // The bump allocator uses the HEAP_BASE..HEAP_BASE+1 MiB region.
-        // Verify the bounds don't overflow or wrap.
+        // The bump heap (minix_alloc_zeroed / sbrk users) uses the
+        // HEAP_BASE..HEAP_BASE+1 MiB region. Verify the bounds don't
+        // overflow or wrap.
         let start = HEAP_BASE;
         let end = HEAP_BASE + 0x100000;
         assert!(start < end, "heap start must be below end");
@@ -1957,13 +1828,6 @@ mod tests {
     }
 
     #[test]
-    fn test_allocator_layout() {
-        // Verify the allocator can be constructed and has the right size.
-        let alloc = BrkAllocator::new();
-        assert_eq!(alloc.ptr.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
     fn test_buf_writer() {
         use core::fmt::Write;
         let mut buf = [0u8; 16];
@@ -1991,22 +1855,5 @@ mod tests {
             assert_eq!(w.pos, 4);
         }
         assert_eq!(&buf, b"hell");
-    }
-
-    #[test]
-    fn test_allocator_is_send_sync() {
-        fn check_send<T: Send>(_: &T) {}
-        fn check_sync<T: Sync>(_: &T) {}
-        let alloc = BrkAllocator::new();
-        check_send(&alloc);
-        check_sync(&alloc);
-    }
-
-    #[test]
-    #[cfg(all(target_os = "minix", feature = "rt"))]
-    fn test_global_allocator_impl() {
-        // Verify the global allocator trait is implemented.
-        fn _check<T: core::alloc::GlobalAlloc>(_: &T) {}
-        _check(&ALLOCATOR);
     }
 }

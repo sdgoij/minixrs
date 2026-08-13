@@ -146,5 +146,13 @@ name = "forktest"
 path = "src/bin/forktest.rs"
 test = false
 
+# allocprobe is a QEMU probe: it drives the rt mmap allocator through
+# alloc/free churn and checks the VM region count stays flat (run from the
+# shell by tools/alloc_churn_probe.py). Embedded as /bin/allocprobe.
+[[bin]]
+name = "allocprobe"
+path = "src/bin/allocprobe.rs"
+test = false
+
 [lints]
 workspace = true

@@ -794,6 +794,141 @@ pub fn regions(_args: &[&str]) -> i32 {
     }
 }
 
+/// allocprobe — QEMU probe for the rt mmap allocator.
+///
+/// Drives the allocator directly (`minix_rt::allocator::alloc`/`dealloc`;
+/// rt binaries don't link the `alloc` crate, so `#[global_allocator]` is
+/// never invoked) and asserts via `region_info` that the VM region count
+/// returns to baseline after every full free and stays flat while freed
+/// blocks are reused. Pins that fully-free chunks are munmapped (the heap
+/// can shrink) and that churn doesn't leak a chunk per cycle. Prints
+/// `allocprobe: PASS`/`FAIL` for the driver in `tools/alloc_churn_probe.py`.
+pub fn allocprobe(_args: &[&str]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        use core::alloc::Layout;
+
+        // 16-byte-aligned layout; the sizes below are constants, so the
+        // layout is always valid.
+        fn lay(size: usize) -> Layout {
+            unsafe { Layout::from_size_align_unchecked(size, 16) }
+        }
+
+        // Current VM-wide region count, or -1 when the query fails.
+        fn regions() -> i32 {
+            match minix_std::vmem::region_info() {
+                Ok((count, _)) => count as i32,
+                Err(_) => -1,
+            }
+        }
+
+        let mut ok = true;
+        let baseline = regions();
+        if baseline < 0 {
+            write_err(b"allocprobe: baseline region_info failed\n");
+            return 1;
+        }
+
+        // Phase 1 — grow then release: 128 x 16 KiB spans ~3 chunks
+        // (need per block is 16416, so a 1 MiB chunk holds 63); the peak
+        // must cross two chunks, and freeing everything must return the
+        // count exactly to baseline (fully-free chunks are munmapped).
+        let mut big = [core::ptr::null_mut(); 128];
+        for slot in big.iter_mut() {
+            let p = unsafe { minix_rt::allocator::alloc(lay(16384)) };
+            if p.is_null() {
+                write_err(b"allocprobe: phase1 alloc failed\n");
+                return 1;
+            }
+            *slot = p;
+        }
+        let peak = regions();
+        for &p in &big {
+            unsafe { minix_rt::allocator::dealloc(p) };
+        }
+        let after = regions();
+        if peak < baseline + 2 {
+            write_err(b"allocprobe: FAIL peak did not cross 2 chunks (");
+            print_dec_u32(peak as u32);
+            write_err(b" vs baseline ");
+            print_dec_u32(baseline as u32);
+            write_err(b")\n");
+            ok = false;
+        }
+        if after != baseline {
+            write_err(b"allocprobe: FAIL count did not return after full free (");
+            print_dec_u32(after as u32);
+            write_err(b" != ");
+            print_dec_u32(baseline as u32);
+            write_err(b")\n");
+            ok = false;
+        }
+
+        // Phase 2 — churn inside one chunk: 200 x 1 KiB fits a single
+        // chunk, so the count must never exceed baseline + 1 while half
+        // the blocks stay live, and must return to baseline when the last
+        // block is freed (reuse, not a fresh chunk per cycle).
+        for cycle in 0..8u32 {
+            let mut small = [core::ptr::null_mut(); 200];
+            for slot in small.iter_mut() {
+                let p = unsafe { minix_rt::allocator::alloc(lay(1024)) };
+                if p.is_null() {
+                    write_err(b"allocprobe: phase2 alloc failed\n");
+                    return 1;
+                }
+                *slot = p;
+            }
+            // Free the first half; the chunk is still live (half remains).
+            for &p in small.iter().take(100) {
+                unsafe { minix_rt::allocator::dealloc(p) };
+            }
+            let during = regions();
+            // Refill the freed half — must reuse blocks, not map a chunk.
+            // (Written into the freed slots so every block is freed exactly
+            // once below: no double-free, no leak.)
+            for slot in small.iter_mut().take(100) {
+                let p = unsafe { minix_rt::allocator::alloc(lay(1024)) };
+                if p.is_null() {
+                    write_err(b"allocprobe: phase2 refill alloc failed\n");
+                    return 1;
+                }
+                *slot = p;
+            }
+            let refilled = regions();
+            for &p in &small {
+                unsafe { minix_rt::allocator::dealloc(p) };
+            }
+            let after_cycle = regions();
+            if during > baseline + 1 || refilled > baseline + 1 {
+                write_err(b"allocprobe: FAIL region count grew during churn (cycle ");
+                print_dec_u32(cycle);
+                write_err(b")\n");
+                ok = false;
+            }
+            if after_cycle != baseline {
+                write_err(b"allocprobe: FAIL count did not return to baseline (cycle ");
+                print_dec_u32(cycle);
+                write_err(b")\n");
+                ok = false;
+            }
+        }
+
+        if ok {
+            write_out(b"allocprobe: PASS regions flat at ");
+            print_dec_u32(baseline as u32);
+            write_out(b"\r\n");
+            0
+        } else {
+            1
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        write_out(b"allocprobe: host stub\n");
+        0
+    }
+}
+
 /// hangdump — ask the kernel to print every process's IPC state to the
 /// serial console (who is blocked on whom). Diagnostic for wedged servers.
 pub fn hangdump(_args: &[&str]) -> i32 {
