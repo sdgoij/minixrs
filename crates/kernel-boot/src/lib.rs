@@ -8,6 +8,12 @@
 
 #![no_std]
 
+use arch_common::com::{
+    DS_PROC_NR, INIT_PROC_NR, MFS_PROC_NR, NET_PROC_NR, PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR,
+    RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR,
+    VM_PROC_NR,
+};
+
 pub mod boot_init;
 
 #[cfg(all(feature = "integration-tests", target_arch = "x86_64"))]
@@ -120,6 +126,41 @@ pub fn print_memory_banner(detected: u64, usable: u64) {
     serial_write(" MiB usable)\r\n");
 }
 
+/// Print a fatal boot error to the boot console, then halt the CPU forever.
+///
+/// The halt mechanism is arch-specific: `hlt` on x86_64, and the arch
+/// `hal::halt()` (a `wfi` loop) on AArch64 and RISC-V. Never returns.
+pub fn boot_abort(msg: &str) -> ! {
+    serial_write("  FAILED: ");
+    serial_write(msg);
+    serial_write("\r\n");
+    #[cfg(all(not(test), target_arch = "x86_64"))]
+    loop {
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+    }
+    #[cfg(all(not(test), target_arch = "aarch64"))]
+    {
+        arch_aarch64::hal::halt()
+    }
+    #[cfg(all(not(test), target_arch = "riscv64"))]
+    {
+        arch_riscv64::hal::halt()
+    }
+    #[cfg(any(
+        test,
+        not(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        ))
+    ))]
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// Write a single byte to the boot console.
 ///
 /// On x86_64: COM1 serial port via port I/O.
@@ -170,6 +211,44 @@ pub fn serial_putc(c: u8) {
         ))
     ))]
     let _ = c;
+}
+
+/// Boot processes in startup order: (initramfs path, endpoint number).
+///
+/// Order matters: VFS must come before MFS so VFS's SENDREC is queued and
+/// processed when MFS later runs, and VM must come before any process
+/// that calls brk() (MFS, PFS, TTY, INIT). VM is loaded right after VFS,
+/// ahead of the device drivers and the brk()-using servers; all three
+/// arches share this single list.
+static BOOT_PROCS_ALL: &[(&str, i32)] = &[
+    ("/sbin/ds", DS_PROC_NR),           // Data Store (first, matches C order)
+    ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
+    ("/sbin/pm", PM_PROC_NR),           // Process Manager
+    ("/sbin/sched", SCHED_PROC_NR),     // Scheduler
+    ("/sbin/vfs", VFS_PROC_NR),         // Virtual File System
+    ("/sbin/vm", VM_PROC_NR),           // Virtual Memory
+    ("/sbin/ramdisk", RAMDISK_PROC_NR), // RAM disk block driver
+    ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR), // virtio-blk disk driver
+    ("/sbin/virtio_net", VIRTIO_NET_PROC_NR), // virtio-net NIC driver
+    ("/sbin/net", NET_PROC_NR),         // network server (ARP/ICMP)
+    ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
+    ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
+    ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
+    ("/sbin/init", INIT_PROC_NR),       // init
+];
+
+/// The boot process list for this build: the full list, or — under the
+/// boot-test feature — the full list minus the trailing INIT entry, so
+/// the boot-complete test runs before any user process starts.
+pub fn boot_procs() -> &'static [(&'static str, i32)] {
+    #[cfg(feature = "boot-test")]
+    {
+        &BOOT_PROCS_ALL[..BOOT_PROCS_ALL.len() - 1]
+    }
+    #[cfg(not(feature = "boot-test"))]
+    {
+        BOOT_PROCS_ALL
+    }
 }
 
 /// Print macro for boot-time serial output.

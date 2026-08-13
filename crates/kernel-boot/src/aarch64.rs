@@ -12,6 +12,11 @@
 use core::panic::PanicInfo;
 
 use core::arch::global_asm;
+#[cfg(not(feature = "integration-tests"))]
+use kernel_boot::boot_abort;
+#[cfg(feature = "integration-tests")]
+use kernel_boot::serial_putc;
+use kernel_boot::serial_write;
 
 // _start entry point — called by QEMU on virt machine.
 // The kernel image is loaded at the start of RAM (0x40000000) by QEMU's
@@ -55,35 +60,6 @@ unsafe extern "C" {
     static __bss_start: u8;
     static __bss_end: u8;
     static __stack_top: u8;
-}
-
-/// Serial output helper — uses PL011 UART directly during early boot.
-fn serial_write(s: &str) {
-    for &b in s.as_bytes() {
-        // PL011 UART at 0x09000000.
-        const UART_DR: usize = 0x0900_0000;
-        const UART_FR: usize = 0x0900_0000 + 0x18;
-        const FR_TXFF: u32 = 1 << 5;
-        unsafe {
-            while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
-                core::hint::spin_loop();
-            }
-            core::ptr::write_volatile(UART_DR as *mut u32, b as u32);
-        }
-    }
-}
-
-#[cfg(feature = "integration-tests")]
-fn serial_putc(c: u8) {
-    const UART_DR: usize = 0x0900_0000;
-    const UART_FR: usize = 0x0900_0000 + 0x18;
-    const FR_TXFF: u32 = 1 << 5;
-    unsafe {
-        while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
-            core::hint::spin_loop();
-        }
-        core::ptr::write_volatile(UART_DR as *mut u32, c as u32);
-    }
 }
 
 /// AArch64 kernel main entry.
@@ -566,183 +542,14 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
             arch_aarch64::timer::init_timer();
         }
 
-        use arch_common::com::*;
+        let boot_cfg = kernel_boot::boot_init::BootProcessConfig {
+            procs: kernel_boot::boot_procs(),
+            map_low_gb_dev_user: true, // AArch64: EL0 virtio-mmio window
+            map_virtio_bars: false,
+            map_virtio_mmio: false,
+        };
 
-        serial_write("  loading boot processes...\r\n");
-
-        // When boot-test is active, INIT is excluded so the test completes
-        // before any user process starts (same as x86 main.rs / riscv64.rs).
-        #[cfg(not(feature = "boot-test"))]
-        let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/ds", DS_PROC_NR),
-            ("/sbin/rs", RS_PROC_NR),
-            ("/sbin/pm", PM_PROC_NR),
-            ("/sbin/sched", SCHED_PROC_NR),
-            ("/sbin/vfs", VFS_PROC_NR),
-            ("/sbin/vm", VM_PROC_NR),
-            ("/sbin/ramdisk", RAMDISK_PROC_NR),
-            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
-            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
-            ("/sbin/net", NET_PROC_NR),
-            ("/sbin/mfs", MFS_PROC_NR),
-            ("/sbin/pfs", PFS_PROC_NR),
-            ("/sbin/tty", TTY_PROC_NR),
-            ("/sbin/init", INIT_PROC_NR),
-        ];
-        #[cfg(feature = "boot-test")]
-        let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/ds", DS_PROC_NR),
-            ("/sbin/rs", RS_PROC_NR),
-            ("/sbin/pm", PM_PROC_NR),
-            ("/sbin/sched", SCHED_PROC_NR),
-            ("/sbin/vfs", VFS_PROC_NR),
-            ("/sbin/vm", VM_PROC_NR),
-            ("/sbin/ramdisk", RAMDISK_PROC_NR),
-            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
-            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
-            ("/sbin/net", NET_PROC_NR),
-            ("/sbin/mfs", MFS_PROC_NR),
-            ("/sbin/pfs", PFS_PROC_NR),
-            ("/sbin/tty", TTY_PROC_NR),
-        ];
-
-        #[cfg(not(feature = "boot-test"))]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 14] =
-            unsafe { core::mem::zeroed() };
-        #[cfg(feature = "boot-test")]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 13] =
-            unsafe { core::mem::zeroed() };
-        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
-            let info = match unsafe {
-                kernel_boot::boot_init::load_and_prepare_proc(path, proc_nr, &[path])
-            } {
-                Some(info) => info,
-                None => {
-                    serial_write("  FAILED loading ");
-                    serial_write(path);
-                    serial_write("\r\n");
-                    arch_aarch64::hal::halt();
-                }
-            };
-            boot_infos[i] = core::mem::MaybeUninit::new(info);
-        }
-
-        serial_write("  creating per-process page tables...\r\n");
-
-        let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
-        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
-            let rp = kernel::table::proc_addr(proc_nr);
-            if i == 0 {
-                first_proc = rp;
-            }
-
-            let info = unsafe { boot_infos[i].assume_init_ref() };
-
-            let pt_phys = unsafe {
-                kernel_boot::boot_init::boot_create_restricted_page_table(
-                    info.code_start,
-                    info.code_end,
-                    info.phys_code_base,
-                    info.stack_start,
-                    info.stack_end,
-                    info.phys_stack_base,
-                    proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR,
-                )
-            };
-            let pt_phys = match pt_phys {
-                Some(p) => p,
-                None => {
-                    serial_write("  FAILED: page table for ");
-                    serial_write(path);
-                    serial_write("\r\n");
-                    arch_aarch64::hal::halt();
-                }
-            };
-
-            unsafe {
-                core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                // proc_init already assigned a priv slot for every boot
-                // image entry; get_priv is only a fallback for processes
-                // without one. init keeps the shared USER slot.
-                if (*rp).p_priv.is_null() {
-                    let _ = kernel::system::get_priv(rp);
-                }
-                if !(*rp).p_priv.is_null() {
-                    (*(*rp).p_priv).s_phys_delta =
-                        (info.phys_code_base as i64) - (info.code_start as i64);
-                }
-                core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
-                core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
-                core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
-            }
-
-            // Map the pre-allocated brk heap window (heap base .. +1 MiB) for
-            // every boot process. Servers allocate from this range via the brk
-            // syscall (minix_alloc_zeroed), so the pages must be present.
-            {
-                let user_flags = kernel::hal::pte_user_flags();
-                let brk_va_start = kernel::hal::user_heap_base();
-                let brk_va_end = brk_va_start + 0x100000u64;
-                let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
-                let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
-                    Some(base) => base,
-                    None => {
-                        serial_write("  FAILED: out of memory for brk heap\r\n");
-                        arch_aarch64::hal::halt();
-                    }
-                };
-                for j in 0..brk_pages {
-                    let va = brk_va_start + (j as u64) * 4096;
-                    let pa = brk_phys + (j as u64) * 4096;
-                    if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err()
-                    {
-                        serial_write("  FAILED: brk page mapping\r\n");
-                        arch_aarch64::hal::halt();
-                    }
-                }
-            }
-
-            // Boot image mapping for the ramdisk driver server (served to
-            // filesystem servers via the BDEV protocol).
-            if proc_nr == RAMDISK_PROC_NR {
-                let image = kernel::minixfs::minixfs_image();
-                let image_len = kernel::minixfs::minixfs_image_len();
-                if image_len > 0 {
-                    let pages = image_len.div_ceil(4096);
-                    let ramdisk_phys = match unsafe { kernel::hal::alloc_phys_contig(pages) } {
-                        Some(base) => base,
-                        None => {
-                            serial_write("  FAILED: out of memory for RAM disk\r\n");
-                            arch_aarch64::hal::halt();
-                        }
-                    };
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            image.as_ptr(),
-                            ramdisk_phys as *mut u8,
-                            image_len,
-                        );
-                    }
-                    let user_flags = kernel::hal::pte_user_flags();
-                    for j in 0..pages {
-                        let va = arch_common::com::RAMDISK_IMAGE_VA + (j as u64) * 4096;
-                        let pa = ramdisk_phys + (j as u64) * 4096;
-                        if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }
-                            .is_err()
-                        {
-                            serial_write("  FAILED: RAM disk page mapping\r\n");
-                            arch_aarch64::hal::halt();
-                        }
-                    }
-                    serial_write("  RAM disk mapped for ramdisk server\r\n");
-                }
-            }
-
-            // Clean D-cache AFTER all mappings so MMU walker sees all PTEs.
-            unsafe {
-                kernel_boot::boot_init::clean_page_table_cache_aarch64(pt_phys);
-            }
-        }
+        let first_proc = unsafe { kernel_boot::boot_init::load_and_prepare_all(&boot_cfg) };
 
         // Restore PUD[0] with proper BBM (Break-Before-Make):
         // The map_page calls in boot_create_restricted_page_table split
@@ -771,61 +578,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
         // overrunning the RX FIFO between timer ticks.
         arch_aarch64::hal::enable_rx_interrupt();
 
-        if first_proc.is_null() {
-            serial_write("  FAILED: no boot processes found\r\n");
-            arch_aarch64::hal::halt();
-        }
-
-        // Set boot notification on PM.
-        unsafe {
-            let pm = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
-            if !pm.is_null() && !(*pm).p_priv.is_null() {
-                let rs_priv_id =
-                    kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR).unwrap_or(0);
-                (*(*pm).p_priv).s_notify_pending.set(rs_priv_id);
-            }
-        }
-
-        serial_write("  enqueuing processes...\r\n");
-
-        for &(_, proc_nr) in boot_procs {
-            let rp = kernel::table::proc_addr(proc_nr);
-            unsafe {
-                let old_flags = (*rp)
-                    .p_rts_flags
-                    .load(core::sync::atomic::Ordering::Relaxed);
-                let cleared = old_flags
-                    & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
-                        | kernel::proc::RtsFlags::SLOT_FREE.bits()
-                        | kernel::proc::RtsFlags::NO_PRIV.bits());
-                if cleared == 0 {
-                    // NO_PRIV (the user-proc marker proc_init sets on init)
-                    // does not block scheduling; x86's boot enqueue clears
-                    // it the same way. Clear before enqueue — this port's
-                    // enqueue requires p_rts_flags == 0.
-                    (*rp).p_rts_flags.store(
-                        old_flags & !kernel::proc::RtsFlags::NO_PRIV.bits(),
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                    kernel::sched::enqueue(rp);
-                }
-            }
-        }
-
-        unsafe {
-            arch_aarch64::cpulocals::set_current_proc(first_proc as u64);
-        }
-
-        serial_write("  scheduler starting...\r\n");
-
-        let next_proc = unsafe { kernel::sched::pick_proc() };
-        let next_ptr = match next_proc {
-            Some(p) => p,
-            None => {
-                serial_write("  FAILED: no runnable processes\r\n");
-                arch_aarch64::hal::halt();
-            }
-        };
+        let next_proc = unsafe { kernel_boot::boot_init::enqueue_and_start(&boot_cfg, first_proc) };
 
         // Enable interrupt routing.
         unsafe {
@@ -842,13 +595,12 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
 
         serial_write("  switching to userspace...\r\n");
         unsafe {
-            arch_aarch64::switch::switch_to_user(next_ptr as *const u8);
+            arch_aarch64::switch::switch_to_user(next_proc as *const u8);
         }
         // switch_to_user never returns — we should never reach here.
         #[allow(unreachable_code)]
         {
-            serial_write("  FAILED: switch_to_user returned!\r\n");
-            arch_aarch64::hal::halt();
+            boot_abort("switch_to_user returned");
         }
     }
 }

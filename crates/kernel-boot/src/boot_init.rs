@@ -7,10 +7,15 @@ use kernel::elf::{Elf64Phdr, ElfError, LoadedElf, parse_elf_header, setup_user_s
 use kernel::initramfs::find_initramfs_file;
 use kernel::pagetable::{boot_cr3, map_page};
 
+use crate::boot_abort;
 use crate::print;
 
 /// Convenience alias for the Proc type.
 use kernel::proc::Proc;
+
+#[cfg(target_arch = "x86_64")]
+use arch_common::com::VM_PROC_NR;
+use arch_common::com::{RAMDISK_IMAGE_VA, RAMDISK_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR};
 
 /// Return type for `load_and_prepare_init`, exposing the loaded ELF bounds
 /// so the caller can create a per-process page table covering all pages.
@@ -316,6 +321,368 @@ pub unsafe fn load_and_prepare_init() -> Option<InitInfo> {
             &["/sbin/init"],
         )
     }
+}
+
+/// Per-arch boot-process configuration passed to [`load_and_prepare_all`]
+/// and [`enqueue_and_start`].
+pub struct BootProcessConfig {
+    /// Boot processes in startup order: (initramfs path, endpoint number).
+    pub procs: &'static [(&'static str, i32)],
+    /// Map the low-GB user device window in driver page tables
+    /// (AArch64 only — the virtio-mmio window gets EL0_RW).
+    pub map_low_gb_dev_user: bool,
+    /// Identity-map the virtio drivers' PCI memory BARs (x86_64 only).
+    pub map_virtio_bars: bool,
+    /// Map the virtio-mmio device window into driver page tables
+    /// (RISC-V only).
+    pub map_virtio_mmio: bool,
+}
+
+/// Load every boot process from the initramfs and build its per-process
+/// page table, mirroring the per-arch loops in the old entry files.
+///
+/// Returns the `Proc` of the first boot process (PM).
+///
+/// # Safety
+///
+/// Must be called after `kernel::init()`, the arch allocator, and the
+/// syscall tables are set up, with the boot identity map active.
+pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
+    let boot_procs = cfg.procs;
+
+    print!("  loading boot processes...\r\n");
+
+    #[cfg(not(feature = "boot-test"))]
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 14] = unsafe { core::mem::zeroed() };
+    #[cfg(feature = "boot-test")]
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 13] = unsafe { core::mem::zeroed() };
+    for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
+        let info = match unsafe { load_and_prepare_proc(path, proc_nr, &[path]) } {
+            Some(info) => info,
+            None => boot_abort("failed to load boot process"),
+        };
+        boot_infos[i] = core::mem::MaybeUninit::new(info);
+    }
+
+    print!("  creating per-process page tables...\r\n");
+
+    let mut first_proc: *mut Proc = core::ptr::null_mut();
+    for (i, &(_, proc_nr)) in boot_procs.iter().enumerate() {
+        let rp = kernel::table::proc_addr(proc_nr);
+        if i == 0 {
+            first_proc = rp;
+        }
+
+        let info = unsafe { boot_infos[i].assume_init_ref() };
+
+        // AArch64 gives the virtio driver processes EL0 access to the
+        // low-GB device window; the other arches map devices separately.
+        let map_low_gb_dev_user = cfg.map_low_gb_dev_user
+            && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR);
+        let pt_phys = unsafe {
+            boot_create_restricted_page_table(
+                info.code_start,
+                info.code_end,
+                info.phys_code_base,
+                info.stack_start,
+                info.stack_end,
+                info.phys_stack_base,
+                map_low_gb_dev_user,
+            )
+        };
+        let pt_phys = match pt_phys {
+            Some(p) => p,
+            None => boot_abort("page table for boot process"),
+        };
+
+        unsafe {
+            core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
+            // proc_init already assigned a priv slot for every boot image
+            // entry; get_priv is only a fallback for processes without
+            // one. init keeps the shared USER slot.
+            if (*rp).p_priv.is_null() {
+                let _ = kernel::system::get_priv(rp);
+            }
+            // Store physical delta for PA translation in verify_grant:
+            // per-process page tables remap VA 0x1000000 → loaded PA, so
+            // s_phys_delta = PA - VA.
+            if !(*rp).p_priv.is_null() {
+                (*(*rp).p_priv).s_phys_delta =
+                    (info.phys_code_base as i64) - (info.code_start as i64);
+            }
+            // Scheduling parameters are arch constants in kernel::hal
+            // (x86: USER_Q=7, 200ms matching C MINIX; AArch64/RISC-V:
+            // 5/50ms). The SCHED server later adjusts them via
+            // SYS_SCHEDCTL.
+            let priority = kernel::hal::user_priority();
+            let quantum_ms = kernel::hal::user_quantum_ms();
+            let cpu_time_left = kernel::hal::user_quantum_cycles();
+            core::ptr::write_volatile(&raw mut (*rp).p_priority, priority);
+            core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, quantum_ms);
+            core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, cpu_time_left);
+        }
+
+        // Pre-map the 1 MiB brk heap window so brk calls work during boot
+        // before VM is fully initialized. x86 skips VM, which manages its
+        // own heap via kernel allocator calls.
+        let user_flags = kernel::hal::pte_user_flags();
+        let brk_va_start = kernel::hal::user_heap_base();
+        let brk_va_end = brk_va_start + 0x100000u64;
+        let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
+        #[cfg(target_arch = "x86_64")]
+        let map_brk = proc_nr != VM_PROC_NR;
+        #[cfg(not(target_arch = "x86_64"))]
+        let map_brk = true;
+        if map_brk {
+            let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
+                Some(base) => base,
+                None => boot_abort("out of memory for brk heap"),
+            };
+            for j in 0..brk_pages {
+                let va = brk_va_start + (j as u64) * 4096;
+                let pa = brk_phys + (j as u64) * 4096;
+                if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err() {
+                    boot_abort("brk page mapping");
+                }
+            }
+        }
+
+        // Boot image mapping for the ramdisk driver server (served to
+        // filesystem servers via the BDEV protocol).
+        if proc_nr == RAMDISK_PROC_NR {
+            let image = kernel::minixfs::minixfs_image();
+            let image_len = kernel::minixfs::minixfs_image_len();
+            if image_len > 0 {
+                let pages = image_len.div_ceil(4096);
+                let ramdisk_phys = match unsafe { kernel::hal::alloc_phys_contig(pages) } {
+                    Some(base) => base,
+                    None => boot_abort("out of memory for RAM disk"),
+                };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        image.as_ptr(),
+                        ramdisk_phys as *mut u8,
+                        image_len,
+                    );
+                }
+                for j in 0..pages {
+                    let va = RAMDISK_IMAGE_VA + (j as u64) * 4096;
+                    let pa = ramdisk_phys + (j as u64) * 4096;
+                    if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err()
+                    {
+                        boot_abort("RAM disk page mapping");
+                    }
+                }
+                print!("  RAM disk mapped for ramdisk server\r\n");
+            }
+        }
+
+        // Virtio device access for the blk/net drivers, per arch: x86
+        // identity-maps the PCI memory BARs; RISC-V maps the virtio-mmio
+        // window (eight transports at 0x10001000, 0x1000 apart — the
+        // device can be at any of them).
+        #[cfg(target_arch = "x86_64")]
+        if cfg.map_virtio_bars && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR) {
+            let subsys = if proc_nr == VIRTIO_BLK_PROC_NR {
+                0x0002
+            } else {
+                0x0001
+            };
+            if !unsafe { map_virtio_driver_bars(pt_phys, user_flags, subsys) } {
+                print!("  WARN: virtio driver BAR mapping failed\r\n");
+            }
+        }
+        if cfg.map_virtio_mmio && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR) {
+            const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
+            for j in 0..8u64 {
+                let va = VIRTIO_MMIO_BASE + j * 0x1000;
+                if unsafe { kernel::pagetable::map_page(pt_phys, va, va, user_flags) }.is_err() {
+                    boot_abort("virtio MMIO page mapping");
+                }
+            }
+        }
+
+        // AArch64: clean D-cache after all mappings so the MMU walker
+        // sees all PTEs.
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            clean_page_table_cache_aarch64(pt_phys);
+        }
+    }
+
+    first_proc
+}
+
+/// Enqueue all boot processes and prepare the scheduler for the first
+/// switch to userspace.
+///
+/// Returns the `Proc` to switch to: the first boot process on x86_64
+/// (started via `restore`), or the first runnable picked by the scheduler
+/// on AArch64 and RISC-V.
+///
+/// # Safety
+///
+/// Must be called after [`load_and_prepare_all`] with its returned
+/// `first_proc`.
+pub unsafe fn enqueue_and_start(cfg: &BootProcessConfig, first_proc: *mut Proc) -> *mut Proc {
+    if first_proc.is_null() {
+        boot_abort("no boot processes found");
+    }
+
+    // Set a boot notification on PM directly (without mini_notify, which
+    // would double-enqueue PM since it is runnable and already in the
+    // queue). PM will discover the pending notification when it calls
+    // RECEIVE.
+    unsafe {
+        let pm = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
+        if !pm.is_null() && !(*pm).p_priv.is_null() {
+            let rs_priv_id =
+                kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR).unwrap_or(0);
+            (*(*pm).p_priv).s_notify_pending.set(rs_priv_id);
+        }
+    }
+
+    print!("  enqueuing processes...\r\n");
+
+    // Ensure all boot processes are runnable with clean flags. In real
+    // MINIX, BOOTINHIBIT is cleared by VM via VMCTL_BOOTINHIBIT_CLEAR; VM
+    // is a stub, so clear it here. Also clear any stale undefined bits.
+    for &(_, proc_nr) in cfg.procs {
+        let rp = kernel::table::proc_addr(proc_nr);
+        unsafe {
+            (*rp)
+                .p_rts_flags
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+            kernel::sched::enqueue(rp);
+        }
+    }
+
+    // Set the current process pointer to the first one (arch-specific
+    // cpulocals API).
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch_x86_64::cpulocals::set_cpulocal_proc_ptr(first_proc as *mut core::ffi::c_void);
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        arch_aarch64::cpulocals::set_current_proc(first_proc as u64);
+    }
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        arch_riscv64::cpulocals::set_current_proc(first_proc as u64);
+    }
+
+    print!("  scheduler starting...\r\n");
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        first_proc
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        match unsafe { kernel::sched::pick_proc() } {
+            Some(p) => p,
+            None => boot_abort("no runnable processes"),
+        }
+    }
+}
+
+/// Identity-map all memory BARs of the first virtio device with the given
+/// subsystem ID (vendor 0x1AF4) into `pt_phys` as EL0-RW pages, so the
+/// user-mode driver can access the modern (virtio 1.x) registers directly.
+///
+/// QEMU/firmware assign the BAR addresses at boot, so they cannot be known
+/// at compile time — discover them via PCI config space.
+///
+/// Returns `false` if the device was not found or a mapping failed.
+#[cfg(target_arch = "x86_64")]
+unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) -> bool {
+    const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
+
+    use arch_x86_64::hal::{pci_cfg_read8, pci_cfg_read16, pci_cfg_read32, pci_cfg_write32};
+
+    for dev in 0..32u8 {
+        for func in 0..8u8 {
+            let vendor = unsafe { pci_cfg_read16(0, dev, func, 0x00) };
+            if vendor == 0xFFFF || vendor == 0 {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if vendor != VIRTIO_PCI_VENDOR {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Read the PCI device ID (offset 0x02) and subsystem device ID
+            // (offset 0x2E). Modern (virtio 1.x) devices report
+            // 0x1040 + virtio device ID and leave the subsystem ID at the
+            // machine default, so match either.
+            let devid = unsafe { pci_cfg_read16(0, dev, func, 0x02) };
+            let sdid = unsafe { pci_cfg_read16(0, dev, func, 0x2E) };
+            if sdid != subsystem_id && devid != 0x1040 + subsystem_id {
+                if func == 0 {
+                    let header = unsafe { pci_cfg_read8(0, dev, 0, 0x0E) };
+                    if header & 0x80 == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Found the virtio-blk device: map every memory BAR.
+            let mut skip_next = false;
+            for bar in 0..6u8 {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                let off = 0x10 + 4 * bar;
+                let val = unsafe { pci_cfg_read32(0, dev, func, off) };
+                let is_64bit = val & 0x4 != 0;
+                if is_64bit {
+                    skip_next = true; // 64-bit BAR spans the next slot
+                }
+                if val & 1 != 0 {
+                    continue; // I/O BAR — modern devices have none
+                }
+                // The full 32-bit-aligned address. For a 64-bit BAR the low
+                // dword can be 0 (QEMU places these above 4 GiB when RAM
+                // exceeds the 32-bit PCI window), so the high dword must be
+                // combined before the unassigned check.
+                let mut pa = (val & 0xFFFF_FFF0) as u64;
+                if is_64bit {
+                    pa |= (unsafe { pci_cfg_read32(0, dev, func, off + 4) } as u64) << 32;
+                }
+                if pa == 0 {
+                    continue; // unassigned
+                }
+                // Discover the BAR size: write all-ones, read the mask,
+                // restore the original value.
+                unsafe { pci_cfg_write32(0, dev, func, off, 0xFFFF_FFFF) };
+                let mask = unsafe { pci_cfg_read32(0, dev, func, off) };
+                unsafe { pci_cfg_write32(0, dev, func, off, val) };
+                let size = (mask & 0xFFFF_FFF0).wrapping_neg() as u64;
+                let pages = size.div_ceil(4096);
+                for p in 0..pages {
+                    let addr = pa + p * 4096;
+                    if unsafe { kernel::pagetable::map_page(pt_phys, addr, addr, flags) }.is_err() {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// Create a per-process page table for the init process.

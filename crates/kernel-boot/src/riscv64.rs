@@ -11,6 +11,10 @@
 use core::panic::PanicInfo;
 
 use core::arch::global_asm;
+use kernel_boot::boot_abort;
+#[cfg(feature = "integration-tests")]
+use kernel_boot::serial_putc;
+use kernel_boot::serial_write;
 
 // _start entry point — called by QEMU/OpenSBI.
 // a0 = hart ID, a1 = DTB pointer.
@@ -48,18 +52,6 @@ _start:
 
 // BSS and initramfs symbols are defined by the custom linker script
 // (tools/minix-raw-riscv64.ld).
-
-/// Serial output helper.
-fn serial_write(s: &str) {
-    for &b in s.as_bytes() {
-        arch_riscv64::sbi::console_putchar(b);
-    }
-}
-
-#[cfg(feature = "integration-tests")]
-fn serial_putc(c: u8) {
-    arch_riscv64::sbi::console_putchar(c);
-}
 
 /// RISC-V64 kernel main entry.
 ///
@@ -567,10 +559,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 kernel::hal::write_cr3(boot_pt);
                 serial_write("  SV39 enabled\r\n");
             } else {
-                serial_write("  FAILED: boot page table\r\n");
-                loop {
-                    core::arch::asm!("wfi", options(nomem, nostack));
-                }
+                boot_abort("boot page table");
             }
         }
 
@@ -642,312 +631,24 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 arch_riscv64::plic::enable_irq(arch_riscv64::plic::UART_IRQ);
                 serial_write("  SV39 enabled\r\n");
             } else {
-                serial_write("  FAILED: boot page table\r\n");
-                loop {
-                    core::arch::asm!("wfi", options(nomem, nostack));
-                }
+                boot_abort("boot page table");
             }
         }
 
-        use arch_common::com::*;
-
-        serial_write("  loading boot processes...\r\n");
-
-        // Define all boot processes: (path, proc_nr)
-        // Order matches C MINIX kernel/table.c: ds first, then rs, pm, ...
-        // When boot-test is active, INIT is excluded so the test completes
-        // before any user process starts (same as x86 main.rs).
-        #[cfg(not(feature = "boot-test"))]
-        let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/ds", DS_PROC_NR),
-            ("/sbin/rs", RS_PROC_NR),
-            ("/sbin/pm", PM_PROC_NR),
-            ("/sbin/sched", SCHED_PROC_NR),
-            ("/sbin/vfs", VFS_PROC_NR),
-            ("/sbin/vm", VM_PROC_NR),
-            ("/sbin/ramdisk", RAMDISK_PROC_NR),
-            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
-            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
-            ("/sbin/net", NET_PROC_NR),
-            ("/sbin/mfs", MFS_PROC_NR),
-            ("/sbin/pfs", PFS_PROC_NR),
-            ("/sbin/tty", TTY_PROC_NR),
-            ("/sbin/init", INIT_PROC_NR),
-        ];
-        #[cfg(feature = "boot-test")]
-        let boot_procs: &[(&str, i32)] = &[
-            ("/sbin/ds", DS_PROC_NR),
-            ("/sbin/rs", RS_PROC_NR),
-            ("/sbin/pm", PM_PROC_NR),
-            ("/sbin/sched", SCHED_PROC_NR),
-            ("/sbin/vfs", VFS_PROC_NR),
-            ("/sbin/vm", VM_PROC_NR),
-            ("/sbin/ramdisk", RAMDISK_PROC_NR),
-            ("/sbin/virtio_blk", VIRTIO_BLK_PROC_NR),
-            ("/sbin/virtio_net", VIRTIO_NET_PROC_NR),
-            ("/sbin/net", NET_PROC_NR),
-            ("/sbin/mfs", MFS_PROC_NR),
-            ("/sbin/pfs", PFS_PROC_NR),
-            ("/sbin/tty", TTY_PROC_NR),
-        ];
-
-        #[cfg(not(feature = "boot-test"))]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 14] =
-            unsafe { core::mem::zeroed() };
-        #[cfg(feature = "boot-test")]
-        let mut boot_infos: [core::mem::MaybeUninit<kernel_boot::boot_init::InitInfo>; 13] =
-            unsafe { core::mem::zeroed() };
-        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
-            let info = match unsafe {
-                kernel_boot::boot_init::load_and_prepare_proc(path, proc_nr, &[path])
-            } {
-                Some(info) => info,
-                None => {
-                    serial_write("  FAILED loading ");
-                    serial_write(path);
-                    serial_write("\r\n");
-                    serial_write(
-                        "  Check: initramfs contains binary? Allocator has free pages?\r\n",
-                    );
-                    // Dump allocator state
-                    serial_write("  Allocator may be out of contiguous memory\r\n");
-                    loop {
-                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                    }
-                }
-            };
-            boot_infos[i] = core::mem::MaybeUninit::new(info);
-        }
-
-        serial_write("  creating per-process page tables...\r\n");
-
-        // Create per-process (restricted) page tables and enqueue each process.
-        let mut first_proc: *mut kernel::proc::Proc = core::ptr::null_mut();
-        for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
-            let rp = kernel::table::proc_addr(proc_nr);
-            if i == 0 {
-                first_proc = rp;
-            }
-
-            let info = unsafe { boot_infos[i].assume_init_ref() };
-
-            // Create a restricted page table that maps only this process's
-            // code and stack, not the entire identity-mapped 1GB region.
-            let pt_phys = unsafe {
-                kernel_boot::boot_init::boot_create_restricted_page_table(
-                    info.code_start,
-                    info.code_end,
-                    info.phys_code_base,
-                    info.stack_start,
-                    info.stack_end,
-                    info.phys_stack_base,
-                    false, // low-GB user device window: RISC-V maps it below
-                )
-            };
-            let pt_phys = match pt_phys {
-                Some(p) => p,
-                None => {
-                    serial_write("  FAILED: page table for ");
-                    serial_write(path);
-                    serial_write("\r\n");
-                    loop {
-                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                    }
-                }
-            };
-
-            unsafe {
-                core::ptr::write_volatile(&raw mut (*rp).p_seg.p_cr3, pt_phys);
-                // Set up privilege structure for this boot process.
-                // proc_init already assigned a priv slot for every boot
-                // image entry; get_priv is only a fallback for processes
-                // without one. init keeps the shared USER slot.
-                if (*rp).p_priv.is_null() {
-                    let _ = kernel::system::get_priv(rp);
-                }
-                // Store physical delta for PA translation in verify_grant.
-                // VFS's grant table is at VA grant_addr; s_phys_delta
-                // converts VA to PA: PA = VA + s_phys_delta.
-                if !(*rp).p_priv.is_null() {
-                    (*(*rp).p_priv).s_phys_delta =
-                        (info.phys_code_base as i64) - (info.code_start as i64);
-                }
-                // Set scheduling parameters.
-                core::ptr::write_volatile(&raw mut (*rp).p_priority, 5i8);
-                core::ptr::write_volatile(&raw mut (*rp).p_quantum_size_ms, 50u32);
-                core::ptr::write_volatile(&raw mut (*rp).p_cpu_time_left, 50_000_000);
-            }
-
-            // Map the brk range (0x3FE00000..0x3FF00000 = 1 MB heap) with
-            // allocated physical pages so the bump allocator has backing memory.
-            // RISC-V requires V|R|W|U|X|A|D for user writable pages.
-            // Without R (0x02), W=1 without R=1 is a reserved encoding.
-            let user_flags = kernel::pagetable::PG_P
-                | kernel::pagetable::PG_RW
-                | kernel::pagetable::PG_U
-                | 0x02
-                | 0x04
-                | 0x08
-                | 0xC0; // R|W|X|A|D
-            let brk_va_start = 0x3FE00000u64;
-            let brk_va_end = 0x3FF00000u64;
-            let brk_pages = ((brk_va_end - brk_va_start) / 4096) as usize;
-            let brk_phys = match unsafe { kernel::hal::alloc_phys_contig(brk_pages) } {
-                Some(base) => base,
-                None => {
-                    serial_write("  FAILED: out of memory for brk heap\r\n");
-                    loop {
-                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                    }
-                }
-            };
-            for j in 0..brk_pages {
-                let va = brk_va_start + (j as u64) * 4096;
-                let pa = brk_phys + (j as u64) * 4096;
-                if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }.is_err() {
-                    serial_write("  FAILED: brk page mapping\r\n");
-                    loop {
-                        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                    }
-                }
-            }
-
-            // If this is the ramdisk driver process, set up the boot image
-            // mapping (served to filesystem servers via the BDEV protocol).
-            if proc_nr == RAMDISK_PROC_NR {
-                let image = kernel::minixfs::minixfs_image();
-                let image_len = kernel::minixfs::minixfs_image_len();
-                if image_len > 0 {
-                    let pages = image_len.div_ceil(4096);
-                    let ramdisk_phys = match unsafe { kernel::hal::alloc_phys_contig(pages) } {
-                        Some(base) => base,
-                        None => {
-                            serial_write("  FAILED: out of memory for RAM disk\r\n");
-                            loop {
-                                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                            }
-                        }
-                    };
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            image.as_ptr(),
-                            ramdisk_phys as *mut u8,
-                            image_len,
-                        );
-                    }
-                    // Map the RAM disk pages in the ramdisk server's page table.
-                    let user_flags = kernel::pagetable::PG_P
-                        | kernel::pagetable::PG_RW
-                        | kernel::pagetable::PG_U
-                        | 0x02
-                        | 0x04
-                        | 0x08
-                        | 0xC0; // R|W|X|A|D
-                    for j in 0..pages {
-                        let va = arch_common::com::RAMDISK_IMAGE_VA + (j as u64) * 4096;
-                        let pa = ramdisk_phys + (j as u64) * 4096;
-                        if unsafe { kernel::pagetable::map_page(pt_phys, va, pa, user_flags) }
-                            .is_err()
-                        {
-                            serial_write("  FAILED: RAM disk page mapping\r\n");
-                            loop {
-                                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                            }
-                        }
-                    }
-                    serial_write("  RAM disk mapped for ramdisk server\r\n");
-                }
-            }
-
-            // virtio drivers (blk/net): map the virtio-mmio device window
-            // into this process's page table so it can probe the device
-            // from user mode. RISC-V QEMU virt places the eight transports
-            // at 0x10001000, 0x1000 apart (the device can be at any of
-            // them), so map the whole 32KB region.
-            if proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR {
-                const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
-                for j in 0..8u64 {
-                    let va = VIRTIO_MMIO_BASE + j * 0x1000;
-                    if unsafe { kernel::pagetable::map_page(pt_phys, va, va, user_flags) }.is_err()
-                    {
-                        serial_write("  FAILED: virtio MMIO page mapping\r\n");
-                        loop {
-                            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                        }
-                    }
-                }
-            }
-        }
-
-        if first_proc.is_null() {
-            serial_write("  FAILED: no boot processes found\r\n");
-            loop {
-                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-            }
-        }
-
-        // Set a boot notification on PM directly (without mini_notify, which
-        // would double-enqueue PM since it is runnable and already in the
-        // queue). PM will discover the pending notification when it calls
-        // RECEIVE.
-        unsafe {
-            let pm = kernel::table::proc_addr(arch_common::com::PM_PROC_NR);
-            if !pm.is_null() && !(*pm).p_priv.is_null() {
-                let rs_priv_id =
-                    kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR).unwrap_or(0);
-                (*(*pm).p_priv).s_notify_pending.set(rs_priv_id);
-            }
-        }
-
-        serial_write("  enqueuing processes...\r\n");
-
-        // Enqueue each process that is runnable.
-        for &(_, proc_nr) in boot_procs {
-            let rp = kernel::table::proc_addr(proc_nr);
-            unsafe {
-                let old_flags = (*rp)
-                    .p_rts_flags
-                    .load(core::sync::atomic::Ordering::Relaxed);
-                let cleared = old_flags
-                    & !(kernel::proc::RtsFlags::BOOTINHIBIT.bits()
-                        | kernel::proc::RtsFlags::SLOT_FREE.bits()
-                        | kernel::proc::RtsFlags::NO_PRIV.bits());
-                if cleared == 0 {
-                    // NO_PRIV (the user-proc marker proc_init sets on init)
-                    // does not block scheduling; x86's boot enqueue clears
-                    // it the same way. Clear before enqueue — this port's
-                    // enqueue requires p_rts_flags == 0.
-                    (*rp).p_rts_flags.store(
-                        old_flags & !kernel::proc::RtsFlags::NO_PRIV.bits(),
-                        core::sync::atomic::Ordering::Relaxed,
-                    );
-                    kernel::sched::enqueue(rp);
-                }
-            }
-        }
-
-        // Set the current process pointer to the first one.
-        unsafe {
-            arch_riscv64::cpulocals::set_current_proc(first_proc as u64);
-        }
-
-        serial_write("  scheduler starting...\r\n");
-
-        // Pick the first process and switch to userspace.
-        let next_proc = unsafe { kernel::sched::pick_proc() };
-        let next_ptr = match next_proc {
-            Some(p) => p,
-            None => {
-                serial_write("  FAILED: no runnable processes\r\n");
-                loop {
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
-                }
-            }
+        let boot_cfg = kernel_boot::boot_init::BootProcessConfig {
+            procs: kernel_boot::boot_procs(),
+            map_low_gb_dev_user: false,
+            map_virtio_bars: false,
+            map_virtio_mmio: true, // RISC-V: virtio-mmio device window
         };
+
+        let first_proc = unsafe { kernel_boot::boot_init::load_and_prepare_all(&boot_cfg) };
+
+        let next_proc = unsafe { kernel_boot::boot_init::enqueue_and_start(&boot_cfg, first_proc) };
 
         serial_write("  switching to userspace...\r\n");
         unsafe {
-            arch_riscv64::switch::switch_to_user(next_ptr as *const u8);
+            arch_riscv64::switch::switch_to_user(next_proc as *const u8);
         }
     }
 }

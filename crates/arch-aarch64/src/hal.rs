@@ -707,6 +707,21 @@ pub const fn user_heap_limit() -> u64 {
     0x3000_0000
 }
 
+/// User-space scheduling priority for boot processes.
+pub const fn user_priority() -> i8 {
+    5
+}
+
+/// User-space scheduling quantum for boot processes in ms.
+pub const fn user_quantum_ms() -> u32 {
+    50
+}
+
+/// Initial per-process CPU-time budget in timer cycles.
+pub const fn user_quantum_cycles() -> u64 {
+    50_000_000
+}
+
 pub const MAP_PRESENT: u64 = crate::pte::PTE_VALID;
 pub const MAP_READ: u64 = 0; // aarch64: no separate read bit; AP bits encode R/W
 pub const MAP_WRITE: u64 = 0;

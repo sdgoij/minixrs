@@ -849,6 +849,22 @@ pub const fn user_heap_limit() -> u64 {
     0x1_0000_0000
 }
 
+/// User-space scheduling priority for boot processes (C MINIX USER_Q).
+pub const fn user_priority() -> i8 {
+    7
+}
+
+/// User-space scheduling quantum for boot processes in ms (USER_QUANTUM).
+pub const fn user_quantum_ms() -> u32 {
+    200
+}
+
+/// Initial per-process CPU-time budget in timer cycles: quantum_ms × the
+/// 2.5 GHz `cpu_set_freq` (200 ms × 2.5 GHz = 500M cycles).
+pub const fn user_quantum_cycles() -> u64 {
+    500_000_000
+}
+
 /// Base of the anonymous-mmap search range, at the top of the brk heap
 /// (0x3FE00000..0x100000000) so heap growth and mmap never collide.
 pub const fn mmap_base() -> u64 {
