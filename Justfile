@@ -16,6 +16,9 @@
 # their std sysroot are used (no `-Zbuild-std`, no JSON specs).
 stage1-rustc := `ls rust/build/*/stage1/bin/rustc.exe rust/build/*/stage1/bin/rustc 2>/dev/null | head -1`
 
+# Repo root with forward slashes (the recipe shell mangles backslashes).
+ROOT := replace(justfile_directory(), "\\", "/")
+
 # Fetches the rust fork submodule first when it's missing
 # (`git submodule update --init rust` is a no-op when it's already present
 # and at the pinned commit), regenerates `rust/config.toml` via
@@ -248,6 +251,35 @@ build-c-hello:
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
     target/mkfs x86_64
+
+# Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
+# toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.
+#
+# Freestanding CMake cross builds (host clang targeting x86_64-unknown-none)
+# against the Minix C headers (tools/c-include); requires
+# target/cxx/toolchain-x86_64.cmake. Quirks handled here:
+#   - both libs need a distinct *_SHARED_OUTPUT_NAME: the never-built shared
+#     target collides with the static archive name on the Generic platform
+#     (ninja "multiple rules generate lib/libc++.a")
+#   - libc++ needs LIBCXX_ENABLE_THREADS=OFF (_LIBCPP_HAS_NO_THREADS);
+#     libc++abi keeps RTTI (private_typeinfo.cpp uses dynamic_cast), so it
+#     uses the plain toolchain, not the -fno-rtti LLVM one
+#   - include order must be libc++ -> c-include -> libcxx-build config, or
+#     libc++'s <string.h> guard skips the C headers and ::size_t is missing
+#   - the IWYU mapping step needs Python3_EXECUTABLE; the standalone libcxx
+#     cmake never sets it, and the host's only python (the embeddable CPython
+#     beside LLVM, whose python311._pth pins sys.path) cannot import libcxx's
+#     local modules, so tools/libcxx-iwyu.cmd stubs the step
+libcxx-x86:
+    rm -rf target/cxx/libcxx-build
+    cmake -G Ninja -S rust/src/llvm-project/libcxx -B target/cxx/libcxx-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=ON -DLIBCXX_ENABLE_EXCEPTIONS=OFF -DLIBCXX_ENABLE_RTTI=OFF -DLIBCXX_ENABLE_FILESYSTEM=OFF -DLIBCXX_ENABLE_LOCALIZATION=ON -DLIBCXX_ENABLE_MONOTONIC_CLOCK=ON -DLIBCXX_ENABLE_NEW_DELETE_DEFINITIONS=OFF -DLIBCXX_ENABLE_RANDOM_DEVICE=ON -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF -DLIBCXX_ENABLE_THREADS=OFF -DLIBCXX_ABI_VERSION=1 -DLIBCXX_ABI_NAMESPACE=__1 -DLIBCXX_CXX_ABI=libcxxabi -DLIBCXX_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXX_SHARED_OUTPUT_NAME=cxx-shared -DLIBCXX_INCLUDE_TESTS=OFF "-DLIBCXX_ADDITIONAL_COMPILE_FLAGS=-I{{ROOT}}/rust/src/llvm-project/libcxxabi/include;-D_POSIX_TIMERS=200809L" "-DPython3_EXECUTABLE={{ROOT}}/tools/libcxx-iwyu.cmd"
+    ninja -C target/cxx/libcxx-build
+    rm -rf target/cxx/libcxxabi-build
+    cmake -G Ninja -S rust/src/llvm-project/libcxxabi -B target/cxx/libcxxabi-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-ffreestanding -fno-pic -mno-red-zone -fno-stack-protector -O2 -I{{ROOT}}/tools/c-include" -DCMAKE_CXX_FLAGS="-ffreestanding -fno-pic -mno-red-zone -fno-stack-protector -O2 -std=c++23 -nostdinc++ -I{{ROOT}}/rust/src/llvm-project/libcxx/include -I{{ROOT}}/tools/c-include -I{{ROOT}}/target/cxx/libcxx-build/include/c++/v1" -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON -DLIBCXXABI_BAREMETAL=ON -DLIBCXXABI_ENABLE_THREADS=OFF -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF -DLIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS=ON -DLIBCXXABI_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=OFF -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF -DLIBCXXABI_SHARED_OUTPUT_NAME=cxxabi-shared
+    ninja -C target/cxx/libcxxabi-build
+    rm -rf target/cxx/merge-tmp
+    mkdir -p target/cxx/merge-tmp
+    cd target/cxx/merge-tmp && llvm-ar x ../libcxxabi-build/lib/libc++abi.a && llvm-ar x ../libcxx-build/lib/libc++.a && mkdir -p ../minix-runtime && llvm-ar rcs ../minix-runtime/libstdc++.a *.obj && cd .. && rm -rf merge-tmp
 
 # ---------- check ----------
 

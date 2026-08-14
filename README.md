@@ -40,7 +40,8 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
 - bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
 - QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
 - `rust-objcopy`, `rust-nm`, `rust-lld` (from `rust-src` component)
-- Clang (for the x86 trampoline post-link)
+- Clang (for the x86 trampoline post-link and the C++ runtime cross build)
+- CMake + Ninja (for the C++ runtime cross build — `just libcxx-x86`)
 - [Just](https://just.systems/) (build runner)
 
 > **Windows users:** Just executes recipes with `sh` (the POSIX shell) —

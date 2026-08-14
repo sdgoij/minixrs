@@ -5,10 +5,14 @@
 //!
 //! All functions follow the POSIX convention: return -1 on error (or
 //! `MAP_FAILED`/`SIG_ERR` where POSIX says so) and set `errno` (via
-//! `__errno_location`). The OS is single-threaded, so a plain static suffices.
+//! `__errno_location`). `errno` is a `#[thread_local]` slot, so each C
+//! thread sees its own value.
 
 #![no_std]
 #![allow(dead_code)]
+// The fork's rustc ships `c_variadic` (and `VaList`) stable, but the rustup
+// nightly used for host builds still gates it — enable it there only.
+#![cfg_attr(not(target_os = "minix"), feature(c_variadic))]
 // `#[thread_local]` on statics is feature-gated in this toolchain line;
 // the std crate declares the same feature for its TLS statics.
 #![feature(thread_local)]
@@ -16,8 +20,21 @@
 #[cfg(target_os = "minix")]
 mod pthread;
 
+// The C-library helper modules (stdio/time/wchar/string/stdlib/setjmp)
+// that the old `tools/c-libc.c` used to provide. Exported symbols are
+// `#[cfg(target_os = "minix")]`-gated inside each module; the pure
+// helpers compile everywhere so the host test suite can exercise them.
+mod c_locale;
+mod c_setjmp;
+mod c_stdio;
+mod c_stdlib;
+mod c_string;
+mod c_sys;
+mod c_time;
+mod c_wchar;
+
 #[cfg(target_os = "minix")]
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
 // ---- errno ----
 
@@ -37,7 +54,7 @@ pub extern "C" fn __errno_location() -> *mut c_int {
 }
 
 #[inline]
-fn set_errno(e: i32) {
+pub(crate) fn set_errno(e: i32) {
     // SAFETY: only this thread touches its own TLS errno slot.
     unsafe { *ERRNO.get() = e };
 }
@@ -126,7 +143,7 @@ pub unsafe extern "C" fn minix_libc_tls_init() {
 
 /// Standard POSIX error return: record `errno` and return -1.
 #[inline]
-fn fail(e: i32) -> i32 {
+pub(crate) fn fail(e: i32) -> i32 {
     set_errno(e);
     -1
 }
@@ -362,7 +379,76 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     }
 }
 
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    match minix_std::fs::fcntl(fd, cmd, arg) {
+        Ok(r) => r,
+        Err(e) => fail(e.0),
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dup(fd: c_int) -> c_int {
+    // POSIX `dup(fd)` == `fcntl(fd, F_DUPFD, 0)`.
+    match minix_std::fs::fcntl(fd, 0, 0) {
+        Ok(r) => r,
+        Err(e) => fail(e.0),
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dup2(fd: c_int, newfd: c_int) -> c_int {
+    match minix_std::fs::dup2(fd, newfd) {
+        Ok(r) => r,
+        Err(e) => fail(e.0),
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pipe(fds: *mut [c_int; 2]) -> c_int {
+    if fds.is_null() {
+        return fail(22); // EINVAL
+    }
+    match minix_std::fs::pipe() {
+        Ok((r, w)) => {
+            unsafe {
+                (*fds)[0] = r;
+                (*fds)[1] = w;
+            }
+            0
+        }
+        Err(e) => fail(e.0),
+    }
+}
+
 // Process lifecycle
+
+/// C `struct rusage` (`tools/c-include/sys/resource.h`), zero-filled by
+/// `wait4` (PM does not report resource usage yet).
+#[cfg(target_os = "minix")]
+#[repr(C)]
+struct Rusage {
+    ru_utime: crate::c_time::TimeVal,
+    ru_stime: crate::c_time::TimeVal,
+    ru_maxrss: c_long,
+    ru_ixrss: c_long,
+    ru_idrss: c_long,
+    ru_isrss: c_long,
+    ru_minflt: c_long,
+    ru_majflt: c_long,
+    ru_nswap: c_long,
+    ru_inblock: c_long,
+    ru_oublock: c_long,
+    ru_msgsnd: c_long,
+    ru_msgrcv: c_long,
+    ru_nsignals: c_long,
+    ru_nvcsw: c_long,
+    ru_nivcsw: c_long,
+}
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -375,8 +461,159 @@ pub unsafe extern "C" fn fork() -> c_int {
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
+pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
+    match minix_std::process::waitpid(pid, options) {
+        Ok((child, s)) => {
+            if !status.is_null() {
+                unsafe { *status = s };
+            }
+            child
+        }
+        Err(e) => fail(e.0),
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn wait(status: *mut c_int) -> c_int {
+    waitpid(-1, status, 0)
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wait4(
+    pid: c_int,
+    status: *mut c_int,
+    options: c_int,
+    usage: *mut c_void,
+) -> c_int {
+    // PM does not return resource usage yet; zero the struct so LLVM's
+    // ProcessStatistics never sees garbage.
+    if !usage.is_null() {
+        unsafe { core::ptr::write_bytes(usage as *mut u8, 0, size_of::<Rusage>()) };
+    }
+    waitpid(pid, status, options)
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
 pub extern "C" fn exit(status: c_int) -> ! {
+    // Run the C++/atexit destructors before the process actually exits.
+    unsafe { __cxa_finalize(core::ptr::null_mut()) };
     minix_std::process::exit(status);
+}
+
+/// Itanium ABI `__cxa_atexit` registry entry.
+#[cfg(target_os = "minix")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct AtExitEntry {
+    func: Option<extern "C" fn(*mut c_void)>,
+    arg: *mut c_void,
+    dso: *mut c_void,
+}
+
+/// Fixed-size registry — no dynamic allocation before libc is up. The C
+/// heap is not thread-safe yet and the runtime is effectively
+/// single-threaded, so no lock.
+#[cfg(target_os = "minix")]
+const ATEXIT_MAX: usize = 64;
+#[cfg(target_os = "minix")]
+static ATEXIT_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(target_os = "minix")]
+static mut ATEXIT: [AtExitEntry; ATEXIT_MAX] = [AtExitEntry {
+    func: None,
+    arg: core::ptr::null_mut(),
+    dso: core::ptr::null_mut(),
+}; ATEXIT_MAX];
+
+/// Itanium ABI `__cxa_atexit`: register `func(arg)` to run at exit (or
+/// when `__cxa_finalize(dso)` is called). Returns 0 on success.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_atexit(
+    func: extern "C" fn(*mut c_void),
+    arg: *mut c_void,
+    dso: *mut c_void,
+) -> c_int {
+    unsafe {
+        let n = ATEXIT_N.load(core::sync::atomic::Ordering::Relaxed);
+        if n >= ATEXIT_MAX {
+            return -1; // registry full
+        }
+        ATEXIT[n] = AtExitEntry {
+            func: Some(func),
+            arg,
+            dso,
+        };
+        ATEXIT_N.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+    }
+    0
+}
+
+/// Itanium ABI `__cxa_finalize`: run and deregister the handlers for
+/// `dso` (null = all), in reverse registration order.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __cxa_finalize(dso: *mut c_void) {
+    unsafe {
+        let mut n = ATEXIT_N.load(core::sync::atomic::Ordering::Relaxed);
+        while n > 0 {
+            n -= 1;
+            let e = &mut ATEXIT[n];
+            if dso.is_null() || e.dso == dso {
+                if let Some(f) = e.func.take() {
+                    f(e.arg);
+                }
+            }
+        }
+        if dso.is_null() {
+            ATEXIT_N.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// C `atexit` over the Itanium registry. The function pointer is cast to
+/// the one-arg form; the Itanium ABI calls atexit handlers with a dummy
+/// argument, which the zero-arg callee ignores.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn atexit(func: extern "C" fn()) -> c_int {
+    let f: extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(func) };
+    __cxa_atexit(f, core::ptr::null_mut(), core::ptr::null_mut())
+}
+
+/// The dummy `__dso_handle` for statically-linked objects: its address is
+/// the handle value passed as `dso` to `__cxa_atexit`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub static __dso_handle: u8 = 0;
+
+/// Run the ELF `.init_array` constructors (crt0 calls this before `main`).
+/// The linker script defines the section bounds.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __minix_init_array() {
+    unsafe {
+        unsafe extern "C" {
+            static __init_array_start: u8;
+            static __init_array_end: u8;
+        }
+        let start = core::ptr::addr_of!(__init_array_start).cast::<extern "C" fn()>();
+        let end = core::ptr::addr_of!(__init_array_end).cast::<extern "C" fn()>();
+        let mut p = start;
+        while p < end {
+            (*p)();
+            p = p.add(1);
+        }
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn abort() -> ! {
+    // SIGABRT exit status (128 + 6), matching libc conventions.
+    minix_std::process::exit(134);
 }
 
 #[cfg(target_os = "minix")]
@@ -385,6 +622,127 @@ pub extern "C" fn getpid() -> c_int {
     match minix_std::process::getpid() {
         Ok((pid, _ppid)) => pid,
         Err(_) => -1,
+    }
+}
+
+/// `gethostname(2)`: copy the machine name into `name`, NUL-terminated.
+/// A single name is enough — lock-file host IDs only need to distinguish
+/// machines, and there is one (the QEMU guest).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
+    if name.is_null() || len == 0 {
+        return fail(22); // EINVAL
+    }
+    let host = b"minix";
+    let n = host.len().min(len - 1);
+    unsafe {
+        core::ptr::copy_nonoverlapping(host.as_ptr() as *const c_char, name, n);
+        *name.add(n) = 0;
+    }
+    0
+}
+
+/// `getsid(2)`: session id of `pid` (0 = caller). There is no session
+/// separation yet — every process is its own session leader — so a live
+/// process's session id is its pid. `kill(pid, 0)` is the existence check:
+/// for a dead pid PM replies ESRCH, which is exactly what lock-file
+/// staleness detection (`getsid == -1 && errno == ESRCH`) relies on.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn getsid(pid: c_int) -> c_int {
+    let own = match minix_std::process::getpid() {
+        Ok((pid, _ppid)) => pid,
+        Err(e) => return fail(e.0),
+    };
+    if pid == 0 {
+        return own;
+    }
+    if pid < 0 {
+        return fail(22); // EINVAL
+    }
+    match minix_std::time::kill(pid, 0) {
+        Ok(()) => pid,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `stat(2)`: file metadata for `path` (follows symlinks).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { stat_path_impl(minix_std::fs::stat, path, buf) }
+}
+
+/// `lstat(2)`: file metadata for `path` (does not follow symlinks).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut c_void) -> c_int {
+    unsafe { stat_path_impl(minix_std::fs::lstat, path, buf) }
+}
+
+/// `fstat(2)`: file metadata for an open descriptor.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut c_void) -> c_int {
+    if buf.is_null() {
+        return fail(22); // EINVAL
+    }
+    match minix_std::fs::fstat(fd) {
+        Ok(st) => {
+            unsafe { fill_c_stat(buf, &st) };
+            0
+        }
+        Err(e) => fail(e.0),
+    }
+}
+
+/// Shared path→`struct stat` glue for `stat`/`lstat`.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated C string and `buf` must point to at
+/// least `size_of::<Stat>()` writable bytes.
+#[cfg(target_os = "minix")]
+unsafe fn stat_path_impl(
+    f: fn(&str) -> Result<minix_std::fs::Stat, minix_std::MinixErr>,
+    path: *const c_char,
+    buf: *mut c_void,
+) -> c_int {
+    if path.is_null() || buf.is_null() {
+        return fail(22); // EINVAL
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(path) };
+    // VFS stat takes `&str` paths (C paths are byte strings, so non-UTF-8
+    // names are rejected for now).
+    let path_str = match core::str::from_utf8(s.to_bytes()) {
+        Ok(p) => p,
+        Err(_) => return fail(22), // EINVAL
+    };
+    match f(path_str) {
+        Ok(st) => {
+            unsafe { fill_c_stat(buf, &st) };
+            0
+        }
+        Err(e) => fail(e.0),
+    }
+}
+
+/// Copy a `minix_std::fs::Stat` (repr(C), 88 bytes) into a C `struct stat`.
+/// The layouts are field-for-field identical (offsets 0, 8, 16, 20, 24, 28,
+/// 32, 40, 48, 56, 64, 72, 80), so one byte copy suffices.
+///
+/// # Safety
+///
+/// `buf` must point to at least `size_of::<Stat>()` writable bytes.
+#[cfg(target_os = "minix")]
+unsafe fn fill_c_stat(buf: *mut c_void, st: &minix_std::fs::Stat) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            st as *const minix_std::fs::Stat as *const u8,
+            buf as *mut u8,
+            core::mem::size_of::<minix_std::fs::Stat>(),
+        );
     }
 }
 
@@ -436,6 +794,12 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeS
         }
         Err(e) => fail(e.0),
     }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn alarm(seconds: c_uint) -> c_uint {
+    minix_std::time::alarm(seconds)
 }
 
 // Signals
@@ -496,6 +860,142 @@ pub unsafe extern "C" fn sigaction(
         Ok(()) => 0,
         Err(e) => fail(e.0),
     }
+}
+
+// ---- signal.h helper functions ----
+
+/// C `sigset_t` — two unsigned longs (the header declares `unsigned long
+/// sigset_t[2]`, 16 bytes).
+#[cfg(target_os = "minix")]
+type SigSet = [c_ulong; 2];
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigemptyset(set: *mut SigSet) -> c_int {
+    if set.is_null() {
+        return fail(22); // EINVAL
+    }
+    unsafe {
+        (*set)[0] = 0;
+        (*set)[1] = 0;
+    }
+    0
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigfillset(set: *mut SigSet) -> c_int {
+    if set.is_null() {
+        return fail(22); // EINVAL
+    }
+    unsafe {
+        (*set)[0] = !0;
+        (*set)[1] = !0;
+    }
+    0
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaddset(set: *mut SigSet, signum: c_int) -> c_int {
+    if set.is_null() || signum <= 0 || signum > 64 {
+        return fail(22); // EINVAL
+    }
+    let i = (signum - 1) as usize;
+    unsafe {
+        (*set)[i / 64] |= 1u64 << (i % 64);
+    }
+    0
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigdelset(set: *mut SigSet, signum: c_int) -> c_int {
+    if set.is_null() || signum <= 0 || signum > 64 {
+        return fail(22); // EINVAL
+    }
+    let i = (signum - 1) as usize;
+    unsafe {
+        (*set)[i / 64] &= !(1u64 << (i % 64));
+    }
+    0
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigismember(set: *const SigSet, signum: c_int) -> c_int {
+    if set.is_null() || signum <= 0 || signum > 64 {
+        return 0;
+    }
+    let i = (signum - 1) as usize;
+    let bit = unsafe { ((*set)[i / 64] >> (i % 64)) & 1u64 };
+    bit as c_int
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn raise(sig: c_int) -> c_int {
+    let pid = match minix_std::process::getpid() {
+        Ok((pid, _ppid)) => pid,
+        Err(e) => return fail(e.0),
+    };
+    match minix_std::time::kill(pid, sig) {
+        Ok(()) => 0,
+        Err(e) => fail(e.0),
+    }
+}
+
+static mut STRSIGNAL_BUF: [u8; 32] = [0; 32];
+
+const SIGNAL_NAMES: [&[u8]; 32] = [
+    b"",
+    b"Hangup",
+    b"Interrupt",
+    b"Quit",
+    b"Illegal instruction",
+    b"Trace/breakpoint trap",
+    b"Aborted",
+    b"Bus error",
+    b"Floating point exception",
+    b"Killed",
+    b"User defined signal 1",
+    b"Segmentation fault",
+    b"User defined signal 2",
+    b"Broken pipe",
+    b"Alarm clock",
+    b"Terminated",
+    b"",
+    b"",
+    b"",
+    b"",
+    b"Stopped (signal)",
+    b"",
+    b"",
+    b"",
+    b"",
+    b"",
+    b"",
+    b"",
+    b"Window changed",
+    b"",
+    b"",
+    b"System call",
+];
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strsignal(sig: c_int) -> *mut c_char {
+    let name: &[u8] = if sig >= 0 && (sig as usize) < SIGNAL_NAMES.len() {
+        let n = SIGNAL_NAMES[sig as usize];
+        if n.is_empty() { b"Unknown signal" } else { n }
+    } else {
+        b"Unknown signal"
+    };
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(STRSIGNAL_BUF) };
+    let copy = name.len().min(buf.len() - 1);
+    buf[..copy].copy_from_slice(&name[..copy]);
+    buf[copy] = 0;
+    buf.as_mut_ptr() as *mut c_char
 }
 
 // Sockets
@@ -768,6 +1268,71 @@ pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *m
         }
         Err(e) => fail(e.0),
     }
+}
+
+/// `poll(2)`: check fd readiness. There is no readiness notification in
+/// the net server yet, so only the serial fds (0-2) are ever ready — a
+/// socket poll returns 0 events (the caller retries or times out).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn poll(fds: *mut c_void, nfds: u64, _timeout: c_int) -> c_int {
+    if fds.is_null() {
+        return fail(22); // EINVAL
+    }
+    let fds = fds as *mut PollFd;
+    let mut ready = 0;
+    for i in 0..nfds {
+        let pfd = unsafe { &mut *fds.add(i as usize) };
+        pfd.revents = 0;
+        if pfd.fd >= 0 && pfd.fd <= 2 {
+            // Serial console: readable and writable at all times.
+            pfd.revents = (pfd.events as i16) & (POLLIN | POLLOUT);
+            if pfd.revents != 0 {
+                ready += 1;
+            }
+        }
+    }
+    ready
+}
+
+/// C `struct pollfd` (`tools/c-include/poll.h`).
+#[cfg(target_os = "minix")]
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+
+/// `dlopen(3)`: not supported — the image is statically linked.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlopen(_filename: *const c_char, _flags: c_int) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+/// `dlsym(3)`: not supported (see `dlopen`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlsym(_handle: *mut c_void, _symbol: *const c_char) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+/// `dlclose(3)`: no-op (see `dlopen`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlclose(_handle: *mut c_void) -> c_int {
+    0
+}
+
+/// `dlerror(3)`: a fixed message (see `dlopen`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlerror() -> *mut c_char {
+    b"dlopen() not supported on this platform\0".as_ptr() as *const c_char as *mut c_char
 }
 
 // Utility
@@ -1098,6 +1663,9 @@ mod tests {
         fn _shutdown(f: extern "C" fn(c_int, c_int) -> c_int) {
             let _ = f;
         }
+        fn _listen(f: extern "C" fn(c_int, c_int) -> c_int) {
+            let _ = f;
+        }
         _socket(socket);
         _addr_in(bind);
         _addr_in(connect);
@@ -1106,7 +1674,7 @@ mod tests {
         _shutdown(shutdown);
         _io(send);
         _iomut(recv);
-        _addr_in(listen);
+        _listen(listen);
         _addr_out(accept);
         _addr_out(getpeername);
         _addr_out(getsockname);

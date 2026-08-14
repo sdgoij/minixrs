@@ -39,7 +39,12 @@ pub const VFS_LSEEK: u32 = VFS_BASE + 2;
 pub const VFS_OPEN: u32 = VFS_BASE + 3;
 pub const VFS_CREAT: u32 = VFS_BASE + 4;
 pub const VFS_CLOSE: u32 = VFS_BASE + 5;
+pub const VFS_LINK: u32 = VFS_BASE + 6;
 pub const VFS_UNLINK: u32 = VFS_BASE + 7;
+pub const VFS_CHDIR: u32 = VFS_BASE + 8;
+pub const VFS_ACCESS: u32 = VFS_BASE + 15;
+pub const VFS_CHMOD: u32 = VFS_BASE + 11;
+pub const VFS_UMASK: u32 = VFS_BASE + 27;
 pub const VFS_RMDIR: u32 = VFS_BASE + 18;
 pub const VFS_MKDIR: u32 = VFS_BASE + 9;
 pub const VFS_STAT: u32 = VFS_BASE + 21;
@@ -48,6 +53,8 @@ pub const VFS_LSTAT: u32 = VFS_BASE + 23;
 pub const VFS_IOCTL: u32 = VFS_BASE + 24;
 pub const VFS_FCNTL: u32 = VFS_BASE + 25;
 pub const VFS_GETDENTS: u32 = VFS_BASE + 29;
+pub const VFS_STATVFS1: u32 = VFS_BASE + 40;
+pub const VFS_FSTATVFS1: u32 = VFS_BASE + 41;
 pub const VFS_SELECT: u32 = VFS_BASE + 30;
 pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
@@ -599,6 +606,161 @@ fn stat_impl(call_nr: u32, path: &str) -> Result<Stat, MinixErr> {
         msg_set_u64(&mut msg, OFF_STAT_BUF, stat_buf.as_mut_ptr() as u64);
         let _ = vfs_call(&mut msg)?;
         Ok(stat_buf.assume_init())
+    }
+}
+
+/// Filesystem statistics — mirrors the layout the FS server writes
+/// (`Statvfs` in `crates/fs/src/mfs/types.rs` and the VFS server).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statvfs {
+    pub f_flags: u64,
+    pub f_bsize: u32,
+    pub f_frsize: u32,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_favail: u64,
+    pub f_fsid: u64,
+    pub f_flag: u64,
+    pub f_namemax: u64,
+}
+
+/// Get filesystem statistics for a path.
+pub fn statvfs(path: &str) -> Result<Statvfs, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut st = core::mem::MaybeUninit::<Statvfs>::zeroed();
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_STATVFS1 as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        msg_set_u64(&mut msg, OFF_STAT_BUF, st.as_mut_ptr() as u64);
+        let _ = vfs_call(&mut msg)?;
+        Ok(st.assume_init())
+    }
+}
+
+/// Get filesystem statistics for an open file descriptor.
+pub fn fstatvfs(fd: i32) -> Result<Statvfs, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut st = core::mem::MaybeUninit::<Statvfs>::zeroed();
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FSTATVFS1 as i32);
+        msg_set_i32(&mut msg, OFF_FSTAT_FD, fd);
+        // VFS_FSTATVFS1 reads the buffer at offset 16 (do_fstatvfs).
+        msg_set_u64(&mut msg, 16, st.as_mut_ptr() as u64);
+        let _ = vfs_call(&mut msg)?;
+        Ok(st.assume_init())
+    }
+}
+
+/// Change the current working directory (VFS_CHDIR — same layout as stat:
+/// path at 8, length at 16).
+pub fn chdir(path: &[u8]) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CHDIR as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Create a hard link (VFS_LINK): name1 at 8/len at 16, name2 at 24/len at 32.
+pub fn link(old: &[u8], new: &[u8]) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (old, new, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_LINK as i32);
+        msg_set_u64(&mut msg, 8, old.as_ptr() as u64);
+        msg_set_u32(&mut msg, 16, old.len() as u32);
+        msg_set_u64(&mut msg, 24, new.as_ptr() as u64);
+        msg_set_u32(&mut msg, 32, new.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Check file access permissions (VFS_ACCESS — path at 8/len at 16,
+/// amode at 24).
+pub fn access(path: &[u8], amode: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, amode, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_ACCESS as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        msg_set_u32(&mut msg, 24, amode);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Change file permissions (VFS_CHMOD — path at 8/len at 16, mode at 24).
+pub fn chmod(path: &[u8], mode: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, mode, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CHMOD as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        msg_set_u32(&mut msg, 24, mode);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Set the file mode creation mask; returns the previous mask
+/// (VFS_UMASK — mode at offset 12).
+pub fn umask(mask: u32) -> Result<u32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (mask, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_UMASK as i32);
+        msg_set_u32(&mut msg, 12, mask);
+        let old = vfs_call(&mut msg)?;
+        Ok(old as u32)
     }
 }
 

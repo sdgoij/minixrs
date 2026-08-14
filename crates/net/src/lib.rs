@@ -41,13 +41,13 @@ pub type Port = u16;
 /// NetBSD-style ioctl encoding (`.refs/minix-3.3.0/sys/sys/ioctl.h`).
 mod ioc {
     /// `IOC_OUT` — device writes data to the user (read ioctl, `_IOR`).
-    pub const IOC_OUT: u32 = 0x4000_0000;
+    pub(crate) const IOC_OUT: u32 = 0x4000_0000;
     /// `IOC_IN` — user writes data to the device (write ioctl, `_IOW`).
-    pub const IOC_IN: u32 = 0x8000_0000;
+    pub(crate) const IOC_IN: u32 = 0x8000_0000;
     /// `IOC_INOUT` — bidirectional.
-    pub const IOC_INOUT: u32 = 0xC000_0000;
+    pub(crate) const IOC_INOUT: u32 = 0xC000_0000;
     /// `IOCPARM_MASK` — size field width.
-    pub const IOCPARM_MASK: u32 = 0x1fff;
+    pub(crate) const IOCPARM_MASK: u32 = 0x1fff;
 }
 
 /// Encode an ioctl request: `_IOW`/`_IOR` with the NetBSD layout

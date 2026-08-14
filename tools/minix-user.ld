@@ -23,6 +23,20 @@ SECTIONS
         *(.got.plt .got.plt.*)
     }
 
+    /* C/C++ static constructors and destructors (LLVM relies on these;
+       crt0 runs the constructors via `__minix_init_array`, and `exit`
+       runs the destructors through `__cxa_finalize`). */
+    .init_array : ALIGN(8) {
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
+    }
+    .fini_array : ALIGN(8) {
+        __fini_array_start = .;
+        KEEP(*(.fini_array .fini_array.*))
+        __fini_array_end = .;
+    }
+
     /* Thread-local storage: the runtime copies `__tls_start..__tdata_end`
        (init image) into a per-thread block and zeroes up to `__tls_end`;
        the thread pointer (FS base / tpidr_el0 / tp) points at the block. */

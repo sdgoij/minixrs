@@ -3,11 +3,14 @@
 minix fork toolchain.
 
 Compiles the freestanding C sources (`tools/hello.c`, `tools/ctest.c`,
-`tools/c-libc.c`, `tools/crt0-x86_64.S`) with clang, builds the
-`minix-libc` rlib (and its no_std `minix-std`/`net`/`minix-rt` deps) with
-the fork's stage1 compiler for `x86_64-pc-minix`, then links each program
-with the fork rustc as the driver (it resolves the rlib metadata and the
-minix sysroot's core/compiler_builtins).
+`tools/crt0-x86_64.S`) with clang, builds the `minix-libc` rlib (and its
+no_std `minix-std`/`net`/`minix-rt` deps) with the fork's stage1 compiler
+for `x86_64-pc-minix`, then links each program with the fork rustc as the
+driver (it resolves the rlib metadata and the minix sysroot's
+core/compiler_builtins).
+
+All of the C library surface (printf family, strtod, wcs*, ...) lives in
+`minix-libc`; the C objects only supply the program code and `_start`.
 
 Outputs: `target/x86_64-pc-minix/release/{helloc,ctest}` — the locations
 the boot-image assembly reads `/bin/helloc`/`/bin/ctest` from
@@ -32,7 +35,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = "x86_64-pc-minix"
 INCLUDE = ROOT / "tools" / "c-include"
 CRT0_S = ROOT / "tools" / "crt0-x86_64.S"
-CLIBC_C = ROOT / "tools" / "c-libc.c"
 OUT_DIR = ROOT / "target" / TARGET / "release"
 WORK = ROOT / "target" / "c-hello"
 
@@ -85,9 +87,9 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     WORK.mkdir(parents=True, exist_ok=True)
 
-    # 1. Freestanding compile of the crt0, the C libc half, and the programs.
-    #    `-mno-red-zone` matches the fork spec's `disable_redzone`;
-    #    `-fno-pic` matches the kernel's static relocation model.
+    # 1. Freestanding compile of the crt0 and the programs. `-mno-red-zone`
+    #    matches the fork spec's `disable_redzone`; `-fno-pic` matches the
+    #    kernel's static relocation model.
     cflags = [
         "--target=x86_64-unknown-none",
         "-ffreestanding",
@@ -98,12 +100,8 @@ def main() -> int:
         "-O2",
         "-c",
     ]
-    for src, obj in (
-        (CRT0_S, WORK / "crt0.o"),
-        (CLIBC_C, WORK / "c-libc.o"),
-    ):
-        if run(["clang", *cflags, "-o", obj, src]) != 0:
-            return 1
+    if run(["clang", *cflags, "-o", WORK / "crt0.o", CRT0_S]) != 0:
+        return 1
     for src, _, needs_headers in PROGRAMS:
         flags = [*cflags, f"-I{INCLUDE}"] if needs_headers else cflags
         if run(["clang", *flags, "-o", WORK / f"{src.stem}.o", src]) != 0:
@@ -116,7 +114,7 @@ def main() -> int:
 
     # 3. Link each program with the fork rustc as the driver. A
     #    `#![no_std] #![no_main]` stub provides the crate; `_start` (and
-    #    `main`) come from the C objects, the syscall C ABI from the
+    #    `main`) come from the C objects, the C library surface from the
     #    minix-libc rlib.
     deps = ROOT / "target" / TARGET / "release" / "deps"
     libc_rlib = max(deps.glob("libminix_libc-*.rlib"), key=lambda p: p.stat().st_mtime)
@@ -145,7 +143,6 @@ def main() -> int:
             "--edition", "2024",
             "-C", f"link-arg=-T{ROOT / 'tools' / 'minix-user.ld'}",
             "-C", f"link-arg={WORK / 'crt0.o'}",
-            "-C", f"link-arg={WORK / 'c-libc.o'}",
             "-C", f"link-arg={WORK / f'{src.stem}.o'}",
             "--extern", f"minix_libc={libc_rlib}",
             "-L", f"dependency={deps}",

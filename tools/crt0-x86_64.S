@@ -26,6 +26,10 @@ _start:
     movq    %r12, %rdi
     movq    %r13, %rsi
     movq    %r14, %rdx
+    call    __minix_init_array    # run ELF .init_array constructors
+    movq    %r12, %rdi
+    movq    %r13, %rsi
+    movq    %r14, %rdx
     call    main
     movq    %rax, %rdi             # exit(main(...))
     call    exit
