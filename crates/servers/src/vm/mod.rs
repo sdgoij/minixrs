@@ -6,6 +6,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
+pub mod cache;
 pub mod cow;
 pub mod mem;
 pub mod pb;
@@ -39,6 +40,12 @@ const EAGAIN: i32 = -11;
 
 /// Cannot allocate memory (ENOMEM).
 const ENOMEM: i32 = -12;
+
+/// No such file or directory (ENOENT from MINIX errno.h).
+const ENOENT: i32 = -2;
+
+/// Bad address (EFAULT from MINIX errno.h).
+const EFAULT: i32 = -14;
 
 /// True if `ep` is a valid user-process endpoint of any generation.
 ///
@@ -1021,7 +1028,7 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
 
     // Extract the fields we need up front so the region borrow ends before
     // the blocking FDIO request.
-    let (fd, file_off, file_size, writable, exec) = {
+    let (fd, file_off, file_size, writable, exec, dev, ino) = {
         let region = match vmp.vm_regions.find_mut(page_addr) {
             Some(r) => r,
             None => {
@@ -1038,8 +1045,45 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
             region.file_size,
             region.flags & region::VR_WRITABLE != 0,
             region.flags & region::VR_EXEC != 0,
+            region.dev,
+            region.ino,
         )
     };
+
+    // A page is cacheable when its content is exactly the file's bytes:
+    // the region must be read-only (a shared frame must never serve a
+    // MAP_PRIVATE writable page — a write by one process would leak into
+    // another's mapping) and the page must lie fully inside the file (the
+    // tail-zero amount past the region's in-file end depends on the
+    // region, so partial pages keep the private allocate path).
+    let cacheable = !writable && file_off + page_size <= file_size;
+
+    // Cache hit: map the existing frame with the region's permissions and
+    // skip allocation + FDIO. The cache holds a PhysBlock reference on the
+    // frame; bump it for this process's mapping so teardown (pb_unref)
+    // leaves the cache's reference and the frame behind.
+    if cacheable
+        && let Some((cached_phys, cached_pb)) =
+            cache::cache_find(dev, file_off, Some(ino), file_off, true)
+    {
+        let mut pt_flags = kernel::pagetable::MAP_USER;
+        if exec {
+            pt_flags |= kernel::pagetable::MAP_EXEC;
+        }
+        if crate::vm::vm_map_page_in(cr3, page_addr, cached_phys, pt_flags) == 0
+            && crate::vm::pb::pb_ref(cached_pb)
+        {
+            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+                && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+            {
+                r.add_page(page_addr, cached_phys);
+            }
+            return true;
+        }
+        // Mapping or reference failed — unmap anything we mapped and fall
+        // through to the fresh-allocate path.
+        let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+    }
 
     let pa = crate::vm::vm_alloc_pages(1);
     if pa == 0 {
@@ -1149,7 +1193,14 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
     }
     let _ = crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags);
 
-    pb::pb_new(pa);
+    // Track the frame so teardown frees it when the last mapping goes
+    // away. Only pages with a PhysBlock can be cached: teardown frees
+    // untracked frames outright, so caching one would leave the cache
+    // referencing a freed page.
+    let pb_idx = pb::pb_new(pa);
+    if cacheable && let Some(pb_idx) = pb_idx {
+        cache::cache_insert(dev, file_off, ino, file_off, pa, pb_idx);
+    }
     if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
         && let Some(r) = vmp.vm_regions.find_mut(page_addr)
     {
@@ -2582,48 +2633,183 @@ fn do_watch_exit(msg: &mut Message) -> i32 {
     OK
 }
 
-fn do_mapcache(msg: &mut Message) -> i32 {
-    // Map a cache page into a process.
-    // m1i1 = target endpoint, m1i2 = cache block number,
-    // m1i3 = flags (e.g., write permission).
-    let target_ep = unsafe { msg.m_payload.m1.m1i1 };
-    let _block = unsafe { msg.m_payload.m1.m1i2 } as u64;
-    let _flags = unsafe { msg.m_payload.m1.m1i3 } as u32;
+/// Reassemble a 64-bit value from its low/high 32-bit halves (the port's
+/// convention for u64/i64 message fields, see do_mmap_file's reply).
+fn u64_from_i32s(lo: i32, hi: i32) -> u64 {
+    ((hi as u32 as u64) << 32) | (lo as u32 as u64)
+}
 
-    if !is_user_ep(target_ep) {
+fn do_mapcache(msg: &mut Message) -> i32 {
+    // VM_MAPCACHEPAGE (FS → VM): map `pages` cached blocks of
+    // (dev, dev_offset ..) into the caller at a fresh virtual address and
+    // return it (C mem_cache.c do_mapcache → m_vmmcp_reply.addr). Every
+    // block must already be cached — C returns ENOENT otherwise. The
+    // mappings are writable: cache blocks exist for filesystem block I/O
+    // (C's mem_type_cache.writable is unconditional).
+    //
+    // Message layout (port convention, C mess_vmmcp field order with
+    // 32-bit dev/ino): m1i1 = dev, m1i2:m1i3 = dev_offset (u64),
+    // m1i4 = ino, m1i5:m1i6 = ino_offset (u64), m1i7 = pages.
+    // Reply: m1i1:m1i2 = mapped virtual address (u64).
+    const MAX_CACHE_MAP_PAGES: u32 = 64;
+
+    let caller = msg.m_source;
+    if !is_user_ep(caller) {
         return EINVAL;
     }
+    let dev = unsafe { msg.m_payload.m1.m1i1 } as u32;
+    let dev_offset = u64_from_i32s(unsafe { msg.m_payload.m1.m1i2 }, unsafe {
+        msg.m_payload.m1.m1i3
+    });
+    let ino = unsafe { msg.m_payload.m1.m1i4 } as u32;
+    let ino_offset = u64_from_i32s(unsafe { msg.m_payload.m1.m1i5 }, unsafe {
+        msg.m_payload.m1.m1i6
+    });
+    let pages = unsafe { msg.m_payload.m1.m1i7 } as u32;
 
-    let cr3 = unsafe { proc::vm_get_addrspace(target_ep) };
+    if dev == 0 || pages == 0 || pages > MAX_CACHE_MAP_PAGES {
+        return EINVAL;
+    }
+    if !dev_offset.is_multiple_of(PAGE_SIZE) || !ino_offset.is_multiple_of(PAGE_SIZE) {
+        return EFAULT;
+    }
+    let cr3 = unsafe { proc::vm_get_addrspace(caller) };
     if cr3 == 0 {
         return EINVAL;
     }
 
-    // TODO: Phase 14 — look up the cache page by block number,
-    // allocate a free virtual address in the cache region,
-    // and map the page with map_page().
-    msg.m_payload.m1.m1i1 = 0; // return the virtual address
+    // Resolve every block before touching the caller's address space so a
+    // missing block leaves nothing mapped (C unmaps partial work on
+    // ENOENT).
+    let mut frames = [0u64; MAX_CACHE_MAP_PAGES as usize];
+    for (i, frame) in frames.iter_mut().enumerate().take(pages as usize) {
+        let i = i as u64;
+        let off = dev_offset + i * PAGE_SIZE;
+        let Some((phys, _)) =
+            cache::cache_find(dev, off, Some(ino), ino_offset + i * PAGE_SIZE, true)
+        else {
+            return ENOENT;
+        };
+        *frame = phys;
+    }
+
+    let bytes = (pages as u64) * PAGE_SIZE;
+    let va = unsafe {
+        let Some(vmp) = proc::vmproc_lookup(caller) else {
+            return EINVAL;
+        };
+        let Some(v) = mmap_find_hole(&vmp.vm_regions, bytes) else {
+            return ENOMEM;
+        };
+        // Writable, fully present: the FS writes blocks through this
+        // window. VR_CACHE keeps teardown coherent (frames are freed via
+        // their PhysBlock references like any other mapping).
+        let region = region::VirRegion::new(
+            v,
+            bytes,
+            region::VR_READABLE | region::VR_WRITABLE | region::VR_PRESENT | region::VR_CACHE,
+        );
+        if vmp.vm_regions.insert(region).is_some() {
+            return EAGAIN;
+        }
+        v
+    };
+
+    for (i, &frame) in frames.iter().enumerate().take(pages as usize) {
+        let i = i as u64;
+        if crate::vm::vm_map_page_in(
+            cr3,
+            va + i * PAGE_SIZE,
+            frame,
+            kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+        ) != 0
+        {
+            for j in 0..i {
+                let _ = crate::vm::vm_unmap_page_in(cr3, va + j * PAGE_SIZE);
+            }
+            unsafe {
+                if let Some(vmp) = proc::vmproc_lookup(caller) {
+                    let _ = vmp.vm_regions.remove(va);
+                }
+            }
+            return ENOMEM;
+        }
+    }
+
+    msg.m_payload.m1.m1i1 = (va & 0xFFFF_FFFF) as i32;
+    msg.m_payload.m1.m1i2 = (va >> 32) as i32;
     OK
 }
 
 fn do_setcache(msg: &mut Message) -> i32 {
-    // Set a cache block for a process.
-    // m1i1 = cache block number, m1i2 = physical address.
-    let _block = unsafe { msg.m_payload.m1.m1i1 } as u64;
-    let _phys = unsafe { msg.m_payload.m1.m1i2 } as u64;
+    // VM_SETCACHEPAGE (FS → VM): register `pages` caller-owned anonymous
+    // pages starting at `block` as the cache entries for
+    // (dev, dev_offset + i*PAGE). C (mem_cache.c do_setcache) requires
+    // each page to be a private anon page (refcount 1); the cache takes
+    // its own reference, so the frame survives the caller's unmap and is
+    // shared with later map_file_page hits.
+    //
+    // Message layout: m1i1 = dev, m1i2:m1i3 = dev_offset (u64),
+    // m1i4 = ino, m1i5:m1i6 = ino_offset (u64), m1i7 = pages,
+    // m1i8:m1i9 = block (caller VA of the page to register, u64).
+    let caller = msg.m_source;
+    if !is_user_ep(caller) {
+        return EINVAL;
+    }
+    let dev = unsafe { msg.m_payload.m1.m1i1 } as u32;
+    let dev_offset = u64_from_i32s(unsafe { msg.m_payload.m1.m1i2 }, unsafe {
+        msg.m_payload.m1.m1i3
+    });
+    let ino = unsafe { msg.m_payload.m1.m1i4 } as u32;
+    let ino_offset = u64_from_i32s(unsafe { msg.m_payload.m1.m1i5 }, unsafe {
+        msg.m_payload.m1.m1i6
+    });
+    let pages = unsafe { msg.m_payload.m1.m1i7 } as u32;
+    let block = u64_from_i32s(unsafe { msg.m_payload.m1.m1i8 }, unsafe {
+        msg.m_payload.m1.m1i9
+    });
 
-    // TODO: Phase 14 — allocate a cache page entry and associate
-    // it with the given block number and physical address.
+    if dev == 0 || pages == 0 || pages as usize > cache::CACHE_CAPACITY {
+        return EINVAL;
+    }
+    if !dev_offset.is_multiple_of(PAGE_SIZE) || !ino_offset.is_multiple_of(PAGE_SIZE) {
+        return EFAULT;
+    }
+    let cr3 = unsafe { proc::vm_get_addrspace(caller) };
+    if cr3 == 0 {
+        return EINVAL;
+    }
+
+    for i in 0..pages {
+        let va = (block + (i as u64) * PAGE_SIZE) & !(PAGE_SIZE - 1);
+        let off = dev_offset + (i as u64) * PAGE_SIZE;
+        let ino_off = ino_offset + (i as u64) * PAGE_SIZE;
+        let pte = crate::vm::vm_walk_page(cr3, va);
+        if pte & kernel::pagetable::PG_P == 0 {
+            return EFAULT;
+        }
+        let phys = kernel::hal::pte_to_phys(pte);
+        if phys == 0 {
+            return EFAULT;
+        }
+        // The page must be exclusively owned by the caller (C: "no
+        // reasonable refcount"); the cache takes the second reference.
+        let pb = match crate::vm::pb::pb_find(phys) {
+            Some(idx) if crate::vm::pb::pb_get(idx).is_some_and(|b| b.refcount == 1) => idx,
+            _ => return EFAULT,
+        };
+        cache::cache_insert(dev, off, ino, ino_off, phys, pb);
+    }
     OK
 }
 
 fn do_clearcache(msg: &mut Message) -> i32 {
-    // Clear cache pages for a process.
-    // m1i1 = target endpoint.
-    let _target_ep = unsafe { msg.m_payload.m1.m1i1 };
-
-    // TODO: Phase 14 — walk the cache page table for the target
-    // process and unmap / free all cache pages.
+    // VM_CLEARCACHE (FS → VM): drop every cached page of `dev` (C
+    // mem_cache.c do_clearcache → clear_cache_bydev). Mappings in live
+    // processes keep their own PhysBlock references, so the frames survive
+    // until those processes unmap them.
+    let dev = unsafe { msg.m_payload.m1.m1i1 } as u32;
+    cache::cache_clear_bydev(dev);
     OK
 }
 
@@ -2818,12 +3004,11 @@ mod tests {
         // Watch exit — now returns OK
         assert_eq!(do_watch_exit(&mut msg), OK);
 
-        // Cache — do_mapcache needs valid endpoint in m1i1
-        assert_eq!(do_mapcache(&mut msg), EINVAL); // no m1i1 set
-        msg.m_payload.m1.m1i1 = 0; // valid ep but no page table
-        assert_eq!(do_mapcache(&mut msg), EINVAL); // no page table
-        msg.m_payload = unsafe { core::mem::zeroed() };
-        assert_eq!(do_setcache(&mut msg), OK);
+        // Cache — the handlers take the caller from m_source (0 here);
+        // dev 0 makes do_mapcache/do_setcache fail validation, while
+        // do_clearcache (dev 0) is a no-op.
+        assert_eq!(do_mapcache(&mut msg), EINVAL);
+        assert_eq!(do_setcache(&mut msg), EINVAL);
         assert_eq!(do_clearcache(&mut msg), OK);
 
         // Rusage — needs valid ep in m1i1

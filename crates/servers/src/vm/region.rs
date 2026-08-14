@@ -67,6 +67,11 @@ pub const VR_FILE: u32 = 0x40;
 /// regions (rodata/data) are pre-faulted at exec so VFS's kernel-mode
 /// copies of the image (vircopy of user buffers) hit present pages.
 pub const VR_EXEC: u32 = 0x80;
+/// Region maps cached file blocks (do_mapcache): a writable, fully
+/// present window over frames the VM block cache shares with a
+/// filesystem. Not file-backed (no fd, no FDIO) — teardown frees the
+/// frames through their PhysBlock references like any other mapping.
+pub const VR_CACHE: u32 = 0x100;
 
 impl VirRegion {
     /// Create a new region descriptor.
