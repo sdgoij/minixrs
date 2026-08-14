@@ -3,7 +3,6 @@
 use crate::procfs::consts::*;
 use crate::procfs::types::{File, FileData};
 
-
 // Re-export the VTreeFS constants/functions we use.
 use libs::vtreefs;
 
@@ -39,12 +38,6 @@ fn get_root_inode() -> u16 {
     vtreefs::get_root_inode() as u16
 }
 
-/// Start the VTreeFS event loop (does not return).
-fn start_vtreefs() -> ! {
-    vtreefs::start_vtreefs()
-}
-
-
 /// Initialization hook called by VTreeFS at startup.
 ///
 /// Constructs the static portion of the ProcFS tree.
@@ -79,12 +72,8 @@ pub fn construct_tree(dir: u16, files: &[File]) {
     }
 }
 
-/// Initialize the ProcFS tree state.
-///
-/// This updates the process tables and counts PID directory entries.
-/// Returns `OK` on success.
-pub fn init_tree() -> i32 {
-    // Build the hook table.
+/// Build the VTreeFS hook table and root inode stat.
+fn hooks_and_root_stat() -> (vtreefs::FsHooks, vtreefs::InodeStat) {
     let hooks = vtreefs::FsHooks {
         init_hook: Some(init_hook),
         cleanup_hook: None,
@@ -102,10 +91,16 @@ pub fn init_tree() -> i32 {
         size: 0,
         dev: NO_DEV as u64,
     };
+    (hooks, root_stat)
+}
 
+/// Initialize the ProcFS tree state.
+///
+/// This updates the process tables and counts PID directory entries.
+/// Returns `OK` on success.
+pub fn init_tree() -> i32 {
+    let (hooks, root_stat) = hooks_and_root_stat();
     vtreefs::vtreefs_init(hooks, NR_INODES as u32, root_stat);
-
-    // Count PID files and update tables (stub).
     OK
 }
 
@@ -114,13 +109,8 @@ pub fn init_tree() -> i32 {
 /// Initializes the tree, sets up root directory properties, and starts
 /// the VTreeFS event loop (which does not return).
 pub fn procfs_main() {
-    let r = init_tree();
-    if r != OK {
-        return;
-    }
-
-    // Start VTreeFS (does not return).
-    start_vtreefs();
+    let (hooks, root_stat) = hooks_and_root_stat();
+    vtreefs::start_vtreefs(hooks, NR_INODES as u32, root_stat, 0);
 }
 
 #[cfg(test)]
@@ -134,8 +124,8 @@ mod tests {
 
     #[test]
     fn init_hook_no_panic() {
-        init_tree(); // initialises VTreeFS and fires init_hook
-        init_hook(); // second call should also be fine
+        init_tree(); // initialises VTreeFS (init_hook fires on mount)
+        init_hook(); // direct call should also be fine
     }
 
     #[test]

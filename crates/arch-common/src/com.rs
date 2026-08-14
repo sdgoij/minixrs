@@ -30,6 +30,7 @@ pub const RAMDISK_PROC_NR: Endpoint = 11;
 pub const VIRTIO_BLK_PROC_NR: Endpoint = 12;
 pub const VIRTIO_NET_PROC_NR: Endpoint = 13;
 pub const NET_PROC_NR: Endpoint = 14;
+pub const DEVMAN_PROC_NR: Endpoint = 15;
 
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;

@@ -3,7 +3,6 @@
 use crate::procfs::buf;
 use crate::procfs::consts::*;
 
-
 /// Kernel process table entry (stub).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Proc {
@@ -46,7 +45,6 @@ pub static MPROC: [MProc; 32] = [MPROC_INIT; 32];
 const FPROC_INIT: FProc = FProc { fp_flags: 0 };
 pub static FPROC: [FProc; 32] = [FPROC_INIT; 32];
 
-
 /// Return whether the given kernel/PM slot is in use by a process.
 pub fn slot_in_use(_slot: i32) -> bool {
     false
@@ -65,7 +63,6 @@ pub fn construct_pid_dirs() {
 pub fn construct_pid_entries(_parent: u32, _name: Option<&str>) {
     // No-op (stub).
 }
-
 
 /// Path name resolution hook.
 ///
@@ -101,17 +98,19 @@ pub fn getdents_hook(node: u32) -> i32 {
 /// Regular file read hook.
 ///
 /// Initialises the output buffer, decodes `cbdata` to find the file
-/// handler, calls it, then returns the result.
-pub fn read_hook(_node: u32, offset: u64, max_len: usize, cbdata: libs::vtreefs::CbData) -> i32 {
-    buf::buf_init(offset, max_len);
+/// handler, calls it, copies the produced bytes into `buf`, and returns
+/// the byte count.
+pub fn read_hook(node: u32, offset: u64, buf: &mut [u8]) -> usize {
+    buf::buf_init(offset, buf.len());
 
+    let cbdata = libs::vtreefs::get_inode_cbdata(node);
     if cbdata != 0 {
         // Decode the handler type from bit 0 of cbdata.
         if cbdata & 1 == 1 {
             // Dynamic handler (bit 0 set): fn(i32).
             // Get the slot number from the parent inode's cbdata.
             let parent_cbdata =
-                libs::vtreefs::get_inode_cbdata(libs::vtreefs::get_inode(_node).parent_id);
+                libs::vtreefs::get_inode_cbdata(libs::vtreefs::get_inode(node).parent_id);
             let slot = parent_cbdata as i32;
             let f: fn(i32) =
                 unsafe { core::mem::transmute::<*const (), fn(i32)>((cbdata & !1) as *const ()) };
@@ -123,7 +122,10 @@ pub fn read_hook(_node: u32, offset: u64, max_len: usize, cbdata: libs::vtreefs:
         }
     }
 
-    OK
+    let (data, len) = buf::buf_get();
+    let n = len.min(buf.len());
+    buf[..n].copy_from_slice(&data[..n]);
+    n
 }
 
 /// Symbolic link resolution hook.
@@ -153,8 +155,9 @@ mod tests {
     #[test]
     fn read_hook_returns_ok() {
         crate::procfs::main::init_tree();
-        let status = read_hook(0, 0, 0, 0);
-        assert_eq!(status, OK);
+        let mut out = [0u8; 16];
+        let n = read_hook(0, 0, &mut out);
+        assert_eq!(n, 0);
     }
 
     #[test]

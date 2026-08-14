@@ -142,6 +142,10 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         }
     }
 
+    // Mount devman so its device tree is populated (its init_hook fires on
+    // readsuper). Blocks until devman starts, like mount_root/MFS.
+    let _ = mount::mount_devman();
+
     // Signal kernel that VFS init (including mount_root) is complete.
     // Boot-test: kernel runs the boot suite against post-mount state and
     // exits QEMU. Normal boot: no handler registered, returns -38

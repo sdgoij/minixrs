@@ -21,6 +21,7 @@ minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
 drivers = { path = "../drivers" }
 fs = { path = "../fs" }
+libs = { path = "../libs" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # server binaries that cannot run as host-native tests. Tests live in the lib target.
@@ -82,6 +83,11 @@ test = false
 [[bin]]
 name = "net"
 path = "src/bin/net.rs"
+test = false
+
+[[bin]]
+name = "devman"
+path = "src/bin/devman.rs"
 test = false
 
 [lints]

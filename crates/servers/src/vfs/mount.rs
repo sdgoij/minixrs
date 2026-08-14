@@ -407,6 +407,49 @@ pub fn mount_pfs() {
     }
 }
 
+/// Register the devman FS vmnt and mount it via `req_readsuper`, so the
+/// device tree gets populated at boot (devman's `init_hook` runs on mount).
+///
+/// devman's tree is not yet reachable through path resolution (VFS has no
+/// multi-mount traversal), but the mount exercises the VTreeFS protocol end
+/// to end and keeps a vmnt for when traversal lands.
+pub fn mount_devman() -> i32 {
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return ENFILE;
+    }
+    unsafe {
+        (*vmp).m_fs_e = arch_common::com::DEVMAN_PROC_NR;
+    }
+
+    let (r, node, _flags_reply) = unsafe {
+        req_readsuper(
+            vmp,
+            core::ptr::null(),
+            0, /* label_len */
+            0, /* dev: none */
+            0, /* readonly: writable */
+            0, /* isroot: devman must not be mounted as root */
+        )
+    };
+    if r != OK {
+        unsafe { mark_vmnt_free(vmp) };
+        return r;
+    }
+
+    unsafe {
+        (*vmp).m_dev = node.dev;
+        (*vmp).m_root_node = node.inode_nr;
+        (*vmp).m_flags = 0;
+        let label = b"devman";
+        let m_label = &mut (*vmp).m_label;
+        let copy_len = label.len().min(LABEL_MAX - 1);
+        m_label[..copy_len].copy_from_slice(&label[..copy_len]);
+        m_label[copy_len] = 0;
+    }
+    OK
+}
+
 /// Check if a device is NONE (no device).
 pub fn is_nonedev(dev: u32) -> i32 {
     if dev == u32::MAX { OK } else { ENOSYS }

@@ -92,6 +92,7 @@ dependencies = [
 name = "libs"
 version = "0.1.0"
 dependencies = [
+ "arch-common",
  "minix-rt",
 ]
 
@@ -144,6 +145,7 @@ dependencies = [
  "drivers",
  "fs",
  "kernel",
+ "libs",
  "minix-rt",
  "minix-std",
  "net",

@@ -18,8 +18,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-// Constants
+use libs::vtreefs;
 
+// Constants
 
 const OK: i32 = 0;
 const EPERM: i32 = -1;
@@ -30,7 +31,6 @@ const EFAULT: i32 = -14;
 const EBUSY: i32 = -16;
 const ENODEV: i32 = -19;
 const EINVAL: i32 = -22;
-
 
 const DEVMAN_BASE: u32 = 0x1200;
 const DEVMAN_ADD_DEV: u32 = DEVMAN_BASE;
@@ -45,37 +45,41 @@ const DEVMAN_BIND: u32 = DEVMAN_BASE + 8;
 const DEVMAN_UNBIND: u32 = DEVMAN_BASE + 9;
 
 //
-// DEVMAN uses m4_* fields (m4_l1, m4_l2, m4_l3) mapped to:
-//   DEVMAN_GRANT_ID  = m4_l1 = offset 16
-//   DEVMAN_GRANT_SIZE = m4_l2 = offset 20
-//   DEVMAN_DEVICE_ID  = m4_l2 = offset 20
-//   DEVMAN_ENDPOINT   = m4_l3 = offset 24
-//   DEVMAN_RESULT     = m4_l1 = offset 16
+// DEVMAN uses the m4_* payload fields, mapped to absolute message offsets
+// (the port's `arch_common::ipc::Message` is m_source@0, m_type@4,
+// m_payload@8):
+//   DEVMAN_GRANT_ID    = m4_l1 = offset 8  (i64)
+//   DEVMAN_GRANT_SIZE  = m4_l2 = offset 16 (i64)
+//   DEVMAN_DEVICE_ID   = m4_l2 = offset 16 (i64)
+//   DEVMAN_ENDPOINT    = m4_l3 = offset 24 (i64)
+//   DEVMAN_RESULT      = m4_l1 = offset 8  (i64)
 
-const MSG_OFF_TYPE: usize = 0; // i32
-const MSG_OFF_SOURCE: usize = 4; // i32
-const MSG_OFF_M4_L1: usize = 16; // i32 — DEVMAN_GRANT_ID / DEVMAN_RESULT
-const MSG_OFF_M4_L2: usize = 20; // i32 — DEVMAN_GRANT_SIZE / DEVMAN_DEVICE_ID
-const MSG_OFF_M4_L3: usize = 24; // i32 — DEVMAN_ENDPOINT
-
+const MSG_OFF_SOURCE: usize = 0; // i32
+const MSG_OFF_TYPE: usize = 4; // i32
+const MSG_OFF_M4_L1: usize = 8; // i64 — DEVMAN_GRANT_ID / DEVMAN_RESULT
+const MSG_OFF_M4_L2: usize = 16; // i64 — DEVMAN_GRANT_SIZE / DEVMAN_DEVICE_ID
+const MSG_OFF_M4_L3: usize = 24; // i64 — DEVMAN_ENDPOINT
 
 const DEVMAN_STRING_LEN: usize = 128;
-
 
 const DEVMAN_DEVICE_UNBOUND: i32 = 0;
 const DEVMAN_DEVICE_BOUND: i32 = 1;
 const DEVMAN_DEVICE_ZOMBIE: i32 = 2;
 
-
 const ADD_STRING: &str = "ADD ";
 const REMOVE_STRING: &str = "REMOVE ";
-
 
 const DEVMAN_DEVINFO_STATIC: u32 = 0;
 const DEVMAN_DEVINFO_DYNAMIC: u32 = 1;
 
-
 const MAX_DEVICES: usize = 256;
+
+/// Mode type bits (match `crates/fs/src/mfs/consts.rs`).
+const I_DIRECTORY: u32 = 0o040000;
+const I_REGULAR: u32 = 0o100000;
+
+/// NO_DEV device number (VFS uses `u32::MAX`).
+const NO_DEV: u32 = u32::MAX;
 
 // Types
 
@@ -249,6 +253,9 @@ static EVENT_TAIL: AtomicI32 = AtomicI32::new(-1);
 
 static NEXT_DEVICE_ID: AtomicI32 = AtomicI32::new(1);
 
+/// VTreeFS inode ID of the `events` file (u32::MAX until init).
+static EVENTS_INODE: AtomicU32 = AtomicU32::new(u32::MAX);
+
 struct StaticInfoTableRaw(UnsafeCell<[DevmanStaticInfoInode; MAX_DEVICES * 4]>);
 unsafe impl Sync for StaticInfoTableRaw {}
 impl StaticInfoTableRaw {
@@ -280,7 +287,6 @@ impl InfoInodeTableRaw {
 
 static INFO_INODE_TABLE: InfoInodeTableRaw = InfoInodeTableRaw::new();
 static INFO_INODE_COUNT: AtomicU32 = AtomicU32::new(0);
-
 
 struct BufState {
     buf: [u8; 4096],
@@ -316,6 +322,11 @@ unsafe fn msg_set_i32(msg: &mut [u8; 64], off: usize, val: i32) {
     msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
 }
 
+/// Write an i64 into a message buffer at the given offset.
+unsafe fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
+    msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
+}
+
 // Buffer operations (from buf.c)
 
 /// Format a string into the static buffer (stub — no formatting).
@@ -328,11 +339,15 @@ unsafe fn buf_append_str(s: &str) {
 
 // Device tree operations
 
-/// Initialize the root device.
+/// Initialize the root device and the VTreeFS tree (called once, from the
+/// VTreeFS `init_hook` on mount).
+///
+/// Creates the `/devices` device root and the `/events` notification file
+/// under the VTreeFS root, matching the C `devman_init_devices()`.
 ///
 /// # Safety
 ///
-/// Must be called once before any other device operations.
+/// The VTreeFS inode table must have been initialized (`vtreefs_init`).
 pub unsafe fn devman_init_devices() {
     unsafe {
         let base = DEVICE_TABLE.as_ptr();
@@ -346,6 +361,38 @@ pub unsafe fn devman_init_devices() {
         root.state = DEVMAN_DEVICE_UNBOUND;
         root.ref_count = 1;
         DEVICE_COUNT.store(1, Ordering::Relaxed);
+
+        // VTreeFS tree: root device directory + events file.
+        let dir_stat = vtreefs::InodeStat {
+            mode: I_DIRECTORY | 0o444,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            dev: NO_DEV as u64,
+        };
+        let file_stat = vtreefs::InodeStat {
+            mode: I_REGULAR | 0o444,
+            uid: 0,
+            gid: 0,
+            size: 0x1000,
+            dev: NO_DEV as u64,
+        };
+        let devices_inode = vtreefs::add_inode(
+            vtreefs::get_root_inode(),
+            "devices",
+            vtreefs::NO_INDEX,
+            &dir_stat,
+            0,
+        );
+        let events_inode = vtreefs::add_inode(
+            vtreefs::get_root_inode(),
+            "events",
+            vtreefs::NO_INDEX,
+            &file_stat,
+            0,
+        );
+        root.inode_id = devices_inode;
+        EVENTS_INODE.store(events_inode, Ordering::Relaxed);
     }
 }
 
@@ -472,12 +519,16 @@ unsafe fn devman_del_device(dev_idx: usize) {
         let mut info = dev.first_info;
         while let Some(i) = info {
             let next = (*INFO_INODE_TABLE.as_ptr().add(i)).next;
-            // Free static info data if present.
             let info_inode = &*INFO_INODE_TABLE.as_ptr().add(i);
-            if info_inode.data_idx != usize::MAX {
-                // Static info entry will be compacted later.
+            if info_inode.inode_id != 0 && !vtreefs::is_inode_deleted(info_inode.inode_id) {
+                vtreefs::delete_inode(info_inode.inode_id);
             }
             info = next;
+        }
+
+        // Remove the device's VTreeFS inode.
+        if dev.inode_id != 0 && !vtreefs::is_inode_deleted(dev.inode_id) {
+            vtreefs::delete_inode(dev.inode_id);
         }
 
         // Remove from parent's child list.
@@ -545,7 +596,7 @@ unsafe fn fix_device_refs(old_idx: usize, new_idx: usize) {
 /// # Safety
 ///
 /// `dev_idx` must be a valid device index.
-unsafe fn devman_dev_add_static_info(dev_idx: usize, _name: &str, data: &str) -> Result<(), i32> {
+unsafe fn devman_dev_add_static_info(dev_idx: usize, name: &str, data: &str) -> Result<(), i32> {
     unsafe {
         // Allocate static info slot.
         let si_count = STATIC_INFO_COUNT.load(Ordering::Relaxed) as usize;
@@ -565,10 +616,32 @@ unsafe fn devman_dev_add_static_info(dev_idx: usize, _name: &str, data: &str) ->
         si.data[..copy_len].copy_from_slice(&data_bytes[..copy_len]);
         si.data[copy_len] = 0;
 
+        // Create the VTreeFS file inode (cbdata = si_idx + 1 so the read
+        // hook can find the static info).
+        let file_stat = vtreefs::InodeStat {
+            mode: I_REGULAR | 0o444,
+            uid: 0,
+            gid: 0,
+            size: 0x1000,
+            dev: NO_DEV as u64,
+        };
+        let dev = &*DEVICE_TABLE.as_ptr().add(dev_idx);
+        let inode_id = vtreefs::add_inode(
+            dev.inode_id,
+            name,
+            vtreefs::NO_INDEX,
+            &file_stat,
+            si_idx + 1,
+        );
+        if inode_id == u32::MAX {
+            return Err(ENOMEM);
+        }
+
         // Allocate info inode slot.
         let ii_idx = alloc_info_inode_slot().ok_or(ENOMEM)?;
         let ii_base = INFO_INODE_TABLE.as_ptr();
         let ii = &mut *ii_base.add(ii_idx);
+        ii.inode_id = inode_id;
         ii.data_idx = si_idx;
         ii.read_fn_idx = 1; // static_info_read
 
@@ -586,7 +659,12 @@ unsafe fn devman_dev_add_static_info(dev_idx: usize, _name: &str, data: &str) ->
 /// # Safety
 ///
 /// `parent_idx` must be a valid device index.
-unsafe fn devman_dev_add_child(parent_idx: usize) -> Result<usize, i32> {
+unsafe fn devman_dev_add_child(
+    parent_idx: usize,
+    name: &str,
+    buffer: &[u8],
+    devinf: &DevmanDeviceInfo,
+) -> Result<usize, i32> {
     unsafe {
         if parent_idx >= DEVICE_COUNT.load(Ordering::Relaxed) as usize {
             return Err(ENODEV);
@@ -599,6 +677,53 @@ unsafe fn devman_dev_add_child(parent_idx: usize) -> Result<usize, i32> {
         dev.parent = Some(parent_idx);
         dev.dev_id = NEXT_DEVICE_ID.fetch_add(1, Ordering::Relaxed);
         dev.state = DEVMAN_DEVICE_UNBOUND;
+
+        // Create the VTreeFS directory inode for the device.
+        let dir_stat = vtreefs::InodeStat {
+            mode: I_DIRECTORY | 0o444,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            dev: NO_DEV as u64,
+        };
+        let parent_inode = (*base.add(parent_idx)).inode_id;
+        let inode_id = vtreefs::add_inode(parent_inode, name, vtreefs::NO_INDEX, &dir_stat, 0);
+        if inode_id == u32::MAX {
+            devman_put_device(dev_idx);
+            return Err(ENOMEM);
+        }
+        dev.inode_id = inode_id;
+
+        // Create the serialized info entries (name/value pairs).
+        let entries: &[DevmanDeviceInfoEntry] = if devinf.count > 0
+            && buffer.len()
+                >= core::mem::size_of::<DevmanDeviceInfo>()
+                    + devinf.count as usize * core::mem::size_of::<DevmanDeviceInfoEntry>()
+        {
+            unsafe {
+                core::slice::from_raw_parts(
+                    buffer
+                        .as_ptr()
+                        .add(core::mem::size_of::<DevmanDeviceInfo>())
+                        as *const DevmanDeviceInfoEntry,
+                    devinf.count as usize,
+                )
+            }
+        } else {
+            &[]
+        };
+        for entry in entries {
+            if entry.type_ == DEVMAN_DEVINFO_STATIC {
+                let name = cstr_at(buffer, entry.name_offset as usize);
+                let data = cstr_at(buffer, entry.data_offset as usize);
+                let _ = devman_dev_add_static_info(dev_idx, name, data);
+            }
+        }
+
+        // Make the device ID accessible to userland.
+        let mut id_buf = [0u8; 16];
+        let id_str = itoa_buf(dev.dev_id, &mut id_buf);
+        let _ = devman_dev_add_static_info(dev_idx, "devman_id", id_str);
 
         // Link into parent's child list.
         let parent = &mut *base.add(parent_idx);
@@ -613,21 +738,119 @@ unsafe fn devman_dev_add_child(parent_idx: usize) -> Result<usize, i32> {
 
 // Event queue operations
 
-/// Add an event to the event queue.
+/// Generate the device path (`/devices/name/...`) for `dev_idx` into `out`.
+///
+/// The path starts at the root device's inode (named `devices`), matching
+/// the C `devman_generate_path`.
+///
+/// # Safety
+///
+/// `out` must be a valid buffer; `dev_idx` must be a valid device index.
+unsafe fn devman_generate_path(dev_idx: usize, out: &mut [u8]) -> i32 {
+    unsafe {
+        // Collect names from the device up to and including the root
+        // device, then emit them as a `/`-joined path.
+        let mut names = [[0u8; 64]; 16];
+        let mut depths = [0usize; 16];
+        let mut depth = 0usize;
+        let mut cur = Some(dev_idx);
+        while let Some(c) = cur {
+            if depth >= names.len() {
+                return ENOMEM;
+            }
+            let dev = &*DEVICE_TABLE.as_ptr().add(c);
+            let name = vtreefs::get_inode_name(dev.inode_id);
+            let nb = name.as_bytes();
+            let n = nb.len().min(63);
+            names[depth][..n].copy_from_slice(&nb[..n]);
+            depths[depth] = n;
+            depth += 1;
+            cur = dev.parent;
+        }
+
+        let mut off = 0usize;
+        for i in (0..depth).rev() {
+            if off + 1 + depths[i] >= out.len() {
+                return ENOMEM;
+            }
+            out[off] = b'/';
+            off += 1;
+            out[off..off + depths[i]].copy_from_slice(&names[i][..depths[i]]);
+            off += depths[i];
+        }
+        if off == 0 {
+            out[off] = b'/';
+            off += 1;
+        }
+        out[off] = 0;
+        OK
+    }
+}
+
+/// Enqueue an ADD/REMOVE event for `dev_idx` (C `devman_device_add_event` /
+/// `devman_device_remove_event`).
 ///
 /// # Safety
 ///
 /// Must be called with valid device state.
-unsafe fn devman_add_event(data: &str) -> Result<(), i32> {
+unsafe fn devman_add_event(dev_idx: usize, add: bool) -> Result<(), i32> {
     unsafe {
         let count = DEVICE_COUNT.load(Ordering::Relaxed) as usize;
-        if count >= MAX_DEVICES {
+        if dev_idx >= count {
+            return Err(ENODEV);
+        }
+
+        // Build "ADD <path> 0x%08x" / "REMOVE <path> 0x%08x".
+        let mut data = [0u8; DEVMAN_STRING_LEN];
+        let prefix: &[u8] = if add { b"ADD " } else { b"REMOVE " };
+        let mut off = prefix.len();
+        data[..off].copy_from_slice(prefix);
+
+        let mut path = [0u8; DEVMAN_STRING_LEN];
+        if devman_generate_path(dev_idx, &mut path) != OK {
             return Err(ENOMEM);
         }
-        let idx = (count - 1) as i32; // reuse last device slot... hmm
-        let _ = idx;
-        // TODO: proper event allocation
-        let _ = data;
+        let plen = path.iter().position(|&b| b == 0).unwrap_or(0);
+        if off + plen + 11 >= data.len() {
+            return Err(ENOMEM);
+        }
+        data[off..off + plen].copy_from_slice(&path[..plen]);
+        off += plen;
+
+        // Append the device id as " 0x%08x".
+        let dev_id = (*DEVICE_TABLE.as_ptr().add(dev_idx)).dev_id;
+        data[off..off + 2].copy_from_slice(b" 0");
+        data[off + 2] = b'x';
+        off += 3;
+        let hex = b"0123456789abcdef";
+        for i in (0..8).rev() {
+            let nibble = ((dev_id as u32 >> (i * 4)) & 0xf) as usize;
+            data[off] = hex[nibble];
+            off += 1;
+        }
+
+        // Append to the event queue (first free slot whose data is empty).
+        let base = EVENT_TABLE.as_ptr();
+        let mut idx = None;
+        for i in 0..MAX_DEVICES {
+            let ev = &*base.add(i);
+            if ev.data[0] == 0 && ev.next.is_none() {
+                idx = Some(i);
+                break;
+            }
+        }
+        let idx = match idx {
+            Some(i) => i,
+            None => return Err(ENOMEM),
+        };
+        *base.add(idx) = DevmanEvent { data, next: None };
+        let tail = EVENT_TAIL.load(Ordering::Relaxed);
+        if tail >= 0 {
+            (*base.add(tail as usize)).next = Some(idx);
+        } else {
+            EVENT_HEAD.store(idx as i32, Ordering::Relaxed);
+        }
+        EVENT_TAIL.store(idx as i32, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -655,10 +878,90 @@ unsafe fn devman_read_event() -> Option<[u8; DEVMAN_STRING_LEN]> {
         EVENT_HEAD.store(-1, Ordering::Relaxed);
         EVENT_TAIL.store(-1, Ordering::Relaxed);
     }
+    // Release the slot for reuse.
+    unsafe { *base.add(idx) = DevmanEvent::zeroed() };
     Some(data)
 }
 
-// Message handlers (stubs)
+// Message handlers
+
+/// Fill the DEVMAN_REPLY reply fields (m_type, DEVMAN_RESULT, DEVMAN_DEVICE_ID).
+///
+/// # Safety
+///
+/// `msg` must be a valid 64-byte message buffer.
+unsafe fn devman_reply(msg: &mut [u8; 64], result: i32, dev_id: i32) {
+    unsafe {
+        msg_set_i32(msg, MSG_OFF_TYPE, DEVMAN_REPLY as i32);
+        msg_set_i64(msg, MSG_OFF_M4_L1, result as i64); // DEVMAN_RESULT
+        msg_set_i64(msg, MSG_OFF_M4_L2, dev_id as i64); // DEVMAN_DEVICE_ID
+    }
+}
+
+/// Read a NUL-terminated string from `buffer` starting at `off`.
+fn cstr_at(buffer: &[u8], off: usize) -> &str {
+    if off >= buffer.len() {
+        return "";
+    }
+    let rest = &buffer[off..];
+    let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    core::str::from_utf8(&rest[..len]).unwrap_or("")
+}
+
+/// Format `v` (non-negative) as a decimal string into `out`.
+fn itoa_buf(v: i32, out: &mut [u8]) -> &str {
+    let mut v = v.max(0) as u32;
+    let mut i = out.len();
+    loop {
+        i -= 1;
+        out[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    core::str::from_utf8(&out[i..]).unwrap_or("")
+}
+
+/// Parse a serialized `DevmanDeviceInfo` blob, add the device to the tree,
+/// and enqueue an ADD event. Returns the new device id, or a negative errno.
+///
+/// Extracted from `do_add_device` so the logic is host-testable without a
+/// grant table.
+///
+/// # Safety
+///
+/// `buffer` must hold a valid serialized device-info blob.
+unsafe fn do_add_device_inner(source: i32, buffer: &[u8]) -> Result<i32, i32> {
+    unsafe {
+        if buffer.len() < core::mem::size_of::<DevmanDeviceInfo>() {
+            return Err(EINVAL);
+        }
+        let devinf = DevmanDeviceInfo {
+            count: i32::from_ne_bytes(buffer[0..4].try_into().unwrap_or([0; 4])),
+            parent_dev_id: i32::from_ne_bytes(buffer[4..8].try_into().unwrap_or([0; 4])),
+            name_offset: u32::from_ne_bytes(buffer[8..12].try_into().unwrap_or([0; 4])),
+            subsystem_offset: u32::from_ne_bytes(buffer[12..16].try_into().unwrap_or([0; 4])),
+        };
+
+        let parent_idx = match devman_find_device(devinf.parent_dev_id) {
+            Some(idx) => idx,
+            None => return Err(ENODEV),
+        };
+        let name = cstr_at(buffer, devinf.name_offset as usize);
+        let dev_idx = devman_dev_add_child(parent_idx, name, buffer, &devinf)?;
+
+        let base = DEVICE_TABLE.as_ptr();
+        let dev = &mut *base.add(dev_idx);
+        dev.state = DEVMAN_DEVICE_UNBOUND;
+        dev.owner = source;
+        let dev_id = dev.dev_id;
+
+        let _ = devman_add_event(dev_idx, true);
+
+        Ok(dev_id)
+    }
+}
 
 /// Handle DEVMAN_ADD_DEV — add a device to the tree.
 ///
@@ -667,23 +970,35 @@ unsafe fn devman_read_event() -> Option<[u8; DEVMAN_STRING_LEN]> {
 /// `msg` must be a valid 64-byte message buffer.
 pub unsafe fn do_add_device(msg: &mut [u8; 64]) -> i32 {
     unsafe {
-        let _source = msg_i32(msg, MSG_OFF_SOURCE);
-        let _grant_id = msg_i32(msg, MSG_OFF_M4_L1);
-        let _grant_size = msg_i32(msg, MSG_OFF_M4_L2);
+        let source = msg_i32(msg, MSG_OFF_SOURCE);
+        let grant_id = msg_i32(msg, MSG_OFF_M4_L1);
+        let grant_size = msg_i32(msg, MSG_OFF_M4_L2);
 
-        // Real implementation would:
-        //   1. Copy device info from caller via sys_safecopyfrom
-        //   2. Find parent device by devinf->parent_dev_id
-        //   3. Call devman_dev_add_child to create the device
-        //   4. Call devman_add_event to notify userspace
-        //   5. Set DEVMAN_DEVICE_ID in the message
-        //   6. Send DEVMAN_REPLY
+        if grant_id < 0 || grant_size < core::mem::size_of::<DevmanDeviceInfo>() as i32 {
+            devman_reply(msg, EINVAL, 0);
+            return EINVAL;
+        }
 
-        // Stub: set reply device ID to 0 and return OK.
-        msg_set_i32(msg, MSG_OFF_M4_L2, 0); // DEVMAN_DEVICE_ID
-        msg_set_i32(msg, MSG_OFF_TYPE, DEVMAN_REPLY as i32);
-        msg_set_i32(msg, MSG_OFF_M4_L1, OK); // DEVMAN_RESULT
-        OK
+        // Copy the serialized device info from the caller via the grant.
+        let mut devinfo_buf = [0u8; 1024];
+        let copy_len = (grant_size as usize).min(devinfo_buf.len());
+        let r =
+            crate::tty::sys_safecopyfrom(source, grant_id as u32, 0, &mut devinfo_buf[..copy_len]);
+        if r != OK {
+            devman_reply(msg, EINVAL, 0);
+            return EINVAL;
+        }
+
+        match do_add_device_inner(source, &devinfo_buf) {
+            Ok(dev_id) => {
+                devman_reply(msg, OK, dev_id);
+                OK
+            }
+            Err(e) => {
+                devman_reply(msg, e, 0);
+                e
+            }
+        }
     }
 }
 
@@ -789,18 +1104,94 @@ pub unsafe fn do_unbind_device(msg: &mut [u8; 64]) -> i32 {
     }
 }
 
-// Server main loop (stub)
+// Server main loop
+
+/// VTreeFS init hook — populate the device tree once, on mount.
+pub fn devman_init_hook() {
+    static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !ONCE.swap(true, Ordering::Relaxed) {
+        unsafe {
+            devman_init_devices();
+        }
+    }
+}
+
+/// VTreeFS message hook — handle non-FS messages (DEVMAN_ADD_DEV,
+/// DEVMAN_DEL_DEV, DEVMAN_BIND, DEVMAN_UNBIND). The reply is built into
+/// `msg` (m_type = DEVMAN_REPLY); the VTreeFS loop sends it back.
+///
+/// # Safety
+///
+/// `msg` must point to a valid 64-byte message buffer.
+pub fn devman_handle_message(msg: &mut [u8; 64]) -> i32 {
+    unsafe {
+        let m_type = msg_i32(msg, MSG_OFF_TYPE) as u32;
+        match m_type {
+            DEVMAN_ADD_DEV => do_add_device(msg),
+            DEVMAN_DEL_DEV => do_del_device(msg),
+            DEVMAN_BIND => do_bind_device(msg),
+            DEVMAN_UNBIND => do_unbind_device(msg),
+            _ => {
+                devman_reply(msg, EINVAL, 0);
+                EINVAL
+            }
+        }
+    }
+}
+
+/// Copy a NUL-terminated string into `buf` starting at `offset`.
+/// Returns the number of bytes written.
+fn fill_from(data: &[u8], offset: u64, buf: &mut [u8]) -> usize {
+    let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let start = (offset as usize).min(len);
+    let n = (len - start).min(buf.len());
+    buf[..n].copy_from_slice(&data[start..start + n]);
+    n
+}
+
+/// VTreeFS read hook — serve the `events` file and static-info files.
+///
+/// Static-info inodes carry their table index in cbdata (`si_idx + 1`); the
+/// events file is identified by inode id. Device directories read as empty.
+pub fn devman_read_hook(node: u32, offset: u64, buf: &mut [u8]) -> usize {
+    let cbdata = vtreefs::get_inode_cbdata(node);
+    if cbdata > 0 {
+        let si = unsafe { &*STATIC_INFO_TABLE.as_ptr().add(cbdata - 1) };
+        return fill_from(&si.data, offset, buf);
+    }
+    if node == EVENTS_INODE.load(Ordering::Relaxed) {
+        return match unsafe { devman_read_event() } {
+            Some(event) => fill_from(&event, offset, buf),
+            None => 0,
+        };
+    }
+    0
+}
 
 /// DEVMAN server main loop.
 ///
-/// Currently a stub — will be wired when VTreeFS and SEF server framework
-/// are running (Phase 12 — VTreeFS + SEF).
+/// Registers the VTreeFS hooks and enters the VTreeFS receive-dispatch loop:
+///   - init_hook  → `devman_init_devices` (on mount)
+///   - message_hook → `devman_handle_message` (ADD/DEL/BIND/UNBIND)
+///   - read_hook → `devman_read_hook` (events + static info)
 pub fn devman_server_main() {
-    // TODO: Phase 12 — VTreeFS init + message loop:
-    //   - Register init_hook (devman_init_devices)
-    //   - Register message_hook (do_add_device, do_del_device, do_bind, do_unbind)
-    //   - Register read_hook (devman_event_read, devman_static_info_read)
-    //   - Start VTreeFS with `start_vtreefs`
+    let hooks = vtreefs::FsHooks {
+        init_hook: Some(devman_init_hook),
+        cleanup_hook: None,
+        lookup_hook: None,
+        getdents_hook: None,
+        read_hook: Some(devman_read_hook),
+        rdlink_hook: None,
+        message_hook: Some(devman_handle_message),
+    };
+    let root_stat = vtreefs::InodeStat {
+        mode: I_DIRECTORY | 0o444,
+        uid: 0,
+        gid: 0,
+        size: 0,
+        dev: NO_DEV as u64,
+    };
+    vtreefs::start_vtreefs(hooks, vtreefs::MAX_INODES as u32, root_stat, 0);
 }
 
 // Tests
@@ -842,7 +1233,23 @@ mod tests {
         NEXT_DEVICE_ID.store(1, Ordering::Relaxed);
         EVENT_HEAD.store(-1, Ordering::Relaxed);
         EVENT_TAIL.store(-1, Ordering::Relaxed);
+        EVENTS_INODE.store(u32::MAX, Ordering::Relaxed);
+        // Initialize the VTreeFS inode table that devman's tree lives in.
+        let root_stat = vtreefs::InodeStat {
+            mode: 0o040555,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            dev: u32::MAX as u64,
+        };
+        vtreefs::vtreefs_init(vtreefs::FsHooks::empty(), 1024, root_stat);
         unsafe { devman_init_devices() };
+    }
+
+    /// Add a child device (name only; no serialized info entries).
+    fn add_child(parent: usize, name: &str) -> usize {
+        let devinf = DevmanDeviceInfo::zeroed();
+        unsafe { devman_dev_add_child(parent, name, &[], &devinf).unwrap() }
     }
 
     #[test]
@@ -887,9 +1294,8 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) };
-        assert!(child.is_ok());
-        let child_idx = child.unwrap();
+        let child = add_child(0, "dev0");
+        let child_idx = child;
 
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let child_dev = unsafe { &*base.add(child_idx) };
@@ -908,9 +1314,9 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let c1 = unsafe { devman_dev_add_child(0) }.unwrap();
-        let c2 = unsafe { devman_dev_add_child(0) }.unwrap();
-        let c3 = unsafe { devman_dev_add_child(0) }.unwrap();
+        let c1 = add_child(0, "dev1");
+        let c2 = add_child(0, "dev2");
+        let c3 = add_child(0, "dev3");
 
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let root = unsafe { &*base.add(0) };
@@ -930,7 +1336,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let child_dev = unsafe { &*base.add(child) };
         let child_id = child_dev.dev_id;
@@ -944,8 +1350,8 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
-        let grandchild = unsafe { devman_dev_add_child(child) }.unwrap();
+        let child = add_child(0, "dev0");
+        let grandchild = add_child(child, "dev1");
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let gc_dev = unsafe { &*base.add(grandchild) };
 
@@ -958,8 +1364,8 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
-        let r = unsafe { devman_dev_add_static_info(child, "devman_id", "42") };
+        let child = add_child(0, "dev0");
+        let r = unsafe { devman_dev_add_static_info(child, "extra", "42") };
         assert!(r.is_ok());
 
         let base = unsafe { DEVICE_TABLE.as_ptr() };
@@ -968,7 +1374,9 @@ mod tests {
 
         let ii_base = unsafe { INFO_INODE_TABLE.as_ptr() };
         let ii = unsafe { &*ii_base.add(dev.first_info.unwrap()) };
-        assert_eq!(ii.data_idx, 0);
+        // add_child already created a "devman_id" info (data_idx 0); the
+        // explicitly added one is the most recent, at the head.
+        assert_eq!(ii.data_idx, 1);
 
         let si_base = unsafe { STATIC_INFO_TABLE.as_ptr() };
         let si = unsafe { &*si_base.add(ii.data_idx) };
@@ -981,7 +1389,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
 
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let dev = unsafe { &*base.add(child) };
@@ -1001,7 +1409,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
         assert_eq!(DEVICE_COUNT.load(Ordering::Relaxed), 2);
 
         unsafe { devman_put_device(child) };
@@ -1014,18 +1422,150 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
+        // grant_id < 0 → the grant copy is skipped and the reply is EINVAL.
         let mut msg = [0u8; 64];
         unsafe {
             msg_set_i32(&mut msg, MSG_OFF_SOURCE, 100);
-            msg_set_i32(&mut msg, MSG_OFF_M4_L1, 1); // grant_id
+            msg_set_i32(&mut msg, MSG_OFF_M4_L1, -1); // grant_id
             msg_set_i32(&mut msg, MSG_OFF_M4_L2, 64); // grant_size
         }
 
         let r = unsafe { do_add_device(&mut msg) };
-        assert_eq!(r, OK);
+        assert_eq!(r, EINVAL);
 
         let result = unsafe { msg_i32(&msg, MSG_OFF_M4_L1) };
-        assert_eq!(result, OK);
+        assert_eq!(result, EINVAL);
+        let m_type = unsafe { msg_i32(&msg, MSG_OFF_TYPE) };
+        assert_eq!(m_type, DEVMAN_REPLY as i32);
+    }
+
+    /// Build a serialized `DevmanDeviceInfo` blob for a device named `name`
+    /// under `parent_dev_id`.
+    fn build_devinfo(name: &str, parent_dev_id: i32) -> [u8; 128] {
+        let mut buf = [0u8; 128];
+        buf[0..4].copy_from_slice(&0i32.to_le_bytes()); // count (no info entries)
+        buf[4..8].copy_from_slice(&parent_dev_id.to_le_bytes());
+        buf[8..12].copy_from_slice(&16u32.to_le_bytes()); // name_offset
+        buf[12..16].copy_from_slice(&(16 + name.len() as u32 + 1).to_le_bytes()); // subsystem_offset
+        buf[16..16 + name.len()].copy_from_slice(name.as_bytes());
+        buf[16 + name.len()] = 0;
+        buf
+    }
+
+    #[test]
+    fn test_add_device_inner() {
+        let _lock = TestLockGuard::acquire();
+        setup();
+
+        let buf = build_devinfo("tty0", 0);
+        let dev_id = unsafe { do_add_device_inner(100, &buf) };
+        assert_eq!(dev_id, Ok(1), "first device gets id 1");
+
+        // The device exists, is owned by the caller, and lives in the tree.
+        let found = unsafe { devman_find_device(1) };
+        assert_eq!(found, Some(1));
+        let base = unsafe { DEVICE_TABLE.as_ptr() };
+        let dev = unsafe { &*base.add(1) };
+        assert_eq!(dev.owner, 100);
+        assert_eq!(dev.state, DEVMAN_DEVICE_UNBOUND);
+        assert_eq!(vtreefs::get_inode_name(dev.inode_id), "tty0");
+
+        // An ADD event was queued with the path and device id.
+        let event = unsafe { devman_read_event() };
+        assert!(event.is_some(), "ADD event queued");
+        let data = event.unwrap();
+        let data_str = core::str::from_utf8(&data).unwrap();
+        assert!(
+            data_str.starts_with("ADD /devices/tty0 0x00000001"),
+            "got: {data_str}"
+        );
+    }
+
+    #[test]
+    fn test_add_device_bad_parent() {
+        let _lock = TestLockGuard::acquire();
+        setup();
+
+        let buf = build_devinfo("orphan", 999);
+        let dev_id = unsafe { do_add_device_inner(100, &buf) };
+        assert_eq!(dev_id, Err(ENODEV));
+    }
+
+    #[test]
+    fn test_message_hook_routing() {
+        let _lock = TestLockGuard::acquire();
+        setup();
+
+        // DEVMAN_ADD_DEV with an invalid grant → EINVAL reply.
+        let mut msg = [0u8; 64];
+        unsafe {
+            msg_set_i32(&mut msg, MSG_OFF_SOURCE, 100);
+            msg_set_i32(&mut msg, MSG_OFF_TYPE, DEVMAN_ADD_DEV as i32);
+            msg_set_i32(&mut msg, MSG_OFF_M4_L1, -1);
+        }
+        let r = unsafe { devman_handle_message(&mut msg) };
+        assert_eq!(r, EINVAL);
+        let m_type = unsafe { msg_i32(&msg, MSG_OFF_TYPE) };
+        assert_eq!(m_type, DEVMAN_REPLY as i32);
+
+        // DEVMAN_BIND from a non-RS endpoint → EPERM reply.
+        let mut msg = [0u8; 64];
+        unsafe {
+            msg_set_i32(&mut msg, MSG_OFF_SOURCE, 100);
+            msg_set_i32(&mut msg, MSG_OFF_TYPE, DEVMAN_BIND as i32);
+            msg_set_i32(&mut msg, MSG_OFF_M4_L2, 0);
+        }
+        let _ = unsafe { devman_handle_message(&mut msg) };
+        let result = unsafe { msg_i32(&msg, MSG_OFF_M4_L1) };
+        assert_eq!(result, EPERM);
+
+        // Unknown message type → EINVAL reply.
+        let mut msg = [0u8; 64];
+        unsafe {
+            msg_set_i32(&mut msg, MSG_OFF_SOURCE, 100);
+            msg_set_i32(&mut msg, MSG_OFF_TYPE, 0x9999);
+        }
+        let r = unsafe { devman_handle_message(&mut msg) };
+        assert_eq!(r, EINVAL);
+        let m_type = unsafe { msg_i32(&msg, MSG_OFF_TYPE) };
+        assert_eq!(m_type, DEVMAN_REPLY as i32);
+    }
+
+    #[test]
+    fn test_read_hook_static_info() {
+        let _lock = TestLockGuard::acquire();
+        setup();
+
+        let child = add_child(0, "dev0");
+        let r = unsafe { devman_dev_add_static_info(child, "devman_id", "42") };
+        assert!(r.is_ok());
+        let base = unsafe { DEVICE_TABLE.as_ptr() };
+        let dev = unsafe { &*base.add(child) };
+        let ii = unsafe { &*INFO_INODE_TABLE.as_ptr().add(dev.first_info.unwrap()) };
+
+        let mut out = [0u8; 8];
+        let n = devman_read_hook(ii.inode_id, 0, &mut out);
+        assert_eq!(&out[..n], b"42");
+    }
+
+    #[test]
+    fn test_events_inode_read() {
+        let _lock = TestLockGuard::acquire();
+        setup();
+
+        let buf = build_devinfo("tty0", 0);
+        assert_eq!(unsafe { do_add_device_inner(100, &buf) }, Ok(1));
+
+        let events_inode = EVENTS_INODE.load(Ordering::Relaxed);
+        assert_ne!(events_inode, u32::MAX);
+        let mut out = [0u8; 64];
+        let n = devman_read_hook(events_inode, 0, &mut out);
+        let data = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(data.starts_with("ADD /devices/tty0 0x"), "got: {data}");
+
+        // The queue is empty now.
+        let mut out = [0u8; 64];
+        assert_eq!(devman_read_hook(events_inode, 0, &mut out), 0);
     }
 
     #[test]
@@ -1047,7 +1587,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let child_id = unsafe { (*base.add(child)).dev_id };
 
@@ -1101,7 +1641,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
         let base = unsafe { DEVICE_TABLE.as_ptr() };
         let child_id = unsafe { (*base.add(child)).dev_id };
 
@@ -1137,7 +1677,7 @@ mod tests {
         let _lock = TestLockGuard::acquire();
         setup();
 
-        let child = unsafe { devman_dev_add_child(0) }.unwrap();
+        let child = add_child(0, "dev0");
         let base = unsafe { DEVICE_TABLE.as_ptr() };
 
         // Initial state: UNBOUND

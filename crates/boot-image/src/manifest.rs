@@ -73,6 +73,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/virtio_blk", "virtio_blk"),
     ("/sbin/virtio_net", "virtio_net"),
     ("/sbin/net", "net"),
+    ("/sbin/devman", "devman"),
 ];
 
 /// Device nodes to create in the initramfs: (path, mode, major, minor).
