@@ -12,6 +12,8 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::request;
 use crate::vfs::types::*;
 
+use arch_common::safecopies::{CPF_READ, CPF_WRITE, GRANT_INVALID};
+
 use core::ptr::addr_of_mut;
 
 // CDEV message field offsets (absolute byte offsets in a 56-byte Message:
@@ -42,10 +44,16 @@ const INLINE_READ_MAX: usize = 48;
 /// Max bytes the tty accepts inline per CDEV_WRITE (m2_l3 = last 8 payload bytes).
 const INLINE_WRITE_MAX: usize = 8;
 
-/// Max bytes an ioctl arg struct travels in the CDEV_IOCTL data area
-/// (absolute bytes 24..56 of the message: m2_l1/m2_l2/m2_l3, unused by
-/// ioctls). Socket option structs (nwio_udpopt_t = 16 bytes) fit easily.
+/// Max bytes an ioctl arg struct travels in the CDEV_IOCTL data area.
+///
+/// Unused since the grant-based ioctl protocol: arg bytes now move through
+/// a magic grant (`cdev_io`), so the 32-byte inline cap is gone. Kept to
+/// document the old inline layout for the net driver's history.
+#[allow(dead_code)]
 const IOCTL_DATA_MAX: usize = 32;
+
+/// Driver-level non-blocking flag (matches the tty server's CDEV_NONBLOCK).
+const CDEV_NONBLOCK: i64 = 0x01;
 
 /// Convert open(2) flags to the tty server's CDEV access bits.
 /// O_RDONLY=0, O_WRONLY=1, O_RDWR=2 (access mode in the low two bits).
@@ -275,46 +283,65 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
         return r;
     }
 
-    // CDEV_IOCTL: request code in m2_i2; the arg struct travels in the
-    // m2_l1/m2_l2/m2_l3 data area (absolute 24..56), sized by the ioctl's
-    // NetBSD _IOC size field. _IOR ioctls get the struct copied back.
+    // CDEV_IOCTL: request code in m2_i2; the arg struct travels through a
+    // magic grant (C device.c make_grant), so arbitrarily large arg structs
+    // (e.g. termios, 44 bytes) work — the driver reads the caller's buffer
+    // with sys_safecopyfrom and writes results back with sys_safecopyto.
+    // The grant access follows the ioctl direction (_IOW → CPF_READ,
+    // _IOR → CPF_WRITE); no-arg ioctls (size 0, e.g. TIOCSTART) pass
+    // GRANT_INVALID and the driver leaves the buffer alone.
+    //
+    // CDEV_IOCTL message layout (matches the tty server's handle_cdev_request
+    // reads): m2_i1 = minor, m2_i2 = request, m2_i3 = grant,
+    // m2_l1 = user endpoint, m2_l2 = flags, m2_l3 = id.
     let request = bytes as u32;
-    let data_len = net::ioc_size(request).min(IOCTL_DATA_MAX);
-    let mut msg = [0u8; 56];
-    request::w_i32(&mut msg, 4, op);
-    request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
-    request::w_i32(&mut msg, CDEV_FLAGS_OFF, request as i32);
-    request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
-    if data_len > 0 {
-        let copy_r = unsafe {
-            crate::vfs::call::sys_vircopy(
-                proc_e,
-                buf,
-                crate::vfs::call::SELF,
-                msg.as_mut_ptr() as u64 + CDEV_POS_OFF as u64,
-                data_len,
-            )
-        };
-        if copy_r != 0 {
-            return copy_r;
-        }
+    let arg_size = net::ioc_size(request);
+    let mut grant_access = 0;
+    if net::ioc_is_out(request) {
+        grant_access |= CPF_WRITE;
     }
+    if net::ioc_is_in(request) {
+        grant_access |= CPF_READ;
+    }
+    let mut grant = GRANT_INVALID;
+    if arg_size > 0 {
+        grant =
+            crate::vfs::grant::cpf_grant_magic_access(proc_e, drv_e, buf, arg_size, grant_access);
+    }
+    let nonblock_flag = if _flags & O_NONBLOCK != 0 {
+        CDEV_NONBLOCK
+    } else {
+        0
+    };
+    let mut msg = build_cdev_ioctl_msg(minor, request, grant, proc_e, nonblock_flag);
     let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
-    if r >= 0 && data_len > 0 && net::ioc_is_out(request) {
-        let copy_r = unsafe {
-            crate::vfs::call::sys_vircopy(
-                crate::vfs::call::SELF,
-                msg.as_ptr() as u64 + CDEV_POS_OFF as u64,
-                proc_e,
-                buf,
-                data_len,
-            )
-        };
-        if copy_r != 0 {
-            return copy_r;
-        }
+    if grant != GRANT_INVALID {
+        crate::vfs::grant::cpf_revoke(grant);
+    }
+    // Deferred ioctl: the driver replied with CDEV_REPLY instead of a plain
+    // status reply (C mess_lchardriver_vfs_reply: status @ m2_i1, id @ m2_i2).
+    if r as u32 == arch_common::com::CDEV_REPLY {
+        return request::r_i32(&msg, 8);
     }
     r
+}
+
+/// Build the grant-based CDEV_IOCTL request message. The arg struct travels
+/// through the magic grant (`grant`, `GRANT_INVALID` for no-arg ioctls); the
+/// user endpoint and flags travel in m2_l1/m2_l2 so the driver can identify
+/// the real caller and honor non-blocking. Layout (matches the tty server's
+/// handle_cdev_request): m2_i1 = minor, m2_i2 = request, m2_i3 = grant,
+/// m2_l1 = user endpoint, m2_l2 = flags, m2_l3 = id.
+fn build_cdev_ioctl_msg(minor: i32, request: u32, grant: i32, user: i32, flags: i64) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, CDEV_IOCTL);
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, request as i32);
+    request::w_i32(&mut msg, CDEV_USER_OFF, grant);
+    request::w_i64(&mut msg, CDEV_POS_OFF, user as i64);
+    request::w_i64(&mut msg, CDEV_COUNT_OFF, flags);
+    request::w_i64(&mut msg, CDEV_BUF_OFF, 0); // id: the port's sync model needs none
+    msg
 }
 
 /// Map a character device to a different device number.
@@ -396,9 +423,16 @@ pub fn cdev_cancel(dev: u32) -> i32 {
 ///
 /// Dispatches incoming character driver replies to the appropriate handler:
 ///
-/// * \`CDEV_REPLY\` — open/close/read/write/ioctl result → \`cdev_generic_reply()\`.
-/// * \`CDEV_SEL1_REPLY\` — first select reply → \`select_reply1()\`.
-/// * \`CDEV_SEL2_REPLY\` — second select reply → \`select_reply2()\`.
+/// * \`CDEV_REPLY\` — open/close/read/write/ioctl result (status @ payload 0,
+///   id @ payload 4).
+/// * \`CDEV_SEL1_REPLY\` / \`CDEV_SEL2_REPLY\` — select replies (minor @
+///   payload 0, status @ payload 4).
+///
+/// In the port's synchronous model a \`CDEV_REPLY\` for a deferred ioctl is
+/// consumed inline by the blocked sendrec in \`cdev_io\` (which extracts the
+/// status there), so a reply reaching the main loop is a late/duplicate
+/// reply or a select notification. VFS select is not implemented yet
+/// (Phase I); the SEL arms are consumed and dropped here.
 ///
 /// C source: \`minix/servers/vfs/device.c\` — \`cdev_reply()\` (line 794)
 ///
@@ -406,15 +440,29 @@ pub fn cdev_cancel(dev: u32) -> i32 {
 ///
 /// Must be called from the VFS main loop when a \`CDEV_REPLY\`,
 /// \`CDEV_SEL1_REPLY\`, or \`CDEV_SEL2_REPLY\` message is received.
+pub fn cdev_reply() -> i32 {
+    let glob = unsafe { &*vfs_global() };
+    let m_in = &glob.fs_m_in;
+    cdev_reply_from(m_in, glob.req_nr as u32)
+}
+
+/// Parse a character-driver reply message and return the result status.
 ///
-/// # TODO
-///
-/// Wire reply dispatch: validate the driver endpoint via \`get_dmap()\`,
-/// then switch on the incoming call number and call the appropriate reply
-/// handler.
-pub fn cdev_reply() {
-    // TODO: read call_nr from global state, dispatch to cdev_generic_reply,
-    // select_reply1, or select_reply2.
+/// Pure over the message buffer so the layout is host-testable. All three
+/// reply types carry the status first (C mess_lchardriver_vfs_reply /
+/// _sel1 / _sel2: status @ payload 0):
+///   CDEV_REPLY      → status @ m_in[8..12], id @ m_in[12..16]
+///   CDEV_SEL1/2     → status @ m_in[8..12], minor @ m_in[12..16]
+/// Anything else → EINVAL.
+pub fn cdev_reply_from(m_in: &[u8; 64], call_nr: u32) -> i32 {
+    match call_nr {
+        arch_common::com::CDEV_REPLY
+        | arch_common::com::CDEV_SEL1_REPLY
+        | arch_common::com::CDEV_SEL2_REPLY => {
+            i32::from_le_bytes(m_in[8..12].try_into().unwrap_or([0; 4]))
+        }
+        _ => EINVAL,
+    }
 }
 
 // Block device operations
@@ -588,6 +636,12 @@ pub fn invalidate_filp_by_char_major(major: i32) {
     }
 }
 
+/// TIOCGETA value used by the layout test (matches the tty server's real
+/// `_IOR('t', 19, struct termios)` encoding; a bare constant keeps this test
+/// module independent of the tty crate's constants).
+#[cfg(test)]
+const TIOCGETA_VALUE: u32 = 0x4000_0000 | ((44 & 0x1fff) << 16) | ((b't' as u32) << 8) | 19;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,5 +702,35 @@ mod tests {
         assert_eq!(CDEV_POS_OFF, 24);
         assert_eq!(CDEV_COUNT_OFF, 32);
         assert_eq!(CDEV_BUF_OFF, 40);
+    }
+
+    #[test]
+    fn test_build_cdev_ioctl_msg_layout() {
+        // Grant-based CDEV_IOCTL layout: m2_i1 = minor, m2_i2 = request,
+        // m2_i3 = grant, m2_l1 = user endpoint, m2_l2 = flags, m2_l3 = id.
+        // Must match the tty server's handle_cdev_request parse.
+        let msg = build_cdev_ioctl_msg(3, TIOCGETA_VALUE, 99, 321, 1);
+        assert_eq!(request::r_i32(&msg, 4), CDEV_IOCTL);
+        assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 3);
+        assert_eq!(request::r_i32(&msg, CDEV_FLAGS_OFF), TIOCGETA_VALUE as i32);
+        assert_eq!(request::r_i32(&msg, CDEV_USER_OFF), 99);
+        assert_eq!(request::r_i64(&msg, CDEV_POS_OFF), 321);
+        assert_eq!(request::r_i64(&msg, CDEV_COUNT_OFF), 1);
+        assert_eq!(request::r_i64(&msg, CDEV_BUF_OFF), 0);
+    }
+
+    #[test]
+    fn test_cdev_reply_from_parses_status() {
+        // C mess_lchardriver_vfs_reply: status @ payload 0, id @ payload 4;
+        // the SEL1/SEL2 variants carry status at the same offset. A non-reply
+        // call number is rejected.
+        let mut m = [0u8; 64];
+        m[4..8].copy_from_slice(&0u32.to_le_bytes());
+        m[8..12].copy_from_slice(&7i32.to_le_bytes()); // status
+        m[12..16].copy_from_slice(&42i32.to_le_bytes()); // id / minor
+        assert_eq!(cdev_reply_from(&m, arch_common::com::CDEV_REPLY), 7);
+        assert_eq!(cdev_reply_from(&m, arch_common::com::CDEV_SEL1_REPLY), 7);
+        assert_eq!(cdev_reply_from(&m, arch_common::com::CDEV_SEL2_REPLY), 7);
+        assert_eq!(cdev_reply_from(&m, 0x1234), EINVAL);
     }
 }

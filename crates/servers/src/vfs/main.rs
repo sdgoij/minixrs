@@ -231,6 +231,13 @@ unsafe fn handle_work() {
 
     if source == PM_PROC_NR {
         let _ = pm::service_pm();
+    } else if arch_common::com::is_cdev_rs(call_nr as u32) {
+        // Character-driver reply (deferred ioctl completion or select
+        // notification): consume it without replying to the driver. The
+        // reply status feeds the suspended worker in the async model; the
+        // port's synchronous model consumed the CDEV_REPLY inline in
+        // cdev_io, so this only sees late replies and select notifications.
+        let _ = crate::vfs::device::cdev_reply();
     } else {
         // Regular VFS calls are dispatched through the call table.
         let result = table::dispatch(call_nr);

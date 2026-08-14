@@ -176,6 +176,22 @@ pub fn cpf_grant_magic_write(who_from: i32, callee: i32, addr: u64, len: usize) 
     VFS_GRANT_TABLE.cpf_grant_magic(who_from, callee, addr, len, CPF_WRITE)
 }
 
+/// Allocate a magic grant with an explicit access mask (`CPF_READ` and/or
+/// `CPF_WRITE`).
+///
+/// Used for ioctl arg buffers: the device driver reads the caller's buffer
+/// through a `CPF_READ` grant (`_IOW` ioctls) and/or writes results back
+/// through a `CPF_WRITE` grant (`_IOR` ioctls).
+pub fn cpf_grant_magic_access(
+    who_from: i32,
+    callee: i32,
+    addr: u64,
+    len: usize,
+    access: i32,
+) -> i32 {
+    VFS_GRANT_TABLE.cpf_grant_magic(who_from, callee, addr, len, access)
+}
+
 /// Allocate a direct grant for data transfer.
 pub fn cpf_grant_direct(granter: i32, callee: i32, addr: u64, len: usize, write: bool) -> i32 {
     let access = if write { CPF_WRITE } else { CPF_READ };

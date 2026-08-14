@@ -1750,6 +1750,116 @@ fn msg_u64(msg: &Message, off: usize) -> u64 {
     )
 }
 
+// SYS_SAFECOPY message offsets (payload starts at byte 8).
+const SAFE_GRANTER_OFF: usize = 8;
+const SAFE_GRANT_ID_OFF: usize = 12;
+const SAFE_OFFSET_OFF: usize = 16;
+const SAFE_ADDR_OFF: usize = 24;
+const SAFE_BYTES_OFF: usize = 32;
+
+/// Copy `src` into the caller's granted buffer via SYS_SAFECOPYTO.
+///
+/// `granter` is the message sender (VFS), whose grant table holds the
+/// magic grant over the user's ioctl arg buffer (created by VFS's
+/// `cdev_io`); the kernel resolves the effective granter (the user) from
+/// the grant entry.
+fn safecopy_to_grant(granter: i32, grant: u32, src: &[u8]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        let mut kmsg = [0u8; 64];
+        kmsg[SAFE_GRANTER_OFF..SAFE_GRANTER_OFF + 4].copy_from_slice(&granter.to_ne_bytes());
+        kmsg[SAFE_GRANT_ID_OFF..SAFE_GRANT_ID_OFF + 4].copy_from_slice(&grant.to_ne_bytes());
+        kmsg[SAFE_OFFSET_OFF..SAFE_OFFSET_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+        kmsg[SAFE_ADDR_OFF..SAFE_ADDR_OFF + 8]
+            .copy_from_slice(&(src.as_ptr() as u64).to_ne_bytes());
+        kmsg[SAFE_BYTES_OFF..SAFE_BYTES_OFF + 8].copy_from_slice(&(src.len() as u64).to_ne_bytes());
+        minix_rt::kernel_call(32, &mut kmsg) // SYS_SAFECOPYTO
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (granter, grant);
+        host_grant_copy_to(src)
+    }
+}
+
+/// Copy `count` bytes from the caller's granted buffer into `dst` via
+/// SYS_SAFECOPYFROM.
+fn safecopy_from_grant(granter: i32, grant: u32, dst: &mut [u8]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        let mut kmsg = [0u8; 64];
+        kmsg[SAFE_GRANTER_OFF..SAFE_GRANTER_OFF + 4].copy_from_slice(&granter.to_ne_bytes());
+        kmsg[SAFE_GRANT_ID_OFF..SAFE_GRANT_ID_OFF + 4].copy_from_slice(&grant.to_ne_bytes());
+        kmsg[SAFE_OFFSET_OFF..SAFE_OFFSET_OFF + 8].copy_from_slice(&0u64.to_ne_bytes());
+        kmsg[SAFE_ADDR_OFF..SAFE_ADDR_OFF + 8]
+            .copy_from_slice(&(dst.as_mut_ptr() as u64).to_ne_bytes());
+        kmsg[SAFE_BYTES_OFF..SAFE_BYTES_OFF + 8].copy_from_slice(&(dst.len() as u64).to_ne_bytes());
+        minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (granter, grant);
+        host_grant_copy_from(dst)
+    }
+}
+
+/// Host stand-in for the kernel grant copy (SYS_SAFECOPY is a raw syscall,
+/// unavailable on host builds). The net tests observe ioctl arg
+/// round-trips through this buffer; production host builds never reach it
+/// (the net server only runs on the minix target).
+#[cfg(not(target_os = "minix"))]
+static HOST_GRANT_BUF: HostGrantBuf = HostGrantBuf(UnsafeCell::new([0u8; 512]));
+
+#[cfg(not(target_os = "minix"))]
+struct HostGrantBuf(UnsafeCell<[u8; 512]>);
+#[cfg(not(target_os = "minix"))]
+unsafe impl Sync for HostGrantBuf {}
+#[cfg(not(target_os = "minix"))]
+impl HostGrantBuf {
+    fn get(&self) -> *mut [u8; 512] {
+        self.0.get()
+    }
+}
+
+#[cfg(not(target_os = "minix"))]
+fn host_grant_copy_from(dst: &mut [u8]) -> i32 {
+    let buf = unsafe { &mut *HOST_GRANT_BUF.get() };
+    if dst.len() > buf.len() {
+        return -14; // EFAULT
+    }
+    dst.copy_from_slice(&buf[..dst.len()]);
+    0
+}
+
+#[cfg(not(target_os = "minix"))]
+fn host_grant_copy_to(src: &[u8]) -> i32 {
+    let buf = unsafe { &mut *HOST_GRANT_BUF.get() };
+    if src.len() > buf.len() {
+        return -14; // EFAULT
+    }
+    buf[..src.len()].copy_from_slice(src);
+    0
+}
+
+/// The ioctl arg grant id (CDEV_IOCTL m2_i3) and its table owner (the
+/// message sender, VFS).
+fn ioctl_grant(msg: &Message) -> u32 {
+    msg_u32(msg, 8)
+}
+fn ioctl_granter(msg: &Message) -> i32 {
+    msg.m_source
+}
+
+/// Copy the ioctl arg struct from the caller's buffer (through the grant).
+fn ioctl_copy_in(msg: &Message, dst: &mut [u8]) -> i32 {
+    safecopy_from_grant(ioctl_granter(msg), ioctl_grant(msg), dst)
+}
+
+/// Copy the ioctl result struct back to the caller (through the grant).
+fn ioctl_copy_out(msg: &Message, src: &[u8]) -> i32 {
+    safecopy_to_grant(ioctl_granter(msg), ioctl_grant(msg), src)
+}
+
 /// Handle a CDEV request and write the reply into `msg`.
 fn handle_cdev_request(msg: &mut Message, call_type: u32) -> i32 {
     let minor = msg_i32(msg, 0);
@@ -1874,9 +1984,10 @@ fn cdev_ioctl_net(msg: &mut Message) -> i32 {
     }
 }
 
-/// UDP ioctls: NWIOSUDPOPT / NWIOGUDPOPT / FIONREAD. The `nwio_udpopt_t`
-/// struct travels at payload bytes 16..32 (VFS's m2_l1 data area); the
-/// FIONREAD int at 16..20.
+/// UDP ioctls: NWIOSUDPOPT / NWIOGUDPOPT / FIONREAD. The arg struct
+/// travels through the CDEV_IOCTL grant (VFS-created magic grant over the
+/// caller's buffer) — `ioctl_copy_in`/`ioctl_copy_out` move the bytes
+/// with SYS_SAFECOPYFROM/TO.
 fn udp_ioctl(msg: &mut Message) -> i32 {
     let minor = msg_i32(msg, 0);
     let request = msg_u32(msg, 4);
@@ -1886,18 +1997,27 @@ fn udp_ioctl(msg: &mut Message) -> i32 {
     };
     match request {
         NWIOSUDPOPT => {
-            let opt = NwioUdpOpt::read_from(unsafe { &msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; NwioUdpOpt::SIZE];
+            let r = ioctl_copy_in(msg, &mut buf);
+            if r != 0 {
+                return r;
+            }
+            let opt = NwioUdpOpt::read_from(&buf);
             udp_setopt(s, &opt)
         }
         NWIOGUDPOPT => {
-            udp_getopt(s).write_to(unsafe { &mut msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; NwioUdpOpt::SIZE];
+            udp_getopt(s).write_to(&mut buf);
+            let r = ioctl_copy_out(msg, &buf);
+            if r != 0 {
+                return r;
+            }
             0
         }
         FIONREAD => {
-            unsafe {
-                msg.m_payload.raw[16..20].copy_from_slice(&(s.rx_len as i32).to_ne_bytes());
-            }
-            0
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&(s.rx_len as i32).to_ne_bytes());
+            ioctl_copy_out(msg, &buf)
         }
         _ => -25, // ENOTTY
     }
@@ -2188,7 +2308,12 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
                 Some(s) => s,
                 None => return -9, // EBADF
             };
-            let conf = NwioTcpConf::read_from(unsafe { &msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; NwioTcpConf::SIZE];
+            let r = ioctl_copy_in(msg, &mut buf);
+            if r != 0 {
+                return r;
+            }
+            let conf = NwioTcpConf::read_from(&buf);
             tcp_setconf(s, &conf)
         }
         NWIOGTCPCONF => {
@@ -2203,14 +2328,24 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
                 nwtc_locport: s.loc_port,
                 nwtc_remport: s.rem_port,
             };
-            conf.write_to(unsafe { &mut msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; NwioTcpConf::SIZE];
+            conf.write_to(&mut buf);
+            let r = ioctl_copy_out(msg, &buf);
+            if r != 0 {
+                return r;
+            }
             0
         }
         NWIOTCPCONN => {
             // The connect struct carries TCF_* flags; only the blocking
             // TCF_DEFAULT connect is implemented (the ioctl blocks until
             // the connection is established or fails).
-            let _cl = NwioTcpCl::read_from(unsafe { &msg.m_payload.raw[16..24] });
+            let mut buf = [0u8; NwioTcpCl::SIZE];
+            let r = ioctl_copy_in(msg, &mut buf);
+            if r != 0 {
+                return r;
+            }
+            let _cl = NwioTcpCl::read_from(&buf);
             tcp_connect(minor)
         }
         NWIOTCPLISTENQ => {
@@ -2218,11 +2353,12 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
                 Some(s) => s,
                 None => return -9, // EBADF
             };
-            let backlog = i32::from_ne_bytes(
-                unsafe { &msg.m_payload.raw[16..20] }
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
+            let mut buf = [0u8; 4];
+            let r = ioctl_copy_in(msg, &mut buf);
+            if r != 0 {
+                return r;
+            }
+            let backlog = i32::from_ne_bytes(buf);
             tcp_listenq(s, backlog)
         }
         NWIOGTCPCOOKIE => {
@@ -2235,11 +2371,21 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
                 s.cookie.tc_secret = next_cookie_secret();
                 s.cookie_set = true;
             }
-            s.cookie.write_to(unsafe { &mut msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; TcpCookie::SIZE];
+            s.cookie.write_to(&mut buf);
+            let r = ioctl_copy_out(msg, &buf);
+            if r != 0 {
+                return r;
+            }
             0
         }
         NWIOTCPACCEPTTO => {
-            let cookie = TcpCookie::read_from(unsafe { &msg.m_payload.raw[16..32] });
+            let mut buf = [0u8; TcpCookie::SIZE];
+            let r = ioctl_copy_in(msg, &mut buf);
+            if r != 0 {
+                return r;
+            }
+            let cookie = TcpCookie::read_from(&buf);
             tcp_acceptto(minor, cookie)
         }
         NWIOTCPSHUTDOWN => {
@@ -2268,20 +2414,16 @@ fn tcp_ioctl(msg: &mut Message) -> i32 {
             };
             let e = s.err;
             s.err = 0;
-            unsafe {
-                msg.m_payload.raw[16..20].copy_from_slice(&e.to_ne_bytes());
-            }
-            0
+            let buf = e.to_ne_bytes();
+            ioctl_copy_out(msg, &buf)
         }
         FIONREAD => {
             let s = match tcp_socket_for_minor(minor) {
                 Some(s) => s,
                 None => return -9, // EBADF
             };
-            unsafe {
-                msg.m_payload.raw[16..20].copy_from_slice(&(s.rx_len as i32).to_ne_bytes());
-            }
-            0
+            let buf = (s.rx_len as i32).to_ne_bytes();
+            ioctl_copy_out(msg, &buf)
         }
         _ => -25, // ENOTTY
     }
@@ -3106,5 +3248,81 @@ mod tests {
         tcp_established_demux(&mut e, 0x7001, 0x8000, TCP_FIN | TCP_ACK, &[]);
         assert_eq!(e.rcv_nxt, 0x8001, "FIN advances rcv_nxt");
         assert!(e.peer_closed, "peer FIN marks EOF");
+    }
+
+    #[test]
+    fn udp_ioctl_nwiosudpopt_reads_arg_from_grant() {
+        // NWIOSUDPOPT (an _IOW ioctl): the arg struct now travels through
+        // the CDEV_IOCTL grant instead of the inline area — the net server
+        // must pull it with SYS_SAFECOPYFROM (host seam: HOST_GRANT_BUF).
+        let socks = unsafe { &mut *SOCKETS.get() };
+        socks[0] = UdpSock::init(5, true);
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+        }
+        let opt = NwioUdpOpt {
+            nwuo_flags: NWUO_LP_SET | NWUO_RP_SET,
+            nwuo_locport: 1234,
+            nwuo_remport: 4321,
+            nwuo_locaddr: 0,
+            nwuo_remaddr: 0,
+        };
+        let mut arg = [0u8; NwioUdpOpt::SIZE];
+        opt.write_to(&mut arg);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                arg.as_ptr(),
+                HOST_GRANT_BUF.get() as *mut u8,
+                arg.len(),
+            );
+        }
+
+        let mut msg = Message {
+            m_source: arch_common::com::VFS_PROC_NR,
+            m_type: CDEV_IOCTL as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            msg.m_payload.raw[0..4].copy_from_slice(&5i32.to_ne_bytes()); // minor
+            msg.m_payload.raw[4..8].copy_from_slice(&NWIOSUDPOPT.to_ne_bytes()); // request
+            msg.m_payload.raw[8..12].copy_from_slice(&1i32.to_ne_bytes()); // grant
+        }
+        let r = udp_ioctl(&mut msg);
+        assert_eq!(r, 0);
+        assert_eq!(
+            socks[0].loc_port, 1234,
+            "NWIOSUDPOPT must apply the granted arg"
+        );
+        assert_eq!(socks[0].rem_port, 4321);
+    }
+
+    #[test]
+    fn udp_ioctl_nwiogudpopt_writes_result_to_grant() {
+        // NWIOGUDPOPT (an _IOR ioctl): the result must be copied back
+        // through the grant (SYS_SAFECOPYTO) for VFS to return to the user.
+        let socks = unsafe { &mut *SOCKETS.get() };
+        socks[0] = UdpSock::init(6, true);
+        socks[0].loc_port = 7777;
+        socks[0].rem_addr = [10, 0, 2, 3];
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+        }
+
+        let mut msg = Message {
+            m_source: arch_common::com::VFS_PROC_NR,
+            m_type: CDEV_IOCTL as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            msg.m_payload.raw[0..4].copy_from_slice(&6i32.to_ne_bytes());
+            msg.m_payload.raw[4..8].copy_from_slice(&NWIOGUDPOPT.to_ne_bytes());
+            msg.m_payload.raw[8..12].copy_from_slice(&1i32.to_ne_bytes());
+        }
+        let r = udp_ioctl(&mut msg);
+        assert_eq!(r, 0);
+        let buf = unsafe { &*HOST_GRANT_BUF.get() };
+        let out = NwioUdpOpt::read_from(&buf[..NwioUdpOpt::SIZE]);
+        assert_eq!(out.nwuo_locport, 7777);
+        assert_eq!(out.nwuo_remaddr, u32::from_be_bytes([10, 0, 2, 3]));
     }
 }

@@ -223,27 +223,33 @@ pub const SIGHUP: u8 = 1;
 pub const SIGWINCH: u8 = 28;
 pub const SIGINFO: u8 = 29;
 
-// IOCTL codes (for stubs)
+// IOCTL codes — real NetBSD/MINIX `_IO[RW]` encodings (`sys/sys/ttycom.h`),
+// so `net::ioc_size`/`ioc_is_out` decode them and a future userland
+// `tcgetattr`/`tcsetattr` matches. `_IOR('t', N, struct)` = device writes
+// the struct to the caller (0x4000_0000); `_IOW('t', N, struct)` = device
+// reads it (0x8000_0000); `_IO('t', N)` = no arg (size 0 → no grant).
 
-pub const TIOCGETA: u32 = 0;
-pub const TIOCSETA: u32 = 1;
-pub const TIOCSETAW: u32 = 2;
-pub const TIOCSETAF: u32 = 3;
-pub const TIOCDRAIN: u32 = 4;
-pub const TIOCFLUSH: u32 = 5;
-pub const TIOCSTART: u32 = 6;
-pub const TIOCSTOP: u32 = 7;
-pub const TIOCSBRK: u32 = 8;
-pub const TIOCCBRK: u32 = 9;
-pub const TIOCGWINSZ: u32 = 10;
-pub const TIOCSWINSZ: u32 = 11;
-pub const TIOCGETD: u32 = 12;
-pub const TIOCSETD: u32 = 13;
-pub const TIOCGLINED: u32 = 14;
-pub const TIOCGQSIZE: u32 = 15;
-pub const TIOCSCTTY: u32 = 16;
-pub const TIOCGPGRP: u32 = 17;
-pub const TIOCSPGRP: u32 = 18;
+pub const TIOCGETA: u32 = net::ioc_encode(0x4000_0000, b't', 19, core::mem::size_of::<Termios>());
+pub const TIOCSETA: u32 = net::ioc_encode(0x8000_0000, b't', 20, core::mem::size_of::<Termios>());
+pub const TIOCSETAW: u32 = net::ioc_encode(0x8000_0000, b't', 21, core::mem::size_of::<Termios>());
+pub const TIOCSETAF: u32 = net::ioc_encode(0x8000_0000, b't', 22, core::mem::size_of::<Termios>());
+pub const TIOCDRAIN: u32 = net::ioc_encode(0, b't', 94, 0);
+pub const TIOCFLUSH: u32 = net::ioc_encode(0x8000_0000, b't', 16, core::mem::size_of::<i32>());
+pub const TIOCSTART: u32 = net::ioc_encode(0, b't', 110, 0);
+pub const TIOCSTOP: u32 = net::ioc_encode(0, b't', 111, 0);
+pub const TIOCSBRK: u32 = net::ioc_encode(0, b't', 123, 0);
+pub const TIOCCBRK: u32 = net::ioc_encode(0, b't', 122, 0);
+pub const TIOCGWINSZ: u32 =
+    net::ioc_encode(0x4000_0000, b't', 104, core::mem::size_of::<WinSize>());
+pub const TIOCSWINSZ: u32 =
+    net::ioc_encode(0x8000_0000, b't', 103, core::mem::size_of::<WinSize>());
+pub const TIOCGETD: u32 = net::ioc_encode(0x4000_0000, b't', 26, core::mem::size_of::<i32>());
+pub const TIOCSETD: u32 = net::ioc_encode(0x8000_0000, b't', 27, core::mem::size_of::<i32>());
+pub const TIOCGLINED: u32 = net::ioc_encode(0x4000_0000, b't', 66, TTLINEDNAMELEN);
+pub const TIOCGQSIZE: u32 = net::ioc_encode(0x4000_0000, b't', 129, core::mem::size_of::<i32>());
+pub const TIOCSCTTY: u32 = net::ioc_encode(0, b't', 97, 0);
+pub const TIOCGPGRP: u32 = net::ioc_encode(0x4000_0000, b't', 119, core::mem::size_of::<i32>());
+pub const TIOCSPGRP: u32 = net::ioc_encode(0x8000_0000, b't', 118, core::mem::size_of::<i32>());
 pub const KIOCBELL: u32 = 19;
 pub const KIOCSMAP: u32 = 20;
 pub const TIOCSFON: u32 = 21;
@@ -1393,9 +1399,20 @@ fn dev_ioctl(tp: &mut Tty) {
         if tp.tty_ioreq == TIOCSETAF {
             tty_icancel(tp);
         }
-        // TODO: Phase 13 — sys_safecopyfrom(tp.tty_iocaller, tp.tty_iogrant, 0,
-        //       &tp.tty_termios, size_of::<Termios>())
-        setattr(tp);
+        // TIOCSETAW/TIOCSETAF: pull the new termios from the caller's
+        // buffer through the grant (the granter is VFS, whose table holds
+        // the magic grant over the user's buffer).
+        let mut new_termios = tp.tty_termios;
+        let copy_r = sys_safecopyfrom(
+            tp.tty_iocaller as i32,
+            tp.tty_iogrant,
+            0,
+            as_bytes_mut(&mut new_termios),
+        );
+        if copy_r == OK {
+            tp.tty_termios = new_termios;
+            setattr(tp);
+        }
     }
 
     tp.tty_ioreq = 0;
@@ -1877,13 +1894,19 @@ pub fn do_write(
 }
 
 /// do_ioctl — perform an IOCTL on a TTY line.
+///
+/// `endpt` is the message sender (VFS) whose grant table holds the magic
+/// grant over the caller's ioctl arg buffer; `grant` is that grant id
+/// (GRANT_INVALID for no-arg ioctls). `user_endpt` is the real caller
+/// (needed by TIOCSCTTY). All arg bytes move through `sys_safecopyto/from`
+/// so arbitrarily large structs (termios, 44 bytes) round-trip.
 pub fn do_ioctl(
     minor: DevMinor,
     request: u32,
     endpt: Endpoint,
     grant: CpGrantId,
     flags: i32,
-    _user_endpt: Endpoint,
+    user_endpt: Endpoint,
     id: CDevId,
 ) -> i32 {
     let tp = match line2tty(minor) {
@@ -1895,17 +1918,16 @@ pub fn do_ioctl(
 
     match request {
         TIOCGETA => {
-            // Get the termios attributes.
-            // TODO: Phase 13 — sys_safecopyto(endpt, grant, 0,
-            //       &tp.tty_termios, size_of::<Termios>())
-            r = OK;
+            // Copy the current termios attributes to the caller.
+            r = sys_safecopyto(endpt, grant, 0, as_bytes(&tp.tty_termios));
         }
         TIOCSETAW | TIOCSETAF | TIOCDRAIN => {
             if tp.tty_outleft > 0 {
                 if flags & CDEV_NONBLOCK != 0 {
                     return EAGAIN;
                 }
-                // Wait for all ongoing output processing to finish.
+                // Wait for all ongoing output processing to finish; the
+                // termios copy happens in dev_ioctl when the drain ends.
                 tp.tty_iocaller = endpt as u32;
                 tp.tty_ioid = id;
                 tp.tty_ioreq = request;
@@ -1916,29 +1938,32 @@ pub fn do_ioctl(
                 if request == TIOCSETAF {
                     tty_icancel(tp);
                 }
-                // TODO: Phase 13 — sys_safecopyfrom(endpt, grant, 0,
-                //       &tp.tty_termios, size_of::<Termios>())
+                // TIOCSETAW/TIOCSETAF: pull the new termios through the grant.
+                let mut new_termios = tp.tty_termios;
+                r = sys_safecopyfrom(endpt, grant, 0, as_bytes_mut(&mut new_termios));
                 if r == OK {
+                    tp.tty_termios = new_termios;
                     setattr(tp);
                 }
             }
         }
         TIOCSETA => {
             // Set the termios attributes.
-            // TODO: Phase 13 — sys_safecopyfrom(endpt, grant, 0,
-            //       &tp.tty_termios, size_of::<Termios>())
+            let mut new_termios = tp.tty_termios;
+            r = sys_safecopyfrom(endpt, grant, 0, as_bytes_mut(&mut new_termios));
             if r == OK {
+                tp.tty_termios = new_termios;
                 setattr(tp);
             }
         }
         TIOCFLUSH => {
-            let _i: i32 = 0;
-            // TODO: Phase 13 — sys_safecopyfrom(endpt, grant, 0, &mut _i, size_of::<i32>())
+            let mut flush_flags = 0i32;
+            r = sys_safecopyfrom(endpt, grant, 0, as_bytes_mut(&mut flush_flags));
             if r == OK {
-                if _i & FREAD != 0 {
+                if flush_flags & FREAD != 0 {
                     tty_icancel(tp);
                 }
-                if _i & FWRITE != 0 {
+                if flush_flags & FWRITE != 0 {
                     (tp.tty_ocancel)(tp, 0);
                 }
             }
@@ -1962,33 +1987,36 @@ pub fn do_ioctl(
             }
         }
         TIOCGWINSZ => {
-            // TODO: Phase 13 — sys_safecopyto(endpt, grant, 0,
-            //       &tp.tty_winsize, size_of::<WinSize>())
+            // Copy the window size to the caller.
+            r = sys_safecopyto(endpt, grant, 0, as_bytes(&tp.tty_winsize));
         }
         TIOCSWINSZ => {
-            // TODO: Phase 13 — sys_safecopyfrom(endpt, grant, 0,
-            //       &tp.tty_winsize, size_of::<WinSize>())
-            sigchar(tp, SIGWINCH, false);
+            // Pull the window size from the caller and signal the pgrp.
+            let mut new_size = tp.tty_winsize;
+            r = sys_safecopyfrom(endpt, grant, 0, as_bytes_mut(&mut new_size));
+            if r == OK {
+                tp.tty_winsize = new_size;
+                sigchar(tp, SIGWINCH, false);
+            }
         }
         TIOCGETD => {
-            let _i: i32 = TTYDISC;
-            // TODO: Phase 13 — sys_safecopyto(endpt, grant, 0, &_i, size_of::<i32>())
+            let buf = TTYDISC.to_ne_bytes();
+            r = sys_safecopyto(endpt, grant, 0, &buf);
         }
         TIOCSETD => {
-            // TODO: Phase 13 — print warning
+            // Only the default discipline is supported.
             r = ENOTTY;
         }
         TIOCGLINED => {
-            // TODO: Phase 13 — sys_safecopyto(endpt, grant, 0,
-            //       LINED_NAME.as_ptr(), LINED_NAME.len())
+            r = sys_safecopyto(endpt, grant, 0, &LINED_NAME);
         }
         TIOCGQSIZE => {
-            let _i: i32 = TTY_IN_BYTES as i32;
-            // TODO: Phase 13 — sys_safecopyto(endpt, grant, 0, &_i, size_of::<i32>())
+            let buf = (TTY_IN_BYTES as i32).to_ne_bytes();
+            r = sys_safecopyto(endpt, grant, 0, &buf);
         }
         TIOCSCTTY => {
             // Process sets this tty as its controlling tty.
-            tp.tty_pgrp = _user_endpt as u32;
+            tp.tty_pgrp = user_endpt as u32;
         }
         TIOCGPGRP | TIOCSPGRP => {}
         _ => {
@@ -2091,21 +2119,93 @@ fn build_safecopy_msg(granter: i32, grant_id: u32, offset: u64, addr: u64, len: 
 /// into `dst` via `SYS_SAFECOPYFROM`. Used to read ioctl args from the
 /// caller's buffer.
 pub fn sys_safecopyfrom(granter: i32, grant_id: u32, offset: u64, dst: &mut [u8]) -> i32 {
-    let mut kmsg = build_safecopy_msg(
-        granter,
-        grant_id,
-        offset,
-        dst.as_mut_ptr() as u64,
-        dst.len(),
-    );
-    minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
+    #[cfg(target_os = "minix")]
+    {
+        let mut kmsg = build_safecopy_msg(
+            granter,
+            grant_id,
+            offset,
+            dst.as_mut_ptr() as u64,
+            dst.len(),
+        );
+        minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
+    }
+    // Host: no kernel grant table (SYS_SAFECOPY is a raw syscall). The
+    // tty tests observe ioctl arg round-trips through HOST_GRANT_BUF.
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (granter, grant_id);
+        host_grant_copy_from(offset, dst)
+    }
 }
 
 /// Copy `src` into the grant `grant_id` (granted by `granter`) via
 /// `SYS_SAFECOPYTO`. Used to write ioctl results to the caller's buffer.
 pub fn sys_safecopyto(granter: i32, grant_id: u32, offset: u64, src: &[u8]) -> i32 {
-    let mut kmsg = build_safecopy_msg(granter, grant_id, offset, src.as_ptr() as u64, src.len());
-    minix_rt::kernel_call(32, &mut kmsg) // SYS_SAFECOPYTO
+    #[cfg(target_os = "minix")]
+    {
+        let mut kmsg =
+            build_safecopy_msg(granter, grant_id, offset, src.as_ptr() as u64, src.len());
+        minix_rt::kernel_call(32, &mut kmsg) // SYS_SAFECOPYTO
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (granter, grant_id);
+        host_grant_copy_to(offset, src)
+    }
+}
+
+/// Host-side stand-in for the kernel grant copy: a scratch buffer the tty
+/// tests read/write through `sys_safecopyto/from` (the tty server only
+/// runs on the minix target, so production host builds never reach it).
+#[cfg(not(target_os = "minix"))]
+static HOST_GRANT_BUF: HostGrantBuf = HostGrantBuf(UnsafeCell::new([0u8; 512]));
+
+#[cfg(not(target_os = "minix"))]
+struct HostGrantBuf(UnsafeCell<[u8; 512]>);
+#[cfg(not(target_os = "minix"))]
+unsafe impl Sync for HostGrantBuf {}
+#[cfg(not(target_os = "minix"))]
+impl HostGrantBuf {
+    fn get(&self) -> *mut [u8; 512] {
+        self.0.get()
+    }
+}
+
+/// Host copy of the grant's contents into `dst` (SYS_SAFECOPYFROM stand-in).
+#[cfg(not(target_os = "minix"))]
+fn host_grant_copy_from(offset: u64, dst: &mut [u8]) -> i32 {
+    let buf = unsafe { &mut *HOST_GRANT_BUF.get() };
+    let start = offset as usize;
+    if start + dst.len() > buf.len() {
+        return -14; // EFAULT
+    }
+    dst.copy_from_slice(&buf[start..start + dst.len()]);
+    0
+}
+
+/// Host copy of `src` into the grant (SYS_SAFECOPYTO stand-in).
+#[cfg(not(target_os = "minix"))]
+fn host_grant_copy_to(offset: u64, src: &[u8]) -> i32 {
+    let buf = unsafe { &mut *HOST_GRANT_BUF.get() };
+    let start = offset as usize;
+    if start + src.len() > buf.len() {
+        return -14; // EFAULT
+    }
+    buf[start..start + src.len()].copy_from_slice(src);
+    0
+}
+
+/// View a value as its raw bytes (for grant copies of ioctl structs).
+fn as_bytes<T>(v: &T) -> &[u8] {
+    // SAFETY: the slice covers exactly the value's storage.
+    unsafe { core::slice::from_raw_parts((v as *const T) as *const u8, core::mem::size_of::<T>()) }
+}
+
+/// Mutable byte view of a value (for grant copies into ioctl structs).
+fn as_bytes_mut<T>(v: &mut T) -> &mut [u8] {
+    // SAFETY: the slice covers exactly the value's storage.
+    unsafe { core::slice::from_raw_parts_mut((v as *mut T) as *mut u8, core::mem::size_of::<T>()) }
 }
 
 /// Reply to a suspended read/write/ioctl request (`CDEV_REPLY`).
@@ -2313,10 +2413,19 @@ unsafe fn handle_cdev_request(
             do_write(minor, position, who_e, grant, copy_len, flags, 0)
         }
         CDEV_IOCTL => {
+            // Grant-based ioctl arg protocol (matches VFS cdev_io):
+            //   m2_i1 = minor, m2_i2 = request, m2_i3 = grant,
+            //   m2_l1 = user endpoint, m2_l2 = flags, m2_l3 = id.
+            // The grant is a VFS-created magic grant over the caller's arg
+            // buffer; the granter for sys_safecopy is VFS (`who_e`), whose
+            // table holds it. The user endpoint travels separately so
+            // TIOCSCTTY can bind the real process.
             let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
-            let flags = unsafe { msg.m_payload.m2.m2i2 };
-            do_ioctl(minor, request, who_e, grant, flags, who_e, 0)
+            let user = unsafe { msg.m_payload.m2.m2l1 } as i32;
+            let flags = unsafe { msg.m_payload.m2.m2l2 } as i32;
+            let id = unsafe { msg.m_payload.m2.m2l3 } as u32;
+            do_ioctl(minor, request, who_e, grant, flags, user, id)
         }
         CDEV_CANCEL => {
             let endpt = unsafe { msg.m_payload.m2.m2i2 };
@@ -3517,5 +3626,104 @@ mod tests {
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x482);
         assert_eq!(i32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 3);
         assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn test_do_ioctl_tiocgeta_roundtrip() {
+        // TIOCGETA must copy the line's termios (44 bytes — too big for any
+        // inline message area) through the grant into the caller's buffer.
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+        }
+
+        let tp = table_mut(0);
+        setup_tty(tp);
+        tp.tty_termios.c_lflag = 0xABCD_1234;
+        tp.tty_termios.c_cc[VEOF] = 0x55;
+
+        let r = do_ioctl(
+            CONS_MINOR,
+            TIOCGETA,
+            arch_common::com::VFS_PROC_NR,
+            1,
+            0,
+            123,
+            7,
+        );
+        assert_eq!(r, OK);
+        let buf = unsafe { &*HOST_GRANT_BUF.get() };
+        let termios = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Termios) };
+        assert_eq!(termios.c_lflag, 0xABCD_1234);
+        assert_eq!(termios.c_cc[VEOF], 0x55);
+    }
+
+    #[test]
+    fn test_do_ioctl_tiocseta_roundtrip() {
+        // TIOCSETA must pull the new termios from the caller's buffer
+        // through the grant and apply it.
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let tp = table_mut(0);
+        setup_tty(tp);
+
+        let mut new_termios = Termios::defaults();
+        new_termios.c_oflag = 0x8765_4321;
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+            core::ptr::copy_nonoverlapping(
+                &new_termios as *const Termios as *const u8,
+                HOST_GRANT_BUF.get() as *mut u8,
+                core::mem::size_of::<Termios>(),
+            );
+        }
+
+        let r = do_ioctl(
+            CONS_MINOR,
+            TIOCSETA,
+            arch_common::com::VFS_PROC_NR,
+            1,
+            0,
+            123,
+            7,
+        );
+        assert_eq!(r, OK);
+        assert_eq!(tp.tty_termios.c_oflag, 0x8765_4321);
+    }
+
+    #[test]
+    fn test_do_ioctl_cdev_ioctl_message_layout() {
+        // The CDEV_IOCTL wire layout the tty parses (minor/request/grant/
+        // user/flags/id in the m2 fields) — pin it so VFS's cdev_io build
+        // and this parse stay aligned. A TIOCGETA through the parsed grant
+        // proves the grant field reached do_ioctl.
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let tp = table_mut(0);
+        setup_tty(tp);
+        tp.tty_termios.c_iflag = 0xCAFE_0000;
+
+        let mut msg = arch_common::ipc::Message {
+            m_source: 0,
+            m_type: CDEV_IOCTL as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        unsafe {
+            msg.m_payload.m2.m2i1 = CONS_MINOR as i32;
+            msg.m_payload.m2.m2i2 = TIOCGETA as i32;
+            msg.m_payload.m2.m2i3 = 99; // grant
+            msg.m_payload.m2.m2l1 = 321; // user endpoint
+            msg.m_payload.m2.m2l2 = 1; // flags
+            msg.m_payload.m2.m2l3 = 7; // id
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+        }
+        let r = unsafe { handle_cdev_request(&mut msg, arch_common::com::VFS_PROC_NR, CDEV_IOCTL) };
+        assert_eq!(r, OK);
+        let buf = unsafe { &*HOST_GRANT_BUF.get() };
+        let termios = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Termios) };
+        assert_eq!(termios.c_iflag, 0xCAFE_0000);
     }
 }
