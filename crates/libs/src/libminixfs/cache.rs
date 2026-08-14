@@ -703,8 +703,13 @@ pub unsafe fn lmfs_invalidate(device: u32) {
 pub const READING: i32 = 0;
 pub const WRITING: i32 = 1;
 
-/// Temporary device constant for RAM disk (DEV_RAM).
-const DEV_RAM: u32 = 0;
+/// Device number of the memory device (`/dev/ram`, C `dmap.h`). Blocks on
+/// this device are put on the LRU front (evict soon) — there is no disk
+/// latency to hide. It must NOT be 0: the port's root filesystem lives on
+/// the virtio disk at device 0, and matching `dev == DEV_RAM` sent every
+/// block to the front, turning the cache into a ~1-block rotating buffer
+/// (zone-map blocks were re-read for every data chunk: ~3-6× disk I/O).
+const DEV_RAM: u32 = arch_common::dmap::DEV_RAM;
 
 /// Read or write scattered data from/to a device.
 ///

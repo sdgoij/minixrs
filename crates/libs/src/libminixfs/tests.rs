@@ -296,6 +296,85 @@ fn test_no_buf_is_null() {
     assert!(NO_BUF.is_null());
 }
 
+/// A sequential read of a file with a zone-map (indirect) chain must issue
+/// ~1 block I/O per data block, not 2-6×.
+///
+/// The MFS `fs_readwrite` loop resolves every chunk through `read_map`,
+/// which reads the shared indirect block, then reads the data block. The
+/// cache must keep the indirect block resident between chunks. Regression
+/// test for the `DEV_RAM = 0` bug: the port's root filesystem lives on the
+/// virtio disk at device 0, which collided with the local `DEV_RAM` and
+/// sent every block to the LRU front (evict-next) — the indirect block was
+/// evicted before each data chunk and re-read every time (~2× reads here,
+/// ~3-6× on disk with read-ahead + double-indirect chains).
+#[test]
+fn test_sequential_read_io_count_stays_near_block_count() {
+    unsafe {
+        init_pool(128);
+        super::lmfs_set_blocksize(4096, 0);
+
+        static READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        static WRITES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        unsafe fn cb(
+            _dev: u32,
+            _block: u64,
+            nblocks: usize,
+            bufs: *const *mut u8,
+            block_size: usize,
+            rw_flag: i32,
+        ) -> i32 {
+            if rw_flag == READING {
+                READS.fetch_add(nblocks, core::sync::atomic::Ordering::Relaxed);
+                // Provide zero-filled data so reads succeed.
+                for i in 0..nblocks {
+                    unsafe {
+                        let buf = *bufs.add(i);
+                        if !buf.is_null() {
+                            core::ptr::write_bytes(buf, 0, block_size);
+                        }
+                    }
+                }
+            } else {
+                WRITES.fetch_add(nblocks, core::sync::atomic::Ordering::Relaxed);
+            }
+            nblocks as i32
+        }
+        super::lmfs_set_block_io(cb);
+        READS.store(0, core::sync::atomic::Ordering::Relaxed);
+        WRITES.store(0, core::sync::atomic::Ordering::Relaxed);
+
+        // The port's root device number: 0 (VFS mounts the virtio root at
+        // dev 0). The zone-map block is shared by all chunks, like a
+        // single-indirect chain in `read_map`.
+        let dev: u32 = 0;
+        let indirect_block: u64 = 100;
+        let data_base: u64 = 200;
+        let ndata = 20usize;
+
+        for i in 0..ndata {
+            // read_map: resolve the zone through the indirect block.
+            let ibp = super::lmfs_get_block(dev, indirect_block);
+            assert!(!ibp.is_null());
+            super::lmfs_put_block(ibp, FULL_DATA_BLOCK);
+            // data block.
+            let bp = super::lmfs_get_block(dev, data_base + i as u64);
+            assert!(!bp.is_null());
+            super::lmfs_put_block(bp, FULL_DATA_BLOCK);
+        }
+
+        let reads = READS.load(core::sync::atomic::Ordering::Relaxed);
+        assert!(
+            reads <= ndata + 2,
+            "sequential read amplified: {reads} block I/Os for {ndata} data blocks (indirect block re-read per chunk)"
+        );
+        assert!(
+            reads >= ndata,
+            "each data block must be read at least once: {reads} < {ndata}"
+        );
+        assert_eq!(WRITES.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+}
+
 /// Test constants have expected values.
 #[test]
 fn test_constants() {
