@@ -122,6 +122,15 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         );
     }
 
+    // Register the fb server as the /dev/fb (major 19) character driver.
+    unsafe {
+        dmap::map_driver(
+            b"fb",
+            arch_common::com::FB_MAJOR as i32,
+            arch_common::com::FB_PROC_NR,
+        );
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();

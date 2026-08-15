@@ -1369,7 +1369,10 @@ fn do_remap(msg: &mut Message) -> i32 {
 fn do_map_phys(msg: &mut Message) -> i32 {
     let target = unsafe { msg.m_payload.m1.m1i1 };
     let len = unsafe { msg.m_payload.m1.m1i2 };
-    let phys = unsafe { msg.m_payload.m1.m1i3 } as u64;
+    // The physical address travels as 32-bit bits (device BARs live below
+    // 4 GiB); reading the i32 field directly would sign-extend addresses
+    // above 2 GiB into the 64-bit range.
+    let phys = (unsafe { msg.m_payload.m1.m1i3 } as u32) as u64;
 
     if len <= 0 {
         return EINVAL;

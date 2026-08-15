@@ -77,6 +77,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/virtio_net", "virtio_net"),
     ("/sbin/net", "net"),
     ("/sbin/devman", "devman"),
+    ("/sbin/fb", "fb"),
 ];
 
 /// Root-filesystem data files baked into the minixfs image: destination
@@ -108,6 +109,7 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/ip", 0o020600, 14, 0),   // char device, major=14 (net), minor=0
     ("/dev/udp", 0o020600, 14, 1),  // char device, major=14 (net), minor=1 — UDP socket
     ("/dev/tcp", 0o020600, 14, 2),  // char device, major=14 (net), minor=2 — TCP socket
+    ("/dev/fb", 0o020666, 19, 0),   // char device, major=19 (fb), minor=0
 ];
 
 #[cfg(test)]

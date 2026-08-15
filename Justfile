@@ -123,7 +123,7 @@ run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
 run-x86 memory: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
 
 run-riscv64 memory: build-riscv64 mkfs-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64

@@ -9,9 +9,9 @@
 #![no_std]
 
 use arch_common::com::{
-    DEVMAN_PROC_NR, DS_PROC_NR, INIT_PROC_NR, MFS_PROC_NR, NET_PROC_NR, PFS_PROC_NR, PM_PROC_NR,
-    RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR,
-    VIRTIO_NET_PROC_NR, VM_PROC_NR,
+    DEVMAN_PROC_NR, DS_PROC_NR, FB_PROC_NR, INIT_PROC_NR, MFS_PROC_NR, NET_PROC_NR, PFS_PROC_NR,
+    PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR,
+    VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR,
 };
 
 pub mod boot_init;
@@ -235,6 +235,7 @@ static BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
     ("/sbin/devman", DEVMAN_PROC_NR),   // device manager (VTreeFS tree)
     ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
+    ("/sbin/fb", FB_PROC_NR),           // framebuffer driver
     ("/sbin/init", INIT_PROC_NR),       // init
 ];
 

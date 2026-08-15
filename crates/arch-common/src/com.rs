@@ -31,7 +31,10 @@ pub const VIRTIO_BLK_PROC_NR: Endpoint = 12;
 pub const VIRTIO_NET_PROC_NR: Endpoint = 13;
 pub const NET_PROC_NR: Endpoint = 14;
 pub const DEVMAN_PROC_NR: Endpoint = 15;
+pub const FB_PROC_NR: Endpoint = 16;
 
+/// Character-device major for the framebuffer driver (/dev/fb).
+pub const FB_MAJOR: u32 = 19;
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;
 

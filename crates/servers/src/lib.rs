@@ -5,6 +5,8 @@
 pub mod clock_server;
 pub mod devman;
 pub mod ds;
+#[cfg(target_os = "minix")]
+pub mod fb;
 pub mod ipc;
 pub mod mutex;
 pub mod net;
