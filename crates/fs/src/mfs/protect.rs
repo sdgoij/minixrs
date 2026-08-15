@@ -381,6 +381,31 @@ mod tests {
     }
 
     #[test]
+    fn test_fs_chmod_sets_and_clears_setuid_bit() {
+        // J5: the setuid/setgid bits live inside ALL_MODES, so chmod can
+        // set them (0o4755) and clear them (0o755) — they survive the
+        // round-trip exactly as requested.
+        init();
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let sp = glo::get_super_ptr(0);
+            (*sp).s_rd_only = 0;
+            let ino = get_inode((*mfs).fs_dev, 7).expect("inode alloc");
+            let rip = glo::get_inode_ptr(ino as usize);
+            (*rip).i_mode = I_REGULAR | 0o755;
+            (*rip).i_sp = Some(sp);
+
+            set_chmod_req(7, 0o4755);
+            assert_eq!(fs_chmod(), OK);
+            assert_eq!((*rip).i_mode, I_REGULAR | 0o4755, "setuid bit set");
+
+            set_chmod_req(7, 0o755);
+            assert_eq!(fs_chmod(), OK);
+            assert_eq!((*rip).i_mode, I_REGULAR | 0o755, "setuid bit cleared");
+        }
+    }
+
+    #[test]
     fn test_fs_chown_read_only_inode_returns_erofs() {
         // An inode with no super block reference is on a read-only fs;
         // ownership must not change.

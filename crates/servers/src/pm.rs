@@ -2401,9 +2401,12 @@ const VFS_M7_P1_OFF: usize = 28;
 const VFS_M7_P2_OFF: usize = 36;
 
 // VFS_PM_EXEC_REPLY field offsets (VFS→PM, same packed convention):
-//   type@4, endpt@8, status@12, partial@16, pc@28 (u64), newsp@36 (u64)
+//   type@4, endpt@8, status@12, partial@16, euid@20, egid@24, pc@28 (u64),
+//   newsp@36 (u64)
 const EXEC_REPLY_STATUS_OFF: usize = 12;
 const EXEC_REPLY_PARTIAL_OFF: usize = 16;
+const EXEC_REPLY_EUID_OFF: usize = 20;
+const EXEC_REPLY_EGID_OFF: usize = 24;
 const EXEC_REPLY_PC_OFF: usize = 28;
 const EXEC_REPLY_NEWSP_OFF: usize = 36;
 
@@ -3466,9 +3469,11 @@ pub fn pm_server_main() {
 
 /// Forward exec to VFS — PM_EXEC handler (call 14).
 ///
-/// Reads path and frame info from the message, copies the path from the
-/// caller's address space, and sends VFS_PM_EXEC to VFS via SENDREC.
-/// Returns SUSPEND; VFS will call back via PM_EXEC_NEW then PM_EXEC_RESTART.
+/// Reads path and frame info from the message and sends VFS_PM_EXEC to
+/// VFS via a blocking SENDREC (the port's synchronous exec flow — C
+/// suspends the request and handles the reply in the main loop). On a
+/// successful load the reply carries the setuid/setgid exec ids, which
+/// are applied here before the exec is finished.
 ///
 /// # Safety
 ///
@@ -3583,6 +3588,24 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     );
 
     // exec_restart is unsafe: it mutates shared mproc state.
+    let new_euid = i32::from_le_bytes(
+        vfs_msg[EXEC_REPLY_EUID_OFF..EXEC_REPLY_EUID_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let new_egid = i32::from_le_bytes(
+        vfs_msg[EXEC_REPLY_EGID_OFF..EXEC_REPLY_EGID_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    if status == OK {
+        // The image loaded: apply setuid/setgid from the exec (C applies
+        // them in do_newexec, which VFS sends only after a successful
+        // load; the port passes the ids inline in the reply).
+        let base = MPROC.as_ptr();
+        let rmp = unsafe { &mut *base.add(caller_slot) };
+        unsafe { apply_exec_creds(rmp, new_euid, new_egid) };
+    }
     unsafe { exec_restart(caller_slot, status, partial, pc, newsp) }
 }
 
@@ -3651,6 +3674,36 @@ pub unsafe fn exec_restart(
     EDONTREPLY
 }
 
+/// Apply the credential change of an exec to `rmp` — shared by the
+/// synchronous exec reply path (`do_exec`) and the PM_EXEC_NEW protocol
+/// (`do_newexec`).
+///
+/// C (exec.c do_newexec): clear TAINTED first, then set it only when the
+/// exec carries setuid/setgid bits (VFS signals this with a non-(-1)
+/// euid/egid) or when the effective and real ids already differ.
+///
+/// # Safety
+///
+/// `rmp` must be a valid, in-use mproc slot.
+pub unsafe fn apply_exec_creds(rmp: &mut MProc, new_euid: i32, new_egid: i32) {
+    // Only apply setuid/setgid if not traced.
+    rmp.mp_flags &= !TAINTED;
+    let setuid_exec = new_euid != -1 || new_egid != -1;
+    if rmp.mp_tracer == NO_TRACER && setuid_exec {
+        if new_euid != -1 {
+            rmp.mp_effuid = new_euid;
+            // C: a setuid exec changes the effective uid only; the real
+            // uid stays (POSIX). VFS's fproc keeps its real uid too.
+        }
+        if new_egid != -1 {
+            rmp.mp_effgid = new_egid;
+        }
+        rmp.mp_flags |= TAINTED;
+    } else if rmp.mp_effuid != rmp.mp_realuid || rmp.mp_effgid != rmp.mp_realgid {
+        rmp.mp_flags |= TAINTED;
+    }
+}
+
 /// Handle PM's side after VFS opens the executable — PM_EXEC_NEW handler.
 ///
 /// Reads exec info from VFS reply: new euid, egid, process name.
@@ -3674,25 +3727,7 @@ pub unsafe fn do_newexec(caller_slot: usize, msg: &mut Message) -> i32 {
     let new_euid = unsafe { msg.m_payload.m1.m1i1 };
     let new_egid = unsafe { msg.m_payload.m1.m1i2 };
 
-    // Only apply setuid/setgid if not traced.
-    // C (exec.c do_newexec): clear TAINTED first, then set it only when the
-    // exec carries setuid/setgid bits (VFS signals this with a non-(-1)
-    // euid/egid) or when the effective and real ids already differ.
-    rmp.mp_flags &= !TAINTED;
-    let setuid_exec = new_euid != -1 || new_egid != -1;
-    if rmp.mp_tracer == NO_TRACER && setuid_exec {
-        if new_euid != -1 {
-            rmp.mp_effuid = new_euid;
-            // C: a setuid exec changes the effective uid only; the real
-            // uid stays (POSIX). VFS's fproc keeps its real uid too.
-        }
-        if new_egid != -1 {
-            rmp.mp_effgid = new_egid;
-        }
-        rmp.mp_flags |= TAINTED;
-    } else if rmp.mp_effuid != rmp.mp_realuid || rmp.mp_effgid != rmp.mp_realgid {
-        rmp.mp_flags |= TAINTED;
-    }
+    unsafe { apply_exec_creds(rmp, new_euid, new_egid) };
 
     // Copy process name from VFS reply (bytes at offset 24 in raw payload).
     let raw = unsafe { &msg.m_payload.raw };

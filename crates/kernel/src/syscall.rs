@@ -541,103 +541,83 @@ const VFS_PROC_NR: i32 = 1;
 /// serial ring directly (its fd 0 stays non-VFS).
 const TTY_PROC_NR: i32 = 5;
 
-/// Build a VFS IPC message and send it via `do_sync_ipc`.
-///
-/// `vfs_call` is the VFS call number (VFS_MKDIR = 0x109, etc.).
-/// `arg1`-`arg3` are i32 arguments placed in the m1 payload.
-/// `path_ptr` and `path_len` are used for path-based calls.
-///
-/// Returns the reply status (OK = 0, or negative errno).
-unsafe fn vfs_ipc_call(
+/// Build the common header of a path-based VFS request in the caller's
+/// send buffer: destination endpoint, call number, path pointer @8, path
+/// length @16 (the m7 convention VFS's `do_*` path handlers parse). The
+/// caller fills any extra fields (mode, owner, …) before sending.
+unsafe fn vfs_path_msg(
     caller: *mut crate::proc::Proc,
     vfs_call: i32,
-    arg1: i32,
-    arg2: i32,
-    arg3: i32,
-) -> i64 {
-    // Build the request in the caller's per-process send buffer: the
-    // SENDREC blocks the caller, and a reply delivered to the shared
-    // kernel stack would be overwritten by the next process to run.
+    path_ptr: u64,
+    path_len: u32,
+) -> &'static mut [u8; crate::proc::MESSAGE_SIZE] {
     let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
     msg.fill(0);
-    // Set destination endpoint (first 4 bytes)
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-    // Set call number (offset 4-8)
     msg[4..8].copy_from_slice(&vfs_call.to_le_bytes());
-    // Set payload fields
-    msg[12..16].copy_from_slice(&arg1.to_le_bytes());
-    msg[16..20].copy_from_slice(&arg2.to_le_bytes());
-    msg[20..24].copy_from_slice(&arg3.to_le_bytes());
-    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
+    msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());
+    msg[16..20].copy_from_slice(&path_len.to_le_bytes());
+    msg
 }
 
 /// SYS_mkdir (40) — create a directory.
+/// args[0] = path pointer, args[1] = path length, args[2] = mode.
 unsafe fn sys_mkdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let mode = args[2] as i32;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_MKDIR = 0x109
-    unsafe { vfs_ipc_call(caller, 0x109, mode, 0, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x109, args[0], args[1] as u32) }; // VFS_MKDIR
+    msg[24..28].copy_from_slice(&(args[2] as i32).to_le_bytes()); // mode
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_unlink (41) — remove a file.
+/// args[0] = path pointer, args[1] = path length.
 unsafe fn sys_unlink_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_UNLINK = 0x107
-    unsafe { vfs_ipc_call(caller, 0x107, 0, 0, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x107, args[0], args[1] as u32) }; // VFS_UNLINK
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_rmdir (42) — remove a directory.
+/// args[0] = path pointer, args[1] = path length.
 unsafe fn sys_rmdir_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_RMDIR = 0x112
-    unsafe { vfs_ipc_call(caller, 0x112, 0, 0, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x112, args[0], args[1] as u32) }; // VFS_RMDIR
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_link (43) — create a hard link.
+/// args[0] = old path pointer, args[1] = old length, args[2] = new path
+/// pointer, args[3] = new length.
 unsafe fn sys_link_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let old_ptr = args[0] as *const u8;
-    let new_ptr = args[1] as *const u8;
-    let _ = (old_ptr, new_ptr);
-    // Route to VFS: VFS_LINK = 0x106
-    unsafe { vfs_ipc_call(caller, 0x106, 0, 0, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x106, args[0], args[1] as u32) }; // VFS_LINK
+    msg[24..32].copy_from_slice(&args[2].to_le_bytes()); // new path @24
+    msg[32..36].copy_from_slice(&(args[3] as u32).to_le_bytes()); // new len @32
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_chmod (44) — change file mode.
+/// args[0] = path pointer, args[1] = path length, args[2] = mode.
 unsafe fn sys_chmod_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let mode = args[2] as i32;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_CHMOD = 0x10B
-    unsafe { vfs_ipc_call(caller, 0x10B, mode, 0, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x10B, args[0], args[1] as u32) }; // VFS_CHMOD
+    msg[24..28].copy_from_slice(&(args[2] as i32).to_le_bytes()); // mode
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_chown (45) — change file owner.
+/// args[0] = path pointer, args[1] = path length, args[2] = owner,
+/// args[3] = group.
 unsafe fn sys_chown_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let owner = args[2] as i32;
-    let group = args[3] as i32;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_CHOWN = 0x10C
-    unsafe { vfs_ipc_call(caller, 0x10C, owner, group, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x10C, args[0], args[1] as u32) }; // VFS_CHOWN
+    msg[24..28].copy_from_slice(&(args[2] as i32).to_le_bytes()); // owner
+    msg[32..36].copy_from_slice(&(args[3] as i32).to_le_bytes()); // group
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
-/// SYS_mknod (46) — create a device node.
+/// SYS_mknod (56) — create a device node.
+/// args[0] = path pointer, args[1] = path length, args[2] = mode,
+/// args[3] = device number.
 unsafe fn sys_mknod_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
-    let path_ptr = args[0] as *const u8;
-    let path_len = args[1] as usize;
-    let mode = args[2] as i32;
-    let dev = args[3] as i32;
-    let _ = (path_ptr, path_len);
-    // Route to VFS: VFS_MKNOD = 0x10A
-    unsafe { vfs_ipc_call(caller, 0x10A, mode, dev, 0) }
+    let msg = unsafe { vfs_path_msg(caller, 0x10A, args[0], args[1] as u32) }; // VFS_MKNOD
+    msg[24..28].copy_from_slice(&(args[2] as i32).to_le_bytes()); // mode
+    msg[32..36].copy_from_slice(&(args[3] as i32).to_le_bytes()); // dev
+    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
 }
 
 /// SYS_getdents (57) — read directory entries.

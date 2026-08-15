@@ -199,7 +199,8 @@ pub fn service_pm() -> i32 {
             };
 
             // Build reply: VFS_PM_EXEC_REPLY with endpt, status, partial,
-            // pc, newsp.
+            // euid, egid, pc, newsp. euid/egid are -1 when the exec carries
+            // no setuid/setgid bit (PM keeps the current ids).
             #[cfg(target_os = "minix")]
             {
                 let mut buf = [0u8; 64];
@@ -207,7 +208,8 @@ pub fn service_pm() -> i32 {
                 buf[8..12].copy_from_slice(&proc_e.to_le_bytes());
                 buf[12..16].copy_from_slice(&result.status.to_le_bytes());
                 buf[16..20].copy_from_slice(&(result.partial as i32).to_le_bytes());
-                buf[24..32].copy_from_slice(&0u64.to_le_bytes()); // NEWPS_STR
+                buf[20..24].copy_from_slice(&result.euid.to_le_bytes());
+                buf[24..28].copy_from_slice(&result.egid.to_le_bytes());
                 buf[28..36].copy_from_slice(&result.pc.to_le_bytes());
                 buf[36..44].copy_from_slice(&result.newsp.to_le_bytes());
                 unsafe { send_raw_to_pm(&buf) };

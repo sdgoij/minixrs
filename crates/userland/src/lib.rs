@@ -850,6 +850,84 @@ pub fn su(args: &[&str]) -> i32 {
     }
 }
 
+/// sugid — setuid/setgid exec probe (J5).
+///
+/// Prints the real/effective uid/gid and issetugid state, then reports
+/// whether the root-only `/etc/secret` is readable. With the setuid bit
+/// set on this binary, euid becomes 0 and the secret is readable; without
+/// it, euid stays the caller's and the open is denied.
+pub fn sugid(_args: &[&str]) -> i32 {
+    #[cfg(not(target_os = "minix"))]
+    {
+        0
+    }
+    #[cfg(target_os = "minix")]
+    {
+        let (ruid, euid) = match minix_std::process::getuid() {
+            Ok(v) => v,
+            Err(_) => {
+                write_err(b"sugid: getuid failed\n");
+                return 1;
+            }
+        };
+        let (rgid, egid) = match minix_std::process::getgid() {
+            Ok(v) => v,
+            Err(_) => {
+                write_err(b"sugid: getgid failed\n");
+                return 1;
+            }
+        };
+        let tainted = minix_std::process::issetugid().unwrap_or(false);
+
+        let mut out = [0u8; 128];
+        let mut len = 0;
+        let push = |s: &[u8], out: &mut [u8], len: &mut usize| {
+            if *len < out.len() {
+                let n = s.len().min(out.len() - *len);
+                out[*len..*len + n].copy_from_slice(&s[..n]);
+                *len += n;
+            }
+        };
+        push(b"ruid=", &mut out, &mut len);
+        len += fmt_dec(ruid, &mut out[len..]);
+        push(b" euid=", &mut out, &mut len);
+        len += fmt_dec(euid, &mut out[len..]);
+        push(b" rgid=", &mut out, &mut len);
+        len += fmt_dec(rgid, &mut out[len..]);
+        push(b" egid=", &mut out, &mut len);
+        len += fmt_dec(egid, &mut out[len..]);
+        push(
+            if tainted {
+                b" issetugid=1"
+            } else {
+                b" issetugid=0"
+            },
+            &mut out,
+            &mut len,
+        );
+
+        // /etc/secret is 0600 root — readable iff euid is 0.
+        let fd = minix_rt::open(b"/etc/secret", 0); // O_RDONLY
+        if fd < 0 {
+            push(b" secret=DENIED\n", &mut out, &mut len);
+            write_out(&out[..len]);
+            return 0;
+        }
+        let mut buf = [0u8; 32];
+        let n = minix_rt::read(fd as i32, &mut buf);
+        let _ = minix_rt::close(fd as i32);
+        if n <= 0 {
+            push(b" secret=DENIED\n", &mut out, &mut len);
+            write_out(&out[..len]);
+            return 0;
+        }
+        push(b" secret=", &mut out, &mut len);
+        write_out(&out[..len]);
+        write_out(&buf[..n as usize]);
+        0
+    }
+}
+
 /// Read one line from stdin (fd 0), stripping the trailing newline.
 #[cfg(target_os = "minix")]
 fn read_line_stdin(buf: &mut [u8]) -> usize {

@@ -114,6 +114,10 @@ pub struct ExecResult {
     pub pc: u64,
     /// New user stack pointer (valid on success).
     pub newsp: u64,
+    /// New effective uid from the setuid bit, or -1 to keep the current one.
+    pub euid: i32,
+    /// New effective gid from the setgid bit, or -1 to keep the current one.
+    pub egid: i32,
 }
 
 /// An exec failure after the address space was replaced: PM must kill the
@@ -125,6 +129,8 @@ fn err_partial(s: i32) -> ExecResult {
         partial: true,
         pc: 0,
         newsp: 0,
+        euid: -1,
+        egid: -1,
     }
 }
 
@@ -149,6 +155,8 @@ pub unsafe fn pm_exec(
         partial: false,
         pc: 0,
         newsp: 0,
+        euid: -1,
+        egid: -1,
     };
 
     if frame_len == 0 || frame_len > EXEC_FRAME_MAX {
@@ -226,6 +234,32 @@ pub unsafe fn pm_exec(
         unsafe { put_vnode(vp) };
         return err(ENOEXEC);
     }
+
+    // Setuid/setgid exec (C get_read_vp): a setuid bit raises the
+    // effective uid to the file's owner, a setgid bit the effective gid to
+    // the file's group. The vnode table drops uid/gid from the lookup
+    // reply, so fetch them via req_stat (C req_stats the executable into
+    // execi->sb here too). -1 = keep the current id.
+    let vp_mode = unsafe { (*vp).v_mode };
+    let (new_euid, new_egid) = if vp_mode & (0o4000 | 0o2000) != 0 {
+        let mut st: minix_std::fs::Stat = unsafe { core::mem::zeroed() };
+        let r = unsafe {
+            crate::vfs::request::req_stat(
+                fs_e,
+                inode_nr,
+                VFS_PROC_NR,
+                &mut st as *mut minix_std::fs::Stat as *mut u8,
+                core::mem::size_of::<minix_std::fs::Stat>(),
+            )
+        };
+        if r == OK {
+            setuid_ids(vp_mode, st.st_uid, st.st_gid)
+        } else {
+            (-1, -1)
+        }
+    } else {
+        (-1, -1)
+    };
 
     // Open a VM fd on the executable in VFS's own fproc (C exec.c: the
     // vmfd lives in fproc[VM_PROC_NR]; VM_VFS_MMAP stores it in the region
@@ -423,11 +457,24 @@ pub unsafe fn pm_exec(
     let _ = mapped_any;
     unsafe { put_vnode(vp) };
 
+    // Apply the setuid/setgid exec to VFS's own fproc (C pm_exec: "If
+    // after loading the image we're still allowed to run with setuid or
+    // setgid, change credentials now"). PM applies the same ids to mproc
+    // from the reply.
+    if new_euid != -1 {
+        fp.fp_effuid = new_euid as u16;
+    }
+    if new_egid != -1 {
+        fp.fp_effgid = new_egid as u16;
+    }
+
     ExecResult {
         status: OK,
         partial: false,
         pc,
         newsp,
+        euid: new_euid,
+        egid: new_egid,
     }
 }
 
@@ -475,6 +522,44 @@ pub unsafe fn pm_exec(
         partial: false,
         pc: 0,
         newsp: 0,
+        euid: -1,
+        egid: -1,
+    }
+}
+
+/// Map a mode's setuid/setgid bits plus the file's owner/group to the
+/// new-ids protocol values (C `get_read_vp`): -1 keeps the current id.
+#[cfg(any(test, target_os = "minix"))]
+fn setuid_ids(mode: u32, uid: u32, gid: u32) -> (i32, i32) {
+    let euid = if mode & 0o4000 != 0 { uid as i32 } else { -1 };
+    let egid = if mode & 0o2000 != 0 { gid as i32 } else { -1 };
+    (euid, egid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setuid_ids;
+
+    #[test]
+    fn no_setid_bits_keep_current_ids() {
+        assert_eq!(setuid_ids(0o755, 0, 0), (-1, -1));
+        assert_eq!(setuid_ids(0o100644, 1000, 1000), (-1, -1));
+    }
+
+    #[test]
+    fn setuid_bit_elevates_to_owner() {
+        assert_eq!(setuid_ids(0o4755, 0, 0), (0, -1));
+        assert_eq!(setuid_ids(0o4755, 1000, 50), (1000, -1));
+    }
+
+    #[test]
+    fn setgid_bit_elevates_to_group() {
+        assert_eq!(setuid_ids(0o2755, 1000, 60), (-1, 60));
+    }
+
+    #[test]
+    fn both_bits_set_both_ids() {
+        assert_eq!(setuid_ids(0o6755, 1000, 60), (1000, 60));
     }
 }
 

@@ -2039,7 +2039,13 @@ pub fn do_chmod() -> i32 {
     let inode_nr = vp_ref.v_inode_nr;
     let mut new_mode = rmode;
     crate::vfs::protect::chmod_strip_setgid(fp, vp_ref, &mut new_mode);
-    let (r, _new_mode) = unsafe { crate::vfs::request::req_chmod(fs_e, inode_nr, new_mode) };
+    let (r, new_mode) = unsafe { crate::vfs::request::req_chmod(fs_e, inode_nr, new_mode) };
+    if r == OK {
+        // Refresh the cached vnode mode from the reply (C protect.c
+        // do_chmod: `vp->v_mode = new_mode`) — otherwise a later lookup
+        // (e.g. exec) sees the stale mode without the chmod's bits.
+        unsafe { (*vp).v_mode = new_mode };
+    }
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -2092,7 +2098,17 @@ pub fn do_chown() -> i32 {
     }
     let fs_e = vp_ref.v_fs_e;
     let inode_nr = vp_ref.v_inode_nr;
-    let (r, _new_mode) = unsafe { crate::vfs::request::req_chown(fs_e, inode_nr, owner, group) };
+    let (r, new_mode) = unsafe { crate::vfs::request::req_chown(fs_e, inode_nr, owner, group) };
+    if r == OK {
+        // Refresh the cached vnode ownership/mode from the reply (C
+        // protect.c do_chown sets v_uid/v_gid/v_mode) so later lookups
+        // (e.g. exec's setuid check) see the chown's effects.
+        unsafe {
+            (*vp).v_uid = owner as i32;
+            (*vp).v_gid = group as i32;
+            (*vp).v_mode = new_mode;
+        }
+    }
     unsafe { mount::put_vnode(vp) };
     r
 }
