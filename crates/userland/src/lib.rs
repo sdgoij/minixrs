@@ -10,6 +10,10 @@
 
 use core::sync::atomic::{AtomicI32, Ordering};
 
+/// Public-domain VGA 8×16 font (K4 framebuffer console and the K5 window
+/// server's text rendering).
+pub mod fbfont;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.
@@ -295,6 +299,265 @@ fn fbmmap_impl(args: &[&str]) -> i32 {
 /// Host stub: no framebuffer to map — exit cleanly.
 #[cfg(not(target_os = "minix"))]
 fn fbmmap_impl(args: &[&str]) -> i32 {
+    let _ = args;
+    0
+}
+
+/// fbterm — framebuffer console (K4): maps /dev/fb, draws an 8×16 text
+/// console with keyboard echo from /dev/kbd (the K2 input server).
+///
+/// `fbterm [max_keys]` — with `max_keys > 0` the console exits after that
+/// many echoed keys (probe mode; 0 = run forever).
+pub fn fbterm(args: &[&str]) -> i32 {
+    fbterm_impl(args)
+}
+
+/// The MINIX implementation: clear the fb, draw a `> ` prompt, and echo
+/// PS/2 key events as text at the cursor (wrap + scroll).
+#[cfg(target_os = "minix")]
+fn fbterm_impl(args: &[&str]) -> i32 {
+    use crate::fbfont::FONT_8X16;
+
+    const XRES: usize = 1024;
+    const YRES: usize = 768;
+    const PITCH: usize = XRES * 4;
+    const FONT_W: usize = 8;
+    const FONT_H: usize = 16;
+    const COLS: usize = XRES / FONT_W;
+    const ROWS: usize = YRES / FONT_H;
+    const MAP_LEN: usize = 4 * 1024 * 1024;
+    const KEY_PAGE: u16 = 0x0007;
+    const KEY_LEFT_SHIFT: u16 = 0x00E1;
+    const KEY_RIGHT_SHIFT: u16 = 0x00E5;
+    const KEY_CAPS_LOCK: u16 = 0x0039;
+    const KEY_ENTER: u16 = 0x0028;
+    const KEY_BACKSPACE: u16 = 0x002A;
+
+    let max_keys: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let fb_fd = match unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"fbterm: open /dev/fb failed\n");
+            return 1;
+        }
+    };
+    let fb = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            MAP_LEN,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_SHARED,
+            fb_fd,
+            0,
+        )
+    };
+    if fb == minix_std::vmem::MAP_FAILED {
+        write_err(b"fbterm: mmap /dev/fb failed\n");
+        return 1;
+    }
+    let kbd_fd = match unsafe { minix_std::fs::open(b"/dev/kbd", minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"fbterm: open /dev/kbd failed\n");
+            return 1;
+        }
+    };
+
+    const BG: [u8; 4] = [0x18, 0x18, 0x30, 0]; // dark blue
+    const FG: [u8; 4] = [0xFF, 0xFF, 0xFF, 0]; // white
+
+    fn put_pixel(fb: *mut u8, x: usize, y: usize, px: [u8; 4]) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(px.as_ptr(), fb.add(y * PITCH + x * 4), 4);
+        }
+    }
+
+    fn draw_char(fb: *mut u8, x: usize, y: usize, ch: u8, fg: [u8; 4], bg: [u8; 4]) {
+        if !(0x20..=0x7E).contains(&ch) {
+            return;
+        }
+        let glyph = FONT_8X16[(ch - 0x20) as usize];
+        for r in 0..FONT_H {
+            let bits = glyph[r];
+            for c in 0..FONT_W {
+                let px = if bits & (0x80 >> c) != 0 { fg } else { bg };
+                put_pixel(fb, x + c, y + r, px);
+            }
+        }
+    }
+
+    fn scroll(fb: *mut u8, bg: [u8; 4]) {
+        // Shift all rows up by one and clear the bottom row.
+        let n = (ROWS - 1) * FONT_H * PITCH;
+        unsafe {
+            core::ptr::copy(fb.add(FONT_H * PITCH) as *const u8, fb, n);
+        }
+        let y0 = (ROWS - 1) * FONT_H;
+        for y in y0..YRES {
+            for x in 0..XRES {
+                put_pixel(fb, x, y, bg);
+            }
+        }
+    }
+
+    fn usage_to_ascii(code: u16) -> Option<u8> {
+        let c = match code {
+            0x04..=0x1D => b'a' + (code - 0x04) as u8,
+            0x1E..=0x27 => b'1' + (code - 0x1E) as u8,
+            0x2C => b' ',
+            0x2D => b'-',
+            0x2E => b'=',
+            0x2F => b'[',
+            0x30 => b']',
+            0x31 => b'\\',
+            0x33 => b';',
+            0x34 => b'\'',
+            0x35 => b'`',
+            0x36 => b',',
+            0x37 => b'.',
+            0x38 => b'/',
+            _ => return None,
+        };
+        Some(c)
+    }
+
+    fn shifted(c: u8) -> u8 {
+        match c {
+            b'1' => b'!',
+            b'2' => b'@',
+            b'3' => b'#',
+            b'4' => b'$',
+            b'5' => b'%',
+            b'6' => b'^',
+            b'7' => b'&',
+            b'8' => b'*',
+            b'9' => b'(',
+            b'0' => b')',
+            b'-' => b'_',
+            b'=' => b'+',
+            b'[' => b'{',
+            b']' => b'}',
+            b'\\' => b'|',
+            b';' => b':',
+            b'\'' => b'"',
+            b'`' => b'~',
+            b',' => b'<',
+            b'.' => b'>',
+            b'/' => b'?',
+            c => c,
+        }
+    }
+
+    // Clear to the background.
+    for y in 0..YRES {
+        for x in 0..XRES {
+            put_pixel(fb, x, y, BG);
+        }
+    }
+
+    let mut col = 0usize;
+    let mut row = 0usize;
+    let mut shift = false;
+    let mut caps = false;
+    let mut keys = 0u32;
+
+    // Initial prompt: "> " at the top-left.
+    draw_char(fb, col * FONT_W, row * FONT_H, b'>', FG, BG);
+    col = 1;
+    draw_char(fb, col * FONT_W, row * FONT_H, b' ', FG, BG);
+    col = 2;
+
+    write_out(b"fbterm: ready\n");
+
+    let mut buf = [0u8; 16];
+    while max_keys == 0 || keys < max_keys {
+        let n = minix_rt::read(kbd_fd, &mut buf);
+        if n >= 8 {
+            let n = n as usize;
+            let mut off = 0;
+            while off + 8 <= n {
+                let page = u16::from_le_bytes([buf[off], buf[off + 1]]);
+                let code = u16::from_le_bytes([buf[off + 2], buf[off + 3]]);
+                let press =
+                    i32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
+                off += 8;
+                if page != KEY_PAGE {
+                    continue;
+                }
+                match code {
+                    KEY_LEFT_SHIFT | KEY_RIGHT_SHIFT => {
+                        shift = press == 1;
+                        continue;
+                    }
+                    KEY_CAPS_LOCK => {
+                        if press == 1 {
+                            caps = !caps;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                if press != 1 {
+                    continue;
+                }
+                match code {
+                    KEY_ENTER => {
+                        col = 0;
+                        row += 1;
+                        if row >= ROWS {
+                            scroll(fb, BG);
+                            row = ROWS - 1;
+                        }
+                        keys += 1;
+                        continue;
+                    }
+                    KEY_BACKSPACE => {
+                        if col > 0 {
+                            col -= 1;
+                            draw_char(fb, col * FONT_W, row * FONT_H, b' ', FG, BG);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let Some(mut ch) = usage_to_ascii(code) {
+                    if ch.is_ascii_alphabetic() {
+                        if shift ^ caps {
+                            ch = ch.to_ascii_uppercase();
+                        }
+                    } else if shift {
+                        ch = shifted(ch);
+                    }
+                    draw_char(fb, col * FONT_W, row * FONT_H, ch, FG, BG);
+                    col += 1;
+                    if col >= COLS {
+                        col = 0;
+                        row += 1;
+                        if row >= ROWS {
+                            scroll(fb, BG);
+                            row = ROWS - 1;
+                        }
+                    }
+                    keys += 1;
+                }
+            }
+        }
+        // Busy-wait between polls (no blocking read on /dev/kbd yet).
+        for _ in 0..200_000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    let _ = minix_std::fs::close(kbd_fd);
+    let _ = minix_std::fs::close(fb_fd);
+    write_out(b"fbterm: done\n");
+    0
+}
+
+/// Host stub: no framebuffer or keyboard — exit cleanly.
+#[cfg(not(target_os = "minix"))]
+fn fbterm_impl(args: &[&str]) -> i32 {
     let _ = args;
     0
 }

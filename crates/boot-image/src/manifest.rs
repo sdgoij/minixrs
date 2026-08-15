@@ -65,6 +65,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // MAP_SHARED and draws (K3). `paint`/`restore` subcommands keep
     // fb_screendump.py green after a probe run.
     ("/bin/fbmmap", "fbmmap"),
+    // `/bin/fbterm` is the framebuffer console (K4): an 8×16 text console
+    // over the mapped fb with PS/2 keyboard echo.
+    ("/bin/fbterm", "fbterm"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),
