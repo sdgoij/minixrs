@@ -238,6 +238,28 @@ pub unsafe fn safecopy(
             Err(e) => return e,
         };
 
+        // Phase D1 (TRAPS.md): pre-check the granter's pages too, on the
+        // CR3-switched copy path only (TRY grants direct-copy and never
+        // fault). A normal grant copy switches CR3 into the granter's
+        // space, so a fault there would be attributed to the caller
+        // (executor) with the granter as the CR3 owner — VM would walk the
+        // wrong regions and SIGSEGV the wrong process (KNOWN_ISSUES #5). C
+        // pre-checks via vm_check; match it: return EFAULT instead of
+        // faulting. Kernel-task granters (no per-process CR3) are trusted,
+        // same as the caller-side check above.
+        if flags & CPF_TRY == 0 && new_granter >= 0 {
+            let gp = proc_addr(endpoint_slot(new_granter));
+            if !gp.is_null() && !crate::vm::vm_check_range(gp, v_offset, bytes) {
+                // CPF_READ = copy FROM granter (granter is src); otherwise
+                // the granter is the destination.
+                return if access & CPF_READ != 0 {
+                    EFAULT_SRC
+                } else {
+                    EFAULT_DST
+                };
+            }
+        }
+
         // Determine src and dst addresses
         let (src_addr, dst_addr) = if access & CPF_READ != 0 {
             // Copy FROM granter TO grantee (caller)
@@ -1060,6 +1082,127 @@ mod tests {
             let msg = build_safecopy_msg(ep, 0, 0, base + copy_off, 16);
             let r = do_safecopy_to(rp, &msg);
             assert_eq!(r, OK);
+        }
+    }
+
+    // Phase D1 granter-side presence pre-checks
+
+    /// Page-aligned fake page-table page: `pte_to_phys` masks the low 12
+    /// bits, so the table pages must be 4096-aligned or the walk reads the
+    /// wrong address after descending a level.
+    #[repr(C, align(4096))]
+    struct FakePtPage {
+        data: [u64; 512],
+    }
+
+    /// Fill a 4-level page table (pml4 → pdpt → pd → pt) mapping exactly
+    /// one 4 KB page (`map_va` → `map_pa`), everything else unmapped.
+    /// Returns the cr3 (host address of `pml4`, readable in test mode).
+    unsafe fn fill_fake_pt(
+        pml4: &mut [u64; 512],
+        pdpt: &mut [u64; 512],
+        pd: &mut [u64; 512],
+        pt: &mut [u64; 512],
+        map_va: u64,
+        map_pa: u64,
+    ) -> u64 {
+        pml4[0] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pdpt[0] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pd[0] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        let idx = (map_va >> 12) & 511;
+        pt[idx as usize] = map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
+        pml4.as_mut_ptr() as u64
+    }
+
+    #[test]
+    fn test_safecopy_from_granter_unmapped_returns_efault_src() {
+        // Phase D1: the granter's pages must be present before a normal
+        // grant copy CR3-switches into the granter's space. A granter VA
+        // with no mapping returns EFAULT_SRC (pre-change: the copy went
+        // ahead via the host-test fallback and returned OK). The caller
+        // (dst) VA is mapped so the caller-side check passes first.
+        unsafe {
+            let ep = make_endpoint(0, 0);
+            grant_buf!(_gb, grant_ptr, 16);
+            let (rp, grant) = setup_with_buf(0, ep, grant_ptr, 16);
+            // Grant covers granter VA 0x7000.
+            *grant.add(0) = make_direct_grant(CPF_READ, ep, 0x7000, 256);
+
+            let mut pml4 = FakePtPage { data: [0; 512] };
+            let mut pdpt = FakePtPage { data: [0; 512] };
+            let mut pd = FakePtPage { data: [0; 512] };
+            let mut pt = FakePtPage { data: [0; 512] };
+            (*rp).p_seg.p_cr3 = fill_fake_pt(
+                &mut pml4.data,
+                &mut pdpt.data,
+                &mut pd.data,
+                &mut pt.data,
+                0x8000,
+                0x200000,
+            );
+
+            let msg = build_safecopy_msg(ep, 0, 0, 0x8000, 16);
+            let r = do_safecopy_from(rp, &msg);
+            assert_eq!(r, EFAULT_SRC);
+        }
+    }
+
+    #[test]
+    fn test_safecopy_to_granter_unmapped_returns_efault_dst() {
+        // Write direction: do_safecopy_to copies INTO the granter, so an
+        // unmapped granter VA is EFAULT_DST (pre-change: OK).
+        unsafe {
+            let ep = make_endpoint(0, 0);
+            grant_buf!(_gb, grant_ptr, 16);
+            let (rp, grant) = setup_with_buf(0, ep, grant_ptr, 16);
+            *grant.add(0) = make_direct_grant(CPF_WRITE, ep, 0x7000, 256);
+
+            let mut pml4 = FakePtPage { data: [0; 512] };
+            let mut pdpt = FakePtPage { data: [0; 512] };
+            let mut pd = FakePtPage { data: [0; 512] };
+            let mut pt = FakePtPage { data: [0; 512] };
+            (*rp).p_seg.p_cr3 = fill_fake_pt(
+                &mut pml4.data,
+                &mut pdpt.data,
+                &mut pd.data,
+                &mut pt.data,
+                0x8000,
+                0x200000,
+            );
+
+            let msg = build_safecopy_msg(ep, 0, 0, 0x8000, 16);
+            let r = do_safecopy_to(rp, &msg);
+            assert_eq!(r, EFAULT_DST);
+        }
+    }
+
+    #[test]
+    fn test_safecopy_from_caller_unmapped_returns_efault_dst() {
+        // Pin of the pre-existing caller-side presence check: an unmapped
+        // caller buffer returns EFAULT_DST before any copy.
+        unsafe {
+            let ep = make_endpoint(0, 0);
+            grant_buf!(_gb, grant_ptr, 16);
+            let (rp, grant) = setup_with_buf(0, ep, grant_ptr, 16);
+            // Grant covers 0x8000 (mapped); the caller (dst) uses 0x7000.
+            *grant.add(0) = make_direct_grant(CPF_READ, ep, 0x8000, 256);
+
+            let mut pml4 = FakePtPage { data: [0; 512] };
+            let mut pdpt = FakePtPage { data: [0; 512] };
+            let mut pd = FakePtPage { data: [0; 512] };
+            let mut pt = FakePtPage { data: [0; 512] };
+            (*rp).p_seg.p_cr3 = fill_fake_pt(
+                &mut pml4.data,
+                &mut pdpt.data,
+                &mut pd.data,
+                &mut pt.data,
+                0x8000,
+                0x200000,
+            );
+
+            let msg = build_safecopy_msg(ep, 0, 0, 0x7000, 16);
+            let r = do_safecopy_from(rp, &msg);
+            assert_eq!(r, EFAULT_DST);
         }
     }
 

@@ -2491,6 +2491,26 @@ unsafe fn do_copy_common(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32
             crate::table::endpoint_slot(dst_endpt)
         };
 
+        // Phase D1 (TRAPS.md): pre-check both sides' page presence before
+        // the CR3-switched copy — C-faithful (C MINIX virtual_copy
+        // pre-checks via vm_check and returns EFAULT). A fault mid-copy
+        // would be attributed to the caller (executor) with the target as
+        // the CR3 owner, and VM would SIGSEGV the wrong process
+        // (KNOWN_ISSUES #5). Kernel-side buffers (proc < 0) are
+        // identity-mapped and present by construction.
+        if src_proc >= 0 {
+            let sp = crate::table::proc_addr(src_proc);
+            if !sp.is_null() && !crate::vm::vm_check_range(sp, src_addr, bytes as u64) {
+                return crate::grants::EFAULT_SRC;
+            }
+        }
+        if dst_proc >= 0 {
+            let dp = crate::table::proc_addr(dst_proc);
+            if !dp.is_null() && !crate::vm::vm_check_range(dp, dst_addr, bytes as u64) {
+                return crate::grants::EFAULT_DST;
+            }
+        }
+
         if flags & CP_FLAG_TRY != 0 {
             // CP_FLAG_TRY: direct copy without VM fallback
             let r = crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes);
@@ -5689,6 +5709,65 @@ mod tests {
             // properly sets p_scheduler, restore the EPERM assertion:
             //   assert_eq!(result, crate::ipc::EPERM);
             assert_eq!(result, crate::ipc::OK);
+        }
+    }
+
+    // Phase D1 both-side presence pre-checks for SYS_VIRCOPY
+
+    fn setup_copy_proc(slot: i32, cr3: u64) -> i32 {
+        unsafe {
+            proc_init();
+            let ep = crate::table::make_endpoint(0, slot);
+            let rp = crate::table::proc_addr(slot);
+            core::ptr::write_bytes(rp.cast::<u8>(), 0, core::mem::size_of::<Proc>());
+            (*rp).p_endpoint = ep;
+            (*rp).p_seg.p_cr3 = cr3;
+            ep
+        }
+    }
+
+    fn build_vircopy_msg(
+        src_ep: i32,
+        src_addr: u64,
+        dst_ep: i32,
+        dst_addr: u64,
+    ) -> [u8; MESSAGE_SIZE] {
+        let mut msg = [0u8; MESSAGE_SIZE];
+        unsafe {
+            msg_write_i32(&mut msg, COPY_SRC_ENDPT_OFF, src_ep);
+            msg_write_u64(&mut msg, COPY_SRC_ADDR_OFF, src_addr);
+            msg_write_i32(&mut msg, COPY_DST_ENDPT_OFF, dst_ep);
+            msg_write_u64(&mut msg, COPY_DST_ADDR_OFF, dst_addr);
+            msg_write_u64(&mut msg, COPY_NR_BYTES_OFF, 16);
+            msg_write_i32(&mut msg, COPY_FLAGS_OFF, 0);
+        }
+        msg
+    }
+
+    #[test]
+    fn test_do_copy_common_src_unmapped_returns_efault_src() {
+        // Phase D1: SYS_VIRCOPY pre-checks both sides; an unmapped source
+        // returns EFAULT_SRC instead of faulting mid-copy (which would be
+        // attributed to the caller with the source as CR3 owner).
+        unsafe {
+            let mut fake_pt = [0u64; 512]; // nothing mapped
+            let ep = setup_copy_proc(3, fake_pt.as_mut_ptr() as u64);
+            let rp = crate::table::proc_addr(3);
+            let mut msg = build_vircopy_msg(ep, 0x7000, crate::system::NONE, 0x8000);
+            let r = do_copy_common(rp, &mut msg);
+            assert_eq!(r, crate::grants::EFAULT_SRC);
+        }
+    }
+
+    #[test]
+    fn test_do_copy_common_dst_unmapped_returns_efault_dst() {
+        unsafe {
+            let mut fake_pt = [0u64; 512]; // nothing mapped
+            let ep = setup_copy_proc(3, fake_pt.as_mut_ptr() as u64);
+            let rp = crate::table::proc_addr(3);
+            let mut msg = build_vircopy_msg(crate::system::NONE, 0x7000, ep, 0x8000);
+            let r = do_copy_common(rp, &mut msg);
+            assert_eq!(r, crate::grants::EFAULT_DST);
         }
     }
 
