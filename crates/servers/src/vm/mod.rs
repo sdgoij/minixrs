@@ -1736,6 +1736,37 @@ fn vmfd_is_referenced(dev: u32, ino: u32, fd: i32, exclude_ep: i32) -> bool {
     referenced
 }
 
+/// Send a VMVFSREQ_FDCLOSE to VFS without waiting for the reply.
+///
+/// Matching C `fdref.c` fdref_deref ("asynchronously close the fd in VFS ...
+/// a close failing, although unexpected, isn't a problem") — and required
+/// for correctness: a blocking sendrec here deadlocks during exec, where
+/// VFS is itself blocked in a SENDREC to VM (VM_EXEC_NEWMEM) and would
+/// consume the FDCLOSE as the wrong reply to its own pending request. VFS
+/// processes the async close when it returns to its main loop; the late
+/// VM_VFS_REPLY is ignored by do_vfs_reply (SUSPEND).
+#[cfg(target_os = "minix")]
+fn fdclose_async(fd: i32) {
+    let mut msg = [0u8; 64];
+    msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
+    msg[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4]
+        .copy_from_slice(&(arch_common::com::VMVFSREQ_FDCLOSE as i32).to_le_bytes());
+    msg[VMCALL_FD_OFF..VMCALL_FD_OFF + 4].copy_from_slice(&fd.to_le_bytes());
+    // reqid 0: the reply is ignored (do_vfs_reply -> SUSPEND).
+    msg[VMCALL_ENDPOINT_OFF..VMCALL_ENDPOINT_OFF + 4]
+        .copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+    let _ = unsafe {
+        minix_rt::asynsend3(
+            arch_common::com::VFS_PROC_NR,
+            msg.as_ptr(),
+            arch_common::ipc::AMF_NOREPLY,
+        )
+    };
+}
+
+#[cfg(not(target_os = "minix"))]
+fn fdclose_async(_fd: i32) {}
+
 /// Close a VM file descriptor (FDCLOSE) once no region in any process other
 /// than `exclude_ep` references its (dev, ino, fd) — a lightweight fdref:
 /// fork clones regions verbatim, so the same vmfd is shared until the last
@@ -1748,16 +1779,7 @@ fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32, exclude_ep: i32) {
         return;
     }
     if !vmfd_is_referenced(dev, ino, fd, exclude_ep) {
-        let mut reply = [0u8; 64];
-        let _ = vfs_request_sync(
-            arch_common::com::VMVFSREQ_FDCLOSE as i32,
-            fd,
-            arch_common::com::VFS_PROC_NR,
-            0,
-            0,
-            0,
-            &mut reply,
-        );
+        fdclose_async(fd);
     }
 }
 

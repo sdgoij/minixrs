@@ -18,6 +18,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/ln", "ln"),
     ("/bin/chmod", "chmod"),
     ("/bin/id", "id"),
+    ("/bin/su", "su"),
     ("/bin/sync", "sync"),
     ("/bin/ping", "ping"),
     ("/bin/udp", "udp"),
@@ -75,6 +76,26 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/virtio_net", "virtio_net"),
     ("/sbin/net", "net"),
     ("/sbin/devman", "devman"),
+];
+
+/// Root-filesystem data files baked into the minixfs image: destination
+/// path, content, mode, uid, gid (binaries come from [`BOOT_BINS`]).
+///
+/// The test user's password field is the `$5$` demo scheme
+/// (`sha256(salt || password)` hex, see `minix-std/src/passwd.rs`):
+/// `sha256("minix" || "test123")`.
+pub const BOOT_FILES: &[(&str, &[u8], u16, u16, u16)] = &[
+    (
+        "/etc/passwd",
+        b"root::0:0:root:/:/bin/sh\n\
+test:$5$minix$ccc32ce88881621a7b1b6bc05c4880ad85c63114ccda648b1f23b5afe4a21ab5:1000:1000:test user:/:/bin/sh\n",
+        0o644,
+        0,
+        0,
+    ),
+    // Root-owned 0600 file for the permission-enforcement probe: the
+    // `test` user must be denied, root must be allowed.
+    ("/etc/secret", b"top secret\n", 0o600, 0, 0),
 ];
 
 /// Device nodes to create in the initramfs: (path, mode, major, minor).

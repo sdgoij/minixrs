@@ -741,6 +741,138 @@ fn fmt_dec(n: i32, buf: &mut [u8]) -> usize {
     s.len()
 }
 
+/// su — switch user: verify the password against /etc/passwd, then
+/// setuid/setgid and exec the user's shell.
+///
+/// Password entry with an empty passwd field needs no password. The `$5$`
+/// hash scheme (sha256(salt||password)) is a documented stand-in for
+/// crypt(3). While reading the password, tty echo is disabled via termios
+/// (TIOCSETA with ECHO cleared) and restored afterwards.
+pub fn su(args: &[&str]) -> i32 {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = args;
+        0
+    }
+    #[cfg(target_os = "minix")]
+    {
+        let target = if args.len() > 1 { args[1] } else { "root" };
+        let mut passwd_buf = [0u8; 2048];
+        let n = match unsafe { minix_std::passwd::read_passwd(&mut passwd_buf) } {
+            Ok(n) => n,
+            Err(e) => {
+                write_err(b"su: cannot read /etc/passwd: ");
+                write_err(errstr(e.0));
+                write_err(b"\n");
+                return 1;
+            }
+        };
+        let entry = match minix_std::passwd::find_passwd(&passwd_buf[..n], target.as_bytes()) {
+            Some(e) => e,
+            None => {
+                write_err(b"su: unknown user: ");
+                write_err(target.as_bytes());
+                write_err(b"\n");
+                return 1;
+            }
+        };
+        if !entry.passwd.is_empty() {
+            write_err(b"Password: ");
+            // Disable tty echo while reading the password (termios ECHO
+            // off), then restore it before exec. If the termios dance
+            // fails, fall back to reading with echo rather than refusing.
+            let mut saved = minix_std::termios::Termios::zeroed();
+            let termios_ok = unsafe {
+                minix_std::termios::tcgetattr(0, &mut saved).is_ok() && {
+                    let mut noecho = saved;
+                    noecho.c_lflag &= !minix_std::termios::ECHO;
+                    minix_std::termios::tcsetattr(0, minix_std::termios::TIOCSETA, &noecho).is_ok()
+                }
+            };
+            let mut pw_buf = [0u8; 64];
+            let pw_len = read_line_stdin(&mut pw_buf);
+            if termios_ok {
+                // Best-effort restore: nothing actionable if it fails, and
+                // the exec path is next either way.
+                let _ = unsafe {
+                    minix_std::termios::tcsetattr(0, minix_std::termios::TIOCSETA, &saved)
+                };
+            }
+            if !minix_std::passwd::passwd_matches(entry.passwd, &pw_buf[..pw_len]) {
+                write_err(b"\nsu: incorrect password\n");
+                return 1;
+            }
+            write_err(b"\n");
+        }
+        // Drop the group BEFORE the uid: after setuid(uid) the effective
+        // uid is no longer root, so the J1 setgid gate (effuid == SUPER_USER
+        // or target == realgid) would reject it. C su does the same order.
+        if let Err(e) = minix_std::process::setgid(entry.gid as i32) {
+            write_err(b"su: setgid: ");
+            write_err(errstr(e.0));
+            write_err(b"\n");
+            return 1;
+        }
+        if let Err(e) = minix_std::process::setuid(entry.uid as i32) {
+            write_err(b"su: setuid: ");
+            write_err(errstr(e.0));
+            write_err(b"\n");
+            return 1;
+        }
+        // Exec the user's shell.
+        let shell = if entry.shell.is_empty() {
+            b"/bin/sh"
+        } else {
+            entry.shell
+        };
+        let mut path = [0u8; 64];
+        let path_len = shell.len().min(path.len() - 1);
+        path[..path_len].copy_from_slice(&shell[..path_len]);
+        path[path_len] = 0;
+        let argv: [*const u8; 2] = [path.as_ptr(), core::ptr::null()];
+        let r = unsafe {
+            minix_rt::execve(
+                path.as_ptr(),
+                path_len + 1,
+                argv.as_ptr(),
+                core::ptr::null(),
+            )
+        };
+        if r < 0 {
+            write_err(b"su: exec ");
+            write_err(shell);
+            write_err(b": ");
+            write_err(errstr(-r as i32));
+            write_err(b"\n");
+            return 1;
+        }
+        0
+    }
+}
+
+/// Read one line from stdin (fd 0), stripping the trailing newline.
+#[cfg(target_os = "minix")]
+fn read_line_stdin(buf: &mut [u8]) -> usize {
+    let mut total = 0usize;
+    loop {
+        let n = minix_rt::read(0, &mut buf[total..]);
+        if n <= 0 {
+            break;
+        }
+        total += n as usize;
+        if total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
+            break;
+        }
+        if total >= buf.len() {
+            break;
+        }
+    }
+    while total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
+        total -= 1;
+    }
+    total
+}
+
 /// sync — flush cached filesystem writes to disk.
 pub fn sync(_args: &[&str]) -> i32 {
     #[cfg(target_os = "minix")]

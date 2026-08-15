@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::manifest::DEVICES;
+use crate::manifest::{self, DEVICES};
 
 pub const SUPER_MAGIC_V3: u16 = 0x4D5A;
 pub const BLOCK_SIZE: usize = 4096;
@@ -218,6 +218,19 @@ impl MinixFs {
 
     /// Add a regular file to `dir_zone`; returns its inode number.
     pub fn add_file(&mut self, dir_zone: u32, name: &str, data: &[u8]) -> u32 {
+        self.add_file_meta(dir_zone, name, data, I_REGULAR | RWX_ALL, 0, 0)
+    }
+
+    /// Add a regular file with explicit mode/owner.
+    pub fn add_file_meta(
+        &mut self,
+        dir_zone: u32,
+        name: &str,
+        data: &[u8],
+        mode: u16,
+        uid: u16,
+        gid: u16,
+    ) -> u32 {
         let zones_needed = data.len().div_ceil(self.zone_size());
         let mut zones = Vec::with_capacity(zones_needed);
         for i in 0..zones_needed {
@@ -228,9 +241,11 @@ impl MinixFs {
             zones.push(z);
         }
 
-        let ino = self.alloc_inode(I_REGULAR | RWX_ALL, data.len() as u32);
+        let ino = self.alloc_inode(mode, data.len() as u32);
         let idx = (ino - 1) as usize;
         if idx < self.inode_table.len() {
+            self.inode_table[idx].d2_uid = uid as i16;
+            self.inode_table[idx].d2_gid = gid;
             // Zone map: 7 direct zones, then single/double-indirect blocks
             // (zone_size/4 = 1024 entries each). MFS read_map resolves
             // i_ndzones=7 direct + i_nindirs indirect + nindirs^2
@@ -454,7 +469,7 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let root_zone = fs.create_directory(ROOT_INODE, ROOT_INODE);
     let bin_zone = fs.add_directory(root_zone, "bin");
     let sbin_zone = fs.add_directory(root_zone, "sbin");
-    let _etc_ino = fs.add_directory(root_zone, "etc");
+    let etc_zone = fs.add_directory(root_zone, "etc");
     let _tmp_ino = fs.add_directory(root_zone, "tmp");
     let dev_zone = fs.add_directory(root_zone, "dev");
 
@@ -470,10 +485,23 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             bin_zone
         } else if dest.starts_with("/sbin/") {
             sbin_zone
+        } else if dest.starts_with("/etc/") {
+            etc_zone
         } else {
             root_zone
         };
         fs.add_file(parent_zone, bin_name, data);
+    }
+
+    // Data files (passwd, root-only secret) with explicit mode/owner.
+    for &(dest, data, mode, uid, gid) in manifest::BOOT_FILES {
+        let name = Path::new(dest).file_name().unwrap().to_str().unwrap();
+        let parent_zone = if dest.starts_with("/etc/") {
+            etc_zone
+        } else {
+            root_zone
+        };
+        fs.add_file_meta(parent_zone, name, data, mode, uid, gid);
     }
 
     // Character-device nodes (major << 16 | minor, matching VFS's cdev
@@ -515,7 +543,10 @@ mod tests {
         let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
-        let console_ino = 10usize; // root, bin, sbin, etc, tmp, dev + 3 devices
+        // Inode numbering: root(1) bin(2) sbin(3) etc(4) tmp(5) dev(6),
+        // then BOOT_FILES passwd(7) secret(8), then devices: tty00(9)
+        // tty01(10) null(11) console(12) ip(13) udp(14) tcp(15).
+        let console_ino = 12usize;
         let off = itable_off + (console_ino - 1) * INODE_SIZE;
         let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
         let dev = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
@@ -528,7 +559,7 @@ mod tests {
         assert_eq!(dev, 5u32 << 16, "console major 5 minor 0");
 
         // /dev/tty00: major 3 minor 0.
-        let tty00_off = itable_off + 6 * INODE_SIZE;
+        let tty00_off = itable_off + 8 * INODE_SIZE;
         let tty00_dev =
             u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
         assert_eq!(tty00_dev, 3u32 << 16);
@@ -623,9 +654,10 @@ mod tests {
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
-        // empty image has 6 dirs (root, bin, sbin, etc, tmp, dev) + 7
-        // devices (tty00, tty01, null, console, ip, udp, tcp) = 13 inodes.
-        let n_inodes = 13usize;
+        // empty image has 6 dirs (root, bin, sbin, etc, tmp, dev) + 2 data
+        // files (passwd, secret) + 7 devices (tty00, tty01, null, console,
+        // ip, udp, tcp) = 15 inodes.
+        let n_inodes = 15usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -633,12 +665,8 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 14) is free — the first allocatable inode.
-        assert_eq!(
-            (imap[14 / 8] >> (14 % 8)) & 1,
-            0,
-            "inode 14 must be free for the first create"
-        );
+        // And the next bit (inode 16) is free — the first allocatable inode.
+        assert_eq!(imap[2] & 1, 0, "inode 16 must be free for the first create");
         let _ = itable_off;
     }
 }

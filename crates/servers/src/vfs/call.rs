@@ -179,6 +179,25 @@ pub fn do_open() -> i32 {
         return ENOENT;
     }
 
+    // Compute access mode bits (R_BIT/W_BIT — the same bits forbidden()
+    // takes) and check the caller's permission before opening.
+    let mode_bits = match flags & 0o3 {
+        0 => crate::vfs::protect::R_BIT, // O_RDONLY
+        1 => crate::vfs::protect::W_BIT, // O_WRONLY
+        2 => crate::vfs::protect::R_BIT | crate::vfs::protect::W_BIT, // O_RDWR
+        _ => {
+            unsafe { mount::put_vnode(vp) };
+            fp.fp_filp[fd as usize] = -1;
+            return EINVAL;
+        }
+    };
+    let r = crate::vfs::protect::forbidden(fp, unsafe { &*vp }, mode_bits, false);
+    if r != OK {
+        unsafe { mount::put_vnode(vp) };
+        fp.fp_filp[fd as usize] = -1;
+        return r;
+    }
+
     // Character devices: route the open to the registered driver before
     // wiring a filp. The filp still references the device vnode so that
     // close/dup/fcntl behave normally; reads, writes and close dispatch on
@@ -204,18 +223,6 @@ pub fn do_open() -> i32 {
         fp.fp_filp[fd as usize] = -1;
         return filp_idx;
     }
-
-    // Compute access mode bits for the filp.
-    let mode_bits = match flags & 0o3 {
-        0 => 1, // O_RDONLY -> R_BIT
-        1 => 2, // O_WRONLY -> W_BIT
-        2 => 3, // O_RDWR -> R_BIT|W_BIT
-        _ => {
-            unsafe { mount::put_vnode(vp) };
-            fp.fp_filp[fd as usize] = -1;
-            return EINVAL;
-        }
-    };
 
     // Set up the filp and fd.
     unsafe {
@@ -375,7 +382,7 @@ pub fn do_creat() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_count = 1;
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
         (*filp_arr.add(filp_idx as usize)).filp_flags = open_flags;
-        (*filp_arr.add(filp_idx as usize)).filp_mode = 2; // W_BIT
+        (*filp_arr.add(filp_idx as usize)).filp_mode = crate::vfs::protect::W_BIT;
     }
     fp.fp_filp[fd as usize] = filp_idx;
     unsafe { mount::put_vnode(vp) };
@@ -463,7 +470,7 @@ pub fn do_read() -> i32 {
     unsafe {
         let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
         let filp = &mut *filp_arr.add(filp_idx as usize);
-        if (filp.filp_mode & 1) == 0 {
+        if (filp.filp_mode & crate::vfs::protect::R_BIT) == 0 {
             return EBADF;
         }
         let vp = filp.filp_vno;
@@ -528,7 +535,7 @@ pub fn do_write() -> i32 {
     unsafe {
         let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
         let filp = &mut *filp_arr.add(filp_idx as usize);
-        if (filp.filp_mode & 2) == 0 {
+        if (filp.filp_mode & crate::vfs::protect::W_BIT) == 0 {
             return EBADF;
         }
         let vp = filp.filp_vno;
@@ -684,13 +691,13 @@ pub fn do_pipe2() -> i32 {
     // Read end (fd0)
     unsafe {
         (*filp_arr.add(filp0 as usize)).filp_pipe_ino = pipe_ino;
-        (*filp_arr.add(filp0 as usize)).filp_mode = 1; // R_BIT
+        (*filp_arr.add(filp0 as usize)).filp_mode = crate::vfs::protect::R_BIT;
         (*filp_arr.add(filp0 as usize)).filp_vno = vp;
     }
     // Write end (fd1)
     unsafe {
         (*filp_arr.add(filp1 as usize)).filp_pipe_ino = pipe_ino;
-        (*filp_arr.add(filp1 as usize)).filp_mode = 2; // W_BIT
+        (*filp_arr.add(filp1 as usize)).filp_mode = crate::vfs::protect::W_BIT;
         (*filp_arr.add(filp1 as usize)).filp_vno = vp;
     }
 
@@ -2443,9 +2450,16 @@ pub fn do_vm_call() -> i32 {
     vm_call_reply(ep, result, req_id)
 }
 
-/// Fill the VM_VFS_REPLY message and return its m_type so the generic
-/// `reply()` path sends it. The result code goes in VMV_RESULT; the fixed
-/// m_type (written at byte 4 both here and by `reply()`) is VM_VFS_REPLY.
+/// Fill the VM_VFS_REPLY message, send it to VM asynchronously, and return
+/// SUSPEND so the generic `reply()` path does not also send a blocking
+/// reply.
+///
+/// Matching C `misc.c do_vm_call` (L461-472): the reply goes out with
+/// `asynsend3` because VM may not be able to receive a blocking send — it
+/// can be mid-fault-resolution, and a blocking SEND here would deadlock the
+/// VM<->VFS pair (observed: VFS blocked SENDING the FDCLOSE reply while VM
+/// handled su's exec'd-image page fault). The result code travels in
+/// VMV_RESULT; the fixed m_type (written at byte 4) is VM_VFS_REPLY.
 fn vm_call_reply(ep: i32, result: i32, req_id: u32) -> i32 {
     unsafe {
         let glob_mut = &mut *vfs_global();
@@ -2453,8 +2467,12 @@ fn vm_call_reply(ep: i32, result: i32, req_id: u32) -> i32 {
         glob_mut.fs_m_out[VMV_RESULT_OFF..][..4].copy_from_slice(&result.to_le_bytes());
         glob_mut.fs_m_out[VMV_REQID_OFF..][..4].copy_from_slice(&req_id.to_le_bytes());
         glob_mut.fs_m_out[4..8].copy_from_slice(&VM_VFS_REPLY.to_le_bytes());
+        #[cfg(target_os = "minix")]
+        {
+            minix_rt::asynsend3(arch_common::com::VM_PROC_NR, glob_mut.fs_m_out.as_ptr(), 0);
+        }
     }
-    VM_VFS_REPLY
+    SUSPEND
 }
 
 /// Perform the `getrusage(who, buf)` system call.
@@ -3179,8 +3197,9 @@ mod tests {
         }
         // do_vm_call always replies with the fixed VM_VFS_REPLY type; the
         // result code travels in VMV_RESULT so VM can distinguish a reply
-        // from a new request.
-        assert_eq!(do_vm_call(), VM_VFS_REPLY);
+        // from a new request. The reply itself is sent asynchronously and
+        // the function returns SUSPEND (matching C misc.c do_vm_call).
+        assert_eq!(do_vm_call(), SUSPEND);
         unsafe {
             let glob = vfs_global();
             let out = &(*glob).fs_m_out;

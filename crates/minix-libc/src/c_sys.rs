@@ -874,37 +874,117 @@ pub struct Passwd {
 }
 
 const ENOENT: i32 = 2;
+const ERANGE: i32 = 34;
 
-/// Look up a user by name. Minix has no passwd database: no such user.
+/// Fill a `Passwd` from a parsed entry whose field slices live in `buf`;
+/// NUL-terminates each field in place and points the struct fields at them.
+/// Returns ERANGE when a field ends at the buffer's last byte (no room for
+/// its NUL terminator).
+///
+/// # Safety
+///
+/// `pwd` must be a valid pointer; `buf` must be the buffer the entry's
+/// field slices borrow from, with `buflen` its length.
+#[cfg(target_os = "minix")]
+unsafe fn fill_passwd(
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    entry: &minix_std::passwd::PasswdEntry,
+) -> c_int {
+    let base = buf as usize;
+    unsafe {
+        (*pwd).pw_uid = entry.uid as c_uint;
+        (*pwd).pw_gid = entry.gid as c_uint;
+    }
+    let fields: [(&[u8], *mut *mut c_char); 5] = unsafe {
+        [
+            (entry.name, core::ptr::addr_of_mut!((*pwd).pw_name)),
+            (entry.passwd, core::ptr::addr_of_mut!((*pwd).pw_passwd)),
+            (entry.gecos, core::ptr::addr_of_mut!((*pwd).pw_gecos)),
+            (entry.dir, core::ptr::addr_of_mut!((*pwd).pw_dir)),
+            (entry.shell, core::ptr::addr_of_mut!((*pwd).pw_shell)),
+        ]
+    };
+    for (f, slot) in fields {
+        let off = f.as_ptr() as usize - base;
+        // NUL-terminate the field (overwrites the ':'/'\n' separator).
+        if off + f.len() >= buflen {
+            return ERANGE;
+        }
+        unsafe {
+            *buf.add(off + f.len()) = 0;
+            *slot = buf.add(off);
+        }
+    }
+    0
+}
+
+/// Look up a user by name in /etc/passwd (reentrant POSIX contract).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwnam_r(
-    _name: *const c_char,
-    _pwd: *mut Passwd,
-    _buf: *mut c_char,
-    _buflen: usize,
+    name: *const c_char,
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    buflen: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
-    if result.is_null() {
+    if result.is_null() || pwd.is_null() || buf.is_null() {
         return crate::fail(EINVAL);
     }
     unsafe { *result = core::ptr::null_mut() };
-    crate::fail(ENOENT)
+    if name.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let name_bytes = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    let data = core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen);
+    let n = match unsafe { minix_std::passwd::read_passwd(data) } {
+        Ok(n) => n,
+        Err(e) => return crate::fail(e.0),
+    };
+    let entry = match minix_std::passwd::find_passwd(&data[..n], name_bytes) {
+        Some(e) => e,
+        None => return crate::fail(ENOENT),
+    };
+    let r = unsafe { fill_passwd(pwd, buf, &entry) };
+    if r != 0 {
+        return crate::fail(r);
+    }
+    unsafe { *result = pwd };
+    0
 }
 
-/// Look up a user by uid. Minix has no passwd database: no such user.
+/// Look up a user by uid in /etc/passwd (reentrant POSIX contract).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwuid_r(
-    _uid: c_int,
-    _pwd: *mut Passwd,
-    _buf: *mut c_char,
-    _buflen: usize,
+    uid: c_int,
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    buflen: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
-    if result.is_null() {
+    if result.is_null() || pwd.is_null() || buf.is_null() {
         return crate::fail(EINVAL);
     }
     unsafe { *result = core::ptr::null_mut() };
-    crate::fail(ENOENT)
+    if uid < 0 {
+        return crate::fail(EINVAL);
+    }
+    let data = core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen);
+    let n = match unsafe { minix_std::passwd::read_passwd(data) } {
+        Ok(n) => n,
+        Err(e) => return crate::fail(e.0),
+    };
+    let entry = match minix_std::passwd::find_passwd_uid(&data[..n], uid as u32) {
+        Some(e) => e,
+        None => return crate::fail(ENOENT),
+    };
+    let r = unsafe { fill_passwd(pwd, buf, &entry) };
+    if r != 0 {
+        return crate::fail(r);
+    }
+    unsafe { *result = pwd };
+    0
 }

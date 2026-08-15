@@ -1025,10 +1025,11 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
             if !invalid && flags & AMF_DONE != 0 {
                 continue;
             }
-            r = if invalid { crate::grants::EINVAL } else { OK };
             done = false;
 
-            if r != crate::grants::EINVAL {
+            if invalid {
+                r = crate::grants::EINVAL;
+            } else {
                 // C L1395: the message must be directed at this receiver.
                 if tabent.endpoint != dst_ep {
                     continue;
@@ -1047,6 +1048,7 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
                 // Deliver the message: copy it into p_delivermsg, stamp the
                 // source endpoint, and set DELIVERMSG so the syscall return
                 // path copies it to the destination's user buffer.
+                r = OK;
                 let msg_src = &tabent.msg as *const Message as *const u8;
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());

@@ -13,7 +13,10 @@
 
 pub mod fs;
 pub mod net;
+pub mod passwd;
 pub mod process;
+pub mod sha256;
+pub mod termios;
 pub mod time;
 pub mod vmem;
 
