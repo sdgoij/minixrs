@@ -131,6 +131,16 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         );
     }
 
+    // Register the input server as the /dev/kbd (major 20) character
+    // driver.
+    unsafe {
+        dmap::map_driver(
+            b"input",
+            arch_common::com::INPUT_MAJOR as i32,
+            arch_common::com::INPUT_PROC_NR,
+        );
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();

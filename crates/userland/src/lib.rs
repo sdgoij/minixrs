@@ -112,6 +112,70 @@ pub unsafe fn parse_args<'a>(
     &buf[..count]
 }
 
+/// keytest — poll /dev/kbd for input events and print each as
+/// `key <page> <code> <press>`. Exits after `max_events` events
+/// (default 32); the events stream is the K2 verification channel.
+pub fn keytest(args: &[&str]) -> i32 {
+    keytest_impl(args)
+}
+
+/// The MINIX implementation polls /dev/kbd for input events and prints
+/// each as `key <page> <code> <press>`, exiting after `max_events` events
+/// (default 32).
+#[cfg(target_os = "minix")]
+fn keytest_impl(args: &[&str]) -> i32 {
+    let path = if args.len() > 1 {
+        args[1].as_bytes()
+    } else {
+        b"/dev/kbd"
+    };
+    let max_events: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(32);
+    let fd = match unsafe { minix_std::fs::open(path, minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"keytest: open failed\n");
+            return -1;
+        }
+    };
+    let mut seen = 0u32;
+    let mut buf = [0u8; 16];
+    while seen < max_events {
+        let n = minix_rt::read(fd, &mut buf);
+        if n >= 8 {
+            let n = n as usize;
+            let mut off = 0;
+            while off + 8 <= n && seen < max_events {
+                let page = u16::from_le_bytes([buf[off], buf[off + 1]]);
+                let code = u16::from_le_bytes([buf[off + 2], buf[off + 3]]);
+                let press =
+                    i32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
+                write_out(b"key ");
+                print_dec(page as u32);
+                write_out(b" ");
+                print_dec(code as u32);
+                write_out(b" ");
+                print_dec(press as u32);
+                write_out(b"\n");
+                seen += 1;
+                off += 8;
+            }
+        }
+        // Busy-wait between polls (nanosleep is not wired up yet).
+        for _ in 0..200_000 {
+            core::hint::spin_loop();
+        }
+    }
+    let _ = minix_std::fs::close(fd);
+    0
+}
+
+/// Host stub: no device to poll — exit cleanly.
+#[cfg(not(target_os = "minix"))]
+fn keytest_impl(args: &[&str]) -> i32 {
+    let _ = args;
+    0
+}
+
 /// cat — concatenate files and print to stdout.
 /// With no arguments, reads from stdin (fd 0).
 pub fn cat(args: &[&str]) -> i32 {

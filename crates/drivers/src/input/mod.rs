@@ -6,6 +6,7 @@
 
 pub mod constants;
 pub mod controller;
+pub mod devio;
 pub mod driver;
 pub mod keyboard;
 pub mod mouse;

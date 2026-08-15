@@ -429,6 +429,26 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // next runnable process; in kernel mode it returns via ret.
         arch_x86_64::apic::enable_com1_interrupts();
         arch_x86_64::apic::unmask_serial_irq();
+
+        // 8b. PS/2 keyboard (IRQ 1). The input server registers an IRQ
+        // hook via SYS_IRQCTL and is notified on every key event; the PIC
+        // line is unmasked here (before any keypress can be injected) and
+        // the ISR is a context-switch point like the serial one.
+        unsafe extern "C" fn kbd_callback() {
+            unsafe { kernel::interrupt::irq_handle(1) };
+        }
+        arch_x86_64::apic::set_kbd_isr_handler(kbd_callback);
+        #[cfg(target_os = "minix")]
+        {
+            let kbd_handler_addr = arch_x86_64::apic::kbd_isr_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                arch_x86_64::interrupt::irq_vector(1) as usize,
+                kbd_handler_addr,
+                0, // IST
+                0, // DPL (kernel only)
+            );
+        }
+        arch_x86_64::apic::unmask_kbd_irq();
     }
 
     // 9. Initialize the wall clock: read the CMOS RTC and store the

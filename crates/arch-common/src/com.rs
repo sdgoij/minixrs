@@ -32,9 +32,12 @@ pub const VIRTIO_NET_PROC_NR: Endpoint = 13;
 pub const NET_PROC_NR: Endpoint = 14;
 pub const DEVMAN_PROC_NR: Endpoint = 15;
 pub const FB_PROC_NR: Endpoint = 16;
+pub const INPUT_PROC_NR: Endpoint = 17;
 
 /// Character-device major for the framebuffer driver (/dev/fb).
 pub const FB_MAJOR: u32 = 19;
+/// Character-device major for the PS/2 input driver (/dev/kbd).
+pub const INPUT_MAJOR: u32 = 20;
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;
 

@@ -205,7 +205,7 @@ pub fn endpoint_lookup(ep: i32) -> *mut Proc {
 
 /// Boot-time process descriptor.
 /// Number of boot processes.
-pub const NR_BOOT_PROCS: usize = 22;
+pub const NR_BOOT_PROCS: usize = 23;
 
 /// Boot image entry.
 #[derive(Debug, Clone, Copy)]
@@ -312,6 +312,10 @@ pub static BOOT_IMAGE: [BootImage; NR_BOOT_PROCS] = [
         proc_nr: 16,
         name: "fb",
     }, // FB_PROC_NR
+    BootImage {
+        proc_nr: 17,
+        name: "input",
+    }, // INPUT_PROC_NR
 ];
 
 // Run queue

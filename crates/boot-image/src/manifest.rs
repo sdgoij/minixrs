@@ -26,6 +26,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/tcp", "tcp"),
     ("/bin/tcpserver", "tcpserver"),
     ("/bin/udp_echo", "udp_echo"),
+    // `/bin/keytest` is the PS/2 keyboard event consumer: polls /dev/kbd
+    // and prints each decoded HID event (page, code, press).
+    ("/bin/keytest", "keytest"),
     // `/bin/coreutils` is the uutils multicall binary, built from the
     // coreutils submodule for x86_64 only so far. `just coreutils-x86` builds
     // the `feat_minix` feature set (56 utilities: text tools, checksums,
@@ -78,6 +81,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/net", "net"),
     ("/sbin/devman", "devman"),
     ("/sbin/fb", "fb"),
+    ("/sbin/input", "input"),
 ];
 
 /// Root-filesystem data files baked into the minixfs image: destination
@@ -110,6 +114,7 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/udp", 0o020600, 14, 1),  // char device, major=14 (net), minor=1 — UDP socket
     ("/dev/tcp", 0o020600, 14, 2),  // char device, major=14 (net), minor=2 — TCP socket
     ("/dev/fb", 0o020666, 19, 0),   // char device, major=19 (fb), minor=0
+    ("/dev/kbd", 0o020600, 20, 0),  // char device, major=20 (input), minor=0
 ];
 
 #[cfg(test)]

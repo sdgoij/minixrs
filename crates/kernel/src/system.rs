@@ -403,15 +403,17 @@ const WHOAMI_ENDPT_OFF: usize = 0;
 const WHOAMI_PRIVFLAGS_OFF: usize = 4;
 const WHOAMI_NAME_OFF: usize = 8;
 
-// mess_lsys_krn_sys_irqctl (for do_irqctl):
-//   offset  0: request  (int / i32)
-//   offset  4: vector   (int / i32)
-//   offset  8: policy   (int / i32)
-//   offset 12: hook_id  (int / i32) — also notify_id for SETPOLICY, reply for hook index
-const IRQCTL_REQUEST_OFF: usize = 0;
-const IRQCTL_VECTOR_OFF: usize = 4;
-const IRQCTL_POLICY_OFF: usize = 8;
-const IRQCTL_HOOK_ID_OFF: usize = 12;
+// mess_lsys_krn_sys_irqctl (for do_irqctl): kernel calls carry their
+// arguments in the payload (bytes 0-7 hold the call number + caller
+// endpoint, matching the devio layout):
+//   offset  8: request  (int / i32)
+//   offset 12: vector   (int / i32)
+//   offset 16: policy   (int / i32)
+//   offset 20: hook_id  (int / i32) — also notify_id for SETPOLICY, reply for hook index
+const IRQCTL_REQUEST_OFF: usize = 8;
+const IRQCTL_VECTOR_OFF: usize = 12;
+const IRQCTL_POLICY_OFF: usize = 16;
+const IRQCTL_HOOK_ID_OFF: usize = 20;
 
 // mess_lsys_krn_sys_setalarm (for do_setalarm):
 //   offset  0: exp_time   (u64)

@@ -7,6 +7,8 @@ pub mod devman;
 pub mod ds;
 #[cfg(target_os = "minix")]
 pub mod fb;
+#[cfg(target_os = "minix")]
+pub mod input;
 pub mod ipc;
 pub mod mutex;
 pub mod net;

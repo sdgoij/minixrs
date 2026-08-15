@@ -1168,6 +1168,150 @@ pub unsafe fn unmask_serial_irq() {
     }
 }
 
+// PS/2 keyboard (IRQ 1) interrupt handler
+
+/// Function pointer type for the keyboard interrupt handler.
+pub type KbdIsrFn = unsafe extern "C" fn();
+
+struct KbdIsrCell(UnsafeCell<Option<KbdIsrFn>>);
+unsafe impl Sync for KbdIsrCell {}
+impl KbdIsrCell {
+    const fn new(val: Option<KbdIsrFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<KbdIsrFn> {
+        self.0.get()
+    }
+}
+
+/// Registered keyboard ISR handler. Called by the assembly trampoline.
+#[used]
+static KBD_ISR_HANDLER: KbdIsrCell = KbdIsrCell::new(None);
+
+/// Register the function to call on each PS/2 keyboard interrupt.
+///
+/// # Safety
+///
+/// Must be called before unmasking IRQ 1.
+pub unsafe fn set_kbd_isr_handler(handler: KbdIsrFn) {
+    unsafe {
+        core::ptr::write(KBD_ISR_HANDLER.get(), Some(handler));
+    }
+}
+
+/// Assembly entry point for the PS/2 keyboard interrupt (IRQ 1 → vector
+/// 0x21). Same shape as [`serial_isr_entry`]: calls the registered
+/// `KBD_ISR_HANDLER`, sends EOI to the master PIC, and splits on the
+/// interrupted mode (kernel: restore + ret; user: context switch).
+///
+/// # Safety
+///
+/// Must be installed in the IDT at vector 0x21 with DPL 0.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "minix")]
+pub unsafe extern "C" fn kbd_isr_entry() {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rbx",
+        "push rbp",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+
+        // Call the registered C handler.
+        "lea    rax, [rip + {handler}]",
+        "mov    rax, [rax]",
+        "test   rax, rax",
+        "jz     3f",
+        "call   rax",
+        "3:",
+
+        // Send EOI to master PIC (IRQ 0-7).
+        "mov    al, 0x20",
+        "out    0x20, al",
+
+        // Check CS.RPL with GPRs still pushed — CS is at [rsp+128]
+        // (15 pushes = 120 bytes; CS is the 2nd slot of the CPU frame).
+        "mov    rdx, [rsp + 128]",
+        "and    rdx, 3",
+        "cmp    rdx, 0",
+        "je     1f",                    // kernel mode (RPL=0)
+
+        // User mode — context-switch point, same as the serial ISR.
+        "mov    rdi, rsp",              // frame = ISR frame (15 GPRs + CPU frame)
+        "call   save_timer_context",   // rax = current proc
+        "add    rsp, 160",             // discard 15 GPRs + 40-byte CPU frame
+        "test   rax, rax",
+        "jz     2f",                    // no current proc: halt
+        "mov    r15, rax",             // r15 = current (callee-saved)
+        "call   pick_proc_raw",        // rax = next runnable or null
+        "test   rax, rax",
+        "cmovz  rax, r15",             // rax = next if runnable, else current
+        "mov    r12, rax",             // r12 = effective next (callee-saved)
+        "cmp    rax, r15",
+        "je     4f",                   // switching to the same process: skip
+        "mov    rdi, rax",
+        "call   isr_deliver_msg",
+        "4:",
+        "mov    rdi, r12",
+        "call   set_cpulocal_proc_asm",
+        "mov    rdi, rax",
+        "call   restore",              // never returns
+        "2:",
+        "cli",
+        "hlt",
+        "jmp    2b",
+
+        "1:",
+        "pop    r15",
+        "pop    r14",
+        "pop    r13",
+        "pop    r12",
+        "pop    r11",
+        "pop    r10",
+        "pop    r9",
+        "pop    r8",
+        "pop    rdi",
+        "pop    rsi",
+        "pop    rbp",
+        "pop    rbx",
+        "pop    rdx",
+        "pop    rcx",
+        "pop    rax",
+        "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
+        "push   qword ptr [rsp + 16]",
+        "popfq",
+        "mov    rsp, [rsp + 24]",
+        "push   qword ptr [rsp - 40]",
+        "ret",
+
+        handler = sym KBD_ISR_HANDLER,
+    )
+}
+
+/// Unmask IRQ 1 (PS/2 keyboard) at the PIC master.
+///
+/// # Safety
+///
+/// Must be called in ring 0.
+pub unsafe fn unmask_kbd_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
+        asm::outb(crate::interrupt::PIC_MASTER_DATA, mask & !0x02);
+    }
+}
+
 /// Mask IRQ 4 (COM1) at the PIC master.
 ///
 /// # Safety
