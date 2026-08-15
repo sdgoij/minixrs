@@ -40,6 +40,10 @@ pub struct VirRegion {
     /// or past this are supplied as zero pages (bss tails, holes, beyond
     /// EOF) instead of being read from the file.
     pub file_size: u64,
+    /// For VR_DIRECT regions: physical base of the device mapping
+    /// (page-aligned). Faults map `phys_base + (va - vaddr)` without
+    /// allocation; teardown must not return these frames to the allocator.
+    pub phys_base: u64,
 }
 
 /// Maximum physical pages tracked inline per region.
@@ -87,6 +91,24 @@ impl VirRegion {
             fd: -1,
             file_offset: 0,
             file_size: 0,
+            phys_base: 0,
+        }
+    }
+
+    /// Create a new direct-physical (device memory) region descriptor.
+    pub const fn new_direct(vaddr: u64, length: u64, flags: u32, phys_base: u64) -> Self {
+        Self {
+            vaddr,
+            length,
+            flags,
+            npages: 0,
+            phys_pages: [0u64; MAX_PHYS_PAGES],
+            dev: 0,
+            ino: 0,
+            fd: -1,
+            file_offset: 0,
+            file_size: 0,
+            phys_base,
         }
     }
 
@@ -113,7 +135,16 @@ impl VirRegion {
             fd,
             file_offset,
             file_size,
+            phys_base: 0,
         }
+    }
+
+    /// Physical address backing the page containing `addr` in a VR_DIRECT
+    /// region: the device base plus the in-region offset.
+    pub const fn direct_phys_at(&self, addr: u64) -> u64 {
+        let page_size: u64 = 4096;
+        let page = (addr - self.vaddr) & !(page_size - 1);
+        self.phys_base + page
     }
 
     /// File offset of the page containing `addr` within this file region.
@@ -359,6 +390,24 @@ mod tests {
         assert_eq!(anon.fd, -1);
         assert_eq!(anon.file_offset, 0);
         assert_eq!(anon.file_size, 0);
+    }
+
+    #[test]
+    fn test_region_new_direct_fields() {
+        let r = VirRegion::new_direct(
+            0x1000,
+            0x4000,
+            VR_READABLE | VR_WRITABLE | VR_DIRECT,
+            0xFD00_0000,
+        );
+        assert_eq!(r.phys_base, 0xFD00_0000);
+        assert_eq!(r.flags & VR_DIRECT, VR_DIRECT);
+        assert_eq!(r.fd, -1);
+        // Faulting VA -> device phys: base + in-region page offset.
+        assert_eq!(r.direct_phys_at(0x1000), 0xFD00_0000);
+        assert_eq!(r.direct_phys_at(0x1FFF), 0xFD00_0000);
+        assert_eq!(r.direct_phys_at(0x2000), 0xFD00_1000);
+        assert_eq!(r.direct_phys_at(0x4FFF), 0xFD00_3000);
     }
 
     #[test]

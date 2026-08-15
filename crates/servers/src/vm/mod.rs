@@ -923,6 +923,33 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         }
     };
 
+    // Direct-physical (device memory) region: map the device frame at
+    // phys_base + in-region offset directly — no allocation, no zero-fill,
+    // no PhysBlock reference (the frames belong to the device).
+    if region.flags & region::VR_DIRECT != 0 {
+        let page_size: u64 = 4096;
+        let page_addr = addr & !(page_size - 1);
+        let pa = region.direct_phys_at(page_addr);
+        let mut pt_flags = kernel::pagetable::MAP_USER;
+        if region.flags & region::VR_WRITABLE != 0 {
+            pt_flags |= kernel::pagetable::MAP_WRITE;
+        }
+        if region.flags & region::VR_EXEC != 0 {
+            pt_flags |= kernel::pagetable::MAP_EXEC;
+        }
+        if crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags) == 0 {
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+        } else {
+            sys_kill(ep, SIGSEGV);
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+        }
+        return;
+    }
+
     // File-backed region: demand the page from the file instead of the
     // zero-fill heap path below. The first fault after exec pre-faults the
     // non-executable file regions (rodata/data) so VFS's kernel-mode copies
@@ -1512,25 +1539,31 @@ fn do_munmap(msg: &mut Message) -> i32 {
     }
 
     // Find and remove the region at this address.
+    let mut direct_region = false;
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(ep) {
             // Remove the region from tracking; close a file region's vmfd
             // once no other process's region references the same file.
-            if let Some(removed) = vmp.vm_regions.remove(addr)
-                && removed.flags & region::VR_FILE != 0
-            {
-                fdref_close_if_unused(removed.dev, removed.ino, removed.fd, -1);
+            if let Some(removed) = vmp.vm_regions.remove(addr) {
+                if removed.flags & region::VR_FILE != 0 {
+                    fdref_close_if_unused(removed.dev, removed.ino, removed.fd, -1);
+                }
+                direct_region = removed.flags & region::VR_DIRECT != 0;
             }
         }
     }
 
-    // Return the region's physical pages to the allocator BEFORE unmapping
-    // the PTEs: free_user_range walks the page table to find the frames
-    // (COW-shared frames and shared identity leaves are kept by the walk),
-    // so the entries must still be present when it runs. The unmap loop
-    // below then clears the PTEs so a later fault cannot map a freed frame.
-    unsafe {
-        crate::vm::proc::free_user_range(cr3, addr, addr + len_aligned);
+    if !direct_region {
+        // Return the region's physical pages to the allocator BEFORE unmapping
+        // the PTEs: free_user_range walks the page table to find the frames
+        // (COW-shared frames and shared identity leaves are kept by the walk),
+        // so the entries must still be present when it runs. The unmap loop
+        // below then clears the PTEs so a later fault cannot map a freed frame.
+        // Direct regions are skipped: their frames are device memory, not the
+        // allocator's to reclaim.
+        unsafe {
+            crate::vm::proc::free_user_range(cr3, addr, addr + len_aligned, &[]);
+        }
     }
 
     // Unmap pages from the page table, one at a time via the kernel (ring
@@ -1671,6 +1704,38 @@ const VMV_DEV_OFF: usize = 28;
 const VMV_INO_OFF: usize = 32;
 const VMV_FD_OFF: usize = 40;
 const VMV_SIZE_PAGES_OFF: usize = 48;
+
+// Device-mmap reply fields (FDLOOKUP of a char device): IS_DEVICE (u32,
+// 1 = char device) at a byte range the file reply leaves free, phys/len
+// overlapping dev/ino and the tail (meaningless for the file branch).
+const VMV_ISDEV_OFF: usize = 12;
+const VMV_PHYS_OFF: usize = 28;
+const VMV_LEN_OFF: usize = 56;
+
+/// Parse the device branch of an FDLOOKUP reply: `Some((phys, len))` when
+/// VFS marked the fd a char device, `None` for a regular file. Pure so the
+/// layout is host-testable.
+fn parse_fdlookup_device(reply: &[u8; 64]) -> Option<(u64, u64)> {
+    let is_dev = u32::from_le_bytes(
+        reply[VMV_ISDEV_OFF..VMV_ISDEV_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    ) != 0;
+    if !is_dev {
+        return None;
+    }
+    let phys = u64::from_le_bytes(
+        reply[VMV_PHYS_OFF..VMV_PHYS_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let len = u64::from_le_bytes(
+        reply[VMV_LEN_OFF..VMV_LEN_OFF + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    Some((phys, len))
+}
 
 /// Send a synchronous VMâ†’VFS request (FDLOOKUP/FDCLOSE/FDIO) and wait for
 /// the VM_VFS_REPLY. VM is single-threaded, so blocking inside a handler is
@@ -2012,6 +2077,13 @@ fn do_mmap_file(
     );
     let file_size = size_pages.saturating_mul(PAGE_SIZE);
 
+    // Char device: the FDLOOKUP reply carries the driver's device-memory
+    // physical range (IS_DEVICE set). Build a VR_DIRECT region that maps
+    // the device phys instead of a lazy file region.
+    if let Some((phys, dev_len)) = parse_fdlookup_device(&reply) {
+        return do_mmap_dev(ep, cr3, prot, len_aligned, page_addr, phys, dev_len, msg);
+    }
+
     // Align the file offset down to a page; the caller's view starts
     // file_page_off bytes into the region's first page (C mmap_file).
     let file_off = file_offset.max(0) as u64;
@@ -2091,6 +2163,86 @@ fn do_mmap_file(
     let mapped = page_addr + file_page_off;
     msg.m_payload.m1.m1i1 = (mapped & 0xFFFF_FFFF) as i32;
     msg.m_payload.m1.m1i2 = (mapped >> 32) as i32;
+    OK
+}
+
+/// Device-memory VM_MMAP: create a VR_DIRECT region mapping the driver's
+/// physical range into the requester. The mapping is capped at the device
+/// size and page-aligned; faults map `phys_base + offset` directly with no
+/// allocation, and teardown leaves the device frames alone.
+#[allow(clippy::too_many_arguments)]
+fn do_mmap_dev(
+    ep: i32,
+    cr3: u64,
+    prot: i32,
+    len_aligned: u64,
+    page_addr: u64,
+    phys: u64,
+    dev_len: u64,
+    msg: &mut Message,
+) -> i32 {
+    if phys == 0 || dev_len == 0 || !phys.is_multiple_of(PAGE_SIZE) {
+        return EINVAL;
+    }
+    let map_len = len_aligned.min(dev_len);
+    let end_addr = page_addr + map_len;
+    if end_addr > kernel::pagetable::MAX_USER_ADDRESS || end_addr < page_addr {
+        return EINVAL;
+    }
+
+    let mut flags = region::VR_READABLE | region::VR_DIRECT;
+    if prot & 0x02 != 0 {
+        flags |= region::VR_WRITABLE;
+    }
+    if prot & 0x04 != 0 {
+        flags |= region::VR_EXEC;
+    }
+    let new_r = region::VirRegion::new_direct(page_addr, map_len, flags, phys);
+
+    unsafe {
+        if let Some(vmp) = proc::vmproc_lookup(ep) {
+            // MAP_FIXED semantics: overlapping regions are replaced (the
+            // caller found a hole for non-MAP_FIXED, so none normally
+            // overlap). A replaced file region's vmfd must be closed once
+            // no other process references the file.
+            let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
+                [None; region::MAX_REGIONS];
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i < region::MAX_REGIONS {
+                let overlaps = vmp.vm_regions.regions[i]
+                    .as_ref()
+                    .is_some_and(|r| r.overlaps(&new_r));
+                if overlaps {
+                    if let Some(r) = vmp.vm_regions.regions[i].take()
+                        && n < region::MAX_REGIONS
+                    {
+                        removed[n] = Some(r);
+                        n += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            if vmp.vm_regions.insert(new_r).is_some() {
+                return EAGAIN;
+            }
+            for r in removed[..n].iter().flatten() {
+                if r.flags & region::VR_FILE != 0 {
+                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
+                }
+            }
+        } else {
+            return EINVAL;
+        }
+    }
+
+    // Clear identity PTEs so the device pages fault in through the direct
+    // branch (no-op on tables without a low-window identity copy).
+    let _ = crate::vm::vm_clear_range(cr3, page_addr, map_len / PAGE_SIZE);
+
+    msg.m_payload.m1.m1i1 = (page_addr & 0xFFFF_FFFF) as i32;
+    msg.m_payload.m1.m1i2 = (page_addr >> 32) as i32;
     OK
 }
 
@@ -2872,6 +3024,44 @@ mod tests {
         VM_UNMAP_PHYS,
     };
     use arch_common::types::Endpoint;
+
+    #[test]
+    fn test_parse_fdlookup_device() {
+        // Regular-file reply (IS_DEVICE = 0): None.
+        let mut reply = [0u8; 64];
+        reply[VMV_ISDEV_OFF..VMV_ISDEV_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+        reply[VMV_FD_OFF..VMV_FD_OFF + 8].copy_from_slice(&5i64.to_le_bytes());
+        assert!(parse_fdlookup_device(&reply).is_none());
+
+        // Char-device reply: Some((phys, len)).
+        let mut reply = [0u8; 64];
+        reply[VMV_ISDEV_OFF..VMV_ISDEV_OFF + 4].copy_from_slice(&1u32.to_le_bytes());
+        reply[VMV_PHYS_OFF..VMV_PHYS_OFF + 8].copy_from_slice(&0xFD00_0000u64.to_le_bytes());
+        reply[VMV_LEN_OFF..VMV_LEN_OFF + 8].copy_from_slice(&0x100_0000u64.to_le_bytes());
+        assert_eq!(
+            parse_fdlookup_device(&reply),
+            Some((0xFD00_0000, 0x100_0000))
+        );
+    }
+
+    #[test]
+    fn test_do_mmap_dev_rejects_bad_ranges() {
+        let mut msg = arch_common::ipc::Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // Unguarded phys / zero device length / unaligned phys.
+        assert_eq!(do_mmap_dev(0, 0, 0x3, 4096, 0x1000, 0, 0, &mut msg), EINVAL);
+        assert_eq!(
+            do_mmap_dev(0, 0, 0x3, 4096, 0x1000, 0xFD00_0000, 0, &mut msg),
+            EINVAL
+        );
+        assert_eq!(
+            do_mmap_dev(0, 0, 0x3, 4096, 0x1000, 0xFD00_0001, 4096, &mut msg),
+            EINVAL
+        );
+    }
 
     #[test]
     fn test_call_number_in_range() {

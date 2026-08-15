@@ -570,6 +570,7 @@ pub const CDEV_WRITE: u32 = CDEV_RQ_BASE + 3;
 pub const CDEV_IOCTL: u32 = CDEV_RQ_BASE + 4;
 pub const CDEV_CANCEL: u32 = CDEV_RQ_BASE + 5;
 pub const CDEV_SELECT: u32 = CDEV_RQ_BASE + 6;
+pub const CDEV_MAP: u32 = CDEV_RQ_BASE + 7;
 
 pub const CDEV_REPLY: u32 = CDEV_RS_BASE;
 pub const CDEV_SEL1_REPLY: u32 = CDEV_RS_BASE + 1;
@@ -825,6 +826,7 @@ mod tests {
         assert_eq!(CDEV_RQ_BASE, 0x400);
         assert_eq!(CDEV_OPEN, 0x400);
         assert_eq!(CDEV_SELECT, 0x406);
+        assert_eq!(CDEV_MAP, 0x407);
         assert_eq!(CDEV_SEL2_REPLY, 0x482);
     }
 

@@ -2355,9 +2355,11 @@ pub fn do_vm_call() -> i32 {
 
     let result = match req {
         VMVFSREQ_FDLOOKUP => {
-            // Look up `req_fd` in the referenced process's fd table and dup
-            // it into VFS's own fproc (the vmfd), so later FDIO/FDCLOSE
-            // requests can resolve the file from VFS's own fd table alone.
+            // Look up `req_fd` in the referenced process's fd table. For a
+            // regular file it is dup'd into VFS's own fproc (the vmfd), so
+            // later FDIO/FDCLOSE requests resolve the file from VFS's own
+            // fd table alone; for a char device the driver's physical
+            // range is fetched instead (no file to read, no vmfd).
             let slot = crate::vfs::misc::endpoint_to_slot(ep);
             let slot = match slot {
                 Some(s) => s,
@@ -2366,32 +2368,56 @@ pub fn do_vm_call() -> i32 {
             unsafe {
                 let fproc_arr = core::ptr::addr_of_mut!((*vfs_global()).fproc) as *mut Fproc;
                 let rfp = &mut *fproc_arr.add(slot);
-                let mut vmfd = 0i32;
-                let r = crate::vfs::misc::dupvm(rfp, req_fd, &mut vmfd);
-                if r != OK {
-                    return vm_call_reply(ep, r, req_id);
+                if req_fd < 0 || (req_fd as usize) >= OPEN_MAX {
+                    return vm_call_reply(ep, EBADF, req_id);
                 }
-
                 let filp_idx = rfp.fp_filp[req_fd as usize];
+                if filp_idx < 0 {
+                    return vm_call_reply(ep, EBADF, req_id);
+                }
                 let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
                 let filp = &*filp_arr.add(filp_idx as usize);
                 let vp = filp.filp_vno;
-
+                if vp.is_null() {
+                    return vm_call_reply(ep, EBADF, req_id);
+                }
+                let mode = (*vp).v_mode;
                 let glob_mut = &mut *vfs_global();
-                // VMV_FD carries the vmfd; VMV_DEV/INO/SIZE_PAGES describe the
-                // backing file. Only regular files are supported (dupvm
-                // rejects block devices and non-files).
-                glob_mut.fs_m_out[VMV_FD_OFF..][..8].copy_from_slice(&(vmfd as u64).to_le_bytes());
-                glob_mut.fs_m_out[VMV_DEV_OFF..][..4].copy_from_slice(&(*vp).v_dev.to_le_bytes());
-                glob_mut.fs_m_out[VMV_INO_OFF..][..8]
-                    .copy_from_slice(&((*vp).v_inode_nr as u64).to_le_bytes());
-                let size_pages = if (*vp).v_size > 0 {
-                    ((*vp).v_size as u64).div_ceil(4096)
+                if (mode & 0o170000) == 0o020000 {
+                    // Char device: ask the driver for its device-memory
+                    // physical range (dmap `map` hook). The reply carries
+                    // IS_DEVICE + dev + phys + len; VM builds a VR_DIRECT
+                    // region instead of a file region.
+                    let dev = (*vp).v_dev;
+                    let (r, phys, len) = crate::vfs::device::cdev_map_phys(dev);
+                    if r != OK {
+                        return vm_call_reply(ep, r, req_id);
+                    }
+                    vm_call_reply_device(&mut glob_mut.fs_m_out, dev, phys, len);
                 } else {
-                    0
-                };
-                glob_mut.fs_m_out[VMV_SIZE_PAGES_OFF..][..8]
-                    .copy_from_slice(&size_pages.to_le_bytes());
+                    let mut vmfd = 0i32;
+                    let r = crate::vfs::misc::dupvm(rfp, req_fd, &mut vmfd);
+                    if r != OK {
+                        return vm_call_reply(ep, r, req_id);
+                    }
+                    // VMV_FD carries the vmfd; VMV_DEV/INO/SIZE_PAGES describe the
+                    // backing file. Only regular files are supported (dupvm
+                    // rejects block devices and non-files).
+                    glob_mut.fs_m_out[VMV_FD_OFF..][..8]
+                        .copy_from_slice(&(vmfd as u64).to_le_bytes());
+                    glob_mut.fs_m_out[VMV_DEV_OFF..][..4]
+                        .copy_from_slice(&(*vp).v_dev.to_le_bytes());
+                    glob_mut.fs_m_out[VMV_INO_OFF..][..8]
+                        .copy_from_slice(&((*vp).v_inode_nr as u64).to_le_bytes());
+                    let size_pages = if (*vp).v_size > 0 {
+                        ((*vp).v_size as u64).div_ceil(4096)
+                    } else {
+                        0
+                    };
+                    glob_mut.fs_m_out[VMV_SIZE_PAGES_OFF..][..8]
+                        .copy_from_slice(&size_pages.to_le_bytes());
+                    glob_mut.fs_m_out[VMV_ISDEV_OFF..][..4].copy_from_slice(&0u32.to_le_bytes());
+                }
             }
             OK
         }
@@ -2464,6 +2490,17 @@ pub fn do_vm_call() -> i32 {
     };
 
     vm_call_reply(ep, result, req_id)
+}
+
+/// Fill the FDLOOKUP reply for a char device: IS_DEVICE=1, the device
+/// number, and the driver's physical range. Pure so the reply layout is
+/// host-testable; VM reads these fields only when IS_DEVICE is set.
+pub fn vm_call_reply_device(out: &mut [u8; 64], dev: u32, phys: u64, len: u64) {
+    out[VMV_ISDEV_OFF..VMV_ISDEV_OFF + 4].copy_from_slice(&1u32.to_le_bytes());
+    out[VMV_DEV_OFF..VMV_DEV_OFF + 4].copy_from_slice(&dev.to_le_bytes());
+    out[VMV_PHYS_OFF..VMV_PHYS_OFF + 8].copy_from_slice(&phys.to_le_bytes());
+    out[VMV_LEN_OFF..VMV_LEN_OFF + 8].copy_from_slice(&len.to_le_bytes());
+    out[VMV_FD_OFF..VMV_FD_OFF + 8].copy_from_slice(&(-1i64).to_le_bytes());
 }
 
 /// Fill the VM_VFS_REPLY message, send it to VM asynchronously, and return
@@ -3201,6 +3238,61 @@ mod tests {
             fs_m_in[8..12].copy_from_slice(&0i32.to_le_bytes()); // flags = 0
         }
         assert_eq!(do_pipe2(), ENOSYS);
+    }
+
+    #[test]
+    fn test_vm_call_reply_device_layout() {
+        // The char-device FDLOOKUP reply: IS_DEVICE @ 12, phys @ 28 (u64,
+        // overlapping dev/ino which are meaningless for devices), len @ 56,
+        // vmfd = -1.
+        let mut out = [0u8; 64];
+        vm_call_reply_device(&mut out, 19 << 16, 0xFD00_0000, 0x100_0000);
+        let is_dev = u32::from_le_bytes(out[VMV_ISDEV_OFF..VMV_ISDEV_OFF + 4].try_into().unwrap());
+        assert_eq!(is_dev, 1);
+        let phys = u64::from_le_bytes(out[VMV_PHYS_OFF..VMV_PHYS_OFF + 8].try_into().unwrap());
+        assert_eq!(phys, 0xFD00_0000);
+        let len = u64::from_le_bytes(out[VMV_LEN_OFF..VMV_LEN_OFF + 8].try_into().unwrap());
+        assert_eq!(len, 0x100_0000);
+        let vmfd = i64::from_le_bytes(out[VMV_FD_OFF..VMV_FD_OFF + 8].try_into().unwrap());
+        assert_eq!(vmfd, -1);
+    }
+
+    #[test]
+    fn test_vm_call_fdlookup_char_device_routes_to_driver() {
+        unsafe {
+            setup();
+            crate::vfs::dmap::init_dmap();
+            let glob = vfs_global();
+            // filp 0 → vnode 0 = a char device (/dev/fb, major 19).
+            let vnode_arr = core::ptr::addr_of_mut!((*glob).vnode) as *mut Vnode;
+            let vp = &mut *vnode_arr.add(0);
+            vp.v_mode = 0o020000; // char special
+            vp.v_dev = 19u32 << 16;
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let filp = &mut *filp_arr.add(0);
+            filp.filp_vno = vp;
+            let fproc_arr = core::ptr::addr_of_mut!((*glob).fproc) as *mut Fproc;
+            let fp = &mut *fproc_arr.add(0);
+            fp.fp_filp[0] = 0; // fd 0 → filp 0
+
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4]
+                .copy_from_slice(&VMVFSREQ_FDLOOKUP.to_le_bytes());
+            fs_m_in[VMCALL_FD_OFF..VMCALL_FD_OFF + 4].copy_from_slice(&0i32.to_le_bytes());
+            fs_m_in[VMCALL_ENDPOINT_OFF..VMCALL_ENDPOINT_OFF + 4]
+                .copy_from_slice(&0i32.to_le_bytes());
+        }
+        assert_eq!(do_vm_call(), SUSPEND);
+        unsafe {
+            let glob = vfs_global();
+            let out = &(*glob).fs_m_out;
+            let result =
+                i32::from_le_bytes(out[VMV_RESULT_OFF..VMV_RESULT_OFF + 4].try_into().unwrap());
+            // The device branch is taken (char vnode resolved, not EBADF/
+            // EINVAL); the driver round trip cannot happen on host, so the
+            // dmap lookup finds no driver → ENXIO.
+            assert_eq!(result, ENXIO);
+        }
     }
 
     #[test]

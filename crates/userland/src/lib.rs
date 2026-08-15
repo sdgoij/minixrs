@@ -176,6 +176,129 @@ fn keytest_impl(args: &[&str]) -> i32 {
     0
 }
 
+/// fbmmap — char-device mmap test for /dev/fb: mmap the framebuffer with
+/// MAP_SHARED and draw into it (K3 verification channel).
+///
+/// Subcommands: `paint` fills a 200×200 block at the top-left corner
+/// white and read-backs pixels to prove the mapping is the live
+/// framebuffer; `restore` repaints that block red (the boot test pattern's
+/// left third) so `fb_screendump.py` stays green afterwards.
+pub fn fbmmap(args: &[&str]) -> i32 {
+    fbmmap_impl(args)
+}
+
+/// The MINIX implementation maps /dev/fb and paints/restores the test
+/// block, read-back verifying the mapping is live.
+#[cfg(target_os = "minix")]
+fn fbmmap_impl(args: &[&str]) -> i32 {
+    const XRES: usize = 1024;
+    const PITCH: usize = XRES * 4;
+    const BLOCK: usize = 200;
+    const MAP_LEN: usize = 4 * 1024 * 1024; // covers 1024×768×4
+
+    let sub = args.get(1).copied().unwrap_or("paint");
+    let paint = match sub {
+        "paint" => true,
+        "restore" => false,
+        _ => {
+            write_err(b"fbmmap: usage: fbmmap paint|restore\n");
+            return 1;
+        }
+    };
+    let fd = match unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"fbmmap: open /dev/fb failed\n");
+            return 1;
+        }
+    };
+    let base = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            MAP_LEN,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if base == minix_std::vmem::MAP_FAILED {
+        write_err(b"fbmmap: mmap /dev/fb failed\n");
+        return 1;
+    }
+
+    // Block colour: white when painting, red (the boot pattern's left
+    // third) when restoring. XRGB8888 LE → bytes B,G,R,X.
+    let px: [u8; 4] = if paint {
+        [0xFF, 0xFF, 0xFF, 0]
+    } else {
+        [0, 0, 0xFF, 0]
+    };
+    for y in 0..BLOCK {
+        for x in 0..BLOCK {
+            let off = (y * PITCH + x * 4) as isize;
+            unsafe {
+                core::ptr::copy_nonoverlapping(px.as_ptr(), base.offset(off), 4);
+            }
+        }
+    }
+
+    // Read back: the block pixel must match, and a point outside the
+    // block must still show the boot pattern (green middle / blue right)
+    // — proving the mapping aliases the live framebuffer.
+    let mut ok = true;
+    let mut got = [0u8; 4];
+    for &(x, y) in &[(100usize, 100usize), (199, 199)] {
+        let off = (y * PITCH + x * 4) as isize;
+        unsafe {
+            core::ptr::copy_nonoverlapping(base.offset(off), got.as_mut_ptr(), 4);
+        }
+        if got != px {
+            write_err(b"fbmmap: block pixel mismatch\n");
+            ok = false;
+        }
+    }
+    // Outside the block: green at (512,100), blue at (1023,767).
+    let expect_green = [0u8, 0xFF, 0, 0];
+    let expect_blue = [0xFFu8, 0, 0, 0];
+    let off = (100 * PITCH + 512 * 4) as isize;
+    unsafe {
+        core::ptr::copy_nonoverlapping(base.offset(off), got.as_mut_ptr(), 4);
+    }
+    if got != expect_green {
+        write_err(b"fbmmap: green sample mismatch\n");
+        ok = false;
+    }
+    let off = (767 * PITCH + 1023 * 4) as isize;
+    unsafe {
+        core::ptr::copy_nonoverlapping(base.offset(off), got.as_mut_ptr(), 4);
+    }
+    if got != expect_blue {
+        write_err(b"fbmmap: blue sample mismatch\n");
+        ok = false;
+    }
+
+    let _ = minix_std::fs::close(fd);
+    if ok {
+        write_out(if paint {
+            b"fbmmap: paint ok\n"
+        } else {
+            b"fbmmap: restore ok\n"
+        });
+        0
+    } else {
+        write_err(b"fbmmap: FAILED\n");
+        1
+    }
+}
+
+/// Host stub: no framebuffer to map — exit cleanly.
+#[cfg(not(target_os = "minix"))]
+fn fbmmap_impl(args: &[&str]) -> i32 {
+    let _ = args;
+    0
+}
+
 /// cat — concatenate files and print to stdout.
 /// With no arguments, reads from stdin (fd 0).
 pub fn cat(args: &[&str]) -> i32 {

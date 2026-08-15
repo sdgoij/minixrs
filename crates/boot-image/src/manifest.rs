@@ -61,6 +61,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // (exercising VM's FDIO demand path), and checks private writes do not
     // modify the file.
     ("/bin/mmapfd", "mmapfd"),
+    // `/bin/fbmmap` is the char-device mmap test: maps /dev/fb with
+    // MAP_SHARED and draws (K3). `paint`/`restore` subcommands keep
+    // fb_screendump.py green after a probe run.
+    ("/bin/fbmmap", "fbmmap"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

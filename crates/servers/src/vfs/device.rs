@@ -12,6 +12,7 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::request;
 use crate::vfs::types::*;
 
+use arch_common::com::CDEV_MAP;
 use arch_common::safecopies::{CPF_READ, CPF_WRITE, GRANT_INVALID};
 
 use core::ptr::addr_of_mut;
@@ -400,6 +401,51 @@ pub fn cdev_select(dev: u32, ops: i32) -> i32 {
     unsafe { request::fs_sendrec(drv_e, &mut msg) }
 }
 
+/// Ask a character driver for the physical range of its device memory
+/// (mmap of a char device — the port's equivalent of the C dmap `map`
+/// hook). Sends `CDEV_MAP`; the driver replies with the physical base
+/// and length in the payload (u64 each).
+///
+/// Returns `(status, phys, len)`; on error phys/len are 0.
+pub fn cdev_map_phys(dev: u32) -> (i32, u64, u64) {
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return (ENXIO, 0, 0);
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return (ENXIO, 0, 0);
+    }
+    let mut msg = build_cdev_map_msg((dev & 0xFFFF) as i32);
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r < 0 {
+        return (r, 0, 0);
+    }
+    parse_cdev_map_reply(&msg)
+}
+
+/// Build a CDEV_MAP request message (m_type @ 4, minor @ 8, flags @ 12).
+fn build_cdev_map_msg(minor: i32) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, CDEV_MAP as i32);
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+    msg
+}
+
+/// Parse a CDEV_MAP reply: status = m_type (returned by `fs_sendrec`),
+/// phys u64 @ payload 0, len u64 @ payload 8. Pure so the layout is
+/// host-testable.
+pub fn parse_cdev_map_reply(msg: &[u8; 56]) -> (i32, u64, u64) {
+    let status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    if status < 0 {
+        return (status, 0, 0);
+    }
+    let phys = u64::from_le_bytes(msg[8..16].try_into().unwrap_or([0; 8]));
+    let len = u64::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+    (OK, phys, len)
+}
+
 /// Cancel an I/O request on a character device.
 ///
 /// Sends a \`CDEV_CANCEL\` message to the driver, then blocks until the
@@ -735,6 +781,37 @@ mod tests {
         assert_eq!(request::r_i64(&msg, CDEV_POS_OFF), 321);
         assert_eq!(request::r_i64(&msg, CDEV_COUNT_OFF), 1);
         assert_eq!(request::r_i64(&msg, CDEV_BUF_OFF), 0);
+    }
+
+    #[test]
+    fn test_build_cdev_map_msg_layout() {
+        // CDEV_MAP: m_type @ 4, minor @ 8, flags @ 12 — the fb server's
+        // handle_cdev_request reads m2_i1/m2_i2 at those payload offsets.
+        let msg = build_cdev_map_msg(0);
+        assert_eq!(request::r_i32(&msg, 4), CDEV_MAP as i32);
+        assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 0);
+        assert_eq!(request::r_i32(&msg, CDEV_FLAGS_OFF), 0);
+    }
+
+    #[test]
+    fn test_parse_cdev_map_reply() {
+        // The driver replies with status = m_type and phys/len in payload
+        // 0..16 (absolute bytes 8..24).
+        let mut msg = [0u8; 56];
+        msg[4..8].copy_from_slice(&0i32.to_le_bytes());
+        msg[8..16].copy_from_slice(&0xFD00_0000u64.to_le_bytes());
+        msg[16..24].copy_from_slice(&0x100_0000u64.to_le_bytes());
+        let (status, phys, len) = parse_cdev_map_reply(&msg);
+        assert_eq!(status, 0);
+        assert_eq!(phys, 0xFD00_0000);
+        assert_eq!(len, 0x100_0000);
+
+        // Error status → zeroed phys/len.
+        msg[4..8].copy_from_slice(&(-6i32).to_le_bytes());
+        let (status, phys, len) = parse_cdev_map_reply(&msg);
+        assert_eq!(status, -6);
+        assert_eq!(phys, 0);
+        assert_eq!(len, 0);
     }
 
     #[test]

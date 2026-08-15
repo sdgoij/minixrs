@@ -384,7 +384,7 @@ pub unsafe fn vm_create(ep: Endpoint) -> i32 {
 ///
 /// `cr3` must be the root of an address space no other code is
 /// concurrently accessing (the owning process must not be running).
-pub(crate) unsafe fn free_address_space(cr3: u64) {
+pub(crate) unsafe fn free_address_space(cr3: u64, skip: &[(u64, u64)]) {
     unsafe {
         use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
         use kernel::hal::{pte_to_phys, pte_user_owned};
@@ -428,7 +428,7 @@ pub(crate) unsafe fn free_address_space(cr3: u64) {
         // is returned to the kernel allocator. `va_base` is the virtual
         // address of entry 0 of this table, used to compute each leaf's
         // VA for the arch ownership check.
-        unsafe fn walk_table(phys: u64, level: u32, va_base: u64, flags: u64) {
+        unsafe fn walk_table(phys: u64, level: u32, va_base: u64, flags: u64, skip: &[(u64, u64)]) {
             if let Some(table) = unsafe { with_table(phys, flags, |t| *t) } {
                 let step = PAGE_SIZE << (level * 9);
                 for (idx, &e) in table.iter().enumerate() {
@@ -439,8 +439,10 @@ pub(crate) unsafe fn free_address_space(cr3: u64) {
                     if level == 0 {
                         // Bottom level: 4KB pages. The arch decides which
                         // user leaves map frames owned by the process —
-                        // shared identity/alias frames are not freed.
-                        if pte_user_owned(e, entry_va) {
+                        // shared identity/alias frames are not freed, and
+                        // device-memory leaves (VR_DIRECT regions) are
+                        // skipped via the caller's `skip` ranges.
+                        if pte_user_owned(e, entry_va) && !in_skip(skip, entry_va) {
                             let frame = pte_to_phys(e);
                             if frame != 0 {
                                 free_user_frame(frame);
@@ -452,7 +454,7 @@ pub(crate) unsafe fn free_address_space(cr3: u64) {
                         continue; // block/huge leaf — shared identity
                     }
                     unsafe {
-                        walk_table(pte_to_phys(e), level - 1, entry_va, flags);
+                        walk_table(pte_to_phys(e), level - 1, entry_va, flags, skip);
                     }
                 }
             }
@@ -471,11 +473,23 @@ pub(crate) unsafe fn free_address_space(cr3: u64) {
                 if e & PG_PS != 0 {
                     continue; // block/huge leaf — shared identity
                 }
-                walk_table(pte_to_phys(e), top - 1, (idx as u64) * root_step, map_flags);
+                walk_table(
+                    pte_to_phys(e),
+                    top - 1,
+                    (idx as u64) * root_step,
+                    map_flags,
+                    skip,
+                );
             }
         }
         let _ = vm_free_pages(cr3, 1);
     }
+}
+
+/// True if `va` lies inside one of the `skip` ranges (device-memory
+/// mappings whose frames must not be returned to the allocator).
+pub(crate) fn in_skip(skip: &[(u64, u64)], va: u64) -> bool {
+    skip.iter().any(|&(s, e)| va >= s && va < e)
 }
 
 /// Release a process's address space, freeing all page table pages.
@@ -502,10 +516,19 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
         // Free the current address space (kernel CR3 preferred; falls back
         // to the Vmproc's recorded root when the kernel slot was already
         // cleared — e.g. PM's exit_restart path sends VM_EXIT after
-        // SYS_CLEAR).
+        // SYS_CLEAR). Device-memory regions are excluded from the walk so
+        // their frames are not returned to the allocator.
+        let mut skip = [(0u64, 0u64); crate::vm::region::MAX_REGIONS];
+        let mut n = 0usize;
+        for r in (*vmp).vm_regions.regions.iter().flatten() {
+            if r.flags & crate::vm::region::VR_DIRECT != 0 && n < crate::vm::region::MAX_REGIONS {
+                skip[n] = (r.vaddr, r.end());
+                n += 1;
+            }
+        }
         let cr3 = vm_get_addrspace(ep);
         if cr3 != 0 {
-            free_address_space(cr3);
+            free_address_space(cr3, &skip[..n]);
         }
 
         // Clear the region tracking.
@@ -537,7 +560,18 @@ pub(crate) unsafe fn free_exec_old_addrspace(ep: Endpoint) {
         };
         let old = vm_get_addrspace(ep);
         if old != 0 {
-            free_address_space(old);
+            // Exclude device-memory regions from the walk (their frames are
+            // not the allocator's to reclaim).
+            let mut skip = [(0u64, 0u64); crate::vm::region::MAX_REGIONS];
+            let mut n = 0usize;
+            for r in (*vmp).vm_regions.regions.iter().flatten() {
+                if r.flags & crate::vm::region::VR_DIRECT != 0 && n < crate::vm::region::MAX_REGIONS
+                {
+                    skip[n] = (r.vaddr, r.end());
+                    n += 1;
+                }
+            }
+            free_address_space(old, &skip[..n]);
         }
         (*vmp).vm_pml4_phys = 0;
     }
@@ -554,7 +588,7 @@ pub(crate) unsafe fn free_exec_old_addrspace(ep: Endpoint) {
 ///
 /// The caller must ensure `cr3` is a valid page-table root and that the
 /// owning process is not concurrently running.
-pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
+pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64, skip: &[(u64, u64)]) {
     unsafe {
         use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
         use kernel::hal::{pte_to_phys, pte_user_owned};
@@ -598,6 +632,7 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
             flags: u64,
             va_start: u64,
             va_end: u64,
+            skip: &[(u64, u64)],
         ) {
             let step = PAGE_SIZE << (level * 9);
             // Skip tables whose whole span lies outside the range.
@@ -615,8 +650,9 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
                     }
                     if level == 0 {
                         // Bottom level: 4KB pages. The arch decides which
-                        // user leaves map frames owned by the process.
-                        if pte_user_owned(e, entry_va) {
+                        // user leaves map frames owned by the process;
+                        // device-memory leaves are skipped via `skip`.
+                        if pte_user_owned(e, entry_va) && !in_skip(skip, entry_va) {
                             let frame = pte_to_phys(e);
                             if frame != 0 {
                                 free_frame(frame);
@@ -628,7 +664,15 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
                         continue; // block/huge leaf — shared identity
                     }
                     unsafe {
-                        walk_table(pte_to_phys(e), level - 1, entry_va, flags, va_start, va_end);
+                        walk_table(
+                            pte_to_phys(e),
+                            level - 1,
+                            entry_va,
+                            flags,
+                            va_start,
+                            va_end,
+                            skip,
+                        );
                     }
                 }
             }
@@ -656,6 +700,7 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64) {
                     map_flags,
                     va_start,
                     va_end,
+                    skip,
                 );
             }
         }

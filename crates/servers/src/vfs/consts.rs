@@ -378,6 +378,15 @@ pub const VMV_INO_OFF: usize = 32;
 pub const VMV_FD_OFF: usize = 40;
 pub const VMV_SIZE_PAGES_OFF: usize = 48;
 
+// Device-mmap reply fields (FDLOOKUP of a char device): the driver's
+// physical range travels instead of file identity. `VMV_ISDEV_OFF` (u32,
+// 1 = char device) is at a byte range the file reply leaves free;
+// `VMV_PHYS_OFF`/`VMV_LEN_OFF` overlap dev/ino (meaningless for devices)
+// and the tail bytes, which the file branch never reads.
+pub const VMV_ISDEV_OFF: usize = 12;
+pub const VMV_PHYS_OFF: usize = 28;
+pub const VMV_LEN_OFF: usize = 56;
+
 /// Named pipe mode for req_newnode.
 pub const I_NAMED_PIPE: u32 = 0o010000;
 

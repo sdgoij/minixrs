@@ -6,7 +6,9 @@
 //! input, then serves the CDEV_* protocol for `/dev/fb` (open/close,
 //! inline read/write, grant-based ioctls).
 
-use arch_common::com::{CDEV_CLOSE, CDEV_IOCTL, CDEV_OPEN, CDEV_READ, CDEV_WRITE, is_cdev_rq};
+use arch_common::com::{
+    CDEV_CLOSE, CDEV_IOCTL, CDEV_MAP, CDEV_OPEN, CDEV_READ, CDEV_WRITE, is_cdev_rq,
+};
 use drivers::video::fb::{
     BochsArch, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO,
     FbArch, Framebuffer,
@@ -230,6 +232,21 @@ unsafe fn handle_cdev_request(
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let user = unsafe { msg.m_payload.m2.m2l1 } as i32;
             do_ioctl(minor, request, who_e, grant, user)
+        }
+        CDEV_MAP => {
+            // Device-memory mmap: reply with the framebuffer's physical
+            // range (phys u64 @ payload 0, len u64 @ payload 8). The arch's
+            // `dev.base` is the identity-mapped VA, which equals the phys.
+            match arch.device(minor as usize) {
+                Ok(dev) => {
+                    unsafe {
+                        msg.m_payload.raw[0..8].copy_from_slice(&dev.base.to_le_bytes());
+                        msg.m_payload.raw[8..16].copy_from_slice(&dev.size.to_le_bytes());
+                    }
+                    0
+                }
+                Err(_) => -6, // ENXIO
+            }
         }
         _ => -38, // ENOSYS
     }
