@@ -340,8 +340,7 @@ pub const SEL_NFDS_OFF: usize = 8;
 pub const SEL_RDFDS_OFF: usize = 16;
 pub const SEL_WRFDS_OFF: usize = 24;
 pub const SEL_EXFDS_OFF: usize = 32;
-pub const SEL_TV_SEC_OFF: usize = 40;
-pub const SEL_TV_USEC_OFF: usize = 48;
+pub const SEL_TIMEOUT_OFF: usize = 40; // u64: user `struct timeval *` (NULL = block forever)
 
 /// VM (memory server) endpoint number.
 pub const VM_PROC_NR: i32 = 8;

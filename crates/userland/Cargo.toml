@@ -154,5 +154,10 @@ name = "allocprobe"
 path = "src/bin/allocprobe.rs"
 test = false
 
+[[bin]]
+name = "seltest"
+path = "src/bin/seltest.rs"
+test = false
+
 [lints]
 workspace = true

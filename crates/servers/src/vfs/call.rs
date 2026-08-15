@@ -3145,15 +3145,16 @@ mod tests {
     }
 
     #[test]
-    fn test_select_invalid_fd_returns_ebadf() {
+    fn test_select_blocking_suspends_when_nothing_ready() {
         unsafe {
             setup();
             let glob = vfs_global();
             let fs_m_in = &mut (*glob).fs_m_in;
             fs_m_in[SEL_NFDS_OFF..SEL_NFDS_OFF + 4].copy_from_slice(&1i32.to_le_bytes());
         }
-        // select with nfds=1 but no fds set — should complete with 0 ready
-        assert_eq!(do_select(), 0);
+        // nfds=1, no fd sets, NULL timeout: nothing ready → the caller is
+        // suspended (no reply) until a driver reports readiness.
+        assert_eq!(do_select(), SUSPEND);
     }
 
     #[test]

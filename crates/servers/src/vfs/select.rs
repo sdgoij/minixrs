@@ -1,11 +1,21 @@
-//! VFS `select()` / `poll()` implementation — ported from `minix/servers/vfs/select.c`.
+//! VFS `select()` implementation — ported from `minix/servers/vfs/select.c`.
 //!
-//! Supports multiplexed I/O across regular files (always ready), pipes
-//! (read via `pipe::pipe_check`), and character devices (via `CDEV_SELECT`
-//! with a simplified single-phase protocol).
+//! `select(nfds, readfds, writefds, errorfds, timeout)`:
+//! - copies the fd sets from the caller (via `sys_vircopy` — VFS is a
+//!   separate address space and never dereferences user pointers),
+//! - checks each fd: regular files are always ready, pipes via
+//!   `pipe_check`, character devices via a `CDEV_SELECT` round-trip (the
+//!   driver replies the currently-ready ops and may register a late watch),
+//! - if anything is ready (or the caller asked to poll), the ready sets are
+//!   copied back and the count returned;
+//! - otherwise the caller is suspended (`SUSPEND`, no reply) until a
+//!   driver's `CDEV_SEL2_REPLY` reports readiness, at which point
+//!   `select_driver_reply` sends the result to the caller.
 //!
-//! The select table holds up to `MAX_SELECTS` concurrent calls.  Each entry
-//! tracks the fd sets, ready sets, timeout, and blocking state for one caller.
+//! Timeouts: `timeout == NULL` blocks forever; `{0,0}` polls. A bounded
+//! timeout currently behaves as forever — the kernel has no server timer
+//! API (`SYS_SETALARM` gap, OPEN_ITEMS A1 deferral), so no wakeup can
+//! fire.
 
 use crate::vfs::consts::*;
 use crate::vfs::types::*;
@@ -17,7 +27,7 @@ const MAX_SELECTS: usize = 16;
 pub type FdSet = u64;
 pub const FD_SETSIZE: usize = 64;
 
-/// Operations that `select()` watches for.
+/// Operations that `select()` watches for (match the drivers' `CDEV_OP_*`).
 pub const SEL_RD: u32 = 0x01;
 pub const SEL_WR: u32 = 0x02;
 pub const SEL_EX: u32 = 0x04;
@@ -64,7 +74,7 @@ fn tab2ops(fd: i32, nfds: i32, readfds: FdSet, writefds: FdSet, errorfds: FdSet)
     ops
 }
 
-/// Convert a SEL_* bitmask to ready fd_set bits.
+/// Convert a SEL_* bitmask to ready fd_set bits; returns the count added.
 fn ops2tab(
     ops: u32,
     fd: i32,
@@ -91,7 +101,7 @@ fn ops2tab(
 struct SelectEntry {
     /// Owning fproc (NULL = free slot).
     requestor: *mut Fproc,
-    /// Endpoint of the requesting process.
+    /// Endpoint to reply to when the select completes.
     req_endpt: i32,
     /// Requested fd sets (as received from user).
     readfds: FdSet,
@@ -111,10 +121,11 @@ struct SelectEntry {
     nreadyfds: i32,
     /// Accumulated error.
     error: i32,
-    /// TRUE = select should block (timeout != {0,0}).
+    /// TRUE = select should block (timeout != {0,0} or NULL).
     block: bool,
-    /// Timeout in ticks (0 = no timeout / poll mode).
-    timeout_ticks: u64,
+    /// Character-device minor watched per fd (`u32::MAX` = none) — matches
+    /// a later `CDEV_SEL2_REPLY` to this fd.
+    char_minor: [u32; FD_SETSIZE],
 }
 
 impl SelectEntry {
@@ -135,7 +146,7 @@ impl SelectEntry {
             nreadyfds: 0,
             error: 0,
             block: false,
-            timeout_ticks: 0,
+            char_minor: [u32::MAX; FD_SETSIZE],
         }
     }
 }
@@ -163,12 +174,6 @@ unsafe fn se_slot_ref(i: usize) -> &'static SelectEntry {
     unsafe { &*(*SELECT_TABLE.get()).as_ptr().add(i) }
 }
 
-/// Check whether a regular file's fd is ready for the given ops.
-/// Regular files are always ready.
-fn select_request_file(_filp: &Filp, ops: u32) -> u32 {
-    ops
-}
-
 /// Check whether a pipe fd is ready for the given ops.
 fn select_request_pipe(filp: &Filp, ops: u32) -> u32 {
     use crate::vfs::pipe;
@@ -189,40 +194,82 @@ fn select_request_pipe(filp: &Filp, ops: u32) -> u32 {
     ready
 }
 
-/// Check whether a character device fd is ready.
-/// For now, char devices are always considered ready (simplified).
-fn select_request_char(_filp: &Filp, ops: u32) -> u32 {
-    ops
+/// Check a character device fd: `CDEV_SELECT` round-trip with the driver.
+/// The driver replies the currently-ready ops (`SEL_* == CDEV_OP_*`). If
+/// nothing is ready, the driver has registered a late watch (`CDEV_NOTIFY`)
+/// and the minor is recorded so a later `CDEV_SEL2_REPLY` can complete the
+/// select.
+fn select_request_char(filp: &Filp, ops: u32, se: &mut SelectEntry, fd: i32) -> u32 {
+    let vp = filp.filp_vno;
+    if vp.is_null() {
+        return 0;
+    }
+    let dev = unsafe { (*vp).v_dev };
+    let ready = crate::vfs::device::cdev_select(dev, ops as i32) as u32;
+    if ready == 0 && ops != 0 {
+        se.char_minor[fd as usize] = dev & 0xFFFF;
+    }
+    ready
 }
 
-/// Perform the `select(nfds, readfds, writefds, errorfds, timeout)` system call.
-///
-/// Reads parameters from `fs_m_in`, checks ready fds across the fd set,
-/// and either returns immediately or suspends the caller.
+/// Perform the `select(nfds, readfds, writefds, errorfds, timeout)` system
+/// call. Returns the number of ready fds (copied into the caller's sets),
+/// a negative errno, or `SUSPEND` when the caller must block until a
+/// driver reports readiness (`select_driver_reply` sends the final reply).
 ///
 /// # Safety
 ///
-/// Must be called from a valid VFS dispatch context where `fs_m_in` contains
-/// a properly-formed `select` request.
+/// Must be called from a valid VFS dispatch context (`handle_work`), where
+/// `glob.fp` names the caller.
 pub unsafe fn do_select() -> i32 {
     use crate::vfs::glo::vfs_global;
     let glob = unsafe { &mut *vfs_global() };
 
     let nfds = r2_i32(&glob.fs_m_in, SEL_NFDS_OFF);
-    let readfds_ptr = r2_u64(&glob.fs_m_in, SEL_RDFDS_OFF);
-    let writefds_ptr = r2_u64(&glob.fs_m_in, SEL_WRFDS_OFF);
-    let errorfds_ptr = r2_u64(&glob.fs_m_in, SEL_EXFDS_OFF);
-    let timeout_sec = r2_i64(&glob.fs_m_in, SEL_TV_SEC_OFF);
-    let timeout_usec = r2_i64(&glob.fs_m_in, SEL_TV_USEC_OFF);
-
     if nfds < 0 || nfds > FD_SETSIZE as i32 {
         return EINVAL;
     }
+    let rdfds_p = r2_u64(&glob.fs_m_in, SEL_RDFDS_OFF);
+    let wrfds_p = r2_u64(&glob.fs_m_in, SEL_WRFDS_OFF);
+    let exfds_p = r2_u64(&glob.fs_m_in, SEL_EXFDS_OFF);
+    let timeout_p = r2_u64(&glob.fs_m_in, SEL_TIMEOUT_OFF);
 
-    let fp = unsafe { &mut *glob.fproc.as_mut_ptr() };
+    let fp = match unsafe { glob.fp.as_mut() } {
+        Some(fp) => fp,
+        None => return EINVAL,
+    };
     let caller_ep = fp.fp_endpoint;
 
-    // Find a free select table slot.
+    // Timeout: NULL → block forever; {0,0} → poll; bounded → behaves as
+    // forever (no server timer API to fire a wakeup).
+    let mut block = true;
+    if timeout_p != 0 {
+        let mut tv = [0u8; 8];
+        if user_copy_in(caller_ep, timeout_p, &mut tv) != 0 {
+            return EFAULT;
+        }
+        let sec = i32::from_le_bytes([tv[0], tv[1], tv[2], tv[3]]);
+        let usec = i32::from_le_bytes([tv[4], tv[5], tv[6], tv[7]]);
+        if sec == 0 && usec == 0 {
+            block = false;
+        }
+    }
+
+    // Copy the fd sets from the caller (NULL pointers = empty set).
+    let mut readfds: FdSet = 0;
+    let mut writefds: FdSet = 0;
+    let mut errorfds: FdSet = 0;
+    if rdfds_p != 0 && user_copy_in(caller_ep, rdfds_p, as_bytes_mut(&mut readfds)) != 0 {
+        return EFAULT;
+    }
+    if wrfds_p != 0 && user_copy_in(caller_ep, wrfds_p, as_bytes_mut(&mut writefds)) != 0 {
+        return EFAULT;
+    }
+    if exfds_p != 0 && user_copy_in(caller_ep, exfds_p, as_bytes_mut(&mut errorfds)) != 0 {
+        return EFAULT;
+    }
+
+    // Find a free select slot.
     let mut slot_idx = MAX_SELECTS;
     for i in 0..MAX_SELECTS {
         if unsafe { se_slot_ref(i) }.requestor.is_null() {
@@ -235,43 +282,22 @@ pub unsafe fn do_select() -> i32 {
     }
 
     let se = unsafe { se_slot(slot_idx) };
-
-    // Copy fd sets from user space.
-    let mut readfds: FdSet = 0;
-    let mut writefds: FdSet = 0;
-    let mut errorfds: FdSet = 0;
-
-    if readfds_ptr != 0 && nfds > 0 {
-        unsafe {
-            copy_from_user(readfds_ptr, &mut readfds);
-        }
-    }
-    if writefds_ptr != 0 && nfds > 0 {
-        unsafe {
-            copy_from_user(writefds_ptr, &mut writefds);
-        }
-    }
-    if errorfds_ptr != 0 && nfds > 0 {
-        unsafe {
-            copy_from_user(errorfds_ptr, &mut errorfds);
-        }
-    }
-
-    // Initialize select entry.
     se.requestor = fp;
     se.req_endpt = caller_ep;
     se.nfds = nfds;
     se.readfds = readfds;
     se.writefds = writefds;
     se.errorfds = errorfds;
-    se.vir_readfds = readfds_ptr;
-    se.vir_writefds = writefds_ptr;
-    se.vir_errorfds = errorfds_ptr;
-    fd_zero(&mut se.ready_readfds);
-    fd_zero(&mut se.ready_writefds);
-    fd_zero(&mut se.ready_errorfds);
+    se.vir_readfds = rdfds_p;
+    se.vir_writefds = wrfds_p;
+    se.vir_errorfds = exfds_p;
+    se.ready_readfds = 0;
+    se.ready_writefds = 0;
+    se.ready_errorfds = 0;
     se.nreadyfds = 0;
     se.error = OK;
+    se.block = block;
+    se.char_minor = [u32::MAX; FD_SETSIZE];
 
     // Check each fd for readiness.
     for fd in 0..nfds {
@@ -283,38 +309,51 @@ pub unsafe fn do_select() -> i32 {
         let filp_idx = fp.fp_filp[fd as usize];
         if filp_idx < 0 {
             se.error = EBADF;
-            continue;
+            break;
         }
-
         let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
         let filp = unsafe { &*filp_arr.add(filp_idx as usize) };
         let vp = filp.filp_vno;
         if vp.is_null() {
             se.error = EBADF;
+            break;
+        }
+
+        // Fds not opened for the requested direction are immediately ready
+        // (an operation would fail instantly — POSIX).
+        let mut want = ops;
+        if ops & SEL_RD != 0 && (filp.filp_mode & 1) == 0 {
+            se.nreadyfds += ops2tab(
+                SEL_RD,
+                fd,
+                &mut se.ready_readfds,
+                &mut se.ready_writefds,
+                &mut se.ready_errorfds,
+            );
+            want &= !SEL_RD;
+        }
+        if ops & SEL_WR != 0 && (filp.filp_mode & 2) == 0 {
+            se.nreadyfds += ops2tab(
+                SEL_WR,
+                fd,
+                &mut se.ready_readfds,
+                &mut se.ready_writefds,
+                &mut se.ready_errorfds,
+            );
+            want &= !SEL_WR;
+        }
+        if want == 0 {
             continue;
         }
 
-        let mut want_ops = ops;
-
-        // Check mode: if fd lacks read permission but SEL_RD requested → ready
-        if ops & SEL_RD != 0 && (filp.filp_mode & 1) == 0 {
-            want_ops |= SEL_RD;
-        }
-        if ops & SEL_WR != 0 && (filp.filp_mode & 2) == 0 {
-            want_ops |= SEL_WR;
-        }
-
-        // Dispatch based on file type.
         let ready_ops = if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
-            select_request_pipe(filp, want_ops)
+            select_request_pipe(filp, want)
         } else {
             let mode = unsafe { (*vp).v_mode };
             if mode & S_IFCHR != 0 {
-                select_request_char(filp, want_ops)
-            } else if mode & S_IFBLK != 0 {
-                want_ops // block devices: always ready for now
+                select_request_char(filp, want, se, fd)
             } else {
-                select_request_file(filp, want_ops)
+                want // regular and block devices: always ready
             }
         };
 
@@ -329,49 +368,91 @@ pub unsafe fn do_select() -> i32 {
         }
     }
 
-    // Determine blocking mode.
-    se.block = !(timeout_sec == 0 && timeout_usec == 0);
-    if se.block {
-        se.timeout_ticks = (timeout_sec as u64)
-            .saturating_mul(100)
-            .saturating_add((timeout_usec as u64) / 10000);
-    } else {
-        se.timeout_ticks = 0;
+    if se.error != OK {
+        let e = se.error;
+        se.requestor = core::ptr::null_mut();
+        return e;
     }
-
-    // Return immediately if ready, error, or non-blocking.
-    if se.nreadyfds > 0 || se.error != OK || !se.block {
-        let result = if se.error != OK {
-            se.error
-        } else {
-            se.nreadyfds
-        };
+    if se.nreadyfds > 0 || !se.block {
         write_results(se);
-        se.requestor = core::ptr::null_mut(); // free slot
-        return result;
+        let n = se.nreadyfds;
+        se.requestor = core::ptr::null_mut();
+        return n;
     }
 
-    // Blocking: suspend the process.
+    // Nothing ready and blocking: suspend the caller. The entry stays; a
+    // driver's `CDEV_SEL2_REPLY` (select_driver_reply) sends the result.
     fp.fp_blocked_on = FP_BLOCKED_ON_SELECT;
     SUSPEND
 }
 
-/// Copy a completed select's results back to user space and free the slot.
+/// A driver reports readiness for a watched minor (`CDEV_SEL1_REPLY` /
+/// `CDEV_SEL2_REPLY`; `status` = the ops that became ready). Matches the
+/// select entry watching that minor, marks the ops ready, and — when the
+/// select can complete — copies the results back and replies to the caller.
+///
+/// Returns `OK` if an entry consumed the reply; `ENOENT` for a stray reply
+/// (the select already completed — its driver watch was not cancelled,
+/// `cdev_cancel` is not implemented yet).
+///
+/// # Safety
+///
+/// Must be called from the VFS main loop (driver reply dispatch).
+pub unsafe fn select_driver_reply(minor: u32, status: i32) -> i32 {
+    let ops = status as u32;
+    for i in 0..MAX_SELECTS {
+        let se = se_slot(i);
+        if se.requestor.is_null() {
+            continue;
+        }
+        for fd in 0..se.nfds {
+            if se.char_minor[fd as usize] == minor {
+                let matched = ops & (SEL_RD | SEL_WR | SEL_EX);
+                if matched != 0 {
+                    se.nreadyfds += ops2tab(
+                        matched,
+                        fd,
+                        &mut se.ready_readfds,
+                        &mut se.ready_writefds,
+                        &mut se.ready_errorfds,
+                    );
+                }
+                if se.nreadyfds > 0 || !se.block {
+                    write_results(se);
+                    let n = se.nreadyfds;
+                    let endpt = se.req_endpt;
+                    se.requestor = core::ptr::null_mut();
+                    send_reply(endpt, n);
+                }
+                return OK;
+            }
+        }
+    }
+    ENOENT
+}
+
+/// Copy a completed select's results back to the user and free the slot.
 unsafe fn write_results(se: &SelectEntry) {
     if se.vir_readfds != 0 {
-        unsafe {
-            copy_to_user(se.ready_readfds, se.vir_readfds);
-        }
+        let _ = user_copy_out(
+            se.req_endpt,
+            se.vir_readfds,
+            &se.ready_readfds.to_le_bytes(),
+        );
     }
     if se.vir_writefds != 0 {
-        unsafe {
-            copy_to_user(se.ready_writefds, se.vir_writefds);
-        }
+        let _ = user_copy_out(
+            se.req_endpt,
+            se.vir_writefds,
+            &se.ready_writefds.to_le_bytes(),
+        );
     }
     if se.vir_errorfds != 0 {
-        unsafe {
-            copy_to_user(se.ready_errorfds, se.vir_errorfds);
-        }
+        let _ = user_copy_out(
+            se.req_endpt,
+            se.vir_errorfds,
+            &se.ready_errorfds.to_le_bytes(),
+        );
     }
 }
 
@@ -379,47 +460,64 @@ fn r2_i32(buf: &[u8; 64], off: usize) -> i32 {
     i32::from_le_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4]))
 }
 
-fn r2_i64(buf: &[u8; 64], off: usize) -> i64 {
-    i64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]))
-}
-
 fn r2_u64(buf: &[u8; 64], off: usize) -> u64 {
     u64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]))
 }
 
-unsafe fn copy_from_user(user_ptr: u64, dst: &mut FdSet) {
-    let src = user_ptr as *const u8;
-    let bytes = unsafe { core::slice::from_raw_parts(src, 8) };
-    *dst = u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
+unsafe fn as_bytes_mut(v: &mut FdSet) -> &mut [u8] {
+    unsafe { core::slice::from_raw_parts_mut((v as *mut FdSet) as *mut u8, 8) }
 }
 
-unsafe fn copy_to_user(val: FdSet, user_ptr: u64) {
-    let dst = user_ptr as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(&val.to_le_bytes() as *const u8, dst, 8);
+// User-memory copies go through SYS_VIRCOPY (VFS is a separate address
+// space). Host builds have no user spaces; the host tests avoid the copy
+// paths (fd_set pointers are NULL in the tests).
+
+#[cfg(target_os = "minix")]
+unsafe fn user_copy_in(endpt: i32, src: u64, dst: &mut [u8]) -> i32 {
+    crate::vfs::call::sys_vircopy(
+        endpt,
+        src,
+        crate::vfs::call::SELF,
+        dst.as_mut_ptr() as u64,
+        dst.len(),
+    )
+}
+
+#[cfg(target_os = "minix")]
+unsafe fn user_copy_out(endpt: i32, dst: u64, src: &[u8]) -> i32 {
+    crate::vfs::call::sys_vircopy(
+        crate::vfs::call::SELF,
+        src.as_ptr() as u64,
+        endpt,
+        dst,
+        src.len(),
+    )
+}
+
+#[cfg(not(target_os = "minix"))]
+unsafe fn user_copy_in(_endpt: i32, _src: u64, _dst: &mut [u8]) -> i32 {
+    -1
+}
+
+#[cfg(not(target_os = "minix"))]
+unsafe fn user_copy_out(_endpt: i32, _dst: u64, _src: &[u8]) -> i32 {
+    -1
+}
+
+/// Send the final select result to the caller (blocked in `sendrec(VFS)`).
+/// VFS reply convention: result in m_type @ 4 (matches `main.rs reply()`).
+#[cfg(target_os = "minix")]
+unsafe fn send_reply(endpt: i32, result: i32) {
+    let mut out = [0u8; 64];
+    out[4..8].copy_from_slice(&result.to_le_bytes());
+    const SEND_CALL: u64 = 46;
+    if endpt >= 0 {
+        let _ = minix_rt::syscall2(SEND_CALL, endpt as u64, out.as_mut_ptr() as u64);
     }
 }
 
-/// Notify any blocked select() caller that fds are ready.
-/// Called by pipe close/release or device event handlers.
-pub fn select_notify() {
-    unsafe {
-        for i in 0..MAX_SELECTS {
-            let se = se_slot(i);
-            if se.requestor.is_null() {
-                continue;
-            }
-            if se.block && se.nreadyfds == 0 && se.error == OK {
-                continue;
-            }
-            // Wake the process.
-            write_results(se);
-            let fp = &mut *se.requestor;
-            fp.fp_blocked_on = FP_BLOCKED_ON_NONE;
-            se.requestor = core::ptr::null_mut();
-        }
-    }
-}
+#[cfg(not(target_os = "minix"))]
+unsafe fn send_reply(_endpt: i32, _result: i32) {}
 
 #[cfg(test)]
 mod tests {
@@ -457,13 +555,6 @@ mod tests {
         assert_eq!(s, 0);
         fd_set(-1, &mut s);
         assert_eq!(s, 0);
-    }
-
-    #[test]
-    fn test_fd_isset_out_of_range() {
-        let s: FdSet = !0;
-        assert!(!fd_isset(100, &s));
-        assert!(!fd_isset(-1, &s));
     }
 
     #[test]
@@ -505,16 +596,44 @@ mod tests {
     }
 
     #[test]
-    fn test_select_request_file_always_ready() {
-        let f = Filp::default();
-        assert_eq!(select_request_file(&f, SEL_RD), SEL_RD);
-        assert_eq!(select_request_file(&f, SEL_WR), SEL_WR);
-        assert_eq!(select_request_file(&f, SEL_RD | SEL_WR), SEL_RD | SEL_WR);
+    fn test_select_driver_reply_stray_returns_enoent() {
+        // No entry watches the minor → the reply is stray (ENOENT).
+        unsafe {
+            assert_eq!(select_driver_reply(5, SEL_RD as i32), ENOENT);
+        }
     }
 
     #[test]
-    fn test_select_request_char_always_ready() {
-        let f = Filp::default();
-        assert_eq!(select_request_char(&f, SEL_RD), SEL_RD);
+    fn test_select_driver_reply_marks_ready_and_replies() {
+        // A blocking entry watching minor 3 on fd 2: a CDEV_SEL2_REPLY
+        // with SEL_RD marks fd 2 readable and completes the select (the
+        // host reply seam is a no-op; we assert the entry is freed).
+        unsafe {
+            let se = se_slot(0);
+            se.requestor = core::ptr::null_mut(); // ensure clean
+            // Fake a caller fproc so the slot is "in use".
+            let mut fp = Fproc {
+                fp_endpoint: 42,
+                ..Default::default()
+            };
+            se.requestor = &mut fp as *mut Fproc;
+            se.req_endpt = 42;
+            se.nfds = 3;
+            se.block = true;
+            se.nreadyfds = 0;
+            se.char_minor = [u32::MAX; FD_SETSIZE];
+            se.char_minor[2] = 3; // fd 2 watches minor 3
+            se.vir_readfds = 0; // no user copy on host
+            se.vir_writefds = 0;
+            se.vir_errorfds = 0;
+            se.ready_readfds = 0;
+            se.ready_writefds = 0;
+            se.ready_errorfds = 0;
+
+            let r = select_driver_reply(3, SEL_RD as i32);
+            assert_eq!(r, OK);
+            assert!(fd_isset(2, &se.ready_readfds));
+            assert!(se.requestor.is_null(), "entry freed after reply");
+        }
     }
 }

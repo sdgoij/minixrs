@@ -988,6 +988,78 @@ pub fn parse_i32(s: &str) -> Option<i32> {
 /// The kill-termination path is PM_KILL → do_kill → sig_proc → sig_proc_exit
 /// → zombie → parent reap (SIGNALS.md Phase 3). Negative pids (process
 /// groups) are a follow-up.
+/// select(2) smoke test (Phase I): pipe readiness (deterministic) + tty
+/// fd 0 (poll, then a blocking select satisfied by console input).
+pub fn seltest(_args: &[&str]) -> i32 {
+    // 1. Pipe: write one byte, poll-select on the read end → 1 ready.
+    let (rd, wr) = match minix_std::fs::pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            write_err(b"seltest: pipe failed\r\n");
+            return 1;
+        }
+    };
+    let mut one = *b"x";
+    let w = unsafe { minix_rt::syscall3(3, wr as u64, one.as_mut_ptr() as u64, 1) }; // NR_WRITE
+    if w != 1 {
+        write_err(b"seltest: pipe write failed\r\n");
+        return 1;
+    }
+    let mut rdf = 1u64 << rd;
+    match minix_std::fs::select(rd + 1, Some(&mut rdf), None, None, Some((0, 0))) {
+        Ok(n) if n == 1 && (rdf & (1u64 << rd)) != 0 => {
+            write_out(b"seltest: pipe-ready=1\r\n");
+        }
+        _ => {
+            write_err(b"seltest: pipe-ready FAIL\r\n");
+            return 1;
+        }
+    }
+    // Drain the byte, then poll again → empty pipe (writer open) is not ready.
+    let mut b = [0u8; 1];
+    let r = unsafe { minix_rt::syscall3(2, rd as u64, b.as_mut_ptr() as u64, 1) }; // NR_READ
+    if r != 1 || b[0] != b'x' {
+        write_err(b"seltest: pipe read failed\r\n");
+        return 1;
+    }
+    let mut rdf = 1u64 << rd;
+    match minix_std::fs::select(rd + 1, Some(&mut rdf), None, None, Some((0, 0))) {
+        Ok(0) => write_out(b"seltest: pipe-poll-empty=0\r\n"),
+        _ => {
+            write_err(b"seltest: pipe-poll-empty FAIL\r\n");
+            return 1;
+        }
+    }
+    unsafe {
+        minix_rt::syscall1(5, rd as u64); // NR_CLOSE
+        minix_rt::syscall1(5, wr as u64);
+    }
+
+    // 2. tty fd 0: poll → not ready at boot (no input queued).
+    let mut rdf = 1u64 << 0;
+    match minix_std::fs::select(1, Some(&mut rdf), None, None, Some((0, 0))) {
+        Ok(0) => write_out(b"seltest: tty-poll=0\r\n"),
+        _ => {
+            write_err(b"seltest: tty-poll FAIL\r\n");
+            return 1;
+        }
+    }
+    // 3. tty fd 0: blocking select — returns when console input arrives.
+    write_out(b"seltest: tty-block waiting\r\n");
+    let mut rdf = 1u64 << 0;
+    match minix_std::fs::select(1, Some(&mut rdf), None, None, None) {
+        Ok(n) if n >= 1 && (rdf & 1) != 0 => {
+            write_out(b"seltest: tty-block=1\r\n");
+        }
+        _ => {
+            write_err(b"seltest: tty-block FAIL\r\n");
+            return 1;
+        }
+    }
+    write_out(b"seltest: PASS\r\n");
+    0
+}
+
 pub fn kill(args: &[&str]) -> i32 {
     if args.len() < 2 {
         write_err(b"usage: kill pid [sig]\r\n");

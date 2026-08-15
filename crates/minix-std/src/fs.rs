@@ -764,6 +764,69 @@ pub fn umask(mask: u32) -> Result<u32, MinixErr> {
     }
 }
 
+// select message offsets (match VFS's SEL_* consts; timeout is a user
+// `struct timeval *` — NULL = block forever, {0,0} = poll).
+const SEL_NFDS: usize = 8;
+const SEL_RDFDS: usize = 16;
+const SEL_WRFDS: usize = 24;
+const SEL_EXFDS: usize = 32;
+const SEL_TIMEOUT: usize = 40;
+
+/// Poll/select on up to 64 file descriptors.
+///
+/// `timeout == None` blocks indefinitely; `Some((0, 0))` polls. A bounded
+/// timeout currently behaves like `None` — the kernel has no server timer
+/// API to fire the wakeup (OPEN_ITEMS A1 deferral).
+///
+/// Returns the number of ready fds; on success the ready sets are written
+/// back into the passed sets.
+pub fn select(
+    nfds: i32,
+    readfds: Option<&mut u64>,
+    writefds: Option<&mut u64>,
+    errorfds: Option<&mut u64>,
+    timeout: Option<(i32, i32)>,
+) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (nfds, readfds, writefds, errorfds, timeout, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_SELECT as i32);
+        msg_set_i32(&mut msg, SEL_NFDS, nfds);
+        msg_set_u64(
+            &mut msg,
+            SEL_RDFDS,
+            readfds.map_or(0, |s| s as *mut u64 as u64),
+        );
+        msg_set_u64(
+            &mut msg,
+            SEL_WRFDS,
+            writefds.map_or(0, |s| s as *mut u64 as u64),
+        );
+        msg_set_u64(
+            &mut msg,
+            SEL_EXFDS,
+            errorfds.map_or(0, |s| s as *mut u64 as u64),
+        );
+        let mut tv = [0u8; 8];
+        let tv_ptr = match timeout {
+            Some((sec, usec)) => {
+                tv[0..4].copy_from_slice(&sec.to_le_bytes());
+                tv[4..8].copy_from_slice(&usec.to_le_bytes());
+                tv.as_mut_ptr() as u64
+            }
+            None => 0,
+        };
+        msg_set_u64(&mut msg, SEL_TIMEOUT, tv_ptr);
+        let n = vfs_call(&mut msg)?;
+        Ok(n as i32)
+    }
+}
+
 /// Perform an I/O control operation on a file descriptor.
 ///
 /// # Safety

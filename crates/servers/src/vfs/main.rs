@@ -242,7 +242,11 @@ unsafe fn handle_work() {
         // Regular VFS calls are dispatched through the call table.
         let result = table::dispatch(call_nr);
         (*glob).err_code = result;
-        reply(fp, result);
+        // A blocking select suspends the caller: the reply is sent later by
+        // select_driver_reply when a driver reports readiness (CDEV_SEL2).
+        if result != SUSPEND {
+            reply(fp, result);
+        }
     }
 }
 

@@ -368,7 +368,15 @@ pub fn cdev_map(dev: u32, rfp: *const Fproc) -> u32 {
 
 /// Initiate a select call on a character device.
 ///
-/// Sends a CDEV_SELECT message to the driver via synchronous sendrec.
+/// Sends a `CDEV_SELECT` message to the driver via synchronous sendrec and
+/// returns the currently-ready ops (`SEL_* == CDEV_OP_*`). `CDEV_NOTIFY`
+/// asks the driver to register a late watch: if not everything is ready it
+/// replies later with `CDEV_SEL2_REPLY` when the remaining ops become
+/// ready (the tty's `select_retry`).
+///
+/// Wire layout (matches the tty's `handle_cdev_request`): m_type @ 4 =
+/// `CDEV_SELECT`, m2_i1 @ 8 = minor, m2_i2 @ 12 = ops | CDEV_NOTIFY. The
+/// reply type is the ready ops.
 pub fn cdev_select(dev: u32, ops: i32) -> i32 {
     let major = (dev >> 16) as i32;
     let minor = dev & 0xFFFF;
@@ -382,16 +390,14 @@ pub fn cdev_select(dev: u32, ops: i32) -> i32 {
     }
 
     let mut msg = [0u8; 56];
-    request::w_i32(&mut msg, 4, minor as i32);
-    request::w_i32(&mut msg, 8, ops);
-    request::w_i32(&mut msg, 0, CDEV_SELECT);
-
-    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
-    if r != 0 {
-        return r;
-    }
-    // Reply: selected ops in m2_i1
-    request::r_i32(&msg, 4)
+    request::w_i32(&mut msg, 4, CDEV_SELECT);
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, minor as i32);
+    request::w_i32(
+        &mut msg,
+        CDEV_FLAGS_OFF,
+        ops | arch_common::com::CDEV_NOTIFY as i32,
+    );
+    unsafe { request::fs_sendrec(drv_e, &mut msg) }
 }
 
 /// Cancel an I/O request on a character device.
@@ -443,7 +449,19 @@ pub fn cdev_cancel(dev: u32) -> i32 {
 pub fn cdev_reply() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let m_in = &glob.fs_m_in;
-    cdev_reply_from(m_in, glob.req_nr as u32)
+    let call_nr = glob.req_nr as u32;
+    match call_nr {
+        arch_common::com::CDEV_SEL1_REPLY | arch_common::com::CDEV_SEL2_REPLY => {
+            // Select notification: status (the ops now ready) @ payload 0
+            // (m_in[8..12]), minor @ payload 4 (m_in[12..16]) — the layout
+            // chardriver_reply_select builds. Route to the select machinery,
+            // which sends the final reply to the blocked caller.
+            let status = i32::from_le_bytes(m_in[8..12].try_into().unwrap_or([0; 4]));
+            let minor = u32::from_le_bytes(m_in[12..16].try_into().unwrap_or([0; 4]));
+            unsafe { crate::vfs::select::select_driver_reply(minor, status) }
+        }
+        _ => cdev_reply_from(m_in, call_nr),
+    }
 }
 
 /// Parse a character-driver reply message and return the result status.
