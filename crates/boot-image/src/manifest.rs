@@ -17,6 +17,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/cp", "cp"),
     ("/bin/ln", "ln"),
     ("/bin/chmod", "chmod"),
+    ("/bin/id", "id"),
     ("/bin/sync", "sync"),
     ("/bin/ping", "ping"),
     ("/bin/udp", "udp"),

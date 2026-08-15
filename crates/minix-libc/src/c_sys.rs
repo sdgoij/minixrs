@@ -713,13 +713,152 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     0
 }
 
-// ---- pwd.h ----
+// ---- pwd.h / unistd.h credentials ----
 
-/// User id. Minix has no user accounts; everything runs as root.
+/// Real user id (PM).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getuid() -> c_int {
-    0
+    match minix_std::process::getuid() {
+        Ok((ruid, _)) => ruid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Effective user id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn geteuid() -> c_int {
+    match minix_std::process::getuid() {
+        Ok((_, euid)) => euid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Real group id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgid() -> c_int {
+    match minix_std::process::getgid() {
+        Ok((rgid, _)) => rgid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Effective group id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getegid() -> c_int {
+    match minix_std::process::getgid() {
+        Ok((_, egid)) => egid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Process group id of `pid` (0 = self) (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsid(pid: c_int) -> c_int {
+    match minix_std::process::getsid(pid) {
+        Ok(sid) => sid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// True when running with setuid/setgid taint (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn issetugid() -> c_int {
+    match minix_std::process::issetugid() {
+        Ok(t) => t as c_int,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Fetch supplemental groups. `size == 0` is a count query (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgroups(size: c_int, list: *mut c_int) -> c_int {
+    if size < 0 {
+        return crate::fail(EINVAL);
+    }
+    if size == 0 || list.is_null() {
+        return match minix_std::process::getgroups(&mut []) {
+            Ok(n) => n,
+            Err(e) => crate::fail(e.0),
+        };
+    }
+    let n = (size as usize).min(minix_std::process::NGROUPS_MAX);
+    let mut buf = [0i32; minix_std::process::NGROUPS_MAX];
+    match minix_std::process::getgroups(&mut buf[..n]) {
+        Ok(count) => {
+            for i in 0..count {
+                unsafe { *list.add(i as usize) = buf[i] };
+            }
+            count
+        }
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set the real and effective user id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setuid(uid: c_int) -> c_int {
+    match minix_std::process::setuid(uid) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set the effective user id only (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seteuid(uid: c_int) -> c_int {
+    match minix_std::process::seteuid(uid) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set the real and effective group id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setgid(gid: c_int) -> c_int {
+    match minix_std::process::setgid(gid) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set the effective group id only (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setegid(gid: c_int) -> c_int {
+    match minix_std::process::setegid(gid) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set supplemental groups (PM; root-only).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setgroups(size: usize, list: *const c_int) -> c_int {
+    if size > minix_std::process::NGROUPS_MAX {
+        return crate::fail(EINVAL);
+    }
+    if size > 0 && list.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let mut buf = [0i32; minix_std::process::NGROUPS_MAX];
+    for i in 0..size {
+        buf[i] = unsafe { *list.add(i) };
+    }
+    match minix_std::process::setgroups(&buf[..size]) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 /// `struct passwd` — matches pwd.h.

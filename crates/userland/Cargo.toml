@@ -69,6 +69,11 @@ path = "src/bin/chown.rs"
 test = false
 
 [[bin]]
+name = "id"
+path = "src/bin/id.rs"
+test = false
+
+[[bin]]
 name = "sync"
 path = "src/bin/sync.rs"
 test = false

@@ -25,8 +25,21 @@ pub const PM_EXIT: u32 = PM_BASE + 1;
 pub const PM_FORK: u32 = PM_BASE + 2;
 pub const PM_WAITPID: u32 = PM_BASE + 3;
 pub const PM_GETPID: u32 = PM_BASE + 4;
+pub const PM_SETUID: u32 = PM_BASE + 5;
+pub const PM_GETUID: u32 = PM_BASE + 6;
+pub const PM_SETGROUPS: u32 = PM_BASE + 9;
+pub const PM_GETGROUPS: u32 = PM_BASE + 10;
+pub const PM_SETGID: u32 = PM_BASE + 12;
+pub const PM_GETGID: u32 = PM_BASE + 13;
 pub const PM_EXEC: u32 = PM_BASE + 14;
+pub const PM_SETEUID: u32 = PM_BASE + 29;
+pub const PM_SETEGID: u32 = PM_BASE + 30;
+pub const PM_ISSETUGID: u32 = PM_BASE + 31;
+pub const PM_GETSID: u32 = PM_BASE + 32;
 pub const PM_EXEC_NEW: u32 = PM_BASE + 43;
+
+/// Maximum supplemental groups (matches PM's `pm.rs NGROUPS_MAX`).
+pub const NGROUPS_MAX: usize = 32;
 
 // For PM calls, the message layout is:
 //   offset 0: dest endpoint (i32) — set by sendrec
@@ -39,6 +52,14 @@ const OFF_TYPE: usize = 4;
 //   m1i2 = ppid (i32) at offset 12
 const OFF_PID: usize = 8;
 const OFF_PPID: usize = 12;
+
+// Credential call layout (PM handlers in pm.rs, ported from getset.c):
+//   m1i1 = arg (new uid/gid, pid, ngroups) at offset 8
+//   m1i2 = second reply value (euid/egid) at offset 12
+//   raw[16..24] = group-array pointer at offset 24
+const OFF_ARG1: usize = 8;
+const OFF_ARG2: usize = 12;
+const OFF_PTR: usize = 24;
 
 // PM_FORK reply (via VFS_PM_FORK_REPLY): child pid in m1i1@8.
 const OFF_CHILD_PID: usize = 8;
@@ -223,6 +244,194 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
     }
 }
 
+// Credential calls (C pm/getset.c). PM replies with the status in m_type;
+// negative = -errno.
+
+/// Run a PM credential call with an optional m1i1 argument, returning the
+/// reply buffer (m_type >= 0 verified).
+///
+/// # Safety
+///
+/// Must be called with the PM server running.
+#[cfg(target_os = "minix")]
+unsafe fn pm_cred_call(call: u32, arg1: Option<i32>) -> Result<[u8; 64], MinixErr> {
+    let mut msg = [0u8; 64];
+    msg_set_i32(&mut msg, OFF_TYPE, call as i32);
+    if let Some(v) = arg1 {
+        msg_set_i32(&mut msg, OFF_ARG1, v);
+    }
+    let result = unsafe { sendrec(PM_PROC_NR, &mut msg) };
+    match result {
+        Ok(_) => {
+            let mtype = msg_i32(&msg, OFF_TYPE);
+            if mtype < 0 {
+                Err(MinixErr::from_i32(mtype))
+            } else {
+                Ok(msg)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Real and effective user ids: `(ruid, euid)`.
+pub fn getuid() -> Result<(i32, i32), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_GETUID, None).map(|msg| (msg_i32(&msg, OFF_ARG1), msg_i32(&msg, OFF_ARG2)))
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Real and effective group ids: `(rgid, egid)`.
+pub fn getgid() -> Result<(i32, i32), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_GETGID, None).map(|msg| (msg_i32(&msg, OFF_ARG1), msg_i32(&msg, OFF_ARG2)))
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Process group id of `pid` (0 = self).
+pub fn getsid(pid: i32) -> Result<i32, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_GETSID, Some(pid)).map(|msg| msg_i32(&msg, OFF_ARG1))
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = pid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// True when the process runs with setuid/setgid taint (C `issetugid`).
+pub fn issetugid() -> Result<bool, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_ISSETUGID, None).map(|msg| msg_i32(&msg, OFF_ARG1) != 0)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Fetch supplemental groups into `buf`; returns the group count. An empty
+/// `buf` is a count query (C `getgroups(0, NULL)`).
+pub fn getgroups(buf: &mut [i32]) -> Result<i32, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETGROUPS as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, buf.len() as i32);
+        msg[OFF_PTR..OFF_PTR + 8].copy_from_slice(&(buf.as_mut_ptr() as u64).to_le_bytes());
+        let result = sendrec(PM_PROC_NR, &mut msg);
+        match result {
+            Ok(_) => {
+                let mtype = msg_i32(&msg, OFF_TYPE);
+                if mtype < 0 {
+                    Err(MinixErr::from_i32(mtype))
+                } else {
+                    Ok(msg_i32(&msg, OFF_ARG1))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = buf;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Set the real and effective user id (C `setuid`).
+pub fn setuid(uid: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_SETUID, Some(uid)).map(|_| ())
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = uid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Set the effective user id only (C `seteuid`).
+pub fn seteuid(uid: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_SETEUID, Some(uid)).map(|_| ())
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = uid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Set the real and effective group id (C `setgid`).
+pub fn setgid(gid: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_SETGID, Some(gid)).map(|_| ())
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = gid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Set the effective group id only (C `setegid`).
+pub fn setegid(gid: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_SETEGID, Some(gid)).map(|_| ())
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = gid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Set supplemental groups (C `setgroups`; root-only in PM).
+pub fn setgroups(gids: &[i32]) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SETGROUPS as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, gids.len() as i32);
+        msg[OFF_PTR..OFF_PTR + 8].copy_from_slice(&(gids.as_ptr() as u64).to_le_bytes());
+        let result = sendrec(PM_PROC_NR, &mut msg);
+        match result {
+            Ok(_) => {
+                let mtype = msg_i32(&msg, OFF_TYPE);
+                if mtype < 0 {
+                    Err(MinixErr::from_i32(mtype))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = gids;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
 impl MinixErr {
     /// Create a MinixErr from a raw syscall return value (non-positive).
     pub const fn from_i32(v: i32) -> Self {
@@ -247,7 +456,51 @@ mod tests {
         assert_eq!(PM_FORK, 0x002);
         assert_eq!(PM_WAITPID, 0x003);
         assert_eq!(PM_GETPID, 0x004);
+        assert_eq!(PM_SETUID, 0x005);
+        assert_eq!(PM_GETUID, 0x006);
+        assert_eq!(PM_SETGROUPS, 0x009);
+        assert_eq!(PM_GETGROUPS, 0x00A);
+        assert_eq!(PM_SETGID, 0x00C);
+        assert_eq!(PM_GETGID, 0x00D);
+        assert_eq!(PM_SETEUID, 0x01D);
+        assert_eq!(PM_SETEGID, 0x01E);
+        assert_eq!(PM_ISSETUGID, 0x01F);
+        assert_eq!(PM_GETSID, 0x020);
         assert_eq!(PM_EXEC_NEW, 0x02B);
+    }
+
+    #[test]
+    fn test_cred_message_format() {
+        // PM handlers (pm.rs) read m1i1@8 for the id/pid/ngroups argument
+        // and the group pointer from raw[16..24] (@24 in the std buffer),
+        // and reply ruid/rgid in m1i1@8, euid/egid in m1i2@12.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SETUID as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, 100);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x005);
+        assert_eq!(msg_i32(&msg, OFF_ARG1), 100);
+
+        let ptr: u64 = 0x1234_5678_9ABC_DEF0;
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETGROUPS as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, 3);
+        msg[OFF_PTR..OFF_PTR + 8].copy_from_slice(&ptr.to_le_bytes());
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x00A);
+        assert_eq!(msg_i32(&msg, OFF_ARG1), 3);
+        assert_eq!(
+            u64::from_le_bytes(msg[OFF_PTR..OFF_PTR + 8].try_into().unwrap()),
+            ptr
+        );
+    }
+
+    #[test]
+    fn test_getuid_reply_layout() {
+        // PM handle_getuid replies ruid in m1i1@8, euid in m1i2@12.
+        let mut msg = [0u8; 64];
+        msg[OFF_TYPE..OFF_TYPE + 4].copy_from_slice(&0i32.to_le_bytes()); // OK status
+        msg_set_i32(&mut msg, OFF_ARG1, 100); // ruid
+        msg_set_i32(&mut msg, OFF_ARG2, 100); // euid
+        assert_eq!(msg_i32(&msg, OFF_ARG1), 100);
+        assert_eq!(msg_i32(&msg, OFF_ARG2), 100);
     }
 
     #[test]

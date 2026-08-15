@@ -658,6 +658,89 @@ pub fn chown(args: &[&str]) -> i32 {
     exit_code
 }
 
+/// id — print real/effective user and group ids and supplemental groups.
+///
+/// Numeric only: there is no passwd database yet (Phase J4), so names are
+/// omitted. Mirrors the output shape of coreutils `id`.
+pub fn id(_args: &[&str]) -> i32 {
+    let fail_id = |op: &[u8], e: minix_std::MinixErr| -> i32 {
+        write_err(b"id: ");
+        write_err(op);
+        write_err(b": ");
+        write_err(errstr(e.0));
+        write_err(b"\n");
+        1
+    };
+
+    let (ruid, euid) = match minix_std::process::getuid() {
+        Ok(v) => v,
+        Err(e) => return fail_id(b"getuid", e),
+    };
+    let (rgid, egid) = match minix_std::process::getgid() {
+        Ok(v) => v,
+        Err(e) => return fail_id(b"getgid", e),
+    };
+
+    let mut out = [0u8; 256];
+    let mut len = 0;
+    let push = |s: &[u8], out: &mut [u8], len: &mut usize| {
+        if *len < out.len() {
+            let n = s.len().min(out.len() - *len);
+            out[*len..*len + n].copy_from_slice(&s[..n]);
+            *len += n;
+        }
+    };
+    push(b"uid=", &mut out, &mut len);
+    len += fmt_dec(ruid, &mut out[len..]);
+    push(b" euid=", &mut out, &mut len);
+    len += fmt_dec(euid, &mut out[len..]);
+    push(b" gid=", &mut out, &mut len);
+    len += fmt_dec(rgid, &mut out[len..]);
+    push(b" egid=", &mut out, &mut len);
+    len += fmt_dec(egid, &mut out[len..]);
+    push(b" groups=", &mut out, &mut len);
+
+    let mut groups = [0i32; minix_std::process::NGROUPS_MAX];
+    match minix_std::process::getgroups(&mut groups) {
+        Ok(count) => {
+            for (i, g) in groups[..count as usize].iter().enumerate() {
+                if i > 0 {
+                    push(b",", &mut out, &mut len);
+                }
+                len += fmt_dec(*g, &mut out[len..]);
+            }
+        }
+        Err(e) => return fail_id(b"getgroups", e),
+    }
+    push(b"\n", &mut out, &mut len);
+    write_out(&out[..len]);
+    0
+}
+
+/// Format `n` as decimal digits into `buf`; returns the digit count (only
+/// the part that fits is copied).
+fn fmt_dec(n: i32, buf: &mut [u8]) -> usize {
+    let mut tmp = [0u8; 12];
+    let mut i = tmp.len();
+    let mut v = n.unsigned_abs();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        i -= 1;
+        tmp[i] = b'-';
+    }
+    let s = &tmp[i..];
+    let copy = s.len().min(buf.len());
+    buf[..copy].copy_from_slice(&s[..copy]);
+    s.len()
+}
+
 /// sync — flush cached filesystem writes to disk.
 pub fn sync(_args: &[&str]) -> i32 {
     #[cfg(target_os = "minix")]
