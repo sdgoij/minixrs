@@ -135,6 +135,44 @@ pub fn service_pm() -> i32 {
             OK
         }
 
+        VFS_PM_SETGROUPS => {
+            let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
+            let ngroups = r_i32(&glob.fs_m_in, PM_EID_OFF);
+            let addr = r_u64(&glob.fs_m_in, PM_RID_OFF);
+            // The group array lives in PM's address space; copy it here
+            // (PM stores i32 gids, VFS stores u16 — pm_setgroups casts).
+            #[cfg(target_os = "minix")]
+            {
+                let n = (ngroups.max(0) as usize).min(NGROUPS_MAX);
+                if n > 0 {
+                    let mut buf = [0i32; NGROUPS_MAX];
+                    let r = unsafe {
+                        crate::vfs::call::sys_vircopy(
+                            PM_PROC_NR,
+                            addr,
+                            crate::vfs::call::SELF,
+                            buf.as_mut_ptr() as u64,
+                            n * 4,
+                        )
+                    };
+                    if r == 0 {
+                        unsafe { pm_setgroups(proc_e, n as i32, buf.as_ptr()) };
+                    }
+                } else {
+                    unsafe { pm_setgroups(proc_e, 0, core::ptr::null()) };
+                }
+            }
+            #[cfg(not(target_os = "minix"))]
+            {
+                let _ = (proc_e, ngroups, addr);
+            }
+            #[cfg(target_os = "minix")]
+            unsafe {
+                reply_to_pm(VFS_PM_RS_BASE + 11, proc_e)
+            };
+            OK
+        }
+
         VFS_PM_SETSID => {
             let proc_e = r_i32(&glob.fs_m_in, PM_ENDPT_OFF);
             pm_setsid(proc_e);
@@ -230,7 +268,7 @@ pub fn service_pm() -> i32 {
             OK
         }
 
-        VFS_PM_INIT | VFS_PM_SETGROUPS => OK,
+        VFS_PM_INIT => OK,
 
         _ => EINVAL,
     }

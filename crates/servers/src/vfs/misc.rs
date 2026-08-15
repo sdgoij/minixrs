@@ -227,17 +227,21 @@ pub fn pm_setuid(proc_e: i32, euid: i32, ruid: i32) {
 
 /// Set groups for a process.
 ///
+/// `addr` points to an array of `ngroups` i32 gids in the caller's (PM's)
+/// address space — the service_pm SETGROUPS arm copies it here first.
+///
 /// # Safety
 ///
-/// `addr` must point to a valid array of at least `ngroups` u16 values.
-pub unsafe fn pm_setgroups(proc_e: i32, ngroups: i32, addr: *const u16) {
+/// `addr` must point to a valid array of at least `ngroups` i32 values
+/// when `ngroups > 0`.
+pub unsafe fn pm_setgroups(proc_e: i32, ngroups: i32, addr: *const i32) {
     if let Some(rfp) = fproc_by_endpoint(proc_e) {
         unsafe {
             (*rfp).fp_ngroups = ngroups;
             if ngroups > 0 && !addr.is_null() {
                 let count = ngroups.min(NGROUPS_MAX as i32) as usize;
                 for i in 0..count {
-                    (*rfp).fp_sgroups[i] = *addr.add(i);
+                    (*rfp).fp_sgroups[i] = (*addr.add(i)) as u16;
                 }
             }
         }
@@ -508,7 +512,7 @@ mod tests {
         unsafe {
             (*fp_slot(2)).fp_endpoint = 2;
         }
-        let groups = [100u16, 200, 300];
+        let groups = [100i32, 200, 300];
         unsafe {
             pm_setgroups(2, 3, groups.as_ptr());
         }

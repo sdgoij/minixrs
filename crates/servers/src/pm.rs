@@ -78,6 +78,8 @@ pub const ENOSYS: i32 = -71;
 pub const EINVAL: i32 = -22;
 pub const EAGAIN: i32 = -11;
 pub const EPERM: i32 = -1;
+pub const EFAULT: i32 = -14;
+pub const ESRCH: i32 = -3;
 
 // SigSet — signal set type (sigset_t equivalent)
 
@@ -2056,7 +2058,12 @@ pub unsafe fn do_get(slot: usize, call_nr: i32) -> Result<i64, i32> {
 ///
 /// `slot` must be < `NR_PROCS` and refer to a valid in-use process. The
 /// caller must ensure exclusive access to this slot.
-pub unsafe fn do_set(slot: usize, call_nr: i32, uid: i32, gid: i32) -> Result<(), i32> {
+/// Handle PM_SETUID/SETEUID/SETGID/SETEGID with C semantics
+/// (`pm/getset.c do_set`): non-root may only set the id to the current
+/// real id; root may set anything. PM_SETUID/SETGID change real+effective;
+/// PM_SETEUID/SETEGID change effective only. On success returns the
+/// `VFS_PM_*` message type the caller must forward to VFS.
+pub unsafe fn do_set(slot: usize, call_nr: i32, new_id: i32) -> Result<u32, i32> {
     if slot >= NR_PROCS {
         return Err(EINVAL);
     }
@@ -2068,20 +2075,90 @@ pub unsafe fn do_set(slot: usize, call_nr: i32, uid: i32, gid: i32) -> Result<()
     }
 
     match call_nr {
-        0 => {
-            // PM_SETUID
-            rmp.mp_realuid = uid;
-            rmp.mp_effuid = uid;
-            Ok(())
+        PM_SETUID | PM_SETEUID => {
+            // C: if (mp_realuid != uid && mp_effuid != SUPER_USER) EPERM.
+            if rmp.mp_realuid != new_id && rmp.mp_effuid != SUPER_USER {
+                return Err(EPERM);
+            }
+            if call_nr == PM_SETUID {
+                rmp.mp_realuid = new_id;
+            }
+            rmp.mp_effuid = new_id;
+            Ok(arch_common::com::VFS_PM_SETUID)
         }
-        1 => {
-            // PM_SETGID
-            rmp.mp_realgid = gid;
-            rmp.mp_effgid = gid;
-            Ok(())
+        PM_SETGID | PM_SETEGID => {
+            // C: if (mp_realgid != gid && mp_effuid != SUPER_USER) EPERM.
+            if rmp.mp_realgid != new_id && rmp.mp_effuid != SUPER_USER {
+                return Err(EPERM);
+            }
+            if call_nr == PM_SETGID {
+                rmp.mp_realgid = new_id;
+            }
+            rmp.mp_effgid = new_id;
+            Ok(arch_common::com::VFS_PM_SETGID)
         }
-        _ => Err(ENOSYS),
+        _ => Err(EINVAL),
     }
+}
+
+/// Handle PM_SETGROUPS (C `do_set`): root-only; copies the caller's group
+/// list into `mp_sgroups` (gids are i32 in the port; C's gid_t is u16, so
+/// values above 0xFFFF are rejected) and returns the `VFS_PM_SETGROUPS`
+/// message type to forward.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS` and refer to a valid in-use process. On the
+/// minix target, `ptr` must point to a caller-accessible array of
+/// `ngroups` i32 gids.
+pub unsafe fn do_setgroups(slot: usize, ngroups: i32, ptr: u64) -> Result<u32, i32> {
+    if slot >= NR_PROCS {
+        return Err(EINVAL);
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE == 0 {
+        return Err(EINVAL);
+    }
+    if rmp.mp_effuid != SUPER_USER {
+        return Err(EPERM);
+    }
+    if ngroups > NGROUPS_MAX as i32 || ngroups < 0 {
+        return Err(EINVAL);
+    }
+    if ngroups > 0 && ptr == 0 {
+        return Err(EFAULT);
+    }
+    if ngroups > 0 {
+        #[cfg(target_os = "minix")]
+        {
+            let r = minix_rt::sys_vircopy(
+                rmp.mp_endpoint,
+                ptr,
+                minix_rt::SELF,
+                rmp.mp_sgroups.as_mut_ptr() as u64,
+                (ngroups as usize) * core::mem::size_of::<i32>(),
+            );
+            if r != 0 {
+                return Err(r);
+            }
+            for i in 0..ngroups as usize {
+                if rmp.mp_sgroups[i] > 0xFFFF {
+                    return Err(EINVAL);
+                }
+            }
+        }
+        #[cfg(not(target_os = "minix"))]
+        {
+            return Err(EINVAL); // host tests exercise the ngroups == 0 path
+        }
+    }
+    for i in (ngroups.max(0) as usize)..NGROUPS_MAX {
+        rmp.mp_sgroups[i] = 0;
+    }
+    rmp.mp_ngroups = ngroups.max(0);
+    Ok(arch_common::com::VFS_PM_SETGROUPS)
 }
 
 // pm_isokendpt
@@ -2482,7 +2559,51 @@ pub unsafe fn handle_getpid(caller_slot: usize, msg: &mut Message) -> i32 {
     OK
 }
 
-/// Handler for PM_SETUID — set user/group IDs.
+/// Root uid/gid (C SUPER_USER).
+const SUPER_USER: i32 = 0;
+
+/// Forward a successful credential change to VFS (VFS_PM_SETUID/SETGID/
+/// SETGROUPS) with the blocking-sendrec pattern PM uses for exec. Message
+/// layout matches vfs/pm.rs: type @ 4, endpt @ 8, eid @ 12, rid @ 16 (u64
+/// — for SETGROUPS this is the group-array pointer in PM's space).
+#[cfg(target_os = "minix")]
+unsafe fn forward_cred_to_vfs(msg_type: u32, endpt: i32, eid: i32, rid: u64) {
+    let mut vfs_msg = [0u8; 64];
+    vfs_msg[4..8].copy_from_slice(&(msg_type as i32).to_le_bytes());
+    vfs_msg[8..12].copy_from_slice(&endpt.to_le_bytes());
+    vfs_msg[12..16].copy_from_slice(&eid.to_le_bytes());
+    vfs_msg[16..24].copy_from_slice(&rid.to_le_bytes());
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::VFS_PROC_NR as u64,
+            vfs_msg.as_mut_ptr() as u64,
+        )
+    };
+}
+
+#[cfg(not(target_os = "minix"))]
+unsafe fn forward_cred_to_vfs(_msg_type: u32, _endpt: i32, _eid: i32, _rid: u64) {}
+
+/// Common tail for the four set*id handlers: apply `do_set` and forward
+/// the VFS update on success.
+unsafe fn setid_common(caller_slot: usize, call_nr: i32, new_id: i32) -> i32 {
+    match unsafe { do_set(caller_slot, call_nr, new_id) } {
+        Ok(fwd) => {
+            let base = MPROC.as_ptr();
+            let rmp = unsafe { &*base.add(caller_slot) };
+            let (eid, rid) = match call_nr {
+                PM_SETUID | PM_SETEUID => (rmp.mp_effuid, rmp.mp_realuid as u64),
+                _ => (rmp.mp_effgid, rmp.mp_realgid as u64),
+            };
+            unsafe { forward_cred_to_vfs(fwd, rmp.mp_endpoint, eid, rid) };
+            OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Handler for PM_SETUID.
 ///
 /// # Safety
 ///
@@ -2490,28 +2611,170 @@ pub unsafe fn handle_getpid(caller_slot: usize, msg: &mut Message) -> i32 {
 /// to a valid message buffer.
 pub unsafe fn handle_setuid(caller_slot: usize, msg: &mut Message) -> i32 {
     let uid = unsafe { msg.m_payload.m1.m1i1 };
-    let gid = unsafe { msg.m_payload.m1.m1i2 };
-    match unsafe { do_set(caller_slot, 0, uid, gid) } {
-        Ok(()) => OK,
-        Err(e) => e,
-    }
+    unsafe { setid_common(caller_slot, PM_SETUID, uid) }
 }
 
-/// Handler for PM_SETGID — set real/effective group ID.
+/// Handler for PM_SETEUID — effective uid only.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_seteuid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let uid = unsafe { msg.m_payload.m1.m1i1 };
+    unsafe { setid_common(caller_slot, PM_SETEUID, uid) }
+}
+
+/// Handler for PM_SETGID.
 ///
 /// # Safety
 ///
 /// `caller_slot` must be a valid, in-use process slot. `msg` must point
 /// to a valid message buffer.
 pub unsafe fn handle_setgid(caller_slot: usize, msg: &mut Message) -> i32 {
-    // PM_SETGID message: m1i1 = gid, m1i2 = egid
     let gid = unsafe { msg.m_payload.m1.m1i1 };
-    let egid = unsafe { msg.m_payload.m1.m1i2 };
-    // do_set with subtype 1 for GID operations
-    match unsafe { do_set(caller_slot, 1, gid, egid) } {
-        Ok(()) => OK,
+    unsafe { setid_common(caller_slot, PM_SETGID, gid) }
+}
+
+/// Handler for PM_SETEGID — effective gid only.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_setegid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let gid = unsafe { msg.m_payload.m1.m1i1 };
+    unsafe { setid_common(caller_slot, PM_SETEGID, gid) }
+}
+
+/// Handler for PM_SETGROUPS — root-only; the group list comes from the
+/// caller's buffer (m1i1 = ngroups, raw[16..24] = pointer; C
+/// `m_lc_pm_groups`).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer; on the minix target raw[16..24] must name a
+/// caller-accessible group array when ngroups > 0.
+pub unsafe fn handle_setgroups(caller_slot: usize, msg: &mut Message) -> i32 {
+    let ngroups = unsafe { msg.m_payload.m1.m1i1 };
+    let ptr = u64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[16..24] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    match unsafe { do_setgroups(caller_slot, ngroups, ptr) } {
+        Ok(fwd) => {
+            let base = MPROC.as_ptr();
+            let rmp = unsafe { &*base.add(caller_slot) };
+            unsafe {
+                forward_cred_to_vfs(
+                    fwd,
+                    rmp.mp_endpoint,
+                    rmp.mp_ngroups,
+                    rmp.mp_sgroups.as_ptr() as u64,
+                );
+            }
+            OK
+        }
         Err(e) => e,
     }
+}
+
+/// Handler for PM_GETGROUPS — m1i1 = ngroups (0 = count query),
+/// raw[16..24] = pointer to the caller's gid array.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer. On the minix target, when `ngroups > 0`,
+/// `ptr` must name a caller-accessible gid array large enough for
+/// `ngroups` entries.
+pub unsafe fn handle_getgroups(caller_slot: usize, msg: &mut Message) -> i32 {
+    let ngroups = unsafe { msg.m_payload.m1.m1i1 };
+    let ptr = u64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[16..24] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    if ngroups > NGROUPS_MAX as i32 || ngroups < 0 {
+        return EINVAL;
+    }
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    if ngroups == 0 {
+        // Count query (C: return mp_ngroups).
+        msg.m_payload.m1.m1i1 = rmp.mp_ngroups;
+        return OK;
+    }
+    if ngroups < rmp.mp_ngroups {
+        return EINVAL; // asking for fewer groups than available
+    }
+    #[cfg(target_os = "minix")]
+    {
+        let r = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            rmp.mp_sgroups.as_ptr() as u64,
+            rmp.mp_endpoint,
+            ptr,
+            (ngroups as usize) * core::mem::size_of::<i32>(),
+        );
+        if r != 0 {
+            return r;
+        }
+        msg.m_payload.m1.m1i1 = rmp.mp_ngroups;
+        OK
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (ptr, ngroups);
+        EINVAL // host tests use the count query
+    }
+}
+
+/// Handler for PM_GETSID — m1i1 = pid (0 = self); returns the target's
+/// process group id.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_getsid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let pid = unsafe { msg.m_payload.m1.m1i1 };
+    let base = MPROC.as_ptr();
+    let target = if pid != 0 {
+        let mut found = None;
+        for i in 0..NR_PROCS {
+            let p = unsafe { &*base.add(i) };
+            if p.mp_flags & IN_USE != 0 && p.mp_pid == pid {
+                found = Some(i);
+                break;
+            }
+        }
+        found
+    } else {
+        Some(caller_slot)
+    };
+    match target {
+        Some(i) => {
+            unsafe { msg.m_payload.m1.m1i1 = (*base.add(i)).mp_procgrp };
+            OK
+        }
+        None => ESRCH,
+    }
+}
+
+/// Handler for PM_ISSETUGID — 1 after a setuid/setgid exec (TAINTED).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_issetugid(caller_slot: usize, msg: &mut Message) -> i32 {
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(caller_slot) };
+    msg.m_payload.m1.m1i1 = if rmp.mp_flags & TAINTED != 0 { 1 } else { 0 };
+    OK
 }
 
 /// Handler for PM_GETGID — return real/effective GID.
@@ -2825,8 +3088,8 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         6 => unsafe { handle_getuid(caller_slot, msg) },
         7 => unsafe { handle_stime(caller_slot, msg) }, // PM_STIME
         8 => unsafe { no_sys(caller_slot, msg) },       // PM_PTRACE
-        9 => unsafe { no_sys(caller_slot, msg) },       // PM_SETGROUPS
-        10 => unsafe { no_sys(caller_slot, msg) },      // PM_GETGROUPS
+        9 => unsafe { handle_setgroups(caller_slot, msg) }, // PM_SETGROUPS
+        10 => unsafe { handle_getgroups(caller_slot, msg) }, // PM_GETGROUPS
         11 => unsafe { handle_kill(caller_slot, msg) },
         12 => unsafe { handle_setgid(caller_slot, msg) }, // PM_SETGID
         13 => unsafe { handle_getgid(caller_slot, msg) }, // PM_GETGID
@@ -2841,9 +3104,10 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         24 => unsafe { handle_sigreturn(caller_slot, msg) },
         25 => unsafe { no_sys(caller_slot, msg) }, // PM_SYSUNAME
         28 => unsafe { handle_time(caller_slot, msg) }, // PM_GETTIMEOFDAY
-        29 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEUID
-        30 => unsafe { no_sys(caller_slot, msg) }, // PM_SETEGID
-        32 => unsafe { no_sys(caller_slot, msg) }, // PM_GETSID
+        29 => unsafe { handle_seteuid(caller_slot, msg) }, // PM_SETEUID
+        30 => unsafe { handle_setegid(caller_slot, msg) }, // PM_SETEGID
+        31 => unsafe { handle_issetugid(caller_slot, msg) }, // PM_ISSETUGID
+        32 => unsafe { handle_getsid(caller_slot, msg) }, // PM_GETSID
         34 => unsafe { handle_clock_gettime(caller_slot, msg) }, // PM_CLOCK_GETTIME
         35 => unsafe { handle_clock_settime(caller_slot, msg) }, // PM_CLOCK_SETTIME
         36 => unsafe { handle_rusage(caller_slot, msg) }, // PM_GETRUSAGE
@@ -3411,14 +3675,22 @@ pub unsafe fn do_newexec(caller_slot: usize, msg: &mut Message) -> i32 {
     let new_egid = unsafe { msg.m_payload.m1.m1i2 };
 
     // Only apply setuid/setgid if not traced.
-    if rmp.mp_tracer == NO_TRACER {
+    // C (exec.c do_newexec): clear TAINTED first, then set it only when the
+    // exec carries setuid/setgid bits (VFS signals this with a non-(-1)
+    // euid/egid) or when the effective and real ids already differ.
+    rmp.mp_flags &= !TAINTED;
+    let setuid_exec = new_euid != -1 || new_egid != -1;
+    if rmp.mp_tracer == NO_TRACER && setuid_exec {
         if new_euid != -1 {
             rmp.mp_effuid = new_euid;
-            rmp.mp_realuid = new_euid;
+            // C: a setuid exec changes the effective uid only; the real
+            // uid stays (POSIX). VFS's fproc keeps its real uid too.
         }
         if new_egid != -1 {
             rmp.mp_effgid = new_egid;
         }
+        rmp.mp_flags |= TAINTED;
+    } else if rmp.mp_effuid != rmp.mp_realuid || rmp.mp_effgid != rmp.mp_realgid {
         rmp.mp_flags |= TAINTED;
     }
 
@@ -4467,6 +4739,259 @@ mod tests {
             let base = MPROC.as_ptr();
             assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
         }
+    }
+
+    // Phase J1 credential API (C pm/getset.c semantics)
+
+    unsafe fn setup_cred_proc(slot: usize, ruid: i32, euid: i32, rgid: i32, egid: i32) {
+        let base = MPROC.as_ptr();
+        let rmp = unsafe { &mut *base.add(slot) };
+        rmp.mp_flags |= IN_USE;
+        rmp.mp_realuid = ruid;
+        rmp.mp_effuid = euid;
+        rmp.mp_realgid = rgid;
+        rmp.mp_effgid = egid;
+        rmp.mp_ngroups = 0;
+        rmp.mp_pid = 0;
+        rmp.mp_procgrp = 0;
+    }
+
+    fn cred_msg() -> Message {
+        Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        }
+    }
+
+    #[test]
+    fn test_do_set_nonroot_cannot_setuid_root() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+        }
+        let r = unsafe { do_set(slot, PM_SETUID, 0) };
+        assert_eq!(r, Err(EPERM), "non-root must not escalate to root");
+    }
+
+    #[test]
+    fn test_do_set_root_can_setuid_any() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 0, 0, 0, 0);
+        }
+        let r = unsafe { do_set(slot, PM_SETUID, 100) };
+        assert_eq!(r, Ok(arch_common::com::VFS_PM_SETUID));
+        let base = MPROC.as_ptr();
+        let rmp = unsafe { &*base.add(slot) };
+        assert_eq!(rmp.mp_realuid, 100);
+        assert_eq!(rmp.mp_effuid, 100);
+    }
+
+    #[test]
+    fn test_do_set_seteuid_changes_effective_only() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 0, 0, 0, 0);
+        }
+        let r = unsafe { do_set(slot, PM_SETEUID, 100) };
+        assert_eq!(r, Ok(arch_common::com::VFS_PM_SETUID));
+        let base = MPROC.as_ptr();
+        let rmp = unsafe { &*base.add(slot) };
+        assert_eq!(rmp.mp_realuid, 0, "seteuid keeps the real uid");
+        assert_eq!(rmp.mp_effuid, 100);
+    }
+
+    #[test]
+    fn test_do_set_nonroot_setgid_only_to_realgid() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+        }
+        let r = unsafe { do_set(slot, PM_SETGID, 60) };
+        assert_eq!(
+            r,
+            Err(EPERM),
+            "non-root may not switch gid away from real gid"
+        );
+        let r = unsafe { do_set(slot, PM_SETGID, 50) };
+        assert_eq!(r, Ok(arch_common::com::VFS_PM_SETGID));
+        let base = MPROC.as_ptr();
+        let rmp = unsafe { &*base.add(slot) };
+        assert_eq!(rmp.mp_realgid, 50);
+        assert_eq!(rmp.mp_effgid, 50);
+    }
+
+    #[test]
+    fn test_do_setgroups_root_only() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+        }
+        // Non-root: EPERM.
+        let r = unsafe { do_setgroups(slot, 0, 0) };
+        assert_eq!(r, Err(EPERM));
+        // Root with zero groups: OK (host path needs no user copy).
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(slot)).mp_effuid = 0;
+        }
+        let r = unsafe { do_setgroups(slot, 0, 0) };
+        assert_eq!(r, Ok(arch_common::com::VFS_PM_SETGROUPS));
+        assert_eq!(unsafe { (*base.add(slot)).mp_ngroups }, 0);
+    }
+
+    #[test]
+    fn test_do_setgroups_rejects_too_many() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 0, 0, 0, 0);
+        }
+        let r = unsafe { do_setgroups(slot, NGROUPS_MAX as i32 + 1, 0) };
+        assert_eq!(r, Err(EINVAL));
+    }
+
+    #[test]
+    fn test_do_newexec_keeps_real_uid_on_setuid() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+        }
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(slot)).mp_tracer = NO_TRACER;
+        }
+        let mut msg = cred_msg();
+        msg.m_payload.m1.m1i1 = 200; // new euid (setuid exec)
+        msg.m_payload.m1.m1i2 = 60; // new egid
+        let r = unsafe { do_newexec(slot, &mut msg) };
+        assert_eq!(r, OK);
+        let rmp = unsafe { &*base.add(slot) };
+        assert_eq!(rmp.mp_effuid, 200, "effective uid rises");
+        assert_eq!(rmp.mp_realuid, 100, "real uid is preserved");
+        assert_eq!(rmp.mp_effgid, 60);
+        assert_ne!(rmp.mp_flags & TAINTED, 0, "setuid exec taints");
+    }
+
+    #[test]
+    fn test_do_newexec_plain_exec_clears_taint() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+            (*base.add(slot)).mp_flags |= TAINTED; // stale taint from a past setuid exec
+        }
+        let mut msg = cred_msg();
+        msg.m_payload.m1.m1i1 = -1; // no setuid bits
+        msg.m_payload.m1.m1i2 = -1; // no setgid bits
+        let r = unsafe { do_newexec(slot, &mut msg) };
+        assert_eq!(r, OK);
+        let rmp = unsafe { &*base.add(slot) };
+        assert_eq!(rmp.mp_flags & TAINTED, 0, "plain exec clears taint");
+        assert_eq!(rmp.mp_effuid, 100, "no setuid exec: ids unchanged");
+    }
+
+    #[test]
+    fn test_do_newexec_id_mismatch_taints() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_cred_proc(slot, 100, 200, 50, 50); // effuid != realuid
+        }
+        let mut msg = cred_msg();
+        msg.m_payload.m1.m1i1 = -1;
+        msg.m_payload.m1.m1i2 = -1;
+        let r = unsafe { do_newexec(slot, &mut msg) };
+        assert_eq!(r, OK);
+        let rmp = unsafe { &*base.add(slot) };
+        assert_ne!(
+            rmp.mp_flags & TAINTED,
+            0,
+            "running with differing real/eff ids taints (C)"
+        );
+    }
+
+    #[test]
+    fn test_issetugid_reflects_taint() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 100, 100, 50, 50);
+        }
+        let base = MPROC.as_ptr();
+        let mut msg = cred_msg();
+        let r = unsafe { handle_issetugid(slot, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 0);
+        unsafe {
+            (*base.add(slot)).mp_flags |= TAINTED;
+        }
+        let r = unsafe { handle_issetugid(slot, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 1);
+    }
+
+    #[test]
+    fn test_getsid_returns_procgrp() {
+        init_proc();
+        let a = alloc_proc().unwrap();
+        let b = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(a)).mp_flags |= IN_USE;
+            (*base.add(a)).mp_pid = 42;
+            (*base.add(a)).mp_procgrp = 7;
+            (*base.add(b)).mp_flags |= IN_USE;
+            (*base.add(b)).mp_pid = 99;
+            (*base.add(b)).mp_procgrp = 8;
+        }
+        let mut msg = cred_msg();
+        msg.m_payload.m1.m1i1 = 42;
+        let r = unsafe { handle_getsid(a, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 7);
+        msg.m_payload.m1.m1i1 = 12345;
+        let r = unsafe { handle_getsid(a, &mut msg) };
+        assert_eq!(r, ESRCH);
+        msg.m_payload.m1.m1i1 = 0;
+        let r = unsafe { handle_getsid(b, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 8);
+    }
+
+    #[test]
+    fn test_getgroups_count_query() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            setup_cred_proc(slot, 0, 0, 0, 0);
+        }
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(slot)).mp_ngroups = 3;
+            (*base.add(slot)).mp_sgroups[0] = 10;
+            (*base.add(slot)).mp_sgroups[1] = 20;
+            (*base.add(slot)).mp_sgroups[2] = 30;
+        }
+        let mut msg = cred_msg();
+        // ngroups = 0 → count query.
+        msg.m_payload.m1.m1i1 = 0;
+        let r = unsafe { handle_getgroups(slot, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 3);
+        // Asking for fewer groups than available → EINVAL (C).
+        msg.m_payload.m1.m1i1 = 2;
+        let r = unsafe { handle_getgroups(slot, &mut msg) };
+        assert_eq!(r, EINVAL);
     }
 
     #[test]
