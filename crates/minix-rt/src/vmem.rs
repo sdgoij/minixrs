@@ -184,7 +184,7 @@ mod tests {
     fn test_mmap_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, VM_MMAP as i32);
-        msg_set_u64(&mut msg, OFF_VM_ADDR, 0x1234_5678 as u64);
+        msg_set_u64(&mut msg, OFF_VM_ADDR, 0x1234_5678_u64);
         msg_set_u64(&mut msg, OFF_VM_LEN, 0x1000);
         msg_set_i32(&mut msg, OFF_VM_PROT, PROT_READ | PROT_WRITE);
         msg_set_i32(&mut msg, OFF_VM_FLAGS, MAP_PRIVATE | MAP_ANONYMOUS);
@@ -211,7 +211,7 @@ mod tests {
     fn test_munmap_message_format() {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, VM_MUNMAP as i32);
-        msg_set_u64(&mut msg, OFF_VM_ADDR, 0x8000_0000 as u64);
+        msg_set_u64(&mut msg, OFF_VM_ADDR, 0x8000_0000_u64);
         msg_set_u64(&mut msg, OFF_VM_LEN, 0x2000);
         assert_eq!(msg_i32(&msg, OFF_TYPE), 0xC11);
         assert_eq!(msg_u64(&msg, OFF_VM_ADDR), 0x8000_0000);

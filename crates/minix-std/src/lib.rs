@@ -11,6 +11,7 @@
 
 #![no_std]
 
+pub mod font;
 pub mod fs;
 pub mod net;
 pub mod passwd;
@@ -19,6 +20,7 @@ pub mod sha256;
 pub mod termios;
 pub mod time;
 pub mod vmem;
+pub mod wserver;
 
 use core::cell::UnsafeCell;
 
@@ -51,6 +53,8 @@ pub const DS_PROC_NR: i32 = 6;
 pub const SCHED_PROC_NR: i32 = 4;
 /// TTY driver endpoint.
 pub const TTY_PROC_NR: i32 = 5;
+/// Window server endpoint (K5 desktop).
+pub const WS_PROC_NR: i32 = 18;
 /// Clock task endpoint (kernel task, negative).
 pub const CLOCK: i32 = -3;
 /// System task endpoint (kernel task, negative).

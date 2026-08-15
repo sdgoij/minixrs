@@ -33,6 +33,7 @@ pub const NET_PROC_NR: Endpoint = 14;
 pub const DEVMAN_PROC_NR: Endpoint = 15;
 pub const FB_PROC_NR: Endpoint = 16;
 pub const INPUT_PROC_NR: Endpoint = 17;
+pub const WS_PROC_NR: Endpoint = 18;
 
 /// Character-device major for the framebuffer driver (/dev/fb).
 pub const FB_MAJOR: u32 = 19;
@@ -599,6 +600,12 @@ pub const CDEV_OP_WR: u32 = 0x02;
 pub const CDEV_OP_ERR: u32 = 0x04;
 pub const CDEV_NOTIFY: u32 = 0x08;
 
+/// Direct request to the input server: register the sender as the
+/// consumer to be notified (SENDNB of `NOTIFY_MESSAGE`) when keyboard
+/// events are queued. Used by the window server (K5) so its receive loop
+/// wakes on key events without polling.
+pub const INPUT_REG_CONSUMER: u32 = 0x0B00;
+
 pub const CDEV_CLONED: u32 = 0x20000000;
 pub const CDEV_CTTY: u32 = 0x40000000;
 
@@ -828,6 +835,7 @@ mod tests {
         assert_eq!(CDEV_SELECT, 0x406);
         assert_eq!(CDEV_MAP, 0x407);
         assert_eq!(CDEV_SEL2_REPLY, 0x482);
+        assert_eq!(INPUT_REG_CONSUMER, 0x0B00);
     }
 
     #[test]

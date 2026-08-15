@@ -28,6 +28,10 @@ const EAGAIN: i32 = -11;
 /// Decode state for the keyboard scancode stream.
 static mut INPUT_DRIVER: InputDriver = InputDriver::new();
 
+/// Consumer endpoint (the window server) notified when events queue; -1 =
+/// none. Registered via `INPUT_REG_CONSUMER`.
+static mut CONSUMER_EP: i32 = -1;
+
 /// Bounded event ring (dropping when full — a keyboard repeat outruns
 /// the consumer rather than blocking the IRQ path).
 static mut EV_QUEUE: [InputEvent; EV_QUEUE_LEN] = [InputEvent {
@@ -60,12 +64,15 @@ impl InputCallbacks for ServerCallbacks {
 }
 
 /// Drain all pending scancodes from the 8042 and decode them into events.
-fn drain_keyboard() {
+/// Returns true when at least one event was queued (EV_TAIL advanced).
+fn drain_keyboard() -> bool {
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_DRIVER) };
     let mut cb = ServerCallbacks;
+    let tail = unsafe { EV_TAIL };
     // The 8042 keeps IRQ 1 asserted while data is pending, so the ISR
     // notifies once per batch; drain until the controller reports empty.
     while unsafe { driver.intr_handler::<DevioIo, ServerCallbacks>(&mut cb) } {}
+    unsafe { EV_TAIL != tail }
 }
 
 /// Pop up to `count` bytes of events (8 bytes each) into `buf`.
@@ -151,7 +158,45 @@ pub fn input_server_main() {
             let is_notify =
                 (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
             if is_notify {
-                drain_keyboard();
+                if drain_keyboard() {
+                    // Wake the registered consumer (window server) so it
+                    // routes the queued keys without polling.
+                    let consumer = unsafe { CONSUMER_EP };
+                    if consumer >= 0 {
+                        let mut notify = arch_common::ipc::Message {
+                            m_source: 0,
+                            m_type: arch_common::com::NOTIFY_MESSAGE as i32,
+                            m_payload: unsafe { core::mem::zeroed() },
+                        };
+                        unsafe {
+                            let r = minix_rt::syscall2(
+                                minix_rt::SENDNB_CALL,
+                                consumer as u64,
+                                &mut notify as *mut arch_common::ipc::Message as u64,
+                            );
+                            if r < 0 {
+                                minix_rt::write(2, b"input: notify consumer failed\n".as_ptr(), 30);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Direct registration request (not a CDEV message): the sender
+            // becomes the keyboard-event consumer.
+            if call_type == arch_common::com::INPUT_REG_CONSUMER {
+                unsafe {
+                    CONSUMER_EP = src_ep;
+                }
+                msg.m_type = 0;
+                unsafe {
+                    minix_rt::syscall2(
+                        minix_rt::SEND_CALL,
+                        src_ep as u64,
+                        &mut msg as *mut arch_common::ipc::Message as u64,
+                    );
+                }
                 continue;
             }
 

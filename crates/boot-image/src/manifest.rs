@@ -68,6 +68,12 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/fbterm` is the framebuffer console (K4): an 8×16 text console
     // over the mapped fb with PS/2 keyboard echo.
     ("/bin/fbterm", "fbterm"),
+    // `/bin/wdemo` is the window-server demo client (K5): `info` draws a
+    // static info window, `term` a terminal window that echoes routed keys.
+    ("/bin/wdemo", "wdemo"),
+    // `/sbin/wserver` is the window server (K5): boot proc 18, the in-house
+    // compositor on /dev/fb.
+    ("/sbin/wserver", "wserver"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),

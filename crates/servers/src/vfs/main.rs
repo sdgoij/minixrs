@@ -23,12 +23,24 @@ const PM_PROC_NR: i32 = 0;
 ///
 /// Matches the `boot_procs` table in `crates/kernel-boot/src/main.rs`.
 const BOOT_ENDPOINTS: &[i32] = &[
-    arch_common::com::PM_PROC_NR,      // 0: Process Manager
-    arch_common::com::VFS_PROC_NR,     // 1: Virtual File System (self)
-    arch_common::com::RS_PROC_NR,      // 2: Reincarnation Server
-    arch_common::com::MFS_PROC_NR,     // 7: Minix File System
-    arch_common::com::INIT_PROC_NR,    // 10: init
-    arch_common::com::RAMDISK_PROC_NR, // 11: RAM disk driver
+    arch_common::com::PM_PROC_NR,         // 0: Process Manager
+    arch_common::com::VFS_PROC_NR,        // 1: Virtual File System (self)
+    arch_common::com::RS_PROC_NR,         // 2: Reincarnation Server
+    arch_common::com::SCHED_PROC_NR,      // 4: Scheduler
+    arch_common::com::TTY_PROC_NR,        // 5: Terminal driver
+    arch_common::com::DS_PROC_NR,         // 6: Data Store
+    arch_common::com::MFS_PROC_NR,        // 7: Minix File System
+    arch_common::com::VM_PROC_NR,         // 8: Virtual Memory
+    arch_common::com::PFS_PROC_NR,        // 9: Pipe File System
+    arch_common::com::INIT_PROC_NR,       // 10: init
+    arch_common::com::RAMDISK_PROC_NR,    // 11: RAM disk driver
+    arch_common::com::VIRTIO_BLK_PROC_NR, // 12: virtio-blk driver
+    arch_common::com::VIRTIO_NET_PROC_NR, // 13: virtio-net driver
+    arch_common::com::NET_PROC_NR,        // 14: network server
+    arch_common::com::DEVMAN_PROC_NR,     // 15: device manager
+    arch_common::com::FB_PROC_NR,         // 16: framebuffer driver
+    arch_common::com::INPUT_PROC_NR,      // 17: PS/2 keyboard driver
+    arch_common::com::WS_PROC_NR,         // 18: window server
 ];
 
 /// Offset of m_source in the message buffer (4 bytes).

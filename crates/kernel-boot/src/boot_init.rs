@@ -353,9 +353,9 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     print!("  loading boot processes...\r\n");
 
     #[cfg(not(feature = "boot-test"))]
-    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 17] = unsafe { core::mem::zeroed() };
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 18] = unsafe { core::mem::zeroed() };
     #[cfg(feature = "boot-test")]
-    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 16] = unsafe { core::mem::zeroed() };
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 17] = unsafe { core::mem::zeroed() };
     for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
         let info = match unsafe { load_and_prepare_proc(path, proc_nr, &[path]) } {
             Some(info) => info,

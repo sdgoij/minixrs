@@ -205,7 +205,7 @@ pub fn endpoint_lookup(ep: i32) -> *mut Proc {
 
 /// Boot-time process descriptor.
 /// Number of boot processes.
-pub const NR_BOOT_PROCS: usize = 23;
+pub const NR_BOOT_PROCS: usize = 24;
 
 /// Boot image entry.
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +316,10 @@ pub static BOOT_IMAGE: [BootImage; NR_BOOT_PROCS] = [
         proc_nr: 17,
         name: "input",
     }, // INPUT_PROC_NR
+    BootImage {
+        proc_nr: 18,
+        name: "wserver",
+    }, // WS_PROC_NR
 ];
 
 // Run queue
@@ -461,10 +465,11 @@ pub unsafe fn proc_init() {
     }
 
     unsafe {
-        // The shared USER priv slot may SENDREC to PM, VFS, and VM only.
-        // PM/VFS: MINIX `USER_IPC_TO` (process lifecycle + files). VM:
-        // this port's userland `brk()` sends VM_BRK directly to the VM
-        // server (minix-rt `brk`), so it must be reachable too.
+        // The shared USER priv slot may SENDREC to PM, VFS, VM, and the
+        // window server. PM/VFS: MINIX `USER_IPC_TO` (process lifecycle +
+        // files). VM: this port's userland `brk()` sends VM_BRK directly
+        // to the VM server (minix-rt `brk`), so it must be reachable too.
+        // WS: the `wdemo` client talks to the wserver boot proc (K5).
         let pm_priv = BOOT_IMAGE
             .iter()
             .position(|bi| bi.proc_nr == arch_common::com::PM_PROC_NR)
@@ -476,6 +481,10 @@ pub unsafe fn proc_init() {
         let vm_priv = BOOT_IMAGE
             .iter()
             .position(|bi| bi.proc_nr == arch_common::com::VM_PROC_NR)
+            .unwrap_or(0);
+        let ws_priv = BOOT_IMAGE
+            .iter()
+            .position(|bi| bi.proc_nr == arch_common::com::WS_PROC_NR)
             .unwrap_or(0);
 
         for (i, bi) in BOOT_IMAGE.iter().enumerate() {
@@ -501,6 +510,7 @@ pub unsafe fn proc_init() {
                 (*priv_ptr).s_ipc_to.set(pm_priv);
                 (*priv_ptr).s_ipc_to.set(vfs_priv);
                 (*priv_ptr).s_ipc_to.set(vm_priv);
+                (*priv_ptr).s_ipc_to.set(ws_priv);
                 for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
                     *chunk = 0;
                 }

@@ -11,7 +11,7 @@
 use arch_common::com::{
     DEVMAN_PROC_NR, DS_PROC_NR, FB_PROC_NR, INIT_PROC_NR, INPUT_PROC_NR, MFS_PROC_NR, NET_PROC_NR,
     PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR,
-    VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR,
+    VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR, WS_PROC_NR,
 };
 
 pub mod boot_init;
@@ -237,6 +237,7 @@ static BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
     ("/sbin/fb", FB_PROC_NR),           // framebuffer driver
     ("/sbin/input", INPUT_PROC_NR),     // PS/2 keyboard driver
+    ("/sbin/wserver", WS_PROC_NR),      // window server (K5 desktop)
     ("/sbin/init", INIT_PROC_NR),       // init
 ];
 

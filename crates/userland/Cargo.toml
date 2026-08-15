@@ -166,6 +166,11 @@ name = "fbterm"
 path = "src/bin/fbterm.rs"
 test = false
 
+[[bin]]
+name = "wdemo"
+path = "src/bin/wdemo.rs"
+test = false
+
 # allocprobe is a QEMU probe: it drives the rt mmap allocator through
 # alloc/free churn and checks the VM region count stays flat (run from the
 # shell by tools/alloc_churn_probe.py). Embedded as /bin/allocprobe.

@@ -21,6 +21,7 @@ pub mod vfs;
 pub mod virtio_blk;
 pub mod virtio_net;
 pub mod vm;
+pub mod wserver;
 
 #[cfg(test)]
 mod tests {

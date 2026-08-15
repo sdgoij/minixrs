@@ -404,7 +404,8 @@ fn fbterm_impl(args: &[&str]) -> i32 {
     fn usage_to_ascii(code: u16) -> Option<u8> {
         let c = match code {
             0x04..=0x1D => b'a' + (code - 0x04) as u8,
-            0x1E..=0x27 => b'1' + (code - 0x1E) as u8,
+            0x1E..=0x26 => b'1' + (code - 0x1E) as u8,
+            0x27 => b'0',
             0x2C => b' ',
             0x2D => b'-',
             0x2E => b'=',
@@ -558,6 +559,135 @@ fn fbterm_impl(args: &[&str]) -> i32 {
 /// Host stub: no framebuffer or keyboard — exit cleanly.
 #[cfg(not(target_os = "minix"))]
 fn fbterm_impl(args: &[&str]) -> i32 {
+    let _ = args;
+    0
+}
+
+/// wdemo — window-server demo client (K5): creates windows on the
+/// `wserver` desktop and draws into them.
+///
+/// Subcommands: `info` draws a static info window (text + color strip)
+/// and exits; `term <max_keys>` opens a terminal window and echoes keys
+/// routed to it by the server (0 = forever).
+pub fn wdemo(args: &[&str]) -> i32 {
+    wdemo_impl(args)
+}
+
+/// The MINIX implementation talks the `minix_std::wserver` protocol to
+/// the wserver boot proc.
+#[cfg(target_os = "minix")]
+fn wdemo_impl(args: &[&str]) -> i32 {
+    use minix_std::wserver::{ws_create, ws_fill, ws_input, ws_key_char, ws_reply_status, ws_text};
+
+    const COLS: i32 = 40;
+    const ROWS: i32 = 11;
+
+    fn ws_call(msg: &mut [u8; 64]) -> i32 {
+        if unsafe { minix_std::sendrec(minix_std::WS_PROC_NR, msg) }.is_err() {
+            return -71;
+        }
+        ws_reply_status(msg)
+    }
+
+    fn ws_puts(wid: i32, row: i32, col: i32, s: &[u8]) -> i32 {
+        for (i, &ch) in s.iter().enumerate() {
+            let mut msg = ws_text(wid, row, col + i as i32, ch);
+            let r = ws_call(&mut msg);
+            if r != 0 {
+                return r;
+            }
+        }
+        0
+    }
+
+    let sub = args.get(1).copied().unwrap_or("info");
+    match sub {
+        "info" => {
+            let mut msg = ws_create(40, 40, 320, 200, b"Info".as_ptr() as u64, 4);
+            let r = ws_call(&mut msg);
+            if r != 0 {
+                write_err(b"wdemo: create info failed err=");
+                print_dec((-r) as u32);
+                write_err(b"\n");
+                return 1;
+            }
+            let wid = minix_std::wserver::ws_reply_wid(&msg);
+            ws_puts(wid, 0, 0, b"minixrs window server");
+            ws_puts(wid, 2, 0, b"K5 in-house compositor");
+            ws_puts(wid, 3, 0, b"software rasterizer +");
+            ws_puts(wid, 4, 0, b"8x16 VGA font");
+            // Color strip (body-local): red/green/blue bars.
+            let mut msg = ws_fill(wid, 0, 150, 320, 158, 0x00FF0000);
+            ws_call(&mut msg);
+            let mut msg = ws_fill(wid, 0, 158, 320, 166, 0x0000FF00);
+            ws_call(&mut msg);
+            let mut msg = ws_fill(wid, 0, 166, 320, 174, 0x000000FF);
+            ws_call(&mut msg);
+            write_out(b"wdemo: info ok\n");
+            0
+        }
+        "term" => {
+            let max_keys: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut msg = ws_create(440, 40, 320, 200, b"Term".as_ptr() as u64, 4);
+            let r = ws_call(&mut msg);
+            if r != 0 {
+                write_err(b"wdemo: create term failed\n");
+                return 1;
+            }
+            let wid = minix_std::wserver::ws_reply_wid(&msg);
+            ws_puts(wid, 0, 0, b"> ");
+            write_out(b"wdemo: term waiting\n");
+            let (mut row, mut col) = (0i32, 2i32);
+            let mut keys = 0i32;
+            while max_keys == 0 || keys < max_keys {
+                let mut msg = ws_input(wid);
+                if unsafe { minix_std::sendrec(minix_std::WS_PROC_NR, &mut msg) }.is_err() {
+                    return 1;
+                }
+                let ch = ws_key_char(&msg);
+                match ch {
+                    b'\n' => {
+                        col = 0;
+                        row += 1;
+                        if row >= ROWS {
+                            row = ROWS - 1;
+                        }
+                    }
+                    0x08 => {
+                        if col > 0 {
+                            col -= 1;
+                            let mut msg = ws_text(wid, row, col, b' ');
+                            ws_call(&mut msg);
+                        }
+                    }
+                    c => {
+                        let mut msg = ws_text(wid, row, col, c);
+                        ws_call(&mut msg);
+                        col += 1;
+                        if col >= COLS {
+                            col = 0;
+                            row += 1;
+                            if row >= ROWS {
+                                row = ROWS - 1;
+                            }
+                        }
+                    }
+                }
+                keys += 1;
+            }
+            write_out(b"wdemo: term ok\n");
+            0
+        }
+        _ => {
+            write_err(b"wdemo: usage: wdemo info|term [max_keys]\n");
+            1
+        }
+    }
+}
+
+/// Host stub: no window server — exit cleanly.
+#[cfg(not(target_os = "minix"))]
+fn wdemo_impl(args: &[&str]) -> i32 {
     let _ = args;
     0
 }

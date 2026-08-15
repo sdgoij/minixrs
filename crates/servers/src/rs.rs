@@ -668,6 +668,7 @@ pub fn rs_server_main() {
             (arch_common::com::MFS_PROC_NR, b"mfs"),
             (arch_common::com::FB_PROC_NR, b"fb"),
             (arch_common::com::INPUT_PROC_NR, b"input"),
+            (arch_common::com::WS_PROC_NR, b"wserver"),
         ];
         for &(ep, label) in boot_svcs {
             if let Some(slot) = unsafe { alloc_slot() } {
