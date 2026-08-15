@@ -28,7 +28,7 @@ pub static FS_CALL_VEC: [fn() -> i32; NREQS] = [
     fs_chown,      //  5 (FS_BASE + 5)
     fs_chmod,      //  6 (FS_BASE + 6)
     fs_inhibread,  //  7 (FS_BASE + 7)
-    no_sys,        //  8 (FS_BASE + 8)  fs_stat
+    fs_stat,       //  8 (FS_BASE + 8)
     fs_utime,      //  9 (FS_BASE + 9)
     fs_statvfs,    // 10 (FS_BASE + 10)
     fs_breadwrite, // 11 (FS_BASE + 11)

@@ -62,12 +62,69 @@ pub fn read_only(rip_idx: u16) -> i32 {
     }
 }
 
+/// Change a file's mode bits (C `mfs/protect.c fs_chmod`).
+///
+/// Message layout (VFS `req_chmod`): inode (u32) at payload[0], mode
+/// (u16) at payload[4]. Reply: mode (u16) at payload[0].
 pub fn fs_chmod() -> i32 {
-    EINVAL
+    unsafe {
+        let mfs = glo::mfs_ptr();
+        let payload = &(*mfs).m_in.m_payload.raw;
+        let ino = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
+        let mode = u16::from_ne_bytes(payload[4..6].try_into().unwrap_or([0u8; 2]));
+        let rip = match get_inode((*mfs).fs_dev, ino) {
+            Some(i) => i,
+            None => return EINVAL,
+        };
+        let r = read_only(rip);
+        if r != OK {
+            put_inode(Some(rip));
+            return r;
+        }
+        let rip_ptr = glo::get_inode_ptr(rip as usize);
+        // Replace the permission bits, keep the type bits (C: mode & ALL_MODES).
+        (*rip_ptr).i_mode = ((*rip_ptr).i_mode & !ALL_MODES) | (mode & ALL_MODES);
+        (*rip_ptr).i_update |= CTIME;
+        (*rip_ptr).i_dirt = IN_DIRTY;
+        let new_mode = (*rip_ptr).i_mode;
+        let raw_ref = &mut (*mfs).m_out.m_payload.raw;
+        raw_ref[0..2].copy_from_slice(&new_mode.to_le_bytes());
+        put_inode(Some(rip));
+        OK
+    }
 }
 
+/// Change a file's owner (C `mfs/protect.c fs_chown`).
+///
+/// Message layout (VFS `req_chown`): inode (u32) at payload[0], uid
+/// (u16) at payload[4], gid (u16) at payload[6]. Reply: mode (u16) at
+/// payload[0].
 pub fn fs_chown() -> i32 {
-    EINVAL
+    unsafe {
+        let mfs = glo::mfs_ptr();
+        let payload = &(*mfs).m_in.m_payload.raw;
+        let ino = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
+        let uid = u16::from_ne_bytes(payload[4..6].try_into().unwrap_or([0u8; 2]));
+        let gid = u16::from_ne_bytes(payload[6..8].try_into().unwrap_or([0u8; 2]));
+        let rip = match get_inode((*mfs).fs_dev, ino) {
+            Some(i) => i,
+            None => return EINVAL,
+        };
+        let rip_ptr = glo::get_inode_ptr(rip as usize);
+        let r = read_only(rip);
+        if r == OK {
+            (*rip_ptr).i_uid = uid;
+            (*rip_ptr).i_gid = gid;
+            (*rip_ptr).i_mode &= !(I_SET_UID_BIT | I_SET_GID_BIT);
+            (*rip_ptr).i_update |= CTIME;
+            (*rip_ptr).i_dirt = IN_DIRTY;
+        }
+        // Reply mode — C always reports it, changed or not.
+        let raw_ref = &mut (*mfs).m_out.m_payload.raw;
+        raw_ref[0..2].copy_from_slice(&(*rip_ptr).i_mode.to_le_bytes());
+        put_inode(Some(rip));
+        r
+    }
 }
 
 pub fn fs_getdents() -> i32 {
@@ -232,6 +289,37 @@ mod tests {
     fn init() {
         unsafe {
             crate::mfs::glo::mfs_init_globals();
+            // Reset the inode hash table and unused list so that
+            // get_inode / find_inode start from a clean slate
+            // (mfs_init_globals only resets MFS_STORAGE, not these
+            // separate static mut variables).
+            *crate::mfs::glo::UNUSED_INODES_HEAD.get() = Some(0);
+            let p = crate::mfs::glo::HASH_INODES.get();
+            for i in 0..crate::mfs::consts::INODE_HASH_SIZE {
+                let elem = core::ptr::addr_of_mut!((*p)[i]);
+                elem.write(None);
+            }
+        }
+    }
+
+    /// Build a chown request message for inode `ino`, owner `uid`/`gid`.
+    fn set_chown_req(ino: u32, uid: u16, gid: u16) {
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&ino.to_le_bytes());
+            raw[4..6].copy_from_slice(&uid.to_le_bytes());
+            raw[6..8].copy_from_slice(&gid.to_le_bytes());
+        }
+    }
+
+    /// Build a chmod request message for inode `ino`, mode `mode`.
+    fn set_chmod_req(ino: u32, mode: u16) {
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&ino.to_le_bytes());
+            raw[4..6].copy_from_slice(&mode.to_le_bytes());
         }
     }
 
@@ -248,15 +336,100 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_chmod_returns_einval_when_uninitialized() {
+    fn test_fs_chmod_read_only_inode_returns_erofs() {
+        // An inode with no super block reference is on a read-only fs
+        // (C: rip->i_sp->s_rd_only). The mode is never touched.
         init();
-        assert_eq!(fs_chmod(), EINVAL);
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let ino = get_inode((*mfs).fs_dev, 7).expect("inode alloc");
+            let rip = glo::get_inode_ptr(ino as usize);
+            (*rip).i_mode = 0o755;
+            set_chmod_req(7, 0o600);
+            let r = fs_chmod();
+            assert_eq!(r, EROFS);
+            assert_eq!((*rip).i_mode, 0o755, "mode unchanged on r/o fs");
+        }
     }
 
     #[test]
-    fn test_fs_chown_returns_einval_when_uninitialized() {
+    fn test_fs_chmod_sets_mode_and_keeps_type_bits() {
         init();
-        assert_eq!(fs_chown(), EINVAL);
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let sp = glo::get_super_ptr(0);
+            (*sp).s_rd_only = 0;
+            let ino = get_inode((*mfs).fs_dev, 7).expect("inode alloc");
+            let rip = glo::get_inode_ptr(ino as usize);
+            (*rip).i_mode = I_DIRECTORY | 0o755;
+            (*rip).i_sp = Some(sp);
+
+            set_chmod_req(7, 0o600);
+            let r = fs_chmod();
+            assert_eq!(r, OK);
+            assert_eq!(
+                (*rip).i_mode,
+                I_DIRECTORY | 0o600,
+                "type bits survive, permission bits replaced"
+            );
+            assert_ne!((*rip).i_update & CTIME, 0, "ctime update flagged");
+            assert_eq!((*rip).i_dirt, IN_DIRTY, "inode marked dirty");
+            let reply_raw = (*mfs).m_out.m_payload.raw;
+            let reply_mode = u16::from_ne_bytes(reply_raw[0..2].try_into().unwrap_or([0; 2]));
+            assert_eq!(reply_mode, (*rip).i_mode, "reply carries new mode");
+        }
+    }
+
+    #[test]
+    fn test_fs_chown_read_only_inode_returns_erofs() {
+        // An inode with no super block reference is on a read-only fs;
+        // ownership must not change.
+        init();
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let ino = get_inode((*mfs).fs_dev, 7).expect("inode alloc");
+            let rip = glo::get_inode_ptr(ino as usize);
+            (*rip).i_uid = 100;
+            (*rip).i_gid = 50;
+            set_chown_req(7, 200, 60);
+            let r = fs_chown();
+            assert_eq!(r, EROFS);
+            assert_eq!((*rip).i_uid, 100, "owner unchanged on r/o fs");
+            assert_eq!((*rip).i_gid, 50);
+        }
+    }
+
+    #[test]
+    fn test_fs_chown_sets_owner_and_clears_setuid_bits() {
+        init();
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            let sp = glo::get_super_ptr(0);
+            (*sp).s_rd_only = 0;
+            let ino = get_inode((*mfs).fs_dev, 7).expect("inode alloc");
+            let rip = glo::get_inode_ptr(ino as usize);
+            (*rip).i_mode = 0o4755; // setuid + rwxr-xr-x
+            (*rip).i_uid = 100;
+            (*rip).i_gid = 50;
+            (*rip).i_sp = Some(sp);
+
+            set_chown_req(7, 200, 60);
+            let r = fs_chown();
+            assert_eq!(r, OK);
+            assert_eq!((*rip).i_uid, 200, "owner uid changes");
+            assert_eq!((*rip).i_gid, 60, "owner gid changes");
+            assert_eq!(
+                (*rip).i_mode & (I_SET_UID_BIT | I_SET_GID_BIT),
+                0,
+                "setuid/setgid bits cleared by chown (C)"
+            );
+            assert_eq!((*rip).i_mode & 0o777, 0o755, "perm bits untouched");
+            assert_ne!((*rip).i_update & CTIME, 0, "ctime update flagged");
+            assert_eq!((*rip).i_dirt, IN_DIRTY, "inode marked dirty");
+            let reply_raw = (*mfs).m_out.m_payload.raw;
+            let reply_mode = u16::from_ne_bytes(reply_raw[0..2].try_into().unwrap_or([0; 2]));
+            assert_eq!(reply_mode, (*rip).i_mode, "reply carries new mode");
+        }
     }
 
     #[test]

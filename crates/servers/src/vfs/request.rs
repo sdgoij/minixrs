@@ -294,6 +294,29 @@ pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i
 
 // Inode metadata operations
 
+/// Build the REQ_CHOWN request (inode/uid/gid) — shared wire layout between
+/// VFS and the FS servers (mfs/ext2 parse the same offsets).
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+fn build_chown_msg(inode_nr: u32, newuid: u16, newgid: u16) -> MsgBuf {
+    let mut msg = [0u8; 56];
+    w_i32(&mut msg, M_TYPE_OFF, REQ_CHOWN);
+    w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
+    w_u16(&mut msg, PAYLOAD_OFF + 4, newuid); // uid
+    w_u16(&mut msg, PAYLOAD_OFF + 6, newgid); // gid
+    msg
+}
+
+/// Build the REQ_CHMOD request (inode/mode) — shared wire layout between
+/// VFS and the FS servers (mfs/ext2 parse the same offsets).
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+fn build_chmod_msg(inode_nr: u32, rmode: u32) -> MsgBuf {
+    let mut msg = [0u8; 56];
+    w_i32(&mut msg, M_TYPE_OFF, REQ_CHMOD);
+    w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
+    w_u16(&mut msg, PAYLOAD_OFF + 4, rmode as u16); // mode
+    msg
+}
+
 /// Change mode of an inode.
 ///
 /// Returns `(status, new_mode)`.
@@ -304,10 +327,7 @@ pub unsafe fn req_bpeek(fs_e: i32, dev: u32, pos: off_t, num_of_bytes: u32) -> i
 pub unsafe fn req_chmod(fs_e: i32, inode_nr: u32, rmode: u32) -> (i32, u32) {
     #[cfg(target_os = "minix")]
     {
-        let mut msg = [0u8; 56];
-        w_i32(&mut msg, M_TYPE_OFF, REQ_CHMOD);
-        w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_u16(&mut msg, PAYLOAD_OFF + 4, rmode as u16); // mode
+        let mut msg = build_chmod_msg(inode_nr, rmode);
 
         let r = fs_sendrec(fs_e, &mut msg);
         let new_mode = r_u16(&msg, PAYLOAD_OFF) as u32; // mode (reply)
@@ -330,11 +350,7 @@ pub unsafe fn req_chmod(fs_e: i32, inode_nr: u32, rmode: u32) -> (i32, u32) {
 pub unsafe fn req_chown(fs_e: i32, inode_nr: u32, newuid: u16, newgid: u16) -> (i32, u32) {
     #[cfg(target_os = "minix")]
     {
-        let mut msg = [0u8; 56];
-        w_i32(&mut msg, M_TYPE_OFF, REQ_CHOWN);
-        w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_u16(&mut msg, PAYLOAD_OFF + 4, newuid); // uid
-        w_u16(&mut msg, PAYLOAD_OFF + 6, newgid); // gid
+        let mut msg = build_chown_msg(inode_nr, newuid, newgid);
 
         let r = fs_sendrec(fs_e, &mut msg);
         let new_mode = r_u16(&msg, PAYLOAD_OFF) as u32; // mode (reply)
@@ -1510,6 +1526,33 @@ mod tests {
         let mut msg = [0u8; 56];
         let r = unsafe { fs_sendrec(0, &mut msg) };
         assert_eq!(r, -ENOSYS);
+    }
+
+    #[test]
+    fn test_req_chown_wire_layout() {
+        // VFS → FS chown wire layout: inode u32@payload[0], uid u16@4,
+        // gid u16@6; reply mode u16@payload[0]. MFS/ext2 fs_chown parse
+        // the same offsets, so this pin keeps both sides from drifting.
+        let mut msg = build_chown_msg(0x1122_3344, 0xAABB, 0xCCDD);
+        assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_CHOWN);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF), 0x1122_3344);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 4), 0xAABB);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 6), 0xCCDD);
+        // Reply: the FS writes the mode at payload[0].
+        msg[PAYLOAD_OFF..PAYLOAD_OFF + 2].copy_from_slice(&0o755u16.to_le_bytes());
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF), 0o755);
+    }
+
+    #[test]
+    fn test_req_chmod_wire_layout() {
+        // VFS → FS chmod wire layout: inode u32@payload[0], mode u16@4;
+        // reply mode u16@payload[0].
+        let mut msg = build_chmod_msg(0x1122_3344, 0o600);
+        assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_CHMOD);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF), 0x1122_3344);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 4), 0o600);
+        msg[PAYLOAD_OFF..PAYLOAD_OFF + 2].copy_from_slice(&0o755u16.to_le_bytes());
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF), 0o755);
     }
 
     #[test]

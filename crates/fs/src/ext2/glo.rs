@@ -8,6 +8,8 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, Ordering};
 
+use arch_common::ipc::Message;
+
 use crate::ext2::consts::*;
 use crate::ext2::types::*;
 use core::mem::MaybeUninit;
@@ -34,6 +36,10 @@ pub struct Ext2Global {
     pub inode_table: [Inode; NR_INODES],
     pub inode_cache_hit: u32,
     pub inode_cache_miss: u32,
+
+    // Incoming and outgoing FS protocol messages.
+    pub m_in: Message,
+    pub m_out: Message,
 }
 
 pub(crate) struct Ext2StorageCell(UnsafeCell<MaybeUninit<Ext2Global>>);
@@ -136,6 +142,16 @@ pub unsafe fn ext2_init_globals() {
         inode_table: core::array::from_fn(|_| Inode::default()),
         inode_cache_hit: 0,
         inode_cache_miss: 0,
+        m_in: Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        },
+        m_out: Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        },
     });
 }
 
