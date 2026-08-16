@@ -398,9 +398,9 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
 
     // Register timer callback for preemptive scheduling.
     unsafe fn aarch64_timer_callback(frame: &mut [u8; 288]) {
-        // Full per-tick accounting (monotonic/realtime, virtual timers, load
-        // average, quantum accounting via context_stop → proc_no_time →
-        // notify_scheduler) in BOTH kernel and user mode, matching x86's
+        // Full per-tick accounting (monotonic/realtime, virtual timers,
+        // load average, quantum accounting via context_stop → proc_no_time
+        // → notify_scheduler) in BOTH kernel and user mode, matching x86's
         // timer_int_handler. The SPSR check below then limits the
         // save/pick/switch to user-mode interrupts.
         unsafe { kernel::clock::timer_int_handler() };
@@ -408,7 +408,12 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
         // Timer already acknowledged by IRQ handler via timer_irq_ack().
 
         // Skip if this interrupt fired in kernel mode (not user mode).
-        // SPSR_EL1 M[3:0] = 0 means EL0t (user mode).
+        // SPSR_EL1 M[3:0] = 0 means EL0t (user mode). Kernel-mode
+        // interrupts (EL1) are skipped: kernel processing runs with
+        // interrupts masked, so they can only fire at a resumable WFI point
+        // (the all-blocked idle loop), and the kernel-mode switch-back
+        // faults — the console read no longer busy-waits in kernel mode, so
+        // no process ever spins there.
         let spsr = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
         if (spsr & 0xF) != 0 {
             return;
@@ -463,6 +468,19 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         kernel::hal::write_cr3(new_cr3);
                     }
                     arch_aarch64::cpulocals::set_current_proc(next_proc as u64);
+                }
+            } else {
+                // User-mode interrupt and the caller is still the best
+                // runnable process: rotate it to its queue's tail so other
+                // runnable processes in the same queue (e.g. the input
+                // server's SYS_SETALARM poll, woken behind a spinning
+                // console reader) get a turn on the next tick instead of
+                // waiting for the cycle-based quantum (~5 s at the 10 MHz
+                // generic timer) to expire. EL1 interrupts are skipped
+                // above, so this never touches a mid-syscall frame.
+                unsafe {
+                    kernel::sched::remove_from_queue(caller);
+                    kernel::sched::enqueue(caller);
                 }
             }
         }

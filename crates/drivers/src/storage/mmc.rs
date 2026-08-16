@@ -12,7 +12,6 @@ use crate::DriverError;
 
 // SD/MMC Protocol Constants (from sdmmcreg.h)
 
-
 pub const MMC_GO_IDLE_STATE: u32 = 0;
 pub const MMC_SEND_OP_COND: u32 = 1;
 pub const MMC_ALL_SEND_CID: u32 = 2;
@@ -46,16 +45,13 @@ pub const MMC_LOCK_UNLOCK: u32 = 42;
 pub const MMC_APP_CMD: u32 = 55;
 pub const MMC_READ_OCR: u32 = 58;
 
-
 pub const SD_SEND_RELATIVE_ADDR: u32 = 3;
 pub const SD_SEND_SWITCH_FUNC: u32 = 6;
 pub const SD_SEND_IF_COND: u32 = 8;
 
-
 pub const SD_APP_SET_BUS_WIDTH: u32 = 6;
 pub const SD_APP_OP_COND: u32 = 41;
 pub const SD_APP_SEND_SCR: u32 = 51;
-
 
 pub const MMC_OCR_MEM_READY: u32 = 1 << 31;
 pub const MMC_OCR_HCS: u32 = 1 << 30;
@@ -72,10 +68,8 @@ pub const MMC_OCR_2_6V_2_7V: u32 = 1 << 14;
 pub const MMC_OCR_2_5V_2_6V: u32 = 1 << 13;
 pub const MMC_OCR_1_6V_1_7V: u32 = 1 << 4;
 
-
 pub const MMC_R1_READY_FOR_DATA: u32 = 1 << 8;
 pub const MMC_R1_APP_CMD: u32 = 1 << 5;
-
 
 pub fn mmc_r1(resp: &[u32; 4]) -> u32 {
     resp[0]
@@ -87,7 +81,6 @@ pub fn sd_r6(resp: &[u32; 4]) -> u32 {
     resp[0]
 }
 
-
 pub fn mmc_arg_rca(rca: u16) -> u32 {
     (rca as u32) << 16
 }
@@ -95,10 +88,8 @@ pub fn sd_r6_rca(resp: &[u32; 4]) -> u16 {
     (sd_r6(resp) >> 16) as u16
 }
 
-
 pub const SD_ARG_BUS_WIDTH_1: u32 = 0;
 pub const SD_ARG_BUS_WIDTH_4: u32 = 2;
-
 
 pub const EXT_CSD_BUS_WIDTH: u32 = 183;
 pub const EXT_CSD_HS_TIMING: u32 = 185;
@@ -115,12 +106,10 @@ pub const EXT_CSD_STRUCTURE_VER_1_2: u8 = 2;
 pub const EXT_CSD_CARD_TYPE_26M: u32 = 1 << 0;
 pub const EXT_CSD_CARD_TYPE_52M: u32 = 1 << 1;
 
-
 pub const MMC_SWITCH_MODE_CMD_SET: u8 = 0x00;
 pub const MMC_SWITCH_MODE_SET_BITS: u8 = 0x01;
 pub const MMC_SWITCH_MODE_CLEAR_BITS: u8 = 0x02;
 pub const MMC_SWITCH_MODE_WRITE_BYTE: u8 = 0x03;
-
 
 /// Extract a bitfield from a 128-bit response (4 × u32).
 /// Corresponds to C `MMC_RSP_BITS` / `__bitfield`.
@@ -153,7 +142,6 @@ pub fn mmc_rsp_bits(resp: &[u32; 4], start: i32, len: i32) -> u32 {
     dst & mask
 }
 
-
 pub fn mmc_csd_csdver(resp: &[u32; 4]) -> u32 {
     mmc_rsp_bits(resp, 126, 2)
 }
@@ -184,7 +172,6 @@ pub fn mmc_csd_write_bl_len(resp: &[u32; 4]) -> u32 {
     mmc_rsp_bits(resp, 22, 4)
 }
 
-
 pub fn sd_csd_c_size(resp: &[u32; 4]) -> u32 {
     mmc_rsp_bits(resp, 62, 12)
 }
@@ -204,7 +191,6 @@ pub fn sd_csd_read_bl_len(resp: &[u32; 4]) -> u32 {
     mmc_rsp_bits(resp, 80, 4)
 }
 pub const SD_CSD_RW_BL_LEN_1G: u32 = 0x9;
-
 
 pub fn scr_structure(scr: &[u32; 2]) -> u32 {
     mmc_rsp_bits_from(scr, 60, 4)
@@ -583,7 +569,6 @@ pub const MMC_BLOCK_SIZE: u32 = 512;
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_mmc_commands() {
         assert_eq!(MMC_GO_IDLE_STATE, 0);
@@ -628,7 +613,6 @@ mod tests {
         assert_eq!(MMC_R1_READY_FOR_DATA, 0x100);
         assert_eq!(MMC_R1_APP_CMD, 0x20);
     }
-
 
     #[test]
     fn test_mmc_rsp_bits_simple() {
@@ -678,7 +662,6 @@ mod tests {
         assert_eq!(sd_r6_rca(&resp), 0x5678);
     }
 
-
     #[test]
     fn test_ext_csd_constants() {
         assert_eq!(EXT_CSD_BUS_WIDTH, 183);
@@ -687,7 +670,6 @@ mod tests {
         assert_eq!(EXT_CSD_CARD_TYPE_26M, 1);
         assert_eq!(EXT_CSD_CARD_TYPE_52M, 2);
     }
-
 
     #[test]
     fn test_sdhci_register_offsets() {
@@ -721,7 +703,6 @@ mod tests {
         assert_eq!(SDHC_ERROR_INTERRUPT, 1 << 15);
     }
 
-
     #[test]
     fn test_mmc_command_new() {
         let cmd = MmcCommand::new();
@@ -753,7 +734,6 @@ mod tests {
         assert_eq!(CardState::Dead as u8, 3);
         assert_eq!(CardState::Disconnected as u8, 4);
     }
-
 
     #[test]
     fn test_dummy_host_reset() {
@@ -813,12 +793,10 @@ mod tests {
         assert!(host.write(&card, 0, 1, &buf).is_ok());
     }
 
-
     #[test]
     fn test_mmc_block_size() {
         assert_eq!(MMC_BLOCK_SIZE, 512);
     }
-
 
     #[test]
     fn test_slot_constants() {

@@ -463,7 +463,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             // then limits the save/pick/switch to user-mode interrupts.
             unsafe { kernel::clock::timer_int_handler() };
             // Preempt: if we interrupted user mode, save state and
-            // potentially switch to another runnable process.
+            // potentially switch to another runnable process. Kernel-mode
+            // interrupts (SPP=1) are skipped: kernel processing runs with
+            // SIE=0, so they can only fire at a resumable WFI point (the
+            // all-blocked idle loop), and the kernel-mode switch-back
+            // faults (an exec page fault at the resume instruction — the
+            // console read no longer busy-waits in kernel mode, so no
+            // process ever spins there).
             let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
             if (sstatus >> 8) & 1 != 0 {
                 return; // SPP=1: interrupted kernel mode, skip
@@ -491,6 +497,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                     8,
                 );
             }
+            // User-mode interrupt and the caller is still the best runnable
+            // process: rotate it to its queue's tail so other runnable
+            // processes in the same queue (e.g. the input server's
+            // SYS_SETALARM poll, woken behind a spinning console reader)
+            // get a turn on the next tick instead of waiting for the
+            // quantum to expire (the cycle-based quantum is ~5 s at the
+            // 10 MHz CLINT timebase). Kernel-mode interrupts are skipped
+            // above, so this rotation never touches a mid-syscall frame.
             if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                 if next_proc != caller {
                     unsafe {
@@ -532,6 +546,13 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             kernel::hal::write_cr3(new_cr3);
                         }
                         arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                    }
+                } else {
+                    // Caller is the best runnable: round-robin within its
+                    // own queue (no-op when it is the only entry).
+                    unsafe {
+                        kernel::sched::remove_from_queue(caller);
+                        kernel::sched::enqueue(caller);
                     }
                 }
             }

@@ -766,7 +766,6 @@ pub fn filter_transfer(
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_constants() {
         assert_eq!(SECTOR_SIZE, 512);
@@ -775,7 +774,6 @@ mod tests {
         assert_eq!(DRIVER_MAIN, 0);
         assert_eq!(DRIVER_BACKUP, 1);
     }
-
 
     #[test]
     fn test_config_default() {
@@ -809,7 +807,6 @@ mod tests {
         assert_eq!(cfg.sum_size, 16);
     }
 
-
     #[test]
     fn test_checksum_type_repr() {
         assert_eq!(ChecksumType::Nil as u8, 0);
@@ -825,7 +822,6 @@ mod tests {
         assert_eq!(di.endpoint, -1);
         assert_eq!(di.problem, DriverProblem::None);
     }
-
 
     #[test]
     fn test_crc32_empty() {
@@ -847,7 +843,6 @@ mod tests {
     fn test_crc32_deterministic() {
         assert_eq!(compute_crc(b"test data"), compute_crc(b"test data"));
     }
-
 
     #[test]
     fn test_md5_rfc1321_empty() {
@@ -928,7 +923,6 @@ mod tests {
         assert_ne!(d, [0u8; 16]);
     }
 
-
     #[test]
     fn test_calc_sum_nil() {
         let mut cfg = FilterConfig::default();
@@ -959,7 +953,6 @@ mod tests {
         calc_sum_into(1, &[0u8; 512], &mut sum[..cfg.sum_size as usize], &cfg);
         assert_ne!(sum, [0u8; 16]);
     }
-
 
     #[test]
     fn test_log2phys_basic() {

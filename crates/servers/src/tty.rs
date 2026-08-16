@@ -1814,10 +1814,16 @@ pub fn do_read(
 
     // Blocking read: pull one byte at a time from the kernel serial ring
     // and run it through the line discipline until the request completes
-    // or sigchar releases it with EINTR.
+    // or sigchar releases it with EINTR. On riscv/aarch64 the fd-0 read
+    // returns EAGAIN when the ring is empty (the kernel read no longer
+    // busy-waits in kernel mode, which starves the input server); retry
+    // in user mode, where the timer preempts us and other servers run.
     loop {
         let mut byte = [0u8; 1];
         let r = minix_rt::read(0, &mut byte);
+        if r == EAGAIN as i64 {
+            continue;
+        }
         if r <= 0 {
             // The serial-ring path always delivers a byte; a failure here
             // means the console is gone — release the caller.

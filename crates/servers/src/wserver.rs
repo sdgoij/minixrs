@@ -420,6 +420,7 @@ fn drain_kbd() {
         }
         let n = n as usize;
         let mut off = 0;
+        let mut routed = false;
         while off + 8 <= n {
             let page = u16::from_le_bytes([buf[off], buf[off + 1]]);
             let code = u16::from_le_bytes([buf[off + 2], buf[off + 3]]);
@@ -465,7 +466,16 @@ fn drain_kbd() {
                         &mut key_msg as *mut Message as u64,
                     );
                 }
+                // route_key consumed the waiter; stop reading so any
+                // further events in this batch stay queued for the next
+                // WS_INPUT registration (the catch-up drain) instead of
+                // being swallowed.
+                routed = true;
+                break;
             }
+        }
+        if routed {
+            break;
         }
     }
 }

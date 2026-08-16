@@ -11,3 +11,4 @@ pub mod driver;
 pub mod keyboard;
 pub mod mouse;
 pub mod scanmap;
+pub mod virtio_input;

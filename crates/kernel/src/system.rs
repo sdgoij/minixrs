@@ -117,10 +117,12 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset 32: system_time  (u64)
 //   offset 40: system_hz    (u64)
 //
-// mess_lsys_krn_sys_setalarm (for do_setalarm):
-//   offset  0: exp_time   (u64)
-//   offset  8: time_left  (u64)
-//   offset 16: abs_time   (i32)
+// mess_lsys_krn_sys_setalarm (for do_setalarm). kbuf[0..4] = call number,
+// kbuf[4..8] = source endpoint (set by sys_kernel_call_handler), so the
+// payload starts at offset 8:
+//   offset  8: exp_time   (u64)
+//   offset 16: time_left  (u64)
+//   offset 24: abs_time   (i32)
 //
 // mess_lsys_krn_sys_abort (for do_abort):
 //   offset 0: how (i32)
@@ -415,13 +417,15 @@ const IRQCTL_VECTOR_OFF: usize = 12;
 const IRQCTL_POLICY_OFF: usize = 16;
 const IRQCTL_HOOK_ID_OFF: usize = 20;
 
-// mess_lsys_krn_sys_setalarm (for do_setalarm):
-//   offset  0: exp_time   (u64)
-//   offset  8: time_left  (u64, reply field)
-//   offset 16: abs_time   (i32)
-const SETALARM_EXP_TIME_OFF: usize = 0;
-const SETALARM_TIME_LEFT_OFF: usize = 8;
-const SETALARM_ABS_TIME_OFF: usize = 16;
+// mess_lsys_krn_sys_setalarm (for do_setalarm). kbuf[0..4] = call number,
+// kbuf[4..8] = source endpoint (set by sys_kernel_call_handler), so the
+// payload starts at offset 8:
+//   offset  8: exp_time   (u64)
+//   offset 16: time_left  (u64, reply field)
+//   offset 24: abs_time   (i32)
+const SETALARM_EXP_TIME_OFF: usize = 8;
+const SETALARM_TIME_LEFT_OFF: usize = 16;
+const SETALARM_ABS_TIME_OFF: usize = 24;
 
 // mess_lsys_krn_sys_stime (for do_stime):
 //   offset 0: boot_time (time_t / i64)

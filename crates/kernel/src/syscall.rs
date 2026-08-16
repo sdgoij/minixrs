@@ -114,9 +114,33 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         if buf.is_null() || count == 0 {
             return -14; // EFAULT
         }
-        // Read one byte (blocking via read_blocking which polls ser_input,
-        // UART MMIO, and on RISC-V also SBI DBCN console_read).
+        // Read one byte. On x86 the read blocks by spinning with IF=0
+        // (read_blocking); on riscv/aarch64 that kernel-mode busy-wait
+        // starves other processes (the timer only fires at the WFI window
+        // and the kernel-mode resume path faults), so the fd-0 read
+        // instead returns EAGAIN when no byte is available. The tty's
+        // do_read loop retries in user mode, where the timer can preempt
+        // it and schedule the input server's virtio-keyboard poll. The
+        // UART is drained into the ring here and by the per-tick trap
+        // drains, so a retry finds the byte.
+        #[cfg(target_arch = "x86_64")]
         let byte = crate::ser_input::read_blocking();
+        #[cfg(not(target_arch = "x86_64"))]
+        let byte = {
+            let mut got = crate::ser_input::try_read();
+            if got.is_none() {
+                // Feed the ring from the UART first (the ISR/timer drain
+                // is disabled while we run), then re-check.
+                while let Some(b) = crate::hal::poll_console() {
+                    unsafe { crate::ser_input::push_byte(b) };
+                }
+                got = crate::ser_input::try_read();
+            }
+            match got {
+                Some(b) => b,
+                None => return -11, // EAGAIN: tty retries in user mode
+            }
+        };
         unsafe {
             core::ptr::write_volatile(buf, byte);
             core::arch::asm!("", options(nostack, preserves_flags));

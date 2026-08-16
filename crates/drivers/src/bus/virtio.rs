@@ -550,6 +550,12 @@ pub fn virtio_sread8(dev: &VirtioDevice, offset: u16) -> u8 {
     unsafe { mmio_read32(dev_cfg_base(dev) + off as u64) as u8 }
 }
 
+/// Write one byte to the device config space (e.g. virtio-input selectors).
+pub fn virtio_swrite8(dev: &VirtioDevice, offset: u16, val: u8) {
+    let off = if dev.msi { VIRTIO_MSI_ADD_OFF } else { 0 } + offset;
+    unsafe { mmio_write8(dev_cfg_base(dev) + off as u64, val) }
+}
+
 /// Initialize a vring with the given descriptor table, avail, and used rings.
 ///
 /// Chains all descriptors into the free list as a circular singly-linked

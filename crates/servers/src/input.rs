@@ -1,17 +1,23 @@
-//! PS/2 keyboard driver server — `/dev/kbd` (major 20).
+//! Keyboard driver server — `/dev/kbd` (major 20).
 //!
-//! Registers an IRQ-1 hook via SYS_IRQCTL (the kernel's `kbd_isr_entry`
-//! notifies this process on every key event), drains the 8042 scancode
-//! stream through SYS_DEVIO, decodes scancodes to HID events with the
-//! input crate's state machine, and serves the decoded events as a
-//! character device. Reads are non-blocking: a read with no pending
-//! events returns EAGAIN and the consumer polls (blocking reads and
-//! CDEV_SELECT are follow-ons once VFS passes read nonblock flags).
+//! Two backends feed the same HID event ring: the 8042 (x86, IRQ-1 hook
+//! via SYS_IRQCTL — the kernel's `kbd_isr_entry` notifies this process on
+//! every key event) and virtio-keyboard (riscv/aarch64 — no wired userland
+//! IRQ, so the event queue is polled on a periodic SYS_SETALARM). Both
+//! drain into the ring, which the window server consumes as a character
+//! device. Reads are non-blocking: a read with no pending events returns
+//! EAGAIN and the consumer polls (blocking reads and CDEV_SELECT are
+//! follow-ons once VFS passes read nonblock flags).
 
 use arch_common::com::{CDEV_CLOSE, CDEV_OPEN, CDEV_READ, is_cdev_rq};
+#[cfg(target_os = "minix")]
+use drivers::bus::virtio::virtio_set_phys_delta;
+use drivers::input::constants::INPUT_PAGE_KEY;
+#[cfg(target_arch = "x86_64")]
 use drivers::input::controller::Ps2Controller;
 use drivers::input::devio::DevioIo;
 use drivers::input::driver::{InputCallbacks, InputDriver};
+use drivers::input::virtio_input::{VirtioInput, keycode_to_usage};
 
 /// A decoded input event: HID usage page, usage code, and press value.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +33,15 @@ const EAGAIN: i32 = -11;
 
 /// Decode state for the keyboard scancode stream.
 static mut INPUT_DRIVER: InputDriver = InputDriver::new();
+
+/// Virtio-keyboard backend (riscv/aarch64); uninitialized on x86.
+static mut VIRTIO_INPUT: VirtioInput = VirtioInput::new();
+
+/// Whether the 8042 PS/2 controller came up. Only x86 has an I8042;
+/// on riscv/aarch64 SYS_DEVIO returns ENOSYS and `devio_hook` reads the
+/// request back as the status byte, so draining the absent controller
+/// would spin forever.
+static mut PS2_READY: bool = false;
 
 /// Consumer endpoint (the window server) notified when events queue; -1 =
 /// none. Registered via `INPUT_REG_CONSUMER`.
@@ -66,6 +81,9 @@ impl InputCallbacks for ServerCallbacks {
 /// Drain all pending scancodes from the 8042 and decode them into events.
 /// Returns true when at least one event was queued (EV_TAIL advanced).
 fn drain_keyboard() -> bool {
+    if !unsafe { PS2_READY } {
+        return false;
+    }
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_DRIVER) };
     let mut cb = ServerCallbacks;
     let tail = unsafe { EV_TAIL };
@@ -73,6 +91,54 @@ fn drain_keyboard() -> bool {
     // notifies once per batch; drain until the controller reports empty.
     while unsafe { driver.intr_handler::<DevioIo, ServerCallbacks>(&mut cb) } {}
     unsafe { EV_TAIL != tail }
+}
+
+/// Drain pending virtio-input events into the HID event ring. The device
+/// emits Linux keycodes; `keycode_to_usage` maps them to the HID usages
+/// the window server consumes. Returns true when an event was queued.
+fn drain_virtio() -> bool {
+    let tail = unsafe { EV_TAIL };
+    let input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
+    let mut cb = ServerCallbacks;
+    input.drain(|code, value| {
+        if let Some(usage) = keycode_to_usage(code) {
+            cb.key_event(INPUT_PAGE_KEY, usage, value as i32);
+        }
+    });
+    unsafe { EV_TAIL != tail }
+}
+
+/// Query this process's VA→PA image translation offset (SYS_GETINFO
+/// GET_PHYS_DELTA) and hand it to the virtio transport so the vring base
+/// and descriptor addresses are programmed as guest-physical addresses
+/// (same pattern as the virtio-blk/net/fb servers; without it the
+/// virtio-keyboard DMA targets raw VAs and the device's writes land in
+/// non-RAM).
+#[cfg(target_os = "minix")]
+fn init_phys_delta() {
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&arch_common::com::GET_PHYS_DELTA.to_ne_bytes());
+    minix_rt::kernel_call(26, &mut msg); // SYS_GETINFO
+    let delta = i64::from_ne_bytes(msg[0..8].try_into().unwrap_or([0u8; 8]));
+    virtio_set_phys_delta(delta);
+}
+
+/// Arm the periodic virtio-input poll: SYS_SETALARM (kernel call 24) with
+/// a short relative expiry. The kernel notifies via CLOCK on expiry; the
+/// notify branch re-arms. The virtio-keyboard has no wired userland IRQ on
+/// riscv/aarch64, so the event queue is polled on a tick.
+#[cfg(target_os = "minix")]
+fn arm_virtio_poll() {
+    let input = unsafe { &*core::ptr::addr_of!(VIRTIO_INPUT) };
+    if !input.is_initialized() {
+        return;
+    }
+    let mut msg = [0u8; 64];
+    // SYS_SETALARM payload: exp_time u64 @8, abs_time i32 @24 (bytes 0-7
+    // are the call number/source, clobbered by the kernel dispatch).
+    msg[8..16].copy_from_slice(&5u64.to_ne_bytes()); // exp_time: 5 ticks
+    msg[24..28].copy_from_slice(&0i32.to_ne_bytes()); // relative
+    let _ = minix_rt::kernel_call(24, &mut msg); // SYS_SETALARM
 }
 
 /// Pop up to `count` bytes of events (8 bytes each) into `buf`.
@@ -131,9 +197,29 @@ pub fn input_server_main() {
 
         drivers::input::devio::input_set_devio(devio_hook);
 
+        // The virtio transport needs this process's VA→PA delta to program
+        // guest-physical addresses (init_phys_delta queries SYS_GETINFO).
+        init_phys_delta();
+
         // Initialize the 8042 (enables the keyboard and mouse interrupts).
-        let _ = unsafe { Ps2Controller::init::<DevioIo>() };
+        // The I8042 only exists on x86; on riscv/aarch64 the probe would
+        // spin through the SYS_DEVIO wait timeouts (port I/O returns ENOSYS
+        // there, so every status read looks "output full" and `wait_ready`
+        // burns its full 100k-iteration budget).
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            PS2_READY = Ps2Controller::init::<DevioIo>().is_ok()
+        };
         register_irq();
+
+        // Try the virtio-keyboard backend (riscv/aarch64; absent on x86).
+        let virtio_input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
+        if virtio_input.init().is_ok() {
+            unsafe {
+                minix_rt::write(1, b"input: virtio-keyboard ready\n".as_ptr(), 29);
+            }
+            arm_virtio_poll();
+        }
 
         loop {
             let mut msg = arch_common::ipc::Message {
@@ -158,7 +244,11 @@ pub fn input_server_main() {
             let is_notify =
                 (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
             if is_notify {
-                if drain_keyboard() {
+                let had_ps2 = drain_keyboard();
+                let had_virtio = drain_virtio();
+                // The alarm poll is one-shot; re-arm for the next tick.
+                arm_virtio_poll();
+                if had_ps2 || had_virtio {
                     // Wake the registered consumer (window server) so it
                     // routes the queued keys without polling.
                     let consumer = unsafe { CONSUMER_EP };

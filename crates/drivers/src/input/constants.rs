@@ -5,7 +5,6 @@
 
 #![allow(clippy::identity_op)]
 
-
 /// Keyboard data port (read/write data, read output buffer).
 pub const KEYBD: u16 = 0x60;
 
@@ -15,10 +14,8 @@ pub const KB_COMMAND: u16 = 0x64;
 /// Keyboard status port (read status from controller).
 pub const KB_STATUS: u16 = 0x64;
 
-
 /// ACK byte sent by keyboard in response to a command.
 pub const KB_ACK: u8 = 0xFA;
-
 
 /// Auxiliary device output buffer full.
 pub const KB_AUX_BYTE: u8 = 0x20;
@@ -28,7 +25,6 @@ pub const KB_OUT_FULL: u8 = 0x01;
 
 /// Input buffer full (controller not ready to receive).
 pub const KB_IN_FULL: u8 = 0x02;
-
 
 /// Read the controller command byte.
 pub const KBC_RD_RAM_CCB: u8 = 0x20;
@@ -48,7 +44,6 @@ pub const KBC_DI_KBD: u8 = 0xAD;
 /// Enable keyboard interface.
 pub const KBC_EN_KBD: u8 = 0xAE;
 
-
 /// Wait this many microseconds for a status update.
 pub const KBC_WAIT_TIME: u32 = 100_000;
 
@@ -58,13 +53,11 @@ pub const KBC_READ_TIME: u32 = 1_000_000;
 /// Microseconds to delay when polling.
 pub const KBC_IN_DELAY: u32 = 7;
 
-
 /// Output buffer size for data to the keyboard.
 pub const KBD_OUT_BUFSZ: usize = 16;
 
 /// Number of scancode entries in the translation tables.
 pub const KBD_SCAN_CODES: usize = 0x80;
-
 
 /// OR this mask to indicate a key release.
 pub const SCAN_RELEASE: u8 = 0x80;
@@ -81,7 +74,6 @@ pub const SCAN_EXT0: u8 = 0xE0;
 /// Prefix for Pause/Break-style extended scancodes.
 pub const SCAN_EXT1: u8 = 0xE1;
 
-
 /// Scroll Lock LED bit.
 pub const LED_SCROLL_LOCK: u8 = 0x01;
 
@@ -93,7 +85,6 @@ pub const LED_CAPS_LOCK: u8 = 0x04;
 
 /// Command to set keyboard LEDs.
 pub const LED_CODE: u8 = 0xED;
-
 
 /// General Desktop page.
 pub const INPUT_PAGE_GD: u16 = 0x0001;
@@ -110,20 +101,17 @@ pub const INPUT_PAGE_BUTTON: u16 = 0x0009;
 /// Consumer page.
 pub const INPUT_PAGE_CONS: u16 = 0x000C;
 
-
 /// Key release event value.
 pub const INPUT_RELEASE: i32 = 0;
 
 /// Key press event value.
 pub const INPUT_PRESS: i32 = 1;
 
-
 /// Absolute value (the default).
 pub const INPUT_FLAG_ABS: u16 = 0x00;
 
 /// Relative value.
 pub const INPUT_FLAG_REL: u16 = 0x04;
-
 
 /// X-axis movement.
 pub const INPUT_GD_X: u16 = 0x0030;
@@ -139,7 +127,6 @@ pub const INPUT_GD_SYSTEM_SLEEP: u16 = 0x0082;
 
 /// System Wake Up.
 pub const INPUT_GD_SYSTEM_WAKE_UP: u16 = 0x0083;
-
 
 pub const INPUT_KEY_A: u16 = 0x0004;
 pub const INPUT_KEY_B: u16 = 0x0005;
@@ -278,7 +265,6 @@ pub const INPUT_KEY_LANG_5: u16 = 0x0088;
 
 pub const INPUT_KEY_SYSREQ: u16 = 0x008C;
 
-
 pub const INPUT_KEY_LEFT_CTRL: u16 = 0x00E0;
 pub const INPUT_KEY_LEFT_SHIFT: u16 = 0x00E1;
 pub const INPUT_KEY_LEFT_ALT: u16 = 0x00E2;
@@ -288,14 +274,11 @@ pub const INPUT_KEY_RIGHT_SHIFT: u16 = 0x00E5;
 pub const INPUT_KEY_RIGHT_ALT: u16 = 0x00E6;
 pub const INPUT_KEY_RIGHT_GUI: u16 = 0x00E7;
 
-
 pub const INPUT_LED_NUMLOCK: u16 = 0x0001;
 pub const INPUT_LED_CAPSLOCK: u16 = 0x0002;
 pub const INPUT_LED_SCROLLLOCK: u16 = 0x0003;
 
-
 pub const INPUT_BUTTON_1: u16 = 0x0001;
-
 
 pub const INPUT_CONS_SCAN_NEXT_TRACK: u16 = 0x00B5;
 pub const INPUT_CONS_SCAN_PREVIOUS_TRACK: u16 = 0x00B6;
@@ -325,7 +308,6 @@ pub const INPUT_CONS_AC_STOP: u16 = 0x0226;
 pub const INPUT_CONS_AC_REFRESH: u16 = 0x0227;
 
 pub const INPUT_CONS_AC_BOOKMARKS: u16 = 0x022A;
-
 
 /// Keyboard device flag.
 pub const INPUT_DEV_KBD: u8 = 0x01;

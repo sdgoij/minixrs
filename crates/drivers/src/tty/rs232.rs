@@ -68,12 +68,10 @@ pub const UART_SCR: u16 = 7; // Scratch Register
 
 // Register bit definitions
 
-
 pub const IER_ERXBF: u8 = 0x01; // Enable Received Data Available Interrupt
 pub const IER_ETXBE: u8 = 0x02; // Enable Transmitter Holding Register Empty Interrupt
 pub const IER_ERLS: u8 = 0x04; // Enable Receiver Line Status Interrupt
 pub const IER_EMSC: u8 = 0x08; // Enable Modem Status Interrupt
-
 
 pub const IIR_IPEND: u8 = 0x01; // Interrupt Pending (0 = pending)
 pub const IIR_IID: u8 = 0x0E; // Interrupt ID mask
@@ -103,7 +101,6 @@ impl From<u8> for UartInterruptId {
     }
 }
 
-
 pub const FCR_ENABLE: u8 = 0x01; // Enable FIFOs
 pub const FCR_CLEAR_RX: u8 = 0x02; // Clear Receiver FIFO
 pub const FCR_CLEAR_TX: u8 = 0x04; // Clear Transmitter FIFO
@@ -112,7 +109,6 @@ pub const FCR_TRIGGER_1: u8 = 0x00; // 1 byte trigger
 pub const FCR_TRIGGER_4: u8 = 0x40; // 4 bytes trigger
 pub const FCR_TRIGGER_8: u8 = 0x80; // 8 bytes trigger
 pub const FCR_TRIGGER_14: u8 = 0xC0; // 14 bytes trigger
-
 
 pub const LCR_WLEN5: u8 = 0x00; // 5 data bits
 pub const LCR_WLEN6: u8 = 0x01; // 6 data bits
@@ -125,13 +121,11 @@ pub const LCR_SP: u8 = 0x20; // Stick Parity
 pub const LCR_BREAK: u8 = 0x40; // Break Control (send break)
 pub const LCR_DLAB: u8 = 0x80; // Divisor Latch Access Bit
 
-
 pub const MCR_DTR: u8 = 0x01; // Data Terminal Ready
 pub const MCR_RTS: u8 = 0x02; // Request To Send
 pub const MCR_OUT1: u8 = 0x04; // Auxiliary output 1
 pub const MCR_OUT2: u8 = 0x08; // Auxiliary output 2 (IRQ enable on PC)
 pub const MCR_LOOP: u8 = 0x10; // Loopback mode
-
 
 pub const LSR_DR: u8 = 0x01; // Data Ready (receiver)
 pub const LSR_OE: u8 = 0x02; // Overrun Error
@@ -141,7 +135,6 @@ pub const LSR_BI: u8 = 0x10; // Break Interrupt
 pub const LSR_THRE: u8 = 0x20; // Transmitter Holding Register Empty
 pub const LSR_TEMT: u8 = 0x40; // Transmitter Empty
 pub const LSR_RXFE: u8 = 0x80; // Error in Receiver FIFO
-
 
 pub const MSR_DCTS: u8 = 0x01; // Delta Clear To Send
 pub const MSR_DDSR: u8 = 0x02; // Delta Data Set Ready
@@ -257,14 +250,12 @@ impl<IO: IoPort> Rs232Port<IO> {
         }
     }
 
-
     pub fn read_reg(&self, reg: u16) -> u8 {
         self.io.inb(self.base + reg)
     }
     pub fn write_reg(&mut self, reg: u16, val: u8) {
         self.io.outb(self.base + reg, val);
     }
-
 
     pub fn set_baud(&mut self, baud: u32) -> Result<(), DriverError> {
         if baud == 0 {
@@ -287,7 +278,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.baud
     }
 
-
     pub fn set_line_params(&mut self, bits: u8, parity: u8, stop: u8) {
         let mut lcr = match bits {
             5 => LCR_WLEN5,
@@ -309,13 +299,11 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.lcr = lcr;
     }
 
-
     pub fn set_fifo(&mut self, trigger: u8) {
         let fcr = FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX | (trigger & FCR_TRIGGER_14);
         self.write_reg(UART_FCR, fcr);
         self.fcr = fcr;
     }
-
 
     pub fn set_interrupts(&mut self, ier: u8) {
         self.write_reg(UART_IER, ier);
@@ -325,7 +313,6 @@ impl<IO: IoPort> Rs232Port<IO> {
     pub fn get_interrupt_id(&self) -> UartInterruptId {
         UartInterruptId::from(self.read_reg(UART_IIR))
     }
-
 
     pub fn set_modem(&mut self, mcr: u8) {
         self.write_reg(UART_MCR, mcr);
@@ -350,7 +337,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         }
         self.set_modem(mcr);
     }
-
 
     pub fn is_data_ready(&self) -> bool {
         self.read_reg(UART_LSR) & LSR_DR != 0
@@ -401,7 +387,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         count
     }
 
-
     pub fn send_break(&mut self, on: bool) {
         let mut lcr = self.read_reg(UART_LCR);
         if on {
@@ -412,7 +397,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         self.write_reg(UART_LCR, lcr);
         self.lcr = lcr;
     }
-
 
     pub fn init(&mut self, baud: u32, mcr_out2: bool) -> Result<(), DriverError> {
         self.set_baud(baud)?;
@@ -475,7 +459,6 @@ impl<IO: IoPort> Rs232Port<IO> {
         &self.error
     }
 }
-
 
 #[allow(clippy::new_without_default)]
 impl Default for RsInputBuf {

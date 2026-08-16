@@ -15,7 +15,6 @@ pub struct ScanmapEntry {
     pub code: u16,
 }
 
-
 /// Normal (unprefixed) scancode → HID translation.
 ///
 /// Indexed by scancode & 0x7F.  Entries not listed are {0, 0} (unmapped).
@@ -470,7 +469,6 @@ pub static SCANMAP_NORMAL: [ScanmapEntry; KBD_SCAN_CODES] = {
     tbl
 };
 
-
 /// Extended (0xE0-prefixed) scancode → HID translation.
 ///
 /// Indexed by the byte following 0xE0, masked with 0x7F.
@@ -640,7 +638,6 @@ pub static SCANMAP_ESCAPED: [ScanmapEntry; KBD_SCAN_CODES] = {
 
     tbl
 };
-
 
 /// Colemak remapping table: maps a QWERTY HID code to a Colemak HID code.
 ///
