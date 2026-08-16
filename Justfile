@@ -129,6 +129,24 @@ run-riscv64 memory: build-riscv64 mkfs-riscv64
 run-aarch64 memory: build-aarch64 mkfs-aarch64
     qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
 
+# ---------- desktop (graphical window; shell stays on stdio) ----------
+# The SDL window shows the framebuffer and routes host keys to the guest
+# keyboard (PS/2 on x86, virtio-keyboard on riscv/aarch64), so the
+# wserver desktop is interactive: click the window and type into the
+# focused wdemo window while the shell runs on the terminal.
+
+desktop target="x86" memory="256M":
+    @just desktop-{{target}} {{memory}}
+
+desktop-x86 memory="256M": build-x86 mkfs-x86
+    qemu-system-x86_64 -display sdl -serial stdio -m {{memory}} -no-reboot -vga none -device bochs-display -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+
+desktop-riscv64 memory="256M": build-riscv64 mkfs-riscv64
+    qemu-system-riscv64 -machine virt -m {{memory}} -display sdl -serial stdio -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+
+desktop-aarch64 memory="256M": build-aarch64 mkfs-aarch64
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -display sdl -serial stdio -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+
 # ---------- debug (QEMU gdb stub on :1234) ----------
 
 debug target="x86":
