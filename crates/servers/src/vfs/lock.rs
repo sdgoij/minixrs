@@ -13,7 +13,6 @@ use crate::vfs::types::*;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-
 fn r2_i16(buf: &[u8; 64], off: usize) -> i16 {
     i16::from_le_bytes(buf[off..off + 2].try_into().unwrap_or([0; 2]))
 }
@@ -41,7 +40,6 @@ pub struct LockConflict {
     pub lock_last: i64,
 }
 
-
 struct LockTable(UnsafeCell<[FileLock; NR_LOCKS]>);
 unsafe impl Sync for LockTable {}
 
@@ -64,7 +62,6 @@ static NR_ACTIVE_LOCKS: AtomicI32 = AtomicI32::new(0);
 
 /// Maximum byte position (2 GB − 1), used when `l_len == 0` (lock to EOF).
 const MAX_FILE_POS: i64 = 0x7FFFFFFF;
-
 
 /// Compute the absolute byte range `[first, last]` from a `struct flock`
 /// description and the file's current position / size.
@@ -110,7 +107,6 @@ fn compute_range(
     Ok((first, last))
 }
 
-
 /// Get a raw pointer to the lock table.
 fn lock_table_ptr() -> *mut [FileLock; NR_LOCKS] {
     LOCK_TABLE.0.get()
@@ -153,7 +149,6 @@ pub fn remove_locks_by_pid_vnode(pid: i32, vnode: *const Vnode) {
         }
     }
 }
-
 
 /// Check if the proposed lock `(l_type, pid, vnode, first, last)` conflicts
 /// with any existing lock in the table.
@@ -201,7 +196,6 @@ pub fn check_lock(
     }
     Ok(())
 }
-
 
 /// Remove or trim locks matching `(pid, vnode, first, last)`.
 ///
@@ -280,7 +274,6 @@ pub fn remove_locks(pid: i32, vnode: *const Vnode, first: i64, last: i64) -> i32
     freed
 }
 
-
 /// Wake all processes blocked on `FP_BLOCKED_ON_LOCK`.
 /// Each will re-execute its lock request from scratch.
 ///
@@ -299,7 +292,6 @@ pub unsafe fn lock_revive() {
         }
     }
 }
-
 
 /// Perform an advisory file lock operation.
 ///
@@ -345,11 +337,12 @@ pub unsafe fn lock_op() -> i32 {
     if cmd == F_GETLK && l_type == F_UNLCK {
         return EINVAL;
     }
-    // Check file opened with appropriate access.
-    if l_type == F_RDLCK && (filp.filp_mode & 1) == 0 {
+    // Check file opened with appropriate access (filp_mode holds the
+    // permission-style R_BIT/W_BIT bits, see do_open).
+    if l_type == F_RDLCK && (filp.filp_mode & crate::vfs::protect::R_BIT) == 0 {
         return EBADF;
     }
-    if l_type == F_WRLCK && (filp.filp_mode & 2) == 0 {
+    if l_type == F_WRLCK && (filp.filp_mode & crate::vfs::protect::W_BIT) == 0 {
         return EBADF;
     }
 
@@ -416,7 +409,6 @@ unsafe fn write_flock_reply(_l_type: i16, conflict: LockConflict) {
     w2_i64(&mut glob.fs_m_out, LOCK_LEN_OFF, len);
     w2_i32(&mut glob.fs_m_out, LOCK_PID_OFF, conflict.lock_pid);
 }
-
 
 #[cfg(test)]
 mod tests {

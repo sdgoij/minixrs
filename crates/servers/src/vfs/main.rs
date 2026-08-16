@@ -124,6 +124,17 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         dmap::map_driver(b"tty", 5, arch_common::com::TTY_PROC_NR);
     }
 
+    // Register the tty server as the PTY (major 9) character driver so
+    // opening /dev/ptyp0-3 / /dev/ttyp0-3 reaches it (the pty pair lives
+    // inside the tty server).
+    unsafe {
+        dmap::map_driver(
+            b"pty",
+            arch_common::dmap::PTY_MAJOR as i32,
+            arch_common::com::TTY_PROC_NR,
+        );
+    }
+
     // Register the net server as the /dev/ip (major 14) character driver
     // so opening /dev/ip routes read/write to the ARP/ICMP server.
     unsafe {

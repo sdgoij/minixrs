@@ -179,6 +179,21 @@ name = "allocprobe"
 path = "src/bin/allocprobe.rs"
 test = false
 
+# ttyprobe is a QEMU probe: it opens a pty pair (/dev/ptyp0 + /dev/ttyp0)
+# and round-trips bytes both ways through the tty line discipline (Phase
+# M2). Embedded as /bin/ttyprobe.
+[[bin]]
+name = "ttyprobe"
+path = "src/bin/ttyprobe.rs"
+test = false
+
+# wterm is the M3 terminal window client: opens a pty, spawns /bin/sh on
+# the slave, and renders its output (VT subset) into a wserver window.
+[[bin]]
+name = "wterm"
+path = "src/bin/wterm.rs"
+test = false
+
 [[bin]]
 name = "seltest"
 path = "src/bin/seltest.rs"

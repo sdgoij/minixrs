@@ -58,9 +58,44 @@ pub const TIOCGETA: u32 = ioc_encode(0x4000_0000, b't', 19, core::mem::size_of::
 /// Set the terminal attributes (NetBSD `TIOCSETA`).
 pub const TIOCSETA: u32 = ioc_encode(0x8000_0000, b't', 20, core::mem::size_of::<Termios>());
 
+/// Window size (rows/cols; the pty master's ioctl sets the slave's).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WinSize {
+    pub ws_row: u16,
+    pub ws_col: u16,
+    pub ws_xpixel: u16,
+    pub ws_ypixel: u16,
+}
+
+/// Get the terminal window size (NetBSD `TIOCGWINSZ`).
+pub const TIOCGWINSZ: u32 = ioc_encode(0x4000_0000, b't', 104, core::mem::size_of::<WinSize>());
+/// Set the terminal window size (NetBSD `TIOCSWINSZ`).
+pub const TIOCSWINSZ: u32 = ioc_encode(0x8000_0000, b't', 103, core::mem::size_of::<WinSize>());
+
 // Local flags (c_lflag) — matches the tty server.
 /// Echo input characters.
 pub const ECHO: u32 = 0x0000_0008;
+/// Erase echoes as backspace-space-backspace.
+pub const ECHOE: u32 = 0x0000_0002;
+/// Kill echoes the erased characters.
+pub const ECHOK: u32 = 0x0000_0004;
+/// Echo the newline even when ECHO is off.
+pub const ECHONL: u32 = 0x0000_0010;
+/// Echo control characters as `^X`.
+pub const ECHOCTL: u32 = 0x0000_0040;
+/// Generate signals on INTR/QUIT/SUSP characters.
+pub const ISIG: u32 = 0x0000_0080;
+/// Canonical (line-by-line) input mode.
+pub const ICANON: u32 = 0x0000_0100;
+/// Input extensions (LNEXT/REPRINT).
+pub const IEXTEN: u32 = 0x0000_0400;
+
+// Control-character indices (c_cc) — matches the tty server.
+/// VMIN index (raw-mode minimum bytes).
+pub const VMIN: usize = 16;
+/// VTIME index (raw-mode inter-byte timeout, tenths).
+pub const VTIME: usize = 17;
 
 /// Fetch the terminal attributes of `fd` into `t`.
 ///

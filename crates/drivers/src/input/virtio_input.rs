@@ -231,9 +231,16 @@ pub fn keycode_to_usage(code: u16) -> Option<u16> {
         51 => 0x36, // ,
         52 => 0x37, // .
         53 => 0x38, // /
-        // Shift (wserver tracks 0xE1/0xE5).
+        // Shift/ctrl (the wserver tracks 0xE1/0xE5 shift, 0xE0/0xE4 ctrl).
         42 => 0xE1, // left shift
         54 => 0xE5, // right shift
+        29 => 0xE0, // left ctrl
+        97 => 0xE4, // right ctrl
+        // Arrows (the wterm client turns these into escape sequences).
+        103 => 0x52, // up
+        108 => 0x51, // down
+        105 => 0x50, // left
+        106 => 0x4F, // right
         _ => return None,
     };
     Some(usage)
@@ -292,6 +299,12 @@ mod tests {
         assert_eq!(keycode_to_usage(57), Some(0x2C)); // space
         assert_eq!(keycode_to_usage(42), Some(0xE1)); // left shift
         assert_eq!(keycode_to_usage(54), Some(0xE5)); // right shift
+        assert_eq!(keycode_to_usage(29), Some(0xE0)); // left ctrl
+        assert_eq!(keycode_to_usage(97), Some(0xE4)); // right ctrl
+        assert_eq!(keycode_to_usage(103), Some(0x52)); // up
+        assert_eq!(keycode_to_usage(108), Some(0x51)); // down
+        assert_eq!(keycode_to_usage(105), Some(0x50)); // left
+        assert_eq!(keycode_to_usage(106), Some(0x4F)); // right
         assert_eq!(keycode_to_usage(12), Some(0x2D)); // -
         assert_eq!(keycode_to_usage(39), Some(0x33)); // ;
         assert_eq!(keycode_to_usage(53), Some(0x38)); // /
@@ -301,7 +314,7 @@ mod tests {
     fn unmapped_keys_return_none() {
         assert!(keycode_to_usage(1).is_none()); // esc
         assert!(keycode_to_usage(15).is_none()); // tab
-        assert!(keycode_to_usage(103).is_none()); // up
+        assert!(keycode_to_usage(100).is_none()); // alt right
         assert!(keycode_to_usage(0xFFFF).is_none());
     }
 }

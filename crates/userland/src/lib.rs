@@ -584,7 +584,9 @@ pub fn wdemo(args: &[&str]) -> i32 {
 /// the wserver boot proc.
 #[cfg(target_os = "minix")]
 fn wdemo_impl(args: &[&str]) -> i32 {
-    use minix_std::wserver::{ws_create, ws_fill, ws_input, ws_key_char, ws_reply_status, ws_text};
+    use minix_std::wserver::{
+        ws_create, ws_fill, ws_flush, ws_input, ws_key_char, ws_reply_status, ws_text,
+    };
 
     const COLS: i32 = 40;
     const ROWS: i32 = 11;
@@ -630,6 +632,9 @@ fn wdemo_impl(args: &[&str]) -> i32 {
             ws_call(&mut msg);
             let mut msg = ws_fill(wid, 0, 166, 320, 174, 0x000000FF);
             ws_call(&mut msg);
+            // Redraws are deferred to WS_FLUSH.
+            let mut msg = ws_flush();
+            ws_call(&mut msg);
             write_out(b"wdemo: info ok\n");
             0
         }
@@ -644,6 +649,8 @@ fn wdemo_impl(args: &[&str]) -> i32 {
             let wid = minix_std::wserver::ws_reply_wid(&msg);
             ws_puts(wid, 0, 0, b"> ");
             write_out(b"wdemo: term waiting\n");
+            let mut msg = ws_flush();
+            ws_call(&mut msg);
             let (mut row, mut col) = (0i32, 2i32);
             let mut keys = 0i32;
             while max_keys == 0 || keys < max_keys {
@@ -680,6 +687,9 @@ fn wdemo_impl(args: &[&str]) -> i32 {
                         }
                     }
                 }
+                // Redraws are deferred to WS_FLUSH; repaint after each key.
+                let mut msg = ws_flush();
+                ws_call(&mut msg);
                 keys += 1;
             }
             write_out(b"wdemo: term ok\n");

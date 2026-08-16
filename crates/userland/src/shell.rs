@@ -70,11 +70,16 @@ pub fn sh(_args: &[&str]) -> i32 {
     #[cfg(target_os = "minix")]
     {
         // Ignore SIGINT: the tty's sigchar sends it on ^C, and the shell
-        // must survive it at the prompt (read_line just gets EINTR and the
-        // loop reprints the prompt). TTY.md 1C.3.
+        // must survive it at the prompt (the editor's read just gets EINTR
+        // and the loop reprints the prompt). TTY.md 1C.3.
         if minix_std::time::sig_ignore(minix_std::time::SIGINT).is_err() {
             write_err(b"sh: warning: cannot ignore SIGINT\n");
         }
+        // The line editor drives echo/editing itself (arrows, history), so
+        // the tty runs raw at the prompt and canonical for commands. If fd 0
+        // is not a terminal, termios fails and the editor still reads bytes.
+        let editor_ok = tty_set_raw(true);
+        let mut ed = Editor::new();
         let mut buf = [0u8; 256];
         loop {
             // Reap finished background jobs before each prompt so `[pid]
@@ -82,9 +87,22 @@ pub fn sh(_args: &[&str]) -> i32 {
             // order. SIGNALS.md 3.4 — prompt-time reaping is the pattern.
             reap_jobs();
             write_out(b"# ");
-            let line_len = read_line(&mut buf);
+            let line_len = read_line(&mut ed, &mut buf);
+            if line_len == LINE_EOF {
+                // ^D at an empty prompt: exit the shell.
+                if editor_ok {
+                    tty_set_raw(false);
+                }
+                return 0;
+            }
             if line_len == 0 {
                 continue;
+            }
+            ed.push_history(&buf[..line_len]);
+            // Commands run with the tty back in canonical mode (children
+            // expect normal echo/line editing).
+            if editor_ok {
+                tty_set_raw(false);
             }
 
             let line_str = core::str::from_utf8(&buf[..line_len]).unwrap_or("");
@@ -117,11 +135,17 @@ pub fn sh(_args: &[&str]) -> i32 {
 
             if background {
                 run_background(&raw_tokens[..raw_argc]);
+                if editor_ok {
+                    tty_set_raw(true);
+                }
                 continue;
             }
 
             // Run the command chain (`&&` splitting) in the foreground.
             let status = run_chain(&raw_tokens, raw_argc);
+            if editor_ok {
+                tty_set_raw(true);
+            }
             if status == SH_EXIT {
                 return 0;
             }
@@ -278,37 +302,392 @@ fn reap_jobs() {
 }
 
 // ---------------------------------------------------------------------------
-// Line reading
+// Line reading — raw-mode editor with history (arrows, ^A/E/U/W/K, ^C/^D)
 // ---------------------------------------------------------------------------
 
-/// Read one line from stdin into `buf`. Returns the number of bytes stored
-/// (excluding the trailing newline).
-///
-/// The tty's canonical line discipline (ICANON) does the echoing, backspace
-/// and line editing; this only accumulates bytes until the line ends. The
-/// first read blocks until a line is available, so a ^C (EINTR) at an empty
-/// prompt yields an empty line and the caller reprints the prompt.
+/// Maximum line length the editor holds.
+#[cfg(any(target_os = "minix", test))]
+const EDIT_MAX: usize = 256;
+/// Number of history entries kept.
+#[cfg(any(target_os = "minix", test))]
+const HIST_MAX: usize = 16;
+/// Assumed terminal width for full-row blanks (the pty is 80 cols;
+/// the console has no winsize).
+#[cfg(any(target_os = "minix", test))]
+const SCR_COLS: usize = 80;
+/// Sentinel returned by `read_line` on EOF (^D at an empty prompt).
+pub const LINE_EOF: usize = usize::MAX;
+
+/// Write to stdout (the tty) with EAGAIN retry — the pty slave's output
+/// buffer reports EAGAIN when full and the reader (wterm) drains it.
 #[cfg(target_os = "minix")]
-fn read_line(buf: &mut [u8]) -> usize {
-    let mut total = 0usize;
+fn tty_write(s: &[u8]) {
+    let mut off = 0;
+    while off < s.len() {
+        match unsafe { minix_std::fs::write(1, &s[off..]) } {
+            Ok(n) => off += n as usize,
+            Err(e) if e.0 == -minix_std::EAGAIN => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// Host stub: the editor's buffer logic is unit-tested without a tty.
+#[cfg(all(not(target_os = "minix"), test))]
+fn tty_write(_s: &[u8]) {}
+
+/// Raw-mode line editor state (the shell's own echo/editing — the tty's
+/// canonical mode cannot do arrows or history).
+#[cfg(any(target_os = "minix", test))]
+struct Editor {
+    line: [u8; EDIT_MAX],
+    len: usize,
+    cur: usize,
+    hist: [[u8; EDIT_MAX]; HIST_MAX],
+    hist_len: [usize; HIST_MAX],
+    hist_n: usize,
+    hist_pos: usize,
+    draft: [u8; EDIT_MAX],
+    draft_len: usize,
+}
+
+#[cfg(any(target_os = "minix", test))]
+impl Editor {
+    fn new() -> Self {
+        Self {
+            line: [0; EDIT_MAX],
+            len: 0,
+            cur: 0,
+            hist: [[0; EDIT_MAX]; HIST_MAX],
+            hist_len: [0; HIST_MAX],
+            hist_n: 0,
+            hist_pos: 0,
+            draft: [0; EDIT_MAX],
+            draft_len: 0,
+        }
+    }
+
+    fn set_line(&mut self, src: &[u8]) {
+        let n = src.len().min(EDIT_MAX);
+        self.line[..n].copy_from_slice(&src[..n]);
+        self.len = n;
+        self.cur = n;
+    }
+
+    /// Blank the current row and redraw the prompt + line, positioning the
+    /// display cursor at the editor cursor. The blank is `SCR_COLS - 1` wide
+    /// so it never wraps in wterm (exactly 80 spaces would push the 80th
+    /// cell onto the next row).
+    fn redraw_line(&mut self) {
+        let spaces = [b' '; SCR_COLS - 1];
+        tty_write(b"\r");
+        tty_write(&spaces);
+        tty_write(b"\r");
+        tty_write(b"# ");
+        tty_write(&self.line[..self.len]);
+        for _ in 0..(self.len - self.cur) {
+            tty_write(b"\x08");
+        }
+    }
+
+    /// The display cursor sits at `display_at`; rewrite the line tail from
+    /// there (plus a blank to clear any leftover char) and position the
+    /// display cursor at the editor cursor (which may be left or right of
+    /// `display_at`).
+    fn sync_from(&mut self, display_at: usize) {
+        let written = self.len - display_at + 1;
+        tty_write(&self.line[display_at..self.len]);
+        tty_write(b" ");
+        for _ in 0..written {
+            tty_write(b"\x08");
+        }
+        if self.cur > display_at {
+            let mut p = display_at;
+            while p < self.cur {
+                tty_write(&[self.line[p]]);
+                p += 1;
+            }
+        } else {
+            for _ in self.cur..display_at {
+                tty_write(b"\x08");
+            }
+        }
+    }
+
+    fn insert(&mut self, ch: u8) {
+        if self.len >= EDIT_MAX {
+            return;
+        }
+        let at = self.cur;
+        for i in (at..self.len).rev() {
+            self.line[i + 1] = self.line[i];
+        }
+        self.line[at] = ch;
+        self.len += 1;
+        self.cur += 1;
+        if at + 1 == self.len {
+            // Append at the end: just echo the char.
+            tty_write(&[ch]);
+        } else {
+            self.sync_from(at);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cur == 0 {
+            return;
+        }
+        let at = self.cur - 1;
+        for i in at..self.len - 1 {
+            self.line[i] = self.line[i + 1];
+        }
+        self.len -= 1;
+        self.cur = at;
+        if at == self.len {
+            // Erase at the end: backspace, blank, backspace.
+            tty_write(b"\x08 \x08");
+        } else {
+            // The display cursor is one past `at` (the deleted char); move
+            // it back onto the deletion point, then sync the tail.
+            tty_write(b"\x08");
+            self.sync_from(at);
+        }
+    }
+
+    fn kill_to_end(&mut self) {
+        let killed = self.len - self.cur;
+        for _ in 0..killed {
+            tty_write(b" \x08");
+        }
+        self.len = self.cur;
+    }
+
+    fn kill_word(&mut self) {
+        let old_cur = self.cur;
+        let mut at = old_cur;
+        while at > 0 && self.line[at - 1] == b' ' {
+            at -= 1;
+        }
+        while at > 0 && self.line[at - 1] != b' ' {
+            at -= 1;
+        }
+        let shift = old_cur - at;
+        for i in at..self.len - shift {
+            self.line[i] = self.line[i + shift];
+        }
+        self.len -= shift;
+        self.cur = at;
+        // Move the display cursor back to `at`, then sync from there.
+        for _ in 0..shift {
+            tty_write(b"\x08");
+        }
+        self.sync_from(at);
+    }
+
+    #[cfg(target_os = "minix")]
+    fn cursor_left(&mut self) {
+        if self.cur > 0 {
+            self.cur -= 1;
+            tty_write(b"\x08");
+        }
+    }
+
+    #[cfg(target_os = "minix")]
+    fn cursor_right(&mut self) {
+        if self.cur < self.len {
+            tty_write(&self.line[self.cur..self.cur + 1]);
+            self.cur += 1;
+        }
+    }
+
+    #[cfg(target_os = "minix")]
+    fn cursor_home(&mut self) {
+        while self.cur > 0 {
+            self.cur -= 1;
+            tty_write(b"\x08");
+        }
+    }
+
+    #[cfg(target_os = "minix")]
+    fn cursor_end(&mut self) {
+        while self.cur < self.len {
+            tty_write(&self.line[self.cur..self.cur + 1]);
+            self.cur += 1;
+        }
+    }
+
+    #[cfg(target_os = "minix")]
+    fn kill_line(&mut self) {
+        let spaces = [b' '; SCR_COLS - 1];
+        tty_write(b"\r");
+        tty_write(&spaces);
+        tty_write(b"\r");
+        tty_write(b"# ");
+        self.len = 0;
+        self.cur = 0;
+    }
+
+    fn history_up(&mut self) {
+        if self.hist_n == 0 {
+            return;
+        }
+        if self.hist_pos == 0 {
+            self.draft[..self.len].copy_from_slice(&self.line[..self.len]);
+            self.draft_len = self.len;
+        }
+        if self.hist_pos < self.hist_n {
+            self.hist_pos += 1;
+            let idx = self.hist_n - self.hist_pos;
+            let mut tmp = [0u8; EDIT_MAX];
+            let n = self.hist_len[idx];
+            tmp[..n].copy_from_slice(&self.hist[idx][..n]);
+            self.set_line(&tmp[..n]);
+            self.redraw_line();
+        }
+    }
+
+    fn history_down(&mut self) {
+        if self.hist_pos == 0 {
+            return;
+        }
+        self.hist_pos -= 1;
+        if self.hist_pos == 0 {
+            let mut tmp = [0u8; EDIT_MAX];
+            let n = self.draft_len;
+            tmp[..n].copy_from_slice(&self.draft[..n]);
+            self.set_line(&tmp[..n]);
+        } else {
+            let idx = self.hist_n - self.hist_pos;
+            let mut tmp = [0u8; EDIT_MAX];
+            let n = self.hist_len[idx];
+            tmp[..n].copy_from_slice(&self.hist[idx][..n]);
+            self.set_line(&tmp[..n]);
+        }
+        self.redraw_line();
+    }
+
+    fn push_history(&mut self, line: &[u8]) {
+        if line.is_empty() {
+            return;
+        }
+        if self.hist_n == HIST_MAX {
+            for i in 1..HIST_MAX {
+                let mut tmp = [0u8; EDIT_MAX];
+                let n = self.hist_len[i];
+                tmp[..n].copy_from_slice(&self.hist[i][..n]);
+                self.hist[i - 1][..n].copy_from_slice(&tmp[..n]);
+                self.hist_len[i - 1] = n;
+            }
+            self.hist_n = HIST_MAX - 1;
+        }
+        let n = line.len().min(EDIT_MAX);
+        self.hist[self.hist_n][..n].copy_from_slice(&line[..n]);
+        self.hist_len[self.hist_n] = n;
+        self.hist_n += 1;
+    }
+}
+
+/// Set the tty's line mode: raw (the editor drives echo/editing — ISIG off
+/// so ^C arrives as data and the editor aborts the line itself) or
+/// canonical (normal echo + ISIG for foreground commands). Returns false
+/// when fd 0 is not a terminal (the caller then falls back to a plain read
+/// loop).
+#[cfg(target_os = "minix")]
+fn tty_set_raw(raw: bool) -> bool {
+    use minix_std::termios::{ECHO, ECHOCTL, ECHOE, ECHOK, ECHONL, ICANON, ISIG, TIOCSETA};
+    let mut t = minix_std::termios::Termios::zeroed();
+    if unsafe { minix_std::termios::tcgetattr(0, &mut t) }.is_err() {
+        return false;
+    }
+    if raw {
+        t.c_lflag &=
+            !(ICANON | ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL | ISIG | minix_std::termios::IEXTEN);
+    } else {
+        t.c_lflag |= ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ISIG | minix_std::termios::IEXTEN;
+    }
+    unsafe { minix_std::termios::tcsetattr(0, TIOCSETA, &t) }.is_ok()
+}
+
+/// Read one line from stdin into `buf` with the raw-mode editor. Returns
+/// the number of bytes stored (excluding the newline), `0` for an aborted
+/// or empty line, or `LINE_EOF` for ^D at an empty prompt. The editor
+/// (history) persists across calls.
+#[cfg(target_os = "minix")]
+fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
+    // The editor persists across calls (history); start each line fresh.
+    ed.len = 0;
+    ed.cur = 0;
+    ed.hist_pos = 0;
+    // ESC sequence state: 0 none, 1 saw ESC, 2 saw ESC[.
+    let mut esc = 0u8;
     loop {
-        let n = minix_rt::read(0, &mut buf[total..]);
+        let mut b = [0u8; 1];
+        let n = minix_rt::read(0, &mut b);
+        if n == minix_std::EAGAIN as i64 {
+            continue; // pty slave: no byte yet — retry
+        }
+        if n == minix_std::EINTR as i64 {
+            // ^C: ISIG consumed it and signaled; the shell ignores SIGINT.
+            tty_write(b"^C\n");
+            return 0;
+        }
         if n <= 0 {
             break;
         }
-        total += n as usize;
-        if total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
-            break;
+        let ch = b[0];
+        if esc == 1 {
+            esc = if ch == b'[' { 2 } else { 0 };
+            continue;
         }
-        if total >= buf.len() {
-            break;
+        if esc == 2 {
+            esc = 0;
+            match ch {
+                b'A' => ed.history_up(),
+                b'B' => ed.history_down(),
+                b'C' => ed.cursor_right(),
+                b'D' => ed.cursor_left(),
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            0x1B => esc = 1,
+            b'\n' | b'\r' => {
+                tty_write(b"\n");
+                let n = ed.len.min(buf.len());
+                buf[..n].copy_from_slice(&ed.line[..n]);
+                return n;
+            }
+            0x08 | 0x7F => ed.backspace(),
+            0x01 => ed.cursor_home(),
+            0x05 => ed.cursor_end(),
+            0x0B => ed.kill_to_end(),
+            0x0C => { /* ^L: no ANSI clear on the console — ignore */ }
+            0x15 => ed.kill_line(),
+            0x17 => ed.kill_word(),
+            0x03 => {
+                // ^C with ISIG off (shouldn't happen) — abort the line.
+                tty_write(b"^C\n");
+                return 0;
+            }
+            0x04 => {
+                if ed.len == 0 {
+                    return LINE_EOF;
+                }
+                // ^D on a non-empty line: delete the char under the cursor.
+                if ed.cur < ed.len {
+                    for i in ed.cur..ed.len - 1 {
+                        ed.line[i] = ed.line[i + 1];
+                    }
+                    ed.len -= 1;
+                    ed.sync_from(ed.cur);
+                }
+            }
+            c if (0x20..=0x7E).contains(&c) => ed.insert(c),
+            _ => {}
         }
     }
-    // Strip the trailing newline (canonical mode delivers it).
-    while total > 0 && (buf[total - 1] == b'\n' || buf[total - 1] == b'\r') {
-        total -= 1;
-    }
-    total
+    ed.len
 }
 
 // ---------------------------------------------------------------------------
@@ -841,5 +1220,133 @@ fn setup_redirect(outfile: &str) -> i32 {
             write_err(b"\r\n");
             minix_rt::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_insert_at_end_and_middle() {
+        let mut ed = Editor::new();
+        ed.insert(b'e');
+        ed.insert(b'c');
+        ed.insert(b'h');
+        assert_eq!(&ed.line[..ed.len], b"ech");
+        assert_eq!(ed.cur, 3);
+        // Move to the middle and insert.
+        ed.cur = 1;
+        ed.insert(b'X');
+        assert_eq!(&ed.line[..ed.len], b"eXch");
+        assert_eq!(ed.cur, 2);
+    }
+
+    #[test]
+    fn editor_backspace_mid_line() {
+        let mut ed = Editor::new();
+        for c in b"abcd".iter() {
+            ed.insert(*c);
+        }
+        ed.cur = 3; // between c and d
+        ed.backspace(); // remove c
+        assert_eq!(&ed.line[..ed.len], b"abd");
+        assert_eq!(ed.cur, 2);
+    }
+
+    #[test]
+    fn editor_kill_word_and_to_end() {
+        let mut ed = Editor::new();
+        for c in b"rm -rf /".iter() {
+            ed.insert(*c);
+        }
+        ed.kill_word(); // removes " /" ... actually "rm -rf " + word
+        assert_eq!(&ed.line[..ed.len], b"rm -rf ");
+        ed.cur = ed.len;
+        ed.insert(b't');
+        ed.insert(b'm');
+        ed.insert(b'p');
+        ed.cur = 3; // after "rm "
+        ed.kill_to_end();
+        assert_eq!(&ed.line[..ed.len], b"rm ");
+    }
+
+    #[test]
+    fn editor_history_navigation() {
+        let mut ed = Editor::new();
+        ed.push_history(b"echo one");
+        ed.push_history(b"echo two");
+        assert_eq!(ed.hist_n, 2);
+        ed.history_up();
+        assert_eq!(&ed.line[..ed.len], b"echo two");
+        ed.history_up();
+        assert_eq!(&ed.line[..ed.len], b"echo one");
+        ed.history_down();
+        assert_eq!(&ed.line[..ed.len], b"echo two");
+        ed.history_down();
+        // Back to the (empty) draft.
+        assert_eq!(ed.len, 0);
+    }
+
+    #[test]
+    fn editor_history_keeps_draft() {
+        let mut ed = Editor::new();
+        ed.push_history(b"ls");
+        for c in b"cat ".iter() {
+            ed.insert(*c);
+        }
+        // Type "cat " then Up: the draft "cat " must be restored on Down.
+        ed.history_up();
+        assert_eq!(&ed.line[..ed.len], b"ls");
+        ed.history_down();
+        assert_eq!(&ed.line[..ed.len], b"cat ");
+    }
+
+    #[test]
+    fn editor_overwrite_then_backspace() {
+        // The user's scenario: type `arsrst`, move back, overwrite, then
+        // backspace — the deleted char must come out and the cursor track.
+        let mut ed = Editor::new();
+        for c in b"arsrst".iter() {
+            ed.insert(*c);
+        }
+        ed.cur = 3; // move back three (cursor_left on the real tty)
+        assert_eq!(ed.cur, 3);
+        ed.insert(b'X'); // overwrite: "arsXrst", cur 4
+        assert_eq!(&ed.line[..ed.len], b"arsXrst");
+        ed.backspace(); // delete the X: "arsrst", cur 3
+        assert_eq!(&ed.line[..ed.len], b"arsrst");
+        assert_eq!(ed.cur, 3);
+        // And a second backspace deletes the 's' (index 2).
+        ed.backspace();
+        assert_eq!(&ed.line[..ed.len], b"arrst");
+        assert_eq!(ed.cur, 2);
+    }
+
+    #[test]
+    fn editor_history_ring_drops_oldest() {
+        let mut ed = Editor::new();
+        for i in 0..(HIST_MAX + 5) {
+            let mut s = [0u8; 4];
+            let n = write_dec(&mut s, i as u32);
+            ed.push_history(&s[s.len() - n..]);
+        }
+        assert_eq!(ed.hist_n, HIST_MAX);
+        // The oldest entries (0..5) were dropped.
+        ed.history_up();
+        assert_eq!(&ed.line[..ed.len], b"20");
+    }
+
+    fn write_dec(buf: &mut [u8], mut v: u32) -> usize {
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 || i == 0 {
+                break;
+            }
+        }
+        buf.len() - i
     }
 }

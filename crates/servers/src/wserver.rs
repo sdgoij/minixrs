@@ -13,11 +13,13 @@ use arch_common::ipc::Message;
 #[cfg(target_os = "minix")]
 use minix_std::font::FONT_8X16;
 #[cfg(target_os = "minix")]
-use minix_std::wserver::{WS_CLOSE, WS_CREATE, WS_FILL, WS_INPUT, WS_KEY, WS_TEXT};
+use minix_std::wserver::{
+    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_KEY, WS_TEXT,
+};
 
 const TITLE_H: usize = 16;
 const MAX_WINDOWS: usize = 4;
-const MAX_TEXT_COLS: usize = 40;
+const MAX_TEXT_COLS: usize = 80;
 const MAX_TEXT_ROWS: usize = 24;
 const MAX_RECTS: usize = 8;
 
@@ -68,6 +70,8 @@ pub struct Window {
     pub text: [[u8; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
     pub nrects: usize,
     pub rects: [WsRect; MAX_RECTS],
+    /// Inverse-video block cell (body row, col), if the client set one.
+    pub cursor: Option<(usize, usize)>,
 }
 
 impl Window {
@@ -88,6 +92,7 @@ impl Window {
                 y1: 0,
                 color: 0,
             }; MAX_RECTS],
+            cursor: None,
         }
     }
 
@@ -129,7 +134,12 @@ impl WsState {
 
     /// Allocate a window; returns its wid or a negative error.
     pub fn create(&mut self, x: i32, y: i32, w: i32, h: i32) -> Result<usize, i32> {
-        if w <= 0 || h <= 0 || (w as usize) / 8 > MAX_TEXT_COLS || (h as usize) / 16 > MAX_TEXT_ROWS
+        // The text grid holds body rows, so the height check excludes the
+        // title bar (a 24-row terminal is 400 px: 384 body + 16 title).
+        if w <= 0
+            || h <= (TITLE_H as i32)
+            || (w as usize) / 8 > MAX_TEXT_COLS
+            || (h as usize - TITLE_H) / 16 > MAX_TEXT_ROWS
         {
             return Err(-22); // EINVAL
         }
@@ -143,6 +153,7 @@ impl WsState {
                 win.title = [0; 24];
                 win.text = [[b' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS];
                 win.nrects = 0;
+                win.cursor = None;
                 self.focus = i;
                 return Ok(i);
             }
@@ -161,6 +172,20 @@ impl WsState {
             return Err(-34); // ERANGE
         }
         win.text[row as usize][col as usize] = ch;
+        Ok(())
+    }
+
+    /// Place the inverse-video block cursor at a body cell.
+    pub fn set_cursor(&mut self, wid: usize, row: i32, col: i32) -> Result<(), i32> {
+        let win = self.windows.get_mut(wid).ok_or(-9)?; // EBADF
+        if !win.used {
+            return Err(-9);
+        }
+        let (rows, cols) = (win.rows(), win.cols());
+        if row < 0 || col < 0 || row as usize >= rows || col as usize >= cols {
+            return Err(-34); // ERANGE
+        }
+        win.cursor = Some((row as usize, col as usize));
         Ok(())
     }
 
@@ -237,10 +262,12 @@ static mut WS_FB: u64 = 0;
 static mut WS_FB_FD: i32 = -1;
 #[cfg(target_os = "minix")]
 static mut WS_KBD_FD: i32 = -1;
-/// Keyboard shift state across drains (a press and its letter can land in
+/// Keyboard modifier state across drains (a press and its key can land in
 /// different batches).
 #[cfg(target_os = "minix")]
 static mut WS_SHIFT: bool = false;
+#[cfg(target_os = "minix")]
+static mut WS_CTRL: bool = false;
 
 #[cfg(target_os = "minix")]
 fn put_pixel(fb: u64, x: usize, y: usize, color: u32) {
@@ -339,6 +366,20 @@ fn redraw(fb: u64) {
                 }
             }
         }
+        // Block cursor: inverse-video cell (glyph dark on white; a space
+        // cell renders as a solid white block).
+        if let Some((r, c)) = win.cursor {
+            if r < rows && c < cols {
+                let cx = x + c * 8;
+                let cy = body_y + r * 16;
+                let ch = win.text[r][c];
+                if ch != b' ' {
+                    draw_char(fb, cx, cy, ch, COLOR_BODY, COLOR_TEXT);
+                } else {
+                    fill_rect(fb, cx, cy, cx + 8, cy + 16, COLOR_TEXT);
+                }
+            }
+        }
     }
     // virtio-gpu is explicit-flush: push the new frame to the display.
     // No-op for VGA-style backends.
@@ -403,7 +444,31 @@ fn shifted(c: u8) -> u8 {
     }
 }
 
-/// Drain /dev/kbd and route key presses to the focused window's waiter.
+/// Map a (shifted) ASCII char to its control character for a held Ctrl.
+/// US-layout convention: letters AND with 0x1F; the top-row shifted
+/// specials and their unshifted digit twins map to the classic control
+/// codes (xterm's default).
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+fn ctrl_map(ch: u8) -> u8 {
+    match ch {
+        b'@' | b' ' | b'2' => 0x00, // NUL
+        b'[' | b'3' => 0x1B,        // ESC
+        b'\\' | b'4' => 0x1C,       // FS
+        b']' | b'5' => 0x1D,        // GS
+        b'^' | b'6' => 0x1E,        // RS
+        b'_' | b'7' => 0x1F,        // US
+        b'?' => 0x7F,               // DEL
+        c if c.is_ascii_alphabetic() => c & 0x1F,
+        _ => ch,
+    }
+}
+
+/// HID usages of the arrow keys (routed without an ASCII char; the client
+/// turns them into escape sequences).
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+fn is_arrow(code: u16) -> bool {
+    matches!(code, 0x4F..=0x52)
+}
 /// Only drains when the focused window has a blocked WS_INPUT client —
 /// otherwise the events stay queued for other consumers (e.g. keytest).
 #[cfg(target_os = "minix")]
@@ -430,7 +495,12 @@ fn drain_kbd() {
             if page != KEY_PAGE {
                 continue;
             }
+            // Modifiers: track the held state on both press and release.
             match code {
+                0x00E0 | 0x00E4 => {
+                    unsafe { WS_CTRL = press == 1 };
+                    continue;
+                }
                 0x00E1 | 0x00E5 => {
                     unsafe { WS_SHIFT = press == 1 };
                     continue;
@@ -440,8 +510,10 @@ fn drain_kbd() {
             if press != 1 {
                 continue;
             }
-            let Some(mut ch) = usage_to_ascii(code) else {
-                continue;
+            let mut ch = match usage_to_ascii(code) {
+                Some(c) => c,
+                None if is_arrow(code) => 0, // arrows route with no char
+                None => continue,
             };
             if ch.is_ascii_alphabetic() {
                 if unsafe { WS_SHIFT } {
@@ -450,16 +522,22 @@ fn drain_kbd() {
             } else if unsafe { WS_SHIFT } {
                 ch = shifted(ch);
             }
+            if unsafe { WS_CTRL } {
+                ch = ctrl_map(ch);
+            }
             let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
-            if let Some((ep, ch)) = state.route_key(ch) {
+            if let Some((ep, _)) = state.route_key(ch) {
                 let mut key_msg = Message {
                     m_source: 0,
                     m_type: WS_KEY as i32,
                     m_payload: unsafe { core::mem::zeroed() },
                 };
-                // The key char rides in m2l1 (minix_std::wserver::ws_key_char).
+                // The key char rides in m2l1 (minix_std::wserver::ws_key_char)
+                // and the HID usage in m2l2 (ws_key_usage) so clients can
+                // distinguish special keys (arrows) from plain chars.
                 unsafe {
                     key_msg.m_payload.m2.m2l1 = ch as i64;
+                    key_msg.m_payload.m2.m2l2 = code as i64;
                     minix_rt::syscall2(
                         minix_rt::SEND_CALL,
                         ep as u64,
@@ -522,8 +600,9 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             let col = m.m2i3;
             let ch = m.m2l1 as u8;
             let r = state.text(wid, row, col, ch);
+            // Redraws are deferred to WS_FLUSH so a client can batch a
+            // screenful of WS_TEXT/WS_FILL updates and repaint once.
             if r.is_ok() {
-                redraw(unsafe { WS_FB });
                 Some(0)
             } else {
                 Some(r.unwrap_err())
@@ -537,12 +616,28 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             let y1 = m.m2l2 as i32;
             let color = m.m2l3 as u32;
             let r = state.fill(wid, x0, y0, x1, y1, color);
+            // See WS_TEXT: repaint happens on WS_FLUSH.
             if r.is_ok() {
-                redraw(unsafe { WS_FB });
                 Some(0)
             } else {
                 Some(r.unwrap_err())
             }
+        }
+        WS_CURSOR => {
+            let wid = m.m2i1 as usize;
+            let row = m.m2i2;
+            let col = m.m2i3;
+            let r = state.set_cursor(wid, row, col);
+            // Repaint happens on WS_FLUSH (the block is part of the frame).
+            if r.is_ok() {
+                Some(0)
+            } else {
+                Some(r.unwrap_err())
+            }
+        }
+        WS_FLUSH => {
+            redraw(unsafe { WS_FB });
+            Some(0)
         }
         WS_CLOSE => {
             let wid = m.m2i1 as usize;
@@ -820,6 +915,33 @@ mod tests {
         assert_eq!(st.focus, a);
         assert!(!st.windows[b].used);
         st.close(b).unwrap_err();
+    }
+
+    #[test]
+    fn test_set_cursor_roundtrip() {
+        let mut st = WsState::new();
+        let wid = st.create(0, 0, 320, 200).unwrap();
+        // No cursor until the client sets one (other clients, e.g. wdemo).
+        assert_eq!(st.windows[wid].cursor, None);
+        st.set_cursor(wid, 3, 5).unwrap();
+        assert_eq!(st.windows[wid].cursor, Some((3, 5)));
+        // Out-of-bounds cursor rejected.
+        assert!(st.set_cursor(wid, 11, 0).is_err());
+        assert!(st.set_cursor(wid, 0, 40).is_err());
+        // A fresh window starts without a cursor.
+        let b = st.create(440, 40, 320, 200).unwrap();
+        assert_eq!(st.windows[b].cursor, None);
+    }
+
+    #[test]
+    fn test_close_resets_cursor() {
+        let mut st = WsState::new();
+        let wid = st.create(0, 0, 320, 200).unwrap();
+        st.set_cursor(wid, 0, 0).unwrap();
+        st.close(wid).unwrap();
+        // The slot is reusable; a re-create starts cursor-less.
+        let b = st.create(0, 0, 320, 200).unwrap();
+        assert_eq!(st.windows[b].cursor, None);
     }
 
     #[test]

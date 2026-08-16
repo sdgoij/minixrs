@@ -320,9 +320,10 @@ pub unsafe fn do_select() -> i32 {
         }
 
         // Fds not opened for the requested direction are immediately ready
-        // (an operation would fail instantly — POSIX).
+        // (an operation would fail instantly — POSIX). filp_mode holds the
+        // permission-style R_BIT/W_BIT bits (see do_open).
         let mut want = ops;
-        if ops & SEL_RD != 0 && (filp.filp_mode & 1) == 0 {
+        if ops & SEL_RD != 0 && (filp.filp_mode & crate::vfs::protect::R_BIT) == 0 {
             se.nreadyfds += ops2tab(
                 SEL_RD,
                 fd,
@@ -332,7 +333,7 @@ pub unsafe fn do_select() -> i32 {
             );
             want &= !SEL_RD;
         }
-        if ops & SEL_WR != 0 && (filp.filp_mode & 2) == 0 {
+        if ops & SEL_WR != 0 && (filp.filp_mode & crate::vfs::protect::W_BIT) == 0 {
             se.nreadyfds += ops2tab(
                 SEL_WR,
                 fd,

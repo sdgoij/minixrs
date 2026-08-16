@@ -71,6 +71,12 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wdemo` is the window-server demo client (K5): `info` draws a
     // static info window, `term` a terminal window that echoes routed keys.
     ("/bin/wdemo", "wdemo"),
+    // `/bin/ttyprobe` is the PTY round-trip probe (M2): opens /dev/ptyp0 +
+    // /dev/ttyp0 and pushes bytes both ways through the line discipline.
+    ("/bin/ttyprobe", "ttyprobe"),
+    // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
+    // on the slave, its output rendered (VT subset) into a wserver window.
+    ("/bin/wterm", "wterm"),
     // `/sbin/wserver` is the window server (K5): boot proc 18, the in-house
     // compositor on /dev/fb.
     ("/sbin/wserver", "wserver"),
@@ -128,6 +134,16 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/tcp", 0o020600, 14, 2),  // char device, major=14 (net), minor=2 — TCP socket
     ("/dev/fb", 0o020666, 19, 0),   // char device, major=19 (fb), minor=0
     ("/dev/kbd", 0o020600, 20, 0),  // char device, major=20 (input), minor=0
+    // PTY devices (major 9, the tty server): slave /dev/ttyp0-3,
+    // master /dev/ptyp0-3.
+    ("/dev/ttyp0", 0o020666, 9, 128),
+    ("/dev/ttyp1", 0o020666, 9, 129),
+    ("/dev/ttyp2", 0o020666, 9, 130),
+    ("/dev/ttyp3", 0o020666, 9, 131),
+    ("/dev/ptyp0", 0o020666, 9, 192),
+    ("/dev/ptyp1", 0o020666, 9, 193),
+    ("/dev/ptyp2", 0o020666, 9, 194),
+    ("/dev/ptyp3", 0o020666, 9, 195),
 ];
 
 #[cfg(test)]

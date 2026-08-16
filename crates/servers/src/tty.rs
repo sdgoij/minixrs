@@ -28,6 +28,10 @@ use arch_common::endpoint::ANY;
 
 use kernel::r#priv::MinixTimer;
 
+// Imports from drivers (PTY driver — pty lines and the PtyHost trait)
+
+use drivers::tty::pty::{PtyHost, TTY_OUT_BYTES, minor_to_pty, pty_by_index, pty_init};
+
 // Constants — device configuration
 
 /// Number of console lines.
@@ -35,6 +39,9 @@ pub const NR_CONS: usize = 4;
 
 /// Number of RS-232 serial lines.
 pub const NR_RS_LINES: usize = 4;
+
+/// Number of PTY pairs (mirrors pty.rs).
+pub const NR_PTYS: usize = 4;
 
 /// First minor for console devices.
 pub const CONS_MINOR: u32 = 0;
@@ -619,13 +626,13 @@ impl Tty {
 /// Safety: All access to the TTY table must be externally synchronized.
 /// The TTY server is single-threaded in MINIX; `UnsafeCell` provides
 /// interior mutability for the static.
-struct TtyTableRaw(UnsafeCell<[Tty; NR_CONS + NR_RS_LINES]>);
+struct TtyTableRaw(UnsafeCell<[Tty; NR_CONS + NR_RS_LINES + NR_PTYS]>);
 unsafe impl Sync for TtyTableRaw {}
 
 impl TtyTableRaw {
     const fn new() -> Self {
         Self(UnsafeCell::new(
-            [const { Tty::zeroed() }; NR_CONS + NR_RS_LINES],
+            [const { Tty::zeroed() }; NR_CONS + NR_RS_LINES + NR_PTYS],
         ))
     }
 
@@ -711,6 +718,9 @@ pub fn line2tty(minor: u32) -> Option<&'static mut Tty> {
         tp = tty_addr(line.wrapping_sub(CONS_MINOR) as usize);
     } else if (line.wrapping_sub(RS232_MINOR)) < NR_RS_LINES as u32 {
         tp = tty_addr(line.wrapping_sub(RS232_MINOR) as usize + NR_CONS);
+    } else if (line.wrapping_sub(TTYPX_MINOR)) < NR_PTYS as u32 {
+        // PTY slave lines live after the console and RS-232 lines.
+        tp = tty_addr(line.wrapping_sub(TTYPX_MINOR) as usize + NR_CONS + NR_RS_LINES);
     } else {
         tp = ptr::null_mut();
     }
@@ -1561,8 +1571,11 @@ pub fn tty_init(system_hz_val: u32) {
     SYSTEM_HZ.store(system_hz_val, Ordering::Relaxed);
 
     // Safety: We have exclusive access during initialization.
-    let table: &mut [Tty; NR_CONS + NR_RS_LINES] =
-        unsafe { &mut *TTY_TABLE.as_ptr().cast::<[Tty; NR_CONS + NR_RS_LINES]>() };
+    let table: &mut [Tty; NR_CONS + NR_RS_LINES + NR_PTYS] = unsafe {
+        &mut *TTY_TABLE
+            .as_ptr()
+            .cast::<[Tty; NR_CONS + NR_RS_LINES + NR_PTYS]>()
+    };
 
     for (s, tp) in table.iter_mut().enumerate() {
         tp.tty_index = s as i32;
@@ -1593,9 +1606,28 @@ pub fn tty_init(system_hz_val: u32) {
             tp.tty_devread = console_read;
             tp.tty_devwrite = console_write;
             tp.tty_echo_fn = console_echo;
-        } else {
+        } else if s < NR_CONS + NR_RS_LINES {
             // RS-232 lines: rs_init will be called by the serial driver.
             tp.tty_minor = RS232_MINOR + s as u32 - NR_CONS as u32;
+        } else {
+            // PTY slave lines. Input arrives from the master writer
+            // (CDEV_WRITE on the pty master) straight through in_process;
+            // the devread hook stays a no-op. Output drains into the pty
+            // output buffer, which the master reader consumes.
+            let idx = s - NR_CONS - NR_RS_LINES;
+            tp.tty_minor = TTYPX_MINOR + idx as u32;
+            tp.tty_line_active = true;
+            tp.tty_devread = pty_slave_read;
+            tp.tty_devwrite = pty_slave_write;
+            tp.tty_echo_fn = pty_slave_echo;
+            tp.tty_icancel_fn = pty_slave_icancel;
+            tp.tty_ocancel = pty_slave_ocancel;
+            tp.tty_open = pty_slave_open;
+            tp.tty_close = pty_slave_close;
+            // Safety: exclusive access during init.
+            unsafe {
+                pty_init(idx);
+            }
         }
     }
 }
@@ -1647,6 +1679,191 @@ fn console_echo(_tp: &mut Tty, c: i32) {
     unsafe { minix_rt::write(1, &raw const byte, 1) };
 }
 
+// PTY lines — slave hooks and master CDEV handlers
+//
+// The slave is a normal tty line whose input arrives from the master
+// writer and whose output drains into the pty output buffer. The master
+// is a separate device (no tty line) whose reads drain that buffer and
+// whose writes feed the slave's line discipline.
+//
+// The port's CDEV protocol is synchronous with a single VFS worker, so
+// pty I/O never suspends (EDONTREPLY) — a deferred request would freeze
+// VFS (the pty's input arrives via a CDEV_WRITE message VFS itself must
+// process). Instead:
+// - master reads are non-blocking (EAGAIN when empty); the reader polls;
+// - master writes are all-or-nothing per CDEV_WRITE (VFS advances by the
+//   full inline chunk regardless of the reply); EAGAIN when the slave
+//   input queue cannot take the whole chunk;
+// - slave reads return EAGAIN when no complete line is queued; the
+//   reader (the shell) retries in user mode (the riscv/aarch64 console
+//   pattern) — the scheduler preempts the spin;
+// - slave writes return EAGAIN when the pty output buffer is full (the
+//   master reader drains it; a 2048-byte buffer rarely fills in
+//   interactive use).
+
+/// `PtyHost` for the tty server: wires the pty driver's callbacks to the
+/// slave line's line discipline. Output processing is a pass-through — the
+/// window-terminal consumer (wterm) parses `\n`/`\t`/`\r` itself, so the
+/// console's ONLCR/OXTABS work stays console-only.
+impl PtyHost for Tty {
+    fn in_process(&mut self, data: &[u8]) -> usize {
+        in_process(self, data)
+    }
+
+    fn out_process(&mut self, _buf: &[u8], _len: &mut usize, _ocount: &mut usize) {}
+
+    fn sigchar(&mut self, sig: u8, may_flush: bool) {
+        sigchar(self, sig, may_flush);
+    }
+
+    fn handle_events(&mut self) {
+        handle_events(self);
+    }
+}
+
+/// PTY index for a pty slave line (derived from the line's minor).
+fn pty_slave_idx(tp: &Tty) -> usize {
+    (tp.tty_minor - TTYPX_MINOR) as usize
+}
+
+/// True for pty slave minors (a normal tty line draining to a pty).
+fn is_pty_slave_line(minor: u32) -> bool {
+    matches!(minor_to_pty(minor), Some((_, false)))
+}
+
+/// PTY slave devread — no-op. Input arrives from the master writer
+/// straight through in_process; there is no device to poll.
+fn pty_slave_read(_tp: &mut Tty, _try_only: i32) -> i32 {
+    0
+}
+
+/// PTY slave devwrite — drain inline write data into the pty output
+/// buffer. All-or-nothing: when the buffer cannot take the whole chunk,
+/// leave `tty_outleft` set so do_write reports EAGAIN (the reader drains
+/// the buffer and the writer retries).
+fn pty_slave_write(tp: &mut Tty, _try_only: i32) -> i32 {
+    if tp.tty_writecount == 0 {
+        return 0;
+    }
+    let idx = pty_slave_idx(tp);
+    let n = tp.tty_writecount;
+    let pty = unsafe { pty_by_index(idx) };
+    if TTY_OUT_BYTES - pty.output_count() < n {
+        return 0;
+    }
+    let mut data = [0u8; 8];
+    data[..n].copy_from_slice(&tp.tty_writedata[..n]);
+    pty.slave_write(false, &data[..n], tp);
+    tp.tty_writeidx = 0;
+    tp.tty_writecount = 0;
+    tp.tty_outleft = 0;
+    tp.tty_outcum += n;
+    tp.tty_outcaller = NONE;
+    1
+}
+
+/// PTY slave echo hook — push an echoed byte into the pty output buffer
+/// so the master reader (wterm) renders it.
+fn pty_slave_echo(tp: &mut Tty, c: i32) {
+    let idx = pty_slave_idx(tp);
+    let pty = unsafe { pty_by_index(idx) };
+    pty.slave_echo((c & 0xFF) as u8, tp);
+}
+
+/// PTY slave icancel hook.
+fn pty_slave_icancel(tp: &mut Tty, _try_only: i32) -> i32 {
+    let pty = unsafe { pty_by_index(pty_slave_idx(tp)) };
+    pty.slave_icancel();
+    0
+}
+
+/// PTY slave ocancel hook.
+fn pty_slave_ocancel(tp: &mut Tty, _try_only: i32) -> i32 {
+    let pty = unsafe { pty_by_index(pty_slave_idx(tp)) };
+    pty.slave_ocancel();
+    0
+}
+
+/// PTY slave open hook — mark the pty's slave side active.
+fn pty_slave_open(tp: &mut Tty, _try_only: i32) -> i32 {
+    let pty = unsafe { pty_by_index(pty_slave_idx(tp)) };
+    pty.slave_open();
+    0
+}
+
+/// PTY slave close hook — mark the pty's slave side closed.
+fn pty_slave_close(tp: &mut Tty, _try_only: i32) -> i32 {
+    let pty = unsafe { pty_by_index(pty_slave_idx(tp)) };
+    pty.slave_close();
+    0
+}
+
+/// PTY slave read — non-blocking: EAGAIN when no complete line is queued
+/// (see the section header: the single-worker VFS cannot hold a suspended
+/// read while the master write that feeds it waits on VFS). The reader
+/// retries in user mode.
+fn do_read_pty_slave(minor: u32, user_endpt: i32, size: usize, flags: i32, id: u32) -> i32 {
+    let tp = match line2tty(minor) {
+        Some(tp) => tp,
+        None => return ENXIO,
+    };
+
+    if tp.tty_incaller != NONE || tp.tty_inleft > 0 {
+        return EIO;
+    }
+    if size == 0 {
+        return EINVAL;
+    }
+
+    tp.tty_incaller = user_endpt as u32;
+    tp.tty_inid = id;
+    tp.tty_inleft = size;
+    tp.tty_read_intr = false;
+
+    in_transfer(tp);
+    if tp.tty_inleft == 0 {
+        // A complete line was queued — reply synchronously.
+        return finish_read(tp);
+    }
+
+    // No line yet: release the read state and report EAGAIN.
+    tp.tty_inleft = 0;
+    tp.tty_incum = 0;
+    tp.tty_incaller = NONE;
+    tp.tty_read_intr = false;
+    let _ = flags;
+    EAGAIN
+}
+
+/// Master write — feed the slave line's input queue. All-or-nothing per
+/// inline chunk (VFS advances by the full chunk regardless of the reply):
+/// EAGAIN when the queue cannot take the whole chunk.
+fn pty_master_write(idx: usize, data: &[u8]) -> i32 {
+    let slave_tp = match line2tty(TTYPX_MINOR + idx as u32) {
+        Some(tp) => tp,
+        None => return ENXIO,
+    };
+    let free = TTY_IN_BYTES - slave_tp.tty_incount as usize;
+    if free < data.len() {
+        return EAGAIN;
+    }
+    in_process(slave_tp, data);
+    in_transfer(slave_tp);
+    data.len() as i32
+}
+
+/// Master read — drain the pty output buffer inline. Non-blocking:
+/// EAGAIN when empty (the reader polls), 0 (EOF) when the slave is
+/// closed and drained.
+fn pty_master_read(idx: usize, out: &mut [u8]) -> i32 {
+    let pty = unsafe { pty_by_index(idx) };
+    match pty.master_read_inline(out) {
+        Ok(Some(n)) => n as i32,
+        Ok(None) => EAGAIN,
+        Err(_) => EIO,
+    }
+}
+
 // Character driver interface stubs
 //
 // These depend on the chardriver framework (Phase 13).
@@ -1664,6 +1881,17 @@ type Position = u64;
 /// Makes the TTY the caller's controlling TTY unless NOCTTY is set or the
 /// device is the log device.
 pub fn do_open(minor: DevMinor, access: i32, user_endpt: Endpoint) -> i32 {
+    // PTY master: no controlling-tty semantics; just mark the master open.
+    if let Some((idx, true)) = minor_to_pty(minor) {
+        let pty = unsafe { pty_by_index(idx) };
+        return match pty.master_open() {
+            Ok(()) => OK,
+            Err(drivers::DriverError::Busy) => BUSY,
+            Err(drivers::DriverError::NotFound) => ENXIO,
+            Err(_) => EIO,
+        };
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -1700,6 +1928,17 @@ pub fn do_open(minor: DevMinor, access: i32, user_endpt: Endpoint) -> i32 {
 
 /// do_close — close a TTY line.
 pub fn do_close(minor: DevMinor) -> i32 {
+    // PTY master close: signal SIGHUP to the slave when it is still open.
+    if let Some((idx, true)) = minor_to_pty(minor) {
+        let pty = unsafe { pty_by_index(idx) };
+        if let Some(slave_tp) = line2tty(TTYPX_MINOR + idx as u32) {
+            pty.master_close(slave_tp);
+        } else {
+            pty.reset();
+        }
+        return OK;
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -1754,6 +1993,12 @@ pub fn do_read(
     flags: i32,
     id: CDevId,
 ) -> i32 {
+    // PTY slave reads are non-blocking (EAGAIN when no line is queued) —
+    // see the pty section header: a suspended read would freeze VFS.
+    if let Some((_, false)) = minor_to_pty(minor) {
+        return do_read_pty_slave(minor, user_endpt, size, flags, id);
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -1879,7 +2124,16 @@ pub fn do_write(
         return r;
     }
 
-    // None or not all the bytes could be written.
+    // None or not all the bytes could be written. For pty slave lines a
+    // full output buffer reports EAGAIN (the master reader drains it; a
+    // suspended write would freeze VFS's single worker).
+    if tp.tty_outleft != 0 && is_pty_slave_line(minor) {
+        tp.tty_outleft = 0;
+        tp.tty_outcum = 0;
+        tp.tty_outcaller = NONE;
+        return EAGAIN;
+    }
+
     if flags & CDEV_NONBLOCK != 0 {
         let r = if tp.tty_outcum > 0 {
             tp.tty_outcum as i32
@@ -1915,6 +2169,34 @@ pub fn do_ioctl(
     user_endpt: Endpoint,
     id: CDevId,
 ) -> i32 {
+    // PTY master ioctls: only window-size ioctls are meaningful — they
+    // apply to the slave line (the master is the controlling side; wterm
+    // reports the terminal size this way). Everything else: ENOTTY.
+    if let Some((idx, true)) = minor_to_pty(minor) {
+        if request != TIOCGWINSZ && request != TIOCSWINSZ {
+            return ENOTTY;
+        }
+        let slave_tp = match line2tty(TTYPX_MINOR + idx as u32) {
+            Some(tp) => tp,
+            None => return ENXIO,
+        };
+        match request {
+            TIOCGWINSZ => {
+                return sys_safecopyto(endpt, grant, 0, as_bytes(&slave_tp.tty_winsize));
+            }
+            TIOCSWINSZ => {
+                let mut new_size = slave_tp.tty_winsize;
+                let r = sys_safecopyfrom(endpt, grant, 0, as_bytes_mut(&mut new_size));
+                if r == OK {
+                    slave_tp.tty_winsize = new_size;
+                    sigchar(slave_tp, SIGWINCH, false);
+                }
+                return r;
+            }
+            _ => return ENOTTY,
+        }
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -2035,6 +2317,15 @@ pub fn do_ioctl(
 
 /// do_cancel — cancel a suspended I/O request.
 pub fn do_cancel(minor: DevMinor, endpt: Endpoint, id: CDevId) -> i32 {
+    // PTY master: cancel a pending master I/O request, if any.
+    if let Some((idx, true)) = minor_to_pty(minor) {
+        let pty = unsafe { pty_by_index(idx) };
+        return match pty.master_cancel(endpt as u32, id) {
+            Some(n) => n as i32,
+            None => EAGAIN,
+        };
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -2079,6 +2370,19 @@ pub fn do_cancel(minor: DevMinor, endpt: Endpoint, id: CDevId) -> i32 {
 
 /// do_select — select/poll on a TTY line.
 pub fn do_select(minor: DevMinor, mut ops: u32, endpt: Endpoint) -> i32 {
+    // PTY master: evaluate select against the output buffer.
+    if let Some((idx, true)) = minor_to_pty(minor) {
+        let pty = unsafe { pty_by_index(idx) };
+        let watch = ops & CDEV_NOTIFY;
+        ops &= CDEV_OP_RD | CDEV_OP_WR | CDEV_OP_ERR;
+        let ready = pty.select_try(ops);
+        let remaining = ops & !ready;
+        if remaining != 0 && watch != 0 {
+            pty.master_select(remaining, true, endpt as u32);
+        }
+        return ready as i32;
+    }
+
     let tp = match line2tty(minor) {
         Some(tp) => tp,
         None => return ENXIO,
@@ -2296,8 +2600,8 @@ pub fn tty_server_main() {
         // Check for kernel notifications (NOTIFY_MESSAGE = 0x1000).
         let is_notify = (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
         if is_notify {
-            // Handle events on all TTY lines.
-            for i in 0..NR_CONS + NR_RS_LINES {
+            // Handle events on all TTY lines (including the pty slaves).
+            for i in 0..NR_CONS + NR_RS_LINES + NR_PTYS {
                 let tp = unsafe { &mut *TTY_TABLE.as_ptr().add(i) };
                 handle_events(tp);
             }
@@ -2386,6 +2690,18 @@ unsafe fn handle_cdev_request(
             let user = unsafe { msg.m_payload.m2.m2i3 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
+            // PTY master: drain the output buffer inline (non-blocking).
+            if let Some((idx, true)) = minor_to_pty(minor) {
+                let want = count.min(48);
+                let mut out = [0u8; 48];
+                let r = pty_master_read(idx, &mut out[..want]);
+                if r > 0 {
+                    unsafe {
+                        msg.m_payload.raw[..r as usize].copy_from_slice(&out[..r as usize]);
+                    }
+                }
+                return r;
+            }
             let result = do_read(minor, position, user, count, flags, 0);
             // If read completed with data, copy into reply payload.
             if result > 0 {
@@ -2407,6 +2723,14 @@ unsafe fn handle_cdev_request(
             // is m_payload.raw[32]). Reading raw[40..] here would grab 8
             // bytes past the data.
             let copy_len = count.min(8);
+            // PTY master: feed the slave line's input queue directly.
+            if let Some((idx, true)) = minor_to_pty(minor) {
+                let mut data = [0u8; 8];
+                unsafe {
+                    data[..copy_len].copy_from_slice(&msg.m_payload.raw[32..32 + copy_len]);
+                }
+                return pty_master_write(idx, &data[..copy_len]);
+            }
             {
                 let tp_mut = line2tty(minor).unwrap();
                 unsafe {
@@ -2653,6 +2977,133 @@ mod tests {
 
         let tp = line2tty(999);
         assert!(tp.is_none());
+    }
+
+    #[test]
+    fn test_line2tty_pty_slave_minor() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        // PTY slave minors map to the pty-backed lines; master minors do
+        // not (the master is handled by the dedicated pty_master_* paths).
+        for idx in 0..NR_PTYS {
+            let tp = line2tty(TTYPX_MINOR + idx as u32);
+            assert!(tp.is_some(), "pty slave {idx} should map");
+            assert_eq!(tp.unwrap().tty_minor, TTYPX_MINOR + idx as u32);
+            assert!(
+                line2tty(PTYPX_MINOR + idx as u32).is_none(),
+                "pty master {idx} has no tty line"
+            );
+        }
+        assert!(
+            line2tty(TTYPX_MINOR + NR_PTYS as u32).is_none(),
+            "beyond pty slave range"
+        );
+    }
+
+    #[test]
+    fn test_tty_init_wires_pty_slave_lines() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        for idx in 0..NR_PTYS {
+            let tp = table_ref(NR_CONS + NR_RS_LINES + idx);
+            assert!(tp.tty_line_active, "pty slave {idx} active");
+            assert_eq!(tp.tty_minor, TTYPX_MINOR + idx as u32);
+            assert_eq!(
+                tp.tty_devread as *const () as usize,
+                pty_slave_read as *const () as usize
+            );
+            assert_eq!(
+                tp.tty_devwrite as *const () as usize,
+                pty_slave_write as *const () as usize
+            );
+            assert_eq!(
+                tp.tty_echo_fn as *const () as usize,
+                pty_slave_echo as *const () as usize
+            );
+            // Safety: exclusive access in the single-threaded test.
+            assert!(
+                !unsafe { pty_by_index(idx) }.is_tty_active(),
+                "fresh pty {idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pty_master_write_feeds_slave_queue() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let line = NR_CONS + NR_RS_LINES;
+        setup_canon(table_mut(line));
+
+        // Master write "hi\n" → slave input queue with a line break.
+        assert_eq!(pty_master_write(0, b"hi\n"), 3);
+        let tp = table_ref(line);
+        assert_eq!(tp.tty_incount as usize, 3);
+        assert_eq!(tp.tty_eotct, 1, "line break queued");
+    }
+
+    #[test]
+    fn test_pty_master_write_eagain_when_queue_full() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let line = NR_CONS + NR_RS_LINES;
+        setup_raw(table_mut(line));
+        table_mut(line).tty_incount = TTY_IN_BYTES as i32;
+
+        // All-or-nothing: a full input queue rejects the chunk.
+        assert_eq!(pty_master_write(0, b"x"), EAGAIN);
+    }
+
+    #[test]
+    fn test_pty_slave_read_eagain_then_line() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let line = NR_CONS + NR_RS_LINES;
+        setup_canon(table_mut(line));
+
+        // No complete line: EAGAIN (the single-worker VFS cannot hold a
+        // suspended read while the master write feeding it waits on VFS).
+        assert_eq!(do_read_pty_slave(TTYPX_MINOR, 42, 16, 0, 7), EAGAIN);
+        {
+            let tp = table_ref(line);
+            assert_eq!(tp.tty_incaller, NONE, "read state released on EAGAIN");
+            assert_eq!(tp.tty_inleft, 0);
+        }
+
+        // A master write queues the line; the next read completes it (the
+        // canonical line includes the newline).
+        assert_eq!(pty_master_write(0, b"ls\n"), 3);
+        assert_eq!(do_read_pty_slave(TTYPX_MINOR, 42, 16, 0, 7), 3);
+        let tp = table_ref(line);
+        assert_eq!(&tp.tty_inbuf_user[..3], b"ls\n");
+    }
+
+    #[test]
+    fn test_pty_slave_write_drains_to_master() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let line = NR_CONS + NR_RS_LINES;
+        let tp = table_mut(line);
+        setup_tty(tp);
+        // The CDEV_WRITE inline path lands bytes in tty_writedata; the
+        // devwrite hook drains them into the pty output buffer.
+        tp.tty_writedata[..5].copy_from_slice(b"hello");
+        tp.tty_writeidx = 0;
+        tp.tty_writecount = 5;
+        tp.tty_outleft = 5;
+        assert_eq!(pty_slave_write(tp, 0), 1);
+        assert_eq!(tp.tty_outleft, 0, "write drained");
+
+        // The master read then drains the output buffer in order.
+        let mut out = [0u8; 16];
+        assert_eq!(pty_master_read(0, &mut out[..16]), 5);
+        assert_eq!(&out[..5], b"hello");
     }
 
     #[test]
@@ -3697,6 +4148,59 @@ mod tests {
         );
         assert_eq!(r, OK);
         assert_eq!(tp.tty_termios.c_oflag, 0x8765_4321);
+    }
+
+    #[test]
+    fn test_master_tiocswinsz_forwards_to_slave() {
+        // TIOCSWINSZ on the pty master sets the slave line's winsize — the
+        // terminal client (wterm) reports the grid size this way, so
+        // TIOCGWINSZ on the slave (e.g. `stty size`) sees the real size.
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let slave = table_mut(NR_CONS + NR_RS_LINES); // pty pair 0 slave
+        setup_tty(slave);
+        assert_eq!(slave.tty_winsize.ws_row, 0); // zeroed by default
+
+        let new_size = WinSize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+            core::ptr::copy_nonoverlapping(
+                &new_size as *const WinSize as *const u8,
+                HOST_GRANT_BUF.get() as *mut u8,
+                core::mem::size_of::<WinSize>(),
+            );
+        }
+
+        let r = do_ioctl(
+            PTYPX_MINOR, // master minor of pair 0
+            TIOCSWINSZ,
+            arch_common::com::VFS_PROC_NR,
+            1,
+            0,
+            123,
+            7,
+        );
+        assert_eq!(r, OK);
+        assert_eq!(slave.tty_winsize.ws_row, 24);
+        assert_eq!(slave.tty_winsize.ws_col, 80);
+
+        // Non-winsize ioctls on the master still return ENOTTY.
+        let r2 = do_ioctl(
+            PTYPX_MINOR,
+            TIOCGETA,
+            arch_common::com::VFS_PROC_NR,
+            1,
+            0,
+            123,
+            7,
+        );
+        assert_eq!(r2, ENOTTY);
     }
 
     #[test]

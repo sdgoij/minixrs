@@ -621,6 +621,31 @@ impl Pty {
         }
     }
 
+    /// Copy available output bytes to a caller buffer (non-blocking).
+    ///
+    /// The port's CDEV protocol carries read data inline in the reply
+    /// payload, so the master read copies from the output buffer directly
+    /// instead of the grant-based suspend path.
+    ///
+    /// Returns `Ok(Some(n))` with `n > 0` bytes copied, `Ok(Some(0))` when
+    /// the slave side is closed and the buffer drained (EOF), `Ok(None)`
+    /// when the buffer is empty (EAGAIN), or `Err(..)`.
+    pub fn master_read_inline(&mut self, out: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        if self.ocount == 0 {
+            if self.state & TTY_CLOSED != 0 {
+                return Ok(Some(0)); // EOF
+            }
+            return Ok(None);
+        }
+        let n = self.ocount.min(out.len());
+        for (i, slot) in out[..n].iter_mut().enumerate() {
+            *slot = self.obuf[(self.otail + i) % TTY_OUT_BYTES];
+        }
+        self.ocount -= n;
+        self.otail = (self.otail + n) % TTY_OUT_BYTES;
+        Ok(Some(n))
+    }
+
     /// Number of bytes in the output buffer.
     pub fn output_count(&self) -> usize {
         self.ocount
@@ -934,6 +959,32 @@ mod tests {
         // Read from master side — request exact amount available
         let r = p.master_read(11, false, &mut host);
         assert_eq!(r, Ok(Some(11)));
+    }
+
+    #[test]
+    fn test_master_read_inline() {
+        let mut p = Pty::new();
+        let mut host = MockHost::new();
+
+        assert!(p.master_open().is_ok());
+
+        // Empty buffer: EAGAIN (Ok(None)), no EOF yet (slave open).
+        let mut out = [0u8; 64];
+        assert_eq!(p.master_read_inline(&mut out[..8]), Ok(None));
+
+        // Slave writes "hello" — the inline read drains it in order.
+        p.slave_write(false, b"hello", &mut host);
+        assert_eq!(p.master_read_inline(&mut out[..3]), Ok(Some(3)));
+        assert_eq!(&out[..3], b"hel");
+        assert_eq!(p.master_read_inline(&mut out[..8]), Ok(Some(2)));
+        assert_eq!(&out[..2], b"lo");
+
+        // Drained: EAGAIN again.
+        assert_eq!(p.master_read_inline(&mut out[..8]), Ok(None));
+
+        // Slave closes; drained buffer now reports EOF (0).
+        p.slave_close();
+        assert_eq!(p.master_read_inline(&mut out[..8]), Ok(Some(0)));
     }
 
     #[test]

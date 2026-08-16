@@ -144,10 +144,12 @@ pub fn pipe_refcounts(idx: usize) -> (u32, u32) {
     for i in 0..NR_FILPS {
         let f = unsafe { &*filp_arr.add(i) };
         if is_pipe_filp(f.filp_pipe_ino) && pipe_index_from_filp(f.filp_pipe_ino) == idx {
-            if f.filp_mode & 1 != 0 {
+            // filp_mode stores the permission-style R_BIT (0o4) / W_BIT (0o2)
+            // bits (same as do_open's mode_bits), not the fd access-mode 1/2.
+            if f.filp_mode & crate::vfs::protect::R_BIT != 0 {
                 readers += 1;
             }
-            if f.filp_mode & 2 != 0 {
+            if f.filp_mode & crate::vfs::protect::W_BIT != 0 {
                 writers += 1;
             }
         }
@@ -283,4 +285,77 @@ pub fn pipe_write_user(idx: usize, user_e: i32, user_buf: u64, count: usize) -> 
         off += got;
     }
     done as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vfs::glo::vfs_global;
+    use crate::vfs::types::Filp;
+
+    /// Reset a filp slot to a pipe end with the given access mode.
+    fn set_pipe_filp(i: usize, pipe_idx: usize, mode: u32) {
+        unsafe {
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let f = &mut *filp_arr.add(i);
+            f.filp_count = 1;
+            f.filp_pipe_ino = pipe_index_for_filp(pipe_idx);
+            f.filp_mode = mode;
+        }
+    }
+
+    fn clear_pipe_filp(i: usize) {
+        unsafe {
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            (*filp_arr.add(i)).filp_count = 0;
+            (*filp_arr.add(i)).filp_pipe_ino = 0;
+            (*filp_arr.add(i)).filp_mode = 0;
+        }
+    }
+
+    /// filp_mode holds the permission-style R_BIT/W_BIT bits (as do_open and
+    /// do_pipe2 set them). pipe_refcounts must recognize R_BIT=0o4 as a
+    /// reader — a regression test for the EPIPE-on-every-write bug where the
+    /// reader check tested `& 1` against a mode of 0o4.
+    #[test]
+    fn test_pipe_refcounts_recognizes_rbit_reader() {
+        clear_pipe_filp(0);
+        clear_pipe_filp(1);
+        set_pipe_filp(0, 3, crate::vfs::protect::R_BIT); // read end
+        set_pipe_filp(1, 3, crate::vfs::protect::W_BIT); // write end
+        let (readers, writers) = pipe_refcounts(3);
+        assert_eq!(readers, 1, "R_BIT reader filp must be counted");
+        assert_eq!(writers, 1, "W_BIT writer filp must be counted");
+        clear_pipe_filp(0);
+        clear_pipe_filp(1);
+    }
+
+    /// The same convention applies to an O_RDWR filp (R_BIT | W_BIT).
+    #[test]
+    fn test_pipe_refcounts_rdwr_counts_both() {
+        clear_pipe_filp(0);
+        clear_pipe_filp(1);
+        set_pipe_filp(
+            0,
+            4,
+            crate::vfs::protect::R_BIT | crate::vfs::protect::W_BIT,
+        );
+        let (readers, writers) = pipe_refcounts(4);
+        assert_eq!(readers, 1);
+        assert_eq!(writers, 1);
+        clear_pipe_filp(0);
+    }
+
+    /// Unrelated pipe indices and non-pipe filps must not be counted.
+    #[test]
+    fn test_pipe_refcounts_ignores_other_pipes_and_regular_filps() {
+        clear_pipe_filp(0);
+        clear_pipe_filp(1);
+        set_pipe_filp(0, 3, crate::vfs::protect::R_BIT);
+        let (readers, writers) = pipe_refcounts(9);
+        assert_eq!((readers, writers), (0, 0));
+        clear_pipe_filp(0);
+    }
 }

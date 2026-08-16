@@ -11,6 +11,7 @@
 //! - `ws_input` — {wid}: no immediate reply; when a key routes to the
 //!   window, the server sends `WS_KEY` (char in m2l1) and the client's
 //!   blocked sendrec completes with it.
+//! - `ws_cursor` — {wid, row, col} → 0: the inverse-video block cell.
 
 /// Window-server request base.
 pub const WS_BASE: u32 = 0x0D00;
@@ -19,8 +20,9 @@ pub const WS_TEXT: u32 = WS_BASE + 1;
 pub const WS_FILL: u32 = WS_BASE + 2;
 pub const WS_CLOSE: u32 = WS_BASE + 3;
 pub const WS_INPUT: u32 = WS_BASE + 4;
-/// Server → client: a routed key press (ASCII char in m2l1).
 pub const WS_KEY: u32 = WS_BASE + 5;
+pub const WS_FLUSH: u32 = WS_BASE + 6;
+pub const WS_CURSOR: u32 = WS_BASE + 7;
 
 // Absolute message-byte offsets (m2 layout).
 const OFF_TYPE: usize = 4;
@@ -82,10 +84,22 @@ pub fn ws_fill(wid: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> [u8;
 }
 
 /// Build a WS_CLOSE request.
+/// Build a WS_CLOSE request: remove the window.
 pub fn ws_close(wid: i32) -> [u8; 64] {
     let mut msg = [0u8; 64];
     msg_set_i32(&mut msg, OFF_TYPE, WS_CLOSE as i32);
     msg_set_i32(&mut msg, OFF_M2_I1, wid);
+    msg
+}
+
+/// Build a WS_CURSOR request: place the inverse-video block cursor at a
+/// body cell. Redraws are deferred to WS_FLUSH like WS_TEXT.
+pub fn ws_cursor(wid: i32, row: i32, col: i32) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg_set_i32(&mut msg, OFF_TYPE, WS_CURSOR as i32);
+    msg_set_i32(&mut msg, OFF_M2_I1, wid);
+    msg_set_i32(&mut msg, OFF_M2_I2, row);
+    msg_set_i32(&mut msg, OFF_M2_I3, col);
     msg
 }
 
@@ -94,6 +108,14 @@ pub fn ws_input(wid: i32) -> [u8; 64] {
     let mut msg = [0u8; 64];
     msg_set_i32(&mut msg, OFF_TYPE, WS_INPUT as i32);
     msg_set_i32(&mut msg, OFF_M2_I1, wid);
+    msg
+}
+
+/// Build a WS_FLUSH request: repaint the desktop with the buffered
+/// WS_TEXT/WS_FILL updates (redraws are deferred until this arrives).
+pub fn ws_flush() -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg_set_i32(&mut msg, OFF_TYPE, WS_FLUSH as i32);
     msg
 }
 
@@ -116,6 +138,12 @@ pub fn ws_key_char(msg: &[u8; 64]) -> u8 {
     msg[OFF_M2_L1]
 }
 
+/// HID usage code of the routed key (m2l2) — lets clients distinguish
+/// special keys (e.g. arrows, which carry no ASCII char) from plain chars.
+pub fn ws_key_usage(msg: &[u8; 64]) -> u16 {
+    u16::from_le_bytes([msg[OFF_M2_L2], msg[OFF_M2_L2 + 1]])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +157,8 @@ mod tests {
         assert_eq!(WS_CLOSE, 0x0D03);
         assert_eq!(WS_INPUT, 0x0D04);
         assert_eq!(WS_KEY, 0x0D05);
+        assert_eq!(WS_FLUSH, 0x0D06);
+        assert_eq!(WS_CURSOR, 0x0D07);
     }
 
     #[test]
@@ -141,6 +171,15 @@ mod tests {
         assert_eq!(u64::from_le_bytes(msg[24..32].try_into().unwrap()), 200);
         assert_eq!(u64::from_le_bytes(msg[32..40].try_into().unwrap()), 0x1234);
         assert_eq!(u64::from_le_bytes(msg[40..48].try_into().unwrap()), 4);
+    }
+
+    #[test]
+    fn test_ws_cursor_layout() {
+        let msg = ws_cursor(3, 4, 5);
+        assert_eq!(ws_reply_status(&msg), 0x0D07);
+        assert_eq!(i32::from_le_bytes(msg[8..12].try_into().unwrap()), 3);
+        assert_eq!(i32::from_le_bytes(msg[12..16].try_into().unwrap()), 4);
+        assert_eq!(i32::from_le_bytes(msg[16..20].try_into().unwrap()), 5);
     }
 
     #[test]
