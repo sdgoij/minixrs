@@ -469,6 +469,9 @@ fn fbterm_impl(args: &[&str]) -> i32 {
     draw_char(fb, col * FONT_W, row * FONT_H, b' ', FG, BG);
     col = 2;
 
+    // virtio-gpu is explicit-flush; no-op for VGA-style backends.
+    let _ = unsafe { minix_std::fs::ioctl(fb_fd, minix_std::fs::FBIOFLUSH, core::ptr::null_mut()) };
+
     write_out(b"fbterm: ready\n");
 
     let mut buf = [0u8; 16];
@@ -543,6 +546,10 @@ fn fbterm_impl(args: &[&str]) -> i32 {
                     keys += 1;
                 }
             }
+            // virtio-gpu is explicit-flush; no-op for VGA-style backends.
+            let _ = unsafe {
+                minix_std::fs::ioctl(fb_fd, minix_std::fs::FBIOFLUSH, core::ptr::null_mut())
+            };
         }
         // Busy-wait between polls (no blocking read on /dev/kbd yet).
         for _ in 0..200_000 {

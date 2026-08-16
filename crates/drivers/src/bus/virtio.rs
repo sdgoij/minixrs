@@ -287,6 +287,12 @@ pub fn virtio_set_phys_delta(delta: i64) {
     PHYS_DELTA.store(delta, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// Current VA→PA translation offset (for translating buffer addresses
+/// embedded in command payloads, e.g. virtio-gpu backing entries).
+pub fn virtio_phys_delta() -> i64 {
+    phys_delta()
+}
+
 /// Current VA→PA translation offset.
 fn phys_delta() -> i64 {
     PHYS_DELTA.load(core::sync::atomic::Ordering::Relaxed)

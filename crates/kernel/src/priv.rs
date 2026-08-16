@@ -620,6 +620,13 @@ mod tests {
     }
 
     #[test]
+    fn test_priv_phys_delta_layout() {
+        // DMA drivers read s_phys_delta via SYS_GETINFO; the field offset
+        // is stable (the tables before it are fixed-size).
+        assert_eq!(core::mem::offset_of!(Priv, s_phys_delta), 0x430);
+    }
+
+    #[test]
     fn test_idle_priv_exists() {
         unsafe {
             assert_eq!((*IDLE_PRIV.get()).s_proc_nr, 0);

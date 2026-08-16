@@ -15,7 +15,9 @@ use kernel::proc::Proc;
 
 #[cfg(target_arch = "x86_64")]
 use arch_common::com::VM_PROC_NR;
-use arch_common::com::{RAMDISK_IMAGE_VA, RAMDISK_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR};
+use arch_common::com::{
+    FB_PROC_NR, RAMDISK_IMAGE_VA, RAMDISK_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR,
+};
 
 /// Return type for `load_and_prepare_init`, exposing the loaded ELF bounds
 /// so the caller can create a per-process page table covering all pages.
@@ -378,7 +380,9 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
         // AArch64 gives the virtio driver processes EL0 access to the
         // low-GB device window; the other arches map devices separately.
         let map_low_gb_dev_user = cfg.map_low_gb_dev_user
-            && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR);
+            && (proc_nr == VIRTIO_BLK_PROC_NR
+                || proc_nr == VIRTIO_NET_PROC_NR
+                || proc_nr == FB_PROC_NR);
         let pt_phys = unsafe {
             boot_create_restricted_page_table(
                 info.code_start,
@@ -492,7 +496,11 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
                 print!("  WARN: virtio driver BAR mapping failed\r\n");
             }
         }
-        if cfg.map_virtio_mmio && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR) {
+        if cfg.map_virtio_mmio
+            && (proc_nr == VIRTIO_BLK_PROC_NR
+                || proc_nr == VIRTIO_NET_PROC_NR
+                || proc_nr == FB_PROC_NR)
+        {
             const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
             for j in 0..8u64 {
                 let va = VIRTIO_MMIO_BASE + j * 0x1000;

@@ -827,6 +827,11 @@ pub fn select(
     }
 }
 
+/// Push the framebuffer to the display (FBIOFLUSH, `/dev/fb`). No-op on
+/// VGA-style devices; virtio-gpu needs it after drawing. Must match
+/// `drivers::video::fb::FBIOFLUSH`.
+pub const FBIOFLUSH: u32 = 0x4604;
+
 /// Perform an I/O control operation on a file descriptor.
 ///
 /// # Safety

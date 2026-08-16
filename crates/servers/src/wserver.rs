@@ -234,6 +234,8 @@ static mut WS_STATE: WsState = WsState::new();
 #[cfg(target_os = "minix")]
 static mut WS_FB: u64 = 0;
 #[cfg(target_os = "minix")]
+static mut WS_FB_FD: i32 = -1;
+#[cfg(target_os = "minix")]
 static mut WS_KBD_FD: i32 = -1;
 /// Keyboard shift state across drains (a press and its letter can land in
 /// different batches).
@@ -337,6 +339,13 @@ fn redraw(fb: u64) {
                 }
             }
         }
+    }
+    // virtio-gpu is explicit-flush: push the new frame to the display.
+    // No-op for VGA-style backends.
+    let fd = unsafe { WS_FB_FD };
+    if fd >= 0 {
+        let _ =
+            unsafe { minix_std::fs::ioctl(fd, minix_std::fs::FBIOFLUSH, core::ptr::null_mut()) };
     }
 }
 
@@ -612,6 +621,7 @@ pub fn wserver_main() {
         }
         unsafe {
             WS_FB = fb as u64;
+            WS_FB_FD = fb_fd;
         }
         let kbd_fd = match unsafe { minix_std::fs::open(b"/dev/kbd", minix_std::fs::O_RDONLY, 0) } {
             Ok(fd) => fd,

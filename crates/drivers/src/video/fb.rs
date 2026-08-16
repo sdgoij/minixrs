@@ -12,6 +12,8 @@ use core::sync::atomic::AtomicUsize;
 
 use crate::DriverError;
 
+pub use crate::video::virtio_gpu::VirtioGpuArch;
+
 /// Fixed screen information (immutable hardware characteristics).
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -117,6 +119,9 @@ pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
 pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
 pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
 pub const FBIOPAN_DISPLAY: u32 = 0x4603;
+/// Push the framebuffer to the display (no-op on VGA-style devices whose
+/// LFB is always scanned out; virtio-gpu needs an explicit RESOURCE_FLUSH).
+pub const FBIOFLUSH: u32 = 0x4604;
 
 // Arch trait
 
@@ -124,6 +129,14 @@ pub const FBIOPAN_DISPLAY: u32 = 0x4603;
 pub trait FbArch {
     fn init(&mut self, minor: usize) -> Result<(), DriverError>;
     fn device(&self, minor: usize) -> Result<FbDevice, DriverError>;
+    /// Address the driver reads/writes framebuffer bytes through. For
+    /// device-memory backends this is the identity-mapped device VA (the
+    /// same as `device().base`); for RAM-backed backends (virtio-gpu) it
+    /// is the buffer's image VA while `device().base` is the guest-physical
+    /// address handed to VFS for mmap.
+    fn mem(&self, minor: usize) -> Result<u64, DriverError> {
+        self.device(minor).map(|d| d.base)
+    }
     fn var_screeninfo(&self, minor: usize) -> Result<FbVarScreeninfo, DriverError>;
     fn set_var_screeninfo(
         &mut self,
@@ -132,6 +145,11 @@ pub trait FbArch {
     ) -> Result<(), DriverError>;
     fn fix_screeninfo(&self, minor: usize) -> Result<FbFixScreeninfo, DriverError>;
     fn pan_display(&mut self, minor: usize, info: &FbVarScreeninfo) -> Result<(), DriverError>;
+    /// Push framebuffer contents to the display. Default: nothing to do
+    /// (VGA-style LFBs are scanned out continuously).
+    fn flush(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 // NullArch — test backend
@@ -539,6 +557,84 @@ impl FbArch for BochsArch {
 
 // Driver
 
+/// Runtime-selected framebuffer backend. x86 QEMU has bochs-display
+/// (PCI VGA); riscv64/aarch64 `virt` machines have virtio-gpu, so the
+/// server probes bochs first and falls back to virtio-gpu (one binary on
+/// all arches).
+#[allow(clippy::large_enum_variant)] // both variants live in BSS as a static
+pub enum FbBackend {
+    Bochs(BochsArch),
+    VirtioGpu(VirtioGpuArch),
+}
+
+impl FbBackend {
+    pub const fn new_bochs() -> Self {
+        FbBackend::Bochs(BochsArch::new())
+    }
+}
+
+impl FbArch for FbBackend {
+    fn init(&mut self, minor: usize) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.init(minor),
+            FbBackend::VirtioGpu(a) => a.init(minor),
+        }
+    }
+
+    fn device(&self, minor: usize) -> Result<FbDevice, DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.device(minor),
+            FbBackend::VirtioGpu(a) => a.device(minor),
+        }
+    }
+
+    fn mem(&self, minor: usize) -> Result<u64, DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.mem(minor),
+            FbBackend::VirtioGpu(a) => a.mem(minor),
+        }
+    }
+
+    fn var_screeninfo(&self, minor: usize) -> Result<FbVarScreeninfo, DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.var_screeninfo(minor),
+            FbBackend::VirtioGpu(a) => a.var_screeninfo(minor),
+        }
+    }
+
+    fn set_var_screeninfo(
+        &mut self,
+        minor: usize,
+        info: &FbVarScreeninfo,
+    ) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.set_var_screeninfo(minor, info),
+            FbBackend::VirtioGpu(a) => a.set_var_screeninfo(minor, info),
+        }
+    }
+
+    fn fix_screeninfo(&self, minor: usize) -> Result<FbFixScreeninfo, DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.fix_screeninfo(minor),
+            FbBackend::VirtioGpu(a) => a.fix_screeninfo(minor),
+        }
+    }
+
+    fn pan_display(&mut self, minor: usize, info: &FbVarScreeninfo) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.pan_display(minor, info),
+            FbBackend::VirtioGpu(a) => a.pan_display(minor, info),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.flush(),
+            FbBackend::VirtioGpu(a) => a.flush(),
+        }
+    }
+}
+
 /// Framebuffer character device driver.
 ///
 /// Reads and writes from/to framebuffer memory using volatile pointer
@@ -599,7 +695,8 @@ impl Framebuffer {
         }
         let avail = (dev.size - pos) as usize;
         let n = buf.len().min(avail);
-        let src = (dev.base + pos) as *const u8;
+        let base = arch.mem(minor)?;
+        let src = (base + pos) as *const u8;
         for (i, dst) in buf.iter_mut().enumerate().take(n) {
             // Safety: we trust the arch backend to provide a valid
             // framebuffer address.  The address range is within dev.size.
@@ -624,7 +721,8 @@ impl Framebuffer {
         }
         let avail = (dev.size - pos) as usize;
         let n = buf.len().min(avail);
-        let dst = (dev.base + pos) as *mut u8;
+        let base = arch.mem(minor)?;
+        let dst = (base + pos) as *mut u8;
         for (i, &val) in buf.iter().enumerate().take(n) {
             // Safety: same as read — address validated via arch.device().
             unsafe { core::ptr::write_volatile(dst.add(i), val) };
@@ -691,6 +789,7 @@ impl Framebuffer {
                     unsafe { core::ptr::read(data.as_ptr() as *const FbVarScreeninfo) };
                 arch.pan_display(minor, &info)
             }
+            FBIOFLUSH => arch.flush(),
             _ => Err(DriverError::InvalidArgument),
         }
     }

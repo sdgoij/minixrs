@@ -1,22 +1,45 @@
-//! Framebuffer character-device server — `/dev/fb` (Bochs VBE backend).
+//! Framebuffer character-device server — `/dev/fb`.
 //!
-//! Boots the BochsArch backend (PCI probe for `1234:1111`, mode-set to
-//! 1024×768×32, BARs identity-mapped via `VM_MAP_PHYS`), fills a test
-//! pattern so the framebuffer is verifiable via QMP `screendump` with no
-//! input, then serves the CDEV_* protocol for `/dev/fb` (open/close,
-//! inline read/write, grant-based ioctls).
+//! Selects the backend at boot: bochs-display (PCI probe for `1234:1111`,
+//! mode-set to 1024×768×32, BARs identity-mapped via `VM_MAP_PHYS`) on
+//! x86, or virtio-gpu (device ID 16 on the riscv/aarch64 `virt` machines)
+//! whose framebuffer is a server-owned RAM buffer attached as resource
+//! backing. Fills a test pattern so the framebuffer is verifiable via QMP
+//! `screendump` with no input, then serves the CDEV_* protocol for
+//! `/dev/fb` (open/close, inline read/write, grant-based ioctls, and the
+//! FBIOFLUSH push for explicit-flush devices like virtio-gpu).
 
 use arch_common::com::{
     CDEV_CLOSE, CDEV_IOCTL, CDEV_MAP, CDEV_OPEN, CDEV_READ, CDEV_WRITE, is_cdev_rq,
 };
+use drivers::bus::virtio;
 use drivers::video::fb::{
-    BochsArch, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO,
-    FbArch, Framebuffer,
+    FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO,
+    FbArch, FbBackend, Framebuffer, VirtioGpuArch,
 };
 
-/// Global driver state — one arch + one driver instance (no heap).
-static mut FB_ARCH: BochsArch = BochsArch::new();
+/// Global driver state — one backend + one driver instance (no heap).
+/// The backend is selected at boot: bochs-display on x86, virtio-gpu on
+/// riscv/aarch64 (bochs probe fails there, so we switch).
+static mut FB_BACKEND: FbBackend = FbBackend::new_bochs();
 static mut FB_DRIVER: Framebuffer = Framebuffer::new();
+
+/// The virtio-gpu framebuffer is a guest-RAM buffer owned by this server
+/// (page-aligned, 1024×768×32 = 3 MiB). Its guest-physical address is what
+/// the K3 mmap path maps into consumers. Only the virtio-gpu backend uses
+/// it; bochs uses device memory.
+#[repr(align(4096))]
+struct FbBufCell(core::cell::UnsafeCell<[u8; 3 * 1024 * 1024]>);
+unsafe impl Sync for FbBufCell {}
+impl FbBufCell {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0u8; 3 * 1024 * 1024]))
+    }
+    fn get(&self) -> u64 {
+        self.0.get() as u64
+    }
+}
+static FB_BUF: FbBufCell = FbBufCell::new();
 
 /// Scratch space for ioctl arg structs and inline write data.
 static mut FB_SCRATCH: [u8; 128] = [0; 128];
@@ -72,11 +95,101 @@ fn physmap_hook(phys: u64, len: usize) -> u64 {
     (u32::from_ne_bytes(msg[8..12].try_into().unwrap_or([0u8; 4]))) as u64
 }
 
+/// Query this process's VA→PA image translation offset (SYS_GETINFO
+/// GET_PHYS_DELTA) and hand it to the virtio transport so queue and
+/// descriptor addresses are programmed as guest-physical addresses (same
+/// pattern as the virtio-blk/net servers).
+#[cfg(target_os = "minix")]
+fn init_phys_delta() {
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&arch_common::com::GET_PHYS_DELTA.to_ne_bytes());
+    minix_rt::kernel_call(26, &mut msg); // SYS_GETINFO
+    let delta = i64::from_ne_bytes(msg[0..8].try_into().unwrap_or([0u8; 8]));
+    virtio::virtio_set_phys_delta(delta);
+}
+
+#[cfg(not(target_os = "minix"))]
+fn init_phys_delta() {}
+
+/// Write a boot-time status line to the console (stdout).
+fn slog(msg: &[u8]) {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        minix_rt::write(1, msg.as_ptr(), msg.len());
+    }
+    #[cfg(not(target_os = "minix"))]
+    let _ = msg;
+}
+
+/// Select and initialize the framebuffer backend: bochs-display first
+/// (x86), then virtio-gpu (riscv/aarch64, where the bochs probe finds no
+/// PCI VGA). The virtio-gpu backend is pointed at the server-owned RAM
+/// buffer before its init so the device can attach it as backing.
+fn backend_init() -> bool {
+    let backend = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+    match backend {
+        FbBackend::Bochs(arch) => {
+            if arch.init(0).is_ok() {
+                slog(b"fb: backend bochs-display\n");
+                return true;
+            }
+            slog(b"fb: no bochs-display, trying virtio-gpu\n");
+            *backend = FbBackend::VirtioGpu(VirtioGpuArch::new());
+            match backend {
+                FbBackend::VirtioGpu(v) => {
+                    v.set_fb_va(FB_BUF.get());
+                    match v.init(0) {
+                        Ok(()) => {
+                            slog(b"fb: backend virtio-gpu\n");
+                            true
+                        }
+                        Err(e) => {
+                            let code = match e {
+                                drivers::DriverError::NotFound => 6,         // ENXIO
+                                drivers::DriverError::Busy => 16,            // EBUSY
+                                drivers::DriverError::InvalidArgument => 22, // EINVAL
+                                drivers::DriverError::Unsupported => 95,     // EOPNOTSUPP
+                                drivers::DriverError::Io | drivers::DriverError::Unknown => 5, // EIO
+                            };
+                            let mut m = [0u8; 64];
+                            let msg = b"fb: virtio-gpu init failed err=";
+                            m[..msg.len()].copy_from_slice(msg);
+                            let mut i = msg.len();
+                            let mut v = code as u32;
+                            let mut tmp = [0u8; 10];
+                            let mut j = 10;
+                            loop {
+                                j -= 1;
+                                tmp[j] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                if v == 0 {
+                                    break;
+                                }
+                            }
+                            while j < 10 {
+                                m[i] = tmp[j];
+                                i += 1;
+                                j += 1;
+                            }
+                            m[i] = b'\n';
+                            i += 1;
+                            slog(&m[..i]);
+                            false
+                        }
+                    }
+                }
+                FbBackend::Bochs(_) => false,
+            }
+        }
+        FbBackend::VirtioGpu(_) => false,
+    }
+}
+
 /// Fill the framebuffer with a distinctive test pattern: the left third
 /// red, the middle third green, the right third blue. Screendump pixel
 /// asserts key off these colors, so the mode-set + BAR mapping are proven
 /// end-to-end.
-fn fill_test_pattern(arch: &mut BochsArch) {
+fn fill_test_pattern(arch: &mut dyn FbArch) {
     let (xres, yres) = (
         drivers::video::fb::BOCHS_DEFAULT_XRES,
         drivers::video::fb::BOCHS_DEFAULT_YRES,
@@ -101,7 +214,7 @@ fn fill_test_pattern(arch: &mut BochsArch) {
 }
 
 /// Write one framebuffer row via the driver's volatile write path.
-fn write_row(arch: &mut BochsArch, pos: u64, data: &[u8]) -> usize {
+fn write_row(arch: &dyn FbArch, pos: u64, data: &[u8]) -> usize {
     // The Framebuffer driver's write takes the arch by reference; a whole
     // row is far larger than the scratch, so write in chunks through the
     // driver's own path.
@@ -118,10 +231,16 @@ pub fn fb_server_main() {
 
         drivers::video::fb::fb_set_devio(devio_hook);
         drivers::video::fb::fb_set_physmap(physmap_hook);
+        virtio::virtio_set_devio(devio_hook);
+        init_phys_delta();
 
-        let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_ARCH) };
-        if arch.init(0).is_ok() {
+        if backend_init() {
+            let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+            let arch: &mut dyn FbArch = arch;
             fill_test_pattern(arch);
+            // virtio-gpu is explicit-flush: push the pattern to the
+            // display (no-op for bochs).
+            let _ = arch.flush();
         }
 
         loop {
@@ -177,7 +296,8 @@ unsafe fn handle_cdev_request(
     //   m2_i1 = minor  (payload +0), m2_i2 = flags (+4), m2_i3 = grant (+8)
     //   m2_l1 = position (+16), m2_l2 = count (+24), m2_l3 = inline data (+32)
     let minor = unsafe { msg.m_payload.m2.m2i1 as u32 };
-    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_ARCH) };
+    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+    let arch: &mut dyn FbArch = arch;
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(FB_DRIVER) };
 
     match call_type {
@@ -235,8 +355,10 @@ unsafe fn handle_cdev_request(
         }
         CDEV_MAP => {
             // Device-memory mmap: reply with the framebuffer's physical
-            // range (phys u64 @ payload 0, len u64 @ payload 8). The arch's
-            // `dev.base` is the identity-mapped VA, which equals the phys.
+            // range (phys u64 @ payload 0, len u64 @ payload 8). For bochs
+            // the arch's `dev.base` is the identity-mapped device VA
+            // (equals the phys); for virtio-gpu it is the backing buffer's
+            // guest-physical address directly.
             match arch.device(minor as usize) {
                 Ok(dev) => {
                     unsafe {
@@ -259,7 +381,8 @@ unsafe fn handle_cdev_request(
 ///
 /// `grant` must be a valid VFS magic grant over the caller's buffer.
 fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 {
-    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_ARCH) };
+    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+    let arch: &mut dyn FbArch = arch;
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(FB_DRIVER) };
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCRATCH) };
 
@@ -280,14 +403,16 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
             core::mem::size_of::<drivers::video::fb::FbVarScreeninfo>(),
             false,
         ),
+        FBIOFLUSH => (0, false),
         _ => return -25, // ENOTTY
     };
     if arg_size > scratch.len() {
         return -7; // E2BIG
     }
 
-    // Fetch the arg struct from the caller through the grant.
-    if !is_out {
+    // Fetch the arg struct from the caller through the grant. No-arg
+    // ioctls (FBIOFLUSH) come with GRANT_INVALID; skip the copy.
+    if !is_out && arg_size > 0 {
         if safecopy_from(who_e, grant, scratch, arg_size) != 0 {
             return -14; // EFAULT
         }

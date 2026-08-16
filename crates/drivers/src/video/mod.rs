@@ -4,3 +4,4 @@
 
 pub mod fb;
 pub mod tda19988;
+pub mod virtio_gpu;
