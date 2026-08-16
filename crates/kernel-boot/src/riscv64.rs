@@ -1,11 +1,6 @@
-//! RISC-V64 kernel boot binary entry point.
-//!
-//! Build with: `cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix`
-
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
-#![allow(static_mut_refs)]
-#![cfg(target_arch = "riscv64")]
+// RISC-V64 kernel boot entry code, shared by the normal/boot-test/
+// integration-test bins. The crate-level attributes live in the wrapper
+// bins (riscv64_main.rs / riscv64_boot.rs / riscv64_test.rs).
 
 #[cfg(not(test))]
 use core::panic::PanicInfo;

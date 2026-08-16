@@ -41,16 +41,36 @@ arch-x86_64 = { path = "../arch-x86_64" }
 
 [[bin]]
 name = "kernel-boot-riscv64"
-path = "src/riscv64.rs"
+path = "src/riscv64_main.rs"
 required-features = ["riscv64"]
+
+[[bin]]
+name = "kernel-boot-riscv64-boot"
+path = "src/riscv64_boot.rs"
+required-features = ["riscv64", "boot-test"]
+
+[[bin]]
+name = "kernel-boot-riscv64-test"
+path = "src/riscv64_test.rs"
+required-features = ["riscv64", "integration-tests"]
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 arch-riscv64 = { path = "../arch-riscv64" }
 
 [[bin]]
 name = "kernel-boot-aarch64"
-path = "src/aarch64.rs"
+path = "src/aarch64_main.rs"
 required-features = ["aarch64"]
+
+[[bin]]
+name = "kernel-boot-aarch64-boot"
+path = "src/aarch64_boot.rs"
+required-features = ["aarch64", "boot-test"]
+
+[[bin]]
+name = "kernel-boot-aarch64-test"
+path = "src/aarch64_test.rs"
+required-features = ["aarch64", "integration-tests"]
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arch-aarch64 = { path = "../arch-aarch64" }

@@ -102,19 +102,17 @@ build-x86: userland-x86
 build-x86-test: userland-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs,embed_minixfs,integration-tests
+    target/mkboot embed_initramfs,embed_minixfs,integration-tests kernel-test
 
 build-x86-boot: userland-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs,embed_minixfs,boot-test
+    target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
 
 build-riscv64: userland-riscv64
-    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
 build-aarch64: userland-aarch64
-    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release
 
 # ---------- run ----------
@@ -150,33 +148,22 @@ debug-aarch64: build-aarch64
 # mount_root.
 
 build-riscv64-test: userland-riscv64
-    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
-    # Copy to a distinct name so a later normal build is not fooled by this
-    # artifact (cargo skips relinking when the output file is newer than its
-    # fingerprint — the shared path would otherwise keep the test kernel).
-    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
 
 build-aarch64-test: userland-aarch64
-    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
-    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/aarch64-unknown-minix/release/kernel-boot-aarch64-test
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-test --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
 
 build-riscv64-boot: userland-riscv64
-    rm -f target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
-    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-boot --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
 
 build-aarch64-boot: userland-aarch64
-    rm -f target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
-    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
 
 test-qemu target="x86":
     @just test-qemu-{{target}}
 
 test-qemu-x86: build-x86-test mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 # RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so
 # pass/fail is determined from the serial log.
@@ -193,7 +180,7 @@ test-boot target="x86":
     @just test-boot-{{target}}
 
 test-boot-x86: build-x86-boot mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
 
 test-boot-riscv64: build-riscv64-boot mkfs-riscv64
     qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi

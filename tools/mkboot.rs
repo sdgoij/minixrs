@@ -6,7 +6,10 @@
 // (a build script cannot do post-link work).
 //
 // Usage: rustc tools/mkboot.rs --edition 2024 -o target/mkboot
-//        target/mkboot [features]     (default: embed_initramfs,embed_minixfs)
+//        target/mkboot [features] [stem]
+//          features: comma-joined feature list (default: embed_initramfs,embed_minixfs)
+//          stem:     output name — <stem>.bin + <stem>-trampoline.elf (default: kernel,
+//                    which keeps the historical names kernel.bin + trampoline.elf)
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,11 +41,17 @@ fn main() {
     let workspace = Path::new(".");
 
     // Parse optional --features argument (e.g. "embed_initramfs,integration-tests")
-    let extra_features: Vec<String> = std::env::args().skip(1).collect();
-    let features = if extra_features.is_empty() {
+    // and an optional output stem (the last arg when two or more are given).
+    let mut extra_args: Vec<String> = std::env::args().skip(1).collect();
+    let stem = if extra_args.len() >= 2 {
+        extra_args.pop().expect("stem arg")
+    } else {
+        "kernel".to_string()
+    };
+    let features = if extra_args.is_empty() {
         "embed_initramfs,embed_minixfs".to_string()
     } else {
-        let mut all = extra_features.join(",");
+        let mut all = extra_args.join(",");
         if !all.contains("embed_initramfs") {
             all = format!("embed_initramfs,{}", all);
         }
@@ -117,7 +126,12 @@ fn main() {
         .join("kernel-boot")
         .join("trampoline.ld");
     let trampoline_obj = workspace.join("target").join("trampoline_.o");
-    let trampoline_elf = workspace.join("target").join("trampoline.elf");
+    let trampoline_name = if stem == "kernel" {
+        "trampoline.elf".to_string()
+    } else {
+        format!("{stem}-trampoline.elf")
+    };
+    let trampoline_elf = workspace.join("target").join(trampoline_name);
 
     let status = Command::new("clang")
         .args([
@@ -154,7 +168,7 @@ fn main() {
     println!("Trampoline rebuilt with kmain @ 0x{}", kmain_addr);
 
     // 4. objcopy to raw binary.
-    let kernel_bin = workspace.join("target").join("kernel.bin");
+    let kernel_bin = workspace.join("target").join(format!("{stem}.bin"));
     let status = Command::new("rust-objcopy")
         .args([
             "-O",
@@ -165,5 +179,5 @@ fn main() {
         .status()
         .expect("rust-objcopy failed");
     assert!(status.success());
-    println!("kernel.bin written");
+    println!("{} written", kernel_bin.display());
 }
