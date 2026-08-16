@@ -114,18 +114,14 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         if buf.is_null() || count == 0 {
             return -14; // EFAULT
         }
-        // Read one byte. On x86 the read blocks by spinning with IF=0
-        // (read_blocking); on riscv/aarch64 that kernel-mode busy-wait
-        // starves other processes (the timer only fires at the WFI window
-        // and the kernel-mode resume path faults), so the fd-0 read
-        // instead returns EAGAIN when no byte is available. The tty's
-        // do_read loop retries in user mode, where the timer can preempt
-        // it and schedule the input server's virtio-keyboard poll. The
-        // UART is drained into the ring here and by the per-tick trap
-        // drains, so a retry finds the byte.
-        #[cfg(target_arch = "x86_64")]
-        let byte = crate::ser_input::read_blocking();
-        #[cfg(not(target_arch = "x86_64"))]
+        // Read one byte. The fd-0 read returns EAGAIN when the ring is
+        // empty and the tty's do_read loop retries in user mode, where the
+        // timer preempts it and schedules other runnable processes (e.g.
+        // the input server's SYS_SETALARM virtio poll). A kernel-mode
+        // busy-wait would starve them: the x86 read spins with IF=0 (no
+        // timer), and the riscv/aarch64 timer only fires at the WFI window
+        // anyway. The UART is drained into the ring here and by the
+        // per-tick trap drains, so a retry finds the byte.
         let byte = {
             let mut got = crate::ser_input::try_read();
             if got.is_none() {

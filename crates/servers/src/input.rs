@@ -1,8 +1,9 @@
-//! Keyboard driver server — `/dev/kbd` (major 20).
+//! Keyboard + mouse driver server — `/dev/kbd` (major 20).
 //!
 //! Two backends feed the same HID event ring: the 8042 (x86, IRQ-1 hook
 //! via SYS_IRQCTL — the kernel's `kbd_isr_entry` notifies this process on
-//! every key event) and virtio-keyboard (riscv/aarch64 — no wired userland
+//! every key event; IRQ-12 hook for the PS/2 mouse) and virtio-input
+//! (x86 virtio-mouse, riscv/aarch64 virtio-keyboard — no wired userland
 //! IRQ, so the event queue is polled on a periodic SYS_SETALARM). Both
 //! drain into the ring, which the window server consumes as a character
 //! device. Reads are non-blocking: a read with no pending events returns
@@ -11,13 +12,16 @@
 
 use arch_common::com::{CDEV_CLOSE, CDEV_OPEN, CDEV_READ, is_cdev_rq};
 #[cfg(target_os = "minix")]
-use drivers::bus::virtio::virtio_set_phys_delta;
-use drivers::input::constants::INPUT_PAGE_KEY;
+use drivers::bus::virtio::{virtio_set_devio, virtio_set_phys_delta};
+use drivers::input::constants::{
+    INPUT_BUTTON_1, INPUT_FLAG_ABS, INPUT_FLAG_REL, INPUT_GD_X, INPUT_GD_Y, INPUT_PAGE_ABS,
+    INPUT_PAGE_BUTTON, INPUT_PAGE_GD, INPUT_PAGE_KEY,
+};
 #[cfg(target_arch = "x86_64")]
 use drivers::input::controller::Ps2Controller;
 use drivers::input::devio::DevioIo;
 use drivers::input::driver::{InputCallbacks, InputDriver};
-use drivers::input::virtio_input::{VirtioInput, keycode_to_usage};
+use drivers::input::virtio_input::{EV_ABS, EV_KEY, EV_REL, VirtioInput, keycode_to_usage};
 
 /// A decoded input event: HID usage page, usage code, and press value.
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +38,8 @@ const EAGAIN: i32 = -11;
 /// Decode state for the keyboard scancode stream.
 static mut INPUT_DRIVER: InputDriver = InputDriver::new();
 
-/// Virtio-keyboard backend (riscv/aarch64); uninitialized on x86.
+/// Virtio-input backend (virtio-keyboard on riscv/aarch64, virtio-mouse
+/// on x86); uninitialized when no virtio-input device is present.
 static mut VIRTIO_INPUT: VirtioInput = VirtioInput::new();
 
 /// Whether the 8042 PS/2 controller came up. Only x86 has an I8042;
@@ -63,19 +68,29 @@ static mut EV_SCRATCH: [u8; 48] = [0; 48];
 /// [`InputCallbacks`] implementation that queues decoded events.
 struct ServerCallbacks;
 
+/// Enqueue one decoded event into the ring (drops when full).
+fn push_event(page: u16, code: u16, press: i32) {
+    unsafe {
+        let next = (EV_TAIL + 1) % EV_QUEUE_LEN;
+        if next == EV_HEAD {
+            return; // queue full — drop
+        }
+        EV_QUEUE[EV_TAIL] = InputEvent { page, code, press };
+        EV_TAIL = next;
+    }
+}
+
 impl InputCallbacks for ServerCallbacks {
     fn key_event(&mut self, page: u16, code: u16, press: i32) {
-        unsafe {
-            let next = (EV_TAIL + 1) % EV_QUEUE_LEN;
-            if next == EV_HEAD {
-                return; // queue full — drop
-            }
-            EV_QUEUE[EV_TAIL] = InputEvent { page, code, press };
-            EV_TAIL = next;
-        }
+        push_event(page, code, press);
     }
 
-    fn mouse_event(&mut self, _page: u16, _code: u16, _value: i32, _flags: u16) {}
+    fn mouse_event(&mut self, page: u16, code: u16, value: i32, _flags: u16) {
+        // The page distinguishes the semantics: GD (0x01) carries X/Y
+        // deltas (relative), BUTTON (0x09) carries button state 0/1
+        // (absolute). Both fit the same {page, code, press} event shape.
+        push_event(page, code, value);
+    }
 }
 
 /// Drain all pending scancodes from the 8042 and decode them into events.
@@ -94,15 +109,58 @@ fn drain_keyboard() -> bool {
 }
 
 /// Drain pending virtio-input events into the HID event ring. The device
-/// emits Linux keycodes; `keycode_to_usage` maps them to the HID usages
-/// the window server consumes. Returns true when an event was queued.
+/// emits Linux input events: EV_KEY with Linux keycodes (keyboard —
+/// `keycode_to_usage` maps them to HID usages; mouse buttons BTN_* map to
+/// the BUTTON page), EV_REL X/Y deltas (relative mouse — the GD page),
+/// and EV_ABS X/Y positions (absolute tablet — the ABS page, QEMU
+/// normalized to 0..0x7FFF). Which device the instance probed decides
+/// which codes appear. Returns true when an event was queued.
 fn drain_virtio() -> bool {
     let tail = unsafe { EV_TAIL };
     let input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
     let mut cb = ServerCallbacks;
-    input.drain(|code, value| {
-        if let Some(usage) = keycode_to_usage(code) {
-            cb.key_event(INPUT_PAGE_KEY, usage, value as i32);
+    input.drain(|type_, code, value| {
+        match (type_, code) {
+            // Linux BTN_LEFT/RIGHT/MIDDLE = 0x110/0x111/0x112.
+            (EV_KEY, 0x110) => cb.mouse_event(
+                INPUT_PAGE_BUTTON,
+                INPUT_BUTTON_1,
+                value as i32,
+                INPUT_FLAG_ABS,
+            ),
+            (EV_KEY, 0x111) => cb.mouse_event(
+                INPUT_PAGE_BUTTON,
+                INPUT_BUTTON_1 + 1,
+                value as i32,
+                INPUT_FLAG_ABS,
+            ),
+            (EV_KEY, 0x112) => cb.mouse_event(
+                INPUT_PAGE_BUTTON,
+                INPUT_BUTTON_1 + 2,
+                value as i32,
+                INPUT_FLAG_ABS,
+            ),
+            // Linux REL_X = 0x00, REL_Y = 0x01.
+            (EV_REL, 0x00) => {
+                cb.mouse_event(INPUT_PAGE_GD, INPUT_GD_X, value as i32, INPUT_FLAG_REL)
+            }
+            (EV_REL, 0x01) => {
+                cb.mouse_event(INPUT_PAGE_GD, INPUT_GD_Y, value as i32, INPUT_FLAG_REL)
+            }
+            // Linux ABS_X = 0x00, ABS_Y = 0x01 (absolute tablet; the value
+            // is already QEMU-normalized to 0..0x7FFF).
+            (EV_ABS, 0x00) => {
+                cb.mouse_event(INPUT_PAGE_ABS, INPUT_GD_X, value as i32, INPUT_FLAG_ABS)
+            }
+            (EV_ABS, 0x01) => {
+                cb.mouse_event(INPUT_PAGE_ABS, INPUT_GD_Y, value as i32, INPUT_FLAG_ABS)
+            }
+            (EV_KEY, _) => {
+                if let Some(usage) = keycode_to_usage(code) {
+                    cb.key_event(INPUT_PAGE_KEY, usage, value as i32);
+                }
+            }
+            _ => {}
         }
     });
     unsafe { EV_TAIL != tail }
@@ -188,6 +246,20 @@ fn register_irq() {
     let _ = minix_rt::kernel_call(19, &mut msg); // SYS_IRQCTL
 }
 
+/// Register an IRQ-12 hook (SYS_IRQCTL) so the kernel notifies this
+/// process on every PS/2 mouse (aux channel) interrupt. The 8042's
+/// keyboard ISR drains whatever the controller holds, but mouse packets
+/// arrive on their own line (IRQ 12), which needs its own hook.
+#[cfg(target_os = "minix")]
+fn register_mouse_irq() {
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&arch_common::com::IRQ_SETPOLICY.to_ne_bytes());
+    msg[12..16].copy_from_slice(&12i32.to_ne_bytes()); // IRQ 12
+    msg[16..20].copy_from_slice(&arch_common::com::IRQ_REENABLE.to_ne_bytes());
+    msg[20..24].copy_from_slice(&2i32.to_ne_bytes()); // notify_id
+    let _ = minix_rt::kernel_call(19, &mut msg); // SYS_IRQCTL
+}
+
 /// Main loop: receive kernel notifications (keyboard IRQs) and CDEV
 /// requests for `/dev/kbd`.
 pub fn input_server_main() {
@@ -196,6 +268,10 @@ pub fn input_server_main() {
         const ANY: i32 = 0x0000_ffff;
 
         drivers::input::devio::input_set_devio(devio_hook);
+        // The virtio transport routes PCI config reads through the same
+        // SYS_DEVIO hook (without it the x86 pci_probe reads return 0 and
+        // the device is never found; the MMIO transports don't use it).
+        virtio_set_devio(devio_hook);
 
         // The virtio transport needs this process's VA→PA delta to program
         // guest-physical addresses (init_phys_delta queries SYS_GETINFO).
@@ -211,12 +287,15 @@ pub fn input_server_main() {
             PS2_READY = Ps2Controller::init::<DevioIo>().is_ok()
         };
         register_irq();
+        register_mouse_irq();
 
-        // Try the virtio-keyboard backend (riscv/aarch64; absent on x86).
+        // Try the virtio-input backend (virtio-keyboard on riscv/aarch64,
+        // virtio-mouse on x86). Polled on an alarm when present; the PS/2
+        // path stays the x86 keyboard source.
         let virtio_input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
         if virtio_input.init().is_ok() {
             unsafe {
-                minix_rt::write(1, b"input: virtio-keyboard ready\n".as_ptr(), 29);
+                minix_rt::write(1, b"input: virtio-input ready\n".as_ptr(), 26);
             }
             arm_virtio_poll();
         }

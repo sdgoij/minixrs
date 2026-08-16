@@ -14,7 +14,8 @@ use arch_common::ipc::Message;
 use minix_std::font::FONT_8X16;
 #[cfg(target_os = "minix")]
 use minix_std::wserver::{
-    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_KEY, WS_TEXT,
+    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_KEY, WS_PTR, WS_PTRMODE,
+    WS_TEXT,
 };
 
 const TITLE_H: usize = 16;
@@ -23,18 +24,62 @@ const MAX_TEXT_COLS: usize = 80;
 const MAX_TEXT_ROWS: usize = 24;
 const MAX_RECTS: usize = 8;
 
+// Screen geometry — unconditional so the host tests exercise the
+// pointer/drag math with the real desktop size.
+const XRES: usize = 1024;
+const YRES: usize = 768;
+
+// Window chrome geometry.
+/// Width of the title-bar close button (px).
+const CLOSE_W: i32 = 16;
+/// Edge grip for resize hit-testing (px).
+const RESIZE_GRIP: i32 = 4;
+/// Minimum window size (px). Height includes the title bar, so MIN_H
+/// keeps at least one body row.
+const MIN_W: i32 = 80;
+const MIN_H: i32 = TITLE_H as i32 + 16;
+
+// Resize edge bitmask (N/S/E/W).
+const EDGE_N: u8 = 0x01;
+const EDGE_S: u8 = 0x02;
+const EDGE_E: u8 = 0x04;
+const EDGE_W: u8 = 0x08;
+
+/// Mouse pointer bitmap (8x12 arrow), drawn on top of everything.
+#[cfg(target_os = "minix")]
+const POINTER_BITMAP: [u8; 12] = [
+    0b10000000, 0b11000000, 0b11100000, 0b11110000, 0b11111000, 0b11111100, 0b11111110, 0b11111100,
+    0b11101000, 0b11011000, 0b10011000, 0b00011000,
+];
+/// Pointer overlay size (px) — matches the bitmap (8 wide, 12 tall).
+#[cfg(target_os = "minix")]
+const POINTER_W: usize = 8;
+#[cfg(target_os = "minix")]
+const POINTER_H: usize = 12;
+/// Number of pixels in the pointer overlay.
+#[cfg(target_os = "minix")]
+const POINTER_CELLS: usize = POINTER_W * POINTER_H;
+
 // Drawing constants — the rasterizer only runs on the MINIX target (the
 // host tests cover the window-state protocol ops; pixels are probe-verified).
-#[cfg(target_os = "minix")]
-const XRES: usize = 1024;
-#[cfg(target_os = "minix")]
-const YRES: usize = 768;
 #[cfg(target_os = "minix")]
 const PITCH: usize = XRES * 4;
 #[cfg(target_os = "minix")]
 const MAP_LEN: usize = 4 * 1024 * 1024;
 #[cfg(target_os = "minix")]
 const KEY_PAGE: u16 = 0x0007;
+#[cfg(target_os = "minix")]
+const POINTER_PAGE_GD: u16 = 0x0001;
+#[cfg(target_os = "minix")]
+const POINTER_PAGE_ABS: u16 = 0x00FD;
+#[cfg(target_os = "minix")]
+const POINTER_PAGE_BTN: u16 = 0x0009;
+#[cfg(target_os = "minix")]
+const POINTER_GD_X: u16 = 0x0030;
+#[cfg(target_os = "minix")]
+const POINTER_GD_Y: u16 = 0x0031;
+#[cfg(target_os = "minix")]
+const POINTER_BTN_1: u16 = 0x0001;
 
 /// XRGB8888 colors (u32 0x00RRGGBB, LE bytes B,G,R,0).
 #[cfg(target_os = "minix")]
@@ -47,6 +92,8 @@ const COLOR_TITLE_FOCUSED: u32 = 0x004080C0;
 const COLOR_TITLE_UNFOCUSED: u32 = 0x00202040;
 #[cfg(target_os = "minix")]
 const COLOR_TEXT: u32 = 0x00FFFFFF;
+#[cfg(target_os = "minix")]
+const COLOR_POINTER: u32 = 0x00FFFFFF;
 
 /// A filled pixel rect inside a window's body (window-local coords).
 #[derive(Clone, Copy)]
@@ -72,6 +119,8 @@ pub struct Window {
     pub rects: [WsRect; MAX_RECTS],
     /// Inverse-video block cell (body row, col), if the client set one.
     pub cursor: Option<(usize, usize)>,
+    /// Window opted into WS_PTR pointer-event delivery (WS_PTRMODE).
+    pub want_ptr: bool,
 }
 
 impl Window {
@@ -93,6 +142,7 @@ impl Window {
                 color: 0,
             }; MAX_RECTS],
             cursor: None,
+            want_ptr: false,
         }
     }
 
@@ -107,14 +157,46 @@ impl Window {
     }
 }
 
+/// An in-flight title-bar drag or edge/corner resize.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Drag {
+    pub wid: usize,
+    pub mode: DragMode,
+    /// Pointer position when the drag started (screen px).
+    pub grab: (i32, i32),
+    /// Window geometry (x, y, w, h) when the drag started.
+    pub start: (i32, i32, i32, i32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DragMode {
+    Move,
+    Resize { edges: u8 },
+}
+
+/// What a pointer button transition did, for the server to act on.
+pub enum PtrAction {
+    /// Deliver a WS_PTR to `wid`'s client (window-local x/y).
+    Deliver { wid: usize, x: i32, y: i32 },
+    /// No client delivery (desktop, chrome, or drag end).
+    None,
+}
+
 /// Window-server state (host-testable; the server's statics are one of
 /// these).
 pub struct WsState {
     pub windows: [Window; MAX_WINDOWS],
-    /// Focused window index, or `MAX_WINDOWS` when none.
+    /// Focused window index, or `MAX_WINDOWS` when none (== z-order top).
     pub focus: usize,
     /// Client blocked in WS_INPUT for a window: (endpoint, wid).
     pub waiter: (i32, usize),
+    /// Stacking order: window indices bottom → top (used windows only).
+    pub zorder: [usize; MAX_WINDOWS],
+    pub nz: usize,
+    /// Pointer position (screen px), clamped to the framebuffer.
+    pub pointer: (i32, i32),
+    /// In-flight chrome operation (title drag / edge resize), if any.
+    pub drag: Option<Drag>,
 }
 
 impl Default for WsState {
@@ -129,6 +211,10 @@ impl WsState {
             windows: [Window::new(); MAX_WINDOWS],
             focus: MAX_WINDOWS,
             waiter: (-1, usize::MAX),
+            zorder: [0; MAX_WINDOWS],
+            nz: 0,
+            pointer: ((XRES / 2) as i32, (YRES / 2) as i32),
+            drag: None,
         }
     }
 
@@ -154,7 +240,8 @@ impl WsState {
                 win.text = [[b' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS];
                 win.nrects = 0;
                 win.cursor = None;
-                self.focus = i;
+                win.want_ptr = false;
+                self.push_z(i);
                 return Ok(i);
             }
         }
@@ -221,21 +308,28 @@ impl WsState {
         Ok(())
     }
 
-    /// Close a window; focus falls back to the highest open window.
+    /// Close a window; focus falls back to the top of the z-order.
     pub fn close(&mut self, wid: usize) -> Result<(), i32> {
         let win = self.windows.get_mut(wid).ok_or(-9)?;
         if !win.used {
             return Err(-9);
         }
         win.used = false;
+        self.remove_z(wid);
         if self.waiter.1 == wid {
             self.waiter = (-1, usize::MAX);
         }
+        if let Some(d) = self.drag
+            && d.wid == wid
+        {
+            self.drag = None;
+        }
         if self.focus == wid {
-            self.focus = (0..MAX_WINDOWS)
-                .rev()
-                .find(|&i| self.windows[i].used)
-                .unwrap_or(MAX_WINDOWS);
+            self.focus = if self.nz > 0 {
+                self.zorder[self.nz - 1]
+            } else {
+                MAX_WINDOWS
+            };
         }
         Ok(())
     }
@@ -250,6 +344,236 @@ impl WsState {
             return Some((ep, ch));
         }
         None
+    }
+
+    // --- stacking order ---
+
+    /// Position of `wid` in the z-order (bottom = 0), if used.
+    fn zpos(&self, wid: usize) -> Option<usize> {
+        self.zorder[..self.nz].iter().position(|&w| w == wid)
+    }
+
+    /// Append a window to the top of the z-order and focus it.
+    fn push_z(&mut self, wid: usize) {
+        self.zorder[self.nz] = wid;
+        self.nz += 1;
+        self.focus = wid;
+    }
+
+    /// Remove a window from the z-order (does not touch focus).
+    fn remove_z(&mut self, wid: usize) {
+        if let Some(pos) = self.zpos(wid) {
+            for i in pos..self.nz - 1 {
+                self.zorder[i] = self.zorder[i + 1];
+            }
+            self.nz -= 1;
+        }
+    }
+
+    /// Raise a window to the top of the stacking order and focus it.
+    pub fn raise(&mut self, wid: usize) {
+        let Some(pos) = self.zpos(wid) else {
+            return;
+        };
+        for i in pos..self.nz - 1 {
+            self.zorder[i] = self.zorder[i + 1];
+        }
+        self.zorder[self.nz - 1] = wid;
+        self.focus = wid;
+    }
+
+    /// Topmost window whose rect contains (x, y); `None` on the desktop.
+    pub fn window_at(&self, x: i32, y: i32) -> Option<usize> {
+        for &wid in self.zorder[..self.nz].iter().rev() {
+            let w = &self.windows[wid];
+            if x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h {
+                return Some(wid);
+            }
+        }
+        None
+    }
+
+    /// Which resize edges a press at (x, y) hits on `wid` (bitmask), or 0.
+    pub fn resize_edges(&self, wid: usize, x: i32, y: i32) -> u8 {
+        let win = &self.windows[wid];
+        let (wx, wy, ww, wh) = (win.x, win.y, win.w, win.h);
+        let mut e = 0;
+        if y >= wy && y < wy + RESIZE_GRIP {
+            e |= EDGE_N;
+        }
+        if y >= wy + wh - RESIZE_GRIP && y < wy + wh {
+            e |= EDGE_S;
+        }
+        if x >= wx && x < wx + RESIZE_GRIP {
+            e |= EDGE_W;
+        }
+        if x >= wx + ww - RESIZE_GRIP && x < wx + ww {
+            e |= EDGE_E;
+        }
+        e
+    }
+
+    /// Move the pointer by a relative delta (a GD X/Y event) and apply
+    /// any in-flight drag/resize. Returns true when the pointer moved
+    /// (and thus the desktop changed — the caller repaints accordingly).
+    pub fn pointer_rel(&mut self, dx: i32, dy: i32) -> bool {
+        let (oldx, oldy) = self.pointer;
+        self.pointer.0 = (self.pointer.0 + dx).clamp(0, XRES as i32 - 1);
+        self.pointer.1 = (self.pointer.1 + dy).clamp(0, YRES as i32 - 1);
+        if self.pointer.0 == oldx && self.pointer.1 == oldy {
+            return false;
+        }
+        let (px, py) = self.pointer;
+        match self.drag {
+            Some(Drag {
+                wid,
+                mode: DragMode::Move,
+                grab,
+                start: _,
+            }) => {
+                let win = &mut self.windows[wid];
+                // Keep at least 8 px of the window on-screen horizontally
+                // and the title bar visible vertically.
+                win.x = (px - grab.0).clamp(-(win.w - 8), XRES as i32 - 8);
+                win.y = (py - grab.1).clamp(0, YRES as i32 - 16);
+            }
+            Some(Drag {
+                wid,
+                mode: DragMode::Resize { edges },
+                grab: _,
+                start: (sx, sy, sw, sh),
+            }) => {
+                let win = &mut self.windows[wid];
+                let (mut x, mut y, mut w, mut h) = (sx, sy, sw, sh);
+                if edges & EDGE_W != 0 {
+                    x = px.min(sx + sw - MIN_W);
+                    w = sx + sw - x;
+                }
+                if edges & EDGE_E != 0 {
+                    w = (px - sx).max(MIN_W);
+                }
+                if edges & EDGE_N != 0 {
+                    y = py.min(sy + sh - MIN_H);
+                    h = sy + sh - y;
+                }
+                if edges & EDGE_S != 0 {
+                    h = (py - sy).max(MIN_H);
+                }
+                // Snap to the cell grid so the text grid stays well-defined.
+                w = (w / 8) * 8;
+                h = TITLE_H as i32 + ((h - TITLE_H as i32) / 16) * 16;
+                // Re-anchor after snapping: the opposite edge stays put.
+                if edges & EDGE_W != 0 {
+                    x = sx + sw - w;
+                }
+                if edges & EDGE_N != 0 {
+                    y = sy + sh - h;
+                }
+                win.w = w.max(MIN_W);
+                win.h = h.max(MIN_H);
+                win.x = x.clamp(-(win.w - 8), XRES as i32 - 8);
+                win.y = y.clamp(0, YRES as i32 - 16);
+            }
+            None => {}
+        }
+        true
+    }
+
+    /// A button press/release (1 = left, 2 = right, 3 = middle). Applies
+    /// the chrome ops (close button, raise/focus, title drag, edge resize)
+    /// and returns a pointer delivery for the window under the pointer
+    /// when it opted in, else `None`.
+    pub fn pointer_button(&mut self, which: u8, down: bool) -> PtrAction {
+        let (px, py) = self.pointer;
+        if down {
+            let Some(wid) = self.window_at(px, py) else {
+                self.drag = None;
+                return PtrAction::None;
+            };
+            // The close button (top-right of the title bar) closes.
+            if which == 1 {
+                let win = &self.windows[wid];
+                let (cx0, cy0, cx1, cy1) = (
+                    win.x + win.w - CLOSE_W,
+                    win.y,
+                    win.x + win.w,
+                    win.y + TITLE_H as i32,
+                );
+                if px >= cx0 && px < cx1 && py >= cy0 && py < cy1 {
+                    let _ = self.close(wid);
+                    self.drag = None;
+                    return PtrAction::None;
+                }
+            }
+            // A click on any part of a window raises + focuses it.
+            self.raise(wid);
+            let edges = self.resize_edges(wid, px, py);
+            let win = &self.windows[wid];
+            let in_title = py < win.y + TITLE_H as i32;
+            if which == 1 {
+                // Edges beat the title bar (the top grip is inside it).
+                if edges != 0 {
+                    self.drag = Some(Drag {
+                        wid,
+                        mode: DragMode::Resize { edges },
+                        grab: (px, py),
+                        start: (win.x, win.y, win.w, win.h),
+                    });
+                    return PtrAction::None;
+                }
+                if in_title {
+                    self.drag = Some(Drag {
+                        wid,
+                        mode: DragMode::Move,
+                        grab: (px - win.x, py - win.y),
+                        start: (win.x, win.y, win.w, win.h),
+                    });
+                    return PtrAction::None;
+                }
+            }
+            self.drag = None;
+            let win = &self.windows[wid];
+            let by = win.y + TITLE_H as i32;
+            if win.want_ptr && py >= by && py < win.y + win.h {
+                PtrAction::Deliver {
+                    wid,
+                    x: px - win.x,
+                    y: py - by,
+                }
+            } else {
+                PtrAction::None
+            }
+        } else {
+            // Any release ends a drag (only left starts one).
+            if which == 1 {
+                self.drag = None;
+            }
+            // Deliver releases too, so clients see click/release pairs.
+            if let Some(wid) = self.window_at(px, py) {
+                let win = &self.windows[wid];
+                let by = win.y + TITLE_H as i32;
+                if win.want_ptr && py >= by && py < win.y + win.h {
+                    return PtrAction::Deliver {
+                        wid,
+                        x: px - win.x,
+                        y: py - by,
+                    };
+                }
+            }
+            PtrAction::None
+        }
+    }
+
+    /// Consume the waiter for `wid` when the window wants pointer events,
+    /// returning the endpoint to deliver the WS_PTR to.
+    pub fn route_ptr(&mut self, wid: usize) -> Option<i32> {
+        if self.waiter.0 >= 0 && self.waiter.1 == wid && self.windows[wid].want_ptr {
+            let ep = self.waiter.0;
+            self.waiter = (-1, usize::MAX);
+            Some(ep)
+        } else {
+            None
+        }
     }
 }
 
@@ -268,6 +592,17 @@ static mut WS_KBD_FD: i32 = -1;
 static mut WS_SHIFT: bool = false;
 #[cfg(target_os = "minix")]
 static mut WS_CTRL: bool = false;
+/// Held mouse-button mask for WS_PTR deliveries (bit 0 = left, …).
+#[cfg(target_os = "minix")]
+static mut WS_BUTTONS: u8 = 0;
+/// Pointer overlay: the desktop pixels under the pointer, captured when
+/// it was drawn, so a plain move can repair the vacated area without a
+/// full desktop redraw. `WS_PTR_POS` is where the underlay was captured
+/// (`None` before the first draw).
+#[cfg(target_os = "minix")]
+static mut WS_PTR_UNDERLAY: [u32; POINTER_CELLS] = [0; POINTER_CELLS];
+#[cfg(target_os = "minix")]
+static mut WS_PTR_POS: Option<(usize, usize)> = None;
 
 #[cfg(target_os = "minix")]
 fn put_pixel(fb: u64, x: usize, y: usize, color: u32) {
@@ -277,6 +612,95 @@ fn put_pixel(fb: u64, x: usize, y: usize, color: u32) {
             core::ptr::write_volatile((fb + off) as *mut u32, color);
         }
     }
+}
+
+#[cfg(target_os = "minix")]
+fn read_pixel(fb: u64, x: usize, y: usize) -> u32 {
+    if x < XRES && y < YRES {
+        let off = (y * PITCH + x * 4) as u64;
+        unsafe { core::ptr::read_volatile((fb + off) as *const u32) }
+    } else {
+        0
+    }
+}
+
+/// Draw the pointer arrow bitmap at (px, py).
+#[cfg(target_os = "minix")]
+fn draw_pointer(fb: u64, px: usize, py: usize) {
+    for r in 0..POINTER_H {
+        let bits = POINTER_BITMAP[r];
+        for c in 0..POINTER_W {
+            if bits & (0x80 >> c) != 0 {
+                put_pixel(fb, px + c, py + r, COLOR_POINTER);
+            }
+        }
+    }
+}
+
+/// Push the framebuffer to the display (FBIOFLUSH) directly to the fb
+/// server, bypassing VFS: VFS is single-worker and the shell's blocking
+/// console read holds it hostage, so a /dev/fb ioctl would block the
+/// redraw until console input arrives. FBIOFLUSH carries no arg struct,
+/// so the CDEV_IOCTL travels with no grant; it is a no-op for VGA-style
+/// backends (bochs-display) and pushes the frame on virtio-gpu.
+#[cfg(target_os = "minix")]
+fn fb_flush() {
+    let mut msg = Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_IOCTL as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    // CDEV_IOCTL wire layout (m2 fields): minor, request, grant, user,
+    // flags, id.
+    msg.m_payload.m2.m2i1 = 0; // minor
+    msg.m_payload.m2.m2i2 = minix_std::fs::FBIOFLUSH as i32; // request
+    msg.m_payload.m2.m2i3 = 0; // grant (none — no arg struct)
+    msg.m_payload.m2.m2l1 = 0; // user endpoint (unused)
+    msg.m_payload.m2.m2l2 = 0; // flags
+    msg.m_payload.m2.m2l3 = 0; // id
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::FB_PROC_NR as u64,
+            &mut msg as *mut Message as u64,
+        )
+    };
+}
+
+/// Repaint the pointer after a plain move (no drag): restore the pixels
+/// the pointer vacated (the underlay captured when it was drawn), then
+/// capture the new position's desktop and draw the pointer there. The
+/// desktop content doesn't change during a move, so no full redraw is
+/// needed — a full redraw per PS/2 packet (~100–200/s) would saturate
+/// the emulated CPU.
+#[cfg(target_os = "minix")]
+fn pointer_overlay_move() {
+    let fb = unsafe { WS_FB };
+    let state = unsafe { &*core::ptr::addr_of!(WS_STATE) };
+    let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
+    unsafe {
+        // Repair the area the pointer left: write back the desktop that
+        // was underneath it.
+        let pos = WS_PTR_POS;
+        if let Some((ox, oy)) = pos {
+            for i in 0..POINTER_CELLS {
+                put_pixel(
+                    fb,
+                    ox + i % POINTER_W,
+                    oy + i / POINTER_W,
+                    WS_PTR_UNDERLAY[i],
+                );
+            }
+        }
+        // Capture what the pointer is about to cover, then remember where.
+        for i in 0..POINTER_CELLS {
+            WS_PTR_UNDERLAY[i] = read_pixel(fb, px + i % POINTER_W, py + i / POINTER_W);
+        }
+        WS_PTR_POS = Some((px, py));
+    }
+    draw_pointer(fb, px, py);
+    // virtio-gpu is explicit-flush: push the change to the display.
+    fb_flush();
 }
 
 #[cfg(target_os = "minix")]
@@ -310,12 +734,14 @@ fn draw_text(fb: u64, x: usize, y: usize, s: &[u8], fg: u32, bg: u32) {
     }
 }
 
-/// Redraw the whole desktop: background, then windows in creation order.
+/// Redraw the whole desktop: background, then windows in z-order, then
+/// the mouse pointer on top.
 #[cfg(target_os = "minix")]
 fn redraw(fb: u64) {
     fill_rect(fb, 0, 0, XRES, YRES, COLOR_DESKTOP);
     let state = unsafe { &*core::ptr::addr_of!(WS_STATE) };
-    for (i, win) in state.windows.iter().enumerate() {
+    for &i in &state.zorder[..state.nz] {
+        let win = &state.windows[i];
         if !win.used {
             continue;
         }
@@ -325,18 +751,19 @@ fn redraw(fb: u64) {
         let body_h = h - TITLE_H;
         // Body background.
         fill_rect(fb, x, body_y, x + w, body_y + body_h, COLOR_BODY);
-        // Filled rects (body-local).
+        // Filled rects (body-local, clamped to the body so a shrunken
+        // window's stale rects don't spill onto the neighbor).
         for r in win.rects[..win.nrects].iter() {
-            fill_rect(
-                fb,
-                x + r.x0 as usize,
-                body_y + r.y0 as usize,
-                x + r.x1 as usize,
-                body_y + r.y1 as usize,
-                r.color,
-            );
+            let x0 = (x + r.x0 as usize).min(x + w);
+            let y0 = (body_y + r.y0 as usize).min(body_y + body_h);
+            let x1 = (x + r.x1 as usize).min(x + w);
+            let y1 = (body_y + r.y1 as usize).min(body_y + body_h);
+            if x1 > x0 && y1 > y0 {
+                fill_rect(fb, x0, y0, x1, y1, r.color);
+            }
         }
-        // Title bar chrome + title text.
+        // Title bar chrome + title text (clamped so it never runs under
+        // the close button).
         let title_color = if state.focus == i {
             COLOR_TITLE_FOCUSED
         } else {
@@ -348,14 +775,21 @@ fn redraw(fb: u64) {
             .iter()
             .position(|&c| c == 0)
             .unwrap_or(win.title.len());
+        let max_chars = (w.saturating_sub(CLOSE_W as usize + 12)) / 8;
         draw_text(
             fb,
             x + 4,
             y,
-            &win.title[..title_len],
+            &win.title[..title_len.min(max_chars)],
             COLOR_TEXT,
             title_color,
         );
+        // Close button: an X at the title's right end.
+        let cx = x + w - CLOSE_W as usize;
+        for i in 0..10usize {
+            put_pixel(fb, cx + 2 + i, y + 3 + i, COLOR_TEXT);
+            put_pixel(fb, cx + 2 + i, y + 13 - i, COLOR_TEXT);
+        }
         // Body text.
         let (cols, rows) = (win.cols(), win.rows());
         for r in 0..rows {
@@ -381,13 +815,20 @@ fn redraw(fb: u64) {
             }
         }
     }
+    // Mouse pointer on top of everything. Capture the underlay (the
+    // desktop the pointer covers) so a later plain move can repair this
+    // area without a full redraw.
+    let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
+    unsafe {
+        for i in 0..POINTER_CELLS {
+            WS_PTR_UNDERLAY[i] = read_pixel(fb, px + i % POINTER_W, py + i / POINTER_W);
+        }
+        WS_PTR_POS = Some((px, py));
+    }
+    draw_pointer(fb, px, py);
     // virtio-gpu is explicit-flush: push the new frame to the display.
     // No-op for VGA-style backends.
-    let fd = unsafe { WS_FB_FD };
-    if fd >= 0 {
-        let _ =
-            unsafe { minix_std::fs::ioctl(fd, minix_std::fs::FBIOFLUSH, core::ptr::null_mut()) };
-    }
+    fb_flush();
 }
 
 /// HID keyboard usage → ASCII (unshifted).
@@ -469,93 +910,218 @@ fn ctrl_map(ch: u8) -> u8 {
 fn is_arrow(code: u16) -> bool {
     matches!(code, 0x4F..=0x52)
 }
-/// Only drains when the focused window has a blocked WS_INPUT client —
-/// otherwise the events stay queued for other consumers (e.g. keytest).
+/// Route one keyboard event; returns true when a key was delivered to a
+/// waiter (the caller stops draining so any further events in the batch
+/// stay queued for the next WS_INPUT registration's catch-up drain).
 #[cfg(target_os = "minix")]
-fn drain_kbd() {
+fn handle_key(code: u16, press: i32) -> bool {
+    // Modifiers: track the held state on both press and release.
+    match code {
+        0x00E0 | 0x00E4 => {
+            unsafe { WS_CTRL = press == 1 };
+            return false;
+        }
+        0x00E1 | 0x00E5 => {
+            unsafe { WS_SHIFT = press == 1 };
+            return false;
+        }
+        _ => {}
+    }
+    if press != 1 {
+        return false;
+    }
+    let mut ch = match usage_to_ascii(code) {
+        Some(c) => c,
+        None if is_arrow(code) => 0, // arrows route with no char
+        None => return false,
+    };
+    if ch.is_ascii_alphabetic() {
+        if unsafe { WS_SHIFT } {
+            ch = ch.to_ascii_uppercase();
+        }
+    } else if unsafe { WS_SHIFT } {
+        ch = shifted(ch);
+    }
+    if unsafe { WS_CTRL } {
+        ch = ctrl_map(ch);
+    }
     let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
-    if state.waiter.0 < 0 || state.waiter.1 != state.focus {
-        return;
+    if let Some((ep, _)) = state.route_key(ch) {
+        let mut key_msg = Message {
+            m_source: 0,
+            m_type: WS_KEY as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // The key char rides in m2l1 (minix_std::wserver::ws_key_char)
+        // and the HID usage in m2l2 (ws_key_usage) so clients can
+        // distinguish special keys (arrows) from plain chars.
+        unsafe {
+            key_msg.m_payload.m2.m2l1 = ch as i64;
+            key_msg.m_payload.m2.m2l2 = code as i64;
+            minix_rt::syscall2(
+                minix_rt::SEND_CALL,
+                ep as u64,
+                &mut key_msg as *mut Message as u64,
+            );
+        }
+        return true;
     }
-    let mut buf = [0u8; 16];
+    false
+}
+
+/// Drain decoded input events (keys + mouse). Keyboard events route to
+/// the focused window's waiter when one is blocked; mouse events always
+/// move the pointer / drive chrome and may deliver WS_PTR. Returns true
+/// when the desktop changed (needs a redraw).
+///
+/// Events are fetched directly from the input server (the consumer
+/// protocol's event channel), not through a `/dev/kbd` VFS read: VFS is
+/// single-worker, so the shell's blocking console read holds it hostage
+/// and a /dev/kbd read would sit queued until console input arrives.
+/// The input server handles CDEV_READ by popping its event ring into the
+/// reply payload; the reply status is the byte count (EAGAIN when empty).
+///
+/// The wserver consumes the whole stream unconditionally now (it cannot
+/// leave mouse events queued), so a key pressed with no waiter is dropped
+/// instead of staying for another /dev/kbd reader (keytest).
+#[cfg(target_os = "minix")]
+fn drain_input() -> bool {
+    let mut changed = false;
     loop {
-        let n = unsafe { minix_rt::read(WS_KBD_FD, &mut buf) };
-        if n < 8 {
+        let mut msg = Message {
+            m_source: 0,
+            m_type: arch_common::com::CDEV_READ as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        // Standard CDEV_READ wire layout (m2 fields): minor, flags, grant,
+        // position, count.
+        msg.m_payload.m2.m2i1 = 0; // minor
+        msg.m_payload.m2.m2i2 = 0; // flags
+        msg.m_payload.m2.m2i3 = 0; // grant (unused)
+        msg.m_payload.m2.m2l1 = 0; // position
+        msg.m_payload.m2.m2l2 = 16; // count
+        let _ = unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                arch_common::com::INPUT_PROC_NR as u64,
+                &mut msg as *mut Message as u64,
+            )
+        };
+        // The SENDREC return is the sender (INPUT); the reply status (byte
+        // count or EAGAIN) is in m_type. A stray notification delivered as
+        // the reply (NOTIFY_MESSAGE = 0x1000) is out of range — bail; the
+        // main loop recovers the collided event reply when it arrives.
+        let n = msg.m_type;
+        if n < 8 || n > 48 {
             break;
         }
-        let n = n as usize;
-        let mut off = 0;
-        let mut routed = false;
-        while off + 8 <= n {
-            let page = u16::from_le_bytes([buf[off], buf[off + 1]]);
-            let code = u16::from_le_bytes([buf[off + 2], buf[off + 3]]);
-            let press =
-                i32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]);
-            off += 8;
-            if page != KEY_PAGE {
-                continue;
-            }
-            // Modifiers: track the held state on both press and release.
-            match code {
-                0x00E0 | 0x00E4 => {
-                    unsafe { WS_CTRL = press == 1 };
-                    continue;
-                }
-                0x00E1 | 0x00E5 => {
-                    unsafe { WS_SHIFT = press == 1 };
-                    continue;
-                }
-                _ => {}
-            }
-            if press != 1 {
-                continue;
-            }
-            let mut ch = match usage_to_ascii(code) {
-                Some(c) => c,
-                None if is_arrow(code) => 0, // arrows route with no char
-                None => continue,
-            };
-            if ch.is_ascii_alphabetic() {
-                if unsafe { WS_SHIFT } {
-                    ch = ch.to_ascii_uppercase();
-                }
-            } else if unsafe { WS_SHIFT } {
-                ch = shifted(ch);
-            }
-            if unsafe { WS_CTRL } {
-                ch = ctrl_map(ch);
-            }
-            let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
-            if let Some((ep, _)) = state.route_key(ch) {
-                let mut key_msg = Message {
-                    m_source: 0,
-                    m_type: WS_KEY as i32,
-                    m_payload: unsafe { core::mem::zeroed() },
-                };
-                // The key char rides in m2l1 (minix_std::wserver::ws_key_char)
-                // and the HID usage in m2l2 (ws_key_usage) so clients can
-                // distinguish special keys (arrows) from plain chars.
-                unsafe {
-                    key_msg.m_payload.m2.m2l1 = ch as i64;
-                    key_msg.m_payload.m2.m2l2 = code as i64;
-                    minix_rt::syscall2(
-                        minix_rt::SEND_CALL,
-                        ep as u64,
-                        &mut key_msg as *mut Message as u64,
-                    );
-                }
-                // route_key consumed the waiter; stop reading so any
-                // further events in this batch stay queued for the next
-                // WS_INPUT registration (the catch-up drain) instead of
-                // being swallowed.
-                routed = true;
-                break;
-            }
-        }
-        if routed {
-            break;
+        // SAFETY: the input server filled the reply payload with events.
+        let batch = unsafe { &msg.m_payload.raw[..n as usize] };
+        if process_event_batch(batch) {
+            changed = true;
         }
     }
+    changed
+}
+
+/// Process one batch of decoded input events (8-byte {page, code, press}
+/// records). Returns true when the desktop changed (needs a redraw). A key
+/// that consumed the WS_INPUT waiter stops the batch: the rest are already
+/// popped from the input ring, and no second waiter can be served by one
+/// batch anyway.
+#[cfg(target_os = "minix")]
+fn process_event_batch(data: &[u8]) -> bool {
+    let mut changed = false;
+    let mut off = 0;
+    while off + 8 <= data.len() {
+        let page = u16::from_le_bytes([data[off], data[off + 1]]);
+        let code = u16::from_le_bytes([data[off + 2], data[off + 3]]);
+        let press =
+            i32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
+        off += 8;
+        match page {
+            KEY_PAGE => {
+                if handle_key(code, press) {
+                    return changed;
+                }
+            }
+            POINTER_PAGE_GD => {
+                let dx = if code == POINTER_GD_X { press } else { 0 };
+                let dy = if code == POINTER_GD_Y { press } else { 0 };
+                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
+                let dragging = state.drag.is_some();
+                if state.pointer_rel(dx, dy) {
+                    if dragging {
+                        // The drag moved/resized a window — full redraw.
+                        changed = true;
+                    } else {
+                        // Plain move: repaint just the pointer overlay.
+                        pointer_overlay_move();
+                    }
+                }
+            }
+            POINTER_PAGE_ABS => {
+                // Absolute tablet position: QEMU normalizes input to
+                // 0..0x7FFF; scale to the framebuffer and apply as a delta
+                // from the current pointer so the drag/resize logic (which
+                // anchors on the pointer position) works unchanged. The X
+                // and Y arrive as separate events; each lands immediately.
+                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
+                let (dx, dy) = if code == POINTER_GD_X {
+                    (press * XRES as i32 / 32768 - state.pointer.0, 0)
+                } else if code == POINTER_GD_Y {
+                    (0, press * YRES as i32 / 32768 - state.pointer.1)
+                } else {
+                    (0, 0)
+                };
+                let dragging = state.drag.is_some();
+                if state.pointer_rel(dx, dy) {
+                    if dragging {
+                        changed = true;
+                    } else {
+                        pointer_overlay_move();
+                    }
+                }
+            }
+            POINTER_PAGE_BTN => {
+                let which = (code - POINTER_BTN_1 + 1) as u8;
+                if !(1..=3).contains(&which) {
+                    continue;
+                }
+                let down = press == 1;
+                let bit = 1u8 << (which - 1);
+                if down {
+                    unsafe { WS_BUTTONS |= bit };
+                } else {
+                    unsafe { WS_BUTTONS &= !bit };
+                }
+                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
+                let action = state.pointer_button(which, down);
+                changed = true;
+                if let PtrAction::Deliver { wid, x, y } = action {
+                    if let Some(ep) = state.route_ptr(wid) {
+                        let mut ptr_msg = Message {
+                            m_source: 0,
+                            m_type: WS_PTR as i32,
+                            m_payload: unsafe { core::mem::zeroed() },
+                        };
+                        unsafe {
+                            ptr_msg.m_payload.m2.m2i1 = WS_BUTTONS as i32;
+                            ptr_msg.m_payload.m2.m2i2 = x;
+                            ptr_msg.m_payload.m2.m2i3 = y;
+                            minix_rt::syscall2(
+                                minix_rt::SEND_CALL,
+                                ep as u64,
+                                &mut ptr_msg as *mut Message as u64,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 /// Handle one client request; returns `Some(status)` to reply, or `None`
@@ -657,8 +1223,23 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             state.waiter = (src, wid);
             // A key may already be queued (the input server notifies on
             // IRQ, not on waiter registration); catch it immediately.
-            drain_kbd();
+            if drain_input() {
+                redraw(unsafe { WS_FB });
+            }
             None
+        }
+        WS_PTRMODE => {
+            let wid = m.m2i1 as usize;
+            let on = m.m2i2 != 0;
+            let win = match state.windows.get_mut(wid) {
+                Some(w) => w,
+                None => return Some(-9), // EBADF
+            };
+            if !win.used {
+                return Some(-9); // EBADF
+            }
+            win.want_ptr = on;
+            Some(0)
         }
         _ => Some(-38), // ENOSYS
     }
@@ -783,11 +1364,32 @@ pub fn wserver_main() {
             }
             let src_ep = src as i32;
 
-            // Input notification: the keyboard has queued events.
+            // Input notification: the keyboard/mouse has queued events.
             let is_notify =
                 (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
             if is_notify && src_ep == arch_common::com::INPUT_PROC_NR {
-                drain_kbd();
+                if drain_input() {
+                    redraw(unsafe { WS_FB });
+                }
+                continue;
+            }
+
+            // Any other message from the input server is an event fetch
+            // reply that arrived outside drain_input: the SENDNB wakeup can
+            // collide with the fetch SENDREC (both come from INPUT), so the
+            // fetch completes with the notification and the real reply lands
+            // here. Process the events instead of replying ENOSYS — a stray
+            // reply to INPUT would start an ENOSYS ping-pong and drop them.
+            if src_ep == arch_common::com::INPUT_PROC_NR {
+                let n = msg.m_type;
+                if (8..=48).contains(&n) {
+                    // SAFETY: the input server filled the reply payload
+                    // with events.
+                    let batch = unsafe { &msg.m_payload.raw[..n as usize] };
+                    if process_event_batch(batch) {
+                        redraw(unsafe { WS_FB });
+                    }
+                }
                 continue;
             }
 
@@ -969,5 +1571,155 @@ mod tests {
         assert!(usage_to_ascii(0x00E1).is_none());
         assert_eq!(shifted(b'1'), b'!');
         assert_eq!(shifted(b'.'), b'>');
+    }
+
+    #[test]
+    fn test_zorder_create_raise_close() {
+        let mut st = WsState::new();
+        let a = st.create(0, 0, 320, 200).unwrap();
+        let b = st.create(200, 120, 320, 200).unwrap();
+        // Creation order is the stacking order; the newest is on top.
+        assert_eq!(&st.zorder[..st.nz], &[a, b]);
+        assert_eq!(st.focus, b);
+        // Raising the older window puts it on top and focuses it.
+        st.raise(a);
+        assert_eq!(&st.zorder[..st.nz], &[b, a]);
+        assert_eq!(st.focus, a);
+        // Closing the top falls back to the remaining window.
+        st.close(a).unwrap();
+        assert_eq!(&st.zorder[..st.nz], &[b]);
+        assert_eq!(st.focus, b);
+    }
+
+    #[test]
+    fn test_window_at_topmost() {
+        let mut st = WsState::new();
+        let a = st.create(100, 100, 320, 200).unwrap(); // 100..420, 100..300
+        let b = st.create(200, 120, 320, 200).unwrap(); // 200..520, 120..320
+        // In both windows → the topmost (b).
+        assert_eq!(st.window_at(250, 200), Some(b));
+        // Only in a.
+        assert_eq!(st.window_at(150, 130), Some(a));
+        // On the desktop.
+        assert_eq!(st.window_at(10, 10), None);
+        // After raising a, it wins the overlap.
+        st.raise(a);
+        assert_eq!(st.window_at(250, 200), Some(a));
+    }
+
+    #[test]
+    fn test_pointer_title_drag_moves_window() {
+        let mut st = WsState::new();
+        let wid = st.create(100, 100, 320, 200).unwrap();
+        // Move the pointer to a title-bar point away from the edges
+        // (y=110 is in the title but below the 4px N grip).
+        st.pointer_rel(-262, -274); // (512, 384) → (250, 110)
+        assert!(matches!(st.pointer_button(1, true), PtrAction::None));
+        assert!(matches!(
+            st.drag,
+            Some(Drag {
+                mode: DragMode::Move,
+                ..
+            })
+        ));
+        st.pointer_rel(30, 20); // pointer → (280, 130); grab was (150, 10)
+        assert_eq!(st.windows[wid].x, 130);
+        assert_eq!(st.windows[wid].y, 120);
+        // Release ends the drag; further moves don't move the window.
+        assert!(matches!(st.pointer_button(1, false), PtrAction::None));
+        assert!(st.drag.is_none());
+        let (x, y) = (st.windows[wid].x, st.windows[wid].y);
+        st.pointer_rel(10, 0);
+        assert_eq!((st.windows[wid].x, st.windows[wid].y), (x, y));
+    }
+
+    #[test]
+    fn test_pointer_resize_snaps_to_grid() {
+        let mut st = WsState::new();
+        let wid = st.create(100, 100, 320, 200).unwrap();
+        // Grab the SE corner (x=419 is within 4px of x+w, y=299 of y+h).
+        st.pointer_rel(-93, -85); // (512, 384) → (419, 299)
+        assert!(matches!(st.pointer_button(1, true), PtrAction::None));
+        assert!(matches!(
+            st.drag,
+            Some(Drag { mode: DragMode::Resize { edges }, .. }) if edges & (EDGE_E | EDGE_S) != 0
+        ));
+        st.pointer_rel(21, 12); // pointer → (440, 311)
+        // w = 440-100 = 340 → snap 336; h = 311-100 = 211 → 192+16 = 208.
+        assert_eq!(st.windows[wid].w, 336);
+        assert_eq!(st.windows[wid].h, 208);
+        // Origin stays put for an E|S resize.
+        assert_eq!((st.windows[wid].x, st.windows[wid].y), (100, 100));
+    }
+
+    #[test]
+    fn test_pointer_close_button_closes() {
+        let mut st = WsState::new();
+        let wid = st.create(100, 100, 320, 200).unwrap();
+        // Close button: x 404..420, y 100..116.
+        st.pointer_rel(-102, -276); // (512, 384) → (410, 108)
+        assert!(matches!(st.pointer_button(1, true), PtrAction::None));
+        assert!(!st.windows[wid].used);
+        assert_eq!(st.focus, MAX_WINDOWS);
+    }
+
+    #[test]
+    fn test_pointer_body_delivers_to_ptr_client() {
+        let mut st = WsState::new();
+        let wid = st.create(100, 100, 320, 200).unwrap();
+        st.windows[wid].want_ptr = true;
+        st.waiter = (7, wid);
+        // Body point (200, 200): win-local (100, 84).
+        st.pointer_rel(-312, -184); // (512, 384) → (200, 200)
+        match st.pointer_button(1, true) {
+            PtrAction::Deliver { wid: w, x, y } => {
+                assert_eq!(w, wid);
+                assert_eq!(x, 100);
+                assert_eq!(y, 84);
+            }
+            PtrAction::None => panic!("expected a pointer delivery"),
+        }
+        // Release delivers too (click/release pairs).
+        assert!(matches!(
+            st.pointer_button(1, false),
+            PtrAction::Deliver { .. }
+        ));
+    }
+
+    #[test]
+    fn test_pointer_body_ignored_without_ptrmode() {
+        let mut st = WsState::new();
+        let wid = st.create(100, 100, 320, 200).unwrap();
+        assert!(!st.windows[wid].want_ptr);
+        st.pointer_rel(-312, -184); // body point
+        assert!(matches!(st.pointer_button(1, true), PtrAction::None));
+        assert!(matches!(st.pointer_button(1, false), PtrAction::None));
+    }
+
+    #[test]
+    fn test_route_ptr_requires_ptrmode() {
+        let mut st = WsState::new();
+        let wid = st.create(0, 0, 320, 200).unwrap();
+        st.waiter = (9, wid);
+        // Not opted in → the waiter stays.
+        assert!(st.route_ptr(wid).is_none());
+        assert_eq!(st.waiter, (9, wid));
+        st.windows[wid].want_ptr = true;
+        assert_eq!(st.route_ptr(wid), Some(9));
+        assert_eq!(st.waiter, (-1, usize::MAX));
+    }
+
+    #[test]
+    fn test_pointer_move_without_drag_just_moves() {
+        let mut st = WsState::new();
+        assert_eq!(st.pointer, (512, 384));
+        // A plain move changes the desktop (the pointer moved).
+        assert!(st.pointer_rel(10, -5));
+        assert_eq!(st.pointer, (522, 379));
+        // A zero delta reports no change.
+        assert!(!st.pointer_rel(0, 0));
+        // Clamped to the framebuffer.
+        st.pointer_rel(-5000, 5000);
+        assert_eq!(st.pointer, (0, YRES as i32 - 1));
     }
 }

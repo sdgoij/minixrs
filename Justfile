@@ -121,7 +121,7 @@ run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
 run-x86 memory: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
 run-riscv64 memory: build-riscv64 mkfs-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
@@ -133,13 +133,19 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # The SDL window shows the framebuffer and routes host keys to the guest
 # keyboard (PS/2 on x86, virtio-keyboard on riscv/aarch64), so the
 # wserver desktop is interactive: click the window and type into the
-# focused wdemo window while the shell runs on the terminal.
+# focused wdemo window while the shell runs on the terminal. The pointer
+# is a virtio-tablet (absolute): the guest cursor tracks the host cursor
+# 1:1 and works whether or not the SDL grab is held — with a relative
+# virtio-mouse, releasing the grab (Alt+Ctrl+G or leaving the window)
+# stops guest motion until a re-grab takes. The display gets an id
+# because QEMU resolves `display=` (and QMP input-send-event device
+# names) by id.
 
 desktop target="x86" memory="256M":
     @just desktop-{{target}} {{memory}}
 
 desktop-x86 memory="256M": build-x86 mkfs-x86
-    qemu-system-x86_64 -display sdl -serial stdio -m {{memory}} -no-reboot -vga none -device bochs-display -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    qemu-system-x86_64 -display sdl -serial stdio -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
 desktop-riscv64 memory="256M": build-riscv64 mkfs-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -display sdl -serial stdio -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64

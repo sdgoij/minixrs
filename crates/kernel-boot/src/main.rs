@@ -449,6 +449,25 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
             );
         }
         arch_x86_64::apic::unmask_kbd_irq();
+
+        // 8c. PS/2 mouse (IRQ 12). Same shape as the keyboard: the input
+        // server registers an IRQ hook via SYS_IRQCTL and is notified on
+        // mouse packets; the slave-PIC line is unmasked here.
+        unsafe extern "C" fn mouse_callback() {
+            unsafe { kernel::interrupt::irq_handle(12) };
+        }
+        arch_x86_64::apic::set_mouse_isr_handler(mouse_callback);
+        #[cfg(target_os = "minix")]
+        {
+            let mouse_handler_addr = arch_x86_64::apic::mouse_isr_entry as *const () as u64;
+            (*arch_x86_64::idt::IDT.get()).set_handler(
+                arch_x86_64::interrupt::irq_vector(12) as usize,
+                mouse_handler_addr,
+                0, // IST
+                0, // DPL (kernel only)
+            );
+        }
+        arch_x86_64::apic::unmask_mouse_irq();
     }
 
     // 9. Initialize the wall clock: read the CMOS RTC and store the

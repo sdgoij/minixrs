@@ -929,10 +929,6 @@ pub unsafe extern "C" fn timer_isr_entry() {
         "test   rax, rax",
         "cmovz  rax, r15",             // rax = next if runnable, else current
         "mov    r12, rax",             // r12 = effective next (callee-saved)
-        // Deliver any staged message to the picked process before switching
-        // (mirrors the RISC-V/AArch64 timer callbacks). Without this a
-        // picked process resumes with the message stuck in p_delivermsg
-        // until its next syscall return.
         "cmp    rax, r15",
         "je     4f",                   // switching to the same process: skip
         "mov    rdi, rax",
@@ -1309,6 +1305,153 @@ pub unsafe fn unmask_kbd_irq() {
     unsafe {
         let mask = asm::inb(crate::interrupt::PIC_MASTER_DATA);
         asm::outb(crate::interrupt::PIC_MASTER_DATA, mask & !0x02);
+    }
+}
+
+// PS/2 mouse (IRQ 12) interrupt handler
+
+/// Function pointer type for the mouse interrupt handler.
+pub type MouseIsrFn = unsafe extern "C" fn();
+
+struct MouseIsrCell(UnsafeCell<Option<MouseIsrFn>>);
+unsafe impl Sync for MouseIsrCell {}
+impl MouseIsrCell {
+    const fn new(val: Option<MouseIsrFn>) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+    fn get(&self) -> *mut Option<MouseIsrFn> {
+        self.0.get()
+    }
+}
+
+/// Registered mouse ISR handler. Called by the assembly trampoline.
+#[used]
+static MOUSE_ISR_HANDLER: MouseIsrCell = MouseIsrCell::new(None);
+
+/// Register the function to call on each PS/2 mouse interrupt.
+///
+/// # Safety
+///
+/// Must be called before unmasking IRQ 12.
+pub unsafe fn set_mouse_isr_handler(handler: MouseIsrFn) {
+    unsafe {
+        core::ptr::write(MOUSE_ISR_HANDLER.get(), Some(handler));
+    }
+}
+
+/// Assembly entry point for the PS/2 mouse interrupt (IRQ 12 → vector
+/// 0x2C). Same shape as [`kbd_isr_entry`] — calls the registered
+/// `MOUSE_ISR_HANDLER`, sends EOI to the slave PIC then the master PIC
+/// (IRQ 12 is a slave line; the master needs the cascade EOI too), and
+/// splits on the interrupted mode (kernel: restore + ret; user: context
+/// switch).
+///
+/// # Safety
+///
+/// Must be installed in the IDT at vector 0x2C with DPL 0.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+#[cfg(target_os = "minix")]
+pub unsafe extern "C" fn mouse_isr_entry() {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rbx",
+        "push rbp",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+
+        // Call the registered C handler.
+        "lea    rax, [rip + {handler}]",
+        "mov    rax, [rax]",
+        "test   rax, rax",
+        "jz     3f",
+        "call   rax",
+        "3:",
+
+        // Send EOI to slave PIC (IRQ 8-15) then master (cascade line).
+        "mov    al, 0x20",
+        "out    0xA0, al",
+        "out    0x20, al",
+
+        // Check CS.RPL with GPRs still pushed — CS is at [rsp+128]
+        // (15 pushes = 120 bytes; CS is the 2nd slot of the CPU frame).
+        "mov    rdx, [rsp + 128]",
+        "and    rdx, 3",
+        "cmp    rdx, 0",
+        "je     1f",                    // kernel mode (RPL=0)
+
+        // User mode — context-switch point, same as the timer ISR.
+        "mov    rdi, rsp",              // frame = ISR frame (15 GPRs + CPU frame)
+        "call   save_timer_context",   // rax = current proc
+        "add    rsp, 160",             // discard 15 GPRs + 40-byte CPU frame
+        "test   rax, rax",
+        "jz     2f",                    // no current proc: halt
+        "mov    r15, rax",             // r15 = current (callee-saved)
+        "call   pick_proc_raw",        // rax = next runnable or null
+        "test   rax, rax",
+        "cmovz  rax, r15",             // rax = next if runnable, else current
+        "mov    r12, rax",             // r12 = effective next (callee-saved)
+        "cmp    rax, r15",
+        "je     4f",                   // switching to the same process: skip
+        "mov    rdi, rax",
+        "call   isr_deliver_msg",
+        "4:",
+        "mov    rdi, r12",
+        "call   set_cpulocal_proc_asm",
+        "mov    rdi, rax",
+        "call   restore",              // never returns
+        "2:",
+        "cli",
+        "hlt",
+        "jmp    2b",
+
+        "1:",
+        "pop    r15",
+        "pop    r14",
+        "pop    r13",
+        "pop    r12",
+        "pop    r11",
+        "pop    r10",
+        "pop    r9",
+        "pop    r8",
+        "pop    rdi",
+        "pop    rsi",
+        "pop    rbp",
+        "pop    rbx",
+        "pop    rdx",
+        "pop    rcx",
+        "pop    rax",
+        "and    qword ptr [rsp + 16], 0xfffffffffffffdff",
+        "push   qword ptr [rsp + 16]",
+        "popfq",
+        "mov    rsp, [rsp + 24]",
+        "push   qword ptr [rsp - 40]",
+        "ret",
+
+        handler = sym MOUSE_ISR_HANDLER,
+    )
+}
+
+/// Unmask IRQ 12 (the PS/2 mouse, on the slave PIC) at the hardware.
+///
+/// # Safety
+///
+/// Must be called in ring 0 after the IDT entry is installed.
+pub unsafe fn unmask_mouse_irq() {
+    use crate::asm;
+    unsafe {
+        let mask = asm::inb(crate::interrupt::PIC_SLAVE_DATA);
+        asm::outb(crate::interrupt::PIC_SLAVE_DATA, mask & !0x10);
     }
 }
 

@@ -85,6 +85,9 @@ pub unsafe fn run_boot_tests() -> ! {
     // M: Every boot process has a walkable page table
     failures += test_boot_procs_page_tables();
 
+    // N: Mouse wiring — the IRQ-12 hook must notify the input server.
+    failures += test_mouse_irq_notifies_input();
+
     if failures == 0 {
         serial_write("ALL TESTS PASSED\r\n");
         exit_qemu_success();
@@ -104,6 +107,32 @@ fn rdu(msg: *const u8, off: usize) -> u32 {
 }
 
 // A: Liveness
+
+/// The IRQ-12 hook (registered by the input server via SYS_IRQCTL) must
+/// notify the input server when the mouse interrupt fires. Runs the hook
+/// path directly (`irq_handle(12)`, what the mouse ISR calls) and checks
+/// the notification reaches the input server's pending-interrupt state.
+fn test_mouse_irq_notifies_input() -> u32 {
+    unsafe {
+        let rp = kernel::table::proc_addr(arch_common::com::INPUT_PROC_NR);
+        if rp.is_null() {
+            return 1;
+        }
+        let privp = (*rp).p_priv;
+        if privp.is_null() {
+            return 1;
+        }
+        // Clear any stale pending bit for notify_id 2 (register_mouse_irq).
+        (*privp).s_int_pending &= !(1u64 << 2);
+        kernel::interrupt::irq_handle(12);
+        if (*privp).s_int_pending & (1u64 << 2) == 0 {
+            serial_write("  FAIL: mouse IRQ12 notification not pending\r\n");
+            return 1;
+        }
+        serial_write("  OK mouse IRQ12 -> input notification\r\n");
+    }
+    0
+}
 
 fn test_alive(ep: i32, name: &str) -> u32 {
     unsafe {

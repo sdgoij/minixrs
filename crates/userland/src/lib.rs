@@ -695,8 +695,83 @@ fn wdemo_impl(args: &[&str]) -> i32 {
             write_out(b"wdemo: term ok\n");
             0
         }
+        "ptr" => {
+            // Pointer demo: opt into WS_PTR events, mark clicks with a
+            // '+' at the clicked cell and echo the coordinates.
+            let mut msg = ws_create(40, 40, 320, 200, b"Ptr".as_ptr() as u64, 3);
+            if ws_call(&mut msg) != 0 {
+                write_err(b"wdemo: create ptr failed\n");
+                return 1;
+            }
+            let wid = minix_std::wserver::ws_reply_wid(&msg);
+            let mut msg = minix_std::wserver::ws_ptrmode(wid, 1);
+            if ws_call(&mut msg) != 0 {
+                write_err(b"wdemo: ptrmode failed\n");
+                return 1;
+            }
+            ws_puts(wid, 1, 0, b"click the body");
+            let mut msg = ws_flush();
+            ws_call(&mut msg);
+            write_out(b"wdemo: ptr waiting\n");
+
+            // Write `prefix` then the decimal digits of `v` at (row, col);
+            // returns the column after the digits.
+            fn ws_puts_num(wid: i32, row: i32, col: i32, prefix: &[u8], v: i32) -> i32 {
+                let mut c = col;
+                ws_puts(wid, row, c, prefix);
+                c += prefix.len() as i32;
+                if v < 0 {
+                    let mut msg = ws_text(wid, row, c, b'-');
+                    ws_call(&mut msg);
+                    c += 1;
+                }
+                let n = v.unsigned_abs();
+                let mut digits = [0u8; 10];
+                let mut i = 10;
+                let mut d = n;
+                loop {
+                    i -= 1;
+                    digits[i] = b'0' + (d % 10) as u8;
+                    d /= 10;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                while i < 10 {
+                    let mut msg = ws_text(wid, row, c, digits[i]);
+                    ws_call(&mut msg);
+                    c += 1;
+                    i += 1;
+                }
+                c
+            }
+
+            let mut clicks = 0i32;
+            loop {
+                let mut msg = ws_input(wid);
+                if unsafe { minix_std::sendrec(minix_std::WS_PROC_NR, &mut msg) }.is_err() {
+                    return 1;
+                }
+                if ws_reply_status(&msg) == minix_std::wserver::WS_PTR as i32 {
+                    let x = minix_std::wserver::ws_ptr_x(&msg);
+                    let y = minix_std::wserver::ws_ptr_y(&msg);
+                    let (r, c) = (y / 16, x / 8);
+                    if r >= 0 && r < ROWS && c >= 0 && c < COLS {
+                        let mut msg = ws_text(wid, r, c, b'+');
+                        ws_call(&mut msg);
+                    }
+                    let mut col = 0;
+                    col = ws_puts_num(wid, 0, col, b"click ", clicks);
+                    col = ws_puts_num(wid, 0, col, b" at ", x);
+                    ws_puts_num(wid, 0, col, b",", y);
+                    clicks += 1;
+                }
+                let mut msg = ws_flush();
+                ws_call(&mut msg);
+            }
+        }
         _ => {
-            write_err(b"wdemo: usage: wdemo info|term [max_keys]\n");
+            write_err(b"wdemo: usage: wdemo info|term|ptr [max_keys]\n");
             1
         }
     }

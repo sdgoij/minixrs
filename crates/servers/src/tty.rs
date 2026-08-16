@@ -2059,14 +2059,20 @@ pub fn do_read(
 
     // Blocking read: pull one byte at a time from the kernel serial ring
     // and run it through the line discipline until the request completes
-    // or sigchar releases it with EINTR. On riscv/aarch64 the fd-0 read
-    // returns EAGAIN when the ring is empty (the kernel read no longer
-    // busy-waits in kernel mode, which starves the input server); retry
-    // in user mode, where the timer preempts us and other servers run.
+    // or sigchar releases it with EINTR. The fd-0 read returns EAGAIN
+    // when the ring is empty; retry in user mode, but yield first so
+    // other runnable processes (the input server's SYS_SETALARM poll)
+    // get scheduled. A tight spin would hog the run-queue head forever:
+    // boot servers are kernel-scheduled, so the timer renews the quantum
+    // instead of preempting (proc_no_time) and pick_proc keeps returning
+    // the head process.
     loop {
         let mut byte = [0u8; 1];
         let r = minix_rt::read(0, &mut byte);
         if r == EAGAIN as i64 {
+            // Yield the CPU: marks us PREEMPTED, the syscall-return path
+            // re-enqueues at the tail and picks the next runnable server.
+            minix_rt::thread_yield();
             continue;
         }
         if r <= 0 {

@@ -21,7 +21,11 @@ const EVENTQ: usize = 0;
 const STATUSQ: usize = 1;
 
 /// Linux input event types (`linux/input-event-codes.h`).
-const EV_KEY: u16 = 0x01;
+pub const EV_KEY: u16 = 0x01;
+/// Relative axis event (mouse X/Y deltas).
+pub const EV_REL: u16 = 0x02;
+/// Absolute axis event (tablet X/Y positions).
+pub const EV_ABS: u16 = 0x03;
 
 /// `virtio_input_config` selectors.
 const CFG_EV_BITS: u8 = 0x10;
@@ -87,10 +91,11 @@ impl VirtioInput {
         Ok(())
     }
 
-    /// Reap completed events. `f` is called with `(code, value)` for each
-    /// EV_KEY event. Returns the number of events reaped. Each used
+    /// Reap completed events. `f` is called with `(type_, code, value)`
+    /// for every raw event (the caller maps keyboard keycodes and mouse
+    /// axes/buttons). Returns the number of events reaped. Each used
     /// descriptor is immediately re-submitted, so the pool stays armed.
-    pub fn drain<F: FnMut(u16, u32)>(&mut self, mut f: F) -> usize {
+    pub fn drain<F: FnMut(u16, u16, u32)>(&mut self, mut f: F) -> usize {
         let Some(dev) = self.dev.as_mut() else {
             return 0;
         };
@@ -107,9 +112,7 @@ impl VirtioInput {
                         self.ev_bufs[token][7],
                     ]),
                 };
-                if ev.type_ == EV_KEY {
-                    f(ev.code, ev.value);
-                }
+                f(ev.type_, ev.code, ev.value);
             }
             n += 1;
             if token >= EV_BUF_COUNT || submit_event_buf(&self.ev_bufs[token], token, dev).is_err()

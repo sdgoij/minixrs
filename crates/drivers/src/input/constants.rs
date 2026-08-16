@@ -98,6 +98,12 @@ pub const INPUT_PAGE_LED: u16 = 0x0008;
 /// Button page.
 pub const INPUT_PAGE_BUTTON: u16 = 0x0009;
 
+/// Absolute position page (internal, vendor-defined area). Carries
+/// screen-space X/Y coordinates (QEMU normalizes absolute input to
+/// 0..0x7FFF); the consumer scales to its framebuffer. Distinct from
+/// [`INPUT_PAGE_GD`], whose X/Y events are relative deltas.
+pub const INPUT_PAGE_ABS: u16 = 0x00FD;
+
 /// Consumer page.
 pub const INPUT_PAGE_CONS: u16 = 0x000C;
 

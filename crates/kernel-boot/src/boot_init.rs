@@ -488,11 +488,17 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
         // window (eight transports at 0x10001000, 0x1000 apart — the
         // device can be at any of them).
         #[cfg(target_arch = "x86_64")]
-        if cfg.map_virtio_bars && (proc_nr == VIRTIO_BLK_PROC_NR || proc_nr == VIRTIO_NET_PROC_NR) {
+        if cfg.map_virtio_bars
+            && (proc_nr == VIRTIO_BLK_PROC_NR
+                || proc_nr == VIRTIO_NET_PROC_NR
+                || proc_nr == INPUT_PROC_NR)
+        {
             let subsys = if proc_nr == VIRTIO_BLK_PROC_NR {
                 0x0002
-            } else {
+            } else if proc_nr == VIRTIO_NET_PROC_NR {
                 0x0001
+            } else {
+                0x0012 // virtio-input (the x86 mouse)
             };
             if !unsafe { map_virtio_driver_bars(pt_phys, user_flags, subsys) } {
                 print!("  WARN: virtio driver BAR mapping failed\r\n");
@@ -649,7 +655,7 @@ unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) ->
                 continue;
             }
 
-            // Found the virtio-blk device: map every memory BAR.
+            // Found the device: map every memory BAR.
             let mut skip_next = false;
             for bar in 0..6u8 {
                 if skip_next {

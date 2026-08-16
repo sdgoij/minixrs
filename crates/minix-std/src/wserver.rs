@@ -9,9 +9,13 @@
 //! - `ws_fill` — {wid, x0, y0, x1, y1, color} → 0.
 //! - `ws_close` — {wid} → 0.
 //! - `ws_input` — {wid}: no immediate reply; when a key routes to the
-//!   window, the server sends `WS_KEY` (char in m2l1) and the client's
-//!   blocked sendrec completes with it.
+//!   window, the server sends `WS_KEY` (char in m2l1, HID usage in m2l2)
+//!   and the client's blocked sendrec completes with it.
 //! - `ws_cursor` — {wid, row, col} → 0: the inverse-video block cell.
+//! - `ws_ptrmode` — {wid, on} → 0: opt the window into pointer events.
+//!   When a button press/release lands on such a window (and it has a
+//!   blocked `ws_input` waiter), the server sends `WS_PTR` (button mask
+//!   in m2i1, window-local x in m2i2, y in m2i3) instead of a key.
 
 /// Window-server request base.
 pub const WS_BASE: u32 = 0x0D00;
@@ -23,6 +27,8 @@ pub const WS_INPUT: u32 = WS_BASE + 4;
 pub const WS_KEY: u32 = WS_BASE + 5;
 pub const WS_FLUSH: u32 = WS_BASE + 6;
 pub const WS_CURSOR: u32 = WS_BASE + 7;
+pub const WS_PTR: u32 = WS_BASE + 8;
+pub const WS_PTRMODE: u32 = WS_BASE + 9;
 
 // Absolute message-byte offsets (m2 layout).
 const OFF_TYPE: usize = 4;
@@ -103,6 +109,16 @@ pub fn ws_cursor(wid: i32, row: i32, col: i32) -> [u8; 64] {
     msg
 }
 
+/// Build a WS_PTRMODE request: opt the window into (or out of) pointer
+/// event delivery (WS_PTR instead of WS_KEY on button presses).
+pub fn ws_ptrmode(wid: i32, on: i32) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    msg_set_i32(&mut msg, OFF_TYPE, WS_PTRMODE as i32);
+    msg_set_i32(&mut msg, OFF_M2_I1, wid);
+    msg_set_i32(&mut msg, OFF_M2_I2, on);
+    msg
+}
+
 /// Build a WS_INPUT request: block until a key routes to window `wid`.
 pub fn ws_input(wid: i32) -> [u8; 64] {
     let mut msg = [0u8; 64];
@@ -144,6 +160,22 @@ pub fn ws_key_usage(msg: &[u8; 64]) -> u16 {
     u16::from_le_bytes([msg[OFF_M2_L2], msg[OFF_M2_L2 + 1]])
 }
 
+/// Button mask of a WS_PTR delivery (m2i1): bit 0 = left, 1 = right,
+/// 2 = middle.
+pub fn ws_ptr_buttons(msg: &[u8; 64]) -> u8 {
+    msg[OFF_M2_I1]
+}
+
+/// Window-local X of a WS_PTR delivery (m2i2).
+pub fn ws_ptr_x(msg: &[u8; 64]) -> i32 {
+    i32::from_le_bytes(msg[OFF_M2_I2..OFF_M2_I2 + 4].try_into().unwrap_or([0; 4]))
+}
+
+/// Window-local Y of a WS_PTR delivery (m2i3).
+pub fn ws_ptr_y(msg: &[u8; 64]) -> i32 {
+    i32::from_le_bytes(msg[OFF_M2_I3..OFF_M2_I3 + 4].try_into().unwrap_or([0; 4]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +191,8 @@ mod tests {
         assert_eq!(WS_KEY, 0x0D05);
         assert_eq!(WS_FLUSH, 0x0D06);
         assert_eq!(WS_CURSOR, 0x0D07);
+        assert_eq!(WS_PTR, 0x0D08);
+        assert_eq!(WS_PTRMODE, 0x0D09);
     }
 
     #[test]
@@ -180,6 +214,26 @@ mod tests {
         assert_eq!(i32::from_le_bytes(msg[8..12].try_into().unwrap()), 3);
         assert_eq!(i32::from_le_bytes(msg[12..16].try_into().unwrap()), 4);
         assert_eq!(i32::from_le_bytes(msg[16..20].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn test_ws_ptrmode_layout() {
+        let msg = ws_ptrmode(2, 1);
+        assert_eq!(ws_reply_status(&msg), 0x0D09);
+        assert_eq!(i32::from_le_bytes(msg[8..12].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(msg[12..16].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn test_ws_ptr_parsing() {
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&(WS_PTR as i32).to_le_bytes());
+        msg[8] = 0b101; // left + middle held
+        msg[12..16].copy_from_slice(&37i32.to_le_bytes());
+        msg[16..20].copy_from_slice(&11i32.to_le_bytes());
+        assert_eq!(ws_ptr_buttons(&msg), 0b101);
+        assert_eq!(ws_ptr_x(&msg), 37);
+        assert_eq!(ws_ptr_y(&msg), 11);
     }
 
     #[test]
