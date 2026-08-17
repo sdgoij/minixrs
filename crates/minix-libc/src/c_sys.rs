@@ -793,7 +793,7 @@ pub unsafe extern "C" fn getgroups(size: c_int, list: *mut c_int) -> c_int {
     match minix_std::process::getgroups(&mut buf[..n]) {
         Ok(count) => {
             for i in 0..count {
-                unsafe { *list.add(i as usize) = buf[i] };
+                unsafe { *list.add(i as usize) = buf[i as usize] };
             }
             count
         }
@@ -938,7 +938,7 @@ pub unsafe extern "C" fn getpwnam_r(
         return crate::fail(EINVAL);
     }
     let name_bytes = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
-    let data = core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen);
+    let data = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen) };
     let n = match unsafe { minix_std::passwd::read_passwd(data) } {
         Ok(n) => n,
         Err(e) => return crate::fail(e.0),
@@ -947,7 +947,7 @@ pub unsafe extern "C" fn getpwnam_r(
         Some(e) => e,
         None => return crate::fail(ENOENT),
     };
-    let r = unsafe { fill_passwd(pwd, buf, &entry) };
+    let r = unsafe { fill_passwd(pwd, buf, buflen, &entry) };
     if r != 0 {
         return crate::fail(r);
     }
@@ -972,7 +972,7 @@ pub unsafe extern "C" fn getpwuid_r(
     if uid < 0 {
         return crate::fail(EINVAL);
     }
-    let data = core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen);
+    let data = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen) };
     let n = match unsafe { minix_std::passwd::read_passwd(data) } {
         Ok(n) => n,
         Err(e) => return crate::fail(e.0),
@@ -981,7 +981,7 @@ pub unsafe extern "C" fn getpwuid_r(
         Some(e) => e,
         None => return crate::fail(ENOENT),
     };
-    let r = unsafe { fill_passwd(pwd, buf, &entry) };
+    let r = unsafe { fill_passwd(pwd, buf, buflen, &entry) };
     if r != 0 {
         return crate::fail(r);
     }

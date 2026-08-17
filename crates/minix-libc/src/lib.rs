@@ -643,30 +643,6 @@ pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     0
 }
 
-/// `getsid(2)`: session id of `pid` (0 = caller). There is no session
-/// separation yet — every process is its own session leader — so a live
-/// process's session id is its pid. `kill(pid, 0)` is the existence check:
-/// for a dead pid PM replies ESRCH, which is exactly what lock-file
-/// staleness detection (`getsid == -1 && errno == ESRCH`) relies on.
-#[cfg(target_os = "minix")]
-#[unsafe(no_mangle)]
-pub extern "C" fn getsid(pid: c_int) -> c_int {
-    let own = match minix_std::process::getpid() {
-        Ok((pid, _ppid)) => pid,
-        Err(e) => return fail(e.0),
-    };
-    if pid == 0 {
-        return own;
-    }
-    if pid < 0 {
-        return fail(22); // EINVAL
-    }
-    match minix_std::time::kill(pid, 0) {
-        Ok(()) => pid,
-        Err(e) => fail(e.0),
-    }
-}
-
 /// `stat(2)`: file metadata for `path` (follows symlinks).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
