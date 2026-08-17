@@ -7,7 +7,7 @@
 use crate::vfs::consts::*;
 use crate::vfs::dmap;
 use crate::vfs::glo::vfs_global;
-use crate::vfs::request::req_readsuper;
+use crate::vfs::request::{req_lookup, req_readsuper};
 use crate::vfs::types::*;
 
 use core::ptr::addr_of_mut;
@@ -49,6 +49,24 @@ pub fn find_vmnt(fs_e: i32) -> *mut Vmnt {
         for i in 0..NR_MNTS {
             let vmp = &mut *vmnt_arr.add(i);
             if vmp.m_fs_e == fs_e {
+                return vmp;
+            }
+        }
+    }
+    core::ptr::null_mut()
+}
+
+/// Find a vmnt whose mount point is `inode` in the filesystem `fs_e` (the
+/// fs that owns the mounted-on directory). This is the mount-crossing
+/// lookup: the resolved node is a mounted-on directory, and the vmnt's
+/// `m_fs`/`m_mounted_on` identify where it is attached.
+pub fn find_vmnt_mounted_on(fs_e: i32, inode: u32) -> *mut Vmnt {
+    unsafe {
+        let glob = vfs_global();
+        let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+        for i in 0..NR_MNTS {
+            let vmp = &mut *vmnt_arr.add(i);
+            if vmp.m_fs == fs_e && vmp.m_mounted_on == inode {
                 return vmp;
             }
         }
@@ -410,10 +428,16 @@ pub fn mount_pfs() {
 /// Register the devman FS vmnt and mount it via `req_readsuper`, so the
 /// device tree gets populated at boot (devman's `init_hook` runs on mount).
 ///
-/// devman's tree is not yet reachable through path resolution (VFS has no
-/// multi-mount traversal), but the mount exercises the VTreeFS protocol end
-/// to end and keeps a vmnt for when traversal lands.
-pub fn mount_devman() -> i32 {
+/// The mount point is `/devices` in the root filesystem: the directory is
+/// resolved in MFS, the vmnt records it as `m_mounted_on`/`m_fs`, and a
+/// vnode is created for devman's root so path traversal can cross into the
+/// tree (`advance`'s mount-crossing). `m_path` lets the path resolver
+/// split a `/devices/...` request at the mount boundary.
+///
+/// # Safety
+///
+/// `root_vp` must point to a valid MFS root vnode (from `mount_root`).
+pub unsafe fn mount_devman(root_vp: *mut Vnode) -> i32 {
     let vmp = get_free_vmnt();
     if vmp.is_null() {
         return ENFILE;
@@ -437,15 +461,59 @@ pub fn mount_devman() -> i32 {
         return r;
     }
 
+    // Resolve the mount point (/devices) in the root filesystem.
+    let mount_path: &[u8] = b"/devices";
+    let mut resolve = Lookup::default();
+    resolve.l_path[..mount_path.len()].copy_from_slice(mount_path);
+    resolve.l_path_len = mount_path.len();
+    let root_ino = (*root_vp).v_inode_nr;
+    let (lr, lres) = unsafe {
+        req_lookup(
+            arch_common::com::MFS_PROC_NR,
+            root_ino,
+            root_ino,
+            0, /* uid */
+            0, /* gid */
+            &resolve,
+        )
+    };
+    if lr != OK {
+        unsafe { mark_vmnt_free(vmp) };
+        return lr;
+    }
+
     unsafe {
         (*vmp).m_dev = node.dev;
         (*vmp).m_root_node = node.inode_nr;
+        (*vmp).m_mounted_on = lres.inode_nr;
+        (*vmp).m_fs = arch_common::com::MFS_PROC_NR; // mounted-on dir lives on MFS
         (*vmp).m_flags = 0;
         let label = b"devman";
         let m_label = &mut (*vmp).m_label;
         let copy_len = label.len().min(LABEL_MAX - 1);
         m_label[..copy_len].copy_from_slice(&label[..copy_len]);
         m_label[copy_len] = 0;
+        // Mount path for the path resolver's mount-prefix splitter.
+        let m_path = &mut (*vmp).m_path;
+        m_path[..mount_path.len()].copy_from_slice(mount_path);
+        m_path[mount_path.len()] = 0;
+    }
+
+    // Create the devman root vnode so mount crossing can find it
+    // (find_vnode(DEVMAN, m_root_node)).
+    let vp = get_free_vnode();
+    if vp.is_null() {
+        unsafe { mark_vmnt_free(vmp) };
+        return ENFILE;
+    }
+    unsafe {
+        (*vp).v_fs_e = arch_common::com::DEVMAN_PROC_NR;
+        (*vp).v_inode_nr = node.inode_nr;
+        (*vp).v_mode = node.mode;
+        (*vp).v_size = node.file_size;
+        (*vp).v_dev = node.dev;
+        (*vp).v_ref_count = 1;
+        (*vp).v_fs_count = 1;
     }
     OK
 }
@@ -794,5 +862,33 @@ mod tests {
     #[test]
     fn test_vnode_clean_refs_null_is_noop() {
         unsafe { vnode_clean_refs(core::ptr::null_mut()) }
+    }
+
+    #[test]
+    fn test_find_vmnt_mounted_on_matches_fs_and_inode() {
+        unsafe {
+            init_tables();
+            let glob = vfs_global();
+            let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+
+            // Simulate the devman mount: mounted on inode 5 of MFS (7).
+            let vmp = &mut *vmnt_arr;
+            vmp.m_fs = 7; // MFS_PROC_NR — the mounted-on dir's fs
+            vmp.m_mounted_on = 5;
+            vmp.m_fs_e = 15; // DEVMAN_PROC_NR
+
+            // Exact (fs, inode) match.
+            let hit = find_vmnt_mounted_on(7, 5);
+            assert!(!hit.is_null());
+            assert_eq!((*hit).m_fs_e, 15);
+
+            // Wrong fs or wrong inode: no match.
+            assert!(find_vmnt_mounted_on(7, 6).is_null());
+            assert!(find_vmnt_mounted_on(9, 5).is_null());
+
+            // A zeroed vmnt (no mount) never matches a real fs.
+            init_vmnts();
+            assert!(find_vmnt_mounted_on(7, 0).is_null());
+        }
     }
 }

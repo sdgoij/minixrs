@@ -2581,6 +2581,22 @@ pub fn chardriver_reply_select(endpt: i32, minor: u32, status: i32) -> i32 {
 pub fn tty_server_main() {
     tty_init(100);
 
+    // Register the console with devman so /devices shows the tty device.
+    // devman's device tree is initialized when VFS mounts it, which can
+    // land after tty starts (VFS blocks on MFS's readsuper first), so an
+    // ADD sent at init races the mount: retry while devman reports the
+    // tree not ready (errno 19 = ENODEV, returned as a positive MinixErr).
+    // Each attempt blocks until devman replies, letting the scheduler
+    // progress VFS's mount between attempts.
+    let mut retries = 0usize;
+    loop {
+        match minix_util::devman::devman_add_device("tty0", 0) {
+            Ok(_) => break,
+            Err(e) if e.0 == 19 && retries < 100 => retries += 1,
+            Err(_) => break,
+        }
+    }
+
     loop {
         let mut msg = arch_common::ipc::Message {
             m_source: 0,

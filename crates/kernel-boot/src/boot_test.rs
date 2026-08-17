@@ -43,10 +43,12 @@ pub unsafe fn run_boot_tests() -> ! {
     // C: VFS→MFS IPC (request in VFS's sendmsg)
     failures += test_vfs_sent_readsuper();
 
-    // D: MFS→VFS IPC (reply in VFS's delivermsg)
+    // D: MFS→VFS IPC (reply in VFS's delivermsg). The last sendrec VFS
+    // performs before boot-complete is mount_devman's lookup of the
+    // /devices mount point, so the delivered message is that lookup reply.
     failures += test_vfs_reply_from_mfs();
-    failures += test_vfs_reply_root_inode();
-    failures += test_vfs_reply_file_size();
+    failures += test_vfs_reply_devices_lookup();
+    failures += test_vfs_reply_devices_size();
 
     // E: Grant table registration
     failures += test_grant_registered();
@@ -277,7 +279,11 @@ fn test_vfs_reply_from_mfs() -> u32 {
     0
 }
 
-fn test_vfs_reply_root_inode() -> u32 {
+// D: Did VFS resolve the /devices mount point in MFS? (The readsuper
+// reply is no longer the last message in VFS's delivermsg — mount_devman's
+// lookup of /devices is — so this pins that lookup instead.)
+
+fn test_vfs_reply_devices_lookup() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(VFS_PROC_NR);
         if rp.is_null() {
@@ -289,22 +295,23 @@ fn test_vfs_reply_root_inode() -> u32 {
             serial_write("  SKIP: no MFS reply\r\n");
             return 0;
         }
-        let ino = rdu(msg, 20);
-        let dev = rdu(msg, 16);
-        if ino != 1 {
-            serial_write("  FAIL: inode_nr=");
+        // REQ_LOOKUP reply: inode @ 28, dev @ 24 (req_lookup parsing).
+        let ino = rdu(msg, 28);
+        let dev = rdu(msg, 24);
+        if ino != 7 {
+            serial_write("  FAIL: devices inode=");
             print_dec(ino);
-            serial_write(" expected 1\r\n");
+            serial_write(" expected 7\r\n");
             return 1;
         }
-        serial_write("  OK root inode=1 dev=");
+        serial_write("  OK devices dir inode=7 dev=");
         print_dec(dev);
         serial_write("\r\n");
     }
     0
 }
 
-fn test_vfs_reply_file_size() -> u32 {
+fn test_vfs_reply_devices_size() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(VFS_PROC_NR);
         if rp.is_null() {
@@ -316,14 +323,15 @@ fn test_vfs_reply_file_size() -> u32 {
             serial_write("  SKIP: no MFS reply\r\n");
             return 0;
         }
-        let low = rdu(msg, 8);
-        let high = rdu(msg, 12);
+        // REQ_LOOKUP reply: file_size (i64) @ 16.
+        let low = rdu(msg, 16);
+        let high = rdu(msg, 20);
         let size = (low as u64) | ((high as u64) << 32);
         if size == 0 {
-            serial_write("  FAIL: root file_size=0 (empty root?)\r\n");
+            serial_write("  FAIL: devices dir size=0 (empty?)\r\n");
             return 1;
         }
-        serial_write("  OK root dir size=");
+        serial_write("  OK devices dir size=");
         print_dec(high);
         serial_write(",");
         print_dec(low);

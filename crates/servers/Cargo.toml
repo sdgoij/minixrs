@@ -19,6 +19,7 @@ kernel = { path = "../kernel" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
+minix-util = { path = "../minix-util" }
 drivers = { path = "../drivers" }
 fs = { path = "../fs" }
 libs = { path = "../libs" }

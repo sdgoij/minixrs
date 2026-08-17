@@ -126,6 +126,8 @@ dependencies = [
 name = "minix-util"
 version = "0.1.0"
 dependencies = [
+ "arch-common",
+ "minix-rt",
  "minix-std",
 ]
 
@@ -148,6 +150,7 @@ dependencies = [
  "libs",
  "minix-rt",
  "minix-std",
+ "minix-util",
  "net",
 ]
 

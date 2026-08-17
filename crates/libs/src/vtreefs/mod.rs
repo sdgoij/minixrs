@@ -600,11 +600,11 @@ fn fs_lookup(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // VFS embeds the path (NUL-terminated, up to 24 bytes) at payload[24].
+    // VFS embeds the path (up to 24 bytes) at payload[24]; `path_len` does
+    // not include the NUL terminator (VFS writes one after the copy). The
+    // walk below stops at either the length or a NUL, so both conventions
+    // are accepted (MFS's fs_lookup does the same).
     let avail = path_len.min(24);
-    if avail == 0 || raw[24 + avail - 1] != 0 {
-        return EINVAL;
-    }
     if path_len > avail {
         // The embedded path is truncated — we cannot resolve it.
         return ENAMETOOLONG;
@@ -772,7 +772,10 @@ fn fs_read(msg: &mut Message) -> i32 {
     let raw = raw_of_mut(msg);
     raw[0..8].copy_from_slice(&(pos + got as i64).to_le_bytes()); // seek_pos
     raw[8..12].copy_from_slice(&(got as u32).to_le_bytes()); // nbytes
-    OK
+    // The reply m_type carries the byte count (matching MFS's
+    // `fs_readwrite`, which returns cum_io): VFS's `do_read` reports the
+    // reply m_type to the caller as the read() result.
+    got as i32
 }
 
 /// Convert a mode to a `d_type` value (`DT_*`).
@@ -1325,7 +1328,9 @@ mod tests {
             w_i64(raw, 24, 4096); // nbytes
         }
         let status = handle_fs_message(&mut msg);
-        assert_eq!(status, OK);
+        // The read reply m_type carries the byte count (MFS protocol:
+        // VFS's do_read reports it as the read() result).
+        assert_eq!(status, READ_DATA.len() as i32, "status = byte count");
         assert_eq!(
             r_i64(raw_of(&msg), 0),
             READ_DATA.len() as i64,

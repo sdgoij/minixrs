@@ -11,7 +11,7 @@ use crate::vfs::mount::*;
 use crate::vfs::request::req_lookup;
 use crate::vfs::types::*;
 
-use core::ptr::null_mut;
+use core::ptr::{addr_of_mut, null_mut};
 
 /// Resolve parent directory (for create/link/rename etc.).
 pub const PATH_GET_PARENT: u32 = 1;
@@ -68,7 +68,9 @@ unsafe fn lookup(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> (i32, Looku
 ///
 /// Returns a vnode for the resolved component, or null on error.
 /// Handles mount point crossing: if the resolved inode is a mount point,
-/// follows the vmnt link to the root of the mounted FS.
+/// follows the vmnt link to the root of the mounted FS. If the path passes
+/// through a mounted tree (a vmnt with `m_path` set), the path is split at
+/// the mount boundary and resolved in the mounted FS.
 ///
 /// # Safety
 ///
@@ -81,22 +83,60 @@ pub unsafe fn advance(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mut V
         return null_mut();
     }
 
+    // Mount-point crossing for paths that pass through a mounted tree:
+    // resolve the mount-point prefix in dirp's fs, cross into the mounted
+    // FS, then resolve the remainder there. The port has one tree mount
+    // (devman at /devices), so a single split suffices.
+    let path = &resolve.l_path[..resolve.l_path_len];
+    if let Some((vmp, prefix_len)) = find_mount_prefix(path)
+        && (*vmp).m_fs == (*dirp).v_fs_e
+    {
+        let mut pre = *resolve;
+        pre.l_path_len = prefix_len;
+        let crossed = advance_within(dirp, &pre, rfp);
+        if crossed.is_null() {
+            return null_mut();
+        }
+
+        let rest = &path[prefix_len..];
+        if rest.iter().all(|&b| b == b'/') {
+            // The path ends at the mount point itself.
+            return crossed;
+        }
+
+        let mut rem = *resolve;
+        rem.l_path_len = rest.len();
+        rem.l_path[..rest.len()].copy_from_slice(rest);
+        let vp = advance_within(crossed, &rem, rfp);
+        put_vnode(crossed);
+        return vp;
+    }
+
+    advance_within(dirp, resolve, rfp)
+}
+
+/// Resolve `resolve` within the fs that owns `dirp` (no mount-prefix
+/// splitting), crossing a mount point only if the final resolved inode is
+/// a mounted-on directory.
+///
+/// # Safety
+///
+/// `dirp` must point to a valid, locked directory vnode. `rfp` must point
+/// to a valid Fproc for the calling process.
+unsafe fn advance_within(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
+    if dirp.is_null() {
+        return null_mut();
+    }
+
     let (r, res) = lookup(dirp, resolve, rfp);
     if r != OK {
         return null_mut();
     }
 
     let fs_e = res.fs_e;
-    let new_vp = get_free_vnode();
-    if new_vp.is_null() {
-        return null_mut();
-    }
-
-    // Check if the inode is already in the vnode table.
     let vp = find_vnode(fs_e, res.inode_nr);
-    if !vp.is_null() {
+    let vp = if !vp.is_null() {
         // Already have it — use the existing one.
-        unlock_vnode(new_vp);
         if lock_vnode(vp, VNODE_OPCL) != EBUSY {
             // Lock acquired, but vnode may have vanished.
             if (*vp).v_ref_count == 0 {
@@ -106,31 +146,100 @@ pub unsafe fn advance(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mut V
             }
         }
         dup_vnode(vp);
-        return vp;
-    }
+        vp
+    } else {
+        let new_vp = get_free_vnode();
+        if new_vp.is_null() {
+            return null_mut();
+        }
+        // Fill in the new vnode.
+        (*new_vp).v_fs_e = res.fs_e;
+        (*new_vp).v_inode_nr = res.inode_nr;
+        (*new_vp).v_mode = res.mode;
+        (*new_vp).v_size = res.file_size;
+        (*new_vp).v_dev = res.dev;
+        (*new_vp).v_ref_count = 1;
+        (*new_vp).v_fs_count = 1;
+        new_vp
+    };
 
-    // Fill in the new vnode.
-    (*new_vp).v_fs_e = res.fs_e;
-    (*new_vp).v_inode_nr = res.inode_nr;
-    (*new_vp).v_mode = res.mode;
-    (*new_vp).v_size = res.file_size;
-    (*new_vp).v_dev = res.dev;
-    (*new_vp).v_ref_count = 1;
-    (*new_vp).v_fs_count = 1;
-
-    // Handle mount point crossing.
-    let vmp = find_vmnt(res.fs_e);
-    if !vmp.is_null() && (*vmp).m_mounted_on == res.inode_nr {
-        // Cross the mount point: the root vnode of the mounted FS.
+    // Handle mount point crossing: if the resolved inode is a mounted-on
+    // directory, return the root vnode of the mounted FS. (The C matches on
+    // (dev, inode); the port tracks the mounted-on fs endpoint in the
+    // vmnt's `m_fs`.)
+    let vmp = find_vmnt_mounted_on(fs_e, res.inode_nr);
+    if !vmp.is_null() {
         let root_vp = find_vnode((*vmp).m_fs_e, (*vmp).m_root_node);
         if !root_vp.is_null() {
-            unlock_vnode(new_vp);
+            put_vnode(vp);
             dup_vnode(root_vp);
             return root_vp;
         }
     }
 
-    new_vp
+    vp
+}
+
+/// If `path` passes through a mounted tree, return the vmnt whose mount
+/// path (`m_path`) is a component-wise prefix of `path`, plus the byte
+/// length of the matched prefix within `path`.
+fn find_mount_prefix(path: &[u8]) -> Option<(*mut Vmnt, usize)> {
+    unsafe {
+        let glob = vfs_global();
+        let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+        for i in 0..NR_MNTS {
+            let vmp = &mut *vmnt_arr.add(i);
+            let m_path = &vmp.m_path;
+            let mlen = m_path.iter().position(|&b| b == 0).unwrap_or(0);
+            if mlen == 0 {
+                continue;
+            }
+            if let Some(len) = mount_path_prefix_len(&m_path[..mlen], path) {
+                return Some((vmp, len));
+            }
+        }
+    }
+    None
+}
+
+/// Component-wise prefix match of `m_path` against `path`. Returns the
+/// byte length of the matched prefix within `path` (the position right
+/// after the mount point's final component), or None.
+fn mount_path_prefix_len(m_path: &[u8], path: &[u8]) -> Option<usize> {
+    let mut m = m_path;
+    let mut p = path;
+    let mut matched = 0usize;
+    loop {
+        // Skip leading separators in the mount path itself.
+        let m_skip = m.iter().take_while(|&&b| b == b'/').count();
+        m = &m[m_skip..];
+        if m.is_empty() {
+            // Every mount component matched; the remainder starts right
+            // after the mount point's final component (a separator between
+            // the mount point and the next component belongs to the
+            // remainder).
+            return Some(matched);
+        }
+
+        // Skip path separators only while there is a mount component left
+        // to match, so relative paths ("devices/...") align with an
+        // absolute mount path ("/devices").
+        let p_skip = p.iter().take_while(|&&b| b == b'/').count();
+        p = &p[p_skip..];
+        matched += p_skip;
+        if p.is_empty() {
+            return None;
+        }
+
+        let m_end = m.iter().position(|&b| b == b'/').unwrap_or(m.len());
+        let p_end = p.iter().position(|&b| b == b'/').unwrap_or(p.len());
+        if m[..m_end] != p[..p_end] {
+            return None;
+        }
+        matched += p_end;
+        m = &m[m_end..];
+        p = &p[p_end..];
+    }
 }
 
 /// Resolve a full pathname to a vnode.
@@ -372,5 +481,36 @@ mod tests {
             let result = last_dir(&resolve, &rfp);
             assert!(result.is_null(), "nested path lookup fails without FS IPC");
         }
+    }
+
+    #[test]
+    fn mount_path_prefix_exact_match() {
+        assert_eq!(mount_path_prefix_len(b"/devices", b"/devices"), Some(8));
+        assert_eq!(mount_path_prefix_len(b"/devices", b"devices"), Some(7));
+        assert_eq!(mount_path_prefix_len(b"/devices", b"/devices/"), Some(8));
+    }
+
+    #[test]
+    fn mount_path_prefix_with_remainder() {
+        // The prefix ends right after the mount point's final component.
+        assert_eq!(
+            mount_path_prefix_len(b"/devices", b"/devices/tty0"),
+            Some(8)
+        );
+        assert_eq!(mount_path_prefix_len(b"/devices", b"devices/tty0"), Some(7));
+        assert_eq!(
+            mount_path_prefix_len(b"/devices", b"/devices/tty0/extra"),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn mount_path_prefix_rejects_non_matches() {
+        // Component boundary: /devicesx must not match /devices.
+        assert_eq!(mount_path_prefix_len(b"/devices", b"/devicesx"), None);
+        // Shorter or unrelated paths.
+        assert_eq!(mount_path_prefix_len(b"/devices", b"/"), None);
+        assert_eq!(mount_path_prefix_len(b"/devices", b"/bin/ls"), None);
+        assert_eq!(mount_path_prefix_len(b"/devices", b""), None);
     }
 }

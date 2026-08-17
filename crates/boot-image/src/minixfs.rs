@@ -472,6 +472,9 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let etc_zone = fs.add_directory(root_zone, "etc");
     let _tmp_ino = fs.add_directory(root_zone, "tmp");
     let dev_zone = fs.add_directory(root_zone, "dev");
+    // Mount point for the devman device tree (VFS mount_devman crosses
+    // into devman's VTreeFS here).
+    let _devices_zone = fs.add_directory(root_zone, "devices");
 
     for (dest, data) in files {
         if data.is_empty() {
@@ -532,10 +535,11 @@ mod tests {
     #[test]
     fn device_nodes_in_image() {
         // With no files, inodes are deterministic: 1=root, 2=bin, 3=sbin,
-        // 4=etc, 5=tmp, 6=dev, then the four devices in manifest order
-        // (tty00, tty01, null, console). The console inode must be a
-        // char-special node whose zone[0] carries (major << 16 | minor) so
-        // MFS reports the device number VFS's cdev_* expects.
+        // 4=etc, 5=tmp, 6=dev, 7=devices, then the four devices in
+        // manifest order (tty00, tty01, null, console). The console inode
+        // must be a char-special node whose zone[0] carries
+        // (major << 16 | minor) so MFS reports the device number VFS's
+        // cdev_* expects.
         let empty: &[(&'static str, Vec<u8>)] = &[];
         let image = build_minixfs(empty);
 
@@ -543,10 +547,10 @@ mod tests {
         let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
-        // Inode numbering: root(1) bin(2) sbin(3) etc(4) tmp(5) dev(6),
-        // then BOOT_FILES passwd(7) secret(8), then devices: tty00(9)
-        // tty01(10) null(11) console(12) ip(13) udp(14) tcp(15).
-        let console_ino = 12usize;
+        // Inode numbering: root(1) bin(2) sbin(3) etc(4) tmp(5) dev(6)
+        // devices(7), then BOOT_FILES passwd(8) secret(9), then devices:
+        // tty00(10) tty01(11) null(12) console(13) ip(14) udp(15) tcp(16).
+        let console_ino = 13usize;
         let off = itable_off + (console_ino - 1) * INODE_SIZE;
         let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
         let dev = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
@@ -558,8 +562,8 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(dev, 5u32 << 16, "console major 5 minor 0");
 
-        // /dev/tty00: major 3 minor 0.
-        let tty00_off = itable_off + 8 * INODE_SIZE;
+        // /dev/tty00: major 3 minor 0 (inode 10 → slot 9).
+        let tty00_off = itable_off + 9 * INODE_SIZE;
         let tty00_dev =
             u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
         assert_eq!(tty00_dev, 3u32 << 16);
@@ -583,9 +587,9 @@ mod tests {
             u32::from_le_bytes(image[itable_off + 24..itable_off + 28].try_into().unwrap());
         assert!(root_zone >= 2, "root data zone must be allocated");
 
-        // "echo" inode (inode 7: 1=root, 2=bin, 3=sbin, 4=etc, 5=tmp,
-        // 6=dev) must be a regular file of size 11.
-        let echo_ino_off = itable_off + 6 * INODE_SIZE;
+        // "echo" inode (inode 8: 1=root, 2=bin, 3=sbin, 4=etc, 5=tmp,
+        // 6=dev, 7=devices) must be a regular file of size 11.
+        let echo_ino_off = itable_off + 7 * INODE_SIZE;
         let echo_mode =
             u16::from_le_bytes(image[echo_ino_off..echo_ino_off + 2].try_into().unwrap());
         assert_eq!(echo_mode, I_REGULAR | RWX_ALL);
@@ -610,7 +614,7 @@ mod tests {
                 .unwrap(),
         );
         let bin_name = &image[bin_off + 2 * (4 + NAMESIZE) + 4..bin_off + 2 * (4 + NAMESIZE) + 9];
-        assert_eq!(bin_ino, 7, "echo dirent must point at inode 7");
+        assert_eq!(bin_ino, 8, "echo dirent must point at inode 8");
         assert_eq!(&bin_name[..4], b"echo", "echo dirent must be in /bin");
     }
 
@@ -639,26 +643,27 @@ mod tests {
         let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
-        // Console is inode 10 in the empty image (root, bin, sbin, etc, tmp,
-        // dev + tty00, tty01, null). Its imap bit (10) must be set, bit 0
-        // must be reserved, and bit 1 (inode 1, root) must be set.
+        // Console is inode 13 in the empty image (root, bin, sbin, etc, tmp,
+        // dev, devices + passwd, secret + tty00, tty01, null). Its imap bit
+        // (13) must be set, bit 0 must be reserved, and bit 1 (inode 1,
+        // root) must be set.
         let imap = &image[2 * BLOCK_SIZE..3 * BLOCK_SIZE];
         assert_eq!(imap[0] & 1, 1, "bit 0 must be reserved (no inode 0)");
         assert_eq!((imap[0] >> 1) & 1, 1, "inode 1 (root) must be in use");
         assert_eq!(
-            (imap[10 / 8] >> (10 % 8)) & 1,
+            (imap[13 / 8] >> (13 % 8)) & 1,
             1,
-            "inode 10 (console) must be in use"
+            "inode 13 (console) must be in use"
         );
 
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
-        // empty image has 6 dirs (root, bin, sbin, etc, tmp, dev) + 2 data
-        // files (passwd, secret) + 17 devices (tty00, tty01, null, console,
-        // ip, udp, tcp, fb, kbd + the 8 pty nodes ttyp0-3/ptyp0-3) =
-        // 25 inodes.
-        let n_inodes = 25usize;
+        // empty image has 7 dirs (root, bin, sbin, etc, tmp, dev, devices)
+        // + 2 data files (passwd, secret) + 17 devices (tty00, tty01, null,
+        // console, ip, udp, tcp, fb, kbd + the 8 pty nodes ttyp0-3/ptyp0-3)
+        // = 26 inodes.
+        let n_inodes = 26usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -666,11 +671,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 26) is free — the first allocatable inode.
+        // And the next bit (inode 27) is free — the first allocatable inode.
         assert_eq!(
-            imap[3] & 0b100,
+            imap[3] & 0b1000,
             0,
-            "inode 26 must be free for the first create"
+            "inode 27 must be free for the first create"
         );
         let _ = itable_off;
     }
