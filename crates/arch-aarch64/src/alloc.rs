@@ -365,7 +365,7 @@ mod tests {
         );
 
         // Identity (frame == va) is shared.
-        assert!(is_alias_frame(0x1234_000, 0x1234_000));
+        assert!(is_alias_frame(0x0123_4000, 0x0123_4000));
 
         // Below USER_LOW: never an alias.
         assert!(!is_alias_frame(base, 0x1000));

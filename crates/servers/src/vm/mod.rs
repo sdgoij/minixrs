@@ -162,23 +162,24 @@ pub fn vm_free_pages_query() -> i32 {
 pub static VM_SELF_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Next free virtual address in VM's address space for temporary mappings.
-/// Starts at 0x7F0000000000 — well above the heap (0x3FE00000) and
-/// below the kernel half (0xFFFF800000000000). Each call to `vm_find_hole`
-/// bumps this by the requested number of pages.
+/// Each call to `vm_find_hole` bumps this by the requested number of pages.
 ///
-/// Base is per-arch: just below the arch's user-space top so the scratch
-/// mappings never collide with code/heap/mmap/stack (which all live in the
-/// low GiBs). 4 GiB of headroom = 1M transient mappings. The old fixed
+/// Base is per-arch ([`kernel::hal::vm_scratch_base`]): just below the
+/// arch's user-space top so the scratch mappings never collide with
+/// code/heap/mmap/stack (which all live in the low GiBs). The old fixed
 /// 0x7F0000000000 was x86-only and above riscv64's SV39 user top
 /// (0x4000000000), so every self-map on riscv64 was rejected by the
 /// kernel's MAP bounds check and demand-paging bailed. Page-aligned:
-/// aarch64's MAX_USER_ADDRESS (2^44 - 1) ends in 0xFFF, so the raw
-/// subtraction would hand out misaligned scratch VAs — map_page maps the
-/// page containing the VA, and a 4KB read from the returned VA would cross
-/// into an unmapped page (observed: vm_destroy's page-table walk faulted
-/// and VM deadlocked with PAGEFAULT on hello exit).
-static VM_NEXT_MAP_VA: AtomicU64 =
-    AtomicU64::new((kernel::pagetable::MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF);
+/// aarch64's previous MAX_USER_ADDRESS (2^44 - 1) ended in 0xFFF, so the
+/// raw subtraction would have handed out misaligned scratch VAs — map_page
+/// maps the page containing the VA, and a 4KB read from the returned VA
+/// would cross into an unmapped page (observed: vm_destroy's page-table
+/// walk faulted and VM deadlocked with PAGEFAULT on hello exit). Since D3
+/// lowered aarch64's MAX_USER_ADDRESS below the kernel window (0x40000000),
+/// the aarch64 scratch base is a dedicated gap between the exec image and
+/// the brk heap instead of "just below the user top" (which would land on
+/// the mmap base).
+static VM_NEXT_MAP_VA: AtomicU64 = AtomicU64::new(kernel::hal::vm_scratch_base());
 
 /// LIFO of temporary-mapping VAs released by [`vm_unmappage`], so the
 /// kernel's intermediate table pages for VM's own address space are reused

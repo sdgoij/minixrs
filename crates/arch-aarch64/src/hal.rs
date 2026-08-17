@@ -666,46 +666,13 @@ pub fn set_alias_window(base: u64, usable: u64) {
     crate::alloc::set_alias_window(base, usable);
 }
 
-pub const fn kern_vaddr() -> u64 {
-    0x4000_0000
-}
-
-pub const fn user_stack_base() -> u64 {
-    // Must be in PUD[0] range. 0x3FC00000 is just below the RAM start
-    // (0x40000000), giving maximum space for code and heap below it.
-    0x3FC0_0000u64
-}
-
-/// Base of the anonymous-mmap search range. Must stay in the user-accessible
-/// low 1 GiB (PUD[0]): everything at/above 0x40000000 is the kernel's
-/// EL1-only identity map and cannot be mapped for user access.
-pub const fn mmap_base() -> u64 {
-    0x3000_0000
-}
-
-pub const fn user_stack_size() -> usize {
-    // 1MB: the current server binaries allocate large stack frames (e.g.
-    // pfs_main's inlined init uses ~340KB), which would underflow a 64KB
-    // stack. x86/RISC-V tolerate that via permissive low memory mappings;
-    // on AArch64 the low-GB alias is only available to exec'd processes, so
-    // give every process a stack large enough for the biggest frame.
-    0x100_000
-}
-
-/// Base of the userland brk heap. AArch64 user space is only the low 1 GiB
-/// (PUD[0]): the kernel's EL1-only identity map starts at 0x40000000, so a
-/// heap at the top of the range (0x3FE00000, as on x86/riscv) would collide
-/// with the kernel block after ~2 MiB of growth. The heap sits below the
-/// anonymous-mmap base (0x30000000) so heap growth (up) and mmap regions
-/// (up from the mmap base) cannot overlap.
-pub const fn user_heap_base() -> u64 {
-    0x2000_0000
-}
-
-/// Exclusive upper bound for brk growth — the anonymous-mmap base.
-pub const fn user_heap_limit() -> u64 {
-    0x3000_0000
-}
+// The port's user-VA layout constants live in `vmparam` (host-testable;
+// this module is target-gated) and are re-exported so the kernel's
+// `hal::*` re-export and direct `arch_aarch64::hal::*` users keep working.
+pub use crate::vmparam::{
+    MAX_USER_ADDRESS, kern_vaddr, mmap_base, user_heap_base, user_heap_limit, user_stack_base,
+    user_stack_size, vm_scratch_base,
+};
 
 /// User-space scheduling priority for boot processes.
 pub const fn user_priority() -> i8 {
@@ -728,7 +695,6 @@ pub const MAP_WRITE: u64 = 0;
 pub const MAP_USER: u64 = crate::pte::PTE_AP_EL0_RW;
 pub const MAP_EXEC: u64 = 0; // aarch64: no separate execute bit; absence of UXN/PXN is executable
 pub const MAP_NX: u64 = 0;
-pub const MAX_USER_ADDRESS: u64 = 0x0000_0FFF_FFFF_FFFF;
 
 pub fn boot_cr3() -> u64 {
     crate::BOOT_CR3.load(Ordering::Relaxed)

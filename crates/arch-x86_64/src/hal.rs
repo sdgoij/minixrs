@@ -871,6 +871,12 @@ pub const fn mmap_base() -> u64 {
     0x1_0000_0000
 }
 
+/// Base of VM's temporary self-mapping range: just below the user top so
+/// the scratch mappings never collide with code/heap/mmap/stack.
+pub const fn vm_scratch_base() -> u64 {
+    (MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF
+}
+
 /// Page table flags (x86_64).
 pub const MAP_PRESENT: u64 = 0x0000000000000001; // PG_P
 pub const MAP_READ: u64 = 0; // x86 has no read bit; absence of PG_RW is read-only

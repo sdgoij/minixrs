@@ -317,7 +317,8 @@ mod tests {
             // Replicate the fork's per-leaf inputs before calling it, to
             // isolate a window/VA mismatch.
             let parent_p1_pre = rd(pte, 1);
-            let leaf_va_pre = (0usize << 39) | (0usize << 30) | (8usize << 21) | (1usize << 12);
+            // PGD[0] | PUD[0] | PMD[8] | PTE[1] (the PGD/PUD indices are 0).
+            let leaf_va_pre = (8usize << 21) | (1usize << 12);
             assert_eq!(
                 leaf_va_pre, 0x100_1000usize,
                 "leaf VA decode: got {:#x}",

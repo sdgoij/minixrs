@@ -621,6 +621,12 @@ pub const fn mmap_base() -> u64 {
     0x1_0000_0000
 }
 
+/// Base of VM's temporary self-mapping range: just below the user top so
+/// the scratch mappings never collide with code/heap/mmap/stack.
+pub const fn vm_scratch_base() -> u64 {
+    (MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF
+}
+
 pub const MAP_PRESENT: u64 = pte::PTE_V;
 pub const MAP_READ: u64 = pte::PTE_R;
 // SV39 requires W to imply R: a leaf with W=1,R=0 is reserved and faults
