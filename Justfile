@@ -94,17 +94,19 @@ coreutils-aarch64:
 build target="x86":
     @just build-{{target}}
 
-build-x86: userland-x86
+# build-x86* embeds /bin/coreutils (kernel build.rs requires it on x86_64),
+# so the multicall must be built and copied into the shared target dir first.
+build-x86: userland-x86 coreutils-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs
 
-build-x86-test: userland-x86
+build-x86-test: userland-x86 coreutils-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,integration-tests kernel-test
 
-build-x86-boot: userland-x86
+build-x86-boot: userland-x86 coreutils-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
