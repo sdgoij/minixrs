@@ -451,24 +451,32 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Register timer callback for preemptive scheduling.
     unsafe {
         unsafe fn riscv_timer_callback(frame: &mut [u8; 296]) {
-            // Full per-tick accounting (monotonic/realtime, virtual timers,
-            // load average, quantum accounting via context_stop →
-            // proc_no_time → notify_scheduler) in BOTH kernel and user
-            // mode, matching x86's timer_int_handler. The SPP check below
-            // then limits the save/pick/switch to user-mode interrupts.
-            unsafe { kernel::clock::timer_int_handler() };
-            // Preempt: if we interrupted user mode, save state and
-            // potentially switch to another runnable process. Kernel-mode
-            // interrupts (SPP=1) are skipped: kernel processing runs with
-            // SIE=0, so they can only fire at a resumable WFI point (the
-            // all-blocked idle loop), and the kernel-mode switch-back
-            // faults (an exec page fault at the resume instruction — the
-            // console read no longer busy-waits in kernel mode, so no
-            // process ever spins there).
+            // Nested (S-mode) tick: the timer fired inside the outer trap's
+            // kernel processing — with SIE=1 during U-mode traps, a tick
+            // boundary can land mid-syscall. Skip the per-tick accounting
+            // and expiry dispatch: timer_int_handler walks the run queues
+            // (load_update) and may notify/enqueue a process
+            // (tmrs_exptimers → mini_notify), which would race the outer
+            // syscall's own queue/process-state access. The tick was
+            // already consumed (stimecmp re-armed in trap.rs) and the UART
+            // drained; accounting resumes on the next user-mode tick, as
+            // when the kernel ran with SIE=0 throughout.
             let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
             if (sstatus >> 8) & 1 != 0 {
                 return; // SPP=1: interrupted kernel mode, skip
             }
+            // User-mode tick: full per-tick accounting (monotonic/realtime,
+            // virtual timers, load average, quantum accounting via
+            // context_stop → proc_no_time → notify_scheduler), matching
+            // x86's timer_int_handler.
+            unsafe { kernel::clock::timer_int_handler() };
+            // Preempt: if we interrupted user mode, save state and
+            // potentially switch to another runnable process. Kernel-mode
+            // interrupts (SPP=1) are skipped above: kernel processing runs
+            // with SIE=0 when nested (a fault taken mid-syscall must not
+            // nest), and the kernel-mode switch-back faults (an exec page
+            // fault at the resume instruction — the console read no longer
+            // busy-waits in kernel mode, so no process ever spins there).
             let caller = arch_riscv64::hal::current_proc() as *mut kernel::proc::Proc;
             if caller.is_null() {
                 return;

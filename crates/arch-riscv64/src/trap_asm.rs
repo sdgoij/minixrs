@@ -95,9 +95,30 @@ trap_vector:
     csrr    t4, sscratch
     sd      t4, 40(sp)
 
+    # Re-enable SIE for user-mode traps (SPP=0) so interrupt-driven UART RX
+    # keeps draining while the kernel processes the trap; a bursty push
+    # otherwise overruns the 16550 FIFO during long kernel windows. S-mode
+    # traps (a fault taken mid-syscall) stay SIE=0: kernel processing must
+    # not nest. The saved sstatus at 264 has SIE=0 and is restored on
+    # return, so SIE is cleared again before sret.
+    csrr    t0, sstatus
+    srli    t0, t0, 8
+    andi    t0, t0, 1
+    bnez    t0, 3f
+    csrs    sstatus, 2                # SIE bit = bit 1
+3:
     # Call trap_handler(frame)
     mv      a0, sp
     call    trap_handler
+
+    # Mask SIE before the exit path: a U-mode trap handler ran with SIE=1
+    # (the whole point of Phase E), but the sepc/sstatus/GPR restore below
+    # must not be interrupted — a nested trap here re-fetches the restore
+    # code, and if a context switch just rewrote the frame the fault lands
+    # on a wrong page-table context (a kernel-address fault the VM treats
+    # as user-range and blocks the process on). The saved sstatus at 264
+    # (SIE=0) is restored below regardless.
+    csrci   sstatus, 2
 
     # Restore CSRs
     ld      t0, 256(sp)

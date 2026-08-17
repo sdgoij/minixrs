@@ -123,15 +123,21 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // anyway. The UART is drained into the ring here and by the
         // per-tick trap drains, so a retry finds the byte.
         let byte = {
+            // Mask SIE around the feed/read so it is atomic w.r.t. a
+            // nested UART drain: on riscv, U-mode traps re-enable SIE, so
+            // a timer tick can fire mid-syscall and push bytes into the
+            // ring. Each ring op is individually masked (ser_input), but
+            // the pop→push feed loop must not interleave with a nested
+            // drain or bytes reorder.
+            let saved = crate::hal::irq_save();
             let mut got = crate::ser_input::try_read();
             if got.is_none() {
-                // Feed the ring from the UART first (the ISR/timer drain
-                // is disabled while we run), then re-check.
                 while let Some(b) = crate::hal::poll_console() {
                     unsafe { crate::ser_input::push_byte(b) };
                 }
                 got = crate::ser_input::try_read();
             }
+            crate::hal::irq_restore(saved);
             match got {
                 Some(b) => b,
                 None => return -11, // EAGAIN: tty retries in user mode

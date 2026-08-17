@@ -79,6 +79,21 @@ pub fn poll_console() -> Option<u8> {
     serial_try_read_byte()
 }
 
+/// Disable interrupts (IF) and return whether they were enabled.
+///
+/// Pairs with `irq_restore`. x86 syscalls already run with IF=0 (SF_MASK)
+/// and the ISRs run with IF=0, so there is nothing to mask — the riscv
+/// port needs the real version (U-mode traps re-enable SIE).
+#[inline]
+pub fn irq_save() -> bool {
+    false
+}
+
+/// Restore interrupts to the state reported by `irq_save`. No-op on x86
+/// (see `irq_save`).
+#[inline]
+pub fn irq_restore(_enabled: bool) {}
+
 /// Arch-specific CPU idle: PAUSE busy-wait with interrupts disabled.
 ///
 /// The console read wait (`ser_input::read_blocking`) spins with IF=0, so

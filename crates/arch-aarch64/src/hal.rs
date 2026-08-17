@@ -98,6 +98,21 @@ pub fn cpu_idle() {
     }
 }
 
+/// Disable interrupts (DAIF) and return whether they were enabled.
+///
+/// Pairs with `irq_restore`. aarch64 kernel processing runs with IRQ
+/// masked (DAIF.I set on exception entry), so there is nothing to mask —
+/// the riscv port needs the real version (U-mode traps re-enable SIE).
+#[inline]
+pub fn irq_save() -> bool {
+    false
+}
+
+/// Restore interrupts to the state reported by `irq_save`. No-op on
+/// aarch64 (see `irq_save`).
+#[inline]
+pub fn irq_restore(_enabled: bool) {}
+
 /// Read the generic timer counter.
 pub fn read_cycles() -> u64 {
     let val: u64;

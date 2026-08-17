@@ -40,16 +40,17 @@ pub fn serial_byte_available() -> bool {
 }
 
 /// Non-blocking poll: returns a byte if available from any console source
-/// (SBI debug console or MMIO 8250 UART).
+/// (MMIO 8250 UART first, SBI debug console as fallback).
+///
+/// The MMIO read is preferred: the SBI getchar is an ecall into M-mode
+/// (~100s of ns per byte), and the per-byte drain loops in the input path
+/// run hot during bursts. The SBI fallback covers hosts without the
+/// 16550.
 pub fn poll_console() -> Option<u8> {
-    if let Some(byte) = crate::sbi::console_getchar() {
-        return Some(byte);
-    }
     if serial_byte_available() {
-        unsafe { Some(core::ptr::read_volatile(0x10000000usize as *const u8)) }
-    } else {
-        None
+        unsafe { return Some(core::ptr::read_volatile(0x10000000usize as *const u8)) };
     }
+    crate::sbi::console_getchar()
 }
 
 /// Arch-specific CPU idle hint (wfi with interrupts enabled on RISC-V).
@@ -61,6 +62,37 @@ pub fn cpu_idle() {
             "csrci sstatus, 2",
             options(nomem, nostack)
         );
+    }
+}
+
+/// Disable S-mode interrupts (SIE) and return whether they were enabled.
+///
+/// Pairs with `irq_restore`. U-mode traps re-enable SIE during trap
+/// handling (trap_asm.rs), so a timer/UART interrupt can fire mid-syscall;
+/// code that touches state shared with the interrupt handlers (ser_input,
+/// the timer queue) must make its critical section atomic this way. The
+/// asm deliberately omits `nomem` so it also acts as a compiler barrier:
+/// the masked body cannot be moved outside the mask window.
+#[inline]
+pub fn irq_save() -> bool {
+    let prev: usize;
+    unsafe {
+        core::arch::asm!(
+            "csrrc {prev}, sstatus, 2",
+            prev = out(reg) prev,
+            options(nostack)
+        );
+    }
+    prev & 2 != 0
+}
+
+/// Restore S-mode interrupts to the state reported by `irq_save`.
+#[inline]
+pub fn irq_restore(enabled: bool) {
+    if enabled {
+        unsafe {
+            core::arch::asm!("csrsi sstatus, 2", options(nostack));
+        }
     }
 }
 

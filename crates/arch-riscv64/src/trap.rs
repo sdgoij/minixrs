@@ -178,9 +178,17 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 unsafe {
                     crate::clint::handle_timer_interrupt();
                     if let Some(cb) = *UART_INPUT_CALLBACK.get() {
-                        while let Some(byte) = crate::sbi::console_getchar() {
+                        // Mask SIE so the drain is atomic w.r.t. a nested
+                        // drain (an external UART IRQ can fire while this
+                        // trap handler runs with SIE=1). ser_input ops are
+                        // individually masked, but the pop→push loop must
+                        // not interleave with another drain or bytes
+                        // reorder.
+                        let saved = crate::hal::irq_save();
+                        while let Some(byte) = crate::uart::try_getchar() {
                             cb(byte);
                         }
+                        crate::hal::irq_restore(saved);
                     }
                     if let Some(cb) = *TIMER_CALLBACK.get() {
                         cb(frame);
@@ -196,11 +204,15 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                             // Drain the 16550 RX FIFO into the ser_input
                             // ring so piped bursts don't overrun the
                             // 16-byte FIFO while the shell is busy between
-                            // timer ticks.
+                            // timer ticks. Mask SIE so the drain is atomic
+                            // w.r.t. a nested timer-tick drain (see the
+                            // timer branch).
                             if let Some(cb) = *UART_INPUT_CALLBACK.get() {
+                                let saved = crate::hal::irq_save();
                                 while let Some(byte) = crate::uart::try_getchar() {
                                     cb(byte);
                                 }
+                                crate::hal::irq_restore(saved);
                             }
                         }
                         crate::plic::complete_irq(irq);

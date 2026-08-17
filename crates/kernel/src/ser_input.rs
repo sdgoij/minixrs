@@ -2,8 +2,10 @@
 //!
 //! The serial ISR writes characters here; `sys_read_handler` for fd=0
 //! reads from here.  Single-consumer (syscall), single-producer (ISR).
-//! Synchronised via atomics — the ISR runs with interrupts disabled so
-//! there is no concurrency on the writer side.
+//! Each operation is internally serialized via `hal::irq_save/irq_restore`
+//! so it is atomic w.r.t. a nested drain: the riscv port re-enables SIE
+//! during U-mode trap handling, so a timer/UART interrupt can push into
+//! the ring while a syscall is feeding or reading it.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -34,12 +36,19 @@ static READ_IDX: AtomicUsize = AtomicUsize::new(0);
 /// Push a byte into the buffer.  Called from the serial ISR.
 /// Drops the byte if the buffer is full.
 ///
+/// The operation is atomic w.r.t. other ring operations (interrupts are
+/// masked for its duration), so it is safe to call from both ISR and
+/// syscall context, including when a nested interrupt can fire.
+///
 /// # Safety
 ///
-/// Must be called with interrupts disabled (from ISR context).
+/// The underlying buffer is raw `UnsafeCell` storage; the caller must
+/// uphold the single-owner discipline for the byte slot (enforced by the
+/// masking, which serializes concurrent producers/consumers).
 #[inline]
 pub unsafe fn push_byte(byte: u8) {
     unsafe {
+        let saved = crate::hal::irq_save();
         let w = WRITE_IDX.load(Ordering::Relaxed);
         let r = READ_IDX.load(Ordering::Acquire);
         let next = (w + 1) & BUF_MASK;
@@ -48,23 +57,30 @@ pub unsafe fn push_byte(byte: u8) {
             core::ptr::write(p.add(w), byte);
             WRITE_IDX.store(next, Ordering::Release);
         }
+        crate::hal::irq_restore(saved);
     }
 }
 
 /// Try to read a byte from the buffer.
 /// Returns `Some(byte)` if data is available, `None` if empty.
+///
+/// Atomic w.r.t. other ring operations (see `push_byte`).
 #[inline]
 pub fn try_read() -> Option<u8> {
     unsafe {
+        let saved = crate::hal::irq_save();
         let r = READ_IDX.load(Ordering::Relaxed);
         let w = WRITE_IDX.load(Ordering::Acquire);
-        if r == w {
-            return None;
-        }
-        let p = BUF.get().cast::<u8>();
-        let byte = core::ptr::read(p.add(r));
-        READ_IDX.store((r + 1) & BUF_MASK, Ordering::Release);
-        Some(byte)
+        let out = if r == w {
+            None
+        } else {
+            let p = BUF.get().cast::<u8>();
+            let byte = core::ptr::read(p.add(r));
+            READ_IDX.store((r + 1) & BUF_MASK, Ordering::Release);
+            Some(byte)
+        };
+        crate::hal::irq_restore(saved);
+        out
     }
 }
 
@@ -93,11 +109,16 @@ pub fn read_blocking() -> u8 {
 }
 
 /// Return the number of bytes available for reading.
+///
+/// Atomic w.r.t. other ring operations (see `push_byte`).
 #[inline]
 pub fn available() -> usize {
+    let saved = crate::hal::irq_save();
     let w = WRITE_IDX.load(Ordering::Acquire);
     let r = READ_IDX.load(Ordering::Relaxed);
-    (w.wrapping_sub(r)) & BUF_MASK
+    let n = (w.wrapping_sub(r)) & BUF_MASK;
+    crate::hal::irq_restore(saved);
+    n
 }
 
 /// Reset the buffer (for testing).
