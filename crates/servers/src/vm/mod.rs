@@ -2269,11 +2269,15 @@ fn do_fork(msg: &mut Message) -> i32 {
     //   m_source = PM_PROC_NR (sender, set by IPC — not the parent!)
     //   m1.m1i1  = parent endpoint (VMF_ENDPOINT)
     //   m1.m1i2  = child slot number (VMF_SLOTNO)
+    //   m1.m1i3  = forking thread's tid (VMF_TID; 0 = main) — plumbed by
+    //              PM from the PM_FORK message so the kernel's SYS_FORK
+    //              copies the right thread's frame (POSIX fork).
     // Reply:
     //   m1.m1i1  = child endpoint (VMF_CHILD_ENDPOINT)
 
     let parent_ep = unsafe { msg.m_payload.m1.m1i1 };
     let child_slot = unsafe { msg.m_payload.m1.m1i2 };
+    let fork_tid = unsafe { msg.m_payload.m1.m1i3 };
     if parent_ep < 0 || child_slot < 0 || child_slot >= NR_PROCS as i32 {
         return EINVAL;
     }
@@ -2298,7 +2302,7 @@ fn do_fork(msg: &mut Message) -> i32 {
 
     // Call SYS_FORK to create the kernel Proc entry.
     const PFF_VMINHIBIT: u32 = 0x01;
-    let result = minix_rt::sys_fork(parent_ep, child_slot, PFF_VMINHIBIT);
+    let result = minix_rt::sys_fork(parent_ep, child_slot, PFF_VMINHIBIT, fork_tid);
     let (child_ep, msgaddr) = match result {
         Ok((ep, ma)) => (ep, ma),
         Err(_) => {

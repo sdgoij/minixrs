@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub type BasicSyscallFn = unsafe fn(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64;
 
 /// Maximum syscall number we handle.
-pub const NR_BASIC_SYSCALLS: usize = 64;
+pub const NR_BASIC_SYSCALLS: usize = 65;
 
 struct BasicSyscallTable(UnsafeCell<[Option<BasicSyscallFn>; NR_BASIC_SYSCALLS]>);
 unsafe impl Sync for BasicSyscallTable {}
@@ -752,6 +752,14 @@ unsafe fn sys_thread_create_handler(caller: *mut crate::proc::Proc, args: &[u64;
     unsafe { crate::thread::create(caller, args[0], args[1], args[2]) as i64 }
 }
 
+/// SYS_thread_self (64) — return the calling thread's tid (0 = main).
+unsafe fn sys_thread_self_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -38; // ENOSYS
+    }
+    unsafe { (*caller).p_tid as i64 }
+}
+
 /// SYS_thread_exit (55) — terminate the calling thread. The main thread
 /// (tid 0) calling this exits the whole process (status in args[0]).
 unsafe fn sys_thread_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
@@ -1152,6 +1160,7 @@ pub unsafe fn init_basic_syscalls() {
         register_basic_syscall(61, sys_futex_wait_handler); // NR_FUTEX_WAIT
         register_basic_syscall(62, sys_futex_wake_handler); // NR_FUTEX_WAKE
         register_basic_syscall(63, sys_hang_dump_handler); // NR_HANGDUMP
+        register_basic_syscall(64, sys_thread_self_handler); // NR_THREAD_SELF
     }
 }
 
@@ -1168,6 +1177,21 @@ mod tests {
             (*rp).p_endpoint = 42;
             let args = [0u64; 6];
             assert_eq!(sys_getpid_handler(rp, &args), 42);
+        }
+    }
+
+    #[test]
+    fn test_thread_self_returns_caller_tid() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let args = [0u64; 6];
+            // Main thread: tid 0.
+            (*rp).p_tid = 0;
+            assert_eq!(sys_thread_self_handler(rp, &args), 0);
+            // Worker thread: its tid.
+            (*rp).p_tid = 3;
+            assert_eq!(sys_thread_self_handler(rp, &args), 3);
         }
     }
 

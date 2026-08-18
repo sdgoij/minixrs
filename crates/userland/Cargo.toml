@@ -156,6 +156,14 @@ name = "forktest"
 path = "src/bin/forktest.rs"
 test = false
 
+# forkthread is a fork-from-worker test: spawns a thread, forks from it,
+# and verifies the child is a copy of the worker (Phase F2). Embedded as
+# /bin/forkthread.
+[[bin]]
+name = "forkthread"
+path = "src/bin/forkthread.rs"
+test = false
+
 [[bin]]
 name = "fbmmap"
 path = "src/bin/fbmmap.rs"

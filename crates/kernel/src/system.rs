@@ -163,6 +163,7 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 const FORK_ENDPT_OFF: usize = 8;
 const FORK_SLOT_OFF: usize = 12;
 const FORK_FLAGS_OFF: usize = 16;
+const FORK_TID_OFF: usize = 20;
 
 const CLEAR_ENDPT_OFF: usize = 8;
 
@@ -3950,6 +3951,7 @@ pub unsafe fn do_endksig_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 ///   [8..12] = parent endpoint
 ///   [12..16] = child slot number
 ///   [16..20] = fork flags (PFF_VMINHIBIT)
+///   [20..24] = forking thread's tid (0 = main; plumbed by fork())
 ///
 /// Reply fields (from `mess_krn_lsys_sys_fork`):
 ///   [8..12]  = child endpoint
@@ -3963,6 +3965,7 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         let parent_ep = msg_read_i32(msg, FORK_ENDPT_OFF);
         let child_slot = msg_read_i32(msg, FORK_SLOT_OFF);
         let fork_flags = msg_read_u32(msg, FORK_FLAGS_OFF);
+        let fork_tid = msg_read_i32(msg, FORK_TID_OFF);
 
         if !table::is_ok_endpoint(parent_ep) {
             return crate::ipc::EFAULT;
@@ -3973,11 +3976,20 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         }
 
         // POSIX fork: the child is a copy of the CALLING thread, not of the
-        // main thread. The caller is the thread blocked in the RECEIVE phase
-        // of its PM_FORK sendrec; recover it so the child resumes at the
-        // forking thread's fork() return. Falls back to the main slot for
-        // single-threaded processes (identical result) or an ambiguous scan.
-        let forking = crate::thread::find_forking_thread(rpp);
+        // main thread. The userland fork() plumbs the calling thread's tid
+        // through PM/VM into this message; look it up in the process's
+        // thread list so a fork from a worker is deterministic (the old
+        // best-effort scan was ambiguous when several threads were in a
+        // sendrec to PM at once). tid 0 = the main thread. The best-effort
+        // scan remains as a fallback for callers that omit the tid.
+        let mut forking = if fork_tid == 0 {
+            rpp
+        } else {
+            crate::thread::find_thread_by_tid(rpp, fork_tid as u32)
+        };
+        if forking.is_null() {
+            forking = crate::thread::find_forking_thread(rpp);
+        }
         if !forking.is_null() {
             rpp = forking;
         }

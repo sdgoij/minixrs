@@ -210,6 +210,9 @@ pub const NR_FUTEX_WAKE: u64 = 62;
 /// Print the kernel's per-process IPC state to the serial console
 /// (kernel: SYS_hangdump) — diagnostic for wedged-server hangs.
 pub const NR_HANGDUMP: u64 = 63;
+/// Return the calling thread's tid (0 for the main thread; kernel:
+/// SYS_thread_self).
+pub const NR_THREAD_SELF: u64 = 64;
 
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
@@ -782,6 +785,13 @@ pub fn thread_set_tls(addr: usize) {
     }
 }
 
+/// Return the calling thread's tid: 0 for the main thread, > 0 for a
+/// worker. Used by `fork()` so the kernel can copy the forking thread's
+/// frame deterministically instead of scanning for it.
+pub fn thread_self() -> i32 {
+    unsafe { syscall0(NR_THREAD_SELF) as i32 }
+}
+
 /// Block this thread until a `futex_wake` on `addr`. Returns 0 when woken,
 /// -EAGAIN when `*addr != expected` (retry the compare-and-set).
 ///
@@ -1032,13 +1042,16 @@ pub fn sys_vircopy(src_ep: i32, src_addr: u64, dst_ep: i32, dst_addr: u64, bytes
 /// `parent_ep` is the parent's endpoint.
 /// `child_slot` is the child's process table slot number.
 /// `flags` can contain PFF_VMINHIBIT.
+/// `tid` is the forking thread's tid (0 = main), so the kernel copies
+/// that thread's frame (POSIX fork) instead of scanning for it.
 /// On success, returns `(child_endpoint, parent_msgaddr)`.
 /// On failure, returns an error code.
-pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32) -> Result<(i32, u64), i32> {
+pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32, tid: i32) -> Result<(i32, u64), i32> {
     let mut msg = [0u8; 64];
     msg[8..12].copy_from_slice(&parent_ep.to_le_bytes());
     msg[12..16].copy_from_slice(&child_slot.to_le_bytes());
     msg[16..20].copy_from_slice(&flags.to_le_bytes());
+    msg[20..24].copy_from_slice(&tid.to_le_bytes());
     let r = kernel_call(0, &mut msg);
     if r != 0 {
         return Err(r);

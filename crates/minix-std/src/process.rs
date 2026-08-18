@@ -64,6 +64,10 @@ const OFF_PTR: usize = 24;
 // PM_FORK reply (via VFS_PM_FORK_REPLY): child pid in m1i1@8.
 const OFF_CHILD_PID: usize = 8;
 
+// PM_FORK request: the forking thread's tid in m1i2@12, read by PM's
+// handle_fork so the kernel's SYS_FORK copies that thread's frame.
+const OFF_FORK_TID: usize = 12;
+
 // PM_EXIT arg: m1i1 = status@8 (PM handle_exit reads m1i1).
 const OFF_EXIT_STATUS: usize = 8;
 
@@ -116,6 +120,7 @@ pub unsafe fn fork() -> Result<i32, MinixErr> {
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_FORK as i32);
+        msg_set_i32(&mut msg, OFF_FORK_TID, minix_rt::thread_self());
         let result = sendrec(PM_PROC_NR, &mut msg);
         match result {
             Ok(_) => {

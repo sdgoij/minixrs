@@ -52,6 +52,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/threadtest` is the thread smoke test: spawns kernel threads
     // that share the process address space, do PM IPC, and are joined back.
     ("/bin/threadtest", "threadtest"),
+    // `/bin/forkthread` is the fork-from-worker test: spawns a worker,
+    // forks from it, and verifies the child is a copy of the worker
+    // (deterministic fork via the plumbed tid, Phase F2).
+    ("/bin/forkthread", "forkthread"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
     // returns to baseline (see tools/alloc_churn_probe.py).

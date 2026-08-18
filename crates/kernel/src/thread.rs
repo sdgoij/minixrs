@@ -372,6 +372,25 @@ pub unsafe fn find_forking_thread(main: *mut Proc) -> *mut Proc {
     }
 }
 
+/// Find the thread with tid `tid` in `main`'s thread list (the main slot
+/// has tid 0). Returns null when no thread has that tid.
+///
+/// # Safety
+///
+/// `main` must be the process's main slot with a consistent thread list.
+pub unsafe fn find_thread_by_tid(main: *mut Proc, tid: u32) -> *mut Proc {
+    unsafe {
+        let mut t = main;
+        while !t.is_null() {
+            if (*t).p_tid == tid {
+                return t;
+            }
+            t = (*t).p_t_next;
+        }
+        core::ptr::null_mut()
+    }
+}
+
 /// Free every extra thread of `main`'s process — used when the process dies
 /// (main-thread exit, `exit()` from any thread, a fatal signal, or PM's
 /// `SYS_CLEAR` reap) or when `exec` replaces the process image. Walks the
@@ -813,6 +832,39 @@ mod tests {
             // Cleanup.
             (*main).p_t_next = core::ptr::null_mut();
             (*t1)
+                .p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+            (*main)
+                .p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_find_thread_by_tid_walks_list() {
+        let _l = ThreadTestLock::acquire();
+        unsafe {
+            reset_state();
+            let main = make_main(113);
+            assert_eq!(create(main, 0x401000, 0x7fff_f000, 0), 1);
+            assert_eq!(create(main, 0x402000, 0x7fff_e000, 0), 2);
+            let t1 = (*main).p_t_next;
+            let t2 = (*t1).p_t_next;
+
+            // Main (tid 0) and both workers are addressable by tid.
+            assert_eq!(find_thread_by_tid(main, 0), main);
+            assert_eq!(find_thread_by_tid(main, 1), t1);
+            assert_eq!(find_thread_by_tid(main, 2), t2);
+
+            // Unknown tid: null (caller falls back to the scan / main).
+            assert!(find_thread_by_tid(main, 7).is_null());
+
+            // Cleanup.
+            (*main).p_t_next = core::ptr::null_mut();
+            (*t1)
+                .p_rts_flags
+                .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+            (*t2)
                 .p_rts_flags
                 .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
             (*main)

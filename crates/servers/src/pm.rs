@@ -2432,7 +2432,10 @@ const LC_EXEC_PS_STR_OFF: usize = 40;
 ///
 /// - `caller_slot` must be a valid, in-use process slot.
 /// - `msg` must point to a valid message buffer.
-pub unsafe fn handle_fork(caller_slot: usize, _msg: &mut Message) -> i32 {
+pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
+    // The forking thread's tid (m1i2, written by userland fork()) so VM's
+    // SYS_FORK can copy that thread's frame deterministically. 0 = main.
+    let fork_tid = unsafe { msg.m_payload.m1.m1i2 };
     let result = unsafe { do_fork(caller_slot) };
     match result {
         Ok(child_slot) => {
@@ -2448,6 +2451,7 @@ pub unsafe fn handle_fork(caller_slot: usize, _msg: &mut Message) -> i32 {
             vm_msg[4..8].copy_from_slice(&(arch_common::com::VM_FORK as i32).to_le_bytes());
             vm_msg[8..12].copy_from_slice(&parent_endpoint.to_le_bytes()); // VMF_ENDPOINT
             vm_msg[12..16].copy_from_slice(&(child_slot as i32).to_le_bytes()); // VMF_SLOTNO
+            vm_msg[16..20].copy_from_slice(&fork_tid.to_le_bytes()); // VMF_TID
             let vm_reply = unsafe {
                 minix_rt::syscall2(
                     minix_rt::SENDREC_CALL,
