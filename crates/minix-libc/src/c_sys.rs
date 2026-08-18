@@ -695,21 +695,36 @@ fn set_str(field: &mut [c_char; 65], s: &[u8]) {
     field[n] = 0;
 }
 
-/// Fill the system identification struct (best effort: the kernel exposes
-/// no version information to userland yet).
+/// Fill the system identification struct from PM_SYSUNAME.
+///
+/// Each served field comes from PM's `uts_tbl`, so `machine` matches the
+/// architecture (the previous hardcoded version said x86_64 everywhere)
+/// and release/version come from the same table. `domainname` is not
+/// served by PM (C's `uts_tbl` has no entry for it) — left empty. Fields
+/// that PM rejects stay empty rather than failing the whole call.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     if buf.is_null() {
         return crate::fail(EINVAL);
     }
+    // Zero the whole struct so unserved fields are empty strings.
+    unsafe {
+        core::ptr::write_bytes(buf as *mut u8, 0, core::mem::size_of::<Utsname>());
+    }
     let u = unsafe { &mut *buf };
-    set_str(&mut u.sysname, b"Minix");
-    set_str(&mut u.nodename, b"minix");
-    set_str(&mut u.release, b"");
-    set_str(&mut u.version, b"");
-    set_str(&mut u.machine, b"x86_64");
-    set_str(&mut u.domainname, b"");
+    let fetch = |field: i32, dst: &mut [c_char; 65]| {
+        let r =
+            unsafe { minix_std::process::sysuname(field, dst.as_mut_ptr() as *mut u8, dst.len()) };
+        if r.is_err() {
+            set_str(dst, b"");
+        }
+    };
+    fetch(minix_std::process::UTS_SYSNAME, &mut u.sysname);
+    fetch(minix_std::process::UTS_NODENAME, &mut u.nodename);
+    fetch(minix_std::process::UTS_RELEASE, &mut u.release);
+    fetch(minix_std::process::UTS_VERSION, &mut u.version);
+    fetch(minix_std::process::UTS_MACHINE, &mut u.machine);
     0
 }
 

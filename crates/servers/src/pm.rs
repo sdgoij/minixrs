@@ -2860,17 +2860,21 @@ pub unsafe fn handle_getsid(caller_slot: usize, msg: &mut Message) -> i32 {
 /// uname strings served by PM_SYSUNAME (matching C `uts_tbl` in
 /// `servers/pm/misc.c`). The kernel-arch / hostname / bus fields are
 /// unsupported, as in C (NULL entries).
+///
+/// The constants carry their own NUL terminator: Rust byte strings do not
+/// append one (unlike C), so `string.len()` below equals C's
+/// `strlen(string) + 1`.
 #[cfg(target_arch = "x86_64")]
-const UTS_ARCH: &[u8] = b"x86_64";
+const UTS_ARCH: &[u8] = b"x86_64\0";
 #[cfg(target_arch = "riscv64")]
-const UTS_ARCH: &[u8] = b"riscv64";
+const UTS_ARCH: &[u8] = b"riscv64\0";
 #[cfg(target_arch = "aarch64")]
-const UTS_ARCH: &[u8] = b"aarch64";
+const UTS_ARCH: &[u8] = b"aarch64\0";
 const UTS_MACHINE: &[u8] = UTS_ARCH;
-const UTS_NODENAME: &[u8] = b"minix";
-const UTS_RELEASE: &[u8] = b"";
-const UTS_VERSION: &[u8] = b"";
-const UTS_SYSNAME: &[u8] = b"Minix";
+const UTS_NODENAME: &[u8] = b"minix\0";
+const UTS_RELEASE: &[u8] = b"\0";
+const UTS_VERSION: &[u8] = b"\0";
+const UTS_SYSNAME: &[u8] = b"Minix\0";
 
 /// `_UTS_*` field indices and request codes (sys/utsname.h).
 const UTS_GET: i32 = 0;
@@ -2895,9 +2899,10 @@ fn uts_tbl() -> &'static [Option<&'static [u8]>] {
 /// Handler for PM_SYSUNAME — copy one uname string to the caller.
 ///
 /// Matching C: `do_sysuname()` in `servers/pm/misc.c`. Request
-/// `mess_lc_pm_sysuname`: req@m1i1, field@m1i2, len@raw[16..24],
-/// value@raw[24..32]. Returns the number of bytes copied (the reply
-/// m_type); `_UTS_SET` is unsupported (C has it `#if 0`'d too).
+/// `mess_lc_pm_sysuname` (payload-relative offsets; the payload starts at
+/// message byte 8 after m_source/m_type): req@m1i1, field@m1i2,
+/// len@raw[8..16], value@raw[16..24]. Returns the number of bytes copied
+/// (the reply m_type); `_UTS_SET` is unsupported (C has it `#if 0`'d too).
 ///
 /// # Safety
 ///
@@ -2908,12 +2913,12 @@ pub unsafe fn handle_sysuname(caller_slot: usize, msg: &mut Message) -> i32 {
     let req = unsafe { msg.m_payload.m1.m1i1 };
     let field = unsafe { msg.m_payload.m1.m1i2 };
     let len = u64::from_le_bytes(
-        unsafe { &msg.m_payload.raw[16..24] }
+        unsafe { &msg.m_payload.raw[8..16] }
             .try_into()
             .unwrap_or([0; 8]),
     );
     let value = u64::from_le_bytes(
-        unsafe { &msg.m_payload.raw[24..32] }
+        unsafe { &msg.m_payload.raw[16..24] }
             .try_into()
             .unwrap_or([0; 8]),
     );
@@ -2926,8 +2931,9 @@ pub unsafe fn handle_sysuname(caller_slot: usize, msg: &mut Message) -> i32 {
     if req != UTS_GET {
         return EINVAL; // _UTS_SET not supported (matching C)
     }
-    // C: n = strlen(string) + 1, clamped to the caller's buffer size.
-    let n = (string.len() + 1).min(len as usize);
+    // The constants include their NUL, so n = string.len() matches C's
+    // strlen(string) + 1, clamped to the caller's buffer size.
+    let n = string.len().min(len as usize);
     let base = MPROC.as_ptr();
     let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
     #[cfg(target_os = "minix")]
@@ -5627,15 +5633,16 @@ mod tests {
         let mut msg = make_msg();
         msg.m_payload.m1.m1i1 = UTS_GET;
         msg.m_payload.m1.m1i2 = 7; // _UTS_SYSNAME = "Minix"
-        // len = 64: full string + NUL.
+        // len = 64: full string + NUL. mess_lc_pm_sysuname (payload
+        // offsets): req@m1i1, field@m1i2, len@raw[8..16], value@raw[16..24].
         unsafe {
-            msg.m_payload.raw[16..24].copy_from_slice(&64u64.to_le_bytes());
-            msg.m_payload.raw[24..32].copy_from_slice(&0x1234_0000u64.to_le_bytes());
+            msg.m_payload.raw[8..16].copy_from_slice(&64u64.to_le_bytes());
+            msg.m_payload.raw[16..24].copy_from_slice(&0x1234_0000u64.to_le_bytes());
         }
         assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, 6); // "Minix" + NUL
         // len = 3 clamps the copy (C: n = min(strlen+1, len)).
         unsafe {
-            msg.m_payload.raw[16..24].copy_from_slice(&3u64.to_le_bytes());
+            msg.m_payload.raw[8..16].copy_from_slice(&3u64.to_le_bytes());
         }
         assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, 3);
     }

@@ -1550,6 +1550,32 @@ mod tests {
     use super::*;
     use crate::table::proc_init;
 
+    /// Page-aligned fake page-table page: `pte_to_phys` masks the low 12
+    /// bits, so the table pages must be 4096-aligned or the walk reads the
+    /// wrong address after descending a level.
+    #[repr(C, align(4096))]
+    struct FakePtPage {
+        data: [u64; 512],
+    }
+
+    /// Fill a 4-level page table mapping one 4 KB page (`map_va` →
+    /// `map_pa`); returns the cr3 (host address of `pml4`).
+    fn fill_fake_pt(
+        pml4: &mut [u64; 512],
+        pdpt: &mut [u64; 512],
+        pd: &mut [u64; 512],
+        pt: &mut [u64; 512],
+        map_va: u64,
+        map_pa: u64,
+    ) -> u64 {
+        pml4[0] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pdpt[0] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pd[0] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        let idx = (map_va >> 12) & 511;
+        pt[idx as usize] = map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
+        pml4.as_mut_ptr() as u64
+    }
+
     fn setup_proc(nr: i32) -> *mut Proc {
         unsafe {
             crate::hal::init_cpulocals();
@@ -1648,6 +1674,92 @@ mod tests {
             let rts = (*src).p_rts_flags.load(Ordering::Relaxed);
             assert!(rts & RtsFlags::SENDING.bits() != 0);
             assert_eq!((*dst).p_caller_q, src);
+        }
+    }
+
+    #[test]
+    fn test_mini_send_blocked_path_preserves_message() {
+        // The queued (blocked) path copies the caller's message via
+        // copy_from_user into p_sendmsg; the later RECEIVE dequeue copies
+        // p_sendmsg to the receiver's buffer. Drive the full chain with a
+        // real copy_from_user (fake page table) and verify the message
+        // survives intact — the PM_SYSUNAME consumer failed here on some
+        // stack layouts because the queued message arrived corrupted.
+        unsafe {
+            proc_init();
+            let src = setup_proc(0);
+            let dst = setup_proc(1);
+            (*dst).p_rts_flags.store(0, Ordering::Relaxed); // not receiving
+
+            // Caller's message lives in a page-aligned host buffer mapped at
+            // VA 0x1000 in the sender's fake page table.
+            #[repr(align(4096))]
+            struct AlignedBuf {
+                data: [u8; MESSAGE_SIZE],
+            }
+            let mut aligned = AlignedBuf {
+                data: [0u8; MESSAGE_SIZE],
+            };
+            let msg_buf = &mut aligned.data;
+            msg_buf[0..4].copy_from_slice(&42i32.to_ne_bytes()); // dest
+            msg_buf[4..8].copy_from_slice(&0x19i32.to_ne_bytes()); // m_type
+            msg_buf[8..12].copy_from_slice(&0i32.to_ne_bytes()); // req
+            msg_buf[12..16].copy_from_slice(&7i32.to_ne_bytes()); // field
+            msg_buf[16..24].copy_from_slice(&65u64.to_ne_bytes()); // len
+            msg_buf[24..32].copy_from_slice(&0x1003_0000u64.to_ne_bytes()); // value
+
+            let mut pml4 = FakePtPage { data: [0; 512] };
+            let mut pdpt = FakePtPage { data: [0; 512] };
+            let mut pd = FakePtPage { data: [0; 512] };
+            let mut pt = FakePtPage { data: [0; 512] };
+            let cr3 = fill_fake_pt(
+                &mut pml4.data,
+                &mut pdpt.data,
+                &mut pd.data,
+                &mut pt.data,
+                0x1000,
+                msg_buf.as_ptr() as u64,
+            );
+            (*src).p_seg.p_cr3 = cr3;
+
+            let dst_ep = (*dst).p_endpoint;
+            // Check the blocked-path copy directly.
+            let copy_r = copy_from_user(src, 0x1000, (*src).p_sendmsg.as_mut_ptr(), MESSAGE_SIZE);
+            assert_eq!(copy_r, OK, "copy_from_user in blocked path must succeed");
+            assert_eq!(
+                &(&(*src).p_sendmsg)[12..16],
+                &7i32.to_ne_bytes(),
+                "field after direct copy"
+            );
+            assert_eq!(mini_send(src, dst_ep, 0x1000 as *const u8, 0), OK);
+            assert!(
+                (*src).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SENDING.bits() != 0,
+                "sender must block on the queued path"
+            );
+
+            // The message must be intact in p_sendmsg.
+            let s_msg = &(*src).p_sendmsg;
+            assert_eq!(&s_msg[8..12], &0i32.to_ne_bytes(), "req");
+            assert_eq!(&s_msg[12..16], &7i32.to_ne_bytes(), "field");
+            assert_eq!(&s_msg[16..24], &65u64.to_ne_bytes(), "len");
+            assert_eq!(&s_msg[24..32], &0x1003_0000u64.to_ne_bytes(), "value");
+
+            // Dequeue into the receiver's buffer and verify content.
+            let mut buf = [0u8; MESSAGE_SIZE];
+            assert_eq!(
+                mini_receive(dst, crate::system::NONE, buf.as_mut_ptr(), 0),
+                OK
+            );
+            assert_eq!(&buf[4..8], &0x19i32.to_ne_bytes(), "m_type");
+            assert_eq!(&buf[8..12], &0i32.to_ne_bytes(), "req");
+            assert_eq!(&buf[12..16], &7i32.to_ne_bytes(), "field");
+            assert_eq!(&buf[16..24], &65u64.to_ne_bytes(), "len");
+            assert_eq!(&buf[24..32], &0x1003_0000u64.to_ne_bytes(), "value");
+            // Bytes 0-3 are overwritten with the sender's endpoint.
+            assert_eq!(
+                i32::from_ne_bytes(buf[..4].try_into().unwrap()),
+                (*src).p_endpoint
+            );
         }
     }
 

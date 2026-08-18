@@ -59,6 +59,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ptracetest` is the ptrace smoke test: TRACEME + SIGSTOP stop,
     // CONTINUE resume, and exit reap through PM_PTRACE (Phase J6).
     ("/bin/ptracetest", "ptracetest"),
+    // `/bin/unametest` fetches the PM_SYSUNAME fields and verifies
+    // sysname/nodename/machine (J6 follow-up).
+    ("/bin/unametest", "unametest"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
     // returns to baseline (see tools/alloc_churn_probe.py).

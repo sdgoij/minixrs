@@ -26,6 +26,7 @@ pub const PM_FORK: u32 = PM_BASE + 2;
 pub const PM_WAITPID: u32 = PM_BASE + 3;
 pub const PM_GETPID: u32 = PM_BASE + 4;
 pub const PM_PTRACE: u32 = PM_BASE + 8;
+pub const PM_SYSUNAME: u32 = PM_BASE + 25;
 pub const PM_SETUID: u32 = PM_BASE + 5;
 pub const PM_GETUID: u32 = PM_BASE + 6;
 pub const PM_SETGROUPS: u32 = PM_BASE + 9;
@@ -131,6 +132,58 @@ pub unsafe fn ptrace(request: i32, pid: i32, addr: u64, data: i64) -> Result<i64
     #[cfg(not(target_os = "minix"))]
     {
         let _ = (request, pid, addr, data);
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// `_UTS_*` field indices and request codes (sys/utsname.h). The PM
+/// handler serves GET only, like C's `#if 0`'d SET.
+pub const UTS_GET: i32 = 0;
+pub const UTS_ARCH: i32 = 0;
+pub const UTS_KERNEL: i32 = 1;
+pub const UTS_MACHINE: i32 = 2;
+pub const UTS_HOSTNAME: i32 = 3;
+pub const UTS_NODENAME: i32 = 4;
+pub const UTS_RELEASE: i32 = 5;
+pub const UTS_VERSION: i32 = 6;
+pub const UTS_SYSNAME: i32 = 7;
+pub const UTS_BUS: i32 = 8;
+
+/// Fetch one uname string (PM_SYSUNAME).
+///
+/// `field` is a `_UTS_*` index; PM copies the string (NUL-terminated,
+/// clamped to `len`) into `value` and replies with the byte count. Returns
+/// the number of bytes copied (including the NUL when it fits).
+///
+/// # Safety
+///
+/// `value` must name a caller-accessible buffer of at least `len` bytes.
+pub unsafe fn sysuname(field: i32, value: *mut u8, len: usize) -> Result<usize, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SYSUNAME as i32);
+        msg_set_i32(&mut msg, 8, UTS_GET); // m1i1 = req (mess_lc_pm_sysuname)
+        msg_set_i32(&mut msg, 12, field); // m1i2 = field
+        msg[16..24].copy_from_slice(&(len as u64).to_le_bytes()); // .len
+        msg[24..32].copy_from_slice(&(value as u64).to_le_bytes()); // .value
+        let result = sendrec(PM_PROC_NR, &mut msg);
+        match result {
+            Ok(_) => {
+                let mtype = msg_i32(&msg, OFF_TYPE);
+                if mtype < 0 {
+                    Err(MinixErr::from_i32(mtype))
+                } else {
+                    // The reply m_type is the number of bytes copied.
+                    Ok(mtype as usize)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (field, value, len);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -525,6 +578,29 @@ mod tests {
         assert_eq!(PM_ISSETUGID, 0x01F);
         assert_eq!(PM_GETSID, 0x020);
         assert_eq!(PM_EXEC_NEW, 0x02B);
+        assert_eq!(PM_PTRACE, 0x008);
+        assert_eq!(PM_SYSUNAME, 0x019);
+    }
+
+    #[test]
+    fn test_sysuname_message_format() {
+        // PM handle_sysuname reads req@m1i1(8), field@m1i2(12),
+        // len@raw[16..24], value@raw[24..32] (mess_lc_pm_sysuname); the
+        // reply m_type is the number of bytes copied.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SYSUNAME as i32);
+        msg_set_i32(&mut msg, 8, UTS_GET);
+        msg_set_i32(&mut msg, 12, UTS_MACHINE);
+        msg[16..24].copy_from_slice(&65u64.to_le_bytes());
+        msg[24..32].copy_from_slice(&0x1234_0000u64.to_le_bytes());
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x019);
+        assert_eq!(msg_i32(&msg, 8), UTS_GET);
+        assert_eq!(msg_i32(&msg, 12), UTS_MACHINE);
+        assert_eq!(u64::from_le_bytes(msg[16..24].try_into().unwrap()), 65);
+        assert_eq!(
+            u64::from_le_bytes(msg[24..32].try_into().unwrap()),
+            0x1234_0000
+        );
     }
 
     #[test]
