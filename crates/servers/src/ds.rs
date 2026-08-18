@@ -28,7 +28,7 @@ pub const NR_DS_KEYS: usize = 64; // 2 * NR_SYS_PROCS (32)
 pub const NR_DS_SUBS: usize = 128; // 4 * NR_SYS_PROCS (32)
 
 /// Maximum key length.
-pub const DS_MAX_KEYLEN: usize = 64;
+pub const DS_MAX_KEYLEN: usize = 80; // C ds.h — "Max length of a key, including '\0'."
 
 /// Entry is in use.
 pub const DSF_IN_USE: u32 = 0x001;
@@ -48,6 +48,9 @@ pub const DSF_TYPE_MEM: u32 = 0x040;
 /// Type: label (endpoint mapping).
 pub const DSF_TYPE_LABEL: u32 = 0x080;
 
+/// `getsysinfo(DS_PROC_NR, SI_DATA_STORE, ...)` request code (sysinfo.h).
+pub const SI_DATA_STORE: i32 = 5;
+
 // Internal flag bits (stored in entry, not exposed to caller).
 const DSF_MASK_INTERNAL: u32 = DSF_IN_USE;
 
@@ -61,32 +64,37 @@ const DSF_PRIV_SUBSCRIBE: u32 = 0x4000;
 
 // Types
 
-/// A data store entry (maps to C `struct data_store`).
-#[derive(Debug, Clone)]
+/// A data store entry — byte-for-byte C `struct data_store` (ds/store.h):
+/// `int flags; char key[DS_MAX_KEYLEN]; char owner[DS_MAX_KEYLEN];` then
+/// the anonymous `union { unsigned u32; struct { void *data; size_t
+/// length; size_t reallen; } mem; }`. The SI_DATA_STORE reply copies this
+/// array raw, so the layout must match C exactly.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct DataStore {
     pub flags: u32,
     pub key: [u8; DS_MAX_KEYLEN],
     pub owner: [u8; DS_MAX_KEYLEN],
-    pub data: DataValue,
+    pub u: DataStoreU,
 }
 
-/// The value stored in a data entry.
-#[derive(Debug, Clone)]
+/// C `struct data_store`'s anonymous union. U32 and label entries store
+/// their value/endpoint in `u32` (C `do_publish` writes `u.u32` for both
+/// DSF_TYPE_U32 and DSF_TYPE_LABEL); memory blobs use `mem`.
+#[derive(Clone, Copy)]
 #[repr(C)]
-pub enum DataValue {
-    /// Unsigned 32-bit value.
-    U32(u32),
-    /// Endpoint (for label type).
-    Endpoint(i32),
-    /// Not supported without heap allocator — use U32/LABEL only.
-    Unsupported,
+pub union DataStoreU {
+    pub u32: u32,
+    pub mem: DataStoreMem,
 }
 
-impl Default for DataValue {
-    fn default() -> Self {
-        DataValue::U32(0)
-    }
+/// C `struct data_store`'s `mem` member (memory blob).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DataStoreMem {
+    pub data: u64,
+    pub length: u64,
+    pub reallen: u64,
 }
 
 /// A subscription entry (maps to C `struct subscription`).
@@ -147,7 +155,7 @@ impl DsStoreRaw {
                     flags: 0,
                     key: [0u8; DS_MAX_KEYLEN],
                     owner: [0u8; DS_MAX_KEYLEN],
-                    data: DataValue::U32(0),
+                    u: DataStoreU { u32: 0 },
                 }
             }; NR_DS_KEYS],
         ))
@@ -240,9 +248,7 @@ unsafe fn lookup_label_entry(endpoint: i32) -> Option<*mut DataStore> {
         if flags & DSF_TYPE_LABEL == 0 {
             continue;
         }
-        if let DataValue::Endpoint(ep) = entry.data
-            && ep == endpoint
-        {
+        if unsafe { entry.u.u32 as i32 } == endpoint {
             return Some(entry);
         }
     }
@@ -496,7 +502,7 @@ pub unsafe fn do_publish_u32(key: &[u8], value: u32, source: i32) -> Result<(), 
             .unwrap_or(DS_MAX_KEYLEN - 1);
         dsp.owner[..olen].copy_from_slice(&source_name[..olen]);
         dsp.owner[olen] = 0;
-        dsp.data = DataValue::U32(value);
+        dsp.u.u32 = value;
         dsp.flags = DSF_IN_USE | DSF_TYPE_U32;
 
         // Compute entry index for subscriber notification.
@@ -545,7 +551,7 @@ pub unsafe fn do_publish_label(key: &[u8], endpoint: i32, source: i32) -> Result
             .unwrap_or(DS_MAX_KEYLEN - 1);
         dsp.owner[..olen].copy_from_slice(&source_name[..olen]);
         dsp.owner[olen] = 0;
-        dsp.data = DataValue::Endpoint(endpoint);
+        dsp.u.u32 = endpoint as u32;
         dsp.flags = DSF_IN_USE | DSF_TYPE_LABEL;
 
         let store_base = DS_STORE.as_ptr();
@@ -568,10 +574,7 @@ pub unsafe fn do_publish_label(key: &[u8], endpoint: i32, source: i32) -> Result
 pub unsafe fn do_retrieve_u32(key: &[u8]) -> Result<u32, i32> {
     unsafe {
         let dsp = lookup_entry(key, DSF_TYPE_U32).ok_or(-3)?;
-        match (*dsp).data {
-            DataValue::U32(v) => Ok(v),
-            _ => Err(-22),
-        }
+        Ok((*dsp).u.u32)
     }
 }
 
@@ -583,10 +586,7 @@ pub unsafe fn do_retrieve_u32(key: &[u8]) -> Result<u32, i32> {
 pub unsafe fn do_retrieve_label(key: &[u8]) -> Result<i32, i32> {
     unsafe {
         let dsp = lookup_entry(key, DSF_TYPE_LABEL).ok_or(-3)?;
-        match (*dsp).data {
-            DataValue::Endpoint(ep) => Ok(ep),
-            _ => Err(-22),
-        }
+        Ok((*dsp).u.u32 as i32)
     }
 }
 
@@ -790,17 +790,49 @@ unsafe fn ds_getprocname_by_name(name: &[u8]) -> Option<i32> {
             .iter()
             .position(|&c| c == 0)
             .unwrap_or(entry.key.len());
-        if key_len == name_len
-            && entry.key[..key_len] == name[..name_len]
-            && let DataValue::Endpoint(ep) = entry.data
-        {
-            return Some(ep);
+        if key_len == name_len && entry.key[..key_len] == name[..name_len] {
+            return Some(unsafe { entry.u.u32 as i32 });
         }
     }
     None
 }
 
 // Server main loop (stub — see Phase 12)
+
+/// DS_GETSYSINFO — copy the whole data store to the caller.
+///
+/// Matching C: `do_getsysinfo()` in `servers/ds/store.c`. `what` must be
+/// `SI_DATA_STORE` and `size` must equal `sizeof(struct data_store) *
+/// NR_DS_KEYS`, else EINVAL. The reply is a raw copy of `DS_STORE` in the
+/// C-compatible layout, so a C consumer (e.g. IS `dmp_ds`) can parse it.
+pub fn do_getsysinfo(caller_ep: i32, what: i32, where_addr: u64, size: u64) -> i32 {
+    const EINVAL: i32 = -22;
+    if what != SI_DATA_STORE {
+        return EINVAL;
+    }
+    let length = (core::mem::size_of::<DataStore>() * NR_DS_KEYS) as u64;
+    if length != size {
+        return EINVAL;
+    }
+    #[cfg(target_os = "minix")]
+    {
+        let r = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            DS_STORE.as_ptr() as u64,
+            caller_ep,
+            where_addr,
+            length as usize,
+        );
+        if r != 0 {
+            return r;
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (caller_ep, where_addr); // host tests validate the checks
+    }
+    0
+}
 
 /// DS server main loop.
 ///
@@ -813,7 +845,7 @@ pub fn ds_server_main() {
     #[cfg(target_os = "minix")]
     {
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SENDNB_CALL: u64 = 51;
         const ANY: i32 = 0x0000ffff;
         const ENOSYS: i32 = -71;
 
@@ -848,7 +880,7 @@ pub fn ds_server_main() {
                 msg.m_type = ENOSYS;
                 unsafe {
                     minix_rt::syscall2(
-                        SENDREC_CALL,
+                        SENDNB_CALL,
                         src_ep as u64,
                         &mut msg as *mut arch_common::ipc::Message as u64,
                     );
@@ -1028,22 +1060,33 @@ pub fn ds_server_main() {
                         }
                     }
                     0x807 => {
-                        // DS_GETSYSINFO — no in-tree consumer queries DS
-                        // today; implement SI_DATA_STORE (raw store copy)
-                        // when one exists (see PORTING_PLAN.md J6
-                        // ds-getsysinfo). ENOSYS is the C default for
-                        // unimplemented calls.
-                        ENOSYS
+                        // DS_GETSYSINFO (C ds/store.c do_getsysinfo): request
+                        // mess_lsys_getsysinfo — what@m1i1, where@raw[8..16],
+                        // size@raw[16..24] (payload offsets).
+                        let what = unsafe { msg.m_payload.m1.m1i1 };
+                        let where_addr = u64::from_le_bytes(
+                            unsafe { &msg.m_payload.raw[8..16] }
+                                .try_into()
+                                .unwrap_or([0; 8]),
+                        );
+                        let size = u64::from_le_bytes(
+                            unsafe { &msg.m_payload.raw[16..24] }
+                                .try_into()
+                                .unwrap_or([0; 8]),
+                        );
+                        do_getsysinfo(src_ep, what, where_addr, size)
                     }
                     _ => ENOSYS,
                 }
             };
 
-            // Send the reply.
+            // Send the reply. A plain SENDNB (C `reply()` uses ipc_send): a
+            // SENDREC here would block in its receive phase and swallow the
+            // client's next request without dispatching it.
             msg.m_type = status;
             unsafe {
                 minix_rt::syscall2(
-                    SENDREC_CALL,
+                    SENDNB_CALL,
                     src_ep as u64,
                     &mut msg as *mut arch_common::ipc::Message as u64,
                 );
@@ -1310,7 +1353,33 @@ mod tests {
         assert_eq!(DSF_MASK_TYPE, 0x0F0);
         assert_eq!(NR_DS_KEYS, 64);
         assert_eq!(NR_DS_SUBS, 128);
-        assert_eq!(DS_MAX_KEYLEN, 64);
+        assert_eq!(DS_MAX_KEYLEN, 80); // C ds.h
+        assert_eq!(SI_DATA_STORE, 5); // C sysinfo.h
+    }
+
+    #[test]
+    fn test_data_store_c_layout() {
+        // C struct data_store (ds/store.h): int flags (4) + key[80] +
+        // owner[80] + union {u32 | mem{data,length,reallen}} (24), with the
+        // union 8-aligned → 192 bytes, align 8.
+        assert_eq!(core::mem::size_of::<DataStore>(), 192);
+        assert_eq!(core::mem::align_of::<DataStore>(), 8);
+        assert_eq!(core::mem::offset_of!(DataStore, key), 4);
+        assert_eq!(core::mem::offset_of!(DataStore, owner), 84);
+        assert_eq!(core::mem::offset_of!(DataStore, u), 168);
+        assert_eq!(core::mem::size_of::<DataStoreU>(), 24);
+    }
+
+    #[test]
+    fn test_getsysinfo_checks_and_size() {
+        let _g = setup();
+        // Unknown `what` → EINVAL.
+        assert_eq!(do_getsysinfo(-5, 0, 0, 0), -22);
+        // Size must match sizeof(struct data_store) * NR_DS_KEYS.
+        assert_eq!(do_getsysinfo(-5, SI_DATA_STORE, 0, 0), -22);
+        let len = (core::mem::size_of::<DataStore>() * NR_DS_KEYS) as u64;
+        // On host the vircopy is compiled out; the checks pass → 0.
+        assert_eq!(do_getsysinfo(-5, SI_DATA_STORE, 0, len), 0);
     }
 
     #[test]

@@ -465,11 +465,13 @@ pub unsafe fn proc_init() {
     }
 
     unsafe {
-        // The shared USER priv slot may SENDREC to PM, VFS, VM, and the
-        // window server. PM/VFS: MINIX `USER_IPC_TO` (process lifecycle +
-        // files). VM: this port's userland `brk()` sends VM_BRK directly
-        // to the VM server (minix-rt `brk`), so it must be reachable too.
-        // WS: the `wdemo` client talks to the wserver boot proc (K5).
+        // The shared USER priv slot may SENDREC to PM, VFS, VM, WS, and
+        // DS. PM/VFS: MINIX `USER_IPC_TO` (process lifecycle + files).
+        // VM: this port's userland `brk()` sends VM_BRK directly to the
+        // VM server (minix-rt `brk`), so it must be reachable too. WS:
+        // the `wdemo` client talks to the wserver boot proc (K5). DS:
+        // userland `getsysinfo`-style clients (e.g. `/bin/dstest`) query
+        // the data store.
         let pm_priv = BOOT_IMAGE
             .iter()
             .position(|bi| bi.proc_nr == arch_common::com::PM_PROC_NR)
@@ -485,6 +487,10 @@ pub unsafe fn proc_init() {
         let ws_priv = BOOT_IMAGE
             .iter()
             .position(|bi| bi.proc_nr == arch_common::com::WS_PROC_NR)
+            .unwrap_or(0);
+        let ds_priv = BOOT_IMAGE
+            .iter()
+            .position(|bi| bi.proc_nr == arch_common::com::DS_PROC_NR)
             .unwrap_or(0);
 
         for (i, bi) in BOOT_IMAGE.iter().enumerate() {
@@ -511,6 +517,7 @@ pub unsafe fn proc_init() {
                 (*priv_ptr).s_ipc_to.set(vfs_priv);
                 (*priv_ptr).s_ipc_to.set(vm_priv);
                 (*priv_ptr).s_ipc_to.set(ws_priv);
+                (*priv_ptr).s_ipc_to.set(ds_priv);
                 for chunk in (*priv_ptr).s_k_call_mask.iter_mut() {
                     *chunk = 0;
                 }

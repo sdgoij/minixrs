@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
+minix-util = { path = "../minix-util" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # binaries that cannot run as host-native tests. Tests live in the lib target.
@@ -193,6 +194,14 @@ test = false
 [[bin]]
 name = "utimetest"
 path = "src/bin/utimetest.rs"
+test = false
+
+# dstest is the DS_GETSYSINFO smoke test: verifies the DS wire protocol
+# (publish EPERM without a label, SI_DATA_STORE size checks + copy).
+# Embedded as /bin/dstest.
+[[bin]]
+name = "dstest"
+path = "src/bin/dstest.rs"
 test = false
 
 [[bin]]

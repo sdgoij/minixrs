@@ -68,6 +68,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/utimetest` exercises the VFS_UTIMENS → MFS fs_utime chain
     // (explicit times, UTIME_OMIT, UTIME_NOW) on a scratch file.
     ("/bin/utimetest", "utimetest"),
+    // `/bin/dstest` verifies the DS wire protocol: publish EPERM without
+    // a label, DS_GETSYSINFO size checks and the SI_DATA_STORE copy.
+    ("/bin/dstest", "dstest"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
     // returns to baseline (see tools/alloc_churn_probe.py).
