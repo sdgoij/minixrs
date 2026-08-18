@@ -21,9 +21,12 @@ pub fn fs_new_driver() -> i32 {
 }
 
 /// Change mode of a pipe inode.
+///
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: misc.c fs_chmod()
 pub fn fs_chmod() -> i32 {
-    todo!("pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring")
+    ENOSYS
 }
 
 #[cfg(test)]
@@ -46,8 +49,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_chmod_panics() {
-        fs_chmod();
+    fn test_fs_chmod_returns_enosys() {
+        assert_eq!(fs_chmod(), ENOSYS);
     }
 }

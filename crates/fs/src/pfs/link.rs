@@ -7,12 +7,11 @@ use crate::pfs::consts::*;
 
 /// Truncate a pipe inode.
 ///
-/// Only truncation to size 0 is supported (pipes cannot grow via truncate).
-///
-/// Returns OK on success, EINVAL if `newsize != 0`.
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: link.c fs_ftrunc(), truncate_inode()
 pub fn fs_ftrunc() -> i32 {
-    todo!("pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring")
+    ENOSYS
 }
 
 /// Create a hard link — not supported for pipes.
@@ -60,8 +59,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_ftrunc_panics() {
-        fs_ftrunc();
+    fn test_fs_ftrunc_returns_enosys() {
+        assert_eq!(fs_ftrunc(), ENOSYS);
     }
 }

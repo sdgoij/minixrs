@@ -7,13 +7,11 @@ use crate::pfs::inode::*;
 
 /// Create a new pipe inode.
 ///
-/// Allocates an inode of type `I_NAMED_PIPE` on the given device.
-/// Returns the inode number and metadata through the VFS message.
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: open.c fs_newnode()
 pub fn fs_newnode() -> i32 {
-    todo!(
-        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
-    )
+    ENOSYS
 }
 
 /// Create a pipe inode.
@@ -88,8 +86,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_newnode_panics() {
-        fs_newnode();
+    fn test_fs_newnode_returns_enosys() {
+        assert_eq!(fs_newnode(), ENOSYS);
     }
 }

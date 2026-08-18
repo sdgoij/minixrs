@@ -289,11 +289,12 @@ pub fn dup_inode(ip_idx: u16) {
 }
 
 /// VFS putnode handler — decrease inode reference count.
+///
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: inode.c fs_putnode()
 pub fn fs_putnode() -> i32 {
-    todo!(
-        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
-    )
+    ENOSYS
 }
 
 unsafe fn remove_from_unused(idx: u16) {
@@ -484,8 +485,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_putnode_panics() {
-        fs_putnode();
+    fn test_fs_putnode_returns_enosys() {
+        assert_eq!(fs_putnode(), ENOSYS);
     }
 }

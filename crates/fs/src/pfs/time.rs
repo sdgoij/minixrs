@@ -5,12 +5,11 @@ use crate::pfs::glo;
 
 /// Update access and modification times of a pipe inode.
 ///
-/// In PFS, `fs_utime` updates the atime and mtime fields of an inode.
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: time.c fs_utime()
 pub fn fs_utime() -> i32 {
-    todo!(
-        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
-    )
+    ENOSYS
 }
 
 /// Set access time on an inode.
@@ -82,8 +81,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_utime_panics() {
-        fs_utime();
+    fn test_fs_utime_returns_enosys() {
+        assert_eq!(fs_utime(), ENOSYS);
     }
 }

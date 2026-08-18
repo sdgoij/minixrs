@@ -6,12 +6,11 @@ use crate::pfs::inode::*;
 
 /// Stat a pipe inode.
 ///
-/// Returns file metadata including size, mode, timestamps, etc.
+/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
+/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
 // Reference: stadir.c fs_stat()
 pub fn fs_stat() -> i32 {
-    todo!(
-        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
-    )
+    ENOSYS
 }
 
 /// Statvfs — not meaningful for PFS (no block storage).
@@ -72,8 +71,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pfs server is unwired")]
-    fn test_fs_stat_panics() {
-        fs_stat();
+    fn test_fs_stat_returns_enosys() {
+        assert_eq!(fs_stat(), ENOSYS);
     }
 }
