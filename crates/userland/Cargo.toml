@@ -187,6 +187,14 @@ name = "eptest"
 path = "src/bin/eptest.rs"
 test = false
 
+# utimetest is the utime smoke test: exercises the VFS_UTIMENS → MFS
+# fs_utime chain (explicit times, UTIME_OMIT, UTIME_NOW). Embedded as
+# /bin/utimetest.
+[[bin]]
+name = "utimetest"
+path = "src/bin/utimetest.rs"
+test = false
+
 [[bin]]
 name = "fbmmap"
 path = "src/bin/fbmmap.rs"

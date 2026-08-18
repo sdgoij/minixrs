@@ -10,6 +10,8 @@
 
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_ushort, c_void};
 
+use crate::c_time::TimeT;
+
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const ENOSYS: i32 = 71;
@@ -726,6 +728,74 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     fetch(minix_std::process::UTS_VERSION, &mut u.version);
     fetch(minix_std::process::UTS_MACHINE, &mut u.machine);
     0
+}
+
+// ---- utime.h / sys/time.h timestamps (VFS_UTIMENS → FS fs_utime) ----
+
+/// C `struct utimbuf` (utime.h).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Utimbuf {
+    pub actime: TimeT,
+    pub modtime: TimeT,
+}
+
+/// Set a file's access/modification times (`utime(2)`).
+///
+/// `times == NULL` stamps both fields with the current time (UTIME_NOW).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utime(path: *const c_char, times: *const Utimbuf) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    if path_bytes.is_empty() {
+        return crate::fail(ENOENT); // X/Open requirement
+    }
+    let (actime, modtime, acnsec, mnsec) = if times.is_null() {
+        (0, 0, minix_std::fs::UTIME_NOW, minix_std::fs::UTIME_NOW)
+    } else {
+        let t = unsafe { &*times };
+        (t.actime, t.modtime, 0, 0)
+    };
+    match unsafe { minix_std::fs::utime(path_bytes, actime, modtime, acnsec, mnsec) } {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Set a file's access/modification times (`utimes(2)`, microsecond).
+///
+/// `tv == NULL` stamps both fields with the current time.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimes(
+    path: *const c_char,
+    tv: *const [crate::c_time::TimeVal; 2],
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    if path_bytes.is_empty() {
+        return crate::fail(ENOENT); // X/Open requirement
+    }
+    let (actime, modtime, acnsec, mnsec) = if tv.is_null() {
+        (0, 0, minix_std::fs::UTIME_NOW, minix_std::fs::UTIME_NOW)
+    } else {
+        let t = unsafe { &*tv };
+        (
+            t[0].tv_sec,
+            t[1].tv_sec,
+            t[0].tv_usec * 1000,
+            t[1].tv_usec * 1000,
+        )
+    };
+    match unsafe { minix_std::fs::utime(path_bytes, actime, modtime, acnsec, mnsec) } {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 // ---- pwd.h / unistd.h credentials ----

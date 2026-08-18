@@ -2152,19 +2152,48 @@ pub fn do_mapdriver() -> i32 {
 
 // Time operations
 
+// VFS_UTIMENS request layout (C `mess_vfs_utimens`, payload offsets):
+//   atime@0, mtime@8, ansec@16, mnsec@24, len@32, name@40, fd@48, flags@52
+const OFF_UT_ATIME: usize = 8;
+const OFF_UT_MTIME: usize = 16;
+const OFF_UT_ANSEC: usize = 24;
+const OFF_UT_MNSEC: usize = 32;
+const OFF_UT_LEN: usize = 40;
+const OFF_UT_NAME: usize = 48;
+const OFF_UT_FD: usize = 56;
+const OFF_UT_FLAGS: usize = 60;
+
+/// `utimensat(2)` nanosecond sentinels (sys/stat.h).
+const UTIME_NOW: i64 = -1;
+const UTIME_OMIT: i64 = -2;
+
 /// Perform the `utimens(path, times, flag)` system call (and its friends).
 ///
-/// C source: `minix/servers/vfs/time.c` â€” `do_utimens()` (line 26)
+/// C source: `minix/servers/vfs/time.c` — `do_utimens()`. Path-based style
+/// only (utime/utimes/utimensat by name); the fd-based futimens style is
+/// not wired because the port's VFS has no filp→vnode bridge for it.
 pub fn do_utimens() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
         None => return EINVAL,
     };
     let glob = unsafe { &*vfs_global() };
-    let path_addr = r_u64(&glob.fs_m_in, 8);
-    let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let atime = r_u64(&glob.fs_m_in, 24) as i64;
-    let mtime = r_u64(&glob.fs_m_in, 32) as i64;
+    let m = &glob.fs_m_in;
+    let atime = r_u64(m, OFF_UT_ATIME) as i64;
+    let mtime = r_u64(m, OFF_UT_MTIME) as i64;
+    let ansec = r_u64(m, OFF_UT_ANSEC) as i64;
+    let mnsec = r_u64(m, OFF_UT_MNSEC) as i64;
+    let path_len = r_u32(m, OFF_UT_LEN) as usize;
+    let path_addr = r_u64(m, OFF_UT_NAME);
+    let _fd = r_i32(m, OFF_UT_FD);
+    let flags = r_i32(m, OFF_UT_FLAGS);
+
+    if path_addr == 0 {
+        return EINVAL; // futimens-style fd call not supported
+    }
+    if flags != 0 {
+        return EINVAL; // unknown flag (AT_SYMLINK_NOFOLLOW unsupported)
+    }
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
@@ -2190,7 +2219,74 @@ pub fn do_utimens() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
-    let r = unsafe { crate::vfs::request::req_utime((*vp).v_fs_e, (*vp).v_inode_nr, atime, mtime) };
+    let vp_ref = unsafe { &*vp };
+
+    let mut r = OK;
+    // Only the owner of a file or the super user can change timestamps.
+    if vp_ref.v_uid != fp.fp_effuid as i32 && fp.fp_effuid != SU_UID {
+        r = EPERM;
+    }
+    // Need write permission (or super user) to 'touch' the file.
+    if r != OK && ansec == UTIME_NOW && mnsec == UTIME_NOW {
+        r = crate::vfs::protect::forbidden(fp, vp_ref, crate::vfs::protect::W_BIT, false);
+    }
+    if crate::vfs::protect::read_only(vp_ref) != OK {
+        r = EROFS; // not even su can touch if R/O
+    }
+
+    let mut new_atime = (atime, ansec);
+    let mut new_mtime = (mtime, mnsec);
+    if r == OK {
+        // Do we need to ask for the current time?
+        let need_now =
+            ansec == UTIME_NOW || ansec == UTIME_OMIT || mnsec == UTIME_NOW || mnsec == UTIME_OMIT;
+        let now = if need_now {
+            match minix_std::time::clock_gettime(minix_std::time::CLOCK_REALTIME) {
+                Ok(ts) => (ts.tv_sec, ts.tv_nsec),
+                Err(_) => {
+                    r = EINVAL;
+                    (0, 0)
+                }
+            }
+        } else {
+            (0, 0)
+        };
+        match ansec {
+            UTIME_NOW => new_atime = now,
+            UTIME_OMIT => new_atime = (now.0, UTIME_OMIT),
+            _ => {
+                if (ansec as u64) >= 1_000_000_000 {
+                    r = EINVAL;
+                } else {
+                    new_atime = (atime, ansec);
+                }
+            }
+        }
+        match mnsec {
+            UTIME_NOW => new_mtime = now,
+            UTIME_OMIT => new_mtime = (now.0, UTIME_OMIT),
+            _ => {
+                if (mnsec as u64) >= 1_000_000_000 {
+                    r = EINVAL;
+                } else {
+                    new_mtime = (mtime, mnsec);
+                }
+            }
+        }
+    }
+
+    if r == OK {
+        r = unsafe {
+            crate::vfs::request::req_utime(
+                vp_ref.v_fs_e,
+                vp_ref.v_inode_nr,
+                new_atime.0,
+                new_mtime.0,
+                new_atime.1,
+                new_mtime.1,
+            )
+        };
+    }
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -3152,7 +3248,8 @@ mod tests {
             setup();
             let glob = vfs_global();
             let fs_m_in = &mut (*glob).fs_m_in;
-            fs_m_in[8..16].copy_from_slice(&0u64.to_le_bytes());
+            // name@48 non-null, len@40 = 0 → empty path fails lookup.
+            fs_m_in[48..56].copy_from_slice(&1u64.to_le_bytes());
             let r = do_utimens();
             assert!(r < 0);
         }

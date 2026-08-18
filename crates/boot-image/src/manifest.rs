@@ -65,6 +65,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/eptest` queries its own pid/uid/gid by endpoint through
     // PM_GETEPINFO and cross-checks getpid/getuid/getgid (J6 follow-up).
     ("/bin/eptest", "eptest"),
+    // `/bin/utimetest` exercises the VFS_UTIMENS → MFS fs_utime chain
+    // (explicit times, UTIME_OMIT, UTIME_NOW) on a scratch file.
+    ("/bin/utimetest", "utimetest"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
     // returns to baseline (see tools/alloc_churn_probe.py).

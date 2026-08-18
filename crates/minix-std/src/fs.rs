@@ -61,6 +61,11 @@ pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
 pub const VFS_PIPE2: u32 = VFS_BASE + 26;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
 pub const VFS_DUP2: u32 = VFS_BASE + 49;
+pub const VFS_UTIMENS: u32 = VFS_BASE + 37;
+
+/// `utimensat(2)` nanosecond sentinels (sys/stat.h).
+pub const UTIME_NOW: i64 = -1;
+pub const UTIME_OMIT: i64 = -2;
 
 // fcntl commands (from `minix/include/fcntl.h`).
 
@@ -431,6 +436,46 @@ pub fn unlink(path: &[u8]) -> Result<(), MinixErr> {
         msg_set_i32(&mut msg, OFF_CALL, VFS_UNLINK as i32);
         msg_set_u64(&mut msg, OFF_NAME, path.as_ptr() as u64);
         msg_set_i32(&mut msg, OFF_NAME_LEN, path.len() as i32);
+        vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Set a file's access/modification times (VFS_UTIMENS → FS `fs_utime`).
+///
+/// `acnsec`/`mnsec` are the nanosecond fields: `UTIME_NOW` stamps the
+/// current clock, `UTIME_OMIT` leaves the field alone, any other value is
+/// stored at second resolution.
+///
+/// # Safety
+///
+/// Must be called in a context where the VFS server is running.
+pub unsafe fn utime(
+    path: &[u8],
+    actime: i64,
+    modtime: i64,
+    acnsec: i64,
+    mnsec: i64,
+) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, actime, modtime, acnsec, mnsec);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        // C mess_vfs_utimens layout (payload offsets): atime@0, mtime@8,
+        // ansec@16, mnsec@24, len@32, name@40, fd@48, flags@52.
+        msg_set_i32(&mut msg, OFF_CALL, VFS_UTIMENS as i32);
+        msg_set_i64(&mut msg, 8, actime);
+        msg_set_i64(&mut msg, 16, modtime);
+        msg_set_i64(&mut msg, 24, acnsec);
+        msg_set_i64(&mut msg, 32, mnsec);
+        msg_set_u64(&mut msg, 40, path.len() as u64); // len
+        msg_set_u64(&mut msg, 48, path.as_ptr() as u64); // name
+        msg_set_i32(&mut msg, 56, 0); // fd (unused)
+        msg_set_i32(&mut msg, 60, 0); // flags
         vfs_call(&mut msg)?;
         Ok(())
     }
@@ -936,6 +981,27 @@ mod tests {
         assert_eq!(VFS_FSYNC, 0x120);
         assert_eq!(VFS_TRUNCATE, 0x121);
         assert_eq!(VFS_COPYFD, 0x12E);
+        assert_eq!(VFS_UTIMENS, 0x125);
+    }
+
+    #[test]
+    fn test_utime_message_format() {
+        // C mess_vfs_utimens layout (message-absolute): atime@8, mtime@16,
+        // ansec@24, mnsec@32, len@40, name@48, fd@56, flags@60.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_UTIMENS as i32);
+        msg_set_i64(&mut msg, 8, 1000);
+        msg_set_i64(&mut msg, 16, 2000);
+        msg_set_i64(&mut msg, 24, UTIME_NOW);
+        msg_set_i64(&mut msg, 32, UTIME_OMIT);
+        msg_set_u64(&mut msg, 40, 5); // len
+        msg_set_u64(&mut msg, 48, 0x1234); // name
+        assert_eq!(msg_i32(&msg, OFF_CALL), 0x125);
+        assert_eq!(msg_i64(&msg, 8), 1000);
+        assert_eq!(msg_i64(&msg, 24), UTIME_NOW);
+        assert_eq!(msg_i64(&msg, 32), UTIME_OMIT);
+        assert_eq!(msg_u64(&msg, 40), 5);
+        assert_eq!(msg_u64(&msg, 48), 0x1234);
     }
 
     #[test]

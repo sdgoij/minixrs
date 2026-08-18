@@ -1336,10 +1336,20 @@ pub unsafe fn req_unmount(fs_e: i32) -> i32 {
 
 /// Set access and modification times of an inode.
 ///
+/// `acnsec`/`modnsec` are the nanosecond fields (UTIME_NOW -1 / UTIME_OMIT
+/// -2 pass through; MFS stores second resolution for other values).
+///
 /// # Safety
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
-pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t) -> i32 {
+pub unsafe fn req_utime(
+    fs_e: i32,
+    inode_nr: u32,
+    actime: off_t,
+    modtime: off_t,
+    acnsec: i64,
+    modnsec: i64,
+) -> i32 {
     #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
@@ -1347,12 +1357,13 @@ pub unsafe fn req_utime(fs_e: i32, inode_nr: u32, actime: off_t, modtime: off_t)
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
         w_i64(&mut msg, PAYLOAD_OFF + 8, actime); // actime
         w_i64(&mut msg, PAYLOAD_OFF + 16, modtime); // modtime
-        // acnsec and modnsec default to 0 (buffer is zeroed)
+        w_i32(&mut msg, PAYLOAD_OFF + 24, acnsec as i32); // acnsec (u32 wire)
+        w_i32(&mut msg, PAYLOAD_OFF + 28, modnsec as i32); // modnsec (u32 wire)
         fs_sendrec(fs_e, &mut msg)
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, inode_nr, actime, modtime);
+        let _ = (fs_e, inode_nr, actime, modtime, acnsec, modnsec);
         ENOSYS
     }
 }
@@ -1584,7 +1595,7 @@ mod tests {
         let r = unsafe { req_unmount(0) };
         assert_eq!(r, ENOSYS);
 
-        let r = unsafe { req_utime(0, 0, 0, 0) };
+        let r = unsafe { req_utime(0, 0, 0, 0, 0, 0) };
         assert_eq!(r, ENOSYS);
 
         let r = unsafe { req_putnode(0, 0, 0) };
