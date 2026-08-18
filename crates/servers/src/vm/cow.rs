@@ -267,6 +267,28 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
     let page_size: u64 = kernel::vm::VM_PAGE_SIZE as u64;
     let page_addr = fault_addr & !(page_size - 1);
 
+    // MAP_SHARED region page: the child inherited the shared cache frame
+    // COW-protected (vm_paging_fork cleared W). The frame must stay
+    // shared — re-enable writability in place instead of copying, so both
+    // processes keep writing to the same frame (the region flag survived
+    // the fork via vm_clone's region copy).
+    if vmp
+        .vm_regions
+        .find(page_addr)
+        .is_some_and(|r| r.flags & crate::vm::region::VR_SHARED != 0)
+    {
+        let pte = crate::vm::vm_walk_page(cr3, page_addr);
+        if pte != 0 && pte & PG_P != 0 && !pte_is_writable(pte) {
+            return crate::vm::vm_map_page_in(
+                cr3,
+                page_addr,
+                pte_to_phys(pte),
+                pte_set_writable(pte),
+            );
+        }
+        return 0;
+    }
+
     // 1. Walk the page table via kernel call (runs in ring 0 with
     // identity mapping — no memory corruption risk).
     let pte_val = crate::vm::vm_walk_page(cr3, page_addr);

@@ -836,6 +836,15 @@ pub fn cat(args: &[&str]) -> i32 {
 /// verify a writable private mapping takes writes without modifying the
 /// file. Takes an optional path (default /bin/hello).
 pub fn mmapfd(args: &[&str]) -> i32 {
+    let shared = args.contains(&"shared");
+    let path = args
+        .iter()
+        .find(|a| **a != "shared")
+        .copied()
+        .unwrap_or("/bin/hello");
+    if shared {
+        return mmapfd_shared(path);
+    }
     let path = args.get(1).copied().unwrap_or("/bin/hello");
     // Two independent fds: one backs the mmap, the other is used for direct
     // reads to compare against the mapping (avoids file-position coupling).
@@ -954,6 +963,99 @@ pub fn mmapfd(args: &[&str]) -> i32 {
     write_out(b"mmapfd: ok, file-backed mmap verified (");
     print_dec(checked as u32 + 1);
     write_out(b" pages + tail)\n");
+    0
+}
+
+/// MAP_SHARED mode: parent and forked child map the same file region and
+/// verify cross-process write visibility through the shared cache frame.
+///
+/// The parent faults the first page in BEFORE forking, so the child
+/// inherits it COW-protected (vm_paging_fork clears W on the child's
+/// writable PTEs); the child's first store must then re-enable
+/// writability on the shared frame (VM's VR_SHARED COW exception) rather
+/// than copy it — otherwise the parent would not see the marker.
+fn mmapfd_shared(path: &str) -> i32 {
+    // The backing fd needs write access for a writable shared mapping
+    // (POSIX; VM also uses it for the FDIO reads).
+    let fd = match unsafe { minix_std::fs::open(path.as_bytes(), minix_std::fs::O_RDWR, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"mmapfd: cannot open (shared)\n");
+            return 1;
+        }
+    };
+    let size = match minix_std::fs::lseek(fd, 0, minix_std::fs::SEEK_END) {
+        Ok(sz) if sz > 0 => sz as usize,
+        _ => {
+            write_err(b"mmapfd: size query failed (shared)\n");
+            let _ = minix_std::fs::close(fd);
+            return 1;
+        }
+    };
+    let p = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            size,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if p == minix_std::vmem::MAP_FAILED {
+        write_err(b"mmapfd: mmap SHARED failed\n");
+        let _ = minix_std::fs::close(fd);
+        return 1;
+    }
+
+    // Fault the first page in before forking (see the doc comment).
+    let _ = unsafe { *p };
+
+    let pid = match unsafe { minix_std::process::fork() } {
+        Ok(pid) => pid,
+        Err(_) => {
+            write_err(b"mmapfd: fork failed (shared)\n");
+            let _ = unsafe { minix_std::vmem::munmap(p, size) };
+            let _ = minix_std::fs::close(fd);
+            return 1;
+        }
+    };
+    if pid == 0 {
+        const MARKER: u8 = 0x5A;
+        unsafe {
+            core::ptr::write_volatile(p, MARKER);
+        }
+        if unsafe { core::ptr::read_volatile(p) } != MARKER {
+            write_err(b"mmapfd: shared write did not persist\n");
+            minix_std::process::exit(1);
+        }
+        minix_std::process::exit(0);
+    }
+    // Parent: wait for the child, then verify the marker is visible in
+    // our view of the mapping (a COW copy in the child would hide it).
+    let (_, status) = match minix_std::process::waitpid(pid, 0) {
+        Ok(w) => w,
+        Err(_) => {
+            write_err(b"mmapfd: waitpid failed (shared)\n");
+            return 1;
+        }
+    };
+    if status != 0 {
+        write_err(b"mmapfd: child failed (status ");
+        print_dec(status as u32);
+        write_err(b")\n");
+        return 2;
+    }
+    if unsafe { core::ptr::read_volatile(p) } != 0x5A {
+        write_err(b"mmapfd: parent did not see shared write\n");
+        return 3;
+    }
+
+    unsafe {
+        let _ = minix_std::vmem::munmap(p, size);
+        let _ = minix_std::fs::close(fd);
+    }
+    write_out(b"mmapfd: shared mapping verified (cross-process visibility)\n");
     0
 }
 

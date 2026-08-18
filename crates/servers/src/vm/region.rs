@@ -76,6 +76,11 @@ pub const VR_EXEC: u32 = 0x80;
 /// filesystem. Not file-backed (no fd, no FDIO) — teardown frees the
 /// frames through their PhysBlock references like any other mapping.
 pub const VR_CACHE: u32 = 0x100;
+/// MAP_SHARED file region: pages are shared cache frames mapped
+/// read-write (no COW), so two processes mapping the same file region
+/// see each other's writes. The documented exception to the
+/// per-process-private-page model (FILEMMAP §6).
+pub const VR_SHARED: u32 = 0x200;
 
 impl VirRegion {
     /// Create a new region descriptor.
@@ -365,6 +370,32 @@ mod tests {
         assert_eq!(VR_PRESENT, 0x10);
         assert_eq!(VR_DATA, 0x20);
         assert_eq!(VR_FILE, 0x40);
+        assert_eq!(VR_EXEC, 0x80);
+        assert_eq!(VR_CACHE, 0x100);
+        assert_eq!(VR_SHARED, 0x200);
+    }
+
+    #[test]
+    fn test_shared_file_region_fields() {
+        // A MAP_SHARED file region carries VR_SHARED alongside VR_FILE and
+        // VR_WRITABLE; the flag survives the region copy at fork (the COW
+        // exception keys on it).
+        let r = VirRegion::new_file(
+            0x1000,
+            0x4000,
+            VR_READABLE | VR_WRITABLE | VR_FILE | VR_SHARED,
+            0,
+            0,
+            0,
+            0,
+            0x10000,
+        );
+        assert!(r.flags & VR_SHARED != 0);
+        assert!(r.flags & VR_FILE != 0);
+        assert!(r.flags & VR_WRITABLE != 0);
+        // Copy semantics: plain value copy keeps the flag.
+        let c = r;
+        assert!(c.flags & VR_SHARED != 0);
     }
 
     #[test]

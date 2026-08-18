@@ -1056,7 +1056,7 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
 
     // Extract the fields we need up front so the region borrow ends before
     // the blocking FDIO request.
-    let (fd, file_off, file_size, writable, exec, dev, ino) = {
+    let (fd, file_off, file_size, writable, exec, shared, dev, ino) = {
         let region = match vmp.vm_regions.find_mut(page_addr) {
             Some(r) => r,
             None => {
@@ -1073,18 +1073,21 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
             region.file_size,
             region.flags & region::VR_WRITABLE != 0,
             region.flags & region::VR_EXEC != 0,
+            region.flags & region::VR_SHARED != 0,
             region.dev,
             region.ino,
         )
     };
 
     // A page is cacheable when its content is exactly the file's bytes:
-    // the region must be read-only (a shared frame must never serve a
+    // read-only regions always (a shared frame must never serve a
     // MAP_PRIVATE writable page — a write by one process would leak into
-    // another's mapping) and the page must lie fully inside the file (the
-    // tail-zero amount past the region's in-file end depends on the
-    // region, so partial pages keep the private allocate path).
-    let cacheable = !writable && file_off + page_size <= file_size;
+    // another's mapping), and MAP_SHARED regions even when writable (the
+    // shared frame is the point — all mappers share it). The page must lie
+    // fully inside the file (the tail-zero amount past the region's
+    // in-file end depends on the region, so partial pages keep the private
+    // allocate path even for shared regions).
+    let cacheable = (!writable || shared) && file_off + page_size <= file_size;
 
     // Cache hit: map the existing frame with the region's permissions and
     // skip allocation + FDIO. The cache holds a PhysBlock reference on the
@@ -1097,6 +1100,10 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
         let mut pt_flags = kernel::pagetable::MAP_USER;
         if exec {
             pt_flags |= kernel::pagetable::MAP_EXEC;
+        }
+        if writable {
+            // MAP_SHARED writable regions map the shared frame read-write.
+            pt_flags |= kernel::pagetable::MAP_WRITE;
         }
         if crate::vm::vm_map_page_in(cr3, page_addr, cached_phys, pt_flags) == 0
             && crate::vm::pb::pb_ref(cached_pb)
@@ -1685,6 +1692,10 @@ const MAP_FIXED: u32 = 0x10;
 // MAP_ANONYMOUS (matches `minix-std::vmem::MAP_ANONYMOUS`).
 const MAP_ANONYMOUS: u32 = 0x20;
 
+// MAP_SHARED (matches `minix-std::vmem::MAP_SHARED`): file pages are
+// shared cache frames (VR_SHARED region flag), not private copies.
+const MAP_SHARED: u32 = 0x01;
+
 // VM_MMAP file-offset field (i64 at absolute byte 40 = payload offset 32).
 const MMAP_OFFSET: usize = 32;
 
@@ -2108,6 +2119,12 @@ fn do_mmap_file(
     }
     if prot & 0x04 != 0 {
         flags |= region::VR_EXEC;
+    }
+    if map_flags & MAP_SHARED != 0 {
+        // MAP_SHARED: pages are shared cache frames (no COW). The region
+        // flag survives fork so the child's COW-protected pages re-enable
+        // writability on the shared frame instead of copying.
+        flags |= region::VR_SHARED;
     }
     let new_r = region::VirRegion::new_file(
         page_addr,
