@@ -18,10 +18,9 @@
 //! | `read`     | read.c      | Pipe read/write operations                     |
 //! | `link`     | link.c      | Truncate and stub link/unlink/rename           |
 //! | `open`     | open.c      | Pipe and special node creation                 |
-//! | `mount`    | mount.c, super.c | Mount/unmount, mountpoint check            |
-//! | `misc`     | misc.c      | Sync, flush, new_driver, chmod                 |
-//! | `stadir`   | stadir.c    | Stat and statvfs                               |
-//! | `time`     | time.c      | Utime / timestamp helpers                      |
+//! | `mount`    | mount.c     | Unmount                                         |
+//! | `misc`     | misc.c      | Sync, chmod                                     |
+//! | `stadir`   | stadir.c    | Stat                                            |
 //! | `utility`  | utility.c   | no_sys, clock_time                             |
 //! | `table`    | table.c     | VFS dispatch table (33 entries)                |
 //! | `main`     | main.c      | Server init and main loop                      |
@@ -44,10 +43,8 @@ pub mod path;
 pub mod read;
 pub mod stadir;
 pub mod table;
-pub mod time;
 pub mod types;
 pub mod utility;
-
 
 pub use bitmap::*;
 pub use buffer::*;
@@ -61,5 +58,4 @@ pub use path::*;
 pub use read::*;
 pub use stadir::*;
 pub use table::*;
-pub use time::*;
 pub use utility::*;

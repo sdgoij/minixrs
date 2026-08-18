@@ -308,7 +308,11 @@ pub fn fp_is_blocked(fp_flags: i32) -> bool {
 }
 
 /// PFS (Pipe File System) endpoint number.
-pub const PFS_PROC_NR: i32 = 4;
+///
+/// Was `4` (the scheduler's number) before pipes were wired to PFS — the
+/// in-VFS pipe design only used this as a local vmnt key, so the wrong
+/// value was harmless until req_newnode started SENDRECing to it.
+pub const PFS_PROC_NR: i32 = arch_common::com::PFS_PROC_NR;
 
 /// Pipe buffer size in bytes (POSIX PIPE_BUF, minimum atomic write size).
 pub const PIPE_BUF_SIZE: i32 = 7168;
@@ -396,6 +400,7 @@ pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFBLK: u32 = 0o060000;
 pub const S_IFREG: u32 = 0o100000;
 pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFIFO: u32 = 0o010000;
 
 /// Self endpoint (for sys_vircopy).
 pub const SELF: i32 = 0x0000fffd;

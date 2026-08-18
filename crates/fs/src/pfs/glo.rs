@@ -22,6 +22,8 @@ pub struct PfsGlobal {
     pub exitsignaled: i32,
     /// Incoming IPC message type.
     pub m_in_type: i32,
+    /// Incoming IPC message source endpoint (VFS).
+    pub m_source: i32,
     /// Incoming IPC message data (48 bytes).
     pub m_in_data: [u8; 48],
     /// Outgoing IPC message data (48 bytes).

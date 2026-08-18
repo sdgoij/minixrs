@@ -1,6 +1,7 @@
 //! Inode table management — adapted from `minix/fs/pfs/inode.c`
 
 use crate::pfs::bitmap::*;
+use crate::pfs::buffer::put_block;
 use crate::pfs::consts::*;
 use crate::pfs::glo;
 use crate::pfs::types::*;
@@ -288,13 +289,39 @@ pub fn dup_inode(ip_idx: u16) {
     }
 }
 
-/// VFS putnode handler — decrease inode reference count.
+/// VFS putnode handler — decrease inode reference count (REQ_PUTNODE).
 ///
-/// Unwired in this port: pipe data lives in VFS ring buffers, so VFS never
-/// sends PFS requests (see PORTING_PLAN.md Phase 9.6 pfs-wiring).
+/// The request carries the inode number (u32 at payload[0]) and the number
+/// of references to release (u64 at payload[8]).  When the last reference
+/// goes away the pipe data buffer is released as well.
 // Reference: inode.c fs_putnode()
 pub fn fs_putnode() -> i32 {
-    ENOSYS
+    unsafe {
+        let pfs = glo::pfs_ptr();
+        let data_ptr = core::ptr::addr_of_mut!((*pfs).m_in_data) as *const u8;
+        let inum = core::ptr::read_unaligned(data_ptr.add(0) as *const u32);
+        let count = core::ptr::read_unaligned(data_ptr.add(8) as *const u64) as i32;
+
+        if count <= 0 {
+            return -EINVAL;
+        }
+        let rip_idx = match find_inode(inum) {
+            Some(i) => i,
+            None => return -EINVAL,
+        };
+        let inode = ino_mut(rip_idx);
+        if count > (*inode).i_count {
+            return -EINVAL;
+        }
+        // Keep one reference; put_inode() consumes it (C: i_count -= count - 1).
+        (*inode).i_count -= count - 1;
+        let dev = (*inode).i_dev;
+        put_inode(Some(rip_idx));
+        if (*inode).i_count == 0 {
+            put_block(dev, inum);
+        }
+        OK
+    }
 }
 
 unsafe fn remove_from_unused(idx: u16) {
@@ -485,7 +512,43 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_putnode_returns_enosys() {
-        assert_eq!(fs_putnode(), ENOSYS);
+    fn test_fs_putnode_releases_reference() {
+        init();
+        let ip = get_inode(1, 55).unwrap();
+        unsafe {
+            let pfs = glo::pfs_ptr();
+            let data = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
+            core::ptr::write_unaligned(data.add(0) as *mut u32, 55);
+            core::ptr::write_unaligned(data.add(8) as *mut u64, 1);
+        }
+        assert_eq!(fs_putnode(), OK);
+        unsafe {
+            assert_eq!((*ino_ref(ip)).i_count, 0);
+        }
+    }
+
+    #[test]
+    fn test_fs_putnode_unknown_inode() {
+        init();
+        unsafe {
+            let pfs = glo::pfs_ptr();
+            let data = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
+            core::ptr::write_unaligned(data.add(0) as *mut u32, 999);
+            core::ptr::write_unaligned(data.add(8) as *mut u64, 1);
+        }
+        assert_eq!(fs_putnode(), -EINVAL);
+    }
+
+    #[test]
+    fn test_fs_putnode_rejects_bad_count() {
+        init();
+        get_inode(1, 56);
+        unsafe {
+            let pfs = glo::pfs_ptr();
+            let data = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
+            core::ptr::write_unaligned(data.add(0) as *mut u32, 56);
+            core::ptr::write_unaligned(data.add(8) as *mut u64, 0); // count 0
+        }
+        assert_eq!(fs_putnode(), -EINVAL);
     }
 }

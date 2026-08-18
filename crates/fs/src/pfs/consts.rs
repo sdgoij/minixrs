@@ -33,8 +33,13 @@ pub const INODEMAP_CHUNKS: usize = fs_bitmap_chunks(PFS_NR_INODES);
 pub const FS_BASE: i32 = 0xA00;
 pub const FS_CALL_VEC_SIZE: usize = 33;
 
+pub const REQ_PUTNODE: i32 = FS_BASE + 2;
+pub const REQ_FTRUNC: i32 = FS_BASE + 4;
+pub const REQ_CHMOD: i32 = FS_BASE + 6;
+pub const REQ_STAT: i32 = FS_BASE + 8;
 pub const REQ_READ: i32 = FS_BASE + 19;
 pub const REQ_WRITE: i32 = FS_BASE + 20;
+pub const REQ_NEWNODE: i32 = FS_BASE + 29;
 
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;

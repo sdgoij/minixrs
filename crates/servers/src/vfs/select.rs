@@ -175,19 +175,22 @@ unsafe fn se_slot_ref(i: usize) -> &'static SelectEntry {
 }
 
 /// Check whether a pipe fd is ready for the given ops.
+///
+/// Readiness is derived from the cached pipe size and the filp table
+/// (C `pipe_check` with `notouch`): readable when data is buffered or the
+/// last writer has closed; writable when a reader is open and space remains.
 fn select_request_pipe(filp: &Filp, ops: u32) -> u32 {
     use crate::vfs::pipe;
-    if !pipe::is_pipe_filp(filp.filp_pipe_ino) {
-        return 0;
-    }
-    let pipe_idx = pipe::pipe_index_from_filp(filp.filp_pipe_ino);
     let mut ready = 0u32;
-    if let Some(p) = pipe::get_pipe(pipe_idx) {
-        let (readers, writers) = pipe::pipe_refcounts(pipe_idx);
-        if ops & SEL_RD != 0 && (!p.is_empty() || writers == 0) {
+    if ops & SEL_RD != 0 {
+        let r = pipe::pipe_check(filp, pipe::READING, 0, 1, true);
+        if r != EAGAIN {
             ready |= SEL_RD;
         }
-        if ops & SEL_WR != 0 && (!p.is_full() && readers > 0) {
+    }
+    if ops & SEL_WR != 0 {
+        let r = pipe::pipe_check(filp, pipe::WRITING, 0, 1, true);
+        if r != EPIPE && r != EAGAIN {
             ready |= SEL_WR;
         }
     }
@@ -347,11 +350,11 @@ pub unsafe fn do_select() -> i32 {
             continue;
         }
 
-        let ready_ops = if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
-            select_request_pipe(filp, want)
-        } else {
+        let ready_ops = {
             let mode = unsafe { (*vp).v_mode };
-            if mode & S_IFCHR != 0 {
+            if mode & S_IFIFO != 0 {
+                select_request_pipe(filp, want)
+            } else if mode & S_IFCHR != 0 {
                 select_request_char(filp, want, se, fd)
             } else {
                 want // regular and block devices: always ready

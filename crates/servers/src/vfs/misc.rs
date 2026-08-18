@@ -170,9 +170,9 @@ pub fn pm_fork(pproc: i32, cproc: i32, cpid: i32) -> i32 {
         child.fp_pid = cpid;
         child.fp_flags = FP_NOFLAGS;
 
-        // Increment filp refcounts for inherited fds. Pipe reader/writer
-        // counts are derived from the filp table (pipe_refcounts), so the
-        // pipe itself needs no adjustment here.
+        // Increment filp refcounts for inherited fds. Reader/writer
+        // presence for pipes is derived from the filp table (find_filp_vp),
+        // so the pipe itself needs no adjustment here.
         for i in 0..OPEN_MAX {
             let fd_idx = child.fp_filp[i];
             if fd_idx >= 0 && (fd_idx as usize) < NR_FILPS {
@@ -609,7 +609,6 @@ mod tests {
             (*fp_slot(21)).fp_filp[1] = 1; // fd 1 -> filp 1
             (*filp_slot(1)).filp_count = 1;
             (*filp_slot(1)).filp_mode = 2; // W_BIT (pipe write end)
-            (*filp_slot(1)).filp_pipe_ino = crate::vfs::pipe::pipe_index_for_filp(0);
             // glob.fp points at a DIFFERENT slot (PM's own slot for
             // PM-sourced messages), which must NOT be touched.
             (*glob).fp = fp_slot(0);

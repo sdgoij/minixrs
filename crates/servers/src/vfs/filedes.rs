@@ -5,6 +5,7 @@
 
 use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
+use crate::vfs::mount;
 use crate::vfs::types::*;
 
 // Debug: lock checking (stubs)
@@ -73,7 +74,6 @@ pub unsafe fn get_fd(rfp: &mut Fproc, start: i32, k: &mut i32) -> i32 {
             f.filp_select_flags = 0;
             f.filp_pipe_select_ops = 0;
             f.filp_pipe_select_ep = [-1; 2];
-            f.filp_pipe_ino = 0;
             f.filp_flags = 0;
             f.filp_ino = 0;
             f.filp_vno = core::ptr::null_mut();
@@ -109,19 +109,21 @@ pub unsafe fn get_filp(fd: i32, fp: &Fproc) -> i32 {
     idx
 }
 
-/// Find a filp slot that refers to the given vnode inode number
-/// with matching mode bits. Returns a raw pointer to the filp, or
-/// `NULL` if none is found.
+/// Find a filp slot that refers to the given vnode with matching mode bits.
+///
+/// Used to determine whether anyone still holds a given end of a pipe
+/// (C `find_filp(vp, bits)`). Returns a raw pointer to the filp, or `NULL`
+/// if none is found.
 ///
 /// # Safety
 ///
 /// Requires exclusive access to the global filp table.
-pub unsafe fn find_filp(ino: u32, mode: u32) -> *mut Filp {
+pub unsafe fn find_filp_vp(vp: *mut Vnode, mode: u32) -> *mut Filp {
     let glob = vfs_global();
     let filp_array = unsafe { core::ptr::addr_of_mut!((*glob).filp) as *mut Filp };
     for i in 0..NR_FILPS {
         let f = unsafe { &mut *filp_array.add(i) };
-        if f.filp_count > 0 && f.filp_ino == ino && (f.filp_mode & mode) != 0 {
+        if f.filp_count > 0 && f.filp_vno == vp && (f.filp_mode & mode) != 0 {
             return f;
         }
     }
@@ -186,6 +188,12 @@ pub unsafe fn close_filp(filp_idx: i32) -> i32 {
             unsafe {
                 crate::vfs::device::cdev_close(f.filp_dev);
             }
+        }
+        // Release the vnode reference the filp held (C close_filp: the
+        // open-time vnode reference is consumed here, sending req_putnode
+        // so the FS server can free the inode).
+        if !vp.is_null() {
+            mount::put_vnode(vp);
         }
         *f = Filp::default();
     }

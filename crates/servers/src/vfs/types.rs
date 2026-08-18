@@ -87,7 +87,7 @@ impl Default for Fproc {
 }
 
 /// NO_DEV value (defined in arch-common consts).
-const NO_DEV: u32 = 0xffff;
+pub const NO_DEV: u32 = 0xffff;
 
 // Filp (open file description, from file.h)
 
@@ -112,7 +112,6 @@ pub struct Filp {
     pub filp_select_ep: i32,
     pub filp_pipe_select_ops: u32,
     pub filp_pipe_select_ep: [i32; 2],
-    pub filp_pipe_ino: u32,
     /// Device number used for character-device I/O: the vnode's `v_dev`,
     /// or the cloned minor device returned by a socket driver's
     /// `CDEV_CLONED` open reply.
@@ -138,7 +137,6 @@ impl Default for Filp {
             filp_select_ep: -1,
             filp_pipe_select_ops: 0,
             filp_pipe_select_ep: [-1; 2],
-            filp_pipe_ino: 0,
             filp_dev: 0,
             filp_dgram: 0,
         }
@@ -166,7 +164,6 @@ pub struct Vnode {
     pub v_fs_count: i32,
     pub v_fs_count_check: i32,
     pub v_smoothed: u8,
-    pub v_pipe: u8,
     pub v_bfs_e: i32,
     pub v_dev: u32,
     pub v_fs_dev: u32,
@@ -190,7 +187,6 @@ impl Default for Vnode {
             v_fs_count: 0,
             v_fs_count_check: 0,
             v_smoothed: 0,
-            v_pipe: 0,
             v_bfs_e: -1,
             v_dev: 0,
             v_fs_dev: 0,

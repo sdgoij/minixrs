@@ -1,361 +1,231 @@
-//! VFS pipe implementation — in-VFS pipe buffers.
+//! VFS pipe operations — adapted from `minix/servers/vfs/pipe.c`
 //!
-//! Unlike original MINIX which uses a separate PipeFS (PFS) server
-//! process, this implementation manages pipe buffers directly within
-//! the VFS server.  Pipes are synchronous: reads return `EAGAIN` when
-//! empty (no suspension yet), writes succeed until the pipe buffer is
-//! full.
+//! Pipe inodes and pipe data live in the PFS server, matching the original
+//! MINIX design: `do_pipe2` creates the pipe inode on PFS via `req_newnode`
+//! and maps the vnode to PFS (`v_fs_e = PFS_PROC_NR`); read/write route
+//! through `req_read`/`req_write` into PFS's block cache. VFS caches the
+//! current pipe size in `v_size` (refreshed from each reply's seek_pos) and
+//! derives reader/writer presence from its own filp table (`find_filp_vp`),
+//! exactly like C.
+//!
+//! Blocking is not ported: C's `SUSPEND`/`revive` machinery is absent, so an
+//! empty pipe with writers returns `EAGAIN` and a full pipe returns `EAGAIN`
+//! instead of suspending the caller.
 
-use core::cell::UnsafeCell;
+use crate::vfs::consts::*;
+use crate::vfs::filedes;
+use crate::vfs::types::*;
 
-use crate::vfs::consts::{NR_FILPS, PIPE_BUF_SIZE};
+/// Read/write direction flags (C `read.h`).
+pub const READING: i32 = 0;
+pub const WRITING: i32 = 1;
 
-/// Maximum number of concurrent pipe buffers.
-const NR_PIPES: usize = 32;
-
-/// Sentinel bit in `filp_pipe_ino` to distinguish pipe indices from
-/// real inode numbers.
-const PIPE_SENTINEL: u32 = 0x8000_0000;
-
-/// Mask off the sentinel bit to get the raw pipe index.
-#[inline]
-pub fn pipe_index_from_filp(ino: u32) -> usize {
-    (ino & !PIPE_SENTINEL) as usize
-}
-
-/// Encode a pipe index for storage in `filp_pipe_ino`.
-#[inline]
-pub fn pipe_index_for_filp(idx: usize) -> u32 {
-    (idx as u32) | PIPE_SENTINEL
-}
-
-/// Returns `true` if a filp inode field refers to a pipe.
-#[inline]
-pub fn is_pipe_filp(ino: u32) -> bool {
-    ino & PIPE_SENTINEL != 0
-}
-
-/// A single pipe buffer with independent read and write ends.
+/// Decide whether a pipe read or write can proceed.
 ///
-/// The number of open read/write ends is NOT stored here: it is derived
-/// from the filp table on demand (see `pipe_refcounts`). A parallel counter
-/// incremented in dup2/fork and decremented in close proved unreliable — a
-/// single miscount silently broke EPIPE/EOF semantics.
-pub struct Pipe {
-    pub data: [u8; PIPE_BUF_SIZE as usize],
-    pub head: usize,  // write cursor
-    pub tail: usize,  // read cursor
-    pub count: usize, // bytes currently buffered
-}
-
-impl Pipe {
-    const fn new() -> Self {
-        Self {
-            data: [0u8; PIPE_BUF_SIZE as usize],
-            head: 0,
-            tail: 0,
-            count: 0,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.count >= self.data.len()
-    }
-
-    /// Write up to `buf.len()` bytes into the pipe.
-    /// Returns the number of bytes actually written.
-    pub fn write(&mut self, buf: &[u8]) -> usize {
-        let cap = self.data.len();
-        let available = cap - self.count;
-        let n = buf.len().min(available);
-        for &b in buf.iter().take(n) {
-            self.data[self.head] = b;
-            self.head += 1;
-            if self.head >= cap {
-                self.head = 0;
-            }
-        }
-        self.count += n;
-        n
-    }
-
-    /// Read up to `buf.len()` bytes from the pipe.
-    /// Returns the number of bytes actually read.
-    pub fn read(&mut self, buf: &mut [u8]) -> usize {
-        let n = buf.len().min(self.count);
-        for dst in buf.iter_mut().take(n) {
-            *dst = self.data[self.tail];
-            self.tail += 1;
-            if self.tail >= self.tail.max(1).min(self.data.len()) {
-                // wrap
-            }
-            if self.tail >= self.data.len() {
-                self.tail = 0;
-            }
-        }
-        self.count -= n;
-        n
-    }
-}
-
-struct PipeTable(UnsafeCell<[Pipe; NR_PIPES]>);
-
-// Safety: single-threaded VFS server, UnsafeCell for interior mutability.
-unsafe impl Sync for PipeTable {}
-
-impl PipeTable {
-    const fn new() -> Self {
-        Self(UnsafeCell::new([const { Pipe::new() }; NR_PIPES]))
-    }
-}
-
-static PIPES: PipeTable = PipeTable::new();
-
-/// Allocate a new pipe.  Returns the pipe index, or `None` if the table is
-/// full.
-pub fn alloc_pipe() -> Option<usize> {
-    for i in 0..NR_PIPES {
-        let (readers, writers) = pipe_refcounts(i);
-        if readers == 0 && writers == 0 {
-            let pipes = unsafe { &mut *PIPES.0.get() };
-            pipes[i].head = 0;
-            pipes[i].tail = 0;
-            pipes[i].count = 0;
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Count the open read and write ends of a pipe by scanning the filp table.
+/// Returns the number of bytes that may be transferred (clamped to the
+/// available space), 0 for EOF (read on an empty pipe with no writers),
+/// or a negative errno (`EAGAIN` when the operation would block — this port
+/// has no suspension — or `EPIPE` when writing with no readers).
 ///
-/// Deriving the counts from the filps (which are refcounted consistently in
-/// dup2, fork and close) keeps EPIPE/EOF semantics correct regardless of the
-/// order of dup2/close/fork operations.
-pub fn pipe_refcounts(idx: usize) -> (u32, u32) {
-    let glob = unsafe { &mut *crate::vfs::glo::vfs_global() };
-    let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut crate::vfs::types::Filp;
-    let mut readers = 0u32;
-    let mut writers = 0u32;
-    for i in 0..NR_FILPS {
-        let f = unsafe { &*filp_arr.add(i) };
-        if is_pipe_filp(f.filp_pipe_ino) && pipe_index_from_filp(f.filp_pipe_ino) == idx {
-            // filp_mode stores the permission-style R_BIT (0o4) / W_BIT (0o2)
-            // bits (same as do_open's mode_bits), not the fd access-mode 1/2.
-            if f.filp_mode & crate::vfs::protect::R_BIT != 0 {
-                readers += 1;
+/// `notouch` matches C's select path (check readiness only).
+// Reference: pipe.c pipe_check()
+pub fn pipe_check(filp: &Filp, rw_flag: i32, _oflags: i32, bytes: i32, _notouch: bool) -> i32 {
+    unsafe {
+        let vp = filp.filp_vno;
+        if vp.is_null() {
+            return EBADF;
+        }
+        if rw_flag == READING {
+            if (*vp).v_size == 0 {
+                // Empty pipe: EOF once the last writer closes; EAGAIN while
+                // a writer is still open (C would SUSPEND here).
+                if filedes::find_filp_vp(vp, crate::vfs::protect::W_BIT).is_null() {
+                    0
+                } else {
+                    EAGAIN
+                }
+            } else {
+                bytes
             }
-            if f.filp_mode & crate::vfs::protect::W_BIT != 0 {
-                writers += 1;
+        } else {
+            // Writing: EPIPE without a reader; otherwise clamp to space.
+            if filedes::find_filp_vp(vp, crate::vfs::protect::R_BIT).is_null() {
+                return EPIPE;
             }
+            let space = PIPE_BUF_SIZE as i64 - (*vp).v_size;
+            if space <= 0 {
+                return EAGAIN;
+            }
+            (bytes as i64).min(space) as i32
         }
     }
-    (readers, writers)
 }
 
-/// Get a mutable reference to a pipe by index.  Returns `None` if the index
-/// is out of range.
-pub fn get_pipe(idx: usize) -> Option<&'static mut Pipe> {
-    let pipes = unsafe { &mut *PIPES.0.get() };
-    if idx < NR_PIPES {
-        Some(&mut pipes[idx])
-    } else {
-        None
-    }
-}
-
-/// Release both ends and reset the pipe buffer for reuse.
-/// Called when both ends are closed.
-pub fn release_pipe(idx: usize) {
-    let (readers, writers) = pipe_refcounts(idx);
-    if readers == 0
-        && writers == 0
-        && let Some(p) = get_pipe(idx)
-    {
-        p.head = 0;
-        p.tail = 0;
-        p.count = 0;
-    }
-}
-
-/// Read up to `count` bytes from pipe `idx` into the user buffer at
-/// `user_buf` in `user_e`'s address space (used by `do_read`).
+/// Read from or write to a pipe end (C `rw_pipe`).
 ///
-/// Returns the number of bytes read, 0 for EOF (pipe empty and no writers),
-/// EAGAIN when the pipe is empty but a writer is still open (no suspension
-/// in this port), or a negative errno.
-pub fn pipe_read_user(idx: usize, user_e: i32, user_buf: u64, count: usize) -> i32 {
-    if count == 0 {
-        return 0;
-    }
-    let pipe = match get_pipe(idx) {
-        Some(p) => p,
-        None => return -9, // EBADF
-    };
-    let (_, writers) = pipe_refcounts(idx);
-    if pipe.is_empty() {
-        // EOF once all writers are gone; EAGAIN while a writer exists
-        // (matching C's non-blocking read on an empty pipe).
-        return if writers > 0 { -11 } else { 0 }; // EAGAIN / EOF
-    }
-    let n = count.min(PIPE_BUF_SIZE as usize).min(pipe.count);
-    let mut chunk = [0u8; 256];
-    let mut done = 0usize;
-    let mut off = 0usize;
-    while done < n {
-        let want = (n - done).min(chunk.len());
-        let got = pipe.read(&mut chunk[..want]);
-        if got == 0 {
-            break;
+/// Checks the pipe state, then routes the data transfer to PFS through
+/// `req_read`/`req_write` and refreshes the cached `v_size` from the reply.
+/// Returns the number of bytes transferred, or a negative errno.
+// Reference: read.c rw_pipe()
+pub fn rw_pipe(filp: &Filp, rw_flag: i32, user_e: i32, buf: u64, req_size: usize) -> i32 {
+    unsafe {
+        let vp = filp.filp_vno;
+        if vp.is_null() {
+            return EBADF;
         }
-        // Copy the data into the reader's address space via the kernel
-        // (SYS_VIRCOPY). The local kernel::vm::virtual_copy would run
-        // privileged CR3 instructions in user mode (VFS links the kernel
-        // crate), faulting in ring 3 and silently failing the copy.
-        let r = unsafe {
-            crate::vfs::call::sys_vircopy(
-                crate::vfs::call::SELF,
-                chunk.as_ptr() as u64,
+        let oflags = filp.filp_flags as i32;
+        let r = pipe_check(filp, rw_flag, oflags, req_size as i32, false);
+        if r <= 0 {
+            return r;
+        }
+        let mut size = r as usize;
+        if rw_flag == READING && size > (*vp).v_size as usize {
+            size = (*vp).v_size as usize;
+        }
+        let (r2, new_pos) = if rw_flag == READING {
+            crate::vfs::request::req_read(
+                (*vp).v_fs_e,
+                (*vp).v_inode_nr,
+                buf as *mut u8,
+                0,
+                size as u32,
                 user_e,
-                user_buf + off as u64,
-                got,
+                0,
+            )
+        } else {
+            crate::vfs::request::req_write(
+                (*vp).v_fs_e,
+                (*vp).v_inode_nr,
+                buf as *const u8,
+                0,
+                size as u32,
+                user_e,
+                0,
             )
         };
-        if r != 0 {
-            break;
+        if r2 < 0 {
+            return r2;
         }
-        done += got;
-        off += got;
+        // C caches the pipe size from the reply's seek_pos.
+        (*vp).v_size = new_pos;
+        r2
     }
-    done as i32
-}
-
-/// Write up to `count` bytes from the user buffer at `user_buf` in
-/// `user_e`'s address space into pipe `idx` (used by `do_write`).
-///
-/// Returns the number of bytes written, EPIPE when no reader is open,
-/// or a negative errno.
-pub fn pipe_write_user(idx: usize, user_e: i32, user_buf: u64, count: usize) -> i32 {
-    if count == 0 {
-        return 0;
-    }
-    let pipe = match get_pipe(idx) {
-        Some(p) => p,
-        None => return -9, // EBADF
-    };
-    let (readers, _) = pipe_refcounts(idx);
-    if readers == 0 {
-        return -32; // EPIPE
-    }
-    let available = PIPE_BUF_SIZE as usize - pipe.count;
-    if available == 0 {
-        return -11; // EAGAIN — pipe full (no suspension in this port)
-    }
-    let n = count.min(available);
-    let mut chunk = [0u8; 256];
-    let mut done = 0usize;
-    let mut off = 0usize;
-    while done < n {
-        let want = (n - done).min(chunk.len());
-        // Copy the writer's data into VFS via the kernel (SYS_VIRCOPY).
-        // The local kernel::vm::virtual_copy would run privileged CR3
-        // instructions in user mode (VFS links the kernel crate),
-        // faulting in ring 3 and silently failing the copy.
-        let r = unsafe {
-            crate::vfs::call::sys_vircopy(
-                user_e,
-                user_buf + off as u64,
-                crate::vfs::call::SELF,
-                chunk.as_mut_ptr() as u64,
-                want,
-            )
-        };
-        if r != 0 {
-            break;
-        }
-        let got = pipe.write(&chunk[..want]);
-        if got == 0 {
-            break;
-        }
-        done += got;
-        off += got;
-    }
-    done as i32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vfs::glo::vfs_global;
-    use crate::vfs::types::Filp;
+    use crate::vfs::protect::{R_BIT, W_BIT};
 
-    /// Reset a filp slot to a pipe end with the given access mode.
-    fn set_pipe_filp(i: usize, pipe_idx: usize, mode: u32) {
+    fn init() {
         unsafe {
             let glob = vfs_global();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-            let f = &mut *filp_arr.add(i);
-            f.filp_count = 1;
-            f.filp_pipe_ino = pipe_index_for_filp(pipe_idx);
-            f.filp_mode = mode;
+            for i in 0..crate::vfs::consts::NR_FILPS {
+                (*filp_arr.add(i)) = Filp::default();
+            }
         }
     }
 
-    fn clear_pipe_filp(i: usize) {
+    /// Wire filp slot `i` to `vp` as a pipe end with the given mode bits.
+    unsafe fn set_pipe_filp(i: usize, vp: *mut Vnode, mode: u32) {
+        let glob = vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+        let f = &mut *filp_arr.add(i);
+        f.filp_count = 1;
+        f.filp_mode = mode;
+        f.filp_vno = vp;
+    }
+
+    unsafe fn make_pipe_vnode(v_size: i64) -> *mut Vnode {
+        let glob = vfs_global();
+        let vnode_arr = core::ptr::addr_of_mut!((*glob).vnode) as *mut Vnode;
+        let vp = &mut *vnode_arr.add(0);
+        *vp = Vnode::default();
+        vp.v_mode = crate::vfs::consts::S_IFIFO;
+        vp.v_size = v_size;
+        vp
+    }
+
+    #[test]
+    fn test_pipe_check_read_empty_with_writer_returns_eagain() {
+        init();
         unsafe {
+            let vp = make_pipe_vnode(0);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
             let glob = vfs_global();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-            (*filp_arr.add(i)).filp_count = 0;
-            (*filp_arr.add(i)).filp_pipe_ino = 0;
-            (*filp_arr.add(i)).filp_mode = 0;
+            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), EAGAIN);
         }
     }
 
-    /// filp_mode holds the permission-style R_BIT/W_BIT bits (as do_open and
-    /// do_pipe2 set them). pipe_refcounts must recognize R_BIT=0o4 as a
-    /// reader — a regression test for the EPIPE-on-every-write bug where the
-    /// reader check tested `& 1` against a mode of 0o4.
     #[test]
-    fn test_pipe_refcounts_recognizes_rbit_reader() {
-        clear_pipe_filp(0);
-        clear_pipe_filp(1);
-        set_pipe_filp(0, 3, crate::vfs::protect::R_BIT); // read end
-        set_pipe_filp(1, 3, crate::vfs::protect::W_BIT); // write end
-        let (readers, writers) = pipe_refcounts(3);
-        assert_eq!(readers, 1, "R_BIT reader filp must be counted");
-        assert_eq!(writers, 1, "W_BIT writer filp must be counted");
-        clear_pipe_filp(0);
-        clear_pipe_filp(1);
+    fn test_pipe_check_read_empty_no_writer_returns_eof() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            set_pipe_filp(0, vp, R_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), 0);
+        }
     }
 
-    /// The same convention applies to an O_RDWR filp (R_BIT | W_BIT).
     #[test]
-    fn test_pipe_refcounts_rdwr_counts_both() {
-        clear_pipe_filp(0);
-        clear_pipe_filp(1);
-        set_pipe_filp(
-            0,
-            4,
-            crate::vfs::protect::R_BIT | crate::vfs::protect::W_BIT,
-        );
-        let (readers, writers) = pipe_refcounts(4);
-        assert_eq!(readers, 1);
-        assert_eq!(writers, 1);
-        clear_pipe_filp(0);
+    fn test_pipe_check_read_with_data_returns_bytes() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(100);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), 16);
+        }
     }
 
-    /// Unrelated pipe indices and non-pipe filps must not be counted.
     #[test]
-    fn test_pipe_refcounts_ignores_other_pipes_and_regular_filps() {
-        clear_pipe_filp(0);
-        clear_pipe_filp(1);
-        set_pipe_filp(0, 3, crate::vfs::protect::R_BIT);
-        let (readers, writers) = pipe_refcounts(9);
-        assert_eq!((readers, writers), (0, 0));
-        clear_pipe_filp(0);
+    fn test_pipe_check_write_no_reader_returns_epipe() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            assert_eq!(pipe_check(&*filp_arr.add(1), WRITING, 0, 16, false), EPIPE);
+        }
+    }
+
+    #[test]
+    fn test_pipe_check_write_full_returns_eagain() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(crate::vfs::consts::PIPE_BUF_SIZE as i64);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            assert_eq!(pipe_check(&*filp_arr.add(1), WRITING, 0, 16, false), EAGAIN);
+        }
+    }
+
+    #[test]
+    fn test_pipe_check_write_clamps_to_space() {
+        init();
+        unsafe {
+            // 100 bytes buffered; space = PIPE_BUF - 100.
+            let vp = make_pipe_vnode(100);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let space = crate::vfs::consts::PIPE_BUF_SIZE as i64 - 100;
+            assert_eq!(
+                pipe_check(&*filp_arr.add(1), WRITING, 0, (space + 50) as i32, false),
+                space as i32
+            );
+        }
     }
 }

@@ -42,7 +42,7 @@ pub fn pfs_main() -> i32 {
     unsafe {
         use arch_common::ipc::Message;
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SEND_CALL: u64 = 46;
         const ANY: i32 = 0x0000ffff;
 
         loop {
@@ -64,6 +64,7 @@ pub fn pfs_main() -> i32 {
             // Copy message fields into PFS globals for handler access.
             let call_nr = msg.m_type as u32;
             (*pfs).m_in_type = msg.m_type;
+            (*pfs).m_source = msg.m_source;
             // Copy first 48 bytes of payload (m_in_data size)
             let src_data = &msg as *const Message as *const u8;
             let dst_data = core::ptr::addr_of_mut!((*pfs).m_in_data) as *mut u8;
@@ -79,7 +80,10 @@ pub fn pfs_main() -> i32 {
             core::ptr::copy_nonoverlapping(reply_data, msg_data.add(8), 48);
             msg.m_type = result;
 
-            minix_rt::syscall2(SENDREC_CALL, src as u64, &mut msg as *mut Message as u64);
+            // Reply with a plain SEND (C `ipc_send`), matching MFS: a
+            // SENDREC here would make the reply's receive phase swallow the
+            // client's next request (the DS hang this port already hit).
+            minix_rt::syscall2(SEND_CALL, src as u64, &mut msg as *mut Message as u64);
         }
     }
 

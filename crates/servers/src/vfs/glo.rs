@@ -160,7 +160,6 @@ const fn new_filp_array() -> [Filp; NR_FILPS] {
         filp_select_ep: -1,
         filp_pipe_select_ops: 0,
         filp_pipe_select_ep: [-1; 2],
-        filp_pipe_ino: 0,
         filp_dev: 0,
         filp_dgram: 0,
     }; NR_FILPS]
@@ -180,7 +179,6 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
         v_fs_count: 0,
         v_fs_count_check: 0,
         v_smoothed: 0,
-        v_pipe: 0,
         v_bfs_e: -1,
         v_dev: 0,
         v_fs_dev: 0,

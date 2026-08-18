@@ -106,20 +106,9 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
         }
     }
 
-    // Handle pipe filps: reset the buffer when the last reference goes away.
-    // The reader/writer counts are derived from the filp table (see
-    // pipe_refcounts), so nothing needs adjusting here beyond the reset.
-    unsafe {
-        let glob = &mut *vfs_global();
-        let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
-        if (filp_idx as usize) < NR_FILPS {
-            let f = &*filp_arr.add(filp_idx as usize);
-            if crate::vfs::pipe::is_pipe_filp(f.filp_pipe_ino) {
-                let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(f.filp_pipe_ino);
-                crate::vfs::pipe::release_pipe(pipe_idx);
-            }
-        }
-    }
+    // The vnode reference is released by close_filp (req_putnode to the
+    // owning FS server), which also frees the PFS pipe inode/buffer when
+    // the last end closes.
 
     unsafe { crate::vfs::filedes::close_filp(filp_idx) }
 }

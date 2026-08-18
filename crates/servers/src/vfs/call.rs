@@ -477,10 +477,16 @@ pub fn do_read() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        // Pipe reads come from the in-VFS ring buffer.
-        if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
-            let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
-            return crate::vfs::pipe::pipe_read_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
+        // Pipes route through PFS (C rw_pipe): readiness check, then
+        // req_read into PFS's block cache.
+        if ((*vp).v_mode & S_IFMT) == S_IFIFO {
+            return crate::vfs::pipe::rw_pipe(
+                filp,
+                crate::vfs::pipe::READING,
+                fp.fp_endpoint,
+                buf_addr,
+                count,
+            );
         }
         // Character devices: route through the registered driver.
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {
@@ -542,10 +548,16 @@ pub fn do_write() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        // Pipe writes go into the in-VFS ring buffer.
-        if crate::vfs::pipe::is_pipe_filp(filp.filp_pipe_ino) {
-            let pipe_idx = crate::vfs::pipe::pipe_index_from_filp(filp.filp_pipe_ino);
-            return crate::vfs::pipe::pipe_write_user(pipe_idx, fp.fp_endpoint, buf_addr, count);
+        // Pipes route through PFS (C rw_pipe): readiness check, then
+        // req_write into PFS's block cache.
+        if ((*vp).v_mode & S_IFMT) == S_IFIFO {
+            return crate::vfs::pipe::rw_pipe(
+                filp,
+                crate::vfs::pipe::WRITING,
+                fp.fp_endpoint,
+                buf_addr,
+                count,
+            );
         }
         // Character devices: route through the registered driver.
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {
@@ -668,35 +680,53 @@ pub fn do_pipe2() -> i32 {
     fp.fp_filp[fd0 as usize] = filp0;
     fp.fp_filp[fd1 as usize] = filp1;
 
-    // Allocate a local pipe buffer (in-VFS, no separate PFS server).
-    // Deviation from C: the original creates a named-pipe inode on PFS via
-    // req_newnode; here the pipe data lives in VFS's own ring buffer, so no
-    // PFS inode is needed and the vnode stays a local pipe vnode.
-    let pipe_idx = match crate::vfs::pipe::alloc_pipe() {
-        Some(idx) => idx,
-        None => {
-            fp.fp_filp[fd0 as usize] = -1;
-            fp.fp_filp[fd1 as usize] = -1;
-            mount::unlock_vnode(vp);
-            return ENFILE;
-        }
+    // Create a named-pipe inode on PFS and map the vnode to it
+    // (C create_pipe: req_newnode(PFS_PROC_NR, uid, gid, I_NAMED_PIPE,
+    // NO_DEV)). The pipe data lives in PFS's block cache; VFS caches the
+    // size in v_size and routes read/write through req_read/req_write.
+    let (r, res) = unsafe {
+        crate::vfs::request::req_newnode(
+            PFS_PROC_NR,
+            fp.fp_effuid,
+            fp.fp_effgid,
+            I_NAMED_PIPE,
+            NO_DEV,
+        )
     };
-
-    // Mark the vnode as a pipe and link filps to the pipe buffer.
-    unsafe {
-        (*vp).v_pipe = 1;
+    if r != OK {
+        fp.fp_filp[fd0 as usize] = -1;
+        fp.fp_filp[fd1 as usize] = -1;
+        mount::unlock_vnode(vp);
+        return r;
     }
-    let pipe_ino = crate::vfs::pipe::pipe_index_for_filp(pipe_idx);
+
+    // Fill in the vnode (C create_pipe: v_fs_e = v_mapfs_e = PFS,
+    // v_inode_nr, v_mode = fmode, v_size = 0, v_dev = NO_DEV,
+    // v_fs_count = 1, v_ref_count = 1).
+    unsafe {
+        (*vp).v_fs_e = PFS_PROC_NR;
+        (*vp).v_inode_nr = res.inode_nr;
+        (*vp).v_mode = res.mode;
+        (*vp).v_size = 0;
+        (*vp).v_dev = NO_DEV;
+        (*vp).v_fs_count = 1;
+        (*vp).v_ref_count = 1;
+    }
+    // One shared vnode reference for both pipe ends (C: dup_vnode after
+    // wiring the first filp); the two closes release it.
+    unsafe {
+        mount::dup_vnode(vp);
+    }
+
+    // Wire the filps to the pipe vnode.
     let filp_arr = unsafe { core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp };
     // Read end (fd0)
     unsafe {
-        (*filp_arr.add(filp0 as usize)).filp_pipe_ino = pipe_ino;
         (*filp_arr.add(filp0 as usize)).filp_mode = crate::vfs::protect::R_BIT;
         (*filp_arr.add(filp0 as usize)).filp_vno = vp;
     }
     // Write end (fd1)
     unsafe {
-        (*filp_arr.add(filp1 as usize)).filp_pipe_ino = pipe_ino;
         (*filp_arr.add(filp1 as usize)).filp_mode = crate::vfs::protect::W_BIT;
         (*filp_arr.add(filp1 as usize)).filp_vno = vp;
     }

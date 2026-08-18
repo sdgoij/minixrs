@@ -1063,16 +1063,12 @@ pub fn ds_server_main() {
                         // DS_GETSYSINFO (C ds/store.c do_getsysinfo): request
                         // mess_lsys_getsysinfo — what@m1i1, where@raw[8..16],
                         // size@raw[16..24] (payload offsets).
-                        let what = unsafe { msg.m_payload.m1.m1i1 };
+                        let what = msg.m_payload.m1.m1i1;
                         let where_addr = u64::from_le_bytes(
-                            unsafe { &msg.m_payload.raw[8..16] }
-                                .try_into()
-                                .unwrap_or([0; 8]),
+                            (&msg.m_payload.raw[8..16]).try_into().unwrap_or([0; 8]),
                         );
                         let size = u64::from_le_bytes(
-                            unsafe { &msg.m_payload.raw[16..24] }
-                                .try_into()
-                                .unwrap_or([0; 8]),
+                            (&msg.m_payload.raw[16..24]).try_into().unwrap_or([0; 8]),
                         );
                         do_getsysinfo(src_ep, what, where_addr, size)
                     }

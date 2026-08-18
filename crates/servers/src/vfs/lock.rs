@@ -423,7 +423,6 @@ mod tests {
             v_mode: 0o100000, // regular file
             v_size: 1024,
             v_dev: 0,
-            v_pipe: 0,
             ..Default::default()
         }
     }
