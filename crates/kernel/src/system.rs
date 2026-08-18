@@ -2164,30 +2164,34 @@ pub unsafe fn do_privctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 
 // do_trace — ptrace kernel support (SYS_TRACE)
 
-// Internal trace request codes (matching C do_trace.c switch cases).
-const T_STOP: i32 = 0;
+// Trace request codes (sys/ptrace.h; C kernel do_trace.c switches on the
+// same values, so PM passes the userland ptrace(2) request through
+// unchanged).
+const T_STOP: i32 = -1;
 const T_GETINS: i32 = 1;
 const T_GETDATA: i32 = 2;
-const T_GETUSER: i32 = 3;
 const T_SETINS: i32 = 4;
 const T_SETDATA: i32 = 5;
-const T_SETUSER: i32 = 6;
-const T_DETACH: i32 = 7;
-const T_RESUME: i32 = 8;
-const T_STEP: i32 = 9;
-const T_SYSCALL: i32 = 10;
-const T_READB_INS: i32 = 11;
-const T_WRITEB_INS: i32 = 12;
+const T_DETACH: i32 = 10;
+const T_RESUME: i32 = 7;
+const T_SYSCALL: i32 = 14;
+const T_READB_INS: i32 = 100;
+const T_WRITEB_INS: i32 = 101;
+const T_GETUSER: i32 = 102;
+const T_SETUSER: i32 = 103;
+const T_STEP: i32 = 104;
 
-// Message layout for trace:
-//   offset  0: endpt   (i32) — traced process endpoint
-//   offset  4: request (i32) — trace request (T_*)
-//   offset  8: address (u64) — address in traced process
-//   offset 16: data    (i64) — data to write / returned data
-const TRACE_ENDPT_OFF: usize = 0;
-const TRACE_REQUEST_OFF: usize = 4;
-const TRACE_ADDRESS_OFF: usize = 8;
-const TRACE_DATA_OFF: usize = 16;
+// Message layout for trace (payload starts at offset 8; kbuf[0..8] holds
+// the kernel_call header — internal call number at 0-3, source endpoint
+// at 4-7):
+//   offset  8: endpt   (i32) — traced process endpoint
+//   offset 12: request (i32) — trace request (T_*)
+//   offset 16: address (u64) — address in traced process
+//   offset 24: data    (i64) — data to write / returned data
+const TRACE_ENDPT_OFF: usize = 8;
+const TRACE_REQUEST_OFF: usize = 12;
+const TRACE_ADDRESS_OFF: usize = 16;
+const TRACE_DATA_OFF: usize = 24;
 
 /// Handle SYS_TRACE — ptrace kernel operations.
 ///
@@ -2216,10 +2220,15 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 
         match tr_request {
             T_STOP => {
-                // Stop the process.
-                (*rp)
+                // Stop the process. C's RTS_SET dequeues when the process
+                // was runnable; without that a runnable+queued target stays
+                // linked with P_STOP set and is skipped by pick_proc.
+                let old = (*rp)
                     .p_rts_flags
                     .fetch_or(RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                if old == 0 {
+                    crate::sched::dequeue(rp);
+                }
                 // Clear syscall trace and single step flags.
                 (*rp).p_misc_flags.fetch_and(
                     !(MiscFlags::SC_TRACE.bits() | MiscFlags::STEP.bits()),
@@ -2323,18 +2332,26 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     .p_misc_flags
                     .fetch_and(!MiscFlags::SC_ACTIVE.bits(), Ordering::Relaxed);
                 // Fall through to T_RESUME.
-                (*rp)
+                // C's RTS_UNSET enqueues when the process becomes runnable
+                // again (it was dequeued by the T_STOP set if runnable).
+                let old = (*rp)
                     .p_rts_flags
                     .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                if old & !RtsFlags::P_STOP.bits() == 0 {
+                    crate::sched::enqueue(rp);
+                }
                 msg_write_i64(msg, TRACE_DATA_OFF, 0);
                 OK
             }
 
             T_RESUME => {
                 // Resume execution.
-                (*rp)
+                let old = (*rp)
                     .p_rts_flags
                     .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                if old & !RtsFlags::P_STOP.bits() == 0 {
+                    crate::sched::enqueue(rp);
+                }
                 msg_write_i64(msg, TRACE_DATA_OFF, 0);
                 OK
             }
@@ -2344,9 +2361,12 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 (*rp)
                     .p_misc_flags
                     .fetch_or(MiscFlags::STEP.bits(), Ordering::Relaxed);
-                (*rp)
+                let old = (*rp)
                     .p_rts_flags
                     .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                if old & !RtsFlags::P_STOP.bits() == 0 {
+                    crate::sched::enqueue(rp);
+                }
                 msg_write_i64(msg, TRACE_DATA_OFF, 0);
                 OK
             }
@@ -2356,9 +2376,12 @@ pub unsafe fn do_trace_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 (*rp)
                     .p_misc_flags
                     .fetch_or(MiscFlags::SC_TRACE.bits(), Ordering::Relaxed);
-                (*rp)
+                let old = (*rp)
                     .p_rts_flags
                     .fetch_and(!RtsFlags::P_STOP.bits(), Ordering::Relaxed);
+                if old & !RtsFlags::P_STOP.bits() == 0 {
+                    crate::sched::enqueue(rp);
+                }
                 msg_write_i64(msg, TRACE_DATA_OFF, 0);
                 OK
             }
@@ -6341,6 +6364,45 @@ mod tests {
                 flags & RtsFlags::SIGNALED.bits() != 0,
                 "do_kill should set SIGNALED on target"
             );
+        }
+    }
+
+    #[test]
+    fn test_do_trace_stop_resume_toggles_p_stop() {
+        unsafe {
+            init_signal_env();
+            let rp = crate::table::proc_addr(0);
+            let target = crate::table::proc_addr(1);
+            let target_ep = crate::table::make_endpoint(0, 1);
+            (*target).p_endpoint = target_ep;
+            (*target).p_nr = 1;
+            (*target).p_priority = 5;
+            (*target).p_rts_flags.store(0, Ordering::Relaxed);
+
+            // T_STOP sets P_STOP (C's RTS_SET also dequeues a runnable
+            // process).
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, TRACE_ENDPT_OFF, target_ep);
+            msg_write_i32(&mut msg, TRACE_REQUEST_OFF, T_STOP);
+            let result = do_trace_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+            let flags = (*target).p_rts_flags.load(Ordering::Relaxed);
+            assert!(flags & RtsFlags::P_STOP.bits() != 0, "T_STOP sets P_STOP");
+
+            // T_RESUME clears P_STOP (and re-enqueues a runnable process).
+            msg_write_i32(&mut msg, TRACE_REQUEST_OFF, T_RESUME);
+            let result = do_trace_handler(rp, &mut msg);
+            assert_eq!(result, OK);
+            let flags = (*target).p_rts_flags.load(Ordering::Relaxed);
+            assert!(
+                flags & RtsFlags::P_STOP.bits() == 0,
+                "T_RESUME clears P_STOP"
+            );
+
+            // T_OK (0) is a PM-only request — the kernel rejects it.
+            msg_write_i32(&mut msg, TRACE_REQUEST_OFF, 0);
+            let result = do_trace_handler(rp, &mut msg);
+            assert_eq!(result, crate::ipc::EINVAL);
         }
     }
 

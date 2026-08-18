@@ -164,6 +164,14 @@ name = "forkthread"
 path = "src/bin/forkthread.rs"
 test = false
 
+# ptracetest is the ptrace smoke test: TRACEME + SIGSTOP stop, CONTINUE
+# resume, and exit reap through PM_PTRACE (Phase J6). Embedded as
+# /bin/ptracetest.
+[[bin]]
+name = "ptracetest"
+path = "src/bin/ptracetest.rs"
+test = false
+
 [[bin]]
 name = "fbmmap"
 path = "src/bin/fbmmap.rs"

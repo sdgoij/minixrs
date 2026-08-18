@@ -48,6 +48,49 @@ pub const ITIMER_PROF: i32 = 2;
 pub const NO_TRACER: i32 = -1;
 pub const NO_PARENT: i32 = -2;
 
+/// ptrace request codes (sys/ptrace.h; the kernel's SYS_TRACE switches on
+/// the same values, so requests pass through PM unchanged).
+pub const T_STOP: i32 = -1;
+pub const T_OK: i32 = 0;
+pub const T_GETINS: i32 = 1;
+pub const T_GETDATA: i32 = 2;
+pub const T_SETINS: i32 = 4;
+pub const T_SETDATA: i32 = 5;
+pub const T_RESUME: i32 = 7;
+pub const T_EXIT: i32 = 8;
+pub const T_ATTACH: i32 = 9;
+pub const T_DETACH: i32 = 10;
+pub const T_SYSCALL: i32 = 14;
+pub const T_READB_INS: i32 = 100;
+pub const T_WRITEB_INS: i32 = 101;
+pub const T_GETUSER: i32 = 102;
+pub const T_SETUSER: i32 = 103;
+pub const T_STEP: i32 = 104;
+pub const T_SETOPT: i32 = 105;
+pub const T_GETRANGE: i32 = 106;
+pub const T_SETRANGE: i32 = 107;
+
+/// Trace options (sys/ptrace.h): automatically trace forked children,
+/// send SIGSTOP on successful exec, or (the attach default) do nothing on
+/// exec.
+pub const TO_TRACEFORK: u32 = 0x1;
+pub const TO_ALTEXEC: u32 = 0x2;
+pub const TO_NOEXEC: u32 = 0x4;
+
+/// Trace spaces (sys/ptrace.h) — address-space selector for range ops.
+const TS_INS: i32 = 0;
+const TS_DATA: i32 = 1;
+
+/// `struct ptrace_range` (sys/ptrace.h) — copied from the caller for
+/// T_GETRANGE / T_SETRANGE.
+#[repr(C)]
+struct PtraceRange {
+    pr_space: i32,
+    pr_addr: i64,
+    pr_ptr: u64,
+    pr_size: u64,
+}
+
 /// Maximum supplemental groups.
 pub const NGROUPS_MAX: usize = 32;
 
@@ -80,6 +123,7 @@ pub const EAGAIN: i32 = -11;
 pub const EPERM: i32 = -1;
 pub const EFAULT: i32 = -14;
 pub const ESRCH: i32 = -3;
+pub const EBUSY: i32 = -16;
 
 // SigSet — signal set type (sigset_t equivalent)
 
@@ -759,10 +803,9 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
     let told_parent = rmp.mp_flags & TOLD_PARENT != 0;
     let endpoint = rmp.mp_endpoint;
 
-    // Stop scheduling (SYS_STOP via kernel call 5).
-    let mut stop_msg = [0u8; 64];
-    stop_msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
-    let _ = minix_rt::kernel_call(5, &mut stop_msg);
+    // Stop scheduling (SYS_TRACE T_STOP — P_STOP in the kernel).
+    let mut data: i64 = 0;
+    let _ = minix_rt::sys_trace(T_STOP, endpoint, 0, &mut data);
 
     if dump_core {
         unsafe { zombify(slot) };
@@ -794,7 +837,13 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
     }
 
     if traced {
-        // Reply to tracer with exit status.
+        // Reply to the tracer with the exit status. mp_tracer is a slot
+        // index, so resolve it to the tracer's endpoint first.
+        let tracer_ep = if tracer >= 0 && (tracer as usize) < NR_PROCS {
+            unsafe { (*base.add(tracer as usize)).mp_endpoint }
+        } else {
+            0
+        };
         let mut reply_msg = Message {
             m_source: 0,
             m_type: OK,
@@ -806,7 +855,7 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
         let _ = unsafe {
             minix_rt::syscall2(
                 minix_rt::SENDNB_CALL,
-                tracer as u64,
+                tracer_ep as u64,
                 &mut reply_msg as *mut Message as u64,
             )
         };
@@ -943,9 +992,6 @@ pub unsafe fn tell_parent(parent: usize, child: &MProc) {
 /// `parent` must be < `NR_PROCS`. The caller must ensure that no conflicting
 /// mutable reference to the parent slot exists.
 pub unsafe fn wait_test(parent: usize, child: &MProc) -> bool {
-    if child.mp_flags & ZOMBIE == 0 {
-        return false;
-    }
     if parent >= NR_PROCS {
         return false;
     }
@@ -954,12 +1000,14 @@ pub unsafe fn wait_test(parent: usize, child: &MProc) -> bool {
     if parent_rmp.mp_flags & IN_USE == 0 {
         return false;
     }
-    // Parent must have WAITING flag set AND matching wpid
+    // Parent must have WAITING flag set AND matching wpid (C wait_test:
+    // parent_waiting && right_child — no ZOMBIE gate; a tracer waits on
+    // stopped children too).
     if parent_rmp.mp_flags & WAITING == 0 {
         return false;
     }
     let wpid = parent_rmp.mp_wpid;
-    wpid == -1 || wpid == child.mp_pid
+    wpid == -1 || wpid == child.mp_pid || -wpid == child.mp_procgrp
 }
 
 /// Tell the tracer that a traced child exited.
@@ -985,10 +1033,10 @@ pub unsafe fn tell_tracer(slot: usize) {
         return;
     }
 
-    if child.mp_flags & ZOMBIE != 0 {
-        let child_mut = unsafe { &mut *base.add(slot) };
-        child_mut.mp_flags |= TOLD_PARENT;
-    }
+    // C: rp->mp_flags |= TOLD_PARENT — the tracer was told about this
+    // child; a later waitpid must not report it again.
+    let child_mut = unsafe { &mut *base.add(slot) };
+    child_mut.mp_flags |= TOLD_PARENT;
 
     let tracer_rmp = unsafe { &mut *base.add(tracer as usize) };
     if tracer_rmp.mp_flags & IN_USE == 0 {
@@ -1061,7 +1109,9 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
         return Err(EINVAL);
     }
 
-    // Scan for a zombie child.
+    // Scan for a waitable child: an exited (zombie) child, or — for a
+    // tracer — a traced child that stopped (TRACE_STOPPED + a pending
+    // sigtrace) or became a TRACE_ZOMBIE. Matching C do_waitpid().
     for i in 0..NR_PROCS {
         if i == parent {
             continue;
@@ -1071,11 +1121,41 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
         if child.mp_flags & IN_USE == 0 {
             continue;
         }
-        if child.mp_parent != parent as i32 {
+        // Already reported to a tracer (C: TOLD_PARENT children are skipped).
+        if child.mp_flags & TOLD_PARENT != 0 {
+            continue;
+        }
+        let is_parent = child.mp_parent == parent as i32;
+        let is_tracer = child.mp_tracer == parent as i32;
+        if !is_parent && !is_tracer {
+            continue;
+        }
+        // A tracer does not collect plain zombies of the real parent.
+        if !is_parent && child.mp_flags & ZOMBIE != 0 {
             continue;
         }
         if wpid != -1 && child.mp_pid != wpid {
             continue;
+        }
+        if is_tracer {
+            if child.mp_flags & TRACE_ZOMBIE != 0 {
+                // Traced child exited: tell_tracer sends the reply, and the
+                // real parent is notified like a normal zombie. The caller
+                // must not reply again (EDONTREPLY).
+                unsafe { tell_tracer(i) };
+                unsafe { check_parent(i, true) };
+                return Err(EDONTREPLY);
+            }
+            if child.mp_flags & TRACE_STOPPED != 0 {
+                // Traced child stopped on a signal: report W_STOPCODE(sig).
+                for sig in 1.._NSIG as i32 {
+                    if child.mp_sigtrace.sigismember(sig) {
+                        let child_mut = unsafe { &mut *base.add(i) };
+                        child_mut.mp_sigtrace.sigdelset(sig);
+                        return Ok((child.mp_pid, w_exitcode(sig, 0)));
+                    }
+                }
+            }
         }
         if child.mp_flags & ZOMBIE != 0 {
             // Found a zombie child.
@@ -1169,9 +1249,11 @@ pub unsafe fn check_sig(proc_id: i32, pgrp_ref: i32, signo: i32, ksig: bool) -> 
         // if the disposition drops the signal. C counts matches and returns
         // OK when count > 0, ESRCH when nothing matched.
         sent += 1;
-        // Send the signal.
+        // Send the signal. Matching C check_sig(): sig_proc with
+        // trace=TRUE so a traced process diverts the signal to its tracer
+        // (a kill(2)-triggered stop is how ptrace users stop their target).
         unsafe {
-            sig_proc(i, signo, false, ksig);
+            sig_proc(i, signo, true, ksig);
         }
         // Specific pid: only one process may be signaled.
         if proc_id > 0 {
@@ -1207,10 +1289,13 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
     }
 
     // Matching C sig_proc(): a traced process gets the signal diverted to
-    // its tracer first, unless the signal is SIGKILL.
+    // its tracer first, unless the signal is SIGKILL. The stop also stops
+    // the child in the kernel and notifies a waiting tracer (trace_stop).
     if trace && rmp.mp_tracer != NO_TRACER && signo != SIGKILL {
         rmp.mp_sigtrace.sigaddset(signo);
-        rmp.mp_flags |= TRACE_STOPPED;
+        if rmp.mp_flags & TRACE_STOPPED == 0 {
+            unsafe { trace_stop(slot, signo) };
+        }
         return;
     }
 
@@ -1438,9 +1523,8 @@ pub unsafe fn stop_proc(slot: usize) {
     }
     rmp.mp_flags |= PROC_STOPPED;
     let endpoint = rmp.mp_endpoint;
-    let mut msg = [0u8; 64];
-    msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
-    let _ = minix_rt::kernel_call(5, &mut msg);
+    let mut data: i64 = 0;
+    let _ = minix_rt::sys_trace(T_STOP, endpoint, 0, &mut data);
 }
 
 /// Deliver pending signals to a process.
@@ -1997,9 +2081,8 @@ pub unsafe fn unpause(slot: usize) -> bool {
     if rmp.mp_flags & (WAITING | SIGSUSPENDED) != 0 {
         rmp.mp_flags |= PROC_STOPPED;
         let endpoint = rmp.mp_endpoint;
-        let mut msg = [0u8; 64];
-        msg[8..12].copy_from_slice(&endpoint.to_le_bytes());
-        let _ = minix_rt::kernel_call(5, &mut msg);
+        let mut data: i64 = 0;
+        let _ = minix_rt::sys_trace(T_STOP, endpoint, 0, &mut data);
         rmp.mp_flags &= !(WAITING | SIGSUSPENDED);
         return true;
     }
@@ -2528,6 +2611,7 @@ pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
             }
             OK
         }
+        Err(EDONTREPLY) => EDONTREPLY, // tell_tracer already replied
         Err(EAGAIN) => EAGAIN,
         Err(_) => {
             // No zombie child found. Store the waitpid request and block.
@@ -2910,6 +2994,330 @@ pub unsafe fn handle_getprocnr(caller_slot: usize, msg: &mut Message) -> i32 {
     ESRCH
 }
 
+// ---- PM_PTRACE (servers/pm/trace.c do_trace) ----
+
+/// Handler for PM_PTRACE — process debugging control.
+///
+/// Matching C: `do_trace()` in `servers/pm/trace.c`. Request
+/// `mess_lc_pm_ptrace`: pid@m1i1, req@m1i2, addr@raw[16..24],
+/// data@raw[24..32]. Reply `mess_pm_lc_ptrace`: data@raw[8..16] (the
+/// reply m_type is the status).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer. On the minix target, `addr`/`data` must
+/// name caller-accessible memory where the request requires.
+pub unsafe fn handle_trace(caller_slot: usize, msg: &mut Message) -> i32 {
+    let pid = unsafe { msg.m_payload.m1.m1i1 };
+    let req = unsafe { msg.m_payload.m1.m1i2 };
+    let addr = u64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[16..24] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let mut data = i64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[24..32] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let base = MPROC.as_ptr();
+    let who = unsafe { &*base.add(caller_slot) };
+    // mp_tracer stores a slot index (C who_p), while IPC/copies need the
+    // caller's endpoint.
+    let who_ep = who.mp_endpoint;
+    let who_slot = caller_slot as i32;
+
+    // find_proc(pid): first in-use slot with that pid (C find_proc()).
+    let find_proc = |pid: i32| -> Option<usize> {
+        for i in 0..NR_PROCS {
+            let p = unsafe { &*base.add(i) };
+            if p.mp_flags & IN_USE != 0 && p.mp_pid == pid {
+                return Some(i);
+            }
+        }
+        None
+    };
+    // Write the reply data field (mess_pm_lc_ptrace.data, i64@8).
+    let reply_data = |msg: &mut Message, v: i64| unsafe {
+        msg.m_payload.raw[8..16].copy_from_slice(&v.to_le_bytes());
+    };
+
+    match req {
+        T_OK => {
+            // Enable tracing by this process's parent (the debugger's
+            // pre-exec child).
+            if who.mp_tracer != NO_TRACER {
+                return EBUSY;
+            }
+            let who_mut = unsafe { &mut *base.add(caller_slot) };
+            who_mut.mp_tracer = who.mp_parent;
+            reply_data(msg, 0);
+            return OK;
+        }
+        T_ATTACH => {
+            let Some(child_slot) = find_proc(pid) else {
+                return ESRCH;
+            };
+            let child = unsafe { &*base.add(child_slot) };
+            if child.mp_flags & EXITING != 0 {
+                return ESRCH;
+            }
+            // Non-root: uid/gid must match and the child must not be
+            // setuid-tainted.
+            if who.mp_effuid != SUPER_USER
+                && (who.mp_effuid != child.mp_effuid
+                    || who.mp_effgid != child.mp_effgid
+                    || child.mp_effuid != child.mp_realuid
+                    || child.mp_effgid != child.mp_realgid)
+            {
+                return EPERM;
+            }
+            // Only root may trace system servers.
+            if who.mp_effuid != SUPER_USER && child.mp_flags & PRIV_PROC != 0 {
+                return EPERM;
+            }
+            // System servers may not trace anyone (they use sys_trace()).
+            if who.mp_flags & PRIV_PROC != 0 {
+                return EPERM;
+            }
+            // Can't trace self, PM or VM.
+            if child_slot == caller_slot
+                || child.mp_endpoint == arch_common::com::PM_PROC_NR
+                || child.mp_endpoint == arch_common::com::VM_PROC_NR
+            {
+                return EPERM;
+            }
+            // Can't trace a process that is already being traced.
+            if child.mp_tracer != NO_TRACER {
+                return EBUSY;
+            }
+            let child_mut = unsafe { &mut *base.add(child_slot) };
+            child_mut.mp_tracer = who_slot;
+            child_mut.mp_trace_flags = TO_NOEXEC;
+            // SIGSTOP diverts to the tracer and stops the child.
+            unsafe { sig_proc(child_slot, SIGSTOP, true, false) };
+            reply_data(msg, 0);
+            return OK;
+        }
+        T_STOP => {
+            // Not exposed to user programs (C: use kill(2) instead).
+            return EINVAL;
+        }
+        T_READB_INS | T_WRITEB_INS => {
+            // Root-only text-segment byte access on any process.
+            if who.mp_effuid != SUPER_USER {
+                return EPERM;
+            }
+            let Some(child_slot) = find_proc(pid) else {
+                return ESRCH;
+            };
+            let child = unsafe { &*base.add(child_slot) };
+            if child.mp_flags & EXITING != 0 {
+                return ESRCH;
+            }
+            let r = minix_rt::sys_trace(req, child.mp_endpoint, addr, &mut data);
+            if r != 0 {
+                return r;
+            }
+            reply_data(msg, data);
+            return OK;
+        }
+        _ => {}
+    }
+
+    // All other calls: the child must be a traced, stopped child of the
+    // caller.
+    let Some(child_slot) = find_proc(pid) else {
+        return ESRCH;
+    };
+    let child = unsafe { &*base.add(child_slot) };
+    if child.mp_flags & EXITING != 0 {
+        return ESRCH;
+    }
+    if child.mp_tracer != who_slot {
+        return ESRCH;
+    }
+    if child.mp_flags & TRACE_STOPPED == 0 {
+        return EBUSY;
+    }
+
+    match req {
+        T_EXIT => {
+            let child_mut = unsafe { &mut *base.add(child_slot) };
+            child_mut.mp_flags |= TRACE_EXIT;
+            // Defer the exit if a VFS call is pending; exit_restart runs it
+            // when the VFS reply arrives.
+            if child_mut.mp_flags & VFS_CALL != 0 {
+                child_mut.mp_exitstatus = (data & 0xFF) as i8;
+            } else {
+                unsafe { exit_proc(child_slot, data as i32, false) };
+            }
+            EDONTREPLY // the exit path replies to the tracer later
+        }
+        T_SETOPT => {
+            let child_mut = unsafe { &mut *base.add(child_slot) };
+            child_mut.mp_trace_flags = data as u32;
+            reply_data(msg, 0);
+            OK
+        }
+        T_GETRANGE | T_SETRANGE => {
+            // Copy the ptrace_range struct from the caller, validate it,
+            // then copy the range between caller and child.
+            let mut pr: PtraceRange = unsafe { core::mem::zeroed() };
+            let r = minix_rt::sys_vircopy(
+                who_ep,
+                addr,
+                minix_rt::SELF,
+                &mut pr as *mut _ as u64,
+                core::mem::size_of::<PtraceRange>(),
+            );
+            if r != 0 {
+                return r;
+            }
+            if pr.pr_space != TS_INS && pr.pr_space != TS_DATA {
+                return EINVAL;
+            }
+            if pr.pr_size == 0 || pr.pr_size > i64::MAX as u64 {
+                return EINVAL;
+            }
+            let r = if req == T_GETRANGE {
+                minix_rt::sys_vircopy(
+                    child.mp_endpoint,
+                    pr.pr_addr as u64,
+                    who_ep,
+                    pr.pr_ptr,
+                    pr.pr_size as usize,
+                )
+            } else {
+                minix_rt::sys_vircopy(
+                    who_ep,
+                    pr.pr_ptr,
+                    child.mp_endpoint,
+                    pr.pr_addr as u64,
+                    pr.pr_size as usize,
+                )
+            };
+            if r != 0 {
+                return r;
+            }
+            reply_data(msg, 0);
+            OK
+        }
+        T_DETACH => {
+            if data < 0 || data >= _NSIG as i64 {
+                return EINVAL;
+            }
+            let child_mut = unsafe { &mut *base.add(child_slot) };
+            child_mut.mp_tracer = NO_TRACER;
+            // Let all tracer-pending signals through the filter.
+            for i in 1.._NSIG as i32 {
+                if child_mut.mp_sigtrace.sigismember(i) {
+                    child_mut.mp_sigtrace.sigdelset(i);
+                    let _ = unsafe { check_sig(child_mut.mp_pid, 0, i, false) };
+                }
+            }
+            if data > 0 {
+                unsafe { sig_proc(child_slot, data as i32, true, false) };
+            }
+            // Resume the child as if nothing ever happened.
+            child_mut.mp_flags &= !TRACE_STOPPED;
+            child_mut.mp_trace_flags = 0;
+            unsafe { check_pending(child_mut) };
+            // Kernel: clear SC_ACTIVE and clear P_STOP (C falls through to
+            // the sys_trace tail with req = T_DETACH).
+            let r = minix_rt::sys_trace(req, child_mut.mp_endpoint, addr, &mut data);
+            if r != 0 {
+                return r;
+            }
+            reply_data(msg, data);
+            OK
+        }
+        T_RESUME | T_STEP | T_SYSCALL => {
+            if data < 0 || data >= _NSIG as i64 {
+                return EINVAL;
+            }
+            let child_mut = unsafe { &mut *base.add(child_slot) };
+            if data > 0 {
+                // Deliver the signal (not diverted — the child is being
+                // released from the tracer's control).
+                unsafe { sig_proc(child_slot, data as i32, false, false) };
+            }
+            // If other signals are waiting to be delivered to the tracer,
+            // feign a successful resumption (the child stops again).
+            let mut pending = false;
+            for i in 1.._NSIG as i32 {
+                if child_mut.mp_sigtrace.sigismember(i) {
+                    pending = true;
+                    break;
+                }
+            }
+            if pending {
+                reply_data(msg, 0);
+                return OK;
+            }
+            child_mut.mp_flags &= !TRACE_STOPPED;
+            unsafe { check_pending(child_mut) };
+            // Kernel: resume / single-step / syscall-trace the child.
+            let r = minix_rt::sys_trace(req, child_mut.mp_endpoint, addr, &mut data);
+            if r != 0 {
+                return r;
+            }
+            reply_data(msg, data);
+            OK
+        }
+        _ => EINVAL,
+    }
+}
+
+/// A traced process got a signal — stop it in the kernel and notify a
+/// waiting tracer. Matching C `trace_stop()` in `servers/pm/trace.c`.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`; the caller must hold exclusive access to
+/// the process table.
+pub unsafe fn trace_stop(slot: usize, signo: i32) {
+    let base = MPROC.as_ptr();
+    let rmp = unsafe { &*base.add(slot) };
+    let tracer = rmp.mp_tracer;
+    #[cfg(target_os = "minix")]
+    let endpoint = rmp.mp_endpoint;
+    // Kernel-side stop (P_STOP) + clear SC_TRACE/STEP. Host tests only
+    // exercise the PM-side state (the kernel is a separate crate).
+    #[cfg(target_os = "minix")]
+    {
+        let mut data: i64 = 0;
+        let _ = minix_rt::sys_trace(T_STOP, endpoint, 0, &mut data);
+    }
+    let rmp = unsafe { &mut *base.add(slot) };
+    rmp.mp_flags |= TRACE_STOPPED;
+    if tracer >= 0 && (tracer as usize) < NR_PROCS && unsafe { wait_test(tracer as usize, rmp) } {
+        rmp.mp_sigtrace.sigdelset(signo);
+        let tracer_rmp = unsafe { &mut *base.add(tracer as usize) };
+        tracer_rmp.mp_flags &= !WAITING; // tracer is no longer waiting
+        // Reply to the tracer: pid@m1i1, W_STOPCODE(signo)@m1i2. Host
+        // tests verify the state transitions above only.
+        #[cfg(target_os = "minix")]
+        {
+            let mut reply_msg = Message {
+                m_source: 0,
+                m_type: OK,
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+            reply_msg.m_payload.m1.m1i1 = rmp.mp_pid;
+            reply_msg.m_payload.m1.m1i2 = w_exitcode(signo, 0);
+            let _ = unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SENDNB_CALL,
+                    tracer_rmp.mp_endpoint as u64,
+                    &mut reply_msg as *mut Message as u64,
+                )
+            };
+        }
+    }
+}
+
 /// Handler for PM_ISSETUGID — 1 after a setuid/setgid exec (TAINTED).
 ///
 /// # Safety
@@ -3233,7 +3641,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         5 => unsafe { handle_setuid(caller_slot, msg) },
         6 => unsafe { handle_getuid(caller_slot, msg) },
         7 => unsafe { handle_stime(caller_slot, msg) }, // PM_STIME
-        8 => unsafe { no_sys(caller_slot, msg) },       // PM_PTRACE
+        8 => unsafe { handle_trace(caller_slot, msg) }, // PM_PTRACE
         9 => unsafe { handle_setgroups(caller_slot, msg) }, // PM_SETGROUPS
         10 => unsafe { handle_getgroups(caller_slot, msg) }, // PM_GETGROUPS
         11 => unsafe { handle_kill(caller_slot, msg) },
@@ -5283,6 +5691,196 @@ mod tests {
         // Unknown pid → ESRCH.
         msg.m_payload.m1.m1i1 = 9999;
         assert_eq!(unsafe { handle_getprocnr(caller, &mut msg) }, ESRCH);
+    }
+
+    // ---- PM_PTRACE (handle_trace / trace_stop / traced waitpid) ----
+
+    /// Set up `slot` as a root process with the given pid/endpoint.
+    unsafe fn setup_root(slot: usize, pid: i32, endpoint: i32) {
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(slot)).mp_flags |= IN_USE;
+            (*base.add(slot)).mp_pid = pid;
+            (*base.add(slot)).mp_endpoint = endpoint;
+            (*base.add(slot)).mp_effuid = 0;
+            (*base.add(slot)).mp_effgid = 0;
+            (*base.add(slot)).mp_realuid = 0;
+            (*base.add(slot)).mp_realgid = 0;
+        }
+    }
+
+    #[test]
+    fn test_trace_ok_sets_tracer_to_parent() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let parent = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(caller, 1, 0x8000);
+            (*base.add(caller)).mp_parent = parent as i32;
+            (*base.add(caller)).mp_tracer = NO_TRACER;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i2 = T_OK;
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, OK);
+        unsafe {
+            assert_eq!((*base.add(caller)).mp_tracer, parent as i32);
+            assert_eq!(
+                i64::from_ne_bytes(msg.m_payload.raw[8..16].try_into().unwrap()),
+                0
+            );
+        }
+        // A second TRACEME is EBUSY (already traced).
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EBUSY);
+    }
+
+    #[test]
+    fn test_trace_attach_permission_errors() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        unsafe {
+            setup_root(caller, 1, 0x8000);
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i2 = T_ATTACH;
+        // Unknown pid → ESRCH.
+        msg.m_payload.m1.m1i1 = 9999;
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, ESRCH);
+        // Self-attach → EPERM.
+        msg.m_payload.m1.m1i1 = 1;
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EPERM);
+        // T_STOP is not exposed to user programs (C).
+        msg.m_payload.m1.m1i1 = 0;
+        msg.m_payload.m1.m1i2 = T_STOP;
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EINVAL);
+    }
+
+    #[test]
+    fn test_trace_attach_sets_tracer_and_stops() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let target = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(caller, 1, 0x8000);
+            setup_root(target, 2, 0x8010);
+            (*base.add(target)).mp_tracer = NO_TRACER;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i2 = T_ATTACH;
+        msg.m_payload.m1.m1i1 = 2;
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, OK);
+        unsafe {
+            // mp_tracer is a slot index (C who_p); options = TO_NOEXEC.
+            assert_eq!((*base.add(target)).mp_tracer, caller as i32);
+            assert_eq!((*base.add(target)).mp_trace_flags, TO_NOEXEC);
+            // SIGSTOP diverted to the tracer → child stopped.
+            assert_ne!((*base.add(target)).mp_flags & TRACE_STOPPED, 0);
+            assert!((*base.add(target)).mp_sigtrace.sigismember(SIGSTOP));
+        }
+        // Already traced → EBUSY.
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EBUSY);
+    }
+
+    #[test]
+    fn test_trace_control_requires_stopped_child() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let target = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(caller, 1, 0x8000);
+            setup_root(target, 2, 0x8010);
+            (*base.add(target)).mp_tracer = caller as i32;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i2 = T_RESUME;
+        msg.m_payload.m1.m1i1 = 2;
+        // Traced but not stopped → EBUSY.
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EBUSY);
+        // Not traced by this caller → ESRCH.
+        unsafe {
+            (*base.add(target)).mp_tracer = NO_TRACER;
+        }
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, ESRCH);
+        // Bad signal number on resume → EINVAL.
+        unsafe {
+            (*base.add(target)).mp_tracer = caller as i32;
+            (*base.add(target)).mp_flags |= TRACE_STOPPED;
+            msg.m_payload.raw[24..32].copy_from_slice(&(_NSIG as i64).to_le_bytes());
+        }
+        assert_eq!(unsafe { handle_trace(caller, &mut msg) }, EINVAL);
+    }
+
+    #[test]
+    fn test_trace_stop_clears_waiting_on_tracer() {
+        init_proc();
+        let tracer = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(tracer, 1, 0x8000);
+            setup_root(child, 2, 0x8010);
+            (*base.add(tracer)).mp_flags |= WAITING;
+            (*base.add(tracer)).mp_wpid = -1;
+            (*base.add(child)).mp_tracer = tracer as i32;
+        }
+        unsafe { trace_stop(child, SIGSTOP) };
+        unsafe {
+            assert_ne!((*base.add(child)).mp_flags & TRACE_STOPPED, 0);
+            assert_eq!(
+                (*base.add(tracer)).mp_flags & WAITING,
+                0,
+                "tracer no longer waiting after the stop reply"
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_waitpid_reports_traced_stop() {
+        init_proc();
+        let tracer = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(tracer, 1, 0x8000);
+            setup_root(child, 2, 0x8010);
+            (*base.add(child)).mp_flags |= TRACE_STOPPED;
+            (*base.add(child)).mp_tracer = tracer as i32;
+            (*base.add(child)).mp_sigtrace.sigaddset(SIGSTOP);
+        }
+        // The tracer's waitpid reports W_STOPCODE(SIGSTOP) and consumes
+        // the sigtrace entry.
+        let r = unsafe { do_waitpid(tracer, -1, 0) };
+        assert_eq!(r, Ok((2, SIGSTOP << 8)));
+        unsafe {
+            assert!(!(*base.add(child)).mp_sigtrace.sigismember(SIGSTOP));
+        }
+    }
+
+    #[test]
+    fn test_do_waitpid_collects_trace_zombie() {
+        init_proc();
+        let tracer = alloc_proc().unwrap();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            setup_root(tracer, 1, 0x8000);
+            setup_root(parent, 3, 0x8011);
+            setup_root(child, 2, 0x8010);
+            (*base.add(child)).mp_flags |= TRACE_ZOMBIE;
+            (*base.add(child)).mp_parent = parent as i32;
+            (*base.add(child)).mp_tracer = tracer as i32;
+            (*base.add(child)).mp_exitstatus = 7;
+        }
+        // tell_tracer replies itself; do_waitpid returns EDONTREPLY so the
+        // caller does not reply twice, and marks the child TOLD_PARENT.
+        let r = unsafe { do_waitpid(tracer, -1, 0) };
+        assert_eq!(r, Err(EDONTREPLY));
+        unsafe {
+            assert_ne!((*base.add(child)).mp_flags & TOLD_PARENT, 0);
+        }
     }
 
     #[test]

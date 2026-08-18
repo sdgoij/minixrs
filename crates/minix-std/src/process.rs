@@ -25,6 +25,7 @@ pub const PM_EXIT: u32 = PM_BASE + 1;
 pub const PM_FORK: u32 = PM_BASE + 2;
 pub const PM_WAITPID: u32 = PM_BASE + 3;
 pub const PM_GETPID: u32 = PM_BASE + 4;
+pub const PM_PTRACE: u32 = PM_BASE + 8;
 pub const PM_SETUID: u32 = PM_BASE + 5;
 pub const PM_GETUID: u32 = PM_BASE + 6;
 pub const PM_SETGROUPS: u32 = PM_BASE + 9;
@@ -81,6 +82,58 @@ const OFF_WAIT_STATUS: usize = 12;
 
 /// Wait options: return immediately if no child has exited.
 pub const WNOHANG: i32 = 1;
+
+/// ptrace(2) request codes (sys/ptrace.h PT_*; PM's handler aliases them
+/// T_*).
+pub const PT_TRACE_ME: i32 = 0;
+pub const PT_READ_I: i32 = 1;
+pub const PT_READ_D: i32 = 2;
+pub const PT_WRITE_I: i32 = 4;
+pub const PT_WRITE_D: i32 = 5;
+pub const PT_CONTINUE: i32 = 7;
+pub const PT_KILL: i32 = 8;
+pub const PT_ATTACH: i32 = 9;
+pub const PT_DETACH: i32 = 10;
+pub const PT_SYSCALL: i32 = 14;
+
+/// Process debugging control (PM_PTRACE).
+///
+/// `request` is a `PT_*` code, `pid` the traced process, `addr` an
+/// address in its space, `data` the request's data word. Returns the
+/// reply data (e.g. a word read from the traced process) on success.
+///
+/// # Safety
+///
+/// Must be called in a context where the PM server is running.
+pub unsafe fn ptrace(request: i32, pid: i32, addr: u64, data: i64) -> Result<i64, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_PTRACE as i32);
+        msg_set_i32(&mut msg, 8, pid); // m1i1 — mess_lc_pm_ptrace.pid
+        msg_set_i32(&mut msg, 12, request); // m1i2 — .req
+        msg[16..24].copy_from_slice(&addr.to_le_bytes()); // .addr
+        msg[24..32].copy_from_slice(&data.to_le_bytes()); // .data
+        let result = sendrec(PM_PROC_NR, &mut msg);
+        match result {
+            Ok(_) => {
+                let mtype = msg_i32(&msg, OFF_TYPE);
+                if mtype < 0 {
+                    Err(MinixErr::from_i32(mtype))
+                } else {
+                    // Reply: mess_pm_lc_ptrace.data (i64) at raw[8..16].
+                    Ok(i64::from_le_bytes(msg[8..16].try_into().unwrap_or([0; 8])))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (request, pid, addr, data);
+        Err(MinixErr::ENOSYS)
+    }
+}
 
 // PM_EXEC_NEW args:
 //   offset 12: exec_endpt (i32) — calling process endpoint, set by kernel

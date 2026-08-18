@@ -1061,6 +1061,27 @@ pub fn sys_fork(parent_ep: i32, child_slot: i32, flags: u32, tid: i32) -> Result
     Ok((child_ep, msgaddr))
 }
 
+/// Invoke SYS_TRACE (kernel call 5) — ptrace kernel operations.
+///
+/// `request` is a `T_*` code (sys/ptrace.h), `proc_ep` the traced
+/// process's endpoint, `addr` the address in its space, and `data` the
+/// value in/out (the kernel reads it for `T_SET*`, writes it for
+/// `T_GET*`/`T_READB_INS`). Returns 0 on success or a negative error
+/// code.
+pub fn sys_trace(request: i32, proc_ep: i32, addr: u64, data: &mut i64) -> i32 {
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&proc_ep.to_le_bytes());
+    msg[12..16].copy_from_slice(&request.to_le_bytes());
+    msg[16..24].copy_from_slice(&addr.to_le_bytes());
+    msg[24..32].copy_from_slice(&(*data).to_le_bytes());
+    let r = kernel_call(5, &mut msg);
+    if r != 0 {
+        return r;
+    }
+    *data = i64::from_le_bytes(msg[24..32].try_into().unwrap_or([0; 8]));
+    0
+}
+
 /// Write a diagnostic byte directly to the serial port via SYS_DIAGCTL.
 /// This does NOT go through VFS, so it can be called even when VFS is
 /// blocked (e.g., during mount_root or fork).
