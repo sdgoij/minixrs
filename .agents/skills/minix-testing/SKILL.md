@@ -44,6 +44,22 @@ Checklist before declaring a change done:
       boot-image
 - [ ] `cargo clippy -- -D warnings` clean on the changed crates
 
+## Grep for warnings — don't eyeball the tail
+
+`cargo build`/`cargo test` print warnings *before* the final `Finished`/
+`test result` lines, so piping to `tail -N` hides them. After any validation
+run on a touched crate, confirm zero warnings explicitly:
+
+```sh
+cargo build -p servers 2>&1 | grep -E "^(error|warning)"   # expect: no output
+cargo clippy --workspace --all-targets -- -D warnings      # expect: Finished, no errors
+```
+
+A warning in a crate you only *compiled* (not edited) still counts: if your
+change prompted the rebuild and the tree had latent warnings, fix or flag
+them before handing back — the tree must be shippable at every checkpoint
+(`bare-metal-debug` skill, same rule).
+
 ## Test Type / Domain Quick Reference
 
 | Domain | Runner | Best For | Cost |
