@@ -2940,6 +2940,23 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
     + 16 ext2 + 75 PFS)
   - `cargo clippy -p fs --tests -- -D warnings` passes
 
+- [ ] **9.6x — pfs-wiring assessment (J6, 2026-08-18)**: the pfs *server*
+  process boots, but VFS never sends it FS requests — pipe data lives in
+  VFS's own ring buffers (`vfs/pipe.rs` deviation; `do_pipe2` only needs
+  the PFS vmnt entry, `map_vnode` returns ENOSYS). The IPC-dispatch
+  handlers (`fs_putnode`/`fs_ftrunc`/`fs_chmod`/`fs_newnode`/`fs_stat`/
+  `fs_utime`) are therefore unreachable; their `todo!()`s reference this
+  task. Resolution options: (a) wire VFS named-pipe/newnode requests to
+  pfs (C-faithful, replaces the in-VFS pipe buffers), or (b) drop the pfs
+  server from the boot image and leave the handlers as documented no_sys.
+
+- [ ] **J6 — ds-getsysinfo (2026-08-18)**: DS_GETSYSINFO (0x807,
+  `SI_DATA_STORE` raw store copy) has no in-tree consumer — RS never
+  queries DS. Implement `do_getsysinfo` when a consumer exists; needs a
+  defined `DataStore` value layout for the raw copy (the port's
+  `DataValue` enum is not C-layout-compatible). Until then DS replies
+  ENOSYS (C's unimplemented-call default) with a traceable comment.
+
 - [x] **9.7 — Port `minix/lib/libminixfs/` — MINIX native filesystem library**
   - Source: `.refs/minix-3.3.0/minix/lib/libminixfs/` (cache.c, minixfs.h, fetch_credentials.c)
   - Implemented in `crates/libs/src/libminixfs/` (6 modules):

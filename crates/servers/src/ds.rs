@@ -1028,7 +1028,11 @@ pub fn ds_server_main() {
                         }
                     }
                     0x807 => {
-                        // DS_GETSYSINFO — not implemented yet
+                        // DS_GETSYSINFO — no in-tree consumer queries DS
+                        // today; implement SI_DATA_STORE (raw store copy)
+                        // when one exists (see PORTING_PLAN.md J6
+                        // ds-getsysinfo). ENOSYS is the C default for
+                        // unimplemented calls.
                         ENOSYS
                     }
                     _ => ENOSYS,

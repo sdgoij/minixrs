@@ -23,7 +23,7 @@ pub fn fs_new_driver() -> i32 {
 /// Change mode of a pipe inode.
 // Reference: misc.c fs_chmod()
 pub fn fs_chmod() -> i32 {
-    todo!("fs_chmod: not yet wired — requires IPC message parsing")
+    todo!("pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring")
 }
 
 #[cfg(test)]
@@ -46,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
+    #[should_panic(expected = "pfs server is unwired")]
     fn test_fs_chmod_panics() {
         fs_chmod();
     }

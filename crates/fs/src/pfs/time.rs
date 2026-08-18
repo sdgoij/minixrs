@@ -8,7 +8,9 @@ use crate::pfs::glo;
 /// In PFS, `fs_utime` updates the atime and mtime fields of an inode.
 // Reference: time.c fs_utime()
 pub fn fs_utime() -> i32 {
-    todo!("fs_utime: not yet wired — requires IPC message parsing")
+    todo!(
+        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
+    )
 }
 
 /// Set access time on an inode.
@@ -80,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
+    #[should_panic(expected = "pfs server is unwired")]
     fn test_fs_utime_panics() {
         fs_utime();
     }

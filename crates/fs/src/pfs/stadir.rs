@@ -9,7 +9,9 @@ use crate::pfs::inode::*;
 /// Returns file metadata including size, mode, timestamps, etc.
 // Reference: stadir.c fs_stat()
 pub fn fs_stat() -> i32 {
-    todo!("fs_stat: not yet wired — requires IPC message parsing")
+    todo!(
+        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
+    )
 }
 
 /// Statvfs — not meaningful for PFS (no block storage).
@@ -70,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
+    #[should_panic(expected = "pfs server is unwired")]
     fn test_fs_stat_panics() {
         fs_stat();
     }

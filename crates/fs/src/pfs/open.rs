@@ -11,7 +11,9 @@ use crate::pfs::inode::*;
 /// Returns the inode number and metadata through the VFS message.
 // Reference: open.c fs_newnode()
 pub fn fs_newnode() -> i32 {
-    todo!("fs_newnode: not yet wired — requires IPC message parsing")
+    todo!(
+        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
+    )
 }
 
 /// Create a pipe inode.
@@ -86,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
+    #[should_panic(expected = "pfs server is unwired")]
     fn test_fs_newnode_panics() {
         fs_newnode();
     }

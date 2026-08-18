@@ -2771,6 +2771,145 @@ pub unsafe fn handle_getsid(caller_slot: usize, msg: &mut Message) -> i32 {
     }
 }
 
+// ---- PM_SYSUNAME / PM_GETEPINFO / PM_GETPROCNR (J6 info calls) ----
+
+/// uname strings served by PM_SYSUNAME (matching C `uts_tbl` in
+/// `servers/pm/misc.c`). The kernel-arch / hostname / bus fields are
+/// unsupported, as in C (NULL entries).
+#[cfg(target_arch = "x86_64")]
+const UTS_ARCH: &[u8] = b"x86_64";
+#[cfg(target_arch = "riscv64")]
+const UTS_ARCH: &[u8] = b"riscv64";
+#[cfg(target_arch = "aarch64")]
+const UTS_ARCH: &[u8] = b"aarch64";
+const UTS_MACHINE: &[u8] = UTS_ARCH;
+const UTS_NODENAME: &[u8] = b"minix";
+const UTS_RELEASE: &[u8] = b"";
+const UTS_VERSION: &[u8] = b"";
+const UTS_SYSNAME: &[u8] = b"Minix";
+
+/// `_UTS_*` field indices and request codes (sys/utsname.h).
+const UTS_GET: i32 = 0;
+const UTS_MAX: usize = 9;
+
+/// The uname string table (C `uts_tbl[]` in misc.c). NULL entries are
+/// unsupported fields (kernel arch, hostname, bus).
+fn uts_tbl() -> &'static [Option<&'static [u8]>] {
+    &[
+        Some(UTS_ARCH),     // _UTS_ARCH (0)
+        None,               // _UTS_KERNEL (1)
+        Some(UTS_MACHINE),  // _UTS_MACHINE (2)
+        None,               // _UTS_HOSTNAME (3)
+        Some(UTS_NODENAME), // _UTS_NODENAME (4)
+        Some(UTS_RELEASE),  // _UTS_RELEASE (5)
+        Some(UTS_VERSION),  // _UTS_VERSION (6)
+        Some(UTS_SYSNAME),  // _UTS_SYSNAME (7)
+        None,               // _UTS_BUS (8)
+    ]
+}
+
+/// Handler for PM_SYSUNAME — copy one uname string to the caller.
+///
+/// Matching C: `do_sysuname()` in `servers/pm/misc.c`. Request
+/// `mess_lc_pm_sysuname`: req@m1i1, field@m1i2, len@raw[16..24],
+/// value@raw[24..32]. Returns the number of bytes copied (the reply
+/// m_type); `_UTS_SET` is unsupported (C has it `#if 0`'d too).
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer. On the minix target, `value` must name a
+/// caller-accessible buffer of at least `len` bytes.
+pub unsafe fn handle_sysuname(caller_slot: usize, msg: &mut Message) -> i32 {
+    let req = unsafe { msg.m_payload.m1.m1i1 };
+    let field = unsafe { msg.m_payload.m1.m1i2 };
+    let len = u64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[16..24] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    let value = u64::from_le_bytes(
+        unsafe { &msg.m_payload.raw[24..32] }
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    if field < 0 || field as usize >= UTS_MAX {
+        return EINVAL;
+    }
+    let Some(string) = uts_tbl()[field as usize] else {
+        return EINVAL; // unsupported field
+    };
+    if req != UTS_GET {
+        return EINVAL; // _UTS_SET not supported (matching C)
+    }
+    // C: n = strlen(string) + 1, clamped to the caller's buffer size.
+    let n = (string.len() + 1).min(len as usize);
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    #[cfg(target_os = "minix")]
+    {
+        let r = minix_rt::sys_vircopy(minix_rt::SELF, string.as_ptr() as u64, caller_ep, value, n);
+        if r != 0 {
+            return r;
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (caller_ep, value); // host tests validate the count path
+    }
+    n as i32
+}
+
+/// Handler for PM_GETEPINFO — pid/uid/gid of the process at `endpt`.
+///
+/// Matching C: `do_getepinfo()` in `servers/pm/misc.c`. Request:
+/// endpt@m1i1. Reply: uid@m1i1, gid@m1i2, and the pid as the reply
+/// m_type (C returns `rmp->mp_pid`).
+///
+/// # Safety
+///
+/// `_caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_getepinfo(_caller_slot: usize, msg: &mut Message) -> i32 {
+    let ep = unsafe { msg.m_payload.m1.m1i1 };
+    match unsafe { pm_isokendpt(ep) } {
+        Some(slot) => {
+            let rmp = unsafe { &*MPROC.as_ptr().add(slot) };
+            msg.m_payload.m1.m1i1 = rmp.mp_effuid;
+            msg.m_payload.m1.m1i2 = rmp.mp_effgid;
+            rmp.mp_pid
+        }
+        None => ESRCH,
+    }
+}
+
+/// Handler for PM_GETPROCNR — endpoint of the process with the given pid.
+///
+/// Matching C: `do_getprocnr()` in `servers/pm/misc.c`. Only RS may call
+/// (the per-call ACL C applies to `who_e`). Request: pid@m1i1. Reply:
+/// endpt@m1i1.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_getprocnr(caller_slot: usize, msg: &mut Message) -> i32 {
+    let base = MPROC.as_ptr();
+    let caller_ep = unsafe { (*base.add(caller_slot)).mp_endpoint };
+    if caller_ep != arch_common::com::RS_PROC_NR {
+        return EPERM;
+    }
+    let pid = unsafe { msg.m_payload.m1.m1i1 };
+    for i in 0..NR_PROCS {
+        let rmp = unsafe { &*base.add(i) };
+        if rmp.mp_flags & IN_USE != 0 && rmp.mp_pid == pid {
+            msg.m_payload.m1.m1i1 = rmp.mp_endpoint;
+            return OK;
+        }
+    }
+    ESRCH
+}
+
 /// Handler for PM_ISSETUGID — 1 after a setuid/setgid exec (TAINTED).
 ///
 /// # Safety
@@ -3109,21 +3248,21 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         22 => unsafe { handle_sigpending(caller_slot, msg) },
         23 => unsafe { handle_sigprocmask(caller_slot, msg) },
         24 => unsafe { handle_sigreturn(caller_slot, msg) },
-        25 => unsafe { no_sys(caller_slot, msg) }, // PM_SYSUNAME
-        28 => unsafe { handle_time(caller_slot, msg) }, // PM_GETTIMEOFDAY
-        29 => unsafe { handle_seteuid(caller_slot, msg) }, // PM_SETEUID
-        30 => unsafe { handle_setegid(caller_slot, msg) }, // PM_SETEGID
+        25 => unsafe { handle_sysuname(caller_slot, msg) }, // PM_SYSUNAME
+        28 => unsafe { handle_time(caller_slot, msg) },     // PM_GETTIMEOFDAY
+        29 => unsafe { handle_seteuid(caller_slot, msg) },  // PM_SETEUID
+        30 => unsafe { handle_setegid(caller_slot, msg) },  // PM_SETEGID
         31 => unsafe { handle_issetugid(caller_slot, msg) }, // PM_ISSETUGID
-        32 => unsafe { handle_getsid(caller_slot, msg) }, // PM_GETSID
+        32 => unsafe { handle_getsid(caller_slot, msg) },   // PM_GETSID
         34 => unsafe { handle_clock_gettime(caller_slot, msg) }, // PM_CLOCK_GETTIME
         35 => unsafe { handle_clock_settime(caller_slot, msg) }, // PM_CLOCK_SETTIME
-        36 => unsafe { handle_rusage(caller_slot, msg) }, // PM_GETRUSAGE
-        37 => unsafe { handle_reboot(caller_slot, msg) }, // PM_REBOOT
+        36 => unsafe { handle_rusage(caller_slot, msg) },   // PM_GETRUSAGE
+        37 => unsafe { handle_reboot(caller_slot, msg) },   // PM_REBOOT
         42 => unsafe { handle_srv_kill(caller_slot, msg) }, // PM_SRV_KILL
-        43 => unsafe { handle_newexec(caller_slot, msg) }, // PM_EXEC_NEW
+        43 => unsafe { handle_newexec(caller_slot, msg) },  // PM_EXEC_NEW
         44 => unsafe { handle_execrestart(caller_slot, msg) }, // PM_EXEC_RESTART
-        45 => unsafe { no_sys(caller_slot, msg) }, // PM_GETEPINFO
-        46 => unsafe { no_sys(caller_slot, msg) }, // PM_GETPROCNR
+        45 => unsafe { handle_getepinfo(caller_slot, msg) }, // PM_GETEPINFO
+        46 => unsafe { handle_getprocnr(caller_slot, msg) }, // PM_GETPROCNR
         _ => unsafe { no_sys(caller_slot, msg) },
     }
 }
@@ -5031,6 +5170,119 @@ mod tests {
         msg.m_payload.m1.m1i1 = 2;
         let r = unsafe { handle_getgroups(slot, &mut msg) };
         assert_eq!(r, EINVAL);
+    }
+
+    // ---- J6 info calls: PM_SYSUNAME / PM_GETEPINFO / PM_GETPROCNR ----
+
+    fn make_msg() -> Message {
+        Message {
+            m_source: 0,
+            m_type: 0,
+            m_payload: unsafe { core::mem::zeroed() },
+        }
+    }
+
+    #[test]
+    fn test_sysuname_rejects_bad_field_and_req() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(caller)).mp_endpoint = 0x8000;
+        }
+        let mut msg = make_msg();
+        // Field out of range.
+        msg.m_payload.m1.m1i1 = UTS_GET; // req
+        msg.m_payload.m1.m1i2 = UTS_MAX as i32;
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, EINVAL);
+        msg.m_payload.m1.m1i2 = -1;
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, EINVAL);
+        // Unsupported field (kernel arch, hostname, bus are NULL in uts_tbl).
+        msg.m_payload.m1.m1i2 = 1; // _UTS_KERNEL
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, EINVAL);
+        msg.m_payload.m1.m1i2 = 8; // _UTS_BUS
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, EINVAL);
+        // _UTS_SET is unsupported.
+        msg.m_payload.m1.m1i2 = 7; // _UTS_SYSNAME
+        msg.m_payload.m1.m1i1 = 1; // _UTS_SET
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, EINVAL);
+    }
+
+    #[test]
+    fn test_sysuname_get_returns_clamped_byte_count() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(caller)).mp_endpoint = 0x8000;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i1 = UTS_GET;
+        msg.m_payload.m1.m1i2 = 7; // _UTS_SYSNAME = "Minix"
+        // len = 64: full string + NUL.
+        unsafe {
+            msg.m_payload.raw[16..24].copy_from_slice(&64u64.to_le_bytes());
+            msg.m_payload.raw[24..32].copy_from_slice(&0x1234_0000u64.to_le_bytes());
+        }
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, 6); // "Minix" + NUL
+        // len = 3 clamps the copy (C: n = min(strlen+1, len)).
+        unsafe {
+            msg.m_payload.raw[16..24].copy_from_slice(&3u64.to_le_bytes());
+        }
+        assert_eq!(unsafe { handle_sysuname(caller, &mut msg) }, 3);
+    }
+
+    #[test]
+    fn test_getepinfo_returns_uid_gid_and_pid() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let target = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(caller)).mp_flags |= IN_USE;
+            (*base.add(target)).mp_flags |= IN_USE;
+            (*base.add(target)).mp_endpoint = 0x8012;
+            (*base.add(target)).mp_pid = 42;
+            (*base.add(target)).mp_effuid = 100;
+            (*base.add(target)).mp_effgid = 50;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i1 = 0x8012;
+        // C returns the pid as the reply m_type; uid/gid in m1i1/m1i2.
+        assert_eq!(unsafe { handle_getepinfo(caller, &mut msg) }, 42);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 100);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i2 }, 50);
+        // Unknown endpoint → ESRCH.
+        msg.m_payload.m1.m1i1 = 0x7FFF;
+        assert_eq!(unsafe { handle_getepinfo(caller, &mut msg) }, ESRCH);
+    }
+
+    #[test]
+    fn test_getprocnr_requires_rs_and_finds_by_pid() {
+        init_proc();
+        let caller = alloc_proc().unwrap();
+        let target = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(caller)).mp_flags |= IN_USE;
+            (*base.add(caller)).mp_endpoint = 0x8000; // not RS
+            (*base.add(target)).mp_flags |= IN_USE;
+            (*base.add(target)).mp_endpoint = 0x8012;
+            (*base.add(target)).mp_pid = 42;
+        }
+        let mut msg = make_msg();
+        // Non-RS caller → EPERM (C's who_e check).
+        msg.m_payload.m1.m1i1 = 42;
+        assert_eq!(unsafe { handle_getprocnr(caller, &mut msg) }, EPERM);
+        // RS caller finds the endpoint by pid.
+        unsafe {
+            (*base.add(caller)).mp_endpoint = arch_common::com::RS_PROC_NR;
+        }
+        assert_eq!(unsafe { handle_getprocnr(caller, &mut msg) }, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 0x8012);
+        // Unknown pid → ESRCH.
+        msg.m_payload.m1.m1i1 = 9999;
+        assert_eq!(unsafe { handle_getprocnr(caller, &mut msg) }, ESRCH);
     }
 
     #[test]

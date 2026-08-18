@@ -595,29 +595,11 @@ pub fn bdev_close(dev: u32) -> i32 {
     request::r_i32(&msg, BDEV_STATUS_OFF)
 }
 
-/// Process the result of a block driver request.
-///
-/// Wakes up the worker thread that is waiting for a block driver reply.
-/// The reply message is copied into the worker's sendrec buffer.
-///
-/// C source: \`minix/servers/vfs/device.c\` — \`bdev_reply()\` (line 824)
-///
-/// # Safety
-///
-/// Must be called from the VFS main loop when a \`BDEV_REPLY\` message
-/// is received.
-///
-/// # TODO
-///
-/// Wire reply processing:
-///   1. Validate driver via \`get_dmap()\`.
-///   2. Lookup the servicing worker thread from \`dmap_servicing\`.
-///   3. Copy the incoming message into \`w_drv_sendrec\`.
-///   4. Signal the worker thread with \`worker_signal()\`.
-pub fn bdev_reply() {
-    // TODO: lookup driver endpoint, copy reply message into worker's
-    // sendrec buffer, and signal the waiting worker thread.
-}
+// C's `bdev_reply()` (device.c line 824) processes asynchronous
+// BDEV_REPLY completions from block drivers. This port's block path is
+// sendrec-synchronous (bdev_open/bdev_close above reply inline via
+// `fs_sendrec`), and the VFS main loop has no BDEV_REPLY branch, so that
+// async handler is unreachable here and deliberately omitted.
 
 /// A block driver has been mapped in (or restarted).
 ///

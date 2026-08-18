@@ -291,9 +291,10 @@ pub fn dup_inode(ip_idx: u16) {
 /// VFS putnode handler — decrease inode reference count.
 // Reference: inode.c fs_putnode()
 pub fn fs_putnode() -> i32 {
-    todo!("fs_putnode: not yet wired")
+    todo!(
+        "pfs server is unwired in this port (VFS pipes are in-VFS ring buffers); see PORTING_PLAN.md Phase 9.6 pfs-wiring"
+    )
 }
-
 
 unsafe fn remove_from_unused(idx: u16) {
     let head_ptr = glo::UNUSED_INODES_HEAD.get();
@@ -483,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet wired")]
+    #[should_panic(expected = "pfs server is unwired")]
     fn test_fs_putnode_panics() {
         fs_putnode();
     }
