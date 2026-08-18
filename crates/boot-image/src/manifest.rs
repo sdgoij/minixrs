@@ -62,6 +62,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/unametest` fetches the PM_SYSUNAME fields and verifies
     // sysname/nodename/machine (J6 follow-up).
     ("/bin/unametest", "unametest"),
+    // `/bin/eptest` queries its own pid/uid/gid by endpoint through
+    // PM_GETEPINFO and cross-checks getpid/getuid/getgid (J6 follow-up).
+    ("/bin/eptest", "eptest"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
     // returns to baseline (see tools/alloc_churn_probe.py).

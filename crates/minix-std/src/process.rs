@@ -27,6 +27,8 @@ pub const PM_WAITPID: u32 = PM_BASE + 3;
 pub const PM_GETPID: u32 = PM_BASE + 4;
 pub const PM_PTRACE: u32 = PM_BASE + 8;
 pub const PM_SYSUNAME: u32 = PM_BASE + 25;
+pub const PM_GETEPINFO: u32 = PM_BASE + 45;
+pub const PM_GETPROCNR: u32 = PM_BASE + 46;
 pub const PM_SETUID: u32 = PM_BASE + 5;
 pub const PM_GETUID: u32 = PM_BASE + 6;
 pub const PM_SETGROUPS: u32 = PM_BASE + 9;
@@ -463,6 +465,42 @@ pub fn getgroups(buf: &mut [i32]) -> Result<i32, MinixErr> {
     }
 }
 
+/// Query the pid/uid/gid of the process at `endpt` (PM_GETEPINFO).
+///
+/// Returns `(pid, uid, gid)`; the uid/gid are the effective ids (C
+/// `do_getepinfo` reads `mp_effuid`/`mp_effgid`). `endpt` must be a
+/// user-process endpoint (kernel tasks are rejected with `ESRCH`).
+///
+/// # Safety
+///
+/// Must be called in a context where the PM server is running.
+pub unsafe fn getepinfo(endpt: i32) -> Result<(i32, i32, i32), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETEPINFO as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, endpt); // m1i1 = mess_lsys_pm_getepinfo.endpt
+        let result = sendrec(PM_PROC_NR, &mut msg);
+        match result {
+            Ok(_) => {
+                // Reply: pid as m_type, uid@m1i1, gid@m1i2.
+                let mtype = msg_i32(&msg, OFF_TYPE);
+                if mtype < 0 {
+                    Err(MinixErr::from_i32(mtype))
+                } else {
+                    Ok((mtype, msg_i32(&msg, OFF_ARG1), msg_i32(&msg, OFF_ARG2)))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = endpt;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
 /// Set the real and effective user id (C `setuid`).
 pub fn setuid(uid: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "minix")]
@@ -580,6 +618,20 @@ mod tests {
         assert_eq!(PM_EXEC_NEW, 0x02B);
         assert_eq!(PM_PTRACE, 0x008);
         assert_eq!(PM_SYSUNAME, 0x019);
+        assert_eq!(PM_GETEPINFO, 0x02D);
+        assert_eq!(PM_GETPROCNR, 0x02E);
+    }
+
+    #[test]
+    fn test_getepinfo_message_format() {
+        // PM handle_getepinfo reads endpt@m1i1(8) (mess_lsys_pm_getepinfo)
+        // and replies with pid as m_type, uid@m1i1, gid@m1i2
+        // (mess_pm_lsys_getepinfo).
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_GETEPINFO as i32);
+        msg_set_i32(&mut msg, OFF_ARG1, 0x8012);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), 0x02D);
+        assert_eq!(msg_i32(&msg, OFF_ARG1), 0x8012);
     }
 
     #[test]

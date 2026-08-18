@@ -451,6 +451,11 @@ pub fn init_proc() {
         unsafe {
             (*base.add(slot)).mp_flags |= IN_USE | PRIV_PROC;
             (*base.add(slot)).mp_magic = MP_MAGIC;
+            // Phantom slot: no real process backs it. A zeroed mp_endpoint
+            // would shadow the real boot entries in pm_isokendpt lookups
+            // (getepinfo(0) returned the phantom's pid 0 instead of PM's
+            // pid 1); a negative sentinel is rejected by pm_isokendpt.
+            (*base.add(slot)).mp_endpoint = -1;
         }
         PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
     }
@@ -5670,6 +5675,25 @@ mod tests {
         // Unknown endpoint → ESRCH.
         msg.m_payload.m1.m1i1 = 0x7FFF;
         assert_eq!(unsafe { handle_getepinfo(caller, &mut msg) }, ESRCH);
+    }
+
+    #[test]
+    fn test_getepinfo_pm_not_shadowed_by_placeholder() {
+        init_proc();
+        // pm_server_main's boot loop allocates the real PM entry (endpoint
+        // 0, pid 1) into a free slot; the init_proc placeholder at slot 0
+        // must not shadow it in pm_isokendpt (its endpoint is -1).
+        let pm_slot = alloc_proc().unwrap();
+        let base = MPROC.as_ptr();
+        unsafe {
+            (*base.add(pm_slot)).mp_endpoint = 0;
+            (*base.add(pm_slot)).mp_pid = 1;
+        }
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i1 = 0; // PM endpoint
+        assert_eq!(unsafe { handle_getepinfo(pm_slot, &mut msg) }, 1);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 0); // PM runs as root
+        assert_eq!(unsafe { msg.m_payload.m1.m1i2 }, 0);
     }
 
     #[test]

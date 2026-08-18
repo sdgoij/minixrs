@@ -180,6 +180,13 @@ name = "unametest"
 path = "src/bin/unametest.rs"
 test = false
 
+# eptest is the PM_GETEPINFO smoke test: queries its own pid/uid/gid by
+# endpoint and cross-checks getpid/getuid/getgid. Embedded as /bin/eptest.
+[[bin]]
+name = "eptest"
+path = "src/bin/eptest.rs"
+test = false
+
 [[bin]]
 name = "fbmmap"
 path = "src/bin/fbmmap.rs"
