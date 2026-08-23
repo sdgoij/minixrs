@@ -47,6 +47,14 @@ const O_TRUNC: u32 = 0o1000;
 const O_APPEND: u32 = 0o2000;
 /// CP_FLAG_TRY: direct copy without VM fallback.
 const CP_FLAG_TRY: i32 = 0x01;
+
+/// Normalize an FS server reply for a caller-facing syscall result. FS
+/// servers disagree on the errno sign — MFS replies with positive errnos
+/// (EEXIST = 17), PFS with negative ones (-EINVAL) — and minix-std treats
+/// a negative m_type as an error, so errno-status replies must be negative.
+fn norm_fs_errno(r: i32) -> i32 {
+    if r > 0 { -r } else { r }
+}
 /// SYS_VIRCOPY message field offsets (matches kernel/src/system.rs)
 // NOTE: offset 0-7 is reserved for the kernel_call header
 // (internal call number at 0-3, source endpoint at 4-7).
@@ -287,7 +295,11 @@ pub fn do_creat() -> i32 {
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
     let open_flags = r_u32(&glob.fs_m_in, 24);
-    let create_mode = r_u32(&glob.fs_m_in, 28);
+    // C common_open: a creat mode is permission-only from the caller — the
+    // regular-file type bit is added here (MFS stores the raw mode). Without
+    // it the new inode has no S_IFMT type, and later operations that switch
+    // on the type (e.g. truncate_vnode) reject the file.
+    let create_mode = r_u32(&glob.fs_m_in, 28) | crate::vfs::consts::S_IFREG;
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
@@ -926,7 +938,7 @@ unsafe fn truncate_vnode(vp: *mut Vnode, newsize: i64) -> i32 {
     if r == OK {
         (*vp).v_size = newsize;
     }
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `truncate(path, length)` system call.
@@ -1679,7 +1691,7 @@ pub fn do_link() -> i32 {
     let r = unsafe { crate::vfs::request::req_link(src_fs_e, dir_ino, core::ptr::null(), src_ino) };
     unsafe { mount::put_vnode(dirp) };
     unsafe { mount::put_vnode(vp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `unlink(path)` system call (also used for `rmdir` in C).
@@ -1723,7 +1735,7 @@ pub fn do_unlink() -> i32 {
     let dir_ino = unsafe { (*dirp).v_inode_nr };
     let r = unsafe { crate::vfs::request::req_unlink(fs_e, dir_ino, core::ptr::null()) };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `rename(oldpath, newpath)` system call.
@@ -1802,7 +1814,7 @@ pub fn do_rename() -> i32 {
     };
     unsafe { mount::put_vnode(dirp2) };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `mkdir(path, mode)` system call.
@@ -1862,7 +1874,7 @@ pub fn do_mkdir() -> i32 {
         )
     };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `mknod(path, mode, dev)` system call.
@@ -1943,7 +1955,7 @@ pub fn do_mknod() -> i32 {
         )
     };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `symlink(target, linkpath)` system call.
@@ -1995,7 +2007,7 @@ pub fn do_slink() -> i32 {
         )
     };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `rmdir(path)` system call.
@@ -2043,7 +2055,7 @@ pub fn do_rmdir() -> i32 {
         crate::vfs::request::req_rmdir((*dirp).v_fs_e, (*dirp).v_inode_nr, core::ptr::null())
     };
     unsafe { mount::put_vnode(dirp) };
-    r
+    norm_fs_errno(r)
 }
 
 // Permission operations
@@ -2180,7 +2192,7 @@ pub fn do_chmod() -> i32 {
     if owns_ref {
         unsafe { mount::put_vnode(vp) };
     }
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `chown(path, owner, group)` and `fchown(fd, owner, group)` system calls.
@@ -2243,7 +2255,7 @@ pub fn do_chown() -> i32 {
         }
     }
     unsafe { mount::put_vnode(vp) };
-    r
+    norm_fs_errno(r)
 }
 
 /// Perform the `umask(mode)` system call.
@@ -2879,6 +2891,19 @@ mod tests {
         (*glob).fp = fp;
         (*glob).fs_m_in = [0u8; 64];
         (*glob).fs_m_out = [0u8; 64];
+    }
+
+    #[test]
+    fn test_norm_fs_errno_normalizes_positive_errnos() {
+        // MFS replies positive errnos (EEXIST = 17, ENOENT = 2), PFS
+        // negative ones; minix-std treats a negative m_type as an error, so
+        // caller-facing VFS results must be negative. Regression pin:
+        // do_mknod forwarded +17, so the shell saw EEXIST as success
+        // (silent second mknod).
+        assert_eq!(norm_fs_errno(17), -17); // raw MFS EEXIST
+        assert_eq!(norm_fs_errno(2), -2); // raw MFS ENOENT
+        assert_eq!(norm_fs_errno(-17), -17); // already negative: unchanged
+        assert_eq!(norm_fs_errno(0), 0);
     }
 
     #[test]

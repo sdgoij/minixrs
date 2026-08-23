@@ -530,6 +530,7 @@ pub fn search_dir(
         let dp = &mut *((*held_bp).data_ptr as *mut Direct);
         // If we found a free slot in an existing block (not extended),
         // re-find it by scanning for a zero mfs_d_ino slot.
+        let mut written_slot = 0usize;
         let dp = if !extended {
             let num_entries = nr_dir_entries(block_size);
             let mut found: *mut Direct = core::ptr::null_mut();
@@ -537,6 +538,7 @@ pub fn search_dir(
                 let e = &mut *((*held_bp).data_ptr as *mut Direct).add(i);
                 if (*e).mfs_d_ino == 0 {
                     found = e;
+                    written_slot = i;
                     break;
                 }
             }
@@ -547,6 +549,9 @@ pub fn search_dir(
             }
             &mut *found
         } else {
+            // The newly allocated block starts at the old i_size, so its
+            // first slot covers the first `old_slots` entries.
+            written_slot = old_slots;
             dp
         };
 
@@ -563,8 +568,13 @@ pub fn search_dir(
         (*ldirp).i_update |= CTIME | MTIME;
         (*ldirp).i_dirt = IN_DIRTY;
 
-        if new_slots > old_slots {
-            (*ldirp).i_size = (new_slots * DIR_ENTRY_SIZE) as i32;
+        if written_slot + 1 > old_slots {
+            // Grow i_size to cover the slot actually written. The free-slot
+            // re-scan can land past the scanned new_slots when the block
+            // holds entries beyond the on-disk i_size (an unclean previous
+            // boot); sizing by new_slots alone would leave the new entry
+            // invisible to the next LOOK_UP.
+            (*ldirp).i_size = ((written_slot + 1) * DIR_ENTRY_SIZE) as i32;
             if extended {
                 rw_inode(ldir_idx, WRITING);
             }
@@ -829,5 +839,88 @@ mod tests {
         let mut dummy: u32 = 0;
         let r = search_dir(0, b"nope", Some(&mut dummy), LOOK_UP, IGN_PERM);
         assert_eq!(r, ENOENT, "search_dir should not find 'nope'");
+    }
+
+    /// Regression pin for the `search_dir` ENTER i_size fix: a directory
+    /// block holding entries beyond the on-disk i_size (an unclean previous
+    /// boot left the block written but the inode unflushed — `stray` sits
+    /// at slot 8, i_size covers only slots 0-7). ENTER's free-slot re-scan
+    /// then writes past the scanned slots, and i_size must grow to cover
+    /// the slot actually written — otherwise the same-boot LOOK_UP misses
+    /// the new entry (`pipetest: file open failed` on a polluted disk).
+    #[test]
+    fn test_search_dir_enter_grows_size_past_stale_entry() {
+        use alloc::vec;
+
+        init();
+        unsafe {
+            libs::libminixfs::cache::lmfs_buf_pool(10);
+            libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
+            // Discard blocks cached by an earlier test's device-0 disk.
+            libs::libminixfs::cache::lmfs_invalidate(0);
+        }
+
+        // RAM disk block 0: 9 entries, but the inode's i_size covers only
+        // the first 8 slots — the stale "stray" entry is beyond i_size.
+        let mut disk = vec![0u8; 4096];
+        let names: [&str; 9] = [
+            ".", "..", "bin", "sbin", "etc", "tmp", "dev", "devices", "stray",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let mut e = Direct {
+                mfs_d_ino: (i + 1) as u32,
+                mfs_d_name: [0u8; MFS_NAME_MAX],
+            };
+            e.mfs_d_name[..name.len()].copy_from_slice(name.as_bytes());
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &e as *const Direct as *const u8,
+                    disk.as_mut_ptr().add(i * DIR_ENTRY_SIZE),
+                    DIR_ENTRY_SIZE,
+                );
+            }
+        }
+        unsafe {
+            crate::block_io::ram_disk_init(disk.as_ptr(), disk.len());
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+        }
+
+        unsafe {
+            let sp = crate::mfs::glo::get_super_ptr(0);
+            (*sp).s_block_size = 4096;
+            (*sp).s_log_zone_size = 0;
+            (*sp).s_ndzones = 7;
+            (*sp).s_nindirs = 1024;
+            (*sp).s_native = 1;
+            (*sp).s_dev = 0;
+
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            (*rip).i_dev = 0;
+            (*rip).i_mode = I_DIRECTORY;
+            (*rip).i_size = (8 * DIR_ENTRY_SIZE) as i32;
+            (*rip).i_zone[0] = 0; // data zone 0 = block 0 on device 0
+            (*rip).i_sp = Some(&*sp);
+        }
+
+        // ENTER: the free-slot re-scan skips slot 8 (taken by the stale
+        // "stray") and writes "shellfifo" to slot 9.
+        let mut new_ino: u32 = 88;
+        let r = search_dir(0, b"shellfifo", Some(&mut new_ino), ENTER, IGN_PERM);
+        assert_eq!(r, OK, "ENTER shellfifo");
+        unsafe {
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            assert_eq!(
+                (*rip).i_size,
+                (10 * DIR_ENTRY_SIZE) as i32,
+                "i_size must cover the slot actually written (slot 9)"
+            );
+        }
+
+        // Same-boot LOOK_UP must find shellfifo (a 9-slot i_size would
+        // miss slot 9 and report ENOENT).
+        let mut found: u32 = 0;
+        let r = search_dir(0, b"shellfifo", Some(&mut found), LOOK_UP, IGN_PERM);
+        assert_eq!(r, OK, "same-boot LOOK_UP must find the entry in slot 9");
+        assert_eq!(found, 88);
     }
 }
