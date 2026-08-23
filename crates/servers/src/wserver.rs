@@ -1343,7 +1343,7 @@ pub fn wserver_main() {
         }
 
         unsafe {
-            minix_rt::write(1, b"wserver: ready\n".as_ptr(), 14);
+            minix_rt::write(1, b"wserver: ready\n".as_ptr(), 15);
         }
 
         loop {
