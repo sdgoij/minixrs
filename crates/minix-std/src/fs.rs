@@ -58,6 +58,9 @@ pub const VFS_FSTATVFS1: u32 = VFS_BASE + 41;
 pub const VFS_SELECT: u32 = VFS_BASE + 30;
 pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
+pub const VFS_FTRUNCATE: u32 = VFS_BASE + 34;
+pub const VFS_FCHMOD: u32 = VFS_BASE + 35;
+pub const VFS_FCHOWN: u32 = VFS_BASE + 36;
 pub const VFS_PIPE2: u32 = VFS_BASE + 26;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
 pub const VFS_DUP2: u32 = VFS_BASE + 49;
@@ -791,6 +794,24 @@ pub fn chmod(path: &[u8], mode: u32) -> Result<(), MinixErr> {
     }
 }
 
+/// Change permissions of an open file (VFS_FCHMOD — fd at 8, mode at 12).
+pub fn fchmod(fd: i32, mode: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, mode, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FCHMOD as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        msg_set_u32(&mut msg, 12, mode);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
 /// Set the file mode creation mask; returns the previous mask
 /// (VFS_UMASK — mode at offset 12).
 pub fn umask(mask: u32) -> Result<u32, MinixErr> {
@@ -940,7 +961,8 @@ pub fn fsync(fd: i32) -> Result<(), MinixErr> {
     }
 }
 
-/// Truncate a file to a specified length.
+/// Truncate an open file to a specified length (VFS_FTRUNCATE — fd at 8,
+/// length at 12; the fd-based counterpart of the path-based VFS_TRUNCATE).
 pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
@@ -950,7 +972,7 @@ pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
     #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
-        msg_set_i32(&mut msg, OFF_CALL, VFS_TRUNCATE as i32);
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FTRUNCATE as i32);
         msg_set_i32(&mut msg, OFF_FD_ONLY, fd);
         msg_set_i64(&mut msg, OFF_TRUNC_LENGTH, length);
         let _ = vfs_call(&mut msg)?;
@@ -980,8 +1002,36 @@ mod tests {
         assert_eq!(VFS_SELECT, 0x11E);
         assert_eq!(VFS_FSYNC, 0x120);
         assert_eq!(VFS_TRUNCATE, 0x121);
+        assert_eq!(VFS_FTRUNCATE, 0x122);
+        assert_eq!(VFS_FCHMOD, 0x123);
         assert_eq!(VFS_COPYFD, 0x12E);
         assert_eq!(VFS_UTIMENS, 0x125);
+    }
+
+    #[test]
+    fn test_fchmod_message_format() {
+        // C mess_lc_vfs_fchmod layout (message-absolute): fd@8, mode@12.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FCHMOD as i32);
+        msg_set_i32(&mut msg, 8, 3);
+        msg_set_u32(&mut msg, 12, 0o640);
+        assert_eq!(msg_i32(&msg, OFF_CALL), 0x123);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_u32(&msg, 12), 0o640);
+    }
+
+    #[test]
+    fn test_ftruncate_message_format() {
+        // ftruncate is fd-based: it must use VFS_FTRUNCATE (0x122, fd@8 +
+        // length@12) — the path-based VFS_TRUNCATE (0x121) would be
+        // dispatched to do_truncate and misinterpret the fd as a path.
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FTRUNCATE as i32);
+        msg_set_i32(&mut msg, 8, 3);
+        msg_set_i64(&mut msg, 12, 1234);
+        assert_eq!(msg_i32(&msg, OFF_CALL), 0x122);
+        assert_eq!(msg_i32(&msg, 8), 3);
+        assert_eq!(msg_i64(&msg, 12), 1234);
     }
 
     #[test]

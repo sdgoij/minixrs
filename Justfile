@@ -19,18 +19,19 @@ stage1-rustc := `ls rust/build/*/stage1/bin/rustc.exe rust/build/*/stage1/bin/ru
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
 
-# Fetches the rust fork submodule first when it's missing
-# (`git submodule update --init rust` is a no-op when it's already present
-# and at the pinned commit), regenerates `rust/config.toml` via
-# `tools/rust-config.py` for the requested arch, then runs x.py and builds
-# the `/bin/hello` std smoke-test binary with `tools/build-std-hello.py`.
+# Fetches the build-critical submodules (the rust fork and the uutils
+# coreutils source) when they're missing — `git submodule update --init` is a
+# no-op when they're already present and at the pinned commits — regenerates
+# `rust/config.toml` via `tools/rust-config.py` for the requested arch, then
+# runs x.py and builds the `/bin/hello` std smoke-test binary with
+# `tools/build-std-hello.py`.
 # Note: per-arch runs rebuild only that arch's std — x.py prunes the other
 # arches from the stage1 sysroot — so `all` (the default) is the complete
 # setup. Incremental afterwards; the first run downloads the stage0
 # toolchain and CI LLVM (needs network).
 # Build the stage1 compiler + std + /bin/hello for a minix target (all by default).
 bootstrap target="all":
-    git submodule update --init rust
+    git submodule update --init rust coreutils
     python tools/rust-config.py {{target}}
     cd rust && python x.py build library/std
     # x.py rebuilt the stage1 rustc, but cargo fingerprints the compiler by
@@ -45,7 +46,7 @@ bootstrap target="all":
     # are wiped by the clean; rebuild them for x86 (build-c-hello.py is
     # x86-only — riscv64/aarch64 C binaries are not yet supported).
     if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py; fi
-    @echo "stage1 compiler + /bin/hello ready. Re-assemble images: target/mkboot embed_initramfs,embed_minixfs && target/mkfs <arch>"
+    @echo "stage1 compiler + /bin/hello ready. Rebuild the images: just build-{{ if target == "all" { "x86" } else { target } }} && just mkfs-{{ if target == "all" { "x86" } else { target } }}; boot with just run-{{ if target == "all" { "x86" } else { target } }} 256M"
 
 # Userland + server binaries for a target, built into the shared cargo
 # target dir (fast incremental; required before the kernel build, whose

@@ -61,9 +61,10 @@ fn assemble(
     // top-level `just build <target>` recipes).
     let mut bins = Vec::new();
     for &(dest, bin_name) in manifest::BOOT_BINS {
-        // The C smoke-test binaries (helloc/ctest) are only built for
-        // x86_64 today (tools/build-c-hello.py is x86-only); skip them on
-        // other arches until the build script grows target support.
+        // The C smoke-test binaries (helloc/ctest) and the uutils multicall
+        // (coreutils) are only built for x86_64 today (their build tooling
+        // is x86-only); skip them on other arches until that grows target
+        // support.
         if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/coreutils") && t.arch != "x86_64" {
             continue;
         }
@@ -71,10 +72,9 @@ fn assemble(
         let data = match std::fs::read(&src) {
             Ok(d) => d,
             Err(e) => panic!(
-                "kernel build.rs: boot binary {} missing ({e}). \
-                 Build the userland binaries first, e.g. `just build {}`.",
+                "kernel build.rs: boot binary {} missing ({e}). {}",
                 src.display(),
-                t.arch
+                missing_binary_hint(dest, t)
             ),
         };
         bins.push((dest, data));
@@ -138,6 +138,33 @@ fn assemble(
         emit_env("MINIXFS_DATA", &out_dir.join("minixfs_data.rs"));
         emit_env("MINIXFS_IMG", &img_path);
         copy_mirror(&mirror_dir.join("minixfs.img"), &img_bytes);
+    }
+}
+
+/// Actionable fix for a missing boot binary. Most come from the `userland`
+/// crate, but a few are produced by dedicated tooling and fail confusingly
+/// when someone drives the kernel build directly (e.g. `target/mkboot` after
+/// `just bootstrap` wiped the shared target dir).
+fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
+    // The just recipes are named build-x86/build-riscv64/build-aarch64 but
+    // the arch field is the rustc short name ("x86_64").
+    let arch = match t.arch {
+        "x86_64" => "x86",
+        other => other,
+    };
+    match dest {
+        "/bin/coreutils" => format!(
+            "the uutils multicall is built from the coreutils submodule — \
+             run `just coreutils-{arch}` first (`just build-{arch}` runs it too)"
+        ),
+        "/bin/hello" => format!(
+            "the std smoke-test binary is built by `python tools/build-std-hello.py {arch}`"
+        ),
+        "/bin/helloc" | "/bin/ctest" => {
+            "the C smoke-test binaries are built by `python tools/build-c-hello.py` (x86 only)"
+                .to_string()
+        }
+        _ => format!("run `just userland-{arch}` first (`just build-{arch}` runs it too)"),
     }
 }
 

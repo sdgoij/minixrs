@@ -75,6 +75,7 @@ pub unsafe fn run_boot_tests() -> ! {
     failures += test_initramfs_echo_elf();
     failures += test_initramfs_sh_exists();
     failures += test_initramfs_boot_files();
+    failures += test_initramfs_pipetest_elf();
 
     // K: PM MPROC page table walk
     failures += test_pm_mproc_pt();
@@ -634,6 +635,10 @@ fn test_initramfs_boot_files() -> u32 {
         "/sbin/devman",
         "/sbin/ramdisk",
         "/sbin/virtio_blk",
+        // The PFS pipe smoke-test binary (pipe fstat/ftruncate/fchmod +
+        // FIFO data plane). Its guest run is /bin/pipetest; the wire
+        // formats it exercises are pinned by host tests.
+        "/bin/pipetest",
     ];
     let mut failures: u32 = 0;
     for &f in &files {
@@ -648,6 +653,29 @@ fn test_initramfs_boot_files() -> u32 {
         serial_write("  OK all boot files present\r\n");
     }
     failures
+}
+
+/// The PFS pipe smoke test must be a valid ELF in the initramfs (not a
+/// truncated entry), mirroring the echo ELF check.
+fn test_initramfs_pipetest_elf() -> u32 {
+    unsafe {
+        let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/pipetest") {
+            Some(d) => d,
+            None => return 1,
+        };
+        match kernel::elf::parse_elf_header(data) {
+            Ok(_) => {
+                serial_write("  OK /bin/pipetest is a valid ELF, size=");
+                print_dec(data.len() as u32);
+                serial_write("\r\n");
+                0
+            }
+            Err(_) => {
+                serial_write("  FAIL: /bin/pipetest is not a valid ELF\r\n");
+                1
+            }
+        }
+    }
 }
 
 fn test_initramfs_echo_elf() -> u32 {

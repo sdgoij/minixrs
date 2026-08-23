@@ -196,6 +196,14 @@ name = "utimetest"
 path = "src/bin/utimetest.rs"
 test = false
 
+# pipetest is the PFS pipe smoke test: pipe() creates a named-pipe inode on
+# PFS, then fstat/ftruncate/fchmod on the fds route to the PFS handlers and
+# bytes round-trip through the block-cache buffer. Embedded as /bin/pipetest.
+[[bin]]
+name = "pipetest"
+path = "src/bin/pipetest.rs"
+test = false
+
 # dstest is the DS_GETSYSINFO smoke test: verifies the DS wire protocol
 # (publish EPERM without a label, SI_DATA_STORE size checks + copy).
 # Embedded as /bin/dstest.

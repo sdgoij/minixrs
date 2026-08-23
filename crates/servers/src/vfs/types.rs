@@ -154,7 +154,14 @@ impl Default for Filp {
 pub struct Vnode {
     pub v_fs: u32,
     pub v_fs_e: i32,
+    /// Mapped FS endpoint for mapped vnodes (C `v_mapfs_e`) — the FS that
+    /// owns the inode once a vnode is remapped (e.g. FIFO inodes live on
+    /// PFS while the directory entry stays on MFS). NONE (-1) when unmapped.
+    pub v_mapfs_e: i32,
     pub v_inode_nr: u32,
+    /// Inode number on the mapped FS (C `v_mapinode_nr`), valid when
+    /// `v_mapfs_e != NONE`.
+    pub v_mapinode_nr: u32,
     pub v_mode: u32,
     pub v_size: i64,
     pub v_uid: i32,
@@ -162,6 +169,8 @@ pub struct Vnode {
     pub v_ref_count: i32,
     pub v_ref_check: i32,
     pub v_fs_count: i32,
+    /// Reference count at the mapped FS (C `v_mapfs_count`).
+    pub v_mapfs_count: i32,
     pub v_fs_count_check: i32,
     pub v_smoothed: u8,
     pub v_bfs_e: i32,
@@ -177,7 +186,9 @@ impl Default for Vnode {
         Self {
             v_fs: 0,
             v_fs_e: -1,
+            v_mapfs_e: -1,
             v_inode_nr: 0,
+            v_mapinode_nr: 0,
             v_mode: 0,
             v_size: 0,
             v_uid: 0,
@@ -185,6 +196,7 @@ impl Default for Vnode {
             v_ref_count: 0,
             v_ref_check: 0,
             v_fs_count: 0,
+            v_mapfs_count: 0,
             v_fs_count_check: 0,
             v_smoothed: 0,
             v_bfs_e: -1,

@@ -10,6 +10,62 @@ use crate::mfs::misc::*;
 /// host test path, which fakes a direct-memory RAM disk at this address.
 #[cfg(not(target_os = "minix"))]
 const RAMDISK_IMAGE_VA: u64 = arch_common::com::RAMDISK_IMAGE_VA;
+
+/// Parse a REQ_MKNOD message payload (VFS `req_mknod`'s embedded-path
+/// layout) into the request fields `fs_mknod` reads: cch[0] = dir_ino,
+/// cch[1] = mode, cch[2] = device, cch[3] = uid, cch[4] = gid and
+/// user_path = the entry name (null-terminated).
+///
+/// Payload-relative byte offsets (kept in lockstep with `vfs/request.rs`
+/// `build_mknod_msg`):
+///   raw[0..4]   = dir_ino (u32)
+///   raw[4..6]   = mode (u16)
+///   raw[6..8]   = uid (u16)
+///   raw[8..10]  = gid (u16)
+///   raw[10..14] = device (u32)
+///   raw[14..18] = path_len (u32)
+///   raw[18..]   = name (up to 30 bytes, null-terminated)
+///
+/// Short/truncated payloads parse defensively (zeros, empty name).
+#[cfg(any(test, target_os = "minix"))]
+pub(crate) fn parse_mknod_request(raw: &[u8], cch: &mut [i32], user_path: &mut [u8]) {
+    let rd32 = |off: usize| {
+        u32::from_le_bytes(
+            raw.get(off..off + 4)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([0u8; 4]),
+        )
+    };
+    let rd16 = |off: usize| {
+        u16::from_le_bytes(
+            raw.get(off..off + 2)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([0u8; 2]),
+        )
+    };
+
+    let dir_ino = rd32(0);
+    let mode = rd16(4);
+    let uid = rd16(6);
+    let gid = rd16(8);
+    let device = rd32(10);
+    let path_len = rd32(14) as usize;
+
+    cch[0] = dir_ino as i32;
+    cch[1] = mode as i32;
+    cch[2] = device as i32;
+    cch[3] = uid as i32;
+    cch[4] = gid as i32;
+
+    let copy_len = path_len
+        .min(PATH_MAX - 1)
+        .min(30)
+        .min(raw.len().saturating_sub(18));
+    if copy_len > 0 {
+        user_path[..copy_len].copy_from_slice(&raw[18..18 + copy_len]);
+    }
+    user_path[copy_len] = 0;
+}
 #[cfg(not(target_os = "minix"))]
 const RAMDISK_IMAGE_SIZE: usize = arch_common::com::RAMDISK_IMAGE_SIZE;
 
@@ -130,6 +186,27 @@ pub fn mfs_main() -> i32 {
                         }
                         core::ptr::write(user_path_ptr.add(copy_len), 0);
                     }
+                }
+            }
+
+            // For mknod (21), create (23) and mkdir (22) requests, extract
+            // fields from the message payload and read the filename from
+            // embedded data. VFS req_mknod/req_create/req_mkdir layout (raw
+            // offsets):
+            //   raw[0..4]   = dir_ino (u32)
+            //   raw[4..6]   = mode (u16)
+            //   raw[6..8]   = uid (u16)
+            //   raw[8..10]  = gid (u16)
+            //   raw[10..14] = device (u32, mknod only)
+            //   raw[14..18] = path_len (u32)
+            //   raw[18..]   = path data (up to 30 bytes, null-terminated)
+            // mknod's handler reads the device from cch[2], so it is
+            // parsed into that slot; create/mkdir leave it as the gid.
+            if req_nr == 21 {
+                unsafe {
+                    let mfs = glo::mfs_ptr();
+                    let raw = (*mfs).m_in.m_payload.raw;
+                    parse_mknod_request(&raw, &mut (*mfs).cch, &mut (*mfs).user_path);
                 }
             }
 
@@ -262,6 +339,48 @@ mod tests {
     #[test]
     fn test_mfs_init() {
         assert_eq!(mfs_init(), OK);
+    }
+
+    /// Pin the VFS→MFS mknod wire format: a payload built exactly as
+    /// `vfs/request.rs` `build_mknod_msg` writes it must parse into the
+    /// fields `fs_mknod` reads. This would have caught the pre-Stage-3
+    /// break where req_mknod used a grant-based layout MFS never parsed
+    /// (mknod silently created nothing).
+    #[test]
+    fn test_parse_mknod_request_layout() {
+        let mut raw = [0u8; 48];
+        raw[0..4].copy_from_slice(&7u32.to_le_bytes()); // dir_ino
+        raw[4..6].copy_from_slice(&0o10000u16.to_le_bytes()); // mode (FIFO)
+        raw[6..8].copy_from_slice(&0u16.to_le_bytes()); // uid
+        raw[8..10].copy_from_slice(&0u16.to_le_bytes()); // gid
+        raw[10..14].copy_from_slice(&0u32.to_le_bytes()); // device
+        raw[14..18].copy_from_slice(&10u32.to_le_bytes()); // path_len (name + NUL)
+        raw[18..28].copy_from_slice(b"shellfifo\0"); // name
+
+        let mut cch = [0i32; 8];
+        let mut user_path = [0u8; PATH_MAX];
+        parse_mknod_request(&raw, &mut cch, &mut user_path);
+
+        assert_eq!(cch[0], 7); // dir_ino
+        assert_eq!(cch[1], 0o10000); // mode
+        assert_eq!(cch[2], 0); // device
+        assert_eq!(cch[3], 0); // uid
+        assert_eq!(cch[4], 0); // gid
+        assert_eq!(&user_path[..9], b"shellfifo");
+        assert_eq!(user_path[9], 0);
+    }
+
+    /// A truncated/zeroed payload must parse defensively (no panic, empty
+    /// name) rather than corrupting the request fields.
+    #[test]
+    fn test_parse_mknod_request_short_payload() {
+        let raw = [0u8; 4];
+        let mut cch = [9i32; 8];
+        let mut user_path = [b'x'; PATH_MAX];
+        parse_mknod_request(&raw, &mut cch, &mut user_path);
+        assert_eq!(cch[0], 0);
+        assert_eq!(cch[1], 0);
+        assert_eq!(user_path[0], 0); // empty name, null-terminated
     }
 
     /// Verify the buffer cache wiring end-to-end:

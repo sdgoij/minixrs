@@ -169,7 +169,9 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
     [Vnode {
         v_fs: 0,
         v_fs_e: -1,
+        v_mapfs_e: -1,
         v_inode_nr: 0,
+        v_mapinode_nr: 0,
         v_mode: 0,
         v_size: 0,
         v_uid: 0,
@@ -177,6 +179,7 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
         v_ref_count: 0,
         v_ref_check: 0,
         v_fs_count: 0,
+        v_mapfs_count: 0,
         v_fs_count_check: 0,
         v_smoothed: 0,
         v_bfs_e: -1,
@@ -350,8 +353,10 @@ mod tests {
     fn vfs_global_fs_m_in_offset() {
         // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
         // probe anchors; keep in sync with the struct). Filp gained
-        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 320576);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 320592);
+        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
+        // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
+        // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more).
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 328768);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 328784);
     }
 }

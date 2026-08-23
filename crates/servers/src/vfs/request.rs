@@ -485,11 +485,7 @@ pub unsafe fn req_statvfs(fs_e: i32, who_e: i32, buf: *mut u8, len: usize) -> i3
 pub unsafe fn req_ftrunc(fs_e: i32, inode_nr: u32, start: off_t, end: off_t) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let mut msg = [0u8; 56];
-        w_i32(&mut msg, M_TYPE_OFF, REQ_FTRUNC);
-        w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_i64(&mut msg, PAYLOAD_OFF + 8, start); // trc_start
-        w_i64(&mut msg, PAYLOAD_OFF + 16, end); // trc_end
+        let mut msg = build_ftrunc_msg(inode_nr, start, end);
         fs_sendrec(fs_e, &mut msg)
     }
     #[cfg(not(target_os = "minix"))]
@@ -497,6 +493,21 @@ pub unsafe fn req_ftrunc(fs_e: i32, inode_nr: u32, start: off_t, end: off_t) -> 
         let _ = (fs_e, inode_nr, start, end);
         ENOSYS
     }
+}
+
+/// Build the REQ_FTRUNC request: inode u32@0, trc_start i64@8, trc_end
+/// i64@16. The new size travels in `trc_start` — pfs/MFS `fs_ftrunc` read
+/// it there (truncate to N ⇔ `req_ftrunc(fs_e, inode, N, 0)`), so callers
+/// must pass the size as `start`. Kept in lockstep with the fs-side
+/// handlers; pinned by `test_req_ftrunc_wire_layout`.
+#[cfg(any(test, target_os = "minix"))]
+fn build_ftrunc_msg(inode_nr: u32, start: i64, end: i64) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    w_i32(&mut msg, M_TYPE_OFF, REQ_FTRUNC);
+    w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
+    w_i64(&mut msg, PAYLOAD_OFF + 8, start); // trc_start
+    w_i64(&mut msg, PAYLOAD_OFF + 16, end); // trc_end
+    msg
 }
 
 /// Read directory entries.
@@ -750,7 +761,7 @@ pub unsafe fn req_mkdir(
 pub unsafe fn req_mknod(
     fs_e: i32,
     inode_nr: u32,
-    _lastc: *const u8,
+    lastc: *const u8,
     uid: u16,
     gid: u16,
     dmode: u32,
@@ -758,40 +769,57 @@ pub unsafe fn req_mknod(
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let path_len = if _lastc.is_null() {
-            0
+        let path_bytes = if lastc.is_null() {
+            &[]
         } else {
-            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
-                .to_bytes()
-                .len()
-                + 1
+            core::ffi::CStr::from_ptr(lastc.cast::<core::ffi::c_char>()).to_bytes()
         };
-        let grant_id = crate::vfs::grant::cpf_grant_magic(
-            arch_common::com::VFS_PROC_NR,
-            fs_e,
-            _lastc as u64,
-            path_len,
-        );
-
-        let mut msg = [0u8; 56];
-        w_i32(&mut msg, M_TYPE_OFF, REQ_MKNOD);
-        w_u32(&mut msg, PAYLOAD_OFF, dev); // device
-        w_u32(&mut msg, PAYLOAD_OFF + 4, inode_nr); // inode
-        w_u16(&mut msg, PAYLOAD_OFF + 8, dmode as u16); // mode
-        w_u16(&mut msg, PAYLOAD_OFF + 10, uid); // uid
-        w_u16(&mut msg, PAYLOAD_OFF + 12, gid); // gid
-        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id);
-        w_u64(&mut msg, PAYLOAD_OFF + 24, path_len as u64);
-
-        let r = fs_sendrec(fs_e, &mut msg);
-        crate::vfs::grant::cpf_revoke(grant_id);
-        r
+        let mut msg = build_mknod_msg(inode_nr, dmode, uid, gid, dev, path_bytes);
+        fs_sendrec(fs_e, &mut msg)
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, inode_nr, _lastc, uid, gid, dmode, dev);
+        let _ = (fs_e, inode_nr, lastc, uid, gid, dmode, dev);
         ENOSYS
     }
+}
+
+/// Build the REQ_MKNOD request — embedded-path layout, parsed by MFS
+/// `parse_mknod_request` (see crates/fs/src/mfs/main.rs):
+///   raw[0..4]  = inode (u32)
+///   raw[4..6]  = mode (u16)
+///   raw[6..8]  = uid (u16)
+///   raw[8..10] = gid (u16)
+///   raw[10..14]= device (u32)
+///   raw[14..18]= path_len (u32)
+///   raw[18..]  = path data (up to 30 bytes, null-terminated)
+#[cfg(any(test, target_os = "minix"))]
+fn build_mknod_msg(
+    inode_nr: u32,
+    dmode: u32,
+    uid: u16,
+    gid: u16,
+    dev: u32,
+    path_bytes: &[u8],
+) -> [u8; 56] {
+    let path_len = path_bytes.len() + 1;
+    let path_copy_len = path_bytes.len().min(30);
+
+    let mut msg = [0u8; 56];
+    w_i32(&mut msg, M_TYPE_OFF, REQ_MKNOD);
+    w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
+    w_u16(&mut msg, PAYLOAD_OFF + 4, dmode as u16); // mode
+    w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
+    w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
+    w_u32(&mut msg, PAYLOAD_OFF + 10, dev); // device
+    w_u32(&mut msg, PAYLOAD_OFF + 14, path_len as u32);
+    if path_copy_len > 0 {
+        msg[PAYLOAD_OFF + 18..PAYLOAD_OFF + 18 + path_copy_len]
+            .copy_from_slice(&path_bytes[..path_copy_len]);
+    }
+    msg[PAYLOAD_OFF + 18 + path_copy_len] = 0;
+
+    msg
 }
 
 /// Check whether an inode is a mount point.
@@ -1564,6 +1592,40 @@ mod tests {
         assert_eq!(r_u16(&msg, PAYLOAD_OFF + 4), 0o600);
         msg[PAYLOAD_OFF..PAYLOAD_OFF + 2].copy_from_slice(&0o755u16.to_le_bytes());
         assert_eq!(r_u16(&msg, PAYLOAD_OFF), 0o755);
+    }
+
+    #[test]
+    fn test_req_ftrunc_wire_layout() {
+        // VFS → FS ftrunc wire layout: inode u32@payload[0], trc_start
+        // i64@8, trc_end i64@16. The new size is trc_start — pfs/MFS
+        // fs_ftrunc read it there (truncate to N ⇔ (N, 0)). This pin
+        // guards the pre-Stage-3 bug where callers passed (0, N), which
+        // silently truncated every file to 0.
+        let msg = build_ftrunc_msg(0x1122_3344, 0x1234_5678_9ABC_DEF0i64, 0);
+        assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_FTRUNC);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF), 0x1122_3344);
+        assert_eq!(r_i64(&msg, PAYLOAD_OFF + 8), 0x1234_5678_9ABC_DEF0i64); // trc_start
+        assert_eq!(r_i64(&msg, PAYLOAD_OFF + 16), 0); // trc_end
+    }
+
+    #[test]
+    fn test_req_mknod_wire_layout() {
+        // VFS → FS mknod embedded-path layout: inode u32@payload[0], mode
+        // u16@4, uid u16@6, gid u16@8, device u32@10, path_len u32@14,
+        // name at 18.. null-terminated. MFS parse_mknod_request reads the
+        // same offsets — the pin keeps both sides from drifting (the
+        // pre-Stage-3 grant-based layout was never parsed by MFS).
+        let msg = build_mknod_msg(7, 0o10000, 0x11, 0x22, 0x33, b"fifo");
+        assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_MKNOD);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF), 7);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 4), 0o10000);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 6), 0x11);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 8), 0x22);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF + 10), 0x33);
+        // name "fifo" + NUL at payload[18..]
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF + 14), 5); // path_len
+        assert_eq!(&msg[PAYLOAD_OFF + 18..PAYLOAD_OFF + 22], b"fifo");
+        assert_eq!(msg[PAYLOAD_OFF + 22], 0);
     }
 
     #[test]

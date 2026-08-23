@@ -483,11 +483,15 @@ pub unsafe extern "C" fn chmod(path: *const c_char, mode: c_uint) -> c_int {
     }
 }
 
-/// Change permissions on an open fd. VFS has no fd-based chmod call yet.
+/// Change permissions on an open fd (VFS fchmod → the filp's vnode, routed
+/// to the owning FS — PFS for pipe fds).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fchmod(_fd: c_int, _mode: c_uint) -> c_int {
-    crate::fail(ENOSYS)
+pub unsafe extern "C" fn fchmod(fd: c_int, mode: c_uint) -> c_int {
+    match minix_std::fs::fchmod(fd, mode) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 /// Set the file mode creation mask (VFS umask); returns the previous mask.

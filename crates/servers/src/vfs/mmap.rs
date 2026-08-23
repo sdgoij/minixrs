@@ -9,22 +9,50 @@ use crate::vfs::types::Vnode;
 
 /// Map a vnode to a specific FS endpoint (e.g., PFS for named pipes).
 ///
-/// Sends REQ_NEWNODE to the target FS to create a mapped node, then
-/// updates the vnode's v_mapfs_e and v_fs_e to point to the new FS.
+/// Sends REQ_NEWNODE to the target FS to create a mapped node (a pipe
+/// inode on PFS), then records the mapping in `v_mapfs_e` / `v_mapinode_nr`
+/// / `v_mapfs_count`. Data operations (read/write/truncate) route through
+/// the mapped FS while the directory entry stays on the original FS
+/// (`v_fs_e` / `v_inode_nr` are untouched).
 ///
 /// If `vp->v_mapfs_e != NONE`, the vnode is already mapped — returns OK.
 ///
-/// TODO: call req_newnode(fs_e, ...), update vp fields on success.
-/// Real implementation needs: FS request wrappers (Phase 10.2), vmnt lookup.
-///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/pipe.c` (map_vnode)
-pub fn map_vnode(vp: *mut Vnode, map_to_fs_e: i32) -> i32 {
-    let _ = (vp, map_to_fs_e);
-    // TODO: if vp->v_mapfs_e != NONE, return OK
-    // vmp = find_vmnt(map_to_fs_e)
-    // req_newnode(map_to_fs_e, ...) -> NodeDetails
-    // update vp->v_mapfs_e, vp->v_fs_e, vp->v_dev, vp->v_inode_nr
-    ENOSYS
+///
+/// # Safety
+///
+/// `vp` must point to a valid, initialized Vnode.
+pub unsafe fn map_vnode(vp: *mut Vnode, map_to_fs_e: i32) -> i32 {
+    unsafe {
+        if (*vp).v_mapfs_e != NONE_ENDPOINT {
+            return OK;
+        }
+        // C panics on an unknown endpoint (find_vmnt); the port degrades to
+        // ENOSYS, like do_pipe2 does for a missing PFS vmnt.
+        let vmp = crate::vfs::mount::find_vmnt(map_to_fs_e);
+        if vmp.is_null() {
+            return ENOSYS;
+        }
+        let fp = crate::vfs::glo::current_fp();
+        if fp.is_null() {
+            return EINVAL;
+        }
+        // C: req_newnode(map_to_fs_e, fp->fp_effuid, fp->fp_effgid,
+        // I_NAMED_PIPE, vp->v_dev, &res).
+        let (r, res) = crate::vfs::request::req_newnode(
+            map_to_fs_e,
+            (*fp).fp_effuid,
+            (*fp).fp_effgid,
+            I_NAMED_PIPE,
+            (*vp).v_dev,
+        );
+        if r == OK {
+            (*vp).v_mapfs_e = map_to_fs_e; // C: res.fs_e (== requested endpoint)
+            (*vp).v_mapinode_nr = res.inode_nr;
+            (*vp).v_mapfs_count = 1;
+        }
+        r
+    }
 }
 
 // VM_VFS_MMAP message layout (VFS → VM, m_type = VM_VFS_MMAP). Offsets are
@@ -114,8 +142,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_map_vnode_returns_enosys() {
+    fn test_map_vnode_already_mapped_returns_ok() {
+        let mut vp = Vnode {
+            v_mapfs_e: PFS_PROC_NR, // pretend already mapped
+            ..Default::default()
+        };
+        unsafe { assert_eq!(map_vnode(&mut vp, PFS_PROC_NR), OK) };
+    }
+
+    #[test]
+    fn test_map_vnode_unknown_fs_returns_enosys() {
+        // The default vmnt table has no entry for PFS → ENOSYS (C panics).
         let mut vp = Vnode::default();
-        assert_eq!(map_vnode(&mut vp, 0), ENOSYS);
+        unsafe {
+            assert_eq!(map_vnode(&mut vp, PFS_PROC_NR), ENOSYS);
+            assert_eq!(vp.v_mapfs_e, NONE_ENDPOINT); // mapping not applied
+        }
     }
 }

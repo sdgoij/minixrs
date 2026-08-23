@@ -203,6 +203,20 @@ pub unsafe fn put_vnode(vp: *mut Vnode) {
                 );
                 (*vp).v_fs_count = 0;
             }
+            // The inode could have been mapped (a FIFO opened via its
+            // directory entry): release the mapped FS's inode too — unless
+            // it is the same FS (C vnode.c put_vnode).
+            if (*vp).v_mapfs_e != crate::vfs::consts::NONE_ENDPOINT
+                && (*vp).v_mapfs_e != (*vp).v_fs_e
+                && (*vp).v_mapfs_count > 0
+            {
+                let _ = crate::vfs::request::req_putnode(
+                    (*vp).v_mapfs_e,
+                    (*vp).v_mapinode_nr,
+                    (*vp).v_mapfs_count,
+                );
+                (*vp).v_mapfs_count = 0;
+            }
             *vp = Vnode::default();
         }
     }

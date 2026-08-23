@@ -15,6 +15,11 @@ workspace = true
 
 [features]
 default = []
+# The x86 kernel bin is gated like the riscv64/aarch64 ones so a plain host
+# `cargo build --workspace` does not try to link a #![no_main] kernel image
+# as a host executable (MSVC link.exe: LNK1561 entry point must be defined).
+# The x86 image build (`just build-x86` -> `target/mkboot`) passes it.
+x86 = []
 embed_initramfs = ["kernel/embed_initramfs"]
 embed_minixfs = ["kernel/embed_minixfs"]
 integration-tests = ["kernel/qemu-tests"]
@@ -29,7 +34,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "kernel-boot"
 path = "src/main.rs"
-required-features = []
+required-features = ["x86"]
 
 [dependencies]
 arch-common = { path = "../arch-common" }

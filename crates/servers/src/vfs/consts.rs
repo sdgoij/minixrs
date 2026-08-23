@@ -1,6 +1,10 @@
 //! VFS constants — adapted from `minix/servers/vfs/const.h`
 //! and `minix/include/minix/callnr.h`.
 
+/// Sentinel for an unset FS endpoint (Vnode `v_fs_e` / `v_mapfs_e` when no
+/// FS owns them yet; the C `NONE`). Endpoints are otherwise non-negative.
+pub const NONE_ENDPOINT: i32 = -1;
+
 // Table sizes
 
 /// Number of slots in the filp table.

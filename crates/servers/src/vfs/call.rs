@@ -43,6 +43,8 @@ const SYS_VIRCOPY: i32 = 15;
 const O_EXCL: u32 = 0o200;
 /// O_TRUNC open flag (from `minix/include/fcntl.h`).
 const O_TRUNC: u32 = 0o1000;
+/// O_APPEND open flag (from `minix/include/fcntl.h`).
+const O_APPEND: u32 = 0o2000;
 /// CP_FLAG_TRY: direct copy without VM fallback.
 const CP_FLAG_TRY: i32 = 0x01;
 /// SYS_VIRCOPY message field offsets (matches kernel/src/system.rs)
@@ -127,7 +129,7 @@ pub fn do_open() -> i32 {
     let glob = unsafe { &*vfs_global() };
 
     // Message layout: flags (offset 8), path_addr (offset 16), path_len (offset 24)
-    let flags = r_i32(&glob.fs_m_in, 8) as u32;
+    let mut flags = r_i32(&glob.fs_m_in, 8) as u32;
     let path_addr = r_u64(&glob.fs_m_in, 16);
     let path_len = r_u32(&glob.fs_m_in, 24) as usize;
 
@@ -196,6 +198,31 @@ pub fn do_open() -> i32 {
         unsafe { mount::put_vnode(vp) };
         fp.fp_filp[fd as usize] = -1;
         return r;
+    }
+
+    // Named pipes (FIFOs opened via a directory entry): map the vnode to
+    // PFS so reads/writes route there (rw_pipe uses v_mapfs_*); the
+    // directory entry stays on the original FS. C common_open S_IFIFO.
+    // (C also truncates a sole-reference FIFO on open; the mapped PFS inode
+    // is created fresh by map_vnode at size 0, so there is never stale data
+    // to clear.)
+    if unsafe { (*vp).v_mode & S_IFMT } == S_IFIFO {
+        let r = unsafe { crate::vfs::mmap::map_vnode(vp, PFS_PROC_NR) };
+        if r != OK {
+            unsafe { mount::put_vnode(vp) };
+            fp.fp_filp[fd as usize] = -1;
+            return r;
+        }
+        // C pipe_open: reject O_RDWR; a write end needs a reader already
+        // open (blocking opens return EAGAIN — no suspension machinery).
+        let open_r = unsafe { crate::vfs::pipe::pipe_open(vp, mode_bits, flags) };
+        if open_r != OK {
+            unsafe { mount::put_vnode(vp) };
+            fp.fp_filp[fd as usize] = -1;
+            return open_r;
+        }
+        // C forces append mode on FIFO opens.
+        flags |= O_APPEND;
     }
 
     // Character devices: route the open to the registered driver before
@@ -883,9 +910,28 @@ pub fn do_copyfd() -> i32 {
     k
 }
 
+/// Truncate a regular file or pipe vnode to `newsize` (C link.c
+/// `truncate_vnode`). The new size travels in REQ_FTRUNC's `trc_start`
+/// field — passing it as `trc_end` would truncate to 0 (see
+/// `test_req_ftrunc_wire_layout` and the pfs/MFS fs_ftrunc handlers).
+///
+/// # Safety
+///
+/// `vp` must point to a valid, locked vnode.
+unsafe fn truncate_vnode(vp: *mut Vnode, newsize: i64) -> i32 {
+    if !matches!((*vp).v_mode & S_IFMT, S_IFREG | S_IFIFO) {
+        return EINVAL;
+    }
+    let r = crate::vfs::request::req_ftrunc((*vp).v_fs_e, (*vp).v_inode_nr, newsize, 0);
+    if r == OK {
+        (*vp).v_size = newsize;
+    }
+    r
+}
+
 /// Perform the `truncate(path, length)` system call.
 ///
-/// C source: `minix/servers/vfs/link.c` â€” `do_truncate()` (line 91)
+/// C source: `minix/servers/vfs/link.c` â€” `do_truncate()` (line 277)
 pub fn do_truncate() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -920,7 +966,7 @@ pub fn do_truncate() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
-    let r = unsafe { crate::vfs::request::req_ftrunc((*vp).v_fs_e, (*vp).v_inode_nr, 0, length) };
+    let r = unsafe { truncate_vnode(vp, length) };
     unsafe { mount::put_vnode(vp) };
     r
 }
@@ -950,7 +996,7 @@ pub fn do_ftruncate() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
-        crate::vfs::request::req_ftrunc((*vp).v_fs_e, (*vp).v_inode_nr, 0, length)
+        truncate_vnode(vp, length)
     }
 }
 
@@ -1850,6 +1896,9 @@ pub fn do_mknod() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    if actual_len == 0 {
+        return ENOENT;
+    }
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
@@ -1857,13 +1906,36 @@ pub fn do_mknod() -> i32 {
     if dirp.is_null() {
         return ENOENT;
     }
+    // C open.c do_mknod: the parent must be a directory we can write+search
+    // (and only the superuser may create non-FIFO nodes).
+    if unsafe { (*dirp).v_mode & S_IFMT } != S_IFDIR {
+        unsafe { mount::put_vnode(dirp) };
+        return ENOTDIR;
+    }
+    let r2 = crate::vfs::protect::forbidden(
+        fp,
+        unsafe { &*dirp },
+        crate::vfs::protect::W_BIT | crate::vfs::protect::X_BIT,
+        false,
+    );
+    if r2 != OK {
+        unsafe { mount::put_vnode(dirp) };
+        return r2;
+    }
+    // The name is the last path component (C: lastc within fullpath).
+    let name_start = path_buf[..actual_len]
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let name = &path_buf[name_start..actual_len];
     let fs_e = unsafe { (*dirp).v_fs_e };
     let dir_ino = unsafe { (*dirp).v_inode_nr };
     let r = unsafe {
         crate::vfs::request::req_mknod(
             fs_e,
             dir_ino,
-            core::ptr::null(),
+            name.as_ptr(),
             fp.fp_effuid,
             fp.fp_effgid,
             mode,
@@ -2030,39 +2102,68 @@ pub fn do_chmod() -> i32 {
         None => return EINVAL,
     };
     let glob = unsafe { &*vfs_global() };
-    let path_addr = r_u64(&glob.fs_m_in, 8);
-    let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let rmode = r_u32(&glob.fs_m_in, 24);
-    let mut path_buf = [0u8; PATH_MAX];
-    let copy_len = path_len.min(PATH_MAX - 1);
-    unsafe {
-        if sys_vircopy(
-            fp.fp_endpoint,
-            path_addr,
-            SELF,
-            path_buf.as_mut_ptr() as u64,
-            copy_len,
-        ) != 0
-        {
+    // The same handler serves VFS_CHMOD (path) and VFS_FCHMOD (fd); the
+    // call number is stashed in req_nr by the main loop (C `job_call_nr`).
+    let is_fchmod = glob.req_nr == VFS_FCHMOD;
+
+    // Resolve the target vnode: eat_path for chmod(2), the filp's vnode for
+    // fchmod(2). Only the path case owns a vnode reference to release.
+    let (vp, owns_ref) = if is_fchmod {
+        let fd = r_i32(&glob.fs_m_in, FD_OFF);
+        if fd < 0 || (fd as usize) >= OPEN_MAX {
             return EBADF;
         }
-    }
-    let actual_len = path_buf[..copy_len]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(copy_len);
-    let mut resolve = Lookup::default();
-    resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
-    resolve.l_path_len = actual_len;
-    let vp = unsafe { path::eat_path(&resolve, fp) };
-    if vp.is_null() {
-        return ENOENT;
-    }
+        let filp_idx = fp.fp_filp[fd as usize];
+        if filp_idx < 0 {
+            return EBADF;
+        }
+        let filp_arr = unsafe { core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp };
+        let vp = unsafe { (*filp_arr.add(filp_idx as usize)).filp_vno };
+        if vp.is_null() {
+            return EBADF;
+        }
+        (vp, false)
+    } else {
+        let path_addr = r_u64(&glob.fs_m_in, 8);
+        let path_len = r_u32(&glob.fs_m_in, 16) as usize;
+        let mut path_buf = [0u8; PATH_MAX];
+        let copy_len = path_len.min(PATH_MAX - 1);
+        unsafe {
+            if sys_vircopy(
+                fp.fp_endpoint,
+                path_addr,
+                SELF,
+                path_buf.as_mut_ptr() as u64,
+                copy_len,
+            ) != 0
+            {
+                return EBADF;
+            }
+        }
+        let actual_len = path_buf[..copy_len]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(copy_len);
+        let mut resolve = Lookup::default();
+        resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
+        resolve.l_path_len = actual_len;
+        let vp = unsafe { path::eat_path(&resolve, fp) };
+        if vp.is_null() {
+            return ENOENT;
+        }
+        (vp, true)
+    };
+
+    // fchmod(2) carries the mode at 12 (fd@8), chmod(2) at 24 (path@8/len@16).
+    let rmode = r_u32(&glob.fs_m_in, if is_fchmod { 12 } else { 24 });
+
     // Permission check: must own file or be root.
     let vp_ref = unsafe { &*vp };
     let r = crate::vfs::protect::chmod_allowed(fp, vp_ref);
     if r != OK {
-        unsafe { mount::put_vnode(vp) };
+        if owns_ref {
+            unsafe { mount::put_vnode(vp) };
+        }
         return r;
     }
     let fs_e = vp_ref.v_fs_e;
@@ -2076,7 +2177,9 @@ pub fn do_chmod() -> i32 {
         // (e.g. exec) sees the stale mode without the chmod's bits.
         unsafe { (*vp).v_mode = new_mode };
     }
-    unsafe { mount::put_vnode(vp) };
+    if owns_ref {
+        unsafe { mount::put_vnode(vp) };
+    }
     r
 }
 
@@ -3257,6 +3360,30 @@ mod tests {
             fs_m_in[8..16].copy_from_slice(&0u64.to_le_bytes());
             let r = do_chmod();
             assert!(r < 0);
+        }
+    }
+
+    #[test]
+    fn test_fchmod_bad_fd_returns_ebadf() {
+        unsafe {
+            setup();
+            let glob = vfs_global();
+            (*glob).req_nr = VFS_FCHMOD;
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[8..12].copy_from_slice(&(-1i32).to_le_bytes());
+            assert_eq!(do_chmod(), EBADF);
+        }
+    }
+
+    #[test]
+    fn test_fchmod_unopened_fd_returns_ebadf() {
+        unsafe {
+            setup();
+            let glob = vfs_global();
+            (*glob).req_nr = VFS_FCHMOD;
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[8..12].copy_from_slice(&3i32.to_le_bytes());
+            assert_eq!(do_chmod(), EBADF);
         }
     }
 

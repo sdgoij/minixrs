@@ -49,7 +49,7 @@ fn main() {
         "kernel".to_string()
     };
     let features = if extra_args.is_empty() {
-        "embed_initramfs,embed_minixfs".to_string()
+        "embed_initramfs,embed_minixfs,x86".to_string()
     } else {
         let mut all = extra_args.join(",");
         if !all.contains("embed_initramfs") {
@@ -57,6 +57,11 @@ fn main() {
         }
         if !all.contains("embed_minixfs") {
             all = format!("{},embed_minixfs", all);
+        }
+        // The kernel-boot bin is feature-gated like the riscv64/aarch64
+        // ones, so plain workspace builds skip the no_main kernel image.
+        if !all.split(',').any(|f| f == "x86") {
+            all = format!("{},x86", all);
         }
         all
     };

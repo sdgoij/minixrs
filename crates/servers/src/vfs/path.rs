@@ -145,6 +145,11 @@ unsafe fn advance_within(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mu
                 (*vp).v_fs_count += 1;
             }
         }
+        // A mapped vnode (e.g. a FIFO) re-establishes its mapped-FS
+        // reference on each path lookup (C path.c advance).
+        if (*vp).v_mapfs_e != crate::vfs::consts::NONE_ENDPOINT {
+            (*vp).v_mapfs_count = 1;
+        }
         dup_vnode(vp);
         vp
     } else {

@@ -68,6 +68,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/utimetest` exercises the VFS_UTIMENS → MFS fs_utime chain
     // (explicit times, UTIME_OMIT, UTIME_NOW) on a scratch file.
     ("/bin/utimetest", "utimetest"),
+    // `/bin/pipetest` is the PFS pipe smoke test: pipe() creates a
+    // named-pipe inode on PFS, then fstat/ftruncate/fchmod on the fds route
+    // to the PFS handlers and bytes round-trip through the block cache.
+    ("/bin/pipetest", "pipetest"),
     // `/bin/dstest` verifies the DS wire protocol: publish EPERM without
     // a label, DS_GETSYSINFO size checks and the SI_DATA_STORE copy.
     ("/bin/dstest", "dstest"),

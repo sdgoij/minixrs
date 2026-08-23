@@ -1766,11 +1766,10 @@ pub fn mknod(args: &[&str]) -> i32 {
         return 1;
     }
     let path = args[1];
-    let mode_str = args[2];
     let dev_str = args[3];
-    let mode = match u32::from_str_radix(mode_str, 8) {
-        Ok(m) if m <= 0o7777 => m,
-        _ => {
+    let mode = match parse_mknod_mode(args[2]) {
+        Some(m) => m,
+        None => {
             write_err(b"mknod: invalid mode\n");
             return 1;
         }
@@ -1786,6 +1785,15 @@ pub fn mknod(args: &[&str]) -> i32 {
         return 1;
     }
     0
+}
+
+/// Parse the octal mode argument of `mknod path mode dev`: type bits
+/// (S_IFMT = 0o170000) plus permission bits (0o7777), so `mknod x 010000 0`
+/// can create a FIFO. The VFS/MFS side applies the caller's umask to the
+/// permission part.
+fn parse_mknod_mode(s: &str) -> Option<u32> {
+    let m = u32::from_str_radix(s, 8).ok()?;
+    if m <= 0o177777 { Some(m) } else { None }
 }
 
 /// reboot — reboot the system.
@@ -2768,6 +2776,17 @@ mod tests {
     fn test_echo() {
         assert_eq!(echo(&["echo", "hello"]), 0);
         assert_eq!(echo(&["echo"]), 0);
+    }
+
+    #[test]
+    fn test_parse_mknod_mode() {
+        // FIFO type bits must be accepted so `mknod x 010000 0` works.
+        assert_eq!(parse_mknod_mode("010000"), Some(0o10000));
+        assert_eq!(parse_mknod_mode("644"), Some(0o644));
+        assert_eq!(parse_mknod_mode("020600"), Some(0o20600)); // char device
+        assert_eq!(parse_mknod_mode("177777"), Some(0o177777)); // S_IFMT | 07777
+        assert_eq!(parse_mknod_mode("200000"), None); // beyond S_IFMT | 07777
+        assert_eq!(parse_mknod_mode("xyz"), None);
     }
 
     #[test]

@@ -82,20 +82,21 @@ pub fn rw_pipe(filp: &Filp, rw_flag: i32, user_e: i32, buf: u64, req_size: usize
         if rw_flag == READING && size > (*vp).v_size as usize {
             size = (*vp).v_size as usize;
         }
+        // Named pipes (opened through a directory entry) keep the entry on
+        // the original FS but route data through the mapped FS (C read.c
+        // rw_pipe uses v_mapfs_e/v_mapinode_nr); anonymous pipes set
+        // v_fs_e = PFS directly and leave the mapping fields unset.
+        let (fs_e, inode_nr) = if (*vp).v_mapfs_e != crate::vfs::consts::NONE_ENDPOINT {
+            ((*vp).v_mapfs_e, (*vp).v_mapinode_nr)
+        } else {
+            ((*vp).v_fs_e, (*vp).v_inode_nr)
+        };
         let (r2, new_pos) = if rw_flag == READING {
-            crate::vfs::request::req_read(
-                (*vp).v_fs_e,
-                (*vp).v_inode_nr,
-                buf as *mut u8,
-                0,
-                size as u32,
-                user_e,
-                0,
-            )
+            crate::vfs::request::req_read(fs_e, inode_nr, buf as *mut u8, 0, size as u32, user_e, 0)
         } else {
             crate::vfs::request::req_write(
-                (*vp).v_fs_e,
-                (*vp).v_inode_nr,
+                fs_e,
+                inode_nr,
                 buf as *const u8,
                 0,
                 size as u32,
@@ -110,6 +111,39 @@ pub fn rw_pipe(filp: &Filp, rw_flag: i32, user_e: i32, buf: u64, req_size: usize
         (*vp).v_size = new_pos;
         r2
     }
+}
+
+/// Reader/writer pairing for a FIFO open (C `pipe_open` in open.c).
+///
+/// O_RDWR on a FIFO is rejected (ENXIO); a write end needs a reader already
+/// open, a read end is always openable. The suspension branch of C is
+/// replaced by EAGAIN, matching the port's no-blocking pipe policy: a
+/// blocking open that C would suspend on fails immediately instead.
+///
+/// # Safety
+///
+/// `vp` must point to a valid, initialized Vnode.
+// Reference: open.c pipe_open()
+pub unsafe fn pipe_open(vp: *mut Vnode, bits: u32, oflags: u32) -> i32 {
+    use crate::vfs::protect::{R_BIT, W_BIT};
+    if (bits & (R_BIT | W_BIT)) == (R_BIT | W_BIT) {
+        return ENXIO;
+    }
+    let other = if bits & W_BIT != 0 { R_BIT } else { W_BIT };
+    unsafe {
+        if filedes::find_filp_vp(vp, other).is_null() {
+            if (oflags as i32) & O_NONBLOCK != 0 {
+                // C: a non-blocking write end without a reader fails; a
+                // non-blocking read end without a writer opens fine.
+                if bits & W_BIT != 0 {
+                    return ENXIO;
+                }
+            } else {
+                return EAGAIN;
+            }
+        }
+    }
+    OK
 }
 
 #[cfg(test)]
@@ -226,6 +260,52 @@ mod tests {
                 pipe_check(&*filp_arr.add(1), WRITING, 0, (space + 50) as i32, false),
                 space as i32
             );
+        }
+    }
+
+    #[test]
+    fn test_pipe_open_rdwr_rejected() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            assert_eq!(pipe_open(vp, R_BIT | W_BIT, 0), ENXIO);
+        }
+    }
+
+    #[test]
+    fn test_pipe_open_write_no_reader_nonblock_enxio() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            assert_eq!(pipe_open(vp, W_BIT, O_NONBLOCK as u32), ENXIO);
+        }
+    }
+
+    #[test]
+    fn test_pipe_open_write_no_reader_blocking_eagain() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            assert_eq!(pipe_open(vp, W_BIT, 0), EAGAIN);
+        }
+    }
+
+    #[test]
+    fn test_pipe_open_read_no_writer_nonblock_ok() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            assert_eq!(pipe_open(vp, R_BIT, O_NONBLOCK as u32), OK);
+        }
+    }
+
+    #[test]
+    fn test_pipe_open_write_with_reader_ok() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            set_pipe_filp(0, vp, R_BIT);
+            assert_eq!(pipe_open(vp, W_BIT, 0), OK);
         }
     }
 }
