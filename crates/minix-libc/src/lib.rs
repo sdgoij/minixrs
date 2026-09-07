@@ -10,12 +10,11 @@
 
 #![no_std]
 #![allow(dead_code)]
-// The fork's rustc ships `c_variadic` (and `VaList`) stable, but the rustup
-// nightly used for host builds still gates it — enable it there only.
-#![cfg_attr(not(target_os = "minix"), feature(c_variadic))]
-// `#[thread_local]` on statics is feature-gated in this toolchain line;
-// the std crate declares the same feature for its TLS statics.
-#![feature(thread_local)]
+// `#[thread_local]` on statics is feature-gated in this toolchain line; the
+// std crate declares the same feature for its TLS statics. Only minix builds
+// compile TLS code (the per-thread errno slot); host builds use a plain
+// static and need no gate, so the crate compiles on a stable host toolchain.
+#![cfg_attr(target_os = "minix", feature(thread_local))]
 
 #[cfg(target_os = "minix")]
 mod pthread;
@@ -38,11 +37,17 @@ use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
 // ---- errno ----
 
-/// Per-thread errno in native TLS. `crt0` (and the pthread trampoline) sets
-/// up the thread pointer (FS base) before `main`, so this is genuinely
-/// per-thread: each C thread sees its own `errno`.
+/// Per-thread errno in native TLS on minix. `crt0` (and the pthread
+/// trampoline) sets up the thread pointer (FS base) before `main`, so this is
+/// genuinely per-thread: each C thread sees its own `errno`. Host builds
+/// (single-threaded test scaffolding) use a shared atomic slot instead, which
+/// avoids needing the `thread_local` feature on a stable host toolchain.
+#[cfg(target_os = "minix")]
 #[thread_local]
 static ERRNO: core::cell::UnsafeCell<i32> = core::cell::UnsafeCell::new(0);
+
+#[cfg(not(target_os = "minix"))]
+static ERRNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 /// POSIX `errno` accessor: returns this thread's TLS errno slot.
 #[cfg(target_os = "minix")]
@@ -55,8 +60,13 @@ pub extern "C" fn __errno_location() -> *mut c_int {
 
 #[inline]
 pub(crate) fn set_errno(e: i32) {
-    // SAFETY: only this thread touches its own TLS errno slot.
-    unsafe { *ERRNO.get() = e };
+    #[cfg(target_os = "minix")]
+    {
+        // SAFETY: only this thread touches its own TLS errno slot.
+        unsafe { *ERRNO.get() = e };
+    }
+    #[cfg(not(target_os = "minix"))]
+    ERRNO.store(e, core::sync::atomic::Ordering::Relaxed);
 }
 
 // ---- per-thread TLS runtime ----

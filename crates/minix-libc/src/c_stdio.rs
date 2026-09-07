@@ -4,8 +4,11 @@
 //! `vformat`, keeping the same conversion set (`%d %i %u %x %X %p %s %c
 //! %%`, with `l`/`z` length prefixes) and the same (ASCII-only) behavior.
 
+#[cfg(target_os = "minix")]
 use core::ffi::VaList;
-use core::ffi::{c_char, c_int, c_long, c_ulong, c_void};
+use core::ffi::{c_char, c_int};
+#[cfg(target_os = "minix")]
+use core::ffi::{c_long, c_ulong, c_void};
 
 fn c_strlen(s: *const c_char) -> usize {
     if s.is_null() {
@@ -138,6 +141,7 @@ fn signed_num(l: i64, left: bool, zero: bool, width: i32, emit: &mut Emit<'_>) -
     }
 }
 
+#[cfg(target_os = "minix")]
 /// Format `fmt` with the C varargs in `args`, feeding output to `emit`.
 /// Returns the number of characters that would be written.
 ///
@@ -310,6 +314,7 @@ pub unsafe extern "C" fn printf(fmt: *const c_char, args: ...) -> c_int {
     unsafe { vprintf(fmt, args) }
 }
 
+#[cfg(target_os = "minix")]
 /// Format into a bounded buffer (C `vsnprintf` semantics): at most
 /// `size - 1` characters plus a NUL terminator when `size > 0`; returns
 /// the full length regardless.
