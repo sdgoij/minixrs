@@ -5,6 +5,10 @@
 // this tool only does the steps that must run AFTER the kernel ELF links
 // (a build script cannot do post-link work).
 //
+// The tools it shells out to (lld, nm, objcopy, clang) are resolved from the
+// fork's build tree when it has them, and from PATH otherwise - see
+// `crates/kernel-boot/toolchain_tools.rs`.
+//
 // Usage: rustc tools/mkboot.rs --edition 2024 -o target/mkboot
 //        target/mkboot [features] [stem]
 //          features: comma-joined feature list (default: embed_initramfs,embed_minixfs)
@@ -14,27 +18,32 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../crates/kernel-boot/toolchain_tools.rs"]
+mod toolchain_tools;
+
+use toolchain_tools::{exe, find_tool, host_triple, tool_dirs};
+
 /// Locate the rust fork's stage1 rustc (`rust/build/<host-triple>/stage1/`),
-/// built by `just bootstrap`, via the default toolchain's host triple.
-fn find_stage1_rustc(workspace: &Path) -> PathBuf {
-    let output = Command::new("rustc")
-        .arg("-vV")
-        .output()
-        .expect("rustc -vV failed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let host = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("host: "))
-        .expect("host triple not found in rustc -vV")
-        .to_string();
-    let exe = if cfg!(windows) { "rustc.exe" } else { "rustc" };
+/// built by `just bootstrap`.
+fn find_stage1_rustc(workspace: &Path, host: &str) -> PathBuf {
     workspace
         .join("rust")
         .join("build")
         .join(host)
         .join("stage1")
         .join("bin")
-        .join(exe)
+        .join(exe("rustc"))
+}
+
+/// Resolve a tool, or say how to get it.
+fn tool(dirs: &[PathBuf], names: &[&str], what: &str) -> PathBuf {
+    find_tool(dirs, names).unwrap_or_else(|| {
+        panic!(
+            "no {what} found (tried {}, then PATH) — run `just bootstrap` to build the \
+             fork's toolchain, or install LLVM",
+            names.join(", ")
+        )
+    })
 }
 
 fn main() {
@@ -70,12 +79,18 @@ fn main() {
     // 1. Build the kernel with the rust fork's stage1 compiler (built by
     //    `just bootstrap`); the in-tree target provides core/alloc/std from
     //    its sysroot, and the linker script comes from .cargo/config.toml.
-    let stage1_rustc = find_stage1_rustc(workspace);
+    let host = host_triple();
+    let dirs = tool_dirs(workspace, &host);
+    let stage1_rustc = find_stage1_rustc(workspace, &host);
     assert!(
         stage1_rustc.exists(),
         "stage1 rustc not found at {} — run `just bootstrap` first",
         stage1_rustc.display()
     );
+    let nm = tool(&dirs, &["rust-nm", "llvm-nm"], "nm");
+    let objcopy = tool(&dirs, &["rust-objcopy", "llvm-objcopy"], "objcopy");
+    let lld = tool(&dirs, &["rust-lld", "lld"], "lld");
+    let clang = tool(&dirs, &["clang"], "clang");
     let status = Command::new("cargo")
         .env("RUSTC", &stage1_rustc)
         .args([
@@ -99,10 +114,10 @@ fn main() {
         .join("release")
         .join("kernel-boot");
 
-    let output = Command::new("rust-nm")
+    let output = Command::new(&nm)
         .args(["-n", &kernel_elf.to_string_lossy()])
         .output()
-        .expect("rust-nm failed");
+        .expect("nm failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let kmain_addr = stdout
@@ -124,7 +139,7 @@ fn main() {
     //    link because that binary is linked into the trampoline ELF as its own
     //    loadable segment, which is what makes the ELF a single boot artifact.
     let kernel_bin = workspace.join("target").join(format!("{stem}.bin"));
-    let status = Command::new("rust-objcopy")
+    let status = Command::new(&objcopy)
         .args([
             "-O",
             "binary",
@@ -132,7 +147,7 @@ fn main() {
             &kernel_bin.to_string_lossy(),
         ])
         .status()
-        .expect("rust-objcopy failed");
+        .expect("objcopy failed");
     assert!(status.success());
     println!("{} written", kernel_bin.display());
 
@@ -154,7 +169,7 @@ fn main() {
     };
     let trampoline_elf = workspace.join("target").join(trampoline_name);
 
-    let status = Command::new("clang")
+    let status = Command::new(&clang)
         .args([
             "-c",
             "-target",
@@ -185,7 +200,7 @@ fn main() {
     )
     .expect("writing the kernel blob assembly failed");
 
-    let status = Command::new("clang")
+    let status = Command::new(&clang)
         .args([
             "-c",
             "-target",
@@ -199,7 +214,7 @@ fn main() {
         .expect("clang failed");
     assert!(status.success());
 
-    let status = Command::new("rust-lld")
+    let status = Command::new(&lld)
         .args([
             "-flavor",
             "gnu",
@@ -213,7 +228,7 @@ fn main() {
             &blob_o.to_string_lossy(),
         ])
         .status()
-        .expect("rust-lld failed");
+        .expect("lld failed");
     assert!(status.success());
 
     std::fs::remove_file(&trampoline_obj).ok();

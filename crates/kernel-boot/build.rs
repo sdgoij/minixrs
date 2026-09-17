@@ -4,29 +4,40 @@
 //! which QEMU qboot loads to transition to 64-bit long mode before jumping
 //! to the 64-bit kernel.
 //!
-//! If clang or rust-lld are not available (e.g., in rust-analyzer),
-//! the build script silently skips rebuilding the trampoline.
-//! A previously built trampoline.elf is used if present.
+//! This one has no kernel address compiled in and no kernel image in it: it
+//! only keeps a plain `cargo build` of the x86 target bootable with a
+//! separately loaded kernel.bin. `tools/mkboot.rs` rebuilds the same
+//! trampoline with kmain and the kernel embedded, and that is what the
+//! recipes boot.
+//!
+//! If clang or lld are not available (e.g., in rust-analyzer), the build
+//! script silently skips rebuilding the trampoline. A previously built
+//! trampoline.elf is used if present.
 
 use std::path::PathBuf;
 use std::process::Command;
 
+mod toolchain_tools;
+
+use toolchain_tools::{find_tool, host_triple, tool_dirs};
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let target_dir = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("target");
+    let workspace = manifest_dir.parent().unwrap().parent().unwrap();
+    let target_dir = workspace.join("target");
 
     let trampoline_s = manifest_dir.join("src").join("trampoline.S");
     let trampoline_ld = manifest_dir.join("trampoline.ld");
     let trampoline_elf = target_dir.join("trampoline.elf");
 
+    // Cargo hands build scripts the host triple, which is also what x.py names
+    // its build directory after.
+    let host = std::env::var("HOST").unwrap_or_else(|_| host_triple());
+    let dirs = tool_dirs(workspace, &host);
+
     // Skip rebuild if tools aren't available (e.g. rust-analyzer).
-    let clang = match find_clang() {
-        Some(c) => c,
+    let clang = match find_tool(&dirs, &["clang"]) {
+        Some(clang) => clang,
         None => {
             if trampoline_elf.exists() {
                 return;
@@ -36,13 +47,13 @@ fn main() {
         }
     };
 
-    let rust_lld = match find_rust_lld() {
-        Some(l) => l,
+    let lld = match find_tool(&dirs, &["rust-lld", "lld"]) {
+        Some(lld) => lld,
         None => {
             if trampoline_elf.exists() {
                 return;
             }
-            eprintln!("kernel-boot: rust-lld not found, cannot link trampoline");
+            eprintln!("kernel-boot: lld not found, cannot link trampoline");
             return;
         }
     };
@@ -74,7 +85,7 @@ fn main() {
     }
 
     // Link trampoline.o → trampoline.elf
-    let status = Command::new(&rust_lld)
+    let status = Command::new(&lld)
         .args([
             "-flavor",
             "gnu",
@@ -96,44 +107,4 @@ fn main() {
 
     // Clean up object file
     std::fs::remove_file(&trampoline_obj).ok();
-}
-
-fn find_clang() -> Option<String> {
-    for name in &["clang"] {
-        let output = Command::new(name)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match output {
-            Ok(s) if s.success() => return Some(name.to_string()),
-            _ => continue,
-        }
-    }
-    None
-}
-
-fn find_rust_lld() -> Option<String> {
-    if Command::new("rust-lld")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Some("rust-lld".to_string());
-    }
-
-    if let Ok(home) = std::env::var("RUSTUP_HOME") {
-        let candidates = [
-            format!("{home}/toolchains/nightly-x86_64-pc-windows-msvc/bin/rust-lld.exe"),
-            format!("{home}/toolchains/nightly-x86_64-pc-windows-msvc/bin/rust-lld"),
-        ];
-        for c in candidates {
-            if std::path::Path::new(&c).exists() {
-                return Some(c);
-            }
-        }
-    }
-    None
 }

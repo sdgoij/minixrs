@@ -39,8 +39,7 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
   its stage1 compiler + the minix std sysroots (first run needs network)
 - bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
 - QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
-- `rust-objcopy`, `rust-nm`, `rust-lld` (from `rust-src` component)
-- Clang (for the x86 trampoline post-link and the C++ runtime cross build)
+- Clang 22 (x86 trampoline, C smoke tests, C++ runtime cross build)
 - CMake + Ninja (for the C++ runtime cross build — `just libcxx-x86`)
 - [Just](https://just.systems/) (build runner)
 

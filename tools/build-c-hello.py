@@ -31,6 +31,10 @@ import pathlib
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from lld import find_lld
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = "x86_64-pc-minix"
 INCLUDE = ROOT / "tools" / "c-include"
@@ -80,6 +84,15 @@ def main() -> int:
         print(
             "error: rust fork stage1 compiler not found — build it first "
             "(see module docstring)",
+            file=sys.stderr,
+        )
+        return 1
+
+    lld = find_lld()
+    if lld is None:
+        print(
+            "error: no lld to link with — build the toolchain (`just bootstrap`) "
+            "so its LLD lands in the sysroot, or install LLVM",
             file=sys.stderr,
         )
         return 1
@@ -142,6 +155,9 @@ def main() -> int:
             "--target", TARGET,
             "--edition", "2024",
             "-C", f"link-arg=-T{ROOT / 'tools' / 'minix-user.ld'}",
+            # The minix target specs ask rustc for a program named `lld` on
+            # PATH; the toolchain's own LLD is not called that (see tools/lld.py).
+            "-C", f"linker={lld}",
             "-C", f"link-arg={WORK / 'crt0.o'}",
             "-C", f"link-arg={WORK / f'{src.stem}.o'}",
             "--extern", f"minix_libc={libc_rlib}",

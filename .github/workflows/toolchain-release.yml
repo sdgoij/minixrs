@@ -54,13 +54,35 @@ jobs:
             /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           df -h /
 
-      # cmake/ninja for the LLVM build, clang for the C smoke-test binaries that
+      # cmake/ninja for the LLVM build, and a clang for the C smoke-test binaries
       # `just bootstrap` builds (they are not part of the published toolchain).
-      - name: Install build tools
+      #
+      # The archive's `clang` on ubuntu-24.04 is 18, years behind the dev
+      # machines, and that skew only ever fails here: syntax a newer clang
+      # accepts silently is a hard error on the older one (a C2y `0o` octal
+      # literal in `tools/c-include/` did exactly that). Installing the same
+      # generation as the dev machines removes that direction of skew;
+      # `LLVM_VERSION` is the pin to bump along with them.
+      - name: Install build tools and clang
+        env:
+          LLVM_VERSION: 22
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang cmake ninja-build python-is-python3
+            cmake ninja-build python-is-python3
+          keyring=/usr/share/keyrings/llvm.gpg
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o "$keyring"
+          repo="deb [signed-by=$keyring] http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main"
+          echo "$repo" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}"
+          # Everything calls a bare `clang` (the recipes, tools/build-c-hello.py,
+          # and x.py's own C compiler detection), and /usr/local/bin comes first.
+          sudo ln -sf "/usr/bin/clang-${LLVM_VERSION}" /usr/local/bin/clang
+          sudo ln -sf "/usr/bin/clang++-${LLVM_VERSION}" /usr/local/bin/clang++
+          clang --version
 
       - name: Rewrite submodule SSH URLs to HTTPS
         run: |

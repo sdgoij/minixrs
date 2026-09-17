@@ -98,6 +98,37 @@ ls rust/build/<host>/stage1/lib/rustlib/x86_64-pc-windows-msvc/lib/ | grep -i pr
 Related trap: the recipe's root `cargo clean` does **not** clean `coreutils/target/` —
 coreutils is in the root workspace's `exclude` list and keeps its own target dir.
 
+## Linking minix binaries
+
+The minix target specs are GNU-flavoured LLD targets, so rustc links a minix binary by
+running a program named `lld`, resolved on `PATH` — *not* the `rust-lld` a sysroot
+ships. A dev machine with LLVM installed hides that. A CI image has no LLVM, and there
+the smoke scripts and every userland/coreutils recipe die with:
+
+```
+error: linker `lld` not found
+  = note: No such file or directory (os error 2)
+```
+
+`tools/lld.py` is the single place that decides which linker to use: the stage1
+sysroot's `rust-lld`, else the LLD under `rust/build/<host>/{lld,ci-llvm}/bin`, else a
+system `lld`. The Justfile exports that path as `CARGO_TARGET_<TRIPLE>_LINKER` (per
+target, never through RUSTFLAGS — build scripts must keep the host linker), and the
+smoke scripts pass it to rustc as `-C linker=`. Run `python tools/lld.py` to see what
+the current host resolves to.
+
+The post-link tools of the x86 image path (`tools/mkboot.rs`, plus
+`crates/kernel-boot/build.rs` for the fallback trampoline) have the same problem with
+`lld`, `nm` and `objcopy`, and resolve them the same way through
+`crates/kernel-boot/toolchain_tools.rs` — the sysroot only has `llvm-nm` (no
+`rust-nm`), so those lookups try both names. Clang is a genuine PATH prerequisite:
+neither the toolchain nor the CI LLVM artifacts ship one.
+
+The sysroot only holds `rust-lld` when bootstrap built LLD: a Linux host gets that for
+free (bootstrap turns `rust.lld` on for its host, `default_linux_linker_overrides`), a
+Windows host does not — so on Windows the resolution falls through to the CI LLVM's
+`lld.exe` or a system LLVM.
+
 **Ordering trap: `cargo clean` can never be the last step before a build.** It deletes
 `target/<triple>/release/<bin>`, and the kernel's `build.rs` then panics:
 
@@ -140,6 +171,14 @@ Smoke tests use the stage1 rustc directly — no cargo, no network:
 python tools/build-std-hello.py all      # /bin/hello for all three minix triples
 python tools/build-c-hello.py            # helloc + ctest (x86 only)
 ```
+
+The C smoke test compiles with the host's clang, so its version has to stay at least as
+new as the dev machines': syntax a newer clang accepts silently is a hard error on an
+older one. A C2y `0o` octal literal in `tools/c-include/fcntl.h` compiled on a dev
+machine and failed CI's clang 18 with `invalid suffix 'o00'`. `toolchain-release.yml`
+therefore installs clang 22 from apt.llvm.org, and `LLVM_VERSION` there is the pin to
+bump when the dev machines move - nothing in the tree guards the other direction, so a
+local clang newer than the image's can still accept syntax CI rejects.
 
 Sanity-check each `target/<triple>/release/hello`: ELF machine `0x3e` x86-64, `0xf3`
 RISC-V, `0xb7` AArch64.
@@ -237,6 +276,7 @@ Shapes worth knowing as of the current upstream:
 - [ ] fork-only files byte-identical: `git diff --stat <pre-rebase-tag> HEAD -- 'library/std/src/sys/pal/minix/**' 'library/std/src/sys/pipe/minix.rs' 'library/std/src/sys/net/connection/minix.rs' 'library/std/src/sys/thread/minix.rs' 'compiler/rustc_target/src/spec/targets/*minix*'`
 - [ ] no conflict markers; `library/std/Cargo.toml` and `library/Cargo.lock` still carry the minix deps
 - [ ] `x.py build library/std library/proc_macro` green (warnings are errors)
+- [ ] `python tools/lld.py` prints a linker (the smoke scripts pass it to rustc)
 - [ ] smoke-test ELFs carry the right ELF machine
 - [ ] boot transcript clean, `/bin/hello` threads + TLS + allocator all pass
 - [ ] the operator folds the adaptation edits into the fork commits and updates the parent's submodule pointer

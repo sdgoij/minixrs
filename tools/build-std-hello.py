@@ -34,6 +34,10 @@ import pathlib
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from lld import find_lld
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "tools" / "std-hello.rs"
 
@@ -77,7 +81,7 @@ def find_stage1_rustc() -> "pathlib.Path | None":
     return found[0]
 
 
-def build(target: str) -> int:
+def build(target: str, lld: pathlib.Path) -> int:
     out_dir = TARGETS.get(target)
     if out_dir is None:
         print(
@@ -109,6 +113,9 @@ def build(target: str) -> int:
         "--edition", "2024",
         "-C", f"link-arg=-T{ROOT / 'tools' / 'minix-user.ld'}",
         "-C", "link-arg=--no-eh-frame-hdr",
+        # The minix target specs ask rustc for a program named `lld` on PATH;
+        # the toolchain's own LLD is not called that (see tools/lld.py).
+        "-C", f"linker={lld}",
         "-o", str(out),
         str(SOURCE),
     ]
@@ -123,15 +130,23 @@ def build(target: str) -> int:
 
 def main(argv: list[str]) -> int:
     arg = argv[1] if len(argv) > 1 else "x86_64-pc-minix"
+    lld = find_lld()
+    if lld is None:
+        print(
+            "error: no lld to link with — build the toolchain (`just bootstrap`) "
+            "so its LLD lands in the sysroot, or install LLVM",
+            file=sys.stderr,
+        )
+        return 1
     if arg == "all":
         for triple in ARCHES.values():
-            rc = build(triple)
+            rc = build(triple, lld)
             if rc != 0:
                 return rc
         return 0
     if arg in ARCHES:
         arg = ARCHES[arg]
-    return build(arg)
+    return build(arg, lld)
 
 
 if __name__ == "__main__":

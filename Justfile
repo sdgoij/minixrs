@@ -5,7 +5,9 @@
 # Requires:
 #   - `just bootstrap` first (builds the rust fork stage1 compiler, which
 #     provides the in-tree minix targets + their std sysroot)
-#   - QEMU, rust-nm, rust-lld, rust-objcopy, clang
+#   - QEMU and clang on PATH — clang assembles the x86 trampoline and the C/C++
+#     smoke tests; the toolchain's own tools (lld, nm, objcopy) are resolved
+#     from its build tree, with PATH only as a fallback (see `minix-lld` below)
 #
 # The recipes orchestrate plain `cargo` invocations; all image assembly
 # (initramfs CPIO + MinixFS) lives in `crates/kernel/build.rs`. x86
@@ -15,6 +17,21 @@
 # the RUSTC for userland/server builds so the in-tree minix targets and
 # their std sysroot are used (no `-Zbuild-std`, no JSON specs).
 stage1-rustc := `ls rust/build/*/stage1/bin/rustc.exe rust/build/*/stage1/bin/rustc 2>/dev/null | head -1`
+
+# Path to an lld that can link the minix targets, resolved by `tools/lld.py`
+# (the toolchain's own when it has one, a system LLVM otherwise). The minix
+# target specs make rustc run a program named `lld`, which a CI image does not
+# have on PATH. Empty when no lld exists yet - `just bootstrap` links only
+# after x.py has built one, so the scripts that link resolve it themselves.
+minix-lld := `python tools/lld.py`
+
+# The per-target `linker` settings cargo reads (`CARGO_TARGET_<TRIPLE>_LINKER`),
+# rather than RUSTFLAGS: RUSTFLAGS also reaches the host build scripts, which
+# must keep the host linker. The scripts that invoke rustc directly pass the
+# same path with `-C linker=`.
+export CARGO_TARGET_X86_64_PC_MINIX_LINKER := minix-lld
+export CARGO_TARGET_RISCV64GC_UNKNOWN_MINIX_LINKER := minix-lld
+export CARGO_TARGET_AARCH64_UNKNOWN_MINIX_LINKER := minix-lld
 
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
@@ -76,16 +93,19 @@ fetch-stage1 target="all":
 # build.rs assembles the images from them).
 userland-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    @test -n "{{minix-lld}}" || (echo 'error: no lld to link the minix binaries with — run `just bootstrap`/`just fetch-stage1`, or install LLVM' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p userland --bins --target x86_64-pc-minix --release
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p servers --bins --target x86_64-pc-minix --release
 
 userland-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    @test -n "{{minix-lld}}" || (echo 'error: no lld to link the minix binaries with — run `just bootstrap`/`just fetch-stage1`, or install LLVM' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p userland --bins --target riscv64gc-unknown-minix --release
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p servers --bins --target riscv64gc-unknown-minix --release
 
 userland-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    @test -n "{{minix-lld}}" || (echo 'error: no lld to link the minix binaries with — run `just bootstrap`/`just fetch-stage1`, or install LLVM' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p userland --bins --target aarch64-unknown-minix --release
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-user.ld -C link-arg=--no-eh-frame-hdr" cargo build -p servers --bins --target aarch64-unknown-minix --release
 

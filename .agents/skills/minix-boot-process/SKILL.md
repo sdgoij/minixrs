@@ -27,8 +27,9 @@ The ELF32 multiboot trampoline transitions the CPU from 32-bit to 64-bit long mo
 6. Far-jumps (lret) to 64-bit entry, sets up temporary stack
 7. Jumps to kmain() at address extracted by `tools/mkboot.rs` (x86 post-link)
 
-Built by `tools/mkboot.rs` (clang + rust-lld) after the kernel ELF links; the
-address comes from `rust-nm` on the kernel-boot ELF.
+Built by `tools/mkboot.rs` (clang, plus lld and nm out of the fork's own build
+tree — see `crates/kernel-boot/toolchain_tools.rs`) after the kernel ELF links;
+the address comes from nm on the kernel-boot ELF.
 
 ## Stage 2: kmain() (crates/kernel-boot/src/main.rs)
 

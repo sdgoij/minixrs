@@ -81,8 +81,8 @@ jobs:
       # Host-only build. crates/kernel/build.rs assembles the per-arch boot
       # binaries only when TARGET is a minix triple, and every kernel-boot bin
       # is behind required-features, so no fork toolchain, clang or QEMU is
-      # involved (kernel-boot/build.rs skips the trampoline when clang or
-      # rust-lld is missing).
+      # involved (kernel-boot/build.rs skips the trampoline when it finds no
+      # clang or lld).
       - name: Run host tests
         run: cargo test --workspace
 
