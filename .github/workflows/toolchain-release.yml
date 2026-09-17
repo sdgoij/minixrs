@@ -1,0 +1,140 @@
+# Builds the fork's stage1 toolchain (LLVM included) once and publishes it as a
+# release in this repository, so CI and local work can install it in minutes
+# instead of building it from source.
+#
+# Manual only: one run is one LLVM build, and the result stays valid until the
+# pinned rust commit changes. The tag *is* that commit, so consumers resolve it
+# exactly - `tools/fetch-stage1.py` derives the same tag from the commit the
+# `rust` submodule pins, which is why the toolchain can never be stale.
+#
+# The release lives here rather than on the fork, because the built-in
+# `GITHUB_TOKEN` can only write its own repository: that keeps the whole thing
+# free of personal access tokens, and consuming the asset needs no credentials
+# at all (this repository is public). A workflow living in the fork instead
+# could not even be dispatched - its default branch is the upstream mirror,
+# which is replaced wholesale on every sync.
+#
+# The asset is host-specific: a toolchain built here runs on Linux x86_64 with
+# this image's glibc floor. `ubuntu-24.04` is pinned rather than `-latest` so
+# that floor does not move when `-latest` advances - older-built artifacts run
+# on newer images, not the other way around. A Windows asset for local use would
+# be a second matrix entry.
+
+name: toolchain release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: toolchain-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: stage1 for x86_64-unknown-linux-gnu
+    runs-on: ubuntu-24.04
+    # A from-source LLVM build dominates this; being killed halfway wastes it.
+    timeout-minutes: 300
+    # Only this job needs to write, and only for its own release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      # A from-source LLVM build needs far more room than a runner has free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # cmake/ninja for the LLVM build, clang for the C smoke-test binaries that
+      # `just bootstrap` builds (they are not part of the published toolchain).
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build python-is-python3
+
+      - name: Rewrite submodule SSH URLs to HTTPS
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      # ~4.5 GiB of submodule history that the build never reads (`rust` ~1.0 GiB,
+      # `src/llvm-project` ~3.4 GiB). x.py's own `update_submodule` leaves these
+      # alone: it compares `rev-parse HEAD` with `ls-tree HEAD` and returns early
+      # when they match.
+      - name: Check out the submodules shallowly
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 rust coreutils
+          git -C rust submodule update --init --depth 1 src/llvm-project library/backtrace
+
+      - uses: extractions/setup-just@v4
+
+      # `all` builds std for the host and all three minix targets, so one asset
+      # serves every arch job.
+      - name: Build the stage1 toolchain
+        run: just bootstrap all
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          sha="$(git -C rust rev-parse HEAD)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          stage1="rust/build/${host}/stage1"
+
+          # Publish only something that is actually usable: every minix std
+          # present, and a rustc that can report its own version.
+          for t in x86_64-pc-minix riscv64gc-unknown-minix aarch64-unknown-minix; do
+            test -d "${stage1}/lib/rustlib/${t}/lib" || { echo "!! no std for ${t}"; exit 1; }
+          done
+          "${stage1}/bin/rustc" -vV
+
+          asset="stage1-${sha}-${host}.tar.xz"
+          tar -cJf "${asset}" -C "rust/build/${host}" stage1
+          sha256sum "${asset}" > SHA256SUMS
+          ls -lh "${asset}"
+          {
+            echo "sha=${sha}"
+            echo "host=${host}"
+            echo "asset=${asset}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha='${{ steps.package.outputs.sha }}'
+          host='${{ steps.package.outputs.host }}'
+          asset='${{ steps.package.outputs.asset }}'
+          tag="stage1-${sha}"
+          notes="$(printf '%s\n' \
+            "Minix stage1 toolchain built from rust fork commit \`${sha}\`, the commit the" \
+            "\`rust\` submodule of this repository pins at \`${GITHUB_SHA}\`." \
+            "" \
+            "- host: \`${host}\`" \
+            "- targets: host plus x86_64-pc-minix, riscv64gc-unknown-minix, aarch64-unknown-minix" \
+            "- llvm: from source, \`targets = \"AArch64;RISCV;X86\"\`, \`download-ci-llvm = false\` (\`tools/rust-config.py\`)" \
+            "" \
+            "Install it with \`just fetch-stage1\`, which derives this tag from the \`rust\`" \
+            "submodule commit and verifies \`SHA256SUMS\`. \`just bootstrap\` remains the" \
+            "authoritative path when the fork itself changes.")"
+          if gh release view "${tag}" > /dev/null 2>&1; then
+            gh release upload "${tag}" --clobber "${asset}" SHA256SUMS
+            gh release edit "${tag}" --notes "${notes}"
+          else
+            gh release create "${tag}" \
+              --title "stage1 ${sha:0:12} (${host})" \
+              --notes "${notes}" \
+              "${asset}" SHA256SUMS
+          fi
+          echo "published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"

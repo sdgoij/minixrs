@@ -43,19 +43,33 @@ bootstrap target="all":
     # Stage 1 is spelled out because x.py asserts an implicit stage is 2 under
     # CI, and stage 1 is the compiler every other recipe consumes.
     cd rust && python x.py build --stage 1 library/std library/proc_macro
-    # x.py rebuilt the stage1 rustc, but cargo fingerprints the compiler by
-    # version string — an incremental rebuild keeps the same string, so the
-    # old rlib cache stays "fresh" and the next userland build fails with
-    # E0463 ("can't find crate for ...") when rustc cannot read the stale
-    # metadata. Drop the cargo cache; the smoke-test binaries under target/
-    # are rebuilt below.
+    @just _finish-bootstrap {{target}}
+    @echo "stage1 compiler + /bin/hello ready. Rebuild the images: just build-{{ if target == "all" { "x86" } else { target } }} && just mkfs-{{ if target == "all" { "x86" } else { target } }}; boot with just run-{{ if target == "all" { "x86" } else { target } }} 256M"
+
+# Bring the tree in line with a stage1 sysroot that already exists: drop the
+# cargo cache, then rebuild the smoke-test binaries the clean removed.
+# x.py rebuilt the stage1 rustc, but cargo fingerprints the compiler by version
+# string - an incremental rebuild keeps the same string, so the old rlib cache
+# stays "fresh" and the next userland build fails with E0463 ("can't find crate
+# for ...") when rustc cannot read the stale metadata.
+_finish-bootstrap target:
     cargo clean
     python tools/build-std-hello.py {{target}}
-    # The C smoke-test binaries (helloc/ctest) also live under target/ and
-    # are wiped by the clean; rebuild them for x86 (build-c-hello.py is
-    # x86-only — riscv64/aarch64 C binaries are not yet supported).
+    # The C smoke-test binaries (helloc/ctest) also live under target/ and are
+    # wiped by the clean; rebuild them for x86 (build-c-hello.py is x86-only —
+    # riscv64/aarch64 C binaries are not yet supported).
     if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py; fi
-    @echo "stage1 compiler + /bin/hello ready. Rebuild the images: just build-{{ if target == "all" { "x86" } else { target } }} && just mkfs-{{ if target == "all" { "x86" } else { target } }}; boot with just run-{{ if target == "all" { "x86" } else { target } }} 256M"
+
+# Install the prebuilt stage1 toolchain for the commit the `rust` submodule
+# pins, fetched from a release on the rust fork and checksum-verified, instead
+# of building LLVM and the compiler from source. It is the same toolchain
+# `bootstrap all` produces (host + all three minix targets) and is therefore
+# host-specific; `bootstrap` stays authoritative for work inside the fork.
+# Fetch the prebuilt stage1 toolchain instead of building it from source (`bootstrap`).
+fetch-stage1 target="all":
+    python tools/fetch-stage1.py
+    @just _finish-bootstrap {{target}}
+    @echo "prebuilt stage1 ready. Rebuild the images: just build-x86 && just mkfs-x86; boot with just run-x86 256M"
 
 # Userland + server binaries for a target, built into the shared cargo
 # target dir (fast incremental; required before the kernel build, whose
