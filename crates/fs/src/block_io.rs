@@ -243,6 +243,77 @@ fn driver_endpoint(dev: u32) -> i32 {
     arch_common::com::RAMDISK_PROC_NR
 }
 
+/// Ask `ep` whether it has a device, with a `BDEV_OPEN`/`BDEV_CLOSE` pair.
+///
+/// This exists so the root device's driver can be picked *before* the first
+/// block read: a failed read is cached against the device, so a mount retried
+/// against a different driver would keep failing on the poisoned block.
+#[cfg(target_os = "minix")]
+fn bdev_has_device(ep: i32) -> bool {
+    let request = |mtype: u32| -> i32 {
+        unsafe {
+            let mut msg = arch_common::ipc::Message {
+                m_source: 0,
+                m_type: mtype as i32,
+                m_payload: core::mem::zeroed(),
+            };
+            // Payload layout matches the driver servers' `handle_bdev`:
+            //   raw[0..4]  minor device (i32)
+            //   raw[4..8]  flags (i32)
+            //   raw[8..16] grant id (i64) - unused for open/close
+            {
+                let raw = &mut msg.m_payload.raw;
+                raw[0..4].copy_from_slice(&0i32.to_ne_bytes());
+                raw[4..8].copy_from_slice(&0i32.to_ne_bytes());
+                raw[8..16].copy_from_slice(&0i64.to_ne_bytes());
+            }
+
+            let r = minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                ep as u64,
+                &mut msg as *mut arch_common::ipc::Message as u64,
+            );
+            if r < 0 {
+                return r as i32;
+            }
+            // Reply status sits where the byte count does for read/write.
+            i64::from_ne_bytes(msg.m_payload.raw[16..24].try_into().unwrap_or([0u8; 8])) as i32
+        }
+    };
+
+    if request(arch_common::com::BDEV_OPEN) < 0 {
+        return false;
+    }
+    let _ = request(arch_common::com::BDEV_CLOSE);
+    true
+}
+
+/// Resolve the driver that serves the root device for `dev`, preferring
+/// `label` and falling back to the ramdisk driver.
+///
+/// The fallback is what makes a diskless boot work: the boot filesystem image
+/// is served by the ramdisk driver as device 0 (the kernel maps it into that
+/// server at `RAMDISK_IMAGE_VA`), while the dev flows attach a virtio disk and
+/// mount that instead. With no disk attached the virtio driver answers
+/// `BDEV_OPEN` with an error, so `dev` is re-registered to the ramdisk here,
+/// before any block I/O can cache a failure.
+pub fn bdev_driver_root(dev: u32, label: &[u8]) -> i32 {
+    let r = bdev_driver(dev, label);
+    if r != OK {
+        return r;
+    }
+
+    #[cfg(target_os = "minix")]
+    {
+        let ep = driver_endpoint(dev);
+        if ep != arch_common::com::RAMDISK_PROC_NR && !bdev_has_device(ep) {
+            return bdev_driver(dev, b"ramdisk");
+        }
+    }
+
+    OK
+}
+
 /// Copy `len` bytes from the grant `grant_id` (granted by `granter`) into
 /// `dst` via `SYS_SAFECOPYFROM`. Used to read driver labels and other
 /// small payloads sent by VFS.

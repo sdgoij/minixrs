@@ -155,6 +155,57 @@ run-riscv64 memory: build-riscv64 mkfs-riscv64
 run-aarch64 memory: build-aarch64 mkfs-aarch64
     qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
 
+# One self-contained, bootable artifact per arch: the kernel with the initramfs
+# and root filesystem embedded, so QEMU needs no separate disk. With no virtio
+# disk attached, MFS mounts the embedded image through the ramdisk driver
+# (`fs::block_io::bdev_driver_root` falls back to it when the preferred driver
+# has no device).
+#
+# The artifact is an ELF, which is what `-kernel` loads; x86 carries the kernel
+# as a segment of its multiboot trampoline ELF, the other arches are the kernel
+# itself. A raw disk image for real hardware would instead be the (unwired)
+# `tools/mbr.S` + `tools/stage2.S` + `tools/mkimg.rs` route.
+#
+# Each recipe boots what it produced and checks that the window server came up,
+# so a bad artifact fails here rather than in someone's hands. The boot timeout
+# is deliberately tight - 5 s, against a guest that reaches the shell in about
+# two - so a slow boot fails the recipe instead of only being slow.
+#
+# The QEMU command mirrors the matching `run-*` recipe minus the disk - which is
+# the point - so the display and input devices are passed too: without virtio-gpu
+# `fb` fails to initialise on riscv64/aarch64 and wserver has no framebuffer (x86
+# would still look fine, because QEMU keeps a default VGA adapter under
+# `-nographic`).
+#
+# `/usr/bin/timeout` is spelled out because on Windows a bare `timeout` resolves
+# to the Windows TIMEOUT.EXE instead: a recipe shell inherits System32 ahead of
+# the MSYS bin dir, and that binary's command line is unrelated (the same trap
+# applies to `find`, `sort` and `more`).
+# Build the single-file boot artifact for an arch.
+image target="x86":
+    @just image-{{target}}
+
+image-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    /usr/bin/timeout 5 qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 2>&1 | tee target/image-x86.log
+    @just _assert-qemu-log target/image-x86.log "wserver: ready"
+    @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
+
+image-riscv64: build-riscv64
+    mkdir -p target/images/riscv64gc-unknown-minix
+    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
+    /usr/bin/timeout 5 qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf 2>&1 | tee target/image-riscv64.log
+    @just _assert-qemu-log target/image-riscv64.log "wserver: ready"
+    @echo "done: target/images/riscv64gc-unknown-minix/minix-riscv64.elf — qemu-system-riscv64 -machine virt -m 256M -nographic -kernel <it>"
+
+image-aarch64: build-aarch64
+    mkdir -p target/images/aarch64-unknown-minix
+    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/images/aarch64-unknown-minix/minix-aarch64.elf
+    /usr/bin/timeout 5 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf 2>&1 | tee target/image-aarch64.log
+    @just _assert-qemu-log target/image-aarch64.log "wserver: ready"
+    @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -kernel <it>"
+
 # ---------- desktop (graphical window; shell stays on stdio) ----------
 # The SDL window shows the framebuffer and routes host keys to the guest
 # keyboard (PS/2 on x86, virtio-keyboard on riscv/aarch64), so the

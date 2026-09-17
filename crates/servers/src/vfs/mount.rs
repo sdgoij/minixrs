@@ -579,9 +579,11 @@ pub fn mount_root() -> *mut Vnode {
     // the block driver that backs the root device. MFS resolves the label
     // to a driver endpoint (bdev_driver) and routes root block I/O to it.
     //
-    // The root filesystem lives on the attached virtio disk on every arch;
-    // MFS routes block I/O through the BDEV protocol to the virtio_blk
-    // driver server (x86_64 legacy PCI, RISC-V/AArch64 modern virtio-mmio).
+    // The label is a preference, not a requirement: MFS probes the driver and
+    // falls back to the ramdisk driver when it has no device, which is how a
+    // diskless boot mounts the embedded filesystem image instead. With a
+    // virtio disk attached the root lives on it (x86_64 legacy PCI,
+    // RISC-V/AArch64 modern virtio-mmio) and that is what gets used.
     #[cfg(target_os = "minix")]
     let driver_label: &[u8] = b"virtio_blk";
 

@@ -37,7 +37,10 @@ pub fn fs_readsuper() -> i32 {
                     &mut label[..label_len],
                 );
                 if r == 0 {
-                    let _ = crate::block_io::bdev_driver(dev, &label[..label_len]);
+                    // Prefers the granted label, but re-registers `dev` to the
+                    // ramdisk driver when that driver has no device - a
+                    // diskless boot's root is the embedded filesystem image.
+                    let _ = crate::block_io::bdev_driver_root(dev, &label[..label_len]);
                 }
             }
         }
