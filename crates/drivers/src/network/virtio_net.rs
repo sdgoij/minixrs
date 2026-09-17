@@ -97,9 +97,8 @@ pub struct VirtioNetConfig {
 }
 
 //
-// Static DMA storage. Every cell is explicitly aligned to 16 bytes: the
-// transport uses bit 0 of a buffer address as the writable flag, so an
-// odd byte address would be misread as writable (RX) or not (TX).
+// Static DMA storage. The cells are 16-byte aligned so that the header and
+// payload of a slot share the alignment the device prefers.
 //
 
 #[repr(align(16))]
@@ -244,12 +243,14 @@ fn refill_slot(st: &mut VirtioNetState, slot: usize) -> bool {
         let buf = &mut (*RX_BUFS.get())[slot];
         let bufs = [
             virtio::VirtioPhysBuf {
-                addr: hdr as *mut VirtioNetHdr as u64 | 1,
+                addr: hdr as *mut VirtioNetHdr as u64,
                 size: VIRTIO_NET_HDR_SIZE as u32,
+                writable: true,
             },
             virtio::VirtioPhysBuf {
-                addr: buf.as_mut_ptr() as u64 | 1,
+                addr: buf.as_mut_ptr() as u64,
                 size: RX_BUF_SIZE as u32,
+                writable: true,
             },
         ];
         virtio::virtio_to_queue(dev, RXQ, &bufs, slot).is_ok()
@@ -412,10 +413,12 @@ pub fn virtio_net_transmit(packet: &[u8]) -> Result<(), DriverError> {
             virtio::VirtioPhysBuf {
                 addr: hdr as *mut VirtioNetHdr as u64,
                 size: VIRTIO_NET_HDR_SIZE as u32,
+                writable: false,
             },
             virtio::VirtioPhysBuf {
                 addr: TX_BUF.get() as *mut u8 as u64,
                 size: packet.len() as u32,
+                writable: false,
             },
         ];
         virtio::virtio_to_queue(dev, TXQ, &bufs, 0).map_err(|_| DriverError::Io)?;

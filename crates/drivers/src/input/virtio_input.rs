@@ -166,8 +166,9 @@ fn submit_event_buf(
         dev,
         EVENTQ,
         &[virtio::VirtioPhysBuf {
-            addr: va | 1, // writable
+            addr: va,
             size: 8,
+            writable: true,
         }],
         token,
     )

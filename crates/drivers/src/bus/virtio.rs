@@ -260,14 +260,13 @@ pub struct Vring {
 }
 
 /// Physical buffer descriptor for scatter-gather I/O.
-///
-/// The LSB of `addr` is used as a writable flag (`1` = writable).
-/// Only word-aligned buffers should be used.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct VirtioPhysBuf {
     pub addr: u64,
     pub size: u32,
+    /// Set `VRING_DESC_F_WRITE`: the device writes into this buffer.
+    pub writable: bool,
 }
 
 //
@@ -808,16 +807,13 @@ fn queue_notify(dev: &VirtioDevice, qidx: usize) {
 }
 
 /// Fill a single vring descriptor from a `VirtioPhysBuf`.
-///
-/// The LSB of `vp.addr` is used as the writable flag; the actual
-/// address is `vp.addr & !1`.
 fn use_vring_desc(vd: &mut VringDesc, vp: &VirtioPhysBuf) {
     // Translate the guest VA to the guest-physical address the device
-    // DMAs to, then keep the writable flag bit from `vp.addr`.
-    vd.addr = (vp.addr & !1u64).wrapping_add(phys_delta() as u64);
+    // DMAs to, then set the direction flag from `writable`.
+    vd.addr = vp.addr.wrapping_add(phys_delta() as u64);
     vd.len = vp.size;
     vd.flags = VRING_DESC_F_NEXT;
-    if vp.addr & 1 != 0 {
+    if vp.writable {
         vd.flags |= VRING_DESC_F_WRITE;
     }
 }
@@ -1497,8 +1493,7 @@ mod tests {
         assert_eq!(vr.used.idx, 0);
     }
 
-    /// Test that `use_vring_desc` correctly strips the LSB and sets
-    /// the WRITE flag.
+    /// `use_vring_desc` leaves the WRITE flag clear for a readable buffer.
     #[test]
     fn test_use_vring_desc_readable() {
         let mut vd = VringDesc {
@@ -1511,6 +1506,7 @@ mod tests {
         let buf = VirtioPhysBuf {
             addr: 0x1000,
             size: 512,
+            writable: false,
         };
 
         use_vring_desc(&mut vd, &buf);
@@ -1519,7 +1515,7 @@ mod tests {
         assert_eq!(vd.flags, VRING_DESC_F_NEXT);
     }
 
-    /// Test the writable flag via LSB.
+    /// `use_vring_desc` sets the WRITE flag for a writable buffer.
     #[test]
     fn test_use_vring_desc_writable() {
         let mut vd = VringDesc {
@@ -1530,8 +1526,9 @@ mod tests {
         };
 
         let buf = VirtioPhysBuf {
-            addr: 0x2001,
+            addr: 0x2000,
             size: 256,
+            writable: true,
         };
 
         use_vring_desc(&mut vd, &buf);
@@ -1567,14 +1564,17 @@ mod tests {
             VirtioPhysBuf {
                 addr: 0x3000,
                 size: 64,
+                writable: false,
             },
             VirtioPhysBuf {
-                addr: 0x4001,
+                addr: 0x4000,
                 size: 128,
+                writable: true,
             },
             VirtioPhysBuf {
                 addr: 0x5000,
                 size: 32,
+                writable: false,
             },
         ];
 
@@ -1631,14 +1631,17 @@ mod tests {
             VirtioPhysBuf {
                 addr: 0x3000,
                 size: 64,
+                writable: false,
             },
             VirtioPhysBuf {
-                addr: 0x4001,
+                addr: 0x4000,
                 size: 128,
+                writable: true,
             },
             VirtioPhysBuf {
                 addr: 0x5000,
                 size: 32,
+                writable: false,
             },
         ];
 
@@ -1711,6 +1714,7 @@ mod tests {
         let bufs = [VirtioPhysBuf {
             addr: 0x6000,
             size: 256,
+            writable: false,
         }];
 
         // Manually simulate to_queue logic.
@@ -1816,14 +1820,17 @@ mod tests {
             VirtioPhysBuf {
                 addr: 0x6000,
                 size: 256,
+                writable: false,
             },
             VirtioPhysBuf {
-                addr: 0x7001,
+                addr: 0x7000,
                 size: 512,
+                writable: true,
             },
             VirtioPhysBuf {
                 addr: 0x8000,
                 size: 128,
+                writable: false,
             },
         ];
         let vring = &mut q.vring;
@@ -1957,14 +1964,19 @@ mod tests {
         assert_eq!(d.next, 0);
     }
 
+    /// Regression: the writable flag used to live in bit 0 of `addr`, so an
+    /// odd buffer address was silently rounded down by `addr & !1`. The
+    /// address must now survive verbatim.
     #[test]
-    fn test_virtiophysical_default() {
+    fn test_virtiophysical_odd_addr_preserved() {
         let b = VirtioPhysBuf {
             addr: 0xABCD0011,
             size: 1024,
+            writable: true,
         };
         assert_eq!(b.addr, 0xABCD0011);
         assert_eq!(b.size, 1024);
+        assert!(b.writable);
     }
 
     /// Build a test device with `num_queues` queues allocated.
@@ -2006,10 +2018,12 @@ mod tests {
         let bufs0 = [VirtioPhysBuf {
             addr: 0x1000,
             size: 16,
+            writable: false,
         }];
         let bufs1 = [VirtioPhysBuf {
             addr: 0x2000,
             size: 32,
+            writable: false,
         }];
         virtio_to_queue(&mut dev, 0, &bufs0, 11).unwrap();
         virtio_to_queue(&mut dev, 1, &bufs1, 22).unwrap();
@@ -2055,6 +2069,7 @@ mod tests {
         let bufs = [VirtioPhysBuf {
             addr: 0x3000,
             size: 16,
+            writable: false,
         }];
         assert!(virtio_to_queue(&mut dev1, 1, &bufs, 0).is_err());
         assert!(virtio_from_queue(&mut dev1, 1).is_none());

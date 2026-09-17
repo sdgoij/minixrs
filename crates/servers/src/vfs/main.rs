@@ -186,7 +186,12 @@ unsafe fn sef_cb_init_fresh() -> i32 {
 
     // Mount devman so its device tree is populated (its init_hook fires on
     // readsuper). Blocks until devman starts, like mount_root/MFS.
-    let _ = unsafe { mount::mount_devman(root_vp) };
+    // A null root_vp means mount_root() failed: mount_devman would dereference
+    // the null vnode, and that fault is never resolvable, so the boot livelocks
+    // instead of reporting the failure.
+    if !root_vp.is_null() {
+        let _ = unsafe { mount::mount_devman(root_vp) };
+    }
 
     // Signal kernel that VFS init (including mount_root) is complete.
     // Boot-test: kernel runs the boot suite against post-mount state and

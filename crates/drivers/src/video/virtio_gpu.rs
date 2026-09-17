@@ -218,10 +218,12 @@ impl VirtioGpuArch {
             VirtioPhysBuf {
                 addr: cmd_addr,
                 size: cmd.len() as u32,
+                writable: false,
             },
             VirtioPhysBuf {
-                addr: resp_addr | 1, // writable
+                addr: resp_addr,
                 size: self.resp.len() as u32,
+                writable: true,
             },
         ];
         virtio::virtio_to_queue(dev, 0, &bufs, 0).map_err(|_| DriverError::Io)?;

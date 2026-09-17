@@ -151,28 +151,26 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    (`kernel-boot-riscv64-{boot,test}` write their own output path, never
    the normal `kernel-boot-riscv64`), so a later `just build-riscv64`
    always relinks the normal kernel (KNOWN_ISSUES tooling notes).
-4. **`[toolchain]` virtio-blk reads fail after the 2026-09-17 fork rebase**
-   — RISC-V only; x86 and aarch64 are green. `mount_root()` returns null
-   because MFS's `req_readsuper` gets EINVAL: the virtio_blk server's read
-   of block 0 times out and replies EIO (-5), leaving MFS's block cache
-   zeroed (`read_super` sees `magic=0 blk=0`), so VFS never mounts root
-   (boot suite: 3 failures, all downstream of this). Not the upstream
-   delta: the failure is byte-identical before and after rebasing onto
-   c999cef531e. `VBLKDBG probe OK` shows MMIO works and the FEATURES_OK
-   handshake completes (the probe validates magic/version/device-id), then
-   `read failed err=Unknown` — the status byte is still at its pre-submit
-   `0xFF` sentinel, so the device never completes the request. The
-   transport programs `q.paddr = ring + phys_delta()` and
-   `vd.addr = va + phys_delta()` with the kernel's per-process
-   `s_phys_delta = phys_code_base - code_start` (`GET_PHYS_DELTA`);
-   hypothesis: that text-derived delta does not hold for the driver's
-   `.bss` queue rings/scratch on riscv (layout-dependent, so a compiler
-   bump can shift it). Un-instrumented it presents as a silent hang:
-   `mount_root()` null → unchecked `mount_devman(null)` → the null+12 load
-   fault at 0xc is unmappable → VM livelocks in `sys_vmctl_memreq_get`
-   (3.1M traps in 46 s, no console output). Watch it with the
-   `VFSDBG`/`MFSDBG`/`BDEVDBG`/`VBLKDBG` markers in `crates/{servers,fs}`
-   (bare-metal-debug skill).
+4. ~~`[toolchain]` **virtio-blk reads fail after the 2026-09-17 fork rebase**~~
+   — **FIXED**: RISC-V only; x86 and aarch64 were green. The transport
+   overloaded bit 0 of `VirtioPhysBuf::addr` as the device-writable flag
+   (`vd.addr = (vp.addr & !1) + phys_delta()`), which silently rounds an odd
+   buffer address down by one byte. The blk driver's 1-byte `STATUS` static is
+   byte-aligned, so its address parity depends on `.bss` layout: it landed at
+   `0x100e001` (odd) on RISC-V after the compiler bump, but at an even address
+   on x86 (`0x100f018`) and aarch64 (`0x100d000`), which is why only RISC-V
+   broke. The device completed the read correctly and wrote `VIRTIO_BLK_S_OK`
+   to `...c000` while the driver polled `...c001`, so `wait_for_completion`
+   always timed out (`read failed err=Unknown`); MFS's cache stayed zeroed
+   (`read_super: magic=0 blk=0`), `mount_root()` returned null, and the boot
+   suite reported 3 failures. Fixed by giving `VirtioPhysBuf` an explicit
+   `writable: bool`. The same latent hazard covered virtio-input event
+   buffers (odd addresses inside `[[u8; 8]]`) and any other odd-addressed DMA
+   buffer. Diagnosed without guest-side instrumentation via the host QMP probe
+   (`tools/riscv_blk_probe.py`), which reads the vring and DMA buffers out of
+   guest physical memory. The `mount_devman` null guard in
+   `crates/servers/src/vfs/main.rs` keeps a future mount failure from turning
+   into the VM livelock described here.
 
 ---
 

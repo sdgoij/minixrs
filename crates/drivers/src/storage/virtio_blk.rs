@@ -573,9 +573,6 @@ pub unsafe fn virtio_blk_transfer(
     //
     // Layout: [header (readable)] [data (writable for read, readable for
     // write)] [status (writable)]
-    //
-    // Note: the last bit of PhysBuf.addr is used as a writable flag by the
-    // virtio transport layer.
 
     // Prepare the header at HDRS[0].
     // SAFETY: single-threaded access to global DMA buffers.
@@ -591,8 +588,7 @@ pub unsafe fn virtio_blk_transfer(
     // The header physical address.  In a real system this must be the
     // physical (guest-physical) address of `HDRS`.  For now we treat the
     // pointer as an identity-mapped address (common in bare-metal or
-    // early boot).  The transport layer strips the LSB for the address and
-    // uses it as the writable flag.
+    // early boot).
     let hdr_paddr = hdr as *const _ as u64;
 
     // Status buffer: writable.
@@ -601,25 +597,25 @@ pub unsafe fn virtio_blk_transfer(
     *status = 0xFF; // pre-fill with invalid
     let status_paddr = status as *const _ as u64;
 
-    // Data buffer: writable for read, readable for write. The transport
-    // (use_vring_desc) treats bit 0 of PhysBuf.addr as the writable flag;
-    // VRING_DESC_F_WRITE (= 2) is a descriptor-table flag, not the buffer
-    // convention — using it marks reads as readable and corrupts the
-    // address by +2.
-    let data_paddr = (buf.as_ptr() as u64) | if !write { 1 } else { 0 };
+    // Data buffer: writable for read, readable for write. The direction is
+    // carried by `VirtioPhysBuf::writable`, not by the address.
+    let data_addr = buf.as_ptr() as u64;
 
     let phys_bufs = [
         VirtioPhysBuf {
             addr: hdr_paddr,
             size: core::mem::size_of::<VirtioBlkOuthdr>() as u32,
+            writable: false,
         },
         VirtioPhysBuf {
-            addr: data_paddr,
+            addr: data_addr,
             size: transfer_size,
+            writable: !write,
         },
         VirtioPhysBuf {
-            addr: status_paddr | 1, // LSB = 1 → writable
+            addr: status_paddr,
             size: 1,
+            writable: true,
         },
     ];
 
@@ -661,10 +657,12 @@ fn virtio_blk_flush_inner() -> Result<(), DriverError> {
             VirtioPhysBuf {
                 addr: hdr_paddr,
                 size: core::mem::size_of::<VirtioBlkOuthdr>() as u32,
+                writable: false,
             },
             VirtioPhysBuf {
-                addr: status_paddr | 1,
+                addr: status_paddr,
                 size: 1,
+                writable: true,
             },
         ];
 
