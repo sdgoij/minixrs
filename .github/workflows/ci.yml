@@ -1,0 +1,96 @@
+# CI: host tests on Windows and Linux. Testing only — no release or publish jobs.
+#
+# macOS is deliberately not in the host matrix: the host tests surface
+# macOS-specific issues that are out of scope for now. Re-adding it means one
+# more entry in the `host-tests` matrix below (and a 10x runner-minute rate).
+#
+# The per-arch boot + QEMU suites are not run here. They need the fork's stage1
+# compiler, which means a from-source LLVM build: the fork's pinned base has no
+# CI LLVM artifacts, and bootstrap treats that miss as fatal instead of falling
+# back (`tools/rust-config.py` therefore sets `download-ci-llvm = false`). Three
+# matrix jobs each paying for LLVM is not worth it per push; the intended fix is
+# a prebuilt stage1 published as a release and consumed here. Until then run them
+# locally with `just test-boot-<arch>` and `just test-qemu-<arch>`, which gate on
+# the guest's serial log via `just _assert-qemu-log`.
+#
+# If they are re-added, two things learned the hard way: a fresh checkout pulls
+# ~4.5 GiB of submodule history that the build never reads (`rust` ~1.0 GiB,
+# `src/llvm-project` ~3.4 GiB), so clone the submodules with `--depth 1`; and a
+# from-source LLVM build needs far more disk than a runner has free by default.
+
+name: minixrs
+
+on:
+  # Pushes to main plus every PR; widen to all branches if runner minutes
+  # are not a constraint.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Windows runners default to PowerShell; the submodule setup below is POSIX shell.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  host-tests:
+    name: host tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      # crates/{minix-rt,minix-std,net} declare path dependencies into
+      # rust/library/... — optional and gated behind `rustc-dep-of-std`, but
+      # cargo has to load those manifests to resolve the workspace, so without
+      # `rust` present every cargo command fails with "unable to update
+      # .../rust/library/compiler-builtins/compiler-builtins".
+      #
+      # Only that submodule: coreutils has no path dependencies, and
+      # library/compiler-builtins/compiler-builtins is a plain directory inside
+      # the rust repo, not a nested submodule, so nothing deeper is needed. If
+      # a shallow fetch of the pinned commit ever fails, drop `--depth 1`.
+      - name: Check out the rust submodule
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust
+
+      - uses: extractions/setup-just@v4
+
+      - name: Show toolchain
+        run: |
+          just --version
+          rustc -vV
+
+      # Host-only build. crates/kernel/build.rs assembles the per-arch boot
+      # binaries only when TARGET is a minix triple, and every kernel-boot bin
+      # is behind required-features, so no fork toolchain, clang or QEMU is
+      # involved (kernel-boot/build.rs skips the trampoline when clang or
+      # rust-lld is missing).
+      - name: Run host tests
+        run: cargo test --workspace
+
+      # The pinned channel's clippy component is not guaranteed to be in the
+      # runner image, so add it explicitly - the `test-linux` recipe does the
+      # same in the container.
+      - name: Run clippy
+        if: runner.os == 'Linux'
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets -- -D warnings

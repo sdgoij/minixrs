@@ -6,7 +6,8 @@ Usage: python tools/rust-config.py [all|x86|riscv64|aarch64]   (default: all)
 The fork's `config.toml` is gitignored, so `just bootstrap` calls this to
 (re)create it deterministically before running x.py. The minix targets are
 in STAGE0_MISSING_TARGETS, so bootstrap builds a stage1 compiler from
-source; `download-ci-llvm` avoids a from-source LLVM build.
+source, and that compiler needs LLVM - built from source as well, see the
+`[llvm]` block in the generated config.
 
 The build host triple is detected and always included in the target list:
 x.py prunes std for any target not listed, and the host std is required to
@@ -64,7 +65,17 @@ def main(argv: list[str]) -> int:
 # The host ({host}) is always listed so its std survives x.py's pruning.
 
 [llvm]
-download-ci-llvm = true
+# Built from source. The CI LLVM artifacts are keyed to the upstream base
+# commit and get purged upstream once that base ages out; when the lookup
+# misses, bootstrap exits with "failed to download llvm from CI" instead of
+# falling back. `if-unchanged` does not avoid that either - this tree is
+# unmodified relative to upstream, so it takes the download path too.
+download-ci-llvm = false
+# Only the backends the host and the minix targets need. The default is 15
+# targets plus 4 experimental ones and dominates a from-source build, so
+# extend this list when a port adds an arch (the minix triples map to X86,
+# RISCV and AArch64).
+targets = "AArch64;RISCV;X86"
 
 [build]
 target = {targets!r}

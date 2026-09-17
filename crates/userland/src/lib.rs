@@ -8,6 +8,13 @@
 
 #![no_std]
 
+// Host test builds link std so `write_out` has a way to reach stdout; the
+// crate itself is no_std for the minix target, and the non-test host builds
+// only ever get checked/compiled (never run), so linking std there would just
+// collide with the bins' own lang items.
+#[cfg(all(not(target_os = "minix"), test))]
+extern crate std;
+
 use core::sync::atomic::{AtomicI32, Ordering};
 
 /// Public-domain VGA 8×16 font (K4 framebuffer console and the K5 window
@@ -30,15 +37,20 @@ pub fn write_out(s: &[u8]) {
     let fd = REDIRECT_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         write_fd(fd, s);
-        return;
-    }
-    #[cfg(any(
-        target_arch = "x86_64",
-        target_arch = "riscv64",
-        target_arch = "aarch64"
-    ))]
-    unsafe {
-        minix_rt::write(1, s.as_ptr(), s.len());
+    } else {
+        #[cfg(target_os = "minix")]
+        unsafe {
+            minix_rt::write(1, s.as_ptr(), s.len());
+        }
+        // Host tests have no minix syscall ABI: a raw `minix_rt::write`
+        // executes an unrelated host syscall (on Linux it closes stdout,
+        // which silently swallows the rest of a test binary's output), so
+        // write through std.
+        #[cfg(all(not(target_os = "minix"), test))]
+        {
+            use std::io::Write as _;
+            let _ = std::io::stdout().write_all(s);
+        }
     }
 }
 

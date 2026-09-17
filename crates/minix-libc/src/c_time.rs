@@ -58,6 +58,10 @@ pub(crate) fn civil_from_days(days: i64, out: &mut Tm) {
     out.tm_wday = wday;
 }
 
+// `TimeT` is `c_long`: 64-bit on the minix targets and on a Linux host,
+// 32-bit on a Windows host. The casts below widen on Windows and are no-ops
+// on Linux, so whether the lint fires depends on the host, not on the code.
+#[allow(clippy::unnecessary_cast)]
 pub(crate) fn secs_to_tm(t: TimeT, out: &mut Tm) {
     let mut days = t as i64 / 86400;
     let mut rem = t as i64 % 86400;

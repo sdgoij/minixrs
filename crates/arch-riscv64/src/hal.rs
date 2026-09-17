@@ -950,16 +950,18 @@ pub fn stop_profile_clock() {}
 
 // Stub linker symbols for builds without the kernel linker script.
 // The RISC-V linker script (`minix-raw-riscv64.ld`) defines these from
-// the sections. These stubs prevent unresolved symbol errors in dev/test.
+// the sections. These stubs prevent unresolved symbol errors in dev/test
+// builds — `not(target_os = "minix")` covers every host toolchain, not just
+// Windows.
 #[cfg(any(
-    target_os = "windows",
+    not(target_os = "minix"),
     all(target_os = "minix", not(target_arch = "riscv64"))
 ))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
 #[cfg(any(
-    target_os = "windows",
+    not(target_os = "minix"),
     all(target_os = "minix", not(target_arch = "riscv64"))
 ))]
 #[used]

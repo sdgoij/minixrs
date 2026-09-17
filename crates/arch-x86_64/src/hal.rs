@@ -1269,16 +1269,17 @@ pub fn stop_profile_clock() {
 
 // Stub linker symbols for builds without the kernel linker script.
 // The linker script (`minix-raw.ld`) defines these from the sections.
-// These stubs prevent unresolved symbol errors in dev/test builds.
+// These stubs prevent unresolved symbol errors in dev/test builds —
+// `not(target_os = "minix")` covers every host toolchain, not just Windows.
 #[cfg(any(
-    target_os = "windows",
+    not(target_os = "minix"),
     all(target_os = "minix", not(target_vendor = "pc"))
 ))]
 #[used]
 #[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
 #[cfg(any(
-    target_os = "windows",
+    not(target_os = "minix"),
     all(target_os = "minix", not(target_vendor = "pc"))
 ))]
 #[used]

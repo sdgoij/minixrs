@@ -658,22 +658,20 @@ fn test_initramfs_boot_files() -> u32 {
 /// The PFS pipe smoke test must be a valid ELF in the initramfs (not a
 /// truncated entry), mirroring the echo ELF check.
 fn test_initramfs_pipetest_elf() -> u32 {
-    unsafe {
-        let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/pipetest") {
-            Some(d) => d,
-            None => return 1,
-        };
-        match kernel::elf::parse_elf_header(data) {
-            Ok(_) => {
-                serial_write("  OK /bin/pipetest is a valid ELF, size=");
-                print_dec(data.len() as u32);
-                serial_write("\r\n");
-                0
-            }
-            Err(_) => {
-                serial_write("  FAIL: /bin/pipetest is not a valid ELF\r\n");
-                1
-            }
+    let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/pipetest") {
+        Some(d) => d,
+        None => return 1,
+    };
+    match kernel::elf::parse_elf_header(data) {
+        Ok(_) => {
+            serial_write("  OK /bin/pipetest is a valid ELF, size=");
+            print_dec(data.len() as u32);
+            serial_write("\r\n");
+            0
+        }
+        Err(_) => {
+            serial_write("  FAIL: /bin/pipetest is not a valid ELF\r\n");
+            1
         }
     }
 }

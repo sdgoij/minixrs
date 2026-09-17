@@ -404,11 +404,13 @@ mod tests {
         assert_eq!(TI1225_POWER_5V, 0x200);
     }
 
-    // QEMU does not emulate the TI1225 CardBus bridge, so these hardware-
-    // dependent tests cannot run on Windows (no PCI passthrough available).
+    // These tests drive the CardBus bridge over raw port I/O, which host
+    // userland cannot do: Linux faults on the privileged instruction, and
+    // Windows only appears to work because it lets userland read a real port.
+    // They therefore only run for the minix target.
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[cfg_attr(not(target_os = "minix"), ignore = "requires hardware I/O")]
     fn test_ti1225_init_no_hardware_still_returns_index() {
         unsafe {
             // Without actual TI1225 hardware, detect will find empty sockets.
@@ -420,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[cfg_attr(not(target_os = "minix"), ignore = "requires hardware I/O")]
     fn test_ti1225_detect_empty_socket() {
         unsafe {
             let _ = ti1225_init(0, 0, 0);
@@ -431,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[cfg_attr(not(target_os = "minix"), ignore = "requires hardware I/O")]
     fn test_ti1225_power_unknown_voltage_fails() {
         unsafe {
             let _ = ti1225_init(0, 0, 0);
@@ -449,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[cfg_attr(not(target_os = "minix"), ignore = "requires hardware I/O")]
     fn test_ti1225_bridge_count() {
         unsafe {
             TI1225_BRIDGE_COUNT.store(0, Ordering::Relaxed);
@@ -459,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_os = "windows", ignore = "requires hardware I/O")]
+    #[cfg_attr(not(target_os = "minix"), ignore = "requires hardware I/O")]
     fn test_ti1225_get_bridge() {
         unsafe {
             TI1225_BRIDGE_COUNT.store(0, Ordering::Relaxed);

@@ -19,6 +19,10 @@ stage1-rustc := `ls rust/build/*/stage1/bin/rustc.exe rust/build/*/stage1/bin/ru
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
 
+# Rust channel pinned by rust-toolchain.toml; also the tag of the container
+# image `test-linux` uses, so the two cannot drift apart.
+rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r'`
+
 # Fetches the build-critical submodules (the rust fork and the uutils
 # coreutils source) when they're missing — `git submodule update --init` is a
 # no-op when they're already present and at the pinned commits — regenerates
@@ -33,7 +37,12 @@ ROOT := replace(justfile_directory(), "\\", "/")
 bootstrap target="all":
     git submodule update --init rust coreutils
     python tools/rust-config.py {{target}}
-    cd rust && python x.py build library/std
+    # `library/proc_macro` is built alongside std: x.py prunes the stage1
+    # sysroot to the listed crates, and without libproc_macro a later host
+    # proc-macro build (the coreutils multicall) fails with E0463.
+    # Stage 1 is spelled out because x.py asserts an implicit stage is 2 under
+    # CI, and stage 1 is the compiler every other recipe consumes.
+    cd rust && python x.py build --stage 1 library/std library/proc_macro
     # x.py rebuilt the stage1 rustc, but cargo fingerprints the compiler by
     # version string — an incremental rebuild keeps the same string, so the
     # old rlib cache stays "fresh" and the next userland build fails with
@@ -190,30 +199,48 @@ test-qemu target="x86":
     @just test-qemu-{{target}}
 
 test-qemu-x86: build-x86-test mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-qemu-x86.log
+    @just _assert-qemu-log target/test-qemu-x86.log "-- done --"
 
-# RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so
-# pass/fail is determined from the serial log.
+# RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so the
+# serial log is the gate - see _assert-qemu-log above.
 test-qemu-riscv64: build-riscv64-test
-    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test 2>&1 | tee target/test-qemu-riscv64.log
+    @just _assert-qemu-log target/test-qemu-riscv64.log "ALL TESTS PASSED"
 
-# AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 — no exit-code
-# device and no semihosting on this QEMU build), so pass/fail is determined
-# from the serial log like RISC-V.
+# AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 - no exit-code device
+# and no semihosting on this QEMU build), so the serial log is the gate.
 test-qemu-aarch64: build-aarch64-test
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test 2>&1 | tee target/test-qemu-aarch64.log
+    @just _assert-qemu-log target/test-qemu-aarch64.log "ALL TESTS PASSED"
 
 test-boot target="x86":
     @just test-boot-{{target}}
 
+# Gate a QEMU test run on its serial log. The riscv64/aarch64 kernels report no
+# exit status through SBI SRST / PSCI on this QEMU build, so the log is the only
+# evidence that the suite ran to completion - without this the recipes exit 0
+# whatever the guest does. `marker` is the summary the suite prints when every
+# check passed (`ALL TESTS PASSED`, or `-- done --` for the x86 kernel suite).
+#
+# The recipes `tee` the serial output, so the log also holds host-side failures
+# (a missing qemu binary, a bad device) and a QEMU that dies mid-run. All of
+# those fail here, because the marker never appears.
+_assert-qemu-log log marker:
+    @if grep -q -- "FAILURES:" {{log}}; then echo "!! failures reported in {{log}}:"; grep -n -- "FAILURES:" {{log}}; exit 1; fi
+    @if ! grep -qF -- "{{marker}}" {{log}}; then echo "!! no '{{marker}}' in {{log}} - the suite did not run to completion. Tail:"; tail -30 {{log}}; exit 1; fi
+
 test-boot-x86: build-x86-boot mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-boot-x86.log
+    @just _assert-qemu-log target/test-boot-x86.log "ALL TESTS PASSED"
 
 test-boot-riscv64: build-riscv64-boot mkfs-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot 2>&1 | tee target/test-boot-riscv64.log
+    @just _assert-qemu-log target/test-boot-riscv64.log "ALL TESTS PASSED"
 
 test-boot-aarch64: build-aarch64-boot mkfs-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot; code=$?; if [ "$code" -eq 1 ]; then exit 0; else exit "$code"; fi
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
+    @just _assert-qemu-log target/test-boot-aarch64.log "ALL TESTS PASSED"
 
 test target="x86":
     @just test-{{target}}
@@ -296,6 +323,19 @@ libcxx-x86:
     cd target/cxx/merge-tmp && llvm-ar x ../libcxxabi-build/lib/libc++abi.a && llvm-ar x ../libcxx-build/lib/libc++.a && mkdir -p ../minix-runtime && llvm-ar rcs ../minix-runtime/libstdc++.a *.obj && cd .. && rm -rf merge-tmp
 
 # ---------- check ----------
+
+# Run the host test suite (and clippy) on Linux, in a container on the podman
+# WSL machine — the same gate CI's `host-tests` job runs on ubuntu-latest.
+#
+# A Windows-only host run cannot see host-libc portability bugs; this recipe
+# is how CI's Linux failures get reproduced locally (see the
+# `linux-host-tests` skill). The repo is mounted **read-only** and all build
+# output stays inside the container, so the working tree is never touched.
+#
+# Needs: podman with a `podman machine` VM, and network for the image pull.
+test-linux:
+    @podman machine start >/dev/null 2>&1 || true
+    MSYS_NO_PATHCONV=1 podman run --rm --network=host -e RUSTUP_TOOLCHAIN={{rust-channel}}-x86_64-unknown-linux-gnu -e CARGO_TARGET_DIR=/tmp/just-target -v "{{ROOT}}:/w:ro" -w /w rust:{{rust-channel}} bash -c 'export PATH=/usr/local/cargo/bin:/usr/bin:/bin; cargo test --workspace --no-fail-fast --locked 2>&1 | tee /tmp/t.log; t=${PIPESTATUS[0]}; grep -h "^test result:" /tmp/t.log | awk "{p+=\$4;i+=\$8} END {printf \"linux host tests: passed=%d ignored=%d summaries=%d\\n\",p,i,NR}"; if [ $t -ne 0 ]; then echo "--- failures ---"; grep -nE "test result: FAILED|^error|signal:|panicked" /tmp/t.log | head -20; fi; rustup component add clippy >/dev/null 2>&1; cargo clippy --all-targets -- -D warnings; c=$?; echo "linux host tests: cargo-test rc=$t clippy rc=$c"; test $t -eq 0 -a $c -eq 0'
 
 # Host clippy + riscv64 compilation check (fork stage1 compiler).
 check:

@@ -818,10 +818,16 @@ pub fn futex_wake(addr: *const u32, count: u32) -> i32 {
 /// is not exported — `minix-libc` provides the C ABI `write`, and a duplicate
 /// symbol would break the link.
 ///
+/// The export is also limited to the minix target: on a host the symbol would
+/// shadow the host C library's `write`, which `std`'s own stdout/stderr paths
+/// call. A minix syscall stub answering those writes returns a bogus length,
+/// so `write_all` panics, the panic hook writes to stderr, and the process
+/// dies in an unbounded panic recursion instead of reporting test results.
+///
 /// # Safety
 ///
 /// `buf` must point to at least `len` valid bytes in the process's address space.
-#[cfg_attr(feature = "rt", unsafe(no_mangle))]
+#[cfg_attr(all(feature = "rt", target_os = "minix"), unsafe(no_mangle))]
 pub unsafe extern "C" fn write(fd: i32, buf: *const u8, len: usize) -> i64 {
     unsafe { syscall3(NR_WRITE, fd as u64, buf as u64, len as u64) }
 }

@@ -174,3 +174,18 @@ just test-boot                      # 12 tests after VFS mount_root
 # Normal boot
 just run                            # no tests, starts shell
 ```
+
+Pass/fail for the QEMU runners is decided from the guest's serial log, not from
+QEMU's exit status: the riscv64/aarch64 kernels cannot report one (SBI SRST /
+PSCI), so QEMU exits 0 whatever the guest did. Each `test-boot-*` / `test-qemu-*`
+recipe tees the serial output to `target/test-<kind>-<arch>.log` — visible on
+stdout while streaming, kept as the CI artifact — and then calls
+`just _assert-qemu-log <log> <marker>`; the marker is `ALL TESTS PASSED`, or
+`-- done --` for the x86 kernel suite, and the assert fails on a `FAILURES:` line
+or a missing summary. Read that log when a recipe fails: stderr goes through the
+same `tee`, so host-side failures (a missing `qemu-system-*`, a bad device) land
+in it too and fail the same assert.
+
+Because the recipe is a pipeline, the line's exit status is `tee`'s, not QEMU's.
+The marker assert is the gate — do not add a `code=$?` check after the pipe and
+expect it to see QEMU's status.

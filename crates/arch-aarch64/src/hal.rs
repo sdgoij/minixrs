@@ -952,9 +952,23 @@ pub unsafe fn mfence() {
 pub unsafe fn init_profile_clock(_rate_code: u32, _callback: unsafe extern "C" fn()) {}
 pub fn stop_profile_clock() {}
 
-#[allow(non_upper_case_globals)]
+// Stub linker symbols for builds without the kernel linker script.
+// The AArch64 linker script (`minix-raw-aarch64.ld`) defines these from the
+// sections. These stubs prevent unresolved symbol errors in dev/test builds —
+// `not(target_os = "minix")` covers every host toolchain, not just Windows.
+#[cfg(any(
+    not(target_os = "minix"),
+    all(target_os = "minix", not(target_arch = "aarch64"))
+))]
+#[used]
+#[unsafe(no_mangle)]
 pub static __bss_start: u8 = 0;
-#[allow(non_upper_case_globals)]
+#[cfg(any(
+    not(target_os = "minix"),
+    all(target_os = "minix", not(target_arch = "aarch64"))
+))]
+#[used]
+#[unsafe(no_mangle)]
 pub static __bss_end: u8 = 0;
 
 pub fn bss_start() -> u64 {
