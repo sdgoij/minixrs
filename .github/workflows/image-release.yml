@@ -17,9 +17,14 @@
 # the tests and the suites, so a green push to `main` - or a `v*` tag - publishes
 # its own images with nobody pressing anything. Keeping the images and the release
 # here rather than inline in `ci.yml` is what this file is for; the caller is one
-# job that does nothing else. `workflow_dispatch` is the escape hatch: publishing
-# without waiting for anything, which is what to reach for when only the publish
-# step of a run failed and the images are already built.
+# job that does nothing else.
+#
+# Deliberately *only* callable - no trigger of its own - so it cannot sit in the
+# Actions sidebar as a workflow with a run history of its own. Its runs are the
+# `release / ...` jobs inside the `minixrs` run, and a sidebar entry whose only run
+# is an old failure is a dead end to click into. To retry a publish that failed,
+# re-run the failed jobs of that `minixrs` run instead: the images are artifacts of
+# the same run, so the publish job re-downloads them rather than rebuilding.
 #
 # The version depends on what triggered the caller, not on this file:
 #   - a `v*` tag is the release and the version (`minix-x86-v0.1.0.elf`)
@@ -42,11 +47,10 @@
 # the `rust` + `coreutils` submodules are needed by the workspace and the multicall
 # (`build-x86` embeds it), all shallowly: none of that history is read.
 
-name: image release
+name: boot images (called by minixrs)
 
 on:
   workflow_call:
-  workflow_dispatch:
 
 concurrency:
   group: image-release
