@@ -141,9 +141,17 @@ jobs:
         run: |
           set -euo pipefail
           cd images
+          # The arch jobs upload `target/images/<triple>/minix-<arch>.elf`, and an
+          # artifact keeps whatever path sat below the upload glob's root, so the file
+          # arrives nested (`images/x86_64-pc-minix/minix-x86.elf`) rather than flat.
+          # Find it by name - `x86` is not the triple, and which directory a runner
+          # used is not this job's business - and print the tree, so a change on
+          # either side of this shows up as the layout rather than as "not found".
+          find . -type f | sort
           for arch in x86 riscv64 aarch64; do
-            test -s "minix-${arch}.elf" || { echo "!! no minix-${arch}.elf"; exit 1; }
-            mv "minix-${arch}.elf" "minix-${arch}-${VERSION}.elf"
+            src=$(find . -type f -name "minix-${arch}.elf" | head -1)
+            [ -n "$src" ] || { echo "!! no minix-${arch}.elf in the download"; exit 1; }
+            mv "$src" "minix-${arch}-${VERSION}.elf"
           done
           ls -lh
           sha256sum minix-*.elf > SHA256SUMS
