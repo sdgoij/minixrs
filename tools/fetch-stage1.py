@@ -19,6 +19,10 @@ one; the only record is the marker this script writes next to what it installs.
 This repository is public, so no credentials are involved - unlike publishing a
 release into the fork, which would need a cross-repo token.
 
+`tools/verify-stage1.py` consumes what this installs, on a Linux host: it runs
+this script and then links the smoke binaries with the result, which is how a
+release gets checked before an arch job depends on it.
+
 Two environment overrides exist for testing this script and for consuming a
 release from elsewhere:
 

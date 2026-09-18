@@ -5,9 +5,11 @@
 # Requires:
 #   - `just bootstrap` first (builds the rust fork stage1 compiler, which
 #     provides the in-tree minix targets + their std sysroot)
-#   - QEMU and clang on PATH — clang assembles the x86 trampoline and the C/C++
-#     smoke tests; the toolchain's own tools (lld, nm, objcopy) are resolved
-#     from its build tree, with PATH only as a fallback (see `minix-lld` below)
+#   - QEMU 11 or newer (the suite recipes refuse an older emulator - see
+#     `qemu-min-version`) and clang on PATH — clang assembles the x86 trampoline
+#     and the C/C++ smoke tests; the toolchain's own tools (lld, nm, objcopy) are
+#     resolved from its build tree, with PATH only as a fallback (see `minix-lld`
+#     below)
 #
 # The recipes orchestrate plain `cargo` invocations; all image assembly
 # (initramfs CPIO + MinixFS) lives in `crates/kernel/build.rs`. x86
@@ -83,10 +85,19 @@ _finish-bootstrap target:
 # `bootstrap all` produces (host + all three minix targets) and is therefore
 # host-specific; `bootstrap` stays authoritative for work inside the fork.
 # Fetch the prebuilt stage1 toolchain instead of building it from source (`bootstrap`).
+# A published release can be verified by consuming it: `just verify-stage1`
+# (Linux/WSL only - the asset is host-specific).
 fetch-stage1 target="all":
     python tools/fetch-stage1.py
     @just _finish-bootstrap {{target}}
-    @echo "prebuilt stage1 ready. Rebuild the images: just build-x86 && just mkfs-x86; boot with just run-x86 256M"
+    @echo "prebuilt stage1 ready. Rebuild the images: just build-{{ if target == "all" { "x86" } else { target } }} && just mkfs-{{ if target == "all" { "x86" } else { target } }}; boot with just run-{{ if target == "all" { "x86" } else { target } }} 256M"
+
+# Consume the published stage1 the way a Linux dev or CI job does: fetch it (into
+# target/stage1-verify), link the smoke binaries for all three minix targets with
+# it, and check each result's ELF machine. Fails on Windows because the published
+# asset is a Linux one; run it in WSL there.
+verify-stage1:
+    python tools/verify-stage1.py
 
 # Userland + server binaries for a target, built into the shared cargo
 # target dir (fast incremental; required before the kernel build, whose
@@ -189,7 +200,10 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # Each recipe boots what it produced and checks that the window server came up,
 # so a bad artifact fails here rather than in someone's hands. The boot timeout
 # is deliberately tight - 5 s, against a guest that reaches the shell in about
-# two - so a slow boot fails the recipe instead of only being slow.
+# two - so a slow boot fails the recipe instead of only being slow. It is a
+# parameter so that the release job (`.github/workflows/image-release.yml`) can
+# pass a larger one: a CI runner emulates the guest, and that is a property of the
+# runner, not of the artifact.
 #
 # The QEMU command mirrors the matching `run-*` recipe minus the disk - which is
 # the point - so the display and input devices are passed too: without virtio-gpu
@@ -201,28 +215,32 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # to the Windows TIMEOUT.EXE instead: a recipe shell inherits System32 ahead of
 # the MSYS bin dir, and that binary's command line is unrelated (the same trap
 # applies to `find`, `sort` and `more`).
-# Build the single-file boot artifact for an arch.
-image target="x86":
-    @just image-{{target}}
+# Build the single-file boot artifact for an arch. `boot-timeout` is what the
+# self-check gets (see the note above).
+image target="x86" boot-timeout="5":
+    @just image-{{target}} {{boot-timeout}}
 
-image-x86: build-x86
+image-x86 boot-timeout="5": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    /usr/bin/timeout 5 qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 2>&1 | tee target/image-x86.log
+    @just _assert-qemu-version qemu-system-x86_64
+    /usr/bin/timeout {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 2>&1 | tee target/image-x86.log
     @just _assert-qemu-log target/image-x86.log "wserver: ready"
     @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
 
-image-riscv64: build-riscv64
+image-riscv64 boot-timeout="5": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
-    /usr/bin/timeout 5 qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf 2>&1 | tee target/image-riscv64.log
+    @just _assert-qemu-version qemu-system-riscv64
+    /usr/bin/timeout {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf 2>&1 | tee target/image-riscv64.log
     @just _assert-qemu-log target/image-riscv64.log "wserver: ready"
     @echo "done: target/images/riscv64gc-unknown-minix/minix-riscv64.elf — qemu-system-riscv64 -machine virt -m 256M -nographic -kernel <it>"
 
-image-aarch64: build-aarch64
+image-aarch64 boot-timeout="5": build-aarch64
     mkdir -p target/images/aarch64-unknown-minix
     cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/images/aarch64-unknown-minix/minix-aarch64.elf
-    /usr/bin/timeout 5 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf 2>&1 | tee target/image-aarch64.log
+    @just _assert-qemu-version qemu-system-aarch64
+    /usr/bin/timeout {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf 2>&1 | tee target/image-aarch64.log
     @just _assert-qemu-log target/image-aarch64.log "wserver: ready"
     @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -kernel <it>"
 
@@ -267,6 +285,30 @@ debug-aarch64: build-aarch64
 # integration-tests feature runs kernel::tests::run_all() in QEMU before any
 # userspace starts; boot-test runs the multi-server boot suite after VFS
 # mount_root.
+#
+# The suites self-terminate (isa-debug-exit on x86, SBI SRST / PSCI elsewhere),
+# so every QEMU run is bounded: a guest that hangs has to fail the recipe with its
+# serial tail from `_assert-qemu-log`, not walk the CI job into its own timeout.
+# `/usr/bin/timeout` is spelled out for the same reason the image recipes do it - a
+# bare `timeout` is the Windows one, whose command line is unrelated.
+#
+# Seconds one QEMU run may take before it is killed. A passing suite is seconds of
+# guest time once the build is out of the way, so this is bulk headroom for a slow
+# or loaded emulator, not a performance budget.
+qemu-timeout := "60"
+
+# The oldest emulator the suites pass on. An older one is not a slow-but-working
+# case to wait out: on the QEMU 8.2 that ubuntu-24.04 ships, the aarch64 boot suite
+# hangs forever at "scheduler starting..." behind a permanent IRQ storm, so a stale
+# emulator only looks like a timeout. Fail with its version instead.
+qemu-min-version := "11"
+
+# Refuse to boot a guest on an emulator older than `qemu-min-version`; `emulator`
+# is the qemu-system-* binary the calling recipe is about to run. Reported above
+# `_assert-qemu-log`, because a killed run's log tail says nothing about why.
+_assert-qemu-version emulator:
+    @command -v {{emulator}} > /dev/null || (echo "!! {{emulator}} is not on PATH." >&2; exit 1)
+    @v=$({{emulator}} --version 2>/dev/null | sed -n '1s/^QEMU emulator version \([0-9][0-9.]*\).*/\1/p'); major=${v%%.*}; if [ -z "$major" ] || [ "$major" -lt {{qemu-min-version}} ]; then echo "!! {{emulator}} is version ${v:-unknown}; the suites need QEMU {{qemu-min-version}} or newer - older emulators hang the aarch64 boot suite." >&2; exit 1; fi
 
 build-riscv64-test: userland-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
@@ -284,19 +326,22 @@ test-qemu target="x86":
     @just test-qemu-{{target}}
 
 test-qemu-x86: build-x86-test mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-qemu-x86.log
+    @just _assert-qemu-version qemu-system-x86_64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-qemu-x86.log
     @just _assert-qemu-log target/test-qemu-x86.log "-- done --"
 
 # RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so the
 # serial log is the gate - see _assert-qemu-log above.
 test-qemu-riscv64: build-riscv64-test
-    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test 2>&1 | tee target/test-qemu-riscv64.log
+    @just _assert-qemu-version qemu-system-riscv64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test 2>&1 | tee target/test-qemu-riscv64.log
     @just _assert-qemu-log target/test-qemu-riscv64.log "ALL TESTS PASSED"
 
 # AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 - no exit-code device
 # and no semihosting on this QEMU build), so the serial log is the gate.
 test-qemu-aarch64: build-aarch64-test
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test 2>&1 | tee target/test-qemu-aarch64.log
+    @just _assert-qemu-version qemu-system-aarch64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test 2>&1 | tee target/test-qemu-aarch64.log
     @just _assert-qemu-log target/test-qemu-aarch64.log "ALL TESTS PASSED"
 
 test-boot target="x86":
@@ -316,15 +361,18 @@ _assert-qemu-log log marker:
     @if ! grep -qF -- "{{marker}}" {{log}}; then echo "!! no '{{marker}}' in {{log}} - the suite did not run to completion. Tail:"; tail -30 {{log}}; exit 1; fi
 
 test-boot-x86: build-x86-boot mkfs-x86
-    qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-boot-x86.log
+    @just _assert-qemu-version qemu-system-x86_64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-boot-x86.log
     @just _assert-qemu-log target/test-boot-x86.log "ALL TESTS PASSED"
 
 test-boot-riscv64: build-riscv64-boot mkfs-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot 2>&1 | tee target/test-boot-riscv64.log
+    @just _assert-qemu-version qemu-system-riscv64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot 2>&1 | tee target/test-boot-riscv64.log
     @just _assert-qemu-log target/test-boot-riscv64.log "ALL TESTS PASSED"
 
 test-boot-aarch64: build-aarch64-boot mkfs-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
+    @just _assert-qemu-version qemu-system-aarch64
+    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
     @just _assert-qemu-log target/test-boot-aarch64.log "ALL TESTS PASSED"
 
 test target="x86":

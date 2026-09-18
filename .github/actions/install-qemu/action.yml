@@ -1,0 +1,97 @@
+# Builds the QEMU a suite needs and puts it on PATH, for the one target the calling
+# job runs.
+#
+# The suites are pinned to a QEMU floor (11, see `qemu-min-version` in the
+# Justfile) and no runner image ships one that new: ubuntu-24.04 has 8.2, where the
+# aarch64 boot suite stops at "scheduler starting..." under a permanent IRQ storm
+# (966k taking-exception-5 in 20 s from a single ELR), and 26.04 has 10.2, which is
+# simply untested - every dev machine runs 11. No distribution package provides 11
+# yet either, so build it from the upstream source.
+#
+# One softmmu target is ~2 minutes of `make -j4`, so the install is cached: a miss
+# builds it, every later run on the same version restores it. Bumping
+# `version` changes the key, which is also what to do if a restored binary ever
+# fails on a newer image.
+#
+# The build needs libfdt (`libfdt-dev`) because the release tarball's dtc
+# subproject cannot be fetched without git, and python3-venv because configure
+# creates a meson venv; both were found the hard way, in a container.
+
+name: install qemu
+description: Build QEMU from upstream source for one minix arch and put it on PATH
+
+inputs:
+  version:
+    description: QEMU release to build
+    default: "11.1.1"
+  arch:
+    description: minix arch whose suite will run (x86, riscv64, aarch64)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # One place maps the minix arch to QEMU's names, for the steps below and for
+    # the workflow's own logging.
+    - name: Resolve the target and emulator name
+      shell: bash
+      env:
+        QEMU_ARCH: ${{ inputs.arch }}
+      run: |
+        set -euo pipefail
+        case "$QEMU_ARCH" in
+          x86) target=x86_64-softmmu; binary=qemu-system-x86_64 ;;
+          *)   target="$QEMU_ARCH-softmmu"; binary="qemu-system-$QEMU_ARCH" ;;
+        esac
+        echo "QEMU_TARGET_LIST=$target" >> "$GITHUB_ENV"
+        echo "QEMU_SYSTEM=$binary" >> "$GITHUB_ENV"
+
+    # Unconditional: a restored build still needs libglib and libpixman at
+    # runtime, and relying on the image to carry them is how a cache hit turns
+    # into an unexplained "error while loading shared libraries".
+    - name: Install the build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential ninja-build pkg-config \
+          libglib2.0-dev libpixman-1-dev libfdt-dev python3-venv
+
+    - name: Restore the QEMU build
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/qemu
+        key: qemu-${{ inputs.version }}-${{ inputs.arch }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build QEMU ${{ inputs.version }}
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        QEMU_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        src=$(mktemp -d)
+        curl -fsSL -o "$src/qemu.tar.xz" \
+          "https://download.qemu.org/qemu-$QEMU_VERSION.tar.xz"
+        tar -xf "$src/qemu.tar.xz" -C "$src"
+        cd "$src/qemu-$QEMU_VERSION"
+        # Default features, only the emulator this job needs; docs, tools and the
+        # guest agent are not part of booting a guest. Leaving device selection
+        # alone is deliberate - `--without-default-devices` would drop the virtio
+        # devices the suites use.
+        ./configure --prefix="$RUNNER_TEMP/qemu" --target-list="$QEMU_TARGET_LIST" \
+          --disable-docs --disable-tools --disable-guest-agent
+        make -j"$(nproc)"
+        make install
+
+    # The version goes to the log because running an old emulator is exactly what
+    # this action exists to prevent; `just test-boot-<arch>` then refuses anything
+    # below the floor.
+    - name: Put QEMU on PATH and report it
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/qemu/bin/$QEMU_SYSTEM" --version

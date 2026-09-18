@@ -1,0 +1,212 @@
+# Builds each arch's single-file boot artifact and publishes all three as one
+# release, so downloading an ELF and pointing QEMU at it is the whole setup.
+#
+# These are ELFs because that is what `-kernel` loads - the format is the point,
+# not an implementation detail. A raw disk image or an ISO is a different track
+# (real hardware; `tools/mbr.S` + `stage2.S` + `mkimg.rs`, not wired up) rather
+# than a rename of these, and naming one `.img` here would invite `dd` or
+# `-drive file=`, which cannot boot it.
+#
+# Minutes rather than hours: the images are built against the stage1 published for
+# the pinned `rust` commit (`just fetch-stage1`) instead of building LLVM and the
+# compiler first. The one coupling is that a tag has to be pushed after the
+# toolchain release for its `rust` pin exists, or the jobs stop at `fetch-stage1`
+# (same as the arch jobs in `ci.yml`).
+#
+# Two triggers, two kinds of release:
+#   - a `v*` tag is the release and the version (`minix-x86-v0.1.0.elf`)
+#   - a manual dispatch on a branch is a per-commit build, versioned by the commit
+#     (`minix-x86-<sha>.elf`) and tagged `image-<sha>`, the convention
+#     `stage1-<sha>` set. Those are published as prereleases, as is a semver
+#     prerelease tag like `v0.2.0-rc.1`, so neither can take "latest" away from a
+#     plain `v0.2.0` release.
+# Either way the version is the same string in the release tag and the asset names.
+#
+# Each job *boots* what it built: `just image-<arch>` runs the artifact in QEMU and
+# fails unless the window server comes up, so a release can only contain images
+# that came up somewhere other than the machine that built them. That self-check's
+# 5 s timeout is calibrated for a dev machine with KVM, so the job passes a larger
+# `boot-timeout`: a runner emulates the guest.
+#
+# The emulator is not optional here either - the artifact boots userspace, so it is
+# subject to the same floor as the suites (`qemu-min-version`), which
+# `.github/actions/install-qemu` provides. Clang assembles the x86 trampoline, and
+# the `rust` + `coreutils` submodules are needed by the workspace and the multicall
+# (`build-x86` embeds it), all shallowly: none of that history is read.
+
+name: image release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: image-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: image (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, riscv64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - name: Check out the submodules
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust coreutils
+
+      - uses: extractions/setup-just@v4
+
+      - uses: ./.github/actions/install-clang
+
+      - uses: ./.github/actions/install-qemu
+        with:
+          arch: ${{ matrix.arch }}
+
+      # The recipes call `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 ${{ matrix.arch }}
+
+      # 120 s against a dev machine's 5 s: it is the runner's emulation speed, not
+      # a budget the image has to meet. A boot that is actually broken still fails
+      # here, only later.
+      - name: Build and boot the artifact
+        run: just image ${{ matrix.arch }} 120
+
+      # Named without the version: the publish job is the only place that knows
+      # whether this is a tag or a commit, so it renames on the way into the
+      # release. `if-no-files-found: error` because the recipe's own check would
+      # have passed on a file this glob then failed to match, e.g. after a rename.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: minix-${{ matrix.arch }}.elf
+          path: target/images/*/minix-${{ matrix.arch }}.elf
+          if-no-files-found: error
+
+  # One job, not three: a release is created once, and a partial one is worse than
+  # none - `needs` waits for every arch above, so a failure anywhere publishes
+  # nothing.
+  publish:
+    name: release
+    needs: image
+    runs-on: ubuntu-24.04
+    # Only this job writes, and only for its own release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: images
+
+      - name: Resolve the version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$GITHUB_SHA"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "version: ${version}"
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd images
+          for arch in x86 riscv64 aarch64; do
+            test -s "minix-${arch}.elf" || { echo "!! no minix-${arch}.elf"; exit 1; }
+            mv "minix-${arch}.elf" "minix-${arch}-${VERSION}.elf"
+          done
+          ls -lh
+          sha256sum minix-*.elf > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # The tag *is* the release: the version, the release name and "latest".
+            tag="$VERSION"
+            subject="release ${VERSION} (commit ${GITHUB_SHA:0:12})"
+          else
+            # A per-commit build: named by the commit, and a prerelease so it cannot
+            # become "latest" in place of a tagged one.
+            tag="image-${GITHUB_SHA}"
+            subject="commit ${GITHUB_SHA:0:12}"
+          fi
+          assets=("images/minix-x86-${VERSION}.elf" "images/minix-riscv64-${VERSION}.elf" \
+            "images/minix-aarch64-${VERSION}.elf" images/SHA256SUMS)
+          notes="$(printf '%s\n' \
+            "MINIX/Rust boot images for ${subject}." \
+            "" \
+            "One self-contained ELF per arch: the initramfs and the MinixFS root image are" \
+            "embedded, so QEMU needs no disk attached. Each was booted by the run that" \
+            "built it - it fails unless the window server comes up - and each needs QEMU 11" \
+            "or newer, the floor the test suites enforce as well." \
+            "" \
+            "Check the download with \`sha256sum -c SHA256SUMS\`, then boot it with the" \
+            "command line below. The shell is on stdio; \`-nographic\` is what makes it" \
+            "usable from a terminal, and the display and input devices are the ones the" \
+            "build verified (without virtio-gpu the framebuffer does not come up on" \
+            "riscv64/aarch64)." \
+            "" \
+            "x86_64:" \
+            "" \
+            "    qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel minix-x86-${VERSION}.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0" \
+            "" \
+            "RISC-V64:" \
+            "" \
+            "    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-riscv64-${VERSION}.elf" \
+            "" \
+            "AArch64:" \
+            "" \
+            "    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-aarch64-${VERSION}.elf")"
+          # Re-running a tag or a commit replaces the assets rather than failing: the
+          # release name is derived, so a second run is a rebuild, not a new release.
+          if gh release view "${tag}" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "${tag}" -R "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+            gh release edit "${tag}" -R "$GITHUB_REPOSITORY" --notes "${notes}"
+          else
+            # Prerelease unless this is a plain `v0.2.0`: a semver prerelease tag
+            # (`v0.2.0-rc.1`) is not a release yet, and neither is a per-commit build,
+            # so "latest" is the newest milestone rather than the newest build. The
+            # hyphen test is on the *tag*: on a dispatch `GITHUB_REF_NAME` is the
+            # branch, and a branch called `feature/qemu-fix` must not decide this.
+            prerelease=(--prerelease)
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              case "$GITHUB_REF_NAME" in
+                *-*) ;;
+                *) prerelease=() ;;
+              esac
+            fi
+            gh release create "${tag}" -R "$GITHUB_REPOSITORY" \
+              "${prerelease[@]}" \
+              --title "boot images ${VERSION}" \
+              --notes "${notes}" \
+              "${assets[@]}"
+          fi
+          echo "published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"

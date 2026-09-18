@@ -189,3 +189,14 @@ in it too and fail the same assert.
 Because the recipe is a pipeline, the line's exit status is `tee`'s, not QEMU's.
 The marker assert is the gate — do not add a `code=$?` check after the pipe and
 expect it to see QEMU's status.
+
+## The emulator version is a requirement
+
+`test-qemu-*` and `test-boot-*` check their emulator before booting a guest
+(`_assert-qemu-version`, floor in the `qemu-min-version` variable) and refuse
+anything older than QEMU 11. That is not tidiness: on the 8.2 that ubuntu-24.04
+ships, the aarch64 boot suite hangs forever at `scheduler starting...` behind a
+permanent IRQ storm (966k `Taking exception 5 [IRQ]` in 20 s, all from one ELR),
+so a stale emulator only looks like a slow suite until `qemu-timeout` kills it.
+No distribution packages QEMU 11 yet, which is why CI builds it
+(`.github/actions/install-qemu`, cached); a dev machine needs 11 or newer.

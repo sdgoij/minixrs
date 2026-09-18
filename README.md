@@ -38,7 +38,9 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
   the forked Rust compiler in the `rust/` submodule; `just bootstrap` builds
   its stage1 compiler + the minix std sysroots (first run needs network)
 - bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
-- QEMU (`qemu-system-x86_64`, `qemu-system-riscv64`, `qemu-system-aarch64`)
+- QEMU 11 or newer (`qemu-system-x86_64`, `qemu-system-riscv64`,
+  `qemu-system-aarch64`) — the test recipes refuse an older emulator, which hangs
+  the aarch64 boot suite
 - Clang 22 (x86 trampoline, C smoke tests, C++ runtime cross build)
 - CMake + Ninja (for the C++ runtime cross build — `just libcxx-x86`)
 - [Just](https://just.systems/) (build runner)
@@ -81,6 +83,13 @@ and MinixFS root image are assembled by `crates/kernel/build.rs` from the
 built userland/server binaries, and the x86 trampoline/kernel.bin post-link
 is handled by `tools/mkboot.rs`. Assembled images are mirrored per-target
 under `target/images/<triple>/` for host inspection.
+
+`just image [arch]` builds one self-contained, bootable ELF per arch — the
+initramfs and root image are embedded, so QEMU needs no disk attached. Prebuilt
+ones are attached to releases: a `v*` tag for a release, `image-<sha>`
+(prereleases) for a per-commit build. The assets carry the version
+(`minix-x86-v0.1.0.elf`), every image in a release was booted by the build that
+published it, and the release notes carry the exact `qemu-system-*` command line.
 
 ## Project Structure
 

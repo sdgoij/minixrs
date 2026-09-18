@@ -307,3 +307,11 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
     x86's CR0.WP=0), which is what lets `virtual_copy` write it. A kernel
     write through a still-COW'd leaf is an EL1 data abort (loud). Verify
     with `/bin/forktest` (fork + write isolation).
+
+12. **Check the emulator version before chasing a boot hang** — 1-11 are real bugs,
+    this one is not. On the QEMU 8.2 that ubuntu-24.04 ships, the boot suite stops at
+    `scheduler starting...` behind a permanent IRQ storm (966k `Taking exception 5
+    [IRQ]` in 20 s, all from one ELR); the same kernel finishes in 0.2 s on 11. The
+    suite recipes refuse anything below QEMU 11 (`_assert-qemu-version`), but a
+    hand-run `qemu-system-aarch64 ...` does not, so compare against a known-good
+    emulator before instrumenting the kernel. The `minix-testing` skill has the rest.

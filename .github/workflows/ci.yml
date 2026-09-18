@@ -1,22 +1,28 @@
-# CI: host tests on Windows and Linux. Testing only — no release or publish jobs.
+# CI: host tests on Windows and Linux, plus the per-arch boot and QEMU suites on
+# Linux.
 #
 # macOS is deliberately not in the host matrix: the host tests surface
 # macOS-specific issues that are out of scope for now. Re-adding it means one
 # more entry in the `host-tests` matrix below (and a 10x runner-minute rate).
 #
-# The per-arch boot + QEMU suites are not run here. They need the fork's stage1
-# compiler, which means a from-source LLVM build: the fork's pinned base has no
-# CI LLVM artifacts, and bootstrap treats that miss as fatal instead of falling
-# back (`tools/rust-config.py` therefore sets `download-ci-llvm = false`). Three
-# matrix jobs each paying for LLVM is not worth it per push; the intended fix is
-# a prebuilt stage1 published as a release and consumed here. Until then run them
-# locally with `just test-boot-<arch>` and `just test-qemu-<arch>`, which gate on
-# the guest's serial log via `just _assert-qemu-log`.
+# The arch suites consume the stage1 that `toolchain-release.yml` publishes for
+# the commit the `rust` submodule pins: `just fetch-stage1` downloads it, which is
+# what makes these jobs affordable - a from-source LLVM build per job is not.
+# That couples the two: bumping the pin has to be followed by a `toolchain
+# release` run, or the arch jobs stop at `fetch-stage1` until one is published.
+# Both suites also run locally (`just test-boot-<arch>`, `just test-qemu-<arch>`,
+# on Windows too); they gate on the guest's serial log via `just _assert-qemu-log`.
 #
-# If they are re-added, two things learned the hard way: a fresh checkout pulls
-# ~4.5 GiB of submodule history that the build never reads (`rust` ~1.0 GiB,
-# `src/llvm-project` ~3.4 GiB), so clone the submodules with `--depth 1`; and a
-# from-source LLVM build needs far more disk than a runner has free by default.
+# Learned the hard way, for whoever edits this next: a fresh checkout pulls ~4.5
+# GiB of submodule history the build never reads (`rust` ~1.0 GiB,
+# `src/llvm-project` ~3.4 GiB), so clone the submodules with `--depth 1`; the
+# published toolchain is built on ubuntu-24.04, so a runner older than that
+# cannot run it (newer is fine); the emulator version matters as much as the
+# compiler's - every image's QEMU is below the suite floor (8.2 on ubuntu-24.04,
+# 10.2 on 26.04), so `.github/actions/install-qemu` builds the pinned one for each
+# job instead of the jobs pinning an image for it; and clang stays at least as
+# new as the dev machines' (`.github/actions/install-clang`), because syntax a
+# newer clang accepts silently is a hard error on the older one.
 
 name: minixrs
 
@@ -94,3 +100,63 @@ jobs:
         run: |
           rustup component add clippy
           cargo clippy --all-targets -- -D warnings
+
+  # The per-arch boot and kernel suites, on the stage1 published for the pinned
+  # `rust` commit (see the header). One job per arch so a failure names its arch
+  # and the three run in parallel; each pays its own 230 MB download, which is
+  # cheap next to the LLVM build this replaced.
+  #
+  # The image only has to be new enough for the stage1 (ubuntu-24.04, what it was
+  # built on); the emulator comes from `install-qemu`, which builds the version
+  # the suites require and caches it. No image pin is load-bearing here.
+  #
+  # `just image-<arch>` is deliberately not run here. It self-checks the boot
+  # artifact with a 5 s QEMU timeout, which is calibrated for a dev machine with
+  # KVM - a runner emulates the guest and needs far longer.
+  arch-tests:
+    name: boot + qemu (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, riscv64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      # `rust` is the pin `just fetch-stage1` resolves the release from (and
+      # supplies the workspace's path dependencies); `coreutils` is the multicall
+      # the kernel embeds - on x86_64 only so far, every arch eventually, so it is
+      # cloned for all of them. Both shallow: the build reads none of the history.
+      - name: Check out the submodules
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust coreutils
+
+      - uses: extractions/setup-just@v4
+
+      - uses: ./.github/actions/install-clang
+
+      # The suites refuse an emulator below `qemu-min-version`, an image has none
+      # that new, and no distribution packages one yet - so build it. Cached, so
+      # this is a restore on every run after the first.
+      - uses: ./.github/actions/install-qemu
+        with:
+          arch: ${{ matrix.arch }}
+
+      # The recipes call `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 ${{ matrix.arch }}
+
+      - name: Kernel integration suite
+        run: just test-qemu ${{ matrix.arch }}
+
+      - name: Boot suite
+        run: just test-boot ${{ matrix.arch }}

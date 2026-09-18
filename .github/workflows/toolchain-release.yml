@@ -19,6 +19,11 @@
 # that floor does not move when `-latest` advances - older-built artifacts run
 # on newer images, not the other way around. A Windows asset for local use would
 # be a second matrix entry.
+#
+# Published as a prerelease, like the `image-<sha>` builds: it is a toolchain for
+# a commit, not a milestone, and a repository's "latest release" should be a `v*`
+# tag or nothing at all. `edit` carries the flag as well as `create`, so a re-run
+# also repairs releases published before that was the rule.
 
 name: toolchain release
 
@@ -54,35 +59,16 @@ jobs:
             /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           df -h /
 
-      # cmake/ninja for the LLVM build, and a clang for the C smoke-test binaries
-      # `just bootstrap` builds (they are not part of the published toolchain).
-      #
-      # The archive's `clang` on ubuntu-24.04 is 18, years behind the dev
-      # machines, and that skew only ever fails here: syntax a newer clang
-      # accepts silently is a hard error on the older one (a C2y `0o` octal
-      # literal in `tools/c-include/` did exactly that). Installing the same
-      # generation as the dev machines removes that direction of skew;
-      # `LLVM_VERSION` is the pin to bump along with them.
-      - name: Install build tools and clang
-        env:
-          LLVM_VERSION: 22
+      # cmake/ninja for the LLVM build, `python` for x.py and the tools, and a
+      # clang for the C smoke-test binaries and the trampoline (`install-clang`
+      # explains the version pin).
+      - name: Install build tools
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build python-is-python3
-          keyring=/usr/share/keyrings/llvm.gpg
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o "$keyring"
-          repo="deb [signed-by=$keyring] http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main"
-          echo "$repo" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}"
-          # Everything calls a bare `clang` (the recipes, tools/build-c-hello.py,
-          # and x.py's own C compiler detection), and /usr/local/bin comes first.
-          sudo ln -sf "/usr/bin/clang-${LLVM_VERSION}" /usr/local/bin/clang
-          sudo ln -sf "/usr/bin/clang++-${LLVM_VERSION}" /usr/local/bin/clang++
-          clang --version
+
+      - uses: ./.github/actions/install-clang
 
       - name: Rewrite submodule SSH URLs to HTTPS
         run: |
@@ -150,11 +136,15 @@ jobs:
             "Install it with \`just fetch-stage1\`, which derives this tag from the \`rust\`" \
             "submodule commit and verifies \`SHA256SUMS\`. \`just bootstrap\` remains the" \
             "authoritative path when the fork itself changes.")"
+          # Every stage1 is a prerelease (see the header), including any published
+          # before that: `edit` is the only path that can repair those, and it is a
+          # no-op for the rest.
           if gh release view "${tag}" > /dev/null 2>&1; then
             gh release upload "${tag}" --clobber "${asset}" SHA256SUMS
-            gh release edit "${tag}" --notes "${notes}"
+            gh release edit "${tag}" --prerelease --notes "${notes}"
           else
             gh release create "${tag}" \
+              --prerelease \
               --title "stage1 ${sha:0:12} (${host})" \
               --notes "${notes}" \
               "${asset}" SHA256SUMS

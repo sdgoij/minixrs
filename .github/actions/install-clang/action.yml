@@ -1,0 +1,41 @@
+# Installs a clang from apt.llvm.org and puts it on PATH as the bare `clang` /
+# `clang++` everything calls: the Justfile recipes, `tools/build-c-hello.py`, and
+# x.py's own C compiler detection.
+#
+# The archive's clang on ubuntu-24.04 is 18, years behind the dev machines, and
+# that skew only fails on CI - syntax a newer clang accepts silently is a hard
+# error on the older one (a C2y `0o` octal literal in `tools/c-include/fcntl.h`
+# compiled on a dev machine and came back as "invalid suffix 'o00'"). Keep the
+# version at least as new as the dev machines'.
+#
+# The dist is the runner's own codename, so this follows the image when it moves;
+# a codename apt.llvm.org has no build for fails at `apt-get update`.
+
+name: install clang
+description: Install a current clang from apt.llvm.org and expose it as `clang`
+
+inputs:
+  version:
+    description: LLVM major version to install
+    default: "22"
+
+runs:
+  using: composite
+  steps:
+    - name: Install clang ${{ inputs.version }}
+      shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        . /etc/os-release
+        keyring=/usr/share/keyrings/llvm.gpg
+        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+          | sudo gpg --dearmor -o "$keyring"
+        repo="deb [signed-by=$keyring] http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_VERSION} main"
+        echo "$repo" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}"
+        sudo ln -sf "/usr/bin/clang-${LLVM_VERSION}" /usr/local/bin/clang
+        sudo ln -sf "/usr/bin/clang++-${LLVM_VERSION}" /usr/local/bin/clang++
+        clang --version

@@ -129,6 +129,19 @@ free (bootstrap turns `rust.lld` on for its host, `default_linux_linker_override
 Windows host does not — so on Windows the resolution falls through to the CI LLVM's
 `lld.exe` or a system LLVM.
 
+A published toolchain can be checked from Linux without a Linux dev box, since the
+asset is a Linux one and WSL is enough:
+
+```sh
+wsl.exe -d <distro> -- python3 tools/verify-stage1.py   # or `just verify-stage1` in WSL
+```
+
+That fetches the release for the pinned commit, links `tools/std-hello.rs` for all
+three minix targets with the sysroot's `rust-lld`, and checks each ELF's machine. It
+is the cheapest way to catch a release that is missing LLD, or a `rustc` too new for
+the host's glibc (the asset is built on ubuntu-24.04, so an older distro cannot run
+it).
+
 **Ordering trap: `cargo clean` can never be the last step before a build.** It deletes
 `target/<triple>/release/<bin>`, and the kernel's `build.rs` then panics:
 
@@ -280,3 +293,5 @@ Shapes worth knowing as of the current upstream:
 - [ ] smoke-test ELFs carry the right ELF machine
 - [ ] boot transcript clean, `/bin/hello` threads + TLS + allocator all pass
 - [ ] the operator folds the adaptation edits into the fork commits and updates the parent's submodule pointer
+- [ ] the stage1 for that *new* pin is published first (`toolchain release`), because CI's arch tests
+      consume `stage1-<pin>` and stop at `just fetch-stage1` until the release exists
