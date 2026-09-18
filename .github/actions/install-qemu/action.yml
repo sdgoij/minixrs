@@ -1,21 +1,29 @@
-# Builds the QEMU a suite needs and puts it on PATH, for the one target the calling
-# job runs.
+# Builds the QEMU the recipes need and puts it on PATH, for the one target the
+# calling job runs.
 #
-# The suites are pinned to a QEMU floor (11, see `qemu-min-version` in the
+# The recipes are pinned to a QEMU floor (11, see `qemu-min-version` in the
 # Justfile) and no runner image ships one that new: ubuntu-24.04 has 8.2, where the
 # aarch64 boot suite stops at "scheduler starting..." under a permanent IRQ storm
 # (966k taking-exception-5 in 20 s from a single ELR), and 26.04 has 10.2, which is
 # simply untested - every dev machine runs 11. No distribution package provides 11
 # yet either, so build it from the upstream source.
 #
-# One softmmu target is ~2 minutes of `make -j4`, so the install is cached: a miss
-# builds it, every later run on the same version restores it. Bumping
-# `version` changes the key, which is also what to do if a restored binary ever
-# fails on a newer image.
+# One softmmu target is ~2 minutes of `make -j4`, so the install is cached, and the
+# configure flags are hashed into the key: editing them rebuilds instead of
+# restoring a binary built without them.
+#
+# The last step exists because "the build is good enough" is not something to
+# assume: the first image release run died on all three arches at
+# `-netdev user,id=net0: network backend 'user' is not compiled into this binary`,
+# because a stock build has no slirp (`-netdev user`) and no recipe had ever run
+# this emulator with a netdev before - the suites do not pass one. So the devices
+# and backends the Justfile passes *this* emulator are read out of it and checked
+# against the build.
 #
 # The build needs libfdt (`libfdt-dev`) because the release tarball's dtc
-# subproject cannot be fetched without git, and python3-venv because configure
-# creates a meson venv; both were found the hard way, in a container.
+# subproject cannot be fetched without git, libslirp (`libslirp-dev`) for the
+# user-mode network backend, and python3-venv because configure creates a meson
+# venv. The first two were found the hard way, in a container and in CI.
 
 name: install qemu
 description: Build QEMU from upstream source for one minix arch and put it on PATH
@@ -25,30 +33,44 @@ inputs:
     description: QEMU release to build
     default: "11.1.1"
   arch:
-    description: minix arch whose suite will run (x86, riscv64, aarch64)
+    description: minix arch whose suites and image will run (x86, riscv64, aarch64)
     required: true
 
 runs:
   using: composite
   steps:
-    # One place maps the minix arch to QEMU's names, for the steps below and for
-    # the workflow's own logging.
-    - name: Resolve the target and emulator name
+    # One place maps the minix arch to QEMU's names and holds the configure flags,
+    # for the steps below and for the workflow's own logging.
+    - name: Resolve the target, emulator name, and build flags
+      id: resolve
       shell: bash
       env:
         QEMU_ARCH: ${{ inputs.arch }}
       run: |
         set -euo pipefail
         case "$QEMU_ARCH" in
-          x86) target=x86_64-softmmu; binary=qemu-system-x86_64 ;;
-          *)   target="$QEMU_ARCH-softmmu"; binary="qemu-system-$QEMU_ARCH" ;;
+          x86) target=x86_64-softmmu; binary=qemu-system-x86_64; machine=pc ;;
+          *)   target="$QEMU_ARCH-softmmu"; binary="qemu-system-$QEMU_ARCH"; machine=virt ;;
         esac
-        echo "QEMU_TARGET_LIST=$target" >> "$GITHUB_ENV"
-        echo "QEMU_SYSTEM=$binary" >> "$GITHUB_ENV"
+        # Default devices, only the emulator this job needs; docs, tools and the
+        # guest agent are not part of booting a guest. Leaving device selection
+        # alone is deliberate - `--without-default-devices` would drop the virtio
+        # devices every recipe uses. `--enable-slirp` is spelled out rather than
+        # left to autodetection so a missing libslirp fails here, at configure time,
+        # instead of at `-netdev user` minutes into a release job.
+        config="--disable-docs --disable-tools --disable-guest-agent --enable-slirp"
+        {
+          echo "target=$target"
+          echo "emulator=$binary"
+          echo "machine=$machine"
+          echo "config=$config"
+          # Short, stable and derived from the flags: the cache key follows them.
+          echo "build_key=r$(printf '%s' "$config" | sha256sum | cut -c1-8)"
+        } >> "$GITHUB_OUTPUT"
 
-    # Unconditional: a restored build still needs libglib and libpixman at
-    # runtime, and relying on the image to carry them is how a cache hit turns
-    # into an unexplained "error while loading shared libraries".
+    # Unconditional: a restored build still needs libglib, libpixman and libslirp at
+    # runtime, and relying on the image to carry them is how a cache hit turns into
+    # an unexplained "error while loading shared libraries".
     - name: Install the build dependencies
       shell: bash
       run: |
@@ -56,20 +78,23 @@ runs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           build-essential ninja-build pkg-config \
-          libglib2.0-dev libpixman-1-dev libfdt-dev python3-venv
+          libglib2.0-dev libpixman-1-dev libfdt-dev libslirp-dev python3-venv
 
     - name: Restore the QEMU build
       id: cache
       uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/qemu
-        key: qemu-${{ inputs.version }}-${{ inputs.arch }}-${{ runner.os }}-${{ runner.arch }}
+        key: qemu-${{ inputs.version }}-${{ steps.resolve.outputs.build_key }}-${{ inputs.arch }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Build QEMU ${{ inputs.version }}
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         QEMU_VERSION: ${{ inputs.version }}
+        QEMU_TARGET_LIST: ${{ steps.resolve.outputs.target }}
+        # Unquoted on purpose: it is a list of flags.
+        QEMU_BUILD_CONFIG: ${{ steps.resolve.outputs.config }}
       run: |
         set -euo pipefail
         src=$(mktemp -d)
@@ -77,12 +102,9 @@ runs:
           "https://download.qemu.org/qemu-$QEMU_VERSION.tar.xz"
         tar -xf "$src/qemu.tar.xz" -C "$src"
         cd "$src/qemu-$QEMU_VERSION"
-        # Default features, only the emulator this job needs; docs, tools and the
-        # guest agent are not part of booting a guest. Leaving device selection
-        # alone is deliberate - `--without-default-devices` would drop the virtio
-        # devices the suites use.
+        # shellcheck disable=SC2086
         ./configure --prefix="$RUNNER_TEMP/qemu" --target-list="$QEMU_TARGET_LIST" \
-          --disable-docs --disable-tools --disable-guest-agent
+          $QEMU_BUILD_CONFIG
         make -j"$(nproc)"
         make install
 
@@ -91,7 +113,42 @@ runs:
     # below the floor.
     - name: Put QEMU on PATH and report it
       shell: bash
+      env:
+        QEMU_SYSTEM: ${{ steps.resolve.outputs.emulator }}
       run: |
         set -euo pipefail
         echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
         "$RUNNER_TEMP/qemu/bin/$QEMU_SYSTEM" --version
+
+    # Every `-device`/`-netdev` argument any recipe passes to this emulator, checked
+    # against what the binary actually offers. If this rejects a device a recipe
+    # needs, either enable it in `config` above (with its build dependency) or the
+    # recipe is asking CI for something a minimal QEMU build cannot do.
+    - name: Check the build can run the recipes
+      shell: bash
+      env:
+        QEMU_SYSTEM: ${{ steps.resolve.outputs.emulator }}
+        QEMU_MACHINE: ${{ steps.resolve.outputs.machine }}
+      run: |
+        set -euo pipefail
+        qemu="$RUNNER_TEMP/qemu/bin/$QEMU_SYSTEM"
+        lines=$(grep -- "$QEMU_SYSTEM" Justfile || true)
+        [ -n "$lines" ] || { echo "!! no recipe in the Justfile runs $QEMU_SYSTEM" >&2; exit 1; }
+
+        devices=$("$qemu" -device help 2>&1)
+        netdevs=$("$qemu" -machine "$QEMU_MACHINE" -netdev help 2>&1)
+
+        missing=""
+        while read -r name; do
+          grep -qF "name \"$name\"" <<<"$devices" || missing="$missing -device $name"
+        done < <(grep -o -- '-device [a-z0-9_-]*' <<<"$lines" | cut -d' ' -f2 | sort -u)
+        while read -r type; do
+          grep -qw -- "$type" <<<"$netdevs" || missing="$missing -netdev $type"
+        done < <(grep -o -- '-netdev [a-z0-9_-]*' <<<"$lines" | cut -d' ' -f2 | sort -u)
+
+        if [ -n "$missing" ]; then
+          echo "!! $QEMU_SYSTEM cannot run the recipes; missing:$missing" >&2
+          echo "   Add what is needed to the configure flags (and a build dependency)." >&2
+          exit 1
+        fi
+        echo "$QEMU_SYSTEM has every device and backend the Justfile passes it"
