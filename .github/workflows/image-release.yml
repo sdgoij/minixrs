@@ -13,10 +13,18 @@
 # toolchain release for its `rust` pin exists, or the jobs stop at `fetch-stage1`
 # (same as the arch jobs in `ci.yml`).
 #
-# Two triggers, two kinds of release:
+# Runs as part of the default workflow: `ci.yml` calls this as a job that `needs`
+# the tests and the suites, so a green push to `main` - or a `v*` tag - publishes
+# its own images with nobody pressing anything. Keeping the images and the release
+# here rather than inline in `ci.yml` is what this file is for; the caller is one
+# job that does nothing else. `workflow_dispatch` is the escape hatch: publishing
+# without waiting for anything, which is what to reach for when only the publish
+# step of a run failed and the images are already built.
+#
+# The version depends on what triggered the caller, not on this file:
 #   - a `v*` tag is the release and the version (`minix-x86-v0.1.0.elf`)
-#   - a manual dispatch on a branch is a per-commit build, versioned by the commit
-#     (`minix-x86-<sha>.elf`) and tagged `image-<sha>`, the convention
+#   - a push to `main`, or a dispatch, is a per-commit build, versioned by the commit
+#     (`minix-x86-<sha>.elf`) and released as `image-<sha>`, the convention
 #     `stage1-<sha>` set. Those are published as prereleases, as is a semver
 #     prerelease tag like `v0.2.0-rc.1`, so neither can take "latest" away from a
 #     plain `v0.2.0` release.
@@ -37,8 +45,7 @@
 name: image release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
@@ -144,7 +151,10 @@ jobs:
 
       - name: Publish the release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `github.token`, not `secrets.GITHUB_TOKEN`: a called workflow is always
+          # handed the caller's token, while the secret of that name is not
+          # something a call can rely on.
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail

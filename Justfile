@@ -201,9 +201,9 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # so a bad artifact fails here rather than in someone's hands. The boot timeout
 # is deliberately tight - 5 s, against a guest that reaches the shell in about
 # two - so a slow boot fails the recipe instead of only being slow. It is a
-# parameter so that the release job (`.github/workflows/image-release.yml`) can
-# pass a larger one: a CI runner emulates the guest, and that is a property of the
-# runner, not of the artifact.
+# parameter so that the release job (`.github/workflows/image-release.yml`, called
+# by `ci.yml`) can pass a larger one: a CI runner emulates the guest, and that is a
+# property of the runner, not of the artifact.
 #
 # The QEMU command mirrors the matching `run-*` recipe minus the disk - which is
 # the point - so the display and input devices are passed too: without virtio-gpu

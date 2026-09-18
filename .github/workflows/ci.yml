@@ -1,17 +1,26 @@
-# CI: host tests on Windows and Linux, plus the per-arch boot and QEMU suites on
-# Linux.
+# CI: host tests on Windows and Linux, the per-arch boot and QEMU suites on Linux,
+# and - for the commits that pass - the boot images, published as a release.
 #
 # macOS is deliberately not in the host matrix: the host tests surface
 # macOS-specific issues that are out of scope for now. Re-adding it means one
 # more entry in the `host-tests` matrix below (and a 10x runner-minute rate).
+#
+# The jobs are one chain: `host-tests` and `arch-tests` are the gate, and then
+# `release` calls `.github/workflows/image-release.yml`, which builds and boots one
+# artifact per arch and publishes them. The images live in their own file because
+# that is where the release logic belongs; they run here because `needs` is what
+# makes the release downstream of the tests rather than a separate thing that might
+# publish a commit whose suites failed. Pull requests skip it, so a green push to
+# `main` publishes its images, and a `v*` tag does too.
 #
 # The arch suites consume the stage1 that `toolchain-release.yml` publishes for
 # the commit the `rust` submodule pins: `just fetch-stage1` downloads it, which is
 # what makes these jobs affordable - a from-source LLVM build per job is not.
 # That couples the two: bumping the pin has to be followed by a `toolchain
 # release` run, or the arch jobs stop at `fetch-stage1` until one is published.
-# Both suites also run locally (`just test-boot-<arch>`, `just test-qemu-<arch>`,
-# on Windows too); they gate on the guest's serial log via `just _assert-qemu-log`.
+# The image jobs depend on it for the same reason. Both suites also run locally
+# (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they gate on
+# the guest's serial log via `just _assert-qemu-log`.
 #
 # Learned the hard way, for whoever edits this next: a fresh checkout pulls ~4.5
 # GiB of submodule history the build never reads (`rust` ~1.0 GiB,
@@ -28,18 +37,25 @@ name: minixrs
 
 on:
   # Pushes to main plus every PR; widen to all branches if runner minutes
-  # are not a constraint.
+  # are not a constraint. Tags publish too: see the `release` job.
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancelling is for pull requests, where only the newest attempt matters. A run on
+  # `main` or a tag is not cancelled: it may be in the middle of publishing a
+  # release, and a half-uploaded one is worse than a queued run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
 
 # Windows runners default to PowerShell; the submodule setup below is POSIX shell.
 defaults:
@@ -110,9 +126,10 @@ jobs:
   # built on); the emulator comes from `install-qemu`, which builds the version
   # the suites require and caches it. No image pin is load-bearing here.
   #
-  # `just image-<arch>` is deliberately not run here. It self-checks the boot
-  # artifact with a 5 s QEMU timeout, which is calibrated for a dev machine with
-  # KVM - a runner emulates the guest and needs far longer.
+  # `just image-<arch>` is not run in *this* job: the `image` jobs in
+  # `image-release.yml`, which the `release` job below calls, do that with a larger
+  # `boot-timeout` - a runner emulates the guest, and the recipe's 5 s self-check is
+  # calibrated for a dev machine with KVM.
   arch-tests:
     name: boot + qemu (${{ matrix.arch }})
     runs-on: ubuntu-24.04
@@ -160,3 +177,19 @@ jobs:
 
       - name: Boot suite
         run: just test-boot ${{ matrix.arch }}
+
+  # The images and the release live in `.github/workflows/image-release.yml`, which
+  # this calls: the release logic keeps one home, and `needs` is what makes the
+  # release downstream of the tests and the suites rather than something that could
+  # publish a commit whose suites failed. Pull requests are excluded by the `if`, so
+  # a green push to `main` - and a `v*` tag - publishes its own images with nobody
+  # pressing anything. This job does nothing else; the work is in that file.
+  release:
+    name: release
+    needs: [host-tests, arch-tests]
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+    # The called workflow writes a release, so the caller has to allow that much.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/image-release.yml
+    secrets: inherit
