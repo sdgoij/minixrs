@@ -1065,6 +1065,17 @@ pub fn start_vtreefs(hooks: FsHooks, nr_inodes: u32, root_stat: InodeStat, nr_in
                 continue;
             }
 
+            // RS asks each service it starts to initialise, and this loop is where a
+            // VTreeFS server's messages arrive, so the answer belongs here rather than
+            // in a server's message hook — otherwise every VTreeFS server that RS ever
+            // asks would have to remember to handle it, and devman is the one that
+            // does. The shape (m_type `RS_INIT`, result in `m2i1`, sent to RS) is
+            // shared through `answer_rs_init`, because RS's init loop blocks for it and
+            // panics on anything else.
+            if minix_util::rs::answer_rs_init(msg.m_type, msg.m_source) {
+                continue;
+            }
+
             let sender = msg.m_source;
             let from_vfs = sender == arch_common::com::VFS_PROC_NR;
 

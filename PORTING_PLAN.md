@@ -6778,9 +6778,13 @@ The generalisation worth keeping: **RS's table describes what RS knows, not what
 `boot_svcs` still names services the wasm harness never spawns (SCHED, TTY, FB, INPUT, WS)
 and marks them active, so a present service and an absent one look the same from inside
 RS. Making that honest — skip what is not in the process table — is still unbuilt, and it
-is what would make a wrong entry degrade to "not asked" instead of a panic. `devman` is
-the next service to add and it needs a branch in `libs::vtreefs`, since that is where its
-loop lives.
+is what would make a wrong entry degrade to "not asked" instead of a panic.
+
+`devman` followed the same way, with its branch in `libs::vtreefs`' receive loop rather
+than in its own message hook: that loop is where a VTreeFS server's messages arrive, so
+putting the answer there means every VTreeFS server RS asks can answer, instead of each
+one having to remember to. Three services in `asked` now answer through the one shared
+shape.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

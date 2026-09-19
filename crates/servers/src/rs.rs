@@ -897,6 +897,7 @@ pub fn rs_server_main() {
             (arch_common::com::MFS_PROC_NR, b"mfs"),
             (arch_common::com::RAMDISK_PROC_NR, b"ramdisk"),
             (arch_common::com::VIRTIO_BLK_PROC_NR, b"virtio_blk"),
+            (arch_common::com::DEVMAN_PROC_NR, b"devman"),
             (arch_common::com::FB_PROC_NR, b"fb"),
             (arch_common::com::INPUT_PROC_NR, b"input"),
             (arch_common::com::WS_PROC_NR, b"wserver"),
@@ -940,6 +941,7 @@ pub fn rs_server_main() {
             arch_common::com::PM_PROC_NR,
             arch_common::com::RAMDISK_PROC_NR,
             arch_common::com::VIRTIO_BLK_PROC_NR,
+            arch_common::com::DEVMAN_PROC_NR,
         ];
         for &ep in asked {
             let slot = match unsafe { lookup_slot_by_endpoint(ep) } {

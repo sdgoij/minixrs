@@ -91,6 +91,7 @@ version = "0.1.0"
 dependencies = [
  "arch-common",
  "minix-rt",
+ "minix-util",
 ]
 
 [[package]]

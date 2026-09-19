@@ -15,6 +15,10 @@ workspace = true
 [dependencies]
 minix-rt = { path = "../minix-rt" }
 arch-common = { path = "../arch-common" }
+# For `minix_util::rs::answer_rs_init`: `vtreefs`' loop is where a VTreeFS server's
+# messages arrive, and devman is a service RS asks to initialise. The handshake's
+# shape lives in one place rather than being open-coded per server.
+minix-util = { path = "../minix-util" }
 
 [lints]
 workspace = true
