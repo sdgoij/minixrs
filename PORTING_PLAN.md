@@ -6742,9 +6742,17 @@ a BDEV request" is a single assertion that the whole chain ran — VFS's `readsu
 MFS's block read, the RAM disk's reply. It fails against the old behaviour, where the
 RAM disk's trace was a single `RECEIVE` and nothing ever reached it.
 
-One step further now, and it is where M3c stops: VFS advances past `mount_root` — three
-`SENDREC`s where the stall was one — and then blocks in a further one, so it has not
-reached its main loop. The harness names that state rather than asserting it.
+One step further, and it is the last one: VFS's init mounts **devman** right after the
+root filesystem (`mount_devman`, whose own comment says it "blocks until devman starts,
+like mount_root/MFS"), so the same absent-peer problem appeared one step later. Spawned,
+the chain completes and VFS's tail is six `SENDREC`s — readsuper to MFS, `mount_devman`
+to devman, and the block reads between them — then `SYS_BOOT_COMPLETE` (call 60) and the
+`RECEIVE` it waits in. M3c: VFS reaches its main loop.
+
+The shape is worth keeping, because it happened twice in a row and will happen again:
+**a server that mounts something is a server that has to be told the thing exists.** Each
+of these was a probe or a readsuper aimed at an endpoint with no instance behind it, and
+in both cases the answer was to spawn the peer rather than to special-case the platform.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

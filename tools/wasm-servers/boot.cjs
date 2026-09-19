@@ -184,6 +184,9 @@ const specs = [
   // is absent would leave that probe blocked on a peer that does not exist. It
   // answers `EIO`, which is true here, and the ramdisk fallback fires.
   { slot: 12, entry: 'minix_server_virtio_blk', label: 'virtio_blk' },
+  // VFS's init mounts devman's tree right after the root filesystem, and
+  // `mount_devman` blocks until it starts.
+  { slot: 15, entry: 'minix_server_devman', label: 'devman' },
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
@@ -406,12 +409,18 @@ check('the dispatch loop converged', converged, `${steps} steps`);
 // ------------------------------------------------------------- assertions
 
 const servers = procs.filter((p) =>
-  ['ds', 'rs', 'pm', 'ramdisk', 'vm', 'mfs'].includes(p.spec.label)
+  [
+    'ds',
+    'rs',
+    'pm',
+    'ramdisk',
+    'vm',
+    'mfs',
+    'virtio_blk',
+    'devman',
+    'vfs',
+  ].includes(p.spec.label)
 );
-// VFS and the virtio block driver are spawned but not yet in that list: VFS advances
-// past `readsuper` and then blocks in a further `SENDREC`, so it has not reached its
-// main loop. What *is* provable is asserted below instead of nothing.
-const vfsInst = procs.find((p) => p.spec.label === 'vfs');
 const client = procs.find((p) => p.spec.label === 'client');
 const unregistered = procs.find((p) => p.spec.label === 'unregistered');
 const ds = procs.find((p) => p.spec.label === 'ds');
@@ -479,15 +488,11 @@ check(
   ramdiskInst.tail.some((t) => t.nr === 46),
   `ramdisk tail: ${ramdiskInst.tail.map((t) => t.nr).join(',')} (46 is SEND)`
 );
-// What that chain stops short of. VFS advances past `readsuper` — three `SENDREC`s,
-// where the stall before this change was one — and then blocks in a further one, so it
-// has not reached its main loop and is not asserted to have. Named so the next reader
-// sees the state rather than a gap.
-note(
-  'VFS advances past mount_root and blocks in a later sendrec',
-  `vfs tail: ${vfsInst.tail.map((t) => `nr=${t.nr}`).join(',') || '(no syscalls)'}; ` +
-    `blocked=${kernel.exports.minix_proc_blocked(vfsInst.spec.slot)}`
-);
+// VFS is in the `servers` list above now, so it is asserted to have reached its main
+// loop with the rest. Its tail is six `SENDREC`s — readsuper to MFS, mount_devman to
+// devman, and the block reads between them — then `SYS_BOOT_COMPLETE` (call 60) and the
+// `RECEIVE` it waits in, which is what makes the mount a proven fact rather than an
+// observed one.
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is
 // `rs_up`'s `GET_WHOAMI`), announces itself to RS, and only then sends to DS.

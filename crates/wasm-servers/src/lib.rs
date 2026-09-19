@@ -135,6 +135,18 @@ pub extern "C" fn minix_server_virtio_blk() -> i32 {
     0
 }
 
+/// The device manager, whose VTreeFS the `/devices` mount point names.
+///
+/// VFS's init mounts it *after* the root filesystem — `mount_devman`, whose own comment
+/// says it "blocks until devman starts, like mount_root/MFS". Without this instance VFS
+/// stops there on an absent peer, which is the same shape as the `virtio_blk` probe
+/// above (`PORTING_PLAN.md` finding 25), so it is answered the same way: by being there.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_devman() -> i32 {
+    servers::devman::devman_server_main();
+    0
+}
+
 /// Device 0's base address in bytes, as **the RAM disk instance** computed it.
 ///
 /// The host put the image somewhere and the server sized the device from the

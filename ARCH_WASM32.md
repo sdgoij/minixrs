@@ -8,10 +8,11 @@ wasm, no processes), M2's protocol core (instance-per-process, the dispatch
 protocol, Asyncify across the boundary, a real two-process rendezvous), M2c (the
 real servers, built for `os = "minix"`, spawned by the kernel through to their
 own main loops and the DS→RS→PM init handshake), M3a (the boot filesystem
-image serving from a RAM disk instance), and M3b (VM and MFS up, initialised, and
-waiting on a receive) are all **done** — see §11 for commands and results. M3 proper,
-real processes with VFS and a shell, is design; the chain is VM → ramdisk → MFS → VFS,
-and M3c is the last link.
+image serving from a RAM disk instance), M3b (VM and MFS up, initialised, and
+waiting on a receive), and M3c (VFS mounts root and reaches its main loop — the whole
+chain, VM → ramdisk → MFS → VFS, running on wasm) are all **done** — see §11 for
+commands and results. What M3 has not reached is a *user* process: no shell, no
+`init`.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1151,6 +1152,34 @@ Not done here, and it is what M3c needs: the `asked` table in RS still holds onl
 PM, so nothing asks VM or MFS to initialise. VM's `RS_INIT` branch exists but is never
 reached, and MFS has none. Extending it wants a platform-honest table, per the decision
 recorded with M2c.
+
+**M3c — VFS mounts root. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 27/27 checks passed, over nine servers
+```
+
+VFS is spawned at `VFS_PROC_NR` and reaches its main loop, which means its whole init
+ran: `mount_root` asked MFS for the root superblock, MFS asked the RAM disk instance for
+the block over BDEV, and `mount_devman` brought up the device tree afterwards. Its tail
+is six `SENDREC`s, then `SYS_BOOT_COMPLETE` (call 60), then the `RECEIVE` it waits in.
+
+Two servers had to exist for that to finish, and neither was optional: a `virtio_blk`
+instance spawned with **no device attached**, because `mount_root` names it as the
+preferred root driver and then asks whether it has a device — an honest `EIO` lets
+`bdev_driver_root` take the ramdisk fallback, and keeps the platform branch out of `fs`;
+and **devman**, because `mount_devman` blocks until it starts. Both were absent-peer
+stalls, and `PORTING_PLAN.md` finding 25 records the measurements and the reasoning.
+
+With this the whole chain runs on wasm: **VM → ramdisk → MFS → VFS**, plus DS, RS, PM,
+an honest virtio_blk and devman. Nine instances, each in its own main loop, each blocked
+in the kernel on a receive from any sender.
+
+What M3c does *not* do, and it is the rest of M3: nothing is running as a *user* process
+yet. There is no shell, no `init`, and the `asked` table in RS still holds only DS and
+PM, so nothing asks VM, MFS, devman or VFS to initialise through RS. Extending it wants
+a platform-honest table, per the decision recorded with M2c.
 
 ## 12. Risks, ranked
 
