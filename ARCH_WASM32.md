@@ -7,11 +7,12 @@ Status: **partially implemented.** M0 (host-mode HAL), M1 (kernel boots as
 wasm, no processes), M2's protocol core (instance-per-process, the dispatch
 protocol, Asyncify across the boundary, a real two-process rendezvous), M2c (the
 real servers, built for `os = "minix"`, spawned by the kernel through to their
-own main loops and the DS→RS→PM init handshake), and M3a (the boot filesystem
-image serving from a RAM disk instance) are all **done** — see §11 for commands
-and results. M3 proper, real processes with VFS and a shell, is design; the chain
-is VM → ramdisk → MFS → VFS, and §11's M3a records the first link and the
-constant it had to stop trusting.
+own main loops and the DS→RS→PM init handshake), M3a (the boot filesystem
+image serving from a RAM disk instance), and M3b's MFS (the real MinixFS file server
+spawned, initialised, and waiting on a receive) are all **done** — see §11 for
+commands and results. M3 proper, real processes with VFS and a shell, is design; the
+chain is VM → ramdisk → MFS → VFS, and VM is the link that still does not run (§11
+M3b).
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1125,6 +1126,36 @@ new ones: the image is present in that instance and describes its own length, an
 **server's** derived device size equals the image the host placed. Reading the
 server's answer rather than the host's constant is the point; finding 23 is what
 happened when it was a `panic!` instead.
+
+**M3b — MFS runs as an instance. Status: PARTIAL — MFS reaches its main loop, VM does
+not.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 26/26 checks passed, with a note naming what VM does instead
+```
+
+MFS is spawned at `MFS_PROC_NR` and passes the same three checks the other servers do:
+it reaches its main loop (`nr=47 a0=0xffff` — one kernel call, then the `RECEIVE`),
+blocks in the kernel on it, and is receiving from any sender. That means `mfs_init()`
+completed on wasm — globals, inode cache, the buffer cache, and the BDEV wiring to the
+RAM disk instance — and the server is waiting for work. `wasm-servers` now depends on
+`fs` directly for the entry point, as `servers`' own `mfs` binary target already did.
+
+VM is spawned at `VM_PROC_NR` because MFS's allocator runs during init and every
+`brk()` goes through VM. It does *not* reach its main loop: its trace is 64+ entries of
+nothing but `nr=50 a0=0x3e`, and it ends blocked inside a kernel call rather than in a
+`RECEIVE`. Call 62 is `SYS_VM_PAGING` and the loop is inside `init_vm()`, not the
+receive loop — VM's own page-table work is exactly what `pt_levels() == 0` makes
+inert, so it is asking for translations that cannot complete and not noticing. That
+is `PORTING_PLAN.md` finding 24 and it is the next thing to fix; the harness *names*
+it rather than asserting it, so a harness that is complete for what it covers stays
+green and the day VM reaches the loop is the day the note changes.
+
+Not done here, and it is what M3c needs: the `asked` table in RS still holds only DS
+and PM, so nothing asks VM or MFS to initialise — VM's `RS_INIT` branch exists but is
+never reached, and MFS has none. Extending it wants a platform-honest table, per the
+decision recorded with M2c.
 
 ## 12. Risks, ranked
 

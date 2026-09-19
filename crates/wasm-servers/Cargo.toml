@@ -16,6 +16,9 @@ path = "src/lib.rs"
 [dependencies]
 servers = { path = "../servers" }
 arch-common = { path = "../arch-common" }
+# MFS's entry point lives in `fs` (as `servers`' own `mfs` binary target calls
+# `fs::mfs::main::mfs_main`), so this module needs the crate directly.
+fs = { path = "../fs" }
 # Supplies the panic handler and the global allocator (`rt`), both gated on
 # `target_os = "minix"` — which this target now is. There is no `_start` for
 # wasm32, so nothing here conflicts with the host calling into an export.

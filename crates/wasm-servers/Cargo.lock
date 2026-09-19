@@ -138,6 +138,7 @@ name = "wasm-servers"
 version = "0.1.0"
 dependencies = [
  "arch-common",
+ "fs",
  "minix-rt",
  "minix-util",
  "servers",

@@ -92,6 +92,22 @@ pub extern "C" fn minix_server_ramdisk() -> i32 {
     0
 }
 
+/// The virtual memory server. Every process that calls `brk()` depends on it, so it
+/// is spawned before the filesystem servers whose allocators grow a heap.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_vm() -> i32 {
+    servers::vm::vm_main();
+    0
+}
+
+/// The MinixFS file server. Its root device is the RAM disk instance, reached over
+/// BDEV.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_mfs() -> i32 {
+    fs::mfs::main::mfs_main();
+    0
+}
+
 /// Device 0's base address in bytes, as **the RAM disk instance** computed it.
 ///
 /// The host put the image somewhere and the server sized the device from the

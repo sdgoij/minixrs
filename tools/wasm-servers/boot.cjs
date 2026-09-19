@@ -172,6 +172,10 @@ const specs = [
   // the boot filesystem image the host copies into this instance below — the wasm
   // equivalent of the kernel mapping the image on the hardware arches.
   { slot: 11, entry: 'minix_server_ramdisk', label: 'ramdisk' },
+  // VM before MFS: every process that calls `brk()` depends on it, and MFS's
+  // allocator runs during init.
+  { slot: 8, entry: 'minix_server_vm', label: 'vm' },
+  { slot: 7, entry: 'minix_server_mfs', label: 'mfs' },
   // Not a boot process and not a server: the client that gives DS something to
   // answer. Its slot is above the boot procs on purpose, so `p_priv` stays null
   // — `may_send_to` allows anything from a privilege-less process, and allows DS
@@ -381,12 +385,15 @@ check('the dispatch loop converged', converged, `${steps} steps`);
 
 // ------------------------------------------------------------- assertions
 
-const servers = procs.filter((p) => ['ds', 'rs', 'pm', 'ramdisk'].includes(p.spec.label));
+const servers = procs.filter((p) =>
+  ['ds', 'rs', 'pm', 'ramdisk', 'mfs'].includes(p.spec.label)
+);
 const client = procs.find((p) => p.spec.label === 'client');
 const unregistered = procs.find((p) => p.spec.label === 'unregistered');
 const ds = procs.find((p) => p.spec.label === 'ds');
 const rs = procs.find((p) => p.spec.label === 'rs');
 const ramdiskInst = procs.find((p) => p.spec.label === 'ramdisk');
+const vmInst = procs.find((p) => p.spec.label === 'vm');
 
 // The last syscall a server makes before it stops is the `RECEIVE` it blocks in,
 // which is what "it is in its main loop" means for an instance that no longer has
@@ -435,6 +442,22 @@ check(
     `(image is ${ramdiskImage.length}; host put it at 0x${RAMDISK_IMAGE_VA.toString(16)}, ` +
     `and the driver reports base=0x${ramdiskInst.inst.exports.minix_ramdisk_device_base().toString(16)} ` +
     'because `ramdisk_set_image` stores the address in `dev.data` and zeroes `dev.base`)'
+);
+
+// VM is spawned and does not run away, but it does not reach a `RECEIVE` yet:
+// `init_vm()` calls SYS_VM_PAGING (kernel call 62) repeatedly and the process ends
+// up blocked inside a kernel call. Its trace is 64 entries of nothing but `nr=50
+// a0=0x3e`, which is where the loop is. Named rather than asserted, so the gap is
+// visible in the output without turning a harness that is otherwise complete for
+// what it covers into a failing one -- and so that the day it *does* reach the
+// loop, the note is what changes.
+note(
+  'VM runs but does not reach its main loop yet',
+  `last syscalls: ${vmInst.trace
+    .slice(-4)
+    .map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`)
+    .join(', ')} (call 62 is SYS_VM_PAGING, seen ${vmInst.trace.length}+ times); ` +
+    `blocked=${kernel.exports.minix_proc_blocked(vmInst.spec.slot)}`
 );
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is
