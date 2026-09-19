@@ -6977,7 +6977,33 @@ Two things the attempt cost, both kept:
 Worth pairing with finding 12: that one concluded the host needs its own lever against a
 runaway guest. This is the first time the need has actually been hit, and the lever the
 harness has — a step count, and a budget that only bites between dispatches — does not
-reach a loop that never returns to the host.
+reach a loop that never returns to the host. Both halves were then addressed: the budget now
+throws a `BudgetExhausted` that the dispatcher catches and names, and the step cap grew,
+because it was 256 — a fit for a boot that only ever *wrote* to the console — and a shell
+consuming a 31-byte script needs a few hundred steps (finding 33).
+
+**Explained by finding 33**: the zeros were the caller's buffer never being written, which
+is why the line could not complete and why the retry loop was infinite rather than merely
+slow.
+
+**33. The serial ring's read path wrote the byte through the caller's pointer.** Found by
+instrumenting the tty's blocking read after finding 32 had located the stall without
+explaining it: every iteration reported the same byte, `0x00`, with the outstanding count
+already at zero and one byte "delivered". `sys_read_handler`'s fd-0 branch reads the byte out
+of the serial ring and stored it with `core::ptr::write_volatile(buf, byte)`, where `buf` is
+a **caller** address — so on wasm the store landed in the kernel's own memory, the caller's
+buffer kept whatever it held (the tty's `[0u8; 1]`, hence the zeros), and the return value
+still said a byte had arrived. The tty's line discipline then consumed one zero per read and
+never saw the newline a reader waits for, so the read never completed and the shell retried
+forever.
+
+Fixed with `vm::write_to_proc`, the same kernel-to-process copy the other sites already use
+(`do_vdevio_handler`, `getmcontext`), which reduces to the store this always was on an arch
+where the two address spaces are one. It is the write-direction counterpart of finding 28 —
+the same mistake on `sys_write_handler`'s read of the console buffer — and the third site in
+that family (13, 16, 28): a pointer that belongs to the *caller* dereferenced as if it were
+the kernel's. The reason it could hide so long is the same as finding 31's: nothing on this
+port had ever *read* from a process, only written to one, so the path was never walked.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

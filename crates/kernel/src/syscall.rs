@@ -145,15 +145,18 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
                 None => return -11, // EAGAIN: tty retries in user mode
             }
         };
-        unsafe {
-            core::ptr::write_volatile(buf, byte);
-            // A compiler barrier, so the volatile write above cannot be
-            // reordered or elided. wasm32 has no stable inline asm, so use the
-            // intrinsic that exists for this purpose.
-            #[cfg(not(target_arch = "wasm32"))]
-            core::arch::asm!("", options(nostack, preserves_flags));
-            #[cfg(target_arch = "wasm32")]
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        // The byte belongs in the *caller's* address space, which on an arch whose two
+        // spaces are separate memories is a copy this kernel cannot make by writing
+        // through the pointer: a raw store lands in its own memory, the caller's buffer
+        // keeps whatever it held, and the count below still reports one byte delivered.
+        // The tty then consumed a zero per read and never saw the newline a reader waits
+        // for, so the console read never completed (finding 33). `write_to_proc` is the
+        // same operation the other kernel-to-process copies use, and on a hardware arch
+        // it reduces to the store this always was.
+        let proc_nr = (*caller).p_nr;
+        let r = crate::vm::write_to_proc(proc_nr, buf as u64, &byte, 1);
+        if r != 0 {
+            return r as i64;
         }
         1
     } else {

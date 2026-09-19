@@ -12,9 +12,11 @@ image serving from a RAM disk instance), M3b (VM and MFS up, initialised, and
 waiting on a receive), M3c (VFS mounts root and reaches its main loop — the whole
 chain, VM → ramdisk → MFS → VFS, running on wasm), M3d (INIT, the first *user*
 process: it runs, writes to the console through the kernel, reaches PM, and exits), and
-M3e (the tty server, and INIT's stdio routed through VFS and the tty to the real console)
-are all **done** — see §11 for commands and results. M3f (the shell) was attempted and is
-blocked, with the blocker located rather than assumed: the read path, not exec (§11).
+M3e (the tty server, and INIT's stdio routed through VFS and the tty to the real console),
+and M3f (the shell: prompt, input, a builtin command, exit) are all **done** — see §11 for
+commands and results. M3 — console, TTY, shell — is complete; what remains of the port is
+M4 onwards, and exec as module instantiation (§7.2), which M3f worked around rather than
+implemented.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1085,8 +1087,9 @@ touches their own statics — which is exactly why nothing had noticed.
 
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
 real coreutils. Progress: M3a (RAM disk), M3b (VM + MFS), M3c (VFS mounts root),
-M3d (INIT, the first user process), M3e (the console, end to end), M3f (the shell —
-attempted, blocked; see below).
+M3d (INIT, the first user process), M3e (the console, end to end), M3f (the shell) —
+see below. M3 is complete; only the module-backed half of its title (exec from the
+image) is outstanding, which is §7.2's work and M7's.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
 existing persistence test adapted.
@@ -1300,28 +1303,42 @@ fetch resolve to the right bytes. `PORTING_PLAN.md` finding 31 has the diagnosis
 fix; it is why the milestone could not have been reached before, and why nothing else
 noticed — no process's own IPC goes through that path.
 
-**M3f — The shell. Status: BLOCKED, with the blocker located.**
+**M3f — The shell. Status: DONE.**
 
-M3's last piece is the shell, and its prerequisite on the shipping arches is exec: `init`
-`execve`s `/bin/sh`, and on this port exec is module instantiation (§7.2), which the host
-has not implemented. The attempt therefore ran the shell *in place* in INIT's slot, with the
-console set up exactly as init does it — the substitution an exec would have made, minus the
-exec itself.
+```text
+sh tools/wasm-servers/run.sh
+# 44/44 checks passed, over ten servers and one user process
+```
 
-It established three things and not a fourth. The shell starts, and its prompt leaves
-through VFS and the tty because M3e's chain is already in place; the host's scripted input
-reaches the guest — all 31 bytes of it, in order, consumed inside a single host dispatch,
-which is what shows the kernel's `poll_console` and the tty's own `read(0)` doing their
-part; and `echo` is a shell *builtin* (`shell.rs::run_builtin`), so a first command needs no
-exec at all. What does not happen is the read completing a line. The tty's blocking path
-retries `read(0)` forever and the shell retries with it, so the run hangs instead of failing
-— and it hangs *inside one host dispatch*, where the harness's step cap cannot reach it.
-`PORTING_PLAN.md` finding 32 has the evidence and the shape of the next attempt.
+M3's last piece, and its prerequisite on the shipping arches is exec: `init` `execve`s
+`/bin/sh`, and on this port exec is module instantiation (§7.2), which the host has not
+implemented. So the shell runs *in place* in INIT's slot, with the console set up exactly as
+init does it — the substitution an exec would have made, minus the exec itself. What the
+console shows:
 
-The honest statement of M3 is therefore: console end to end (M3e), shell not yet — with the
-blocker located in the tty's read completion rather than in exec, which is a smaller problem
-than the one this milestone was expected to end on, and one that `thread_yield`-based
-retry loops make hard to observe.
+```text
+kernel: # echo hello from the shell
+kernel: hello from the shell
+kernel: # exit
+```
+
+The prompt, the tty's echo of the command, the builtin's output and the exit are four
+separate facts, and the harness checks two of them as such: the prompt says a reader started
+and its first write went out through VFS and the tty, and `hello from the shell` matched
+*exactly* — not as a substring, because the echoed command contains it too — says a whole
+line came back in, was parsed, and its result was written out. The input is the host's
+(`consoleInput`), so the read direction is exercised rather than assumed, and exercised all
+the way down: the host's bytes, the kernel's serial ring, the tty's blocking read, VFS's
+`CDEV_READ` and the shell's line editor. `echo` being a shell builtin (`shell.rs::run_builtin`)
+is what makes a first command need no exec at all.
+
+Getting there required finding 33, and finding 33 is what finding 32 was missing: the serial
+ring's read path wrote the byte through the *caller's* pointer, so on this port a reader
+received zeros and never saw a newline. That is why the first attempt looked like a hang
+while being an infinite loop on a line that could never end — and it is why the harness now
+ends such a run with a named diagnosis instead of an external kill, and why its step cap had
+to grow: every console byte a reader consumes costs several dispatches, and the old bound
+cut the shell off mid-line, which looked like a reading bug and was a harness limit.
 
 ## 12. Risks, ranked
 

@@ -74,6 +74,17 @@ let syscallsLeft = SYSCALL_BUDGET;
 /// failure report says who was spinning.
 let exhaustedBy = null;
 
+/// Thrown by the syscall gate once the budget is spent, instead of answering an error.
+///
+/// An error *return* is something the guest decides what to do with, and a guest in a
+/// retry loop may simply retry: the tty's blocking read treats `EINVAL` as "the console is
+/// gone" and gives up, which is at least an ending, but a reader that treats it as any
+/// other failure would loop again. A throw unwinds out of the guest's dispatch to the
+/// loop that owns it, which can then stop and say who was spinning. Finding 32 is the run
+/// that needed this: the loop was inside a single dispatch, so neither the step cap nor a
+/// return value could end it, and the run had to be killed from outside.
+class BudgetExhausted extends Error {}
+
 const checks = [];
 function check(name, ok, detail) {
   checks.push({ name, ok });
@@ -97,6 +108,10 @@ function emit(byte) {
   const ch = String.fromCharCode(byte & 0xff);
   if (ch === '\n') {
     timeline.push(`${consoleTag}: ${currentLine}`);
+    // Print it as it arrives when tracing. The timeline is only dumped when a run ends,
+    // and "the run never ends" is exactly when a guest's own output is the only evidence
+    // there is (finding 32).
+    if (process.env.WASM_TRACE === '1') console.log(`${consoleTag}: ${currentLine}`);
     currentLine = '';
     return;
   }
@@ -274,10 +289,7 @@ function makeServer(spec) {
         const msgAddr = Number(a1);
         if (syscallsLeft <= 0) {
           exhaustedBy = spec.label;
-          // BigInt, because this import's return type is i64: returning a Number here
-          // throws `Cannot convert -22 to a BigInt` and replaces the diagnosis -- which
-          // instance spent the budget -- with a TypeError from the host.
-          return BigInt(EINVAL);
+          throw new BudgetExhausted(`${spec.label} spent the ${SYSCALL_BUDGET}-syscall budget`);
         }
         syscallsLeft -= 1;
         if (st.trace.length < TRACE_LIMIT) st.trace.push({ nr, a0: dst });
@@ -426,8 +438,14 @@ for (;;) {
   if (slot === -1) break;
   // A safety net, not a bound: the exchange adds round trips, and a resume
   // consumes a step like a first run does. A runaway is caught by the syscall
-  // budget instead, which names the instance.
-  if (++steps > 256) {
+  // budget instead, which names the instance -- and now throws rather than
+  // returning an error, so a loop that never comes back here still ends.
+  //
+  // The number has to leave room for a *reader*. Every console byte the shell
+  // consumes costs several dispatches (shell -> VFS -> tty -> VFS -> shell), so a
+  // 31-byte script is a few hundred steps on its own; 256 fitted a boot that only
+  // ever wrote to the console and cut the shell off mid-line (M3f).
+  if (++steps > 4000) {
     converged = false;
     break;
   }
@@ -451,6 +469,14 @@ for (;;) {
   try {
     run(st);
   } catch (e) {
+    if (e instanceof BudgetExhausted) {
+      // The budget is the host's only lever against a runaway guest (finding 12), and this
+      // is the form of it that works when the runaway never returns to this loop: stop the
+      // run and say so, rather than ending it from outside with no diagnosis.
+      converged = false;
+      note('the syscall budget ran out inside a single dispatch', e.message);
+      break;
+    }
     // A trap whose last syscall was EXIT is a process exiting, not failing.
     // `minix-rt::exit` issues `SYS_EXIT` and then traps, because this target gives the
     // host no chance to run while an instance is executing, so a spin would hang it
@@ -963,6 +989,31 @@ check(
   'a write from INIT reached the console through VFS and the tty',
   initReport[2] === VFS_LINE_BYTES && sawVfsLine,
   `write status=${initReport[2]} (expected ${VFS_LINE_BYTES}), line on console=${sawVfsLine}`
+);
+
+// --------------------------------------------- M3f: the shell, in INIT's slot
+
+// init's last step is `exec("/bin/sh")`; on this port exec is module instantiation
+// (ARCH_WASM32.md 7.2), which is not implemented, so the shell runs in place with the
+// stdio above already set up. Two lines are the evidence, and they are different
+// claims: the prompt says a *reader* started and its first write went out through VFS
+// and the tty; the builtin's output says a whole line came back in, was parsed, and its
+// result was written out. The host supplies that line (`consoleInput`), so the input
+// direction is exercised rather than assumed.
+const sawPrompt = timeline.some((l) => l.includes('# '));
+// Exactly, not `includes`: the tty echoes the input, so the *echo* of the command also
+// contains this text on the prompt line. Only the builtin's own output is a line of its
+// own that is nothing but this.
+const sawBuiltin = timeline.some((l) => l.trimEnd() === 'kernel: hello from the shell');
+check(
+  'the shell printed a prompt through VFS and the tty',
+  sawPrompt,
+  `prompt on console=${sawPrompt}`
+);
+check(
+  'the shell read a line, ran its echo builtin, and its output reached the console',
+  sawBuiltin,
+  `builtin output on console=${sawBuiltin}`
 );
 
 note(
