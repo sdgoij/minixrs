@@ -125,7 +125,7 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset 24: abs_time   (i32)
 //
 // mess_lsys_krn_sys_abort (for do_abort):
-//   offset 0: how (i32)
+//   C union offset 0: how (i32) → message offset 8 (see the DEVIO note below).
 //
 // mess_lsys_krn_sys_diagctl (for do_diagctl):
 //   offset  0: code   (i32)
@@ -147,7 +147,8 @@ unsafe fn msg_write_u64(msg: &mut [u8; MESSAGE_SIZE], offset: usize, val: u64) {
 //   offset 16: cpu       (i32)
 //
 // mess_lsys_krn_sys_statectl (for do_statectl):
-//   offset 0: request (i32)
+//   C union offset 0: request (i32) → message offset 8:
+//   offset 8: request (i32)
 //
 // mess_1 (used by do_runctl, do_trace, etc.):
 //   offset  0: m1ull1 (u64)
@@ -182,7 +183,7 @@ const TIMES_REPLY_USER_OFF: usize = 24;
 const TIMES_REPLY_SYSTEM_OFF: usize = 32;
 const TIMES_REPLY_HZ_OFF: usize = 40;
 
-const ABORT_HOW_OFF: usize = 0;
+const ABORT_HOW_OFF: usize = 8;
 
 #[allow(dead_code)]
 const DIAGCTL_CODE_OFF: usize = 0;
@@ -206,7 +207,7 @@ const SCHEDCTL_PRIORITY_OFF: usize = 16;
 const SCHEDCTL_QUANTUM_OFF: usize = 20;
 const SCHEDCTL_CPU_OFF: usize = 24;
 
-const STATECTL_REQUEST_OFF: usize = 0;
+const STATECTL_REQUEST_OFF: usize = 8;
 
 const M1_I1_OFF: usize = 8;
 const M1_I2_OFF: usize = 12;
@@ -274,12 +275,13 @@ const EXEC_FINISH_STACK_OFF: usize = 32;
 
 // Mcontext message offsets (Phase 8.10)
 //
-// mess_lsys_krn_sys_{get,set}mcontext:
-//   offset  0: endpt    (endpoint_t / i32, 4 bytes)
-//   offset  4: _pad     (4 bytes)
-//   offset  8: ctx_ptr  (vir_bytes / u64)
-const MCONTEXT_ENDPT_OFF: usize = 0;
-const MCONTEXT_CTX_PTR_OFF: usize = 8;
+// mess_lsys_krn_sys_{get,set}mcontext — request fields, so they sit past the
+// kernel-call header:
+//   offset  8: endpt    (endpoint_t / i32, 4 bytes)
+//   offset 12: _pad     (4 bytes)
+//   offset 16: ctx_ptr  (vir_bytes / u64)
+const MCONTEXT_ENDPT_OFF: usize = 8;
+const MCONTEXT_CTX_PTR_OFF: usize = 16;
 
 const M1_P1_OFF: usize = 24;
 const M1_P3_OFF: usize = 40;
@@ -307,30 +309,33 @@ const DEVIO_VALUE_OFF: usize = 16;
 #[allow(dead_code)]
 const DEVIO_REPLY_VALUE_OFF: usize = 8;
 
-// mess_lsys_krn_sys_vdevio (for do_vdevio):
-//   offset  0: request  (int / i32)
-//   offset  4: vec_size (int / i32)
-//   offset  8: vec_addr (vir_bytes / u64)
-const VDEVIO_REQUEST_OFF: usize = 0;
-const VDEVIO_VEC_SIZE_OFF: usize = 4;
-const VDEVIO_VEC_ADDR_OFF: usize = 8;
+// mess_lsys_krn_sys_vdevio (for do_vdevio) — request fields:
+//   offset  8: request  (int / i32)
+//   offset 12: vec_size (int / i32)
+//   offset 16: vec_addr (vir_bytes / u64)
+//
+// Payload-relative in C, shifted past the kernel-call header like DEVIO above.
+// Read from 0, `request` was the call number.
+const VDEVIO_REQUEST_OFF: usize = 8;
+const VDEVIO_VEC_SIZE_OFF: usize = 12;
+const VDEVIO_VEC_ADDR_OFF: usize = 16;
 
-// mess_lsys_krn_sys_sdevio (for do_sdevio):
-//   Layout on x86_64 (with natural alignment):
-//   offset  0: request   (int / i32, 4 bytes)
-//   offset  4: _pad      (4 bytes for alignment)
-//   offset  8: port      (long int / i64, 8 bytes)
-//   offset 16: vec_endpt (endpoint_t / i32, 4 bytes)
-//   offset 20: _pad2     (4 bytes)
-//   offset 24: vec_addr  (phys_bytes / u64, 8 bytes)
-//   offset 32: vec_size  (vir_bytes / u64, 8 bytes)
-//   offset 40: offset    (vir_bytes / u64, 8 bytes)
-const SDEVIO_REQUEST_OFF: usize = 0;
-const SDEVIO_PORT_OFF: usize = 8;
-const SDEVIO_VEC_ENDPT_OFF: usize = 16;
-const SDEVIO_VEC_ADDR_OFF: usize = 24;
-const SDEVIO_VEC_SIZE_OFF: usize = 32;
-const SDEVIO_OFFSET_OFF: usize = 40;
+// mess_lsys_krn_sys_sdevio (for do_sdevio) — request fields, so they sit past the
+// kernel-call header (C's union offsets are 8 lower):
+//   offset  8: request   (int / i32, 4 bytes)
+//   offset 12: _pad      (4 bytes for alignment)
+//   offset 16: port      (long int / i64, 8 bytes)
+//   offset 24: vec_endpt (endpoint_t / i32, 4 bytes)
+//   offset 28: _pad2     (4 bytes)
+//   offset 32: vec_addr  (phys_bytes / u64, 8 bytes)
+//   offset 40: vec_size  (vir_bytes / u64, 8 bytes)
+//   offset 48: offset    (vir_bytes / u64, 8 bytes)
+const SDEVIO_REQUEST_OFF: usize = 8;
+const SDEVIO_PORT_OFF: usize = 16;
+const SDEVIO_VEC_ENDPT_OFF: usize = 24;
+const SDEVIO_VEC_ADDR_OFF: usize = 32;
+const SDEVIO_VEC_SIZE_OFF: usize = 40;
+const SDEVIO_OFFSET_OFF: usize = 48;
 
 // mess_lsys_krn_sys_vumap (for do_vumap):
 //   offset  8: endpt     (endpoint_t / i32)
@@ -366,19 +371,24 @@ const MAPVEC_NR: usize = 64;
 const VUA_READ: i32 = 0x0001;
 const VUA_WRITE: i32 = 0x0002;
 
-// mess_lsys_krn_sys_umap (for do_umap, do_umap_remote):
-//   offset  0: src_endpt  (endpoint_t / i32)
-//   offset  4: segment    (int / i32)
-//   offset  8: src_addr   (vir_bytes / u64)
-//   offset 16: dst_endpt  (endpoint_t / i32)
-//   offset 20: nr_bytes   (int / i32)
+// mess_lsys_krn_sys_umap (for do_umap, do_umap_remote) — request fields:
+//   offset  8: src_endpt  (endpoint_t / i32)
+//   offset 12: segment    (int / i32)
+//   offset 16: src_addr   (vir_bytes / u64)
+//   offset 24: dst_endpt  (endpoint_t / i32)
+//   offset 28: nr_bytes   (int / i32)
 // mess_krn_lsys_sys_umap (reply):
-//   offset  0: dst_addr   (phys_bytes / u64)
-const UMAP_SRC_ENDPT_OFF: usize = 0;
-const UMAP_SEGMENT_OFF: usize = 4;
-const UMAP_SRC_ADDR_OFF: usize = 8;
-const UMAP_DST_ENDPT_OFF: usize = 16;
-const UMAP_NR_BYTES_OFF: usize = 20;
+//   offset  8: dst_addr   (phys_bytes / u64)
+//
+// Payload-relative in C, shifted past the kernel-call header like DEVIO above.
+// Read from 0, `segment` was the caller's endpoint and `src_endpt` the call
+// number. The reply's `dst_addr` keeps the same offset as the request's
+// `src_endpt`, which is where C puts both (its union member opens the struct).
+const UMAP_SRC_ENDPT_OFF: usize = 8;
+const UMAP_SEGMENT_OFF: usize = 12;
+const UMAP_SRC_ADDR_OFF: usize = 16;
+const UMAP_DST_ENDPT_OFF: usize = 24;
+const UMAP_NR_BYTES_OFF: usize = 28;
 
 // mess_lsys_krn_sys_memset (for do_memset):
 //   offset  8: base      (phys_bytes / u64)
@@ -440,9 +450,10 @@ const SETALARM_EXP_TIME_OFF: usize = 8;
 const SETALARM_TIME_LEFT_OFF: usize = 16;
 const SETALARM_ABS_TIME_OFF: usize = 24;
 
-// mess_lsys_krn_sys_stime (for do_stime):
-//   offset 0: boot_time (time_t / i64)
-const STIME_BOOT_TIME_OFF: usize = 0;
+// mess_lsys_krn_sys_stime (for do_stime) — a request field, so it sits past the
+// kernel-call header:
+//   offset 8: boot_time (time_t / i64)
+const STIME_BOOT_TIME_OFF: usize = 8;
 
 // mess_lsys_krn_sys_settime (for do_settime). kbuf[0..4] = call number,
 // kbuf[4..8] = source endpoint (set by sys_kernel_call_handler), so the
@@ -6036,6 +6047,102 @@ mod tests {
     }
 
     #[test]
+    fn test_kernel_call_request_offsets_are_past_the_header() {
+        // `sys_kernel_call_handler` overwrites the caller's first 8 bytes with
+        // [call number@0, source@4] before the handler runs, so every *request*
+        // field has to be at 8 or later. C's structs are union-relative and start
+        // at 0, which is how these seven read the call number for as long as they
+        // did (PORTING_PLAN finding 14). Pinned numerically rather than through the
+        // constants they guard, so a regression to a union offset fails here.
+        assert_eq!(ABORT_HOW_OFF, 8);
+        assert_eq!(STATECTL_REQUEST_OFF, 8);
+        assert_eq!(STIME_BOOT_TIME_OFF, 8);
+        assert_eq!(MCONTEXT_ENDPT_OFF, 8);
+        assert_eq!(MCONTEXT_CTX_PTR_OFF, 16);
+        assert_eq!(VDEVIO_REQUEST_OFF, 8);
+        assert_eq!(VDEVIO_VEC_SIZE_OFF, 12);
+        assert_eq!(VDEVIO_VEC_ADDR_OFF, 16);
+        assert_eq!(SDEVIO_REQUEST_OFF, 8);
+        assert_eq!(SDEVIO_PORT_OFF, 16);
+        assert_eq!(SDEVIO_VEC_ENDPT_OFF, 24);
+        assert_eq!(SDEVIO_VEC_ADDR_OFF, 32);
+        assert_eq!(SDEVIO_VEC_SIZE_OFF, 40);
+        assert_eq!(SDEVIO_OFFSET_OFF, 48);
+        assert_eq!(UMAP_SRC_ENDPT_OFF, 8);
+        assert_eq!(UMAP_SEGMENT_OFF, 12);
+        assert_eq!(UMAP_SRC_ADDR_OFF, 16);
+        assert_eq!(UMAP_DST_ENDPT_OFF, 24);
+        assert_eq!(UMAP_NR_BYTES_OFF, 28);
+    }
+
+    #[test]
+    fn test_statectl_reads_the_request_not_the_call_number() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+
+            // The request at the message offset (8): CLEAR_IPC_REFS is accepted.
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg[0..4].copy_from_slice(&55i32.to_ne_bytes()); // SYS_STATECTL
+            msg[8..12].copy_from_slice(&1i32.to_ne_bytes());
+            assert_eq!(do_statectl_handler(rp, &mut msg), OK);
+
+            // The same value only where the call number lives is not the request.
+            let mut header_only = [0u8; MESSAGE_SIZE];
+            header_only[0..4].copy_from_slice(&1i32.to_ne_bytes());
+            assert_eq!(
+                do_statectl_handler(rp, &mut header_only),
+                crate::ipc::EFAULT
+            );
+        }
+    }
+
+    #[test]
+    fn test_stime_reads_boot_time_not_the_call_number() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let before = crate::clock::get_boottime();
+
+            // boot_time at the message offset (8) is taken.
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg[0..4].copy_from_slice(&39i32.to_ne_bytes()); // SYS_STIME
+            msg[8..16].copy_from_slice(&1_700_000_000i64.to_ne_bytes());
+            assert_eq!(do_stime_handler(rp, &mut msg), OK);
+            assert_eq!(crate::clock::get_boottime(), 1_700_000_000);
+
+            // A value only in the header is not boot time: offset 8 reads 0, so the
+            // call number (39) must not appear as the boot time.
+            let mut header_only = [0u8; MESSAGE_SIZE];
+            header_only[0..4].copy_from_slice(&39i32.to_ne_bytes());
+            assert_eq!(do_stime_handler(rp, &mut header_only), OK);
+            assert_eq!(crate::clock::get_boottime(), 0);
+
+            crate::clock::set_boottime(before);
+        }
+    }
+
+    #[test]
+    fn test_getmcontext_reads_endpt_not_the_call_number() {
+        unsafe {
+            proc_init();
+            let caller = crate::table::proc_addr(0);
+
+            // Garbage at the message offset (8) is a bad endpoint: EINVAL. With the
+            // constant at C's union offset 0 the handler read the header instead,
+            // where 0 is a *kernel task* slot and the answer was EPERM — so this
+            // assertion distinguishes the two offsets rather than restating one.
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg[8..12].copy_from_slice(&99999i32.to_ne_bytes());
+            assert_eq!(
+                do_getmcontext_handler(caller, &mut msg),
+                crate::ipc::EINVAL,
+                "endpt at offset 8 must be the field that is read"
+            );
+        }
+    }
+
+    #[test]
     fn test_do_getksig_reply_contract() {
         unsafe {
             init_signal_test_env();
@@ -6625,7 +6732,8 @@ mod tests {
             proc_init();
             let rp = crate::table::proc_addr(0);
             let mut msg = [0u8; MESSAGE_SIZE];
-            msg_write_i32(&mut msg, UMAP_SRC_ENDPT_OFF, 99999);
+            // `src_endpt` at the message offset (8), not C's union offset (0).
+            msg[8..12].copy_from_slice(&99999i32.to_ne_bytes());
             let result = do_umap_handler(rp, &mut msg);
             assert_eq!(
                 result,
@@ -6641,7 +6749,7 @@ mod tests {
             proc_init();
             let rp = crate::table::proc_addr(0);
             let mut msg = [0u8; MESSAGE_SIZE];
-            msg_write_i32(&mut msg, UMAP_SRC_ENDPT_OFF, SELF);
+            msg[8..12].copy_from_slice(&SELF.to_ne_bytes());
             let result = do_umap_handler(rp, &mut msg);
             // Delegates to do_umap_remote -> vm_lookup with zero CR3 -> returns error
             assert!(result != OK, "should fail with no CR3");
@@ -7021,10 +7129,34 @@ mod tests {
             let rp = crate::table::proc_addr(0);
             let mut msg = [0u8; MESSAGE_SIZE];
             let req = arch_common::com::DIO_INPUT | arch_common::com::DIO_BYTE;
-            msg_write_i32(&mut msg, VDEVIO_REQUEST_OFF, req as i32);
-            msg_write_i32(&mut msg, VDEVIO_VEC_SIZE_OFF, -1);
+            // Both at message offsets: request@8, vec_size@12.
+            msg[8..12].copy_from_slice(&(req as i32).to_ne_bytes());
+            msg[12..16].copy_from_slice(&(-1i32).to_ne_bytes());
             let result = do_vdevio_handler(rp, &mut msg);
             assert_eq!(result, crate::ipc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_vdevio_reads_the_request_not_the_call_number() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            // A negative vec_size at the *message* offset is the request; with
+            // `request` read from the header (the old bug) the direction bits came
+            // from the call number and this returned a different error.
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg[0..4].copy_from_slice(&23i32.to_ne_bytes()); // SYS_VDEVIO
+            msg[8..12].copy_from_slice(&(arch_common::com::DIO_INPUT as i32).to_ne_bytes());
+            msg[12..16].copy_from_slice(&(-1i32).to_ne_bytes());
+            assert_eq!(do_vdevio_handler(rp, &mut msg), crate::ipc::EINVAL);
+
+            // No request in the payload at all: still EINVAL (vec_size <= 0), and a
+            // request left in the header must not be mistaken for one.
+            let mut header_only = [0u8; MESSAGE_SIZE];
+            header_only[0..4].copy_from_slice(&(arch_common::com::DIO_INPUT as i32).to_ne_bytes());
+            header_only[12..16].copy_from_slice(&(-1i32).to_ne_bytes());
+            assert_eq!(do_vdevio_handler(rp, &mut header_only), crate::ipc::EINVAL);
         }
     }
 

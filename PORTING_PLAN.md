@@ -1044,16 +1044,24 @@ Phase 5 Status below.
 
 **Phase 5 Status**: ALL syscalls implemented with real handlers.
 All ~50 syscall handlers are live (SYS_FORK through SYS_SPROF).
-299+ kernel tests, workspace clippy clean. No remaining `todo!()` stubs
-or deferred syscalls — every handler (do_fork, do_exec, do_clear, do_exit,
-do_copy, do_umap, do_umap_remote, do_vumap, do_memset, do_abort,
-do_getinfo, do_privctl, do_irqctl, do_devio, do_vdevio, do_sdevio,
-do_kill, do_getksig, do_endksig, do_sigsend, do_sigreturn, do_times,
-do_setalarm, do_vtimer, do_runctl, do_statectl, do_schedule, do_schedctl,
-do_setgrant, do_trace, do_safecopy_from/to/vsafecopy, do_safememset,
-do_vmctl, do_settime, do_stime, do_getmcontext, do_setmcontext,
-do_diagctl, do_cprofile, do_profbuf, do_sprofile, do_vircopy,
-do_physcopy) has a real implementation.
+299+ kernel tests, workspace clippy clean. No remaining `todo!()` stubs in the
+syscall handlers or in any arch HAL, and no deferred syscalls — every handler
+(do_fork, do_exec, do_clear, do_exit, do_copy, do_umap, do_umap_remote,
+do_vumap, do_memset, do_abort, do_getinfo, do_privctl, do_irqctl, do_devio,
+do_vdevio, do_sdevio, do_kill, do_getksig, do_endksig, do_sigsend,
+do_sigreturn, do_times, do_setalarm, do_vtimer, do_runctl, do_statectl,
+do_schedule, do_schedctl, do_setgrant, do_trace,
+do_safecopy_from/to/vsafecopy, do_safememset, do_vmctl, do_settime, do_stime,
+do_getmcontext, do_setmcontext, do_diagctl, do_cprofile, do_profbuf,
+do_sprofile, do_vircopy, do_physcopy) has a real implementation.
+
+The `todo!()`s that do remain in `crates/` are all documented deferrals with a
+tracker entry, not gaps in a live path: SMP (`kernel/src/smp.rs`),
+`mmc` (12.17) and `vbfs` (11e.13, external SFFS/VBOX libraries) — plus two in
+`servers/src/vfs/dmap.rs` marked unused. The arch HALs held five more until
+2026-09, all in `arch-riscv64` (`KNOWN_ISSUES.md` `[riscv]` 5); aarch64's
+`mcontext` pair is now implemented too (`[aarch64]` 8), having silently returned
+a zeroed context before.
 
 ---
 
@@ -4031,27 +4039,35 @@ trait Driver {
     `rs_up` then gets its label published to DS by RS's `do_up` (C's
     `publish_service`) and can publish and read back; the harness client reports
     `rs_up=0`, `publish=0`, `retrieve=0`, `value=0x2a`.
-  - **DS answers the init request, and RS waits for the answer.** `do_init_ready`
-    (C's `request.c`) consumes DS's `RS_INIT` result: the slot RS put into
-    `RS_INITIALIZING` when it sent the request moves to `RS_ACTIVE`, a reply from a
-    slot RS never asked to initialise is `EINVAL`, and a service reporting a
-    *failed* init is treated as crashed and gets no reply (`EDONTREPLY`, which the
-    loop honours by staying silent). Both guards are pinned: the host tests drive
-    each branch, and the harness has the client — a process RS *does* know, since it
-    announced itself — claim to be initialised and get `EINVAL`, because being known
-    is not the same as having been asked. DS sends its answer through
-    `minix_util::rs::rs_init_ready` once it has copied the rproctab — the table is
-    consumed *before* DS reports ready, because the reverse order would let RS
-    believe DS is serving while it has no labels. RS blocks for the answer during
-    its own init rather than finding it in its main loop, as C's
-    `catch_boot_init_ready` does; that is not only tidiness — see finding 21, where
-    leaving the answer to the loop let a client request be dispatched to DS while
-    DS was still inside the `SENDREC` carrying its answer, and RS's next request to
-    DS was then refused by the kernel's deadlock detector.
-  - **What is still not here:** RS sends an `RS_INIT` request only to DS. C sends
-    one to every service it starts, so the runtime-start path needs a request per
-    service, and the services that never answer need the period/heartbeat and
-    restart machinery C pairs with `RS_INITIALIZING`.
+  - **DS and PM answer the init request, and RS waits for each answer.**
+    `do_init_ready` (C's `request.c`) consumes the service's `RS_INIT` result: the
+    slot RS put into `RS_INITIALIZING` when it sent the request moves to
+    `RS_ACTIVE`; a reply from a slot RS never asked to initialise is `EINVAL`; and a
+    service reporting a *failed* init is treated as crashed and gets no reply
+    (`EDONTREPLY`, which the loop honours by staying silent). Every branch is pinned:
+    the host tests drive each one, and the harness has the client — a process RS
+    *does* know, since it announced itself — claim to be initialised and get
+    `EINVAL`, because being known is not the same as having been asked.
+  - **Who RS asks is a table, and it stands in for C's `SF_SYNCH_BOOT`.** C waits
+    only for services whose boot-image privilege flags say `SF_SYNCH_BOOT`, and
+    counts the rest as `nr_uncaught_init_srvs` for the main loop to pick up — and in
+    MINIX 3.3.0's reference tree *nothing sets that flag*, so C's boot takes the
+    deferred path for every service. This port takes the synchronous one for the
+    services it starts, for two reasons: the harness spawns clients alongside the
+    servers, which is exactly the window finding 21 describes, and RS has no
+    heartbeat or period machinery yet to notice a service that never answers. The
+    `asked` table in `rs_server_main` is that gate — a service belongs in it once
+    its main loop answers `RS_INIT`, which is where the request arrives. DS answers
+    after copying the rproctab (so the table is in place before DS reports ready)
+    and PM answers from its own loop. A service that talks to RS *before* answering
+    is not a shape the wait can absorb: RS panics rather than mistaking that message
+    for the answer, which is why the table grows a service at a time with the boot
+    gates as the check.
+  - **What is still not here:** the `asked` table holds DS and PM. The other boot
+    services are marked active when their slot is created because nothing asks them
+    yet, so extending the table means adding the loop branch to that server as well;
+    and a service that never answers then needs the period/heartbeat and restart
+    machinery C pairs with `RS_INITIALIZING`.
   - **Transport differs from C; the grant does not.** C passes `rproctab_gid` as
     SEF init info at *spawn* time and this port has no channel for that, so RS
     sends the `RS_INIT` message after both processes exist. The send itself is a
@@ -6368,13 +6384,42 @@ a bogus endpoint or a write to nowhere reachable, not as a crash.
 
 `SYS_MEMSET`, `SYS_SAFEMEMSET` and `SYS_VUMAP` were shifted past the header as
 part of closing the seam worklist, because their conversions could not otherwise
-be exercised. The convention is pinned by two host tests that read through
-literal offsets rather than the constants they guard; the third,
-`do_memset`, is pinned by the wasm harness instead (a regressed `count` would make
-a host test overrun). The remaining handlers are the same bug and want one sweep;
-none of them is on a path this port has exercised — the `SIO` family answers
-`ENOSYS` before it matters (`has_port_io()` is false), and `MCONTEXT`/`UMAP`/
-`STATECTL` are unreached.
+be exercised. **The rest of the sweep is done (2026-09):** `do_vdevio`,
+`do_sdevio`, `do_umap`/`do_umap_remote`, `do_getmcontext`/`do_setmcontext`,
+`do_statectl`, `do_stime` and `do_abort` now address their request through the
+message offset (C's union offset + 8) as well. The rule the file now follows is
+stated in the comments: a *request* field lives at 8 or later, because
+`sys_kernel_call_handler` puts the call number at 0 and the source at 4 before the
+handler runs; C's `mess_*` structs are union-relative and their union opens at
+message offset 8, so the port's constant is C's offset plus eight.
+
+Two families were already consistent and were left alone, which is worth knowing
+before "fixing" them: `do_diagctl` reads its code at 8 by hand (with a comment
+saying why) and its data at 12/16, matching its caller `diag_putchar`'s own
+layout; and the `SIGCALLS_*` family (`kill`, `sigsend`, `sigreturn`, `getksig`)
+uses a layout of its own (0/16/20/24) that the live signal paths on all three
+arches exercise.
+
+The *reply* side is deliberately not uniform, and a caller has to match its own
+handler rather than C: `fork`'s reply is at 8 (`minix_rt::sys_fork` reads it
+there), `whoami`'s is written at 0 and read at 0 by its caller
+(`minix_util::rs::self_endpoint` is the live example), `times` writes its fields
+at 0 as well but has no caller in the tree to confirm the other end, and `umap`'s
+`dst_addr` now sits at 8 — where C puts it, and the same offset as the request's
+`src_endpt`, because C's reply struct opens with it too. A C-side caller reading
+a port reply that is written at 0 would see the header instead.
+
+All of these calls are unreached in this port, which is why none of it showed up:
+no code calls kernel calls 14 (`umap`), 22/23 (`sdevio`/`vdevio`), 27 (`abort`),
+39 (`stime`), 50/51 (`getmc`/`setmcontext`) or 55 (`statectl`). The offset bug is
+therefore pinned by tests rather than by behaviour — a constants test that reads
+the literals rather than the constants they guard, and effect-level tests for
+`statectl`, `stime`, `vdevio` and `getmcontext` that fail on the old offsets
+(the `umap` pair were converted to literal offsets for the same reason).
+
+`do_safememset` sits behind `verify_grant` (a grant table, `s_grant_pa`,
+`s_phys_delta`), which this port has not exercised either, so its conversion is
+likewise unpinned end to end.
 
 One consequence is worth separating from the offset bug, because fixing the
 offsets does not remove it:
@@ -6514,14 +6559,16 @@ it. Fixed in `arch_common::ipc` (`ENOTREADY`/`EDEADSRCDST` added, `EDONTREPLY` a
 `ELOCKED` corrected, `ELOCKWILLBLOCK` removed), in `minix-std`, and in `rs.rs`,
 which now imports the constant instead of redefining it.
 
-**Not fixed, and recorded deliberately:** `kernel/src/ipc.rs` carries a third set
-— `ENOTREADY = -73`, `ELOCKED = -132`, `EDEADSRCDST = -199` — which are Linux
-errno values (`EDESTADDRREQ`, `ENOTSUP`-adjacent, `ENETUNREACH`-adjacent) rather
-than MINIX's. They are what `mini_send`/`mini_receive` *return*, so correcting
-them changes every IPC failure a server can observe; the host tests name the
-constants rather than pinning values, so the change is mechanical but not small,
-and it deserves its own pass. That this work had to read `-132` out of a syscall
-trace to identify it is the argument for doing that pass.
+**Fixed in `kernel/src/ipc.rs` too.** That file carried a third set —
+`ENOTREADY = -73`, `ELOCKED = -132`, `EDEADSRCDST = -199` — which are Linux values
+(`EDESTADDRREQ` and friends), not `errno.h`'s `-201`/`-208`/`-202`. They are what
+`mini_send`/`mini_receive` *return*, so the reason to fix them is not the port's
+own code (nothing outside the kernel compares them, and the host tests name them
+rather than pinning values) but the C that will be ported next: `sef_cb_lu_prepare`
+returning `ENOTREADY` and its caller comparing it is the standard live-update
+shape, and a C value compared against a Linux one takes the wrong branch silently.
+`test_minix_ipc_error_codes_match_c` now pins all four by value, so the two
+families cannot drift apart again.
 
 **21. An init reply left to the main loop can be overtaken by a request, and the
 kernel refuses the result with `ELOCKED`.** The first version of DS's

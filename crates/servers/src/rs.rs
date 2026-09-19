@@ -916,77 +916,89 @@ pub fn rs_server_main() {
             panic!("rs: SYS_SETGRANT failed");
         }
 
-        // DS is the one service RS sends an init request to, so it is the one whose
-        // slot waits for a reply — C's `init_service` marks the slot initializing
-        // immediately before the request. The services above are active because this
-        // port asks nothing of them.
-        let ds_slot = match unsafe { lookup_slot_by_endpoint(arch_common::com::DS_PROC_NR) } {
-            Some(slot) => slot,
-            None => panic!("rs: ds is not registered, so it cannot be asked to initialize"),
-        };
-        if let Err(e) = unsafe { mark_initializing(ds_slot) } {
-            panic!("rs: cannot put ds into RS_INITIALIZING: {e}");
-        }
+        // Ask each service this port starts *and* whose main loop answers an init
+        // request, then wait for the answer — C's `init_service` followed by
+        // `catch_boot_init_ready`. C gates the wait on `SF_SYNCH_BOOT` in the boot
+        // image's privilege flags; this port has no boot-image flags wired, so this
+        // table is that gate's stand-in: a service belongs here once its loop answers
+        // `RS_INIT`, and RS then blocks for it. The other boot services are marked
+        // active at their slot's creation because nothing asks them yet.
+        //
+        // The `rproctab` grant travels with every request (C's `init_service` sets
+        // `rproctab_gid` unconditionally) and only DS reads it.
+        let asked: &[i32] = &[arch_common::com::DS_PROC_NR, arch_common::com::PM_PROC_NR];
+        for &ep in asked {
+            let slot = match unsafe { lookup_slot_by_endpoint(ep) } {
+                Some(slot) => slot,
+                None => panic!("rs: endpoint {ep} cannot be told to initialize"),
+            };
+            if let Err(e) = unsafe { mark_initializing(slot) } {
+                panic!("rs: cannot put endpoint {ep} into RS_INITIALIZING: {e}");
+            }
 
-        // A blocking send, not `asynsend` as in C: the destination is a boot
-        // service that is already in the process table, so this is a rendezvous
-        // that completes as soon as DS reaches its first receive — which makes it
-        // independent of which of the two is scheduled first.
-        let mut init = rproctab_init_msg(gid);
-        let sent = unsafe {
-            minix_rt::syscall2(
-                minix_rt::SEND_CALL,
-                arch_common::com::DS_PROC_NR as u64,
-                &mut init as *mut Message as u64,
-            )
-        };
-        if sent < 0 {
-            panic!("rs: RS_INIT to DS failed: {sent}");
-        }
+            // A blocking send, not `asynsend` as in C: the destination is already
+            // in the process table, so this is a rendezvous that completes as soon
+            // as it reaches its first receive — which makes it independent of which
+            // of the two is scheduled first.
+            let mut init = rproctab_init_msg(gid);
+            let sent = unsafe {
+                minix_rt::syscall2(
+                    minix_rt::SEND_CALL,
+                    ep as u64,
+                    &mut init as *mut Message as u64,
+                )
+            };
+            if sent < 0 {
+                panic!("rs: RS_INIT to endpoint {ep} failed: {sent}");
+            }
 
-        // Wait for DS's answer here rather than letting it land in the loop, as
-        // C's `catch_boot_init_ready` does: RS has not finished initialising until
-        // the service it asked has, and blocking for the answer keeps a client's
-        // first request from interleaving with the handshake — DS is half-way
-        // through its own initiation while its reply is outstanding, and a new
-        // request arriving in that window would be sent to a service that is
-        // still waiting to hear back from RS.
-        let mut reply = Message {
-            m_source: 0,
-            m_type: 0,
-            // SAFETY: the payload is a union of plain integers and byte arrays.
-            m_payload: unsafe { core::mem::zeroed() },
-        };
-        let got = unsafe {
-            minix_rt::syscall2(
-                RECEIVE_CALL,
-                arch_common::com::DS_PROC_NR as u64,
-                &mut reply as *mut Message as u64,
-            )
-        };
-        if got < 0 {
-            panic!("rs: waiting for ds's init reply failed: {got}");
-        }
-        if reply.m_type != RS_INIT {
-            panic!("rs: unexpected reply from ds: {}", reply.m_type);
-        }
-        let result = unsafe { reply.m_payload.m2.m2i1 };
-        if result != OK {
-            // C panics in `catch_boot_init_ready` for the same reason: a boot
-            // service that cannot initialise leaves the system without whatever it
-            // was going to provide.
-            panic!("rs: ds failed to initialize: {result}");
-        }
+            // Wait for the answer here rather than letting it land in the loop, as
+            // C's `catch_boot_init_ready` does: RS has not finished initialising
+            // until the service it asked has, and blocking for the answer keeps a
+            // client's first request from interleaving with the handshake — the
+            // service is half-way through its own initiation while its answer is
+            // outstanding, and a new request arriving in that window would go to a
+            // service that is still waiting to hear back from RS (finding 21).
+            //
+            // A message from this endpoint that is *not* an init reply is a panic
+            // rather than a `continue`: it means the service talked to RS before
+            // answering, which is not a shape this wait can absorb.
+            let mut reply = Message {
+                m_source: 0,
+                m_type: 0,
+                // SAFETY: the payload is a union of plain integers and byte arrays.
+                m_payload: unsafe { core::mem::zeroed() },
+            };
+            let got = unsafe {
+                minix_rt::syscall2(RECEIVE_CALL, ep as u64, &mut reply as *mut Message as u64)
+            };
+            if got < 0 {
+                panic!("rs: waiting for endpoint {ep}'s init reply failed: {got}");
+            }
+            if reply.m_type != RS_INIT {
+                panic!(
+                    "rs: unexpected message from endpoint {ep}: {}",
+                    reply.m_type
+                );
+            }
+            let result = unsafe { reply.m_payload.m2.m2i1 };
+            if result != OK {
+                // C panics in `catch_boot_init_ready` for the same reason: a boot
+                // service that cannot initialise leaves the system without whatever
+                // it was going to provide.
+                panic!("rs: endpoint {ep} failed to initialize: {result}");
+            }
 
-        // Unblock DS, then record the state change through the same handler the
-        // loop uses, so the two paths cannot diverge. C's order too: "Reply and
-        // unblock the service before doing anything else."
-        reply.m_type = OK;
-        unsafe {
-            minix_rt::syscall2(SENDNB_CALL, got as u64, &mut reply as *mut Message as u64);
-        }
-        if unsafe { do_init_ready(&reply) } != OK {
-            panic!("rs: ds's init reply was not accepted");
+            // Unblock the service, then record the state change through the same
+            // handler the loop uses, so the two paths cannot diverge. C's order too:
+            // "Reply and unblock the service before doing anything else."
+            reply.m_type = OK;
+            unsafe {
+                minix_rt::syscall2(SENDNB_CALL, got as u64, &mut reply as *mut Message as u64);
+            }
+            if unsafe { do_init_ready(&reply) } != OK {
+                panic!("rs: endpoint {ep}'s init reply was not accepted");
+            }
         }
 
         loop {

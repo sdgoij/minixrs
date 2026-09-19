@@ -99,22 +99,20 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    on x86. (OPEN_ITEMS Phase F2)
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (FILEMMAP §6)
-11. **`EDONTREPLY` and its neighbours disagreed with C in three places —
-    partially FIXED (2026-09).** `sys/sys/errno.h` has `ENOTREADY -201`,
-    `EDEADSRCDST -202`, `EDONTREPLY -203`, `ELOCKED -208`, but
-    `arch-common::ipc` had `EDONTREPLY -201` (C's `ENOTREADY`), `ELOCKED -202`
-    (C's `EDEADSRCDST`) and an `ELOCKWILLBLOCK -203` that C does not define;
-    `minix-std` and `servers/rs.rs` repeated the `-201`. It was latent because
-    nothing returned the pseudo-code until `do_init_ready` (the init-complete
-    reply) became its first user — and a server returning its own crate's
-    `EDONTREPLY` would have returned `ENOTREADY` instead. Fixed in
-    `arch-common`, `minix-std` and `rs.rs`; **`kernel/src/ipc.rs` still has its
-    own Linux-valued trio** (`ENOTREADY -73`, `ELOCKED -132`,
-    `EDEADSRCDST -199`) which `mini_send`/`mini_receive` return, so every IPC
-    failure a server observes carries a number C would not produce. Those are
-    a separate pass: the host tests name the constants rather than pin values,
-    so it is mechanical, but it is real behaviour on every arch.
-    (`PORTING_PLAN.md` finding 20)
+11. **`EDONTREPLY` and its neighbours disagreed with C in three places — FIXED
+    (2026-09).** `sys/sys/errno.h` has `ENOTREADY -201`, `EDEADSRCDST -202`,
+    `EDONTREPLY -203`, `ELOCKED -208`, but `arch-common::ipc` had
+    `EDONTREPLY -201` (C's `ENOTREADY`), `ELOCKED -202` (C's `EDEADSRCDST`) and an
+    `ELOCKWILLBLOCK -203` that C does not define; `minix-std` and
+    `servers/rs.rs` repeated the `-201`, and `kernel/src/ipc.rs` returned a
+    third, Linux-valued trio (`-73`/`-132`/`-199`). It was latent because
+    nothing returned the pseudo-code until the init-complete reply
+    (`do_init_ready`) became its first user, and because nothing compared the
+    kernel's values — but ported C compares them *by value*
+    (`sef_cb_lu_prepare` returning `ENOTREADY` and its caller checking it is the
+    standard live-update shape). All four definitions now carry C's values, with
+    `test_minix_ipc_error_codes_match_c` pinning them. (`PORTING_PLAN.md`
+    finding 20)
 
 ---
 
@@ -187,6 +185,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    guest physical memory. The `mount_devman` null guard in
    `crates/servers/src/vfs/main.rs` keeps a future mount failure from turning
    into the VM livelock described here.
+5. **The register file has two byte layouts, and the HAL named the wrong one
+   — FIXED (2026-09).** `p_reg` is *not* the trap frame. The trap entry saves
+   x0..x31 at 0..248 with `sepc` at 256, `sstatus` at 264 and `scause` at 272
+   (`trap_asm.rs`, a 296-byte frame); `p_reg` keeps `sepc` in x0's slot, x1..x30
+   at 8..240, and `sstatus` in x31's slot, with the real `t6` in `Proc::p_t6` —
+   `t6` need not survive a trap, because `switch_to_user` uses the register and
+   the psABI lets a syscall clobber a caller-saved temp. The post-syscall hook
+   (`kernel-boot/src/riscv64.rs`) translates between them and documents both.
+   Three HAL functions were written against the wrong one or not at all:
+   `write_frame_ip` was `todo!()` (a panic the first time sepc had to be moved),
+   the `mcontext` pair was `todo!()`, and `bkl_lock`/`bkl_unlock` were `todo!()`.
+   `Mcontext` gains `from_frame`/`write_into_frame` and the conversion now lives
+   there, where the host can test it (`hal` is `target_arch`-gated, so anything
+   tested in it never runs — see the testing notes); `bkl` is an empty no-op,
+   which is what `BKL_LOCK` is on every other arch while SMP is off
+   (`arch-x86_64/src/spinlock.rs` compiles the primitives out).
 
 ---
 
@@ -250,6 +264,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    in both layouts, because by then the loader has moved the free cursor). Any
    change that grows the aarch64 image is a candidate to re-arm a latent overlap
    of this shape — see `PORTING_PLAN.md` finding 19.
+8. **`trapframe_to_mcontext` returned a zeroed context — FIXED (2026-09).**
+   The pair was `Mcontext::default()` and an empty function, so
+   `SYS_GETMCONTEXT` would have reported an all-zero register file rather than
+   failing. AArch64 has a single frame layout — `p_reg` *is* the exception frame
+   (x0..x30 at 0..240, `SP_EL0` at 248, `ELR_EL1` at 256, `SPSR_EL1` at 264;
+   `set_initial_regs`, `switch_to_user` and the post-syscall hook all agree) — so
+   the conversion is a straight register-file copy plus those three words, now in
+   `Mcontext::from_frame`/`write_into_frame` where the host can test it.
+   `tpidr_el0` is not in the frame at all: the kernel keeps it in `Proc::p_tls`
+   and reloads it on every switch.
 
 ---
 
@@ -258,6 +282,14 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 - `exec_loop_mem.py` now takes an `ARCH` argument (x86 | riscv64 | aarch64)
   with per-arch QEMU invocation; aarch64/riscv64 must not use
   `-monitor none` (it drops UART input bytes there).
+- **Tests in `arch-riscv64`/`arch-aarch64`'s `hal.rs` never run.** Their `lib.rs`
+  gates `pub mod hal` on `target_arch`, and the host is x86_64, so those modules
+  are not compiled by `cargo test` at all — and the QEMU builds do not build
+  tests. x86_64's `hal` *is* host-compiled, which is why its
+  `trapframe_mcontext_roundtrip_preserves_regs` does run and hides the asymmetry.
+  Put anything that must be verified in a portable module (`frame.rs`,
+  `mcontext.rs`, `psl.rs`, …) and let `hal` delegate to it; verify the target-only
+  code by running the arch's QEMU gate.
 - `/bin/forktest` (userland bin, `crates/userland/src/bin/forktest.rs`) is
   the fork + COW isolation test: a 4 KiB writable `.data` page is filled,
   forked, and both sides write disjoint patterns; the parent verifies the

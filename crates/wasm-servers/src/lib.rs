@@ -30,10 +30,11 @@
 //! second client here is the control — same key, same protocol, no announcement —
 //! so the refusal an unlabelled publisher gets stays measured rather than assumed.
 //!
-//! That handshake closes in both directions: DS answers RS's init request with
-//! `rs_init_ready`, and `minix_rs_is_active` lets the host ask *RS* whether it
-//! consumed the answer. The effect of the reply is a flag inside RS rather than a
-//! copy, so no amount of trace reading can show it.
+//! That handshake closes in both directions, for the two services RS asks: DS
+//! answers once it has copied the rproctab and PM answers from its own loop, and
+//! `minix_rs_is_active` lets the host ask *RS* whether it consumed each answer. The
+//! effect of an answer is a flag inside RS rather than a copy, so no amount of trace
+//! reading can show it.
 
 #![no_std]
 #![no_main]

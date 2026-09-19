@@ -501,13 +501,27 @@ pub unsafe fn arch_proc_init(
     }
 }
 
-/// Convert a trap frame to a machine context (not implemented).
-pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 288]) -> crate::mcontext::Mcontext {
-    Mcontext::default()
+/// Convert a trap frame to a machine context (for signal handling).
+///
+/// The layout knowledge — and its tests — live in `crate::mcontext`, which is
+/// compiled for the host; `hal` is target-gated, so anything tested here would never
+/// run.
+///
+/// # Safety
+///
+/// `frame` must be a valid trap frame.
+pub unsafe fn trapframe_to_mcontext(frame: &[u8; 288]) -> crate::mcontext::Mcontext {
+    crate::mcontext::Mcontext::from_frame(frame)
 }
 
-/// Restore a trap frame from a machine context (not implemented).
-pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 288], _mc: &crate::mcontext::Mcontext) {}
+/// Restore a trap frame from a machine context.
+///
+/// # Safety
+///
+/// `frame` must be a valid, writable trap frame.
+pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 288], mc: &crate::mcontext::Mcontext) {
+    mc.write_into_frame(frame);
+}
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u64 = 12;

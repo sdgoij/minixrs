@@ -41,9 +41,15 @@ pub const ESRCH: i32 = -3;
 pub const EINTR: i32 = -4;
 pub const E2BIG: i32 = -7;
 pub const ENOMSG: i32 = -42;
-pub const ENOTREADY: i32 = -73;
-pub const ELOCKED: i32 = -132;
-pub const EDEADSRCDST: i32 = -199;
+// The MINIX-specific IPC codes, from `.refs/minix-3.3.0/sys/sys/errno.h`
+// (`_SIGN n` is `-n`). They were Linux values here (`-73`/`-132`/`-199`), which
+// nothing noticed while the only consumers were comparisons by name — but C code
+// this port has yet to port compares them *by value* (`sef_cb_lu_prepare`
+// returning `ENOTREADY` is the standard live-update shape), so a mismatch would
+// silently take the wrong branch.
+pub const ENOTREADY: i32 = -201;
+pub const EDEADSRCDST: i32 = -202;
+pub const ELOCKED: i32 = -208;
 pub const ENOSYS: i32 = -72;
 pub const EINVAL: i32 = -22;
 
@@ -1837,6 +1843,16 @@ mod tests {
                 (*src).p_endpoint
             );
         }
+    }
+
+    #[test]
+    fn test_minix_ipc_error_codes_match_c() {
+        // Pinned by value, not by name: these are what a blocked or refused IPC
+        // hands back to userland, and ported C compares them numerically.
+        assert_eq!(ENOTREADY, -201);
+        assert_eq!(EDEADSRCDST, -202);
+        assert_eq!(crate::system::EDONTREPLY, -203);
+        assert_eq!(ELOCKED, -208);
     }
 
     #[test]

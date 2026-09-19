@@ -394,34 +394,62 @@ check(
 // That round trip is the chain starting to move, and it is visible only because
 // the notification reached PM's own memory.
 const pm = procs.find((p) => p.spec.label === 'pm');
+// The trace with consecutive repeats collapsed: a syscall that blocks is
+// re-entered when it resumes, so its entry appears once per block and only the
+// sequence of *distinct* steps is stable. PM's steps are the notification, the
+// kernel call it answers with, the receive that waits for real work, the answer
+// to RS's init request, and back to waiting.
+const distinctSteps = (p) =>
+  p.trace
+    .map((t) => [t.nr, t.a0])
+    .filter((c, i, a) => i === 0 || c[0] !== a[i - 1][0] || c[1] !== a[i - 1][1]);
 check(
-  'PM consumed the boot notification and returned to receiving',
-  JSON.stringify(pm.trace.map((t) => [t.nr, t.a0])) ===
+  'PM consumed the boot notification, answered RS, and returned to receiving',
+  JSON.stringify(distinctSteps(pm)) ===
     JSON.stringify([
       [RECEIVE, ANY],
       [KERNEL_CALL, GETKSIG],
       [RECEIVE, ANY],
+      [SENDREC, rs.spec.endpoint],
+      [RECEIVE, ANY],
     ]),
   pm.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
 );
-// PM's three copies, taken by *who they involve* rather than by position: RS's
-// init now asks the kernel for two copies of its own (the `SYS_SETGRANT` message
-// and its reply) before PM runs, so a prefix of the log is no longer PM's. The
-// middle one is the point: the notification arriving, PM's `SYS_GETKSIG` message
-// being read *out of PM's memory*, and the reply going back. Before the
-// kernel-call fix the middle copy did not exist — the kernel read its own memory
-// in place of PM's message and dispatched on that.
+// PM's copies, taken by *who they involve* rather than by position: RS's init now
+// asks the kernel for two copies of its own (the `SYS_SETGRANT` message and its
+// reply) before PM runs, so a prefix of the log is no longer PM's. The first three
+// are PM's own exchange with the kernel: the notification arriving, PM's
+// `SYS_GETKSIG` message being read *out of PM's memory*, and the reply going back.
+// Before the kernel-call fix the middle copy did not exist — the kernel read its
+// own memory in place of PM's message and dispatched on that.
 const pmCopies = copyLog.filter((c) => c.srcProc === 0 || c.dstProc === 0);
+const pmNotifyCopies = pmCopies.slice(0, 3);
 check(
   'the notification, the kernel-call message and its reply all crossed the seam',
-  pmCopies.length === 3 &&
+  pmNotifyCopies.length === 3 &&
     pmCopies.every((c) => c.result === 0) &&
-    pmCopies[0].srcProc < 0 &&
-    pmCopies[0].dstProc === 0 &&
-    pmCopies[1].srcProc === 0 &&
-    pmCopies[1].dstProc < 0 &&
-    pmCopies[2].srcProc < 0 &&
-    pmCopies[2].dstProc === 0,
+    pmNotifyCopies[0].srcProc < 0 &&
+    pmNotifyCopies[0].dstProc === 0 &&
+    pmNotifyCopies[1].srcProc === 0 &&
+    pmNotifyCopies[1].dstProc < 0 &&
+    pmNotifyCopies[2].srcProc < 0 &&
+    pmNotifyCopies[2].dstProc === 0,
+  pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
+);
+// And the next three are the init handshake PM is now part of, which is what makes
+// it answer RS at all: RS's `RS_INIT` landing in PM's buffer, PM's answer on its way
+// out, and RS's reply to it.
+const pmInitCopies = pmCopies.slice(3);
+check(
+  "RS's init request, PM's answer and RS's reply all crossed the seam",
+  pmInitCopies.length === 3 &&
+    pmInitCopies.every((c) => c.result === 0 && c.bytes === 64) &&
+    pmInitCopies[0].srcProc < 0 &&
+    pmInitCopies[0].dstProc === 0 &&
+    pmInitCopies[1].srcProc === 0 &&
+    pmInitCopies[1].dstProc < 0 &&
+    pmInitCopies[2].srcProc < 0 &&
+    pmInitCopies[2].dstProc === 0,
   pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
 );
 
@@ -492,6 +520,22 @@ check(
   `minix_rs_is_active(${ds.spec.endpoint}) = ${dsActive}`
 );
 
+// The same handshake for the other service RS asks. PM answers in its main loop,
+// which is where the request arrives, so this also pins that a service can be
+// *asked* rather than assumed ready.
+const rsPmReply = rs.trace.filter((t) => t.nr === SENDNB && t.a0 === pm.spec.endpoint);
+check(
+  "RS answered PM's init-complete reply",
+  rsPmReply.length === 1,
+  rs.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
+);
+const pmActive = rs.inst.exports.minix_rs_is_active(pm.spec.endpoint);
+check(
+  'RS moved PM out of RS_INITIALIZING, so its reply was consumed',
+  pmActive === 1,
+  `minix_rs_is_active(${pm.spec.endpoint}) = ${pmActive}`
+);
+
 // The round trip this harness exists for, now that DS can name the client: RS
 // registered the label (`rs_up`), published it to DS, and DS accepted both the
 // publish and the read-back.
@@ -559,17 +603,18 @@ note(
     'grant table and handed DS the public process table, which DS copied out of ' +
     "RS's own instance and mapped into its label table; DS then answered that " +
     'request and RS consumed the answer, moving DS out of `RS_INITIALIZING`; PM ' +
+    'answered its own init request from its main loop and RS consumed that too; PM ' +
     'consumed the RS boot notification; and DS served a real client that announced ' +
     'itself with `rs_up`, reading the key out of the client\'s instance through the ' +
     'copy seam and addressing both replies back to the client. The control client — ' +
     'same protocol, same key, no announcement — is still refused, so the ' +
     'authorisation the label table provides is measured rather than assumed, and the ' +
     'announced client is refused when it claims to be initialised, because only RS ' +
-    'decides who has been asked. What is not here is a request for any service ' +
-    'other than DS: C sends every service it ' +
-    'starts an `RS_INIT` request, so the runtime-start path will need those slots to ' +
-    'wait for a reply too, and the period/heartbeat and restart machinery that goes ' +
-    'with a service that never answers.'
+    'decides who has been asked. What is not here is an init request for the other ' +
+    'services this port starts: the `asked` table in `rs_server_main` grows a ' +
+    'service at a time as its loop learns to answer, and the period/heartbeat and ' +
+    'restart machinery that goes with a service that never answers is what a ' +
+    'runtime-start path will still need.'
 );
 
 console.log('\nper-server syscall trace:');

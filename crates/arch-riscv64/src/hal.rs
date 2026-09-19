@@ -173,24 +173,39 @@ impl Default for Spinlock {
 
 /// Acquire the big kernel lock.
 ///
+/// A no-op on this port, as on every other one: MINIX's `BKL_LOCK` is
+/// `spinlock_lock(&big_kernel_lock)` and the spinlock primitives compile out when
+/// SMP is off (`arch-x86_64/src/spinlock.rs`: `SPINLOCKS_ACTIVE = CONFIG_SMP &&
+/// CONFIG_MAX_CPUS > 1`), which it is. Deliberately *not* implemented as a real
+/// lock: a caller that nests (C's `kmain` takes it once, interrupt paths take and
+/// release it) would deadlock against itself on a single hart.
+///
 /// # Safety
 ///
 /// Must be called in a context where the lock can be safely acquired.
-pub unsafe fn bkl_lock() {
-    todo!("RISC-V BKL; see Phase 19.5");
-}
+pub unsafe fn bkl_lock() {}
 
 /// Release the big kernel lock.
+///
+/// A no-op; see `bkl_lock`.
 ///
 /// # Safety
 ///
 /// Must be called by the hart that currently holds the lock.
-pub unsafe fn bkl_unlock() {
-    todo!("RISC-V BKL; see Phase 19.5");
-}
+pub unsafe fn bkl_unlock() {}
 
-// RISC-V TrapFrame layout (32 GPR + sepc + sstatus + scause = 35 × 8 = 280 bytes)
-// We use the same [u8; 256] layout as x86_64 for now. Expand to 288 if needed later.
+// The `p_reg` layout the helpers below address, in bytes:
+//
+//   [0..8)     sepc (x0's slot — x0 is never a GPR, so it is free)
+//   [8..248)   x1..x30, one register per 8 bytes
+//   [248..256) sstatus (x31's slot)
+//
+// x31 (`t6`) has no slot here: it need not survive a trap (`switch_to_user` uses the
+// register for its own purposes, and the psABI lets a syscall clobber a
+// caller-saved temp), so the kernel keeps it in `Proc::p_t6`. The *trap frame* is a
+// different layout — x0..x31 at 0..248 with sepc@256, sstatus@264, scause@272 — and
+// `kernel-boot/src/riscv64.rs`'s post-syscall hook translates between the two. See
+// `KNOWN_ISSUES.md` `[riscv]` 5 before changing an offset here.
 
 /// Read a u64 field from a trap frame at the given byte offset.
 ///
@@ -283,9 +298,11 @@ pub unsafe fn read_frame_ip(frame: &[u8; 256]) -> u64 {
 ///
 /// # Safety
 ///
-/// `frame` must be a valid trap frame.
-pub unsafe fn write_frame_ip(_frame: &mut [u8; 256], _ip: u64) {
-    todo!("RISC-V sepc write; see Phase 19.4");
+/// `frame` must be a valid, writable trap frame.
+pub unsafe fn write_frame_ip(frame: &mut [u8; 256], ip: u64) {
+    // RISC-V: sepc stored at offset 0 (x0's slot, never loaded as a GPR),
+    // mirroring `read_frame_ip`, `exec_init_regs` and `arch_proc_init`.
+    unsafe { write_frame_field(frame, 0, ip) }
 }
 
 /// Set initial register values in a trap frame for a new process.
@@ -448,20 +465,24 @@ pub unsafe fn arch_proc_init(
 
 /// Convert a trap frame to a machine context (for signal handling).
 ///
+/// The layout knowledge — and its tests — live in `crate::mcontext`, which is
+/// compiled for the host; `hal` is target-gated, so anything tested here would never
+/// run.
+///
 /// # Safety
 ///
-/// `_frame` must be a valid trap frame.
-pub unsafe fn trapframe_to_mcontext(_frame: &[u8; 256]) -> crate::mcontext::Mcontext {
-    todo!("RISC-V mcontext; see Phase 19.6");
+/// `frame` must be a valid trap frame.
+pub unsafe fn trapframe_to_mcontext(frame: &[u8; 256]) -> crate::mcontext::Mcontext {
+    crate::mcontext::Mcontext::from_frame(frame)
 }
 
 /// Restore a trap frame from a machine context.
 ///
 /// # Safety
 ///
-/// `_frame` must be a valid, writable trap frame.
-pub unsafe fn mcontext_to_trapframe(_frame: &mut [u8; 256], _mc: &crate::mcontext::Mcontext) {
-    todo!("RISC-V mcontext; see Phase 19.6");
+/// `frame` must be a valid, writable trap frame.
+pub unsafe fn mcontext_to_trapframe(frame: &mut [u8; 256], mc: &crate::mcontext::Mcontext) {
+    mc.write_into_frame(frame);
 }
 
 pub const PAGE_SIZE: u64 = 4096;
