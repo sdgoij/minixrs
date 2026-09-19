@@ -265,6 +265,38 @@ pub extern "C" fn minix_make_endpoint(slot: i32) -> i32 {
     kernel::table::make_endpoint(0, slot)
 }
 
+/// Which kind of process the kernel believes `slot` is.
+///
+/// Spawning a slot is not the same as that slot being the kind of process the host
+/// intended, and the difference lives in the privilege structure `proc_init`
+/// attaches: a server gets a slot of its own with `SYS_PROC`, an ordinary user gets
+/// the shared USER slot without it. Finding 9 is what it looks like when that table
+/// is never built at all — no process had privileges and nothing noticed, because
+/// the servers' init only touches their own statics. So the host asks.
+///
+/// * `2` — a system server: `SYS_PROC` set, a privilege slot of its own.
+/// * `1` — an ordinary user process, on the shared USER slot.
+/// * `0` — no privilege structure attached to that slot.
+/// * `-1` — not a slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_proc_kind(slot: i32) -> i32 {
+    unsafe {
+        let rp = proc_at(slot);
+        if rp.is_null() {
+            return -1;
+        }
+        let p = (*rp).p_priv;
+        if p.is_null() {
+            return 0;
+        }
+        if (*p).s_flags.contains(kernel::r#priv::PrivFlags::SYS_PROC) {
+            2
+        } else {
+            1
+        }
+    }
+}
+
 /// Deliberately panic, so the host can verify the diagnostic path end to end:
 /// the message and location reach the console, and the halt path traps.
 #[unsafe(no_mangle)]

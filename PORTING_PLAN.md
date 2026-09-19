@@ -6824,6 +6824,22 @@ join `asked` — RS now asks seven services (DS, PM, RAMDISK, VIRTIO_BLK, DEVMAN
 all through the one shared answer shape — and the x86_64 boot test exercises the new branch
 of check C, reporting `OK VFS reached MFS (readsuper sent; now past it)`.
 
+**Recurrence, found by M3d: the same anti-pattern in the wasm harness.** Adding INIT — the
+first user process — failed two checks that had nothing to do with INIT. One asserted PM's
+*entire* syscall trace as a fixed five-step sequence; the other read the copy log by offset,
+requiring `pmCopies.slice(3)` to be exactly the three copies of the RS↔PM handshake. A real
+user process changes both: PM answers its `PM_GETPID` and then handles its exit, which adds a
+`SENDNB` to endpoint 10 and a second `GETKSIG`/`ENDKSIG` round to the trace, and six more
+copies to the log. Neither check was wrong about the protocol; both were asserting where the
+boot had got to when someone looked, exactly as check C was.
+
+They now assert the properties instead — PM took the notification before it answered RS and
+is receiving from any sender afterwards, and the handshake moved bytes in each of its four
+directions at least once. This is worth stating plainly because the fix *weakens* two
+assertions, and the reason it is not lost coverage is that the discarded part was never a
+claim about the protocol: a check cannot be made more meaningful by pinning how many copies
+happened to be in a log before an unrelated process joined the machine.
+
 **28. `sys_write_handler` read the caller's console buffer directly.** The last syscall
 taking a user pointer that had not been converted to the copy seam (§5.1): it copied `buf`
 straight into a stack chunk, which on wasm is the *kernel's* memory. For ordinary output

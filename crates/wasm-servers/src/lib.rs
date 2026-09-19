@@ -296,3 +296,67 @@ pub extern "C" fn minix_ds_client_unregistered() -> i32 {
 
     0
 }
+
+// -------------------------------------------------------------------- INIT
+
+/// Write `n` in decimal into the tail of `out`, returning the digits.
+fn decimal(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
+    let mut i = out.len();
+    loop {
+        i -= 1;
+        out[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    &out[i..]
+}
+
+/// The first *user* process: INIT, in the slot `BOOT_IMAGE` already reserves for
+/// it.
+///
+/// Every instance before this one has been a server, and a server is a particular
+/// kind of process: a privilege slot of its own, `SYS_PROC` set, `SRV_T` traps,
+/// every kernel call allowed, and a main loop that never ends. INIT is the other
+/// kind. `proc_init` links it to the *shared* USER privilege slot instead
+/// (`s_proc_nr == NONE`, `USR_T` traps, an empty kernel-call mask, `s_ipc_to`
+/// holding only the services an ordinary user may call), and its lifetime ends.
+/// What was missing was an instance to put in that slot; the harness asks the
+/// kernel which kind it made with `minix_proc_kind` rather than trusting the slot
+/// number.
+///
+/// Both of the things it does are cross-boundary. Its output leaves through
+/// `sys_write_handler`'s console shortcut rather than through VFS: INIT has not
+/// dup2'd a redirect onto fd 1, so `p_fd_vfs` is 0, and the kernel reads the bytes
+/// out of *this* instance through the copy seam (§5.1) and emits them itself. And
+/// `getpid` is not a kernel syscall on this port — `minix-rt` reaches PM with
+/// `PM_GETPID` — so the pid it prints is PM's answer, which INIT can only have got
+/// because the shared USER privilege slot lets an ordinary user send to PM. No
+/// write from any instance reached the console before findings 28 and 29, so this
+/// is also the first process that could have shown the difference.
+///
+/// It stops at the edge of what M3 has built. The rest of `userland::init` opens
+/// `/dev/console`, dup2's it onto 0..2 and marks those fds VFS-owned so the shell
+/// it execs inherits tty-backed stdio — and neither the console device (a tty
+/// server behind VFS's device layer) nor `/bin/sh` exists on this port yet. Its
+/// no-console path is a spin with no syscall in it, which on this target hangs the
+/// host synchronously instead of failing (finding 12), so the first user process
+/// ends here having proved what can be proved without them: that a process which is
+/// not a server runs, writes, reaches a server, and exits.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_init() {
+    userland::write_out(b"init: booting MINIX/Rust\r\n");
+    userland::write_out(b"init: pid=");
+    let mut buf = [0u8; 10];
+    userland::write_out(decimal(minix_rt::getpid() as u32, &mut buf));
+    userland::write_out(b"\r\n");
+    userland::write_out(b"init: no console device or shell yet, exiting\r\n");
+    // Through the real exit path, so PM's half of a process lifecycle runs: the
+    // kernel marks this process SIGNALED | SIG_PENDING | SLOT_FREE, queues the exit
+    // for PM to read with GETKSIG, and notifies PM as the signal manager.
+    // `minix-rt::exit` then traps, because this target has no return path out of an
+    // entry point and a spin would hang the host; the harness reads a trap whose
+    // last syscall was exit as the exit it is.
+    minix_rt::exit(0);
+}

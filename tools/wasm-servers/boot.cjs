@@ -44,6 +44,9 @@ const SENDREC = 48;
 const SEND = 46;
 const SENDNB = 51;
 const ANY = 0x0000ffff;
+/// `SYS_EXIT`. `minix-rt::exit` issues this and then traps, so it is also how a
+/// trap is told apart from a failure.
+const EXIT = 0;
 /// Kernel call 7 is `SYS_GETKSIG`, which PM asks for on every notification.
 const KERNEL_CALL = 50;
 const GETKSIG = 7;
@@ -191,6 +194,10 @@ const specs = [
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
+  // INIT — the first *user* process, at `INIT_PROC_NR`. The one instance here that
+  // is not a server: the kernel links it to the shared USER privilege slot, and its
+  // lifetime ends. Spawned with the boot processes, after the servers it talks to.
+  { slot: 10, entry: 'minix_init', label: 'init' },
   // Not a boot process and not a server: the client that gives DS something to
   // answer. Its slot is above the boot procs on purpose, so `p_priv` stays null
   // — `may_send_to` allows anything from a privilege-less process, and allows DS
@@ -423,6 +430,20 @@ for (;;) {
   try {
     run(st);
   } catch (e) {
+    // A trap whose last syscall was EXIT is a process exiting, not failing.
+    // `minix-rt::exit` issues `SYS_EXIT` and then traps, because this target gives the
+    // host no chance to run while an instance is executing, so a spin would hang it
+    // synchronously rather than fail (finding 12). The kernel has already done the exit
+    // bookkeeping -- SIGNALED | SIG_PENDING | SLOT_FREE, the queued exit status, and a
+    // notification to PM as signal manager -- so recording it is all that is left.
+    // It must *not* call `minix_proc_exit` here: that stores SLOT_FREE on its own,
+    // which would clear SIGNALED, and SIGNALED is exactly what PM's GETKSIG loop
+    // looks for to find the exit.
+    const last = st.tail.length > 0 ? st.tail[st.tail.length - 1] : null;
+    if (last !== null && last.nr === EXIT) {
+      st.exited = true;
+      continue;
+    }
     // A trap is how a wasm process dies loudly: `minix-rt`'s panic handler exits, and
     // `exit` now traps instead of spinning, so a panic arrives here as
     // `RuntimeError` rather than as a hang nothing can report. The instance's tail is
@@ -559,25 +580,25 @@ check(
 // That round trip is the chain starting to move, and it is visible only because
 // the notification reached PM's own memory.
 const pm = procs.find((p) => p.spec.label === 'pm');
-// The trace with consecutive repeats collapsed: a syscall that blocks is
-// re-entered when it resumes, so its entry appears once per block and only the
-// sequence of *distinct* steps is stable. PM's steps are the notification, the
-// kernel call it answers with, the receive that waits for real work, the answer
-// to RS's init request, and back to waiting.
-const distinctSteps = (p) =>
-  p.trace
-    .map((t) => [t.nr, t.a0])
-    .filter((c, i, a) => i === 0 || c[0] !== a[i - 1][0] || c[1] !== a[i - 1][1]);
+// The three things this claims, as properties rather than as a sequence of steps.
+// The sequence assertion it used to be held exactly while no *user* process existed;
+// INIT now sends PM a PM_GETPID and then an exit to report, so PM's trace legitimately
+// has more in it -- SENDNB to endpoint 10, and a second GETKSIG round with the
+// `SYS_ENDKSIG` that closes it. Pinning the whole trace was asserting where the boot
+// had got to rather than what the protocol is, which is finding 27's lesson.
+const pmSteps = pm.trace.map((t) => [t.nr, t.a0]);
+const pmFirstGetksig = pmSteps.findIndex(([nr, a0]) => nr === KERNEL_CALL && a0 === GETKSIG);
+const pmRsAnswer = pmSteps.findIndex(([nr, a0]) => nr === SENDREC && a0 === rs.spec.endpoint);
+const pmLastStep = pmSteps[pmSteps.length - 1];
 check(
   'PM consumed the boot notification, answered RS, and returned to receiving',
-  JSON.stringify(distinctSteps(pm)) ===
-    JSON.stringify([
-      [RECEIVE, ANY],
-      [KERNEL_CALL, GETKSIG],
-      [RECEIVE, ANY],
-      [SENDREC, rs.spec.endpoint],
-      [RECEIVE, ANY],
-    ]),
+  pmSteps.length > 0 &&
+    pmSteps[0][0] === RECEIVE &&
+    pmSteps[0][1] === ANY &&
+    pmFirstGetksig > 0 &&
+    pmRsAnswer > pmFirstGetksig &&
+    pmLastStep[0] === RECEIVE &&
+    pmLastStep[1] === ANY,
   pm.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
 );
 // PM's copies, taken by *who they involve* rather than by position: RS's init now
@@ -601,21 +622,25 @@ check(
     pmNotifyCopies[2].dstProc === 0,
   pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
 );
-// And the next three are the init handshake PM is now part of, which is what makes
-// it answer RS at all: RS's `RS_INIT` landing in PM's buffer, PM's answer on its way
-// out, and RS's reply to it.
-const pmInitCopies = pmCopies.slice(3);
+// And the init handshake PM is now part of, which is what makes it answer RS at all.
+// Counted by *direction* rather than as a positional slice of the log: the handshake
+// moves bytes out of RS's instance into the kernel's staging buffer and on into PM's,
+// then PM's answer back the other way, and each of those four directions has to appear
+// at least once with a successful copy. The slice-of-three this used to be needed the
+// log to hold exactly three entries involving PM, which stopped being true the moment
+// INIT added its own -- finding 27's lesson, again.
+const dirCount = (src, dst) =>
+  copyLog.filter((c) => c.srcProc === src && c.dstProc === dst && c.result === 0).length;
+const rsInitDirs = [
+  dirCount(rs.spec.slot, -1),
+  dirCount(-1, pm.spec.slot),
+  dirCount(pm.spec.slot, -1),
+  dirCount(-1, rs.spec.slot),
+];
 check(
   "RS's init request, PM's answer and RS's reply all crossed the seam",
-  pmInitCopies.length === 3 &&
-    pmInitCopies.every((c) => c.result === 0 && c.bytes === 64) &&
-    pmInitCopies[0].srcProc < 0 &&
-    pmInitCopies[0].dstProc === 0 &&
-    pmInitCopies[1].srcProc === 0 &&
-    pmInitCopies[1].dstProc < 0 &&
-    pmInitCopies[2].srcProc < 0 &&
-    pmInitCopies[2].dstProc === 0,
-  pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
+  rsInitDirs.every((n) => n >= 1),
+  `copies by direction (rs->kernel, kernel->pm, pm->kernel, kernel->rs) = [${rsInitDirs.join(',')}]`
 );
 
 // ------------------------------------------------------------ the DS exchange
@@ -777,6 +802,72 @@ check(
   "the kernel's run queues are consistent afterwards",
   kernel.exports.minix_runqueues_ok() === 1,
   'runqueues_ok() reported an inconsistency'
+);
+
+// ----------------------------------------- M3d: the first user process (INIT)
+
+const init = procs.find((p) => p.spec.label === 'init');
+
+// The claim is not "an instance ran" but "an ordinary user process ran", and the
+// difference between that and a server is kernel state, so ask the kernel instead
+// of inferring it from the slot number. Finding 9 is the shape of getting this
+// wrong without noticing: the wasm kernel once ran no boot sequence at all, so no
+// process had a privilege structure and every check still passed.
+const initKind = kernel.exports.minix_proc_kind(init.spec.slot);
+check(
+  'the kernel made INIT an ordinary user process rather than a server',
+  initKind === 1,
+  `kind=${initKind} (1 = shared USER slot, 2 = SYS_PROC, 0 = no priv)`
+);
+// The control, so the answer above cannot be a constant.
+const dsKind = kernel.exports.minix_proc_kind(ds.spec.slot);
+check(
+  'the same question about DS answers "server"',
+  dsKind === 2,
+  `kind=${dsKind}`
+);
+
+// Both of INIT's effects had to cross an instance boundary. The console lines exist
+// only if the kernel read them out of INIT's own memory through the copy seam
+// (findings 28 and 29), and the pid is not a kernel syscall: `minix-rt`'s `getpid`
+// is a SENDREC to PM, so a number here means the shared USER slot let an ordinary
+// user reach PM and PM answered. The value pins PM's own answer rather than a
+// constant -- PM assigns `mp_pid = endpoint + 1` when it fills its boot table, so
+// INIT at endpoint 10 is pid 11. (C gives init `INIT_PID` of 1; that is not this
+// port's scheme, and changing it is not this milestone's business.)
+const sawBanner = timeline.some((l) => l.includes('init: booting MINIX/Rust'));
+const sawStop = timeline.some((l) => l.includes('no console device or shell yet'));
+check(
+  "INIT's console output reached the harness through the kernel",
+  sawBanner && sawStop,
+  `banner=${sawBanner} closingLine=${sawStop}`
+);
+const pidLine = timeline.find((l) => l.includes('init: pid='));
+check(
+  'INIT reached PM over SENDREC and PM answered with its pid',
+  pidLine !== undefined && pidLine.endsWith('init: pid=11'),
+  `line=${JSON.stringify(pidLine)} (expected one ending "init: pid=11")`
+);
+
+// And it ended, by exiting rather than by trapping: the last syscall it made was
+// EXIT, which is the only thing that lets the harness tell the two traps apart.
+const initTail = init.tail.map((t) => t.nr);
+check(
+  'INIT exited through the exit syscall',
+  init.exited === true && initTail[initTail.length - 1] === EXIT,
+  `exited=${init.exited} tail=[${initTail.join(',')}]`
+);
+
+note(
+  'what M3d establishes, and what M3 still owes',
+  'INIT is the first process on this port that is not a server: the kernel links it ' +
+    'to the shared USER privilege slot, its console output leaves through the ' +
+    'kernel\'s copy seam, it reaches PM with a real SENDREC, and it exits through ' +
+    'SYS_EXIT, which is what notifies PM of a death. What M3 still owes is the TTY ' +
+    'half: `userland::init` cannot run to its end until `/dev/console` exists (a tty ' +
+    'server behind VFS\'s device layer) and `/bin/sh` exists to be exec\'d, and its ' +
+    'no-console path is a spin with no syscall in it, which on this target hangs the ' +
+    'host instead of failing (finding 12).'
 );
 
 note(

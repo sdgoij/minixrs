@@ -9,10 +9,11 @@ protocol, Asyncify across the boundary, a real two-process rendezvous), M2c (the
 real servers, built for `os = "minix"`, spawned by the kernel through to their
 own main loops and the DS→RS→PM init handshake), M3a (the boot filesystem
 image serving from a RAM disk instance), M3b (VM and MFS up, initialised, and
-waiting on a receive), and M3c (VFS mounts root and reaches its main loop — the whole
-chain, VM → ramdisk → MFS → VFS, running on wasm) are all **done** — see §11 for
-commands and results. What M3 has not reached is a *user* process: no shell, no
-`init`.
+waiting on a receive), M3c (VFS mounts root and reaches its main loop — the whole
+chain, VM → ramdisk → MFS → VFS, running on wasm), and M3d (INIT, the first *user*
+process: it runs, writes to the console through the kernel, reaches PM, and exits) are
+all **done** — see §11 for commands and results. What M3 has not reached is the rest of
+M3: no console device, no TTY server, and no shell.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1192,6 +1193,47 @@ yet. There is no shell and no `init`. RS's `asked` table now holds seven service
 RAMDISK, VIRTIO_BLK, DEVMAN, MFS and VFS — so each of those is asked to initialise through
 RS and answers; VM is the one still never asked, and the period/heartbeat machinery for a
 service that never answers is still owed.
+
+**M3d — The first user process. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 37/37 checks passed, over nine servers and one user process
+```
+
+INIT is spawned at `INIT_PROC_NR`, and it is the one instance here that is not a server. The
+difference is kernel state rather than a label, so the harness asks the kernel for it:
+`minix_proc_kind` answers "ordinary user" for INIT and "system server" for DS, and the
+second answer is what stops the first from being a constant. Finding 9 is what this guards
+against — the wasm kernel once ran no boot sequence at all, so no process had a privilege
+structure and every check still passed.
+
+Both of its effects cross an instance boundary, and neither could have been observed before
+findings 28 and 29:
+
+- Its output leaves through `sys_write_handler`'s console shortcut. INIT declares no console
+  import and `p_fd_vfs` is 0 (it has not dup2'd a redirect onto fd 1), so the lines exist on
+  the console only because the kernel read them out of INIT's own memory through the copy
+  seam (§5.1).
+- Its pid is not a kernel syscall. `minix-rt`'s `getpid` reaches PM with `PM_GETPID`, so
+  `init: pid=11` is PM's answer, and INIT can only have got it because the shared USER
+  privilege slot lets an ordinary user send to PM. (`11` because this port assigns
+  `mp_pid = endpoint + 1`; C's `INIT_PID` of 1 is not the scheme here, and changing it is
+  not this milestone's business.)
+
+It ends by exiting rather than by returning: `SYS_EXIT` is what tells PM that a process died
+(`sys_exit_handler` sets SIGNALED | SIG_PENDING | SLOT_FREE, queues the status, and notifies
+the signal manager). `minix-rt::exit` then traps, so the harness has to tell two traps
+apart — it reads a trap whose last syscall was EXIT as the exit it is, and deliberately does
+*not* call `minix_proc_exit` on it, because that would store SLOT_FREE on its own and clear
+SIGNALED, which is exactly what PM's `GETKSIG` loop looks for.
+
+What M3d does not do is the TTY half of M3, and `userland::init` cannot run to its end
+without it: its next act is to open `/dev/console`, dup2 it onto 0..2 and mark those fds
+VFS-owned so the shell it execs inherits tty-backed stdio, and there is neither a console
+device (a tty server behind VFS's device layer) nor a `/bin/sh` to exec. Its no-console path
+is a spin with no syscall in it, which on this target hangs the host synchronously rather
+than failing (finding 12), so running `init` unmodified has to wait for those.
 
 ## 12. Risks, ranked
 

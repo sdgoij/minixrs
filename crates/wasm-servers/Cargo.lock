@@ -136,6 +136,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "userland"
+version = "0.1.0"
+dependencies = [
+ "minix-rt",
+ "minix-std",
+ "minix-util",
+]
+
+[[package]]
 name = "wasm-servers"
 version = "0.1.0"
 dependencies = [
@@ -144,4 +153,5 @@ dependencies = [
  "minix-rt",
  "minix-util",
  "servers",
+ "userland",
 ]
