@@ -14,12 +14,12 @@ pub mod proc;
 pub mod region;
 
 use arch_common::com::{
-    NR_VM_CALLS, RS_INIT, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT,
-    VM_FORK, VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP,
-    VM_MUNMAP, VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO,
-    VM_RQ_BASE, VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP,
-    VM_UNMAP_PHYS, VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMCTL_CLEAR_PAGEFAULT,
-    VMIW_REGION, VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
+    NR_VM_CALLS, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT, VM_FORK,
+    VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP, VM_MUNMAP,
+    VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE,
+    VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP, VM_UNMAP_PHYS,
+    VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMCTL_CLEAR_PAGEFAULT, VMIW_REGION,
+    VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
 };
 use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
@@ -691,6 +691,16 @@ pub fn vm_main() {
             }
             let src_ep = src as i32;
 
+            // RS asks each service it starts to initialise, and the answer has a shape
+            // RS's loop blocks for — `answer_rs_init` is that shape, shared with the
+            // other services so six of them cannot disagree about it. It is answered
+            // here rather than in `dispatch_message` because that call is given the
+            // source as `0` (and only uses it for VM's own bookkeeping), while this
+            // needs the real sender to be sure the request came from RS.
+            if minix_util::rs::answer_rs_init(msg.m_type, src_ep) {
+                continue;
+            }
+
             // Dispatch the call. dispatch_message handles setting msg.m_type
             // to the result and (via ipc_send_stub) sending the reply.
             // The stub is a no-op; the main loop sends the actual reply via SEND.
@@ -741,12 +751,8 @@ pub fn dispatch_message(msg: &mut Message, ipc_status: i32) -> i32 {
         return EDONTREPLY;
     }
 
-    if call_nr == RS_INIT {
-        // TODO: Phase 13 — SEF init callback.
-        msg.m_type = OK;
-        let _ = ipc_send_stub(msg.m_source, msg);
-        return OK;
-    }
+    // `RS_INIT` is answered in the receive loop, not here: this dispatch is handed the
+    // source as `0`, and the answer has to be sent to the real sender (see `vm_main`).
 
     if is_vfs_fs_transid(call_nr) {
         // TODO: Phase 13 — VFS transaction dispatch.
@@ -3047,7 +3053,12 @@ fn do_getrusage(msg: &mut Message) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    // `RS_INIT` is no longer referenced by the server itself — the receive loop answers
+    // it through `minix_util::rs::answer_rs_init`, which takes the message type as a
+    // value — so the name is only needed by the tests that build one.
     use super::*;
+    #[allow(unused_imports)]
+    use arch_common::com::RS_INIT;
     use arch_common::com::{
         NR_VM_CALLS, VM_MMAP, VM_PAGEFAULT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE, VM_SHM_UNMAP,
         VM_UNMAP_PHYS,
@@ -3547,8 +3558,14 @@ mod tests {
         assert_eq!(r, EDONTREPLY);
     }
 
+    /// `RS_INIT` is answered in the receive loop, not here, because the answer has to go
+    /// to the real sender and `dispatch_message` is handed the source as `0`.
+    /// `minix_util::rs::answer_rs_init` is the shape, and `vm_main` calls it before
+    /// dispatching. So dispatching an init request is now just an unknown call — what
+    /// this pins is that the loop's path is the only one that answers it, since a
+    /// second answer site is how the two would drift apart.
     #[test]
-    fn test_dispatch_rs_init_returns_ok() {
+    fn test_dispatch_does_not_answer_rs_init() {
         init_vm();
         let mut msg = Message {
             m_source: RS_PROC_NR,
@@ -3556,8 +3573,7 @@ mod tests {
             m_payload: unsafe { core::mem::zeroed() },
         };
         let r = dispatch_message(&mut msg, 0);
-        assert_eq!(r, OK);
-        assert_eq!(msg.m_type, OK);
+        assert_eq!(r, ENOSYS);
     }
 
     #[test]

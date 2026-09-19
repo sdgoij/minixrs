@@ -53,4 +53,8 @@ node "$wasm_opt" --asyncify \
   -o "$here/build/servers.async.wasm"
 
 echo
-node "$here/boot.cjs"
+# Bounded, because a boot that deadlocks deadlocks *silently*: an instance waiting on
+# an answer that never comes leaves the host looping in the dispatch step, with no
+# output to say so. `timeout` was already the house answer for the QEMU recipes; this is
+# the same failure mode and it should not be able to cost a quarter of an hour.
+/usr/bin/timeout -s 9 120 node "$here/boot.cjs"

@@ -4013,13 +4013,9 @@ pub fn pm_server_main() {
             // rather than at startup: the request arrives as a message, so answering
             // it in the loop keeps the handshake ordered by delivery, and RS never
             // sends into a process that is mid-`SENDREC` (see `rs.rs`'s init loop).
-            // C's SEF does the same thing from `sef_cb_init_response`.
-            if msg.m_type == arch_common::com::RS_INIT as i32
-                && src_ep == arch_common::com::RS_PROC_NR
-            {
-                if let Err(e) = minix_util::rs::rs_init_ready(0) {
-                    panic!("pm: init-ready reply to rs failed: {e:?}");
-                }
+            // The shape itself lives in `answer_rs_init` because every service RS
+            // asks has to get it right.
+            if minix_util::rs::answer_rs_init(msg.m_type, src_ep) {
                 continue;
             }
 

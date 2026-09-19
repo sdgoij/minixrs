@@ -276,6 +276,13 @@ pub fn virtio_blk_server_main() {
             }
             let src_ep = src as i32;
 
+            // RS asks each service it starts to initialise, and the answer has a shape
+            // RS's loop blocks for — `answer_rs_init` is that shape, shared with the
+            // other services so six of them cannot disagree about it.
+            if minix_util::rs::answer_rs_init(msg.m_type, src_ep) {
+                continue;
+            }
+
             // Handle the BDEV message, then reply with a plain SEND (46),
             // matching the ramdisk server's proven reply pattern (a SENDREC
             // reply would immediately re-block this loop in RECEIVE).

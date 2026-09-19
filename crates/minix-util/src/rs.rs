@@ -118,3 +118,31 @@ pub fn rs_init_ready(result: i32) -> Result<(), MinixErr> {
         Err(MinixErr(71))
     }
 }
+
+/// Answer an `RS_INIT` request, or report that this was not one.
+///
+/// Every service RS asks to initialise must answer with `m_type == RS_INIT` and its
+/// result in `m2i1`, because RS's init loop blocks for exactly that message and panics
+/// on anything else (`rs.rs`). Five servers have to get that shape right, so it lives
+/// here rather than being open-coded five times, and a service that gets it wrong fails
+/// at boot on every arch instead of on one.
+///
+/// Takes the message's type and its sender rather than a message, because the port has
+/// two representations — `arch_common::ipc::Message` in the servers and a `[u8; 64]`
+/// buffer in this crate's own helpers — and the handshake's shape must not depend on
+/// which one a service happens to use.
+///
+/// Returns `true` when the message was an init request and has been answered, meaning
+/// the caller should go back to its receive rather than dispatch it.
+#[must_use]
+pub fn answer_rs_init(m_type: i32, src_ep: i32) -> bool {
+    if m_type != arch_common::com::RS_INIT as i32 || src_ep != RS_ENDPOINT {
+        return false;
+    }
+    if let Err(e) = rs_init_ready(0) {
+        // RS blocks for this answer, so failing to send it is fatal rather than
+        // something the loop can carry on past.
+        panic!("init-ready reply to rs failed: {e:?}");
+    }
+    true
+}
