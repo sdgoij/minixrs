@@ -123,7 +123,9 @@ pub const VIRTIO_MMIO_VERSION_MODERN: u32 = 2;
 /// First virtio-mmio transport base on QEMU `virt` machines. The two
 /// machines place the transports at different addresses with different
 /// strides: RISC-V at 0x10001000 (0x1000 apart), AArch64 at 0x0a000000
-/// (0x200 apart). The x86_64 value is a placeholder (never probed).
+/// (0x200 apart). Neither x86_64 nor wasm32 probes this path — x86_64 uses
+/// virtio-pci, and the wasm port reaches its devices through host imports — so
+/// both get placeholders that are never read.
 #[cfg(target_arch = "riscv64")]
 pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
 #[cfg(target_arch = "riscv64")]
@@ -132,9 +134,9 @@ pub const VIRTIO_MMIO_STRIDE: u64 = 0x1000;
 pub const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 #[cfg(target_arch = "aarch64")]
 pub const VIRTIO_MMIO_STRIDE: u64 = 0x200;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "wasm32"))]
 pub const VIRTIO_MMIO_BASE: u64 = 0;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "wasm32"))]
 pub const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 
 /// Transport count differs by machine: RISC-V virt has 8 transports
@@ -145,7 +147,7 @@ pub const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 pub const VIRTIO_MMIO_NUM_TRANSPORTS: u64 = 8;
 #[cfg(target_arch = "aarch64")]
 pub const VIRTIO_MMIO_NUM_TRANSPORTS: u64 = 32;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "wasm32"))]
 pub const VIRTIO_MMIO_NUM_TRANSPORTS: u64 = 8;
 /// VIRTIO_F_VERSION_1 (bit 32), mandatory for modern devices. It lives in
 /// the high feature word, so it is bit 0 of the word selected by sel=1.

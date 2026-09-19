@@ -286,7 +286,9 @@ pub fn do_getsysinfo() -> i32 {
     // Read message fields from fs_m_in (mess_lsys_getsysinfo layout)
     let what = i32::from_le_bytes(glob.fs_m_in[0..4].try_into().unwrap_or([0; 4]));
     let dst_addr = u64::from_le_bytes(glob.fs_m_in[4..12].try_into().unwrap_or([0; 8]));
-    let buf_size = usize::from_le_bytes(glob.fs_m_in[12..20].try_into().unwrap_or([0; 8]));
+    // The field holds eight bytes in the message, so read it as u64 and narrow:
+    // `usize::from_le_bytes` would demand four bytes on a 32-bit target.
+    let buf_size = u64::from_le_bytes(glob.fs_m_in[12..20].try_into().unwrap_or([0; 8])) as usize;
 
     // Only superuser may call do_getsysinfo (leaks sensitive data).
     let fp = unsafe { &*glob.fp };

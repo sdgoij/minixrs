@@ -97,7 +97,8 @@ pub fn write_err(s: &[u8]) {
     #[cfg(any(
         target_arch = "x86_64",
         target_arch = "riscv64",
-        target_arch = "aarch64"
+        target_arch = "aarch64",
+        target_arch = "wasm32"
     ))]
     unsafe {
         minix_rt::write(2, s.as_ptr(), s.len());
@@ -2250,9 +2251,7 @@ pub fn init(_args: &[&str]) -> i32 {
                 core::arch::asm!("wfi", options(nomem, nostack))
             };
             #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
-            unsafe {
-                core::arch::asm!("pause")
-            };
+            core::hint::spin_loop();
         }
     }
 
@@ -2284,9 +2283,7 @@ pub fn init(_args: &[&str]) -> i32 {
             core::arch::asm!("wfi", options(nomem, nostack))
         };
         #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
-        unsafe {
-            core::arch::asm!("pause")
-        };
+        core::hint::spin_loop();
         let _ = minix_rt::getpid();
     }
 }

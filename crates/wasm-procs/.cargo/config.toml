@@ -1,0 +1,18 @@
+# Link flags for the M2 guest processes.
+#
+# `--import-memory` is the design's arrangement (§5): the host owns each
+# instance's memory, because only the host can move bytes between two processes
+# and it has to place the Asyncify stack buffer somewhere it can see.
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=--no-entry",
+  # The guest's `extern "C"` calls into the kernel become imports from `env`.
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--export=proc_a",
+  "-C", "link-arg=--export=proc_b",
+  "-C", "link-arg=--export=msg_ptr",
+  "-C", "link-arg=--export=info_ptr",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--initial-memory=4194304",
+]

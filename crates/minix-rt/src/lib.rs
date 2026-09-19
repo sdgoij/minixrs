@@ -152,6 +152,45 @@ pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
     )
 }
 
+/// The frame address for the signal being handled, kept in memory.
+///
+/// The native ports read it off the stack in a naked function, because a
+/// hardware signal frame *is* a stack frame. wasm32 has neither, so §6.3 of
+/// `ARCH_WASM32.md` moves delivery to the process's own syscall shim: the shim
+/// records the frame here before invoking a handler, and the trampoline below
+/// hands it back to PM.
+#[cfg(target_arch = "wasm32")]
+static SIGFRAME_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record the frame the trampoline should return to PM. Called by the shim.
+#[cfg(target_arch = "wasm32")]
+pub fn set_sigframe_ptr(addr: u64) {
+    SIGFRAME_PTR.store(addr, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The sigreturn trampoline for wasm32.
+///
+/// Sends PM_SIGRETURN so PM restores the signal mask and invokes SYS_SIGRETURN,
+/// then stops. Never returns, like the other ports — it just gets there without
+/// popping a return address, since there is no stack to pop.
+///
+/// # Safety
+///
+/// Must only be reached from the sigframe return slot. Signal delivery itself
+/// is not yet exercised on wasm32; this is the §6.3 contract implemented, not a
+/// placeholder.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
+    let scp = SIGFRAME_PTR.load(core::sync::atomic::Ordering::Relaxed);
+    let mut msg = [0u8; 64];
+    msg[4..8].copy_from_slice(&PM_SIGRETURN.to_ne_bytes());
+    msg[24..32].copy_from_slice(&scp.to_ne_bytes());
+    // SAFETY: the host supplies the syscall gate for every instance.
+    unsafe { syscall2(SENDREC_CALL, PM_PROC_NR as u64, msg.as_ptr() as u64) };
+    core::arch::wasm32::unreachable()
+}
+
 /// IPC syscall numbers.
 pub const SEND_CALL: u64 = 46;
 pub const SENDNB_CALL: u64 = 51;
@@ -547,6 +586,58 @@ pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6:
         );
     }
     ret
+}
+
+// WebAssembly syscalls. There is no instruction to issue and no register
+// convention to honour: the syscall gate is an ordinary call across the host
+// boundary, which is the whole point of §4.3 — a syscall is a call, and the
+// "trap frame" the other arches unpick is just an argument list.
+#[cfg(target_arch = "wasm32")]
+unsafe extern "C" {
+    fn minix_syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn wasm_syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    // SAFETY: the host supplies the gate for every instance it instantiates.
+    unsafe { minix_syscall(nr, a0, a1, a2, a3, a4, a5) }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall0(nr: u64) -> i64 {
+    unsafe { wasm_syscall(nr, 0, 0, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, 0, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, a2, 0, 0, 0, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, a2, a3, 0, 0, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, a2, a3, a4, 0, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, a2, a3, a4, a5, 0) }
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+pub unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    unsafe { wasm_syscall(nr, a1, a2, a3, a4, a5, a6) }
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -1668,8 +1759,16 @@ pub const HEAP_BASE: usize = if cfg!(target_arch = "aarch64") {
 /// mmap base) cannot overlap.
 pub const HEAP_LIMIT: usize = if cfg!(target_arch = "aarch64") {
     0x3000_0000
+} else if cfg!(target_arch = "wasm32") {
+    // A 32-bit `usize` cannot hold the 4 GiB the other targets use, and wasm32's
+    // linear memory ceiling is 4 GiB anyway; 1 GiB leaves room for the stack and
+    // mmap regions inside it.
+    0x4000_0000
 } else {
-    0x1_0000_0000
+    // Written through `u64` because every branch of a `cfg!` guard is still
+    // type-checked, so the literal has to fit a 32-bit `usize` even on the
+    // targets that never evaluate this arm. The value is unreachable there.
+    (0x1u64 << 32) as usize
 };
 
 /// Allocate zeroed memory for direct-heap users (e.g. the MFS block

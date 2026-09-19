@@ -24,5 +24,10 @@ arch-riscv64 = { path = "../arch-riscv64" }
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arch-aarch64 = { path = "../arch-aarch64" }
 
+# The wasm HAL re-exports the same inert port-I/O and PCI surface the other arch
+# crates provide, so driver code compiles unchanged.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+arch-wasm32 = { path = "../arch-wasm32" }
+
 [lints]
 workspace = true

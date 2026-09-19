@@ -67,6 +67,7 @@ dependencies = [
  "arch-aarch64",
  "arch-common",
  "arch-riscv64",
+ "arch-wasm32",
  "arch-x86_64",
 ]
 

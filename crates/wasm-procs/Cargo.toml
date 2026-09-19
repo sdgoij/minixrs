@@ -1,0 +1,18 @@
+# Standalone: a wasm-only module with no host entry point, so a workspace-wide
+# build could not link it. Same reasoning as the other excluded crates.
+[workspace]
+
+[package]
+name = "wasm-procs"
+version = "0.1.0"
+description = "Hand-written wasm processes for the M2 dispatch protocol"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = 2

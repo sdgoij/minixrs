@@ -3,9 +3,12 @@
 Rough design for an `arch-wasm32` port: the kernel, servers, and userland
 compiled to WebAssembly and run in a browser tab (or Node, or any wasm host).
 
-Status: **partially implemented.** M0 (host-mode HAL) and M1 (kernel boots as
-wasm, no processes) are both **done** — see §11 for commands and results. M2
-onward is design.
+Status: **partially implemented.** M0 (host-mode HAL), M1 (kernel boots as
+wasm, no processes), and M2's protocol core (instance-per-process, the dispatch
+protocol, Asyncify across the boundary, a real two-process rendezvous) are all
+**done** — see §11 for commands and results. What remains of M2 is the real
+servers as modules, which needs the toolchain work in §10 rather than more
+protocol design. M3 onward is design.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -486,8 +489,48 @@ use the stock toolchain while the three MINIX triples keep using the fork:
 cargo build -p kernel --target wasm32-unknown-unknown --release
 ```
 
-**Userland: needs the fork.** `minix-std`/`minix-rt`/`minix-libc` bottom out in
-a MINIX syscall ABI, so:
+**Userland: needs the fork.** ~~`minix-std`/`minix-rt`/`minix-libc` bottom out in
+a MINIX syscall ABI, so:~~ **Correction: they do not.** `crates/servers` and
+`crates/userland` depend on `minix-rt`, `minix-std`, and `minix-util` — all
+`#![no_std]` — and **not** on the fork's `std`. They build for
+`wasm32-unknown-unknown` with the pinned stock toolchain, exactly like the
+kernel, so no target spec and no std PAL are needed:
+
+```
+cargo check -p servers -p userland --target wasm32-unknown-unknown
+# 0 errors, 0 warnings
+```
+
+The original claim here assumed userland linked the fork's std (as `RUSTC.md`
+suggests for the coreutils, which *are* real Rust programs). The servers are not.
+Only `coreutils` would need the PAL, and it is not on the path to a booting
+system.
+
+What it did take was the same class of repair M1 found — arch gaps and 32-bit
+width — across four crates:
+
+- `minix-rt`: the wasm32 syscall gate (`syscall0..6` over a host import) and a
+  sigreturn trampoline implementing the §6.3 contract, since there is no stack
+  for a naked function to read.
+- `minix-rt`: `HEAP_LIMIT`'s 4 GiB arm, which a 32-bit `usize` cannot hold — and
+  which every branch of a `cfg!` guard still type-checks, so the literal had to
+  be written through `u64` even though the arm is unreachable.
+- `drivers/hal.rs`: a wasm32 arm for that crate's arch boundary (the same
+  single-file discipline as the kernel's), pointing at `arch-wasm32`'s inert
+  port-I/O and PCI surface — the disposition §8 already prescribes.
+- `drivers`, `servers`, `userland`: a wasm32 virtio-mmio placeholder, a `uname`
+  arch string, two `asm!("pause")` spin hints replaced with the portable
+  `core::hint::spin_loop()`, and one more `usize::from_le_bytes` over an 8-byte
+  message field.
+
+That last one is the second occurrence of the same bug (§5.2 lists the first, in
+`kernel/src/ipc.rs`). Two instances of an ABI field read at the wrong width is no
+longer a coincidence, and it is the argument for the per-struct size assertion
+§5.2 proposes.
+
+Verified against the shipping target rather than assumed: a stage1 toolchain is
+present, so `cargo check -p minix-rt -p drivers -p servers -p userland --target
+x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there.
 
 - new target spec `wasm32_unknown_minix.rs` alongside the three existing ones in
   `rust/compiler/rustc_target/src/spec/targets/`
@@ -621,11 +664,54 @@ declared one. `--gc-sections` dropped `host_console_read` and
 `host_console_available`, because M1 has no input path. Reading an import list as
 a contract would be a mistake.
 
-**M2 — Instances as processes + IPC.** Asyncify, the dispatch protocol, the
-syscall shim, DS/RS/PM/SCHED as modules, one hand-written hello process.
-This is the milestone that validates or kills the whole design. Its biggest
-unknown (fork) is already answered — see `tools/fork-spike/` and §12 risk 1 —
-so what remains is the ordinary work of wiring the servers up.
+**M2 — Instances as processes + IPC. Status: protocol core DONE.**
+The dispatch protocol, the syscall boundary, and Asyncify across an instance
+boundary all work, driven by the kernel's own process table, run queues, and
+`mini_send`/`mini_receive` — not a stand-in.
+
+```text
+sh tools/wasm-m2/run.sh
+# 7/7 checks passed
+```
+
+The demonstration is a two-process rendezvous. `crates/wasm-procs` is one
+hand-written module instantiated twice; the host loop asks the kernel who should
+run, and the observed interleaving is the proof:
+
+```
+A: sending to B      <- blocks in the kernel here
+B: waiting for A
+B: got A's payload
+A: unblocked         <- resumed by the host, straight-line code either side
+```
+
+A is unwound when the kernel reports it blocked, and rewound when the kernel
+re-enqueues it. Nothing in the guest knows it was suspended, which is the
+property §4.2 rests on.
+
+What each layer did, which is also the division the design predicts: the kernel
+blocked and re-queued A, decided the run order, and completed the rendezvous;
+the host carried the payload bytes, because no part of the kernel can read
+another instance's memory.
+
+Two things the work settled:
+
+- **Run-queue membership is the IPC code's business.** `mini_send` dequeues a
+  caller that blocks and the matching side re-enqueues it, so the host never
+  reconciles queues — it only asks who is runnable.
+- **Endpoints are the kernel's encoding, not arbitrary handles.** The first
+  attempt used hand-picked endpoints `1`/`2` and deadlocked silently: both sides
+  blocked and `mini_send` still returned OK, because a blocking send and a
+  completed one are indistinguishable by return value. The host now asks the
+  kernel for endpoints via `minix_make_endpoint`. This is the same shape as the
+  discarded-`copy_from_user` finding in M0 — IPC failing in a way that looks like
+  success.
+
+Still open in M2: the servers now **compile** for wasm32 (see §10) but do not yet
+**run** — that needs the kernel to route the real MINIX syscall numbers and a boot
+sequence that instantiates DS → RS → PM → VFS as modules. The protocol no longer
+has unknowns and the toolchain no longer has blockers, so what remains is
+integration.
 
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
 real coreutils.
