@@ -141,7 +141,15 @@ pub fn mfs_main() -> i32 {
             if src < 0 {
                 continue;
             }
-            let _src_ep = src as i32;
+            let src_ep = src as i32;
+
+            // RS asks each service it starts to initialise, and this is where MFS's
+            // messages arrive. Answering from the loop rather than at init means RS's
+            // request waits until MFS has actually initialised, which is what being
+            // ready means.
+            if minix_util::rs::answer_rs_init(msg.m_type, src_ep) {
+                continue;
+            }
 
             // Determine request number by subtracting FS_BASE from m_type.
             let req_type = msg.m_type;

@@ -251,6 +251,15 @@ unsafe fn handle_work() {
     let call_nr = i32::from_le_bytes(fs_m_in[4..8].try_into().unwrap_or([0; 4]));
     (*glob).req_nr = call_nr;
 
+    // RS asks each service it starts to initialise, and this is where VFS's messages
+    // arrive. Answering from the work loop rather than during init means RS's request
+    // waits until the root filesystem is actually mounted and devman is up, which is
+    // what VFS being ready means — and it costs no ordering risk, because nothing in
+    // VFS's init waits on RS.
+    if minix_util::rs::answer_rs_init(call_nr, source) {
+        return;
+    }
+
     // Notifications (m_type == NOTIFY_MESSAGE) are fire-and-forget — no reply needed.
     if call_nr == arch_common::com::NOTIFY_MESSAGE as i32 {
         // Update req_nr, but skip dispatch and reply.

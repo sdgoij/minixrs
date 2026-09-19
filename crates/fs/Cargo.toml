@@ -16,6 +16,9 @@ workspace = true
 libs = { path = "../libs" }
 arch-common = { path = "../arch-common" }
 minix-rt = { path = "../minix-rt" }
+# For `minix_util::rs::answer_rs_init`: MFS answers RS's init request from its receive
+# loop, and the handshake's shape lives in one place rather than per server.
+minix-util = { path = "../minix-util" }
 
 [dev-dependencies]
 # The integration tests drive the servers through the block cache, which is

@@ -78,6 +78,7 @@ dependencies = [
  "arch-common",
  "libs",
  "minix-rt",
+ "minix-util",
 ]
 
 [[package]]
