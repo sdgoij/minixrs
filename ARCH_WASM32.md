@@ -10,10 +10,11 @@ real servers, built for `os = "minix"`, spawned by the kernel through to their
 own main loops and the DS→RS→PM init handshake), M3a (the boot filesystem
 image serving from a RAM disk instance), M3b (VM and MFS up, initialised, and
 waiting on a receive), M3c (VFS mounts root and reaches its main loop — the whole
-chain, VM → ramdisk → MFS → VFS, running on wasm), and M3d (INIT, the first *user*
-process: it runs, writes to the console through the kernel, reaches PM, and exits) are
-all **done** — see §11 for commands and results. What M3 has not reached is the rest of
-M3: no console device, no TTY server, and no shell.
+chain, VM → ramdisk → MFS → VFS, running on wasm), M3d (INIT, the first *user*
+process: it runs, writes to the console through the kernel, reaches PM, and exits), and
+M3e (the tty server, and INIT's stdio routed through VFS and the tty to the real console)
+are all **done** — see §11 for commands and results. What M3 has not reached is its last
+piece: the shell, which needs exec-as-module-instantiation (§7.2).
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1084,7 +1085,8 @@ touches their own statics — which is exactly why nothing had noticed.
 
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
 real coreutils. Progress: M3a (RAM disk), M3b (VM + MFS), M3c (VFS mounts root),
-M3d (INIT, the first user process), M3e (the tty server, partial) — see below.
+M3d (INIT, the first user process), M3e (the console, end to end) — see below. What
+is left is the shell, which needs §7.2's module-backed exec.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
 existing persistence test adapted.
@@ -1237,12 +1239,11 @@ Its no-console path is a spin with no syscall in it, which on this target hangs 
 synchronously rather than failing (finding 12), so running `init` unmodified has to wait for
 those.
 
-**M3e — The console's tty server. Status: PARTIAL — the driver runs, the open is not
-exercised yet.**
+**M3e — The console, end to end. Status: DONE.**
 
 ```text
 sh tools/wasm-servers/run.sh
-# 39/39 checks passed, over ten servers and one user process
+# 42/42 checks passed, over ten servers and one user process
 ```
 
 The tty server is spawned at `TTY_PROC_NR` and reaches its main loop, which is the third
@@ -1254,6 +1255,27 @@ not up. The harness reads the result from devman's *own* device table rather tha
 tty's side: what a driver registers is devman's state, and a tty whose registration was
 refused is indistinguishable from one whose registration landed, because
 `devman_add_device` retries only on the one retryable errno and gives up quietly otherwise.
+
+INIT then walks the chain, in `userland::init`'s own order, and the console says so:
+
+```text
+kernel: init: open(/dev/console) -> 0
+kernel: init: dup2 onto 0..2 -> 0
+kernel: init: stdio is VFS-routed
+kernel: init: VFS-routed write -> 27
+```
+
+The third and fourth lines are the result: from the `set_fd_vfs` on, nothing INIT writes
+takes the kernel's console shortcut. It leaves as a `VFS_WRITE`, VFS vircopies the bytes out
+of INIT's instance into a `CDEV_WRITE` message, and the tty writes them with its own
+`write(1)` — so a line on the console and a returned byte count are two independent pieces
+of evidence about the same chain, and the harness checks both. Nothing in the port had
+walked that route before: every `write` any process had made went to the kernel and stopped
+there.
+
+The dup2 is load-bearing rather than bookkeeping, and that is why it is checked on its own:
+forwarding fd 1 to VFS asks VFS for *fd 1's* filp, so with nothing dup2'd onto fd 1 the
+VFS-routed write answers `EBADF` instead of reaching a driver.
 
 Two things were worth establishing rather than assuming, and both came out favourably:
 
@@ -1268,11 +1290,15 @@ Two things were worth establishing rather than assuming, and both came out favou
   code says so: `TODO(1A.5): replace with RS-driven registration once tty publishes its
   dev_nr at boot` (`PORTING_PLAN.md` finding 30).
 
-What is left is to exercise it: a probe process that opens `/dev/console` the way
-`userland::init` does, dup2's it onto 0..2, marks those fds VFS-owned, and writes a line
-that has to come back out through VFS → the tty → the host console. The chain exists end
-to end now, but nothing has walked it, and "the two halves are present" is not the same
-claim as "an open reaches the driver".
+The first attempt at the open answered `ENOSYS`, and that turned out to be the most
+valuable part of the milestone: a server answering "I do not know that call" because the
+message it received had no `m_type` in it. Every kernel-*forwarded* syscall was sending its
+request out of the wrong memory on this port — the kernel builds it in the caller's
+`p_sendmsg` and then asks the copy seam to fetch that address from the *caller's* instance,
+where it means something else entirely. Only the identity-mapped shipping arches made the
+fetch resolve to the right bytes. `PORTING_PLAN.md` finding 31 has the diagnosis and the
+fix; it is why the milestone could not have been reached before, and why nothing else
+noticed — no process's own IPC goes through that path.
 
 ## 12. Risks, ranked
 

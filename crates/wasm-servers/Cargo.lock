@@ -151,6 +151,7 @@ dependencies = [
  "arch-common",
  "fs",
  "minix-rt",
+ "minix-std",
  "minix-util",
  "servers",
  "userland",

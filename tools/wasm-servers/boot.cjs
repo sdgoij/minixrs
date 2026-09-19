@@ -874,11 +874,13 @@ check(
 // INIT at endpoint 10 is pid 11. (C gives init `INIT_PID` of 1; that is not this
 // port's scheme, and changing it is not this milestone's business.)
 const sawBanner = timeline.some((l) => l.includes('init: booting MINIX/Rust'));
-const sawStop = timeline.some((l) => l.includes('no console device or shell yet'));
+// A line printed *before* `set_fd_vfs`, so it can only have arrived by the shortcut:
+// afterwards INIT's writes go the long way and the checks below take over.
+const sawShortcut = timeline.some((l) => l.includes('init: open(/dev/console) ->'));
 check(
   "INIT's console output reached the harness through the kernel",
-  sawBanner && sawStop,
-  `banner=${sawBanner} closingLine=${sawStop}`
+  sawBanner && sawShortcut,
+  `banner=${sawBanner} shortcutLine=${sawShortcut}`
 );
 const pidLine = timeline.find((l) => l.includes('init: pid='));
 check(
@@ -906,6 +908,45 @@ note(
     'server behind VFS\'s device layer) and `/bin/sh` exists to be exec\'d, and its ' +
     'no-console path is a spin with no syscall in it, which on this target hangs the ' +
     'host instead of failing (finding 12).'
+);
+
+// ----------------------------------- M3e: INIT's stdio, through VFS and the tty
+
+// Read from INIT's own report rather than off the console, because a line on the
+// console would also be there if the kernel's shortcut had served it. Three values:
+// the open's descriptor (or a negated errno), the dup2 status, and the byte count the
+// VFS-routed write returned. A step the run never reached stays at its sentinel, so
+// "not attempted" cannot be read as "succeeded with zero" -- which is exactly how the
+// dup2 check below passed while the open was still failing.
+const initReport = (() => {
+  const view = new DataView(init.memory.buffer);
+  const ptr = init.inst.exports.init_report_ptr();
+  return Array.from({ length: 3 }, (_, i) => Number(view.getBigInt64(ptr + i * 8, true)));
+})();
+check(
+  'INIT opened /dev/console through VFS to the tty',
+  initReport[0] >= 0,
+  `open status=${initReport[0]} (>=0 is a descriptor, negative is an errno)`
+);
+// The dup2 is what puts a filp on fd 1; without it the VFS-routed write below would
+// answer EBADF rather than reaching a driver, so this is a real precondition and not
+// bookkeeping. `-4096` here means the step was never reached.
+check(
+  "INIT dup2'd the console onto 0..2",
+  initReport[1] === 0,
+  `dup2 status=${initReport[1]} (-4096 = never reached)`
+);
+// The milestone: this write did *not* take the kernel's console shortcut. It left as a
+// VFS_WRITE, VFS vircopied the bytes out of INIT's instance into a CDEV_WRITE message,
+// and the tty wrote them with its own write(1) -- so both the count and the line are
+// evidence, and neither alone would be.
+const VFS_LINE = 'init: stdio is VFS-routed';
+const VFS_LINE_BYTES = VFS_LINE.length + 2; // + CRLF
+const sawVfsLine = timeline.some((l) => l.includes(VFS_LINE));
+check(
+  'a write from INIT reached the console through VFS and the tty',
+  initReport[2] === VFS_LINE_BYTES && sawVfsLine,
+  `write status=${initReport[2]} (expected ${VFS_LINE_BYTES}), line on console=${sawVfsLine}`
 );
 
 note(

@@ -242,12 +242,22 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             // code handles this by clearing REPLY_PEND before RECEIVING.
 
             let dst_msg: &mut [u8; MESSAGE_SIZE] = &mut (*recv_ptr).p_delivermsg;
-            let _ = crate::ipc::copy_from_user(
-                caller_ptr,
-                m_ptr as u64,
-                dst_msg.as_mut_ptr(),
-                MESSAGE_SIZE,
-            );
+            // A message the kernel built is already addressable here. Fetching it through
+            // `copy_from_user` would look for it in the *caller's* address space, where
+            // that same address holds something else entirely; the fetch only reached the
+            // right bytes on a hardware arch because the kernel is identity-mapped in every
+            // address space, so the walk resolved to the bytes that were already there
+            // (finding 31).
+            if flags & FROM_KERNEL != 0 {
+                core::ptr::copy(m_ptr, dst_msg.as_mut_ptr(), MESSAGE_SIZE);
+            } else {
+                let _ = crate::ipc::copy_from_user(
+                    caller_ptr,
+                    m_ptr as u64,
+                    dst_msg.as_mut_ptr(),
+                    MESSAGE_SIZE,
+                );
+            }
 
             let src_ep = (*caller_ptr).p_endpoint;
             let ep_bytes = src_ep.to_ne_bytes();
@@ -326,12 +336,18 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             }
 
             let caller_msg: &mut [u8; MESSAGE_SIZE] = &mut (*caller_ptr).p_sendmsg;
-            let _ = crate::ipc::copy_from_user(
-                caller_ptr,
-                m_ptr as u64,
-                caller_msg.as_mut_ptr(),
-                MESSAGE_SIZE,
-            );
+            // See the delivery branch above: for a forwarded syscall `m_ptr` *is*
+            // `p_sendmsg`, so this is a no-op rather than a fetch out of another memory.
+            if flags & FROM_KERNEL != 0 {
+                core::ptr::copy(m_ptr, caller_msg.as_mut_ptr(), MESSAGE_SIZE);
+            } else {
+                let _ = crate::ipc::copy_from_user(
+                    caller_ptr,
+                    m_ptr as u64,
+                    caller_msg.as_mut_ptr(),
+                    MESSAGE_SIZE,
+                );
+            }
 
             if flags & FROM_KERNEL != 0 {
                 (*caller_ptr)
@@ -858,6 +874,26 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
 ///
 /// All process pointers must be valid.
 pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i32 {
+    unsafe { do_sync_ipc_flags(caller_ptr, m_ptr, call, 0) }
+}
+
+/// `do_sync_ipc` with send flags.
+///
+/// `FROM_KERNEL` says the message at `m_ptr` lives in *this* kernel's memory rather than
+/// in the caller's address space, which is true of every kernel-forwarded syscall: those
+/// build their request in the caller's `p_sendmsg`. The distinction has to be carried,
+/// because the copy that fetches the message must know which of the two memories to
+/// fetch it from (`mini_send`, finding 31).
+///
+/// # Safety
+///
+/// All process pointers must be valid.
+pub unsafe fn do_sync_ipc_flags(
+    caller_ptr: *mut Proc,
+    m_ptr: *mut u8,
+    call: i32,
+    flags: i32,
+) -> i32 {
     unsafe {
         let src_dst_e = core::ptr::read_unaligned(m_ptr.cast::<[u8; 8]>());
         let ep = i32::from_ne_bytes([src_dst_e[0], src_dst_e[1], src_dst_e[2], src_dst_e[3]]);
@@ -894,7 +930,7 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
                 (*caller_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                let r = mini_send(caller_ptr, ep, m_ptr, 0);
+                let r = mini_send(caller_ptr, ep, m_ptr, flags);
                 if r != OK {
                     return r;
                 }
@@ -909,7 +945,7 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
                 // so mini_receive skips notification checks as intended.
                 mini_receive(caller_ptr, ep, m_ptr, 0)
             }
-            SEND => mini_send(caller_ptr, ep, m_ptr, 0),
+            SEND => mini_send(caller_ptr, ep, m_ptr, flags),
             RECEIVE => {
                 // C: RECEIVE clears REPLY_PEND before mini_receive
                 (*caller_ptr)
@@ -917,7 +953,7 @@ pub unsafe fn do_sync_ipc(caller_ptr: *mut Proc, m_ptr: *mut u8, call: i32) -> i
                     .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
                 mini_receive(caller_ptr, ep, m_ptr, 0)
             }
-            SENDNB => mini_send(caller_ptr, ep, m_ptr, NON_BLOCKING),
+            SENDNB => mini_send(caller_ptr, ep, m_ptr, flags | NON_BLOCKING),
             NOTIFY => mini_notify((*caller_ptr).p_endpoint, ep),
             _ => crate::system::EBADREQUEST,
         }
@@ -941,7 +977,10 @@ pub unsafe fn syscall_sendrec_status(caller_ptr: *mut Proc, msg: &mut [u8; MESSA
         (*caller_ptr)
             .p_misc_flags
             .fetch_or(MiscFlags::SYS_FWD_REPLY.bits(), Ordering::Relaxed);
-        let r = do_sync_ipc(caller_ptr, msg.as_mut_ptr(), SENDREC);
+        // `msg` is the caller's `p_sendmsg`, which is this kernel's memory, so the send
+        // has to say so: the copy that moves it would otherwise read the caller's own
+        // address space at a kernel address (finding 31).
+        let r = do_sync_ipc_flags(caller_ptr, msg.as_mut_ptr(), SENDREC, FROM_KERNEL);
         if r != 0 {
             (*caller_ptr)
                 .p_misc_flags

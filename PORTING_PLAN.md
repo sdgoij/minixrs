@@ -6909,6 +6909,40 @@ the label copy in `do_mapdriver` is the one that has to go through the copy seam
 port (`vm::read_from_proc`, as findings 13, 16 and 28 do) rather than a raw pointer read of
 RS's memory.
 
+**31. Every kernel-forwarded syscall was sending its request out of the wrong memory.**
+Found by M3e's first attempt to open `/dev/console`, which answered `ENOSYS` — VFS's answer
+for a call number it does not know, because the message it received had no `m_type` in it.
+The forwarded syscalls (`sys_open_handler`, `sys_write_handler`, `sys_read_handler` and the
+rest) build their request in the caller's `p_sendmsg`, which is *this kernel's* memory, and
+hand that address to `mini_send`. `mini_send` fetched it with
+`copy_from_user(caller, m_ptr, ..)`, and on wasm that seam reads `m_ptr` out of the
+**caller's** instance — there is no "the kernel's memory is also the caller's" here, so the
+fetch returned whatever that address holds in the process's own image. Only the
+identity-mapped shipping arches made this work: there the walk resolved to the same bytes,
+and a copy meant to fetch a user message degenerated into the memcpy it should always have
+been.
+
+`FROM_KERNEL` already existed for exactly this — `sched::notify_scheduler` passes it for a
+message on the kernel's stack — and `mini_send` *recorded* it in
+`MiscFlags::SENDING_FROM_KERNEL` and then copied as though the message were the caller's.
+Nothing read the flag. The fix carries it to both copy sites in `mini_send`: with
+`FROM_KERNEL` the message is already addressable where it is, so the copy is a `memcpy` into
+`p_delivermsg` (or a no-op into `p_sendmsg`, which for a forwarded syscall is where it
+already is). `do_sync_ipc` gained a flags-carrying sibling so `syscall_sendrec_status` can
+say so; the ten user-side callers are untouched, because a user syscall's message really is
+in the caller's memory — and there the kernel's own write of the destination endpoint into
+`msg_ptr` is the *separate* seam site that works only because `do_sync_ipc` reads it back
+out of the same place it wrote it.
+
+Why it could hide for so long: it is invisible to every IPC made *by a process* (those build
+their message on their own stack or in their own statics, so the seam reads the right
+memory), and it appears only for a syscall the kernel *forwards* to a server — which on this
+port is every file operation a user process makes. It is also silent in the shape this port
+keeps meeting: the server answers an error that reads like a missing feature (`ENOSYS`)
+rather than like a message that arrived unreachable. The check that caught it was the
+first thing to make a user process open a *device*, and the diagnosis came from the tty's
+trace showing twelve syscalls of its own init and no request at all.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

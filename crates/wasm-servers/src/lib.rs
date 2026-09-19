@@ -344,6 +344,53 @@ fn decimal(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
     &out[i..]
 }
 
+/// Print a signed decimal, for the report lines that carry a status.
+fn write_i32(v: i32) {
+    let mut out = [0u8; 12];
+    let mut n = v.unsigned_abs();
+    let mut i = out.len();
+    loop {
+        i -= 1;
+        out[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        i -= 1;
+        out[i] = b'-';
+    }
+    userland::write_out(&out[i..]);
+}
+
+/// Sentinel for a report entry the run never reached, so a step that did not happen
+/// cannot be mistaken for one that succeeded with a zero status.
+const INIT_NOT_REACHED: i64 = -4096;
+
+/// Facts about INIT's console setup for the host to assert numerically, rather than
+/// parse out of the console: `[open status, dup2 status, VFS-routed write status]`,
+/// where a negative status is a negated errno and the write's is a byte count.
+static mut INIT_REPORT: [i64; 3] = [INIT_NOT_REACHED; 3];
+
+/// Address of the report, so the host does not have to parse the module layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn init_report_ptr() -> u32 {
+    core::ptr::addr_of_mut!(INIT_REPORT) as u32
+}
+
+fn init_report(idx: usize, value: i64) {
+    // SAFETY: single-threaded instance, and the host reads the report only after the
+    // entry point has blocked or exited. `addr_of_mut!` avoids taking a reference to the
+    // mutable static.
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(INIT_REPORT).cast::<i64>().add(idx),
+            value,
+        )
+    };
+}
+
 /// The first *user* process: INIT, in the slot `BOOT_IMAGE` already reserves for
 /// it.
 ///
@@ -367,14 +414,22 @@ fn decimal(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
 /// write from any instance reached the console before findings 28 and 29, so this
 /// is also the first process that could have shown the difference.
 ///
-/// It stops at the edge of what M3 has built. The rest of `userland::init` opens
-/// `/dev/console`, dup2's it onto 0..2 and marks those fds VFS-owned so the shell
-/// it execs inherits tty-backed stdio — and neither the console device (a tty
-/// server behind VFS's device layer) nor `/bin/sh` exists on this port yet. Its
-/// no-console path is a spin with no syscall in it, which on this target hangs the
-/// host synchronously instead of failing (finding 12), so the first user process
-/// ends here having proved what can be proved without them: that a process which is
-/// not a server runs, writes, reaches a server, and exits.
+/// It walks the console chain, which is the whole of M3e: `userland::init`'s own next
+/// steps, in its order — open `/dev/console`, dup2 the fd onto 0..2, then tell the kernel
+/// those fds are VFS's. From the `set_fd_vfs` on, fd 1 writes leave the kernel's console
+/// shortcut and take the long way: the kernel forwards them to VFS, VFS vircopies them
+/// out of *this* instance into a `CDEV_WRITE` message, and the tty writes the bytes with
+/// its own `write(1)`. `/dev/console` is major 5 in the boot image and VFS's dmap maps
+/// major 5 to the tty instance, so the open needs nothing else — which is exactly what
+/// had not been established. The dup2 has to come before the flag: forwarding fd 1 to
+/// VFS asks VFS for *fd 1's* filp, and with nothing dup2'd onto fd 1 there is no filp and
+/// the answer is EBADF.
+///
+/// It exits rather than exec'ing a shell, because exec on this port is module
+/// instantiation (§7.2) and the host has not implemented it. `userland::init` would print
+/// `exec failed` and spin in a `getpid` loop — a spin *with* a syscall, so the harness's
+/// budget is the only thing that would end it and the run's end would be an artefact
+/// rather than a result.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_init() {
     userland::write_out(b"init: booting MINIX/Rust\r\n");
@@ -382,12 +437,60 @@ pub extern "C" fn minix_init() {
     let mut buf = [0u8; 10];
     userland::write_out(decimal(minix_rt::getpid() as u32, &mut buf));
     userland::write_out(b"\r\n");
-    userland::write_out(b"init: no console device or shell yet, exiting\r\n");
-    // Through the real exit path, so PM's half of a process lifecycle runs: the
-    // kernel marks this process SIGNALED | SIG_PENDING | SLOT_FREE, queues the exit
-    // for PM to read with GETKSIG, and notifies PM as the signal manager.
-    // `minix-rt::exit` then traps, because this target has no return path out of an
-    // entry point and a spin would hang the host; the harness reads a trap whose
-    // last syscall was exit as the exit it is.
+
+    // Every line above this one came out through the kernel's console shortcut, which is
+    // what serves fd 1 until a process says otherwise. These are the first writes in the
+    // port that have to reach a char driver.
+    let fd = minix_rt::open(b"/dev/console", 0o2); // O_RDWR
+    init_report(0, fd);
+    userland::write_out(b"init: open(/dev/console) -> ");
+    write_i32(fd as i32);
+    userland::write_out(b"\r\n");
+    if fd < 0 {
+        userland::write_out(b"init: no console, exiting\r\n");
+        minix_rt::exit(1);
+    }
+    let fd = fd as i32;
+
+    let mut dup_err = 0i32;
+    for slot in 0..3 {
+        if let Err(e) = minix_std::fs::dup2(fd, slot) {
+            dup_err = e.0;
+        }
+    }
+    init_report(1, -dup_err as i64);
+    userland::write_out(b"init: dup2 onto 0..2 -> ");
+    write_i32(-dup_err);
+    userland::write_out(b"\r\n");
+    if dup_err != 0 {
+        userland::write_out(b"init: stdio not routed, exiting\r\n");
+        minix_rt::exit(1);
+    }
+
+    // SAFETY: this instance has one thread, and these are its own descriptors. The kernel
+    // reads this flag to decide whether fd 1's writes take the shortcut or go to VFS.
+    unsafe {
+        minix_rt::set_fd_vfs(0, 1);
+        minix_rt::set_fd_vfs(1, 1);
+        minix_rt::set_fd_vfs(2, 1);
+    }
+
+    // From here on every line is evidence about the chain rather than a report about the
+    // process: it can only appear on the console if VFS routed it to the tty and the tty
+    // wrote it. The explicit `write` is what puts a number in the report; `write_out`
+    // after it is the same call a shell would make.
+    const VFS_LINE: &[u8] = b"init: stdio is VFS-routed\r\n";
+    let n = unsafe { minix_rt::write(1, VFS_LINE.as_ptr(), VFS_LINE.len()) };
+    init_report(2, n);
+    userland::write_out(b"init: VFS-routed write -> ");
+    write_i32(n as i32);
+    userland::write_out(b"\r\n");
+
+    // Through the real exit path, so PM's half of a process lifecycle runs: the kernel
+    // marks this process SIGNALED | SIG_PENDING | SLOT_FREE, queues the exit for PM to
+    // read with GETKSIG, and notifies PM as the signal manager. `minix-rt::exit` then
+    // traps, because this target has no return path out of an entry point and a spin
+    // would hang the host; the harness reads a trap whose last syscall was exit as the
+    // exit it is.
     minix_rt::exit(0);
 }

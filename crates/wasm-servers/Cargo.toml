@@ -26,8 +26,10 @@ minix-rt = { path = "../minix-rt" }
 # The DS client below is the real one, not a hand-rolled message.
 minix-util = { path = "../minix-util" }
 # INIT is the first *user* process, and it writes with the real `userland::write_out`
-# rather than a copy of it.
+# rather than a copy of it. `dup2` is how it routes that fd at the console, which is the
+# same call `userland::init` makes (`minix-std`'s, not a private one).
 userland = { path = "../userland" }
+minix-std = { path = "../minix-std" }
 
 [profile.release]
 panic = "abort"
