@@ -20,7 +20,9 @@
 //! same in `sef_cb_init_fresh` (`sys_safecopyfrom(RS_PROC_NR,
 //! info->rproctab_gid, 0, rprocpub, sizeof(rprocpub))` then `map_service` per
 //! entry in use), and that seeding is what lets a *service* publish at all: an
-//! endpoint DS cannot name is refused with EPERM.
+//! endpoint DS cannot name is refused with EPERM. DS then answers the request
+//! (`minix_util::rs::rs_init_ready`), which is what tells RS it has finished
+//! initialising — the label table is in place before DS reports ready.
 //! All store operations are fully implemented and tested.
 
 #![allow(dead_code)]
@@ -998,6 +1000,15 @@ pub fn ds_server_main() {
                     // DS unable to accept a publish from anyone. C panics here
                     // for the same reason.
                     panic!("ds: sys_safecopyfrom(rs) failed: {e}");
+                }
+
+                // Answer the request, which is what moves DS out of
+                // `RS_INITIALIZING`: C's `sef_cb_init_fresh` returns once it has
+                // copied the table, and SEF then sends this reply. So the table
+                // is consumed before DS is reported ready — the reverse order
+                // would let RS believe DS is serving while it has no labels.
+                if let Err(e) = minix_util::rs::rs_init_ready(0) {
+                    panic!("ds: init-ready reply to rs failed: {e:?}");
                 }
                 continue;
             }

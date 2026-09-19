@@ -4031,14 +4031,36 @@ trait Driver {
     `rs_up` then gets its label published to DS by RS's `do_up` (C's
     `publish_service`) and can publish and read back; the harness client reports
     `rs_up=0`, `publish=0`, `retrieve=0`, `value=0x2a`.
+  - **DS answers the init request, and RS waits for the answer.** `do_init_ready`
+    (C's `request.c`) consumes DS's `RS_INIT` result: the slot RS put into
+    `RS_INITIALIZING` when it sent the request moves to `RS_ACTIVE`, a reply from a
+    slot RS never asked to initialise is `EINVAL`, and a service reporting a
+    *failed* init is treated as crashed and gets no reply (`EDONTREPLY`, which the
+    loop honours by staying silent). Both guards are pinned: the host tests drive
+    each branch, and the harness has the client — a process RS *does* know, since it
+    announced itself — claim to be initialised and get `EINVAL`, because being known
+    is not the same as having been asked. DS sends its answer through
+    `minix_util::rs::rs_init_ready` once it has copied the rproctab — the table is
+    consumed *before* DS reports ready, because the reverse order would let RS
+    believe DS is serving while it has no labels. RS blocks for the answer during
+    its own init rather than finding it in its main loop, as C's
+    `catch_boot_init_ready` does; that is not only tidiness — see finding 21, where
+    leaving the answer to the loop let a client request be dispatched to DS while
+    DS was still inside the `SENDREC` carrying its answer, and RS's next request to
+    DS was then refused by the kernel's deadlock detector.
+  - **What is still not here:** RS sends an `RS_INIT` request only to DS. C sends
+    one to every service it starts, so the runtime-start path needs a request per
+    service, and the services that never answer need the period/heartbeat and
+    restart machinery C pairs with `RS_INITIALIZING`.
   - **Transport differs from C; the grant does not.** C passes `rproctab_gid` as
     SEF init info at *spawn* time and this port has no channel for that, so RS
-    sends the `RS_INIT` message after both processes exist. It is a *blocking* send
-    (`SEND`, not `SENDREC`), which cannot deadlock because both ends are already
-    in the kernel's process table: DS reaching its first receive is all the
-    rendezvous needs, so the handshake does not depend on which of the two is
-    scheduled first. What this needed from the kernel is findings 16 (the grant
-    entry read) and 17 (the privilege-slot allocator `SYS_SETGRANT` uses).
+    sends the `RS_INIT` message after both processes exist. The send itself is a
+    *blocking* send (`SEND`, not `SENDREC`), which cannot deadlock because both ends
+    are already in the kernel's process table: DS reaching its first receive is all
+    the rendezvous needs, so it does not depend on which of the two is scheduled
+    first — but the *answer* is awaited, from DS's endpoint, before RS enters its
+    loop. What this needed from the kernel is findings 16 (the grant entry read) and
+    17 (the privilege-slot allocator `SYS_SETGRANT` uses).
   - `do_publish_label` now carries C's "only RS may publish labels" check
     (`store.c` `do_publish`: `(flags & DSF_TYPE_LABEL) && m_source != RS_PROC_NR`
     → EPERM). The U32 path deliberately does not take it: C has no RS-only
@@ -6477,6 +6499,49 @@ a shape: **a latent layout overlap can be armed by any size change.** It is the
 second instance of that shape in this port, and when a boot breaks with no
 diagnostic after a change that only grew code, the linker script is the first
 place to look rather than the change.
+
+**20. `EDONTREPLY` had three definitions and two values, and the ipc codes around
+it are Linux's.** Found while implementing `do_init_ready`, which is C's first
+*user* of the "don't send a reply" pseudo-code: `sys/sys/errno.h` has
+`ENOTREADY -201`, `EDEADSRCDST -202`, `EDONTREPLY -203`, `ELOCKED -208`. The port
+had `arch_common::ipc::EDONTREPLY = -201`, `ELOCKED = -202`, and an
+`ELOCKWILLBLOCK = -203` that `errno.h` does not contain at all;
+`minix_std::EDONTREPLY` and a local copy in `servers/rs.rs` both carried the same
+`-201`. Only the kernel's `system::EDONTREPLY` (`-203`) was right — so a server
+returning the value its own crate called `EDONTREPLY` would have returned C's
+`ENOTREADY`, and the kernel's reply-suppression check would not have recognised
+it. Fixed in `arch_common::ipc` (`ENOTREADY`/`EDEADSRCDST` added, `EDONTREPLY` and
+`ELOCKED` corrected, `ELOCKWILLBLOCK` removed), in `minix-std`, and in `rs.rs`,
+which now imports the constant instead of redefining it.
+
+**Not fixed, and recorded deliberately:** `kernel/src/ipc.rs` carries a third set
+— `ENOTREADY = -73`, `ELOCKED = -132`, `EDEADSRCDST = -199` — which are Linux
+errno values (`EDESTADDRREQ`, `ENOTSUP`-adjacent, `ENETUNREACH`-adjacent) rather
+than MINIX's. They are what `mini_send`/`mini_receive` *return*, so correcting
+them changes every IPC failure a server can observe; the host tests name the
+constants rather than pinning values, so the change is mechanical but not small,
+and it deserves its own pass. That this work had to read `-132` out of a syscall
+trace to identify it is the argument for doing that pass.
+
+**21. An init reply left to the main loop can be overtaken by a request, and the
+kernel refuses the result with `ELOCKED`.** The first version of DS's
+init-complete reply was consumed by RS's dispatch loop (`RS_INIT =>
+do_init_ready`), which is where the port's message handling naturally puts it. The
+handshake worked and the client broke: `rs_up` came back `-132`. The trace said
+why — RS's `publish_service` `SENDREC` to DS was recorded *once*, so it never
+blocked, it only failed. The window is narrow but real: DS's answer is outstanding,
+so DS is inside the `SENDREC` that carries it, and a client request delivered to RS
+in that window makes RS send DS a **new** request while DS is mid-`SENDREC`. The
+kernel's deadlock detector then sees `caller(RS) → dst(DS)` with DS's
+`P_BLOCKEDON` pointing back at RS and `RTS_SENDING` still set (this port keeps
+`SENDING` through a `SENDREC`'s receive phase, and C's size-2 escape reads exactly
+that bit to say "a SEND/RECEIVE pair, not a deadlock") — so it refuses the send as
+`ELOCKED`. C cannot hit this because its boot init *blocks* for the answer
+(`catch_boot_init_ready`), so no service is ever mid-`SENDREC` while RS serves
+someone else. Fixed by blocking for the answer during RS's init as well. Worth
+keeping as a shape: **a reply that arrives as ordinary traffic can interleave with
+the request that produced it**, and the interleaving presents as a deadlock rather
+than as an ordering problem.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

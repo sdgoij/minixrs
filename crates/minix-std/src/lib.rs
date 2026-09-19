@@ -137,7 +137,8 @@ pub const EMSGSIZE: i32 = -90;
 pub const EPROTONOSUPPORT: i32 = -93;
 pub const EAFNOSUPPORT: i32 = -97;
 pub const ENOTCONN: i32 = -107;
-pub const EDONTREPLY: i32 = -201;
+/// Pseudo-code: do not send a reply (C `errno.h`: `_SIGN 203`).
+pub const EDONTREPLY: i32 = -203;
 pub const SUSPEND: i32 = -998;
 
 // IPC primitives

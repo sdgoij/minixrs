@@ -19,14 +19,20 @@
 //! The IPC message loop runs, and `tools/wasm-servers` drives it. It also hands
 //! DS the public process table — C's `RS_INIT` handshake, where `rproctab_gid`
 //! is a read-only grant over `rprocpub` — which is what seeds DS's label table and
-//! lets a service publish at all (Phase 12.4). What is still deferred is the rest
-//! of SEF: the init-complete *reply* a service sends back, which RS's
-//! `do_init_ready` consumes.
+//! lets a service publish at all (Phase 12.4). DS answers that request with its
+//! own `RS_INIT` result, which `do_init_ready` consumes: the slot RS put into
+//! `RS_INITIALIZING` when it sent the request becomes `RS_ACTIVE`.
+//!
+//! DS is the only service this port sends an init request to, so it is the only
+//! one whose slot waits for a reply — the other boot services are marked active at
+//! init because nothing asked them to initialise. C sends a request to every
+//! service it starts, which is what a runtime-start path will need before those
+//! services can report ready.
 //! All service table management and lookup functions are fully implemented.
 
 #![allow(dead_code, clippy::missing_safety_doc)]
 
-use arch_common::ipc::Message;
+use arch_common::ipc::{EDONTREPLY, Message};
 use arch_common::safecopies::{
     CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CpDirect, CpGrant, CpUnion, GRANTEE_ANY,
 };
@@ -117,7 +123,6 @@ pub const RS_LU_PREPARE: i32 = arch_common::com::RS_LU_PREPARE as i32;
 
 const ESRCH: i32 = -3;
 const EEXIST: i32 = -17;
-const EDONTREPLY: i32 = -201;
 
 // Types
 
@@ -523,6 +528,35 @@ pub unsafe fn mark_initialized(idx: usize, endpoint: i32) -> Result<(), i32> {
     Ok(())
 }
 
+/// Mark a service as initializing, so its init reply is expected and a second
+/// one is refused. C's `init_service`: `rp->r_flags |= RS_INITIALIZING` before the
+/// `RS_INIT` request goes out.
+pub unsafe fn mark_initializing(idx: usize) -> Result<(), i32> {
+    if idx >= NR_SYS_PROCS {
+        return Err(EINVAL);
+    }
+    let base = RPROC.as_ptr();
+    let rp = unsafe { &mut *base.add(idx) };
+    if rp.flags & RS_IN_USE == 0 {
+        return Err(EINVAL);
+    }
+    rp.flags |= RS_INITIALIZING;
+    rp.flags &= !RS_ACTIVE;
+    Ok(())
+}
+
+/// Whether `endpoint`'s slot is active and no longer initializing — the state a
+/// consumed init reply is supposed to produce.
+pub unsafe fn is_active(endpoint: i32) -> bool {
+    match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(idx) => {
+            let flags = unsafe { (*RPROC.as_ptr().add(idx)).flags };
+            flags & RS_ACTIVE != 0 && flags & RS_INITIALIZING == 0
+        }
+        None => false,
+    }
+}
+
 /// Mark a service as terminated.
 pub unsafe fn mark_terminated(idx: usize) {
     if idx >= NR_SYS_PROCS {
@@ -780,13 +814,45 @@ unsafe fn do_lookup(msg: &mut Message) -> i32 {
     }
 }
 
-/// Service reports initialization complete (RS_INIT).
+/// Service reports initialization complete (`RS_INIT`).
+///
+/// C's `do_init_ready`. A service answers the `RS_INIT` request RS sent it — for
+/// DS that request carries the `rproctab` grant — with its own result, and the
+/// reply is what moves the slot out of `RS_INITIALIZING`. A reply from a slot RS
+/// never asked to initialise is `EINVAL`, and a service that reports a *failed*
+/// init is treated as crashed (C's `crash_service`, whose restart policy this port
+/// does not have yet: the slot is marked terminated and left for it). That last
+/// case is why the caller gets no reply — `EDONTREPLY` keeps RS's loop silent,
+/// because the sender is being killed rather than answered.
 unsafe fn do_init_ready(msg: &Message) -> i32 {
     let endpoint = msg.m_source;
-    match unsafe { lookup_slot_by_endpoint(endpoint) } {
-        Some(slot) => unsafe { mark_initialized(slot, endpoint) }.map_or_else(|e| e, |_| OK),
-        None => ESRCH,
+    // The payload's first word is `mess_rs_init.result`, which the service's
+    // init-response callback writes (C `sef_init.c`).
+    // SAFETY: reading a `Payload` union field is unsafe; `m2i1` is the first word
+    // of the payload and the message is a live value, so the read is in bounds.
+    let result = unsafe { msg.m_payload.m2.m2i1 };
+
+    // RS has no init request to answer, so a failure result here is RS's own.
+    if endpoint == arch_common::com::RS_PROC_NR && result != OK {
+        return result;
     }
+
+    let slot = match unsafe { lookup_slot_by_endpoint(endpoint) } {
+        Some(slot) => slot,
+        None => return ESRCH,
+    };
+
+    let flags = unsafe { (*RPROC.as_ptr().add(slot)).flags };
+    if flags & RS_INITIALIZING == 0 {
+        return EINVAL;
+    }
+
+    if result != OK {
+        unsafe { mark_terminated(slot) };
+        return EDONTREPLY;
+    }
+
+    unsafe { mark_initialized(slot, endpoint) }.map_or_else(|e| e, |_| OK)
 }
 
 /// Live update prepare (RS_LU_PREPARE) — not yet implemented.
@@ -802,6 +868,11 @@ fn do_upd_ready(_msg: &Message) -> i32 {
 pub fn rs_server_main() {
     #[cfg(target_os = "minix")]
     {
+        // IPC syscall numbers.
+        const RECEIVE_CALL: u64 = 47;
+        const SENDNB_CALL: u64 = 51;
+        const ANY: i32 = 0x0000ffff;
+
         // Initialize RS's process table.
         unsafe {
             rs_init();
@@ -845,6 +916,18 @@ pub fn rs_server_main() {
             panic!("rs: SYS_SETGRANT failed");
         }
 
+        // DS is the one service RS sends an init request to, so it is the one whose
+        // slot waits for a reply — C's `init_service` marks the slot initializing
+        // immediately before the request. The services above are active because this
+        // port asks nothing of them.
+        let ds_slot = match unsafe { lookup_slot_by_endpoint(arch_common::com::DS_PROC_NR) } {
+            Some(slot) => slot,
+            None => panic!("rs: ds is not registered, so it cannot be asked to initialize"),
+        };
+        if let Err(e) = unsafe { mark_initializing(ds_slot) } {
+            panic!("rs: cannot put ds into RS_INITIALIZING: {e}");
+        }
+
         // A blocking send, not `asynsend` as in C: the destination is a boot
         // service that is already in the process table, so this is a rendezvous
         // that completes as soon as DS reaches its first receive — which makes it
@@ -861,10 +944,50 @@ pub fn rs_server_main() {
             panic!("rs: RS_INIT to DS failed: {sent}");
         }
 
-        // IPC syscall numbers.
-        const RECEIVE_CALL: u64 = 47;
-        const SENDNB_CALL: u64 = 51;
-        const ANY: i32 = 0x0000ffff;
+        // Wait for DS's answer here rather than letting it land in the loop, as
+        // C's `catch_boot_init_ready` does: RS has not finished initialising until
+        // the service it asked has, and blocking for the answer keeps a client's
+        // first request from interleaving with the handshake — DS is half-way
+        // through its own initiation while its reply is outstanding, and a new
+        // request arriving in that window would be sent to a service that is
+        // still waiting to hear back from RS.
+        let mut reply = Message {
+            m_source: 0,
+            m_type: 0,
+            // SAFETY: the payload is a union of plain integers and byte arrays.
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        let got = unsafe {
+            minix_rt::syscall2(
+                RECEIVE_CALL,
+                arch_common::com::DS_PROC_NR as u64,
+                &mut reply as *mut Message as u64,
+            )
+        };
+        if got < 0 {
+            panic!("rs: waiting for ds's init reply failed: {got}");
+        }
+        if reply.m_type != RS_INIT {
+            panic!("rs: unexpected reply from ds: {}", reply.m_type);
+        }
+        let result = unsafe { reply.m_payload.m2.m2i1 };
+        if result != OK {
+            // C panics in `catch_boot_init_ready` for the same reason: a boot
+            // service that cannot initialise leaves the system without whatever it
+            // was going to provide.
+            panic!("rs: ds failed to initialize: {result}");
+        }
+
+        // Unblock DS, then record the state change through the same handler the
+        // loop uses, so the two paths cannot diverge. C's order too: "Reply and
+        // unblock the service before doing anything else."
+        reply.m_type = OK;
+        unsafe {
+            minix_rt::syscall2(SENDNB_CALL, got as u64, &mut reply as *mut Message as u64);
+        }
+        if unsafe { do_init_ready(&reply) } != OK {
+            panic!("rs: ds's init reply was not accepted");
+        }
 
         loop {
             let mut msg = Message {
@@ -905,13 +1028,17 @@ pub fn rs_server_main() {
                 _ => ENOSYS,
             };
 
-            // Reply to sender. A plain SENDNB (C `reply()` uses `ipc_send`): a
-            // SENDREC here would block in its receive phase and swallow the next
-            // request instead of dispatching it, which is the same defect DS's
-            // loop documents.
-            msg.m_type = result;
-            unsafe {
-                minix_rt::syscall2(SENDNB_CALL, src as u64, &mut msg as *mut Message as u64);
+            // Reply to sender, unless the handler suppressed it: C's loop skips
+            // the reply for `EDONTREPLY`, which is what the sender of a failed
+            // init report gets — it is being killed, not answered. A plain SENDNB
+            // (C `reply()` uses `ipc_send`): a SENDREC here would block in its
+            // receive phase and swallow the next request instead of dispatching
+            // it, which is the same defect DS's loop documents.
+            if result != EDONTREPLY {
+                msg.m_type = result;
+                unsafe {
+                    minix_rt::syscall2(SENDNB_CALL, src as u64, &mut msg as *mut Message as u64);
+                }
             }
         }
     }
@@ -1020,6 +1147,92 @@ mod tests {
 
             let label = core::str::from_utf8(&rp.label).unwrap();
             assert_eq!(label.trim_end_matches('\0'), "test.service");
+        }
+    }
+
+    #[test]
+    fn test_mark_initializing_clears_active() {
+        let _g = setup();
+        unsafe {
+            let idx = alloc_slot().unwrap();
+            init_slot(idx, 106, -1, b"reinit").unwrap();
+            mark_initialized(idx, 106).unwrap();
+
+            // The boot handshake's shape: the slot is active, then RS asks it to
+            // initialise, so it waits for a reply again.
+            mark_initializing(idx).unwrap();
+            let rp = &*RPROC.as_ptr().add(idx);
+            assert!(rp.flags & RS_INITIALIZING != 0);
+            assert!(rp.flags & RS_ACTIVE == 0);
+        }
+    }
+
+    /// The reply a service builds in `sef_init.c`: the payload's first word is
+    /// the init result.
+    fn init_reply(source: i32, result: i32) -> Message {
+        let mut msg = Message {
+            m_source: source,
+            m_type: RS_INIT,
+            // SAFETY: the payload is a union of plain integers and byte arrays.
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        msg.m_payload.m2.m2i1 = result;
+        msg
+    }
+
+    #[test]
+    fn test_do_init_ready_completes_initialization() {
+        let _g = setup();
+        unsafe {
+            let idx = alloc_slot().unwrap();
+            init_slot(idx, 102, -1, b"ready").unwrap();
+
+            assert_eq!(do_init_ready(&init_reply(102, 0)), OK);
+
+            let rp = &*RPROC.as_ptr().add(idx);
+            assert!(rp.flags & RS_ACTIVE != 0);
+            assert!(rp.flags & RS_INITIALIZING == 0);
+            assert!(is_active(102));
+        }
+    }
+
+    #[test]
+    fn test_do_init_ready_refuses_a_slot_that_was_not_asked() {
+        let _g = setup();
+        unsafe {
+            let idx = alloc_slot().unwrap();
+            init_slot(idx, 103, -1, b"unexpected").unwrap();
+            mark_initialized(idx, 103).unwrap();
+
+            // Already active, so no request is outstanding: C answers EINVAL.
+            assert_eq!(do_init_ready(&init_reply(103, 0)), EINVAL);
+        }
+    }
+
+    #[test]
+    fn test_do_init_ready_unknown_service() {
+        let _g = setup();
+        unsafe {
+            assert_eq!(do_init_ready(&init_reply(104, 0)), ESRCH);
+        }
+    }
+
+    #[test]
+    fn test_do_init_ready_failure_terminates_and_suppresses_the_reply() {
+        let _g = setup();
+        unsafe {
+            let idx = alloc_slot().unwrap();
+            init_slot(idx, 105, -1, b"broken").unwrap();
+
+            // `EDONTREPLY` is what keeps RS's loop silent, and the slot is left
+            // terminated rather than active — the restart policy C's
+            // `crash_service` applies is not in this port yet.
+            assert_eq!(do_init_ready(&init_reply(105, -5)), EDONTREPLY);
+
+            let rp = &*RPROC.as_ptr().add(idx);
+            assert!(rp.flags & RS_TERMINATED != 0);
+            assert!(rp.flags & RS_ACTIVE == 0);
+            assert!(!is_active(105));
         }
     }
 

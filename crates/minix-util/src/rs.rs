@@ -1,4 +1,4 @@
-//! RS client — announce a service to the Reincarnation Server.
+//! RS client — announce a service to the Reincarnation Server, and report ready.
 //!
 //! `rs_up` sends the `RS_UP` request RS's `do_up` reads: a label, its length, and
 //! the endpoint the label names. RS records the pair and publishes it to DS
@@ -11,6 +11,10 @@
 //! the request carries an endpoint obtained from `GET_WHOAMI` rather than a guess
 //! — announcing the wrong one would leave the service named under an endpoint it
 //! never sends from, and therefore still unnameable to DS.
+//!
+//! `rs_init_ready` is the other direction: a service RS sent an init request to
+//! answers it once its init has finished, which is what takes its slot out of
+//! `RS_INITIALIZING`.
 //!
 //! All functions return `Err(MinixErr(71))` on host (`cfg(not(target_os =
 //! "minix"))`), like the other clients here.
@@ -27,8 +31,7 @@ use crate::wire::{
     msg_set_u64,
 };
 
-const RS_ENDPOINT: i32 = 2; // RS_PROC_NR
-const RS_UP: u32 = 0x700;
+const RS_ENDPOINT: i32 = arch_common::com::RS_PROC_NR;
 
 /// Kernel call 26 is `SYS_GETINFO`, and `GET_WHOAMI` asks it for the caller.
 const SYS_GETINFO: i32 = 26;
@@ -68,7 +71,7 @@ pub fn rs_up(label: &[u8]) -> Result<(), MinixErr> {
     {
         let endpoint = self_endpoint()?;
 
-        let mut msg: Message = build_msg(RS_UP);
+        let mut msg: Message = build_msg(arch_common::com::RS_UP);
         msg_set_i32(&mut msg, OFF_M2_I1, label.len() as i32);
         msg_set_i32(&mut msg, OFF_M2_I2, endpoint);
         msg_set_u64(&mut msg, OFF_M2_L1, label.as_ptr() as u64);
@@ -81,6 +84,36 @@ pub fn rs_up(label: &[u8]) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
         let _ = label;
+        Err(MinixErr(71))
+    }
+}
+
+/// Report to RS that this service has finished initialising (`RS_INIT`).
+///
+/// The reply half of the init handshake: RS sends a service an `RS_INIT` request
+/// — for DS it carries the `rproctab` grant — and the service answers with its own
+/// result, which is what moves its slot out of `RS_INITIALIZING` (`do_init_ready`,
+/// C's `sef_init.c` builds the same message). The send blocks until RS has
+/// replied, as C's default init-response callback does (`ipc_sendrec`), so the
+/// service knows RS recorded it before it starts serving.
+///
+/// `result` is the init callback's status: `0` for success. C treats a non-zero
+/// result as a crash, and RS does not reply to one, so a service that reports a
+/// failure here should not expect this call to return normally.
+pub fn rs_init_ready(result: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    {
+        let mut msg: Message = build_msg(arch_common::com::RS_INIT);
+        msg_set_i32(&mut msg, OFF_M2_I1, result);
+
+        // SAFETY: as in `rs_up` — the syscall overwrites the live 64-byte buffer
+        // with the reply.
+        unsafe { minix_std::sendrec(RS_ENDPOINT, &mut msg) }?;
+        check_result(&msg)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = result;
         Err(MinixErr(71))
     }
 }

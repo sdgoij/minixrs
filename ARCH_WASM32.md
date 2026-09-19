@@ -885,11 +885,12 @@ over `target_os = "minix"` code, because the fork's rustc has no clippy-driver.
 It found 6 deny-by-default errors there, now fixed, plus 118 warnings that only
 bite under `-D warnings`.
 
-**M2c — Real servers reach their main loops, the DS round trip completes, and PM's chain starts. Status: DONE.**
+**M2c — Real servers reach their main loops, the DS handshake closes in both
+directions, and PM's chain starts. Status: DONE.**
 
 ```text
 sh tools/wasm-servers/run.sh
-# 18/18 checks passed
+# 21/21 checks passed
 ```
 
 DS, RS and PM — the *real* servers, built for the real `os = "minix"` target —
@@ -972,9 +973,29 @@ kernel reading RS's 48-byte grant *entry* out of RS's own instance, DS's
 announcing itself and is still refused, so the authorisation the label table
 provides is measured rather than assumed.
 
-What is still not here is the *init-complete reply*: C's service answers `RS_INIT`
-with its own result message, which RS consumes in `do_init_ready`, and that
-function exists but has no sender yet.
+**The handshake closes in both directions.** DS answers the init request once it
+has copied the rproctab (`rs_init_ready`), and RS consumes the answer in
+`do_init_ready`, moving DS's slot out of `RS_INITIALIZING`. The effect is a flag
+inside RS rather than a copy, so the harness asks RS for it — `minix_rs_is_active`
+is called on the RS *instance*, which is the only place that state exists.
+`do_init_ready` keeps C's other branches too: a reply from a slot that was never
+asked to initialise is `EINVAL`, and a service reporting a failed init is treated
+as crashed and given no reply at all (`EDONTREPLY`). The first of those is measured
+in the run rather than only in host tests: the client that announced itself with
+`rs_up` — a process RS does know — then claims to be initialised, and RS answers
+`EINVAL`, because being known is not the same as having been asked.
+
+RS waits for that answer *during* its init, as C's `catch_boot_init_ready` does,
+rather than picking it up in its main loop — and that turns out to matter beyond
+tidiness, because with the answer left to the loop a client request can be
+dispatched to DS in the window where DS is still inside the `SENDREC` carrying
+its answer. RS's next request to DS is then refused as `ELOCKED` by the kernel's
+deadlock detector, whose size-2 escape covers a SEND/RECEIVE pair but not a sender
+that is mid-`SENDREC` (`PORTING_PLAN.md` finding 21). DS is the only service RS
+sends an init request to, so it is the only one whose slot waits for a reply; the
+rest are marked active at init because this port asks nothing of them. C sends a
+request to every service it starts, and the period/heartbeat machinery that goes
+with a service that never answers is what a runtime-start path will need.
 
 Two things to know about the harness: it builds with nightly (`-Z
 json-target-spec -Z build-std=core,alloc`), and per-server modules are not yet

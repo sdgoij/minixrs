@@ -461,13 +461,35 @@ const readReport = (st, n) => {
   const ptr = st.inst.exports.ds_report_ptr();
   return Array.from({ length: n }, (_, i) => Number(view.getBigInt64(ptr + i * 8, true)));
 };
-const dsReport = readReport(client, 4);
+const dsReport = readReport(client, 5);
 
 const dsReplies = ds.trace.filter((t) => t.nr === SENDNB).length;
 check(
   'DS answered the handshake and the client',
   dsReplies >= 3,
   `${dsReplies} reply syscall(s) in DS's trace`
+);
+
+// The other direction of the init protocol, which is what the init-complete reply
+// closes: DS answers the request RS sent it, and RS's `do_init_ready` consumes the
+// answer. RS's only SENDNB to DS's endpoint is that reply — its other replies go to
+// the client — and it is sent after DS's table copy, so the two checks below are
+// the request and its answer rather than two views of the same message.
+const rsInitReply = rs.trace.filter((t) => t.nr === SENDNB && t.a0 === ds.spec.endpoint);
+check(
+  'RS answered DS\'s init-complete reply',
+  rsInitReply.length === 1,
+  rs.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
+);
+
+// And the state the reply was supposed to change: a flag inside RS, which no copy
+// or trace can show, so the host asks RS. Read from RS's own instance — each
+// instance carries all three servers' code, so an untouched table would answer 0.
+const dsActive = rs.inst.exports.minix_rs_is_active(ds.spec.endpoint);
+check(
+  'RS moved DS out of RS_INITIALIZING, so the reply was consumed',
+  dsActive === 1,
+  `minix_rs_is_active(${ds.spec.endpoint}) = ${dsActive}`
 );
 
 // The round trip this harness exists for, now that DS can name the client: RS
@@ -477,6 +499,15 @@ check(
   'the client announced itself to RS',
   dsReport[3] === 0,
   `rs_up=${dsReport[3]} (expected 0)`
+);
+// A known service may still not declare *itself* ready: RS is the one that asks,
+// so an unsolicited `RS_INIT` from a slot it never put into RS_INITIALIZING is
+// refused. EINVAL, as C answers it — not ESRCH, which would mean RS had never
+// heard of the client at all.
+check(
+  'RS refuses an init-complete reply it did not ask for',
+  dsReport[4] === -22,
+  `unsolicited RS_INIT=${dsReport[4]} (expected -22 EINVAL)`
 );
 check(
   'DS accepted the client\'s publish and handed the value back',
@@ -526,15 +557,19 @@ note(
   'what this establishes, and what it does not',
   'All three servers ran their own init and blocked in RECEIVE; RS registered its ' +
     'grant table and handed DS the public process table, which DS copied out of ' +
-    "RS's own instance and mapped into its label table; PM consumed the RS boot " +
-    'notification; and DS served a real client that announced itself with `rs_up`, ' +
-    'reading the key out of the client\'s instance through the copy seam and ' +
-    'addressing both replies back to the client. The control client — same ' +
-    'protocol, same key, no announcement — is still refused, so the authorisation ' +
-    'the label table provides is measured rather than assumed. What is not here is ' +
-    'the init-complete reply: C\'s service answers `RS_INIT` with its own result ' +
-    'message and RS consumes it in `do_init_ready`, which this port has not built, ' +
-    'so RS never learns that the seeding finished.'
+    "RS's own instance and mapped into its label table; DS then answered that " +
+    'request and RS consumed the answer, moving DS out of `RS_INITIALIZING`; PM ' +
+    'consumed the RS boot notification; and DS served a real client that announced ' +
+    'itself with `rs_up`, reading the key out of the client\'s instance through the ' +
+    'copy seam and addressing both replies back to the client. The control client — ' +
+    'same protocol, same key, no announcement — is still refused, so the ' +
+    'authorisation the label table provides is measured rather than assumed, and the ' +
+    'announced client is refused when it claims to be initialised, because only RS ' +
+    'decides who has been asked. What is not here is a request for any service ' +
+    'other than DS: C sends every service it ' +
+    'starts an `RS_INIT` request, so the runtime-start path will need those slots to ' +
+    'wait for a reply too, and the period/heartbeat and restart machinery that goes ' +
+    'with a service that never answers.'
 );
 
 console.log('\nper-server syscall trace:');

@@ -9,11 +9,13 @@
 //! # Why reaching a main loop is the thing to check
 //!
 //! DS, RS and PM each run their own init and then enter `loop { RECEIVE }`, and
-//! none of them needs another server to get there. So the first syscall an
-//! instance issues is its first receive, which means "it finished init and
-//! reached its main loop" is readable from the host as a syscall trace — without
-//! asking the servers to print anything on this port's behalf, and without
-//! adding a hook to them.
+//! none of them needs another server to get there. The host therefore reads "it
+//! finished init and reached its main loop" off the syscall trace, without asking
+//! the servers to print anything on this port's behalf and without adding a hook
+//! to them. The trace has to be read as a *tail* rather than a first syscall: RS
+//! now registers its grant table and hands DS the process table before it
+//! receives anything, so its first syscall is that work, and a server that blocks
+//! in RECEIVE from `ANY` is what "it is in its loop" means for all three.
 //!
 //! What that does *not* prove is that they can talk to each other, which is what
 //! the DS client at the end of this file is for: it gives DS a real request to
@@ -27,6 +29,11 @@
 //! process that then announces itself with `rs_up` gets a label of its own. The
 //! second client here is the control — same key, same protocol, no announcement —
 //! so the refusal an unlabelled publisher gets stays measured rather than assumed.
+//!
+//! That handshake closes in both directions: DS answers RS's init request with
+//! `rs_init_ready`, and `minix_rs_is_active` lets the host ask *RS* whether it
+//! consumed the answer. The effect of the reply is a flag inside RS rather than a
+//! copy, so no amount of trace reading can show it.
 
 #![no_std]
 #![no_main]
@@ -75,17 +82,37 @@ pub extern "C" fn minix_server_pm() -> i32 {
     0
 }
 
+/// Whether `endpoint`'s slot has left `RS_INITIALIZING` — read it from the **RS
+/// instance**.
+///
+/// The init-complete reply's effect is a state change inside RS, not a byte that
+/// crosses the host boundary, so this is the only way the harness can check that
+/// `do_init_ready` actually consumed the answer rather than merely receiving it.
+/// Each instance carries all three servers' code, so calling this on the wrong
+/// instance reads an untouched table and answers `0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_rs_is_active(endpoint: i32) -> i32 {
+    // SAFETY: single-threaded instance, and `is_active` only reads this
+    // instance's own process table.
+    if unsafe { servers::rs::is_active(endpoint) } {
+        1
+    } else {
+        0
+    }
+}
+
 // ------------------------------------------------------------------ DS client
 
 /// What the client observed, so the host can read it without a console.
 ///
-/// `[publish status, retrieve status, retrieved value, rs_up status]` — the first
-/// two are errnos (negated), the third the value the store handed back, and the
-/// fourth the status of announcing this process to RS, which is what makes the
-/// first one possible. Nothing in this module declares a console import, so a
-/// report in memory is the only way the client's result can reach the host; the
-/// M2 harness established the pattern.
-static mut DS_REPORT: [i64; 4] = [0; 4];
+/// `[publish status, retrieve status, retrieved value, rs_up status,
+/// unsolicited-init status]` — the first two are errnos (negated), the third the
+/// value the store handed back, the fourth the status of announcing this process
+/// to RS (which is what makes the first one possible), and the fifth the status of
+/// claiming to be initialised without having been asked. Nothing in this module
+/// declares a console import, so a report in memory is the only way the client's
+/// result can reach the host; the M2 harness established the pattern.
+static mut DS_REPORT: [i64; 5] = [0; 5];
 
 /// Address of the report, so the host does not have to parse the module layout.
 #[unsafe(no_mangle)]
@@ -149,6 +176,18 @@ pub extern "C" fn minix_ds_client() -> i32 {
             ds_report(2, -1);
         }
     }
+
+    // The other direction of the same message: `rs_up` made this process known to
+    // RS, and it still may not report itself initialised — RS puts a slot into
+    // `RS_INITIALIZING` only when *it* asks, so an unsolicited `RS_INIT` is
+    // refused. Without that, any client could mark itself ready.
+    ds_report(
+        4,
+        match minix_util::rs::rs_init_ready(0) {
+            Ok(()) => 0,
+            Err(e) => -(e.0 as i64),
+        },
+    );
 
     0
 }

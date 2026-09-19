@@ -99,6 +99,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    on x86. (OPEN_ITEMS Phase F2)
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (FILEMMAP §6)
+11. **`EDONTREPLY` and its neighbours disagreed with C in three places —
+    partially FIXED (2026-09).** `sys/sys/errno.h` has `ENOTREADY -201`,
+    `EDEADSRCDST -202`, `EDONTREPLY -203`, `ELOCKED -208`, but
+    `arch-common::ipc` had `EDONTREPLY -201` (C's `ENOTREADY`), `ELOCKED -202`
+    (C's `EDEADSRCDST`) and an `ELOCKWILLBLOCK -203` that C does not define;
+    `minix-std` and `servers/rs.rs` repeated the `-201`. It was latent because
+    nothing returned the pseudo-code until `do_init_ready` (the init-complete
+    reply) became its first user — and a server returning its own crate's
+    `EDONTREPLY` would have returned `ENOTREADY` instead. Fixed in
+    `arch-common`, `minix-std` and `rs.rs`; **`kernel/src/ipc.rs` still has its
+    own Linux-valued trio** (`ENOTREADY -73`, `ELOCKED -132`,
+    `EDEADSRCDST -199`) which `mini_send`/`mini_receive` return, so every IPC
+    failure a server observes carries a number C would not produce. Those are
+    a separate pass: the host tests name the constants rather than pin values,
+    so it is mechanical, but it is real behaviour on every arch.
+    (`PORTING_PLAN.md` finding 20)
 
 ---
 

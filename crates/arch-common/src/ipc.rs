@@ -184,9 +184,20 @@ pub const ENOTDIR: i32 = -20;
 pub const EISDIR: i32 = -21;
 pub const EINVAL: i32 = -22;
 pub const ENOBUFS: i32 = -55;
-pub const EDONTREPLY: i32 = -201;
-pub const ELOCKED: i32 = -202;
-pub const ELOCKWILLBLOCK: i32 = -203;
+// The MINIX-specific codes, from `.refs/minix-3.3.0/sys/sys/errno.h`. The three
+// that used to live here were shifted by two — `EDONTREPLY` carried the value of
+// `ENOTREADY` — and `ELOCKWILLBLOCK` had no counterpart in `errno.h` at all.
+/// Source or destination is not ready (`_SIGN 201`).
+pub const ENOTREADY: i32 = -201;
+/// Source or destination is not alive (`_SIGN 202`).
+pub const EDEADSRCDST: i32 = -202;
+/// Pseudo-code: do not send a reply (`_SIGN 203`). A handler that returns this
+/// does not answer its caller. It is the same value the kernel's own handlers
+/// use (`kernel::system::EDONTREPLY`), so a server and the kernel cannot
+/// disagree about it.
+pub const EDONTREPLY: i32 = -203;
+/// Can't send a message due to a deadlock (`_SIGN 208`).
+pub const ELOCKED: i32 = -208;
 
 // Compile-time guard: Payload must be exactly 56 bytes so Message is 64.
 // If this fails, an M variant exceeds 56 bytes and will cause
@@ -282,7 +293,9 @@ mod tests {
         assert_eq!(ENOTDIR, -20);
         assert_eq!(EISDIR, -21);
         assert_eq!(ENOBUFS, -55);
-        assert_eq!(ELOCKED, -202);
-        assert_eq!(ELOCKWILLBLOCK, -203);
+        assert_eq!(ENOTREADY, -201);
+        assert_eq!(EDEADSRCDST, -202);
+        assert_eq!(EDONTREPLY, -203);
+        assert_eq!(ELOCKED, -208);
     }
 }
