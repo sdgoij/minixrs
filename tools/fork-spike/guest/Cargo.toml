@@ -1,0 +1,18 @@
+# Standalone on purpose: this guest is built with the stock toolchain for
+# wasm32-unknown-unknown and must not join the main workspace, whose members
+# are the three MINIX triples.
+[workspace]
+
+[package]
+name = "fork-spike-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = 2

@@ -19,10 +19,14 @@ embed_minixfs = []
 qemu-tests = []
 riscv64 = []
 aarch64 = []
+# Host-mode HAL: runs this kernel's arch-independent logic under cargo test
+# instead of only in QEMU. Host-only; never enable it for a bare-metal target.
+sim = ["dep:arch-sim"]
 
 [dependencies]
 arch-common = { path = "../arch-common" }
 bitflags = { workspace = true }
+arch-sim = { path = "../arch-sim", optional = true }
 
 [build-dependencies]
 boot-image = { path = "../boot-image" }

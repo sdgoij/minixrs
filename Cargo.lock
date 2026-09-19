@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "arch-sim"
+version = "0.1.0"
+dependencies = [
+ "arch-common",
+]
+
+[[package]]
 name = "arch-x86_64"
 version = "0.1.0"
 dependencies = [
@@ -71,6 +78,7 @@ dependencies = [
  "arch-aarch64",
  "arch-common",
  "arch-riscv64",
+ "arch-sim",
  "arch-x86_64",
  "bitflags",
  "boot-image",

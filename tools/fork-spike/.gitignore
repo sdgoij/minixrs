@@ -1,0 +1,3 @@
+# Build output and locally installed tooling (Binaryen) are not source.
+build/
+.tools/

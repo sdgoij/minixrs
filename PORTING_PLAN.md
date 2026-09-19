@@ -5999,6 +5999,61 @@ behave undefinedly. These are `#[ignore]`'d:
     main`. Fixed by adding explicit `[[bin]]` entries with `test = false` in
     `Cargo.toml`.
 
+#### Host-mode kernel tests (`crates/arch-sim`) — added
+
+`crates/arch-sim` implements the kernel's HAL surface with host primitives, and
+`crates/kernel` gains an opt-in `sim` feature that selects it, so the
+arch-independent kernel runs on the host:
+
+```
+cargo run --manifest-path crates/kernel-sim-tests/Cargo.toml
+# 24/24 checks passed, 2 notes
+```
+
+This sidesteps the ring-0 problem above rather than `#[ignore]`-ing around it:
+the HAL never emits a privileged instruction, so nothing needs skipping. It
+currently covers the process table, the scheduler's run queues, IPC rendezvous,
+the VM page pool, and frame layout. The runner is excluded from the workspace
+(`crates/kernel-sim-tests`, mirroring `crates/kernel-tests`) because enabling
+`kernel/sim` as a workspace member would let cargo's feature unification select
+the simulator for the real boot binaries too.
+
+Two findings from its first runs:
+
+**1. `table::is_ok_proc_nr` and `table::proc_addr` overflow on their input.**
+Both compute the table index *before* validating it (`crates/kernel/src/table.rs`):
+
+```rust
+pub fn is_ok_proc_nr(n: i32) -> bool {
+    let idx = NR_TASKS as i32 + n;      // overflows for large n
+    (idx as usize) < NR_PROCS_TOTAL
+}
+```
+
+`is_ok_proc_nr(i32::MAX)` and `proc_addr(i32::MAX)` each panic with
+"attempt to add with overflow" in a debug build. A release build only *happens*
+to be safe: the wrapped negative index casts to a very large `usize`, so the
+bound comparison is false. A function whose job is rejecting bad input therefore
+panics, or relies on an accident. Not fixed here — whether it is reachable
+depends on whether each caller clamps first, which needs a call-site audit. It is
+reproduced as a `NOTE` in the harness so it cannot silently regress.
+
+**2. IPC payloads cannot be verified on the host, and their copy error is
+discarded.** `mini_send` copies the message out of the sender's address space via
+`copy_from_user`, and the result is dropped:
+
+```rust
+let _ = crate::ipc::copy_from_user(..);
+```
+
+With no address translation the copy fails, so the receiver's buffer stays zeroed
+and nothing reports a problem. The rendezvous *bookkeeping* is fully testable on
+the host (source endpoint recorded in `p_delivermsg`, flags cleared, run queues
+consistent), but payload integrity still needs a real arch or a simulator that
+models translation. The discarded error is worth a look independently of the
+simulator — a silently failed message copy surfaces as unexplained zeroes, not as
+an error.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

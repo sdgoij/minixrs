@@ -1,0 +1,19 @@
+[package]
+name = "arch-sim"
+version = "0.1.0"
+description = "Host-mode HAL: runs the arch-independent kernel under cargo test"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }
+
+[lints]
+workspace = true

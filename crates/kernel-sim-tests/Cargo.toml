@@ -1,0 +1,19 @@
+[package]
+name = "kernel-sim-tests"
+version = "0.1.0"
+description = "Runs the arch-independent kernel on the host, under arch-sim"
+
+# Deliberately NOT a workspace member: it enables `kernel/sim`, and if it shared
+# the workspace build graph, cargo's feature unification would turn `sim` on for
+# the real boot binaries as well. Mirrors crates/kernel-tests, which is excluded
+# for the same class of reason.
+edition = "2024"
+
+[[bin]]
+name = "kernel-sim-tests"
+path = "src/main.rs"
+
+[dependencies]
+kernel = { path = "../kernel", features = ["sim"] }
+arch-sim = { path = "../arch-sim" }
+arch-common = { path = "../arch-common" }

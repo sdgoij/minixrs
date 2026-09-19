@@ -1,0 +1,3 @@
+# This crate is excluded from the workspace, so cargo uses its own target dir
+# rather than the shared workspace one.
+target/

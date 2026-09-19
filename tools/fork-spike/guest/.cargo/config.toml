@@ -1,0 +1,24 @@
+# Link flags for the fork-spike guest. Kept here (rather than on the command
+# line) so `cargo build` from this directory reproduces the exact module the
+# host harness expects.
+#
+# `--import-memory` is the load-bearing one: the host must own `WebAssembly.Memory`
+# so it can snapshot a suspended process, hand the snapshot to a fresh instance,
+# and write divergent syscall replies into each. That is how the real port needs
+# to load modules, deliver IPC, and perform grant copies too.
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=--import-memory",
+  # Big enough for the default 1 MiB shadow stack plus data/globals.
+  "-C", "link-arg=--initial-memory=4194304",
+  "-C", "link-arg=--export=process_main",
+  "-C", "link-arg=--export=async_process_main",
+  "-C", "link-arg=--export=async_deep_process_main",
+  "-C", "link-arg=--export=msg_ptr",
+  "-C", "link-arg=--export=reply_slot_ptr",
+  "-C", "link-arg=--export=resume_pc_ptr",
+  # Exported so the harness can observe (and, if needed, synchronise) a mutable
+  # wasm global across the fork. Globals are not part of linear memory.
+  "-C", "link-arg=--export=__stack_pointer",
+]
