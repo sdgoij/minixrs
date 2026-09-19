@@ -489,8 +489,22 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
         }
         // Serial output shortcut for console writes.
         if count > 0 {
-            for i in 0..count.min(256) {
-                let c = unsafe { core::ptr::read_volatile(buf.add(i)) };
+            let n = count.min(256);
+            let mut chunk = [0u8; 256];
+            // `buf` is an address in the *caller's* space, so this is a transfer out of
+            // its address space. On an arch whose two spaces are separate memories the
+            // kernel cannot read it and has to ask the host, which is what
+            // `read_from_proc` does; on the hardware arches it reduces to the copy this
+            // always did. Reading `buf` directly instead — as this did — is why a
+            // panic message never appeared on wasm: the kernel read its own memory at
+            // that address and sent that to the console, which for a panic message
+            // meant silence. Found while tracing a panic from its syscall sequence
+            // (finding 28).
+            let proc_nr = if caller.is_null() { -1 } else { (*caller).p_nr };
+            if crate::vm::read_from_proc(proc_nr, buf as u64, chunk.as_mut_ptr(), n) != 0 {
+                return -14; // EFAULT
+            }
+            for &c in chunk.iter().take(n) {
                 if c == b'\n' {
                     crate::hal::serial_write_byte(b'\r');
                 }

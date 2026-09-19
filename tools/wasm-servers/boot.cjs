@@ -429,6 +429,13 @@ for (;;) {
     console.log(
       `  last: ${st.tail.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join(', ')}`
     );
+    // The console timeline is only printed at the end of a successful run, so a
+    // panic's message — which reaches it as the dying process's `write(2, ...)` —
+    // would be thrown away exactly when it is most wanted. Print what has
+    // accumulated, partial line included.
+    if (currentLine !== '') console.log(`${consoleTag}: ${currentLine}`);
+    console.log('--- console timeline up to the trap ---');
+    for (const line of timeline) console.log(`  ${line}`);
     throw e;
   }
 }
