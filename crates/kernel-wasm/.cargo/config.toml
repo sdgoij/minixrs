@@ -1,0 +1,18 @@
+# Link flags for the wasm kernel instance.
+#
+# `--initial-memory` is sized for the kernel's own statics, not for userland:
+# the VM page bitmap alone is 1 MiB (NR_PHYS_PAGES / 32 chunks of u32), and the
+# process table adds most of another megabyte. The host owns the memory from M2
+# onward; for M1 the module brings its own.
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=--no-entry",
+  # Resolve this HAL's `extern "C"` declarations as imports from `env`, rather
+  # than failing the link for being undefined.
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--export=minix_kernel_init",
+  "-C", "link-arg=--export=minix_kernel_trigger_panic",
+  "-C", "link-arg=--initial-memory=33554432",
+  "-C", "link-arg=--max-memory=268435456",
+]

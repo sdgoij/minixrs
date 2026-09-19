@@ -3,14 +3,14 @@
 Rough design for an `arch-wasm32` port: the kernel, servers, and userland
 compiled to WebAssembly and run in a browser tab (or Node, or any wasm host).
 
-Status: **design sketch**. Not implemented. Milestones below are ordered so the
-bycatch (M0) lands first and pays for itself regardless of whether the rest
-proceeds.
+Status: **partially implemented.** M0 (host-mode HAL) and M1 (kernel boots as
+wasm, no processes) are both **done** — see §11 for commands and results. M2
+onward is design.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
-wasm process — has since been **verified by a runnable spike** in
-`tools/fork-spike/` (20/20 checks, including a negative control, with buffer
-sizing and overflow behaviour measured). See §4.2 and §12, risk 1.
+wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
+(20/20 checks, including a negative control, with buffer sizing and overflow
+behaviour measured). See §4.2 and §12, risk 1.
 
 ## 1. Goal and non-goals
 
@@ -278,6 +278,37 @@ read another process's message. It cannot touch another process's private
 memory — that stays sealed — so the protection that matters (server privilege
 separation over private data) is preserved. Worth stating in the port's
 documentation rather than discovering later.
+
+### 5.2 Pointer width: the port's sharpest constraint
+
+wasm32 pointers are 32 bits. M1 established that this is not a formality: the
+kernel assumed 64-bit pointers in four places, none of which had ever been
+exercised on a 32-bit target.
+
+| Site | Assumption | Fix applied |
+|---|---|---|
+| `vm.rs` `NR_PHYS_PAGES` | `0x8_0000_0000` as a `usize` literal | compute through `u64`, cast the quotient |
+| `ipc.rs` `ipc_senda_handler` | `usize::from_le_bytes` over an 8-byte message field | read `u64`, narrow to `usize` |
+| `clock.rs` `MinixTimer` | static asserts pinning a 32-byte layout | asserted only where 64-bit pointers hold |
+| `syscall.rs` | `asm!` compiler barrier (unstable on wasm32) | `compiler_fence` on that target |
+
+All four fixes are ABI-neutral on the 64-bit arches, and the host kernel suite
+still passes after them. But the general lesson is a **port invariant rather than
+a bug**: on wasm32 a `usize` is four bytes, so any ABI struct containing a pointer
+or a `usize` has a different layout there than on the three shipping arches.
+`MinixTimer` is already written that way — it stores a function pointer and an
+opaque argument as `usize`.
+
+This lands hardest on M2, where servers exchange message structs over IPC:
+
+> Message and ABI structs must carry `u64` handles and fixed-width integers —
+> never pointers, never `usize`.
+
+A struct that violates this agrees with itself on any one target and disagrees
+with a server compiled for another, which is the kind of mismatch that shows up
+as corrupted fields rather than a link error. A static size assertion per message
+struct, as `clock.rs` already does for `MinixTimer`, is the cheap way to hold the
+line.
 
 ## 6. Privilege, traps, signals
 
@@ -565,9 +596,30 @@ reports "not mapped" without dereferencing an invented address, and the paths
 that would misbehave fail loudly rather than corrupt state. That boundary is now
 measured rather than assumed: it is exactly the IPC payload copy.
 
-**M1 — Kernel boots as wasm, single instance.** `arch-wasm32` with console
-imports only, no processes. Proves the HAL disposition and the build. Exit
-criterion: kernel prints its banner through a host import and panics correctly.
+**M1 — Kernel boots as wasm, single instance. Status: DONE.**
+`crates/arch-wasm32` is the HAL and `crates/kernel-wasm` is the platform layer
+(the analogue of `kernel-boot` at the host boundary). No processes yet.
+
+```text
+sh tools/wasm-boot/run.sh
+# 4/4 checks passed, 2 notes
+```
+
+The kernel prints its banner through `env.host_console_write`, and a deliberate
+panic reports the message and source location to the console before calling
+`env.host_halt` and trapping. The built artifact is 83 KB.
+
+M1's real work turned out not to be the HAL. Four blockers surfaced, and three
+were **32-bit width assumptions the kernel had never been asked about** — see
+§5.1. The fourth was the predicted one: `syscall.rs`'s `asm!` compiler barrier is
+unstable on wasm32 and became a `compiler_fence` there. `consts::sigframe` also
+needed a wasm32 arm, since the signal-frame offsets were only defined for the
+three hardware arches.
+
+Also learned from the link: the import boundary is the *used* set, not the
+declared one. `--gc-sections` dropped `host_console_read` and
+`host_console_available`, because M1 has no input path. Reading an import list as
+a contract would be a mistake.
 
 **M2 — Instances as processes + IPC.** Asyncify, the dispatch protocol, the
 syscall shim, DS/RS/PM/SCHED as modules, one hand-written hello process.
@@ -653,16 +705,22 @@ and easy to underestimate.
 Workable, but the Justfile needs to be explicit about which is which, or builds
 will silently use the wrong one.
 
+**7. Pointer width in ABI structs.** wasm32 pointers are 32 bits, so a message or
+ABI struct containing a pointer or a `usize` has a layout that differs from the
+shipping arches. M1 had to repair four instances of this in the kernel (§5.2), and
+M2 will multiply the surface by exchanging messages between servers. The invariant
+that keeps it contained is in §5.2; the risk is that a violation is silent on any
+single target.
+
 ## 13. Open questions
 
 - ~~Does the fork-as-checkpoint spike actually work?~~ **Answered: yes** —
   `tools/fork-spike/`, 20/20 checks. Buffer sizing is measured (~36 bytes/frame)
   and the overflow failure mode is characterised (§4.2, §12 risk 1).
-- Can the pinned stock 1.96.0 build `core` for `wasm32-unknown-unknown` in this
-  workspace, or does it need `-Zbuild-std=core`? **Partly answered**: the spike's
-  guest builds with the pinned stock toolchain and no `build-std`, and the
-  kernel is `#![no_std]` like it is, so M1 looks safe. Still verify the kernel
-  itself, which pulls in more of `core`.
+- ~~Can the pinned stock 1.96.0 build `core` for `wasm32-unknown-unknown` in this
+  workspace, or does it need `-Zbuild-std=core`?~~ **Answered at M1: no, and no.**
+  The kernel, `arch-common`, `arch-sim`, and `arch-wasm32` all built and linked
+  for wasm32 with the pinned stock toolchain and no `build-std`.
 - Browser memory ceiling per tab vs. a 256 MiB guest budget. Minimum viable
   `-m` for the full server stack is unknown.
 - Is the shared mailbox arena (§5.1) acceptable, or is full host-mediated

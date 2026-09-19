@@ -6,6 +6,9 @@ exclude = [
     # Enables `kernel/sim`; sharing the workspace build graph would let cargo's
     # feature unification turn `sim` on for the real boot binaries too.
     "crates/kernel-sim-tests",
+    # wasm-only binary with no host entry point; a workspace-wide build could not
+    # link it.
+    "crates/kernel-wasm",
     # The rust fork is a nested repository with its own workspace; exclude it
     # so cargo operations inside `rust/` (e.g. the bootstrap build) don't
     # resolve to this workspace.
@@ -18,6 +21,7 @@ members = [
     "crates/arch-x86_64",
     "crates/arch-riscv64",
     "crates/arch-sim",
+    "crates/arch-wasm32",
     "crates/boot-image",
     "crates/drivers",
     "crates/fs",

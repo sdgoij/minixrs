@@ -145,7 +145,13 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         };
         unsafe {
             core::ptr::write_volatile(buf, byte);
+            // A compiler barrier, so the volatile write above cannot be
+            // reordered or elided. wasm32 has no stable inline asm, so use the
+            // intrinsic that exists for this purpose.
+            #[cfg(not(target_arch = "wasm32"))]
             core::arch::asm!("", options(nostack, preserves_flags));
+            #[cfg(target_arch = "wasm32")]
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         }
         1
     } else {

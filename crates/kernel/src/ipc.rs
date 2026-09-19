@@ -1297,7 +1297,10 @@ pub unsafe fn ipc_notify_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 pub unsafe fn ipc_senda_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let table = u64::from_le_bytes(msg[8..16].try_into().unwrap_or([0; 8])) as *mut u8;
-        let size = usize::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8]));
+        // The field holds eight bytes in the message, so read it as u64 and
+        // narrow. `usize::from_le_bytes` would demand four bytes on a 32-bit
+        // target and stop compiling.
+        let size = u64::from_le_bytes(msg[16..24].try_into().unwrap_or([0; 8])) as usize;
         try_deliver_senda(caller, table, size)
     }
 }

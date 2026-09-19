@@ -1,0 +1,25 @@
+[package]
+name = "arch-wasm32"
+version = "0.1.0"
+description = "WebAssembly (wasm32) HAL: the kernel with host imports as its devices"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+arch-common = { path = "../arch-common" }
+# The simulator and the wasm port are the same HAL; the only difference is
+# whether the host boundary is a function call or an import. `arch-sim` owns the
+# pieces with no boundary at all (paging stubs, frame layout, VA layout, the page
+# arena), so they are re-exported rather than duplicated a fourth time. That is
+# the design's own framing: the simulator is this port minus the boundary.
+arch-sim = { path = "../arch-sim" }
+
+[lints]
+workspace = true

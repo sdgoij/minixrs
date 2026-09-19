@@ -1,0 +1,18 @@
+[package]
+name = "kernel-wasm"
+version = "0.1.0"
+description = "wasm32 platform layer: instantiates the kernel with a host import boundary"
+
+# Deliberately NOT a workspace member: this is a wasm-only binary with no entry
+# point for a host target, so a workspace-wide `cargo build` could not link it.
+# Mirrors crates/kernel-tests and crates/kernel-sim-tests.
+edition = "2024"
+
+[[bin]]
+name = "kernel-wasm"
+path = "src/main.rs"
+
+[dependencies]
+kernel = { path = "../kernel" }
+arch-common = { path = "../arch-common" }
+arch-wasm32 = { path = "../arch-wasm32" }

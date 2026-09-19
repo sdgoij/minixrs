@@ -59,7 +59,6 @@ dependencies = [
  "arch-aarch64",
  "arch-common",
  "arch-riscv64",
- "arch-sim",
  "arch-wasm32",
  "arch-x86_64",
  "bitflags",
@@ -67,10 +66,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "kernel-sim-tests"
+name = "kernel-wasm"
 version = "0.1.0"
 dependencies = [
  "arch-common",
- "arch-sim",
+ "arch-wasm32",
  "kernel",
 ]

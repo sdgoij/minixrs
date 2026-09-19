@@ -395,10 +395,12 @@ pub unsafe fn build_sigframe(
     trampoline: u64,
     _frame_addr: u64,
 ) {
+    use arch_common::consts::{sigframe as sf, SC_MAGIC};
     dst[0..8].copy_from_slice(&trampoline.to_ne_bytes());
-    dst[8..24].copy_from_slice(mask);
-    dst[24..28].copy_from_slice(&signo.to_ne_bytes());
-    dst[32..32 + 256].copy_from_slice(saved);
+    dst[sf::MASK_OFF..sf::MASK_OFF + 16].copy_from_slice(mask);
+    dst[sf::SIGNAL_OFF..sf::SIGNAL_OFF + 4].copy_from_slice(&signo.to_ne_bytes());
+    dst[sf::REGS_OFF..sf::REGS_OFF + 256].copy_from_slice(saved);
+    dst[sf::MAGIC_OFF..sf::MAGIC_OFF + 8].copy_from_slice(&SC_MAGIC.to_ne_bytes());
 }
 
 /// # Safety
@@ -421,7 +423,8 @@ pub unsafe fn sigframe_set_entry(
 ///
 /// `frame` must hold at least 32 + 256 bytes written by `build_sigframe`.
 pub unsafe fn sigframe_restore(p_reg: &mut [u8; 256], frame: &[u8]) {
-    p_reg.copy_from_slice(&frame[32..32 + 256]);
+    use arch_common::consts::sigframe as sf;
+    p_reg.copy_from_slice(&frame[sf::REGS_OFF..sf::REGS_OFF + 256]);
 }
 
 /// # Safety

@@ -28,6 +28,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arch-wasm32"
+version = "0.1.0"
+dependencies = [
+ "arch-common",
+ "arch-sim",
+]
+
+[[package]]
 name = "arch-x86_64"
 version = "0.1.0"
 dependencies = [
@@ -79,6 +87,7 @@ dependencies = [
  "arch-common",
  "arch-riscv64",
  "arch-sim",
+ "arch-wasm32",
  "arch-x86_64",
  "bitflags",
  "boot-image",

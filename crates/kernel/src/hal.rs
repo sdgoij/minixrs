@@ -14,6 +14,9 @@ pub use arch_sim::hal::*;
 #[cfg(all(not(feature = "sim"), target_arch = "x86_64"))]
 pub use arch_x86_64::hal::*;
 
+#[cfg(all(not(feature = "sim"), target_arch = "wasm32"))]
+pub use arch_wasm32::hal::*;
+
 #[cfg(all(not(feature = "sim"), target_arch = "riscv64"))]
 pub use arch_riscv64::hal::*;
 

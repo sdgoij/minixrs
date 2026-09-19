@@ -82,6 +82,19 @@ pub mod sigframe {
     pub const MAGIC_OFF: usize = 320;
 }
 
+// The wasm port has no hardware signal frame: signals are delivered at a
+// syscall-return boundary and the "frame" is a plain buffer in the process's
+// linear memory. These offsets describe what the wasm/simulator HAL writes, so
+// the kernel's validation reads the same fields on every arch.
+#[cfg(target_arch = "wasm32")]
+pub mod sigframe {
+    pub const SIZE: usize = 296;
+    pub const REGS_OFF: usize = 32; // [32..288) = saved p_reg
+    pub const MASK_OFF: usize = 8;
+    pub const SIGNAL_OFF: usize = 24;
+    pub const MAGIC_OFF: usize = 288;
+}
+
 /// Number of I/O ranges per privilege.
 pub const NR_IO_RANGE: usize = 16;
 

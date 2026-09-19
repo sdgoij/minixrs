@@ -4,7 +4,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 pub const VM_PAGE_SIZE: usize = 4096;
-pub const NR_PHYS_PAGES: usize = 0x8_0000_0000 / VM_PAGE_SIZE;
+// Written through u64 so the 32 GiB figure survives a 32-bit `usize`; the
+// quotient (8 Mi pages) fits either way, the intermediate literal does not.
+pub const NR_PHYS_PAGES: usize = (0x8_0000_0000u64 / VM_PAGE_SIZE as u64) as usize;
 pub const TOTAL_PHYS_MEM: u64 = 0x8_0000_0000;
 pub const NR_MEMS: usize = 8;
 const BITCHUNK_BITS: usize = 32;

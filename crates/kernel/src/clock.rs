@@ -487,6 +487,11 @@ pub unsafe fn app_cpu_init_timer(_freq: u32) -> i32 {
 
 // Compile-time size assertions
 
+// These pin the 64-bit struct layout, where a pointer and a `usize` are both
+// eight bytes. Under a target with 32-bit pointers the same struct is a
+// different size by construction, so the assertion only means something where
+// it applies.
+#[cfg(not(target_arch = "wasm32"))]
 const _: () = {
     let _ = core::mem::transmute::<*mut MinixTimer, [u8; 8]>;
     let _ = core::mem::transmute::<MinixTimer, [u8; 32]>;
