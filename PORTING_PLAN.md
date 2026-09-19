@@ -6824,6 +6824,46 @@ join `asked` — RS now asks seven services (DS, PM, RAMDISK, VIRTIO_BLK, DEVMAN
 all through the one shared answer shape — and the x86_64 boot test exercises the new branch
 of check C, reporting `OK VFS reached MFS (readsuper sent; now past it)`.
 
+**28. `sys_write_handler` read the caller's console buffer directly.** The last syscall
+taking a user pointer that had not been converted to the copy seam (§5.1): it copied `buf`
+straight into a stack chunk, which on wasm is the *kernel's* memory. For ordinary output
+that prints whatever the kernel happens to keep at that address; for a `panic!` message — a
+dying process's only account of why it died — the console receives the kernel's own bytes
+in place of the message, so the one thing worth reporting is what goes missing. Converted
+to `vm::read_from_proc`, the operation findings 13 and 16 and the `EXEC_SETUP` name read
+already use; the three shipping arches keep the byte-for-byte direct copy. Its failure path
+now prints the errno in hex instead of discarding it, because its caller is a panic handler
+that has nothing to do with the result.
+
+**29. The wasm harness passed syscall arguments 3..6 as zero, so a console `write`
+transferred nothing and reported success.** `minix-rt`'s wasm import is `(nr, a0..a5)` and
+`syscall3(NR_WRITE, fd, buf, len)` fills `a2`, but `tools/wasm-servers/boot.cjs` named only
+`(nrRaw, a0, a1)` and passed literal `0n` for the rest. `sys_write_handler` therefore saw
+`count = 0`, skipped the console branch (it is guarded by `count > 0`) and returned 0: a
+successful no-op. Every handler that reads `args[2..]` was equally zeroed — `read`'s count,
+`open`'s flags, `mkdir`/`chmod`/`mknod`'s mode, `link`'s second path, `getdents`' count,
+`thread_create`'s three — but the servers issue none of those during boot, so `write` was
+the only one with a visible consequence.
+
+It was found by chasing a `panic!` that reached `write(2, ...)` and then `exit(-1)` with the
+message never appearing. The first conclusion was wrong, and it is worth keeping because it
+was plausible enough to be acted on: the trace suggested the process's fd 2 must be
+VFS-owned, so the handler was taking the forward-to-VFS branch. It cannot be. `p_fd_vfs`
+has exactly one setter, `SYS_SETFDVFS`, and its callers are the shell, `wterm` and std's
+`child_exec`; no boot service reaches any of them, and `Proc::default` zeroes the field. The
+console branch *was* being taken — it simply had nothing to write. A trace showing `write`
+followed by `exit` cannot distinguish "the wrong branch was taken" from "the right branch
+was handed a zero count", and the reading that was believed sent the investigation into the
+kernel when the defect was in the harness.
+
+The fix belongs in the harness, not the kernel: the ABI is `minix-rt`'s six argument
+registers, and the host's job is to forward what it is given. With them forwarded, the probe
+panic reports itself — `TRAP in rs (slot 2) ... first 3 syscalls: 3,3,0`, with
+`kernel: panic: rs probe: ...` in the console timeline — where before it printed nothing at
+all. The forward-to-VFS branch got the loud-failure diagnostic anyway, printing only on a
+negative status (VFS's success status is the byte count), because a write that silently did
+not happen is the failure mode both this finding and finding 28 are instances of.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

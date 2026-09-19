@@ -1148,16 +1148,16 @@ afterwards. `PORTING_PLAN.md` finding 24 is the correction: the harness now keep
 the head and the tail, because the ordering checks need the one and the loop checks need
 the other.
 
-Not done here, and it is what M3c needs: the `asked` table in RS still holds only DS and
-PM, so nothing asks VM or MFS to initialise. VM's `RS_INIT` branch exists but is never
-reached, and MFS has none. Extending it wants a platform-honest table, per the decision
-recorded with M2c.
+Not done at M3b, and it is what M3c needed: the `asked` table in RS held only DS and PM, so
+nothing asked VM or MFS to initialise. VM's `RS_INIT` branch existed but was never reached,
+and MFS had none. Extending it wants a platform-honest table, per the decision recorded with
+M2c; M3c did extend it, to the seven services listed below.
 
 **M3c — VFS mounts root. Status: DONE.**
 
 ```text
 sh tools/wasm-servers/run.sh
-# 27/27 checks passed, over nine servers
+# 32/32 checks passed, over nine servers
 ```
 
 VFS is spawned at `VFS_PROC_NR` and reaches its main loop, which means its whole init
@@ -1176,10 +1176,22 @@ With this the whole chain runs on wasm: **VM → ramdisk → MFS → VFS**, plus
 an honest virtio_blk and devman. Nine instances, each in its own main loop, each blocked
 in the kernel on a receive from any sender.
 
+A service's console output reaches this harness only through the kernel: the server instances
+have no console import of their own, so their `write(2, ...)` is served by
+`sys_write_handler`, which reads the message out of that instance through the copy seam and
+emits it. That path had never actually carried a byte. The harness's syscall trampoline
+forwarded only the first two argument registers into the kernel, so every server `write`
+arrived with `count = 0` and returned success — and nothing noticed, because no server prints
+during a boot that works. It surfaced as a `panic!` whose message never appeared, which is
+also why a service's failure used to be indistinguishable from a service that had quietly
+stopped. `PORTING_PLAN.md` finding 29 has the diagnosis, including the branch that was blamed
+for it first; finding 28 is the kernel-side read it uncovered next to it.
+
 What M3c does *not* do, and it is the rest of M3: nothing is running as a *user* process
-yet. There is no shell, no `init`, and the `asked` table in RS still holds only DS and
-PM, so nothing asks VM, MFS, devman or VFS to initialise through RS. Extending it wants
-a platform-honest table, per the decision recorded with M2c.
+yet. There is no shell and no `init`. RS's `asked` table now holds seven services — DS, PM,
+RAMDISK, VIRTIO_BLK, DEVMAN, MFS and VFS — so each of those is asked to initialise through
+RS and answers; VM is the one still never asked, and the period/heartbeat machinery for a
+service that never answers is still owed.
 
 ## 12. Risks, ranked
 

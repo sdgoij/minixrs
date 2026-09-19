@@ -236,7 +236,14 @@ function makeServer(spec) {
       // will: `SYS_VIRCOPY` is how it reads a client's key, so the primitive is
       // the real one rather than a refusal.
       host_copy_between: copyBetween,
-      minix_syscall: (nrRaw, a0, a1) => {
+      // All six argument registers are named and forwarded, not only the two the
+      // message-passing syscalls use. The kernel's dispatcher hands `args` straight
+      // to the handler, and the three-argument syscalls read `args[2]` — `write`'s
+      // count among them. Naming only `a0`/`a1` replaced the rest with a literal
+      // zero, so a console `write` transferred `count = 0` bytes and reported
+      // success: a panicking server's message reached the kernel and went nowhere
+      // (finding 29).
+      minix_syscall: (nrRaw, a0, a1, a2, a3, a4, a5) => {
         const nr = Number(nrRaw);
         const dst = Number(a0);
         const msgAddr = Number(a1);
@@ -270,12 +277,12 @@ function makeServer(spec) {
         const result = kernel.exports.minix_syscall(
           spec.slot,
           BigInt(nr),
-          BigInt(dst),
-          BigInt(msgAddr),
-          0n,
-          0n,
-          0n,
-          0n
+          BigInt(a0),
+          BigInt(a1),
+          BigInt(a2),
+          BigInt(a3),
+          BigInt(a4),
+          BigInt(a5)
         );
         const blocked = kernel.exports.minix_proc_blocked(spec.slot) === 1;
 

@@ -198,11 +198,15 @@ function makeProc(spec) {
         consoleTag = spec.label;
         emit(b);
       },
-      minix_syscall: (nrRaw, a0, a1) => {
-        // Seven parameters at the ABI; only the first three are named here
-        // because this path needs no more. wasm i64 arrives as a BigInt, and
-        // addresses fit comfortably in a Number, so normalise up front:
-        // comparing a Number against a BigInt is silently false.
+      // Seven parameters at the ABI, all six argument registers forwarded: the
+      // kernel's dispatcher passes them straight to the handler, and the
+      // three-argument syscalls read `args[2]`. The synthetic processes here only
+      // issue `syscall0..2`, so nothing on this path noticed a dropped register —
+      // the servers harness is where that cost a console `write` its whole count
+      // (finding 29). wasm i64 arrives as a BigInt, and addresses fit comfortably in
+      // a Number, so normalise up front: comparing a Number against a BigInt is
+      // silently false.
+      minix_syscall: (nrRaw, a0, a1, a2, a3, a4, a5) => {
         const nr = Number(nrRaw);
         const dst = Number(a0);
         const msgAddr = Number(a1);
@@ -225,12 +229,12 @@ function makeProc(spec) {
         const result = kernel.exports.minix_syscall(
           spec.slot,
           BigInt(nr),
-          BigInt(dst),
-          BigInt(msgAddr),
-          0n,
-          0n,
-          0n,
-          0n
+          BigInt(a0),
+          BigInt(a1),
+          BigInt(a2),
+          BigInt(a3),
+          BigInt(a4),
+          BigInt(a5)
         );
         const blocked = kernel.exports.minix_proc_blocked(spec.slot) === 1;
 

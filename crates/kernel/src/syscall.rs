@@ -465,6 +465,29 @@ unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6
     0
 }
 
+/// Report a console-write failure on the console itself.
+///
+/// A dying process's last act is `write(2, "panic: ...")`, and that write is the only
+/// account of why it died. When the write fails, the caller cannot act on the errno —
+/// the panic handler has nothing to do with it — so the kernel is the only place the
+/// failure can still be recorded, and it records it or nobody ever learns the message
+/// was lost. Both failing paths in `sys_write_handler` use this.
+///
+/// The errno goes out in hex with two digits: the port's errno range reaches
+/// `ELOCKED` (208), so a single digit would report several distinct errnos as one.
+fn console_diagnostic(what: &[u8], errno: i64) {
+    for &b in what {
+        crate::hal::serial_write_byte(b);
+    }
+    let v = (-errno) as u32;
+    for shift in [4, 0] {
+        let d = ((v >> shift) & 0xf) as u8;
+        crate::hal::serial_write_byte(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+    }
+    crate::hal::serial_write_byte(b'\r');
+    crate::hal::serial_write_byte(b'\n');
+}
+
 /// SYS_write (3) — write to a file descriptor.
 /// fd=1 (stdout), fd=2 (stderr) go to serial output, unless the process
 /// VFS-owns them (dup2'd redirect), in which case the write is forwarded
@@ -507,15 +530,11 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
                 // instance look like one that had simply stopped: the process's last
                 // act is `write(2, "panic: ...")`, and if the console write cannot read
                 // the message, the message — the only account of why — is discarded and
-                // nothing records that it was. The errno goes out as one hex digit so a
-                // failure that is not EFAULT is not mistaken for one.
-                for &b in b"! write: cannot read caller's console buffer, errno=0x" {
-                    crate::hal::serial_write_byte(b);
-                }
-                let d = ((-r) & 0xf) as u8;
-                crate::hal::serial_write_byte(if d < 10 { b'0' + d } else { b'a' + d - 10 });
-                crate::hal::serial_write_byte(b'\r');
-                crate::hal::serial_write_byte(b'\n');
+                // nothing records that it was.
+                console_diagnostic(
+                    b"! write: cannot read caller's console buffer, errno=0x",
+                    r as i64,
+                );
                 return -14; // EFAULT
             }
             for &c in chunk.iter().take(n) {
@@ -561,7 +580,15 @@ unsafe fn forward_write_to_vfs(
     msg[24..32].copy_from_slice(&(count as u64).to_le_bytes());
     msg[32..40].copy_from_slice(&0u64.to_le_bytes()); // position (unused)
 
-    unsafe { crate::ipc::syscall_sendrec_status(caller, msg) }
+    // A negative status is an errno; a non-negative one is the byte count VFS
+    // accepted, so only the former is a failure. The caller is usually a panic
+    // handler, which discards the result — the same silence the console path breaks —
+    // so this is the last point at which a failed write can still be noticed.
+    let r = unsafe { crate::ipc::syscall_sendrec_status(caller, msg) };
+    if r < 0 {
+        console_diagnostic(b"! write: VFS forward failed, errno=0x", r);
+    }
+    r
 }
 
 /// SYS_setfdvfs (53) — mark fd 0..2 as VFS-owned (on=1) or serial (on=0).
