@@ -6680,27 +6680,32 @@ readable number instead: `minix_ramdisk_device_size` exports the size the **serv
 derived, and the harness compares it with the image it placed, so a disagreement fails
 with both figures printed.
 
-**24. VM does not reach its main loop on wasm: `init_vm()` loops on `SYS_VM_PAGING`.**
-Found bringing MFS up (M3b), which needs VM because its allocator runs during init.
-MFS itself is fine — one kernel call then the `RECEIVE` — but VM's trace is 64+ entries
-of nothing but `nr=50 a0=0x3e`, call 62 and `SYS_VM_PAGING` every time, and it ends
-blocked *inside a kernel call* rather than in a `RECEIVE`. The loop is in `init_vm()`,
-not in the receive loop that follows it.
+**24. A head-truncated trace made a healthy server look stuck.** Found bringing VM up for
+M3b, and it was the harness's fault, not VM's.
 
-That is the shape the physical-address work predicted. VM's page-table operations are
-precisely what `pt_levels() == 0` makes inert (`ARCH_WASM32.md` §5.3): `vm_walk_page`
-routes to kernel call 62, the handler runs, and on this target there is no translation
-to return — so a caller that treats "not mapped" as "try again" spins rather than
-failing. The fix is the same shape as `umap`/`vumap`'s: on a target with no page
-tables, VM has to learn that its paging work is not merely unanswered but
-unanswerable, and stop asking. Not fixed yet — it wants `init_vm` read through, since
-which of its walks are load-bearing on a paging-less target is the actual question,
-and pinning the negative so the loop cannot come back.
+The evidence read as a spin: VM's trace was 64 entries of nothing but `nr=50 a0=0x3e`
+(kernel call 62, `SYS_VM_PAGING`) and it never showed a `RECEIVE`. `vm_init_boot` does
+explain the calls — it queries the kernel about every process slot, `for slot in
+0..NR_PROCS`, which is 256 of them — but a bounded loop should end, and the trace said
+it did not.
 
-Worth keeping as a shape: **the harness names this rather than asserting it.** A
-server that spins is green-but-noted, because a harness that is complete for what it
-covers is more useful than one that is red for what it does not — and the day VM
-reaches the loop is the day the note changes.
+What gave it away was the two checks that *passed*: `blocked=1` (VM was blocked in the
+kernel) and "no instance ran the syscall budget out". A server that had genuinely spun
+would have failed one of them. It was blocked on its **receive**, and the `RECEIVE` was
+simply never recorded, because `TRACE_LIMIT` capped the trace at the first 64 entries —
+`if (st.trace.length < TRACE_LIMIT) st.trace.push(...)` keeps the *head*.
+
+That is exactly what the check's own comment already said was wrong: "a resume re-enters
+the syscall import, so a trace grows duplicates at every unwind and **only its tail is
+meaningful here**". The comment described the intent and the code did the opposite, and
+nothing caught it because no server before VM made more than 64 syscalls before reaching
+its loop. The harness now keeps both — `trace` for the client's ordering checks, which
+need the first entries, and `tail` for the loop checks — and VM passes the same three
+checks as every other server.
+
+Worth keeping as a shape: **a diagnostic that observes the wrong end of a sequence looks
+exactly like the bug it is meant to find.** The tell was not in the trace but in the
+verdicts that disagreed with it.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

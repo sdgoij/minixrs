@@ -62,6 +62,9 @@ const EINVAL = -22;
 // syscall and exhausted Node's heap instead of diagnosing anything.
 const SYSCALL_BUDGET = 2000;
 const TRACE_LIMIT = 64;
+// How many of the *latest* syscalls to keep. Small on purpose: the loop checks
+// want the last one and the few before it.
+const TAIL_LIMIT = 8;
 let syscallsLeft = SYSCALL_BUDGET;
 /// Which instance ran the budget out, if any. Named rather than booleans so the
 /// failure report says who was spinning.
@@ -203,6 +206,13 @@ function makeServer(spec) {
     scratch: 0,
     syscalls: 0,
     trace: [],
+    // The *last* few syscalls, as well as the first `TRACE_LIMIT`. The checks that
+    // ask "is it in its main loop?" are asking about the tail, but a head-only
+    // trace answers with whichever server made the most calls before it looped:
+    // VM queries the kernel about every process slot first (`vm_init_boot`), which
+    // is 256 calls, so a 64-entry head never reaches its `RECEIVE`. The client
+    // checks need the head, so both are kept.
+    tail: [],
   };
 
   const imports = {
@@ -224,6 +234,8 @@ function makeServer(spec) {
         }
         syscallsLeft -= 1;
         if (st.trace.length < TRACE_LIMIT) st.trace.push({ nr, a0: dst });
+        st.tail.push({ nr, a0: dst });
+        if (st.tail.length > TAIL_LIMIT) st.tail.shift();
         st.syscalls += 1;
 
         if (st.pending !== null) {
@@ -386,30 +398,30 @@ check('the dispatch loop converged', converged, `${steps} steps`);
 // ------------------------------------------------------------- assertions
 
 const servers = procs.filter((p) =>
-  ['ds', 'rs', 'pm', 'ramdisk', 'mfs'].includes(p.spec.label)
+  ['ds', 'rs', 'pm', 'ramdisk', 'vm', 'mfs'].includes(p.spec.label)
 );
 const client = procs.find((p) => p.spec.label === 'client');
 const unregistered = procs.find((p) => p.spec.label === 'unregistered');
 const ds = procs.find((p) => p.spec.label === 'ds');
 const rs = procs.find((p) => p.spec.label === 'rs');
 const ramdiskInst = procs.find((p) => p.spec.label === 'ramdisk');
-const vmInst = procs.find((p) => p.spec.label === 'vm');
 
 // The last syscall a server makes before it stops is the `RECEIVE` it blocks in,
 // which is what "it is in its main loop" means for an instance that no longer has
 // a first-syscall-is-a-receive shape: RS does real work at init now — it registers
 // its grant table and hands DS the process table — so its trace starts with that
 // work and ends in the loop. A resume re-enters the syscall import, so a trace
-// grows duplicates at every unwind and only its tail is meaningful here.
-const lastSyscall = (p) => p.trace[p.trace.length - 1];
+// grows duplicates at every unwind and only its tail is meaningful here — which is
+// why this reads `tail` and not `trace`.
+const lastSyscall = (p) => p.tail[p.tail.length - 1];
 const reachedLoop = servers.filter(
-  (p) => p.trace.length > 0 && lastSyscall(p).nr === RECEIVE
+  (p) => p.tail.length > 0 && lastSyscall(p).nr === RECEIVE
 );
 check(
   'every server reached its main loop',
   reachedLoop.length === servers.length,
   servers
-    .map((p) => `${p.spec.label}: ${p.trace.map((t) => t.nr).join(',') || '(no syscalls)'}`)
+    .map((p) => `${p.spec.label}: ${p.tail.map((t) => t.nr).join(',') || '(no syscalls)'}`)
     .join('; ')
 );
 
@@ -424,12 +436,12 @@ check(
 check(
   'each is receiving from any sender, as its main loop asks',
   servers.every((p) => {
-    const receives = p.trace.filter((t) => t.nr === RECEIVE);
+    const receives = p.tail.filter((t) => t.nr === RECEIVE);
     return receives.length > 0 && receives[receives.length - 1].a0 === ANY;
   }),
   servers
     .map((p) => {
-      const receives = p.trace.filter((t) => t.nr === RECEIVE);
+      const receives = p.tail.filter((t) => t.nr === RECEIVE);
       return `${p.spec.label}: a0=${receives[receives.length - 1]?.a0}`;
     })
     .join('; ')
@@ -442,22 +454,6 @@ check(
     `(image is ${ramdiskImage.length}; host put it at 0x${RAMDISK_IMAGE_VA.toString(16)}, ` +
     `and the driver reports base=0x${ramdiskInst.inst.exports.minix_ramdisk_device_base().toString(16)} ` +
     'because `ramdisk_set_image` stores the address in `dev.data` and zeroes `dev.base`)'
-);
-
-// VM is spawned and does not run away, but it does not reach a `RECEIVE` yet:
-// `init_vm()` calls SYS_VM_PAGING (kernel call 62) repeatedly and the process ends
-// up blocked inside a kernel call. Its trace is 64 entries of nothing but `nr=50
-// a0=0x3e`, which is where the loop is. Named rather than asserted, so the gap is
-// visible in the output without turning a harness that is otherwise complete for
-// what it covers into a failing one -- and so that the day it *does* reach the
-// loop, the note is what changes.
-note(
-  'VM runs but does not reach its main loop yet',
-  `last syscalls: ${vmInst.trace
-    .slice(-4)
-    .map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`)
-    .join(', ')} (call 62 is SYS_VM_PAGING, seen ${vmInst.trace.length}+ times); ` +
-    `blocked=${kernel.exports.minix_proc_blocked(vmInst.spec.slot)}`
 );
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is
