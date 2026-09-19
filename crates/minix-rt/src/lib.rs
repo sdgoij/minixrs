@@ -814,6 +814,17 @@ pub fn exit(status: i32) -> ! {
     unsafe {
         syscall1(NR_EXIT, status as u64);
     }
+    // The kernel has already marked this process dead, so the only question is what
+    // the *instance* does next. Spinning hangs the host synchronously — no JS handler
+    // can run while an instance is executing — so a panic anywhere in a wasm process
+    // presents as a command that never returns, with the panic text as the only clue
+    // and an external SIGKILL as the only way out. Trap instead: the engine raises
+    // `WebAssembly.RuntimeError`, which the harness can catch and name.
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        core::arch::wasm32::unreachable()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     loop {
         #[cfg(target_arch = "x86_64")]
         unsafe {

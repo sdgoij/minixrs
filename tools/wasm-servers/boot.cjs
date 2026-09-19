@@ -401,7 +401,35 @@ for (;;) {
     note('the kernel picked a slot the host never spawned', `slot ${slot}`);
     break;
   }
-  run(st);
+  // Bounded step trace. A deadlock shows up here as the same slot being picked
+  // over and over with its syscall count frozen, which is the only way to tell a
+  // stuck instance from one that is merely slow -- and nothing else prints until
+  // the loop converges. `WASM_TRACE=1` opts in; it is noise on a normal run.
+  if (process.env.WASM_TRACE === '1' && steps <= 300) {
+    const last = st.tail.length > 0 ? st.tail[st.tail.length - 1] : null;
+    console.log(
+      `  step ${steps}: slot ${slot} (${st.spec.label}) syscalls=${st.syscalls} ` +
+        `last=${last === null ? '-' : `nr=${last.nr} a0=0x${last.a0.toString(16)}`}`
+    );
+  }
+  try {
+    run(st);
+  } catch (e) {
+    // A trap is how a wasm process dies loudly: `minix-rt`'s panic handler exits, and
+    // `exit` now traps instead of spinning, so a panic arrives here as
+    // `RuntimeError` rather than as a hang nothing can report. The instance's tail is
+    // the whole diagnosis -- which syscall it was in, and what it had done -- so print
+    // it before letting the error through.
+    console.log(
+      `\nTRAP in ${st.spec.label} (slot ${st.spec.slot}) at step ${steps}: ${e}`
+    );
+    console.log(`  syscalls=${st.syscalls}`);
+    console.log(`  first ${st.trace.length} syscalls: ${st.trace.map((t) => t.nr).join(',')}`);
+    console.log(
+      `  last: ${st.tail.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join(', ')}`
+    );
+    throw e;
+  }
 }
 
 check('the dispatch loop converged', converged, `${steps} steps`);
