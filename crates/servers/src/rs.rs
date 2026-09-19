@@ -879,6 +879,13 @@ pub fn rs_server_main() {
         }
 
         // Register boot services with their known endpoints.
+        //
+        // This is the list RS can *see*: `lookup_slot_by_endpoint` scans these
+        // entries and nothing else, so a service that is missing here cannot be
+        // asked to initialise — the lookup returns `None` and RS panics before it
+        // gets that far. The RAM disk driver and the virtio block driver were the
+        // two the wasm work spawned without adding here, which is what made
+        // extending `asked` panic rather than ask (finding 26).
         let boot_svcs: &[(i32, &[u8])] = &[
             (arch_common::com::DS_PROC_NR, b"ds"),
             (arch_common::com::RS_PROC_NR, b"rs"),
@@ -888,6 +895,8 @@ pub fn rs_server_main() {
             (arch_common::com::VM_PROC_NR, b"vm"),
             (arch_common::com::TTY_PROC_NR, b"tty"),
             (arch_common::com::MFS_PROC_NR, b"mfs"),
+            (arch_common::com::RAMDISK_PROC_NR, b"ramdisk"),
+            (arch_common::com::VIRTIO_BLK_PROC_NR, b"virtio_blk"),
             (arch_common::com::FB_PROC_NR, b"fb"),
             (arch_common::com::INPUT_PROC_NR, b"input"),
             (arch_common::com::WS_PROC_NR, b"wserver"),
@@ -926,7 +935,12 @@ pub fn rs_server_main() {
         //
         // The `rproctab` grant travels with every request (C's `init_service` sets
         // `rproctab_gid` unconditionally) and only DS reads it.
-        let asked: &[i32] = &[arch_common::com::DS_PROC_NR, arch_common::com::PM_PROC_NR];
+        let asked: &[i32] = &[
+            arch_common::com::DS_PROC_NR,
+            arch_common::com::PM_PROC_NR,
+            arch_common::com::RAMDISK_PROC_NR,
+            arch_common::com::VIRTIO_BLK_PROC_NR,
+        ];
         for &ep in asked {
             let slot = match unsafe { lookup_slot_by_endpoint(ep) } {
                 Some(slot) => slot,

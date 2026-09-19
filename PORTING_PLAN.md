@@ -6754,6 +6754,34 @@ The shape is worth keeping, because it happened twice in a row and will happen a
 of these was a probe or a readsuper aimed at an endpoint with no instance behind it, and
 in both cases the answer was to spawn the peer rather than to special-case the platform.
 
+**26. Extending RS's `asked` table needs RS's *own* service list first, and that list is
+not the platform's.** The last piece of the `asked` work, and it took three attempts
+because the failure was a hang rather than a message (finding 23 is the mechanism, 24 the
+trace that finally located it).
+
+`asked` names the services RS asks to initialise; RS looks each one up with
+`lookup_slot_by_endpoint`, which scans **RS's own `RPROCPUB`** and nothing else. That
+table is built at startup from `boot_svcs` — a compiled-in list inside `rs_server_main` —
+and any service absent from it is invisible: the lookup returns `None` and RS panics
+rather than asking. The wasm work had spawned the RAM disk and the virtio block driver
+without adding them to that list, so extending `asked` with either did not ask them, it
+killed RS at the top of the next loop iteration.
+
+So the pair had to move together: the two services go in `boot_svcs` (RS can see them)
+*and* in `asked` (RS asks them), and their loops answer through
+`minix_util::rs::answer_rs_init`, which until this had no caller at all. Both are pinned
+in the wasm harness by the fact they make possible — RS sent the request *and* RS's own
+view of the service ends up active — and `just test-arches` covers the same handshake on
+the hardware arches, which spawn both.
+
+The generalisation worth keeping: **RS's table describes what RS knows, not what exists.**
+`boot_svcs` still names services the wasm harness never spawns (SCHED, TTY, FB, INPUT, WS)
+and marks them active, so a present service and an absent one look the same from inside
+RS. Making that honest — skip what is not in the process table — is still unbuilt, and it
+is what would make a wrong entry degrade to "not asked" instead of a panic. `devman` is
+the next service to add and it needs a branch in `libs::vtreefs`, since that is where its
+loop lives.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

@@ -41,6 +41,7 @@ const WASM_PAGE = 65536;
 
 const RECEIVE = 47;
 const SENDREC = 48;
+const SEND = 46;
 const SENDNB = 51;
 const ANY = 0x0000ffff;
 /// Kernel call 7 is `SYS_GETKSIG`, which PM asks for on every notification.
@@ -685,6 +686,23 @@ check(
   pmActive === 1,
   `minix_rs_is_active(${pm.spec.endpoint}) = ${pmActive}`
 );
+
+// The two services the wasm work had to add to RS's own table before it could ask
+// them at all. `lookup_slot_by_endpoint` scans `boot_svcs` and nothing else, so
+// without those entries RS panicked instead of asking (finding 27); with them, the
+// handshake runs and — the point — RS's own view of each ends up active. Asking
+// them is also what exercises `minix_util::rs::answer_rs_init` in the RAM disk and
+// the virtio block driver, which is otherwise unreachable code.
+for (const label of ['ramdisk', 'virtio_blk']) {
+  const inst = procs.find((p) => p.spec.label === label);
+  const asked = rs.trace.some((t) => t.nr === SEND && t.a0 === inst.spec.endpoint);
+  const active = rs.inst.exports.minix_rs_is_active(inst.spec.endpoint) === 1;
+  check(
+    `RS asked ${label} to initialise and it answered`,
+    asked && active,
+    `sent=${asked} active=${active} (endpoint ${inst.spec.endpoint})`
+  );
+}
 
 // The round trip this harness exists for, now that DS can name the client: RS
 // registered the label (`rs_up`), published it to DS, and DS accepted both the
