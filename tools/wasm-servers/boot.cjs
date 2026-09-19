@@ -179,6 +179,14 @@ const specs = [
   // allocator runs during init.
   { slot: 8, entry: 'minix_server_vm', label: 'vm' },
   { slot: 7, entry: 'minix_server_mfs', label: 'mfs' },
+  // Spawned with no device attached, on purpose: `mount_root` prefers the
+  // `virtio_blk` driver and asks it whether it has a device, and an instance that
+  // is absent would leave that probe blocked on a peer that does not exist. It
+  // answers `EIO`, which is true here, and the ramdisk fallback fires.
+  { slot: 12, entry: 'minix_server_virtio_blk', label: 'virtio_blk' },
+  // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
+  // so MFS has to be alive and answering first.
+  { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   // Not a boot process and not a server: the client that gives DS something to
   // answer. Its slot is above the boot procs on purpose, so `p_priv` stays null
   // — `may_send_to` allows anything from a privilege-less process, and allows DS
@@ -400,6 +408,10 @@ check('the dispatch loop converged', converged, `${steps} steps`);
 const servers = procs.filter((p) =>
   ['ds', 'rs', 'pm', 'ramdisk', 'vm', 'mfs'].includes(p.spec.label)
 );
+// VFS and the virtio block driver are spawned but not yet in that list: VFS advances
+// past `readsuper` and then blocks in a further `SENDREC`, so it has not reached its
+// main loop. What *is* provable is asserted below instead of nothing.
+const vfsInst = procs.find((p) => p.spec.label === 'vfs');
 const client = procs.find((p) => p.spec.label === 'client');
 const unregistered = procs.find((p) => p.spec.label === 'unregistered');
 const ds = procs.find((p) => p.spec.label === 'ds');
@@ -454,6 +466,27 @@ check(
     `(image is ${ramdiskImage.length}; host put it at 0x${RAMDISK_IMAGE_VA.toString(16)}, ` +
     `and the driver reports base=0x${ramdiskInst.inst.exports.minix_ramdisk_device_base().toString(16)} ` +
     'because `ramdisk_set_image` stores the address in `dev.data` and zeroes `dev.base`)'
+);
+
+// The probe is gone, and this is what says so. `mount_root` prefers the `virtio_blk`
+// driver and asks it whether it has a device; with that instance absent the probe
+// blocked on a peer that would never answer, MFS sat inside it and the RAM disk was
+// never asked for a block (`PORTING_PLAN.md` finding 25). A `SEND` in the RAM disk's
+// trace can only happen after it received a BDEV request and answered, so this pins
+// the whole chain in one fact: VFS mounted, MFS read, the RAM disk served.
+check(
+  'the RAM disk served a BDEV request, so the mount chain reached it',
+  ramdiskInst.tail.some((t) => t.nr === 46),
+  `ramdisk tail: ${ramdiskInst.tail.map((t) => t.nr).join(',')} (46 is SEND)`
+);
+// What that chain stops short of. VFS advances past `readsuper` — three `SENDREC`s,
+// where the stall before this change was one — and then blocks in a further one, so it
+// has not reached its main loop and is not asserted to have. Named so the next reader
+// sees the state rather than a gap.
+note(
+  'VFS advances past mount_root and blocks in a later sendrec',
+  `vfs tail: ${vfsInst.tail.map((t) => `nr=${t.nr}`).join(',') || '(no syscalls)'}; ` +
+    `blocked=${kernel.exports.minix_proc_blocked(vfsInst.spec.slot)}`
 );
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is

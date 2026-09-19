@@ -6707,6 +6707,45 @@ Worth keeping as a shape: **a diagnostic that observes the wrong end of a sequen
 exactly like the bug it is meant to find.** The tell was not in the trace but in the
 verdicts that disagreed with it.
 
+**25. MFS's root-driver probe targets an endpoint that does not exist on wasm.** Found
+spawning VFS for M3c, which is the first thing that makes MFS do I/O.
+
+The traces name the stall without ambiguity. VFS ends in `nr=48` (a `SENDREC`) — its
+`mount_root` → `req_readsuper` to MFS — and waits. MFS ends in `nr=48` too, after one
+`RECEIVE` and a kernel call: `mount_root` passes the label `virtio_blk`, so MFS resolves
+it and then *probes* that driver with `bdev_has_device`, which sends a BDEV OPEN. There
+is no virtio_blk instance in this harness — there is no virtio transport at all — so
+that `SENDREC` blocks on a peer nobody will ever be. The RAM disk instance's trace is a
+single `nr=47`: it is in its main loop and was never asked for a block. The dispatch
+loop then converges with every process blocked, which is what a chain waiting on an
+absent peer looks like from the outside.
+
+Both halves were checked rather than assumed, because the alternative reading — a
+VFS/MFS cycle, finding 21's shape — is just as consistent with those traces.
+`endpoint_for_label` is a pure function, so no label round trip to VFS is involved, and
+`bdev_has_device` is a `sendrec`, so the probe is. `bdev_driver_root` already has the
+fallback that would save this — it switches to the ramdisk driver when the preferred one
+"has no device" — but it decides that by *asking* the preferred driver, which is the one
+thing that cannot be done when the driver is not there.
+
+**Fixed, by having the absent driver be present and honest about it.** A `virtio_blk`
+instance is spawned that finds no device, so `virtio_blk_open` answers `EIO` to the
+probe, `bdev_has_device` returns false, and `bdev_driver_root` takes the ramdisk
+fallback it already had. That is a true statement on this platform — the driver is
+there and nothing is attached — rather than a stub, and it keeps the platform branch
+out of `fs`. It also exercises the fallback the hardware arches depend on instead of
+bypassing it.
+
+The fix is pinned by the fact it makes possible: a `SEND` in the RAM disk instance's
+trace can only follow a BDEV request it received and answered, so "the RAM disk served
+a BDEV request" is a single assertion that the whole chain ran — VFS's `readsuper`,
+MFS's block read, the RAM disk's reply. It fails against the old behaviour, where the
+RAM disk's trace was a single `RECEIVE` and nothing ever reached it.
+
+One step further now, and it is where M3c stops: VFS advances past `mount_root` — three
+`SENDREC`s where the stall was one — and then blocks in a further one, so it has not
+reached its main loop. The harness names that state rather than asserting it.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

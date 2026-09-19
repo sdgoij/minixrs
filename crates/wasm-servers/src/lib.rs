@@ -108,6 +108,33 @@ pub extern "C" fn minix_server_mfs() -> i32 {
     0
 }
 
+/// The virtual file system server. Its `sef_cb_init_fresh` runs `mount_root`, which
+/// asks MFS for the root superblock over IPC, and MFS asks the RAM disk instance for
+/// the block — so reaching this server's main loop means the whole chain ran.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_vfs() -> i32 {
+    // SAFETY: called exactly once, from this instance's only thread, which is the
+    // contract `vfs_main` asks for.
+    unsafe { servers::vfs::main::vfs_main() };
+    0
+}
+
+/// The virtio block driver, spawned with **no device attached** on purpose.
+///
+/// `mount_root` names `virtio_blk` as its preferred root driver and then asks that
+/// driver whether it has a device (`bdev_has_device`, a BDEV OPEN). There is no virtio
+/// transport on wasm, so without this instance nothing answers and the probe blocks on
+/// an absent peer forever — MFS waiting inside it, VFS waiting on MFS, and the RAM disk
+/// never asked for a block. Spawned, it answers `EIO` because `virtio_blk_open` finds no
+/// device, which is true, and `bdev_driver_root` takes the ramdisk fallback it already
+/// has. Faithful rather than a stub: a driver that is present and reports nothing
+/// attached. `PORTING_PLAN.md` finding 25.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_virtio_blk() -> i32 {
+    servers::virtio_blk::virtio_blk_server_main();
+    0
+}
+
 /// Device 0's base address in bytes, as **the RAM disk instance** computed it.
 ///
 /// The host put the image somewhere and the server sized the device from the
