@@ -6943,6 +6943,42 @@ rather than like a message that arrived unreachable. The check that caught it wa
 first thing to make a user process open a *device*, and the diagnosis came from the tty's
 trace showing twelve syscalls of its own init and no request at all.
 
+**32. A blocking read on the console never completes on wasm, and its retry loop cannot be
+interrupted.** Found attempting M3f (the shell). The shell starts — spawned in INIT's slot
+with the console set up exactly as init does it — its prompt goes out through VFS and the
+tty (the M3e chain), and the host's scripted input does reach the guest: all 31 bytes, in
+order, consumed *inside a single host dispatch*, which is what says the kernel's
+`poll_console` and the tty's own `read(0)` are doing their part. But the read never
+completes a line, so the shell retries `read(0)` and the run never converges.
+
+Located but not yet explained: the tty's blocking `do_read` path (`servers/src/tty.rs`)
+loops `minix_rt::read(0, ..)` → on `EAGAIN` → `thread_yield()` → retry, and that whole loop
+runs **inside one host dispatch**. On a hardware arch that is the design — the timer
+preempts and the UART interrupt fills the ring — but here the host never regains control
+between iterations, so the step cap never fires, and the syscall budget ends it only by
+accident: once spent, the gate answers `EINVAL`, which `do_read` reads as `r <= 0` and
+treats as "the console is gone". Since the bytes are consumed and the line still does not
+complete, the fault is in the read *completion* rather than in the input plumbing — the
+`in_process`/`in_transfer`/`finish_read` path for a console line is where the next attempt
+should start.
+
+Two things the attempt cost, both kept:
+
+- The budget's exhausted path returned a JS `Number` from an import whose return type is
+  `i64` (`return EINVAL` in the harness trampoline), so the diagnosis — which instance spent
+  the budget — was replaced by `TypeError: Cannot convert -22 to a BigInt` from the host.
+  It is `BigInt(EINVAL)` now.
+- The host had **no console input at all**: `host_console_read` answered `-1`
+  unconditionally, which nothing had needed before because every earlier milestone only
+  ever *wrote* to the console. It now feeds a script, and that plumbing is what established
+  that the bytes reach the guest; it also means the harness can no longer run a shell that
+  is left without input, since an empty read spins.
+
+Worth pairing with finding 12: that one concluded the host needs its own lever against a
+runaway guest. This is the first time the need has actually been hit, and the lever the
+harness has — a step count, and a budget that only bites between dispatches — does not
+reach a loop that never returns to the host.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

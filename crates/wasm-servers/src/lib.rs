@@ -486,6 +486,16 @@ pub extern "C" fn minix_init() {
     write_i32(n as i32);
     userland::write_out(b"\r\n");
 
+    // The next step in `userland::init` is `exec("/bin/sh")`, and this is where M3f
+    // stops. Attempting it produced the run recorded in finding 32: the shell does start
+    // in this slot with the console above already set up, and the host's scripted input
+    // does reach the guest, but the tty's blocking read never completes a line, so the
+    // shell retries `read(0)` forever and the retry loop runs *inside* one host dispatch —
+    // where neither the step cap nor the syscall budget can end it. That is why this
+    // exits instead: a shell that cannot read is indistinguishable from a hang, and a
+    // hanging harness is worse than an honest stop.
+    userland::write_out(b"init: no shell yet (finding 32), exiting\r\n");
+
     // Through the real exit path, so PM's half of a process lifecycle runs: the kernel
     // marks this process SIGNALED | SIG_PENDING | SLOT_FREE, queues the exit for PM to
     // read with GETKSIG, and notifies PM as the signal manager. `minix-rt::exit` then

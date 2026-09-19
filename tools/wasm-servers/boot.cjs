@@ -143,14 +143,27 @@ function copyBetween(srcProc, srcAddr, dstProc, dstAddr, bytes) {
 // ----------------------------------------------------------- kernel instance
 
 const kernelModule = new WebAssembly.Module(fs.readFileSync(kernelPath));
+// What the shell reads when it asks for a line. The kernel drains these bytes into its
+// own serial ring (`poll_console`) and the tty pulls them from there, so this is the
+// port's console input seen from outside. The script is `exit`-terminated on purpose: an
+// empty read answers EAGAIN and the shell's editor retries in user mode, so a shell left
+// without input spins with syscalls and the budget is the only thing that would end it.
+const consoleInput = Array.from(Buffer.from('echo hello from the shell\nexit\n'));
+
 const kernel = new WebAssembly.Instance(kernelModule, {
   env: {
     host_console_write: (b) => {
       consoleTag = 'kernel';
       emit(b);
     },
-    host_console_read: () => -1,
-    host_console_available: () => 0,
+    host_console_read: () => {
+      if (consoleInput.length === 0) return -1;
+      const b = consoleInput.shift();
+      if (process.env.WASM_TRACE === '1')
+        console.log(`  [input] host supplied 0x${b.toString(16)} (${consoleInput.length} left)`);
+      return b;
+    },
+    host_console_available: () => consoleInput.length,
     host_cycles: () => BigInt((cycles += 1000)),
     host_halt: (code) => {
       haltCode = code;
@@ -261,7 +274,10 @@ function makeServer(spec) {
         const msgAddr = Number(a1);
         if (syscallsLeft <= 0) {
           exhaustedBy = spec.label;
-          return EINVAL;
+          // BigInt, because this import's return type is i64: returning a Number here
+          // throws `Cannot convert -22 to a BigInt` and replaces the diagnosis -- which
+          // instance spent the budget -- with a TypeError from the host.
+          return BigInt(EINVAL);
         }
         syscallsLeft -= 1;
         if (st.trace.length < TRACE_LIMIT) st.trace.push({ nr, a0: dst });
