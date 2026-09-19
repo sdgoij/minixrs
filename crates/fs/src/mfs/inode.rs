@@ -320,9 +320,14 @@ pub fn update_times(rip_idx: u16) {
 // Reference: inode.c fs_putnode()
 pub fn fs_putnode() -> i32 {
     unsafe {
-        let ino = (*glo::mfs_ptr()).cch[0] as u32;
-        let count = (*glo::mfs_ptr()).cch[1];
-        let dev = (*glo::mfs_ptr()).fs_dev;
+        let mfs = glo::mfs_ptr();
+
+        // VFS req_putnode payload: count (u64) at payload[0], inode (u32) at
+        // payload[8].
+        let payload = (*mfs).m_in.m_payload.raw;
+        let count = u64::from_ne_bytes(payload[0..8].try_into().unwrap_or([0u8; 8])) as i32;
+        let ino = u32::from_ne_bytes(payload[8..12].try_into().unwrap_or([0u8; 4]));
+        let dev = (*mfs).fs_dev;
 
         let rip = find_inode(dev, ino);
         let rip = match rip {
@@ -406,5 +411,28 @@ mod tests {
     #[test]
     fn test_hash_inum() {
         assert!(hash_inum(1) < INODE_HASH_SIZE);
+    }
+
+    #[test]
+    fn test_fs_putnode_takes_its_input_from_the_payload() {
+        unsafe {
+            crate::mfs::glo::mfs_init_globals();
+            let mfs = glo::mfs_ptr();
+            (*mfs).fs_dev = crate::mfs::consts::NO_DEV;
+
+            // Values the previous cch-based parse would have used. They are
+            // not the request, so they must not decide the outcome.
+            (*mfs).cch[0] = 1;
+            (*mfs).cch[1] = 1;
+            assert_eq!(fs_putnode(), crate::mfs::consts::EINVAL);
+
+            // A count in the payload with an inode that is not in the table
+            // still fails the lookup - a zero payload must not succeed either
+            // way.
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..8].copy_from_slice(&1u64.to_ne_bytes());
+            raw[8..12].copy_from_slice(&42u32.to_ne_bytes());
+            assert_eq!(fs_putnode(), crate::mfs::consts::EINVAL);
+        }
     }
 }

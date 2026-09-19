@@ -189,8 +189,9 @@ const REQ_GETDENTS: i32 = FS_BASE + 31;
 
 /// readsuper flags (VFS `request.rs`).
 const REQ_ISROOT: u32 = 0o02;
-/// lookup flag: return the symlink itself instead of resolving it.
-const PATH_RET_SYMLINK: u32 = 0o02;
+/// lookup flag: return the symlink itself instead of resolving it. Must match
+/// the value VFS sets in `l_flags` (VFS `vfs/path.rs` `PATH_RET_SYMLINK`).
+const PATH_RET_SYMLINK: u32 = 4;
 
 /// Reply `flags` for readsuper — no capabilities.
 const RES_NOFLAGS: u32 = 0;
@@ -1090,6 +1091,13 @@ pub fn start_vtreefs(hooks: FsHooks, nr_inodes: u32, root_stat: InodeStat, nr_in
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// VFS decides the value of this flag (`vfs/path.rs`); the server only
+    /// tests it against `l_flags`. Keep the two in step.
+    #[test]
+    fn test_path_ret_symlink_matches_vfs() {
+        assert_eq!(PATH_RET_SYMLINK, 4);
+    }
 
     fn test_root_stat() -> InodeStat {
         InodeStat {

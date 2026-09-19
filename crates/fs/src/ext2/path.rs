@@ -16,54 +16,258 @@ use crate::ext2::types::*;
 use crate::ext2::utility::*;
 use crate::ext2::write::new_block;
 
-/// fs_lookup — VFS lookup handler.
-pub unsafe fn fs_lookup() -> i32 {
+/// Fill the lookup reply VFS reads back (VFS `req_lookup`): file_size (i64)
+/// at payload[8], device (u32) at payload[16], inode (u32) at payload[20],
+/// mode (u32) at payload[24].
+unsafe fn fill_lookup_reply(rip: *mut Inode) {
+    let raw = &mut (*glo::ext2_ptr()).m_out.m_payload.raw;
+    let size = (*rip).i_size as i64;
+    raw[8..16].copy_from_slice(&size.to_le_bytes());
+    raw[16..20].copy_from_slice(&(*rip).i_block[0].to_le_bytes());
+    raw[20..24].copy_from_slice(&(*rip).i_num.to_le_bytes());
+    raw[24..28].copy_from_slice(&((*rip).i_mode as u32).to_le_bytes());
+}
+
+/// Expand the symbolic link `rip` in place: the link text is prepended to the
+/// remaining path in `user_path`, so the walk restarts at the target.
+///
+/// Reference: path.c ltraverse()
+unsafe fn ltraverse(rip: *mut Inode, suffix_offset: usize, path_len: usize) -> i32 {
     let ext2 = glo::ext2_ptr();
+    let llen = (*rip).i_size as usize;
+    let slen = path_len.saturating_sub(suffix_offset);
+    let up = (*ext2).user_path.as_mut_ptr();
 
-    // FIXME: parse dir_ino, name, flags from message
-    let dir_ino = (*ext2).fs_m_in_type as u32;
-
-    if dir_ino == 0 {
-        (*ext2).err_code = ENOENT;
-        return ENOENT;
+    if slen + llen + 1 > PATH_MAX {
+        return ENAMETOOLONG;
     }
 
-    let rip = get_inode((*ext2).fs_dev, dir_ino);
-    if rip.is_null() {
-        (*ext2).err_code = ENOENT;
-        return ENOENT;
+    let bp;
+    let text: *const u8;
+    if llen >= MAX_FAST_SYMLINK_LENGTH {
+        // Normal symlink: the target lives in the first data block.
+        let b = read_map(rip, 0, 0);
+        if b == NO_BLOCK {
+            return EIO;
+        }
+        bp = lmfs_get_block_ino((*rip).i_dev, b as u64, NORMAL, (*rip).i_num as u64, 0);
+        if bp.is_null() {
+            return EIO;
+        }
+        text = b_data(bp);
+    } else {
+        // Fast symlink: the target is stored in the inode's block array.
+        bp = core::ptr::null_mut();
+        text = (*rip).i_block.as_ptr() as *const u8;
     }
 
-    // FIXME: parse path from grant and user_path
-    // For now just return what we have
-    let _ = rip;
+    // Make room for the expanded link after the suffix, then copy the target
+    // in front of it.
+    core::ptr::copy(up.add(suffix_offset), up.add(llen), slen + 1);
+    core::ptr::copy_nonoverlapping(text, up, llen);
 
-    // Reply would be set in fs_m_out
+    if !bp.is_null() {
+        lmfs_put_block(bp, DIRECTORY_BLOCK);
+    }
     OK
 }
 
+/// fs_lookup — resolve a path to an inode.
+///
+/// Message layout (VFS `req_lookup`): dir_ino (u64) at payload[0], root_ino
+/// (u64) at payload[8], flags (u32) at payload[16], path_len (u32) at
+/// payload[20], path at payload[24] (NUL-terminated, capped at 24 bytes).
+///
+/// Reference: path.c fs_lookup() + parse_path()
+pub unsafe fn fs_lookup() -> i32 {
+    let ext2 = glo::ext2_ptr();
+
+    let payload = (*ext2).m_in.m_payload.raw;
+    let dir_ino = u64::from_ne_bytes(payload[0..8].try_into().unwrap_or([0u8; 8])) as u32;
+    let root_ino = u64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8])) as u32;
+    let flags = u32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4])) as i32;
+    let path_len = u32::from_ne_bytes(payload[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+
+    if path_len == 0 {
+        return EINVAL;
+    }
+    if path_len > PATH_MAX {
+        return E2BIG;
+    }
+
+    // The path travels embedded in the message; copy it out and terminate it.
+    let up = core::ptr::addr_of_mut!((*ext2).user_path);
+    let copy_len = path_len.min(24).min(PATH_MAX - 1);
+    for i in 0..copy_len {
+        core::ptr::write((*up).as_mut_ptr().add(i), payload[24 + i]);
+    }
+    core::ptr::write((*up).as_mut_ptr().add(copy_len), 0);
+    let path_len = copy_len;
+
+    let mut cp_offset: usize = 0;
+    let mut symlinks: i32 = 0;
+    let mut offset: usize = 0;
+
+    // Start at the given directory. get_inode (not find_inode) is used because
+    // find_inode requires i_count > 0, which fails for an inode released to
+    // the unused list by an earlier request.
+    let rip = get_inode((*ext2).fs_dev, dir_ino);
+    if rip.is_null() {
+        return ENOENT;
+    }
+    let mut current_rip = rip;
+    let mut leaving_mount = (*current_rip).i_mountpoint != FALSE;
+
+    loop {
+        // Skip leading slashes.
+        while cp_offset < path_len && (*up)[cp_offset] == b'/' {
+            cp_offset += 1;
+        }
+
+        // End of path: this is the inode we were looking for.
+        if cp_offset >= path_len || (*up)[cp_offset] == 0 {
+            fill_lookup_reply(current_rip);
+            if (*current_rip).i_mountpoint != FALSE {
+                put_inode(current_rip);
+                return EENTERMOUNT;
+            }
+            put_inode(current_rip);
+            return OK;
+        }
+
+        // Extract the next component.
+        let comp_start = cp_offset;
+        while cp_offset < path_len && (*up)[cp_offset] != b'/' && (*up)[cp_offset] != 0 {
+            cp_offset += 1;
+        }
+        let comp_len = cp_offset - comp_start;
+        let component = core::slice::from_raw_parts((*up).as_ptr().add(comp_start), comp_len);
+
+        // ".." may leave the filesystem or be ignored at the process root.
+        if comp_len == 2 && component[0] == b'.' && component[1] == b'.' {
+            let r = forbidden(current_rip, X_BIT);
+            if r != OK {
+                put_inode(current_rip);
+                return r;
+            }
+            if (*current_rip).i_num == root_ino {
+                offset += cp_offset;
+                continue;
+            }
+            if (*current_rip).i_num == ROOT_INODE {
+                let is_root = match (*current_rip).i_sp {
+                    Some(ref sp) => sp.s_is_root != 0,
+                    None => false,
+                };
+                if !is_root {
+                    put_inode(current_rip);
+                    return ELEAVEMOUNT;
+                }
+            }
+        }
+
+        // A mountpoint hands the rest of the path back to VFS.
+        if !leaving_mount && (*current_rip).i_mountpoint != FALSE {
+            fill_lookup_reply(current_rip);
+            put_inode(current_rip);
+            return EENTERMOUNT;
+        }
+
+        // Advance through this component.
+        let dir_ip = current_rip;
+        let next_rip = if leaving_mount {
+            advance(dir_ip, &DOT2, CHK_PERM)
+        } else {
+            advance(dir_ip, component, CHK_PERM)
+        };
+        if next_rip.is_null() {
+            put_inode(dir_ip);
+            return (*ext2).err_code;
+        }
+        current_rip = next_rip;
+        leaving_mount = false;
+
+        // Follow a symlink unless the caller asked for the link itself.
+        if (*current_rip).i_mode & I_TYPE == I_SYMBOLIC_LINK {
+            let next_char = if cp_offset < path_len {
+                (*up)[cp_offset]
+            } else {
+                0
+            };
+            if next_char == 0 && (flags & PATH_RET_SYMLINK) != 0 {
+                put_inode(dir_ip);
+                fill_lookup_reply(current_rip);
+                put_inode(current_rip);
+                return OK;
+            }
+
+            let r = ltraverse(current_rip, cp_offset, path_len);
+            cp_offset = 0;
+            offset = 0;
+            symlinks += 1;
+
+            if symlinks > _POSIX_SYMLOOP_MAX {
+                put_inode(dir_ip);
+                put_inode(current_rip);
+                return ELOOP;
+            }
+            if r != OK {
+                put_inode(dir_ip);
+                put_inode(current_rip);
+                return r;
+            }
+            // A link to an absolute path restarts VFS's resolution.
+            if cp_offset < path_len && (*up)[cp_offset] == b'/' {
+                put_inode(dir_ip);
+                put_inode(current_rip);
+                return ESYMLINK;
+            }
+
+            put_inode(current_rip);
+            dup_inode(dir_ip);
+            current_rip = dir_ip;
+        }
+
+        put_inode(dir_ip);
+        offset += cp_offset;
+    }
+}
+
 /// Advance to the next path component.
+///
+/// Leaves the failure status in the server's `err_code`, as the C original's
+/// callers read it (`fs_lookup`).
 pub unsafe fn advance(dirp: *mut Inode, string: &[u8], chk_perm: i32) -> *mut Inode {
     if dirp.is_null() {
         return core::ptr::null_mut();
     }
 
+    if string.is_empty() || string[0] == 0 {
+        (*glo::ext2_ptr()).err_code = ENOENT;
+        return core::ptr::null_mut();
+    }
+
     if ((*dirp).i_mode & I_TYPE) != I_DIRECTORY {
+        (*glo::ext2_ptr()).err_code = ENOTDIR;
         return core::ptr::null_mut();
     }
 
     let mut numb = 0u32;
     let r = search_dir(dirp, string, &mut numb as *mut u32, LOOK_UP, chk_perm, 0);
+    // C assigns the status unconditionally here; callers read `err_code` after
+    // a successful walk as well, so a stale error from an earlier request must
+    // not survive this one.
+    (*glo::ext2_ptr()).err_code = r;
     if r != OK {
         return core::ptr::null_mut();
     }
 
     if numb == 0 {
+        (*glo::ext2_ptr()).err_code = ENOENT;
         return core::ptr::null_mut();
     }
 
-    let rip = get_inode((*dirp).i_dev, numb);
-    rip
+    get_inode((*dirp).i_dev, numb)
 }
 
 /// Search a directory for a string, or enter/delete an entry.
@@ -112,11 +316,16 @@ pub unsafe fn search_dir(
 
     let mut new_slots = 0u32;
     let mut e_hit = false;
+    // Where an ENTER writes its entry: the free slot the search found, or the
+    // first entry of the block appended when the directory is full.
+    let mut slot_pos: u64 = 0;
     let mut match_found = false;
     let mut pos: u64 = 0;
 
-    // For ENTER, compute required space
-    let string_len = string.len();
+    // For ENTER, compute required space. The name length is C's `strlen()` of
+    // the argument, not the slice length: the dot entries arrive as
+    // NUL-terminated constants.
+    let string_len = cstr_len(string);
     let required_space = if flag == ENTER {
         let mut rs = MIN_DIR_ENTRY_SIZE + string_len;
         if rs & 0x03 != 0 {
@@ -163,11 +372,7 @@ pub unsafe fn search_dir(
 
         prev_dp = core::ptr::null_mut();
 
-        while (dp as usize) < (data_end as usize) || {
-            // Check that dp doesn't wrap/walk off
-            let d_rec_len = core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_rec_len));
-            (dp as usize) < (data_end as usize)
-        } {
+        while (dp as usize) < (data_end as usize) {
             let d_ino = core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_ino));
             let d_rec_len =
                 core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_rec_len)) as usize;
@@ -191,11 +396,16 @@ pub unsafe fn search_dir(
                         match_found = true;
                     }
                 } else {
-                    // LOOK_UP or DELETE — match name
-                    if d_name_len == string.len() {
+                    // LOOK_UP or DELETE — match the name as C's ansi_strcmp()
+                    // does: same length, then the same bytes. d_name is a
+                    // flexible array declared as [u8; 1], so it has to be
+                    // walked by pointer: indexing it panics past the first
+                    // byte.
+                    if d_name_len == string_len {
                         let mut name_match = true;
-                        for i in 0..string.len() {
-                            if core::ptr::read_unaligned(&(*dp).d_name[i]) != string[i] {
+                        let name = core::ptr::addr_of!((*dp).d_name) as *const u8;
+                        for (i, &sc) in string[..string_len].iter().enumerate() {
+                            if core::ptr::read_unaligned(name.add(i)) != sc {
                                 name_match = false;
                                 break;
                             }
@@ -212,9 +422,13 @@ pub unsafe fn search_dir(
                 if flag == IS_EMPTY {
                     r = ENOTEMPTY;
                 } else if flag == DELETE {
-                    // Erase entry
+                    // Erase entry. The inode number is stashed in the tail of
+                    // the name first, so an interrupted erase leaves something
+                    // to recover the entry from.
                     if d_name_len >= core::mem::size_of::<u32>() {
-                        // We're just clearing d_ino
+                        let t = d_name_len - core::mem::size_of::<u32>();
+                        let name = core::ptr::addr_of_mut!((*dp).d_name) as *mut u8;
+                        core::ptr::write_unaligned(name.add(t) as *mut u32, d_ino);
                     }
                     core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dp).d_ino), NO_ENTRY);
                     lmfs_markdirty(bp);
@@ -253,16 +467,14 @@ pub unsafe fn search_dir(
             }
 
             // Check for free slot for ENTER
-            if flag == ENTER && d_ino == NO_ENTRY {
-                if required_space <= d_rec_len {
-                    e_hit = true;
-                    break;
-                }
+            if flag == ENTER && d_ino == NO_ENTRY && required_space <= d_rec_len {
+                e_hit = true;
+                slot_pos = pos + (dp as usize - data as usize) as u64;
+                break;
             }
 
             // Can we shrink dentry for ENTER?
-            if flag == ENTER && required_space + MIN_DIR_ENTRY_SIZE <= d_rec_len {
-                // Split the existing entry
+            if flag == ENTER {
                 let actual_size = MIN_DIR_ENTRY_SIZE + d_name_len;
                 let actual_size_aligned = if actual_size & 0x03 != 0 {
                     (actual_size + DIR_ENTRY_ALIGN as usize - 1) & !(DIR_ENTRY_ALIGN as usize - 1)
@@ -270,7 +482,17 @@ pub unsafe fn search_dir(
                     actual_size
                 };
 
-                let new_slot_size = d_rec_len - actual_size_aligned;
+                // The new entry has to fit in the slack this one leaves behind
+                // (`DIR_ENTRY_SHRINK` in C). Splitting on anything less makes
+                // the new slot shorter than its own contents -- a record length
+                // of zero, which stops the next search at that offset.
+                let new_slot_size = d_rec_len.saturating_sub(actual_size_aligned);
+                if new_slot_size < required_space {
+                    prev_dp = dp;
+                    dp = (dp as *mut u8).wrapping_add(d_rec_len) as *mut Ext2DiskDirDesc;
+                    continue;
+                }
+
                 core::ptr::write_unaligned(
                     core::ptr::addr_of_mut!((*dp).d_rec_len),
                     actual_size_aligned as u16,
@@ -286,7 +508,7 @@ pub unsafe fn search_dir(
                 core::ptr::write_unaligned(core::ptr::addr_of_mut!((*next_dp).d_ino), NO_ENTRY);
                 lmfs_markdirty(bp);
                 e_hit = true;
-                dp = next_dp;
+                slot_pos = pos + (next_dp as usize - data as usize) as u64;
                 break;
             }
 
@@ -312,16 +534,16 @@ pub unsafe fn search_dir(
     (*ldir_ptr).i_last_dpos = pos;
     (*ldir_ptr).i_last_dentry_size = required_space as i32;
 
-    // If no free slot, extend directory
+    // No free slot anywhere: grow the directory by one block and use its first
+    // entry. The entry is written below, so the buffer is only initialised here.
     if !e_hit {
         new_slots = 1;
+        slot_pos = file_size;
         let bp = new_block(ldir_ptr, file_size);
         if bp.is_null() {
             return (*glo::ext2_ptr()).err_code;
         }
-        // Initialize the new block
-        let data = b_data(bp);
-        let dp = data as *mut Ext2DiskDirDesc;
+        let dp = b_data(bp) as *mut Ext2DiskDirDesc;
         core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dp).d_rec_len), block_size as u16);
         core::ptr::write_unaligned(
             core::ptr::addr_of_mut!((*dp).d_name_len),
@@ -329,37 +551,10 @@ pub unsafe fn search_dir(
         ); // for failure
         lmfs_markdirty(bp);
         lmfs_put_block(bp, DIRECTORY_BLOCK);
-        // Get it back for writing the entry
-        let bp2 = lmfs_get_block_ino(
-            (*ldir_ptr).i_dev,
-            read_map(ldir_ptr, file_size, 0) as u64,
-            NORMAL,
-            (*ldir_ptr).i_num as u64,
-            file_size,
-        );
-        let dp2 = b_data(bp2) as *mut Ext2DiskDirDesc;
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dp2).d_rec_len), block_size as u16);
-        core::ptr::write_unaligned(
-            core::ptr::addr_of_mut!((*dp2).d_name_len),
-            EXT2_NAME_MAX as u8,
-        );
-        let _ = dp2;
-        lmfs_put_block(bp2, DIRECTORY_BLOCK);
     }
 
-    // Now we need to write the entry. Get the block again.
-    let block_size_u = block_size as usize;
-    let mut write_pos = (*ldir_ptr).i_last_dpos as u64;
-    if write_pos >= file_size {
-        write_pos = 0;
-        while write_pos < file_size {
-            write_pos += block_size;
-        }
-        // write_pos now points to the last block
-        write_pos -= block_size;
-    }
-
-    let write_block_pos = write_pos & !(block_size - 1);
+    // Write the entry into the block that holds `slot_pos`.
+    let write_block_pos = slot_pos & !(block_size - 1);
     let b = read_map(ldir_ptr, write_block_pos, 0);
     if b == NO_BLOCK {
         return ENOENT;
@@ -376,23 +571,24 @@ pub unsafe fn search_dir(
         return EIO;
     }
 
-    let data_w = b_data(bp_w);
-    let dp_w = data_w as *mut Ext2DiskDirDesc;
+    let dp_at = (b_data(bp_w) as *mut u8).add((slot_pos - write_block_pos) as usize)
+        as *mut Ext2DiskDirDesc;
 
-    // Find the right position
-    let off_in_block = (write_pos - write_block_pos) as usize;
-    let dp_at = (dp_w as *mut u8).add(off_in_block) as *mut Ext2DiskDirDesc;
-
-    // Write the directory entry
+    // Write the directory entry.
     core::ptr::write_unaligned(
         core::ptr::addr_of_mut!((*dp_at).d_name_len),
         string_len as u8,
     );
-    for i in 0..string.len() {
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dp_at).d_name[i]), string[i]);
+    // d_name is a flexible array declared as [u8; 1] — walk it by pointer.
+    let name = core::ptr::addr_of_mut!((*dp_at).d_name) as *mut u8;
+    for (i, &sc) in string[..string_len].iter().enumerate() {
+        core::ptr::write_unaligned(name.add(i), sc);
     }
-    if string.len() < EXT2_NAME_MAX {
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dp_at).d_name[string.len()]), 0);
+    // The on-disk name is length-prefixed, not terminated: only add the NUL
+    // when it still lands inside this entry's slot.
+    let slot_rec_len = core::ptr::read_unaligned(core::ptr::addr_of!((*dp_at).d_rec_len)) as usize;
+    if MIN_DIR_ENTRY_SIZE + string_len + 1 <= slot_rec_len {
+        core::ptr::write_unaligned(name.add(string_len), 0);
     }
     core::ptr::write_unaligned(
         core::ptr::addr_of_mut!((*dp_at).d_ino),

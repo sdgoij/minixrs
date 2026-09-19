@@ -154,6 +154,61 @@ pub fn mfs_nul_f(_file: &str, _line: u32, _str: &[u8], _len: usize, _maxlen: usi
     // In Minix this would print a warning. Silently ignore in no_std.
 }
 
+/// Length of the C string `s`: the bytes before its NUL, or the whole slice
+/// when it has none. C's `strlen()`, which is what the port's name arguments
+/// mean — some are NUL-terminated constants (`DOT1`, `DOT2`), most are exact
+/// slices.
+pub fn cstr_len(s: &[u8]) -> usize {
+    s.iter().position(|&c| c == 0).unwrap_or(s.len())
+}
+
+// The fields of a VFS request travel in the message payload, which `vfs`
+// (`request.rs`) writes little-endian. A payload shorter than the field being
+// read yields zero instead of panicking, as the receive loop's other parsers
+// do.
+
+/// Read a `u32` at `off` from a request payload.
+pub fn payload_u32(raw: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(
+        raw.get(off..off + 4)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 4]),
+    )
+}
+
+/// Read an `i32` at `off` from a request payload.
+pub fn payload_i32(raw: &[u8], off: usize) -> i32 {
+    i32::from_le_bytes(
+        raw.get(off..off + 4)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 4]),
+    )
+}
+
+/// Read a `u64` at `off` from a request payload.
+pub fn payload_u64(raw: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(
+        raw.get(off..off + 8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 8]),
+    )
+}
+
+/// Read an `i64` at `off` from a request payload.
+pub fn payload_i64(raw: &[u8], off: usize) -> i64 {
+    i64::from_le_bytes(
+        raw.get(off..off + 8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 8]),
+    )
+}
+
+/// The entry name a handler got: `user_path` is NUL-terminated by the receive
+/// loop's parsing (or by the grant copy in `fs_slink`).
+pub fn path_name(user_path: &[u8]) -> &[u8] {
+    &user_path[..cstr_len(user_path)]
+}
+
 /// Sanity check assertion (from C SANITYCHECK macro).
 pub fn sanitycheck(_file: &str, _line: u32) {
     // Placeholder — actual checking logic would be wired here.
@@ -203,6 +258,26 @@ mod tests {
     #[test]
     fn test_ansi_strcmp_not_equal() {
         assert_eq!(ansi_strcmp(b"hello", b"world"), -1);
+    }
+
+    #[test]
+    fn test_payload_reads_are_little_endian() {
+        let mut raw = [0u8; 56];
+        raw[0..4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        raw[8..16].copy_from_slice(&(-3i64).to_le_bytes());
+        raw[16..24].copy_from_slice(&0x1_0000_0000u64.to_le_bytes());
+
+        assert_eq!(payload_u32(&raw, 0), 0x1234_5678);
+        assert_eq!(payload_i32(&raw, 0), 0x1234_5678);
+        assert_eq!(payload_i64(&raw, 8), -3);
+        assert_eq!(payload_u64(&raw, 16), 0x1_0000_0000);
+    }
+
+    #[test]
+    fn test_payload_reads_tolerate_short_buffers() {
+        let raw = [0u8; 2];
+        assert_eq!(payload_u32(&raw, 0), 0);
+        assert_eq!(payload_i64(&raw, 4), 0);
     }
 
     #[test]

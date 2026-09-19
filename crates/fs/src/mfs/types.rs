@@ -30,44 +30,9 @@ pub struct Direct {
 pub const DIR_ENTRY_SIZE: usize = core::mem::size_of::<Direct>();
 pub const MFS_DIRSIZ: usize = MFS_NAME_MAX;
 
-/// File status — mirrors the userland `Stat` in `minix-std` (88 bytes on
-/// 64-bit). Must stay byte-identical: MFS writes this layout into the
-/// caller's buffer through the grant created by VFS.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Stat {
-    pub st_dev: u64,
-    pub st_ino: u64,
-    pub st_mode: u32,
-    pub st_nlink: u32,
-    pub st_uid: u32,
-    pub st_gid: u32,
-    pub st_rdev: u64,
-    pub st_size: i64,
-    pub st_blksize: i64,
-    pub st_blocks: i64,
-    pub st_atime: i64,
-    pub st_mtime: i64,
-    pub st_ctime: i64,
-}
-
-/// Filesystem statistics — mirrors `Statvfs` in the VFS server.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Statvfs {
-    pub f_flags: u64,
-    pub f_bsize: u32,
-    pub f_frsize: u32,
-    pub f_blocks: u64,
-    pub f_bfree: u64,
-    pub f_bavail: u64,
-    pub f_files: u64,
-    pub f_ffree: u64,
-    pub f_favail: u64,
-    pub f_fsid: u64,
-    pub f_flag: u64,
-    pub f_namemax: u64,
-}
+/// File status and filesystem statistics are the shared VFS wire layouts
+/// (`<sys/stat.h>` / `<sys/statvfs.h>`), used by every filesystem server.
+pub use crate::stat::{Stat, Statvfs};
 
 /// Super block (in-memory + on-disk).
 #[repr(C)]

@@ -155,8 +155,11 @@ pub const UTIME_OMIT: i64 = -2;
 
 pub const MAX_FILE_POS: i64 = 0x7FFFFFFF; // LONG_MAX
 
-pub const PATH_GET_UCRED: i32 = 0x01;
-pub const PATH_RET_SYMLINK: i32 = 0x02;
+/// Lookup flags sent by VFS. These must match the values VFS itself uses
+/// (`vfs/request.rs` `PATH_GET_UCRED`, `vfs/path.rs` `PATH_RET_SYMLINK`) — a
+/// mismatch makes the flag silently never match here.
+pub const PATH_GET_UCRED: i32 = 0o20;
+pub const PATH_RET_SYMLINK: i32 = 4;
 pub const REQ_RDONLY: i32 = 0x01;
 pub const REQ_ISROOT: i32 = 0x02;
 pub const RES_HASPEEK: i32 = 0x01;
@@ -168,3 +171,17 @@ pub const TRUE: i32 = 1;
 pub const DOT1: [u8; 2] = [b'.', 0];
 pub const DOT2: [u8; 3] = [b'.', b'.', 0];
 pub const UMAX_FILE_POS: u64 = 0x7FFFFFFF;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lookup flags are VFS's, not this server's: VFS puts them in the
+    /// request and compares nothing back. A divergent value here silently
+    /// makes the flag never match in `fs_lookup`.
+    #[test]
+    fn test_lookup_flags_match_vfs() {
+        assert_eq!(PATH_RET_SYMLINK, 4); // vfs/path.rs
+        assert_eq!(PATH_GET_UCRED, 0o20); // vfs/request.rs
+    }
+}

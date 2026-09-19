@@ -193,8 +193,9 @@ pub const W_BIT: u16 = 2;
 pub const X_BIT: u16 = 1;
 pub const RWX_MODES: u16 = 0o0777;
 
-// VFS request numbers
-pub const FS_BASE: i32 = 200;
+// VFS request numbers. FS_BASE is the value VFS stamps into `m_type`
+// (`crates/servers/src/vfs/request.rs`), so it is not free to choose.
+pub const FS_BASE: i32 = 0xA00;
 pub const REQ_READ: i32 = FS_BASE + 19;
 pub const REQ_WRITE: i32 = FS_BASE + 20;
 pub const REQ_PEEK: i32 = FS_BASE + 32;
@@ -204,8 +205,42 @@ pub const REQ_RMDIR: i32 = FS_BASE + 14;
 pub const UTIME_NOW: i64 = -1;
 pub const UTIME_OMIT: i64 = -2;
 
+/// Largest file position (`<minix/const.h>`), used to clamp a readlink size
+/// before it is copied.
+pub const UMAX_FILE_POS: u64 = 0x7FFF_FFFF;
+
 pub const TRUE: i32 = 1;
 pub const FALSE: i32 = 0;
 
+/// Buffer-cache pool size (mirrors the MFS port's `DEFAULT_NR_BUFS`).
+pub const DEFAULT_NR_BUFS: usize = 512;
+
+/// Maximum block-driver label length (minix `const.h` LABEL_MAX).
+pub const LABEL_MAX: usize = 64;
+
 pub const DOT1: [u8; 2] = [b'.', 0];
 pub const DOT2: [u8; 3] = [b'.', b'.', 0];
+
+/// Return a symlink object rather than following it (VFS `vfs/path.rs`).
+pub const PATH_RET_SYMLINK: i32 = 4;
+
+/// Maximum symlink indirections before ELOOP (`<limits.h>`
+/// `_POSIX_SYMLOOP_MAX`).
+pub const _POSIX_SYMLOOP_MAX: i32 = 8;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// VFS sends `m_type` as `FS_BASE + n` and the server loop recovers the
+    /// index as `m_type - FS_BASE`; a mismatch here lands every request in
+    /// `dispatch()`'s out-of-bounds arm. VFS's own constant is the reference.
+    #[test]
+    fn fs_base_matches_vfs() {
+        assert_eq!(FS_BASE, 0xA00);
+        assert_eq!(REQ_UNLINK - FS_BASE, 13);
+        assert_eq!(REQ_RMDIR - FS_BASE, 14);
+        assert_eq!(REQ_READ - FS_BASE, 19);
+        assert_eq!(REQ_WRITE - FS_BASE, 20);
+    }
+}

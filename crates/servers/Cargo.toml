@@ -67,6 +67,11 @@ path = "src/bin/mfs.rs"
 test = false
 
 [[bin]]
+name = "ext2"
+path = "src/bin/ext2.rs"
+test = false
+
+[[bin]]
 name = "ramdisk"
 path = "src/bin/ramdisk.rs"
 test = false

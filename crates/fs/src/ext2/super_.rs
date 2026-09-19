@@ -51,7 +51,7 @@ pub fn read_super(sp: &mut SuperBlock) -> i32 {
 
     sp.s_block_size = 1024 * (1u16 << (sp.s_log_block_size as u16));
 
-    if sp.s_block_size < 1024  {
+    if sp.s_block_size < 1024 {
         return EINVAL;
     }
 
@@ -90,7 +90,13 @@ pub fn read_super(sp: &mut SuperBlock) -> i32 {
         return EINVAL;
     }
 
-    // Load group descriptor table blocks into cache
+    // Load group descriptor table blocks into cache. The cache has to use the
+    // filesystem's block size before a block *number* is resolved through it:
+    // the superblock read itself used the 1024-byte pre-mount default, and
+    // with any other block size the GDT/inode-table offsets would be wrong.
+    unsafe {
+        libs::libminixfs::cache::lmfs_set_blocksize(sp.s_block_size as u32, 0);
+    }
     let gdt_start_block = sp.s_first_data_block + 1;
     let gdb_count = sp.s_gdb_count;
     for i in 0..gdb_count.min(4) {

@@ -10,6 +10,7 @@ pub mod iso9660;
 pub mod mfs;
 pub mod pfs;
 pub mod procfs;
+pub mod stat;
 pub mod vbfs;
 
 #[cfg(test)]

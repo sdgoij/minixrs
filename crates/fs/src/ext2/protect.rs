@@ -84,25 +84,44 @@ pub unsafe fn fs_chown() -> i32 {
 pub unsafe fn fs_getdents() -> i32 {
     let ext2 = glo::ext2_ptr();
 
-    let ino = (*ext2).fs_m_in_type as u32; // FIXME: proper message parsing
-    let _size: usize = 0; // FIXME: parse mem_size from message
-    let _pos: u64 = 0; // FIXME: parse seek_pos from message
+    // VFS req_getdents payload (raw offsets):
+    //   raw[0..4]   = inode (u32)
+    //   raw[8..16]  = seek_pos (i64)
+    //   raw[16..20] = grant (i32)
+    //   raw[24..32] = mem_size (u64)
+    let payload = (*ext2).m_in.m_payload.raw;
+    let ino = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
+    let mut pos = i64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8]));
+    let gid = i32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4]));
 
     let rip = get_inode((*ext2).fs_dev, ino);
     if rip.is_null() {
         return EINVAL;
     }
 
-    let block_size = (*(*rip).i_sp.as_ref().unwrap()).s_block_size;
-    let file_size = (*rip).i_size as u64;
+    let block_size = match (*rip).i_sp {
+        Some(ref sp) => sp.s_block_size as u64,
+        None => {
+            put_inode(rip);
+            return EINVAL;
+        }
+    };
+    let dir_size = (*rip).i_size as i64;
+    if block_size == 0 || pos < 0 || pos >= dir_size {
+        put_inode(rip);
+        return OK;
+    }
 
-    let mut block_pos: u64 = 0;
+    // Entries are packed here and handed over in a single copy at the end;
+    // VFS re-issues the request with the returned seek_pos when it filled up.
+    let mut buf = [0u8; PATH_MAX];
+    let mut buf_off = 0usize;
 
-    // Iterate directory blocks
-    while block_pos < file_size {
+    while pos < dir_size && buf_off + MIN_DIR_ENTRY_SIZE <= buf.len() {
+        let block_pos = (pos as u64) & !(block_size - 1);
         let b = read_map(rip, block_pos, 0);
         if b == NO_BLOCK {
-            block_pos += block_size as u64;
+            pos = (block_pos + block_size) as i64;
             continue;
         }
 
@@ -114,38 +133,73 @@ pub unsafe fn fs_getdents() -> i32 {
             block_pos,
         );
         if bp.is_null() {
-            block_pos += block_size as u64;
-            continue;
+            put_inode(rip);
+            return EIO;
         }
 
         let data = b_data(bp);
-        let data_end = data.wrapping_add(block_size as usize);
-        let mut dp = data as *mut Ext2DiskDirDesc;
+        let block_end = data.add(block_size as usize);
+        let mut dp = data.add((pos as u64 - block_pos) as usize) as *mut Ext2DiskDirDesc;
 
-        while (dp as usize) < (data_end as usize) {
+        while (dp as usize) < (block_end as usize) {
             let d_ino = core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_ino));
             let d_rec_len =
                 core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_rec_len)) as usize;
             let d_name_len =
                 core::ptr::read_unaligned(core::ptr::addr_of!((*dp).d_name_len)) as usize;
 
-            if d_rec_len == 0 || (dp as usize) + d_rec_len > (data_end as usize) {
+            if d_rec_len == 0 || (dp as usize) + d_rec_len > (block_end as usize) {
                 break;
             }
 
-            if d_ino != 0 && d_name_len <= EXT2_NAME_MAX {
-                // FIXME: copy entry to user buffer via grant
-                // Each entry: d_ino (u32), d_rec_len (u16), d_name_len (u8),
-                // d_file_type (u8), d_name[d_name_len]
-                let _ = &(*dp).d_name;
+            if d_ino != NO_ENTRY && d_name_len > 0 && d_name_len <= EXT2_NAME_MAX {
+                // struct dirent: d_fileno (u64), d_reclen (u16), d_namlen
+                // (u16), d_type (u8), d_name.
+                let raw_size = 13 + d_name_len + 1;
+                let reclen = ((raw_size + 3) & !3) as u16;
+                if buf_off + reclen as usize > buf.len() {
+                    break;
+                }
+                buf[buf_off..buf_off + 8].copy_from_slice(&(d_ino as u64).to_le_bytes());
+                buf[buf_off + 8..buf_off + 10].copy_from_slice(&reclen.to_le_bytes());
+                buf[buf_off + 10..buf_off + 12].copy_from_slice(&(d_name_len as u16).to_le_bytes());
+                // DT_UNKNOWN: the inode's file type byte is not mapped here,
+                // VFS resolves the type itself.
+                buf[buf_off + 12] = 0;
+                for i in 0..d_name_len {
+                    buf[buf_off + 13 + i] = core::ptr::read_unaligned((*dp).d_name.as_ptr().add(i));
+                }
+                buf_off += reclen as usize;
             }
 
+            pos = block_pos as i64 + (dp as usize - data as usize) as i64 + d_rec_len as i64;
             dp = (dp as *mut u8).wrapping_add(d_rec_len) as *mut Ext2DiskDirDesc;
         }
 
         lmfs_put_block(bp, DIRECTORY_BLOCK);
-        block_pos += block_size as u64;
+
+        // Nothing consumable left in this block: skip to the next one.
+        if pos < (block_pos + block_size) as i64 {
+            pos = (block_pos + block_size) as i64;
+        }
     }
+
+    if buf_off > 0 && gid >= 0 {
+        #[cfg(target_os = "minix")]
+        {
+            let r = crate::ext2::read::safecopy_to_grant(gid, 0, buf.as_ptr(), buf_off);
+            if r != OK {
+                put_inode(rip);
+                return r;
+            }
+        }
+    }
+
+    // Reply: raw[0..8] = new seek_pos, raw[8..12] = bytes handed to the caller.
+    (*ext2).cch[0] = buf_off as i32;
+    let raw = &mut (*ext2).m_out.m_payload.raw;
+    raw[0..8].copy_from_slice(&pos.to_le_bytes());
+    raw[8..12].copy_from_slice(&(buf_off as i32).to_le_bytes());
 
     (*rip).i_update |= ATIME;
     (*rip).i_dirt = IN_DIRTY;

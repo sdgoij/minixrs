@@ -16,11 +16,49 @@ use crate::ext2::types::*;
 use crate::ext2::utility::*;
 use crate::ext2::write::*;
 
+/// Kernel call numbers for the grant-based copies (KERNEL_CALL + n).
+#[cfg(target_os = "minix")]
+const SAFECOPYTO_CALL: i32 = 32;
+#[cfg(target_os = "minix")]
+const SAFECOPYFROM_CALL: i32 = 31;
+
+/// Copy `len` bytes from `src` into the grant `gid` created by VFS, `buf_off`
+/// bytes into that grant (C: sys_safecopyto).
+#[cfg(target_os = "minix")]
+pub(crate) unsafe fn safecopy_to_grant(gid: i32, buf_off: u64, src: *const u8, len: usize) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+    kmsg[12..16].copy_from_slice(&gid.to_le_bytes());
+    kmsg[16..24].copy_from_slice(&buf_off.to_le_bytes());
+    kmsg[24..32].copy_from_slice(&(src as u64).to_le_bytes());
+    kmsg[32..40].copy_from_slice(&(len as u64).to_le_bytes());
+    minix_rt::kernel_call(SAFECOPYTO_CALL, &mut kmsg)
+}
+
+/// Copy `len` bytes from the grant `gid` created by VFS, `buf_off` bytes into
+/// that grant, into `dst` (C: sys_safecopyfrom).
+#[cfg(target_os = "minix")]
+pub(crate) unsafe fn safecopy_from_grant(gid: i32, buf_off: u64, dst: *mut u8, len: usize) -> i32 {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+    kmsg[12..16].copy_from_slice(&gid.to_le_bytes());
+    kmsg[16..24].copy_from_slice(&buf_off.to_le_bytes());
+    kmsg[24..32].copy_from_slice(&(dst as u64).to_le_bytes());
+    kmsg[32..40].copy_from_slice(&(len as u64).to_le_bytes());
+    minix_rt::kernel_call(SAFECOPYFROM_CALL, &mut kmsg)
+}
+
 /// fs_readwrite — read/write dispatch.
 pub unsafe fn fs_readwrite() -> i32 {
     let ext2 = glo::ext2_ptr();
 
-    let ino = (*ext2).fs_m_in_type as u32; // FIXME: proper message parsing
+    // VFS req_readwrite payload (raw offsets):
+    //   raw[0..4]   = inode (u32)
+    //   raw[8..16]  = seek_pos (i64)
+    //   raw[16..20] = grant (i32)
+    //   raw[24..32] = nbytes (u64)
+    let payload = (*ext2).m_in.m_payload.raw;
+    let ino = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
     let rip = find_inode((*ext2).fs_dev, ino);
     if rip.is_null() {
         return EINVAL;
@@ -36,18 +74,32 @@ pub unsafe fn fs_readwrite() -> i32 {
         block_size = get_block_size((*rip).i_block[0]) as u64;
         f_size = u64::MAX;
     } else {
-        block_size = (*(*rip).i_sp.as_ref().unwrap()).s_block_size as u64;
+        // An inode whose superblock is not mounted cannot be sized or read.
+        match (*rip).i_sp {
+            Some(ref sp) => block_size = sp.s_block_size as u64,
+            None => return EINVAL,
+        }
         f_size = (*rip).i_size as u64;
     }
 
-    // FIXME: determine rw_flag from message type
-    let rw_flag = READING;
-    let _gid: u32 = 0; // FIXME: parse grant from message
-    let mut position: u64 = 0; // FIXME: parse seek_pos from message
-    let mut nrbytes: usize = 0; // FIXME: parse nbytes from message
+    let rw_flag = match (*ext2).req_nr + FS_BASE {
+        REQ_READ => READING,
+        REQ_WRITE => WRITING,
+        REQ_PEEK => PEEKING,
+        _ => return EINVAL,
+    };
+    let gid = i32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4]));
+    let mut position = i64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8])) as u64;
+    let mut nrbytes = u64::from_ne_bytes(payload[24..32].try_into().unwrap_or([0u8; 8])) as usize;
+
+    (*ext2).rdwt_err = OK;
 
     if rw_flag == WRITING && !block_spec {
-        if position > (*(*rip).i_sp.as_ref().unwrap()).s_max_size - nrbytes as u64 {
+        let max_size = match (*rip).i_sp {
+            Some(ref sp) => sp.s_max_size,
+            None => return EINVAL,
+        };
+        if position > max_size.saturating_sub(nrbytes as u64) {
             return EFBIG;
         }
     }
@@ -76,7 +128,7 @@ pub unsafe fn fs_readwrite() -> i32 {
             chunk,
             nrbytes as u32,
             rw_flag,
-            _gid,
+            gid,
             cum_io as u32,
             block_size as u32,
         );
@@ -124,7 +176,10 @@ pub unsafe fn fs_readwrite() -> i32 {
     }
     (*rip).i_dirt = IN_DIRTY;
 
-    // FIXME: set reply nbytes = cum_io, seek_pos = position
+    // Reply fields VFS reads back (req_readwrite): seek_pos, then nbytes.
+    let raw = &mut (*ext2).m_out.m_payload.raw;
+    raw[0..8].copy_from_slice(&(position as i64).to_le_bytes());
+    raw[8..12].copy_from_slice(&(cum_io as u32).to_le_bytes());
 
     OK
 }
@@ -137,8 +192,8 @@ pub unsafe fn rw_chunk(
     chunk: u32,
     _left: u32,
     rw_flag: i32,
-    _gid: u32,
-    _buf_off: u32,
+    gid: i32,
+    buf_off: u32,
     block_size: u32,
 ) -> i32 {
     let mut bp: *mut libs::libminixfs::types::Buf = core::ptr::null_mut();
@@ -160,8 +215,20 @@ pub unsafe fn rw_chunk(
 
     if !block_spec && b == NO_BLOCK {
         if rw_flag == READING {
-            // Reading from a hole — must read as all zeros
-            // FIXME: sys_safememset to grant
+            // Reading a hole reads as zeros (C: sys_safememset).
+            #[cfg(target_os = "minix")]
+            {
+                const ZEROS: [u8; 4096] = [0u8; 4096];
+                let mut done = 0usize;
+                while done < chunk as usize {
+                    let n = (chunk as usize - done).min(ZEROS.len());
+                    r = safecopy_to_grant(gid, buf_off as u64 + done as u64, ZEROS.as_ptr(), n);
+                    if r != OK {
+                        return r;
+                    }
+                    done += n;
+                }
+            }
             return OK;
         } else {
             // Writing to a hole — create and enter in inode
@@ -192,9 +259,27 @@ pub unsafe fn rw_chunk(
         lmfs_markdirty(bp);
     }
 
-    // FIXME: copy data between grant and bp->data_ptr using sys_safecopyto/from
-    let _ = off;
-    let _ = chunk;
+    // Move the data between the caller's grant and the cached block.
+    #[cfg(target_os = "minix")]
+    {
+        let data = (*bp).data_ptr;
+        match rw_flag {
+            READING => {
+                r = safecopy_to_grant(gid, buf_off as u64, data.add(off as usize), chunk as usize);
+            }
+            WRITING => {
+                r = safecopy_from_grant(
+                    gid,
+                    buf_off as u64,
+                    data.add(off as usize),
+                    chunk as usize,
+                );
+            }
+            _ => {}
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    let _ = (gid, buf_off);
 
     let block_type = if off + chunk == block_size {
         FULL_DATA_BLOCK
@@ -215,7 +300,10 @@ pub unsafe fn read_map(rip: *mut Inode, position: u64, opportunistic: i32) -> u3
 
     // Direct blocks (0-11)
     if (block_pos as usize) < EXT2_NDIR_BLOCKS {
-        return (*rip).i_block[block_pos as usize];
+        // Inodes read straight from disk without icopy() can still carry the
+        // on-disk encoding of "no block", which is 0.
+        let b = (*rip).i_block[block_pos as usize];
+        return if b == 0 { NO_BLOCK } else { b };
     }
 
     let doub_ind_s = EXT2_NDIR_BLOCKS as u64 + addr_in_block_u;
@@ -301,12 +389,16 @@ pub unsafe fn read_map(rip: *mut Inode, position: u64, opportunistic: i32) -> u3
 }
 
 /// Read indirect block entry.
+///
+/// On disk an unused entry is 0; `NO_BLOCK` is the in-memory sentinel, so the
+/// two are translated here (and back in `wr_indir`).
 pub unsafe fn rd_indir(bp: *mut libs::libminixfs::types::Buf, index: usize) -> u32 {
     if bp.is_null() {
         return NO_BLOCK;
     }
     let ind = b_ind(bp);
-    core::ptr::read_unaligned(&(*ind.add(index)))
+    let b = core::ptr::read_unaligned(&(*ind.add(index)));
+    if b == 0 { NO_BLOCK } else { b }
 }
 
 /// read_ahead — read a block into the cache before it is needed.

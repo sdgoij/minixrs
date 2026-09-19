@@ -4,11 +4,13 @@ use crate::ext2::balloc::*;
 use crate::ext2::consts::*;
 use crate::ext2::glo;
 use crate::ext2::glo::Ext2Global;
+use crate::ext2::read::read_map;
 use crate::ext2::super_::*;
 use crate::ext2::types::*;
 use crate::ext2::utility::*;
-use libs::libminixfs::cache::{lmfs_get_block, lmfs_markdirty, lmfs_put_block};
-use libs::libminixfs::constants::INODE_BLOCK;
+use crate::ext2::write::write_map;
+use libs::libminixfs::cache::{lmfs_get_block, lmfs_get_block_ino, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::constants::{FULL_DATA_BLOCK, INODE_BLOCK, NORMAL, VMC_NO_INODE};
 use libs::libminixfs::types::Buf;
 
 /// Initialize inode cache.
@@ -264,27 +266,31 @@ pub unsafe fn dup_inode(ip: *mut Inode) {
     (*ip).i_count += 1;
 }
 
-/// fs_putnode handler.
+/// fs_putnode handler — release `count` references to an inode.
+///
+/// Message layout (VFS `req_putnode`): count (u64) at payload[0], inode (u32)
+/// at payload[8].
 pub unsafe fn fs_putnode() -> i32 {
     let ext2 = glo::ext2_ptr();
-    let rip = find_inode((*ext2).fs_dev, (*ext2).fs_m_in_type as u32);
+    let payload = (*ext2).m_in.m_payload.raw;
+    let count = u64::from_ne_bytes(payload[0..8].try_into().unwrap_or([0u8; 8])) as i32;
+    let ino = u32::from_ne_bytes(payload[8..12].try_into().unwrap_or([0u8; 4]));
+
+    let rip = find_inode((*ext2).fs_dev, ino);
     if rip.is_null() {
         return EINVAL;
     }
 
-    let count = (*ext2).cch[0] as i32; // FIXME: proper message parsing
-    if count <= 0 {
-        return EINVAL;
-    }
-    if count > (*rip).i_count {
+    if count <= 0 || count > (*rip).i_count {
         return EINVAL;
     }
 
+    // Decrease the reference count by (count - 1); put_inode consumes the
+    // last one.
     (*rip).i_count -= count - 1;
     put_inode(rip);
     OK
 }
-
 
 unsafe fn remove_from_unused(rip: *mut Inode) {
     let idx = (rip as *const Inode as usize - glo::get_inode_ptr(0) as *const Inode as usize)
@@ -368,7 +374,9 @@ unsafe fn icopy(rip: *mut Inode, dip: *mut DInode, direction: i32) {
         (*rip).i_flags = conv4(norm, (*dip).i_flags);
         (*rip).osd1 = (*dip).osd1;
         for i in 0..EXT2_N_BLOCKS {
-            (*rip).i_block[i] = conv4(norm, (*dip).i_block[i]);
+            // 0 on disk means "no block"; NO_BLOCK is the in-memory sentinel.
+            let b = conv4(norm, (*dip).i_block[i]);
+            (*rip).i_block[i] = if b == 0 { NO_BLOCK } else { b };
         }
         (*rip).i_generation = conv4(norm, (*dip).i_generation);
         (*rip).i_file_acl = conv4(norm, (*dip).i_file_acl);
@@ -391,7 +399,8 @@ unsafe fn icopy(rip: *mut Inode, dip: *mut DInode, direction: i32) {
         (*dip).i_flags = conv4(norm, (*rip).i_flags);
         (*dip).osd1 = (*rip).osd1;
         for i in 0..EXT2_N_BLOCKS {
-            (*dip).i_block[i] = conv4(norm, (*rip).i_block[i]);
+            let b = (*rip).i_block[i];
+            (*dip).i_block[i] = conv4(norm, if b == NO_BLOCK { 0 } else { b });
         }
         (*dip).i_generation = conv4(norm, (*rip).i_generation);
         (*dip).i_file_acl = conv4(norm, (*rip).i_file_acl);
@@ -402,36 +411,149 @@ unsafe fn icopy(rip: *mut Inode, dip: *mut DInode, direction: i32) {
     }
 }
 
-/// Truncate inode (stub).
-pub unsafe fn truncate_inode(rip: *mut Inode, _len: u64) -> i32 {
-    // TODO: implement block deallocation
-    (*rip).i_size = 0;
-    for i in 0..EXT2_N_BLOCKS {
-        if (*rip).i_block[i] != NO_BLOCK {
-            if let Some(ref mut sp) = (*rip).i_sp {
-                free_block(sp as &mut SuperBlock, (*rip).i_block[i]);
+/// Zero a byte range of an inode's already allocated data.
+///
+/// Reference: link.c zeroblock_range() / zeroblock_half()
+unsafe fn zeroblock_range(rip: *mut Inode, start: u64, len: u64) {
+    let block_size = match (*rip).i_sp {
+        Some(ref sp) => sp.s_block_size as u64,
+        None => return,
+    };
+    if len == 0 {
+        return;
+    }
+    let end = start + len;
+    let mut pos = start;
+    while pos < end {
+        let block_pos = pos & !(block_size - 1);
+        let off = (pos - block_pos) as usize;
+        let n = (((block_size - off as u64).min(end - pos)) as usize).max(1);
+        let b = read_map(rip, block_pos, 0);
+        if b != NO_BLOCK {
+            let bp = lmfs_get_block_ino(
+                (*rip).i_dev,
+                b as u64,
+                NORMAL,
+                (*rip).i_num as u64,
+                block_pos,
+            );
+            if !bp.is_null() {
+                core::ptr::write_bytes(b_data(bp).add(off), 0, n);
+                lmfs_markdirty(bp);
+                lmfs_put_block(bp, FULL_DATA_BLOCK);
             }
-            (*rip).i_block[i] = NO_BLOCK;
+        }
+        pos += n as u64;
+    }
+}
+
+/// Free the byte range `[start, end)` of an inode.
+///
+/// `write_map(WMAP_FREE)` frees the indirect blocks that become empty, so the
+/// only blocks left are the ones still referenced by the truncated file.
+///
+/// Reference: link.c freesp_inode()
+pub unsafe fn freesp_inode(rip: *mut Inode, start: u64, end: u64) -> i32 {
+    let block_size = match (*rip).i_sp {
+        Some(ref sp) => sp.s_block_size as u64,
+        None => return EIO,
+    };
+
+    discard_preallocated_blocks(Some(&mut *rip));
+
+    // A hole, or a fast symlink whose target lives in i_block[]: freeing those
+    // through write_map() would treat the target bytes as block numbers.
+    if (*rip).i_blocks == 0 {
+        return OK;
+    }
+
+    let mut end = end;
+    if end > (*rip).i_size as u64 {
+        end = (*rip).i_size as u64;
+    }
+    if end <= start {
+        return EINVAL;
+    }
+
+    let zero_last = start % block_size;
+    let zero_first = end % block_size != 0 && end < (*rip).i_size as u64;
+
+    if start / block_size == (end - 1) / block_size && (zero_last != 0 || zero_first) {
+        // The range stays inside one block: only part of it can be freed.
+        zeroblock_range(rip, start, end - start);
+    } else {
+        // First clear the unused parts of the partly used blocks at either
+        // end of the range.
+        if zero_last != 0 {
+            zeroblock_range(rip, start, block_size - zero_last);
+        }
+        if zero_first {
+            let tail = end % block_size;
+            zeroblock_range(rip, end - tail, tail);
+        }
+
+        // Then free the blocks the range covers completely.
+        let mut e = end / block_size;
+        if end == (*rip).i_size as u64 && (end % block_size) != 0 {
+            e += 1;
+        }
+        let mut p = (start + block_size - 1) / block_size;
+        while p < e {
+            let r = write_map(rip, p * block_size, NO_BLOCK, WMAP_FREE as i32);
+            if r != OK {
+                return r;
+            }
+            p += 1;
         }
     }
-    (*rip).i_blocks = 0;
+
+    (*rip).i_update |= CTIME | MTIME;
     (*rip).i_dirt = IN_DIRTY;
     OK
 }
 
-/// Free inode (stub).
-pub unsafe fn free_inode_(rip: *mut Inode) {
-    if let Some(sp) = (*rip).i_sp.as_mut() {
-        let dev = (*rip).i_dev;
-        let _b = (*rip).i_num;
-        let mode = (*rip).i_mode;
+/// truncate_inode — set an inode to `newsize`, freeing the blocks that fall
+/// away. Growing an inode leaves a hole that reads as zeros.
+///
+/// Reference: link.c truncate_inode()
+pub unsafe fn truncate_inode(rip: *mut Inode, newsize: u64) -> i32 {
+    discard_preallocated_blocks(Some(&mut *rip));
 
-        if _b <= NO_ENTRY || _b > sp.s_inodes_count {
-            return;
-        }
-        // TODO: free_inode_bit(sp, b, (mode & I_TYPE) == I_DIRECTORY);
-        (*rip).i_mode = I_NOT_ALLOC;
-        let _ = dev;
-        let _ = mode;
+    let file_type = (*rip).i_mode & I_TYPE;
+    if file_type == I_CHAR_SPECIAL || file_type == I_BLOCK_SPECIAL {
+        return EINVAL;
     }
+    let max_size = match (*rip).i_sp {
+        Some(ref sp) => sp.s_max_size as u64,
+        None => return EIO,
+    };
+    if newsize > max_size {
+        return EFBIG;
+    }
+
+    let old_size = (*rip).i_size as u64;
+    if newsize < old_size {
+        let r = freesp_inode(rip, newsize, old_size);
+        if r != OK {
+            return r;
+        }
+    } else if newsize > old_size {
+        // The extension is a hole: clear what the old tail shared with the
+        // first block of it, so it reads as zeros either way.
+        zeroblock_range(rip, old_size, newsize - old_size);
+    }
+
+    (*rip).i_size = newsize as u32;
+    (*rip).i_update |= CTIME | MTIME;
+    (*rip).i_dirt = IN_DIRTY;
+
+    OK
+}
+
+/// Free an inode: hand its number back to the inode bitmap and mark it
+/// unallocated.
+///
+/// Reference: inode.c free_inode_() (the bitmap work lives in ialloc.c)
+pub unsafe fn free_inode_(rip: *mut Inode) {
+    crate::ext2::ialloc::free_inode(rip);
 }
