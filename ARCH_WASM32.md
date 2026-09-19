@@ -5,12 +5,13 @@ compiled to WebAssembly and run in a browser tab (or Node, or any wasm host).
 
 Status: **partially implemented.** M0 (host-mode HAL), M1 (kernel boots as
 wasm, no processes), M2's protocol core (instance-per-process, the dispatch
-protocol, Asyncify across the boundary, a real two-process rendezvous), and M2c
-(the real servers, built for `os = "minix"`, spawned by the kernel through to
-their own main loops and the DS→RS→PM init handshake) are all **done** — see §11
-for commands and results. M3, real processes with VFS and a shell, is design; its
-prerequisite is VFS itself as a boot process, which is not the "one more export"
-job that DS, RS and PM each were.
+protocol, Asyncify across the boundary, a real two-process rendezvous), M2c (the
+real servers, built for `os = "minix"`, spawned by the kernel through to their
+own main loops and the DS→RS→PM init handshake), and M3a (the boot filesystem
+image serving from a RAM disk instance) are all **done** — see §11 for commands
+and results. M3 proper, real processes with VFS and a shell, is design; the chain
+is VM → ramdisk → MFS → VFS, and §11's M3a records the first link and the
+constant it had to stop trusting.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -947,7 +948,7 @@ directions, and PM's chain starts. Status: DONE.**
 
 ```text
 sh tools/wasm-servers/run.sh
-# 24/24 checks passed
+# 26/26 checks passed (M2c's 24, plus the two the RAM disk instance adds)
 ```
 
 DS, RS and PM — the *real* servers, built for the real `os = "minix"` target —
@@ -1094,6 +1095,36 @@ existing persistence test adapted.
 **Stretch.** SMP via Workers + `SharedArrayBuffer` (the `Spinlock`/`bkl_*`
 surface already exists and would become Atomics-based; each worker gets its own
 cpulocal region in shared memory). wasm64 to lift the 4 GiB ceiling.
+
+**M3a — The boot filesystem image reaches a RAM disk server on wasm. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 26/26 checks passed
+```
+
+The RAM disk block driver runs as a wasm instance at `RAMDISK_PROC_NR`, and the host
+puts the MinixFS image into its linear memory — the wasm stand-in for the kernel
+mapping the image on the hardware arches. `RAMDISK_IMAGE_VA` gains a wasm arm at
+`0x0100_0000`, which is exactly `MAX_USER_ADDRESS`: a wasm instance's memory holds the
+process and nothing else, so there is no high half for a device window and the image
+sits immediately above the process's own VA range instead. The instance is grown from
+its initial 16 MiB to 32 MiB to cover it, well clear of the wasm stack, which
+`--stack-first` keeps in the low 1 MiB.
+
+The device's length comes from the image's own superblock, not from a constant. That
+was not a preference: `RAMDISK_IMAGE_SIZE` had drifted to half the image, and a device
+that is too small reports end-of-file rather than an error, so the tail of any file
+past the mark would have read as zeros. `PORTING_PLAN.md` finding 22 has the
+measurement; `just test-arches` now boots all three hardware arches with the corrected
+device size, so the fix is not wasm-only.
+
+The checks are the three every server in this harness already passes — reached its
+main loop, blocked in the kernel on a receive, receiving from any sender — plus two
+new ones: the image is present in that instance and describes its own length, and the
+**server's** derived device size equals the image the host placed. Reading the
+server's answer rather than the host's constant is the point; finding 23 is what
+happened when it was a `panic!` instead.
 
 ## 12. Risks, ranked
 

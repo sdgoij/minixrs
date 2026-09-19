@@ -6642,6 +6642,44 @@ keeping as a shape: **a reply that arrives as ordinary traffic can interleave wi
 the request that produced it**, and the interleaving presents as a deadlock rather
 than as an ordering problem.
 
+**22. The RAM disk was sized from a constant that had drifted to half the image.**
+Found while giving the wasm port a RAM disk server (M3a). `RAMDISK_IMAGE_SIZE` said
+`2048 * 4096` — 8 MiB — while `boot_image::minixfs` builds `DEFAULT_BLOCKS` (4096) ×
+`BLOCK_SIZE` (4096), and `MINIXFS_BLOCKS` can move that again. The image on disk is
+16777216 bytes, and its last non-zero byte is at 9809930 — past the 8 MiB mark — so
+real filesystem data sat outside the device the driver reported.
+
+The failure mode is the reason this matters more than the arithmetic: `ramdisk_read`
+treats an offset past `dev.size` as end-of-file and clamps a read that crosses it, so
+the tail of any file living past the mark reads as **zeros with no error** — the
+class of bug the port keeps meeting (M0's findings, M2b's in-window break).
+
+Fixed by removing the guess: `arch_common::com::ramdisk_image_size` reads `s_nzones`
+from the image's own Minix V3 superblock (a little-endian `u32` at image offset 1028,
+with the magic at 1052 as the validity check), and the RAM disk server sizes device 0
+from that. The device and the filesystem on it can no longer disagree, and no
+build-time override can make them. Verified on the hardware arches by
+`just test-arches`, which now boots with a 16 MiB root device rather than 8.
+
+Two smaller things came out of the same read, and neither is fixed:
+`RAMDISK_IMAGE_SIZE` still exists and is still a guess (now 16 MiB) for the two
+`fs` host-test paths that take a size parameter, `mfs/main.rs` and `ext2/main.rs`;
+and `ramdisk_set_image` zeroes `dev.base`, keeping the address only in `dev.data`, so
+`ramdisk_geometry`'s first return value is always 0 — a getter that reports a value
+the setter deliberately discards.
+
+**23. `panic!` hangs a wasm instance rather than failing it.** Found negative-controlling
+M3a: pointing the host at a different image address than `arch-common` names should
+make the RAM disk server refuse, and the intent was that a `panic!` on a missing image
+would be the loud option where the port has no console and no return-value channel
+from an initialiser. It is not loud — the target's panic strategy is `abort` and
+`minix-rt`'s handler does not unwind, so the host spins in a dispatch loop that never
+converges and the harness simply times out. A hang and a missing line look identical,
+which is the pitfall the aarch64 serial work already recorded. The refusal is now a
+readable number instead: `minix_ramdisk_device_size` exports the size the **server**
+derived, and the harness compares it with the image it placed, so a disagreement fails
+with both figures printed.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

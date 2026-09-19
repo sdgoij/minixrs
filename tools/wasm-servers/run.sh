@@ -36,6 +36,17 @@ mkdir -p "$here/build"
 cp "$root/crates/kernel-wasm/target/wasm32-minix/release/kernel-wasm.wasm" \
    "$here/build/kernel.wasm"
 
+# The RAM disk instance is given the boot filesystem image, which the QEMU builds
+# already produce. A clean checkout has none, and `mkminixfs` will warn about the
+# userland binaries it cannot find and still write a valid root tree -- enough for
+# this harness, which checks that the image reaches the instance and that the
+# device is sized from it rather than from a constant.
+image="$root/target/images/x86_64-pc-minix/minixfs.img"
+if [ ! -f "$image" ]; then
+  echo "== building the boot filesystem image =="
+  (cd "$root" && cargo run -q -p boot-image --bin mkminixfs x86_64)
+fi
+
 echo "== applying Asyncify to the servers =="
 node "$wasm_opt" --asyncify \
   "$root/crates/wasm-servers/target/wasm32-minix/release/wasm_servers.wasm" \

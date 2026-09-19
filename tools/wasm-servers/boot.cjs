@@ -21,6 +21,23 @@ const path = require('path');
 const buildDir = path.join(__dirname, 'build');
 const kernelPath = path.join(buildDir, 'kernel.wasm');
 const serverPath = path.join(buildDir, 'servers.async.wasm');
+// The boot filesystem image, in the same place the QEMU builds write it. This
+// harness does not build userland, so it reuses whichever image is on disk — any
+// valid MinixFS image will do here, because what is under test is that the image
+// reaches the RAM disk instance and that the device is sized from it.
+const ramdiskImagePath = path.join(
+  __dirname,
+  '..',
+  '..',
+  'target',
+  'images',
+  'x86_64-pc-minix',
+  'minixfs.img'
+);
+// `RAMDISK_IMAGE_VA` on wasm32: exactly `MAX_USER_ADDRESS`, so the window is
+// outside the process's own VA range. See `arch_common::com`.
+const RAMDISK_IMAGE_VA = 0x1000000;
+const WASM_PAGE = 65536;
 
 const RECEIVE = 47;
 const SENDREC = 48;
@@ -151,6 +168,10 @@ const specs = [
   { slot: 6, entry: 'minix_server_ds', label: 'ds' },
   { slot: 2, entry: 'minix_server_rs', label: 'rs' },
   { slot: 0, entry: 'minix_server_pm', label: 'pm' },
+  // The RAM disk block driver, at `RAMDISK_PROC_NR`. It owns device 0, which is
+  // the boot filesystem image the host copies into this instance below — the wasm
+  // equivalent of the kernel mapping the image on the hardware arches.
+  { slot: 11, entry: 'minix_server_ramdisk', label: 'ramdisk' },
   // Not a boot process and not a server: the client that gives DS something to
   // answer. Its slot is above the boot procs on purpose, so `p_priv` stays null
   // — `may_send_to` allows anything from a privilege-less process, and allows DS
@@ -256,6 +277,40 @@ function makeServer(spec) {
 
 const procs = specs.map(makeServer);
 
+// ------------------------------------------------ the boot filesystem image
+//
+// The kernel maps the MinixFS image into the RAM disk server's address space
+// before that server starts. There is no kernel mapping here, so the host writes
+// it: the instance is grown to cover the window and the image goes in at
+// `RAMDISK_IMAGE_VA`. It must land before the server's entry point runs, since
+// that is when the device is sized from the image's own superblock.
+const ramdiskImage = fs.readFileSync(ramdiskImagePath);
+{
+  const st = procs.find((p) => p.spec.label === 'ramdisk');
+  const needPages = Math.ceil((RAMDISK_IMAGE_VA + ramdiskImage.length) / WASM_PAGE);
+  const havePages = st.memory.buffer.byteLength / WASM_PAGE;
+  if (needPages > havePages) st.memory.grow(needPages - havePages);
+  new Uint8Array(st.memory.buffer, RAMDISK_IMAGE_VA, ramdiskImage.length).set(
+    ramdiskImage
+  );
+  // Read the size back the way the server does: the superblock's `s_nzones` at
+  // image offset 1028, times 4096. If the host and the server disagreed about
+  // where the image is, this is where it shows.
+  const view = new DataView(st.memory.buffer);
+  const magic = view.getUint16(RAMDISK_IMAGE_VA + 1024 + 28, true);
+  const nzones = view.getUint32(RAMDISK_IMAGE_VA + 1024 + 4, true);
+  check(
+    'the boot image is in the ram disk instance, and describes its own size',
+    magic === 0x4d5a && nzones * 4096 === ramdiskImage.length,
+    `magic=0x${magic.toString(16)} s_nzones=${nzones} -> ${nzones * 4096}, image=${ramdiskImage.length}`
+  );
+  note(
+    'what the ram disk instance was given',
+    `image=${ramdiskImage.length} bytes at 0x${RAMDISK_IMAGE_VA.toString(16)}, ` +
+      `memory grown to ${st.memory.buffer.byteLength / WASM_PAGE} wasm pages`
+  );
+}
+
 const spawnFailures = specs.filter(
   (s) => kernel.exports.minix_proc_spawn(s.slot, s.endpoint) !== 0
 );
@@ -326,11 +381,12 @@ check('the dispatch loop converged', converged, `${steps} steps`);
 
 // ------------------------------------------------------------- assertions
 
-const servers = procs.filter((p) => ['ds', 'rs', 'pm'].includes(p.spec.label));
+const servers = procs.filter((p) => ['ds', 'rs', 'pm', 'ramdisk'].includes(p.spec.label));
 const client = procs.find((p) => p.spec.label === 'client');
 const unregistered = procs.find((p) => p.spec.label === 'unregistered');
 const ds = procs.find((p) => p.spec.label === 'ds');
 const rs = procs.find((p) => p.spec.label === 'rs');
+const ramdiskInst = procs.find((p) => p.spec.label === 'ramdisk');
 
 // The last syscall a server makes before it stops is the `RECEIVE` it blocks in,
 // which is what "it is in its main loop" means for an instance that no longer has
@@ -370,6 +426,15 @@ check(
       return `${p.spec.label}: a0=${receives[receives.length - 1]?.a0}`;
     })
     .join('; ')
+);
+
+check(
+  'the RAM disk sized its device from the image, not from a constant',
+  ramdiskInst.inst.exports.minix_ramdisk_device_size() === ramdiskImage.length,
+  `size=${ramdiskInst.inst.exports.minix_ramdisk_device_size()} ` +
+    `(image is ${ramdiskImage.length}; host put it at 0x${RAMDISK_IMAGE_VA.toString(16)}, ` +
+    `and the driver reports base=0x${ramdiskInst.inst.exports.minix_ramdisk_device_base().toString(16)} ` +
+    'because `ramdisk_set_image` stores the address in `dev.data` and zeroes `dev.base`)'
 );
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is

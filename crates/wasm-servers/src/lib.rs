@@ -83,6 +83,33 @@ pub extern "C" fn minix_server_pm() -> i32 {
     0
 }
 
+/// The RAM disk block driver. Its device 0 is the boot filesystem image, which the
+/// host copies into this instance at `RAMDISK_IMAGE_VA` before calling this — the
+/// wasm stand-in for the kernel mapping the image on the hardware arches.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_ramdisk() -> i32 {
+    servers::ramdisk::ramdisk_server_main();
+    0
+}
+
+/// Device 0's base address in bytes, as **the RAM disk instance** computed it.
+///
+/// The host put the image somewhere and the server sized the device from the
+/// image's own superblock, so the harness must read the server's answer rather than
+/// its own constant — reading the host's back would only restate it. Call it on the
+/// RAM disk instance: every instance carries all the servers' code, and an
+/// untouched one answers `0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_ramdisk_device_base() -> u32 {
+    servers::ramdisk::device_geometry().0 as u32
+}
+
+/// Device 0's size in bytes, as **the RAM disk instance** computed it.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_ramdisk_device_size() -> u32 {
+    servers::ramdisk::device_geometry().1 as u32
+}
+
 /// Whether `endpoint`'s slot has left `RS_INITIALIZING` — read it from the **RS
 /// instance**.
 ///

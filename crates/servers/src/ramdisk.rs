@@ -23,6 +23,20 @@
 use arch_common::ipc::Message;
 use drivers::storage::ramdisk;
 
+/// Device 0's `(base, size)` — where this server believes the boot image is and
+/// how large it believes the device to be.
+///
+/// Exists so a harness can ask the server rather than re-derive the answer itself:
+/// the size comes from the image's own superblock, so a disagreement about where
+/// the image lives shows up as a wrong number here instead of as a disk that reads
+/// short. There is no return-value channel for an init failure on this port and no
+/// console on wasm, so this is also the only way the failure is observable at all —
+/// a `panic!` here would hang the host rather than report, since the wasm panic
+/// strategy is `abort` and `minix-rt`'s handler does not unwind.
+pub fn device_geometry() -> (u64, u64) {
+    drivers::storage::ramdisk::ramdisk_geometry(0).unwrap_or((0, 0))
+}
+
 /// BDEV message types (from arch_common::com).
 const BDEV_RQ_BASE: u32 = 0x500;
 const BDEV_OPEN: u32 = BDEV_RQ_BASE;
@@ -192,13 +206,18 @@ pub fn ramdisk_server_main() {
         // Initialize the RAM disk hardware and point device 0 at the boot
         // filesystem image mapped into this server's address space by the
         // kernel boot code.
+        //
+        // The device's length is taken from the image's own superblock rather
+        // than from `RAMDISK_IMAGE_SIZE`. That constant is a compiled-in guess at
+        // what the build produces, and it had drifted: it said 8 MiB while the
+        // image is 16 MiB. A short device does not fail — `ramdisk_read` reports
+        // end-of-file past its end — so the tail of any file beyond the mark would
+        // have read as zeros.
         unsafe {
             ramdisk::ramdisk_init();
-            let _ = ramdisk::ramdisk_set_image(
-                0,
-                arch_common::com::RAMDISK_IMAGE_VA,
-                arch_common::com::RAMDISK_IMAGE_SIZE as u64,
-            );
+            let base = arch_common::com::RAMDISK_IMAGE_VA;
+            let size = arch_common::com::ramdisk_image_size(base);
+            let _ = ramdisk::ramdisk_set_image(0, base, size);
         }
 
         loop {

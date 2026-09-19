@@ -186,13 +186,70 @@ pub mod sys {
 /// driver server's address space. The kernel boot code maps the minixfs image
 /// here before the ramdisk server starts; filesystem servers reach the image
 /// by BDEV requests to that server.
+///
 /// Must not conflict with code (0x1000000) or stack (0x0FE00000) on x86_64,
 /// or with the 0x80000000+ region on RISC-V.
+#[cfg(not(target_arch = "wasm32"))]
 pub const RAMDISK_IMAGE_VA: u64 = 0x100000000;
 
-/// Size of the boot filesystem image (2048 blocks x 4096 bytes).
-/// Must match `total_blocks * BLOCK_SIZE` in `tools/mkminixfs.rs`.
-pub const RAMDISK_IMAGE_SIZE: usize = 2048 * 4096;
+/// The wasm window starts exactly at `MAX_USER_ADDRESS` rather than above the
+/// 64-bit arches' code and stack, because those addresses do not exist here: a
+/// wasm instance's linear memory holds the process and nothing else, so there is
+/// no high half to put a device window in. Everything at or above this ceiling is
+/// outside the process's own VA range and only the RAM disk server reads there,
+/// which is what makes one flat 16 MiB image safe.
+#[cfg(target_arch = "wasm32")]
+pub const RAMDISK_IMAGE_VA: u64 = 0x0100_0000;
+
+/// Size of the boot filesystem image the build produces by default:
+/// `boot_image::minixfs::DEFAULT_BLOCKS` (4096) x `BLOCK_SIZE` (4096).
+///
+/// This is a *default*, not the truth — `MINIXFS_BLOCKS` overrides the block count
+/// at build time, and this constant cannot see that. Prefer [`ramdisk_image_size`],
+/// which asks the image. It said `2048 * 4096` until the wasm work, which is half
+/// of the image actually built, and a device that is too small does not fail
+/// loudly: `ramdisk_read` treats a read past the end as end-of-file, so the tail of
+/// any file that lives past the mark reads as zeros.
+pub const RAMDISK_IMAGE_SIZE: usize = 4096 * 4096;
+
+/// Size in bytes of the MinixFS image at `base`.
+///
+/// Read from the image's own superblock rather than from a compiled-in constant:
+/// `s_nzones` — a little-endian `u32` at superblock offset 4, the superblock itself
+/// being at image offset 1024 — *is* the image's length in 4096-byte blocks, so the
+/// device and the filesystem on it cannot disagree and no build-time override can
+/// make them.
+///
+/// Returns 0 when the magic is not Minix V3, so a caller can tell "there is no
+/// image here" from "an image of length zero" rather than silently getting a
+/// device spanning nothing.
+///
+/// # Safety
+///
+/// `base` must point at a readable image of at least 1054 bytes.
+pub unsafe fn ramdisk_image_size(base: u64) -> u64 {
+    const SUPERBLOCK_OFF: usize = 1024;
+    // `s_nzones` and `s_magic` from `boot_image::minixfs`'s superblock layout.
+    const S_NZONES_OFF: usize = SUPERBLOCK_OFF + 4;
+    const S_MAGIC_OFF: usize = SUPERBLOCK_OFF + 28;
+    const SUPER_MAGIC_V3: u16 = 0x4d5a;
+    const BLOCK_SIZE: u64 = 4096;
+
+    unsafe {
+        let p = base as *const u8;
+        let magic = u16::from_le_bytes([*p.add(S_MAGIC_OFF), *p.add(S_MAGIC_OFF + 1)]);
+        if magic != SUPER_MAGIC_V3 {
+            return 0;
+        }
+        let nzones = u32::from_le_bytes([
+            *p.add(S_NZONES_OFF),
+            *p.add(S_NZONES_OFF + 1),
+            *p.add(S_NZONES_OFF + 2),
+            *p.add(S_NZONES_OFF + 3),
+        ]);
+        nzones as u64 * BLOCK_SIZE
+    }
+}
 
 pub const NR_SYS_CALLS: u32 = 64;
 
