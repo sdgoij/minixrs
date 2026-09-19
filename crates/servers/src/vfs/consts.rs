@@ -430,3 +430,15 @@ pub const CDEV_DGRAM_OPEN: u32 = 0x1000_0000;
 /// CDEV_READ/CDEV_WRITE request flag: one datagram per request, carried by
 /// vircopy (user VA in m2_l1, byte count in m2_l2) instead of inline chunks.
 pub const CDEV_DGRAM: u32 = 0x08;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Negative here, positive in `fs::pfs` — the two conventions coexist and
+    /// both mean C's 78. This one was already right; pinned so it stays that way.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, -78);
+    }
+}

@@ -616,9 +616,11 @@ check(
 
 // SYS_VUMAP (call 18) — `do_vumap_handler` reading the caller's vector.
 //
-// The syscall answers EFAULT and cannot do otherwise here: its output is
-// physical addresses and this port has none, because `vm_lookup_range` walks a
-// page table that does not exist. The *read of the vector* happens before that,
+// The syscall answers ENOSYS and cannot do otherwise here: its output is physical
+// addresses and this port has none, because `vm_lookup_range` walks a page table
+// that does not exist. That is now a deliberate refusal rather than the `EFAULT`
+// the walk used to produce, so a driver author reads "no such call on this port"
+// instead of "bad address". The *read of the vector* happens before the refusal,
 // though, and it is the cross-address-space transfer under test — so the check
 // is the kernel's request rather than the syscall's result, and the note below
 // says which part is proven and which part is a recorded limitation.
@@ -646,6 +648,16 @@ check(
   vumap.copies
     .map((c) => `${c.srcProc}:0x${c.srcAddr.toString(16)}->${c.dstProc}:${c.bytes}`)
     .join(', ')
+);
+// The other half of what this call can do here, and the only place it is
+// reachable: `pt_levels()` is 0, so `do_vumap_handler` refuses once the vector is
+// read — deliberately, with `ENOSYS`, rather than letting the page-table walk
+// report `EFAULT` for every entry. The copy check above and this one together say
+// "the transfer happened, the translation is refused".
+check(
+  'SYS_VUMAP refuses with ENOSYS where there are no page tables',
+  vumap.result === -78,
+  `kernel call 18 returned ${vumap.result}, expected -78 (errno.h ENOSYS)`
 );
 
 // ------------------------------------------- SYS_SETGRANT (34) + SYS_SAFECOPYFROM (31)
@@ -787,8 +799,8 @@ note(
     'to appear correct. The grant pair is the one whose address did not come out ' +
     `of a message at all. SYS_VUMAP answered ${vumap.result} because its result ` +
     'is physical addresses and this port has none: the vector read is the whole ' +
-    'of what can be exercised until a physical-address model is decided, and ' +
-    '`PORTING_PLAN.md` finding 14 records that rather than papering over it. ' +
+    'of what can be exercised, and `ARCH_WASM32.md` §5.3 argues that there is no ' +
+    'physical-address model to build rather than one still to decide. ' +
     'SYS_SAFEMEMSET is the write half of the same grant, so the pair above and ' +
     'this one cover both directions of `verify_grant`.'
 );

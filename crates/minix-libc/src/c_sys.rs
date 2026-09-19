@@ -14,7 +14,8 @@ use crate::c_time::TimeT;
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
-const ENOSYS: i32 = 71;
+/// C `errno.h` value, positive because this is what `fail` stores in `errno`.
+const ENOSYS: i32 = 78;
 
 // ---- sys/mman.h ----
 
@@ -1078,4 +1079,16 @@ pub unsafe extern "C" fn getpwuid_r(
     }
     unsafe { *result = pwd };
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Positive, because this is the value `fail` stores in `errno`, not a
+    /// syscall return. C `errno.h` puts `ENOSYS` at 78; this had 71.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, 78);
+    }
 }

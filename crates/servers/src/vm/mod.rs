@@ -29,8 +29,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const OK: i32 = 0;
 
-/// Operation not supported (ENOSYS from MINIX errno.h).
-const ENOSYS: i32 = -72;
+/// Operation not supported (ENOSYS from MINIX errno.h: `_SIGN 78`, not Linux's
+/// 38).
+const ENOSYS: i32 = -78;
 
 /// Invalid argument (EINVAL).
 const EINVAL: i32 = -5;
@@ -3500,7 +3501,10 @@ mod tests {
 
     #[test]
     fn test_constants_match() {
-        assert_eq!(ENOSYS, -72);
+        assert_eq!(ENOSYS, -78);
+        // `EINVAL` is -5 here, but -5 is `EIO` and C's `EINVAL` is 22. Left alone
+        // deliberately: it has 96 call sites in this file and wants its own change.
+        // Recorded in `PORTING_PLAN.md` finding 20.
         assert_eq!(EINVAL, -5);
         assert_eq!(SIGSEGV, 11);
         assert_eq!(SIGABRT, 6);

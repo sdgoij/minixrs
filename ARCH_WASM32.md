@@ -260,10 +260,10 @@ wasm offsets by subtracting a base and bounds-checking. Consequences:
 - **No COW, no file-backed lazy mmap.** `FILEMMAP.md` documents that exec is
   already file-backed lazy mmap. That mechanism is replaced, not ported: exec
   becomes module instantiation (§7.2).
-- **"Physical memory" is a host-managed page pool.** `alloc_phys_page`,
-  `alloc_phys_contig`, `init_phys_alloc` become host imports over a fixed
-  budget declared at startup; "physical address" is an opaque handle, not an
-  address.
+- **There is no physical address space** — see §5.3. The kernel's frame arena
+  (`alloc_phys_page` and friends) is memory *inside the kernel instance*, page
+  tables do not exist (`pt_levels()` is 0), and no address ever crosses an
+  instance boundary.
 
 ### 5.1 Cross-process copies and IPC payloads
 
@@ -388,6 +388,58 @@ with a server compiled for another, which is the kind of mismatch that shows up
 as corrupted fields rather than a link error. A static size assertion per message
 struct, as `clock.rs` already does for `MinixTimer`, is the cheap way to hold the
 line.
+
+### 5.3 Why there is no physical-address model to build
+
+M1–M2 left `SYS_UMAP` and `SYS_VUMAP` answering `EFAULT`: their result is a
+physical address, `vm_lookup_range` walks a page table, `pt_levels()` is 0, so the
+walk says "not mapped" every time. The obvious question is what a physical address
+*should* mean here. The answer is that nothing needs one, and the existing code
+already depends on that.
+
+**On the three shipping arches "physical" and "kernel virtual" are the same
+number.** Each HAL identity-maps the kernel and says so: x86_64's `kern_vaddr()` is
+`0x200000` ("identity-mapped at 0x200000"), RISC-V is linked at `0x80200000` with
+RAM starting at `0x80000000`, AArch64 loads at `0x40000000` where its RAM starts.
+Their `pte_user_owned` functions test the assumption out loud — a frame is shared
+when `pte_to_phys(pte) == va`. That coincidence, not a physical-address space, is
+what lets the drivers hand device-facing addresses around.
+
+**On wasm there is no such identity and nowhere to put one.** `kern_vaddr()` is 0 —
+"there is no kernel half" — because a process's address space *is* its instance's
+linear memory and nothing else. The kernel instance cannot address a process's
+memory at all; only the host can, which is exactly what §5.1's seam is for.
+
+**No driver needs a foreign address, because the port's drivers bounce.** C's
+`virtio_blk` programs the virtqueue straight from the caller's `iovec`, so it needs
+`sys_vumap` to turn another process's addresses into ones a device can use. This
+port's block server instead reads into its **own** `scratch` buffer and
+`safecopy_to_client`s it (`crates/servers/src/virtio_blk.rs`), with writes going the
+other way; the descriptors `virtio_to_queue` builds name that scratch and two
+driver-local statics. So the grant/seam machinery M2 pinned *is* the replacement for
+`vumap`, and both directions of it are now exercised.
+
+The invariant that holds the line:
+
+> A physical address is only ever dereferenced by the kernel instance, and never
+> crosses an instance boundary. Anything a device must touch is named as an offset
+> in the instance performing the I/O.
+
+That is why the device port needs no address translation at all: `queue_notify`
+becomes a host import, the host reads the vring out of the *caller's* memory (it
+owns that instance), and the descriptor values are the driver's own offsets — to
+the host, the same thing a physical address is to QEMU. `VirtioPhysBuf` keeps its
+shape, and `alloc_phys_page`'s arena stays what `arch-sim` already made it:
+in-process memory whose addresses are private to the kernel instance.
+
+The refusal is now deliberate rather than incidental. On a target whose
+`pt_levels()` is 0, `umap` and `vumap` answer `ENOSYS` — "this port has no such
+thing" — where they used to reach `EFAULT` as a side effect of `p_cr3 == 0`, which
+reads as "your address was bad". For whoever ports a driver next, that is the
+difference between a porting task and an afternoon of debugging. Arches with page
+tables keep `EFAULT`, because there it is the correct answer. `vumap` still reads
+its input vector before refusing, because that transfer is real and is what the M2
+harness pins.
 
 ## 6. Privilege, traps, signals
 
@@ -756,7 +808,7 @@ boundary all work, driven by the kernel's own process table, run queues, and
 
 ```text
 sh tools/wasm-m2/run.sh
-# 31/31 checks passed, 4 notes
+# 32/32 checks passed, 4 notes
 ```
 
 The demonstration is a two-process rendezvous. `crates/wasm-procs` is one
@@ -1121,6 +1173,10 @@ single target.
   workspace, or does it need `-Zbuild-std=core`?~~ **Answered at M1: no, and no.**
   The kernel, `arch-common`, `arch-sim`, and `arch-wasm32` all built and linked
   for wasm32 with the pinned stock toolchain and no `build-std`.
+- ~~What should a "physical address" mean, given that `SYS_UMAP`/`SYS_VUMAP`
+  exist to hand one out and `pt_levels()` is 0?~~ **Answered: nothing, and nothing
+  needs one** — §5.3. No driver in the port wants a foreign address, so there is
+  no model to build; only `umap`/`vumap`'s refusal wants making deliberate.
 - Browser memory ceiling per tab vs. a 256 MiB guest budget. Minimum viable
   `-m` for the full server stack is unknown.
 - Is the shared mailbox arena (§5.1) acceptable, or is full host-mediated

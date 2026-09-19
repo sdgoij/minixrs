@@ -294,7 +294,8 @@ pub const EINTR: i32 = -4;
 pub const ENOTTY: i32 = -25;
 pub const EBADF: i32 = -9;
 pub const BUSY: i32 = -16;
-pub const ENOSYS: i32 = -71;
+/// C `errno.h`: `_SIGN 78`, not Linux's 38.
+pub const ENOSYS: i32 = -78;
 
 /// FREAD / FWRITE for TIOCFLUSH.
 pub const FREAD: i32 = 0x01;
@@ -2814,6 +2815,13 @@ pub fn get_console_line() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned by value, not by name: C compares an errno numerically. `ENOSYS`
+    /// had -71 here while the kernel had -72 and `libminixfs` had Linux's -38.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, -78);
+    }
     use core::sync::atomic::{AtomicBool, Ordering};
 
     static TEST_LOCK: AtomicBool = AtomicBool::new(false);

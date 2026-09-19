@@ -2786,6 +2786,15 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             crate::hal::write_cr3(boot_cr3);
         }
 
+        // The result of this call is a physical address, and a target with no page
+        // tables has none to give. Say so deliberately rather than letting the walk
+        // below report "not mapped" for every entry, which reaches the caller as
+        // `EFAULT` and reads as a bad address. The vector read above still happens:
+        // that transfer is real, and it is what the M2 harness pins.
+        if crate::hal::pt_levels() == 0 {
+            return crate::ipc::ENOSYS;
+        }
+
         let mut pcount: i32 = 0;
 
         // Process each input entry
@@ -4859,7 +4868,14 @@ pub unsafe fn do_umap_remote_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
             }
         }
 
-        // Perform the VM lookup
+        // Perform the VM lookup. On a target with no page tables there is no
+        // translation to perform, and the endpoint and grant checks above are the
+        // whole of what this call can do — so refuse with `ENOSYS` rather than
+        // reduce "no page tables here" to `EFAULT` and send a caller looking for a
+        // bad address.
+        if crate::hal::pt_levels() == 0 {
+            return crate::ipc::ENOSYS;
+        }
         let phys_addr = crate::vm::vm_lookup(lookup_proc, lin_addr);
         if phys_addr == crate::vm::NO_MEM {
             return crate::ipc::EFAULT;

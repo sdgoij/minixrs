@@ -76,6 +76,15 @@ mod tests {
             assert_eq!(OK, 0);
         }
 
+        /// PFS's errnos are positive, which is this module's convention rather
+        /// than a mistake. Pinned because it is the site that was already right:
+        /// C `errno.h` puts `ENOSYS` at 78, and a "fix" to -78 here would be the
+        /// regression.
+        #[test]
+        fn pfs_enosys_matches_c() {
+            assert_eq!(ENOSYS, 78);
+        }
+
         #[test]
         fn pfs_errno_values_are_distinct() {
             let errnos = [EINVAL, EPERM, ENOSPC, EFBIG, ENFILE, EIO, EBUSY, ENOSYS];

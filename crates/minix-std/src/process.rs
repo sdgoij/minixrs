@@ -588,8 +588,8 @@ impl MinixErr {
         if v < 0 { MinixErr(-v) } else { MinixErr(0) }
     }
 
-    /// ENOSYS error constant.
-    pub const ENOSYS: MinixErr = MinixErr(71);
+    /// ENOSYS error constant. C `errno.h`: `_SIGN 78`.
+    pub const ENOSYS: MinixErr = MinixErr(78);
 }
 
 // Tests
@@ -597,6 +597,13 @@ impl MinixErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `MinixErr` stores the errno's magnitude, so this is C's 78 rather than a
+    /// negative. Pinned for the same reason as the sibling test in `lib.rs`.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(MinixErr::ENOSYS, MinixErr(78));
+    }
 
     #[test]
     fn test_pm_call_numbers() {

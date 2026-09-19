@@ -161,7 +161,8 @@ const ENODEV: i32 = -19;
 const ENOTDIR: i32 = -20;
 const EINVAL: i32 = -22;
 const ENAMETOOLONG: i32 = -36;
-const ENOSYS: i32 = -38;
+/// C `errno.h`: `_SIGN 78`. The previous `-38` was Linux's value.
+const ENOSYS: i32 = -78;
 const ELOOP: i32 = -40;
 const ESYMLINK: i32 = -105;
 const ELEAVEMOUNT: i32 = -107;
@@ -1092,6 +1093,13 @@ pub fn start_vtreefs(hooks: FsHooks, nr_inodes: u32, root_stat: InodeStat, nr_in
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned by value, not by name: C compares an errno numerically, and Linux's
+    /// `ENOSYS` is 38 — which is the value this constant had.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, -78);
+    }
 
     /// VFS decides the value of this flag (`vfs/path.rs`); the server only
     /// tests it against `l_flags`. Keep the two in step.

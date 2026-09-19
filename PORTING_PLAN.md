@@ -6449,13 +6449,17 @@ confirmed to fail when those flags were left read-only. With the
 One consequence is worth separating from the offset bug, because fixing the
 offsets does not remove it:
 
-- `do_vumap` yields *physical* addresses, and §5 of `ARCH_WASM32.md` says this
-  port has none: `vm_lookup_range` walks a page table that does not exist here,
-  so the call answers `EFAULT` however the seam behaves. Its input-vector read
-  now goes through the seam and the M2 harness asserts exactly that — the copy
-  from the caller's slot, at the vector's address, of the vector's own byte count
-  — rather than dressing the errno up as a pass. The syscall as a whole has no
-  meaning until a physical-address model is decided (§13's open questions).
+- `do_vumap` yields *physical* addresses, and this port has none: `vm_lookup_range`
+  walks a page table that does not exist here, so the call answers `ENOSYS` on a
+  target whose `pt_levels()` is 0 (`EFAULT` still, where page tables do exist).
+  Its input-vector read goes through the seam and the M2 harness asserts exactly
+  that — the copy from the caller's slot, at the vector's address, of the vector's
+  own byte count — rather than dressing the errno up as a pass. That there is no
+  physical-address model to *build*, rather than one still to be decided, is argued
+  in `ARCH_WASM32.md` §5.3: the three shipping arches identity-map the kernel, so
+  "physical" and "kernel virtual" are the same number there, and the port's drivers
+  already bounce through a driver-local buffer rather than programming a device from
+  another process's addresses.
 
 **15. A syscall that blocked never returned its value to the guest.** Found by
 giving DS something to answer. Its first `RECEIVE` blocks, and the harness
@@ -6590,6 +6594,33 @@ returning `ENOTREADY` and its caller comparing it is the standard live-update
 shape, and a C value compared against a Linux one takes the wrong branch silently.
 `test_minix_ipc_error_codes_match_c` now pins all four by value, so the two
 families cannot drift apart again.
+
+**The same sweep missed `ENOSYS`, which `errno.h` puts at 78 and the port put at
+five different wrong values.** Found while deciding what `umap`/`vumap` should
+answer on a target with no page tables (`ARCH_WASM32.md` §5.3): `kernel/src/ipc.rs`
+had `-72`, `servers/src/vm/mod.rs` `-72`, `minix-std` and `servers/{pm,tty}.rs`
+`-71`, `minix-libc` `71`, and `libminixfs::errors`/`vtreefs` `-38`. That last pair is
+Linux's `ENOSYS` (38) rather than a wrong digit, and 38 is `ENOTSOCK` in C's
+`errno.h` — so the value was wrong in a way that looks plausible in a socket-heavy
+file. `kernel/src/syscall.rs` had two inline `-38` literals, which now name
+`crate::ipc::ENOSYS` instead. Only `fs/src/pfs/consts.rs` (78) and
+`servers/src/vfs/consts.rs` (-78) agreed with C, and they were right in *opposite
+signs* — PFS's errnos are positive because that is what its callers expect — so the
+fix could not be a single global substitution. Every crate that defines the
+constant now carries a test pinning it by value, beside
+`test_minix_ipc_error_codes_match_c`. Two of those tests had been pinning the wrong
+number all along (`minix-std`'s `test_error_constants` and `vm`'s
+`test_constants_match`), which is the part worth keeping: **a value test is only
+worth having if its value was checked against C** — otherwise it freezes the bug,
+and in `vm`'s case the same test would have blocked the fix.
+
+**Two adjacent errnos were found while fixing this and are deliberately left,
+because both are behaviour changes rather than constant changes.** `servers/src/vm/mod.rs`
+has `const EINVAL: i32 = -5`, and its own doc comment says "Invalid argument
+(EINVAL)", but `-5` is `EIO` and C's `EINVAL` is 22; it has 96 call sites in that
+file. `servers/src/vfs/consts.rs` has `ENOTSOCK: i32 = -88`, which is Linux's
+value — C's `errno.h` puts `ENOTSOCK` at 38, the very number the two `ENOSYS` sites
+above had mistaken for `ENOSYS`.
 
 **21. An init reply left to the main loop can be overtaken by a request, and the
 kernel refuses the result with `ELOCKED`.** The first version of DS's

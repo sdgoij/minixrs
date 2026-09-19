@@ -132,7 +132,9 @@ pub const EINVAL: i32 = -22;
 pub const ENOSPC: i32 = -28;
 pub const EDOM: i32 = -33;
 pub const ERANGE: i32 = -34;
-pub const ENOSYS: i32 = -71;
+/// C `errno.h`: `_SIGN 78`. Linux's `ENOSYS` is 38, which is where this had
+/// drifted from.
+pub const ENOSYS: i32 = -78;
 pub const EMSGSIZE: i32 = -90;
 pub const EPROTONOSUPPORT: i32 = -93;
 pub const EAFNOSUPPORT: i32 = -97;
@@ -474,7 +476,9 @@ mod tests {
         assert_eq!(EPERM, -1);
         assert_eq!(ENOENT, -2);
         assert_eq!(EINVAL, -22);
-        assert_eq!(ENOSYS, -71);
+        // C `errno.h`: `_SIGN 78`. Linux's `ENOSYS` is 38, which is the value
+        // that drifted into several crates in this tree.
+        assert_eq!(ENOSYS, -78);
         assert_eq!(SUSPEND, -998);
     }
 

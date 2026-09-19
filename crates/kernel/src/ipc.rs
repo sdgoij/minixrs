@@ -50,7 +50,9 @@ pub const ENOMSG: i32 = -42;
 pub const ENOTREADY: i32 = -201;
 pub const EDEADSRCDST: i32 = -202;
 pub const ELOCKED: i32 = -208;
-pub const ENOSYS: i32 = -72;
+// C `errno.h`: `_SIGN 78`. Linux puts `ENOSYS` at 38, which is the value three
+// other crates in this tree had settled on.
+pub const ENOSYS: i32 = -78;
 pub const EINVAL: i32 = -22;
 
 // C ipcconst.h: status is stored in p_misc_flags (u32_t).
@@ -1853,6 +1855,9 @@ mod tests {
         assert_eq!(EDEADSRCDST, -202);
         assert_eq!(crate::system::EDONTREPLY, -203);
         assert_eq!(ELOCKED, -208);
+        // Not an ipc code, but the same failure mode and found by the same check:
+        // `ENOSYS` was -72 here, and -38, -71, -71, -71 in four other crates.
+        assert_eq!(ENOSYS, -78);
     }
 
     #[test]

@@ -772,7 +772,7 @@ unsafe fn sys_ipc_senda_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
 /// Returns the new thread's tid (> 0) or a negative errno.
 unsafe fn sys_thread_create_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     if caller.is_null() {
-        return -38; // ENOSYS
+        return crate::ipc::ENOSYS as i64;
     }
     unsafe { crate::thread::create(caller, args[0], args[1], args[2]) as i64 }
 }
@@ -780,7 +780,7 @@ unsafe fn sys_thread_create_handler(caller: *mut crate::proc::Proc, args: &[u64;
 /// SYS_thread_self (64) — return the calling thread's tid (0 = main).
 unsafe fn sys_thread_self_handler(caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
     if caller.is_null() {
-        return -38; // ENOSYS
+        return crate::ipc::ENOSYS as i64;
     }
     unsafe { (*caller).p_tid as i64 }
 }

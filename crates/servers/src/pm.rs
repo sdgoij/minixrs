@@ -116,8 +116,8 @@ pub const TRACE_ZOMBIE: u32 = 0x10000;
 pub const DELAY_CALL: u32 = 0x20000;
 pub const TAINTED: u32 = 0x40000;
 
-/// Error codes.
-pub const ENOSYS: i32 = -71;
+/// Error codes. C `errno.h`: `_SIGN 78` for `ENOSYS`, not Linux's 38.
+pub const ENOSYS: i32 = -78;
 pub const EINVAL: i32 = -22;
 pub const EAGAIN: i32 = -11;
 pub const EPERM: i32 = -1;
@@ -4647,6 +4647,13 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned by value, not by name: C compares an errno numerically. `ENOSYS`
+    /// had -71 here while the kernel had -72 and `libminixfs` had Linux's -38.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, -78);
+    }
 
     // A pid that no test process table entry can ever hold (pids are 1..NR_PROCS).
     const UNMATCHED_PID: i32 = 99999;

@@ -8,7 +8,8 @@ pub const EINVAL: i32 = -22;
 pub const EIO: i32 = -5;
 pub const ENOSPC: i32 = -28;
 pub const ENXIO: i32 = -6;
-pub const ENOSYS: i32 = -38;
+/// C `errno.h`: `_SIGN 78`. The previous `-38` was Linux's value.
+pub const ENOSYS: i32 = -78;
 pub const END_OF_FILE: i32 = -204;
 
 /// Filesystem-level error type.
@@ -70,5 +71,17 @@ impl fmt::Display for FsError {
             FsError::EndOfFile => write!(f, "End of file"),
             FsError::Errno(e) => write!(f, "Unknown error {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pinned by value, not by name: C compares an errno numerically, and Linux's
+    /// `ENOSYS` is 38 — which is the value this constant had.
+    #[test]
+    fn test_enosys_matches_c() {
+        assert_eq!(ENOSYS, -78);
     }
 }
