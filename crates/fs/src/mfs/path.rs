@@ -8,6 +8,7 @@ use crate::mfs::read::read_map;
 use crate::mfs::types::*;
 use crate::mfs::utility::conv4;
 use libs::libminixfs::cache::{lmfs_dev, lmfs_get_block, lmfs_markdirty, lmfs_put_block};
+use libs::libminixfs::credentials::fs_lookup_credentials;
 
 /// Compare a name from a directory entry (null-terminated byte array)
 /// against a byte slice, matching C `strncmp` semantics.
@@ -56,7 +57,19 @@ pub fn fs_lookup() -> i32 {
             // Path already null-terminated, use as-is
         }
 
-        // caller_uid and caller_gid are already set in globals.
+        // Caller's identity: uid/gid from the request, or — when VFS shipped
+        // credentials because the caller belongs to supplemental groups — the
+        // block it granted (C fs_lookup_credentials()).
+        if flags & PATH_GET_UCRED != 0 {
+            let credentials = &mut (*mfs).credentials;
+            match fs_lookup_credentials(credentials, (*mfs).lookup_grant_ucred) {
+                Ok((uid, gid)) => {
+                    (*mfs).caller_uid = uid;
+                    (*mfs).caller_gid = gid;
+                }
+                Err(e) => return e,
+            }
+        }
 
         let mut cp_offset: usize = 0;
         let mut symlinks: i32 = 0;

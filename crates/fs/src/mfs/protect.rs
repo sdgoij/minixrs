@@ -28,7 +28,9 @@ pub fn forbidden(rip_idx: u16, access_desired: u16) -> i32 {
         } else {
             let shift = if caller_uid == (*rip).i_uid {
                 6
-            } else if caller_gid == (*rip).i_gid {
+            } else if caller_gid == (*rip).i_gid
+                || (*glo::mfs_ptr()).credentials.in_group((*rip).i_gid)
+            {
                 3
             } else {
                 0

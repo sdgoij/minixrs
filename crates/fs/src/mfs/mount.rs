@@ -10,12 +10,36 @@ use crate::mfs::types::*;
 
 static CLEANMOUNT: AtomicI32 = AtomicI32::new(1);
 
+/// Record a mount's flags on the superblock and decide whether it may write
+/// (C `fs_readsuper`): a filesystem that was not unmounted cleanly is dropped
+/// to read-only rather than written on top of, and VFS's `REQ_RDONLY`/
+/// `REQ_ISROOT` are stored for the requests that read them. Returns the
+/// effective read-only state.
+fn apply_mount_flags(sp: &mut SuperBlock, req_flags: u32) -> bool {
+    let mut readonly = (req_flags & REQ_RDONLY as u32) != 0;
+    let isroot = (req_flags & REQ_ISROOT as u32) != 0;
+    if sp.s_flags & MFSFLAG_CLEAN == 0 && !readonly {
+        readonly = true;
+    }
+    sp.s_rd_only = readonly as i32;
+    sp.s_is_root = isroot as u8;
+    readonly
+}
+
 pub fn fs_readsuper() -> i32 {
     unsafe {
         // Read device number from the incoming message (m1i1).
         // VFS's req_readsuper writes dev at PAYLOAD_OFF + 0 → m1.m1i1.
         let mfs = glo::mfs_ptr();
         let dev = (*mfs).m_in.m_payload.m1.m1i1 as u32;
+
+        // Mount flags: `REQ_RDONLY` says the filesystem may not be written, and
+        // `REQ_ISROOT` marks the process root (where `..` stops).
+        let req_flags = u32::from_ne_bytes(
+            (&(*mfs).m_in.m_payload.raw)[4..8]
+                .try_into()
+                .unwrap_or([0u8; 4]),
+        );
 
         // Resolve the block driver for this device from the driver label
         // VFS grants (label_len at payload+8, label grant at payload+24,
@@ -58,6 +82,16 @@ pub fn fs_readsuper() -> i32 {
                 if (*sp).s_flags & MFSFLAG_CLEAN != 0 {
                     CLEANMOUNT.store(1, Ordering::Relaxed);
                 }
+                let readonly = apply_mount_flags(&mut *sp, req_flags);
+                if !readonly {
+                    // Mark it in use, so the next mount sees it was not unmounted
+                    // cleanly. `fs_unmount` turns the flag back on.
+                    (*sp).s_flags &= !MFSFLAG_CLEAN;
+                    if write_super(&mut *sp) != OK {
+                        (*sp).s_dev = NO_DEV;
+                        return EIO;
+                    }
+                }
                 let root_rip = match get_inode(dev, ROOT_INODE) {
                     Some(rip) => rip,
                     None => {
@@ -79,7 +113,7 @@ pub fn fs_readsuper() -> i32 {
                 (*mfs).m_out.m_payload.m1.m1i2 = if root_inode.i_size < 0 { -1 } else { 0 };
                 (*mfs).m_out.m_payload.m1.m1i3 = dev as i32;
                 (*mfs).m_out.m_payload.m1.m1i4 = ROOT_INODE as i32;
-                (*mfs).m_out.m_payload.m1.m1i5 = 0; // flags: not read-only during boot
+                (*mfs).m_out.m_payload.m1.m1i5 = 0; // flags: no extension flags
                 (*mfs).m_out.m_payload.m1.m1i6 = root_inode.i_mode as i32;
 
                 return OK;
@@ -178,5 +212,31 @@ mod tests {
         // empty, so get_inode fails → EINVAL.
         init();
         assert_eq!(fs_mountpoint(), EINVAL);
+    }
+
+    #[test]
+    fn apply_mount_flags_takes_the_filesystem_flags() {
+        // A clean filesystem mounted read-write stays writable, and the root
+        // flag is recorded for the lookup that reads it.
+        let mut sp = SuperBlock {
+            s_flags: MFSFLAG_CLEAN,
+            ..SuperBlock::default()
+        };
+        assert!(!apply_mount_flags(&mut sp, REQ_ISROOT as u32));
+        assert_eq!(sp.s_rd_only, 0);
+        assert_eq!(sp.s_is_root, 1, "the root mount must be recorded");
+
+        // REQ_RDONLY wins even when the filesystem is clean.
+        assert!(apply_mount_flags(&mut sp, REQ_RDONLY as u32));
+        assert_eq!(sp.s_rd_only, 1);
+
+        // An unclean filesystem is mounted read-only whatever VFS asked for:
+        // writing on top of whatever the crash left behind is worse than
+        // refusing the writes.
+        sp.s_flags = 0;
+        assert!(apply_mount_flags(&mut sp, 0));
+        assert_eq!(sp.s_rd_only, 1);
+        assert!(apply_mount_flags(&mut sp, REQ_RDONLY as u32));
+        assert_eq!(sp.s_rd_only, 1);
     }
 }

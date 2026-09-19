@@ -159,25 +159,41 @@ pub fn mfs_main() -> i32 {
             }
 
             // For lookup requests, extract fields from the message payload.
-            // VFS req_lookup writes at PAYLOAD_OFF (offset 8 in Message):
-            //   +0  = dir_ino  (u64) -> m_payload.m4.l1, m4.l2
-            //   +8  = root_ino (u64) -> m_payload.m4.l3, m4.l4
-            //   +16 = flags    (u32) -> m_payload.m1.m1i5
-            //   +20 = path_len (u32) -> m_payload.m1.m1i6
-            //   +24 = path data
+            // VFS req_lookup raw offsets:
+            //   raw[0..4]   = dir_ino  (u32)
+            //   raw[4..8]   = root_ino (u32)
+            //   raw[8..10]  = uid      (u16)
+            //   raw[10..12] = gid      (u16)
+            //   raw[12..16] = flags    (u32)
+            //   raw[16..20] = grant_ucred (i32; valid when PATH_GET_UCRED is set)
+            //   raw[20..24] = path_len (u32)
+            //   raw[24..]   = path data
             if req_nr == 26 {
                 unsafe {
                     let mfs = glo::mfs_ptr();
-                    let dir_ino = (*mfs).m_in.m_payload.m4.m4l1 as u64;
-                    let root_ino = (*mfs).m_in.m_payload.m4.m4l2 as u64;
-                    let flags = (*mfs).m_in.m_payload.m1.m1i5;
-                    let path_len = (*mfs).m_in.m_payload.m1.m1i6 as usize;
-                    (*mfs).lookup_dir_ino = dir_ino as u32;
-                    (*mfs).lookup_root_ino = root_ino as u32;
-                    (*mfs).lookup_flags = flags;
-                    (*mfs).lookup_path_len = path_len;
-                    // Copy path from embedded location in payload (+24 = m_payload.raw[24])
                     let raw = (*mfs).m_in.m_payload.raw;
+                    let dir_ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
+                    let root_ino = u32::from_ne_bytes(raw[4..8].try_into().unwrap_or([0u8; 4]));
+                    let uid = u16::from_ne_bytes(raw[8..10].try_into().unwrap_or([0u8; 2]));
+                    let gid = u16::from_ne_bytes(raw[10..12].try_into().unwrap_or([0u8; 2]));
+                    let flags =
+                        u32::from_ne_bytes(raw[12..16].try_into().unwrap_or([0u8; 4])) as i32;
+                    let grant_ucred =
+                        i32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
+                    let path_len =
+                        u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+
+                    (*mfs).lookup_dir_ino = dir_ino;
+                    (*mfs).lookup_root_ino = root_ino;
+                    (*mfs).lookup_flags = flags;
+                    (*mfs).lookup_grant_ucred = grant_ucred;
+                    (*mfs).lookup_path_len = path_len;
+                    // `fs_lookup` replaces these with the credential block's
+                    // uid/gid when VFS set PATH_GET_UCRED.
+                    (*mfs).caller_uid = uid;
+                    (*mfs).caller_gid = gid;
+
+                    // Copy path from embedded location in payload (+24 = m_payload.raw[24])
                     let copy_len = path_len.min(PATH_MAX - 1).min(24);
                     if copy_len > 0 {
                         let user_path_ptr = (*mfs).user_path.as_mut_ptr();

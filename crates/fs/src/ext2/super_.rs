@@ -120,7 +120,16 @@ pub fn read_super(sp: &mut SuperBlock) -> i32 {
     OK
 }
 
-/// Write super block and GDT back to disk.
+/// Write the super block and, when something marked it, the group descriptor
+/// table back to the disk.
+///
+/// Reference: super.c write_super() — the C writes the first `SUPER_SIZE_D`
+/// bytes of the in-core superblock at the volume's byte 1024 (or at
+/// `opt.block_with_super * 1024`, which the port does not relocate), and the
+/// descriptor table when `group_descriptors_dirty` is set. Both go through the
+/// block cache here rather than the C's `bdev_write`, so they are written as
+/// the blocks that hold them; the flush at the end is what makes that
+/// immediate, the way a device write is.
 pub fn write_super(sp: &mut SuperBlock) {
     if sp.s_rd_only != 0 {
         return;
@@ -129,20 +138,57 @@ pub fn write_super(sp: &mut SuperBlock) {
         return;
     }
 
-    // Mark any loaded GDT buffer as dirty so it gets written back
-    for i in 0..sp.s_gdb_count.min(4) as usize {
-        let buf_ptr = sp.s_gdt_bufs[i];
-        if buf_ptr != 0 {
-            unsafe {
-                let bp = buf_ptr as *mut Buf;
-                if !bp.is_null() {
+    let block_size = sp.s_block_size as u64;
+    if block_size == 0 {
+        return;
+    }
+
+    // The superblock starts at byte 1024 of the volume, which is inside the
+    // first block for every block size above 1024 (the mount reads it the same
+    // way, under the 1024-byte pre-mount block size).
+    let offset = SUPER_BLOCK_BYTES as u64;
+    let block = offset / block_size;
+    let off_in_block = (offset % block_size) as usize;
+    if off_in_block + SUPER_SIZE_D > block_size as usize {
+        return;
+    }
+
+    unsafe {
+        let bp = libs::libminixfs::cache::lmfs_get_block(sp.s_dev, block);
+        if !bp.is_null() {
+            // Only the on-disk half of the struct belongs in the block; the
+            // rest is in-memory state that `read_super` computed.
+            core::ptr::copy_nonoverlapping(
+                sp as *const SuperBlock as *const u8,
+                b_data(bp).add(off_in_block),
+                SUPER_SIZE_D,
+            );
+            libs::libminixfs::cache::lmfs_markdirty(bp);
+            libs::libminixfs::cache::lmfs_put_block(bp, FULL_DATA_BLOCK);
+        }
+    }
+
+    // The descriptor table only goes back when a group's counts changed
+    // (`mark_group_descriptors_dirty`); the buffers are the ones `read_super`
+    // loaded, so marking them dirty is all the cache needs.
+    if glo::group_descriptors_dirty() {
+        for i in 0..sp.s_gdb_count.min(4) as usize {
+            let bp = sp.s_gdt_bufs[i] as *mut Buf;
+            if !bp.is_null() {
+                unsafe {
                     libs::libminixfs::cache::lmfs_markdirty(bp);
                 }
             }
         }
+        glo::clear_group_descriptors_dirty();
     }
 
-    glo::GROUP_DESCRIPTORS_DIRTY.store(0, Ordering::Relaxed);
+    // The C has both on the device when it returns; the cache writes on flush,
+    // so flush here instead of leaving the superblock in memory until something
+    // else happens to flush it.
+    unsafe {
+        libs::libminixfs::cache::lmfs_flushall();
+    }
 }
 
 /// Get group descriptor for a given block group.

@@ -585,16 +585,17 @@ fn resolve_link(node: u32, out: &mut [u8]) -> Result<usize, i32> {
     Ok(len)
 }
 
-/// `m_vfs_fs_lookup`: dir_ino (u64) at payload[0], root_ino (u64) at
-/// payload[8], flags (u32) at payload[16], path_len (u32) at payload[20],
-/// path (NUL-terminated, embedded, ≤24 bytes) at payload[24].
+/// `m_vfs_fs_lookup`: dir_ino (u32) at payload[0], root_ino (u32) at
+/// payload[4], uid (u16) at payload[8], gid (u16) at payload[10], flags (u32)
+/// at payload[12], grant_ucred (i32) at payload[16], path_len (u32) at
+/// payload[20], path (NUL-terminated, embedded, ≤24 bytes) at payload[24].
 ///
 /// Reply (mess_fs_vfs_lookup): file_size (i64) at payload[8], device (u32)
 /// at payload[16], inode (u32) at payload[20], mode (u32) at payload[24].
 fn fs_lookup(msg: &mut Message) -> i32 {
     let raw = raw_of(msg);
-    let dir_ino = u64::from_ne_bytes(raw[0..8].try_into().unwrap_or([0u8; 8])) as u32;
-    let flags = u32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
+    let dir_ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
+    let flags = u32::from_ne_bytes(raw[12..16].try_into().unwrap_or([0u8; 4]));
     let path_len = u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
 
     if path_len == 0 || path_len > PATH_MAX {
@@ -1233,9 +1234,9 @@ mod tests {
         let mut msg = new_message(REQ_LOOKUP, arch_common::com::VFS_PROC_NR);
         {
             let raw = raw_of_mut(&mut msg);
-            w_i64(raw, 0, 0); // dir_ino = root
-            w_i64(raw, 8, 0); // root_ino
-            w_u32(raw, 16, 0); // flags
+            w_u32(raw, 0, 0); // dir_ino = root
+            w_u32(raw, 4, 0); // root_ino
+            w_u32(raw, 12, 0); // flags
             w_u32(raw, 20, 14); // path_len (incl. NUL)
             raw[24..38].copy_from_slice(b"/devices/tty0\0");
         }
@@ -1251,8 +1252,8 @@ mod tests {
         let mut msg = new_message(REQ_LOOKUP, arch_common::com::VFS_PROC_NR);
         {
             let raw = raw_of_mut(&mut msg);
-            w_i64(raw, 0, 0);
-            w_i64(raw, 8, 0);
+            w_u32(raw, 0, 0);
+            w_u32(raw, 4, 0);
             w_u32(raw, 20, 11);
             raw[24..35].copy_from_slice(b"/nope/nope\0");
         }
@@ -1262,8 +1263,8 @@ mod tests {
         let mut msg = new_message(REQ_LOOKUP, arch_common::com::VFS_PROC_NR);
         {
             let raw = raw_of_mut(&mut msg);
-            w_i64(raw, 0, 1); // dir_ino = devices
-            w_i64(raw, 8, 0);
+            w_u32(raw, 0, 1); // dir_ino = devices
+            w_u32(raw, 4, 0);
             w_u32(raw, 20, 3); // path_len = "..\0"
             raw[24..27].copy_from_slice(b"..\0");
         }

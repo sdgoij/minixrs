@@ -4,6 +4,7 @@ use libs::libminixfs::cache::{lmfs_get_block_ino, lmfs_markdirty, lmfs_put_block
 use libs::libminixfs::constants::{
     DIRECTORY_BLOCK, FULL_DATA_BLOCK, NO_READ, NORMAL, VMC_NO_INODE,
 };
+use libs::libminixfs::credentials::fs_lookup_credentials;
 
 use crate::ext2::consts::*;
 use crate::ext2::glo;
@@ -74,19 +75,26 @@ unsafe fn ltraverse(rip: *mut Inode, suffix_offset: usize, path_len: usize) -> i
 
 /// fs_lookup — resolve a path to an inode.
 ///
-/// Message layout (VFS `req_lookup`): dir_ino (u64) at payload[0], root_ino
-/// (u64) at payload[8], flags (u32) at payload[16], path_len (u32) at
-/// payload[20], path at payload[24] (NUL-terminated, capped at 24 bytes).
+/// Message layout (VFS `req_lookup`; the inode fields are u32 like the C's
+/// `ino_t` since the port embeds the path in the message and needs the room):
+/// dir_ino (u32) at payload[0], root_ino (u32) at payload[4], uid (u16) at
+/// payload[8], gid (u16) at payload[10], flags (u32) at payload[12],
+/// grant_ucred (i32) at payload[16] (set when `PATH_GET_UCRED` is),
+/// path_len (u32) at payload[20], path at payload[24] (NUL-terminated, capped
+/// at 24 bytes).
 ///
 /// Reference: path.c fs_lookup() + parse_path()
 pub unsafe fn fs_lookup() -> i32 {
     let ext2 = glo::ext2_ptr();
 
     let payload = (*ext2).m_in.m_payload.raw;
-    let dir_ino = u64::from_ne_bytes(payload[0..8].try_into().unwrap_or([0u8; 8])) as u32;
-    let root_ino = u64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8])) as u32;
-    let flags = u32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4])) as i32;
-    let path_len = u32::from_ne_bytes(payload[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+    let dir_ino = payload_u32(&payload, 0);
+    let root_ino = payload_u32(&payload, 4);
+    let uid = u16::from_ne_bytes(payload[8..10].try_into().unwrap_or([0u8; 2]));
+    let gid = u16::from_ne_bytes(payload[10..12].try_into().unwrap_or([0u8; 2]));
+    let flags = payload_u32(&payload, 12) as i32;
+    let grant_ucred = payload_i32(&payload, 16);
+    let path_len = payload_u32(&payload, 20) as usize;
 
     if path_len == 0 {
         return EINVAL;
@@ -103,6 +111,23 @@ pub unsafe fn fs_lookup() -> i32 {
     }
     core::ptr::write((*up).as_mut_ptr().add(copy_len), 0);
     let path_len = copy_len;
+
+    // Caller's identity: uid/gid from the request, or — when VFS shipped
+    // credentials because the caller belongs to supplemental groups — the
+    // block it granted (C fs_lookup_credentials()).
+    if flags & PATH_GET_UCRED != 0 {
+        let credentials = &mut (*ext2).credentials;
+        match fs_lookup_credentials(credentials, grant_ucred) {
+            Ok((cred_uid, cred_gid)) => {
+                (*ext2).caller_uid = cred_uid;
+                (*ext2).caller_gid = cred_gid;
+            }
+            Err(e) => return e,
+        }
+    } else {
+        (*ext2).caller_uid = uid;
+        (*ext2).caller_gid = gid;
+    }
 
     let mut cp_offset: usize = 0;
     let mut symlinks: i32 = 0;
@@ -126,12 +151,16 @@ pub unsafe fn fs_lookup() -> i32 {
 
         // End of path: this is the inode we were looking for.
         if cp_offset >= path_len || (*up)[cp_offset] == 0 {
-            fill_lookup_reply(current_rip);
             if (*current_rip).i_mountpoint != FALSE {
+                fill_lookup_reply(current_rip);
                 put_inode(current_rip);
                 return EENTERMOUNT;
             }
-            put_inode(current_rip);
+            // The reference stays with VFS, which is what lets its later
+            // requests find this inode at all (`find_inode` only sees inodes
+            // with a reference) and what `REQ_PUTNODE` gives back. The C puts it
+            // back in the EENTERMOUNT case above only.
+            fill_lookup_reply(current_rip);
             return OK;
         }
 
@@ -195,9 +224,10 @@ pub unsafe fn fs_lookup() -> i32 {
                 0
             };
             if next_char == 0 && (flags & PATH_RET_SYMLINK) != 0 {
+                // The link itself is the final object, so its reference goes to
+                // VFS as well (the parent directory's does not).
                 put_inode(dir_ip);
                 fill_lookup_reply(current_rip);
-                put_inode(current_rip);
                 return OK;
             }
 

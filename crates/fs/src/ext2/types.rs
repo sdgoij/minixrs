@@ -40,6 +40,11 @@ pub struct Ext2DiskDirDesc {
 }
 
 /// Super block (in-memory + on-disk).
+///
+/// The on-disk fields come first and end exactly at the on-disk superblock's
+/// size, so reading a volume is a byte copy of `SUPER_SIZE_D` bytes into this
+/// struct's base; the fields after that are memory-only and start zeroed. The
+/// assertion below is what keeps that true.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct SuperBlock {
@@ -116,6 +121,13 @@ pub struct SuperBlock {
     /// Cached group descriptor table data pointers (as *mut u8 cast to usize).
     pub s_gdt_data: [usize; 4],
 }
+
+// The copy in `fs_readsuper` writes the on-disk bytes over the struct's head, so
+// the first memory-only field has to sit exactly at the end of them.
+const _: () = assert!(
+    core::mem::offset_of!(SuperBlock, s_inodes_per_block) == SUPER_SIZE_D,
+    "SuperBlock's memory-only fields have to start right after its on-disk ones"
+);
 
 impl Default for SuperBlock {
     fn default() -> Self {

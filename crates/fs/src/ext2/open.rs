@@ -53,13 +53,14 @@ pub unsafe fn fs_create() -> i32 {
     }
 
     // VFS's create reply: file_size (i64) at payload[0], inode (u32) at
-    // payload[8], mode (u16) at payload[12].
+    // payload[8], mode (u16) at payload[12]. The new file's reference stays with
+    // VFS (C: only the error path above puts it back; only the parent directory
+    // is put here), and `REQ_PUTNODE` is how VFS hands that reference back.
     if !rip.is_null() {
         let raw = &mut (*ext2).m_out.m_payload.raw;
         raw[0..8].copy_from_slice(&((*rip).i_size as i64).to_le_bytes());
         raw[8..12].copy_from_slice(&(*rip).i_num.to_le_bytes());
         raw[12..14].copy_from_slice(&((*rip).i_mode as u16).to_le_bytes());
-        put_inode(rip);
     }
 
     put_inode(ldirp);

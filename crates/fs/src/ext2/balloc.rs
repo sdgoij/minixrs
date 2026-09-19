@@ -165,6 +165,43 @@ fn alloc_block_bit(rip: &mut Inode, goal: u32) -> u32 {
             let bitmap_len = block_size / core::mem::size_of::<BitchunkT>();
             let bitmap = core::slice::from_raw_parts_mut(bitmap_ptr, bitmap_len);
 
+            // Preallocation: take a whole byte of the bitmap at once and keep
+            // the other seven blocks for this inode's next writes, so a file
+            // being written sequentially finds its blocks together (C
+            // alloc_block_bit's preallocation branch).
+            if rip.i_preallocation != 0
+                && (*gd).free_blocks_count >= (EXT2_PREALLOC_BLOCKS * 4) as u16
+            {
+                if rip.i_prealloc_count != 0 {
+                    // The C drops a stale preallocation before making a new one
+                    // (it should not have survived to a second group's search).
+                    discard_preallocated_blocks(Some(rip));
+                }
+
+                let byte_bit = setbyte(bitmap, sp.s_blocks_per_group);
+                if byte_bit != -1 {
+                    let block =
+                        sp.s_first_data_block + group * sp.s_blocks_per_group + byte_bit as u32;
+
+                    // The first byte of the run is returned as this allocation;
+                    // the rest wait in the inode.
+                    for i in 1..EXT2_PREALLOC_BLOCKS {
+                        rip.i_prealloc_blocks[i - 1] = block + i as u32;
+                    }
+                    rip.i_prealloc_index = 0;
+                    rip.i_prealloc_count = (EXT2_PREALLOC_BLOCKS - 1) as i32;
+
+                    lmfs_markdirty(bp);
+                    lmfs_put_block(bp, FULL_DATA_BLOCK);
+
+                    (*gd).free_blocks_count -= EXT2_PREALLOC_BLOCKS as u16;
+                    sp.s_free_blocks_count -= EXT2_PREALLOC_BLOCKS as u32;
+                    glo::mark_group_descriptors_dirty();
+
+                    return block;
+                }
+            }
+
             let bit = setbit(bitmap, sp.s_blocks_per_group, word);
             if bit == -1 {
                 lmfs_put_block(bp, FULL_DATA_BLOCK);
@@ -185,6 +222,7 @@ fn alloc_block_bit(rip: &mut Inode, goal: u32) -> u32 {
 
             (*gd).free_blocks_count -= 1;
             sp.s_free_blocks_count -= 1;
+            glo::mark_group_descriptors_dirty();
 
             if update_bsearch && block != NO_BLOCK {
                 sp.s_bsearch = block;
@@ -238,6 +276,7 @@ pub fn free_block(sp: &mut SuperBlock, bit_returned: u32) {
 
         (*gd).free_blocks_count += 1;
         sp.s_free_blocks_count += 1;
+        glo::mark_group_descriptors_dirty();
     }
 
     if bit_returned < sp.s_bsearch {

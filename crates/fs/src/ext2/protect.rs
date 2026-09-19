@@ -225,13 +225,10 @@ pub unsafe fn forbidden(rip: *mut Inode, access_desired: u16) -> i32 {
     } else {
         let shift = if caller_uid == (*rip).i_uid {
             6
-        } else if caller_gid == (*rip).i_gid {
+        } else if caller_gid == (*rip).i_gid || (*ext2).credentials.in_group((*rip).i_gid) {
             3
         } else {
-            // Check supplementary groups
-            let mut in_grp = false;
-            // TODO: check credentials.vu_sgroups
-            if in_grp { 3 } else { 0 }
+            0
         };
         perm_bits = (bits >> shift) & (R_BIT | W_BIT | X_BIT);
     }
@@ -287,6 +284,73 @@ mod tests {
             let raw = &mut (*ext2).m_in.m_payload.raw;
             raw[0..4].copy_from_slice(&ino.to_le_bytes());
             raw[4..6].copy_from_slice(&mode.to_le_bytes());
+        }
+    }
+
+    fn set_caller(uid: u16, gid: u16) {
+        unsafe {
+            let ext2 = glo::ext2_ptr();
+            (*ext2).caller_uid = uid;
+            (*ext2).caller_gid = gid;
+        }
+    }
+
+    #[test]
+    fn test_forbidden_grants_access_through_supplementary_group() {
+        init();
+        unsafe {
+            let ext2 = glo::ext2_ptr();
+            let ino = get_inode((*ext2).fs_dev, 7);
+            assert!(!ino.is_null(), "inode alloc");
+            (*ino).i_mode = I_REGULAR | 0o640; // group-readable, nothing for other
+            (*ino).i_uid = 100;
+            (*ino).i_gid = 200;
+
+            set_caller(7, 9);
+            assert_eq!(
+                forbidden(ino, R_BIT),
+                EACCES,
+                "caller is neither the owner, the group, nor other-writable"
+            );
+
+            (*ext2).credentials.vu_ngroups = 1;
+            (*ext2).credentials.vu_sgroups[0] = 200;
+            assert_eq!(
+                forbidden(ino, R_BIT),
+                OK,
+                "membership in the file's group selects the group bits"
+            );
+            assert_eq!(
+                forbidden(ino, X_BIT),
+                EACCES,
+                "the group bits themselves still decide"
+            );
+
+            (*ext2).credentials.vu_sgroups[0] = 300;
+            assert_eq!(forbidden(ino, R_BIT), EACCES, "unrelated group");
+        }
+    }
+
+    #[test]
+    fn test_forbidden_owner_and_effective_group_beat_supplementary() {
+        init();
+        unsafe {
+            let ext2 = glo::ext2_ptr();
+            let ino = get_inode((*ext2).fs_dev, 7);
+            assert!(!ino.is_null(), "inode alloc");
+            (*ino).i_mode = I_REGULAR | 0o600; // owner only
+            (*ino).i_uid = 100;
+            (*ino).i_gid = 200;
+
+            (*ext2).credentials.vu_ngroups = 1;
+            (*ext2).credentials.vu_sgroups[0] = 999;
+
+            set_caller(100, 9);
+            assert_eq!(forbidden(ino, R_BIT), OK, "owner bits apply");
+
+            (*ino).i_mode = I_REGULAR | 0o060;
+            set_caller(7, 200);
+            assert_eq!(forbidden(ino, R_BIT), OK, "effective group bits apply");
         }
     }
 

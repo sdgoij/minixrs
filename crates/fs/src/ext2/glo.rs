@@ -9,6 +9,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, Ordering};
 
 use arch_common::ipc::Message;
+use libs::libminixfs::credentials::VfsUCred;
 
 use crate::ext2::consts::*;
 use crate::ext2::types::*;
@@ -25,6 +26,9 @@ pub struct Ext2Global {
     pub fs_m_in_m_type: i32,
     pub caller_uid: u16,
     pub caller_gid: u16,
+    /// Credential block copied out of the grant VFS attaches to a lookup that
+    /// has `PATH_GET_UCRED` set (C `credentials` in `glo.h`).
+    pub credentials: VfsUCred,
     pub req_nr: i32,
     pub user_path: [u8; PATH_MAX],
     pub fs_dev: u32,
@@ -116,6 +120,22 @@ pub(crate) static RDAHEDPOS: AtomicU64 = AtomicU64::new(0);
 /// Group descriptors dirty flag.
 pub(crate) static GROUP_DESCRIPTORS_DIRTY: AtomicI32 = AtomicI32::new(0);
 
+/// Note that a group descriptor changed, so the next `write_super()` has to put
+/// the table back on the disk (the C original's `group_descriptors_dirty`).
+pub fn mark_group_descriptors_dirty() {
+    GROUP_DESCRIPTORS_DIRTY.store(1, Ordering::Relaxed);
+}
+
+/// Whether a group descriptor changed since the table was last written out.
+pub fn group_descriptors_dirty() -> bool {
+    GROUP_DESCRIPTORS_DIRTY.load(Ordering::Relaxed) != 0
+}
+
+/// Clear the flag, after the table has been written back.
+pub fn clear_group_descriptors_dirty() {
+    GROUP_DESCRIPTORS_DIRTY.store(0, Ordering::Relaxed);
+}
+
 /// Super block pointer (single superblock for ext2).
 pub(crate) static SUPERBLOCK: AtomicPtr<SuperBlock> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -131,6 +151,7 @@ pub unsafe fn ext2_init_globals() {
         fs_m_in_m_type: 0,
         caller_uid: INVAL_UID,
         caller_gid: INVAL_GID,
+        credentials: VfsUCred::zeroed(),
         req_nr: 0,
         user_path: [0; PATH_MAX],
         fs_dev: NO_DEV,

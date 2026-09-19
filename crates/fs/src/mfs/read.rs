@@ -221,36 +221,111 @@ pub fn fs_readwrite() -> i32 {
     }
 }
 
-// Reference: read.c fs_breadwrite()
+/// fs_breadwrite — raw block I/O on a device, without an inode.
+///
+/// VFS routes a block special file's reads and writes here (through the FS that
+/// serves the device): the bytes are addressed on the device, not in a file.
+/// Message layout (VFS `req_breadwrite`): device (u32) at payload[0], seek_pos
+/// (i64) at payload[8], grant (i32) at payload[16], nbytes (u64) at
+/// payload[24]. Reply: seek_pos (i64) at payload[0], nbytes (u64) at payload[8].
+///
+/// Reference: read.c fs_breadwrite()
 pub fn fs_breadwrite() -> i32 {
     unsafe {
         let mfs = glo::mfs_ptr();
-        let req_nr = (*mfs).req_nr;
-        let is_write = req_nr == REQ_BWRITE - FS_BASE;
+        let is_write = (*mfs).req_nr == REQ_BWRITE - FS_BASE;
+        let payload = (*mfs).m_in.m_payload.raw;
 
-        let msg: *const arch_common::ipc::Message = core::ptr::addr_of!((*mfs).m_in);
-        let dev = (*msg).m_payload.m1.m1i1 as u32;
-        let block = (*msg).m_payload.m1.m1i2 as u64;
-        let _count = (*msg).m_payload.m1.m1i3 as usize;
-        let _user_ep = (*msg).m_payload.m1.m1i4;
-        let _grant = (*msg).m_payload.m1.m1i5;
+        let dev = u32::from_ne_bytes(payload[0..4].try_into().unwrap_or([0u8; 4]));
+        let grant = i32::from_ne_bytes(payload[16..20].try_into().unwrap_or([0u8; 4]));
+        let mut pos = u64::from_ne_bytes(payload[8..16].try_into().unwrap_or([0u8; 8]));
+        let mut nrbytes = u64::from_ne_bytes(payload[24..32].try_into().unwrap_or([0u8; 8]));
 
+        // A block write to a filesystem mounted read-only has nowhere to go.
         if is_write {
-            libs::libminixfs::cache::lmfs_invalidate(dev);
+            let sp = super_block::get_super(dev);
+            if !sp.is_null() && (*sp).s_rd_only != 0 {
+                return EROFS;
+            }
         }
 
-        let bp = lmfs_get_block(dev, block);
-        if bp.is_null() {
-            return EIO;
+        // The C takes the block size from the cache (`get_block_size()` there is
+        // `lmfs_fs_block_size()`), which is also the unit the cache addresses
+        // blocks in, for a device this server may not have mounted.
+        let block_size = libs::libminixfs::cache::lmfs_fs_block_size() as u64;
+        if block_size == 0 {
+            return EINVAL;
         }
 
-        if is_write {
-            libs::libminixfs::cache::lmfs_markdirty(bp);
+        let mut r = OK;
+        let mut cum_io: u32 = 0;
+
+        while nrbytes > 0 {
+            let block = pos / block_size;
+            let off = (pos % block_size) as usize;
+            let chunk = (nrbytes.min(block_size - off as u64)) as usize;
+
+            let bp = lmfs_get_block(dev, block);
+            if bp.is_null() {
+                r = EIO;
+                break;
+            }
+
+            #[cfg(target_os = "minix")]
+            {
+                let data = (*bp).data_ptr.add(off);
+                r = if is_write {
+                    minix_rt::kernel_call(
+                        SAFECOPYFROM_CALL,
+                        &mut safecopy_msg(grant, cum_io as u64, data as u64, chunk as u64),
+                    )
+                } else {
+                    minix_rt::kernel_call(
+                        SAFECOPYTO_CALL,
+                        &mut safecopy_msg(grant, cum_io as u64, data as u64, chunk as u64),
+                    )
+                };
+            }
+            #[cfg(not(target_os = "minix"))]
+            let _ = (grant, off, chunk);
+
+            if is_write {
+                libs::libminixfs::cache::lmfs_markdirty(bp);
+            }
+            let block_type = if off + chunk == block_size as usize {
+                FULL_DATA_BLOCK
+            } else {
+                PARTIAL_DATA_BLOCK
+            };
+            lmfs_put_block(bp, block_type);
+
+            if r != OK {
+                break;
+            }
+
+            nrbytes -= chunk as u64;
+            cum_io += chunk as u32;
+            pos += chunk as u64;
         }
 
-        lmfs_put_block(bp, FULL_DATA_BLOCK);
-        OK
+        let raw = &mut (*mfs).m_out.m_payload.raw;
+        raw[0..8].copy_from_slice(&(pos as i64).to_le_bytes());
+        raw[8..16].copy_from_slice(&(cum_io as u64).to_le_bytes());
+        r
     }
+}
+
+/// A SYS_SAFECOPYTO/FROM message for a grant copy at `buf_off` to/from
+/// `local` (C `sys_safecopyto/from(VFS_PROC_NR, gid, buf_off, local, bytes)`).
+#[cfg(target_os = "minix")]
+fn safecopy_msg(gid: i32, buf_off: u64, local: u64, bytes: u64) -> [u8; 64] {
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
+    kmsg[12..16].copy_from_slice(&gid.to_le_bytes());
+    kmsg[16..24].copy_from_slice(&buf_off.to_le_bytes());
+    kmsg[24..32].copy_from_slice(&local.to_le_bytes());
+    kmsg[32..40].copy_from_slice(&bytes.to_le_bytes());
+    kmsg
 }
 
 // Reference: read.c read_map()
@@ -504,21 +579,58 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "unreliable: global buffer cache state contaminated by earlier tests"]
-    fn test_fs_breadwrite_ok_without_disk() {
-        // Without block I/O, breadwrite will get a zero-filled buffer.
+    fn test_fs_breadwrite_refuses_writes_to_a_read_only_filesystem() {
+        // A block write to a filesystem mounted read-only has nowhere to go.
+        // Nothing here touches the buffer cache, which is process-wide state
+        // the other tests in this binary also reconfigure.
+        init();
+        unsafe {
+            let mfs = glo::mfs_ptr();
+            (*mfs).req_nr = REQ_BWRITE - FS_BASE;
+            let sp = glo::get_super_ptr(0);
+            (*sp).s_dev = 5;
+            (*sp).s_rd_only = 1;
+
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&5u32.to_le_bytes()); // device
+            raw[24..32].copy_from_slice(&4096u64.to_le_bytes()); // nbytes
+
+            assert_eq!(fs_breadwrite(), EROFS);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the block cache to itself: the registered block I/O callback \
+                is process-wide and other tests in this binary replace it"]
+    fn test_fs_breadwrite_reports_the_bytes_it_moved() {
+        // The cache is set up with no block I/O callback, so the device blocks
+        // come back zero-filled: what this checks is the request/response
+        // accounting of the raw-device loop (a chunk per block boundary).
         init();
         unsafe {
             libs::libminixfs::cache::lmfs_buf_pool(10);
             libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
             let mfs = glo::mfs_ptr();
             (*mfs).req_nr = REQ_BREAD - FS_BASE;
-            (*mfs).m_in.m_payload.m1.m1i1 = 0; // dev
-            (*mfs).m_in.m_payload.m1.m1i2 = 0; // block
-            (*mfs).m_in.m_payload.m1.m1i3 = 4096; // count
+            let raw = &mut (*mfs).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&1u32.to_le_bytes()); // device
+            raw[8..16].copy_from_slice(&1024i64.to_le_bytes()); // seek_pos, mid-block
+            raw[16..20].copy_from_slice(&(-1i32).to_le_bytes()); // grant (no copy on host)
+            raw[24..32].copy_from_slice(&8192u64.to_le_bytes()); // nbytes, two blocks
+
+            assert_eq!(fs_breadwrite(), OK);
+            let out = (*mfs).m_out.m_payload.raw;
+            assert_eq!(
+                i64::from_le_bytes(out[0..8].try_into().unwrap()),
+                1024 + 8192,
+                "seek_pos after the transfer"
+            );
+            assert_eq!(
+                u32::from_le_bytes(out[8..12].try_into().unwrap()),
+                8192,
+                "bytes moved"
+            );
         }
-        let r = fs_breadwrite();
-        assert_eq!(r, OK);
     }
 
     #[test]

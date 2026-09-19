@@ -2968,13 +2968,55 @@ The I/O handler functions (`do_devio_handler`, `do_vdevio_handler`,
       markdirty/markclean/isclean, flushall, invalidate, set_blocksize, buf_pool init,
       blockschange accounting, rdwt_err tracking, vmcache support, cache_heuristic_check,
       cache_resize, rw_scattered
-    - `credentials.rs` — fetch_credentials stub (VFS protocol not yet wired)
+    - `credentials.rs` — `vfs_ucred_t` block and `fs_lookup_credentials()` (the
+      `PATH_GET_UCRED` grant copy), ported from `fetch_credentials.c`
     - `errors.rs` — FsError enum with Display impl, errno constants
     - `mod.rs` — Module declarations and re-exports
   - Block device read/write stub (todo! — needs block device driver layer Phase 11)
+  - `cache.rs`'s `lmfs_blockschange` is a no-op stub (no cache re-sizing; see 9.8)
   - Tests: 16 tests covering buffer pool init, hash function, LRU order, get/put
     roundtrip, markdirty/isclean, invalidate, NO_READ/PREFETCH modes, bufs_in_use
   - `cargo clippy -p libs --tests -- -D warnings` passes
+
+- [ ] **9.8 — ext2/MFS conformance gaps a C-by-C audit could not close (2026-09-19)**
+  A function-by-function diff of `crates/fs/src/ext2/` against
+  `.refs/minix-3.3.0/minix/fs/ext2/` (and the VFS mount/read paths) closed the
+  behavioural gaps found: `fs_breadwrite` plus VFS block-special routing, the
+  mount flags and on-disk state bookkeeping, the preallocation half of
+  `alloc_block_bit`, `clock_time()` via `SYS_TIMES`, and supplementary-group
+  permission checks. The remainder is listed here.
+
+  - **Blocked on a server-argv mechanism — ext2's service options.** The C parses
+    `env_argv` with `optset_table` in `sef_cb_init_fresh` (`main.c:27-36,134-143`):
+    `sb`, `orlov`/`oldalloc`, `mfsalloc`, `reserved`, `prealloc`/`noprealloc`.
+    The port has nowhere for those arguments to come from: RS never execs a
+    server (`do_up` only registers an endpoint a boot process already has, and
+    boot processes are loaded from the kernel boot image), and no server exposes
+    `env_argc`/`env_argv`. Closing it needs RS service-start with argv delivery
+    (fork/exec building an argv stack), an SEF `env_args` equivalent, and then
+    the table itself — `crates/fs/src/vbfs/config.rs::optset_parse` already parses
+    the `key[=value]` form and can be reused. Until then `prealloc` is off as in
+    the C's default, and the preallocation code is reachable only from tests.
+
+  - **`lmfs_blockschange` is a no-op** (`crates/libs/src/libminixfs/cache.rs`).
+    The C accumulates the allocated-block delta and re-evaluates the cache size
+    once it leaves a ±10 MB band (`libminixfs/cache.c:100-115`); nothing here
+    calls it, so the buffer cache never grows or shrinks with the filesystem.
+    The preallocation branch in `balloc.rs` consequently omits the C's
+    `lmfs_blockschange(sp->s_dev, -EXT2_PREALLOC_BLOCKS)` call.
+
+  - **Debug and error reporting.** `check_block_number` (balloc's SANITYCHECK of
+    a freshly allocated block number), `sanitycheck()` and `mfs_nul_f()` (silent
+    where the C prints), and `bdev_close()` on the unmount/error paths (the
+    port's block layer has no open/close pairing).
+
+  - **VFS read accounting (pre-existing, not ext2-specific).** `do_read` returns
+    the FS reply's status, so a successful read is reported as 0 bytes unless the
+    FS passes the byte count as its reply status — MFS does, while ext2's
+    `fs_readwrite` puts it in the payload, which is where the C's VFS reads
+    `*cum_iop`. The block-special path added in this round returns the byte count
+    (C semantics); the regular-file path should read the reply's `nbytes` the
+    same way.
 
 ---
 

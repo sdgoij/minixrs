@@ -19,12 +19,19 @@ use libs::libminixfs::types::Buf;
 pub unsafe fn fs_readsuper() -> i32 {
     let ext2 = glo::ext2_ptr();
 
-    // VFS req_readsuper writes the device at payload+0 (m1.m1i1), the driver
-    // label length at payload+8 (m1.m1i3) and the label grant at payload+24.
+    // VFS req_readsuper writes the device at payload+0 (m1.m1i1), the flags at
+    // payload+4, the driver label length at payload+8 (m1.m1i3) and the label
+    // grant at payload+24.
     let dev = (*ext2).m_in.m_payload.m1.m1i1 as u32;
     if dev == NO_DEV {
         return EINVAL;
     }
+
+    // Mount flags: a read-only mount never writes the filesystem, and the root
+    // mount is where `..` stops instead of leaving the filesystem.
+    let req_flags = payload_u32(&(*ext2).m_in.m_payload.raw, 4);
+    let readonly = (req_flags & REQ_RDONLY) != 0;
+    let isroot = (req_flags & REQ_ISROOT) != 0;
 
     // Resolve the block driver serving `dev` from the granted label so every
     // block request for this device is routed to that driver; when the named
@@ -60,13 +67,22 @@ pub unsafe fn fs_readsuper() -> i32 {
             return EINVAL;
         }
 
-        let sp_data = (*bp).data_ptr as *const SuperBlock;
+        let sp_data = (*bp).data_ptr;
         let new_sp = allocate_superblock();
         if new_sp.is_null() {
             lmfs_put_block(bp, FULL_DATA_BLOCK);
             return EINVAL;
         }
-        core::ptr::copy_nonoverlapping(sp_data, new_sp, 1);
+        // Only the on-disk half of `SuperBlock` is in the block: the struct
+        // continues with in-memory fields (`s_dev`, `s_block_size`, ...) that
+        // `read_super` fills in, and the buffer holds exactly one block. Copying
+        // the whole struct read past the block, and when the destination landed
+        // inside that overrun the two ranges overlapped - a
+        // `copy_nonoverlapping` precondition violation, not just a wasted copy
+        // (it is what failed the Linux host tests, where the two allocations sat
+        // closer together than on Windows). Byte pointers, so the buffer's own
+        // alignment never matters either.
+        core::ptr::copy_nonoverlapping(sp_data, new_sp as *mut u8, SUPER_SIZE_D);
         lmfs_put_block(bp, FULL_DATA_BLOCK);
 
         (*new_sp).s_dev = dev;
@@ -76,11 +92,23 @@ pub unsafe fn fs_readsuper() -> i32 {
         if r != OK {
             return r;
         }
+
+        // A filesystem that was not cleanly unmounted carries EXT2_ERROR_FS
+        // until an fsck clears it; mounting it read-write would continue from
+        // whatever state the crash left behind.
+        if !readonly && (*new_sp).s_state == EXT2_ERROR_FS {
+            return EINVAL;
+        }
+
         glo::SUPERBLOCK.store(new_sp, Ordering::Relaxed);
     } else if (*sp).s_dev != dev {
         // Already mounted, but on a different device.
         return EINVAL;
     }
+
+    // `sp` was read before the mount branch; the first mount installs the
+    // superblock it just filled in.
+    let sp = glo::SUPERBLOCK.load(Ordering::Relaxed);
 
     (*ext2).fs_dev = dev;
 
@@ -92,6 +120,21 @@ pub unsafe fn fs_readsuper() -> i32 {
     if (*root_ip).i_mode == 0 || ((*root_ip).i_mode & I_TYPE) != I_DIRECTORY {
         put_inode(root_ip);
         return EINVAL;
+    }
+
+    // The flags apply to every successful mount, including a re-mount of an
+    // already-read superblock.
+    (*sp).s_rd_only = readonly as i32;
+    (*sp).s_is_root = isroot as u8;
+
+    if !readonly {
+        // While this mount is up the on-disk state says the filesystem is in
+        // use: an unclean one makes the next mount refuse (or, for a reader,
+        // is visible to fsck).
+        (*sp).s_state = EXT2_ERROR_FS;
+        (*sp).s_mnt_count = (*sp).s_mnt_count.wrapping_add(1);
+        (*sp).s_mtime = clock_time() as u32;
+        write_super(&mut *sp);
     }
 
     // Reply fields VFS req_readsuper reads back:
@@ -180,10 +223,14 @@ pub unsafe fn fs_unmount() -> i32 {
     OK
 }
 
-/// fs_mountpoint — check mount point.
+/// fs_mountpoint — check and set a mount point.
+///
+/// Message layout (VFS `req_mountpoint`): inode (u32) at payload[0].
+///
 pub unsafe fn fs_mountpoint() -> i32 {
     let ext2 = glo::ext2_ptr();
-    let inode_num = (*ext2).fs_m_in_type as u32; // FIXME: proper message parsing
+    let raw = (*ext2).m_in.m_payload.raw;
+    let inode_num = payload_u32(&raw, 0);
 
     let rip = get_inode((*ext2).fs_dev, inode_num);
     if rip.is_null() {
@@ -229,4 +276,3 @@ unsafe fn fs_sync_impl() {
         write_super(&mut *sp);
     }
 }
-

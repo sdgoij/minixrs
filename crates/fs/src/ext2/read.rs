@@ -184,6 +184,97 @@ pub unsafe fn fs_readwrite() -> i32 {
     OK
 }
 
+/// fs_breadwrite — raw block I/O on a device, without an inode.
+///
+/// VFS routes a block special file's reads and writes here (through the FS
+/// that serves the device), because the bytes are addressed on the device, not
+/// in a file. Message layout (VFS `req_breadwrite`): device (u32) at payload[0],
+/// seek_pos (i64) at payload[8], grant (i32) at payload[16], nbytes (u64) at
+/// payload[24]. Reply: seek_pos (i64) at payload[0], nbytes (u64) at payload[8].
+///
+/// Reference: read.c fs_breadwrite()
+pub unsafe fn fs_breadwrite() -> i32 {
+    let ext2 = glo::ext2_ptr();
+    let payload = (*ext2).m_in.m_payload.raw;
+
+    let rw_flag = if (*ext2).m_in.m_type == REQ_BREAD {
+        READING
+    } else {
+        WRITING
+    };
+    let dev = payload_u32(&payload, 0);
+    let gid = payload_i32(&payload, 16);
+    let mut nrbytes = payload_u64(&payload, 24) as usize;
+    let mut position = payload_i64(&payload, 8) as u64;
+
+    // The C takes the block size from the cache (`get_block_size()` there is
+    // `lmfs_fs_block_size()`), which is also the unit the cache addresses blocks
+    // in — and covers a device this server has not mounted, since VFS routes raw
+    // I/O to the FS responsible for the device.
+    let block_size = libs::libminixfs::cache::lmfs_fs_block_size() as u64;
+    if block_size == 0 {
+        return EINVAL;
+    }
+
+    // A pseudo inode for rw_chunk: the device lives in i_block[0], exactly the
+    // way a block special inode stores it, and there is no inode behind it.
+    let mut block = [0u32; EXT2_N_BLOCKS];
+    block[0] = dev;
+    let mut rip = Inode {
+        i_block: block,
+        i_mode: I_BLOCK_SPECIAL,
+        i_dev: NO_DEV,
+        i_num: VMC_NO_INODE as u32,
+        i_size: 0,
+        ..Inode::default()
+    };
+
+    (*ext2).rdwt_err = OK;
+
+    let mut r = OK;
+    let mut cum_io: u32 = 0;
+
+    while nrbytes > 0 {
+        let off = (position % block_size) as u32;
+        let chunk = (nrbytes as u64).min(block_size - off as u64) as u32;
+
+        r = rw_chunk(
+            &mut rip,
+            position,
+            off,
+            chunk,
+            nrbytes as u32,
+            rw_flag,
+            gid,
+            cum_io,
+            block_size as u32,
+        );
+        if r != OK {
+            break;
+        }
+        if (*ext2).rdwt_err < 0 {
+            break;
+        }
+
+        nrbytes -= chunk as usize;
+        cum_io += chunk;
+        position += chunk as u64;
+    }
+
+    let raw = &mut (*ext2).m_out.m_payload.raw;
+    raw[0..8].copy_from_slice(&(position as i64).to_le_bytes());
+    raw[8..16].copy_from_slice(&(cum_io as u64).to_le_bytes());
+
+    if (*ext2).rdwt_err != OK {
+        r = (*ext2).rdwt_err;
+    }
+    if (*ext2).rdwt_err == END_OF_FILE {
+        r = OK;
+    }
+
+    r
+}
+
 /// Read/Write one chunk (partial block).
 pub unsafe fn rw_chunk(
     rip: *mut Inode,
@@ -242,13 +333,17 @@ pub unsafe fn rw_chunk(
         bp = rahead(rip, b, position, block_size);
     } else {
         // WRITING
-        let n = if chunk == block_size { NO_READ } else { NORMAL };
+        let mut n = if chunk == block_size { NO_READ } else { NORMAL };
         if !block_spec && off == 0 && position >= (*rip).i_size as u64 {
-            // Full block write beyond EOF — no need to read
-            bp = lmfs_get_block_ino(dev, b as u64, NO_READ, (*rip).i_num as u64, ino_off);
-        } else {
-            bp = lmfs_get_block_ino(dev, b as u64, n, (*rip).i_num as u64, ino_off);
+            n = NO_READ;
         }
+        bp = if block_spec {
+            // A device block is numbered on the device itself and belongs to no
+            // inode (C: get_block(dev, b, n)).
+            lmfs_get_block_ino(dev, b as u64, n, VMC_NO_INODE, 0)
+        } else {
+            lmfs_get_block_ino(dev, b as u64, n, (*rip).i_num as u64, ino_off)
+        };
     }
 
     if bp.is_null() {
@@ -256,6 +351,13 @@ pub unsafe fn rw_chunk(
     }
 
     if rw_flag == WRITING {
+        // The buffer was acquired without reading the block when the caller
+        // covers a whole block, or writes past the end of the file: clear the
+        // bytes it is not about to overwrite, so the rest of the block does not
+        // expose whatever the buffer held before (C zero_block()).
+        if chunk != block_size && !block_spec && off == 0 && position >= (*rip).i_size as u64 {
+            core::ptr::write_bytes((*bp).data_ptr, 0, block_size as usize);
+        }
         lmfs_markdirty(bp);
     }
 
@@ -431,35 +533,40 @@ pub unsafe fn read_ahead() {
 }
 
 /// rahead — read block with optional read-ahead.
+///
+/// A block special file is addressed directly on its device and carries no
+/// superblock, so its block size comes from the device and no inode-based
+/// block map is consulted (C rahead's `block_spec` branch; the raw-device
+/// prefetch it does there is left out, so a device read fetches one block).
 pub unsafe fn rahead(
     rip: *mut Inode,
     baseblock: u32,
     position: u64,
     _bytes_ahead: u32,
 ) -> *mut libs::libminixfs::types::Buf {
-    let block_size = (*(*rip).i_sp.as_ref().unwrap()).s_block_size as u64;
-    let mut b = baseblock;
+    let block_spec = ((*rip).i_mode & I_TYPE) == I_BLOCK_SPECIAL;
+    let dev = if block_spec {
+        (*rip).i_block[0]
+    } else {
+        (*rip).i_dev
+    };
+    let block_size = get_block_size(dev) as u64;
 
-    // Read the current block
     let ino_off = position & !(block_size - 1);
-    let bp = lmfs_get_block_ino((*rip).i_dev, b as u64, NORMAL, (*rip).i_num as u64, ino_off);
+    let bp = if block_spec {
+        lmfs_get_block_ino(dev, baseblock as u64, NORMAL, VMC_NO_INODE, 0)
+    } else {
+        lmfs_get_block_ino(dev, baseblock as u64, NORMAL, (*rip).i_num as u64, ino_off)
+    };
 
-    if !bp.is_null() {
+    if !bp.is_null() && !block_spec {
         // Try to read ahead by one block
-        b = read_map(rip, position + block_size, 1); // opportunistic
+        let b = read_map(rip, position + block_size, 1); // opportunistic
         if b != NO_BLOCK {
             let ahead_off = (position + block_size) & !(block_size - 1);
-            let ahead_bp = lmfs_get_block_ino(
-                (*rip).i_dev,
-                b as u64,
-                PREFETCH,
-                (*rip).i_num as u64,
-                ahead_off,
-            );
-            if !ahead_bp.is_null() && (*ahead_bp).lmfs_dev != libs::libminixfs::constants::NO_DEV {
-                // Got the read-ahead block — release immediately
-                lmfs_put_block(ahead_bp, PARTIAL_DATA_BLOCK);
-            } else if !ahead_bp.is_null() {
+            let ahead_bp =
+                lmfs_get_block_ino(dev, b as u64, PREFETCH, (*rip).i_num as u64, ahead_off);
+            if !ahead_bp.is_null() {
                 lmfs_put_block(ahead_bp, PARTIAL_DATA_BLOCK);
             }
         }

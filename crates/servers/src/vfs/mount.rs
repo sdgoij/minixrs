@@ -486,8 +486,9 @@ pub unsafe fn mount_devman(root_vp: *mut Vnode) -> i32 {
             arch_common::com::MFS_PROC_NR,
             root_ino,
             root_ino,
-            0, /* uid */
-            0, /* gid */
+            0,    /* uid */
+            0,    /* gid */
+            None, /* superuser: no supplemental groups */
             &resolve,
         )
     };

@@ -147,6 +147,8 @@ fn alloc_inode_bit(sp: &mut SuperBlock, parent: *mut Inode, is_dir: bool) -> u32
             sp.s_dirs_counter += 1;
         }
 
+        glo::mark_group_descriptors_dirty();
+
         return inumber;
     }
 }
@@ -195,13 +197,14 @@ fn free_inode_bit(sp: &mut SuperBlock, bit_returned: u32, is_dir: bool) {
             (*gd).used_dirs_count -= 1;
             sp.s_dirs_counter -= 1;
         }
+
+        glo::mark_group_descriptors_dirty();
     }
 
     if group < sp.s_igsearch as u32 {
         sp.s_igsearch = group as i32;
     }
 }
-
 
 fn find_group_any(sp: &SuperBlock) -> i32 {
     let ngroups = sp.s_groups_count;

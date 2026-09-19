@@ -10,6 +10,7 @@ use crate::vfs::glo::vfs_global;
 use crate::vfs::mount::*;
 use crate::vfs::request::req_lookup;
 use crate::vfs::types::*;
+use libs::libminixfs::credentials::VfsUCred;
 
 use core::ptr::{addr_of_mut, null_mut};
 
@@ -30,6 +31,29 @@ pub struct PathRes {
     pub vp: *mut Vnode,
     pub vmp: *mut Vmnt,
     pub error: i32,
+}
+
+/// The credential block VFS attaches to a lookup when the caller belongs to
+/// supplemental groups. `None` means the uid/gid in the request are enough
+/// (C `req_lookup()`).
+pub fn lookup_credentials(rfp: &Fproc) -> Option<VfsUCred> {
+    if rfp.fp_ngroups <= 0 {
+        return None;
+    }
+
+    let mut cred = VfsUCred::zeroed();
+    cred.vu_uid = rfp.fp_effuid;
+    cred.vu_gid = rfp.fp_effgid;
+    cred.vu_ngroups = rfp.fp_ngroups.min(NGROUPS_MAX as i32);
+    for (i, grp) in rfp
+        .fp_sgroups
+        .iter()
+        .take(cred.vu_sgroups.len())
+        .enumerate()
+    {
+        cred.vu_sgroups[i] = *grp;
+    }
+    Some(cred)
 }
 
 /// Look up a single path component in a directory.
@@ -54,12 +78,14 @@ unsafe fn lookup(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> (i32, Looku
         (*glob).root_dev
     };
 
+    let cred = lookup_credentials(rfp);
     req_lookup(
         fs_e,
         dir_inode,
         root_ino,
         rfp.fp_effuid,
         rfp.fp_effgid,
+        cred.as_ref(),
         resolve,
     )
 }
@@ -385,6 +411,27 @@ mod tests {
         vp.v_fs_e = fs_e;
         vp.v_inode_nr = inode;
         vp
+    }
+
+    #[test]
+    fn lookup_credentials_only_for_group_members() {
+        // C `req_lookup()`: the credential block is only in play when the
+        // caller is in supplemental groups.
+        let mut fp = Fproc::default();
+        assert!(lookup_credentials(&fp).is_none(), "no groups, no block");
+
+        fp.fp_effuid = 1000;
+        fp.fp_effgid = 100;
+        fp.fp_ngroups = 2;
+        fp.fp_sgroups[0] = 100;
+        fp.fp_sgroups[1] = 200;
+
+        let cred = lookup_credentials(&fp).expect("a group member gets a block");
+        assert_eq!(cred.vu_uid, 1000);
+        assert_eq!(cred.vu_gid, 100);
+        assert_eq!(cred.vu_ngroups, 2);
+        assert!(cred.in_group(200));
+        assert!(!cred.in_group(300));
     }
 
     #[test]

@@ -10,10 +10,13 @@
 #[cfg(not(target_os = "minix"))]
 use crate::vfs::consts::ENOSYS;
 #[cfg(target_os = "minix")]
-use crate::vfs::consts::PATH_MAX;
+use crate::vfs::consts::{ENOMEM, PATH_MAX};
 #[cfg(target_os = "minix")]
-use crate::vfs::grant::{cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
+use crate::vfs::grant::{cpf_grant_direct, cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
 use crate::vfs::types::{Lookup, LookupRes, NodeDetails, off_t};
+#[cfg(target_os = "minix")]
+use arch_common::safecopies::GRANT_INVALID;
+use libs::libminixfs::credentials::VfsUCred;
 
 // FS_BASE and REQ_* constants (from minix/include/minix/vfsif.h)
 
@@ -625,35 +628,64 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
 
 /// Path lookup — resolve a path relative to `dir_ino`.
 ///
+/// `cred` carries the caller's credential block when it belongs to
+/// supplemental groups; VFS then sets `PATH_GET_UCRED` and grants the block
+/// to the FS, as the C's `req_lookup()` does.
+///
 /// Returns `(status, lookup_result)`.
 ///
 /// # Safety
 ///
-/// `resolve` must point to a valid `lookup` structure.  Caller must ensure
-/// `fs_e` is a valid FS endpoint.
+/// `resolve` must point to a valid `lookup` structure, and `cred`, when
+/// present, must outlive the call. Caller must ensure `fs_e` is a valid FS
+/// endpoint.
 pub unsafe fn req_lookup(
     fs_e: i32,
     dir_ino: u32,
     root_ino: u32,
-    _uid: u16,
-    _gid: u16,
+    uid: u16,
+    gid: u16,
+    cred: Option<&VfsUCred>,
     resolve: &Lookup,
 ) -> (i32, LookupRes) {
     #[cfg(target_os = "minix")]
     {
-        let flags: u32 = resolve.l_flags;
+        let flags: u32 = resolve.l_flags | if cred.is_some() { PATH_GET_UCRED } else { 0 };
+
+        let mut grant_ucred = GRANT_INVALID;
+        if let Some(credentials) = cred {
+            grant_ucred = cpf_grant_direct(
+                arch_common::com::VFS_PROC_NR,
+                fs_e,
+                credentials as *const VfsUCred as u64,
+                libs::libminixfs::VFS_UCRED_SIZE,
+                false,
+            );
+            if grant_ucred < 0 {
+                return (ENOMEM, LookupRes::default());
+            }
+        }
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
-        // VFS → FS message format (u64 for inodes, path embedded at +24):
-        //   msg[8..16]  = dir_ino   (u64)
-        //   msg[16..24] = root_ino  (u64)
-        //   msg[24..28] = flags     (u32)
-        //   msg[28..32] = path_len  (u32)
-        //   msg[32..]   = path data (up to 24 bytes)
-        w_u64(&mut msg, PAYLOAD_OFF, dir_ino as u64);
-        w_u64(&mut msg, PAYLOAD_OFF + 8, root_ino as u64);
-        w_u32(&mut msg, PAYLOAD_OFF + 16, flags);
+        // VFS → FS REQ_LOOKUP payload, in the order the FS request parsers
+        // expect (inodes are u32, as in the C's `ino_t`: the path is embedded
+        // rather than granted, so the header has no room for 64-bit inodes
+        // plus the credential grant):
+        //   raw[0..4]   = dir_ino     (u32)
+        //   raw[4..8]   = root_ino    (u32)
+        //   raw[8..10]  = uid         (u16)
+        //   raw[10..12] = gid         (u16)
+        //   raw[12..16] = flags       (u32)
+        //   raw[16..20] = grant_ucred (i32, valid with PATH_GET_UCRED)
+        //   raw[20..24] = path_len    (u32)
+        //   raw[24..]   = path data (up to 24 bytes)
+        w_u32(&mut msg, PAYLOAD_OFF, dir_ino);
+        w_u32(&mut msg, PAYLOAD_OFF + 4, root_ino);
+        w_u16(&mut msg, PAYLOAD_OFF + 8, uid);
+        w_u16(&mut msg, PAYLOAD_OFF + 10, gid);
+        w_u32(&mut msg, PAYLOAD_OFF + 12, flags);
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_ucred);
 
         #[cfg(target_os = "minix")]
         let path_len = resolve.l_path_len.min(PATH_MAX - 1);
@@ -674,6 +706,9 @@ pub unsafe fn req_lookup(
         }
 
         let r = fs_sendrec(fs_e, &mut msg);
+        if grant_ucred >= 0 {
+            cpf_revoke(grant_ucred);
+        }
 
         let mut res = LookupRes {
             fs_e: r_i32(&msg, 0),
@@ -696,7 +731,7 @@ pub unsafe fn req_lookup(
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, dir_ino, root_ino, _uid, _gid, resolve);
+        let _ = (fs_e, dir_ino, root_ino, uid, gid, cred, resolve);
         (ENOSYS, LookupRes::default())
     }
 }
@@ -1726,7 +1761,7 @@ mod tests {
 
         let (s, _res) = unsafe {
             let lookup = Lookup::default();
-            req_lookup(0, 0, 0, 0, 0, &lookup)
+            req_lookup(0, 0, 0, 0, 0, None, &lookup)
         };
         assert_eq!(s, ENOSYS);
     }

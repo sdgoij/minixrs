@@ -29,8 +29,8 @@ pub static FS_CALL_VEC: [unsafe fn() -> i32; NREQS] = [
     fs_stat,       //  8 (FS_BASE + 8)
     fs_utime,      //  9 (FS_BASE + 9)
     fs_statvfs,    // 10 (FS_BASE + 10)
-    no_sys,        // 11 (FS_BASE + 11) fs_breadwrite
-    no_sys,        // 12 (FS_BASE + 12) fs_breadwrite
+    fs_breadwrite, // 11 (FS_BASE + 11)
+    fs_breadwrite, // 12 (FS_BASE + 12)
     fs_unlink,     // 13 (FS_BASE + 13)
     fs_unlink,     // 14 (FS_BASE + 14)
     fs_unmount,    // 15 (FS_BASE + 15)
@@ -74,6 +74,16 @@ mod tests {
     #[test]
     fn test_dispatch_oob() {
         assert_eq!(dispatch(NREQS), EINVAL);
+    }
+
+    #[test]
+    fn test_readwrite_slots_serve_the_device_blocks() {
+        // VFS sends raw device blocks (REQ_BREAD/REQ_BWRITE) to the FS that
+        // serves the device; leaving these as `no_sys` makes every block-special
+        // read fail with EINVAL.
+        let handler: unsafe fn() -> i32 = fs_breadwrite;
+        assert!(core::ptr::fn_addr_eq(FS_CALL_VEC[11], handler));
+        assert!(core::ptr::fn_addr_eq(FS_CALL_VEC[12], handler));
     }
 
     #[test]

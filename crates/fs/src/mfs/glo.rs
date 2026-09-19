@@ -10,6 +10,7 @@ use crate::mfs::types::*;
 use arch_common::ipc::Message;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
+use libs::libminixfs::credentials::VfsUCred;
 
 /// Global MFS state.
 #[repr(C)]
@@ -18,6 +19,9 @@ pub struct MfsGlobal {
     pub cch: [i32; NR_INODES],
     pub caller_uid: u16,
     pub caller_gid: u16,
+    /// Credential block copied out of the grant VFS attaches to a lookup that
+    /// has `PATH_GET_UCRED` set (C `credentials` in `glo.h`).
+    pub credentials: VfsUCred,
     pub req_nr: i32,
     pub user_path: [u8; PATH_MAX],
     pub fs_dev: u32,
@@ -33,6 +37,7 @@ pub struct MfsGlobal {
     pub lookup_dir_ino: u32,
     pub lookup_root_ino: u32,
     pub lookup_flags: i32,
+    pub lookup_grant_ucred: i32,
     pub lookup_path_len: usize,
     pub lookup_path_size: usize,
 
@@ -109,6 +114,7 @@ pub unsafe fn mfs_init_globals() {
         cch: [0; NR_INODES],
         caller_uid: INVAL_UID,
         caller_gid: INVAL_GID,
+        credentials: VfsUCred::zeroed(),
         req_nr: 0,
         user_path: [0; PATH_MAX],
         fs_dev: NO_DEV,
@@ -122,6 +128,7 @@ pub unsafe fn mfs_init_globals() {
         lookup_dir_ino: 0,
         lookup_root_ino: 0,
         lookup_flags: 0,
+        lookup_grant_ucred: -1,
         lookup_path_len: 0,
         lookup_path_size: 0,
         lookup_res_inode: 0,
@@ -176,8 +183,8 @@ mod tests {
     fn mfs_global_layout_offsets() {
         // Byte offsets of protocol fields inside MfsGlobal (used by the
         // QEMU-monitor debug probe; keep in sync with the struct).
-        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77568);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77560);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77552);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77640);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77632);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77624);
     }
 }

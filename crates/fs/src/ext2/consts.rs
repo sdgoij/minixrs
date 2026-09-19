@@ -199,6 +199,9 @@ pub const FS_BASE: i32 = 0xA00;
 pub const REQ_READ: i32 = FS_BASE + 19;
 pub const REQ_WRITE: i32 = FS_BASE + 20;
 pub const REQ_PEEK: i32 = FS_BASE + 32;
+/// Raw device blocks, addressed on the device instead of in a file.
+pub const REQ_BREAD: i32 = FS_BASE + 11;
+pub const REQ_BWRITE: i32 = FS_BASE + 12;
 pub const REQ_UNLINK: i32 = FS_BASE + 13;
 pub const REQ_RMDIR: i32 = FS_BASE + 14;
 
@@ -224,6 +227,18 @@ pub const DOT2: [u8; 3] = [b'.', b'.', 0];
 /// Return a symlink object rather than following it (VFS `vfs/path.rs`).
 pub const PATH_RET_SYMLINK: i32 = 4;
 
+/// Mount the filesystem read-only (VFS `vfs/request.rs` REQ_RDONLY, set for
+/// `mount -r` and for the root when VFS boots read-only).
+pub const REQ_RDONLY: u32 = 0o01;
+
+/// This mount is the process root filesystem (VFS `vfs/request.rs`
+/// REQ_ISROOT): `..` at its root must not leave the filesystem.
+pub const REQ_ISROOT: u32 = 0o02;
+
+/// Carry the caller's credentials in a grant instead of sending uid/gid in the
+/// request (VFS `vfs/request.rs`; same value as MFS's `consts.rs`).
+pub const PATH_GET_UCRED: i32 = 0o20;
+
 /// Maximum symlink indirections before ELOOP (`<limits.h>`
 /// `_POSIX_SYMLOOP_MAX`).
 pub const _POSIX_SYMLOOP_MAX: i32 = 8;
@@ -242,5 +257,14 @@ mod tests {
         assert_eq!(REQ_RMDIR - FS_BASE, 14);
         assert_eq!(REQ_READ - FS_BASE, 19);
         assert_eq!(REQ_WRITE - FS_BASE, 20);
+    }
+
+    /// The mount flags are VFS's, not this server's, and a divergent value
+    /// quietly makes `fs_readsuper` treat a writable mount as read-only (or
+    /// the other way round).
+    #[test]
+    fn mount_flags_match_vfs() {
+        assert_eq!(REQ_RDONLY, 0o01); // vfs/request.rs
+        assert_eq!(REQ_ISROOT, 0o02); // vfs/request.rs
     }
 }

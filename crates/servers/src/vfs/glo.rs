@@ -356,7 +356,14 @@ mod tests {
         // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
         // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
         // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 328768);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 328784);
+        // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
+        // probe anchors; keep in sync with the struct). Filp gained
+        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
+        // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
+        // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more). Fproc's
+        // fp_sgroups shrank to the port's NGROUPS_MAX of 32 (64 bytes × 256
+        // fprocs = 16384 the other way).
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 312384);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 312400);
     }
 }

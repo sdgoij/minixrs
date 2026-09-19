@@ -15,10 +15,64 @@ pub unsafe fn b_ind(bp: *mut Buf) -> *mut u32 {
     (*bp).data_ptr as *mut u32
 }
 
+/// SYS_TIMES, the kernel call that reports the clock (KERNEL_CALL + 25).
+#[cfg(target_os = "minix")]
+const SYS_TIMES: i32 = 25;
+
+/// Offsets of the fields `clock_time` needs in the SYS_TIMES reply
+/// (`crates/kernel/src/system.rs` `do_times_handler`).
+#[cfg(target_os = "minix")]
+const TIMES_REPLY_REAL_OFF: usize = 0;
+#[cfg(target_os = "minix")]
+const TIMES_REPLY_BOOTTIME_OFF: usize = 16;
+#[cfg(target_os = "minix")]
+const TIMES_REPLY_HZ_OFF: usize = 40;
+
+/// Seconds since the epoch from the kernel's clock state: the wall clock is
+/// `realtime` ticks past `boot_time`, at `hz` ticks per second.
+///
+/// Reference: utility.c clock_time()
+pub fn clock_time_from(real_ticks: u64, boot_time: i64, hz: u64) -> i64 {
+    boot_time + (real_ticks / hz) as i64
+}
+
 /// Return current time in seconds since epoch.
+///
+/// Reference: utility.c clock_time()
 pub fn clock_time() -> i64 {
-    // TODO: Wire up to system clock when kernel interface is available.
-    0
+    #[cfg(target_os = "minix")]
+    {
+        // The kernel call needs no request fields: it reports the caller's own
+        // times, which is the C's `getuptime(&uptime, &realtime, &boottime)`.
+        let mut kmsg = [0u8; 64];
+        let r = minix_rt::kernel_call(SYS_TIMES, &mut kmsg);
+        if r != OK {
+            panic!("clock_time: getuptime failed: {r}");
+        }
+
+        let real_ticks = u64::from_ne_bytes(
+            kmsg[TIMES_REPLY_REAL_OFF..TIMES_REPLY_REAL_OFF + 8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        );
+        let boot_time = i64::from_ne_bytes(
+            kmsg[TIMES_REPLY_BOOTTIME_OFF..TIMES_REPLY_BOOTTIME_OFF + 8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        );
+        let hz = u64::from_ne_bytes(
+            kmsg[TIMES_REPLY_HZ_OFF..TIMES_REPLY_HZ_OFF + 8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        );
+        clock_time_from(real_ticks, boot_time, hz)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        // No kernel and no clock on the host, and nothing in the host tests
+        // observes a real timestamp.
+        0
+    }
 }
 
 /// Possibly swap a 16-bit word between little-endian and big-endian.
@@ -278,6 +332,21 @@ mod tests {
         let raw = [0u8; 2];
         assert_eq!(payload_u32(&raw, 0), 0);
         assert_eq!(payload_i64(&raw, 4), 0);
+    }
+
+    #[test]
+    fn test_clock_time_from_adds_realtime_to_boot_time() {
+        // 1.5 s of wall-clock ticks past a boot time, at 60 Hz.
+        assert_eq!(clock_time_from(90, 1_700_000_000, 60), 1_700_000_001);
+        assert_eq!(clock_time_from(59, 1_700_000_000, 60), 1_700_000_000);
+        assert_eq!(clock_time_from(0, 0, 60), 0);
+    }
+
+    #[test]
+    fn test_clock_time_host_has_no_clock() {
+        // No kernel to read the clock from on the host.
+        #[cfg(not(target_os = "minix"))]
+        assert_eq!(clock_time(), 0);
     }
 
     #[test]

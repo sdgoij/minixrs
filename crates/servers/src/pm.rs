@@ -5455,6 +5455,15 @@ mod tests {
     }
 
     #[test]
+    fn test_ngroups_max_matches_vfs_credential_block() {
+        // VFS sizes the credential block it hands an FS (and its own fproc
+        // group array) with this value. If PM were the wider of the two, a
+        // lookup for a caller with many groups would ship a block whose group
+        // list is truncated.
+        assert_eq!(NGROUPS_MAX, crate::vfs::consts::NGROUPS_MAX);
+    }
+
+    #[test]
     fn test_do_newexec_keeps_real_uid_on_setuid() {
         init_proc();
         let slot = alloc_proc().unwrap();

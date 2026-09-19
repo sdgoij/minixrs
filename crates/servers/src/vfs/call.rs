@@ -251,6 +251,15 @@ pub fn do_open() -> i32 {
         dev = r as u32;
     }
 
+    // Block special files: raw I/O for the device is handled by the FS that
+    // serves it. A mounted device gives its own FS, anything else falls to the
+    // root FS (C open.c S_IFBLK, minus the driver bookkeeping the port's FSes do
+    // themselves at readsuper).
+    if unsafe { (*vp).v_mode & S_IFMT } == S_IFBLK {
+        let bfs_e = block_fs_endpoint(unsafe { (*vp).v_dev });
+        unsafe { (*vp).v_bfs_e = bfs_e };
+    }
+
     // Allocate a filp entry.
     let filp_idx = unsafe { filedes::alloc_filp() };
     if filp_idx < 0 {
@@ -485,6 +494,65 @@ pub fn do_lseek() -> i32 {
     }
 }
 
+/// The FS responsible for raw I/O on the block device `dev` (C open.c
+/// S_IFBLK): the FS that has it mounted, or the root FS when none does
+/// (`VMNT_FORCEROOTBSF` keeps a mount from claiming the device).
+fn block_fs_endpoint_in(vmnts: &[Vmnt], root_fs_e: i32, dev: u32) -> i32 {
+    let mut bfs_e = root_fs_e;
+    for vmp in vmnts {
+        if vmp.m_dev == dev && (vmp.m_flags & VMNT_FORCEROOTBSF) == 0 {
+            bfs_e = vmp.m_fs_e;
+        }
+    }
+    bfs_e
+}
+
+/// `block_fs_endpoint_in` over the mounted filesystems.
+fn block_fs_endpoint(dev: u32) -> i32 {
+    let glob = unsafe { &*vfs_global() };
+    block_fs_endpoint_in(&glob.vmnt, glob.root_fs_e, dev)
+}
+
+/// Raw block I/O on a block special file (C `read_write`'s S_ISBLK branch).
+///
+/// The bytes are addressed on the device, so the request goes to the FS that
+/// serves it (`v_bfs_e`); `req_breadwrite`'s reply carries the new position and
+/// how much was transferred.
+fn block_io(
+    rw_flag: i32,
+    vp: *mut Vnode,
+    filp: &mut Filp,
+    fp: &Fproc,
+    buf_addr: u64,
+    count: usize,
+) -> i32 {
+    let dev = unsafe { (*vp).v_dev };
+    let bfs_e = unsafe { (*vp).v_bfs_e };
+    if dev == NO_DEV || bfs_e < 0 {
+        // The C panics on a device node without a device; a server that never
+        // resolved one is ENXIO here.
+        return ENXIO;
+    }
+
+    let (r, new_pos, moved) = unsafe {
+        crate::vfs::request::req_breadwrite(
+            bfs_e,
+            fp.fp_endpoint,
+            dev,
+            filp.filp_pos,
+            count as u32,
+            buf_addr as *const u8,
+            rw_flag,
+        )
+    };
+    if r != OK {
+        return r;
+    }
+
+    filp.filp_pos = new_pos;
+    moved as i32
+}
+
 /// Perform the `read(fd, buf, count)` system call.
 ///
 /// C source: `minix/servers/vfs/read.c` â€” `do_read()` (line 31)
@@ -538,6 +606,12 @@ pub fn do_read() -> i32 {
                 count as u64,
                 filp.filp_dgram as i32,
             );
+        }
+        // Block special files: the bytes are addressed on the device, not in a
+        // file, so the request goes to the FS that serves it (C read_write
+        // S_ISBLK: req_breadwrite on v_bfs_e with the device v_sdev).
+        if ((*vp).v_mode & S_IFMT) == S_IFBLK {
+            return block_io(crate::vfs::pipe::READING, vp, filp, fp, buf_addr, count);
         }
         // Call the FS request layer to perform the read.
         let (r, new_pos) = crate::vfs::request::req_read(
@@ -609,6 +683,10 @@ pub fn do_write() -> i32 {
                 count as u64,
                 filp.filp_dgram as i32,
             );
+        }
+        // Block special files (C read_write S_ISBLK).
+        if ((*vp).v_mode & S_IFMT) == S_IFBLK {
+            return block_io(crate::vfs::pipe::WRITING, vp, filp, fp, buf_addr, count);
         }
         let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,
@@ -3051,6 +3129,68 @@ mod tests {
             fs_m_in[LSEEK_WHENCE_OFF..LSEEK_WHENCE_OFF + 4].copy_from_slice(&0i32.to_le_bytes()); // SEEK_SET
         }
         assert_eq!(do_lseek(), 42);
+    }
+
+    #[test]
+    fn test_block_fs_endpoint_prefers_the_mounting_fs() {
+        // The vmnt table is process-wide state other tests read; the selection
+        // is exercised over a table of its own instead.
+        let mnt = Vmnt {
+            m_dev: 0x300,
+            m_fs_e: 7,
+            m_flags: 0,
+            ..Vmnt::default()
+        };
+        let vmnts = [mnt];
+
+        assert_eq!(
+            block_fs_endpoint_in(&vmnts, 3, 0x300),
+            7,
+            "the FS that has the device mounted handles it"
+        );
+        assert_eq!(
+            block_fs_endpoint_in(&vmnts, 3, 0x301),
+            3,
+            "an unmounted device falls to the root FS"
+        );
+
+        let forced = Vmnt {
+            m_flags: VMNT_FORCEROOTBSF,
+            ..mnt
+        };
+        assert_eq!(
+            block_fs_endpoint_in(&[forced], 3, 0x300),
+            3,
+            "VMNT_FORCEROOTBSF keeps the device with the root FS"
+        );
+    }
+
+    #[test]
+    fn test_block_io_refuses_a_device_with_no_device() {
+        // A block special vnode whose device, or whose FS, was never resolved
+        // must not turn into a request to a bogus endpoint.
+        unsafe {
+            setup();
+            let mut vp = Vnode {
+                v_mode: S_IFBLK,
+                v_dev: NO_DEV,
+                v_bfs_e: 5,
+                ..Vnode::default()
+            };
+            let mut filp = Filp::default();
+            let fp = Fproc::default();
+            assert_eq!(
+                block_io(crate::vfs::pipe::READING, &mut vp, &mut filp, &fp, 0, 16),
+                ENXIO
+            );
+
+            vp.v_dev = 0x300;
+            vp.v_bfs_e = -1;
+            assert_eq!(
+                block_io(crate::vfs::pipe::WRITING, &mut vp, &mut filp, &fp, 0, 16),
+                ENXIO
+            );
+        }
     }
 
     #[test]

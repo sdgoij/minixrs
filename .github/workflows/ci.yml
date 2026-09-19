@@ -16,11 +16,19 @@
 # The arch suites consume the stage1 that `toolchain-release.yml` publishes for
 # the commit the `rust` submodule pins: `just fetch-stage1` downloads it, which is
 # what makes these jobs affordable - a from-source LLVM build per job is not.
-# That couples the two: bumping the pin has to be followed by a `toolchain
-# release` run, or the arch jobs stop at `fetch-stage1` until one is published.
-# The image jobs depend on it for the same reason. Both suites also run locally
-# (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they gate on
-# the guest's serial log via `just _assert-qemu-log`.
+#
+# The `rust-pin` job below closes that loop, so bumping the pin is a one-commit
+# change again: it reads the gitlink out of the push and asks whether
+# `stage1-<pin>` exists, and when the pin moved or no release is there, the
+# `stage1` job builds and publishes it *before* the suites run. A missing release
+# therefore can no longer strand an otherwise green run (it used to need a manual
+# `toolchain release` run that was easy to forget). A pull request cannot publish
+# a release, so a PR that bumps the pin fails its suites until the merge builds
+# the toolchain - a fork PR could not write one at all.
+#
+# The image jobs depend on the suites for the same reason. Both suites also run
+# locally (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they
+# gate on the guest's serial log via `just _assert-qemu-log`.
 #
 # Learned the hard way, for whoever edits this next: a fresh checkout pulls ~4.5
 # GiB of submodule history the build never reads (`rust` ~1.0 GiB,
@@ -117,6 +125,117 @@ jobs:
           rustup component add clippy
           cargo clippy --all-targets -- -D warnings
 
+  # Decides whether the pinned rust commit needs a toolchain before anything
+  # consumes one. Read-only, so it needs no write permission; `stage1` below does
+  # the publishing. The parent repository is small (its submodules are not fetched
+  # here), so the full history this diffs the push range against is cheap.
+  rust-pin:
+    name: rust pin / stage1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      pin: ${{ steps.check.outputs.pin }}
+      needed: ${{ steps.check.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # No submodules and no depth limit: the gitlink is read out of the tree
+          # and the push range is diffed, both of which need the history but
+          # neither of which needs the ~4.5 GiB of submodule history the builds
+          # elsewhere in this file fetch.
+          submodules: false
+          fetch-depth: 0
+
+      - name: Decide whether a stage1 has to be built
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The pinned commit, out of the tree rather than out of a clone: the
+          # submodule is not fetched here.
+          pin="$(git rev-parse HEAD:rust)"
+          echo "pin=${pin}" >> "$GITHUB_OUTPUT"
+
+          # What to diff for "did this push move the pin". A push has the previous
+          # tip; a PR is compared against its base; anything else (a manual run, a
+          # first push, a forced one) falls back to the tip's own change.
+          case "${{ github.event_name }}" in
+            push)
+              before='${{ github.event.before }}'
+              if [ -n "$before" ] && [[ ! "$before" =~ ^0+$ ]] \
+                 && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+                range="${before}..${{ github.sha }}"
+              else
+                range="HEAD^..HEAD"
+              fi
+              ;;
+            pull_request)
+              range="origin/${{ github.base_ref }}...HEAD"
+              ;;
+            *)
+              range="HEAD^..HEAD"
+              ;;
+          esac
+
+          # A range that cannot be resolved counts as "changed": building a
+          # toolchain that already exists only costs runner minutes, while the
+          # opposite mistake fails every arch job.
+          if ! git diff --quiet "$range" -- rust 2>/dev/null; then
+            changed=true
+          else
+            changed=false
+          fi
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+
+          # `gh release view` exits 1 for "no such release" and something else for
+          # a real failure (no `gh`, no token, the API down). Both mean the suites
+          # have nothing to fetch, so both build - the difference is only in what
+          # the log says, so treat an unexpected exit code as "not published" and
+          # let the step summary show it.
+          if gh release view "stage1-${pin}" > /dev/null 2>&1; then
+            published=true
+          else
+            published=false
+          fi
+          echo "published=${published}" >> "$GITHUB_OUTPUT"
+
+          # The trigger is the missing release, not the moved pin: the pin can
+          # legitimately point at a commit whose toolchain was published earlier
+          # (publish first, then bump), and rebuilding that is a full LLVM build
+          # for nothing. A moved pin is what usually explains a missing release,
+          # which is why the range above is reported next to the decision.
+          if [ "$published" = true ]; then
+            needed=false
+          else
+            needed=true
+          fi
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### stage1 for \`${pin:0:12}\`"
+            echo
+            echo "- \`rust\` changed in \`${range}\`: **${changed}**"
+            echo "- \`stage1-${pin}\` published: **${published}**"
+            echo "- build needed: **${needed}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One LLVM build, and only when the pin has no toolchain yet - it runs before
+  # anything that would consume one. This calls the workflow the operator can also
+  # run by hand, so the build and its publishing rules keep one home.
+  stage1:
+    name: stage1
+    needs: rust-pin
+    if: >-
+      needs.rust-pin.outputs.needed == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    # The called workflow writes a release, so the caller has to allow that much.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/toolchain-release.yml
+    secrets: inherit
+
   # The per-arch boot and kernel suites, on the stage1 published for the pinned
   # `rust` commit (see the header). One job per arch so a failure names its arch
   # and the three run in parallel; each pays its own 230 MB download, which is
@@ -130,10 +249,19 @@ jobs:
   # `image-release.yml`, which the `release` job below calls, do that with a larger
   # `boot-timeout` - a runner emulates the guest, and the recipe's 5 s self-check is
   # calibrated for a dev machine with KVM.
+  #
+  # The `if` is spelled out because `stage1` is *skipped* whenever there is nothing
+  # to build, and a skipped dependency propagates like a failed one - the suites
+  # would disappear from exactly the runs that are fine.
   arch-tests:
     name: boot + qemu (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    needs: [rust-pin, stage1]
+    if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:

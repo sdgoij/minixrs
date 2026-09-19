@@ -187,8 +187,11 @@ pub const SEL_NOTIFY: u32 = 0x08;
 /// Number of boot processes.
 pub const NR_BOOT_PROCS: usize = 32;
 
-/// Maximum number of supplemental groups.
-pub const NGROUPS_MAX: usize = 64;
+/// Maximum number of supplemental groups. One value for the whole port: the
+/// `Fproc` array VFS fills, the `VfsUCred` block it hands an FS, and PM's
+/// `setgroups` bound all have to agree, or a lookup ships a block the FS
+/// cannot hold.
+pub use libs::libminixfs::NGROUPS_MAX;
 
 // VFS call number constants (from callnr.h)
 

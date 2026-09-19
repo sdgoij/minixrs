@@ -24,18 +24,19 @@
 use fs::block_io;
 use fs::ext2::consts::*;
 use fs::ext2::glo;
-use fs::ext2::inode::{get_inode, put_inode};
+use fs::ext2::inode::{fs_putnode, get_inode, put_inode};
 use fs::ext2::link::{fs_ftrunc, fs_link, fs_rdlink, fs_rename, fs_unlink};
-use fs::ext2::misc::{fs_bpeek, fs_flush};
+use fs::ext2::misc::{fs_bpeek, fs_flush, fs_sync};
 use fs::ext2::mount::fs_readsuper;
 use fs::ext2::open::{fs_create, fs_mkdir};
 use fs::ext2::path::fs_lookup;
-use fs::ext2::protect::fs_getdents;
+use fs::ext2::protect::{fs_chmod, fs_chown, fs_getdents};
 use fs::ext2::read::{fs_readwrite, read_map};
 use fs::ext2::stadir::build_stat;
 use fs::ext2::super_::get_super;
 use fs::ext2::time::fs_utime;
 use fs::ext2::write::write_map;
+use libs::libminixfs::credentials::VfsUCred;
 
 /// 512 KiB image holding a few files, two symlinks and one subdirectory.
 const IMAGE: &[u8] = include_bytes!("../testdata/ext2-mini.img");
@@ -53,22 +54,81 @@ const PATH_RET_SYMLINK: u32 = 4;
 // what the loop (or a grant copy on the target) would have: the same payload
 // layouts VFS's `vfs/request.rs` builds.
 
-/// REQ_LOOKUP of `name` in `dir_ino`; returns `(status, inode)`.
-fn lookup(dir_ino: u32, name: &[u8], flags: u32) -> (i32, u32) {
+/// REQ_PUTNODE: give a reference back, which is how VFS releases an inode it
+/// got from a lookup or create. The FS holds one reference per request that
+/// handed VFS an inode, so a missing one shows up as an EINVAL here.
+fn put_reference(ino: u32, count: i32) {
     unsafe {
         let ext2 = glo::ext2_ptr();
         let raw = &mut (*ext2).m_in.m_payload.raw;
-        raw[0..8].copy_from_slice(&(dir_ino as u64).to_le_bytes());
-        raw[8..16].copy_from_slice(&(ROOT_INODE as u64).to_le_bytes());
-        raw[16..20].copy_from_slice(&flags.to_le_bytes());
+        raw[0..8].copy_from_slice(&(count as u64).to_le_bytes());
+        raw[8..12].copy_from_slice(&ino.to_le_bytes());
+        assert_eq!(
+            fs_putnode(),
+            OK,
+            "no reference to give back for inode {ino}"
+        );
+    }
+}
+
+/// REQ_LOOKUP of `name` in `dir_ino` with an explicit caller identity.
+///
+/// `cred` stands in for the block VFS grants when the caller belongs to
+/// supplemental groups: the host has no kernel to copy it through, so it goes
+/// straight into the server globals with `PATH_GET_UCRED` set in the flags —
+/// which is where `fs_lookup` reads it from in either case.
+fn lookup_as(
+    dir_ino: u32,
+    name: &[u8],
+    flags: u32,
+    uid: u16,
+    gid: u16,
+    cred: Option<&VfsUCred>,
+) -> (i32, u32) {
+    unsafe {
+        let ext2 = glo::ext2_ptr();
+        let flags = if cred.is_some() {
+            flags | PATH_GET_UCRED as u32
+        } else {
+            flags
+        };
+
+        let raw = &mut (*ext2).m_in.m_payload.raw;
+        raw[0..4].copy_from_slice(&dir_ino.to_le_bytes());
+        raw[4..8].copy_from_slice(&ROOT_INODE.to_le_bytes());
+        raw[8..10].copy_from_slice(&uid.to_le_bytes());
+        raw[10..12].copy_from_slice(&gid.to_le_bytes());
+        raw[12..16].copy_from_slice(&flags.to_le_bytes());
+        raw[16..20].copy_from_slice(&(-1i32).to_le_bytes()); // credential grant
         raw[20..24].copy_from_slice(&((name.len() + 1) as u32).to_le_bytes());
         raw[24..24 + name.len()].copy_from_slice(name);
         raw[24 + name.len()] = 0;
+        if let Some(c) = cred {
+            (*ext2).credentials = *c;
+        }
 
         let r = fs_lookup();
         let raw = &(*ext2).m_out.m_payload.raw;
         (r, u32::from_le_bytes(raw[20..24].try_into().unwrap()))
     }
+}
+
+/// REQ_LOOKUP of `name` in `dir_ino` as the super user, without touching the
+/// reference the reply hands out; returns `(status, inode)`.
+fn raw_lookup(dir_ino: u32, name: &[u8], flags: u32) -> (i32, u32) {
+    lookup_as(dir_ino, name, flags, SU_UID as u16, 0, None)
+}
+
+/// REQ_LOOKUP of `name` in `dir_ino`, followed by the putnode VFS would send
+/// when it drops the inode again; returns `(status, inode)`. Callers that want
+/// the reference kept (to look at `i_count`, or to write to the inode without
+/// holding it open) use [`raw_lookup`].
+fn lookup(dir_ino: u32, name: &[u8], flags: u32) -> (i32, u32) {
+    let (r, ino) = raw_lookup(dir_ino, name, flags);
+    if r == OK {
+        put_reference(ino, 1);
+    }
+    (r, ino)
 }
 
 /// The stored link count of `ino`, with the inode released again.
@@ -90,9 +150,11 @@ fn set_name(ext2: *mut glo::Ext2Global, name: &[u8], off: usize) {
     }
 }
 
-/// REQ_CREATE of `name` in `dir_ino`; returns `(status, inode)`.
+/// REQ_CREATE of `name` in `dir_ino`; returns `(status, inode)`. The reference
+/// the reply hands VFS is given straight back, the way VFS would when the file
+/// is closed; a caller that needs it open calls `get_inode` itself.
 fn create(dir_ino: u32, name: &[u8], mode: u16) -> (i32, u32) {
-    unsafe {
+    let (r, ino) = unsafe {
         let ext2 = glo::ext2_ptr();
         (*ext2).cch[0] = dir_ino as i32;
         (*ext2).cch[1] = mode as i32;
@@ -105,7 +167,11 @@ fn create(dir_ino: u32, name: &[u8], mode: u16) -> (i32, u32) {
         let r = fs_create();
         let raw = &(*ext2).m_out.m_payload.raw;
         (r, u32::from_le_bytes(raw[8..12].try_into().unwrap()))
+    };
+    if r == OK {
+        put_reference(ino, 1);
     }
+    (r, ino)
 }
 
 /// REQ_MKDIR of `name` in `dir_ino`. The reply carries no inode, so callers
@@ -218,7 +284,39 @@ fn test_read_and_write_on_a_real_ext2_image() {
         let ext2 = glo::ext2_ptr();
         (*ext2).m_in.m_source = 1;
         (*ext2).m_in.m_payload.m1.m1i1 = DEV as i32;
+        // Writable root mount: no REQ_RDONLY/REQ_ISROOT.
+        (&mut (*ext2).m_in.m_payload.raw)[4..8].copy_from_slice(&0u32.to_le_bytes());
+
+        // On-disk mount bookkeeping before the mount runs: `s_mnt_count` at 52
+        // and `s_state` at 58 of the superblock at byte 1024 (ext2_fs.h order).
+        let mnt_count_before = u16::from_le_bytes(disk[1024 + 52..1024 + 54].try_into().unwrap());
         assert_eq!(fs_readsuper(), OK, "mount of the fixture failed");
+
+        // A read-write mount counts itself and marks the filesystem in use on
+        // the device, which is what makes a crash visible to the next mount.
+        let sp = get_super(DEV);
+        assert!(!sp.is_null(), "mounted superblock");
+        assert_eq!((*sp).s_rd_only, 0, "a plain mount is writable");
+        assert_eq!(
+            (*sp).s_mnt_count,
+            mnt_count_before + 1,
+            "the mount did not count itself"
+        );
+        assert_eq!(
+            (*sp).s_state,
+            EXT2_ERROR_FS,
+            "the mount is not marked dirty"
+        );
+        assert_eq!(
+            u16::from_le_bytes(disk[1024 + 52..1024 + 54].try_into().unwrap()),
+            mnt_count_before + 1,
+            "the mount count did not reach the device"
+        );
+        assert_eq!(
+            u16::from_le_bytes(disk[1024 + 58..1024 + 60].try_into().unwrap()),
+            EXT2_ERROR_FS,
+            "the dirty state did not reach the device"
+        );
 
         // read_super switches the cache to the filesystem's block size before
         // it resolves any block number through it.
@@ -235,13 +333,30 @@ fn test_read_and_write_on_a_real_ext2_image() {
         let sp = get_super(DEV);
         assert!(!sp.is_null());
 
-        // REQ_LOOKUP for "hello.txt" in the root directory.
-        let (r, file_ino) = lookup(ROOT_INODE, b"hello.txt", 0);
+        // REQ_LOOKUP for "hello.txt" in the root directory. The reply hands VFS a
+        // reference to the result, and that reference is what lets the requests
+        // that follow find the inode at all: `find_inode` (read, write, putnode)
+        // sees inodes something holds a reference to, and only a request that
+        // hands VFS an inode leaves one behind.
+        let (r, file_ino) = raw_lookup(ROOT_INODE, b"hello.txt", 0);
         assert_eq!(r, OK, "lookup of hello.txt failed");
         assert!(
             file_ino >= EXT2_GOOD_OLD_FIRST_INO,
             "lookup returned inode {file_ino}"
         );
+        {
+            let held = get_inode(DEV, file_ino);
+            assert!(
+                (*held).i_count >= 2,
+                "the lookup left no reference for VFS (i_count {})",
+                (*held).i_count
+            );
+            put_inode(held);
+        }
+        // VFS drops it again when it releases the inode; the rest of this test
+        // puts its references back the same way, which is what keeps the counts
+        // below meaningful.
+        put_reference(file_ino, 1);
 
         // The inode's metadata comes from the on-disk inode table.
         let fip = get_inode(DEV, file_ino);
@@ -615,5 +730,293 @@ fn test_read_and_write_on_a_real_ext2_image() {
             "UTIME_NOW did not mark atime"
         );
         put_inode(fip);
+
+        // ---- supplementary groups ----
+        //
+        // A caller that is a member of the directory's group may traverse it
+        // through the group bits even when its effective gid is something
+        // else. VFS ships such a caller's groups in a grant (`PATH_GET_UCRED`);
+        // the host has no kernel to copy it through, so `lookup_as` puts the
+        // block where `fs_lookup` reads it from in either case.
+        // Owner 100, group 200, and traversable by the group only.
+        assert_eq!(
+            mkdir(ROOT_INODE, b"sgdir", 0o710),
+            OK,
+            "mkdir of the group-traversable directory failed"
+        );
+        let (r, sgdir) = lookup(ROOT_INODE, b"sgdir", 0);
+        assert_eq!(r, OK, "lookup of the new directory failed");
+        let raw = &mut (*ext2).m_in.m_payload.raw;
+        raw[0..4].copy_from_slice(&sgdir.to_le_bytes());
+        raw[4..6].copy_from_slice(&100u16.to_le_bytes());
+        raw[6..8].copy_from_slice(&200u16.to_le_bytes());
+        assert_eq!(fs_chown(), OK, "chown of the group directory failed");
+        let raw = &mut (*ext2).m_in.m_payload.raw;
+        raw[0..4].copy_from_slice(&sgdir.to_le_bytes());
+        raw[4..6].copy_from_slice(&0o710u16.to_le_bytes());
+        assert_eq!(fs_chmod(), OK, "chmod of the group directory failed");
+
+        let (r, inner) = create(sgdir, b"inner", 0o644);
+        assert_eq!(r, OK, "create inside the group directory failed");
+
+        // A caller with neither the owner's uid nor the directory's gid, and
+        // no matching supplemental group, is refused: 0o710 leaves "other"
+        // without search permission.
+        assert_eq!(
+            lookup_as(ROOT_INODE, b"sgdir/inner", 0, 7, 9, None).0,
+            EACCES,
+            "the other bits must not permit the traversal"
+        );
+
+        // The same caller, with group 200 among its supplemental groups.
+        let mut cred = VfsUCred::zeroed();
+        cred.vu_uid = 7;
+        cred.vu_gid = 9;
+        cred.vu_ngroups = 2;
+        cred.vu_sgroups[0] = 50;
+        cred.vu_sgroups[1] = 200;
+        let (r, ino) = lookup_as(ROOT_INODE, b"sgdir/inner", 0, 7, 9, Some(&cred));
+        assert_eq!(
+            r, OK,
+            "membership in the directory's group grants the group bits"
+        );
+        assert_eq!(ino, inner, "resolved to the file in the group directory");
+        put_reference(ino, 1);
+
+        // A group the directory is not in does not help.
+        cred.vu_sgroups[1] = 300;
+        assert_eq!(
+            lookup_as(ROOT_INODE, b"sgdir/inner", 0, 7, 9, Some(&cred)).0,
+            EACCES,
+            "an unrelated supplemental group must not grant access"
+        );
+
+        // With the flag set the block, not the request, holds the caller's
+        // identity: the request claims the super user, the block does not, and
+        // the block wins.
+        cred.vu_uid = 7;
+        assert_eq!(
+            lookup_as(ROOT_INODE, b"sgdir/inner", 0, 0, 0, Some(&cred)).0,
+            EACCES,
+            "the credential block's uid is the caller's"
+        );
+
+        // ---- sync: the superblock and the descriptor table reach the device ----
+        //
+        // The free counts live in the in-core superblock and in the group
+        // descriptors until a sync writes them out. Here the fixture's own bytes
+        // are the device, so they can be read straight back: the on-disk
+        // superblock sits at byte 1024 (`s_free_blocks_count` at 12,
+        // `s_free_inodes_count` at 16, in ext2_fs.h order) and the descriptor
+        // table in the block after it. Comparing against the bytes the blocks
+        // were loaded with is what makes the check non-vacuous.
+        let disk_blocks_before = u32::from_le_bytes(disk[1024 + 12..1024 + 16].try_into().unwrap());
+        let disk_inodes_before = u32::from_le_bytes(disk[1024 + 16..1024 + 20].try_into().unwrap());
+        let gd_inodes_before = u16::from_le_bytes(disk[2048 + 14..2048 + 16].try_into().unwrap());
+
+        // A file that is not removed, with a block written into it: the inode
+        // count and the free block count both have to change. (The earlier
+        // truncates left blocks on the free list for reuse, so the counts were
+        // back at the fixture's values until here.)
+        let inodes_before = (*sp).s_free_inodes_count;
+        let blocks_before = (*sp).s_free_blocks_count;
+        let (r, kept) = create(ROOT_INODE, b"persisted.txt", 0o644);
+        assert_eq!(r, OK, "create of the persistence file failed");
+        assert_eq!(
+            (*sp).s_free_inodes_count,
+            inodes_before - 1,
+            "the create did not take an inode"
+        );
+
+        // Held open for the write: `fs_readwrite` resolves its inode through
+        // `find_inode`, which only sees inodes something has a reference to - in
+        // MINIX that is the reference the lookup/create reply leaves with VFS
+        // (and `fs_putnode` gives back).
+        let kip = get_inode(DEV, kept);
+        assert!(!kip.is_null());
+        let raw = &mut (*ext2).m_in.m_payload.raw;
+        raw[0..4].copy_from_slice(&kept.to_le_bytes());
+        raw[8..16].copy_from_slice(&0i64.to_le_bytes());
+        raw[16..20].copy_from_slice(&0i32.to_le_bytes());
+        raw[24..32].copy_from_slice(&1024u64.to_le_bytes());
+        (*ext2).req_nr = REQ_WRITE - FS_BASE;
+        assert_eq!(fs_readwrite(), OK, "write to the persistence file failed");
+        assert_eq!(
+            (*sp).s_free_blocks_count,
+            blocks_before - 1,
+            "the write did not allocate a block"
+        );
+        put_inode(kip);
+
+        assert_eq!(fs_sync(), OK, "sync failed");
+
+        let sb = &disk[1024..2048];
+        let sb_free_blocks = u32::from_le_bytes(sb[12..16].try_into().unwrap());
+        let sb_free_inodes = u32::from_le_bytes(sb[16..20].try_into().unwrap());
+        assert_eq!(
+            sb_free_inodes,
+            (*sp).s_free_inodes_count,
+            "the superblock's free inode count is not on the device"
+        );
+        assert_eq!(
+            sb_free_blocks,
+            (*sp).s_free_blocks_count,
+            "the superblock's free block count is not on the device"
+        );
+        assert_ne!(
+            sb_free_inodes, disk_inodes_before,
+            "the superblock on the device still holds the counts it was read with"
+        );
+        assert_ne!(
+            sb_free_blocks, disk_blocks_before,
+            "the superblock on the device still holds the counts it was read with"
+        );
+
+        let gdt = &disk[2048..3072];
+        let gd = fs::ext2::super_::get_group_desc(&*sp, 0);
+        assert!(!gd.is_null());
+        let gd_free_inodes = u16::from_le_bytes(gdt[14..16].try_into().unwrap());
+        assert_eq!(
+            u16::from_le_bytes(gdt[12..14].try_into().unwrap()),
+            (*gd).free_blocks_count,
+            "the descriptor's free block count is not on the device"
+        );
+        assert_eq!(
+            gd_free_inodes,
+            (*gd).free_inodes_count,
+            "the descriptor's free inode count is not on the device"
+        );
+        assert_ne!(
+            gd_free_inodes, gd_inodes_before,
+            "the descriptor on the device still holds the counts it was read with"
+        );
+
+        // ---- raw device blocks (REQ_BREAD/REQ_BWRITE) ----
+        //
+        // VFS sends these for a block special file: the bytes are addressed on
+        // the device, so there is no inode and no file offset. The handler builds
+        // a pseudo inode in which only the device (i_block[0]) and the type are
+        // set — a read that went looking for a superblock or an inode number on
+        // it would fault instead of reading.
+        // Every request goes through the dispatch table VFS uses.
+        let device_io = |rw: i32, pos: i64, bytes: u64| {
+            let raw = &mut (*ext2).m_in.m_payload.raw;
+            (*ext2).m_in.m_type = rw;
+            raw[0..4].copy_from_slice(&DEV.to_le_bytes()); // device
+            raw[8..16].copy_from_slice(&pos.to_le_bytes()); // seek_pos
+            raw[16..20].copy_from_slice(&0i32.to_le_bytes()); // grant (no copy on host)
+            raw[24..32].copy_from_slice(&bytes.to_le_bytes()); // nbytes
+            let r = fs::ext2::table::dispatch((rw - FS_BASE) as usize);
+            let out = (*ext2).m_out.m_payload.raw;
+            (
+                r,
+                i64::from_le_bytes(out[0..8].try_into().unwrap()),
+                u32::from_le_bytes(out[8..12].try_into().unwrap()),
+            )
+        };
+
+        // One whole block: the superblock the fixture was read from.
+        let (r, pos, n) = device_io(REQ_BREAD, 1024, 1024);
+        assert_eq!(r, OK, "raw device read failed");
+        assert_eq!(pos, 2048, "the read did not advance by a block");
+        assert_eq!(n, 1024, "the read did not report the whole block");
+
+        // An unaligned, short request spans two blocks.
+        let (r, pos, n) = device_io(REQ_BREAD, 1020, 8);
+        assert_eq!(r, OK, "unaligned device read failed");
+        assert_eq!(pos, 1028, "the read did not advance by the bytes asked for");
+        assert_eq!(n, 8, "the unaligned read did not report every byte");
+
+        // A write goes through the same path, in the device's block size.
+        let (r, pos, n) = device_io(REQ_BWRITE, 400 * 1024, 1024);
+        assert_eq!(r, OK, "raw device write failed");
+        assert_eq!(pos, 401 * 1024);
+        assert_eq!(n, 1024);
+
+        // ---- block preallocation ----
+        //
+        // With preallocation on (an option in the C; here switched on for the
+        // inode directly), one allocation takes a whole byte of the block bitmap
+        // and keeps the other seven blocks for the inode, so a file written
+        // sequentially gets neighbouring blocks instead of one-at-a-time picks.
+        let (r, pre) = create(ROOT_INODE, b"prealloc.txt", 0o644);
+        assert_eq!(r, OK, "create for the preallocation test failed");
+        let pip = get_inode(DEV, pre);
+        assert!(!pip.is_null());
+        (*pip).i_preallocation = 1;
+
+        let blocks_before = (*sp).s_free_blocks_count;
+        let raw = &mut (*ext2).m_in.m_payload.raw;
+        raw[0..4].copy_from_slice(&pre.to_le_bytes());
+        raw[8..16].copy_from_slice(&0i64.to_le_bytes());
+        raw[16..20].copy_from_slice(&0i32.to_le_bytes());
+        raw[24..32].copy_from_slice(&1024u64.to_le_bytes());
+        (*ext2).req_nr = REQ_WRITE - FS_BASE;
+        assert_eq!(fs_readwrite(), OK, "write with preallocation failed");
+
+        assert_eq!(
+            (*pip).i_prealloc_count,
+            (EXT2_PREALLOC_BLOCKS - 1) as i32,
+            "the allocation did not keep the rest of the run"
+        );
+        let allocated = (*pip).i_block[0];
+        for i in 0..(*pip).i_prealloc_count as usize {
+            assert_eq!(
+                (*pip).i_prealloc_blocks[i],
+                allocated + i as u32 + 1,
+                "the preallocated blocks are not the run after the allocation"
+            );
+        }
+        assert_eq!(
+            (*sp).s_free_blocks_count,
+            blocks_before - EXT2_PREALLOC_BLOCKS as u32,
+            "the whole run must come out of the free count"
+        );
+
+        // Releasing the inode gives the unused blocks back; the one block the
+        // file actually holds stays allocated.
+        put_inode(pip);
+        assert_eq!(
+            (*sp).s_free_blocks_count,
+            blocks_before - 1,
+            "the preallocated run was not discarded when the inode was released"
+        );
+
+        // ---- read-only mounts ----
+        //
+        // VFS sets REQ_RDONLY when a filesystem is mounted read-only (or when
+        // read-only is forced on an unclean one); the FS must then refuse every
+        // write, and allow them again after a read-write mount.
+        let mount = |flags: u32| {
+            let raw = &mut (*ext2).m_in.m_payload.raw;
+            raw[0..4].copy_from_slice(&DEV.to_le_bytes());
+            raw[4..8].copy_from_slice(&flags.to_le_bytes());
+            fs_readsuper()
+        };
+
+        assert_eq!(mount(REQ_RDONLY), OK, "read-only re-mount failed");
+        assert_eq!(
+            (*sp).s_rd_only,
+            1,
+            "REQ_RDONLY did not reach the superblock"
+        );
+        assert_eq!(
+            create(ROOT_INODE, b"read-only.txt", 0o644).0,
+            EROFS,
+            "a read-only mount must not create a file"
+        );
+        assert_eq!(
+            unlink(ROOT_INODE, b"persisted.txt", false),
+            EROFS,
+            "a read-only mount must not unlink either"
+        );
+
+        assert_eq!(mount(0), OK, "read-write re-mount failed");
+        assert_eq!((*sp).s_rd_only, 0, "the re-mount did not lift read-only");
+        assert_eq!(
+            create(ROOT_INODE, b"read-write.txt", 0o644).0,
+            OK,
+            "writes are allowed again after a read-write mount"
+        );
     }
 }

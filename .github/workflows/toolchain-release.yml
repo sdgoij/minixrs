@@ -2,10 +2,14 @@
 # release in this repository, so CI and local work can install it in minutes
 # instead of building it from source.
 #
-# Manual only: one run is one LLVM build, and the result stays valid until the
-# pinned rust commit changes. The tag *is* that commit, so consumers resolve it
-# exactly - `tools/fetch-stage1.py` derives the same tag from the commit the
-# `rust` submodule pins, which is why the toolchain can never be stale.
+# Manual or automatic: `workflow_dispatch` rebuilds and republishes on demand
+# (after an LLVM or clang pin change, say), and `ci.yml` calls it - through
+# `workflow_call` - when the pinned rust commit has no release yet, before
+# anything consumes one. One run is one LLVM build, and the result stays valid
+# until the pinned rust commit changes. The tag *is* that commit, so consumers
+# resolve it exactly - `tools/fetch-stage1.py` derives the same tag from the
+# commit the `rust` submodule pins, which is why the toolchain can never be
+# stale.
 #
 # The release lives here rather than on the fork, because the built-in
 # `GITHUB_TOKEN` can only write its own repository: that keeps the whole thing
@@ -29,6 +33,9 @@ name: toolchain release
 
 on:
   workflow_dispatch:
+  # Called by `ci.yml`; the caller has to grant `contents: write` for the publish
+  # step, since a called workflow cannot widen its own permissions.
+  workflow_call:
 
 concurrency:
   group: toolchain-release
@@ -118,7 +125,11 @@ jobs:
 
       - name: Publish the release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `github.token`, not `secrets.GITHUB_TOKEN`: a called workflow is always
+          # handed the caller's token, while the secret of that name is not
+          # something a call can rely on (`image-release.yml` publishes the same
+          # way).
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sha='${{ steps.package.outputs.sha }}'
