@@ -229,6 +229,11 @@ allocation that lost its reference.
 ```
 just test-boot          # Build + boot QEMU + run 12 assertions + exit
 just run                # Normal boot (skips test, starts shell)
+
+# All six gates (qemu + boot, x86/riscv64/aarch64). `test-qemu` runs
+# `crates/kernel/src/tests.rs`, which the host suite cannot see; the
+# `minix-testing` skill says when that matters.
+just test-arches
 ```
 
 Test file: `crates/kernel-boot/src/boot_test.rs`

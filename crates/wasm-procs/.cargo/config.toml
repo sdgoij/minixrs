@@ -3,6 +3,10 @@
 # `--import-memory` is the design's arrangement (§5): the host owns each
 # instance's memory, because only the host can move bytes between two processes
 # and it has to place the Asyncify stack buffer somewhere it can see.
+#
+# `--initial-memory` is deliberately *below* the heap window's end (3 MiB), so
+# the window is not already backed by the module's own memory. The host has to
+# grow it, which is what makes it the pager rather than a bystander.
 
 [target.wasm32-unknown-unknown]
 rustflags = [
@@ -11,8 +15,16 @@ rustflags = [
   "-C", "link-arg=--allow-undefined",
   "-C", "link-arg=--export=proc_a",
   "-C", "link-arg=--export=proc_b",
+  "-C", "link-arg=--export=proc_heap",
+  "-C", "link-arg=--export=proc_copy_src",
+  "-C", "link-arg=--export=proc_copy_dst",
   "-C", "link-arg=--export=msg_ptr",
   "-C", "link-arg=--export=info_ptr",
+  "-C", "link-arg=--export=heap_report_ptr",
+  "-C", "link-arg=--export=copy_buf_ptr",
+  "-C", "link-arg=--export=copy_report_ptr",
+  "-C", "link-arg=--export=grant_scratch_ptr",
   "-C", "link-arg=--import-memory",
-  "-C", "link-arg=--initial-memory=4194304",
+  "-C", "link-arg=--initial-memory=2097152",
+  "-C", "link-arg=--max-memory=67108864",
 ]

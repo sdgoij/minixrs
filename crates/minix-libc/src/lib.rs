@@ -471,7 +471,10 @@ pub unsafe extern "C" fn fork() -> c_int {
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
+/// # Safety
+///
+/// `status` must be null or point to a writable `c_int`.
+pub unsafe extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     match minix_std::process::waitpid(pid, options) {
         Ok((child, s)) => {
             if !status.is_null() {
@@ -485,8 +488,11 @@ pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_i
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn wait(status: *mut c_int) -> c_int {
-    waitpid(-1, status, 0)
+/// # Safety
+///
+/// Same obligation as `waitpid`: `status` must be null or writable.
+pub unsafe extern "C" fn wait(status: *mut c_int) -> c_int {
+    unsafe { waitpid(-1, status, 0) }
 }
 
 #[cfg(target_os = "minix")]
@@ -502,7 +508,7 @@ pub unsafe extern "C" fn wait4(
     if !usage.is_null() {
         unsafe { core::ptr::write_bytes(usage as *mut u8, 0, size_of::<Rusage>()) };
     }
-    waitpid(pid, status, options)
+    unsafe { waitpid(pid, status, options) }
 }
 
 #[cfg(target_os = "minix")]
@@ -769,7 +775,13 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut minix_std::time::TimeSpec) -> c_int {
+/// # Safety
+///
+/// `tp` must be null or point to a writable `TimeSpec`.
+pub unsafe extern "C" fn clock_gettime(
+    clock_id: c_int,
+    tp: *mut minix_std::time::TimeSpec,
+) -> c_int {
     if tp.is_null() {
         return fail(22); // EINVAL
     }
@@ -851,9 +863,15 @@ pub unsafe extern "C" fn sigaction(
 // ---- signal.h helper functions ----
 
 /// C `sigset_t` — two unsigned longs (the header declares `unsigned long
-/// sigset_t[2]`, 16 bytes).
+/// sigset_t[2]`).
 #[cfg(target_os = "minix")]
 type SigSet = [c_ulong; 2];
+
+/// Bits carried by one `SigSet` word. The set spans 64 signal numbers, so on a
+/// 32-bit target the two words split them 32/32 rather than 64/0 — the index
+/// arithmetic has to follow the word width instead of a fixed 64.
+#[cfg(target_os = "minix")]
+const SIGSET_WORD_BITS: usize = c_ulong::BITS as usize;
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -889,7 +907,7 @@ pub unsafe extern "C" fn sigaddset(set: *mut SigSet, signum: c_int) -> c_int {
     }
     let i = (signum - 1) as usize;
     unsafe {
-        (*set)[i / 64] |= 1u64 << (i % 64);
+        (*set)[i / SIGSET_WORD_BITS] |= 1 << (i % SIGSET_WORD_BITS);
     }
     0
 }
@@ -902,7 +920,7 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigSet, signum: c_int) -> c_int {
     }
     let i = (signum - 1) as usize;
     unsafe {
-        (*set)[i / 64] &= !(1u64 << (i % 64));
+        (*set)[i / SIGSET_WORD_BITS] &= !(1 << (i % SIGSET_WORD_BITS));
     }
     0
 }
@@ -914,7 +932,7 @@ pub unsafe extern "C" fn sigismember(set: *const SigSet, signum: c_int) -> c_int
         return 0;
     }
     let i = (signum - 1) as usize;
-    let bit = unsafe { ((*set)[i / 64] >> (i % 64)) & 1u64 };
+    let bit = unsafe { ((*set)[i / SIGSET_WORD_BITS] >> (i % SIGSET_WORD_BITS)) & 1 };
     bit as c_int
 }
 
@@ -1059,7 +1077,11 @@ pub extern "C" fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int 
 /// `bind(2)`: bind a socket to a `struct sockaddr_in` (AF_INET).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
+/// # Safety
+///
+/// `address` must be a readable `struct sockaddr_in` of at least `address_len`
+/// bytes.
+pub unsafe extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
         Ok(a) => a,
         Err(e) => return fail(-e),
@@ -1074,7 +1096,11 @@ pub extern "C" fn bind(sock: c_int, address: *const c_void, address_len: u32) ->
 /// destination and receive filter.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
+/// # Safety
+///
+/// `address` must be a readable `struct sockaddr_in` of at least `address_len`
+/// bytes.
+pub unsafe extern "C" fn connect(sock: c_int, address: *const c_void, address_len: u32) -> c_int {
     let (ip, port) = match unsafe { decode_sockaddr_in(address as *const u8, address_len) } {
         Ok(a) => a,
         Err(e) => return fail(-e),
@@ -1211,7 +1237,11 @@ pub extern "C" fn listen(sock: c_int, backlog: c_int) -> c_int {
 /// `struct sockaddr_in`) when non-NULL, like the reference accept(2).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+/// # Safety
+///
+/// `address`/`address_len` must be null or valid for the sizes the C caller
+/// declared.
+pub unsafe extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
     let newfd = match minix_std::net::accept(sock) {
         Ok(fd) => fd,
         Err(e) => return fail(e.0),
@@ -1227,7 +1257,14 @@ pub extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: *mut u3
 /// `getpeername(2)`: fill `address` with the connected peer.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+/// # Safety
+///
+/// `address`/`address_len` must be valid for the sizes the C caller declared.
+pub unsafe extern "C" fn getpeername(
+    sock: c_int,
+    address: *mut c_void,
+    address_len: *mut u32,
+) -> c_int {
     if address.is_null() || address_len.is_null() {
         return fail(22); // EINVAL
     }
@@ -1243,7 +1280,14 @@ pub extern "C" fn getpeername(sock: c_int, address: *mut c_void, address_len: *m
 /// `getsockname(2)`: fill `address` with the local bound address.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn getsockname(sock: c_int, address: *mut c_void, address_len: *mut u32) -> c_int {
+/// # Safety
+///
+/// `address`/`address_len` must be valid for the sizes the C caller declared.
+pub unsafe extern "C" fn getsockname(
+    sock: c_int,
+    address: *mut c_void,
+    address_len: *mut u32,
+) -> c_int {
     if address.is_null() || address_len.is_null() {
         return fail(22); // EINVAL
     }
@@ -1610,10 +1654,10 @@ mod tests {
         fn _socket(f: extern "C" fn(c_int, c_int, c_int) -> c_int) {
             let _ = f;
         }
-        fn _addr_in(f: extern "C" fn(c_int, *const c_void, u32) -> c_int) {
+        fn _addr_in(f: unsafe extern "C" fn(c_int, *const c_void, u32) -> c_int) {
             let _ = f;
         }
-        fn _addr_out(f: extern "C" fn(c_int, *mut c_void, *mut u32) -> c_int) {
+        fn _addr_out(f: unsafe extern "C" fn(c_int, *mut c_void, *mut u32) -> c_int) {
             let _ = f;
         }
         fn _io(f: unsafe extern "C" fn(c_int, *const c_void, usize, c_int) -> isize) {

@@ -50,6 +50,24 @@ pub extern "C" fn minix_kernel_init() {
     // `init_cpulocals` has run; without this it must skip that part.
     kernel::panic::mark_cpulocals_ready();
 
+    // The same sequence `kernel-boot` runs before it starts any process, and it
+    // is not optional here either: `proc_init` builds the process table *and*
+    // attaches a privilege structure to each boot process, `system_init` fills
+    // the kernel-call vector (`SYS_VIRCOPY` among them), and
+    // `register_ipc_syscalls` maps the IPC call numbers. Leaving any of them out
+    // is invisible until something depends on it — no privileges means a
+    // pending notification is silently never delivered, and an empty call vector
+    // means `sys_vircopy` answers ENOSYS.
+    // SAFETY: single-threaded, and each only writes tables nothing has read yet.
+    unsafe {
+        kernel::table::proc_init();
+        kernel::system::system_init();
+        kernel::ipc::register_ipc_syscalls();
+        // Fill the syscall table. Until this runs, every number resolves to -38,
+        // so a process's very first getpid would fail.
+        kernel::syscall::init_basic_syscalls();
+    }
+
     print("Hello MINIX!\r\n");
     print("kernel: wasm32 instance initialised\r\n");
 }
@@ -88,8 +106,30 @@ pub extern "C" fn minix_proc_spawn(slot: i32, endpoint: i32) -> i32 {
     }
 }
 
-/// Which process should run next, by slot, or -1 when none is runnable.
+/// Set the boot notification that starts PM's chain. Returns 0, or -1 if PM's
+/// privilege structure is not reachable.
 ///
+/// This is what `boot_init::enqueue_and_start` does on the shipping arches: RS's
+/// notification is left pending on PM's priv structure, and PM discovers it the
+/// first time it calls RECEIVE. Nothing is sent and nothing is copied — the
+/// notification is kernel state, which is why the whole thing is a bit set
+/// rather than a cross-instance transfer.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_boot_notify() -> i32 {
+    unsafe {
+        let pm = proc_at(arch_common::com::PM_PROC_NR);
+        if pm.is_null() || (*pm).p_priv.is_null() {
+            return -1;
+        }
+        let Some(rs_id) = kernel::r#priv::priv_find_proc_id(arch_common::com::RS_PROC_NR) else {
+            return -1;
+        };
+        (*(*pm).p_priv).s_notify_pending.set(rs_id);
+        0
+    }
+}
+
+/// Which process should run next, by slot, or -1 when none is runnable.
 /// The decision is the kernel's: this only reports it.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_step() -> i32 {
@@ -118,25 +158,73 @@ pub extern "C" fn minix_proc_blocked(slot: i32) -> i32 {
     }
 }
 
-/// Perform one IPC syscall on behalf of `slot`.
+/// The syscall gate.
 ///
-/// `dst` is an endpoint for SEND, or the endpoint to receive from for RECEIVE.
-/// Run-queue membership is the kernel's business: `mini_send` dequeues a caller
-/// that blocks, and the matching side re-enqueues it, so nothing here has to.
+/// Every MINIX syscall number arrives here and is routed exactly as the kernel
+/// routes it on the other arches — through the table `init_basic_syscalls`
+/// fills. Nothing is special-cased, which is the point: a server's `getpid`,
+/// its `SENDREC`, and its `brk` take the same path they take on x86_64, and an
+/// unregistered number still answers -38.
+///
+/// The only wasm-specific part is how the caller is identified: the host passes
+/// the slot it is dispatching, where a hardware entry would read the current
+/// proc from the CPU's local storage.
 #[unsafe(no_mangle)]
-pub extern "C" fn minix_syscall(slot: i32, nr: i32, dst: i32) -> i32 {
+pub extern "C" fn minix_syscall(
+    slot: i32,
+    nr: i64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+) -> i64 {
     unsafe {
         let rp = proc_at(slot);
         if rp.is_null() {
             return -1;
         }
-        match nr {
-            // The message pointer is the process's own address space, which the
-            // kernel cannot read here; the host moves the bytes instead.
-            kernel::ipc::SEND => kernel::ipc::mini_send(rp, dst, core::ptr::null(), 0),
-            kernel::ipc::RECEIVE => kernel::ipc::mini_receive(rp, dst, core::ptr::null_mut(), 0),
-            _ => -1,
+        let args = [a0, a1, a2, a3, a4, a5];
+        let result = kernel::syscall::dispatch_basic_syscall(rp, nr as usize, &args);
+
+        // A syscall that queued a message leaves `DELIVERMSG` on the caller for
+        // the arch's syscall-return path to act on. This instance has no such
+        // epilogue — the host returns from this import straight into the process
+        // — so the copy happens here, while the process is still inside the
+        // syscall and before it can look at its buffer.
+        kernel::ipc::deliver_pending_msg(rp);
+
+        // The same missing epilogue costs a blocked call its return value: the
+        // process is suspended inside the syscall and there is no return path to
+        // carry the result out, where a hardware arch would restore the frame
+        // the result was written into. Record it in the frame, so
+        // `minix_proc_retval` can answer with it when the host rewinds — and so
+        // that a later write to the same slot (a receive's sender endpoint,
+        // which `mini_send` stores) overwrites a value rather than being the
+        // only write.
+        if (*rp).p_rts_flags.load(Ordering::Relaxed) & BLOCKED != 0 {
+            arch_wasm32::hal::write_retval(&mut (*rp).p_reg, result as u64);
         }
+
+        result
+    }
+}
+
+/// The return value the kernel holds for `slot`'s suspended syscall.
+///
+/// A call that blocked has not returned to the instance yet. On a hardware arch
+/// the syscall-return epilogue restores the saved frame on resume; a wasm
+/// instance has no such path, so the host asks for the value here when it
+/// rewinds. Returns -1 for a slot that is out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_proc_retval(slot: i32) -> i64 {
+    unsafe {
+        let rp = proc_at(slot);
+        if rp.is_null() {
+            return -1;
+        }
+        arch_wasm32::hal::read_retval(&(*rp).p_reg) as i64
     }
 }
 

@@ -395,11 +395,19 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                                 let priv_id = chunk_i * 32 + bit;
                                 (*priv_ptr).s_notify_pending.clear(priv_id);
                                 let notify_src = priv_addr(priv_id).s_proc_nr;
+                                // Built in the kernel's own delivery slot and moved
+                                // by `delivermsg`, rather than written straight to
+                                // `m_ptr`: on an arch whose two address spaces are
+                                // separate memories, the seam is the only thing that
+                                // can reach the receiver's buffer. Same address
+                                // either way — the syscall handler set
+                                // `p_delivermsg_vir` from this very `m_ptr`.
                                 build_notify_message(
-                                    &mut *(m_ptr as *mut [u8; MESSAGE_SIZE]),
+                                    &mut (*caller_ptr).p_delivermsg,
                                     notify_src,
                                     caller_ptr,
                                 );
+                                delivermsg(caller_ptr);
                                 // build_notify_message leaves m_source = 0;
                                 // return 0 (not notify_src, which is negative
                                 // for kernel tasks) so the receiver's main
@@ -472,14 +480,24 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                     // value (m_source) is the sender's endpoint.
                     let dst_dmsg = (*caller_ptr).p_delivermsg.as_mut_ptr();
                     core::ptr::copy_nonoverlapping(msg_ptr, dst_dmsg, MESSAGE_SIZE);
-                    // Also copy to user buffer directly (for immediate use).
-                    core::ptr::copy_nonoverlapping(msg_ptr, m_ptr, MESSAGE_SIZE);
+                    // Also copy to user buffer directly, for immediate use — but
+                    // only where the kernel can address the receiver's memory.
+                    // Where it cannot, the direct write would land in the
+                    // kernel's own image (a guest address is just past its
+                    // stack) rather than being merely redundant, and the
+                    // MF_DELIVERMSG set below is what performs the delivery.
+                    let direct = crate::hal::CROSS_ADDRESS_SPACE_COPY.is_none();
+                    if direct {
+                        core::ptr::copy_nonoverlapping(msg_ptr, m_ptr, MESSAGE_SIZE);
+                    }
 
                     let src = (*send_ptr).p_endpoint;
                     let ep_bytes = src.to_ne_bytes();
                     // Write source endpoint to m_source (bytes 0-3) in BOTH buffers.
                     core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), dst_dmsg.add(0), 4);
-                    core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), m_ptr.add(0), 4);
+                    if direct {
+                        core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), m_ptr.add(0), 4);
+                    }
                     // Set DELIVERMSG so deliver_msg copies p_delivermsg to user.
                     (*caller_ptr)
                         .p_misc_flags
@@ -661,6 +679,38 @@ fn deadlock(function: i32, caller_ptr: *mut Proc, mut dst_e: i32) -> bool {
     }
 }
 
+/// Copy a message that is waiting in the calling process's kernel buffer out to
+/// the address the process asked for, if there is one.
+///
+/// The hardware arches do this in their syscall-return path, in asm
+/// (`deliver_msg`), which is why the rest of this file can leave `DELIVERMSG` set
+/// and expect someone else to act on it. A wasm instance has no such epilogue — a
+/// syscall there is an ordinary call whose return is the host's — so the platform
+/// layer calls this instead. The decision stays in the kernel; only the timing is
+/// arch-specific.
+///
+/// Idempotent, and a no-op for the paths that deliver inline (`mini_send`'s
+/// direct delivery, `mini_notify`): those clear the flag themselves before their
+/// syscall returns.
+///
+/// # Safety
+///
+/// `rp` must point to a valid `Proc`.
+pub unsafe fn deliver_pending_msg(rp: *mut Proc) {
+    unsafe {
+        if rp.is_null() {
+            return;
+        }
+        if (*rp).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::DELIVERMSG.bits() == 0 {
+            return;
+        }
+        delivermsg(rp);
+        (*rp)
+            .p_misc_flags
+            .fetch_and(!MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+    }
+}
+
 /// Copy data from a process's virtual address space into kernel memory.
 ///
 /// # Safety
@@ -672,6 +722,17 @@ pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usi
     unsafe {
         if len == 0 {
             return OK;
+        }
+        // No page tables to walk: the two sides are the process's address space
+        // and this kernel's, and the HAL is what can reach both.
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            return copy(
+                (*rp).p_nr,
+                user_va,
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                dst as u64,
+                len,
+            );
         }
         let target_cr3 = (*rp).p_seg.p_cr3;
         let boot_cr3 = crate::hal::boot_cr3();
@@ -739,6 +800,18 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
         let vir = (*rp).p_delivermsg_vir;
         if vir == 0 {
             return OK;
+        }
+
+        // As in `copy_from_user`: with no page tables the kernel buffer and the
+        // target's buffer are in different memories, so the HAL makes the copy.
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            return copy(
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                (*rp).p_delivermsg.as_ptr() as u64,
+                (*rp).p_nr,
+                vir,
+                MESSAGE_SIZE,
+            );
         }
 
         // Switch to the target's CR3 so user-space virtual addresses

@@ -5,7 +5,7 @@
 //! Intel-syntax (no `%` prefixes), matching the toolchain's behavior for
 //! `x86_64-unknown-none`.
 
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", target_arch = "x86_64"))]
 use core::ffi::c_int;
 use core::ffi::c_long;
 

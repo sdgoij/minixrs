@@ -625,6 +625,12 @@ pub fn vm_main() {
         let range = (0x81000000u64, 0x0F000000u64);
         #[cfg(target_arch = "aarch64")]
         let range = (0x41000000u64, 0x0F000000u64); // 256MB RAM: 16MB kernel, 240MB free
+        #[cfg(target_arch = "wasm32")]
+        // There is no physical memory distinct from the instance's linear
+        // memory, and the paging paths that would consume these frames are
+        // inert (§7.1). This matches `arch_sim`'s page arena — 2048 pages from
+        // 0x00100000 — because that is the only arena this port has.
+        let range = (0x0010_0000u64, 2048u64 * 4096);
         kernel::hal::init_phys_alloc(range.0, range.1);
     }
     // On aarch64 the server-side copy of the arch allocator is never

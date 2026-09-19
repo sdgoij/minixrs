@@ -43,6 +43,9 @@ Checklist before declaring a change done:
 - [ ] All host suites green: kernel, servers, minix-std, minix-rt, userland,
       boot-image
 - [ ] `cargo clippy -- -D warnings` clean on the changed crates
+- [ ] Arch-gated change (VA layout, a HAL constant, anything under `arch-*/`, a
+      shared test that names an address)? Then `just test-arches` too — the host
+      suite cannot see the suite that runs those
 
 ## Grep for warnings — don't eyeball the tail
 
@@ -76,6 +79,32 @@ IPC syscall wrong?         → QEMU integration test (add Phase G)
 VFS mount_root broken?     → boot test (add assertion in boot_test.rs)
 Data corruption?           → boot test with raw byte dump first
 ```
+
+## Both suites, all three arches
+
+`just test-arches` runs all six QEMU gates — `test-qemu` and `test-boot` for
+x86, riscv64 and aarch64. Two separate reasons make that a routine step and not
+a rare one:
+
+- **The suites are not nested.** `test-qemu` runs the in-kernel suite
+  (`crates/kernel/src/tests.rs`), `test-boot` boots to a shell and runs
+  `boot_test.rs`. Neither includes the other, and the host suite runs neither.
+- **`cargo test` cannot see the first one.** `tests.rs` sits behind the
+  kernel's `qemu-tests` feature and its checks are driven by its own runner, so
+  the host suite neither compiles nor runs them. A test that exists only there
+  is compiled by `just test-qemu-<arch>` and nothing else.
+
+`syscall_brk` is the worked example: it asserted x86_64's heap base
+(`0x3FE00000`) while aarch64's is `0x2000_0000`, so it passed on two arches and
+on the host while `test-qemu-aarch64` failed. Any change to a VA-layout
+constant, a HAL value, or per-arch code needs all six.
+
+The host pin is still the pin (above) — this is the extra sweep for the
+arch-gated part, not a substitute for it.
+
+The six gates are not the same as `just test` (`test-<arch>` runs a *boot*, no
+assertions) or `just check` (host clippy + one riscv64 compile). Neither of
+those would have caught the example above.
 
 ## QEMU Integration Tests
 
@@ -165,11 +194,17 @@ cargo test                          # all host tests
 cargo test -p kernel                # single crate
 cargo test my_test_name             # filtered
 
-# QEMU tests (kernel integration)
+# QEMU tests (kernel integration), per arch - x86 by default
 just test-qemu                      # 40 tests (phases A–O)
+just test-qemu aarch64
 
-# Boot tests (multi-server, filesystem)
+# Boot tests (multi-server, filesystem), per arch - x86 by default
 just test-boot                      # 12 tests after VFS mount_root
+just test-boot aarch64
+
+# All six QEMU gates (x86/riscv64/aarch64 x qemu+boot) - what an
+# arch-gated change needs
+just test-arches
 
 # Normal boot
 just run                            # no tests, starts shell

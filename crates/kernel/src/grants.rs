@@ -93,12 +93,32 @@ pub unsafe fn verify_grant(
             }
 
             // Read the grant entry from the granter's grant table.
-            // s_grant_pa was computed during do_setgrant_handler using
-            // s_phys_delta: PA = VA + (phys_code_base - code_start).
-            let grant_entry_pa =
+            //
+            // `s_grant_pa` is the granter's address of its table, translated to
+            // a kernel-readable physical address where the arch identity-maps
+            // one (`do_setgrant_handler` adds `s_phys_delta`). C performs the
+            // same read with `data_copy`, which switches to the granter's page
+            // table; an arch whose two address spaces are separate memories has
+            // neither, so the read is the cross-address-space operation
+            // `read_from_proc` names. Dereferencing the address directly there
+            // would ingest this kernel's own bytes at that offset and then act
+            // on them as the granter's table.
+            //
+            // C hides a failure here as EPERM, so a table the granter never
+            // wrote is indistinguishable from a bad grant id.
+            let grant_entry_addr =
                 priv_data.s_grant_pa + (cur_grant as u64) * core::mem::size_of::<CpGrant>() as u64;
 
-            let g = core::ptr::read(grant_entry_pa as *const CpGrant);
+            let mut g: CpGrant = core::mem::zeroed();
+            let read = crate::vm::read_from_proc(
+                proc_nr as i32,
+                grant_entry_addr,
+                (&raw mut g).cast::<u8>(),
+                core::mem::size_of::<CpGrant>(),
+            );
+            if read != OK {
+                return Err(EPERM);
+            }
 
             let flags = g.cp_flags;
 
@@ -114,11 +134,18 @@ pub unsafe fn verify_grant(
                 }
                 depth += 1;
 
-                // Verify actual grantee for indirect
+                // Verify actual grantee for indirect.
+                //
+                // C compares `cp_who_to` against `ANY`, which this port does not
+                // have: `mini_receive` normalizes the wire sentinel
+                // `0x0000ffff` into `NONE`, so `GRANTEE_ANY` carries that value
+                // with the meaning the grant needs. `PORTING_PLAN.md` finding 18
+                // records the divergence from C, where `ANY` and `NONE` are
+                // distinct.
                 let indirect = g.cp_u.cp_indirect;
                 if indirect.cp_who_to != cur_grantee
-                    && cur_grantee != crate::system::NONE
-                    && indirect.cp_who_to != crate::system::NONE
+                    && cur_grantee != GRANTEE_ANY
+                    && indirect.cp_who_to != GRANTEE_ANY
                 {
                     return Err(EPERM);
                 }
@@ -147,10 +174,11 @@ pub unsafe fn verify_grant(
                     return Err(EPERM);
                 }
 
-                // Verify grantee
+                // Verify grantee — `GRANTEE_ANY` is the wildcard, as in the
+                // indirect branch above.
                 if direct.cp_who_to != cur_grantee
-                    && cur_grantee != crate::system::NONE
-                    && direct.cp_who_to != crate::system::NONE
+                    && cur_grantee != GRANTEE_ANY
+                    && direct.cp_who_to != GRANTEE_ANY
                 {
                     return Err(EPERM);
                 }
@@ -173,10 +201,11 @@ pub unsafe fn verify_grant(
                 }
                 let magic = g.cp_u.cp_magic;
 
-                // Verify grantee
+                // Verify grantee — `GRANTEE_ANY` is the wildcard, as in the
+                // indirect branch above.
                 if magic.cp_who_to != cur_grantee
-                    && cur_grantee != crate::system::NONE
-                    && magic.cp_who_to != crate::system::NONE
+                    && cur_grantee != GRANTEE_ANY
+                    && magic.cp_who_to != GRANTEE_ANY
                 {
                     return Err(EPERM);
                 }
@@ -277,15 +306,39 @@ pub unsafe fn safecopy(
         // Phase 6.14: wire new_granter into copy path and
         // differentiate CPF_TRY from normal copies.
         //
-        // Magic grants set `new_granter` to `cp_who_from` (the
-        // process whose memory is actually being accessed). Use
-        // the effective granter's CR3 to access v_offset and the
-        // caller's CR3 to access addr.
+        // Magic grants set `new_granter` to `cp_who_from` (the process whose
+        // memory is actually being accessed). Use the effective granter's CR3 to
+        // access v_offset and the caller's CR3 to access addr.
         //
-        // CPF_TRY grants prevent page-fault-on-demand behavior;
-        // use a direct identity-map copy (same as C's virtual_copy
-        // for try grants vs virtual_copy_vmcheck for normal grants).
+        // Both addresses are *virtual* — `v_offset` is `cp_start + offset` in
+        // the granter's space — so on an arch whose page tables do not join the
+        // two spaces they can only be reached through the HAL. `virtual_copy` is
+        // that operation, so every branch below routes through it as soon as the
+        // arch says it must; the direct copies stay for the arches where the
+        // kernel can address both sides itself.
+        let via_hal = crate::hal::CROSS_ADDRESS_SPACE_COPY.is_some();
+
         if flags & CPF_TRY != 0 {
+            // TRY grants skip the page-present pre-check above and rely on the
+            // kernel reaching both addresses directly. Only an arch with an
+            // identity map can, so where the spaces are separate memories the
+            // copy is an ordinary one.
+            if via_hal {
+                let caller_slot = endpoint_slot((*caller).p_endpoint);
+                let effective_slot = endpoint_slot(new_granter);
+                let (src_proc, dst_proc) = if access & CPF_READ != 0 {
+                    (effective_slot, caller_slot)
+                } else {
+                    (caller_slot, effective_slot)
+                };
+                return crate::vm::virtual_copy(
+                    src_proc,
+                    src_addr,
+                    dst_proc,
+                    dst_addr,
+                    bytes as usize,
+                );
+            }
             core::ptr::copy_nonoverlapping(
                 src_addr as *const u8,
                 dst_addr as *mut u8,
@@ -294,7 +347,7 @@ pub unsafe fn safecopy(
             OK
         } else {
             let boot_cr3 = crate::hal::boot_cr3();
-            if boot_cr3 == 0 {
+            if boot_cr3 == 0 && !via_hal {
                 // Pre-init / test mode: direct copy
                 core::ptr::copy_nonoverlapping(
                     src_addr as *const u8,
@@ -316,9 +369,16 @@ pub unsafe fn safecopy(
                 (caller_slot, effective_slot)
             };
 
-            if crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes as usize) != 0
-            {
-                // Fallback: identity-mapped (kernel task) addresses
+            let r = crate::vm::virtual_copy(src_proc, src_addr, dst_proc, dst_addr, bytes as usize);
+            if r != 0 {
+                // Fallback: identity-mapped (kernel task) addresses. That is
+                // only a sensible retry where the kernel can address both
+                // sides; without an identity map the addresses are the
+                // kernel's own image, so the failure is reported instead of
+                // retried somewhere plausible-looking.
+                if via_hal {
+                    return r;
+                }
                 core::ptr::copy_nonoverlapping(
                     src_addr as *const u8,
                     dst_addr as *mut u8,
@@ -407,11 +467,28 @@ pub unsafe fn do_vsafecopy(caller: *mut Proc, msg: &[u8; MESSAGE_SIZE]) -> i32 {
         // Read the vector from caller's address space
         let mut vec: [VscpVec; SCPVEC_NR] = core::mem::zeroed();
         let vec_bytes = els * size_of::<VscpVec>();
-        core::ptr::copy_nonoverlapping(
-            vec_addr as *const u8,
-            vec.as_mut_ptr() as *mut u8,
-            vec_bytes,
-        );
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            // The caller's memory is a different memory here, so this read has
+            // to go through the HAL: reading `vec_addr` directly would ingest
+            // whatever the kernel happens to keep at that offset and then act on
+            // it as a vector of copies.
+            let r = copy(
+                (*caller).p_nr,
+                vec_addr,
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                vec.as_mut_ptr() as u64,
+                vec_bytes,
+            );
+            if r != OK {
+                return r;
+            }
+        } else {
+            core::ptr::copy_nonoverlapping(
+                vec_addr as *const u8,
+                vec.as_mut_ptr() as *mut u8,
+                vec_bytes,
+            );
+        }
 
         // Process each element
         for item in vec.iter().take(els) {
@@ -786,12 +863,18 @@ mod tests {
     fn test_direct_grant_any_grantee() {
         unsafe {
             let ep = make_endpoint(0, 0);
-            let any_ep = crate::system::NONE;
+            let other = make_endpoint(0, 3);
             grant_buf!(_gb, grant_ptr, 16);
             setup_with_buf(0, ep, grant_ptr, 16);
-            *grant_ptr.add(0) = make_direct_grant(CPF_READ, any_ep, 0x1000, 4096);
-            let r = verify_grant(ep, any_ep, 0, 256, CPF_READ, 0);
-            assert!(r.is_ok(), "ANY grantee should allow any caller");
+            // The grant names the wildcard — `GRANTEE_ANY`, the value C spells
+            // `ANY` (see the indirect branch above) — and the caller is not that
+            // value, so acceptance can only come from the wildcard.
+            *grant_ptr.add(0) = make_direct_grant(CPF_READ, GRANTEE_ANY, 0x1000, 4096);
+            let r = verify_grant(ep, other, 0, 256, CPF_READ, 0);
+            assert!(
+                r.is_ok(),
+                "a grant made to any grantee must serve any caller"
+            );
         }
     }
 
@@ -959,12 +1042,15 @@ mod tests {
     fn test_magic_grant_any_grantee() {
         unsafe {
             let ep = make_endpoint(0, 1); // VFS (slot 1, gen 0)
-            let any_ep = crate::system::NONE;
+            let other = make_endpoint(0, 3);
             grant_buf!(_gb, grant_ptr, 16);
             setup_with_buf(1, ep, grant_ptr, 16);
-            *grant_ptr.add(0) = make_magic_grant(CPF_READ, ep, any_ep, 0x5000, 2048);
-            let r = verify_grant(ep, any_ep, 0, 128, CPF_READ, 0);
-            assert!(r.is_ok(), "ANY grantee on magic grant should pass");
+            *grant_ptr.add(0) = make_magic_grant(CPF_READ, ep, GRANTEE_ANY, 0x5000, 2048);
+            let r = verify_grant(ep, other, 0, 128, CPF_READ, 0);
+            assert!(
+                r.is_ok(),
+                "a magic grant made to any grantee must serve any caller"
+            );
         }
     }
 

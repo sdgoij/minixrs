@@ -1,0 +1,564 @@
+'use strict';
+//
+// Real servers under the kernel's own scheduler: DS, RS and PM.
+//
+// The question this answers is narrower than "does the boot chain work" and
+// deliberately so: can a *real* server, compiled for the real target, be
+// instantiated as a process and driven as far as its main loop? Each of the
+// three runs its own init and then `loop { RECEIVE }`, so the first syscall an
+// instance issues is its first receive — which is the whole assertion. Nothing
+// is asked of the servers, and nothing is added to them to make it checkable.
+//
+// What is *not* claimed here: that they can talk to each other — which is what
+// the DS client at the bottom of this file changes. It publishes a value to DS
+// and reads it back through `minix_util`'s real client, so DS answers a real
+// request for the first time, and it can only answer it by copying the key out
+// of the client's instance (the host mediates that, §5.1).
+
+const fs = require('fs');
+const path = require('path');
+
+const buildDir = path.join(__dirname, 'build');
+const kernelPath = path.join(buildDir, 'kernel.wasm');
+const serverPath = path.join(buildDir, 'servers.async.wasm');
+
+const RECEIVE = 47;
+const SENDREC = 48;
+const SENDNB = 51;
+const ANY = 0x0000ffff;
+/// Kernel call 7 is `SYS_GETKSIG`, which PM asks for on every notification.
+const KERNEL_CALL = 50;
+const GETKSIG = 7;
+/// Kernel call 26 is `SYS_GETINFO`, which is how the client learns its own
+/// endpoint before announcing itself to RS.
+const SYS_GETINFO = 26;
+const STATE_UNWINDING = 1;
+const STRUCT_SIZE = 16;
+const BUF_SIZE = 65536;
+const EINVAL = -22;
+
+// A runaway process cannot be preempted on this port (§6.4): if a guest loops
+// inside one dispatch, the host never gets control back and the run cannot even
+// report what happened. The budget is the host's only lever. Once it is spent
+// the gate answers EINVAL, which is enough to break a spin, and the trace stops
+// growing — both matter because the first version of this harness recorded every
+// syscall and exhausted Node's heap instead of diagnosing anything.
+const SYSCALL_BUDGET = 2000;
+const TRACE_LIMIT = 64;
+let syscallsLeft = SYSCALL_BUDGET;
+/// Which instance ran the budget out, if any. Named rather than booleans so the
+/// failure report says who was spinning.
+let exhaustedBy = null;
+
+const checks = [];
+function check(name, ok, detail) {
+  checks.push({ name, ok });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
+  if (!ok && detail) console.log(`        ${detail}`);
+}
+function note(name, detail) {
+  console.log(`NOTE  ${name}`);
+  if (detail) console.log(`        ${detail}`);
+}
+
+const readU32 = (mem, addr) => new DataView(mem.buffer).getUint32(addr, true);
+const writeU32 = (mem, addr, v) =>
+  new DataView(mem.buffer).setUint32(addr, v, true);
+
+let timeline = [];
+let currentLine = '';
+let consoleTag = 'kernel';
+
+function emit(byte) {
+  const ch = String.fromCharCode(byte & 0xff);
+  if (ch === '\n') {
+    timeline.push(`${consoleTag}: ${currentLine}`);
+    currentLine = '';
+    return;
+  }
+  if (ch !== '\r') currentLine += ch;
+}
+
+let cycles = 0;
+let haltCode = null;
+
+// ------------------------------------------------------- cross-process copy
+//
+// The host is this port's page table: it owns every instance's memory, so the
+// kernel's own copies — IPC payloads, message delivery, and SYS_VIRCOPY, which
+// is what DS uses to read a client's key — arrive here. The kernel decides what
+// moves; this only moves the bytes, and refuses what it cannot reach rather
+// than trapping on it.
+
+const EFAULT = -14;
+const copyLog = [];
+
+/// The memory a copy endpoint names: the kernel's own for a negative process
+/// number, else the instance spawned for that slot.
+function memoryFor(proc) {
+  if (proc < 0) return kernel.exports.memory;
+  const st = procs.find((p) => p.spec.slot === proc);
+  return st === undefined ? null : st.memory;
+}
+
+function copyBetween(srcProc, srcAddr, dstProc, dstAddr, bytes) {
+  const src = memoryFor(srcProc);
+  const dst = memoryFor(dstProc);
+  let result = 0;
+  if (src === null || dst === null) result = EFAULT;
+  else if (srcAddr < 0 || dstAddr < 0 || bytes < 0) result = EFAULT;
+  else if (srcAddr + bytes > src.buffer.byteLength) result = EFAULT;
+  else if (dstAddr + bytes > dst.buffer.byteLength) result = EFAULT;
+  else {
+    new Uint8Array(dst.buffer).set(new Uint8Array(src.buffer, srcAddr, bytes), dstAddr);
+  }
+  copyLog.push({ srcProc, srcAddr, dstProc, dstAddr, bytes, result });
+  return result;
+}
+
+// ----------------------------------------------------------- kernel instance
+
+const kernelModule = new WebAssembly.Module(fs.readFileSync(kernelPath));
+const kernel = new WebAssembly.Instance(kernelModule, {
+  env: {
+    host_console_write: (b) => {
+      consoleTag = 'kernel';
+      emit(b);
+    },
+    host_console_read: () => -1,
+    host_console_available: () => 0,
+    host_cycles: () => BigInt((cycles += 1000)),
+    host_halt: (code) => {
+      haltCode = code;
+    },
+    host_copy_between: copyBetween,
+  },
+});
+
+kernel.exports.minix_kernel_init();
+
+// ---------------------------------------------------------- server instances
+
+const serverModule = new WebAssembly.Module(fs.readFileSync(serverPath));
+
+// Boot order, and the process numbers `BOOT_IMAGE` gives them: DS is 6, RS is 2,
+// PM is 0. With generation 0 an endpoint equals its process number, which is why
+// `minix_make_endpoint` answers the same value — but it is still asked rather
+// than assumed, because a hand-picked endpoint is what deadlocked M2. DS's 6 is
+// also what `minix_util`'s client hardcodes as `DS_ENDPOINT`, which is why the
+// client can use the real library rather than a hand-rolled message.
+const specs = [
+  { slot: 6, entry: 'minix_server_ds', label: 'ds' },
+  { slot: 2, entry: 'minix_server_rs', label: 'rs' },
+  { slot: 0, entry: 'minix_server_pm', label: 'pm' },
+  // Not a boot process and not a server: the client that gives DS something to
+  // answer. Its slot is above the boot procs on purpose, so `p_priv` stays null
+  // — `may_send_to` allows anything from a privilege-less process, and allows DS
+  // to reply to one, which is what lets a plain client reach a system server
+  // whose `s_ipc_to` mask was never filled in (nothing calls `fill_sendto_mask`).
+  { slot: 20, entry: 'minix_ds_client', label: 'client' },
+  // The control: the same client, never announced to RS, so DS has no label for
+  // it. Its publish must still be refused.
+  { slot: 21, entry: 'minix_ds_client_unregistered', label: 'unregistered' },
+];
+
+for (const s of specs) s.endpoint = kernel.exports.minix_make_endpoint(s.slot);
+
+function makeServer(spec) {
+  const memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
+  const st = {
+    spec,
+    memory,
+    inst: null,
+    started: false,
+    exited: false,
+    pending: null,
+    blockedCount: 0,
+    dataPtr: 0,
+    scratch: 0,
+    syscalls: 0,
+    trace: [],
+  };
+
+  const imports = {
+    env: {
+      memory,
+      host_cycles: () => BigInt((cycles += 1000)),
+      // The servers reach this through `drivers`' wasm HAL boundary, which is
+      // the same one the kernel uses. Nothing has asked for a copy yet, but DS
+      // will: `SYS_VIRCOPY` is how it reads a client's key, so the primitive is
+      // the real one rather than a refusal.
+      host_copy_between: copyBetween,
+      minix_syscall: (nrRaw, a0, a1) => {
+        const nr = Number(nrRaw);
+        const dst = Number(a0);
+        const msgAddr = Number(a1);
+        if (syscallsLeft <= 0) {
+          exhaustedBy = spec.label;
+          return EINVAL;
+        }
+        syscallsLeft -= 1;
+        if (st.trace.length < TRACE_LIMIT) st.trace.push({ nr, a0: dst });
+        st.syscalls += 1;
+
+        if (st.pending !== null) {
+          // Resumed: the kernel has answered, and the message is already in this
+          // instance's memory — put there by the kernel's own delivery, which
+          // goes through the HAL copy seam. The host does not carry it.
+          st.pending = null;
+          // Put Asyncify back to NORMAL before returning, or the instrumented
+          // caller re-enters its rewind path and traps.
+          st.inst.exports.asyncify_stop_rewind();
+          // Deliberately not the value cached at block time: a receive that
+          // blocked is satisfied later, and `mini_send` stores the *sender's*
+          // endpoint in the receiver's frame return slot. On a hardware arch the
+          // syscall-return epilogue restores it; a wasm instance has no such
+          // path, so the host reads it out. The cached value was OK — at block
+          // time no sender was known.
+          return BigInt(kernel.exports.minix_proc_retval(spec.slot));
+        }
+
+        const result = kernel.exports.minix_syscall(
+          spec.slot,
+          BigInt(nr),
+          BigInt(dst),
+          BigInt(msgAddr),
+          0n,
+          0n,
+          0n,
+          0n
+        );
+        const blocked = kernel.exports.minix_proc_blocked(spec.slot) === 1;
+
+        if (blocked) {
+          st.blockedCount += 1;
+          st.pending = { value: result, nr, msgAddr };
+          st.inst.exports.asyncify_start_unwind(st.dataPtr);
+          return 0n;
+        }
+        return result;
+      },
+    },
+  };
+
+  st.inst = new WebAssembly.Instance(serverModule, imports);
+  // The module names its own scratch region; it is not derived from a linker
+  // default. The 16-byte Asyncify struct goes at its start and the unwind stack
+  // follows.
+  st.scratch = st.inst.exports.asyncify_scratch_ptr();
+  st.dataPtr = st.scratch;
+  const bufStart = st.dataPtr + STRUCT_SIZE;
+  writeU32(memory, st.dataPtr + 0, bufStart);
+  writeU32(memory, st.dataPtr + 4, bufStart + BUF_SIZE);
+  writeU32(memory, st.dataPtr + 8, bufStart);
+  return st;
+}
+
+const procs = specs.map(makeServer);
+
+const spawnFailures = specs.filter(
+  (s) => kernel.exports.minix_proc_spawn(s.slot, s.endpoint) !== 0
+);
+check(
+  'the kernel accepts every instance into its table',
+  spawnFailures.length === 0,
+  spawnFailures.map((s) => s.label).join(', ')
+);
+
+note(
+  'what each instance claims for itself',
+  procs
+    .map(
+      (p) =>
+        `${p.spec.label}: scratch=0x${p.scratch.toString(16)}, memory=${p.memory.buffer.byteLength}`
+    )
+    .join('; ')
+);
+
+// Start PM's chain. This is the kernel-state step `boot_init` performs on the
+// shipping arches: RS's notification is left pending on PM's privilege structure
+// and PM finds it on its next RECEIVE. It is deliberately not a message — nothing
+// is sent between instances — which is why it is a single bit to set rather than
+// a copy.
+const notified = kernel.exports.minix_boot_notify() === 0;
+check(
+  'the kernel sets RS boot notification on PM',
+  notified,
+  'minix_boot_notify() could not reach the privilege structure'
+);
+
+// ---------------------------------------------------------- dispatch loop
+
+function run(st) {
+  if (st.pending !== null) {
+    st.inst.exports.asyncify_start_rewind(st.dataPtr);
+  }
+  st.started = true;
+  st.inst.exports[st.spec.entry]();
+  const state = st.inst.exports.asyncify_get_state();
+  if (state === STATE_UNWINDING) return;
+  st.exited = true;
+  kernel.exports.minix_proc_exit(st.spec.slot);
+}
+
+let steps = 0;
+let converged = true;
+for (;;) {
+  const slot = kernel.exports.minix_step();
+  if (slot === -1) break;
+  // A safety net, not a bound: the exchange adds round trips, and a resume
+  // consumes a step like a first run does. A runaway is caught by the syscall
+  // budget instead, which names the instance.
+  if (++steps > 256) {
+    converged = false;
+    break;
+  }
+  const st = procs.find((p) => p.spec.slot === slot);
+  if (st === undefined) {
+    converged = false;
+    note('the kernel picked a slot the host never spawned', `slot ${slot}`);
+    break;
+  }
+  run(st);
+}
+
+check('the dispatch loop converged', converged, `${steps} steps`);
+
+// ------------------------------------------------------------- assertions
+
+const servers = procs.filter((p) => ['ds', 'rs', 'pm'].includes(p.spec.label));
+const client = procs.find((p) => p.spec.label === 'client');
+const unregistered = procs.find((p) => p.spec.label === 'unregistered');
+const ds = procs.find((p) => p.spec.label === 'ds');
+const rs = procs.find((p) => p.spec.label === 'rs');
+
+// The last syscall a server makes before it stops is the `RECEIVE` it blocks in,
+// which is what "it is in its main loop" means for an instance that no longer has
+// a first-syscall-is-a-receive shape: RS does real work at init now — it registers
+// its grant table and hands DS the process table — so its trace starts with that
+// work and ends in the loop. A resume re-enters the syscall import, so a trace
+// grows duplicates at every unwind and only its tail is meaningful here.
+const lastSyscall = (p) => p.trace[p.trace.length - 1];
+const reachedLoop = servers.filter(
+  (p) => p.trace.length > 0 && lastSyscall(p).nr === RECEIVE
+);
+check(
+  'every server reached its main loop',
+  reachedLoop.length === servers.length,
+  servers
+    .map((p) => `${p.spec.label}: ${p.trace.map((t) => t.nr).join(',') || '(no syscalls)'}`)
+    .join('; ')
+);
+
+check(
+  'each reached it by blocking in the kernel on a receive',
+  servers.every((p) => kernel.exports.minix_proc_blocked(p.spec.slot) === 1),
+  servers
+    .map((p) => `${p.spec.label}: blocked=${kernel.exports.minix_proc_blocked(p.spec.slot)}`)
+    .join('; ')
+);
+
+check(
+  'each is receiving from any sender, as its main loop asks',
+  servers.every((p) => {
+    const receives = p.trace.filter((t) => t.nr === RECEIVE);
+    return receives.length > 0 && receives[receives.length - 1].a0 === ANY;
+  }),
+  servers
+    .map((p) => {
+      const receives = p.trace.filter((t) => t.nr === RECEIVE);
+      return `${p.spec.label}: a0=${receives[receives.length - 1]?.a0}`;
+    })
+    .join('; ')
+);
+
+// The client's own sequence is the claim: it asks the kernel who it is (that is
+// `rs_up`'s `GET_WHOAMI`), announces itself to RS, and only then sends to DS.
+// Order rather than equality: a resume re-enters the syscall import, so the trace
+// repeats an entry per block and only the sequence of what came first is stable.
+const clientSends = client.trace.filter((t) => t.nr === SENDREC);
+check(
+  'the client announces itself to RS before it asks DS for anything',
+  client.trace.length > 0 &&
+    client.trace[0].nr === KERNEL_CALL &&
+    client.trace[0].a0 === SYS_GETINFO &&
+    clientSends.length >= 3 &&
+    clientSends[0].a0 === rs.spec.slot &&
+    clientSends.some((t) => t.a0 === ds.spec.slot),
+  client.trace.map((t) => `nr=${t.nr} a0=${t.a0}`).join('; ') || '(no syscalls)'
+);
+
+// PM is the one that has something to do. `boot_init` leaves RS's notification
+// pending on PM's privilege structure, and PM finds it on its first RECEIVE —
+// then asks the kernel for pending signals, finds none, and goes back to waiting.
+// That round trip is the chain starting to move, and it is visible only because
+// the notification reached PM's own memory.
+const pm = procs.find((p) => p.spec.label === 'pm');
+check(
+  'PM consumed the boot notification and returned to receiving',
+  JSON.stringify(pm.trace.map((t) => [t.nr, t.a0])) ===
+    JSON.stringify([
+      [RECEIVE, ANY],
+      [KERNEL_CALL, GETKSIG],
+      [RECEIVE, ANY],
+    ]),
+  pm.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
+);
+// PM's three copies, taken by *who they involve* rather than by position: RS's
+// init now asks the kernel for two copies of its own (the `SYS_SETGRANT` message
+// and its reply) before PM runs, so a prefix of the log is no longer PM's. The
+// middle one is the point: the notification arriving, PM's `SYS_GETKSIG` message
+// being read *out of PM's memory*, and the reply going back. Before the
+// kernel-call fix the middle copy did not exist — the kernel read its own memory
+// in place of PM's message and dispatched on that.
+const pmCopies = copyLog.filter((c) => c.srcProc === 0 || c.dstProc === 0);
+check(
+  'the notification, the kernel-call message and its reply all crossed the seam',
+  pmCopies.length === 3 &&
+    pmCopies.every((c) => c.result === 0) &&
+    pmCopies[0].srcProc < 0 &&
+    pmCopies[0].dstProc === 0 &&
+    pmCopies[1].srcProc === 0 &&
+    pmCopies[1].dstProc < 0 &&
+    pmCopies[2].srcProc < 0 &&
+    pmCopies[2].dstProc === 0,
+  pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
+);
+
+// ------------------------------------------------------------ the DS exchange
+
+// The handshake that makes any of this possible, and the reason it is a grant
+// rather than message bytes: the table is ~4.4 KiB of *RS's* memory, so the copy
+// runs through the kernel's scope-bound seam (`SYS_SAFECOPYFROM`), and the grant
+// entry `verify_grant` resolves is itself read out of RS's instance.
+const grantEntry = copyLog.find((c) => c.srcProc === 2 && c.dstProc === -1 && c.bytes === 48);
+check(
+  "the kernel read RS's grant entry out of RS's own instance",
+  grantEntry !== undefined && grantEntry.result === 0,
+  copyLog
+    .filter((c) => c.srcProc === 2 || c.dstProc === 2)
+    .map((c) => `${c.srcProc}:0x${c.srcAddr.toString(16)}->${c.dstProc}:${c.bytes}=${c.result}`)
+    .join(', ')
+);
+// 32 slots of `RprocPub` (140 bytes each on this 32-bit target).
+const RPUB_TABLE_BYTES = 4480;
+const tableCopy = copyLog.find(
+  (c) => c.srcProc === 2 && c.dstProc === 6 && c.bytes === RPUB_TABLE_BYTES
+);
+check(
+  "DS copied RS's public process table out of RS's instance",
+  tableCopy !== undefined && tableCopy.result === 0,
+  copyLog
+    .filter((c) => c.dstProc === 6)
+    .map((c) => `${c.srcProc}:0x${c.srcAddr.toString(16)}->6 ${c.bytes}b=${c.result}`)
+    .join(', ')
+);
+
+// What the client saw, read from the client's own instance: it has no console
+// import, so a report in memory is the only channel it has.
+const readReport = (st, n) => {
+  const view = new DataView(st.memory.buffer);
+  const ptr = st.inst.exports.ds_report_ptr();
+  return Array.from({ length: n }, (_, i) => Number(view.getBigInt64(ptr + i * 8, true)));
+};
+const dsReport = readReport(client, 4);
+
+const dsReplies = ds.trace.filter((t) => t.nr === SENDNB).length;
+check(
+  'DS answered the handshake and the client',
+  dsReplies >= 3,
+  `${dsReplies} reply syscall(s) in DS's trace`
+);
+
+// The round trip this harness exists for, now that DS can name the client: RS
+// registered the label (`rs_up`), published it to DS, and DS accepted both the
+// publish and the read-back.
+check(
+  'the client announced itself to RS',
+  dsReport[3] === 0,
+  `rs_up=${dsReport[3]} (expected 0)`
+);
+check(
+  'DS accepted the client\'s publish and handed the value back',
+  dsReport[0] === 0 && dsReport[2] === 0x2a,
+  `publish=${dsReport[0]} retrieve=${dsReport[1]} value=0x${dsReport[2].toString(16)}`
+);
+
+// And the refusal survives: the second client runs the same protocol against the
+// same key without announcing itself, so DS has no label for it.
+const unregReport = readReport(unregistered, 4);
+check(
+  'DS refuses a publisher it has no label for, as the reference does',
+  unregReport[0] === -1,
+  `publish=${unregReport[0]} (expected -1 EPERM)`
+);
+
+// The key is a `const` in the client's own instance, so DS can only have it
+// because the kernel asked the host to copy it across — the one thing that makes
+// this a two-instance exchange rather than a server answering itself. One copy
+// per request, and the byte count is the key's own length.
+const keyCopies = copyLog.filter(
+  (c) =>
+    c.srcProc === client.spec.slot &&
+    c.dstProc === ds.spec.slot &&
+    c.bytes === 8 &&
+    c.result === 0
+);
+check(
+  "DS read the key out of the client's instance through the seam",
+  keyCopies.length === 2,
+  copyLog.map((c) => `${c.srcProc}->${c.dstProc}:${c.bytes}=${c.result}`).join(', ')
+);
+
+check(
+  'no instance ran the syscall budget out',
+  exhaustedBy === null,
+  `${exhaustedBy} spun past ${SYSCALL_BUDGET} syscalls`
+);
+
+check(
+  "the kernel's run queues are consistent afterwards",
+  kernel.exports.minix_runqueues_ok() === 1,
+  'runqueues_ok() reported an inconsistency'
+);
+
+note(
+  'what this establishes, and what it does not',
+  'All three servers ran their own init and blocked in RECEIVE; RS registered its ' +
+    'grant table and handed DS the public process table, which DS copied out of ' +
+    "RS's own instance and mapped into its label table; PM consumed the RS boot " +
+    'notification; and DS served a real client that announced itself with `rs_up`, ' +
+    'reading the key out of the client\'s instance through the copy seam and ' +
+    'addressing both replies back to the client. The control client — same ' +
+    'protocol, same key, no announcement — is still refused, so the authorisation ' +
+    'the label table provides is measured rather than assumed. What is not here is ' +
+    'the init-complete reply: C\'s service answers `RS_INIT` with its own result ' +
+    'message and RS consumes it in `do_init_ready`, which this port has not built, ' +
+    'so RS never learns that the seeding finished.'
+);
+
+console.log('\nper-server syscall trace:');
+for (const p of procs) {
+  console.log(`  ${p.spec.label} (slot ${p.spec.slot}, ep ${p.spec.endpoint}):`);
+  for (const t of p.trace) console.log(`    nr=${t.nr} a0=0x${t.a0.toString(16)}`);
+}
+
+console.log('\nkernel console:');
+for (const line of timeline) console.log(`  ${line}`);
+
+console.log(
+  `\ncross-process copies the kernel asked the host for (${copyLog.length}):`
+);
+if (copyLog.length === 0) {
+  console.log('  (none - nothing has been delivered to these servers yet)');
+}
+for (const c of copyLog) {
+  console.log(
+    `  ${c.srcProc}:0x${c.srcAddr.toString(16)} -> ${c.dstProc}:0x${c.dstAddr.toString(16)}` +
+      ` (${c.bytes} bytes) => ${c.result}`
+  );
+}
+
+const failed = checks.filter((c) => !c.ok);
+console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
+process.exit(failed.length === 0 ? 0 : 1);

@@ -32,6 +32,21 @@ unsafe extern "C" {
     fn host_cycles() -> u64;
     /// Report a terminal condition and stop the instance.
     fn host_halt(code: u32);
+    /// Copy `bytes` between two address spaces. `proc` is a process number, or
+    /// negative for the kernel's own address space. Returns 0, or a negative
+    /// errno.
+    ///
+    /// This is the port's page table. Two processes' address spaces are two
+    /// linear memories here, and the host owns both, so a cross-process copy is
+    /// not something the kernel can perform any more than a CR3 switch is
+    /// something the host could (§5.1 of `ARCH_WASM32.md`).
+    fn host_copy_between(
+        src_proc: i32,
+        src_addr: u32,
+        dst_proc: i32,
+        dst_addr: u32,
+        bytes: u32,
+    ) -> i32;
 }
 
 static TSC_SWITCH: AtomicU64 = AtomicU64::new(0);
@@ -45,11 +60,7 @@ pub(crate) fn console_write(byte: u8) {
 pub(crate) fn console_read() -> Option<u8> {
     // SAFETY: see `console_write`.
     let value = unsafe { host_console_read() };
-    if value < 0 {
-        None
-    } else {
-        Some(value as u8)
-    }
+    if value < 0 { None } else { Some(value as u8) }
 }
 
 pub(crate) fn console_available() -> i32 {
@@ -65,6 +76,21 @@ pub(crate) fn cycles() -> u64 {
 pub(crate) fn halt_host(code: u32) {
     // SAFETY: see `console_write`.
     unsafe { host_halt(code) };
+}
+
+/// Perform a cross-process copy through the host.
+///
+/// Called only by [`hal::CROSS_ADDRESS_SPACE_COPY`], which `kernel::vm`
+/// reaches for instead of switching page tables.
+pub(crate) fn copy_between_procs(
+    src_proc: i32,
+    src_addr: u32,
+    dst_proc: i32,
+    dst_addr: u32,
+    bytes: u32,
+) -> i32 {
+    // SAFETY: see `console_write`.
+    unsafe { host_copy_between(src_proc, src_addr, dst_proc, dst_addr, bytes) }
 }
 
 pub(crate) fn tsc_switch() -> u64 {

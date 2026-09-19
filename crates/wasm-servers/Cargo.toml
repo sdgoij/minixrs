@@ -1,0 +1,28 @@
+# Standalone: a wasm-only module with no host entry point, so a workspace-wide
+# build could not link it. Same reasoning as kernel-wasm and wasm-procs.
+[workspace]
+
+[package]
+name = "wasm-servers"
+version = "0.1.0"
+description = "Real MINIX servers as wasm modules, one exported entry point each"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+servers = { path = "../servers" }
+arch-common = { path = "../arch-common" }
+# Supplies the panic handler and the global allocator (`rt`), both gated on
+# `target_os = "minix"` — which this target now is. There is no `_start` for
+# wasm32, so nothing here conflicts with the host calling into an export.
+minix-rt = { path = "../minix-rt" }
+# The DS client below is the real one, not a hand-rolled message.
+minix-util = { path = "../minix-util" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2

@@ -454,13 +454,23 @@ pub unsafe fn proc_init() {
         }
     }
 
-    // Initialize privilege table pointers
+    // Initialize privilege table pointers, and mark every slot free.
+    //
+    // C's `proc_init` walks the whole table here setting `s_proc_nr = NONE`
+    // ("initialize as free") before any slot is assigned; the port's static
+    // starts them at 0 instead, and only the boot entries below are written. So
+    // without this, no *dynamic* slot is ever free and `get_priv` — the
+    // allocator `SYS_PRIVCTL` and `SYS_SETGRANT` reach for — answers ENOSPC
+    // forever. `test_get_priv_returns_slot` had been freeing the table by hand,
+    // which is why the gap was invisible.
     unsafe {
         let base = PRIV.get() as *mut Priv;
         let ptrs_base = PPRIV_ADDR.get() as *mut *mut Priv;
         for i in 0..NR_SYS_PROCS {
             // SAFETY: i < NR_SYS_PROCS, the array is exactly that size.
             *ptrs_base.add(i) = base.add(i);
+            (*base.add(i)).s_proc_nr = crate::system::NONE;
+            (*base.add(i)).s_id = i as i16;
         }
     }
 

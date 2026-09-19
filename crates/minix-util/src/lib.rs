@@ -3,6 +3,7 @@
 //! Provides thin, safe wrappers over IPC `sendrec` to MINIX system servers:
 //!
 //! - **DS client** (`ds`): Data Store publish/retrieve/subscribe/delete
+//! - **RS client** (`rs`): announce a service (`rs_up`)
 //! - **DEVMAN client** (`devman`): Device tree operations
 //! - **BDEV client** (`bdev`): Block device I/O
 //! - **CDEV client** (`cdev`): Character device I/O
@@ -16,3 +17,7 @@ pub mod bdev;
 pub mod cdev;
 pub mod devman;
 pub mod ds;
+pub mod rs;
+
+/// Shared message-layout helpers used by the clients in this crate.
+pub(crate) mod wire;

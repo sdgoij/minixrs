@@ -431,9 +431,13 @@ fn test_vm_check_range() -> u32 {
 unsafe extern "C" {
     #[cfg(target_arch = "x86_64")]
     static __kernel_end: u8;
+    /// Top of the aarch64 boot stack reservation; the physical allocator starts at
+    /// or above it (see `test_allocator_aarch64_clears_boot_stack`).
+    #[cfg(target_arch = "aarch64")]
+    static __stack_top: u8;
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn test_allocator() -> u32 {
     // Arch-agnostic smoke test: allocate a page and verify it is non-zero
     // and page-aligned. (Not freed — boot tests exit QEMU, and only the
@@ -453,6 +457,48 @@ fn test_allocator() -> u32 {
     }
     serial_write("  OK allocator page=0x");
     print_hex(page);
+    serial_write("\r\n");
+    0
+}
+
+#[cfg(target_arch = "aarch64")]
+fn test_allocator() -> u32 {
+    test_allocator_aarch64_clears_boot_stack()
+}
+
+/// The aarch64 physical allocator starts at `__kernel_end`, and the linker
+/// reserves the 64 KiB boot stack *below* that symbol (it grows down from
+/// `__stack_top`). If the reservation sat above it instead, the loader's first
+/// allocations would land inside the running stack and the loader's own writes
+/// would clobber its frame — which is exactly what a kernel image grown by a few
+/// KiB did to this arch, silently, as an endless loop in `load_and_prepare_proc`
+/// (`PORTING_PLAN.md` finding 19).
+///
+/// Two notes on what this can and cannot stage. It checks the allocator's *base*,
+/// not a fresh allocation: by the time this suite runs the boot loader has taken
+/// tens of MiB, so the first free page is clear of the stack either way and would
+/// prove nothing. And with the pre-fix layout the boot never reaches this suite
+/// at all — the loader dies first — so the regression it guards against is the
+/// *latent* one, where the overlap exists but the image is still small enough for
+/// the boot to survive it.
+#[cfg(target_arch = "aarch64")]
+fn test_allocator_aarch64_clears_boot_stack() -> u32 {
+    let stack_top = core::ptr::addr_of!(__stack_top) as u64;
+    let base = kernel::hal::phys_alloc_base();
+
+    if base < stack_top {
+        serial_write("  FAIL: allocator base 0x");
+        print_hex(base);
+        serial_write(" is below the boot stack top 0x");
+        print_hex(stack_top);
+        serial_write(" — the loader would overwrite its own stack\r\n");
+        return 1;
+    }
+
+    serial_write("  OK allocator base 0x");
+    print_hex(base);
+    serial_write(" is at or above the boot stack top 0x");
+    print_hex(stack_top);
     serial_write("\r\n");
     0
 }

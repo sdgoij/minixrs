@@ -371,17 +371,46 @@ pub unsafe fn vm_lookup(proc_nr: i32, virtaddr: u64) -> u64 {
     }
 }
 
-/// Write a pattern byte to a range of physical memory.
+/// Fill `count` bytes of `proc`'s memory at `vaddr` with the byte `c`.
+///
+/// `proc` is a process number, or a negative one for the kernel's own memory,
+/// and `vaddr` is virtual in that process's space — the shape C's
+/// `vm_memset(caller, who, ph, c, count)` has. The process argument is not
+/// decoration: it is what makes the write possible once the two address spaces
+/// are separate memories, because only the HAL can then reach the target. This
+/// is the fill counterpart of [`virtual_copy`], and it routes the same way:
+/// through [`write_to_proc`] where the arch says the copy is not the kernel's to
+/// make, and as a direct write where the page tables already join the two.
+///
+/// Returns 0, or a negative errno.
 ///
 /// # Safety
 ///
-/// The physical address range must be valid and identity-mapped.
-pub unsafe fn vm_memset(physaddr: u64, c: u8, count: usize) -> i32 {
+/// The range must be valid for `proc`.
+pub unsafe fn vm_memset(proc: i32, vaddr: u64, c: u8, count: usize) -> i32 {
     unsafe {
         if count == 0 {
             return 0;
         }
-        core::ptr::write_bytes(physaddr as *mut u8, c, count);
+        if crate::hal::CROSS_ADDRESS_SPACE_COPY.is_some() {
+            // The kernel has no writable view of another instance's memory, so
+            // the pattern is staged in a kernel buffer and each chunk handed to
+            // the copy seam. Chunked because the seam copies a byte range and
+            // this can be called with a count it would not be safe to stack.
+            const CHUNK: usize = 256;
+            let buf = [c; CHUNK];
+            let mut done = 0usize;
+            while done < count {
+                let n = core::cmp::min(count - done, CHUNK);
+                let r = write_to_proc(proc, vaddr + done as u64, buf.as_ptr(), n);
+                if r != 0 {
+                    return r;
+                }
+                done += n;
+            }
+            return 0;
+        }
+        core::ptr::write_bytes(vaddr as *mut u8, c, count);
         0
     }
 }
@@ -429,6 +458,14 @@ pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u
 /// `dst_proc`'s virtual address `dst_addr` by temporarily switching
 /// CR3 to each process's page table.
 ///
+/// Where the arch has no page tables to switch — so the two address spaces are
+/// genuinely separate memories — the copy is delegated to the HAL, because the
+/// only layer that can reach both is then outside the kernel (§5.1 of
+/// `ARCH_WASM32.md`). The caller cannot tell the difference, which is the point:
+/// this is the single choke point for cross-address-space movement, so IPC
+/// payloads, `sys_vircopy` and the grant table all start working on such an arch
+/// at once.
+///
 /// # Safety
 ///
 /// Both processes must have valid page tables. Addresses must be valid
@@ -444,6 +481,13 @@ pub unsafe fn virtual_copy(
         if bytes == 0 {
             return 0;
         }
+
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            // SAFETY: the HAL hook has the same contract as this function, and
+            // this body is already inside an `unsafe` block.
+            return copy(src_proc, src_addr, dst_proc, dst_addr, bytes);
+        }
+
         let src_rp = crate::table::proc_addr(src_proc);
         let dst_rp = crate::table::proc_addr(dst_proc);
         if src_rp.is_null() || dst_rp.is_null() {
@@ -522,6 +566,59 @@ pub unsafe fn virtual_copy(
             dst_va += chunk as u64;
         }
 
+        0
+    }
+}
+
+/// Read `bytes` from `proc`'s address space at `addr` into kernel memory.
+///
+/// Returns 0, or a negative errno. The sibling of [`virtual_copy`] for transfers
+/// that have a kernel buffer on one side: on an arch whose page tables cannot
+/// reach the process, the read goes through the HAL, and where they can, the
+/// kernel reads the address directly (the caller's page table being active during
+/// a kernel call is what makes that work).
+///
+/// It exists so call sites do not each have to ask which kind of arch they are
+/// on — the question has one answer and it belongs here.
+///
+/// # Safety
+///
+/// `addr` must be valid for `proc`; `dst` must have `bytes` writable bytes.
+pub unsafe fn read_from_proc(proc: i32, addr: u64, dst: *mut u8, bytes: usize) -> i32 {
+    unsafe {
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            return copy(
+                proc,
+                addr,
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                dst as u64,
+                bytes,
+            );
+        }
+        core::ptr::copy_nonoverlapping(addr as *const u8, dst, bytes);
+        0
+    }
+}
+
+/// Write `bytes` from kernel memory into `proc`'s address space at `addr`.
+///
+/// Returns 0, or a negative errno. See [`read_from_proc`].
+///
+/// # Safety
+///
+/// `addr` must be valid for `proc`; `src` must have `bytes` readable bytes.
+pub unsafe fn write_to_proc(proc: i32, addr: u64, src: *const u8, bytes: usize) -> i32 {
+    unsafe {
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            return copy(
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                src as u64,
+                proc,
+                addr,
+                bytes,
+            );
+        }
+        core::ptr::copy_nonoverlapping(src, addr as *mut u8, bytes);
         0
     }
 }
@@ -859,7 +956,7 @@ mod tests {
     #[test]
     fn test_vm_memset_zero_count() {
         unsafe {
-            assert_eq!(vm_memset(0x1000, 0xAA, 0), 0);
+            assert_eq!(vm_memset(-1, 0x1000, 0xAA, 0), 0);
         }
     }
 
@@ -868,7 +965,10 @@ mod tests {
         unsafe {
             let mut buf = [0u8; 64];
             let addr = buf.as_mut_ptr() as u64;
-            assert_eq!(vm_memset(addr, 0xAB, 64), 0);
+            // `-1` is the kernel's own space; on an arch with no copy seam the
+            // target is written through directly, which is the identity case a
+            // host test can reach.
+            assert_eq!(vm_memset(-1, addr, 0xAB, 64), 0);
             for (i, &byte) in buf.iter().enumerate() {
                 assert_eq!(byte, 0xAB, "byte {} mismatch", i);
             }

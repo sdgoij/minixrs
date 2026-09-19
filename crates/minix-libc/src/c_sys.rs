@@ -68,9 +68,13 @@ pub unsafe extern "C" fn setrlimit(_resource: c_int, _rlim: *const Rlimit) -> c_
 // ---- dirent.h ----
 
 /// POSIX `struct dirent`, fixed-name form (d_name is NUL-terminated).
+///
+/// `d_ino` is 64-bit because that is what MINIX's `ino_t` is (`uint64_t` in
+/// `sys/sys/types.h`) and what the getdents record below carries. `c_ulong`
+/// coincided with it on every 64-bit target and silently truncated on wasm32.
 #[repr(C)]
 pub struct Dirent {
-    d_ino: c_ulong,
+    d_ino: u64,
     d_off: c_long,
     d_reclen: c_ushort,
     d_type: u8,
@@ -121,45 +125,43 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readdir(dirp: *mut DIR) -> *mut Dirent {
     let d = unsafe { &mut *dirp };
-    loop {
-        if d.off >= d.buf_len {
-            let n = match minix_std::fs::getdents(d.fd, &mut d.buf) {
-                Ok(n) => n as usize,
-                Err(_) => return core::ptr::null_mut(),
-            };
-            if n == 0 {
-                return core::ptr::null_mut();
-            }
-            d.buf_len = n;
-            d.off = 0;
-        }
-        let off = d.off;
-        if off + DIRENT_NAME_OFF > d.buf_len {
-            d.off = d.buf_len;
+    if d.off >= d.buf_len {
+        let n = match minix_std::fs::getdents(d.fd, &mut d.buf) {
+            Ok(n) => n as usize,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        if n == 0 {
             return core::ptr::null_mut();
         }
-        let reclen = u16::from_ne_bytes([d.buf[off + 8], d.buf[off + 9]]) as usize;
-        if reclen == 0 || off + reclen > d.buf_len {
-            return core::ptr::null_mut();
-        }
-        let namlen = u16::from_ne_bytes([d.buf[off + 10], d.buf[off + 11]]) as usize;
-        let mut ino_bytes = [0u8; 8];
-        ino_bytes.copy_from_slice(&d.buf[off..off + 8]);
-        let ino = u64::from_ne_bytes(ino_bytes);
-        let d_type = d.buf[off + 12];
-        let name_len = namlen.min(255);
-        let name = &d.buf[off + DIRENT_NAME_OFF..off + DIRENT_NAME_OFF + name_len];
-        d.cur.d_ino = ino;
-        d.cur.d_off = 0;
-        d.cur.d_reclen = reclen as u16;
-        d.cur.d_type = d_type;
-        for (i, b) in name.iter().enumerate() {
-            d.cur.d_name[i] = *b as c_char;
-        }
-        d.cur.d_name[name_len] = 0;
-        d.off += reclen;
-        return &mut d.cur;
+        d.buf_len = n;
+        d.off = 0;
     }
+    let off = d.off;
+    if off + DIRENT_NAME_OFF > d.buf_len {
+        d.off = d.buf_len;
+        return core::ptr::null_mut();
+    }
+    let reclen = u16::from_ne_bytes([d.buf[off + 8], d.buf[off + 9]]) as usize;
+    if reclen == 0 || off + reclen > d.buf_len {
+        return core::ptr::null_mut();
+    }
+    let namlen = u16::from_ne_bytes([d.buf[off + 10], d.buf[off + 11]]) as usize;
+    let mut ino_bytes = [0u8; 8];
+    ino_bytes.copy_from_slice(&d.buf[off..off + 8]);
+    let ino = u64::from_ne_bytes(ino_bytes);
+    let d_type = d.buf[off + 12];
+    let name_len = namlen.min(255);
+    let name = &d.buf[off + DIRENT_NAME_OFF..off + DIRENT_NAME_OFF + name_len];
+    d.cur.d_ino = ino;
+    d.cur.d_off = 0;
+    d.cur.d_reclen = reclen as u16;
+    d.cur.d_type = d_type;
+    for (i, b) in name.iter().enumerate() {
+        d.cur.d_name[i] = *b as c_char;
+    }
+    d.cur.d_name[name_len] = 0;
+    d.off += reclen;
+    &mut d.cur
 }
 
 /// Close a directory stream.

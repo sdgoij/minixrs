@@ -221,6 +221,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    low-GB alias window must come from the cached kernel geometry
    (`VM_PAGING_MEMINFO`) — the exec-2 hang was exactly this class of bug.
    (aarch64-debugging skill gotcha 9/10)
+7. **Boot stack vs. physical allocator overlap — FIXED (2026-09).**
+   `tools/minix-raw-aarch64.ld` reserved the 64 KiB boot stack *before*
+   `__kernel_end`, and `kmain` starts the physical allocator at `__kernel_end`,
+   so the loader allocated pages inside its own running stack. Latent since the
+   script was written; an image grown by ~60 KiB armed it, and it presented as an
+   endless loop in `load_and_prepare_proc` with **no** serial output (a corrupt
+   loop counter: 3 segments logged, 4 in the disassembly). The stack reservation
+   now sits between the image and `__kernel_end`, and
+   `test_allocator_aarch64_clears_boot_stack` compares the allocator's *base*
+   against `__stack_top` rather than sampling a fresh allocation (a sample passes
+   in both layouts, because by then the loader has moved the free cursor). Any
+   change that grows the aarch64 image is a candidate to re-arm a latent overlap
+   of this shape — see `PORTING_PLAN.md` finding 19.
 
 ---
 
@@ -264,3 +277,17 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `kernel-boot-trampoline.elf`; the normal build keeps `kernel.bin` +
   `trampoline.elf`). No variant build ever touches the normal kernel
   paths, so `rm`/`cp` shims and `cargo clean -p kernel-boot` are gone.
+- **The bare-metal suite carried an arch assumption that only a bare-metal run
+  can see.** `syscall_brk` in `crates/kernel/src/tests.rs` asserted x86_64's
+  heap base as a literal (`0x3FE00000`, which riscv64 also uses and aarch64 does
+  not — it is at `0x2000_0000`), so `just test-qemu-aarch64` failed at
+  `FAIL syscall_brk` while `cargo test -p kernel` stayed green. It stayed green
+  because `tests.rs` is behind `kernel`'s `qemu-tests` feature and the host suite
+  does not enable it: these tests are compiled by a feature the host build never
+  turns on, so a hardcoded address there is invisible until `just test-qemu-<arch>`
+  runs. `syscall.rs`'s own brk tests had already been made arch-neutral when the
+  handler was; these had not. Now expressed as `hal::user_heap_base()` plus
+  `syscall::BRK_WINDOW_SIZE`, so nothing in the suite names an address.
+  Worth generalising: the suite is the *only* coverage for several of its own
+  tests, so a change to one arch's VA layout has to be followed by all three
+  `test-qemu-<arch>` runs, not by the host suite.

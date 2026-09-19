@@ -11,7 +11,15 @@
 
 use minix_std::MinixErr;
 
-type Message = [u8; 64];
+// The wire helpers are used from the `target_os = "minix"` bodies and from the
+// tests, so they are imported where they are used rather than unconditionally.
+#[cfg(any(target_os = "minix", test))]
+use crate::wire::{
+    OFF_M2_I1, OFF_M2_I3, OFF_M2_L1, OFF_M2_L2, build_msg, check_result, msg_get_i64, msg_set_i32,
+    msg_set_u64,
+};
+#[cfg(target_os = "minix")]
+use crate::wire::{OFF_M2_I2, reply_status};
 
 // DS request codes (arch_common::com, DS_RQ_BASE = 0x800).
 const DS_RQ_BASE: u32 = 0x800;
@@ -21,17 +29,8 @@ const DS_SUBSCRIBE: u32 = DS_RQ_BASE + 2;
 const DS_DELETE: u32 = DS_RQ_BASE + 4;
 const DS_GETSYSINFO: u32 = DS_RQ_BASE + 7;
 
-// Message field offsets (message-absolute). The m_type / request code is
-// at bytes 4..8 (the kernel overwrites bytes 0..4 with the dest endpoint
-// in sendrec); the payload starts at byte 8.
-const OFF_CALL: usize = 4; // i32: request code
-// m2 payload: m2i1@8, m2i2@12, m2i3@16, m2l1@24, m2l2@32.
-const OFF_M2_I1: usize = 8; // i32: key/pattern length
-const OFF_M2_I2: usize = 12; // i32: retrieve/subscribe flags
-const OFF_M2_I3: usize = 16; // i32: publish type flags
-const OFF_M2_L1: usize = 24; // u64: key/pattern pointer; reply value
-const OFF_M2_L2: usize = 32; // u64: publish value
-// m1 payload (getsysinfo): what@8, where@16, size@24.
+// m1 payload (getsysinfo): what@8, where@16, size@24. Kept here rather than in
+// `wire` because no other client uses the m1 layout.
 const OFF_GS_WHAT: usize = 8;
 const OFF_GS_WHERE: usize = 16;
 const OFF_GS_SIZE: usize = 24;
@@ -42,49 +41,6 @@ const DS_ENDPOINT: i32 = 6; // DS_PROC_NR
 const DSF_OVERWRITE: u32 = 0x002;
 const DSF_TYPE_U32: u32 = 0x010;
 const DSF_TYPE_LABEL: u32 = 0x080;
-
-// Helpers
-
-fn msg_set_i32(msg: &mut Message, off: usize, val: i32) {
-    msg[off..off + 4].copy_from_slice(&val.to_ne_bytes());
-}
-
-fn msg_set_u64(msg: &mut Message, off: usize, val: u64) {
-    msg[off..off + 8].copy_from_slice(&val.to_ne_bytes());
-}
-
-fn msg_get_i32(msg: &Message, off: usize) -> i32 {
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(&msg[off..off + 4]);
-    i32::from_ne_bytes(bytes)
-}
-
-fn msg_get_i64(msg: &Message, off: usize) -> i64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&msg[off..off + 8]);
-    i64::from_ne_bytes(bytes)
-}
-
-fn build_msg(typ: u32) -> Message {
-    let mut msg = [0u8; 64];
-    msg_set_i32(&mut msg, OFF_CALL, typ as i32);
-    msg
-}
-
-/// Read the reply status from the m_type field (bytes 4..8). Negative
-/// replies map to `Err(MinixErr(pos))`.
-fn reply_status(msg: &Message) -> Result<i32, MinixErr> {
-    let mtype = msg_get_i32(msg, OFF_CALL);
-    if mtype < 0 {
-        Err(MinixErr(-mtype))
-    } else {
-        Ok(mtype)
-    }
-}
-
-fn check_result(msg: &Message) -> Result<(), MinixErr> {
-    reply_status(msg).map(|_| ())
-}
 
 // Public API
 
@@ -229,6 +185,7 @@ pub fn ds_getsysinfo(buf: &mut [u8]) -> Result<(), MinixErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{OFF_CALL, msg_get_i32};
 
     #[test]
     fn test_ds_constants() {

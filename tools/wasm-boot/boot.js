@@ -55,10 +55,16 @@ const imports = {
     host_console_available: () => consolePending.length,
     // Monotonic and advancing on each read, so any kernel spin-wait on the
     // clock terminates instead of hanging the host.
-    host_cycles: () => (cycles += 1000),
+    // The HAL declares this returning u64, so it must come back as a BigInt.
+    host_cycles: () => BigInt((cycles += 1000)),
     host_halt: (code) => {
       haltCode = code;
     },
+    // M1 has no processes, so there is nothing for a cross-process copy to
+    // name. Refusing is the only honest answer here; M2 and the server harness
+    // implement it, and this import exists only because the kernel build
+    // references it unconditionally.
+    host_copy_between: () => -14, // EFAULT
   },
 };
 
@@ -88,6 +94,7 @@ const expectedImports = [
   'host_console_available',
   'host_cycles',
   'host_halt',
+  'host_copy_between',
 ];
 const importNames = WebAssembly.Module.imports(wasmModule).map((i) => i.name);
 check(

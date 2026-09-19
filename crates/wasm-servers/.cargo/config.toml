@@ -1,0 +1,28 @@
+# Link flags for the servers as wasm modules.
+#
+# `--import-memory` is the design's arrangement (§5): the host owns each
+# instance's memory, because only the host can move bytes between two processes.
+# `--initial-memory` is 16 MiB against a 256 MiB maximum, and lld's `--stack-first`
+# default puts its 1 MiB stack at the bottom of that; the port's heap window
+# (2..6 MiB) and declared stack region (14..16 MiB) have to stay clear of the
+# image. The boot log reports where the module itself ends.
+#
+# Cargo keys a custom target's config by the spec's file stem, so this is
+# `wasm32-minix` for `tools/wasm-target/wasm32-minix.json`.
+
+[target.wasm32-minix]
+rustflags = [
+  "-C", "link-arg=--no-entry",
+  # The servers' syscalls are `extern "C"` calls into the gate; resolve them as
+  # imports from `env` instead of failing the link for being undefined.
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--export=minix_server_ds",
+  "-C", "link-arg=--export=minix_server_rs",
+  "-C", "link-arg=--export=minix_server_pm",
+  # lld does not export `__heap_base` here, so the host is told where it may put
+  # the Asyncify buffer instead of inferring it.
+  "-C", "link-arg=--export=asyncify_scratch_ptr",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--initial-memory=16777216",
+  "-C", "link-arg=--max-memory=268435456",
+]

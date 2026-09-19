@@ -282,6 +282,80 @@ memory — that stays sealed — so the protection that matters (server privileg
 separation over private data) is preserved. Worth stating in the port's
 documentation rather than discovering later.
 
+**What was built: (a), and the reason is that the seam turned out not to be
+optional.** There are three places in the kernel where two address spaces meet —
+`vm::virtual_copy` (which `SYS_VIRCOPY` reduces to), `ipc::copy_from_user`, and
+`ipc::delivermsg` — and none of them can be reached from outside the kernel when
+the two sides are separate memories. Each now asks the HAL for a copy via
+`hal::CROSS_ADDRESS_SPACE_COPY`, which is `Some` on wasm32 (the host performs it)
+and `None` where page tables already join the two spaces, so the hardware arches
+keep their existing code path untouched.
+
+A second gap surfaced only once that worked, and it is worth recording because
+it is invisible from the kernel: the receive path sets `MF_DELIVERMSG` and leaves
+the actual copy to *the syscall-return epilogue*, which lives in each arch's asm.
+A wasm instance has no such epilogue — its syscall is an ordinary call whose
+return belongs to the host — so `ipc::deliver_pending_msg` names that step and
+`kernel-wasm` calls it. A third followed the notification work:
+`system::kernel_call_finish` writes the kernel call's reply straight to the
+caller's address, so PM's `SYS_GETKSIG` answer never arrived and PM span forever.
+And a fourth only surfaced once a *server* was given a request to answer: the
+epilogue does two things, and only the copy had been given a wasm equivalent.
+The other is the return value — a `RECEIVE` that blocks is answered later, and the
+sender's endpoint reaches the guest through the frame `mini_send` writes, which is
+where the shipping arches read it on the way back to userland. Without it a resumed
+call returned the value cached at *block* time, so DS replied to endpoint 0 instead
+of to its client (`PORTING_PLAN.md` finding 15). `kernel-wasm` now records a blocked
+call's result and answers `minix_proc_retval`, and the host reads that slot on
+rewind rather than replaying what it saw.
+Measured cost of the whole thing: **two FFI crossings per message**
+(sender→kernel, kernel→receiver), which is the number (b) would remove. The arena
+stays the right optimisation if the boundary ever costs too much; it is no longer
+on the critical path to a booting system.
+
+**The seam is routed everywhere it has been found, and the worklist is now
+closed.** Each site is gated rather than rewritten: where
+`hal::CROSS_ADDRESS_SPACE_COPY` is `None` the original code runs verbatim, so the
+shipping arches are byte-for-byte unchanged and only wasm takes the new path.
+Every conversion that takes a user pointer reduces to one of two operations —
+`vm::virtual_copy` when two address spaces meet, and `vm::read_from_proc` /
+`vm::write_to_proc` when a kernel buffer is on one side — and `PORTING_PLAN.md`
+finding 10 carries the per-site table, including the two entries that turned out
+to be already converted when the list was finally read through.
+
+Three of the eight were found by a test rather than by reading, and the last one
+is the sharpest: `sys_kernel_call_handler` read the caller's message with a raw
+`copy_nonoverlapping`, so on wasm **every kernel call dispatched on the kernel's
+own memory** — and it did so silently, returning 0. A `SYS_VIRCOPY` test that
+simply asked for a copy and checked the bytes caught it in one run, which is the
+argument for the test below existing at all.
+
+The lesson worth keeping is about the searches: each of those three had been
+grepped for and missed, because the grep excluded the site's shape (`kbuf`, or the
+argument pattern). A grep over a kernel that assumes an identity map is not an
+audit. The last five sites were therefore read one at a time, and each conversion
+was required to bring a test: `do_trace_handler` and `SYS_PRIVCTL` were already
+routed through `vm::virtual_copy`, `EXEC_SETUP`'s name read and `vm::vm_memset`
+(the `do_safememset` helper, which had lost the process argument C's
+`vm_memset(caller, who, ph, c, count)` carries) were converted and are exercised
+by the M2 harness, and `do_vumap`'s vector transfers were converted with the
+harness asserting the input-vector read itself — the call cannot *complete*,
+because its result is physical addresses and this port has none, but that is
+`PORTING_PLAN.md` finding 14 rather than a seam gap. `ps_str` turned out to need
+nothing: it is passed to `arch_proc_init` as a value, and no implementation
+dereferences it.
+
+**A ninth site came later, and its shape is the one worth remembering.**
+`verify_grant` resolved a grant id by reading the *granter's* grant table with
+`core::ptr::read` at `s_grant_pa + id * size_of::<CpGrant>()` — the granter's own
+memory, addressed out of a priv structure rather than out of a message. Every
+grep above was a message grep, so none could have matched; reading C's
+`do_safecopy.c` is what turned it up. It now goes through `vm::read_from_proc`,
+and the M2 harness pins it with a real `SYS_SETGRANT`/`SYS_SAFECOPYFROM` pair
+across two instances (`PORTING_PLAN.md` finding 16). *Finding 17* is the bug that
+test uncovered underneath it: `proc_init` never marked the dynamic privilege
+slots free, so the allocator `SYS_SETGRANT` needs could never return one.
+
 ### 5.2 Pointer width: the port's sharpest constraint
 
 wasm32 pointers are 32 bits. M1 established that this is not a formality: the
@@ -533,7 +607,16 @@ present, so `cargo check -p minix-rt -p drivers -p servers -p userland --target
 x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there.
 
 - new target spec `wasm32_unknown_minix.rs` alongside the three existing ones in
-  `rust/compiler/rustc_target/src/spec/targets/`
+  `rust/compiler/rustc_target/src/spec/targets/` — **done as a JSON spec
+  instead**, `tools/wasm-target/wasm32-minix.json`, built with `-Z
+  json-target-spec -Z build-std=core,alloc`. `os: "minix"` is the whole point
+  and the `std` PAL below is not needed for it: the servers and userland depend
+  on `minix-rt`/`minix-std`, not on `std`. The JSON form needs no fork and no
+  bootstrap, which is why it is the route taken for the moment; moving it into
+  `rust/` later makes it an ordinary `--target` with no `-Z` at all.
+  **This is load-bearing, not cosmetic** — without `os: "minix"` the build
+  compiles the `#[cfg(not(target_os = "minix"))]` host stubs instead of the real
+  servers (97 of them return `ENOSYS`). See `PORTING_PLAN.md` finding 5.
 - a wasm arm in `rust/library/std/src/sys/pal/minix/`
 - a `#[cfg(target_arch = "wasm32")]` arm for `syscall0..syscallN` in
   `crates/minix-rt/src/lib.rs`, calling `extern "C" fn host_syscall(...)`.
@@ -650,7 +733,7 @@ sh tools/wasm-boot/run.sh
 
 The kernel prints its banner through `env.host_console_write`, and a deliberate
 panic reports the message and source location to the console before calling
-`env.host_halt` and trapping. The built artifact is 83 KB.
+`env.host_halt` and trapping. The built artifact is 102 KB (`104268` bytes).
 
 M1's real work turned out not to be the HAL. Four blockers surfaced, and three
 were **32-bit width assumptions the kernel had never been asked about** — see
@@ -664,14 +747,14 @@ declared one. `--gc-sections` dropped `host_console_read` and
 `host_console_available`, because M1 has no input path. Reading an import list as
 a contract would be a mistake.
 
-**M2 — Instances as processes + IPC. Status: protocol core DONE.**
+**M2 — Instances as processes + IPC. Status: DONE.**
 The dispatch protocol, the syscall boundary, and Asyncify across an instance
 boundary all work, driven by the kernel's own process table, run queues, and
 `mini_send`/`mini_receive` — not a stand-in.
 
 ```text
 sh tools/wasm-m2/run.sh
-# 7/7 checks passed
+# 28/28 checks passed, 4 notes
 ```
 
 The demonstration is a two-process rendezvous. `crates/wasm-procs` is one
@@ -689,10 +772,39 @@ A is unwound when the kernel reports it blocked, and rewound when the kernel
 re-enqueues it. Nothing in the guest knows it was suspended, which is the
 property §4.2 rests on.
 
-What each layer did, which is also the division the design predicts: the kernel
-blocked and re-queued A, decided the run order, and completed the rendezvous;
-the host carried the payload bytes, because no part of the kernel can read
-another instance's memory.
+What each layer did: the kernel blocked and re-queued A, decided the run order,
+completed the rendezvous, **and moved the payload**. That last part is a change
+from how this milestone first landed — the host used to hand-carry the bytes
+between instances, because `mini_send`'s `copy_from_user` could not reach the
+sender's memory. §5.1 is what fixed it, and the harness now shows the kernel
+asking for exactly the two copies the path needs and none other:
+
+```
+100:0x100050 -> -1:0x12af64 (64 bytes) => 0   copy_from_user: A's message into the kernel
+-1:0x12b2e4 -> 101:0x100050 (64 bytes) => 0   delivermsg: kernel buffer into B
+```
+
+That log is also what makes the milestone checkable rather than merely green: a
+payload arriving by some other route would show up as a missing or extra copy.
+The host now supplies one primitive — a copy between two memories it owns — and
+decides nothing.
+
+M2 also carries the port's first `SYS_VIRCOPY` test, because that is the operation
+DS needs before it can read a client's key and it is the only place the seam is
+exercised process-to-process rather than kernel-to-process. One instance asks the
+kernel to copy its buffer into another instance's; the second then reads *its own*
+memory, so nothing the host or the sender did locally can satisfy it. Two things
+made it worth the wiring: it proved `SYS_VIRCOPY` end to end, and in doing so it
+found a seam site that reading had missed three times — see §5.1 and
+`PORTING_PLAN.md` finding 13.
+
+The harness has since grown around that seam, because each new site got its test
+rather than its patch: `SYS_MEMSET`, `SYS_EXEC` and `SYS_VUMAP` were converted and
+pinned there, and M2 now also carries the port's only grant test — a
+`SYS_SETGRANT`/`SYS_SAFECOPYFROM` pair where the table lives in one instance and
+the copy is made out of it in another. That last one is the check DS's label
+seeding depends on, and it is the one site whose address came out of a priv
+structure rather than a message (§5.1, `PORTING_PLAN.md` findings 16–17).
 
 Two things the work settled:
 
@@ -707,11 +819,179 @@ Two things the work settled:
   discarded-`copy_from_user` finding in M0 — IPC failing in a way that looks like
   success.
 
-Still open in M2: the servers now **compile** for wasm32 (see §10) but do not yet
-**run** — that needs the kernel to route the real MINIX syscall numbers and a boot
-sequence that instantiates DS → RS → PM → VFS as modules. The protocol no longer
-has unknowns and the toolchain no longer has blockers, so what remains is
-integration.
+The servers compile for wasm32 — see §10 and the correction below — and since M2c
+three of them (DS, RS, PM) *run* as modules the kernel spawns, which is the
+integration this milestone was waiting on. VFS is the one boot service not yet
+instantiated, and the chain past PM belongs to the later milestones.
+
+### M2b — the heap, end to end. Status: DONE
+
+`brk` was chosen as the first syscall to carry all the way through, because the
+allocator sits under every server and fails obscurely when it fails at all. The
+shape of the answer turned out to be a division of labour rather than one call:
+
+| Layer | What it decided |
+|---|---|
+| Kernel | Whether the break is legal, against a window **derived from the HAL** (`hal::user_heap_base()..+1 MiB`) instead of a fixed address |
+| Host | Everything about memory: `WebAssembly.Memory` is host-owned, so `memory.grow` is the only pager this port has |
+| Process | Nothing — it asked, then touched only what was granted |
+
+The process reports its break through a second exported static (`heap_report`),
+because the host cannot know the heap base and parsing the console to find out
+would make the check circular.
+
+The guest module is linked with `--initial-memory=2097152` — **less** than the
+heap window's end at 3 MiB, deliberately. That is what stops the host from being
+a bystander: the window cannot exist unless the host grows the instance, and the
+host grows it once per process at exec, which is the analogue of the pre-map the
+other arches do with a page table. A single `st.backTo(end)` is used for both
+that and for any break the kernel grants past it.
+
+The refusals matter as much as the grants: a break outside the window must come
+back `ENOMEM`, and the process must not write anywhere it was not granted. An
+in-window break that silently failed would look exactly like one that worked —
+the failure mode this port keeps meeting (see M2 and M0's findings).
+
+Measured: `brk(0)` is `0x00200000`, `brk(0x00218000)` is granted, the byte 1 past
+the grant round-trips, and `brk(0x01000000)` is refused. 14/14 checks.
+
+**Not done, and worth stating plainly:** this is the *`SYS_brk` syscall* path.
+`minix_rt::minix_alloc_zeroed` does not use it — it sends `VM_BRK` over IPC to
+the VM server, and assumes `HEAP_BASE..HEAP_BASE+1 MiB` is already mapped. On
+wasm32 both halves of that are still open: VM must be running as a process, and
+the exec-time pre-map has to exist for the shortcut in `minix_alloc_zeroed` to
+be sound. Real heap growth beyond 1 MiB is VM's job in both worlds, so that is
+the next thing the boot chain has to deliver.
+
+### Correction to §10: the servers *were* compiling, but not the real ones
+
+Building for `wasm32-unknown-unknown` gives `target_os = "unknown"`, and the
+servers gate their real bodies on `target_os = "minix"` — **1210 times**. The
+`not(minix)` counterparts are host test stubs; 97 of them return `ENOSYS`
+outright. So the earlier "compiles cleanly for wasm32" result was true of the
+stub arms, not of the code that runs on a Minix.
+
+`tools/wasm-target/wasm32-minix.json` (an `os: "minix"` spec built with
+`-Z build-std`) removes the ambiguity: `minix-rt`, `minix-libc`, `libs`, `fs`,
+`drivers`, `minix-std`, `minix-util`, `servers`, `userland` and the kernel all
+compile with their real bodies selected. Doing so immediately surfaced four
+latent bugs that the stubs had been covering (missing wasm32 arms for
+`USER_STACK_TOP` and VM's phys range, `minix-libc`'s `c_long`-based C ABI, and
+`i8` used where `c_char` is unsigned on riscv64/aarch64). All are written up in
+`PORTING_PLAN.md`.
+
+One bycatch worth keeping: this target is the **only** way to run `cargo clippy`
+over `target_os = "minix"` code, because the fork's rustc has no clippy-driver.
+It found 6 deny-by-default errors there, now fixed, plus 118 warnings that only
+bite under `-D warnings`.
+
+**M2c — Real servers reach their main loops, the DS round trip completes, and PM's chain starts. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 18/18 checks passed
+```
+
+DS, RS and PM — the *real* servers, built for the real `os = "minix"` target —
+are instantiated as wasm processes, spawned by the kernel, and each reaches its
+own `loop { RECEIVE }`. PM then consumes the boot notification that
+`boot_init` leaves pending on its privilege structure, asks the kernel for
+pending signals, finds none, and goes back to waiting:
+
+```
+ds (slot 6, ep 6): nr=47 a0=0xffff
+rs (slot 2, ep 2): nr=47 a0=0xffff
+pm (slot 0, ep 0): nr=47 a0=0xffff        <- RECEIVE: inside its main loop
+                   nr=50 a0=0x7           <- KERNEL_CALL 7 = SYS_GETKSIG
+                   nr=47 a0=0xffff        <- back to RECEIVE
+```
+
+The notification needed no message between instances — it is a bit set on PM's
+priv structure — but its *reply* did need the copy seam (§5.1), which is how the
+`SYS_GETKSIG` answer reached PM's own memory. That round trip is the chain
+starting to move, and it is visible only because the reply crossed.
+
+Once that round trip is done all three are back where they started — blocked in
+`RECEIVE` from `ANY`, which is the state the harness asserts on:
+
+```
+ds (slot 6, ep 6): nr=47 a0=0xffff
+rs (slot 2, ep 2): nr=47 a0=0xffff
+pm (slot 0, ep 0): nr=47 a0=0xffff
+```
+
+`crates/wasm-servers` is the module and each export is a two-line shim over a
+server's own `*_server_main`. The shims exist because a wasm module cannot export
+a Rust `main` and because `src/bin/*.rs` are `#![no_main]` binaries that a
+`cdylib`-only target cannot build — nothing is skipped and no server was modified.
+
+The import boundary the linker actually left is three imports:
+
+```
+env.memory, env.minix_syscall, env.host_cycles
+```
+
+**The evidence is a syscall trace, not a print.** Each server runs its own init
+and then blocks in RECEIVE, and the trace was originally read as "the first
+syscall each instance issues is `RECEIVE` from `ANY`", because that *is* "it
+finished init and is inside its main loop" while init was private to each server's
+own statics. It no longer holds as written: RS's init is now observable work
+(`SYS_SETGRANT`, then a `SEND` of the `RS_INIT` handshake to DS, then its first
+`RECEIVE`), and DS's first `RECEIVE` is what completes that handshake. The
+assertions were re-anchored accordingly — "reached its main loop" now means "is
+blocked in the kernel on a receive, and its last receive names `ANY`", which is
+true of each of the three however much work its init did — and PM's copies are
+identified by process rather than by position in the log, because the handshake
+now interleaves with them.
+
+The `__heap_base` fallback M2 used does not hold here — lld does not export it for
+this module — so the module names its own Asyncify scratch region with an
+exported static instead of the host inferring one. Given §12's note that an
+Asyncify overflow corrupts memory silently, having the host told where to put the
+buffer is the sturdier arrangement of the two.
+
+**The servers talk to one another now.** RS registers a read-only grant over its
+public process table, tells the kernel about it (`SYS_SETGRANT`), and sends DS an
+`RS_INIT` message carrying the grant id — C's `rproctab_gid`, which C delivers as
+SEF init info at spawn time; this port has no channel for that, so RS sends the
+message after both processes exist. It is a *blocking* send, which is safe because
+both are already in the kernel's process table: DS reaching its first receive is
+all the rendezvous needs, so the order the two are scheduled in does not matter.
+DS recognises the message by C's `IS_SEF_INIT_REQUEST` shape, copies the 4480-byte
+table out of RS's instance through the grant (`SYS_SAFECOPYFROM`), and maps each
+in-use entry into its label table. That is what makes DS able to *name* a service,
+and naming is what authorises a publish.
+
+The round trip that proves it belongs to a client: announce (`rs_up` → RS's
+`do_up`, which publishes the label to DS) → `DS_PUBLISH` → `DS_RETRIEVE`, reading
+back the value. The client reports `rs_up=0`, `publish=0`, `retrieve=0`,
+`value=0x2a`, and the copy log shows the three transfers the chain needed — the
+kernel reading RS's 48-byte grant *entry* out of RS's own instance, DS's
+`SYS_SAFECOPYFROM` of the 4480-byte table, and DS reading the client's key through
+`SYS_VIRCOPY`. A second client runs the same protocol against the same key without
+announcing itself and is still refused, so the authorisation the label table
+provides is measured rather than assumed.
+
+What is still not here is the *init-complete reply*: C's service answers `RS_INIT`
+with its own result message, which RS consumes in `do_init_ready`, and that
+function exists but has no sender yet.
+
+Two things to know about the harness: it builds with nightly (`-Z
+json-target-spec -Z build-std=core,alloc`), and per-server modules are not yet
+separate images — one module with three exports is instantiated three times, so
+each instance carries all three servers' code. §7.2's "exec becomes
+instantiation" wants one image per process, which `--export` plus `--gc-sections`
+should give cheaply.
+
+Getting this far turned up the largest finding of the port so far: **the wasm
+kernel was not running the boot sequence.** `kernel-wasm` called `kernel::init`,
+`init_cpulocals` and `init_basic_syscalls`, but not `kernel::table::proc_init`,
+`kernel::system::system_init` or `kernel::ipc::register_ipc_syscalls` — all three
+of which every other arch runs before starting a process. So there were no
+privilege structures (which is why the first notification attempt returned `-1`)
+and an empty kernel-call vector (`SYS_VIRCOPY` would have answered ENOSYS). The
+servers had been reaching their main loops regardless, because their init only
+touches their own statics — which is exactly why nothing had noticed.
 
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
 real coreutils.

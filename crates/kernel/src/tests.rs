@@ -1517,15 +1517,31 @@ fn test_syscall_brk(ctx: &mut TestCtx) {
         (*rp).p_endpoint = 72;
         (*rp).p_rts_flags.store(0, Ordering::Relaxed);
 
+        // The heap window is the HAL's, not a fixed address — x86_64 and riscv64
+        // both put it at 0x3FE0_0000 but aarch64 at 0x2000_0000, so the literals
+        // this test used to carry passed on two of the three and failed on the
+        // third. `sys_brk_handler` was made arch-neutral when that was found; the
+        // assertions below were not.
+        let heap_base = crate::hal::user_heap_base();
+
         let args = [0u64, 0, 0, 0, 0, 0];
         let result = crate::syscall::dispatch_basic_syscall(rp, 36, &args);
-        ctx.assert(result >= 0x3FE00000, "initial brk should be in valid range");
+        ctx.assert(
+            result == heap_base as i64,
+            "initial brk should be the HAL heap base",
+        );
 
-        let args2 = [0x3FE01000u64, 0, 0, 0, 0, 0];
+        let target = heap_base + 0x1000;
+        let args2 = [target, 0, 0, 0, 0, 0];
         let result2 = crate::syscall::dispatch_basic_syscall(rp, 36, &args2);
-        ctx.assert(result2 == 0x3FE01000, "brk should return new break value");
+        ctx.assert(
+            result2 == target as i64,
+            "brk should return new break value",
+        );
 
-        let args4 = [0x40000000u64, 0, 0, 0, 0, 0];
+        // The first address past the window `sys_brk_handler` accepts, expressed
+        // as an offset from the base for the same reason as above.
+        let args4 = [heap_base + crate::syscall::BRK_WINDOW_SIZE, 0, 0, 0, 0, 0];
         let result4 = crate::syscall::dispatch_basic_syscall(rp, 36, &args4);
         ctx.assert(
             result4 == -12,

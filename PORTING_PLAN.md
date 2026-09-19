@@ -4010,7 +4010,51 @@ trait Driver {
   - Delete with subscriber notification
   - Test spinlock serializes concurrent access to shared static tables
   - 29 tests pass, clippy clean
-  - IPC message loop deferred (see Phase 12 wiring)
+  - The IPC message loop exists and has been exercised end to end: the wasm
+    harness (`tools/wasm-servers`) runs two clients built on `minix_util`'s real
+    DS client against this server. One announces itself to RS first and gets a
+    full publish/retrieve round trip; the other never announces itself and is
+    refused, so the label check is measured rather than assumed.
+  - **The store round trip completes: RS seeds the label table.** `do_publish`
+    and `do_publish_label` refuse a source with no label entry
+    (`ds_getprocname`), and C's DS fills that table in `sef_cb_init_fresh` by
+    safecopying RS's `rproctab` through `info->rproctab_gid` and calling
+    `map_service` per entry. That handoff now exists here, in three pieces, in the
+    order they had to land: (i) RS registers a one-entry read-only grant over its
+    `rprocpub` table (`build_rproctab_grant`, grantee the wildcard) and tells the
+    kernel with `SYS_SETGRANT`; (ii) RS sends DS an `RS_INIT` message carrying that
+    grant id in the field C's `mess_rs_init` calls `rproctab_gid` (payload-relative
+    offset 8) with `type = SEF_INIT_FRESH`; (iii) DS handles it under C's
+    `IS_SEF_INIT_REQUEST` shape (`m_type == RS_INIT && m_source == RS_PROC_NR`),
+    `SYS_SAFECOPYFROM`-ing the table through the grant and mapping each in-use
+    entry with `map_service` (owner "rs"). A service that announces itself with
+    `rs_up` then gets its label published to DS by RS's `do_up` (C's
+    `publish_service`) and can publish and read back; the harness client reports
+    `rs_up=0`, `publish=0`, `retrieve=0`, `value=0x2a`.
+  - **Transport differs from C; the grant does not.** C passes `rproctab_gid` as
+    SEF init info at *spawn* time and this port has no channel for that, so RS
+    sends the `RS_INIT` message after both processes exist. It is a *blocking* send
+    (`SEND`, not `SENDREC`), which cannot deadlock because both ends are already
+    in the kernel's process table: DS reaching its first receive is all the
+    rendezvous needs, so the handshake does not depend on which of the two is
+    scheduled first. What this needed from the kernel is findings 16 (the grant
+    entry read) and 17 (the privilege-slot allocator `SYS_SETGRANT` uses).
+  - `do_publish_label` now carries C's "only RS may publish labels" check
+    (`store.c` `do_publish`: `(flags & DSF_TYPE_LABEL) && m_source != RS_PROC_NR`
+    → EPERM). The U32 path deliberately does not take it: C has no RS-only
+    constraint there, and this port's DS tests publish as DS itself, which the
+    label table does not contain (`ds_getprocname` special-cases it).
+  - `ds_getprocname`'s self-endpoint special case compared against `-5` (the async
+    manager's task number) where C has `first_proc_ep = DS_PROC_NR` (6), so it
+    answered for a process that is not DS at all. It now comes from
+    `arch_common::com`.
+  - RS's local request numbers had drifted from C's — `RS_INIT` was `0x70A` where
+    C has `0x714`, and `RS_LOOKUP`/`RS_GETSYSINFO` were transposed — so a request
+    bearing C's number arrived as an unknown call and was answered `ENOSYS`. The
+    constants now come from `arch_common::com` rather than a second literal list
+    (finding 18). RS's reply also changed from `SENDREC` to `SENDNB`: a `SENDREC`
+    in the reply position blocks in its receive phase and swallows the next
+    request instead of dispatching it.
   - Source: `.refs/minix-3.3.0/minix/servers/ds/`
 
 - [x] **12.5 — IPC server** (`.refs/minix-3.3.0/minix/servers/ipc/`): `main.c`, `sem.c`, `shm.c`, `utility.c`, `inc.h`, `ipc.conf`, `proto.h`
@@ -6038,21 +6082,401 @@ panics, or relies on an accident. Not fixed here — whether it is reachable
 depends on whether each caller clamps first, which needs a call-site audit. It is
 reproduced as a `NOTE` in the harness so it cannot silently regress.
 
-**2. IPC payloads cannot be verified on the host, and their copy error is
+**2. IPC payloads could not be verified on the host, and the copy error was
 discarded.** `mini_send` copies the message out of the sender's address space via
-`copy_from_user`, and the result is dropped:
+`copy_from_user`, and the result was dropped:
 
 ```rust
 let _ = crate::ipc::copy_from_user(..);
 ```
 
-With no address translation the copy fails, so the receiver's buffer stays zeroed
-and nothing reports a problem. The rendezvous *bookkeeping* is fully testable on
-the host (source endpoint recorded in `p_delivermsg`, flags cleared, run queues
-consistent), but payload integrity still needs a real arch or a simulator that
-models translation. The discarded error is worth a look independently of the
-simulator — a silently failed message copy surfaces as unexplained zeroes, not as
-an error.
+With no address translation the copy fails, so the receiver's buffer stayed
+zeroed and nothing reported a problem.
+
+**Addressed for wasm32**, and the discarded error is worth separating from it.
+`copy_from_user` returned `OK` without copying when `cr3 == 0` — a silent
+success, not a silent failure — and that is what made the payload vanish. The
+three places where two address spaces meet (`vm::virtual_copy`,
+`ipc::copy_from_user`, `ipc::delivermsg`) now ask the HAL for the copy through
+`hal::CROSS_ADDRESS_SPACE_COPY`, which the host implements on wasm32 and which is
+`None` where page tables do the job. A fourth gap came with it: the receive path
+leaves `MF_DELIVERMSG` for the arch's syscall-return epilogue, which a wasm
+instance does not have, so `ipc::deliver_pending_msg` names that step. The M2
+harness now verifies payload integrity for real and asserts that the kernel asks
+for exactly the two copies the path needs.
+
+The host simulator still cannot verify payloads — `arch-sim`'s `boot_cr3()` is 0
+and its procs share one address space, so its hook is absent and
+`vm::virtual_copy` keeps the old limitation. Note that on a simulator whose procs
+*do* share an address space an identity copy would be the correct model, which
+would turn the M0 note above into a real check; not done, because it changes what
+M0 measures and that deserves its own look.
+
+Still real and unfixed: **the discarded error**. `copy_from_user`'s result being
+thrown away means a genuine failure on a hardware arch surfaces as unexplained
+zeroes rather than as an error.
+
+#### wasm32 port — findings (added)
+
+Building the system for `wasm32` (see `ARCH_WASM32.md`) put a second,
+independent axis of portability pressure on the same code, and it found things
+the three shipping arches cannot: they are all 64-bit and all have a page table.
+
+**1. Arch-independent kernel code hardcoded x86_64's heap addresses.**
+`CURRENT_BRK` was initialised to `0x3FE00000` and `sys_brk_handler` accepted
+`0x3FE00000..0x3FF00000` — x86_64's heap, in `kernel/src/syscall.rs`, with no
+`#[cfg]` anywhere. On aarch64 (heap base `0x2000_0000`) `brk(0)` therefore
+returned an address the same handler would have rejected, so the query and the
+setter disagreed about the window. Fixed: both now derive from
+`hal::user_heap_base()`, and `BRK_WINDOW_SIZE` names the 1 MiB pre-mapped
+window. `test_brk_initial_value_is_inside_the_accepted_window` feeds the queried
+break straight back through the setter so the two cannot drift apart again.
+
+**2. `minix-libc`'s C ABI used `c_long` where MINIX uses fixed 64-bit types.**
+MINIX's headers define `time_t` and `ino_t` as `__int64_t`/`uint64_t`
+(`sys/sys/types.h`, `sys/arch/*/include/ansi.h`) — 64-bit *even on a 32-bit
+target*. `crates/minix-libc` had `type TimeT = c_long`,
+`Dirent { d_ino: c_ulong, .. }`, and `sigaddset`/`sigdelset`/`sigismember`
+indexing a `[c_ulong; 2]` at a hardcoded word width of 64. All three are right
+by accident on LP64 and wrong on anything else. Fixed (`TimeT = i64`,
+`d_ino: u64`, word width from `c_ulong::BITS`).
+`tools/c-include/time.h` still says `typedef long time_t`, which coincides with
+MINIX on every 64-bit target and does not otherwise; unchanged here.
+`tools/c-include/sys/time.h` also declares `tv_usec` as `long` where MINIX's
+`suseconds_t` is `int` — a pre-existing divergence, not touched.
+
+**3. `minix-libc` hardcoded `i8` as `c_char`, which is wrong on two of the three
+shipping targets.** `c_char` is signed on x86_64 and unsigned on riscv64 and
+aarch64 — matching real MINIX, which follows the arch. `c_wchar.rs` passed
+`*mut i8`/`*const i8` to `vsnprintf`, so `minix-libc` did not compile for
+riscv64 or aarch64 at all. It went unnoticed because **`minix-libc` has no
+dependents in the workspace** (`cargo tree -i minix-libc` lists only itself), so
+no cross-target build ever reached it. Fixed to use `c_char`; all three targets
+now check clean.
+
+**4. Two more per-arch tables were missing a wasm32 arm**, and only became
+visible once wasm32 started compiling the *real* code (finding 5):
+`USER_STACK_TOP` in `minix-rt` (added, 2 MiB stack whose top is `0x01000000` =
+16 MiB — the top of that region, well below `MAX_USER_ADDRESS` at 256 MiB) and
+VM's `init_phys_alloc` range in `servers/src/vm/mod.rs` (added, matching
+`arch-sim`'s arena).
+
+**5. The wasm build was compiling host stubs, not the real implementation.**
+The port built as `wasm32-unknown-unknown`, whose `target_os` is `unknown`, not
+`minix`. `minix-rt`, `minix-libc`, `libs`, `servers` and `userland` carry 1210
+`#[cfg(target_os = "minix")]` gates, and the `#[cfg(not(target_os = "minix"))]`
+counterparts are *host test stubs* — VFS's `do_mknod` and its siblings return
+`ENOSYS` outright, `keytest_impl` is a no-op. **97 such `ENOSYS` arms** were
+being selected. Compiling cleanly therefore proved much less than it looked like.
+The fix is a target with `os = "minix"`: `tools/wasm-target/wasm32-minix.json`,
+built with `-Z json-target-spec -Z build-std=core,alloc` (values taken from
+`rustc --print target-spec-json` for `wasm32-unknown-unknown`, with `os` changed).
+`ARCH_WASM32.md` §10 predicted this as an in-tree spec in `rust/`; the JSON form
+needs no fork and no bootstrap, which is why it is the one used for now.
+
+**6. `USER_STACK_TOP`'s duplication is now four-way, and the wasm32 arm is a
+fifth copy of a value that also exists as `arch_wasm32::hal::user_stack_base() +
+user_stack_size()`.** `minix_rt::HEAP_BASE` and `user_heap_base()` are already
+required to agree by hand. Nothing checks either pair.
+
+**7. `minix_rt::brk` truncates the address to 32 bits.** `brk()` (the `VM_BRK`
+IPC path, not `SYS_brk`) does `let addr_val = addr as u32;` and reads the reply
+back from an `m1i1` field at bytes 8..12. It happens to work on all three
+shipping arches because every heap sits below 4 GiB (`0x3FE00000`, `0x20000000`),
+so the truncation is invisible. Not fixed — it needs the VM-side reply layout
+confirmed first. Same class as the `usize::from_le_bytes` and
+`is_ok_proc_nr` findings: a 64-bit value read through a 32-bit door.
+
+**8. `cargo clippy` has never seen any `target_os = "minix"` code.** The three
+Minix targets exist only in the fork's rustc, and there is no clippy-driver for
+it, so `cargo clippy --target x86_64-pc-minix` cannot run — `RUSTC=` does not
+redirect clippy, which spawns the toolchain's own `clippy-driver`. The `-D
+warnings` gate therefore covers the host-native build only. Pointing clippy at
+`wasm32-minix` is the first time this surface is lintable at all.
+
+**Fixed** the six deny-by-default errors it found, all in `minix-libc`:
+`readdir` wrapped its body in a `loop` that every path returned from (removed;
+the body is straight-line now), and five `pub extern "C" fn`s dereferenced a
+caller-supplied raw pointer without being `unsafe` — `waitpid`,
+`clock_gettime`, `accept`, `getpeername`, `getsockname`. Those are now `unsafe`,
+along with `wait`, `bind` and `connect`, which carry the identical obligation
+(`wait` forwards `status` to `waitpid`; `bind`/`connect` hand `address` to
+`decode_sockaddr_in`, which dereferences it) and which the lint does not reach
+because the dereference happens one call further down. Marking them all is what
+makes the crate's convention uniform rather than lint-shaped; it is ABI-neutral,
+and `readdir`/`closedir`/`sendto`/`recvfrom`/`wait4` were already `unsafe`.
+
+What remains is **118 warnings**, which only fail a build under `-D warnings`:
+mostly 42 "unsafe function's docs are missing a Safety section" and 38
+iterator-by-index lints. A mechanical sweep, deliberately not folded into this
+work — and `minix-libc` still has no dependents, so nothing exercises it at
+runtime either way.
+
+**9. The wasm kernel was never running the boot sequence.** `kernel-wasm`'s
+`minix_kernel_init` called `kernel::init`, `panic::mark_cpulocals_ready` and
+`syscall::init_basic_syscalls` — but not `table::proc_init`,
+`system::system_init` or `ipc::register_ipc_syscalls`, which all four other boot
+paths (`kernel-boot`'s `main`, `aarch64`, `riscv64`, `test_runner`) run before
+starting any process. Consequences: no process had a privilege structure, so
+`s_notify_pending` was unreachable and `has_pending_notify` always answered false;
+and the kernel-call vector was empty, so `SYS_VIRCOPY` would have answered ENOSYS
+the moment DS needed it to read a client's key. Fixed — and the reason it went
+unnoticed is worth keeping: the servers reached their receive loops anyway,
+because their init only touches their own statics. A boot sequence that is only
+*mostly* run looks exactly like one that is fully run until something depends on
+the missing part.
+
+**10. Places that write user memory directly, and what they do on wasm.** The
+cross-address-space copy seam (`ARCH_WASM32.md` §5.1) is routed through the HAL
+at every site that takes a user pointer. On an arch whose two address spaces are
+separate memories, a direct write is not merely ineffective — a guest address such
+as `0x100050` is just past the kernel's 1 MiB stack, so it lands *in the kernel's
+own image*.
+
+Fixed, in each case additively: where `hal::CROSS_ADDRESS_SPACE_COPY` is `None`
+the original code runs verbatim, so the three shipping arches are
+byte-for-byte unchanged and only wasm takes the new path.
+
+| Site | What it does |
+|---|---|
+| `vm::virtual_copy` | `SYS_VIRCOPY`, and everything that reduces to it |
+| `ipc::copy_from_user` | caller's memory → kernel buffer |
+| `ipc::delivermsg` | kernel buffer → receiver's memory |
+| `system::kernel_call_finish` | kernel call reply → caller's memory |
+| `system::kernel_call_dispatch`'s caller (`syscall::sys_kernel_call_handler`) | **caller's message → kernel buffer** — see finding 13 |
+| `grants::safecopy` | all three branches: `CPF_TRY`, `boot_cr3 == 0`, and the post-`virtual_copy` fallback |
+| `grants::do_vsafecopy` | reading the `VscpVec` array out of the caller's space |
+| `ipc::mini_receive` | the redundant direct write to the receiver's `m_ptr` |
+
+Two corrections to the original list, both from reading the code rather than the
+grep: `mini_receive`'s copy out of the sender's `p_sendmsg` is *not* a seam site
+(`p_sendmsg` is an inline array in the `Proc`, so that copy is kernel-to-kernel),
+and neither are the `senda` table copies — `tabent.msg` is kernel-side too.
+
+**The audit is not complete, and the remaining work is now enumerated rather than
+vague.** The pattern being hunted is "an identity-map assumption", which has more
+shapes than a grep matches — that is why three of the eight sites above were found
+by a test and none by the greps that were run. What follows is the result of
+enumerating every address the kernel takes out of a message (`msg_read_u64`) and
+every raw `copy_nonoverlapping`/`write_bytes`, then reading each.
+
+Checked and **not** seam sites: `mini_receive`'s copy out of the sender's
+`p_sendmsg` and the `senda` table copies (`tabent.msg`), both kernel-to-kernel
+because those are inline arrays in the `Proc`; `elf.rs`'s load-time copies and
+`EXEC_LOAD`'s stack copy (`user_stack_base` is used as a kernel address there);
+the `SADIO`/`SDIO` handler's `_vec_addr`, and the profiling handlers' `_ctl_ptr`,
+`_mem_ptr` — all unused, and `has_port_io()` is false here anyway.
+
+The worklist is closed. Every row was read, and each conversion is gated on
+`hal::CROSS_ADDRESS_SPACE_COPY` as before, so the shipping arches are unchanged:
+
+| Site | Resolution |
+|---|---|
+| `do_trace_handler` (`tr_addr`) | **already a seam site** — every guest access goes through `vm::virtual_copy`. Stale entry. |
+| `do_safememset_handler` → `vm::vm_memset` | converted: `vm_memset` regained the process argument C's `vm_memset(caller, who, ph, c, count)` has, and fills through `write_to_proc` where the HAL provides the copy. `do_memset_handler` now passes its message's process field for the same reason. |
+| `do_vumap_handler` (`vaddr`, `paddr`) | converted: both vector transfers go through the HAL where the arch needs it, and the `p_cr3 == 0` preconditions now gate only the CR3-switch path, since a process with no page table is the ordinary case here. Still not *usable* — finding 14. |
+| `EXEC_SETUP` (`name_ptr`) | converted: the name is read with `vm::read_from_proc`, with C's `<unset>` fallback. `ps_str` is **not** a second read — it is passed to `arch_proc_init` as a value and no implementation dereferences it. |
+| `SYS_PRIVCTL` (`arg_ptr`, five sub-calls) | **already a seam site** — every sub-call reads through `data_copy_from` → `vm::virtual_copy`. Stale entry. |
+| `p_seg.fpu_state` in `get`/`setmcontext` | not a seam site *as written*: both copies are guarded by `!is_null()`, and nothing in `kernel/src` ever assigns the field, so they are unreachable. If it is ever made to point into a process, both become seam sites. |
+
+Two of the five rows believed open were already converted, and the "two string
+reads" was one read. That is the third time this list has been wrong, for the
+same reason each time: it was assembled by reading code in one shape and then
+trusted as an inventory. The lesson the port keeps relearning is that a worklist
+item is closed by a test, not by an edit — and this pass is the first where each
+conversion has one.
+
+**13. `SYS_KERNELCALL` read its own memory instead of the caller's message.**
+Found by the `SYS_VIRCOPY` test below, not by inspection: `sys_kernel_call_handler`
+began with `copy_nonoverlapping(msg_ptr, kbuf, copy_sz)` — a raw read of a
+*caller* address into the kernel's staging buffer. On wasm that is the kernel's
+own memory, so **every kernel call from a server dispatched on whatever the
+kernel happened to keep at that offset**. It failed silently in the worst way: the
+call was accepted and returned 0. The vircopy test caught it because the copy it
+asked for simply did not happen while the call reported success.
+
+Worth noting as a pattern rather than an incident: this is the third seam site
+found by a test rather than by reading, and each time the grep had been run with
+a filter that excluded the site (`buf.`/`kbuf`, or an exclusion on the argument
+shape). A grep is not an audit.
+
+**11. `delivermsg` and `kernel_call_finish` disagree about the message length.**
+`delivermsg` copies a whole `MESSAGE_SIZE` (64); `kernel_call_finish` deliberately
+copies `size_of::<Message>()` (56), with a comment explaining that 64 would
+ingest 8 bytes of adjacent stack. Both are right for their own callers, but the
+seam now has to preserve the distinction, which is why `kernel_call_finish` calls
+the HAL directly rather than staging through `p_delivermsg`. A single "copy a
+message" helper with an explicit length would remove the trap.
+
+**Correction (later): the distinction above does not exist, and the "(56)" is
+stale.** `size_of::<Message>()` is 64 — `proc.rs`'s `_MSG_SIZE_MATCH` asserts it
+against `MESSAGE_SIZE`, and `libs::vtreefs` and `minix-std` assert it too — so
+`kernel_call_finish`'s `size_of::<Message>().min(MESSAGE_SIZE)` is 64, the same
+as `delivermsg`, and `sys_kernel_call_handler`'s copy is 64 as well. The
+adjacent-stack worry the comments describe does not apply: every caller's buffer
+is 64 bytes (`send_kernel_call`'s is `[u8; 64]`). The 56/64 question bit twice
+anyway, as a *reading* rather than as a bug — finding 14 records a `pmax`
+argument that was derived from these comments and turned out to be wrong, which
+is the argument for running the copy and reading the byte count instead.
+
+**12. A runaway guest cannot be preempted, so the host needs its own limit.**
+`ARCH_WASM32.md` §6.4 says a process that loops without a syscall is unstoppable,
+and PM's first appearance on this port was a spin in its `SYS_GETKSIG` loop —
+caused by finding 10's sibling, the reply that never arrived. The harness's first
+version recorded every syscall and so exhausted Node's heap instead of
+diagnosing anything; it now bounds both the trace and the total syscall count,
+and answers `EINVAL` once the budget is spent. Worth generalising: on this port
+the host is the only thing that can end a runaway, so every harness needs a
+budget rather than a belief that loops terminate.
+
+**14. Several kernel-call handlers read their request from message offset 0,
+where the call number lives.** `sys_kernel_call_handler` builds the message a
+handler sees by taking the caller's `Message` and overwriting its first 8 bytes:
+the call number goes at 0 and the caller's endpoint at 4, so the request payload
+starts at 8. The comment above `DEVIO_REQUEST_OFF` records this being found once
+before, when the virtio-blk PCI probe read the call number as its `request` — the
+constants in `system.rs` are simply not consistent about it. `EXEC`, `EXEC_LOAD`,
+`SCHEDULE`, `SCHEDCTL`, `DEVIO` and `GETINFO` use payload offsets;
+`do_memset`, `do_safememset`, `do_vumap`, `do_vdevio`, `do_sdevio`, `do_umap`,
+`do_statectl`, `ABORT` and both `MCONTEXT` fields take the C struct's own offsets,
+which start at 0. A handler reading one of those acts on the call number instead
+of its request — and the first two fields of the three *tested* handlers happened
+to be `granter`/`endpt`/`base`, so on anything but a grant the mistake shows up as
+a bogus endpoint or a write to nowhere reachable, not as a crash.
+
+`SYS_MEMSET`, `SYS_SAFEMEMSET` and `SYS_VUMAP` were shifted past the header as
+part of closing the seam worklist, because their conversions could not otherwise
+be exercised. The convention is pinned by two host tests that read through
+literal offsets rather than the constants they guard; the third,
+`do_memset`, is pinned by the wasm harness instead (a regressed `count` would make
+a host test overrun). The remaining handlers are the same bug and want one sweep;
+none of them is on a path this port has exercised — the `SIO` family answers
+`ENOSYS` before it matters (`has_port_io()` is false), and `MCONTEXT`/`UMAP`/
+`STATECTL` are unreached.
+
+One consequence is worth separating from the offset bug, because fixing the
+offsets does not remove it:
+
+- `do_vumap` yields *physical* addresses, and §5 of `ARCH_WASM32.md` says this
+  port has none: `vm_lookup_range` walks a page table that does not exist here,
+  so the call answers `EFAULT` however the seam behaves. Its input-vector read
+  now goes through the seam and the M2 harness asserts exactly that — the copy
+  from the caller's slot, at the vector's address, of the vector's own byte count
+  — rather than dressing the errno up as a pass. The syscall as a whole has no
+  meaning until a physical-address model is decided (§13's open questions).
+
+`do_safememset` sits behind `verify_grant` (a grant table, `s_grant_pa`,
+`s_phys_delta`), which this port has not exercised either, so its conversion is
+likewise unpinned end to end.
+
+**15. A syscall that blocked never returned its value to the guest.** Found by
+giving DS something to answer. Its first `RECEIVE` blocks, and the harness
+resumed it with the value cached at *block* time — `OK`, because no sender was
+known then — so DS addressed its reply to endpoint 0 instead of the client's 20,
+read the key out of the *kernel's* process-0 instance, and PM received a request
+meant for the client. The value it should have returned had been written by
+`mini_send` into the receiver's frame (`hal::write_retval` — "IPC semantics:
+RECEIVE returns `m_source`"), which is where the shipping arches read it from on
+the way back to userland. That is the same epilogue `deliver_pending_msg` replaced
+for the *message copy*, but nobody had named it for the *return value*.
+
+Both halves are now present: the platform layer records a blocked call's result
+in the caller's frame, and `minix_proc_retval` lets the host read a slot back when
+it rewinds — which is what both wasm harnesses now do instead of replaying the
+block-time value. Worth recording as a shape rather than an incident: **the arch
+epilogue does two things, and only one of them was ever given a wasm equivalent.**
+The copy got one as soon as it was noticed; the return value did not, and the
+symptom looked like *a wrong process* rather than a missing mechanism.
+
+The same exercise fixed four discarded results in `ds_server_main` — each a
+`let _ = minix_rt::sys_vircopy(...)` followed by parsing the buffer as a key. The
+read is a cross-address-space copy, so its failure is the only signal that the key
+is not there, and going on publishes or matches under whatever the buffer held.
+They now reply with the error, through one `read_key` helper. Nothing had noticed
+because nothing had called them: a discarded error on an unreachable path is
+invisible until the first client arrives, which is the argument for driving one.
+
+The DS round trip the harness was written for now *completes* — see Phase 12.4:
+RS hands DS its public process table over a grant, DS seeds its label table from
+it, and a client that announces itself with `rs_up` can publish and read back
+while one that does not is still refused.
+
+**16. `verify_grant` reads the granter's grant table with a raw pointer.** Found
+while implementing the `rproctab` grant RS hands DS (Phase 12.4). `verify_grant`
+locates an entry as `s_grant_pa + id * size_of::<CpGrant>()` and reads it with
+`core::ptr::read`. `s_grant_pa` is the *granter's* virtual address of its table —
+`do_setgrant_handler` computes `VA + s_phys_delta`, which the shipping arches turn
+into a kernel-readable physical address — so on wasm the kernel reads that offset
+in its **own** memory, and every granted copy resolves against a grant entry the
+granter never wrote. **Grants do not work on this port at all**, for any in-tree
+user of them (`fs::block_io`'s BDEV path, `ext2`'s `safecopy_*_grant`), and it
+fails the way finding 13 did: the entry is read, its flags look wrong, and the
+call is refused as unauthorised rather than as unreachable.
+
+It is the fourth site in this family and the second the enumeration *method*
+missed. Finding 10's worklist was assembled by grepping `msg_read_u64` and every
+raw `copy_nonoverlapping`/`write_bytes`; this is a `core::ptr::read`, so that
+grep could not have found it. Same lesson a third time, with a shape worth naming:
+**not every address the kernel dereferences comes out of a message.** The ones
+that come out of a *priv structure* — a grant table address here, an asynch table
+or a control pointer elsewhere — are the same hazard and want the same seam.
+
+Deliberately **not** converted in the pass that found it: a conversion has to bring
+a test, and at the time the only consumer was DS's label seeding, which was not
+reachable until the rest of the handoff existed. That is no longer the case.
+
+**Fixed.** The read is now `vm::read_from_proc(cur_granter, entry_addr, …)` — the
+operation the other "kernel buffer on one side" sites already use — so a shipping
+arch keeps the byte-for-byte direct read (it can reach the physical address) and
+wasm asks the host for it. `SYS_SETGRANT`/`SYS_SAFECOPYFROM` in the M2 harness
+pins it: one instance's memory holds the table, another copies out of a grant it
+describes, and the check is the kernel's read of the grant *entry* out of the
+granter's instance rather than only the bytes that arrived. Reverted to the raw
+pointer, three checks fail (25/28); with the seam, 28/28. The harness note that
+called the grant path unexercised has been replaced.
+
+**17. `proc_init` never marks the dynamic privilege slots free, so `get_priv` can
+never allocate one.** Found while writing finding 16's test: `SYS_SETGRANT` from
+any process without a *static* privilege slot answers ENOSPC, because `get_priv`
+allocates the first slot whose `s_proc_nr == NONE` and this port's table starts
+every unassigned slot at `0`. C's `proc_init` walks the whole table setting
+`s_proc_nr = NONE` ("initialize as free") before assigning anything; the port
+only writes the boot entries. So the allocator that `SYS_PRIVCTL`'s
+`SYS_PRIV_SET_SYS` and `SYS_SETGRANT` share has never once succeeded — a
+cross-arch bug, not a wasm one, and one that PM will need the moment it creates a
+privilege structure for a userland process. `test_get_priv_returns_slot` had been
+setting `s_proc_nr = NONE` across the table by hand before calling `get_priv`,
+which is exactly the workaround that concealed it. **Fixed** in `table::proc_init`
+(the whole table is freed before assignment, matching C), and the test's
+hand-freeing is gone so it pins the fix now instead of hiding it.
+
+**18. RS's local request numbers had drifted from C's.** Found while wiring the
+`RS_INIT` handshake: RS's own copy of the request numbers had `RS_INIT = 0x70A`
+where C's `com.h` has `0x714`, and `RS_LOOKUP`/`RS_GETSYSINFO` transposed. The
+effect is the one this port keeps meeting — a request bearing C's number arrives
+as an *unknown call* and is answered `ENOSYS`, which looks like a missing feature
+rather than a wrong constant. The constants now come from `arch_common::com`
+instead of a second literal list in `rs.rs`, with a test pinning them, so the two
+lists cannot drift again. Cross-arch, not wasm-specific: any client using C's
+numbers against this port's RS would have hit it.
+
+**19. The aarch64 boot stack overlapped the physical allocator.** Not a wasm bug,
+but found while growing the wasm work's server code. `tools/minix-raw-aarch64.ld`
+reserved the 64 KiB boot stack *before* `__kernel_end`, and `kmain` starts the
+physical allocator *at* `__kernel_end` — so the loader's own allocations landed
+inside the running stack. Latent since the file was written; ~60 KiB of extra
+server code grew the image enough to arm it. It presented as an endless loop
+inside `load_and_prepare_proc` with no output at all: the serial log printed 3 ELF
+segments where the disassembly showed 4, which is what a corrupt loop counter
+looks like when a frame has been written over by an allocator. Fixed by moving the
+stack reservation between the image and `__kernel_end`, and pinned by
+`test_allocator_aarch64_clears_boot_stack`, which compares the allocator's *base*
+against `__stack_top` — a fresh-allocation sample passed in both layouts, because
+by then the loader had moved the free cursor past the overlap. Worth recording as
+a shape: **a latent layout overlap can be armed by any size change.** It is the
+second instance of that shape in this port, and when a boot breaks with no
+diagnostic after a change that only grew code, the linker script is the first
+place to look rather than the change.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

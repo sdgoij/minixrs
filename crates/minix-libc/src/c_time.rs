@@ -5,12 +5,17 @@
 //! algorithm); the conversion helpers are target-independent and
 //! host-tested.
 
+use core::ffi::c_int;
 #[cfg(target_os = "minix")]
 use core::ffi::{c_char, c_void};
-use core::ffi::{c_int, c_long};
 
-/// C `time_t` (the headers define it as `long`).
-pub type TimeT = c_long;
+/// C `time_t`.
+///
+/// MINIX's headers define this as `__int64_t` (`_BSD_TIME_T_` in
+/// `sys/arch/*/include/ansi.h`), i.e. 64-bit on every target including the
+/// 32-bit ones — not `long`. `tools/c-include/time.h` says `long`, which
+/// coincides on the three 64-bit shipping targets and does not on wasm32.
+pub type TimeT = i64;
 
 /// C `struct tm` (nine `int` fields, exactly as `tools/c-include/time.h`).
 #[repr(C)]
@@ -28,11 +33,16 @@ pub struct Tm {
 }
 
 /// C `struct timeval` (`tools/c-include/sys/time.h`).
+///
+/// Both fields are `TimeT` rather than `c_long` so the struct keeps its shape
+/// on a 32-bit target. MINIX's `suseconds_t` is actually `int`, but
+/// `tools/c-include` declares `tv_usec` as `long`; that divergence predates
+/// this port and is unchanged here.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeVal {
-    pub tv_sec: c_long,
-    pub tv_usec: c_long,
+    pub tv_sec: TimeT,
+    pub tv_usec: TimeT,
 }
 
 /// Howard Hinnant's civil-from-days algorithm (public domain).
@@ -58,13 +68,9 @@ pub(crate) fn civil_from_days(days: i64, out: &mut Tm) {
     out.tm_wday = wday;
 }
 
-// `TimeT` is `c_long`: 64-bit on the minix targets and on a Linux host,
-// 32-bit on a Windows host. The casts below widen on Windows and are no-ops
-// on Linux, so whether the lint fires depends on the host, not on the code.
-#[allow(clippy::unnecessary_cast)]
 pub(crate) fn secs_to_tm(t: TimeT, out: &mut Tm) {
-    let mut days = t as i64 / 86400;
-    let mut rem = t as i64 % 86400;
+    let mut days = t / 86400;
+    let mut rem = t % 86400;
     if rem < 0 {
         rem += 86400;
         days -= 1;
@@ -286,8 +292,8 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut TimeVal, tz: *mut c_void) -> c_in
     match minix_std::time::clock_gettime(minix_std::time::CLOCK_REALTIME) {
         Ok(ts) => {
             unsafe {
-                (*tv).tv_sec = ts.tv_sec as c_long;
-                (*tv).tv_usec = (ts.tv_nsec / 1000) as c_long;
+                (*tv).tv_sec = ts.tv_sec as TimeT;
+                (*tv).tv_usec = (ts.tv_nsec / 1000) as TimeT;
             }
             0
         }

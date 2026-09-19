@@ -16,14 +16,25 @@
 //!         publish_service            sys_exec / fork
 //! ```
 //!
-//! The IPC message loop is deferred (Phase 12 — SEF/server framework).
+//! The IPC message loop runs, and `tools/wasm-servers` drives it. It also hands
+//! DS the public process table — C's `RS_INIT` handshake, where `rproctab_gid`
+//! is a read-only grant over `rprocpub` — which is what seeds DS's label table and
+//! lets a service publish at all (Phase 12.4). What is still deferred is the rest
+//! of SEF: the init-complete *reply* a service sends back, which RS's
+//! `do_init_ready` consumes.
 //! All service table management and lookup functions are fully implemented.
 
 #![allow(dead_code, clippy::missing_safety_doc)]
 
 use arch_common::ipc::Message;
+use arch_common::safecopies::{
+    CPF_DIRECT, CPF_READ, CPF_USED, CPF_VALID, CpDirect, CpGrant, CpUnion, GRANTEE_ANY,
+};
 
 // Constants
+
+/// `sef_init_info_t`'s init type for a fresh start (`SEF_INIT_FRESH`).
+const SEF_INIT_FRESH: i32 = 0;
 
 /// Number of system process slots.
 pub const NR_SYS_PROCS: usize = 32;
@@ -84,19 +95,25 @@ const EBUSY: i32 = -16;
 const EINVAL: i32 = -22;
 const ENOSYS: i32 = -71;
 
-// RS call numbers
-pub const RS_UP: i32 = 0x700;
-pub const RS_DOWN: i32 = 0x701;
-pub const RS_REFRESH: i32 = 0x702;
-pub const RS_RESTART: i32 = 0x703;
-pub const RS_SHUTDOWN: i32 = 0x704;
-pub const RS_UPDATE: i32 = 0x705;
-pub const RS_CLONE: i32 = 0x706;
-pub const RS_EDIT: i32 = 0x707;
-pub const RS_GETSYSINFO: i32 = 0x708;
-pub const RS_LOOKUP: i32 = 0x709;
-pub const RS_INIT: i32 = 0x70A;
-pub const RS_LU_PREPARE: i32 = 0x70B;
+// RS call numbers.
+//
+// Taken from `arch_common::com`, which carries C's `com.h` values, rather than
+// kept as a second literal list: the port's local copy had drifted — `RS_INIT`
+// was 0x70A where C has 0x714, and `RS_LOOKUP`/`RS_GETSYSINFO` were transposed —
+// so a request bearing C's number arrived at RS as an unknown call and got
+// ENOSYS. The i32 cast is because the dispatch matches on the message's `m_type`.
+pub const RS_UP: i32 = arch_common::com::RS_UP as i32;
+pub const RS_DOWN: i32 = arch_common::com::RS_DOWN as i32;
+pub const RS_REFRESH: i32 = arch_common::com::RS_REFRESH as i32;
+pub const RS_RESTART: i32 = arch_common::com::RS_RESTART as i32;
+pub const RS_SHUTDOWN: i32 = arch_common::com::RS_SHUTDOWN as i32;
+pub const RS_UPDATE: i32 = arch_common::com::RS_UPDATE as i32;
+pub const RS_CLONE: i32 = arch_common::com::RS_CLONE as i32;
+pub const RS_EDIT: i32 = arch_common::com::RS_EDIT as i32;
+pub const RS_GETSYSINFO: i32 = arch_common::com::RS_GETSYSINFO as i32;
+pub const RS_LOOKUP: i32 = arch_common::com::RS_LOOKUP as i32;
+pub const RS_INIT: i32 = arch_common::com::RS_INIT as i32;
+pub const RS_LU_PREPARE: i32 = arch_common::com::RS_LU_PREPARE as i32;
 
 const ESRCH: i32 = -3;
 const EEXIST: i32 = -17;
@@ -277,6 +294,85 @@ impl RprocPubTableRaw {
 
 static RPROC: RprocTableRaw = RprocTableRaw::new();
 static RPROCPUB: RprocPubTableRaw = RprocPubTableRaw::new();
+
+// ---- The public process table grant ----
+//
+// DS seeds its label table from `RPROCPUB`, and C's RS hands the table over as a
+// read-only direct grant over its own `rprocpub` — `sef_cb_init_fresh`:
+// `cpf_grant_direct(ANY, (vir_bytes) rprocpub, sizeof(rprocpub), CPF_READ)` —
+// with the grant's id travelling in the `RS_INIT` message `init_service` sends.
+
+/// The registered grant table. One entry, because the whole table is one range.
+const NR_RPROCTAB_GRANTS: usize = 1;
+
+struct RproctabGrantRaw(UnsafeCell<[CpGrant; NR_RPROCTAB_GRANTS]>);
+unsafe impl Sync for RproctabGrantRaw {}
+
+impl RproctabGrantRaw {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [const {
+                CpGrant {
+                    cp_flags: 0,
+                    cp_u: CpUnion {
+                        cp_direct: CpDirect {
+                            cp_who_to: 0,
+                            cp_start: 0,
+                            cp_len: 0,
+                            cp_reserved: [0u8; 8],
+                        },
+                    },
+                    cp_reserved: [0u8; 8],
+                }
+            }; NR_RPROCTAB_GRANTS],
+        ))
+    }
+
+    fn as_ptr(&self) -> *mut CpGrant {
+        self.0.get() as *mut CpGrant
+    }
+
+    /// Address of the table, which is what `SYS_SETGRANT` is given.
+    fn table_addr(&self) -> u64 {
+        self.as_ptr() as u64
+    }
+}
+
+static RPROCTAB_GRANT: RproctabGrantRaw = RproctabGrantRaw::new();
+
+/// Give the single grant entry read-only access to the whole [`RPROCPUB`] table
+/// and return its id (always 0).
+///
+/// The grantee is the wildcard, as in C: the table is handed to whichever
+/// service asks for it in the `RS_INIT` message, not to a named one.
+pub unsafe fn build_rproctab_grant() -> i32 {
+    let entry = unsafe { &mut *RPROCTAB_GRANT.as_ptr() };
+    entry.cp_flags = CPF_USED | CPF_VALID | CPF_DIRECT | CPF_READ;
+    entry.cp_u.cp_direct = CpDirect {
+        cp_who_to: GRANTEE_ANY,
+        cp_start: RPROCPUB.as_ptr() as u64,
+        cp_len: core::mem::size_of::<[RprocPub; NR_SYS_PROCS]>(),
+        cp_reserved: [0u8; 8],
+    };
+    0
+}
+
+/// The `RS_INIT` message C's `init_service` sends to a service it starts.
+///
+/// The grant over [`RPROCPUB`] travels in `mess_rs_init.rproctab_gid`, which C
+/// lays out payload-relative at offset 8 (`result@0, type@4, rproctab_gid@8`), so
+/// in this port's `Message` it is `m2i3`.
+fn rproctab_init_msg(gid: i32) -> Message {
+    let mut msg = Message {
+        m_source: 0,
+        m_type: RS_INIT,
+        // SAFETY: the payload is a union of plain integers and byte arrays.
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    msg.m_payload.m2.m2i2 = SEF_INIT_FRESH;
+    msg.m_payload.m2.m2i3 = gid;
+    msg
+}
 
 // ---- Slot management ----
 
@@ -488,6 +584,50 @@ pub unsafe fn slot_endpoint(idx: usize) -> Option<i32> {
 
 // ---- RS request handlers ----
 
+/// Publish a service's label to DS.
+///
+/// This is C's `publish_service`, which calls `ds_publish_label(rpub->label,
+/// rpub->endpoint, DSF_OVERWRITE)`. It matters because a service DS cannot name
+/// is refused every publish — the label table is the whole of what authorises a
+/// writer — so without this a service registered at runtime stays mute.
+///
+/// Returns 0, or the errno the publish failed with.
+#[cfg(target_os = "minix")]
+unsafe fn publish_service(idx: usize) -> i32 {
+    let pub_base = RPROCPUB.as_ptr();
+    let rpub = unsafe { &*pub_base.add(idx) };
+    let label_len = rpub
+        .label
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(RS_MAX_LABEL_LEN);
+
+    let mut msg = Message {
+        m_source: 0,
+        m_type: arch_common::com::DS_PUBLISH as i32,
+        // SAFETY: the payload is a union of plain integers and byte arrays.
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    // DS's `DS_PUBLISH` layout: key pointer in `m2l1`, its length in `m2i1`, the
+    // type flags in `m2i3`, and the label's endpoint in `m2l2`.
+    msg.m_payload.m2.m2i1 = label_len as i32;
+    msg.m_payload.m2.m2i3 = (crate::ds::DSF_TYPE_LABEL | crate::ds::DSF_OVERWRITE) as i32;
+    msg.m_payload.m2.m2l1 = rpub.label.as_ptr() as i64;
+    msg.m_payload.m2.m2l2 = rpub.endpoint as i64;
+
+    let r = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::DS_PROC_NR as u64,
+            &mut msg as *mut Message as u64,
+        )
+    };
+    if r < 0 {
+        return r as i32;
+    }
+    msg.m_type
+}
+
 /// Register a new service (RS_UP).
 unsafe fn do_up(msg: &mut Message) -> i32 {
     let label_ptr = unsafe { msg.m_payload.m2.m2l1 } as u64;
@@ -525,6 +665,17 @@ unsafe fn do_up(msg: &mut Message) -> i32 {
             free_slot(slot);
         }
         return e;
+    }
+
+    // Tell DS, as C's `create_service` does through `publish_service`. A service
+    // DS cannot name may not publish anything, so leaving this out would register
+    // the service everywhere except the one place that authorises it.
+    #[cfg(target_os = "minix")]
+    {
+        let r = unsafe { publish_service(slot) };
+        if r != OK {
+            return r;
+        }
     }
 
     OK
@@ -679,9 +830,40 @@ pub fn rs_server_main() {
             }
         }
 
+        // Hand DS the table, which is what C's `sef_cb_init_fresh` sets up and
+        // `init_service` delivers: the table itself is granted once, told to the
+        // kernel with `SYS_SETGRANT`, and its grant id travels in the `RS_INIT`
+        // message. The order matters — DS copies whatever is in the table when
+        // the message arrives, so the services above must be registered first.
+        let gid = unsafe { build_rproctab_grant() };
+        let mut reg = [0u8; 64];
+        reg[8..16].copy_from_slice(&RPROCTAB_GRANT.table_addr().to_ne_bytes());
+        reg[16..20].copy_from_slice(&(NR_RPROCTAB_GRANTS as i32).to_ne_bytes());
+        if minix_rt::kernel_call(34, &mut reg) != 0 {
+            // C panics here too: with no registered table there is no grant for
+            // DS to resolve its copy against, so no service could be named.
+            panic!("rs: SYS_SETGRANT failed");
+        }
+
+        // A blocking send, not `asynsend` as in C: the destination is a boot
+        // service that is already in the process table, so this is a rendezvous
+        // that completes as soon as DS reaches its first receive — which makes it
+        // independent of which of the two is scheduled first.
+        let mut init = rproctab_init_msg(gid);
+        let sent = unsafe {
+            minix_rt::syscall2(
+                minix_rt::SEND_CALL,
+                arch_common::com::DS_PROC_NR as u64,
+                &mut init as *mut Message as u64,
+            )
+        };
+        if sent < 0 {
+            panic!("rs: RS_INIT to DS failed: {sent}");
+        }
+
         // IPC syscall numbers.
         const RECEIVE_CALL: u64 = 47;
-        const SENDREC_CALL: u64 = 48;
+        const SENDNB_CALL: u64 = 51;
         const ANY: i32 = 0x0000ffff;
 
         loop {
@@ -723,10 +905,13 @@ pub fn rs_server_main() {
                 _ => ENOSYS,
             };
 
-            // Reply to sender.
+            // Reply to sender. A plain SENDNB (C `reply()` uses `ipc_send`): a
+            // SENDREC here would block in its receive phase and swallow the next
+            // request instead of dispatching it, which is the same defect DS's
+            // loop documents.
             msg.m_type = result;
             unsafe {
-                minix_rt::syscall2(SENDREC_CALL, src as u64, &mut msg as *mut Message as u64);
+                minix_rt::syscall2(SENDNB_CALL, src as u64, &mut msg as *mut Message as u64);
             }
         }
     }
@@ -777,6 +962,12 @@ mod tests {
         assert_eq!(SF_NEED_REPL, 0x010);
         assert_eq!(NR_SYS_PROCS, 32);
         assert_eq!(RS_MAX_LABEL_LEN, 64);
+        // The request numbers are C's (`com.h`), not the port's old local copy.
+        assert_eq!(RS_UP, 0x700);
+        assert_eq!(RS_LOOKUP, 0x708);
+        assert_eq!(RS_GETSYSINFO, 0x709);
+        assert_eq!(RS_INIT, 0x714);
+        assert_eq!(RS_LU_PREPARE, 0x715);
     }
 
     #[test]

@@ -375,6 +375,28 @@ test-boot-aarch64: build-aarch64-boot mkfs-aarch64
     /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
     @just _assert-qemu-log target/test-boot-aarch64.log "ALL TESTS PASSED"
 
+# Both QEMU suites for all three arches: the six gates a change to a VA layout, a
+# HAL constant or anything arch-gated has to be followed by. They cover different
+# things and neither substitutes for the other - `test-qemu` runs the in-kernel
+# suite (`crates/kernel/src/tests.rs`, behind the `qemu-tests` feature), `test-boot`
+# boots to a shell and runs `boot_test.rs` - and the host suite cannot stand in for
+# the first, because `tests.rs` is compiled only under `qemu-tests`. That is
+# exactly how `syscall_brk` came to assert x86_64's heap base and fail on aarch64
+# alone: `cargo test` never saw it.
+#
+# Grouped by arch so each arch's userland/coreutils build is reused, and stops at
+# the first failing gate like the individual recipes (the failing log is on
+# stdout).
+#
+# All six QEMU gates in one command.
+test-arches:
+    @just test-qemu x86
+    @just test-boot x86
+    @just test-qemu riscv64
+    @just test-boot riscv64
+    @just test-qemu aarch64
+    @just test-boot aarch64
+
 test target="x86":
     @just test-{{target}}
 

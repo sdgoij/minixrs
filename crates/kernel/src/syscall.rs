@@ -41,8 +41,10 @@ fn syscall_table_ptr() -> *mut [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS] {
     BASIC_SYSCALL_TABLE.get()
 }
 
-/// Simple bump allocator brk (0x3FE00000-0x3FF00000 region).
-static CURRENT_BRK: AtomicU64 = AtomicU64::new(0x3FE00000);
+/// The break starts at the HAL's heap base: this is arch-independent code, and a
+/// hardcoded x86_64 address here made `brk(0)` report an address that
+/// `sys_brk_handler` itself would reject on any other arch.
+static CURRENT_BRK: AtomicU64 = AtomicU64::new(crate::hal::user_heap_base());
 
 /// Register a basic syscall handler.
 ///
@@ -552,18 +554,35 @@ unsafe fn sys_setfdvfs_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
     0
 }
 
+/// Size of the pre-mapped heap window at the start of the heap. The kernel
+/// accepts a break anywhere inside it without involving VM, matching what
+/// `minix_rt` assumes is already mapped.
+///
+/// `pub(crate)` because the arch-neutral bare-metal suite (`tests.rs`) asserts
+/// that the last address *outside* the window is refused, and a literal there is
+/// how the heap base came to be hardcoded in that suite in the first place.
+pub(crate) const BRK_WINDOW_SIZE: u64 = 0x100000;
+
 /// SYS_brk (13) — change data segment size.
-/// Simple bump allocator in 0x3FE00000-0x3FF00000 region.
+///
+/// Simple bump allocator over the first `BRK_WINDOW_SIZE` bytes of the heap.
 unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
     let new_brk = args[0];
     if new_brk == 0 {
         // Query current break
         CURRENT_BRK.load(Ordering::Relaxed) as i64
-    } else if (0x3FE00000..0x3FF00000).contains(&new_brk) {
-        CURRENT_BRK.store(new_brk, Ordering::Relaxed);
-        new_brk as i64
     } else {
-        -12i64 // ENOMEM
+        // The window is the HAL's heap base, not a fixed address. Hardcoding
+        // x86_64's 0x3FE0_0000 here rejected every other arch's addresses, and
+        // on wasm32 — where the heap is a few MiB in because a flat address
+        // space has to actually exist — it rejected all of them.
+        let heap_base = crate::hal::user_heap_base();
+        if (heap_base..heap_base + BRK_WINDOW_SIZE).contains(&new_brk) {
+            CURRENT_BRK.store(new_brk, Ordering::Relaxed);
+            new_brk as i64
+        } else {
+            -12i64 // ENOMEM
+        }
     }
 }
 
@@ -873,7 +892,25 @@ pub unsafe fn sys_kernel_call_handler(caller: *mut crate::proc::Proc, args: &[u6
         // Copy only Message size (56 bytes), not MESSAGE_SIZE (64), because
         // the caller's buffer may be a Message struct, not a raw 64-byte buffer.
         let copy_sz = core::mem::size_of::<Message>().min(crate::proc::MESSAGE_SIZE);
-        core::ptr::copy_nonoverlapping(msg_ptr, kbuf.as_mut_ptr(), copy_sz);
+        // Out of the caller's address space, which on an arch whose address
+        // spaces are separate memories means through the HAL. Reading `msg_ptr`
+        // directly would ingest whatever the kernel keeps at that offset and
+        // then dispatch on it — so every kernel call would silently act on the
+        // wrong message rather than fail.
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            let r = copy(
+                (*caller).p_nr,
+                msg_ptr as u64,
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                kbuf.as_mut_ptr() as u64,
+                copy_sz,
+            );
+            if r != 0 {
+                return r as i64;
+            }
+        } else {
+            core::ptr::copy_nonoverlapping(msg_ptr, kbuf.as_mut_ptr(), copy_sz);
+        }
         // Set call number at bytes 0-3 (for kernel_call_dispatch)
         let call_val = (crate::system::KERNEL_CALL as u32 + call_nr as u32) as i32;
         kbuf[0..4].copy_from_slice(&call_val.to_ne_bytes());
@@ -1237,26 +1274,51 @@ mod tests {
     fn test_brk_query_returns_current() {
         unsafe {
             proc_init();
-            CURRENT_BRK.store(0x3FE01000, Ordering::Relaxed);
+            let start = crate::hal::user_heap_base() + 0x1000;
+            CURRENT_BRK.store(start, Ordering::Relaxed);
             let args = [0u64, 0, 0, 0, 0, 0];
-            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), 0x3FE01000i64);
+            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), start as i64);
         }
     }
 
     #[test]
     fn test_brk_set_valid() {
         unsafe {
-            CURRENT_BRK.store(0x3FE00000, Ordering::Relaxed);
-            let args = [0x3FE02000u64, 0, 0, 0, 0, 0];
-            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), 0x3FE02000i64);
-            assert_eq!(CURRENT_BRK.load(Ordering::Relaxed), 0x3FE02000);
+            let heap_base = crate::hal::user_heap_base();
+            let target = heap_base + 0x2000;
+            CURRENT_BRK.store(heap_base, Ordering::Relaxed);
+            let args = [target, 0, 0, 0, 0, 0];
+            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), target as i64);
+            assert_eq!(CURRENT_BRK.load(Ordering::Relaxed), target);
+        }
+    }
+
+    #[test]
+    fn test_brk_initial_value_is_inside_the_accepted_window() {
+        unsafe {
+            proc_init();
+            let reported = sys_brk_handler(core::ptr::null_mut(), &[0, 0, 0, 0, 0, 0]);
+            assert!(reported >= 0, "brk query failed: {reported}");
+            // Feeding the reported break straight back must not be rejected. A
+            // hardcoded x86_64 break failed this on any other arch, because the
+            // query answered with an address the setter's window excluded.
+            let echo = sys_brk_handler(core::ptr::null_mut(), &[reported as u64, 0, 0, 0, 0, 0]);
+            assert_eq!(echo, reported);
         }
     }
 
     #[test]
     fn test_brk_out_of_range() {
         unsafe {
-            let args = [0x40000000u64, 0, 0, 0, 0, 0];
+            // Exactly one byte past the window the handler accepts.
+            let args = [
+                crate::hal::user_heap_base() + BRK_WINDOW_SIZE,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
             assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), -12);
         }
     }
@@ -1322,11 +1384,12 @@ mod tests {
     #[test]
     fn test_init_registers_brk() {
         unsafe {
-            CURRENT_BRK.store(0x3FE00000, Ordering::Relaxed);
+            let heap_base = crate::hal::user_heap_base();
+            CURRENT_BRK.store(heap_base, Ordering::Relaxed);
             init_basic_syscalls();
             assert_eq!(
                 dispatch_basic_syscall(core::ptr::null_mut(), 36, &[0u64, 0, 0, 0, 0, 0]),
-                0x3FE00000i64
+                heap_base as i64
             );
         }
     }

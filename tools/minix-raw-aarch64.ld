@@ -38,11 +38,17 @@ SECTIONS
         __minixfs_end = .;
     }
 
-    __kernel_end = .;
-
+    /* The 64 KiB boot stack, which grows down from `__stack_top`. It is reserved
+     * *between* the image and `__kernel_end` on purpose: `kmain` starts the
+     * physical allocator at `__kernel_end`, so a `__kernel_end` below the stack
+     * would hand the loader pages inside the running stack, and the loader's own
+     * writes would then clobber its frame. (Not hypothetical: a kernel image
+     * grown by a few KiB did exactly that to this arch's boot, silently, as an
+     * endless loop in `load_and_prepare_proc`. `PORTING_PLAN.md` finding 19.) */
     . = ALIGN(16);
     . = . + 65536;
     __stack_top = .;
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame)

@@ -14,7 +14,13 @@
 //! Subscriber → do_check()            → DS store → return changed entries
 //! ```
 //!
-//! The IPC message loop is deferred (Phase 12 — SEF/server framework).
+//! The IPC message loop runs, and `tools/wasm-servers` drives a real client
+//! against it. Its label table is seeded from RS's public process table, which
+//! RS hands over as a read-only grant in an `RS_INIT` message — C's DS does the
+//! same in `sef_cb_init_fresh` (`sys_safecopyfrom(RS_PROC_NR,
+//! info->rproctab_gid, 0, rprocpub, sizeof(rprocpub))` then `map_service` per
+//! entry in use), and that seeding is what lets a *service* publish at all: an
+//! endpoint DS cannot name is refused with EPERM.
 //! All store operations are fully implemented and tested.
 
 #![allow(dead_code)]
@@ -272,8 +278,11 @@ unsafe fn lookup_sub(owner: &[u8]) -> Option<*mut Subscription> {
 
 /// Get the process name for a given endpoint (from label entries).
 unsafe fn ds_getprocname(endpoint: i32) -> Option<[u8; DS_MAX_KEYLEN]> {
-    // DS itself
-    if endpoint == -5 {
+    // DS itself, which publishes before its own table entry is meaningful. C
+    // spells this `first_proc_ep = DS_PROC_NR` (6); the port compared against
+    // -5, which is the async manager's task number, so the special case answered
+    // for a process that is not DS at all.
+    if endpoint == arch_common::com::DS_PROC_NR {
         let mut name = [0u8; DS_MAX_KEYLEN];
         let ds_name = b"ds";
         name[..ds_name.len()].copy_from_slice(ds_name);
@@ -464,6 +473,77 @@ pub unsafe fn ds_init() {
     }
 }
 
+/// Map one entry of RS's public process table into the label table.
+///
+/// This is C's `map_service`: the label becomes the key, the endpoint the value,
+/// and the owner `"rs"` rather than the service itself, because the entry came
+/// from RS.
+///
+/// # Safety
+///
+/// Caller must ensure exclusive access to the DS tables.
+pub unsafe fn map_service(label: &[u8], endpoint: i32) -> Result<(), i32> {
+    const ENOMEM: i32 = -12;
+    let dsp = unsafe { alloc_data_slot() }.ok_or(ENOMEM)?;
+    let dsp = unsafe { &mut *dsp };
+    write_cstr(&mut dsp.key, label);
+    dsp.u.u32 = endpoint as u32;
+    write_cstr(&mut dsp.owner, b"rs");
+    dsp.flags = DSF_IN_USE | DSF_TYPE_LABEL;
+    Ok(())
+}
+
+/// Write `src` into `dst` as a NUL-terminated string, truncating to fit.
+fn write_cstr(dst: &mut [u8], src: &[u8]) {
+    let len = src.len().min(dst.len() - 1);
+    dst[..len].copy_from_slice(&src[..len]);
+    dst[len] = 0;
+}
+
+/// Copy RS's public process table out of RS and map every entry in use.
+///
+/// The table arrives as a grant over RS's own memory rather than as message
+/// bytes because it is a few KiB of *another* process's address space, which on
+/// this port only the kernel's copy seam can reach.
+///
+/// Returns 0, or the errno the copy failed with.
+///
+/// # Safety
+///
+/// Caller must ensure exclusive access to the DS tables.
+#[cfg(target_os = "minix")]
+unsafe fn map_rproctab(gid: i32) -> Result<(), i32> {
+    use crate::rs::{NR_SYS_PROCS, RS_MAX_LABEL_LEN, RprocPub};
+
+    /// The label bytes of a fixed-size, NUL-padded label field.
+    fn label_of(buf: &[u8; RS_MAX_LABEL_LEN]) -> &[u8] {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        &buf[..len]
+    }
+
+    let mut table: [RprocPub; NR_SYS_PROCS] = core::array::from_fn(|_| RprocPub::default());
+
+    // SYS_SAFECOPYFROM: granter, grant id, offset, destination, bytes. The
+    // destination is this process's own memory, so the kernel can write it.
+    let mut kmsg = [0u8; 64];
+    kmsg[8..12].copy_from_slice(&arch_common::com::RS_PROC_NR.to_ne_bytes());
+    kmsg[12..16].copy_from_slice(&gid.to_ne_bytes());
+    kmsg[16..24].copy_from_slice(&0u64.to_ne_bytes());
+    kmsg[24..32].copy_from_slice(&(table.as_mut_ptr() as u64).to_ne_bytes());
+    kmsg[32..40].copy_from_slice(&(core::mem::size_of_val(&table) as u64).to_ne_bytes());
+    let r = minix_rt::kernel_call(31, &mut kmsg); // SYS_SAFECOPYFROM
+    if r != 0 {
+        return Err(r);
+    }
+
+    for rpub in table.iter() {
+        if rpub.in_use {
+            unsafe { map_service(label_of(&rpub.label), rpub.endpoint) }?;
+        }
+    }
+    Ok(())
+}
+
 // Published operations (do_*)
 
 /// Publish a U32 value under the given key.
@@ -518,13 +598,18 @@ pub unsafe fn do_publish_u32(key: &[u8], value: u32, source: i32) -> Result<(), 
 
 /// Publish an endpoint label under the given key.
 ///
-/// Publish an endpoint label under the given key.
-///
 /// # Safety
 ///
 /// Caller must ensure exclusive access.
 pub unsafe fn do_publish_label(key: &[u8], endpoint: i32, source: i32) -> Result<(), i32> {
     unsafe {
+        // Only RS may publish a label (C `do_publish`: "Only RS can publish
+        // labels"). Without this check any process could name itself, and the
+        // label table is the whole of what decides who may publish at all.
+        if source != arch_common::com::RS_PROC_NR {
+            return Err(-1); // EPERM
+        }
+
         let source_name = ds_getprocname(source);
         if source_name.is_none() {
             return Err(-1);
@@ -849,6 +934,17 @@ pub fn ds_server_main() {
         const ANY: i32 = 0x0000ffff;
         const ENOSYS: i32 = -71;
 
+        /// Copy a key or pattern out of the calling client's memory into `buf`.
+        ///
+        /// The buffer is the *client's*, so this is a cross-address-space copy:
+        /// its failure is the only signal that the key is not there, and going
+        /// on without it would act on whatever `buf` happened to hold — publish
+        /// under a garbage key, or match one. Returns 0, or the errno the copy
+        /// failed with.
+        unsafe fn read_key(src_ep: i32, ptr: u64, len: usize, buf: &mut [u8; 80]) -> i32 {
+            minix_rt::sys_vircopy(src_ep, ptr, minix_rt::SELF, buf.as_mut_ptr() as u64, len)
+        }
+
         // Initialize the data store before processing requests.
         unsafe {
             ds_init();
@@ -888,6 +984,24 @@ pub fn ds_server_main() {
                 continue;
             }
 
+            // RS hands over its public process table before any client can use
+            // the store. C's DS copies `rprocpub` out of the `RS_INIT` message in
+            // `sef_cb_init_fresh` and maps every entry in use; the number and the
+            // source check are C's `IS_SEF_INIT_REQUEST` (`m_type == RS_INIT &&
+            // m_source == RS_PROC_NR`), which is what keeps a client from naming
+            // itself by sending the same message.
+            if msg.m_type == arch_common::com::RS_INIT as i32
+                && src_ep == arch_common::com::RS_PROC_NR
+            {
+                if let Err(e) = unsafe { map_rproctab(msg.m_payload.m2.m2i3) } {
+                    // Nothing else can label a service, so a failed copy leaves
+                    // DS unable to accept a publish from anyone. C panics here
+                    // for the same reason.
+                    panic!("ds: sys_safecopyfrom(rs) failed: {e}");
+                }
+                continue;
+            }
+
             // Dispatch the DS call.
             // DS call numbers: DS_RQ_BASE = 0x800
             let status = unsafe {
@@ -901,31 +1015,29 @@ pub fn ds_server_main() {
 
                         let mut key_buf = [0u8; 80];
                         let copy_len = key_len.min(80);
-                        let _ = minix_rt::sys_vircopy(
-                            src_ep,
-                            key_ptr as u64,
-                            minix_rt::SELF,
-                            key_buf.as_mut_ptr() as u64,
-                            copy_len,
-                        );
-                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+                        let r = read_key(src_ep, key_ptr as u64, copy_len, &mut key_buf);
+                        if r != 0 {
+                            r
+                        } else {
+                            let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
 
-                        match flags & DSF_MASK_TYPE {
-                            DSF_TYPE_U32 => {
-                                let value = msg.m_payload.m2.m2l2 as u32;
-                                match do_publish_u32(key.as_bytes(), value, src_ep) {
-                                    Ok(()) => 0,
-                                    Err(e) => e,
+                            match flags & DSF_MASK_TYPE {
+                                DSF_TYPE_U32 => {
+                                    let value = msg.m_payload.m2.m2l2 as u32;
+                                    match do_publish_u32(key.as_bytes(), value, src_ep) {
+                                        Ok(()) => 0,
+                                        Err(e) => e,
+                                    }
                                 }
-                            }
-                            DSF_TYPE_LABEL => {
-                                let endpoint = msg.m_payload.m2.m2l2 as i32;
-                                match do_publish_label(key.as_bytes(), endpoint, src_ep) {
-                                    Ok(()) => 0,
-                                    Err(e) => e,
+                                DSF_TYPE_LABEL => {
+                                    let endpoint = msg.m_payload.m2.m2l2 as i32;
+                                    match do_publish_label(key.as_bytes(), endpoint, src_ep) {
+                                        Ok(()) => 0,
+                                        Err(e) => e,
+                                    }
                                 }
+                                _ => ENOSYS,
                             }
-                            _ => ENOSYS,
                         }
                     }
                     0x801 => {
@@ -936,33 +1048,31 @@ pub fn ds_server_main() {
 
                         let mut key_buf = [0u8; 80];
                         let copy_len = key_len.min(80);
-                        let _ = minix_rt::sys_vircopy(
-                            src_ep,
-                            key_ptr as u64,
-                            minix_rt::SELF,
-                            key_buf.as_mut_ptr() as u64,
-                            copy_len,
-                        );
-                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+                        let r = read_key(src_ep, key_ptr as u64, copy_len, &mut key_buf);
+                        if r != 0 {
+                            r
+                        } else {
+                            let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
 
-                        match flags & DSF_MASK_TYPE {
-                            DSF_TYPE_U32 => match do_retrieve_u32(key.as_bytes()) {
-                                Ok(value) => {
-                                    msg.m_payload.m2.m2l1 = value as i64;
-                                    msg.m_payload.m2.m2i1 = DSF_TYPE_U32 as i32;
-                                    0
-                                }
-                                Err(e) => e,
-                            },
-                            DSF_TYPE_LABEL => match do_retrieve_label(key.as_bytes()) {
-                                Ok(endpoint) => {
-                                    msg.m_payload.m2.m2l1 = endpoint as i64;
-                                    msg.m_payload.m2.m2i1 = DSF_TYPE_LABEL as i32;
-                                    0
-                                }
-                                Err(e) => e,
-                            },
-                            _ => ENOSYS,
+                            match flags & DSF_MASK_TYPE {
+                                DSF_TYPE_U32 => match do_retrieve_u32(key.as_bytes()) {
+                                    Ok(value) => {
+                                        msg.m_payload.m2.m2l1 = value as i64;
+                                        msg.m_payload.m2.m2i1 = DSF_TYPE_U32 as i32;
+                                        0
+                                    }
+                                    Err(e) => e,
+                                },
+                                DSF_TYPE_LABEL => match do_retrieve_label(key.as_bytes()) {
+                                    Ok(endpoint) => {
+                                        msg.m_payload.m2.m2l1 = endpoint as i64;
+                                        msg.m_payload.m2.m2i1 = DSF_TYPE_LABEL as i32;
+                                        0
+                                    }
+                                    Err(e) => e,
+                                },
+                                _ => ENOSYS,
+                            }
                         }
                     }
                     0x802 => {
@@ -974,36 +1084,34 @@ pub fn ds_server_main() {
 
                         let mut pat_buf = [0u8; 80];
                         let copy_len = pattern_len.min(80);
-                        let _ = minix_rt::sys_vircopy(
-                            src_ep,
-                            pattern_ptr as u64,
-                            minix_rt::SELF,
-                            pat_buf.as_mut_ptr() as u64,
-                            copy_len,
-                        );
-                        let pattern = &pat_buf[..copy_len];
-                        let overwrite = flags & DSF_OVERWRITE != 0;
-                        let initial = flags & DSF_INITIAL != 0;
-                        let type_flags = flags & DSF_MASK_TYPE;
+                        let r = read_key(src_ep, pattern_ptr as u64, copy_len, &mut pat_buf);
+                        if r != 0 {
+                            r
+                        } else {
+                            let pattern = &pat_buf[..copy_len];
+                            let overwrite = flags & DSF_OVERWRITE != 0;
+                            let initial = flags & DSF_INITIAL != 0;
+                            let type_flags = flags & DSF_MASK_TYPE;
 
-                        match do_subscribe(src_ep, pattern, overwrite, initial, type_flags) {
-                            Ok(SubscribeResult::Subscribed) => {
-                                msg.m_payload.m2.m2l1 = 0;
-                                0
+                            match do_subscribe(src_ep, pattern, overwrite, initial, type_flags) {
+                                Ok(SubscribeResult::Subscribed) => {
+                                    msg.m_payload.m2.m2l1 = 0;
+                                    0
+                                }
+                                Ok(SubscribeResult::Overwritten) => {
+                                    msg.m_payload.m2.m2l1 = 1;
+                                    0
+                                }
+                                Ok(SubscribeResult::Exists) => {
+                                    const EEXIST: i32 = -17;
+                                    EEXIST
+                                }
+                                Ok(SubscribeResult::NoSlot) => {
+                                    const ENOMEM: i32 = -12;
+                                    ENOMEM
+                                }
+                                Err(e) => e,
                             }
-                            Ok(SubscribeResult::Overwritten) => {
-                                msg.m_payload.m2.m2l1 = 1;
-                                0
-                            }
-                            Ok(SubscribeResult::Exists) => {
-                                const EEXIST: i32 = -17;
-                                EEXIST
-                            }
-                            Ok(SubscribeResult::NoSlot) => {
-                                const ENOMEM: i32 = -12;
-                                ENOMEM
-                            }
-                            Err(e) => e,
                         }
                     }
                     0x803 => {
@@ -1037,18 +1145,16 @@ pub fn ds_server_main() {
 
                         let mut key_buf = [0u8; 80];
                         let copy_len = key_len.min(80);
-                        let _ = minix_rt::sys_vircopy(
-                            src_ep,
-                            key_ptr as u64,
-                            minix_rt::SELF,
-                            key_buf.as_mut_ptr() as u64,
-                            copy_len,
-                        );
-                        let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
+                        let r = read_key(src_ep, key_ptr as u64, copy_len, &mut key_buf);
+                        if r != 0 {
+                            r
+                        } else {
+                            let key = core::str::from_utf8(&key_buf[..copy_len]).unwrap_or("");
 
-                        match do_delete(key.as_bytes()) {
-                            Ok(()) => 0,
-                            Err(e) => e,
+                            match do_delete(key.as_bytes()) {
+                                Ok(()) => 0,
+                                Err(e) => e,
+                            }
                         }
                     }
                     0x806 => {
@@ -1100,6 +1206,7 @@ pub fn ds_server_main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arch_common::com::{DS_PROC_NR, RS_PROC_NR};
     use core::sync::atomic::{AtomicBool, Ordering};
 
     /// Simple test spinlock to serialize access to the shared DS tables.
@@ -1143,7 +1250,7 @@ mod tests {
     fn test_publish_and_retrieve_u32() {
         let _g = setup();
         unsafe {
-            do_publish_u32(b"test.key", 42, -5).unwrap();
+            do_publish_u32(b"test.key", 42, DS_PROC_NR).unwrap();
             assert_eq!(do_retrieve_u32(b"test.key"), Ok(42));
         }
     }
@@ -1152,8 +1259,8 @@ mod tests {
     fn test_publish_overwrite() {
         let _g = setup();
         unsafe {
-            do_publish_u32(b"my.key", 100, -5).unwrap();
-            do_publish_u32(b"my.key", 200, -5).unwrap();
+            do_publish_u32(b"my.key", 100, DS_PROC_NR).unwrap();
+            do_publish_u32(b"my.key", 200, DS_PROC_NR).unwrap();
             assert_eq!(do_retrieve_u32(b"my.key"), Ok(200));
         }
     }
@@ -1170,9 +1277,51 @@ mod tests {
     fn test_publish_label_and_retrieve() {
         let _g = setup();
         unsafe {
-            do_publish_label(b"process.pm", 17, -5).unwrap();
+            // RS may publish labels only because it is itself a known process:
+            // DS's init maps RS's own table entry along with the rest, and
+            // `do_publish` refuses anything it cannot name.
+            map_service(b"rs", RS_PROC_NR).unwrap();
+            do_publish_label(b"process.pm", 17, RS_PROC_NR).unwrap();
             let ep = do_retrieve_label(b"process.pm").unwrap();
             assert_eq!(ep, 17);
+        }
+    }
+
+    #[test]
+    fn test_publish_label_rejected_from_anyone_but_rs() {
+        let _g = setup();
+        unsafe {
+            // C `do_publish`: "Only RS can publish labels". Without the check a
+            // process could name itself and then publish as that name.
+            assert_eq!(
+                do_publish_label(b"process.me", 42, DS_PROC_NR),
+                Err(-1) // EPERM
+            );
+            assert_eq!(do_retrieve_label(b"process.me"), Err(-3));
+        }
+    }
+
+    #[test]
+    fn test_map_service_authorizes_the_service_it_names() {
+        let _g = setup();
+        unsafe {
+            // This is what RS's public process table does for DS: the mapped
+            // label is what lets the named endpoint publish at all.
+            let before = do_publish_u32(b"svc.key", 1, 42);
+            assert_eq!(before, Err(-1), "an unmapped endpoint must not publish");
+
+            map_service(b"test.svc", 42).unwrap();
+            do_publish_u32(b"svc.key", 1, 42).unwrap();
+            assert_eq!(do_retrieve_u32(b"svc.key"), Ok(1));
+
+            // And the label is retrievable by endpoint, as a published label is.
+            let key = do_retrieve_label_by_ep(42).unwrap();
+            let key_len = key.iter().position(|&c| c == 0).unwrap_or(key.len());
+            assert_eq!(&key[..key_len], b"test.svc");
+
+            // The owner is RS, not the service: the entry came from RS.
+            let dsp = lookup_label_entry(42).unwrap();
+            assert_eq!((*dsp).owner_as_slice(), b"rs");
         }
     }
 
@@ -1180,8 +1329,9 @@ mod tests {
     fn test_retrieve_label_by_endpoint() {
         let _g = setup();
         unsafe {
-            do_publish_label(b"process.ds", -5, -5).unwrap();
-            let key = do_retrieve_label_by_ep(-5).unwrap();
+            map_service(b"rs", RS_PROC_NR).unwrap();
+            do_publish_label(b"process.ds", DS_PROC_NR, RS_PROC_NR).unwrap();
+            let key = do_retrieve_label_by_ep(DS_PROC_NR).unwrap();
             let key_len = key.iter().position(|&c| c == 0).unwrap_or(key.len());
             assert_eq!(&key[..key_len], b"process.ds");
         }
@@ -1191,7 +1341,7 @@ mod tests {
     fn test_delete_entry() {
         let _g = setup();
         unsafe {
-            do_publish_u32(b"delete.me", 77, -5).unwrap();
+            do_publish_u32(b"delete.me", 77, DS_PROC_NR).unwrap();
             assert!(do_retrieve_u32(b"delete.me").is_ok());
             do_delete(b"delete.me").unwrap();
             assert!(do_retrieve_u32(b"delete.me").is_err());
@@ -1222,11 +1372,11 @@ mod tests {
                     key[5] = b'0' + (i % 10) as u8;
                 }
                 let key_len = if i < 10 { 5 } else { 6 };
-                let result = do_publish_u32(&key[..key_len], i as u32, -5);
+                let result = do_publish_u32(&key[..key_len], i as u32, DS_PROC_NR);
                 assert!(result.is_ok(), "publish {} failed: {:?}", i, result);
             }
             // Next should fail.
-            let result = do_publish_u32(b"extra.key", 999, -5);
+            let result = do_publish_u32(b"extra.key", 999, DS_PROC_NR);
             assert_eq!(result, Err(-12)); // ENOMEM
         }
     }
@@ -1236,14 +1386,14 @@ mod tests {
         let _g = setup();
         unsafe {
             // Publish a key.
-            do_publish_u32(b"test.value", 42, -5).unwrap();
+            do_publish_u32(b"test.value", 42, DS_PROC_NR).unwrap();
 
             // Subscribe with a matching pattern.
-            let result = do_subscribe(-5, b"test.*", false, true, DSF_TYPE_U32);
+            let result = do_subscribe(DS_PROC_NR, b"test.*", false, true, DSF_TYPE_U32);
             assert_eq!(result, Ok(SubscribeResult::Subscribed));
 
             // Check should find the entry.
-            let check = do_check(-5);
+            let check = do_check(DS_PROC_NR);
             assert!(matches!(check, Ok(CheckResult::Found { .. })));
         }
     }
@@ -1252,8 +1402,8 @@ mod tests {
     fn test_subscribe_exists() {
         let _g = setup();
         unsafe {
-            do_subscribe(-5, b"test.*", false, false, DSF_TYPE_U32).unwrap();
-            let result = do_subscribe(-5, b"test.*", false, false, DSF_TYPE_U32);
+            do_subscribe(DS_PROC_NR, b"test.*", false, false, DSF_TYPE_U32).unwrap();
+            let result = do_subscribe(DS_PROC_NR, b"test.*", false, false, DSF_TYPE_U32);
             assert_eq!(result, Ok(SubscribeResult::Exists));
         }
     }
@@ -1262,8 +1412,8 @@ mod tests {
     fn test_subscribe_overwrite() {
         let _g = setup();
         unsafe {
-            do_subscribe(-5, b"old.*", false, false, DSF_TYPE_U32).unwrap();
-            let result = do_subscribe(-5, b"new.*", true, false, DSF_TYPE_U32);
+            do_subscribe(DS_PROC_NR, b"old.*", false, false, DSF_TYPE_U32).unwrap();
+            let result = do_subscribe(DS_PROC_NR, b"new.*", true, false, DSF_TYPE_U32);
             assert_eq!(result, Ok(SubscribeResult::Overwritten));
         }
     }
@@ -1272,9 +1422,9 @@ mod tests {
     fn test_check_no_changes() {
         let _g = setup();
         unsafe {
-            do_subscribe(-5, b"test.*", false, false, DSF_TYPE_U32).unwrap();
+            do_subscribe(DS_PROC_NR, b"test.*", false, false, DSF_TYPE_U32).unwrap();
             // No matching entries changed.
-            let check = do_check(-5);
+            let check = do_check(DS_PROC_NR);
             assert_eq!(check, Ok(CheckResult::NotFound));
         }
     }
@@ -1283,7 +1433,7 @@ mod tests {
     fn test_subscribe_all_types() {
         let _g = setup();
         unsafe {
-            let result = do_subscribe(-5, b"*", false, false, 0);
+            let result = do_subscribe(DS_PROC_NR, b"*", false, false, 0);
             assert_eq!(result, Ok(SubscribeResult::Subscribed));
         }
     }

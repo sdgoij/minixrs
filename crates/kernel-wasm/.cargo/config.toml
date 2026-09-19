@@ -4,6 +4,11 @@
 # the VM page bitmap alone is 1 MiB (NR_PHYS_PAGES / 32 chunks of u32), and the
 # process table adds most of another megabyte. The host owns the memory from M2
 # onward; for M1 the module brings its own.
+#
+# Two entries because the same crate is built for two wasm targets: the stock
+# `wasm32-unknown-unknown` (M1/M2) and the `os = "minix"` spec at
+# `tools/wasm-target/wasm32-minix.json` (the server harness), which is what the
+# real servers need. Cargo keys custom-target config by the spec's file stem.
 
 [target.wasm32-unknown-unknown]
 rustflags = [
@@ -13,6 +18,18 @@ rustflags = [
   "-C", "link-arg=--allow-undefined",
   "-C", "link-arg=--export=minix_kernel_init",
   "-C", "link-arg=--export=minix_kernel_trigger_panic",
+  "-C", "link-arg=--export=minix_boot_notify",
+  "-C", "link-arg=--initial-memory=33554432",
+  "-C", "link-arg=--max-memory=268435456",
+]
+
+[target.wasm32-minix]
+rustflags = [
+  "-C", "link-arg=--no-entry",
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--export=minix_kernel_init",
+  "-C", "link-arg=--export=minix_kernel_trigger_panic",
+  "-C", "link-arg=--export=minix_boot_notify",
   "-C", "link-arg=--initial-memory=33554432",
   "-C", "link-arg=--max-memory=268435456",
 ]

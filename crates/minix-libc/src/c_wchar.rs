@@ -3,7 +3,7 @@
 //! `tools/c-libc.c`. `wchar_t` is `int` (4 bytes) on this target.
 
 #[cfg(target_os = "minix")]
-use core::ffi::{VaList, c_long, c_ulong, c_void};
+use core::ffi::{VaList, c_char, c_long, c_ulong, c_void};
 use core::ffi::{c_int, c_uint};
 
 /// `wchar_t` (the compiler builtin on this target is a 32-bit int).
@@ -495,9 +495,9 @@ pub unsafe extern "C" fn vswprintf(
     let mut buf = [0u8; 512];
     let r = unsafe {
         crate::c_stdio::vsnprintf(
-            buf.as_mut_ptr() as *mut i8,
+            buf.as_mut_ptr() as *mut c_char,
             buf.len(),
-            narrow.as_ptr() as *const i8,
+            narrow.as_ptr() as *const c_char,
             ap,
         )
     };

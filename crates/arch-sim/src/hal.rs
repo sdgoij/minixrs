@@ -306,6 +306,21 @@ pub unsafe fn write_retval(frame: &mut [u8; 256], val: u64) {
     unsafe { write_frame_field(frame, frame::RAX, val) }
 }
 
+/// Read back the syscall return value [`write_retval`] last stored.
+///
+/// The shipping arches read this out of the trap frame on the way back to
+/// userland. A wasm instance has no such path — its syscall is an ordinary call
+/// whose return belongs to the host — so the platform layer asks for it
+/// explicitly when it resumes a call that blocked, and a later write (a receive's
+/// sender endpoint, say) is what that resume observes.
+///
+/// # Safety
+///
+/// `frame` must be a readable register save area.
+pub unsafe fn read_retval(frame: &[u8; 256]) -> u64 {
+    unsafe { read_frame_field(frame, frame::RAX) }
+}
+
 /// # Safety
 ///
 /// `frame` must be a readable register save area.
@@ -395,7 +410,7 @@ pub unsafe fn build_sigframe(
     trampoline: u64,
     _frame_addr: u64,
 ) {
-    use arch_common::consts::{sigframe as sf, SC_MAGIC};
+    use arch_common::consts::{SC_MAGIC, sigframe as sf};
     dst[0..8].copy_from_slice(&trampoline.to_ne_bytes());
     dst[sf::MASK_OFF..sf::MASK_OFF + 16].copy_from_slice(mask);
     dst[sf::SIGNAL_OFF..sf::SIGNAL_OFF + 4].copy_from_slice(&signo.to_ne_bytes());

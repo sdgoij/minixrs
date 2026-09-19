@@ -212,12 +212,15 @@ const M1_I1_OFF: usize = 8;
 const M1_I2_OFF: usize = 12;
 const M1_I3_OFF: usize = 16;
 
-// Phase 6.16: do_safememset message offsets
-const SAFEMEMSET_GRANTER_OFF: usize = 0;
-const SAFEMEMSET_GRANT_ID_OFF: usize = 4;
-const SAFEMEMSET_OFFSET_OFF: usize = 8;
-const SAFEMEMSET_PATTERN_OFF: usize = 16;
-const SAFEMEMSET_BYTES_OFF: usize = 24;
+// Phase 6.16: do_safememset message offsets.
+//
+// Payload-relative in C, so they need the kernel-call header added: see the
+// DEVIO comment above. Read from 0, the granter was the call number.
+const SAFEMEMSET_GRANTER_OFF: usize = 8;
+const SAFEMEMSET_GRANT_ID_OFF: usize = 12;
+const SAFEMEMSET_OFFSET_OFF: usize = 16;
+const SAFEMEMSET_PATTERN_OFF: usize = 24;
+const SAFEMEMSET_BYTES_OFF: usize = 32;
 // Exec message offsets (Phase 8.10)
 //
 // mess_lsys_krn_sys_exec:
@@ -330,24 +333,30 @@ const SDEVIO_VEC_SIZE_OFF: usize = 32;
 const SDEVIO_OFFSET_OFF: usize = 40;
 
 // mess_lsys_krn_sys_vumap (for do_vumap):
-//   offset  0: endpt     (endpoint_t / i32)
-//   offset  8: vaddr     (vir_bytes / u64)
-//   offset 16: vcount    (int / i32)
-//   offset 20: _pad      (int / i32)
-//   offset 24: offset    (vir_bytes / u64)
-//   offset 32: access    (int / i32)
-//   offset 36: _pad2     (int / i32)
-//   offset 40: paddr     (vir_bytes / u64)
-//   offset 48: pmax      (int / i32)
+//   offset  8: endpt     (endpoint_t / i32)
+//   offset 16: vaddr     (vir_bytes / u64)
+//   offset 24: vcount    (int / i32)
+//   offset 28: _pad      (int / i32)
+//   offset 32: offset    (vir_bytes / u64)
+//   offset 40: access    (int / i32)
+//   offset 44: _pad2     (int / i32)
+//   offset 48: paddr     (vir_bytes / u64)
+//   offset 56: pmax      (int / i32)
 // mess_krn_lsys_sys_vumap (reply):
 //   offset  0: pcount    (int / i32)
-const VUMAP_ENDPT_OFF: usize = 0;
-const VUMAP_VADDR_OFF: usize = 8;
-const VUMAP_VCOUNT_OFF: usize = 16;
-const VUMAP_OFFSET_OFF: usize = 24;
-const VUMAP_ACCESS_OFF: usize = 32;
-const VUMAP_PADDR_OFF: usize = 40;
-const VUMAP_PMAX_OFF: usize = 48;
+//
+// Payload-relative in C, shifted past the kernel-call header like DEVIO above.
+// `pmax` is last, at 56 — inside the 64 bytes a kernel-call message carries, not
+// past it: `size_of::<Message>()` is 64 (the assertion in `proc.rs` pins it to
+// `MESSAGE_SIZE`), despite the "56 bytes" in the comments on the copy in
+// `syscall.rs`.
+const VUMAP_ENDPT_OFF: usize = 8;
+const VUMAP_VADDR_OFF: usize = 16;
+const VUMAP_VCOUNT_OFF: usize = 24;
+const VUMAP_OFFSET_OFF: usize = 32;
+const VUMAP_ACCESS_OFF: usize = 40;
+const VUMAP_PADDR_OFF: usize = 48;
+const VUMAP_PMAX_OFF: usize = 56;
 const VUMAP_REPLY_PCOUNT_OFF: usize = 0;
 
 /// Maximum number of vectored map elements.
@@ -372,14 +381,17 @@ const UMAP_DST_ENDPT_OFF: usize = 16;
 const UMAP_NR_BYTES_OFF: usize = 20;
 
 // mess_lsys_krn_sys_memset (for do_memset):
-//   offset  0: base      (phys_bytes / u64)
-//   offset  8: count     (phys_bytes / u64)
-//   offset 16: pattern   (unsigned long / u64)
-//   offset 24: process   (endpoint_t / i32)
-const MEMSET_BASE_OFF: usize = 0;
-const MEMSET_COUNT_OFF: usize = 8;
-const MEMSET_PATTERN_OFF: usize = 16;
-const MEMSET_PROC_OFF: usize = 24;
+//   offset  8: base      (phys_bytes / u64)
+//   offset 16: count     (phys_bytes / u64)
+//   offset 24: pattern   (unsigned long / u64)
+//   offset 32: process   (endpoint_t / i32)
+//
+// Payload-relative in C, shifted past the kernel-call header like DEVIO above.
+// Read from 0, `base` was the call number and the fill went nowhere reachable.
+const MEMSET_BASE_OFF: usize = 8;
+const MEMSET_COUNT_OFF: usize = 16;
+const MEMSET_PATTERN_OFF: usize = 24;
+const MEMSET_PROC_OFF: usize = 32;
 
 // mess_lsys_krn_sys_getinfo (for do_getinfo):
 //   offset  8: request    (int / i32)
@@ -817,9 +829,10 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             return crate::ipc::E2BIG;
         }
 
-        // Copy vector from caller's address space
-        // We switch to caller's CR3 to read from their virtual address,
-        // then copy into the kernel VDEVIO_BUF (identity-mapped).
+        // Copy vector from caller's address space. On the hardware arches the
+        // caller's page table is active during a kernel call, so the switch below
+        // is all that is needed and the copy is direct; where it is not, the copy
+        // itself has to go through the HAL.
         let buf_ptr = VDEVIO_BUF.get() as u64;
         {
             let boot_cr3 = crate::hal::boot_cr3();
@@ -830,9 +843,14 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 }
             }
             let buf_mut = VDEVIO_BUF.get() as *mut u8;
-            core::ptr::copy_nonoverlapping(vec_addr as *const u8, buf_mut, bytes);
+            // Restore CR3 before possibly returning, or a failure would leave the
+            // wrong address space active on the arches where the switch matters.
+            let r = crate::vm::read_from_proc((*caller).p_nr, vec_addr, buf_mut, bytes);
             if boot_cr3 != 0 {
                 crate::hal::write_cr3(boot_cr3);
+            }
+            if r != 0 {
+                return r;
             }
         }
 
@@ -940,9 +958,12 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     }
                 }
                 let buf_src = VDEVIO_BUF.get() as *const u8;
-                core::ptr::copy_nonoverlapping(buf_src, vec_addr as *mut u8, bytes);
+                let r = crate::vm::write_to_proc((*caller).p_nr, vec_addr, buf_src, bytes);
                 if boot_cr3 != 0 {
                     crate::hal::write_cr3(boot_cr3);
+                }
+                if r != 0 {
+                    return r;
                 }
             }
 
@@ -1380,6 +1401,22 @@ pub unsafe fn kernel_call_finish(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 // Copy only Message size (56 bytes), not MESSAGE_SIZE (64),
                 // to match the user's receive buffer which is a Message struct.
                 let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
+                // Same seam as `copy_from_user` and `delivermsg`: this is the
+                // kernel's buffer going to a user address, and on an arch whose
+                // address spaces are separate memories only the HAL can get it
+                // there. Written through the HAL rather than staged in
+                // `p_delivermsg` because the length here is the Message size and
+                // `delivermsg` moves a whole `MESSAGE_SIZE`.
+                if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+                    copy(
+                        arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                        msg.as_ptr() as u64,
+                        (*caller).p_nr,
+                        vir,
+                        copy_sz,
+                    );
+                    return;
+                }
                 core::ptr::copy_nonoverlapping(msg.as_ptr(), vir as *mut u8, copy_sz);
             }
         }
@@ -2617,14 +2654,22 @@ pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             crate::grants::CPF_WRITE,
             offset,
         );
-        let (phys_addr, _new_granter, _flags) = match r {
+        let (v_offset, new_granter, _flags) = match r {
             Ok(v) => v,
             Err(e) => return e,
         };
 
-        // Write pattern via vm_memset
-        crate::vm::vm_memset(phys_addr, pattern as u8, bytes as usize);
-        crate::ipc::OK
+        // `v_offset` is virtual in the *granter's* space, not an address the
+        // kernel can write, so the fill names that process — C's
+        // `vm_memset(caller, new_granter, v_offset, pattern, len)`. The error is
+        // propagated rather than dropped: on an arch where the fill crosses the
+        // HAL, a refusal is the only signal that nothing was written.
+        crate::vm::vm_memset(
+            crate::table::endpoint_slot(new_granter),
+            v_offset,
+            pattern as u8,
+            bytes as usize,
+        )
     }
 }
 
@@ -2680,13 +2725,25 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         if source_rp.is_null() {
             return crate::ipc::EFAULT;
         }
-        let source_cr3 = (*source_rp).p_seg.p_cr3;
-        if source_cr3 == 0 {
-            return crate::ipc::EFAULT;
-        }
-        let boot_cr3 = crate::hal::boot_cr3();
-        if boot_cr3 == 0 {
-            return crate::ipc::EFAULT;
+        // The vector and the output buffer are the *caller's*, so reading and
+        // writing them is a transfer out of and into its address space. On an
+        // arch whose page tables cannot reach it — the two spaces are separate
+        // memories — only the HAL can, and the CR3 switch is what makes the
+        // addresses dereferenceable where they can. The two preconditions are
+        // the switch's, not the copy's, so they gate only that path: on such an
+        // arch a process with no page table is the ordinary case, not an error.
+        let via_hal = crate::hal::CROSS_ADDRESS_SPACE_COPY.is_some();
+        let mut source_cr3 = 0u64;
+        let mut boot_cr3 = 0u64;
+        if !via_hal {
+            source_cr3 = (*source_rp).p_seg.p_cr3;
+            if source_cr3 == 0 {
+                return crate::ipc::EFAULT;
+            }
+            boot_cr3 = crate::hal::boot_cr3();
+            if boot_cr3 == 0 {
+                return crate::ipc::EFAULT;
+            }
         }
 
         // Allocate kernel-local vectors on the stack
@@ -2694,14 +2751,27 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         let mut pvec: [arch_common::types::VumapPhys; MAPVEC_NR] = [core::mem::zeroed(); MAPVEC_NR];
 
         // Copy input vector from caller's address space
-        let _size = vcount as usize * size_of::<arch_common::types::VumapVir>();
-        crate::hal::write_cr3(source_cr3);
-        core::ptr::copy_nonoverlapping(
-            vaddr as *const arch_common::types::VumapVir,
-            vvec.as_mut_ptr(),
-            vcount as usize,
-        );
-        crate::hal::write_cr3(boot_cr3);
+        let vec_bytes = vcount as usize * size_of::<arch_common::types::VumapVir>();
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            let r = copy(
+                (*caller).p_nr,
+                vaddr,
+                arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                vvec.as_mut_ptr() as u64,
+                vec_bytes,
+            );
+            if r != crate::ipc::OK {
+                return crate::ipc::EFAULT;
+            }
+        } else {
+            crate::hal::write_cr3(source_cr3);
+            core::ptr::copy_nonoverlapping(
+                vaddr as *const arch_common::types::VumapVir,
+                vvec.as_mut_ptr(),
+                vcount as usize,
+            );
+            crate::hal::write_cr3(boot_cr3);
+        }
 
         let mut pcount: i32 = 0;
 
@@ -2771,14 +2841,27 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 
         // Copy output vector back to caller's address space
         if pcount > 0 {
-            let _psize = pcount as usize * size_of::<arch_common::types::VumapPhys>();
-            crate::hal::write_cr3(source_cr3);
-            core::ptr::copy_nonoverlapping(
-                pvec.as_ptr(),
-                paddr as *mut arch_common::types::VumapPhys,
-                pcount as usize,
-            );
-            crate::hal::write_cr3(boot_cr3);
+            let out_bytes = pcount as usize * size_of::<arch_common::types::VumapPhys>();
+            if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+                let r = copy(
+                    arch_common::safecopies::KERNEL_ADDRESS_SPACE,
+                    pvec.as_ptr() as u64,
+                    (*caller).p_nr,
+                    paddr,
+                    out_bytes,
+                );
+                if r != crate::ipc::OK {
+                    return crate::ipc::EFAULT;
+                }
+            } else {
+                crate::hal::write_cr3(source_cr3);
+                core::ptr::copy_nonoverlapping(
+                    pvec.as_ptr(),
+                    paddr as *mut arch_common::types::VumapPhys,
+                    pcount as usize,
+                );
+                crate::hal::write_cr3(boot_cr3);
+            }
 
             // Write back pcount
             msg_write_i32(msg, VUMAP_REPLY_PCOUNT_OFF, pcount);
@@ -3337,8 +3420,13 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
             Ordering::Relaxed,
         );
 
-        // Copy program name from caller's address space
-        // use a stack buffer and CR3 switching like VDEVIO
+        // Copy program name from the caller's address space, into a stack
+        // buffer. On the hardware arches the caller's page table is active
+        // during a kernel call, so the switch below is what makes `name_ptr`
+        // dereferenceable; where the two address spaces are separate memories
+        // the read itself has to go through the HAL, which `read_from_proc`
+        // decides. `ps_str` needs no such read: it is passed to
+        // `arch_proc_init` as a value, and no implementation dereferences it.
         let mut name_buf = [0u8; arch_common::types::PROC_NAME_LEN];
         let copy_len = name_buf.len() - 1;
         {
@@ -3349,9 +3437,20 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
                     crate::hal::write_cr3(caller_cr3);
                 }
             }
-            core::ptr::copy_nonoverlapping(name_ptr as *const u8, name_buf.as_mut_ptr(), copy_len);
+            let r = crate::vm::read_from_proc(
+                (*caller).p_nr,
+                name_ptr,
+                name_buf.as_mut_ptr(),
+                copy_len,
+            );
             if boot_cr3 != 0 {
                 crate::hal::write_cr3(boot_cr3);
+            }
+            // C (`do_exec.c`) substitutes a placeholder rather than failing the
+            // exec: the name is diagnostic, the new image is not.
+            if r != 0 {
+                name_buf = [0u8; arch_common::types::PROC_NAME_LEN];
+                name_buf[..7].copy_from_slice(b"<unset>");
             }
         }
         name_buf[copy_len] = 0; // null-terminate
@@ -3420,7 +3519,7 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
 /// # Safety
 ///
 /// `caller` must point to a valid `Proc`, `msg` must be a valid message buffer.
-pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let endpt = msg_read_i32(msg, EXEC_LOAD_ENDPT_OFF);
         let entry = msg_read_u64(msg, EXEC_LOAD_ENTRY_OFF);
@@ -3457,13 +3556,20 @@ pub unsafe fn do_exec_load_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             None => return crate::ipc::ENOMEM,
         };
 
-        // Kernel runs with the caller's page table active during a kernel
-        // call, so the caller's buffer VA is directly readable.
-        core::ptr::copy_nonoverlapping(
-            frame_ptr as *const u8,
+        // The frame is in the *caller's* address space, and reading `frame_ptr`
+        // straight only works because the caller's page table is active during a
+        // kernel call. That is an identity-map assumption, so the read is the
+        // HAL-aware kind — and a failure is reported rather than left to become
+        // an exec of whatever the buffer happened to hold.
+        let r = crate::vm::read_from_proc(
+            (*caller).p_nr,
+            frame_ptr,
             frame_base as *mut u8,
             frame_len as usize,
         );
+        if r != 0 {
+            return r;
+        }
 
         let frame_slice = core::slice::from_raw_parts(frame_base as *const u8, frame_len as usize);
 
@@ -3778,9 +3884,12 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
                 crate::hal::write_cr3(caller_cr3);
             }
         }
-        core::ptr::copy_nonoverlapping(mc_bytes, ctx_ptr as *mut u8, copy_sz);
+        let r = crate::vm::write_to_proc((*caller).p_nr, ctx_ptr, mc_bytes, copy_sz);
         if boot_cr3 != 0 {
             crate::hal::write_cr3(boot_cr3);
+        }
+        if r != 0 {
+            return r;
         }
 
         OK
@@ -3795,10 +3904,10 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
 /// # Safety
 ///
 /// `caller` must point to a valid `Proc`.
-pub unsafe fn do_setmcontext_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
+pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
         let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
-        let _ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
+        let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
 
         if !crate::table::is_ok_endpoint(endpt) {
             return crate::ipc::EINVAL;
@@ -3816,14 +3925,17 @@ pub unsafe fn do_setmcontext_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_
 
         let boot_cr3 = crate::hal::boot_cr3();
         if boot_cr3 != 0 {
-            let caller_cr3 = (*_caller).p_seg.p_cr3;
+            let caller_cr3 = (*caller).p_seg.p_cr3;
             if caller_cr3 != 0 {
                 crate::hal::write_cr3(caller_cr3);
             }
         }
-        core::ptr::copy_nonoverlapping(_ctx_ptr as *const u8, mc_bytes, copy_sz);
+        let r = crate::vm::read_from_proc((*caller).p_nr, ctx_ptr, mc_bytes, copy_sz);
         if boot_cr3 != 0 {
             crate::hal::write_cr3(boot_cr3);
+        }
+        if r != 0 {
+            return r;
         }
 
         // Apply the saved context to the target process's TrapFrame
@@ -4880,7 +4992,7 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
     }
 }
 
-/// Handle SYS_MEMSET: write a pattern byte to physical memory.
+/// Handle SYS_MEMSET: write a pattern byte into a process's memory.
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_memset.c`
 ///
 /// # Safety
@@ -4888,14 +5000,23 @@ pub unsafe fn do_vmctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 /// `msg` must contain valid memset fields (base, count, pattern, process).
 pub unsafe fn do_memset_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
-        let _base = msg_read_u64(msg, MEMSET_BASE_OFF);
-        let _count = msg_read_u64(msg, MEMSET_COUNT_OFF);
-        let _pattern = msg_read_u64(msg, MEMSET_PATTERN_OFF);
-        let _process = msg_read_i32(msg, MEMSET_PROC_OFF);
+        let base = msg_read_u64(msg, MEMSET_BASE_OFF);
+        let count = msg_read_u64(msg, MEMSET_COUNT_OFF);
+        let pattern = msg_read_u64(msg, MEMSET_PATTERN_OFF);
+        let process = msg_read_i32(msg, MEMSET_PROC_OFF);
 
-        // Delegate to vm_memset (physical address write)
-        crate::vm::vm_memset(_base, _pattern as u8, _count as usize);
-        OK
+        // C: `vm_memset(caller, m_ptr->...process, base, pattern, count)` — the
+        // process field selects whose memory `base` refers to, with `NONE`
+        // meaning the kernel's own. Resolving it here is what keeps the write
+        // inside that process on an arch whose address spaces are separate
+        // memories; where the kernel can reach the address itself, the resolved
+        // process is unused and the write is unchanged.
+        let proc = if process == crate::system::NONE {
+            arch_common::safecopies::KERNEL_ADDRESS_SPACE
+        } else {
+            crate::table::endpoint_slot(process)
+        };
+        crate::vm::vm_memset(proc, base, pattern as u8, count as usize)
     }
 }
 
@@ -5842,14 +5963,12 @@ mod tests {
             system_init();
             let rp = crate::table::proc_addr(0);
 
-            // Set all proc_nr to NONE to free slots
-            let base = crate::r#priv::PRIV.get() as *mut Priv;
-            for i in 0..NR_SYS_PROCS {
-                (*base.add(i)).s_proc_nr = NONE;
-            }
-
+            // No hand-freeing: the whole point is that `proc_init` leaves the
+            // dynamic slots free, the way C marks the table free before
+            // assigning any of it. This test used to free them itself, which is
+            // what hid the fact that nothing else did.
             let slot = get_priv(rp);
-            assert!(slot.is_some());
+            assert!(slot.is_some_and(|id| id >= crate::r#priv::NR_STATIC_PRIV_IDS));
         }
     }
 
@@ -6578,6 +6697,58 @@ mod tests {
             msg_write_i32(&mut msg, MEMSET_PROC_OFF, 0);
             let result = do_memset_handler(rp, &mut msg);
             assert_eq!(result, OK);
+        }
+    }
+
+    /// The kernel-call header — the call number at message offset 0 and the
+    /// caller's endpoint at 4, both written by `sys_kernel_call_handler` — is
+    /// overwritten before a handler sees the message, so a handler that reads its
+    /// request from 0 acts on the call number.
+    ///
+    /// The payload offsets in these three tests are literals on purpose: using
+    /// the handler's own constants would make the test agree with whatever they
+    /// happen to be, which is the property under test. `do_memset_handler`'s
+    /// offsets are not pinned here because a regression would make it read an
+    /// address-sized `count` and overrun; the wasm harness drives it instead.
+    #[test]
+    fn test_do_safememset_reads_granter_past_the_header() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, 8, NONE);
+            // Reading this would fall through to grant verification instead of
+            // answering EFAULT_SRC.
+            msg_write_i32(&mut msg, 0, 0x1234);
+            assert_eq!(
+                do_safememset_handler(rp, &mut msg),
+                crate::grants::EFAULT_SRC
+            );
+        }
+    }
+
+    /// And for `do_vumap_handler`: read from literal offset 0 the `endpt` field
+    /// is 0x1234 and `vcount` is the low half of `vaddr` (zero here), so the call
+    /// is refused as malformed before the address space is touched (`EINVAL`);
+    /// read from the payload it passes the bounds check and fails only on proc 0
+    /// having no page table (`EFAULT`). The errno says which offset was used.
+    #[test]
+    fn test_do_vumap_reads_request_past_the_header() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_endpoint = crate::table::make_endpoint(0, 0);
+            (*rp).p_seg.p_cr3 = 0;
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, 8, SELF);
+            msg_write_u64(&mut msg, 16, 0);
+            msg_write_i32(&mut msg, 24, 1);
+            msg_write_u64(&mut msg, 32, 0);
+            msg_write_i32(&mut msg, 40, VUA_READ);
+            msg_write_u64(&mut msg, 48, 0);
+            msg_write_i32(&mut msg, 56, 8);
+            msg_write_i32(&mut msg, 0, 0x1234);
+            assert_eq!(do_vumap_handler(rp, &mut msg), crate::ipc::EFAULT);
         }
     }
 
