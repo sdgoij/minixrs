@@ -6400,14 +6400,33 @@ layout; and the `SIGCALLS_*` family (`kill`, `sigsend`, `sigreturn`, `getksig`)
 uses a layout of its own (0/16/20/24) that the live signal paths on all three
 arches exercise.
 
-The *reply* side is deliberately not uniform, and a caller has to match its own
-handler rather than C: `fork`'s reply is at 8 (`minix_rt::sys_fork` reads it
-there), `whoami`'s is written at 0 and read at 0 by its caller
-(`minix_util::rs::self_endpoint` is the live example), `times` writes its fields
-at 0 as well but has no caller in the tree to confirm the other end, and `umap`'s
-`dst_addr` now sits at 8 — where C puts it, and the same offset as the request's
-`src_endpt`, because C's reply struct opens with it too. A C-side caller reading
-a port reply that is written at 0 would see the header instead.
+The *reply* side had the same rule waiting, and two families still ignored it: a
+C reply struct is a union member too, so a field C reads at its own offset 0 is at
+message offset 8 here.
+
+`whoami` is fixed. Its reply is `mess_krn_lsys_sys_getwhoami` — `endpt`@0,
+`privflags`@4, `name`@8, exactly 56 bytes, which is the width C's
+`_ASSERT_MSG_SIZE` in `ipcconst.h` demands of every `mess_*` struct. The handler
+wrote all three at 0/4/8 and `minix_util::rs::self_endpoint` read the endpoint at
+0, so the port agreed with itself and disagreed with C: a ported
+`libsys/sys_whoami.c` would have read the first bytes of the name as the
+endpoint. Both ends now use 8/12/16, and the new test asserts the reply against
+*literal* C-derived offsets — run against the old layout it fails by reading
+`0x74736574`, the name, where the endpoint belongs. `fork` (8) and `umap`'s
+`dst_addr` (8) were already conformant.
+
+`times` is still at 0, and it is a wider divergence than an offset, so it is
+recorded rather than changed. C's `mess_krn_lsys_sys_times` is five `clock_t`
+fields, and `clock_t` must be **four** bytes there — 5 × 4 + `padding[36]` is the
+56 the assert demands — so C's reply runs `real_ticks`@0 through `system_time`@16
+at 4-byte stride. The port writes six *`u64`* fields at 0/8/…/40 and adds a
+`system_hz` that C does not have, because `crates/fs/src/ext2/utility.rs`'s
+`clock_time` divides ticks by hz itself instead of calling C's `getuptime()`, which
+returns seconds. Matching C therefore means deciding whether that field stays as a
+port extension (in which case it too belongs past the header) or whether
+`clock_time` goes through C's helper. Nothing today crosses a C boundary either
+way: the only reader is that same `clock_time`, and it matches the handler's
+layout field for field.
 
 All of these calls are unreached in this port, which is why none of it showed up:
 no code calls kernel calls 14 (`umap`), 22/23 (`sdevio`/`vdevio`), 27 (`abort`),
@@ -6417,9 +6436,15 @@ the literals rather than the constants they guard, and effect-level tests for
 `statectl`, `stime`, `vdevio` and `getmcontext` that fail on the old offsets
 (the `umap` pair were converted to literal offsets for the same reason).
 
-`do_safememset` sits behind `verify_grant` (a grant table, `s_grant_pa`,
-`s_phys_delta`), which this port has not exercised either, so its conversion is
-likewise unpinned end to end.
+`do_safememset` also sits behind `verify_grant` (a grant table, `s_grant_pa`,
+`s_phys_delta`), and the M2 harness now pins that conversion end to end. It is
+the write half of the same grant: the harness sets `CPF_WRITE` in the granter's
+own grant table, calls `SYS_SAFEMEMSET`, and asserts both the kernel's return
+value and the pattern appearing in the granter's instance — the bytes can only
+land there if the kernel asks the seam to put them there, and the check was
+confirmed to fail when those flags were left read-only. With the
+`SYS_SETGRANT`/`SYS_SAFECOPYFROM` pair covering the read direction, both arms of
+`verify_grant` are now exercised rather than inferred.
 
 One consequence is worth separating from the offset bug, because fixing the
 offsets does not remove it:
@@ -6431,10 +6456,6 @@ offsets does not remove it:
   from the caller's slot, at the vector's address, of the vector's own byte count
   — rather than dressing the errno up as a pass. The syscall as a whole has no
   meaning until a physical-address model is decided (§13's open questions).
-
-`do_safememset` sits behind `verify_grant` (a grant table, `s_grant_pa`,
-`s_phys_delta`), which this port has not exercised either, so its conversion is
-likewise unpinned end to end.
 
 **15. A syscall that blocked never returned its value to the guest.** Found by
 giving DS something to answer. Its first `RECEIVE` blocks, and the harness

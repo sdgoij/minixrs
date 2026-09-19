@@ -35,8 +35,9 @@ const RS_ENDPOINT: i32 = arch_common::com::RS_PROC_NR;
 
 /// Kernel call 26 is `SYS_GETINFO`, and `GET_WHOAMI` asks it for the caller.
 const SYS_GETINFO: i32 = 26;
-/// `mess_krn_lsys_sys_getwhoami`'s reply: the endpoint at message offset 0.
-const WHOAMI_ENDPT_OFF: usize = 0;
+/// `mess_krn_lsys_sys_getwhoami`'s `endpt`, which opens at C's union offset 0 —
+/// message offset 8, where the reply's union begins.
+const WHOAMI_ENDPT_OFF: usize = 8;
 /// `mess_lsys_krn_sys_getinfo`'s request field.
 const GETINFO_REQUEST_OFF: usize = 8;
 

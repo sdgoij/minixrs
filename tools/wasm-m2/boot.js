@@ -738,6 +738,46 @@ check(
   `read back 0x${readU32(seam.memory, copiedTo).toString(16)}`
 );
 
+// ------------------------------------------- SYS_SAFEMEMSET (56)
+//
+// The other direction, and the only handler that asks the kernel to *write* into
+// the granter through the seam: `do_safememset` verifies a CPF_WRITE grant and
+// hands the pattern to the copy HAL (`vm_memset` stages it in a kernel buffer and
+// gives each chunk to the seam), so the bytes can only land if the kernel asks the
+// host to put them there. The flags live in the granter's own table — granter
+// memory — so granting write is a write to that table, which is also how a real
+// granter would do it.
+const SYS_SAFEMEMSET = 56;
+const SAFE_FILL_PATTERN = 0x5a;
+
+{
+  const view = new DataView(granterState.memory.buffer);
+  // CPF_USED|CPF_VALID|CPF_DIRECT|CPF_READ|CPF_WRITE.
+  view.setInt32(granterScratch + 0, 0x001303, true);
+}
+const safememset = kernelCall(seamSpec.slot, SYS_SAFEMEMSET, (view, msg) => {
+  view.setInt32(msg + 8, granterSpec.endpoint, true); // granter
+  view.setInt32(msg + 12, 0, true); // grant id
+  view.setBigUint64(msg + 16, 0n, true); // offset into the grant
+  view.setBigUint64(msg + 24, BigInt(SAFE_FILL_PATTERN), true); // pattern
+  view.setBigUint64(msg + 32, 8n, true); // bytes
+});
+check(
+  'SYS_SAFEMEMSET verified the write grant and returned OK',
+  safememset.result === 0,
+  `kernel call 56 returned ${safememset.result}`
+);
+check(
+  "the pattern landed in the granter's own instance",
+  readU32(granterState.memory, granterScratch + GRANT_PAYLOAD_AT) === 0x5a5a5a5a,
+  `read back 0x${readU32(granterState.memory, granterScratch + GRANT_PAYLOAD_AT).toString(16)}`
+);
+check(
+  'the fill crossed the seam into the granter',
+  safememset.copies.some((c) => c.dstProc === granterSpec.slot && c.bytes > 0),
+  safememset.copies.map((c) => `${c.srcProc}->${c.dstProc}:${c.bytes}`).join(', ')
+);
+
 note(
   'what the remaining seams establish, and what they do not',
   'SYS_MEMSET, SYS_EXEC, SYS_VUMAP and the SYS_SETGRANT/SYS_SAFECOPYFROM pair ' +
@@ -749,8 +789,8 @@ note(
     'is physical addresses and this port has none: the vector read is the whole ' +
     'of what can be exercised until a physical-address model is decided, and ' +
     '`PORTING_PLAN.md` finding 14 records that rather than papering over it. ' +
-    '`do_safememset` reaches `verify_grant` by the path the pair above now pins, ' +
-    'but nothing in the port calls it, so its own conversion stays unpinned.'
+    'SYS_SAFEMEMSET is the write half of the same grant, so the pair above and ' +
+    'this one cover both directions of `verify_grant`.'
 );
 
 // Printed last, after every check has run: the timeline and the copy log are

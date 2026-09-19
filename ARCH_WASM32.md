@@ -4,11 +4,13 @@ Rough design for an `arch-wasm32` port: the kernel, servers, and userland
 compiled to WebAssembly and run in a browser tab (or Node, or any wasm host).
 
 Status: **partially implemented.** M0 (host-mode HAL), M1 (kernel boots as
-wasm, no processes), and M2's protocol core (instance-per-process, the dispatch
-protocol, Asyncify across the boundary, a real two-process rendezvous) are all
-**done** — see §11 for commands and results. What remains of M2 is the real
-servers as modules, which needs the toolchain work in §10 rather than more
-protocol design. M3 onward is design.
+wasm, no processes), M2's protocol core (instance-per-process, the dispatch
+protocol, Asyncify across the boundary, a real two-process rendezvous), and M2c
+(the real servers, built for `os = "minix"`, spawned by the kernel through to
+their own main loops and the DS→RS→PM init handshake) are all **done** — see §11
+for commands and results. M3, real processes with VFS and a shell, is design; its
+prerequisite is VFS itself as a boot process, which is not the "one more export"
+job that DS, RS and PM each were.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -754,7 +756,7 @@ boundary all work, driven by the kernel's own process table, run queues, and
 
 ```text
 sh tools/wasm-m2/run.sh
-# 28/28 checks passed, 4 notes
+# 31/31 checks passed, 4 notes
 ```
 
 The demonstration is a two-process rendezvous. `crates/wasm-procs` is one
@@ -802,9 +804,12 @@ The harness has since grown around that seam, because each new site got its test
 rather than its patch: `SYS_MEMSET`, `SYS_EXEC` and `SYS_VUMAP` were converted and
 pinned there, and M2 now also carries the port's only grant test — a
 `SYS_SETGRANT`/`SYS_SAFECOPYFROM` pair where the table lives in one instance and
-the copy is made out of it in another. That last one is the check DS's label
-seeding depends on, and it is the one site whose address came out of a priv
-structure rather than a message (§5.1, `PORTING_PLAN.md` findings 16–17).
+the copy is made out of it in another, followed by the `SYS_SAFEMEMSET` that
+writes the pattern back the other way, its flags written into the granter's own
+table. The pair is the check DS's label seeding depends on, and it is the one site
+whose address came out of a priv structure rather than a message (§5.1,
+`PORTING_PLAN.md` findings 16–17); the memset is what makes `verify_grant`'s write
+arm exercised rather than inferred (finding 14).
 
 Two things the work settled:
 

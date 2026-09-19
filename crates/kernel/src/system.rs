@@ -420,13 +420,15 @@ const GETINFO_VAL_LEN_OFF: usize = 24;
 const GETINFO_VAL_PTR2_OFF: usize = 32;
 const GETINFO_VAL_LEN2_E_OFF: usize = 40;
 
-// mess_krn_lsys_sys_getwhoami (reply for GET_WHOAMI):
-//   offset  0: endpt      (endpoint_t / i32)
-//   offset  4: privflags  (int / i32)
-//   offset  8: name       (char[48])
-const WHOAMI_ENDPT_OFF: usize = 0;
-const WHOAMI_PRIVFLAGS_OFF: usize = 4;
-const WHOAMI_NAME_OFF: usize = 8;
+// mess_krn_lsys_sys_getwhoami (reply for GET_WHOAMI). C's struct is endpt@0,
+// privflags@4, name@8 and exactly 56 bytes wide, so the whole reply sits in the
+// union that opens at message offset 8:
+//   offset  8: endpt      (endpoint_t / i32)
+//   offset 12: privflags  (int / i32)
+//   offset 16: name       (char[48])
+const WHOAMI_ENDPT_OFF: usize = 8;
+const WHOAMI_PRIVFLAGS_OFF: usize = 12;
+const WHOAMI_NAME_OFF: usize = 16;
 
 // mess_lsys_krn_sys_irqctl (for do_irqctl): kernel calls carry their
 // arguments in the payload (bytes 0-7 hold the call number + caller
@@ -6871,6 +6873,31 @@ mod tests {
             msg_write_i32(&mut msg, GETINFO_REQUEST_OFF, GET_WHOAMI as i32);
             let result = do_getinfo_handler(rp, &mut msg);
             assert_eq!(result, OK);
+        }
+    }
+
+    /// The whoami reply is a union member, so it opens where the union does — at
+    /// message offset 8 — and not at C's union-relative 0. Literal offsets below
+    /// are deliberate: reading `WHOAMI_*_OFF` would only restate the constants
+    /// under test. This fails against the old 0/4/8 layout, where offset 8 still
+    /// held the request word instead of the endpoint.
+    #[test]
+    fn test_whoami_reply_sits_at_c_union_offset() {
+        unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            let ep = crate::table::make_endpoint(3, 1);
+            (*rp).p_endpoint = ep;
+            (*rp).p_name = [0u8; PROC_NAME_LEN];
+            (&mut (*rp).p_name)[..4].copy_from_slice(b"test");
+
+            let mut msg = [0u8; MESSAGE_SIZE];
+            msg_write_i32(&mut msg, GETINFO_REQUEST_OFF, GET_WHOAMI as i32);
+
+            assert_eq!(do_getinfo_handler(rp, &mut msg), OK);
+            assert_eq!(msg_read_i32(&msg, 8), ep, "endpt at C's offset 0 + 8");
+            assert_eq!(&msg[16..20], b"test", "name at C's offset 8 + 8");
+            assert_eq!(msg[20], 0, "name is NUL-terminated");
         }
     }
 
