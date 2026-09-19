@@ -1083,7 +1083,8 @@ servers had been reaching their main loops regardless, because their init only
 touches their own statics — which is exactly why nothing had noticed.
 
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
-real coreutils.
+real coreutils. Progress: M3a (RAM disk), M3b (VM + MFS), M3c (VFS mounts root),
+M3d (INIT, the first user process), M3e (the tty server, partial) — see below.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
 existing persistence test adapted.
@@ -1230,10 +1231,48 @@ SIGNALED, which is exactly what PM's `GETKSIG` loop looks for.
 
 What M3d does not do is the TTY half of M3, and `userland::init` cannot run to its end
 without it: its next act is to open `/dev/console`, dup2 it onto 0..2 and mark those fds
-VFS-owned so the shell it execs inherits tty-backed stdio, and there is neither a console
-device (a tty server behind VFS's device layer) nor a `/bin/sh` to exec. Its no-console path
-is a spin with no syscall in it, which on this target hangs the host synchronously rather
-than failing (finding 12), so running `init` unmodified has to wait for those.
+VFS-owned so the shell it execs inherits tty-backed stdio — and at the point M3d stopped
+there was no console device behind VFS's device layer (M3e adds it) and no `/bin/sh` to exec.
+Its no-console path is a spin with no syscall in it, which on this target hangs the host
+synchronously rather than failing (finding 12), so running `init` unmodified has to wait for
+those.
+
+**M3e — The console's tty server. Status: PARTIAL — the driver runs, the open is not
+exercised yet.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 39/39 checks passed, over ten servers and one user process
+```
+
+The tty server is spawned at `TTY_PROC_NR` and reaches its main loop, which is the third
+thing `/dev/console` needs and the first two of which were already there. Its init is not
+passive: `tty_server_main` registers the console with devman
+(`devman_add_device("tty0", 0)`), which costs a grant table (`SYS_SETGRANT`) and a copy of
+the registration blob out of the tty's own instance, and it retries while devman's tree is
+not up. The harness reads the result from devman's *own* device table rather than from the
+tty's side: what a driver registers is devman's state, and a tty whose registration was
+refused is indistinguishable from one whose registration landed, because
+`devman_add_device` retries only on the one retryable errno and gives up quietly otherwise.
+
+Two things were worth establishing rather than assuming, and both came out favourably:
+
+- **The console's output path needs no wasm-specific mechanism.** The tty emits console
+  bytes with its own `write(1)` (`console_write`, and `console_echo` for echoed input),
+  which takes the kernel's console shortcut — the path findings 28 and 29 fixed — on every
+  arch. So the tty needs no console import: on a hardware arch the kernel writes the byte to
+  the UART, and here it reads the bytes out of the tty's own instance and emits them.
+- **The device mapping is not missing.** VFS's `sef_cb_init_fresh` already maps major 5 to
+  `TTY_PROC_NR` in its dmap, so `/dev/console` resolves to this instance the moment the
+  instance exists at that slot. It is a static table rather than C's protocol, and the
+  code says so: `TODO(1A.5): replace with RS-driven registration once tty publishes its
+  dev_nr at boot` (`PORTING_PLAN.md` finding 30).
+
+What is left is to exercise it: a probe process that opens `/dev/console` the way
+`userland::init` does, dup2's it onto 0..2, marks those fds VFS-owned, and writes a line
+that has to come back out through VFS → the tty → the host console. The chain exists end
+to end now, but nothing has walked it, and "the two halves are present" is not the same
+claim as "an open reaches the driver".
 
 ## 12. Risks, ranked
 

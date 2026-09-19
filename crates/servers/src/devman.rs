@@ -435,6 +435,24 @@ pub unsafe fn devman_find_device(dev_id: i32) -> Option<usize> {
     unsafe { _find_dev(0, dev_id) }
 }
 
+/// How many devices are registered under devman's device root, excluding the root
+/// itself.
+///
+/// Read it from the **devman** instance: what a driver registers is a change to
+/// devman's own device tree, not a byte that crosses the host boundary, so this is
+/// the only way a harness can check that an `ADD` was *accepted* rather than merely
+/// sent — the same reason `minix_rs_is_active` exists for the init handshake. Each
+/// instance carries all the servers' code, so asking the wrong instance reads an
+/// empty table and answers `0`.
+pub fn devman_device_count() -> i32 {
+    let total = DEVICE_COUNT.load(Ordering::Relaxed);
+    if total == 0 {
+        // `devman_init_devices` has not run yet (it runs on VTreeFS mount).
+        return 0;
+    }
+    (total - 1) as i32
+}
+
 /// Allocate a slot in the device table.
 ///
 /// Returns the index, or None if full.

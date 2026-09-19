@@ -135,6 +135,25 @@ pub extern "C" fn minix_server_virtio_blk() -> i32 {
     0
 }
 
+/// The tty server: the console, the RS-232 lines and the pty pairs, all behind
+/// VFS's device layer.
+///
+/// `/dev/console` is a char-device node in the boot image (major 5, minor 0 —
+/// `boot-image`'s `DEVICES` table), and `userland::init` opens it to route its stdio
+/// through VFS. What an open resolves to is the dmap entry for major 5, so this
+/// instance is the other half of that: without it nothing answers `CDEV_OPEN` for
+/// the console and init's setup fails into a spin.
+///
+/// Its own init is not passive — it registers the console with devman
+/// (`devman_add_device("tty0", 0)`), which costs a grant table (`SYS_SETGRANT`) and
+/// a copy of the registration blob out of this instance, so reaching the main loop
+/// below means the grant and the seam worked.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_tty() -> i32 {
+    servers::tty::tty_server_main();
+    0
+}
+
 /// The device manager, whose VTreeFS the `/devices` mount point names.
 ///
 /// VFS's init mounts it *after* the root filesystem — `mount_devman`, whose own comment
@@ -182,6 +201,18 @@ pub extern "C" fn minix_rs_is_active(endpoint: i32) -> i32 {
     } else {
         0
     }
+}
+
+/// How many devices devman has registered under its device root — read it from the
+/// **devman** instance.
+///
+/// The driver that registers is the tty server, and whether its `ADD` was *accepted*
+/// is devman's own state rather than anything the host can watch cross, so the answer
+/// has to come from devman. Asking any other instance reads an empty table and
+/// answers `0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_devman_device_count() -> i32 {
+    servers::devman::devman_device_count()
 }
 
 // ------------------------------------------------------------------ DS client

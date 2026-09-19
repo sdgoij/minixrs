@@ -194,6 +194,11 @@ const specs = [
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
+  // The console's driver, spawned once VFS has mounted devman: its init registers the
+  // console with devman (`devman_add_device("tty0", 0)`) and must retry while that
+  // tree is not up yet, so running it after VFS is what makes the first attempt the
+  // one that lands. It is the process `/dev/console` (major 5) has to resolve to.
+  { slot: 5, entry: 'minix_server_tty', label: 'tty' },
   // INIT — the first *user* process, at `INIT_PROC_NR`. The one instance here that
   // is not a server: the kernel links it to the shared USER privilege slot, and its
   // lifetime ends. Spawned with the boot processes, after the servers it talks to.
@@ -483,6 +488,7 @@ const servers = procs.filter((p) =>
     'virtio_blk',
     'devman',
     'vfs',
+    'tty',
   ].includes(p.spec.label)
 );
 const client = procs.find((p) => p.spec.label === 'client');
@@ -557,6 +563,38 @@ check(
 // devman, and the block reads between them — then `SYS_BOOT_COMPLETE` (call 60) and the
 // `RECEIVE` it waits in, which is what makes the mount a proven fact rather than an
 // observed one.
+
+// ------------------------------------------ M3e: the console's tty server
+
+// Whether the tty registered the console is *devman's* state, not the tty's: what a
+// driver registers is a change to devman's own device tree, and nothing about it
+// crosses the host boundary. So it is read from devman's instance, and the count has
+// to be non-zero there rather than inferred from the tty reaching its loop —
+// `devman_add_device` retries while the tree is not up and gives up quietly on any
+// other error, so a tty whose registration was refused and one whose registration
+// landed look identical from the tty's side. The console is the only device anything
+// registers here, and the tty is what registers it.
+const tty = procs.find((p) => p.spec.label === 'tty');
+const devmanInst = procs.find((p) => p.spec.label === 'devman');
+const registered = devmanInst.inst.exports.minix_devman_device_count();
+check(
+  "the tty server's console registration reached devman's device tree",
+  registered === 1,
+  `devman holds ${registered} device(s) under its root, expected 1 (tty0)`
+);
+
+// And the exchange that put it there, seen from both ends: the tty sent to devman's
+// endpoint, and devman answered the tty (46 is SEND). Either alone is one half of a
+// round trip that the count above would have caught as a whole.
+const ttyAskedDevman = tty.trace.some(
+  (t) => t.nr === SENDREC && t.a0 === devmanInst.spec.endpoint
+);
+const devmanAnswered = devmanInst.trace.some((t) => t.nr === 46 && t.a0 === tty.spec.endpoint);
+check(
+  'the tty server asked devman to register the console, and devman answered',
+  ttyAskedDevman && devmanAnswered,
+  `tty sent=${ttyAskedDevman} devman answered=${devmanAnswered}`
+);
 
 // The client's own sequence is the claim: it asks the kernel who it is (that is
 // `rs_up`'s `GET_WHOAMI`), announces itself to RS, and only then sends to DS.

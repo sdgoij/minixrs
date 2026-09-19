@@ -6880,6 +6880,35 @@ all. The forward-to-VFS branch got the loud-failure diagnostic anyway, printing 
 negative status (VFS's success status is the byte count), because a write that silently did
 not happen is the failure mode both this finding and finding 28 are instances of.
 
+**30. The RS→VFS driver-mapping protocol is bypassed, so a new driver's major has to be
+added to a table in VFS.** Found bringing the tty server up for M3e, by asking how
+`/dev/console` (a char-device node in the boot image, major 5 minor 0) finds its driver.
+C's route is `publish_service` → `mapdriver(rpub->label, rpub->dev_nr)` → the
+`VFS_MAPDRIVER` request → VFS's `do_mapdriver`, which checks that the sender is RS, copies
+the label out of RS's address space, resolves the endpoint with `ds_retrieve_label_endpt`
+and calls `map_driver`. This port does not use that route, in three places that agree with
+each other:
+
+- **VFS maps the majors itself.** `sef_cb_init_fresh` calls `map_driver` directly for tty
+  (major 5), pty (9), net (14), fb (19) and input (20), and `mount_root` does the same for
+  major 0; the comment on the tty entry states the intent: `TODO(1A.5): replace with
+  RS-driven registration once tty publishes its dev_nr at boot`.
+- **`do_mapdriver` is a stub that cannot succeed.** `vfs/call.rs` delegates to
+  `dmap::map_service(core::ptr::null())`, and `map_service` answers `EINVAL` for a null
+  pointer by construction, so a request that did arrive would be refused.
+- **RS has no device numbers to send.** Both call sites in `rs.rs` pass a literal `0` as
+  `init_slot`'s `dev_nr` (C's boot image carries a device number per service), so
+  `RprocPub::dev_nr` exists, is copied out to DS, and is always zero.
+
+Nothing is broken by this — the static table is *why* `/dev/console` resolves on the
+shipping arches and on wasm alike — but it is a trap for the next driver ported, which will
+find `open` answering `ENXIO` from a handler that looks fully implemented. Adding the entry
+to VFS's list is the whole fix for a driver whose label is already known there; a driver
+whose major should be assigned at runtime needs the three pieces above wired together, and
+the label copy in `do_mapdriver` is the one that has to go through the copy seam on this
+port (`vm::read_from_proc`, as findings 13, 16 and 28 do) rather than a raw pointer read of
+RS's memory.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper
