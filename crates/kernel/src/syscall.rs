@@ -501,7 +501,21 @@ pub unsafe fn sys_write_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
             // meant silence. Found while tracing a panic from its syscall sequence
             // (finding 28).
             let proc_nr = if caller.is_null() { -1 } else { (*caller).p_nr };
-            if crate::vm::read_from_proc(proc_nr, buf as u64, chunk.as_mut_ptr(), n) != 0 {
+            let r = crate::vm::read_from_proc(proc_nr, buf as u64, chunk.as_mut_ptr(), n);
+            if r != 0 {
+                // Say so out loud. Failing silently here is what made a panicking
+                // instance look like one that had simply stopped: the process's last
+                // act is `write(2, "panic: ...")`, and if the console write cannot read
+                // the message, the message — the only account of why — is discarded and
+                // nothing records that it was. The errno goes out as one hex digit so a
+                // failure that is not EFAULT is not mistaken for one.
+                for &b in b"! write: cannot read caller's console buffer, errno=0x" {
+                    crate::hal::serial_write_byte(b);
+                }
+                let d = ((-r) & 0xf) as u8;
+                crate::hal::serial_write_byte(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+                crate::hal::serial_write_byte(b'\r');
+                crate::hal::serial_write_byte(b'\n');
                 return -14; // EFAULT
             }
             for &c in chunk.iter().take(n) {
