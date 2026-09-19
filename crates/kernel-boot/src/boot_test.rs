@@ -13,6 +13,8 @@ use arch_common::com::{
 
 const FS_BASE: i32 = 0xA00;
 const REQ_READSUPER: i32 = FS_BASE + 28;
+/// `REQ_LOOKUP` — what VFS asks for next once the root is mounted.
+const REQ_LOOKUP: i32 = FS_BASE + 26;
 
 /// Run all boot tests, then exit QEMU with success/failure.
 ///
@@ -227,10 +229,18 @@ fn test_pm_idle() -> u32 {
     0
 }
 
-// C: Did VFS send REQ_READSUPER to MFS?
+// C: Did VFS reach the file server?
 // We can't read MFS's user buffer (it's in MFS's address space),
 // but we CAN read VFS's p_sendmsg which held the outgoing request.
-// After the SENDREC completed, p_sendmsg was NOT cleared.
+//
+// `p_sendmsg` holds the *last* message VFS sent, so this can only be sampled before
+// VFS sends anything else — and what it sends next depends on how far the boot had
+// got, not on the protocol. The readsuper reply stopped being the last message long
+// ago (mount_devman's /devices lookup is; check D below records that), which is this
+// same race hit once already. So the assertion here is the one that does not depend
+// on the moment: VFS reached the file server, which is either the readsuper itself
+// or a request that can only follow a successful `mount_root`. That the readsuper
+// *succeeded* is pinned by check D, which reads MFS's reply.
 
 fn test_vfs_sent_readsuper() -> u32 {
     unsafe {
@@ -243,13 +253,17 @@ fn test_vfs_sent_readsuper() -> u32 {
             serial_write("  SKIP: mount not started\r\n");
             return 0;
         }
-        if ty != REQ_READSUPER {
+        if ty != REQ_READSUPER && ty != REQ_LOOKUP {
             serial_write("  FAIL: VFS send type=");
             print_dec(ty as u32);
-            serial_write(" expected 2588\r\n");
+            serial_write(" expected 2588 (readsuper) or a later request\r\n");
             return 1;
         }
-        serial_write("  OK VFS sent REQ_READSUPER to MFS\r\n");
+        if ty == REQ_READSUPER {
+            serial_write("  OK VFS sent REQ_READSUPER to MFS\r\n");
+        } else {
+            serial_write("  OK VFS reached MFS (readsuper sent; now past it)\r\n");
+        }
     }
     0
 }

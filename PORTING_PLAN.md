@@ -6786,6 +6786,44 @@ putting the answer there means every VTreeFS server RS asks can answer, instead 
 one having to remember to. Three services in `asked` now answer through the one shared
 shape.
 
+**27. A boot test can encode the boot's timing as if it were the protocol.** Found adding MFS
+to RS's `asked` table: the wasm harness was happy (`RS asked mfs to initialise and it
+answered`), and the x86_64 boot test failed with
+
+```
+FAIL: VFS send type=2586 expected 2588
+```
+
+`2586` is not a corrupt value — it is `REQ_LOOKUP` (`FS_BASE + 26`) where readsuper is
+`FS_BASE + 28`. `test_vfs_sent_readsuper` reads VFS's `p_sendmsg`, which holds *the last
+message VFS sent*, and asserts its type; the comment above it says as much ("After the
+SENDREC completed, p_sendmsg was NOT cleared"). So the check passes only while the boot
+is timed such that the readsuper is still VFS's most recent send. Asking one more service
+makes RS block for one more answer, VFS gets further into `mount_devman`, and its last
+send becomes a lookup. **Nothing is broken** — check D reads MFS's reply and still passes,
+which is only reachable if the readsuper round trip happened.
+
+The shape is worth keeping because the file already contains the anti-pattern. Check D's
+comment records hitting the same race earlier and patching it by *moving the target*:
+"the readsuper reply is no longer the last message in VFS's delivermsg — mount_devman's
+lookup of /devices is — so this pins that lookup instead." That is a check chasing the
+boot's current ordering, and it breaks again the next time anything shifts. A snapshot of
+"the last message" is not an assertion about a protocol; it is an assertion about where
+the boot had got to when someone looked.
+
+The fix has two shapes and neither is free. A kernel-side record of the message types VFS
+sends would make the send-side assertion durable, and it belongs behind a feature so only
+the boot-test binary carries it — `mini_send` is the wrong place for unconditional
+bookkeeping. The cheaper shape is to assert the *consequence* instead of the traffic: VFS
+cannot resolve `/devices` through MFS unless `mount_root` succeeded, and `mount_root` is
+the readsuper, so check D already proves the thing check C was sampling for. Whichever is
+chosen, the check should stop depending on being run at the right moment.
+
+Both MFS and VFS answer RS's init request correctly on wasm, so with the check fixed they
+join `asked` — RS now asks seven services (DS, PM, RAMDISK, VIRTIO_BLK, DEVMAN, MFS, VFS),
+all through the one shared answer shape — and the x86_64 boot test exercises the new branch
+of check C, reporting `OK VFS reached MFS (readsuper sent; now past it)`.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

@@ -942,6 +942,8 @@ pub fn rs_server_main() {
             arch_common::com::RAMDISK_PROC_NR,
             arch_common::com::VIRTIO_BLK_PROC_NR,
             arch_common::com::DEVMAN_PROC_NR,
+            arch_common::com::MFS_PROC_NR,
+            arch_common::com::VFS_PROC_NR,
         ];
         for &ep in asked {
             let slot = match unsafe { lookup_slot_by_endpoint(ep) } {

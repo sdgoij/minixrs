@@ -693,7 +693,7 @@ check(
 // handshake runs and — the point — RS's own view of each ends up active. Asking
 // them is also what exercises `minix_util::rs::answer_rs_init` in the RAM disk and
 // the virtio block driver, which is otherwise unreachable code.
-for (const label of ['ramdisk', 'virtio_blk', 'devman']) {
+for (const label of ['ramdisk', 'virtio_blk', 'devman', 'mfs', 'vfs']) {
   const inst = procs.find((p) => p.spec.label === label);
   const asked = rs.trace.some((t) => t.nr === SEND && t.a0 === inst.spec.endpoint);
   const active = rs.inst.exports.minix_rs_is_active(inst.spec.endpoint) === 1;
