@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MINIX/Rust in a browser tab</title>
+    <!--
+      The wasm system running in a tab: the kernel, the servers and the shell, all from
+      `build/`. See README.md next to this file for how to build it and what it does and does
+      not do. `page.js` is the whole front end; everything under it is the same engine the
+      check harness in `tools/wasm-servers/` runs, and the disk behind it is the same
+      interface `run.js` gives a file (`store.js`).
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --fg: #d5d8dd;
+        --dim: #7d8590;
+        --accent: #79b8ff;
+        --bad: #ff7b72;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        height: 100vh;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font-size: 1rem;
+        margin: 0;
+        font-weight: 600;
+      }
+      #status {
+        color: var(--accent);
+      }
+      #status[data-kind='bad'] {
+        color: var(--bad);
+      }
+      #disk {
+        color: var(--dim);
+      }
+      #disk[data-kind='bad'] {
+        color: var(--bad);
+      }
+      .hint {
+        color: var(--dim);
+        margin-left: auto;
+      }
+      #screen {
+        flex: 1;
+        min-height: 0;
+        margin: 0;
+        padding: 0.75rem;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #010409;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        caret-color: transparent;
+      }
+      /* The guest's own display (M5). Its mode is the width/height attributes below, because the
+         guest's fb driver adopts whatever the host names rather than choosing a mode. */
+      #display {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        object-fit: contain;
+        background: #010409;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        image-rendering: pixelated;
+      }
+      /* One pane at a time: the two are views of one session, not two places to be. */
+      #screen[hidden],
+      #display[hidden] {
+        display: none;
+      }
+      /* The cursor. Drawn by CSS rather than written into the text, and blinking in CSS rather than
+         on a timer: an idle tab is what the park machinery exists to keep free, and a cursor that
+         repainted the screen twice a second would be the one thing in the page that never idles. */
+      #cursor::before {
+        content: '';
+        display: inline-block;
+        width: 1ch;
+        height: 1em;
+        vertical-align: text-bottom;
+        background: var(--fg);
+        animation: blink 1.06s steps(1, end) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      #views {
+        display: flex;
+        gap: 0.25rem;
+      }
+      #views button {
+        padding: 0.15rem 0.5rem;
+      }
+      #views button[data-active='true'] {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      #panel {
+        margin: 0;
+        padding: 0.75rem;
+        white-space: pre-wrap;
+        background: #1c1114;
+        border: 1px solid #4b2b30;
+        border-radius: 6px;
+        color: #ffdcd7;
+      }
+      #panel[hidden] {
+        display: none;
+      }
+      #controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 0.3rem 0.6rem;
+        cursor: pointer;
+      }
+      button:hover:enabled {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      button:disabled {
+        color: var(--dim);
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>MINIX/Rust — <code>arch-wasm32</code></h1>
+      <span id="status">starting…</span>
+      <span id="disk"></span>
+      <!--
+        Two views of one session: the console as this page renders it, and the guest's own display
+        (M5a). One at a time, and the keyboard goes to the guest either way — there is one console,
+        and which pane shows it is the reader's choice. Both stay live while hidden.
+      -->
+      <div id="views">
+        <button id="view-terminal" type="button" data-active="true" aria-pressed="true">Terminal</button>
+        <button id="view-display" type="button" data-active="false" aria-pressed="false">Display</button>
+      </div>
+      <span class="hint">
+        type at the prompt · Enter sends · arrows walk history · ^C ^D ^U ^W ^K ^L work
+      </span>
+    </header>
+
+    <!--
+      The guest's own display: the fb server's surface, presented by the host (M5). A run with no
+      canvas is the headless case, and the driver then finds no device — `page.js` always gives it
+      this one, and `display.js` is what turns its frames into pixels.
+    -->
+    <canvas id="display" width="1024" height="768" hidden></canvas>
+
+    <!--
+      The console, with the cursor as its last child: `page.js` puts the text before the cursor in
+      the `pre` and the text after it in the span, and the block between them is CSS (above).
+    -->
+    <pre id="screen"><span id="cursor"></span></pre>
+
+    <!--
+      The controls are the two things a reader cannot do at the prompt, and both come from what
+      the disk cannot promise by itself: a session only ends cleanly if something asks it to
+      (only INIT's exit syncs, unmounts and marks the filesystem clean), and a disk the store
+      refuses has no way out from the terminal at all. Both buttons are wired by page.js.
+    -->
+    <div id="controls">
+      <button id="shutdown" type="button">end the session</button>
+      <button id="clear" type="button">start over from the boot image</button>
+      <span class="hint">ending the session is what leaves the disk clean</span>
+    </div>
+
+    <pre id="panel" hidden></pre>
+
+    <!--
+      The module is created here rather than written as `<script type="module" src="page.js">` so
+      that a load failure can explain itself. A module script is fetched under strict MIME
+      checking: if the server answers `text/plain` the browser refuses the script, the page never
+      runs, and the only trace is one line in the console — nothing on the page can say why.
+      The modules here are `.js` rather than `.mjs` for exactly that reason (`.js` is the one
+      extension every static server maps to a JavaScript type), and this is the belt to that
+      braces: the failure a reader cannot diagnose is worth catching.
+    -->
+    <script>
+      (function () {
+        // Set by page.js as soon as it runs, so a later error is not reported as a load failure.
+        const started = () => window.minixrsStarted === true;
+
+        function explain(why) {
+          if (started()) return;
+          const status = document.getElementById('status');
+          const panel = document.getElementById('panel');
+          if (status) {
+            status.textContent = 'cannot start: the page did not load';
+            status.dataset.kind = 'bad';
+          }
+          if (panel) {
+            panel.hidden = false;
+            panel.textContent =
+              `${why}\n\n` +
+              'A module script is refused before it runs unless the server sends it as\n' +
+              'JavaScript — "text/javascript" or "application/javascript". Serving `.mjs` or\n' +
+              '`.js` as text/plain is the usual cause, and the browser reports it only in its\n' +
+              'own console.\n\n' +
+              'Use the server next to this page, which cannot get it wrong:\n\n' +
+              '  node tools/wasm-browser/serve.js\n\n' +
+              'then open http://127.0.0.1:8080/.';
+          }
+        }
+
+        // Resource failures surface on the element, execution failures on the window.
+        window.addEventListener(
+          'error',
+          (event) => {
+            if (event.target && event.target.tagName === 'SCRIPT') {
+              explain('page.js did not load as a module script.');
+            } else if (event.message) {
+              explain(`page.js threw: ${event.message}`);
+            }
+          },
+          true
+        );
+
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = 'page.js';
+        script.onerror = () => explain('page.js did not load as a module script.');
+        document.head.append(script);
+
+        // A catch-all for the case where neither fires.
+        setTimeout(() => explain('page.js never started.'), 3000);
+      })();
+    </script>
+  </body>
+</html>

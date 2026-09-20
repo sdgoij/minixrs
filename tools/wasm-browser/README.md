@@ -63,6 +63,8 @@ the only difference between what the checks boot and what the page boots.
 | `indexeddb.fake.js` | a stub IndexedDB, so `page.test.js` can run the real store |
 | `serve.js` | a static server, for `file://`'s sake |
 | `build.sh` | stages what the page fetches, via `tools/wasm-servers/build.sh` |
+| `publish.sh` | builds and stages the demo into `docs/` for GitHub Pages, then boots the copy |
+| `publish-check.mjs` | the check that makes the published page the *tested* page (14 checks) |
 
 ## The disk
 
@@ -192,6 +194,41 @@ path, which is why nothing had seen it.
   about it and has its own copy of the mechanism, because a check harness needs no yielding. The
   two share a design rather than a file; `host.js`'s header says which parts are shared knowledge
   and where the authority is (`tools/fork-spike/` for the fork invariants).
+
+## Publishing it
+
+`just publish-wasm` (or `sh tools/wasm-browser/publish.sh`) builds the artifacts and stages this
+page into `docs/`, which is the directory GitHub Pages can serve straight out of the repository —
+so the demo is hosted with no CI, no server and no account of its own. Publishing it is then, once:
+
+```sh
+git add docs && git commit -m "docs: publish the wasm demo" && git push
+```
+
+and in the repository's Settings → Pages: Source "Deploy from a branch", the main branch, folder
+`/docs`. The demo is at `https://<user>.github.io/<repo>/`.
+
+What is staged: `index.html`, the modules it runs (`page.js`, `host.js`, `display.js`, `store.js`,
+`terminal.js`), `package.json` — which is what makes Node read those `.js` files as modules in the
+check below — and the three artifacts in `docs/build/`. Nothing else: the harnesses, the tests,
+`serve.js` and the build scripts are development tools, and none of them can run in a browser.
+
+Two things make the published copy trustworthy rather than hopeful:
+
+- `docs/.nojekyll` is written, because Pages runs a directory through Jekyll unless it is told not
+to, and nothing here is a template.
+- `tools/wasm-browser/publish-check.mjs` runs at the end of the staging and checks the copy itself:
+  every staged file is the one the tests run **byte for byte** (which is what makes the 42 checks in
+  `page.test.js` a statement about the demo), the site names no root-absolute URL (Pages serves it
+  under `/<repo>/`, so `/page.js` is a 404 for everyone but the author), every module the site
+  imports is staged beside it, and then that the **staged** system boots — it imports
+  `docs/host.js`, drives the guest out of `docs/build/`, types a command at the prompt and reads
+  back the frame the guest's `fb` driver presented.
+
+The cost is git history: the boot image is 16 MiB and the artifacts are ~2.7 MiB, so a published
+demo is about 19 MiB per build. `.gitignore` keeps `*.wasm` out of the repository everywhere
+except `docs/build/` for exactly this reason — rebuild when the demo should change, not per
+commit.
 
 ## Verifying it
 

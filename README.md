@@ -162,6 +162,10 @@ The original C reference source is at `.refs/minix-3.3.0/` (git submodule).
 ## Build & Development
 
 - **Build runner:** `Justfile` — run `just <recipe>` for available commands
+- **The browser demo:** `just publish-wasm` builds the wasm system (kernel, servers, image) and
+  stages the page into `docs/`, which GitHub Pages serves straight out of the repository. The
+  assets are committed, so a published demo costs about 19 MiB per build —
+  `tools/wasm-browser/README.md` has the settings and the checks it runs first.
 - **Cargo features:**
   - `embed_initramfs` — embed initramfs in the kernel binary
   - `embed_minixfs` — embed minixfs driver in the kernel

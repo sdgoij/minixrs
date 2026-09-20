@@ -7,3 +7,10 @@
 # Staged build outputs: the page fetches these, and they are rebuilt by the scripts that
 # sit next to them. The image is 16 MiB, which is the reason it is named explicitly.
 tools/wasm-browser/build/
+
+# The published demo is the one place build output *is* committed: GitHub Pages serves `docs/`
+# straight out of the repository, so `just publish-wasm` stages the artifacts there on purpose
+# ("Publishing it" in `tools/wasm-browser/README.md`). The negation has to come after the
+# `*.wasm` rule above, and the boot image — 16 MiB — is not ignored anywhere, so it goes in with
+# them.
+!docs/build/*.wasm

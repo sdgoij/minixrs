@@ -498,6 +498,19 @@ check:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 
+# Build the wasm system and stage the demo into `docs/`, the directory GitHub Pages serves.
+#
+# That is the whole publishing story for the browser demo: no CI, no server, no account — a
+# branch and a folder. What it costs is that the assets have to be *in* the repository, which is
+# why `.gitignore` keeps `*.wasm` out everywhere except `docs/build/`, and why the boot image
+# (16 MiB) goes in with them: expect ~19 MiB per published build, so rebuild it when the demo
+# should change rather than on every commit.
+#
+# It ends by booting the staged copy (`tools/wasm-browser/publish-check.mjs`), which is what
+# makes the published page the *tested* page instead of a copy of it.
+publish-wasm:
+    sh tools/wasm-browser/publish.sh
+
 # Remove generated assets that must be rebuilt from scratch.
 clean:
     rm -rf target/nested target/images

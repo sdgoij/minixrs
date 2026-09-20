@@ -1,0 +1,6 @@
+{
+  "name": "minixrs-wasm-browser",
+  "private": true,
+  "description": "The page, and the Node harnesses over the same engine. `.js` files here are ES modules: the browser needs a JavaScript MIME type for a module script, and `.js` is the one extension every static server maps to one — `.mjs` is not, which is how a page that only needs to be opened turned into a MIME-type error.",
+  "type": "module"
+}
