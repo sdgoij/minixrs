@@ -64,6 +64,13 @@ export function createTerminal({ maxLines = DEFAULT_MAX_LINES } = {}) {
       return line.join('');
     },
 
+    /// Where on that line the cursor is, in columns. This is the shell editor's cursor: it moves
+    /// with `\b` and `\r`, so a reader that draws a cursor can put it where the guest's is rather
+    /// than at the end of the text. Nothing here needed it until the page drew one.
+    get col() {
+      return col;
+    },
+
     /// Everything, unfinished line included. A check that looks for a prompt needs this: a prompt
     /// is written and then waited at, so it is exactly the text no newline has ended.
     text() {

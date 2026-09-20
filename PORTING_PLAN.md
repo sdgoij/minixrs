@@ -3787,6 +3787,10 @@ MMIO transport (no PCI).
   - `FbArch` trait for architecture-specific operations
   - `Framebuffer` driver struct with open/close/read/write/ioctl
   - Real implementation depends on arch-specific VESA/PCI MMIO backend (see 12.22)
+  - `CanvasArch` (M5a, wasm): a third backend whose surface is the *server's* buffer and whose mode
+    is the host's — `ARCH_WASM32.md` §9.2. `fb`'s server is shared with the bus arches; what differs
+    is the backend, `CDEV_MAP` (refused where there are no page tables), and the port-I/O hooks,
+    which do not exist there.
 
 - [x] **11d.3 — `minix/drivers/video/tda19988/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/video/tda19988/`

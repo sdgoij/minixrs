@@ -166,6 +166,20 @@ pub extern "C" fn minix_server_devman() -> i32 {
     0
 }
 
+/// The framebuffer server: `/dev/fb` (major 19, minor 0 in the boot image).
+///
+/// On wasm its backend is the host's canvas rather than a device on a bus, so the surface is
+/// this instance's own memory, the mode comes from the host, and a flush hands the pixels over
+/// - see `drivers::video::fb::CanvasArch` and `ARCH_WASM32.md` §11 (M5a). A host with no display
+/// leaves it a driver that found no device, which is why it still reaches its main loop either
+/// way: the boot's device map already names this slot, so a client's `CDEV_OPEN` has to be
+/// answered by something.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_fb() -> i32 {
+    servers::fb::fb_server_main();
+    0
+}
+
 /// Device 0's base address in bytes, as **the RAM disk instance** computed it.
 ///
 /// The host put the image somewhere and the server sized the device from the

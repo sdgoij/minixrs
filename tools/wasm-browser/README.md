@@ -2,12 +2,20 @@
 
 MINIX/Rust running in a page: the kernel, the servers and the shell, as WebAssembly, driven from
 JavaScript by an engine that stops the guest between syscalls so the tab stays interactive — with a
-disk behind it, so what you do in the tab is still there when you come back.
+disk behind it, so what you do in the tab is still there when you come back, and a canvas the
+guest's own `fb` driver draws on.
 
 ```sh
 sh tools/wasm-browser/build.sh     # build and stage the artifacts
 node tools/wasm-browser/serve.js  # then open http://127.0.0.1:8080/
 ```
+
+The page fetches its own copies of the artifacts (`build/`, which the first line stages), so a page
+reloaded after a change to the guest — without re-running that line — is running the previous build.
+One host per `host.js` is one spec list, so the mismatch shows up as a spec whose entry the module
+does not export; that fails the boot naming the entry, the artifact sizes it loaded and this
+command, rather than trapping inside a slot (`page.test.js` checks both, because both have happened).
+The page fetches with `no-store`, so a reload after staging picks up what is on disk.
 
 The server exists because a wasm module cannot be fetched from `file://` (the origin is opaque, so
 the fetch is refused). It serves this directory and binds to loopback; nothing else is needed — no
@@ -25,7 +33,8 @@ itself so that a load failure explains itself on the page rather than only in th
 
 The same three artifacts the check harness runs, from `tools/wasm-servers/build.sh`: the kernel
 instance, the servers as one module, and the boot filesystem image. The page boots the same system
-the harness does — DS, RS, PM, the RAM disk, VM, MFS, virtio-blk, devman, VFS and the tty — INIT
+the harness does — DS, RS, PM, the RAM disk, VM, MFS, virtio-blk, devman, VFS, the tty and the
+framebuffer server — INIT
 execs `/bin/sh` out of the image, and the shell forks and execs for a command it cannot answer
 itself.
 
@@ -42,14 +51,15 @@ the only difference between what the checks boot and what the page boots.
 
 | File | What it is |
 |---|---|
-| `index.html` | the page: a screen, a status line, where the disk is, the two controls, and a panel for host reports |
-| `page.js` | the DOM front end — the keyboard, the renderer, the disk, the controls, and the pump loop |
-| `host.js` | the engine: instances, the copy seam, exec, fork, and the dispatch loop |
+| `index.html` | the page: a canvas for the guest's display, a console, the pane toggle, a status line, where the disk is, the two controls, and a panel for host reports |
+| `page.js` | the DOM front end — the keyboard, the renderer, the panes, the disk, the display, the controls, and the pump loop |
+| `host.js` | the engine: instances, the copy seam, exec, fork, the two devices, and the dispatch loop |
 | `terminal.js` | the renderer's model: bytes in, lines out, with a cursor |
+| `display.js` | the display's contract as the page implements it: the guest's frames onto the canvas |
 | `store.js` | the store contract, and the page's implementation of it over IndexedDB |
 | `file-store.js` | the same contract over a file, for the Node front ends |
 | `run.js` | drives the engine from Node with scripted keystrokes (13 checks) |
-| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk and its controls, once as a second tab that cannot have it (31 checks) |
+| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (41 checks) |
 | `indexeddb.fake.js` | a stub IndexedDB, so `page.test.js` can run the real store |
 | `serve.js` | a static server, for `file://`'s sake |
 | `build.sh` | stages what the page fetches, via `tools/wasm-servers/build.sh` |
@@ -108,6 +118,42 @@ the same machinery the keyboard uses: bytes into the console.
 Once the session has ended the page says so on the disk line, because that is the moment the tab is
 safe to close: until then, MFS's dirty blocks are still the shutdown's business.
 
+## The display
+
+The canvas above the terminal is the *guest's* own display, not a decorator: the `fb` server boots
+into a backend whose surface is its own memory and whose mode is the canvas's (`ARCH_WASM32.md`
+§9.2, M5a). Two calls cross into the host — the mode, and one frame per flush — so what the canvas
+shows is what the guest's driver put in its framebuffer:
+
+```js
+{ width, height, present(bytes) }   // `display.js`: a canvas; a recorder in the harnesses
+```
+
+`bytes` is one frame in the layout the driver describes — XRGB8888, four bytes per pixel, rows back
+to back — which in memory is B,G,R,X, so `display.js` converts to the R,G,B,A an `ImageData` wants.
+A frame that is not the mode's size is refused by `host.js` rather than shown: the two sides
+disagreeing about the mode is a bug, and a partial picture looks like a drawing error.
+
+With no window system in the guest yet, what is on the canvas is the `fb` driver's own verification
+pattern — three bands, the same one the hardware arches get checked with — because the point of M5a
+is the path, not the picture. `/dev/fb` is a real device a guest program can open and write to.
+
+The canvas and the console are **two panes of one session**, and the toggle in the header decides
+which you are looking at. Both stay live while hidden: the guest keeps drawing frames nobody is
+looking at, and a terminal you switched away from keeps its line and its scroll position. The
+keyboard goes to the guest either way — there is one console, and which pane shows it is your
+choice rather than the guest's.
+
+What the display does *not* do yet, and which piece of M5 each is:
+
+- **The console is not drawn on it.** The terminal is still the host's renderer, byte by byte;
+  putting the console on the canvas, cells and all, is M5b (`wserver`).
+- **No mmap.** `/dev/fb` refuses `CDEV_MAP`: there are no page tables on this port to map a physical
+  range through, and the surface is the server's own memory, which another instance cannot be given
+  a view of. A client writes through the driver instead — which is what the reference's clients do.
+- **No input.** Pointer and keyboard events from the page are not yet delivered to the guest; the
+  wake they need does not exist on this port (M5c).
+
 ## Why an idle prompt is interesting
 
 The shell retries `read(0)` in user mode when there is nothing to read, and on this port the tty's
@@ -133,13 +179,16 @@ path, which is why nothing had seen it.
 
 ## What this does not do
 
-- **No CDEV/termcap niceties.** The renderer handles `\n`, `\r`, `\b` and printable characters.
-  That is all the shell's editor draws with. It is not a terminal emulator: no wrapping, no
-  scrolling region, no ANSI escapes, no alternate screen. A real one is M5's `wserver`/canvas work.
+- **No CDEV/termcap niceties.** The renderer handles `\n`, `\r`, `\b` and printable characters,
+  and the canvas beside it is the guest's own display (M5a). It does draw a cursor, and in the right
+  place: the model has always tracked the column the shell editor moves with `\b` and `\r`, and the
+  page draws a block there (blinking in CSS, so an idle tab still costs nothing). What is still
+  missing is the console *on* the canvas: wrapping, scrolling regions, ANSI escapes and cursor
+  addressing are M5b's `wserver`/cells work, not this renderer's.
 - **No worker.** The guest runs on the main thread, so a slice is bounded by `SLICE_SYSCALLS` and
   the loop yields to the browser between slices. Moving the engine into a Worker would decouple the
   two, and would need the console to cross a `postMessage` boundary.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 65 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 68 facts
   about it and has its own copy of the mechanism, because a check harness needs no yielding. The
   two share a design rather than a file; `host.js`'s header says which parts are shared knowledge
   and where the authority is (`tools/fork-spike/` for the fork invariants).

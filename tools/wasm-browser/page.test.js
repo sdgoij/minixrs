@@ -16,7 +16,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { createHost } from './host.js';
+import { SYSTEM_SPECS, createHost } from './host.js';
 import { fakeIndexedDB } from './indexeddb.fake.js';
 import { indexedDbStore } from './store.js';
 
@@ -92,13 +92,35 @@ const elements = new Map();
 class StubElement {
   constructor(id) {
     this.id = id;
-    this.textContent = '';
+    this.ownText = '';
+    this.children = [];
     this.dataset = {};
+    this.attributes = new Map();
     this.hidden = false;
     this.disabled = false;
     this.scrollTop = 0;
     this.scrollHeight = 0;
     this.byEvent = new Map();
+  }
+  /// The DOM's own semantics, which the page now depends on: `textContent` is this element's text
+  /// plus its children's, and *setting* it drops the children. The console is a `pre` with the
+  /// cursor as its last child, so a stub whose `textContent` ignored children would hide half of
+  /// every line from a check.
+  get textContent() {
+    return this.ownText + this.children.map((child) => child.textContent).join('');
+  }
+  set textContent(value) {
+    this.ownText = String(value);
+    this.children = [];
+  }
+  append(child) {
+    this.children.push(child);
+  }
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+  getAttribute(name) {
+    return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
   addEventListener(type, fn) {
     if (!this.byEvent.has(type)) this.byEvent.set(type, []);
@@ -118,6 +140,36 @@ globalThis.document = {
     return elements.get(id);
   },
 };
+
+/// The page's display is a canvas, which is the one element the stub DOM has to do more than hold
+/// text for: `display.js` asks for a 2D context, allocates an `ImageData` and draws it. The stub
+/// keeps what was drawn, so a check reads the pixels the *guest* put there — through the same
+/// conversion the browser would do.
+class StubCanvas extends StubElement {
+  constructor(id, width, height) {
+    super(id);
+    this.width = width;
+    this.height = height;
+    this.frames = 0;
+    this.image = null;
+  }
+
+  getContext() {
+    return {
+      createImageData: (width, height) => ({
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4),
+      }),
+      putImageData: (image) => {
+        this.image = image;
+        this.frames += 1;
+      },
+    };
+  }
+}
+
+elements.set('display', new StubCanvas('display', 1024, 768));
 
 // The one thing a stub DOM cannot do for the page: starting over finishes by reloading, and this
 // process has no `location`.
@@ -287,6 +339,135 @@ check(
   `screen grew: ${before.length} -> ${screen().length}; status: ${status()}`
 );
 
+// -------------------------------------------------------------------------- the display
+//
+// The guest's own display (M5a): the fb server's surface, its mode, and the canvas. What is
+// checked here is the whole path in one place — the driver's pattern, presented through the host
+// import, converted by `display.js` and read back out of the canvas — because each layer's claim
+// is only worth something if the one above it agrees.
+
+const canvas = document.getElementById('display');
+const pixelAt = (x, y) => {
+  const data = canvas.image.data;
+  const at = (y * canvas.width + x) * 4;
+  return [data[at], data[at + 1], data[at + 2], data[at + 3]];
+};
+
+check(
+  "the guest's fb server reports the host's canvas as its backend",
+  await until(() => screen().includes('fb: backend host canvas'), 'the fb boot line'),
+  `screen:\n${screen()}`
+);
+check(
+  'the canvas is the display: the guest drew a frame into it',
+  await until(() => canvas.frames >= 1, 'the first frame'),
+  `frames=${canvas.frames}`
+);
+check(
+  "the frame is the driver's pattern, in the channels a canvas wants",
+  // The driver paints the left third red, the middle green, the right blue, and writes them as
+  // little-endian XRGB8888 (B,G,R,X in memory) — so this is also the check that `display.js`
+  // converts channel order rather than handing the bytes over as they lie.
+  pixelAt(100, 400).join() === '255,0,0,255' &&
+    pixelAt(500, 400).join() === '0,255,0,255' &&
+    pixelAt(900, 400).join() === '0,0,255,255',
+  `left=${pixelAt(100, 400)} middle=${pixelAt(500, 400)} right=${pixelAt(900, 400)}`
+);
+
+// ------------------------------------------------------------------------ the views
+//
+// Two panes for one session: the console as this page renders it, and the guest's own display.
+// One at a time, and both stay live while hidden — the guest draws whether or not anyone is
+// looking, and the terminal keeps its line — which is what lets the toggle be checked without
+// disturbing anything.
+
+const paneOf = (id) => document.getElementById(id);
+const viewOf = (which) => document.getElementById(`view-${which}`);
+
+check(
+  'the page opens on the console, with the display hidden',
+  paneOf('screen').hidden === false &&
+    paneOf('display').hidden === true &&
+    viewOf('terminal').dataset.active === 'true',
+  `screen hidden=${paneOf('screen').hidden} display hidden=${paneOf('display').hidden}`
+);
+
+viewOf('display').click();
+check(
+  'the toggle switches to the display and says which pane is showing',
+  paneOf('display').hidden === false &&
+    paneOf('screen').hidden === true &&
+    viewOf('display').dataset.active === 'true' &&
+    viewOf('terminal').dataset.active === 'false' &&
+    viewOf('display').getAttribute('aria-pressed') === 'true',
+  `display hidden=${paneOf('display').hidden} active=${viewOf('display').dataset.active} ` +
+    `aria-pressed=${viewOf('display').getAttribute('aria-pressed')}`
+);
+
+viewOf('terminal').click();
+check(
+  'and back: the console was live the whole time, so its prompt is still there',
+  paneOf('screen').hidden === false && paneOf('display').hidden === true && screen().includes('# '),
+  `screen hidden=${paneOf('screen').hidden} last=${JSON.stringify(screen().slice(-20))}`
+);
+
+// The symptom this page must not have: a row rendered twice. The composition is two disjoint
+// slices of one line and the line above it, so a duplicate can only mean the model was read
+// twice — which is what a reader reported once, and what this pins down.
+const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
+
+for (const ch of 'abc') press(ch);
+press('Enter');
+await untilStable(50, 5000);
+check(
+  'the line the reader typed is on the screen once, not twice',
+  occurrences(screen(), '# abc') === 1,
+  `occurrences=${occurrences(screen(), '# abc')}\nscreen:\n${screen()}`
+);
+
+// ----------------------------------------------------------------------- the cursor
+//
+// The renderer has always tracked the cursor's column — the shell's editor moves it with `\b` and
+// `\r` — and nothing drew it. What the page draws is the CSS block between the text before the
+// column and the text after it, so the cursor element's *own* text is what the shell has ahead of
+// its cursor: that is what these check.
+
+const cursorPart = () => document.getElementById('cursor');
+const cursorAfter = () => cursorPart().textContent;
+const cursorIsLast = () => {
+  const children = paneOf('screen').children;
+  return children[children.length - 1] === cursorPart();
+};
+
+for (const ch of 'echo cursortest') press(ch);
+check(
+  'the terminal draws a cursor at the end of the line being typed',
+  // What is ahead of the cursor is whitespace, and that is not a bug: the shell's editor blanks the
+  // rest of the row with spaces and then steps back over them, so the model has written a run of
+  // blanks that the cursor sits in *front* of. What the line says is on the other side of it.
+  (await until(() => screen().includes('echo cursortest'), 'the typed line')) &&
+    cursorIsLast() &&
+    /^\s*$/.test(cursorAfter()),
+  `after-cursor=${JSON.stringify(cursorAfter().slice(0, 20))}… last=${JSON.stringify(screen().slice(-20))}`
+);
+
+press('ArrowLeft');
+check(
+  'the cursor is the shell\'s, not the end of the text: arrow-left leaves a character ahead of it',
+  await until(() => /^t\s*$/.test(cursorAfter()), 'the cursor to move back'),
+  `after-cursor=${JSON.stringify(cursorAfter().slice(0, 20))}…`
+);
+
+press('u', { ctrlKey: true });
+check(
+  'killing the line takes the text out from before the cursor, not the cursor',
+  await until(
+    () => !screen().includes('cursortest') && /^\s*$/.test(cursorAfter()),
+    'the killed line'
+  ),
+  `after-cursor=${JSON.stringify(cursorAfter().slice(0, 20))}… last=${JSON.stringify(screen().slice(-20))}`
+);
+
 // ------------------------------------------------------------------------ the disk
 //
 // The page's block device is IndexedDB, and this is where that is checked — through the
@@ -399,6 +580,32 @@ check(
   'a disk whose contents came from another image is refused, not mixed',
   guardHost.device.attached === false && refused.some((n) => n.includes('different image')),
   `attached=${guardHost.device.attached} reports=${refused.join(' | ')}`
+);
+
+// A bring-up that cannot work for the other reason: a spec the module does not export. That is
+// what a *stale* set of artifacts looks like from the host's side — the page fetches its own staged
+// copies, so a spec list from after a build and modules from before it is a real state to be in, and
+// it has to fail as a sentence naming the entry rather than a TypeError trapped inside a slot.
+let missingExport = null;
+try {
+  createHost({
+    kernel: ARTIFACT_BYTES['build/kernel.wasm'],
+    servers: ARTIFACT_BYTES['build/servers.async.wasm'],
+    image: IMAGE,
+    specs: [...SYSTEM_SPECS, { slot: 24, entry: 'minix_server_absent', label: 'absent' }],
+  });
+} catch (error) {
+  missingExport = error.message;
+}
+check(
+  'a spec the module does not export fails the boot, naming the entry and the fix',
+  // The loaded sizes are in the message because that is the question this failure always raises
+  // (which build is the page running?), and they are the one thing the page can answer itself.
+  missingExport !== null &&
+    missingExport.includes('minix_server_absent') &&
+    missingExport.includes('tools/wasm-browser/build.sh') &&
+    missingExport.includes(String(ARTIFACT_BYTES['build/servers.async.wasm'].length)),
+  `error=${missingExport}`
 );
 
 // A browser with no IndexedDB at all (a private window, typically) cannot be simulated in

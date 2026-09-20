@@ -268,10 +268,6 @@ fn copy_report(idx: usize, value: u64) {
     };
 }
 
-fn buf_get32(buf: *const u8) -> u32 {
-    unsafe { core::ptr::read_volatile(buf.cast::<u32>()) }
-}
-
 /// Scratch for the grant pair: the kernel reads +0 as one `CpGrant` and the bytes
 /// that grant covers live at +48.
 ///

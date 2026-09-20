@@ -92,6 +92,22 @@ unsafe extern "C" {
     fn host_block_write(offset: u64, src: u32, bytes: u32) -> i32;
     /// The attached device's capacity in bytes, or 0 when there is none.
     fn host_block_capacity() -> u64;
+    /// The display's mode, or 0 when the host has none: `width << 32 | height`.
+    ///
+    /// A display is the second device on this port whose hardware is the host (M5), and the
+    /// mode is the host's business rather than the guest's: a canvas has the size the page
+    /// gave it, the way a panel has one the hardware fixed. `fb`'s backend asks this where a
+    /// machine's VGA adapter would be probed, and a host with no display answers 0 — which is
+    /// what makes a headless run a driver that finds no device rather than a driver that
+    /// draws into nothing.
+    fn host_fb_geometry() -> u64;
+    /// Publish `bytes` bytes of the caller's memory at `src` to the display.
+    ///
+    /// The bytes are in the mode `host_fb_geometry` named, XRGB8888, rows back to back with no
+    /// padding — the layout `fb`'s own `FbVarScreeninfo` describes, and the one the driver
+    /// writes into the surface it hands over. Returns 0, or a negative errno: `ENODEV` when
+    /// the host has no display.
+    fn host_fb_present(src: u32, bytes: u32) -> i32;
 }
 
 /// What the host needs in order to instantiate a module as a process.

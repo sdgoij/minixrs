@@ -656,6 +656,49 @@ as the document exists, because two tabs would otherwise be two in-memory copies
 different. A tab that is refused the lock gives up the disk rather than the boot: it comes up on
 the ramdisk and says which of the three reasons it got (`page.js`).
 
+### 9.2 The display (M5a)
+
+The display is the same arrangement as the block device, with one difference that shapes the whole
+milestone: a display's *mode* is not the guest's to choose. A canvas is the size the page made it,
+the way a panel is the size the hardware fixed, so the driver asks the host rather than probing for
+an adapter:
+
+```rust
+fb_geometry() -> (u32, u32)     // (0, 0) when the host has no display
+fb_present(buf) -> i32          // one frame, XRGB8888, rows back to back
+```
+
+The guest's half is `fb`'s third backend (`drivers::video::fb::CanvasArch`), and it is the
+virtio-gpu backend's shape rather than bochs': there is no device memory to map and no mode to
+program, so the surface is a buffer in the *server's own* memory (`FB_BUF`, attached with
+`CanvasArch::new`) and `device().base` is a virtual address rather than a physical one. The mode is
+adopted from the host at `init` and a mode the surface cannot hold is refused outright — the pixels
+are this process's memory, so exceeding it would corrupt an address space instead of clipping a
+picture.
+
+Two things follow, and both are the port's rather than the driver's:
+
+- **`/dev/fb` cannot be `mmap`ped, and the server says so.** VFS's device-`mmap` path asks the
+  kernel to map a *physical* range into the caller (`CDEV_MAP`, then VM's `VR_DIRECT`); there are no
+  page tables here and `VM_MAP_PHYS` answers `EINVAL`, and the surface is one instance's memory
+  that another instance cannot be handed a view of. So `CDEV_MAP` answers `EOPNOTSUPP` and the
+  device is copy-in, copy-out — `read`/`write`/ioctls, which is what the reference's own clients
+  use anyway (`fb_read`/`fb_write` are grant copies there too).
+- **A flush is the only thing that reaches the host.** `FBIOFLUSH` calls `fb_present`, which is
+  what a device with a write-back cache needs and what bochs's scanned-out LFB does not: the pixels
+  leave when the driver says they are ready, which is also the hook M5b's compositor will use.
+
+The host's half is one object per front end — `{width, height, present(bytes)}` — with
+`tools/wasm-browser/display.js` as the page's implementation (a canvas, plus the B,G,R,X → R,G,B,A
+conversion an `ImageData` needs) and a recording object in each harness. `display = null` is a
+machine with no display and makes the driver find no device, which is why `run.js` boots headless
+while `page.js` always has a canvas.
+
+What the reference contributes here is only the driver: its text path is the tty console writing
+VGA cells (i386), and its `fb` driver is ARM-only and paints a boot logo. The three bands this
+port's `fb` paints are that driver's own verification pattern — with a canvas, the pixels are
+something a check can read rather than something a human has to look at.
+
 ## 8. The HAL surface, function by function
 
 All ~150 items in `crates/arch-x86_64/src/hal.rs`, grouped. "Delete" means the
@@ -694,8 +737,9 @@ kernel calls it unconditionally, but it does nothing.
 | `virtio_blk.rs` | IndexedDB (persistent) or in-memory | Async host ops — needs Asyncify |
 | `virtio_net.rs` | WebSocket (or WebRTC data channel) | No raw sockets in a browser |
 | `pci.rs` | Deleted; host provides a device manifest | No PCI bus |
-| `fb.rs`, `wserver.rs`, `fbfont.rs` | Canvas 2D or WebGL | Blit per frame |
-| `input.rs` | DOM pointer/keyboard events | |
+| `fb.rs` | **The host's display** (M5a): the surface is the server's own buffer, the mode is the host's, and `FBIOFLUSH` presents a frame. `CDEV_MAP` refused — no page tables to map a physical range through |
+| `wserver.rs`, `fbfont.rs` | Canvas 2D — M5b. `wserver` is a *port invention* (3.3.0 has no window system); the font is `userland`'s `FONT_8X16` |
+| `input.rs` | DOM pointer/keyboard events — M5c, and it needs a host→kernel wake that does not exist yet |
 | `RTC`/`cmos_read` | `Date.now()` | |
 | `qemu_exit` | host exit import | |
 
@@ -1230,7 +1274,41 @@ database and reloads, which is the only way out of a disk the store refuses and 
 previous tab left unclean. Both are wired only for the tab that holds the disk — a tab that was
 refused the lock deleting the other one's disk is the mixture the lock exists to prevent.
 
-**M5 — Display and input.** `wserver` + `fb` on canvas, pointer input.
+**M5 — Display and input.** Worth reading the reference before writing any of this, because most of
+the milestone is *not* there to port: 3.3.0's text path is the tty console driver writing VGA cells
+(i386; its ARM backend is an empty stub), its pixel path is the ARM-only `fb` driver painting a boot
+logo into an mmap'd LCD, `wserver` does not exist under any name, and the pointer events `pckbd`
+produces have no consumer in the tree at all. What the port therefore has is the `fb` driver — real,
+ported, and needing only a third backend — plus two things of its own: a canvas, and a compositor.
+Three landings:
+
+- **M5a — the host's display, and `/dev/fb` on it. DONE** (§9.2). `fb` boots on wasm into
+  `CanvasArch`: it adopts the host's mode, paints its surface, and a flush hands the frame over.
+  `/dev/fb` (major 19, a node the boot image already has) is served by the same CDEV protocol as on
+  the hardware arches, with `CDEV_MAP` refused because there are no page tables to map through.
+- **M5b — the console on the display.** `wserver` already exists as a compositor (windows, focus,
+  text with `FONT_8X16`, key routing, pointer routing; its state machine is host-tested and its
+  rasterizer is behind `cfg(target_os = "minix")`), and on wasm it draws into a buffer of its own
+  instead of an `mmap`ed `/dev/fb`. What is left is to *run* it and to move the console onto it:
+  today's console is the tty server writing bytes to fd 1, which the kernel hands to the host's
+  renderer, and the cells a display wants are the `console.c` model the port never built (the
+  reference has them in the driver, not in a server). The one open question to settle when it
+  lands: whether a composed frame reaches `fb` as a client write (a grant copy per frame, which is
+  what the reference's own clients do) or whether `wserver` links the HAL and presents directly
+  (no copy, and a second thing that knows about the host's display).
+- **M5c — input: the browser's events into the guest.** The vocabulary and the wire format are the
+  reference's (`INPUT_PAGE_KEY`/`INPUT_PAGE_GD`, `INPUT_EVENT`, the `input` server's routing); what
+  is missing is the *wake*. `input`'s polling alarm never fires on this port (`SYS_SETALARM` is
+  registered and nothing expires it — the wasm kernel has no timer interrupt), and a driver blocked
+  in `RECEIVE` with no timer is a driver nothing can tell about a DOM event. So M5c's first task is
+  the one piece of machinery neither the reference nor this port has: a host→kernel notify export
+  (`kernel-wasm`), which is the role an interrupt controller plays elsewhere and the same role the
+  host already plays for the clock. The path after that is ordinary: the host queues the event, the
+  input server drains it on wake, and its `SENDNB` to `wserver` is a message like any other.
+
+Both blockers above are recorded here rather than discovered later, and neither is a stub in the
+landed code: M5a needs the first (it is the thing that makes mmap impossible) and M5c needs the
+second.
 
 **M6 — Network.** `virtio_net` over WebSocket.
 
@@ -1913,19 +1991,25 @@ What the page does *not* do, and which milestone it belongs to:
   "end the session" (which sends the `exit` that INIT's exit — the shutdown — consists of) rather
   than by typing it. "start over from the boot image" is what a disk the store refuses has instead
   of a dead end. Finding 54 has the detail.
-- **Not a terminal emulator.** `\n`, `\r`, `\b` and printable characters only — all the shell's
-  editor draws with. Wrapping, scrolling regions and ANSI escapes are M5's `wserver`/canvas work.
+- **The display is a canvas, and the console is not on it yet.** The guest's `fb` server owns
+  `/dev/fb` and presents its frames to a canvas (§9.2, M5a), so pixels reach the page through the
+  guest's own driver. What still draws the shell is the host's byte renderer: `\n`, `\r`, `\b` and
+  printable characters only — all the shell's editor draws with — with no wrapping, scrolling
+  regions or ANSI escapes. Putting the console on the canvas, cells and all, is M5b's `wserver`.
 - **No worker.** The guest runs on the main thread and yields to the browser between slices.
   Moving it into a Worker would decouple the two and would need the console to cross
   `postMessage`.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 65 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 68 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
 Verified by `tools/wasm-browser/run.js` (13 checks: the boot, the park, a typed command that forks
 and execs, the reap, quiescence, and four boots over one disk — the last two writing files they
-never sync, so the shutdown is what makes them durable) and `tools/wasm-browser/page.test.js`
-(31 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
-— the pump policy, the key map, the repaint coalescing, and both controls — is not left to a human
+never sync, so the shutdown is what makes them durable; it runs headless, so its guest's `fb` server
+finds no display) and `tools/wasm-browser/page.test.js`
+(41 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
+— the pump policy, the key map, the repaint coalescing, the pane toggle, the cursor's position, both
+controls, and the guest's frame arriving in the canvas with the channels a canvas wants — is not left
+to a human
 to try, then the same session's disk reopened over a stub IndexedDB, which must answer with the file
 the session wrote and with a clean superblock, then the disk cleared and an unseeded store over it,
 and then the page imported a second time under a held Web Lock — the second tab, which has to boot

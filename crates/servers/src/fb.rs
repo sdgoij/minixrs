@@ -2,20 +2,27 @@
 //!
 //! Selects the backend at boot: bochs-display (PCI probe for `1234:1111`,
 //! mode-set to 1024×768×32, BARs identity-mapped via `VM_MAP_PHYS`) on
-//! x86, or virtio-gpu (device ID 16 on the riscv/aarch64 `virt` machines)
+//! x86, virtio-gpu (device ID 16 on the riscv/aarch64 `virt` machines)
 //! whose framebuffer is a server-owned RAM buffer attached as resource
-//! backing. Fills a test pattern so the framebuffer is verifiable via QMP
-//! `screendump` with no input, then serves the CDEV_* protocol for
-//! `/dev/fb` (open/close, inline read/write, grant-based ioctls, and the
-//! FBIOFLUSH push for explicit-flush devices like virtio-gpu).
+//! backing, or the host's canvas on wasm (M5) — a server-owned buffer whose
+//! mode comes from the host and whose flush is a host import. Fills a test
+//! pattern so the framebuffer is verifiable with no input (QMP `screendump`
+//! on the hardware arches, the presented bytes here), then serves the
+//! CDEV_* protocol for `/dev/fb` (open/close, inline read/write, grant-based
+//! ioctls, and the FBIOFLUSH push for explicitly-flushed devices).
 
 use arch_common::com::{
     CDEV_CLOSE, CDEV_IOCTL, CDEV_MAP, CDEV_OPEN, CDEV_READ, CDEV_WRITE, is_cdev_rq,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use drivers::bus::virtio;
+#[cfg(target_arch = "wasm32")]
+use drivers::video::fb::CanvasArch;
+#[cfg(not(target_arch = "wasm32"))]
+use drivers::video::fb::VirtioGpuArch;
 use drivers::video::fb::{
     FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO,
-    FbArch, FbBackend, Framebuffer, VirtioGpuArch,
+    FbArch, FbBackend, Framebuffer,
 };
 
 /// Global driver state — one backend + one driver instance (no heap).
@@ -28,12 +35,18 @@ static mut FB_DRIVER: Framebuffer = Framebuffer::new();
 /// (page-aligned, 1024×768×32 = 3 MiB). Its guest-physical address is what
 /// the K3 mmap path maps into consumers. Only the virtio-gpu backend uses
 /// it; bochs uses device memory.
+/// The surface a RAM-backed backend draws into, page-aligned: 1024×768×32 = 3 MiB. The
+/// virtio-gpu backend attaches it as its resource backing, and the canvas backend *is* it —
+/// which is why the canvas's mode has to fit here, and why a host canvas larger than this is
+/// refused rather than drawn into a longer address space than this process declared.
+const FB_BUF_LEN: usize = 3 * 1024 * 1024;
+
 #[repr(align(4096))]
-struct FbBufCell(core::cell::UnsafeCell<[u8; 3 * 1024 * 1024]>);
+struct FbBufCell(core::cell::UnsafeCell<[u8; FB_BUF_LEN]>);
 unsafe impl Sync for FbBufCell {}
 impl FbBufCell {
     const fn new() -> Self {
-        Self(core::cell::UnsafeCell::new([0u8; 3 * 1024 * 1024]))
+        Self(core::cell::UnsafeCell::new([0u8; FB_BUF_LEN]))
     }
     fn get(&self) -> u64 {
         self.0.get() as u64
@@ -52,7 +65,7 @@ static mut FB_SCRATCH: [u8; 128] = [0; 128];
 ///
 /// Called from the devio hook registry; safe as long as the request is a
 /// valid SYS_DEVIO shape.
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn devio_hook(request: u32, port: u16, value: u32) -> u32 {
     let mut msg = [0u8; 64];
     msg[8..12].copy_from_slice(&request.to_ne_bytes());
@@ -69,7 +82,7 @@ fn devio_hook(request: u32, port: u16, value: u32) -> u32 {
 /// # Safety
 ///
 /// `phys`/`len` must describe a real device memory range.
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn physmap_hook(phys: u64, len: usize) -> u64 {
     let mut msg = [0u8; 64];
     msg[4..8].copy_from_slice(&(arch_common::com::VM_MAP_PHYS as i32).to_ne_bytes());
@@ -99,7 +112,7 @@ fn physmap_hook(phys: u64, len: usize) -> u64 {
 /// GET_PHYS_DELTA) and hand it to the virtio transport so queue and
 /// descriptor addresses are programmed as guest-physical addresses (same
 /// pattern as the virtio-blk/net servers).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn init_phys_delta() {
     let mut msg = [0u8; 64];
     msg[8..12].copy_from_slice(&arch_common::com::GET_PHYS_DELTA.to_ne_bytes());
@@ -121,12 +134,33 @@ fn slog(msg: &[u8]) {
     let _ = msg;
 }
 
-/// Select and initialize the framebuffer backend: bochs-display first
-/// (x86), then virtio-gpu (riscv/aarch64, where the bochs probe finds no
-/// PCI VGA). The virtio-gpu backend is pointed at the server-owned RAM
-/// buffer before its init so the device can attach it as backing.
+/// Select and initialize the framebuffer backend: the host's canvas on wasm (there is nothing to
+/// probe — the host *is* the display), otherwise bochs-display first (x86), then virtio-gpu
+/// (riscv/aarch64, where the bochs probe finds no PCI VGA). The virtio-gpu backend is pointed at
+/// the server-owned RAM buffer before its init so the device can attach it as backing.
 fn backend_init() -> bool {
     let backend = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        *backend = FbBackend::Canvas(CanvasArch::new(FB_BUF.get(), FB_BUF_LEN as u64));
+        match backend.init(0) {
+            Ok(()) => {
+                slog(b"fb: backend host canvas\n");
+                true
+            }
+            Err(drivers::DriverError::Unsupported) => {
+                slog(b"fb: the host's canvas is larger than this server's surface\n");
+                false
+            }
+            Err(_) => {
+                slog(b"fb: the host has no display\n");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     match backend {
         FbBackend::Bochs(arch) => {
             if arch.init(0).is_ok() {
@@ -179,39 +213,61 @@ fn backend_init() -> bool {
                     }
                 }
                 FbBackend::Bochs(_) => false,
+                FbBackend::Canvas(_) => false,
             }
         }
         FbBackend::VirtioGpu(_) => false,
+        FbBackend::Canvas(_) => false,
     }
 }
 
 /// Fill the framebuffer with a distinctive test pattern: the left third
 /// red, the middle third green, the right third blue. Screendump pixel
 /// asserts key off these colors, so the mode-set + BAR mapping are proven
-/// end-to-end.
+/// end-to-end; on wasm the same three bands are what the presented bytes
+/// are checked for, which is how "the canvas is the display" is verified
+/// with no pixels to look at.
+///
+/// The mode comes from the backend rather than from the bochs constants: the
+/// canvas's mode is the host's, and a pattern drawn for the wrong one would
+/// be a garbled picture rather than a failing check.
 fn fill_test_pattern(arch: &mut dyn FbArch) {
-    let (xres, yres) = (
-        drivers::video::fb::BOCHS_DEFAULT_XRES,
-        drivers::video::fb::BOCHS_DEFAULT_YRES,
-    );
-    let pitch = xres * 4;
-    let mut row = [0u8; 4096];
-    for x in 0..xres {
-        let px = if x < xres / 3 {
-            [0u8, 0, 0xFF, 0] // red (XRGB8888 LE → B,G,R,0)
-        } else if x < 2 * xres / 3 {
-            [0u8, 0xFF, 0, 0] // green
-        } else {
-            [0xFFu8, 0, 0, 0] // blue
-        };
-        row[(x * 4) as usize..(x * 4 + 4) as usize].copy_from_slice(&px);
+    let var = match arch.var_screeninfo(0) {
+        Ok(var) => var,
+        Err(_) => return,
+    };
+    let (xres, yres) = (var.xres, var.yres);
+    let pitch = (xres * 4) as usize;
+    if pitch == 0 || yres == 0 {
+        return;
     }
-    for y in 0..yres {
-        let off = (y * pitch) as u64;
-        let n = pitch as usize;
-        let _ = write_row(arch, off, &row[..n]);
+
+    let mut row = [0u8; ROW_BYTES];
+    for y in 0..yres as u64 {
+        // One screen row at a time, in scratch-sized pieces: the row buffer is 1024 pixels, and a
+        // wider mode is written in as many pieces as it takes.
+        let mut done = 0usize;
+        while done < pitch {
+            let n = (pitch - done).min(ROW_BYTES);
+            for i in 0..n / 4 {
+                let x = (done / 4 + i) as u32;
+                let px = if x < xres / 3 {
+                    [0u8, 0, 0xFF, 0] // red (XRGB8888 LE → B,G,R,0)
+                } else if x < 2 * xres / 3 {
+                    [0u8, 0xFF, 0, 0] // green
+                } else {
+                    [0xFFu8, 0, 0, 0] // blue
+                };
+                row[i * 4..i * 4 + 4].copy_from_slice(&px);
+            }
+            let _ = write_row(arch, y * pitch as u64 + done as u64, &row[..n]);
+            done += n;
+        }
     }
 }
+
+/// One screen row's worth of scratch: 1024 pixels of XRGB8888.
+const ROW_BYTES: usize = 4096;
 
 /// Write one framebuffer row via the driver's volatile write path.
 fn write_row(arch: &dyn FbArch, pos: u64, data: &[u8]) -> usize {
@@ -229,10 +285,16 @@ pub fn fb_server_main() {
     {
         const ANY: i32 = 0x0000_ffff;
 
-        drivers::video::fb::fb_set_devio(devio_hook);
-        drivers::video::fb::fb_set_physmap(physmap_hook);
-        virtio::virtio_set_devio(devio_hook);
-        init_phys_delta();
+        // Port I/O and physical mapping are the bus arches' business: there is no port space and
+        // no physical address space to map here, and the canvas backend reaches its display
+        // through a host import instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            drivers::video::fb::fb_set_devio(devio_hook);
+            drivers::video::fb::fb_set_physmap(physmap_hook);
+            virtio::virtio_set_devio(devio_hook);
+            init_phys_delta();
+        }
 
         if backend_init() {
             let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
@@ -354,6 +416,16 @@ unsafe fn handle_cdev_request(
             do_ioctl(minor, request, who_e, grant, user)
         }
         CDEV_MAP => {
+            // No device `mmap` on this arch: VFS would ask the kernel to map the range into the
+            // caller, and there is no address translation here — the surface is also *this*
+            // server's own memory, which is not something another instance can be handed a view
+            // of. A refusal is the honest answer; a plausible-looking address would be read as
+            // a client's own bytes. `/dev/fb` stays a copy-in, copy-out device (M5).
+            #[cfg(target_arch = "wasm32")]
+            {
+                -95 // EOPNOTSUPP
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             // Device-memory mmap: reply with the framebuffer's physical
             // range (phys u64 @ payload 0, len u64 @ payload 8). For bochs
             // the arch's `dev.base` is the identity-mapped device VA

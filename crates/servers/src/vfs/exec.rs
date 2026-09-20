@@ -95,7 +95,7 @@ const EXEC_LOAD_NEWSP_OFF: usize = 24;
 // The path field is what the wasm arm reads instead. VFS sends it on every arch (one code
 // path for the request) and the ELF arm ignores it: there the entry point and the code range
 // already name the image.
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
 const EXEC_LOAD_PATH_PTR_OFF: usize = 56;
 
 // VM_EXEC_NEWMEM: target endpoint in m1i1 (payload bytes 8..12).

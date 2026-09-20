@@ -555,16 +555,178 @@ impl FbArch for BochsArch {
     }
 }
 
+// Canvas backend — the host's display (M5)
+
+/// The host's display: a canvas in a page, reached through the HAL.
+///
+/// This backend is closer to virtio-gpu's than to bochs': there is no device memory to map and
+/// no mode to program, so `mem` is a buffer in *this* process, attached by the server with
+/// [`CanvasArch::new`], and the mode is the host's — the way a panel's mode comes from the
+/// hardware rather than from the driver. The difference from virtio-gpu is where the pixels go:
+/// a flush hands the surface to a host import, instead of describing a virtio-gpu resource.
+///
+/// That the surface is this process's own is the one thing to know here. A device `mmap` cannot
+/// work on this port at all — VFS's path asks the kernel to map a *physical* range, and there is
+/// no address translation to do it with — so `/dev/fb` is a copy-in, copy-out device whose
+/// clients write through the driver, and `fb`'s server refuses `CDEV_MAP` accordingly.
+pub struct CanvasArch {
+    /// The surface, in this process's memory, and how much of it there is. Zero until the server
+    /// attaches one, which is what makes an unattached backend report no device rather than draw
+    /// into address zero.
+    surface: u64,
+    capacity: u64,
+    var: FbVarScreeninfo,
+    fix: FbFixScreeninfo,
+}
+
+impl CanvasArch {
+    pub const fn new(surface: u64, capacity: u64) -> Self {
+        Self {
+            surface,
+            capacity,
+            var: FbVarScreeninfo::new(),
+            fix: FbFixScreeninfo::new(),
+        }
+    }
+
+    /// Take `xres`×`yres` as this device's mode, if the surface can hold it.
+    ///
+    /// The rule, apart from where the numbers come from: a mode the surface cannot hold is
+    /// refused rather than drawn into partly, because the pixels are this process's memory and
+    /// exceeding it would corrupt an address space instead of clipping a picture.
+    fn adopt_mode(&mut self, xres: u32, yres: u32) -> Result<(), DriverError> {
+        if self.surface == 0 || self.capacity == 0 {
+            return Err(DriverError::NotFound);
+        }
+        if xres == 0 || yres == 0 {
+            return Err(DriverError::NotFound);
+        }
+        if (xres as u64) * (yres as u64) * 4 > self.capacity {
+            return Err(DriverError::Unsupported);
+        }
+
+        self.var = FbVarScreeninfo {
+            xres,
+            yres,
+            xres_virtual: xres,
+            yres_virtual: yres,
+            bits_per_pixel: 32,
+            red: FbBitfield {
+                offset: 16,
+                length: 8,
+                msb_right: 0,
+            },
+            green: FbBitfield {
+                offset: 8,
+                length: 8,
+                msb_right: 0,
+            },
+            blue: FbBitfield {
+                offset: 0,
+                length: 8,
+                msb_right: 0,
+            },
+            transp: FbBitfield {
+                offset: 24,
+                length: 8,
+                msb_right: 0,
+            },
+            ..FbVarScreeninfo::new()
+        };
+        self.fix = FbFixScreeninfo {
+            id: *b"host canvas\0\0\0\0\0",
+            line_length: xres * 4,
+            // No MMIO window: the surface is this process's memory, and the only thing that reads
+            // it is this driver's flush.
+            ..FbFixScreeninfo::new()
+        };
+        Ok(())
+    }
+
+    /// The visible surface's size in bytes: the mode's rows, which is all a client or a flush
+    /// may touch. Zero before the mode is adopted, so a device that was never initialized reads
+    /// as empty.
+    fn mode_bytes(&self) -> u64 {
+        (self.var.xres_virtual as u64) * 4 * (self.var.yres_virtual as u64)
+    }
+}
+
+impl FbArch for CanvasArch {
+    fn init(&mut self, _minor: usize) -> Result<(), DriverError> {
+        let (xres, yres) = crate::hal::fb_geometry();
+        self.adopt_mode(xres, yres)
+    }
+
+    fn device(&self, _minor: usize) -> Result<FbDevice, DriverError> {
+        // `base` is this process's own virtual address, not a physical one — the difference a
+        // client would see through `CDEV_MAP`, which the server refuses on this arch.
+        Ok(FbDevice {
+            base: self.surface,
+            size: self.mode_bytes(),
+        })
+    }
+
+    fn var_screeninfo(&self, _minor: usize) -> Result<FbVarScreeninfo, DriverError> {
+        Ok(self.var)
+    }
+
+    fn set_var_screeninfo(
+        &mut self,
+        _minor: usize,
+        info: &FbVarScreeninfo,
+    ) -> Result<(), DriverError> {
+        // The mode is the host's, so a request to change it is refused unless it is already the
+        // one the host named: a canvas is the size the page made it, and accepting the write
+        // would leave the driver drawing a mode the display does not have.
+        if info.xres != self.var.xres || info.yres != self.var.yres {
+            return Err(DriverError::Unsupported);
+        }
+        self.var.xoffset = info.xoffset;
+        self.var.yoffset = info.yoffset;
+        Ok(())
+    }
+
+    fn fix_screeninfo(&self, _minor: usize) -> Result<FbFixScreeninfo, DriverError> {
+        Ok(self.fix)
+    }
+
+    fn pan_display(&mut self, _minor: usize, info: &FbVarScreeninfo) -> Result<(), DriverError> {
+        // Recorded so `FBIOGET_VSCREENINFO` reports back what was asked for, and otherwise
+        // without effect: there is no second buffer to pan to (`yres_virtual == yres` says so),
+        // and the display shows the surface as the last flush left it.
+        self.var.xoffset = info.xoffset;
+        self.var.yoffset = info.yoffset;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        let bytes = self.mode_bytes();
+        if bytes == 0 || self.surface == 0 {
+            return Err(DriverError::NotFound);
+        }
+        // SAFETY: the surface is this process's buffer, `bytes` of it are the mode the host named,
+        // and the slice lives only for this synchronous call.
+        let surface =
+            unsafe { core::slice::from_raw_parts(self.surface as *const u8, bytes as usize) };
+        match crate::hal::fb_present(surface) {
+            0 => Ok(()),
+            _ => Err(DriverError::Io),
+        }
+    }
+}
+
 // Driver
 
 /// Runtime-selected framebuffer backend. x86 QEMU has bochs-display
 /// (PCI VGA); riscv64/aarch64 `virt` machines have virtio-gpu, so the
 /// server probes bochs first and falls back to virtio-gpu (one binary on
-/// all arches).
+/// all arches). On wasm there is nothing to probe: the host *is* the
+/// display, and the server selects the canvas backend outright.
 #[allow(clippy::large_enum_variant)] // both variants live in BSS as a static
 pub enum FbBackend {
     Bochs(BochsArch),
     VirtioGpu(VirtioGpuArch),
+    Canvas(CanvasArch),
 }
 
 impl FbBackend {
@@ -578,6 +740,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.init(minor),
             FbBackend::VirtioGpu(a) => a.init(minor),
+            FbBackend::Canvas(a) => a.init(minor),
         }
     }
 
@@ -585,6 +748,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.device(minor),
             FbBackend::VirtioGpu(a) => a.device(minor),
+            FbBackend::Canvas(a) => a.device(minor),
         }
     }
 
@@ -592,6 +756,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.mem(minor),
             FbBackend::VirtioGpu(a) => a.mem(minor),
+            FbBackend::Canvas(a) => a.mem(minor),
         }
     }
 
@@ -599,6 +764,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.var_screeninfo(minor),
             FbBackend::VirtioGpu(a) => a.var_screeninfo(minor),
+            FbBackend::Canvas(a) => a.var_screeninfo(minor),
         }
     }
 
@@ -610,6 +776,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.set_var_screeninfo(minor, info),
             FbBackend::VirtioGpu(a) => a.set_var_screeninfo(minor, info),
+            FbBackend::Canvas(a) => a.set_var_screeninfo(minor, info),
         }
     }
 
@@ -617,6 +784,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.fix_screeninfo(minor),
             FbBackend::VirtioGpu(a) => a.fix_screeninfo(minor),
+            FbBackend::Canvas(a) => a.fix_screeninfo(minor),
         }
     }
 
@@ -624,6 +792,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.pan_display(minor, info),
             FbBackend::VirtioGpu(a) => a.pan_display(minor, info),
+            FbBackend::Canvas(a) => a.pan_display(minor, info),
         }
     }
 
@@ -631,6 +800,7 @@ impl FbArch for FbBackend {
         match self {
             FbBackend::Bochs(a) => a.flush(),
             FbBackend::VirtioGpu(a) => a.flush(),
+            FbBackend::Canvas(a) => a.flush(),
         }
     }
 }
@@ -1061,6 +1231,131 @@ mod tests {
     fn test_null_arch_init() {
         let mut arch = NullArch::new();
         assert!(arch.init(0).is_ok());
+    }
+
+    // The canvas backend (M5). The mode comes from the host, so what is testable without one is
+    // the rule that turns a mode into a device description — and what a refusal looks like.
+
+    const CANVAS_CAPACITY: u64 = 3 * 1024 * 1024;
+
+    /// The surface the canvas tests hand their backend. A real buffer at a real address, because
+    /// `flush` builds a slice over it: a test that passed an invented address would be building a
+    /// slice over nothing.
+    static mut CANVAS_SURFACE: [u8; CANVAS_CAPACITY as usize] = [0; CANVAS_CAPACITY as usize];
+
+    fn canvas_surface() -> u64 {
+        core::ptr::addr_of_mut!(CANVAS_SURFACE) as u64
+    }
+
+    fn canvas() -> CanvasArch {
+        CanvasArch::new(canvas_surface(), CANVAS_CAPACITY)
+    }
+
+    #[test]
+    fn test_canvas_without_a_surface_has_no_device() {
+        let mut arch = CanvasArch::new(0, 0);
+        assert!(matches!(arch.init(0), Err(DriverError::NotFound)));
+        assert!(matches!(arch.flush(), Err(DriverError::NotFound)));
+    }
+
+    #[test]
+    fn test_canvas_adopts_the_mode_and_describes_it() {
+        let mut arch = canvas();
+        assert!(arch.adopt_mode(1024, 768).is_ok());
+
+        let var = arch.var_screeninfo(0).unwrap();
+        assert_eq!((var.xres, var.yres), (1024, 768));
+        assert_eq!((var.xres_virtual, var.yres_virtual), (1024, 768));
+        assert_eq!(var.bits_per_pixel, 32);
+        assert_eq!(
+            (var.red.offset, var.green.offset, var.blue.offset),
+            (16, 8, 0)
+        );
+
+        let fix = arch.fix_screeninfo(0).unwrap();
+        assert_eq!(fix.line_length, 4096);
+        assert_eq!(&fix.id[..11], b"host canvas");
+        assert_eq!(fix.mmio_len, 0);
+
+        // The surface is this process's own buffer, which is what `mem` reads and writes through.
+        let dev = arch.device(0).unwrap();
+        assert_eq!(dev.base, canvas_surface());
+        assert_eq!(dev.size, 1024 * 768 * 4);
+        assert_eq!(arch.mem(0).unwrap(), dev.base);
+    }
+
+    #[test]
+    fn test_canvas_refuses_a_mode_its_surface_cannot_hold() {
+        let mut arch = canvas();
+        // 1920×1080×4 is 8 MiB against a 3 MiB surface: refused, rather than drawn into the
+        // address space past the end of the buffer.
+        assert!(matches!(
+            arch.adopt_mode(1920, 1080),
+            Err(DriverError::Unsupported)
+        ));
+        assert_eq!(arch.device(0).unwrap().size, 0);
+    }
+
+    #[test]
+    fn test_canvas_refuses_a_mode_change_but_accepts_its_own() {
+        let mut arch = canvas();
+        arch.adopt_mode(1024, 768).unwrap();
+
+        let mut wanted = FbVarScreeninfo::new();
+        wanted.xres = 800;
+        wanted.yres = 600;
+        assert!(matches!(
+            arch.set_var_screeninfo(0, &wanted),
+            Err(DriverError::Unsupported)
+        ));
+
+        // The mode it already has is accepted, offsets and all: that is how a client pans.
+        let mut same = FbVarScreeninfo::new();
+        same.xres = 1024;
+        same.yres = 768;
+        same.xoffset = 2;
+        same.yoffset = 100;
+        assert!(arch.set_var_screeninfo(0, &same).is_ok());
+        let var = arch.var_screeninfo(0).unwrap();
+        assert_eq!((var.xoffset, var.yoffset), (2, 100));
+    }
+
+    #[test]
+    fn test_canvas_pan_display_records_the_offset() {
+        let mut arch = canvas();
+        arch.adopt_mode(1024, 768).unwrap();
+        let mut info = FbVarScreeninfo::new();
+        info.xoffset = 3;
+        info.yoffset = 7;
+        assert!(arch.pan_display(0, &info).is_ok());
+        let var = arch.var_screeninfo(0).unwrap();
+        assert_eq!((var.xoffset, var.yoffset), (3, 7));
+    }
+
+    #[test]
+    fn test_canvas_flush_without_a_host_is_an_io_error() {
+        // `fb_present` answers `ENODEV` on an arch with no host display, and a flush that
+        // reported success would be a frame nobody saw.
+        let mut arch = canvas();
+        arch.adopt_mode(1024, 768).unwrap();
+        assert!(matches!(arch.flush(), Err(DriverError::Io)));
+    }
+
+    #[test]
+    fn test_canvas_flush_hands_over_the_whole_mode() {
+        // The surface is written through the driver and the flush publishes the mode's bytes:
+        // 1024×768×4, not the capacity and not a row.
+        let mut arch = canvas();
+        arch.adopt_mode(1024, 768).unwrap();
+        let mut fb = Framebuffer::new();
+        assert!(fb.write(0, 0, &[0xAA, 0xBB, 0xCC, 0xDD], &arch).is_ok());
+        unsafe {
+            assert_eq!(
+                core::ptr::read_volatile(canvas_surface() as *const u8),
+                0xAA
+            );
+        }
+        assert_eq!(arch.device(0).unwrap().size, 1024 * 768 * 4);
     }
 
     #[test]

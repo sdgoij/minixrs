@@ -18,6 +18,7 @@
 //     from outside — the engine stops *between* syscalls.
 
 import { createHost } from './host.js';
+import { createDisplay } from './display.js';
 import { indexedDbStore } from './store.js';
 import { createTerminal } from './terminal.js';
 
@@ -49,12 +50,21 @@ const terminal = createTerminal({ maxLines: 800 });
 
 const elements = {
   screen: document.getElementById('screen'),
+  cursor: document.getElementById('cursor'),
   status: document.getElementById('status'),
   disk: document.getElementById('disk'),
   panel: document.getElementById('panel'),
   shutdown: document.getElementById('shutdown'),
   clear: document.getElementById('clear'),
+  display: document.getElementById('display'),
+  viewTerminal: document.getElementById('view-terminal'),
+  viewDisplay: document.getElementById('view-display'),
 };
+
+/// The guest's display: the canvas, whose size *is* the mode the guest's `fb` driver adopts (M5).
+/// Built at the top level rather than at bring-up because it is part of what the engine is given:
+/// a page with no canvas is a page whose guest has no display, which is the headless case.
+const display = createDisplay(elements.display);
 
 let host = null;
 let stopping = false;
@@ -76,9 +86,20 @@ const hostNotes = [];
 
 let frameQueued = false;
 
+/// Draw the console.
+///
+/// The screen is the committed lines and then the line being typed, split at the renderer's cursor
+/// column: everything before it in the `pre`'s own text, everything after it in the cursor element,
+/// and the cursor block itself is the CSS between them (`index.html`). Splitting there rather than
+/// appending a block is what puts the cursor where the *shell* has it — the editor moves it with
+/// `\b` and `\r` — and not always at the end of the line.
 function paint() {
   frameQueued = false;
-  elements.screen.textContent = `${terminal.lines.join('\n')}\n${terminal.partial}`;
+  const partial = terminal.partial;
+  const col = terminal.col;
+  elements.screen.textContent = `${terminal.lines.join('\n')}\n${partial.slice(0, col)}`;
+  elements.cursor.textContent = partial.slice(col);
+  elements.screen.append(elements.cursor);
   elements.screen.scrollTop = elements.screen.scrollHeight;
 }
 
@@ -196,6 +217,34 @@ function showDiagnostics(reason) {
       `syscalls of budget left: ${host.budget.left}`
   );
 }
+
+// ----------------------------------------------------------------------- the views
+
+/// Show one pane: the console, or the guest's display. Both stay live while hidden — the guest
+/// draws whether or not anyone is looking, and a terminal that was scrolled away comes back where
+/// it was — so this is only about what the reader sees.
+function showView(which) {
+  const showingDisplay = which === 'display';
+  elements.screen.hidden = showingDisplay;
+  elements.display.hidden = !showingDisplay;
+  for (const [button, active] of [
+    [elements.viewTerminal, !showingDisplay],
+    [elements.viewDisplay, showingDisplay],
+  ]) {
+    button.dataset.active = String(active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function wireViews() {
+  elements.viewTerminal.addEventListener('click', () => showView('terminal'));
+  elements.viewDisplay.addEventListener('click', () => showView('display'));
+}
+
+wireViews();
+// The pane the page opens on, set here rather than left to `index.html`'s attributes: the two agree
+// (the HTML is what a reader sees before this module runs), and what a check reads is this.
+showView('terminal');
 
 // ---------------------------------------------------------------------- the controls
 //
@@ -324,7 +373,11 @@ window.addEventListener('paste', (event) => {
 // ------------------------------------------------------------------------- bring-up
 
 async function fetchBytes(url) {
-  const response = await fetch(url);
+  // `no-store` on purpose: these are rebuilt in place under the page's feet by
+  // `tools/wasm-browser/build.sh`, and a cached module is a boot that claims an artifact is
+  // stale when the file on disk is not (`serve.js` sends the same header, for servers that are
+  // not this one).
+  const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -405,6 +458,7 @@ async function main() {
       servers,
       image,
       store: disk,
+      display,
       sink: {
         write: (byte) => {
           terminal.write(byte);

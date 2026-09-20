@@ -85,6 +85,11 @@ const EXEC_REQ_ARGC = 20;
 /// depends on it and MFS's allocator runs during init; VFS comes last because its init calls
 /// `mount_root`, which asks MFS for the superblock; and the tty comes after VFS because its init
 /// registers the console with devman, which VFS has to have mounted.
+///
+/// `fb` is last of the servers because it is the only one with nothing to talk to at boot: it
+/// asks the host for its mode, paints its surface and waits for a client to open `/dev/fb`
+/// (M5a). Its slot is where the boot image's device map already points major 19, which is why a
+/// boot without it is a `/dev/fb` that nothing answers.
 export const SYSTEM_SPECS = [
   { slot: 6, entry: 'minix_server_ds', label: 'ds' },
   { slot: 2, entry: 'minix_server_rs', label: 'rs' },
@@ -96,6 +101,7 @@ export const SYSTEM_SPECS = [
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   { slot: 5, entry: 'minix_server_tty', label: 'tty' },
+  { slot: 16, entry: 'minix_server_fb', label: 'fb' },
   { slot: 10, entry: 'minix_init', label: 'init' },
 ];
 
@@ -150,6 +156,12 @@ export function createHost({
   /// one there is no device to attach, `virtio_blk` finds nothing, and MFS mounts the root from
   /// the ramdisk — the same path a machine with an empty drive takes.
   store = null,
+  /// The display, or omitted for a headless run: `{width, height, present(bytes)}`, where `bytes`
+  /// is one frame in the layout the guest's `fb` driver describes (XRGB8888, rows back to back).
+  /// The mode is the host's — a canvas is the size the page made it, the way a panel is the size
+  /// the hardware fixed — and `present` is where a frame goes: a canvas in a page, a recorder in
+  /// a check. `display.js` is the canvas one; `run.js` and `boot.cjs` hand over recorders.
+  display = null,
   specs = SYSTEM_SPECS,
   /// The host's lever against a guest that keeps making syscalls without getting anywhere
   /// (finding 12). Generous: a boot with a shell, a fork and an exec costs a five-figure number,
@@ -226,6 +238,31 @@ export function createHost({
       },
     };
   })();
+
+  // ------------------------------------------------------------------- the display
+
+  /// What the display has been asked for, the way `deviceStats` records the device: a check reads
+  /// these rather than asking the guest, because "the guest's frame reached the display" is a
+  /// claim about *these* numbers.
+  const displayStats = {
+    frames: 0,
+    bytes: 0,
+    mode: display === null ? [0, 0] : [display.width, display.height],
+    attached: display !== null,
+  };
+
+  /// Hand one frame of an instance's memory to the display.
+  ///
+  /// A frame that is not the mode's size is refused rather than shown: the guest's driver sends
+  /// exactly the mode it was given, so any other number means the two sides disagree about the
+  /// mode — and a partial picture is the shape of bug that looks like a drawing error.
+  const presentFrame = (memory, srcAddr, bytes) => {
+    if (bytes !== display.width * display.height * 4) return EINVAL;
+    display.present(new Uint8Array(memory.buffer, srcAddr, bytes));
+    displayStats.frames += 1;
+    displayStats.bytes += bytes;
+    return 0;
+  };
 
   // ---------------------------------------------------------------------- state
 
@@ -502,6 +539,19 @@ export function createHost({
     // The entry is the *module's*: `minix_init` and `minix_program_main` belong to different
     // modules, and which one a slot runs is what changes at exec.
     st.entry = entry ?? st.spec.entry;
+    // A spec names a function the module has to export, and the two are written in different
+    // places — one in this file, the other in `crates/wasm-servers`. A module that does not export
+    // it is an artifact set from before that spec existed (the page fetches its own staged copies,
+    // which is the usual way this happens), and the whole run is one TypeError deep inside a
+    // slot otherwise. Said here instead, where the entry's name and its fix can be named.
+    if (typeof st.inst.exports[st.entry] !== 'function') {
+      throw new Error(
+        `the loaded module does not export ${st.entry} (${st.spec.label}, slot ${st.spec.slot}): ` +
+          `loaded artifacts are kernel ${kernelBytes.length} B, servers ${serversBytes.length} B, ` +
+          `image ${imageBytes.length} B — if those are not the build's numbers the artifacts are ` +
+          `stale; rebuild with sh tools/wasm-browser/build.sh`
+      );
+    }
     st.module = module;
     st.entryArgs = [];
     if (argv !== undefined) st.entryArgs = [argv.length, writeArgv(st, argv) + 4];
@@ -593,6 +643,13 @@ export function createHost({
           device === null ? ENODEV : device.readInto(memory, Number(offset), bufAddr, bytes),
         host_block_write: (offset, srcAddr, bytes) =>
           device === null ? ENODEV : device.writeFrom(memory, Number(offset), srcAddr, bytes),
+        // The display (M5a). Same division as the block device: the guest's `fb` driver owns the
+        // surface, the mode it was given, and the protocol above it, while the host owns the two
+        // things that are not the guest's — what size the display is and where the pixels go.
+        host_fb_geometry: () =>
+          BigInt(display === null ? 0 : display.width * 2 ** 32 + display.height),
+        host_fb_present: (srcAddr, bytes) =>
+          display === null ? ENODEV : presentFrame(memory, srcAddr, bytes),
         // All six argument registers are named and forwarded, not only the two the
         // message-passing syscalls use: the kernel's dispatcher hands `args` straight to the
         // handler, and a syscall whose count arrives as a literal zero is a transfer that reports
@@ -817,6 +874,8 @@ export function createHost({
     forks,
     /// What the host's block device has been asked for, and whether one is attached at all.
     device: deviceStats,
+    /// What the display has been asked for: frames presented, bytes, and the mode it named.
+    display: displayStats,
     console: console_,
     spawnFailures,
     pump,

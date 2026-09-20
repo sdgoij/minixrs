@@ -23,7 +23,11 @@
 
 use crate::DriverError;
 use crate::bus::virtio;
-use crate::bus::virtio::{VirtioDevice, VirtioFeature, VirtioPhysBuf};
+use crate::bus::virtio::{VirtioDevice, VirtioPhysBuf};
+// The feature list is the PCI transport's — the wasm probe asks the host for a capacity instead —
+// so the type is only named where that probe is compiled.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bus::virtio::VirtioFeature;
 use core::cell::UnsafeCell;
 
 /// Virtio PCI vendor ID (Red Hat / QEMU).
@@ -61,6 +65,7 @@ pub const VIRTIO_BLK_FEATURES: u32 = (1 << VIRTIO_BLK_F_BARRIER)
 ///
 /// All `guest_support` fields are 0 (no optional features are negotiated
 /// by default in this simplified driver, mirroring the Minix C driver).
+#[cfg(not(target_arch = "wasm32"))]
 const VIRTIO_BLK_FEATURE_LIST: &[VirtioFeature] = &[
     VirtioFeature {
         name: "barrier",
@@ -326,6 +331,7 @@ fn status_ptr() -> *mut [u8; 1] {
 /// PCI config registers.
 ///
 /// Corresponds to `virtio_blk_config()` in the C reference.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_device_config(dev: &VirtioDevice, config: &mut VirtioBlkConfig) {
     // Capacity is always present (two 32-bit reads at offsets 0 and 4).
     let sectors_low = virtio::virtio_sread32(dev, 0);

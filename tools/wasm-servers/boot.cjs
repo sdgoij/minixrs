@@ -395,6 +395,11 @@ const specs = [
   // tree is not up yet, so running it after VFS is what makes the first attempt the
   // one that lands. It is the process `/dev/console` (major 5) has to resolve to.
   { slot: 5, entry: 'minix_server_tty', label: 'tty' },
+  // The framebuffer server, `/dev/fb` (major 19 in the boot image's device map). On wasm its
+  // backend is the host's "display", which here is a recorder and on the page is a canvas: it
+  // takes the host's mode, paints its surface and waits for a client (M5a). Last of the servers
+  // because it has nothing to talk to at boot.
+  { slot: 16, entry: 'minix_server_fb', label: 'fb' },
   // INIT — the first *user* process, at `INIT_PROC_NR`. The one instance here that
   // is not a server: the kernel links it to the shared USER privilege slot, and its
   // lifetime ends. Spawned with the boot processes, after the servers it talks to.
@@ -492,6 +497,32 @@ function writeArgv(st, argv) {
   return base;
 }
 
+/// The display this harness hands the guest (M5a): the `{width, height, present(bytes)}` contract
+/// `display.js` implements for the page, with the frame kept rather than drawn — a checkpoint,
+/// not a stub, because the bytes checked below are the bytes the guest actually presented.
+const display = {
+  width: 1024,
+  height: 768,
+  geometryAsked: 0,
+  frames: 0,
+  lastFrame: null,
+  present(bytes) {
+    this.frames += 1;
+    this.lastFrame = Uint8Array.from(bytes);
+  },
+};
+
+/// The presented frame's pixel at `(x, y)`, in the guest's own channel order.
+function displayPixelAt(x, y) {
+  const at = (y * display.width + x) * 4;
+  return [
+    display.lastFrame[at],
+    display.lastFrame[at + 1],
+    display.lastFrame[at + 2],
+    display.lastFrame[at + 3],
+  ];
+}
+
 /// Build the import object an instance of this slot gets.
 ///
 /// A function of the *slot* rather than of the instance, because exec replaces a slot's
@@ -520,6 +551,21 @@ function makeImports(st) {
       host_block_capacity: () => 0n,
       host_block_read: () => ENODEV,
       host_block_write: () => ENODEV,
+      // The display (M5a), and the thing that makes this harness's claim about it worth making:
+      // there is no canvas here, so what the guest is handed is a *recorder* — the same
+      // `{width, height, present(bytes)}` contract `display.js` implements for the page, with the
+      // frame kept instead of drawn. The mode is the host's, as on the page, and the pixels the
+      // guest presents are checked below against the pattern its driver paints.
+      host_fb_geometry: () => {
+        display.geometryAsked += 1;
+        return BigInt(display.width * 2 ** 32 + display.height);
+      },
+      host_fb_present: (srcAddr, bytes) => {
+        const want = display.width * display.height * 4;
+        if (bytes !== want) return EINVAL;
+        display.present(new Uint8Array(memory.buffer, srcAddr, bytes));
+        return 0;
+      },
       // All six argument registers are named and forwarded, not only the two the
       // message-passing syscalls use. The kernel's dispatcher hands `args` straight
       // to the handler, and the three-argument syscalls read `args[2]` — `write`'s
@@ -991,6 +1037,7 @@ const servers = procs.filter((p) =>
     'devman',
     'vfs',
     'tty',
+    'fb',
   ].includes(p.spec.label)
 );
 const client = procs.find((p) => p.spec.label === 'client');
@@ -1894,6 +1941,29 @@ for (const c of copyLog) {
       ` (${c.bytes} bytes) => ${c.result}`
   );
 }
+
+// ------------------------------------------------------------------ the display (M5a)
+
+check(
+  "the fb server adopted the host's mode",
+  display.geometryAsked > 0,
+  `the driver asked the host ${display.geometryAsked} time(s)`
+);
+check(
+  "the fb server's surface reached the host, so the display is not a dead end",
+  display.frames > 0 && display.lastFrame !== null,
+  `frames=${display.frames}`
+);
+check(
+  "the presented frame is the pattern the driver paints: three bands, XRGB8888",
+  // The bytes are the guest's own, before any canvas conversion — `page.test.js` is where the
+  // channel order the *canvas* wants is checked. Red is [0,0,255,0] in memory because the driver
+  // writes little-endian XRGB8888 words.
+  displayPixelAt(100, 400).join() === '0,0,255,0' &&
+    displayPixelAt(500, 400).join() === '0,255,0,0' &&
+    displayPixelAt(900, 400).join() === '255,0,0,0',
+  `left=${displayPixelAt(100, 400)} middle=${displayPixelAt(500, 400)} right=${displayPixelAt(900, 400)}`
+);
 
 const failed = checks.filter((c) => !c.ok);
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);

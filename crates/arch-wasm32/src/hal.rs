@@ -10,8 +10,8 @@ pub use arch_sim::hal::*;
 
 use crate::{
     console_available, console_read, console_write, copy_between_procs, cycles, halt_host,
-    host_block_capacity, host_block_read, host_block_write, run_profile_callback,
-    set_profile_callback, set_tsc_switch, trap, tsc_switch,
+    host_block_capacity, host_block_read, host_block_write, host_fb_geometry, host_fb_present,
+    run_profile_callback, set_profile_callback, set_tsc_switch, trap, tsc_switch,
 };
 
 pub fn init() {
@@ -113,6 +113,38 @@ pub fn block_write(offset: u64, buf: &[u8]) -> i32 {
 
 /// `EINVAL`, for an argument the host could not be given.
 const EINVAL: i32 = -22;
+
+// ---------------------------------------------------------------------- display
+
+/// The display's mode as `(width, height)`, or `(0, 0)` when the host has no display (M5).
+///
+/// The host is the device on this port the way it is the console, the clock and the disk, and a
+/// display is the one of them whose mode the guest does not choose: a canvas in a page is the
+/// size the page made it, so the driver adopts it the way a driver adopts a panel's mode from
+/// EDID. `fb`'s backend asks this instead of probing a bus.
+pub fn fb_geometry() -> (u32, u32) {
+    // SAFETY: the import has no preconditions; the host answers 0 for "no display".
+    let packed = unsafe { host_fb_geometry() };
+    ((packed >> 32) as u32, packed as u32)
+}
+
+/// Publish `buf` — a whole surface in the mode `fb_geometry` named — to the display.
+///
+/// Returns 0, or a negative errno: `ENODEV` when the host has no display, `EINVAL` for a buffer
+/// this instance could not describe.
+///
+/// The pixels leave through here rather than through device memory because a page has none to
+/// map: VFS's device-`mmap` path asks the kernel to map a *physical* range, and this port has no
+/// address translation to do that with. What the display gets instead is the driver's flush.
+pub fn fb_present(buf: &[u8]) -> i32 {
+    let bytes = buf.len();
+    if bytes > u32::MAX as usize {
+        return EINVAL;
+    }
+    // SAFETY: `buf` is live and `bytes` long for the duration of the call, which is synchronous,
+    // and the host reads only the bytes it is told about.
+    unsafe { host_fb_present(buf.as_ptr() as u32, bytes as u32) }
+}
 
 // ------------------------------------------------------------------- exec
 

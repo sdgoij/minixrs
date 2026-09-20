@@ -67,3 +67,29 @@ mod no_host_device {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use no_host_device::{block_capacity, block_read, block_write};
+
+// The display, and the second device here whose hardware is the host (M5). Same disposition as
+// the block device above: on wasm the driver asks the host for its mode and flushes to it; on a
+// hardware arch there is no host, so the answers are "no display" and the call sites are
+// unreachable by construction — a driver there reaches its framebuffer through the VGA registers
+// or the virtio-gpu transport instead.
+#[cfg(target_arch = "wasm32")]
+pub use arch_wasm32::hal::{fb_geometry, fb_present};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod no_host_display {
+    /// No host, so no display to ask about: `fb`'s backends there are bochs and virtio-gpu, and
+    /// the canvas one is not compiled in.
+    pub fn fb_geometry() -> (u32, u32) {
+        (0, 0)
+    }
+
+    /// `ENODEV`, as above: a flush that reached here has no display to reach, and answering zero
+    /// would report a frame that nobody saw.
+    pub fn fb_present(_buf: &[u8]) -> i32 {
+        -19
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use no_host_display::{fb_geometry, fb_present};

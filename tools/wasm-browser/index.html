@@ -63,6 +63,7 @@
       }
       #screen {
         flex: 1;
+        min-height: 0;
         margin: 0;
         padding: 0.75rem;
         overflow-y: auto;
@@ -72,6 +73,51 @@
         border: 1px solid #21262d;
         border-radius: 6px;
         caret-color: transparent;
+      }
+      /* The guest's own display (M5). Its mode is the width/height attributes below, because the
+         guest's fb driver adopts whatever the host names rather than choosing a mode. */
+      #display {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        object-fit: contain;
+        background: #010409;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        image-rendering: pixelated;
+      }
+      /* One pane at a time: the two are views of one session, not two places to be. */
+      #screen[hidden],
+      #display[hidden] {
+        display: none;
+      }
+      /* The cursor. Drawn by CSS rather than written into the text, and blinking in CSS rather than
+         on a timer: an idle tab is what the park machinery exists to keep free, and a cursor that
+         repainted the screen twice a second would be the one thing in the page that never idles. */
+      #cursor::before {
+        content: '';
+        display: inline-block;
+        width: 1ch;
+        height: 1em;
+        vertical-align: text-bottom;
+        background: var(--fg);
+        animation: blink 1.06s steps(1, end) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      #views {
+        display: flex;
+        gap: 0.25rem;
+      }
+      #views button {
+        padding: 0.15rem 0.5rem;
+      }
+      #views button[data-active='true'] {
+        color: var(--accent);
+        border-color: var(--accent);
       }
       #panel {
         margin: 0;
@@ -114,12 +160,32 @@
       <h1>MINIX/Rust — <code>arch-wasm32</code></h1>
       <span id="status">starting…</span>
       <span id="disk"></span>
+      <!--
+        Two views of one session: the console as this page renders it, and the guest's own display
+        (M5a). One at a time, and the keyboard goes to the guest either way — there is one console,
+        and which pane shows it is the reader's choice. Both stay live while hidden.
+      -->
+      <div id="views">
+        <button id="view-terminal" type="button" data-active="true" aria-pressed="true">Terminal</button>
+        <button id="view-display" type="button" data-active="false" aria-pressed="false">Display</button>
+      </div>
       <span class="hint">
         type at the prompt · Enter sends · arrows walk history · ^C ^D ^U ^W ^K ^L work
       </span>
     </header>
 
-    <pre id="screen"></pre>
+    <!--
+      The guest's own display: the fb server's surface, presented by the host (M5). A run with no
+      canvas is the headless case, and the driver then finds no device — `page.js` always gives it
+      this one, and `display.js` is what turns its frames into pixels.
+    -->
+    <canvas id="display" width="1024" height="768" hidden></canvas>
+
+    <!--
+      The console, with the cursor as its last child: `page.js` puts the text before the cursor in
+      the `pre` and the text after it in the span, and the block between them is CSS (above).
+    -->
+    <pre id="screen"><span id="cursor"></span></pre>
 
     <!--
       The controls are the two things a reader cannot do at the prompt, and both come from what
