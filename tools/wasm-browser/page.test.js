@@ -341,16 +341,29 @@ check(
 
 // -------------------------------------------------------------------------- the display
 //
-// The guest's own display (M5a): the fb server's surface, its mode, and the canvas. What is
-// checked here is the whole path in one place — the driver's pattern, presented through the host
-// import, converted by `display.js` and read back out of the canvas — because each layer's claim
-// is only worth something if the one above it agrees.
+// The guest's own display (M5): the fb server's surface, the compositor's desktop, and the canvas.
+// What is checked here is the whole path in one place — the guest's pixels, presented through the
+// host import, converted by `display.js` and read back out of the canvas — because each layer's
+// claim is only worth something if the one above it agrees.
+//
+// The frame at the end of the run is the *compositor's* (M5b): the console's window on the desktop,
+// which is what M5b is for. The driver's own verification pattern is the first frame `fb` presents
+// at boot and belongs to M5a — `tools/wasm-servers/boot.cjs` checks it there, where the recorder can
+// keep both frames.
 
 const canvas = document.getElementById('display');
 const pixelAt = (x, y) => {
   const data = canvas.image.data;
   const at = (y * canvas.width + x) * 4;
   return [data[at], data[at + 1], data[at + 2], data[at + 3]];
+};
+
+/// A white pixel anywhere in the console window's title strip: the 8x16 font drew the title there.
+const titleIsRasterized = () => {
+  for (let x = 196; x < 400; x += 1) {
+    if (pixelAt(x, 192).join() === '255,255,255,255') return true;
+  }
+  return false;
 };
 
 check(
@@ -363,15 +376,24 @@ check(
   await until(() => canvas.frames >= 1, 'the first frame'),
   `frames=${canvas.frames}`
 );
+// The compositor's window arrives a few frames later than the driver's boot pattern, and the draw
+// happens on an animation frame (`display.js`), so this waits for the desktop rather than assuming
+// it is already drawn.
+const showingDesktop = await until(
+  () => pixelAt(400, 190).join() === '64,128,192,255',
+  "the console window's title bar on the canvas"
+);
 check(
-  "the frame is the driver's pattern, in the channels a canvas wants",
-  // The driver paints the left third red, the middle green, the right blue, and writes them as
-  // little-endian XRGB8888 (B,G,R,X in memory) — so this is also the check that `display.js`
-  // converts channel order rather than handing the bytes over as they lie.
-  pixelAt(100, 400).join() === '255,0,0,255' &&
-    pixelAt(500, 400).join() === '0,255,0,255' &&
-    pixelAt(900, 400).join() === '0,0,255,255',
-  `left=${pixelAt(100, 400)} middle=${pixelAt(500, 400)} right=${pixelAt(900, 400)}`
+  "the canvas shows the desktop the guest composed, in the channels a canvas wants",
+  // Desktop background outside the console's window, the focused title bar's colour inside its
+  // title, and the body's colour in its body. The title bar is 0x004080C0, so as canvas RGBA it is
+  // 64,128,192 — which is also the check that `display.js` converts channel order rather than
+  // handing the guest's B,G,R,X bytes over as they lie (they would read 192,128,64).
+  showingDesktop &&
+    pixelAt(20, 20).join() === '40,40,40,255' &&
+    pixelAt(300, 300).join() === '24,24,32,255' &&
+    titleIsRasterized(),
+  `desktop=${pixelAt(20, 20)} title=${pixelAt(400, 190)} body=${pixelAt(300, 300)} frames=${canvas.frames}`
 );
 
 // ------------------------------------------------------------------------ the views

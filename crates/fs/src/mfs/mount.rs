@@ -27,6 +27,26 @@ fn apply_mount_flags(sp: &mut SuperBlock, req_flags: u32) -> bool {
     readonly
 }
 
+/// Say that a mount came out read-only because the filesystem was not unmounted cleanly.
+///
+/// The mount *succeeds*: reads work, the system comes up, and the first thing that reports the state
+/// is a write failing somewhere much later — which reads as a broken command rather than as a disk
+/// this boot may not write. Dropping to read-only is the reference's answer and it stays; saying so
+/// is this port's, because nothing else does (`PORTING_PLAN.md` finding 54, and the reason the page
+/// carries a control for a disk it cannot write).
+///
+/// The read-only state is also *not* visible to VFS, which asked for a writable mount and is not
+/// told otherwise; that is the reference's protocol shape as well (the `fs_readsuper` reply carries
+/// the root inode, not the effective flags) and it is why the line is the signal rather than
+/// something a caller could ask for.
+fn report_unclean_mount() {
+    #[cfg(target_os = "minix")]
+    {
+        let msg = b"mfs: the filesystem was not unmounted cleanly, mounted read-only\n";
+        unsafe { minix_rt::write(1, msg.as_ptr(), msg.len()) };
+    }
+}
+
 pub fn fs_readsuper() -> i32 {
     unsafe {
         // Read device number from the incoming message (m1i1).
@@ -84,6 +104,12 @@ pub fn fs_readsuper() -> i32 {
                     CLEANMOUNT.store(1, Ordering::Relaxed);
                 }
                 let readonly = apply_mount_flags(&mut *sp, req_flags);
+                if readonly && (req_flags & REQ_RDONLY as u32) == 0 {
+                    // Read-only for the only reason `apply_mount_flags` can produce it without being
+                    // asked: an unclean filesystem. Say it before the mount is handed back, so a
+                    // front end's log holds it ahead of any write that will fail.
+                    report_unclean_mount();
+                }
                 if !readonly {
                     // Mark it in use, so the next mount sees it was not unmounted
                     // cleanly. `fs_unmount` turns the flag back on.

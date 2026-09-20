@@ -180,6 +180,37 @@ pub extern "C" fn minix_server_fb() -> i32 {
     0
 }
 
+/// The window server: the compositor, on `/dev/fb`.
+///
+/// On wasm it composes the desktop into a surface of its own — there is no device memory to map and
+/// no page tables to map one through — and hands each frame to `/dev/fb` as a single datagram write,
+/// which the fb driver copies into the surface it owns and presents when the compositor flushes
+/// (M5b, `ARCH_WASM32.md` §11). It boots before `tty` on purpose: the console's window is created at
+/// tty's init, and a console with no window server behind it has nowhere to put its cells.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_wserver() -> i32 {
+    servers::wserver::wserver_main();
+    0
+}
+
+/// The console's cell grid, row-major, 80x24, as **the tty server's model** computed it.
+///
+/// Call it on the tty instance: the grid is that server's `console` module state, and every instance
+/// carries all the servers' code, so an untouched one answers a pointer into cells that were never
+/// written. What this is for is the check that the console's cells are the ones the guest composed —
+/// the alternative is inferring them from the bytes the host saw on the console, which is the claim
+/// M5b is making. See `console.rs`.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_console_grid_ptr() -> u32 {
+    servers::console::report_ptr()
+}
+
+/// The console screen's cursor cell, as `row << 16 | col`.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_console_cursor() -> u32 {
+    servers::console::report_cursor()
+}
+
 /// Device 0's base address in bytes, as **the RAM disk instance** computed it.
 ///
 /// The host put the image somewhere and the server sized the device from the

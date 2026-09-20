@@ -7481,6 +7481,17 @@ replaces the browser's implementation rather than the page's code, so what runs 
 real `store.js` — including that requests answer on a later task, and that an object store
 enumerates in key order, which is what lets a page's index be zipped to its bytes.
 
+**Addendum — the read-only drop is announced (M5b).** The other half of the above, and the one a
+reader meets first: a session nobody ended leaves the disk unclean, and the *next* boot drops to
+read-only, because writing on top of a half-written tree is how a filesystem comes back wrong. That
+decision is silent — the mount succeeds, reads work, and the first thing that reports the state is a
+write failing much later, which reads as a broken command rather than as a disk this boot may not
+write. `mfs: the filesystem was not unmounted cleanly, mounted read-only` is now printed at the
+mount, so a front end's log holds it before any write that will fail, and `run.js` pins both halves
+(the line, and the `cannot create` under it). VFS is still not told — the `fs_readsuper` reply is
+the reference's, and it carries the root inode rather than the effective flags — which is why the
+line is the signal rather than something a caller can ask for.
+
 One thing the store cannot guard is two *live* sessions over one database: they hold the same
 records, so there is nothing for `imageId` to disagree with, and the mixture would be two in-memory
 disks taking turns. That is the page's, not the store's — `page.js` holds a Web Lock named after the
@@ -7501,6 +7512,28 @@ Nothing had failed: no check depended on the image being pristine, so the aliasi
 until a check imported the page twice and compared what the two boots identified. `file-store.js`
 never slices the source image — it writes it to the file on first use — so `run.js`'s four boots
 over one image were never affected.
+
+**56. A boot process that exits because a host import is missing wedges whoever addresses it next —
+IPC to a dead peer queues, it does not fail.** M5b's first version had `wserver` refuse to start on a
+host with no display, which is what a headless run is. The *display* was the thing that was absent,
+not the compositor: the very next boot process, `tty`, creates the console's window in its init
+(`WS_CREATE`), and its `SENDREC` to slot 18 was accepted by the kernel and never answered — no
+error, no wake, nothing to report. The visible symptom was a boot that stopped after
+`init: pid=11` with `tty` parked at one syscall, and the run *still* reported quiescence, because a
+process blocked on a message nobody will send is not runnable — the same shape as finding 53, where
+VFS blocked forever on a PFS vmnt no server stood behind.
+
+The fix is the disposition `fb` already takes: a driver that finds no device still reaches its main
+loop and still answers, because the boot image's device map names it and a client's open has to be
+answered by *something*. A compositor with no display composes into its own surface the same way and
+simply sends nothing (`WS_SHOW`), because the surface is its own memory and the frames have nowhere
+to go — not because a missing host import is a reason to leave the process table.
+
+The general rule this is worth remembering as: on this port **an endpoint that exists but has
+exited is not distinguishable from one that is merely busy**, so every server whose absence a client
+can encounter has to answer rather than leave. `WS_INPUT` on the wasm port answers `ENOSYS` for the
+same reason (M5c will give it a wake) — a waiter parked with nothing able to wake it is a wedge,
+where a refusal is visible.
 
 **57. Exec put the executable's vnode a second time, resetting it under the vmfd — so every
 demand-paged page of the new image was read from `NONE`.** All three hardware arches stopped at

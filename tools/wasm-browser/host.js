@@ -86,10 +86,16 @@ const EXEC_REQ_ARGC = 20;
 /// `mount_root`, which asks MFS for the superblock; and the tty comes after VFS because its init
 /// registers the console with devman, which VFS has to have mounted.
 ///
-/// `fb` is last of the servers because it is the only one with nothing to talk to at boot: it
+/// `fb` is early among the servers because it is the only one with nothing to talk to at boot: it
 /// asks the host for its mode, paints its surface and waits for a client to open `/dev/fb`
 /// (M5a). Its slot is where the boot image's device map already points major 19, which is why a
 /// boot without it is a `/dev/fb` that nothing answers.
+///
+/// `wserver` follows `fb` and precedes `tty`, and that order is load-bearing in both directions
+/// (M5b): the compositor's frames reach the display through the fb driver, so the driver has to be
+/// alive with its surface painted before the first frame arrives; and the console's window is
+/// created at tty's init, so the window server has to be receiving requests by then. A `tty` before
+/// `wserver` would leave the console's create blocked on a peer that has not started.
 export const SYSTEM_SPECS = [
   { slot: 6, entry: 'minix_server_ds', label: 'ds' },
   { slot: 2, entry: 'minix_server_rs', label: 'rs' },
@@ -100,8 +106,9 @@ export const SYSTEM_SPECS = [
   { slot: 12, entry: 'minix_server_virtio_blk', label: 'virtio_blk' },
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
-  { slot: 5, entry: 'minix_server_tty', label: 'tty' },
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
+  { slot: 18, entry: 'minix_server_wserver', label: 'wserver' },
+  { slot: 5, entry: 'minix_server_tty', label: 'tty' },
   { slot: 10, entry: 'minix_init', label: 'init' },
 ];
 

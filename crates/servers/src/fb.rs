@@ -396,6 +396,14 @@ unsafe fn handle_cdev_request(
             }
         }
         CDEV_WRITE => {
+            // A datagram write is a whole frame in one message: the caller's virtual address in
+            // m2_l1 and the length in m2_l2 (the shape VFS documents for socket devices), rather
+            // than the 8-byte inline chunks the loop above VFS uses. On wasm this is how the
+            // compositor's composed desktop reaches the device — see the arm's own comment.
+            let flags = unsafe { msg.m_payload.m2.m2i2 };
+            if flags & arch_common::com::CDEV_DGRAM as i32 != 0 {
+                return unsafe { frame_write(msg, who_e, arch) };
+            }
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
             // Inline write data in m2_l3 (the last 8 payload bytes).
@@ -444,6 +452,55 @@ unsafe fn handle_cdev_request(
         }
         _ => -38, // ENOSYS
     }
+}
+
+/// Copy a whole frame into the framebuffer, then leave it there for a flush to present.
+///
+/// The write is a *datagram*: one message, one unit, moved by `SYS_VIRCOPY` from the caller's own
+/// memory instead of in 8-byte inline chunks. That is the only shape a frame can take on this port,
+/// and it is why the compositor can be a device client at all here: `/dev/fb` cannot be `mmap`ed
+/// (there are no page tables to map a physical range through, `ARCH_WASM32.md` §9.2), so on the
+/// arches that `mmap` it the frame is a direct memory write and here it is one copy.
+///
+/// The destination and its bound come from the *driver* (`device`), not from a constant here: the
+/// surface is the fb server's own buffer, and how much of it is a frame depends on the mode the
+/// host named. The copy is deliberately not followed by a present — a flush is the only thing that
+/// reaches the host, so a client that draws in pieces shows one frame and not one per write.
+///
+/// # Safety
+///
+/// `msg` must point to a received message whose datagram fields a client filled in.
+unsafe fn frame_write(
+    msg: &mut arch_common::ipc::Message,
+    who_e: i32,
+    arch: &mut dyn FbArch,
+) -> i32 {
+    let va = unsafe { msg.m_payload.m2.m2l1 as u64 };
+    let count = unsafe { msg.m_payload.m2.m2l2 as usize };
+    let dev = match arch.device(0) {
+        Ok(dev) => dev,
+        Err(_) => return -6, // ENXIO
+    };
+    if count == 0 || count as u64 > dev.size {
+        return -22; // EINVAL
+    }
+    let dst = match arch.mem(0) {
+        Ok(mem) => mem,
+        Err(_) => return -6, // ENXIO
+    };
+    // The caller is the process whose memory holds the frame — VFS names it in m2_i3 when it
+    // forwards the request, and a client that calls the driver directly *is* the caller. Both
+    // shapes are the same claim: copy from the process that owns the buffer.
+    let src_ep = if who_e == arch_common::com::VFS_PROC_NR {
+        unsafe { msg.m_payload.m2.m2i3 }
+    } else {
+        who_e
+    };
+    let r = minix_rt::sys_vircopy(src_ep, va, minix_rt::SELF, dst, count);
+    if r != 0 {
+        return -14; // EFAULT
+    }
+    count as i32
 }
 
 /// Grant-based fb ioctl: read the arg struct from the caller's buffer via

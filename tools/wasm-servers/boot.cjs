@@ -65,6 +65,10 @@ const ENODEV = -19;
 const STRUCT_SIZE = 16;
 const BUF_SIZE = 65536;
 const EINVAL = -22;
+/// The console screen's geometry, as `servers::console` builds it: 80x24 cells, the width the
+/// shell's line editor assumes (`SCR_COLS` in `userland::shell`).
+const CONSOLE_COLS = 80;
+const CONSOLE_ROWS = 24;
 
 // A runaway process cannot be preempted on this port (§6.4): if a guest loops
 // inside one dispatch, the host never gets control back and the run cannot even
@@ -390,16 +394,21 @@ const specs = [
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
+  // The framebuffer server, `/dev/fb` (major 19 in the boot image's device map). On wasm its
+  // backend is the host's "display", which here is a recorder and on the page is a canvas: it
+  // takes the host's mode, paints its surface and waits for a client (M5a).
+  { slot: 16, entry: 'minix_server_fb', label: 'fb' },
+  // The window server (M5b), at `WS_PROC_NR`. It composes into a surface of its own — there is no
+  // device memory to map on this arch — and hands each frame to the fb instance above as a
+  // datagram write, so the display keeps one presenter and `/dev/fb` stays the thing that presents.
+  // It runs *before* tty because the console's window is created at tty's init: a create with no
+  // window server receiving would block on a peer that has not started.
+  { slot: 18, entry: 'minix_server_wserver', label: 'wserver' },
   // The console's driver, spawned once VFS has mounted devman: its init registers the
   // console with devman (`devman_add_device("tty0", 0)`) and must retry while that
   // tree is not up yet, so running it after VFS is what makes the first attempt the
   // one that lands. It is the process `/dev/console` (major 5) has to resolve to.
   { slot: 5, entry: 'minix_server_tty', label: 'tty' },
-  // The framebuffer server, `/dev/fb` (major 19 in the boot image's device map). On wasm its
-  // backend is the host's "display", which here is a recorder and on the page is a canvas: it
-  // takes the host's mode, paints its surface and waits for a client (M5a). Last of the servers
-  // because it has nothing to talk to at boot.
-  { slot: 16, entry: 'minix_server_fb', label: 'fb' },
   // INIT — the first *user* process, at `INIT_PROC_NR`. The one instance here that
   // is not a server: the kernel links it to the shared USER privilege slot, and its
   // lifetime ends. Spawned with the boot processes, after the servers it talks to.
@@ -505,22 +514,28 @@ const display = {
   height: 768,
   geometryAsked: 0,
   frames: 0,
+  // The first frame is the one `fb` presents at boot and the last is the compositor's desktop, and
+  // the two checks below need both: the driver's pattern is what says the mode and the surface work
+  // before anything composes, and the desktop is what says the guest's windows reached the display
+  // (M5b).
+  firstFrame: null,
   lastFrame: null,
   present(bytes) {
     this.frames += 1;
-    this.lastFrame = Uint8Array.from(bytes);
+    const frame = Uint8Array.from(bytes);
+    if (this.firstFrame === null) this.firstFrame = frame;
+    this.lastFrame = frame;
   },
 };
 
 /// The presented frame's pixel at `(x, y)`, in the guest's own channel order.
-function displayPixelAt(x, y) {
+function framePixelAt(frame, x, y) {
   const at = (y * display.width + x) * 4;
-  return [
-    display.lastFrame[at],
-    display.lastFrame[at + 1],
-    display.lastFrame[at + 2],
-    display.lastFrame[at + 3],
-  ];
+  return [frame[at], frame[at + 1], frame[at + 2], frame[at + 3]];
+}
+
+function displayPixelAt(x, y) {
+  return framePixelAt(display.lastFrame, x, y);
 }
 
 /// Build the import object an instance of this slot gets.
@@ -1955,14 +1970,122 @@ check(
   `frames=${display.frames}`
 );
 check(
-  "the presented frame is the pattern the driver paints: three bands, XRGB8888",
+  "the frame the driver paints is its pattern: three bands, XRGB8888",
   // The bytes are the guest's own, before any canvas conversion — `page.test.js` is where the
   // channel order the *canvas* wants is checked. Red is [0,0,255,0] in memory because the driver
-  // writes little-endian XRGB8888 words.
-  displayPixelAt(100, 400).join() === '0,0,255,0' &&
-    displayPixelAt(500, 400).join() === '0,255,0,0' &&
-    displayPixelAt(900, 400).join() === '255,0,0,0',
-  `left=${displayPixelAt(100, 400)} middle=${displayPixelAt(500, 400)} right=${displayPixelAt(900, 400)}`
+  // writes little-endian XRGB8888 words. Read from the *first* frame: the compositor replaces this
+  // one later, so `lastFrame` is the desktop (the M5b section below checks that).
+  framePixelAt(display.firstFrame, 100, 400).join() === '0,0,255,0' &&
+    framePixelAt(display.firstFrame, 500, 400).join() === '0,255,0,0' &&
+    framePixelAt(display.firstFrame, 900, 400).join() === '255,0,0,0',
+  `left=${framePixelAt(display.firstFrame, 100, 400)} ` +
+    `middle=${framePixelAt(display.firstFrame, 500, 400)} ` +
+    `right=${framePixelAt(display.firstFrame, 900, 400)}`
+);
+
+/// The console's cell grid, read out of the tty instance's own model (M5b).
+///
+/// The rows are what the *guest* composed: a byte renderer on the host would have to infer cell
+/// positions from CR/BS and the shell's blanks, and would have no cells at all to show a `clear`
+/// sequence's effect on. Reading the model is how the checks below distinguish the two.
+function consoleRows() {
+  const tty = procAt(5);
+  const ptr = tty.inst.exports.minix_console_grid_ptr();
+  const grid = new Uint8Array(tty.memory.buffer, ptr, CONSOLE_COLS * CONSOLE_ROWS);
+  const rows = [];
+  for (let r = 0; r < CONSOLE_ROWS; r += 1) {
+    const row = grid.subarray(r * CONSOLE_COLS, (r + 1) * CONSOLE_COLS);
+    // Trailing blanks are the model's padding, not content — the same trimming the host's terminal
+    // renderer does with the spaces the shell's editor blanks a row with.
+    rows.push(Buffer.from(row).toString('latin1').replace(/\s+$/, ''));
+  }
+  return rows;
+}
+
+// ------------------------------------------------------- the compositor's desktop (M5b)
+//
+// What M5b claims is that the console is *on* the display: the console's cells are the guest's own
+// model, the compositor composes them into its surface, and that surface is what reaches the host
+// last. Three separate claims, in the order they happen.
+
+const gridRows = consoleRows();
+const cursorCell = procAt(5).inst.exports.minix_console_cursor();
+
+check(
+  "the console has a screen of its own, and it holds the shell's prompt",
+  gridRows.some((line) => line.startsWith('# ')),
+  `rows=${JSON.stringify(gridRows.slice(0, 4))}`
+);
+check(
+  "the console's cells hold what the console printed, not what the host inferred",
+  // The shell echoed a command's line and then wrote its output on a line of its own, and both are
+  // in the cells because the console *model* saw the editor's redraws (CR, blanks, the rewritten
+  // prompt) and the command's output in order. A reader that only inferred cell positions from the
+  // byte stream would have the output, but not the prompt at column 0 of a row.
+  gridRows.includes(`# ${[BUILTIN_CMD, ...BUILTIN_ARGS].join(' ')}`) &&
+    gridRows.includes(BUILTIN_ARGS.join(' ')),
+  `rows=${JSON.stringify(gridRows.slice(0, 6))}`
+);
+check(
+  'the console screen has a cursor, and it is on the row the shell is prompting from',
+  // `row << 16 | col`, and the cursor is where the next byte lands: a prompt is written and then
+  // waited at, so the cursor is inside the row that holds it.
+  (cursorCell >> 16) < CONSOLE_ROWS && (cursorCell & 0xffff) < CONSOLE_COLS,
+  `cursor=(${cursorCell >> 16}, ${cursorCell & 0xffff})`
+);
+
+// The console's window on the desktop: what the compositor was told to draw, and where. The
+// geometry is `console.rs`'s — 8x16 cells with a 16-pixel title bar, centred at (192, 184).
+const frameAt = (x, y) => framePixelAt(display.lastFrame, x, y);
+check(
+  'the compositor composed the console into the frame the display last saw',
+  // Desktop background outside the window, the focused title bar's colour inside its title, and
+  // the body's colour in its body. The colours are the guest's little-endian XRGB8888 words:
+  // the title bar is 0x004080C0, so the bytes in memory are 0xC0,0x80,0x40,0x00.
+  frameAt(20, 20).join() === '40,40,40,0' &&
+    frameAt(400, 190).join() === '192,128,64,0' &&
+    frameAt(300, 300).join() === '32,24,24,0',
+  `desktop=${frameAt(20, 20)} title=${frameAt(400, 190)} body=${frameAt(300, 300)}`
+);
+check(
+  "the console's window is titled, and its title is rasterized",
+  // A white pixel in the title strip past the text margin: the 8x16 font drew "console" there with
+  // the same rasterizer that drew the cells.
+  (() => {
+    for (let x = 196; x < 400; x += 1) {
+      if (frameAt(x, 192).join() === '255,255,255,0') return true;
+    }
+    return false;
+  })(),
+  "no white pixel in the console window's title strip"
+);
+check(
+  "the console's cursor is a cell on the display, where the shell says it is",
+  // The cursor is the inverse-video block the compositor paints at the cell the *guest* reported:
+  // a space under it renders as a solid white cell, a glyph as dark-on-white. Either way most of
+  // the cell's pixels are white, which is what tells a drawn cursor from a blank one.
+  (() => {
+    const cx = 192 + (cursorCell & 0xffff) * 8;
+    const cy = 184 + 16 + (cursorCell >> 16) * 16;
+    let white = 0;
+    for (let y = 0; y < 16; y += 1) {
+      for (let x = 0; x < 8; x += 1) {
+        if (frameAt(cx + x, cy + y).join() === '255,255,255,0') white += 1;
+      }
+    }
+    return white > 64;
+  })(),
+  `cursor=(${cursorCell >> 16}, ${cursorCell & 0xffff}) has no inverse-video block`
+);
+check(
+  "the driver's own frame came first and the compositor's desktop last",
+  // `fb` presents its verification pattern at boot (M5a) and the compositor's first flush replaces
+  // it. Both arrived, in that order — which is also what says the frame went *through* the device:
+  // the pattern is what the driver presents, and the desktop is what a client's write put there.
+  display.frames >= 2 &&
+    framePixelAt(display.firstFrame, 100, 400).join() === '0,0,255,0' &&
+    framePixelAt(display.lastFrame, 100, 400).join() === '40,40,40,0',
+  `frames=${display.frames} first=${framePixelAt(display.firstFrame, 100, 400)} last=${frameAt(100, 400)}`
 );
 
 const failed = checks.filter((c) => !c.ok);

@@ -1642,12 +1642,17 @@ fn console_read(_tp: &mut Tty, _try_only: i32) -> i32 {
     0
 }
 
-/// Console devwrite hook — flush inline write data to the serial console.
+/// Console devwrite hook — flush inline write data to the serial console, and (on the arch whose
+/// display is the host's) to the console's own screen.
 ///
 /// The bytes go through the tty's own `write(1)` (the kernel's direct
 /// serial path), which maps LF to CRLF, so the tty's ONLCR handling is not
 /// applied again. Keeping the UART write in the kernel preserves the
 /// single-writer burst ordering.
+///
+/// The screen is fed from the same bytes, in the same order, so what the display shows and what
+/// the host's terminal pane shows are the same stream: the screen is the console's *own* record of
+/// it (M5b, `console.rs`), not a second source of truth.
 fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     if tp.tty_writecount == 0 {
         return 0;
@@ -1662,6 +1667,7 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
             .count() as i32;
     }
     unsafe { minix_rt::write(1, tp.tty_writedata.as_ptr(), n) };
+    show_on_screen(tp, n);
     tp.tty_writeidx = 0;
     tp.tty_writecount = 0;
     tp.tty_outleft = 0;
@@ -1670,15 +1676,35 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     1
 }
 
-/// Console echo hook — write a single echoed byte to the serial console.
+/// Console echo hook — write a single echoed byte to the serial console, and to the screen.
 ///
 /// Uses the tty's own `write(1)` (kernel direct serial path) so echoed
 /// bytes interleave correctly with other console output and the kernel's
 /// LF→CRLF mapping applies to echoed newlines.
-fn console_echo(_tp: &mut Tty, c: i32) {
+fn console_echo(tp: &mut Tty, c: i32) {
     let byte = (c & 0xFF) as u8;
     unsafe { minix_rt::write(1, &raw const byte, 1) };
+    show_on_screen(tp, 1);
 }
+
+/// Feed the console's screen the bytes this line just put on the console.
+///
+/// Three things make this the *active* console's screen and nobody else's: the line has to be a
+/// console line at all (a pty slave's output is another window's business), it has to be the one
+/// `CONSOLE_LINE` names (`/dev/log` and `/dev/console` resolve to that line, so this is the stream
+/// the shell's stdio is on), and it has to be a platform where the console has a screen — the wasm
+/// port, where `wserver` composes one and the host's display shows it. On the hardware arches the
+/// console's cells are the VGA plane's, and the driver's own `write` puts them there.
+#[cfg(target_arch = "wasm32")]
+fn show_on_screen(tp: &Tty, n: usize) {
+    if (tp.tty_minor as usize) >= NR_CONS || tp.tty_minor != get_console_line() {
+        return;
+    }
+    crate::console::output(&tp.tty_writedata[..n]);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn show_on_screen(_tp: &Tty, _n: usize) {}
 
 // PTY lines — slave hooks and master CDEV handlers
 //
@@ -2581,6 +2607,17 @@ pub fn chardriver_reply_select(endpt: i32, minor: u32, status: i32) -> i32 {
 /// notifications (clock, hardware interrupts), and processes TTY events.
 pub fn tty_server_main() {
     tty_init(100);
+
+    // The console's screen (M5b): the cells this line's output lands in, shown by `wserver`.
+    // Created before anything else so the first console write has a window to go to — the retry
+    // loop below can block for a while, and the console's own boot line should not have to wait for
+    // devman. A failure is reported rather than swallowed: the console keeps its cells either way,
+    // they are just shown nowhere, and a silently window-less console is the bug this reports.
+    #[cfg(target_arch = "wasm32")]
+    if crate::console::attach() < 0 {
+        let msg = b"tty: no window server, console not shown\n";
+        unsafe { minix_rt::write(2, msg.as_ptr(), msg.len()) };
+    }
 
     // Register the console with devman so /devices shows the tty device.
     // devman's device tree is initialized when VFS mounts it, which can

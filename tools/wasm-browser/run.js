@@ -372,6 +372,31 @@ check(
 );
 store.close();
 
+// The other half of finding 54's promise, and the case a reader meets first in practice: a session
+// nobody ended leaves the filesystem unclean, so the *next* boot mounts it read-only. Reads still
+// work, so the only thing that reports the state is a write failing later — and a user who typed
+// `echo x > f` and then cannot `cat` it has no way to tell that from a broken shell. The mount now
+// says so, which is what this boot pins: the line, and the write failure under it.
+const uncleanPath = path.join(root, 'target/wasm-unclean-test.img');
+for (const stale of [uncleanPath, `${uncleanPath}.json`]) {
+  if (fs.existsSync(stale)) fs.unlinkSync(stale);
+}
+// The boot image as a *tab closed at the prompt* would leave it: the superblock's clean flag is how
+// MFS remembers that the unmount happened, and clearing it is the whole of what that state is.
+const SUPERBLOCK_FLAGS = 1024 + 18;
+const uncleanImage = Uint8Array.from(imageBytes);
+uncleanImage[SUPERBLOCK_FLAGS] &= ~1;
+const uncleanBoot = bootOver(fileStore(uncleanPath, uncleanImage), [
+  `echo ${UNSYNCED_TEXT} > ${UNSYNCED_FILE}`,
+]);
+check(
+  'a disk a previous session left unclean boots read-only, and the boot says so',
+  uncleanBoot.booted === 'awaiting-input' &&
+    uncleanBoot.terminal.lines.some((l) => l.includes('not unmounted cleanly')) &&
+    uncleanBoot.terminal.lines.some((l) => l.includes('cannot create')),
+  `booted=${uncleanBoot.booted} lines=[${uncleanBoot.terminal.lines.join(' | ')}]`
+);
+
 note(
   'what the M4 device cost and saw',
   [firstBoot, secondBoot, thirdBoot, fourthBoot]

@@ -1,12 +1,29 @@
 //! Window server (K5) — an in-house compositor on the framebuffer.
 //!
-//! Boot proc 18. Opens `/dev/fb` and mmaps it (K3), registers with the
-//! input server as the keyboard consumer (so its receive loop wakes on key
-//! events), and serves the `minix_std::wserver` protocol: create/text/fill/
-//! close windows, and route key presses to the focused window's client.
-//! Draws a desktop background + window chrome (title bars) with the shared
-//! 8×16 font; redraws the whole desktop on every change (K5 scale; damage
-//! tracking is perf follow-up).
+//! Boot proc 18. On the hardware arches it opens `/dev/fb` and mmaps the device's memory (K3),
+//! registers with the input server as the keyboard consumer (so its receive loop wakes on key
+//! events), and serves the `minix_std::wserver` protocol: create/text/fill/close windows, and route
+//! key presses to the focused window's client. Draws a desktop background + window chrome (title
+//! bars) with the shared 8×16 font.
+//!
+//! On wasm there is no device memory to map and no input server, so two things differ (M5b):
+//!
+//!   * **The surface is this process's own.** The mode is the host's (`fb_geometry`, the same
+//!     import `fb`'s canvas backend adopts) and the pixels live in a static here, because a device
+//!     `mmap` needs a physical range to translate and there are no page tables. A frame therefore
+//!     reaches the display as a *write to `/dev/fb`* — the bulk shape the CDEV protocol already has
+//!     for datagram devices, a vircopy of the whole surface — followed by the flush that presents
+//!     it. The compositor is a device client here exactly as it is on the other arches, where the
+//!     `mmap` is what makes the frame a direct memory write instead of a copy.
+//!   * **There is no keyboard yet.** Input arrives from a driver blocked in `RECEIVE` that nothing
+//!     can wake on this port (`ARCH_WASM32.md` §11, M5c), so the input consumer registration is
+//!     skipped and the receive loop serves window requests only.
+//!
+//! The desktop is painted twice over: a *whole* repaint when the windows themselves change (create,
+//! close, move, resize — the cheap thing at that scale, once per user action), and a *cell* repaint
+//! on flush, which is what a client writing text actually costs. The second is what makes a console
+//! on this display viable: the tty's console writes arrive in eight-byte pieces, so a screenful per
+//! flush would be a desktop repaint per eight bytes.
 
 #[cfg(target_os = "minix")]
 use arch_common::ipc::Message;
@@ -14,9 +31,11 @@ use arch_common::ipc::Message;
 use minix_std::font::FONT_8X16;
 #[cfg(target_os = "minix")]
 use minix_std::wserver::{
-    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_KEY, WS_PTR, WS_PTRMODE,
-    WS_TEXT,
+    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_PTRMODE, WS_TEXT,
 };
+// Delivered *to* clients: there is no input source on wasm for either to carry (M5c).
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+use minix_std::wserver::{WS_KEY, WS_PTR};
 
 const TITLE_H: usize = 16;
 const MAX_WINDOWS: usize = 4;
@@ -45,40 +64,47 @@ const EDGE_S: u8 = 0x02;
 const EDGE_E: u8 = 0x04;
 const EDGE_W: u8 = 0x08;
 
-/// Mouse pointer bitmap (8x12 arrow), drawn on top of everything.
-#[cfg(target_os = "minix")]
+/// Mouse pointer bitmap (8x12 arrow), drawn on top of everything. Only where there is a pointer to
+/// draw: the input server that moves one is M5c's, and until then the wasm compositor has none.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_BITMAP: [u8; 12] = [
     0b10000000, 0b11000000, 0b11100000, 0b11110000, 0b11111000, 0b11111100, 0b11111110, 0b11111100,
     0b11101000, 0b11011000, 0b10011000, 0b00011000,
 ];
 /// Pointer overlay size (px) — matches the bitmap (8 wide, 12 tall).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_W: usize = 8;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_H: usize = 12;
 /// Number of pixels in the pointer overlay.
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_CELLS: usize = POINTER_W * POINTER_H;
 
 // Drawing constants — the rasterizer only runs on the MINIX target (the
 // host tests cover the window-state protocol ops; pixels are probe-verified).
 #[cfg(target_os = "minix")]
 const PITCH: usize = XRES * 4;
-#[cfg(target_os = "minix")]
+/// The surface the compositor draws into on the arch where it owns one: the desktop's pixels, one
+/// XRGB8888 frame, page-aligned because it is handed to a host import as a byte range.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+const SURFACE_LEN: usize = PITCH * YRES;
+/// The length the `mmap` of `/dev/fb` asks for on the arches that have device memory (a device
+/// whose BAR is larger than the mode's frame).
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const MAP_LEN: usize = 4 * 1024 * 1024;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const KEY_PAGE: u16 = 0x0007;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_PAGE_GD: u16 = 0x0001;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_PAGE_ABS: u16 = 0x00FD;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_PAGE_BTN: u16 = 0x0009;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_GD_X: u16 = 0x0030;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_GD_Y: u16 = 0x0031;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const POINTER_BTN_1: u16 = 0x0001;
 
 /// XRGB8888 colors (u32 0x00RRGGBB, LE bytes B,G,R,0).
@@ -92,7 +118,7 @@ const COLOR_TITLE_FOCUSED: u32 = 0x004080C0;
 const COLOR_TITLE_UNFOCUSED: u32 = 0x00202040;
 #[cfg(target_os = "minix")]
 const COLOR_TEXT: u32 = 0x00FFFFFF;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const COLOR_POINTER: u32 = 0x00FFFFFF;
 
 /// A filled pixel rect inside a window's body (window-local coords).
@@ -121,6 +147,15 @@ pub struct Window {
     pub cursor: Option<(usize, usize)>,
     /// Window opted into WS_PTR pointer-event delivery (WS_PTRMODE).
     pub want_ptr: bool,
+    /// What the surface holds for this window's body — the diff base a flush paints from, so
+    /// twelve cells of output cost twelve cells of pixels instead of a desktop.
+    pub drawn: [[u8; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+    /// Where the surface's block cursor is (the other half of that diff base).
+    pub drawn_cursor: Option<(usize, usize)>,
+    /// Whether the surface has this window at all: false between `create` and the repaint that
+    /// follows it, which is the only window in which a cell diff would paint a body that is not
+    /// there yet.
+    pub drawn_valid: bool,
 }
 
 impl Window {
@@ -143,6 +178,9 @@ impl Window {
             }; MAX_RECTS],
             cursor: None,
             want_ptr: false,
+            drawn: [[b' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS],
+            drawn_cursor: None,
+            drawn_valid: false,
         }
     }
 
@@ -241,6 +279,9 @@ impl WsState {
                 win.nrects = 0;
                 win.cursor = None;
                 win.want_ptr = false;
+                win.drawn = [[b' '; MAX_TEXT_COLS]; MAX_TEXT_ROWS];
+                win.drawn_cursor = None;
+                win.drawn_valid = false;
                 self.push_z(i);
                 return Ok(i);
             }
@@ -315,6 +356,7 @@ impl WsState {
             return Err(-9);
         }
         win.used = false;
+        win.drawn_valid = false;
         self.remove_z(wid);
         if self.waiter.1 == wid {
             self.waiter = (-1, usize::MAX);
@@ -580,28 +622,56 @@ impl WsState {
 /// Server globals.
 #[cfg(target_os = "minix")]
 static mut WS_STATE: WsState = WsState::new();
+/// The address the rasterizer draws into: this process's own surface on wasm, the `mmap`ed
+/// framebuffer on the arches that have device memory for one.
 #[cfg(target_os = "minix")]
 static mut WS_FB: u64 = 0;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_FB_FD: i32 = -1;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_KBD_FD: i32 = -1;
 /// Keyboard modifier state across drains (a press and its key can land in
 /// different batches).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_SHIFT: bool = false;
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_CTRL: bool = false;
 /// Held mouse-button mask for WS_PTR deliveries (bit 0 = left, …).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_BUTTONS: u8 = 0;
+
+/// Whether a frame handed to `/dev/fb` will be shown: false on a host with no display, where the
+/// compositor still composes (its own state is real, and a client's window is a window) but sends
+/// nothing, because there is nothing to send it to.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+static mut WS_SHOW: bool = false;
+
+/// The composed surface on the arch where the compositor owns its own pixels (M5b). Static rather
+/// than heap because a server has no allocator: the mode the host names has to fit here, and a mode
+/// that does not is refused rather than drawn past the end of an address space.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+#[repr(align(4096))]
+struct SurfaceCell(core::cell::UnsafeCell<[u8; SURFACE_LEN]>);
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+unsafe impl Sync for SurfaceCell {}
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+impl SurfaceCell {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0u8; SURFACE_LEN]))
+    }
+    fn get(&self) -> u64 {
+        self.0.get() as u64
+    }
+}
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+static WS_SURFACE: SurfaceCell = SurfaceCell::new();
 /// Pointer overlay: the desktop pixels under the pointer, captured when
 /// it was drawn, so a plain move can repair the vacated area without a
 /// full desktop redraw. `WS_PTR_POS` is where the underlay was captured
 /// (`None` before the first draw).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_PTR_UNDERLAY: [u32; POINTER_CELLS] = [0; POINTER_CELLS];
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 static mut WS_PTR_POS: Option<(usize, usize)> = None;
 
 #[cfg(target_os = "minix")]
@@ -614,7 +684,7 @@ fn put_pixel(fb: u64, x: usize, y: usize, color: u32) {
     }
 }
 
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn read_pixel(fb: u64, x: usize, y: usize) -> u32 {
     if x < XRES && y < YRES {
         let off = (y * PITCH + x * 4) as u64;
@@ -625,7 +695,7 @@ fn read_pixel(fb: u64, x: usize, y: usize) -> u32 {
 }
 
 /// Draw the pointer arrow bitmap at (px, py).
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn draw_pointer(fb: u64, px: usize, py: usize) {
     for r in 0..POINTER_H {
         let bits = POINTER_BITMAP[r];
@@ -637,13 +707,15 @@ fn draw_pointer(fb: u64, px: usize, py: usize) {
     }
 }
 
-/// Push the framebuffer to the display (FBIOFLUSH) directly to the fb
-/// server, bypassing VFS: VFS is single-worker and the shell's blocking
-/// console read holds it hostage, so a /dev/fb ioctl would block the
-/// redraw until console input arrives. FBIOFLUSH carries no arg struct,
-/// so the CDEV_IOCTL travels with no grant; it is a no-op for VGA-style
-/// backends (bochs-display) and pushes the frame on virtio-gpu.
-#[cfg(target_os = "minix")]
+/// Hand the composed surface to the display.
+///
+/// On the arches with device memory the compositor has the framebuffer `mmap`ed, so its pixels are
+/// already *the device's*: this is the flush that pushes an explicit-flush backend's frame out (a
+/// no-op for VGA-style ones). The ioctl goes **directly to the fb server**, bypassing VFS: VFS is
+/// single-worker and the shell's blocking console read holds it hostage, so a `/dev/fb` ioctl
+/// through it would block the repaint until console input arrives. FBIOFLUSH carries no arg struct,
+/// so the CDEV_IOCTL travels with no grant.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn fb_flush() {
     let mut msg = Message {
         m_source: 0,
@@ -667,16 +739,79 @@ fn fb_flush() {
     };
 }
 
+/// Hand the composed surface to the display — on wasm, where it is this process's own pixels.
+///
+/// Two messages, and both are needed: the **write** puts the frame in the device (the same thing the
+/// other arches get for free by drawing into `mmap`ed device memory), and the **flush** is what
+/// presents it, which stays the only thing that reaches the host. The write is the datagram shape
+/// the CDEV protocol already carries for socket devices — the caller's virtual address in `m2_l1`,
+/// the length in `m2_l2`, the client endpoint in `m2_i3` — because 8-byte inline chunks are what
+/// the inline shape is for and a frame is three megabytes.
+///
+/// Both go directly to the fb server for the reason the flush always has: VFS is single-worker and
+/// the shell's blocking console read holds it, so a device request from the compositor would wait
+/// for keystrokes. The compositor is still a *client* of the device — the frame is copied into the
+/// framebuffer the fb driver names, and it is the driver that presents it.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+fn fb_flush() {
+    if unsafe { !WS_SHOW } {
+        return;
+    }
+    let mut msg = Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_WRITE as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    // CDEV_WRITE wire layout for a datagram: minor, flags, user endpoint,
+    // position (the caller's VA), count.
+    msg.m_payload.m2.m2i1 = 0; // minor
+    msg.m_payload.m2.m2i2 = arch_common::com::CDEV_DGRAM as i32; // flags
+    msg.m_payload.m2.m2i3 = arch_common::com::WS_PROC_NR; // the client whose memory holds the frame
+    msg.m_payload.m2.m2l1 = unsafe { WS_FB } as i64; // the surface's VA in this process
+    msg.m_payload.m2.m2l2 = SURFACE_LEN as i64;
+    let r = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::FB_PROC_NR as u64,
+            &mut msg as *mut Message as u64,
+        )
+    };
+    if r < 0 {
+        report(b"wserver: frame write failed\n");
+        return;
+    }
+    let mut msg = Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_IOCTL as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    msg.m_payload.m2.m2i1 = 0; // minor
+    msg.m_payload.m2.m2i2 = minix_std::fs::FBIOFLUSH as i32; // request
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::FB_PROC_NR as u64,
+            &mut msg as *mut Message as u64,
+        )
+    };
+}
+
+/// Write a diagnostic line to the console's error stream. The compositor's failures are loud: a
+/// window server that cannot reach the display is otherwise a black screen and nothing else.
+#[cfg(target_os = "minix")]
+fn report(msg: &[u8]) {
+    unsafe { minix_rt::write(2, msg.as_ptr(), msg.len()) };
+}
+
 /// Repaint the pointer after a plain move (no drag): restore the pixels
 /// the pointer vacated (the underlay captured when it was drawn), then
 /// capture the new position's desktop and draw the pointer there. The
 /// desktop content doesn't change during a move, so no full redraw is
 /// needed — a full redraw per PS/2 packet (~100–200/s) would saturate
 /// the emulated CPU.
-#[cfg(target_os = "minix")]
-fn pointer_overlay_move() {
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn pointer_overlay_move(state: &WsState) {
     let fb = unsafe { WS_FB };
-    let state = unsafe { &*core::ptr::addr_of!(WS_STATE) };
     let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
     unsafe {
         // Repair the area the pointer left: write back the desktop that
@@ -736,11 +871,16 @@ fn draw_text(fb: u64, x: usize, y: usize, s: &[u8], fg: u32, bg: u32) {
 
 /// Redraw the whole desktop: background, then windows in z-order, then
 /// the mouse pointer on top.
+///
+/// The whole-desktop path, for a change the *windows* make rather than their text: create, close,
+/// move, resize, focus, or the pointer overlay. What it painted is recorded per window (`drawn`,
+/// `drawn_cursor`), which is what lets a later flush paint cells instead — see `redraw_damage`.
 #[cfg(target_os = "minix")]
-fn redraw(fb: u64) {
+fn redraw(fb: u64, state: &mut WsState) {
     fill_rect(fb, 0, 0, XRES, YRES, COLOR_DESKTOP);
-    let state = unsafe { &*core::ptr::addr_of!(WS_STATE) };
-    for &i in &state.zorder[..state.nz] {
+    let zorder = state.zorder;
+    let nz = state.nz;
+    for &i in &zorder[..nz] {
         let win = &state.windows[i];
         if !win.used {
             continue;
@@ -815,24 +955,129 @@ fn redraw(fb: u64) {
             }
         }
     }
-    // Mouse pointer on top of everything. Capture the underlay (the
-    // desktop the pointer covers) so a later plain move can repair this
-    // area without a full redraw.
-    let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
-    unsafe {
-        for i in 0..POINTER_CELLS {
-            WS_PTR_UNDERLAY[i] = read_pixel(fb, px + i % POINTER_W, py + i / POINTER_W);
+    // The surface now holds these windows: record it, so a flush can paint the difference.
+    for win in state.windows.iter_mut() {
+        win.drawn_valid = win.used;
+        if win.used {
+            win.drawn = win.text;
+            win.drawn_cursor = win.cursor;
         }
-        WS_PTR_POS = Some((px, py));
     }
-    draw_pointer(fb, px, py);
+    // Mouse pointer on top of everything. Capture the underlay (the desktop the pointer covers) so a
+    // later plain move can repair this area without a full redraw. Not on wasm, where nothing can
+    // move the pointer yet (the input server is M5c): a compositor that drew one there would park an
+    // arrow in the middle of the desktop and never have a reason to move it.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
+        unsafe {
+            for i in 0..POINTER_CELLS {
+                WS_PTR_UNDERLAY[i] = read_pixel(fb, px + i % POINTER_W, py + i / POINTER_W);
+            }
+            WS_PTR_POS = Some((px, py));
+        }
+        draw_pointer(fb, px, py);
+    }
     // virtio-gpu is explicit-flush: push the new frame to the display.
     // No-op for VGA-style backends.
     fb_flush();
 }
 
+/// Paint one body cell: the glyph on its background, or just the background when there is no glyph
+/// to draw (a space, or a byte the font has no face for).
+#[cfg(target_os = "minix")]
+fn draw_cell(fb: u64, x: usize, y: usize, ch: u8, fg: u32, bg: u32) {
+    if (0x20..=0x7E).contains(&ch) {
+        draw_char(fb, x, y, ch, fg, bg);
+    } else {
+        fill_rect(fb, x, y, x + 8, y + 16, bg);
+    }
+}
+
+/// The color a body cell sits on: the last filled rect covering it, else the body background.
+///
+/// A cell-level repaint needs this because rects are painted *under* text in the whole-desktop
+/// order: erasing a glyph has to put back whatever was beneath it, and for a window that fills
+/// parts of its body that is the rect's color and not the body's. The cell is placed by its
+/// top-left pixel, so a rect that covers only part of a cell counts as covering it — the closest
+/// thing to the whole-desktop result that a per-cell painter can know.
+#[cfg(target_os = "minix")]
+fn cell_bg(win: &Window, cell_x: i32, cell_y: i32) -> u32 {
+    let mut bg = COLOR_BODY;
+    for r in win.rects[..win.nrects].iter() {
+        if cell_x >= r.x0 && cell_x < r.x1 && cell_y >= r.y0 && cell_y < r.y1 {
+            bg = r.color;
+        }
+    }
+    bg
+}
+
+/// Whether the surface is missing a window entirely: true between a window's creation and the
+/// whole-desktop repaint that follows it, which is the one case a cell diff cannot handle (it would
+/// paint cells onto a body that was never drawn).
+#[cfg(target_os = "minix")]
+fn needs_full_redraw(state: &WsState) -> bool {
+    state.windows.iter().any(|w| w.used && !w.drawn_valid)
+}
+
+/// Repaint only the cells that changed since the last repaint, then present if anything did.
+///
+/// This is the path a client's text takes, and the reason it exists is the console: the tty's
+/// console writes arrive eight bytes at a time, and a whole-desktop repaint per flush (786k pixels, each
+/// a bounds-checked volatile store, plus the frame copy to the display) would make a screenful of
+/// shell output take seconds. Returns whether the surface changed, so a flush with nothing new is
+/// also not a frame.
+#[cfg(target_os = "minix")]
+fn redraw_damage(fb: u64, state: &mut WsState) -> bool {
+    let zorder = state.zorder;
+    let nz = state.nz;
+    let mut changed = false;
+    for &i in &zorder[..nz] {
+        let win = &mut state.windows[i];
+        if !win.used {
+            continue;
+        }
+        let (x, y) = (win.x as usize, win.y as usize);
+        let body_y = y + TITLE_H;
+        let (cols, rows) = (win.cols(), win.rows());
+        let cursor = win.cursor;
+        for r in 0..rows {
+            for c in 0..cols {
+                let ch = win.text[r][c];
+                let cell = Some((r, c));
+                let text_changed = ch != win.drawn[r][c];
+                // The cell the cursor left has to go back to its glyph, and the cell it arrived at
+                // becomes the inverse-video block — which also means a cell whose *text* changed
+                // while the cursor sits on it is painted inverse, not plain.
+                let cursor_left = win.drawn_cursor == cell && cursor != cell;
+                let cursor_arrived = cursor == cell && win.drawn_cursor != cell;
+                if text_changed || cursor_left || cursor_arrived {
+                    let bg = cell_bg(win, (c * 8) as i32, (r * 16) as i32);
+                    let px = x + c * 8;
+                    let py = body_y + r * 16;
+                    if cursor == cell {
+                        draw_cell(fb, px, py, ch, bg, COLOR_TEXT);
+                    } else {
+                        draw_cell(fb, px, py, ch, COLOR_TEXT, bg);
+                    }
+                    win.drawn[r][c] = ch;
+                    changed = true;
+                }
+            }
+        }
+        win.drawn_cursor = cursor;
+    }
+    if changed {
+        fb_flush();
+    }
+    changed
+}
+
 /// HID keyboard usage → ASCII (unshifted).
-#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+#[cfg_attr(
+    any(not(target_os = "minix"), target_arch = "wasm32"),
+    allow(dead_code)
+)]
 fn usage_to_ascii(code: u16) -> Option<u8> {
     let c = match code {
         0x04..=0x1D => b'a' + (code - 0x04) as u8,
@@ -857,7 +1102,12 @@ fn usage_to_ascii(code: u16) -> Option<u8> {
     Some(c)
 }
 
-#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+// These three decode a HID usage into a character. They are used only where there is a keyboard to
+// produce one, and tested on the host, hence the two-way allow.
+#[cfg_attr(
+    any(not(target_os = "minix"), target_arch = "wasm32"),
+    allow(dead_code)
+)]
 fn shifted(c: u8) -> u8 {
     match c {
         b'1' => b'!',
@@ -889,7 +1139,10 @@ fn shifted(c: u8) -> u8 {
 /// US-layout convention: letters AND with 0x1F; the top-row shifted
 /// specials and their unshifted digit twins map to the classic control
 /// codes (xterm's default).
-#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+#[cfg_attr(
+    any(not(target_os = "minix"), target_arch = "wasm32"),
+    allow(dead_code)
+)]
 fn ctrl_map(ch: u8) -> u8 {
     match ch {
         b'@' | b' ' | b'2' => 0x00, // NUL
@@ -906,15 +1159,18 @@ fn ctrl_map(ch: u8) -> u8 {
 
 /// HID usages of the arrow keys (routed without an ASCII char; the client
 /// turns them into escape sequences).
-#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+#[cfg_attr(
+    any(not(target_os = "minix"), target_arch = "wasm32"),
+    allow(dead_code)
+)]
 fn is_arrow(code: u16) -> bool {
     matches!(code, 0x4F..=0x52)
 }
 /// Route one keyboard event; returns true when a key was delivered to a
 /// waiter (the caller stops draining so any further events in the batch
 /// stay queued for the next WS_INPUT registration's catch-up drain).
-#[cfg(target_os = "minix")]
-fn handle_key(code: u16, press: i32) -> bool {
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn handle_key(code: u16, press: i32, state: &mut WsState) -> bool {
     // Modifiers: track the held state on both press and release.
     match code {
         0x00E0 | 0x00E4 => {
@@ -945,7 +1201,6 @@ fn handle_key(code: u16, press: i32) -> bool {
     if unsafe { WS_CTRL } {
         ch = ctrl_map(ch);
     }
-    let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
     if let Some((ep, _)) = state.route_key(ch) {
         let mut key_msg = Message {
             m_source: 0,
@@ -984,8 +1239,8 @@ fn handle_key(code: u16, press: i32) -> bool {
 /// The wserver consumes the whole stream unconditionally now (it cannot
 /// leave mouse events queued), so a key pressed with no waiter is dropped
 /// instead of staying for another /dev/kbd reader (keytest).
-#[cfg(target_os = "minix")]
-fn drain_input() -> bool {
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn drain_input(state: &mut WsState) -> bool {
     let mut changed = false;
     loop {
         let mut msg = Message {
@@ -1017,7 +1272,7 @@ fn drain_input() -> bool {
         }
         // SAFETY: the input server filled the reply payload with events.
         let batch = unsafe { &msg.m_payload.raw[..n as usize] };
-        if process_event_batch(batch) {
+        if process_event_batch(batch, state) {
             changed = true;
         }
     }
@@ -1029,8 +1284,8 @@ fn drain_input() -> bool {
 /// that consumed the WS_INPUT waiter stops the batch: the rest are already
 /// popped from the input ring, and no second waiter can be served by one
 /// batch anyway.
-#[cfg(target_os = "minix")]
-fn process_event_batch(data: &[u8]) -> bool {
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn process_event_batch(data: &[u8], state: &mut WsState) -> bool {
     let mut changed = false;
     let mut off = 0;
     while off + 8 <= data.len() {
@@ -1041,14 +1296,13 @@ fn process_event_batch(data: &[u8]) -> bool {
         off += 8;
         match page {
             KEY_PAGE => {
-                if handle_key(code, press) {
+                if handle_key(code, press, state) {
                     return changed;
                 }
             }
             POINTER_PAGE_GD => {
                 let dx = if code == POINTER_GD_X { press } else { 0 };
                 let dy = if code == POINTER_GD_Y { press } else { 0 };
-                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
                 let dragging = state.drag.is_some();
                 if state.pointer_rel(dx, dy) {
                     if dragging {
@@ -1056,7 +1310,7 @@ fn process_event_batch(data: &[u8]) -> bool {
                         changed = true;
                     } else {
                         // Plain move: repaint just the pointer overlay.
-                        pointer_overlay_move();
+                        pointer_overlay_move(state);
                     }
                 }
             }
@@ -1066,7 +1320,6 @@ fn process_event_batch(data: &[u8]) -> bool {
                 // from the current pointer so the drag/resize logic (which
                 // anchors on the pointer position) works unchanged. The X
                 // and Y arrive as separate events; each lands immediately.
-                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
                 let (dx, dy) = if code == POINTER_GD_X {
                     (press * XRES as i32 / 32768 - state.pointer.0, 0)
                 } else if code == POINTER_GD_Y {
@@ -1079,7 +1332,7 @@ fn process_event_batch(data: &[u8]) -> bool {
                     if dragging {
                         changed = true;
                     } else {
-                        pointer_overlay_move();
+                        pointer_overlay_move(state);
                     }
                 }
             }
@@ -1095,7 +1348,6 @@ fn process_event_batch(data: &[u8]) -> bool {
                 } else {
                     unsafe { WS_BUTTONS &= !bit };
                 }
-                let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
                 let action = state.pointer_button(which, down);
                 changed = true;
                 if let PtrAction::Deliver { wid, x, y } = action {
@@ -1152,7 +1404,7 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
                         );
                         state.windows[wid].title[..n].copy_from_slice(&title[..n]);
                     }
-                    redraw(unsafe { WS_FB });
+                    redraw(unsafe { WS_FB }, state);
                     // Union field writes of Copy types are safe.
                     msg.m_payload.m2.m2i1 = wid as i32;
                     Some(0)
@@ -1202,14 +1454,21 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             }
         }
         WS_FLUSH => {
-            redraw(unsafe { WS_FB });
+            // A flush is the client saying "what I wrote is complete". When only its text moved, that
+            // is a cell repaint; a window the surface has not drawn yet is the one case that has to
+            // go the long way round.
+            if needs_full_redraw(state) {
+                redraw(unsafe { WS_FB }, state);
+            } else {
+                redraw_damage(unsafe { WS_FB }, state);
+            }
             Some(0)
         }
         WS_CLOSE => {
             let wid = m.m2i1 as usize;
             let r = state.close(wid);
             if r.is_ok() {
-                redraw(unsafe { WS_FB });
+                redraw(unsafe { WS_FB }, state);
                 Some(0)
             } else {
                 Some(r.unwrap_err())
@@ -1220,13 +1479,24 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             if wid >= MAX_WINDOWS || !state.windows[wid].used {
                 return Some(-9); // EBADF
             }
-            state.waiter = (src, wid);
-            // A key may already be queued (the input server notifies on
-            // IRQ, not on waiter registration); catch it immediately.
-            if drain_input() {
-                redraw(unsafe { WS_FB });
+            // No key can arrive on the wasm port: a key would have to be a *notification* from the
+            // input driver, and nothing expires a notification without a timer interrupt
+            // (`ARCH_WASM32.md` §11, M5c). Refusing is the honest answer — a waiter parked forever
+            // with nothing able to wake it would wedge the client instead of telling it.
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Some(-38); // ENOSYS
             }
-            None
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                state.waiter = (src, wid);
+                // A key may already be queued (the input server notifies on
+                // IRQ, not on waiter registration); catch it immediately.
+                if drain_input(state) {
+                    redraw(unsafe { WS_FB }, state);
+                }
+                None
+            }
         }
         WS_PTRMODE => {
             let wid = m.m2i1 as usize;
@@ -1245,101 +1515,142 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
     }
 }
 
-/// Main loop: receive client requests and input notifications.
+/// Take the display, on the arches that own device memory: open `/dev/fb`, map it, and open
+/// `/dev/kbd` plus register as the input server's consumer so key events wake the receive loop.
+///
+/// Errors are reported rather than returned silently: the compositor cannot serve without a
+/// surface, and a boot proc that exits quietly is a black screen with no explanation.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn attach_display() -> bool {
+    let fb_fd = match unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) } {
+        Ok(fd) => fd,
+        Err(e) => {
+            let mut msg_buf = [0u8; 64];
+            let n = e.0 as u32;
+            let mut i = 0;
+            for b in b"wserver: open /dev/fb err=".iter() {
+                msg_buf[i] = *b;
+                i += 1;
+            }
+            if n == 0 {
+                msg_buf[i] = b'0';
+                i += 1;
+            } else {
+                let mut tmp = [0u8; 10];
+                let mut j = 10;
+                let mut v = n;
+                while v > 0 {
+                    j -= 1;
+                    tmp[j] = b'0' + (v % 10) as u8;
+                    v /= 10;
+                }
+                while j < 10 {
+                    msg_buf[i] = tmp[j];
+                    i += 1;
+                    j += 1;
+                }
+            }
+            msg_buf[i] = b'\n';
+            i += 1;
+            report(&msg_buf[..i]);
+            return false;
+        }
+    };
+    let fb = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            MAP_LEN,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_SHARED,
+            fb_fd,
+            0,
+        )
+    };
+    if fb == minix_std::vmem::MAP_FAILED {
+        report(b"wserver: mmap /dev/fb failed\n");
+        return false;
+    }
+    unsafe {
+        WS_FB = fb as u64;
+        WS_FB_FD = fb_fd;
+    }
+    let kbd_fd = match unsafe { minix_std::fs::open(b"/dev/kbd", minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(_) => {
+            report(b"wserver: open /dev/kbd failed\n");
+            return false;
+        }
+    };
+    unsafe {
+        WS_KBD_FD = kbd_fd;
+    }
+
+    // Register as the input server's consumer so key events wake the
+    // receive loop.
+    let mut reg = Message {
+        m_source: 0,
+        m_type: arch_common::com::INPUT_REG_CONSUMER as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    let reg_r = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::INPUT_PROC_NR as u64,
+            &mut reg as *mut Message as u64,
+        )
+    };
+    if reg_r < 0 {
+        report(b"wserver: input consumer register failed\n");
+    }
+    true
+}
+
+/// Take the display, on the arch where the compositor owns its own pixels (M5b): there is nothing
+/// to open and nothing to probe, because the host *is* the display — the same import `fb`'s canvas
+/// backend adopts a mode from.
+///
+/// The mode has to be the one this surface was built for, and a mode it cannot hold is refused
+/// rather than drawn into partly: the pixels are this process's memory, so a host canvas larger
+/// than the surface would be an address space overrun rather than a clipped picture. There is no
+/// keyboard to open on this arch, which is why nothing here registers with an input server.
+/// Take the display, on the arch where the compositor owns its own pixels (M5b): there is nothing
+/// to open and nothing to probe, because the host *is* the display — the same import `fb`'s canvas
+/// backend adopts a mode from.
+///
+/// A host with **no** display is not a refusal, and that is a correction the headless runs taught:
+/// the surface is this process's own memory, so the compositor has somewhere to compose either way,
+/// and the frames it hands to `/dev/fb` are simply never shown (`fb` there is a driver that found no
+/// device, which is the disposition it already had). Exiting instead would take the window server
+/// away from a console that is about to create its window, and the console's create would block on a
+/// peer that has left — which is exactly what the first version of this did.
+///
+/// A host with a display of the *wrong* mode is refused outright: the pixels are this process's
+/// memory, so drawing a mode the surface is not sized for would be an address space overrun rather
+/// than a clipped picture.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+fn attach_display() -> bool {
+    let (xres, yres) = drivers::hal::fb_geometry();
+    let mode = (xres as usize, yres as usize);
+    if mode != (0, 0) && mode != (XRES, YRES) {
+        // The host's own numbers are in the line `fb` logs when it refuses the same mode.
+        report(b"wserver: the host's canvas is not the desktop's size\n");
+        return false;
+    }
+    unsafe {
+        WS_FB = WS_SURFACE.get();
+        WS_SHOW = mode == (XRES, YRES);
+    }
+    true
+}
+
+/// Main loop: receive client requests and (on the arches with an input server) input notifications.
 pub fn wserver_main() {
     #[cfg(target_os = "minix")]
     {
         const ANY: i32 = 0x0000_ffff;
 
-        // Map the framebuffer (K3) and open the keyboard. Failures are
-        // reported (not silent) — the server cannot serve without them.
-        let fb_fd = match unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) } {
-            Ok(fd) => fd,
-            Err(e) => {
-                let mut msg_buf = [0u8; 64];
-                let n = e.0 as u32;
-                let mut i = 0;
-                for b in b"wserver: open /dev/fb err=".iter() {
-                    msg_buf[i] = *b;
-                    i += 1;
-                }
-                if n == 0 {
-                    msg_buf[i] = b'0';
-                    i += 1;
-                } else {
-                    let mut tmp = [0u8; 10];
-                    let mut j = 10;
-                    let mut v = n;
-                    while v > 0 {
-                        j -= 1;
-                        tmp[j] = b'0' + (v % 10) as u8;
-                        v /= 10;
-                    }
-                    while j < 10 {
-                        msg_buf[i] = tmp[j];
-                        i += 1;
-                        j += 1;
-                    }
-                }
-                msg_buf[i] = b'\n';
-                i += 1;
-                unsafe {
-                    minix_rt::write(2, msg_buf.as_ptr(), i);
-                }
-                return;
-            }
-        };
-        let fb = unsafe {
-            minix_std::vmem::mmap(
-                core::ptr::null_mut(),
-                MAP_LEN,
-                minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
-                minix_std::vmem::MAP_SHARED,
-                fb_fd,
-                0,
-            )
-        };
-        if fb == minix_std::vmem::MAP_FAILED {
-            unsafe {
-                minix_rt::write(2, b"wserver: mmap /dev/fb failed\n".as_ptr(), 29);
-            }
+        if !attach_display() {
             return;
-        }
-        unsafe {
-            WS_FB = fb as u64;
-            WS_FB_FD = fb_fd;
-        }
-        let kbd_fd = match unsafe { minix_std::fs::open(b"/dev/kbd", minix_std::fs::O_RDONLY, 0) } {
-            Ok(fd) => fd,
-            Err(_) => {
-                unsafe {
-                    minix_rt::write(2, b"wserver: open /dev/kbd failed\n".as_ptr(), 30);
-                }
-                return;
-            }
-        };
-        unsafe {
-            WS_KBD_FD = kbd_fd;
-        }
-
-        // Register as the input server's consumer so key events wake the
-        // receive loop.
-        let mut reg = Message {
-            m_source: 0,
-            m_type: arch_common::com::INPUT_REG_CONSUMER as i32,
-            m_payload: unsafe { core::mem::zeroed() },
-        };
-        let reg_r = unsafe {
-            minix_rt::syscall2(
-                minix_rt::SENDREC_CALL,
-                arch_common::com::INPUT_PROC_NR as u64,
-                &mut reg as *mut Message as u64,
-            )
-        };
-        if reg_r < 0 {
-            unsafe {
-                minix_rt::write(2, b"wserver: input consumer register failed\n".as_ptr(), 40);
-            }
         }
 
         unsafe {
@@ -1364,33 +1675,42 @@ pub fn wserver_main() {
             }
             let src_ep = src as i32;
 
-            // Input notification: the keyboard/mouse has queued events.
-            let is_notify =
-                (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
-            if is_notify && src_ep == arch_common::com::INPUT_PROC_NR {
-                if drain_input() {
-                    redraw(unsafe { WS_FB });
-                }
-                continue;
-            }
-
-            // Any other message from the input server is an event fetch
-            // reply that arrived outside drain_input: the SENDNB wakeup can
-            // collide with the fetch SENDREC (both come from INPUT), so the
-            // fetch completes with the notification and the real reply lands
-            // here. Process the events instead of replying ENOSYS — a stray
-            // reply to INPUT would start an ENOSYS ping-pong and drop them.
-            if src_ep == arch_common::com::INPUT_PROC_NR {
-                let n = msg.m_type;
-                if (8..=48).contains(&n) {
-                    // SAFETY: the input server filled the reply payload
-                    // with events.
-                    let batch = unsafe { &msg.m_payload.raw[..n as usize] };
-                    if process_event_batch(batch) {
-                        redraw(unsafe { WS_FB });
+            // Input: on the arches with an input server, its notification says the keyboard or mouse
+            // has queued events. There is no such message on wasm and no such server to send one
+            // (M5c), so the whole branch is compiled out rather than waiting for a sender that does
+            // not exist.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // Input notification: the keyboard/mouse has queued events.
+                let is_notify =
+                    (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
+                if is_notify && src_ep == arch_common::com::INPUT_PROC_NR {
+                    let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
+                    if drain_input(state) {
+                        redraw(unsafe { WS_FB }, state);
                     }
+                    continue;
                 }
-                continue;
+
+                // Any other message from the input server is an event fetch
+                // reply that arrived outside drain_input: the SENDNB wakeup can
+                // collide with the fetch SENDREC (both come from INPUT), so the
+                // fetch completes with the notification and the real reply lands
+                // here. Process the events instead of replying ENOSYS — a stray
+                // reply to INPUT would start an ENOSYS ping-pong and drop them.
+                if src_ep == arch_common::com::INPUT_PROC_NR {
+                    let n = msg.m_type;
+                    if (8..=48).contains(&n) {
+                        // SAFETY: the input server filled the reply payload
+                        // with events.
+                        let batch = unsafe { &msg.m_payload.raw[..n as usize] };
+                        let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
+                        if process_event_batch(batch, state) {
+                            redraw(unsafe { WS_FB }, state);
+                        }
+                    }
+                    continue;
+                }
             }
 
             if let Some(status) = handle_request(&mut msg, src_ep) {

@@ -686,7 +686,7 @@ Two things follow, and both are the port's rather than the driver's:
   use anyway (`fb_read`/`fb_write` are grant copies there too).
 - **A flush is the only thing that reaches the host.** `FBIOFLUSH` calls `fb_present`, which is
   what a device with a write-back cache needs and what bochs's scanned-out LFB does not: the pixels
-  leave when the driver says they are ready, which is also the hook M5b's compositor will use.
+  leave when the driver says they are ready — the hook the compositor's own flushes use (§9.3).
 
 The host's half is one object per front end — `{width, height, present(bytes)}` — with
 `tools/wasm-browser/display.js` as the page's implementation (a canvas, plus the B,G,R,X → R,G,B,A
@@ -698,6 +698,75 @@ What the reference contributes here is only the driver: its text path is the tty
 VGA cells (i386), and its `fb` driver is ARM-only and paints a boot logo. The three bands this
 port's `fb` paints are that driver's own verification pattern — with a canvas, the pixels are
 something a check can read rather than something a human has to look at.
+
+### 9.3 The console on the display (M5b)
+
+The console and the display are two halves that this port had never joined. The console is the tty
+server's (`/dev/console`, major 5): MINIX keeps its *cells* in the console driver, in a file of its
+own beside `tty.c`, because its `write` hook drops bytes into a VGA text plane or a framebuffer the
+driver mapped, and the hardware remembers where each character landed. This port has no such plane —
+its console is a byte stream to the host, and until M5b the front ends re-derived the layout from
+it (`tools/wasm-browser/terminal.js`: one line and a cursor, CR and BS only). The display is the
+canvas `fb` presents (§9.2), which nothing composed into.
+
+M5b is therefore two things, and both are the port's own rather than the reference's:
+
+1. **The console's screen model** (`crates/servers/src/console.rs`, the `console.c` the port never
+   built): an 80×24 cell grid, a cursor, and the control characters and escape sequences a console
+   acts on — CR, LF, BS, tab stops every 8 columns, wrapping and scrolling, and `CSI H/f/J/K`. It is
+   fed from the same bytes `console_write`/`console_echo` put on the console, in the same order, so
+   the screen and the host's terminal pane are the same stream; and it is *not* a terminal emulator
+   (SGR is parsed and dropped, as the reference's console drops it — `wterm` is the client that
+   renders colour) and not a scrollback buffer.
+2. **A window server that runs on this arch**, with the two changes the arch forces: its surface is
+   its own memory (there is no device memory to map) and its frames reach the display as a datagram
+   write to `/dev/fb`. The cells then reach the desktop over `minix_std::wserver`'s own protocol, so
+   the console is a window client like any other and the display keeps one owner.
+
+**How a frame reaches the display** — the question §11's M5b left open, answered here. The
+compositor composes into a surface of its own and hands each frame to `/dev/fb` as **one datagram
+write** (the CDEV shape VFS already documents for socket devices: the caller's VA, the length, the
+client's endpoint), followed by the `FBIOFLUSH` that presents it. So:
+
+- The frame *goes through the device*, which is what keeps `/dev/fb` meaningful on this arch and
+  keeps the display's presenter single: the compositor is a device client exactly as it is on the
+  other arches, where the difference is only that `mmap` makes its frame a direct memory write
+  instead of one `SYS_VIRCOPY`.
+- The write is not a present. A client that draws in pieces shows one frame rather than one per
+  write, and a flush that changed nothing shows none — which is what makes a console window
+  affordable at all (see the damage note below).
+- It travels directly to the fb server, bypassing VFS, for the reason the flush always has: VFS is
+  single-worker and the shell's blocking console read holds it, so a device request from the
+  compositor would wait for keystrokes.
+
+**Why the compositor repaints cells rather than desktops.** The tty's console writes arrive eight
+bytes at a time (the CDEV inline shape), and each one flushes. A whole-desktop repaint is ~786k
+bounds-checked volatile stores and a 3 MiB frame copy, so a desktop per write would make a screenful
+of shell output take seconds. The compositor therefore keeps what the surface holds per window
+(`drawn`, `drawn_cursor`) and a flush paints only the cells that differ — a cell-repaint per eight
+bytes, a whole repaint only when the *windows* change (create, close, move, resize). The same
+split appears on the host's side of the seam: `display.js` copies a presented frame and converts it
+at the next animation frame, so two hundred presents during a burst cost two hundred memcpys and one
+canvas upload. A display refreshes on its own clock; the guest cannot make it refresh per byte.
+
+**Two dispositions worth keeping.** A host with **no** display does not stop the compositor: the
+surface is its own memory, so it composes either way — a client's window is a window — and its
+flushes send nothing, because there is nothing to send them to (`WS_SHOW`; `fb` there is a driver
+that found no device, which is the disposition it already had). That is not tidiness — the first
+version exited, and the console's window create then blocked forever on a peer that had left,
+because IPC to a process that has exited *queues* rather than failing (finding 56). And **the mode
+is checked, not adopted**: the surface is sized for 1024×768, so a host canvas of another size is
+refused outright rather than drawn past the end of an address space.
+
+The console's window is created at tty's init, which is what fixes the boot order: `wserver` has to
+be receiving before `tty` starts (and `fb` before both, since the first frame goes through it), so
+the wasm boot list is `… vfs, fb, wserver, tty, init` (`SYSTEM_SPECS`). That order is the reason the
+window creation is wasm-only for now: the hardware arches' shared list (`BOOT_PROCS_ALL`) starts
+`tty` *before* `wserver`, and a create sent to a window server that has not started yet blocks on
+the peer rather than failing. On those arches the console's cells are the VGA plane's anyway —
+`console_write` ends in the kernel's own serial path — so putting the console on their display means
+reordering that list and checking the pointer-driven paths against a window that a boot process now
+owns: a follow-up, not a gap in this one.
 
 ## 8. The HAL surface, function by function
 
@@ -738,7 +807,7 @@ kernel calls it unconditionally, but it does nothing.
 | `virtio_net.rs` | WebSocket (or WebRTC data channel) | No raw sockets in a browser |
 | `pci.rs` | Deleted; host provides a device manifest | No PCI bus |
 | `fb.rs` | **The host's display** (M5a): the surface is the server's own buffer, the mode is the host's, and `FBIOFLUSH` presents a frame. `CDEV_MAP` refused — no page tables to map a physical range through |
-| `wserver.rs`, `fbfont.rs` | Canvas 2D — M5b. `wserver` is a *port invention* (3.3.0 has no window system); the font is `userland`'s `FONT_8X16` |
+| `wserver.rs`, `fbfont.rs` | **The desktop** (M5b, §9.3): the compositor composes into a surface of its own and hands each frame to `/dev/fb` as one datagram write, which the fb driver presents. `wserver` is a *port invention* (3.3.0 has no window system); the font is `userland`'s `FONT_8X16` |
 | `input.rs` | DOM pointer/keyboard events — M5c, and it needs a host→kernel wake that does not exist yet |
 | `RTC`/`cmos_read` | `Date.now()` | |
 | `qemu_exit` | host exit import | |
@@ -1286,16 +1355,16 @@ Three landings:
   `CanvasArch`: it adopts the host's mode, paints its surface, and a flush hands the frame over.
   `/dev/fb` (major 19, a node the boot image already has) is served by the same CDEV protocol as on
   the hardware arches, with `CDEV_MAP` refused because there are no page tables to map through.
-- **M5b — the console on the display.** `wserver` already exists as a compositor (windows, focus,
-  text with `FONT_8X16`, key routing, pointer routing; its state machine is host-tested and its
-  rasterizer is behind `cfg(target_os = "minix")`), and on wasm it draws into a buffer of its own
-  instead of an `mmap`ed `/dev/fb`. What is left is to *run* it and to move the console onto it:
-  today's console is the tty server writing bytes to fd 1, which the kernel hands to the host's
-  renderer, and the cells a display wants are the `console.c` model the port never built (the
-  reference has them in the driver, not in a server). The one open question to settle when it
-  lands: whether a composed frame reaches `fb` as a client write (a grant copy per frame, which is
-  what the reference's own clients do) or whether `wserver` links the HAL and presents directly
-  (no copy, and a second thing that knows about the host's display).
+- **M5b — the console on the display. DONE** (§9.3). `wserver` runs on wasm into a surface of its
+  own and hands each frame to `/dev/fb` as one datagram write, so the display keeps a single
+  presenter and the compositor is a device client like the reference's own framebuffer clients. The
+  console's cells exist in the guest for the first time (`crates/servers/src/console.rs`, the
+  reference's `console.c`): an 80×24 grid fed from the same bytes the tty puts on the console, pushed
+  to the compositor over `minix_std::wserver`'s protocol, and shown in a window on the desktop. The
+  question this milestone left open — a client write versus the compositor linking the HAL and
+  presenting directly — was settled in favour of the write, and §9.3 records why; the two traps it
+  turned up (an exited window server wedges the console's create, and a desktop repaint per eight
+  bytes of output is not affordable) are in §9.3 and finding 56.
 - **M5c — input: the browser's events into the guest.** The vocabulary and the wire format are the
   reference's (`INPUT_PAGE_KEY`/`INPUT_PAGE_GD`, `INPUT_EVENT`, the `input` server's routing); what
   is missing is the *wake*. `input`'s polling alarm never fires on this port (`SYS_SETALARM` is
@@ -1304,7 +1373,9 @@ Three landings:
   the one piece of machinery neither the reference nor this port has: a host→kernel notify export
   (`kernel-wasm`), which is the role an interrupt controller plays elsewhere and the same role the
   host already plays for the clock. The path after that is ordinary: the host queues the event, the
-  input server drains it on wake, and its `SENDNB` to `wserver` is a message like any other.
+  input server drains it on wake, and its `SENDNB` to `wserver` is a message like any other. Until
+  then `wserver` answers `WS_INPUT` with `ENOSYS` rather than parking a waiter nothing can wake — the
+  refusal is visible where a wedge would not be.
 
 Both blockers above are recorded here rather than discovered later, and neither is a stub in the
 landed code: M5a needs the first (it is the thing that makes mmap impossible) and M5c needs the
@@ -1990,25 +2061,31 @@ What the page does *not* do, and which milestone it belongs to:
   (§9.1, M4): the root is mounted from it and writes go back to it, and the session is left clean by
   "end the session" (which sends the `exit` that INIT's exit — the shutdown — consists of) rather
   than by typing it. "start over from the boot image" is what a disk the store refuses has instead
-  of a dead end. Finding 54 has the detail.
-- **The display is a canvas, and the console is not on it yet.** The guest's `fb` server owns
-  `/dev/fb` and presents its frames to a canvas (§9.2, M5a), so pixels reach the page through the
-  guest's own driver. What still draws the shell is the host's byte renderer: `\n`, `\r`, `\b` and
-  printable characters only — all the shell's editor draws with — with no wrapping, scrolling
-  regions or ANSI escapes. Putting the console on the canvas, cells and all, is M5b's `wserver`.
+  of a dead end. Finding 54 has the detail, including what a session that was *not* ended leaves
+  behind: an unclean filesystem, which the next boot mounts read-only. MFS now says so at the mount
+  (`mfs: … not unmounted cleanly, mounted read-only`) — before M5b the only sign was a write
+  failing later, which reads as a broken command rather than a disk that may not be written.
+- **The display is a canvas, and the console is on it.** The guest's `fb` server owns `/dev/fb` and
+  presents its frames to a canvas (§9.2, M5a), and the compositor's desktop — the console's window,
+  its cells, its cursor — is what those frames now hold (§9.3, M5b). The page's terminal pane is
+  still the host's byte renderer (`\n`, `\r`, `\b` and printable characters, no wrapping or ANSI
+  escapes), which is deliberate: the two panes are two views of one session, the guest's cells and
+  the host's byte stream, and the terminal is where the *boot* log is, since kernel and direct-fd
+  writes never pass through `/dev/console`.
 - **No worker.** The guest runs on the main thread and yields to the browser between slices.
   Moving it into a Worker would decouple the two and would need the console to cross
   `postMessage`.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 68 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 75 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
 Verified by `tools/wasm-browser/run.js` (13 checks: the boot, the park, a typed command that forks
 and execs, the reap, quiescence, and four boots over one disk — the last two writing files they
 never sync, so the shutdown is what makes them durable; it runs headless, so its guest's `fb` server
 finds no display) and `tools/wasm-browser/page.test.js`
-(41 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
+(42 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
 — the pump policy, the key map, the repaint coalescing, the pane toggle, the cursor's position, both
-controls, and the guest's frame arriving in the canvas with the channels a canvas wants — is not left
+controls, and the guest's composed desktop arriving in the canvas with the channels a canvas wants —
+is not left
 to a human
 to try, then the same session's disk reopened over a stub IndexedDB, which must answer with the file
 the session wrote and with a clean superblock, then the disk cleared and an unseeded store over it,

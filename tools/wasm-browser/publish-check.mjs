@@ -106,10 +106,13 @@ const display = {
   width: 1024,
   height: 768,
   frames: 0,
+  first: null,
   last: null,
   present(bytes) {
     this.frames += 1;
-    this.last = Uint8Array.from(bytes);
+    const frame = Uint8Array.from(bytes);
+    if (this.first === null) this.first = frame;
+    this.last = frame;
   },
 };
 
@@ -148,20 +151,38 @@ check(
   `console:\n${terminal.text()}`
 );
 
-/// The pixel at `(x, y)` of the frame the guest presented, in the guest's own channel order.
-const pixel = (x, y) => {
+/// The pixel at `(x, y)` of a frame the guest presented, in the guest's own channel order.
+const pixelOf = (frame, x, y) => {
   const at = (y * display.width + x) * 4;
-  return [display.last[at], display.last[at + 1], display.last[at + 2], display.last[at + 3]];
+  return [frame[at], frame[at + 1], frame[at + 2], frame[at + 3]];
 };
+
 check(
-  "the staged guest's display reached the host: three bands, XRGB8888",
+  "the staged guest's display reached the host: the driver's pattern, XRGB8888",
+  // The driver's own three bands, which is the *first* frame `fb` presents at boot. The last frame
+  // is the compositor's desktop — checked next — because the console's window replaces it (M5b).
   display.frames > 0 &&
-    pixel(100, 400).join() === '0,0,255,0' &&
-    pixel(500, 400).join() === '0,255,0,0' &&
-    pixel(900, 400).join() === '255,0,0,0',
+    pixelOf(display.first, 100, 400).join() === '0,0,255,0' &&
+    pixelOf(display.first, 500, 400).join() === '0,255,0,0' &&
+    pixelOf(display.first, 900, 400).join() === '255,0,0,0',
   display.frames === 0
     ? 'no frame was presented'
-    : `left=${pixel(100, 400)} middle=${pixel(500, 400)} right=${pixel(900, 400)}`
+    : `left=${pixelOf(display.first, 100, 400)} ` +
+      `middle=${pixelOf(display.first, 500, 400)} right=${pixelOf(display.first, 900, 400)}`
+);
+check(
+  "the staged guest's compositor put its desktop on the display",
+  // The console's window, composed by `wserver` and copied into `/dev/fb` as one datagram write
+  // (M5b): the desktop background outside it, the focused title bar's colour in its title, and the
+  // body's colour in its body.
+  display.last !== null &&
+    pixelOf(display.last, 20, 20).join() === '40,40,40,0' &&
+    pixelOf(display.last, 400, 190).join() === '192,128,64,0' &&
+    pixelOf(display.last, 300, 300).join() === '32,24,24,0',
+  display.last === null
+    ? 'no frame was presented'
+    : `desktop=${pixelOf(display.last, 20, 20)} title=${pixelOf(display.last, 400, 190)} ` +
+      `body=${pixelOf(display.last, 300, 300)}`
 );
 
 const failed = checks.filter((c) => !c.ok);
