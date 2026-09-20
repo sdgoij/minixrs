@@ -17,7 +17,8 @@ and M3f (the shell: prompt, input, a builtin command, exit) are all **done**, an
 (exec as module instantiation, §7.2, and fork, §12 risk 1) — see §11 for commands and
 results. M3 — console, TTY, shell — is complete, with the module-backed half of its title:
 a shell forks for a command it cannot answer itself, and the child execs the module the boot
-image carries at that path. What remains of the port is M4 onwards.
+image carries at that path. It runs in a browser tab as well as under Node
+(`tools/wasm-browser/`). What remains of the port is M4 onwards.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -1124,6 +1125,11 @@ command it cannot answer itself, the child execs the module the image carries at
 command's output reaches the console through the stdio the shell inherited, and the shell reaps it
 and reads its next line — M3's title.
 
+**The page — the system in a browser tab. Status: DONE.** Not a numbered milestone: a front end
+rather than a piece of the system, and the thing the port was for.  It runs the same artifacts the
+check harness runs, boots the same eleven instances, and answers keystrokes at a `#` prompt — which
+is what forced finding 41 and the slice-and-park mechanism below.
+
 **Stretch.** SMP via Workers + `SharedArrayBuffer` (the `Spinlock`/`bkl_*`
 surface already exists and would become Atomics-based; each worker gets its own
 cpulocal region in shared memory). wasm64 to lift the 4 GiB ceiling.
@@ -1731,6 +1737,84 @@ suspends exactly once, and a shell forks in a loop), fork cost on a real workloa
 byte copy of a 4 MiB memory, so *memory size* is the lever, not stack depth), the Asyncify
 expansion on a real server, and interaction with signals, which §6.3 proposes delivering at
 syscall-return time — a rewind boundary is a natural place for that and is untested.
+
+**The page — the system in a browser tab. Status: DONE.**
+
+Not one of the numbered milestones: it is a *front end* rather than a piece of the system, and it
+sits alongside M3 and M7 rather than between them. What it establishes is the thing the port was
+for — the whole chain, from the kernel to a `#` prompt that answers keystrokes, running in a
+tab.
+
+```sh
+sh tools/wasm-browser/build.sh     # the same artifacts the check harness runs
+node tools/wasm-browser/serve.js  # then open http://127.0.0.1:8080/
+```
+
+The page is four files with no dependencies and no bundler: `index.html`, `page.js` (the DOM
+front end), `host.js` (the engine: instances, the copy seam, exec, fork, the dispatch loop) and
+`terminal.js` (the renderer's model). It boots `SYSTEM_SPECS` — the eleven system instances, INIT
+execing `/bin/sh` out of the boot image — and from there the console is the same one the other
+arches have:
+
+```text
+kernel: # /bin/echo hi
+kernel: hi
+kernel: # echo second
+kernel: second
+```
+
+**Why a browser needed a mechanism a script did not.** The page has to stop a running guest, for
+two reasons that turn out to be one reason: a keystroke must get in while the guest is running, and
+an idle prompt must not pin the tab. A script needs neither, which is why the check harness can
+run the guest to quiescence and this cannot.
+
+The one reason is that **an idle console on this port is a spin, not a block**. The shell retries
+`read(0)` in user mode and the tty's `do_read` does the same (finding 32), so a guest with nothing
+to read never returns to the host's loop — the harness only ever survived that because its whole
+console script is queued before the run starts, which means the tty's reads always find a byte.
+The page's first idle prompt is the first time this port has had to wait for a human.
+
+So `pump()` ends a slice after a fixed number of syscalls and unwinds the instance through
+Asyncify — the same mechanism a blocked syscall uses, which stops the guest *between* syscalls with
+its state serialised rather than pausing it from outside. `sliceWasSpinOnly()` then reports whether
+a slice did nothing but retry the console read with an empty queue, which is what "the guest is
+waiting for you" looks like from outside; the page parks on it, taking no slices at all until a
+keystroke, with a two-second safety valve in case the reading is ever wrong. An idle page costs
+nothing, and the status line says which state it is in.
+
+Doing that found **finding 41**: `RTS_PREEMPTED`, which `thread_yield` sets and the hardware
+arches' scheduler loops clear on every syscall return, was never cleared on wasm. A process that
+yielded and then blocked in `RECEIVE` was woken with the flag still set, and every wake-up path
+re-enqueues only when `p_rts_flags == 0` — so the run queue drained and the console went silent
+after the first command. The fix is the syscall-return step `kernel-wasm` was missing. This is the
+shape to expect again: **the arch is not only the HAL**, and anything a hardware arch runs in its
+scheduler loop is missing on wasm until it is written there.
+
+What the page does *not* do, and which milestone it belongs to:
+
+- **No persistence.** The boot filesystem is the image the host writes into the RAM disk's memory
+  at every load. A real block device behind the same BDEV protocol is M4.
+- **Not a terminal emulator.** `\n`, `\r`, `\b` and printable characters only — all the shell's
+  editor draws with. Wrapping, scrolling regions and ANSI escapes are M5's `wserver`/canvas work.
+- **No worker.** The guest runs on the main thread and yields to the browser between slices.
+  Moving it into a Worker would decouple the two and would need the console to cross
+  `postMessage`.
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 63 facts
+  about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
+
+Verified by `tools/wasm-browser/run.js` (5 checks: the boot, the park, a typed command that forks
+and execs, the reap, quiescence) and `tools/wasm-browser/page.test.js` (13 checks: the server's
+MIME types, then `page.js` itself under a stub DOM, so the page's own code — the pump policy, the
+key map, the repaint coalescing — is not left to a human to try). What neither can check is the
+part that is only a browser: the pixels, the real `fetch`, and whether a keystroke feels immediate.
+
+The server check is there because a module script is fetched under strict MIME checking, and a
+static server that answers `text/plain` for a JavaScript file leaves a page that will not start
+with nothing on it to say why — the browser reports it only in its own console, which is a round
+trip through a human. The modules are therefore `.js` rather than `.mjs` (the one extension every
+static server maps to a JavaScript type, with a `package.json` next to them so Node agrees the
+contents are ES modules), and `index.html` creates the module script itself so that a load failure
+can explain itself on the page rather than only in the console.
 
 ## 12. Risks, ranked
 

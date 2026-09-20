@@ -4,3 +4,6 @@
 **/node_modules
 **/target
 *.wasm
+# Staged build outputs: the page fetches these, and they are rebuilt by the scripts that
+# sit next to them. The image is 16 MiB, which is the reason it is named explicitly.
+tools/wasm-browser/build/

@@ -7187,6 +7187,45 @@ have reported the truth into a caller that reports a lie — and the lie arrives
 caller has no reason to doubt, which is why it took the copy log to see that the addresses were
 fine.
 
+**41. `RTS_PREEMPTED` was never cleared on wasm, so a process that yielded and then blocked was
+woken into a run queue nobody would look at again.** Found building the browser front end
+(`tools/wasm-browser/`), which is the first thing in the port to interrupt an *idle* guest, and
+what it found is exactly what an idle guest is made of: the console read is a spin. The shell
+retries `read(0)` in user mode and the tty's `do_read` does the same, and the retry calls
+`thread_yield` — which sets `RTS_PREEMPTED` and, as the comment in `tty.rs` says, expects "the
+syscall-return path" to re-enqueue the process at the tail.
+
+On a hardware arch that path is real, and it is in the scheduler loop rather than in anything
+shared: `kernel-boot/src/main.rs` clears `RTS_PREEMPTED` after every syscall and again when it
+picks a preempted candidate (with the `remove_from_queue`-before-`enqueue` dance, because
+`pick_proc` does not dequeue). The riscv64 and aarch64 loops do the same. `kernel-wasm`'s
+`minix_step()` is `pick_proc()` and nothing else, and its `minix_syscall` had no such step — so on
+this port the flag was sticky.
+
+Sticky is fatal, and not for the reason the name suggests. Every wake-up path in `ipc.rs`
+re-enqueues a receiver only when `p_rts_flags == 0` (`mini_send`'s direct delivery and the three
+async delivery arms), and `sched::enqueue` asserts the process is runnable. So: the tty yields,
+blocks in `RECEIVE` — which dequeues it, as it should, *because* PREEMPTED is set — and the next
+client request clears `RECEIVING` and leaves the PREEMPTED bit, so the `== 0` test fails and the
+process is never linked again. The run queue drains, `minix_step()` answers -1, and the system is
+quiet with a live process stranded. Observed from the page: the console answered the first command
+and was dead from the second, with the tty reported as *not blocked* and not runnable at the same
+time. `RTS_NO_QUANTUM` is the same trap and the port already knew it — `proc_no_time`'s comment
+describes this exact deadlock being hit during boot.
+
+Why nothing had seen it is worth keeping: the check harness queues its whole console script before
+the run starts, so the kernel drains it into the ring during boot and the tty's reads always find
+a byte. The EAGAIN path — and therefore `thread_yield` — is never taken for the whole run. An
+interactive console takes it on the first idle prompt, which is the first time this port has ever
+had one.
+
+The fix is to run the step the platform layer was missing, in `kernel-wasm::minix_syscall`: clear
+`RTS_PREEMPTED` on the way out of every syscall, and re-enqueue at the tail when nothing else is
+set, exactly as the hardware loop does. And the general lesson, since this is the platform layer's
+job: **the arch is not only the HAL.** Anything a hardware arch runs as "the syscall return path"
+or in its scheduler loop is missing on wasm until it is written there, and a flag that only that
+path would clear is a latent deadlock rather than a missing feature.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

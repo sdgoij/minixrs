@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MINIX/Rust in a browser tab</title>
+    <!--
+      The wasm system running in a tab: the kernel, the servers and the shell, all from
+      `build/`. See README.md next to this file for how to build it and what it does and does
+      not do. `page.js` is the whole front end; everything under it is the same engine the
+      check harness in `tools/wasm-servers/` runs.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --fg: #d5d8dd;
+        --dim: #7d8590;
+        --accent: #79b8ff;
+        --bad: #ff7b72;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        height: 100vh;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font-size: 1rem;
+        margin: 0;
+        font-weight: 600;
+      }
+      #status {
+        color: var(--accent);
+      }
+      #status[data-kind='bad'] {
+        color: var(--bad);
+      }
+      .hint {
+        color: var(--dim);
+        margin-left: auto;
+      }
+      #screen {
+        flex: 1;
+        margin: 0;
+        padding: 0.75rem;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #010409;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        caret-color: transparent;
+      }
+      #panel {
+        margin: 0;
+        padding: 0.75rem;
+        white-space: pre-wrap;
+        background: #1c1114;
+        border: 1px solid #4b2b30;
+        border-radius: 6px;
+        color: #ffdcd7;
+      }
+      #panel[hidden] {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>MINIX/Rust — <code>arch-wasm32</code></h1>
+      <span id="status">starting…</span>
+      <span class="hint">
+        type at the prompt · Enter sends · arrows walk history · ^C ^D ^U ^W ^K ^L work
+      </span>
+    </header>
+
+    <pre id="screen"></pre>
+    <pre id="panel" hidden></pre>
+
+    <!--
+      The module is created here rather than written as `<script type="module" src="page.js">` so
+      that a load failure can explain itself. A module script is fetched under strict MIME
+      checking: if the server answers `text/plain` the browser refuses the script, the page never
+      runs, and the only trace is one line in the console — nothing on the page can say why.
+      The modules here are `.js` rather than `.mjs` for exactly that reason (`.js` is the one
+      extension every static server maps to a JavaScript type), and this is the belt to that
+      braces: the failure a reader cannot diagnose is worth catching.
+    -->
+    <script>
+      (function () {
+        // Set by page.js as soon as it runs, so a later error is not reported as a load failure.
+        const started = () => window.minixrsStarted === true;
+
+        function explain(why) {
+          if (started()) return;
+          const status = document.getElementById('status');
+          const panel = document.getElementById('panel');
+          if (status) {
+            status.textContent = 'cannot start: the page did not load';
+            status.dataset.kind = 'bad';
+          }
+          if (panel) {
+            panel.hidden = false;
+            panel.textContent =
+              `${why}\n\n` +
+              'A module script is refused before it runs unless the server sends it as\n' +
+              'JavaScript — "text/javascript" or "application/javascript". Serving `.mjs` or\n' +
+              '`.js` as text/plain is the usual cause, and the browser reports it only in its\n' +
+              'own console.\n\n' +
+              'Use the server next to this page, which cannot get it wrong:\n\n' +
+              '  node tools/wasm-browser/serve.js\n\n' +
+              'then open http://127.0.0.1:8080/.';
+          }
+        }
+
+        // Resource failures surface on the element, execution failures on the window.
+        window.addEventListener(
+          'error',
+          (event) => {
+            if (event.target && event.target.tagName === 'SCRIPT') {
+              explain('page.js did not load as a module script.');
+            } else if (event.message) {
+              explain(`page.js threw: ${event.message}`);
+            }
+          },
+          true
+        );
+
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = 'page.js';
+        script.onerror = () => explain('page.js did not load as a module script.');
+        document.head.append(script);
+
+        // A catch-all for the case where neither fires.
+        setTimeout(() => explain('page.js never started.'), 3000);
+      })();
+    </script>
+  </body>
+</html>

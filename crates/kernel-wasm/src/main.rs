@@ -247,6 +247,36 @@ pub extern "C" fn minix_syscall(
             arch_wasm32::hal::write_retval(&mut (*rp).p_reg, result as u64);
         }
 
+        // The arch's syscall-return path, which this instance does not have. Every hardware
+        // arch runs this step in its scheduler loop (`kernel-boot/src/main.rs`, and the riscv64
+        // and aarch64 equivalents): a process that comes out of a syscall with `RTS_PREEMPTED`
+        // has the flag cleared, and is put back on the tail of its queue when nothing else is
+        // set. On wasm nothing did, and the flag is set by `RTS_thread_yield` — the tty's
+        // "console has nothing for me" retry, i.e. `PORTING_PLAN.md` finding 32 — so it stuck.
+        //
+        // A sticky flag is not cosmetic: every wake-up path in `ipc.rs` re-enqueues a receiver
+        // only when `p_rts_flags == 0` (`mini_send` and the three async delivery arms), and
+        // `sched::enqueue` asserts the process is runnable. So a process that yielded and then
+        // blocked in RECEIVE was woken with `RTS_PREEMPTED` still set, never re-linked, and
+        // never picked again — the run-queue drained and the system went quiet with a live
+        // process stranded. Observed as: the tty spins on an empty console read, the first
+        // keystroke completes it, and the console is dead from the second command onwards.
+        //
+        // `store` rather than a masked `fetch_and` on purpose: the hardware loop *stores* the
+        // cleared value, so a blocking flag set during this very syscall (recv, say) survives
+        // while PREEMPTED does not. The enqueue is what the hardware guards on `cleared == 0`.
+        let rts = (*rp).p_rts_flags.load(Ordering::Relaxed);
+        if rts & RtsFlags::PREEMPTED.bits() != 0 {
+            let cleared = rts & !RtsFlags::PREEMPTED.bits();
+            (*rp).p_rts_flags.store(cleared, Ordering::Relaxed);
+            if cleared == 0 {
+                // `pick_proc` does not dequeue, so the process is still linked; a plain
+                // `enqueue` would link it a second time and corrupt the queue into a cycle.
+                kernel::sched::remove_from_queue(rp);
+                kernel::sched::enqueue(rp);
+            }
+        }
+
         result
     }
 }
