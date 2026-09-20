@@ -425,11 +425,11 @@ fn init_report(idx: usize, value: i64) {
 /// VFS asks VFS for *fd 1's* filp, and with nothing dup2'd onto fd 1 there is no filp and
 /// the answer is EBADF.
 ///
-/// It exits rather than exec'ing a shell, because exec on this port is module
-/// instantiation (§7.2) and the host has not implemented it. `userland::init` would print
-/// `exec failed` and spin in a `getpid` loop — a spin *with* a syscall, so the harness's
-/// budget is the only thing that would end it and the run's end would be an artefact
-/// rather than a result.
+/// It ends by exec'ing `/bin/sh`, which is M7a: on this port exec is module instantiation
+/// (§7.2), so the shell arrives as a wasm module the host instantiates *into this slot*,
+/// carrying the stdio above with it because the process is the same process — the same
+/// fds, the same `p_fd_vfs`, the same VFS filps. This instance then ceases to exist, which
+/// is what the harness checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_init() {
     userland::write_out(b"init: booting MINIX/Rust\r\n");
@@ -486,17 +486,31 @@ pub extern "C" fn minix_init() {
     write_i32(n as i32);
     userland::write_out(b"\r\n");
 
-    // init's last step is `exec("/bin/sh")`, and on this port exec is module
-    // instantiation (§7.2), which the host has not implemented. So the shell runs *in
-    // place* instead: the same slot, the same console, and the stdio set up above — which
-    // is what the exec would have handed it.
-    let rc = userland::sh(&["sh"]);
+    // init's last step is `exec("/bin/sh")`, and this is where M7a earns its keep: the
+    // shell is a *module* the host instantiates into this slot, not a call to
+    // `userland::sh` in place. The call is `userland::init`'s, line for line — the same
+    // path, the same argv, the same PM→VFS chain — and what differs is only the answer:
+    // the module the host has for `/bin/sh` is wasm rather than the ELF the boot image
+    // happens to carry at that path. Getting there means the frame built here crosses two
+    // instance boundaries (this one to VFS by `sys_vircopy`, VFS's to the kernel) before
+    // the kernel parses it back into argv, which is the port's copy seam doing the work a
+    // shared address space does on the other arches.
+    let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];
+    let ret = unsafe {
+        minix_rt::execve(
+            c"/bin/sh".as_ptr() as *const u8,
+            c"/bin/sh".to_bytes_with_nul().len(),
+            argv.as_ptr(),
+            core::ptr::null(),
+        )
+    };
 
-    // Through the real exit path, so PM's half of a process lifecycle runs: the kernel
-    // marks this process SIGNALED | SIG_PENDING | SLOT_FREE, queues the exit for PM to
-    // read with GETKSIG, and notifies PM as the signal manager. `minix-rt::exit` then
-    // traps, because this target has no return path out of an entry point and a spin
-    // would hang the host; the harness reads a trap whose last syscall was exit as the
-    // exit it is.
-    minix_rt::exit(rc);
+    // Only a failure reaches here, and on failure the image was not replaced — so this is
+    // init's own error path, not the shell's, and the report is about the exec. It exits
+    // rather than spinning: `userland::init` loops on `getpid` here, which on this target
+    // hangs the host rather than failing (finding 12).
+    userland::write_out(b"init: exec failed: err=");
+    write_i32(ret);
+    userland::write_out(b"\r\n");
+    minix_rt::exit(1);
 }

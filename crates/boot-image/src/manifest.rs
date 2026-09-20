@@ -126,6 +126,21 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/input", "input"),
 ];
 
+/// Programs a **wasm32** image carries: destination path → module file name in the target's
+/// release directory.
+///
+/// The other archs' image holds ELF executables, one per `BOOT_BINS` entry, and the port execs
+/// one by installing its image. Here the image *is* the module store (§7.2's step 4): an exec
+/// reads these bytes and the host instantiates them, so what goes in at `/bin/sh` is the wasm
+/// module the module build produced — already Asyncify'd, because the harness's dispatch loop
+/// reads Asyncify's state after every entry and a module that was not instrumented cannot be
+/// driven at all.
+///
+/// One entry today, and it is the same module the harness instantiates directly for its own
+/// check: the path chooses the module and `argv[0]` chooses the program inside it, which is what
+/// lets `/bin/sh` and the harness's `echo` be one file.
+pub const WASM_MODULES: &[(&str, &str)] = &[("/bin/sh", "program.async.wasm")];
+
 /// Root-filesystem data files baked into the minixfs image: destination
 /// path, content, mode, uid, gid (binaries come from [`BOOT_BINS`]).
 ///

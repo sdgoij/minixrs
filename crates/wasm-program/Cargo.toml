@@ -1,0 +1,28 @@
+# Standalone: a wasm-only module with no host entry point, so a workspace-wide build
+# could not link it. Same reasoning as wasm-servers, kernel-wasm and wasm-procs, and the
+# same destination: `wasm32-minix` is `only-cdylib`, so a program here is a cdylib with an
+# exported entry rather than a `[[bin]]`.
+[workspace]
+
+[package]
+name = "wasm-program"
+version = "0.1.0"
+description = "A userland program as its own wasm module, the shape exec instantiates"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The real command implementations, not copies of them: `echo` here is the same
+# `userland::echo` the shell runs as a builtin and the shipping arches exec.
+userland = { path = "../userland" }
+# The syscall gate, the panic handler and the global allocator (`rt`), all of which a
+# program needs exactly as a server does.
+minix-rt = { path = "../minix-rt" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2

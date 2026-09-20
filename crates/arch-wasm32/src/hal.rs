@@ -63,6 +63,27 @@ unsafe fn copy_between_address_spaces(
     )
 }
 
+// ------------------------------------------------------------------- exec
+
+pub use crate::ExecModuleRequest;
+
+/// Ask the host to instantiate the module named by `request` as the process in `slot`.
+///
+/// Exec on this port (§7.2 of `ARCH_WASM32.md`): a program is a wasm module and only the host
+/// can instantiate one, so the kernel's half is to say which process, which bytes and with what
+/// arguments. Called from the wasm arm of `do_exec_load_handler`, which is where the image would
+/// otherwise be installed.
+///
+/// # Safety
+///
+/// `request` must be live for the duration of the call (it is synchronous: the host reads the
+/// structure and everything it points at before returning), `argv_addr` must hold `argc`
+/// NUL-terminated strings, and `image_addr`/`path_addr` must be valid addresses in the memory of
+/// the process the request names.
+pub unsafe fn exec_module(slot: i32, request: &ExecModuleRequest) -> i32 {
+    crate::exec_module(slot, request)
+}
+
 // ------------------------------------------------------------------ console
 
 pub fn serial_write_byte(byte: u8) {

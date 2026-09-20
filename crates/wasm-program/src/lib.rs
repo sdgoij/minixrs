@@ -1,0 +1,191 @@
+//! One userland program, as its own wasm module.
+//!
+//! This is the shape `exec` instantiates (`ARCH_WASM32.md` §7.2): the module *is* the
+//! program, and the export at the bottom of this file is what the host calls in place of
+//! `_start`. It is a separate crate from `wasm-servers` because the two are arranged
+//! opposite ways round. A server is one module with an entry per server — all ten run the
+//! same binary, because the kernel reserved their slots at boot and nothing chooses between
+//! them. A program is the other way round: what exec was handed is a *path*, so the module
+//! is chosen from the outside and one module per program is the arrangement step 4 of the
+//! M7a plan (module bytes out of the filesystem) will need. Starting with exactly one
+//! program keeps that decision visible instead of hiding it behind a dispatcher.
+//!
+//! # What the entry owns, and why the module rather than the host
+//!
+//! Two regions are module-owned and exported by address. The Asyncify scratch area is
+//! exported for the reason `wasm-servers` exports it: Asyncify must be applied to this
+//! module too, its buffer has to live where the program will never touch, and an overflow
+//! corrupts memory silently rather than trapping — so the host is told where the region is
+//! rather than deriving it from a linker default.
+//!
+//! The second region is the **argv area**, which is where the host writes the arguments of
+//! the process it is creating. The layout is part of this module's ABI, not the host's:
+//!
+//! ```text
+//! base + 0                u32  argc
+//! base + 4                u32  argc pointers, each an absolute address in this instance
+//! base + 4 + 4 * argc          the argument strings, NUL-terminated, in order
+//! ```
+//!
+//! §7.2's step 3 is "the host copies argv into the new instance's memory and the entry reads
+//! it", and this is that with the offsets decided on one side only. The entry then hands the
+//! pointer array to `userland::parse_args`, which is what every `userland/src/bin/*.rs`
+//! calls on the shipping arches — so a program reads its arguments through one code path on
+//! all four targets rather than the wasm one growing a second.
+//!
+//! # The blob is host-written, so it is checked before it is read
+//!
+//! `parse_args` scans each argument for its NUL with no upper bound, which is correct for a
+//! kernel that validated the pointers and wrong for a blob crossing the host boundary: one
+//! misplaced pointer would walk out of the area and trap somewhere unrelated, reporting a
+//! host mistake as a fault in the program. The entry therefore validates structure first
+//! ([`blob_is_sane`]) and refuses loudly, which is the shape a host bug should have here.
+
+#![no_std]
+#![no_main]
+
+/// Region the host uses for the Asyncify data buffer and its stack.
+///
+/// Sized and argued exactly as `wasm-servers` sizes it: 64 KiB of stack against the fitted
+/// ~36 bytes per frame, generous on purpose because the failure mode is a silent
+/// corruption rather than a trap.
+const ASYNCIFY_BUF_SIZE: usize = 65536;
+
+#[repr(C, align(16))]
+struct AsyncifyScratch([u8; ASYNCIFY_BUF_SIZE + 16]);
+
+static mut ASYNCIFY_SCRATCH: AsyncifyScratch = AsyncifyScratch([0; ASYNCIFY_BUF_SIZE + 16]);
+
+/// Address of the scratch region, so the host does not have to guess.
+#[unsafe(no_mangle)]
+pub extern "C" fn asyncify_scratch_ptr() -> u32 {
+    core::ptr::addr_of_mut!(ASYNCIFY_SCRATCH) as u32
+}
+
+/// How much room the host has for the argv blob. Two orders of magnitude more than the
+/// longest argument list this port passes, because the cost of running out is a refusal at
+/// process creation and the cost of the room is 512 bytes of a module's linear memory.
+const ARGV_AREA_SIZE: usize = 512;
+
+/// The most arguments the entry will accept.
+///
+/// Not this module's own choice: it is the width of the buffer `userland::parse_args`
+/// requires, so accepting more would mean reading a blob this program cannot present.
+const ARGV_MAX: usize = 64;
+
+#[repr(C, align(8))]
+struct ArgvArea([u8; ARGV_AREA_SIZE]);
+
+static mut ARGV_AREA: ArgvArea = ArgvArea([0; ARGV_AREA_SIZE]);
+
+/// Where the host writes the argv blob: `argc`, then the pointer array, then the strings.
+///
+/// Exported rather than the offset being written down on both sides. The host has no way to
+/// name a static, and a hardcoded address in JavaScript would be a second copy of the
+/// module's layout that nothing keeps in step with this file.
+#[unsafe(no_mangle)]
+pub extern "C" fn argv_area_ptr() -> u32 {
+    core::ptr::addr_of_mut!(ARGV_AREA) as u32
+}
+
+fn read_u32(addr: u32) -> u32 {
+    // SAFETY: the caller has established `addr` is inside the argv area, which is this
+    // instance's own linear memory. A volatile read because the host wrote it, so nothing
+    // in this translation unit may assume anything about the byte.
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+fn read_u8(addr: u32) -> u8 {
+    // SAFETY: as `read_u32` — the address is inside the argv area.
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
+}
+
+/// Whether the blob at `base` is safe to hand to `userland::parse_args`.
+///
+/// That is: a count this program can present, a pointer array that fits in the area, and
+/// every pointer naming a NUL-terminated string that also lies inside it. Checked as
+/// structure rather than as content — what the arguments *say* is the program's business,
+/// and the harness pins it by reading what the program printed.
+fn blob_is_sane(base: u32, argc: u32) -> bool {
+    let end = base + ARGV_AREA_SIZE as u32;
+    if argc == 0 || argc > ARGV_MAX as u32 {
+        return false;
+    }
+    if base + 4 + 4 * argc > end {
+        return false;
+    }
+    for i in 0..argc {
+        let start = read_u32(base + 4 + 4 * i);
+        if start < base || start >= end {
+            return false;
+        }
+        let mut p = start;
+        while p < end && read_u8(p) != 0 {
+            p += 1;
+        }
+        // Ran to the end of the area without meeting a terminator, so `parse_args` would
+        // scan past it.
+        if p == end {
+            return false;
+        }
+    }
+    true
+}
+
+/// The entry the host calls to run this program in a slot.
+///
+/// `argv` is the pointer array's address, so the module can tell a host that filled in the
+/// blob at an offset of its own invention from one that used the layout above: the two
+/// disagree and the process is refused rather than reading a different set of bytes.
+///
+/// It never returns. A program's lifetime ends in `SYS_EXIT` so that PM's half of a process
+/// lifecycle runs — the kernel marks the process SIGNALED | SIG_PENDING | SLOT_FREE, queues
+/// the exit for PM to read with `GETKSIG`, and notifies PM as the signal manager — and
+/// `minix_rt::exit` then traps, because this target has no return path out of an entry
+/// point and a spin would hang the host instead of ending the run.
+///
+/// Nothing here sets `p_fd_vfs`, and nothing opens a console: this process has no descriptors
+/// at all yet, which is exactly the state `init` is in before it opens `/dev/console`. So
+/// every write below leaves through the kernel's console shortcut, and the kernel reads the
+/// bytes out of *this* instance through the copy seam (§5.1) — which is the fact the harness
+/// checks, because finding 29 is what a write that transfers `count = 0` looks like when it
+/// reports success.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
+    let base = argv_area_ptr();
+    if argc < 0 || argv != base + 4 || !blob_is_sane(base, argc as u32) {
+        userland::write_err(b"program: malformed argv blob\r\n");
+        minix_rt::exit(126);
+    }
+
+    let mut buf = [""; ARGV_MAX];
+    // SAFETY: `blob_is_sane` established the contract `parse_args` documents — `argc`
+    // pointers inside the area, each naming a NUL-terminated string inside it.
+    let args = unsafe { userland::parse_args(argc, argv as *const *const u8, &mut buf) };
+
+    // Dispatch on argv[0], the way a multi-call program does — and the reason a *module* can
+    // hold more than one program while the host's registry still maps one path to one module
+    // (§7.2's step 4): the path chooses the module, argv[0] chooses the program in it. `echo`
+    // is what the harness asks this module for; `/bin/sh` is what `init` execs, and the two
+    // arrive by different routes — the harness instantiates and calls, exec goes through
+    // PM, VFS and the kernel — which is why both are here rather than in two modules.
+    let rc = match args.first().copied() {
+        Some("echo") => userland::echo(args),
+        Some("/bin/sh") | Some("sh") => userland::sh(args),
+        Some(name) => {
+            userland::write_err(b"program: no such command: ");
+            userland::write_err(name.as_bytes());
+            userland::write_err(b"\r\n");
+            127
+        }
+        // Unreachable while `blob_is_sane` refuses an empty blob, and handled anyway:
+        // indexing `args[0]` here would be a panic on wasm, which is a trap the harness
+        // would report as this program faulting.
+        None => {
+            userland::write_err(b"program: empty argv\r\n");
+            127
+        }
+    };
+
+    minix_rt::exit(rc);
+}

@@ -7005,6 +7005,89 @@ that family (13, 16, 28): a pointer that belongs to the *caller* dereferenced as
 the kernel's. The reason it could hide so long is the same as finding 31's: nothing on this
 port had ever *read* from a process, only written to one, so the path was never walked.
 
+**34. `RTS_NO_PRIV` is not a bookkeeping flag — it is what makes a process unrunnable — so
+`do_fork`'s privilege link cannot be copied without it.** Found landing M7a step 1 (a program
+as its own module). The program was instantiated at a free slot, spawned, and linked to the
+shared USER privilege structure the way `do_fork` links a new user process
+(`p_priv = priv_addr(USER_PRIV_ID)`, `p_rts_flags |= RTS_NO_PRIV`). The kernel accepted the
+spawn, the instance existed, and its argv area held what the host wrote — and the program never
+ran: an empty syscall trace, `exited === false`, and `minix_runqueues_ok()` reporting an
+inconsistency, which is an enqueued process that is not runnable.
+
+`Proc::is_runnable` is `p_rts_flags == 0`, so `NO_PRIV` on its own means "in a run queue and
+never picked". That is deliberate in MINIX: the flag says *created, not yet started*, clearing it
+is `sched_start_user`'s job, and that reaches the kernel as `SYS_SCHEDULE` →
+`do_schedule_handler`, which clears `NO_PRIV` along with `NO_QUANTUM` — its own comment says "do
+it here until SCHED is ready". `do_fork` sets the flag precisely because fork does not start a
+child; the scheduler does. This port has no SCHED server in the boot chain and so sends no such
+call; what starts a process here is the harness's `minix_proc_spawn`, which stores a zero into
+`p_rts_flags` (`boot_init::enqueue_and_start`'s analogue), and that is the only reason the
+servers and INIT run at all.
+
+So the arch-layer spawn now takes the privilege link and not the flag
+(`kernel-wasm::minix_proc_spawn_user`). The two read as one idea in `do_fork` — "a new user
+process is the shared USER slot *plus* NO_PRIV" — and they are not: the link is about who the
+process may talk to, the flag is about whether it has been started, and in this harness the spawn
+*is* the start. Setting the flag back re-blocked the process the spawn had just made runnable.
+
+What made it quiet: everything the harness could ask before running the loop said the process was
+there. The spawn returned 0, the instance had a valid argv area and an exported entry, and the
+only symptom was silence — plus a run-queue invariant that the harness already checks for other
+reasons, which is what turned "the program did not run" into "a non-runnable process is sitting
+in a queue".
+
+**35. VM has no `vmproc` for any process on wasm, so `brk` has never worked here.** Found landing
+M7a step 2, where `minix_rt::execve` builds its stack frame with `sbrk` and the exec failed with
+`err=-5` before anything reached PM. `sbrk` is `brk(null)` then `brk(new)`, and the *query* was
+what failed: VM's `do_brk` looks the caller up with `vmproc_lookup(ep)` and answers its own
+`EINVAL` — `-5` in VM, which is `EIO` to everyone else (`vm/mod.rs` says so in a comment, and the
+mismatch is left standing) — when there is no `vmproc`. Printing the number made it look like an
+error from the filesystem rather than "VM does not know this process".
+
+The cause is one conjunct in the kernel's answer to `VM_PAGING_QUERY_PROC`, which is the *only*
+thing that tells VM which processes exist: VM's `vm_init_boot` walks the slots asking, and
+allocates a `vmproc` for each slot the kernel reports with `in_use = SLOT_FREE cleared && cr3 !=
+0`. On wasm there is no page table to point `p_cr3` at — a process's address space is its
+instance's linear memory, which the host owns (§5) — so `p_cr3` is 0 for every process and *every*
+slot was reported as not in use. VM therefore had an empty `vmproc` table, and a process with no
+`vmproc` has no heap: `brk` refused, and no userland allocator could run.
+
+It could hide because nothing on wasm had ever allocated. `init`'s shim did not, `userland::sh`
+ran in place inside it without allocating, and the one program this port had run was `echo`, whose
+whole syscall trace is eight writes and an exit. The first thing that needed a heap was the first
+thing that called `execve` — a *frame*, which is the caller's arguments laid out in memory — and
+that is exactly the shape every milestone so far had avoided.
+
+Fixed in the kernel's reply, and only for wasm: a slot is in use when `SLOT_FREE` is clear, and
+the slot's endpoint goes out as the address-space handle in place of a CR3 the port will never
+have. The handle is a stand-in and is documented as one; the walks that would follow it are inert
+because this HAL's `pt_levels` is 0, so a page-table walk reports "not mapped" without
+dereferencing a derived address. It is finding 34's sibling in shape — a flag or id the shipping
+arches always have a real value for, and this port does not — and the honest answer is the same
+one: work out what the flag *means* to its reader before deciding what to put there.
+
+**36. A failure that arrives after the exec has started resetting the process kills the caller, so
+the diagnostic never appears.** Found landing M7a step 4, in the harness's console transcript: an
+exec that had plainly *reached* the host — the copy log showed VFS reading both the frame and the
+path out of the caller, and the kernel reading them again — ended with INIT dead, no shell, and no
+message. Not a hang and not a trap: the process was gone and the only line that would have said
+why was the one its own failure path writes.
+
+The cause was two bugs wearing one silence. The host refused the module because the kernel passed
+the path's length *including* its NUL terminator, so `execModules.get("/bin/sh\0")` found nothing;
+and the refusal was returned to a VFS arm that had already called `VM_EXEC_NEWMEM`, which makes it
+the "partly replaced" case — `err_partial`, and in `exec_restart` that means `sig_proc(SIGKILL)`
+rather than a reply. A wrong answer became a dead process.
+
+Both are fixed, and the fix is the shape worth keeping: on this arm VFS asks the kernel *before*
+resetting anything, because asking costs nothing and cannot fail. A missing module, a file that is
+not a wasm module, a module the engine will not compile — all of them now arrive as an errno the
+caller reports, which is why step 4's failures are one console line instead of an absence.
+
+The general lesson, since this port keeps meeting it: `err_partial` is not a status, it is a
+decision to stop diagnosing. Any path that can reach it should first be sure the failure could not
+have happened earlier.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

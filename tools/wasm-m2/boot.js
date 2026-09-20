@@ -130,6 +130,11 @@ const kernel = new WebAssembly.Instance(kernelModule, {
       haltCode = code;
     },
     host_copy_between: copyBetween,
+    // Exec is module instantiation on this port (§7.2), so the kernel asks here. M2's
+    // instances are stand-ins driven by the harness, not modules chosen by a path, so
+    // there is nothing to instantiate and the answer is the honest one: no module for
+    // that path. M7a's step 2 is where a harness answers it with a real instance.
+    host_exec_module: () => -2, // ENOENT
   },
 });
 

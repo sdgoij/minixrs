@@ -47,7 +47,55 @@ unsafe extern "C" {
         dst_addr: u32,
         bytes: u32,
     ) -> i32;
+    /// Instantiate the module at `request_addr` as the process in `slot`.
+    ///
+    /// This is exec on this port (§7.2 of `ARCH_WASM32.md`): a program *is* a wasm module,
+    /// so "install the new image" is instantiation, and only the host can instantiate. The
+    /// kernel's half is to say which process, which bytes and with what arguments — one
+    /// structure rather than a row of arguments, because this boundary has already paid for a
+    /// dropped parameter (`PORTING_PLAN.md` finding 29: a console write that transferred
+    /// `count = 0` bytes and reported success), and a layout with named fields is one thing both
+    /// sides can read. See [`ExecModuleRequest`].
+    ///
+    /// The image is **not** copied through here. It is the caller's file, already in the
+    /// caller's memory, and the request says whose and where; only the host can read one
+    /// instance's memory on another's behalf (§5.1). Validating a wasm module means compiling
+    /// it, so that is the engine's work — which is why this returns `ENOEXEC` rather than
+    /// saying anything about what was wrong with the bytes.
+    fn host_exec_module(slot: i32, request_addr: u32) -> i32;
 }
+
+/// What the host needs in order to instantiate a module as a process.
+///
+/// `#[repr(C)]` with all four-byte fields, so the host reads six `u32`s at 0, 4, 8, 12, 16 and
+/// 20. The assertions below are the contract rather than a property of the implementation: a
+/// silent layout change here would be read on the other side as plausible numbers.
+///
+/// The addresses are in two different memories, and the field names say which. The image is in
+/// the process named by `image_proc` — the caller, which read the file — while `path_addr` and
+/// `argv_addr` are in this instance's own memory: the path because the caller owns it and the
+/// kernel passes the pointer along, and the arguments because the kernel parsed them out of the
+/// exec frame and had to lay them out where the host can read them.
+pub struct ExecModuleRequest {
+    /// Whose memory `image_addr` refers to: the calling process's slot.
+    pub image_proc: i32,
+    /// Where the module's bytes are, and how many. Not copied: the host reads them where they
+    /// are, so the only cost of a larger program is the engine's compile.
+    pub image_addr: u32,
+    pub image_len: u32,
+    /// The path the caller executed, NUL-terminated, in `image_proc`'s memory, for the host to
+    /// name in what it reports: a message about an image nobody can name is the shape of
+    /// failure this port keeps meeting.
+    pub path_addr: u32,
+    /// `argc` NUL-terminated arguments back to back, in this instance's memory.
+    pub argv_addr: u32,
+    pub argc: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<ExecModuleRequest>() == 24);
+const _: () = assert!(core::mem::offset_of!(ExecModuleRequest, image_addr) == 4);
+const _: () = assert!(core::mem::offset_of!(ExecModuleRequest, path_addr) == 12);
+const _: () = assert!(core::mem::offset_of!(ExecModuleRequest, argc) == 20);
 
 static TSC_SWITCH: AtomicU64 = AtomicU64::new(0);
 static PROFILE_CB: AtomicUsize = AtomicUsize::new(0);
@@ -55,6 +103,18 @@ static PROFILE_CB: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn console_write(byte: u8) {
     // SAFETY: the host supplies every import in this module at instantiation.
     unsafe { host_console_write(byte as u32) };
+}
+
+/// Ask the host to instantiate the module named by `request` as the process in `slot` — exec, on
+/// this port.
+///
+/// A wrapper rather than a re-export so the kernel passes a reference and the narrowing happens
+/// here, next to the layout it depends on.
+pub(crate) fn exec_module(slot: i32, request: &ExecModuleRequest) -> i32 {
+    // SAFETY: the host supplies every import in this module at instantiation, and `request` lives
+    // on the caller's stack, which outlives a call that is synchronous — that is what lets the
+    // import's contract be "valid for the duration of the call".
+    unsafe { host_exec_module(slot, core::ptr::from_ref(request) as u32) }
 }
 
 pub(crate) fn console_read() -> Option<u8> {

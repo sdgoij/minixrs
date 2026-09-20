@@ -37,6 +37,21 @@ pub const AARCH64: BuildTarget = BuildTarget {
     out_dir: "aarch64-unknown-minix",
 };
 
+/// wasm32, whose "userland build" is not a set of executables but a set of *modules*.
+///
+/// It resolves by arch name only, and deliberately not by rustc triple: `target_from_rustc_target`
+/// answers "which userland binaries does an image for this target hold", and the answer for wasm32
+/// is *none* — §7.3's point is that a wasm kernel carries no userland, and the host supplies the
+/// modules. Adding it there would make `crates/kernel/build.rs` look for `target/wasm32-minix/release/*`
+/// and embed them in an initramfs this port does not use. The CLI's question is the other one —
+/// "which image can I build for this arch" — and that has an answer, because the *image* is where
+/// a wasm program comes from (§7.2's step 4).
+pub const WASM32: BuildTarget = BuildTarget {
+    arch: "wasm32",
+    spec: "wasm32-minix",
+    out_dir: "wasm32-minix",
+};
+
 /// Resolve a `BuildTarget` from a rustc `TARGET` env value (as seen by a
 /// build script), or `None` for host/foreign targets.
 pub fn target_from_rustc_target(rustc_target: &str) -> Option<BuildTarget> {
@@ -46,9 +61,9 @@ pub fn target_from_rustc_target(rustc_target: &str) -> Option<BuildTarget> {
 }
 
 /// Resolve a `BuildTarget` from a short arch name ("x86_64", "riscv64",
-/// "aarch64").
+/// "aarch64", "wasm32").
 pub fn target_from_arch(arch: &str) -> Option<BuildTarget> {
-    [X86_64, RISCV64, AARCH64]
+    [X86_64, RISCV64, AARCH64, WASM32]
         .into_iter()
         .find(|&t| arch == t.arch)
 }
@@ -77,6 +92,11 @@ mod tests {
         assert_eq!(target_from_rustc_target("x86_64-pc-windows-msvc"), None);
         assert_eq!(target_from_arch("aarch64"), Some(AARCH64));
         assert_eq!(target_from_arch("mips"), None);
+        // wasm32 builds an image but is not a rustc-triple match: the kernel's build script
+        // asks the triple question, and for wasm32 the answer is "no userland to embed".
+        assert_eq!(target_from_arch("wasm32"), Some(WASM32));
+        assert_eq!(target_from_rustc_target("wasm32-minix"), None);
+        assert_eq!(target_from_rustc_target("wasm32-unknown-unknown"), None);
     }
 
     #[test]

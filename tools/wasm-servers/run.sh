@@ -26,6 +26,11 @@ echo "== building the servers as a wasm module =="
   cargo +nightly build -Z json-target-spec -Z build-std=core,alloc \
     --release --target "$target")
 
+echo "== building a program as a wasm module =="
+(cd "$root/crates/wasm-program" && \
+  cargo +nightly build -Z json-target-spec -Z build-std=core,alloc \
+    --release --target "$target")
+
 if [ ! -f "$wasm_opt" ]; then
   echo "error: Binaryen not found at $wasm_opt" >&2
   echo "       install with: npm install binaryen --prefix tools/fork-spike/.tools --no-save" >&2
@@ -36,21 +41,37 @@ mkdir -p "$here/build"
 cp "$root/crates/kernel-wasm/target/wasm32-minix/release/kernel-wasm.wasm" \
    "$here/build/kernel.wasm"
 
-# The RAM disk instance is given the boot filesystem image, which the QEMU builds
-# already produce. A clean checkout has none, and `mkminixfs` will warn about the
-# userland binaries it cannot find and still write a valid root tree -- enough for
-# this harness, which checks that the image reaches the instance and that the
-# device is sized from it rather than from a constant.
-image="$root/target/images/x86_64-pc-minix/minixfs.img"
+# The RAM disk instance is given the boot filesystem image. On the other arches that image holds
+# ELF executables built by `just build`; here it holds the *program module* (§7.2's step 4), so
+# the pipeline is: build the module, Asyncify it, stage it where the image builder looks, and
+# build the image from it. An image whose module is stale is worse than no image, because the
+# failure it produces is an exec after a successful boot.
+wasm_release="$root/target/wasm32-minix/release"
+mkdir -p "$wasm_release"
+cp "$here/build/program.async.wasm" "$wasm_release/program.async.wasm"
+
+image="$root/target/images/wasm32-minix/minixfs.img"
+echo "== building the wasm boot filesystem image =="
+(cd "$root" && cargo run -q -p boot-image --bin mkminixfs wasm32)
+
 if [ ! -f "$image" ]; then
-  echo "== building the boot filesystem image =="
-  (cd "$root" && cargo run -q -p boot-image --bin mkminixfs x86_64)
+  echo "error: no image at $image" >&2
+  exit 1
 fi
 
 echo "== applying Asyncify to the servers =="
 node "$wasm_opt" --asyncify \
   "$root/crates/wasm-servers/target/wasm32-minix/release/wasm_servers.wasm" \
   -o "$here/build/servers.async.wasm"
+
+# A program module needs the same treatment, for the same reason and more: the dispatch loop
+# reads `asyncify_get_state` after every entry to tell a blocked process from a finished one,
+# so a module that was not instrumented cannot be driven at all — and a program that blocks
+# (step 2 of the M7a plan) has to unwind through Asyncify for the host to get control back.
+echo "== applying Asyncify to the program =="
+node "$wasm_opt" --asyncify \
+  "$root/crates/wasm-program/target/wasm32-minix/release/wasm_program.wasm" \
+  -o "$here/build/program.async.wasm"
 
 echo
 # Bounded, because a boot that deadlocks deadlocks *silently*: an instance waiting on

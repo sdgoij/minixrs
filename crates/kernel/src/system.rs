@@ -246,10 +246,26 @@ const EXEC_PS_STR_OFF: usize = 40;
 //   offset 24: frame_ptr  (vir_bytes / u64) — exec frame in caller's space
 //   offset 32: frame_len  (vir_bytes / u64)
 // Reply fields:
-//   offset 16: entry      (u64) — entry point of the new image
+//   offset 16: entry      (u64) — ELF: entry point of the new image
 //   offset 24: newsp      (u64) — new user stack pointer (reply)
-//   offset 24: code_start (u64) — page-aligned code range start (request)
-//   offset 32: code_end   (u64) — page-aligned code range end (request)
+//   offset 24: code_start (u64) — ELF: page-aligned code range start (request)
+//   offset 32: code_end   (u64) — ELF: page-aligned code range end (request)
+//   offset 56: path_ptr   (vir_bytes / u64) — NUL-terminated executable path
+//
+// Two of these words carry the *image*, in each arch's own currency, and which currency is
+// which is the whole of the module arm's request:
+//
+//   ELF   offset 16 = entry point, offset 24 = start of the code range VM will map
+//   wasm  offset 16 = address of the executable's bytes, offset 24 = how many
+//
+// It is the same fact both times — where the new program is. The ELF arm names a *mapping*,
+// because the bytes arrive through VM's file regions and never pass through the kernel; the
+// module arm names the bytes themselves, because the host instantiates them and the caller
+// (VFS) is what read them off the disk. The path is separate and stays separate: on this arm it
+// is only what the host says when something is wrong with those bytes.
+//
+// The frame at 40/48 is shared by both, and is the reason argv crosses this boundary at all:
+// the caller built the arguments, so the kernel has to take the frame apart to know them.
 const EXEC_LOAD_ENDPT_OFF: usize = 8;
 const EXEC_LOAD_ENTRY_OFF: usize = 16;
 const EXEC_LOAD_CODE_START_OFF: usize = 24;
@@ -258,6 +274,13 @@ const EXEC_LOAD_FRAME_PTR_OFF: usize = 40;
 const EXEC_LOAD_FRAME_LEN_OFF: usize = 48;
 const EXEC_LOAD_PC_OFF: usize = 16;
 const EXEC_LOAD_NEWSP_OFF: usize = 24;
+// Read only by the wasm arm, and written only by VFS's module arm — the two go together, and the
+// ELF arm neither sends nor reads it, because on that arm the entry point and code range are what
+// name the image and nothing needs to name it in words. Documented here rather than defined
+// conditionally, because the message layout is one thing and which arch reads which field is
+// another.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const EXEC_LOAD_PATH_PTR_OFF: usize = 56;
 
 // Exec finalization message offsets (SYS_EXEC at call 60)
 //
@@ -3550,6 +3573,13 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         let frame_ptr = msg_read_u64(msg, EXEC_LOAD_FRAME_PTR_OFF);
         let frame_len = msg_read_u64(msg, EXEC_LOAD_FRAME_LEN_OFF);
 
+        // The entry point and the code range describe an ELF image; on wasm there is no
+        // such image, because the module the host instantiates supplies its own entry and
+        // its own code. Named here rather than left to the lint so the omission reads as a
+        // property of the port instead of an oversight.
+        #[cfg(target_arch = "wasm32")]
+        let _ = (entry, code_start, code_end);
+
         // Frames bounded by ARG_MAX. No ELF bound: the image is
         // file-mapped, so the executable size is unlimited.
         if frame_len == 0 || frame_len > 1024 * 1024 {
@@ -3610,6 +3640,43 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         // kernel builds the fresh page table, clears the code range so the
         // file regions fault on first touch, maps stack + brk into it, and
         // sets up the frame and registers.
+        //
+        // On wasm there is no page table and no file region to fault on, because the image is
+        // a wasm module the host instantiates (§7.2) — and since step 4 the bytes come out of
+        // the image the caller just read (VFS read the file; `EXEC_LOAD_ENTRY_OFF` and
+        // `EXEC_LOAD_CODE_START_OFF` carry where they are and how many, in the caller's
+        // memory). The kernel does not read them: what a wasm module is cannot be known without
+        // compiling it, which is the engine's job, so the kernel names the bytes and the host
+        // finds out. What it does keep for itself is the frame, because argv comes out of it.
+        #[cfg(target_arch = "wasm32")]
+        let loaded = {
+            let image_addr = msg_read_u64(msg, EXEC_LOAD_ENTRY_OFF);
+            let image_len = msg_read_u64(msg, EXEC_LOAD_CODE_START_OFF);
+            let path_ptr = msg_read_u64(msg, EXEC_LOAD_PATH_PTR_OFF);
+            if image_addr == 0
+                || image_len == 0
+                || image_addr > crate::pagetable::MAX_USER_ADDRESS
+                || image_len > crate::pagetable::MAX_USER_ADDRESS
+            {
+                crate::hal::free_phys_contig(frame_base, frame_pages);
+                return crate::ipc::EINVAL;
+            }
+            match crate::syscall::exec_module_for_target(
+                rp,
+                (*caller).p_nr,
+                image_addr,
+                image_len,
+                path_ptr,
+                &args.argv[..args.argc],
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    crate::hal::free_phys_contig(frame_base, frame_pages);
+                    return e as i32;
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let loaded = match crate::syscall::exec_elf_for_target(
             rp,
             entry,
@@ -5168,7 +5235,21 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 // Return boot process info for a given slot:
                 //   VM_PAGING_CR3_OFF = in_use (u64, 0 or 1)
                 //   VM_PAGING_VA_OFF  = endpoint (u64)
-                //   VM_PAGING_PA_OFF  = CR3 (u64)
+                //   VM_PAGING_PA_OFF  = address-space handle (u64)
+                //
+                // This is the only thing that tells VM which processes exist: its
+                // `vm_init_boot` walks the slots asking and allocates a vmproc for each live
+                // one, and a process without a vmproc has no heap — `brk` answers EINVAL and
+                // no userland allocator can run at all.
+                //
+                // On wasm a process's address space is its instance's linear memory, which
+                // the host owns (§5), so `p_cr3` is 0 for every process and always will be.
+                // Reporting "not in use" because of that would hide every process from VM,
+                // and it did: nothing before M7a allocated (that is what finding 35 is), so
+                // the reply was never wrong in a way that showed. The slot's endpoint stands
+                // in as the handle instead — one per live process, never reused while it
+                // lives — and the walks that would follow it are inert, because this HAL's
+                // `pt_levels` is 0 and a walk reports "not mapped" without dereferencing.
                 let slot = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
                 let rp = crate::table::proc_addr(slot);
                 if rp.is_null() {
@@ -5176,19 +5257,21 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     msg_write_u64(msg, VM_PAGING_VA_OFF, 0);
                     msg_write_u64(msg, VM_PAGING_PA_OFF, 0);
                 } else {
-                    let flags = (*rp)
+                    let live = (*rp)
                         .p_rts_flags
-                        .load(core::sync::atomic::Ordering::Relaxed);
-                    let cr3 = (*rp).p_seg.p_cr3;
-                    let in_use =
-                        if (flags & crate::proc::RtsFlags::SLOT_FREE.bits() == 0) && cr3 != 0 {
-                            1
-                        } else {
-                            0
-                        };
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                        & crate::proc::RtsFlags::SLOT_FREE.bits()
+                        == 0;
+                    #[cfg(target_arch = "wasm32")]
+                    let (in_use, as_handle) = (u64::from(live), (*rp).p_endpoint as u64);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (in_use, as_handle) = {
+                        let cr3 = (*rp).p_seg.p_cr3;
+                        (u64::from(live && cr3 != 0), cr3)
+                    };
                     msg_write_u64(msg, VM_PAGING_CR3_OFF, in_use);
                     msg_write_u64(msg, VM_PAGING_VA_OFF, (*rp).p_endpoint as u64);
-                    msg_write_u64(msg, VM_PAGING_PA_OFF, cr3);
+                    msg_write_u64(msg, VM_PAGING_PA_OFF, as_handle);
                 }
                 OK
             }

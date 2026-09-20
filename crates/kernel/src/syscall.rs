@@ -1187,6 +1187,107 @@ pub unsafe fn exec_elf_for_target(
     }
 }
 
+/// Most arguments an exec may carry to the host — the same bound `userland::parse_args`
+/// gives a program, so a blob this size is always one a program can present.
+#[cfg(target_arch = "wasm32")]
+const EXEC_ARGV_MAX: usize = 64;
+
+/// The bytes the host needs to start a module as a process: the arguments, NUL-terminated
+/// and back to back.
+#[cfg(target_arch = "wasm32")]
+const EXEC_ARGV_BLOB_MAX: usize = 512;
+
+/// Install a new image into `rp` by asking the host to instantiate a module — exec on this port
+/// (§7.2 of `ARCH_WASM32.md`).
+///
+/// There is no address space to build and no entry point to program: the image *is* the bytes the
+/// caller read off the disk, the host owns instantiating them, and the instance the process was
+/// running is discarded rather than modified. So this function's whole job is to assemble the two
+/// things the host cannot work out for itself — where the image is and what the arguments are —
+/// and to leave the process in the state the shared tail of `do_exec_load_handler` expects.
+///
+/// Unlike `exec_elf_for_target`, this does **not** make the target runnable. The caller does that,
+/// exactly as on the other arches, because it is the same two lines of `p_rts_flags` work either
+/// way.
+///
+/// `ExecLoadResult` is returned with both fields zero: the host decides where the new instance
+/// starts, and PC/RSP are what the ELF arches put in the caller's reply. PM ignores them here
+/// (`exec_restart` does not use them), so a zero says "no such thing" rather than standing in for
+/// a value.
+///
+/// # Safety
+///
+/// `rp` must point to a valid, in-use `Proc`; `image_addr`/`image_len` must name the image's bytes
+/// inside `image_proc`'s address space and `path_ptr` a NUL-terminated path in the same place;
+/// `argv` must be the arguments parsed out of the exec frame.
+#[cfg(target_arch = "wasm32")]
+pub unsafe fn exec_module_for_target(
+    rp: *mut crate::proc::Proc,
+    image_proc: i32,
+    image_addr: u64,
+    image_len: u64,
+    path_ptr: u64,
+    argv: &[&str],
+) -> Result<ExecLoadResult, i64> {
+    unsafe {
+        if argv.is_empty() || argv.len() > EXEC_ARGV_MAX {
+            return Err(-22); // EINVAL
+        }
+        // The host reads these out of other instances' memories, so a value that could not be an
+        // address in a 32-bit space is refused here rather than truncated into one that could.
+        if image_addr > u32::MAX as u64 || image_len > u32::MAX as u64 || path_ptr > u32::MAX as u64
+        {
+            return Err(-22);
+        }
+
+        // The blob is the layout the host parses and the module's argv area is filled from:
+        // NUL-terminated strings back to back, with the count travelling separately. No
+        // pointers: a pointer that means something in *this* address space means nothing in
+        // the instance the host is about to create, which is the whole reason the arguments
+        // are copied rather than referenced.
+        let mut blob = [0u8; EXEC_ARGV_BLOB_MAX];
+        let mut at = 0usize;
+        for arg in argv {
+            let bytes = arg.as_bytes();
+            if at + bytes.len() + 1 > blob.len() {
+                return Err(-7); // E2BIG
+            }
+            blob[at..at + bytes.len()].copy_from_slice(bytes);
+            at += bytes.len() + 1;
+        }
+
+        // The image and the path are the caller's; the arguments are ours. Both buffers here are
+        // this instance's stack, and the import reads everything it was pointed at before it
+        // returns — which is what lets its contract be just "valid for the duration of the call".
+        let request = crate::hal::ExecModuleRequest {
+            image_proc,
+            image_addr: image_addr as u32,
+            image_len: image_len as u32,
+            path_addr: path_ptr as u32,
+            argv_addr: blob.as_ptr() as u32,
+            argc: argv.len() as u32,
+        };
+        let r = crate::hal::exec_module((*rp).p_nr, &request);
+        if r != 0 {
+            return Err(r as i64);
+        }
+
+        // The image is replaced, so a message the old image had queued for delivery must not
+        // be copied into the new one. (The other half of that bookkeeping — sweeping the
+        // process's extra threads, which die with the old image — is in the caller's shared
+        // tail, so it happens on every arch in one place.)
+        let old_mf = (*rp)
+            .p_misc_flags
+            .load(core::sync::atomic::Ordering::Relaxed);
+        (*rp).p_misc_flags.store(
+            old_mf & !crate::proc::MiscFlags::DELIVERMSG.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+
+        Ok(ExecLoadResult { entry: 0, rsp: 0 })
+    }
+}
+
 /// Get the signal manager endpoint for a process.
 ///
 /// Returns the endpoint of the signal manager (typically PM) for the

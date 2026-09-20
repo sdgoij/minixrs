@@ -106,6 +106,46 @@ pub extern "C" fn minix_proc_spawn(slot: i32, endpoint: i32) -> i32 {
     }
 }
 
+/// The same, for a slot that is an **ordinary user process** rather than a server.
+///
+/// `minix_proc_spawn` above fills in a slot and nothing else, which is right for every server
+/// here: `proc_init` already attached a privilege structure of its own to each `BOOT_IMAGE`
+/// entry. A slot outside that image has none, and a priv-less slot is not the same thing as a
+/// user process — it cannot send to PM, VFS, VM or DS, because there is no `s_ipc_to` mask to
+/// allow it. So the two exports are separate rather than one with a flag, and the harness asks
+/// the kernel which kind it made (`minix_proc_kind`) instead of trusting the slot number.
+///
+/// The privilege link is `do_fork`'s, which is the kernel's own statement of what a new user
+/// process is (`system.rs`: `rpc->p_priv = priv_addr(USER_PRIV_ID)`). Exec keeps the caller's
+/// structure rather than taking a new one, so a program started from INIT gets this one too —
+/// which is why the link is here, in the arch layer that creates the process, and not in a
+/// program module that cannot see the privilege table.
+///
+/// What is deliberately *not* copied from `do_fork` is its `RTS_NO_PRIV`. That flag is MINIX's
+/// "created, but the scheduler has not started it yet", and clearing it is `sched_start_user`'s
+/// job — reached here through `do_schedule_handler`, which there is no SCHED server to call in
+/// this harness. `minix_proc_spawn` above is what starts a process here (it stores a zero into
+/// `p_rts_flags`, which is the only reason the servers and INIT run at all), and `NO_PRIV` on
+/// its own makes a process unrunnable — `is_runnable` is `p_rts_flags == 0`. So matching
+/// `do_fork` line for line here would re-block the process the spawn just started: the program
+/// is never picked, its trace stays empty, and the run-queue check fails.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_proc_spawn_user(slot: i32, endpoint: i32) -> i32 {
+    let rc = minix_proc_spawn(slot, endpoint);
+    if rc != 0 {
+        return rc;
+    }
+    unsafe {
+        let rp = proc_at(slot);
+        if rp.is_null() {
+            return -1;
+        }
+        (*rp).p_priv = kernel::r#priv::priv_addr_mut(kernel::r#priv::USER_PRIV_ID)
+            as *mut kernel::r#priv::Priv;
+        0
+    }
+}
+
 /// Set the boot notification that starts PM's chain. Returns 0, or -1 if PM's
 /// privilege structure is not reachable.
 ///

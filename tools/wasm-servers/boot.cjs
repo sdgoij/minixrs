@@ -21,17 +21,20 @@ const path = require('path');
 const buildDir = path.join(__dirname, 'build');
 const kernelPath = path.join(buildDir, 'kernel.wasm');
 const serverPath = path.join(buildDir, 'servers.async.wasm');
-// The boot filesystem image, in the same place the QEMU builds write it. This
-// harness does not build userland, so it reuses whichever image is on disk — any
-// valid MinixFS image will do here, because what is under test is that the image
-// reaches the RAM disk instance and that the device is sized from it.
+// A program as its own module (`wasm-program`), Asyncify'd for the same reason the servers
+// are: the harness's dispatch loop reads Asyncify's state after every entry, so a module that
+// was not instrumented has no `asyncify_get_state` to ask.
+const programPath = path.join(buildDir, 'program.async.wasm');
+// The boot filesystem image, in the same place the image builder writes it. For wasm32 that image
+// carries the *program module* rather than ELF executables (see `run.sh`), so it is both the root
+// filesystem and — since step 4 — where an exec's bytes come from.
 const ramdiskImagePath = path.join(
   __dirname,
   '..',
   '..',
   'target',
   'images',
-  'x86_64-pc-minix',
+  'wasm32-minix',
   'minixfs.img'
 );
 // `RAMDISK_IMAGE_VA` on wasm32: exactly `MAX_USER_ADDRESS`, so the window is
@@ -155,6 +158,126 @@ function copyBetween(srcProc, srcAddr, dstProc, dstAddr, bytes) {
   return result;
 }
 
+// ------------------------------------------------------------------ exec
+//
+// Exec on this port is module instantiation (§7.2): the kernel has no image to install, so it
+// names the process, the bytes and the arguments, and the host creates the instance. Since
+// §7.2's step 4 those bytes are the *executable* — the file VFS read off the boot image — which
+// is why the host compiles them here rather than looking anything up: the image is the module
+// store, and an executable that is not a module this engine can run is a failure the engine
+// reports itself.
+//
+// The addresses in the request are in two different memories, and the kernel's comment on
+// `ExecModuleRequest` says which is which: the image is in the calling process's, while the path
+// and the arguments are in the kernel's. Only the host owns both (§5.1), which is the whole
+// reason the request is addresses rather than bytes.
+
+const ENOEXEC = -8;
+const ENOMEM = -12;
+
+/// Field offsets of `ExecModuleRequest` — which asserts its own layout on the Rust side.
+const EXEC_REQ_IMAGE_PROC = 0;
+const EXEC_REQ_IMAGE_ADDR = 4;
+const EXEC_REQ_IMAGE_LEN = 8;
+const EXEC_REQ_PATH_ADDR = 12;
+const EXEC_REQ_ARGV_ADDR = 16;
+const EXEC_REQ_ARGC = 20;
+
+/// Read a NUL-terminated string from an instance's memory, bounded: the string comes from a
+/// process's address space, so the scan has to end somewhere even when the terminator does not.
+function cString(mem, addr, max) {
+  const bytes = new Uint8Array(mem.buffer);
+  let end = addr;
+  const limit = Math.min(addr + max, bytes.length);
+  while (end < limit && bytes[end] !== 0) end += 1;
+  return Buffer.from(bytes.subarray(addr, end)).toString('utf8');
+}
+
+/// The host's half of exec: compile the module the kernel named and instantiate it as the
+/// process in `slot`, with the arguments it supplied.
+///
+/// Returns 0, or a negative errno. `ENOEXEC` is the interesting one and it is deliberately one
+/// answer to several causes — bytes that are not a module, a module whose imports this port does
+/// not supply, a module with no entry this port knows how to call — because they all mean the
+/// same thing to the caller: this executable is not a program that can run here.
+function hostExecModule(slot, requestAddr) {
+  const kernelMemory = kernel.exports.memory;
+  const req = new DataView(kernelMemory.buffer);
+  const imageProc = req.getInt32(requestAddr + EXEC_REQ_IMAGE_PROC, true);
+  const imageAddr = req.getUint32(requestAddr + EXEC_REQ_IMAGE_ADDR, true);
+  const imageLen = req.getUint32(requestAddr + EXEC_REQ_IMAGE_LEN, true);
+  const pathAddr = req.getUint32(requestAddr + EXEC_REQ_PATH_ADDR, true);
+  const argvAddr = req.getUint32(requestAddr + EXEC_REQ_ARGV_ADDR, true);
+  const argc = req.getUint32(requestAddr + EXEC_REQ_ARGC, true);
+
+  const imageMemory = memoryFor(imageProc);
+  if (imageMemory === null) {
+    note('the exec request names a process the host does not have', `proc=${imageProc}`);
+    return EINVAL;
+  }
+  const st = procs.find((p) => p.spec.slot === slot);
+  if (st === undefined || st.inst === null) return EINVAL;
+
+  // Where and how big, without a copy: the bytes stay in the process that read them, and both
+  // checks are the engine's — a range past the end of the memory throws here.
+  const image = new Uint8Array(imageMemory.buffer, imageAddr, imageLen);
+  const path = cString(imageMemory, pathAddr, 256);
+  const argv = [];
+  let at = argvAddr;
+  for (let i = 0; i < argc; i += 1) {
+    const arg = cString(kernelMemory, at, 4096);
+    argv.push(arg);
+    at += Buffer.byteLength(arg, 'utf8') + 1;
+  }
+
+  let module;
+  try {
+    // The compile *is* the validation: nothing else about a wasm module can be checked without
+    // doing this, which is why the kernel hands over bytes it has not looked at.
+    module = new WebAssembly.Module(image);
+  } catch (e) {
+    note(
+      'the executable is not a wasm module this port can run',
+      `path=${JSON.stringify(path)} (${imageLen} bytes): ${e.message}`
+    );
+    return ENOEXEC;
+  }
+
+  // A program module exports one entry, by convention: `minix_program_main(argc, argv)`. The
+  // path chose the module and `argv[0]` chooses the program inside it, so the entry does not
+  // have to be looked up by name — but it does have to be there, and saying so beats
+  // instantiating a module whose entry the harness would then call and fail to find.
+  const entry = 'minix_program_main';
+  if (!WebAssembly.Module.exports(module).some((e) => e.name === entry && e.kind === 'function')) {
+    note('the module has no program entry', `path=${JSON.stringify(path)}: expected ${entry}`);
+    return ENOEXEC;
+  }
+
+  try {
+    // The old instance and its memory are kept: the checks read the reports a replaced image left
+    // behind in them (`init_report_ptr`'s three values), and "the old instance is gone" is a
+    // claim about which instance the *slot* runs, not about the object.
+    st.prev = { inst: st.inst, memory: st.memory, entry: st.entry };
+    instantiate(st, module, argv, entry);
+    st.exited = false;
+    st.exec = {
+      path,
+      argv,
+      moduleBytes: imageLen,
+      // Where in the console transcript the swap happened, so a check can distinguish a line
+      // the *new* image wrote from one the old image wrote before it was replaced. The
+      // abandoned image cannot write anything after this point: its blocked syscall was
+      // dropped with `st.pending` and the host never re-enters it.
+      timelineAt: timeline.length,
+      atSyscall: st.syscalls,
+    };
+    return 0;
+  } catch (e) {
+    note('instantiating the exec target module failed', `${path}: ${e}`);
+    return ENOMEM;
+  }
+}
+
 // ----------------------------------------------------------- kernel instance
 
 const kernelModule = new WebAssembly.Module(fs.readFileSync(kernelPath));
@@ -184,6 +307,8 @@ const kernel = new WebAssembly.Instance(kernelModule, {
       haltCode = code;
     },
     host_copy_between: copyBetween,
+    // The kernel's exec arm asks for the new image here (§7.2); see `hostExecModule`.
+    host_exec_module: hostExecModule,
   },
 });
 
@@ -192,6 +317,12 @@ kernel.exports.minix_kernel_init();
 // ---------------------------------------------------------- server instances
 
 const serverModule = new WebAssembly.Module(fs.readFileSync(serverPath));
+const programModule = new WebAssembly.Module(fs.readFileSync(programPath));
+
+// The program's arguments, as the host supplies them. The module dispatches on argv[0] and
+// `echo` prints the rest, so this array is the thing the console line below is compared
+// against — one array rather than a literal in the spec and another in the check.
+const PROGRAM_ARGV = ['echo', 'hello', 'from', 'a', 'module'];
 
 // Boot order, and the process numbers `BOOT_IMAGE` gives them: DS is 6, RS is 2,
 // PM is 0. With generation 0 an endpoint equals its process number, which is why
@@ -240,34 +371,65 @@ const specs = [
   // The control: the same client, never announced to RS, so DS has no label for
   // it. Its publish must still be refused.
   { slot: 21, entry: 'minix_ds_client_unregistered', label: 'unregistered' },
+  // A program as its own module (M7a step 1). Not a server and not a boot process: its slot
+  // is outside `BOOT_IMAGE`, so the kernel has no privilege structure to attach and the host
+  // asks for the shared USER slot explicitly (`spawnAsUser`) — the same link `do_fork` makes
+  // for a new user process. `argv` is written into the module's own argv area before the
+  // entry runs; the entry takes it as a C argv, so the host passes the count and a pointer.
+  //
+  // `startAfterBoot`: the kernel must not have it in the run queue during boot. A spawned slot
+  // is immediately runnable, so a boot-time program is scheduled at the first opportunity —
+  // which here is while INIT is blocked on its `getpid` reply, where it wrote into the middle
+  // of INIT's console line. The module's instance is created with the others; only the spawn
+  // waits.
+  {
+    slot: 22,
+    entry: 'minix_program_main',
+    label: 'program',
+    argv: PROGRAM_ARGV,
+    spawnAsUser: true,
+    startAfterBoot: true,
+    module: programModule,
+  },
 ];
 
 for (const s of specs) s.endpoint = kernel.exports.minix_make_endpoint(s.slot);
 
-function makeServer(spec) {
-  const memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
-  const st = {
-    spec,
-    memory,
-    inst: null,
-    started: false,
-    exited: false,
-    pending: null,
-    blockedCount: 0,
-    dataPtr: 0,
-    scratch: 0,
-    syscalls: 0,
-    trace: [],
-    // The *last* few syscalls, as well as the first `TRACE_LIMIT`. The checks that
-    // ask "is it in its main loop?" are asking about the tail, but a head-only
-    // trace answers with whichever server made the most calls before it looped:
-    // VM queries the kernel about every process slot first (`vm_init_boot`), which
-    // is 256 calls, so a 64-entry head never reaches its `RECEIVE`. The client
-    // checks need the head, so both are kept.
-    tail: [],
-  };
+/// Write argv into the instance's argv area, in the layout the module declares: `argc`, then
+/// a pointer array, then the NUL-terminated strings.
+///
+/// The offsets are the module's, not the host's — the area's address comes from
+/// `argv_area_ptr()`, which is the only way a static inside a wasm module can be named. What
+/// the host writes is the harness's own `spec.argv`, and what the program prints is what it
+/// read back, so the two ends are compared rather than the host being asserted against
+/// itself.
+function writeArgv(st, argv) {
+  const base = st.inst.exports.argv_area_ptr();
+  const view = new DataView(st.memory.buffer);
+  view.setUint32(base, argv.length, true);
+  let at = base + 4 + 4 * argv.length;
+  argv.forEach((arg, i) => {
+    view.setUint32(base + 4 + 4 * i, at, true);
+    const bytes = Buffer.from(arg, 'utf8');
+    new Uint8Array(st.memory.buffer, at, bytes.length).set(bytes);
+    // Wasm memory starts zeroed and nothing has written here, so the byte after each string
+    // is already the terminator the entry scans for.
+    at += bytes.length + 1;
+  });
+  return base;
+}
 
-  const imports = {
+/// Build the import object an instance of this slot gets.
+///
+/// A function of the *slot* rather than of the instance, because exec replaces a slot's
+/// instance and the replacement has to talk to the kernel through the same gate, in the same
+/// slot's name. `imports.env.memory` is read here, so `st.memory` must already be the memory
+/// the new instance is to own.
+function makeImports(st) {
+  const memory = st.memory;
+  const spec = st.spec;
+
+  return {
     env: {
       memory,
       host_cycles: () => BigInt((cycles += 1000)),
@@ -336,21 +498,80 @@ function makeServer(spec) {
       },
     },
   };
+}
 
-  st.inst = new WebAssembly.Instance(serverModule, imports);
+/// Give a slot an instance to run: a fresh memory, the imports above, the module's entry, and
+/// its arguments.
+///
+/// Called once per slot at boot and again by exec, which is the whole reason it is a function
+/// of the *slot*: exec replaces what a slot runs — its address space, its entry, its
+/// arguments — without changing which slot it is, and without the kernel having to know that
+/// the host did it.
+function instantiate(st, module, argv, entry) {
+  st.memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
+  st.inst = new WebAssembly.Instance(module, makeImports(st));
   // The module names its own scratch region; it is not derived from a linker
   // default. The 16-byte Asyncify struct goes at its start and the unwind stack
   // follows.
   st.scratch = st.inst.exports.asyncify_scratch_ptr();
   st.dataPtr = st.scratch;
   const bufStart = st.dataPtr + STRUCT_SIZE;
-  writeU32(memory, st.dataPtr + 0, bufStart);
-  writeU32(memory, st.dataPtr + 4, bufStart + BUF_SIZE);
-  writeU32(memory, st.dataPtr + 8, bufStart);
+  writeU32(st.memory, st.dataPtr + 0, bufStart);
+  writeU32(st.memory, st.dataPtr + 4, bufStart + BUF_SIZE);
+  writeU32(st.memory, st.dataPtr + 8, bufStart);
+  // The entry is the *module's*, not the slot's: `minix_init` and `minix_program_main` belong
+  // to different modules, and which one a slot runs is what changes at exec.
+  st.entry = entry ?? st.spec.entry;
+  // What the entry is called with. A server's entry takes nothing; a program's takes a C
+  // argv, which is only knowable once the instance exists — the argv area is a static inside
+  // it. A module instantiated by exec gets the arguments the caller exec'd with.
+  st.entryArgs = [];
+  if (argv !== undefined) {
+    st.entryArgs = [argv.length, writeArgv(st, argv) + 4];
+  }
+  // Whatever the replaced image was waiting on went with it: an exec does not return to the
+  // syscall it replaced.
+  st.pending = null;
+}
+
+function makeServer(spec) {
+  const st = {
+    spec,
+    memory: null,
+    inst: null,
+    started: false,
+    exited: false,
+    pending: null,
+    blockedCount: 0,
+    dataPtr: 0,
+    scratch: 0,
+    syscalls: 0,
+    entry: spec.entry,
+    entryArgs: [],
+    // Where the instance running here now came from: `undefined` for one the harness created
+    // at boot, and a record of the exec for one the kernel asked for.
+    exec: undefined,
+    // The instance (and memory) this slot was running before an exec, kept so the checks can
+    // read what the replaced image left in it.
+    prev: undefined,
+    trace: [],
+    // The *last* few syscalls, as well as the first `TRACE_LIMIT`. The checks that
+    // ask "is it in its main loop?" are asking about the tail, but a head-only
+    // trace answers with whichever server made the most calls before it looped:
+    // VM queries the kernel about every process slot first (`vm_init_boot`), which
+    // is 256 calls, so a 64-entry head never reaches its `RECEIVE`. The client
+    // checks need the head, so both are kept.
+    tail: [],
+  };
+
+  instantiate(st, spec.module ?? serverModule, spec.argv);
+
+  // The boot image reaches the RAM disk instance's memory before its entry point runs (see
+  // below), so nothing else may grow that memory between here and there.
   return st;
 }
 
-const procs = specs.map(makeServer);
+const procs = specs.map((s) => makeServer(s));
 
 // ------------------------------------------------ the boot filesystem image
 //
@@ -386,11 +607,26 @@ const ramdiskImage = fs.readFileSync(ramdiskImagePath);
   );
 }
 
-const spawnFailures = specs.filter(
-  (s) => kernel.exports.minix_proc_spawn(s.slot, s.endpoint) !== 0
-);
+// A spec marked `startAfterBoot` is not a boot process: the host creates it once the boot
+// chain has converged, which is what an exec does on the shipping arches (the kernel asks, and
+// the host instantiates). Here the harness asks, so M7a step 1 is the module being real rather
+// than the request being real — but the timing has to match either way, and not only for
+// faithfulness: a program spawned into the boot run queue is *scheduled* during boot, and this
+// one ran while INIT was blocked on its `getpid` reply, splitting INIT's console line in half.
+// The kernel was right and the harness was early.
+function spawnInstance(s) {
+  return s.spawnAsUser
+    ? kernel.exports.minix_proc_spawn_user(s.slot, s.endpoint)
+    : kernel.exports.minix_proc_spawn(s.slot, s.endpoint);
+}
+
+const bootSpecs = specs.filter((s) => !s.startAfterBoot);
+const startSpecs = specs.filter((s) => s.startAfterBoot);
+const startFailures = [];
+
+const spawnFailures = bootSpecs.filter((s) => spawnInstance(s) !== 0);
 check(
-  'the kernel accepts every instance into its table',
+  'the kernel accepts every boot instance into its table',
   spawnFailures.length === 0,
   spawnFailures.map((s) => s.label).join(', ')
 );
@@ -424,7 +660,7 @@ function run(st) {
     st.inst.exports.asyncify_start_rewind(st.dataPtr);
   }
   st.started = true;
-  st.inst.exports[st.spec.entry]();
+  st.inst.exports[st.entry](...st.entryArgs);
   const state = st.inst.exports.asyncify_get_state();
   if (state === STATE_UNWINDING) return;
   st.exited = true;
@@ -435,7 +671,20 @@ let steps = 0;
 let converged = true;
 for (;;) {
   const slot = kernel.exports.minix_step();
-  if (slot === -1) break;
+  if (slot === -1) {
+    // Nothing is runnable, which for this harness is what "the boot chain converged" means. It
+    // is also the moment the host owes the `startAfterBoot` instances: a program must not be in
+    // the run queue during boot, or the kernel schedules it in the middle of another process's
+    // console output — which is what this harness did first, splitting INIT's `pid=` line while
+    // INIT was blocked on the reply. Once, then dispatch again; the second quiescence is the end.
+    if (startSpecs.length > 0) {
+      for (const s of startSpecs.splice(0)) {
+        if (spawnInstance(s) !== 0) startFailures.push(s);
+      }
+      continue;
+    }
+    break;
+  }
   // A safety net, not a bound: the exchange adds round trips, and a resume
   // consumes a step like a first run does. A runaway is caught by the syscall
   // budget instead, which names the instance -- and now throws rather than
@@ -931,25 +1180,36 @@ check(
   `line=${JSON.stringify(pidLine)} (expected one ending "init: pid=11")`
 );
 
-// And it ended, by exiting rather than by trapping: the last syscall it made was
-// EXIT, which is the only thing that lets the harness tell the two traps apart.
+// And the process ended by exiting rather than by trapping: the last syscall in the slot's
+// whole history is EXIT, which is the only thing that lets the harness tell the two traps
+// apart. Whose exit it is matters and is not INIT's: `minix_init`'s last step is the exec,
+// which replaces it, so this is the exit the *shell* takes in the same slot one image later.
+// A check saying so is below (M7a step 2), including the negative control that says the
+// replacement happened rather than the failed-exec path being taken.
 const initTail = init.tail.map((t) => t.nr);
 check(
-  'INIT exited through the exit syscall',
+  'the process in INIT\'s slot exited through the exit syscall',
   init.exited === true && initTail[initTail.length - 1] === EXIT,
   `exited=${init.exited} tail=[${initTail.join(',')}]`
 );
+
+/// The instance a slot was running **before** an exec, or the one it is running now.
+///
+/// The M3e reports are values INIT wrote before it exec'd, so reading them from `st.inst`
+/// after the run would ask the *replacement* module for exports it has never heard of.
+function beforeExec(st) {
+  return st.prev === undefined ? { inst: st.inst, memory: st.memory } : st.prev;
+}
 
 note(
   'what M3d establishes, and what M3 still owes',
   'INIT is the first process on this port that is not a server: the kernel links it ' +
     'to the shared USER privilege slot, its console output leaves through the ' +
-    'kernel\'s copy seam, it reaches PM with a real SENDREC, and it exits through ' +
-    'SYS_EXIT, which is what notifies PM of a death. What M3 still owes is the TTY ' +
-    'half: `userland::init` cannot run to its end until `/dev/console` exists (a tty ' +
-    'server behind VFS\'s device layer) and `/bin/sh` exists to be exec\'d, and its ' +
-    'no-console path is a spin with no syscall in it, which on this target hangs the ' +
-    'host instead of failing (finding 12).'
+    'kernel\'s copy seam, and it reaches PM with a real SENDREC. It used to exit through ' +
+    'SYS_EXIT because the shell ran in place of an exec; now its last step is the exec ' +
+    'itself, so the exit at the end of the slot belongs to the shell (M7a step 2), and the ' +
+    'module it exec\'d came off the boot image (step 4). What is still owed is M7\'s other ' +
+    'half: a shell can only run its builtins until fork exists.'
 );
 
 // ----------------------------------- M3e: INIT's stdio, through VFS and the tty
@@ -961,8 +1221,9 @@ note(
 // "not attempted" cannot be read as "succeeded with zero" -- which is exactly how the
 // dup2 check below passed while the open was still failing.
 const initReport = (() => {
-  const view = new DataView(init.memory.buffer);
-  const ptr = init.inst.exports.init_report_ptr();
+  const before = beforeExec(init);
+  const view = new DataView(before.memory.buffer);
+  const ptr = before.inst.exports.init_report_ptr();
   return Array.from({ length: 3 }, (_, i) => Number(view.getBigInt64(ptr + i * 8, true)));
 })();
 check(
@@ -993,13 +1254,15 @@ check(
 
 // --------------------------------------------- M3f: the shell, in INIT's slot
 
-// init's last step is `exec("/bin/sh")`; on this port exec is module instantiation
-// (ARCH_WASM32.md 7.2), which is not implemented, so the shell runs in place with the
-// stdio above already set up. Two lines are the evidence, and they are different
-// claims: the prompt says a *reader* started and its first write went out through VFS
-// and the tty; the builtin's output says a whole line came back in, was parsed, and its
-// result was written out. The host supplies that line (`consoleInput`), so the input
-// direction is exercised rather than assumed.
+// init's last step is `exec("/bin/sh")`, so the shell arrives as a *module* the host
+// instantiates into the same slot, carrying the stdio above with it: exec keeps the process,
+// so the fds, `p_fd_vfs` and the VFS filps are all still there and the shell opens nothing.
+// The swap itself is checked in the M7a step 2 section below; these two lines are what the
+// *replacement* image did with the console, and they are different claims: the prompt says a
+// reader started and its first write went out through VFS and the tty; the builtin's output
+// says a whole line came back in, was parsed, and its result was written out. The host
+// supplies that line (`consoleInput`), so the input direction is exercised rather than
+// assumed.
 const sawPrompt = timeline.some((l) => l.includes('# '));
 // Exactly, not `includes`: the tty echoes the input, so the *echo* of the command also
 // contains this text on the prompt line. Only the builtin's own output is a line of its
@@ -1014,6 +1277,154 @@ check(
   'the shell read a line, ran its echo builtin, and its output reached the console',
   sawBuiltin,
   `builtin output on console=${sawBuiltin}`
+);
+
+// ------------------------- M7a step 1: a program as its own wasm module
+
+// M3f worked *around* exec: the shell ran in INIT's slot, in `wasm-servers`, because there
+// was no way to run a program that is not a server. This is step 1 of the M7a plan and it is
+// the smallest thing that changes that: a program is its own module, the host instantiates it
+// for a slot and hands it argv, and it runs as an ordinary user process.
+//
+// The three facts are M3d's, asked again because this instance is not `wasm-servers`: its
+// module, its memory layout and its argv area are all its own, so nothing established about
+// the servers carries over to it.
+const program = procs.find((p) => p.spec.label === 'program');
+
+// The spawn is the harness's, not the kernel's: `startAfterBoot` instances are created at the
+// first quiescence, which is the host's hand-rolled half of §7.2's step 2. A failure here would
+// make every check below meaningless, so it is asserted first.
+check(
+  'the kernel accepts the program into its table as an ordinary user process',
+  startFailures.length === 0,
+  startFailures.map((s) => s.label).join(', ')
+);
+
+// A slot outside `BOOT_IMAGE` has no privilege structure, and `minix_proc_spawn` would leave
+// it that way — a process that cannot send to PM, VFS or DS at all, which is not the kind of
+// process exec produces. The control is the same question about DS, asked above: `2` there
+// and `1` here is what says the kernel attached the *shared USER* slot rather than a private
+// one.
+const programKind = kernel.exports.minix_proc_kind(program.spec.slot);
+check(
+  'the kernel made the program an ordinary user process rather than a server',
+  programKind === 1,
+  `kind=${programKind} (1 = shared USER slot, 2 = SYS_PROC, 0 = no priv)`
+);
+
+const programTail = program.tail.map((t) => t.nr);
+check(
+  'the program ran and exited through the exit syscall',
+  program.exited === true && programTail[programTail.length - 1] === EXIT,
+  `exited=${program.exited} tail=[${programTail.join(',')}]`
+);
+
+// `echo` prints its arguments, so this one line is three claims. That argv arrived in the
+// instance: the module cannot print what it was never given, and it only reaches `echo` at all
+// if argv[0] matched. That a program's output reaches the console through the kernel's
+// shortcut: this process has opened no console, so `p_fd_vfs` is 0 and the kernel reads the
+// bytes out of *this* instance through the copy seam (§5.1) — finding 29 is what a write like
+// it that transfers `count = 0` looks like instead. And that the blob parsed: the host's
+// array is the expectation, so a disagreement about the layout or the offsets shows up here
+// rather than as a program that printed something plausible.
+const PROGRAM_LINE = `kernel: ${PROGRAM_ARGV.slice(1).join(' ')}`;
+const sawProgramLine = timeline.some((l) => l.trimEnd() === PROGRAM_LINE);
+check(
+  'the program read the argv the host wrote and its output reached the console',
+  sawProgramLine,
+  `looked for ${JSON.stringify(PROGRAM_LINE)}`
+);
+
+note(
+  'what M7a step 1 establishes, and what it does not',
+  'A program is now a wasm module of its own: `wasm-program` is a cdylib exporting one entry, ' +
+    'the host Asyncifies it, instantiates it for a slot, writes argv into the argv area the ' +
+    'module declares, and the entry parses it with the same `userland::parse_args` every ' +
+    '`userland/src/bin/*.rs` uses on the shipping arches. What is *not* here is a caller: ' +
+    'nothing asked the kernel to create this process, the harness did, and the slot was ' +
+    'chosen by hand — which is exactly what step 2, below, changes. The harness also ' +
+    'instantiates this one straight from the file it built, which is the harness\'s own ' +
+    'business: an exec takes its bytes from the image instead (step 4).'
+);
+
+// ------------------------------- M7a step 2: the kernel asks, the host instantiates
+
+// INIT's exec, end to end. The claim is not that the host *can* instantiate a module — step 1
+// shows that — but that a process asked to become another program and the request travelled
+// the real path: `execve` (INIT) → PM_EXEC (PM) → VFS_PM_EXEC (VFS resolves the path against
+// the boot image and reads the executable) → SYS_EXEC_LOAD (the kernel's exec arm) → this
+// import.
+//
+// Every hop of that has a check elsewhere; what is checked here is the last one, and the
+// reason it is worth checking is that the kernel's arm is *only* reachable that way. The path
+// and the byte count are what the *kernel* handed over — read out of its memory, not the
+// harness's — and the argument list was parsed out of the exec frame by the kernel
+// (`elf::parse_exec_frame`) after two cross-instance copies fetched it from the caller. So a
+// path here is a request the kernel made, not one the harness made.
+const exec = init.exec;
+// The size is the image builder's claim: `mkminixfs wasm32` embedded exactly the module file the
+// harness staged, so a byte count that matches it says the bytes the host compiled came off the
+// disk rather than out of anything the harness kept on the side. Since §7.2's step 4 there is no
+// host-side registry left to fall back on — the only module store is the image.
+const MODULE_BYTES = fs.statSync(programPath).size;
+check(
+  'the kernel handed the host the image of the program INIT exec\'d',
+  exec !== undefined && exec.path === '/bin/sh' && exec.moduleBytes === MODULE_BYTES,
+  exec === undefined
+    ? 'the host was never asked (INIT did not reach exec, or the host could not compile it)'
+    : `path=${exec.path} bytes=${exec.moduleBytes} (image module is ${MODULE_BYTES})`
+);
+// The arguments came out of the frame INIT built: argv[0] is the path it exec'd, and it is
+// what the module dispatches on to decide it is the shell. So this is where the exec frame's
+// argv and the module's argv are the same argv. A failure to parse it would show as an E2BIG
+// or as `program: malformed argv blob` on the console, not as a plausible-looking success.
+check(
+  'the exec carried argv, and the module was told to be the shell',
+  exec !== undefined && exec.argv.length === 1 && exec.argv[0] === '/bin/sh',
+  exec === undefined ? 'no exec' : `argv=${JSON.stringify(exec.argv)}`
+);
+
+// The swap: the slot is running the module's entry in a new address space, and the instance
+// `minix_init` was is no longer the one the slot names. That is what "the old instance is
+// gone" means here — the object survives because the harness reads the reports it left, but
+// nothing will run it again: the dispatch loop drives `st.inst`, and `st.inst` is the module.
+check(
+  'the slot that called exec now runs the new module\'s entry',
+  exec !== undefined &&
+    init.entry === 'minix_program_main' &&
+    init.prev !== undefined &&
+    init.prev.entry === 'minix_init' &&
+    init.inst !== init.prev.inst,
+  exec === undefined
+    ? 'no exec'
+    : `entry=${init.entry} (was ${init.prev && init.prev.entry}), ` +
+      `instance replaced=${init.prev !== undefined && init.inst !== init.prev.inst}`
+);
+
+// And the negative control that makes the two above mean something: the old image's *failure*
+// path also continues in this slot, and it writes a line to say so. Its absence, plus the
+// prompt appearing only after the swap, is what says the exec succeeded rather than the
+// failed-exec path having been taken — and the prompt can only have come from the new image,
+// because the abandoned one was left inside a syscall it will never be rewound into.
+const sawExecFailed = timeline.some((l) => l.includes('init: exec failed'));
+const promptAt = timeline.findIndex((l) => l.includes('# '));
+check(
+  'the shell\'s output came from the image the exec created',
+  !sawExecFailed && exec !== undefined && promptAt >= exec.timelineAt,
+  `execFailedLine=${sawExecFailed} promptAt=${promptAt} swapAt=${exec && exec.timelineAt}`
+);
+
+note(
+  'what M7a step 2 establishes, and what it does not',
+  'A process can now become another program: INIT execs `/bin/sh`, the request goes through PM ' +
+    'and VFS, VFS resolves the path against the boot image and hands the kernel the path and ' +
+    'the exec frame, and the kernel\'s wasm arm asks the host to instantiate a module into the ' +
+    'slot — which is `hal::exec_module` in §7.2. The stdio INIT had set up survives the exec ' +
+    'because exec keeps the process, so the shell opens nothing and reads the same console. ' +
+    'What is not here: the module\'s *bytes* still come from the host\'s registry rather than ' +
+    'from the file VFS found (step 4), and the exec target is named by a path the host maps ' +
+    'by hand. What is also not modelled is the process a shell *runs* — an external command ' +
+    'needs fork, and only builtins work (M7\'s other half).'
 );
 
 note(

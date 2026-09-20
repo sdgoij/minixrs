@@ -1,0 +1,30 @@
+# Link flags for a program as a wasm module.
+#
+# `--import-memory` is the design's arrangement (§5) and it matters more here than for a
+# server: the host owns each instance's memory, and a process's argv arrives by the host
+# writing it into the new instance's memory. `--initial-memory` is 16 MiB against a 256 MiB
+# maximum, which is what keeps a program's linear memory laid out like every other
+# instance's — `--stack-first` puts the 1 MiB stack at the bottom, and the port's heap
+# window (2..6 MiB) and declared stack region (14..16 MiB) have to stay clear of the image.
+# That region is also why the module's argv area is a reserved static rather than an
+# address picked by hand.
+#
+# Cargo keys a custom target's config by the spec's file stem, so this is `wasm32-minix` for
+# `tools/wasm-target/wasm32-minix.json`.
+
+[target.wasm32-minix]
+rustflags = [
+  "-C", "link-arg=--no-entry",
+  # The program's syscalls are `extern "C"` calls into the gate; resolve them as imports
+  # from `env` instead of failing the link for being undefined.
+  "-C", "link-arg=--allow-undefined",
+  "-C", "link-arg=--export=minix_program_main",
+  # The host has no way to name a static, so both regions it needs to write are exported by
+  # address: the Asyncify scratch struct, and the argv area it fills in before the entry
+  # runs.
+  "-C", "link-arg=--export=asyncify_scratch_ptr",
+  "-C", "link-arg=--export=argv_area_ptr",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--initial-memory=16777216",
+  "-C", "link-arg=--max-memory=268435456",
+]

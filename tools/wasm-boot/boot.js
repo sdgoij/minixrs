@@ -65,6 +65,11 @@ const imports = {
     // implement it, and this import exists only because the kernel build
     // references it unconditionally.
     host_copy_between: () => -14, // EFAULT
+    // Exec, on this port, is module instantiation (§7.2): the kernel names the
+    // module and the host creates the instance. M1 has no modules to instantiate
+    // and no process to put one in, so this refuses the same way the copy above
+    // does — M7a's step 2 is where a harness answers it for real.
+    host_exec_module: () => -2, // ENOENT
   },
 };
 
@@ -95,6 +100,7 @@ const expectedImports = [
   'host_cycles',
   'host_halt',
   'host_copy_between',
+  'host_exec_module',
 ];
 const importNames = WebAssembly.Module.imports(wasmModule).map((i) => i.name);
 check(

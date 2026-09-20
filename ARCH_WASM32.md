@@ -543,7 +543,9 @@ program is a wasm module; exec becomes:
 
 The disk image and initramfs therefore carry **wasm modules instead of ELF
 binaries**. That is a userland build-pipeline change (§10), not a kernel one, and
-`elf.rs` is untouched on other arches.
+`elf.rs` is untouched on other arches. **Done** as §10's `mkminixfs wasm32`: the
+boot filesystem image holds the Asyncify'd program module at `/bin/sh`, and nothing
+in the port knows how to run anything else.
 
 ### 7.3 Boot
 
@@ -561,9 +563,13 @@ right shape already; the host resolves each path to a module and instantiates it
 on request instead of the kernel mapping ELF pages for it.
 
 `crates/kernel/build.rs` already emits **empty initramfs stubs** when
-`target_from_rustc_target` does not recognise the triple. wasm32 will fall into
-that arm automatically, which is convenient: the kernel compiles with embed
-features on, and the host supplies modules from JS instead.
+`target_from_rustc_target` does not recognise the triple, and wasm32 falls into
+that arm — which is still what we want, because a wasm kernel carries no
+userland. What changed with §7.2's step 4 is where the modules come from instead:
+not a JS-side registry, but the **boot filesystem image**, built by
+`mkminixfs wasm32` and read at exec time by VFS like any other file. The host is
+still what instantiates them — only it can — but it no longer decides *what* they
+are, which is what makes `/bin/sh` a thing that exists only in the image.
 
 ## 8. The HAL surface, function by function
 
@@ -683,11 +689,21 @@ x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there
   Declare the import with `#[link(wasm_import_module = "minix")]`. No
   `wasm-bindgen` — the kernel is `no_std` and raw imports keep the boundary
   explicit and auditable.
-- a `WASM32` entry in `crates/boot-image/src/targets.rs`
+- a `WASM32` entry in `crates/boot-image/src/targets.rs` — **done, in the CLI's half only**. It
+  resolves by arch name (`mkminixfs wasm32`) and deliberately *not* by rustc triple, because
+  `target_from_rustc_target` answers the other question — which userland binaries an image for
+  this target holds — and for wasm32 that answer is none (see §7.3). `crates/kernel/build.rs`
+  asks that one, so a wasm kernel still embeds nothing.
+- a wasm image: `mkminixfs wasm32` writes `target/images/wasm32-minix/minixfs.img` holding
+  `manifest::WASM_MODULES` instead of `BOOT_BINS` — the program modules rather than executables.
+  **Done**, and it is the module store §7.2's step 4 needs. What it costs is an ordering the
+  harness owns: the module is built, Asyncify'd, staged in `target/wasm32-minix/release/`, and
+  only then does the image builder read it. An image built before the Asyncify pass holds a
+  module the dispatch loop cannot drive.
 - `build-wasm` / `run-wasm` Just recipes; run-wasm serves a directory rather
   than invoking QEMU
 - `wasm-opt --asyncify` over every module (kernel and processes) as a post-build
-  step
+  step — **done** in `tools/wasm-servers/run.sh`, for the servers and the program module
 
 `asm!` sites that need `#[cfg]` gateing outside the arch crates (the arch crates
 simply aren't built for wasm): `kernel` (1), `kernel-boot` (61, replaced by a new
@@ -1098,7 +1114,10 @@ existing persistence test adapted.
 
 **M6 — Network.** `virtio_net` over WebSocket.
 
-**M7 — fork and exec of arbitrary modules.** See §12.
+**M7 — fork and exec of arbitrary modules.** See §12 and the M7a plan below — M7a steps 1–4 are
+done, so a process can exec a module, *is* that module, and the module came off the disk. What is
+left is fork, which is what lets the shell run an external command rather than only its builtins,
+and that is the last piece of M3's title.
 
 **Stretch.** SMP via Workers + `SharedArrayBuffer` (the `Spinlock`/`bkl_*`
 surface already exists and would become Atomics-based; each worker gets its own
@@ -1339,6 +1358,228 @@ while being an infinite loop on a line that could never end — and it is why th
 ends such a run with a named diagnosis instead of an external kill, and why its step cap had
 to grow: every console byte a reader consumes costs several dispatches, and the old bound
 cut the shell off mid-line, which looked like a reading bug and was a harness limit.
+
+**M7a — Exec as module instantiation. Status: steps 1–4 DONE (a program is its own module, the
+kernel asks and the host instantiates, argv crosses, and the bytes come off the disk); step 5 is
+M3's title, and needs M7's fork half.**
+
+This is the other half of M3's title — "shell from a *module-backed filesystem*, running real
+coreutils" — and the largest remaining piece of the port. On the shipping arches `init`
+`execve`s `/bin/sh` and the shell `fork`s and `exec`s for every external command, and neither
+has an analogue here yet. It is scoped on its own because the two halves come apart: **exec**
+is what makes a process *become* another program (what init needs, and what M3f worked
+around), and **fork** is what lets a shell run commands (already verified by the spike in
+`tools/fork-spike/`, §12 risk 1). Exec first: it needs no stack cloning, and its absence is
+the thing M3f routed around rather than solved.
+
+Four facts constrain the shape, all established while landing M3e and M3f:
+
+- **A program module must be a cdylib.** `tools/wasm-target/wasm32-minix.json` is
+  `"only-cdylib": true` and links with `--no-entry`, so `userland`'s `[[bin]]` targets cannot
+  be built for this target at all — which is why `wasm-servers` and `wasm-procs` are cdylibs
+  with `#[unsafe(no_mangle)] pub extern "C"` entries. `/bin/sh` as a module therefore means a
+  cdylib exporting an entry per program, not a `[[bin]]`.
+- **The initramfs is empty for wasm by construction.** `crates/kernel/build.rs` emits empty
+  stubs for a triple it does not recognise, so there are no module bytes inside the kernel to
+  load, and §7.3's answer — *the host supplies modules from JS* — is the only source today.
+  "The image carries modules" is a build-pipeline task (§10), not a kernel one.
+- **The host already has every mechanism exec needs**: `minix_syscall` (the gate a program
+  module imports), `host_copy_between` (the seam, for argv into the new instance),
+  `asyncify_scratch_ptr` (per-instance scratch — and the reason Asyncify must be applied to a
+  program module exactly as `run.sh` applies it to `wasm-servers`), and the `specs` /
+  `makeServer` path that already creates one instance per slot.
+- **The kernel's exec bookkeeping is arch-specific where it matters.** `exec.rs` and the exec
+  syscalls build page tables and set a `TrapFrame`; the equivalent here is "record the
+  instance the host created". That is §7.2's steps 2–4, and it is where the wasm arm diverges
+  rather than shares.
+
+The steps, each with the check that would establish it:
+
+1. **A program as its own module. DONE.** A cdylib exporting one entry (start with the smallest
+   useful program), built and Asyncify'd by the harness, instantiated by the harness for a
+   slot. *Check:* it runs as a process, writes to the console through the kernel's shortcut,
+   and exits — M3d's three facts, but from a module that is not `wasm-servers`.
+2. **The kernel asks, the host instantiates. DONE.** A wasm arm for exec calling a new HAL entry
+   (`hal::exec_module(path)`), which the wasm HAL forwards to a host import; the host creates
+   the instance, swaps it into the calling slot, and the dispatch loop runs the new one.
+   *Check:* the slot that called exec runs the new module's entry, and the old instance is
+   gone.
+3. **argv. DONE.** §7.2's step 3: the host copies argv into the new instance's memory and the
+   entry reads it. *Check:* the program prints its own argv. Two ends to it, and both are in
+   place — the module declares an argv area (`argv_area_ptr()`), the host fills it in and passes
+   a C argv, and the entry parses it with `userland::parse_args`; and on the exec path the argv
+   is the *caller's*, built by `minix_rt::execve`, parsed back out of the exec frame by the
+   kernel (`elf::parse_exec_frame`), and handed to the host as a blob of strings.
+4. **Module bytes from the filesystem. DONE.** The path resolves through VFS/MFS and the bytes that
+   arrive *are* the module, which needs a wasm image (`mkminixfs` for this target, embedding
+   module blobs instead of ELF). *Check:* exec'ing a path that exists only in the image works.
+5. **Then M3's title is earned**, and M7's fork half is what lets the shell run coreutils
+   rather than only its builtins.
+
+Step 4 is done; step 5 needs fork, which is M7's other half.
+
+**M7a step 1 — a program as its own wasm module. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 48/48 checks passed, over ten servers, one user process and one program
+```
+
+`crates/wasm-program` is the new crate, and it is deliberately not `wasm-servers` with another
+export: a server is one module whose entries the kernel's boot image chooses between, while a
+program is chosen from the outside by the path exec was given — which is the arrangement step 4
+will need, so starting with one module per program is what keeps that decision visible. It is a
+cdylib exporting `minix_program_main(argc, argv)`, built and Asyncify'd by the harness exactly as
+the servers are, and its `Cargo.toml` carries the same two-import boundary (`env.memory`,
+`env.minix_syscall`).
+
+What the run shows, at the end of the boot transcript:
+
+```text
+kernel: # exit
+kernel: hello from a module
+```
+
+That line is three claims at once, which is why it is one check. The host's array is the
+expectation — `['echo', 'hello', 'from', 'a', 'module']` — so the module printing its arguments
+back means argv arrived *in the instance*, through the area the module declares and the offsets
+the module chose; and because the entry dispatches on `argv[0]`, reaching `userland::echo` at all
+says that half arrived too. It is also the real `userland::echo`, the same one the shell runs as
+a builtin and the shipping arches exec, not a copy for this port. And the bytes reached the
+console the only way a program with no open console can reach it: `p_fd_vfs` is 0, so the kernel
+took the shortcut and read them out of *this* instance through the copy seam (§5.1) — finding 29
+is what that write looks like when it transfers `count = 0` and reports success instead.
+
+Two things the step cost, both recorded rather than papered over:
+
+- **The program had a privilege structure of its own to ask for.** A slot outside `BOOT_IMAGE`
+  has none: `minix_proc_spawn` fills in the table and stops there, which is right for every
+  server here because `proc_init` already attached a structure to each boot slot. But a
+  priv-less process is not a user process — it cannot send to PM, VFS or DS at all — so the
+  harness now asks for the shared USER slot through `minix_proc_spawn_user`, and *checks* which
+  kind the kernel made (`minix_proc_kind`) rather than trusting the slot number. That check is
+  M3d's, and finding 9 is why it is asked.
+- **`RTS_NO_PRIV` is not decoration, and `do_fork`'s two statements are not separable here.**
+  The first version copied `do_fork` line for line — the privilege link *and* the flag — and the
+  program never ran: an empty syscall trace, and a run-queue check that failed because a
+  non-runnable process was sitting in a queue. `PORTING_PLAN.md` finding 34.
+
+One deliberate oddity: the harness starts the program at the first quiescence rather than with the
+boot processes. A spawned slot is immediately runnable, so the boot-time version was scheduled
+while INIT was blocked on its `getpid` reply and wrote *into the middle of INIT's console line*.
+The kernel was right and the harness was early.
+
+What step 1 does *not* establish is a caller: nothing asked the kernel to create that process,
+the harness did, and the slot was chosen by hand. That is step 2.
+
+**M7a step 2 — the kernel asks, the host instantiates. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 52/52 checks passed, over ten servers, one user process, one program and one exec
+```
+
+INIT's last step is `exec("/bin/sh")`, and it is now a real exec. The request travels the whole
+real path — `minix_rt::execve` in INIT, `PM_EXEC` to PM, `VFS_PM_EXEC` to VFS (which resolves the
+path against the boot image, through MFS and the RAM disk), then VFS's `kernel_call(SYS_EXEC_LOAD)`
+to the kernel — and the kernel ends it by asking the host for a module instead of installing an
+image:
+
+```text
+init → PM → VFS → kernel: SYS_EXEC_LOAD  ─┐
+                                          └─► hal::exec_module(slot, path, argv) ─► host
+                                                                                       │
+                        the slot's instance is replaced by the module's ─────────────────┘
+```
+
+The console transcript is unchanged from M3f, which is the point:
+
+```text
+kernel: # echo hello from the shell
+kernel: hello from the shell
+kernel: # exit
+```
+
+Same lines, different provenance. M3f ran the shell *in place* inside `minix_init` — a call to
+`userland::sh` where the exec should have been — and the shell's `# ` came from the same instance
+INIT had been. Now INIT ceases to exist: the slot runs a module the host instantiated for it, and
+the harness checks exactly that — the entry the slot runs changed from `minix_init` to
+`minix_program_main`, the instance object is a different one, and the prompt appears *after* the
+swap while `init: exec failed` never appears. That last pair is the negative control: the old
+image's failure path also continues in this slot and writes a line saying so, so its absence plus
+a post-swap prompt is what says the replacement happened rather than the failure path.
+
+The stdio survives the exec because exec keeps the process: the fds, `p_fd_vfs`, and VFS's filps
+all belong to the *slot*, so the shell opens nothing, dup2's nothing, and reads the same console.
+That is also why this is not a `[[bin]]`-style handoff: `$(init)` and the shell are two wasm
+modules and one process.
+
+Three things stand between "the module is an instance" and "a process can exec", and each was a
+real gap rather than plumbing:
+
+- **VFS sends the path, because a module is not an image.** The ELF arm's request to
+  `SYS_EXEC_LOAD` names an entry point and a code range, and *those* are what identify the image
+  — the bytes arrive through VM's file regions, so no name is needed. On wasm the host owns the
+  module, so the path is the only name for it: VFS now passes a pointer to its own copy of the
+  resolved path at offset 56 of the message (the last word in a 64-byte message), the kernel
+  reads it out of VFS's memory through the seam — the same way it reads the frame — and only the
+  wasm arm looks at it.
+- **The exec arm asks before it destroys.** VFS's module arm calls the kernel *first* and resets
+  the process's address space afterwards (`VM_EXEC_NEWMEM`, once the host has agreed), which is
+  the opposite order from the ELF arm and the right one here: asking costs nothing, so a path
+  with no module is a clean `ENOENT` that PM reports to the caller. The first version reset the
+  address space first, which made every later failure "the image was partly replaced" — and that
+  path kills the caller, so a missing module looked like a process that had simply stopped.
+- **`argv` crosses two instance boundaries before it is argv again.** `execve` builds the frame
+  in the *caller's* memory; VFS fetches it with `sys_vircopy`; the kernel fetches it again with
+  `read_from_proc`; `parse_exec_frame` turns it back into strings; the kernel lays them out as
+  NUL-separated bytes and the host copies them into the new instance's argv area. Four copies and
+two address spaces, in place of the hardware arches' single one — which is the port's copy seam
+(§5.1) doing exactly what §3 says only the host can do.
+
+What is *not* here is step 4: the module's bytes still come from a registry the host keeps,
+keyed by path, rather than from the file VFS found. That is the next section.
+
+**M7a step 4 — module bytes from the image. Status: DONE.**
+
+```text
+sh tools/wasm-servers/run.sh
+# 52/52 checks passed; minixfs.img: 16777216 bytes, 1 files
+```
+
+There is no host-side module store any more. `mkminixfs wasm32` builds a MinixFS image whose
+`/bin/sh` *is* the Asyncify'd program module (141,476 bytes, embedded byte for byte — a check that
+can be made from outside the port, and was), the RAM disk instance is given that image, VFS
+resolves the path through MFS and reads the whole file, and the host compiles **those bytes**:
+
+```text
+init execs /bin/sh → VFS resolves it → VFS reads the file into its own memory
+                                      → kernel names (proc, addr, len) to the host
+                                      → host: new WebAssembly.Module(those bytes)
+```
+
+Three things about that are worth stating, because each would be a different design:
+
+- **The image is the executable, so the compile is the validation.** The kernel hands over bytes
+  it has not looked at — it cannot, since knowing what a wasm module is means compiling it — and
+  the engine's `new WebAssembly.Module` is what refuses a file that is not one. That is why VFS's
+  module arm asks *before* resetting the address space: a refusal there is an `ENOEXEC` the caller
+  can report, where the same refusal after `vm_exec_newmem` would be "the image was partly
+  replaced" and kill the process. It also means an ELF at `/bin/sh` — which is what the x86_64
+  image has, and what this harness booted until this step — fails loudly and in one place.
+- **The size is bounded on both sides, and refused rather than truncated.** VFS reads the file
+  into a 256 KiB static because on this arch the image *is* the bytes (the ELF arm reads a header
+  and lets VM fault the rest in), and a module that does not fit is `E2BIG`. A truncated wasm
+  module is not a smaller program; it is an invalid one, and the engine would say so somewhere
+  much less informative.
+- **The module name became a convention.** With no registry there is no per-path entry name, so a
+  program module exports `minix_program_main` and the host reports `ENOEXEC` if it does not. The
+  path still travels — the host reads it out of the caller's memory for what it prints — but it is
+  a name now, not a lookup.
+
+What is still not here is step 5: the shell runs, but a shell can only run its *builtins* until
+fork exists, because an external command needs a child to exec in. That is M7's other half, and it
+is the last thing between this port and M3's title.
 
 ## 12. Risks, ranked
 
