@@ -164,6 +164,10 @@ export function createHost({
 
   /// Every fork the kernel asked for: who, into which slot, and the child's own record — not a
   /// lookup by slot, because a slot is a place and the process that lived there can be gone.
+  ///
+  /// `parentBytes` is what the clone cost, and `cloneMs` how long it took: the copy is the whole of
+  /// what a fork costs here (a stack is not what is being duplicated) and it does not pass through
+  /// `copyBetween`, so neither of the totals above would show it.
   const forks = [];
 
   /// Cross-process copies the kernel asked for, capped. Kept because a copy that returned
@@ -171,6 +175,15 @@ export function createHost({
   /// processes see nothing at all.
   const copyLog = [];
   const COPY_LOG_LIMIT = 256;
+
+  /// Every copy the kernel has asked for, totalled rather than kept.
+  ///
+  /// `copyLog` is a ring, because it answers "why did this one fail" and not "how much moved".
+  /// What a command costs is the second question: a fork clones the whole parent instance, so one
+  /// copy of `parentBytes` dominates a command's traffic and a front end has no other way to see
+  /// either the count or the size.
+  let copies = 0;
+  let bytesCopied = 0;
 
   /// Bytes the front end has typed and the guest has not consumed. The kernel drains these into
   /// its serial ring; an empty queue answers `-1`, which is what makes an idle console a retry
@@ -215,6 +228,8 @@ export function createHost({
     if (copyLog.length < COPY_LOG_LIMIT) {
       copyLog.push({ srcProc, srcAddr, dstProc, dstAddr, bytes, result });
     }
+    copies += 1;
+    if (result === 0) bytesCopied += bytes;
     return result;
   }
 
@@ -313,12 +328,14 @@ export function createHost({
     }
 
     let child;
+    const cloneStart = performance.now();
     try {
       child = cloneProcess(parent, childSlot);
     } catch (e) {
       note('cloning a process for fork failed', `${parentSlot} -> ${childSlot}: ${e}`);
       return ENOMEM;
     }
+    const cloneMs = performance.now() - cloneStart;
 
     // Invariant 2, asserted rather than trusted: over the parent's whole length the child's
     // memory is the parent's, byte for byte. A copy short by a page would truncate whatever the
@@ -335,7 +352,15 @@ export function createHost({
 
     procs.push(child);
     bySlot.set(childSlot, child);
-    forks.push({ parent: parentSlot, child: childSlot, st: child, exact, parentBytes, childBytes });
+    forks.push({
+      parent: parentSlot,
+      child: childSlot,
+      st: child,
+      exact,
+      parentBytes,
+      childBytes,
+      cloneMs,
+    });
     return 0;
   }
 
@@ -719,6 +744,11 @@ export function createHost({
     },
     get steps() {
       return steps;
+    },
+    /// How many copies the kernel has asked for, and how many bytes they moved. The count is of
+    /// requests, the bytes of successes.
+    get copies() {
+      return { count: copies, bytes: bytesCopied };
     },
     /// The last slice's shape, for a status line.
     get slice() {

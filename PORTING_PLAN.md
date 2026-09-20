@@ -7311,6 +7311,38 @@ above it has the same shape (`if parent == 0 || parent == 1` compares a slot aga
 It needs a fix in `exit_proc` and a test that a child outliving its parent ends up with a parent
 whose pid is 1, rather than with VFS.
 
+**47. What a loop of commands costs, measured.** Not a bug, and it is here because the number was
+open: §12 risk 1 of `ARCH_WASM32.md` ends with "a real figure needs a realistic workload", and
+after 42 the page can run one. `node tools/wasm-browser/run.js` now types five external commands
+in a row and reports what each cost, which puts numbers on the design's central tradeoff — a fork
+here duplicates the *process*, not a stack.
+
+Five `/bin/echo` commands, each a fork + exec + reap through the real chain, on this machine:
+
+| | slices | dispatch steps | seam copies | seam bytes | clone | child slot |
+|---|---|---|---|---|---|---|
+| per command | 3 | 197 | 723 | 183,046 | 16 MiB in 1.7–2.2 ms | 19 |
+
+The three things this establishes, in the order they matter:
+
+1. **The cost is flat.** Not one of those columns moves across the five iterations, so nothing in
+the chain accumulates — no leaked slot, no growing table, no queue that remembers. That is the
+property a loop needs, and the reason the check bounds the growth rather than the absolute cost.
+2. **The clone is the cost.** 16 MiB of memory copy against 183 KB of cross-seam traffic: the
+messages, the scheduler, VFS and the tty together are a hundredth of the fork. The number to watch
+is therefore the parent's memory size, not anything the port itself does — which is the same
+conclusion the fork spike reached at 4 MiB, now measured at 16 MiB through a real command.
+3. **The slot is reused.** Every child landed in slot 19, which is the slot the previous child
+freed when it was reaped, so PM's `alloc_proc` reclaims through `do_waitpid`/`free_proc` and the
+256-slot table is not consumed by the loop. That also exercises the host's own reuse path five
+times (`procs.splice` for a slot whose occupant has exited), which is the case where a stale
+record would silently deliver a message into a dead instance.
+
+What it does not establish: five iterations is enough to see flatness and not enough to see a
+*trend* — a leak of one byte per command, or a generation counter that only wraps after 32767
+reaps, is invisible here. A longer run is the next measurement if the per-command cost ever needs
+to be argued about, and the harness to drive one is now in place.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

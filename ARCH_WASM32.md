@@ -1876,7 +1876,14 @@ process's maximum stack, not guessed.
 Fork cost measured 1.3–2.5 ms per fork, flat in stack depth — because it is
 dominated by copying a 4 MiB linear memory, not by the serialised stack. **The
 lever on fork cost is the per-process memory size, not the stack depth.** A real
-figure needs a realistic workload.
+figure needs a realistic workload, and there is one now: the page running five
+`/bin/echo` commands in a row (`node tools/wasm-browser/run.js`) costs **1.7–2.2 ms
+and 16 MiB of copy per command**, flat across the five, with every child in the
+slot the previous child's reaping freed. The rest of a command — the IPC, the
+scheduler, VFS and the tty — is 723 cross-seam copies and 183 KB, a hundredth of
+the clone. So a command costs its parent's memory size, and a loop of 250 of them
+costs ~4 GiB of copying and about half a second: viable, and still the
+per-process memory size that sets the price.
 
 Fallbacks if a real workload defeats it (needed only for the deep-stack case):
 

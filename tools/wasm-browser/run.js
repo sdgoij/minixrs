@@ -127,6 +127,93 @@ check(
   `settle ended on ${afterEcho}; console:\n${terminal.text()}`
 );
 
+// ----------------------------------------------- a loop of commands, and its cost
+//
+// The page can drive a loop now, and the cost question is the one the M3b note leaves open: a fork
+// clones the whole instance rather than just a stack. That is a *number per command* — how much
+// moves across the seam, how many slices and dispatch steps it takes — and the thing worth
+// pinning is that it does not grow. A loop whose per-command cost climbs with the iteration count
+// is a loop that stops working; a loop that is uniformly expensive is just slow, which is a
+// property of the design and not of the implementation.
+//
+// The command is the same external `/bin/echo` the check above uses, so every iteration is a
+// fork + exec + reap through the same chain, and the output is what says it ran.
+const LOOP_COMMANDS = 5;
+const loop = [];
+for (let i = 0; i < LOOP_COMMANDS; i += 1) {
+  const before = {
+    slices,
+    steps: host.steps,
+    copies: host.copies.count,
+    bytes: host.copies.bytes,
+    forks: host.forks.length,
+  };
+  type(`/bin/echo loop-${i}\n`);
+  const settled = settle();
+  const fork = host.forks[host.forks.length - 1];
+  loop.push({
+    settled,
+    slices: slices - before.slices,
+    steps: host.steps - before.steps,
+    copies: host.copies.count - before.copies,
+    bytes: host.copies.bytes - before.bytes,
+    forks: host.forks.length - before.forks,
+    child: fork === undefined ? null : fork.child,
+    parentBytes: fork === undefined ? null : fork.parentBytes,
+    cloneMs: fork === undefined ? null : Math.round(fork.cloneMs * 100) / 100,
+  });
+}
+
+check(
+  'every command in the loop ran, and the shell came back for the next one',
+  loop.every((it) => it.settled === 'awaiting-input') &&
+    Array.from({ length: LOOP_COMMANDS }, (_, i) => `loop-${i}`).every((line) =>
+      terminal.lines.includes(line)
+    ),
+  loop
+    .map((it, i) => `${i}: settled=${it.settled} forks=${it.forks}`)
+    .join('; ') + `\n${terminal.text()}`
+);
+
+// One fork per command, and every one of them into the *same* slot: a child that is reaped frees
+// its slot, and PM hands the freed one out again. A loop that took a new slot each time would run
+// out of the port's 256 of them, and would show up here as a distinct child slot per iteration.
+const childSlots = new Set(loop.map((it) => it.child));
+check(
+  'each command forked once, into the one slot the previous child freed by being reaped',
+  loop.every((it) => it.forks === 1) && childSlots.size === 1 && !childSlots.has(null),
+  `forks per command=[${loop.map((it) => it.forks).join(', ')}], child slots=[${loop
+    .map((it) => it.child)
+    .join(', ')}]`
+);
+
+// The cost, as a bound rather than as a benchmark: the point is that it is flat, so a command in the
+// middle of the loop may not cost an order of magnitude more than the first one. The numbers
+// themselves are in the note below, where a reader can see what "flat" was measured to mean
+// instead of having to trust this factor.
+const firstCost = loop[0];
+const worstCost = loop.reduce((a, b) => (b.bytes > a.bytes ? b : a), loop[0]);
+check(
+  'the cost per command does not grow with the iteration count',
+  loop.every((it) => it.bytes > 0 && it.bytes <= firstCost.bytes * 3),
+  `bytes per command=[${loop.map((it) => it.bytes).join(', ')}], ` +
+    `worst=${worstCost.bytes} first=${firstCost.bytes}`
+);
+
+note(
+  `what ${LOOP_COMMANDS} commands in a row cost`,
+  'iteration: slices steps seam-copies seam-bytes clone clone-MiB child-slot\n' +
+    loop
+      .map(
+        (it, i) =>
+          `          ${i}: ${it.slices} ${it.steps} ${it.copies} ${it.bytes} ` +
+          `${it.cloneMs} ms ${(it.parentBytes / (1024 * 1024)).toFixed(0)} slot ${it.child}`
+      )
+      .join('\n') +
+    '\n        The seam totals are the messages; the clone is the fork, and it is the whole cost of a\n' +
+    '        command — the same instance, byte for byte, whether or not the command needs it.'
+);
+
 type('exit\n');
 const afterExit = settle();
 check(
