@@ -21,6 +21,7 @@ pub mod hal;
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(target_arch = "wasm32")]
 unsafe extern "C" {
     /// Append one byte to the console.
     fn host_console_write(byte: u32);
@@ -109,6 +110,86 @@ unsafe extern "C" {
     /// the host has no display.
     fn host_fb_present(src: u32, bytes: u32) -> i32;
 }
+
+/// The same names as *definitions*, for a build of this crate that has no host to import them
+/// from.
+///
+/// This crate is a workspace member, so `cargo test --workspace` and `cargo clippy
+/// --all-targets` build its test target on whatever machine they run on — and there an `extern`
+/// is not a lazy import to be satisfied at instantiation but an *undefined symbol* at link time.
+/// That makes it a platform-shaped failure: GNU ld drops the object that calls an unreachable
+/// function, so Linux linked cleanly, while MSVC's `link.exe` reported `LNK2019` for
+/// `host_copy_between` — the one a test binary still reaches, through
+/// `hal`'s `CROSS_ADDRESS_SPACE_COPY`.
+///
+/// Definitions rather than excluding the crate from the workspace or from its test target,
+/// because what this crate *means* without a host is "no host": the console has nothing to say,
+/// the clock does not run, the devices are not there and the addresses are not reachable. Every
+/// answer below is a refusal — `ENODEV`, `EFAULT`, `ENOEXEC`, `ENOMEM` — rather than a silent
+/// success, which is the hole this port keeps having to close elsewhere. Same disposition as
+/// `drivers::hal`'s devices on an architecture with no host to ask.
+#[cfg(not(target_arch = "wasm32"))]
+mod no_host {
+    /// No host, so no device — the answer `drivers::hal`'s own shim gives.
+    const ENODEV: i32 = -19;
+    /// The host reports this for an address it cannot reach; there is no host to reach one.
+    const EFAULT: i32 = -14;
+    /// Only a host can instantiate a module.
+    const ENOEXEC: i32 = -8;
+    /// Only a host can clone an instance's memory.
+    const ENOMEM: i32 = -12;
+
+    pub unsafe fn host_console_write(_byte: u32) {}
+    /// `-1`: the console contract's "nothing pending", which is also the truth here.
+    pub unsafe fn host_console_read() -> i32 {
+        -1
+    }
+    pub unsafe fn host_console_available() -> i32 {
+        0
+    }
+    /// A clock that does not run. Nothing on this target can be waiting for it.
+    pub unsafe fn host_cycles() -> u64 {
+        0
+    }
+    /// Loud, because there is nothing to return and nothing to stop: a build with no host that
+    /// reaches the halt path is a test exercising something that needs one.
+    pub unsafe fn host_halt(code: u32) -> ! {
+        panic!("halt(code {code}): this build has no host to stop")
+    }
+    pub unsafe fn host_copy_between(
+        _src_proc: i32,
+        _src_addr: u32,
+        _dst_proc: i32,
+        _dst_addr: u32,
+        _bytes: u32,
+    ) -> i32 {
+        EFAULT
+    }
+    pub unsafe fn host_exec_module(_slot: i32, _request_addr: u32) -> i32 {
+        ENOEXEC
+    }
+    pub unsafe fn host_fork_process(_parent_slot: i32, _child_slot: i32) -> i32 {
+        ENOMEM
+    }
+    pub unsafe fn host_block_read(_offset: u64, _buf: u32, _bytes: u32) -> i32 {
+        ENODEV
+    }
+    pub unsafe fn host_block_write(_offset: u64, _src: u32, _bytes: u32) -> i32 {
+        ENODEV
+    }
+    pub unsafe fn host_block_capacity() -> u64 {
+        0
+    }
+    pub unsafe fn host_fb_geometry() -> u64 {
+        0
+    }
+    pub unsafe fn host_fb_present(_src: u32, _bytes: u32) -> i32 {
+        ENODEV
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use no_host::*;
 
 /// What the host needs in order to instantiate a module as a process.
 ///
