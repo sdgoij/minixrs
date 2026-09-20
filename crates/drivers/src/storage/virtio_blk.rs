@@ -253,6 +253,13 @@ static STATUS: StatusCell = StatusCell::new();
 struct VirtioBlkState {
     /// Option holds the device once probed.
     dev: Option<VirtioDevice>,
+    /// Whether the attached device is the *host's* rather than a virtio one (wasm32, M4).
+    ///
+    /// A virtio device is a handle — a queue, a feature mask, a mapped window — and `dev` is where
+    /// it lives. A host device has no handle: the host owns the bytes, and what the driver needs to
+    /// know about it is its size, which is `config` either way. So presence is a bit here rather
+    /// than a second kind of handle, and `dev` stays `None` on that arch.
+    host_device: bool,
     /// Shadow of the device configuration.
     config: VirtioBlkConfig,
     /// Number of times the device has been opened.
@@ -271,6 +278,7 @@ impl VirtioBlkState {
     const fn new() -> Self {
         Self {
             dev: None,
+            host_device: false,
             config: VirtioBlkConfig::new(),
             open_count: 0,
             ro: false,
@@ -285,6 +293,16 @@ impl VirtioBlkState {
     fn capacity_bytes(&self) -> u64 {
         self.config.capacity * (self.blk_size as u64)
     }
+}
+
+/// Whether a block device is attached, by either transport.
+///
+/// Every question the protocol asks above the transport — is there a device, how big is it — goes
+/// through here, so `open` and `close` cannot disagree with each other about which transport is in
+/// play. The transports themselves are cfg'd apart below, because what they *do* with a request
+/// has nothing in common.
+fn device_attached(st: &VirtioBlkState) -> bool {
+    st.dev.is_some() || st.host_device
 }
 
 static STATE: StateCell = StateCell::new();
@@ -402,6 +420,7 @@ pub fn virtio_blk_init() {
     unsafe {
         let st = &mut *state_ptr();
         st.dev = None;
+        st.host_device = false;
         st.config = VirtioBlkConfig::new();
         st.open_count = 0;
         st.ro = false;
@@ -409,6 +428,42 @@ pub fn virtio_blk_init() {
         st.blk_size = VIRTIO_BLK_BLOCK_SIZE;
         st.terminating = false;
     }
+}
+
+/// Attach the device the host owns, if it has one (wasm32 — M4).
+///
+/// This is `virtio_blk_probe`'s counterpart on an arch with no bus to scan: same job, which is to
+/// leave a device attached or answer `NotFound` — and `NotFound` is what makes the driver refuse
+/// `BDEV_OPEN`, which is the answer MFS is watching for before it decides whether the root
+/// filesystem is on this device or on the ramdisk.
+///
+/// The capacity comes from the host and lands in the same `config` a virtio device's would, so
+/// everything above the transport (`geometry`, `open`, the bounds checks in `transfer`) is shared.
+///
+/// # Safety
+///
+/// Must be called once, before any I/O. Must not be called concurrently.
+#[cfg(target_arch = "wasm32")]
+pub unsafe fn virtio_blk_probe(_instance: u16) -> Result<(), DriverError> {
+    // SAFETY: caller guarantees exclusive access.
+    let st = unsafe { &mut *state_ptr() };
+
+    let capacity = crate::hal::block_capacity();
+    if capacity == 0 {
+        return Err(DriverError::NotFound);
+    }
+
+    st.config = VirtioBlkConfig::new();
+    st.config.capacity = capacity / VIRTIO_BLK_BLOCK_SIZE as u64;
+    st.config.blk_size = VIRTIO_BLK_BLOCK_SIZE;
+    // The host's answer to a write is a write that landed, so the guest's flush has nothing left to
+    // do — saying it is supported would promise a durability step that does not exist.
+    st.ro = false;
+    st.flush = false;
+    st.blk_size = VIRTIO_BLK_BLOCK_SIZE;
+    st.host_device = true;
+
+    Ok(())
 }
 
 /// Probe for a virtio-blk device on PCI.
@@ -426,6 +481,7 @@ pub fn virtio_blk_init() {
 ///
 /// Must be called once, after PCI init and before any I/O.
 /// Must not be called concurrently.
+#[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn virtio_blk_probe(instance: u16) -> Result<(), DriverError> {
     // SAFETY: caller guarantees exclusive access.
     let st = unsafe { &mut *state_ptr() };
@@ -468,7 +524,7 @@ pub unsafe fn virtio_blk_probe(instance: u16) -> Result<(), DriverError> {
 pub fn virtio_blk_open() -> Result<(), DriverError> {
     // SAFETY: single-threaded access to global state.
     let st = unsafe { &mut *state_ptr() };
-    if st.dev.is_none() {
+    if !device_attached(st) {
         return Err(DriverError::NotFound);
     }
     st.open_count += 1;
@@ -481,7 +537,7 @@ pub fn virtio_blk_open() -> Result<(), DriverError> {
 pub fn virtio_blk_close() -> Result<(), DriverError> {
     // SAFETY: single-threaded access to global state.
     let st = unsafe { &mut *state_ptr() };
-    if st.dev.is_none() {
+    if !device_attached(st) {
         return Err(DriverError::NotFound);
     }
     if st.open_count == 0 {
@@ -534,6 +590,60 @@ pub fn virtio_blk_geometry() -> (u64, u32) {
 /// # Safety
 ///
 /// `buf` must point to a valid buffer of sufficient size.
+#[cfg(target_arch = "wasm32")]
+pub unsafe fn virtio_blk_transfer(
+    write: bool,
+    sector: u64,
+    buf: &mut [u8],
+) -> Result<usize, DriverError> {
+    let size = buf.len();
+    if size == 0 || !size.is_multiple_of(VIRTIO_BLK_BLOCK_SIZE as usize) {
+        return Err(DriverError::InvalidArgument);
+    }
+
+    // SAFETY: caller guarantees exclusive access; the transfer does not touch `dev`, which is
+    // `None` on this arch — there is no queue, because the host is the device.
+    let st = unsafe { &*state_ptr() };
+    let capacity_bytes = st.config.capacity * (st.blk_size as u64);
+    let offset = sector * VIRTIO_BLK_BLOCK_SIZE as u64;
+
+    // Past the end of the device is not an error: a block device reports a short transfer, and the
+    // filesystem above treats that as the end of the device. Below is the same truncation the
+    // virtio path does, for the same reason.
+    let end = offset.saturating_add(size as u64);
+    let want = if end > capacity_bytes {
+        capacity_bytes.saturating_sub(offset) as usize
+    } else {
+        size
+    };
+    if want == 0 {
+        return Ok(0);
+    }
+
+    let r = if write {
+        crate::hal::block_write(offset, &buf[..want])
+    } else {
+        crate::hal::block_read(offset, &mut buf[..want])
+    };
+    if r < 0 {
+        return Err(DriverError::Io);
+    }
+    Ok(r as usize)
+}
+
+/// Perform a block I/O transfer over the virtio transport.
+///
+/// Reads (`write` = false) or writes (`write` = true) `blocks` sectors
+/// starting at `sector` to/from `buf`.
+///
+/// `buf` must be at least `blocks * VIRTIO_BLK_BLOCK_SIZE` bytes.
+///
+/// Returns the number of bytes transferred on success.
+///
+/// # Safety
+///
+/// `buf` must point to a valid buffer of sufficient size.
+#[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn virtio_blk_transfer(
     write: bool,
     sector: u64,

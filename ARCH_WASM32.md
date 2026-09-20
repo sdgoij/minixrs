@@ -600,6 +600,45 @@ What that cannot fix is the *slot*: PM does not know to keep one it has never be
 told about out of its free list, which is why the declaration above is the path
 and first contact is the backstop.
 
+### 9.1 The block device (M4)
+
+The console and the clock are devices the *kernel* talks to, so their host imports
+live in the kernel's HAL. A block device is a driver's, so its import is reached
+through the drivers' HAL boundary (`crates/drivers/src/hal.rs`, which is the one
+file in that crate allowed to know about architectures):
+
+```rust
+block_capacity() -> u64        // 0 when the host has no device
+block_read(offset, buf)        // bytes read, or a negative errno
+block_write(offset, buf)       // durable when it returns
+```
+
+`virtio_blk.rs` keeps one request path and gains a third transport beside PCI and
+virtio-mmio — `virtio_blk_probe` asks the capacity instead of scanning a bus, and
+`virtio_blk_transfer` copies to and from the host instead of programming a queue.
+Everything about the protocol stays the guest's: the driver answers `BDEV_*`, MFS
+probes `BDEV_OPEN` to decide which driver serves the root, and the root's block I/O
+routes itself. Nothing above the driver changed for M4 — in particular
+`bdev_driver_root`'s fallback to the ramdisk is what makes a host *without* a device
+a diskless boot rather than a failure.
+
+The host's side is a **store**, which is where the persistence actually lives:
+
+```js
+{ imageId, setImageId(id), read(offset, length), write(offset, bytes) }
+```
+
+The boot filesystem image is the device's *initial contents*, so a fresh store boots
+an installed system and every run after it sees what the last one wrote — no install
+step to get wrong. `imageId` is the one assumption this adds over a real disk: a
+store outlives the image it was seeded from, so a rebuilt image over an old store
+would be two filesystems mixed. A store whose identity does not match is refused and
+the device is not attached at all, which is loud (the guest falls back to the
+ramdisk and the host says why) where the mixture would be silent.
+
+The Node implementation is a file (`tools/wasm-browser/run.js`); the page's is
+IndexedDB behind the same four calls.
+
 ## 8. The HAL surface, function by function
 
 All ~150 items in `crates/arch-x86_64/src/hal.rs`, grouped. "Delete" means the
@@ -1139,7 +1178,16 @@ fork — are done, so the shell forks for an external command and the child exec
 module the image carries at that path.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
-existing persistence test adapted.
+existing persistence test adapted. **Status: the device is real and persists; the
+browser's store is what is left.** The host is the device (§9.1): `virtio_blk`
+finds it instead of finding nothing, MFS mounts the root from it, the shell's `>`
+redirect writes through the filesystem to it, and a second boot reads back what the
+first one wrote — checked by `node tools/wasm-browser/run.js`, which boots twice
+over one store. Reaching that exposed two things the port had never done: the image
+was built without `MFSFLAG_CLEAN`, so every mount of this port's root was read-only
+(finding 48), and nothing syncs or unmounts at shutdown, so a boot's writes are
+durable only if the guest syncs them (finding 49). The page's store is IndexedDB
+behind the same interface; until it lands, the page boots diskless.
 
 **M5 — Display and input.** `wserver` + `fb` on canvas, pointer input.
 

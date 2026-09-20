@@ -44,12 +44,18 @@ function note(name, detail) {
 
 const INIT_SLOT = SYSTEM_SPECS.find((s) => s.label === 'init').slot;
 
+// Read once and shared: the M4 section below boots the system a second time from the same three
+// artifacts, and an engine that read them again could be reading a different build.
+const kernelWasm = fs.readFileSync(path.join(buildDir, 'kernel.wasm'));
+const serversWasm = fs.readFileSync(path.join(buildDir, 'servers.async.wasm'));
+const imageBytes = fs.readFileSync(imagePath);
+
 const terminal = createTerminal();
 const diagnostics = [];
 const host = createHost({
-  kernel: fs.readFileSync(path.join(buildDir, 'kernel.wasm')),
-  servers: fs.readFileSync(path.join(buildDir, 'servers.async.wasm')),
-  image: fs.readFileSync(imagePath),
+  kernel: kernelWasm,
+  servers: serversWasm,
+  image: imageBytes,
   sink: {
     write: (byte) => terminal.write(byte),
     note: (name, detail) =>
@@ -220,6 +226,163 @@ check(
   'the shell exits and the system reaches quiescence, with nothing left spinning',
   afterExit === 'quiescent',
   `settle ended on ${afterExit}`
+);
+
+// --------------------------------------------- M4: a disk, and what survives a boot
+//
+// Everything above this line runs diskless: the host hands the RAM disk the boot filesystem image
+// at every boot, so the system mounts an immutable copy and nothing a run writes can outlive it.
+// M4 attaches a *device* instead — the host owns the bytes of a real block device, `virtio_blk`
+// finds it instead of finding nothing, and MFS mounts the root from it.
+//
+// The claim to check is the one a filesystem makes and a RAM disk cannot: **a file written in one
+// boot is there in the next.** Two engines, one store, and the second one asks the shell to `cat`
+// what the first one wrote. A store that was silently reseeded, or an image mounted instead of the
+// disk, fails this — and so does a disk whose superblock, inodes and data blocks do not all agree
+// about where the file is, which is what makes this a test of the whole path rather than of the
+// write alone.
+
+/// The device's contents in a file: a disk, not a cache of one.
+///
+/// The file *is* the device and is created from the boot image the first time, so a fresh store
+/// boots an installed system and every run after it sees what the previous run wrote. Writes are
+/// positional and land before the call returns, which is what `block_write` promises the guest —
+/// visible to the next run, and to the tools that end up looking at the file.
+///
+/// The sidecar records which image the disk's contents were made from, because that is the one
+/// assumption this design adds over a real disk: a store outlives the image it was seeded from.
+function fileStore(diskPath, sourceImage) {
+  const metaPath = `${diskPath}.json`;
+  const meta = fs.existsSync(metaPath)
+    ? JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    : { imageId: null };
+  if (!fs.existsSync(diskPath)) fs.writeFileSync(diskPath, sourceImage);
+
+  let fd = null;
+  const open = () => {
+    if (fd === null) fd = fs.openSync(diskPath, 'r+');
+    return fd;
+  };
+
+  return {
+    get imageId() {
+      return meta.imageId;
+    },
+    setImageId(id) {
+      meta.imageId = id;
+      fs.writeFileSync(metaPath, JSON.stringify(meta));
+    },
+    read(offset, length) {
+      const buf = Buffer.alloc(length);
+      const got = fs.readSync(open(), buf, 0, length, offset);
+      // Past the end of the device is zeros, as it is on a real one.
+      buf.fill(0, got);
+      return buf;
+    },
+    write(offset, bytes) {
+      fs.writeSync(open(), bytes, 0, bytes.length, offset);
+    },
+    close() {
+      if (fd !== null) {
+        fs.closeSync(fd);
+        fd = null;
+      }
+    },
+  };
+}
+
+/// Boot the system over `store`, type `lines`, and hand back what reached the console.
+///
+/// The pump policy is the one above, restated because this drives a second engine: a slice, and a
+/// park when the slice did nothing but retry the console read. Nothing here is a check — the two
+/// calls that follow read the result.
+function bootOver(store, lines) {
+  const term = createTerminal();
+  const engine = createHost({
+    kernel: kernelWasm,
+    servers: serversWasm,
+    image: imageBytes,
+    store,
+    sink: {
+      write: (byte) => term.write(byte),
+      note: (name) => notes.push(name),
+    },
+  });
+  const notes = [];
+  let steps = 0;
+  const run = () => {
+    for (let i = 0; i < 20000; i += 1) {
+      steps += 1;
+      const why = engine.pump({ maxSyscalls: 400 });
+      if (why !== 'slice') return why;
+      if (engine.sliceWasSpinOnly() && engine.console.pending === 0) return 'awaiting-input';
+    }
+    return 'slices-exhausted';
+  };
+  const booted = run();
+  for (const line of lines) {
+    engine.console.push(`${line}\n`);
+    run();
+  }
+  engine.console.push('exit\n');
+  const ended = run();
+  return { terminal: term, engine, booted, ended, steps, notes };
+}
+
+const diskPath = process.env.M4_STORE ?? path.join(root, 'target/wasm-disk-test.img');
+for (const stale of [diskPath, `${diskPath}.json`]) {
+  if (fs.existsSync(stale)) fs.unlinkSync(stale);
+}
+const store = fileStore(diskPath, imageBytes);
+
+const PERSIST_FILE = 'persisted.txt';
+const PERSIST_TEXT = 'written by the first boot';
+
+// `sync` before `exit`, because that is what makes the write *durable*: MFS holds dirty inodes and
+// blocks in its cache (`fs_sync` writes them and flushes the cache), and this port has no shutdown
+// path that syncs or unmounts — the shell exits, the system quiesces, the host stops. So a run that
+// does not sync is a run whose last writes were never written, which is the same promise a real
+// filesystem makes and the same failure a crash gives you. What the second boot proves is that the
+// bytes that *were* written are a filesystem it can mount and read.
+const firstBoot = bootOver(store, [`echo ${PERSIST_TEXT} > ${PERSIST_FILE}`, 'sync']);
+check(
+  'the host attached a block device, and the first boot mounted its root from it',
+  firstBoot.engine.device.attached &&
+    firstBoot.engine.device.bytesRead > 0 &&
+    firstBoot.ended === 'quiescent',
+  `attached=${firstBoot.engine.device.attached} reads=${firstBoot.engine.device.reads} ` +
+    `bytesRead=${firstBoot.engine.device.bytesRead} ended=${firstBoot.ended}`
+);
+// Boot 1's own evidence is that bytes reached the device and that the shell did not complain: a
+// redirect that failed prints `cannot create`, and a write that failed inside the filesystem would
+// leave the device's write count at zero. What the file *is* takes the second boot to check.
+check(
+  "the shell's redirect wrote through the filesystem to the device",
+  firstBoot.engine.device.bytesWritten > 0 &&
+    !firstBoot.terminal.lines.some((l) => l.includes('cannot create')) &&
+    firstBoot.ended === 'quiescent',
+  `writes=${firstBoot.engine.device.writes} bytesWritten=${firstBoot.engine.device.bytesWritten} ` +
+    `console=[${firstBoot.terminal.lines.join(' | ')}]`
+);
+store.close();
+
+// The second boot opens the same store. Nothing about the image changed between the two calls, so
+// anything it can see that the first run wrote came off the disk.
+const secondBoot = bootOver(fileStore(diskPath, imageBytes), [`cat ${PERSIST_FILE}`]);
+const seen = secondBoot.terminal.lines.find((l) => l.trim() === PERSIST_TEXT);
+check(
+  'a second boot sees the file the first one wrote, so the disk is the one that persisted',
+  secondBoot.booted === 'awaiting-input' && seen !== undefined,
+  `booted=${secondBoot.booted} lines=[${secondBoot.terminal.lines.join(' | ')}]`
+);
+
+note(
+  'what the M4 device cost and saw',
+  `first boot: ${firstBoot.engine.device.reads} reads / ${firstBoot.engine.device.bytesRead} bytes, ` +
+    `${firstBoot.engine.device.writes} writes / ${firstBoot.engine.device.bytesWritten} bytes, ` +
+    `${firstBoot.steps} slices\n` +
+    `        second boot: ${secondBoot.engine.device.reads} reads / ` +
+    `${secondBoot.engine.device.bytesRead} bytes (${diskPath})`
 );
 
 // ---------------------------------------------------------------------- the report

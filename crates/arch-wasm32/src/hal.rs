@@ -10,7 +10,8 @@ pub use arch_sim::hal::*;
 
 use crate::{
     console_available, console_read, console_write, copy_between_procs, cycles, halt_host,
-    run_profile_callback, set_profile_callback, set_tsc_switch, trap, tsc_switch,
+    host_block_capacity, host_block_read, host_block_write, run_profile_callback,
+    set_profile_callback, set_tsc_switch, trap, tsc_switch,
 };
 
 pub fn init() {
@@ -62,6 +63,56 @@ unsafe fn copy_between_address_spaces(
         bytes as u32,
     )
 }
+
+// ------------------------------------------------------------------- block device
+
+/// Bytes of the block device the host has attached, or 0 when it has none (M4).
+///
+/// The host is the device on this port the way it is the console and the clock: there is no PCI
+/// bus and no MMIO window to program, so a driver's access to its hardware is an import. What is
+/// *not* the host's decision is anything about the protocol — which driver serves the root, what a
+/// sector is, and what a request looks like are all the guest's (`virtio_blk.rs` answers `BDEV_*`,
+/// MFS probes `BDEV_OPEN`, and the request path that moves the bytes is the driver's own).
+///
+/// This is what `virtio_blk_probe` asks instead of scanning a bus, so a host with no device makes
+/// the driver answer `NotFound` and MFS's root fall back to the ramdisk — a diskless boot, which is
+/// the same disposition a machine with an empty drive has.
+pub fn block_capacity() -> u64 {
+    // SAFETY: the import has no preconditions; the host answers 0 for "no device".
+    unsafe { host_block_capacity() }
+}
+
+/// Read into `buf` from byte `offset` of the attached block device.
+///
+/// Returns the bytes read, or a negative errno — `ENODEV` when there is no device, `EIO` when the
+/// host's store could not be reached. A read that runs past the device's end returns short, which
+/// is what a block driver reports and what the filesystem above expects for a short device.
+pub fn block_read(offset: u64, buf: &mut [u8]) -> i32 {
+    let bytes = buf.len();
+    if bytes > u32::MAX as usize {
+        return EINVAL;
+    }
+    // SAFETY: `buf` is live and `bytes` long for the duration of the call, which is synchronous.
+    unsafe { host_block_read(offset, buf.as_mut_ptr() as u32, bytes as u32) }
+}
+
+/// Write `buf` to byte `offset` of the attached block device.
+///
+/// A write is durable when it returns: the host persists the pages it dirtied before answering,
+/// which is why there is nothing for the guest to flush and why a killed run loses only the write
+/// in flight. The alternative — a write cache in the host with a flush the guest has to ask for —
+/// would be a second place for data to be lost, and the guest's own cache is the one that matters.
+pub fn block_write(offset: u64, buf: &[u8]) -> i32 {
+    let bytes = buf.len();
+    if bytes > u32::MAX as usize {
+        return EINVAL;
+    }
+    // SAFETY: `buf` is live and `bytes` long for the duration of the call, which is synchronous.
+    unsafe { host_block_write(offset, buf.as_ptr() as u32, bytes as u32) }
+}
+
+/// `EINVAL`, for an argument the host could not be given.
+const EINVAL: i32 = -22;
 
 // ------------------------------------------------------------------- exec
 

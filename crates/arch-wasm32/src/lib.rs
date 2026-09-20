@@ -79,6 +79,19 @@ unsafe extern "C" {
     ///
     /// Returns 0, or a negative errno: `ENOMEM` when the clone cannot be made.
     fn host_fork_process(parent_slot: i32, child_slot: i32) -> i32;
+    /// Read `bytes` bytes at byte `offset` of the attached block device, into the caller's memory
+    /// at `buf`.
+    ///
+    /// Returns the number of bytes read, or a negative errno. `ENODEV` means the host has no device
+    /// attached — the same answer a hardware arch gets when its PCI probe finds nothing, and the
+    /// one MFS asks for (`bdev_has_device`'s `BDEV_OPEN` probe) before it decides whether the root
+    /// filesystem lives here or on the ramdisk.
+    fn host_block_read(offset: u64, buf: u32, bytes: u32) -> i32;
+    /// Write `bytes` bytes from the caller's memory at `src` to the attached block device, at byte
+    /// `offset`.
+    fn host_block_write(offset: u64, src: u32, bytes: u32) -> i32;
+    /// The attached device's capacity in bytes, or 0 when there is none.
+    fn host_block_capacity() -> u64;
 }
 
 /// What the host needs in order to instantiate a module as a process.

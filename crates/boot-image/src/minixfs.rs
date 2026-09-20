@@ -319,7 +319,14 @@ impl MinixFs {
             s_zmap_blocks: self.zmap_blocks as i16,
             s_firstdatazone_old: self.first_data_zone,
             s_log_zone_size: LOG_ZONE_SIZE,
-            s_flags: 0,
+            // `MFSFLAG_CLEAN`. MFS mounts read-only a filesystem that is not marked clean — its
+            // protection against mounting one that was half-written when the machine went away —
+            // and it clears this bit when *it* mounts read-write, so the flag means "the last
+            // writer finished", not "never written". A freshly built image is the strongest case
+            // of that, and without the bit every mount of this port's root has been read-only:
+            // nothing had needed to write to it before M4 attached a disk. (`fs/mfs/mount.c`
+            // sets it the same way on a clean unmount.)
+            s_flags: 1,
             s_max_size: 0x7FFFFFFF,
             s_zones: self.total_blocks,
             s_magic: SUPER_MAGIC_V3 as i16,

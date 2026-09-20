@@ -32,3 +32,38 @@ pub use arch_wasm32::hal::{
     PCI_ADDR_PORT, PCI_DATA_PORT, RTC_INDEX, cmos_read, cmos_write, inb, inl, inw, mfence, outb,
     outl, outw, pci_cfg_read8, pci_cfg_read16, pci_cfg_read32, pci_cfg_write32, pci_config_addr,
 };
+
+// The block device, and the first entry here that is a real device rather than an
+// inert name: on this arch the driver's hardware *is* the host (M4). `virtio_blk`
+// asks these three instead of scanning a bus, which is why the driver can keep one
+// request path and two transports.
+//
+// A hardware arch has no host to ask, and a block-device driver there reaches its
+// device through the virtio transport — so these answer "no device" and the call
+// site is unreachable by construction. They exist so driver code compiles, the same
+// disposition the port-I/O names above have.
+#[cfg(target_arch = "wasm32")]
+pub use arch_wasm32::hal::{block_capacity, block_read, block_write};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod no_host_device {
+    /// There is no host, so there is no device to ask about.
+    pub fn block_capacity() -> u64 {
+        0
+    }
+
+    /// `ENODEV`. Reached only if a driver calls the host transport on an arch that has none, which
+    /// `virtio_blk`'s `cfg` prevents — the answer is a refusal rather than a success with no bytes,
+    /// because a silent zero-length read is a hole in a filesystem.
+    pub fn block_read(_offset: u64, _buf: &mut [u8]) -> i32 {
+        -19
+    }
+
+    /// `ENODEV`, as above.
+    pub fn block_write(_offset: u64, _buf: &[u8]) -> i32 {
+        -19
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use no_host_device::{block_capacity, block_read, block_write};

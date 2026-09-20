@@ -55,6 +55,9 @@ const NR_EXIT = 0;
 const NR_THREAD_YIELD = 59;
 const EAGAIN = -11;
 const EFAULT = -14;
+/// No such device. What `host_block_*` answers when the host has no device attached, which is how
+/// `virtio_blk`'s probe learns there is nothing there and MFS's root falls back to the ramdisk.
+const ENODEV = -19;
 const EINVAL = -22;
 const ENOEXEC = -8;
 const ENOMEM = -12;
@@ -134,11 +137,32 @@ function equalBytes(a, b) {
 /// servers as one module, and the boot filesystem image. `sink` receives what the guest writes to
 /// the console (`write`, one byte at a time) and the host's own reports (`note`) — the front end
 /// decides what to do with either.
+/// A place for the block device's bytes to live between runs.
+///
+/// The interface is deliberately the one a *disk* has rather than the one a database has: read a
+/// range, write a range, and say which image the contents were made from. Implementations pick
+/// their own granularity — a file in Node, a record per page in IndexedDB for the page — which is
+/// why neither offset nor length is assumed to be small.
+///
+/// `imageId` is the guard on the one failure mode this design has that a real disk does not: the
+/// store outlives the image it was seeded from, so a rebuilt image over an old store is a mix of
+/// two filesystems. A store whose identity does not match the image is refused (the device is not
+/// attached at all), which is loud — the guest falls back to the ramdisk and the host says why —
+/// whereas the mix would be silent.
+///
+/// ```js
+/// { imageId: string | null, setImageId(id), read(offset, length) -> Uint8Array, write(offset, bytes) }
+/// ```
+
 export function createHost({
   kernel: kernelBytes,
   servers: serversBytes,
   image: imageBytes,
   sink = { write() {}, note() {} },
+  /// Where the block device's contents live between runs, or omitted for a diskless boot. Without
+  /// one there is no device to attach, `virtio_blk` finds nothing, and MFS mounts the root from
+  /// the ramdisk — the same path a machine with an empty drive takes.
+  store = null,
   specs = SYSTEM_SPECS,
   /// The host's lever against a guest that keeps making syscalls without getting anywhere
   /// (finding 12). Generous: a boot with a shell, a fork and an exec costs a five-figure number,
@@ -151,6 +175,69 @@ export function createHost({
   sliceSyscalls = 400,
 } = {}) {
   const note = (name, detail) => sink.note(name, detail);
+
+  // ------------------------------------------------------------------ the device
+
+  /// What the host's block device has been asked for. The checks read this rather than asking the
+  /// guest: "the root came from the disk" is a claim about *these* numbers — a mount that read
+  /// sectors and a filesystem that wrote them back.
+  const deviceStats = { reads: 0, writes: 0, bytesRead: 0, bytesWritten: 0, attached: false };
+
+  /// Identify an image by its size and contents, so a store can be told from an image it was not
+  /// made from. Not a hash for security — a mismatch has to be *detected*, and a fingerprint the
+  /// build cannot accidentally reproduce is enough.
+  const imageIdOf = (bytes) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i += 1) {
+      h ^= bytes[i];
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return `${bytes.length}:${h.toString(16)}`;
+  };
+
+  /// The block device, or null when there is none.
+  ///
+  /// `capacity` is the boot image's length: the image is this disk's *initial contents*, so a fresh
+  /// store boots an installed system and every later run sees what the previous one wrote. There is
+  /// no separate "install" step to get wrong, and no way for the guest to see a disk that is
+  /// neither.
+  const device = (() => {
+    if (store === null) return null;
+    const imageId = imageIdOf(imageBytes);
+    if (store.imageId !== null && store.imageId !== imageId) {
+      note(
+        'the block device was not attached: its contents were made from a different image',
+        `store has ${store.imageId}, image is ${imageId} — delete the store to start over, ` +
+          `or the filesystem on the disk would be two filesystems mixed`
+      );
+      return null;
+    }
+    if (store.imageId === null) store.setImageId(imageId);
+    deviceStats.attached = true;
+    return {
+      capacity: imageBytes.length,
+      /// Copy `bytes` from the device at `offset` into `memory` at `dstAddr`. Short at the end of
+      /// the device, as a block device is.
+      readInto(memory, offset, dstAddr, bytes) {
+        if (offset >= imageBytes.length) return 0;
+        const want = Math.min(bytes, imageBytes.length - offset);
+        const chunk = store.read(offset, want);
+        new Uint8Array(memory.buffer, dstAddr, want).set(chunk);
+        deviceStats.reads += 1;
+        deviceStats.bytesRead += want;
+        return want;
+      },
+      /// Copy `bytes` into the device from `memory` at `srcAddr`.
+      writeFrom(memory, offset, srcAddr, bytes) {
+        if (offset >= imageBytes.length) return 0;
+        const want = Math.min(bytes, imageBytes.length - offset);
+        store.write(offset, new Uint8Array(memory.buffer, srcAddr, want));
+        deviceStats.writes += 1;
+        deviceStats.bytesWritten += want;
+        return want;
+      },
+    };
+  })();
 
   // ---------------------------------------------------------------------- state
 
@@ -508,6 +595,16 @@ export function createHost({
         host_copy_between: copyBetween,
         host_exec_module: hostExecModule,
         host_fork_process: hostForkProcess,
+        // The block device (M4). Three calls, and the driver above them is the same one the
+        // hardware arches run: `virtio_blk`'s `probe` asks the capacity instead of scanning a bus,
+        // and its `transfer` moves the bytes here instead of through a virtqueue. What stays the
+        // guest's is everything about the protocol — who opens the device, what a sector is, and
+        // which driver serves the root.
+        host_block_capacity: () => BigInt(device === null ? 0 : device.capacity),
+        host_block_read: (offset, bufAddr, bytes) =>
+          device === null ? ENODEV : device.readInto(memory, Number(offset), bufAddr, bytes),
+        host_block_write: (offset, srcAddr, bytes) =>
+          device === null ? ENODEV : device.writeFrom(memory, Number(offset), srcAddr, bytes),
         // All six argument registers are named and forwarded, not only the two the
         // message-passing syscalls use: the kernel's dispatcher hands `args` straight to the
         // handler, and a syscall whose count arrives as a literal zero is a transfer that reports
@@ -730,6 +827,8 @@ export function createHost({
     memoryFor,
     copyLog,
     forks,
+    /// What the host's block device has been asked for, and whether one is attached at all.
+    device: deviceStats,
     console: console_,
     spawnFailures,
     pump,

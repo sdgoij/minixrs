@@ -7343,6 +7343,39 @@ What it does not establish: five iterations is enough to see flatness and not en
 reaps, is invisible here. A longer run is the next measurement if the per-command cost ever needs
 to be argued about, and the harness to drive one is now in place.
 
+**48. The root filesystem was never writable: the image is built without `MFSFLAG_CLEAN`, and MFS
+mounts read-only any filesystem that is not marked clean.** Found by M4, because M4 is the first
+thing in the port that had to *write* to the root — every run before it read the boot filesystem and
+left it alone, so nothing had ever asked. The first attempt answered `sh: cannot create f.txt:
+err=30`, which is `EROFS`, on a diskless boot as well as a disk-backed one: the device was not the
+variable.
+
+The rule is MINIX's, and it is a good one: `apply_mount_flags` refuses to mount read-write a
+filesystem whose superblock does not say the last writer finished, and clears the bit itself on the
+first read-write mount. That is protection against mounting a filesystem that was half-written when
+the machine went away, and the reference's answer to it is `fsck` from `/etc/rc`. What the port was
+missing was only the first half of the story: `mkminixfs` wrote `s_flags: 0`, so the bit was never
+set, so *every* mount of *every* arch's root was read-only — including the first one after a build,
+which is the one case that is unambiguously clean. The fix is one field in the image builder, with
+the disposition stated where it is set.
+
+**49. Nothing syncs or unmounts at shutdown, so a boot's writes are durable only if the guest syncs
+them.** Found with 48, by trying to read in a second boot what the first one wrote: it was not
+there, and the device had the receipt — three blocks written (the superblock, from the mount) while
+the inode, the directory block and the data block stayed in MFS's cache. `fs_sync` writes dirty
+inodes and flushes the block cache, and it is the shell's `sync` builtin that reaches it.
+
+This is not a wasm bug and it is not even a bug: a filesystem that has not been synced has not
+promised anything, and a crash loses those writes on any arch. What it is is a *missing shutdown*.
+On the shipping arches `/etc/rc` unmounts the root and `fs_unmount` sets `MFSFLAG_CLEAN` again, so
+the disk is left in the state the next mount wants; here the shell exits, the system quiesces and
+the host stops, so a page that is closed leaves a filesystem marked dirty — which, given 48's rule,
+means the next boot mounts it **read-only**. Reading survives that (which is how M4's persistence
+check passes) but writing does not, so the follow-up is a clean shutdown: something at quiescence
+that syncs and unmounts the root. The port's `fs_unmount` also stops short of the reference — it
+sets the clean bit in memory and never calls `write_super` — so that path is worth a look at the
+same time.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

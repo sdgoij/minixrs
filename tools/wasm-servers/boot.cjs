@@ -60,6 +60,8 @@ const SYS_GETINFO = 26;
 /// it receives anything, which is where its process table comes from (`init_boot_procs`).
 const GET_IMAGE = 1;
 const STATE_UNWINDING = 1;
+/// No such device. What the block imports answer here, where no device is attached on purpose.
+const ENODEV = -19;
 const STRUCT_SIZE = 16;
 const BUF_SIZE = 65536;
 const EINVAL = -22;
@@ -509,6 +511,15 @@ function makeImports(st) {
       // will: `SYS_VIRCOPY` is how it reads a client's key, so the primitive is
       // the real one rather than a refusal.
       host_copy_between: copyBetween,
+      // No block device: this harness runs the *diskless* configuration on purpose, so the root
+      // comes from the RAM disk and every check that reads the filesystem is reading the image the
+      // host handed over at boot. M4's device — and the persistence claim that needs it — is driven
+      // by `tools/wasm-browser/run.js`, which is where a second boot is cheap. The answers here are
+      // the "nothing attached" ones: `virtio_blk`'s probe sees capacity 0, refuses `BDEV_OPEN`, and
+      // MFS mounts the root from the ramdisk, which is what a machine with an empty drive does.
+      host_block_capacity: () => 0n,
+      host_block_read: () => ENODEV,
+      host_block_write: () => ENODEV,
       // All six argument registers are named and forwarded, not only the two the
       // message-passing syscalls use. The kernel's dispatcher hands `args` straight
       // to the handler, and the three-argument syscalls read `args[2]` — `write`'s
