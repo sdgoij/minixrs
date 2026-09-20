@@ -8,7 +8,8 @@
       The wasm system running in a tab: the kernel, the servers and the shell, all from
       `build/`. See README.md next to this file for how to build it and what it does and does
       not do. `page.js` is the whole front end; everything under it is the same engine the
-      check harness in `tools/wasm-servers/` runs.
+      check harness in `tools/wasm-servers/` runs, and the disk behind it is the same
+      interface `run.js` gives a file (`store.js`).
     -->
     <style>
       :root {
@@ -50,6 +51,12 @@
       #status[data-kind='bad'] {
         color: var(--bad);
       }
+      #disk {
+        color: var(--dim);
+      }
+      #disk[data-kind='bad'] {
+        color: var(--bad);
+      }
       .hint {
         color: var(--dim);
         margin-left: auto;
@@ -78,18 +85,54 @@
       #panel[hidden] {
         display: none;
       }
+      #controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 0.3rem 0.6rem;
+        cursor: pointer;
+      }
+      button:hover:enabled {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      button:disabled {
+        color: var(--dim);
+        cursor: default;
+      }
     </style>
   </head>
   <body>
     <header>
       <h1>MINIX/Rust — <code>arch-wasm32</code></h1>
       <span id="status">starting…</span>
+      <span id="disk"></span>
       <span class="hint">
         type at the prompt · Enter sends · arrows walk history · ^C ^D ^U ^W ^K ^L work
       </span>
     </header>
 
     <pre id="screen"></pre>
+
+    <!--
+      The controls are the two things a reader cannot do at the prompt, and both come from what
+      the disk cannot promise by itself: a session only ends cleanly if something asks it to
+      (only INIT's exit syncs, unmounts and marks the filesystem clean), and a disk the store
+      refuses has no way out from the terminal at all. Both buttons are wired by page.js.
+    -->
+    <div id="controls">
+      <button id="shutdown" type="button">end the session</button>
+      <button id="clear" type="button">start over from the boot image</button>
+      <span class="hint">ending the session is what leaves the disk clean</span>
+    </div>
+
     <pre id="panel" hidden></pre>
 
     <!--

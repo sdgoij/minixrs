@@ -22,6 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createHost, SYSTEM_SPECS } from './host.js';
+import { fileStore } from './file-store.js';
 import { createTerminal } from './terminal.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -249,55 +250,6 @@ check(
 // flush and unmount leaves a disk that reads fine and refuses to be written, and nothing says why.
 // The third and fourth boots below write files and never sync them: what makes those writes
 // durable is the shutdown, and nothing else.
-
-/// The device's contents in a file: a disk, not a cache of one.
-///
-/// The file *is* the device and is created from the boot image the first time, so a fresh store
-/// boots an installed system and every run after it sees what the previous run wrote. Writes are
-/// positional and land before the call returns, which is what `block_write` promises the guest —
-/// visible to the next run, and to the tools that end up looking at the file.
-///
-/// The sidecar records which image the disk's contents were made from, because that is the one
-/// assumption this design adds over a real disk: a store outlives the image it was seeded from.
-function fileStore(diskPath, sourceImage) {
-  const metaPath = `${diskPath}.json`;
-  const meta = fs.existsSync(metaPath)
-    ? JSON.parse(fs.readFileSync(metaPath, 'utf8'))
-    : { imageId: null };
-  if (!fs.existsSync(diskPath)) fs.writeFileSync(diskPath, sourceImage);
-
-  let fd = null;
-  const open = () => {
-    if (fd === null) fd = fs.openSync(diskPath, 'r+');
-    return fd;
-  };
-
-  return {
-    get imageId() {
-      return meta.imageId;
-    },
-    setImageId(id) {
-      meta.imageId = id;
-      fs.writeFileSync(metaPath, JSON.stringify(meta));
-    },
-    read(offset, length) {
-      const buf = Buffer.alloc(length);
-      const got = fs.readSync(open(), buf, 0, length, offset);
-      // Past the end of the device is zeros, as it is on a real one.
-      buf.fill(0, got);
-      return buf;
-    },
-    write(offset, bytes) {
-      fs.writeSync(open(), bytes, 0, bytes.length, offset);
-    },
-    close() {
-      if (fd !== null) {
-        fs.closeSync(fd);
-        fd = null;
-      }
-    },
-  };
-}
 
 /// Boot the system over `store`, type `lines`, and hand back what reached the console.
 ///

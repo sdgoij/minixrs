@@ -628,6 +628,13 @@ The host's side is a **store**, which is where the persistence actually lives:
 { imageId, setImageId(id), read(offset, length), write(offset, bytes) }
 ```
 
+The page's store has one more call, which is not the device's: `clear()` closes its connection and
+deletes the database, so the next boot seeds itself from the image again. The device never asks for
+it — the page's "start over from the boot image" control does, on the two states with no other way
+out (a store whose contents came from another image, which the device refuses to attach, and a
+filesystem a tab left unclean, which the next mount will not write). A file store is cleared by
+deleting the file.
+
 The boot filesystem image is the device's *initial contents*, so a fresh store boots
 an installed system and every run after it sees what the last one wrote — no install
 step to get wrong. `imageId` is the one assumption this adds over a real disk: a
@@ -636,8 +643,18 @@ would be two filesystems mixed. A store whose identity does not match is refused
 the device is not attached at all, which is loud (the guest falls back to the
 ramdisk and the host says why) where the mixture would be silent.
 
-The Node implementation is a file (`tools/wasm-browser/run.js`); the page's is
-IndexedDB behind the same four calls.
+The Node implementation is a file (`tools/wasm-browser/file-store.js`, driven by `run.js`); the
+page's is IndexedDB behind the same four calls (`tools/wasm-browser/store.js`). The page's cannot
+answer the way the file does — IndexedDB is asynchronous and `host_block_read`/`host_block_write`
+are not — so it holds the disk in memory for the session and writes changed pages back as records,
+which is a weaker promise than the reference's durable-on-return `block_write` (`PORTING_PLAN.md`
+finding 54).
+
+Holding it is a tab's, not a page's: the page takes a Web Lock named after the database for as long
+as the document exists, because two tabs would otherwise be two in-memory copies of one disk and
+`imageId` cannot tell those apart — the records are the same records, only the sessions are
+different. A tab that is refused the lock gives up the disk rather than the boot: it comes up on
+the ramdisk and says which of the three reasons it got (`page.js`).
 
 ## 8. The HAL surface, function by function
 
@@ -1177,30 +1194,41 @@ is §7.2's work and M7's, and both halves of M7 — exec as module instantiation
 fork — are done, so the shell forks for an external command and the child execs the
 module the image carries at that path.
 
-**M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
-existing persistence test adapted. **Status: the device is real, persists, and survives a clean
-shutdown; the browser's store is what is left.** The host is the device (§9.1): `virtio_blk`
-finds it instead of finding nothing, MFS mounts the root from it, the shell's `>`
-redirect writes through the filesystem to it, and a second boot reads back what the
-first one wrote — checked by `node tools/wasm-browser/run.js`, which boots four times
-over one store. The last two boots write files and never sync them, so what makes
-those writes durable is the *shutdown*, and the boot that can write after one is the
-check that the shutdown left the disk clean.
+**M4 — VFS/MFS + host block device. Status: DONE.** The host is the device (§9.1), the browser's
+disk is IndexedDB behind the same four calls the Node front ends give a file, and a session survives
+a reload. `virtio_blk` finds the device instead of finding nothing, MFS mounts the root from it, the
+shell's `>` redirect writes through the filesystem to it, and a later boot reads back what an
+earlier one wrote — checked by `node tools/wasm-browser/run.js`, which boots four times over one
+store (the last two writing files they never sync, so the shutdown is what makes them durable), and
+by `node tools/wasm-browser/page.test.js`, which reopens the page's own disk and requires it to
+answer with the file the session wrote and with a clean superblock, and which imports the page a
+second time to check the tab that cannot have the disk. The page knows the disk may be
+absent or refused and says which it got, on its own status line, and the disk belongs to the tab
+that has it — a Web Lock held for the life of the document — so a second tab is told it is taken
+rather than handed the same records to write.
 
-That shutdown is finding 49's follow-up, and it is the reference's: this port's `init`
-becomes the shell by `exec`, so the exit of INIT ends the session, PM follows it with
-`VFS_PM_REBOOT`, and VFS runs `pm_reboot` — sync, free every non-file-server process,
-sync, unmount, free everything left, sync, unmount with force. Reaching it exposed
-two things M4 had already recorded (the image was built without `MFSFLAG_CLEAN`, so
-every mount of this port's root was read-only — finding 48 — and nothing synced or
-unmounted at shutdown — finding 49) and four more: the clean bit was written into the
-block cache and then thrown away by the unmount's invalidate (50), VFS leaked a vnode
-reference per path resolution and `pm_fork` leaked its child's directories (51), MFS's
-own inode-reference accounting does not balance, which is why the forced pass carries
-C's `unmount_all` argument (52), and VFS fabricates a PFS mount for a server this boot
-does not start, so the shutdown skips device-less mounts as `do_sync` already does
-(53). The page's store is IndexedDB behind the same interface; until it lands, the
-page boots diskless.
+Reaching that exposed two things M4 had already recorded (the image was built without
+`MFSFLAG_CLEAN`, so every mount of this port's root was read-only — finding 48 — and nothing synced
+or unmounted at shutdown — finding 49) and five more. The clean bit was written into the block
+cache and thrown away by the unmount's invalidate (50); VFS leaked a vnode reference per path
+resolution and `pm_fork` leaked its child's directories (51); MFS's own inode-reference accounting
+does not balance, which is why the forced pass carries C's `unmount_all` argument (52); VFS
+fabricates a PFS mount for a server this boot does not start, so the shutdown skips device-less
+mounts as `do_sync` already does (53); and the page's disk cannot be durable when a write returns,
+and a tab closed at the prompt leaves the filesystem unclean (54).
+
+The two-tab check then found one more, in the checks themselves: `store.js` copied the image
+with `slice`, which on a Node `Buffer` is a *view*, so the harness's own image bytes were being
+written by the first session — a second boot hashed a filesystem that was no longer the one it read
+(55).
+
+M4's own UI is the two controls the page now has, because both are states a reader can be in with
+no way out otherwise: "end the session" sends `^U` and `exit`, which is the guest's shutdown (this
+port's init becomes the shell, so `exit` at the prompt *is* INIT's exit, and PM follows it with
+VFS's `pm_reboot`), and "start over from the boot image" closes the store's connection, deletes the
+database and reloads, which is the only way out of a disk the store refuses and of a filesystem a
+previous tab left unclean. Both are wired only for the tab that holds the disk — a tab that was
+refused the lock deleting the other one's disk is the mixture the lock exists to prevent.
 
 **M5 — Display and input.** `wserver` + `fb` on canvas, pointer input.
 
@@ -1880,21 +1908,29 @@ scheduler loop is missing on wasm until it is written there.
 
 What the page does *not* do, and which milestone it belongs to:
 
-- **No persistence.** The boot filesystem is the image the host writes into the RAM disk's memory
-  at every load. A real block device behind the same BDEV protocol is M4.
+- **Persistence, and what looks after it is two buttons.** The page's block device is IndexedDB
+  (§9.1, M4): the root is mounted from it and writes go back to it, and the session is left clean by
+  "end the session" (which sends the `exit` that INIT's exit — the shutdown — consists of) rather
+  than by typing it. "start over from the boot image" is what a disk the store refuses has instead
+  of a dead end. Finding 54 has the detail.
 - **Not a terminal emulator.** `\n`, `\r`, `\b` and printable characters only — all the shell's
   editor draws with. Wrapping, scrolling regions and ANSI escapes are M5's `wserver`/canvas work.
 - **No worker.** The guest runs on the main thread and yields to the browser between slices.
   Moving it into a Worker would decouple the two and would need the console to cross
   `postMessage`.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 63 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 65 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
-Verified by `tools/wasm-browser/run.js` (5 checks: the boot, the park, a typed command that forks
-and execs, the reap, quiescence) and `tools/wasm-browser/page.test.js` (13 checks: the server's
-MIME types, then `page.js` itself under a stub DOM, so the page's own code — the pump policy, the
-key map, the repaint coalescing — is not left to a human to try). What neither can check is the
-part that is only a browser: the pixels, the real `fetch`, and whether a keystroke feels immediate.
+Verified by `tools/wasm-browser/run.js` (13 checks: the boot, the park, a typed command that forks
+and execs, the reap, quiescence, and four boots over one disk — the last two writing files they
+never sync, so the shutdown is what makes them durable) and `tools/wasm-browser/page.test.js`
+(31 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
+— the pump policy, the key map, the repaint coalescing, and both controls — is not left to a human
+to try, then the same session's disk reopened over a stub IndexedDB, which must answer with the file
+the session wrote and with a clean superblock, then the disk cleared and an unseeded store over it,
+and then the page imported a second time under a held Web Lock — the second tab, which has to boot
+from the ramdisk and say why). What neither can check is the part that is only a browser: the
+pixels, the real `fetch` and `indexedDB`, and whether a keystroke feels immediate.
 
 The server check is there because a module script is fetched under strict MIME checking, and a
 static server that answers `text/plain` for a JavaScript file leaves a page that will not start

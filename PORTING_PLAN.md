@@ -7445,6 +7445,59 @@ them, and for the same reason: there is no medium to leave consistent. The hole 
 boot's to close — start PFS, or do not fabricate its record there — and it is recorded rather than
 fixed here because it is about which servers the page runs, not about the shutdown.
 
+**54. The page's disk cannot promise what `block_write` promises, and a tab closed at the prompt
+leaves the filesystem unclean.** The browser half of M4, and it has two halves: the platform's and
+the guest's.
+
+The platform's: IndexedDB is asynchronous and `host_block_read`/`host_block_write` are not —
+`virtio_blk` gets a value back and cannot be made to wait — so the page's disk is the boot image in
+memory, seeded once and overlaid with one IndexedDB record per page that changes. Reads are answered
+from that array; a write is in the database a tick later, when the browser commits the transaction.
+The reference's `block_write` is durable *when it returns*, and no page can have that back: a page
+killed inside that window loses the blocks it was writing, which is what a disk with a write cache
+does too. A write that never reaches the database is reported through a callback, because by then
+the guest has been told it landed, and the page puts that on its status line.
+
+The guest's is finding 49 from the other side. MFS holds its dirty blocks in its own cache until
+something flushes them, so a tab closed at the prompt — the way tabs are closed — leaves the disk
+dirty. Reads survive that and writes do not: the next boot mounts it read-only, and by 48's rule
+nothing says so until a write fails. Only `exit` runs the shutdown that syncs, unmounts and marks
+the disk clean, so ending the session is what makes it durable. The page's control does exactly
+that: it sends `^U` and `exit`, which is all the mechanism there is — this port's init becomes the
+shell by exec, so the guest's shutdown is reached by INIT exiting, and a host has no other way to
+ask (a foreground program takes those bytes as its input and the session then ends when it does).
+Its second control is the way out of a disk the store refuses and of one a previous tab left
+unclean, neither of which is reachable from the prompt: it closes the store's connection, deletes
+the database and reloads.
+
+The store is checked by `node tools/wasm-browser/page.test.js` (13 checks to 31), through the
+store's own interface: the page's session writes a file and ends, and a store reopened over the same
+database must answer with that file and with a clean superblock. Its fake (`indexeddb.fake.js`)
+replaces the browser's implementation rather than the page's code, so what runs under Node is the
+real `store.js` — including that requests answer on a later task, and that an object store
+enumerates in key order, which is what lets a page's index be zipped to its bytes.
+
+One thing the store cannot guard is two *live* sessions over one database: they hold the same
+records, so there is nothing for `imageId` to disagree with, and the mixture would be two in-memory
+disks taking turns. That is the page's, not the store's — `page.js` holds a Web Lock named after the
+database for the life of the document, and a tab that cannot take it boots from the ramdisk and says
+so. The check is the page imported a second time under a held lock, which is also the only check of
+the page's no-disk path.
+
+**55. `store.js` copied the boot image with `slice`, which on a Node `Buffer` is a view — so the
+harness's own image bytes were what the disk wrote to.** The page imported a second time reported a
+*different* image than the first, from the same file: the first session's writes had gone through
+`imageBytes.slice()` into the Buffer the harness reads from disk and hands every boot, so the second
+import identified a filesystem the first boot had already left. In a browser the line is right —
+`fetch` gives a `Uint8Array`, whose `slice` copies — and the value is only a `Buffer` where a store
+is handed bytes by a Node front end, which is what these checks do. The copy is now
+`new Uint8Array(imageBytes)`, which copies whatever it is handed.
+
+Nothing had failed: no check depended on the image being pristine, so the aliasing was invisible
+until a check imported the page twice and compared what the two boots identified. `file-store.js`
+never slices the source image — it writes it to the file on first use — so `run.js`'s four boots
+over one image were never affected.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

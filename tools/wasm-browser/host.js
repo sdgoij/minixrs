@@ -137,22 +137,9 @@ function equalBytes(a, b) {
 /// servers as one module, and the boot filesystem image. `sink` receives what the guest writes to
 /// the console (`write`, one byte at a time) and the host's own reports (`note`) — the front end
 /// decides what to do with either.
-/// A place for the block device's bytes to live between runs.
 ///
-/// The interface is deliberately the one a *disk* has rather than the one a database has: read a
-/// range, write a range, and say which image the contents were made from. Implementations pick
-/// their own granularity — a file in Node, a record per page in IndexedDB for the page — which is
-/// why neither offset nor length is assumed to be small.
-///
-/// `imageId` is the guard on the one failure mode this design has that a real disk does not: the
-/// store outlives the image it was seeded from, so a rebuilt image over an old store is a mix of
-/// two filesystems. A store whose identity does not match the image is refused (the device is not
-/// attached at all), which is loud — the guest falls back to the ramdisk and the host says why —
-/// whereas the mix would be silent.
-///
-/// ```js
-/// { imageId: string | null, setImageId(id), read(offset, length) -> Uint8Array, write(offset, bytes) }
-/// ```
+/// `store` is where the block device's bytes live between runs, and the store contract — the four
+/// synchronous calls, and what `imageId` guards — is documented in `store.js`.
 
 export function createHost({
   kernel: kernelBytes,
@@ -207,8 +194,9 @@ export function createHost({
     if (store.imageId !== null && store.imageId !== imageId) {
       note(
         'the block device was not attached: its contents were made from a different image',
-        `store has ${store.imageId}, image is ${imageId} — delete the store to start over, ` +
-          `or the filesystem on the disk would be two filesystems mixed`
+        `store has ${store.imageId}, image is ${imageId} — delete the store to start over ` +
+          `(the page offers a control for that), or the filesystem on the disk would be two ` +
+          `filesystems mixed`
       );
       return null;
     }

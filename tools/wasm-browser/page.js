@@ -18,6 +18,7 @@
 //     from outside — the engine stops *between* syscalls.
 
 import { createHost } from './host.js';
+import { indexedDbStore } from './store.js';
 import { createTerminal } from './terminal.js';
 
 const ARTIFACTS = {
@@ -25,6 +26,10 @@ const ARTIFACTS = {
   servers: 'build/servers.async.wasm',
   image: 'build/minixfs.img',
 };
+
+/// The database the disk lives in. Named here rather than in `store.js` because the lock
+/// below is about this page's disk, not about stores in general.
+const DISK_NAME = 'minixrs-disk';
 
 /// How many syscalls one slice may run. A syscall here costs a few microseconds, so this is a few
 /// milliseconds of guest work — short enough that a keystroke is picked up promptly, long enough
@@ -45,11 +50,19 @@ const terminal = createTerminal({ maxLines: 800 });
 const elements = {
   screen: document.getElementById('screen'),
   status: document.getElementById('status'),
+  disk: document.getElementById('disk'),
   panel: document.getElementById('panel'),
+  shutdown: document.getElementById('shutdown'),
+  clear: document.getElementById('clear'),
 };
 
 let host = null;
 let stopping = false;
+/// The store this tab's disk lives in, or null when it has none: the page offers to start over
+/// on it, which is the only way out of a store the device refuses.
+let disk = null;
+/// Whether this tab has asked the guest to end the session (`endSession`).
+let shutdownAsked = false;
 /// Resolves the current wait-for-input, if the loop is parked.
 let wake = null;
 /// The host's own reports (`note`): how a dropped fork or an unloadable module reaches the
@@ -78,6 +91,15 @@ function repaint() {
 function setStatus(text, kind = '') {
   elements.status.textContent = text;
   elements.status.dataset.kind = kind;
+}
+
+/// Where the disk is, or why there is none. Set once, at bring-up: a page whose writes go
+/// to IndexedDB and a page booting from the ramdisk look identical from the terminal, and
+/// the difference is whether anything you do survives a reload.
+function setDisk(text, kind = '') {
+  if (elements.disk === null) return;
+  elements.disk.textContent = text;
+  elements.disk.dataset.kind = kind;
 }
 
 // --------------------------------------------------------------------------- the pump
@@ -137,6 +159,7 @@ async function run() {
     }
     if (reason === 'quiescent') {
       setStatus(describeState(reason));
+      if (shutdownAsked) sessionEnded();
       await waitForInput();
       continue;
     }
@@ -155,15 +178,87 @@ async function run() {
   }
 }
 
-function showDiagnostics(reason) {
-  const notes = hostNotes.length > 0 ? hostNotes.join('\n') : '(none reported)';
+function showPanel(text) {
   elements.panel.hidden = false;
-  elements.panel.textContent =
-    `${describeState(reason)}\n\nhost reports:\n${notes}\n\n` +
-    `dispatch steps: ${host.steps}\n` +
-    `processes: ${host.procs.map((p) => `${p.spec.label}(${p.spec.slot})`).join(' ')}\n` +
-    `forks: ${host.forks.length}\n` +
-    `syscalls of budget left: ${host.budget.left}`;
+  elements.panel.textContent = text;
+}
+
+function reportsText() {
+  return hostNotes.length > 0 ? hostNotes.join('\n') : '(none reported)';
+}
+
+function showDiagnostics(reason) {
+  showPanel(
+    `${describeState(reason)}\n\nhost reports:\n${reportsText()}\n\n` +
+      `dispatch steps: ${host.steps}\n` +
+      `processes: ${host.procs.map((p) => `${p.spec.label}(${p.spec.slot})`).join(' ')}\n` +
+      `forks: ${host.forks.length}\n` +
+      `syscalls of budget left: ${host.budget.left}`
+  );
+}
+
+// ---------------------------------------------------------------------- the controls
+//
+// Both exist because of what the disk cannot promise by itself (`PORTING_PLAN.md` finding 54).
+// A session only ends cleanly if something asks it to — MFS holds its dirty blocks until a
+// shutdown syncs them, so a tab closed at the prompt leaves the filesystem unclean and the next
+// boot mounts it read-only — and a store the page refuses is otherwise a page with no way back,
+// since the device is never attached and nothing at the prompt can clear what refuses it.
+
+/// End the session. The shutdown is the guest's, and the guest gets it from INIT's exit: this
+/// port's init *becomes* the shell by exec, so `exit` at the prompt is the whole mechanism.
+/// There is no other lever — a host cannot ask a guest to stop, and the console is the only
+/// channel it has.
+///
+/// ^U first, so a half-typed line does not become the command. A program in the foreground takes
+/// the bytes as its own input, so the session ends when that program does.
+function endSession() {
+  if (shutdownAsked) return;
+  shutdownAsked = true;
+  elements.shutdown.disabled = true;
+  setStatus('ending the session — the guest is shutting down…');
+  send('\x15exit\n');
+}
+
+/// The session is over, and the disk is the shutdown's: it was synced, unmounted and marked
+/// clean, which is the moment this tab can be closed without the next boot paying for it.
+/// Setting the same two lines again is harmless, so this does not need a flag of its own.
+function sessionEnded() {
+  setDisk('disk: IndexedDB — the session ended, so the filesystem is clean');
+  setStatus('the session ended — the disk is clean and this tab can be closed');
+}
+
+/// Throw the disk away and start from the boot image again. This is the way out of the two
+/// states that have no other one: a store whose contents came from a different image, which the
+/// device refuses to attach, and a filesystem a previous tab left unclean, which the next mount
+/// reads but will not write.
+async function startOver() {
+  elements.clear.disabled = true;
+  setStatus('clearing the disk…');
+  // The guest's disk is about to go away underneath it and this page is on its way to a reload,
+  // so the pump stops first: nothing should be writing to a store that is being deleted.
+  stopping = true;
+  try {
+    await disk.clear();
+  } catch (error) {
+    hostNotes.push(`the disk could not be cleared: ${error}`);
+    setStatus(`the disk could not be cleared: ${error.message}`, 'bad');
+    showPanel(`the disk could not be cleared.\n\n${reportsText()}`);
+    return;
+  }
+  location.reload();
+}
+
+function wireControls() {
+  elements.shutdown.addEventListener('click', endSession);
+  if (disk === null) {
+    // Nothing to clear: this browser has no IndexedDB, or another tab holds the disk — and in
+    // that case deleting it from here would be deleting another session's disk, which is the
+    // mixture the lock exists to prevent. The disk line and the panel say which it was.
+    elements.clear.disabled = true;
+    return;
+  }
+  elements.clear.addEventListener('click', startOver);
 }
 
 // ---------------------------------------------------------------------- the keyboard
@@ -234,6 +329,64 @@ async function fetchBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+/// Hold the page's disk for this tab, so a second one cannot write it.
+///
+/// Two tabs are two in-memory disks over one set of records — a superblock from one session
+/// left over the blocks of another — which is the mixture the store's `imageId` guard exists
+/// to prevent, arriving by another route. The Web Locks API is what makes this cheap: a lock
+/// is held while the callback's promise is pending, and the browser drops it when the
+/// document goes away, so a closed tab does not leave the disk locked. A browser without the
+/// API opens the disk unlocked, which is what this page did before.
+///
+async function takeDisk(name) {
+  const locks = globalThis.navigator?.locks;
+  if (locks === undefined) return true;
+  // Never settles: the lock is held for as long as this document exists.
+  const held = new Promise(() => {});
+  return new Promise((resolve) => {
+    locks
+      .request(`${name}-owner`, { ifAvailable: true }, (lock) => {
+        resolve(lock !== null);
+        return lock === null ? undefined : held;
+      })
+      .catch((error) => {
+        hostNotes.push(`the disk is not locked to this tab: ${error}`);
+        resolve(true);
+      });
+  });
+}
+
+/// The disk, or null when this page cannot have one.
+///
+/// The boot image is the disk's initial contents and IndexedDB holds what the guest
+/// writes, so a reload comes back to the filesystem the last session left — which is what
+/// the guest's own shutdown makes worth having. There are three ways to end up without a
+/// disk, and all of them are reported rather than thrown away: another tab holds it, this
+/// browser has no IndexedDB (a private window, say), or the disk's contents came from
+/// another image (`host.js` refuses that one).
+async function openDisk(image) {
+  if (!(await takeDisk(DISK_NAME))) {
+    hostNotes.push('another tab has the disk open, so this page booted from the ramdisk');
+    return null;
+  }
+  try {
+    return await indexedDbStore({
+      name: DISK_NAME,
+      imageBytes: image,
+      // A write that cannot reach the database has already been reported to the guest as
+      // done, so this is the only place it can be seen — and it belongs on the page, not
+      // only in a report a reader has to trigger.
+      onError: (error) => {
+        hostNotes.push(`the disk could not be written: ${error}`);
+        setDisk('disk: writes are failing, and this session is only in memory', 'bad');
+      },
+    });
+  } catch (error) {
+    hostNotes.push(`no disk: ${error.message}`);
+    return null;
+  }
+}
+
 async function main() {
   // Read by `index.html`'s loader, which reports a module that never ran as a load failure: a MIME
   // type the browser refuses leaves nothing else to go on.
@@ -246,10 +399,12 @@ async function main() {
       fetchBytes(ARTIFACTS.servers),
       fetchBytes(ARTIFACTS.image),
     ]);
+    disk = await openDisk(image);
     host = createHost({
       kernel,
       servers,
       image,
+      store: disk,
       sink: {
         write: (byte) => {
           terminal.write(byte);
@@ -259,13 +414,23 @@ async function main() {
           hostNotes.push(`${name}${detail === undefined ? '' : `: ${detail}`}`),
       },
     });
+    if (host.device.attached) {
+      setDisk('disk: IndexedDB — the root came off it and writes go back to it');
+    } else {
+      // Whatever the reason, it is in the reports and a reader cannot guess it: a store
+      // that was opened and then refused (its contents came from another image) leaves this
+      // boot on the ramdisk just as surely as having no disk at all.
+      setDisk('disk: none — this boot is the ramdisk', 'bad');
+      showPanel(`this boot has no disk.\n\n${reportsText()}`);
+    }
+    wireControls();
   } catch (error) {
     setStatus(`cannot start: ${error.message}`, 'bad');
-    elements.panel.hidden = false;
-    elements.panel.textContent =
+    showPanel(
       'The artifacts are missing, so build them first:\n\n' +
-      '  sh tools/wasm-browser/build.sh\n\n' +
-      `then reload this page. (${error.message})`;
+        '  sh tools/wasm-browser/build.sh\n\n' +
+        `then reload this page. (${error.message})`
+    );
     return;
   }
   await run();
