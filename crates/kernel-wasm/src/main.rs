@@ -129,8 +129,14 @@ pub extern "C" fn minix_proc_spawn(slot: i32, endpoint: i32) -> i32 {
 /// its own makes a process unrunnable — `is_runnable` is `p_rts_flags == 0`. So matching
 /// `do_fork` line for line here would re-block the process the spawn just started: the program
 /// is never picked, its trace stays empty, and the run-queue check fails.
+///
+/// The slot also goes into the kernel's image table, so the process is one the servers can see
+/// whether or not the host declared it in advance; see `minix_image_add`.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_proc_spawn_user(slot: i32, endpoint: i32) -> i32 {
+    if !kernel::table::image_add(slot, endpoint) {
+        return -1;
+    }
     let rc = minix_proc_spawn(slot, endpoint);
     if rc != 0 {
         return rc;
@@ -143,6 +149,30 @@ pub extern "C" fn minix_proc_spawn_user(slot: i32, endpoint: i32) -> i32 {
         (*rp).p_priv = kernel::r#priv::priv_addr_mut(kernel::r#priv::USER_PRIV_ID)
             as *mut kernel::r#priv::Priv;
         0
+    }
+}
+
+/// Name a slot in the kernel's image table: the loader's statement that a process will exist
+/// there.
+///
+/// The host is this port's loader (§7 of `ARCH_WASM32.md`), so the set of processes that exist
+/// is not `BOOT_IMAGE`'s alone. A program the host runs outside the boot image is still a
+/// process the kernel has, and this table is how the servers come to know it: PM registers every
+/// entry it names, and an entry is what keeps PM from handing that slot to a forked child.
+///
+/// Declaring a slot the host will spawn *later* is the boot-image model exactly — a boot image
+/// names its processes before any of them run, which is why a `startAfterBoot` module cannot
+/// simply be spawned early instead: it would be scheduled mid-boot. It is also why this is a
+/// separate export from `minix_proc_spawn_user`, which adds the slot itself and cannot be called
+/// before the process is wanted.
+///
+/// Returns 0, or -1 when the table has no room.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_image_add(slot: i32, endpoint: i32) -> i32 {
+    if kernel::table::image_add(slot, endpoint) {
+        0
+    } else {
+        -1
     }
 }
 

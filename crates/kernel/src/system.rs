@@ -5363,6 +5363,37 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
     }
 }
 
+/// Copy `bytes` from kernel memory at `src` into `dst_proc`'s address space at `dst_addr`.
+///
+/// Every `GET_*` arm below used to answer this itself with `if boot_cr3() == 0 { plain copy }`,
+/// which reads "there are no page tables to switch" as "the kernel and the caller share one
+/// address space". On a hardware arch before paging those are the same statement. On an arch with
+/// no page tables at all they are not: the two address spaces are two memories, the plain copy
+/// writes into the kernel's own memory, and the caller reads whatever was already at its address
+/// and is told the call succeeded. The HAL is the layer that knows which kind of arch this is
+/// (`CROSS_ADDRESS_SPACE_COPY` is `Some` exactly where page tables cannot join two address
+/// spaces), so ask it first and keep the shortcut for the case it was written for.
+///
+/// # Safety
+///
+/// `src` must be valid for `bytes`. `dst_proc` must be a valid process number and `dst_addr` a
+/// writable address in its space.
+unsafe fn kernel_to_proc(src: *const u8, dst_proc: i32, dst_addr: u64, bytes: usize) -> i32 {
+    unsafe {
+        if bytes == 0 {
+            return 0;
+        }
+        if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
+            return copy(-1, src as u64, dst_proc, dst_addr, bytes);
+        }
+        if crate::hal::boot_cr3() == 0 {
+            core::ptr::copy_nonoverlapping(src, dst_addr as *mut u8, bytes);
+            return 0;
+        }
+        crate::vm::virtual_copy(-1, src as u64, dst_proc, dst_addr, bytes)
+    }
+}
+
 /// Handle SYS_GETINFO: retrieve system information.
 /// Source: `.refs/minix-3.3.0/minix/kernel/system/do_getinfo.c`
 ///
@@ -5404,26 +5435,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && machine_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                // Use virtual_copy to copy from kernel (boot address space)
-                // Since the machine struct is in the kernel's identity-mapped space,
-                // we can copy directly if BOOT_CR3 is active.
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    // Pre-init / test mode: direct copy works
-                    core::ptr::copy_nonoverlapping(
-                        machine,
-                        val_ptr as *mut u8,
-                        core::cmp::min(machine_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    // Use virtual_copy to copy into caller's address space
-                    crate::vm::virtual_copy(
-                        -1, // KERNEL (proc_nr = -1 = HARDWARE/KERNEL)
-                        machine as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(machine_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    machine,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(machine_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5433,21 +5452,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && kinfo_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        kinfo,
-                        val_ptr as *mut u8,
-                        core::cmp::min(kinfo_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        kinfo as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(kinfo_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    kinfo,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(kinfo_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5457,21 +5469,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                     core::ptr::addr_of!(hz).cast::<u8>(),
                     core::mem::size_of::<u32>(),
                 );
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        src_slice.as_ptr(),
-                        val_ptr as *mut u8,
-                        core::mem::size_of::<u32>(),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        src_slice.as_ptr() as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::mem::size_of::<u32>(),
-                    );
+                let r = kernel_to_proc(
+                    src_slice.as_ptr(),
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::mem::size_of::<u32>(),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5481,22 +5486,37 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && hooks_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        hooks,
-                        val_ptr as *mut u8,
-                        core::cmp::min(hooks_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        hooks as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(hooks_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    hooks,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(hooks_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
+                OK
+            }
+            arch_common::com::GET_IMAGE => {
+                let entries = crate::table::image_count();
+                let image_size = entries * crate::table::IMAGE_ENTRY_SIZE;
+                if val_len > 0 && image_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let r = kernel_to_proc(
+                    crate::table::image_base(),
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(image_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
+                }
+                // C's `image[]` is fixed at `NR_BOOT_PROCS` entries and its callers read exactly
+                // that. This table grows when the loader adds a process, so the count has to travel
+                // back with it — in the reply message, which is how the caller learns how much of
+                // its buffer is meaningful.
+                msg_write_i64(msg, 0, entries as i64);
                 OK
             }
             arch_common::com::GET_PROCTAB => {
@@ -5506,21 +5526,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && proctab_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        proc_base,
-                        val_ptr as *mut u8,
-                        core::cmp::min(proctab_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        proc_base as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(proctab_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    proc_base,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(proctab_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5531,21 +5544,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && privtab_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        priv_base,
-                        val_ptr as *mut u8,
-                        core::cmp::min(privtab_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        priv_base as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(privtab_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    priv_base,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(privtab_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5567,21 +5573,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && proc_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        target_pr.cast::<u8>(),
-                        val_ptr as *mut u8,
-                        core::cmp::min(proc_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        target_pr as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(proc_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    target_pr.cast::<u8>(),
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(proc_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5600,21 +5599,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && priv_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        core::ptr::addr_of!(*priv_entry).cast::<u8>(),
-                        val_ptr as *mut u8,
-                        core::cmp::min(priv_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        core::ptr::addr_of!(*priv_entry) as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(priv_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    core::ptr::addr_of!(*priv_entry).cast::<u8>(),
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(priv_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5624,21 +5616,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && irq_actids_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        irq_actids,
-                        val_ptr as *mut u8,
-                        core::cmp::min(irq_actids_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        irq_actids as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(irq_actids_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    irq_actids,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(irq_actids_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }
@@ -5649,21 +5634,14 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 if val_len > 0 && params_size > val_len as usize {
                     return crate::ipc::E2BIG;
                 }
-                let boot_cr3 = crate::hal::boot_cr3();
-                if boot_cr3 == 0 {
-                    core::ptr::copy_nonoverlapping(
-                        params.as_ptr(),
-                        val_ptr as *mut u8,
-                        core::cmp::min(params_size, val_len.max(0) as usize),
-                    );
-                } else {
-                    crate::vm::virtual_copy(
-                        -1,
-                        params.as_ptr() as u64,
-                        (*caller).p_nr,
-                        val_ptr,
-                        core::cmp::min(params_size, val_len.max(0) as usize),
-                    );
+                let r = kernel_to_proc(
+                    params.as_ptr(),
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(params_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
                 }
                 OK
             }

@@ -56,6 +56,9 @@ const GETKSIG = 7;
 /// Kernel call 26 is `SYS_GETINFO`, which is how the client learns its own
 /// endpoint before announcing itself to RS.
 const SYS_GETINFO = 26;
+/// `GET_IMAGE`, one of `SYS_GETINFO`'s requests: the kernel's image table. PM asks for it before
+/// it receives anything, which is where its process table comes from (`init_boot_procs`).
+const GET_IMAGE = 1;
 const STATE_UNWINDING = 1;
 const STRUCT_SIZE = 16;
 const BUF_SIZE = 65536;
@@ -426,20 +429,15 @@ const specs = [
   // M7b step 5a's subject: the same module, asked for by a different name, so the program that
   // runs is the one that forks.
   //
-  // Slot 3, which is `memory`'s in the kernel's `BOOT_IMAGE` and which this harness does not
-  // start — because PM has to know the *parent* before it can fork it, and the only endpoints it
-  // knows are the boot ones. PM finds a sender with `pm_isokendpt`, which searches for an mproc
-  // whose `mp_endpoint` matches; a process this harness invents at slot 23 has no mproc at all,
-  // so PM drops its `PM_FORK` and the parent blocks forever. Slot 3's endpoint PM has registered
-  // (as a phantom, `pm_server_main`), so the request is one PM can act on. `memory` is the right
-  // host for it — `sched`'s 4 and `pfs`'s 9 are the other two this harness leaves empty.
-  //
-  // What is *not* right is that this is how a user process has to be born here at all: on the
-  // shipping arches PM creates every process it forks, and a process it did not create cannot
-  // fork. That is finding 39's subject, and the fix is a registration path the kernel or the
-  // harness can use, not a slot picked by hand.
+  // Slot 23, outside the kernel's `BOOT_IMAGE` — a process the kernel has and the boot image does
+  // not name, which is the case the boot arches cannot have (PM creates every process there). What
+  // lets PM serve it is the image table: this harness is the loader on this port (§7), so it
+  // declares the slot to the kernel before the boot chain starts (`minix_image_add`, below), PM
+  // registers every entry the kernel names, and the slot is one PM will not hand to a child. Slot
+  // 3 was where this program used to sit, borrowing `memory`'s endpoint because PM's knowledge of
+  // the boot processes was a hardcoded 0..10 range and that was the only way in: finding 39.
   {
-    slot: 3,
+    slot: 23,
     entry: 'minix_program_main',
     label: 'forktest',
     argv: ['forktest'],
@@ -450,6 +448,23 @@ const specs = [
 ];
 
 for (const s of specs) s.endpoint = kernel.exports.minix_make_endpoint(s.slot);
+
+// The host is this port's loader, so what it will run is what the kernel's image table has to
+// name. PM reads that table when it starts (finding 39's fix), and takes from it both which
+// processes exist and which slots are not free — so a slot declared here is registered and its
+// slot is kept out of the free list a `fork` child would otherwise be given.
+//
+// The `startAfterBoot` specs are declared here, at boot, and spawned later: a boot image names its
+// processes before any of them run, and that ordering is exactly what a slot spawned early would
+// break (it would be scheduled mid-boot, splitting INIT's console line — see `spawnInstance`).
+const declared = specs.filter(
+  (s) => kernel.exports.minix_image_add(s.slot, s.endpoint) !== 0
+);
+check(
+  'the kernel accepts every declared slot into its image table',
+  declared.length === 0,
+  declared.map((s) => s.label).join(', ')
+);
 
 /// Write argv into the instance's argv area, in the layout the module declares: `argc`, then
 /// a pointer array, then the NUL-terminated strings.
@@ -1088,20 +1103,25 @@ check(
   client.trace.map((t) => `nr=${t.nr} a0=${t.a0}`).join('; ') || '(no syscalls)'
 );
 
-// PM is the one that has something to do. `boot_init` leaves RS's notification
-// pending on PM's privilege structure, and PM finds it on its first RECEIVE —
-// then asks the kernel for pending signals, finds none, and goes back to waiting.
-// That round trip is the chain starting to move, and it is visible only because
-// the notification reached PM's own memory.
+// PM is the one that has something to do. Before it receives anything it asks the kernel for the
+// image table (C's `sef_cb_init_fresh` calls `sys_getimage` first, and that loop is where PM's
+// process table comes from — finding 39), and only then does `boot_init`'s pending notification
+// bring it to its first RECEIVE. `boot_init` leaves RS's notification pending on PM's privilege
+// structure, and PM finds it on that RECEIVE — then asks the kernel for pending signals, finds
+// none, and goes back to waiting. That round trip is the chain starting to move, and it is visible
+// only because the notification reached PM's own memory.
 const pm = procs.find((p) => p.spec.label === 'pm');
-// The three things this claims, as properties rather than as a sequence of steps.
-// The sequence assertion it used to be held exactly while no *user* process existed;
-// INIT now sends PM a PM_GETPID and then an exit to report, so PM's trace legitimately
-// has more in it -- SENDNB to endpoint 10, and a second GETKSIG round with the
-// `SYS_ENDKSIG` that closes it. Pinning the whole trace was asserting where the boot
-// had got to rather than what the protocol is, which is finding 27's lesson.
+// The claims, as properties rather than as a sequence of steps. The sequence assertion it used to
+// be held exactly while no *user* process existed; INIT now sends PM a PM_GETPID and then an exit
+// to report, so PM's trace legitimately has more in it -- SENDNB to endpoint 10, and a second
+// GETKSIG round with the `SYS_ENDKSIG` that closes it. Pinning the whole trace was asserting where
+// the boot had got to rather than what the protocol is, which is finding 27's lesson.
 const pmSteps = pm.trace.map((t) => [t.nr, t.a0]);
+// The image read is PM's first syscall of all: a kernel call, `SYS_GETINFO`, whose request
+// (`GET_IMAGE`) lives inside the message. The trace records the call number, not the request.
+const pmImageRead = pmSteps.findIndex(([nr, a0]) => nr === KERNEL_CALL && a0 === SYS_GETINFO);
 const pmFirstGetksig = pmSteps.findIndex(([nr, a0]) => nr === KERNEL_CALL && a0 === GETKSIG);
+const pmFirstReceive = pmSteps.findIndex(([nr, a0]) => nr === RECEIVE && a0 === ANY);
 const pmRsAnswer = pmSteps.findIndex(([nr, a0]) => nr === SENDREC && a0 === rs.spec.endpoint);
 // "Returned to receiving" is a claim about where PM *ends up*, and the head trace is not the
 // record of that: `trace` stops at `TRACE_LIMIT`, and now that asynchronous sends are delivered
@@ -1111,11 +1131,10 @@ const pmRsAnswer = pmSteps.findIndex(([nr, a0]) => nr === SENDREC && a0 === rs.s
 const pmLastStep =
   pm.tail.length > 0 ? [pm.tail[pm.tail.length - 1].nr, pm.tail[pm.tail.length - 1].a0] : [0, 0];
 check(
-  'PM consumed the boot notification, answered RS, and returned to receiving',
-  pmSteps.length > 0 &&
-    pmSteps[0][0] === RECEIVE &&
-    pmSteps[0][1] === ANY &&
-    pmFirstGetksig > 0 &&
+  'PM registers the kernel image, then consumes the boot notification, answers RS, and returns to receiving',
+  pmImageRead === 0 &&
+    pmFirstReceive > pmImageRead &&
+    pmFirstGetksig > pmFirstReceive &&
     pmRsAnswer > pmFirstGetksig &&
     pmLastStep[0] === RECEIVE &&
     pmLastStep[1] === ANY,
@@ -1124,23 +1143,25 @@ check(
 );
 // PM's copies, taken by *who they involve* rather than by position: RS's init now
 // asks the kernel for two copies of its own (the `SYS_SETGRANT` message and its
-// reply) before PM runs, so a prefix of the log is no longer PM's. The first three
-// are PM's own exchange with the kernel: the notification arriving, PM's
-// `SYS_GETKSIG` message being read *out of PM's memory*, and the reply going back.
-// Before the kernel-call fix the middle copy did not exist — the kernel read its
-// own memory in place of PM's message and dispatched on that.
+// reply) before PM runs, so a prefix of the log is no longer PM's. What PM does before anything
+// else crosses the seam is ask the kernel for its image table, and the table itself — kilobytes
+// into a buffer of its own, not a 64-byte delivery slot — is the first thing that arrives. After
+// it come the notification, PM's `SYS_GETKSIG` message being read *out of PM's memory*, and the
+// reply going back. Before the kernel-call fix the middle of those did not exist — the kernel
+// read its own memory in place of PM's message and dispatched on that.
 const pmCopies = copyLog.filter((c) => c.srcProc === 0 || c.dstProc === 0);
-const pmNotifyCopies = pmCopies.slice(0, 3);
+const pmImageCopy = pmCopies.findIndex(
+  (c) => c.srcProc < 0 && c.dstProc === 0 && c.bytes > 64
+);
+const pmFirstDelivery = pmCopies.findIndex((c) => c.srcProc < 0 && c.dstProc === 0);
 check(
-  'the notification, the kernel-call message and its reply all crossed the seam',
-  pmNotifyCopies.length === 3 &&
+  'the image table, the notification, the kernel-call message and its reply all crossed the seam',
+  pmCopies.length >= 4 &&
     pmCopies.every((c) => c.result === 0) &&
-    pmNotifyCopies[0].srcProc < 0 &&
-    pmNotifyCopies[0].dstProc === 0 &&
-    pmNotifyCopies[1].srcProc === 0 &&
-    pmNotifyCopies[1].dstProc < 0 &&
-    pmNotifyCopies[2].srcProc < 0 &&
-    pmNotifyCopies[2].dstProc === 0,
+    pmImageCopy > 0 &&
+    pmImageCopy === pmFirstDelivery &&
+    pmCopies[pmImageCopy - 1].srcProc === 0 &&
+    pmCopies[pmImageCopy - 1].dstProc < 0,
   pmCopies.map((c) => `${c.srcProc}->${c.dstProc}=${c.result}`).join(', ')
 );
 // And the init handshake PM is now part of, which is what makes it answer RS at all.
@@ -1698,6 +1719,20 @@ check(
     reapedMatch[1] === childMatch[1] &&
     Number(reapedMatch[2]) === 0,
   reapedLine ?? '(waitpid never returned)'
+);
+
+// Finding 39's fix, observed rather than asserted about internals: PM registers a process it did
+// not create at the slot the *endpoint* names, and the pid it answers with is the one registration
+// gives that slot (`slot + 1`). The program's slot is outside the kernel's `BOOT_IMAGE`, so the pid
+// is only that number if PM learned about the process rather than finding it in a boot list — and
+// the fork above is the rest of the proof, because a `PM_FORK` PM cannot place is dropped and the
+// parent blocks forever instead of reaching these lines.
+check(
+  'the forking program is a process of its own, registered at the slot its endpoint names',
+  parentMatch !== null && Number(parentMatch[1]) === forktest.spec.slot + 1,
+  parentMatch === null
+    ? '(the parent printed no pid line)'
+    : `parent pid=${parentMatch[1]}, slot=${forktest.spec.slot} (expected ${forktest.spec.slot + 1})`
 );
 check(
   'each instance ended in its own exit, the child first',

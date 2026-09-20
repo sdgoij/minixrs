@@ -575,6 +575,127 @@ pub unsafe fn proc_init() {
                 (*rp).p_priv = priv_ptr;
             }
         }
+
+        // Last, so every entry can carry the endpoint the loop above assigned.
+        image_init();
+    }
+}
+
+// Image table
+
+/// Bytes of one image entry — `struct boot_image`, which is what a `GET_IMAGE` caller reads.
+pub const IMAGE_ENTRY_SIZE: usize = size_of::<arch_common::types::BootImage>();
+
+/// How many entries the image table holds: one per process slot the kernel can have, the boot
+/// image's kernel tasks included. A table that could not name every process the kernel can start
+/// would be a bound nobody checked.
+pub const NR_IMAGE_ENTRIES: usize = NR_PROCS_TOTAL;
+
+#[repr(C, align(8))]
+struct ImageTable {
+    entries: [arch_common::types::BootImage; NR_IMAGE_ENTRIES],
+    count: usize,
+}
+
+struct ImageTableCell(UnsafeCell<ImageTable>);
+// Safety: as for the process table above — every accessor is unsafe and exclusion is the caller's.
+unsafe impl Sync for ImageTableCell {}
+
+impl ImageTableCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(ImageTable {
+            entries: [const {
+                arch_common::types::BootImage {
+                    proc_nr: 0,
+                    proc_name: [0; arch_common::types::PROC_NAME_LEN],
+                    endpoint: 0,
+                    start_addr: 0,
+                    len: 0,
+                }
+            }; NR_IMAGE_ENTRIES],
+            count: 0,
+        }))
+    }
+
+    fn get(&self) -> *mut ImageTable {
+        self.0.get()
+    }
+}
+
+/// C's `struct boot_image image[]` — the table `SYS_GETINFO(GET_IMAGE)` serves.
+///
+/// `BOOT_IMAGE` above is the template; this is what the *loader* gave the kernel, and the two are
+/// not the same statement. C fills `image[]` at boot from the multiboot modules, and everything
+/// that needs to know which processes exist reads it rather than the constant. That distinction is
+/// load-bearing on wasm, where the host is the loader: a process the host creates after
+/// `proc_init` is added here (`image_add`), which is how it becomes a process the servers can see.
+static IMAGE: ImageTableCell = ImageTableCell::new();
+
+/// Add an entry, keeping the table dense. Returns false when there is no room, which the caller
+/// must report: a process the table cannot name is one PM cannot register.
+unsafe fn image_push(proc_nr: i32, endpoint: i32, name: &[u8]) -> bool {
+    unsafe {
+        let table = IMAGE.get();
+        if (*table).count >= NR_IMAGE_ENTRIES {
+            return false;
+        }
+        let entry = &mut (*table).entries[(*table).count];
+        entry.proc_nr = proc_nr;
+        entry.endpoint = endpoint;
+        // The two fields this port's kernel never learns: nothing here maps a module's bytes into
+        // memory (the loader owns loading), so there is no address or length to report. Callers in
+        // C that want them are VM's, and this port's VM does not read the image table.
+        entry.start_addr = 0;
+        entry.len = 0;
+        let len = core::cmp::min(name.len(), arch_common::types::PROC_NAME_LEN - 1);
+        entry.proc_name[..len].copy_from_slice(&name[..len]);
+        entry.proc_name[len] = 0;
+        (*table).count += 1;
+        true
+    }
+}
+
+/// Record that the kernel now has a process at `proc_nr`, so `GET_IMAGE` names it.
+///
+/// Idempotent per process number, and it updates the endpoint rather than ignoring the call: a
+/// caller that already named the slot may name it again with a newer endpoint. This is what an
+/// arch whose loader creates processes after boot calls, so a process can never exist on one
+/// side of the boundary and not the other.
+///
+/// Returns false only when the table is full.
+pub fn image_add(proc_nr: i32, endpoint: i32) -> bool {
+    unsafe {
+        let table = IMAGE.get();
+        for i in 0..(*table).count {
+            if (*table).entries[i].proc_nr == proc_nr {
+                (*table).entries[i].endpoint = endpoint;
+                return true;
+            }
+        }
+        image_push(proc_nr, endpoint, b"")
+    }
+}
+
+/// Number of entries in the image table.
+pub fn image_count() -> usize {
+    unsafe { (*IMAGE.get()).count }
+}
+
+/// Start of the image table, for `GET_IMAGE` to copy out of.
+pub fn image_base() -> *const u8 {
+    unsafe { (*IMAGE.get()).entries.as_ptr().cast::<u8>() }
+}
+
+/// Fill the image table from the boot image — the loader's own list, which on this port's shipped
+/// arches is the kernel's template. `proc_init` calls this once its endpoints are assigned.
+unsafe fn image_init() {
+    unsafe {
+        (*IMAGE.get()).count = 0;
+        for bi in &BOOT_IMAGE {
+            let rp = proc_addr(bi.proc_nr);
+            let endpoint = if rp.is_null() { 0 } else { (*rp).p_endpoint };
+            image_push(bi.proc_nr, endpoint, bi.name.as_bytes());
+        }
     }
 }
 
@@ -583,6 +704,64 @@ pub unsafe fn proc_init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_image_table_names_every_boot_process() {
+        unsafe { proc_init() };
+        assert_eq!(image_count(), NR_BOOT_PROCS);
+        let entries = unsafe {
+            core::slice::from_raw_parts(
+                image_base().cast::<arch_common::types::BootImage>(),
+                image_count(),
+            )
+        };
+        for (i, bi) in BOOT_IMAGE.iter().enumerate() {
+            assert_eq!(entries[i].proc_nr, bi.proc_nr, "entry {i}");
+            assert_eq!(
+                entries[i].endpoint,
+                make_endpoint(0, bi.proc_nr),
+                "entry {i}"
+            );
+            let name = &entries[i].proc_name[..bi.name.len()];
+            assert_eq!(name, bi.name.as_bytes(), "entry {i}");
+            assert_eq!(entries[i].proc_name[bi.name.len()], 0, "entry {i}");
+        }
+    }
+
+    #[test]
+    fn test_image_add_is_idempotent_and_updates_the_endpoint() {
+        unsafe { proc_init() };
+        let before = image_count();
+        // Slot 23 is outside the boot image: the case a wasm host creates.
+        assert!(image_add(23, make_endpoint(0, 23)));
+        assert_eq!(image_count(), before + 1);
+        assert!(image_add(23, make_endpoint(1, 23)));
+        assert_eq!(
+            image_count(),
+            before + 1,
+            "a repeat must not add a second entry"
+        );
+        let entries = unsafe {
+            core::slice::from_raw_parts(
+                image_base().cast::<arch_common::types::BootImage>(),
+                image_count(),
+            )
+        };
+        assert_eq!(entries[before].endpoint, make_endpoint(1, 23));
+    }
+
+    #[test]
+    fn test_image_table_holds_every_slot_the_kernel_has() {
+        unsafe { proc_init() };
+        assert_eq!(NR_IMAGE_ENTRIES, NR_PROCS_TOTAL);
+        for slot in 0..NR_PROCS as i32 {
+            assert!(image_add(slot, slot), "slot {slot} did not fit");
+        }
+        // Full, and exactly: the boot image's kernel tasks and its nineteen user entries, plus one
+        // entry for each of the remaining user slots. A capacity that could not take the last slot
+        // would mean a process the table cannot name.
+        assert_eq!(image_count(), NR_IMAGE_ENTRIES);
+    }
 
     #[test]
     fn test_proc_addr_tasks() {

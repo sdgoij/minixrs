@@ -372,19 +372,6 @@ static PROCS_IN_USE: AtomicU32 = AtomicU32::new(0);
 ///
 /// Scans the process table for a slot with `IN_USE` not set, marks it as in
 /// use, and returns its index. Returns `None` if all slots are occupied.
-/// Reserve a slot so alloc_proc skips it.
-#[allow(dead_code)]
-fn reserve_slot(slot: usize) {
-    if slot < NR_PROCS {
-        let base = MPROC.as_ptr();
-        unsafe {
-            (*base.add(slot)).mp_flags |= IN_USE;
-            (*base.add(slot)).mp_magic = MP_MAGIC;
-        }
-        PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 pub fn alloc_proc() -> Option<usize> {
     let base = MPROC.as_ptr();
     for i in 0..NR_PROCS {
@@ -423,47 +410,131 @@ pub unsafe fn free_proc(slot: usize) {
     PROCS_IN_USE.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// How many slots `init_proc` marks as the kernel's boot processes: every system proc_nr in the
-/// kernel's `BOOT_IMAGE`, which runs contiguously from PM's 0 to the window server's
-/// `WS_PROC_NR`. The count and the range are one definition because the tests below check the
-/// counter and the table's first free slot against it.
-const BOOT_PROC_SLOTS: u32 = arch_common::com::WS_PROC_NR as u32 + 1;
+/// The kernel's image table as the ABI lays it out: `struct boot_image`, `GET_IMAGE`'s reply.
+#[cfg(target_os = "minix")]
+const IMAGE_ENTRY_BYTES: usize = core::mem::size_of::<arch_common::types::BootImage>();
+
+/// Room for one entry per process slot the kernel can have — the most it can ever name.
+#[cfg(target_os = "minix")]
+const IMAGE_BUF_BYTES: usize = kernel::proc::NR_PROCS_TOTAL * IMAGE_ENTRY_BYTES;
+
+#[cfg(target_os = "minix")]
+#[repr(C, align(8))]
+struct ImageBufferCell(UnsafeCell<[u8; IMAGE_BUF_BYTES]>);
+// Safety: as for the process table — every access is unsafe and exclusion is the caller's.
+#[cfg(target_os = "minix")]
+unsafe impl Sync for ImageBufferCell {}
+
+/// Where `GET_IMAGE` writes the kernel's image table.
+///
+/// A buffer of its own rather than the message: the table is kilobytes and a message is 64 bytes.
+/// Bytes rather than `[BootImage]` so the kernel has a plain pointer to write through.
+#[cfg(target_os = "minix")]
+static IMAGE_BUF: ImageBufferCell = ImageBufferCell(UnsafeCell::new([0u8; IMAGE_BUF_BYTES]));
 
 /// Initialize the PM process table.
 ///
-/// Resets the entire table and `PROCS_IN_USE` counter, then marks
-/// boot process slots as IN_USE so alloc_proc skips them.
+/// Every slot is cleared and nothing is marked in use: which slots are occupied comes from the
+/// kernel's image table, next, in `init_boot_procs`. This is C's shape — `sef_cb_init_fresh`
+/// zeroes `mproc` and sets `procs_in_use = 0` before it fills anything in — and it is what makes
+/// the table's slot numbers the kernel's process numbers rather than an independent allocation.
 pub fn init_proc() {
     let base = MPROC.as_ptr();
     for i in 0..NR_PROCS {
+        // Safety: `i < NR_PROCS`, so the write is in bounds.
         unsafe {
             *base.add(i) = MProc::zeroed();
         }
     }
     PROCS_IN_USE.store(0, Ordering::Relaxed);
-    // The slot numbers are proc_nr values (not MProc indices); they keep alloc_proc() aligned
-    // with the kernel's Proc table, which is what makes a fork child's slot (VMF_SLOTNO) a slot
-    // the kernel has free. A partial list is worse than useless here: a slot the kernel's boot
-    // image owns but this table thinks is free is handed out as a child slot, and
-    // `do_fork_handler` then copies the child's Proc over a live server's (finding 39).
-    //
-    // These are placeholders — the real per-process entries (endpoint, pid)
-    // are created in pm_server_main. Mark them PRIV_PROC so sig_proc/
-    // exit_proc treat them as system processes (matching C) and a signal
-    // broadcast (e.g. ^C's SIGINT) cannot terminate a phantom slot. The real
-    // INIT entry (allocated in pm_server_main, endpoint 10) is a user
-    // process and receives ^C.
-    for slot in 0..BOOT_PROC_SLOTS as usize {
-        unsafe {
-            (*base.add(slot)).mp_flags |= IN_USE | PRIV_PROC;
-            (*base.add(slot)).mp_magic = MP_MAGIC;
-            // Phantom slot: no real process backs it. A zeroed mp_endpoint
-            // would shadow the real boot entries in pm_isokendpt lookups
-            // (getepinfo(0) returned the phantom's pid 0 instead of PM's
-            // pid 1); a negative sentinel is rejected by pm_isokendpt.
-            (*base.add(slot)).mp_endpoint = -1;
+}
+
+/// Register every process the kernel's image table names, at the slot the kernel has it in.
+///
+/// This is C's `sef_cb_init_fresh` loop over `sys_getimage()`'s reply, and it is the whole of how
+/// PM comes to know the processes it did not create. `mproc[ip->proc_nr]` is not an accident of
+/// this port's allocator: MINIX's PM is a table indexed by process number, `pm_isokendpt` reads
+/// the slot out of the endpoint, and a forked child's slot is one PM chose and the kernel
+/// honoured. Registering by index is what keeps those three statements true together.
+///
+/// The endpoints come from the kernel rather than from `proc_nr`: the generation number is the
+/// kernel's, and a slot's endpoint is not always its own number.
+///
+/// Returns how many slots were registered.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn init_boot_procs(entries: &[arch_common::types::BootImage]) -> u32 {
+    let base = MPROC.as_ptr();
+    let mut registered = 0u32;
+    for entry in entries {
+        // The image names the kernel tasks too (C's `image[]` does, and PM skips them the same
+        // way): they have negative process numbers and PM is not their manager.
+        if entry.proc_nr < 0 || entry.proc_nr as usize >= NR_PROCS {
+            continue;
         }
-        PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
+        let slot = entry.proc_nr as usize;
+        // Safety: `slot < NR_PROCS` checked above. Caller guarantees exclusion.
+        let rmp = unsafe { &mut *base.add(slot) };
+        if rmp.mp_flags & IN_USE != 0 {
+            continue;
+        }
+        let name_len = core::cmp::min(PROC_NAME_LEN - 1, entry.proc_name.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                entry.proc_name.as_ptr(),
+                rmp.mp_name.as_mut_ptr().cast::<u8>(),
+                name_len,
+            );
+        }
+        rmp.mp_name[name_len] = 0;
+        rmp.mp_endpoint = entry.endpoint;
+        rmp.mp_pid = slot as i32 + 1;
+        // System processes are PRIV_PROC so `sig_proc`/`exit_proc` treat them as such and a signal
+        // broadcast cannot terminate them (matching C, and the same rule the placeholder slots
+        // used to get). INIT is the first user process and receives ^C.
+        rmp.mp_flags = IN_USE
+            | if entry.proc_nr < arch_common::com::INIT_PROC_NR {
+                PRIV_PROC
+            } else {
+                0
+            };
+        rmp.mp_magic = MP_MAGIC;
+        registered += 1;
+    }
+    PROCS_IN_USE.fetch_add(registered, Ordering::Relaxed);
+    registered
+}
+
+/// Ask the kernel for its image table — C's `sys_getimage()`.
+///
+/// The kernel's own table is the loader's list (`kernel::table`'s image table), which on wasm is
+/// the boot image plus every slot the host declared, so its length is not a constant: the reply
+/// carries the entry count at offset 0, and the buffer's own size is what bounds the read.
+///
+/// Returns an empty slice when the kernel cannot answer, which is the truthful reading — PM then
+/// knows no processes at all, rather than a table it made up.
+#[cfg(target_os = "minix")]
+unsafe fn kernel_image() -> &'static [arch_common::types::BootImage] {
+    const SYS_GETINFO: i32 = 26;
+    let buf = IMAGE_BUF.0.get();
+    let mut msg = [0u8; 64];
+    msg[8..12].copy_from_slice(&arch_common::com::GET_IMAGE.to_ne_bytes());
+    msg[16..24].copy_from_slice(&(buf as u64).to_ne_bytes());
+    msg[24..28].copy_from_slice(&(IMAGE_BUF_BYTES as i32).to_ne_bytes());
+    if minix_rt::kernel_call(SYS_GETINFO, &mut msg) != 0 {
+        return &[];
+    }
+    let count = i64::from_ne_bytes(msg[0..8].try_into().unwrap_or([0; 8]));
+    let max = (IMAGE_BUF_BYTES / IMAGE_ENTRY_BYTES) as i64;
+    if count <= 0 || count > max {
+        return &[];
+    }
+    // Safety: the buffer is `IMAGE_BUF_BYTES` bytes and `align(8)`, which is the entry's
+    // alignment, and `count` was just bounded to the entries it holds.
+    unsafe {
+        core::slice::from_raw_parts(buf.cast::<arch_common::types::BootImage>(), count as usize)
     }
 }
 
@@ -2257,36 +2328,86 @@ pub unsafe fn do_setgroups(slot: usize, ngroups: i32, ptr: u64) -> Result<u32, i
 
 // pm_isokendpt
 
-/// Check if a process endpoint is valid.
+/// Check if a process endpoint is valid, and give the PM slot it names.
 ///
-/// Searches the MProc table by endpoint value (not by extracting slot bits),
-/// because PM's slot allocator and the kernel's Proc table allocator may
-/// assign different slot numbers for the same process (the kernel ignores
-/// PM's child_slot hint due to a message size mismatch).
+/// Matching C `pm_isokendpt()` from `minix/servers/pm/utility.c`: the slot comes out of the
+/// endpoint, and the slot only holds the sender if its stored endpoint *is* the sender's — the
+/// generation check, which is what stops a reused slot's new process being taken for the old one.
 ///
-/// Matching C `pm_isokendpt()` from `minix/servers/pm/main.c` which extracts
-/// the slot from the endpoint (`_ENDPOINT_P`). Our Rust implementation
-/// cannot use that shortcut because the kernel and PM slot allocators are
-/// independent, so we scan linearly.
+/// There is no search here, and that is the point: PM's slot numbers are the kernel's process
+/// numbers. `init_boot_procs` takes them from the kernel's image, `do_fork` asks the kernel for a
+/// child's slot and the kernel honours it, and the kernel's answer is then what PM stores
+/// (`handle_fork` records VM's reply, not a guess). A version of this that scanned the table for
+/// the endpoint instead — which this was, for as long as the two allocators disagreed — would
+/// paper over exactly that disagreement rather than report it, and the slot it returned would be
+/// the one thing every other handler in this file is indexing with.
 ///
 /// # Safety
 ///
 /// The caller must ensure that no conflicting mutable reference to the
 /// process table exists while this function reads the relevant slot.
 pub unsafe fn pm_isokendpt(endpoint: i32) -> Option<usize> {
-    if endpoint < 0 {
+    let slot = kernel::table::endpoint_slot(endpoint);
+    if slot < 0 || slot as usize >= NR_PROCS {
         return None;
     }
     let base = MPROC.as_ptr();
-    for i in 0..NR_PROCS {
-        unsafe {
-            let rmp = &*base.add(i);
-            if rmp.mp_flags & IN_USE != 0 && rmp.mp_endpoint == endpoint {
-                return Some(i);
-            }
+    // Safety: `slot < NR_PROCS` checked above. Caller guarantees no conflicting mutable
+    // reference for this slot.
+    unsafe {
+        let rmp = &*base.add(slot as usize);
+        if rmp.mp_flags & IN_USE == 0 || rmp.mp_endpoint != endpoint {
+            return None;
         }
     }
-    None
+    Some(slot as usize)
+}
+
+/// Register a process PM did not create, at the slot its own endpoint names.
+///
+/// On the shipping arches there is nothing this function is for: PM creates every process it
+/// serves (`fork`), and every other process it knows comes from the kernel's image table
+/// (`init_boot_procs`, which is C's `sys_getimage` loop). A process the kernel has and the image
+/// does not name — a wasm host spawning a program straight into a slot (§7 of
+/// `ARCH_WASM32.md`) — is invisible to PM, and `PM_FORK` from one is dropped because
+/// `pm_isokendpt` cannot place the sender.
+///
+/// A message from an endpoint is proof its process exists, and the endpoint says where: its
+/// process number is the slot the kernel has that process in, which is the slot PM must use.
+/// So the sender registers itself by sending, and nothing is asked of the kernel — the fact that
+/// the kernel just delivered the message *is* the answer. What is deliberately not registered is
+/// a sender whose slot PM already has in use: two processes in one slot is a misalignment, and
+/// filling the table in would hide it rather than fix it. Hence `None`, and the caller reports.
+///
+/// Returns the slot, or `None` if the sender cannot be placed.
+///
+/// # Safety
+///
+/// The caller must ensure exclusive access to the process table.
+pub unsafe fn pm_register_sender(endpoint: i32) -> Option<usize> {
+    let slot = kernel::table::endpoint_slot(endpoint);
+    if slot < 0 || slot as usize >= NR_PROCS {
+        return None;
+    }
+    let slot = slot as usize;
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above. Caller guarantees exclusion.
+    let rmp = unsafe { &mut *base.add(slot) };
+    if rmp.mp_flags & IN_USE != 0 {
+        return None;
+    }
+    *rmp = MProc::zeroed();
+    rmp.mp_flags = IN_USE
+        | if endpoint < arch_common::com::INIT_PROC_NR {
+            PRIV_PROC
+        } else {
+            0
+        };
+    rmp.mp_endpoint = endpoint;
+    rmp.mp_pid = slot as i32 + 1;
+    rmp.mp_magic = MP_MAGIC;
+    PROCS_IN_USE.fetch_add(1, Ordering::Relaxed);
+    Some(slot)
 }
 
 // Dispatch table + main loop
@@ -3712,30 +3833,37 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
     let call_nr = msg.m_type;
 
     // Look up the process associated with this reply.
-    // VFS echoes the child endpoint back in m7_i1 (offset 8), but
-    // the IPC message payload is corrupted by the kernel's iretq
-    // frame which overwrites bytes at user_rsp-40..user_rsp during
-    // syscall return. This clobbers the upper portion of any
-    // stack-local message buffer.  Instead of reading proc_e from
-    // the message, scan the MProc table for a process with VFS_CALL
-    // set — that's the child waiting for the VFS reply.
+    //
+    // Both kinds of reply name it: VFS echoes back the endpoint PM sent it, in `mess_7.m7_i1`
+    // (offset 8), so this is the same endpoint lookup every other message goes through.
+    //
+    // This used to be a scan for whichever process had `VFS_CALL` set, on the grounds that the
+    // message was clobbered on the way back by the kernel's x86 `iretq` frame. That is not what
+    // happens on this port — the kernel writes the reply into PM's own delivery buffer — and a
+    // scan cannot answer the question at all when two processes are mid-round-trip: it takes the
+    // *first* slot with the flag, and the `restart_sigs` below then clears the flag on that one.
+    // So an exit reply for one process would clear a live fork's flag, and the fork's own reply
+    // would find no `VFS_CALL` holder left to reply to: the parent blocks on `fork` forever. The
+    // scan stays as the fallback for a reply that names an endpoint PM cannot place.
     let base = MPROC.as_ptr();
-    let proc_n = (0..NR_PROCS).find(|&i| {
-        let rmp = unsafe { &*base.add(i) };
-        rmp.mp_flags & VFS_CALL != 0
-    });
+    let reply_ep = unsafe { msg.m_payload.m1.m1i1 };
+    let proc_n = match unsafe { pm_isokendpt(reply_ep) } {
+        Some(n) => Some(n),
+        None => (0..NR_PROCS).find(|&i| {
+            let rmp = unsafe { &*base.add(i) };
+            rmp.mp_flags & VFS_CALL != 0
+        }),
+    };
     let proc_n = match proc_n {
         Some(n) => n,
         None => return, // no pending VFS call — nothing to do
     };
-    // Compute child endpoint from slot, matching do_fork encoding.
-    // Do NOT read mp_endpoint from the MProc table — it may have
-    // been corrupted by the iretq frame stack clobber during VFS
-    // IPC.  The slot-based encoding is deterministic:
-    //   endpoint = slot | 0x8000  (for gen-1 user processes)
-    let proc_e = (proc_n as i32) | 0x8000;
-
-    let _rmp = unsafe { &*base.add(proc_n) };
+    // What the child is called. The process's own endpoint, which for a fork reply is the one VFS
+    // echoed back: the slot is not enough, because an endpoint carries the generation the *kernel*
+    // assigned (`handle_fork` records it from VM's reply) and encoding one from the slot
+    // (`slot | 0x8000`) is a guess that is right the first time a slot is used and wrong every
+    // time after.
+    let proc_e = unsafe { (*base.add(proc_n)).mp_endpoint };
 
     // Clear VFS_CALL and re-deliver any signals that pended while the
     // process was in a PM→VFS round-trip (matching C: check_pending on the
@@ -3763,6 +3891,10 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                     let zero: i32 = 0;
                     parent_reply[VFS_M7_I2_OFF..VFS_M7_I2_OFF + 4]
                         .copy_from_slice(&zero.to_le_bytes());
+                    // Non-blocking, and a failure has nowhere to go: the parent is waiting on this
+                    // reply, so a failed send is a parent that never resumes, and PM has no channel
+                    // to report that on (see the drop path in `pm_server_main`). The send cannot
+                    // block PM itself, which is why the port uses SENDNB here rather than a reply.
                     unsafe {
                         minix_rt::syscall2(
                             minix_rt::SENDNB_CALL,
@@ -3773,7 +3905,7 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                 }
             }
 
-            // Step 2: Schedule the child (matching C: sched_start_user).
+            // Schedule the child (matching C: sched_start_user).
             // This clears RTS_NO_QUANTUM on the child and enqueues it.
             let mut sched_msg = [0u8; 64];
             sched_msg[8..12].copy_from_slice(&proc_e.to_le_bytes()); // endpoint
@@ -3790,8 +3922,8 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
                 //  no child or get SIGCHLD when child_free happens)
             } else {
                 // Step 3: Reply to child with OK (matching C: reply(proc_n, OK)).
-                // On RISC-V, do_fork_handler clears RECEIVING and REPLY_PEND
-                // on the child directly — SENDNB reply is skipped.
+                // The child is waiting in the RECEIVING half of the SENDREC it inherited from the
+                // parent, and this send is what enqueues it for the first time.
                 #[cfg(not(target_arch = "riscv64"))]
                 {
                     let mut child_reply = [0u8; 64];
@@ -3877,32 +4009,13 @@ pub unsafe fn sched_init() {
 pub fn pm_server_main() {
     #[cfg(target_os = "minix")]
     {
-        // Initialize PM's process table.
+        // Initialize PM's process table, then register the kernel's processes from the kernel's
+        // own image: PM and the boot servers, RS (endpoint 2) which sends the first boot
+        // notification to kickstart the server chain, and every other entry the loader named.
+        // Nothing here is a slot PM picked — the kernel's process numbers are PM's slot numbers,
+        // which is what `pm_isokendpt` reads back out of an endpoint.
         init_proc();
-
-        // Mark PM and other boot processes as IN_USE so pm_isokendpt
-        // accepts messages from them. RS (endpoint 2) sends the first
-        // boot notification to kickstart the server chain.
-        let boot_endpoints = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        for &ep in &boot_endpoints {
-            if let Some(slot) = alloc_proc() {
-                let mp = unsafe { &mut *MPROC.as_ptr().add(slot) };
-                mp.mp_endpoint = ep;
-                mp.mp_pid = ep + 1; // PID = slot + 1 (like real MINIX)
-                // System services (endpoints 0-9) get PRIV_PROC so
-                // sig_proc/exit_proc treat them as system processes and a
-                // signal broadcast cannot terminate them. INIT (endpoint
-                // 10) stays a normal user process — it must receive ^C.
-                if ep < arch_common::com::INIT_PROC_NR {
-                    mp.mp_flags |= PRIV_PROC;
-                }
-            }
-        }
-        // Reserve slot 11 (kernel proc_addr(11) = RAMDISK) so alloc_proc
-        // doesn't return it. The kernel's Proc table has boot processes
-        // at proc_nr 0..11; PM's slot numbers must match for do_fork_handler
-        // to find a free slot via proc_addr(child_slot).
-        reserve_slot(11);
+        unsafe { init_boot_procs(kernel_image()) };
 
         // NOTE: sched_init() is NOT called. Boot processes never have
         // RTS_NO_QUANTUM set, and forked children get their quantum
@@ -3995,12 +4108,24 @@ pub fn pm_server_main() {
                 continue;
             }
 
-            // For non-notifications, resolve the sender's process slot.
+            // For non-notifications, resolve the sender's process slot. A sender PM does not
+            // have is one the kernel created and the image table did not name — the sender
+            // registers itself, which is the only thing that can place it (finding 39).
             let slot = match unsafe { pm_isokendpt(src_ep) } {
                 Some(s) => s,
-                None => {
-                    continue;
-                }
+                None => match unsafe { pm_register_sender(src_ep) } {
+                    Some(s) => s,
+                    None => {
+                        // Neither in the table nor placeable by its endpoint: PM and the kernel
+                        // disagree about who exists, and the caller is left blocking on a reply
+                        // that will not come. Nothing is printed, deliberately — a diagnostic
+                        // written from here is a SENDREC to VFS from inside a receive, and VFS
+                        // waiting on a reply from PM is just when this would matter, so the write
+                        // would deadlock the pair instead of reporting it. Making it loud needs a
+                        // channel that is not half of the problem; until then this is the report.
+                        continue;
+                    }
+                },
             };
 
             // Handle VFS replies: messages from VFS in the VFS_PM_RS range
@@ -4782,49 +4907,205 @@ mod tests {
         assert!(mp.is_stopped());
     }
 
+    /// The kernel's image as `GET_IMAGE` answers it, built from the kernel's own `BOOT_IMAGE`.
+    ///
+    /// Taken from the kernel rather than written out again on purpose: the invariant under test is
+    /// that PM registers *every* slot the kernel's image owns, and a copy of the list here would
+    /// pass while the kernel's grew.
+    fn test_image() -> [arch_common::types::BootImage; kernel::table::NR_BOOT_PROCS] {
+        let mut out = [const {
+            arch_common::types::BootImage {
+                proc_nr: 0,
+                proc_name: [0; arch_common::types::PROC_NAME_LEN],
+                endpoint: 0,
+                start_addr: 0,
+                len: 0,
+            }
+        }; kernel::table::NR_BOOT_PROCS];
+        for (i, bi) in kernel::table::BOOT_IMAGE.iter().enumerate() {
+            out[i].proc_nr = bi.proc_nr;
+            out[i].endpoint = kernel::table::make_endpoint(0, bi.proc_nr);
+            let n = core::cmp::min(bi.name.len(), arch_common::types::PROC_NAME_LEN - 1);
+            out[i].proc_name[..n].copy_from_slice(&bi.name.as_bytes()[..n]);
+        }
+        out
+    }
+
+    /// The shape every test below starts from, because it is the shape PM starts from: an empty
+    /// table, then the kernel's image registered into it. Returns how many slots that took.
+    fn init_proc_with_boot_image() -> u32 {
+        init_proc();
+        unsafe { init_boot_procs(&test_image()) }
+    }
+
     #[test]
     fn test_init_proc_clears_table() {
         let _idx = alloc_proc().expect("should find a free slot");
         assert!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed) > 0);
         init_proc();
-        // Every system proc_nr in the kernel's BOOT_IMAGE, 0 through `WS_PROC_NR`.
-        assert_eq!(
-            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            arch_common::com::WS_PROC_NR as u32 + 1
-        );
+        // Nothing is in use until the image is registered: the slots come from the kernel, not
+        // from `init_proc`'s own idea of which ones the boot image owns.
+        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// Registration is by the kernel's process number, which is what makes `pm_isokendpt`'s
+    /// arithmetic and `alloc_proc`'s child slot agree with the kernel. A table that registered the
+    /// boot processes anywhere else was finding 39: the same process in two slots.
+    #[test]
+    fn test_init_boot_procs_registers_at_the_kernel_process_number() {
+        let registered = init_proc_with_boot_image();
+        assert_eq!(registered, arch_common::com::WS_PROC_NR as u32 + 1);
+        unsafe {
+            let base = MPROC.as_ptr();
+            for entry in test_image().iter().filter(|e| e.proc_nr >= 0) {
+                let rmp = &*base.add(entry.proc_nr as usize);
+                assert_ne!(
+                    rmp.mp_flags & IN_USE,
+                    0,
+                    "slot {} not in use",
+                    entry.proc_nr
+                );
+                assert_eq!(rmp.mp_endpoint, entry.endpoint);
+                assert_eq!(rmp.mp_pid, entry.proc_nr + 1);
+                assert_eq!(rmp.mp_name[0], entry.proc_name[0] as i8);
+            }
+            // The slots past the image are free, so `alloc_proc` has them.
+            let first_free = &*base.add(registered as usize);
+            assert_eq!(first_free.mp_flags & IN_USE, 0);
+        }
     }
 
     #[test]
-    fn test_init_proc_marks_boot_slots_priv() {
-        init_proc();
+    fn test_init_boot_procs_marks_system_processes_priv() {
+        init_proc_with_boot_image();
         unsafe {
             let base = MPROC.as_ptr();
-            // The boot slots are kernel-alignment placeholders, not real
-            // processes: all of them are PRIV_PROC so a signal broadcast
-            // cannot terminate a placeholder slot. The real INIT entry
-            // (allocated in pm_server_main, endpoint 10) is a user process
-            // and receives ^C.
-            for slot in 0..=arch_common::com::WS_PROC_NR as usize {
-                assert_ne!(
-                    (*base.add(slot)).mp_flags & PRIV_PROC,
-                    0,
-                    "boot placeholder slot {slot} must be PRIV_PROC"
+            // Every system process in the kernel's image is PRIV_PROC, so a signal broadcast
+            // cannot terminate it and `exit_proc` refuses to kill one. INIT is the first *user*
+            // process and must receive ^C.
+            for entry in test_image().iter().filter(|e| e.proc_nr >= 0) {
+                let rmp = &*base.add(entry.proc_nr as usize);
+                let want = entry.proc_nr < arch_common::com::INIT_PROC_NR;
+                assert_eq!(
+                    rmp.mp_flags & PRIV_PROC != 0,
+                    want,
+                    "slot {} (PRIV_PROC)",
+                    entry.proc_nr
                 );
             }
         }
     }
 
-    /// The first slot `alloc_proc` hands out must be one the kernel's boot image does not own:
-    /// a fork child is created by the *kernel* at PM's chosen slot, so a collision overwrites a
-    /// live server's Proc rather than failing.
+    /// The kernel's image names every kernel task too, with negative process numbers. They are not
+    /// PM's to manage and must not take a slot.
+    #[test]
+    fn test_init_boot_procs_skips_kernel_tasks() {
+        let tasks = test_image().iter().filter(|e| e.proc_nr < 0).count();
+        assert_eq!(tasks, kernel::proc::NR_TASKS);
+        unsafe {
+            let registered = init_proc_with_boot_image();
+            let base = MPROC.as_ptr();
+            assert_eq!(
+                registered,
+                kernel::table::NR_BOOT_PROCS as u32 - tasks as u32
+            );
+            assert_eq!(
+                (*base.add(0)).mp_pid,
+                1,
+                "slot 0 is PM, whatever the image says"
+            );
+        }
+    }
+
+    /// The first slot `alloc_proc` hands out must be one the kernel's image does not own: a fork
+    /// child is created by the *kernel* at PM's chosen slot, so a collision overwrites a live
+    /// server's Proc rather than failing.
     #[test]
     fn test_alloc_proc_skips_every_boot_slot() {
-        init_proc();
+        init_proc_with_boot_image();
         let slot = alloc_proc().expect("a free slot");
         assert!(
             slot > arch_common::com::WS_PROC_NR as usize,
-            "alloc_proc returned {slot}, which the kernel's boot image owns"
+            "alloc_proc returned {slot}, which the kernel's image owns"
         );
+    }
+
+    #[test]
+    fn test_pm_isokendpt_places_registered_processes() {
+        init_proc_with_boot_image();
+        unsafe {
+            for entry in test_image().iter().filter(|e| e.proc_nr >= 0) {
+                assert_eq!(
+                    pm_isokendpt(entry.endpoint),
+                    Some(entry.proc_nr as usize),
+                    "endpoint {}",
+                    entry.endpoint
+                );
+            }
+            // An endpoint whose generation is not the one recorded is a different process in the
+            // same slot, and must not be taken for the one that is there.
+            assert_eq!(
+                pm_isokendpt(arch_common::com::PM_PROC_NR),
+                Some(arch_common::com::PM_PROC_NR as usize)
+            );
+            assert!(
+                pm_isokendpt(kernel::table::make_endpoint(
+                    1,
+                    arch_common::com::PM_PROC_NR
+                ))
+                .is_none()
+            );
+            // Kernel tasks have negative endpoints and are nobody's slot.
+            assert!(pm_isokendpt(arch_common::com::SYSTEM).is_none());
+            assert!(pm_isokendpt(-1).is_none());
+        }
+    }
+
+    /// A sender PM has never heard of is registered at the slot its endpoint names — the process
+    /// the kernel created outside the image table, which is finding 39's other half.
+    #[test]
+    fn test_pm_register_sender_registers_an_unknown_process() {
+        init_proc_with_boot_image();
+        let slot = arch_common::com::WS_PROC_NR as usize + 4;
+        let endpoint = slot as i32;
+        assert_eq!(unsafe { pm_isokendpt(endpoint) }, None);
+        assert_eq!(unsafe { pm_register_sender(endpoint) }, Some(slot));
+        assert_eq!(unsafe { pm_isokendpt(endpoint) }, Some(slot));
+        unsafe {
+            let base = MPROC.as_ptr();
+            let rmp = &*base.add(slot);
+            assert_eq!(rmp.mp_endpoint, endpoint);
+            assert_eq!(rmp.mp_pid, slot as i32 + 1);
+            // Past INIT, so a user process: it may exit, and a ^C broadcast may reach it.
+            assert_eq!(rmp.mp_flags & PRIV_PROC, 0);
+        }
+    }
+
+    /// Registering a raw endpoint would let the kernel's process and PM's be different processes:
+    /// the slot already holds something, so the sender cannot be placed at all.
+    #[test]
+    fn test_pm_register_sender_refuses_an_occupied_slot() {
+        init_proc_with_boot_image();
+        let slot = arch_common::com::MEM_PROC_NR as usize;
+        // A second generation of the same slot: `endpoint_slot` still names slot 3, which holds
+        // the image's `memory`, so there is nowhere to put the sender.
+        let other = kernel::table::make_endpoint(1, slot as i32);
+        assert_eq!(unsafe { pm_register_sender(other) }, None);
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(slot)).mp_endpoint, arch_common::com::MEM_PROC_NR);
+        }
+    }
+
+    #[test]
+    fn test_pm_register_sender_bounds() {
+        init_proc_with_boot_image();
+        assert_eq!(
+            unsafe { pm_register_sender(arch_common::com::SYSTEM) },
+            None
+        );
+        // An endpoint whose process number is outside the table.
+        assert_eq!(unsafe { pm_register_sender(NR_PROCS as i32 + 5) }, None);
     }
 
     /// Reset a free slot as an in-use user process with an endpoint/pid.
@@ -4972,14 +5253,16 @@ mod tests {
         // delivering into the shell's waitpid without completing the syscall
         // froze it (observed: sigtest ^C stranded the shell mid-waitpid).
         init_proc();
-        test_sig_slot(12, 42, 100);
-        test_sig_slot(13, 43, 101);
+        // The endpoint names the slot, as it must for anything that arrives as a message source
+        // rather than as a pid: PM places a sender by its endpoint.
+        test_sig_slot(12, 12, 100);
+        test_sig_slot(13, 13, 101);
         unsafe {
             let base = MPROC.as_ptr();
             (*base.add(12)).mp_flags |= PRIV_PROC;
             (*base.add(12)).mp_sigmask.sigaddset(SIGINT);
             (*base.add(13)).mp_sigmask.sigaddset(SIGINT);
-            let count = process_ksig(42, SIGINT);
+            let count = process_ksig(12, SIGINT);
             assert!(!(*base.add(12)).mp_sigpending.sigismember(SIGINT));
             assert!(
                 !(*base.add(13)).mp_sigpending.sigismember(SIGINT),
@@ -5018,8 +5301,8 @@ mod tests {
         // pgrp broadcast has no meaning yet (all processes share the shell's
         // group). See test_process_ksig_sigint_direct_target.
         init_proc();
-        test_sig_slot(12, 42, 100);
-        test_sig_slot(13, 43, 101);
+        test_sig_slot(12, 12, 100);
+        test_sig_slot(13, 13, 101);
         unsafe {
             let base = MPROC.as_ptr();
             (*base.add(12)).mp_procgrp = 5;
@@ -5027,7 +5310,7 @@ mod tests {
             (*base.add(12)).mp_sigmask.sigaddset(SIGINT);
             (*base.add(13)).mp_sigmask.sigaddset(SIGINT);
             // Signal the pgrp-5 process: only the reported endpoint moves.
-            let count = process_ksig(42, SIGINT);
+            let count = process_ksig(12, SIGINT);
             assert!((*base.add(12)).mp_sigpending.sigismember(SIGINT));
             assert!(!(*base.add(13)).mp_sigpending.sigismember(SIGINT));
             assert_eq!(count, 1);
@@ -5048,11 +5331,11 @@ mod tests {
     #[test]
     fn test_process_ksig_reply_delivers_signal_bits() {
         init_proc();
-        test_sig_slot(12, 42, 100);
+        test_sig_slot(12, 12, 100);
         unsafe {
             let base = MPROC.as_ptr();
             (*base.add(12)).mp_sigmask.sigaddset(SIGINT);
-            let is_exit = process_ksig_reply(42, 1u128 << SIGINT);
+            let is_exit = process_ksig_reply(12, 1u128 << SIGINT);
             assert!(!is_exit);
             assert!((*base.add(12)).mp_sigpending.sigismember(SIGINT));
         }
@@ -5060,7 +5343,7 @@ mod tests {
 
     #[test]
     fn test_alloc_proc_returns_valid_slot() {
-        init_proc();
+        init_proc_with_boot_image();
         let idx = alloc_proc().expect("should find a free slot");
         assert!(idx < NR_PROCS);
         unsafe {
@@ -5073,12 +5356,11 @@ mod tests {
 
     #[test]
     fn test_free_proc_clears_slot() {
-        init_proc();
-        // The kernel's boot process slots are pre-marked as IN_USE.
+        let boot = init_proc_with_boot_image();
         let idx = alloc_proc().expect("should find a free slot");
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS + 1
+            boot + 1
         );
         unsafe {
             free_proc(idx);
@@ -5088,54 +5370,54 @@ mod tests {
             let rmp = &*base.add(idx);
             assert!(!rmp.in_use());
             assert_eq!(rmp.mp_magic, 0);
-            // Back to the boot slots and nothing else.
+            // Back to the image's slots and nothing else.
             assert_eq!(
                 PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-                BOOT_PROC_SLOTS
+                boot
             );
         }
     }
 
     #[test]
     fn test_alloc_proc_exhaustion() {
-        init_proc();
+        let boot = init_proc_with_boot_image() as usize;
         let mut count = 0;
         while alloc_proc().is_some() {
             count += 1;
         }
-        assert_eq!(count, NR_PROCS - BOOT_PROC_SLOTS as usize);
+        assert_eq!(count, NR_PROCS - boot);
     }
 
     #[test]
     fn test_procs_in_use_tracking() {
-        init_proc();
+        let boot = init_proc_with_boot_image();
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS
+            boot
         );
         let a = alloc_proc().unwrap();
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS + 1
+            boot + 1
         );
         let b = alloc_proc().unwrap();
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS + 2
+            boot + 2
         );
         unsafe {
             free_proc(a);
         }
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS + 1
+            boot + 1
         );
         unsafe {
             free_proc(b);
         }
         assert_eq!(
             PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
-            BOOT_PROC_SLOTS
+            boot
         );
     }
 
@@ -5725,17 +6007,20 @@ mod tests {
         init_proc();
         let caller = alloc_proc().unwrap();
         let target = alloc_proc().unwrap();
+        // The endpoint is the one the target's slot would really have: PM places a sender by its
+        // endpoint, and generation 1 is what a reused slot gets.
+        let target_ep = kernel::table::make_endpoint(1, target as i32);
         let base = MPROC.as_ptr();
         unsafe {
             (*base.add(caller)).mp_flags |= IN_USE;
             (*base.add(target)).mp_flags |= IN_USE;
-            (*base.add(target)).mp_endpoint = 0x8012;
+            (*base.add(target)).mp_endpoint = target_ep;
             (*base.add(target)).mp_pid = 42;
             (*base.add(target)).mp_effuid = 100;
             (*base.add(target)).mp_effgid = 50;
         }
         let mut msg = make_msg();
-        msg.m_payload.m1.m1i1 = 0x8012;
+        msg.m_payload.m1.m1i1 = target_ep;
         // C returns the pid as the reply m_type; uid/gid in m1i1/m1i2.
         assert_eq!(unsafe { handle_getepinfo(caller, &mut msg) }, 42);
         assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 100);
@@ -5746,21 +6031,36 @@ mod tests {
     }
 
     #[test]
-    fn test_getepinfo_pm_not_shadowed_by_placeholder() {
-        init_proc();
-        // pm_server_main's boot loop allocates the real PM entry (endpoint
-        // 0, pid 1) into a free slot; the init_proc placeholder at slot 0
-        // must not shadow it in pm_isokendpt (its endpoint is -1).
-        let pm_slot = alloc_proc().unwrap();
-        let base = MPROC.as_ptr();
-        unsafe {
-            (*base.add(pm_slot)).mp_endpoint = 0;
-            (*base.add(pm_slot)).mp_pid = 1;
-        }
+    fn test_getepinfo_finds_pm_at_slot_zero() {
+        init_proc_with_boot_image();
+        // PM is slot 0 because the kernel's image says so, and its pid comes with it. The old
+        // table registered the boot processes in slots `alloc_proc` happened to hand out, which
+        // is the same process in two slots — finding 39.
         let mut msg = make_msg();
         msg.m_payload.m1.m1i1 = 0; // PM endpoint
-        assert_eq!(unsafe { handle_getepinfo(pm_slot, &mut msg) }, 1);
+        assert_eq!(unsafe { handle_getepinfo(0, &mut msg) }, 1);
         assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 0); // PM runs as root
+        assert_eq!(unsafe { msg.m_payload.m1.m1i2 }, 0);
+    }
+
+    #[test]
+    fn test_pm_isokendpt_ignores_a_free_slot_holding_endpoint_zero() {
+        init_proc();
+        // A free slot is zeroed, and zero is PM's endpoint: only `IN_USE` tells the two apart, so
+        // `pm_isokendpt` checks it before it answers with the slot.
+        unsafe {
+            let base = MPROC.as_ptr();
+            let stray = &mut *base.add(7);
+            *stray = MProc::zeroed();
+            assert_eq!(stray.mp_endpoint, 0);
+            assert_eq!(pm_isokendpt(0), None, "a free slot must not answer for PM");
+        }
+        let slots = init_proc_with_boot_image();
+        assert_eq!(slots, arch_common::com::WS_PROC_NR as u32 + 1);
+        let mut msg = make_msg();
+        msg.m_payload.m1.m1i1 = 0; // PM endpoint
+        assert_eq!(unsafe { handle_getepinfo(0, &mut msg) }, 1);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 0);
         assert_eq!(unsafe { msg.m_payload.m1.m1i2 }, 0);
     }
 
@@ -5772,7 +6072,7 @@ mod tests {
         let base = MPROC.as_ptr();
         unsafe {
             (*base.add(caller)).mp_flags |= IN_USE;
-            (*base.add(caller)).mp_endpoint = 0x8000; // not RS
+            (*base.add(caller)).mp_endpoint = 0x8000; // generation 1 of slot 0: not RS
             (*base.add(target)).mp_flags |= IN_USE;
             (*base.add(target)).mp_endpoint = 0x8012;
             (*base.add(target)).mp_pid = 42;

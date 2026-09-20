@@ -573,6 +573,33 @@ not a JS-side registry, but the **boot filesystem image**, built by
 still what instantiates them — only it can — but it no longer decides *what* they
 are, which is what makes `/bin/sh` a thing that exists only in the image.
 
+#### The host is the loader, so it declares the image
+
+On the hardware arches the boot loader hands the kernel a module list and the
+kernel fills its image table from it; PM reads that table at startup
+(`sys_getimage`) and *that* is how the servers come to know which processes exist.
+The host occupies the loader's seat here, so the same list has to come from it:
+`minix_image_add(slot, endpoint)` names a slot, and `minix_proc_spawn_user` names
+the one it creates, so a process the host starts is a process the kernel's image
+names. PM then registers it by process number, which is what keeps the three
+statements that have to agree — PM's slot, the kernel's `proc_nr`, and the number
+`_ENDPOINT_P` reads out of an endpoint — true of each other, and keeps a fork
+child out of a slot the host already has a process in.
+
+That makes the *order* load-bearing, and it is the same order a boot image has
+always had: everything the host will run is declared **before** the boot chain
+starts, because PM reads the table once and a slot declared later is one PM will
+hand to a child. A spec marked `startAfterBoot` is therefore declared at boot and
+spawned when the system first quiesces — declaring it is the loader's statement,
+spawning it is the schedule's, and only the second one has to wait.
+
+A process that is in neither the image nor PM's table can still reach PM: a
+message from an endpoint is proof the process exists, and the endpoint says which
+slot it is in, so the sender registers itself on first contact (`pm_register_sender`).
+What that cannot fix is the *slot*: PM does not know to keep one it has never been
+told about out of its free list, which is why the declaration above is the path
+and first contact is the backstop.
+
 ## 8. The HAL surface, function by function
 
 All ~150 items in `crates/arch-x86_64/src/hal.rs`, grouped. "Delete" means the

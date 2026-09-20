@@ -7226,6 +7226,91 @@ job: **the arch is not only the HAL.** Anything a hardware arch runs as "the sys
 or in its scheduler loop is missing on wasm until it is written there, and a flag that only that
 path would clear is a latent deadlock rather than a missing feature.
 
+**42. `GET_IMAGE` was declared, unimplemented, and is the whole of how PM learns which processes
+exist.** This is finding 39's remaining half, and it was not a missing feature but a missing arm:
+`SYS_GETINFO`'s request 1 is the kernel's image table — C's `sys_getimage()`, the call
+`sef_cb_init_fresh` makes *before* anything else so it can fill `mproc[ip->proc_nr]` — and the
+port's `do_getinfo_handler` fell through to `ENOSYS` for it.
+
+PM worked around that with a hardcoded range: `pm_server_main` registered endpoints `0..=10` in
+whatever slots `alloc_proc` happened to return (19 onwards, because `init_proc` had pre-marked
+0..18), gave them `mp_endpoint = -1` as "phantom" placeholders, and called `reserve_slot(11)` by
+hand. Everything that followed from that was the same complaint stated differently: PM's slot
+numbers were not the kernel's process numbers, so `pm_isokendpt` had to search for an endpoint
+instead of reading one out of it; `alloc_proc`'s child slot was only accidentally a slot the
+kernel had free; and a process outside 0..10 — anything the host starts, a `memory`/`sched`/`pfs`
+slot the harness repurposed — was invisible to PM, so its `PM_FORK` was dropped and its parent
+blocked forever (why `forktest` had to borrow `memory`'s slot 3).
+
+The fix is the C design, and the table is what makes it work. `kernel::table` keeps the image as a
+*runtime* table (`IMAGE_TABLE`, one entry per process slot the kernel can have), filled from
+`BOOT_IMAGE` in `proc_init` and appended to by `image_add`; `GET_IMAGE` serves it. That distinction
+between the template and the loader's list is C's (`main.c` fills `image[]` from the multiboot
+modules), and it is load-bearing on wasm, where the host *is* the loader: a slot the host declares
+(`minix_image_add`) or spawns (`minix_proc_spawn_user`) is in the image before PM reads it, so PM
+registers it and keeps its slot out of the free list a `fork` child would otherwise be given.
+PM's side is then C's loop: `init_proc` only clears the table, `init_boot_procs` fills
+`mproc[proc_nr]` from the image (endpoint, pid, name, `PRIV_PROC` below `INIT_PROC_NR`), and
+`pm_isokendpt` becomes the arithmetic C has — `_ENDPOINT_P(endpoint)`, with the stored endpoint as
+the generation check. The phantoms, the hardcoded range and `reserve_slot(11)` are all gone.
+
+One more path came with it, for the case the image cannot name: a sender PM has no slot for
+registers itself (`pm_register_sender`). A message from an endpoint is proof the process exists and
+the endpoint says where, so nothing has to be asked of the kernel — and a sender whose slot PM
+already has in use is refused rather than overwritten, because that is a misalignment and filling
+the table in would hide it.
+
+**43. The `boot_cr3() == 0` shortcut in `do_getinfo_handler` wrote the caller's data into the
+kernel's own memory on wasm.** Found by making `GET_IMAGE` work, which is the first thing in the
+port to reach these arms with a real buffer. Every `GET_*` arm copied with
+`if boot_cr3() == 0 { plain copy } else { virtual_copy }`, reading "there are no page tables to
+switch" as "the kernel and the caller share one address space". Before paging on a hardware arch
+those are the same statement; on an arch with no page tables at all they are not — the caller's
+memory is a different instance, so the plain copy wrote into the kernel's own `.bss` and the caller
+read whatever it already had, with `OK` returned. `GET_PHYS_DELTA` had never shown it because it
+answers in the message. The fix is one helper, `kernel_to_proc`, which asks the HAL first
+(`CROSS_ADDRESS_SPACE_COPY` is `Some` exactly where page tables cannot join two address spaces) and
+keeps the shortcut for the case it was written for; every arm now uses it, and a failed copy is
+returned rather than swallowed.
+
+**44. `handle_vfs_reply` found its process by scanning for the first `VFS_CALL` holder, so one
+reply could clear a live fork's flag and leave its parent blocked forever.** This one had been
+latent since before this work and the work is what made it reachable. The scan was there because
+the message was thought to be clobbered on the way back by the kernel's x86 `iretq` frame — but on
+this port the kernel writes the reply into PM's own delivery buffer, and a scan cannot answer
+"which process is this about" when two processes are mid-round-trip: it takes the *first* slot with
+the flag and the `restart_sigs` that follows clears the flag on that one.
+
+So the moment PM started serving more processes, one of their exits would land as a
+`VFS_PM_EXIT` reply while a fork was waiting, clear the fork child's flag, and be ignored — after
+which the fork's own reply found no `VFS_CALL` holder at all and replied to nobody. The parent
+blocks in `fork`, the child is never scheduled, and from outside it looks like the process simply
+stopped: the harness saw `forktest` make one syscall and never print again, with PM's trace ended
+in receives. What made it *this* work's problem is worth keeping: the reply for an exit was always
+there, but PM used to drop those exits at the door (it had no slot for the process), so they never
+reached this function. Registering more processes did not create the bug; it removed the accident
+that hid it. The fix is to resolve the process from the endpoint the reply names (VFS echoes it in
+`m7_i1`), with the scan kept as the fallback the comment describes. Both fixes are the same
+sentence as 39's: **where two tables describe the same process, identify it by what the kernel
+says it is, not by what can be found nearby.**
+
+**45. `handle_vfs_reply` encoded the child's endpoint as `slot | 0x8000` rather than reading the
+one the kernel assigned.** Generation 1 of a slot is what a *first* fork produces, which is why the
+guess survived: it is right until a slot is reused, and then PM schedules and replies to an endpoint
+the kernel has already retired. The comment above it said not to read `mp_endpoint` because the
+`iretq` frame might have corrupted the table — the same mistaken belief as 44, and the same fix:
+`handle_fork` records VM's reply, so the table holds the kernel's answer and there is nothing to
+guess.
+
+**46. `exit_proc` reparents orphans to `1`, which is VFS's slot, not INIT's.** Found while reading
+the exit path for 44; not fixed, because it is a separate bug and nothing in this work reaches it.
+`mp_parent` is a *slot* everywhere it is used (`do_fork` stores one, `handle_getpid` and
+`check_parent` index the table with it), and the port's `INIT_PROC_NR` is 10 — so a process whose
+parent was PM or INIT, and whose own children outlive it, hands those children to VFS. The guard
+above it has the same shape (`if parent == 0 || parent == 1` compares a slot against INIT's *pid*).
+It needs a fix in `exit_proc` and a test that a child outliving its parent ends up with a parent
+whose pid is 1, rather than with VFS.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper
