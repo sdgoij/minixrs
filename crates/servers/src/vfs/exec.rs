@@ -327,18 +327,24 @@ pub unsafe fn pm_exec(
         return err(ENOMEM);
     }
 
-    // Failure cleanup for the ELF arm: close the vmfd (VFS owns it until a VM_VFS_MMAP
-    // succeeds) and release the vnode reference. The module arm has its own, below: there is
-    // no descriptor to close, and a helper that pretended otherwise would be a lie.
+    // Closing the vmfd is how this arm gives up the executable's vnode: the filp was handed
+    // the one reference `vp` carries, so closing it puts the vnode exactly once. C has
+    // `/* dup_vnode(vp); */` at the same place, which marks that reference as transferred
+    // rather than copied, and its exit path (pm_execfinal) puts the vnode only in the branch
+    // where no filp was ever given one.
+    #[cfg(not(target_arch = "wasm32"))]
+    let close_vmfd = || unsafe {
+        let glob_mut = &mut *vfs_global();
+        let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
+        let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
+        let _ = crate::vfs::stadir::close_fd(vmf, vmfd);
+    };
+
+    // Failure cleanup for the ELF arm. The module arm has its own, below: there is no
+    // descriptor to close, and a helper that pretended otherwise would be a lie.
     #[cfg(not(target_arch = "wasm32"))]
     let fail = |s: i32| -> ExecResult {
-        unsafe {
-            let glob_mut = &mut *vfs_global();
-            let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
-            let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
-            let _ = crate::vfs::stadir::close_fd(vmf, vmfd);
-            put_vnode(vp);
-        }
+        close_vmfd();
         err(s)
     };
 
@@ -434,7 +440,7 @@ pub unsafe fn pm_exec(
         // No PC and no stack pointer: the host's instance starts at the module's own entry,
         // and PM ignores both fields (`exec_restart` does not use them). A zero here says
         // "no such thing on this arch" rather than standing in for a value.
-        return unsafe { finish_exec(fp, vp, 0, 0, new_euid, new_egid) };
+        return unsafe { finish_exec(fp, vp, true, 0, 0, new_euid, new_egid) };
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -550,6 +556,11 @@ pub unsafe fn pm_exec(
                 off + filesz,
             );
             if r != 0 {
+                // No region took the vmfd, so VFS still owns it (C pm_execfinal closes an
+                // unused vmfd; a used one travels into the region VM tears down).
+                if !mapped_any {
+                    close_vmfd();
+                }
                 return err_partial(r);
             }
             mapped_any = true;
@@ -587,11 +598,14 @@ pub unsafe fn pm_exec(
                 .unwrap(),
         );
 
-        // VM owns the vmfd now (it sends FDCLOSE when the last region using it
-        // dies); VFS only releases its vnode reference.
-        let _ = mapped_any;
+        // VM owns the vmfd now (it sends FDCLOSE when the last region using it dies), and
+        // the vnode reference went with it, so `vp` is not released below. Only a vmfd no
+        // region took is closed here, and closing it is what releases that reference.
+        if !mapped_any {
+            close_vmfd();
+        }
 
-        unsafe { finish_exec(fp, vp, pc, newsp, new_euid, new_egid) }
+        unsafe { finish_exec(fp, vp, false, pc, newsp, new_euid, new_egid) }
     }
 }
 
@@ -602,14 +616,21 @@ pub unsafe fn pm_exec(
 /// The two arms of `pm_exec` differ in how the image is installed and agree on everything
 /// after that — so this is one function rather than two copies of it that would drift.
 ///
+/// `release_vnode` is what the arms disagree about even here: the ELF arm gave `vp`'s only
+/// reference to the vmfd's filp, which keeps the vnode alive for the demand paging that is
+/// still to come and puts it when VM closes the fd. Putting it a second time here resets the
+/// vnode under that filp — `v_fs_e` back to NONE and `v_inode_nr` to 0 — and VM's next FDIO
+/// on the fd then reads a vnode that names no file.
+///
 /// # Safety
 ///
 /// `fp` must be the target's VFS slot, and `vp` an executable vnode whose reference this
-/// call consumes.
+/// call consumes when `release_vnode` is set.
 #[cfg(target_os = "minix")]
 unsafe fn finish_exec(
     fp: &mut Fproc,
     vp: *mut crate::vfs::types::Vnode,
+    release_vnode: bool,
     pc: u64,
     newsp: u64,
     new_euid: i32,
@@ -623,9 +644,10 @@ unsafe fn finish_exec(
     }
     fp.fp_cloexec = 0;
 
-    // The reference VFS took to resolve the path goes back; on the ELF arm VM holds its
-    // own through the vmfd, and on the module arm nothing else does.
-    unsafe { put_vnode(vp) };
+    // The reference VFS took to resolve the path goes back, unless a filp already holds it.
+    if release_vnode {
+        unsafe { put_vnode(vp) };
+    }
 
     // Apply the setuid/setgid exec to VFS's own fproc (C pm_exec: "If
     // after loading the image we're still allowed to run with setuid or

@@ -7502,6 +7502,58 @@ until a check imported the page twice and compared what the two boots identified
 never slices the source image — it writes it to the file on first use — so `run.js`'s four boots
 over one image were never affected.
 
+**57. Exec put the executable's vnode a second time, resetting it under the vmfd — so every
+demand-paged page of the new image was read from `NONE`.** All three hardware arches stopped at
+`init: starting shell...`, and the gates stayed green because they assert `wserver: ready`, which is
+printed before the shell exists. The shell's entry page faulted, VM handled it, VFS's FDIO arm ran,
+and the read went to endpoint -1: `VFSFD fd=0 filp=3 fs_e=-1 ino=0` — a *reset* vnode, which is what
+`put_vnode` leaves behind. The kernel trace showed the consequence, `VFS SENDREC ep=65535`, and no
+`PFCLEAR` ever followed, so `init` sat on `RTS_PAGEFAULT` with an empty run queue.
+
+`pm_exec` hands the vmfd's filp the one vnode reference `eat_path` returned — `filp.filp_vno = vp`
+with no `dup_vnode`, matching C's commented-out `/* dup_vnode(vp); */` at the same place, which marks
+the reference as *transferred* rather than copied. `finish_exec` then called `put_vnode(vp)`
+unconditionally. With the filp holding the only reference, that put took the count to zero and
+`*vp = Vnode::default()` ran, so the vnode the filp still pointed at named no file. C's exit path
+(`pm_execfinal`) puts the vnode only in the branch where no filp was ever given one
+(`if(newfilp) unlock_filp(newfilp); else if (execi.vp != NULL) { unlock_vnode(execi.vp); put_vnode(execi.vp); }`),
+and closes an unused vmfd (`if(execi.vmfd >= 0 && !execi.vmfd_used) close_fd(vmfp, execi.vmfd)`) —
+closing it is what releases the reference in that case.
+
+Fixed in `crates/servers/src/vfs/exec.rs`: `finish_exec` takes `release_vnode`, set from which arm
+called it — the module arm passes `true` (nothing else holds the vnode), the ELF arm `false`, closing
+a vmfd that no region took instead; `fail` closes the descriptor rather than closing it *and*
+putting the vnode. Introduced by `dd4e377a7` (exec as wasm module instantiation), which added
+`finish_exec` — the wasm work did not break the other arches, but the code path it added did.
+
+**58. A server that grows its heap while VM is waiting for it wedges the system.** `minix-rt`'s
+global allocator maps its chunks with `mmap_chunk` → `minix_rt::vmem::mmap`, which is a *blocking*
+`sendrec` to VM — so any allocation, at any depth in any server, can stop that server on VM. VM's
+`vfs_request_sync` (FDIO/FDLOOKUP) meanwhile blocks VM on VFS. When both happen at once the kernel
+delivers VFS's `mmap` request *into VM's SENDREC reply slot* (a SENDREC's receive matches on source
+endpoint alone), and neither side can move: VFS waits for the mmap reply, VM has already returned
+from the fault handler, and the run queues are empty.
+
+Found while chasing 57, from the delivered message itself: it decoded field for field as
+`mmap(NULL, 1 MiB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)` — `m_type` 3082
+(`VM_MMAP`), `prot` 3 at byte 12, `flags` 0x22 at byte 16, `len` 0x100000 at byte 20, `addr` 0 at
+byte 28. The trigger was the *diagnostic*: the `VFSFD` print added inside `do_vm_call`'s FDIO arm
+built a `String`, and that allocation grew VFS's heap. Rewriting that print to emit fixed bytes made
+the same tree boot to `# ` on all three arches, which is what identified it.
+
+So the invariant the port runs on is *no allocation inside VFS's VM-request handlers* (the FDIO,
+FDLOOKUP and FDCLOSE arms of `do_vm_call`). Today nothing enforces it; the same hazard covers
+`vm_remap`, `vm_getphys` and `vm_unmap` in `crates/servers/src/ipc.rs`, which are the same shape and
+also callable from device paths. C does not have this problem because VM never blocks on VFS — the
+`vm_vfs_*` requests are asynchronous with callbacks through `do_vfs_reply`. The port replaced that
+with a synchronous sendrec (`vfs_request_sync`) and left `do_vfs_reply` a stub that rejects
+out-of-band replies, which is what makes a stray request able to land in a reply slot. The kernel
+already carries the guard the structural fix wants: `mini_receive`'s async path refuses to let an
+`AMF_NOREPLY` message satisfy a SENDREC waiter (`try_one`, matching C's `L1401`), and the synchronous
+path has no equivalent. Making VM's VFS requests asynchronous (send with `AMF_NOREPLY` so a waiting
+server cannot absorb them, plus the pending-request table `do_vfs_reply` would complete) removes the
+class rather than the instance.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

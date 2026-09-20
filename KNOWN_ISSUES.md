@@ -84,6 +84,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      VM_VFS_REPLY messages are rejected with SUSPEND — C's async PENDING
      table has no counterpart here); `clear_pagefault` now forwards
      VMCTL_CLEAR_PAGEFAULT to the kernel (was a no-op).
+   - **No allocation inside VFS's VM-request handlers (FDIO, FDLOOKUP,
+     FDCLOSE of `do_vm_call`).** Those run while VM is blocked in
+     `vfs_request_sync`, and a server's heap growth is itself a *synchronous*
+     VM call (`minix-rt`'s `mmap_chunk` → `vmem::mmap` → blocking sendrec), so
+     an allocation here is delivered into VM's SENDREC reply slot and wedges
+     both servers — VM already returned from the fault handler, VFS waits for
+     the mmap reply, run queues empty. Same hazard for `vm_remap`,
+     `vm_getphys`, `vm_unmap` in `servers/src/ipc.rs` from device paths.
+     Nothing enforces this today; it is held by inspection. The structural
+     fix is to make VM's VFS requests asynchronous (send with `AMF_NOREPLY`,
+     which `mini_receive`'s async path already refuses to let satisfy a
+     SENDREC waiter, plus the pending table `do_vfs_reply` would complete) —
+     PORTING_PLAN.md finding 58.
 8. **Threads (THREADS.md open workstreams)** — `thread_local!` in the minix
    std PAL, `Mutex`/`Condvar` over a futex sleep/wake, per-thread errno,
    C-ABI pthread surface; per-thread sigreturn is deferred (process-level
