@@ -7376,6 +7376,75 @@ that syncs and unmounts the root. The port's `fs_unmount` also stops short of th
 sets the clean bit in memory and never calls `write_super` — so that path is worth a look at the
 same time.
 
+The follow-up is in, and reaching it found four more things (50–53). PM now drives it: this port's
+`init` *becomes* the shell by `exec`, so the exit of INIT is the end of the session, and PM follows
+it with `VFS_PM_REBOOT` — the reference's own shutdown, which it reaches from `reboot(2)` — whose
+VFS half (`pm_reboot`) is the reference's sequence with the two process-freeing passes that make the
+unmount possible. `node tools/wasm-browser/run.js` proves the result with four boots over one disk:
+the third and fourth write files and never sync them, so what makes those writes durable is the
+shutdown, and the check that they *can* write is the check that the second boot's shutdown left the
+disk clean.
+
+**50. `MFSFLAG_CLEAN` could never reach the device: `write_super` marks the block dirty, and the
+unmount throws the cache away before anything flushes it.** The last link in the chain above, and
+the one that made the first working shutdown look like a failure: the superblock on the disk still
+read `s_flags = 0x0` after a boot that had unmounted the root, while MFS's own copy in memory said
+`0x1`. `rw_super` writes the superblock into the block cache and marks it dirty; the reference then
+leaves it to the next flush, and its `fs_unmount` ends with `lmfs_invalidate(fs_dev)` — which on
+this port discards a buffer whatever its state (`cache.rs` clears the slot without looking at
+`lmfs_dirt`), so the bit was written and then thrown away one line later. Fixed by flushing after
+`write_super`, before the invalidate: the clean bit is a promise about what is *on the device*, and
+this is the last thing the filesystem does.
+
+**51. VFS leaked a vnode reference per path resolution, and `pm_fork` leaked its child's
+directories.** Found while working out why `unmount`'s busy check could never pass: the root
+vnode's reference count was 39 where the port's own `mount_root` accounts for 37 (one for the vmnt,
+two per boot process), and it never came back down. `eat_path` dup'd the directory it started from
+*and* its result on top of the reference `advance` already returns; `last_dir` dup'd its start
+directory on the path that hands it to `advance`; and `pm_fork` copied a parent's `fp_rdir`/`fp_cdir`
+into the child (the struct copy does that) without `dup_vnode`ing them, so a child's exit released
+references its parent still held. The doubles at boot were the two path resolutions of it
+(`/dev/console` then `/bin/sh`); each leaked one, because `do_open` puts exactly one of the two and
+the non-opening callers (`stat`, `access`, `truncate`, `exec`) put one as well.
+
+Fixed to the reference's contract: `eat_path` and `last_dir` take no reference on the directory they
+start from and return the one `advance` gives, and `do_open`/`do_creat` hand that reference to the
+filp instead of putting it. `pm_fork` dups the child's two. The port's `free_proc` also now *puts*
+`fp_rdir`/`fp_cdir` where it used to only null them — the reference does the same, and without it no
+amount of correct resolution would ever release them.
+
+**52. MFS's inode-reference accounting does not balance either, so its busy check cannot pass and the
+shutdown needs a forced unmount.** With 51 fixed, VFS's side of the count came out right and the
+unmount still refused: MFS's own `fs_unmount` counted five inode references on the device — root
+(1), `/devices` (1), a device inode (1) and a file created during the run (2) — and the reference
+refuses an unmount above one. How they are held is a set of places where an FS-side reference is
+taken and never put back: `mount_devman` resolves `/devices` with a bare `req_lookup` and keeps only
+the inode *number* (the reference holds the vnode, and `unmount` puts it), and the create path ends
+up with both `fs_create`'s inode and the lookup that follows it holding the same inode with one
+`putnode` between them.
+
+Rather than paper over it, the unmount request now carries C's `unmount_all` argument: VFS's forced
+pass tells the filesystem that this is a shutdown, whose guarantee is VFS's own (no open file
+description on the device), so it must come off whatever its caches still reference. The unforced
+pass stays strict, which is why the reference's two passes are in `pm_reboot` in its own order — and
+why a mount record now survives a refused unmount, so the forced pass still has something to ask
+(C frees the record regardless, which on this port would have left nothing to retry and the disk
+dirty).
+
+**53. VFS fabricates a PFS mount for a server the wasm boot does not start, so any request to it
+blocks VFS forever.** M4's shutdown walk found this the direct way: it asked the PFS vmnt to unmount
+first (C's `mount_pfs` record is the table's first entry), and VFS never came back — no MFS unmount,
+no clean bit, and the run still reported quiescence, because a process blocked in a `SENDREC` to a
+slot nobody will serve is not runnable. `mount_pfs` is the reference's own (it fabricates the record
+so pipe operations can lock it, and the reference's PFS is a boot server, so the record always names
+something), and the port's wasm boot starts eleven instances with no PFS among them — so a pipe
+created on the page would block VFS the same way.
+
+The shutdown therefore skips mounts with no device, which is also what `do_sync` already does with
+them, and for the same reason: there is no medium to leave consistent. The hole itself is the wasm
+boot's to close — start PFS, or do not fabricate its record there — and it is recorded rather than
+fixed here because it is about which servers the page runs, not about the shutdown.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

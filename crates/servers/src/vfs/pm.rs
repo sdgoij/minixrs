@@ -262,11 +262,20 @@ pub fn service_pm() -> i32 {
         }
 
         VFS_PM_REBOOT => {
-            pm_reboot();
+            let left = pm_reboot();
             #[cfg(target_os = "minix")]
             unsafe {
-                reply_to_pm(VFS_PM_RS_BASE + 10, 0)
-            };
+                // The reference's reply here is what tells PM to abort the kernel,
+                // and its only field is the type. This port has no abort to trigger,
+                // so the field C leaves zero carries the one thing left to know
+                // instead: how many filesystems the forced pass could not unmount.
+                let mut buf = [0u8; 64];
+                buf[4..8].copy_from_slice(&(VFS_PM_RS_BASE + 10).to_le_bytes());
+                buf[8..12].copy_from_slice(&left.to_le_bytes());
+                send_raw_to_pm(&buf);
+            }
+            #[cfg(not(target_os = "minix"))]
+            let _ = left;
             OK
         }
 

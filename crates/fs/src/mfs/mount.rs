@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use crate::mfs::consts::*;
 use crate::mfs::glo;
 use crate::mfs::inode::*;
+use crate::mfs::misc::fs_sync;
 use crate::mfs::super_block::*;
 use crate::mfs::types::*;
 
@@ -129,22 +130,71 @@ pub fn fs_unmount() -> i32 {
         if (*mfs).super_blocks[0].s_dev != (*mfs).fs_dev {
             return EINVAL;
         }
-        let mut count = 0;
-        for i in 0..NR_INODES {
-            let inode = &*glo::get_inode_ptr(i);
-            if (*inode).i_count > 0 && (*inode).i_dev == (*mfs).fs_dev {
-                count += (*inode).i_count;
+
+        // VFS's forced pass (the shutdown's) says the filesystem must come off, so
+        // the tests below are skipped. The reason they exist — an unmount happening
+        // under an open file — is VFS's to check and it already has (it refuses to
+        // unmount a device with an open file description on it), and this port's
+        // caches do not hold references that add up the way the C reference expects:
+        // several paths take an FS reference VFS does not later put back
+        // (`PORTING_PLAN.md` has the measurements), so a strict count here would
+        // refuse the shutdown's unmount of a filesystem nothing is using.
+        let forced = u32::from_ne_bytes(
+            (&(*mfs).m_in.m_payload.raw)[0..4]
+                .try_into()
+                .unwrap_or([0u8; 4]),
+        ) != 0;
+        if !forced {
+            let mut count = 0;
+            for i in 0..NR_INODES {
+                let inode = &*glo::get_inode_ptr(i);
+                if (*inode).i_count > 0 && (*inode).i_dev == (*mfs).fs_dev {
+                    count += (*inode).i_count;
+                }
+            }
+            if count > 1 {
+                return EBUSY;
             }
         }
         let root_ip = find_inode((*mfs).fs_dev, ROOT_INODE);
-        if root_ip.is_none() || count > 1 {
-            return if count > 1 { EBUSY } else { EINVAL };
+        if root_ip.is_none() {
+            return EINVAL;
         }
         put_inode(root_ip);
-        if CLEANMOUNT.load(Ordering::Relaxed) != 0 && (*mfs).super_blocks[0].s_rd_only == 0 {
-            (*mfs).super_blocks[0].s_flags |= MFSFLAG_CLEAN;
+
+        // Flush the inodes and cached blocks before marking the filesystem
+        // clean: the clean bit is a promise about what is on the device, and a
+        // promise made over a cache that still holds them is a filesystem the
+        // next read-write mount would find half-written (the C reference's
+        // `fs_unmount` flushes first and writes the superblock last, for this
+        // reason).
+        let r = fs_sync();
+        if r != OK {
+            return r;
         }
-        (*mfs).super_blocks[0].s_dev = NO_DEV;
+
+        let sp = &mut (*mfs).super_blocks[0];
+        // Mark it clean if we're allowed to write _and_ it was clean originally.
+        if CLEANMOUNT.load(Ordering::Relaxed) != 0 && sp.s_rd_only == 0 {
+            sp.s_flags |= MFSFLAG_CLEAN;
+            let r = write_super(sp);
+            if r != OK {
+                return r;
+            }
+            // `write_super` puts the superblock in the block cache and marks it
+            // dirty; the clean bit is a promise about what is *on the device*, so it
+            // goes out here rather than waiting for a flush that will never come —
+            // this is the last thing the filesystem does, and the invalidate below
+            // throws the cache away.
+            libs::libminixfs::cache::lmfs_flushall();
+        }
+
+        // The device is no longer being written through, so nothing from this
+        // filesystem may stay in the block cache: a block written back after
+        // the unmount would land on a filesystem nobody is tracking any more.
+        libs::libminixfs::cache::lmfs_invalidate(sp.s_dev);
+
+        sp.s_dev = NO_DEV;
         (*mfs).unmountdone = TRUE;
         OK
     }

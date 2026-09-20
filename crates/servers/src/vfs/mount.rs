@@ -402,6 +402,111 @@ pub fn do_umount() -> i32 {
     ENOSYS
 }
 
+/// Find the mounted filesystem with this device number.
+///
+/// The test is `m_fs_e`, not `m_dev`: a free slot and the root filesystem both
+/// say `m_dev == 0` on this port (C separates them with a distinct `NO_DEV`).
+fn find_vmnt_by_dev(dev: u32) -> *mut Vmnt {
+    unsafe {
+        let glob = vfs_global();
+        let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+        for i in 0..NR_MNTS {
+            let vmp = &mut *vmnt_arr.add(i);
+            if vmp.m_fs_e >= 0 && vmp.m_dev == dev {
+                return vmp;
+            }
+        }
+    }
+    core::ptr::null_mut()
+}
+
+/// Unmount one mounted filesystem.
+///
+/// `force` is C's `unmount_all` argument and is passed on to the filesystem: it says
+/// that this unmount is a shutdown's, whose guarantee is VFS's own (the busy check
+/// below), so a filesystem must come off whatever its own caches still reference.
+///
+/// The busy check is C's in meaning and not in form. C sums the reference counts of
+/// the vnodes on the device and allows exactly one — the vmnt's own root reference.
+/// That number is not trustworthy on this port: VFS's path resolution leaked a
+/// reference per lookup (`eat_path` and `last_dir` dup'd the directory they started
+/// from, and `eat_path` dup'd its result on top of the reference `advance` already
+/// returns) and `pm_fork` copied a parent's root and working directories into the
+/// child without duplicating them; those are fixed, and `PORTING_PLAN.md` has the
+/// rest of what the reference counts still do not add up to. So what is checked here
+/// is the thing the count stands for — an open file description on the device —
+/// which is what C's check is for: putting a filesystem down under an open file is
+/// the mistake, not the bookkeeping.
+///
+/// Returns `OK` when the filesystem confirmed the unmount, `EBUSY` when something
+/// still holds the device, and otherwise what the filesystem answered — in which
+/// case the mount record stays: the filesystem has given up nothing, so a later pass
+/// (the shutdown's forced one) is still able to ask it again, and the record is the
+/// only thing that says there is something there to ask.
+///
+/// # Safety
+///
+/// `vmp` must be null or point to a valid, initialized Vmnt entry whose `m_fs_e`
+/// names a mounted filesystem.
+unsafe fn unmount_vmnt(vmp: *mut Vmnt, force: i32) -> i32 {
+    if vmp.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        let glob = vfs_global();
+        let dev = (*vmp).m_dev;
+        let fs_e = (*vmp).m_fs_e;
+
+        // An open file description on the device: a filp is the reference that
+        // makes a filesystem busy, and the one an unmount must not happen under.
+        let filp_arr = addr_of_mut!((*glob).filp) as *mut Filp;
+        for i in 0..NR_FILPS {
+            let f = &*filp_arr.add(i);
+            if f.filp_count > 0 && !f.filp_vno.is_null() && (*f.filp_vno).v_dev == dev {
+                return EBUSY;
+            }
+        }
+
+        // Tell the filesystem to drop all inode references for its root but one,
+        // then to flush everything it is holding and unmount.
+        let root_vp = find_vnode(fs_e, (*vmp).m_root_node);
+        vnode_clean_refs(root_vp);
+        let r = crate::vfs::request::req_unmount(fs_e, force);
+        if r != OK {
+            return r;
+        }
+
+        // This filesystem is gone, so stop listing it in statistics, and let its
+        // root vnode go with it: C reuses the entry rather than freeing it, and so
+        // does this.
+        (*vmp).m_flags &= !VMNT_CANSTAT;
+        if !root_vp.is_null() {
+            (*root_vp).v_ref_count = 0;
+            (*root_vp).v_fs_count = 0;
+        }
+        mark_vmnt_free(vmp);
+        OK
+    }
+}
+
+/// Unmount the filesystem mounted on `dev`.
+///
+/// The half of `umount(2)` that has a filesystem to take down. `do_umount` still
+/// needs the path-to-device lookup and the label copy back to the caller, and that
+/// caller is why this is the strict form: `force == 0`, so the filesystem applies
+/// its own busy check as well as VFS's.
+///
+/// Returns `EINVAL` when nothing is mounted on `dev`, `EBUSY` when something still
+/// holds it, and otherwise the filesystem's answer — with the mount record freed only
+/// when the unmount actually happened (see `unmount_vmnt`).
+pub fn unmount(dev: u32) -> i32 {
+    let vmp = find_vmnt_by_dev(dev);
+    if vmp.is_null() {
+        return EINVAL;
+    }
+    unsafe { unmount_vmnt(vmp, 0) }
+}
+
 /// Mount a filesystem with explicit parameters (internal use).
 pub fn mount_fs(
     _dev: u32,
@@ -415,11 +520,6 @@ pub fn mount_fs(
     ENOSYS
 }
 
-/// Unmount a filesystem by device or label.
-pub fn unmount(_dev: u32, _label: Option<&[u8]>) -> i32 {
-    ENOSYS
-}
-///
 /// PFS is not really mounted onto the filesystem tree — it just needs a
 /// vmnt entry so pipe operations can find and lock it (matching the
 /// original C `mount_pfs()` in `minix/servers/vfs/mount.c`).
@@ -538,8 +638,75 @@ pub fn is_nonedev(dev: u32) -> i32 {
     if dev == u32::MAX { OK } else { ENOSYS }
 }
 
-/// Unmount all filesystems (for reboot).
-pub fn unmount_all(_force: i32) {}
+/// Unmount all filesystems (for reboot or shutdown).
+///
+/// Filesystems are mounted on filesystems, so pulling the loose ones off once is
+/// not enough: each pass takes off whatever its mount point no longer needs, and
+/// `NR_MNTS` passes is deeper than the table can nest (C runs the same loop).
+///
+/// The passes walk table slots rather than device numbers, because the two mounts
+/// on this port that have no device — PFS and devman — carry the same `NO_DEV`
+/// sentinel, so `unmount(dev)` would have to guess which was meant. Those two are
+/// skipped, as `do_sync` already skips them: there is no medium to leave
+/// consistent, and PFS's record is fabricated by `mount_pfs` at init rather than
+/// created by a mount that succeeded, so it is the one vmnt that does not imply a
+/// server behind it — the wasm boot starts none, and asking it to unmount is a
+/// wait for an answer that cannot come.
+///
+/// Returns how many filesystems did not come off cleanly — the ones still mounted
+/// after the passes, which is the reference's own verification. `force` is C's: it is
+/// the pass whose answer is a requirement, and the count is only worth returning for
+/// it — a server on this port has no console and the wasm disposition is `abort`,
+/// which would hang the host instead of reporting it (the disposition `ramdisk.rs`
+/// states).
+pub fn unmount_all(force: i32) -> i32 {
+    unsafe {
+        let glob = vfs_global();
+        let vmnt_arr = addr_of_mut!((*glob).vmnt) as *mut Vmnt;
+
+        for _ in 0..NR_MNTS {
+            let mut live = 0;
+            for i in 0..NR_MNTS {
+                let vmp = vmnt_arr.add(i);
+                if (*vmp).m_fs_e < 0 || is_nonedev((*vmp).m_dev) == OK {
+                    continue;
+                }
+                live += 1;
+                // The failure is what is left to see in the table: an unmount that did
+                // not happen leaves its record mounted, which is what the count below
+                // reads, so there is nothing to carry out of this call.
+                unmount_vmnt(vmp, force);
+            }
+            if live == 0 {
+                // Nothing left to pull off, so no further pass can reach anything.
+                break;
+            }
+        }
+
+        if force == 0 {
+            return 0;
+        }
+        mounted_count(vmnt_arr)
+    }
+}
+
+/// Count the table's mounted filesystems that have a device (the port's free marker
+/// is `m_fs_e < 0`, and a mount with no device is one `unmount_all` does not put
+/// down — see its note).
+///
+/// # Safety
+///
+/// `vmnt_arr` must point to `NR_MNTS` valid, initialized Vmnt entries.
+unsafe fn mounted_count(vmnt_arr: *mut Vmnt) -> i32 {
+    let mut n = 0;
+    for i in 0..NR_MNTS {
+        let vmp = unsafe { &*vmnt_arr.add(i) };
+        if vmp.m_fs_e >= 0 && is_nonedev(vmp.m_dev) != OK {
+            n += 1;
+        }
+    }
+    n
+}
 
 /// Mount the root filesystem at boot time.
 ///
@@ -685,6 +852,93 @@ mod tests {
             (*glob).fp = fp;
         }
         assert_eq!(do_umount(), EPERM);
+    }
+
+    /// Give the table a mounted filesystem on `dev`, with its root vnode; a filp may
+    /// then hold that vnode to make it busy.
+    unsafe fn mount_one(dev: u32, fs_e: i32) -> *mut Vnode {
+        unsafe {
+            let vmp = get_free_vmnt();
+            (*vmp).m_fs_e = fs_e;
+            (*vmp).m_dev = dev;
+            (*vmp).m_root_node = 1;
+            let vp = get_free_vnode();
+            (*vp).v_fs_e = fs_e;
+            (*vp).v_inode_nr = 1;
+            (*vp).v_dev = dev;
+            (*vp).v_ref_count = 1;
+            (*vp).v_fs_count = 1;
+            vp
+        }
+    }
+
+    /// Point an open filp at `vp` (filps are what `unmount` treats as "in use").
+    unsafe fn open_a_filp_on(vp: *mut Vnode) {
+        unsafe {
+            let glob = vfs_global();
+            let filp_arr = addr_of_mut!((*glob).filp) as *mut crate::vfs::types::Filp;
+            (*filp_arr).filp_count = 1;
+            (*filp_arr).filp_vno = vp;
+        }
+    }
+
+    #[test]
+    fn unmount_reports_einval_when_nothing_is_mounted_there() {
+        unsafe {
+            init_tables();
+            assert_eq!(unmount(7), EINVAL);
+        }
+    }
+
+    #[test]
+    fn unmount_refuses_a_device_with_an_open_filp() {
+        unsafe {
+            init_tables();
+            let vp = mount_one(3, 42);
+            open_a_filp_on(vp);
+            assert_eq!(unmount(3), EBUSY);
+            // The record is the only thing that says there is still something to
+            // unmount, so a refusal must leave it alone.
+            assert!(!find_vmnt_by_dev(3).is_null());
+        }
+    }
+
+    #[test]
+    fn unmount_learns_the_filesystems_answer_and_keeps_the_record_when_it_fails() {
+        unsafe {
+            init_tables();
+            mount_one(3, 42);
+            // On this build there is no filesystem to ask — `req_unmount` is the host
+            // stub — so what this checks is that the answer reaches the caller and
+            // that a failed unmount leaves the mount in place.
+            assert_eq!(unmount(3), ENOSYS);
+            assert!(!find_vmnt_by_dev(3).is_null());
+        }
+    }
+
+    #[test]
+    fn unmount_all_skips_a_mount_with_no_device() {
+        unsafe {
+            init_tables();
+            // PFS and devman live on the same NO_DEV sentinel: nothing to put down, and
+            // on the wasm boot nothing behind the record to ask.
+            let vmp = get_free_vmnt();
+            (*vmp).m_fs_e = 9;
+            (*vmp).m_dev = u32::MAX;
+            assert_eq!(unmount_all(1), 0);
+        }
+    }
+
+    #[test]
+    fn unmount_all_counts_what_is_still_mounted() {
+        unsafe {
+            init_tables();
+            mount_one(3, 42);
+            // The filesystem's answer decides: with the host stub refusing, the mount
+            // stays, and the forced pass is the one that reports it.
+            assert_eq!(unmount_all(0), 0);
+            assert_eq!(unmount_all(1), 1);
+        }
     }
 
     #[test]

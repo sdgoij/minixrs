@@ -241,6 +241,14 @@ check(
 // disk, fails this — and so does a disk whose superblock, inodes and data blocks do not all agree
 // about where the file is, which is what makes this a test of the whole path rather than of the
 // write alone.
+//
+// The second claim here is the shutdown's, and it is the one that made finding 49: **the disk is
+// left clean when the system stops.** `MFSFLAG_CLEAN` on the superblock is what lets the *next*
+// mount be read-write — MFS refuses to write on a filesystem whose last user did not end cleanly,
+// which is its protection against writing over a half-written one — so a shutdown that does not
+// flush and unmount leaves a disk that reads fine and refuses to be written, and nothing says why.
+// The third and fourth boots below write files and never sync them: what makes those writes
+// durable is the shutdown, and nothing else.
 
 /// The device's contents in a file: a disk, not a cache of one.
 ///
@@ -337,13 +345,15 @@ const store = fileStore(diskPath, imageBytes);
 
 const PERSIST_FILE = 'persisted.txt';
 const PERSIST_TEXT = 'written by the first boot';
+const UNSYNCED_FILE = 'unsynced.txt';
+const UNSYNCED_TEXT = 'written without syncing';
+const AGAIN_FILE = 'again.txt';
+const AGAIN_TEXT = 'written by a boot after a shutdown';
 
-// `sync` before `exit`, because that is what makes the write *durable*: MFS holds dirty inodes and
-// blocks in its cache (`fs_sync` writes them and flushes the cache), and this port has no shutdown
-// path that syncs or unmounts — the shell exits, the system quiesces, the host stops. So a run that
-// does not sync is a run whose last writes were never written, which is the same promise a real
-// filesystem makes and the same failure a crash gives you. What the second boot proves is that the
-// bytes that *were* written are a filesystem it can mount and read.
+// `sync` before `exit` here on purpose: this boot is the M4 claim on its own — a write the *guest*
+// flushed and the shutdown had no part in — and it keeps the shell's `sync` builtin exercised.
+// `fs_sync` writes the dirty inodes and flushes the block cache, so the file this boot makes
+// durable is the one the next boot reads.
 const firstBoot = bootOver(store, [`echo ${PERSIST_TEXT} > ${PERSIST_FILE}`, 'sync']);
 check(
   'the host attached a block device, and the first boot mounted its root from it',
@@ -375,14 +385,52 @@ check(
   secondBoot.booted === 'awaiting-input' && seen !== undefined,
   `booted=${secondBoot.booted} lines=[${secondBoot.terminal.lines.join(' | ')}]`
 );
+store.close();
+
+// The third boot writes and does *not* sync: at the moment it exits the inode, the directory block
+// and the data block are still in MFS's cache, so whether a later boot can read the file is a
+// question about the shutdown alone. It is also the boot that catches finding 49 in the other
+// direction: a disk left unclean by the second boot's shutdown mounts read-only, and a read-only
+// mount writes nothing at all — so a device that saw no writes *is* the shell's `cannot create`.
+const thirdBoot = bootOver(fileStore(diskPath, imageBytes), [
+  `echo ${UNSYNCED_TEXT} > ${UNSYNCED_FILE}`,
+]);
+check(
+  'a boot after a shutdown mounted the disk read-write, and its write reached the device',
+  thirdBoot.engine.device.bytesWritten > 0 &&
+    !thirdBoot.terminal.lines.some((l) => l.includes('cannot create')) &&
+    thirdBoot.ended === 'quiescent',
+  `writes=${thirdBoot.engine.device.writes} bytesWritten=${thirdBoot.engine.device.bytesWritten} ` +
+    `console=[${thirdBoot.terminal.lines.join(' | ')}]`
+);
+store.close();
+
+// The fourth boot reads back what the third one wrote without syncing — the shutdown flushed it, or
+// the file would still have been in MFS's cache when the host stopped — and writes a file of its
+// own, which is the same question about the disk's writability asked of the third boot's shutdown.
+const fourthBoot = bootOver(fileStore(diskPath, imageBytes), [
+  `cat ${UNSYNCED_FILE}`,
+  `echo ${AGAIN_TEXT} > ${AGAIN_FILE}`,
+]);
+const flushed = fourthBoot.terminal.lines.find((l) => l.trim() === UNSYNCED_TEXT);
+check(
+  'a boot that exited without syncing still left its file on the disk',
+  fourthBoot.booted === 'awaiting-input' && flushed !== undefined,
+  `booted=${fourthBoot.booted} lines=[${fourthBoot.terminal.lines.join(' | ')}]`
+);
+store.close();
 
 note(
   'what the M4 device cost and saw',
-  `first boot: ${firstBoot.engine.device.reads} reads / ${firstBoot.engine.device.bytesRead} bytes, ` +
-    `${firstBoot.engine.device.writes} writes / ${firstBoot.engine.device.bytesWritten} bytes, ` +
-    `${firstBoot.steps} slices\n` +
-    `        second boot: ${secondBoot.engine.device.reads} reads / ` +
-    `${secondBoot.engine.device.bytesRead} bytes (${diskPath})`
+  [firstBoot, secondBoot, thirdBoot, fourthBoot]
+    .map(
+      (b, i) =>
+        `${['first', 'second', 'third', 'fourth'][i]} boot: ${b.engine.device.reads} reads / ` +
+        `${b.engine.device.bytesRead} bytes, ${b.engine.device.writes} writes / ` +
+        `${b.engine.device.bytesWritten} bytes`
+    )
+    .join('\n        ') +
+    `\n        (${diskPath})`
 );
 
 // ---------------------------------------------------------------------- the report

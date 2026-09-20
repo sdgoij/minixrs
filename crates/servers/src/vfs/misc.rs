@@ -3,8 +3,10 @@
 //! Covers process lifecycle hooks (pm_exit, pm_fork, pm_exec, pm_set*),
 //! system info queries (do_getsysinfo), resource usage, and utility helpers.
 
+use crate::vfs::call::do_sync;
 use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
+use crate::vfs::mount::{find_vmnt, put_vnode, unmount_all};
 use crate::vfs::types::*;
 
 /// System info query: copy the process table.
@@ -52,9 +54,20 @@ fn free_proc(rfp: &mut Fproc, flags: u32) {
         }
     }
 
-    // Release root and working directories.
-    rfp.fp_rdir = core::ptr::null_mut();
-    rfp.fp_cdir = core::ptr::null_mut();
+    // Release root and working directories. The reference puts these vnodes, and
+    // not doing so leaks a reference per process: `mount_root` hands every boot
+    // process its root twice (`dup_vnode`), so the root vnode of the root
+    // filesystem ends up with two references per process that nothing ever
+    // drops — which is exactly what stops an unmount of it being possible
+    // (`unmount`'s busy check allows one reference).
+    if !rfp.fp_rdir.is_null() {
+        unsafe { put_vnode(rfp.fp_rdir) };
+        rfp.fp_rdir = core::ptr::null_mut();
+    }
+    if !rfp.fp_cdir.is_null() {
+        unsafe { put_vnode(rfp.fp_cdir) };
+        rfp.fp_cdir = core::ptr::null_mut();
+    }
 
     // If not actually exiting, stop here.
     if flags & FP_EXITING == 0 {
@@ -170,6 +183,17 @@ pub fn pm_fork(pproc: i32, cproc: i32, cpid: i32) -> i32 {
         child.fp_pid = cpid;
         child.fp_flags = FP_NOFLAGS;
 
+        // The struct copy above brought the parent's root and working directories
+        // with it, which are two more references to the same vnodes: give the child
+        // its own, or the child's exit would release the parent's (C `pm_fork` dups
+        // both for the same reason).
+        if !child.fp_rdir.is_null() {
+            crate::vfs::mount::dup_vnode(child.fp_rdir);
+        }
+        if !child.fp_cdir.is_null() {
+            crate::vfs::mount::dup_vnode(child.fp_cdir);
+        }
+
         // Increment filp refcounts for inherited fds. Reader/writer
         // presence for pipes is derived from the filp table (find_filp_vp),
         // so the pipe itself needs no adjustment here.
@@ -258,11 +282,65 @@ pub fn pm_setsid(proc_e: i32) {
     }
 }
 
-/// Prepare for reboot: sync all filesystems.
+/// Free every process VFS knows about, without killing any of them — the
+/// reference's shutdown does this so that nothing is still holding a filesystem
+/// when one is asked to come off. The root directory reference every boot process
+/// holds (two of them, from `mount_root`) is what makes this necessary: until they
+/// are put, the root filesystem of the root is busy and cannot be unmounted.
 ///
-/// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (pm_reboot)
-pub fn pm_reboot() {
-    // TODO: iterate vmnt table, call req_sync for each
+/// `skip_file_servers` is the reference's first pass. A filesystem server has to be
+/// given its chance to unmount before its own fproc goes, which is why the forced
+/// pass that follows the second call is the one that succeeds.
+///
+/// This is deliberately not `pm_exit`: nothing here is exiting, and a process that
+/// is still running is entitled to be back in VFS's tables the moment it sends
+/// anything (`handle_work` re-attaches its fproc to the sender endpoint).
+///
+/// # Safety
+///
+/// Must be called with exclusive access to VFS's tables.
+unsafe fn free_leftover_procs(skip_file_servers: bool) {
+    unsafe {
+        let glob = vfs_global();
+        let fproc_arr = core::ptr::addr_of_mut!((*glob).fproc) as *mut Fproc;
+        for i in 0..256usize {
+            let rfp = &mut *fproc_arr.add(i);
+            if rfp.fp_endpoint < 0 {
+                continue;
+            }
+            if skip_file_servers && !find_vmnt(rfp.fp_endpoint).is_null() {
+                continue;
+            }
+            free_proc(rfp, 0 /* Do not exit: release the resources only */);
+        }
+    }
+}
+
+/// Perform the VFS side of a shutdown — the reference's `pm_reboot`.
+///
+/// It aborts the kernel from the reply, which is what it waits for the reply *to*
+/// do; there is no abort here, because the host (or the machine's own halt) stops
+/// the system, and that cannot happen before this returns. What is left is the part
+/// that makes the disk safe to mount again, in the reference's order: sync, free
+/// the processes that are not file servers, sync, unmount, free everything left,
+/// sync, and unmount again with force. The interleaving is the point — the forced
+/// pass is the first one the root can come off in, because the file servers' own
+/// root-directory references are only released by the pass before it.
+///
+/// Returns the number of filesystems the forced pass could not unmount; zero is a
+/// shutdown that left every filesystem unmounted.
+pub fn pm_reboot() -> i32 {
+    do_sync();
+    unsafe {
+        free_leftover_procs(true /* File servers get their chance to unmount */)
+    };
+    do_sync();
+    unmount_all(0 /* Don't force */);
+    unsafe {
+        free_leftover_procs(false /* Everything left, file servers included */)
+    };
+    do_sync();
+    unmount_all(1 /* Force */)
 }
 
 /// Create a core dump of a process.

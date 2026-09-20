@@ -286,36 +286,21 @@ fn mount_path_prefix_len(m_path: &[u8], path: &[u8]) -> Option<usize> {
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/path.c` (eat_path, line 137)
 pub unsafe fn eat_path(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
     // Determine starting directory: absolute paths start from root, relative from cwd.
+    //
+    // No reference is taken on it: it is the fproc's own, and `advance` only reads
+    // it. C's `eat_path` passes `fp_rd`/`fp_wd` the same way, and the reference the
+    // caller is given (and puts) is the one `advance` returns.
     let start_dir = if !resolve.l_path.is_empty() && resolve.l_path[0] == b'/' {
-        // Absolute path: start from process's root directory.
-        if !rfp.fp_rdir.is_null() {
-            let vp = rfp.fp_rdir;
-            dup_vnode(vp);
-            vp
-        } else {
-            null_mut()
-        }
+        rfp.fp_rdir
     } else {
-        // Relative path: start from current working directory.
-        if !rfp.fp_cdir.is_null() {
-            let vp = rfp.fp_cdir;
-            dup_vnode(vp);
-            vp
-        } else {
-            null_mut()
-        }
+        rfp.fp_cdir
     };
 
     if start_dir.is_null() {
         return null_mut();
     }
 
-    // Call advance to resolve the path.
-    let result = advance(start_dir, resolve, rfp);
-    if !result.is_null() {
-        dup_vnode(result);
-    }
-    result
+    advance(start_dir, resolve, rfp)
 }
 
 /// Resolve everything except the last path component.
@@ -343,40 +328,22 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
     // For "/x": last_slash = Some(0), parent_len = 1 (just "/")
     // For "/tmp/x": last_slash = Some(4), parent_len = 4 ("/tmp")
     // For "x": last_slash = None, parent_len = 0 (cwd)
+    // As in `eat_path`: no reference is taken on the start directory, because the
+    // one the caller puts is the one `advance` returns (or the explicit one below,
+    // where the start directory *is* the answer).
     let (parent_len, start_dir) = match last_slash {
         Some(pos) => {
             if pos == 0 {
                 // Path like "/x" — parent is the root directory.
-                let vp = if !rfp.fp_rdir.is_null() {
-                    let vp = rfp.fp_rdir;
-                    dup_vnode(vp);
-                    vp
-                } else {
-                    null_mut()
-                };
-                (1usize, vp) // parent_len = 1 ("/")
+                (1usize, rfp.fp_rdir) // parent_len = 1 ("/")
             } else {
                 // Path like "/tmp/x" — parent is "/tmp".
-                let vp = if !rfp.fp_rdir.is_null() {
-                    let vp = rfp.fp_rdir;
-                    dup_vnode(vp);
-                    vp
-                } else {
-                    null_mut()
-                };
-                (pos, vp) // parent_len = pos (up to but not including the slash)
+                (pos, rfp.fp_rdir)
             }
         }
         None => {
             // No slash — path is relative. Parent is cwd.
-            let vp = if !rfp.fp_cdir.is_null() {
-                let vp = rfp.fp_cdir;
-                dup_vnode(vp);
-                vp
-            } else {
-                null_mut()
-            };
-            (0usize, vp)
+            (0usize, rfp.fp_cdir)
         }
     };
 
@@ -385,8 +352,10 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
     }
 
     // If the parent path is just "/" (root), return the root directory directly.
-    // No need to do a lookup — the root vnode IS the parent.
+    // No need to do a lookup — the root vnode IS the parent, and it is being handed
+    // back as the result, so the caller's put needs a reference of its own.
     if parent_len == 0 || (parent_len == 1 && path_buf[0] == b'/') {
+        dup_vnode(start_dir);
         return start_dir;
     }
 

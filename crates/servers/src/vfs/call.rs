@@ -286,9 +286,10 @@ pub fn do_open() -> i32 {
         };
     }
 
-    // Release the vnode reference (the filp now holds it).
-    unsafe { mount::put_vnode(vp) };
-
+    // The reference `eat_path` returned is the filp's now, so there is nothing to
+    // release here: a `put_vnode` would drop the vnode the open fd depends on to
+    // zero, and the entry would be reused while the filp still pointed at it (C's
+    // `do_open` hands the reference over the same way).
     fd
 }
 
@@ -433,7 +434,7 @@ pub fn do_creat() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_mode = crate::vfs::protect::W_BIT;
     }
     fp.fp_filp[fd as usize] = filp_idx;
-    unsafe { mount::put_vnode(vp) };
+    // As in `do_open`: the reference from `eat_path` belongs to the filp now.
     fd
 }
 

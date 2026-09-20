@@ -1378,19 +1378,25 @@ pub unsafe fn req_unlink(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
 
 /// Unmount a filesystem.
 ///
+/// `force` is C's `unmount_all` argument, passed on to the filesystem: it says that
+/// this unmount is the shutdown's, whose guarantee is VFS's own (no open file
+/// description on the device — see `unmount_vmnt`), so the filesystem must come off
+/// whatever its own caches still reference.
+///
 /// # Safety
 ///
 /// Caller must ensure `fs_e` is a valid FS endpoint.
-pub unsafe fn req_unmount(fs_e: i32) -> i32 {
+pub unsafe fn req_unmount(fs_e: i32, force: i32) -> i32 {
     #[cfg(target_os = "minix")]
     {
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_UNMOUNT);
+        w_i32(&mut msg, PAYLOAD_OFF, force);
         fs_sendrec(fs_e, &mut msg)
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = fs_e;
+        let _ = (fs_e, force);
         ENOSYS
     }
 }
@@ -1689,7 +1695,7 @@ mod tests {
         let r = unsafe { req_sync(0) };
         assert_eq!(r, ENOSYS);
 
-        let r = unsafe { req_unmount(0) };
+        let r = unsafe { req_unmount(0, 0) };
         assert_eq!(r, ENOSYS);
 
         let r = unsafe { req_utime(0, 0, 0, 0, 0, 0) };

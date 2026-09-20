@@ -864,6 +864,35 @@ pub unsafe fn exit_proc(slot: usize, exit_status: i32, dump_core: bool) {
 
     let _dump = dump_core;
     unsafe { zombify(slot) };
+
+    // This port's init *becomes* the shell (userland's `init` execs /bin/sh), so the
+    // exit of INIT is the end of the session and the last moment anything can put
+    // the filesystems down. Without it the superblock a read-write mount dirtied
+    // stays dirty, and the next boot mounts the disk read-only — which reads fine
+    // and refuses to write, so nothing says why.
+    //
+    // VFS's `pm_reboot` is the reference's shutdown, reached there by reboot(2);
+    // here it is VFS_PM_REBOOT, sent after the VFS_PM_EXIT above and never before
+    // it: the exit is what closes this process's files, and the busy check in
+    // `unmount` is about exactly that (messages from one sender arrive in order,
+    // so VFS closes them before it reads this).
+    //
+    // Not a wait, deliberately. The reference waits for VFS_PM_REBOOT_REPLY only
+    // to abort the kernel on it; there is no abort here — the host stops the
+    // machine once nothing is runnable, which cannot happen while VFS is still
+    // syncing or unmounting, because that work is what keeps VFS runnable.
+    if slot == arch_common::com::INIT_PROC_NR as usize {
+        let mut reboot_msg = [0u8; 64];
+        reboot_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
+            .copy_from_slice(&(arch_common::com::VFS_PM_REBOOT as i32).to_le_bytes());
+        let _ = unsafe {
+            minix_rt::asynsend3(
+                arch_common::com::VFS_PROC_NR,
+                reboot_msg.as_ptr(),
+                arch_common::ipc::AMF_NOREPLY,
+            )
+        };
+    }
 }
 
 /// Complete exit after VFS has finished cleanup.
@@ -3831,6 +3860,16 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
 /// - Must be called with exclusive access to the MProc table.
 pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
     let call_nr = msg.m_type;
+
+    // The shutdown's reply, not a process's. VFS sends it after its sync and
+    // unmount, and what its payload carries is the count of filesystems it could
+    // not unmount (C sends a zeroed message here and aborts the kernel on it).
+    // Nothing is waiting for it: the shutdown is VFS's, and the process replies
+    // below would read that count as the endpoint of a process that has a VFS
+    // call in flight.
+    if call_nr as u32 == arch_common::com::VFS_PM_REBOOT_REPLY {
+        return;
+    }
 
     // Look up the process associated with this reply.
     //

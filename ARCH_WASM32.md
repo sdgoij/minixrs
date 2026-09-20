@@ -1178,16 +1178,29 @@ fork — are done, so the shell forks for an external command and the child exec
 module the image carries at that path.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
-existing persistence test adapted. **Status: the device is real and persists; the
-browser's store is what is left.** The host is the device (§9.1): `virtio_blk`
+existing persistence test adapted. **Status: the device is real, persists, and survives a clean
+shutdown; the browser's store is what is left.** The host is the device (§9.1): `virtio_blk`
 finds it instead of finding nothing, MFS mounts the root from it, the shell's `>`
 redirect writes through the filesystem to it, and a second boot reads back what the
-first one wrote — checked by `node tools/wasm-browser/run.js`, which boots twice
-over one store. Reaching that exposed two things the port had never done: the image
-was built without `MFSFLAG_CLEAN`, so every mount of this port's root was read-only
-(finding 48), and nothing syncs or unmounts at shutdown, so a boot's writes are
-durable only if the guest syncs them (finding 49). The page's store is IndexedDB
-behind the same interface; until it lands, the page boots diskless.
+first one wrote — checked by `node tools/wasm-browser/run.js`, which boots four times
+over one store. The last two boots write files and never sync them, so what makes
+those writes durable is the *shutdown*, and the boot that can write after one is the
+check that the shutdown left the disk clean.
+
+That shutdown is finding 49's follow-up, and it is the reference's: this port's `init`
+becomes the shell by `exec`, so the exit of INIT ends the session, PM follows it with
+`VFS_PM_REBOOT`, and VFS runs `pm_reboot` — sync, free every non-file-server process,
+sync, unmount, free everything left, sync, unmount with force. Reaching it exposed
+two things M4 had already recorded (the image was built without `MFSFLAG_CLEAN`, so
+every mount of this port's root was read-only — finding 48 — and nothing synced or
+unmounted at shutdown — finding 49) and four more: the clean bit was written into the
+block cache and then thrown away by the unmount's invalidate (50), VFS leaked a vnode
+reference per path resolution and `pm_fork` leaked its child's directories (51), MFS's
+own inode-reference accounting does not balance, which is why the forced pass carries
+C's `unmount_all` argument (52), and VFS fabricates a PFS mount for a server this boot
+does not start, so the shutdown skips device-less mounts as `do_sync` already does
+(53). The page's store is IndexedDB behind the same interface; until it lands, the
+page boots diskless.
 
 **M5 — Display and input.** `wserver` + `fb` on canvas, pointer input.
 
