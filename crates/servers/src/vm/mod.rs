@@ -2298,7 +2298,24 @@ fn do_fork(msg: &mut Message) -> i32 {
     // Phase 1: Allocate Vmproc for child and create a private page table
     // (deep copy of all user pages). VM_clone uses the slot number as a
     // temporary endpoint; the real endpoint is created by sys_fork below.
+    //
+    // On wasm there is no page table to deep-copy: an address space is an
+    // instance's linear memory, and the host makes the copy (the kernel's fork
+    // arm asks it, in the call VM is about to make). What matters here is that
+    // the child ends up with a **non-zero** address-space handle, because
+    // `do_fork` below guards its `sys_vmctl_set_addspace` call with
+    // `child_cr3 != 0` — and that call is what clears `VMINHIBIT` and makes the
+    // child runnable. A zero handle is a child that is created, never runnable,
+    // and never runs, which the harness reports the way it reports a finished
+    // process. The handle is the child's endpoint, the stand-in finding 35
+    // settled on: one per live process, and the walks that could follow it are
+    // inert because this HAL has no page-table levels.
     let temp_ep: i32 = child_slot;
+    #[cfg(target_arch = "wasm32")]
+    if unsafe { proc::vm_clone_wasm(parent_ep, temp_ep) } != 0 {
+        return EINVAL;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if unsafe { proc::vm_clone(parent_ep, temp_ep) } != 0 {
         return EINVAL;
     }
@@ -2337,10 +2354,16 @@ fn do_fork(msg: &mut Message) -> i32 {
         }
         // COW bookkeeping: the fork COW-protects the child's shared frames
         // (aarch64 now included), so walk the tables and register the shared
-        // frames in the PhysBlock table before the child runs.
-        let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
-        if parent_cr3_val != 0 && child_cr3 != 0 {
-            let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3) };
+        // frames in the PhysBlock table before the child runs. Nothing on wasm
+        // shares a frame — the child's memory is a copy, not a shared leaf — so
+        // there is nothing to register and no table to walk.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let child_cr3 = unsafe { proc::vm_get_addrspace(child_ep) };
+            let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
+            if parent_cr3_val != 0 && child_cr3 != 0 {
+                let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3) };
+            }
         }
     }
 
@@ -2348,7 +2371,10 @@ fn do_fork(msg: &mut Message) -> i32 {
     // kernel's fork-reply copy lands in a private writable page, not a
     // read-only shared frame (matches C's handle_memory_once after fork).
     // On aarch64 this is what lets virtual_copy write the child's msg page
-    // without faulting on the AP=11 COW leaf.
+    // without faulting on the AP=11 COW leaf. ELF-only for the same reason as
+    // the COW setup above: on wasm the child's memory was copied whole, so the
+    // reply has somewhere writable to land already.
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
         const PAGE_SIZE: u64 = 4096;
         let msg_va = msgaddr;

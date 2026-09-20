@@ -67,7 +67,15 @@ const EINVAL = -22;
 // the gate answers EINVAL, which is enough to break a spin, and the trace stops
 // growing — both matter because the first version of this harness recorded every
 // syscall and exhausted Node's heap instead of diagnosing anything.
-const SYSCALL_BUDGET = 2000;
+//
+// It is a budget for the whole run, not per instance, so it has to cover what the
+// *script* costs as well as the boot chain: every console byte the shell reads is
+// a read plus its echo write, each of those is a VFS round trip to the tty, and a
+// fork clones an instance and an exec creates one. 2000 was enough while the shell
+// could only run a builtin; a shell that forks, execs and reaps needs several
+// times that, and the run then ended with `vfs spent the 2000-syscall budget` in
+// the middle of the script rather than at the end.
+const SYSCALL_BUDGET = 20000;
 const TRACE_LIMIT = 64;
 // How many of the *latest* syscalls to keep. Small on purpose: the loop checks
 // want the last one and the few before it.
@@ -174,6 +182,11 @@ function copyBetween(srcProc, srcAddr, dstProc, dstAddr, bytes) {
 
 const ENOEXEC = -8;
 const ENOMEM = -12;
+
+/// Every fork the kernel asked for: who, into which slot, and when in the parent's syscall
+/// history. Recorded from the *kernel's* request, so the checks read what happened rather than
+/// what the harness intended.
+const forks = [];
 
 /// Field offsets of `ExecModuleRequest` — which asserts its own layout on the Rust side.
 const EXEC_REQ_IMAGE_PROC = 0;
@@ -286,7 +299,24 @@ const kernelModule = new WebAssembly.Module(fs.readFileSync(kernelPath));
 // port's console input seen from outside. The script is `exit`-terminated on purpose: an
 // empty read answers EAGAIN and the shell's editor retries in user mode, so a shell left
 // without input spins with syscalls and the budget is the only thing that would end it.
-const consoleInput = Array.from(Buffer.from('echo hello from the shell\nexit\n'));
+//
+// The first line is 5b's subject and the second is M3f's: `echo` is the shell's own builtin,
+// while `/bin/echo` is a path, so the shell forks, the child execs the module the image carries
+// at that path, and the shell reaps it — `fork` and `exec` in one line of a script.
+//
+// Each command is named once, and both the script and the checks that look at its output are
+// built from it. A literal in the script and another in the check is how a check keeps passing
+// against a command nobody runs any more.
+const EXTERNAL_CMD = '/bin/echo';
+const EXTERNAL_ARGS = ['hi'];
+const BUILTIN_CMD = 'echo';
+const BUILTIN_ARGS = ['second'];
+const consoleInput = Array.from(
+  Buffer.from(
+    `${[EXTERNAL_CMD, ...EXTERNAL_ARGS].join(' ')}\n` +
+      `${[BUILTIN_CMD, ...BUILTIN_ARGS].join(' ')}\nexit\n`
+  )
+);
 
 const kernel = new WebAssembly.Instance(kernelModule, {
   env: {
@@ -309,6 +339,8 @@ const kernel = new WebAssembly.Instance(kernelModule, {
     host_copy_between: copyBetween,
     // The kernel's exec arm asks for the new image here (§7.2); see `hostExecModule`.
     host_exec_module: hostExecModule,
+    // ...and its fork arm asks for the child's memory (§12 risk 1); see `hostForkProcess`.
+    host_fork_process: hostForkProcess,
   },
 });
 
@@ -387,6 +419,30 @@ const specs = [
     entry: 'minix_program_main',
     label: 'program',
     argv: PROGRAM_ARGV,
+    spawnAsUser: true,
+    startAfterBoot: true,
+    module: programModule,
+  },
+  // M7b step 5a's subject: the same module, asked for by a different name, so the program that
+  // runs is the one that forks.
+  //
+  // Slot 3, which is `memory`'s in the kernel's `BOOT_IMAGE` and which this harness does not
+  // start — because PM has to know the *parent* before it can fork it, and the only endpoints it
+  // knows are the boot ones. PM finds a sender with `pm_isokendpt`, which searches for an mproc
+  // whose `mp_endpoint` matches; a process this harness invents at slot 23 has no mproc at all,
+  // so PM drops its `PM_FORK` and the parent blocks forever. Slot 3's endpoint PM has registered
+  // (as a phantom, `pm_server_main`), so the request is one PM can act on. `memory` is the right
+  // host for it — `sched`'s 4 and `pfs`'s 9 are the other two this harness leaves empty.
+  //
+  // What is *not* right is that this is how a user process has to be born here at all: on the
+  // shipping arches PM creates every process it forks, and a process it did not create cannot
+  // fork. That is finding 39's subject, and the fix is a registration path the kernel or the
+  // harness can use, not a slot picked by hand.
+  {
+    slot: 3,
+    entry: 'minix_program_main',
+    label: 'forktest',
+    argv: ['forktest'],
     spawnAsUser: true,
     startAfterBoot: true,
     module: programModule,
@@ -473,7 +529,8 @@ function makeImports(st) {
           // syscall-return epilogue restores it; a wasm instance has no such
           // path, so the host reads it out. The cached value was OK — at block
           // time no sender was known.
-          return BigInt(kernel.exports.minix_proc_retval(spec.slot));
+          const rv = kernel.exports.minix_proc_retval(spec.slot);
+          return BigInt(rv);
         }
 
         const result = kernel.exports.minix_syscall(
@@ -522,6 +579,9 @@ function instantiate(st, module, argv, entry) {
   // The entry is the *module's*, not the slot's: `minix_init` and `minix_program_main` belong
   // to different modules, and which one a slot runs is what changes at exec.
   st.entry = entry ?? st.spec.entry;
+  // Which module this slot is running, so a fork can instantiate the same one: the child's
+  // memory is a copy of this module's, and a child running different code would be nonsense.
+  st.module = module;
   // What the entry is called with. A server's entry takes nothing; a program's takes a C
   // argv, which is only knowable once the instance exists — the argv area is a static inside
   // it. A module instantiated by exec gets the arguments the caller exec'd with.
@@ -539,6 +599,7 @@ function makeServer(spec) {
     spec,
     memory: null,
     inst: null,
+    module: null,
     started: false,
     exited: false,
     pending: null,
@@ -554,6 +615,9 @@ function makeServer(spec) {
     // The instance (and memory) this slot was running before an exec, kept so the checks can
     // read what the replaced image left in it.
     prev: undefined,
+    // Set on a slot the kernel created by forking: the parent's slot. `undefined` for every
+    // slot that came from `specs` or from an exec.
+    forkOf: undefined,
     trace: [],
     // The *last* few syscalls, as well as the first `TRACE_LIMIT`. The checks that
     // ask "is it in its main loop?" are asking about the tail, but a head-only
@@ -569,6 +633,127 @@ function makeServer(spec) {
   // The boot image reaches the RAM disk instance's memory before its entry point runs (see
   // below), so nothing else may grow that memory between here and there.
   return st;
+}
+
+/// The host's process table lookup: one record per slot the kernel knows a process by.
+function procAt(slot) {
+  return procs.find((p) => p.spec.slot === slot);
+}
+
+/// Give `childSlot` a copy of `parentSlot`'s process, as `fork` does.
+///
+/// `tools/fork-spike/` is the authority on this, and it found four things that are silent when
+/// wrong. All four are here, and they are the whole of the host's part:
+///
+/// 1. The snapshot goes in **after** `instantiate()`, because instantiation re-applies the
+///    module's data segments. A child that never receives the snapshot starts from the entry
+///    point again — and re-issues the fork, forking recursively.
+/// 2. The child's memory is the parent's *size*, not the module's minimum: a parent that grew
+///    past the minimum would otherwise be truncated at the fork point.
+/// 3. The host-side record is duplicated, not just the memory — memory is not the whole process.
+///    In particular the child inherits `pending`: it is suspended inside the same syscall the
+///    parent is, and that is what makes its next dispatch a *rewind* rather than a start.
+/// 4. The divergent return values are not written here at all. The resume path already returns
+///    `minix_proc_retval(slot)`, which the kernel set to 0 for the child, and PM's reply decides
+///    the parent's. Nothing about a fork is asymmetric except which of those two arrives.
+function forkSlot(parent, childSlot) {
+  // A spec-like record rather than a boot spec: the kernel made this slot, so there is no boot
+  // order, no argv of its own (the snapshot carries the parent's argparse area) and no endpoint
+  // the host was ever told. `startAfterBoot` keeps it out of the boot spawn loop.
+  const child = makeServer({
+    slot: childSlot,
+    entry: parent.entry,
+    label: `${parent.spec.label}+F`,
+    module: parent.module,
+    startAfterBoot: true,
+  });
+
+  // (1) and (2): after instantiation, and the parent's size.
+  const parentPages = parent.memory.buffer.byteLength / WASM_PAGE;
+  const childPages = child.memory.buffer.byteLength / WASM_PAGE;
+  if (parentPages > childPages) child.memory.grow(parentPages - childPages);
+  new Uint8Array(child.memory.buffer, 0, parent.memory.buffer.byteLength).set(
+    new Uint8Array(parent.memory.buffer)
+  );
+
+  // (3): the record. The copies are shallow for the syscall pairs, which nothing mutates in
+  // place, and deep for the histories, which the child goes on appending to.
+  child.pending = parent.pending === null ? null : { ...parent.pending };
+  child.entryArgs = [...parent.entryArgs];
+  child.tail = parent.tail.map((t) => ({ ...t }));
+  child.trace = parent.trace.map((t) => ({ ...t }));
+  child.syscalls = parent.syscalls;
+  child.blockedCount = parent.blockedCount;
+  child.forkOf = parent.spec.slot;
+
+  // `exec` and `prev` stay unset: they are what the checks read as "this slot was replaced by an
+  // exec", and the child has neither exec'd nor been replaced.
+  return child;
+}
+
+/// The host's half of fork: clone the process in `parentSlot` into `childSlot`.
+///
+/// Called from the kernel's fork arm, which is the only layer that knows a fork happened — PM
+/// drove it and VM chose the slot, and neither can copy a memory it does not own. The host is
+/// asked because it owns both (§5.1), and a fork here is nothing more than bytes: there is no
+/// page table to copy, because on this port an address space *is* an instance's memory.
+///
+/// Returns 0, or a negative errno. `ENOMEM` covers both "the clone failed" and "there is
+/// already a process in that slot": the kernel checks the slot too, so reaching the second one
+/// means the host and the kernel disagree about the process table, which is worth a note.
+function hostForkProcess(parentSlot, childSlot) {
+  const parent = procAt(parentSlot);
+  if (parent === undefined || parent.inst === null) {
+    note('the kernel asked to fork a slot the host does not have', `parent=${parentSlot}`);
+    return EINVAL;
+  }
+  const occupant = procAt(childSlot);
+  if (occupant !== undefined && !occupant.exited) {
+    note('the kernel forked into a slot the host is already running', `child=${childSlot}`);
+    return EINVAL;
+  }
+  // A slot whose process has exited is a free slot, and the kernel is entitled to hand it to
+  // the next fork: its `Proc` went SLOT_FREE when the process died, and PM's table freed the
+  // mproc with it. The host has to reach the same conclusion, and the record is the thing that
+  // moves — dropping the dead one keeps `procs` one entry per live slot, which is what both
+  // `procAt` and the dispatch loop's slot lookup require. The *fork* is recorded below and
+  // carries the child's own record, so a check that asks `the child of this fork` still names
+  // the process it means after the slot has been reused.
+  if (occupant !== undefined) procs.splice(procs.indexOf(occupant), 1);
+
+  let child;
+  try {
+    child = forkSlot(parent, childSlot);
+  } catch (e) {
+    note('cloning a process for fork failed', `${parentSlot} -> ${childSlot}: ${e}`);
+    return ENOMEM;
+  }
+  // The spike's invariant 2, asserted rather than trusted: over the parent's whole length the
+  // child's memory is the parent's, byte for byte. A copy that was short by a page would
+  // truncate whatever the parent had grown past the module's minimum, and nothing downstream
+  // would report the truncation — the child would simply resume into a hole. This is the one
+  // step of the clone with no second opinion, so it is compared rather than assumed.
+  const parentBytes = parent.memory.buffer.byteLength;
+  const childBytes = child.memory.buffer.byteLength;
+  const exact =
+    childBytes >= parentBytes &&
+    Buffer.compare(
+      Buffer.from(new Uint8Array(child.memory.buffer, 0, parentBytes)),
+      Buffer.from(new Uint8Array(parent.memory.buffer, 0, parentBytes))
+    ) === 0;
+  procs.push(child);
+  forks.push({
+    parent: parentSlot,
+    child: childSlot,
+    // The child's own record, not a lookup by slot: a slot is a place, and the process that
+    // lived there can be gone by the time a check asks (a later fork reuses it).
+    st: child,
+    atSyscall: parent.syscalls,
+    exact,
+    parentBytes,
+    childBytes,
+  });
+  return 0;
 }
 
 const procs = specs.map((s) => makeServer(s));
@@ -918,7 +1103,13 @@ const pm = procs.find((p) => p.spec.label === 'pm');
 const pmSteps = pm.trace.map((t) => [t.nr, t.a0]);
 const pmFirstGetksig = pmSteps.findIndex(([nr, a0]) => nr === KERNEL_CALL && a0 === GETKSIG);
 const pmRsAnswer = pmSteps.findIndex(([nr, a0]) => nr === SENDREC && a0 === rs.spec.endpoint);
-const pmLastStep = pmSteps[pmSteps.length - 1];
+// "Returned to receiving" is a claim about where PM *ends up*, and the head trace is not the
+// record of that: `trace` stops at `TRACE_LIMIT`, and now that asynchronous sends are delivered
+// (findings 37 and 38) PM serves more messages before it gets to the fork, so its 64th syscall
+// is some mid-run SENDNB. The tail is the field that answers "what was it doing at the end" —
+// the same question the server main-loop checks above ask of it.
+const pmLastStep =
+  pm.tail.length > 0 ? [pm.tail[pm.tail.length - 1].nr, pm.tail[pm.tail.length - 1].a0] : [0, 0];
 check(
   'PM consumed the boot notification, answered RS, and returned to receiving',
   pmSteps.length > 0 &&
@@ -928,7 +1119,8 @@ check(
     pmRsAnswer > pmFirstGetksig &&
     pmLastStep[0] === RECEIVE &&
     pmLastStep[1] === ANY,
-  pm.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')
+  `head: ${pm.trace.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')}` +
+    ` | tail: ${pm.tail.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join('; ')}`
 );
 // PM's copies, taken by *who they involve* rather than by position: RS's init now
 // asks the kernel for two copies of its own (the `SYS_SETGRANT` message and its
@@ -1267,7 +1459,8 @@ const sawPrompt = timeline.some((l) => l.includes('# '));
 // Exactly, not `includes`: the tty echoes the input, so the *echo* of the command also
 // contains this text on the prompt line. Only the builtin's own output is a line of its
 // own that is nothing but this.
-const sawBuiltin = timeline.some((l) => l.trimEnd() === 'kernel: hello from the shell');
+const BUILTIN_LINE = `kernel: ${BUILTIN_ARGS.join(' ')}`;
+const sawBuiltin = timeline.some((l) => l.trimEnd() === BUILTIN_LINE);
 check(
   'the shell printed a prompt through VFS and the tty',
   sawPrompt,
@@ -1276,7 +1469,7 @@ check(
 check(
   'the shell read a line, ran its echo builtin, and its output reached the console',
   sawBuiltin,
-  `builtin output on console=${sawBuiltin}`
+  `looked for ${JSON.stringify(BUILTIN_LINE)}: builtin output on console=${sawBuiltin}`
 );
 
 // ------------------------- M7a step 1: a program as its own wasm module
@@ -1427,6 +1620,189 @@ note(
     'needs fork, and only builtins work (M7\'s other half).'
 );
 
+// ---------------------------------------- M7b step 5a: fork, from a program
+
+// The chain §11 scopes: userland's `fork` is PM's table copy, VM's address-space clone, the
+// kernel's `Proc` and the schedule that makes the child runnable — and on this port the clone
+// itself is the host's, because an address space here is an instance's memory (§5.1). The module
+// is the one `echo` and `/bin/sh` come from; what makes it the program that forks is `argv[0]`.
+const forktest = procs.find((p) => p.spec.label === 'forktest');
+// The program's fork, told apart from the shell's: 5b puts a second fork in the same run, and
+// "a fork happened" would then pass on the wrong one. Which process forked is the subject here.
+const forkRecord = forks.find((f) => f.parent === forktest.spec.slot) ?? null;
+const forkedChild = forkRecord === null ? undefined : forkRecord.st;
+
+check(
+  'the kernel asked the host to clone the program, and the host made a copy',
+  forkRecord !== null && forkedChild !== undefined && forkedChild.forkOf === forktest.spec.slot,
+  forkRecord === null
+    ? `the program (slot ${forktest.spec.slot}) never forked; ` +
+      `forks=[${forks.map((f) => `${f.parent}->${f.child}`).join(', ')}]`
+    : `child slot=${forkRecord.child} forkOf=${forkedChild.forkOf}`
+);
+
+check(
+  'the clone became an instance of its own, in a slot the kernel chose',
+  forkedChild !== undefined &&
+    forkedChild.inst !== forktest.inst &&
+    forkedChild.memory !== forktest.memory &&
+    forkedChild.spec.slot === forkRecord.child,
+  forkedChild === undefined
+    ? 'no second instance was created'
+    : `slot=${forkedChild.spec.slot} forkOf=${forkedChild.forkOf} ` +
+      `instance is the parent's=${forkedChild.inst === forktest.inst}`
+);
+
+// Invariant 2 of the fork spike, asserted against the bytes rather than trusted: a copy that was
+// short by a page would truncate whatever the parent had grown past the module's minimum, and the
+// child would resume into a hole with nothing downstream reporting the truncation.
+check(
+  "the child's memory was the parent's, byte for byte, at the fork point",
+  forkRecord !== null && forkRecord.exact,
+  forkRecord === null
+    ? 'no fork'
+    : `copied ${forkRecord.parentBytes} bytes into a memory of ${forkRecord.childBytes}`
+);
+
+// What the two instances said, read by value. The child's pid is one it asked PM for itself
+// (`getpid`) and the parent's is the one PM answered its `fork` with, so a match is two routes out
+// of the same process table agreeing — and `fork=0` on the child's line against a pid on the
+// parent's is the divergence itself, from the one call the two share.
+const childLine = timeline.find((l) => l.includes('forktest: child '));
+const parentLine = timeline.find((l) => l.includes('forktest: parent pid='));
+const reapedLine = timeline.find((l) => l.includes('forktest: parent reaped '));
+const childMatch =
+  childLine === undefined ? null : /child pid=(\d+) fork=0$/.exec(childLine.trimEnd());
+const parentMatch =
+  parentLine === undefined ? null : /parent pid=(\d+) fork=(\d+)$/.exec(parentLine.trimEnd());
+const reapedMatch =
+  reapedLine === undefined ? null : /reaped pid=(\d+) status=(\d+)$/.exec(reapedLine.trimEnd());
+
+check(
+  'the child printed the 0 that fork returned to it, and named its own pid',
+  childMatch !== null,
+  childLine ?? '(the child printed nothing)'
+);
+check(
+  "the pid the parent's fork returned is the child's own pid, and not the parent's",
+  parentMatch !== null &&
+    childMatch !== null &&
+    parentMatch[2] === childMatch[1] &&
+    parentMatch[1] !== childMatch[1],
+  `parent: ${parentLine ?? '(nothing)'} | child: ${childLine ?? '(nothing)'}`
+);
+check(
+  'the parent reaped the child with status 0, so PM answered a waiting parent',
+  reapedMatch !== null &&
+    childMatch !== null &&
+    reapedMatch[1] === childMatch[1] &&
+    Number(reapedMatch[2]) === 0,
+  reapedLine ?? '(waitpid never returned)'
+);
+check(
+  'each instance ended in its own exit, the child first',
+  forkedChild !== undefined && forkedChild.exited === true && forktest.exited === true,
+  forkedChild === undefined
+    ? 'no child'
+    : `child exited=${forkedChild.exited}, parent exited=${forktest.exited}`
+);
+
+note(
+  'what M7b step 5a establishes, and what it does not',
+  'A program can now fork: the kernel asked the host to clone the parent (hal::fork_process, ' +
+    '§7.2), the child resumed inside the same syscall the parent is suspended in and saw 0 where ' +
+    'the parent saw a pid, and the two instances agreed about who the child is. The parent reaping ' +
+    'it is PM\'s first GETKSIG for a wasm process that died with a parent waiting. What is not ' +
+    'here is what a shell does with fork: an exec in the child, which is 5b, and the repeated ' +
+    'suspend/resume a loop of forks needs, which nothing in the spike covered. Nor is the ' +
+    'address-space handle anything but a stand-in — VM records the child\'s endpoint where a CR3 ' +
+    'would go (§5.3), so nothing that walks it can mean anything yet.'
+);
+
+// --------------------------------- M7b step 5b: the shell runs a command it cannot do itself
+
+// The console script's first line is `/bin/echo ...`, which the shell cannot answer from a
+// builtin: it builds a path, forks, and the child execs what the image carries there. So this is
+// 5a's chain and M7a's exec on one line of a script, and every hop is a check elsewhere — what is
+// checked here is that they *compose*, which is M3's title.
+const shellFork = forks.find((f) => f.parent === init.spec.slot);
+// The fork's own record of the child, not `procAt(slot)`: the forktest program forks later in
+// the same run and the kernel may hand it this slot, so what lives at that slot at the end is
+// not what the shell forked.
+const shellChild = shellFork === undefined ? undefined : shellFork.st;
+check(
+  'the shell forked for the external command, and the child is an instance of its own',
+  shellFork !== undefined &&
+    shellChild !== undefined &&
+    shellChild.forkOf === init.spec.slot &&
+    shellChild.inst !== init.inst,
+  shellFork === undefined
+    ? `the shell (slot ${init.spec.slot}) never forked; forks=[${forks.map((f) => `${f.parent}->${f.child}`).join(', ')}]`
+    : `child slot=${shellFork.child}`
+);
+
+// The path is the *kernel's* record of what the child asked to become — read out of its memory
+// by `hostExecModule`, not supplied by this harness — and the byte count is the image builder's,
+// so a match says the module the child became is the one the script's path names in the boot
+// image. The path and `argv[0]` are both the command line's, so a shell that resolved something
+// else would disagree here.
+check(
+  "the child exec'd the path the shell typed, from the image's copy of the module",
+  shellChild !== undefined &&
+    shellChild.exec !== undefined &&
+    shellChild.exec.path === EXTERNAL_CMD &&
+    shellChild.exec.argv[0] === EXTERNAL_CMD &&
+    shellChild.exec.moduleBytes === MODULE_BYTES,
+  shellChild === undefined || shellChild.exec === undefined
+    ? 'the child never exec\'d'
+    : `path=${shellChild.exec.path} argv=${JSON.stringify(shellChild.exec.argv)} ` +
+      `bytes=${shellChild.exec.moduleBytes} (image module is ${MODULE_BYTES})`
+);
+
+// `echo` prints its arguments, so the line says three things: the exec'd image parsed the argv
+// the shell passed, it reached the `echo` arm (a module that had not heard of `/bin/echo` would
+// have refused with `no such command`), and its output reached the console — through the fds the
+// shell inherited from INIT, since this process never opened anything.
+const EXTERNAL_LINE = `kernel: ${EXTERNAL_ARGS.join(' ')}`;
+const sawExternal = timeline.some((l) => l.trimEnd() === EXTERNAL_LINE);
+check(
+  "the external command's output reached the console, from the image the exec created",
+  sawExternal &&
+    shellChild !== undefined &&
+    shellChild.exec !== undefined &&
+    timeline.findIndex((l) => l.trimEnd() === EXTERNAL_LINE) >= shellChild.exec.timelineAt,
+  `looked for ${JSON.stringify(EXTERNAL_LINE)} after the exec at line ` +
+    `${shellChild && shellChild.exec && shellChild.exec.timelineAt}`
+);
+
+// And the reap. The claim is not just that the child died but that the shell was waiting for it:
+// `init` is the slot the shell is in, and its own exit is the *last* thing it does, so a shell
+// that never reaped would still be blocked in `waitpid` when the script reaches `exit` — the two
+// together are what say the wait completed.
+check(
+  'the child exited, and the shell reaped it and went on to exit itself',
+  shellChild !== undefined &&
+    shellChild.exited === true &&
+    init.exited === true &&
+    init.tail.length > 0 &&
+    init.tail[init.tail.length - 1].nr === EXIT,
+  shellChild === undefined
+    ? 'no child'
+    : `child exited=${shellChild.exited}, shell exited=${init.exited}, ` +
+      `shell tail=[${init.tail.map((t) => t.nr).join(',')}]`
+);
+
+note(
+  'what M7b step 5b establishes',
+  "M3's title is earned: the shell runs a command it cannot answer from a builtin. It resolves " +
+    'the path, forks (PM\'s table, VM\'s clone — on this port the host\'s memory copy), the child ' +
+    'execs `/bin/echo` (PM → VFS → the kernel → the host instantiating a module from the boot ' +
+    'image), the command prints through the stdio INIT opened, the child exits, and the shell ' +
+    'reaps it and reads its next line. The one thing a shell still cannot do is loop over ' +
+    'commands efficiently: each fork clones the whole instance, which the spike measured at ' +
+    '*memory size* per fork rather than stack depth.'
+);
+
 note(
   'what this establishes, and what it does not',
   'All three servers ran their own init and blocked in RECEIVE; RS registered its ' +
@@ -1451,6 +1827,10 @@ console.log('\nper-server syscall trace:');
 for (const p of procs) {
   console.log(`  ${p.spec.label} (slot ${p.spec.slot}, ep ${p.spec.endpoint}):`);
   for (const t of p.trace) console.log(`    nr=${t.nr} a0=0x${t.a0.toString(16)}`);
+  // The tail as well as the head: `trace` stops at `TRACE_LIMIT`, so for a process that made
+  // more calls than that — every server, and anything that forks late — the head says nothing
+  // about what it was doing when the run ended, which is the only question a stuck run asks.
+  if (p.tail.length > 0) console.log(`    ... tail: ${p.tail.map((t) => `nr=${t.nr} a0=0x${t.a0.toString(16)}`).join(', ')}`);
 }
 
 console.log('\nkernel console:');

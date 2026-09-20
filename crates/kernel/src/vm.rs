@@ -435,6 +435,20 @@ pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u
             // tasks (init, etc.) continue to work.
             return true;
         }
+        if crate::hal::pt_levels() == 0 {
+            // An arch with no page-table levels has nothing to walk, so this question cannot be
+            // answered here at all: the process's address space is a memory the kernel cannot
+            // inspect, and `p_cr3` holds an opaque handle rather than a root. Walking it anyway
+            // answers "not mapped" for every address — which is safe, in that nothing
+            // dereferences a derived address, but it is a *false* answer, and every caller here
+            // treats it as authoritative. The cost was an exec that failed with EFAULT before a
+            // byte moved: VFS fetches the frame and the path out of the exec'ing process with
+            // `sys_vircopy`, whose pre-check denied both, so a forked child could not become
+            // another program (finding 40). Whether an address is valid on such an arch is the
+            // copy seam's business — it is the only layer that can see both memories, and it
+            // answers EFAULT itself.
+            return true;
+        }
         if bytes == 0 {
             return true;
         }

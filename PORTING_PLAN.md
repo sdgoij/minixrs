@@ -6367,6 +6367,17 @@ and answers `EINVAL` once the budget is spent. Worth generalising: on this port
 the host is the only thing that can end a runaway, so every harness needs a
 budget rather than a belief that loops terminate.
 
+Two things about that budget were learned the hard way in M7b, and both cost a
+session. It is a budget for the **whole run**, so it has to be sized for the
+script as well as the boot chain — 2000 was comfortable while the shell could
+only run a builtin, and a shell that forks, execs and reaps needs several times
+that. And when it is too small the report is *misleading*: `exhaustedBy` names
+whichever instance happened to make the last syscall, so a budget spent mid-script
+reads as `vfs spent the 2000-syscall budget` and `no instance ran the syscall
+budget out: vfs spun past 2000 syscalls` — blaming VFS, which was doing its job.
+With the console transcript truncated at the same point, the run looks exactly
+like the hang it is not. Raise the budget before believing a spin diagnosis.
+
 **14. Several kernel-call handlers read their request from message offset 0,
 where the call number lives.** `sys_kernel_call_handler` builds the message a
 handler sees by taking the caller's `Message` and overwriting its first 8 bytes:
@@ -7087,6 +7098,94 @@ caller reports, which is why step 4's failures are one console line instead of a
 The general lesson, since this port keeps meeting it: `err_partial` is not a status, it is a
 decision to stop diagnosing. Any path that can reach it should first be sure the failure could not
 have happened earlier.
+
+**37. Every asynchronous send on this port was reading its own request out of the wrong memory,
+so `asynsend3` queued nothing and reported success.** Found landing M7b step 5a, where PM's fork
+notify to VFS is the first async send whose *effect* a check depends on: PM's trace showed the
+`SENDA` go out, the kernel's copy log showed a table read at PM's own address, and VFS never saw
+the message. The copy log made it concrete — `0:0x1 -> -1:0xffef0 (80 bytes)`, one async table
+entry read from PM's address **0x1**. The table pointer was read as 1 because the kernel read it
+*from its own memory*: `sys_ipc_senda_handler` dereferenced the caller's message pointer and
+`ipc_senda_handler` then took `[8..16]` as the table address and `[16..24]` as its size.
+
+This is finding 31's class, and the reason only this one syscall shows it is worth keeping:
+`SEND`, `RECEIVE` and `SENDREC` each have the kernel *write* the endpoint into the caller's buffer
+(`do_sync_ipc` reads it straight back), so both halves of that exchange happen at the same wrong
+address and agree. Nothing writes `SENDA`'s request but `asynsend3`. So the one IPC call whose
+arguments come entirely from the caller was the one that read the kernel's bytes — and it failed
+*silently*, because a per-entry error is written into the sender's async table, which only the
+next send would look at. `asynsend3` returned `OK` for a message no one received.
+
+The fix is the seam, as everywhere else: fetch the request with `copy_from_user` before reading
+it. Worth knowing before trusting any other `asynsend3` path on this port — PM's `VFS_PM_EXIT`,
+VFS's and VM's replies all travel this way, and none of them had a check that would have noticed.
+
+**38. Waking a process with a message is not the same as handing it the message, and the receiver
+has to be told who sent it.** Found immediately after 37, when VFS received the fork notify and
+did something *else* with it. Two separate omissions in the same two functions, both invisible
+while 37 held because nothing was delivered at all:
+
+- `try_deliver_senda` and `try_one` copy the message into the receiver's `p_delivermsg`, set
+  `MF_DELIVERMSG`, and leave the copy into the receiver's own memory to the arch's syscall-return
+  path. On a hardware arch something does that; this port has no such path — the same shape as the
+  wasm entry's `deliver_pending_msg` (finding 31's family). `mini_send` and `mini_notify` call
+  `delivermsg` themselves for exactly this reason; the two async paths did not. The receiver was
+  woken, resumed, and read whatever its buffer held *before*.
+- Neither wrote the receiver's return value. `RECEIVE` returns the sender's endpoint, and nothing
+  on any arch puts it in the resumed frame but the deliverer — `mini_send` calls
+  `hal::write_retval` for that reason. So the resumed process saw the endpoint its *previous*
+  receive returned, and VFS, which reads the sender out of that return value (`get_work`), routed
+  a message from PM as though INIT had sent it. This one is not wasm-specific: it is latent on
+  every arch, and it would show up as "the server answered the wrong caller".
+
+**39. A process the kernel creates outside `BOOT_IMAGE` cannot fork, and PM's free-slot answer can
+name a slot that is already taken.** Found at the end of 5a, after the fork's five layers were all
+in place: PM never saw the `PM_FORK` at all. `pm_isokendpt` searches for an mproc whose
+`mp_endpoint` matches the sender, and PM's table holds only the endpoints it registered at boot —
+nothing for a program the harness started at slot 23. The request was delivered and dropped.
+
+Under that sat the second half: PM hands a fork child the slot `alloc_proc` returns, and the
+*kernel* creates the child there. The two tables only agree if PM's idea of "in use" covers
+"any proc_nr the kernel's `BOOT_IMAGE` gives a process". `init_proc`'s list was ten slots out of
+the nineteen the kernel has, so `alloc_proc`'s first answer — 3 — was the kernel's `memory`,
+and the child's `Proc` would have been copied over a live server's.
+
+Both are the same missing invariant stated twice: **PM's mproc table must mirror the kernel's
+`Proc` table, index for index.** `init_proc` now marks every boot proc_nr, and with 37 and 38
+fixed the fork runs. What is *not* fixed is how a process gets into that table when the kernel
+creates it outside the boot image: nothing registers one. On the shipping arches that cannot
+happen — PM creates every process it can later fork — but this harness spawns a program straight
+into a slot, and 5a's parent therefore has to borrow an endpoint PM already knows (`memory`'s
+slot 3, one of the three this harness leaves empty). That is a harness workaround for a missing
+path, not a design: what it wants is either a registration call PM can be handed, or a boot-time
+list PM can read from the kernel.
+
+**40. `vm_check_range` answered "not mapped" for every address on an arch that has no page-table
+levels, so the child's exec failed with `EFAULT` before a byte moved.** Found landing 5b, as the
+one hop of a forked child's `execve` that failed: PM accepted the request, VFS resolved the path
+out of the boot image, and then VFS's fetch of the exec frame and of the path — both plain
+`sys_vircopy` calls — came back `-14`. Nothing was wrong with the caller's addresses; the check
+that was supposed to *say* so could not be performed.
+
+`vm_check_range` walks `p_cr3`, page by page, and returns true only if every page is present. It
+already had a first escape hatch for a `p_cr3` of zero (the boot process's shared table). The
+third case is an arch whose `pt_levels()` is 0: there is nothing to walk, `p_cr3` holds an opaque
+handle rather than a root, and the process's address space is a memory the kernel cannot inspect
+at all — which is the same situation as `cr3 == 0`, reached by a different route. Walking anyway
+denied every address, and every caller of `vm_check_range` treats its answer as authoritative, so
+the denial became an errno.
+
+The fix is to defer rather than to answer. Whether an address is valid there is the **copy
+seam**'s business: `vm::virtual_copy`'s HAL branch is the only layer that can see both memories,
+and it reports EFAULT itself when it cannot make the copy. On such an arch the pre-check can only
+be a false authority, so it steps aside.
+
+The shape is worth naming, because it is not the same as the findings above it: this is not a
+missing seam site but a *pre-check* that cannot be evaluated on this port standing in for the
+real check. A pre-check that answers "no" when it means "I cannot tell" turns a layer that would
+have reported the truth into a caller that reports a lie — and the lie arrives as an errno the
+caller has no reason to doubt, which is why it took the copy log to see that the addresses were
+fine.
 
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 

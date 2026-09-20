@@ -815,12 +815,27 @@ unsafe fn sys_ipc_senda_handler(caller: *mut crate::proc::Proc, args: &[u64; 6])
     if msg_ptr.is_null() {
         return -14; // EFAULT
     }
-    unsafe {
-        crate::ipc::ipc_senda_handler(
+    // The one IPC request the *caller* builds. SEND, RECEIVE and SENDREC each have `do_sync_ipc`
+    // write the endpoint into this buffer and read it straight back, so on an arch where the
+    // kernel and its callers do not share memory the two halves agree at the same wrong address
+    // and nothing notices. Nothing writes this one but `asynsend3`, so reading it here read the
+    // *kernel's* bytes at a caller's address: the table pointer came out as garbage, the async
+    // table scan found no valid entry, and every `asynsend3` on this port delivered nothing —
+    // silently, because the result lands in the caller's own table where only the next send
+    // would look (finding 37). Fetch it through the seam instead.
+    let mut kmsg = [0u8; crate::proc::MESSAGE_SIZE];
+    let copied = unsafe {
+        crate::ipc::copy_from_user(
             caller,
-            &mut *msg_ptr.cast::<[u8; crate::proc::MESSAGE_SIZE]>(),
-        ) as i64
+            msg_ptr as u64,
+            kmsg.as_mut_ptr(),
+            crate::proc::MESSAGE_SIZE,
+        )
+    };
+    if copied != crate::ipc::OK {
+        return copied as i64;
     }
+    unsafe { crate::ipc::ipc_senda_handler(caller, &mut kmsg) as i64 }
 }
 
 // Thread syscalls (54, 55, 58, 59)

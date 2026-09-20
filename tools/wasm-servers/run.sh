@@ -41,24 +41,6 @@ mkdir -p "$here/build"
 cp "$root/crates/kernel-wasm/target/wasm32-minix/release/kernel-wasm.wasm" \
    "$here/build/kernel.wasm"
 
-# The RAM disk instance is given the boot filesystem image. On the other arches that image holds
-# ELF executables built by `just build`; here it holds the *program module* (§7.2's step 4), so
-# the pipeline is: build the module, Asyncify it, stage it where the image builder looks, and
-# build the image from it. An image whose module is stale is worse than no image, because the
-# failure it produces is an exec after a successful boot.
-wasm_release="$root/target/wasm32-minix/release"
-mkdir -p "$wasm_release"
-cp "$here/build/program.async.wasm" "$wasm_release/program.async.wasm"
-
-image="$root/target/images/wasm32-minix/minixfs.img"
-echo "== building the wasm boot filesystem image =="
-(cd "$root" && cargo run -q -p boot-image --bin mkminixfs wasm32)
-
-if [ ! -f "$image" ]; then
-  echo "error: no image at $image" >&2
-  exit 1
-fi
-
 echo "== applying Asyncify to the servers =="
 node "$wasm_opt" --asyncify \
   "$root/crates/wasm-servers/target/wasm32-minix/release/wasm_servers.wasm" \
@@ -72,6 +54,27 @@ echo "== applying Asyncify to the program =="
 node "$wasm_opt" --asyncify \
   "$root/crates/wasm-program/target/wasm32-minix/release/wasm_program.wasm" \
   -o "$here/build/program.async.wasm"
+
+# The RAM disk instance is given the boot filesystem image. On the other arches that image holds
+# ELF executables built by `just build`; here it holds the *program module* (§7.2's step 4), so
+# the pipeline is: build the module, Asyncify it, stage it where the image builder looks, and
+# build the image from it. An image whose module is stale is worse than no image, because the
+# failure it produces is an exec after a successful boot — which is also why the staging has to
+# come *after* the Asyncify pass: staging what the previous run left in `build/` puts the
+# previous run's module in the image, and the only symptom is an exec whose `argv[0]` the module
+# in the image has never heard of.
+wasm_release="$root/target/wasm32-minix/release"
+mkdir -p "$wasm_release"
+cp "$here/build/program.async.wasm" "$wasm_release/program.async.wasm"
+
+image="$root/target/images/wasm32-minix/minixfs.img"
+echo "== building the wasm boot filesystem image =="
+(cd "$root" && cargo run -q -p boot-image --bin mkminixfs wasm32)
+
+if [ ! -f "$image" ]; then
+  echo "error: no image at $image" >&2
+  exit 1
+fi
 
 echo
 # Bounded, because a boot that deadlocks deadlocks *silently*: an instance waiting on

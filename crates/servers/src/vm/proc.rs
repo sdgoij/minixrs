@@ -747,6 +747,49 @@ pub unsafe fn vm_clone(parent_ep: Endpoint, child_ep: Endpoint) -> i32 {
     }
 }
 
+/// Clone a process's address space for fork, on the wasm HAL.
+///
+/// There is no page table to walk here: an address space is an instance's
+/// linear memory, and the host makes the copy when the kernel's fork arm asks
+/// it (see `do_fork_handler`). All that is left for VM is the bookkeeping —
+/// allocate the child's `Vmproc` and inherit the parent's counters, region
+/// top, and regions, exactly as `vm_clone` does after its page-table copy.
+///
+/// The stored handle is the child's endpoint. It stands in for a CR3 so the
+/// `child_cr3 != 0` guard in `do_fork` holds and the child is un-inhibited;
+/// see the reasoning there for why a zero handle would leave the child
+/// created but never runnable.
+///
+/// # Safety
+///
+/// The caller must ensure both endpoints are valid and that the parent's
+/// address space is not concurrently modified during the clone.
+#[cfg(target_arch = "wasm32")]
+pub unsafe fn vm_clone_wasm(parent_ep: Endpoint, child_ep: Endpoint) -> i32 {
+    unsafe {
+        let child_vmp = match vmproc_alloc(child_ep) {
+            Some(vmp) => vmp as *mut Vmproc,
+            None => return -1,
+        };
+
+        (*child_vmp).vm_pml4_phys = child_ep as u64;
+
+        if let Some(parent_vmp) = vmproc_lookup(parent_ep) {
+            (*child_vmp).vm_minor_page_fault = parent_vmp.vm_minor_page_fault;
+            (*child_vmp).vm_major_page_fault = parent_vmp.vm_major_page_fault;
+            (*child_vmp).vm_region_top = parent_vmp.vm_region_top;
+            // Copy all regions from parent to child.
+            for i in 0..crate::vm::region::MAX_REGIONS {
+                if let Some(region) = &parent_vmp.vm_regions.regions[i] {
+                    let _ = (*child_vmp).vm_regions.insert(*region);
+                }
+            }
+        }
+
+        0
+    }
+}
+
 /// Create a child page table with private copies of parent's user pages.
 ///
 /// Walks the parent's page table (via identity map), allocates new physical

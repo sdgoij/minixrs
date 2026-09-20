@@ -132,6 +132,67 @@ fn blob_is_sane(base: u32, argc: u32) -> bool {
     true
 }
 
+/// The smallest program that needs `fork` (`ARCH_WASM32.md` §11, M7b step 5a).
+///
+/// It forks once, and the two instances say which one they are: the child prints the pid it was
+/// given and the 0 `fork` returned to it, the parent prints the pid `fork` returned and then
+/// reaps the child. One fork, no exec, no loop — a shell forks repeatedly and the shell is 5b's
+/// subject, while this is the chain underneath it: PM's table copy, VM's address-space clone
+/// (the host's memory copy on this port), the kernel's `Proc` and the schedule that makes the
+/// child runnable, and the two ends of one `fork` disagreeing about what it returned.
+///
+/// Every line is finished without a blocking syscall inside it, so the parent and the child —
+/// both writing to the same console — cannot interleave half-finished lines.
+fn forktest() -> i32 {
+    let pid = minix_rt::fork();
+    if pid < 0 {
+        userland::write_out(b"forktest: fork failed\n");
+        return 1;
+    }
+
+    // Asked *after* the fork on purpose: the child's memory is a copy of the parent's at the
+    // fork point, so a pid read before it would be the parent's in both instances.
+    let me = minix_rt::getpid();
+    if me < 0 {
+        userland::write_out(b"forktest: getpid failed\n");
+        return 1;
+    }
+
+    if pid == 0 {
+        userland::write_out(b"forktest: child pid=");
+        userland::print_dec(me as u32);
+        userland::write_out(b" fork=0\n");
+        return 0;
+    }
+
+    userland::write_out(b"forktest: parent pid=");
+    userland::print_dec(me as u32);
+    userland::write_out(b" fork=");
+    userland::print_dec(pid as u32);
+    userland::write_out(b"\n");
+
+    // Blocking: if the child has not exited yet this is where the parent stops, and PM's
+    // `tell_parent` is what resumes it — the first time a wasm process has died with a parent
+    // waiting. Which of the two happens first is the dispatcher's decision, so the exit code
+    // below is the evidence rather than the order.
+    let (reaped, status) = minix_rt::waitpid(pid, 0);
+    if reaped < 0 {
+        userland::write_out(b"forktest: waitpid failed\n");
+        return 1;
+    }
+    userland::write_out(b"forktest: parent reaped pid=");
+    userland::print_dec(reaped as u32);
+    userland::write_out(b" status=");
+    if status < 0 {
+        userland::write_out(b"-");
+        userland::print_dec(status.unsigned_abs());
+    } else {
+        userland::print_dec(status as u32);
+    }
+    userland::write_out(b"\n");
+    0
+}
+
 /// The entry the host calls to run this program in a slot.
 ///
 /// `argv` is the pointer array's address, so the module can tell a host that filled in the
@@ -165,13 +226,15 @@ pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
 
     // Dispatch on argv[0], the way a multi-call program does — and the reason a *module* can
     // hold more than one program while the host's registry still maps one path to one module
-    // (§7.2's step 4): the path chooses the module, argv[0] chooses the program in it. `echo`
-    // is what the harness asks this module for; `/bin/sh` is what `init` execs, and the two
-    // arrive by different routes — the harness instantiates and calls, exec goes through
-    // PM, VFS and the kernel — which is why both are here rather than in two modules.
+    // (§7.2's step 4): the path chooses the module, argv[0] chooses the program in it. A program
+    // reached by `exec` gets the path the caller typed, which is why the arms name both a path
+    // and a bare name: `/bin/echo` is what the shell's `run_external` builds and hands to
+    // `execve` (shell.rs), while `echo` and `forktest` are what the harness passes when it
+    // instantiates this module itself for a slot.
     let rc = match args.first().copied() {
-        Some("echo") => userland::echo(args),
+        Some("echo") | Some("/bin/echo") => userland::echo(args),
         Some("/bin/sh") | Some("sh") => userland::sh(args),
+        Some("forktest") | Some("/bin/forktest") => forktest(),
         Some(name) => {
             userland::write_err(b"program: no such command: ");
             userland::write_err(name.as_bytes());

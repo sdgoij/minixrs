@@ -4415,6 +4415,25 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 .store(mf & !MiscFlags::REPLY_PEND.bits(), Ordering::SeqCst);
         }
 
+        // On wasm the child's address space is a copy of the parent's *instance*, and only the
+        // host can make it — the child's `Proc` above is bookkeeping, not the process. The
+        // parent is still suspended in the SENDREC that asked PM to fork, which is the state
+        // the clone requires: what makes the child's resume work is that the parent's stack is
+        // serialised into the memory being copied (`tools/fork-spike/`, §12 risk 1).
+        //
+        // The slot named to the host is the *process*'s, not the forking thread's: a fork from
+        // a worker thread runs this handler with `rpp` pointing at the thread (see the tid
+        // lookup above), and a thread has a `Proc` of its own — but the instance to clone is
+        // the process's, which is what the parent endpoint names.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let parent_slot = table::endpoint_slot(parent_ep);
+            let r = crate::hal::fork_process(parent_slot, child_slot);
+            if r != 0 {
+                return r;
+            }
+        }
+
         // C MINIX does NOT clear RECEIVING or REPLY_PEND on the child.
         // The child inherits RECEIVING from the parent (which is blocked in
         // SENDREC during the fork). When PM later sends SENDNB to the child,

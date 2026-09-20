@@ -135,6 +135,10 @@ const kernel = new WebAssembly.Instance(kernelModule, {
     // there is nothing to instantiate and the answer is the honest one: no module for
     // that path. M7a's step 2 is where a harness answers it with a real instance.
     host_exec_module: () => -2, // ENOENT
+    // Fork's clone (§12 risk 1). M2's stand-in instances are driven by the harness rather
+    // than created by the kernel, so there is nothing to clone and the refusal is the
+    // honest answer; M7b is where a harness answers it with a real copy.
+    host_fork_process: () => -12, // ENOMEM
   },
 });
 

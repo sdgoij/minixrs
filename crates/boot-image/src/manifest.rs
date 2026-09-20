@@ -136,10 +136,17 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
 /// reads Asyncify's state after every entry and a module that was not instrumented cannot be
 /// driven at all.
 ///
-/// One entry today, and it is the same module the harness instantiates directly for its own
-/// check: the path chooses the module and `argv[0]` chooses the program inside it, which is what
-/// lets `/bin/sh` and the harness's `echo` be one file.
-pub const WASM_MODULES: &[(&str, &str)] = &[("/bin/sh", "program.async.wasm")];
+/// The one module under several paths: `/bin/sh` is what `init` execs, `/bin/echo` is what the
+/// shell runs as an external command (5b — `fork` and `exec` on one line), and `/bin/forktest` is
+/// 5a's probe. All three are the same file, because the path chooses the module and `argv[0]`
+/// chooses the program inside it — which is what makes a multi-call program affordable in an
+/// image whose modules are megabytes wide, and which is why the module's dispatch arms name the
+/// paths as well as the bare names.
+pub const WASM_MODULES: &[(&str, &str)] = &[
+    ("/bin/sh", "program.async.wasm"),
+    ("/bin/echo", "program.async.wasm"),
+    ("/bin/forktest", "program.async.wasm"),
+];
 
 /// Root-filesystem data files baked into the minixfs image: destination
 /// path, content, mode, uid, gid (binaries come from [`BOOT_BINS`]).

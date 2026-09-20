@@ -63,6 +63,22 @@ unsafe extern "C" {
     /// it, so that is the engine's work — which is why this returns `ENOEXEC` rather than
     /// saying anything about what was wrong with the bytes.
     fn host_exec_module(slot: i32, request_addr: u32) -> i32;
+    /// Clone the process in `parent_slot` into `child_slot`, as `fork` does.
+    ///
+    /// The one host entry with no addresses in it, because there is nothing to name: the
+    /// parent's whole address space is what is being copied, and only the host can read one
+    /// instance's memory and write another's (§5.1). On this port an address space *is* an
+    /// instance's linear memory, so a fork is a byte copy where the other arches walk page
+    /// tables and lay down COW leaves.
+    ///
+    /// The kernel calls this from `do_fork_handler`, where the child's `Proc` has just been
+    /// made and the parent is still suspended inside the `SENDREC` that asked PM to fork —
+    /// which is the state the clone has to happen in, because what makes the child's resume
+    /// work is that the parent's stack is serialised in the memory being copied
+    /// (`tools/fork-spike/`, §12 risk 1).
+    ///
+    /// Returns 0, or a negative errno: `ENOMEM` when the clone cannot be made.
+    fn host_fork_process(parent_slot: i32, child_slot: i32) -> i32;
 }
 
 /// What the host needs in order to instantiate a module as a process.
@@ -115,6 +131,14 @@ pub(crate) fn exec_module(slot: i32, request: &ExecModuleRequest) -> i32 {
     // on the caller's stack, which outlives a call that is synchronous — that is what lets the
     // import's contract be "valid for the duration of the call".
     unsafe { host_exec_module(slot, core::ptr::from_ref(request) as u32) }
+}
+
+/// Ask the host to clone the process in `parent_slot` into `child_slot` — fork, on this port.
+pub(crate) fn fork_process(parent_slot: i32, child_slot: i32) -> i32 {
+    // SAFETY: the host supplies every import in this module at instantiation. Nothing is
+    // borrowed across the call — the arguments are the two slots — so there is nothing for the
+    // caller to keep alive.
+    unsafe { host_fork_process(parent_slot, child_slot) }
 }
 
 pub(crate) fn console_read() -> Option<u8> {

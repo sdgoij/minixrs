@@ -423,6 +423,12 @@ pub unsafe fn free_proc(slot: usize) {
     PROCS_IN_USE.fetch_sub(1, Ordering::Relaxed);
 }
 
+/// How many slots `init_proc` marks as the kernel's boot processes: every system proc_nr in the
+/// kernel's `BOOT_IMAGE`, which runs contiguously from PM's 0 to the window server's
+/// `WS_PROC_NR`. The count and the range are one definition because the tests below check the
+/// counter and the table's first free slot against it.
+const BOOT_PROC_SLOTS: u32 = arch_common::com::WS_PROC_NR as u32 + 1;
+
 /// Initialize the PM process table.
 ///
 /// Resets the entire table and `PROCS_IN_USE` counter, then marks
@@ -435,11 +441,11 @@ pub fn init_proc() {
         }
     }
     PROCS_IN_USE.store(0, Ordering::Relaxed);
-    // Mark boot process slots as occupied. These match the kernel's
-    // boot_proc list: ds, rs, pm, sched, vfs, ramdisk, vm, mfs, tty, init.
-    // The slot numbers are proc_nr values (not MProc indices); they keep
-    // alloc_proc() aligned with the kernel's Proc table so fork child slots
-    // (VMF_SLOTNO) index both tables identically.
+    // The slot numbers are proc_nr values (not MProc indices); they keep alloc_proc() aligned
+    // with the kernel's Proc table, which is what makes a fork child's slot (VMF_SLOTNO) a slot
+    // the kernel has free. A partial list is worse than useless here: a slot the kernel's boot
+    // image owns but this table thinks is free is handed out as a child slot, and
+    // `do_fork_handler` then copies the child's Proc over a live server's (finding 39).
     //
     // These are placeholders — the real per-process entries (endpoint, pid)
     // are created in pm_server_main. Mark them PRIV_PROC so sig_proc/
@@ -447,7 +453,7 @@ pub fn init_proc() {
     // broadcast (e.g. ^C's SIGINT) cannot terminate a phantom slot. The real
     // INIT entry (allocated in pm_server_main, endpoint 10) is a user
     // process and receives ^C.
-    for &slot in &[6, 2, 0, 4, 1, 11, 8, 7, 5, 10] {
+    for slot in 0..BOOT_PROC_SLOTS as usize {
         unsafe {
             (*base.add(slot)).mp_flags |= IN_USE | PRIV_PROC;
             (*base.add(slot)).mp_magic = MP_MAGIC;
@@ -4781,8 +4787,11 @@ mod tests {
         let _idx = alloc_proc().expect("should find a free slot");
         assert!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed) > 0);
         init_proc();
-        // init_proc marks 10 boot process slots as IN_USE.
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
+        // Every system proc_nr in the kernel's BOOT_IMAGE, 0 through `WS_PROC_NR`.
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            arch_common::com::WS_PROC_NR as u32 + 1
+        );
     }
 
     #[test]
@@ -4795,7 +4804,7 @@ mod tests {
             // cannot terminate a placeholder slot. The real INIT entry
             // (allocated in pm_server_main, endpoint 10) is a user process
             // and receives ^C.
-            for &slot in &[6, 2, 0, 4, 1, 11, 8, 7, 5, 10] {
+            for slot in 0..=arch_common::com::WS_PROC_NR as usize {
                 assert_ne!(
                     (*base.add(slot)).mp_flags & PRIV_PROC,
                     0,
@@ -4803,6 +4812,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The first slot `alloc_proc` hands out must be one the kernel's boot image does not own:
+    /// a fork child is created by the *kernel* at PM's chosen slot, so a collision overwrites a
+    /// live server's Proc rather than failing.
+    #[test]
+    fn test_alloc_proc_skips_every_boot_slot() {
+        init_proc();
+        let slot = alloc_proc().expect("a free slot");
+        assert!(
+            slot > arch_common::com::WS_PROC_NR as usize,
+            "alloc_proc returned {slot}, which the kernel's boot image owns"
+        );
     }
 
     /// Reset a free slot as an in-use user process with an endpoint/pid.
@@ -5052,9 +5074,12 @@ mod tests {
     #[test]
     fn test_free_proc_clears_slot() {
         init_proc();
-        // 10 boot process slots are pre-marked as IN_USE.
+        // The kernel's boot process slots are pre-marked as IN_USE.
         let idx = alloc_proc().expect("should find a free slot");
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS + 1
+        );
         unsafe {
             free_proc(idx);
         }
@@ -5063,40 +5088,55 @@ mod tests {
             let rmp = &*base.add(idx);
             assert!(!rmp.in_use());
             assert_eq!(rmp.mp_magic, 0);
-            // Back to 10 boot process slots.
-            assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
+            // Back to the boot slots and nothing else.
+            assert_eq!(
+                PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+                BOOT_PROC_SLOTS
+            );
         }
     }
 
     #[test]
     fn test_alloc_proc_exhaustion() {
         init_proc();
-        // 10 boot process slots are pre-marked as IN_USE.
-        let boot_slots = 10;
         let mut count = 0;
         while alloc_proc().is_some() {
             count += 1;
         }
-        assert_eq!(count, NR_PROCS - boot_slots);
+        assert_eq!(count, NR_PROCS - BOOT_PROC_SLOTS as usize);
     }
 
     #[test]
     fn test_procs_in_use_tracking() {
         init_proc();
-        // init_proc marks 10 boot process slots as IN_USE.
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS
+        );
         let a = alloc_proc().unwrap();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS + 1
+        );
         let b = alloc_proc().unwrap();
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 12);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS + 2
+        );
         unsafe {
             free_proc(a);
         }
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 11);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS + 1
+        );
         unsafe {
             free_proc(b);
         }
-        assert_eq!(PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed), 10);
+        assert_eq!(
+            PROCS_IN_USE.load(core::sync::atomic::Ordering::Relaxed),
+            BOOT_PROC_SLOTS
+        );
     }
 
     #[test]

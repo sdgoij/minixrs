@@ -84,6 +84,20 @@ pub unsafe fn exec_module(slot: i32, request: &ExecModuleRequest) -> i32 {
     crate::exec_module(slot, request)
 }
 
+/// Ask the host to clone the process in `parent_slot` into `child_slot`.
+///
+/// Fork on this port (§12 risk 1): the host owns both memories, so the clone is its work, and
+/// the kernel's is to know that a fork happened and which two slots it names. Called from the
+/// wasm arm of `do_fork_handler`.
+///
+/// # Safety
+///
+/// Both slots must name processes the host has instances for; `child_slot` must be empty. The
+/// call is synchronous and borrows nothing.
+pub unsafe fn fork_process(parent_slot: i32, child_slot: i32) -> i32 {
+    crate::fork_process(parent_slot, child_slot)
+}
+
 // ------------------------------------------------------------------ console
 
 pub fn serial_write_byte(byte: u8) {

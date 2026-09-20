@@ -13,10 +13,11 @@ waiting on a receive), M3c (VFS mounts root and reaches its main loop — the wh
 chain, VM → ramdisk → MFS → VFS, running on wasm), M3d (INIT, the first *user*
 process: it runs, writes to the console through the kernel, reaches PM, and exits), and
 M3e (the tty server, and INIT's stdio routed through VFS and the tty to the real console),
-and M3f (the shell: prompt, input, a builtin command, exit) are all **done** — see §11 for
-commands and results. M3 — console, TTY, shell — is complete; what remains of the port is
-M4 onwards, and exec as module instantiation (§7.2), which M3f worked around rather than
-implemented.
+and M3f (the shell: prompt, input, a builtin command, exit) are all **done**, and so is M7
+(exec as module instantiation, §7.2, and fork, §12 risk 1) — see §11 for commands and
+results. M3 — console, TTY, shell — is complete, with the module-backed half of its title:
+a shell forks for a command it cannot answer itself, and the child execs the module the boot
+image carries at that path. What remains of the port is M4 onwards.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -598,7 +599,7 @@ kernel calls it unconditionally, but it does nothing.
 | PCI | `PCI_ADDR_PORT`, `PCI_DATA_PORT`, `pci_config_addr`, `pci_cfg_read8`/`read16`/`read32`, `pci_cfg_write32` | **Delete.** Devices come from a host manifest (§9). |
 | CMOS / RTC | `RTC_INDEX`, `cmos_read`, `cmos_write` | **Rewrite.** `Date.now()`. |
 | Physical memory | `init_phys_alloc`, `alloc_phys_page`, `alloc_phys_contig`, `free_phys_contig`, `phys_alloc_base`, `phys_alloc_usable_size`, `phys_free_pages` | **Rewrite.** Host-managed page pool; "physical address" is an opaque handle (§5). |
-| Misc platform | `init`, `fork_needs_child_flag_clear`, `bss_start`, `bss_end`, `qemu_exit` | `init` is a wasm-side setup; `fork_needs_child_flag_clear` → `true` (child instance needs its own return value); BSS symbols still work; `qemu_exit` → host exit import. |
+| Misc platform | `init`, `fork_needs_child_flag_clear`, `bss_start`, `bss_end`, `qemu_exit` | `init` is a wasm-side setup; `fork_needs_child_flag_clear` → **`false`**, corrected in M7b: the design first said `true` on the grounds that the child needs its own return value, but the predicate does not decide the return value — it decides whether the *child* waits for PM's `SENDNB` reply to be enqueued (`false`, as x86_64 and `arch-sim` answer) or is cleared and enqueued by `SYS_SCHEDULE` (`true`, as riscv64 and aarch64 answer, where PM's reply to the child is skipped). On this port the child's resume is a message arriving through the copy seam like everyone else's, so `false` is the answer that fits, and the return value is the host's business either way (§7.2, M7b) — which 5a then confirmed: the child resumed, and it resumed when PM's `SENDNB` reached it. BSS symbols still work; `qemu_exit` → host exit import. |
 
 ## 9. Devices as host imports
 
@@ -1104,8 +1105,10 @@ touches their own statics — which is exactly why nothing had noticed.
 **M3 — Console, TTY, shell.** Shell from a module-backed filesystem, running
 real coreutils. Progress: M3a (RAM disk), M3b (VM + MFS), M3c (VFS mounts root),
 M3d (INIT, the first user process), M3e (the console, end to end), M3f (the shell) —
-see below. M3 is complete; only the module-backed half of its title (exec from the
-image) is outstanding, which is §7.2's work and M7's.
+see below. M3 is complete: the module-backed half of its title (exec from the image)
+is §7.2's work and M7's, and both halves of M7 — exec as module instantiation and
+fork — are done, so the shell forks for an external command and the child execs the
+module the image carries at that path.
 
 **M4 — VFS/MFS + host block device.** A real filesystem in IndexedDB, with the
 existing persistence test adapted.
@@ -1114,10 +1117,12 @@ existing persistence test adapted.
 
 **M6 — Network.** `virtio_net` over WebSocket.
 
-**M7 — fork and exec of arbitrary modules.** See §12 and the M7a plan below — M7a steps 1–4 are
-done, so a process can exec a module, *is* that module, and the module came off the disk. What is
-left is fork, which is what lets the shell run an external command rather than only its builtins,
-and that is the last piece of M3's title.
+**M7 — fork and exec of arbitrary modules.** See §12 and the M7a/M7b plans below — **done**: M7a
+steps 1–4, so a process can exec a module, *is* that module, and the module came off the disk, and
+M7b's 5a (fork alone) and 5b (the shell running an external command). A shell now forks for a
+command it cannot answer itself, the child execs the module the image carries at that path, the
+command's output reaches the console through the stdio the shell inherited, and the shell reaps it
+and reads its next line — M3's title.
 
 **Stretch.** SMP via Workers + `SharedArrayBuffer` (the `Spinlock`/`bkl_*`
 surface already exists and would become Atomics-based; each worker gets its own
@@ -1359,9 +1364,9 @@ ends such a run with a named diagnosis instead of an external kill, and why its 
 to grow: every console byte a reader consumes costs several dispatches, and the old bound
 cut the shell off mid-line, which looked like a reading bug and was a harness limit.
 
-**M7a — Exec as module instantiation. Status: steps 1–4 DONE (a program is its own module, the
-kernel asks and the host instantiates, argv crosses, and the bytes come off the disk); step 5 is
-M3's title, and needs M7's fork half.**
+**M7a — Exec as module instantiation. Status: DONE (steps 1–4: a program is its own module, the
+kernel asks and the host instantiates, argv crosses, and the bytes come off the disk; step 5, M3's
+title, came with M7b's fork half below).**
 
 This is the other half of M3's title — "shell from a *module-backed filesystem*, running real
 coreutils" — and the largest remaining piece of the port. On the shipping arches `init`
@@ -1414,9 +1419,9 @@ The steps, each with the check that would establish it:
    arrive *are* the module, which needs a wasm image (`mkminixfs` for this target, embedding
    module blobs instead of ELF). *Check:* exec'ing a path that exists only in the image works.
 5. **Then M3's title is earned**, and M7's fork half is what lets the shell run coreutils
-   rather than only its builtins.
+   rather than only its builtins. Scoped below as **M7b**.
 
-Step 4 is done; step 5 needs fork, which is M7's other half.
+Steps 4 and 5 are both done: exec as module instantiation (M7a) and fork (M7b).
 
 **M7a step 1 — a program as its own wasm module. Status: DONE.**
 
@@ -1577,9 +1582,155 @@ Three things about that are worth stating, because each would be a different des
   path still travels — the host reads it out of the caller's memory for what it prints — but it is
   a name now, not a lookup.
 
-What is still not here is step 5: the shell runs, but a shell can only run its *builtins* until
-fork exists, because an external command needs a child to exec in. That is M7's other half, and it
-is the last thing between this port and M3's title.
+What step 4 could not do on its own was step 5: a shell that has exec still runs only its
+*builtins* until fork exists, because an external command needs a child to exec in. That is M7's
+other half, and it was the last thing between this port and M3's title.
+
+**M7b — fork. Status: DONE — 5a and 5b both, so M3's title is earned.**
+
+This is the last piece of M3's title — "shell from a module-backed filesystem, running real
+coreutils" — and the only remaining thing a shell needs that it does not have. §12 risk 1 is
+resolved: `tools/fork-spike/` proved that a process suspended inside a syscall can be forked by
+cloning its linear memory into a fresh instance, and that both instances then rewind and diverge.
+What is left is not a question but a chain, and the chain is five layers deep because MINIX's
+`fork` is three round trips:
+
+```text
+user: fork()  →  PM_FORK → PM alloc_proc (a table copy, no arch code)
+              →  VM_FORK → VM: the address space clone
+                        → kernel SYS_FORK      → the child's Proc
+                        → kernel VMCTL_SETADDRSPACE → the child becomes runnable
+              →  PM replies to the parent with the child's pid; the child's own return is 0
+```
+
+**What each layer needs, and why.** In order of how much of it is arch-shaped:
+
+- **PM's `do_fork` needs nothing.** It is `core::ptr::copy_nonoverlapping` over `mproctab` plus a
+  free-slot search — the same on every arch, and it already picks the child's slot and drives the
+  rest. This is the layer that makes the piece look bigger than it is.
+- **VM's `do_fork` needs a wasm arm of maybe twenty lines**: skip `pt_new_for_fork` (the page-table
+  deep copy — the clone the guest needs is its *memory*, and the host is the only layer that can
+  make it), and set the child's address-space handle to something non-zero. That second part is
+  load-bearing and silent: `do_fork` guards the `sys_vmctl_set_addspace` call with
+  `child_cr3 != 0`, and that call is what clears `VMINHIBIT` — so a zero handle means the child is
+  created, never made runnable, and simply never runs, with the harness's dispatch loop reporting
+  "nothing runnable" as if the process had finished. Finding 35 is the same class of trap: an id the
+  shipping arches always have a real value for.
+- **The kernel's `do_fork_handler` needs its proc copy plus one wasm arm**, and the proc copy is
+  already arch-independent — it is `copy_nonoverlapping` over `Proc`, `write_retval(child, 0)`, the
+  `SENDING` clear, `NO_QUANTUM`/`NO_PRIV`, and the `*F` name. What the arm adds is
+  `hal::fork_process(parent_slot, child_slot)`, which is the whole of what the host is being asked
+  for. `do_vmctl_set_addspace` needs nothing: on wasm there is no page table to load, and setting
+  `p_cr3` to the handle plus clearing `VMINHIBIT` is exactly right as it stands. One flag to settle
+  before writing it: `do_fork_handler` ends by consulting `hal::fork_needs_child_flag_clear()`, and
+  the four arches disagree about it — x86_64 and `arch-sim` answer `false` (the child waits for
+  PM's `SENDNB` reply, which is what enqueues it), riscv64 and aarch64 answer `true` and clear
+  `RECEIVING`/`REPLY_PEND` on the child directly because PM's reply is skipped there. The wasm HAL
+  re-exports `arch-sim`'s `false`, and §8's HAL table says `true` — so the design and the code
+  disagree, and this piece is where it matters. `false` is the better fit for this port: the child's
+  resume is then driven by a real message from PM arriving through the copy seam, which is the same
+  path every other blocked process in this harness takes, rather than by a scheduler call that
+  nothing on this port makes. Deciding it is not optional — with the wrong answer the child is
+  either resumed twice or never.
+- **The host is where the work is**, because it owns both memories and the per-process records, and
+  because the spike found that memory alone is not the process. Four invariants, three of them
+  silent when wrong — the spike's README states all four and its harnesses assert them:
+  1. **The snapshot is copied in *after* `instantiate()`.** Instantiation re-applies the module's
+     data segments, so a child that never receives the snapshot restarts from the entry point —
+     and then re-issues the fork request, forking recursively.
+  2. **The child's memory is the parent's size**, not the module's minimum: a parent that grew past
+     it would be truncated at the fork point.
+  3. **The host-side record is duplicated, not just the memory.** `st.pending` (the syscall the
+     parent is suspended in), `entry`, `entryArgs`, the tail — the port's copies of what the
+     kernel's `Proc` holds. Miss this and the child re-blocks on the syscall it had already been
+     waiting for.
+  4. **The divergent replies go in before either side resumes**, which here means simply that the
+     resume path already reads `minix_proc_retval(slot)` — 0 for the child, PM's pid for the parent
+     — so the clone needs no message doctoring at all. Worth knowing before looking for where to do
+     it.
+  The host also has to stop assuming one instance per entry in `specs`: a forked slot has no spec,
+  no boot order and no argv of its own, so `procs` becomes a slot-indexed set of records that
+  `makeServer` *populates* rather than a list of specs that *is* the process table.
+- **The image needs the commands the shell will run.** `/bin/echo` is another `WASM_MODULES` entry
+  pointing at the same module file, because the module dispatches on `argv[0]`: one module, several
+  paths, which is what makes a multi-call program possible in an image whose modules are megabytes
+  wide. Nothing in the loader changes for it.
+
+The two checks, in the order they can be reached:
+
+1. **5a — fork alone. DONE.** The program module gained an arm for a small fork test (`argv[0]`
+   chooses it, as `echo` and `/bin/sh` are chosen), and the image carries a path to it. *Check:*
+   two instances exist for two slots, the child's memory is the parent's at the fork point, both
+   print — the child with a 0 from `fork`, the parent with the pid PM gave it — and the parent
+   reaps the child, which is PM's `GETKSIG` path and the first time a wasm process has died with a
+   parent waiting. The harness's console, at the end of its run:
+
+   ```text
+   kernel: forktest: parent pid=4 fork=12
+   kernel: forktest: child pid=12 fork=0
+   kernel: forktest: parent reaped pid=12 status=0
+   ```
+
+   The checks behind those lines are in `tools/wasm-servers/boot.cjs` and are the ones §11 asked
+   for; the child's pid is one it asked PM for itself, so the match against the parent's `fork`
+   return is two routes out of the same process table agreeing rather than one number asserted
+   twice.
+
+   Three things it cost, all in `PORTING_PLAN.md`: finding 37 (every `asynsend3` on this port read
+   its own request out of the kernel's memory, so PM's notify to VFS queued nothing and reported
+   success), finding 38 (the two async delivery paths woke the receiver without handing it the
+   message, and without setting the return value `RECEIVE` means as the sender's endpoint — a bug
+   that is latent on every arch), and finding 39 (PM's mproc table has to mirror the kernel's
+   `Proc` table index for index, which it did not). The last of those is why the harness's fork
+   test runs at slot 3: PM can only fork a process whose endpoint it already knows, and nothing
+   registers a process the kernel creates outside `BOOT_IMAGE` — the registration path finding 39
+   describes is still owed.
+2. **5b — the shell runs an external command. DONE.** The console script changed from `echo hello`
+   (a builtin, and what M3f proves) to `/bin/echo hi` followed by `echo second`: one line that is
+   `fork` **and** `exec`, and one that is still the builtin, so the two paths are told apart rather
+   than one standing in for both. *Check:* the output appears, and the harness sees the sequence —
+   a new slot, a clone of the shell, an exec in that clone, and an exit the shell reaps. The
+   harness's console, at the end of its run:
+
+   ```text
+   kernel: # /bin/echo hi
+   kernel: hi
+   kernel: # echo second
+   kernel: second
+   kernel: # exit
+   kernel:
+   kernel: hello from a module
+   kernel: forktest: parent pid=4 fork=13
+   kernel: forktest: child pid=13 fork=0
+   kernel: forktest: parent reaped pid=13 status=0
+   ```
+
+   The `# ` before `exit` is the third prompt, and the empty line after it is the shell's own echo
+   of the newline: the shell came back from reaping the child and asked for another line. `hi` is
+   the external command's output — a module instantiated from the bytes the image carries at
+   `/bin/echo`, printing argv the shell passed it — while `second` is the builtin's, from the same
+   image with no fork and no exec. The lines below those are M7a step 1's program and 5a's fork
+   test, which run after the shell has exited.
+
+   Two things it cost, beyond 5a's three findings. Finding 40 is the one that mattered: the
+   child's exec failed with `EFAULT` before a byte moved, because `vm_check_range` walked a page
+   table that does not exist on this arch and answered "not mapped" for every address. The other
+   was the harness's own: its syscall budget is a budget for the whole run, and the shell now
+   costs several times what a builtin-only run did, so the run ended mid-script with the budget
+   report *blaming VFS* — see finding 12's addendum, which is worth reading before believing any
+   spin diagnosis on this port.
+
+   What 5b still does not establish is the *loop*: the shell forks once here, and a shell that
+   runs a directory of commands forks repeatedly. Each fork clones the whole instance — the
+   spike measured *memory size* per fork rather than stack depth — so repeated `fork`/`exec` cost
+   is measured by nothing yet.
+
+What the spike does *not* prove is worth carrying into this work, because each is something the
+port will be the first to do: repeated suspend/resume on one process (every case in the spike
+suspends exactly once, and a shell forks in a loop), fork cost on a real workload (the spike's is a
+byte copy of a 4 MiB memory, so *memory size* is the lever, not stack depth), the Asyncify
+expansion on a real server, and interaction with signals, which §6.3 proposes delivering at
+syscall-return time — a rewind boundary is a natural place for that and is untested.
 
 ## 12. Risks, ranked
 

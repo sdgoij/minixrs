@@ -1173,9 +1173,22 @@ pub unsafe fn try_one(src_ptr: *mut Proc, dst_ptr: *mut Proc) -> i32 {
                 let msg_dst = (*dst_ptr).p_delivermsg.as_mut_ptr();
                 core::ptr::copy_nonoverlapping(msg_src, msg_dst, core::mem::size_of::<Message>());
                 core::ptr::write_unaligned(msg_dst as *mut i32, caller_ep);
+                // The receiver's RECEIVE returns the sender's endpoint, and nothing puts it there
+                // by itself — `mini_send` writes it for the same reason. Without this the resumed
+                // process sees the endpoint its *previous* receive returned, so a server that
+                // reads the sender out of its return value (VFS's `get_work` does) routes the
+                // message as though someone else had sent it (finding 38).
+                crate::hal::write_retval(&mut (*dst_ptr).p_reg, caller_ep as u64);
                 (*dst_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+                // ...and do that copy here rather than leaving it to the epilogue, exactly as
+                // `mini_send` and `mini_notify` do: the receiver is a third party woken by this
+                // send, so an arch without a syscall-return path (this one) leaves the message
+                // in the kernel's slot and the receiver reads whatever its buffer held before
+                // (finding 38). `deliver_pending_msg` is what the wasm entry calls for the
+                // caller; here it is the same call for the receiver.
+                deliver_pending_msg(dst_ptr);
             }
 
             // C L1415-1419 (store_result): write the result and AMF_DONE
@@ -1592,9 +1605,17 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                 // dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint;
                 let src_ep = (*caller_ptr).p_endpoint;
                 core::ptr::write_unaligned(msg_dst as *mut i32, src_ep);
+                // The receiver's RECEIVE returns the sender's endpoint — see `try_one` for why
+                // the deliverer has to write it, which is finding 38's second half.
+                crate::hal::write_retval(&mut (*dst_ptr).p_reg, src_ep as u64);
                 (*dst_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+                // And put the message in the receiver's own memory here, rather than leaving it
+                // in the kernel's slot for a syscall-return path that this port does not have
+                // (finding 38): the receiver is a third party woken by this send, so nothing else
+                // would ever make that copy.
+                deliver_pending_msg(dst_ptr);
                 let old_rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
                 let new_rts = old_rts & !RtsFlags::RECEIVING.bits();
                 (*dst_ptr).p_rts_flags.store(new_rts, Ordering::Relaxed);

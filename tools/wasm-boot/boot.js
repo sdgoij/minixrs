@@ -70,6 +70,10 @@ const imports = {
     // and no process to put one in, so this refuses the same way the copy above
     // does — M7a's step 2 is where a harness answers it for real.
     host_exec_module: () => -2, // ENOENT
+    // Fork's clone (§12 risk 1), the other import the host owes the kernel's process
+    // machinery. M1 has one process and no memory of a second, so it refuses — and this
+    // arm is only reachable from SYS_FORK, which nothing here calls.
+    host_fork_process: () => -12, // ENOMEM
   },
 };
 
@@ -101,6 +105,7 @@ const expectedImports = [
   'host_halt',
   'host_copy_between',
   'host_exec_module',
+  'host_fork_process',
 ];
 const importNames = WebAssembly.Module.imports(wasmModule).map((i) => i.name);
 check(
