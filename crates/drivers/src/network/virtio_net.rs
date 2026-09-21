@@ -30,6 +30,10 @@ pub const VIRTIO_NET_F_MAC: u8 = 5;
 pub const VIRTIO_NET_F_STATUS: u8 = 16;
 
 /// Features this driver negotiates.
+///
+/// A link has no feature negotiation — it is the frame and nothing else — so the list exists where
+/// there is a device to negotiate with.
+#[cfg(not(target_arch = "wasm32"))]
 static VIRTIO_NET_FEATURES: &[virtio::VirtioFeature] = &[virtio::VirtioFeature {
     name: "VIRTIO_NET_F_MAC",
     bit: VIRTIO_NET_F_MAC,
@@ -127,9 +131,15 @@ impl RxBufCell {
 }
 static RX_BUFS: RxBufCell = RxBufCell::new();
 
+// The transmit header is the *device's* word for what the guest knows about a frame (no offload,
+// no GSO), so it exists where there is a device to hand it to. A link carries the frame and nothing
+// else, which is also why the wasm arm of `virtio_net_transmit` stages the frame and stops there.
+#[cfg(not(target_arch = "wasm32"))]
 #[repr(align(16))]
 struct TxHdrCell(UnsafeCell<VirtioNetHdr>);
+#[cfg(not(target_arch = "wasm32"))]
 unsafe impl Sync for TxHdrCell {}
+#[cfg(not(target_arch = "wasm32"))]
 impl TxHdrCell {
     const fn new() -> Self {
         Self(UnsafeCell::new(VirtioNetHdr::new()))
@@ -138,6 +148,7 @@ impl TxHdrCell {
         self.0.get()
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 static TX_HDR: TxHdrCell = TxHdrCell::new();
 
 #[repr(align(16))]
@@ -171,6 +182,13 @@ struct VirtioNetState {
     rx_fifo_head: usize,
     rx_fifo_tail: usize,
     rx_fifo: [RxEntry; RX_BUF_COUNT],
+    /// Whether this arch's hardware is the host rather than a device behind a bus (M6).
+    ///
+    /// A separate question from `dev`, which is `None` on this arch because there is no queue to
+    /// hold — but there *is* a device, and open/close/probe have to be able to say so, or a driver
+    /// that found its hardware would report `NotFound` for it.
+    #[cfg(target_arch = "wasm32")]
+    host_device: bool,
 }
 
 impl VirtioNetState {
@@ -183,7 +201,22 @@ impl VirtioNetState {
             rx_fifo_head: 0,
             rx_fifo_tail: 0,
             rx_fifo: [RxEntry { slot: 0, len: 0 }; RX_BUF_COUNT],
+            #[cfg(target_arch = "wasm32")]
+            host_device: false,
         }
+    }
+}
+
+/// Whether the driver found its hardware: the host's link on this arch, a probed queue on the
+/// others. What `dev.is_some()` would answer if every arch had a queue.
+fn has_device(st: &VirtioNetState) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        st.host_device
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        st.dev.is_some()
     }
 }
 
@@ -258,6 +291,7 @@ fn refill_slot(st: &mut VirtioNetState, slot: usize) -> bool {
 }
 
 /// Refill every RX slot; returns the number successfully submitted.
+#[cfg(not(target_arch = "wasm32"))]
 fn refill_all(st: &mut VirtioNetState) -> usize {
     let mut n = 0;
     for slot in 0..RX_BUF_COUNT {
@@ -271,6 +305,7 @@ fn refill_all(st: &mut VirtioNetState) -> usize {
 /// Reap completed RX chains into the pending FIFO. A slot whose packet
 /// cannot be queued (FIFO full) is refilled immediately so the device
 /// never loses a buffer.
+#[cfg(not(target_arch = "wasm32"))]
 fn reap_rx(st: &mut VirtioNetState) {
     loop {
         let (slot, used_len) = match st
@@ -295,6 +330,35 @@ fn reap_rx(st: &mut VirtioNetState) {
     }
 }
 
+/// Pull whatever the link is holding into the FIFO, as `reap_rx` does from a used ring (M6).
+///
+/// The slot an entry names is the FIFO's own tail, which is the stand-in for the ring index the
+/// device would have written: entries in flight occupy distinct slots for the same reason, and the
+/// push that would collide is the push the FIFO refuses. It stops at the FIFO's capacity rather
+/// than draining the link, so a burst the guest has not read yet stays where it is — the frames are
+/// the link's until the driver takes them, the same contract the RX ring has.
+#[cfg(target_arch = "wasm32")]
+fn fill_from_link(st: &mut VirtioNetState) {
+    unsafe {
+        let bufs = RX_BUFS.get();
+        while st.rx_fifo_count < RX_BUF_COUNT {
+            let slot = st.rx_fifo_tail;
+            let Some(n) = crate::hal::net_recv(&mut (*bufs)[slot]) else {
+                return;
+            };
+            if !fifo_push(
+                st,
+                RxEntry {
+                    slot: slot as u16,
+                    len: n as u16,
+                },
+            ) {
+                return;
+            }
+        }
+    }
+}
+
 // ---- Public API ----
 
 /// Reset driver state (must be called before anything else).
@@ -306,6 +370,10 @@ pub fn virtio_net_init() {
     st.rx_fifo_count = 0;
     st.rx_fifo_head = 0;
     st.rx_fifo_tail = 0;
+    #[cfg(target_arch = "wasm32")]
+    {
+        st.host_device = false;
+    }
 }
 
 /// Probe for a virtio-net device and set up RX/TX queues.
@@ -319,31 +387,58 @@ pub fn virtio_net_init() {
 pub unsafe fn virtio_net_probe(instance: u16) -> Result<(), DriverError> {
     let st = unsafe { &mut *state_ptr() };
 
-    let mut dev = virtio::virtio_probe(VIRTIO_ID_NET, "virtio-net", VIRTIO_NET_FEATURES, instance)
-        .map_err(|_| DriverError::NotFound)?;
-    virtio::virtio_alloc_queue(&mut dev, RXQ).map_err(|_| DriverError::Io)?;
-    virtio::virtio_alloc_queue(&mut dev, TXQ).map_err(|_| DriverError::Io)?;
-    dev.num_queues = 2;
-
-    // Read the MAC from the device config (offset 0..6).
-    for i in 0..6u16 {
-        st.mac[i as usize] = virtio::virtio_sread8(&dev, i);
+    // The host is the wire (M6). The link's MAC is the whole of what a probe learns from the
+    // hardware, and there is no queue to allocate because the link holds the frames until they are
+    // read — so a probe is one question, and a host with no link answers `None`: `NotFound`, the
+    // answer a machine with an empty slot gives, which leaves the net server running without a NIC
+    // rather than failing to start. What is deliberately *not* probed is anything about the
+    // protocol: the DL messages, the frames and the addressing are all the guest's, on both.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = instance;
+        match crate::hal::net_mac() {
+            Some(mac) => {
+                st.mac = mac;
+                st.host_device = true;
+                Ok(())
+            }
+            None => Err(DriverError::NotFound),
+        }
     }
 
-    virtio::virtio_device_ready(&mut dev);
-    virtio::virtio_irq_enable(&mut dev);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut dev =
+            virtio::virtio_probe(VIRTIO_ID_NET, "virtio-net", VIRTIO_NET_FEATURES, instance)
+                .map_err(|_| DriverError::NotFound)?;
+        virtio::virtio_alloc_queue(&mut dev, RXQ).map_err(|_| DriverError::Io)?;
+        virtio::virtio_alloc_queue(&mut dev, TXQ).map_err(|_| DriverError::Io)?;
+        dev.num_queues = 2;
 
-    st.dev = Some(dev);
-    Ok(())
+        // Read the MAC from the device config (offset 0..6).
+        for i in 0..6u16 {
+            st.mac[i as usize] = virtio::virtio_sread8(&dev, i);
+        }
+
+        virtio::virtio_device_ready(&mut dev);
+        virtio::virtio_irq_enable(&mut dev);
+
+        st.dev = Some(dev);
+        Ok(())
+    }
 }
 
 /// Open the device: (re)fill the RX queue with free buffers.
 pub fn virtio_net_open() -> Result<(), DriverError> {
     let st = unsafe { &mut *state_ptr() };
-    if st.dev.is_none() {
+    if !has_device(st) {
         return Err(DriverError::NotFound);
     }
     st.open_count += 1;
+    // Nothing to chain on this arch: the link holds the frames until the driver reads them, so
+    // there is no queue to fill and asking `refill_all` would report the failure of a step that
+    // does not exist.
+    #[cfg(not(target_arch = "wasm32"))]
     if refill_all(st) == 0 {
         return Err(DriverError::Io);
     }
@@ -353,7 +448,7 @@ pub fn virtio_net_open() -> Result<(), DriverError> {
 /// Close the device.
 pub fn virtio_net_close() -> Result<(), DriverError> {
     let st = unsafe { &mut *state_ptr() };
-    if st.dev.is_none() {
+    if !has_device(st) {
         return Err(DriverError::NotFound);
     }
     if st.open_count > 0 {
@@ -370,9 +465,12 @@ pub fn virtio_net_mac() -> [u8; 6] {
 /// Reap completed RX chains and report how many packets are pending.
 pub fn virtio_net_rx_pending() -> usize {
     let st = unsafe { &mut *state_ptr() };
-    if st.dev.is_none() {
+    if !has_device(st) {
         return 0;
     }
+    #[cfg(target_arch = "wasm32")]
+    fill_from_link(st);
+    #[cfg(not(target_arch = "wasm32"))]
     reap_rx(st);
     fifo_len(st)
 }
@@ -403,10 +501,28 @@ pub fn virtio_net_transmit(packet: &[u8]) -> Result<(), DriverError> {
         return Err(DriverError::InvalidArgument);
     }
     let st = unsafe { &mut *state_ptr() };
+    if !has_device(st) {
+        return Err(DriverError::NotFound);
+    }
+
+    // Staged first, on both arches: `TX_BUF` is where the frame is before the device (or the link)
+    // takes it, and that is the only part of a transmit the two transports share.
+    unsafe {
+        core::ptr::copy_nonoverlapping(packet.as_ptr(), TX_BUF.get() as *mut u8, packet.len());
+    }
+    submit_tx(st, packet.len())
+}
+
+/// Hand the frame staged in `TX_BUF` to the device, and wait for it to take it.
+///
+/// The queue's word for a frame is a `[hdr|buf]` chain the device reads and completes, so a transmit
+/// is not finished until the used ring says so. Serialised, as this driver has always been: one
+/// frame in flight, which is what the DL protocol's reply-per-request expects.
+#[cfg(not(target_arch = "wasm32"))]
+fn submit_tx(st: &mut VirtioNetState, len: usize) -> Result<(), DriverError> {
     let dev = st.dev.as_mut().ok_or(DriverError::NotFound)?;
 
     unsafe {
-        core::ptr::copy_nonoverlapping(packet.as_ptr(), TX_BUF.get() as *mut u8, packet.len());
         let hdr = &mut *TX_HDR.get();
         *hdr = VirtioNetHdr::default();
         let bufs = [
@@ -417,7 +533,7 @@ pub fn virtio_net_transmit(packet: &[u8]) -> Result<(), DriverError> {
             },
             virtio::VirtioPhysBuf {
                 addr: TX_BUF.get() as *mut u8 as u64,
-                size: packet.len() as u32,
+                size: len as u32,
                 writable: false,
             },
         ];
@@ -432,6 +548,26 @@ pub fn virtio_net_transmit(packet: &[u8]) -> Result<(), DriverError> {
         core::hint::spin_loop();
     }
     Err(DriverError::Busy)
+}
+
+/// Hand the frame staged in `TX_BUF` to the link (M6).
+///
+/// Nothing to add and nothing to wait for: a link carries the frame, and no link has a use for a
+/// `virtio_net_hdr` — that header is the *device's* word for what the guest knows about the frame,
+/// which is why the offload features are negotiated at all rather than assumed. What the link does
+/// with the frame is the link's business (`ARCH_WASM32.md` §9: an in-page gateway, or a relay at the
+/// other end of a WebSocket), and the answer is whether it took it — which for a link is the end of
+/// the transmit, where for a queue it is the beginning.
+#[cfg(target_arch = "wasm32")]
+fn submit_tx(_st: &mut VirtioNetState, len: usize) -> Result<(), DriverError> {
+    unsafe {
+        let staged = core::slice::from_raw_parts(TX_BUF.get() as *const u8, len);
+        if crate::hal::net_send(staged) {
+            Ok(())
+        } else {
+            Err(DriverError::Io)
+        }
+    }
 }
 
 #[cfg(test)]

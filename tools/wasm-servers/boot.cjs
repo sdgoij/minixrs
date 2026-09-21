@@ -17,6 +17,9 @@
 
 const fs = require('fs');
 const path = require('path');
+// The wire, shared with the page's engine rather than copied: a second gateway would be a second
+// thing to be wrong, and what these checks are for is the wire the demo actually runs on (M6).
+const { createGateway } = require('../wasm-browser/net.js');
 
 const buildDir = path.join(__dirname, 'build');
 const kernelPath = path.join(buildDir, 'kernel.wasm');
@@ -324,10 +327,15 @@ const EXTERNAL_CMD = '/bin/echo';
 const EXTERNAL_ARGS = ['hi'];
 const BUILTIN_CMD = 'echo';
 const BUILTIN_ARGS = ['second'];
+// The network's command (M6): a path too, so the shell forks and execs the module's `ping` arm — and
+// the first program in the image whose work is a *device* rather than its own stdio.
+const NET_CMD = 'ping';
+const NET_ARGS = ['10.0.2.2'];
 const consoleInput = Array.from(
   Buffer.from(
     `${[EXTERNAL_CMD, ...EXTERNAL_ARGS].join(' ')}\n` +
-      `${[BUILTIN_CMD, ...BUILTIN_ARGS].join(' ')}\nexit\n`
+      `${[BUILTIN_CMD, ...BUILTIN_ARGS].join(' ')}\n` +
+      `${[NET_CMD, ...NET_ARGS].join(' ')}\nexit\n`
   )
 );
 
@@ -378,6 +386,32 @@ function inputImports(memory) {
       view.setInt32(outAddr + 4, ev.value, true);
       return 8;
     },
+  };
+}
+
+/// The network link this harness attaches: the in-page gateway, the same one the page creates (M6).
+///
+/// A link is `{mac, pending(), recv(into), send(frame)}`, and the four imports below are the whole of
+/// what the guest sees of it — `virtio_net`'s wasm transport asks for a MAC, asks whether anything
+/// arrived, takes a frame or hands one over, and nothing above that boundary knows which link it is.
+/// The gateway's `stats` is what the checks read to say frames moved rather than that a call
+/// returned.
+const gateway = createGateway();
+
+/// The imports an instance's link needs: the four calls `arch_wasm32`'s net wrapper documents, in
+/// the same shape `inputImports` has below.
+function netImports(memory) {
+  const packedMac = () => {
+    let v = 0n;
+    for (const byte of gateway.mac) v = (v << 8n) | BigInt(byte);
+    return v;
+  };
+  return {
+    host_net_mac: () => packedMac(),
+    host_net_pending: () => gateway.pending(),
+    host_net_recv: (bufAddr, bytes) => gateway.recv(new Uint8Array(memory.buffer, bufAddr, bytes)),
+    host_net_send: (srcAddr, bytes) =>
+      gateway.send(new Uint8Array(memory.buffer, srcAddr, bytes)) ? 0 : ENODEV,
   };
 }
 
@@ -442,6 +476,15 @@ const specs = [
   // is absent would leave that probe blocked on a peer that does not exist. It
   // answers `EIO`, which is true here, and the ramdisk fallback fires.
   { slot: 12, entry: 'minix_server_virtio_blk', label: 'virtio_blk' },
+  // The network (M6), at the proc numbers the shipping arches give them (`arch-common`'s
+  // `VIRTIO_NET_PROC_NR` and `NET_PROC_NR`), so the kernel's boot table, their endpoints and their
+  // privilege structures are the same ones — what this list adds is the instances. `virtio_net`
+  // first, because `net`'s own startup sends it `DL_CONF` and blocks until that is answered; and
+  // both before VFS, because `/dev/ip` (major 14) resolving to an instance that does not exist is a
+  // client's `open` blocked on a peer that never answers — which is exactly what a `ping` with no
+  // net server behind it does.
+  { slot: 13, entry: 'minix_server_virtio_net', label: 'virtio_net' },
+  { slot: 14, entry: 'minix_server_net', label: 'net' },
   // VFS's init mounts devman's tree right after the root filesystem, and
   // `mount_devman` blocks until it starts.
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
@@ -644,6 +687,7 @@ function makeImports(st) {
       // import on this side; these records go to a *driver* that polls, which is why the queue is an
       // import and the wake is an export on the kernel.
       ...inputImports(memory),
+      ...netImports(memory),
       // All six argument registers are named and forwarded, not only the two the
       // message-passing syscalls use. The kernel's dispatcher hands `args` straight
       // to the handler, and the three-argument syscalls read `args[2]` — `write`'s
@@ -2277,6 +2321,44 @@ check(
     framePixelAt(display.firstFrame, 100, 400).join() === '0,0,255,0' &&
     framePixelAt(display.lastFrame, 100, 400).join() === '40,40,40,0',
   `frames=${display.frames} first=${framePixelAt(display.firstFrame, 100, 400)} last=${frameAt(100, 400)}`
+);
+
+// ---------------------------------------------------------------------------- M6: the network
+//
+// The guest's own stack, all of it. The shell forks and execs `/bin/ping` (a path, so this is 5b's
+// fork/exec path again), the program opens `/dev/ip`, VFS routes major 14 to the net server, and that
+// server ARP-resolves 10.0.2.2, frames an Ethernet/IP/ICMP packet and hands it to `virtio_net` over
+// DL. What answers is the host's link — `net.js`'s gateway, the same object the page creates, and on
+// this arch the wire `virtio_net`'s transport reaches through four imports.
+//
+// Two checks, because either alone would be weaker: the console line says the guest's *own* stack
+// parsed the reply back into a datagram (a string with no frames behind it is a hardcoded string),
+// and the gateway's stats say frames actually crossed (frames with no line is a reply nobody read).
+// The id is ping's own — `userland::ping` sends `getpid() as u16` — so a reply the *guest* did not
+// ask for would not carry one.
+const PING_LINE = /^kernel: ping: 10\.0\.2\.2 alive \(reply id=(\d+) seq=1\)$/;
+const pingLines = timeline.map((l) => l.trimEnd());
+const pingLine = pingLines.find((l) => PING_LINE.test(l));
+const pingId = pingLine === undefined ? 0 : Number(pingLine.match(PING_LINE)[1]);
+check(
+  'the guest pinged its gateway, and its own stack parsed the reply',
+  pingLine !== undefined && pingId > 0,
+  `console ping lines: ${pingLines.filter((l) => l.includes('ping')).join(' | ') || '(none)'}; ` +
+    `gateway saw ${JSON.stringify(gateway.stats)}`
+);
+check(
+  "and the frames went over the host's link, answered rather than dropped",
+  gateway.stats.arpRequests >= 1 &&
+    gateway.stats.arpReplies === gateway.stats.arpRequests &&
+    gateway.stats.icmpRequests >= 1 &&
+    gateway.stats.icmpReplies === gateway.stats.icmpRequests &&
+    gateway.stats.unanswered === 0,
+  JSON.stringify(gateway.stats)
+);
+note(
+  'what the link carried',
+  `${gateway.stats.frames} frame(s) from the guest, ${gateway.stats.arpReplies} ARP and ` +
+    `${gateway.stats.icmpReplies} ICMP repl(ies) back; ${gateway.stats.unanswered} unanswered`
 );
 
 const failed = checks.filter((c) => !c.ok);

@@ -609,6 +609,34 @@ check(
   `screen:\n${screen()}`
 );
 
+// ------------------------------------------------------------------------ the network
+//
+// The page's half of M6. `boot.cjs` checks the same thing at the engine level through the same four
+// imports; what this adds is that a *reader* can do it — the keys go through the page's own keyboard
+// handler, the link is the one `page.js` chose (the in-page gateway, since this page was not opened
+// with `?net=`), and the answer is read back off the screen the reader is looking at.
+//
+// It runs *here*, after the disk's own checks, because the earliest of those asserts the store has no
+// pages yet and pauses are what makes that true: a guest that has run a command or two more than the
+// check assumed may already have flushed (MFS flushes on its own clock, and this harness's clock is
+// the guest's syscalls). The freshness claim is about the *start* of a session, so the thing that
+// asserts it has to run there.
+//
+// `ping` is the port's own client (`userland::ping`), so the ICMP id that comes back is the pid of
+// the process the shell forked for it. That is why the check reads the id instead of matching a
+// constant: a reply to somebody else's request, or one the host made up, would not carry this
+// guest's.
+for (const ch of 'ping 10.0.2.2') press(ch);
+press('Enter');
+check(
+  'a reader can ping the gateway from the page, and the guest parses the reply',
+  await until(
+    () => /ping: 10\.0\.2\.2 alive \(reply id=\d+ seq=1\)/.test(screen()),
+    'the ping reply'
+  ),
+  `screen:\n${screen()}`
+);
+
 // The session ends the way a tab ends it: the control, not the keyboard. It is the same bytes
 // the shell would get (`^U` and `exit`, which is INIT's exit — the shutdown M4 exists to run),
 // and the reason the control exists is on the other side of it: a session that ends this way

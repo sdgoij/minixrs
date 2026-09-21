@@ -25,8 +25,8 @@ pub use arch_aarch64::hal::{
 // Devices in the wasm port come from the host, so every port-I/O and PCI entry
 // point here is inert — the disposition `ARCH_WASM32.md` §8 already prescribes.
 // The names exist so driver code compiles unchanged; a driver that actually
-// needs its device will reach it through a host import in M4/M6, not through
-// these.
+// needs its device reaches it through a host import instead, which is what M4
+// (block), M5 (display, input) and M6 (network) each added below.
 #[cfg(target_arch = "wasm32")]
 pub use arch_wasm32::hal::{
     PCI_ADDR_PORT, PCI_DATA_PORT, RTC_INDEX, cmos_read, cmos_write, inb, inl, inw, mfence, outb,
@@ -116,3 +116,45 @@ mod no_host_input {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use no_host_input::input_event;
+
+// Network, and the fourth device here whose hardware is the host (M6). Same disposition as the
+// block device: on wasm the driver's wire *is* the host, and on a hardware arch there is no host to
+// ask — `virtio_net`'s transport there is the virtio queue, so the call sites are unreachable by
+// construction and the answers below are refusals rather than successes with no packets.
+//
+// The shape is the block device's, with the read/write direction made explicit: a received frame is
+// *pulled* (the DL client's read drives it, and an empty queue is the ordinary answer), while a
+// transmit is handed over whole. `net_pending` is the used-ring walk's replacement — a driver has to
+// ask before it reads, because "nothing yet" is what a NIC answers most of the time.
+#[cfg(target_arch = "wasm32")]
+pub use arch_wasm32::hal::{net_mac, net_pending, net_recv, net_send};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod no_host_network {
+    /// No host, so no link to ask for an address: `virtio_net`'s probe there reads the device
+    /// config instead.
+    pub fn net_mac() -> Option<[u8; 6]> {
+        None
+    }
+
+    /// No link, so nothing queued — and `None` rather than `Some(0)`, because the two are different
+    /// questions and only one of them is "there is no wire".
+    pub fn net_pending() -> Option<usize> {
+        None
+    }
+
+    /// No link, so no frame. `None` rather than a short read, because a zero-length frame is not a
+    /// frame — the same reason the driver's own path reports an empty queue as "nothing pending".
+    pub fn net_recv(_buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+
+    /// `false`, as above: a transmit that reached here has no wire to put a frame on, and answering
+    /// success would report a packet nobody sent.
+    pub fn net_send(_frame: &[u8]) -> bool {
+        false
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use no_host_network::{net_mac, net_pending, net_recv, net_send};

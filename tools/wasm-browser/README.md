@@ -33,8 +33,9 @@ itself so that a load failure explains itself on the page rather than only in th
 
 The same three artifacts the check harness runs, from `tools/wasm-servers/build.sh`: the kernel
 instance, the servers as one module, and the boot filesystem image. The page boots the same system
-the harness does — DS, RS, PM, the RAM disk, VM, MFS, virtio-blk, devman, VFS, the tty and the
-framebuffer server — INIT
+the harness does — DS, RS, PM, the RAM disk, VM, MFS, virtio-blk, devman, VFS, the tty, the
+framebuffer server, the input server, the window server, and the network (virtio-net and `net`, the
+last two added by M6) — INIT
 execs `/bin/sh` out of the image, and the shell forks and execs for a command it cannot answer
 itself.
 
@@ -58,13 +59,15 @@ the only difference between what the checks boot and what the page boots.
 | `display.js` | the display's contract as the page implements it: the guest's frames onto the canvas |
 | `store.js` | the store contract, and the page's implementation of it over IndexedDB |
 | `file-store.js` | the same contract over a file, for the Node front ends |
-| `run.js` | drives the engine from Node with scripted keystrokes (19 checks) |
-| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (45 checks) |
+| `run.js` | drives the engine from Node with scripted keystrokes (20 checks) |
+| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (46 checks) |
+| `net.js` | the network link (M6): the in-page gateway, and the WebSocket link a page opened with `?net=` uses |
+| `net.test.js` | the gateway's own frames, checked the way a receiver checks them (27 checks) |
 | `indexeddb.fake.js` | a stub IndexedDB, so `page.test.js` can run the real store |
 | `serve.js` | a static server, for `file://`'s sake |
 | `build.sh` | stages what the page fetches, via `tools/wasm-servers/build.sh` |
 | `publish.sh` | builds and stages the demo into `docs/` for GitHub Pages, then boots the copy |
-| `publish-check.mjs` | the check that makes the published page the *tested* page (15 checks) |
+| `publish-check.mjs` | the check that makes the published page the *tested* page (16 checks) |
 
 ## The disk
 
@@ -164,6 +167,36 @@ What the display does not do:
   range through, and the surface is the server's own memory, which another instance cannot be given
   a view of. A client writes through the driver instead — which is what the reference's clients do.
 
+## The network
+
+The guest runs the port's own network stack on this port as it does anywhere else — the `net` server
+(`/dev/ip`, `/dev/udp`, `/dev/tcp`, major 14) and the `virtio_net` DL driver — and what the host
+supplies is the *wire* (M6). Type `ping 10.0.2.2` at the prompt: the shell forks and execs
+`/bin/ping` off the image, the guest ARP-resolves the gateway, frames an Ethernet/IP/ICMP packet, and
+the reply comes back up the same path and is parsed by the guest's own stack.
+
+Two wires, and the guest cannot tell them apart — the four host imports are the whole of what it sees
+them through:
+
+- **The in-page gateway**, which is what a page gets by default. It answers ARP and ICMP echo for
+  `10.0.2.2` in the page itself, the way QEMU's SLIRP answers the same address for the arches. Nothing
+  else is invented: a frame for another host is counted and dropped.
+- **A WebSocket relay**, if the page is opened with `?net=<url>`. The frames are tunnelled to
+  `tools/wasm-net/relay.js`, which runs the *same* gateway on its side:
+
+  ```sh
+  node tools/wasm-net/relay.js          # prints the URL, and what it carries
+  ```
+
+  then open the demo with `?net=ws://127.0.0.1:8787/`. A parameter rather than a build-time choice
+  because both wires serve the same guest, and a demo that had to be rebuilt to show the other one
+  would be two demos. The relay is a gateway, not a bridge — frames reach the process next to them,
+  not the internet, which would be a NAT and a policy decision rather than a transport one.
+
+What the guest does *not* have yet is a client for the other two sockets: UDP and TCP work through this
+same link, but `/bin/udp`, `/bin/tcp` and the servers are ELF binaries on the arches and have no arm in
+this image's module. Each is a `WASM_MODULES` entry and a `match` arm away.
+
 ## Why an idle prompt is interesting
 
 The shell retries `read(0)` in user mode when there is nothing to read, and on this port the tty's
@@ -198,7 +231,7 @@ path, which is why nothing had seen it.
 - **No worker.** The guest runs on the main thread, so a slice is bounded by `SLICE_SYSCALLS` and
   the loop yields to the browser between slices. Moving the engine into a Worker would decouple the
   two, and would need the console to cross a `postMessage` boundary.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 80 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 82 facts
   about it and has its own copy of the mechanism, because a check harness needs no yielding. The
   two share a design rather than a file; `host.js`'s header says which parts are shared knowledge
   and where the authority is (`tools/fork-spike/` for the fork invariants).
@@ -226,7 +259,7 @@ Two things make the published copy trustworthy rather than hopeful:
 - `docs/.nojekyll` is written, because Pages runs a directory through Jekyll unless it is told not
 to, and nothing here is a template.
 - `tools/wasm-browser/publish-check.mjs` runs at the end of the staging and checks the copy itself:
-  every staged file is the one the tests run **byte for byte** (which is what makes the 45 checks in
+  every staged file is the one the tests run **byte for byte** (which is what makes the 46 checks in
   `page.test.js` a statement about the demo), the site names no root-absolute URL (Pages serves it
   under `/<repo>/`, so `/page.js` is a 404 for everyone but the author), every module the site
   imports is staged beside it, and then that the **staged** system boots — it imports
@@ -243,6 +276,8 @@ commit.
 ```sh
 node tools/wasm-browser/run.js        # the engine: four boots over one disk
 node tools/wasm-browser/page.test.js  # the page's own code, under a stub DOM
+node tools/wasm-browser/net.test.js   # the link: the gateway's frames, byte by byte
+node tools/wasm-net/relay.test.js     # the relay, over a real socket
 sh tools/wasm-servers/run.sh           # the check harness, for the same artifacts
 ```
 

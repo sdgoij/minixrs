@@ -22,7 +22,9 @@ image carries at that path. It runs in a browser tab as well as under Node
 composed onto the guest's display, §9.3) have landed since, along with the published demo in `docs/`.
 M5c (input, §11) has landed too: the host is the keyboard and the pointer, its records reach the
 guest's `input` server through the same notification path an IRQ takes on the other arches, and the
-desktop's arrow moves where the browser's pointer went. What remains is M6 (network).
+desktop's arrow moves where the browser's pointer went. And M6 (network, §11) has landed: the host is
+the wire, the guest runs the port's own `net` server and `virtio_net` driver against it, and
+`ping 10.0.2.2` typed at the prompt in a browser tab is answered. Every milestone in §11 is done.
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -837,7 +839,7 @@ kernel calls it unconditionally, but it does nothing.
 | `ser_input`, `tty.rs`, `serial_*` | DOM/canvas terminal buffers | Blocking read = Asyncify unwind |
 | Timer (`clock.rs`, `init_profile_clock`) | `performance.now()` + host-injected ticks | Host *is* the interrupt controller |
 | `virtio_blk.rs` | IndexedDB (persistent) or in-memory | Async host ops — needs Asyncify |
-| `virtio_net.rs` | WebSocket (or WebRTC data channel) | No raw sockets in a browser |
+| `virtio_net.rs` | **The host's link** (M6): four imports (`mac`, `pending`, `recv`, `send`) and a frame is all that crosses. `net.js` has two links behind the same seam — an in-page gateway that answers ARP and ICMP echo for 10.0.2.2, and a WebSocket relay (`tools/wasm-net/relay.js`) running that same gateway | No raw sockets in a browser |
 | `pci.rs` | Deleted; host provides a device manifest | No PCI bus |
 | `fb.rs` | **The host's display** (M5a): the surface is the server's own buffer, the mode is the host's, and `FBIOFLUSH` presents a frame. `CDEV_MAP` refused — no page tables to map a physical range through |
 | `wserver.rs`, `fbfont.rs` | **The desktop** (M5b, §9.3): the compositor composes into a surface of its own and hands each frame to `/dev/fb` as one datagram write, which the fb driver presents. `wserver` is a *port invention* (3.3.0 has no window system); the font is `userland`'s `FONT_8X16` |
@@ -1436,7 +1438,54 @@ Both blockers above are recorded here rather than discovered later, and neither 
 landed code: M5a needs the first (it is the thing that makes mmap impossible) and M5c needed the
 second, which it has now.
 
-**M6 — Network.** `virtio_net` over WebSocket.
+**M6 — Network. Status: DONE.** `virtio_net` over a host link, and a `ping` in a browser tab.
+
+The stack is the port's own, unchanged: `net` is the same server that serves `/dev/ip`, `/dev/udp`
+and `/dev/tcp` on the hardware arches, `virtio_net` is the same DL driver, and the protocol between
+them is the reference's `libnetdriver`. What M6 added is the *transport*, exactly as M4 did for the
+block device — `virtio_net_probe` asks the host for a MAC instead of reading a device config,
+`rx_pending` fills the RX FIFO from the link where `reap_rx` fills it from a used ring, and
+`transmit` stages the frame and hands it over whole. Four imports (`host_net_mac`,
+`host_net_pending`, `host_net_recv`, `host_net_send`) and one predicate (`has_device`) are the whole
+of the difference: `receive`, the FIFO and every byte above them are compiled once for all four
+targets.
+
+Two details worth the ink. A transmit carries **no `virtio_net_hdr`** on this arch: that header is the
+*device's* word for what the guest knows about a frame — which is why the offload features are
+negotiated rather than assumed — and a link has no use for one, so the header's static exists only
+where there is a device to hand it to. And `has_device` replaces `dev.is_some()` because on wasm
+`dev` is `None` *and* there is a device: the host's link. A driver that reported `NotFound` for the
+hardware it just found would be a system with no network on an arch that has one.
+
+The other half is what a link *is*, and §9's one word — "WebSocket" — turned out to need an answer a
+browser can give on its own. A WebSocket has to terminate somewhere and the published demo has no
+server behind it, so the wire is a seam with two implementations (`tools/wasm-browser/net.js`):
+`createGateway` answers ARP and ICMP echo for 10.0.2.2 in-process, which is the gateway the port
+already targets under QEMU's SLIRP, and `createWebSocketLink` tunnels the same frames to a relay
+(`tools/wasm-net/relay.js`) that runs *that same gateway* on its side. The page chooses with
+`?net=<url>`; the guest cannot tell the difference, because the four imports are the whole of what it
+sees.
+
+Demonstrated: `ping 10.0.2.2`, typed at the shell, in a browser tab. The shell forks and execs
+`/bin/ping` off the image, the program opens `/dev/ip`, VFS routes major 14 to `net`, that server
+ARP-resolves the gateway, frames an Ethernet/IP/ICMP packet and hands it to `virtio_net` over DL — and
+the reply comes back up the same path into the guest's own stack, which parses it and prints the id
+it chose (`getpid() as u16`). The checks read that id rather than matching a constant, which is what
+says the answer belongs to *this* guest's request.
+
+Measured: two frames per `ping` (the ARP request and the echo request), both answered, none refused.
+`boot.cjs` checks it at quiescence (82/82), `run.js` at a live prompt (20/20) and `page.test.js`
+through the page's own keyboard handler (46/46). The wire has its own two tests, because a link is
+the one part of this that neither guest can see: `net.test.js` frames the gateway's replies the way a
+*receiver* frames them — a checksum is only accepted when recomputing it over the data including the
+stored value comes out zero (27/27) — and `relay.test.js` drives the relay with the WebSocket client
+Node ships rather than the one under test (10/10).
+
+What is not here: UDP and TCP work through this link, but nothing in the image exercises them —
+`/bin/udp`, `/bin/tcp` and the servers are ELF binaries on the arches and have no arm in the wasm
+module yet, which is a `WASM_MODULES` entry and a `match` arm away each. And the relay is a gateway,
+not a bridge: frames reach the process next to it, not the internet, which would be a NAT and a policy
+decision rather than a transport one.
 
 **M7 — fork and exec of arbitrary modules.** See §12 and the M7a/M7b plans below — **done**: M7a
 steps 1–4, so a process can exec a module, *is* that module, and the module came off the disk, and
@@ -2130,16 +2179,17 @@ What the page does *not* do, and which milestone it belongs to:
 - **No worker.** The guest runs on the main thread and yields to the browser between slices.
   Moving it into a Worker would decouple the two and would need the console to cross
   `postMessage`.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 80 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 82 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
-Verified by `tools/wasm-browser/run.js` (19 checks: the boot, the park, a typed command that forks
-and execs, the reap, quiescence, the pointer reaching the desktop while the shell is busy, a drag
+Verified by `tools/wasm-browser/run.js` (20 checks: the boot, the park, a typed command that forks
+and execs, the reap, a typed `ping` reaching the host link, quiescence, the pointer reaching the
+desktop while the shell is busy, a drag
 long enough that the old cost exhausted the budget, and four
 boots over one disk — the last two writing files they
 never sync, so the shutdown is what makes them durable; it runs headless, so its guest's `fb` server
 finds no display) and `tools/wasm-browser/page.test.js`
-(45 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
+(46 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
 — the pump policy, the key map, the repaint coalescing, the pane toggle, the cursor's position, both
 controls, and the guest's composed desktop arriving in the canvas with the channels a canvas wants —
 is not left
@@ -2262,7 +2312,11 @@ target does and does not cover is written down.
   `-m` for the full server stack is unknown.
 - Is the shared mailbox arena (§5.1) acceptable, or is full host-mediated
   copying required? This is a design-taste question, not a technical one.
-- Does the sequence of M5/M6 matter? Neither blocks the shell.
+- ~~Does the sequence of M5/M6 matter? Neither blocks the shell.~~ **Answered: no, and both
+  landed.** They share nothing but the disposition — the host is the device and the guest owns every
+  byte above it — and M6 reused that rather than extending it: `virtio_net`'s wasm transport is four
+  imports, and the wire behind them is a seam with two implementations because a WebSocket has to
+  terminate somewhere and the published demo has no server behind it (§11, M6).
 - The wasm harness (`boot.cjs`, `run.js`, `page.test.js`) and `just publish-wasm` run by hand: no
   workflow mentions any of them, so the best-tested surface in the project is unguarded while the
   weaker arch gates are watched on every push. Wiring it in drags a nightly and Binaryen into a

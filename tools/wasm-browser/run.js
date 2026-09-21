@@ -22,6 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createHost, SYSTEM_SPECS } from './host.js';
+import { createGateway } from './net.js';
 import { fileStore } from './file-store.js';
 import { createTerminal } from './terminal.js';
 
@@ -53,10 +54,16 @@ const imageBytes = fs.readFileSync(imagePath);
 
 const terminal = createTerminal();
 const diagnostics = [];
+// The network link (M6): the in-page gateway, the same object the page creates and `boot.cjs`
+// requires. What this engine adds over `boot.cjs`'s copy is the *live prompt*: `ping` is typed at a
+// running shell rather than run from a boot script, so the client is a fork of a shell that is
+// already serving its own console read.
+const gateway = createGateway();
 const host = createHost({
   kernel: kernelWasm,
   servers: serversWasm,
   image: imageBytes,
+  net: gateway,
   sink: {
     write: (byte) => terminal.write(byte),
     note: (name, detail) =>
@@ -136,6 +143,30 @@ check(
   "the child's output reached the console and the shell came back for more",
   afterEcho === 'awaiting-input' && terminal.lines.includes('hi'),
   `settle ended on ${afterEcho}; console:\n${terminal.text()}`
+);
+
+// --------------------------------------------------------------------- M6: the network
+//
+// A typed `ping`, at a shell that is already at its prompt: the shell forks and execs `/bin/ping`
+// off the image, the program opens `/dev/ip`, VFS routes major 14 to the net server, and that server
+// ARP-resolves 10.0.2.2, frames the packet and hands it to `virtio_net` over DL — which on this arch
+// reaches the host through four imports (`ARCH_WASM32.md` §9, M6). What answers is `net.js`'s
+// gateway, the same object the page runs.
+//
+// The id in the reply is the forked client's own pid, so the check reading it is what says the
+// answer came back to *this* guest's request rather than being something the host decided to print.
+const GATEWAY_STATS_BEFORE = JSON.stringify(gateway.stats);
+type('ping 10.0.2.2\n');
+const afterPing = settle();
+check(
+  'a typed ping reaches the host link, and the guest parses the reply',
+  afterPing === 'awaiting-input' &&
+    /ping: 10\.0\.2\.2 alive \(reply id=\d+ seq=1\)/.test(terminal.text()) &&
+    gateway.stats.arpReplies >= 1 &&
+    gateway.stats.icmpReplies >= 1 &&
+    gateway.stats.unanswered === 0,
+  `settle ended on ${afterPing}; link carried ${JSON.stringify(gateway.stats)} ` +
+    `(was ${GATEWAY_STATS_BEFORE}); console:\n${terminal.text()}`
 );
 
 // ----------------------------------------------- a loop of commands, and its cost

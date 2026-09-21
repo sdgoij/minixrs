@@ -11,7 +11,8 @@ pub use arch_sim::hal::*;
 use crate::{
     console_available, console_read, console_write, copy_between_procs, cycles, halt_host,
     host_block_capacity, host_block_read, host_block_write, host_fb_geometry, host_fb_present,
-    run_profile_callback, set_profile_callback, set_tsc_switch, trap, tsc_switch,
+    host_net_mac, host_net_pending, host_net_recv, host_net_send, run_profile_callback,
+    set_profile_callback, set_tsc_switch, trap, tsc_switch,
 };
 
 pub fn init() {
@@ -148,6 +149,75 @@ pub fn block_write(offset: u64, buf: &[u8]) -> i32 {
 
 /// `EINVAL`, for an argument the host could not be given.
 const EINVAL: i32 = -22;
+
+// ------------------------------------------------------------------------ network
+
+/// The attached link's MAC address, or `None` when the host has no link (M6).
+///
+/// The host is the wire on this port the way it is the console, the clock, the disk, the display and
+/// the input devices, and this is what `virtio_net_probe` asks instead of reading a device config —
+/// which is the only thing its probe wants from the hardware. A host with no link answers `None`, so
+/// the driver reports `NotFound` and the net server runs without a NIC, the same disposition a
+/// machine with an empty slot has.
+///
+/// The MAC is the *link's*, not the host's business: what a link is addressed as is a property of
+/// the wire it is pretending to be, and the two links this port has (`ARCH_WASM32.md` §9) are an
+/// in-page gateway and a WebSocket relay — neither of which has a reason to disagree about it.
+pub fn net_mac() -> Option<[u8; 6]> {
+    // SAFETY: the import has no preconditions; the host answers 0 for "no link".
+    let packed = unsafe { host_net_mac() };
+    if packed == 0 {
+        return None;
+    }
+    Some([
+        (packed >> 40) as u8,
+        (packed >> 32) as u8,
+        (packed >> 24) as u8,
+        (packed >> 16) as u8,
+        (packed >> 8) as u8,
+        packed as u8,
+    ])
+}
+
+/// One inbound frame, or `None` when the link has nothing queued.
+///
+/// `None` and not a zero length, because a frame that arrives has at least an Ethernet header and
+/// the link's absence is the other question — which the driver has already asked at probe time. A
+/// frame larger than `buf` is a driver bug rather than a link condition, so it is reported short and
+/// the caller drops it, as a real NIC's driver does.
+pub fn net_recv(buf: &mut [u8]) -> Option<usize> {
+    let bytes = buf.len().min(u32::MAX as usize) as u32;
+    // SAFETY: `buf` is live and `bytes` long for the duration of the call, which is synchronous,
+    // and the host writes only the bytes it is told about.
+    let n = unsafe { host_net_recv(buf.as_mut_ptr() as u32, bytes) };
+    if n < 0 { None } else { Some(n as usize) }
+}
+
+/// How many frames the link is holding for this guest, or `None` when there is no link.
+///
+/// The question an arch with a device answers by walking its used ring, and the one that makes the
+/// DL server's read cheap: a NIC has nothing to give most of the time, and a driver that found that
+/// out by reading would spend a round trip on every poll. `None` is the link's absence rather than
+/// its emptiness, which is why it is not `0`.
+pub fn net_pending() -> Option<usize> {
+    // SAFETY: the import has no preconditions; the host answers ENODEV for "no link".
+    let n = unsafe { host_net_pending() };
+    if n < 0 { None } else { Some(n as usize) }
+}
+
+/// Hand one frame to the link. False when there is no link, or the host refused it.
+///
+/// A frame rather than a stream, and complete: a transmit that reported success has handed the
+/// whole frame over, which is what the DL server's `DL_TASK_REPLY` promises its client.
+pub fn net_send(frame: &[u8]) -> bool {
+    if frame.len() > u32::MAX as usize {
+        return false;
+    }
+    // SAFETY: `frame` is live and `frame.len()` long for the duration of the call, which is
+    // synchronous, and the host reads only the bytes it is told about.
+    let r = unsafe { host_net_send(frame.as_ptr() as u32, frame.len() as u32) };
+    r == 0
+}
 
 // ---------------------------------------------------------------------- display
 

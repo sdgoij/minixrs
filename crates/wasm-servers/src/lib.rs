@@ -135,6 +135,36 @@ pub extern "C" fn minix_server_virtio_blk() -> i32 {
     0
 }
 
+/// The virtio-net DL server, whose hardware on this arch is the host's link (M6).
+///
+/// `net` drives it: `DL_CONF` for the MAC, then `DL_READV_S`/`DL_WRITEV_S` per packet — the protocol
+/// `libnetdriver` defines and the one the arches' QEMU device answers. What is the host's here is
+/// only the *wire*: `virtio_net_probe` asks the link for a MAC instead of reading a device config,
+/// and a transmit is a frame handed over rather than a descriptor the device completes
+/// (`crates/drivers/src/network/virtio_net.rs`). The frames themselves are the guest's on both.
+///
+/// It has to be spawned for `net` to start at all: that server's first act is `DL_CONF`, a SENDREC
+/// that blocks until this instance answers it. A system with `net` and no `virtio_net` is a net
+/// server that never reaches its loop.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_virtio_net() -> i32 {
+    servers::virtio_net::virtio_net_server_main();
+    0
+}
+
+/// The net server: ARP and ICMP behind `/dev/ip`, and the UDP and TCP sockets behind `/dev/udp` and
+/// `/dev/tcp` (M6).
+///
+/// The device nodes are already in the boot image (`boot-image`'s `DEVICES` table: major 14, minors
+/// 0, 1 and 2), so this instance is what an `open("/dev/ip")` resolves to — VFS routes by major, and
+/// without an instance the open blocks on a peer that never answers. Its own first acts are
+/// `register_grants` and `dl_conf` to `virtio_net`, which is why that instance is spawned as well.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_net() -> i32 {
+    servers::net::net_server_main();
+    0
+}
+
 /// The tty server: the console, the RS-232 lines and the pty pairs, all behind
 /// VFS's device layer.
 ///

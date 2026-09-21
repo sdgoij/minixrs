@@ -1,0 +1,6 @@
+{
+  "name": "minixrs-wasm-net",
+  "private": true,
+  "description": "The WebSocket relay the wasm port's second network link talks to (M6). `.js` files here are ES modules, the same arrangement `tools/wasm-browser/package.json` makes for the page.",
+  "type": "module"
+}

@@ -235,6 +235,10 @@ pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
         Some("echo") | Some("/bin/echo") => userland::echo(args),
         Some("/bin/sh") | Some("sh") => userland::sh(args),
         Some("forktest") | Some("/bin/forktest") => forktest(),
+        // The first program in this module whose work is not the console's: `ping` opens `/dev/ip`
+        // and the net server behind it drives the host's link (M6), so this is the arm that says
+        // the module can hold a *client* of a device rather than a handler of its own stdio.
+        Some("ping") | Some("/bin/ping") => userland::ping(args),
         Some(name) => {
             userland::write_err(b"program: no such command: ");
             userland::write_err(name.as_bytes());

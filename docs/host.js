@@ -110,6 +110,12 @@ export const SYSTEM_SPECS = [
   { slot: 8, entry: 'minix_server_vm', label: 'vm' },
   { slot: 7, entry: 'minix_server_mfs', label: 'mfs' },
   { slot: 12, entry: 'minix_server_virtio_blk', label: 'virtio_blk' },
+  // The network (M6). Slots 13 and 14 are the proc numbers the shipping arches give these two
+  // (`arch-common`'s `VIRTIO_NET_PROC_NR` and `NET_PROC_NR`), so the kernel's boot table, their
+  // endpoints and their privilege structures are the same ones — what the host adds is the
+  // instances. `virtio_net` first: `net`'s own startup blocks on it.
+  { slot: 13, entry: 'minix_server_virtio_net', label: 'virtio_net' },
+  { slot: 14, entry: 'minix_server_net', label: 'net' },
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
@@ -176,6 +182,14 @@ export function createHost({
   /// the hardware fixed — and `present` is where a frame goes: a canvas in a page, a recorder in
   /// a check. `display.js` is the canvas one; `run.js` and `boot.cjs` hand over recorders.
   display = null,
+  /// The network link, or omitted for a guest with no NIC: `{mac, pending(), recv(into), send(frame)}`.
+  ///
+  /// The host is the wire on this port (M6), and which wire is the front end's choice — `net.js` has
+  /// two, an in-page gateway and a WebSocket relay, and the guest cannot tell them apart. What the
+  /// guest owns is everything above the frame: `virtio_net`'s DL messages, the `net` server's ARP
+  /// and ICMP, and the client's packets. Without a link the driver reports `NotFound` and the system
+  /// boots without a NIC, which is the disposition a machine with an empty slot has.
+  net = null,
   specs = SYSTEM_SPECS,
   /// The host's lever against a guest that keeps making syscalls without getting anywhere
   /// (finding 12). Generous: a boot with a shell, a fork and an exec costs a five-figure number,
@@ -672,6 +686,14 @@ export function createHost({
     return st;
   }
 
+  /// A 6-byte MAC as the one number `host_net_mac` answers with: `m0` in the top byte, which is the
+  /// order `arch_wasm32`'s wrapper unpacks.
+  const macPacked = (mac) => {
+    let packed = 0n;
+    for (const byte of mac) packed = (packed << 8n) | BigInt(byte);
+    return packed;
+  };
+
   /// Build the import object an instance of this slot gets.
   ///
   /// A function of the *slot* rather than of the instance, because exec replaces a slot's
@@ -739,6 +761,24 @@ export function createHost({
           view.setUint16(outAddr + 2, ev.code, true);
           view.setInt32(outAddr + 4, ev.value, true);
           return 8;
+        },
+        // The network link (M6). The same division the block device has: the host owns the wire, and
+        // the guest owns every byte of meaning above it. The two numbers that are *not* frames —
+        // whether there is a link at all, and what MAC it reports — are the only things this
+        // boundary decides, which is what makes a link swap invisible to the guest.
+        host_net_mac: () => BigInt(net === null ? 0 : macPacked(net.mac)),
+        host_net_pending: () => (net === null ? ENODEV : net.pending()),
+        host_net_recv: (bufAddr, bytes) => {
+          if (net === null) return ENODEV;
+          // A view rather than a copy: the link writes the frame where the caller asked for it, the
+          // same arrangement `host_block_read` has.
+          return net.recv(new Uint8Array(memory.buffer, bufAddr, bytes));
+        },
+        host_net_send: (srcAddr, bytes) => {
+          if (net === null) return ENODEV;
+          // `ENODEV` for a refused transmit too: what the driver asks is only "was it taken", and a
+          // link with no carrier is a device that is not there as far as this call is concerned.
+          return net.send(new Uint8Array(memory.buffer, srcAddr, bytes)) ? 0 : ENODEV;
         },
         // All six argument registers are named and forwarded, not only the two the
         // message-passing syscalls use: the kernel's dispatcher hands `args` straight to the
@@ -1009,6 +1049,9 @@ export function createHost({
     /// What the display has been asked for: frames presented, bytes, and the mode it named.
     display: displayStats,
     console: console_,
+    /// The network link, or null when the host has none. The checks read its `stats`, and a front
+    /// end that chose the link already holds it.
+    net,
     /// The input queue, and the two ways to put a record in it: `push` announces it (what a front end
     /// does), `enqueue` holds it silently (what a check does to prove the announcement is what the
     /// guest acts on).

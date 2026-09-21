@@ -142,10 +142,15 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
 /// chooses the program inside it — which is what makes a multi-call program affordable in an
 /// image whose modules are megabytes wide, and which is why the module's dispatch arms name the
 /// paths as well as the bare names.
+///
+/// `/bin/ping` is the same arrangement and the first entry here that is a *client of a device*
+/// rather than a program working on its own stdio (M6): it opens `/dev/ip`, and what answers is the
+/// net server and the host's link behind it.
 pub const WASM_MODULES: &[(&str, &str)] = &[
     ("/bin/sh", "program.async.wasm"),
     ("/bin/echo", "program.async.wasm"),
     ("/bin/forktest", "program.async.wasm"),
+    ("/bin/ping", "program.async.wasm"),
 ];
 
 /// Root-filesystem data files baked into the minixfs image: destination

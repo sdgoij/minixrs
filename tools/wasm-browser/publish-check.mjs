@@ -101,6 +101,9 @@ check(
 
 const { createHost } = await import(pathToFileURL(staged('host.js')).href);
 const { createTerminal } = await import(pathToFileURL(staged('terminal.js')).href);
+// The staged link, not the working copy's: what this file is for is the copy that gets published, so
+// the wire the demo will run is the wire this checks (M6).
+const { createGateway } = await import(pathToFileURL(staged('net.js')).href);
 
 const display = {
   width: 1024,
@@ -117,11 +120,13 @@ const display = {
 };
 
 const terminal = createTerminal();
+const gateway = createGateway();
 const host = createHost({
   kernel: read(staged('build/kernel.wasm')),
   servers: read(staged('build/servers.async.wasm')),
   image: read(staged('build/minixfs.img')),
   display,
+  net: gateway,
   sink: { write: (byte) => terminal.write(byte), note: () => {} },
 });
 
@@ -149,6 +154,20 @@ check(
   'a command typed at the staged prompt runs and answers',
   terminal.lines.includes('published'),
   `console:\n${terminal.text()}`
+);
+
+host.console.push('ping 10.0.2.2\n');
+settle();
+check(
+  'and the staged guest has a network: a typed ping reaches the link and is answered',
+  // The demo's headline for M6, checked on the copy that gets served — a reader who opens the page
+  // and types this is the thing being verified, so it is verified here rather than only in the
+  // working tree the tests run against.
+  /ping: 10\.0\.2\.2 alive \(reply id=\d+ seq=1\)/.test(terminal.text()) &&
+    gateway.stats.arpReplies >= 1 &&
+    gateway.stats.icmpReplies >= 1 &&
+    gateway.stats.unanswered === 0,
+  `console:\n${terminal.text()}\nlink: ${JSON.stringify(gateway.stats)}`
 );
 
 /// The pixel at `(x, y)` of a frame the guest presented, in the guest's own channel order.

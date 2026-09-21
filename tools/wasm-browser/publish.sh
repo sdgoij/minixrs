@@ -26,7 +26,7 @@ sh "$here/build.sh" >/dev/null
 
 mkdir -p "$site/build"
 
-for file in index.html page.js host.js display.js store.js terminal.js package.json; do
+for file in index.html page.js host.js display.js store.js terminal.js net.js package.json; do
   cp "$here/$file" "$site/$file"
 done
 

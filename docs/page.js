@@ -20,6 +20,7 @@
 import { createHost } from './host.js';
 import { createDisplay } from './display.js';
 import { indexedDbStore } from './store.js';
+import { createGateway, createWebSocketLink } from './net.js';
 import { createTerminal } from './terminal.js';
 
 const ARTIFACTS = {
@@ -65,6 +66,24 @@ const elements = {
 /// Built at the top level rather than at bring-up because it is part of what the engine is given:
 /// a page with no canvas is a page whose guest has no display, which is the headless case.
 const display = createDisplay(elements.display);
+
+/// The network link this page attaches (M6), and what to call it.
+///
+/// The in-page gateway unless the page was opened with `?net=<websocket url>`, in which case the
+/// frames are tunnelled to a relay (`tools/wasm-net/relay.js`) instead. A query parameter rather
+/// than a build-time choice because both wires serve the *same* guest — what changes is where the
+/// frames go — and a demo that had to be rebuilt to show the other one would be two demos. The
+/// value is deliberately a whole WebSocket URL: the page has no business deciding which relay is
+/// the right one, and a reader who runs one knows its address.
+function openLink() {
+  const wanted = new URLSearchParams(window.location?.search ?? '').get('net');
+  if (wanted === null || wanted === '') {
+    return { link: createGateway(), name: 'net: the in-page gateway' };
+  }
+  return { link: createWebSocketLink({ url: wanted }), name: `net: relay ${wanted}` };
+}
+
+const net = openLink();
 
 let host = null;
 let stopping = false;
@@ -203,7 +222,7 @@ async function run() {
       continue;
     }
 
-    setStatus(`running — ${host.steps} dispatch steps, ${host.procs.length} processes`);
+    setStatus(`running — ${host.steps} dispatch steps, ${host.procs.length} processes, ${net.name}`);
     await nextFrame();
   }
 }
@@ -549,6 +568,7 @@ async function main() {
       image,
       store: disk,
       display,
+      net: net.link,
       sink: {
         write: (byte) => {
           terminal.write(byte);

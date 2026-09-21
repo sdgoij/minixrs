@@ -125,6 +125,30 @@ unsafe extern "C" {
     /// `press` is signed and a decoded triple is what the call site holds; this is the same
     /// arrangement `host_block_read` has, and for the same reason.
     fn host_input_read(out: u32) -> i32;
+    /// The attached network link's MAC address, packed `m0 << 40 | … | m5`, or 0 for no link.
+    ///
+    /// The host is the wire on this port (M6) the way it is the console, the clock, the disk, the
+    /// display and the input devices, and a MAC is the one thing a NIC's probe has to learn from its
+    /// hardware — on an arch with a bus, `virtio_net_probe` reads it out of the device config. Zero
+    /// is the answer that means "no link": the driver reports `NotFound` and the net server runs
+    /// without a NIC rather than pretending to have one.
+    fn host_net_mac() -> u64;
+    /// Write the next inbound frame at `buf` in the caller's memory (up to `bytes`), and return its
+    /// length; `-1` when the link has nothing queued, `ENODEV` when there is no link at all.
+    ///
+    /// A *frame*, not a stream, and without the virtio header: what the link carries is exactly
+    /// what the RX path hands the DL client on an arch whose device delivers into a queue, so the
+    /// driver above this boundary is the same one on both. `-1` is the console's "nothing pending"
+    /// rather than an errno, because an empty queue is the ordinary state of a NIC.
+    fn host_net_recv(buf: u32, bytes: u32) -> i32;
+    /// How many frames the link is holding for this guest.
+    ///
+    /// What an arch with a device learns by walking its used ring — a driver has to ask before it
+    /// reads, because "nothing yet" is the answer a NIC gives most of the time and a read that
+    /// blocked on it would be a driver that cannot serve its other clients. `ENODEV` for no link.
+    fn host_net_pending() -> i32;
+    /// Hand `bytes` bytes of the caller's memory at `src` to the link, as one frame.
+    fn host_net_send(src: u32, bytes: u32) -> i32;
 }
 
 /// The same names as *definitions*, for a build of this crate that has no host to import them
@@ -205,6 +229,20 @@ mod no_host {
     /// `-1`: the console contract's "nothing pending", which is also the truth here.
     pub unsafe fn host_input_read(_out: u32) -> i32 {
         -1
+    }
+    /// No host, so no link: a driver that asks finds no device, which is the answer a machine with
+    /// an empty slot gets from its probe.
+    pub unsafe fn host_net_mac() -> u64 {
+        0
+    }
+    pub unsafe fn host_net_recv(_buf: u32, _bytes: u32) -> i32 {
+        ENODEV
+    }
+    pub unsafe fn host_net_pending() -> i32 {
+        ENODEV
+    }
+    pub unsafe fn host_net_send(_src: u32, _bytes: u32) -> i32 {
+        ENODEV
     }
 }
 
