@@ -1,6 +1,6 @@
 ---
 name: silent-failure-traps
-description: Traps in minixrs where a failure looks like success or like silence rather than an error — host scripts driving a QEMU guest (an MSYS FIFO that a native QEMU reads nothing from, a pipeline's left side swallowing `exit 1`, `read` eating a trailing tab, input sent before the prompt being dropped), and the kernel's message/diag boundaries (a delivered message's source endpoint, the SYS_DIAGCTL layout). Load when writing or fixing a gate, a harness, an `image-*` recipe or CI check, when scripting input into a guest, when a guest's output stops for no apparent reason, or when a reply reaches a server with the wrong sender.
+description: Traps in minixrs where a failure looks like success or like silence rather than an error — host scripts driving a QEMU guest (an MSYS FIFO that a native QEMU reads nothing from, a pipeline's left side swallowing `exit 1`, `read` eating a trailing tab, input sent before the prompt being dropped, an expectation another step has already printed so a command that never ran passes), and the kernel's message/diag boundaries (a delivered message's source endpoint, the SYS_DIAGCTL layout). Load when writing or fixing a gate, a harness, an `image-*` recipe or CI check, when scripting input into a guest, when a guest's output stops for no apparent reason, or when a reply reaches a server with the wrong sender.
 ---
 
 # Silent failure traps
@@ -32,6 +32,15 @@ reasoned about; the fix recorded is what the code does now.
 - **Anchored expectations only.** The guest echoes what you type, so an unanchored search for the
   expected output also matches the echo of the command that was supposed to produce it. Match a whole
   line (`^…[[:space:]]*$`) and never let an expectation be a substring of its own command.
+- **An expectation can be answered by another step.** The match runs against the whole accumulated log,
+  so a step whose expected line any *earlier* step has already printed passes while doing nothing at
+  all. A `pr` bisect went green in all five steps with `pr` out of `feat_minix`, and the replay of the
+  original failing sequence went green too — its `pr` step's expectation had already been printed by
+  the `cat` step above it. An empty expectation is weaker still — it asserts only that the shell echoed
+  the line and came back to a prompt, and the exit status is never consulted, so a command that
+  panicked, failed or does not exist passes exactly like one that worked. Give every assertion a line no
+  other step can produce (a per-step marker turned that same probe into a wedge it could finally see),
+  and read "the prompt came back" as liveness, not as evidence that the tool worked.
 
 ## The kernel's message boundary
 

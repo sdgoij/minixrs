@@ -70,6 +70,8 @@ Rules that apply to a single crate belong in that crate's own `.rules` file, not
 ## What NOT to put in `.rules`
 Avoid architectural descriptions of a crate (module layout, data flow, key types). These go stale fast and the agent can gather them by reading the code. Rules should be **traps to avoid**, not **maps to follow**.
 
+**A lesson about *how to work* is not a rule — it is a skill.** This file is for what a contributor writing code must do differently: traps in the code, the build or the workflow, each of them an actionable line. A *procedure* — how to drive a guest, how to gate a change, how to diagnose a subsystem, anything whose value is in its steps and measurements — belongs in the skill that owns that area (`silent-failure-traps` for guest harnesses and gates, `rust-fork-rebase` for toolchain rebuilds, `minix-testing` for where tests live), where it can be loaded when it is relevant; this file is read by every session, so it stays high-signal. Reach for the skill first — a "Suggested .rules additions" note in a PR is for a trap that a code change must avoid, not for methodology.
+
 ## No drive-by additions
 Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.

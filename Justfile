@@ -71,8 +71,21 @@ bootstrap target="all":
 # string - an incremental rebuild keeps the same string, so the old rlib cache
 # stays "fresh" and the next userland build fails with E0463 ("can't find crate
 # for ...") when rustc cannot read the stale metadata.
+# coreutils is a workspace of its own, with its own target/ dir, so that clean
+# never reaches it: without the clean below the multicall links rlibs built by
+# the previous toolchain against the new sysroot, which shows up as the same
+# E0463 and as a mixed `TypeId` scheme - clap then panics in
+# `MatchesError::Downcast` on every flag it reads. The price is one full
+# multicall rebuild after a bootstrap.
 _finish-bootstrap target:
     cargo clean
+    # `fetch-stage1` does not require the coreutils submodule, so skip this
+    # where its manifest is not checked out rather than fail there.
+    if [ -f coreutils/Cargo.toml ]; then cargo clean --manifest-path coreutils/Cargo.toml; fi
+    # A clean that quietly does nothing (an unparseable manifest is enough for
+    # it to report success) leaves the old rlibs behind, so assert it took
+    # effect now rather than let it resurface minutes into a later build.
+    @test -z "$(find coreutils/target -name '*.rlib' 2>/dev/null | head -1)" || (echo 'error: stale coreutils rlibs survived the clean - they fail later builds as E0463 or as clap TypeId panics' >&2 && exit 1)
     python tools/build-std-hello.py {{target}}
     # The C smoke-test binaries (helloc/ctest) also live under target/ and are
     # wiped by the clean; rebuild them for x86 (build-c-hello.py is x86-only —

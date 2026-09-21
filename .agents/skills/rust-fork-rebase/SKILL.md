@@ -96,7 +96,22 @@ ls rust/build/<host>/stage1/lib/rustlib/x86_64-pc-windows-msvc/lib/ | grep -i pr
 ```
 
 Related trap: the recipe's root `cargo clean` does **not** clean `coreutils/target/` —
-coreutils is in the root workspace's `exclude` list and keeps its own target dir.
+coreutils is in the root workspace's `exclude` list and keeps its own target dir. Left alone, that
+dir survives a toolchain rebuild and the multicall then links rlibs built by the *previous* stage1
+against the new sysroot. Two symptoms, both measured: the same `E0463` during `just coreutils-x86`
+(`can't find crate for typenum` / `shlex` / `num_traits` / `arrayvec`), and a mixed `TypeId` scheme,
+where clap panics on the first flag it reads — `Mismatch between definition and access of
+'number-nonblank' … MatchesError::Downcast` from `coreutils cat`.
+
+`_finish-bootstrap` now cleans it too, and asserts that no `*.rlib` survived: a `cargo clean` can
+exit 0 and leave everything in place (measured — it did, once, while the manifest was momentarily
+invalid, leaving 6774 files behind, and the stale rlibs only showed up minutes later as that E0463
+burst). Check by hand with:
+
+```sh
+find coreutils/target -name '*.rlib' \
+  ! -newer rust/build/<host>/stage1/lib/rustlib/<triple>/lib/libcore-*.rlib | wc -l   # 0
+```
 
 ## Linking minix binaries
 
@@ -286,6 +301,7 @@ Shapes worth knowing as of the current upstream:
 
 - [ ] `range-diff` shows every commit `=` (or `!` entries reviewed line by line) and no conflict markers remain
 - [ ] `ps -W | grep -i qemu` is empty before any `cargo clean`, and the smoke binaries were rebuilt after the last clean
+- [ ] `coreutils/target` holds no rlib older than the sysroot's `libcore` (`_finish-bootstrap` asserts this)
 - [ ] fork-only files byte-identical: `git diff --stat <pre-rebase-tag> HEAD -- 'library/std/src/sys/pal/minix/**' 'library/std/src/sys/pipe/minix.rs' 'library/std/src/sys/net/connection/minix.rs' 'library/std/src/sys/thread/minix.rs' 'compiler/rustc_target/src/spec/targets/*minix*'`
 - [ ] no conflict markers; `library/std/Cargo.toml` and `library/Cargo.lock` still carry the minix deps
 - [ ] `x.py build library/std library/proc_macro` green (warnings are errors)
