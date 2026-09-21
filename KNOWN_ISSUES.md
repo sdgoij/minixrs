@@ -79,24 +79,25 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      → SENDNB loop, `CLOCK_GETTIME` reads the kernel clock via SYS_TIMES,
      `CLOCK_SETTIME` forwards to SYS_SETTIME); note userland
      `clock_gettime` actually goes through PM, which already works.
-   - VM `do_vfs_reply` is implemented for the port's synchronous
-     VM→VFS protocol (`vfs_request_sync` blocks in sendrec, so out-of-band
-     VM_VFS_REPLY messages are rejected with SUSPEND — C's async PENDING
-     table has no counterpart here); `clear_pagefault` now forwards
-     VMCTL_CLEAR_PAGEFAULT to the kernel (was a no-op).
+   - VM `do_vfs_reply` completes the port's VM→VFS requests: they are asynchronous
+     (`vm/vfs_request.rs`, `asynsend3` with `AMF_NOREPLY`), so the reply is the only
+     thing that can finish them, and a reply whose request id matches nothing is
+     reported rather than read as an answer.
+   - `clear_pagefault` forwards VMCTL_CLEAR_PAGEFAULT to the kernel.
    - **No allocation inside VFS's VM-request handlers (FDIO, FDLOOKUP,
-     FDCLOSE of `do_vm_call`).** Those run while VM is blocked in
-     `vfs_request_sync`, and a server's heap growth is itself a *synchronous*
-     VM call (`minix-rt`'s `mmap_chunk` → `vmem::mmap` → blocking sendrec), so
-     an allocation here is delivered into VM's SENDREC reply slot and wedges
-     both servers — VM already returned from the fault handler, VFS waits for
-     the mmap reply, run queues empty. Same hazard for `vm_remap`,
-     `vm_getphys`, `vm_unmap` in `servers/src/ipc.rs` from device paths.
-     Nothing enforces this today; it is held by inspection. The structural
-     fix is to make VM's VFS requests asynchronous (send with `AMF_NOREPLY`,
-     which `mini_receive`'s async path already refuses to let satisfy a
-     SENDREC waiter, plus the pending table `do_vfs_reply` would complete) —
+     FDCLOSE of `do_vm_call`).** The hazard was that those run while VM is
+     blocked in `vfs_request_sync`, and a server's heap growth is itself a
+     *synchronous* VM call (`minix-rt`'s `mmap_chunk` → `vmem::mmap` →
+     blocking sendrec), so an allocation there was delivered into VM's
+     SENDREC reply slot and wedged both servers — VM already returned from
+     the fault handler, VFS waited for the mmap reply, run queues empty.
+     VM does not wait on VFS any more (`vm/vfs_request.rs`, asynchronous with
+     `AMF_NOREPLY`, so a waiting server cannot absorb the request either), so
+     the handler may allocate and the class is gone rather than policed —
      PORTING_PLAN.md finding 58.
+     Still true, and unrelated to that: `vm_remap`, `vm_getphys` and
+     `vm_unmap` in `servers/src/ipc.rs` are *callers* of VM, so a server
+     blocking on VM in those paths is the ordinary shape, not a cycle.
 8. **Threads (THREADS.md open workstreams)** — `thread_local!` in the minix
    std PAL, `Mutex`/`Condvar` over a futex sleep/wake, per-thread errno,
    C-ABI pthread surface; per-thread sigreturn is deferred (process-level

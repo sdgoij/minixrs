@@ -61,11 +61,11 @@ eviction, and no file-page COW. The block cache (and the MFS cache-sharing
 | `VR_*` region flags | `servers/src/vm/region.rs` — `VR_FILE` + `{dev,ino,fd,file_offset,file_size}`, `VR_EXEC`, `VR_WRITABLE/READABLE` | **implemented** |
 | VM↔VFS request codes | `arch-common/src/com.rs` (`VMVFSREQ_FDLOOKUP/FDCLOSE/FDIO`, `VM_VFS_REPLY`, `VM_VFS_MMAP`) | constants exist, used |
 | VFS `do_vm_call` (FDLOOKUP/FDCLOSE/FDIO) | `servers/src/vfs/call.rs` | **implemented** (dupvm, resolve vnode → dev/ino; FDIO does `req_read` into the faulting page; reply normalized to OK — byte count travels in the payload) |
-| VM→VFS request plumbing | `vm/mod.rs::vfs_request_sync` — synchronous SENDREC (`VFS_VMCALL`); the faulting process stays `RTS_PAGEFAULT`-blocked while VM waits | **implemented** |
+| VM→VFS request plumbing | `vm/vfs_request.rs` — asynchronous (`asynsend3` with `AMF_NOREPLY`), several in flight keyed by request id, a fixed node pool; the faulting process stays `RTS_PAGEFAULT`-blocked, VM does not wait | **implemented** (2026-09: was a synchronous SENDREC, finding 58) |
 | VM `do_vfs_mmap` | `servers/src/vm/mod.rs` — creates one lazy VR_FILE region per exec'd `PT_LOAD` (per-segment prot, in-file end, clears identity PTEs, sets one-shot pre-fault) | **implemented** |
-| VM `do_vfs_reply` | vm/mod.rs | still a no-op stub — the async reply path is unused (FDIO is synchronous) |
+| VM `do_vfs_reply` | `vm/vfs_request.rs::complete` — matches the reply's request id to the outstanding request and completes it (the `mmap` answers its caller itself; a page fault finishes its page and resolves the fault) | **implemented** |
 | VM block cache | `do_mapcache/do_setcache/do_clearcache` (vm/mod.rs) | **stubs** — v2 item, not needed for correctness with private per-fault pages |
-| `handle_pagefault_for` | vm/mod.rs | **file branch implemented**: `map_file_page` (alloc → zero → map writable → FDIO → zero bss tail → downgrade to region perms) |
+| `handle_pagefault_for` | vm/mod.rs | **file branch implemented**: `advance_fault` → `start_file_page` (alloc → zero → map writable → FDIO → `finish_file_page`: zero bss tail → downgrade to region perms), the fault resolved by the page that lands last |
 | VFS `vfs_memmap` | `servers/src/vfs/mmap.rs` | **implemented** (sends `VM_VFS_MMAP` with fd+offset+len+vaddr+prot+in-file end) |
 | VFS `map_vnode` | mmap.rs | still an ENOSYS stub (named-pipe mapping, out of scope) |
 | `VM_EXEC_NEWMEM` / `do_exec_newmem` | vm/mod.rs | **wired into the exec chain** (VFS calls it before mapping segments) |

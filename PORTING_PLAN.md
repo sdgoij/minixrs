@@ -7574,18 +7574,18 @@ byte 28. The trigger was the *diagnostic*: the `VFSFD` print added inside `do_vm
 built a `String`, and that allocation grew VFS's heap. Rewriting that print to emit fixed bytes made
 the same tree boot to `# ` on all three arches, which is what identified it.
 
-So the invariant the port runs on is *no allocation inside VFS's VM-request handlers* (the FDIO,
-FDLOOKUP and FDCLOSE arms of `do_vm_call`). Today nothing enforces it; the same hazard covers
-`vm_remap`, `vm_getphys` and `vm_unmap` in `crates/servers/src/ipc.rs`, which are the same shape and
-also callable from device paths. C does not have this problem because VM never blocks on VFS — the
-`vm_vfs_*` requests are asynchronous with callbacks through `do_vfs_reply`. The port replaced that
-with a synchronous sendrec (`vfs_request_sync`) and left `do_vfs_reply` a stub that rejects
-out-of-band replies, which is what makes a stray request able to land in a reply slot. The kernel
-already carries the guard the structural fix wants: `mini_receive`'s async path refuses to let an
-`AMF_NOREPLY` message satisfy a SENDREC waiter (`try_one`, matching C's `L1401`), and the synchronous
-path has no equivalent. Making VM's VFS requests asynchronous (send with `AMF_NOREPLY` so a waiting
-server cannot absorb them, plus the pending-request table `do_vfs_reply` would complete) removes the
-class rather than the instance.
+So the invariant the port ran on was *no allocation inside VFS's VM-request handlers* (the FDIO,
+FDLOOKUP and FDCLOSE arms of `do_vm_call`). Nothing enforced it, and it was held by inspection until
+2026-09, when the class was removed rather than policed: VM's VFS requests are asynchronous now
+(`crates/servers/src/vm/vfs_request.rs`), so VM never blocks on VFS and no request of VFS's can be
+delivered into a reply slot — see `TEST_GATES.md` Step 6 for the shape and finding 64 for how a
+stray message in that slot used to be read as an answer. C does not have the problem for the same
+reason: the `vm_vfs_*` requests are asynchronous with callbacks through `do_vfs_reply`. The port had
+replaced that with a synchronous sendrec (`vfs_request_sync`, gone) and left `do_vfs_reply` a stub
+that rejected out-of-band replies, which is what made a stray request able to land in a reply slot.
+The kernel already carried the guard the structural fix wanted: `mini_receive`'s async path refuses
+to let an `AMF_NOREPLY` message satisfy a SENDREC waiter (`try_one`, matching C's `L1401`); the
+async send is what uses it.
 
 **59. A console line assembled across a blocking syscall is a line somebody else can split.** On
 wasm INIT printed `init: pid=` and then the number as separate writes, with `getpid` — a SENDREC to
@@ -7715,21 +7715,29 @@ whose reply is simply the next message the kernel hands it — and VFS replies w
 `vm_call_reply` is the only place the type is written, and its own host test asserts as much). VM
 never checked it: `vfs_request_sync` read `VMV_RESULT`, `VMV_FD`, `VMV_SIZE_PAGES` straight out of
 whatever message came back. A message that arrived in that slot without being the reply — VFS's own
-request, or the late reply to an earlier asynchronous one (`fdclose_async`'s reply, reqid 0, which
-`do_vfs_reply` drops) — was therefore read as an fd, a file size and a page count taken out of the
+request, or the late reply to an earlier asynchronous one (`vfs_request::close`'s reply, reqid 0,
+which `complete` drops) — was therefore read as an fd, a file size and a page count taken out of the
 wrong words. The symptom is a wrong mapping or a wrong file at an arbitrary later point, which is the
 class finding 58 belongs to: nothing says where the two conversations crossed.
 
-It is checked now: `is_vfs_reply` tests bytes 4..8 against `VM_VFS_REPLY`, and a mismatch is reported
-and answered `EINVAL` rather than used. The report goes out over `SYS_DIAGCTL`, not `write(2)`, because
-the server being reported about is VFS — a report that needs VFS to print is one more way to hang in
-the place it is describing. `minix_rt::diag_write` is the missing half of `diag_putchar` (which is now
-a wrapper over it): it carries a whole line, chunked at 52 bytes, which is what one message holds — the
-kernel's own 256 cap is on what it will read, not on what fits. The line names the sender, the type,
-the request, the fd and the first two payload words, once: a slip like this repeats identically on
-every request, so a line per occurrence would amplify the log rather than explain it.
+It is checked now, in two steps. The type says whether a message is an answer at all (`is_vfs_reply`
+tests bytes 4..8 against `VM_VFS_REPLY`), and the request id says *whose* answer it is — the reply
+must name a request that is outstanding, or it completes nothing. Both reports go out over
+`SYS_DIAGCTL`, not `write(2)`, because the server being reported about is VFS — a report that needs
+VFS to print is one more way to hang in the place it is describing. `minix_rt::diag_write` is the
+missing half of `diag_putchar` (which is now a wrapper over it): it carries a whole line, chunked at
+52 bytes, which is what one message holds — the kernel's own 256 cap was on what it will read, not on
+what fits, and is the message's size now. The line names the sender, the type, the request id and the
+first two payload words, once: a slip like this repeats identically on every request, so a line per
+occurrence would amplify the log rather than explain it.
 
-The second half is the detector for the class, in the kernel rather than in VM, because the crossing
+**The two halves became one when Step 6 landed.** The type check was a patch over a synchronous
+`vfs_request_sync`, which is gone: VM's requests are asynchronous now (`vm/vfs_request.rs`), the reply
+is matched by request id, and a reply that matches nothing is reported rather than read as the current
+request's — which is the same class caught one step earlier. `is_vfs_reply`, the report and the tests
+for them moved into that module with the protocol they describe.
+
+The other half is the detector for the class, in the kernel rather than in VM, because the crossing
 is visible there and nowhere else. `mini_send`'s direct-delivery path now notes the send that
 satisfies a SENDREC waiter with the send half of another `sendrec`: the receiver has `REPLY_PEND`
 (it is in a `sendrec`'s receive phase, and `find_receiver` has established that its `p_getfrom_e`

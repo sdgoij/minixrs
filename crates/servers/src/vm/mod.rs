@@ -12,6 +12,7 @@ pub mod mem;
 pub mod pb;
 pub mod proc;
 pub mod region;
+pub mod vfs_request;
 
 use arch_common::com::{
     NR_VM_CALLS, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT, VM_FORK,
@@ -25,7 +26,14 @@ use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
 use arch_common::ipc::{EDONTREPLY, Message};
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+// The VM↔VFS protocol's layout constants live with the protocol
+// (`vm/vfs_request.rs`), which is also where the requests are sent from.
+use crate::vm::vfs_request::{
+    VMV_DEV_OFF, VMV_FD_OFF, VMV_INO_OFF, VMV_ISDEV_OFF, VMV_LEN_OFF, VMV_PHYS_OFF, VMV_RESULT_OFF,
+    VMV_SIZE_PAGES_OFF,
+};
 
 const OK: i32 = 0;
 
@@ -969,21 +977,15 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     // non-executable file regions (rodata/data) so VFS's kernel-mode copies
     // of the image (vircopy of user buffers) hit present pages.
     if region.flags & region::VR_FILE != 0 {
-        if vmp.prefault_exec {
+        let fault = if vmp.prefault_exec {
             vmp.prefault_exec = false;
-            // The pre-fault covers the faulting page when it lies in a
-            // non-executable region; map_file_page skips present pages, so
-            // the call below only maps the page when it is still absent
-            // (a VR_EXEC text page, which the pre-fault leaves lazy).
-            if !prefault_vfs_file_regions(ep, vmp, cr3) {
-                return;
-            }
-        }
-        if map_file_page(ep, vmp, cr3, addr) {
-            unsafe {
-                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-            }
-        }
+            Fault::for_prefault(ep, cr3, vmp, addr)
+        } else {
+            Fault::for_page(ep, cr3, addr)
+        };
+        // The fault is resolved by whichever page lands last, and not here: the pages VFS has to
+        // fill arrive later, and waiting for them in this handler is what finding 58 is about.
+        advance_fault(fault);
         return;
     }
 
@@ -1047,38 +1049,175 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     }
 }
 
-/// Map one page of a file-backed region: allocate a fresh page, map it
-/// writable at the VA, ask VFS to read the file block into it (FDIO — the
-/// magic grant write lands in the target's CR3), then downgrade to the
-/// region's permissions. Pages at or past EOF (holes, `.bss` tails) stay
-/// zero-filled; the FDIO read only fills the in-file portion. Shared by the
-/// demand-fault path and the exec pre-fault; the caller resolves the fault
-/// with VMCTL_CLEAR_PAGEFAULT on success. Returns false if the process was
-/// SIGSEGV'd (kill + fault-clear already done).
-fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
-    let page_size: u64 = 4096;
-    let page_addr = addr & !(page_size - 1);
+/// End a faulting process: SIGSEGV, and resolve the fault so it can be scheduled to die.
+fn kill_faulting(ep: i32) {
+    sys_kill(ep, SIGSEGV);
+    unsafe {
+        mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+    }
+}
 
-    // The exec pre-fault may have mapped this page already (the faulting
-    // page lies in a non-executable region it covered); skip it so the page
-    // isn't double-allocated. In the plain demand-fault path only PROT
-    // faults arrive with a present page, which map as before.
-    if crate::vm::vm_walk_page(cr3, page_addr) & kernel::pagetable::PG_P != 0 {
-        return true;
+/// The file pages one fault has to map, and whether the last of them unblocks the faulting
+/// process.
+///
+/// The pages are asked for one at a time (VFS answers one at a time), and the whole set is carried
+/// here rather than prepared up front: the fault path is also the place VM allocates ahead of
+/// nothing (finding 58), so the state tying a page to its process has to be something a request can
+/// hold rather than something built on the stack.
+#[derive(Clone, Copy)]
+pub struct Fault {
+    pub ep: i32,
+    pub cr3: u64,
+    /// Resolve the fault when the last page lands.
+    pub resolve: bool,
+    /// The pages of the pre-fault that ran on this process's first file fault, if it ran.
+    ranges: [(u64, u64); region::MAX_REGIONS],
+    n: usize,
+    range_i: usize,
+    page: u64,
+    /// The faulting page itself, mapped last when the ranges do not cover it (a text page, which
+    /// the pre-fault leaves lazy on purpose).
+    fault_page: u64,
+    trailing: bool,
+}
+
+impl Fault {
+    /// A demand fault: just this page.
+    fn for_page(ep: i32, cr3: u64, addr: u64) -> Self {
+        Self {
+            ep,
+            cr3,
+            resolve: true,
+            ranges: [(0, 0); region::MAX_REGIONS],
+            n: 0,
+            range_i: 0,
+            page: 0,
+            fault_page: addr & !(PAGE_SIZE - 1),
+            trailing: false,
+        }
     }
 
-    // Extract the fields we need up front so the region borrow ends before
-    // the blocking FDIO request.
-    let (fd, file_off, file_size, writable, exec, shared, dev, ino) = {
-        let region = match vmp.vm_regions.find_mut(page_addr) {
-            Some(r) => r,
-            None => {
-                sys_kill(ep, SIGSEGV);
-                unsafe {
-                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                }
-                return false;
+    /// The first file fault after an exec: the non-executable file regions' pages first — so
+    /// VFS's kernel-mode copies of the image (vircopy of user buffers, e.g. the shell's `# `
+    /// prompt in rodata) hit present pages — and the faulting page last.
+    fn for_prefault(ep: i32, cr3: u64, vmp: &proc::Vmproc, addr: u64) -> Self {
+        let mut fault = Self::for_page(ep, cr3, addr);
+        for r in vmp.vm_regions.regions.iter().flatten() {
+            if r.flags & region::VR_FILE != 0
+                && r.flags & region::VR_EXEC == 0
+                && fault.n < region::MAX_REGIONS
+            {
+                fault.ranges[fault.n] = (r.vaddr, r.end());
+                fault.n += 1;
             }
+        }
+        if fault.n > 0 {
+            fault.page = fault.ranges[0].0;
+        }
+        fault
+    }
+
+    /// The next page to map, advancing the cursor. `None` when there is nothing left to map.
+    fn next_page(&mut self) -> Option<u64> {
+        loop {
+            if self.range_i < self.n {
+                let (start, end) = self.ranges[self.range_i];
+                let va = self.page.max(start);
+                if va < end {
+                    self.page = va + PAGE_SIZE;
+                    return Some(va);
+                }
+                self.range_i += 1;
+                if self.range_i < self.n {
+                    self.page = self.ranges[self.range_i].0;
+                }
+                continue;
+            }
+            if !self.trailing {
+                self.trailing = true;
+                if self.fault_page != 0 {
+                    return Some(self.fault_page);
+                }
+            }
+            return None;
+        }
+    }
+}
+
+/// One file page VFS is filling (FDIO): everything needed to finish it when the answer arrives.
+#[derive(Clone, Copy)]
+pub struct PageState {
+    fault: Fault,
+    page_addr: u64,
+    pa: u64,
+    file_off: u64,
+    file_size: u64,
+    writable: bool,
+    exec: bool,
+    cacheable: bool,
+    dev: u32,
+    ino: u32,
+}
+
+/// What starting a page amounts to right now.
+enum PageOutcome {
+    /// Mapped without asking VFS: already present, in the cache, or past the file's end.
+    Done,
+    /// An FDIO request is outstanding; its completion finishes the page.
+    Pending,
+    /// The process was killed and its fault resolved; the chain is over.
+    Killed,
+}
+
+/// Map the pages a fault needs, asking VFS for each file block in turn.
+///
+/// This is the fault path's `SUSPEND`-safe half: a page that is already there (the pre-fault
+/// mapped it, the cache has the frame, or it lies past the file's end) costs no request, and the
+/// pages that do are asked for one at a time. The chain continues from the FDIO completion
+/// (`finish_file_page`), which is why the fault travels with each page.
+fn advance_fault(fault: Fault) {
+    let mut fault = fault;
+    while let Some(va) = fault.next_page() {
+        match start_file_page(va, &fault) {
+            PageOutcome::Done => continue,
+            PageOutcome::Pending | PageOutcome::Killed => return,
+        }
+    }
+    if fault.resolve {
+        unsafe {
+            mem::sys_vmctl(fault.ep, VMCTL_CLEAR_PAGEFAULT, 0);
+        }
+    }
+}
+
+/// Start one page of a file-backed region: allocate a fresh page, map it writable at the VA, and
+/// ask VFS to read the file block into it (FDIO — the magic grant write lands in the target's
+/// CR3). Pages at or past EOF (holes, `.bss` tails) stay zero-filled and never reach VFS; the rest
+/// are finished by `finish_file_page`, which puts the region's permissions on the page and
+/// records it.
+fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
+    let page_size: u64 = PAGE_SIZE;
+    let ep = fault.ep;
+    let cr3 = fault.cr3;
+    let page_addr = va & !(page_size - 1);
+
+    // The exec pre-fault may have mapped this page already (the faulting page lies in a
+    // non-executable region it covered); skip it so the page isn't double-allocated. In the
+    // plain demand-fault path only PROT faults arrive with a present page, which map as before.
+    if crate::vm::vm_walk_page(cr3, page_addr) & kernel::pagetable::PG_P != 0 {
+        return PageOutcome::Done;
+    }
+
+    // Extract the fields we need up front so the region borrow ends before the request: the
+    // answer arrives later, as its own message.
+    let (fd, file_off, file_size, writable, exec, shared, dev, ino) = {
+        let Some(vmp) = (unsafe { proc::vmproc_lookup(ep) }) else {
+            kill_faulting(ep);
+            return PageOutcome::Killed;
+        };
+        let Some(region) = vmp.vm_regions.find_mut(page_addr) else {
+            kill_faulting(ep);
+            return PageOutcome::Killed;
         };
         (
             region.fd,
@@ -1092,20 +1231,17 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
         )
     };
 
-    // A page is cacheable when its content is exactly the file's bytes:
-    // read-only regions always (a shared frame must never serve a
-    // MAP_PRIVATE writable page — a write by one process would leak into
-    // another's mapping), and MAP_SHARED regions even when writable (the
-    // shared frame is the point — all mappers share it). The page must lie
-    // fully inside the file (the tail-zero amount past the region's
-    // in-file end depends on the region, so partial pages keep the private
-    // allocate path even for shared regions).
+    // A page is cacheable when its content is exactly the file's bytes: read-only regions always
+    // (a shared frame must never serve a MAP_PRIVATE writable page — a write by one process would
+    // leak into another's mapping), and MAP_SHARED regions even when writable (the shared frame is
+    // the point — all mappers share it). The page must lie fully inside the file (the tail-zero
+    // amount past the region's in-file end depends on the region, so partial pages keep the
+    // private allocate path even for shared regions).
     let cacheable = (!writable || shared) && file_off + page_size <= file_size;
 
-    // Cache hit: map the existing frame with the region's permissions and
-    // skip allocation + FDIO. The cache holds a PhysBlock reference on the
-    // frame; bump it for this process's mapping so teardown (pb_unref)
-    // leaves the cache's reference and the frame behind.
+    // Cache hit: map the existing frame with the region's permissions and skip allocation + FDIO.
+    // The cache holds a PhysBlock reference on the frame; bump it for this process's mapping so
+    // teardown (pb_unref) leaves the cache's reference and the frame behind.
     if cacheable
         && let Some((cached_phys, cached_pb)) =
             cache::cache_find(dev, file_off, Some(ino), file_off, true)
@@ -1126,20 +1262,17 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
             {
                 r.add_page(page_addr, cached_phys);
             }
-            return true;
+            return PageOutcome::Done;
         }
-        // Mapping or reference failed — unmap anything we mapped and fall
-        // through to the fresh-allocate path.
+        // Mapping or reference failed — unmap anything we mapped and fall through to the
+        // fresh-allocate path.
         let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
     }
 
     let pa = crate::vm::vm_alloc_pages(1);
     if pa == 0 {
-        sys_kill(ep, SIGSEGV);
-        unsafe {
-            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-        }
-        return false;
+        kill_faulting(ep);
+        return PageOutcome::Killed;
     }
 
     // Zero-fill the page via a temporary mapping in VM's own address space.
@@ -1149,19 +1282,16 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
     );
     if tmp_va == 0 {
         crate::vm::vm_free_pages(pa, 1);
-        sys_kill(ep, SIGSEGV);
-        unsafe {
-            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-        }
-        return false;
+        kill_faulting(ep);
+        return PageOutcome::Killed;
     }
     unsafe {
         core::ptr::write_bytes(tmp_va as *mut u8, 0, page_size as usize);
     }
     crate::vm::vm_unmappage(tmp_va);
 
-    // Map writable so MFS's SAFECOPYTO (through the target's CR3) lands in
-    // the page, then downgrade to the region's permissions below.
+    // Map writable so MFS's SAFECOPYTO (through the target's CR3) lands in the page, then
+    // downgrade to the region's permissions in `finish_page`.
     if crate::vm::vm_map_page_in(
         cr3,
         page_addr,
@@ -1170,51 +1300,75 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
     ) != 0
     {
         crate::vm::vm_free_pages(pa, 1);
-        sys_kill(ep, SIGSEGV);
-        unsafe {
-            mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-        }
-        return false;
+        kill_faulting(ep);
+        return PageOutcome::Killed;
     }
 
+    let state = PageState {
+        fault: *fault,
+        page_addr,
+        pa,
+        file_off,
+        file_size,
+        writable,
+        exec,
+        cacheable,
+        dev,
+        ino,
+    };
+
     if file_off < file_size {
-        let mut reply = [0u8; 64];
-        let r = vfs_request_sync(
+        let job = crate::vm::vfs_request::Job::Page(state);
+        match crate::vm::vfs_request::send(
             arch_common::com::VMVFSREQ_FDIO as i32,
             fd,
             ep,
             file_off,
             page_addr,
             page_size as u32,
-            &mut reply,
-        );
-        if r != 0 {
-            let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
-            crate::vm::vm_free_pages(pa, 1);
-            sys_kill(ep, SIGSEGV);
-            unsafe {
-                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            job,
+        ) {
+            Ok(()) => return PageOutcome::Pending,
+            Err(_) => {
+                let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+                crate::vm::vm_free_pages(pa, 1);
+                kill_faulting(ep);
+                return PageOutcome::Killed;
             }
-            return false;
         }
-        // The region's in-file end can fall mid-page (a segment whose
-        // filesz is not page-aligned, or a file shorter than the mapped
-        // view): FDIO filled the whole page from the file, whose tail
-        // sections (.strtab, next segment) are not part of the memory
-        // image. Zero everything past the in-file end.
-        let in_file = file_size - file_off;
+    }
+
+    // Past the file's end: a hole, already zero-filled, so there is nothing to read.
+    if finish_page(&state, false) {
+        PageOutcome::Done
+    } else {
+        PageOutcome::Killed
+    }
+}
+
+/// The end of a file page: zero the part of it past the file's in-file end, put the region's
+/// permissions on it, and record it in the cache and the region.
+///
+/// `tail_zero` is false for a page past the file's end, which was never read from the file. Returns
+/// false if the process was killed instead (the page's mapping and frame are already released).
+fn finish_page(state: &PageState, tail_zero: bool) -> bool {
+    let page_size: u64 = PAGE_SIZE;
+
+    if tail_zero {
+        // The region's in-file end can fall mid-page (a segment whose filesz is not page-aligned,
+        // or a file shorter than the mapped view): FDIO filled the whole page from the file, whose
+        // tail sections (.strtab, next segment) are not part of the memory image. Zero everything
+        // past the in-file end.
+        let in_file = state.file_size - state.file_off;
         if in_file < page_size {
             let tmp_va = crate::vm::vm_mappage(
-                pa,
+                state.pa,
                 kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
             );
             if tmp_va == 0 {
-                let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
-                crate::vm::vm_free_pages(pa, 1);
-                sys_kill(ep, SIGSEGV);
-                unsafe {
-                    mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
-                }
+                let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
+                crate::vm::vm_free_pages(state.pa, 1);
+                kill_faulting(state.fault.ep);
                 return false;
             }
             unsafe {
@@ -1228,65 +1382,62 @@ fn map_file_page(ep: i32, vmp: &mut proc::Vmproc, cr3: u64, addr: u64) -> bool {
         }
     }
 
-    // Downgrade to the region's permissions (read-only exec pages must not
-    // stay writable; writable MAP_PRIVATE segments keep MAP_WRITE; exec
-    // segments keep the execute bit, which SV39 requires for instruction
-    // fetch — a text page without X faults forever on RISC-V).
+    // Downgrade to the region's permissions (read-only exec pages must not stay writable; writable
+    // MAP_PRIVATE segments keep MAP_WRITE; exec segments keep the execute bit, which SV39 requires
+    // for instruction fetch — a text page without X faults forever on RISC-V).
     let mut pt_flags = kernel::pagetable::MAP_USER;
-    if writable {
+    if state.writable {
         pt_flags |= kernel::pagetable::MAP_WRITE;
     }
-    if exec {
+    if state.exec {
         pt_flags |= kernel::pagetable::MAP_EXEC;
     }
-    let _ = crate::vm::vm_map_page_in(cr3, page_addr, pa, pt_flags);
+    let _ = crate::vm::vm_map_page_in(state.fault.cr3, state.page_addr, state.pa, pt_flags);
 
-    // Track the frame so teardown frees it when the last mapping goes
-    // away. Only pages with a PhysBlock can be cached: teardown frees
-    // untracked frames outright, so caching one would leave the cache
-    // referencing a freed page.
-    let pb_idx = pb::pb_new(pa);
-    if cacheable && let Some(pb_idx) = pb_idx {
-        cache::cache_insert(dev, file_off, ino, file_off, pa, pb_idx);
-    }
-    if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
-        && let Some(r) = vmp.vm_regions.find_mut(page_addr)
+    // Track the frame so teardown frees it when the last mapping goes away. Only pages with a
+    // PhysBlock can be cached: teardown frees untracked frames outright, so caching one would
+    // leave the cache referencing a freed page.
+    let pb_idx = pb::pb_new(state.pa);
+    if state.cacheable
+        && let Some(pb_idx) = pb_idx
     {
-        r.add_page(page_addr, pa);
+        cache::cache_insert(
+            state.dev,
+            state.file_off,
+            state.ino,
+            state.file_off,
+            state.pa,
+            pb_idx,
+        );
+    }
+    if let Some(vmp) = unsafe { proc::vmproc_lookup(state.fault.ep) }
+        && let Some(r) = vmp.vm_regions.find_mut(state.page_addr)
+    {
+        r.add_page(state.page_addr, state.pa);
     }
     true
 }
 
-/// Pre-fault every non-executable file region of an exec'd image (rodata,
-/// data, bss) so VFS's kernel-mode copies of the image (vircopy of user
-/// buffers, e.g. the shell's `# ` prompt in rodata) hit present pages.
-/// Text stays lazy — its faults are user-mode instruction fetches, which
-/// have a working resume path. Runs once, on the first file-region fault
-/// after exec. Returns false if a page failed and the process was
-/// SIGSEGV'd.
-fn prefault_vfs_file_regions(ep: i32, vmp: &mut proc::Vmproc, cr3: u64) -> bool {
-    let page_size: u64 = 4096;
-    let mut ranges: [(u64, u64); region::MAX_REGIONS] = [(0, 0); region::MAX_REGIONS];
-    let mut n = 0usize;
-    for r in vmp.vm_regions.regions.iter().flatten() {
-        if r.flags & region::VR_FILE != 0
-            && r.flags & region::VR_EXEC == 0
-            && n < region::MAX_REGIONS
-        {
-            ranges[n] = (r.vaddr, r.end());
-            n += 1;
-        }
+/// Finish a page VFS has filled, then carry on with the rest of the fault.
+///
+/// Called from the FDIO completion (`vm/vfs_request.rs`): the handler that asked for this page
+/// returned `SUSPEND`, and this is where its work continues.
+pub fn finish_file_page(state: PageState, reply: &[u8; 64]) {
+    let result = i32::from_le_bytes(
+        reply[crate::vm::vfs_request::VMV_RESULT_OFF..crate::vm::vfs_request::VMV_RESULT_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    if result != 0 {
+        let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
+        crate::vm::vm_free_pages(state.pa, 1);
+        kill_faulting(state.fault.ep);
+        return;
     }
-    for &(start, end) in &ranges[..n] {
-        let mut page = start;
-        while page < end {
-            if !map_file_page(ep, vmp, cr3, page) {
-                return false;
-            }
-            page += page_size;
-        }
+    if !finish_page(&state, true) {
+        return;
     }
-    true
+    advance_fault(state.fault);
 }
 
 /// Send a signal to a process via the kernel.
@@ -1712,31 +1863,6 @@ const MAP_SHARED: u32 = 0x01;
 // VM_MMAP file-offset field (i64 at absolute byte 40 = payload offset 32).
 const MMAP_OFFSET: usize = 32;
 
-// VMâ†’VFS request protocol (VFS_VMCALL message; M10 layout, absolute
-// message-byte offsets — matches `vfs/consts.rs`).
-const VFS_VMCALL: i32 = 0x100 + 38; // VFS_BASE + 38
-const VMCALL_REQ_OFF: usize = 16;
-const VMCALL_FD_OFF: usize = 20;
-const VMCALL_REQID_OFF: usize = 24;
-const VMCALL_ENDPOINT_OFF: usize = 28;
-const VMCALL_OFFSET_OFF: usize = 8;
-const VMCALL_FAULTVA_OFF: usize = 32;
-const VMCALL_LENGTH_OFF: usize = 48;
-
-// Reply (VM_VFS_REPLY) payload offsets.
-const VMV_RESULT_OFF: usize = 20;
-const VMV_DEV_OFF: usize = 28;
-const VMV_INO_OFF: usize = 32;
-const VMV_FD_OFF: usize = 40;
-const VMV_SIZE_PAGES_OFF: usize = 48;
-
-// Device-mmap reply fields (FDLOOKUP of a char device): IS_DEVICE (u32,
-// 1 = char device) at a byte range the file reply leaves free, phys/len
-// overlapping dev/ino and the tail (meaningless for the file branch).
-const VMV_ISDEV_OFF: usize = 12;
-const VMV_PHYS_OFF: usize = 28;
-const VMV_LEN_OFF: usize = 56;
-
 /// Parse the device branch of an FDLOOKUP reply: `Some((phys, len))` when
 /// VFS marked the fd a char device, `None` for a regular file. Pure so the
 /// layout is host-testable.
@@ -1762,177 +1888,6 @@ fn parse_fdlookup_device(reply: &[u8; 64]) -> Option<(u64, u64)> {
     Some((phys, len))
 }
 
-/// Message type of the reply `vfs_request_sync` waits for. A SENDREC consumes
-/// whatever its destination sends, so the type is the only thing separating the
-/// reply from a request that was delivered into the reply slot instead (finding
-/// 64).
-fn is_vfs_reply(msg: &[u8; 64]) -> bool {
-    i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) == VM_VFS_REPLY as i32
-}
-
-/// A byte line built without `alloc`, for diagnostics a server writes itself.
-struct Line {
-    buf: [u8; 160],
-    len: usize,
-}
-
-impl Line {
-    fn new() -> Self {
-        Self {
-            buf: [0; 160],
-            len: 0,
-        }
-    }
-
-    /// Append as much of `bytes` as fits. Reports are the thing being written
-    /// when they are written, so a full buffer truncates rather than panics.
-    fn push(&mut self, bytes: &[u8]) {
-        let room = self.buf.len() - self.len;
-        let n = room.min(bytes.len());
-        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
-        self.len += n;
-    }
-
-    fn push_i32(&mut self, v: i32) {
-        if v < 0 {
-            self.push(b"-");
-        }
-        // Via i64 so i32::MIN's magnitude does not overflow.
-        let mut n = i64::from(v).unsigned_abs();
-        let mut digits = [0u8; 20];
-        let mut i = digits.len();
-        loop {
-            i -= 1;
-            digits[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-            if n == 0 {
-                break;
-            }
-        }
-        self.push(&digits[i..]);
-    }
-
-    fn push_hex32(&mut self, mut v: u32) {
-        self.push(b"0x");
-        let mut digits = [0u8; 8];
-        let mut i = digits.len();
-        loop {
-            i -= 1;
-            let d = (v & 0xf) as u8;
-            digits[i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-            v >>= 4;
-            if v == 0 {
-                break;
-            }
-        }
-        self.push(&digits[i..]);
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.len]
-    }
-}
-
-/// The report for a message whose type is not VM_VFS_REPLY: who it came from,
-/// what it was, and the first payload words, so the log names the conversation
-/// that went wrong rather than only that one did.
-fn vfs_reply_mismatch_line(msg: &[u8; 64], req: i32, fd: i32) -> Line {
-    let src = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
-    let mtype = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
-    let w0 = u32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
-    let w1 = u32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
-
-    let mut line = Line::new();
-    line.push(b"VM: vfs_request_sync: reply type ");
-    line.push_hex32(mtype as u32);
-    line.push(b" from ep ");
-    line.push_i32(src);
-    line.push(b" is not VM_VFS_REPLY ");
-    line.push_hex32(VM_VFS_REPLY);
-    line.push(b" (req ");
-    line.push_i32(req);
-    line.push(b", fd ");
-    line.push_i32(fd);
-    line.push(b", words ");
-    line.push_hex32(w0);
-    line.push(b" ");
-    line.push_hex32(w1);
-    line.push(b")\n");
-    line
-}
-
-/// Report a reply of the wrong type, once.
-///
-/// Once, because a protocol slip repeats on every request the same way, and a
-/// console line per fault would be a log amplifier rather than a diagnostic.
-///
-/// On the diag channel rather than through `write`: this is VM reporting that its
-/// conversation with VFS did not go as expected, and VFS is exactly the server
-/// that may be unable to answer — a report delivered through it could block here
-/// instead of printing.
-fn report_vfs_reply_mismatch(msg: &[u8; 64], req: i32, fd: i32) {
-    static REPORTED: AtomicBool = AtomicBool::new(false);
-    if REPORTED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    minix_rt::diag_write(vfs_reply_mismatch_line(msg, req, fd).as_bytes());
-}
-
-/// Send a synchronous VM→VFS request (FDLOOKUP/FDCLOSE/FDIO) and wait for
-/// the VM_VFS_REPLY. VM is single-threaded, so blocking inside a handler is
-/// safe: VFS processes the request (forwarding to MFS if needed) and
-/// replies, waking VM's SENDREC. This replaces C MINIX's async
-/// request/callback machinery with a synchronous call.
-///
-/// Returns the reply's VMV_RESULT; on OK the full reply is left in `reply`
-/// for the caller to read the remaining VMV_* fields.
-fn vfs_request_sync(
-    req: i32,
-    fd: i32,
-    ep: i32,
-    offset: u64,
-    fault_va: u64,
-    length: u32,
-    reply: &mut [u8; 64],
-) -> i32 {
-    let mut msg = [0u8; 64];
-    msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
-    msg[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4].copy_from_slice(&req.to_le_bytes());
-    msg[VMCALL_FD_OFF..VMCALL_FD_OFF + 4].copy_from_slice(&fd.to_le_bytes());
-    msg[VMCALL_REQID_OFF..VMCALL_REQID_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
-    msg[VMCALL_ENDPOINT_OFF..VMCALL_ENDPOINT_OFF + 4].copy_from_slice(&ep.to_le_bytes());
-    msg[VMCALL_OFFSET_OFF..VMCALL_OFFSET_OFF + 8].copy_from_slice(&offset.to_le_bytes());
-    msg[VMCALL_FAULTVA_OFF..VMCALL_FAULTVA_OFF + 8].copy_from_slice(&fault_va.to_le_bytes());
-    msg[VMCALL_LENGTH_OFF..VMCALL_LENGTH_OFF + 4].copy_from_slice(&length.to_le_bytes());
-    let r = unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDREC_CALL,
-            arch_common::com::VFS_PROC_NR as u64,
-            msg.as_mut_ptr() as u64,
-        )
-    };
-    if r < 0 {
-        return r as i32;
-    }
-    // What came back is assumed to be the reply only if it says it is. VFS sends
-    // every reply with this fixed type (`vfs/call.rs` vm_call_reply, error results
-    // included, which travel in VMV_RESULT), so a different type here is a
-    // message that was never meant for this slot — a request, or a reply to a
-    // request from an earlier generation of this conversation. Reading its
-    // payload as a result would turn that into a wrong answer somewhere later,
-    // which is the expensive part.
-    if !is_vfs_reply(&msg) {
-        report_vfs_reply_mismatch(&msg, req, fd);
-        return EINVAL;
-    }
-    reply.copy_from_slice(&msg);
-    i32::from_le_bytes(
-        msg[VMV_RESULT_OFF..VMV_RESULT_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    )
-}
-
 /// True if any active process other than `exclude_ep` has a file region
 /// referencing (dev, ino, fd). fork clones regions verbatim, so a fork
 /// sibling's region keeps the shared vmfd alive; the dying process's own
@@ -1956,37 +1911,6 @@ fn vmfd_is_referenced(dev: u32, ino: u32, fd: i32, exclude_ep: i32) -> bool {
     referenced
 }
 
-/// Send a VMVFSREQ_FDCLOSE to VFS without waiting for the reply.
-///
-/// Matching C `fdref.c` fdref_deref ("asynchronously close the fd in VFS ...
-/// a close failing, although unexpected, isn't a problem") — and required
-/// for correctness: a blocking sendrec here deadlocks during exec, where
-/// VFS is itself blocked in a SENDREC to VM (VM_EXEC_NEWMEM) and would
-/// consume the FDCLOSE as the wrong reply to its own pending request. VFS
-/// processes the async close when it returns to its main loop; the late
-/// VM_VFS_REPLY is ignored by do_vfs_reply (SUSPEND).
-#[cfg(target_os = "minix")]
-fn fdclose_async(fd: i32) {
-    let mut msg = [0u8; 64];
-    msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
-    msg[VMCALL_REQ_OFF..VMCALL_REQ_OFF + 4]
-        .copy_from_slice(&(arch_common::com::VMVFSREQ_FDCLOSE as i32).to_le_bytes());
-    msg[VMCALL_FD_OFF..VMCALL_FD_OFF + 4].copy_from_slice(&fd.to_le_bytes());
-    // reqid 0: the reply is ignored (do_vfs_reply -> SUSPEND).
-    msg[VMCALL_ENDPOINT_OFF..VMCALL_ENDPOINT_OFF + 4]
-        .copy_from_slice(&arch_common::com::VFS_PROC_NR.to_le_bytes());
-    let _ = unsafe {
-        minix_rt::asynsend3(
-            arch_common::com::VFS_PROC_NR,
-            msg.as_ptr(),
-            arch_common::ipc::AMF_NOREPLY,
-        )
-    };
-}
-
-#[cfg(not(target_os = "minix"))]
-fn fdclose_async(_fd: i32) {}
-
 /// Close a VM file descriptor (FDCLOSE) once no region in any process other
 /// than `exclude_ep` references its (dev, ino, fd) — a lightweight fdref:
 /// fork clones regions verbatim, so the same vmfd is shared until the last
@@ -1999,7 +1923,7 @@ fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32, exclude_ep: i32) {
         return;
     }
     if !vmfd_is_referenced(dev, ino, fd, exclude_ep) {
-        fdclose_async(fd);
+        crate::vm::vfs_request::close(fd);
     }
 }
 
@@ -2118,19 +2042,12 @@ fn do_mmap(msg: &mut Message) -> i32 {
     let page_addr = vaddr & !(PAGE_SIZE - 1);
 
     // File-backed mapping: fd >= 0 without MAP_ANONYMOUS (matching C's
-    // do_mmap: `fd == -1 || (flags & MAP_ANON)` selects anonymous).
+    // do_mmap: `fd == -1 || (flags & MAP_ANON)` selects anonymous). The fd has to be resolved by
+    // VFS before there is a region to create, so this is where the handler stops being
+    // synchronous: the request goes out, VFS answers later, and `finish_mmap_file` does the rest
+    // and replies to the caller (finding 58 — VM must not wait on VFS).
     if fd >= 0 && map_flags as u32 & MAP_ANONYMOUS == 0 {
-        return do_mmap_file(
-            ep,
-            cr3,
-            prot,
-            map_flags as u32,
-            len_aligned,
-            page_addr,
-            fd,
-            file_offset,
-            msg,
-        );
+        return start_mmap_file(ep, fd, map_flags as u32, msg);
     }
 
     // Validate the address range is within bounds.
@@ -2178,35 +2095,101 @@ fn do_mmap(msg: &mut Message) -> i32 {
     OK
 }
 
-/// File-backed VM_MMAP: resolve the fd via FDLOOKUP, create a lazy VR_FILE
-/// region, and return the mapped address (page-aligned base plus the
-/// unaligned file-offset head).
-#[allow(clippy::too_many_arguments)]
-fn do_mmap_file(
-    ep: i32,
-    cr3: u64,
-    prot: i32,
-    map_flags: u32,
-    len_aligned: u64,
-    page_addr: u64,
-    fd: i32,
-    file_offset: i64,
-    msg: &mut Message,
-) -> i32 {
-    // Resolve the fd to a VM fd + file identity via VFS.
-    let mut reply = [0u8; 64];
-    let r = vfs_request_sync(
+/// Start a file-backed `mmap`: ask VFS to resolve the fd and return `SUSPEND`.
+///
+/// The caller's message is the state (C stores it the same way, see `mmap_file_cont`): the fd, the
+/// length, the address hint and the flags are all in it, so `finish_mmap_file` re-derives what it
+/// needs from it when the answer arrives. That also puts the address choice and the region's
+/// insertion in the same step, which is what makes two mappings racing for one hole pick different
+/// addresses rather than both picking the free space seen before either was created.
+fn start_mmap_file(ep: i32, fd: i32, map_flags: u32, msg: &mut Message) -> i32 {
+    // The one placement error that needs no answer from VFS: MAP_FIXED without an address.
+    let addr = u64::from_ne_bytes(
+        unsafe { &msg.m_payload.raw }[MMAP_ADDR..MMAP_ADDR + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    if addr == 0 && map_flags & MAP_FIXED != 0 {
+        return EINVAL;
+    }
+
+    let mut caller_msg = [0u8; 64];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (msg as *const Message).cast::<u8>(),
+            caller_msg.as_mut_ptr(),
+            64,
+        );
+    }
+    let job = crate::vm::vfs_request::Job::Mmap { ep, caller_msg };
+    match crate::vm::vfs_request::send(
         arch_common::com::VMVFSREQ_FDLOOKUP as i32,
         fd,
         ep,
         0,
         0,
         0,
-        &mut reply,
-    );
-    if r != 0 {
-        return r;
+        job,
+    ) {
+        Ok(()) => SUSPEND,
+        Err(e) => e,
     }
+}
+
+/// File-backed VM_MMAP: resolve the fd via FDLOOKUP, create a lazy VR_FILE
+/// region, and return the mapped address (page-aligned base plus the
+/// unaligned file-offset head).
+///
+/// Called from the FDLOOKUP completion, with VFS's answer in `reply`, and answers the caller itself
+/// (`vfs_request::reply_to`) — the handler that started this returned `SUSPEND`.
+pub fn finish_mmap_file(ep: i32, caller_msg: &mut [u8; 64], reply: &[u8; 64]) -> i32 {
+    let msg: &mut Message = unsafe { &mut *(caller_msg.as_mut_ptr().cast::<Message>()) };
+
+    let result = i32::from_le_bytes(
+        reply[VMV_RESULT_OFF..VMV_RESULT_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    if result != 0 {
+        return result;
+    }
+
+    let cr3 = unsafe { proc::vm_get_addrspace(ep) };
+    if cr3 == 0 {
+        return EINVAL;
+    }
+
+    let raw = unsafe { &msg.m_payload.raw };
+    let prot = i32::from_ne_bytes(raw[MMAP_PROT..MMAP_PROT + 4].try_into().unwrap_or([0; 4]));
+    let map_flags =
+        i32::from_ne_bytes(raw[MMAP_FLAGS..MMAP_FLAGS + 4].try_into().unwrap_or([0; 4])) as u32;
+    let length = u64::from_ne_bytes(raw[MMAP_LEN..MMAP_LEN + 8].try_into().unwrap_or([0; 8]));
+    let addr = u64::from_ne_bytes(raw[MMAP_ADDR..MMAP_ADDR + 8].try_into().unwrap_or([0; 8]));
+    let file_offset = i64::from_ne_bytes(
+        raw[MMAP_OFFSET..MMAP_OFFSET + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+
+    let len_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    // The address was not fixed (that was rejected before the request): an explicit hint is
+    // honoured, otherwise the first free hole — found now, so the search and the insertion below
+    // are one step (see `start_mmap_file`).
+    let vaddr = if addr != 0 {
+        addr
+    } else {
+        let vmp = match unsafe { proc::vmproc_lookup(ep) } {
+            Some(vmp) => vmp,
+            None => return EINVAL,
+        };
+        match mmap_find_hole(&vmp.vm_regions, len_aligned) {
+            Some(va) => va,
+            None => return EINVAL,
+        }
+    };
+    let page_addr = vaddr & !(PAGE_SIZE - 1);
+
     let vmfd = i32::from_le_bytes(
         reply[VMV_FD_OFF..VMV_FD_OFF + 4]
             .try_into()
@@ -2232,7 +2215,7 @@ fn do_mmap_file(
     // Char device: the FDLOOKUP reply carries the driver's device-memory
     // physical range (IS_DEVICE set). Build a VR_DIRECT region that maps
     // the device phys instead of a lazy file region.
-    if let Some((phys, dev_len)) = parse_fdlookup_device(&reply) {
+    if let Some((phys, dev_len)) = parse_fdlookup_device(reply) {
         return do_mmap_dev(ep, cr3, prot, len_aligned, page_addr, phys, dev_len, msg);
     }
 
@@ -2692,16 +2675,14 @@ fn do_notify_sig(msg: &mut Message) -> i32 {
     OK
 }
 
+/// Handle a `VM_VFS_REPLY`: VFS's answer to one of VM's requests.
+///
+/// The work is the request's, and it happens here because VM does not wait: the handler that asked
+/// returned `SUSPEND`, and the completion answers the caller (or resolves the fault) in
+/// `vm/vfs_request.rs`'s terms. A reply with no request behind it is reported there rather than
+/// read as an answer (finding 64).
 fn do_vfs_reply(msg: &mut Message) -> i32 {
-    // VM→VFS requests in this port are synchronous: vfs_request_sync blocks
-    // in sendrec, so VFS's VM_VFS_REPLY is consumed inline by that call and
-    // never arrives here as a fresh message. The C design routes async
-    // replies through a PENDING transaction table (vfs.c do_vfs_reply); the
-    // sync design deliberately has no such table, so an out-of-band reply is
-    // a protocol error. Decline to answer it (SUSPEND), matching C's
-    // "don't reply to the reply" convention.
-    let _ = msg;
-    SUSPEND
+    crate::vm::vfs_request::complete(msg)
 }
 
 fn do_vfs_mmap(msg: &mut Message) -> i32 {
@@ -3217,55 +3198,6 @@ mod tests {
         VM_UNMAP_PHYS,
     };
     use arch_common::types::Endpoint;
-
-    #[test]
-    fn test_is_vfs_reply_accepts_only_the_reply_type() {
-        let mut reply = [0u8; 64];
-        reply[4..8].copy_from_slice(&(VM_VFS_REPLY as i32).to_le_bytes());
-        assert!(is_vfs_reply(&reply));
-
-        // A request for the same conversation, delivered into the reply slot, is
-        // the case this check exists for.
-        let mut request = [0u8; 64];
-        request[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
-        assert!(!is_vfs_reply(&request));
-
-        // And nothing saying what it is is not a reply either.
-        assert!(!is_vfs_reply(&[0u8; 64]));
-    }
-
-    #[test]
-    fn test_vfs_reply_mismatch_line_names_the_conversation() {
-        // The line spells the two message types in hex, so the values are pinned
-        // here too: a change to either constant then fails this test instead of
-        // turning the log line into a quiet lie.
-        assert_eq!(VM_VFS_REPLY, 0xc1e);
-        assert_eq!(VFS_VMCALL, 0x126);
-
-        let mut msg = [0u8; 64];
-        msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-        msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
-        msg[8..12].copy_from_slice(&7u32.to_le_bytes());
-        msg[12..16].copy_from_slice(&0xdead_beefu32.to_le_bytes());
-
-        let line = vfs_reply_mismatch_line(&msg, 3, 11);
-        assert_eq!(
-            core::str::from_utf8(line.as_bytes()),
-            Ok(
-                "VM: vfs_request_sync: reply type 0x126 from ep 1 is not VM_VFS_REPLY 0xc1e \
-                (req 3, fd 11, words 0x7 0xdeadbeef)\n"
-            )
-        );
-    }
-
-    #[test]
-    fn test_line_truncates_rather_than_panicking() {
-        let mut line = Line::new();
-        for _ in 0..64 {
-            line.push(b"0123456789");
-        }
-        assert_eq!(line.as_bytes().len(), 160);
-    }
 
     #[test]
     fn test_parse_fdlookup_device() {

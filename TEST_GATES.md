@@ -176,6 +176,23 @@ heap growth in the wrong place wedges the system. The structural fix is the C sh
 requests asynchronous (`asynsend` with `AMF_NOREPLY`, which `mini_receive`'s async path already
 refuses to let satisfy a SENDREC waiter) plus the pending table `do_vfs_reply` would complete. Then
 VM never blocks on VFS and the crossing cannot happen. The big one; take it with Step 5 in place.
+**Done.** `crates/servers/src/vm/vfs_request.rs` is the C shape: requests go out with `asynsend3` and
+`AMF_NOREPLY`, and `complete` matches the answer's request id to the request that asked for it. The
+two callers that used to wait were split at the wait — `do_mmap`/`finish_mmap_file` for FDLOOKUP (the
+handler returns `SUSPEND`, the completion creates the region *and* answers the caller) and
+`advance_fault`/`start_file_page`/`finish_file_page` for FDIO (the fault is left open, and the page
+that lands last resolves it). The exec pre-fault is the same machinery with a cursor: the pages are
+asked for one at a time, and the fault's own page is the last step. Two deliberate differences from
+C's `vfs.c`: a fixed node pool instead of `SLABALLOC` (allocating here is the hazard), and several
+requests in flight keyed by id instead of C's one-active LIFO queue (VFS echoes the id).
+
+What this does and does not prove: the class is gone by construction rather than by test — there is
+no longer a `SENDREC` to VFS anywhere in VM's source, which is checkable by reading it — and the
+paths the change touches are the ones every boot already exercises (exec runs a file-backed image,
+which is FDLOOKUP plus a pre-fault of FDIOs). The new unit tests cover the table (a reply for a
+forgotten request completes nothing) and the wire layout; the wedged interleaving itself is not
+reproducible on demand, since provoking it needs an allocation in VFS's handler that the fix made
+safe to have.
 
 **Step 7 — one scenario, four targets.** *Bounds the wasm blind spot (cause (i)).*
 Express the userspace smoke scenario once — exec a program from the image, check its output, write a
