@@ -520,6 +520,120 @@ fn test_mini_notify_receiving(ctx: &mut TestCtx) {
 
 // Process table tests
 
+fn test_crossed_sendrec_reported(ctx: &mut TestCtx) {
+    unsafe {
+        let caller = make_test_proc(120);
+        let waiter = make_test_proc(121);
+        let server = make_test_proc(122);
+        let replier = make_test_proc(123);
+        if caller.is_null() || waiter.is_null() || server.is_null() || replier.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        for p in [caller, waiter, server, replier] {
+            (*p).p_misc_flags.store(0, Ordering::Relaxed);
+        }
+        let caller_ep = (*caller).p_endpoint;
+        let waiter_ep = (*waiter).p_endpoint;
+        let server_ep = (*server).p_endpoint;
+        let replier_ep = (*replier).p_endpoint;
+
+        // FROM_KERNEL, so the message is copied straight out of this kernel's own
+        // memory and the test needs no page table.
+        let mut msg = [0u8; crate::proc::MESSAGE_SIZE];
+        msg[4..8].copy_from_slice(&0x1234i32.to_ne_bytes());
+
+        let before = crate::ipc::crossed_sendrec_detections();
+
+        // 1. A sendrec send into a plain RECEIVE: the receiver is not awaiting a
+        //    reply, so this is an ordinary request.
+        (*server)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*server).p_getfrom_e = caller_ep;
+        (*caller)
+            .p_misc_flags
+            .fetch_or(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        let r = crate::ipc::mini_send(
+            caller,
+            server_ep,
+            msg.as_ptr(),
+            crate::ipc::FROM_KERNEL | crate::ipc::SENDREC_SEND,
+        );
+        ctx.assert(r == 0, "a request into a plain RECEIVE must deliver");
+        (*caller).p_misc_flags.fetch_and(
+            !crate::proc::MiscFlags::REPLY_PEND.bits(),
+            Ordering::Relaxed,
+        );
+        (*server)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+
+        // 2. A `SENDNB` into a sendrec waiter, from a caller that is carrying a
+        //    `REPLY_PEND` it will never clear — what C's `do_sync_ipc` leaves behind
+        //    when a sendrec's send fails (`proc.c`: `result != OK` breaks out with the
+        //    flag still set). Measured on VM during boot, whose next send was its
+        //    ordinary reply loop; it is not a sendrec's send, so it is not a crossing.
+        (*waiter)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*waiter).p_getfrom_e = caller_ep;
+        (*waiter)
+            .p_misc_flags
+            .fetch_or(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        (*caller)
+            .p_misc_flags
+            .fetch_or(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        let r = crate::ipc::mini_send(
+            caller,
+            waiter_ep,
+            msg.as_ptr(),
+            crate::ipc::FROM_KERNEL | crate::ipc::NON_BLOCKING,
+        );
+        ctx.assert(r == 0, "a SENDNB into a sendrec waiter must deliver");
+
+        // 3. A reply to a sendrec waiter, from a process that is not in a sendrec.
+        (*waiter)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*waiter).p_getfrom_e = replier_ep;
+        let r = crate::ipc::mini_send(replier, waiter_ep, msg.as_ptr(), crate::ipc::FROM_KERNEL);
+        ctx.assert(r == 0, "a reply to a sendrec waiter must deliver");
+        ctx.assert(
+            crate::ipc::crossed_sendrec_detections() == before,
+            "none of the three ordinary shapes is a crossing",
+        );
+
+        // 4. The crossing: a sendrec's send into a sendrec waiter. The waiter's
+        //    `REPLY_PEND` has to be set again — phase 2's delivery cleared it, which
+        //    is the behaviour the flag is supposed to have.
+        (*waiter)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+        (*waiter).p_getfrom_e = caller_ep;
+        (*waiter)
+            .p_misc_flags
+            .fetch_or(crate::proc::MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        let r = crate::ipc::mini_send(
+            caller,
+            waiter_ep,
+            msg.as_ptr(),
+            crate::ipc::FROM_KERNEL | crate::ipc::SENDREC_SEND,
+        );
+        ctx.assert(r == 0, "a crossed sendrec must still be delivered");
+        ctx.assert(
+            crate::ipc::crossed_sendrec_detections() == before + 1,
+            "a crossed sendrec must be detected",
+        );
+
+        for p in [caller, waiter, server, replier] {
+            (*p).p_rts_flags
+                .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+            (*p).p_misc_flags.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 fn test_proc_addr_valid_tasks(ctx: &mut TestCtx) {
     let rp = crate::table::proc_addr(-1);
     ctx.assert(!rp.is_null(), "proc_addr(-1) must be non-null");
@@ -2560,6 +2674,9 @@ pub fn run_all() -> u32 {
         ser_write("  SKIP sendrec_direct (no boot_cr3)\n");
         ser_write("  SKIP sendrec_reply_cycle (no boot_cr3)\n");
     }
+    // Not gated on a page table: it sends with FROM_KERNEL, so the message never
+    // leaves the kernel's own memory.
+    total += run("crossed_sendrec", test_crossed_sendrec_reported);
     total += run("proc_addr_tasks", test_proc_addr_valid_tasks);
     total += run("proc_addr_oob", test_proc_addr_out_of_range);
     total += run("endpoint_encoding", test_endpoint_encoding);

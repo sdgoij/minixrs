@@ -1196,22 +1196,36 @@ pub fn sys_trace(request: i32, proc_ep: i32, addr: u64, data: &mut i64) -> i32 {
     0
 }
 
+/// Bytes one SYS_DIAGCTL message can carry: the kernel reads `len` bytes from
+/// `msg[12]`, inside a 64-byte message.
+pub const DIAG_CHUNK_MAX: usize = 64 - 12;
+
+/// Write diagnostic bytes directly to the serial port via SYS_DIAGCTL.
+///
+/// This does NOT go through VFS, which is the reason it exists as well as the
+/// reason `diag_putchar` does: a server that has to report something about its
+/// conversation *with VFS* cannot deliver the report through VFS — that is a
+/// second sendrec to the server that is not answering. The kernel copies the
+/// bytes out of the message itself, so no pointer of the caller's is
+/// dereferenced (which is why this works with a mismatched CR3).
+///
+/// No newline is added; the caller's bytes are what reaches the console.
+pub fn diag_write(bytes: &[u8]) {
+    for chunk in bytes.chunks(DIAG_CHUNK_MAX) {
+        let mut msg = [0u8; 64];
+        // DIAGCTL message: kernel overwrites msg[0..8] with call_nr + src.
+        msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
+        msg[12..12 + chunk.len()].copy_from_slice(chunk);
+        msg[16..20].copy_from_slice(&(chunk.len() as i32).to_le_bytes());
+        let _ = kernel_call(44, &mut msg); // SYS_DIAGCTL = kernel call 44
+    }
+}
+
 /// Write a diagnostic byte directly to the serial port via SYS_DIAGCTL.
 /// This does NOT go through VFS, so it can be called even when VFS is
 /// blocked (e.g., during mount_root or fork).
 pub fn diag_putchar(c: u8) {
-    let mut msg = [0u8; 64];
-    // DIAGCTL message: kernel overwrites msg[0..8] with call_nr + src.
-    // Use msg[8..12] for the subfunction code (read by handler).
-    // Put the byte directly in msg[12] (offset 12 = M1_I2_OFF) so the
-    // kernel handler can read it without dereferencing a user-space
-    // pointer (which fails due to CR3 mismatch).
-    msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
-    msg[12] = c; // byte value stored directly in message
-    msg[13] = b'\r';
-    msg[14] = b'\n';
-    msg[16..20].copy_from_slice(&3i32.to_le_bytes()); // len = 3
-    let _ = kernel_call(44, &mut msg); // SYS_DIAGCTL = kernel call 44
+    diag_write(&[c, b'\r', b'\n']);
 }
 
 /// Invoke SYS_VMCTL(VMCTL_SETADDRSPACE) to set a process's CR3 and clear

@@ -176,9 +176,9 @@ See `.agents/skills/` for domain deep-dives:
 - **Host tests:** `cargo test` — pure-logic unit and property tests
 - **QEMU integration:** `just test-qemu [arch]` — kernel tests running in QEMU
   (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants):
-  - `just test-qemu` (x86_64) — 84 tests, exits with a real pass/fail code
-  - `just test-qemu riscv64` — 70 tests, paging enabled
-  - `just test-qemu aarch64` — 70 tests, MMU enabled
+  - `just test-qemu` (x86_64) — 91 tests, exits with a real pass/fail code
+  - `just test-qemu riscv64` — 76 tests, paging enabled
+  - `just test-qemu aarch64` — 76 tests, MMU enabled
 
   RISC-V/AArch64 integration builds enable the MMU before running the shared
   suite, so copy_from_user / delivermsg perform real page-table walks, the

@@ -7708,6 +7708,92 @@ the order is kept. The device-backed drains are unchanged: a controller or a vir
 of events per interrupt, so the ring is never *their* constraint — the host's queue is the only one
 that can hold a batch the size of a drag.
 
+**64. VM read whatever arrived in its reply slot as a reply, so a slip in the VM↔VFS protocol
+surfaced as a wrong result somewhere else.** VM's VFS requests are synchronous — a `SENDREC` to VFS
+whose reply is simply the next message the kernel hands it — and VFS replies with a *fixed* type,
+`VM_VFS_REPLY`, on every VMCALL, error results included (they travel in `VMV_RESULT`; `vfs/call.rs`
+`vm_call_reply` is the only place the type is written, and its own host test asserts as much). VM
+never checked it: `vfs_request_sync` read `VMV_RESULT`, `VMV_FD`, `VMV_SIZE_PAGES` straight out of
+whatever message came back. A message that arrived in that slot without being the reply — VFS's own
+request, or the late reply to an earlier asynchronous one (`fdclose_async`'s reply, reqid 0, which
+`do_vfs_reply` drops) — was therefore read as an fd, a file size and a page count taken out of the
+wrong words. The symptom is a wrong mapping or a wrong file at an arbitrary later point, which is the
+class finding 58 belongs to: nothing says where the two conversations crossed.
+
+It is checked now: `is_vfs_reply` tests bytes 4..8 against `VM_VFS_REPLY`, and a mismatch is reported
+and answered `EINVAL` rather than used. The report goes out over `SYS_DIAGCTL`, not `write(2)`, because
+the server being reported about is VFS — a report that needs VFS to print is one more way to hang in
+the place it is describing. `minix_rt::diag_write` is the missing half of `diag_putchar` (which is now
+a wrapper over it): it carries a whole line, chunked at 52 bytes, which is what one message holds — the
+kernel's own 256 cap is on what it will read, not on what fits. The line names the sender, the type,
+the request, the fd and the first two payload words, once: a slip like this repeats identically on
+every request, so a line per occurrence would amplify the log rather than explain it.
+
+The second half is the detector for the class, in the kernel rather than in VM, because the crossing
+is visible there and nowhere else. `mini_send`'s direct-delivery path now notes the send that
+satisfies a SENDREC waiter with the send half of another `sendrec`: the receiver has `REPLY_PEND`
+(it is in a `sendrec`'s receive phase, and `find_receiver` has established that its `p_getfrom_e`
+names *this* sender), and the caller's send carries `SENDREC_SEND`, which `do_sync_ipc` sets for the
+duration of the call and nothing else does. That pair is exactly two processes in `sendrec` to each
+other with their messages crossed: each message lands in the other's reply slot, so each side reads
+the other's request as the answer to its own. It reports once, with both endpoints and the type, and
+counts every occurrence (`crossed_sendrec_detections`). The delivery itself is unchanged: the
+invariant here is VM's to keep (no allocation inside a VFS-request handler), not the kernel's to
+enforce, and a kernel that refused this send would turn a wrong answer into a deadlock in the same
+place it was trying to make visible.
+
+`SENDREC_SEND` exists because the first version asked the caller's `REPLY_PEND` instead, and the
+answer on the first boot was a false positive — which turned out to be finding 65, a flag that
+outlives the `sendrec` that set it. The flag cannot answer "is a sendrec sending right now": only the
+caller knows, so the caller says so.
+
+The guards are on both halves, and the negative cases are the ones that matter. `servers` has host
+tests for the predicate, for the exact report line (pinning both message types, so a change to either
+constant fails the test instead of making the log line a quiet lie) and for truncation rather than a
+panic. The integration suite gained `crossed_sendrec`, which asserts the count rises for the crossing
+*and stays put* for the three shapes it could be confused with — a sendrec send into a plain `RECEIVE`,
+a reply to a sendrec waiter from a process not in one, and finding 65's shape, a `SENDNB` from a caller
+carrying a stale `REPLY_PEND` — because a detector that fires on ordinary traffic is worse than no
+detector. It sends with `FROM_KERNEL`, so it needs no page table and runs on all three arches, and no
+crossing occurs in a normal boot: with the detector in place the boot logs are silent on all three,
+which is the state the class is in.
+
+**65. `MF_REPLY_PEND` outlived the `sendrec` that set it, and this port is the one that cares.** The
+first version of finding 64's detector reported a crossing on every boot:
+
+```
+kernel: crossed sendrec: ep 8 -> ep 18, message type 0x0, send flags 0x80; both were awaiting a reply
+  caller 8 rts=0 misc=MF_REPLY_PEND getfrom=1 sendto=1
+  recv   18 rts=RTS_RECEIVING misc=MF_REPLY_PEND getfrom=8
+```
+
+Slot 8 is VM and 18 is the window server, and the dump says what it is not: `send flags 0x80` is
+`NON_BLOCKING`, so the send is VM's ordinary `SENDNB` reply, and `rts=0` says VM is neither sending nor
+receiving — it is running. VM was simply *carrying* `REPLY_PEND`, left over from the `sendrec` to VFS
+(still visible in `getfrom=1`/`sendto=1`) that had already completed.
+
+VFS replies to VM with `asynsend3` rather than a blocking send (its `vm_call_reply`, deliberately, so
+that VM cannot deadlock the pair mid-fault), and the kernel's async delivery path,
+`try_deliver_senda`, cleared the receiver's `RTS_RECEIVING` and enqueued it without clearing
+`MF_REPLY_PEND`. C has the same hole — `proc.c try_deliver_senda` sets `MF_DELIVERMSG`,
+`RTS_UNSET(RTS_RECEIVING)`, and does not touch the flag — and C does not care, because its
+`WILLRECEIVE` macro reads `RTS_RECEIVING`, `RTS_SENDING` and `p_getfrom_e` and never the flag. This
+port's `will_receive_sendrec` *does* read it, on purpose: it refuses to deliver a third party's message
+into the receive phase of a `SENDREC`. So the hangover costs C nothing and costs this port the flag's
+meaning — a process carrying it is treated as waiting for a reply it is not waiting for, refusing
+everyone but its stale `p_getfrom_e` until its next `RECEIVE` clears it, and the kernel labels its next
+send a `SENDREC` call that is not one.
+
+The fix is `receive_done`, used by `try_deliver_senda`'s direct-delivery branch: it is the third of the
+three places a message reaches a receiver, and now clears the sendrec wait as the other two do. This
+is one of the places the port deliberately parts with C, for the reason above. The evidence is a
+before/after on the same predicate, which is the only lever that shows it: the boot report above
+appeared on every boot before the fix, and after it is gone — the stale flag was the only thing the
+old predicate was ever seeing, and no genuine crossing happens during boot. The unit half is two host
+tests on `receive_done` (it clears the sendrec wait; it leaves the receiver's other flags alone). The
+integration suite cannot reach this path: `try_deliver_senda` reads the sender's async table through
+`virtual_copy`, and the suite's test processes have no page table to read it from.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

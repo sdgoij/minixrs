@@ -147,14 +147,28 @@ change that weakens a gate fail loudly. A marker string is a specification and s
 one.
 
 **Step 5 — make the silent classes loud at runtime.** *The per-run version of Step 1's watchdog; it
-would have turned today's 20-minute decode into one line.*
+would have turned today's 20-minute decode into one line.* **Done (findings 64, 65).**
 - In VM's `vfs_request_sync`: the reply is consumed without checking its type, so a stray request
   delivered into the reply slot is read as a result. Validate `m_type == VM_VFS_REPLY` and report a
-  mismatch (sender, type, first payload words) rather than using it.
+  mismatch (sender, type, first payload words) rather than using it. **Taken:** `is_vfs_reply` gates the
+  read, a mismatch answers `EINVAL`, and the report goes out on the diag channel — deliberately not
+  through VFS, which is the server it is reporting about — once, with the sender, the type, the
+  request, the fd and the first two payload words.
 - In the kernel: when `mini_send` would satisfy a SENDREC waiter with a message whose *sender is
   itself awaiting a reply*, two processes are in `sendrec` to each other and their messages have
   crossed. Report it once, with both endpoints and types. Target-independent, so it covers the wasm
-  leg too.
+  leg too. **Taken:** a `sendrec`'s send is marked with `SENDREC_SEND` (the caller's
+  `REPLY_PEND` is not enough — finding 65 shows the flag outliving the `sendrec`), the report is once
+  and the count is every occurrence, and the delivery is left alone — the invariant is VM's, and
+  refusing the send would turn a wrong answer into a deadlock. Guards on both halves, including the
+  negative cases: a detector that fires on ordinary traffic is worse than none.
+
+The step's second bullet found something on its own: the first predicate fired on every boot, on a
+`REPLY_PEND` that had outlived a completed `sendrec` because the async delivery path
+(`try_deliver_senda`, which is how VFS answers VM) cleared the receiver's `RECEIVING` and not its
+`REPLY_PEND`. That is finding 65 — C has the same hole and does not care, because C's `WILLRECEIVE`
+never reads the flag; this port's does. This is the shape the step is *for*: the detector did not find
+the crossing it was written for, it found the thing that would have made it lie.
 
 **Step 6 — remove finding 58's class rather than policing it.**
 The invariant today is "no allocation inside VFS's VM-request handlers", held by inspection, and a

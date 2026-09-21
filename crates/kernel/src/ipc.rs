@@ -3,7 +3,7 @@
 //! Implements the core Minix IPC primitives.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use arch_common::ipc::{
     AMF_DONE, AMF_NOREPLY, AMF_NOTIFY, AMF_NOTIFY_ERR, AMF_VALID, AsynMsg, Message,
@@ -16,6 +16,18 @@ use crate::table::{endpoint_slot, is_ok_endpoint, proc_addr};
 
 pub const NON_BLOCKING: i32 = 0x80;
 pub const FROM_KERNEL: i32 = 0x100;
+
+/// Internal send flag: this send is the send half of a `SENDREC`, set only by
+/// `do_sync_ipc_flags` for the duration of that call.
+///
+/// It exists because `MF_REPLY_PEND` cannot answer the question. C's `do_sync_ipc`
+/// sets that flag and then returns on a failed `mini_send` without clearing it
+/// (`proc.c`: `if (call_nr == SEND || result != OK) break;`), so a process can be
+/// running with `REPLY_PEND` set and no `sendrec` in flight at all — measured once
+/// on VM during boot, whose next send was its ordinary `SENDNB` reply loop. What
+/// distinguishes a `sendrec`'s send from any other send is that the *caller* knows,
+/// so the caller says so.
+pub const SENDREC_SEND: i32 = 0x200;
 
 pub const SEND: i32 = 0x01;
 pub const RECEIVE: i32 = 0x02;
@@ -202,6 +214,122 @@ unsafe fn find_notify_receiver(main: *mut Proc, src_e: i32) -> *mut Proc {
     }
 }
 
+/// Crossed SENDREC pairs seen, and whether the first one has been reported.
+///
+/// A pair that has crossed tends to cross again on the next message, so the
+/// console gets the first one and the count keeps the rest visible to a test.
+static CROSSED_SENDREC: AtomicU32 = AtomicU32::new(0);
+static CROSSED_SENDREC_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// How many times a send has satisfied a SENDREC waiter from inside a SENDREC.
+///
+/// Exposed for the integration suite: a report that only writes to the console
+/// cannot be asserted on, and this class is one that has to stay detected.
+pub fn crossed_sendrec_detections() -> u32 {
+    CROSSED_SENDREC.load(Ordering::Relaxed)
+}
+
+unsafe fn ser_puts(bytes: &[u8]) {
+    for &b in bytes {
+        crate::hal::serial_write_byte(b);
+    }
+}
+
+unsafe fn ser_i32(v: i32) {
+    if v < 0 {
+        crate::hal::serial_write_byte(b'-');
+    }
+    let mut n = i64::from(v).unsigned_abs();
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    unsafe { ser_puts(&digits[i..]) };
+}
+
+unsafe fn ser_hex32(v: u32) {
+    unsafe { ser_puts(b"0x") };
+    let mut digits = [0u8; 8];
+    let mut i = digits.len();
+    let mut v = v;
+    loop {
+        i -= 1;
+        let d = (v & 0xf) as u8;
+        digits[i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    unsafe { ser_puts(&digits[i..]) };
+}
+
+/// Write the one-line report for a crossed SENDREC pair.
+///
+/// Both endpoints and the message's type, because the pair is the finding: which
+/// two processes are in `sendrec` to each other says which servers to look at, and
+/// the type says which conversation crossed.
+unsafe fn report_crossed_sendrec(caller_ptr: *mut Proc, recv_ptr: *mut Proc, mtype: i32) {
+    unsafe {
+        ser_puts(b"kernel: crossed sendrec: ep ");
+        ser_i32((*caller_ptr).p_endpoint);
+        ser_puts(b" -> ep ");
+        ser_i32((*recv_ptr).p_endpoint);
+        ser_puts(b", message type ");
+        ser_hex32(mtype as u32);
+        if let Some(name) = crate::debug::mtypename(mtype) {
+            ser_puts(b" (");
+            ser_puts(name.as_bytes());
+            ser_puts(b")");
+        }
+        ser_puts(b"; both were awaiting a reply\r\n");
+    }
+}
+
+/// Note a send that satisfies a SENDREC waiter with the send half of another
+/// `sendrec`.
+///
+/// `SENDREC_SEND` says the caller is in the send phase of a `sendrec`; `REPLY_PEND`
+/// on the receiver says it is in the receive phase of one, waiting for *this*
+/// sender's message (`find_receiver` matched, so its `p_getfrom_e` names this
+/// sender). Both are therefore inside `sendrec` to each other with their messages
+/// crossed: each lands in the other's reply slot, and each side reads the other's
+/// request as the answer to its own — silent until something downstream makes it
+/// visible, which is what made the same class a 20-minute decode.
+///
+/// The delivery itself is unchanged. The invariant is VM's to keep (no allocation
+/// inside a VFS-request handler), not the kernel's to enforce, and a kernel that
+/// refused this send would turn a wrong answer into a deadlock in the same place.
+///
+/// `SENDREC_SEND` rather than the caller's `REPLY_PEND`, because that flag outlives
+/// the `sendrec` that set it: C's `do_sync_ipc` returns on a failed send without
+/// clearing it, so a process can be running with it set and no `sendrec` in flight —
+/// measured on VM at boot, and fixed in `receive_done` (finding 65). The question
+/// this asks is "is a `sendrec` sending right now", and only the caller knows.
+unsafe fn note_crossed_sendrec(caller_ptr: *mut Proc, recv_ptr: *mut Proc, mtype: i32, flags: i32) {
+    unsafe {
+        if flags & SENDREC_SEND == 0 {
+            return;
+        }
+        let awaiting_reply =
+            (*recv_ptr).p_misc_flags.load(Ordering::Relaxed) & MiscFlags::REPLY_PEND.bits() != 0;
+        if !awaiting_reply {
+            return;
+        }
+        CROSSED_SENDREC.fetch_add(1, Ordering::Relaxed);
+        if CROSSED_SENDREC_REPORTED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        report_crossed_sendrec(caller_ptr, recv_ptr, mtype);
+    }
+}
+
 /// Send a message from `caller_ptr` to `dst_e`.
 ///
 /// # Safety
@@ -261,6 +389,8 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
 
             let src_ep = (*caller_ptr).p_endpoint;
             let ep_bytes = src_ep.to_ne_bytes();
+            let mtype = i32::from_le_bytes([dst_msg[4], dst_msg[5], dst_msg[6], dst_msg[7]]);
+            note_crossed_sendrec(caller_ptr, recv_ptr, mtype, flags);
             // Write source endpoint to m_source (bytes 0-3), matching
             // original C: dst_ptr->p_delivermsg.m_source = caller_ptr->p_endpoint
             core::ptr::copy_nonoverlapping(ep_bytes.as_ptr(), dst_msg.as_mut_ptr().add(0), 4);
@@ -930,7 +1060,10 @@ pub unsafe fn do_sync_ipc_flags(
                 (*caller_ptr)
                     .p_misc_flags
                     .fetch_or(MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                let r = mini_send(caller_ptr, ep, m_ptr, flags);
+                // SENDREC_SEND says this send is a sendrec's send half, which is
+                // what the crossed-sendrec check needs and REPLY_PEND cannot tell it
+                // (C leaves that flag set when this send fails).
+                let r = mini_send(caller_ptr, ep, m_ptr, flags | SENDREC_SEND);
                 if r != OK {
                     return r;
                 }
@@ -1419,6 +1552,35 @@ pub unsafe fn ipc_notify_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     unsafe { do_sync_ipc(caller, msg.as_mut_ptr(), NOTIFY) }
 }
 
+/// Finish a delivery that the receiver was waiting for: it is no longer `RECEIVING`,
+/// runnable if nothing else holds it, and no longer awaiting a reply.
+///
+/// The third of the three places a message reaches a receiver, and the one that
+/// forgot the second half: `mini_send` clears `REPLY_PEND` on delivery, every path
+/// through `mini_receive` that returns a message clears it, and this one — a
+/// destination already waiting when the message arrives — cleared only `RECEIVING`.
+/// A process left holding `REPLY_PEND` is one that `will_receive_sendrec` treats as
+/// waiting for a reply it is not waiting for: it refuses third-party messages until
+/// its next `RECEIVE` clears the flag, and the kernel labels its next send a
+/// `SENDREC` call that is not one (finding 65).
+///
+/// C `proc.c` `try_deliver_senda` does not clear it either, so this is one of the
+/// places the port deliberately parts with the reference: C's `WILLRECEIVE` does not
+/// consult the flag, so a hangover costs it nothing, while this port's does.
+unsafe fn receive_done(recv_ptr: *mut Proc) {
+    unsafe {
+        (*recv_ptr)
+            .p_misc_flags
+            .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+        let old_rts = (*recv_ptr).p_rts_flags.load(Ordering::Relaxed);
+        let new_rts = old_rts & !RtsFlags::RECEIVING.bits();
+        (*recv_ptr).p_rts_flags.store(new_rts, Ordering::Relaxed);
+        if new_rts == 0 {
+            enqueue(recv_ptr);
+        }
+    }
+}
+
 /// SENDA syscall handler — delivers async messages to their destinations.
 ///
 /// Reads the async message table pointer and size from the message buffer
@@ -1616,12 +1778,7 @@ pub unsafe fn try_deliver_senda(caller_ptr: *mut Proc, table: *mut u8, size: usi
                 // (finding 38): the receiver is a third party woken by this send, so nothing else
                 // would ever make that copy.
                 deliver_pending_msg(dst_ptr);
-                let old_rts = (*dst_ptr).p_rts_flags.load(Ordering::Relaxed);
-                let new_rts = old_rts & !RtsFlags::RECEIVING.bits();
-                (*dst_ptr).p_rts_flags.store(new_rts, Ordering::Relaxed);
-                if new_rts == 0 {
-                    enqueue(dst_ptr);
-                }
+                receive_done(dst_ptr);
             } else if r == OK {
                 // Destination not waiting — mark as pending
                 let caller_id = (*privp).s_id;
@@ -1749,6 +1906,57 @@ mod tests {
         // Flags at bits 16+
         status |= (IPC_FLG_MSG_FROM_KERNEL as u32) << 16;
         assert!(ipc_status_has_flag(status, IPC_FLG_MSG_FROM_KERNEL as u32));
+    }
+
+    #[test]
+    fn test_receive_done_clears_the_sendrec_wait() {
+        unsafe {
+            proc_init();
+            let dst = setup_proc(1);
+            // The receiver was waiting for the reply to its own sendrec.
+            (*dst)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*dst)
+                .p_misc_flags
+                .store(MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+
+            receive_done(dst);
+
+            assert_eq!(
+                (*dst).p_rts_flags.load(Ordering::Relaxed),
+                0,
+                "a completed receive is no longer waiting for a message"
+            );
+            assert_eq!(
+                (*dst).p_misc_flags.load(Ordering::Relaxed),
+                0,
+                "and no longer waiting for a reply (finding 65)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_receive_done_keeps_other_flags() {
+        unsafe {
+            proc_init();
+            let dst = setup_proc(1);
+            (*dst)
+                .p_rts_flags
+                .store(RtsFlags::RECEIVING.bits(), Ordering::Relaxed);
+            (*dst)
+                .p_misc_flags
+                .store(MiscFlags::DELIVERMSG.bits(), Ordering::Relaxed);
+
+            receive_done(dst);
+
+            assert_eq!((*dst).p_rts_flags.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                (*dst).p_misc_flags.load(Ordering::Relaxed),
+                MiscFlags::DELIVERMSG.bits(),
+                "only the sendrec wait is cleared"
+            );
+        }
     }
 
     #[test]

@@ -4755,7 +4755,11 @@ pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 // len (offset 16) = number of bytes to write.
                 let len = msg_read_i32(msg, 16);
                 if len > 0 {
-                    let max_len = len.min(256) as usize;
+                    // The message is `MESSAGE_SIZE` bytes and the data starts at byte
+                    // 12, so that is the real ceiling: this is what can be in the
+                    // message, not a policy about how much to print. It was 256, which
+                    // indexes past the end of the array a caller can fill.
+                    let max_len = len.min((MESSAGE_SIZE - 12) as i32) as usize;
                     for i in 0..max_len {
                         let byte = msg[12 + i];
                         crate::hal::serial_write_byte(byte);

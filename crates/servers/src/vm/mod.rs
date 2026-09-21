@@ -25,7 +25,7 @@ use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
 use arch_common::ipc::{EDONTREPLY, Message};
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 const OK: i32 = 0;
 
@@ -1762,7 +1762,123 @@ fn parse_fdlookup_device(reply: &[u8; 64]) -> Option<(u64, u64)> {
     Some((phys, len))
 }
 
-/// Send a synchronous VMâ†’VFS request (FDLOOKUP/FDCLOSE/FDIO) and wait for
+/// Message type of the reply `vfs_request_sync` waits for. A SENDREC consumes
+/// whatever its destination sends, so the type is the only thing separating the
+/// reply from a request that was delivered into the reply slot instead (finding
+/// 64).
+fn is_vfs_reply(msg: &[u8; 64]) -> bool {
+    i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4])) == VM_VFS_REPLY as i32
+}
+
+/// A byte line built without `alloc`, for diagnostics a server writes itself.
+struct Line {
+    buf: [u8; 160],
+    len: usize,
+}
+
+impl Line {
+    fn new() -> Self {
+        Self {
+            buf: [0; 160],
+            len: 0,
+        }
+    }
+
+    /// Append as much of `bytes` as fits. Reports are the thing being written
+    /// when they are written, so a full buffer truncates rather than panics.
+    fn push(&mut self, bytes: &[u8]) {
+        let room = self.buf.len() - self.len;
+        let n = room.min(bytes.len());
+        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+    }
+
+    fn push_i32(&mut self, v: i32) {
+        if v < 0 {
+            self.push(b"-");
+        }
+        // Via i64 so i32::MIN's magnitude does not overflow.
+        let mut n = i64::from(v).unsigned_abs();
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        self.push(&digits[i..]);
+    }
+
+    fn push_hex32(&mut self, mut v: u32) {
+        self.push(b"0x");
+        let mut digits = [0u8; 8];
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            let d = (v & 0xf) as u8;
+            digits[i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
+            if v == 0 {
+                break;
+            }
+        }
+        self.push(&digits[i..]);
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// The report for a message whose type is not VM_VFS_REPLY: who it came from,
+/// what it was, and the first payload words, so the log names the conversation
+/// that went wrong rather than only that one did.
+fn vfs_reply_mismatch_line(msg: &[u8; 64], req: i32, fd: i32) -> Line {
+    let src = i32::from_le_bytes(msg[0..4].try_into().unwrap_or([0; 4]));
+    let mtype = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    let w0 = u32::from_le_bytes(msg[8..12].try_into().unwrap_or([0; 4]));
+    let w1 = u32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4]));
+
+    let mut line = Line::new();
+    line.push(b"VM: vfs_request_sync: reply type ");
+    line.push_hex32(mtype as u32);
+    line.push(b" from ep ");
+    line.push_i32(src);
+    line.push(b" is not VM_VFS_REPLY ");
+    line.push_hex32(VM_VFS_REPLY);
+    line.push(b" (req ");
+    line.push_i32(req);
+    line.push(b", fd ");
+    line.push_i32(fd);
+    line.push(b", words ");
+    line.push_hex32(w0);
+    line.push(b" ");
+    line.push_hex32(w1);
+    line.push(b")\n");
+    line
+}
+
+/// Report a reply of the wrong type, once.
+///
+/// Once, because a protocol slip repeats on every request the same way, and a
+/// console line per fault would be a log amplifier rather than a diagnostic.
+///
+/// On the diag channel rather than through `write`: this is VM reporting that its
+/// conversation with VFS did not go as expected, and VFS is exactly the server
+/// that may be unable to answer — a report delivered through it could block here
+/// instead of printing.
+fn report_vfs_reply_mismatch(msg: &[u8; 64], req: i32, fd: i32) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    minix_rt::diag_write(vfs_reply_mismatch_line(msg, req, fd).as_bytes());
+}
+
+/// Send a synchronous VM→VFS request (FDLOOKUP/FDCLOSE/FDIO) and wait for
 /// the VM_VFS_REPLY. VM is single-threaded, so blocking inside a handler is
 /// safe: VFS processes the request (forwarding to MFS if needed) and
 /// replies, waking VM's SENDREC. This replaces C MINIX's async
@@ -1797,6 +1913,17 @@ fn vfs_request_sync(
     };
     if r < 0 {
         return r as i32;
+    }
+    // What came back is assumed to be the reply only if it says it is. VFS sends
+    // every reply with this fixed type (`vfs/call.rs` vm_call_reply, error results
+    // included, which travel in VMV_RESULT), so a different type here is a
+    // message that was never meant for this slot — a request, or a reply to a
+    // request from an earlier generation of this conversation. Reading its
+    // payload as a result would turn that into a wrong answer somewhere later,
+    // which is the expensive part.
+    if !is_vfs_reply(&msg) {
+        report_vfs_reply_mismatch(&msg, req, fd);
+        return EINVAL;
     }
     reply.copy_from_slice(&msg);
     i32::from_le_bytes(
@@ -3090,6 +3217,55 @@ mod tests {
         VM_UNMAP_PHYS,
     };
     use arch_common::types::Endpoint;
+
+    #[test]
+    fn test_is_vfs_reply_accepts_only_the_reply_type() {
+        let mut reply = [0u8; 64];
+        reply[4..8].copy_from_slice(&(VM_VFS_REPLY as i32).to_le_bytes());
+        assert!(is_vfs_reply(&reply));
+
+        // A request for the same conversation, delivered into the reply slot, is
+        // the case this check exists for.
+        let mut request = [0u8; 64];
+        request[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
+        assert!(!is_vfs_reply(&request));
+
+        // And nothing saying what it is is not a reply either.
+        assert!(!is_vfs_reply(&[0u8; 64]));
+    }
+
+    #[test]
+    fn test_vfs_reply_mismatch_line_names_the_conversation() {
+        // The line spells the two message types in hex, so the values are pinned
+        // here too: a change to either constant then fails this test instead of
+        // turning the log line into a quiet lie.
+        assert_eq!(VM_VFS_REPLY, 0xc1e);
+        assert_eq!(VFS_VMCALL, 0x126);
+
+        let mut msg = [0u8; 64];
+        msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
+        msg[4..8].copy_from_slice(&VFS_VMCALL.to_le_bytes());
+        msg[8..12].copy_from_slice(&7u32.to_le_bytes());
+        msg[12..16].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+
+        let line = vfs_reply_mismatch_line(&msg, 3, 11);
+        assert_eq!(
+            core::str::from_utf8(line.as_bytes()),
+            Ok(
+                "VM: vfs_request_sync: reply type 0x126 from ep 1 is not VM_VFS_REPLY 0xc1e \
+                (req 3, fd 11, words 0x7 0xdeadbeef)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_line_truncates_rather_than_panicking() {
+        let mut line = Line::new();
+        for _ in 0..64 {
+            line.push(b"0123456789");
+        }
+        assert_eq!(line.as_bytes().len(), 160);
+    }
 
     #[test]
     fn test_parse_fdlookup_device() {
