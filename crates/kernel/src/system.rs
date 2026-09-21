@@ -3694,6 +3694,11 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
 
         crate::hal::free_phys_contig(frame_base, frame_pages);
 
+        // A userland exec of a file-backed image is the boundary the boot test watches for: the
+        // boot loader's own loads install an image directly and never come through here, so this
+        // is the only place that can say "a user process is about to run this program".
+        crate::bootwatch::note_exec((*rp).p_nr);
+
         // Make the target runnable at the new entry point: it is blocked in
         // SENDREC to PM; clear RECEIVING and enqueue so restore() loads the
         // new p_reg and jumps to the exec'd entry.

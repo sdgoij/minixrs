@@ -24,7 +24,7 @@ const REQ_LOOKUP: i32 = FS_BASE + 26;
 /// has finished mount_root and all boot processes are initialized.
 /// Requires that the kernel-allocator, process table, IPC, and per-process
 /// page tables are fully set up. The function never returns — it exits QEMU.
-pub unsafe fn run_boot_tests() -> ! {
+pub unsafe fn run_boot_tests() {
     serial_write("\r\n=== BOOT TEST ===\r\n");
     let mut failures: u32 = 0;
 
@@ -93,14 +93,49 @@ pub unsafe fn run_boot_tests() -> ! {
     // N: Mouse wiring — the IRQ-12 hook must notify the input server.
     failures += test_mouse_irq_notifies_input();
 
-    if failures == 0 {
-        serial_write("ALL TESTS PASSED\r\n");
-        exit_qemu_success();
-    } else {
+    if failures != 0 {
         serial_write("FAILURES: ");
         print_dec(failures);
         serial_write("\r\n");
         exit_qemu_failure(failures);
+    }
+
+    // Phase 1 is the deterministic post-mount state, and it stops short of the boundary the boot was
+    // being trusted for. Phase 2 is that boundary: a user process has to exec a program out of the
+    // image and then leave user mode again. INIT was held off the run queue until now, so phase 1 saw
+    // exactly the fixed state it always has; releasing it lets the boot continue past the point this
+    // suite used to exit at, and the watch armed here turns "it never ran" into a failure instead of
+    // a summary printed before anyone had tried.
+    serial_write("\r\n  phase 1 complete; releasing init\r\n");
+    kernel::bootwatch::arm(
+        kernel::clock::get_monotonic() + BOOT_WATCH_TICKS,
+        boot_watch_verdict,
+    );
+    unsafe { crate::boot_init::release_init() };
+}
+
+/// Ticks the userspace phase is given before it counts as stopped. A boot reaches the shell in well
+/// under a second of ticks; what this guards against is a hang, so the value only has to be larger
+/// than a boot.
+const BOOT_WATCH_TICKS: u64 = 500;
+
+/// The verdict for the userspace phase, called from the timer interrupt by `kernel::bootwatch`.
+///
+/// Prints the outcome and exits QEMU, so it never returns — including on the failure path, where the
+/// process table is dumped first. A stuck boot saying *who* is stuck is the whole point.
+fn boot_watch_verdict(passed: bool) {
+    unsafe {
+        serial_write("\r\n=== BOOT TEST: userspace ===\r\n");
+        if passed {
+            serial_write("  OK a user process exec'd an image and ran\r\n");
+            serial_write("ALL TESTS PASSED\r\n");
+            exit_qemu_success();
+        } else {
+            serial_write("  FAIL: no user process ran after exec — the system stopped\r\n");
+            kernel::syscall::sys_hang_dump_handler(core::ptr::null_mut(), &[0u64; 6]);
+            serial_write("\r\nFAILURES: 1\r\n");
+            exit_qemu_failure(1);
+        }
     }
 }
 

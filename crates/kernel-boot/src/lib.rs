@@ -24,7 +24,10 @@ pub mod boot_test;
 
 #[cfg(feature = "boot-test")]
 pub unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args: &[u64; 6]) -> i64 {
-    unsafe { boot_test::run_boot_tests() }
+    // Phase 1 runs here. The verdict belongs to phase 2 and arrives later, from
+    // `boot_test::boot_watch_verdict` once userland has had its chance to run.
+    unsafe { boot_test::run_boot_tests() };
+    0
 }
 
 /// Non-boot-test fallback for SYS_BOOT_COMPLETE: VFS signals boot finished.
@@ -245,14 +248,12 @@ static BOOT_PROCS_ALL: &[(&str, i32)] = &[
 /// boot-test feature — the full list minus the trailing INIT entry, so
 /// the boot-complete test runs before any user process starts.
 pub fn boot_procs() -> &'static [(&'static str, i32)] {
-    #[cfg(feature = "boot-test")]
-    {
-        &BOOT_PROCS_ALL[..BOOT_PROCS_ALL.len() - 1]
-    }
-    #[cfg(not(feature = "boot-test"))]
-    {
-        BOOT_PROCS_ALL
-    }
+    // Under `boot-test` INIT used to be dropped from this list, which is why the suite ran — and
+    // exited QEMU — before any user process existed, and so could not see a boot that stopped at the
+    // shell. It is loaded with the rest now and held off the run queue instead
+    // (`boot_init::enqueue_and_start`), so phase 1 still sees the fixed post-mount state and phase 2
+    // still gets a user process to run.
+    BOOT_PROCS_ALL
 }
 
 /// Print macro for boot-time serial output.

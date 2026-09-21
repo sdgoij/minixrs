@@ -311,6 +311,11 @@ pub unsafe fn timer_int_handler() {
 
         let mono = MONOTONIC.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // The boot-progress watch counts ticks rather than wall time: what it is built to catch is a
+        // system that has stopped, so finite against infinite is the whole distinction and the
+        // deadline's exact value does not matter. Inert unless a boot-test build armed it.
+        crate::bootwatch::tick(mono);
+
         // Limit adjtime changes to every other tick.
         let delta = ADJTIME_DELTA.load(Ordering::Relaxed);
         if delta != 0 && (mono & 0x1) != 0 {

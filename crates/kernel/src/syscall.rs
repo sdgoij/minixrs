@@ -82,6 +82,14 @@ pub unsafe fn dispatch_basic_syscall(
     // Per-process page tables preserve the kernel identity map via PD
     // deep-copy, so the kernel can access its own data AND user data
     // without switching CR3. The old CR3 save/restore is disabled.
+    //
+    // Every syscall passes the boot-progress watch (`bootwatch`), which is what lets the boot suite
+    // tell "userspace is up" from "userspace never ran": a process that exec'd an image and then
+    // entered the kernel has crossed the boundary, and one that is stuck on a page fault has not.
+    // Inert unless a boot-test build armed it.
+    if !caller.is_null() {
+        crate::bootwatch::note_syscall(unsafe { (*caller).p_nr });
+    }
 
     unsafe {
         let table = syscall_table_ptr() as *const Option<BasicSyscallFn>;
@@ -373,7 +381,17 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
 /// console. Diagnostic for wedged-server hangs: shows who is blocked on
 /// whom (SENDING → p_sendto_e, RECEIVING → p_getfrom_e) so a deadlocked
 /// server chain is visible from the shell.
-unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
+/// Dump the process table to the serial console.
+///
+/// The normal caller is the SYS_HANG_DUMP syscall; the boot test also calls it directly on the
+/// failure path, because a system that has stopped is only actionable if the dump names who is
+/// stopped and on what (`rts` flags and `rip`, which is where a stuck fault shows up).
+///
+/// # Safety
+///
+/// Reads the process table only. `_caller` and `_args` are unused, so both may be null/dummy; the
+/// caller must be on a kernel stack that can survive the serial writes (any is fine).
+pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u64; 6]) -> i64 {
     unsafe {
         use crate::proc::RtsFlags;
 

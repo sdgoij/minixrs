@@ -355,10 +355,16 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
 
     print!("  loading boot processes...\r\n");
 
-    #[cfg(not(feature = "boot-test"))]
-    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 18] = unsafe { core::mem::zeroed() };
-    #[cfg(feature = "boot-test")]
-    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; 17] = unsafe { core::mem::zeroed() };
+    // One slot per entry in `BOOT_PROCS_ALL`, which is what `boot_procs()` hands back on both builds
+    // now: the boot-test build used to keep a smaller array for the shorter list it had, and the two
+    // drifted the moment INIT was loaded again. The assertion keeps them in step.
+    const BOOT_PROC_SLOTS: usize = 18;
+    assert!(
+        boot_procs.len() <= BOOT_PROC_SLOTS,
+        "boot process list outgrew BOOT_PROC_SLOTS"
+    );
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; BOOT_PROC_SLOTS] =
+        unsafe { core::mem::zeroed() };
     for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
         let info = match unsafe { load_and_prepare_proc(path, proc_nr, &[path]) } {
             Some(info) => info,
@@ -530,6 +536,24 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     first_proc
 }
 
+/// Release the boot-test build's held INIT: clear VMINHIBIT and enqueue it.
+///
+/// The other half of the hold in `enqueue_and_start`. Called by the boot suite after phase 1, so
+/// that the userspace boundary it now watches is reached with the scheduler in a known state.
+#[cfg(feature = "boot-test")]
+pub unsafe fn release_init() {
+    let rp = kernel::table::proc_addr(arch_common::com::INIT_PROC_NR);
+    unsafe {
+        (*rp).p_rts_flags.fetch_and(
+            !kernel::proc::RtsFlags::VMINHIBIT.bits(),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        if (*rp).is_runnable() {
+            kernel::sched::enqueue(rp);
+        }
+    }
+}
+
 /// Enqueue all boot processes and prepare the scheduler for the first
 /// switch to userspace.
 ///
@@ -570,6 +594,21 @@ pub unsafe fn enqueue_and_start(cfg: &BootProcessConfig, first_proc: *mut Proc) 
             (*rp)
                 .p_rts_flags
                 .store(0, core::sync::atomic::Ordering::Relaxed);
+
+            // Under `boot-test`, INIT is loaded but held: phase 1 of the boot suite is a
+            // deterministic post-mount state, and a user process being scheduled through it would
+            // make those checks racy (that is why INIT used to be dropped from the list entirely).
+            // `release_init` hands it over once phase 1 has printed, which is what lets the suite
+            // reach the userspace boundary it used to stop short of.
+            #[cfg(feature = "boot-test")]
+            if proc_nr == arch_common::com::INIT_PROC_NR {
+                (*rp).p_rts_flags.store(
+                    kernel::proc::RtsFlags::VMINHIBIT.bits(),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                continue;
+            }
+
             kernel::sched::enqueue(rp);
         }
     }
