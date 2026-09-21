@@ -73,7 +73,11 @@ function settle({ maxSlices = 20000 } = {}) {
     slices += 1;
     const reason = host.pump({ maxSyscalls: 400 });
     if (reason !== 'slice') return reason;
-    if (host.sliceWasSpinOnly() && host.console.pending === 0) return 'awaiting-input';
+    // Nothing pending on the host's side either: a record the guest was *told* about is work, and
+    // the instance it woke is behind the spinning shell in the run queue (see `input.pending`).
+    if (host.sliceWasSpinOnly() && host.console.pending === 0 && host.input.pending === 0) {
+      return 'awaiting-input';
+    }
   }
   return 'slices-exhausted';
 }
@@ -219,6 +223,155 @@ note(
       .join('\n') +
     '\n        The seam totals are the messages; the clone is the fork, and it is the whole cost of a\n' +
     '        command — the same instance, byte for byte, whether or not the command needs it.'
+);
+
+// The browser's events into the guest, driven the way a front end drives them: the host queues a
+// record and raises the line the input server registered, and the guest's own input server drains it
+// into the ring the desktop reads. Both halves matter, and the *control* below is the interesting
+// one — the driver is blocked in RECEIVE, so a record queued without a wake is a record nobody takes,
+// and a check that only ever pushed could not tell that from a check that is not running at all.
+//
+// The desktop is where the end of the chain is read, because it is the only layer that *does*
+// something with a pointer record: a key would need a window whose client is asking for one, and
+// nothing in this port's program module does (userland's `wterm` is not built for wasm yet).
+const INPUT_SLOT = SYSTEM_SPECS.find((s) => s.label === 'input').slot;
+const WSERVER_SLOT = SYSTEM_SPECS.find((s) => s.label === 'wserver').slot;
+const inputServer = host.procAt(INPUT_SLOT);
+const wserverProc = host.procAt(WSERVER_SLOT);
+const pointerNow = () => wserverProc.inst.exports.minix_wserver_pointer();
+const ringNow = () => inputServer.inst.exports.minix_input_events_queued();
+// The HID page and usages a front end sends for a pointer, and where it puts it: a quarter of the way
+// across and a third of the way down, in the normalized 0..0x7FFF space an absolute device reports.
+const PAGE_ABS = 0x00fd;
+const ABS_X = 0x0030;
+const ABS_Y = 0x0031;
+const ABS_X_VALUE = 0x4000;
+const ABS_Y_VALUE = 0x2000;
+// Where the desktop's own arithmetic puts that: `press * XRES / 32768` per axis, which is the
+// conversion `process_event_batch` does for the ABS page.
+const EXPECTED_X = Math.floor((ABS_X_VALUE * 1024) / 32768);
+const EXPECTED_Y = Math.floor((ABS_Y_VALUE * 768) / 32768);
+const EXPECTED_POINTER = (EXPECTED_X << 16) | EXPECTED_Y;
+// `WsState::new` starts the pointer centered, so this pins that the move below is the host's record
+// rather than where the desktop happens to begin.
+const pointerBefore = pointerNow();
+check(
+  'the desktop has not been moved yet, so the move below is the host record',
+  pointerBefore === (512 << 16) | 384 && ringNow() === 0,
+  `pointer=0x${pointerBefore.toString(16)} (centered at boot) ring=${ringNow()}`
+);
+
+// The control: the same kind of record the push below sends, in the same queue, held without an
+// interrupt — so whatever the next round does cannot be the queue alone.
+host.input.enqueue(PAGE_ABS, ABS_Y, ABS_Y_VALUE);
+const afterHold = settle();
+check(
+  'a record queued without an interrupt waits in the queue and reaches no one',
+  ringNow() === 0 && host.input.queue.length === 1 && pointerNow() === pointerBefore,
+  `settle ended on ${afterHold}; ring=${ringNow()} host queue=${host.input.queue.length} ` +
+    `pointer=0x${pointerNow().toString(16)} (the input server is blocked in RECEIVE — nothing ` +
+    'told it to look)'
+);
+
+// The real thing, and it carries the second claim: the queue is the *host's*, so the record that
+// arrived while the driver was blocked is still there when the wake comes. Both should be taken.
+host.input.push(PAGE_ABS, ABS_X, ABS_X_VALUE);
+const afterPush = settle();
+check(
+  'the interrupt woke the input server, which drained the queue into the desktop',
+  pointerNow() === EXPECTED_POINTER && ringNow() === 0 && host.input.pending === 0,
+  `settle ended on ${afterPush}; pointer=0x${pointerNow().toString(16)} ` +
+    `(expected 0x${EXPECTED_POINTER.toString(16)}: x=${EXPECTED_X} y=${EXPECTED_Y}) ` +
+    `ring=${ringNow()} host queue=${host.input.pending}`
+);
+
+// The checks above ran with the desktop idle, which is the easy case: the kernel hands a
+// notification straight to a consumer blocked in RECEIVE. A live page meets the other case — the
+// desktop is routinely runnable, because the tty relays the console's cells to it on every write —
+// and a non-blocking *send* is refused for a destination that is not receiving at that instant
+// (`mini_send`'s NON_BLOCKING arm answers ENOTREADY). The wake is then gone, the events stay in the
+// input ring, and the arrow stops: what a reader saw was a console filling with
+// `input: notify consumer failed`.
+//
+// So the wake has to be a *notification*, which the kernel remembers for a destination that is not
+// receiving and hands over at its next RECEIVE. The check below is the symptom rather than one
+// interleaving — which instance the dispatcher reaches first is the scheduler's business — so it
+// puts a console write in flight (the desktop's reason to be runnable) and a burst of pointer
+// records into the same turn, then reads both ends: the desktop moved where the last record said,
+// and the input server reported nothing.
+const BURST = 20;
+const beforeBurst = terminal.text().length;
+host.console.push('/bin/echo busy\n');
+for (let i = 0; i < BURST; i += 1) {
+  const value = 0x1000 + i * 0x100;
+  host.input.push(PAGE_ABS, ABS_X, value);
+  host.input.push(PAGE_ABS, ABS_Y, value);
+}
+const afterBurst = settle();
+const burstLast = 0x1000 + (BURST - 1) * 0x100;
+const burstPointer =
+  (Math.floor((burstLast * 1024) / 32768) << 16) | Math.floor((burstLast * 768) / 32768);
+const burstConsole = terminal.text().slice(beforeBurst);
+check(
+  'a wake that arrives while the desktop is busy still reaches it',
+  pointerNow() === burstPointer &&
+    ringNow() === 0 &&
+    host.input.pending === 0 &&
+    // No complaint from the input server either: a wake that could not be delivered is exactly
+    // what it would have to say something about, whatever it ends up calling it.
+    !burstConsole.includes('input: '),
+  `settle ended on ${afterBurst}; pointer=0x${pointerNow().toString(16)} ` +
+    `(expected 0x${burstPointer.toString(16)}) ring=${ringNow()} ` +
+    `host queue=${host.input.pending} console since=[${burstConsole.trim()}]`
+);
+
+// ------------------------------------------------------ M5c: a drag, and what it costs
+//
+// The checks above move the pointer a handful of times in one turn. A reader *drags* it, which is a
+// different shape of load: hundreds of records over as many turns, each one a wake and a round of
+// the input server and the desktop. That is where this port's dispatch model shows its cost, and it
+// is what the reader who reported `stopped: the syscall budget ran out` was doing (finding 62).
+//
+// The mechanism, because the number is not self-explanatory: a guest that yields cannot switch to
+// the process its yield made runnable, since switching is the host's and one instance runs at a
+// time. Until a yield handed control back, the yielder held the CPU for the rest of the slice —
+// which at a prompt is the tty's console-read retry, some 400 syscalls of it. So each round of the
+// handshake cost a whole slice: eight slices and ~3200 syscalls for a job of about 25, and the
+// budget went on the spins between the rounds rather than on the rounds.
+//
+// So the claim is the reader's own: a drag long enough that the old cost would have exhausted the
+// budget finishes, and arrives at the position the last record named. The bound is loose on purpose
+// — it is a statement about the *shape* of the cost, not a measured constant.
+const DRAG = 400;
+const DRAG_BATCH = 4;
+const dragBefore = host.budget.left;
+let dragValue = 0;
+let dragReason = 'ok';
+for (let i = 0; i < DRAG; i += DRAG_BATCH) {
+  for (let j = 0; j < DRAG_BATCH; j += 1) {
+    dragValue = 0x100 + (i + j) * 32;
+    host.input.push(PAGE_ABS, ABS_X, dragValue);
+    host.input.push(PAGE_ABS, ABS_Y, dragValue);
+  }
+  dragReason = settle();
+  if (dragReason !== 'awaiting-input') break;
+}
+const dragCost = dragBefore - host.budget.left;
+const dragPointer =
+  (Math.floor((dragValue * 1024) / 32768) << 16) | Math.floor((dragValue * 768) / 32768);
+check(
+  'a long drag over the desktop is not paid for out of the syscall budget',
+  dragReason === 'awaiting-input' &&
+    pointerNow() === dragPointer &&
+    ringNow() === 0 &&
+    host.input.pending === 0 &&
+    // Pre-change this was ~3200 syscalls per record, so 400 records is 1.28M and the budget (1M)
+    // is gone before the drag ends. The bound is 100 per record: 4x the measured ~25, and 32x
+    // under the old cost.
+    dragCost < DRAG * 100,
+  `settle ended on ${dragReason}; ${DRAG} records cost ${dragCost} syscalls ` +
+    `(${(dragCost / DRAG).toFixed(1)} each); pointer=0x${pointerNow().toString(16)} ` +
+    `(expected 0x${dragPointer.toString(16)}) ring=${ringNow()} host queue=${host.input.pending}`
 );
 
 type('exit\n');

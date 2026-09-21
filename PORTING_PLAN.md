@@ -7587,6 +7587,127 @@ path has no equivalent. Making VM's VFS requests asynchronous (send with `AMF_NO
 server cannot absorb them, plus the pending-request table `do_vfs_reply` would complete) removes the
 class rather than the instance.
 
+**59. A console line assembled across a blocking syscall is a line somebody else can split.** On
+wasm INIT printed `init: pid=` and then the number as separate writes, with `getpid` — a SENDREC to
+PM — between them, which is a point at which the dispatch ends and another instance is entered. The
+line had always come out whole because nothing else happened to be writing at that moment; M5c added
+a boot process (`input`) and the desktop's own `wserver: ready` landed inside it, so `boot.cjs` saw
+`kernel: init: pid=wserver: ready` and its check on the transcript failed.
+
+The console is shared, and the schedule between two writes is not the writer's to decide: the fix is
+in the program, not in the check — the wasm INIT's pid line is now assembled after the pid is known
+and written with one syscall, which no other instance can be scheduled inside. The same shape is in
+`userland::init` (three writes, the blocking `getpid` before them, so on the arches that preempt it
+is one interrupt away from the same split); it is left alone because the boot tests there read the
+text rather than the line boundaries, and it is recorded here so the next reader knows which of the
+two was measured.
+
+**60. A woken process can sit behind one that never blocks, so "the guest is idle" is not the
+front end's to infer from the guest alone.** At the shell's prompt the retry of `read(0)` is a user
+mode spin: the process never blocks, so it stays at the head of the priority-0 run queue — this port
+rotates a process only when one of its syscalls ends (`kernel-wasm`'s `minix_syscall` clears
+`PREEMPTED` and re-enqueues at the tail there), and the host enters an instance and does not come
+back until that instance's slice is spent. A notification that made the input server runnable was
+therefore *behind* the shell, and the front end's park heuristic — a slice that only retried the
+console read — parked the run before the input server was ever given a slice. The pointer record sat
+in the host's queue and the desktop never moved its arrow.
+
+The fix is in the front end rather than the kernel, because the front end is what decides to stop:
+`host.input.pending` reports records the host has *announced* and the guest has not taken, and a
+spin-only slice no longer parks while any of those is outstanding. That is also what keeps the
+control honest — a record held with no interrupt is not announced, so the loop parks and nothing
+happens, which is exactly the claim M5c's control is making.
+
+Found by `tools/wasm-browser/run.js`, whose check moves the desktop's pointer while the shell is
+alive; `tools/wasm-servers/boot.cjs` runs its copy of the check at quiescence, after the shell has
+exited, and passed throughout. Two engines over one system is what caught it, and it is the reason
+the M5c check exists in both.
+
+**61. The wasm "physical" arena overlapped the kernel module's own statics, so the first exec frame
+wrote over the privilege table.** `arch-sim`'s frame arena starts at `ARENA_BASE` = 0x100000, and its
+comment calls that value "arbitrary non-zero" — true where a returned page is only stored or
+compared, and false on this port, where the kernel *dereferences* what `kernel::hal` hands it.
+wasm32 has no physical/virtual identity to keep (`ARCH_WASM32.md` §5.3), so the arena's addresses can
+only be the instance's own linear memory, and a fixed number above the image is not memory at all.
+With the base re-exported from `arch-sim`, `alloc_phys_contig` handed back the module's own bytes:
+the privilege table lives at 0x100e40, four kilobytes into the arena's first page, so the first exec
+frame written at 0x100000 landed on top of a `Priv` entry. The desktop's `s_trap_mask` came back as
+0, its next `RECEIVE` was refused with `ETRAPDENIED` (-211), and it spun in that receive loop until
+the front end's syscall budget ran out — the report named `wserver` and a spent budget, which is a
+symptom several layers away from the write that caused it.
+
+Only wasm is affected: a hardware arch returns real RAM above the kernel image, and `arch-sim`'s own
+users never dereference a returned page. It also predates M5c and needed nothing from it — the
+overlap is there from the first allocation — but M5c is what made it *visible*, by adding a boot
+process and a live run whose park heuristic no longer ended before the corruption showed. The fix is `crates/arch-wasm32/src/hal.rs`: a page-aligned 2 MiB `static PHYS_ARENA`, with
+`init()` passing its address to `init_phys_alloc`, so the arena is part of the module by construction
+and its addresses mean what §5.3 says they mean.
+
+`kernel-wasm` now carries the two check surfaces this had none of. `minix_arena_overlaps_privs`
+answers the invariant itself — do the arena's pages cover the table — and `boot.cjs` asserts it is 0;
+that check *fails* on the old base (measured: 79/80) and passes on the static, which is the guard the
+bug did not have. `minix_proc_trap_mask` reads the observable: every slot's mask must still be the
+one `table.rs` stamped at init. The second alone would not have been enough, and finding this out was
+worth the time — with the debug exports of this hunt removed, the layout shifted far enough that the
+old base no longer lands on a `Priv` entry at all, so a mask comparison passes on code that is still
+wrong. An invariant that depends on where the linker put things has to be checked as an invariant.
+
+`run.js`'s quiescence check, which failed while the arena sat on the module's statics, passes with it
+re-based. Neither of the other harnesses, nor the cross-arch gates, would have caught any of this:
+the overlap is present from the first allocation but only becomes a *symptom* after an exec on wasm,
+and the budget exhaustion was the only thing that ever spoke up.
+
+**62. A yield could not switch processes, so every round of an input handshake cost a whole slice.**
+`SYS_thread_yield` is how this port waits for the console: the tty's blocking read answers `EAGAIN`,
+yields, and retries (the console-read loop in `tty.rs`). What the kernel did with that yield was
+bookkeeping — the flag is cleared and the process re-linked at the tail of its queue on the
+syscall-return path (`kernel-wasm`'s `minix_syscall`, which finding 12 added). What nothing did was
+*dispatch* the process the yield had just made runnable: switching processes is the host's, one
+instance runs at a time, and the host only picks again when a dispatch returns. So a yielding process
+held the CPU for the rest of the slice, and at a prompt that slice is filled with the tty's retry.
+
+Nothing noticed while the guest was simply idle — the front end parks, and a slice of spinning once
+per park is cheap. The input path is what made it expensive, because a pointer record is a *round
+trip*: the input server drains it, wakes the desktop, the desktop reads it and repaints, and each of
+those steps needs the other process dispatched. Each round therefore needed a slice, and each slice
+needed ~400 syscalls of console-read retry. Measured: 8 slices and ~3200 syscalls per record, ~1400
+when the moves are paced the way a browser paces them. A drag over the desktop is hundreds of
+records, so the 1M-syscall budget went on the spins *between* the rounds rather than on the rounds,
+and the page stopped with `the syscall budget ran out` — the report this finding comes from.
+
+The fix is in both engines' syscall gate (`tools/wasm-browser/host.js` and
+`tools/wasm-servers/boot.cjs`): a `thread_yield` hands control back to the host, and the guest resumes
+after it on its next dispatch. Unconditional rather than "only when somebody else is runnable" — a
+yield means the caller is done with the CPU, and which process runs next is the scheduler's answer,
+which the kernel has already given; gating it on a second opinion would be the host re-deciding. The
+other half is in `host.js`'s `pump`: a dispatch that did nothing but retry, with nothing pending on
+the host's side either, ends the slice. That is the same condition the front end parks on, so it is
+reached rather than approached, and an idle guest pays one round trip to park instead of a slice of
+spinning.
+
+Measured after: 400 paced records cost 4,700 syscalls, 11.8 each, and — the part that says the
+mechanism is fixed rather than the constant — the cost no longer scales with the slice length. The
+guards are `run.js`'s drag check, which asserts a drag past the old budget's reach arrives (it fails
+on the old gate: 560,000 syscalls for the same 400 records), and `page.test.js`'s, which drives the
+same drag through the page's own DOM handlers and fails with the reader's own status line. The
+harnesses were also cheaper for it: `run.js`'s whole suite went from 13,862 syscalls to 5,624.
+
+**63. The input ring dropped the *newest* records when the host's queue was drained into it.** The
+ring holds 64 records and `push_event` drops when it is full; `drain_host` emptied the host's queue
+into it unconditionally, so a batch larger than the ring kept the first 63 and discarded the rest —
+backwards for a pointer, where the newest position is the only one that matters. The page sends X and
+Y per event, so 800 moves are 1600 records: the arrow ended 32 events behind the pointer and the
+remaining 768 moves were thrown away. It surfaced while writing finding 62's guard, which is worth
+recording: the drag that was supposed to show the budget no longer went *also* stopped short of the
+position its last record named, and the position it stopped at was exactly the ring's capacity.
+
+The drain now stops at the ring's capacity and leaves the remainder in the host's queue, and the
+consumer's read (`CDEV_READ`) drains the host queue before serving, so a backlog moves as the consumer
+reads instead of waiting for an interrupt that, at the end of a drag, never comes. Nothing is lost and
+the order is kept. The device-backed drains are unchanged: a controller or a virtqueue holds a handful
+of events per interrupt, so the ring is never *their* constraint — the host's queue is the only one
+that can hold a batch the size of a drag.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

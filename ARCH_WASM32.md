@@ -18,7 +18,11 @@ and M3f (the shell: prompt, input, a builtin command, exit) are all **done**, an
 results. M3 — console, TTY, shell — is complete, with the module-backed half of its title:
 a shell forks for a command it cannot answer itself, and the child execs the module the boot
 image carries at that path. It runs in a browser tab as well as under Node
-(`tools/wasm-browser/`). What remains of the port is M4 onwards.
+(`tools/wasm-browser/`). M4 (the block device, §9.1), M5a (the display, §9.2) and M5b (the console
+composed onto the guest's display, §9.3) have landed since, along with the published demo in `docs/`.
+M5c (input, §11) has landed too: the host is the keyboard and the pointer, its records reach the
+guest's `input` server through the same notification path an IRQ takes on the other arches, and the
+desktop's arrow moves where the browser's pointer went. What remains is M6 (network).
 
 The design's riskiest assumption — that `fork` is implementable for a suspended
 wasm process — has been **verified by a runnable spike** in `tools/fork-spike/`
@@ -437,8 +441,18 @@ That is why the device port needs no address translation at all: `queue_notify`
 becomes a host import, the host reads the vring out of the *caller's* memory (it
 owns that instance), and the descriptor values are the driver's own offsets — to
 the host, the same thing a physical address is to QEMU. `VirtioPhysBuf` keeps its
-shape, and `alloc_phys_page`'s arena stays what `arch-sim` already made it:
-in-process memory whose addresses are private to the kernel instance.
+shape, and `alloc_phys_page`'s arena is in-process memory whose addresses are private
+to the kernel instance — but that is constructed here rather than inherited.
+`arch-sim`'s base is a fixed `0x100000` that its own comment calls "arbitrary
+non-zero", which is true where a returned page is only stored; on this port the
+kernel dereferences it, so the base has to name real bytes of *this* module.
+`arch-wasm32` therefore owns a page-aligned 2 MiB `static PHYS_ARENA` and hands its
+address to `init_phys_alloc` (`crates/arch-wasm32/src/hal.rs`). Taking `arch-sim`'s
+base instead points the arena at the module's own statics: in the layout where this first showed,
+the privilege table sat at `0x100e40`, four kilobytes into the first page, so the first exec frame
+landed on a `Priv` entry and the desktop's `s_trap_mask` came back 0 (`PORTING_PLAN.md` finding 61).
+The invariant above is what made the difference invisible for as long as it was — nothing crossed an
+instance boundary either way.
 
 The refusal is now deliberate rather than incidental. On a target whose
 `pt_levels()` is 0, `umap` and `vumap` answer `ENOSYS` — "this port has no such
@@ -510,6 +524,25 @@ preempt. Mitigations, in order of preference:
    overrun, treating it as a crash. Requires COOP/COEP headers for
    `SharedArrayBuffer`.
 3. Engine-level fuel metering would solve it properly; browsers do not expose it.
+
+What it costs in practice (findings 60 and 62, both of which M5c walked into) is worth stating here,
+because "frequent yield points" is not the same as *rotating*: this port rotates a process only when
+one of its syscalls ends, so a process that never blocks (the shell retrying its read at the prompt)
+stays at the head of its run queue and the instance a notification just woke waits behind it. Nothing
+is lost, but a front end that parks the guest on "this slice only retried the console read" has to ask
+the *host* as well: `host.input.pending` is the front end's answer to "is there work the guest has
+been told about", and a slice does not park while any is outstanding.
+
+A `SYS_thread_yield` is the one point where the guest itself asks for the CPU to go elsewhere, and
+until finding 62 it was bookkeeping only: the flag was cleared and the process re-linked on the
+syscall-return path, but nothing *dispatched* the process the yield had just made runnable, because
+dispatching is the host's job and the host was still inside the dispatch. So the yielder held the CPU
+for the rest of the slice, and at a prompt that slice is the tty's console-read retry — around 400
+syscalls of it. Every round of the input path's handshake therefore cost a whole slice, eight of them
+and ~3200 syscalls per pointer record, so a drag over the desktop spent the syscall budget on the
+spins between the rounds rather than on the rounds. Both engines now hand control back to the host on
+a yield and resume the guest after it, which is what makes a yield mean "let someone else run" on a
+target whose processes are separate instances.
 
 ## 7. Kernel-side changes beyond `hal.rs`
 
@@ -794,7 +827,7 @@ kernel calls it unconditionally, but it does nothing.
 | Port I/O | `has_port_io`, `inb`/`outb`/`inw`/`outw`/`inl`/`outl`, `phys_insb`/`phys_outsb`/`phys_insw`/`phys_outsw` | **Delete.** `has_port_io` → `false`. |
 | PCI | `PCI_ADDR_PORT`, `PCI_DATA_PORT`, `pci_config_addr`, `pci_cfg_read8`/`read16`/`read32`, `pci_cfg_write32` | **Delete.** Devices come from a host manifest (§9). |
 | CMOS / RTC | `RTC_INDEX`, `cmos_read`, `cmos_write` | **Rewrite.** `Date.now()`. |
-| Physical memory | `init_phys_alloc`, `alloc_phys_page`, `alloc_phys_contig`, `free_phys_contig`, `phys_alloc_base`, `phys_alloc_usable_size`, `phys_free_pages` | **Rewrite.** Host-managed page pool; "physical address" is an opaque handle (§5). |
+| Physical memory | `init_phys_alloc`, `alloc_phys_page`, `alloc_phys_contig`, `free_phys_contig`, `phys_alloc_base`, `phys_alloc_usable_size`, `phys_free_pages` | **Re-based, not rewritten.** `arch-sim`'s allocator is kept, and `init()` gives it the address of a page-aligned 2 MiB static (`crates/arch-wasm32/src/hal.rs`); "physical address" stays an opaque handle (§5.3) — but note finding 61: inheriting `arch-sim`'s default base pointed that handle at the module's own statics, and the privilege table is inside it. |
 | Misc platform | `init`, `fork_needs_child_flag_clear`, `bss_start`, `bss_end`, `qemu_exit` | `init` is a wasm-side setup; `fork_needs_child_flag_clear` → **`false`**, corrected in M7b: the design first said `true` on the grounds that the child needs its own return value, but the predicate does not decide the return value — it decides whether the *child* waits for PM's `SENDNB` reply to be enqueued (`false`, as x86_64 and `arch-sim` answer) or is cleared and enqueued by `SYS_SCHEDULE` (`true`, as riscv64 and aarch64 answer, where PM's reply to the child is skipped). On this port the child's resume is a message arriving through the copy seam like everyone else's, so `false` is the answer that fits, and the return value is the host's business either way (§7.2, M7b) — which 5a then confirmed: the child resumed, and it resumed when PM's `SENDNB` reached it. BSS symbols still work; `qemu_exit` → host exit import. |
 
 ## 9. Devices as host imports
@@ -808,7 +841,7 @@ kernel calls it unconditionally, but it does nothing.
 | `pci.rs` | Deleted; host provides a device manifest | No PCI bus |
 | `fb.rs` | **The host's display** (M5a): the surface is the server's own buffer, the mode is the host's, and `FBIOFLUSH` presents a frame. `CDEV_MAP` refused — no page tables to map a physical range through |
 | `wserver.rs`, `fbfont.rs` | **The desktop** (M5b, §9.3): the compositor composes into a surface of its own and hands each frame to `/dev/fb` as one datagram write, which the fb driver presents. `wserver` is a *port invention* (3.3.0 has no window system); the font is `userland`'s `FONT_8X16` |
-| `input.rs` | DOM pointer/keyboard events — M5c, and it needs a host→kernel wake that does not exist yet |
+| `input.rs` | **The host's own records** (M5c): the browser's pointer events become HID records in a host queue, which the input server drains when the interrupt the host raised wakes it — and that interrupt is what makes anyone look, because a driver blocked in `RECEIVE` cannot poll. The kernel's half is one export (`minix_kernel_irq`), the general host→kernel notification rather than an input-specific seam (§13) |
 | `RTC`/`cmos_read` | `Date.now()` | |
 | `qemu_exit` | host exit import | |
 
@@ -1365,21 +1398,43 @@ Three landings:
   presenting directly — was settled in favour of the write, and §9.3 records why; the two traps it
   turned up (an exited window server wedges the console's create, and a desktop repaint per eight
   bytes of output is not affordable) are in §9.3 and finding 56.
-- **M5c — input: the browser's events into the guest.** The vocabulary and the wire format are the
-  reference's (`INPUT_PAGE_KEY`/`INPUT_PAGE_GD`, `INPUT_EVENT`, the `input` server's routing); what
-  is missing is the *wake*. `input`'s polling alarm never fires on this port (`SYS_SETALARM` is
-  registered and nothing expires it — the wasm kernel has no timer interrupt), and a driver blocked
-  in `RECEIVE` with no timer is a driver nothing can tell about a DOM event. So M5c's first task is
-  the one piece of machinery neither the reference nor this port has: a host→kernel notify export
-  (`kernel-wasm`), which is the role an interrupt controller plays elsewhere and the same role the
-  host already plays for the clock. The path after that is ordinary: the host queues the event, the
-  input server drains it on wake, and its `SENDNB` to `wserver` is a message like any other. Until
-  then `wserver` answers `WS_INPUT` with `ENOSYS` rather than parking a waiter nothing can wake — the
-  refusal is visible where a wedge would not be.
+- **M5c — input: the browser's events into the guest. DONE.** The vocabulary and the wire format
+  are the reference's (`INPUT_PAGE_KEY`/`INPUT_PAGE_GD`/`INPUT_PAGE_ABS`, `INPUT_EVENT`, the `input`
+  server's routing), and what it needed was the *wake*: `input`'s polling alarm never fires on this
+  port (`SYS_SETALARM` is registered and nothing expires it — the wasm kernel has no timer
+  interrupt), and a driver blocked in `RECEIVE` with no timer is a driver nothing can tell about a
+  DOM event. So the machinery is the host→kernel notification neither the reference nor this port
+  had — one export, `minix_kernel_irq(irq)`, which walks the hooks the driver registered with
+  `SYS_IRQCTL` exactly as a hardware interrupt does. It is deliberately *not* input-specific: it is
+  the interrupt-controller role, which is the answer §13 leaned towards, and it is what a timer tick
+  or a network event would arrive through next.
+
+  The rest is ordinary, and the pieces are the ones the other devices already established. The host
+  holds a queue of records (HID usage page, usage, value) and the input server drains it through the
+  same kind of host import `fb` and `virtio_blk` use — `host_input_read` into the caller's own
+  memory, `-1` for "nothing pending". `wserver` registers as the input server's consumer while it
+  attaches, which is the registration the hardware arches make too, and `WS_INPUT` now answers
+  instead of refusing. And the desktop draws its own arrow again: the pointer overlay was compiled
+  out on wasm precisely because nothing could move it.
+
+  Two things this cost, both recorded as findings. The console line `init: pid=` is assembled across
+  a blocking `getpid` in the wasm INIT, so the new boot process's own output landed inside it
+  (finding 59 — fixed by writing the line once). And a woken driver sits *behind* the spinning shell
+  in the run queue, so the front end's park rule had to learn what "the guest is idle" means when
+  the host is holding work it has announced (finding 60). The second is the reason the M5c check
+  exists in both engines: `run.js` drives it at a live prompt and fails without the fix, while
+  `boot.cjs` runs its copy at quiescence and never saw it.
+
+  What is *not* wired yet is the browser's *keyboard* on the desktop: a key already has a consumer
+  here (the console, which is this port's UART), and nothing on this port asks the desktop for one
+  (`userland`'s `wterm` is not built for wasm), so `page.js` sends pointer records only. The guest
+  side is ready for keys — the input server queues the KEY page and the desktop routes it to the
+  focused window's waiter — and a browser key would be one `host.input.push` away once a window is
+  there to want it.
 
 Both blockers above are recorded here rather than discovered later, and neither is a stub in the
-landed code: M5a needs the first (it is the thing that makes mmap impossible) and M5c needs the
-second.
+landed code: M5a needs the first (it is the thing that makes mmap impossible) and M5c needed the
+second, which it has now.
 
 **M6 — Network.** `virtio_net` over WebSocket.
 
@@ -1602,7 +1657,7 @@ noticed — no process's own IPC goes through that path.
 
 ```text
 sh tools/wasm-servers/run.sh
-# 44/44 checks passed, over ten servers and one user process
+# 80/80 checks passed, over thirteen servers and one user process
 ```
 
 M3's last piece, and its prerequisite on the shipping arches is exec: `init` `execve`s
@@ -2075,14 +2130,16 @@ What the page does *not* do, and which milestone it belongs to:
 - **No worker.** The guest runs on the main thread and yields to the browser between slices.
   Moving it into a Worker would decouple the two and would need the console to cross
   `postMessage`.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 75 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 80 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
-Verified by `tools/wasm-browser/run.js` (13 checks: the boot, the park, a typed command that forks
-and execs, the reap, quiescence, and four boots over one disk — the last two writing files they
+Verified by `tools/wasm-browser/run.js` (19 checks: the boot, the park, a typed command that forks
+and execs, the reap, quiescence, the pointer reaching the desktop while the shell is busy, a drag
+long enough that the old cost exhausted the budget, and four
+boots over one disk — the last two writing files they
 never sync, so the shutdown is what makes them durable; it runs headless, so its guest's `fb` server
 finds no display) and `tools/wasm-browser/page.test.js`
-(42 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
+(45 checks: the server's MIME types, then `page.js` itself under a stub DOM, so the page's own code
 — the pump policy, the key map, the repaint coalescing, the pane toggle, the cursor's position, both
 controls, and the guest's composed desktop arriving in the canvas with the channels a canvas wants —
 is not left
@@ -2177,6 +2234,17 @@ M2 will multiply the surface by exchanging messages between servers. The invaria
 that keeps it contained is in §5.2; the risk is that a violation is silent on any
 single target.
 
+**8. This target cannot test the mechanism it replaces.** There are no page faults here, so there is
+no demand paging: no `VR_FILE` regions, no vmfd, no FDIO, no one-shot exec pre-fault — the whole
+file-backed exec path does not exist on this target, and `exec` is module instantiation instead
+(§7.2). That is the design working as intended, and it has a consequence worth naming rather than
+leaving implicit: **the target with the strongest harness is the one least able to exercise the
+port's most fragile path.** Two bugs on the hardware arches, found while this half of the port was
+being finished (`PORTING_PLAN.md` findings 57 and 58), were invisible here for exactly that reason —
+every wasm check was green, and none of them could have been otherwise. A green wasm run is evidence
+about what wasm *executes*, not about the mechanism wasm replaces. `TEST_GATES.md` is where what each
+target does and does not cover is written down.
+
 ## 13. Open questions
 
 - ~~Does the fork-as-checkpoint spike actually work?~~ **Answered: yes** —
@@ -2195,6 +2263,17 @@ single target.
 - Is the shared mailbox arena (§5.1) acceptable, or is full host-mediated
   copying required? This is a design-taste question, not a technical one.
 - Does the sequence of M5/M6 matter? Neither blocks the shell.
+- The wasm harness (`boot.cjs`, `run.js`, `page.test.js`) and `just publish-wasm` run by hand: no
+  workflow mentions any of them, so the best-tested surface in the project is unguarded while the
+  weaker arch gates are watched on every push. Wiring it in drags a nightly and Binaryen into a
+  runner, which is why it has stayed manual — a decision to take rather than one to inherit.
+- ~~M5c's wake (§11): one input-specific export, or the general host→kernel notify — the
+  interrupt-controller role, with `input` as its first user?~~ **Answered: the general one, and M5c is
+  its first user.** `minix_kernel_irq(irq)` is the host saying "this line is asserted", the kernel
+  walking the hooks a driver registered with `SYS_IRQCTL` — no input-specific seam, and nothing for
+  the next device to invent. The clock is still driven by `host_cycles` rather than by a raised line,
+  because the kernel reads that one directly; a timer *interrupt* (which is what would expire
+  `SYS_SETALARM` and let a server arm an alarm at all) is now a caller of the same export away.
 
 ## 14. What this buys if it stops at M0
 

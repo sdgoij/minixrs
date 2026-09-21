@@ -16,6 +16,41 @@ use crate::{
 
 pub fn init() {
     arch_sim::hal::init();
+    // SAFETY: the arena is this crate's own page-aligned static, and nothing else reads or writes it
+    // before this point (the kernel calls `init` once, before any allocation).
+    unsafe { arch_sim::hal::init_phys_alloc(arena_base(), ARENA_BYTES as u64) };
+}
+
+/// The kernel instance's "physical" memory (the frame arena `kernel::hal` hands out), and the
+/// reason it is a static rather than `arch-sim`'s stand-in base.
+///
+/// On a hardware arch "physical" and "kernel virtual" are the same number, and the arena is a range
+/// of RAM above the kernel image. On this port there is no such range and no identity to keep
+/// (`ARCH_WASM32.md` §5.3): the only memory the kernel can dereference is its own module's, so the
+/// arena has to *be* part of it, at an address private to the instance. `arch-sim`'s base is
+/// documented as "arbitrary non-zero", which is true where nothing dereferences a returned page and
+/// false here — the kernel writes what it was handed through the pointer, and with the default base
+/// those pages are the module's own statics. The privilege table lives at 0x100e40, four kilobytes
+/// into the first page, so the first exec frame written at 0x100000 landed on top of a `Priv` entry:
+/// the desktop's `s_trap_mask` came back as 0, its next `RECEIVE` was refused with `ETRAPDENIED`, and
+/// it spun until the front end's syscall budget ran out. A page-aligned static is what makes the
+/// arena's addresses mean what §5.3 says they mean.
+#[repr(C, align(4096))]
+struct ArenaCell(core::cell::UnsafeCell<[u8; ARENA_BYTES]>);
+
+// SAFETY: single-threaded, like every other static the HAL hands out.
+unsafe impl Sync for ArenaCell {}
+
+static PHYS_ARENA: ArenaCell = ArenaCell(core::cell::UnsafeCell::new([0u8; ARENA_BYTES]));
+
+/// How much of it there is. Sized by what this port allocates from it, which is one exec frame
+/// (bounded at 1 MiB by `do_exec_load_handler`) and VM's bookkeeping regions — not by the 8 MiB a
+/// hardware arch's RAM has to spare. A request past the end is refused (`phys_claim` returns
+/// `None`), so the failure is a failed exec rather than a write somewhere else.
+const ARENA_BYTES: usize = 2 * 1024 * 1024;
+
+fn arena_base() -> u64 {
+    core::ptr::from_ref(&PHYS_ARENA) as u64
 }
 
 // ------------------------------------------------- cross-address-space copy
@@ -144,6 +179,20 @@ pub fn fb_present(buf: &[u8]) -> i32 {
     // SAFETY: `buf` is live and `bytes` long for the duration of the call, which is synchronous,
     // and the host reads only the bytes it is told about.
     unsafe { host_fb_present(buf.as_ptr() as u32, bytes as u32) }
+}
+
+/// The host's next queued input event, as `(page, code, press)`, or `None` when it has none (M5c).
+///
+/// The input server is the caller, and it calls this until it answers `None`: the host queues a DOM
+/// event and raises the line the server registered with SYS_IRQCTL, whose handler wakes it, so an
+/// empty answer is the end of a drain rather than a failure. The *pages* the host uses are the HID
+/// ones the other backends decode into (`INPUT_PAGE_KEY`, `INPUT_PAGE_ABS`, ...), which is what
+/// makes this a third backend for one driver rather than a second event format.
+///
+/// On an arch with a device the answer is always `None`: the keyboard there is an 8042 or a
+/// virtio-input, and a drain has nothing to ask a host it does not have.
+pub fn input_event() -> Option<(u16, u16, i32)> {
+    crate::input_event()
 }
 
 // ------------------------------------------------------------------- exec

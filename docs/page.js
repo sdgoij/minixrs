@@ -188,7 +188,16 @@ async function run() {
     // A slice. The case that matters is a slice that did nothing but retry the console read with
     // nothing to read: the guest is waiting for the keyboard, so stop pumping it and let the tab
     // idle. This is what keeps an idle prompt off the CPU.
-    if (host.sliceWasSpinOnly() && host.console.pending === 0) {
+    //
+    // `input.pending` is the other half of "idle": a pointer record the guest has been *told*
+    // about is work, and the instance that wake made runnable sits behind the spinning shell in the
+    // run queue — this port rotates a process only when a syscall ends, and the shell's read never
+    // ends the dispatch. Parking there would drop the event until the next key.
+    if (
+      host.sliceWasSpinOnly() &&
+      host.console.pending === 0 &&
+      host.input.pending === 0
+    ) {
       setStatus(describeState('awaiting-input'));
       await waitForInput(PARK_MS);
       continue;
@@ -368,6 +377,87 @@ window.addEventListener('paste', (event) => {
     event.preventDefault();
     send(text);
   }
+});
+
+// The pointer is the one input the *desktop* owns on this port (M5c). Keys stay on the console: the
+// page's keyboard is this port's UART, and a key has a consumer already (`page.js`'s own mapping maps
+// it to the byte the shell's line editor wants). A pointer has none — nothing about the console takes
+// one — so a pointer event on the canvas becomes an HID record and the guest's input server is what
+// routes it, which is what moves the arrow the compositor draws over its desktop.
+//
+// The records are *absolute*: a canvas says where the pointer is, and the guest's ABS page is the one
+// that carries a position — normalized to 0..0x7FFF, the way a virtio tablet reports one, which the
+// desktop scales to its own pixels.
+const BUTTON_PAGE = 0x0009;
+const ABS_PAGE = 0x00fd;
+const ABS_X = 0x0030;
+const ABS_Y = 0x0031;
+/// The HID usage each browser `event.button` maps to: left is 1, right is 2, middle is 3, which is
+/// the order the records carry them and not the order the DOM numbers them.
+const BUTTON_USAGE = { 0: 1, 1: 3, 2: 2 };
+/// The most a normalized coordinate may be: one less than the divisor the desktop uses.
+const ABS_MAX = 32767;
+
+/// Send one input record to the guest, and wake a parked pump if there is one.
+///
+/// The wake matters for the reason the console's does: the guest parked because the only instance
+/// the dispatcher reaches is the shell retrying its read, and a woken input server needs a slice
+/// before it can drain anything.
+function sendInput(page, code, value) {
+  host.input.push(page, code, value);
+  if (wake !== null) wake();
+}
+
+/// Where the pointer is on the canvas, normalized to the range the guest's ABS page uses.
+///
+/// The canvas is the guest's *mode*, so the fraction across it is what the guest needs; the CSS box
+/// may be a different size, which is why this reads the rectangle rather than the attributes.
+function normalise(event) {
+  const rect = elements.display.getBoundingClientRect();
+  const across = (event.clientX - rect.left) / Math.max(rect.width, 1);
+  const down = (event.clientY - rect.top) / Math.max(rect.height, 1);
+  return [
+    Math.min(Math.max(Math.round(across * ABS_MAX), 0), ABS_MAX),
+    Math.min(Math.max(Math.round(down * ABS_MAX), 0), ABS_MAX),
+  ];
+}
+
+function sendPointer(event) {
+  if (host === null) return;
+  const [x, y] = normalise(event);
+  sendInput(ABS_PAGE, ABS_X, x);
+  sendInput(ABS_PAGE, ABS_Y, y);
+}
+
+/// Which buttons the page is holding down, so a pointer that leaves the canvas can release them.
+///
+/// A desktop that never hears the release keeps dragging, and the drag ends when the button is let
+/// go — which on this side of the boundary is this map and not the guest's.
+const heldButtons = new Set();
+
+function sendButton(event, pressed) {
+  if (host === null) return;
+  const usage = BUTTON_USAGE[event.button];
+  if (usage === undefined) return;
+  if (pressed) {
+    heldButtons.add(usage);
+  } else {
+    heldButtons.delete(usage);
+  }
+  sendInput(BUTTON_PAGE, usage, pressed ? 1 : 0);
+}
+
+elements.display.addEventListener('pointermove', sendPointer);
+elements.display.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  // The position first: a click that arrives before the move would land on the old one.
+  sendPointer(event);
+  sendButton(event, true);
+});
+elements.display.addEventListener('pointerup', (event) => sendButton(event, false));
+elements.display.addEventListener('pointerleave', () => {
+  for (const usage of heldButtons) sendInput(BUTTON_PAGE, usage, 0);
+  heldButtons.clear();
 });
 
 // ------------------------------------------------------------------------- bring-up

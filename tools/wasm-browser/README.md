@@ -58,13 +58,13 @@ the only difference between what the checks boot and what the page boots.
 | `display.js` | the display's contract as the page implements it: the guest's frames onto the canvas |
 | `store.js` | the store contract, and the page's implementation of it over IndexedDB |
 | `file-store.js` | the same contract over a file, for the Node front ends |
-| `run.js` | drives the engine from Node with scripted keystrokes (13 checks) |
-| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (41 checks) |
+| `run.js` | drives the engine from Node with scripted keystrokes (19 checks) |
+| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (45 checks) |
 | `indexeddb.fake.js` | a stub IndexedDB, so `page.test.js` can run the real store |
 | `serve.js` | a static server, for `file://`'s sake |
 | `build.sh` | stages what the page fetches, via `tools/wasm-servers/build.sh` |
 | `publish.sh` | builds and stages the demo into `docs/` for GitHub Pages, then boots the copy |
-| `publish-check.mjs` | the check that makes the published page the *tested* page (14 checks) |
+| `publish-check.mjs` | the check that makes the published page the *tested* page (15 checks) |
 
 ## The disk
 
@@ -136,25 +136,33 @@ to back — which in memory is B,G,R,X, so `display.js` converts to the R,G,B,A 
 A frame that is not the mode's size is refused by `host.js` rather than shown: the two sides
 disagreeing about the mode is a bug, and a partial picture looks like a drawing error.
 
-With no window system in the guest yet, what is on the canvas is the `fb` driver's own verification
-pattern — three bands, the same one the hardware arches get checked with — because the point of M5a
-is the path, not the picture. `/dev/fb` is a real device a guest program can open and write to.
+With a window system in the guest, what is on the canvas is the desktop the compositor composes
+(M5b, `ARCH_WASM32.md` §9.3): the console's 80x24 cells in a window of their own, drawn by
+`wserver` into a surface of its own memory and handed to `/dev/fb` as one datagram write per flush.
+The `fb` driver's own verification pattern — three bands, the same one the hardware arches are
+checked with — is what its surface holds before any client writes, and `tools/wasm-servers/boot.cjs`
+checks both.
 
 The canvas and the console are **two panes of one session**, and the toggle in the header decides
 which you are looking at. Both stay live while hidden: the guest keeps drawing frames nobody is
-looking at, and a terminal you switched away from keeps its line and its scroll position. The
-keyboard goes to the guest either way — there is one console, and which pane shows it is your
-choice rather than the guest's.
+looking at, and a terminal you switched away from keeps its line and its scroll position. Keys go to
+the console either way — there is one console, and this port's keyboard is its input path, the way
+the UART is on the hardware arches.
 
-What the display does *not* do yet, and which piece of M5 each is:
+The canvas also takes **pointer** input (M5c): moving the mouse over it moves the arrow the
+compositor draws on its desktop, and a click goes to whatever the pointer is over. A pointer is the
+one device the desktop owns here — nothing about the console takes one — and it reaches the guest
+the way a hardware mouse does: the host queues an HID record and raises the line the input server
+registered, the input server drains it into its ring, and the window server reads it as the
+consumer. A *key* stays on the console for the reason above, so the desktop's own key clients (a
+`wterm` window, say) would need a rule for which of the two a keystroke is for; that is not written
+yet, and the guest side is ready for it.
 
-- **The console is not drawn on it.** The terminal is still the host's renderer, byte by byte;
-  putting the console on the canvas, cells and all, is M5b (`wserver`).
+What the display does not do:
+
 - **No mmap.** `/dev/fb` refuses `CDEV_MAP`: there are no page tables on this port to map a physical
   range through, and the surface is the server's own memory, which another instance cannot be given
   a view of. A client writes through the driver instead — which is what the reference's clients do.
-- **No input.** Pointer and keyboard events from the page are not yet delivered to the guest; the
-  wake they need does not exist on this port (M5c).
 
 ## Why an idle prompt is interesting
 
@@ -184,13 +192,13 @@ path, which is why nothing had seen it.
 - **No CDEV/termcap niceties.** The renderer handles `\n`, `\r`, `\b` and printable characters,
   and the canvas beside it is the guest's own display (M5a). It does draw a cursor, and in the right
   place: the model has always tracked the column the shell editor moves with `\b` and `\r`, and the
-  page draws a block there (blinking in CSS, so an idle tab still costs nothing). What is still
-  missing is the console *on* the canvas: wrapping, scrolling regions, ANSI escapes and cursor
-  addressing are M5b's `wserver`/cells work, not this renderer's.
+  page draws a block there (blinking in CSS, so an idle tab still costs nothing). The two panes are
+  independent renderings of one stream: this one is a byte-level model on the host, and the canvas is
+  the guest's own cells (M5b), which is why the pointer works on one and the cursor on both.
 - **No worker.** The guest runs on the main thread, so a slice is bounded by `SLICE_SYSCALLS` and
   the loop yields to the browser between slices. Moving the engine into a Worker would decouple the
   two, and would need the console to cross a `postMessage` boundary.
-- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 68 facts
+- **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 80 facts
   about it and has its own copy of the mechanism, because a check harness needs no yielding. The
   two share a design rather than a file; `host.js`'s header says which parts are shared knowledge
   and where the authority is (`tools/fork-spike/` for the fork invariants).
@@ -218,7 +226,7 @@ Two things make the published copy trustworthy rather than hopeful:
 - `docs/.nojekyll` is written, because Pages runs a directory through Jekyll unless it is told not
 to, and nothing here is a template.
 - `tools/wasm-browser/publish-check.mjs` runs at the end of the staging and checks the copy itself:
-  every staged file is the one the tests run **byte for byte** (which is what makes the 42 checks in
+  every staged file is the one the tests run **byte for byte** (which is what makes the 45 checks in
   `page.test.js` a statement about the demo), the site names no root-absolute URL (Pages serves it
   under `/<repo>/`, so `/page.js` is a 404 for everyone but the author), every module the site
   imports is staged beside it, and then that the **staged** system boots — it imports

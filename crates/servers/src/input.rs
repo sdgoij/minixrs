@@ -71,13 +71,24 @@ struct ServerCallbacks;
 /// Enqueue one decoded event into the ring (drops when full).
 fn push_event(page: u16, code: u16, press: i32) {
     unsafe {
-        let next = (EV_TAIL + 1) % EV_QUEUE_LEN;
-        if next == EV_HEAD {
+        if ring_is_full() {
             return; // queue full — drop
         }
+        let next = (EV_TAIL + 1) % EV_QUEUE_LEN;
         EV_QUEUE[EV_TAIL] = InputEvent { page, code, press };
         EV_TAIL = next;
     }
+}
+
+/// Whether the ring has no room for another event.
+///
+/// The device-backed drains can ignore this — a controller or a virtqueue holds a handful of events
+/// per interrupt, so the ring is never their constraint. The *host's* queue can hold a batch the
+/// size of a drag, and there `push_event`'s drop is the wrong event to lose: for a pointer it is the
+/// newest position that matters, so the drain stops at the capacity and leaves the rest where they
+/// are. Those are picked up by the next drain, which a consumer's read performs.
+fn ring_is_full() -> bool {
+    unsafe { (EV_TAIL + 1) % EV_QUEUE_LEN == EV_HEAD }
 }
 
 impl InputCallbacks for ServerCallbacks {
@@ -166,6 +177,42 @@ fn drain_virtio() -> bool {
     unsafe { EV_TAIL != tail }
 }
 
+/// Drain the host's queued input events into the HID ring (M5c).
+///
+/// The host is the keyboard and the pointer on this port, so its records are the events: this is the
+/// third backend beside the 8042 and virtio-input, and it is the only one on the arch where neither
+/// of those exists. The host already speaks the ring's own record shape (`{page, code, press}` with
+/// the HID pages the other backends decode into), so the drain is a copy rather than a translation —
+/// what a DOM event *means* is decided on the host's side, exactly as what a keystroke means for the
+/// console is decided by the page that turns it into bytes.
+///
+/// Returns true when at least one event was queued, which is what tells the caller to wake the
+/// registered consumer.
+#[cfg(target_arch = "wasm32")]
+fn drain_host() -> bool {
+    let tail = unsafe { EV_TAIL };
+    // Stop at the ring's capacity instead of emptying the host queue into it. `push_event` drops
+    // when full, so an unconditional drain discards everything past the 63rd record — and on a drag
+    // that is most of it: 800 pointer moves are 1600 records, and the arrow used to end 32 events
+    // behind the pointer with the rest thrown away. Left where they are, the remainder is taken by
+    // the next drain, which `CDEV_READ` performs, so nothing is lost and nothing waits on an
+    // interrupt that may not come until the drag is over.
+    while !ring_is_full() {
+        let Some((page, code, press)) = drivers::hal::input_event() else {
+            break;
+        };
+        push_event(page, code, press);
+    }
+    unsafe { EV_TAIL != tail }
+}
+
+/// Nothing to drain on an arch whose events come from a device: there is no host queue, and the
+/// backends above are where the events are.
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_host() -> bool {
+    false
+}
+
 /// Query this process's VA→PA image translation offset (SYS_GETINFO
 /// GET_PHYS_DELTA) and hand it to the virtio transport so the vring base
 /// and descriptor addresses are programmed as guest-physical addresses
@@ -212,6 +259,20 @@ fn pop_events(buf: &mut [u8], count: usize) -> usize {
             n += 8;
         }
         n
+    }
+}
+
+/// How many events the ring is holding, as **this process** computed it.
+///
+/// For the checks rather than for the driver: "the host's event reached the guest" is a claim about
+/// this ring, and the host knowing what it queued proves nothing about whether the driver took it.
+/// Every instance carries all the servers' code, so asking the wrong one answers a ring that never
+/// received anything — which is why the harness calls it on the input server's own instance.
+pub fn queued_events() -> i32 {
+    unsafe {
+        let head = EV_HEAD;
+        let tail = EV_TAIL;
+        ((tail + EV_QUEUE_LEN - head) % EV_QUEUE_LEN) as i32
     }
 }
 
@@ -292,12 +353,20 @@ pub fn input_server_main() {
         // Try the virtio-input backend (virtio-keyboard on riscv/aarch64,
         // virtio-mouse on x86). Polled on an alarm when present; the PS/2
         // path stays the x86 keyboard source.
-        let virtio_input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
-        if virtio_input.init().is_ok() {
-            unsafe {
-                minix_rt::write(1, b"input: virtio-input ready\n".as_ptr(), 26);
+        //
+        // Not on wasm: there is no bus to probe and no transport to program — the host is the
+        // device, and `drain_host` is where its events arrive. The probe there would be a PCI scan
+        // over an inert port-I/O HAL, which finds nothing after spending more syscalls than a boot
+        // is given.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let virtio_input = unsafe { &mut *core::ptr::addr_of_mut!(VIRTIO_INPUT) };
+            if virtio_input.init().is_ok() {
+                unsafe {
+                    minix_rt::write(1, b"input: virtio-input ready\n".as_ptr(), 26);
+                }
+                arm_virtio_poll();
             }
-            arm_virtio_poll();
         }
 
         loop {
@@ -325,26 +394,39 @@ pub fn input_server_main() {
             if is_notify {
                 let had_ps2 = drain_keyboard();
                 let had_virtio = drain_virtio();
+                let had_host = drain_host();
                 // The alarm poll is one-shot; re-arm for the next tick.
                 arm_virtio_poll();
-                if had_ps2 || had_virtio {
+                if had_ps2 || had_virtio || had_host {
                     // Wake the registered consumer (window server) so it
                     // routes the queued keys without polling.
+                    //
+                    // A *notification*, not a message that looks like one: the kernel remembers a
+                    // notification for a destination that is not receiving at this instant
+                    // (`mini_notify` records it in the destination's pending map and the consumer
+                    // finds it on its next RECEIVE). A non-blocking send has no such fallback — it
+                    // answers ENOTREADY to a busy destination and the wake is gone — and that is
+                    // not a theoretical difference: the window server spends its time relaying the
+                    // console, so the message form failed per event and the events sat in the ring
+                    // until the next one happened to arrive while it was waiting.
                     let consumer = unsafe { CONSUMER_EP };
                     if consumer >= 0 {
-                        let mut notify = arch_common::ipc::Message {
-                            m_source: 0,
-                            m_type: arch_common::com::NOTIFY_MESSAGE as i32,
-                            m_payload: unsafe { core::mem::zeroed() },
-                        };
+                        let mut buf = [0u8; 8];
                         unsafe {
+                            // The kernel builds the notification itself; the buffer is the syscall
+                            // ABI's second argument, which this call reads the destination from.
                             let r = minix_rt::syscall2(
-                                minix_rt::SENDNB_CALL,
+                                minix_rt::NOTIFY_CALL,
                                 consumer as u64,
-                                &mut notify as *mut arch_common::ipc::Message as u64,
+                                buf.as_mut_ptr() as u64,
                             );
                             if r < 0 {
-                                minix_rt::write(2, b"input: notify consumer failed\n".as_ptr(), 30);
+                                // Only a destination the kernel cannot reach answers this — an
+                                // endpoint that has left, not one that is merely busy. The length
+                                // is the literal's own, because a hand-counted one silently dropped
+                                // the newline when this message was reworded.
+                                let msg = b"input: consumer is unreachable\n";
+                                minix_rt::write(2, msg.as_ptr(), msg.len());
                             }
                         }
                     }
@@ -412,6 +494,10 @@ unsafe fn handle_cdev_request(
         CDEV_READ => {
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
             let n = count.min(48);
+            // Top the ring up before serving the read. A host backlog only drains while the ring has
+            // room, and the interrupt that would drain it next may not arrive until the next event —
+            // which at the end of a drag is never. Serving reads is what keeps it moving.
+            drain_host();
             let dst = unsafe { &mut *core::ptr::addr_of_mut!(EV_SCRATCH) };
             let got = pop_events(&mut dst[..n], n);
             if got > 0 {

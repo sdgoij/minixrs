@@ -33,8 +33,8 @@ use minix_std::font::FONT_8X16;
 use minix_std::wserver::{
     WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_PTRMODE, WS_TEXT,
 };
-// Delivered *to* clients: there is no input source on wasm for either to carry (M5c).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+// Delivered *to* clients: a key or a pointer record the desktop routed to a window's waiter.
+#[cfg(target_os = "minix")]
 use minix_std::wserver::{WS_KEY, WS_PTR};
 
 const TITLE_H: usize = 16;
@@ -64,20 +64,20 @@ const EDGE_S: u8 = 0x02;
 const EDGE_E: u8 = 0x04;
 const EDGE_W: u8 = 0x08;
 
-/// Mouse pointer bitmap (8x12 arrow), drawn on top of everything. Only where there is a pointer to
-/// draw: the input server that moves one is M5c's, and until then the wasm compositor has none.
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+/// Mouse pointer bitmap (8x12 arrow), drawn on top of everything. What moves it is the input
+/// server, whose events are the host's on the arch whose pointer is the host's (M5c).
+#[cfg(target_os = "minix")]
 const POINTER_BITMAP: [u8; 12] = [
     0b10000000, 0b11000000, 0b11100000, 0b11110000, 0b11111000, 0b11111100, 0b11111110, 0b11111100,
     0b11101000, 0b11011000, 0b10011000, 0b00011000,
 ];
 /// Pointer overlay size (px) — matches the bitmap (8 wide, 12 tall).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_W: usize = 8;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_H: usize = 12;
 /// Number of pixels in the pointer overlay.
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_CELLS: usize = POINTER_W * POINTER_H;
 
 // Drawing constants — the rasterizer only runs on the MINIX target (the
@@ -92,19 +92,21 @@ const SURFACE_LEN: usize = PITCH * YRES;
 /// whose BAR is larger than the mode's frame).
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const MAP_LEN: usize = 4 * 1024 * 1024;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+/// The HID pages and usages the input server's records carry, whatever the backend behind them
+/// (M5c): the 8042 and virtio-input backends decode into these, and the host speaks them directly.
+#[cfg(target_os = "minix")]
 const KEY_PAGE: u16 = 0x0007;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_PAGE_GD: u16 = 0x0001;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_PAGE_ABS: u16 = 0x00FD;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_PAGE_BTN: u16 = 0x0009;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_GD_X: u16 = 0x0030;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_GD_Y: u16 = 0x0031;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const POINTER_BTN_1: u16 = 0x0001;
 
 /// XRGB8888 colors (u32 0x00RRGGBB, LE bytes B,G,R,0).
@@ -118,7 +120,7 @@ const COLOR_TITLE_FOCUSED: u32 = 0x004080C0;
 const COLOR_TITLE_UNFOCUSED: u32 = 0x00202040;
 #[cfg(target_os = "minix")]
 const COLOR_TEXT: u32 = 0x00FFFFFF;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 const COLOR_POINTER: u32 = 0x00FFFFFF;
 
 /// A filled pixel rect inside a window's body (window-local coords).
@@ -632,12 +634,12 @@ static mut WS_FB_FD: i32 = -1;
 static mut WS_KBD_FD: i32 = -1;
 /// Keyboard modifier state across drains (a press and its key can land in
 /// different batches).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 static mut WS_SHIFT: bool = false;
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 static mut WS_CTRL: bool = false;
 /// Held mouse-button mask for WS_PTR deliveries (bit 0 = left, …).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 static mut WS_BUTTONS: u8 = 0;
 
 /// Whether a frame handed to `/dev/fb` will be shown: false on a host with no display, where the
@@ -669,9 +671,9 @@ static WS_SURFACE: SurfaceCell = SurfaceCell::new();
 /// it was drawn, so a plain move can repair the vacated area without a
 /// full desktop redraw. `WS_PTR_POS` is where the underlay was captured
 /// (`None` before the first draw).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 static mut WS_PTR_UNDERLAY: [u32; POINTER_CELLS] = [0; POINTER_CELLS];
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 static mut WS_PTR_POS: Option<(usize, usize)> = None;
 
 #[cfg(target_os = "minix")]
@@ -684,7 +686,7 @@ fn put_pixel(fb: u64, x: usize, y: usize, color: u32) {
     }
 }
 
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 fn read_pixel(fb: u64, x: usize, y: usize) -> u32 {
     if x < XRES && y < YRES {
         let off = (y * PITCH + x * 4) as u64;
@@ -695,7 +697,7 @@ fn read_pixel(fb: u64, x: usize, y: usize) -> u32 {
 }
 
 /// Draw the pointer arrow bitmap at (px, py).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 fn draw_pointer(fb: u64, px: usize, py: usize) {
     for r in 0..POINTER_H {
         let bits = POINTER_BITMAP[r];
@@ -796,6 +798,17 @@ fn fb_flush() {
     };
 }
 
+/// The pointer's screen position, as **this process** has it.
+///
+/// For the checks: the host's queue says what was offered and the input server's ring says what
+/// arrived, while this is what the desktop *did* with it — the difference between "the record
+/// reached the guest" and "the guest acted on it". Call it on the window server's instance, since
+/// every instance carries all the servers' code and an untouched one answers its own zeroes.
+#[cfg(target_os = "minix")]
+pub fn pointer_position() -> (i32, i32) {
+    unsafe { (*core::ptr::addr_of!(WS_STATE)).pointer }
+}
+
 /// Write a diagnostic line to the console's error stream. The compositor's failures are loud: a
 /// window server that cannot reach the display is otherwise a black screen and nothing else.
 #[cfg(target_os = "minix")]
@@ -809,7 +822,11 @@ fn report(msg: &[u8]) {
 /// desktop content doesn't change during a move, so no full redraw is
 /// needed — a full redraw per PS/2 packet (~100–200/s) would saturate
 /// the emulated CPU.
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+///
+/// The same on the arch whose pointer is the host's (M5c): a browser sends pointer records rather
+/// than a packet stream, but a move is a move, and the repair-and-redraw is what keeps one from being
+/// a whole-desktop repaint.
+#[cfg(target_os = "minix")]
 fn pointer_overlay_move(state: &WsState) {
     let fb = unsafe { WS_FB };
     let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
@@ -964,10 +981,8 @@ fn redraw(fb: u64, state: &mut WsState) {
         }
     }
     // Mouse pointer on top of everything. Capture the underlay (the desktop the pointer covers) so a
-    // later plain move can repair this area without a full redraw. Not on wasm, where nothing can
-    // move the pointer yet (the input server is M5c): a compositor that drew one there would park an
-    // arrow in the middle of the desktop and never have a reason to move it.
-    #[cfg(not(target_arch = "wasm32"))]
+    // later plain move can repair this area without a full redraw — which is what the host's pointer
+    // records need on the arch whose pointer is the host's (M5c).
     {
         let (px, py) = (state.pointer.0 as usize, state.pointer.1 as usize);
         unsafe {
@@ -1159,17 +1174,14 @@ fn ctrl_map(ch: u8) -> u8 {
 
 /// HID usages of the arrow keys (routed without an ASCII char; the client
 /// turns them into escape sequences).
-#[cfg_attr(
-    any(not(target_os = "minix"), target_arch = "wasm32"),
-    allow(dead_code)
-)]
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
 fn is_arrow(code: u16) -> bool {
     matches!(code, 0x4F..=0x52)
 }
 /// Route one keyboard event; returns true when a key was delivered to a
 /// waiter (the caller stops draining so any further events in the batch
 /// stay queued for the next WS_INPUT registration's catch-up drain).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 fn handle_key(code: u16, press: i32, state: &mut WsState) -> bool {
     // Modifiers: track the held state on both press and release.
     match code {
@@ -1239,7 +1251,7 @@ fn handle_key(code: u16, press: i32, state: &mut WsState) -> bool {
 /// The wserver consumes the whole stream unconditionally now (it cannot
 /// leave mouse events queued), so a key pressed with no waiter is dropped
 /// instead of staying for another /dev/kbd reader (keytest).
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 fn drain_input(state: &mut WsState) -> bool {
     let mut changed = false;
     loop {
@@ -1284,7 +1296,7 @@ fn drain_input(state: &mut WsState) -> bool {
 /// that consumed the WS_INPUT waiter stops the batch: the rest are already
 /// popped from the input ring, and no second waiter can be served by one
 /// batch anyway.
-#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+#[cfg(target_os = "minix")]
 fn process_event_batch(data: &[u8], state: &mut WsState) -> bool {
     let mut changed = false;
     let mut off = 0;
@@ -1479,24 +1491,13 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             if wid >= MAX_WINDOWS || !state.windows[wid].used {
                 return Some(-9); // EBADF
             }
-            // No key can arrive on the wasm port: a key would have to be a *notification* from the
-            // input driver, and nothing expires a notification without a timer interrupt
-            // (`ARCH_WASM32.md` §11, M5c). Refusing is the honest answer — a waiter parked forever
-            // with nothing able to wake it would wedge the client instead of telling it.
-            #[cfg(target_arch = "wasm32")]
-            {
-                return Some(-38); // ENOSYS
+            state.waiter = (src, wid);
+            // A key may already be queued (the input server notifies on
+            // IRQ, not on waiter registration); catch it immediately.
+            if drain_input(state) {
+                redraw(unsafe { WS_FB }, state);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                state.waiter = (src, wid);
-                // A key may already be queued (the input server notifies on
-                // IRQ, not on waiter registration); catch it immediately.
-                if drain_input(state) {
-                    redraw(unsafe { WS_FB }, state);
-                }
-                None
-            }
+            None
         }
         WS_PTRMODE => {
             let wid = m.m2i1 as usize;
@@ -1585,8 +1586,21 @@ fn attach_display() -> bool {
         WS_KBD_FD = kbd_fd;
     }
 
-    // Register as the input server's consumer so key events wake the
-    // receive loop.
+    register_input_consumer();
+    true
+}
+
+/// Register as the input server's consumer, so that a queued event wakes the receive loop.
+///
+/// One function for both ways of having a keyboard, because it is the *registration* rather than the
+/// open that decides whether an event ever reaches this process: the arch whose keyboard is a device
+/// opens `/dev/kbd` and the arch whose keyboard is the host's opens nothing (M5c), and both then have
+/// to tell the input server where to notify.
+///
+/// A refusal is reported rather than swallowed: a desktop that never hears about a key looks exactly
+/// like a desktop nobody typed at, and this is the only place that can tell them apart.
+#[cfg(target_os = "minix")]
+fn register_input_consumer() {
     let mut reg = Message {
         m_source: 0,
         m_type: arch_common::com::INPUT_REG_CONSUMER as i32,
@@ -1602,17 +1616,8 @@ fn attach_display() -> bool {
     if reg_r < 0 {
         report(b"wserver: input consumer register failed\n");
     }
-    true
 }
 
-/// Take the display, on the arch where the compositor owns its own pixels (M5b): there is nothing
-/// to open and nothing to probe, because the host *is* the display — the same import `fb`'s canvas
-/// backend adopts a mode from.
-///
-/// The mode has to be the one this surface was built for, and a mode it cannot hold is refused
-/// rather than drawn into partly: the pixels are this process's memory, so a host canvas larger
-/// than the surface would be an address space overrun rather than a clipped picture. There is no
-/// keyboard to open on this arch, which is why nothing here registers with an input server.
 /// Take the display, on the arch where the compositor owns its own pixels (M5b): there is nothing
 /// to open and nothing to probe, because the host *is* the display — the same import `fb`'s canvas
 /// backend adopts a mode from.
@@ -1640,6 +1645,10 @@ fn attach_display() -> bool {
         WS_FB = WS_SURFACE.get();
         WS_SHOW = mode == (XRES, YRES);
     }
+    // There is no `/dev/kbd` to open here (`drivers::hal::input_event` is the host's own queue, and
+    // the input server drains it), but the registration is the same one the other arches make: it is
+    // what makes an event a wake instead of something nobody looks for.
+    register_input_consumer();
     true
 }
 
@@ -1675,16 +1684,23 @@ pub fn wserver_main() {
             }
             let src_ep = src as i32;
 
-            // Input: on the arches with an input server, its notification says the keyboard or mouse
-            // has queued events. There is no such message on wasm and no such server to send one
-            // (M5c), so the whole branch is compiled out rather than waiting for a sender that does
-            // not exist.
-            #[cfg(not(target_arch = "wasm32"))]
+            // Input: the input server's notification says the keyboard or the pointer has queued
+            // events. Who that is differs by arch — an 8042 and a virtio-input there, the host's own
+            // records on wasm (M5c) — and nothing above this branch does: all three end in one ring
+            // that this process drains the same way.
+            //
+            // Identified by `m_type` alone, which is how a notification is defined here: the kernel
+            // builds it (`build_notify_message`) with no source and no payload, and the RECEIVE that
+            // finds it returns 0 rather than a sender (`mini_receive`'s pending-notification arm).
+            // The input server is the only process that notifies this one, so "somebody notified
+            // me" and "the input has events" are the same statement — and matching on the source
+            // instead, as this did, is what a *message* looks like: it silently reduced to "the
+            // input server sent me a message" and left every real notification to be reported as a
+            // stray one.
             {
-                // Input notification: the keyboard/mouse has queued events.
                 let is_notify =
                     (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
-                if is_notify && src_ep == arch_common::com::INPUT_PROC_NR {
+                if is_notify {
                     let state = unsafe { &mut *core::ptr::addr_of_mut!(WS_STATE) };
                     if drain_input(state) {
                         redraw(unsafe { WS_FB }, state);

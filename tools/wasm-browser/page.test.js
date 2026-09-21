@@ -167,6 +167,14 @@ class StubCanvas extends StubElement {
       },
     };
   }
+
+  /// Where the canvas is on the page, which the page's pointer handling needs: it normalizes a
+  /// `clientX`/`clientY` through this rectangle (M5c). A stub that could not answer would make every
+  /// pointer event throw, and the size is the canvas's own, so a client position here *is* a desktop
+  /// position.
+  getBoundingClientRect() {
+    return { left: 0, top: 0, width: this.width, height: this.height };
+  }
 }
 
 elements.set('display', new StubCanvas('display', 1024, 768));
@@ -394,6 +402,65 @@ check(
     pixelAt(300, 300).join() === '24,24,32,255' &&
     titleIsRasterized(),
   `desktop=${pixelAt(20, 20)} title=${pixelAt(400, 190)} body=${pixelAt(300, 300)} frames=${canvas.frames}`
+);
+
+// A pointer event on the canvas is the browser's input reaching the guest, and the compositor is where
+// it becomes visible: it draws the arrow over its own desktop. So this reads the whole path off one
+// pixel — the page's DOM handler, the host's queue, the interrupt, the input server, the consumer, the
+// desktop's overlay — and it is the only check of M5c that goes through the page rather than through
+// the engine's API (`run.js` drives that half, including the control that the *wake* is what makes the
+// guest look).
+//
+// The stub canvas's rectangle is its own size, so a client position is a desktop position: the page
+// normalizes to the guest's 0..0x7FFF and the desktop scales back, and 300/400 is what comes out.
+const POINTER_X = 300;
+const POINTER_Y = 400;
+const arrowAt = (x, y) => {
+  for (let row = 0; row < 12; row += 1) {
+    for (let col = 0; col < 8; col += 1) {
+      if (pixelAt(x + col, y + row).join() === '255,255,255,255') return true;
+    }
+  }
+  return false;
+};
+
+check(
+  'the desktop has not drawn its arrow where this check will move it',
+  !arrowAt(POINTER_X, POINTER_Y),
+  `pixels at ${POINTER_X},${POINTER_Y}: ${pixelAt(POINTER_X, POINTER_Y)}`
+);
+for (const fn of canvas.byEvent.get('pointermove') ?? []) {
+  fn({ clientX: POINTER_X, clientY: POINTER_Y, preventDefault() {} });
+}
+check(
+  "a pointer event on the canvas moves the guest desktop's arrow",
+  await until(() => arrowAt(POINTER_X, POINTER_Y), 'the pointer overlay'),
+  `pixels at ${POINTER_X},${POINTER_Y}: ${pixelAt(POINTER_X, POINTER_Y)}; status: ${status()}`
+);
+
+// A drag is the same path many times over, and it is the shape a reader actually produces. It is also
+// where the cost first mattered: a browser delivers a pointermove per frame, so a drag of a few
+// hundred turns is a few hundred rounds of the input server and the desktop, and while a yield could
+// not switch processes each of those rounds cost a whole slice of the tty's console-read retry
+// (finding 62). A reader dragging over the desktop got `stopped: the syscall budget ran out`.
+//
+// The number of moves is the one the old cost could not afford: it measured ~1400 syscalls per
+// record, so this is past the 1M budget and the page would have stopped with the arrow somewhere
+// behind the pointer. What the check asserts is that the drag *arrives* — the arrow at the last
+// position the events named — rather than where the guest ran out of budget.
+const DRAG_MOVES = 800;
+const DRAG_FROM = 120;
+let dragLast = DRAG_FROM;
+for (let i = 0; i < DRAG_MOVES; i += 1) {
+  dragLast = DRAG_FROM + i;
+  for (const fn of canvas.byEvent.get('pointermove') ?? []) {
+    fn({ clientX: dragLast, clientY: POINTER_Y, preventDefault() {} });
+  }
+}
+check(
+  'a drag through the page arrives, rather than spending the budget on the turns in between',
+  await until(() => arrowAt(dragLast, POINTER_Y), `the arrow at ${dragLast}`),
+  `arrow at ${dragLast},${POINTER_Y} is ${pixelAt(dragLast, POINTER_Y)}; status: ${status()}`
 );
 
 // ------------------------------------------------------------------------ the views

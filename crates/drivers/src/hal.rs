@@ -93,3 +93,26 @@ mod no_host_display {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use no_host_display::{fb_geometry, fb_present};
+
+// Input, and the third device here whose hardware is the host (M5c). The disposition is the
+// display's, with one difference: this is the one host device the guest *pulls* rather than the one
+// that pushes. The input server drains the host's queue on the notification its IRQ hook produced,
+// so the queue lives on the host's side of the boundary and the drain on the guest's — which is why
+// there is a reader here and not, say, a `host_input_pending` the kernel polls.
+//
+// On a hardware arch the answer is always `None`: the keyboard and the pointer there are an 8042, a
+// virtio-input or a USB HID device, and the input server's other two backends are where those
+// events come from.
+#[cfg(target_arch = "wasm32")]
+pub use arch_wasm32::hal::input_event;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod no_host_input {
+    /// No host, so no queue: the events come from the device backends instead.
+    pub fn input_event() -> Option<(u16, u16, i32)> {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use no_host_input::input_event;

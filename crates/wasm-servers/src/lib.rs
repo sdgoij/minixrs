@@ -180,6 +180,30 @@ pub extern "C" fn minix_server_fb() -> i32 {
     0
 }
 
+/// The input server: `/dev/kbd` (major 20) — the keyboard and the pointer as events.
+///
+/// On wasm its third backend is the host's own records (M5c, `ARCH_WASM32.md` §11), which is why the
+/// instance has to exist at all: nothing on this port reads an 8042 or probes for a virtio-input, and
+/// the desktop has no other way to be told that the reader moved the mouse. It boots after `fb` and
+/// before `wserver` because that is the kernel's own `BOOT_IMAGE` order, and the order is load-bearing
+/// in one direction: `wserver` registers itself as the input server's consumer while it attaches, so
+/// the server it registers with has to be there to answer.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_input() -> i32 {
+    servers::input::input_server_main();
+    0
+}
+
+/// Events the **input server's** ring is holding. Call it on that instance.
+///
+/// The check that a host record became a guest event reads this rather than the host's queue: what
+/// the host queued is the input, and "the guest took it" is a claim about this ring. Zero is the
+/// ordinary answer at rest — the driver drains its ring into the consumer as it goes.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_input_events_queued() -> i32 {
+    servers::input::queued_events()
+}
+
 /// The window server: the compositor, on `/dev/fb`.
 ///
 /// On wasm it composes the desktop into a surface of its own — there is no device memory to map and
@@ -191,6 +215,18 @@ pub extern "C" fn minix_server_fb() -> i32 {
 pub extern "C" fn minix_server_wserver() -> i32 {
     servers::wserver::wserver_main();
     0
+}
+
+/// The window server's pointer position as `x << 16 | y`, as **that instance** has it.
+///
+/// The one claim about M5c that no other reading can make: the host's queue is the input and the
+/// input server's ring is the delivery, while this says the desktop *moved* — which is the whole
+/// point of a pointer record. Both coordinates are non-negative and inside the desktop (the driver
+/// clamps them), so a packed pair has no sign to lose.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_wserver_pointer() -> u32 {
+    let (x, y) = servers::wserver::pointer_position();
+    ((x as u32) << 16) | (y as u32 & 0xffff)
 }
 
 /// The console's cell grid, row-major, 80x24, as **the tty server's model** computed it.
@@ -478,10 +514,25 @@ fn init_report(idx: usize, value: i64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_init() {
     userland::write_out(b"init: booting MINIX/Rust\r\n");
-    userland::write_out(b"init: pid=");
-    let mut buf = [0u8; 10];
-    userland::write_out(decimal(minix_rt::getpid() as u32, &mut buf));
-    userland::write_out(b"\r\n");
+    // The pid line in one write, and `getpid` *before* it: the console is shared, and a line whose
+    // pieces straddle a blocking syscall can be split by whoever else runs while it waits. `getpid`
+    // is a SENDREC to PM, so this is exactly such a wait — and when the input server joined the boot
+    // (M5c), the desktop's own `ready` line landed in the middle of this one.
+    let mut digits = [0u8; 10];
+    let pid = decimal(minix_rt::getpid() as u32, &mut digits);
+    let mut line = [0u8; 32];
+    let mut n = 0;
+    for b in b"init: pid=" {
+        line[n] = *b;
+        n += 1;
+    }
+    for b in pid {
+        line[n] = *b;
+        n += 1;
+    }
+    line[n] = b'\r';
+    line[n + 1] = b'\n';
+    userland::write_out(&line[..n + 2]);
 
     // Every line above this one came out through the kernel's console shortcut, which is
     // what serves fd 1 until a process says otherwise. These are the first writes in the

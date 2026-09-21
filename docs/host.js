@@ -96,6 +96,12 @@ const EXEC_REQ_ARGC = 20;
 /// alive with its surface painted before the first frame arrives; and the console's window is
 /// created at tty's init, so the window server has to be receiving requests by then. A `tty` before
 /// `wserver` would leave the console's create blocked on a peer that has not started.
+///
+/// `input` sits between `fb` and `wserver`, which is the order the kernel's own `BOOT_IMAGE` gives
+/// (M5c). The direction that matters is the second one: `wserver` registers itself as the input
+/// server's consumer while it attaches, so the server it registers with has to be there — and on
+/// this port the input server is not optional, because the host's own records are the only keyboard
+/// and pointer the desktop has.
 export const SYSTEM_SPECS = [
   { slot: 6, entry: 'minix_server_ds', label: 'ds' },
   { slot: 2, entry: 'minix_server_rs', label: 'rs' },
@@ -107,6 +113,7 @@ export const SYSTEM_SPECS = [
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
+  { slot: 17, entry: 'minix_server_input', label: 'input' },
   { slot: 18, entry: 'minix_server_wserver', label: 'wserver' },
   { slot: 5, entry: 'minix_server_tty', label: 'tty' },
   { slot: 10, entry: 'minix_init', label: 'init' },
@@ -316,6 +323,60 @@ export function createHost({
     },
     get pending() {
       return queue.length;
+    },
+  };
+
+  /// HID usage page of the keyboard, and the two interrupt lines the input server registers (M5c).
+  ///
+  /// A keyboard is IRQ 1 and a pointing device is IRQ 12 wherever they are attached, and this port's
+  /// host is no exception: the line *is* the device's identity as far as the notifying side is
+  /// concerned, which is why the host names one rather than the guest inferring it from the record.
+  const KEY_PAGE = 0x0007;
+  const IRQ_KEYBOARD = 1;
+  const IRQ_POINTER = 12;
+
+  /// Input records the front end has produced and the guest has not consumed (M5c).
+  ///
+  /// Records rather than bytes, because a record is what the guest's input server queues and what
+  /// its consumer routes: a HID usage page, a usage, and a value. The host holds them for the reason
+  /// it holds the console's bytes — the *guest* pulls — and the difference between the two queues is
+  /// why they are separate: the console's is drained by the kernel on the process's next read, while
+  /// this one is drained by a driver that has to be *woken*, which is what `push` does and `enqueue`
+  /// deliberately does not.
+  const inputQueue = [];
+  /// Whether the host has *announced* something the guest has not taken yet — a raised line whose
+  /// driver has not drained the queue since. It is what `sliceWasSpinOnly` cannot see: at the
+  /// prompt the shell is the only instance the dispatcher reaches (it never blocks, so it stays at
+  /// the head of a run queue this port rotates only when a syscall ends), and a parked front end
+  /// would therefore never let the input server have the slice that a wake just made it deserve.
+  let announced = false;
+
+  /// Queue one input record and raise the line its driver registered.
+  ///
+  /// The record goes in *before* the interrupt: the guest's drain runs when the notification wakes
+  /// it, so the other order is a drain that finds nothing, and an event that waits for the next
+  /// wake — which is the wedge this milestone exists to avoid.
+  function pushInput(page, code, value) {
+    inputQueue.push({ page, code, value });
+    announced = true;
+    kernel.exports.minix_kernel_irq(page === KEY_PAGE ? IRQ_KEYBOARD : IRQ_POINTER);
+  }
+
+  const input_ = {
+    queue: inputQueue,
+    /// One event the way a front end produces them: queued and announced.
+    push: pushInput,
+    /// Queued but *not* announced — the control for the wake, because nothing else in the guest
+    /// looks at this queue. A record held this way is one the guest never takes, and a check that
+    /// cannot tell that from a delivered event is not checking the wake at all.
+    enqueue(page, code, value) {
+      inputQueue.push({ page, code, value });
+    },
+    /// Work the guest has been *told* about and has not taken: the front end's answer to "is there
+    /// anything to wake it for", the way `console.pending` is for bytes. A record merely held here
+    /// is not work — no one was told — which is what keeps the control below from parking the loop.
+    get pending() {
+      return announced ? inputQueue.length : 0;
     },
   };
 
@@ -657,6 +718,28 @@ export function createHost({
           BigInt(display === null ? 0 : display.width * 2 ** 32 + display.height),
         host_fb_present: (srcAddr, bytes) =>
           display === null ? ENODEV : presentFrame(memory, srcAddr, bytes),
+        // The input queue (M5c). The same contract as the console's read, one record at a time: the
+        // guest drains until it is told there is nothing, which is what makes a drain cheap. What is
+        // different is where the *answer* comes from — the input server's IRQ hook, which `push`
+        // raises through the kernel — because a driver blocked in RECEIVE cannot poll.
+        //
+        // The record is eight bytes: HID usage page and usage as little-endian u16, then the value as
+        // a little-endian i32, which is the positive-and-negative form `arch_wasm32`'s import
+        // documents and decodes.
+        host_input_read: (outAddr) => {
+          if (inputQueue.length === 0) {
+            // The guest asked and there was nothing: whatever was announced has been taken, and the
+            // front end is free to park again (see `input.pending`).
+            announced = false;
+            return -1;
+          }
+          const ev = inputQueue.shift();
+          const view = new DataView(memory.buffer);
+          view.setUint16(outAddr, ev.page, true);
+          view.setUint16(outAddr + 2, ev.code, true);
+          view.setInt32(outAddr + 4, ev.value, true);
+          return 8;
+        },
         // All six argument registers are named and forwarded, not only the two the
         // message-passing syscalls use: the kernel's dispatcher hands `args` straight to the
         // handler, and a syscall whose count arrives as a literal zero is a transfer that reports
@@ -672,6 +755,15 @@ export function createHost({
             // re-enters its rewind path and traps.
             st.pending = null;
             st.inst.exports.asyncify_stop_rewind();
+          } else if (st.pending !== null && st.pending.kind === 'resumed') {
+            // A yield the host took back so it could dispatch whoever the yield made runnable.
+            // The syscall itself *was* delivered — the kernel rotated the run queue and answered —
+            // so there is nothing to ask it again: hand back what it returned and let the guest
+            // carry on from the line after the yield.
+            const value = st.pending.value;
+            st.pending = null;
+            st.inst.exports.asyncify_stop_rewind();
+            return value;
           } else if (st.pending !== null) {
             // The kernel has answered, and the message is already in this instance's memory — put
             // there by the kernel's own delivery, through the copy seam. The host does not carry
@@ -724,6 +816,24 @@ export function createHost({
 
           if (kernel.exports.minix_proc_blocked(spec.slot) === 1) {
             st.pending = { kind: 'blocked', value: result, nr, msgAddr };
+            st.inst.exports.asyncify_start_unwind(st.dataPtr);
+            return 0n;
+          }
+
+          // A yield has to hand control back to the host, because switching processes is the
+          // host's job: one instance runs at a time and `pump` is what picks the next. Inside a
+          // dispatch nothing can pick, so a process that yields while another is runnable would
+          // otherwise spend the rest of the slice spinning on the CPU that process is waiting for.
+          // That is what a pointer drag over the desktop did — eight rounds of the input/desktop
+          // handshake, one per slice, each slice filled with the tty's console-read retry
+          // (`PORTING_PLAN.md` finding 62).
+          //
+          // Unconditional rather than gated on "is somebody else runnable": a yield means the
+          // caller is done with the CPU, and asking the scheduler first would put the decision in
+          // the host that the kernel has already made. `pump` ends the slice when a whole dispatch
+          // did nothing but retry, so the round trip an idle guest pays is one, not the slice.
+          if (nr === NR_THREAD_YIELD) {
+            st.pending = { kind: 'resumed', value: result, nr, msgAddr };
             st.inst.exports.asyncify_start_unwind(st.dataPtr);
             return 0n;
           }
@@ -834,6 +944,8 @@ export function createHost({
         note('the kernel picked a slot the host never spawned', `slot ${slot}`);
         return 'unknown-slot';
       }
+      const usedBefore = slice.used;
+      const spinBefore = slice.spin;
       try {
         run(st);
       } catch (e) {
@@ -858,6 +970,19 @@ export function createHost({
           `${e} — syscalls=${st.syscalls}, last=${st.tail.map((t) => `nr=${t.nr}`).join(',')}`
         );
         return 'trapped';
+      }
+      // A dispatch that did nothing but retry the console read, with nothing for the host to hand
+      // either side: the guest is waiting for input, so end the slice here instead of spending the
+      // rest of it spinning. The front end's park condition is the same one — this only reaches it
+      // sooner, and with a yield handing control back (the `thread_yield` arm above) the whole idle
+      // retry costs one round trip rather than a slice of them.
+      if (
+        slice.used > usedBefore &&
+        slice.spin - spinBefore === slice.used - usedBefore &&
+        console_.pending === 0 &&
+        input_.pending === 0
+      ) {
+        return 'slice';
       }
       if (slice.used >= slice.limit) return 'slice';
     }
@@ -884,6 +1009,10 @@ export function createHost({
     /// What the display has been asked for: frames presented, bytes, and the mode it named.
     display: displayStats,
     console: console_,
+    /// The input queue, and the two ways to put a record in it: `push` announces it (what a front end
+    /// does), `enqueue` holds it silently (what a check does to prove the announcement is what the
+    /// guest acts on).
+    input: input_,
     spawnFailures,
     pump,
     sliceWasSpinOnly,

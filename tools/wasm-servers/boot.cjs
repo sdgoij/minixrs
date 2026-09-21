@@ -50,6 +50,10 @@ const ANY = 0x0000ffff;
 /// `SYS_EXIT`. `minix-rt::exit` issues this and then traps, so it is also how a
 /// trap is told apart from a failure.
 const EXIT = 0;
+/// Kernel call 59 is `SYS_thread_yield` — the tty's console-read retry (`finding 32`). A yield
+/// hands control back to the host here as well, so the process it just made runnable is the one
+/// dispatched next instead of the yielder spinning out the run holding the CPU (finding 62).
+const THREAD_YIELD = 59;
 /// Kernel call 7 is `SYS_GETKSIG`, which PM asks for on every notification.
 const KERNEL_CALL = 50;
 const GETKSIG = 7;
@@ -327,6 +331,56 @@ const consoleInput = Array.from(
   )
 );
 
+// The host is the keyboard and the pointer on this port, and its records are the only events the
+// desktop has. Unlike the console's bytes, these are *pulled*: the input server drains them when the
+// notification its IRQ hook produced wakes it. So the host's half has two parts — the queue, and the
+// interrupt — and the check below takes them apart on purpose, because a record queued without a
+// wake is a record nobody looks for.
+const KEY_PAGE = 0x0007;
+const IRQ_KEYBOARD = 1;
+const IRQ_POINTER = 12;
+const inputQueue = [];
+
+// The pages and usages a front end sends, as `drivers::input::constants` names them. Named here for
+// the reason the console script is: the check's input and the assert on what the desktop did are
+// built from one set of numbers rather than two.
+const PAGE_ABS = 0x00fd;
+const ABS_X = 0x0030;
+const ABS_Y = 0x0031;
+/// Where the pointer is put: a quarter of the way across and a third of the way down, in the
+/// normalized 0..0x7FFF space an absolute pointing device reports.
+const ABS_X_VALUE = 0x4000;
+const ABS_Y_VALUE = 0x2000;
+
+/// Queue one input record and raise the line its driver registered.
+///
+/// `enqueue` holds a record without raising, which is what the control needs: it is the same record
+/// in the same queue, and the only difference is whether the guest is told.
+function enqueueInput(page, code, value) {
+  inputQueue.push({ page, code, value });
+}
+
+function pushInput(page, code, value) {
+  enqueueInput(page, code, value);
+  kernel.exports.minix_kernel_irq(page === KEY_PAGE ? IRQ_KEYBOARD : IRQ_POINTER);
+}
+
+/// The imports an instance's input queue needs: the record layout `arch_wasm32`'s import documents,
+/// eight bytes written into the caller's own memory.
+function inputImports(memory) {
+  return {
+    host_input_read: (outAddr) => {
+      if (inputQueue.length === 0) return -1;
+      const ev = inputQueue.shift();
+      const view = new DataView(memory.buffer);
+      view.setUint16(outAddr, ev.page, true);
+      view.setUint16(outAddr + 2, ev.code, true);
+      view.setInt32(outAddr + 4, ev.value, true);
+      return 8;
+    },
+  };
+}
+
 const kernel = new WebAssembly.Instance(kernelModule, {
   env: {
     host_console_write: (b) => {
@@ -398,6 +452,11 @@ const specs = [
   // backend is the host's "display", which here is a recorder and on the page is a canvas: it
   // takes the host's mode, paints its surface and waits for a client (M5a).
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
+  // The input server (M5c), at `INPUT_PROC_NR`: the host's records are the keyboard and the pointer
+  // on this port, and it is the only thing that queues them. It comes before wserver because wserver
+  // registers itself as its consumer while it attaches, and a registration sent to an instance that
+  // does not exist blocks the desktop forever.
+  { slot: 17, entry: 'minix_server_input', label: 'input' },
   // The window server (M5b), at `WS_PROC_NR`. It composes into a surface of its own — there is no
   // device memory to map on this arch — and hands each frame to the fb instance above as a
   // datagram write, so the display keeps one presenter and `/dev/fb` stays the thing that presents.
@@ -581,6 +640,10 @@ function makeImports(st) {
         display.present(new Uint8Array(memory.buffer, srcAddr, bytes));
         return 0;
       },
+      // The input queue (M5c). The kernel drains the console's bytes itself, so the console needs no
+      // import on this side; these records go to a *driver* that polls, which is why the queue is an
+      // import and the wake is an export on the kernel.
+      ...inputImports(memory),
       // All six argument registers are named and forwarded, not only the two the
       // message-passing syscalls use. The kernel's dispatcher hands `args` straight
       // to the handler, and the three-argument syscalls read `args[2]` — `write`'s
@@ -606,10 +669,15 @@ function makeImports(st) {
           // Resumed: the kernel has answered, and the message is already in this
           // instance's memory — put there by the kernel's own delivery, which
           // goes through the HAL copy seam. The host does not carry it.
+          const resumed = st.pending;
           st.pending = null;
           // Put Asyncify back to NORMAL before returning, or the instrumented
           // caller re-enters its rewind path and traps.
           st.inst.exports.asyncify_stop_rewind();
+          // A yield the host interrupted so it could dispatch whoever the yield made runnable: the
+          // syscall was delivered and answered, so return what the kernel gave rather than asking
+          // for a blocked call's retval.
+          if (resumed.kind === 'resumed') return resumed.value;
           // Deliberately not the value cached at block time: a receive that
           // blocked is satisfied later, and `mini_send` stores the *sender's*
           // endpoint in the receiver's frame return slot. On a hardware arch the
@@ -634,7 +702,17 @@ function makeImports(st) {
 
         if (blocked) {
           st.blockedCount += 1;
-          st.pending = { value: result, nr, msgAddr };
+          st.pending = { kind: 'blocked', value: result, nr, msgAddr };
+          st.inst.exports.asyncify_start_unwind(st.dataPtr);
+          return 0n;
+        }
+        // A yield has to hand control back to the host, because switching processes is the host's
+        // job: one instance runs at a time and this loop is what picks the next. Without this the
+        // yielder keeps the CPU for the whole dispatch, so a process the yield made runnable waits
+        // for a dispatch boundary — which is one *slice* in the page's engine, and the reason a
+        // pointer drag over the desktop spent the syscall budget (finding 62).
+        if (nr === THREAD_YIELD) {
+          st.pending = { kind: 'resumed', value: result, nr, msgAddr };
           st.inst.exports.asyncify_start_unwind(st.dataPtr);
           return 0n;
         }
@@ -919,6 +997,77 @@ note(
 // is sent between instances — which is why it is a single bit to set rather than
 // a copy.
 const notified = kernel.exports.minix_boot_notify() === 0;
+
+// The browser's events into the guest. The check runs at quiescence, because that is when a front
+// end hands the guest an event: nothing is executing, so the kernel is in a state to take the
+// interrupt.
+//
+// Two claims, and the first is the one worth the machinery. The record has to reach the input
+// server's *ring*, which is an ordinary message path; and the interrupt is what makes anyone look,
+// which is not — a driver blocked in RECEIVE cannot poll, so a record queued without a wake is a
+// record no one takes. The stages below take the queue and the wake apart for exactly that reason:
+// the control queues a record and raises nothing, and only the push is allowed to move anything.
+const inputServer = procs.find((p) => p.spec.label === 'input');
+const wserverInst = procs.find((p) => p.spec.label === 'wserver');
+const pointerNow = () => wserverInst.inst.exports.minix_wserver_pointer();
+const ringNow = () => inputServer.inst.exports.minix_input_events_queued();
+// Where the desktop's own arithmetic puts a normalized absolute position: `press * XRES / 32768`
+// for each axis, which is the conversion `process_event_batch` does for the ABS page.
+const EXPECTED_X = Math.floor((ABS_X_VALUE * 1024) / 32768);
+const EXPECTED_Y = Math.floor((ABS_Y_VALUE * 768) / 32768);
+const EXPECTED_POINTER = (EXPECTED_X << 16) | EXPECTED_Y;
+const pointerBefore = pointerNow();
+let inputStage = 0;
+let inputDone = false;
+
+/// Run one stage of the input check. False means "dispatch again", so the guest gets the chance to
+/// act on what the stage just did.
+function inputCheckStep() {
+  switch (inputStage) {
+    case 0: {
+      // The desktop starts with its pointer centered (`WsState::new`), which is where the record
+      // below moves it *from* — so the assertion is that the host's record is what changes it, not
+      // that the pointer merely has a value.
+      check(
+        'the desktop has not been moved yet, so the move below is the host record',
+        pointerBefore !== EXPECTED_POINTER && pointerBefore === (512 << 16) | 384 && ringNow() === 0,
+        `pointer=0x${pointerBefore.toString(16)} (centered at boot) ring=${ringNow()}`
+      );
+      // The control: the same kind of record the push below sends, in the same queue, held without
+      // an interrupt — so whatever the next round does cannot be the queue alone.
+      enqueueInput(PAGE_ABS, ABS_Y, ABS_Y_VALUE);
+      inputStage = 1;
+      return false;
+    }
+    case 1: {
+      check(
+        'a record queued without an interrupt waits in the queue and reaches no one',
+        ringNow() === 0 && inputQueue.length === 1 && pointerNow() === pointerBefore,
+        `ring=${ringNow()} host queue=${inputQueue.length} ` +
+          `pointer=0x${pointerNow().toString(16)} ` +
+          '(the input server is blocked in RECEIVE — nothing told it to look)'
+      );
+      // The real thing: queue a second record and raise the line the input server registered, which
+      // is what a front end does. Both records are now the guest's to find, and it should find both:
+      // the queue is the host's, so an event that arrived while the driver was blocked is still
+      // there when the wake comes.
+      pushInput(PAGE_ABS, ABS_X, ABS_X_VALUE);
+      inputStage = 2;
+      return false;
+    }
+    default: {
+      check(
+        'the interrupt woke the input server, which drained the queue into the desktop',
+        pointerNow() === EXPECTED_POINTER && ringNow() === 0 && inputQueue.length === 0,
+        `pointer=0x${pointerNow().toString(16)} (expected 0x${EXPECTED_POINTER.toString(16)}: ` +
+          `x=${EXPECTED_X} y=${EXPECTED_Y}) ring=${ringNow()} host queue=${inputQueue.length}`
+      );
+      inputStage = 3;
+      inputDone = true;
+      return true;
+    }
+  }
+}
 check(
   'the kernel sets RS boot notification on PM',
   notified,
@@ -953,6 +1102,13 @@ for (;;) {
       for (const s of startSpecs.splice(0)) {
         if (spawnInstance(s) !== 0) startFailures.push(s);
       }
+      continue;
+    }
+    // M5c's turn, and it needs the same thing the `startAfterBoot` specs need: a moment when the
+    // guest is doing nothing, so the host can hand it an event the way a front end does. Three
+    // rounds, each one asserted after the guest has had its chance to act (see `inputCheckStep`).
+    if (!inputDone) {
+      inputCheckStep();
       continue;
     }
     break;
@@ -1037,6 +1193,41 @@ for (;;) {
 }
 
 check('the dispatch loop converged', converged, `${steps} steps`);
+
+// The two checks below are the guard for the arena overlapping the kernel's own statics (finding 61).
+// `arch-wasm32`'s frame arena is either a *static of the kernel module* or an address that means
+// nothing: a fixed base such as `arch-sim`'s 0x100000 is not memory on this target, and an arena
+// there writes each exec frame over the module's own data.
+//
+// The first check is the invariant itself, and it is the one with teeth: it fails on an arena that
+// covers the privilege table and passes on one the linker placed beside the other statics. The
+// second is the *observable* of that corruption — a `Priv` entry's trap mask taken to 0, which is a
+// silent IPC permission change until the slot is next scheduled — and it is kept because a mask is
+// what a reader would have to look at on an arch where the addresses themselves are not comparable.
+const wrongMasks = procs
+  .map((p) => ({
+    label: p.spec.label,
+    kind: kernel.exports.minix_proc_kind(p.spec.slot),
+    mask: kernel.exports.minix_proc_trap_mask(p.spec.slot),
+  }))
+  .filter((s) => {
+    // A server carries every IPC primitive and a user process carries `SENDREC` alone
+    // (`kernel/src/table.rs`); a slot with no privilege structure has nothing to compare.
+    if (s.kind === 2) return s.mask !== -1;
+    if (s.kind === 1) return s.mask !== 1 << 3;
+    return false;
+  });
+
+check(
+  'the frame arena does not overlap the privilege table, so no exec writes over a Priv',
+  kernel.exports.minix_arena_overlaps_privs() === 0,
+  'the arena covers the privilege table: an exec frame lands on a Priv entry (finding 61)'
+);
+check(
+  'every slot still carries the trap mask the kernel stamped on it',
+  wrongMasks.length === 0,
+  wrongMasks.map((s) => `${s.label}: kind=${s.kind} mask=${s.mask}`).join(', ')
+);
 
 // ------------------------------------------------------------- assertions
 

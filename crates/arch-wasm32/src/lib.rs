@@ -109,6 +109,22 @@ unsafe extern "C" {
     /// writes into the surface it hands over. Returns 0, or a negative errno: `ENODEV` when
     /// the host has no display.
     fn host_fb_present(src: u32, bytes: u32) -> i32;
+    /// Write the caller's next queued input event at `out`, in the caller's own memory: eight
+    /// bytes holding HID usage `page` and `code` as little-endian `u16` and `press` as a
+    /// little-endian `i32` — the record the input server's ring is made of, so the guest's drain
+    /// is a copy rather than a translation. Returns the length written (8), or `-1` when the host
+    /// has nothing pending.
+    ///
+    /// The host is the keyboard and the pointer on this port (M5c), the way it is the console, the
+    /// clock, the disk and the display. What is the guest's is everything above the record: the
+    /// input server decodes it into events and queues them, and the window server routes them —
+    /// which is why the queue is the host's and the *drain* is the driver's, and why an empty
+    /// answer is the ordinary end of a drain rather than a failure.
+    ///
+    /// The host writes into the caller's memory rather than returning a packed value because
+    /// `press` is signed and a decoded triple is what the call site holds; this is the same
+    /// arrangement `host_block_read` has, and for the same reason.
+    fn host_input_read(out: u32) -> i32;
 }
 
 /// The same names as *definitions*, for a build of this crate that has no host to import them
@@ -185,6 +201,10 @@ mod no_host {
     }
     pub unsafe fn host_fb_present(_src: u32, _bytes: u32) -> i32 {
         ENODEV
+    }
+    /// `-1`: the console contract's "nothing pending", which is also the truth here.
+    pub unsafe fn host_input_read(_out: u32) -> i32 {
+        -1
     }
 }
 
@@ -265,6 +285,31 @@ pub(crate) fn console_available() -> i32 {
 pub(crate) fn cycles() -> u64 {
     // SAFETY: see `console_write`.
     unsafe { host_cycles() }
+}
+
+/// The host's next queued input record, as `(page, code, press)`, or `None` when it has none.
+///
+/// The layout is the one `host_input_read` documents; decoded here rather than at each call site
+/// because the two sides of that layout are the host's write and this read, and keeping them in one
+/// function is what stops a third reading of it appearing somewhere else.
+///
+/// Only a complete record is returned: an answer that is neither 8 nor the `-1` sentinel is treated
+/// as nothing pending, because a half-record would hand the input server a plausible event made of
+/// half of one and half of the previous one.
+pub(crate) fn input_event() -> Option<(u16, u16, i32)> {
+    let mut bytes = [0u8; 8];
+    // SAFETY: the host supplies every import in this module at instantiation, and `bytes` is live
+    // and eight bytes long for the duration of a synchronous call in which the host writes only
+    // what it is told about.
+    let n = unsafe { host_input_read(bytes.as_mut_ptr() as u32) };
+    if n != 8 {
+        return None;
+    }
+    Some((
+        u16::from_le_bytes([bytes[0], bytes[1]]),
+        u16::from_le_bytes([bytes[2], bytes[3]]),
+        i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+    ))
 }
 
 pub(crate) fn halt_host(code: u32) {

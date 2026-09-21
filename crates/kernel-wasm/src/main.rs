@@ -81,6 +81,65 @@ fn proc_at(slot: i32) -> *mut Proc {
     kernel::table::proc_addr(slot)
 }
 
+/// Raise `irq` — the host is this port's interrupt controller (M5c).
+/// Every device on this port whose interrupt matters is a host event, and this is the one place the
+/// host can say so: `irq_handle` walks the hooks a driver registered with SYS_IRQCTL and notifies the
+/// process that owns each one, which is the same path a hardware interrupt takes on the other three
+/// arches. The division is the port's usual one — the host declares *that* something happened, the
+/// guest decides what it means — and it is deliberately not input-specific: the same export is what a
+/// timer tick or a network event would arrive through, so the next device needs no seam of its own
+/// (`ARCH_WASM32.md` §13).
+///
+/// Called between dispatch slices, never during one, so the kernel is in a consistent state and no
+/// instance is executing.
+///
+/// A vector with no hook registered is a no-op — a spurious interrupt, which is what a host raising a
+/// line nobody has claimed is.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_kernel_irq(irq: i32) {
+    // SAFETY: `irq_handle` refuses a vector outside the table's range (it asserts) and returns
+    // without doing anything for one no handler has claimed. Nothing is borrowed across the call.
+    unsafe { kernel::interrupt::irq_handle(irq) };
+}
+
+/// Whether the kernel's frame arena overlaps the privilege table (`PORTING_PLAN.md` finding 61).
+///
+/// The arena is where an exec frame lands, and the table is the kernel's own static, so "the arena
+/// covers memory it must not" is a question about two addresses in one module — answerable here
+/// rather than inferred from a symptom several layers away. It reads as 1 when the ranges intersect
+/// and 0 when they are disjoint; the fix that makes it 0 is a page-aligned static, because only a
+/// static of this module is laid out by the linker *beside* the other statics rather than possibly
+/// on top of them.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_arena_overlaps_privs() -> i32 {
+    let arena_start = arch_wasm32::hal::phys_alloc_base();
+    let arena_end = arena_start + arch_wasm32::hal::phys_alloc_usable_size();
+    // No reference is taken: the table is written through other pointers elsewhere, and only its
+    // address and extent are wanted here.
+    let priv_start = kernel::r#priv::PRIV.get() as *const u8 as u64;
+    let priv_end = priv_start
+        + (core::mem::size_of::<kernel::r#priv::Priv>() * kernel::proc::NR_SYS_PROCS) as u64;
+    i32::from(arena_start < priv_end && priv_start < arena_end)
+}
+
+/// The IPC trap mask a slot's privilege structure carries — `SRV_T` for a server, `USR_T` for a
+/// user process, or -1 for a slot with no privilege structure.
+///
+/// For the checks, and for one property they can otherwise only infer: the privilege table is the
+/// most sensitive thing the kernel's frame arena sits next to (`arch_wasm32`'s static arena,
+/// `ARCH_WASM32.md` §5.3), so "an exec did not disturb the process table" is readable as "every
+/// mask is what it was". A mask that changed is a frame written outside the arena.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_proc_trap_mask(slot: i32) -> i32 {
+    unsafe {
+        let rp = proc_at(slot);
+        if rp.is_null() || (*rp).p_priv.is_null() {
+            return -1;
+        }
+        (*(*rp).p_priv).s_trap_mask as i32
+    }
+}
+
 /// Register a process in the kernel's table and make it runnable.
 ///
 /// `endpoint` must be a real endpoint from `minix_make_endpoint`: the kernel
