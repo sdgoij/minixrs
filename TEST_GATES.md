@@ -166,13 +166,19 @@ VM never blocks on VFS and the crossing cannot happen. The big one; take it with
 **Step 7 — one scenario, four targets.** *Bounds the wasm blind spot (cause (i)).*
 Express the userspace smoke scenario once — exec a program from the image, check its output, write a
 file, read it back — and run it on the three arches and in the wasm harness, reusing `run.js`'s
-scenario rather than inventing a second. Wiring the wasm harness into CI is a separate decision
-(nightly + Binaryen on a runner); it is the only place fork, exec, persistence and the display are
-measured, so it deserves the decision rather than the default it has now.
+scenario rather than inventing a second. ~~Wiring the wasm harness into CI is a separate decision
+(nightly + Binaryen on a runner)~~ **Taken.** `ci.yml` has two new jobs: `wasm-tests` installs a
+nightly with `rust-src`, installs Binaryen where `build.sh` looks for it, builds the artifacts and runs
+`boot.cjs`, `run.js` and `page.test.js`; `wasm-wire-tests` runs the network link's two, which need no
+toolchain, no artifact and no submodule at all. Both are in `release`'s `needs`, so a red wasm run
+stops a publish like any other gate. What remains of *this* step is the shared scenario: the three
+harnesses and the arch suites still state their own.
 
 **Step 8 — write down what is not covered, next to the gates.**
 Today: userspace on wasm (no paging, so the file-backed exec path is absent); finding 58's invariant
-until Step 6; the wasm harnesses and `publish-wasm` not in CI; and `image-release.yml` running
+until Step 6; `publish-wasm`'s *staging* not in CI — its harnesses are, since Step 7's decision, but
+the staging cannot be gated by diffing `docs/` after a rebuild, because the wasm artifacts are only
+byte-reproducible under the same nightly and `build.sh` pins none; and `image-release.yml` running
 `just image <arch> 120` — the same assertion as the dev self-check with a 120 s timeout instead of 5,
 so the released boot is longer and no stronger. Edit this list whenever a gate changes.
 

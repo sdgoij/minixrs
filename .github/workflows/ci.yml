@@ -30,6 +30,21 @@
 # locally (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they
 # gate on the guest's serial log via `just _assert-qemu-log`.
 #
+# The two wasm jobs close the last hole, and they are separate jobs on purpose. The
+# port's wasm front ends are its strongest surface - `run.js` types at a shell,
+# execs off the image, forks, and re-reads a disk - and nothing ran them: they were
+# manual because `build.sh` needs a nightly and Binaryen, which is a runner setup
+# rather than a code problem (`TEST_GATES.md` cause (i), `ARCH_WASM32.md` §13). What
+# they caught on the way to being wired in is the argument for wiring them: an
+# arena overlapping the kernel's own statics (finding 61) and a yield that could not
+# switch processes (finding 62), the second of which reached a reader as `stopped:
+# the syscall budget ran out` while dragging the mouse over the desktop.
+#
+# `wasm-wire-tests` needs none of that toolchain: the network link is plain
+# JavaScript and its tests exercise the *link* rather than the guest, so they need
+# no artifacts. Splitting it out means a toolchain problem cannot hide the cheap
+# half, and a failure names which half of the wasm surface broke.
+#
 # Learned the hard way, for whoever edits this next: a fresh checkout pulls ~4.5
 # GiB of submodule history the build never reads (`rust` ~1.0 GiB,
 # `src/llvm-project` ~3.4 GiB), so clone the submodules with `--depth 1`; the
@@ -124,6 +139,87 @@ jobs:
         run: |
           rustup component add clippy
           cargo clippy --all-targets -- -D warnings
+
+  # The network link's own tests (M6): the gateway's replies, and the WebSocket relay over a real
+  # socket. Neither needs a toolchain, an artifact or a submodule - `net.js` and `relay.js` are
+  # plain JavaScript - which is why this job can be the cheap half of the wasm surface rather than
+  # waiting on the one below.
+  wasm-wire-tests:
+    name: wasm wire tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      # Not for the tests' sake but for the transport's: `relay.test.js` drives the relay with the
+      # WebSocket *client* Node ships, which is a global only from 22.4 on. The runner's default
+      # Node is whatever the image carries, and a wire test whose client is missing would fail for a
+      # reason that has nothing to do with the wire.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: The link's own frames, checked the way a receiver checks them
+        run: node tools/wasm-browser/net.test.js
+
+      - name: The relay, over a real socket
+        run: node tools/wasm-net/relay.test.js
+
+  # The wasm system itself: the kernel instance, the servers and the program module built for
+  # `wasm32-minix`, then the three harnesses over them. `boot.cjs` runs at quiescence and checks the
+  # boot chain and every device; `run.js` runs at a live prompt and checks the same artifacts with a
+  # shell that is actually working; `page.test.js` checks the page's own code under a stub DOM.
+  wasm-tests:
+    name: wasm system
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # The same reason `host-tests` fetches it: `crates/{minix-rt,minix-std,net}` declare path
+      # dependencies into `rust/library/...`, optional and gated behind `rustc-dep-of-std`, but
+      # cargo has to load those manifests to resolve, so without `rust` present every cargo command
+      # fails before it compiles anything. The wasm crates are built from the same workspace, so it
+      # is needed here too — and only this one: `coreutils` is an x86 image's multicall, not a wasm
+      # module's.
+      - name: Check out the rust submodule
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust
+
+      # `-Z build-std` compiles `core` and `alloc` from source, which is a component rather than
+      # part of the toolchain's default profile.
+      - name: Install a nightly, with the sources build-std compiles
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+
+      # Binaryen is not in the repository (`tools/fork-spike/.gitignore` keeps `.tools/` out), so
+      # the path `build.sh` looks for it at is where this has to put it. The npm package carries the
+      # binaries.
+      - name: Install Binaryen where build.sh looks for it
+        run: npm install binaryen --prefix tools/fork-spike/.tools --no-save
+
+      - name: Build the kernel, the servers and the program module
+        run: sh tools/wasm-servers/build.sh
+
+      - name: Check harness, at quiescence
+        run: node tools/wasm-servers/boot.cjs
+
+      - name: Engine, at a live prompt
+        run: node tools/wasm-browser/run.js
+
+      - name: The page's own code, under a stub DOM
+        run: node tools/wasm-browser/page.test.js
 
   # Decides whether the pinned rust commit needs a toolchain before anything
   # consumes one. Read-only, so it needs no write permission; `stage1` below does
@@ -314,7 +410,7 @@ jobs:
   # pressing anything. This job does nothing else; the work is in that file.
   release:
     name: release
-    needs: [host-tests, arch-tests]
+    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests]
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     # The called workflow writes a release, so the caller has to allow that much.
     permissions:

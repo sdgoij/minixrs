@@ -2317,10 +2317,15 @@ target does and does not cover is written down.
   byte above it — and M6 reused that rather than extending it: `virtio_net`'s wasm transport is four
   imports, and the wire behind them is a seam with two implementations because a WebSocket has to
   terminate somewhere and the published demo has no server behind it (§11, M6).
-- The wasm harness (`boot.cjs`, `run.js`, `page.test.js`) and `just publish-wasm` run by hand: no
+- ~~The wasm harness (`boot.cjs`, `run.js`, `page.test.js`) and `just publish-wasm` run by hand: no
   workflow mentions any of them, so the best-tested surface in the project is unguarded while the
-  weaker arch gates are watched on every push. Wiring it in drags a nightly and Binaryen into a
-  runner, which is why it has stayed manual — a decision to take rather than one to inherit.
+  weaker arch gates are watched on every push.~~ **Answered: the harnesses are watched now.** `ci.yml`
+  gained `wasm-tests` (a nightly with `rust-src`, Binaryen where `build.sh` looks for it, the three
+  harnesses) and `wasm-wire-tests` (the network link's two, which need no toolchain at all), and
+  `release` needs both. The nightly is *unpinned* — `build.sh` uses `+nightly` — so a toolchain change
+  under the build is now the way this gate can fail for a reason that is nobody's commit; pinning it
+  is the fix if that ever bites. `publish-wasm` is still manual, and cannot be gated by diffing `docs/`
+  after a rebuild: the artifacts are byte-reproducible only under the same nightly.
 - ~~M5c's wake (§11): one input-specific export, or the general host→kernel notify — the
   interrupt-controller role, with `input` as its first user?~~ **Answered: the general one, and M5c is
   its first user.** `minix_kernel_irq(irq)` is the host saying "this line is asserted", the kernel

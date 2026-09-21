@@ -9,7 +9,7 @@
 //   * **the copies are the tested files, byte for byte.** This is the same argument
 //     `tools/wasm-servers/build.sh` makes about the artifacts ("a page built by a different
 //     pipeline from the ones the checks ran would be a page nobody had tested"), applied to the
-//     source files — which is what makes `page.test.js`'s 42 checks a statement about the demo.
+//     source files — which is what makes `page.test.js`'s 46 checks a statement about the demo.
 //   * **the site is portable.** Pages serves it under `/<repo>/`, so a root-absolute URL is a
 //     404 for everyone but the author, who is probably serving `docs/` at `/`.
 //   * **it boots from the published tree** — `docs/host.js` driving the guest out of
