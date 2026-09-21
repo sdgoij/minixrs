@@ -1474,7 +1474,7 @@ it chose (`getpid() as u16`). The checks read that id rather than matching a con
 says the answer belongs to *this* guest's request.
 
 Measured: two frames per `ping` (the ARP request and the echo request), both answered, none refused.
-`boot.cjs` checks it at quiescence (82/82), `run.js` at a live prompt (20/20) and `page.test.js`
+`boot.cjs` checks it at quiescence (82/82), `run.js` at a live prompt (22/22) and `page.test.js`
 through the page's own keyboard handler (46/46). The wire has its own two tests, because a link is
 the one part of this that neither guest can see: `net.test.js` frames the gateway's replies the way a
 *receiver* frames them — a checksum is only accepted when recomputing it over the data including the
@@ -2182,8 +2182,10 @@ What the page does *not* do, and which milestone it belongs to:
 - **Not the only engine.** `tools/wasm-servers/boot.cjs` drives the same system to assert 82 facts
   about it and keeps its own copy of the mechanism, since a check harness needs no yielding.
 
-Verified by `tools/wasm-browser/run.js` (20 checks: the boot, the park, a typed command that forks
-and execs, the reap, a typed `ping` reaching the host link, quiescence, the pointer reaching the
+Verified by `tools/wasm-browser/run.js` (22 checks: the boot, the park, the shared smoke scenario in
+`tools/smoke/scenario.tsv` — a program exec'd from the image, a file written and read back, the same
+file the three arch recipes type into their shells — the reap, a typed `ping` reaching the host link,
+quiescence, the pointer reaching the
 desktop while the shell is busy, a drag
 long enough that the old cost exhausted the budget, and four
 boots over one disk — the last two writing files they

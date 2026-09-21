@@ -39,9 +39,10 @@ servers came up, before anyone used them".
 ## 2. Why that is the gate to fix
 
 - **It runs on every PR and every arch.** `arch-tests` runs `test-qemu` + `test-boot` for x86, riscv64
-  and aarch64. `image-<arch>` — the only job that boots a shipped artifact — runs only in the
-  `release` job, on pushes to `main` and tags. A marker patch there would have protected the
-  least-watched half of the gate on the least-frequent trigger.
+  and aarch64. `image-<arch>` — the only job that boots a shipped artifact — ran only in the
+  `release` job, on pushes to `main` and tags, when this was written; Step 2 later put it in
+  `arch-tests` too. A marker patch there would have protected the least-watched half of the gate on
+  the least-frequent trigger.
 - **Its declared domain is where the bug lived.** `minix-testing` describes `test-boot` as
   "multi-server IPC, filesystem reads, cross-process data transfer, VFS↔MFS protocol" — which is
   precisely the neighbourhood of a file read that never reached the filesystem.
@@ -65,9 +66,10 @@ the `Justfile`; `wserver: ready` was there from the commit that introduced `imag
 (`63c99edce`), whose message says the recipe "asserts the shell prompt with `_assert-qemu-log`". The
 intent was the prompt; the code was one server's startup; nothing pinned the difference.
 
-**(g) The doctrine overstates the coverage.** `minix-testing` says `test-boot` "boots to a shell". It
-does not, for the reasons in §1. The document people trust claimed more than the code did, which is
-why the marker in (f) survived review.
+**(g) The doctrine overstates the coverage.** `minix-testing` said `test-boot` "boots to a shell". It
+did not, for the reasons in §1. The document people trust claimed more than the code did, which is
+why the marker in (f) survived review. (Step 3 fixed the sentence: the skill now says where the
+boundary is instead.)
 
 **(h) A marker can be satisfied by the failing system.** Two shapes: a marker from before the
 boundary (f), and a marker the harness's own input produces — a gate that pipes `echo boom` into the
@@ -124,21 +126,32 @@ was reset. That is the class, which is what a gate is for; the line is what a di
 (Step 5).
 
 **Step 2 — keep an assertion on the shipped artifact.** *Defence in depth; catches cause (e), which
-Step 1 cannot.*
-Pipe `/bin/echo <marker>` into the guest in `image-<arch>` and require a line that is exactly
-`<marker>` — the echoed input is `# /bin/echo <marker>`, so only real output satisfies it (cause (h)).
-Keep `wserver: ready` beside it as information, not as the gate. This is the same assertion the wasm
-harness already makes, on the artifact a user downloads. Its one open question is whether input piped
-into QEMU at boot is buffered by the tty until the shell reads it or dropped; if dropped, it needs a
-feeder that types after the prompt appears. Step 1 does not depend on the answer, which is another
-reason to do it first.
+Step 1 cannot.* **Done.**
+`just image-<arch>` boots the artifact it built and has `tools/smoke/feed.sh` type
+`tools/smoke/scenario.tsv` into the shell that comes up: `/bin/echo` (a program exec'd from the
+image), `/bin/echo <text> > smoke.txt` (a file written), `/bin/cat smoke.txt` (that file read back).
+A step must answer on a whole line of its own — the guest echoes what it is typed, so only real
+output satisfies one (cause (h)) — and a step that does not answer fails the recipe *by name*.
+`wserver: ready` stays asserted beside it, deliberately: (f) shows it is not sufficient, and it is
+the marker finding 66 needed, which the scenario could not see.
+Its open question is answered, and it has a sharp edge: **input before the prompt is dropped, not
+buffered.** Measured on the shipped x86 image — `printf '/bin/echo alive\n' | qemu …` printed
+nothing, and the same bytes after a delay printed the command, its output and the next prompt. The
+feeder therefore waits for the prompt and types one step at a time. On git-bash there is a second
+trap: `mkfifo` is emulated there and the QEMU is a native Windows binary that reads nothing from one,
+so the feeder holds its end of a *pipe* and reports through a status file. Its budget sits a second
+inside the guest's own timeout, so a step that hangs is always reported by the driver that can name
+it, never as the guest going quiet for another reason.
+`arch-tests` runs it on every PR — the job already has clang, QEMU and the stage1 — and the release
+job re-runs the same recipes with a larger `boot-timeout`.
 
 **Step 3 — make the names and the doctrine true.** *Cheap, and it stops the next reader relying on a
-claim that is not checked.*
-Retire `minix-testing`'s "boots to a shell" (post-Step 1 the sentence becomes true, so write what is
-now true and where the boundary sits), and say in the `Justfile` what each marker means:
-`ALL TESTS PASSED` = servers + one userland exec; the image marker = a command from the image
-answered.
+claim that is not checked.* **Done.**
+`minix-testing` no longer says `test-boot` "boots to a shell". It says what the suite does — the
+servers and `mount_root`, then a userspace phase in which a test init execs a program from the image
+— and that nothing types a command at it, which is what `just image-<arch>` and
+`tools/smoke/scenario.tsv` are for. The `Justfile` says what each marker means: `ALL TESTS PASSED` =
+servers + one userland exec; the image recipe = the scenario answered, from the shipped artifact.
 
 **Step 4 — test the gate.** *Protects Steps 1 and 2 from rotting the way the old marker did.*
 Two fixture logs — the good one, and one stopped at `init: starting shell...` — with a check that the
@@ -202,16 +215,25 @@ scenario rather than inventing a second. ~~Wiring the wasm harness into CI is a 
 nightly with `rust-src`, installs Binaryen where `build.sh` looks for it, builds the artifacts and runs
 `boot.cjs`, `run.js` and `page.test.js`; `wasm-wire-tests` runs the network link's two, which need no
 toolchain, no artifact and no submodule at all. Both are in `release`'s `needs`, so a red wasm run
-stops a publish like any other gate. What remains of *this* step is the shared scenario: the three
-harnesses and the arch suites still state their own.
+stops a publish like any other gate. **Done**, and the shared scenario is `tools/smoke/scenario.tsv`:
+a command, a tab, and the whole line its output must produce, one step per line. All four targets read
+that one file — `tools/smoke/feed.sh` types it into the three QEMU guests, `run.js` drives it in the
+wasm engine — and the checks around it differ only where the targets do: on wasm, `run.js` also reads
+the kernel's own account of the first step (the shell's fork, the child's exec of the image's
+module), which a console cannot show.
+It earned its keep on the first run: the wasm image carried no `/bin/cat`, so the read-back step
+could not run there, and the module now answers it (a fifth name on the one module, `WASM_MODULES`).
+The recipe was also checked against an impossible expectation — it exits 1 and names the step — since
+a gate nobody has seen fail is a gate nobody knows works.
 
 **Step 8 — write down what is not covered, next to the gates.**
-Today: userspace on wasm (no paging, so the file-backed exec path is absent); finding 58's invariant
-until Step 6; `publish-wasm`'s *staging* not in CI — its harnesses are, since Step 7's decision, but
-the staging cannot be gated by diffing `docs/` after a rebuild, because the wasm artifacts are only
-byte-reproducible under the same nightly and `build.sh` pins none; and `image-release.yml` running
-`just image <arch> 120` — the same assertion as the dev self-check with a 120 s timeout instead of 5,
-so the released boot is longer and no stronger. Edit this list whenever a gate changes.
+Today: userspace on wasm beyond what the scenario reaches (no paging, so the file-backed exec path is
+absent there — the reads it does take come from the image's own filesystem); `publish-wasm`'s
+*staging* not in CI — its harnesses are, since Step 7's decision, but the staging cannot be gated by
+diffing `docs/` after a rebuild, because the wasm artifacts are only byte-reproducible under the same
+nightly and `build.sh` pins none; the release boot being the same scenario as the dev self-check with
+a 120 s timeout instead of 15, so it is longer and not stronger; and nothing yet tests the gates
+themselves (Step 4). Edit this list whenever a gate changes.
 
 ## 6. Order
 

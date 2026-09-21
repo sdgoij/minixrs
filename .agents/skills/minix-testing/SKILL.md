@@ -87,8 +87,11 @@ x86, riscv64 and aarch64. Two separate reasons make that a routine step and not
 a rare one:
 
 - **The suites are not nested.** `test-qemu` runs the in-kernel suite
-  (`crates/kernel/src/tests.rs`), `test-boot` boots to a shell and runs
-  `boot_test.rs`. Neither includes the other, and the host suite runs neither.
+  (`crates/kernel/src/tests.rs`), `test-boot` runs `boot_test.rs`: the servers
+  and `mount_root` first, then a userspace phase in which a test init execs a
+  program from the image. It crosses that boundary but stops short of a shell —
+  nothing types a command at it. Neither includes the other, and the host suite
+  runs neither.
 - **`cargo test` cannot see the first one.** `tests.rs` sits behind the
   kernel's `qemu-tests` feature and its checks are driven by its own runner, so
   the host suite neither compiles nor runs them. A test that exists only there

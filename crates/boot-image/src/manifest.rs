@@ -137,11 +137,12 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
 /// driven at all.
 ///
 /// The one module under several paths: `/bin/sh` is what `init` execs, `/bin/echo` is what the
-/// shell runs as an external command (5b — `fork` and `exec` on one line), and `/bin/forktest` is
-/// 5a's probe. All three are the same file, because the path chooses the module and `argv[0]`
-/// chooses the program inside it — which is what makes a multi-call program affordable in an
-/// image whose modules are megabytes wide, and which is why the module's dispatch arms name the
-/// paths as well as the bare names.
+/// shell runs as an external command (5b — `fork` and `exec` on one line), `/bin/cat` is how a file
+/// written by the shell is read back (the userspace smoke scenario's last step,
+/// `tools/smoke/scenario.tsv`), and `/bin/forktest` is 5a's probe. All of them are the same file,
+/// because the path chooses the module and `argv[0]` chooses the program inside it — which is what
+/// makes a multi-call program affordable in an image whose modules are megabytes wide, and which is
+/// why the module's dispatch arms name the paths as well as the bare names.
 ///
 /// `/bin/ping` is the same arrangement and the first entry here that is a *client of a device*
 /// rather than a program working on its own stdio (M6): it opens `/dev/ip`, and what answers is the
@@ -149,6 +150,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
 pub const WASM_MODULES: &[(&str, &str)] = &[
     ("/bin/sh", "program.async.wasm"),
     ("/bin/echo", "program.async.wasm"),
+    ("/bin/cat", "program.async.wasm"),
     ("/bin/forktest", "program.async.wasm"),
     ("/bin/ping", "program.async.wasm"),
 ];

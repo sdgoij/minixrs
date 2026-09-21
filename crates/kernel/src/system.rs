@@ -4735,9 +4735,12 @@ pub unsafe fn do_schedctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE
 ///
 /// Message layout (after kernel overwrites bytes 0-7 with call_nr+src):
 ///   [8..12]  = subfunction code (DIAGCTL_CODE_DIAG = 1, etc.)
-///   [16..20] = len (for DIAG)
-///   [24..32] = buf pointer (for DIAG)
+///   [12..16] = len (for DIAG)
+///   [16..]   = the bytes themselves (for DIAG)
 ///   [20..24] = endpt (for STACKTRACE)
+///
+/// The length and the bytes do not overlap, which they once did (len at 16, bytes from 12 — a
+/// four-byte hole in every diagnostic line; finding 67).
 ///
 /// # Safety
 ///
@@ -4749,19 +4752,18 @@ pub unsafe fn do_diagctl_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         let code = msg_read_i32(msg, 8);
         match code as u32 {
             arch_common::com::DIAGCTL_CODE_DIAG => {
-                // Write diagnostic data to serial port directly.
-                // Data is stored directly in the message at offset 12
-                // (diag_putchar places byte at [12], CR at [13], LF at [14]).
-                // len (offset 16) = number of bytes to write.
-                let len = msg_read_i32(msg, 16);
+                // Write diagnostic data to serial port directly, out of the message itself: a
+                // caller's pointer cannot be dereferenced here (the caller's CR3 may not be the
+                // current one), which is why the bytes travel in the message.
+                let len = msg_read_i32(msg, 12);
                 if len > 0 {
-                    // The message is `MESSAGE_SIZE` bytes and the data starts at byte
-                    // 12, so that is the real ceiling: this is what can be in the
-                    // message, not a policy about how much to print. It was 256, which
-                    // indexes past the end of the array a caller can fill.
-                    let max_len = len.min((MESSAGE_SIZE - 12) as i32) as usize;
+                    // The message is `MESSAGE_SIZE` bytes and the data starts at 16, so that is the
+                    // real ceiling: this is what can be in the message, not a policy about how much
+                    // to print. It was 256, which indexes past the end of the array a caller can
+                    // fill.
+                    let max_len = len.min((MESSAGE_SIZE - 16) as i32) as usize;
                     for i in 0..max_len {
-                        let byte = msg[12 + i];
+                        let byte = msg[16 + i];
                         crate::hal::serial_write_byte(byte);
                     }
                 }

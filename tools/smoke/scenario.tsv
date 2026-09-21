@@ -1,0 +1,25 @@
+# The userspace smoke scenario — what a user would call working, in one place.
+#
+#   sh tools/smoke/feed.sh <log> <seconds> <qemu command…>      (the three arches)
+#   node tools/wasm-browser/run.js                               (wasm)
+#
+# One step per line: the command, a tab, and the line its output must produce. An empty expectation
+# means the step has nothing to say and the next prompt is the whole of its evidence — a write.
+#
+# Two rules, both of them cause (h) in TEST_GATES.md:
+#
+#   * The expectation is matched against a *whole line*. The guest echoes what it is sent, so
+#     `# /bin/echo smoke-ok` would satisfy a substring search for `smoke-ok` on a shell that
+#     echoed the line and never ran the command. Anchored, only the output can satisfy it.
+#   * The expectation is therefore never a prefix or substring of its own command.
+#
+# Why these three steps: they are the ones that need the file-backed exec path (an image binary
+# exec'd by the shell), the filesystem (a file created, and read back through a second open), and a
+# second process — which is what was broken, invisibly, when init stopped at `RTS_PAGEFAULT`
+# (finding 57). `boot.cjs` and `page.test.js` assert much more on wasm; this is the part every
+# target can be asked, and wasm cannot answer for the other three: it has no page faults, so it
+# never runs FDIO or the demand-paged path at all.
+
+/bin/echo smoke-ok	smoke-ok
+/bin/echo hello-from-the-image > smoke.txt	
+/bin/cat smoke.txt	hello-from-the-image

@@ -197,13 +197,13 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # itself. A raw disk image for real hardware would instead be the (unwired)
 # `tools/mbr.S` + `tools/stage2.S` + `tools/mkimg.rs` route.
 #
-# Each recipe boots what it produced and checks that the window server came up,
-# so a bad artifact fails here rather than in someone's hands. The boot timeout
-# is deliberately tight - 5 s, against a guest that reaches the shell in about
-# two - so a slow boot fails the recipe instead of only being slow. It is a
-# parameter so that the release job (`.github/workflows/image-release.yml`, called
-# by `ci.yml`) can pass a larger one: a CI runner emulates the guest, and that is a
-# property of the runner, not of the artifact.
+#  Each recipe boots what it produced and drives the userspace smoke scenario into its
+# shell, so a bad artifact fails here rather than in someone's hands. The boot timeout
+# bounds the guest - 15 s, against a guest that reaches the shell in about two, with the
+# scenario's own budget set a second inside it - so a guest that stops making progress
+# fails the recipe instead of only being slow. It is a parameter so that the release job
+# (`.github/workflows/image-release.yml`, called by `ci.yml`) can pass a larger one: a CI
+# runner emulates the guest, and that is a property of the runner, not of the artifact.
 #
 # The QEMU command mirrors the matching `run-*` recipe minus the disk - which is
 # the point - so the display and input devices are passed too: without virtio-gpu
@@ -217,32 +217,39 @@ run-aarch64 memory: build-aarch64 mkfs-aarch64
 # applies to `find`, `sort` and `more`).
 # Build the single-file boot artifact for an arch. `boot-timeout` is what the
 # self-check gets (see the note above).
-image target="x86" boot-timeout="5":
+image target="x86" boot-timeout="15":
     @just image-{{target}} {{boot-timeout}}
 
-image-x86 boot-timeout="5": build-x86
+# One self-contained, bootable ELF per arch, booted and driven through the userspace smoke scenario
+# (`tools/smoke/scenario.tsv`): a program exec'd from the image, a file written, that file read back
+# — the same steps `run.js` drives in the browser. The guest is not left to print markers on its own;
+# the scenario is typed into the shell that a user gets, which is what makes this a check on the
+# artifact rather than on the servers having started. `wserver: ready` stays an assertion as well:
+# it caught a real regression (a browser-ready desktop, dead on the arches) that the scenario could
+# not see — the shell worked while the window server was stuck, finding 66.
+image-x86 boot-timeout="15": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    /usr/bin/timeout {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 2>&1 | tee target/image-x86.log
+    sh tools/smoke/feed.sh target/image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/image-x86.log "wserver: ready"
     @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
 
-image-riscv64 boot-timeout="5": build-riscv64
+image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
     @just _assert-qemu-version qemu-system-riscv64
-    /usr/bin/timeout {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf 2>&1 | tee target/image-riscv64.log
+    sh tools/smoke/feed.sh target/image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf
     @just _assert-qemu-log target/image-riscv64.log "wserver: ready"
     @echo "done: target/images/riscv64gc-unknown-minix/minix-riscv64.elf — qemu-system-riscv64 -machine virt -m 256M -nographic -kernel <it>"
 
-image-aarch64 boot-timeout="5": build-aarch64
+image-aarch64 boot-timeout="15": build-aarch64
     mkdir -p target/images/aarch64-unknown-minix
     cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/images/aarch64-unknown-minix/minix-aarch64.elf
     @just _assert-qemu-version qemu-system-aarch64
-    /usr/bin/timeout {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf 2>&1 | tee target/image-aarch64.log
+    sh tools/smoke/feed.sh target/image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf
     @just _assert-qemu-log target/image-aarch64.log "wserver: ready"
-    @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -kernel <it>"
+    @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -m 256M -nographic -kernel <it>"
 
 # ---------- desktop (graphical window; shell stays on stdio) ----------
 # The SDL window shows the framebuffer and routes host keys to the guest

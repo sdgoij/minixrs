@@ -65,7 +65,7 @@ the only difference between what the checks boot and what the page boots.
 | `display.js` | the display's contract as the page implements it: the guest's frames onto the canvas |
 | `store.js` | the store contract, and the page's implementation of it over IndexedDB |
 | `file-store.js` | the same contract over a file, for the Node front ends |
-| `run.js` | drives the engine from Node with scripted keystrokes (20 checks) |
+| `run.js` | drives the engine from Node with scripted keystrokes, over the shared smoke scenario in `tools/smoke/scenario.tsv` (22 checks) |
 | `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (46 checks) |
 | `net.js` | the network link (M6): the in-page gateway, and the WebSocket link a page opened with `?net=` uses |
 | `net.test.js` | the gateway's own frames, checked the way a receiver checks them (27 checks) |

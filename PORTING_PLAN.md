@@ -7802,6 +7802,38 @@ tests on `receive_done` (it clears the sendrec wait; it leaves the receiver's ot
 integration suite cannot reach this path: `try_deliver_senda` reads the sender's async table through
 `virtual_copy`, and the suite's test processes have no page table to read it from.
 
+**66. An async delivery put the sender's endpoint in a register the syscall epilogue then wrote
+over, so VFS read every reply as coming from PM.** Step 6 of `TEST_GATES.md` moved VM's requests to
+VFS off the blocking path, and VFS takes the sender of each message from `RECEIVE`'s return value
+(`get_work`). `mini_receive`'s async branch delivered the message through `try_async`, which stamps
+the sender's endpoint into the receiver's return register exactly as `mini_send` does — and then
+returned `OK`, so the epilogue that writes a syscall's return value overwrote it with 0. Zero is
+PM's endpoint, so an `FDLOOKUP` for the window server's `/dev/fb` mmap was routed to VFS's *PM*
+handler and never answered.
+
+Nothing noticed, and that is the finding. The symptom was `/sbin/wserver` stopping at its first
+`mmap /dev/fb` and never printing `wserver: ready`; the shell came up normally, every suite passed
+and all three arches booted — a browser-ready desktop whose window server was dead. No gate asserted
+that line, which is why `image-*` asserts it now, and why finding 57's class needed a check on the
+leaf rather than on the boot.
+
+The fix returns the endpoint read back out of the delivered message — `try_one` stamped it there, so
+the message is the record — which is what the caller-queue scan below has always returned. `try_one`
+still writes that register as well, which the same endpoint in the return value now makes redundant
+on the non-wasm path; it stays because wasm has no syscall epilogue to write it.
+
+**67. `diag_write` wrote each chunk's length inside that chunk's payload, so diagnostics lost four
+bytes a line.** `minix-rt`'s diag helper put the length at `msg[16..20]` and the payload from
+`msg[12..]`, so the four bytes the kernel printed as a chunk's first four were the little-endian
+length and the last four bytes of every chunk were never printed. `do_diagctl_handler` read from the
+same offsets it wrote, so the two agreed on a layout that cannot carry a full message: a diagnostic
+line is what a wedged boot has instead of a stack trace, and it arrived with its first four bytes
+replaced by an integer.
+
+The fix moves both sides together — the length at `msg[12..16]`, the bytes from `msg[16..]`,
+`DIAG_CHUNK_MAX = 64 - 16 = 48` — and pins it with two host tests on `diag_message`, both of which
+were checked to fail under the old offsets before they were kept.
+
 ### M1c Tasks — Multi-Process Scheduling & Context Switch
 
 **Goal:** Replace the single-process `boot_jump_to_user()` with a proper

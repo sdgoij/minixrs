@@ -189,11 +189,19 @@ See `.agents/skills/` for domain deep-dives:
 - **Boot tests:** `just test-boot [arch]` — multi-server verification after VFS
   mount_root on all three hardware arches (server liveness, process-table
   consistency, VFS→MFS readsuper IPC round-trip, brk/RAM-disk mappings,
-  allocator, initramfs)
+  allocator, initramfs), then a userspace phase in which a test init execs a
+  program from the image and the kernel requires the exec'd entry page to be
+  mapped user+executable
+- **One scenario, four targets:** `tools/smoke/scenario.tsv` is the userspace smoke
+  test — a program exec'd from the image, a file written, that file read back — and all
+  four targets read that one file. `just image [arch]` builds the shipped ELF and types
+  the steps into the shell that comes up, through `tools/smoke/feed.sh`; `run.js` drives
+  the same steps in the wasm engine. `arch-tests` runs it on every PR, so an image whose
+  shell cannot run a command has to fail the build rather than a download.
 - **wasm (the browser target):** `sh tools/wasm-browser/build.sh` builds and stages the artifacts
   first (it runs `tools/wasm-servers/build.sh`, then copies the three into the page's `build/`), then
   - `node tools/wasm-servers/boot.cjs` — the boot chain and every device, at quiescence (82 checks)
-  - `node tools/wasm-browser/run.js` — the same artifacts at a *live* prompt (20)
+  - `node tools/wasm-browser/run.js` — the same artifacts at a *live* prompt (22)
   - `node tools/wasm-browser/page.test.js` — the page's own code under a stub DOM (46)
   - `node tools/wasm-browser/net.test.js` and `node tools/wasm-net/relay.test.js` — the network
     link's frames, and the relay over a real socket (27 + 10; these two need no artifacts at all)

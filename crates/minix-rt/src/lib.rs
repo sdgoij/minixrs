@@ -1197,8 +1197,25 @@ pub fn sys_trace(request: i32, proc_ep: i32, addr: u64, data: &mut i64) -> i32 {
 }
 
 /// Bytes one SYS_DIAGCTL message can carry: the kernel reads `len` bytes from
-/// `msg[12]`, inside a 64-byte message.
-pub const DIAG_CHUNK_MAX: usize = 64 - 12;
+/// `msg[16]`, which leaves 48 of the 64-byte message.
+pub const DIAG_CHUNK_MAX: usize = 64 - 16;
+
+/// Build the SYS_DIAGCTL message for one chunk of diagnostic bytes.
+///
+/// Pure, and separate from the call, because the layout it writes is a contract with the kernel's
+/// `do_diagctl_handler`: the length goes at offset 12 and the bytes at offset 16, so that the two
+/// cannot overlap. They did — the length was written at 16 and the bytes from 12, which put the
+/// length four bytes inside its own payload, and every line longer than four bytes came out with a
+/// hole in it (finding 67). The hole was where a diagnostic is least affordable: those lines are
+/// what a wedged boot has instead of a stack trace.
+pub fn diag_message(chunk: &[u8]) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    // DIAGCTL message: the kernel overwrites msg[0..8] with call_nr + src.
+    msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
+    msg[12..16].copy_from_slice(&(chunk.len() as i32).to_le_bytes());
+    msg[16..16 + chunk.len()].copy_from_slice(chunk);
+    msg
+}
 
 /// Write diagnostic bytes directly to the serial port via SYS_DIAGCTL.
 ///
@@ -1212,11 +1229,7 @@ pub const DIAG_CHUNK_MAX: usize = 64 - 12;
 /// No newline is added; the caller's bytes are what reaches the console.
 pub fn diag_write(bytes: &[u8]) {
     for chunk in bytes.chunks(DIAG_CHUNK_MAX) {
-        let mut msg = [0u8; 64];
-        // DIAGCTL message: kernel overwrites msg[0..8] with call_nr + src.
-        msg[8..12].copy_from_slice(&1i32.to_le_bytes()); // DIAGCTL_CODE_DIAG = 1
-        msg[12..12 + chunk.len()].copy_from_slice(chunk);
-        msg[16..20].copy_from_slice(&(chunk.len() as i32).to_le_bytes());
+        let mut msg = diag_message(chunk);
         let _ = kernel_call(44, &mut msg); // SYS_DIAGCTL = kernel call 44
     }
 }
@@ -1864,6 +1877,37 @@ pub unsafe fn minix_alloc_zeroed(layout: core::alloc::Layout) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_diag_message_leaves_its_payload_intact() {
+        // The kernel reads the length from bytes 12..16 and the bytes from 16 on, so the payload
+        // starts where the length ends. It did not: the length was written at 16 and the payload
+        // from 12, which put the length four bytes *inside* its own payload and silently cut four
+        // bytes out of every diagnostic line longer than four bytes (finding 67). A line of a
+        // diagnostic is what a wedged boot has instead of a stack trace, so the layout is pinned
+        // here — a chunk this long fails the test below under the old offsets.
+        let chunk = b"TEMP: a line longer than four bytes";
+        let msg = diag_message(chunk);
+        assert_eq!(
+            i32::from_le_bytes(msg[12..16].try_into().unwrap_or([0; 4])) as usize,
+            chunk.len(),
+            "the kernel reads the chunk's length from bytes 12..16"
+        );
+        assert_eq!(
+            &msg[16..16 + chunk.len()],
+            chunk,
+            "and the bytes from 16, so neither can overwrite the other"
+        );
+    }
+
+    #[test]
+    fn test_diag_message_fills_a_message_without_past_the_end() {
+        // A chunk of exactly DIAG_CHUNK_MAX leaves the message full and not over.
+        let chunk = [b'x'; DIAG_CHUNK_MAX];
+        let msg = diag_message(&chunk);
+        assert_eq!(DIAG_CHUNK_MAX, 48);
+        assert_eq!(&msg[16..64], &chunk[..]);
+    }
 
     #[test]
     fn test_syscall_numbers() {

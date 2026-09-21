@@ -124,11 +124,49 @@ check(
   `last slice: used=${host.slice.used}, of which spin=${host.slice.spin}`
 );
 
-type('/bin/echo hi\n');
-const afterEcho = settle();
+// -------------------------------------------------------------- the shared smoke scenario
+//
+// The same steps, in the same order, that `just image-<arch>` types into the three QEMU guests
+// (`tools/smoke/scenario.tsv`, driven there by `tools/smoke/feed.sh`): a command the shell cannot
+// answer itself, a file written through its redirection, and that file read back through a second
+// open. Expressed once and driven here as well, so all four targets are asked the same question.
+//
+// What this adds over the three arch runs is the kernel's own account of the first step — the fork
+// by the shell, and the exec of the image's module by the child — which a console cannot show.
+const scenario = fs
+  .readFileSync(path.join(root, 'tools/smoke/scenario.tsv'), 'utf8')
+  .replace(/\r/g, '')
+  .split('\n')
+  .filter((line) => line !== '' && !line.startsWith('#'))
+  .map((line) => {
+    const [command, expected = ''] = line.split('\t');
+    return { command, expected };
+  });
+
+check(
+  'the shared smoke scenario was read and has steps',
+  scenario.length > 0,
+  `${scenario.length} steps from tools/smoke/scenario.tsv`
+);
+
+/// The console holds a line equal to `expected` — the whole line, as `feed.sh` requires of the three
+/// arch runs, because the guest echoes what it is typed.
+const answered = (expected) => terminal.lines.includes(expected.trim());
+
+/// A step with nothing to print is evidenced by its own echo, which is what `feed.sh` looks for: the
+/// command on a line of its own, after the prompt.
+const echoed = (command) => terminal.lines.some((l) => l.trim() === `# ${command}`);
+
+/// Type one scenario step at the prompt, and hand back where `settle` ended.
+function typeStep(step) {
+  type(`${step.command}\n`);
+  return settle();
+}
+
+const firstStep = typeStep(scenario[0]);
 const forked = host.forks.find((f) => f.parent === INIT_SLOT);
 check(
-  "a typed command the shell cannot answer itself forked, and the child exec'd the image's module",
+  "the scenario's first step forked, and the child exec'd the image's module",
   forked !== undefined &&
     forked.st.forkOf === INIT_SLOT &&
     forked.st.exec !== undefined &&
@@ -140,9 +178,22 @@ check(
       `argv=${JSON.stringify(forked.st.exec && forked.st.exec.argv)}`
 );
 check(
-  "the child's output reached the console and the shell came back for more",
-  afterEcho === 'awaiting-input' && terminal.lines.includes('hi'),
-  `settle ended on ${afterEcho}; console:\n${terminal.text()}`
+  "the scenario's first step answered, and the shell came back for more",
+  firstStep === 'awaiting-input' && answered(scenario[0].expected),
+  `settle ended on ${firstStep}; console:\n${terminal.text()}`
+);
+
+// The rest of it: the write, whose whole evidence is its own echo and the prompt that follows, and
+// the read, which is the only step whose answer had to come off the filesystem rather than out of
+// the console.
+const rest = scenario.slice(1).map((step) => ({ ...step, ended: typeStep(step) }));
+const saw = (s) => (s.expected === '' ? echoed(s.command) : answered(s.expected));
+check(
+  `the scenario's remaining ${rest.length} steps answered, one prompt each`,
+  rest.every((s) => s.ended === 'awaiting-input' && saw(s)),
+  rest
+    .map((s) => `${s.command} -> ${saw(s) ? 'ok' : 'no'} (settle ended on ${s.ended})`)
+    .join('\n        ')
 );
 
 // --------------------------------------------------------------------- M6: the network

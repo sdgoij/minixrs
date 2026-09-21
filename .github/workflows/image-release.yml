@@ -35,11 +35,12 @@
 #     plain `v0.2.0` release.
 # Either way the version is the same string in the release tag and the asset names.
 #
-# Each job *boots* what it built: `just image-<arch>` runs the artifact in QEMU and
-# fails unless the window server comes up, so a release can only contain images
-# that came up somewhere other than the machine that built them. That self-check's
-# 5 s timeout is calibrated for a dev machine with KVM, so the job passes a larger
-# `boot-timeout`: a runner emulates the guest.
+# Each job *boots* what it built and drives it: `just image-<arch>` runs the artifact in
+# QEMU, types the userspace smoke scenario (`tools/smoke/scenario.tsv`) into its shell,
+# and fails unless every step answers - so a release can only contain images whose
+# shell execs a program from the image, writes a file and reads it back. That
+# self-check's 15 s timeout is calibrated for a dev machine with KVM, so the job passes
+# a larger `boot-timeout`: a runner emulates the guest.
 #
 # The emulator is not optional here either - the artifact boots userspace, so it is
 # subject to the same floor as the suites (`qemu-min-version`), which
@@ -95,7 +96,7 @@ jobs:
       - name: Install the prebuilt stage1
         run: just fetch-stage1 ${{ matrix.arch }}
 
-      # 120 s against a dev machine's 5 s: it is the runner's emulation speed, not
+      # 120 s against a dev machine's 15 s: it is the runner's emulation speed, not
       # a budget the image has to meet. A boot that is actually broken still fails
       # here, only later.
       - name: Build and boot the artifact

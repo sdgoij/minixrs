@@ -606,7 +606,19 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                     (*caller_ptr)
                         .p_misc_flags
                         .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                    return OK;
+                    // The sender's endpoint, as on every other path a message reaches a receiver:
+                    // the receive's return value is who sent it. Returning `OK` here meant the
+                    // syscall epilogue wrote 0 over the endpoint the delivery had just put in the
+                    // return register, so a receiver that takes the sender from its return value
+                    // — VFS does — read "0", meaning PM, and routed the request to its PM handler
+                    // instead of the call that asked (finding 66). The caller-queue scan below
+                    // has always returned the endpoint; this is the same thing for the same reason.
+                    // Read it back out of the delivered message: `try_one` stamped the sender's
+                    // endpoint into it just as `mini_send` does, so the message is the record.
+                    let ep = core::ptr::read_unaligned(
+                        (*caller_ptr).p_delivermsg.as_ptr() as *const i32
+                    );
+                    return ep;
                 }
             }
 

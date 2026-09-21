@@ -348,10 +348,11 @@ jobs:
   # built on); the emulator comes from `install-qemu`, which builds the version
   # the suites require and caches it. No image pin is load-bearing here.
   #
-  # `just image-<arch>` is not run in *this* job: the `image` jobs in
-  # `image-release.yml`, which the `release` job below calls, do that with a larger
-  # `boot-timeout` - a runner emulates the guest, and the recipe's 5 s self-check is
-  # calibrated for a dev machine with KVM.
+  # `just image-<arch>` runs in this job as its last step, because it is the one check on
+  # the artifact a user gets rather than on a kernel built for a suite: it boots the
+  # shipped image and types the userspace smoke scenario into the shell. The release job
+  # below re-runs the same recipes with a larger `boot-timeout` - a runner emulates the
+  # guest, and the recipe's 15 s is calibrated for a dev machine with KVM.
   #
   # The `if` is spelled out because `stage1` is *skipped* whenever there is nothing
   # to build, and a skipped dependency propagates like a failed one - the suites
@@ -408,6 +409,15 @@ jobs:
 
       - name: Boot suite
         run: just test-boot ${{ matrix.arch }}
+
+      # The shipped artifact, which is not what the suites above run: they use a kernel
+      # built with the test features, and this is the image a release publishes. The
+      # recipe boots it and drives `tools/smoke/scenario.tsv` into its shell - a program
+      # exec'd from the image, a file written, that file read back. 120 s against a dev
+      # machine's 15: a runner emulates the guest, and a boot that is actually broken
+      # still fails here, only later.
+      - name: The shipped image, driven through the smoke scenario
+        run: just image ${{ matrix.arch }} 120
 
   # The images and the release live in `.github/workflows/image-release.yml`, which
   # this calls: the release logic keeps one home, and `needs` is what makes the

@@ -233,6 +233,12 @@ pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
     // instantiates this module itself for a slot.
     let rc = match args.first().copied() {
         Some("echo") | Some("/bin/echo") => userland::echo(args),
+        // The first arm whose work is the filesystem rather than its own stdio: `cat` opens the path
+        // it is given, which on this target is a file in the boot image, so the read comes back
+        // through VFS and MFS rather than out of the console. It is what reads back what the smoke
+        // scenario's `>` wrote, and the only arm here that a *second* process had to have made a
+        // file for.
+        Some("cat") | Some("/bin/cat") => userland::cat(args),
         Some("/bin/sh") | Some("sh") => userland::sh(args),
         Some("forktest") | Some("/bin/forktest") => forktest(),
         // The first program in this module whose work is not the console's: `ping` opens `/dev/ip`
