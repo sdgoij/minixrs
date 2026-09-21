@@ -31,6 +31,26 @@ function check(name, ok, detail) {
   if (detail !== undefined && !ok) console.log(`        ${detail}`);
 }
 
+// The three artifacts, before anything else: their absence is a missing build, not a failing page,
+// and it otherwise surfaces twice — a `404` from the server and a raw `ENOENT` from the read
+// further down — after checks have already printed `FAIL`, which reads as a broken page. The two
+// module halves come from the servers build and the image from *this* directory's staging, which is
+// what `tools/wasm-browser/build.sh` adds over `tools/wasm-servers/build.sh`, so the two names in
+// the message differ and it says which is which.
+const INPUTS = [
+  [path.join(buildDir, 'kernel.wasm'), 'sh tools/wasm-servers/build.sh'],
+  [path.join(buildDir, 'servers.async.wasm'), 'sh tools/wasm-servers/build.sh'],
+  [imagePath, 'sh tools/wasm-browser/build.sh'],
+];
+const missing = INPUTS.filter(([file]) => !fs.existsSync(file));
+if (missing.length > 0) {
+  for (const [file, build] of missing) {
+    console.error(`missing artifact: ${file}`);
+    console.error(`  build it with: ${build}`);
+  }
+  process.exit(1);
+}
+
 // ------------------------------------------------------------------- the server's MIME types
 
 /// Start `serve.js` on a port the OS picks, and hand back where it is and how to stop it.

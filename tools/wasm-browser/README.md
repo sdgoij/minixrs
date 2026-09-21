@@ -17,6 +17,12 @@ does not export; that fails the boot naming the entry, the artifact sizes it loa
 command, rather than trapping inside a slot (`page.test.js` checks both, because both have happened).
 The page fetches with `no-store`, so a reload after staging picks up what is on disk.
 
+That staging is also what separates `page.test.js` from the other harnesses: the ones that drive the
+engine take the two modules from `tools/wasm-servers/build` and the image from `target/images/`, while
+`page.test.js` boots the page, which fetches its image from *this* directory's `build/`. So the
+servers build alone passes those and fails that one — and locally the directory survives between
+runs, which hides what a fresh checkout has: no `build/` at all. CI runs `build.sh` for that reason.
+
 The server exists because a wasm module cannot be fetched from `file://` (the origin is opaque, so
 the fetch is refused). It serves this directory and binds to loopback; nothing else is needed — no
 bundler, no dependencies, no network.

@@ -209,8 +209,15 @@ jobs:
       - name: Install Binaryen where build.sh looks for it
         run: npm install binaryen --prefix tools/fork-spike/.tools --no-save
 
-      - name: Build the kernel, the servers and the program module
-        run: sh tools/wasm-servers/build.sh
+      # `tools/wasm-browser/build.sh` rather than `tools/wasm-servers/build.sh`, though the latter is
+      # the whole build: this one also *stages* what the page fetches into
+      # `tools/wasm-browser/build/`, and `page.test.js` boots the page against that directory. It is
+      # the difference between the harnesses that read `tools/wasm-servers/build` (`boot.cjs`,
+      # `run.js`, which take their image from `target/images/`) and the one that reads the page's own
+      # copy: locally that directory survives between runs and hides it, a fresh checkout has no
+      # `build/` at all, and the job failed exactly there.
+      - name: Build and stage the kernel, the servers and the program module
+        run: sh tools/wasm-browser/build.sh
 
       - name: Check harness, at quiescence
         run: node tools/wasm-servers/boot.cjs

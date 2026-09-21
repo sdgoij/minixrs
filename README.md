@@ -91,7 +91,7 @@ just test-qemu aarch64        # Run the QEMU integration tests
 just test-boot aarch64        # Run the boot tests
 
 # wasm32 — the same system in a browser tab
-sh tools/wasm-servers/build.sh    # Build the kernel, the servers and the boot image for wasm32
+sh tools/wasm-browser/build.sh    # Build the artifacts and stage the page's copies of them
 node tools/wasm-browser/serve.js  # Serve the page, then open http://127.0.0.1:8080/
 node tools/wasm-servers/boot.cjs  # Checks: the boot chain and every device, at quiescence
 just publish-wasm                 # Or: build and stage the demo into docs/ (what Pages serves)
@@ -190,7 +190,8 @@ See `.agents/skills/` for domain deep-dives:
   mount_root on all three hardware arches (server liveness, process-table
   consistency, VFS→MFS readsuper IPC round-trip, brk/RAM-disk mappings,
   allocator, initramfs)
-- **wasm (the browser target):** `sh tools/wasm-servers/build.sh` builds the artifacts first, then
+- **wasm (the browser target):** `sh tools/wasm-browser/build.sh` builds and stages the artifacts
+  first (it runs `tools/wasm-servers/build.sh`, then copies the three into the page's `build/`), then
   - `node tools/wasm-servers/boot.cjs` — the boot chain and every device, at quiescence (82 checks)
   - `node tools/wasm-browser/run.js` — the same artifacts at a *live* prompt (20)
   - `node tools/wasm-browser/page.test.js` — the page's own code under a stub DOM (46)
