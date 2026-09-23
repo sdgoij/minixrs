@@ -2124,12 +2124,18 @@ pub unsafe fn process_ksig(proc_nr_e: i32, signo: i32) -> i32 {
             }
         }
         _ => {
-            // Other signals: find the process, check ksigpending.
+            // Other signals (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGKILL from the kernel,
+            // ...): C `process_ksig` hands every one of them to `sig_proc` with `ksig = TRUE`
+            // (`check_sig(id, signo, TRUE)`, `pm/signal.c`), and the only process states it
+            // refuses are "gone" ones. This arm used to deliver only signals the kernel had
+            // *not* already reported because PM had pended them itself, which dropped every
+            // kernel signal that had not been pended first — so a process faulting on an
+            // address no region covers was resumed and re-faulted for good (KNOWN_ISSUES 12,
+            // measured: 174,215 SIGSEGVs caused, none delivered).
             if let Some(slot) = unsafe { pm_isokendpt(proc_nr_e) } {
                 let base = MPROC.as_ptr();
-                let rmp = unsafe { &mut *base.add(slot) };
-                if rmp.mp_ksigpending.sigismember(signo) {
-                    rmp.mp_ksigpending.sigdelset(signo);
+                let rmp = unsafe { &*base.add(slot) };
+                if rmp.mp_flags & (IN_USE | EXITING) == IN_USE {
                     unsafe { sig_proc(slot, signo, false, true) };
                     count = 1;
                 }

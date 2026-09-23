@@ -1113,6 +1113,13 @@ pub unsafe fn exec_elf_for_target(
         };
         let saved_cr3 = crate::hal::read_cr3();
         crate::hal::write_cr3(boot_cr3_val);
+        // A new process's stack starts zeroed. `alloc_phys_contig` hands back physical pages some
+        // other owner has already used — a server's message buffers among them — and the frames
+        // below the exec frame are ordinary readable memory. Every other path that gives a user
+        // page to a process (the demand-paging path, page-table pages) clears it first; without
+        // this the process reads a previous owner's data, which is what made every allocation-heavy
+        // tool die in `clap` on a word that appears nowhere in its binary.
+        core::ptr::write_bytes(phys_stack_base as *mut u8, 0, stack_pages * 0x1000);
         let phys_rsp = match crate::elf::setup_user_stack_full(
             phys_stack_base + user_stack_size as u64,
             user_stack_size,
@@ -1165,6 +1172,12 @@ pub unsafe fn exec_elf_for_target(
         let brk_end = brk_start + 0x100000u64;
         let brk_pages = ((brk_end - brk_start) / 4096) as usize;
         if let Some(brk_phys) = crate::hal::alloc_phys_contig(brk_pages) {
+            // Same reason as the stack: the pre-mapped heap is where a new process's earliest
+            // allocations land, and they must not be able to see what the pages held before.
+            let brk_saved_cr3 = crate::hal::read_cr3();
+            crate::hal::write_cr3(boot_cr3_val);
+            core::ptr::write_bytes(brk_phys as *mut u8, 0, brk_pages * 0x1000);
+            crate::hal::write_cr3(brk_saved_cr3);
             let mut brk_va = brk_start;
             let mut brk_pa = brk_phys;
             while brk_va < brk_end {
@@ -1214,6 +1227,9 @@ pub unsafe fn exec_elf_for_target(
                 core::sync::atomic::Ordering::Relaxed,
             );
             crate::hal::release_fpu(rp as *mut core::ffi::c_void);
+            // The saved state belongs to the image being replaced; the new one must not start
+            // with its registers.
+            crate::fpu::reset(rp);
         }
 
         Ok(ExecLoadResult { entry, rsp: rsp_fb })

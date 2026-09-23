@@ -328,6 +328,22 @@ pub unsafe fn set_tls_fs_base_offset(off: u64) {
     }
 }
 
+/// Byte offset of `Proc::p_seg.fpu_state` within the `Proc` struct, registered by the kernel at
+/// boot (0 = disabled). `restore()` reloads the resumed process's FPU/SIMD state from it.
+#[unsafe(no_mangle)]
+pub static mut FPU_STATE_OFF: u64 = 0;
+
+/// Register the byte offset of `Proc::p_seg.fpu_state` (set once during boot).
+///
+/// # Safety
+///
+/// Must be called exactly once during boot, before any process resumes.
+pub unsafe fn set_fpu_state_offset(off: u64) {
+    unsafe {
+        core::ptr::write_volatile(&raw mut FPU_STATE_OFF, off);
+    }
+}
+
 /// Set the calling thread's FS base (the x86_64 thread pointer for TLS).
 ///
 /// # Safety
@@ -1017,6 +1033,18 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "jz     6f",
         "swapgs",
         "6:",
+        // Reload the resumed process's FPU/SIMD state. The kernel is built with SSE and does not
+        // otherwise preserve a process's vector registers, so a value the process kept live in an
+        // XMM register comes back as the kernel's own leftovers (see `kernel::fpu`). Done here,
+        // before `r15` is overwritten by the user's r15 below.
+        "mov    rax, [rip + {fpu_off}]",
+        "test   rax, rax",
+        "jz     11f",
+        "mov    rdx, [r15 + rax]",
+        "test   rdx, rdx",
+        "jz     11f",
+        "fxrstor [rdx]",
+        "11:",
         // Load user registers from p_reg via r15.
         "mov    rax, [r15]",
         "mov    rbx, [r15 + 8]",
@@ -1049,6 +1077,7 @@ pub unsafe extern "C" fn restore(proc_ptr: *const u8) -> ! {
         "pop    rax",
         "iretq",
         tls_off = sym TLS_FS_BASE_OFF,
+        fpu_off = sym FPU_STATE_OFF,
     );
 }
 

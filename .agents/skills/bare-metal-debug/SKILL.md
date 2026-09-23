@@ -488,6 +488,55 @@ the very first interrupt that tries to return via iretq will #GP.
 **Workaround:** The pop-and-rebuild approach in the timer ISR (above)
 unconditionally pushes 0x0013 for SS, overriding the stale value.
 
+### A trap taken at CPL0 cannot be resumed
+
+Nothing in this kernel `iretq`s back into a kernel context. The timer is unmasked only in the window
+`restore` opens around the user `iretq`, so the kernel is never interrupted, which means
+`restore`'s kernel-resume branch (it builds a three-entry frame when `p_reg`'s saved CS has RPL 0)
+is never exercised — and it does not work: an `iretq` whose frame holds the kernel CS `0x0008` #GPs
+with the error code equal to that selector, and the `#GP` entry then re-enters itself about 1800
+times with the stack descending 0x20 per iteration before the machine dies.
+
+Two consequences for instruments:
+
+- Any trap you *install* has the same problem. A `#DB` data breakpoint armed while the CPU is in the
+  kernel fires at CPL0, and the handler cannot return: printing and `iretq`-ing produces the loop
+  above, and printing without returning stalls the guest silently (a report that never reaches the
+  log, because the handler's own `iretq` is what faults). Arm watchpoints only where only *user*
+  code runs — for a one-shot, record the process whose resume should arm them (its root), and have
+  `restore`'s user branch set the debug registers for that root and clear them for every other, so
+  a kernel-mode hit cannot happen at all.
+- `#PF` is the model to copy when a trap must be handled without returning: it saves the faulting
+  context into `p_reg` and goes through `pick_proc_raw` / `restore`, never through `iretq`.
+
+### The kernel's own SSE clobbers the user's vector registers
+
+x86_64 code built by rustc uses SSE by default, and for a long time nothing here preserved a user
+process's FPU/SIMD state across a kernel entry. A value the compiler keeps live in an XMM register
+across a fault (a basic block with a `movups` load, an address computation that faults, and a
+`movups` store) came back holding whatever the kernel's own last 16-byte copy left in that
+register — on this port, the first 16 bytes of a `SYS_VMCTL` kernel-call message, which landed in
+`clap`'s parse results and killed every allocation-heavy tool.
+
+**Diagnostic signature.** A process's *own* data is corrupt while no memory write is: every copy
+trap, page-table walk, alias scan and watchpoint on the destination comes up empty, the corrupt
+bytes appear nowhere in the process's memory, and the value looks like a kernel structure. Walk the
+loads, not the stores: a store whose destination watchpoint fires but whose disassembled source
+slot holds a *legitimate* value is taking its value from a register. Then check what ran between
+the load and the store — any kernel entry can be it.
+
+**Fix shape.** Save the live state on kernel entry (`fxsave` into the process's `p_seg.fpu_state`),
+on the way out of every entry, and reload it in the resume path (`fxrstor`); see
+`crates/kernel/src/fpu.rs` and `restore` in `crates/arch-x86_64/src/asm.rs`. Compiling the kernel
+with `-C target-feature=-sse,-sse2` is *not* sufficient on its own: `core`/`alloc` come from the
+prebuilt sysroot with SSE enabled, and the clobber survives.
+
+**Also inherited by fork.** In C the FXSAVE area lives inside `Proc`, so `*rpc = *rpp` copies it by
+value; here it is a pointer, so a fork that copies the struct leaves parent and child sharing one
+area and overwriting each other's state. Copy it explicitly (`fpu::fork_inherit`) and reset it at
+exec (`fpu::reset`). Thread creation copies fields one at a time and leaves it null, which is what
+you want.
+
 **Note:** This is a QEMU implementation limitation. Real hardware sets SS.RPL
 to match the target CPL (3) on SYSRETQ.
 
@@ -738,6 +787,140 @@ cargo build -p kernel-boot --target x86_64-pc-minix.json \
 Without debug info, LLDB can still resolve function names from the symbol
 table and set breakpoints by name, but `frame variable` and line-level
 stepping won't work.
+
+## A wedged child is not a wedged system
+
+A command whose prompt never returns looks the same whether the system is stuck or only
+that one child is. Separate the two before reading any kernel state: run the suspect
+command in the background — the shell prints `[pid]` and takes the next line — then run
+`hangdump`. That builtin is SYS_hang_dump (63) and prints every live process's rts flags,
+rip and rsp, so the blocked child can be named rather than guessed at.
+
+Measured, after `coreutils seq 3 &`:
+
+```
+  init*F ep=00008013 rts=00000400 mf=00006001 rip=0000000001000000 rsp=000000000fefffb0
+```
+
+`rts=0x400` is `RTS_PAGEFAULT` and `rip=0x1000000` is the ELF entry point, so the child
+never executed a first instruction. The same run then answered `/bin/echo` normally, which
+is the finding: the child was wedged, the system was not. It is a race, not the tool —
+twelve backgrounded `coreutils true` left three of them in the exit path
+(`rts=00000101`, `SLOT_FREE|NO_ENDPOINT`) at one identical `rip` 40 s later. A foreground
+run of the same command is what turns this into "the shell never came back".
+
+**Which address faulted.** `PAGE_FAULT_INFO` in kernel BSS (symbol `PAGE_FAULT_INFO`;
+`{fault_addr: u64, error_code: u32, valid: u32}` per 16-byte slot, indexed by
+proc_nr = `endpoint & 0xff`) keeps the last unresolved fault per process. Read it while
+the guest is wedged through QEMU's monitor
+(`-monitor tcp:127.0.0.1:4444,server,nowait`, then `xp /1024xg <symbol address>`). Two
+cautions, both measured: `xp` prints a leading address column per line, so taking every
+hex token as data shifts the slots by one and yields convincing nonsense; and QEMU's
+socket chardev stops listening once its client disconnects, so a later connection is
+refused — do every read inside the one connection.
+
+**A hot RIP in the kernel is not proof of a spin.** This port's console read busy-polls
+the UART (`movw $0x3fd, %dx; inb %dx, %al` inside `syscall_handler_c` and
+`sys_read_handler`), and x86 syscalls run with IF=0, so an *idle* guest whose tty server is
+the only runnable process samples exactly like a wedged one — 23 of 24 samples landed in
+those two drain loops with nothing typed. Take the same samples with nothing typed as a
+control before reading anything into them.
+
+**A virtual watchpoint is a stop for every process, and a low VA is also a physical one.**
+Two traps, both measured while chasing a write into one process's stack slot:
+
+* Arming `Z2` on a stack VA from boot stops *every* process on *every* access to that VA —
+  each has its own frame there. The guest then crawls (tens of thousands of stops) and never
+  reaches the code under study: a `coreutils seq 3` that always reproduces went 300 s without
+  past the command echo. Arm for the window you care about, not from reset.
+* A `Z1` at the user entry VA (`0x1000000`, every process enters there) is *also* a valid
+  physical address inside RAM, so it fires for kernel-mode identity accesses too: 2 698 364
+  stops before the shell prompt. Any VA below the RAM size is ambiguous this way. A stop
+  trigger for "after boot" has to be an address above RAM that only user code runs from.
+* A stop that arrives while the CPU is halted is only resumable if the client sends `c`; a
+  watcher that treats every read timeout as "no stop" leaves the guest frozen with the
+  command half-echoed. Read the guest's own output to tell "slow" from "stopped".
+* QEMU's gdbstub does not answer a `\x03` interrupt in this setup (10 s timeout, repeatedly).
+  Drive the guest by spawning QEMU from the debugger with its own pipes instead: a scenario
+  harness on the left of a shell pipeline dies on this host (`couldn't create signal pipe,
+  Win32 error 5`) and takes QEMU and the stub down with it.
+* `proc.stdout.read(65536)` on a Windows pipe blocks until the buffer is *full*, so a debugger
+  that reads the guest that way sees an empty log and reports "never booted" while QEMU is fine.
+  Use `os.read(fd, 65536)` (or `read1`) to get whatever is available.
+* An allocator frame handed to a process can shift by a page **between builds** (the same slot
+  came out `0x6132000`, `0x6133000` and `0x6134000` in consecutive ones), so hard-coded physical
+  watchpoint addresses must be re-derived from the build under test, not carried over. The same
+  applies to a *source* address read off a disassembly: a watchpoint armed on it can silently never
+  fire simply because the frame moved. Prefer watching an address that does not move (a stack VA, a
+  named symbol) and take operand addresses from the build in hand.
+* A byte pattern is a weak signature: `2b 06 00 00` "found" the message in a slot that merely held
+  the small integer `0x62b`. Match the full value, or a pair of fields.
+* The heap base (`0x3fe00000`) and the mmap base (`0x100000000`) are the **same VA in every
+  process** — each maps its own frame there — so a watchpoint on them is not process-specific: the
+  first hit is whichever process writes its heap first, which during boot is the shell. "Cold" and
+  "exclusive" are different properties; gate the arm on the live CR3 being the process you want.
+* A guest that stalls **mid-echo** (the log ends inside a line, the prompt never returns) with
+  almost *no* watchpoint hits is a harness failure, not a guest state: QEMU blocks writing the
+  console into a stdout pipe that nothing drains. A reader thread that dies silently looks exactly
+  like a wedged guest, so keep it robust and observable, and treat "stalled with nothing stopped"
+  as "my reader is not reading". Once the reader is honest, the same symptom distinguishes a real
+  guest stall: with the reader alive and the CPU not stopped, a console frozen mid-command and no
+  further hits is the *guest* hung — and on this system two cold-slot watchpoints were enough to
+  hang fork/exec before the child existed, i.e. the instrument changed the system under test. When a
+  watchpoint's mere presence perturbs the path, stop using watchpoints (a TCG plugin or `-d` write
+  trace observes without stopping the CPU).
+
+## Instruments that cost no CPU stops
+
+When watchpoints perturb the path, three kernel-side instruments have replaced them here. All three
+were used in one run to settle a corruption question that watchpoints could not, and none of them uses
+the gdbstub.
+
+**A silent probe needs a positive control.** "The bytes are not a copy of the buffer I suspected" is
+only a finding if the suspected buffer can be shown to *carry* what you searched for. Stamp a unique
+word into a field the producer's consumer never reads (for a message: the word after the fields the
+handler parses), then check *from the other side* that it is live — e.g. print that word in the
+kernel's handler for that message. Without that step, a probe that fires zero times reads exactly like
+"the hypothesis is false" when it may just be dead. Measured: the marker was verifiably live
+(`val=a55a5aa5` at the handler) and absent from the bytes under study, which is what made "this is not
+a copy of the live buffer" a result rather than an inference from layout.
+
+**Date the corruption, not just locate it.** Sweeping only the *one page* that holds the suspect field,
+on *every* fault, is cheap enough to leave on (a page per fault, not a megabyte) and it converts "which
+address holds it" into "at which fault did it first appear". That single change took a search over a
+whole 1 MiB stack and a 2 MiB heap down to one fault number — and showed the field was zero on the
+fault before the one that read it, which is what rules out the stale-slot and dirty-hand-out readings.
+Sweep the wider windows only on the first few faults and on any fault whose address is outside every
+legal user region, so a normal run stays fast and a crash gets the full picture.
+
+**Make the store fault so it names itself.** The cheapest way to catch a write into a known VA is not
+a watchpoint but a page-table edit: clear the **write** bit of that page's PTE from inside the kernel,
+and the store takes the fault path the kernel already logs (`K: pf addr=… err=… rip=…` with `err=0x07`,
+think `err=0x07`,
+present+write+user). The `rip` is the store instruction, and disassembling it in the same build gives
+the source operand — one hop of a taint walk per fault, or, by re-arming after each fault, a loop
+inside a single run. It perturbs only by adding COW faults the path already handles. Prefer this over
+arming DR0/DR7: vector 1 here is a fatal stub (`'B'` then `sti; hlt`), so a debug-register hit hangs
+the guest instead of reporting.
+
+**But page permissions are part of the behaviour you are measuring.** The same trick *removes* a
+corruption whose writer goes through the process's own PTE: with the page read-only the store faults,
+the fault's resolution drops the write, and the process runs on as if nothing had happened — a
+reproducer that never fails again. Measured exactly that (a `coreutils seq` wedge that always died
+went green with nothing written). So treat a PTE edit as a perturbation to be reverted, not as a free
+observation, and prefer instruments that do not change what the page allows.
+
+**Print on change, or the print is the perturbation.** Logging every fault of one process drove the
+corruption out of the run entirely (a crash register set that reproduced in every unlogged build
+simply stopped appearing), and logging only when the value under study changed brought it back. Keep
+the instrument's output proportional to the *changes* you care about — a `static` previous value and
+an early `return` — and check the failure still reproduces before reading anything into a run.
+
+**Enumerate; do not sample, and decode bits rather than eyeballing hex.** Four sampled page-table
+entries looked like a user-accessible identity window (and nearly became a wrong root cause);
+enumerating all 512 low-1 GiB entries showed exactly the four legitimate user mappings and no
+identity one. The sampled values were misread by hand: `0xe3` and `0x83` both have bit 2 clear, i.e.
+supervisor-only. Walk the whole range and test the bit with an expression, not with your eyes.
 
 ## RISC-V64 Debugging
 

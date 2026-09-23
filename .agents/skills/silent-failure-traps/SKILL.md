@@ -41,6 +41,13 @@ reasoned about; the fix recorded is what the code does now.
   panicked, failed or does not exist passes exactly like one that worked. Give every assertion a line no
   other step can produce (a per-step marker turned that same probe into a wedge it could finally see),
   and read "the prompt came back" as liveness, not as evidence that the tool worked.
+- **A reading taken before the step under test is not evidence about it.** Two boots of a
+  wedge scenario read clean — no process in `RTS_PAGEFAULT`, so "the fix worked" — because
+  the `hangdump` that produced those listings ran *before* the `seq` steps that wedge; the
+  same boots stopped on a `PAGEFAULT` child at the later step, and the trigger reproduces
+  every time when it is the *first* command of a fresh boot. Place the reading after the
+  step it is meant to judge, and re-run with the triggering command first, or an empty
+  result is a statement about the wrong moment.
 
 ## The kernel's message boundary
 

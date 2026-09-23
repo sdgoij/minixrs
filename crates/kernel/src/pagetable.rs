@@ -166,6 +166,12 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let pte_flags = (flags & PG_PTEMASK) | PG_P | crate::hal::pte_leaf_flags();
         let pte_val = crate::hal::build_pte(pa, pte_flags);
         let mut table_phys = cr3;
+        // A split replaces one huge entry with 512 small ones covering the whole 2 MiB (or 1 GiB)
+        // range it mapped, so flushing the one address below is not enough: every other translation
+        // in that range keeps whatever the CPU already holds for it, and an access through the stale
+        // entry neither takes the new permissions nor faults where the new entries say it should.
+        // The range is recorded here so the split path can invalidate all of it.
+        let mut split = false;
 
         // Walk from the top non-leaf level down to level 1.
         for level in (1..levels).rev() {
@@ -199,6 +205,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 //   level-1 = 0: 4KB entries (leaf, L0/PT)
                 //   level-1 = 1: 2MB entries (PD/L1)
                 //   level-1 = 2: 1GB entries (PDPT/L2)
+                split = true;
                 let pt_phys = alloc_pt_page()?;
                 let base_pa = crate::hal::pte_to_phys(pte);
                 let next_level = level - 1;
@@ -228,10 +235,14 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         let idx = crate::hal::pt_index(va, 0);
         let pte_addr = pt.add(idx);
         write_pte(pte_addr, pte_val);
-        // Flush TLB for the modified page so the new mapping is visible.
-        // Without this, stale read-only TLB entries (e.g., from COW
-        // protection) persist and cause repeated page faults.
-        crate::hal::tlb_flush_page(va);
+        // Flush so the new mapping is visible. Without this, stale read-only TLB entries (e.g.,
+        // from COW protection) persist and cause repeated page faults. A split changed 512
+        // translations, not one, so it takes the full flush.
+        if split {
+            crate::hal::tlb_flush();
+        } else {
+            crate::hal::tlb_flush_page(va);
+        }
         Ok(())
     }
 }
@@ -273,6 +284,9 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
     unsafe {
         let levels = crate::hal::pt_levels();
         let mut table_phys = cr3;
+        // As in `map_page`: a split rewrites 512 translations at once, so only a full flush makes
+        // the cleared range fault the way this function promises it will.
+        let mut split = false;
 
         // Walk from the top non-leaf level down to level 1, splitting any
         // huge page that covers `va` into its children on the way down.
@@ -293,6 +307,7 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
             if pte & PG_PS != 0 {
                 // Huge page covering va: split into 512 children, preserving
                 // the original page's flags (mirrors map_page's split).
+                split = true;
                 let pt_phys = alloc_pt_page()?;
                 let base_pa = crate::hal::pte_to_phys(pte);
                 let next_level = level - 1;
@@ -319,7 +334,11 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
         let pt = table_phys as *mut u64;
         let idx = crate::hal::pt_index(va, 0);
         write_pte(pt.add(idx), 0);
-        crate::hal::tlb_flush_page(va);
+        if split {
+            crate::hal::tlb_flush();
+        } else {
+            crate::hal::tlb_flush_page(va);
+        }
         Ok(())
     }
 }

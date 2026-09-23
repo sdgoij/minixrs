@@ -248,6 +248,24 @@ image-x86 boot-timeout="15": build-x86
     @just _assert-qemu-log target/image-x86.log "wserver: ready"
     @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
 
+# Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
+# the next tool must read them back. It is the gate that made the multicall wedge findable: a
+# child used to die inside `clap` on a corrupted pointer (item 12's open half), and these steps
+# are exactly what that defect broke.
+#
+# Green as of 2026-09-22: the last cause was the kernel clobbering a live process's XMM
+# registers on entry (`crates/kernel/src/fpu.rs`), and the recipe went green with no edit to
+# these steps, which is what it was written to do. Kept separate from `image-x86`'s boot smoke
+# so that gate keeps measuring what it means to (that the image boots), and out of
+# `test-arches`, as it was while red, so a failure here is never reported as a boot or arch
+# failure.
+test-coreutils-wedge boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "coreutils-wedge: no child was left wedged"
+
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf

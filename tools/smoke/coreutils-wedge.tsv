@@ -1,0 +1,15 @@
+# The acceptance test for KNOWN_ISSUES.md 12: `coreutils seq 3` must write its three lines and
+# the next step must read them back. `coreutils seq` is the item's reproducer (its startup
+# allocates; `wc`, `head`, `cat` and `true` pass, and `seq 3` fails exactly as `seq 200` did),
+# so a fix cannot land without these steps passing.
+#
+# Green as of 2026-09-22, with no edit to these steps: the last cause was the kernel clobbering
+# a live process's XMM registers on entry (crates/kernel/src/fpu.rs).
+#
+# Each step carries a tab separator. The readback is a whole line no other step can print, so a
+# step cannot pass on an earlier step's output or on the shell merely echoing the command.
+coreutils seq 3 > wedge-big.txt	
+coreutils wc -l wedge-big.txt	3 wedge-big.txt
+coreutils seq 200 > wedge-big.txt	
+coreutils wc -l wedge-big.txt	200 wedge-big.txt
+/bin/echo WEDGE-OK	WEDGE-OK

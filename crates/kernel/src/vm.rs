@@ -595,6 +595,19 @@ pub unsafe fn virtual_copy(
 /// It exists so call sites do not each have to ask which kind of arch they are
 /// on — the question has one answer and it belongs here.
 ///
+/// Read `bytes` from `proc`'s address space at `addr` into kernel memory.
+///
+/// Returns 0, or a negative errno.
+///
+/// The kernel runs on the *current* process's page tables, and this copy is addressed to `proc`'s —
+/// which is not the same process whenever a caller reads on another's behalf (the grant-table read
+/// below, the exec frame, `vm_memset`). With no copy seam of its own the arch has to switch to the
+/// target's root for the copy and restore the caller's, exactly as `delivermsg` does, or the copy
+/// resolves `addr` in whatever address space happens to be loaded: a caller that did not switch
+/// first reads (or writes) the running process's memory at that address instead. On every hardware
+/// port that was the old behaviour, and `grants.rs`'s `verify_grant` only worked because the
+/// granter's `s_grant_pa` is physical and the identity map reaches it.
+///
 /// # Safety
 ///
 /// `addr` must be valid for `proc`; `dst` must have `bytes` writable bytes.
@@ -609,6 +622,23 @@ pub unsafe fn read_from_proc(proc: i32, addr: u64, dst: *mut u8, bytes: usize) -
                 bytes,
             );
         }
+        // `boot_cr3() == 0` means the arch is not paging through process roots (host tests, before
+        // init), where the bare copy is the only thing that can work.
+        if crate::hal::boot_cr3() != 0 {
+            let target = crate::table::proc_addr(proc);
+            let target_cr3 = if target.is_null() {
+                0
+            } else {
+                (*target).p_seg.p_cr3
+            };
+            let saved = crate::hal::read_cr3();
+            if target_cr3 != 0 && target_cr3 != saved {
+                crate::hal::write_cr3(target_cr3);
+                core::ptr::copy_nonoverlapping(addr as *const u8, dst, bytes);
+                crate::hal::write_cr3(saved);
+                return 0;
+            }
+        }
         core::ptr::copy_nonoverlapping(addr as *const u8, dst, bytes);
         0
     }
@@ -616,7 +646,10 @@ pub unsafe fn read_from_proc(proc: i32, addr: u64, dst: *mut u8, bytes: usize) -
 
 /// Write `bytes` from kernel memory into `proc`'s address space at `addr`.
 ///
-/// Returns 0, or a negative errno. See [`read_from_proc`].
+/// Returns 0, or a negative errno. See [`read_from_proc`] for why the target's root is loaded for
+/// the copy: without it, a caller that has not already switched writes the running process's memory
+/// at `addr`, which is how one process's message buffer came to sit inside another's freshly mapped
+/// page (KNOWN_ISSUES 15).
 ///
 /// # Safety
 ///
@@ -631,6 +664,21 @@ pub unsafe fn write_to_proc(proc: i32, addr: u64, src: *const u8, bytes: usize) 
                 addr,
                 bytes,
             );
+        }
+        if crate::hal::boot_cr3() != 0 {
+            let target = crate::table::proc_addr(proc);
+            let target_cr3 = if target.is_null() {
+                0
+            } else {
+                (*target).p_seg.p_cr3
+            };
+            let saved = crate::hal::read_cr3();
+            if target_cr3 != 0 && target_cr3 != saved {
+                crate::hal::write_cr3(target_cr3);
+                core::ptr::copy_nonoverlapping(src, addr as *mut u8, bytes);
+                crate::hal::write_cr3(saved);
+                return 0;
+            }
         }
         core::ptr::copy_nonoverlapping(src, addr as *mut u8, bytes);
         0

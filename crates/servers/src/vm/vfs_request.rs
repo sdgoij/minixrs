@@ -164,6 +164,26 @@ pub fn send(
     }
 }
 
+/// Is VFS still filling this page of this process?
+///
+/// `start_file_page` maps a zero-filled placeholder at the VA before VFS has the file's bytes, so a
+/// second thread of the same process that touches the page finds a *present* mapping. The page fault
+/// path would otherwise take that for a finished page (`PageOutcome::Done`) and let the thread run on
+/// the placeholder, whose content is not the file's yet. The answer is keyed on the page and the
+/// process, because that is what the thread that blocked on it has in common with the fill.
+pub fn page_pending(ep: i32, page_addr: u64) -> bool {
+    unsafe {
+        let pool = &*POOL.get();
+        pool.iter().any(|n| {
+            n.busy
+                && match &n.job {
+                    Some(Job::Page(state)) => state.fault.ep == ep && state.page_addr == page_addr,
+                    _ => false,
+                }
+        })
+    }
+}
+
 /// Handle VFS's answer: complete the request it belongs to.
 ///
 /// Returns `SUSPEND` — a reply is never answered, which is also what the sender's table expects.

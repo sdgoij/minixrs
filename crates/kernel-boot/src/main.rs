@@ -379,6 +379,12 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         //    handler=0, which would jump to address 0 on interrupt).
         unsafe extern "C" fn timer_callback() {
             unsafe {
+                // Save the interrupted process's FPU/SIMD state before `timer_int_handler` (and
+                // everything below it) runs: nothing else preserves it, and this is the first Rust
+                // reached on the timer path.
+                kernel::fpu::save(
+                    arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc
+                );
                 kernel::clock::timer_int_handler();
                 // Drain the UART on every tick (matching AArch64's
                 // el1_irq_handler_c, which polls the UART on every IRQ) so
@@ -411,7 +417,12 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // 6. Configure COM1 for interrupt-driven input.
         // C callback called on every serial interrupt.
         unsafe extern "C" fn serial_callback() {
-            unsafe { drain_uart_input() };
+            unsafe {
+                kernel::fpu::save(
+                    arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc
+                );
+                drain_uart_input();
+            }
         }
         arch_x86_64::apic::set_serial_isr_handler(serial_callback);
 
@@ -439,7 +450,13 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // line is unmasked here (before any keypress can be injected) and
         // the ISR is a context-switch point like the serial one.
         unsafe extern "C" fn kbd_callback() {
-            unsafe { kernel::interrupt::irq_handle(1) };
+            unsafe {
+                // First Rust on this IRQ's path: keep the preempted process's vector registers.
+                kernel::fpu::save(
+                    arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc
+                );
+                kernel::interrupt::irq_handle(1)
+            };
         }
         arch_x86_64::apic::set_kbd_isr_handler(kbd_callback);
         #[cfg(target_os = "minix")]
@@ -458,7 +475,12 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // server registers an IRQ hook via SYS_IRQCTL and is notified on
         // mouse packets; the slave-PIC line is unmasked here.
         unsafe extern "C" fn mouse_callback() {
-            unsafe { kernel::interrupt::irq_handle(12) };
+            unsafe {
+                kernel::fpu::save(
+                    arch_x86_64::cpulocals::get_cpulocal_proc_ptr() as *mut kernel::proc::Proc
+                );
+                kernel::interrupt::irq_handle(12)
+            };
         }
         arch_x86_64::apic::set_mouse_isr_handler(mouse_callback);
         #[cfg(target_os = "minix")]
@@ -543,6 +565,10 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
                 kernel::proc::Proc,
                 p_tls
             ) as u64);
+
+            // Register `Proc.p_seg.fpu_state`'s offset so `restore` reloads each process's
+            // FPU/SIMD state on the way back to user mode (see `kernel::fpu`).
+            arch_x86_64::asm::set_fpu_state_offset(kernel::fpu::state_offset() as u64);
 
             // Install exception handlers: page fault, GPF, double fault.
             // These use IST stacks for reliability. #UD/#DB get plain
@@ -727,6 +753,9 @@ pub unsafe extern "C" fn save_fault_context(frame: *const u64) {
         if rp.is_null() {
             return;
         }
+        // The faulting process's vector registers are still live, and everything below — VM's
+        // work on this fault among it — is SSE code that would overwrite them.
+        kernel::fpu::save(rp);
         // fault RIP/RFLAGS/user RSP live in the CPU-pushed portion of the
         // frame (after the 15 GPR pushes), not in the GPR slots.
         let regs = [
@@ -870,6 +899,9 @@ pub unsafe extern "C" fn syscall_handler_c(saved: *const u64) {
             core::ptr::write_volatile(saved as *mut u64, 0);
             return;
         }
+        // First Rust on the syscall path: keep the caller's vector registers across everything
+        // below, which is SSE code.
+        kernel::fpu::save(rp);
         // Drain the UART FIFO into the ser_input ring on every syscall so
         // piped bursts are captured promptly even when no serial IRQ is
         // pending (the syscall runs with IF=0). Syscalls are far more

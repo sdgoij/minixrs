@@ -175,6 +175,15 @@ pub(crate) unsafe fn vmproc_alloc(ep: Endpoint) -> Option<&'static mut Vmproc> {
 
 /// Free a Vmproc slot.
 ///
+/// Only the entry that *is* this endpoint is freed. A stale endpoint names the same slot as
+/// whatever process has taken that slot over since, and `is_ok_endpoint` accepts it, because
+/// it checks that the generation is in range rather than that the slot still holds that
+/// generation. Freeing by slot alone then deletes a live process's entry: that process's page
+/// faults are looked up through the table, so it never has one resolved again, stays
+/// `RTS_PAGEFAULT`-blocked for good, and the kernel's fault record for it is never consumed —
+/// a child stuck at its ELF entry while the rest of the system runs normally. `vmproc_lookup`
+/// has always made this check; the free path did not.
+///
 /// # Safety
 ///
 /// Must be called from the single-threaded VM server context.
@@ -186,7 +195,11 @@ pub(crate) unsafe fn vmproc_free(ep: Endpoint) {
         let slot = endpoint_slot(ep) as usize;
         if slot < NR_PROCS {
             let table = &mut *VMPROC_TABLE.get();
-            table[slot] = None;
+            let is_this_endpoint =
+                matches!(table[slot].as_ref(), Some(vmp) if vmp.vm_endpoint == ep);
+            if is_this_endpoint {
+                table[slot] = None;
+            }
         }
     }
 }
@@ -413,11 +426,14 @@ pub(crate) unsafe fn free_address_space(cr3: u64, skip: &[(u64, u64)]) {
 
         fn free_user_frame(frame: u64) {
             if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
-                let refcount = crate::vm::pb::pb_get(pb_idx).map_or(1, |b| b.refcount);
+                // The PhysBlock owns the page. `pb_unref` frees it when the last reference goes and
+                // leaves it alone while another owner still holds one (a COW sibling, the file cache),
+                // so there is nothing left to do here. Falling through to free it as well returned
+                // every last-reference page to the pool twice — the allocator then handed the same
+                // physical page to two owners, which is how one process's heap page came to hold
+                // another's kernel-call message buffers.
                 crate::vm::pb::pb_unref(pb_idx);
-                if refcount > 1 {
-                    return; // still COW-shared with another process
-                }
+                return;
             }
             let _ = vm_free_pages(frame, 1);
         }
@@ -558,7 +574,15 @@ pub(crate) unsafe fn free_exec_old_addrspace(ep: Endpoint) {
             Some(vmp) => vmp as *mut Vmproc,
             None => return,
         };
-        let old = vm_get_addrspace(ep);
+        // Reclaim the *pre-exec* root, which is what the Vmproc still records. The kernel's
+        // SYS_EXEC_LOAD installs the new root in `p_cr3` before this runs — that is precisely why the
+        // record is cleared below — so asking the kernel for the current one hands back the *new*
+        // image's address space and this walk frees the frames the image is about to run on: its
+        // stack and its brk heap, the moment they were allocated. Those pages then go back to the
+        // allocator while the process still maps them, and the same physical page is handed to a
+        // second owner (which is how a process's heap came to hold a server's message buffers). The
+        // old table, meanwhile, leaked.
+        let old = (*vmp).vm_pml4_phys;
         if old != 0 {
             // Exclude device-memory regions from the walk (their frames are
             // not the allocator's to reclaim).
@@ -616,11 +640,12 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64, skip:
 
         fn free_frame(frame: u64) {
             if let Some(pb_idx) = crate::vm::pb::pb_find(frame) {
-                let refcount = crate::vm::pb::pb_get(pb_idx).map_or(1, |b| b.refcount);
+                // As in `free_user_frame`: `pb_unref` is the whole of the release when a PhysBlock
+                // exists — it frees the page when the last reference goes and keeps it while a COW
+                // sibling or the file cache still holds one. Reading the refcount first and freeing
+                // afterwards returned every last-reference page to the pool twice.
                 crate::vm::pb::pb_unref(pb_idx);
-                if refcount > 1 {
-                    return; // still COW-shared with another process
-                }
+                return;
             }
             let _ = vm_free_pages(frame, 1);
         }

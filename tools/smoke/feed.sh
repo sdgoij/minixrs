@@ -34,7 +34,9 @@ seconds=$1
 shift
 
 here=$(cd "$(dirname "$0")" && pwd)
-scenario="$here/scenario.tsv"
+# The scenario to drive. `FEED_SCENARIO` lets a caller point at one of its own, so a new
+# check does not have to edit the boot smoke's steps to exist.
+scenario=${FEED_SCENARIO:-"$here/scenario.tsv"}
 steps_file="$log.steps"
 status="$log.status"
 tab=$(printf '\t')

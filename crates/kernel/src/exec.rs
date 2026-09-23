@@ -59,11 +59,13 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
             core::ptr::write(parent, child | flags);
         }
 
-        // Deep-copy the boot PD entries into the new PD (shared identity map).
+        // Deep-copy the boot PD entries into the new PD (shared identity map),
+        // supervisor-only: the map is the kernel's, and a user entry over the low pool would
+        // expose other processes' frames and the page tables themselves.
         let new_pd = page_addrs[n_pages - 1] as *mut u64;
         let boot_pd = boot_pd_phys as *const u64;
         for i in 0..512 {
-            let entry = core::ptr::read(boot_pd.add(i));
+            let entry = core::ptr::read(boot_pd.add(i)) & !PG_U;
             core::ptr::write(new_pd.add(i), entry);
         }
 

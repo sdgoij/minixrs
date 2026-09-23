@@ -927,11 +927,17 @@ pub unsafe fn boot_create_restricted_page_table(
         // and link PDP[0..31] → the copies, so kernel phys access stays mapped
         // under this CR3 at any RAM size. map_page splits the 2 MiB huge
         // pages for the user's code/stack/brk pages below.
-        // The 0..1 GiB window keeps its user bit (boot processes access the
-        // low identity); windows above 1 GiB are supervisor-only so the
-        // anonymous-mmap heap at mmap_base() (1 GiB) faults and VM maps real
-        // pages instead of aliasing identity memory (AArch64/RISC-V already
-        // keep the high identity EL1/S-mode only).
+        //
+        // Every window is supervisor-only, window 0 included. The identity map
+        // exists so the kernel can reach physical memory from this CR3; it is not how a
+        // process reaches its own, and U on window 0 gives every boot process the whole
+        // low pool at VA == PA — other processes' frames (whose pages it can then write as
+        // ordinary user stores, with no kernel write path to attribute the result to, which
+        // is how one process's message buffer turns up in another's heap), the page tables,
+        // and the kernel's own stacks. Above 1 GiB it is also what would let the
+        // anonymous-mmap heap silently alias identity memory instead of faulting. Device
+        // windows a driver is entitled to are granted explicitly (`map_virtio_bars`,
+        // `VM_MAP_PHYS`), and a process's own pages are mapped with their own flags.
         unsafe {
             core::ptr::write(
                 pages[0] as *mut u64,
@@ -948,10 +954,7 @@ pub unsafe fn boot_create_restricted_page_table(
                 let boot_pd = kernel::hal::pte_to_phys(e) as *const u64;
                 let new_pd = pages[2 + i] as *mut u64;
                 for j in 0..512usize {
-                    let mut entry = core::ptr::read(boot_pd.add(j));
-                    if i > 0 {
-                        entry &= !kernel::hal::pte_user();
-                    }
+                    let entry = core::ptr::read(boot_pd.add(j)) & !kernel::hal::pte_user();
                     core::ptr::write(new_pd.add(j), entry);
                 }
                 core::ptr::write(

@@ -1322,6 +1322,24 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
         let parent = parent_cr3 as *const u64;
         let child = child_cr3 as *mut u64;
 
+        // A page-table page must never be handed to a walk holding anything but its own entries.
+        // This allocator recycles pages and does not clear them, and the child's tables are filled
+        // in only where the parent has an entry, so every other slot would keep whatever the
+        // page's previous owner left there — words with bit 0 set, which a walk reads as present
+        // leaves pointing at arbitrary frames. `map_page` zeroes the tables it creates for the
+        // same reason.
+        unsafe fn fresh_table() -> Option<*mut u64> {
+            unsafe {
+                match alloc_phys_page() {
+                    Some(pa) => {
+                        core::ptr::write_bytes(pa as *mut u8, 0, 4096);
+                        Some(pa as *mut u64)
+                    }
+                    None => None,
+                }
+            }
+        }
+
         // Copy kernel half (entries 256-511) directly.
         core::ptr::copy_nonoverlapping(
             parent.add(USER_ENTRIES),
@@ -1337,8 +1355,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 continue;
             }
             let parent_p3 = (e4 & PG_FRAME) as *const u64;
-            let child_p3 = match alloc_phys_page() {
-                Some(pa) => pa as *mut u64,
+            let child_p3 = match fresh_table() {
+                Some(p) => p,
                 None => return -12,
             };
             core::ptr::write(child.add(l4), (child_p3 as u64) | (e4 & !PG_FRAME));
@@ -1348,8 +1366,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     continue;
                 }
                 let parent_p2 = (e3 & PG_FRAME) as *const u64;
-                let child_p2 = match alloc_phys_page() {
-                    Some(pa) => pa as *mut u64,
+                let child_p2 = match fresh_table() {
+                    Some(p) => p,
                     None => return -12,
                 };
                 core::ptr::write(child_p3.add(l3), (child_p2 as u64) | (e3 & !PG_FRAME));
@@ -1377,8 +1395,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         continue;
                     }
                     let parent_p1 = (e2 & PG_FRAME) as *const u64;
-                    let child_p1 = match alloc_phys_page() {
-                        Some(pa) => pa as *mut u64,
+                    let child_p1 = match fresh_table() {
+                        Some(p) => p,
                         None => return -12,
                     };
                     core::ptr::write(child_p2.add(l2), (child_p1 as u64) | (e2 & !PG_FRAME));
@@ -1511,12 +1529,14 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             let new_pd = *new_pd as *mut u64;
             for j in 0usize..512 {
                 let mut e = core::ptr::read(boot_pd.add(j));
-                // Windows above 1 GiB stay supervisor-only so the
-                // anonymous-mmap heap at mmap_base() (1 GiB) faults and VM
-                // maps real pages instead of aliasing identity memory.
-                if i > 0 {
-                    e &= !PG_U;
-                }
+                // The identity map is the kernel's and must stay mapped in every address space
+                // (the kernel runs on the process's tables), but it must never be user-accessible:
+                // it covers the whole low pool, so U here lets a process reach other processes'
+                // frames, the page tables and the kernel's own stacks at VA == PA. A process's own
+                // code is demand-paged from VM and its stack and heap are mapped explicitly, so it
+                // needs nothing from this map. This mirrors the boot path's restricted tables and
+                // the RISC-V port, which copies the same map supervisor-only.
+                e &= !PG_U;
                 core::ptr::write(new_pd.add(j), e);
             }
             core::ptr::write((pdpt_page as *mut u64).add(i), pd_pages[i] | flags);

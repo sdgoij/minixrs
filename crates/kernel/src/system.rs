@@ -826,6 +826,17 @@ static VDEVIO_BUF: VdevioBufCell = VdevioBufCell::new([0u8; VDEVIO_BUF_SIZE]);
 /// `caller` must be a valid process pointer with privilege structure.
 pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let request = msg_read_i32(msg, VDEVIO_REQUEST_OFF) as u32;
         let vec_size = msg_read_i32(msg, VDEVIO_VEC_SIZE_OFF);
         let vec_addr = msg_read_u64(msg, VDEVIO_VEC_ADDR_OFF);
@@ -883,7 +894,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
             // wrong address space active on the arches where the switch matters.
             let r = crate::vm::read_from_proc((*caller).p_nr, vec_addr, buf_mut, bytes);
             if boot_cr3 != 0 {
-                crate::hal::write_cr3(boot_cr3);
+                crate::hal::write_cr3(return_cr3);
             }
             if r != 0 {
                 return r;
@@ -996,7 +1007,7 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 let buf_src = VDEVIO_BUF.get() as *const u8;
                 let r = crate::vm::write_to_proc((*caller).p_nr, vec_addr, buf_src, bytes);
                 if boot_cr3 != 0 {
-                    crate::hal::write_cr3(boot_cr3);
+                    crate::hal::write_cr3(return_cr3);
                 }
                 if r != 0 {
                     return r;
@@ -1018,6 +1029,17 @@ pub unsafe fn do_vdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
 /// `caller` must be a valid process pointer.
 pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let request = msg_read_i32(msg, SDEVIO_REQUEST_OFF) as u32;
         let _port = msg_read_u64(msg, SDEVIO_PORT_OFF);
         let vec_endpt = msg_read_i32(msg, SDEVIO_VEC_ENDPT_OFF);
@@ -1161,9 +1183,9 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     crate::ipc::EINVAL
                 };
 
-                // Switch back to boot CR3
+                // Switch back to the caller's tables
                 if boot_cr3 != 0 {
-                    crate::hal::write_cr3(boot_cr3);
+                    crate::hal::write_cr3(return_cr3);
                 }
 
                 result
@@ -1241,9 +1263,9 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     crate::ipc::EINVAL
                 };
 
-                // Switch back to boot CR3
+                // Switch back to the caller's tables
                 if boot_cr3 != 0 {
-                    crate::hal::write_cr3(boot_cr3);
+                    crate::hal::write_cr3(return_cr3);
                 }
 
                 result
@@ -1452,6 +1474,22 @@ pub unsafe fn kernel_call_finish(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                         copy_sz,
                     );
                     return;
+                }
+                // No seam of its own: `vir` is a virtual address in the *caller's* space, and the
+                // kernel is not guaranteed to be running on the caller's page tables here — it is
+                // whatever root was loaded when the call was made, and every process shares the
+                // same stack and mmap VAs, so writing through the wrong one drops the reply on a
+                // live address of an unrelated process. Switch for the copy and restore, exactly as
+                // `delivermsg` does.
+                if crate::hal::boot_cr3() != 0 {
+                    let target_cr3 = (*caller).p_seg.p_cr3;
+                    let saved_cr3 = crate::hal::read_cr3();
+                    if target_cr3 != 0 && target_cr3 != saved_cr3 {
+                        crate::hal::write_cr3(target_cr3);
+                        core::ptr::copy_nonoverlapping(msg.as_ptr(), vir as *mut u8, copy_sz);
+                        crate::hal::write_cr3(saved_cr3);
+                        return;
+                    }
                 }
                 core::ptr::copy_nonoverlapping(msg.as_ptr(), vir as *mut u8, copy_sz);
             }
@@ -2721,6 +2759,17 @@ pub unsafe fn do_safememset_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
 /// `caller` and `msg` must be valid.
 pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let endpt = (*caller).p_endpoint;
         let source = msg_read_i32(msg, VUMAP_ENDPT_OFF);
         let vaddr = msg_read_u64(msg, VUMAP_VADDR_OFF);
@@ -2770,14 +2819,12 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
         // arch a process with no page table is the ordinary case, not an error.
         let via_hal = crate::hal::CROSS_ADDRESS_SPACE_COPY.is_some();
         let mut source_cr3 = 0u64;
-        let mut boot_cr3 = 0u64;
         if !via_hal {
             source_cr3 = (*source_rp).p_seg.p_cr3;
             if source_cr3 == 0 {
                 return crate::ipc::EFAULT;
             }
-            boot_cr3 = crate::hal::boot_cr3();
-            if boot_cr3 == 0 {
+            if crate::hal::boot_cr3() == 0 {
                 return crate::ipc::EFAULT;
             }
         }
@@ -2806,7 +2853,7 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                 vvec.as_mut_ptr(),
                 vcount as usize,
             );
-            crate::hal::write_cr3(boot_cr3);
+            crate::hal::write_cr3(return_cr3);
         }
 
         // The result of this call is a physical address, and a target with no page
@@ -2905,7 +2952,7 @@ pub unsafe fn do_vumap_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
                     paddr as *mut arch_common::types::VumapPhys,
                     pcount as usize,
                 );
-                crate::hal::write_cr3(boot_cr3);
+                crate::hal::write_cr3(return_cr3);
             }
 
             // Write back pcount
@@ -3443,6 +3490,17 @@ pub unsafe fn do_profbuf_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 /// `caller` must point to a valid `Proc`.
 pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let endpt = msg_read_i32(msg, EXEC_ENDPT_OFF);
         let ip = msg_read_u64(msg, EXEC_IP_OFF);
         let stack = msg_read_u64(msg, EXEC_STACK_OFF);
@@ -3489,7 +3547,7 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
                 copy_len,
             );
             if boot_cr3 != 0 {
-                crate::hal::write_cr3(boot_cr3);
+                crate::hal::write_cr3(return_cr3);
             }
             // C (`do_exec.c`) substitutes a placeholder rather than failing the
             // exec: the name is diagnostic, the new image is not.
@@ -3941,6 +3999,17 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
 /// `caller` must point to a valid `Proc`.
 pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
         let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
 
@@ -3980,7 +4049,7 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         }
         let r = crate::vm::write_to_proc((*caller).p_nr, ctx_ptr, mc_bytes, copy_sz);
         if boot_cr3 != 0 {
-            crate::hal::write_cr3(boot_cr3);
+            crate::hal::write_cr3(return_cr3);
         }
         if r != 0 {
             return r;
@@ -4000,6 +4069,17 @@ pub unsafe fn do_getmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
 /// `caller` must point to a valid `Proc`.
 pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
     unsafe {
+        // The kernel runs on the caller's page table. Whatever this handler
+        // switches to for a copy, it has to come back to that root — not to the
+        // boot table, which is only the caller's own root when the caller is a
+        // boot process. Left on the boot table, every later access in this
+        // syscall resolves through the identity map, so a user address (a reply
+        // written to the caller's buffer, say) lands at physical address equal
+        // to that address instead.
+        let return_cr3 = {
+            let c = (*caller).p_seg.p_cr3;
+            if c != 0 { c } else { crate::hal::boot_cr3() }
+        };
         let endpt = msg_read_i32(msg, MCONTEXT_ENDPT_OFF);
         let ctx_ptr = msg_read_u64(msg, MCONTEXT_CTX_PTR_OFF);
 
@@ -4026,7 +4106,7 @@ pub unsafe fn do_setmcontext_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_S
         }
         let r = crate::vm::read_from_proc((*caller).p_nr, ctx_ptr, mc_bytes, copy_sz);
         if boot_cr3 != 0 {
-            crate::hal::write_cr3(boot_cr3);
+            crate::hal::write_cr3(return_cr3);
         }
         if r != 0 {
             return r;
@@ -4244,8 +4324,9 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
             return crate::ipc::EFAULT;
         }
 
-        // C: save_fpu(rpp) — save parent FPU state before struct copy
-        // Skipped: FPU save requires architecture-specific code
+        // C: save_fpu(rpp) — the parent's state was already saved on this syscall's entry, so the
+        // child only has to be given a copy of it rather than the parent's area itself.
+        // (`*rpc = *rpp` below would otherwise leave the two sharing one save area.)
 
         let mut new_gen = table::endpoint_gen((*rpc).p_endpoint) + 1;
         if new_gen >= table::EP_MAX_GENERATION {
@@ -4254,6 +4335,9 @@ pub unsafe fn do_fork_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) 
 
         // C: *rpc = *rpp — copy parent Proc struct to child
         core::ptr::copy_nonoverlapping(rpp, rpc, 1);
+        // The struct copy takes `p_seg.fpu_state` with it, which is a pointer: give the child its
+        // own copy of the parent's state (C copies the area by value).
+        crate::fpu::fork_inherit(rpp, rpc);
 
         // C: rpc->p_nr = slot (obliterated by copy, restore it)
         (*rpc).p_nr = child_slot;
@@ -5182,6 +5266,15 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     Some(pa) => pa,
                     None => return crate::ipc::ENOMEM,
                 };
+                // A page handed to a process must read as zero. `alloc_phys_contig` recycles physical
+                // pages whose previous owner's data is still in them — a server's message buffers, a
+                // table — and an anonymous page a process has never written must be zero, which is
+                // what the page fault path has always done for itself. Clearing here covers every
+                // consumer at once — demand paging, `brk` growth, the COW copy's destination — rather
+                // than each mapping site. Without it a fresh heap page carries the previous owner's
+                // words, which is what made every allocation-heavy tool die in `clap` on a pointer
+                // that appears nowhere in its binary.
+                core::ptr::write_bytes(pa as *mut u8, 0, count as usize * crate::vm::VM_PAGE_SIZE);
                 msg_write_u64(msg, VM_PAGING_PA_OFF, pa);
                 OK
             }

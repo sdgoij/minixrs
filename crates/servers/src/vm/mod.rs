@@ -937,6 +937,9 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     let region = match region {
         Some(r) => r,
         None => {
+            // The process is touching an address no region covers: end it. The signal has to go
+            // through `sys_kill`, which reaches the kernel (see there) — a process that cannot be
+            // killed is resumed on the page it faulted on and re-faults for good.
             sys_kill(ep, SIGSEGV);
             unsafe {
                 mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
@@ -1205,6 +1208,14 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // non-executable region it covered); skip it so the page isn't double-allocated. In the
     // plain demand-fault path only PROT faults arrive with a present page, which map as before.
     if crate::vm::vm_walk_page(cr3, page_addr) & kernel::pagetable::PG_P != 0 {
+        // Unless VFS is still filling it. The frame that is present then is the placeholder below:
+        // zero, and mapped without the user bit precisely so nothing may run it, so a present PTE
+        // is not evidence the page is the file's yet. A thread that faults on it has to stay
+        // blocked like the thread whose fill it is — the completion clears the whole group, which
+        // is what releases both.
+        if crate::vm::vfs_request::page_pending(ep, page_addr) {
+            return PageOutcome::Pending;
+        }
         return PageOutcome::Done;
     }
 
@@ -1290,15 +1301,15 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     }
     crate::vm::vm_unmappage(tmp_va);
 
-    // Map writable so MFS's SAFECOPYTO (through the target's CR3) lands in the page, then
-    // downgrade to the region's permissions in `finish_page`.
-    if crate::vm::vm_map_page_in(
-        cr3,
-        page_addr,
-        pa,
-        kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
-    ) != 0
-    {
+    // Map the destination of the FDIO copy. The read VFS performs is a kernel-mode safecopy that
+    // runs on this process's CR3, so the PTE has to be present and writable — but deliberately
+    // *not* user-accessible. While the fill is in flight the frame holds zeros, and a user thread
+    // of this process (page faults block one thread, not the group) that reached the page would run
+    // those zeros: as code that is a #GP from a garbage operand, as data it is whatever the
+    // zero bytes mean to the reader. Measured on x86: a child fetched a zero-filled `.text` page
+    // this way and faulted in `SipHash`; the same window is why a `clap` value could downcast to a
+    // type id that was nowhere in the binary. `finish_page` puts the region's permissions on.
+    if crate::vm::vm_map_page_in(cr3, page_addr, pa, kernel::pagetable::MAP_WRITE) != 0 {
         crate::vm::vm_free_pages(pa, 1);
         kill_faulting(ep);
         return PageOutcome::Killed;
@@ -1442,23 +1453,30 @@ pub fn finish_file_page(state: PageState, reply: &[u8; 64]) {
 
 /// Send a signal to a process via the kernel.
 ///
-/// Validates endpoint and signal number, sets SIG_PENDING+SIGNALED flags,
-/// and enqueues the process for signal delivery.
+/// The kernel's own `Proc` table is the only one that matters here, and this server links its
+/// own copy of the kernel crate: a `cause_sig` called from VM sets the flags in VM's private
+/// BSS, where nothing reads them. Measured (2026-09-21, KNOWN_ISSUES 12): the SIGSEGV that is
+/// supposed to end a process faulting on an address no region covers never arrived, so the
+/// process was resumed on the page it had faulted on and re-faulted forever — 370,708 faults
+/// in 25 s, with every server idle and the shell never reaching a prompt. SYS_KILL is the way
+/// across that boundary, the same way `clear_pagefault` below uses VMCTL.
 pub fn sys_kill(ep: i32, sig: i32) -> i32 {
     if !(0..=127).contains(&sig) {
         return EINVAL;
     }
-    let slot = kernel::table::endpoint_slot(ep);
-    // cause_sig (not send_sig): the target is a user process, so the
-    // signal must go through its signal manager — set RTS_SIGNALED |
-    // RTS_SIG_PENDING and notify PM (SIGKSIG). send_sig only records
-    // the bit in s_sig_pending and notifies SYSTEM, so a SIGSEGV'd
-    // process would keep running (and re-faulting) forever.
     #[cfg(target_os = "minix")]
-    unsafe {
-        kernel::system::cause_sig(slot, sig);
+    {
+        // SYS_KILL (kernel call 6): sigcalls endpt @ 16, sig @ 20 (`do_kill_handler`).
+        let mut msg = [0u8; 64];
+        msg[16..20].copy_from_slice(&ep.to_le_bytes());
+        msg[20..24].copy_from_slice(&sig.to_le_bytes());
+        minix_rt::kernel_call(6, &mut msg)
     }
-    OK
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (ep, sig);
+        OK
+    }
 }
 
 /// Clear the page fault flag on a process, reactivating it.

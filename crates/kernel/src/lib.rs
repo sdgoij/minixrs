@@ -8,6 +8,7 @@ pub mod clock;
 pub mod debug;
 pub mod elf;
 pub mod exec;
+pub mod fpu;
 pub mod glo;
 pub mod grants;
 pub mod hal;
