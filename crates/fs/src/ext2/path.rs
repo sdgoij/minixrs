@@ -75,13 +75,13 @@ unsafe fn ltraverse(rip: *mut Inode, suffix_offset: usize, path_len: usize) -> i
 
 /// fs_lookup — resolve a path to an inode.
 ///
-/// Message layout (VFS `req_lookup`; the inode fields are u32 like the C's
-/// `ino_t` since the port embeds the path in the message and needs the room):
-/// dir_ino (u32) at payload[0], root_ino (u32) at payload[4], uid (u16) at
-/// payload[8], gid (u16) at payload[10], flags (u32) at payload[12],
+/// Message layout (VFS `req_lookup`; the inode fields are u32 as VFS sends
+/// them): dir_ino (u32) at payload[0], root_ino (u32) at payload[4], uid (u16)
+/// at payload[8], gid (u16) at payload[10], flags (u32) at payload[12],
 /// grant_ucred (i32) at payload[16] (set when `PATH_GET_UCRED` is),
-/// path_len (u32) at payload[20], path at payload[24] (NUL-terminated, capped
-/// at 24 bytes).
+/// path_len (u32) at payload[20] (path bytes, without the NUL),
+/// grant_path (i32) at payload[24] — a read-only grant over VFS's own path
+/// buffer.
 ///
 /// Reference: path.c fs_lookup() + parse_path()
 pub unsafe fn fs_lookup() -> i32 {
@@ -95,6 +95,7 @@ pub unsafe fn fs_lookup() -> i32 {
     let flags = payload_u32(&payload, 12) as i32;
     let grant_ucred = payload_i32(&payload, 16);
     let path_len = payload_u32(&payload, 20) as usize;
+    let grant_path = payload_i32(&payload, 24);
 
     if path_len == 0 {
         return EINVAL;
@@ -103,12 +104,23 @@ pub unsafe fn fs_lookup() -> i32 {
         return E2BIG;
     }
 
-    // The path travels embedded in the message; copy it out and terminate it.
+    // The path stays in VFS's own buffer, reachable only through the grant;
+    // copy it out and terminate it. `path_len` counts the bytes without the NUL.
     let up = core::ptr::addr_of_mut!((*ext2).user_path);
-    let copy_len = path_len.min(24).min(PATH_MAX - 1);
-    for i in 0..copy_len {
-        core::ptr::write((*up).as_mut_ptr().add(i), payload[24 + i]);
+    let copy_len = path_len.min(PATH_MAX - 1);
+    #[cfg(target_os = "minix")]
+    {
+        use crate::ext2::read::safecopy_from_grant;
+
+        let r = safecopy_from_grant(grant_path, 0, (*up).as_mut_ptr(), copy_len);
+        if r != OK {
+            return r;
+        }
     }
+    // On the host no kernel can copy the grant through, so the driver of this
+    // handler is what leaves the path in `user_path`.
+    #[cfg(not(target_os = "minix"))]
+    let _ = grant_path;
     core::ptr::write((*up).as_mut_ptr().add(copy_len), 0);
     let path_len = copy_len;
 

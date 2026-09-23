@@ -174,8 +174,8 @@ pub fn mfs_main() -> i32 {
             //   raw[10..12] = gid      (u16)
             //   raw[12..16] = flags    (u32)
             //   raw[16..20] = grant_ucred (i32; valid when PATH_GET_UCRED is set)
-            //   raw[20..24] = path_len (u32)
-            //   raw[24..]   = path data
+            //   raw[20..24] = path_len (u32, bytes, the NUL terminator not counted)
+            //   raw[24..28] = grant_path (i32, direct grant of VFS's `l_path`)
             if req_nr == 26 {
                 unsafe {
                     let mfs = glo::mfs_ptr();
@@ -190,26 +190,19 @@ pub fn mfs_main() -> i32 {
                         i32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
                     let path_len =
                         u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+                    let grant_path =
+                        i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
 
                     (*mfs).lookup_dir_ino = dir_ino;
                     (*mfs).lookup_root_ino = root_ino;
                     (*mfs).lookup_flags = flags;
                     (*mfs).lookup_grant_ucred = grant_ucred;
+                    (*mfs).lookup_grant_path = grant_path;
                     (*mfs).lookup_path_len = path_len;
                     // `fs_lookup` replaces these with the credential block's
                     // uid/gid when VFS set PATH_GET_UCRED.
                     (*mfs).caller_uid = uid;
                     (*mfs).caller_gid = gid;
-
-                    // Copy path from embedded location in payload (+24 = m_payload.raw[24])
-                    let copy_len = path_len.min(PATH_MAX - 1).min(24);
-                    if copy_len > 0 {
-                        let user_path_ptr = (*mfs).user_path.as_mut_ptr();
-                        for j in 0..copy_len {
-                            core::ptr::write(user_path_ptr.add(j), raw[24 + j]);
-                        }
-                        core::ptr::write(user_path_ptr.add(copy_len), 0);
-                    }
                 }
             }
 

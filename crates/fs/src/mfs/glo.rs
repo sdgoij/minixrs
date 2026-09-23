@@ -38,6 +38,7 @@ pub struct MfsGlobal {
     pub lookup_root_ino: u32,
     pub lookup_flags: i32,
     pub lookup_grant_ucred: i32,
+    pub lookup_grant_path: i32,
     pub lookup_path_len: usize,
     pub lookup_path_size: usize,
 
@@ -129,6 +130,7 @@ pub unsafe fn mfs_init_globals() {
         lookup_root_ino: 0,
         lookup_flags: 0,
         lookup_grant_ucred: -1,
+        lookup_grant_path: -1,
         lookup_path_len: 0,
         lookup_path_size: 0,
         lookup_res_inode: 0,
@@ -182,9 +184,10 @@ mod tests {
     #[test]
     fn mfs_global_layout_offsets() {
         // Byte offsets of protocol fields inside MfsGlobal (used by the
-        // QEMU-monitor debug probe; keep in sync with the struct).
-        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77640);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77632);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77624);
+        // QEMU-monitor debug probe; keep in sync with the struct). Each moved
+        // by 8 when `lookup_grant_path` was added before them.
+        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77648);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77640);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77632);
     }
 }

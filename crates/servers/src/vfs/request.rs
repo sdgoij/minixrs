@@ -666,46 +666,39 @@ pub unsafe fn req_lookup(
             }
         }
 
-        let mut msg = [0u8; 56];
-        w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
-        // VFS → FS REQ_LOOKUP payload, in the order the FS request parsers
-        // expect (inodes are u32, as in the C's `ino_t`: the path is embedded
-        // rather than granted, so the header has no room for 64-bit inodes
-        // plus the credential grant):
-        //   raw[0..4]   = dir_ino     (u32)
-        //   raw[4..8]   = root_ino    (u32)
-        //   raw[8..10]  = uid         (u16)
-        //   raw[10..12] = gid         (u16)
-        //   raw[12..16] = flags       (u32)
-        //   raw[16..20] = grant_ucred (i32, valid with PATH_GET_UCRED)
-        //   raw[20..24] = path_len    (u32)
-        //   raw[24..]   = path data (up to 24 bytes)
-        w_u32(&mut msg, PAYLOAD_OFF, dir_ino);
-        w_u32(&mut msg, PAYLOAD_OFF + 4, root_ino);
-        w_u16(&mut msg, PAYLOAD_OFF + 8, uid);
-        w_u16(&mut msg, PAYLOAD_OFF + 10, gid);
-        w_u32(&mut msg, PAYLOAD_OFF + 12, flags);
-        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_ucred);
-
-        #[cfg(target_os = "minix")]
+        // The path travels in a direct grant, the way the C's `req_lookup`
+        // sends it: it can be `PATH_MAX` bytes, which the 56-byte message
+        // cannot hold beside the two inodes, the two grants and the length.
+        // The grant is over VFS's own `l_path`, so `resolve` must outlive the
+        // sendrec below (every caller holds it across the call).
         let path_len = resolve.l_path_len.min(PATH_MAX - 1);
-        #[cfg(not(target_os = "minix"))]
-        let path_len = resolve.l_path_len;
-        w_u32(&mut msg, PAYLOAD_OFF + 20, path_len as u32);
+        let grant_path = cpf_grant_direct(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            resolve.l_path.as_ptr() as u64,
+            PATH_MAX,
+            false,
+        );
+        if grant_path < 0 {
+            if grant_ucred >= 0 {
+                cpf_revoke(grant_ucred);
+            }
+            return (ENOMEM, LookupRes::default());
+        }
 
-        // Embed path in message (grant-based SAFECOPY not working yet)
-        let path_max = 24usize;
-        let path_copy_len = path_len.min(path_max);
-        if path_copy_len > 0 {
-            let dst = &mut msg[PAYLOAD_OFF + 24..PAYLOAD_OFF + 24 + path_copy_len];
-            dst.copy_from_slice(&resolve.l_path[..path_copy_len]);
-        }
-        // Null-terminate
-        if 24 + path_copy_len < 56 {
-            msg[PAYLOAD_OFF + 24 + path_copy_len] = 0;
-        }
+        let mut msg = build_lookup_msg(
+            dir_ino,
+            root_ino,
+            uid,
+            gid,
+            flags,
+            grant_ucred,
+            path_len,
+            grant_path,
+        );
 
         let r = fs_sendrec(fs_e, &mut msg);
+        cpf_revoke(grant_path);
         if grant_ucred >= 0 {
             cpf_revoke(grant_ucred);
         }
@@ -734,6 +727,47 @@ pub unsafe fn req_lookup(
         let _ = (fs_e, dir_ino, root_ino, uid, gid, cred, resolve);
         (ENOSYS, LookupRes::default())
     }
+}
+
+/// Build the REQ_LOOKUP request.
+///
+/// The path is not in the message: it travels in `grant_path`, a direct
+/// read-only grant over VFS's `l_path`, because a pathname can be `PATH_MAX`
+/// bytes. Every FS `fs_lookup` (MFS's dispatcher and `path.rs`, `ext2/path.rs`,
+/// `libs::vtreefs`) parses this layout and has to be changed with it: a
+/// writer/parser mismatch here is silent, which is what an earlier grant-based
+/// `mknod` did — it created nothing.
+///   raw[0..4]   = dir_ino     (u32)
+///   raw[4..8]   = root_ino    (u32)
+///   raw[8..10]  = uid         (u16)
+///   raw[10..12] = gid         (u16)
+///   raw[12..16] = flags       (u32)
+///   raw[16..20] = grant_ucred (i32, valid with PATH_GET_UCRED)
+///   raw[20..24] = path_len    (u32, bytes; the NUL terminator is not counted)
+///   raw[24..28] = grant_path  (i32)
+#[cfg(any(test, target_os = "minix"))]
+#[allow(clippy::too_many_arguments)]
+fn build_lookup_msg(
+    dir_ino: u32,
+    root_ino: u32,
+    uid: u16,
+    gid: u16,
+    flags: u32,
+    grant_ucred: i32,
+    path_len: usize,
+    grant_path: i32,
+) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
+    w_u32(&mut msg, PAYLOAD_OFF, dir_ino);
+    w_u32(&mut msg, PAYLOAD_OFF + 4, root_ino);
+    w_u16(&mut msg, PAYLOAD_OFF + 8, uid);
+    w_u16(&mut msg, PAYLOAD_OFF + 10, gid);
+    w_u32(&mut msg, PAYLOAD_OFF + 12, flags);
+    w_i32(&mut msg, PAYLOAD_OFF + 16, grant_ucred);
+    w_u32(&mut msg, PAYLOAD_OFF + 20, path_len as u32);
+    w_i32(&mut msg, PAYLOAD_OFF + 24, grant_path);
+    msg
 }
 
 // Directory operations
@@ -838,7 +872,9 @@ fn build_mknod_msg(
     path_bytes: &[u8],
 ) -> [u8; 56] {
     let path_len = path_bytes.len() + 1;
-    let path_copy_len = path_bytes.len().min(30);
+    // The embedded field ends at the message's last byte, so the terminator
+    // only fits for 29 bytes of name: a 30-byte one wrote byte 56 of 56.
+    let path_copy_len = path_bytes.len().min(56 - (PAYLOAD_OFF + 18) - 1);
 
     let mut msg = [0u8; 56];
     w_i32(&mut msg, M_TYPE_OFF, REQ_MKNOD);
@@ -1563,6 +1599,35 @@ pub unsafe fn req_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the REQ_LOOKUP layout where its writer lives. The FS side reads these
+    /// offsets, and a change to one side only is silent (an earlier grant-based
+    /// `mknod` layout was never parsed: it created nothing).
+    #[test]
+    fn lookup_request_layout_is_what_the_fs_parsers_read() {
+        let msg = build_lookup_msg(
+            0x1122_3344,
+            0x5566_7788,
+            0xAABB,
+            0xCCDD,
+            0x00FF_00FF,
+            -3,
+            7,
+            -1,
+        );
+        assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_LOOKUP);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF), 0x1122_3344);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF + 4), 0x5566_7788);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 8), 0xAABB);
+        assert_eq!(r_u16(&msg, PAYLOAD_OFF + 10), 0xCCDD);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF + 12), 0x00FF_00FF);
+        assert_eq!(r_i32(&msg, PAYLOAD_OFF + 16), -3);
+        assert_eq!(r_u32(&msg, PAYLOAD_OFF + 20), 7);
+        assert_eq!(r_i32(&msg, PAYLOAD_OFF + 24), -1);
+        // Nothing carries path bytes any more, however long the path is: the
+        // rest of the message stays zeroed rather than holding a truncated one.
+        assert!(msg[PAYLOAD_OFF + 28..].iter().all(|&b| b == 0));
+    }
 
     #[test]
     fn test_req_constants() {

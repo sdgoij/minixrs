@@ -1,0 +1,26 @@
+# Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
+# killed VFS - it wrote the REQ_LOOKUP terminator one byte past the 56-byte message
+# at exactly 24, and truncated anything longer to 24 bytes and resolved the wrong
+# name. The path now travels in a grant.
+#
+# The lengths bracket that 24-byte boundary so a regression names the length it
+# stopped at, and every read-back is a marker no other step can print: the guest
+# echoes the command, so only real output satisfies one (a write step has no
+# expectation of its own - its evidence is the read-back under it).
+#
+# Nothing here goes above 24: *creating* a name longer than 28 bytes is a separate
+# defect, still open (KNOWN_ISSUES.md item 20 - `create`/`mkdir`/`mknod` embed the
+# name and fail with ENOENT past 28), and a step for it belongs with that fix.
+/bin/echo path-16 > aaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaa	path-16
+/bin/echo path-20 > aaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaa	path-20
+/bin/echo path-21 > aaaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaaa	path-21
+/bin/echo path-22 > aaaaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaaaa	path-22
+/bin/echo path-23 > aaaaaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaaaaa	path-23
+/bin/echo path-24 > aaaaaaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaaaaaa	path-24
+/bin/echo LONG-PATH-OK	LONG-PATH-OK

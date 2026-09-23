@@ -999,6 +999,64 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     that starts calling `vm::alloc_mem` at run time hands out frames the arch allocator has already
     handed to a process, with no ownership either side can see. Fix by initialising one allocator
     (or by giving the two disjoint chunks), and delete the stale comment.
+19. **A lookup path of 24 bytes or more killed VFS (2026-09-23, FIXED).**
+    `req_lookup` built the pathname into the 56-byte request message and wrote the NUL
+    terminator at `PAYLOAD_OFF + 24 + path_copy_len`. The guard around that write tested
+    `24 + path_copy_len < 56`, which never fires (the copy is itself capped at 24), so a
+    path of **exactly 24 bytes** wrote byte 56 of a 56-byte array: VFS panicked
+    (`crates/servers/src/vfs/request.rs:705`) and the filesystem server died, taking the
+    shell with it — the guest simply stopped answering. Longer paths were worse in a
+    quieter way: the message advertised a `path_len` it did not carry and every FS
+    parser truncated to 24 bytes, so a path past 24 was resolved as its first 24 bytes.
+    Reproduced with `cat` on a 24-character name and bracketed in the guest: 23 bytes
+    resolved, 24 panicked, every time.
+
+    What it was blocking: `coreutils pr` and `ptx`, excluded from `feat_minix` as
+    "guest-side memory corruption" that "wants a kernel/VM look". It was never pr's bug
+    and not item 12's XMM clobber — `pr` calls `metadata()` and formats a timestamp, and
+    jiff's system timezone probes a `/usr/share/zoneinfo/...` path longer than 24 bytes.
+    (The `U` bytes `sort` printed and the clap TypeId that is not a hash *were* item 12.)
+
+    Fixed by sending the path in a **direct grant** on VFS's own `l_path`, which is what
+    the C's `req_lookup` does (`cpf_grant_direct`, `CPF_READ`): the message carries
+    `path_len` at payload[20..24] and the grant id at payload[24..28] instead of path
+    bytes. Every parser moved with it — MFS's dispatch and `fs_lookup`, `ext2/path.rs`,
+    and `libs::vtreefs` — because a writer/parser mismatch here is silent; that is what
+    an earlier grant-based `mknod` layout did (it created nothing). `path_len` is the
+    byte count without the terminator, one convention for the whole port: the C sends
+    `strlen + 1` plus a separate `path_size`, and each FS here adds its own NUL.
+
+    Verified in an x86 guest: `echo >`/`cat` on names of 16, 20, 21, 22, 23 and **24**
+    bytes all work, and the gate that covers them (`just test-long-path`, which gives
+    every read-back its own marker) is green; `pr -t`, `pr`, `ptx` and `ptx -r` produce
+    real output; `just image-x86` 3/3. The writer's layout is pinned by
+    `lookup_request_layout_is_what_the_fs_parsers_read` in `servers`, and the host
+    drivers were updated to match (`crates/fs/tests/ext2_image.rs`, vtreefs's test).
+
+    One correction to how this was proved: the first version of the scenario expected
+    the same short string in every step, so its later steps were satisfied by an earlier
+    step's output and a real failure went unseen — item 20's create limit "passed" that
+    way at 30 bytes. It is the trap `silent-failure-traps` describes, met while writing
+    the gate, and giving each step a distinct marker is what exposed item 20.
+20. **A name longer than 28 bytes cannot be created (2026-09-23, open — measured).**
+    `create`, `mkdir` and `mknod` carry their single name *inside* the request, so the
+    name is capped by the room left after the fixed fields: 28 bytes for
+    `req_create`/`req_mkdir`, 29 for `build_mknod_msg` (a 30-byte name wrote byte 56 of
+    56 as well; that write is bounded now), while `path_len` still advertises the
+    untruncated length. Measured in an x86 guest with `echo n > <name>`: names of 24,
+    25, 27 and **28** bytes create and read back; **29**, 30 and 32 bytes fail with
+    `sh: cannot create <name>: err=02` (ENOENT) and leave nothing behind — that is the
+    shell's own `>` redirect, so this is not a coreutils-only path. It fails loudly
+    rather than creating a file under a truncated name, which is the better half of the
+    news; `MFS_NAME_MAX` is 60, so 29-60 bytes is still a real gap for anything that
+    creates files. `coreutils mkdir`, `ln`, `truncate` and `split` are all in
+    `feat_minix`.
+    The fix is the one lookup just got — grant the name — and it has to land on both
+    sides at once: `parse_mknod_request`'s test in `crates/fs/src/mfs/main.rs` exists
+    because an earlier grant-based layout was never parsed and `mknod` created nothing.
+    Its gate belongs in `tools/smoke/long-path.tsv` (whose header says why no step goes
+    above the 28-byte create limit) or beside it.
+    Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
 
 ---
 
@@ -1238,6 +1296,12 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   rewritten to describe the green gate while keeping the two rules that still
   matter: every step carries a tab separator, and its readback is a whole line no
   other step can print.
+- **`cargo clippy` on the host does not compile `#[cfg(target_os = "minix")]` code.** A new
+  `dangerous_implicit_autorefs` error reached through a raw-pointer field in `mfs/path.rs`
+  passed the whole workspace clippy cleanly and only appeared when `just image-x86` reached
+  the `userland-x86` build. `just check` (host clippy plus a riscv64 *kernel* check) does not
+  cover it. Anything touching a server's minix-only path needs a minix-target build —
+  `just build-x86` — before a clippy result means anything.
 - **A run of that gate must have zero `K:`/`G:` text in its log.** Every
   instrument this chase used printed through the kernel's serial path
   (`K: …` for a probe, `G` for the `#GP` handler), and a probe left in place

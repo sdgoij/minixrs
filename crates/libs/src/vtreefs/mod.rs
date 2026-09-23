@@ -511,6 +511,53 @@ fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
     minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
+/// Copy a lookup's path out of the grant VFS attached to the request.
+///
+/// A minix target reads VFS's own buffer through the kernel. A host build has
+/// no kernel to read it with — calling one there would execute a real syscall
+/// instruction — so the test that drives this handler supplies the bytes the
+/// grant would have pointed at.
+fn fetch_path(grant_id: i32, dst: &mut [u8]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        safecopy_from(arch_common::com::VFS_PROC_NR, grant_id, dst)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = grant_id;
+        host_path::copy_into(dst);
+        OK
+    }
+}
+
+/// Host-side stand-in for the bytes of a lookup grant.
+#[cfg(not(target_os = "minix"))]
+mod host_path {
+    use core::cell::UnsafeCell;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Store(UnsafeCell<[u8; super::PATH_MAX]>, AtomicUsize);
+    // Safety: MINIX servers are single-threaded, and so is the test using this.
+    unsafe impl Sync for Store {}
+
+    static STORE: Store = Store(UnsafeCell::new([0u8; super::PATH_MAX]), AtomicUsize::new(0));
+
+    pub fn set(path: &[u8]) {
+        let n = path.len().min(super::PATH_MAX);
+        // Safety: single-threaded, as above.
+        let store = unsafe { &mut *STORE.0.get() };
+        store[..n].copy_from_slice(&path[..n]);
+        STORE.1.store(n, Ordering::Relaxed);
+    }
+
+    pub fn copy_into(dst: &mut [u8]) {
+        let n = STORE.1.load(Ordering::Relaxed).min(dst.len());
+        // Safety: single-threaded, as above.
+        let store = unsafe { &*STORE.0.get() };
+        dst[..n].copy_from_slice(&store[..n]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FS protocol handlers
 // ---------------------------------------------------------------------------
@@ -589,7 +636,8 @@ fn resolve_link(node: u32, out: &mut [u8]) -> Result<usize, i32> {
 /// `m_vfs_fs_lookup`: dir_ino (u32) at payload[0], root_ino (u32) at
 /// payload[4], uid (u16) at payload[8], gid (u16) at payload[10], flags (u32)
 /// at payload[12], grant_ucred (i32) at payload[16], path_len (u32) at
-/// payload[20], path (NUL-terminated, embedded, ≤24 bytes) at payload[24].
+/// payload[20] (path bytes, without the NUL), grant_path (i32) at payload[24]
+/// — a read-only grant over VFS's own path buffer.
 ///
 /// Reply (mess_fs_vfs_lookup): file_size (i64) at payload[8], device (u32)
 /// at payload[16], inode (u32) at payload[20], mode (u32) at payload[24].
@@ -597,25 +645,26 @@ fn fs_lookup(msg: &mut Message) -> i32 {
     let raw = raw_of(msg);
     let dir_ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
     let flags = u32::from_ne_bytes(raw[12..16].try_into().unwrap_or([0u8; 4]));
-    let path_len = u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+    let mut path_len = u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
+    let grant_path = i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
 
-    if path_len == 0 || path_len > PATH_MAX {
+    if path_len == 0 {
         return EINVAL;
     }
-
-    // VFS embeds the path (up to 24 bytes) at payload[24]; `path_len` does
-    // not include the NUL terminator (VFS writes one after the copy). The
-    // walk below stops at either the length or a NUL, so both conventions
-    // are accepted (MFS's fs_lookup does the same).
-    let avail = path_len.min(24);
-    if path_len > avail {
-        // The embedded path is truncated — we cannot resolve it.
+    // The path has to fit together with its NUL terminator. VFS's own PATH_MAX
+    // is smaller than this server's, so a path that fits here is resolvable.
+    if path_len >= PATH_MAX {
         return ENAMETOOLONG;
     }
 
+    // The path stays in VFS's own buffer, reachable only through the grant;
+    // copy it out into a local buffer and terminate it for the walk below.
     let mut path = [0u8; PATH_MAX];
-    path[..avail].copy_from_slice(&raw[24..24 + avail]);
-    let mut path_len = avail;
+    let r = fetch_path(grant_path, &mut path[..path_len]);
+    if r != OK {
+        return r;
+    }
+    path[path_len] = 0;
 
     if dir_ino as usize >= MAX_INODES {
         return EINVAL;
@@ -1256,8 +1305,9 @@ mod tests {
             w_u32(raw, 0, 0); // dir_ino = root
             w_u32(raw, 4, 0); // root_ino
             w_u32(raw, 12, 0); // flags
-            w_u32(raw, 20, 14); // path_len (incl. NUL)
-            raw[24..38].copy_from_slice(b"/devices/tty0\0");
+            w_u32(raw, 20, 13); // path_len, bytes without the terminator
+            raw[24..28].copy_from_slice(&(-1i32).to_le_bytes()); // grant_path
+            host_path::set(b"/devices/tty0");
         }
         let status = handle_fs_message(&mut msg);
         assert_eq!(status, OK);
@@ -1273,8 +1323,9 @@ mod tests {
             let raw = raw_of_mut(&mut msg);
             w_u32(raw, 0, 0);
             w_u32(raw, 4, 0);
-            w_u32(raw, 20, 11);
-            raw[24..35].copy_from_slice(b"/nope/nope\0");
+            w_u32(raw, 20, 10); // "/nope/nope", without the terminator
+            raw[24..28].copy_from_slice(&(-1i32).to_le_bytes());
+            host_path::set(b"/nope/nope");
         }
         assert_eq!(handle_fs_message(&mut msg), ENOENT);
 
@@ -1284,8 +1335,9 @@ mod tests {
             let raw = raw_of_mut(&mut msg);
             w_u32(raw, 0, 1); // dir_ino = devices
             w_u32(raw, 4, 0);
-            w_u32(raw, 20, 3); // path_len = "..\0"
-            raw[24..27].copy_from_slice(b"..\0");
+            w_u32(raw, 20, 2); // ".." without the terminator
+            raw[24..28].copy_from_slice(&(-1i32).to_le_bytes());
+            host_path::set(b"..");
         }
         let status = handle_fs_message(&mut msg);
         assert_eq!(status, OK);

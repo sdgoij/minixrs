@@ -100,9 +100,11 @@ fn lookup_as(
         raw[10..12].copy_from_slice(&gid.to_le_bytes());
         raw[12..16].copy_from_slice(&flags.to_le_bytes());
         raw[16..20].copy_from_slice(&(-1i32).to_le_bytes()); // credential grant
-        raw[20..24].copy_from_slice(&((name.len() + 1) as u32).to_le_bytes());
-        raw[24..24 + name.len()].copy_from_slice(name);
-        raw[24 + name.len()] = 0;
+        raw[20..24].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        raw[24..28].copy_from_slice(&(-1i32).to_le_bytes()); // path grant
+        // No kernel on the host to copy the lookup grant through, so the driver
+        // leaves the path where the minix copy would have put it.
+        set_name(ext2, name, 0);
         if let Some(c) = cred {
             (*ext2).credentials = *c;
         }

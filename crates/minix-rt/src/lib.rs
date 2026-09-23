@@ -1738,7 +1738,7 @@ pub unsafe extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // Format panic message into a stack buffer and write to stderr.
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 512];
     let payload = info.message();
     // Use core::fmt to write the message.
     use core::fmt::Write;
@@ -1746,6 +1746,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         buf: &mut buf,
         pos: 0,
     };
+    if let Some(location) = info.location() {
+        // The message alone does not say where it came from, and this handler is
+        // the only account of why the process died: without the site a panic
+        // cannot be acted on.
+        let _ = write!(cursor, "{}:{}: ", location.file(), location.line());
+    }
     let _ = write!(cursor, "panic: {payload}");
     let len = cursor.pos.min(buf.len() - 1);
     let msg = &buf[..len];

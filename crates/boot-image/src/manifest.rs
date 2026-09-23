@@ -31,7 +31,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/keytest", "keytest"),
     // `/bin/coreutils` is the uutils multicall binary, built from the
     // coreutils submodule for x86_64 only so far. `just coreutils-x86` builds
-    // the `feat_minix` feature set (56 utilities: text tools, checksums,
+    // the `feat_minix` feature set (60 applets: text tools, checksums,
     // filesystem basics); the kernel build.rs skips it on other arches.
     ("/bin/coreutils", "coreutils"),
     // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`

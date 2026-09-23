@@ -52,9 +52,25 @@ pub fn fs_lookup() -> i32 {
             return EINVAL;
         }
 
-        // Verify null-terminated path (C code only logs a warning, don't reject)
-        if path_len > 0 && (*mfs).user_path[path_len - 1] == 0 {
-            // Path already null-terminated, use as-is
+        // The path stays in VFS's own buffer, reachable only through the direct
+        // grant on the request, and `path_len` counts its bytes without the NUL.
+        // A host build has no kernel to copy through, so there the driver of
+        // this handler is what leaves the path in `user_path`.
+        #[cfg(target_os = "minix")]
+        {
+            let copy_len = path_len.min(PATH_MAX - 1);
+            if copy_len > 0 {
+                let user_path = &mut (*mfs).user_path;
+                let r = crate::block_io::safecopy_from(
+                    arch_common::com::VFS_PROC_NR,
+                    (*mfs).lookup_grant_path,
+                    &mut user_path[..copy_len],
+                );
+                if r != OK {
+                    return r;
+                }
+                user_path[copy_len] = 0;
+            }
         }
 
         // Caller's identity: uid/gid from the request, or — when VFS shipped
