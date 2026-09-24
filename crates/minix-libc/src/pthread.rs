@@ -23,6 +23,7 @@ const PTHREAD_STACK_SIZE: usize = 256 * 1024;
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
+const ESRCH: i32 = 3;
 
 /// Per-thread bookkeeping; `pthread_t` points at this.
 #[repr(C)]
@@ -182,6 +183,36 @@ pub unsafe extern "C" fn pthread_detach(thread: usize) -> c_int {
         }
         (*pth).detached = 1;
         0
+    }
+}
+
+/// POSIX `pthread_kill(thread, sig)`.
+///
+/// The tid is the whole of it: threads are `Proc`s here, so PM hands the tid to
+/// the kernel (`SIGCALLS_TID_OFF`), which resolves it with `find_thread_by_tid`
+/// and builds the handler frame on that thread's own saved registers.
+/// `pthread_self()` returns null on this port's main thread - tid 0 - so a null
+/// handle names the process itself rather than being invalid.
+///
+/// What this is not: a signal that has to *pend* (blocked in the mask) loses the
+/// target, because masks are per process, and PM re-delivers it to the process
+/// when it unblocks. The unblocked case, which is what `pthread_kill` is for, is
+/// exact.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_kill(thread: usize, sig: c_int) -> c_int {
+    let tid = if thread == 0 {
+        0
+    } else {
+        // SAFETY: `thread` is a `pthread_t` this layer handed out.
+        let tid = unsafe { (*(thread as *const Pthread)).tid };
+        if tid <= 0 {
+            return fail(ESRCH);
+        }
+        tid
+    };
+    match minix_std::time::thread_kill(tid, sig) {
+        Ok(()) => 0,
+        Err(e) => fail(e.0),
     }
 }
 

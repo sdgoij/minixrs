@@ -116,6 +116,7 @@ const OFF_GETTIME_NSEC: usize = 16; // i64 (long)
 // KILL (PM handle_kill: m1i1 = signo, m1i2 = pid)
 const OFF_KILL_PID: usize = 12; // i32
 const OFF_KILL_SIG: usize = 8; // i32
+const OFF_KILL_TID: usize = 16; // i32 — one thread of the caller, 0 = the process
 
 // SIGACTION (PM do_sigaction: m1i1 = signo, m2l1 = act ptr, m2l2 = oact ptr,
 // m2l3 = sigreturn trampoline ptr)
@@ -310,11 +311,12 @@ pub fn build_sigaction_msg(
     msg_set_u64(msg, OFF_SIGACT_RESTORER, restorer);
 }
 
-/// Build a PM_KILL request (m_type@4, signo@8, pid@12).
-pub fn build_kill_msg(signo: i32, pid: i32, msg: &mut [u8; 64]) {
+/// Build a PM_KILL request (m_type@4, signo@8, pid@12, tid@16).
+pub fn build_kill_msg(signo: i32, pid: i32, tid: i32, msg: &mut [u8; 64]) {
     msg_set_i32(msg, OFF_TYPE, PM_KILL as i32);
     msg_set_i32(msg, OFF_KILL_SIG, signo);
     msg_set_i32(msg, OFF_KILL_PID, pid);
+    msg_set_i32(msg, OFF_KILL_TID, tid);
 }
 
 /// Send a signal to a process.
@@ -325,7 +327,7 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
     #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
-        build_kill_msg(sig, pid, &mut msg);
+        build_kill_msg(sig, pid, 0, &mut msg);
         match pm_call(&mut msg) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -334,6 +336,29 @@ pub fn kill(pid: i32, sig: i32) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
         let _ = (pid, sig);
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Send a signal to one thread of the calling process.
+///
+/// The target is always in the caller's own process (`pthread_kill` cannot
+/// name another), so no pid is sent and PM has nothing to look up. PM's signal
+/// bookkeeping is per process, so the tid steers *delivery* only: see
+/// `SIGCALLS_TID_OFF` in `arch-common`.
+pub fn thread_kill(tid: i32, sig: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        build_kill_msg(sig, 0, tid, &mut msg);
+        match pm_call(&mut msg) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (tid, sig);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -652,13 +677,26 @@ mod tests {
 
     #[test]
     fn test_kill_message_format() {
-        // PM handle_kill reads m1i1 = signo@8, m1i2 = pid@12.
+        // PM handle_kill reads m1i1 = signo@8, m1i2 = pid@12, m1i3 = tid@16.
         let mut msg = [0u8; 64];
-        build_kill_msg(SIGTERM, 123, &mut msg);
+        build_kill_msg(SIGTERM, 123, 0, &mut msg);
 
         assert_eq!(msg_i32(&msg, OFF_TYPE), PM_KILL as i32);
         assert_eq!(msg_i32(&msg, OFF_KILL_SIG), 15);
         assert_eq!(msg_i32(&msg, OFF_KILL_PID), 123);
+        assert_eq!(msg_i32(&msg, OFF_KILL_TID), 0);
+    }
+
+    /// A thread-directed kill names a tid and no pid: the target is always a
+    /// thread of the caller, so PM must not go looking for a process.
+    #[test]
+    fn test_thread_kill_message_format() {
+        let mut msg = [0u8; 64];
+        build_kill_msg(SIGTERM, 0, 7, &mut msg);
+
+        assert_eq!(msg_i32(&msg, OFF_KILL_SIG), 15);
+        assert_eq!(msg_i32(&msg, OFF_KILL_PID), 0);
+        assert_eq!(msg_i32(&msg, OFF_KILL_TID), 7);
     }
 
     #[test]

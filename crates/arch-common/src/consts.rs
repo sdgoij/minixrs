@@ -48,6 +48,10 @@ pub const SIGMSG_SIZE: usize = 48;
 pub const SIGCALLS_ENDPT_OFF: usize = 16;
 pub const SIGCALLS_SIG_OFF: usize = 20;
 pub const SIGCALLS_SIGCTX_OFF: usize = 24;
+/// A thread tid within the target process, or 0 for the process itself.
+/// Threads are `Proc`s here, so this is the only thing `SYS_SIGSEND` needs to
+/// build the handler frame on a thread rather than on the process leader.
+pub const SIGCALLS_TID_OFF: usize = 32;
 
 // Sigframe on the target's stack. Layout differs per arch (the saved
 // register file is arch-specific); the shared fields (mask / signal /

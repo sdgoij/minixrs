@@ -172,6 +172,7 @@ const SIGCALLS_MAP_OFF: usize = 0;
 const SIGCALLS_ENDPT_OFF: usize = 16;
 const SIGCALLS_SIG_OFF: usize = 20;
 const SIGCALLS_SIGCTX_OFF: usize = 24;
+const SIGCALLS_TID_OFF: usize = 32;
 
 const FORK_REPLY_ENDPT_OFF: usize = 8;
 const FORK_REPLY_MSGADDR_OFF: usize = 16;
@@ -5793,9 +5794,23 @@ pub unsafe fn do_sigsend_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
         if table::is_kernel_nr(proc_nr) {
             return crate::ipc::EPERM;
         }
-        let rp = proc_addr(proc_nr);
+        let mut rp = proc_addr(proc_nr);
         if rp.is_null() {
             return crate::ipc::EINVAL;
+        }
+
+        // A non-zero tid targets one thread of the process instead of the
+        // process itself: threads are Procs here (one per SYS_thread_create,
+        // each with its own `p_reg`), and the frame built below lands on the
+        // target's own saved registers - so resolving to the thread is all a
+        // thread-directed signal needs. Zero keeps the process behaviour.
+        let tid = msg_read_i32(msg, SIGCALLS_TID_OFF);
+        if tid != 0 {
+            let t = crate::thread::find_thread_by_tid(crate::thread::group(rp), tid as u32);
+            if t.is_null() {
+                return crate::ipc::ESRCH;
+            }
+            rp = t;
         }
 
         // Copy the sigmsg from the caller (PM).

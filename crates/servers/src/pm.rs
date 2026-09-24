@@ -1385,6 +1385,13 @@ pub unsafe fn check_sig(proc_id: i32, pgrp_ref: i32, signo: i32, ksig: bool) -> 
 /// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to
 /// the target slot.
 pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
+    unsafe { sig_proc_inner(slot, signo, trace, ksig, 0) }
+}
+
+/// The body of `sig_proc`, plus where the handler should run: a non-zero `tid`
+/// names one thread of `slot`'s process. Masks, pending and ignore stay per
+/// process - only delivery is steerable, because PM never learned about threads.
+unsafe fn sig_proc_inner(slot: usize, signo: i32, trace: bool, ksig: bool, tid: i32) {
     if slot >= NR_PROCS {
         return;
     }
@@ -1470,7 +1477,7 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
         // unpause: the process is stopped and its call released with EINTR.
         rmp.mp_flags &= !(WAITING | SIGSUSPENDED);
         rmp.mp_flags |= PROC_STOPPED;
-        if unsafe { sig_send(slot, signo) } {
+        if unsafe { sig_send(slot, signo, tid) } {
             // The kernel set up the handler frame and resumed the process;
             // clear PM's stop mark (matching C sig_send → try_resume_proc).
             rmp.mp_flags &= !PROC_STOPPED;
@@ -1508,7 +1515,7 @@ pub unsafe fn sig_proc(slot: usize, signo: i32, trace: bool, ksig: bool) {
 ///
 /// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to
 /// the process table.
-pub unsafe fn sig_send(slot: usize, signo: i32) -> bool {
+pub unsafe fn sig_send(slot: usize, signo: i32, tid: i32) -> bool {
     if slot >= NR_PROCS {
         return false;
     }
@@ -1538,6 +1545,10 @@ pub unsafe fn sig_send(slot: usize, signo: i32) -> bool {
         .copy_from_slice(&endpoint.to_ne_bytes());
     kmsg[arch_common::consts::SIGCALLS_SIGCTX_OFF..arch_common::consts::SIGCALLS_SIGCTX_OFF + 8]
         .copy_from_slice(&(sigmsg.as_ptr() as u64).to_ne_bytes());
+    // 0 names the process, non-zero that thread of it: the kernel resolves the
+    // tid through `find_thread_by_tid` and builds the frame on its registers.
+    kmsg[arch_common::consts::SIGCALLS_TID_OFF..arch_common::consts::SIGCALLS_TID_OFF + 4]
+        .copy_from_slice(&tid.to_ne_bytes());
     let r = minix_rt::kernel_call(9, &mut kmsg);
     r == 0
 }
@@ -3557,6 +3568,13 @@ pub unsafe fn handle_getuid(caller_slot: usize, msg: &mut Message) -> i32 {
 pub unsafe fn handle_kill(caller_slot: usize, msg: &mut Message) -> i32 {
     let signo = unsafe { msg.m_payload.m1.m1i1 };
     let target_pid = unsafe { msg.m_payload.m1.m1i2 };
+    let tid = unsafe { msg.m_payload.m1.m1i3 };
+    // A tid means `pthread_kill`: the target is always a thread of the caller's
+    // own process, so there is no pid to resolve and no permission to check.
+    if tid != 0 {
+        unsafe { sig_proc_inner(caller_slot, signo, false, false, tid) };
+        return OK;
+    }
     match unsafe { do_kill(caller_slot, target_pid, signo) } {
         Ok(()) => OK,
         Err(e) => e,
