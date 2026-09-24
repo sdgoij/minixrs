@@ -168,7 +168,16 @@ pub fn fs_getdents() -> i32 {
         let rip_ref = &*glo::get_inode_ptr(rip as usize);
         let dir_size = (*rip_ref).i_size as i64;
         if pos < 0 || pos >= dir_size {
-            return 0;
+            // End of the directory: reply with no bytes. Returning a bare 0
+            // reads as OK at the VFS, which then takes `nbytes` from a payload
+            // this path never wrote — the *previous* call's byte count — so a
+            // reader asking until it gets 0 (libc readdir, and `ls` now that it
+            // reads a whole directory) is handed the same entries again for
+            // ever. Reply explicitly instead.
+            let raw_ref = &mut (*mfs).m_out.m_payload.raw;
+            raw_ref[0..8].copy_from_slice(&pos.to_le_bytes());
+            raw_ref[8..12].copy_from_slice(&0i32.to_le_bytes());
+            return OK;
         }
 
         let sp = crate::mfs::super_block::get_super(dev);

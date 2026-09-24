@@ -63,6 +63,17 @@ reasoned about; the fix recorded is what the code does now.
   kernel's `do_diagctl_handler`, and moving one without the other cuts bytes out of every line without
   failing anything — a diagnostic line being what a wedged boot has instead of a stack trace
   (finding 67).
+- **An ioctl that was never routed answers `OK`.** VFS's `do_ioctl` returns success for a vnode whose
+  device has no handler, so an ioctl's *success* says nothing about what the fd is: `TIOCGWINSZ` on a
+  pipe answered `OK` with a zeroed `winsize`, and `ls`'s first "is this a terminal" test — the ioctl
+  succeeded — laid out columns into a pipe. A server's *absence* of an error is not a positive answer;
+  ask about the object instead. `fstat` and `S_IFCHR` distinguishes the console from a pipe
+  (`S_IFIFO`) and a file (`S_IFREG`).
+- **A reply code of `OK` with a payload that path never wrote is the previous call's payload.** MFS's
+  `fs_getdents` returned a bare `0` at end-of-directory — `OK` to the VFS, which then read `nbytes`
+  from the last request's message and handed a reader the same entries again, for ever. The single
+  reader that called it once never noticed; the one that loops until it gets 0 hung with no output at
+  all. Every early return that means "nothing more" has to write its own zero.
 
 ## A gate nobody has seen fail is a gate nobody knows works
 

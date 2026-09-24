@@ -1149,7 +1149,202 @@ pub struct Dirent {
 
 const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 
-/// ls — list directory contents.
+/// Names held for one `ls` listing: enough for this image's `/bin`, and a bound
+/// on what a directory far larger than that costs. There is no allocator in the
+/// userland, so a listing that overflows is reported rather than silently
+/// shortened.
+const LS_MAX_ENTRIES: usize = 512;
+/// Bytes those names' text is packed into (MFS names are at most 60 bytes).
+const LS_NAME_BYTES: usize = 16 * 1024;
+/// Columns are separated by two spaces, as `ls` does.
+const LS_GAP: usize = 2;
+/// What `ls` assumes when the terminal will not say. The console is a serial
+/// line: the tty answers `TIOCGWINSZ` with 0 columns until something sets the
+/// size, and 80 is the conventional stand-in.
+#[cfg(target_os = "minix")]
+const LS_DEFAULT_WIDTH: usize = 80;
+/// The widest terminal `ls` lays out for. A line is assembled in a buffer before
+/// it is written, so this bounds that buffer — and a terminal wider than this
+/// (the tty reports up to 65535) gains nothing from more columns.
+const LS_MAX_WIDTH: usize = 512;
+/// Room for one rendered line: `LS_MAX_WIDTH` columns' worth, plus the name that
+/// overflows it (a name is at most 255 bytes).
+const LS_LINE_BYTES: usize = LS_MAX_WIDTH + 256;
+/// The column separator and its padding are written from here, in chunks, so a
+/// padded line is a handful of writes rather than one per space.
+const LS_SPACES: [u8; 16] = [b' '; 16];
+
+/// The name `span` refers to in `arena`.
+fn ls_name(arena: &[u8], span: (usize, usize)) -> &[u8] {
+    &arena[span.0..span.0 + span.1]
+}
+
+/// Sort name spans into `ls` order: bytewise, which is what puts `Cargo.toml`
+/// before `crates`. This port has one locale and no collation tables.
+///
+/// Unstable because the userland has no allocator and stable `sort_by` is in
+/// `alloc`; a directory holds one entry per name, so there is nothing for the
+/// stability to preserve.
+fn ls_sort(arena: &[u8], spans: &mut [(usize, usize)]) {
+    spans.sort_unstable_by(|&a, &b| ls_name(arena, a).cmp(ls_name(arena, b)));
+}
+
+/// The width of column `c` when `rows` rows are filled down it: the longest
+/// name in the column, so the column to its right starts at the same offset on
+/// every row. 0 when the column holds nothing.
+fn ls_col_width(lengths: &[usize], rows: usize, c: usize) -> usize {
+    (0..rows)
+        .map(|r| c * rows + r)
+        .filter(|&i| i < lengths.len())
+        .map(|i| lengths[i])
+        .max()
+        .unwrap_or(0)
+}
+
+/// The longest line `ls` prints for `cols` columns of `rows` rows: every column
+/// but the last on a line padded to its width, two spaces between them, and
+/// nothing after the last name.
+fn ls_line_width(lengths: &[usize], rows: usize, cols: usize) -> usize {
+    let mut longest = 0usize;
+    for r in 0..rows {
+        let mut line = 0usize;
+        let mut printed = 0usize;
+        let mut last_pad = 0usize;
+        for c in 0..cols {
+            let i = c * rows + r;
+            if i >= lengths.len() {
+                continue;
+            }
+            if printed > 0 {
+                line += LS_GAP;
+            }
+            let width = ls_col_width(lengths, rows, c);
+            line += width;
+            last_pad = width - lengths[i];
+            printed += 1;
+        }
+        if printed > 0 {
+            line -= last_pad;
+        }
+        longest = longest.max(line);
+    }
+    longest
+}
+
+/// How `ls` lays `lengths` out in `width`: the most columns whose longest line
+/// still fits, filled down each column before the next — what a terminal `ls`
+/// does — and one name per line when even two columns do not fit.
+fn ls_plan(lengths: &[usize], width: usize) -> (usize, usize) {
+    let count = lengths.len();
+    if count <= 1 {
+        return (1, count.max(1));
+    }
+    // The most columns that could possibly fit, from the shortest name; the
+    // search walks down from there, so the first line that fits is also the
+    // widest arrangement that does.
+    let shortest = lengths.iter().copied().min().unwrap_or(1).max(1);
+    let most = count.min((width + LS_GAP) / (shortest + LS_GAP));
+    let mut cols = most.max(1);
+    while cols > 1 {
+        let rows = count.div_ceil(cols);
+        // A column holding nothing is not an arrangement worth keeping: it
+        // reserves a column's worth of width and leaves one row short of the
+        // others, so a balanced layout with fewer columns is preferred.
+        if (cols - 1) * rows < count && ls_line_width(lengths, rows, cols) <= width {
+            return (cols, rows);
+        }
+        cols -= 1;
+    }
+    (1, count)
+}
+
+/// The width `ls` lays its columns out in: `None` when fd 1 is not a terminal —
+/// a listing going into a file or a pipe, which `ls` writes one name per line.
+///
+/// A terminal here is a character device: the console's descriptors are one, a
+/// pipe's is not (PFS creates it `I_NAMED_PIPE`), and neither is a regular
+/// file. That is the test rather than the ioctl's success, because VFS answers
+/// an ioctl it does not route with `OK` — measured: `ls | cat` laid out columns
+/// before this check existed. The ioctl is then asked only for the size, which
+/// the console does not have to report (a serial line has no width to know), so
+/// a zero falls back to the conventional default.
+fn ls_width() -> Option<usize> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        None
+    }
+    #[cfg(target_os = "minix")]
+    {
+        let on_a_terminal = match minix_std::fs::fstat(1) {
+            Ok(st) => st.st_mode & minix_std::fs::S_IFMT == minix_std::fs::S_IFCHR,
+            Err(_) => false,
+        };
+        if !on_a_terminal {
+            return None;
+        }
+        let mut ws = minix_std::termios::WinSize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let arg = core::ptr::addr_of_mut!(ws) as *mut u8;
+        match unsafe { minix_std::fs::ioctl(1, minix_std::termios::TIOCGWINSZ, arg) } {
+            Ok(_) if ws.ws_col > 0 => Some(ws.ws_col as usize),
+            _ => Some(LS_DEFAULT_WIDTH),
+        }
+    }
+}
+
+/// Render row `r` of the `cols`-column layout into `out`, returning the line's
+/// length. Every column but the last name on the line is padded to its column's
+/// width so the column to the right lines up; nothing follows the last name
+/// (trailing spaces would be invisible and unparsable).
+fn ls_render_row(
+    arena: &[u8],
+    spans: &[(usize, usize)],
+    lengths: &[usize],
+    rows: usize,
+    cols: usize,
+    r: usize,
+    out: &mut [u8],
+) -> usize {
+    let mut n = 0usize;
+    let mut printed = 0usize;
+    for c in 0..cols {
+        let i = c * rows + r;
+        if i >= spans.len() {
+            continue;
+        }
+        if printed > 0 {
+            n = ls_append(out, n, &LS_SPACES[..LS_GAP]);
+        }
+        n = ls_append(out, n, ls_name(arena, spans[i]));
+        if c + 1 < cols && (c + 1) * rows + r < spans.len() {
+            let pad = ls_col_width(lengths, rows, c) - lengths[i];
+            let mut written = 0usize;
+            while written < pad {
+                let chunk = (pad - written).min(LS_SPACES.len());
+                n = ls_append(out, n, &LS_SPACES[..chunk]);
+                written += chunk;
+            }
+        }
+        printed += 1;
+    }
+    n
+}
+
+/// Copy `bytes` into `out` at `n`, stopping at the buffer's end, and return the
+/// new length. The plan keeps a line inside `LS_LINE_BYTES`; this is what makes
+/// that a floor rather than a promise.
+fn ls_append(out: &mut [u8], n: usize, bytes: &[u8]) -> usize {
+    let room = out.len() - n;
+    let copy = bytes.len().min(room);
+    out[n..n + copy].copy_from_slice(&bytes[..copy]);
+    n + copy
+}
+
+/// ls — list directory contents: sorted, in columns that fit the terminal.
 pub fn ls(args: &[&str]) -> i32 {
     let dir = if args.len() > 1 { args[1] } else { "." };
     // Use IPC-based open via minix_std (routes to VFS)
@@ -1171,36 +1366,105 @@ pub fn ls(args: &[&str]) -> i32 {
             return 1;
         }
     };
+    let mut arena = [0u8; LS_NAME_BYTES];
+    let mut spans = [(0usize, 0usize); LS_MAX_ENTRIES];
+    let mut used = 0usize;
+    let mut count = 0usize;
+    let mut read_error = false;
+    let mut truncated = false;
+    // The listing is sorted, so the whole directory is read before anything is
+    // printed. `getdents` is called until it reports the end: one call returns
+    // one buffer's worth, and a single call silently listed a prefix of any
+    // directory larger than it.
     let mut buf = [0u8; 4096];
-    let n = minix_std::fs::getdents(fd, &mut buf).unwrap_or(0);
-    if n <= 0 {
-        // Fallback: just print the directory name if getdents fails
-        write_out(dir.as_bytes());
-        write_out(b"\r\n");
-    } else {
+    loop {
+        let n = match minix_std::fs::getdents(fd, &mut buf) {
+            Ok(n) if n > 0 => n as usize,
+            Ok(_) => break,
+            Err(_) => {
+                read_error = true;
+                break;
+            }
+        };
         let mut off = 0usize;
-        while off < n as usize {
-            if off + DIRENT_NAME_OFF > n as usize {
+        while off < n {
+            if off + DIRENT_NAME_OFF > n {
                 break;
             }
-            let reclen = u16::from_ne_bytes([buf[off + 8], buf[off + 9]]);
-            if reclen == 0 || off + reclen as usize > n as usize {
+            let reclen = u16::from_ne_bytes([buf[off + 8], buf[off + 9]]) as usize;
+            if reclen == 0 || off + reclen > n {
                 break;
             }
-            let namlen = u16::from_ne_bytes([buf[off + 10], buf[off + 11]]);
-            if namlen > 0 && off + DIRENT_NAME_OFF + namlen as usize <= n as usize {
-                let name = &buf[off + DIRENT_NAME_OFF..off + DIRENT_NAME_OFF + namlen as usize];
+            let namlen = u16::from_ne_bytes([buf[off + 10], buf[off + 11]]) as usize;
+            if namlen > 0 && off + DIRENT_NAME_OFF + namlen <= n {
+                let name = &buf[off + DIRENT_NAME_OFF..off + DIRENT_NAME_OFF + namlen];
                 // Skip . and ..
                 if name != b"." && name != b".." {
-                    write_out(name);
-                    write_out(b"  ");
+                    if count < LS_MAX_ENTRIES && used + namlen <= LS_NAME_BYTES {
+                        arena[used..used + namlen].copy_from_slice(name);
+                        spans[count] = (used, namlen);
+                        used += namlen;
+                        count += 1;
+                    } else {
+                        truncated = true;
+                    }
                 }
             }
-            off += reclen as usize;
+            off += reclen;
         }
-        write_out(b"\n");
     }
     let _ = minix_std::fs::close(fd);
+
+    if read_error {
+        write_err(b"ls: ");
+        write_err(dir.as_bytes());
+        write_err(b": cannot read directory\r\n");
+        if count == 0 {
+            return 1;
+        }
+    }
+    if truncated {
+        write_err(b"ls: ");
+        write_err(dir.as_bytes());
+        write_err(b": listing truncated\r\n");
+    }
+    if count == 0 {
+        return if read_error { 1 } else { 0 };
+    }
+
+    ls_sort(&arena, &mut spans[..count]);
+    let mut lengths = [0usize; LS_MAX_ENTRIES];
+    for (i, span) in spans[..count].iter().enumerate() {
+        lengths[i] = span.1;
+    }
+
+    match ls_width() {
+        Some(width) => {
+            let (cols, rows) = ls_plan(&lengths[..count], width.min(LS_MAX_WIDTH));
+            let mut line = [0u8; LS_LINE_BYTES];
+            for r in 0..rows {
+                let n = ls_render_row(
+                    &arena,
+                    &spans[..count],
+                    &lengths[..count],
+                    rows,
+                    cols,
+                    r,
+                    &mut line,
+                );
+                write_out(&line[..n]);
+                write_out(b"\n");
+            }
+        }
+        // Not a terminal: one name per line, which is what a caller parsing the
+        // output wants.
+        None => {
+            for span in &spans[..count] {
+                write_out(ls_name(&arena, *span));
+                write_out(b"\n");
+            }
+        }
+    }
     0
 }
 
@@ -2974,5 +3238,108 @@ mod tests {
     #[test]
     fn test_errstr_negative() {
         assert_eq!(errstr(-1), b"Unknown error");
+    }
+
+    /// `ls` order is bytewise, so an upper-case name sorts before a lower-case
+    /// one — the order a terminal `ls` shows, and the one the directory's own
+    /// order (inode order) does not give.
+    #[test]
+    fn ls_sort_is_bytewise() {
+        let arena = b"cratesCargo.tomlZebraapple";
+        let mut spans = [(0usize, 6usize), (6, 10), (16, 5), (21, 5)];
+        ls_sort(arena, &mut spans);
+        let sorted: [&[u8]; 4] = [
+            ls_name(arena, spans[0]),
+            ls_name(arena, spans[1]),
+            ls_name(arena, spans[2]),
+            ls_name(arena, spans[3]),
+        ];
+        assert_eq!(
+            sorted,
+            [b"Cargo.toml".as_slice(), b"Zebra", b"apple", b"crates"]
+        );
+    }
+
+    #[test]
+    fn ls_plan_fits_one_row_when_it_can() {
+        // Three one-character names: 3 + 2 gaps = 7 columns of a terminal.
+        assert_eq!(ls_plan(&[1, 1, 1], 80), (3, 1));
+    }
+
+    #[test]
+    fn ls_plan_narrows_with_the_width() {
+        // Ten 4-character names need 10*4 + 9*2 = 58 columns in one row.
+        let lengths = [4usize; 10];
+        assert_eq!(ls_plan(&lengths, 58), (10, 1));
+        // One column short of that drops to two rows, balanced 5 and 5.
+        assert_eq!(ls_plan(&lengths, 57), (5, 2));
+        // And a narrow one fits three per row of four.
+        assert_eq!(ls_plan(&lengths, 20), (3, 4));
+        for (width, (cols, rows)) in [(58, (10, 1)), (57, (5, 2)), (20, (3, 4))] {
+            assert!(ls_line_width(&lengths, rows, cols) <= width);
+        }
+    }
+
+    #[test]
+    fn ls_plan_keeps_columns_balanced() {
+        // Eight names in five columns would leave the fifth column empty; four
+        // columns of two rows is the arrangement `ls` shows.
+        assert_eq!(ls_plan(&[12; 8], 80), (4, 2));
+    }
+
+    /// The listing this was written for: 26 names from a home directory on a
+    /// 128-column terminal, which `ls` shows as nine columns of three. Columns
+    /// here are not a uniform width, which is what makes nine of them fit where
+    /// nine uniform 8-byte names would not.
+    #[test]
+    fn ls_plan_matches_the_reported_listing() {
+        let lengths = [
+            8, 8, 10, 10, 10, 7, 9, 10, 15, 13, 13, 18, 8, 6, 8, 10, 17, 17, 9, 4, 13, 16, 3, 6, 3,
+            5,
+        ];
+        assert_eq!(ls_plan(&lengths, 128), (9, 3));
+        assert_eq!(ls_line_width(&lengths, 3, 9), 128);
+        // Narrower on the same terminal: eight columns would leave the eighth
+        // empty (26 names over four rows is 28 slots), so seven it is.
+        assert_eq!(ls_plan(&lengths, 120), (7, 4));
+    }
+
+    #[test]
+    fn ls_plan_falls_back_to_one_per_line() {
+        // Two names longer than the whole width cannot share a line.
+        assert_eq!(ls_plan(&[20, 20], 10), (1, 2));
+        // A zero width has no columns to offer.
+        assert_eq!(ls_plan(&[1, 1, 1], 0), (1, 3));
+    }
+
+    /// A row pads each column to its width — the longest name in that column,
+    /// which may be on a later row — so names line up under the one above, and
+    /// pads nothing after the last name on the line.
+    #[test]
+    fn ls_render_row_pads_columns_but_not_the_line_end() {
+        // Two columns of two rows: `aaaa`/`bbbbbbbb` and `cc`/`dd`.
+        let arena = b"aaaabbbbbbbbccdd";
+        let spans = [(0usize, 4usize), (4, 8), (12, 2), (14, 2)];
+        let lengths = [4usize, 8, 2, 2];
+        let mut line = [0u8; 64];
+        // Row 0 pads `aaaa` out to the column's 8 bytes; `cc` ends the line.
+        let n = ls_render_row(arena, &spans, &lengths, 2, 2, 0, &mut line);
+        assert_eq!(&line[..n], b"aaaa      cc");
+        // Row 1 needs no padding: its first name is the column's widest.
+        let n = ls_render_row(arena, &spans, &lengths, 2, 2, 1, &mut line);
+        assert_eq!(&line[..n], b"bbbbbbbb  dd");
+    }
+
+    /// A name too long for the buffer is cut, not written past it: the plan
+    /// keeps a line inside the buffer, and this is the floor under that.
+    #[test]
+    fn ls_render_row_stops_at_the_buffer_end() {
+        let arena = b"aaaaaaaaaa";
+        let spans = [(0usize, 10usize)];
+        let lengths = [10usize];
+        let mut line = [0u8; 4];
+        let n = ls_render_row(arena, &spans, &lengths, 1, 1, 0, &mut line);
+        assert_eq!(n, 4);
+        assert_eq!(&line[..n], b"aaaa");
     }
 }

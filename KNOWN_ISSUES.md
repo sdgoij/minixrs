@@ -1058,6 +1058,30 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     above the 28-byte create limit) or beside it.
     Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
 
+25. **~~MFS `getdents` returned `OK` at end-of-directory without a reply payload~~
+    — FIXED (2026-09-24).** The end-of-directory path returned a bare `0`,
+    which the VFS reads as `OK`, and then took `nbytes` from a payload that path
+    never wrote — the *previous* call's byte count. A reader looping until
+    `getdents` reports 0 (the libc's `readdir`, and `ls` now that it reads a
+    whole directory to sort it) was therefore handed the same entries again for
+    ever: `ls` in an x86 guest printed nothing and never returned to a prompt.
+    The old single-call `ls` never reached the end path, and `readdir` stopped
+    as soon as it found the name it wanted, which is why neither had shown it.
+    The path now replies with `seek_pos` unchanged and `nbytes = 0`. Measured:
+    `ls` of a 41-entry `/bin` lists it in full, and `ls | cat` terminates.
+    (`crates/fs/src/mfs/protect.rs`)
+26. **`isatty` answers 1 for any of fd 0..2 (2026-09-24, open).**
+    `crates/minix-libc/src/c_sys.rs` decides "is this a terminal" by the fd
+    *number* — `if (0..=2).contains(&fd) { 1 } else { 0 }` — so a C program
+    redirected into a file or a pipe is still told it is on a terminal. bash
+    uses exactly that to decide whether to be interactive, and coreutils tools
+    use it for colour and piping behaviour, so this is not cosmetic. The real
+    test is available and now used by `ls` (`crates/userland/src/lib.rs`):
+    `fstat` and check `S_IFCHR` — the console's descriptors are character
+    devices, a pipe's vnode is `S_IFIFO` (PFS creates it `I_NAMED_PIPE`) and a
+    file's is `S_IFREG`. The ioctl is *not* a test: VFS answers an ioctl it does
+    not route with `OK`, which is how `ls | cat` laid out columns before the
+    check above existed. (`crates/minix-libc/src/c_sys.rs`)
 ---
 
 ## x86_64 (`[x86]`)
