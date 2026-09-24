@@ -419,6 +419,51 @@ jobs:
       - name: The shipped image, driven through the smoke scenario
         run: just image ${{ matrix.arch }} 120
 
+  # The port's largest C consumer, built and booted. bash is fetched at the pinned
+  # upstream commit, configured against `tools/c-include`, linked against minix-libc
+  # (`tools/build-bash.py`), and then driven through `tools/smoke/bash.tsv` in the
+  # guest. This is the only job that builds a third-party C project, so it is where
+  # a missing header, a missing libc export or a link flag that stopped being
+  # forwarded shows up: the C smoke binaries (/bin/helloc, /bin/ctest) exercise the
+  # same surface, but nowhere near this much of it.
+  bash:
+    name: bash (built from the pinned commit, then booted)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - name: Check out the submodules
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust coreutils
+
+      - uses: extractions/setup-just@v4
+
+      - uses: ./.github/actions/install-clang
+
+      - uses: ./.github/actions/install-qemu
+        with:
+          arch: x86
+
+      # The recipes call `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 x86
+
+      # Fetches bash (a full clone the first time — the pin is a commit, so a
+      # shallow one is not enough), rebuilds minix-libc with this host's stage1,
+      # configures, links, and boots the result through the bash scenario. 120 s of
+      # boot budget, as `image` above: a runner emulates the guest.
+      - name: Build bash and boot it
+        run: just test-bash 120
+
   # The images and the release live in `.github/workflows/image-release.yml`, which
   # this calls: the release logic keeps one home, and `needs` is what makes the
   # release downstream of the tests and the suites rather than something that could
@@ -427,7 +472,7 @@ jobs:
   # pressing anything. This job does nothing else; the work is in that file.
   release:
     name: release
-    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests]
+    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash]
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     # The called workflow writes a release, so the caller has to allow that much.
     permissions:

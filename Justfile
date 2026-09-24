@@ -295,6 +295,24 @@ test-long-path boot-timeout="30": build-x86
     FEED_SCENARIO=tools/smoke/long-path.tsv sh tools/smoke/feed.sh target/test-long-path.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "long-path: every length resolved"
 
+# Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
+# it: the version banner, a `-c` command line, an arithmetic expansion, a loop, a
+# redirection read back through a second process, an external command (bash's
+# fork+exec path) and `$PWD` from its own startup. Nothing else in the tree boots
+# bash, and the shared smoke scenario cannot: it types into the minix shell and
+# waits for its `#` prompt, which an interactive bash would replace with
+# `bash-5.3#`. x86 only, like the C surface itself (`tools/cc-minix.py`).
+#
+# The injection is what puts bash in the image: it is deliberately not a
+# `BOOT_BINS` entry, so an image build never depends on bash having been built.
+test-bash boot-timeout="40": build-bash
+    MINIXFS_EXTRA='/bin/bash=target/bash/bash' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "bash: every step of tools/smoke/bash.tsv answered"
+
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
@@ -512,6 +530,19 @@ build-c-hello:
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
     target/mkfs x86_64
+
+# GNU bash for x86_64 minix, from the upstream commit `tools/build-bash.py` pins:
+# fetched, configured against `tools/c-include` and linked against minix-libc by
+# `tools/cc-minix.py`, the `cc` a C project's own build needs. That host must be
+# POSIX (the stage1, the rlib and clang all have to be the same host's), so on
+# Windows the script re-enters WSL by itself — `MINIX_WSL_DISTRO` picks the
+# distribution. Artifact: `target/bash/bash`; `just test-bash` boots it.
+# `C_BUILD.md` has the why of each flag and each trap this build costs.
+#
+# Run this *after* the toolchain: `bootstrap` and `fetch-stage1` start with
+# `cargo clean`, which takes `target/bash-src` and the build tree with it.
+build-bash:
+    python tools/build-bash.py
 
 # Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
 # toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.

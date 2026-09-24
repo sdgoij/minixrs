@@ -17,8 +17,8 @@ explicitly.
 
 ## What breaks it: a third-party project's build is not self-contained
 
-bash (`bash/`, a source checkout) does not build this way, for reasons that have
-nothing to do with minix:
+bash (a source checkout, fetched at a pinned commit by `tools/build-bash.py`)
+does not build this way, for reasons that have nothing to do with minix:
 
 - **Its tree lacks generated sources.** A git checkout has no `signames.c`, no
   `syntax.c`, no `builtins/builtext.h`. `make` therefore builds `support/mksignames`,
@@ -43,8 +43,9 @@ and those programs have to be POSIX.
 | In-tree C smoke tests (`hello.c`, `ctest.c`) | any |
 | Third-party configure/make C software | a **POSIX** host: Linux, WSL, or the podman container `just test-linux` already uses |
 
-On that host a `cc` for the target does the same two halves `build-c-hello.py`
-assembles by hand: compile with clang
+On that host `tools/cc-minix.py` is that `cc` — the command a C project's own
+build system reaches — doing the same two halves `build-c-hello.py` assembles by
+hand: compile with clang
 `--target=x86_64-unknown-none -ffreestanding -mno-red-zone -fno-stack-protector -fno-pic`
 plus the hermetic include flags from `tools/ccflags.py`; link by compiling the C
 inputs and driving the fork's rustc with `tools/crt0-x86_64.S`,
@@ -141,9 +142,8 @@ banner and executes: `-c 'echo BASH-OK'`, an arithmetic expansion, a `for` loop,
 a redirect with a read-back, and — once `getcwd` existed — `$PWD` from its own
 startup.
 
-The steps that prove each of those, with the read-back each one needs, are in
-`target/tmp/bash-run.tsv` and `target/tmp/cwd.tsv`. Both are scratch: `/bin/bash`
-is not a `BOOT_BINS` entry, so no committed recipe boots bash at all.
+The steps that prove each of those, with the read-back each one needs, are
+`tools/smoke/bash.tsv`, driven by `just test-bash` — the committed path, below.
 
 What it took, beyond the hermetic compile above:
 
@@ -210,19 +210,35 @@ retrieving current directory: getcwd: cannot access parent directories: Unknown
 error`. The missing call was `getcwd`; the *name* of the failure was missing
 from `strerror`, whose table stopped at 34 (see the errno note at the end).
 
-**What is left is making it a committed path.** `/bin/bash` has to go into the
-image without `MINIXFS_EXTRA` — a `BOOT_BINS` entry in
-`crates/boot-image/src/manifest.rs`, as `/bin/ctest` has — which needs the build
-tracked rather than a scratch `cc` in `target/tmp/`, and then a scenario of its
-own, because nothing in the smoke suite exercises bash's startup: its profile
-files, its terminal setup and its forking are still only as tested as typing
-into it once.
+**The committed path.** The build is tracked now — `tools/build-bash.py` fetches
+bash at a pinned upstream commit (a git checkout rather than a release tarball:
+that is what the working build was validated against, and the generated files the
+tarball would add are the ones whose regeneration the traps below are about),
+rebuilds `minix-libc` with the host's own stage1, configures, links and publishes
+`target/bash/bash`. On Windows it re-enters WSL by itself (`MINIX_WSL_DISTRO`
+picks the distribution), because the stage1, the rlib and clang have to be the
+same host's — which is the whole of why this route is Linux.
+
+`just build-bash` runs it; `just test-bash` then injects the result as `/bin/bash`
+through `MINIXFS_EXTRA` (still not a `BOOT_BINS` entry: an image that always
+carried a 1.4 MB bash would only build where bash had been built) and drives
+`tools/smoke/bash.tsv` at it in the guest — the banner, `-c`, arithmetic, a loop,
+a redirect read back through a second process, an external command (bash's
+fork+exec path) and `$PWD` from its own startup. CI's `bash` job runs exactly
+that pair, and it is in the release's `needs`, so a C surface that builds bash
+but breaks it blocks a release.
+
+**What that still does not cover:** an *interactive* bash. The driver types into
+the minix shell and waits for its `#` prompt, which bash's `bash-5.3#` replaces,
+so every step is a fresh `bash -c`. Its profile files, its terminal setup
+(`tcsetattr` into raw mode) and readline are therefore still only as exercised as
+typing at it by hand once — the one part of bash a scenario cannot reach yet.
 
 ## Traps
 
 - **The rlib has two builders, and each thinks its own build is current.**
-  `tools/build-c-hello.py` links with the *Windows* stage1, the bash `cc` with the
-  *Linux* one, and both write into `target/x86_64-pc-minix/release/deps/`.
+  `tools/build-c-hello.py` links with the *Windows* stage1, `tools/cc-minix.py`
+  with the *Linux* one, and both write into `target/x86_64-pc-minix/release/deps/`.
   Measured: they do **not** always share a filename — editing the libc changed the
   hash, and two `libminix_libc-<hash>.rlib` files then sat in `deps/` at once. The
   wrapper takes the newest by mtime, so a `just build-x86` (Windows) run *after*
@@ -230,12 +246,16 @@ into it once.
   Windows-built `core`, and the link fails with `E0460: found possibly newer
   version of crate core`. The asymmetry is the rest of the trap: the *Linux* build
   must delete the rlib first (`rm -f
-  target/x86_64-pc-minix/release/deps/libminix_libc-*.rlib` before rebuilding,
-  which `target/tmp/build-minix-libc-linux.sh` does not do on its own) because its
-  fingerprint says "current" and it skips the build, while the Windows build
-  recompiles by itself, having seen the output change. Keep the order the recipe
-  uses — delete, build with the Linux stage1, then link — with no Windows minix
-  build in between.
+  target/x86_64-pc-minix/release/deps/libminix_libc-*.rlib` before rebuilding)
+  because its fingerprint says "current" and it skips the build, while the Windows
+  build recompiles by itself, having seen the output change. `tools/build-bash.py`
+  does that deletion itself; keep its order — delete, build with the Linux stage1,
+  then link — with no Windows minix build in between.
+- **`cargo clean` takes the bash source with it.** `bootstrap` and `fetch-stage1`
+  both begin with one, and everything bash's build keeps under `target/`
+  (`bash-src`, `bash-build`, the artifact) is inside what it removes. So build
+  bash *after* the toolchain: otherwise the next `just build-bash` refetches and
+  reconfigures from scratch, with no error to say why.
 - **`make` reports success without relinking when only the libc changed.** The
   rlib is not a prerequisite of any bash target, so with every `.o` newer than
   `bash`, `make` does nothing and says so: `make exit: 0`, 203 objects, and the

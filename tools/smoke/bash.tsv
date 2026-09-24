@@ -1,0 +1,26 @@
+# The bash scenario — what the port's largest C consumer has to answer.
+#
+#   FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# Driven by `just test-bash`, which builds bash from the pinned upstream commit
+# (`tools/build-bash.py`) and injects it as /bin/bash, because it is deliberately not a BOOT_BINS
+# entry: an image that always carries a 1.4 MB bash would only build where bash had been built.
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the whole line
+# its output must produce. Every step is a fresh `bash -c`, not an interactive bash — the driver
+# types into the *minix* shell and waits for its `#` prompt, which an interactive bash would replace
+# with `bash-5.3#`. What that leaves untested is bash's own terminal setup and readline: entering
+# raw mode is still only as exercised as typing into it by hand.
+#
+# What the steps cover, in the order bash reaches them: its version banner, a command line from -c,
+# arithmetic expansion, a loop, a redirection written and read back through a second process, an
+# external command (the fork+exec path — `cat` is not a builtin, and a forked child reading memory
+# its parent has already freed is what killed it), and $PWD from bash's own startup, which needs
+# getcwd and chdir and is why `shell-init: error retrieving current directory` is gone.
+
+/bin/bash --version	GNU bash, version.*
+/bin/bash -c 'echo BASH-OK'	BASH-OK
+/bin/bash -c 'x=$((6*7)); echo MATH=$x'	MATH=42
+/bin/bash -c 'for i in 1 2 3; do echo LOOP-$i; done'	LOOP-3
+/bin/bash -c 'echo BH-WRITE > /tmp/bh.txt; cat /tmp/bh.txt'	BH-WRITE
+/bin/bash -c 'cd /tmp && printf "PWD=%s\n" "$PWD"'	PWD=/tmp

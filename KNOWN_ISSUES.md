@@ -1505,7 +1505,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `/usr/include/strings.h`, which pulls `bits/types/locale_t.h`, which collided
   with the port's own `locale_t`. The flags — `-nostdinc -isystem
   <clang resource dir>/include -I tools/c-include` — now live in
-  `tools/ccflags.py`, shared by `tools/build-c-hello.py` and the bash `cc`. A
+  `tools/ccflags.py`, shared by `tools/build-c-hello.py` and `tools/cc-minix.py`. A
   missing header is a hard error now, which is the point. What it fixed, in
   order: `_POSIX_VERSION` had to exist for bash to stop using `union wait`;
   `HAVE_TERMIOS_H` answers no; `clock_t` needed a `sys/times.h` to be found
@@ -1514,14 +1514,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   which `HANDLE_MULTIBYTE` is off while bash's globbing still uses an identifier
   only the multibyte branch declares. `C_BUILD.md` has the write-up.
   (`tools/ccflags.py`, `tools/build-c-hello.py`)
-- **What the hermetic compile then exposed: the port's own missing headers.**
-  With the host out of the picture, the bash build's remaining errors are a
-  to-do list rather than a mystery: `sgtty.h` in 5 files (bash's terminal
-  handling falls back to sgtty because there is no `termios.h`, which is the
-  next real piece and is kernel-facing), `sys/ioctl.h` (window size),
-  `sys/param.h` (`MAXPATHLEN`), and `mktemp`/`mknod` (absent from the libc).
-  `netopen.c`'s `_`/`internal_error` is a different shape — NLS-disabled gettext
-  — and is not diagnosed. (`tools/c-include`, `crates/minix-libc`)
+- **~~What the hermetic compile then exposed: the port's own missing headers~~
+  — FIXED (2026-09-24).** With the host out of the picture the bash build's
+  errors became a to-do list, and every entry is closed now: `termios.h` and the
+  tty surface behind it (`tcgetattr`/`tcsetattr`/`tcgetpgrp`/`cfmakeraw`, …),
+  `sys/ioctl.h`, `sys/param.h`, `utime.h`, `netinet/in.h`/`arpa/inet.h`,
+  `mktemp`, `mknod`/`mkfifo`, `times`, `bsearch`, `wcwidth`/`mbstowcs`, and
+  `_POSIX_VERSION` in `unistd.h`. `C_BUILD.md`'s "the missing terminal
+  interface" list is the inventory, and bash configuring, compiling and linking
+  at all is the check on it (`just build-bash`).
+  (`tools/c-include`, `crates/minix-libc`)
 - **The C headers are generated and checked, and both sides agree.**
   `tools/gen-c-headers.py` derives the headers from the libc with cbindgen into
   `target/c-include/`; `tools/check-c-headers.py` asserts the two sides agree and
@@ -1555,20 +1557,34 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `getenv: hello` passes, and the same run with an impossible readback fails, so
   the check itself is sound. A scenario step is what would stop it depending on
   that. (`tools/ctest.c`, `tools/build-c-hello.py`, `tools/smoke/feed.sh`)
-- **bash is built by a scratch route and no gate boots it.** `/bin/bash` is not in
-  `BOOT_BINS`, so it only reaches an image through `MINIXFS_EXTRA`, and the binary
-  itself is the Linux-host build in `target/tmp/` (see `C_BUILD.md`) — nothing
-  tracked rebuilds it. That makes two traps live whenever the libc changes:
-  `make` reports success *without* relinking (the rlib is not a prerequisite of
-  any bash target, so a `make exit: 0` with 203 objects and an unchanged binary
-  mtime is the normal outcome — the mtime is the only evidence a relink
-  happened), and `target/tmp/cc-minix` takes the *newest* `libminix_libc-*.rlib`
-  in `deps/`, which after a Windows `just build-x86` is the other host's rlib
-  (the link then fails `E0460: found possibly newer version of crate core`).
-  Verified by hand: `/bin/bash -c 'printf "PWD=%s\n" "$PWD"'` prints
-  `PWD=/tmp/cwdtest` from a scratch scenario, and before the forced relink the
-  same step carried the `shell-init: error retrieving current directory` line.
-  (`target/tmp/bash-*.sh`, `target/tmp/cc-minix`, `C_BUILD.md`)
+- **bash is a committed build with a gate (2026-09-25).** `tools/build-bash.py`
+  fetches bash at a pinned upstream commit, rebuilds `minix-libc` with this
+  host's stage1, configures against `tools/c-include`, links with
+  `tools/cc-minix.py` and publishes `target/bash/bash`. On Windows the script
+  re-enters WSL by itself (`MINIX_WSL_DISTRO` picks the distribution), because
+  the stage1, the rlib and clang all have to be the same host's. `just test-bash`
+  injects the result as `/bin/bash` — still not a `BOOT_BINS` entry, so an image
+  build never depends on bash having been built — and drives
+  `tools/smoke/bash.tsv` in the guest: six steps, all green (the banner, `-c`,
+  arithmetic, a loop, a redirect read back through a second process, an external
+  command, which is bash's fork+exec path, and `$PWD` from its own startup).
+  CI's `bash` job runs that pair and is in the release's `needs`, so a C surface
+  that builds bash but breaks it blocks a release.
+
+  Both traps this route has are handled by the tools rather than by whoever runs
+  them: the **forced relink** (`make` reports success *without* one when only the
+  rlib changed — the rlib is a prerequisite of no bash target, so the binary's
+  mtime is the only evidence) and the **rlib's two builders**
+  (`tools/build-bash.py` deletes the stale rlib and rebuilds with this host's
+  stage1, which is what makes `tools/cc-minix.py`'s newest-by-mtime pick the
+  right one; otherwise the link fails `E0460: found possibly newer version of
+  crate core`).
+
+  Still not covered: an **interactive** bash. The driver types into the minix
+  shell and waits for its `#` prompt, which bash's `bash-5.3#` replaces, so every
+  step is a fresh `bash -c`; readline and the terminal setup (`tcsetattr` into
+  raw mode) are as untested as before. (`tools/build-bash.py`,
+  `tools/cc-minix.py`, `Justfile`, `tools/smoke/bash.tsv`, `C_BUILD.md`)
 - **~~`signal.h` and `minix-libc` disagree on `sigprocmask`~~ — FIXED
   (2026-09-24).** `minix-std`'s signature is now
   `sigprocmask(how, set_ptr, old_ptr)` (PM's `m2l1`/`m2l2`, both caller
