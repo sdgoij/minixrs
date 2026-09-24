@@ -2480,17 +2480,20 @@ fn do_fork(msg: &mut Message) -> i32 {
         if child_cr3 != 0 {
             let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
         }
-        // COW bookkeeping: the fork COW-protects the child's shared frames
-        // (aarch64 now included), so walk the tables and register the shared
-        // frames in the PhysBlock table before the child runs. Nothing on wasm
-        // shares a frame — the child's memory is a copy, not a shared leaf — so
-        // there is nothing to register and no table to walk.
+        // COW bookkeeping: the fork left the child's writable pages sharing the
+        // parent's frames with the child's write bit cleared (aarch64 now
+        // included), so walk the tables and give the child a private copy of
+        // each one — or, for a frame that is genuinely shared (a MAP_SHARED file
+        // page, whose frame is the cache's), register it in the PhysBlock table
+        // instead.
+        // Nothing on wasm shares a frame — the child's memory is a copy, not a
+        // shared leaf — so there is nothing to register and no table to walk.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let child_cr3 = unsafe { proc::vm_get_addrspace(child_ep) };
             let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
             if parent_cr3_val != 0 && child_cr3 != 0 {
-                let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3) };
+                let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3, child_ep) };
             }
         }
     }

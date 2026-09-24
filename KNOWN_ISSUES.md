@@ -31,10 +31,15 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK` value)
    were tried and reverted. Open: profile MFS's cache/read-ahead against
    the virtio request stream. (FILEMMAP §7)
-3. **`mmap(fd)` MAP_SHARED semantics** — no consumer yet (exec + the
-   `mmapfd` test binary are MAP_PRIVATE-only). A shared file mapping would
-   reintroduce COW for shared file pages, which the current per-process
-   private-page design avoids. (FILEMMAP §6)
+3. **`mmap(fd)` MAP_SHARED semantics** — implemented (MAP_SHARED sets
+   `VR_SHARED`, the pages are file-cache frames shared between processes) and
+   exercised by `mmapfd shared`, which forks and checks that the child's write is
+   visible in the parent's view. It is deliberately the *only* place a frame is
+   shared for writing: the fork keeps such a page aliased (item 27) and
+   `handle_cow_fault` re-enables writability in place instead of copying. What
+   is still unbuilt is the *reverse* case — a shared *anonymous* mapping, or a
+   file mapping whose cache page is evicted underneath it (item 1's stub cache).
+   (FILEMMAP §6)
 4. **~~VFS `do_fstat` never copies the `Stat` back~~ — FIXED.** The stat
    path now works end-to-end: VFS `do_stat`/`do_fstat`/`do_lstat` pass the
    caller's buffer + `size_of::<Stat>()` to `req_stat` (was `null_mut`, 0);
@@ -1153,6 +1158,47 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     file's is `S_IFREG`. The ioctl is *not* a test: VFS answers an ioctl it does
     not route with `OK`, which is how `ls | cat` laid out columns before the
     check above existed. (`crates/minix-libc/src/c_sys.rs`)
+27. **A fork shared the parent's writable pages with the child, so the parent's own writes
+    reached the child (2026-09-24, FIXED).** `vm_paging_fork` clears `PG_RW` on the child's
+    writable user leaves and leaves the parent's alone, so after a fork the parent still had
+    write access to the very frames the child aliased. Every write the parent made between the
+    fork and the child's first store to a page was therefore visible to the child — the fork was
+    not the snapshot `fork(2)` promises, in the direction nobody tested (`/bin/forktest` only
+    checked that the *child's* write did not reach the parent).
+
+    *Found through bash (see `C_BUILD.md`).* A command that forks — `cat /etc/passwd`, and any
+    other external command — killed the child with a ring-3 `#GP` at `list_length`
+    (`G0000 0000000001084590 001B …`). The fault-time register file, read with a gdbstub
+    breakpoint on `exception_gpf_entry` (`target/tmp/bash-gpf-probe.py`), gave
+    `rax=0xdfdfdfdfdfdfdfdf` — non-canonical, and the operand of the faulting
+    `mov (%rax),%rax`. `0xdf` is bash's own poison: `ocache_free` (`bash/include/ocache.h`)
+    `OC_MEMSET`s a freed word list with it. `execute_simple_command` runs `dispose_words (words)`
+    in the *parent* right after `execute_disk_command`'s fork (`execute_cmd.c:4945`), and the
+    child's first use of that list is `list_length` inside `strvec_from_word_list`, so the child
+    read the parent's scrub as a `next` pointer. The child had never written the block, which is
+    why the sibling page it did write (`/bin/forktest`'s) never saw it: a store gets a private
+    copy either way, and only a *read* of an untouched page shows the leak.
+
+    *Fixed* in VM: `cow_setup_fork` now walks the same leaves and, for each page carrying the
+    kernel's fork marker that is not in a `VR_SHARED` region, gives the child a private copy
+    (`vm_alloc_pages` + `vm_copy_pages` + `vm_map_page_in`) instead of aliasing the frame.
+    Genuinely shared pages (MAP_SHARED file pages, whose frame is the file cache's) keep the
+    alias and their PhysBlock reference, which is what `handle_cow_fault`'s `VR_SHARED` branch
+    re-enables writability on. Nothing is left read-only for the parent, so no kernel-side write
+    (`sys_vircopy`, `write_to_proc`, `delivermsg`) can fault on a COW page — that is the trade:
+    the reference's both-sides COW needs the `vm_suspend`/`VMSUSPEND` path (MINIX
+    `arch/i386/memory.c:virtual_copy_f`), which suspends the caller, hands VM the *target* of the
+    copy, and restarts the kernel call; this port has no such path, and a kernel copy that hit a
+    read-only user page would be blamed on the running server (`handle_page_fault` uses
+    `current_proc()`) and kill it. Deferred, not lost.
+
+    *Covered* by `/bin/forktest`, which now also checks the direction that was missing: a page
+    the child only reads must keep its fork-time contents while the parent writes it. Verified
+    both ways — green with the copy, and with the copy disabled as a negative control it reports
+    `forktest: parent's write reached the child (fork not a snapshot)` and exits 6.
+    (`crates/servers/src/vm/cow.rs`, `crates/servers/src/vm/mod.rs`,
+    `crates/userland/src/bin/forktest.rs`)
+
 ---
 
 ## x86_64 (`[x86]`)
@@ -1246,16 +1292,17 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 ## AArch64 (`[aarch64]`)
 
 1. **Fork is a proper COW fork (was deep copy).** x86/riscv fork by clearing
-   the child's write bit and sharing frames read-only with PhysBlock
-   refcounts; aarch64 now does the same, with the access encoding expressed
+   the child's write bit; aarch64 does the same, with the access encoding expressed
    through HAL helpers (`pte_is_writable`/`pte_set_writable`/`pte_is_user`)
-   because AP[2:1] is a 2-bit field, not a single RW bit. The child's
-   owned leaves map the parent's frame with AP = read-only; the parent's
-   PTEs are untouched; the shared low-GB alias leaves stay verbatim
+   because AP[2:1] is a 2-bit field, not a single RW bit. That cleared bit is the
+   fork *marker* VM reads: `cow_setup_fork` then gives the child a private copy of
+   each marked page, keeping the alias only for MAP_SHARED frames (item 27 — the
+   parent's PTEs used to stay writable with the frame shared, so the parent's own
+   writes reached the child). The shared low-GB alias leaves stay verbatim
    (`alloc::is_alias_frame` — never copied, never COW'd). VM's
    `cow_setup_fork` + the COW message-buffer prefault are active. Verified
-   by `/bin/forktest` (fork + write isolation) on all three arches and the
-   flat exec loop. (`crates/arch-aarch64/src/fork.rs`, `crates/servers/src/vm/cow.rs`)
+   by `/bin/forktest` (fork + write isolation, both directions) on all three arches
+   and the flat exec loop. (`crates/arch-aarch64/src/fork.rs`, `crates/servers/src/vm/cow.rs`)
 2. **Per-exec leak: 0** — the exec loop is flat at leak 0.0 KiB/exec at
    256M/1G/4G.
 3. **Kernel-range fault gate — FIXED (D3, 2026-08-17).** aarch64's
@@ -1330,11 +1377,17 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `mcontext.rs`, `psl.rs`, …) and let `hal` delegate to it; verify the target-only
   code by running the arch's QEMU gate.
 - `/bin/forktest` (userland bin, `crates/userland/src/bin/forktest.rs`) is
-  the fork + COW isolation test: a 4 KiB writable `.data` page is filled,
-  forked, and both sides write disjoint patterns; the parent verifies the
-  child's write did not land in its view (COW private copy) and the child
-  verifies its own write. It runs as a normal command (shell fork → exec);
-  for image injection use `MINIXFS_EXTRA=/bin/forktest=...`.
+  the fork isolation test: two 4 KiB writable `.data` pages (separately aligned,
+  so a store to one cannot drag the other across the fork) are filled, forked, and
+  both sides checked. The child writes `PAGE` and verifies its own write; the
+  parent verifies the child's write did not land in its view. Then the parent
+  writes `WATCH` — which the child only ever *reads* — and the child, after a spin
+  long enough for a timer quantum to land in it, verifies it still reads the
+  fork-time contents. That last step is the one that catches a fork whose pages
+  are shared rather than copied: a page the child writes gets a private copy
+  either way, so only a read of an untouched page shows the parent's post-fork
+  write reaching the child (item 27). It runs as a normal command (shell fork →
+  exec); for image injection use `MINIXFS_EXTRA=/bin/forktest=...`.
 - Two cross-arch bugs found while landing the aarch64 COW fork (fixed):
   (1) `do_vfs_mmap` removed a whole overlapping region when a later
   PT_LOAD segment shared its rounded-up tail page (data memsz spanning the

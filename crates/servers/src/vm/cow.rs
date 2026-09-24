@@ -1,31 +1,56 @@
-//! COW (Copy-on-Write) page fault handling for VM.
+//! Fork-time memory decisions and the page faults that finish them.
 //!
-//! When a forked process (parent or child) writes to a shared page,
-//! the page fault handler in `mod.rs` detects it and calls
-//! `handle_cow_fault` to allocate a private copy.
+//! `cow_setup_fork` runs at fork: it turns each page carrying the kernel's fork
+//! marker into either a private copy for the child or, for a genuinely shared
+//! frame (a MAP_SHARED file page), a tracked alias.
+//!
+//! `handle_cow_fault` is what is left for a write fault on a page that is still
+//! read-only and present: re-enabling writability on a shared frame in place, or
+//! copying a page whose writer must not disturb the other process.
 
 use crate::vm::pb;
 use crate::vm::proc::Vmproc;
 use kernel::hal::{pte_is_user, pte_is_writable, pte_set_writable, pte_to_phys};
 use kernel::pagetable::{PG_P, PG_PS};
 
-/// Set up COW for a fork: create PhysBlock entries for all shared
-/// user-writable pages with refcount=2.
+/// Finish a fork's memory: turn every page whose child PTE carries the COW
+/// marker (the kernel's `vm_paging_fork` clears the write bit on the child's
+/// writable user leaves, and only there) into either a private copy of the
+/// child's own or a tracked reference to a genuinely shared frame.
 ///
-/// The kernel's vm_paging_fork_x86_64 has already cleared the RW bit
-/// on all user-writable PTEs in both parent and child page tables.
-/// This function only manages the PhysBlock refcounting so that
-/// handle_cow_fault can track shared pages.
+/// A private page is copied rather than aliased: with the parent still holding
+/// write access to the frame, every write the parent makes after the fork is
+/// visible to the child, so the fork is not the snapshot fork(2) promises.
+/// Measured with bash: the parent's `dispose_words` runs right after
+/// `execute_disk_command` forks and scrubs the command's just-freed word list
+/// with 0xdf (its `ocache_free`), and the child read that 0xdf back as the
+/// list's `next` pointer and took a ring-3 #GP in `list_length`.
 ///
-/// Called from VM's do_fork after vm_paging_fork creates the child
-/// page table but before the child runs.
-pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
+/// A shared page (`VR_SHARED`, a MAP_SHARED file page whose frame belongs to
+/// the file cache) keeps the alias — seeing each other's writes through the
+/// frame is the point — and is registered with a second reference so teardown
+/// does not free the cache's frame. `handle_cow_fault` re-enables writability
+/// on it in place.
+///
+/// Called from VM's do_fork after vm_paging_fork creates the child page table
+/// but before the child runs.
+pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i32) -> i32 {
     if parent_cr3 == 0 || child_cr3 == 0 {
         return -1;
     }
 
     const USER_ENTRIES: usize = 256;
     const ALL_ENTRIES: usize = 512;
+
+    // The child's regions are the parent's, copied by vm_clone, so the region
+    // that covers a page is the one the fork decision has to key on.
+    let is_shared_region = |va: u64| -> bool {
+        unsafe { crate::vm::proc::vmproc_lookup(child_ep) }.is_some_and(|vmp| {
+            vmp.vm_regions
+                .find(va)
+                .is_some_and(|r| r.flags & crate::vm::region::VR_SHARED != 0)
+        })
+    };
 
     // Walk parent's user-half page tables to discover shared pages.
     // We must use vm_mappage to map physical page table pages into
@@ -139,6 +164,29 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                         if child_e2 & PG_P == 0 || pte_is_writable(child_e2) {
                             continue;
                         }
+                        // SV39: PGD index 30, PMD 21, PTE 12 — the walk here
+                        // iterates root, middle, leaf, so the leaf is this level.
+                        let va = ((l4 as u64) << 30) | ((l3 as u64) << 21) | ((l2 as u64) << 12);
+                        if !is_shared_region(va) {
+                            let new_phys = crate::vm::vm_alloc_pages(1);
+                            if new_phys != 0
+                                && crate::vm::vm_copy_pages(phys, new_phys, 1) == 0
+                                && crate::vm::vm_map_page_in(
+                                    child_cr3,
+                                    va,
+                                    new_phys,
+                                    pte_set_writable(child_e2),
+                                ) == 0
+                            {
+                                continue;
+                            }
+                            if new_phys != 0 {
+                                crate::vm::vm_free_pages(new_phys, 1);
+                            }
+                            // Out of memory: fall through and track the alias
+                            // instead, so the frame is not freed while the
+                            // parent still maps it.
+                        }
                         let pb_idx = match pb::pb_find(phys) {
                             Some(idx) => {
                                 pb::pb_ref(idx);
@@ -211,6 +259,32 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
                         continue; // child not COW-protected — no sharing to track
                     }
 
+                    // 4-level: PML4 index 39, PDPT 30, PD 21, PT 12.
+                    let va = ((l4 as u64) << 39)
+                        | ((l3 as u64) << 30)
+                        | ((l2 as u64) << 21)
+                        | ((l1 as u64) << 12);
+                    if !is_shared_region(va) {
+                        let new_phys = crate::vm::vm_alloc_pages(1);
+                        if new_phys != 0
+                            && crate::vm::vm_copy_pages(phys, new_phys, 1) == 0
+                            && crate::vm::vm_map_page_in(
+                                child_cr3,
+                                va,
+                                new_phys,
+                                pte_set_writable(child_e1),
+                            ) == 0
+                        {
+                            continue;
+                        }
+                        if new_phys != 0 {
+                            crate::vm::vm_free_pages(new_phys, 1);
+                        }
+                        // Out of memory: fall through and track the alias
+                        // instead, so the frame is not freed while the parent
+                        // still maps it.
+                    }
+
                     // Set up PhysBlock with refcount=2
                     let pb_idx = match pb::pb_find(phys) {
                         Some(idx) => {
@@ -247,8 +321,11 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64) -> i32 {
 
 /// Handle a COW page fault for process `vmp` at `fault_addr`.
 ///
-/// Called when a write page fault occurs on a present, read-only page
-/// that belongs to a writable region (shared via fork).
+/// Called when a write page fault occurs on a present, read-only user page.
+/// That is now either a MAP_SHARED frame (re-enable writability in place, so
+/// both processes keep writing the same frame) or a read-only page someone is
+/// writing that must not be shared — a copy nothing else references. Pages the
+/// fork left shared are resolved in `cow_setup_fork` before the child runs.
 ///
 /// 1. Walk the page table to find the PTE and physical address.
 /// 2. Find the `PhysBlock` for this physical address.
