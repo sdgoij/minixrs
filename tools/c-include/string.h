@@ -17,6 +17,10 @@ void *memmove(void *dst, const void *src, size_t n);
 void *memchr(const void *s, int c, size_t n);
 int strcmp(const char *a, const char *b);
 int strncmp(const char *a, const char *b, size_t n);
+/* The POSIX home for these two is <strings.h>; glibc also declares them here
+ * under _DEFAULT_SOURCE, and callers that include only <string.h> rely on it. */
+int strcasecmp(const char *a, const char *b);
+int strncasecmp(const char *a, const char *b, size_t n);
 int strcoll(const char *a, const char *b);
 int strcoll(const char *a, const char *b);
 char *strcpy(char *dst, const char *src);

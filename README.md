@@ -35,7 +35,8 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
 - **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three hardware arches (x86_64, RISC-V64, AArch64).
 - **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
 - **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
-- **uutils/coreutils builds for minix** — the `echo` util compiles and links for `x86_64-pc-minix` against the fork's std (the `coreutils` submodule tracks the port; not yet booted on the OS).
+- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port.
+- **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
 
 ## Quick Start

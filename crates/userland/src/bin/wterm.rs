@@ -387,7 +387,7 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                 // manual_c_str_literals fires on the host toolchain).
                 #[allow(clippy::manual_c_str_literals)]
                 let argv = [b"/bin/sh\0".as_ptr(), ptr::null()];
-                let _ = minix_std::process::exec(b"/bin/sh", &argv);
+                let _ = minix_std::process::exec(b"/bin/sh", &argv, &[]);
             }
             minix_rt::exit(1);
         }

@@ -1057,7 +1057,78 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     Its gate belongs in `tools/smoke/long-path.tsv` (whose header says why no step goes
     above the 28-byte create limit) or beside it.
     Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
+21. **~~The environment did not survive `exec`~~ — FIXED (2026-09-24).**
+    Every process started with an empty environment whatever its parent passed:
+    the chain dropped `envp` at all three of its Rust-side links. The C
+    `execve` took `_envp` and ignored it, `minix_std::process::exec` had no
+    environment parameter and handed the frame builder a null, and `getenv` was
+    a stub that returned NULL — while `minix_rt::execve` and the kernel's frame
+    *parser* already carried `envp`, so half of it was built and nothing used
+    it. Now the C `execve` counts `envp` (capped at 63, which is what the frame
+    holds), `minix_std::process::exec` takes and forwards it, `crt0` publishes
+    the block as `environ` through `__minix_set_environ` before `main` (so a
+    constructor can `getenv`, and `environ` is an empty array rather than null
+    before that), and `getenv` walks the block. Measured in an x86 guest:
+    `tools/ctest.c` re-execs itself with `CTESTENV=hello` and the child prints
+    `getenv: hello`; before the fix the same step printed `getenv: unset`. This
+    is what bash needs for `PATH`, `HOME` and `TERM` and for its children.
+    (`crates/minix-libc/src/c_sys.rs`, `crates/minix-std/src/process.rs`,
+    `crates/minix-libc/src/c_stdlib.rs`, `tools/crt0-x86_64.S`)
 
+22. **~~The shell did not remove quotes~~ — FIXED (2026-09-24).**
+    `crates/userland/src/shell.rs` split a command line with
+    `split_whitespace()`, so a quoted argument reached its program as
+    fragments: `bash -c 'echo BASH-OK'` handed bash `'echo` and `BASH-OK'`, and
+    bash's reply — ``BASH-OK': -c: line 1: unexpected EOF while looking for
+    matching `''` — reads as a defect in bash rather than in the shell that fed
+    it. Nothing in the tree had used a quote before, which is why it survived:
+    every smoke scenario and every `MINIXFS_EXTRA` probe is quote-free. The
+    tokenizer is quote-aware now (`shell.rs::tokenize`): `'…'` and `"…"` are
+    stripped in place, whitespace inside them stays in its word, a backslash
+    escapes the byte after it, `echo ''` still passes one empty argument, and an
+    unclosed quote is refused (`sh: unexpected EOF while looking for matching
+    `'`) instead of being run with the quote as text. Measured in an x86 guest:
+    `/bin/bash -c 'echo BASH-OK'` prints `BASH-OK`; before, it printed the
+    unmatched-quote error. Unit tests (`shell::tests::tokenize_*`) cover the
+    cases the guest cannot reach cheaply.
+23. **~~`getcwd` was a stub returning `ENOSYS`~~ — FIXED (2026-09-24).**
+    VFS holds a directory's *vnode*, not its name, so the name has to be
+    recovered by walking up: `stat(".")` and `stat("..")` identify the
+    directory, a scan of `".."` finds which entry holds that inode, and
+    `chdir("..")` moves up for the next round — root is where the two stats
+    agree. That is MINIX's own `__getcwd`
+    (`minix/lib/libc/sys/__getcwd.c`) and the port now ports it, including its
+    duty to restore the caller: the walk ends at the root, so the components it
+    found are re-descended before returning, on the failure paths as well as the
+    success one. The allocate form `getcwd(NULL, size)` is implemented too,
+    because that is how bash asks (`getcwd(0, PATH_MAX)`,
+    `bash/builtins/common.c`). Measured in an x86 guest from `/tmp/cwdtest`:
+    `getcwd=/tmp/cwdtest errno=0`, `getcwd(NULL,0)=/tmp/cwdtest`, and a
+    relative-path write issued *after* the call lands in `/tmp/cwdtest` — which
+    is the restore duty, not a formality. bash's startup then reports a cwd of
+    its own: `/bin/bash -c 'printf "PWD=%s\n" "$PWD"'` prints
+    `PWD=/tmp/cwdtest`, and the `shell-init: error retrieving current directory`
+    line is gone.
+    The failure's *name* was a second gap in the same path: `strerror`'s table
+    stopped at 34, so `strerror(ENOSYS)` (78 here) said "Unknown error" and the
+    real message was `getcwd: cannot access parent directories: Unknown error`.
+    The table now covers every errno `tools/c-include/errno.h` declares, with a
+    host test that reads the header and asserts it
+    (`c_string::tests::every_declared_errno_has_a_message`) and a second that
+    holds every message inside `strerror`'s buffer, which was 32 bytes and
+    silently truncated the long ones.
+    (`crates/minix-libc/src/c_sys.rs`, `crates/minix-libc/src/c_string.rs`)
+24. **`std::env::current_dir` has no implementation for minix (2026-09-24,
+    open).** `rust/library/std/src/sys/paths/mod.rs` routes `target_os =
+    "minix"` to `sys::paths::unsupported`, so `current_dir` returns
+    "unsupported operation" whatever the libc can do — it does not call
+    `getcwd`, which is why item 23 does not fix it. `std::env::current_dir`,
+    `std::fs::canonicalize` and `Command::current_dir` all go through it, so
+    `coreutils pwd` fails and any applet that resolves a relative path in Rust
+    rather than leaving it to VFS is wrong. The fix is to route minix to
+    `sys/paths/unix.rs::getcwd` (which calls `libc::getcwd` and grows on
+    `ERANGE`); it needs the Rust fork and a stage1 rebuild, so it is not a change
+    to make alongside libc work.
 25. **~~MFS `getdents` returned `OK` at end-of-directory without a reply payload~~
     — FIXED (2026-09-24).** The end-of-directory path returned a bare `0`,
     which the VFS reads as `OK`, and then took `nbytes` from a payload that path
@@ -1279,9 +1350,47 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   (< 4 regions/exec, < 16 pages/exec, < 16 pages/exec leak).
 - `[env]` `mkboot`/QEMU process lock (LNK1104) — `taskkill` the stale
   qemu-system-* processes before re-running builds.
-- `[env]` MSYS mangles POSIX-style env values (`MINIXFS_EXTRA=dest=...`);
-  the `mkfs-*` recipes now set `MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA` so
-  `mkfs.exe` sees the value verbatim.
+- **`coreutils/build.rs` must not declare a `rerun-if-changed` path it does
+  not have (2026-09-24, patched in the submodule).** It emitted
+  `cargo:rerun-if-changed=docs/tldr.zip` unconditionally, and that archive is
+  in `docs/.gitignore` — a download, read only by the `uudoc` binary we do not
+  build — so the path is *missing* in every checkout, and cargo treats a
+  declared-but-missing path as always changed. The build script therefore
+  re-ran on every build, rewrote `uutils_map.rs`, and dirtied the crate through
+  `StaleDepFingerprint`: `Compiling coreutils` (~30-48 s) on every
+  `just build-x86`, with no input changing. Cargo names the reason itself under
+  `CARGO_LOG=cargo::core::compiler::fingerprint=info`, which is how it was
+  found: `dirty: FsStatusOutdated(StaleItem(MissingFile { path:
+  "…/docs/tldr.zip" }))`. The `println!` is inside an `exists()` guard now, and
+  `just build-x86` went from ~50 s to ~5 s. **It is a patch to the `coreutils`
+  submodule, so a rebase onto upstream drops it** and the ~45 s per build
+  returns silently; re-apply it there, and use that `CARGO_LOG` line to tell
+  "the build is slow" from "something is being rebuilt that should not be".
+- `[env]` **MSYS converts a POSIX-style `MINIXFS_EXTRA` value on the way to a
+  native tool, and the file lands in `/` instead of `/bin` (2026-09-24).** The
+  exclusion used to be only on the `mkfs-*` lines, and those do not read the
+  variable — it is read by the *kernel* build script, reached through `build-*`.
+  So `$env:MINIXFS_EXTRA='/bin/bash=…'; just run` produced `/bash`: the
+  converted dest (`C:/Program Files/Git/bin/bash`) fails `starts_with("/bin/")`
+  and `boot-image::minixfs` routes anything unrecognised to the root,
+  *silently* — the file's data and a well-formed dirent both existed, in the
+  wrong directory, and `ls /bin` simply did not list it. Both halves are fixed:
+  the Justfile exports `MSYS2_ENV_CONV_EXCL` for every recipe, and
+  `crates/kernel/build.rs` refuses a dest that is not `/bin/`, `/sbin/` or
+  `/etc/`, naming the exclusion in its message.
+
+  It has to be an `export` and not a per-line prefix, which is the second half
+  of the trap: `just run` re-enters `just` (`run` → `run-x86`), and the value is
+  converted when the *inner* `just.exe` is started by the outer recipe's shell —
+  before any line of the inner recipe runs, so a prefix on the line that starts
+  `target/mkboot` is too late. Measured: with such prefixes in place, a `just run`
+  from PowerShell still panicked in `build-x86`; with the export, the same
+  `just image` (the same nesting) builds and boots. Verified: the dirent is in
+  zone 7 (`/bin`) and `/bin/bash --version` answers, where before it was in
+  zone 6 (`/`) and only `/bash --version` did. The `mkfs-*` lines had carried an
+  exclusion prefix from the start; those are removed, because `tools/mkfs.rs`
+  reads no environment at all — it copies the assembled image — so the prefix
+  never did anything and its comment described the wrong half of the build.
 - `[env]` `just test-boot-riscv64`/`test-qemu-riscv64` (and the aarch64
   equivalents) overwrote the normal kernel binary via the shared cargo
   output path, so a later `just build-riscv64` could report "Finished"
@@ -1332,3 +1441,86 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   both perturbs the guest and hides a wedge gate that would otherwise pass —
   the rule in this repo is that probes are stripped and the gate re-run before
   hand-back, not that the gate is judged with the probe still in.
+- **~~A target C compile is not hermetic: the host's headers answer for
+  minix~~ — FIXED (2026-09-24).** `clang --target=x86_64-unknown-none -I
+  tools/c-include` also searched `/usr/include`, so any header the port lacked
+  was satisfied by glibc and any *description* of it was glibc's: configure
+  reported `HAVE_UNION_WAIT`, `HAVE_TERMIOS_H` and `HAVE_STRINGS_H` yes for a
+  target that has none of them (the port does ship a `sys/wait.h`, but without
+  `union wait`), and bash compiled paths no real system has. It surfaced as
+  `locale.h` being rejected: `HAVE_STRINGS_H` came from
+  `/usr/include/strings.h`, which pulls `bits/types/locale_t.h`, which collided
+  with the port's own `locale_t`. The flags — `-nostdinc -isystem
+  <clang resource dir>/include -I tools/c-include` — now live in
+  `tools/ccflags.py`, shared by `tools/build-c-hello.py` and the bash `cc`. A
+  missing header is a hard error now, which is the point. What it fixed, in
+  order: `_POSIX_VERSION` had to exist for bash to stop using `union wait`;
+  `HAVE_TERMIOS_H` answers no; `clock_t` needed a `sys/times.h` to be found
+  (bash writes `#define clock_t long` otherwise, which collides with the host's
+  typedef in the build tools); and `locale_utf8locale` needed `wcwidth`, without
+  which `HANDLE_MULTIBYTE` is off while bash's globbing still uses an identifier
+  only the multibyte branch declares. `C_BUILD.md` has the write-up.
+  (`tools/ccflags.py`, `tools/build-c-hello.py`)
+- **What the hermetic compile then exposed: the port's own missing headers.**
+  With the host out of the picture, the bash build's remaining errors are a
+  to-do list rather than a mystery: `sgtty.h` in 5 files (bash's terminal
+  handling falls back to sgtty because there is no `termios.h`, which is the
+  next real piece and is kernel-facing), `sys/ioctl.h` (window size),
+  `sys/param.h` (`MAXPATHLEN`), and `mktemp`/`mknod` (absent from the libc).
+  `netopen.c`'s `_`/`internal_error` is a different shape — NLS-disabled gettext
+  — and is not diagnosed. (`tools/c-include`, `crates/minix-libc`)
+- **The C headers are generated and checked, and both sides agree.**
+  `tools/gen-c-headers.py` derives the headers from the libc with cbindgen into
+  `target/c-include/`; `tools/check-c-headers.py` asserts the two sides agree and
+  now reports 0 in each direction: 363 exports, 359 declarations.
+  The checker had been under-reporting in three ways, all fixed: a prototype
+  wrapped over two lines was not a declaration to it (`pthread_create`, `qsort`,
+  `sendto` and a dozen more read as undeclared while sitting in the headers); a
+  struct member ended in `;` and did read as one (`d_ino`, `pw_name`,
+  `sa_family`, `ru_utime`, …); and tracking bodies swallowed each header's
+  content at its `extern "C" {`. The eleven exports it then reported missing were
+  real — `issetugid`, `setegid`, `seteuid`, `setgroups`, `logb`, `pthread_kill`,
+  `utime`, `utimes`, `vsscanf`, `vfscanf`, `vscanf` — and are declared now
+  (`utime.h` and `sys/times.h` are new headers). `bsearch` was the one *declared*
+  function with no implementation, i.e. a link error waiting for the first C
+  caller, and is implemented. Retiring `tools/c-include` is still a merge rather
+  than a deletion: cbindgen derives declarations but not constants (`EOF`,
+  `SEEK_SET`, the errno numbers, struct layouts), so each hand-authored header
+  has to keep its types and macros and take the generated declarations, after
+  which the check reads the set the compiler actually gets.
+  (`tools/gen-c-headers.py`, `tools/check-c-headers.py`)
+- **`/bin/ctest` is embedded but no gate drives it.** `tools/ctest.c` is the C
+  smoke test (errno, the malloc family, stdio, strings, pthreads, the `scanf`
+  family — the only on-target call of those variadic entry points anywhere in the
+  tree — `mkfifo` through the VFS mknod path, the environment through a re-exec of
+  itself, and the cwd surface: `getcwd` in both forms, `strerror`'s text, and the
+  `stat`/`readdir` dev/ino values a `..` walk compares). Each section prints one
+  line only when every check in it held, and prints the failing `__LINE__`
+  otherwise, but nothing in `tools/smoke/` runs it — the coverage exists only
+  when a human types it at the shell. Verified by hand on 2026-09-24:
+  `FEED_SCENARIO=...` with `/bin/ctest` and the lines `scanf: ok`, `mkfifo: ok`,
+  `getenv: hello` passes, and the same run with an impossible readback fails, so
+  the check itself is sound. A scenario step is what would stop it depending on
+  that. (`tools/ctest.c`, `tools/build-c-hello.py`, `tools/smoke/feed.sh`)
+- **bash is built by a scratch route and no gate boots it.** `/bin/bash` is not in
+  `BOOT_BINS`, so it only reaches an image through `MINIXFS_EXTRA`, and the binary
+  itself is the Linux-host build in `target/tmp/` (see `C_BUILD.md`) — nothing
+  tracked rebuilds it. That makes two traps live whenever the libc changes:
+  `make` reports success *without* relinking (the rlib is not a prerequisite of
+  any bash target, so a `make exit: 0` with 203 objects and an unchanged binary
+  mtime is the normal outcome — the mtime is the only evidence a relink
+  happened), and `target/tmp/cc-minix` takes the *newest* `libminix_libc-*.rlib`
+  in `deps/`, which after a Windows `just build-x86` is the other host's rlib
+  (the link then fails `E0460: found possibly newer version of crate core`).
+  Verified by hand: `/bin/bash -c 'printf "PWD=%s\n" "$PWD"'` prints
+  `PWD=/tmp/cwdtest` from a scratch scenario, and before the forced relink the
+  same step carried the `shell-init: error retrieving current directory` line.
+  (`target/tmp/bash-*.sh`, `target/tmp/cc-minix`, `C_BUILD.md`)
+- **~~`signal.h` and `minix-libc` disagree on `sigprocmask`~~ — FIXED
+  (2026-09-24).** `minix-std`'s signature is now
+  `sigprocmask(how, set_ptr, old_ptr)` (PM's `m2l1`/`m2l2`, both caller
+  pointers), the libc export is the POSIX three-argument form, and
+  `sigsuspend`/`sigpending` — which PM already implemented as
+  `do_sigsuspend`/`do_sigpending` but nothing exposed — are now in `minix-std`,
+  the libc and `signal.h`.
+  (`tools/c-include/signal.h`, `crates/minix-libc/src/lib.rs`)

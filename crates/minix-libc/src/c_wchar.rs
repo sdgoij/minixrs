@@ -676,10 +676,92 @@ pub unsafe extern "C" fn getwchar() -> WInt {
     unsafe { getwc(crate::c_stdio::stdin) }
 }
 
+/// POSIX `wcscoll()`: wide collation in the C locale is comparison order.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcscoll(s1: *const WChar, s2: *const WChar) -> c_int {
+    let mut i = 0usize;
+    loop {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        if a != b {
+            return if a < b { -1 } else { 1 };
+        }
+        if a == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+}
+
+/// POSIX `wcsxfrm()`: copy at most `n` wide characters of `src` into `dest`
+/// and return the full length.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsxfrm(dest: *mut WChar, src: *const WChar, n: usize) -> usize {
+    if src.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    while unsafe { *src.add(len) } != 0 {
+        len += 1;
+    }
+    if !dest.is_null() && n > 0 {
+        let copy = if len < n - 1 { len } else { n - 1 };
+        let mut i = 0usize;
+        while i < copy {
+            unsafe { *dest.add(i) = *src.add(i) };
+            i += 1;
+        }
+        unsafe { *dest.add(copy) = 0 };
+    }
+    len
+}
+
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putwchar(wc: WChar) -> WInt {
     unsafe { putwc(wc, crate::c_stdio::stdout) }
+}
+
+/// The column width `wc` occupies: 0 for the null character, 1 for a printable
+/// ASCII character, -1 for anything else.
+///
+/// A general `wcwidth` needs the width tables of the locale's encoding. This
+/// port has the C locale only, and `mbrtowc` maps a byte to the wide character
+/// of the same value and rejects anything above ASCII, so the answer above is
+/// the whole of it here. Callers that redisplay text (readline) see -1 for
+/// every non-ASCII byte, which is what a C locale reports.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn wcwidth(wc: WChar) -> c_int {
+    if wc == 0 {
+        0
+    } else if (0x20..0x7f).contains(&wc) {
+        1
+    } else {
+        -1
+    }
+}
+
+/// The sum of `wcswidth`'s arguments' widths, or -1 if any of them has no
+/// width (see `wcwidth`). Stops at the first null, as POSIX specifies.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcswidth(pwcs: *const WChar, n: usize) -> c_int {
+    let mut total = 0;
+    for i in 0..n {
+        let wc = unsafe { *pwcs.add(i) };
+        if wc == 0 {
+            break;
+        }
+        let w = wcwidth(wc);
+        if w < 0 {
+            return -1;
+        }
+        total += w;
+    }
+    total
 }
 
 #[cfg(test)]

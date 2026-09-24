@@ -63,12 +63,17 @@ size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps);
 size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps);
 int mbtowc(wchar_t *pwc, const char *pmb, size_t max);
 size_t mbrlen(const char *s, size_t n, mbstate_t *ps);
+int mbsinit(const mbstate_t *ps);
 size_t mbsrtowcs(wchar_t *dest, const char **src, size_t len, mbstate_t *ps);
 size_t mbsnrtowcs(wchar_t *dest, const char **src, size_t nms, size_t len, mbstate_t *ps);
 size_t wcsnrtombs(char *dest, const wchar_t **src, size_t nwc, size_t len, mbstate_t *ps);
 size_t wcsrtombs(char *dest, const wchar_t **src, size_t len, mbstate_t *ps);
 int wcscoll(const wchar_t *s1, const wchar_t *s2);
 size_t wcsxfrm(wchar_t *dest, const wchar_t *src, size_t n);
+
+/* Display width (C locale: printable ASCII is one column). */
+int wcwidth(wchar_t wc);
+int wcswidth(const wchar_t *pwcs, size_t n);
 
 #ifdef __cplusplus
 }

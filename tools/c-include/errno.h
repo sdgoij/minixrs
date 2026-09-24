@@ -26,8 +26,60 @@ extern int *__errno_location(void);
 #define ENOSPC 28
 #define EDOM 33
 #define ERANGE 34
-#define ENOSYS 71
+#define ENOSYS 78
 #define EOPNOTSUPP 95
 #define EAFNOSUPPORT 97
+
+/* The rest of the set, in Linux numbering — the convention `minix-std` uses
+ * for the values it actually returns (EAGAIN 11, ENOTCONN 107, ENOSYS 78).
+ * The MINIX reference's errno.h numbers these differently; this port follows
+ * the numbers its own libc returns. */
+#define ENOEXEC 8
+#define ECHILD 10
+#define ENOTBLK 15
+#define EXDEV 18
+#define ENFILE 23
+#define EMFILE 24
+#define ENOTTY 25
+#define ETXTBSY 26
+#define EFBIG 27
+#define ESPIPE 29
+#define EROFS 30
+#define EMLINK 31
+#define EPIPE 32
+#define EDEADLK 35
+#define ENAMETOOLONG 36
+#define ELOOP 40
+#define EOVERFLOW 75
+#define EILSEQ 84
+#define EWOULDBLOCK EAGAIN
+
+/* The socket and process families, in the same Linux numbering: the port
+ * exports socket/sendto/recvfrom, so these are values C code will compare
+ * against rather than names it merely needs to exist. */
+#define E2BIG 7
+#define ENOTSOCK 88
+#define EDESTADDRREQ 89
+#define EMSGSIZE 90
+#define ENOPROTOOPT 92
+#define EPROTONOSUPPORT 93
+#define EADDRINUSE 98
+#define EADDRNOTAVAIL 99
+#define ENETDOWN 100
+#define ENETUNREACH 101
+#define ENETRESET 102
+#define ECONNABORTED 103
+#define ECONNRESET 104
+#define ENOBUFS 105
+#define EISCONN 106
+#define ENOTCONN 107
+#define ESHUTDOWN 108
+#define ETOOMANYREFS 109
+#define ETIMEDOUT 110
+#define ECONNREFUSED 111
+#define EHOSTDOWN 112
+#define EHOSTUNREACH 113
+#define EALREADY 114
+#define EINPROGRESS 115
 
 #endif

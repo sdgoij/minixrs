@@ -23,6 +23,9 @@ extern "C" {
 #define WTERMSIG(s) ((s) & 0x7f)
 #define WSTOPSIG(s) WEXITSTATUS(s)
 #define WCOREDUMP(s) ((s) & 0x80)
+/* No continued status exists yet: PM has no stop/continue encoding (see the
+ * note above), so a child is never reported as having continued. */
+#define WIFCONTINUED(s) (0)
 
 pid_t wait(int *status);
 pid_t waitpid(pid_t pid, int *status, int options);

@@ -22,4 +22,9 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex);
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
+/* Send a signal to another thread of this process. A thread is a kernel
+ * thread here (THREADS.md), so this is PM's signal delivery aimed at the
+ * thread's tid. */
+int pthread_kill(pthread_t thread, int sig);
+
 #endif

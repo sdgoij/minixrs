@@ -18,4 +18,8 @@
 #define FP_SUBNORMAL 3
 #define FP_NORMAL 4
 
+/* Radix-independent exponent, by IEEE bit extraction rather than `log()` —
+ * `no_std` has no logarithm. */
+double logb(double x);
+
 #endif

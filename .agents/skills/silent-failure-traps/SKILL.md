@@ -1,6 +1,6 @@
 ---
 name: silent-failure-traps
-description: Traps in minixrs where a failure looks like success or like silence rather than an error — host scripts driving a QEMU guest (an MSYS FIFO that a native QEMU reads nothing from, a pipeline's left side swallowing `exit 1`, `read` eating a trailing tab, input sent before the prompt being dropped, an expectation another step has already printed so a command that never ran passes), and the kernel's message/diag boundaries (a delivered message's source endpoint, the SYS_DIAGCTL layout). Load when writing or fixing a gate, a harness, an `image-*` recipe or CI check, when scripting input into a guest, when a guest's output stops for no apparent reason, or when a reply reaches a server with the wrong sender.
+description: Traps in minixrs where a failure looks like success or like silence rather than an error — host scripts driving a QEMU guest (an MSYS FIFO that a native QEMU reads nothing from, a pipeline's left side swallowing `exit 1`, `read` eating a trailing tab, input sent before the prompt being dropped, an expectation another step has already printed so a command that never ran passes), a build that reports success without relinking or that links another toolchain's artifact, and the kernel's message/diag boundaries (a delivered message's source endpoint, the SYS_DIAGCTL layout). Load when writing or fixing a gate, a harness, an `image-*` recipe or CI check, when scripting input into a guest, when a guest's output stops for no apparent reason, or when a reply reaches a server with the wrong sender.
 ---
 
 # Silent failure traps
@@ -86,6 +86,28 @@ blocked in, the log's tail. A guest sitting at a prompt that ignores input is a 
 list above); a server that never printed its ready line is a system problem, and `wserver: ready` is
 asserted beside the scenario for precisely that reason (finding 66 was a dead window server under a
 working shell).
+
+## A build that reports success is not a build that happened
+
+- **`make` does not relink when the only thing that changed is a library outside its dependency
+  the wrapper passes the rlib as a link
+  argument, so no `.o` is older than `bash` and `make` does nothing. Its output is *identical* to a
+  real relink — `make exit: 0`, the same object count — and the only evidence is the binary's mtime
+  or size. Force the relink (`rm -f <the binary>` before `make`) whenever a library changed, and
+  check the artifact's mtime before reading the run's behaviour as the new build's. The same shape
+  is in `KNOWN_ISSUES.md` for the kernel variants, where a "Finished" once meant nothing had
+  relinked.
+- **A wrapper that takes "the newest" of several same-named artifacts can take another toolchain's.**
+  Two stage1 compilers each build `libminix_libc-<hash>.rlib` into one `deps/` directory, and the hash
+  changes with the crate's contents — so both files can exist at once, and "newest by mtime" picks
+  whichever was built last. Linking them together fails with `E0460: found possibly newer version of
+  crate core`, which names neither the cause nor the file. Pin the build order (delete, build with
+  one toolchain, link) and do not let the other toolchain's build land in between.
+- **A script's exit status is its *last* command's.** The bash build script ends with `grep -E
+  'error:…' … | head -60`, so a run with no errors exits **1** and a run with errors would exit 0 —
+  the verdict was inverted relative to what the summary prints above it ("distinct error messages",
+  empty). Read the section the script printed, not the status it returned, and give a script an
+  explicit exit when its tail is a search.
 
 ## Where the reference implementations are
 

@@ -42,11 +42,14 @@ pub const VFS_CLOSE: u32 = VFS_BASE + 5;
 pub const VFS_LINK: u32 = VFS_BASE + 6;
 pub const VFS_UNLINK: u32 = VFS_BASE + 7;
 pub const VFS_CHDIR: u32 = VFS_BASE + 8;
+pub const VFS_RENAME: u32 = VFS_BASE + 17;
+pub const VFS_FCHDIR: u32 = VFS_BASE + 31;
 pub const VFS_ACCESS: u32 = VFS_BASE + 15;
 pub const VFS_CHMOD: u32 = VFS_BASE + 11;
 pub const VFS_UMASK: u32 = VFS_BASE + 27;
 pub const VFS_RMDIR: u32 = VFS_BASE + 18;
 pub const VFS_MKDIR: u32 = VFS_BASE + 9;
+pub const VFS_MKNOD: u32 = VFS_BASE + 10;
 pub const VFS_STAT: u32 = VFS_BASE + 21;
 pub const VFS_FSTAT: u32 = VFS_BASE + 22;
 pub const VFS_LSTAT: u32 = VFS_BASE + 23;
@@ -217,6 +220,7 @@ const OFF_GETDENTS_NBYTES: usize = 24;
 const OFF_NAME: usize = 8;
 const OFF_NAME_LEN: usize = 16;
 const OFF_MKDIR_MODE: usize = 24;
+const OFF_MKNOD_DEV: usize = 32;
 
 // VFS_FCNTL (matches do_fcntl):
 //   offset 8:  fd (i32)
@@ -418,6 +422,32 @@ pub fn mkdir(path: &[u8], mode: u32) -> Result<(), MinixErr> {
         msg_set_u64(&mut msg, OFF_NAME, path.as_ptr() as u64);
         msg_set_i32(&mut msg, OFF_NAME_LEN, path.len() as i32);
         msg_set_u32(&mut msg, OFF_MKDIR_MODE, mode);
+        vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Create a FIFO or device node (VFS mknod). Only the superuser may create
+/// anything but a FIFO; the check is the caller's (VFS enforces it).
+pub fn mknod(path: &[u8], mode: u32, dev: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, mode, dev, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        // VFS_MKNOD (0x10A) — do_mknod expects:
+        //   offset 8:  name pointer (u64)
+        //   offset 16: name length (u32)
+        //   offset 24: mode (u32)
+        //   offset 32: dev (u32)
+        msg_set_i32(&mut msg, OFF_CALL, VFS_MKNOD as i32);
+        msg_set_u64(&mut msg, OFF_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_NAME_LEN, path.len() as u32);
+        msg_set_u32(&mut msg, OFF_MKDIR_MODE, mode);
+        msg_set_u32(&mut msg, OFF_MKNOD_DEV, dev);
         vfs_call(&mut msg)?;
         Ok(())
     }
@@ -730,6 +760,45 @@ pub fn chdir(path: &[u8]) -> Result<(), MinixErr> {
         msg_set_i32(&mut msg, OFF_CALL, VFS_CHDIR as i32);
         msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
         msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Change to the directory an open fd refers to (VFS_FCHDIR): the fd sits at
+/// 8, the slot `do_fchdir` reads.
+pub fn fchdir(fd: i32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FCHDIR as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Rename a file (VFS_RENAME): name1 at 8/len at 16, name2 at 24/len at 32,
+/// the layout `do_rename` reads.
+pub fn rename(old: &[u8], new: &[u8]) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (old, new, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_RENAME as i32);
+        msg_set_u64(&mut msg, 8, old.as_ptr() as u64);
+        msg_set_u32(&mut msg, 16, old.len() as u32);
+        msg_set_u64(&mut msg, 24, new.as_ptr() as u64);
+        msg_set_u32(&mut msg, 32, new.len() as u32);
         let _ = vfs_call(&mut msg)?;
         Ok(())
     }

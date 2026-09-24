@@ -24,11 +24,13 @@ mod pthread;
 // `#[cfg(target_os = "minix")]`-gated inside each module; the pure
 // helpers compile everywhere so the host test suite can exercise them.
 mod c_locale;
+mod c_net;
 mod c_setjmp;
 mod c_stdio;
 mod c_stdlib;
 mod c_string;
 mod c_sys;
+mod c_termios;
 mod c_time;
 mod c_wchar;
 
@@ -347,7 +349,7 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) ->
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize {
+pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     if buf.is_null() {
         return fail(22) as isize; // EINVAL
     }
@@ -360,7 +362,7 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: usize) -> isiz
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: usize) -> isize {
+pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
     if buf.is_null() {
         return fail(22) as isize; // EINVAL
     }
@@ -382,7 +384,7 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
+pub extern "C" fn lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
     match minix_std::fs::lseek(fd, offset, whence) {
         Ok(pos) => pos,
         Err(e) => fail(e.0) as i64,
@@ -632,6 +634,98 @@ pub extern "C" fn abort() -> ! {
     minix_std::process::exit(134);
 }
 
+/// POSIX `system()`: run `cmd` through `/bin/sh -c` and return the shell's
+/// exit status, or -1 when the child could not be started.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn system(cmd: *const c_char) -> c_int {
+    const SH: &[u8] = b"/bin/sh\0";
+    const DASH_C: &[u8] = b"-c\0";
+    if cmd.is_null() {
+        return 1;
+    }
+    let pid = unsafe { fork() };
+    if pid < 0 {
+        return -1;
+    }
+    if pid == 0 {
+        let argv: [*const c_char; 4] = [
+            SH.as_ptr() as *const c_char,
+            DASH_C.as_ptr() as *const c_char,
+            cmd,
+            core::ptr::null(),
+        ];
+        unsafe { crate::c_sys::execv(SH.as_ptr() as *const c_char, argv.as_ptr()) };
+        exit(127)
+    }
+    let mut status: c_int = 0;
+    if unsafe { waitpid(pid, &mut status, 0) } < 0 {
+        return -1;
+    }
+    // The wait status carries the exit code in its second byte.
+    (status >> 8) & 0xff
+}
+
+/// glibc-shaped `__assert_fail()`: the out-of-line half of the `assert` macro.
+/// Reports the failure on stderr and aborts. `line` is an `unsigned int`, as
+/// the C declaration has it.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __assert_fail(
+    assertion: *const c_char,
+    file: *const c_char,
+    line: u32,
+    function: *const c_char,
+) -> ! {
+    let fmt = b"%s:%u: %s: assertion \"%s\" failed\n\0";
+    let mut buf = [0u8; 512];
+    let n = unsafe {
+        crate::c_stdio::snprintf(
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+            fmt.as_ptr() as *const c_char,
+            file,
+            line,
+            function,
+            assertion,
+        )
+    };
+    if n > 0 {
+        let len = if (n as usize) < buf.len() {
+            n as usize
+        } else {
+            buf.len() - 1
+        };
+        let _ = unsafe { write(2, buf.as_ptr() as *const c_void, len) };
+    }
+    abort()
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn getppid() -> c_int {
+    match minix_std::process::getpid() {
+        Ok((_pid, ppid)) => ppid,
+        Err(e) => {
+            set_errno(e.0);
+            -1
+        }
+    }
+}
+
+/// C-facing scalar aliases. Signatures are written with these so the headers
+/// generated from this crate carry the POSIX names; cbindgen maps the bare
+/// Rust primitives to `uintptr_t`/`intptr_t`/`int64_t` instead. These are C's
+/// names, so they keep C's spelling.
+#[allow(non_camel_case_types)]
+pub type size_t = usize;
+#[allow(non_camel_case_types)]
+pub type ssize_t = isize;
+#[allow(non_camel_case_types)]
+pub type off_t = i64;
+#[allow(non_camel_case_types)]
+pub type time_t = i64;
+
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn getpid() -> c_int {
@@ -811,10 +905,36 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     }
 }
 
+/// POSIX `sigprocmask()`: examine or change the signal mask. `set` and
+/// `oldset` point at 16-byte `sigset_t` buffers in the caller; pass NULL to
+/// skip either.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub extern "C" fn sigprocmask(how: c_int, set: u64) -> c_int {
-    match minix_std::time::sigprocmask(how, set) {
+pub unsafe extern "C" fn sigprocmask(how: c_int, set: *const SigSet, oldset: *mut SigSet) -> c_int {
+    match minix_std::time::sigprocmask(how, set as u64, oldset as u64) {
+        Ok(()) => 0,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// POSIX `sigsuspend()`: atomically install `mask` and wait for a signal.
+///
+/// POSIX defines no success return: the call ends as -1/EINTR once a handler
+/// has run, which is what PM's release of a suspended call produces.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigsuspend(mask: *const SigSet) -> c_int {
+    match minix_std::time::sigsuspend(mask as u64) {
+        Ok(()) => fail(4), // EINTR
+        Err(e) => fail(e.0),
+    }
+}
+
+/// POSIX `sigpending()`: write the set of pending signals into `set`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigpending(set: *mut SigSet) -> c_int {
+    match minix_std::time::sigpending(set as u64) {
         Ok(()) => 0,
         Err(e) => fail(e.0),
     }

@@ -9,7 +9,9 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 static int counter = 0;
 static pthread_mutex_t counter_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -91,6 +93,117 @@ int main(int argc, char **argv) {
         }
         printf("pthread: counter=%d (expected 4) main_errno=%d %s\n", counter,
                errno, counter == 4 && errno == 0 ? "ok" : "FAIL");
+    }
+
+    /* scanf family: the field rules are the fiddly part, so every edge is
+     * checked -- a `0` that is not octal, `0x` with no hex digit, an `e` with
+     * no exponent digits, a scanset, a width, suppression, and %n. */
+    {
+        int bad = 0;
+        int a = 0, b = 0, n = -1;
+        char w[16];
+        unsigned hex = 0;
+        double d = 0.0;
+
+#define CHECK(cond)                                                          \
+        do {                                                                 \
+            if (!(cond)) {                                                   \
+                printf("  scanf check %d FAIL\n", __LINE__);                  \
+                bad++;                                                       \
+            }                                                                \
+        } while (0)
+
+        CHECK(sscanf("42 hello", "%d %s", &a, w) == 2);
+        CHECK(a == 42 && strcmp(w, "hello") == 0);
+        CHECK(sscanf("0x1f", "%i", &a) == 1 && a == 31);
+        CHECK(sscanf("08", "%i", &a) == 1 && a == 0); /* the field is the 0 */
+        CHECK(sscanf("0xg", "%x", &hex) == 1 && hex == 0);
+        CHECK(sscanf("hello!", "%3s", w) == 1 && strcmp(w, "hel") == 0);
+        CHECK(sscanf("abc123", "%[a-c]", w) == 1 && strcmp(w, "abc") == 0);
+        CHECK(sscanf("7 8", "%*d %d", &b) == 1 && b == 8);
+        CHECK(sscanf("1e", "%lf", &d) == 1 && d == 1.0);
+        CHECK(sscanf("2.5e2", "%lf", &d) == 1 && d == 250.0);
+        CHECK(sscanf("12ab", "%d%n", &a, &n) == 1 && a == 12 && n == 2);
+        CHECK(sscanf("abc", "%d", &a) == 0);
+        CHECK(sscanf("", "%d", &a) == EOF);
+
+        /* the same rules over a stream, which goes through the FILE path */
+        FILE *sf = fopen("ctest-scan.txt", "w");
+        CHECK(sf != NULL);
+        if (sf) {
+            CHECK(fprintf(sf, "7 1f\n") == 5);
+            fclose(sf);
+            sf = fopen("ctest-scan.txt", "r");
+            CHECK(sf != NULL);
+            if (sf) {
+                unsigned v1 = 0, v2 = 0;
+                CHECK(fscanf(sf, "%u %x", &v1, &v2) == 2);
+                CHECK(v1 == 7 && v2 == 0x1f);
+                fclose(sf);
+            }
+        }
+#undef CHECK
+        printf("scanf: %s\n", bad == 0 ? "ok" : "FAIL");
+    }
+
+    /* mkfifo: the VFS mknod path, reached the way a C program reaches it. */
+    {
+        const char *name = "ctest-fifo";
+        struct stat st;
+        unlink(name);
+        int made = mkfifo(name, 0600);
+        int statted = made == 0 ? stat(name, &st) : -1;
+        int ok = made == 0 && statted == 0 && S_ISFIFO(st.st_mode) != 0;
+        printf("mkfifo: %s\n", ok ? "ok" : "FAIL");
+        if (ok)
+            unlink(name);
+    }
+
+    /* cwd: `getcwd` is a stub (it returns ENOSYS), and bash reports on it
+       at startup. Print the parts a `..` walk needs — stat's dev/ino for "."
+       and "..", and readdir's d_ino — so the one that is wrong is visible
+       rather than inferred from an empty path. */
+    {
+        char cwdbuf[64];
+        struct stat dot;
+        struct stat dotdot;
+        int s_dot = stat(".", &dot);
+        int s_dotdot = stat("..", &dotdot);
+        DIR *d = opendir("..");
+        struct dirent *e = d ? readdir(d) : NULL;
+
+        printf("cwd: strerror(ENOSYS)=%s\n", strerror(ENOSYS));
+        errno = 0;
+        char *got = getcwd(cwdbuf, sizeof cwdbuf);
+        printf("cwd: getcwd=%s errno=%d\n", got ? got : "(null)", errno);
+        /* The allocate form, which is the one bash asks for. */
+        char *heap = getcwd(NULL, 0);
+        printf("cwd: getcwd(NULL,0)=%s\n", heap ? heap : "(null)");
+        free(heap);
+        printf("cwd: stat(\".\")=%d dev=%lu ino=%lu\n", s_dot,
+               (unsigned long)dot.st_dev, (unsigned long)dot.st_ino);
+        printf("cwd: stat(\"..\")=%d dev=%lu ino=%lu\n", s_dotdot,
+               (unsigned long)dotdot.st_dev, (unsigned long)dotdot.st_ino);
+        printf("cwd: readdir(\"..\") first=%s\n", e ? e->d_name : "(none)");
+        if (e)
+            printf("cwd: readdir ino=%lu\n", (unsigned long)e->d_ino);
+        if (d)
+            closedir(d);
+    }
+
+    /* environ + getenv, exercised through a re-exec with an explicit
+       environment: this shell has no `export`, so the only way ctest can be
+       handed a variable is to exec itself with one — which is also the path
+       bash takes when it runs a command with an environment. */
+    if (argc >= 2 && strcmp(argv[1], "re-exec") == 0) {
+        char *value = getenv("CTESTENV");
+        printf("getenv: %s\n", value ? value : "unset");
+        return 0;
+    } else {
+        char *envp[2] = { (char *)"CTESTENV=hello", NULL };
+        char *child_argv[3] = { argv[0], (char *)"re-exec", NULL };
+        execve(argv[0], child_argv, envp);
+        printf("getenv: execve failed errno=%d\n", errno);
     }
 
     puts("ctest done");

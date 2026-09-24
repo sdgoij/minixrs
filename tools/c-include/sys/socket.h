@@ -28,13 +28,22 @@ struct sockaddr {
     char sa_data[14];
 };
 
+/* The 32-bit IPv4 address, holding the four octets in network order. Spelled as
+ * a struct, as POSIX does, because C code assigns through `.s_addr`. */
+struct in_addr {
+    unsigned int s_addr;
+};
+
 /* Minix sockaddr_in layout (net/gen/socket.h): length byte, family byte,
- * then network-order port/address — matches minix-libc's decoder. */
+ * then network-order port/address — matches minix-libc's decoder.
+ *
+ * sin_family is one byte and sin_len leads, which MINIX keeps from its BSD
+ * ancestry; code that assigns AF_INET still compiles (it truncates). */
 struct sockaddr_in {
     unsigned char sin_len;
     unsigned char sin_family;
     unsigned short sin_port;
-    unsigned int sin_addr;
+    struct in_addr sin_addr;
     char sin_zero[8];
 };
 

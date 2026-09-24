@@ -294,11 +294,17 @@ pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
 ///
 /// `path` is the binary path, `argv` is the null-terminated argument list.
 /// On success, does not return (the process is replaced).
-pub fn exec(path: &[u8], argv: &[*const u8]) -> Result<i32, MinixErr> {
+/// Replace the process image with `path`, handing it `argv` and `envp` — both
+/// NUL-terminated arrays of NUL-terminated strings, as C passes them. An empty
+/// `envp` slice means no environment.
+///
+/// Delegates to the PM→VFS exec chain (`minix_rt::execve`), which builds the
+/// argc/argv/envp frame the kernel parses. Only returns on failure.
+pub fn exec(path: &[u8], argv: &[*const u8], envp: &[*const u8]) -> Result<i32, MinixErr> {
     #[cfg(target_os = "minix")]
     unsafe {
         // Delegate to the PM→VFS exec chain (minix_rt::execve). Build a
-        // NUL-terminated path and a null-terminated argv array on the stack
+        // NUL-terminated path and null-terminated argv/envp arrays on the stack
         // since execve requires both.
         let mut path_buf = [0u8; 256];
         let n = path.len().min(path_buf.len() - 1);
@@ -306,11 +312,14 @@ pub fn exec(path: &[u8], argv: &[*const u8]) -> Result<i32, MinixErr> {
         let mut argv_buf = [core::ptr::null(); 64];
         let argc = argv.len().min(argv_buf.len() - 1);
         argv_buf[..argc].copy_from_slice(&argv[..argc]);
+        let mut envp_buf = [core::ptr::null(); 64];
+        let envc = envp.len().min(envp_buf.len() - 1);
+        envp_buf[..envc].copy_from_slice(&envp[..envc]);
         let r = minix_rt::execve(
             path_buf.as_ptr(),
             n + 1,
             argv_buf.as_ptr(),
-            core::ptr::null(),
+            envp_buf.as_ptr(),
         );
         if r < 0 {
             Err(MinixErr::from_i32(r))
@@ -322,7 +331,7 @@ pub fn exec(path: &[u8], argv: &[*const u8]) -> Result<i32, MinixErr> {
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (path, argv);
+        let _ = (path, argv, envp);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -773,7 +782,7 @@ mod tests {
 
     #[test]
     fn test_exec_returns_enosys_on_host() {
-        let result = exec(b"/bin/sh", &[]);
+        let result = exec(b"/bin/sh", &[], &[]);
         assert!(result.is_err());
     }
 

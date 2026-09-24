@@ -99,6 +99,23 @@ fn assemble(
             let (dest, path) = entry
                 .split_once('=')
                 .expect("MINIXFS_EXTRA entry must be dest=path");
+            // A dest without a known prefix is not a near miss: build_minixfs
+            // routes anything else to the root filesystem, so a converted value
+            // produces a *different* path (/bash, not /bin/bash) rather than an
+            // error. MSYS converts POSIX-style env values on the way to a
+            // native tool, which is how one arrives here — refuse it while the
+            // value's provenance is still known, and name the way out.
+            if !["/bin/", "/sbin/", "/etc/"]
+                .iter()
+                .any(|dir| dest.starts_with(dir))
+            {
+                panic!(
+                    "MINIXFS_EXTRA: {dest:?} is not a /bin/, /sbin/ or /etc/ path. A \
+                     POSIX-style value is converted on the way to a native tool, and a \
+                     converted dest lands the file in the root filesystem. Set \
+                     MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA (the Justfile's build recipes do)."
+                );
+            }
             // The bins list wants &'static str; the env string is transient,
             // so leak each dest (build scripts run once per build).
             let dest: &'static str = Box::leak(dest.to_owned().into_boxed_str());

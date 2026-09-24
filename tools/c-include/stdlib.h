@@ -48,6 +48,9 @@ void srand(unsigned int seed);
  * Declared here, not wchar.h, matching glibc — libc++'s <cstdlib>
  * imports ::mbtowc and the BSD locale fallbacks call it. */
 int mbtowc(wchar_t *pwc, const char *pmb, size_t max);
+int mblen(const char *s, size_t n);
+size_t mbstowcs(wchar_t *dest, const char *src, size_t n);
+size_t wcstombs(char *dest, const wchar_t *src, size_t n);
 
 void qsort(void *base, size_t nmemb, size_t size,
            int (*compar)(const void *, const void *));
@@ -56,6 +59,7 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 char *getenv(const char *name);
 int system(const char *command);
 char *realpath(const char *path, char *resolved);
+char *mktemp(char *template);
 
 /* div/ldiv/lldiv — C standard integer division results. */
 typedef struct { int quot, rem; } div_t;

@@ -541,6 +541,33 @@ pub unsafe extern "C" fn mbrlen(s: *const c_char, n: usize, ps: *mut c_void) -> 
     unsafe { mbrtowc(core::ptr::null_mut(), s, n, ps) }
 }
 
+/// C89 `mblen()`: the length in bytes of the next multibyte character. In the C
+/// locale that is 1 for an ASCII character, 0 for the terminator, and -1 for
+/// anything else — the same rule `mbtowc` applies.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn mblen(s: *const c_char, n: usize) -> c_int {
+    if s.is_null() {
+        return 0; // not state-dependent
+    }
+    if n == 0 {
+        return -1;
+    }
+    match unsafe { *s } as u8 {
+        0 => 0,
+        b if b < 0x80 => 1,
+        _ => -1,
+    }
+}
+
+/// POSIX `mbsinit()`: whether the conversion state is the initial one. The C
+/// locale has no other state, and this port's conversions ignore the argument.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn mbsinit(_ps: *const c_void) -> c_int {
+    1
+}
+
 fn mbsrtowcs_impl(
     dest: *mut crate::c_wchar::WChar,
     src: *mut *const c_char,
@@ -658,6 +685,31 @@ pub unsafe extern "C" fn wcsrtombs(
     _ps: *mut c_void,
 ) -> usize {
     wcsnrtombs_impl(dest, src, usize::MAX, len)
+}
+
+/// C89 `mbstowcs()`: `mbsrtowcs()` reading from a plain `src`, with no state and
+/// no source pointer to update.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mbstowcs(
+    dest: *mut crate::c_wchar::WChar,
+    src: *const c_char,
+    n: usize,
+) -> usize {
+    let mut p = src;
+    mbsrtowcs_impl(dest, &mut p, n, None)
+}
+
+/// C89 `wcstombs()`: `wcsrtombs()` reading from a plain `src`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstombs(
+    dest: *mut c_char,
+    src: *const crate::c_wchar::WChar,
+    n: usize,
+) -> usize {
+    let mut p = src;
+    wcsnrtombs_impl(dest, &mut p, usize::MAX, n)
 }
 
 #[cfg(target_os = "minix")]

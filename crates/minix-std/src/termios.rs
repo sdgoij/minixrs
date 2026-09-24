@@ -57,6 +57,23 @@ const fn ioc_encode(dir: u32, group: u8, num: u8, size: usize) -> u32 {
 pub const TIOCGETA: u32 = ioc_encode(0x4000_0000, b't', 19, core::mem::size_of::<Termios>());
 /// Set the terminal attributes (NetBSD `TIOCSETA`).
 pub const TIOCSETA: u32 = ioc_encode(0x8000_0000, b't', 20, core::mem::size_of::<Termios>());
+/// Set the attributes once output has drained (POSIX `TCSADRAIN`).
+pub const TIOCSETAW: u32 = ioc_encode(0x8000_0000, b't', 21, core::mem::size_of::<Termios>());
+/// Set the attributes after discarding input (POSIX `TCSAFLUSH`).
+pub const TIOCSETAF: u32 = ioc_encode(0x8000_0000, b't', 22, core::mem::size_of::<Termios>());
+/// Wait for output to drain; no argument.
+pub const TIOCDRAIN: u32 = ioc_encode(0, b't', 94, 0);
+/// Discard queued input and/or output; the argument is the `FREAD`/`FWRITE`
+/// mask (POSIX `TCIFLUSH`/`TCOFLUSH`/`TCIOFLUSH`).
+pub const TIOCFLUSH: u32 = ioc_encode(0x8000_0000, b't', 16, core::mem::size_of::<i32>());
+/// Suspend output (POSIX `TCOOFF`); no argument.
+pub const TIOCSTOP: u32 = ioc_encode(0, b't', 111, 0);
+/// Resume output (POSIX `TCOON`); no argument.
+pub const TIOCSTART: u32 = ioc_encode(0, b't', 110, 0);
+/// Read the foreground process group of the terminal.
+pub const TIOCGPGRP: u32 = ioc_encode(0x4000_0000, b't', 119, core::mem::size_of::<i32>());
+/// Set the foreground process group of the terminal.
+pub const TIOCSPGRP: u32 = ioc_encode(0x8000_0000, b't', 118, core::mem::size_of::<i32>());
 
 /// Window size (rows/cols; the pty master's ioctl sets the slave's).
 #[repr(C)]
@@ -72,6 +89,36 @@ pub struct WinSize {
 pub const TIOCGWINSZ: u32 = ioc_encode(0x4000_0000, b't', 104, core::mem::size_of::<WinSize>());
 /// Set the terminal window size (NetBSD `TIOCSWINSZ`).
 pub const TIOCSWINSZ: u32 = ioc_encode(0x8000_0000, b't', 103, core::mem::size_of::<WinSize>());
+
+// Input flags (c_iflag) — matches the tty server.
+/// Signal on break.
+pub const IGNBRK: u32 = 0x0000_0001;
+/// Interrupt on break.
+pub const BRKINT: u32 = 0x0000_0002;
+/// Mark parity errors.
+pub const PARMRK: u32 = 0x0000_0008;
+/// Strip the eighth bit.
+pub const ISTRIP: u32 = 0x0000_0020;
+/// Translate NL to CR.
+pub const INLCR: u32 = 0x0000_0040;
+/// Discard CR.
+pub const IGNCR: u32 = 0x0000_0080;
+/// Translate CR to NL.
+pub const ICRNL: u32 = 0x0000_0100;
+/// Enable output flow control (^S/^Q).
+pub const IXON: u32 = 0x0000_0200;
+
+// Output flags (c_oflag) — matches the tty server.
+/// Post-process output.
+pub const OPOST: u32 = 0x0000_0001;
+
+// Control flags (c_cflag) — matches the tty server.
+/// The character-size mask.
+pub const CSIZE: u32 = 0x0000_0300;
+/// Eight bits per character.
+pub const CS8: u32 = 0x0000_0300;
+/// Enable parity generation and detection.
+pub const PARENB: u32 = 0x0000_1000;
 
 // Local flags (c_lflag) — matches the tty server.
 /// Echo input characters.
@@ -157,6 +204,21 @@ mod tests {
     fn ioctl_codes_match_tty_server() {
         assert_eq!(TIOCGETA, 0x402C_7413);
         assert_eq!(TIOCSETA, 0x802C_7414);
+        assert_eq!(TIOCSETAW, 0x802C_7415);
+        assert_eq!(TIOCSETAF, 0x802C_7416);
+        assert_eq!(TIOCDRAIN, 0x0000_745E);
+        assert_eq!(TIOCFLUSH, 0x8004_7410);
+        assert_eq!(TIOCSTART, 0x0000_746E);
+        assert_eq!(TIOCSTOP, 0x0000_746F);
+        assert_eq!(TIOCGPGRP, 0x4004_7477);
+        assert_eq!(TIOCSPGRP, 0x8004_7476);
+        assert_eq!(TIOCGWINSZ, 0x4008_7468);
+        assert_eq!(TIOCSWINSZ, 0x8008_7467);
         assert_eq!(ECHO, 0x8);
+        // The flags `cfmakeraw` clears and sets.
+        assert_eq!(ICRNL | IXON, 0x300);
+        assert_eq!(OPOST, 0x1);
+        assert_eq!(CSIZE | PARENB, 0x1300);
+        assert_eq!(CS8, 0x300);
     }
 }

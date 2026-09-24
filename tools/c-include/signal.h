@@ -11,6 +11,12 @@ extern "C" {
 
 typedef unsigned long sigset_t[2];
 
+/* POSIX requires this in <signal.h>. Without it a configure test decides the
+ * target has none and writes `#define sig_atomic_t int` into config.h, which
+ * then collides with the host's own typedef when a build-host tool includes
+ * that config.h. */
+typedef int sig_atomic_t;
+
 typedef void (*sighandler_t)(int);
 
 #define SIG_DFL ((sighandler_t)0)
@@ -87,10 +93,11 @@ int sigfillset(sigset_t *set);
 int sigaddset(sigset_t *set, int signum);
 int sigdelset(sigset_t *set, int signum);
 int sigismember(const sigset_t *set, int signum);
+int sigsuspend(const sigset_t *mask);
+int sigpending(sigset_t *set);
 
-typedef jmp_buf sigjmp_buf;
-#define sigsetjmp(env, savemask) setjmp(env)
-#define siglongjmp(env, val) longjmp(env, val)
+/* `sigjmp_buf`/`sigsetjmp`/`siglongjmp` live in <setjmp.h>, where POSIX puts
+ * them; this header includes it, so they remain visible through here. */
 
 #ifdef __cplusplus
 }

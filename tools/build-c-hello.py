@@ -34,18 +34,18 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from lld import find_lld
+from ccflags import compile_flags
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = "x86_64-pc-minix"
-INCLUDE = ROOT / "tools" / "c-include"
 CRT0_S = ROOT / "tools" / "crt0-x86_64.S"
 OUT_DIR = ROOT / "target" / TARGET / "release"
 WORK = ROOT / "target" / "c-hello"
 
-# (source, output name, needs minix headers)
+# (source, output name)
 PROGRAMS = [
-    (ROOT / "tools" / "hello.c", "helloc", False),
-    (ROOT / "tools" / "ctest.c", "ctest", True),
+    (ROOT / "tools" / "hello.c", "helloc"),
+    (ROOT / "tools" / "ctest.c", "ctest"),
 ]
 
 
@@ -102,7 +102,8 @@ def main() -> int:
 
     # 1. Freestanding compile of the crt0 and the programs. `-mno-red-zone`
     #    matches the fork spec's `disable_redzone`; `-fno-pic` matches the
-    #    kernel's static relocation model.
+    #    kernel's static relocation model. The include flags are what keep the
+    #    compile off the host's headers (tools/ccflags.py).
     cflags = [
         "--target=x86_64-unknown-none",
         "-ffreestanding",
@@ -112,12 +113,12 @@ def main() -> int:
         "-fno-pic",
         "-O2",
         "-c",
+        *compile_flags(),
     ]
     if run(["clang", *cflags, "-o", WORK / "crt0.o", CRT0_S]) != 0:
         return 1
-    for src, _, needs_headers in PROGRAMS:
-        flags = [*cflags, f"-I{INCLUDE}"] if needs_headers else cflags
-        if run(["clang", *flags, "-o", WORK / f"{src.stem}.o", src]) != 0:
+    for src, _ in PROGRAMS:
+        if run(["clang", *cflags, "-o", WORK / f"{src.stem}.o", src]) != 0:
             return 1
 
     # 2. Build minix-libc (+ minix-std/net/minix-rt) for the minix target.
@@ -147,7 +148,7 @@ def main() -> int:
         "}\n",
         encoding="utf-8",
     )
-    for src, name, _ in PROGRAMS:
+    for src, name in PROGRAMS:
         out = OUT_DIR / name
         link = [
             rustc,

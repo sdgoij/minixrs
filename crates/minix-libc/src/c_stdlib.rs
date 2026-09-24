@@ -2,9 +2,9 @@
 //! and `strtod`. Ported from the old `tools/c-libc.c`, plus the integer
 //! parsers the header always declared but never implemented.
 
+use core::ffi::{c_char, c_int, c_long, c_longlong};
 #[cfg(target_os = "minix")]
-use core::ffi::{c_char, c_ulong, c_void};
-use core::ffi::{c_int, c_long, c_longlong};
+use core::ffi::{c_ulong, c_void};
 
 /// `div_t` — `{ int quot, rem }`.
 #[repr(C)]
@@ -362,6 +362,108 @@ pub unsafe extern "C" fn qsort(
     }
 }
 
+/// Binary search for `key` among `nmemb` elements of `size` bytes at `base`,
+/// which `cmp` must already have sorted. `cmp` receives the key first and the
+/// element second, as the C comparator does.
+///
+/// Split out from the export so the host suite can exercise the bounds it
+/// computes without a C callback having to be called.
+fn bsearch_impl(
+    base: *const u8,
+    nmemb: usize,
+    size: usize,
+    key: *const u8,
+    cmp: impl Fn(*const u8, *const u8) -> i32,
+) -> *const u8 {
+    let mut lo = 0usize;
+    let mut hi = nmemb;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let elem = unsafe { base.add(mid * size) };
+        match cmp(key, elem) {
+            0 => return elem,
+            n if n < 0 => hi = mid,
+            _ => lo = mid + 1,
+        }
+    }
+    core::ptr::null()
+}
+
+/// POSIX `bsearch()`: a pointer to the element matching `key` in a sorted
+/// array, or null when it is absent.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bsearch(
+    key: *const c_void,
+    base: *const c_void,
+    nmemb: usize,
+    size: usize,
+    compar: Option<unsafe extern "C" fn(*const c_void, *const c_void) -> c_int>,
+) -> *mut c_void {
+    let (Some(compar), false) = (compar, base.is_null() || size == 0) else {
+        return core::ptr::null_mut();
+    };
+    let found = bsearch_impl(
+        base as *const u8,
+        nmemb,
+        size,
+        key as *const u8,
+        |key, elem| unsafe { compar(key as *const c_void, elem as *const c_void) },
+    );
+    found as *mut c_void
+}
+
+/// Six characters for a `mktemp` suffix, from a caller-supplied seed. The
+/// alphabet is the portable filename set, so no suffix needs escaping.
+fn temp_suffix(seed: u32) -> [u8; 6] {
+    const ALPHABET: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = [0u8; 6];
+    let mut state = seed;
+    for c in &mut out {
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        *c = ALPHABET[((state >> 16) & 0x3f) as usize % ALPHABET.len()];
+    }
+    out
+}
+
+/// `mktemp()`: replace `template`'s trailing `XXXXXX` in place and return the
+/// template, or null when there is no `XXXXXX` to fill.
+///
+/// The name is *not* reserved: nothing stops another process from taking it
+/// between this call and the caller's `open`, which is why POSIX deprecated
+/// `mktemp` in favour of `mkstemp`. It exists here because bash's temporary-file
+/// path calls it, not because it is a good interface.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
+    if template.is_null() {
+        return core::ptr::null_mut();
+    }
+    let bytes = unsafe { core::ffi::CStr::from_ptr(template) }.to_bytes();
+    if bytes.len() < 6 || &bytes[bytes.len() - 6..] != b"XXXXXX" {
+        return core::ptr::null_mut();
+    }
+    // The pid and the clock are what differ between two callers that arrive in
+    // the same tick; the counter separates two calls from the same process.
+    // A clock that will not answer leaves the other two, which is a weaker
+    // seed but not a failure this function can report.
+    let ticks = match minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) {
+        Ok(t) => t.tv_nsec as u32,
+        Err(_) => 0,
+    };
+    let pid = crate::getpid() as u32;
+    static mut SEQ: u32 = 0;
+    let seq = unsafe {
+        SEQ = SEQ.wrapping_add(1);
+        SEQ
+    };
+    let suffix = temp_suffix(pid ^ ticks.rotate_left(7) ^ seq.wrapping_mul(0x9E37_79B9));
+    for (i, c) in suffix.iter().enumerate() {
+        unsafe { *template.add(bytes.len() - 6 + i) = *c as c_char };
+    }
+    template
+}
+
 // glibc-compatible 31-bit LCG; POSIX leaves the sequence unspecified.
 static mut RAND_STATE: u32 = 1;
 
@@ -381,12 +483,59 @@ pub unsafe extern "C" fn rand() -> c_int {
 }
 
 #[cfg(target_os = "minix")]
+/// The process environment, as C sees it: the NULL-terminated array the kernel
+/// handed `main`, published by `crt0` through `__minix_set_environ`.
+///
+/// It points at an empty array until then, which is what makes an `environ`
+/// dereference from an `.init_array` constructor safe rather than a null
+/// pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getenv(_name: *const c_char) -> *mut c_char {
-    // The C runtime does not capture the environment block yet, so the
-    // environment is empty; returning NULL is the POSIX answer for an unset
-    // variable, which libc++ handles.
-    core::ptr::null_mut()
+pub static mut environ: *mut *mut c_char = core::ptr::addr_of_mut!(EMPTY_ENVIRON);
+
+#[cfg(target_os = "minix")]
+static mut EMPTY_ENVIRON: *mut c_char = core::ptr::null_mut();
+
+/// Publish the environment block `crt0` was handed. Called before `main`, so
+/// constructors and `getenv` see the real environment.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __minix_set_environ(envp: *mut *mut c_char) {
+    unsafe { environ = envp };
+}
+
+/// Find `name` in the NULL-terminated `env` array, answering the value (the
+/// bytes after the `=`) or null.
+fn getenv_in(env: *const *const c_char, name: &[u8]) -> *mut c_char {
+    if env.is_null() || name.is_empty() || name.contains(&b'=') {
+        return core::ptr::null_mut();
+    }
+    let mut p = env;
+    loop {
+        let entry = unsafe { *p };
+        if entry.is_null() {
+            return core::ptr::null_mut();
+        }
+        let bytes = unsafe { core::ffi::CStr::from_ptr(entry) }.to_bytes();
+        if let Some(eq) = bytes.iter().position(|b| *b == b'=')
+            && &bytes[..eq] == name
+        {
+            return unsafe { entry.add(eq + 1) as *mut c_char };
+        }
+        p = unsafe { p.add(1) };
+    }
+}
+
+/// C `getenv()`: the value of `name` in the environment, or null. The pointer
+/// is into the environment block, as POSIX specifies — the caller must not free
+/// it, and it must not be used after `setenv`/`putenv` moves that block.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
+    if name.is_null() {
+        return core::ptr::null_mut();
+    }
+    let want = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    getenv_in(unsafe { environ } as *const *const c_char, want)
 }
 
 #[cfg(target_os = "minix")]
@@ -411,6 +560,71 @@ mod tests {
     fn div_quot_rem() {
         let r = div(7, 2);
         assert_eq!((r.quot, r.rem), (3, 1));
+    }
+
+    #[test]
+    fn getenv_in_reads_the_environment() {
+        let mut path = *b"PATH=/bin:/sbin\0";
+        let mut empty = *b"EMPTY=\0";
+        let mut env: [*const c_char; 4] = [
+            path.as_mut_ptr() as *const c_char,
+            empty.as_mut_ptr() as *const c_char,
+            core::ptr::null(),
+            core::ptr::null(),
+        ];
+        let env = env.as_mut_ptr() as *const *const c_char;
+        unsafe {
+            let v = getenv_in(env, b"PATH");
+            assert!(!v.is_null());
+            assert_eq!(core::ffi::CStr::from_ptr(v).to_bytes(), b"/bin:/sbin");
+            // A name with no value is found, with an empty value.
+            let v = getenv_in(env, b"EMPTY");
+            assert!(!v.is_null());
+            assert_eq!(core::ffi::CStr::from_ptr(v).to_bytes(), b"");
+            // Absent, invalid, and empty names answer null.
+            assert!(getenv_in(env, b"HOME").is_null());
+            assert!(getenv_in(env, b"PA=TH").is_null());
+            assert!(getenv_in(env, b"").is_null());
+            assert!(getenv_in(core::ptr::null(), b"PATH").is_null());
+        }
+    }
+
+    #[test]
+    fn temp_suffix_is_a_portable_name() {
+        let a = temp_suffix(1);
+        let b = temp_suffix(2);
+        assert_ne!(a, b);
+        for c in a.iter().chain(b.iter()) {
+            assert!(
+                c.is_ascii_alphanumeric(),
+                "{} is not a filename byte",
+                *c as char
+            );
+        }
+        // The same seed gives the same name, which is what makes the suffix a
+        // function of the seed rather than of hidden state.
+        assert_eq!(a, temp_suffix(1));
+    }
+
+    #[test]
+    fn bsearch_impl_finds_the_key() {
+        let data: [u32; 5] = [1, 3, 5, 7, 9];
+        let size = core::mem::size_of::<u32>();
+        let base = data.as_ptr() as *const u8;
+        let cmp = |key: *const u8, elem: *const u8| {
+            let (k, e) = unsafe { (*(key as *const u32), *(elem as *const u32)) };
+            if k < e { -1 } else { i32::from(k > e) }
+        };
+        for (i, value) in data.iter().enumerate() {
+            let key = core::ptr::from_ref(value) as *const u8;
+            let hit = bsearch_impl(base, data.len(), size, key, cmp);
+            assert_eq!(hit, unsafe { base.add(i * size) });
+        }
+
+        let absent = 4u32;
+        let key = core::ptr::from_ref(&absent) as *const u8;
+        assert!(bsearch_impl(base, data.len(), size, key, cmp).is_null());
+        assert!(bsearch_impl(base, 0, size, key, cmp).is_null());
     }
 
     #[test]

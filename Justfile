@@ -35,6 +35,20 @@ export CARGO_TARGET_X86_64_PC_MINIX_LINKER := minix-lld
 export CARGO_TARGET_RISCV64GC_UNKNOWN_MINIX_LINKER := minix-lld
 export CARGO_TARGET_AARCH64_UNKNOWN_MINIX_LINKER := minix-lld
 
+# MSYS converts POSIX-style env values when an MSYS shell starts a *native*
+# tool, and `MINIXFS_EXTRA`'s value (`/bin/bash=<path>`) is one. Converted, its
+# dest is no longer `/bin/...`, and boot-image::minixfs routes a dest it does
+# not recognise to the root filesystem — the file appears at `/bash` and every
+# listing of `/bin` says it is missing. (`crates/kernel/build.rs` refuses that
+# dest now, so it is a build error rather than a misleading image.)
+#
+# The exclusion has to be in the environment of the shell doing the spawning,
+# which is why this is exported for every recipe and not prefixed onto the lines
+# that spawn a native tool: the recipes that re-enter `just` (`run` -> `run-x86`,
+# `image` -> `image-x86`, `build` -> `build-x86`, ...) have the value converted
+# when the inner `just.exe` starts, before any line of the inner recipe runs.
+export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA"
+
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
 
@@ -472,21 +486,19 @@ mkfs-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    # MSYS mangles POSIX-style MINIXFS_EXTRA values (dest=path); exclude it
-    # from path conversion so mkfs.exe sees the value verbatim.
-    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs x86_64
+    target/mkfs x86_64
 
 mkfs-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs riscv64
+    target/mkfs riscv64
 
 mkfs-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA target/mkfs aarch64
+    target/mkfs aarch64
 
 # Rebuild the C smoke-test binary (/bin/helloc) from tools/hello.c +
 # tools/crt0-x86_64.S (clang freestanding + minix-libc, linked with the fork
@@ -545,9 +557,14 @@ test-linux:
     @podman machine start >/dev/null 2>&1 || true
     MSYS_NO_PATHCONV=1 podman run --rm --network=host -e RUSTUP_TOOLCHAIN={{rust-channel}}-x86_64-unknown-linux-gnu -e CARGO_TARGET_DIR=/tmp/just-target -v "{{ROOT}}:/w:ro" -w /w rust:{{rust-channel}} bash -c 'export PATH=/usr/local/cargo/bin:/usr/bin:/bin; cargo test --workspace --no-fail-fast --locked 2>&1 | tee /tmp/t.log; t=${PIPESTATUS[0]}; grep -h "^test result:" /tmp/t.log | awk "{p+=\$4;i+=\$8} END {printf \"linux host tests: passed=%d ignored=%d summaries=%d\\n\",p,i,NR}"; if [ $t -ne 0 ]; then echo "--- failures ---"; grep -nE "test result: FAILED|^error|signal:|panicked" /tmp/t.log | head -20; fi; rustup component add clippy >/dev/null 2>&1; cargo clippy --all-targets -- -D warnings; c=$?; echo "linux host tests: cargo-test rc=$t clippy rc=$c"; test $t -eq 0 -a $c -eq 0'
 
-# Host clippy + riscv64 compilation check (fork stage1 compiler).
+# Host clippy, riscv64 compilation check (fork stage1 compiler), and the C
+# header contract: the headers in tools/c-include are what the C and C++
+# consumers compile against (bash, /bin/helloc and /bin/ctest, the libc++
+# build), and nothing else notices when an export and its declaration drift
+# apart. The checker parses the Rust sources, so it needs no cbindgen.
 check:
     cargo clippy -- -D warnings
+    python tools/check-c-headers.py
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 

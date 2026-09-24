@@ -105,16 +105,25 @@ pub fn sh(_args: &[&str]) -> i32 {
                 tty_set_raw(false);
             }
 
-            let line_str = core::str::from_utf8(&buf[..line_len]).unwrap_or("");
-
-            // Split into raw tokens by whitespace.
-            let mut raw_tokens = [""; 32];
-            let mut raw_argc = 0usize;
-            for token in line_str.split_whitespace() {
-                if raw_argc < raw_tokens.len() {
-                    raw_tokens[raw_argc] = token;
-                    raw_argc += 1;
+            // Split into words, removing quoting. `buf` is rewritten in place
+            // (quotes and the bytes they protect are compacted out), so the
+            // words borrow it; history already holds the line as typed.
+            let mut spans = [(0usize, 0usize); 32];
+            let mut raw_argc = match tokenize(&mut buf, line_len, &mut spans) {
+                Ok(n) => n,
+                Err(TokenizeError::UnmatchedQuote(q)) => {
+                    write_err(b"sh: unexpected EOF while looking for matching `");
+                    write_err(&[q]);
+                    write_err(b"'\r\n");
+                    if editor_ok {
+                        tty_set_raw(true);
+                    }
+                    continue;
                 }
+            };
+            let mut raw_tokens = [""; 32];
+            for (i, &(start, len)) in spans[..raw_argc].iter().enumerate() {
+                raw_tokens[i] = core::str::from_utf8(&buf[start..start + len]).unwrap_or("");
             }
 
             if raw_argc == 0 {
@@ -693,6 +702,151 @@ fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
+
+/// The quote a tokenizer pass stopped inside.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq)]
+enum TokenizeError {
+    /// A `'` or `"` with no matching close — `bash -c 'echo hi`.
+    UnmatchedQuote(u8),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    None,
+    Single,
+    Double,
+}
+
+/// Where a word's bytes are being written in `tokenize`'s line buffer, and how
+/// many words are already complete. Exists so the five sites that emit a byte
+/// (unquoted, either quote, either escape) do not each repeat the "start a word
+/// if this byte is its first" step.
+struct WordSink<'a> {
+    line: &'a mut [u8],
+    write: usize,
+    start: Option<usize>,
+    count: usize,
+    spans: &'a mut [(usize, usize)],
+}
+
+#[allow(dead_code)]
+impl WordSink<'_> {
+    /// Begin a word at the current write position, if one is not open.
+    fn begin_word(&mut self) {
+        if self.start.is_none() {
+            self.start = Some(self.write);
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        self.begin_word();
+        self.line[self.write] = byte;
+        self.write += 1;
+    }
+
+    /// Close the open word, if any. Words past `spans` are dropped: the
+    /// caller's token table is fixed.
+    fn end_word(&mut self) {
+        if let Some(start) = self.start.take()
+            && self.count < self.spans.len()
+        {
+            self.spans[self.count] = (start, self.write - start);
+            self.count += 1;
+        }
+    }
+}
+
+/// Split `line[..len]` into words with quoting removed, returning how many
+/// there are. Word `i` is left as `spans[i]`, a byte range into `line`, whose
+/// bytes have been compacted in place — quote characters and the escapes that
+/// protected a byte are gone from the word's own text.
+///
+/// The words cannot be `split_whitespace()` results because whitespace inside
+/// quotes is part of the word: `/bin/bash -c 'echo BASH-OK'` is three words,
+/// and the third is `echo BASH-OK`, not two more.
+///
+/// That in-place compaction is why `line` is mutable and why the spans must be
+/// read after the call: each byte is written at or before the position it was
+/// read from, so no word's text is damaged by a later one.
+#[allow(dead_code)]
+fn tokenize(
+    line: &mut [u8],
+    len: usize,
+    spans: &mut [(usize, usize)],
+) -> Result<usize, TokenizeError> {
+    let mut sink = WordSink {
+        line,
+        write: 0,
+        start: None,
+        count: 0,
+        spans,
+    };
+    let mut quote = Quote::None;
+    let mut read = 0usize;
+    while read < len {
+        let byte = sink.line[read];
+        match quote {
+            Quote::Single if byte == b'\'' => {
+                quote = Quote::None;
+                read += 1;
+            }
+            Quote::Single => {
+                sink.push(byte);
+                read += 1;
+            }
+            Quote::Double if byte == b'"' => {
+                quote = Quote::None;
+                read += 1;
+            }
+            Quote::Double
+                if byte == b'\\'
+                    && read + 1 < len
+                    && matches!(sink.line[read + 1], b'"' | b'\\' | b'$' | b'`') =>
+            {
+                let protected = sink.line[read + 1];
+                sink.push(protected);
+                read += 2;
+            }
+            Quote::Double => {
+                sink.push(byte);
+                read += 1;
+            }
+            Quote::None if byte == b'\'' => {
+                // Opening a quote begins a word even if the quotes hold
+                // nothing: `echo ''` passes one empty argument.
+                sink.begin_word();
+                quote = Quote::Single;
+                read += 1;
+            }
+            Quote::None if byte == b'"' => {
+                sink.begin_word();
+                quote = Quote::Double;
+                read += 1;
+            }
+            Quote::None if byte.is_ascii_whitespace() => {
+                sink.end_word();
+                read += 1;
+            }
+            Quote::None if byte == b'\\' && read + 1 < len => {
+                let protected = sink.line[read + 1];
+                sink.push(protected);
+                read += 2;
+            }
+            Quote::None => {
+                sink.push(byte);
+                read += 1;
+            }
+        }
+    }
+    if quote != Quote::None {
+        let byte = if quote == Quote::Single { b'\'' } else { b'"' };
+        return Err(TokenizeError::UnmatchedQuote(byte));
+    }
+    sink.end_word();
+    Ok(sink.count)
+}
 
 /// Scan `raw_tokens[0..raw_argc]` for `>` and split off the redirect filename.
 /// The returned `ParsedCommand` contains only the non-redirect tokens.
@@ -1348,5 +1502,97 @@ mod tests {
             }
         }
         buf.len() - i
+    }
+
+    /// The words `tokenize` found in a line, read back the way `sh` reads
+    /// them. A struct because the crate has no `Vec` to return them in.
+    struct Words {
+        buf: [u8; 256],
+        spans: [(usize, usize); 32],
+        count: usize,
+    }
+
+    impl Words {
+        fn new(line: &[u8]) -> Self {
+            let mut buf = [0u8; 256];
+            buf[..line.len()].copy_from_slice(line);
+            let mut spans = [(0usize, 0usize); 32];
+            let count = tokenize(&mut buf, line.len(), &mut spans).expect("no unmatched quote");
+            Words { buf, spans, count }
+        }
+
+        fn get(&self, i: usize) -> &[u8] {
+            let (start, len) = self.spans[i];
+            &self.buf[start..start + len]
+        }
+    }
+
+    #[test]
+    fn tokenize_splits_on_unquoted_whitespace() {
+        let w = Words::new(b"/bin/echo  hello\tworld");
+        assert_eq!(w.count, 3);
+        assert_eq!(w.get(0), b"/bin/echo");
+        assert_eq!(w.get(1), b"hello");
+        assert_eq!(w.get(2), b"world");
+    }
+
+    #[test]
+    fn tokenize_keeps_a_quoted_argument_in_one_word() {
+        // The case that exposed the gap: a shell that splits on whitespace
+        // alone hands bash `'echo` and `BASH-OK'`, and bash reports an
+        // unmatched quote instead of running the command.
+        for line in [
+            b"/bin/bash -c 'echo BASH-OK'".as_slice(),
+            b"/bin/bash -c \"echo BASH-OK\"".as_slice(),
+        ] {
+            let w = Words::new(line);
+            assert_eq!(w.count, 3);
+            assert_eq!(w.get(0), b"/bin/bash");
+            assert_eq!(w.get(1), b"-c");
+            assert_eq!(w.get(2), b"echo BASH-OK");
+        }
+    }
+
+    #[test]
+    fn tokenize_strips_quotes_around_and_inside_a_word() {
+        // Quotes may open mid-word, and the word continues after them.
+        let w = Words::new(b"a'b c'd");
+        assert_eq!(w.count, 1);
+        assert_eq!(w.get(0), b"ab cd");
+        // An empty quoted word is still a word.
+        let w = Words::new(b"echo ''");
+        assert_eq!(w.count, 2);
+        assert_eq!(w.get(0), b"echo");
+        assert_eq!(w.get(1), b"");
+    }
+
+    #[test]
+    fn tokenize_escapes_outside_quotes() {
+        // A backslash protects the byte that would otherwise separate words.
+        let w = Words::new(b"a\\ b");
+        assert_eq!(w.count, 1);
+        assert_eq!(w.get(0), b"a b");
+        // Inside double quotes it protects a double quote or a backslash;
+        // before anything else the backslash is literal and both bytes stay.
+        let w = Words::new(b"\"a\\\"b\"");
+        assert_eq!(w.count, 1);
+        assert_eq!(w.get(0), b"a\"b");
+        let w = Words::new(b"\"a\\nb\"");
+        assert_eq!(w.count, 1);
+        assert_eq!(w.get(0), b"a\\nb");
+    }
+
+    #[test]
+    fn tokenize_reports_an_unmatched_quote() {
+        // `bash -c 'echo hi` must be refused rather than run with the quote
+        // carried through as text.
+        let line = b"/bin/bash -c 'echo hi";
+        let mut buf = [0u8; 32];
+        buf[..line.len()].copy_from_slice(line);
+        let mut spans = [(0usize, 0usize); 32];
+        assert_eq!(
+            tokenize(&mut buf, line.len(), &mut spans),
+            Err(TokenizeError::UnmatchedQuote(b'\''))
+        );
     }
 }

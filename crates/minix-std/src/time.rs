@@ -32,6 +32,7 @@ pub const PM_BASE: u32 = 0x000;
 pub const PM_ITIMER: u32 = PM_BASE + 17; // 0x011
 pub const PM_KILL: u32 = PM_BASE + 11; // 0x00B
 pub const PM_SIGACTION: u32 = PM_BASE + 20; // 0x014
+pub const PM_SIGSUSPEND: u32 = PM_BASE + 21; // 0x015
 pub const PM_SIGPENDING: u32 = PM_BASE + 22; // 0x016
 pub const PM_SIGPROCMASK: u32 = PM_BASE + 23; // 0x017
 pub const PM_GETTIMEOFDAY: u32 = PM_BASE + 28; // 0x01C
@@ -408,18 +409,18 @@ pub fn sig_ignore(sig: i32) -> Result<(), MinixErr> {
 
 /// Examine and change the signal mask.
 ///
-/// Message layout: m_type = PM_SIGPROCMASK, m1i1 = how, m2l1 = pointer to a
-/// 16-byte mask (matches PM `do_sigprocmask`).
-pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
+/// `set` and `old` are *caller pointers* to 16-byte masks, not mask bits: PM
+/// reads the new mask and writes the old one through SYS_VIRCOPY
+/// (`do_sigprocmask`, m1i1 = how, m2l1 = set ptr, m2l2 = old ptr). Pass 0 for
+/// either to skip it.
+pub fn sigprocmask(how: i32, set: u64, old: u64) -> Result<(), MinixErr> {
     #[cfg(target_os = "minix")]
     unsafe {
-        let mut mask = [0u8; 16];
-        mask[0..8].copy_from_slice(&set.to_ne_bytes());
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_SIGPROCMASK as i32);
         msg_set_i32(&mut msg, OFF_SIGMASK_HOW, how);
-        msg_set_u64(&mut msg, OFF_SIGMASK_SET, mask.as_ptr() as u64);
-        msg_set_u64(&mut msg, OFF_SIGMASK_OLD, 0);
+        msg_set_u64(&mut msg, OFF_SIGMASK_SET, set);
+        msg_set_u64(&mut msg, OFF_SIGMASK_OLD, old);
         match pm_call(&mut msg) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -427,7 +428,58 @@ pub fn sigprocmask(how: i32, set: u64) -> Result<(), MinixErr> {
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (how, set);
+        let _ = (how, set, old);
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// POSIX `sigsuspend`: atomically install the mask at `set` and wait for a
+/// signal to be delivered.
+///
+/// PM answers `SUSPEND` (`do_sigsuspend`, m2l1 = set ptr), so the reply stays
+/// outstanding until a signal arrives; PM's delivery path then clears
+/// SIGSUSPENDED and the kernel releases the call with EINTR. Returning on
+/// either is what the C wrapper needs, since `sigsuspend` reports `-1`/EINTR
+/// once a handler has run.
+pub fn sigsuspend(set: u64) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SIGSUSPEND as i32);
+        msg_set_u64(&mut msg, OFF_SIGMASK_SET, set);
+        match pm_call(&mut msg) {
+            Ok(_) => Ok(()),
+            // 4 = EINTR: the kernel releases the suspended call with EINTR when
+            // the signal that wakes us is delivered.
+            Err(e) if e.0 == 4 => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = set;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// POSIX `sigpending`: report the signals pending on the process.
+///
+/// PM writes 16 bytes into the caller's buffer (`do_sigpending`, m2l1 = set
+/// ptr), merging the kernel-pending set in.
+pub fn sigpending(set: u64) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, PM_SIGPENDING as i32);
+        msg_set_u64(&mut msg, OFF_SIGMASK_SET, set);
+        match pm_call(&mut msg) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = set;
         Err(MinixErr::ENOSYS)
     }
 }
@@ -701,15 +753,26 @@ mod tests {
 
     #[test]
     fn test_sigprocmask_message_format() {
-        // PM do_sigprocmask reads m1i1 = how@8, m2l1 = set ptr@24.
+        // PM do_sigprocmask reads m1i1 = how@8, m2l1 = set ptr@24,
+        // m2l2 = old ptr@32.
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_SIGPROCMASK as i32);
         msg_set_i32(&mut msg, OFF_SIGMASK_HOW, SIG_SETMASK);
         msg_set_u64(&mut msg, OFF_SIGMASK_SET, 0xFFFF);
+        msg_set_u64(&mut msg, OFF_SIGMASK_OLD, 0x1234);
 
-        assert_eq!(msg_i32(&msg, OFF_TYPE), PM_SIGPROCMASK as i32);
-        assert_eq!(msg_i32(&msg, OFF_SIGMASK_HOW), SIG_SETMASK);
+        assert_eq!(msg_i32(&mut msg, OFF_TYPE), PM_SIGPROCMASK as i32);
+        assert_eq!(msg_i32(&mut msg, OFF_SIGMASK_HOW), SIG_SETMASK);
         assert_eq!(msg_u64(&msg, OFF_SIGMASK_SET), 0xFFFF);
+        assert_eq!(msg_u64(&msg, OFF_SIGMASK_OLD), 0x1234);
+    }
+
+    #[test]
+    fn test_sigsuspend_pending_message_types() {
+        // PM dispatch: 21 = sigsuspend, 22 = sigpending, 23 = sigprocmask.
+        assert_eq!(PM_SIGSUSPEND, 0x015);
+        assert_eq!(PM_SIGPENDING, 0x016);
+        assert_eq!(PM_SIGPROCMASK, 0x017);
     }
 
     #[test]
@@ -742,7 +805,19 @@ mod tests {
 
     #[test]
     fn test_sigprocmask_returns_enosys_on_host() {
-        let r = sigprocmask(SIG_SETMASK, 0);
+        let r = sigprocmask(SIG_SETMASK, 0, 0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_sigsuspend_returns_enosys_on_host() {
+        let r = sigsuspend(0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_sigpending_returns_enosys_on_host() {
+        let r = sigpending(0);
         assert!(r.is_err());
     }
 

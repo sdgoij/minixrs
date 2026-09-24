@@ -4,8 +4,10 @@
  *   [rsp]         = argc
  *   [rsp+8 ..]    = argv[] pointers, NULL terminator
  *   ... then envp[] pointers, NULL terminator
- * (same layout the rust fork's `_start` consumes). `main` gets argc/argv
- * per the SysV calling convention; `exit` never returns.
+ * (same layout the rust fork's `_start` consumes). `main` gets argc/argv per
+ * the SysV calling convention and envp as its third argument, and `environ` is
+ * published from that argument so `getenv` works from the first constructor
+ * onward. `exit` never returns.
  */
 
     .section .text._start,"ax"
@@ -23,6 +25,8 @@ _start:
     movq    %rsi, %r13             # argv
     movq    %rdx, %r14             # envp
     call    minix_libc_tls_init    # set up the main thread's TLS block + thread pointer
+    movq    %r14, %rdi             # envp
+    call    __minix_set_environ    # publish it as C's `environ`
     movq    %r12, %rdi
     movq    %r13, %rsi
     movq    %r14, %rdx

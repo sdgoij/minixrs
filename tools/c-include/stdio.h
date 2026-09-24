@@ -22,8 +22,9 @@ int vprintf(const char *fmt, va_list ap);
 }
 #endif
 
-/* FILE-based stdio. All streams are unbuffered and currently route to the
- * serial console (fopen-family I/O lands on real fds once implemented). */
+/* FILE-based stdio. Streams are unbuffered and carry a real fd: fopen/fdopen
+ * open one, and the whole read/write and printf family goes through it.
+ * fclose closes it; fflush is a no-op because nothing is buffered. */
 typedef struct __FILE FILE;
 typedef long fpos_t;
 #define EOF (-1)
@@ -55,6 +56,7 @@ int fclose(FILE *stream);
 int fileno(FILE *stream);
 
 FILE *fopen(const char *path, const char *mode);
+FILE *fdopen(int fd, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -65,6 +67,7 @@ int feof(FILE *stream);
 int ferror(FILE *stream);
 void clearerr(FILE *stream);
 int ungetc(int c, FILE *stream);
+void setlinebuf(FILE *stream);
 int remove(const char *path);
 int rename(const char *oldpath, const char *newpath);
 int perror(const char *s);
@@ -76,6 +79,9 @@ int vasprintf(char **strp, const char *fmt, va_list ap);
 int scanf(const char *fmt, ...);
 int sscanf(const char *str, const char *fmt, ...);
 int fscanf(FILE *stream, const char *fmt, ...);
+int vscanf(const char *fmt, va_list ap);
+int vsscanf(const char *str, const char *fmt, va_list ap);
+int vfscanf(FILE *stream, const char *fmt, va_list ap);
 
 #ifdef __cplusplus
 }

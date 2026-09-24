@@ -211,12 +211,15 @@ pub unsafe extern "C" fn setsockopt(
 // fork is implemented in lib.rs (minix_std::process::fork).
 
 /// Replace the process image (PM→VFS exec chain). Only returns on error.
+///
+/// `envp` is the environment the new image starts with — bash and every other
+/// shell pass theirs to each child. A null `envp` means an empty environment.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execve(
     path: *const c_char,
     argv: *const *const c_char,
-    _envp: *const *const c_char,
+    envp: *const *const c_char,
 ) -> c_int {
     if path.is_null() || argv.is_null() {
         return crate::fail(EINVAL);
@@ -226,8 +229,17 @@ pub unsafe extern "C" fn execve(
     while !unsafe { *argv.add(argc) }.is_null() {
         argc += 1;
     }
+    // The kernel's frame holds 63 of each (minix-rt caps there too), so a
+    // runaway array without its terminator cannot walk the address space.
+    let mut envc = 0usize;
+    if !envp.is_null() {
+        while envc < 63 && !unsafe { *envp.add(envc) }.is_null() {
+            envc += 1;
+        }
+    }
     let argv_slice = unsafe { core::slice::from_raw_parts(argv as *const *const u8, argc) };
-    match minix_std::process::exec(path_bytes, argv_slice) {
+    let envp_slice = unsafe { core::slice::from_raw_parts(envp as *const *const u8, envc) };
+    match minix_std::process::exec(path_bytes, argv_slice, envp_slice) {
         Ok(_) => crate::fail(0), // exec never returns on success
         Err(e) => crate::fail(e.0),
     }
@@ -261,6 +273,10 @@ const SC_CLK_TCK: c_int = 2;
 const SC_GETPW_R_SIZE_MAX: c_int = 69;
 const OPEN_MAX: c_int = 32;
 
+/// The clock tick rate `_SC_CLK_TCK` reports and `times()` counts in. One
+/// number, because the two have to agree.
+pub(crate) const CLK_TCK: i64 = 60;
+
 /// Query system configuration values.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -269,12 +285,30 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
         SC_ARG_MAX => 131_072,
         SC_PAGE_SIZE => 4096,
         SC_OPEN_MAX => OPEN_MAX as c_long,
-        SC_CLK_TCK => 60,
+        SC_CLK_TCK => CLK_TCK as c_long,
         SC_GETPW_R_SIZE_MAX => 16_384,
         _ => {
             crate::set_errno(EINVAL);
             -1
         }
+    }
+}
+
+/// Device control (`ioctl(2)`).
+///
+/// The request number is the NetBSD/Linux-style encoding (direction, size and
+/// a type letter in the high bits, the request in the low byte), so a driver
+/// learns how to move the argument without knowing the request — see
+/// `net::ioc_encode`. `arg` is whatever the request names: a pointer to the
+/// struct, or nothing at all for the many requests whose size field is zero.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, arg: *mut c_void) -> c_int {
+    // The C request is an `unsigned long` and the encoding is 32 bits, so a
+    // request that does not fit in one is not this system's.
+    match unsafe { minix_std::fs::ioctl(fd, request as u32, arg as *mut u8) } {
+        Ok(_) => 0,
+        Err(e) => crate::fail(e.0),
     }
 }
 
@@ -390,12 +424,274 @@ pub unsafe extern "C" fn fstatvfs(fd: c_int, buf: *mut c_void) -> c_int {
 
 // ---- unistd.h path operations ----
 
-/// Get the current working directory. VFS has no getcwd call yet.
+/// `struct dirent`'s `d_name` width: a name this walk must be able to hold.
+const CWD_NAME_MAX: usize = 255;
+
+/// Prepend `name` and a `/` to the path being built, which grows downward
+/// from the end of the caller's buffer towards `buf`. `None` when it would
+/// overrun — the caller reports `ERANGE`.
+///
+/// # Safety
+///
+/// `buf` and `p` must point into one allocation, with `buf <= p`, and the
+/// bytes in `buf .. p` must be the caller's to write.
+unsafe fn cwd_prepend(buf: *mut c_char, p: *mut c_char, name: &[u8]) -> Option<*mut c_char> {
+    let mut q = p;
+    for &byte in name.iter().rev() {
+        q = unsafe { q.sub(1) };
+        if q < buf {
+            return None;
+        }
+        unsafe { *q = byte as c_char };
+    }
+    q = unsafe { q.sub(1) };
+    if q < buf {
+        return None;
+    }
+    unsafe { *q = b'/' as c_char };
+    Some(q)
+}
+
+/// Undo the walk's `chdir("..")`s by re-descending the components of the path
+/// built so far, leaving the process where it started. `Err` carries the
+/// errno of the component it could not re-enter.
+///
+/// # Safety
+///
+/// `path` must point at the NUL-terminated pathname built by
+/// [`cwd_prepend`], and the process must be at the root of the filesystem —
+/// which is where the walk leaves it.
+#[cfg(target_os = "minix")]
+unsafe fn cwd_recover(path: *mut c_char) -> Result<(), i32> {
+    // The caller's errno describes why the walk gave up; the chdirs below
+    // would otherwise overwrite it.
+    let saved = unsafe { *crate::__errno_location() };
+    let mut p = path;
+    while unsafe { *p } != 0 {
+        p = unsafe { p.add(1) };
+        let start = p;
+        while unsafe { *p } != 0 && unsafe { *p } as u8 != b'/' {
+            p = unsafe { p.add(1) };
+        }
+        let slash = unsafe { *p };
+        unsafe { *p = 0 };
+        let component = unsafe { core::ffi::CStr::from_ptr(start) }.to_bytes();
+        let outcome = minix_std::fs::chdir(component);
+        unsafe { *p = slash };
+        if let Err(e) = outcome {
+            return Err(e.0);
+        }
+    }
+    crate::set_errno(saved);
+    Ok(())
+}
+
+/// Scan an open `".."` for the entry naming `want`, writing its name into
+/// `name` (NUL-terminated) and returning the name's length.
+///
+/// Inode numbers are only comparable within one device, so when the parent is
+/// on a different one — the directory is a mount point — the entry is
+/// identified by an `lstat` of its joined path instead.
+///
+/// # Safety
+///
+/// `dir` must be a stream [`opendir`] returned, and `name` must hold the
+/// bytes of the longest name compared against.
+#[cfg(target_os = "minix")]
+unsafe fn cwd_entry(
+    dir: *mut DIR,
+    want: &minix_std::fs::Stat,
+    same_dev: bool,
+    name: &mut [u8],
+) -> Option<usize> {
+    loop {
+        let entry = unsafe { readdir(dir) };
+        if entry.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while len + 1 < name.len() && unsafe { (*entry).d_name[len] } != 0 {
+            name[len] = unsafe { (*entry).d_name[len] } as u8;
+            len += 1;
+        }
+        name[len] = 0;
+        if name[..len] == *b"." || name[..len] == *b".." {
+            continue;
+        }
+        let found = if same_dev {
+            unsafe { (*entry).d_ino == want.st_ino }
+        } else {
+            let mut joined = [0u8; 3 + CWD_NAME_MAX + 1];
+            joined[..3].copy_from_slice(b"../");
+            joined[3..3 + len].copy_from_slice(&name[..len]);
+            joined[3 + len] = 0;
+            match core::str::from_utf8(&joined[..3 + len]) {
+                Ok(path) => match minix_std::fs::lstat(path) {
+                    Ok(st) => st.st_dev == want.st_dev && st.st_ino == want.st_ino,
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            }
+        };
+        if found {
+            return Some(len);
+        }
+    }
+}
+
+/// The port's pathname ceiling (`unistd.h`'s `PATH_MAX`). No walk can build a
+/// longer result, so this is where the allocate-form retry stops.
+const CWD_PATH_MAX: usize = 4096;
+
+/// `getcwd(3)`: the absolute pathname of the current directory.
+///
+/// VFS keeps a directory's vnode, not its name, so the name is recovered by
+/// walking up: `stat` of `"."` and `".."` identifies the directory, a scan of
+/// `".."` finds which entry holds that inode, and `chdir("..")` moves up for
+/// the next round. Root is where the two stats agree. Ported from MINIX's
+/// `__getcwd` (`minix/lib/libc/sys/__getcwd.c`), including its duty to put the
+/// caller back: the walk finishes at the root, and the components it found are
+/// re-descended before it returns, so even a failure leaves the caller where
+/// it started.
+///
+/// A NULL `buf` asks for the result to be `malloc`ed, as glibc allows and as
+/// bash uses (`getcwd(0, PATH_MAX)`); the caller frees it.
+///
+/// The walk moves the process's own cwd, so two threads calling this at once
+/// can cross — the same property MINIX's implementation has.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn getcwd(_buf: *mut c_char, _size: usize) -> *mut c_char {
-    crate::set_errno(ENOSYS);
-    core::ptr::null_mut()
+pub unsafe extern "C" fn getcwd(buf: *mut c_char, size: usize) -> *mut c_char {
+    if !buf.is_null() {
+        if size <= 1 {
+            crate::set_errno(EINVAL);
+            return core::ptr::null_mut();
+        }
+        return match unsafe { cwd_walk(buf, size) } {
+            Ok(()) => buf,
+            Err(errno) => {
+                crate::set_errno(errno);
+                core::ptr::null_mut()
+            }
+        };
+    }
+
+    // The allocate form. Grow on ERANGE the way glibc does, up to the path
+    // ceiling — past that the walk itself could not have produced the longer
+    // result it is asking for.
+    let mut cap = if size == 0 {
+        256
+    } else {
+        size.min(CWD_PATH_MAX)
+    };
+    loop {
+        let alloc = unsafe { crate::malloc(cap) } as *mut c_char;
+        if alloc.is_null() {
+            crate::set_errno(ENOMEM);
+            return core::ptr::null_mut();
+        }
+        match unsafe { cwd_walk(alloc, cap) } {
+            Ok(()) => return alloc,
+            Err(ERANGE) if cap < CWD_PATH_MAX => {
+                unsafe { crate::free(alloc as *mut c_void) };
+                cap = (cap * 2).min(CWD_PATH_MAX);
+            }
+            Err(errno) => {
+                unsafe { crate::free(alloc as *mut c_void) };
+                crate::set_errno(errno);
+                return core::ptr::null_mut();
+            }
+        }
+    }
+}
+
+/// The walk behind [`getcwd`]: fill `buf`, `size` bytes, with the current
+/// directory's absolute pathname. `Err` carries the errno to report, and the
+/// caller's cwd is restored on every path.
+#[cfg(target_os = "minix")]
+unsafe fn cwd_walk(buf: *mut c_char, size: usize) -> Result<(), i32> {
+    let mut current = minix_std::fs::stat(".").map_err(|e| e.0)?;
+
+    // The path is built backwards, from the buffer's NUL upwards.
+    let mut p = unsafe { buf.add(size - 1) };
+    unsafe { *p = 0 };
+
+    loop {
+        let above = match minix_std::fs::stat("..") {
+            Ok(st) => st,
+            Err(e) => {
+                unsafe { cwd_recover(p) }?;
+                return Err(e.0);
+            }
+        };
+        if above.st_dev == current.st_dev && above.st_ino == current.st_ino {
+            break; // The parent is this directory, so this directory is the root.
+        }
+        let dir = unsafe { opendir(b"..\0".as_ptr() as *const c_char) };
+        if dir.is_null() {
+            unsafe { cwd_recover(p) }?;
+            return Err(ENOENT);
+        }
+        let mut name = [0u8; CWD_NAME_MAX + 1];
+        let found = unsafe { cwd_entry(dir, &current, above.st_dev == current.st_dev, &mut name) };
+        unsafe { closedir(dir) };
+        let len = match found {
+            Some(len) => len,
+            None => {
+                unsafe { cwd_recover(p) }?;
+                return Err(ENOENT);
+            }
+        };
+        p = match unsafe { cwd_prepend(buf, p, &name[..len]) } {
+            Some(outer) => outer,
+            None => {
+                unsafe { cwd_recover(p) }?;
+                return Err(ERANGE);
+            }
+        };
+        if let Err(e) = minix_std::fs::chdir(b"..") {
+            unsafe { cwd_recover(p) }?;
+            return Err(e.0);
+        }
+        current = above;
+    }
+
+    unsafe { cwd_recover(p) }?;
+    if unsafe { *p } == 0 {
+        // Nothing was added: the directory is the root itself.
+        p = unsafe { p.sub(1) };
+        unsafe { *p = b'/' as c_char };
+    }
+    if p != buf {
+        let len = unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes().len();
+        unsafe { core::ptr::copy(p, buf, len + 1) };
+    }
+    Ok(())
+}
+
+/// POSIX `fchdir()`: change directory to the one `fd` refers to (VFS_FCHDIR).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fchdir(fd: c_int) -> c_int {
+    match minix_std::fs::fchdir(fd) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// POSIX `rename()`: rename `old` to `new` (VFS_RENAME).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    if old.is_null() || new.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let old_bytes = unsafe { core::ffi::CStr::from_ptr(old) }.to_bytes();
+    let new_bytes = unsafe { core::ffi::CStr::from_ptr(new) }.to_bytes();
+    match minix_std::fs::rename(old_bytes, new_bytes) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 /// Change the current working directory (VFS chdir).
@@ -442,6 +738,31 @@ pub unsafe extern "C" fn ftruncate(fd: c_int, length: c_long) -> c_int {
         Ok(()) => 0,
         Err(e) => crate::fail(e.0),
     }
+}
+
+/// Create a special file (`mknod(2)`): a FIFO, or a device node when the
+/// caller is privileged enough for one.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mknod(path: *const c_char, mode: c_uint, dev: c_uint) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    if path_bytes.is_empty() {
+        return crate::fail(ENOENT); // X/Open requirement
+    }
+    match minix_std::fs::mknod(path_bytes, mode, dev) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Create a FIFO (`mkfifo(3)`), which is `mknod` with the FIFO type bits.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: c_uint) -> c_int {
+    unsafe { mknod(path, mode | minix_std::fs::S_IFIFO, 0) }
 }
 
 /// Create a directory (VFS mkdir).
@@ -967,6 +1288,7 @@ pub struct Passwd {
 
 const ENOENT: i32 = 2;
 const ERANGE: i32 = 34;
+const ENOTTY: i32 = 25;
 
 /// Fill a `Passwd` from a parsed entry whose field slices live in `buf`;
 /// NUL-terminates each field in place and points the struct fields at them.
@@ -1081,6 +1403,103 @@ pub unsafe extern "C" fn getpwuid_r(
     0
 }
 
+/// Shared storage for the non-reentrant lookups: POSIX defines `getpwuid` and
+/// `getpwnam` as returning a pointer into a static area, so they are not
+/// thread-safe by contract. One entry and one buffer serve both.
+const PWD_BUF_LEN: usize = 1024;
+#[cfg(target_os = "minix")]
+static mut PWD_BUF: [c_char; PWD_BUF_LEN] = [0; PWD_BUF_LEN];
+#[cfg(target_os = "minix")]
+static mut PWD_ENTRY: Passwd = Passwd {
+    pw_name: core::ptr::null_mut(),
+    pw_passwd: core::ptr::null_mut(),
+    pw_uid: 0,
+    pw_gid: 0,
+    pw_gecos: core::ptr::null_mut(),
+    pw_dir: core::ptr::null_mut(),
+    pw_shell: core::ptr::null_mut(),
+};
+
+/// POSIX `getpwuid`: the non-reentrant form, over `getpwuid_r` and the static
+/// area above. NULL on error with `errno` set - including ENOENT when there is
+/// no such uid - which is exactly what callers test for.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwuid(uid: c_int) -> *mut Passwd {
+    let mut result: *mut Passwd = core::ptr::null_mut();
+    let r = unsafe {
+        getpwuid_r(
+            uid,
+            core::ptr::addr_of_mut!(PWD_ENTRY),
+            core::ptr::addr_of_mut!(PWD_BUF).cast::<c_char>(),
+            PWD_BUF_LEN,
+            &mut result,
+        )
+    };
+    if r != 0 {
+        core::ptr::null_mut()
+    } else {
+        result
+    }
+}
+
+/// POSIX `getpwnam`: the non-reentrant form of `getpwnam_r`, same contract as
+/// `getpwuid` above.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
+    let mut result: *mut Passwd = core::ptr::null_mut();
+    let r = unsafe {
+        getpwnam_r(
+            name,
+            core::ptr::addr_of_mut!(PWD_ENTRY),
+            core::ptr::addr_of_mut!(PWD_BUF).cast::<c_char>(),
+            PWD_BUF_LEN,
+            &mut result,
+        )
+    };
+    if r != 0 {
+        core::ptr::null_mut()
+    } else {
+        result
+    }
+}
+
+/// POSIX `sleep(seconds)`: whole seconds, returning the unslept remainder.
+///
+/// The port's `usleep` is a busy-wait on the monotonic clock (PM has no
+/// nanosleep call yet), so this loops in chunks rather than multiplying a
+/// large argument into its microsecond parameter. Nothing interrupts the wait,
+/// which is why the return is always 0.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sleep(seconds: c_uint) -> c_uint {
+    let mut left = seconds;
+    while left > 0 {
+        let chunk = if left > 1000 { 1000 } else { left };
+        unsafe { usleep(chunk * 1_000_000) };
+        left -= chunk;
+    }
+    0
+}
+
+/// POSIX `ttyname(fd)`: the name of the terminal open on `fd`, or NULL with
+/// `errno = ENOTTY` when `fd` is not a terminal.
+///
+/// This OS has one console terminal per process, so the name is `/dev/tty` -
+/// the device bash tries first anyway, and the one its `check_dev_tty` falls
+/// back to when that open fails.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
+    if unsafe { isatty(fd) } == 0 {
+        crate::set_errno(ENOTTY);
+        return core::ptr::null_mut();
+    }
+    static mut TTYNAME_BUF: [c_char; 9] = [47, 100, 101, 118, 47, 116, 116, 121, 0];
+    core::ptr::addr_of_mut!(TTYNAME_BUF).cast::<c_char>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,5 +1509,36 @@ mod tests {
     #[test]
     fn test_enosys_matches_c() {
         assert_eq!(ENOSYS, 78);
+    }
+
+    /// `cwd_prepend` writes downward from the end of the caller's buffer, so
+    /// the boundary it must stop at is the buffer's own start: one byte past
+    /// it would be a write outside the caller's object.
+    #[test]
+    fn cwd_prepend_builds_the_path_backwards() {
+        // A 5-byte buffer holds "/etc": four characters and the terminator.
+        let mut buf = [0u8; 5];
+        let p = unsafe { buf.as_mut_ptr().add(4) } as *mut c_char;
+        unsafe { *p = 0 };
+        let start = unsafe { cwd_prepend(buf.as_mut_ptr() as *mut c_char, p, b"etc") }
+            .expect("5 bytes hold /etc");
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(start) }.to_bytes(),
+            b"/etc"
+        );
+    }
+
+    /// One byte short of `/etc`. The walk may leave the buffer half-written —
+    /// it discovers the overrun only as it reaches it — but it must not write
+    /// below the caller's object, which is what the guard bytes here are for.
+    #[test]
+    fn cwd_prepend_refuses_to_overrun_the_buffer() {
+        let mut arena = [0u8; 8];
+        // Four guard bytes, then the four the caller offered.
+        let buf = unsafe { arena.as_mut_ptr().add(4) } as *mut c_char;
+        let p = unsafe { buf.add(3) };
+        unsafe { *p = 0 };
+        assert_eq!(unsafe { cwd_prepend(buf, p, b"etc") }, None);
+        assert_eq!(arena[..4], [0u8; 4], "wrote below the caller's buffer");
     }
 }

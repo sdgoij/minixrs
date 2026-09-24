@@ -45,6 +45,19 @@ pub struct TimeVal {
     pub tv_usec: TimeT,
 }
 
+/// C `clock_t` — `long`, as `tools/c-include/time.h` declares it.
+pub type ClockT = core::ffi::c_long;
+
+/// C `struct tms` (`tools/c-include/sys/times.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tms {
+    pub tms_utime: ClockT,
+    pub tms_stime: ClockT,
+    pub tms_cutime: ClockT,
+    pub tms_cstime: ClockT,
+}
+
 /// Howard Hinnant's civil-from-days algorithm (public domain).
 pub(crate) fn civil_from_days(days: i64, out: &mut Tm) {
     let z = days + 719468;
@@ -301,6 +314,35 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut TimeVal, tz: *mut c_void) -> c_in
     }
 }
 
+/// POSIX `times()`: the number of clock ticks elapsed since an arbitrary point
+/// in the past, at `CLK_TCK` ticks a second, with the four CPU times written to
+/// `buf`.
+///
+/// The CPU times are reported as zero: PM accounts no CPU time per process yet,
+/// so there is nothing to report — the same reason `wait4`'s `rusage` comes back
+/// zero-filled. The tick count itself is real: it is the monotonic clock.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn times(buf: *mut Tms) -> ClockT {
+    if !buf.is_null() {
+        unsafe {
+            *buf = Tms {
+                tms_utime: 0,
+                tms_stime: 0,
+                tms_cutime: 0,
+                tms_cstime: 0,
+            }
+        };
+    }
+    match minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) {
+        Ok(ts) => {
+            (ts.tv_sec * crate::c_sys::CLK_TCK + ts.tv_nsec * crate::c_sys::CLK_TCK / 1_000_000_000)
+                as ClockT
+        }
+        Err(_) => -1,
+    }
+}
+
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
@@ -319,6 +361,30 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
     }
     unsafe { secs_to_tm(*timep, &mut *result) };
     result
+}
+
+#[cfg(target_os = "minix")]
+static mut LOCAL_TM: core::mem::MaybeUninit<Tm> = core::mem::MaybeUninit::uninit();
+
+/// POSIX `localtime()`: `localtime_r` into libc's static buffer. The port has
+/// no timezone support, so this and `gmtime` agree; use the `_r` form when the
+/// shared buffer would be a hazard.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
+    let buf: *mut Tm = (&raw mut LOCAL_TM).cast();
+    unsafe { localtime_r(timep, buf) }
+}
+
+#[cfg(target_os = "minix")]
+static mut GMT_TM: core::mem::MaybeUninit<Tm> = core::mem::MaybeUninit::uninit();
+
+/// POSIX `gmtime()`: the UTC form of `localtime`, into its own static buffer.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
+    let buf: *mut Tm = (&raw mut GMT_TM).cast();
+    unsafe { gmtime_r(timep, buf) }
 }
 
 #[cfg(target_os = "minix")]

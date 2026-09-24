@@ -1,5 +1,5 @@
-/* Minimal pwd.h for the minix OS — no user database. Every process runs
- * as uid 0; the *_r lookups return ENOENT (no such user). */
+/* pwd.h for the minix OS. Lookups read /etc/passwd; the *_r pair returns
+ * ENOENT when no entry matches. */
 #ifndef _PWD_H
 #define _PWD_H
 
@@ -24,6 +24,12 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen,
                struct passwd **result);
 int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
                struct passwd **result);
+
+/* The non-reentrant pair. bash decides these are declared by grepping the
+ * preprocessed header for the substring "getpwuid", which `getpwuid_r` above
+ * satisfies - so it skips its own extern and needs the real declaration here. */
+struct passwd *getpwuid(uid_t uid);
+struct passwd *getpwnam(const char *name);
 
 #ifdef __cplusplus
 }
