@@ -596,13 +596,31 @@ const contains = (bytes, text) =>
 const reopened = async (name) => indexedDbStore({ name, imageBytes: IMAGE });
 
 const booted = await reopened('minixrs-disk');
-// At a parked prompt the store holds the image id and no pages: the mount cleared the clean
-// bit in MFS's *cache*, and nothing has flushed it yet because nothing has synced — which is
-// finding 49, and the reason a session's writes are the shutdown's business.
+// At a parked prompt the store holds the image id and none of the guest's own bytes: finding 49 is
+// that a session's writes are the shutdown's business, and this session has written no data. The
+// one page that may be there is the superblock, and then only for the byte a read-write mount
+// changes — `MFSFLAG_CLEAN` is cleared as the root is mounted, and whether that block has left the
+// block cache by now depends on what the boot has read since, which is not something a check about
+// the *guest* should turn on. So the page list is allowed to hold page 0, and its bytes are allowed
+// to differ from the image at `s_flags` and nowhere else.
+const diskPages = () => indexedDB.databases.get('minixrs-disk')?.tables.get('pages') ?? new Map();
+/// The offsets at which the device's superblock differs from the image it was seeded from: empty
+/// while the mount's clear is still in the cache, the flag byte alone once it has been written.
+const superblockDiff = () => {
+  const page = diskPages().get(0);
+  if (page === undefined) return [];
+  const image = IMAGE.subarray(0, page.length);
+  const at = [];
+  for (let i = 0; i < page.length; i += 1) if (page[i] !== image[i]) at.push(i);
+  return at;
+};
 check(
-  'the store is seeded for this image, and has no bytes of its own yet',
-  booted.imageId !== null && (indexedDB.databases.get('minixrs-disk')?.tables.get('pages').size ?? 0) === 0,
-  `imageId=${booted.imageId}`
+  'the store is seeded for this image, and holds no bytes the guest wrote',
+  booted.imageId !== null &&
+    [...diskPages().keys()].every((page) => page === 0) &&
+    superblockDiff().every((at) => at === SUPERBLOCK_FLAGS),
+  `imageId=${booted.imageId} pages=[${[...diskPages().keys()].join(',')}] ` +
+    `superblock diff=[${superblockDiff().join(',')}]`
 );
 check(
   'the page says where its disk is, so a reader knows a reload will find their files',

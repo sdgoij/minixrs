@@ -761,8 +761,8 @@ mod tests {
         msg_set_u64(&mut msg, OFF_SIGMASK_SET, 0xFFFF);
         msg_set_u64(&mut msg, OFF_SIGMASK_OLD, 0x1234);
 
-        assert_eq!(msg_i32(&mut msg, OFF_TYPE), PM_SIGPROCMASK as i32);
-        assert_eq!(msg_i32(&mut msg, OFF_SIGMASK_HOW), SIG_SETMASK);
+        assert_eq!(msg_i32(&msg, OFF_TYPE), PM_SIGPROCMASK as i32);
+        assert_eq!(msg_i32(&msg, OFF_SIGMASK_HOW), SIG_SETMASK);
         assert_eq!(msg_u64(&msg, OFF_SIGMASK_SET), 0xFFFF);
         assert_eq!(msg_u64(&msg, OFF_SIGMASK_OLD), 0x1234);
     }

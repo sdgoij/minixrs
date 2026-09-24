@@ -1,0 +1,5 @@
+#!/bin/sh
+# Host clippy is not a substitute for a minix-target build: it never compiles
+# `#[cfg(target_os = "minix")]` code, so `just check` and `just build-x86` still
+# have to run before a change touching a server's minix-only path is pushed.
+exec cargo clippy --workspace --all-targets -- -D warnings
