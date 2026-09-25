@@ -8,9 +8,17 @@
 //! idea of "the image".
 
 use crate::elf::{
-    R_X86_64_64, R_X86_64_COPY, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_NONE,
-    R_X86_64_RELATIVE, RELA_SIZE, Rela,
+    R_X86_64_64, R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
+    R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
 };
+
+/// The module id the loader fills a shared object's `tls_index` with.
+///
+/// `ti_module` only has to tell one module from another, and the port places a
+/// single one (the runtime's TLS block has no room for a second), so the value
+/// is a constant rather than something allocated per object. ELF numbers
+/// modules from 1; 0 means "no module".
+pub const TLS_MODULE_ID: u64 = 1;
 
 /// What to do with one relocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +45,11 @@ pub fn reloc_action(typ: u32, base: u64, sym_value: u64, addend: i64) -> Action 
         R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
             Action::Write(sym_value.wrapping_add(addend as u64))
         }
+        // A thread-local in the general- or local-dynamic model is reached
+        // through a `tls_index` holding a module id and an offset within it, and
+        // the loader is the only one that can say which module that is. The
+        // symbol's *address* is not what goes here.
+        R_X86_64_DTPMOD64 => Action::Write(TLS_MODULE_ID),
         // A non-PIE executable's reference to a variable defined in a shared object:
         // the linker reserved space for the variable in the executable, and the
         // loader has to move the object's initial value into it.
@@ -515,6 +528,16 @@ mod tests {
         assert_eq!(reloc_action(R_X86_64_NONE, BASE, 0, 0), Action::Skip);
         assert_eq!(reloc_action(R_X86_64_COPY, BASE, 0, 0), Action::Copy);
         assert_eq!(reloc_action(0xdead_beef, BASE, 0, 0), Action::Unsupported);
+    }
+
+    #[test]
+    fn dtpmod_fills_the_module_id_not_the_symbol_value() {
+        // The symbol's address, passed in as if the walk had resolved one, must
+        // not reach the store: `__tls_get_addr` is asked for a module.
+        assert_eq!(
+            reloc_action(R_X86_64_DTPMOD64, BASE, 0x201_0000, 0),
+            Action::Write(TLS_MODULE_ID)
+        );
     }
 
     /// Every type this loader claims to handle is applied, at its own offset,

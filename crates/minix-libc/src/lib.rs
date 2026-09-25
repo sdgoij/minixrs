@@ -34,6 +34,18 @@ mod c_termios;
 mod c_time;
 mod c_wchar;
 
+/// The `panic` lang item for the shared-object build (`libc.so`).
+///
+/// The rlib that the port's binaries link against leaves this to the program
+/// that links it, but a `cdylib` is a final artifact and nothing downstream can
+/// supply it. The target's panic strategy is `abort`, and a shared library has
+/// no unwinder, so a panic stops the program.
+#[cfg(feature = "so")]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    minix_rt::exit(101)
+}
+
 #[cfg(target_os = "minix")]
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 
@@ -138,13 +150,21 @@ pub(crate) fn tls_block_alloc() -> usize {
 /// `crt0` before `main` and by the pthread trampoline for new threads, so
 /// any `#[thread_local]` access (errno, the pthread handle) works.
 ///
+/// A statically linked program's block bounds come from the linker script, which
+/// is why this can build one. A dynamically linked program has a `PT_INTERP`
+/// loader instead, and the loader builds the same block from this object's
+/// `PT_TLS` and installs the pointer before it runs any initialiser
+/// (`crates/ldso/src/rtld.rs`), so the shared-object build has nothing to add —
+/// and a second block would move the thread pointer away from the storage the
+/// loader's `__tls_get_addr` hands out.
+///
 /// Best effort: on heap failure the thread pointer is left unset and TLS
 /// accesses will fault.
 ///
 /// # Safety
 ///
 /// Must be called exactly once per thread, before any TLS access on it.
-#[cfg(target_os = "minix")]
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn minix_libc_tls_init() {
     let tp = tls_block_alloc();
@@ -152,6 +172,22 @@ pub unsafe extern "C" fn minix_libc_tls_init() {
         minix_rt::thread_set_tls(tp);
     }
 }
+
+/// The shared-object build's `minix_libc_tls_init`, which the loader has already
+/// done: it laid the thread's block out from this object's `PT_TLS` and installed
+/// the thread pointer before any initialiser could run.
+///
+/// `tls_block_alloc` still builds a block for each thread
+/// `pthread_create` starts, and that is sound because the loader rounds the
+/// segment's `p_memsz` the same way — so a worker's own thread pointer is at the
+/// same distance from its storage as the block `__tls_get_addr` expects.
+///
+/// # Safety
+///
+/// Kept for `crt0`'s contract; it changes nothing.
+#[cfg(all(target_os = "minix", feature = "so"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn minix_libc_tls_init() {}
 
 /// Standard POSIX error return: record `errno` and return -1.
 #[inline]
@@ -652,26 +688,6 @@ pub extern "C" fn atexit(func: extern "C" fn()) -> c_int {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub static __dso_handle: u8 = 0;
-
-/// Run the ELF `.init_array` constructors (crt0 calls this before `main`).
-/// The linker script defines the section bounds.
-#[cfg(target_os = "minix")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __minix_init_array() {
-    unsafe {
-        unsafe extern "C" {
-            static __init_array_start: u8;
-            static __init_array_end: u8;
-        }
-        let start = core::ptr::addr_of!(__init_array_start).cast::<extern "C" fn()>();
-        let end = core::ptr::addr_of!(__init_array_end).cast::<extern "C" fn()>();
-        let mut p = start;
-        while p < end {
-            (*p)();
-            p = p.add(1);
-        }
-    }
-}
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]

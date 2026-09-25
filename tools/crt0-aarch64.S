@@ -32,10 +32,27 @@ _start:
     bl      minix_libc_tls_init    // set up the main thread's TLS block + thread pointer
     mov     x0, x21                // envp
     bl      __minix_set_environ    // publish it as C's `environ`
-    mov     x0, x19
-    mov     x1, x20
-    mov     x2, x21
-    bl      __minix_init_array     // run ELF .init_array constructors
+    // Run this image's .init_array constructors, walking the bounds its own
+    // linker script defines. The walk is inline rather than a call into the C
+    // library because that call would take its bounds from whichever image
+    // defines it: in a dynamically linked program `__minix_init_array` resolves
+    // into the shared object, whose array is the object's own and empty, and the
+    // program's constructors would be skipped without a word.
+    adrp    x22, __init_array_start
+    add     x22, x22, :lo12:__init_array_start
+    adrp    x23, __init_array_end
+    add     x23, x23, :lo12:__init_array_end
+.Lctors:
+    cmp     x22, x23
+    b.hs    .Lctors_done
+    mov     x0, x19                // argc
+    mov     x1, x20                // argv
+    mov     x2, x21                // envp
+    ldr     x16, [x22]
+    blr     x16
+    add     x22, x22, #8
+    b       .Lctors
+.Lctors_done:
     mov     x0, x19
     mov     x1, x20
     mov     x2, x21

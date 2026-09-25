@@ -62,6 +62,10 @@ pub const R_X86_64_COPY: u32 = 5;
 pub const R_X86_64_GLOB_DAT: u32 = 6;
 pub const R_X86_64_JUMP_SLOT: u32 = 7;
 pub const R_X86_64_RELATIVE: u32 = 8;
+/// Fills a `tls_index`'s `ti_module` with the module the store belongs to. The
+/// general- (or local-) dynamic TLS model reaches its thread-locals through
+/// `__tls_get_addr`, and this is the id it is handed.
+pub const R_X86_64_DTPMOD64: u32 = 16;
 
 pub const EHDR_SIZE: usize = 64;
 pub const PHDR_SIZE: usize = 56;
@@ -243,18 +247,18 @@ impl<'a> Elf<'a> {
             .find(|p| p.p_type == PT_DYNAMIC)
     }
 
-    /// Whether the image carries a `PT_TLS` segment.
+    /// The image's `PT_TLS` segment, if it has one: the thread-local storage a
+    /// shared object brings with it.
     ///
-    /// The port's TLS is a *single module's*: the linker script reserves
-    /// `__tls_start`/`__tdata_end`/`__tls_end` and the C runtime's `init_tls` copies
-    /// that one block into the thread's storage. A shared object with a thread-local
-    /// of its own would need a block per module, so the loader refuses one rather
-    /// than let its accesses read another module's storage (D8 of
-    /// `DYNAMIC_LINKING.md`).
-    pub fn has_tls(&self) -> bool {
+    /// The segment is a *template*: `p_vaddr .. p_vaddr + p_filesz` is the
+    /// initialised image, which lies inside a `PT_LOAD` and is therefore mapped
+    /// with the rest of the object, and `p_memsz` is the size every thread's
+    /// block needs. The loader gives an object that has one a slot in a thread's
+    /// block (`crates/ldso/src/rtld.rs`).
+    pub fn tls_phdr(&self) -> Option<Phdr> {
         (0..self.e_phnum() as usize)
             .filter_map(|i| self.phdr(i))
-            .any(|p| p.p_type == PT_TLS)
+            .find(|p| p.p_type == PT_TLS)
     }
 
     /// The file offset a link-time virtual address lives at, from the `PT_LOAD`
@@ -467,12 +471,21 @@ mod tests {
     #[test]
     fn tls_is_reported_from_the_program_headers() {
         let b = build();
-        assert!(!Elf::new(&b).unwrap().has_tls(), "no PT_TLS in the image");
+        assert_eq!(
+            Elf::new(&b).unwrap().tls_phdr(),
+            None,
+            "no PT_TLS in the image"
+        );
 
-        // The same image, with its first program header made a PT_TLS.
+        // The same image, with its first program header made a PT_TLS. What the
+        // loader needs out of it is the segment itself: the initialised image and
+        // the size every thread's copy needs are all in the header.
         let mut b = build();
         b[PHOFF..PHOFF + 4].copy_from_slice(&PT_TLS.to_le_bytes());
-        assert!(Elf::new(&b).unwrap().has_tls());
+        let tls = Elf::new(&b).unwrap().tls_phdr().unwrap();
+        assert_eq!(tls.p_type, PT_TLS);
+        assert_eq!(tls.p_vaddr, BASE);
+        assert_eq!(tls.p_filesz, FILE_LEN as u64);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Dynamic linking for minixrs — implementation proposal
 
-Status: **proposal — design settled, Phases 0–2 built** (on `feature/ldso`). Every claim
+Status: **proposal — design settled, Phases 0–3 built** (on `feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
 built* record where the implementation revised the draft.
@@ -30,8 +30,13 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
   **classic non-PIE first** progression so each phase adds exactly one mechanism.
 - **wasm32 is out of scope** — exec there is host module instantiation and there are no
   faults to fault on (`ARCH_WASM32.md`). This is a three-arch project.
-- The long pole is the **toolchain fork** (a dynamic/PIC variant of the `*-minix`
-  targets), not the loader. Phases 0–2 deliberately avoid touching it.
+- **The toolchain fork was not needed.** The long pole was expected to be a dynamic/PIC
+  variant of the `*-minix` targets in `rust/`, but a JSON target plus `-Z build-std`
+  carries Phases 0–3 (§6.5). The fork's static target is untouched, so static stays
+  exactly what it was (D2).
+- **Phase 3 is a dynamic C library.** `minix-libc` builds as `libc.so`, and a C program
+  linked against it runs — which needed the loader to place thread-local storage, since
+  the library has `#[thread_local]` statics of its own (§6.6, D8).
 
 ## 1. Goal
 
@@ -43,6 +48,8 @@ Concretely, "done" for v1 means:
 
 - `/bin/dynhello` prints a string it does not contain, which comes from `/lib/libdyn.so`
   (proved by the string living only in the `.so` in the image).
+- A C program linked against `/lib/libc.so` runs, and what it prints comes from that
+  object — including an `errno` read out of thread-local storage the loader placed.
 - Two processes running `dynhello` share the `.so`'s text pages (measured, not assumed).
 - A `fork` after load works (the child keeps the mapping), and re-`exec` works.
 - Every existing static binary and every existing gate is unchanged.
@@ -235,13 +242,36 @@ load-time error instead of a first-call trap.
    code. (The `FILEMMAP.md §3/§6` "block cache is a stub" claims predate the cache and
    should be corrected there.)
 
-### D8 — TLS: single-module static TLS first
+### D8 — TLS: single-module static TLS, placed by the loader
 
 `init_tls()` copies one image (`__tls_start..__tls_end`) into a per-thread block; there is
-no module id. v1 keeps DSOs **without `PT_TLS`** and makes the loader reject one that has
-it (loudly, not silently). Phase 2 adds general static TLS across modules (assign each
-`PT_TLS` an offset, build one block, resolve `DTPMOD64`/`DTPOFF64`/`TPOFF64`); dynamic
-TLS (`DT_TLSDESC`) stays out.
+no module id. v1 kept DSOs **without `PT_TLS`** and made the loader reject one that had it
+(loudly, not silently).
+
+**As built (Phase 3) — the loader places one module, which is all the port's runtime can
+hold.** `minix-libc`'s `errno` and pthread handle are `#[thread_local]`, so `libc.so`
+arrives with a `PT_TLS` whatever the design says, and the compiler reaches it through
+`__tls_get_addr` (the local-dynamic form, since the symbols are local to the object). So
+the loader now:
+
+- accepts `PT_TLS`, and at most **one** object carrying it — the program's own if it has
+  one (a program linked against the *rlib* carries the library's, which is the common
+  case), otherwise a single loaded object's. Two is refused by name;
+- builds the block at `tp - align16(p_memsz)` (variant II, the convention
+  `tls_block_alloc` already uses), copies the initialised part, zeroes the rest, and
+  installs the thread pointer **before** any initialiser runs — an initialiser may touch a
+  thread-local;
+- defines `__tls_get_addr`, which returns `tp - align16(p_memsz) + ti.offset` for this
+  thread, reading `tp` from `[tp]` (the port's own convention) so a thread
+  `pthread_create` started gets its own storage;
+- resolves the three symbols a `cdylib` leaves undefined because it is linked with no
+  script — `__tls_start`, `__tdata_end`, `__tls_end` — from that object's `PT_TLS`
+  (§6.6);
+- resolves `DTPMOD64` to a constant module id.
+
+Out of scope, and refused rather than mishandled: two modules with TLS (the second's
+storage would alias the first's), and `DT_TLSDESC`/`TPOFF64` (neither object needs them,
+and initial-exec would be a second relocation path to maintain).
 
 ### D9 — Auxv: registers first, auxv only when a consumer needs it
 
@@ -341,8 +371,9 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
   turning it off restores an artifact-free image. Destinations must start with `/bin/`,
   `/sbin/`, `/lib/` or `/libexec/`; `MSYS2_ENV_CONV_EXCL` covers the Windows conversion.
 - The gate sets it to `/libexec/ld.so`, `/lib/libdyn.so`, `/lib/libdyn2.so` and
-  `/bin/dynhello`. The objects keep the names their `DT_NEEDED` entries use, so no soname
-  symlink is needed: the loader's search path is literal (`crates/ldso/src/rtld.rs`).
+  `/bin/dynhello`, and (Phase 3) `/lib/libc.so` and `/bin/dynclib`. The objects keep the
+  names their `DT_NEEDED` entries use, so no soname symlink is needed: the loader's search
+  path is literal (`crates/ldso/src/rtld.rs`).
 - `boot-image` gains `/lib` and `/libexec`: unconditionally in the initramfs (`cpio.rs`,
   part of the base layout, because the loader must be reachable before `mount_root`) and in
   the MinixFS image only when a file needs one, created *after* every other directory so no
@@ -352,21 +383,60 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
 
 ### 6.5 Toolchain
 
-- **No fork change for Phases 0–2.** As built: the `.so` is `clang -fPIC` objects linked
-  with `lld -shared -soname libdyn.so` — no script of our own, LLD's defaults place
-  `.dynsym`/`.dynstr`/`.hash`/`.rela.*` correctly. The executable is linked with the fork's
-  stage1 `rustc` as the driver (it needs the `minix-libc` rlib for `write`/`exit`) and
-  requires `-Bdynamic -l:libdyn.so --dynamic-linker=/libexec/ld.so`. `-Bdynamic` is not
-  optional: the minix target's `crt_static_default` makes rustc pass `-static`, under which
-  LLD refuses the `.so` altogether.
+- **No fork change for Phases 0–3.** As built, the C `.so`s are `clang -fPIC` objects
+  linked with `lld -shared -soname libdyn.so` — no script of our own, LLD's defaults place
+  `.dynsym`/`.dynstr`/`.hash`/`.rela.*` correctly. An executable is linked with the fork's
+  stage1 `rustc` as the driver and requires `-Bdynamic -l:<name>.so
+  --dynamic-linker=/libexec/ld.so`. `-Bdynamic` is not optional: the minix target's
+  `crt_static_default` makes rustc pass `-static`, under which LLD refuses the `.so`
+  altogether.
 - The loader has **its own link script** (`tools/minix-ldso.ld`, base `0x04000000`):
   `tools/minix-user.ld` pins `. = 0x01000000`, and an explicit assignment wins over
   `--image-base`, so that flag cannot move it.
-- **Phase 3 (fork):** a dynamic variant of the `*-minix` target — `dynamic_linking: true`,
-  `relocation_model: Pic`, `crt_objects`/`--dynamic-linker=/libexec/ld.so`, and dropping
-  or conditioning the `pre_link_args --image-base=0x1000000` for `-shared` links
-  (`rust/compiler/rustc_target/src/spec/base/minix.rs`). Prefer a **new target name** or
-  a `-C` profile over changing the default, so static builds are untouched (D2).
+- **Phase 3 needed no fork either.** `crates/minix-libc` is a Rust library, so its shared
+  object is built by rustc rather than LLD — `cargo rustc -p minix-libc --crate-type
+  cdylib` — and three things had to be arranged for that to work
+  (`tools/build-dynlibc.py`):
+
+  1. **A PIC/`cdylib` target: `tools/minix-dyn-target/x86_64-pc-minix-dyn.json`.**
+     `relocation-model: pic` and `dynamic-linking: true`, plus
+     `crt-static-allows-dylibs: true` — without that last flag rustc *silently drops* the
+     `cdylib` crate type when `crt-static-default` is on, which is what the minix target
+     sets (`rustc_session/src/output.rs::invalid_output_for_target`): the object was built
+     as an rlib and no `.so` appeared. The target also **drops** the built-in minix
+     target's `pre_link_args --image-base=0x1000000`: an object is mapped at
+     `slot + p_vaddr`, so a non-zero link-time base would put it that far past the slot
+     reserved for it — `rtld.rs` reserves the object's *highest* vaddr
+     (`image_extent`'s `hi`) rather than its extent for the same reason.
+  2. **`-Z build-std=core,alloc`.** The target's sysroot `libcore` is not position
+     independent, and the link fails with `R_X86_64_64 cannot be used against local
+     symbol` until `build-std` rebuilds it under the PIC target. That, and not a fork, is
+     what makes the toolchain the long pole: the fork's static target is never touched
+     (D2), and the object's `core` is built into `target/dynlibc/` rather than into the
+     sysroot the static userland links against.
+  3. **`--features so` and `link-arg=--soname=libc.so`.** A `cdylib` is a final artifact
+     and nothing downstream supplies the `panic` lang item, so the feature adds one
+     (`crates/minix-libc/src/lib.rs`); the soname is what makes the program's `DT_NEEDED`
+     the name the loader searches for.
+
+  The program is then linked with `--allow-shlib-undefined`: the object leaves four
+  symbols for the loader on purpose (§6.6), and LLD checks a linked object's undefined
+  symbols by default.
+
+### 6.6 What the loader gives the objects it loads
+
+The loader is linkable to the objects it maps, the way a system `ld.so` is
+(`rtld.rs::loader_defined`), and it answers five names that are in no object's tables:
+
+- `__tls_get_addr` — the runtime linker's own, since the address of a thread-local
+depends on which thread is asking (D8).
+- `__tls_start`, `__tdata_end`, `__tls_end` — the TLS bounds a *statically linked*
+program gets from `tools/minix-user.ld`. A `cdylib` is linked with no script of ours, so
+it leaves all three undefined, and the object's `PT_TLS` is the better answer than a
+second script would be: it is the same fact, stated once, and the loader has to read it
+anyway. (It is also why these must be answered *per referencing object*: a non-PIE
+executable exports its own `__tls_start` for its own, unrelated block, and a naive global
+lookup would bind the object's reference to the program's.)
 
 ## 7. Phased plan
 
@@ -441,6 +511,8 @@ that is not whole entries).
   DSO's data), weak undefined symbols, and `DT_INIT`/`DT_INIT_ARRAY` ordering.
 - A library's own `DT_NEEDED` is followed (transitively, one mapping per name).
 - Static TLS across modules stays unimplemented, and is now **refused by name** (D8).
+  (Phase 3 replaces that refusal with a loader that places the one module the port's
+  runtime can hold.)
 - `fork` after load and re-`exec` are exercised by the gate.
 - Deferred with the reason: `LD_LIBRARY_PATH` (needs the loader to walk `envp`, which it
   now receives but does not read) and `AT_PAGESZ` (needs auxv, which is D9's work and so
@@ -488,15 +560,70 @@ a duplicate mapping would still print the right line, because both copies are re
 The gate proves the loading order and the initialiser order; the single mapping is
 correct by construction rather than measured.
 
-### Phase 3 — toolchain, and a dynamic C library
+### Phase 3 — toolchain, and a dynamic C library — **done, less the soname scheme**
 
-- The fork's dynamic target variant (§6.5), and `minix-libc` built as a `.so` with a
-  soname, so **C programs** link dynamically (this is where `bash` could shrink).
-- Soname/versioned symlink scheme in the image (the MINIX `shlib_version` idea, one
-  version).
+- `minix-libc` builds as `libc.so` with a soname, so **C programs** link dynamically —
+  which is where `bash` could eventually shrink.
+- Building it needed a PIC/`cdylib` target and `build-std`; the toolchain fork was not
+  needed after all (§6.5). The loader gained single-module TLS (§6.6, D8) and the
+  loader-defined symbols the object leaves undefined.
+- Three things the loader turned out to assume, found by building a real library against
+  it rather than a two-function test object (each is now a fixed bug, recorded here
+  because the same assumptions are easy to reintroduce):
 
-Gate: a `tools/` C program (or `helloc`) built dynamically against `libc.so` runs; the
-existing `helloc`/`ctest` static gates still pass.
+  1. **A symbol scan capped at 256 entries.** `libc.so` exports ~400 dynamic symbols, so
+     every name past the cap was invisible — `stdout` failed to resolve. The cap is gone;
+     an object's symbol count is now its `.hash` `nchain` clamped to the symbols that fit
+     inside the object, which is the bound that does not go stale.
+  2. **Refusing a main program with `PT_TLS`.** A program linked against the `minix-libc`
+     *rlib* carries the library's thread-locals itself, so that refusal rejected the
+     port's own Phase 0–2 test program. The program is now placed like any other object.
+  3. **LD_LIBRARY_PATH** stays unimplemented: the loader receives `envp` (it passes it to
+     initialisers) but does not walk it.
+
+As built:
+
+- `tools/build-dynlibc.py` builds `libc.so` (`cargo rustc --crate-type cdylib` under the
+  dyn target, `--features so`, soname `libc.so`) and `tools/dynclib.c` linked against it,
+  and `dynlink-x86` runs it after `tools/build-dynlink.py`.
+- The loader's TLS work is `rtld.rs::install_tls` + `__tls_get_addr` + the loader-defined
+  bounds symbols; `reloc.rs` gained `R_X86_64_DTPMOD64` (the walk writes a module id, not
+  a symbol value) and `layout.rs` the block-size rule, both host-tested.
+- `crates/minix-libc`'s `minix_libc_tls_init` is a no-op under the `so` feature: for a
+  dynamically linked program the loader owns the thread pointer, and installing a second
+  block would move it away from the storage `__tls_get_addr` hands out. `crates/minix-libc`
+  needs no other change, so the static library is untouched (D2).
+
+Gate (`just test-dynlink-x86`, four steps in one boot): the three `dynhello` steps above,
+plus `/bin/dynclib`, which must print
+`libc-dyn-ok errno=2 msg=No such file or directory ctor=1`. The line is the whole chain in
+one place: the program asks `open` for a path that cannot exist (a `libc.so` symbol),
+reads `errno` (its thread-local, so through the loader's `__tls_get_addr`), prints
+`strerror`'s answer (a pointer into a buffer inside `libc.so`), and reports whether its
+own constructor ran (`ctor`). The gate fails if the executable contains the message, so
+the message can only have come from the object, and it fails if `ctor` is 0 — the
+constructor was added precisely because the gate could not previously see the failure
+below. The static `helloc`/`ctest` gates are unchanged and still pass (`just test-arches`).
+
+**A dynamically linked program's own `.init_array` — found here, then fixed.** `crt0`
+used to call `__minix_init_array`, which in a dynamically linked program resolves into
+`libc.so` and walks *that object's* array — empty, because LLD synthesises
+`__init_array_start`/`__init_array_end` for a `-shared` link and binds them inside the
+object. The program's own constructors were therefore skipped without a word. `crt0` now
+walks its own bounds itself (all three arches), and the helper is gone rather than left
+as an internal whose default meaning is a trap. The gate's `ctor=1` field is what makes
+that walk observable: skipping it in `tools/crt0-x86_64.S` turns the line into `ctor=0`
+and fails the step — which is how the fix was checked, not just its green result.
+
+**Known gaps.**
+
+- **A worker thread's block is the object's, not the loader's.** `pthread_create` still
+  goes through `tls_block_alloc`, which is sound only because the loader rounds `p_memsz`
+  the same way and the layout is a single module — so it agrees. With a second TLS module
+  (refused) that reasoning would not hold.
+- **No soname/versioned symlink scheme** (the MINIX `shlib_version` idea): one version,
+  named by the soname the object states, and the loader's search is literal. Nothing needs
+  a version yet, so the idea is deferred rather than designed.
 
 ### Phase 4 — Rust (deferred; independently skippable)
 

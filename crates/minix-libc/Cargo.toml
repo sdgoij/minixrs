@@ -17,3 +17,9 @@ minix-rt = { path = "../minix-rt", default-features = false }
 
 [lints]
 workspace = true
+
+[features]
+# Build the C library as `libc.so` (`cargo rustc --crate-type cdylib`). A
+# shared object is a final artifact, so it has to supply the `panic` lang
+# item itself; the rlib build leaves that to the program that links it.
+so = []

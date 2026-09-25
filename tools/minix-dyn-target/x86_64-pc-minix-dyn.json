@@ -1,0 +1,29 @@
+{
+  "arch": "x86_64",
+  "cpu": "x86-64",
+  "crt-static-allows-dylibs": true,
+  "crt-static-default": true,
+  "crt-static-respected": true,
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "disable-redzone": true,
+  "dynamic-linking": true,
+  "executables": true,
+  "has-thread-local": true,
+  "linker": "lld",
+  "linker-flavor": "gnu-lld",
+  "lld-flavor": "gnu",
+  "llvm-target": "x86_64-unknown-none",
+  "main-needs-argc-argv": true,
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "Minix (x86_64), position-independent: shared objects and PIC code. Deliberately no --image-base, unlike the built-in target: a shared object is mapped by the loader at a base it chooses, so a link-time base is not just unnecessary but harmful — the loader maps at `slot + p_vaddr`, and the slot it reserved would then be short by the object's own base.",
+    "host_tools": false,
+    "std": false,
+    "tier": 3
+  },
+  "os": "minix",
+  "panic-strategy": "abort",
+  "relocation-model": "pic",
+  "singlethread": false,
+  "target-pointer-width": 64
+}

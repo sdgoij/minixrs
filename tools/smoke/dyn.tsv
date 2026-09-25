@@ -40,3 +40,23 @@
 /bin/dynhello	dynlink-ok dynlink-data dynlink-2-ok
 /bin/dynhello fork	child-ok dynlink-ok dynlink-data dynlink-2-ok
 /bin/dynhello exec	re-exec-ok dynlink-ok dynlink-data dynlink-2-ok
+
+# `/bin/dynclib` is a C program linked against `libc.so` rather than the static
+# library: every libc symbol it calls is resolved by the loader before `main`.
+# Three fields are about a mechanism the loader and `crt0` each have to get
+# right, and each fails on its own if they do not.
+#
+# `errno` is a thread-local in that object, so reading it goes through the
+# `__tls_get_addr` the loader supplies, against a block the loader laid out from
+# the object's own `PT_TLS`. `msg` comes from `strerror`, which returns a pointer
+# into a buffer inside `libc.so`, so it is that object's data, reached through a
+# relocation the loader applied. `ctor` is the program's own constructor: `crt0`
+# walks this image's `.init_array` itself, and the field is 0 if that walk is
+# missing — which is what routing it through the C library used to do, since that
+# resolves into the object's own, empty array.
+#
+# `just test-dynlink-x86` fails the gate if the executable contains the message,
+# which is what makes the line evidence about `libc.so` rather than about the
+# program: the program asks for the error number it just caused, and only the
+# object can name it.
+/bin/dynclib	libc-dyn-ok errno=2 msg=No such file or directory ctor=1

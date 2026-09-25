@@ -4,8 +4,8 @@
 //! enters it with the main program's ELF header page in a register, and [`rtld`]
 //! maps each `DT_NEEDED` shared object at a base it allocates, resolves
 //! `GLOB_DAT`/`JUMP_SLOT` from the objects' symbol tables, applies every object's
-//! `RELATIVE` fixups against its base, and hands back the main program's entry
-//! point.
+//! `RELATIVE` fixups against its base, places the thread-local storage the objects
+//! brought, and hands back the main program's entry point.
 //!
 //! [`elf`] and [`reloc`] are host-buildable and carry the unit tests
 //! (`cargo test -p ldso`), so the parsing and the relocation rules are checked

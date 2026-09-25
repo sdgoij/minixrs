@@ -13,28 +13,37 @@
 //! `RELATIVE` relocations are applied against that base. The main program is
 //! still non-PIE: its addresses are absolute, so its bias is 0.
 //!
-//! Only the main program's `DT_NEEDED` list is followed — an object that itself
-//! needs another is a load failure today, not a silent omission, because its own
-//! symbols then go unresolved. Eager binding throughout: no resolve trampoline,
-//! so an unresolved symbol is a load failure rather than a first-call fault.
+//! A `DT_NEEDED` list is followed transitively, depth-first, so the loaded
+//! objects come out in reverse topological order (a dependency precedes what
+//! needs it, which is the order the initialisers then run in backwards). Eager
+//! binding throughout: no resolve trampoline, so an unresolved symbol is a load
+//! failure rather than a first-call fault.
+//!
+//! Two things here are the loader's own rather than any object's. Its symbol
+//! table answers the names a position-independent object cannot resolve for
+//! itself — the TLS bounds a `cdylib` is linked without, and `__tls_get_addr`
+//! ([`loader_defined`]) — and it installs the thread's thread-local storage
+//! before any initialiser can run, because an initialiser may touch one
+//! ([`install_tls`]).
 
 use crate::elf::{
     DT_HASH, DT_INIT, DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_JMPREL, DT_NEEDED, DT_NULL, DT_PLTREL,
     DT_PLTRELSZ, DT_RELA, DT_RELASZ, DT_STRTAB, DT_SYMTAB, DYN_SIZE, EM_X86_64, ET_DYN, Elf,
     MAX_DYN, PF_W, PF_X, PT_LOAD, RELA_SIZE, Rela, SYM_SIZE, Sym,
 };
-use crate::layout::{BaseAlloc, image_extent, page_down, page_up};
+use crate::layout::{BaseAlloc, image_extent, page_down, page_up, tls_block_size};
 use crate::reloc::{
-    Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, apply_table,
+    Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, TLS_MODULE_ID, apply_table,
 };
+use core::arch::asm;
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A `DT_NEEDED` name is looked up here, in order.
 const SEARCH_PATH: &[&[u8]] = &[b"/lib/", b"/usr/lib/"];
 
 const PAGE: u64 = 0x1000;
 const MAX_OBJECTS: usize = 8;
-const MAX_SYMS: usize = 256;
 /// Longest library name kept for the "already loaded" check.
 const NAME_MAX: usize = 128;
 
@@ -86,7 +95,8 @@ enum LoadError {
     NotElf,
     NotObject,
     NoDynamic,
-    HasTls,
+    TwoTlsModules,
+    NoTlsSpace,
     TooManyObjects,
     CannotLoad,
     NoSpace,
@@ -99,7 +109,10 @@ fn die_load(e: LoadError) -> ! {
         LoadError::NotElf => die(b"ld.so: main header page is not an x86_64 ELF\n"),
         LoadError::NotObject => die(b"ld.so: a DT_NEEDED is not a PIC object\n"),
         LoadError::NoDynamic => die(b"ld.so: no PT_DYNAMIC\n"),
-        LoadError::HasTls => die(b"ld.so: a shared object with TLS is not supported\n"),
+        LoadError::TwoTlsModules => {
+            die(b"ld.so: more than one loaded object has thread-local storage\n")
+        }
+        LoadError::NoTlsSpace => die(b"ld.so: no room for a thread-local block\n"),
         LoadError::TooManyObjects => die(b"ld.so: too many objects\n"),
         LoadError::CannotLoad => die(b"ld.so: cannot load DT_NEEDED\n"),
         LoadError::NoSpace => die(b"ld.so: no room for another object\n"),
@@ -195,6 +208,20 @@ impl LibName {
     }
 }
 
+/// An object's thread-local storage, as its `PT_TLS` segment states it, moved to
+/// runtime addresses.
+#[derive(Clone, Copy)]
+struct TlsSlot {
+    /// Runtime VA of the initialised image (`p_vaddr + bias`), which lies inside
+    /// one of the object's mapped `PT_LOAD`s.
+    init: u64,
+    /// How many bytes of it are initialised (`p_filesz`); the rest of the block
+    /// is zeroed.
+    init_len: u64,
+    /// How many bytes every thread's copy needs (`p_memsz`).
+    memsz: u64,
+}
+
 /// One loaded ELF object: the link-time facts its dynamic array states, and the
 /// bias they were mapped at (`0` for a non-PIE main program). Every read adds
 /// the bias; `img_start`/`img_end` are the runtime addresses a relocation
@@ -210,6 +237,8 @@ struct Object {
     nsym: usize,
     img_start: u64,
     img_end: u64,
+    /// The thread-local storage it brings with it, if any.
+    tls: Option<TlsSlot>,
     /// The name it was loaded by, empty for the main program.
     name: LibName,
 }
@@ -223,6 +252,7 @@ impl Object {
         nsym: 0,
         img_start: 0,
         img_end: 0,
+        tls: None,
         name: LibName::EMPTY,
     };
 
@@ -261,13 +291,27 @@ impl Object {
         None
     }
 
-    /// The dynamic symbol count, from the `.hash` table's `nchain` (ELF requires
-    /// `DT_HASH` alongside `DT_GNU_HASH` for compatibility, and LLD emits both).
+    /// The dynamic symbol count, bounded by what the object has room for.
+    ///
+    /// The count is the `.hash` table's `nchain` (ELF requires `DT_HASH`
+    /// alongside `DT_GNU_HASH` for compatibility, and LLD emits both). An object
+    /// the static linker gave no dynamic symbols claims none — which is how a
+    /// non-PIE program contributes to a lookup only the names it really exports.
+    ///
+    /// `nchain` is the one number here that a malformed image could inflate, and
+    /// a scan is only ever as good as its bound, so the claim is clamped to the
+    /// symbols that fit between the table and the end of the object.
     unsafe fn sym_count(&self) -> usize {
-        match unsafe { self.dyn_tag(DT_HASH) } {
-            Some(h) => unsafe { rd_u32(self.bias + h + 4) as usize },
-            None => 0,
+        if self.symtab == 0 || self.strtab == 0 {
+            return 0;
         }
+        let Some(h) = (unsafe { self.dyn_tag(DT_HASH) }) else {
+            return 0;
+        };
+        let claimed = unsafe { rd_u32(self.bias + h + 4) } as u64;
+        let symtab = self.bias + self.symtab;
+        let room = self.img_end.saturating_sub(symtab) / SYM_SIZE as u64;
+        claimed.min(room) as usize
     }
 }
 
@@ -277,11 +321,16 @@ impl Object {
 /// COPY needs — this image's own symbol for the name is the destination it is
 /// about to write, so resolving there would copy the destination onto itself.
 unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usize) -> Option<Def> {
+    // The loader is linkable to the objects it maps, the way a system `ld.so` is:
+    // the names below belong to the loader and are in no object's tables.
+    if let Some(def) = loader_defined(objects, owner, name) {
+        return Some(def);
+    }
     for (i, o) in objects.iter().enumerate() {
         if scope == Scope::ExcludeSelf && i == owner {
             continue;
         }
-        for idx in 0..o.nsym.min(MAX_SYMS) as u32 {
+        for idx in 0..o.nsym as u32 {
             if let Some(n) = unsafe { o.defined_name(idx) }
                 && n == name
             {
@@ -299,6 +348,34 @@ unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usiz
         }
     }
     None
+}
+
+/// A symbol the loader itself defines for the objects it loads.
+///
+/// A position-independent object reaches its own thread-local storage through
+/// `__tls_get_addr`, and its buffer allocator through `__tls_start`,
+/// `__tdata_end` and `__tls_end` — the bounds a *statically linked* program gets
+/// from the port's linker script. A `cdylib` is linked by nothing but LLD, so it
+/// leaves those three undefined, and the loader answers with the object's own
+/// `PT_TLS`, which is where those bounds really come from anyway.
+fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> {
+    if name == b"__tls_get_addr" {
+        return Some(Def {
+            addr: __tls_get_addr as *const () as u64,
+            size: 0,
+        });
+    }
+    let tls = objects.get(owner)?.tls?;
+    let addr = if name == b"__tls_start" {
+        tls.init
+    } else if name == b"__tdata_end" {
+        tls.init + tls.init_len
+    } else if name == b"__tls_end" {
+        tls.init + tls.memsz
+    } else {
+        return None;
+    };
+    Some(Def { addr, size: 0 })
 }
 
 /// The image a relocation walk writes to: one loaded object's tables, read
@@ -396,16 +473,13 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
     if elf.e_machine() != EM_X86_64 || elf.e_type() != ET_DYN {
         return Err(LoadError::NotObject);
     }
-    // The port's TLS is one module's (the C runtime's `init_tls` copies the block
-    // the linker script reserves); an object with a thread-local of its own would
-    // need a block per module, so it is refused rather than allowed to read another
-    // module's storage.
-    if elf.has_tls() {
-        return Err(LoadError::HasTls);
-    }
 
     let (lo, hi) = image_extent(&elf).ok_or(LoadError::NotObject)?;
-    let base = alloc.reserve(hi - lo).ok_or(LoadError::NoSpace)?;
+    // The span to reserve is `hi`, not `hi - lo`: the object is mapped at
+    // `base + page_down(p_vaddr)`, so an object linked at a non-zero base reaches
+    // that much further past the base it was handed — and `DSO_LIMIT` has to be
+    // checked against where it really ends.
+    let base = alloc.reserve(hi).ok_or(LoadError::NoSpace)?;
 
     for i in 0..elf.e_phnum() as usize {
         let p = elf.phdr(i).ok_or(LoadError::NotObject)?;
@@ -438,6 +512,16 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         }
     }
 
+    // What the object needs a thread of its own for, if anything. `PT_TLS`
+    // points inside a `PT_LOAD`, so the initialised image is already mapped at
+    // `base`; only the zeroed tail has to be made up when a thread's copy is
+    // built (`install_tls`).
+    let tls = elf.tls_phdr().filter(|p| p.p_memsz != 0).map(|p| TlsSlot {
+        init: base + p.p_vaddr,
+        init_len: p.p_filesz,
+        memsz: p.p_memsz,
+    });
+
     let dynp = elf.dynamic_phdr().ok_or(LoadError::NoDynamic)?;
     let mut obj = Object {
         dynamic: dynp.p_vaddr,
@@ -447,6 +531,7 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         nsym: 0,
         img_start: base + lo,
         img_end: base + hi,
+        tls,
         name: LibName::EMPTY,
     };
     obj.symtab = unsafe { obj.dyn_tag(DT_SYMTAB) }.ok_or(LoadError::NoDynamic)?;
@@ -592,6 +677,116 @@ unsafe fn run_initialisers(obj: &Object, ctx: &InitCtx) {
     }
 }
 
+/// The size of the thread-local block `__tls_get_addr` stands on, or 0 when no
+/// object brought thread-local storage.
+///
+/// Written once before any object code can run and read by every thread's TLS
+/// access, so it is an atomic rather than a plain static: the store is a load-
+/// time event and the loads are arbitrary program points.
+static TLS_BLOCK_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// The pair the general- and local-dynamic TLS models hand to `__tls_get_addr`:
+/// which module, and where in it.
+#[repr(C)]
+struct TlsIndex {
+    module: u64,
+    offset: u64,
+}
+
+/// The calling thread's thread pointer (the FS base).
+///
+/// There is no unprivileged way to read the FS base on this CPU, but the port's
+/// own convention supplies one: the runtime's `tls_block_alloc` writes the
+/// pointer at `[tp]`, and [`install_tls`] does the same, so that word *is* the
+/// pointer. Reading it per call is what lets a thread `pthread_create` started
+/// work — its block is its own, and only the distance from the pointer down to
+/// the storage is fixed.
+fn read_tp() -> u64 {
+    let tp: u64;
+    unsafe {
+        asm!(
+            "mov {tp}, qword ptr fs:[0]",
+            tp = out(reg) tp,
+            options(nostack, nomem, preserves_flags),
+        )
+    };
+    tp
+}
+
+/// `__tls_get_addr`: the storage base of the module `ti` names, for *this*
+/// thread.
+///
+/// A position-independent object reaches its thread-locals through this call in
+/// the general- and local-dynamic models, because the answer depends on which
+/// thread is asking. `ti.offset` is zero in the local-dynamic form — the object
+/// adds the variable's offset itself, through a `DTPOFF32` the static linker
+/// resolved — so adding it is what makes the general-dynamic form work too.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __tls_get_addr(ti: *const TlsIndex) -> *mut u8 {
+    let size = TLS_BLOCK_SIZE.load(Ordering::Relaxed);
+    if size == 0 {
+        return ptr::null_mut();
+    }
+    let Some(ti) = (unsafe { ti.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    if ti.module != TLS_MODULE_ID {
+        die(b"ld.so: __tls_get_addr asked for a module this load did not place\n");
+    }
+    read_tp().wrapping_sub(size).wrapping_add(ti.offset) as *mut u8
+}
+
+/// Install the calling thread's storage for the loaded objects' thread-locals.
+///
+/// The port has one thread pointer with one block behind it — the runtime's
+/// `tls_block_alloc` builds the same block for a thread `pthread_create` starts,
+/// and that is what makes the two agree: the loader hands the block size to
+/// `__tls_get_addr` through [`TLS_BLOCK_SIZE`], and the runtime reaches the same
+/// addresses by rounding the object's `p_memsz` the same way.
+///
+/// One object can be placed, at `tp - align16(p_memsz)`. That is where a non-PIE
+/// program's `%fs`-relative offsets already expect its own thread-locals to be,
+/// which is why the program is placed like any other object rather than treated
+/// as a special case. Two objects with thread-locals cannot be: the loader gives
+/// `__tls_get_addr` one offset to work from, so a second module's storage would
+/// alias the first's — refused rather than allowed to read the wrong storage.
+unsafe fn install_tls(objects: &[Object]) -> Result<(), LoadError> {
+    let mut slot = None;
+    for o in objects {
+        let Some(tls) = o.tls else { continue };
+        if slot.is_some() {
+            return Err(LoadError::TwoTlsModules);
+        }
+        slot = Some(tls);
+    }
+    let Some(tls) = slot else { return Ok(()) };
+
+    let size = tls_block_size(tls.memsz);
+    // Room for the block and for the word the thread pointer sits on, which is
+    // at its 16-aligned end.
+    let alloc = unsafe { minix_rt::sbrk((size + 32) as isize) };
+    if alloc < 0 {
+        return Err(LoadError::NoTlsSpace);
+    }
+    let block = ((alloc as u64) + 15) & !15;
+    unsafe {
+        ptr::copy_nonoverlapping(
+            tls.init as *const u8,
+            block as *mut u8,
+            tls.init_len as usize,
+        );
+        ptr::write_bytes(
+            (block + tls.init_len) as *mut u8,
+            0,
+            (size - tls.init_len) as usize,
+        );
+        ptr::write((block + size) as *mut u64, block + size);
+    }
+    TLS_BLOCK_SIZE.store(size, Ordering::Relaxed);
+    minix_rt::thread_set_tls((block + size) as usize);
+    Ok(())
+}
+
 /// Load every object the main program needs, relocate everything, run every
 /// initialiser, and return the main program's entry point.
 ///
@@ -621,6 +816,16 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         None => die_load(LoadError::NoDynamic),
     };
 
+    // Thread-locals of the program's own, if it has any. Its bias is 0, so the
+    // segment's link-time address is its runtime address. [`install_tls`] has to
+    // see them to refuse them: the program's `%fs`-relative offsets are already
+    // baked into its code by the static linker.
+    let tls = elf.tls_phdr().filter(|p| p.p_memsz != 0).map(|p| TlsSlot {
+        init: p.p_vaddr,
+        init_len: p.p_filesz,
+        memsz: p.p_memsz,
+    });
+
     let mut main = Object {
         dynamic: dynp.p_vaddr,
         bias: 0,
@@ -629,6 +834,7 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         nsym: 0,
         img_start: main_lo,
         img_end: main_hi,
+        tls,
         name: LibName::EMPTY,
     };
     main.symtab = match unsafe { main.dyn_tag(DT_SYMTAB) } {
@@ -655,6 +861,13 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         }
     }
     if let Err(e) = relocate(loaded, 0) {
+        die_load(e);
+    }
+
+    // A thread-local has to be reachable before any initialiser runs, because an
+    // initialiser may touch one; the block is installed once, here, for this
+    // thread.
+    if let Err(e) = unsafe { install_tls(loaded) } {
         die_load(e);
     }
 

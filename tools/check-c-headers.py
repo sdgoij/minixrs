@@ -109,7 +109,6 @@ def main() -> int:
     internals = {
         "__cxa_atexit",
         "__cxa_finalize",
-        "__minix_init_array",
         "__minix_set_environ",
         "minix_libc_tls_init",
     }

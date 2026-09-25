@@ -43,6 +43,11 @@ impl BaseAlloc {
 
     /// Reserve `span` bytes and return the base to map an object at. `None` when
     /// the next one would reach the loader.
+    ///
+    /// `span` is the object's *highest* address measured from its own vaddr
+    /// origin (`image_extent`'s `hi`), not its extent: the loader maps at
+    /// `base + page_down(p_vaddr)`, so an object linked at a non-zero base reaches
+    /// that much further past the base it was given.
     pub fn reserve(&mut self, span: u64) -> Option<u64> {
         let base = self.next;
         let end = base.checked_add(page_up(span))?.checked_add(DSO_GAP)?;
@@ -76,6 +81,17 @@ pub fn image_extent(elf: &Elf<'_>) -> Option<(u64, u64)> {
     if lo == u64::MAX { None } else { Some((lo, hi)) }
 }
 
+/// The size of thread-local storage block a `PT_TLS` of `memsz` bytes needs.
+///
+/// x86_64 lays TLS out backwards from the thread pointer: the pointer sits past
+/// the block and a module's storage is at `tp - tls_block_size(memsz)`. The C
+/// runtime's `tls_block_alloc` (`crates/minix-libc/src/lib.rs`) rounds the same
+/// way, and the two must agree: a block a `pthread` allocates has to be reachable
+/// through the same `__tls_get_addr` the loader wrote relocations for.
+pub const fn tls_block_size(memsz: u64) -> u64 {
+    (memsz + 15) & !15
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +109,17 @@ mod tests {
 
     fn wr64(b: &mut [u8], o: usize, v: u64) {
         b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// The loader's block size is the runtime's, including the case where a
+    /// segment's size is already a multiple of the alignment.
+    #[test]
+    fn tls_block_size_rounds_to_the_thread_pointers_alignment() {
+        assert_eq!(tls_block_size(0), 0);
+        assert_eq!(tls_block_size(1), 16);
+        assert_eq!(tls_block_size(12), 16);
+        assert_eq!(tls_block_size(16), 16);
+        assert_eq!(tls_block_size(17), 32);
     }
 
     /// An `ET_DYN` header with two `PT_LOAD`s: `0x1000..0x1800` and

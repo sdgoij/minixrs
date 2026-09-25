@@ -23,9 +23,11 @@ SECTIONS
         *(.got.plt .got.plt.*)
     }
 
-    /* C/C++ static constructors and destructors (LLVM relies on these;
-       crt0 runs the constructors via `__minix_init_array`, and `exit`
-       runs the destructors through `__cxa_finalize`). */
+    /* C/C++ static constructors and destructors (LLVM relies on these; crt0
+       walks `__init_array_start..__init_array_end` itself — not through the C
+       library, whose copy would walk the *shared object's* array in a
+       dynamically linked program — and `exit` runs the destructors through
+       `__cxa_finalize`). */
     .init_array : ALIGN(8) {
         __init_array_start = .;
         KEEP(*(.init_array .init_array.*))
