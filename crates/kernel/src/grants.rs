@@ -267,9 +267,9 @@ pub unsafe fn safecopy(
             Err(e) => return e,
         };
 
-        // Phase D1 (TRAPS.md): pre-check the granter's pages too, on the
-        // CR3-switched copy path only (TRY grants direct-copy and never
-        // fault). A normal grant copy switches CR3 into the granter's
+        // Pre-check the granter's pages too, on the CR3-switched copy path
+        // only (TRY grants direct-copy and never fault). A normal grant copy
+        // switches CR3 into the granter's
         // space, so a fault there would be attributed to the caller
         // (executor) with the granter as the CR3 owner — VM would walk the
         // wrong regions and SIGSEGV the wrong process (KNOWN_ISSUES #5). C

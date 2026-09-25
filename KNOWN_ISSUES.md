@@ -6,12 +6,7 @@ MFS `fs_stat`/`fs_statvfs`), the server-stub cleanup (VM
 chardriver primitives), and the tooling fixes (automated per-exec
 region/page-count probe, riscv64/aarch64 kernel-binary collision, MSYS
 env mangling). Supersedes the older "open questions" lists in FILEMMAP §6
-where they overlap; FILEMMAP/TRAPS keep the detailed write-ups.
-
-> **Execution plan:** [OPEN_ITEMS.md](OPEN_ITEMS.md) is the consolidated
-> working plan for every open item in this file (steps, files, tests, exit
-> criteria; done items removed). Item numbers cited there refer back to
-> the sections below.
+where they overlap; FILEMMAP keeps the detailed write-up.
 
 Legend: `[all]` affects all arches, `[x86]` / `[riscv]` / `[aarch64]`
 are arch-specific, `[env]` is tooling/platform, not kernel.
@@ -50,18 +45,43 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    were added to minix-std. Verified: host tests (Stat/Statvfs layout pins,
    `build_stat`/`estimate_blocks` mapping, message formats) + x86 boot test.
    `mmapfd`'s `lseek(SEEK_END)` workaround is obsolete but harmless.
-5. **Kernel-mode fault attribution (TRAPS Phase 6)** — `handle_page_fault`
+5. **Kernel-mode fault attribution** — `handle_page_fault`
    attributes by `current_proc()`, which is wrong during a
    cross-address-space `virtual_copy` (CR3 owner vs. executor). The exec
    **pre-fault workaround stays** because of this gap, not a resume bug:
    with it disabled, RISC-V's S-mode forwarding fires but the kernel
    attributes the fault to the copier (e.g. VFS) and VM SIGSEGVs it.
-   Removing the pre-fault requires fixing attribution first. (TRAPS.md)
+   Removing the pre-fault requires fixing attribution first.
+
+   **Decision (2026-08-14): avoid the wrong attribution rather than fix it,
+   C-faithfully.** Pre-check page presence on **both** sides of every kernel copy
+   and return `EFAULT` instead of fault-forwarding (C MINIX's `virtual_copy`
+   pre-checks via `vm_check`). Implemented in `safecopy` (the granter's pages —
+   `crates/kernel/src/grants.rs`) and `do_copy_common` (both src and dst —
+   `crates/kernel/src/system.rs`), with `EFAULT`-on-missing-page host-tested in
+   both directions. Consequences:
+   - Under this model the exec **pre-touch/pre-fault is the design, not a
+     workaround**, and stays; removing it is off the table until the deferred
+     alternative below is taken.
+   - The **deferred alternative** is fault-forwarding with (a) dual-endpoint
+     attribution — VM resolves by the *owner* (fault-time CR3) and clears/blocks
+     the *executor* — and (b) a kernel-mode resume that restores the **fault-time**
+     CR3 (today `restore` loads the executor's `p_seg.p_cr3`). It is the riskiest
+     kernel change in this area and should land only with a real consumer (lazy
+     stack/heap, demand-paged kernel-copy targets).
+   - The earlier fault-in machinery stays in place either way, dormant: the
+     address-based gate in `handle_page_fault` (forward below `MAX_USER_ADDRESS`
+     to VM, kernel-address faults stay fatal), the x86 `swapgs` +
+     `save_fault_context` entry and kernel-mode `restore`, and the RISC-V S-mode
+     forwarding.
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies
    into lazy user pages (future lazy stack/heap, general `vircopy`) still
-   need the machinery exercised. (TRAPS.md)
+   need the machinery exercised.
+
+   Under the #5 decision, ordinary kernel copies pre-check and return `EFAULT`
+   instead of faulting, so these resume paths are dormant rather than load-bearing.
 
    *Measured on x86_64 (2026-09-22): the path does not merely go
    unexercised, it cannot work as written.* The three-entry `iretq` frame
@@ -127,7 +147,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    forking thread's frame via `find_thread_by_tid` instead of the
    best-effort scan (which stays only as a fallback). Verified by
    `/bin/forkthread` (fork-from-worker, child inherits the worker's tid)
-   on x86. (OPEN_ITEMS Phase F2)
+   on x86.
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (FILEMMAP §6)
 11. **`EDONTREPLY` and its neighbours disagreed with C in three places — FIXED

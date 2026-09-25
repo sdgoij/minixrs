@@ -112,8 +112,6 @@ pub fn vfs_memmap(
         msg[VMMAP_VADDR_OFF..VMMAP_VADDR_OFF + 8].copy_from_slice(&vaddr.to_le_bytes());
         msg[VMMAP_OFFSET_OFF..VMMAP_OFFSET_OFF + 8]
             .copy_from_slice(&(foffset as u64).to_le_bytes());
-        msg[VMMAP_OFFSET_OFF..VMMAP_OFFSET_OFF + 8]
-            .copy_from_slice(&(foffset as u64).to_le_bytes());
         msg[VMMAP_SIZE_OFF..VMMAP_SIZE_OFF + 8].copy_from_slice(&file_size.to_le_bytes());
         msg[VMMAP_DEV_OFF..VMMAP_DEV_OFF + 4].copy_from_slice(&dev.to_le_bytes());
         msg[VMMAP_INO_OFF..VMMAP_INO_OFF + 4].copy_from_slice(&inode_nr.to_le_bytes());

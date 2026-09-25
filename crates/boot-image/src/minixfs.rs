@@ -515,8 +515,8 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     }
 
     // Character-device nodes (major << 16 | minor, matching VFS's cdev
-    // decoding). TTY.md 1C.1 relies on /dev/console resolving so init can
-    // route stdio through the tty.
+    // decoding). init relies on /dev/console resolving so it can route
+    // stdio through the tty.
     for &(path, mode, major, minor) in DEVICES {
         let name = Path::new(path).file_name().unwrap().to_str().unwrap();
         fs.add_device(dev_zone, name, mode as u16, (major << 16) | minor);

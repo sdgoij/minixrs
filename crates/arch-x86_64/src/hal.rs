@@ -504,7 +504,7 @@ pub unsafe fn copy_frame(dst: &mut [u8; 256], src: &[u8; 256]) {
     }
 }
 
-// Signal-delivery sigframe (SIGNALS.md Phase 4).
+// Signal-delivery sigframe.
 //
 // x86_64 layout (296 bytes, arch_common::consts::sigframe):
 //   [0..8)     trampoline (the handler's return address — `ret` pops it)

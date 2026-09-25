@@ -1123,9 +1123,9 @@ fn test_boot_procs_consistent() -> u32 {
     failures
 }
 
-/// Verify the pre-allocated brk heap (0x3FE00000..0x3FF00000) is mapped in
-/// every boot process's page table except VM (x86 skips VM; RISC-V/AArch64
-/// map it but skipping keeps the check valid on all arches).
+/// Verify the pre-allocated brk heap window (`hal::user_heap_base()` .. +1 MiB)
+/// is mapped in every boot process's page table except VM (VM is absent from
+/// the list below, which keeps the check valid on all arches).
 fn test_brk_heap_mapped() -> u32 {
     let procs: &[(i32, &str)] = &[
         (DS_PROC_NR, "ds"),
@@ -1151,7 +1151,7 @@ fn test_brk_heap_mapped() -> u32 {
             if cr3 == 0 {
                 continue;
             }
-            if kernel::pagetable::walk(cr3, 0x3FE00000).is_err() {
+            if kernel::pagetable::walk(cr3, kernel::hal::user_heap_base()).is_err() {
                 serial_write("  FAIL: ");
                 serial_write(name);
                 serial_write(" brk heap not mapped\r\n");

@@ -9,11 +9,11 @@
 //! through the fixed slot array — the VM server is single-threaded `no_std`
 //! and allocates nothing at runtime (matching `pb.rs`'s static-table style).
 //!
-//! Cache entries are always *clean* file content: `map_file_page` only
+//! Cache entries are always *clean* file content: `finish_page` only
 //! inserts pages whose whole 4 KiB lies inside the file, and only for
-//! read-only regions, so a cached frame is never dirtied by a
-//! MAP_PRIVATE write (writable file pages keep the private allocate+FDIO
-//! path and never enter the cache).
+//! read-only or `MAP_SHARED` regions, so a cached frame is never dirtied by
+//! a MAP_PRIVATE write (a writable MAP_PRIVATE file page keeps the private
+//! allocate+FDIO path and never enters the cache).
 
 use core::cell::UnsafeCell;
 

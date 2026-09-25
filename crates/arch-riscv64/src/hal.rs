@@ -346,7 +346,7 @@ pub fn frame_default() -> [u8; 256] {
     [0u8; 256]
 }
 
-// Signal-delivery sigframe (SIGNALS.md Phase 4).
+// Signal-delivery sigframe.
 //
 // RISC-V layout (296 bytes, arch_common::consts::sigframe):
 //   [0..256)   saved p_reg (sepc@0, ra@8, sp@16, a0@80, sstatus@248)

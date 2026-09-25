@@ -3114,7 +3114,7 @@ fn do_setcache(msg: &mut Message) -> i32 {
     // (dev, dev_offset + i*PAGE). C (mem_cache.c do_setcache) requires
     // each page to be a private anon page (refcount 1); the cache takes
     // its own reference, so the frame survives the caller's unmap and is
-    // shared with later map_file_page hits.
+    // shared with later `start_file_page` hits.
     //
     // Message layout: m1i1 = dev, m1i2:m1i3 = dev_offset (u64),
     // m1i4 = ino, m1i5:m1i6 = ino_offset (u64), m1i7 = pages,

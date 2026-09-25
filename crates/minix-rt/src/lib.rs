@@ -63,7 +63,7 @@ pub const SELF: i32 = 31742;
 pub const PM_SIGRETURN: i32 = 24;
 
 /// Address of this process's sigreturn trampoline, passed to PM at sigaction
-/// time (SIGNALS.md Phase 4). Every userland image links minix-rt, so the
+/// time. Every userland image links minix-rt, so the
 /// symbol exists in each process; the address is used only within the process
 /// that registered it.
 pub fn sigreturn_trampoline_addr() -> u64 {

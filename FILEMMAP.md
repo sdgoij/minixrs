@@ -2,13 +2,13 @@
 
 Status: **Stage 3 (exec rework) implemented and booting on all three arches**
 (x86, RISC-V, AArch64 — shell prompt, `hello` with threadstd, `exit`);
-Stages 1–2 done in the simplified form below (per-page FDIO, **no VM block
-cache**); Stage 4 partially done. The RISC-V and AArch64 ports needed three
+Stages 1–2 done in the simplified form below (per-page FDIO; the file page
+cache has since landed — see §3/§6); Stage 4 partially done. The RISC-V and AArch64 ports needed three
 additional boot fixes (§5 Bugs 4–6) before they could run the new exec, and
-the RISC-V S-mode fault forwarding (TRAPS Phase 3) is now in-commit and
-boot-green alongside the x86/AArch64 kernel-mode resume work.
-Related: TRAPS.md Phase 6 (kernel-mode fault-in), the Phase 5 lazy-mmap work
-it builds on.
+the RISC-V S-mode fault forwarding is now in-commit and boot-green alongside
+the x86/AArch64 kernel-mode resume work.
+Related: the kernel-mode fault-in work (§5 Bug 2 and §6) and the lazy-mmap work
+this builds on.
 
 ## 1. Goal
 
@@ -33,48 +33,53 @@ The C flow (`.refs/minix-3.3.0/`) — what this port's design is modeled on:
    as the process's `vmfd`, and sets `execi.args.memmap = vfs_memmap`.
 2. `libexec_load_elf` parses the ELF and calls `vfs_memmap` once per `PT_LOAD`
    segment — `vfs_memmap` (exec.c:160) forwards to `minix_vfs_mmap`, which
-   sends VM a `VM_MMAP` carrying `fd` + `file_offset` + `len` + `vaddr` +
-   `clearend` + protection.
+   sends VM a **`VM_VFS_MMAP`** (not `VM_MMAP`, which is the user mmap call)
+   carrying `fd` + `file_offset` + `len` + `vaddr` + `clearend` + a lone
+   `MVM_WRITABLE` bit from `PROT_WRITE` (not a full prot field).
 3. VM's `do_mmap` sees a file fd and sends VFS a **`VMVFSREQ_FDLOOKUP`**
    request (`servers/vm/mmap.c:266`). VFS replies with `(dev, ino, size)`;
    VM's `mmap_file` (mmap.c:85) creates a **file-backed region** (VR_ANON
    absent; per-region `{dev, ino, fd}` + offset) at the segment's vaddr.
 4. On the first touch of a file-backed page, VM's
    `mappedfile_pagefault` (`servers/vm/mem_file.c`) finds the block in VM's
-   block cache (`vm_cache.c`); on miss it sends **`VMVFSREQ_FDIO`** to VFS,
-   which reads the block into the cache page and replies. VM maps the cache
-   page into the process.
+   block cache (`servers/vm/cache.c` — *not* `vm_cache.c`, which does not
+   exist); on miss it sends **`VMVFSREQ_FDIO`** to VFS. VFS forwards the read
+   to the FS (`REQ_PEEK`), and the **FS** fills VM's cache page
+   (`vm_map_cacheblock`); VM then maps the cache page into the process.
 5. The kernel never copies the image: `do_exec`/`exec_restart` only set up
    registers and the stack (which VFS built and VM mapped).
 
-**Deviation from the reference:** this port skips the VM block cache for now —
-each fault allocates a fresh private page, FDIO-fills it, and maps it. Pages
-are process-private, so there is no cross-process page sharing, no cache
-eviction, and no file-page COW. The block cache (and the MFS cache-sharing
-`VM_SETCACHEPAGE` design) remains a v2 item (§6).
+**Deviation from the reference:** this port's VM *does* cache file pages — the
+cache landed after this section was written (`crates/servers/src/vm/cache.rs`;
+see §3) — so read-only file pages are shared across processes. What remains
+per-process is a **writable** `MAP_PRIVATE` file page: `start_file_page` refuses
+to cache one (`cacheable` requires `!writable`), so each fault allocates,
+FDIO-fills and maps its own frame. There is still no file-page COW, and no
+filesystem calls the `VM_SETCACHEPAGE` sharing protocol yet (§6), so MFS's own
+buffer cache does not hand pages to VM.
 
 ## 3. Current-state inventory (updated)
 
 | Piece | Where | State |
 |---|---|---|
 | mmap message carries fd/offset | `minix-std/src/vmem.rs`; `do_mmap` → `do_mmap_file` for user mmaps, `do_vfs_mmap` for exec segments | **used** |
-| `VR_*` region flags | `servers/src/vm/region.rs` — `VR_FILE` + `{dev,ino,fd,file_offset,file_size}`, `VR_EXEC`, `VR_WRITABLE/READABLE` | **implemented** |
+| `VR_*` region flags | `servers/src/vm/region.rs` — `VR_FILE` + `{dev,ino,fd,file_offset,file_size}`, `VR_EXEC`, `VR_WRITABLE/READABLE`, plus `VR_SHARED` and `VR_CACHE` | **implemented** |
 | VM↔VFS request codes | `arch-common/src/com.rs` (`VMVFSREQ_FDLOOKUP/FDCLOSE/FDIO`, `VM_VFS_REPLY`, `VM_VFS_MMAP`) | constants exist, used |
 | VFS `do_vm_call` (FDLOOKUP/FDCLOSE/FDIO) | `servers/src/vfs/call.rs` | **implemented** (dupvm, resolve vnode → dev/ino; FDIO does `req_read` into the faulting page; reply normalized to OK — byte count travels in the payload) |
 | VM→VFS request plumbing | `vm/vfs_request.rs` — asynchronous (`asynsend3` with `AMF_NOREPLY`), several in flight keyed by request id, a fixed node pool; the faulting process stays `RTS_PAGEFAULT`-blocked, VM does not wait | **implemented** (2026-09: was a synchronous SENDREC, finding 58) |
 | VM `do_vfs_mmap` | `servers/src/vm/mod.rs` — creates one lazy VR_FILE region per exec'd `PT_LOAD` (per-segment prot, in-file end, clears identity PTEs, sets one-shot pre-fault) | **implemented** |
 | VM `do_vfs_reply` | `vm/vfs_request.rs::complete` — matches the reply's request id to the outstanding request and completes it (the `mmap` answers its caller itself; a page fault finishes its page and resolves the fault) | **implemented** |
-| VM block cache | `do_mapcache/do_setcache/do_clearcache` (vm/mod.rs) | **stubs** — v2 item, not needed for correctness with private per-fault pages |
-| `handle_pagefault_for` | vm/mod.rs | **file branch implemented**: `advance_fault` → `start_file_page` (alloc → zero → map writable → FDIO → `finish_file_page`: zero bss tail → downgrade to region perms), the fault resolved by the page that lands last |
+| VM file page cache | `crates/servers/src/vm/cache.rs` (`cache_find`/`cache_insert`/`clear_bydev`, LRU, 4096 pages); used by `vm/mod.rs::start_file_page`/`finish_page` | **implemented** — read-only and `MAP_SHARED`-writable file pages are shared across processes. The `do_mapcache`/`do_setcache`/`do_clearcache` handlers are implemented too (not stubs), but no filesystem calls them yet |
+| `handle_pagefault_for` | vm/mod.rs | **file branch implemented**: `advance_fault` → `start_file_page` (a `vm/cache.rs` hit maps a shared frame and skips the rest; on miss: alloc → zero → map writable → FDIO → `finish_file_page`: zero bss tail → downgrade to region perms), the fault resolved by the page that lands last |
 | VFS `vfs_memmap` | `servers/src/vfs/mmap.rs` | **implemented** (sends `VM_VFS_MMAP` with fd+offset+len+vaddr+prot+in-file end) |
-| VFS `map_vnode` | mmap.rs | still an ENOSYS stub (named-pipe mapping, out of scope) |
+| VFS `map_vnode` | mmap.rs | **implemented** — `req_newnode` to the mapped FS (PFS), sets `v_mapfs_e`/`v_mapinode_nr`/`v_mapfs_count`; returns ENOSYS only when `find_vmnt` finds no mount (the C panics) |
 | `VM_EXEC_NEWMEM` / `do_exec_newmem` | vm/mod.rs | **wired into the exec chain** (VFS calls it before mapping segments) |
 | Exec image construction | `kernel/src/syscall.rs::exec_elf_for_target` | **shrunk**: no ELF parse, no segment copy. Builds the fresh root (`exec_create_root`), clears the code range, maps stack + brk, sets up frame/registers. Entry + code range come from VFS via `SYS_EXEC_LOAD` |
 | Identity-map aliasing at exec'd VAs | kernel clears the code range in the fresh table; `do_vfs_mmap`/`do_mmap_file` clear identity PTEs over the region | **cleared** |
-| Exec pre-fault (non-exec regions) | `vm/mod.rs::prefault_vfs_file_regions` + `Vmproc::prefault_exec` | **implemented** (see §5, Bug-2 workaround) |
-| `file_size` = in-file end | `region.rs` + `map_file_page` — bss pages zero-filled, last partial in-file page tail zeroed | **implemented** (see §5, Bug-3 fix) |
+| Exec pre-fault (non-exec regions) | `Vmproc::prefault_exec` (a flag in `vm/proc.rs`) + `Fault::for_prefault` (`vm/mod.rs`) | **implemented** (see §5, Bug-2 workaround) |
+| `file_size` = in-file end | `region.rs` + `start_file_page`/`finish_page` — bss pages zero-filled, last partial in-file page tail zeroed | **implemented** (see §5, Bug-3 fix) |
 | fdref / region teardown | `vm/mod.rs::fdref_close_if_unused` (FDCLOSE when the last region on a `(dev,ino,fd)` dies); `do_munmap` → `free_user_range`; `vm_destroy` clears regions | **implemented** |
-| fork of file-backed images | `vm/proc.rs::vm_clone` copies regions verbatim (fdref shared); kernel deep-copies the PT with COW (`cow_setup_fork`) | **implemented** |
+| fork of file-backed images | `vm/proc.rs::vm_clone` copies regions verbatim (fdref shared); the kernel's `vm_paging_fork` builds the child table sharing frames and clearing the child's write bit, and VM's `cow_setup_fork` (`vm/cow.rs`) registers the COW views | **implemented** |
 | 16 MiB exec caps | VFS header-only read; kernel no ELF bound | **removed** |
 
 ## 4. Architectural decision: who builds the exec'd address space
@@ -95,10 +100,11 @@ regions and mapping:
    kernel builds the fresh page table from the boot identity map
    (`exec_create_root`), **clears the code range** so the lazy file regions
    fault on first touch, maps stack + brk, and programs the entry registers.
-5. Demand-paging: on a file-region fault, `map_file_page` allocates a private
+5. Demand-paging: on a file-region fault, `start_file_page` allocates a private
    page, zeroes it, maps it writable, sends `VMVFSREQ_FDIO` (VFS `req_read`s
    the file block into the page through the target's CR3), zeroes the bss tail
-   past the in-file end, and downgrades to the region's permissions.
+   past the in-file end, and downgrades to the region's permissions. (A
+   `vm/cache.rs` hit short-circuits this — see §3.)
 
 Two Stage-3 additions sit on top of this flow (see §5):
 
@@ -115,19 +121,20 @@ all are now fixed and boot-verified.
 After the exec chain started working, the shell hung at its prompt because
 VFS's kernel-mode `sys_vircopy` of the process's user buffer (e.g. the
 shell's `write(1, "# ", …)` where the prompt lives in lazy `.rodata`) faulted
-in kernel mode (CPL=0). The x86 kernel-mode fault **resume** is not
-implemented (TRAPS.md Phase 2 — `save_fault_context` cannot recover a ring-0
-frame from the IST1 #PF), so the fault livelocked into a #GP.
+in kernel mode (CPL=0). The x86 kernel-mode fault **resume** was not
+implemented then (`save_fault_context` could not recover a ring-0 frame from
+the IST1 #PF), so the fault livelocked into a #GP.
 
 Fix (Stage-appropriate, no kernel-mode resume machinery): on the **first
 file-region fault after exec**, VM pre-faults every **non-executable** file
 region (rodata/data/bss) so VFS's kernel-mode copies of the image hit present
 pages. Text (`VR_EXEC`) stays lazy — its faults are user-mode instruction
-fetches, which have a working resume path. Implemented as
-`Vmproc::prefault_exec` + `prefault_vfs_file_regions` in `vm/mod.rs`
-(`map_file_page` is the shared per-page mapper). The x86 kernel-mode fault
-resume (TRAPS Phase 2: conditional `swapgs` + `restore()` IRET by saved CS
-RPL) has since landed with this commit, so the pre-fault is no longer
+fetches, which have a working resume path. Implemented as a
+`Vmproc::prefault_exec` flag (`vm/proc.rs`) set at exec and consumed by
+`Fault::for_prefault` (`vm/mod.rs`, selecting `VR_FILE && !VR_EXEC` regions);
+`start_file_page`/`finish_page` are the per-page mapper. The x86 kernel-mode fault
+resume (conditional `swapgs` + `restore()` IRET by saved CS RPL) has since
+landed with this commit, so the pre-fault is no longer
 strictly required on x86 — it stays as a uniform, cheap workaround across
 arches.
 
@@ -156,7 +163,7 @@ RISC-V hung at `init: starting shell...` — the shell's exec never completed
 and no prompt appeared. QMP walks of the exec'd page table showed the text
 PTE as `0x13` (V|R|U): the page was *present* but not executable, so every
 instruction fetch faulted, and because the page was present the demand-paging
-present-skip in `map_file_page` returned without remapping — an instruction-
+present-skip in `start_file_page` returned without remapping — an instruction-
 fetch livelock (zero page faults in the QEMU trace, init oscillating between
 `RTS_PAGEFAULT` and runnable with `sepc` pinned at the entry point).
 
@@ -167,11 +174,11 @@ Two compounding causes:
    execute bit; absence of NX means executable, so this was invisible there).
 2. **VFS never sent `PROT_EXEC`**: `pm_exec` built `prot` from `p_flags` as
    read-*or*-write, so VM's `do_vfs_mmap` never marked the text region
-   `VR_EXEC`, and `map_file_page` downgraded it to read-only.
+   `VR_EXEC`, and `finish_page` downgraded it to read-only.
 
 Fix: add `MAP_EXEC` to all three HALs (`PTE_X` on RISC-V, `0` on
 x86/aarch64 — absence of NX/UXN means executable there), honor `VR_EXEC` in
-`map_file_page`'s downgrade, the anon demand path, and `do_mmap`, and have
+`finish_page`'s downgrade, the anon demand path, and `do_mmap`, and have
 `pm_exec` convert ELF `p_flags` (PF_R/W/X) to `PROT_READ/WRITE/EXEC`. Also
 fixed `pte_leaf_flags()` to set `PTE_R`: SV39 decodes a leaf with R=W=X=0 as
 a table pointer, so a "read-only" user page faulted on every access.
@@ -229,20 +236,23 @@ mode it faulted in.
 
 ## 6. Open questions / deferred items
 
-- **VM block cache** (`do_mapcache/setcache/clearcache` stubs): the current
-  per-fault private-page design needs no cache for correctness, but every
-  exec'd page is a fresh allocation and reads go straight to VFS/MFS each
-  time. A bounded cache (or the real MINIX MFS cache sharing via
-  `VM_SETCACHEPAGE`) is the v2 perf work.
-- **Kernel-mode fault resume (TRAPS Phase 2)**: the exec pre-fault only covers
+- **File page cache** (`crates/servers/src/vm/cache.rs`): **implemented**. Read-only and
+  `MAP_SHARED`-writable file pages are cached by `(dev, offset)` with a `PhysBlock`
+  reference and shared across processes; a writable `MAP_PRIVATE` page keeps the private
+  allocate + FDIO path, which is correct (a shared frame must not serve a private
+  writable mapping). The v2 item that *is* still open is **FS-side** cache sharing: VM's
+  `VM_MAPCACHEPAGE`/`VM_SETCACHEPAGE`/`VM_CLEARCACHE` handlers exist and are registered,
+  but no filesystem in the port sends them, so MFS's own buffer cache does not donate
+  pages to VM (and read-ahead stays absent — see the I/O-amplification item below).
+- **Kernel-mode fault resume**: the exec pre-fault only covers
   exec'd images' non-exec regions. Any other kernel-mode copy into a lazy
   user page (future lazy stack/heap, general `vircopy`) still requires the
   real kernel-mode resume machinery. Status: all three arches are in-commit
   and boot-verified — **x86** (conditional `swapgs` + kernel-mode IRET),
   **AArch64** (EL1 rework: full frame save + ESR-synthesized error codes),
-  and **RISC-V** (S-mode forwarding; the TRAPS Phase 3 "does the trap-asm
-  frame save capture the S-mode SP?" open question turned out to be an asm
-  register-save bug — §5 Bug 6 — now fixed). The lazy exec only takes
+  and **RISC-V** (S-mode forwarding; the "does the trap-asm frame save capture
+  the S-mode SP?" open question turned out to be an asm register-save bug —
+  §5 Bug 6 — now fixed). The lazy exec only takes
   user-mode faults in practice (text fetch + pre-faulted rodata/data), which
   have a working resume path on every arch. The **pre-fault workaround
   stays** because of the Phase 6 attribution gap, not a resume bug: with it
@@ -253,15 +263,19 @@ mode it faulted in.
   no match, and SIGSEGVs the process.
 - **clearend** semantics are subsumed by the in-file end handling (§5 Bug 3),
   including the mid-page tail zeroing.
-- **COW for shared file pages**: not needed in the current design — file pages
-  are private per process (each fault allocates a fresh page), and fork COWs
-  the page-table level. A shared/`MAP_SHARED` file mapping would reintroduce
-  it (deferred, no userland consumer yet).
-- **Userland `mmap(fd)`**: exercised by the new `/bin/mmapfd` test binary
-  (§7), but no *real* userland consumer yet (exec remains the production
-  user). VFS `do_fstat` also never copies the `Stat` back to the caller —
-  mmapfd works around it with `lseek(SEEK_END)`; fstat needs a fix before
-  any stat-using tool can rely on it.
+- **COW for shared file pages**: `MAP_SHARED` file regions are implemented and the
+  region flag is set (`vm/mod.rs`); `vm/cow.rs` treats a `VR_SHARED` page as an
+  exception at fork — the alias stays live, so parent and child keep writing the
+  same frame. There *is* a consumer now: `mmapfd shared`
+  (`userland/src/lib.rs::mmapfd_shared`). This is no longer "deferred, no userland
+  consumer yet".
+- **Userland `mmap(fd)`**: exercised by `/bin/mmapfd` (§7) and `mmapfd shared`;
+  exec remains the production user. The `do_fstat` gap recorded here does **not**
+  hold in the current code: `do_fstat` → `req_stat` uses a write grant
+  (`vfs/call.rs`, `vfs/request.rs`) and MFS `fs_stat` copies the `Stat` back
+  (`fs/src/mfs/stadir.rs::stat_inode` → `safecopy_to`). mmapfd still avoids `fstat`
+  (it uses `lseek(SEEK_END)`), but that is a choice, not evidence of the bug — if a
+  stat-using tool misbehaves, re-check this path at runtime.
 - **Repeated-exec degradation (leak)**: the 20× exec loop passes on all
   arches at all RAM sizes, but a 100× loop degrades and hangs — `hello`
   stops completing at ≈44 execs (`-m 256M`) / ≈63 (`-m 4G`) on x86
@@ -278,14 +292,14 @@ mode it faulted in.
   fixes (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK`
   constant value — both tried and reverted, §7). Open: profile MFS's
   cache/read-ahead against the virtio request stream.
-- **AArch64 address-range caveat**: aarch64's `MAX_USER_ADDRESS` covers the
-  whole TTBR0 range, so a *kernel-range* fault (e.g. kernel code at
-  0x40000000) is "user-range" to the address-based gate and the EL1 handler
-  would eret-retry it. The heap fix (Bug 5) removes the one real trigger;
-  a proper per-arch user-VA ceiling is TRAPS Phase 4 follow-up.
-- **Attribution** (TRAPS Phase 6): exec no longer does cross-address-space
-  kernel copies, so the exec-time attribution exposure is gone. General
-  `vircopy` attribution stays a separate Phase 6 item.
+- **AArch64 address-range ceiling** (was a caveat): a proper user-VA ceiling now
+  exists — `MAX_USER_ADDRESS = kern_vaddr() = 0x4000_0000`, with a compile-time pin
+  (`arch-aarch64/src/vmparam.rs`), so a kernel-range VA is no longer "user-range" to
+  the address-based gate. The heap fix (Bug 5) removed the one real trigger. This is
+  closed, not an open follow-up.
+- **Attribution**: exec no longer does cross-address-space kernel copies, so the
+  exec-time attribution exposure is gone. General `vircopy` attribution stays a
+  separate open item (`KNOWN_ISSUES.md` #5).
 
 ## 7. Verification (current status)
 
@@ -309,7 +323,7 @@ MiB `.rodata` PT_LOAD) at `-m 256M`/`1G`/`4G` — **PASS on all three arches**
 (9 boots): exec completes past the old 16 MiB cap, all 8448 pages
 demand-page in from the file, and the checksum matches the file contents
 (8448 × 0xAB). The build hooks that make this possible: `MINIXFS_BLOCKS`
-(image size, default 2048 blocks / 8 MiB) and `MINIXFS_EXTRA`
+(image size, default 4096 blocks / 16 MiB — `boot-image/src/minixfs.rs`) and `MINIXFS_EXTRA`
 ("dest=path;…" binaries injected into the disk image only — the initramfs
 stays small so the kernel image fits the 256M budget). MSYS converts
 POSIX-style values (`/bin/big=…`) in env vars on Windows, so the invocation
@@ -322,8 +336,9 @@ file). **PASS on all three arches** (x86 45 pages, riscv 61, aarch64 66).
 This is the first exercise of the userland file-mmap path (`do_mmap_file` +
 FDLOOKUP + file regions). Two gaps found while landing it: VFS `do_fstat`
 never copies the `Stat` back to the caller (mmapfd uses `lseek(SEEK_END)`
-instead), and `MINIXFS_EXTRA` entries are routed to `/bin` by string match
-because MSYS mangles POSIX dest paths (the `Path::parent()` match put them
+instead), and `MINIXFS_EXTRA` entries are routed by string match (to `/bin`, `/sbin`
+or `/etc`, else the root; `build.rs` now rejects other destinations) because
+MSYS mangles POSIX dest paths (the `Path::parent()` match put them
 in `/`).
 
 Boot fixes required by the enlarged images (embedded initramfs + minixfs
@@ -352,8 +367,11 @@ completions via QEMU `-trace`):
   (§5 Bug 2): the first file-region fault after exec pre-faults every
   non-executable region, so `/bin/bign`'s 33 MiB `.rodata` is read eagerly
   (≈8467 block reads) even though its main never touches it. Text stays
-  lazy. Removing this workaround is the TRAPS Phase 2 dependency, not a
-  VFS exec-path issue.
+  lazy. Removing this workaround requires the fault-attribution fix (see
+  `KNOWN_ISSUES.md` #5), not a VFS exec-path change; the port chose the
+  C-faithful alternative first — pre-check both sides of every kernel copy and
+  return `EFAULT` — under which an eager pre-touch is the model, not a
+  workaround.
 - Large sequential reads also show a **pre-existing ~3-6× I/O
   amplification** in the MFS/virtio read path (cat ≈2.8×, mmapfd ≈5.6×,
   bign ≈5.8× the file's block count). Not exec-specific; two candidate
@@ -415,8 +433,8 @@ registers nothing). The fork now shares alias leaves verbatim; then, with
 the COW fork landed (next paragraph), the COW setup is active on aarch64
 too; `just test-boot-aarch64` green.
 
-AArch64 COW fork — **implemented** (replaces the deep-copy shortcut; plan
-in `AARCH64_COW.md`): `vm_paging_fork` now shares frames and marks only
+AArch64 COW fork — **implemented**, replacing aarch64's deep-copy shortcut:
+`vm_paging_fork` now shares frames and marks only
 the child's view read-only (AP = `PTE_AP_RO`, the parent's PTE untouched);
 alias leaves stay shared verbatim; VM's `cow_setup_fork` + the COW
 message-buffer prefault are active on aarch64. Because AP[2:1] is a 2-bit
@@ -439,15 +457,19 @@ looped. It now trims the old region to its non-overlapping part.
 - VM's `sys_kill` called `send_sig` (records the bit in `s_sig_pending`,
 notifies SYSTEM — never PM), so a fault with no matching region left
 the process alive and re-faulting forever (VM spun in a memreq_get /
-handle_pagefault_for livelock). It now uses `cause_sig` (RTS_SIGNALED
-+ PM notification), so an unhandleable fault kills the process.
+handle_pagefault_for livelock). It now goes through **`SYS_KILL`** (`minix_rt::kernel_call(6, …)`)
+so the real kernel `Proc` is signalled — a direct `cause_sig` from VM does
+not work, because VM links its own copy of the kernel crate whose tables
+nothing reads. An unhandleable fault now kills the process.
 (`crates/servers/src/vm/mod.rs::sys_kill`)
 
 Remaining:
 
-- VM block cache (v2): the current design has no cache — each fault allocates
-  a private page — so eviction/LRU only applies once `do_mapcache`/
-  `do_setcache`/`do_clearcache` land (§6).
+- FS-side cache sharing (v2): VM's file page cache, its LRU eviction and the
+  `do_mapcache`/`do_setcache`/`do_clearcache` handlers have landed (§3, §6), so
+  read-only and `MAP_SHARED` file pages are shared across processes; what remains is
+  for a filesystem (MFS's own buffer cache) to donate pages through
+  `VM_SETCACHEPAGE`, which none does yet.
 - MFS read-path I/O amplification (above); the exec-leak is resolved on
   all three arches (x86/riscv 0 KiB/exec; aarch64 reached 0 after the
   fork stopped deep-copying alias leaves — see the aarch64 paragraph

@@ -1462,7 +1462,7 @@ unsafe fn sig_proc_inner(slot: usize, signo: i32, trace: bool, ksig: bool, tid: 
         return;
     }
 
-    // Caught: ask the kernel to run the handler (SIGNALS.md Phase 4).
+    // Caught: ask the kernel to run the handler.
     if !badignore && rmp.mp_catch.sigismember(signo) {
         // Can't deliver while the process is in a PM→VFS round-trip; pend
         // and let restart_sigs deliver when the VFS reply arrives.
@@ -1788,7 +1788,7 @@ pub unsafe fn do_sigaction(caller_slot: usize, msg: &mut Message) -> i32 {
     let nact_ptr = unsafe { msg.m_payload.m2.m2l1 };
     let oact_ptr = unsafe { msg.m_payload.m2.m2l2 };
     // The sigreturn trampoline address (m2l3@40), passed by the client so
-    // PM can build the sigframe for caught signals (SIGNALS.md 4.4).
+    // PM can build the sigframe for caught signals.
     let restorer = unsafe { msg.m_payload.m2.m2l3 };
 
     // SIGKILL and SIGSTOP cannot have their action changed.
@@ -2039,7 +2039,7 @@ pub unsafe fn do_sigsuspend(caller_slot: usize, msg: &mut Message) -> i32 {
 }
 
 /// Handle PM_SIGRETURN — restore the signal mask and CPU context after a
-/// caught handler (SIGNALS.md Phase 4).
+/// caught handler.
 ///
 /// Message layout: m2l1 = pointer to the sigframe on the caller's stack.
 /// PM restores `mp_sigmask` from the frame, then calls SYS_SIGRETURN so the
@@ -5185,7 +5185,7 @@ mod tests {
         }
     }
 
-    // --- signal-delivery pins (SIGNALS.md Phase 2 / TTY.md 1C) ---
+    // --- signal-delivery pins ---
 
     #[test]
     fn test_apply_action_sig_ign_sets_ignore() {

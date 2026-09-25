@@ -12,7 +12,7 @@ fn host_panic(_: &core::panic::PanicInfo) -> ! {
 
 /// Number of SIGINTs delivered. The handler runs, then sigreturn resumes the
 /// interrupted pipe/tty read; the loop checks this counter and exits after 3
-/// deliveries (SIGNALS.md Phase 4 verification).
+/// deliveries.
 static SIGINT_COUNT: AtomicI32 = AtomicI32::new(0);
 
 /// A SIGINT handler: prints and returns. The interrupted read resumes via

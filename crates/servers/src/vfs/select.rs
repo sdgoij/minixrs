@@ -14,8 +14,7 @@
 //!
 //! Timeouts: `timeout == NULL` blocks forever; `{0,0}` polls. A bounded
 //! timeout currently behaves as forever — the kernel has no server timer
-//! API (`SYS_SETALARM` gap, OPEN_ITEMS A1 deferral), so no wakeup can
-//! fire.
+//! API (`SYS_SETALARM` gap), so no wakeup can fire.
 
 use crate::vfs::consts::*;
 use crate::vfs::types::*;

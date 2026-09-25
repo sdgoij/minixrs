@@ -932,7 +932,8 @@ pub fn mmapfd(args: &[&str]) -> i32 {
         off += 4096;
     }
     // Last byte: the partial-page tail past the last full page, which
-    // exercises the in-file-end zero/read boundary in map_file_page.
+    // exercises the in-file-end zero/read boundary in
+    // `start_file_page`/`finish_page`.
     let last_off = size - 1;
     if unsafe { *p.add(last_off) } != file_byte(last_off).unwrap_or(0) {
         write_err(b"mmapfd: mapping mismatch at last byte\n");
@@ -2338,7 +2339,7 @@ pub fn parse_i32(s: &str) -> Option<i32> {
 /// kill — send a signal to a process: `kill pid [sig]`, default SIGTERM.
 ///
 /// The kill-termination path is PM_KILL → do_kill → sig_proc → sig_proc_exit
-/// → zombie → parent reap (SIGNALS.md Phase 3). Negative pids (process
+/// → zombie → parent reap. Negative pids (process
 /// groups) are a follow-up.
 /// select(2) smoke test (Phase I): pipe readiness (deterministic) + tty
 /// fd 0 (poll, then a blocking select satisfied by console input).
@@ -2487,7 +2488,7 @@ pub fn init(_args: &[&str]) -> i32 {
     // 0/1/2, and mark the fds VFS-owned so the kernel forwards reads and
     // writes to VFS (and the tty) instead of the serial ring / direct
     // UART. The p_fd_vfs flags and the VFS filps survive fork/exec, so
-    // the shell and its children inherit tty-backed stdio (TTY.md 1C.1).
+    // the shell and its children inherit tty-backed stdio.
     let mut console_ok = false;
     let fd = minix_rt::open(b"/dev/console", 0o2); // O_RDWR
     if fd >= 0 {

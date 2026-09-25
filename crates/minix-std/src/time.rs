@@ -364,7 +364,7 @@ pub fn thread_kill(tid: i32, sig: i32) -> Result<(), MinixErr> {
     }
 }
 
-/// Examine or change a signal action (SIGNALS.md 2.1).
+/// Examine or change a signal action.
 ///
 /// `handler` is SIG_DFL (0), SIG_IGN (1), or a handler address; `mask` is
 /// the new signal mask (low 128 bits); `flags` the sa_flags. The act is
@@ -376,7 +376,7 @@ pub fn sigaction(signo: i32, handler: u64, mask: u128, flags: i32) -> Result<(),
         let act = encode_action(handler, mask, flags);
         let mut msg = [0u8; 64];
         // PM needs the caller's sigreturn trampoline address (m2l3@40) to
-        // build the sigframe for caught signals (SIGNALS.md Phase 4).
+        // build the sigframe for caught signals.
         let restorer = minix_rt::sigreturn_trampoline_addr();
         build_sigaction_msg(signo, act.as_ptr() as u64, 0, restorer, &mut msg);
         match pm_call(&mut msg) {

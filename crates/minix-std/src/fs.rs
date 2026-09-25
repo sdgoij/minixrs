@@ -911,7 +911,7 @@ const SEL_TIMEOUT: usize = 40;
 ///
 /// `timeout == None` blocks indefinitely; `Some((0, 0))` polls. A bounded
 /// timeout currently behaves like `None` — the kernel has no server timer
-/// API to fire the wakeup (OPEN_ITEMS A1 deferral).
+/// API to fire the wakeup.
 ///
 /// Returns the number of ready fds; on success the ready sets are written
 /// back into the passed sets.

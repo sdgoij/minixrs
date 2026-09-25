@@ -2798,7 +2798,7 @@ pub fn do_vm_call() -> i32 {
                 );
                 // Normalize the reply result: this port's req_read returns the
                 // FS reply's m_type (the byte count, e.g. 4096) on success, but
-                // VM's map_file_page treats any non-zero result as a
+                // VM's finish_file_page treats any non-zero result as a
                 // failure (C: `actual_read_write_peek` returns OK and the byte
                 // count travels in the payload). Reply OK on a non-negative
                 // result so a successful fill of the faulting page is not

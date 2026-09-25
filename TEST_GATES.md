@@ -76,7 +76,7 @@ boundary (f), and a marker the harness's own input produces — a gate that pipe
 guest and greps for `boom` passes on a shell that echoes the line and never runs the command.
 
 **(i) The target we iterate on is blind to the class.** wasm has no page faults, so it has no FDIO,
-no demand-paged pages and no `prefault_vfs_file_regions` — the entire file-backed exec path is absent
+no demand-paged pages and no exec pre-fault (`Vmproc::prefault_exec`) — the entire file-backed exec path is absent
 there. Its harness is the strongest of the four (`run.js` types commands, execs files, forks, re-reads
 a disk), which makes the coverage look symmetric when it is not. And no workflow runs that harness at
 all: `boot.cjs`, `run.js` and `page.test.js` are manual, and `just publish-wasm` is a manual recipe.

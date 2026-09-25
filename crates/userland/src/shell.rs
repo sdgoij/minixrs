@@ -71,7 +71,7 @@ pub fn sh(_args: &[&str]) -> i32 {
     {
         // Ignore SIGINT: the tty's sigchar sends it on ^C, and the shell
         // must survive it at the prompt (the editor's read just gets EINTR
-        // and the loop reprints the prompt). TTY.md 1C.3.
+        // and the loop reprints the prompt).
         if minix_std::time::sig_ignore(minix_std::time::SIGINT).is_err() {
             write_err(b"sh: warning: cannot ignore SIGINT\n");
         }
@@ -84,7 +84,7 @@ pub fn sh(_args: &[&str]) -> i32 {
         loop {
             // Reap finished background jobs before each prompt so `[pid]
             // done` / `[pid] terminated (signal N)` reports appear in
-            // order. SIGNALS.md 3.4 — prompt-time reaping is the pattern.
+            // order — prompt-time reaping is the pattern.
             reap_jobs();
             write_out(b"# ");
             let line_len = read_line(&mut ed, &mut buf);

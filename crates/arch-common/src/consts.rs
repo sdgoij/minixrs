@@ -28,7 +28,7 @@ pub const NR_PTYS: usize = 4;
 /// Number of scheduling queues.
 pub const NR_SCHED_QUEUES: usize = 16;
 
-// Signal delivery (SIGNALS.md Phase 4)
+// Signal delivery
 
 /// Magic value validating a sigframe on the target's stack.
 pub const SC_MAGIC: u64 = 0xC0FFEE1;

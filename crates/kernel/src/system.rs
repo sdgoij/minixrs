@@ -2633,9 +2633,9 @@ unsafe fn do_copy_common(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -> i32
             crate::table::endpoint_slot(dst_endpt)
         };
 
-        // Phase D1 (TRAPS.md): pre-check both sides' page presence before
-        // the CR3-switched copy — C-faithful (C MINIX virtual_copy
-        // pre-checks via vm_check and returns EFAULT). A fault mid-copy
+        // Pre-check both sides' page presence before the CR3-switched copy —
+        // C-faithful (C MINIX virtual_copy pre-checks via vm_check and returns
+        // EFAULT), so a kernel-mode fault cannot fire here. A fault mid-copy
         // would be attributed to the caller (executor) with the target as
         // the CR3 owner, and VM would SIGSEGV the wrong process
         // (KNOWN_ISSUES #5). Kernel-side buffers (proc < 0) are
@@ -5769,7 +5769,7 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
 }
 
 /// Handle SYS_SIGSEND: set up a signal handler frame on the target's
-/// stack and enter the handler (SIGNALS.md Phase 4).
+/// stack and enter the handler.
 ///
 /// The message (m_sigcalls) carries the target endpoint at offset 16 and
 /// a pointer to a 48-byte `struct sigmsg` (in the caller's address space)
@@ -5896,8 +5896,7 @@ pub unsafe fn do_sigsend_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
     }
 }
 
-/// Handle SYS_SIGRETURN: restore registers from a signal frame
-/// (SIGNALS.md Phase 4).
+/// Handle SYS_SIGRETURN: restore registers from a signal frame.
 ///
 /// The message (m_sigcalls) carries the target endpoint at offset 16 and
 /// the sigframe address at offset 24. The frame is copied in, validated,

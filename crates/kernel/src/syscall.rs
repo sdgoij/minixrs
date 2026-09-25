@@ -117,7 +117,7 @@ unsafe fn sys_read_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // stdin → serial input (interrupt-driven via ser_input). The
         // tty server is the only process that reads the ring directly
         // (its own fd 0 stays non-VFS); a stray reader would steal
-        // console input from tty (TTY.md 1C.4).
+        // console input from tty.
         if !caller.is_null() && (*caller).p_endpoint != TTY_PROC_NR {
             return -9; // EBADF
         }

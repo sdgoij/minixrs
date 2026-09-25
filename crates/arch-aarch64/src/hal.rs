@@ -393,7 +393,7 @@ pub fn frame_default() -> [u8; 288] {
     [0u8; 288]
 }
 
-// Signal-delivery sigframe (SIGNALS.md Phase 4).
+// Signal-delivery sigframe.
 //
 // AArch64 layout (328 bytes, arch_common::consts::sigframe):
 //   [0..288)   saved p_reg (x0@0, x2@16, x30@240, SP_EL0@248,
