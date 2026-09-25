@@ -102,9 +102,10 @@ _finish-bootstrap target:
     @test -z "$(find coreutils/target -name '*.rlib' 2>/dev/null | head -1)" || (echo 'error: stale coreutils rlibs survived the clean - they fail later builds as E0463 or as clap TypeId panics' >&2 && exit 1)
     python tools/build-std-hello.py {{target}}
     # The C smoke-test binaries (helloc/ctest) also live under target/ and are
-    # wiped by the clean; rebuild them for x86 (build-c-hello.py is x86-only —
-    # riscv64/aarch64 C binaries are not yet supported).
-    if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py; fi
+    # wiped by the clean. They build for all three arches now
+    # (`just build-c-hello <arch>`), but the boot images embed them on x86_64
+    # only (`crates/kernel/build.rs`), so only that one is rebuilt here.
+    if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py x86; fi
 
 # Install the prebuilt stage1 toolchain for the commit the `rust` submodule
 # pins, fetched from a release on the rust fork and checksum-verified, instead
@@ -301,17 +302,32 @@ test-long-path boot-timeout="30": build-x86
 # fork+exec path) and `$PWD` from its own startup. Nothing else in the tree boots
 # bash, and the shared smoke scenario cannot: it types into the minix shell and
 # waits for its `#` prompt, which an interactive bash would replace with
-# `bash-5.3#`. x86 only, like the C surface itself (`tools/cc-minix.py`).
+# `bash-5.3#`.
 #
 # The injection is what puts bash in the image: it is deliberately not a
 # `BOOT_BINS` entry, so an image build never depends on bash having been built.
-test-bash boot-timeout="40": build-bash
-    MINIXFS_EXTRA='/bin/bash=target/bash/bash' just build-x86
+test-bash arch="x86" boot-timeout="60": (build-bash arch)
+    @just test-bash-{{arch}} {{boot-timeout}}
+
+test-bash-x86 boot-timeout="40":
+    MINIXFS_EXTRA='/bin/bash=target/bash/x86/bash' just build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "bash: every step of tools/smoke/bash.tsv answered"
+    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "bash: every step of tools/smoke/bash.tsv answered (x86_64)"
+
+test-bash-riscv64 boot-timeout="60":
+    MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' just build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "bash: every step of tools/smoke/bash.tsv answered (riscv64)"
+
+test-bash-aarch64 boot-timeout="60":
+    MINIXFS_EXTRA='/bin/bash=target/bash/aarch64/bash' just build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "bash: every step of tools/smoke/bash.tsv answered (aarch64)"
 
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
@@ -518,31 +534,39 @@ mkfs-aarch64:
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
     target/mkfs aarch64
 
-# Rebuild the C smoke-test binary (/bin/helloc) from tools/hello.c +
-# tools/crt0-x86_64.S (clang freestanding + minix-libc, linked with the fork
-# rustc), then re-embed it in the initramfs and disk image. Requires
-# `just build-x86` once so target/mkboot exists.
-build-c-hello:
-    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    python tools/build-c-hello.py
-    @test -x target/mkboot || (echo 'error: target/mkboot missing — run `just build-x86` once' >&2 && exit 1)
+# Rebuild the C smoke-test binaries (/bin/helloc, /bin/ctest) from tools/hello.c,
+# tools/ctest.c and the arch's tools/crt0-<arch>.S (clang freestanding +
+# minix-libc, linked with the fork rustc). For x86 it then re-embeds them in the
+# initramfs and disk image, which needs `just build-x86` once so target/mkboot
+# exists; the other arches embed through their own `just build-<arch>`
+# (`crates/kernel/build.rs`).
+build-c-hello arch="x86":
+    #!/bin/sh
+    set -eu
+    test -n "{{stage1-rustc}}" || { echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2; exit 1; }
+    python tools/build-c-hello.py {{arch}}
+    # The re-embed is the x86 images' (target/mkboot assembles them, and needs one
+    # `just build-x86` first); the other arches embed through their own
+    # `just build-<arch>` — crates/kernel/build.rs.
+    if [ "{{arch}}" != x86 ]; then exit 0; fi
+    test -x target/mkboot || { echo 'error: target/mkboot missing — run `just build-x86` once' >&2; exit 1; }
     target/mkboot embed_initramfs,embed_minixfs
     rm -f target/mkfs target/mkfs.exe
     "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
     target/mkfs x86_64
 
-# GNU bash for x86_64 minix, from the upstream commit `tools/build-bash.py` pins:
+# GNU bash for a minix target, from the upstream commit `tools/build-bash.py` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
 # `tools/cc-minix.py`, the `cc` a C project's own build needs. That host must be
 # POSIX (the stage1, the rlib and clang all have to be the same host's), so on
 # Windows the script re-enters WSL by itself — `MINIX_WSL_DISTRO` picks the
-# distribution. Artifact: `target/bash/bash`; `just test-bash` boots it.
-# `C_BUILD.md` has the why of each flag and each trap this build costs.
+# distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash <arch>`
+# boots it. `C_BUILD.md` has the why of each flag and each trap this build costs.
 #
 # Run this *after* the toolchain: `bootstrap` and `fetch-stage1` start with
 # `cargo clean`, which takes `target/bash-src` and the build tree with it.
-build-bash:
-    python tools/build-bash.py
+build-bash arch="x86":
+    python tools/build-bash.py {{arch}}
 
 # Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
 # toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.

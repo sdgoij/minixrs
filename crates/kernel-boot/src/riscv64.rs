@@ -194,6 +194,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         !kernel::proc::MiscFlags::CONTEXT_SET.bits(),
                         core::sync::atomic::Ordering::SeqCst,
                     );
+                    // An exec'd image must not start with the replaced image's registers.
+                    kernel::fpu::restore(caller);
                 }
                 return;
             }
@@ -226,6 +228,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             }
             if rts != 0 {
                 // Current process blocked or preempted — pick a new one.
+                // Keep its live FP registers first: the frame copy below is only
+                // the integer half of the state, and the process chosen further
+                // down will overwrite the registers this one left there.
+                unsafe { kernel::fpu::save(caller) };
                 // FIRST: save current process's registers from the trap frame
                 // to its p_reg.  The trap frame holds the register state at
                 // the time of the ecall; without saving it, the current
@@ -259,7 +265,15 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         &raw mut (*caller).p_reg as *mut u8,
                         8,
                     );
-                    // Save sstatus from frame[264..272] into p_reg[248..256]
+                    // Save sstatus from frame[264..272] into p_reg[248..256],
+                    // whatever mode the trap came from. This must NOT be gated
+                    // on SPP: an S-mode trap here is a user page fault taken
+                    // inside the kernel's own copy (the kernel walks the
+                    // current page table, so a not-yet-resident user page
+                    // faults in S-mode), and that process has to be resumed in
+                    // S-mode with its own SPP=1 sstatus. Leaving the user's
+                    // sstatus in place instead makes the trap exit return the
+                    // process to U-mode at a kernel address.
                     core::ptr::copy_nonoverlapping(
                         frame.as_ptr().add(264),
                         (&raw mut (*caller).p_reg as *mut u8).add(248),
@@ -323,6 +337,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                         }
                         // Update current process pointer
                         arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                        kernel::fpu::restore(next_proc);
                     }
                 } else {
                     // No runnable processes — all blocked on IPC.
@@ -343,6 +358,8 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             8,
                         );
                         // Save sstatus from frame[264..272] into p_reg[248..256]
+                        // unconditionally — see the note in the branch above for
+                        // why gating this on SPP breaks an S-mode resume.
                         core::ptr::copy_nonoverlapping(
                             frame.as_ptr().add(264),
                             (&raw mut (*caller).p_reg as *mut u8).add(248),
@@ -401,6 +418,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                                     kernel::hal::write_cr3(new_cr3);
                                 }
                                 arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                                kernel::fpu::restore(next_proc);
                             }
                             break;
                         }
@@ -451,32 +469,31 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
     // Register timer callback for preemptive scheduling.
     unsafe {
         unsafe fn riscv_timer_callback(frame: &mut [u8; 296]) {
-            // Nested (S-mode) tick: the timer fired inside the outer trap's
-            // kernel processing — with SIE=1 during U-mode traps, a tick
-            // boundary can land mid-syscall. Skip the per-tick accounting
-            // and expiry dispatch: timer_int_handler walks the run queues
-            // (load_update) and may notify/enqueue a process
-            // (tmrs_exptimers → mini_notify), which would race the outer
-            // syscall's own queue/process-state access. The tick was
-            // already consumed (stimecmp re-armed in trap.rs) and the UART
-            // drained; accounting resumes on the next user-mode tick, as
-            // when the kernel ran with SIE=0 throughout.
+            // Per-tick accounting, whichever mode the tick arrived in:
+            // monotonic/realtime, virtual timers, load average and quantum
+            // accounting via context_stop → proc_no_time → notify_scheduler,
+            // matching x86's timer_int_handler.
+            //
+            // This used to sit behind the SPP check below, i.e. it ran only for
+            // a tick taken in U-mode — and on this port that is never. Measured
+            // here, sampling the 1st, 100th, 1000th and 10000th tick: every one
+            // arrived with SPP=1. They are taken while a trap handler runs,
+            // because `trap_asm.rs` runs a U-mode trap's handler with SIE=1 (so
+            // interrupt-driven input keeps draining), and the effect of the
+            // accounting's absence was a clock that never advanced: a wall
+            // clock frozen at 0, `alarm` never expiring, and `just test-boot
+            // riscv64` failing because `kernel::bootwatch` — which counts ticks
+            // and is armed 500 of them — never reached its deadline.
+            unsafe { kernel::clock::timer_int_handler() };
+            // The SPP check still decides whether the tick may *switch*. A
+            // nested (S-mode) tick leaves the frame alone, so the syscall it
+            // interrupted runs to its own end and this callback never loads
+            // another process's state over a half-finished kernel frame. That
+            // is also why the save below is skipped for it.
             let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
             if (sstatus >> 8) & 1 != 0 {
-                return; // SPP=1: interrupted kernel mode, skip
+                return; // SPP=1: interrupted kernel processing, no switch
             }
-            // User-mode tick: full per-tick accounting (monotonic/realtime,
-            // virtual timers, load average, quantum accounting via
-            // context_stop → proc_no_time → notify_scheduler), matching
-            // x86's timer_int_handler.
-            unsafe { kernel::clock::timer_int_handler() };
-            // Preempt: if we interrupted user mode, save state and
-            // potentially switch to another runnable process. Kernel-mode
-            // interrupts (SPP=1) are skipped above: kernel processing runs
-            // with SIE=0 when nested (a fault taken mid-syscall must not
-            // nest), and the kernel-mode switch-back faults (an exec page
-            // fault at the resume instruction — the console read no longer
-            // busy-waits in kernel mode, so no process ever spins there).
             let caller = arch_riscv64::hal::current_proc() as *mut kernel::proc::Proc;
             if caller.is_null() {
                 return;
@@ -511,6 +528,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                 if next_proc != caller {
                     unsafe {
+                        // This tick preempts `caller`: capture its live FP
+                        // registers before the process below can run and
+                        // overwrite them.
+                        kernel::fpu::save(caller);
                         let mf = (*next_proc)
                             .p_misc_flags
                             .load(core::sync::atomic::Ordering::Relaxed);
@@ -549,6 +570,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                             kernel::hal::write_cr3(new_cr3);
                         }
                         arch_riscv64::cpulocals::set_current_proc(next_proc as u64);
+                        kernel::fpu::restore(next_proc);
                     }
                 } else {
                     // Caller is the best runnable: round-robin within its
@@ -669,6 +691,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         let first_proc = unsafe { kernel_boot::boot_init::load_and_prepare_all(&boot_cfg) };
 
         let next_proc = unsafe { kernel_boot::boot_init::enqueue_and_start(&boot_cfg, first_proc) };
+
+        // The first process has no image yet: `restore` gives it zeroed registers
+        // instead of whatever the kernel's own last use of the FP unit left behind.
+        unsafe {
+            kernel::fpu::restore(next_proc);
+        }
 
         serial_write("  switching to userspace...\r\n");
         unsafe {

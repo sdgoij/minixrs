@@ -283,6 +283,14 @@ pub unsafe extern "C" fn strtold(s: *const c_char, endptr: *mut *mut c_char) -> 
     )
 }
 
+/// On the 64-bit targets `long double` is `double`, so this *is* `strtod`; the
+/// x86_64 form above exists only because that ABI returns the value in x87 ST0.
+#[cfg(all(target_os = "minix", not(target_arch = "x86_64")))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtold(s: *const c_char, endptr: *mut *mut c_char) -> f64 {
+    unsafe { strtod(s, endptr) }
+}
+
 /// Locale-aware variant; the locale argument is ignored (same as `strtold`).
 #[cfg(all(target_os = "minix", target_arch = "x86_64"))]
 #[unsafe(no_mangle)]
@@ -301,6 +309,17 @@ pub unsafe extern "C" fn strtold_l(
         "ret",
         strtod = sym crate::c_stdlib::strtod,
     )
+}
+
+/// Locale-aware variant; the locale argument is ignored (same as `strtold`).
+#[cfg(all(target_os = "minix", not(target_arch = "x86_64")))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtold_l(
+    s: *const c_char,
+    endptr: *mut *mut c_char,
+    _loc: *const c_void,
+) -> f64 {
+    unsafe { strtod(s, endptr) }
 }
 
 /// Radix-independent exponent via IEEE bit extraction (no_std has no `ln`).

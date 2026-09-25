@@ -170,6 +170,34 @@ const HDR: usize = 16; // [size: usize][flags: usize]
 const ALIGN: usize = 16;
 const USED: usize = 1;
 
+/// The page the target's `sbrk` works in. `sbrk` returns a page-aligned
+/// address and leaves the break page-aligned as well, so a heap block that
+/// does not fill its pages ends before the break and the *next* extension's
+/// block lands past the untouched gap (or past a thread stack sbrk'd in
+/// between). The free-list walk stops at the first zeroed header — that is
+/// what keeps it out of a stack — so a block above such a gap is unreachable:
+/// memory that can never be handed out or coalesced again, one page per
+/// extension, until `sbrk` fails. Rounding each extension request to a whole
+/// page is what makes consecutive blocks meet, and it is how the walk stays
+/// able to see the whole heap.
+const HEAP_PAGE: usize = 4096;
+
+/// The `sbrk` request for a block of `need` bytes, and the size to record for
+/// it: `(ask, size)`. The last partial page is left as a free block when it is
+/// big enough to hold one, so the slack stays reusable; when it is not, the
+/// block absorbs it (the caller never sees the difference, the size in the
+/// header is the port's own).
+#[inline]
+fn extend_request(need: usize) -> (usize, usize) {
+    let ask = align_up(need, HEAP_PAGE);
+    let pad = ask - need;
+    if pad >= HDR + ALIGN {
+        (ask, need)
+    } else {
+        (ask, ask)
+    }
+}
+
 static mut HEAP_START: usize = 0;
 /// Exact end of the heap (past the last block). The program break may be
 /// higher — the VM server rounds it to pages, and thread stacks are sbrk'd
@@ -213,14 +241,19 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
         let heap = HEAP_START;
         if heap == 0 {
             // First allocation: extend the break and start the heap there.
-            let base = minix_rt::sbrk(need as isize);
+            let (ask, size) = extend_request(need);
+            let base = minix_rt::sbrk(ask as isize);
             if base < 0 {
                 set_errno(-base as i32);
                 return core::ptr::null_mut();
             }
             HEAP_START = base as usize;
-            HEAP_END = HEAP_START + need;
-            set_hdr(base as *mut u8, need, USED);
+            HEAP_END = HEAP_START + ask;
+            set_hdr(base as *mut u8, size, USED);
+            let pad = ask - size;
+            if pad >= HDR + ALIGN {
+                set_hdr((HEAP_START + size) as *mut u8, pad, 0);
+            }
             return (HEAP_START + HDR) as *mut c_void;
         }
 
@@ -247,17 +280,23 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
             p += sz;
         }
 
-        // Nothing fit: extend the break and place a fresh block there (it
-        // may not be contiguous with the old heap — pthread stacks were
-        // sbrk'd in between — so track the new end explicitly).
-        let r = minix_rt::sbrk(need as isize);
+        // Nothing fit: extend the break and place a fresh block there (it may
+        // not be contiguous with the old heap — a thread stack sbrk'd in
+        // between — so track the new end explicitly; see `extend_request` for
+        // why the request is a whole number of pages).
+        let (ask, size) = extend_request(need);
+        let r = minix_rt::sbrk(ask as isize);
         if r < 0 {
             set_errno(-r as i32);
             return core::ptr::null_mut();
         }
         let b = r as usize;
-        set_hdr(b as *mut u8, need, USED);
-        HEAP_END = b + need;
+        set_hdr(b as *mut u8, size, USED);
+        let pad = ask - size;
+        if pad >= HDR + ALIGN {
+            set_hdr((b + size) as *mut u8, pad, 0);
+        }
+        HEAP_END = b + ask;
         (b + HDR) as *mut c_void
     }
 }
@@ -317,7 +356,14 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         return unsafe { malloc(size) };
     }
     unsafe {
-        let old = hdr_size(ptr as *mut u8) - HDR;
+        // The size is in the block header, HDR bytes below the pointer handed
+        // out — not at the pointer itself, which is the caller's first byte.
+        // Reading it there gave `realloc` a garbage "old size": a grow whose
+        // garbage read high returned the same, too-small block, and the caller
+        // then overran it (a long-running C loop of growing `realloc`s died of
+        // one, which is what a `bash` arithmetic loop was doing), while a grow
+        // whose garbage read low copied from the wrong length.
+        let old = hdr_size((ptr as usize - HDR) as *mut u8) - HDR;
         if size <= old {
             return ptr;
         }

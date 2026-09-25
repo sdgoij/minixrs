@@ -162,6 +162,40 @@ pub unsafe fn register_page_fault_handler(handler: unsafe fn(u64, u32) -> i32) {
     }
 }
 
+/// One byte to the M-mode console (`sbi_legacy_console_putchar`): the only
+/// output that works without page tables, a UART driver or a runnable process.
+unsafe fn sbi_putc(c: u8) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") 1u64,
+            in("a6") 0u64,
+            in("a0") c as u64,
+            in("a1") 0u64,
+            in("a2") 0u64,
+            options(nomem, nostack),
+        );
+    }
+}
+
+unsafe fn sbi_puts(s: &str) {
+    for &b in s.as_bytes() {
+        unsafe {
+            sbi_putc(b);
+        }
+    }
+}
+
+unsafe fn sbi_hex(val: u64) {
+    let hex = b"0123456789abcdef";
+    for i in (0..16).rev() {
+        let nibble = ((val >> (i * 4)) & 0xF) as usize;
+        unsafe {
+            sbi_putc(hex[nibble]);
+        }
+    }
+}
+
 /// The main trap handler — called from trap_asm.S.
 ///
 /// # Safety
@@ -250,11 +284,13 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 }
             }
             cause::INSTR_PAGE_FAULT | cause::LOAD_PAGE_FAULT | cause::STORE_PAGE_FAULT => {
-                // Read stval and sepc from the trap frame.
-                let stval: u64;
-                unsafe {
-                    core::arch::asm!("csrr {v}, stval", v = out(reg) stval, options(nomem, nostack))
-                };
+                // The fault address comes from the frame, where the trap entry
+                // saved `stval` — not from the live CSR, which a nested trap can
+                // have overwritten by the time this handler runs (see the note in
+                // `trap_asm.rs`). A load/store to an address another trap faulted
+                // on, or an instruction fetch whose fetch address was replaced by
+                // 0, is a `SIGSEGV` for the wrong process.
+                let stval = u64::from_ne_bytes(frame[288..296].try_into().unwrap());
                 let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
 
                 // Check the mode the fault was taken in (SPP bit in the saved
@@ -306,46 +342,17 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
 
                 // Fatal page fault: print diagnostics and halt.
                 // Use SBI console for diagnostics (no page table dependency).
-                unsafe fn sbi_putc(c: u8) {
-                    unsafe {
-                        core::arch::asm!(
-                            "ecall",
-                            in("a7") 1u64,
-                            in("a6") 0u64,
-                            in("a0") c as u64,
-                            in("a1") 0u64,
-                            in("a2") 0u64,
-                            options(nomem, nostack),
-                        );
-                    }
-                }
-                unsafe fn sbi_puts(s: &str) {
-                    for &b in s.as_bytes() {
-                        unsafe {
-                            sbi_putc(b);
-                        }
-                    }
-                }
-                unsafe fn print_hex(val: u64) {
-                    let hex = b"0123456789abcdef";
-                    for i in (0..16).rev() {
-                        let nibble = ((val >> (i * 4)) & 0xF) as usize;
-                        unsafe {
-                            sbi_putc(hex[nibble]);
-                        }
-                    }
-                }
                 unsafe {
                     let sstatus: u64;
                     core::arch::asm!("csrr {v}, sstatus", v = out(reg) sstatus, options(nomem, nostack));
                     sbi_puts("!PF ");
-                    print_hex(stval);
+                    sbi_hex(stval);
                     sbi_putc(b' ');
-                    print_hex(sepc);
+                    sbi_hex(sepc);
                     sbi_putc(b' ');
-                    print_hex(scause_val);
+                    sbi_hex(scause_val);
                     sbi_putc(b' ');
-                    print_hex(sstatus);
+                    sbi_hex(sstatus);
                     sbi_putc(b'\r');
                     sbi_putc(b'\n');
                 }
@@ -353,11 +360,47 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     unsafe { core::arch::asm!("wfi", options(nomem, nostack)) }
                 }
             }
-            _ => loop {
+            // Anything else — an illegal instruction, a misaligned or
+            // access-faulting load or store, a breakpoint — has no handler here:
+            // nothing in this port turns one of those into a signal for the
+            // process that caused it, so there is no "carry on" to return to.
+            //
+            // What it must not be is silence, which is what this arm used to be
+            // (a bare `wfi` loop). That turned a single wrong bit in an `exec`ed
+            // process's `sstatus` — the FP unit left disabled, `PSL_USERSET`'s
+            // `FS` field written as bit 9 by `hal::exec_init_regs` — into a
+            // machine that stopped with no output at all: the first
+            // floating-point instruction a C program executes trapped, the trap
+            // handler slept, and the only symptom was a shell that never came
+            // back, which reads as a hung guest rather than as one instruction.
+            // Naming the cause, the faulting instruction's `stval`, the program
+            // counter and the mode is what makes the next one a two-minute
+            // diagnosis instead.
+            unhandled => {
                 unsafe {
-                    core::arch::asm!("wfi", options(nomem, nostack));
+                    let stval = u64::from_ne_bytes(frame[288..296].try_into().unwrap());
+                    let sepc = u64::from_ne_bytes(frame[256..264].try_into().unwrap());
+                    let sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
+                    sbi_puts("!trap cause=");
+                    sbi_hex(unhandled);
+                    sbi_puts(" stval=");
+                    sbi_hex(stval);
+                    sbi_puts(" sepc=");
+                    sbi_hex(sepc);
+                    sbi_puts(" sstatus=");
+                    sbi_hex(sstatus);
+                    sbi_puts(if (sstatus >> 8) & 1 == 0 {
+                        " mode=user\r\n"
+                    } else {
+                        " mode=kernel\r\n"
+                    });
                 }
-            },
+                loop {
+                    unsafe {
+                        core::arch::asm!("wfi", options(nomem, nostack));
+                    }
+                }
+            }
         }
     }
 }

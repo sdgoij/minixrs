@@ -62,9 +62,11 @@ fn assemble(
     let mut bins = Vec::new();
     for &(dest, bin_name) in manifest::BOOT_BINS {
         // The C smoke-test binaries (helloc/ctest) and the uutils multicall
-        // (coreutils) are only built for x86_64 today (their build tooling
-        // is x86-only); skip them on other arches until that grows target
-        // support.
+        // (coreutils) are carried by the x86_64 images only: the multicall is
+        // built from the coreutils submodule for that arch alone, and these are
+        // the images this tool chain assembles first. They *build* for every arch
+        // now (`just build-c-hello <arch>`), so this gate is about what an image
+        // carries rather than about what can be built.
         if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/coreutils") && t.arch != "x86_64" {
             continue;
         }
@@ -178,7 +180,8 @@ fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
             "the std smoke-test binary is built by `python tools/build-std-hello.py {arch}`"
         ),
         "/bin/helloc" | "/bin/ctest" => {
-            "the C smoke-test binaries are built by `python tools/build-c-hello.py` (x86 only)"
+            "the C smoke-test binaries are built by `python tools/build-c-hello.py \
+             <arch>` — the images carry them on x86_64 only"
                 .to_string()
         }
         _ => format!("run `just userland-{arch}` first (`just build-{arch}` runs it too)"),

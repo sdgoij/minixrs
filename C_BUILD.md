@@ -7,9 +7,13 @@ worth keeping in view because the next section is where it stops.
 
 - The userland is Rust, built by the fork's stage1 for the in-tree minix targets.
 - The two in-tree C programs (`tools/hello.c`, `tools/ctest.c`) are built by
-  `tools/build-c-hello.py`: `clang --target=x86_64-unknown-none` for the compile
-  half, the fork's rustc for the link half, against `tools/c-include`, `tools/crt0-x86_64.S`,
+  `tools/build-c-hello.py`: clang for the compile half
+  (`--target=<machine>-unknown-none`), the fork's rustc for the link half,
+  against `tools/c-include`, the target's `tools/crt0-<arch>.S`,
   `tools/minix-user.ld` and the `minix-libc` rlib.
+- All three arches build C now, not just x86_64: `tools/ccarch.py` holds the
+  triple and clang machine per target, and what that took is in "A three-arch C
+  surface" below.
 
 Neither needs a POSIX host. The compiler runs *on* Windows, the headers are the
 port's own rather than the system's, and every path in the link is passed
@@ -44,11 +48,14 @@ and those programs have to be POSIX.
 | Third-party configure/make C software | a **POSIX** host: Linux, WSL, or the podman container `just test-linux` already uses |
 
 On that host `tools/cc-minix.py` is that `cc` — the command a C project's own
-build system reaches — doing the same two halves `build-c-hello.py` assembles by
-hand: compile with clang
-`--target=x86_64-unknown-none -ffreestanding -mno-red-zone -fno-stack-protector -fno-pic`
-plus the hermetic include flags from `tools/ccflags.py`; link by compiling the C
-inputs and driving the fork's rustc with `tools/crt0-x86_64.S`,
+build system reaches, told which target it is for (`… cc-minix.py riscv64`, and
+x86_64 when it is not told) — doing the same two halves `build-c-hello.py`
+assembles by hand: compile with clang
+`--target=<machine>-unknown-none -ffreestanding -fno-stack-protector -fno-pic`
+(plus `-mno-red-zone` where the machine has a red zone, and RISC-V's
+`-march=rv64gc -mabi=lp64d`, both of which `tools/ccarch.py` carries) plus the
+hermetic include flags from `tools/ccflags.py`; link by compiling the C inputs and
+driving the fork's rustc with the target's `tools/crt0-<arch>.S`,
 `-T tools/minix-user.ld` and the `minix-libc` rlib.
 
 The alternative, if a Windows host must stay in the loop, is to build from a
@@ -215,24 +222,160 @@ bash at a pinned upstream commit (a git checkout rather than a release tarball:
 that is what the working build was validated against, and the generated files the
 tarball would add are the ones whose regeneration the traps below are about),
 rebuilds `minix-libc` with the host's own stage1, configures, links and publishes
-`target/bash/bash`. On Windows it re-enters WSL by itself (`MINIX_WSL_DISTRO`
+`target/bash/<arch>/bash`. On Windows it re-enters WSL by itself (`MINIX_WSL_DISTRO`
 picks the distribution), because the stage1, the rlib and clang have to be the
 same host's — which is the whole of why this route is Linux.
 
-`just build-bash` runs it; `just test-bash` then injects the result as `/bin/bash`
+`just build-bash <arch>` runs it (the artifact lands at `target/bash/<arch>/bash`);
+`just test-bash <arch>` then injects the result as `/bin/bash`
 through `MINIXFS_EXTRA` (still not a `BOOT_BINS` entry: an image that always
 carried a 1.4 MB bash would only build where bash had been built) and drives
 `tools/smoke/bash.tsv` at it in the guest — the banner, `-c`, arithmetic, a loop,
 a redirect read back through a second process, an external command (bash's
-fork+exec path) and `$PWD` from its own startup. CI's `bash` job runs exactly
-that pair, and it is in the release's `needs`, so a C surface that builds bash
-but breaks it blocks a release.
+fork+exec path) and `$PWD` from its own startup. CI's `bash` job runs that pair for
+each of the three arches and publishes the shell as the `bash-<arch>` artifact; the
+release workflow downloads it and injects the same `/bin/bash` into the image it
+publishes, so a released image carries a shell for scripts (a plain `just image`
+stays bash-free). The job is in the release's `needs`, so a C surface that builds
+bash but breaks it blocks a release.
 
 **What that still does not cover:** an *interactive* bash. The driver types into
 the minix shell and waits for its `#` prompt, which bash's `bash-5.3#` replaces,
 so every step is a fresh `bash -c`. Its profile files, its terminal setup
 (`tcsetattr` into raw mode) and readline are therefore still only as exercised as
 typing at it by hand once — the one part of bash a scenario cannot reach yet.
+
+## A three-arch C surface
+
+The **compile** half was always arch-generic: clang is a cross compiler, and
+`tools/c-include` is little-endian headers with nothing x86 in them beyond the
+comments — `tools/hello.c` compiles for `x86_64-unknown-none`,
+`riscv64-unknown-none` and `aarch64-unknown-none` alike. The **link** half was
+x86_64's alone (`tools/crt0-x86_64.S` and nothing beside it, five libc entry
+points written in x86 asm, `jmp_buf` the SysV x86_64 layout). That is what
+changed, and this is what it took:
+
+- **The entry points.** `tools/crt0-aarch64.S` and `tools/crt0-riscv64.S` follow
+  the same sequence as the x86 one: read `argc`/`argv`/`envp` off the initial
+  stack, park them in callee-saved registers across `minix_libc_tls_init`,
+  publish `environ`, run `.init_array`, call `main`, `exit`. The per-arch part is
+  the register set and the stack layout, which
+  `rust/library/std/src/sys/pal/minix` already documents for its own `_start` —
+  that is the reference to crib from.
+- **`setjmp`/`longjmp`** (`crates/minix-libc/src/c_setjmp.rs`) save what each ABI
+  calls callee-saved: x86_64's rbx/rbp/r12-r15/rsp/rip, aarch64's x19-x30/sp and
+  d8-d15, riscv64's ra/sp/s0-s11 and fs0-fs11. `tools/c-include/setjmp.h`
+  declares the matching `jmp_buf` length, and the two have to agree: bash reaches
+  both through its `posixjmp.h`.
+- **`strtold`, `strtold_l`, `wcstold`** are asm on x86_64 for one reason only:
+  that ABI returns an 80-bit `long double` in x87 ST0. On aarch64 and riscv64
+  `long double` *is* `double`, so each is a one-line call to `strtod`/`wcstod`.
+- **The RISC-V float ABI is the one thing clang's default gets wrong** for this
+  port: `riscv64-unknown-none` defaults to soft-float, the fork's
+  `riscv64gc-unknown-minix` spec is `Lp64d`, and lld refuses to link objects whose
+  `EF_RISCV_FLOAT_ABI` differ — which is a correctness question before it is a
+  link error, since a `double` would cross the Rust/C boundary in a register one
+  side does not use. `-march=rv64gc -mabi=lp64d` is the fix. `-mno-red-zone` is
+  accepted-but-unused on RISC-V, so it is passed only where a red zone exists.
+  Both live in `tools/ccarch.py`, which the three drivers share
+  (`cc-minix.py`, `build-c-hello.py`, `build-bash.py`), so a further target is one
+  entry rather than three.
+
+Verified: `hello.c` and `ctest.c` link for all three targets; bash's configure,
+its 209 objects and its link succeed for all three (`just build-bash <arch>`); and
+bash's own smoke scenario passes in the guest on x86_64 and aarch64.
+
+**riscv64 was the one that stopped short, and the reason was one field.** In a
+riscv64 guest `/bin/bash --version` printed nothing and never returned, and so did
+every `sscanf` — with or without an argument read, and through `vsscanf` given a
+`va_list` the C compiler built. That was never a scan problem: `psl::PSL_USERSET`
+enabled the FP unit with `FS=Initial`, which RISC-V lets an implementation treat as
+`FS=Off`, so no process had floating point at all and the first instruction rustc
+spills in *any* function that touches a `double` (`c.fsdsp` in the prologue) was an
+illegal instruction. The trap handler's catch-all arm answered that with a silent
+`wfi`, which is why the symptom was a hung guest rather than a fault: the guest was
+idle and nothing said why. `FS=Dirty` is the value that means "the registers hold
+the current state" — and at that point nothing kept an image of `f0`-`f31` to
+restore from, the x86 FPU support being `kernel::fpu` and x86-only (RISC-V has one
+now; see "riscv64's per-process FP image" below) — so the unit comes up on,
+the trap return writes the same `PSL_USERSET` for every U-mode return, and the
+catch-all arm names the cause, `stval`, `sepc` and the mode before it halts. bash's
+banner, arithmetic, loops, redirection and fork+exec all run in a riscv64 guest now.
+
+What the FP fix then exposed is that a *long-running* C program still dies, and the
+cause was the port's C heap rather than the kernel: `realloc` read a block's size
+from the block header at the *user* pointer instead of `HDR` bytes below it, so a
+grow that read high returned the same too-small block and the caller overran it;
+and `malloc`'s extension path placed a fresh block at a page-rounded `sbrk` address
+while leaving the free-list walk unable to cross the gap in front of it, so every
+extension leaked its page (and `free`'s walk back from the heap start, which is
+O(heap), then made the leak look like a hang). Both are fixed
+(`crates/minix-libc/src/lib.rs`) and the difference is measurable in the guest: a C
+probe that grows one buffer to 100000 bytes prints `REALLOC ok`, a churn probe of
+300000 varying-size `malloc`/`free` cycles goes from hanging to `CHURN ok 300000`,
+and `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo S=$s'` goes from killed
+by SIGSEGV every time to `S=8002000`. A prompt-paced scenario of 30 `bash -c` steps
+lost 5-6 steps before those fixes and 1 after.
+
+What was left after that was a trap-state bug, not a C one. A `bash -c` step still
+died in about 5-10% of invocations — the child ended as a signal (139) and VM's
+trace of the kill said `pf-noregion 0x0`, error code 0x14, a user *instruction*
+fetch at address zero, which reads as a call through a null function pointer. It
+was not one: the riscv64 trap handler read `stval` live, and `stval` is the one
+fault CSR that is not part of the interrupted context — the entry saves `sepc`,
+`sstatus` and `scause` in the frame but not `stval`, and the architecture lets a
+trap that is not a load/store/instruction fault (an interrupt, and this port takes
+its ticks inside a U-mode trap's handler) write 0 there. VM was handed address 0,
+found no region covering it, and killed a process that had done nothing wrong.
+`trap_asm.rs` now saves `stval` in the trap frame's unused `288..296` slot and
+`trap.rs` reads the fault address from the frame. With that, 60 consecutive
+`bash -c` invocations in the prompt-paced census lost nothing, `just test-bash
+riscv64` is green, and so are `test-qemu`/`test-boot riscv64` and the workspace
+suite.
+
+**riscv64's per-process FP image.** The trap frame saves no `f`-register, so with
+`FS=Dirty` two processes that each use floating point can see each other's
+registers across a switch — and there is no RISC-V lazy `FS=Off`-and-trap arm to
+fall back on. Measured first, with a C probe that names `fs0`, holds a value in it
+across a `getpid()` and checks it afterwards: two processes in flight reported
+`FPPROBE parent bad=40000` and `FPPROBE child bad=40000` (every round, both),
+while the same probe without the `fork` reported `FPONE bad=0` — the loss needs the
+*other* process to have run, not just a trap. A first version of the probe passed
+instead: `register double held asm("fs0")` around the call compiled to `fsd fs0`
+before it and `fld fs0` after it, giving the value a stack home the compiler
+reloaded, so the register never really held it. The set, the call and the check are
+one `asm` block now.
+
+The fix saves at the switch, not the entry, because the kernel executes no floating
+point itself: nothing between a process's last user instruction and the switch can
+disturb its registers, so the switch sites — `riscv_post_syscall`,
+`riscv_timer_callback` and the boot `switch_to_user` in
+`crates/kernel-boot/src/riscv64.rs` — call `kernel::fpu::save` on the process being
+left and `restore` on the one being entered. `fork` saves the parent before copying
+the image to the child, `exec` zeroes it, and `restore` writes `fcsr` (the rounding
+mode and the accrued flags) as well as `f0`-`f31`, so neither leaks either. The
+registers are the first 256 bytes of the one-page area; `fcsr` sits just past them
+(`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only as the
+mcontext ABI defines it. With it the probe reports `FPPROBE ok` (both `bad=0`), the
+prompt-paced census is 80/80 with zero losses, `just test-bash` is 6/6 on all three
+arches, and `test-qemu`/`test-boot riscv64` and the workspace suite are green.
+
+bash is reliable in a riscv64 guest for everything the smoke scenario and the
+census cover, and floating point in user programs now survives a context switch.
+
+**One more thing the C surface did not have: a clock.** The riscv64 timer was
+armed — `clint::init_timer` writes `stimecmp` — and never enabled: nothing in the
+port set `sie.STIE`, so the deadline lapsed in silence. No tick, no virtual timer,
+no `alarm` (a probe that spins with a three-second `alarm` is never interrupted),
+nothing preempted, and the boot-progress watch, which counts ticks, never reached
+its deadline — which is why `just test-boot riscv64` stopped at `phase 1 complete;
+releasing init`. The per-tick accounting had a second reason never to run: it sat
+behind the timer callback's SPP check, and every tick this port takes arrives in
+S-mode (sampled at the 1st, 100th, 1000th and 10000th tick), because a U-mode
+trap's handler runs with `SIE=1`. Both halves are fixed: `sie.STIE` is set where
+the timer is armed, and the accounting runs for either mode while the SPP check
+still decides whether the tick may switch. `just test-boot riscv64` now prints
+`ALL TESTS PASSED`.
 
 ## Traps
 

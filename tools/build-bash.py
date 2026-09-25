@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build GNU bash for x86_64 minix, from a pinned upstream commit.
+"""Build GNU bash for x86_64, riscv64 or aarch64 minix, from a pinned upstream
+commit.
+
+Usage: python tools/build-bash.py [all|x86|riscv64|aarch64|<triple>] [--force]
+                                  [--jobs N]
+                                (default: x86_64-pc-minix)
 
 bash is the port's largest C consumer and its broadest test of the C surface:
 209 objects, its own configure, and everything from termios to globbing. It is
@@ -7,15 +12,7 @@ also the reason several of the C headers and libc entry points exist at all
 (`C_BUILD.md` records which). This script is the build that keeps them honest:
 it fetches bash at a pinned commit, builds minix-libc with the *same* stage1 the
 link uses, configures bash against the port's headers, links it, and leaves the
-result at `target/bash/bash`.
-
-Everything it needs comes from `just fetch-stage1` (or `bootstrap`) plus clang,
-gcc, make and git on the build host. The host has to be POSIX — the stage1, the
-rlib and clang must all be the same host's — so on Windows the build re-enters
-WSL. Override the distribution with `MINIX_WSL_DISTRO`; the default is the one
-C_BUILD.md's write-up used.
-
-    python tools/build-bash.py [--force] [--jobs N]
+result at `target/bash/<arch>/bash`.
 
 `--force` refetches the source and reconfigures (the default reuses both, and
 still rebuilds the libc and relinks, so it is safe to re-run after a libc edit).
@@ -38,9 +35,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 sys.path.insert(0, str(TOOLS))
 
+from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 from lld import find_lld, host_triple  # noqa: E402
-
-TARGET = "x86_64-pc-minix"
 
 # Pinned: the commit the working build was validated against — "Bash-5.3 patch
 # 15" (`git describe`: bash-5.3-16-gb4608166). bash's git repository ships its
@@ -51,14 +47,38 @@ BASH_GIT = "https://git.savannah.gnu.org/git/bash.git"
 BASH_COMMIT = "b460816602167718f78a6233164e8875f49b75b2"
 BASH_DESCRIBE = "Bash-5.3 patch 15"
 
+# The source is one clone for every target — it is the same tree — while the
+# build tree, the artifact and the logs are per arch: two arches sharing a
+# build directory would configure and link each other's objects.
 SRC = ROOT / "target" / "bash-src"
-BUILD = ROOT / "target" / "bash-build"
-ARTIFACT = ROOT / "target" / "bash" / "bash"
-CONFIGURE_LOG = ROOT / "target" / "bash-configure.log"
-MAKE_LOG = ROOT / "target" / "bash-make.log"
-# Written into the build directory: which commit it was configured for. A pin
-# change means the tree on disk is not the tree the config describes.
-BUILD_MARKER = BUILD / ".minixrs-commit"
+
+
+def bash_dir(arch: Arch) -> pathlib.Path:
+    return ROOT / "target" / "bash" / arch.name
+
+
+def build_dir(arch: Arch) -> pathlib.Path:
+    return bash_dir(arch) / "build"
+
+
+def artifact(arch: Arch) -> pathlib.Path:
+    """What `publish` writes and `just test-bash` injects."""
+    return bash_dir(arch) / "bash"
+
+
+def configure_log(arch: Arch) -> pathlib.Path:
+    return bash_dir(arch) / "configure.log"
+
+
+def make_log(arch: Arch) -> pathlib.Path:
+    return bash_dir(arch) / "make.log"
+
+
+def build_marker(arch: Arch) -> pathlib.Path:
+    """Which commit the tree was configured for: a pin change means the tree on
+    disk is not the tree the config describes."""
+    return build_dir(arch) / ".minixrs-commit"
+
 
 # Two configure knobs a *static* libc makes necessary, both of which upstream
 # never sees because a shared libc interposes instead (C_BUILD.md has the link
@@ -69,8 +89,14 @@ BUILD_MARKER = BUILD / ".minixrs-commit"
 #                          termcap, and bash's bundled lib/termcap defines the
 #                          same three; the macro is how readline is told to
 #                          declare them instead.
-CONFIGURE_FLAGS = ("--host=x86_64-unknown-none", "--disable-nls", "--without-bash-malloc")
 CFLAGS = "-DNEED_EXTERN_PC"
+
+
+def configure_flags(arch: Arch) -> tuple[str, ...]:
+    """`--host` is the machine clang is told (`tools/ccarch.py`), which is what
+    makes bash's configure treat this as a cross build."""
+    return (f"--host={arch.clang_target}", "--disable-nls", "--without-bash-malloc")
+
 
 # The host tools (mkbuiltins, mksignames, ...) are built by CC_FOR_BUILD against
 # buildconf.h, which has no HAVE_STDBOOL_H: bashansi.h then writes
@@ -88,6 +114,11 @@ def cc_for_build() -> str:
         "bash's host tools (CC_FOR_BUILD)")
 
 
+def cc_for_target(arch: Arch) -> str:
+    """The `cc` the target build calls: the port's wrapper, told which arch."""
+    return f"python3 {TOOLS / 'cc-minix.py'} {arch.name}"
+
+
 def note(msg: str) -> None:
     print(f"[bash] {msg}", flush=True)
 
@@ -99,17 +130,6 @@ def die(msg: str):
 def run(cmd: list[str], **kwargs) -> int:
     print("+", " ".join(str(c) for c in cmd), file=sys.stderr, flush=True)
     return subprocess.run([str(c) for c in cmd], **kwargs).returncode
-
-
-def host_triple() -> str:
-    try:
-        out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError) as e:
-        die(f"cannot run `rustc -vV` to detect the host triple: {e}")
-    for line in out.stdout.splitlines():
-        if line.startswith("host: "):
-            return line[6:].strip()
-    die("`rustc -vV` did not report a host triple")
 
 
 def host_stage1_rustc() -> pathlib.Path:
@@ -214,7 +234,7 @@ def have_commit(git: list[str], commit: str) -> bool:
 
 # ------------------------------------------------------------------ libc
 
-def build_libc() -> None:
+def build_libc(arch: Arch) -> None:
     """Build minix-libc with this host's stage1.
 
     The rlib records the `core` it was built against, so a host that links with
@@ -224,13 +244,12 @@ def build_libc() -> None:
     delete the rlib first and rebuild, in this order, with no build from another
     host in between.
     """
-    rlibs = list((ROOT / "target" / TARGET / "release" / "deps").glob("libminix_libc-*.rlib"))
-    for rlib in rlibs:
+    for rlib in arch.libc_deps.glob("libminix_libc-*.rlib"):
         rlib.unlink()
     rustc = host_stage1_rustc()
-    note(f"minix-libc with {rustc}")
+    note(f"minix-libc for {arch.triple} with {rustc}")
     env = {**os.environ, "RUSTC": str(rustc)}
-    if run(["cargo", "build", "-p", "minix-libc", "--target", TARGET, "--release"],
+    if run(["cargo", "build", "-p", "minix-libc", "--target", arch.triple, "--release"],
            cwd=ROOT, env=env) != 0:
         die("building minix-libc failed")
     note("minix-libc rebuilt with this host's stage1")
@@ -238,23 +257,25 @@ def build_libc() -> None:
 
 # ------------------------------------------------------------------ configure + make
 
-def configured_for() -> str:
-    return BUILD_MARKER.read_text(encoding="utf-8").strip() if BUILD_MARKER.is_file() else ""
+def configured_for(arch: Arch) -> str:
+    marker = build_marker(arch)
+    return marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
 
 
-def configure(force: bool) -> None:
+def configure(arch: Arch, force: bool) -> None:
     """Run bash's configure out-of-tree, if the tree is not configured for the pin."""
+    build = build_dir(arch)
     want = os.environ.get("MINIXRS_BASH_COMMIT", BASH_COMMIT)
-    if not force and (BUILD / "config.status").is_file() and configured_for() == want:
+    if not force and (build / "config.status").is_file() and configured_for(arch) == want:
         note("configure: reusing the existing config.status")
         return
-    if force and BUILD.is_dir():
-        shutil.rmtree(BUILD)
-    BUILD.mkdir(parents=True, exist_ok=True)
+    if force and build.is_dir():
+        shutil.rmtree(build)
+    build.mkdir(parents=True, exist_ok=True)
 
     env = {
         **os.environ,
-        "CC": f"python3 {TOOLS / 'cc-minix.py'}",
+        "CC": cc_for_target(arch),
         "CC_FOR_BUILD": cc_for_build(),
         "CFLAGS": CFLAGS,
     }
@@ -263,51 +284,73 @@ def configure(force: bool) -> None:
         env["LD"] = str(lld)
     note(f"CC={env['CC']}  CC_FOR_BUILD={env['CC_FOR_BUILD']}  LD={env.get('LD', '-')}")
 
-    note(f"configure {SRC}/configure {' '.join(CONFIGURE_FLAGS)}")
-    with open(CONFIGURE_LOG, "w", encoding="utf-8") as log:
-        rc = run([str(SRC / "configure"), *CONFIGURE_FLAGS], cwd=BUILD, env=env,
+    flags = configure_flags(arch)
+    note(f"configure {SRC}/configure {' '.join(flags)}")
+    with open(configure_log(arch), "w", encoding="utf-8") as log:
+        rc = run([str(SRC / "configure"), *flags], cwd=build, env=env,
                  stdout=log, stderr=subprocess.STDOUT)
     if rc != 0:
-        die(f"configure failed (rc={rc}); tail of {CONFIGURE_LOG}:\n"
-            f"{log_tail(CONFIGURE_LOG)}")
-    BUILD_MARKER.write_text(want, encoding="utf-8")
-    note(f"configure ok (log: {CONFIGURE_LOG.name})")
+        die(f"configure failed (rc={rc}); tail of {configure_log(arch)}:\n"
+            f"{log_tail(configure_log(arch))}")
+    build_marker(arch).write_text(want, encoding="utf-8")
+    note(f"configure ok (log: {configure_log(arch).name})")
 
 
-def make(jobs: int) -> None:
+def make(arch: Arch, jobs: int) -> None:
     """Link bash. The relink is forced: make compares the shell against its
     objects, and the rlib is a prerequisite of none of them, so a libc change
     alone leaves every object newer and make reports success without relinking
     (C_BUILD.md, trap 2)."""
-    previous = BUILD / "bash"
+    build = build_dir(arch)
+    previous = build / "bash"
     if previous.exists():
         previous.unlink()
-    env = {**os.environ, "CC": f"python3 {TOOLS / 'cc-minix.py'}"}
+    env = {**os.environ, "CC": cc_for_target(arch)}
     note(f"make -j{jobs}")
-    with open(MAKE_LOG, "w", encoding="utf-8") as log:
-        rc = run(["make", f"-j{jobs}", f"CC_FOR_BUILD={cc_for_build()}"], cwd=BUILD,
+    with open(make_log(arch), "w", encoding="utf-8") as log:
+        rc = run(["make", f"-j{jobs}", f"CC_FOR_BUILD={cc_for_build()}"], cwd=build,
                  env=env, stdout=log, stderr=subprocess.STDOUT)
     if rc != 0:
-        die(f"make failed (rc={rc}); tail of {MAKE_LOG}:\n{log_tail(MAKE_LOG)}")
+        die(f"make failed (rc={rc}); tail of {make_log(arch)}:\n{log_tail(make_log(arch))}")
 
 
 # ------------------------------------------------------------------ publish
 
-def publish() -> None:
-    built = BUILD / "bash"
+def elf_machine(data: bytes) -> int:
+    """`e_machine` out of an ELF64 header (`e_ident[18..20]`, little-endian)."""
+    return int.from_bytes(data[18:20], "little")
+
+
+def publish(arch: Arch) -> None:
+    built = build_dir(arch) / "bash"
     if not built.is_file():
         die(f"{built} was not produced — make ran but linked nothing")
-    data = built.read_bytes()[:4]
-    if data != b"\x7fELF":
-        die(f"{built} is not an ELF ({data!r})")
+    data = built.read_bytes()[:64]
+    if data[:4] != b"\x7fELF":
+        die(f"{built} is not an ELF ({data[:4]!r})")
+    machine = elf_machine(data)
+    if machine != arch.e_machine:
+        die(f"{built} is ELF machine 0x{machine:x}, not {arch.triple} "
+            f"(0x{arch.e_machine:x}) — the build did not use the target's flags")
     size = built.stat().st_size
     if size < 200_000:
         die(f"{built} is {size} bytes, which is too small to be the shell")
-    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(built, ARTIFACT)
-    note(f"wrote {ARTIFACT} ({size} bytes)")
-    note("boot it: just test-bash  (or inject it with "
-         f"MINIXFS_EXTRA=/bin/bash={ARTIFACT.relative_to(ROOT)} and boot an image)")
+    out = artifact(arch)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(built, out)
+    note(f"wrote {out} ({size} bytes, {arch.triple})")
+    just = "x86" if arch.name == "x86" else arch.name
+    note(f"boot it: just test-bash {just}  (or inject it with "
+         f"MINIXFS_EXTRA=/bin/bash={out.relative_to(ROOT)} and boot an image)")
+
+
+def build(arch: Arch, force: bool, jobs: int) -> int:
+    fetch_source(force)
+    build_libc(arch)
+    configure(arch, force)
+    make(arch, jobs)
+    publish(arch)
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -328,6 +371,12 @@ def main(argv: list[str]) -> int:
             jobs = int(value)
             continue
         rest.append(arg)
+    if rest and rest[0] == "all":
+        arches = list(ALL)
+        rest = rest[1:]
+    else:
+        arch, rest = resolve_argv(rest)
+        arches = [arch]
     if rest:
         die(f"unknown argument {rest[0]!r} (see --help)")
 
@@ -339,11 +388,10 @@ def main(argv: list[str]) -> int:
         die(f"the build needs {', '.join(missing)} on PATH")
     cc_for_build()  # fail here rather than inside configure
 
-    fetch_source(force)
-    build_libc()
-    configure(force)
-    make(jobs)
-    publish()
+    for arch in arches:
+        rc = build(arch, force, jobs)
+        if rc != 0:
+            return rc
     return 0
 
 

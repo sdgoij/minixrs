@@ -86,6 +86,17 @@ trap_vector:
     csrs    sstatus, t0
     csrr    t0, scause
     sd      t0, 272(sp)
+    # The faulting address too. `stval` is the one fault CSR that is not part of
+    # the interrupted context — nothing restores it — so a handler that reads it
+    # live can be handed a *different* trap's value: a nested trap (a tick taken
+    # while this handler runs, with SIE=1 for a U-mode trap) overwrites it, and
+    # the handler then forwards that other address to VM, which finds no region
+    # for it and kills an innocent process. Saving it here makes it this trap's,
+    # exactly as `scause` above is. The trap frame's bytes 288..296 were its only
+    # unused slot — the same offsets in `hal.rs`'s sigframe are a *different*
+    # 296-byte buffer, built on the user's stack — so the size is unchanged.
+    csrr    t0, stval
+    sd      t0, 288(sp)
 
     # Fix-ups: the interrupted SP (from the spill) into slot 16 (and 280 for
     # debug), and the interrupted t0 (from sscratch) into slot 40.
@@ -124,6 +135,33 @@ trap_vector:
     ld      t0, 256(sp)
     csrw    sepc, t0
     ld      t0, 264(sp)
+    # A return to user mode (SPP=0) gets the sstatus a user process runs with,
+    # instead of whatever the frame holds: interrupts on after this `sret`
+    # (`sret` copies SPIE to SIE) and the FP unit enabled. That is
+    # `PSL_USERSET`, the same value every entry path writes —
+    # `arch_proc_init` / `set_initial_regs` / `exec_init_regs` in `hal.rs` — and
+    # its comment has why the FP bit has to be `Dirty`.
+    #
+    # Why the frame cannot be trusted for it: a process was measured running with
+    # the frame's copy at zero — FP unit off, interrupts off — while its own saved
+    # `p_reg` held `PSL_USERSET`, and the
+    # hook in `kernel-boot/src/riscv64.rs` never sees a `CONTEXT_SET` translation
+    # for the process that exec'd. The value has to survive fork, exec and every
+    # syscall return; defining it here, where both entries meet, is the one place
+    # that cannot be skipped. With the FP unit off, the first floating-point
+    # instruction a process executes is an illegal instruction — rustc spills
+    # `fs0`-`fs2` in the prologue of any function that touches a `double`, so a C
+    # program reached one immediately — and the trap handler used to answer that
+    # by halting the machine in silence.
+    #
+    # The rest of `sstatus` is left to the hardware: UXL reflects the current
+    # XLEN and SD is derived. User mode cannot write this register, so there is
+    # nothing for this to lose.
+    srli    t1, t0, 8
+    andi    t1, t1, 1
+    bnez    t1, 1f
+    li      t0, {userset}
+1:
     csrw    sstatus, t0
 
     # Re-arm sscratch for the next trap: the U-mode kernel stack. (S-mode
@@ -168,7 +206,8 @@ trap_vector:
     ld      sp,   16(sp)
 
     sret
-"#
+"#,
+    userset = const crate::psl::PSL_USERSET,
 );
 
 /// Get the address of the trap vector for stvec.

@@ -1314,7 +1314,9 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
         if arg_off + len + 1 >= cmd_path.len() {
             break;
         }
-        cmd_path[arg_off..arg_off + len].copy_from_slice(tok);
+        // `len` is `tok.len()` clamped to the space one argument may occupy,
+        // so the copy is over the clamp: `tok` itself can be longer.
+        cmd_path[arg_off..arg_off + len].copy_from_slice(&tok[..len]);
         cmd_path[arg_off + len] = 0;
         argv_buf[i] = unsafe { cmd_path.as_ptr().add(arg_off) };
         arg_off += len + 1;

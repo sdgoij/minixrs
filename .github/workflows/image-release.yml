@@ -1,6 +1,12 @@
 # Builds each arch's single-file boot artifact and publishes all three as one
 # release, so downloading an ELF and pointing QEMU at it is the whole setup.
 #
+# The published images carry the bash that `ci.yml`'s `bash` job built for the same arch
+# (its `bash-<arch>` artifact, injected here through `MINIXFS_EXTRA`), so the release ships
+# a shell for scripts as well as the minix shell. That job is a `needs` of the `release` job
+# that calls this file, so the artifacts exist before these jobs run - the wait is the same
+# shape as the arch jobs' `needs: stage1`.
+#
 # These are ELFs because that is what `-kernel` loads - the format is the point,
 # not an implementation detail. A raw disk image or an ISO is a different track
 # (real hardware; `tools/mbr.S` + `stage2.S` + `mkimg.rs`, not wired up) rather
@@ -96,10 +102,24 @@ jobs:
       - name: Install the prebuilt stage1
         run: just fetch-stage1 ${{ matrix.arch }}
 
+      # The `bash` job in `ci.yml` built this arch's shell and published it as the
+      # `bash-<arch>` artifact; the `release` job that calls this file `needs` that job,
+      # so it exists by the time this one runs. Downloading it to the path the recipes
+      # expect lets the build below inject `/bin/bash` into the published image.
+      - uses: actions/download-artifact@v8
+        with:
+          name: bash-${{ matrix.arch }}
+          path: target/bash/${{ matrix.arch }}
+
       # 120 s against a dev machine's 15 s: it is the runner's emulation speed, not
       # a budget the image has to meet. A boot that is actually broken still fails
       # here, only later.
       - name: Build and boot the artifact
+        env:
+          # The same injection `just test-bash` uses, so the published image is the one
+          # the `bash` job booted with `/bin/bash` in place. `scenario.tsv` still runs in
+          # the minix shell - its `#` prompt is not replaced by an installed bash.
+          MINIXFS_EXTRA: /bin/bash=target/bash/${{ matrix.arch }}/bash
         run: just image ${{ matrix.arch }} 120
 
       # Named without the version: the publish job is the only place that knows
@@ -125,6 +145,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          # Only the images: the `bash` job's `bash-<arch>` artifacts live in the same run,
+          # and merging those into `images/` would leave shells beside the ELFs.
+          pattern: minix-*.elf
           merge-multiple: true
           path: images
 
@@ -187,8 +210,9 @@ jobs:
             "MINIX/Rust boot images for ${subject}." \
             "" \
             "One self-contained ELF per arch: the initramfs and the MinixFS root image are" \
-            "embedded, so QEMU needs no disk attached. Each was booted by the run that" \
-            "built it - it fails unless the window server comes up - and each needs QEMU 11" \
+            "embedded, so QEMU needs no disk attached. Each carries GNU bash" \
+            "(\`/bin/bash\`, built for the arch by the same run) and was booted by that run -" \
+            "it fails unless the window server comes up - and each needs QEMU 11" \
             "or newer, the floor the test suites enforce as well." \
             "" \
             "Check the download with \`sha256sum -c SHA256SUMS\`, then boot it with the" \

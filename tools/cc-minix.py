@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A `cc` for x86_64-pc-minix, for C projects that drive a compiler themselves.
+"""A `cc` for x86_64-, riscv64- and aarch64-minix, for C projects that drive a
+compiler themselves.
 
 bash is one: `configure` compiles and links probe programs, `make` invokes the
 compiler once per object and again to link the shell. This is the command those
@@ -7,13 +8,15 @@ steps reach, assembled from the two halves the port already has:
 
   * **compile** — clang with the port's headers, hermetic and freestanding.
     `tools/ccflags.py` has why none of those flags is optional.
-  * **link** — the fork's stage1 rustc with `tools/crt0-x86_64.S` and the
-    minix-libc rlib, which is the same pair `tools/build-c-hello.py` assembles
-    by hand for `/bin/helloc`.
+  * **link** — the fork's stage1 rustc with the arch's `tools/crt0-<arch>.S`
+    and the minix-libc rlib, which is the same pair `tools/build-c-hello.py`
+    assembles by hand for `/bin/helloc`.
 
-Point a build at it by name, exactly as a cross build would:
+Point a build at it by name, exactly as a cross build would, naming the target
+first where it is not x86_64 (the default, so an existing `CC` keeps working):
 
     CC="python3 <repo>/tools/cc-minix.py"
+    CC="python3 <repo>/tools/cc-minix.py riscv64"
 
 `tools/build-bash.py` does that. The build host has to be POSIX (the rlib, the
 stage1 and clang must be the same host's): see `C_BUILD.md`.
@@ -29,25 +32,15 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+from ccarch import Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags, link_passthrough  # noqa: E402
 from lld import find_lld, host_triple  # noqa: E402
 
-TARGET = "x86_64-pc-minix"
-CRT0_S = ROOT / "tools" / "crt0-x86_64.S"
 LD_SCRIPT = ROOT / "tools" / "minix-user.ld"
-WORK = ROOT / "target" / "cc-minix"
-LIBC_DEPS = ROOT / "target" / TARGET / "release" / "deps"
 
-# `--target=x86_64-unknown-none` is what tools/c-include's headers are written
-# for; the minix triple is what the rlib and crt0 are built for. They are the
-# same machine, and the link step below is what makes that explicit.
-BASE_CFLAGS = [
-    "--target=x86_64-unknown-none",
-    "-ffreestanding",
-    "-mno-red-zone",
-    "-fno-stack-protector",
-    "-fno-pic",
-]
+# Scratch objects, per arch: two arches' objects in one directory would be
+# linked into each other's executable.
+WORK_ROOT = ROOT / "target" / "cc-minix"
 
 # The rustc link wants a crate root; this one pulls the libc in and is otherwise
 # empty, the same stub tools/build-c-hello.py writes.
@@ -95,7 +88,7 @@ def find_stage1_rustc() -> pathlib.Path | None:
     return None
 
 
-def newest_libc_rlib() -> pathlib.Path | None:
+def newest_libc_rlib(arch: Arch) -> pathlib.Path | None:
     """The minix-libc rlib to link against.
 
     Newest by mtime, because more than one can sit in `deps/`: the rlib has two
@@ -104,7 +97,7 @@ def newest_libc_rlib() -> pathlib.Path | None:
     `tools/build-bash.py` deletes the stale one and rebuilds with this host's
     stage1, which is what makes "newest" the right one to take.
     """
-    rlibs = list(LIBC_DEPS.glob("libminix_libc-*.rlib"))
+    rlibs = list(arch.libc_deps.glob("libminix_libc-*.rlib"))
     return max(rlibs, key=lambda p: p.stat().st_mtime) if rlibs else None
 
 
@@ -138,11 +131,14 @@ def split_args(argv: list[str]) -> tuple[list[str], list[str], str | None]:
 
 
 def main(argv: list[str]) -> int:
+    # A leading target name (or triple) selects the arch; without one this is
+    # the x86_64 `cc` it has always been.
+    arch, argv = resolve_argv(argv)
     if not argv:
         print("cc-minix: no arguments", file=sys.stderr)
         return 1
     if len(argv) == 1 and argv[0] in VERSION_PROBES:
-        print("cc-minix: clang for x86_64-unknown-none, linked by the minix "
+        print(f"cc-minix: clang for {arch.clang_target}, linked by the minix "
               "fork's stage1 rustc")
         return 0
 
@@ -158,10 +154,12 @@ def main(argv: list[str]) -> int:
         return 1
 
     flags, inputs, out = split_args(argv)
-    WORK.mkdir(parents=True, exist_ok=True)
+    cflags = arch.base_cflags()
+    work = WORK_ROOT / arch.name
+    work.mkdir(parents=True, exist_ok=True)
 
     if any(a in COMPILE_ONLY for a in argv):
-        cmd = ["clang", *BASE_CFLAGS, *compile_flags(), *flags, *inputs]
+        cmd = ["clang", *cflags, *compile_flags(), *flags, *inputs]
         if out:
             cmd += ["-o", out]
         return run(cmd)
@@ -177,27 +175,28 @@ def main(argv: list[str]) -> int:
         if src.endswith((".o", ".a")):
             objects.append(src)
             continue
-        obj = WORK / (pathlib.Path(src).stem + ".o")
-        if run(["clang", *BASE_CFLAGS, *compile_flags(), *flags, "-c", src,
+        obj = work / (pathlib.Path(src).stem + ".o")
+        if run(["clang", *cflags, *compile_flags(), *flags, "-c", src,
                 "-o", str(obj)]) != 0:
             return 1
         objects.append(str(obj))
 
-    crt0 = WORK / "crt0.o"
-    if run(["clang", *BASE_CFLAGS, "-c", str(CRT0_S), "-o", str(crt0)]) != 0:
+    crt0 = work / "crt0.o"
+    if run(["clang", *cflags, "-c", str(arch.crt0), "-o", str(crt0)]) != 0:
         return 1
 
-    rlib = newest_libc_rlib()
+    rlib = newest_libc_rlib(arch)
     if rlib is None:
-        print("cc-minix: no minix-libc rlib — run `just build-bash` (it builds one "
-              "with this host's stage1) or `cargo build -p minix-libc --target "
-              f"{TARGET} --release`", file=sys.stderr)
+        print(f"cc-minix: no minix-libc rlib for {arch.triple} — run `just "
+              f"build-bash {arch.name}` (it builds one with this host's stage1) "
+              f"or `cargo build -p minix-libc --target {arch.triple} --release`",
+              file=sys.stderr)
         return 1
 
-    stub = WORK / "link_stub.rs"
+    stub = work / "link_stub.rs"
     stub.write_text(STUB, encoding="utf-8")
 
-    cmd = [str(rustc), "--crate-type", "bin", "--target", TARGET, "--edition", "2024",
+    cmd = [str(rustc), "--crate-type", "bin", "--target", arch.triple, "--edition", "2024",
            "-C", f"link-arg=-T{LD_SCRIPT}", "-C", f"linker={lld}",
            "-C", f"link-arg={crt0}"]
     for obj in objects:
@@ -206,7 +205,7 @@ def main(argv: list[str]) -> int:
     # executable has no archives in it and every symbol in them is undefined.
     for arg in link_passthrough(argv):
         cmd += ["-C", f"link-arg={arg}"]
-    cmd += ["--extern", f"minix_libc={rlib}", "-L", f"dependency={LIBC_DEPS}",
+    cmd += ["--extern", f"minix_libc={rlib}", "-L", f"dependency={arch.libc_deps}",
             "-o", out if out else "a.out", str(stub)]
     return run(cmd)
 

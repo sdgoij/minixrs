@@ -40,6 +40,15 @@ pub fn read_time() -> u64 {
 /// Uses SSTC stimecmp directly (QEMU virt supports this).
 /// Returns the actual interval in ticks that was programmed.
 ///
+/// Writing `stimecmp` only makes the timer *pending*: a supervisor timer
+/// interrupt is taken only with `sie.STIE` set, so the deadline alone lapses in
+/// silence. Nothing else in the port sets `sie` at all, which is why a riscv64
+/// guest reached its shell with a clock that never advanced — no tick, no
+/// virtual timer, no `alarm`, nothing preempted, and the boot-progress watch
+/// (`kernel::bootwatch`, which counts ticks) never fired. `sstatus.SIE` is the
+/// port's per-mode switch and is unaffected: the kernel runs with it off and
+/// user mode with it on, so the tick lands in whichever window is open.
+///
 /// # Safety
 ///
 /// Must be called once during boot, with interrupts disabled.
@@ -51,6 +60,12 @@ pub unsafe fn init_timer(interval_hz: u64) -> u64 {
     // Write stimecmp directly (SSTC extension, CSR 0x14D)
     unsafe {
         core::arch::asm!("csrw 0x14D, {next}", next = in(reg) next, options(nomem, nostack));
+        // …and enable it in `sie`, which is the half that was missing.
+        core::arch::asm!(
+            "csrs sie, {v}",
+            v = in(reg) crate::psl::sie::STIE,
+            options(nomem, nostack)
+        );
     }
     NEXT_INTERVAL.store(interval_ticks, Ordering::Relaxed);
     interval_ticks

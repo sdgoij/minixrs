@@ -473,6 +473,14 @@ pub unsafe extern "C" fn wcstold(s: *const WChar, endptr: *mut *mut WChar) -> f6
     )
 }
 
+/// On the 64-bit targets `long double` is `double`, so this *is* `wcstod` (see
+/// `strtold` in c_stdlib.rs for why the x86_64 form is asm).
+#[cfg(all(target_os = "minix", not(target_arch = "x86_64")))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstold(s: *const WChar, endptr: *mut *mut WChar) -> f64 {
+    unsafe { wcstod(s, endptr) }
+}
+
 /// Wide printf: narrow the format, format through `vsnprintf`, widen back.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]

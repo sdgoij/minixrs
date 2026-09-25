@@ -1286,6 +1286,81 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    tested in it never runs — see the testing notes); `bkl` is an empty no-op,
    which is what `BKL_LOCK` is on every other arch while SMP is off
    (`arch-x86_64/src/spinlock.rs` compiles the primitives out).
+6. **riscv64 ticked no clock at all, and its C heap leaked (2026-09-25).**
+   Found by driving bash in a riscv64 guest: three defects, all fixed, plus a
+   residual flake that is not.
+   *The timer was armed but never enabled.* `clint::init_timer` wrote `stimecmp`
+   and nothing ever set `sie.STIE`, so the deadline lapsed in silence — no clock
+   tick, no virtual timer, no `alarm`, nothing preempted, and
+   `kernel::bootwatch` (500 ticks of slack for the userspace boot phase) never
+   reached its deadline, which is why `just test-boot riscv64` failed. Compounding
+   it, the per-tick accounting sat *behind* the callback's SPP check, so it ran
+   only for a tick taken in U-mode — and every tick this port takes arrives in
+   S-mode (measured: sampling the 1st, 100th, 1000th and 10000th tick). The
+   accounting now runs for both, and the SPP check still decides whether the tick
+   may switch. Verified: `just test-boot riscv64` prints `ALL TESTS PASSED`,
+   where before it stopped at `phase 1 complete; releasing init`.
+   *The C heap leaked.* `realloc` took a block's size from the header at the
+   *user* pointer instead of `HDR` bytes below it, so a grow that read high
+   returned the same too-small block and the caller overran it; and `malloc`'s
+   extension path placed a fresh block at a page-rounded `sbrk` address while
+   leaving the free-list walk unable to cross the gap in front of it, so every
+   extension leaked its page (`free`'s O(heap) walk then turned the leak into a
+   crawl). Measured in the guest: a probe growing one buffer to 100000 bytes
+   prints `REALLOC ok`; a 300000-cycle varying-size churn probe goes from hanging
+   to `CHURN ok 300000`; `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo
+   S=$s'` goes from killed by SIGSEGV every time to `S=8002000`.
+   *The last of it was a trap-state bug, not a C one.* After those fixes a
+   `bash -c` step still died in about 5-10% of invocations: the child ended as a
+   signal (139 from the shell's `waitpid_status`) and VM's trace of the kill said
+   `pf-noregion 0x0` with error code 0x14 — a user *instruction* fetch at address
+   zero, which reads as a call through a null function pointer. It was not one.
+   The riscv64 trap handler read `stval` **live**, and `stval` is the one fault
+   CSR that is not part of the interrupted context: the trap entry saves `sepc`,
+   `sstatus` and `scause` into the frame but not `stval`, and the architecture
+   lets a trap that is not a load/store/instruction fault — an interrupt, and
+   this port takes its ticks *inside* a U-mode trap's handler — write 0 there.
+   Measured with the entry's value kept alongside: the live CSR read 0 while the
+   saved one held the real address (`cause=0xc`, `0x103257e`, inside bash's own
+   text). VM was therefore handed address 0, found no region covering it, and
+   killed a process that had done nothing wrong. `trap_asm.rs` now saves `stval`
+   into the trap frame's unused `288..296` slot (the same offsets in `hal.rs` are
+   the *sigframe*, a different 296-byte buffer on the user's stack), and `trap.rs`
+   reads the fault address from the frame, as it already did `scause`/`sepc`/
+   `sstatus`. Verified: 60 consecutive `bash -c` invocations in the prompt-paced
+   census with zero losses, `just test-bash riscv64` 3/3 green, and
+   `test-qemu`/`test-boot riscv64` plus the workspace suite green. Two things to
+   carry forward: the timer fix above is what took the arithmetic step from
+   failing two runs in three to not failing at all, and the zero that VM saw was
+   a plausible-looking NULL dereference until the frame's copy showed the real
+   address — the fault *address* a handler forwards is as much state as the
+   cause.
+
+   *The FP image, and the one measurement the first probe missed.* The trap frame
+   saves no `f`-register and the port kept no per-process image, so with
+   `PSL_USERSET`'s `FS=Dirty` (the registers, not the hardware's lazy
+   `FS=Off`-and-trap path) two processes each using floating point could see each
+   other's registers across a switch. Measured: a probe that names `fs0`, holds a
+   value in it across a `getpid()` and checks it afterwards reported `FPPROBE
+   parent bad=40000` and `FPPROBE child bad=40000` — every round, both processes —
+   while the same probe with the `fork` removed reported `FPONE bad=0`, so the loss
+   needed the other process to have run, not merely a trap. A first version of the
+   probe passed instead: `register double held asm("fs0")` around the call compiled
+   to `fsd fs0` before it and `fld fs0` after it, giving the value a stack home the
+   compiler reloaded, so the register never really held it; the set, the call and
+   the check are one `asm` block now. The fix saves at the *switch* rather than the
+   entry, because the kernel executes no floating point itself — nothing between a
+   process's last user instruction and the switch can disturb its registers — so
+   `riscv_post_syscall`, `riscv_timer_callback` and the boot `switch_to_user`
+   (`crates/kernel-boot/src/riscv64.rs`) call `kernel::fpu::save` on the process
+   being left and `restore` on the one being entered. `fork` saves the parent
+   before copying the image to the child, `exec` zeroes it, and `restore` writes
+   `fcsr` (rounding mode and accrued flags) as well as `f0`-`f31`, so neither leaks
+   either; `fcsr` lives past the 256 bytes of registers in the one-page area
+   (`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only.
+   Verified: the probe reports `FPPROBE ok` (both `bad=0`), 80/80 steps in the
+   prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
+   `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
 
 ---
 
@@ -1560,7 +1635,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 - **bash is a committed build with a gate (2026-09-25).** `tools/build-bash.py`
   fetches bash at a pinned upstream commit, rebuilds `minix-libc` with this
   host's stage1, configures against `tools/c-include`, links with
-  `tools/cc-minix.py` and publishes `target/bash/bash`. On Windows the script
+  `tools/cc-minix.py` and publishes `target/bash/<arch>/bash`. On Windows the script
   re-enters WSL by itself (`MINIX_WSL_DISTRO` picks the distribution), because
   the stage1, the rlib and clang all have to be the same host's. `just test-bash`
   injects the result as `/bin/bash` — still not a `BOOT_BINS` entry, so an image
@@ -1568,7 +1643,10 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `tools/smoke/bash.tsv` in the guest: six steps, all green (the banner, `-c`,
   arithmetic, a loop, a redirect read back through a second process, an external
   command, which is bash's fork+exec path, and `$PWD` from its own startup).
-  CI's `bash` job runs that pair and is in the release's `needs`, so a C surface
+  CI's `bash` job runs that pair for each of the three arches and publishes the
+  shell as the `bash-<arch>` artifact; the release workflow downloads it and
+  injects the same `/bin/bash` into the image it publishes, so a released image
+  carries a shell for scripts. The job is in the release's `needs`, so a C surface
   that builds bash but breaks it blocks a release.
 
   Both traps this route has are handled by the tools rather than by whoever runs

@@ -238,8 +238,11 @@ pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, argc: u
         write_frame_field(frame, 16, sp); // sp (x2)
         write_frame_field(frame, 80, argc); // a0 (x10)
         write_frame_field(frame, 88, argv); // a1 (x11)
-        // sstatus = SPIE | FS_INITIAL (SIE=0, SPIE=1, SPP=0)
-        write_frame_field(frame, 248, 0x00000220);
+        // `PSL_USERSET`, like the other entry paths: an `exec`ed process differs
+        // from a spawned one only in what its registers hold, and the FP unit has
+        // to be enabled for both (that constant's comment has the illegal
+        // instruction a wrong value here produced).
+        write_frame_field(frame, 248, crate::psl::PSL_USERSET);
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -317,18 +320,14 @@ pub unsafe fn set_initial_regs(frame: &mut [u8; 256], entry: u64, sp: u64, arg: 
     // a0 = arg (x10 at offset 80): the spawned-thread entry (thread_start)
     //     receives its ThreadInit box pointer here. Exec/boot entries read
     //     argc/argv from the stack and ignore a0.
-    // sstatus = SPIE | FS_INITIAL (SIE=0, SPIE=1, SPP=0, FS=initial)
+    // sstatus = PSL_USERSET (SIE=0, SPIE=1, SPP=0, FP unit enabled)
     // SIE=0 is CRITICAL: prevents supervisor interrupts from firing between
     // `csrw sstatus` and `sret` in switch_to_user.
     unsafe {
         write_frame_field(frame, 0, entry); // sepc in x0 slot
         write_frame_field(frame, 16, sp); // sp (x2 at offset 16)
         write_frame_field(frame, 80, arg); // a0 (x10) = arg
-        write_frame_field(
-            frame,
-            248,
-            crate::psl::sstatus::SPIE | crate::psl::sstatus::FS_INITIAL,
-        ); // sstatus: SIE=0, SPIE=1
+        write_frame_field(frame, 248, crate::psl::PSL_USERSET);
     }
 }
 
@@ -455,11 +454,8 @@ pub unsafe fn arch_proc_init(
     unsafe {
         write_frame_field(frame, 0, entry); // sepc = entry point
         write_frame_field(frame, 16, stack); // sp = user stack
-        write_frame_field(
-            frame,
-            248,
-            crate::psl::sstatus::SPIE | crate::psl::sstatus::FS_INITIAL,
-        ); // sstatus: SIE=0, SPIE=1, SPP=0
+        write_frame_field(frame, 248, crate::psl::PSL_USERSET);
+        // sstatus: SIE=0, SPIE=1, SPP=0, FP unit enabled
     }
 }
 
