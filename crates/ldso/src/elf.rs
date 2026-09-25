@@ -25,6 +25,7 @@ pub const PT_DYNAMIC: u32 = 2;
 pub const PT_INTERP: u32 = 3;
 pub const PT_NOTE: u32 = 4;
 pub const PT_PHDR: u32 = 6;
+pub const PT_TLS: u32 = 7;
 pub const PT_GNU_STACK: u32 = 0x6474_e551;
 
 pub const PF_X: u32 = 1;
@@ -42,12 +43,15 @@ pub const DT_RELASZ: i64 = 8;
 pub const DT_RELAENT: i64 = 9;
 pub const DT_STRSZ: i64 = 10;
 pub const DT_SYMENT: i64 = 11;
+pub const DT_INIT: i64 = 12;
 pub const DT_SONAME: i64 = 14;
 pub const DT_REL: i64 = 17;
 pub const DT_RELSZ: i64 = 18;
 pub const DT_RELENT: i64 = 19;
 pub const DT_PLTREL: i64 = 20;
 pub const DT_JMPREL: i64 = 23;
+pub const DT_INIT_ARRAY: i64 = 25;
+pub const DT_INIT_ARRAYSZ: i64 = 27;
 pub const DT_GNU_HASH: i64 = 0x6fff_fef5;
 pub const DT_RELACOUNT: i64 = 0x6fff_fff9;
 pub const DT_RELCOUNT: i64 = 0x6fff_fffa;
@@ -237,6 +241,20 @@ impl<'a> Elf<'a> {
         (0..self.e_phnum() as usize)
             .filter_map(|i| self.phdr(i))
             .find(|p| p.p_type == PT_DYNAMIC)
+    }
+
+    /// Whether the image carries a `PT_TLS` segment.
+    ///
+    /// The port's TLS is a *single module's*: the linker script reserves
+    /// `__tls_start`/`__tdata_end`/`__tls_end` and the C runtime's `init_tls` copies
+    /// that one block into the thread's storage. A shared object with a thread-local
+    /// of its own would need a block per module, so the loader refuses one rather
+    /// than let its accesses read another module's storage (D8 of
+    /// `DYNAMIC_LINKING.md`).
+    pub fn has_tls(&self) -> bool {
+        (0..self.e_phnum() as usize)
+            .filter_map(|i| self.phdr(i))
+            .any(|p| p.p_type == PT_TLS)
     }
 
     /// The file offset a link-time virtual address lives at, from the `PT_LOAD`
@@ -444,6 +462,17 @@ mod tests {
         assert_eq!(dynp.p_type, PT_DYNAMIC);
         assert_eq!(e.dynamic_phdr(), Some(dynp));
         assert_eq!(e.phdr(2), None);
+    }
+
+    #[test]
+    fn tls_is_reported_from_the_program_headers() {
+        let b = build();
+        assert!(!Elf::new(&b).unwrap().has_tls(), "no PT_TLS in the image");
+
+        // The same image, with its first program header made a PT_TLS.
+        let mut b = build();
+        b[PHOFF..PHOFF + 4].copy_from_slice(&PT_TLS.to_le_bytes());
+        assert!(Elf::new(&b).unwrap().has_tls());
     }
 
     #[test]

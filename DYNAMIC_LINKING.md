@@ -1,6 +1,6 @@
 # Dynamic linking for minixrs — implementation proposal
 
-Status: **proposal — design settled, Phases 0–1 built** (on `feature/ldso`). Every claim
+Status: **proposal — design settled, Phases 0–2 built** (on `feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
 built* record where the implementation revised the draft.
@@ -435,19 +435,58 @@ offset with the rest of the image unchanged; the base allocator and the extent; 
 refusal paths (unsupported type, unknown symbol, a target outside the image, a table size
 that is not whole entries).
 
-### Phase 2 — coverage, TLS, fork/exec
+### Phase 2 — coverage, TLS, fork/exec — **done, less `LD_LIBRARY_PATH` and auxv**
 
-- Full reloc/symbol coverage (`COPY` — reachable the moment a non-PIE program names a
-  DSO's data, and refused by name today — plus weak/undefined symbols and
-  `DT_INIT_ARRAY` ordering), following a DSO's own `DT_NEEDED` transitively, search path +
-  `LD_LIBRARY_PATH`, `AT_PAGESZ`.
-- Static TLS across modules, or the D8 rejection if not yet implemented.
-- `fork` after load (should already work — `vm_clone` copies regions verbatim and the
-  kernel COWs the PT; **verify**, don't assume) and re-`exec`.
+- Full reloc/symbol coverage: `COPY` (reachable the moment a non-PIE program names a
+  DSO's data), weak undefined symbols, and `DT_INIT`/`DT_INIT_ARRAY` ordering.
+- A library's own `DT_NEEDED` is followed (transitively, one mapping per name).
+- Static TLS across modules stays unimplemented, and is now **refused by name** (D8).
+- `fork` after load and re-`exec` are exercised by the gate.
+- Deferred with the reason: `LD_LIBRARY_PATH` (needs the loader to walk `envp`, which it
+  now receives but does not read) and `AT_PAGESZ` (needs auxv, which is D9's work and so
+  belongs with the frame changes in §6).
 
-Gate: a scenario that loads, forks (child and parent both use the DSO), then re-execs;
-plus host tests for each reloc type and for a missing symbol (must fail at load, not at
-first call — D6).
+As built:
+
+- `COPY` needed the walk to distinguish two scopes, so `reloc.rs` has a `Scope`: a
+  `COPY` resolves with `Scope::ExcludeSelf` because this image's own symbol for the name
+  *is* the destination. `RelocImage` gained `copy_range`, and a definition is only
+  accepted when its `st_value .. + st_size` lies inside the object that states it.
+- Weak undefined symbols resolve to 0 rather than failing the load; a strong one still
+  fails it (D6). The referencing object's symbol bind is what decides, so the trait has
+  `sym_is_weak`.
+- Loading is a dependency-first DFS over `DT_NEEDED` with a name-based "already loaded"
+  check, so a diamond loads one mapping and a cycle terminates. The list is reverse
+  topological, which is why initialisers walk it backwards.
+- Initialisers are called with `argc`/`argv`/`envp`, so the loader's `_start` now reads
+  `envp` off the exec'd stack.
+- An object with `PT_TLS` is refused: the port's TLS is one module's, and silently
+  letting an object read another module's storage is the failure this avoids.
+
+Gate (`just test-dynlink-x86`, three steps in one boot):
+
+| Step | Line | What only that step can show |
+|---|---|---|
+| `/bin/dynhello` | `dynlink-ok dynlink-data dynlink-2-ok` | bases, both objects' relocations, transitive load, cross-object resolution, initialisers |
+| `/bin/dynhello fork` | `child-ok …` | the mappings survive `fork`: the child calls into both objects and exits 0 |
+| `/bin/dynhello exec` | `re-exec-ok …` | a second load of the same program, by the process the first one replaced itself with |
+
+Each prefix can be produced by its own step alone — a whole-line match is anchored but
+scans the whole log, so a prefix an earlier step printed would make a later step pass
+without running.
+
+The negative check still holds: none of the three strings is in the executable.
+
+Host tests (`cargo test -p ldso`) cover each relocation type the loader claims — applied
+once, at its own offset, with the rest of the image untouched — the scope each resolves
+with, a weak reference resolving to 0 and the strong one failing, the allocator and the
+`PT_TLS` query.
+
+**Known gap.** De-duplication is by the name a `DT_NEEDED` gave; two different names for
+one file (a path and a soname) would map it twice. It is also not *isolated* by the gate:
+a duplicate mapping would still print the right line, because both copies are resolvable.
+The gate proves the loading order and the initialiser order; the single mapping is
+correct by construction rather than measured.
 
 ### Phase 3 — toolchain, and a dynamic C library
 

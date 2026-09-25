@@ -14,7 +14,8 @@ The executable is linked with the fork's stage1 rustc as the driver (the same wa
 
 Phase 0 was one object; Phase 1 needs two, because the loader's *base* allocator
 is only exercised when a second object has to land somewhere other than the
-first.
+first. Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
+dependency of a dependency and of the executable at the same time.
 
 Phase 0 is x86_64-only. Usage: python tools/build-dynlink.py [x86]
 
@@ -36,7 +37,7 @@ from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import find_lld  # noqa: E402
 
-DSOS = ("libdyn", "libdyn2")
+DSOS = ("libdyn2", "libdyn")
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
 
@@ -77,16 +78,23 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(["clang", *cflags, "-o", work / "dynhello.o", ROOT / "tools" / "dynhello.c"]) != 0:
         return 1
 
-    # The shared objects must be position-independent.
+    # The shared objects must be position-independent. `libdyn2` is built and linked
+    # first: `libdyn` names it as its own DT_NEEDED, which is what makes the loader
+    # follow a dependency of a dependency (and find the object the executable also
+    # names, so it is mapped once).
     dso_flags = [*arch.base_cflags(), "-fno-builtin", "-O2", "-fPIC", "-c", *compile_flags()]
     for name in DSOS:
         if run(["clang", *dso_flags, "-o", work / f"{name}.o", ROOT / "tools" / f"{name}.c"]) != 0:
             return 1
 
-        # Link the .so with LLD directly (the minix target specs ask for `lld` on
-        # PATH; we have the toolchain's own).
+    # Link each .so with LLD directly (the minix target specs ask for `lld` on
+    # PATH; we have the toolchain's own), against the objects built before it.
+    for i, name in enumerate(DSOS):
         dso = work / f"{name}.so"
-        if run([lld, "-flavor", "gnu", "-shared", "-soname", f"{name}.so", "-o", dso, work / f"{name}.o"]) != 0:
+        earlier = [arg for dep in DSOS[:i] for arg in (f"-L{work}", f"-l:{dep}.so")]
+        link_so = [lld, "-flavor", "gnu", "-shared", "-soname", f"{name}.so", "-o", dso,
+                   work / f"{name}.o", *earlier]
+        if run(link_so) != 0:
             return 1
         print(f"wrote {dso}")
 

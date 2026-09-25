@@ -2,27 +2,41 @@
 #
 #   FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
 #
-# Driven by `just test-dynlink-x86`, which builds the loader and the two C
-# artifacts and injects all of them into the image (`DYNLINK_BINS`).
+# Driven by `just test-dynlink-x86`, which builds the loader and the C artifacts
+# and injects all of them into the image (`DYNLINK_BINS`).
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab,
 # and the whole line its output must produce.
 #
 # `/bin/dynhello` is a non-PIE `ET_EXEC` with `PT_INTERP /libexec/ld.so` and
-# `DT_NEEDED` for two shared objects. Its single line holds one value per
-# mechanism the loader has to get right:
+# `DT_NEEDED` for two shared objects, one of which names the other. Its line holds
+# one value per mechanism the loader has to get right:
 #
-#   dynlink-ok     libdyn's `JUMP_SLOT` — the main's PLT call, resolved by name
-#   dynlink-data   libdyn's `RELATIVE` — some of the object's own data, reached
-#                  through a pointer the loader must rebase; unfixed it is a wild
-#                  address, not a wrong number
-#   dynlink-2-ok   libdyn2's `JUMP_SLOT` — the second object, which only resolves
-#                  if the loader gave it a base of its own
+#   dynlink-ok     libdyn's `JUMP_SLOT` — the main's PLT call, resolved by name;
+#                  the value also depends on libdyn's own `DT_NEEDED` having been
+#                  loaded, on its `JUMP_SLOT` into libdyn2 being resolved across
+#                  objects, and on libdyn2's initialiser having run
+#   dynlink-data   libdyn's `RELATIVE`, copied into the main by an
+#                  `R_X86_64_COPY`: an unfixed pointer is a wild address
+#   dynlink-2-ok   libdyn2's initialiser — the value is its uninitialised form
+#                  until a constructor runs, so it is the order and the calling of
+#                  constructors that this field is about
 #
 # None of those strings is in the executable: `just test-dynlink-x86` fails the
-# gate if it is, which is what makes this line evidence about the loader rather
-# than about the program. One line, not three, because the harness matches whole
-# lines anywhere in the log — a second expected line would be satisfied by the
-# first run's output and prove nothing.
+# gate if it is, which is what makes these lines evidence about the loader rather
+# than about the program.
+#
+# The three steps differ only in the prefix, and each prefix can be produced by its
+# own step alone — a whole-line match is anchored, and the harness scans the whole
+# log, so a prefix that any earlier step printed would make a later step pass
+# without running.
+#
+#   (none)  the plain line: load, relocate, run
+#   fork    `child-ok` if a forked child could call into both objects and exit 0 —
+#           the mappings survive a fork, not just an exec
+#   exec    `re-exec-ok`, printed by the process that `dynhello exec` replaced
+#           itself with: a second load of the same program works
 
 /bin/dynhello	dynlink-ok dynlink-data dynlink-2-ok
+/bin/dynhello fork	child-ok dynlink-ok dynlink-data dynlink-2-ok
+/bin/dynhello exec	re-exec-ok dynlink-ok dynlink-data dynlink-2-ok

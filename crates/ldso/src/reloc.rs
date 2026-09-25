@@ -19,6 +19,9 @@ pub enum Action {
     Skip,
     /// Store this at `r_offset`.
     Write(u64),
+    /// A byte copy (`R_X86_64_COPY`): the walk resolves the symbol with
+    /// [`Scope::ExcludeSelf`] and moves the definition's bytes to `r_offset`.
+    Copy,
     /// A relocation type this loader does not implement; the load must fail
     /// rather than continue with a half-relocated image.
     Unsupported,
@@ -26,7 +29,7 @@ pub enum Action {
 
 /// Resolve one relocation. `base` is the loaded image's base address (the value
 /// a `RELATIVE` fixup adds to); `sym_value` is the resolved symbol's address,
-/// ignored by `RELATIVE`.
+/// ignored by `RELATIVE` (and by `COPY`, whose bytes the walk moves itself).
 pub fn reloc_action(typ: u32, base: u64, sym_value: u64, addend: i64) -> Action {
     match typ {
         R_X86_64_NONE => Action::Skip,
@@ -34,19 +37,39 @@ pub fn reloc_action(typ: u32, base: u64, sym_value: u64, addend: i64) -> Action 
         R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
             Action::Write(sym_value.wrapping_add(addend as u64))
         }
-        // A non-PIE executable's reference to a variable defined in a shared object
-        // arrives as a COPY: the loader has to move the object's initial value into
-        // space the linker reserved in the executable. That is Phase 2
-        // (`DYNAMIC_LINKING.md`); refusing it beats ignoring it, because an ignored
-        // COPY leaves the variable holding nothing.
-        R_X86_64_COPY => Action::Unsupported,
+        // A non-PIE executable's reference to a variable defined in a shared object:
+        // the linker reserved space for the variable in the executable, and the
+        // loader has to move the object's initial value into it.
+        R_X86_64_COPY => Action::Copy,
         _ => Action::Unsupported,
     }
 }
 
-/// Whether a relocation type is resolved by looking its symbol up by name.
+/// Whether a relocation type's *value* is a symbol's address. `COPY` is not one
+/// of these: its bytes are moved by the walk, and its definition is looked up
+/// with a narrower scope than a value's.
 pub fn uses_symbol(typ: u32) -> bool {
     matches!(typ, R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT)
+}
+
+/// Which loaded objects a symbol lookup may consider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every loaded object.
+    All,
+    /// Every object but the one being relocated. A `COPY` needs this: this image's
+    /// own symbol for the name *is* the destination, so a copy that resolved it
+    /// would read what it is about to write.
+    ExcludeSelf,
+}
+
+/// A symbol's definition, as its defining object states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Def {
+    /// Its runtime address in the object that defines it.
+    pub addr: u64,
+    /// `st_size` — how many bytes a `COPY` moves.
+    pub size: u64,
 }
 
 /// Longest symbol name a walk copies. A name that does not fit fails the load
@@ -55,7 +78,10 @@ pub fn uses_symbol(typ: u32) -> bool {
 pub const SYMNAME_MAX: usize = 128;
 
 /// A symbol name copied out of an image's string table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The buffer is private and only `as_bytes` reads it, so equality is over the
+/// name and not over whatever a longer name left behind it in the buffer.
+#[derive(Debug, Clone, Copy)]
 pub struct SymName {
     buf: [u8; SYMNAME_MAX],
     len: usize,
@@ -79,10 +105,19 @@ impl SymName {
             return false;
         }
         self.buf[..name.len()].copy_from_slice(name);
+        self.buf[name.len()..].fill(0);
         self.len = name.len();
         true
     }
 }
+
+impl PartialEq for SymName {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for SymName {}
 
 impl Default for SymName {
     fn default() -> Self {
@@ -121,7 +156,8 @@ pub enum RelocError {
 ///
 /// Table and symbol reads take **link-time** virtual addresses — the values an
 /// image's dynamic array holds — and each implementation maps them into its own
-/// storage. A store takes a **runtime** address, which is `bias() + r_offset`.
+/// storage. A store or copy takes a **runtime** address, which is
+/// `bias() + r_offset`.
 pub trait RelocImage {
     /// The `index`th entry of the `RELA` table at link-time VA `table_va`.
     fn rela(&self, table_va: u64, index: usize) -> Option<Rela>;
@@ -130,9 +166,15 @@ pub trait RelocImage {
     /// The base the image was loaded at: a link-time address `v` reads at
     /// `bias() + v` in this image.
     fn bias(&self) -> u64;
+    /// Whether symbol `idx` is weak (`STB_WEAK`). A weak reference with no
+    /// definition resolves to 0 rather than failing the load, as the ABI says.
+    fn sym_is_weak(&self, idx: u32) -> bool;
     /// Store `value` at runtime VA `va`. `false` when `va` is not inside this
     /// image — a relocation may only write to its own object.
     fn store(&mut self, va: u64, value: u64) -> bool;
+    /// Copy `len` bytes from runtime VA `src` to runtime VA `dst` (a `COPY`
+    /// relocation). `false` when `dst .. dst + len` leaves this image.
+    fn copy_range(&mut self, dst: u64, src: u64, len: u64) -> bool;
 }
 
 /// Apply every relocation in the `RELA` table at link-time VA `table_va` spanning
@@ -145,7 +187,7 @@ pub fn apply_table<I, F>(
 ) -> Result<(), RelocError>
 where
     I: RelocImage,
-    F: FnMut(&[u8]) -> Option<u64>,
+    F: FnMut(&[u8], Scope) -> Option<Def>,
 {
     if !bytes.is_multiple_of(RELA_SIZE) {
         return Err(RelocError::BadSize(bytes));
@@ -160,7 +202,13 @@ where
         let sym_value = if uses_symbol(typ) {
             img.sym_name(r.sym(), &mut name)
                 .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
-            resolve(name.as_bytes()).ok_or(RelocError::Unresolved(name))?
+            match resolve(name.as_bytes(), Scope::All) {
+                Some(def) => def.addr,
+                // A weak reference with no definition is 0; a strong one is a load
+                // failure, which is what eager binding buys (D6).
+                None if img.sym_is_weak(r.sym()) => 0,
+                None => return Err(RelocError::Unresolved(name)),
+            }
         } else {
             0
         };
@@ -169,6 +217,16 @@ where
             Action::Write(value) => {
                 let at = base.wrapping_add(r.r_offset);
                 if !img.store(at, value) {
+                    return Err(RelocError::OutOfRange(at));
+                }
+            }
+            Action::Copy => {
+                img.sym_name(r.sym(), &mut name)
+                    .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
+                let def = resolve(name.as_bytes(), Scope::ExcludeSelf)
+                    .ok_or(RelocError::Unresolved(name))?;
+                let at = base.wrapping_add(r.r_offset);
+                if !img.copy_range(at, def.addr, def.size) {
                     return Err(RelocError::OutOfRange(at));
                 }
             }
@@ -191,11 +249,11 @@ mod tests {
     const BASE: u64 = 0x200_0000;
     const PHOFF: usize = EHDR_SIZE;
     const STRTAB_VA: u64 = 0x100;
-    const SYMTAB_VA: u64 = 0x120;
-    const RELA_VA: u64 = 0x180;
-    const PLT_VA: u64 = 0x1c8;
+    const SYMTAB_VA: u64 = 0x128;
+    const RELA_VA: u64 = 0x1c0;
+    const PLT_VA: u64 = 0x220;
     const FILE_LEN: usize = 0x400;
-    const NSYM: usize = 4;
+    const NSYM: usize = 6;
 
     // Where the relocations write. `SLOT_NONE` is a no-op's target: it must come
     // out untouched, which is how "applied to the right offset" is checked for
@@ -205,6 +263,12 @@ mod tests {
     const SLOT_JUMP: u64 = 0x390;
     const SLOT_GLOB: u64 = 0x398;
     const SLOT_NONE: u64 = 0x3a0;
+    const SLOT_COPY: u64 = 0x3a8;
+    const SLOT_WEAK: u64 = 0x3b0;
+    /// The COPY's source — the "other object's" own bytes, staged by the test. A
+    /// copy is memory to memory, so where they live does not matter here: what the
+    /// walk must get right is which objects it may resolve the name in.
+    const SOURCE: u64 = 0x3c0;
 
     const RESOLVED_MESSAGE: u64 = 0x200_1234;
     const RESOLVED_CROSS: u64 = 0x201_5678;
@@ -227,9 +291,11 @@ mod tests {
     }
 
     /// A synthetic `ET_DYN` image with one `R|W` `PT_LOAD` covering the file, a
-    /// symbol table (`dyn_message` defined, `cross`/`nowhere` undefined), and two
-    /// relocation tables: `.rela.dyn` with `RELATIVE`, `R_X86_64_64` and `NONE`,
-    /// `.rela.plt` with `JUMP_SLOT` and `GLOB_DAT`.
+    /// symbol table (`dyn_message` defined; `cross`, `nowhere` and `copied`
+    /// undefined, so they resolve to another object if at all, and `maybe`
+    /// undefined and weak), and two relocation tables: `.rela.dyn` with `RELATIVE`,
+    /// `R_X86_64_64`, `NONE` and `COPY`, `.rela.plt` with `JUMP_SLOT` and two
+    /// `GLOB_DAT`s, one of them against the weak symbol.
     fn file_image() -> Vec<u8> {
         let mut b = vec![0u8; FILE_LEN];
         b[0..4].copy_from_slice(&ELF_MAGIC);
@@ -251,7 +317,7 @@ mod tests {
         wr64(&mut b, PHOFF + 48, 0x1000);
 
         let strtab = STRTAB_VA as usize;
-        b[strtab..strtab + 27].copy_from_slice(b"\0dyn_message\0cross\0nowhere\0");
+        b[strtab..strtab + 40].copy_from_slice(b"\0dyn_message\0cross\0nowhere\0copied\0maybe\0");
 
         let sym = SYMTAB_VA as usize;
         wr32(&mut b, sym + SYM_SIZE, 1); // st_name -> "dyn_message"
@@ -263,6 +329,10 @@ mod tests {
         b[sym + 2 * SYM_SIZE + 4] = 0x11;
         wr32(&mut b, sym + 3 * SYM_SIZE, 19); // "nowhere", undefined
         b[sym + 3 * SYM_SIZE + 4] = 0x11;
+        wr32(&mut b, sym + 4 * SYM_SIZE, 27); // "copied", undefined: a COPY's name
+        b[sym + 4 * SYM_SIZE + 4] = 0x11;
+        wr32(&mut b, sym + 5 * SYM_SIZE, 34); // "maybe", undefined and WEAK
+        b[sym + 5 * SYM_SIZE + 4] = 0x21; // WEAK | OBJECT
 
         let rela = RELA_VA as usize;
         wr64(&mut b, rela, SLOT_RELATIVE);
@@ -273,12 +343,20 @@ mod tests {
         wr64(&mut b, rela + RELA_SIZE + 16, 0x10);
         wr64(&mut b, rela + 2 * RELA_SIZE, SLOT_NONE);
         wr64(&mut b, rela + 2 * RELA_SIZE + 8, r_info(0, R_X86_64_NONE));
+        wr64(&mut b, rela + 3 * RELA_SIZE, SLOT_COPY);
+        wr64(&mut b, rela + 3 * RELA_SIZE + 8, r_info(4, R_X86_64_COPY));
 
         let plt = PLT_VA as usize;
         wr64(&mut b, plt, SLOT_JUMP);
         wr64(&mut b, plt + 8, r_info(2, R_X86_64_JUMP_SLOT));
         wr64(&mut b, plt + RELA_SIZE, SLOT_GLOB);
         wr64(&mut b, plt + RELA_SIZE + 8, r_info(1, R_X86_64_GLOB_DAT));
+        wr64(&mut b, plt + 2 * RELA_SIZE, SLOT_WEAK);
+        wr64(
+            &mut b,
+            plt + 2 * RELA_SIZE + 8,
+            r_info(5, R_X86_64_GLOB_DAT),
+        );
         b
     }
 
@@ -320,6 +398,12 @@ mod tests {
             self.base
         }
 
+        fn sym_is_weak(&self, idx: u32) -> bool {
+            self.file
+                .sym_at(SYMTAB_VA, idx)
+                .is_some_and(|s| s.bind() == crate::elf::Sym::STB_WEAK)
+        }
+
         fn store(&mut self, va: u64, value: u64) -> bool {
             let Some(off) = va.checked_sub(self.base).map(|v| v as usize) else {
                 return false;
@@ -330,30 +414,63 @@ mod tests {
             self.img[off..off + 8].copy_from_slice(&value.to_le_bytes());
             true
         }
+
+        fn copy_range(&mut self, dst: u64, src: u64, len: u64) -> bool {
+            let len = len as usize;
+            let (Some(d), Some(s)) = (
+                dst.checked_sub(self.base).map(|v| v as usize),
+                src.checked_sub(self.base).map(|v| v as usize),
+            ) else {
+                return false;
+            };
+            if d + len > self.img.len() || s + len > self.img.len() {
+                return false;
+            }
+            self.img.copy_within(s..s + len, d);
+            true
+        }
     }
 
-    fn resolve(name: &[u8]) -> Option<u64> {
+    fn resolve(name: &[u8], _scope: Scope) -> Option<Def> {
         match name {
-            b"dyn_message" => Some(RESOLVED_MESSAGE),
-            b"cross" => Some(RESOLVED_CROSS),
+            b"dyn_message" => Some(Def {
+                addr: RESOLVED_MESSAGE,
+                size: 0,
+            }),
+            b"cross" => Some(Def {
+                addr: RESOLVED_CROSS,
+                size: 0,
+            }),
+            // A COPY's definition: eight bytes the test staged at `SOURCE`.
+            b"copied" => Some(Def {
+                addr: BASE + SOURCE,
+                size: 8,
+            }),
             _ => None,
         }
     }
 
+    /// Apply a table and report the scopes the resolver was called with, so a test
+    /// can see *how* each type resolved and not only what it wrote.
     fn apply(
         file: &[u8],
         loaded: &mut [u8],
         table_va: u64,
         bytes: usize,
-    ) -> Result<(), RelocError> {
+    ) -> (Result<(), RelocError>, Vec<Scope>) {
         let elf = Elf::new(file).expect("valid");
         let mut img = Synth {
             file: elf,
             img: loaded,
             base: BASE,
         };
-        let mut res = resolve;
-        apply_table(&mut img, table_va, bytes, &mut res)
+        let mut scopes = Vec::new();
+        let mut res = |name: &[u8], scope: Scope| {
+            scopes.push(scope);
+            resolve(name, scope)
+        };
+        let r = apply_table(&mut img, table_va, bytes, &mut res);
+        (r, scopes)
     }
 
     fn slot(loaded: &[u8], off: u64) -> u64 {
@@ -396,19 +513,21 @@ mod tests {
     #[test]
     fn none_skips_and_unsupported_is_refused() {
         assert_eq!(reloc_action(R_X86_64_NONE, BASE, 0, 0), Action::Skip);
-        assert_eq!(reloc_action(R_X86_64_COPY, BASE, 0, 0), Action::Unsupported);
+        assert_eq!(reloc_action(R_X86_64_COPY, BASE, 0, 0), Action::Copy);
         assert_eq!(reloc_action(0xdead_beef, BASE, 0, 0), Action::Unsupported);
     }
 
-    /// The Phase 1 gate: every type this loader claims to handle is applied, at
-    /// its own offset, exactly once — and the no-op's target is the control that
-    /// says the walk wrote nothing else.
+    /// Every type this loader claims to handle is applied, at its own offset,
+    /// exactly once — and the no-op's target is the control that says the walk
+    /// wrote nothing else.
     #[test]
     fn every_reloc_type_lands_once_at_its_own_offset() {
         let file = file_image();
         let mut loaded = vec![SENTINEL; FILE_LEN];
-        apply(&file, &mut loaded, RELA_VA, 3 * RELA_SIZE).expect("dyn table");
-        apply(&file, &mut loaded, PLT_VA, 2 * RELA_SIZE).expect("plt table");
+        let (r, scopes) = apply(&file, &mut loaded, RELA_VA, 4 * RELA_SIZE);
+        r.expect("dyn table");
+        let (r, plt_scopes) = apply(&file, &mut loaded, PLT_VA, 3 * RELA_SIZE);
+        r.expect("plt table");
 
         assert_eq!(
             slot(&loaded, SLOT_RELATIVE),
@@ -423,15 +542,34 @@ mod tests {
         assert_eq!(slot(&loaded, SLOT_JUMP), RESOLVED_CROSS, "JUMP_SLOT");
         assert_eq!(slot(&loaded, SLOT_GLOB), RESOLVED_MESSAGE, "GLOB_DAT");
         assert_eq!(
+            slot(&loaded, SLOT_WEAK),
+            0,
+            "a weak undefined symbol is 0, not an error"
+        );
+        assert_eq!(
             slot(&loaded, SLOT_NONE),
             u64::from_le_bytes([SENTINEL; 8]),
             "NONE writes nothing"
         );
 
-        let written = [SLOT_RELATIVE, SLOT_ABS64, SLOT_JUMP, SLOT_GLOB, SLOT_NONE];
+        // A value is resolved across every object; a COPY must not resolve to the
+        // image it is writing into.
+        assert_eq!(scopes, vec![Scope::All, Scope::ExcludeSelf]);
+        assert_eq!(plt_scopes, vec![Scope::All, Scope::All, Scope::All]);
+
+        let touched = [
+            SLOT_RELATIVE,
+            SLOT_ABS64,
+            SLOT_JUMP,
+            SLOT_GLOB,
+            SLOT_NONE,
+            SLOT_COPY,
+            SLOT_WEAK,
+            SOURCE,
+        ];
         for (i, eight) in loaded.chunks_exact(8).enumerate() {
             let off = (i * 8) as u64;
-            if written.contains(&off) {
+            if touched.contains(&off) {
                 continue;
             }
             assert!(
@@ -442,12 +580,62 @@ mod tests {
     }
 
     #[test]
+    fn a_weak_undefined_symbol_resolves_to_zero_but_a_strong_one_fails() {
+        let file = file_image();
+        let mut loaded = vec![SENTINEL; FILE_LEN];
+        let (r, _) = apply(&file, &mut loaded, PLT_VA, 3 * RELA_SIZE);
+        r.expect("a weak reference is not a load failure");
+        assert_eq!(slot(&loaded, SLOT_WEAK), 0);
+
+        // The same relocation pointed at a strong undefined symbol instead.
+        let mut file = file_image();
+        wr64(
+            &mut file,
+            PLT_VA as usize + 2 * RELA_SIZE + 8,
+            r_info(3, R_X86_64_GLOB_DAT),
+        );
+        let mut loaded = vec![SENTINEL; FILE_LEN];
+        let mut name = SymName::new();
+        assert!(name.set(b"nowhere"));
+        assert_eq!(
+            apply(&file, &mut loaded, PLT_VA, 3 * RELA_SIZE).0,
+            Err(RelocError::Unresolved(name))
+        );
+    }
+
+    #[test]
+    fn a_copy_moves_the_definitions_bytes_and_resolves_outside_this_image() {
+        let file = file_image();
+        let mut loaded = vec![SENTINEL; FILE_LEN];
+        let staged = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        loaded[SOURCE as usize..SOURCE as usize + 8].copy_from_slice(&staged);
+
+        let (r, scopes) = apply(&file, &mut loaded, RELA_VA, 4 * RELA_SIZE);
+        r.expect("dyn table");
+        assert_eq!(
+            &loaded[SLOT_COPY as usize..SLOT_COPY as usize + 8],
+            &staged,
+            "the definition's bytes must land at the COPY's offset"
+        );
+        assert_eq!(
+            &loaded[SOURCE as usize..SOURCE as usize + 8],
+            &staged,
+            "a copy does not disturb its source"
+        );
+        assert_eq!(
+            scopes,
+            vec![Scope::All, Scope::ExcludeSelf],
+            "the COPY must resolve in another object, not in the one it patches"
+        );
+    }
+
+    #[test]
     fn an_unsupported_type_fails_the_load() {
         let mut file = file_image();
         wr64(&mut file, RELA_VA as usize + 8, 0xdead_beef);
         let mut loaded = vec![SENTINEL; FILE_LEN];
         assert_eq!(
-            apply(&file, &mut loaded, RELA_VA, 3 * RELA_SIZE),
+            apply(&file, &mut loaded, RELA_VA, 4 * RELA_SIZE).0,
             Err(RelocError::Unsupported(0xdead_beef))
         );
     }
@@ -458,7 +646,7 @@ mod tests {
         wr64(&mut file, RELA_VA as usize, (FILE_LEN + 8) as u64);
         let mut loaded = vec![SENTINEL; FILE_LEN];
         assert_eq!(
-            apply(&file, &mut loaded, RELA_VA, RELA_SIZE),
+            apply(&file, &mut loaded, RELA_VA, RELA_SIZE).0,
             Err(RelocError::OutOfRange(BASE + FILE_LEN as u64 + 8))
         );
     }
@@ -477,7 +665,7 @@ mod tests {
         let mut name = SymName::new();
         assert!(name.set(b"nowhere"));
         assert_eq!(
-            apply(&file, &mut loaded, PLT_VA, RELA_SIZE),
+            apply(&file, &mut loaded, PLT_VA, RELA_SIZE).0,
             Err(RelocError::Unresolved(name))
         );
     }
@@ -492,7 +680,7 @@ mod tests {
         );
         let mut loaded = vec![SENTINEL; FILE_LEN];
         assert_eq!(
-            apply(&file, &mut loaded, PLT_VA, RELA_SIZE),
+            apply(&file, &mut loaded, PLT_VA, RELA_SIZE).0,
             Err(RelocError::BadSymbol(NSYM as u32 + 5, SymError::Missing))
         );
     }
@@ -502,7 +690,7 @@ mod tests {
         let file = file_image();
         let mut loaded = vec![SENTINEL; FILE_LEN];
         assert_eq!(
-            apply(&file, &mut loaded, RELA_VA, RELA_SIZE + 1),
+            apply(&file, &mut loaded, RELA_VA, RELA_SIZE + 1).0,
             Err(RelocError::BadSize(RELA_SIZE + 1))
         );
     }

@@ -343,10 +343,14 @@ test-bash-aarch64 boot-timeout="60":
     @echo "bash: every step of tools/smoke/bash.tsv answered (aarch64)"
 
 # Boot the dynamic-linking artifacts and drive `tools/smoke/dyn.tsv` at them.
-# `/bin/dynhello` is an `ET_EXEC` with `PT_INTERP /libexec/ld.so` and
-# `DT_NEEDED` for two shared objects, so printing the strings that live only in
-# them is what proves the loader ran, mapped both objects (at a base each),
-# bound the calls by name and applied each object's own `RELATIVE` fixups.
+# `/bin/dynhello` is an `ET_EXEC` with `PT_INTERP /libexec/ld.so` and `DT_NEEDED`
+# for two shared objects, one of which names the other, so the strings that live
+# only in those objects are what prove the loader chose a base for each of them,
+# followed a dependency of a dependency, resolved names across objects, applied
+# each object's own `RELATIVE` fixups and `R_X86_64_COPY`, and ran the objects'
+# initialisers in dependency order. Two further steps ask for a fork after the
+# load (the child calls into both objects) and an exec after it (the replacement
+# program loads again).
 #
 # The negative check is the centre of this gate: no `dynlink` string may be in
 # `/bin/dynhello`. Were one there, the program could print it with no loader at
@@ -363,7 +367,7 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "dynlink: /bin/dynhello printed what only the shared objects contain (x86_64)"
+    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec (x86_64)"
 
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
