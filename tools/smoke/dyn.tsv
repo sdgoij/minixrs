@@ -1,15 +1,28 @@
-# The Phase 0 dynamic-linking scenario.
+# The dynamic-linking scenario.
 #
 #   FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
 #
-# Driven by `just test-dynlink-x86`, which builds the loader and the two C artifacts and
-# injects all three into the image (`DYNLINK_BINS`).
+# Driven by `just test-dynlink-x86`, which builds the loader and the two C
+# artifacts and injects all of them into the image (`DYNLINK_BINS`).
 #
-# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
-# whole line its output must produce. `/bin/dynhello` is a classic-dynamic `ET_EXEC`: it
-# carries `PT_INTERP /libexec/ld.so` and `DT_NEEDED libdyn.so`, and its single PLT call
-# (`dyn_message`) is bound by the loader before `main` runs. The string it prints exists
-# only in `/lib/libdyn.so` — the gate fails if the same bytes are in the program — so this
-# line is the loader having run, mapped the object and patched the GOT.
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab,
+# and the whole line its output must produce.
+#
+# `/bin/dynhello` is a non-PIE `ET_EXEC` with `PT_INTERP /libexec/ld.so` and
+# `DT_NEEDED` for two shared objects. Its single line holds one value per
+# mechanism the loader has to get right:
+#
+#   dynlink-ok     libdyn's `JUMP_SLOT` — the main's PLT call, resolved by name
+#   dynlink-data   libdyn's `RELATIVE` — some of the object's own data, reached
+#                  through a pointer the loader must rebase; unfixed it is a wild
+#                  address, not a wrong number
+#   dynlink-2-ok   libdyn2's `JUMP_SLOT` — the second object, which only resolves
+#                  if the loader gave it a base of its own
+#
+# None of those strings is in the executable: `just test-dynlink-x86` fails the
+# gate if it is, which is what makes this line evidence about the loader rather
+# than about the program. One line, not three, because the harness matches whole
+# lines anywhere in the log — a second expected line would be satisfied by the
+# first run's output and prove nothing.
 
-/bin/dynhello	dynlink-ok
+/bin/dynhello	dynlink-ok dynlink-data dynlink-2-ok

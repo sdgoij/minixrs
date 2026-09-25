@@ -3,13 +3,18 @@
 
 Produces, under `target/dynlink/`:
 
-* `libdyn.so` — the shared object (`tools/libdyn.c`), built with LLD directly;
+* `libdyn.so`, `libdyn2.so` — the shared objects (`tools/libdyn.c`,
+  `tools/libdyn2.c`), built with LLD directly;
 * `dynhello`   — a classic-dynamic `ET_EXEC` (`tools/dynhello.c`) with `PT_INTERP`
-  (`/libexec/ld.so`) and `DT_NEEDED` (`libdyn.so`).
+  (`/libexec/ld.so`) and `DT_NEEDED` for both objects.
 
 The executable is linked with the fork's stage1 rustc as the driver (the same way
 `tools/build-c-hello.py` does it), because its `write`/`exit` come from the
-`minix-libc` rlib; the C objects and the shared object are clang + LLD's work.
+`minix-libc` rlib; the C objects and the shared objects are clang + LLD's work.
+
+Phase 0 was one object; Phase 1 needs two, because the loader's *base* allocator
+is only exercised when a second object has to land somewhere other than the
+first.
 
 Phase 0 is x86_64-only. Usage: python tools/build-dynlink.py [x86]
 
@@ -31,7 +36,7 @@ from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import find_lld  # noqa: E402
 
-DSO_NAME = "libdyn.so"
+DSOS = ("libdyn", "libdyn2")
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
 
@@ -72,17 +77,18 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(["clang", *cflags, "-o", work / "dynhello.o", ROOT / "tools" / "dynhello.c"]) != 0:
         return 1
 
-    # The shared object must be position-independent.
+    # The shared objects must be position-independent.
     dso_flags = [*arch.base_cflags(), "-fno-builtin", "-O2", "-fPIC", "-c", *compile_flags()]
-    if run(["clang", *dso_flags, "-o", work / "libdyn.o", ROOT / "tools" / "libdyn.c"]) != 0:
-        return 1
+    for name in DSOS:
+        if run(["clang", *dso_flags, "-o", work / f"{name}.o", ROOT / "tools" / f"{name}.c"]) != 0:
+            return 1
 
-    # Link the .so with LLD directly (the minix target specs ask for `lld` on
-    # PATH; we have the toolchain's own).
-    dso = work / DSO_NAME
-    if run([lld, "-flavor", "gnu", "-shared", "-soname", DSO_NAME, "-o", dso, work / "libdyn.o"]) != 0:
-        return 1
-    print(f"wrote {dso}")
+        # Link the .so with LLD directly (the minix target specs ask for `lld` on
+        # PATH; we have the toolchain's own).
+        dso = work / f"{name}.so"
+        if run([lld, "-flavor", "gnu", "-shared", "-soname", f"{name}.so", "-o", dso, work / f"{name}.o"]) != 0:
+            return 1
+        print(f"wrote {dso}")
 
     # minix-libc for the target: the executable's write/exit come from here.
     env = {**os.environ, "RUSTC": str(rustc)}
@@ -109,6 +115,8 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     )
 
     out = work / "dynhello"
+    # Each shared object the executable names, as a pair of `-C link-arg` entries.
+    libs = [arg for name in DSOS for arg in ("-C", f"link-arg=-l:{name}.so")]
     link = [
         rustc,
         "--crate-type", "bin",
@@ -118,13 +126,13 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         "-C", f"linker={lld}",
         "-C", f"link-arg={work / 'crt0.o'}",
         "-C", f"link-arg={work / 'dynhello.o'}",
-        # Resolve `dyn_message` against the shared object, and record the
-        # interpreter that must run before `main`. `-Bdynamic` is needed because
-        # the minix target's `crt_static_default` makes rustc pass `-static`,
-        # under which lld refuses to link a `.so` at all.
+        # Resolve the calls and the data symbol against the shared objects, and
+        # record the interpreter that must run before `main`. `-Bdynamic` is
+        # needed because the minix target's `crt_static_default` makes rustc pass
+        # `-static`, under which lld refuses to link a `.so` at all.
         "-C", f"link-arg=-L{work}",
         "-C", "link-arg=-Bdynamic",
-        "-C", f"link-arg=-l:{DSO_NAME}",
+        *libs,
         "-C", f"link-arg=--dynamic-linker={INTERP}",
         "--extern", f"minix_libc={libc_rlib}",
         "-L", f"dependency={deps}",

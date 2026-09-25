@@ -1,27 +1,31 @@
-//! Phase 0 runtime linking.
+//! The runtime linker.
 //!
 //! The loader is entered as a program's `PT_INTERP` interpreter. The kernel has
 //! mapped the main program's ELF header page read-only and put its address in
 //! the register `_start` reads (`r9`); from there the loader takes `e_entry` and
 //! the program headers, maps each `DT_NEEDED` object, resolves the symbols those
-//! objects (and the main program) need, patches the main program's PLT/GOT, and
-//! returns `e_entry` for its caller to enter.
+//! objects (and the main program) need, applies every object's `RELATIVE`
+//! fixups, patches the main program's PLT/GOT, and returns `e_entry` for its
+//! caller to enter.
 //!
-//! Classic non-PIE: the main program's addresses are absolute, and the objects
-//! are `ET_DYN` mapped at [`DSO_BASE`]. Eager binding only — no resolve
-//! trampoline, so an unresolved symbol is a load failure rather than a
-//! first-call fault.
+//! Phase 1 is PIC: each `DT_NEEDED` is an `ET_DYN` object mapped at a base the
+//! allocator picks (deterministically — the port has no ASLR), and its own
+//! `RELATIVE` relocations are applied against that base. The main program is
+//! still non-PIE: its addresses are absolute, so its bias is 0.
+//!
+//! Only the main program's `DT_NEEDED` list is followed — an object that itself
+//! needs another is a load failure today, not a silent omission, because its own
+//! symbols then go unresolved. Eager binding throughout: no resolve trampoline,
+//! so an unresolved symbol is a load failure rather than a first-call fault.
 
 use crate::elf::{
     DT_HASH, DT_JMPREL, DT_NEEDED, DT_NULL, DT_PLTREL, DT_PLTRELSZ, DT_RELA, DT_RELASZ, DT_STRTAB,
-    DT_SYMTAB, DYN_SIZE, EM_X86_64, Elf, MAX_DYN, PF_W, PF_X, PT_LOAD, RELA_SIZE, SYM_SIZE,
+    DT_SYMTAB, DYN_SIZE, EM_X86_64, ET_DYN, Elf, MAX_DYN, PF_W, PF_X, PT_LOAD, R_X86_64_COPY,
+    RELA_SIZE, Rela, SYM_SIZE,
 };
+use crate::layout::{BaseAlloc, image_extent, page_down, page_up};
+use crate::reloc::{RelocError, RelocImage, SYMNAME_MAX, SymError, SymName, apply_table};
 use core::ptr;
-
-/// Where `ET_DYN` objects are mapped. Fixed (no ASLR), and clear of the main
-/// program (`0x0100_0000`), the loader itself (`0x0400_0000`), the stack
-/// (`0x0FE0_0000`) and the heap (`0x3FE0_0000`).
-pub const DSO_BASE: u64 = 0x0200_0000;
 
 /// A `DT_NEEDED` name is looked up here, in order.
 const SEARCH_PATH: &[&[u8]] = &[b"/lib/", b"/usr/lib/"];
@@ -31,19 +35,109 @@ const MAX_NEEDED: usize = 8;
 const MAX_OBJECTS: usize = 8;
 const MAX_SYMS: usize = 256;
 
-const ELF64_MAGIC: [u8; 4] = *b"\x7fELF";
-
-fn page_down(x: u64) -> u64 {
-    x & !(PAGE - 1)
+fn write_bytes(b: &[u8]) {
+    unsafe { minix_rt::write(2, b.as_ptr(), b.len()) };
 }
 
-fn page_up(x: u64) -> u64 {
-    (x + PAGE - 1) & !(PAGE - 1)
+fn write_dec(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    write_bytes(&buf[i..]);
+}
+
+fn write_hex(v: u64) {
+    let mut buf = [b'0'; 16];
+    for (i, b) in buf.iter_mut().enumerate() {
+        let nib = ((v >> (4 * (15 - i))) & 0xf) as u8;
+        *b = if nib < 10 {
+            b'0' + nib
+        } else {
+            b'a' + nib - 10
+        };
+    }
+    write_bytes(&buf);
 }
 
 fn die(msg: &[u8]) -> ! {
-    unsafe { minix_rt::write(2, msg.as_ptr(), msg.len()) };
+    write_bytes(msg);
     minix_rt::exit(1)
+}
+
+fn die_parts(parts: &[&[u8]]) -> ! {
+    for p in parts {
+        write_bytes(p);
+    }
+    minix_rt::exit(1)
+}
+
+/// Why a load failed. Every one is fatal: a half-relocated program must not run.
+enum LoadError {
+    NotElf,
+    NotObject,
+    NoDynamic,
+    TooManyObjects,
+    CannotLoad,
+    NoSpace,
+    DtRel,
+    Reloc(RelocError),
+}
+
+fn die_load(e: LoadError) -> ! {
+    match e {
+        LoadError::NotElf => die(b"ld.so: main header page is not an x86_64 ELF\n"),
+        LoadError::NotObject => die(b"ld.so: a DT_NEEDED is not a PIC object\n"),
+        LoadError::NoDynamic => die(b"ld.so: no PT_DYNAMIC\n"),
+        LoadError::TooManyObjects => die(b"ld.so: too many objects\n"),
+        LoadError::CannotLoad => die(b"ld.so: cannot load DT_NEEDED\n"),
+        LoadError::NoSpace => die(b"ld.so: no room for another object\n"),
+        LoadError::DtRel => die(b"ld.so: PLT relocations are not RELA\n"),
+        LoadError::Reloc(RelocError::BadSize(_)) => die(b"ld.so: malformed RELA table size\n"),
+        LoadError::Reloc(RelocError::BadTable(..)) => {
+            die(b"ld.so: a relocation table is not in the image\n")
+        }
+        LoadError::Reloc(RelocError::Unsupported(R_X86_64_COPY)) => {
+            die(b"ld.so: copy relocations are not implemented\n")
+        }
+        LoadError::Reloc(RelocError::Unsupported(t)) => {
+            write_bytes(b"ld.so: unsupported relocation type ");
+            write_dec(t as u64);
+            die(b"\n")
+        }
+        LoadError::Reloc(RelocError::BadSymbol(i, SymError::Missing)) => {
+            write_bytes(b"ld.so: no name for symbol ");
+            write_dec(i as u64);
+            die(b"\n")
+        }
+        LoadError::Reloc(RelocError::BadSymbol(i, SymError::TooLong)) => {
+            write_bytes(b"ld.so: symbol ");
+            write_dec(i as u64);
+            die(b" has too long a name\n")
+        }
+        LoadError::Reloc(RelocError::Unresolved(n)) => {
+            die_parts(&[b"ld.so: unresolved symbol ", n.as_bytes(), b"\n"])
+        }
+        LoadError::Reloc(RelocError::OutOfRange(a)) => {
+            write_bytes(b"ld.so: relocation target outside the image: 0x");
+            write_hex(a);
+            die(b"\n")
+        }
+    }
+}
+
+unsafe fn rd_u8(va: u64) -> u8 {
+    unsafe { ptr::read(va as *const u8) }
+}
+
+unsafe fn rd_u16(va: u64) -> u16 {
+    unsafe { ptr::read_unaligned(va as *const u16) }
 }
 
 unsafe fn rd_u32(va: u64) -> u32 {
@@ -58,59 +152,42 @@ unsafe fn wr_u64(va: u64, v: u64) {
     unsafe { ptr::write_unaligned(va as *mut u64, v) }
 }
 
+/// A NUL-terminated string at `va`, reading at most [`SYMNAME_MAX`] bytes — a
+/// longer one is reported as too long rather than scanned into unmapped memory.
 unsafe fn cstr_va(va: u64) -> &'static [u8] {
-    unsafe {
-        let mut n = 0usize;
-        while ptr::read((va + n as u64) as *const u8) != 0 {
-            n += 1;
-        }
-        core::slice::from_raw_parts(va as *const u8, n)
+    let mut n = 0usize;
+    while n < SYMNAME_MAX && unsafe { rd_u8(va + n as u64) } != 0 {
+        n += 1;
     }
+    unsafe { core::slice::from_raw_parts(va as *const u8, n) }
 }
 
-/// Value of the first `tag` in the dynamic array at `dyn_va` (a runtime VA).
-unsafe fn dyn_tag(dyn_va: u64, tag: i64) -> Option<u64> {
-    let mut p = dyn_va;
-    for _ in 0..MAX_DYN {
-        let t = unsafe { rd_u64(p) } as i64;
-        if t == DT_NULL {
-            return None;
-        }
-        if t == tag {
-            return Some(unsafe { rd_u64(p + 8) });
-        }
-        p = p.checked_add(DYN_SIZE as u64)?;
-    }
-    None
-}
-
-/// The dynamic symbol count, from the `.hash` table's `nchain` (ELF requires
-/// `DT_HASH` alongside `DT_GNU_HASH` for compatibility, and LLD emits both).
-unsafe fn sym_count(dyn_va: u64, bias: u64) -> usize {
-    match unsafe { dyn_tag(dyn_va, DT_HASH) } {
-        Some(h) => unsafe { rd_u32(bias + h + 4) as usize },
-        None => 0,
-    }
-}
-
-/// One loaded ELF object: where its dynamic array and symbol tables are, and the
-/// bias its link-time addresses are relative to (`0` for a non-PIE executable).
+/// One loaded ELF object: the link-time facts its dynamic array states, and the
+/// bias they were mapped at (`0` for a non-PIE main program). Every read adds
+/// the bias; `img_start`/`img_end` are the runtime addresses a relocation
+/// belonging to this object may write.
 #[derive(Clone, Copy)]
 struct Object {
-    dyn_va: u64,
+    /// Link-time VA of this object's dynamic array.
+    dynamic: u64,
     bias: u64,
+    /// Link-time VA of its symbol table and string table.
     symtab: u64,
     strtab: u64,
     nsym: usize,
+    img_start: u64,
+    img_end: u64,
 }
 
 impl Object {
     const EMPTY: Object = Object {
-        dyn_va: 0,
+        dynamic: 0,
         bias: 0,
         symtab: 0,
         strtab: 0,
         nsym: 0,
+        img_start: 0,
+        img_end: 0,
     };
 
     /// The name of dynamic symbol `idx`, if it is a defined global or weak.
@@ -118,39 +195,49 @@ impl Object {
         if idx as usize >= self.nsym {
             return None;
         }
-        let st = self.symtab + (idx as u64) * SYM_SIZE as u64;
+        let st = self.bias + self.symtab + (idx as u64) * SYM_SIZE as u64;
         let st_name = unsafe { rd_u32(st) };
-        let st_info = unsafe { ptr::read((st + 4) as *const u8) };
-        let st_shndx = unsafe { ptr::read_unaligned((st + 6) as *const u16) };
+        let st_shndx = unsafe { rd_u16(st + 6) };
         if st_name == 0 || st_shndx == 0 {
             return None;
         }
-        let bind = st_info >> 4;
+        let bind = unsafe { rd_u8(st + 4) } >> 4;
         if bind != 1 && bind != 2 {
             // STB_GLOBAL, STB_WEAK
             return None;
         }
-        Some(unsafe { cstr_va(self.strtab + st_name as u64) })
-    }
-
-    /// The name of dynamic symbol `idx`, defined or not (for a relocation's
-    /// symbol).
-    unsafe fn name_of(&self, idx: u32) -> Option<&'static [u8]> {
-        if idx == 0 || idx as usize >= self.nsym {
-            return None;
-        }
-        let st = self.symtab + (idx as u64) * SYM_SIZE as u64;
-        let st_name = unsafe { rd_u32(st) };
-        if st_name == 0 {
-            return None;
-        }
-        Some(unsafe { cstr_va(self.strtab + st_name as u64) })
+        Some(unsafe { cstr_va(self.bias + self.strtab + st_name as u64) })
     }
 
     /// The runtime address of this object's `idx`th symbol (for definitions).
     unsafe fn value_of(&self, idx: u32) -> u64 {
-        let st = self.symtab + (idx as u64) * SYM_SIZE as u64;
+        let st = self.bias + self.symtab + (idx as u64) * SYM_SIZE as u64;
         self.bias + unsafe { rd_u64(st + 8) }
+    }
+
+    /// The value of the first `tag` in this object's dynamic array.
+    unsafe fn dyn_tag(&self, tag: i64) -> Option<u64> {
+        let mut p = self.bias + self.dynamic;
+        for _ in 0..MAX_DYN {
+            let t = unsafe { rd_u64(p) } as i64;
+            if t == DT_NULL {
+                return None;
+            }
+            if t == tag {
+                return Some(unsafe { rd_u64(p + 8) });
+            }
+            p = p.checked_add(DYN_SIZE as u64)?;
+        }
+        None
+    }
+
+    /// The dynamic symbol count, from the `.hash` table's `nchain` (ELF requires
+    /// `DT_HASH` alongside `DT_GNU_HASH` for compatibility, and LLD emits both).
+    unsafe fn sym_count(&self) -> usize {
+        match unsafe { self.dyn_tag(DT_HASH) } {
+            Some(h) => unsafe { rd_u32(self.bias + h + 4) as usize },
+            None => 0,
+        }
     }
 }
 
@@ -168,65 +255,91 @@ unsafe fn find_symbol(objects: &[Object], name: &[u8]) -> Option<u64> {
     None
 }
 
-/// Apply a `RELA` range at runtime VA `rela_va` spanning `bytes`.
-unsafe fn apply_rela(objects: &[Object], owner: &Object, rela_va: u64, bytes: usize) {
-    let count = bytes / RELA_SIZE;
-    for i in 0..count {
-        let p = rela_va + (i as u64) * RELA_SIZE as u64;
-        let r_offset = unsafe { rd_u64(p) };
-        let r_info = unsafe { rd_u64(p + 8) };
-        let r_addend = unsafe { rd_u64(p + 16) } as i64;
-        let typ = (r_info & 0xffff_ffff) as u32;
-        let sym = (r_info >> 32) as u32;
-        let at = owner.bias + r_offset;
-        match typ {
-            8 => unsafe { wr_u64(at, owner.bias.wrapping_add(r_addend as u64)) }, // RELATIVE
-            1 | 6 | 7 => {
-                // R_X86_64_64, GLOB_DAT, JUMP_SLOT
-                let name = unsafe { owner.name_of(sym) };
-                match name.and_then(|n| unsafe { find_symbol(objects, n) }) {
-                    Some(addr) => unsafe { wr_u64(at, addr.wrapping_add(r_addend as u64)) },
-                    None => die(b"ld.so: unresolved symbol\n"),
-                }
-            }
-            _ => die(b"ld.so: unsupported relocation\n"),
+/// The image a relocation walk writes to: one loaded object's tables, read
+/// through the real mapping, bounded to that object's own span of memory.
+struct GuestImage {
+    base: u64,
+    symtab: u64,
+    strtab: u64,
+    nsym: usize,
+    start: u64,
+    end: u64,
+}
+
+impl GuestImage {
+    fn of(obj: &Object) -> Self {
+        Self {
+            base: obj.bias,
+            symtab: obj.symtab,
+            strtab: obj.strtab,
+            nsym: obj.nsym,
+            start: obj.img_start,
+            end: obj.img_end,
         }
     }
 }
 
-/// Relocate one object: its own `RELATIVE`/`GLOB_DAT` tables, then its PLT.
-unsafe fn relocate(objects: &[Object], o: &Object) {
-    if let Some(rela) = unsafe { dyn_tag(o.dyn_va, DT_RELA) } {
-        let sz = unsafe { dyn_tag(o.dyn_va, DT_RELASZ).unwrap_or(0) };
-        unsafe { apply_rela(objects, o, o.bias + rela, sz as usize) };
+impl RelocImage for GuestImage {
+    fn rela(&self, table_va: u64, index: usize) -> Option<Rela> {
+        let p = self
+            .base
+            .checked_add(table_va)?
+            .checked_add((index * RELA_SIZE) as u64)?;
+        Some(Rela {
+            r_offset: unsafe { rd_u64(p) },
+            r_info: unsafe { rd_u64(p + 8) },
+            r_addend: unsafe { rd_u64(p + 16) } as i64,
+        })
     }
-    if let Some(jmprel) = unsafe { dyn_tag(o.dyn_va, DT_JMPREL) } {
-        let sz = unsafe { dyn_tag(o.dyn_va, DT_PLTRELSZ).unwrap_or(0) };
-        let kind = unsafe { dyn_tag(o.dyn_va, DT_PLTREL).unwrap_or(DT_RELA as u64) };
-        if kind != DT_RELA as u64 {
-            die(b"ld.so: DT_REL PLT (unexpected)\n");
+
+    fn sym_name(&self, idx: u32, out: &mut SymName) -> Result<(), SymError> {
+        if idx as usize >= self.nsym {
+            return Err(SymError::Missing);
         }
-        unsafe { apply_rela(objects, o, o.bias + jmprel, sz as usize) };
+        let st = self.base + self.symtab + (idx as u64) * SYM_SIZE as u64;
+        let st_name = unsafe { rd_u32(st) };
+        if st_name == 0 {
+            return Err(SymError::Missing);
+        }
+        let name = unsafe { cstr_va(self.base + self.strtab + st_name as u64) };
+        // `cstr_va` stops at `SYMNAME_MAX` without seeing a NUL, so a name that
+        // long is one that might be longer still.
+        if name.len() == SYMNAME_MAX || !out.set(name) {
+            return Err(SymError::TooLong);
+        }
+        Ok(())
+    }
+
+    fn bias(&self) -> u64 {
+        self.base
+    }
+
+    fn store(&mut self, va: u64, value: u64) -> bool {
+        if va < self.start || va.checked_add(8).is_none_or(|e| e > self.end) {
+            return false;
+        }
+        unsafe { wr_u64(va, value) };
+        true
     }
 }
 
 /// Map one shared object's segments at `base` and read its dynamic tables.
-fn map_object(fd: i32, base: u64) -> Option<Object> {
+fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
     let mut hdr = [0u8; PAGE as usize];
     let n = minix_rt::read(fd, &mut hdr);
     if n < 64 {
-        return None;
+        return Err(LoadError::NotObject);
     }
-    let elf = match Elf::new(&hdr[..n as usize]) {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-    if elf.e_machine() != EM_X86_64 {
-        return None;
+    let elf = Elf::new(&hdr[..n as usize]).map_err(|_| LoadError::NotObject)?;
+    if elf.e_machine() != EM_X86_64 || elf.e_type() != ET_DYN {
+        return Err(LoadError::NotObject);
     }
 
+    let (lo, hi) = image_extent(&elf).ok_or(LoadError::NotObject)?;
+    let base = alloc.reserve(hi - lo).ok_or(LoadError::NoSpace)?;
+
     for i in 0..elf.e_phnum() as usize {
-        let p = elf.phdr(i)?;
+        let p = elf.phdr(i).ok_or(LoadError::NotObject)?;
         if p.p_type != PT_LOAD || p.p_memsz == 0 {
             continue;
         }
@@ -252,28 +365,30 @@ fn map_object(fd: i32, base: u64) -> Option<Object> {
             )
         };
         if r.is_null() || r as u64 != va {
-            return None;
+            return Err(LoadError::NotObject);
         }
     }
 
-    let dynp = elf.dynamic_phdr()?;
-    let dyn_va = base + dynp.p_vaddr;
-    let symtab = base + unsafe { dyn_tag(dyn_va, DT_SYMTAB)? };
-    let strtab = base + unsafe { dyn_tag(dyn_va, DT_STRTAB)? };
-    let nsym = unsafe { sym_count(dyn_va, base) };
-    Some(Object {
-        dyn_va,
+    let dynp = elf.dynamic_phdr().ok_or(LoadError::NoDynamic)?;
+    let mut obj = Object {
+        dynamic: dynp.p_vaddr,
         bias: base,
-        symtab,
-        strtab,
-        nsym,
-    })
+        symtab: 0,
+        strtab: 0,
+        nsym: 0,
+        img_start: base + lo,
+        img_end: base + hi,
+    };
+    obj.symtab = unsafe { obj.dyn_tag(DT_SYMTAB) }.ok_or(LoadError::NoDynamic)?;
+    obj.strtab = unsafe { obj.dyn_tag(DT_STRTAB) }.ok_or(LoadError::NoDynamic)?;
+    obj.nsym = unsafe { obj.sym_count() };
+    Ok(obj)
 }
 
 /// Open a `DT_NEEDED` name from the search path and map it.
-fn load(name: &[u8]) -> Option<Object> {
+fn load(name: &[u8], alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
     if name.len() + 16 > 128 {
-        return None;
+        return Err(LoadError::CannotLoad);
     }
     let mut path = [0u8; 128];
     for dir in SEARCH_PATH {
@@ -285,11 +400,31 @@ fn load(name: &[u8]) -> Option<Object> {
             continue;
         }
         let fd = fd as i32;
-        let obj = map_object(fd, DSO_BASE);
+        let obj = read_and_map(fd, alloc);
         minix_rt::close(fd);
         return obj;
     }
-    None
+    Err(LoadError::CannotLoad)
+}
+
+/// Relocate one object: its own `RELATIVE`/`R_*_64` tables, then its PLT.
+fn relocate(objects: &[Object], owner: &Object) -> Result<(), LoadError> {
+    let mut img = GuestImage::of(owner);
+    let mut resolve = |name: &[u8]| unsafe { find_symbol(objects, name) };
+
+    if let Some(rela) = unsafe { owner.dyn_tag(DT_RELA) } {
+        let sz = unsafe { owner.dyn_tag(DT_RELASZ).unwrap_or(0) };
+        apply_table(&mut img, rela, sz as usize, &mut resolve).map_err(LoadError::Reloc)?;
+    }
+    if let Some(jmprel) = unsafe { owner.dyn_tag(DT_JMPREL) } {
+        let sz = unsafe { owner.dyn_tag(DT_PLTRELSZ).unwrap_or(0) };
+        let kind = unsafe { owner.dyn_tag(DT_PLTREL).unwrap_or(DT_RELA as u64) };
+        if kind != DT_RELA as u64 {
+            return Err(LoadError::DtRel);
+        }
+        apply_table(&mut img, jmprel, sz as usize, &mut resolve).map_err(LoadError::Reloc)?;
+    }
+    Ok(())
 }
 
 /// Load every `DT_NEEDED` of `main`, relocate everything, and return the main
@@ -303,62 +438,83 @@ pub unsafe fn run(main_hdr: u64) -> u64 {
     let hdr = unsafe { core::slice::from_raw_parts(main_hdr as *const u8, PAGE as usize) };
     let elf = match Elf::new(hdr) {
         Ok(e) => e,
-        Err(_) => die(b"ld.so: main header page is not ELF\n"),
+        Err(_) => die_load(LoadError::NotElf),
     };
-    if elf.bytes()[..4] != ELF64_MAGIC {
-        die(b"ld.so: main magic\n");
+    if elf.e_machine() != EM_X86_64 {
+        die_load(LoadError::NotElf);
     }
     let entry = elf.e_entry();
+    // Non-PIE: the main program's addresses are absolute, so its bias is 0 and
+    // its link-time tables read exactly where the image says.
+    let (main_lo, main_hi) = match image_extent(&elf) {
+        Some(e) => e,
+        None => die_load(LoadError::NotObject),
+    };
     let dynp = match elf.dynamic_phdr() {
         Some(p) => p,
-        None => die(b"ld.so: main has no PT_DYNAMIC\n"),
+        None => die_load(LoadError::NoDynamic),
     };
 
-    // Non-PIE: the main's dynamic tables are at absolute addresses.
-    let dyn_va = dynp.p_vaddr;
-    let main = Object {
-        dyn_va,
+    let mut main = Object {
+        dynamic: dynp.p_vaddr,
         bias: 0,
-        symtab: unsafe { dyn_tag(dyn_va, DT_SYMTAB).unwrap_or(0) },
-        strtab: unsafe { dyn_tag(dyn_va, DT_STRTAB).unwrap_or(0) },
-        nsym: unsafe { sym_count(dyn_va, 0) },
+        symtab: 0,
+        strtab: 0,
+        nsym: 0,
+        img_start: main_lo,
+        img_end: main_hi,
     };
+    main.symtab = match unsafe { main.dyn_tag(DT_SYMTAB) } {
+        Some(v) => v,
+        None => 0,
+    };
+    main.strtab = match unsafe { main.dyn_tag(DT_STRTAB) } {
+        Some(v) => v,
+        None => 0,
+    };
+    main.nsym = unsafe { main.sym_count() };
 
     let mut objects = [Object::EMPTY; MAX_OBJECTS];
     objects[0] = main;
     let mut nobj = 1usize;
+    let mut alloc = BaseAlloc::new();
 
-    // Load each DT_NEEDED.
-    let mut p = dyn_va;
+    // Load each DT_NEEDED. `main.bias` is 0 here, but the walk is written in the
+    // object's own terms so the same code would follow a biased object's list.
     let mut needed = 0usize;
+    let mut p = main.bias + main.dynamic;
     for _ in 0..MAX_DYN {
         let t = unsafe { rd_u64(p) } as i64;
         if t == DT_NULL {
             break;
         }
         if t == DT_NEEDED {
-            let name = unsafe { cstr_va(main.strtab + rd_u64(p + 8)) };
             if needed >= MAX_NEEDED || nobj >= MAX_OBJECTS {
-                die(b"ld.so: too many objects\n");
+                die_load(LoadError::TooManyObjects);
             }
+            let name = unsafe { cstr_va(main.bias + main.strtab + rd_u64(p + 8)) };
             needed += 1;
-            match load(name) {
-                Some(o) => {
+            match load(name, &mut alloc) {
+                Ok(o) => {
                     objects[nobj] = o;
                     nobj += 1;
                 }
-                None => die(b"ld.so: cannot load DT_NEEDED\n"),
+                Err(e) => die_load(e),
             }
         }
         p += DYN_SIZE as u64;
     }
 
     let loaded = &objects[..nobj];
-    // Objects first (their own RELATIVE fixups), then the main's PLT.
+    // Objects first (their own RELATIVE fixups), then the main program's PLT.
     for o in &loaded[1..] {
-        unsafe { relocate(loaded, o) };
+        if let Err(e) = relocate(loaded, o) {
+            die_load(e);
+        }
     }
-    unsafe { relocate(loaded, &main) };
+    if let Err(e) = relocate(loaded, &main) {
+        die_load(e);
+    }
 
     entry
 }

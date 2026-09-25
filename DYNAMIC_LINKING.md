@@ -1,9 +1,9 @@
 # Dynamic linking for minixrs — implementation proposal
 
-Status: **proposal — design settled, Phase 0 built** (on `feature/ldso`). Every claim below
-about the port was read out of the tree at the time of writing; every claim about MINIX
-3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as built*
-record where the implementation revised the draft.
+Status: **proposal — design settled, Phases 0–1 built** (on `feature/ldso`). Every claim
+below about the port was read out of the tree at the time of writing; every claim about
+MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
+built* record where the implementation revised the draft.
 
 Related: [`FILEMMAP.md`](FILEMMAP.md) (the exec/mmap substrate this builds on),
 [`PORTING_PLAN.md`](PORTING_PLAN.md) (phase tracker), [`C_BUILD.md`](C_BUILD.md) (the
@@ -326,9 +326,9 @@ In the ELF arm, after reading the headers of the path VFS was given:
 `vmfd`s are tracked separately: a failure before mapping closes whichever fd no region has
 taken, and on success VM owns every fd a region took (it closes the last one to die).
 
-Phase 0 also implements `RELATIVE` in the loader (Appendix A) although `libdyn.so` carries
-no relocations — any object with a data address needs it, and it is exercised from Phase 1
-onward.
+Phase 0 also implemented `RELATIVE` in the loader (Appendix A) although its one object
+carried no relocations — any object with a data address needs it. Phase 1 gives each object
+one (a `const` pointer's initialiser), so the gate exercises it rather than trusting it.
 
 ### 6.4 Image manifest: a loader and a `.so` list
 
@@ -340,9 +340,9 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
   **both** images (which answers open question 5), with `cargo:rerun-if-env-changed` so
   turning it off restores an artifact-free image. Destinations must start with `/bin/`,
   `/sbin/`, `/lib/` or `/libexec/`; `MSYS2_ENV_CONV_EXCL` covers the Windows conversion.
-- The gate sets it to `/libexec/ld.so`, `/lib/libdyn.so` and `/bin/dynhello`. The `.so`
-  keeps the name its `DT_NEEDED` names, so no soname symlink is needed: the loader's search
-  path is literal (`crates/ldso/src/rtld.rs`).
+- The gate sets it to `/libexec/ld.so`, `/lib/libdyn.so`, `/lib/libdyn2.so` and
+  `/bin/dynhello`. The objects keep the names their `DT_NEEDED` entries use, so no soname
+  symlink is needed: the loader's search path is literal (`crates/ldso/src/rtld.rs`).
 - `boot-image` gains `/lib` and `/libexec`: unconditionally in the initramfs (`cpio.rs`,
   part of the base layout, because the loader must be reachable before `mount_root`) and in
   the MinixFS image only when a file needs one, created *after* every other directory so no
@@ -400,21 +400,47 @@ whole line `dynlink-ok` on the serial log — a string that exists only in `/lib
 The negative check first asserts it is **absent** from `/bin/dynhello` (`grep -q`), which
 is what makes the boot evidence about the loader rather than about the program.
 
-### Phase 1 — PIC/`ET_DYN`, real bases, `RELATIVE`
+### Phase 1 — PIC/`ET_DYN`, real bases, `RELATIVE` — **done**
 
-- DSOs (and optionally the main program) become PIC `ET_DYN`; the loader gains a
-  deterministic base allocator and processes `RELATIVE` (+ `R_*_64`, `IRELATIVE` if LLD
-  emits it).
-- Main program's `AT_BASE` if it becomes PIE (this is the first real consumer of auxv,
-  D9/§6.2) — or keep the main program non-PIE and defer auxv again.
+- DSOs are PIC `ET_DYN` mapped by a deterministic base allocator, and the loader applies
+  each object's `RELATIVE` (plus `R_X86_64_64`, `GLOB_DAT`, `JUMP_SLOT`).
+- The main program stays non-PIE, so `AT_BASE`/auxv is deferred again (D9) — the choice the
+  line above allowed.
 
-Gate: the Phase 0 scenario with a PIC `.so`; a host unit test over a synthetic ET_DYN
-image asserting each reloc type is applied exactly once and to the right offset.
+As built:
+
+- The base allocator and the image extent are pure address policy in
+  `crates/ldso/src/layout.rs` (host-tested): the first `DT_NEEDED` lands at
+  `DSO_BASE = 0x0200_0000`, each later one above the previous object's highest page plus a
+  gap, and nothing is placed at or above `DSO_LIMIT` (the loader's own base). The gap is
+  what makes an access past one object fault instead of landing in its neighbour.
+- The relocation walk moved into `reloc.rs` behind a `RelocImage` trait (relocation table,
+  symbol name, store), so it is host-tested against a synthetic `ET_DYN` image while the
+  loader implements the same trait over real memory. A store is bounded to the object's own
+  extent, so a relocation cannot write outside the object that owns it.
+- The gate's program needs **two** objects, which is the only way the allocator is exercised
+  in the guest: `libdyn.so` and `libdyn2.so` (one `RELATIVE` each) and three `JUMP_SLOT`s in
+  the main. The strings live only in the objects, and the program's single output line holds
+  one value per mechanism.
+- `R_X86_64_COPY` is **not** implemented, and that is why the test program reaches libdyn's
+  data through a function: a non-PIE executable's reference to a variable defined in a
+  shared object produces a COPY. The loader refuses it with a message naming it rather than
+  ignoring it, because an ignored COPY leaves the variable holding nothing.
+
+Gate (`just test-dynlink-x86`, still one boot): `/bin/dynhello` prints
+`dynlink-ok dynlink-data dynlink-2-ok` — a `JUMP_SLOT` into each object plus libdyn's own
+`RELATIVE` — and each string is asserted **absent** from the program. Host side,
+`cargo test -p ldso`: every relocation type the loader claims, applied once at its own
+offset with the rest of the image unchanged; the base allocator and the extent; and the
+refusal paths (unsupported type, unknown symbol, a target outside the image, a table size
+that is not whole entries).
 
 ### Phase 2 — coverage, TLS, fork/exec
 
-- Full reloc/symbol coverage (`COPY`, weak/undefined symbols, `DT_INIT_ARRAY` ordering),
-  search path + `LD_LIBRARY_PATH`, `AT_PAGESZ`.
+- Full reloc/symbol coverage (`COPY` — reachable the moment a non-PIE program names a
+  DSO's data, and refused by name today — plus weak/undefined symbols and
+  `DT_INIT_ARRAY` ordering), following a DSO's own `DT_NEEDED` transitively, search path +
+  `LD_LIBRARY_PATH`, `AT_PAGESZ`.
 - Static TLS across modules, or the D8 rejection if not yet implemented.
 - `fork` after load (should already work — `vm_clone` copies regions verbatim and the
   kernel COWs the PT; **verify**, don't assume) and re-`exec`.
