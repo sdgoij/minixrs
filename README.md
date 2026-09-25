@@ -16,7 +16,10 @@ that build, and CI builds and boots the same artifacts on every push.
 VFS mounts the root filesystem, MFS reads and writes files, and the shell supports
 `>` redirection (create/truncate) for builtin commands **and external binaries**
 (exec'd commands write through VFS via a dup2'd fd, so `/bin/echo x > file` works).
-Pipes are not wired into the shell parser yet.
+Alongside `>` the builtin shell handles `|` pipelines (up to eight stages), `&&`
+chaining and trailing `&` background jobs. It is deliberately kept small: GNU bash is
+the full shell (built by the fork's stage1 and injected as `/bin/bash`, see below), so
+the root shell does not need to grow into one.
 
 See `.agents/skills/` for domain-specific documentation and
 [PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
@@ -35,9 +38,37 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
 - **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three hardware arches (x86_64, RISC-V64, AArch64).
 - **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
 - **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
-- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port.
+- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
 - **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
+
+## coreutils
+
+`/bin/coreutils` is the port's real toolchain: one multicall binary built from the
+[`uutils/coreutils`](https://github.com/uutils/coreutils) fork in `coreutils/`, whose **60
+applets** are the subset named by the `feat_minix` feature set in `coreutils/Cargo.toml`. It is
+embedded in the image on **x86_64** and **riscv64**. **aarch64** builds it
+(`just coreutils-aarch64`, which needs the port's own `cc` for blake3's NEON path) but the image
+does not carry it yet, because an applet that allocates heavily — `coreutils seq 200` —
+intermittently writes nothing there (KNOWN_ISSUES aarch64 #9). wasm32 does not build it at all:
+the multicall links the std PAL, which the browser target does not.
+
+The applets run as `coreutils <name> [args]`; the multicall also dispatches on its own
+`argv[0]`, so a link named for an applet works too. The OS has no kernel entropy source, so
+`coreutils/src/bin/coreutils.rs` registers a weak SplitMix64 RNG for the applets that want one
+(`factor`, `seq`, `shuf`, `sort`) until it grows one. The link is stripped and `opt-level=z` to
+keep the ~6 MiB binary inside the default 16 MiB minixfs.
+
+`just test-coreutils-wedge` is the acceptance gate — the scenario in
+`tools/smoke/coreutils-wedge.tsv` has `coreutils seq 3` write three lines and the next tool read
+them back, the reproducer for the wedge that once left a child dead at its ELF entry
+(KNOWN_ISSUES item 12). It runs in QEMU on x86_64, and the same scenario has also been run green
+on riscv64.
+
+The excluded applets are the ones the port cannot run yet: `chmod` and `touch` need
+`std::os::unix` mode bits and `filetime`, `rm` pulls in `console` with no non-`unix` fallback,
+and `pwd` and `mktemp` need a working `std::env::current_dir` (KNOWN_ISSUES item 24). The OS
+ships its own `/bin/chmod`, `/bin/rm` and friends for those.
 
 ## Quick Start
 

@@ -377,6 +377,26 @@ the timer is armed, and the accounting runs for either mode while the SPP check
 still decides whether the tick may switch. `just test-boot riscv64` now prints
 `ALL TESTS PASSED`.
 
+**The multicall now travels with two of the images.** `/bin/coreutils` (the uutils
+multicall, 60 applets under `feat_minix`) was embedded on x86_64 alone: `just
+coreutils-riscv64` and `just coreutils-aarch64` existed but nothing depended on them
+and neither copied its binary into the directory the kernel embeds from, so no image
+they built could carry it. Both copy it there now and `build-riscv64`/`build-aarch64`
+depend on them — except aarch64, which is deliberately left out (below).
+
+riscv64's ships: the same `test-coreutils-wedge` scenario the x86 gate runs passes
+10/10 in a riscv64 guest. aarch64's does not, so it is built but not embedded:
+`coreutils seq 3` prints, but `seq 20` (and 100/200/1000) intermittently writes
+*nothing at all* — an empty file, no error, no signal the shell reports — and the wedge
+scenario failed 0/3 aarch64 boots (KNOWN_ISSUES aarch64 #9 has the measurements). The
+exclusion is one line in `crates/kernel/build.rs`.
+
+aarch64 is also the only target whose multicall needs a C compiler at all: blake3's
+aarch64 path compiles `blake3_neon.c` unconditionally, where x86 falls back to Rust
+intrinsics when no `cc` is present and riscv64 has no SIMD path. `coreutils-aarch64`
+runs it under the port's own `tools/cc-minix.py aarch64` (with `llvm-ar` where there is
+no `ar`, `ar` otherwise) — the same hermetic C compile bash's build uses.
+
 ## Traps
 
 - **The rlib has two builders, and each thinks its own build is current.**

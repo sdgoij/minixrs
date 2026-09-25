@@ -167,18 +167,29 @@ coreutils-x86:
 coreutils-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target riscv64gc-unknown-minix --no-default-features --features feat_minix
+    cp coreutils/target/riscv64gc-unknown-minix/release/coreutils target/riscv64gc-unknown-minix/release/coreutils
 
+# Built (and needed to reproduce the bug) but *not* embedded: the aarch64 multicall
+# intermittently writes no output at all — see KNOWN_ISSUES aarch64 #9 — so the image
+# does not carry it yet.
 coreutils-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
+    # blake3's aarch64 path compiles `blake3_neon.c` unconditionally, while x86 falls
+    # back to Rust intrinsics when no `cc` is found and riscv64 has no SIMD path at
+    # all — so aarch64 is the one target whose multicall needs a C compiler. It is the
+    # port's own, told the arch (`tools/cc-minix.py`), with an archiver for the object:
+    # `llvm-ar` where it exists (MSYS has no `ar`), binutils' `ar` otherwise (a Linux
+    # runner). Both are named bare, so cc-rs resolves them on PATH.
+    AR_aarch64_unknown_minix="$(command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo ar)" CC_aarch64_unknown_minix="python3 {{ROOT}}/tools/cc-minix.py aarch64" RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
+    cp coreutils/target/aarch64-unknown-minix/release/coreutils target/aarch64-unknown-minix/release/coreutils
 
 # ---------- build ----------
 
 build target="x86":
     @just build-{{target}}
 
-# build-x86* embeds /bin/coreutils (kernel build.rs requires it on x86_64),
-# so the multicall must be built and copied into the shared target dir first.
+# build-x86* embeds /bin/coreutils, so the multicall must be built and copied
+# into the shared target dir first.
 build-x86: userland-x86 coreutils-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
@@ -194,7 +205,7 @@ build-x86-boot: userland-x86 coreutils-x86
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
 
-build-riscv64: userland-riscv64
+build-riscv64: userland-riscv64 coreutils-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
 build-aarch64: userland-aarch64
@@ -411,13 +422,13 @@ _assert-qemu-version emulator:
     @command -v {{emulator}} > /dev/null || (echo "!! {{emulator}} is not on PATH." >&2; exit 1)
     @v=$({{emulator}} --version 2>/dev/null | sed -n '1s/^QEMU emulator version \([0-9][0-9.]*\).*/\1/p'); major=${v%%.*}; if [ -z "$major" ] || [ "$major" -lt {{qemu-min-version}} ]; then echo "!! {{emulator}} is version ${v:-unknown}; the suites need QEMU {{qemu-min-version}} or newer - older emulators hang the aarch64 boot suite." >&2; exit 1; fi
 
-build-riscv64-test: userland-riscv64
+build-riscv64-test: userland-riscv64 coreutils-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
 
 build-aarch64-test: userland-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-test --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
 
-build-riscv64-boot: userland-riscv64
+build-riscv64-boot: userland-riscv64 coreutils-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-boot --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
 
 build-aarch64-boot: userland-aarch64

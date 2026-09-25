@@ -61,13 +61,18 @@ fn assemble(
     // top-level `just build <target>` recipes).
     let mut bins = Vec::new();
     for &(dest, bin_name) in manifest::BOOT_BINS {
-        // The C smoke-test binaries (helloc/ctest) and the uutils multicall
-        // (coreutils) are carried by the x86_64 images only: the multicall is
-        // built from the coreutils submodule for that arch alone, and these are
-        // the images this tool chain assembles first. They *build* for every arch
-        // now (`just build-c-hello <arch>`), so this gate is about what an image
-        // carries rather than about what can be built.
-        if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/coreutils") && t.arch != "x86_64" {
+        // The C smoke-test binaries (helloc/ctest) are carried by the x86_64
+        // images only. They *build* for every arch (`just build-c-hello <arch>`),
+        // so this gate is about what an image carries rather than about what can
+        // be built.
+        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+            continue;
+        }
+        // The uutils multicall is embedded on x86_64 and riscv64. aarch64 *builds*
+        // it (`just coreutils-aarch64`, which needs the port's own `cc` for
+        // blake3's NEON path) but must not carry it yet: `coreutils seq 200` on
+        // aarch64 silently writes an empty file (KNOWN_ISSUES aarch64 #9).
+        if dest == "/bin/coreutils" && t.arch == "aarch64" {
             continue;
         }
         let src = release.join(bin_name);

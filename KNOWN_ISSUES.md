@@ -1435,6 +1435,31 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `Mcontext::from_frame`/`write_into_frame` where the host can test it.
    `tpidr_el0` is not in the frame at all: the kernel keeps it in `Proc::p_tls`
    and reloads it on every switch.
+9. **`/bin/coreutils` is built but not embedded on aarch64: it loses output
+   (2026-09-25, open — measured).** `coreutils seq 3` prints its three lines, but
+   `coreutils seq 20` (and 100/200/1000) intermittently writes **nothing** — an
+   empty file when redirected, no error, no signal the shell reports — while the
+   same scenario passes 10/10 on riscv64 and is the green gate on x86_64. Over
+   three boots the prompt-paced `tools/smoke/coreutils-wedge.tsv` scenario failed
+   all three times on aarch64 (it never got past `seq 200`) and the riscv64 runs
+   of it were 6/6. A whole output going missing with no diagnostic is the shape of
+   KNOWN_ISSUES 12 — whose x86 cause was the kernel clobbering a live process's XMM
+   registers on entry — but aarch64 is *not* that mechanism: its EL0 sync and IRQ
+   handlers already save and restore the caller-saved SIMD registers (`q0`-`q7`,
+   `q16`-`q31`) on every trap (`crates/arch-aarch64/src/exception.rs`), and `seq 3`
+   working while larger runs do not points at the allocation-heavy startup path, not
+   at a register. So the multicall *builds* for aarch64 (`just coreutils-aarch64`,
+   which needs an explicit `CC`/`AR` for blake3's NEON C — x86 falls back to Rust
+   intrinsics when no `cc` is found and riscv64 has no SIMD path, so aarch64 is the
+   only target whose multicall needs a C compiler at all) but the image deliberately
+   does not carry it: `crates/kernel/build.rs` skips `/bin/coreutils` on aarch64
+   alone, and the recipe is left in place for the bug hunt. Reproducer:
+   `just coreutils-aarch64`, then `FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh
+   tools/smoke/feed.sh <log> 90 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m
+   256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev
+   user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device
+   -device virtio-keyboard-device -kernel
+   target/aarch64-unknown-minix/release/kernel-boot-aarch64`.
 
 ---
 
