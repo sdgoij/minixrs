@@ -370,6 +370,21 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (x86_64)"
 
+# Measure whether two processes that map one object through the loader share its
+# physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
+# the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
+# same dynamic image, `libc.so` mapped by the loader in each), then walks both
+# processes' page tables from outside the guest and compares the frames behind the
+# object's pages. It is a probe and not a gate: as first run it reports FAIL, and
+# the failure is the finding (`DYNAMIC_LINKING.md` §7 Phase 5 says what it means
+# and where the cause is).
+probe-dso-share-x86: dynlink-x86
+    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/dso_share_probe.py
+
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf

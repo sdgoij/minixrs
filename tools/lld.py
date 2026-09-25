@@ -76,6 +76,36 @@ def build_dirs(host: str) -> "list[pathlib.Path]":
     return dirs
 
 
+def find_nm() -> "pathlib.Path | None":
+    """The `llvm-nm` to read a minix image's symbols with, or None.
+
+    Same candidates as `find_lld`, and for the same reason: the LLVM a build
+    downloaded is where the linker came from, and its `llvm-nm` is beside it. The
+    host tools use it to read a struct layout out of the image rather than
+    hardcoding one (`tools/dso_share_probe.py`).
+    """
+    override = os.environ.get("MINIXRS_LLVM_NM")
+    if override:
+        path = pathlib.Path(override)
+        if not path.is_file():
+            # Not a reason to silently read the symbols with something else.
+            print(
+                f"error: MINIXRS_LLVM_NM is {override}, which is not a file",
+                file=sys.stderr,
+            )
+            return None
+        return path
+
+    for build in build_dirs(host_triple()):
+        for bin_dir in (build / "ci-llvm" / "bin", build / "lld" / "bin"):
+            nm = bin_dir / exe("llvm-nm")
+            if nm.is_file():
+                return nm
+
+    system = shutil.which("llvm-nm")
+    return pathlib.Path(system) if system else None
+
+
 def find_lld() -> "pathlib.Path | None":
     """The lld to link minix binaries with, or None when there is none."""
     override = os.environ.get("MINIXRS_LLD")

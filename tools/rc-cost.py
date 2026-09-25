@@ -27,31 +27,14 @@ not strip); one built with `-C strip=symbols`, like `coreutils`, reports nothing
 """
 
 import collections
-import os
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-def find_nm() -> str:
-    """An `llvm-nm` to read the symbols with.
-
-    `MINIXRS_LLVM_NM` overrides, the way `tools/lld.py` takes `MINIXRS_LLD`; then the
-    first one on `PATH`; then the LLVM install a Windows dev box usually has. The
-    tools run on Linux too (`just test-arches` in CI), so nothing may assume the third.
-    """
-    override = os.environ.get("MINIXRS_LLVM_NM")
-    if override:
-        return override
-    found = shutil.which("llvm-nm")
-    if found:
-        return found
-    windows = pathlib.Path(r"C:\Program Files\LLVM\bin\llvm-nm.exe")
-    if windows.is_file():
-        return str(windows)
-    sys.exit("error: no llvm-nm found (set MINIXRS_LLVM_NM, or install LLVM)")
+from lld import find_nm  # noqa: E402
 # Rust v0 mangling: `Cs` + a base-62 disambiguator + `_` + the crate name's decimal
 # length + the name. The disambiguator's length varies with its value, which is why
 # this is `+` and not a fixed width.
@@ -72,8 +55,11 @@ LAYER = {
 
 
 def analyse(path: pathlib.Path) -> None:
+    nm = find_nm()
+    if nm is None:
+        sys.exit("error: no llvm-nm to read the symbols with (set MINIXRS_LLVM_NM)")
     out = subprocess.run(
-        [find_nm(), "--print-size", str(path)], capture_output=True, text=True
+        [str(nm), "--print-size", str(path)], capture_output=True, text=True
     ).stdout
     instantiated = 0
     layer = 0

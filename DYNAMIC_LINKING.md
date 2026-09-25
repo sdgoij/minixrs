@@ -1,6 +1,7 @@
 # Dynamic linking for minixrs — implementation proposal
 
-Status: **proposal — design settled, Phases 0–3 built, Phase 4 decided (dropped)** (on
+Status: **proposal — design settled, Phases 0–3 built, Phase 4 decided (dropped), Phase 5
+measured (fails, cause found)** (on
 `feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
@@ -18,10 +19,11 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
   (`FILEMMAP.md`) and **userland `mmap` with `MAP_FIXED` and `MAP_SHARED`**
   (`vm/mod.rs::do_mmap`, `finish_mmap_file`). So this is an *addition* to a working
   substrate, not a replacement of it.
-- **The payoff is nearly free.** VM already caches and shares read-only file pages
-  across processes (`vm/cache.rs`, consulted by `start_file_page`), so a DSO's `.text`
-  is shared the moment a loader maps it read-only — no new VM code. Phase 5 is
-  measurement plus that mapping discipline (§5 D7, §7 Phase 5).
+- **The payoff is not free after all.** The port has a file page cache and consults it
+  before allocating a frame (`vm/cache.rs`, `start_file_page`), but the cache is **empty**:
+  `cache_insert` refuses `dev == 0` (C's `NO_DEV`) and this port's root filesystem is
+  mounted with device 0, so nothing is ever cached and no file-backed frame is shared.
+  Measured, not inferred — Phase 5 (§7) has the run and the two fixes it needs.
 - The kernel ELF loader needs almost no change: the **exec path never checks `e_type`**
   (`servers/src/vfs/exec.rs::pm_exec` reads `PT_LOAD`s directly), and DSOs are mapped by
   *userland* `mmap`, not by `parse_elf_header`. The one kernel-side edit is a register
@@ -85,14 +87,16 @@ add the machinery, change no default.
 
 ### 2.2 What it actually buys the port
 
-- **Shared text between processes.** Two processes running the *same* binary already
-  share its text: exec maps read-only `VR_FILE` regions and VM looks its file page cache
-  up before allocating a frame (`crates/servers/src/vm/mod.rs:1251`,
-  `cacheable = (!writable || shared) && …`). So the DSO case is **different** binaries
-  sharing one object's text — which is what a C library buys, and what Phase 3 delivered.
-  What stays private per process either way is the writable, relocated part
-  (`.data`/`.got`) and every monomorphised instantiation (`tools/rc-cost.py`), and that is
-  what bounds the saving. See §2.3, Phase 4's decision and Phase 5.
+- **Shared text between processes — the thing that is supposed to be.** The code path for
+  it exists: exec maps read-only `VR_FILE` regions and VM consults its file page cache
+  before allocating a frame (`crates/servers/src/vm/mod.rs:1251`,
+  `cacheable = (!writable || shared) && …`). But it is **not reached in practice** — the
+  cache is empty, so text is not shared even between two processes of the *same* binary
+  (Phase 5 measured that directly). The DSO case is therefore *different* binaries sharing
+  one object's text, which is what a C library buys and what Phase 3 delivered, and the
+  size of the saving turns on the same cache question. What stays private per process
+  regardless is the writable, relocated part (`.data`/`.got`) and every monomorphised
+  instantiation (`tools/rc-cost.py`). See §2.3, Phase 4's decision and Phase 5.
 - **Smaller C binaries and a smaller image** — for the programs that link `minix-libc`, which
   is where the copies were: `bash` and `ctest` carry it today and `libc.so` is not carried at
   all. Phase 3 is the size of it; a Rust binary's library code is largely inlined, so this does
@@ -683,33 +687,72 @@ program code is a small fraction of it. Nothing in the port is, and `tools/rc-co
 the check (give it a binary) — the same instrument Phase 5 needs. If the answer does change,
 option (a) still buys nothing by construction and option (b) is what Phase 3 delivered for C.
 
-### Phase 5 — sharing: measure, and keep the mapping discipline
+### Phase 5 — sharing: measure, and keep the mapping discipline — **measured: fails, cause found**
 
-The sharing mechanism is already in the tree — `vm/cache.rs` is a real LRU file page
-cache (4096 pages, `PhysBlock`-referenced), `start_file_page` looks a frame up in it
-before allocating, and `finish_page` inserts read-only pages that lie fully inside the
-file. So a read-only DSO page is shared across processes with **no new VM work**; this
-phase is verification plus one loader constraint:
+The draft started from the premise that sharing was already in the tree — `vm/cache.rs`
+is a real LRU file page cache, `start_file_page` looks a frame up in it before
+allocating, and `finish_page` inserts pages that lie fully inside the file — so a
+read-only DSO page would be shared with **no new VM work**, and this phase would be
+verification plus one loader constraint.
 
-- **The loader must map read-only segments read-only.** `cacheable` requires
-  `!writable`. A loader that maps a DSO `PROT_READ|PROT_WRITE` so it can patch it in
-  place gets a private copy of every page and no sharing. Map `.text`/`.rodata`
-  `PROT_READ` (`| PROT_EXEC`); leave the writable `.data`/`.got` private — that is where
-  the relocations go anyway.
-- **The last partial page of a read-only segment is private** (`file_off + page_size <=
-  file_size` fails there). Expected, one page per segment.
-- **The one thing to check first, before writing loader code**: confirm `cacheable` is
-  actually reached for the path the loader will use. Today exec segments get there
-  (`do_vfs_mmap` sets `VR_WRITABLE` only for `PF_W` segments), and a userland
-  `mmap(PROT_READ)` does too (`finish_mmap_file`). If a measurement disagrees, that is a
-  read of `start_file_page`, not a build.
-- **Measure it**: two processes running the same dynamic binary must share the `.so`'s
-  text frames. `VMIW_REGION`, the allocator probes (`tools/alloc_churn_probe.py`), and a
-  cache-size query are the tools. `VM_MAPCACHEPAGE`/`VM_SETCACHEPAGE` exist for the
-  filesystem's own block sharing and are not needed for DSO text.
+**Measurement says otherwise.** `tools/dso_share_probe.py` (recipe
+`just probe-dso-share-x86`) boots the dynamic image, runs
+`/bin/dynclib hold | /bin/dynclib hold` — two lives of the same dynamic image, `libc.so`
+mapped by the loader in each — and walks **both** processes' page tables from *outside*
+the guest, comparing the frames behind the object's pages (the two map it at the same
+address: the loader's allocator is deterministic and there is no ASLR). Result:
+
+- the object's read-only pages are mapped **read-only** — PTE `…025`: present, user,
+  accessed, no `RW` — so the loader's mapping discipline is what this phase asked for;
+- but every one of them is **private**: 13 read-only pages of `libc.so`, all different
+  frames, in the two processes;
+- and the control the probe prints with it does not rescue the reading. Of the same two
+  processes' own program text (mapped by exec, not by the loader), only the **first** page
+  is a common frame — and since the cache is empty (below), that one page is not this
+  mechanism either. Nothing file-backed is shared *through the cache*.
+
+The absence is **below the loader**, and the loader is not where to fix it.
+
+**Cause (measured, then read).** VM's file page cache is *empty* at that moment —
+`CacheTable::len() == 0`, read out of VM's own BSS from outside the guest. `cache_insert`
+refuses `dev == 0`, which is C's `NO_DEV` (`.refs/minix-3.3.0/minix/include/minix/
+const.h:126` defines it as `((dev_t) 0)`) — but **this port's root filesystem is mounted
+with device 0**: `vfs/mount.rs::mount_root` passes `dev = 0` ("root block device") and
+takes the filesystem's reply back into the vnode, and the port records the consequence
+itself at `vfs/mount.rs:408` ("the root filesystem [says] `m_dev == 0` on this port").
+The port's own `NO_DEV` sentinel is `0xffff` (`vfs/types.rs`), so 0 is a *valid* device
+here, and the C guard silently disables the cache for every file in the system.
+
+**Two things have to change together, and neither is the loader:**
+
+1. **Device 0 must stop meaning "no device".** Either mount the root with a real
+   block-device number, as C does, or key the guard off the port's own sentinel rather
+   than C's. This is the smaller question.
+2. **The cache key has to include the inode.** The lookup matches on `(dev, dev_offset)`
+   alone and only *restamps* `ino` (`vm/cache.rs::find_slot`), while `dev_offset` here is
+   a **file offset** (`start_file_page` passes `region.file_offset_at(page)`): every
+   binary's page 0, and every object's page *N*, would alias onto one entry. C avoids
+   this by consulting `find_cached_page_byino(dev, ino, offset)` on the file-fault path
+   and keeping the by-device form for the block paths
+   (`.refs/minix-3.3.0/minix/servers/vm/mem_file.c:104,207`). Do (1) without (2) and a
+   silent non-sharing becomes silently shared pages *between unrelated files*.
+
+Neither was done here: both are VM/VFS design changes on a branch whose remit was to add
+a loader, and (2) is a correctness fix that wants its own review. Until they land, a DSO
+saves address space only — its pages are private in every process that maps it.
+
+Retained from the draft, and it holds: **the loader maps read-only segments read-only.**
+`crates/ldso/src/rtld.rs::read_and_map` maps each `PT_LOAD` with `PROT_READ`
+(`| PROT_EXEC` for `PF_X`) and adds `PROT_WRITE` only for `PF_W`, so the writable
+`.data`/`.got` — where the relocations go — is the private part, as intended. The last
+partial page of a read-only segment being private
+(`file_off + page_size <= file_size` fails there, one page per segment) is expected and
+is not what this measurement shows.
 
 Gate: a measured assertion that two processes' `.so` text maps to one physical frame set
-(not a comment), on at least two arches.
+(not a comment), on at least two arches. **x86_64 is measured and fails, with the cause
+above**; the second arch is inherited by Phase 7, because `crates/ldso` has no other arch
+yet and the probe's page-table walk is x86_64's.
 
 ### Phase 6 — `dlopen`/`dlsym` (optional)
 
@@ -769,20 +812,27 @@ Three layers, matching `minix-testing`:
    on `tools/smoke/feed.sh` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
    negative assertion (§7 Phase 0 gate: the string is not in the main binary) is what
    makes the gate meaningful rather than a print that would pass either way.
+4. **QEMU measurement, not a serial-log gate** — `tools/dso_share_probe.py` (recipe
+   `just probe-dso-share-x86`) reads two processes' page tables out of guest physical
+   memory, because only the kernel knows a virtual address's frame and the loader is the
+   subject under test. It is what makes Phase 5's claim a measurement (§7 Phase 5); it is
+   not wired into `test-arches` because its first run is a FAIL that the phase records.
 
 Plus the existing suites must stay green on all three arches at every phase
 (`just test-qemu`, `just test-boot`, the smoke scenario).
 
 ## 10. Open questions
 
-1. ~~Does `VR_SHARED` actually share frames today?~~ **Answered (this pass).** Sharing is
-   not `VR_SHARED` — that flag is fork/COW semantics for `MAP_SHARED` pages
-   (`vm/cow.rs`) — but the `vm/cache.rs` file page cache, which `start_file_page`
-   consults and `finish_page` populates for read-only pages fully inside the file. So
-   read-only DSO text is shared across processes already, and Phase 5 shrinks to
-   measurement + mapping discipline. Residual question: is a per-process writable
-   `.data`/`.got` for each DSO acceptable (it is the standard cost, but it caps how much
-   a `.so` actually saves).
+1. ~~Does `VR_SHARED` actually share frames today?~~ **Answered, and corrected.** Sharing
+   is not `VR_SHARED` — that flag is fork/COW semantics for `MAP_SHARED` pages
+   (`vm/cow.rs`) — it is meant to be the `vm/cache.rs` file page cache, which
+   `start_file_page` consults and `finish_page` populates for read-only pages fully inside
+   the file. But the cache is **empty**, for the reason Phase 5 measured: `cache_insert`
+   refuses `dev == 0`, and this port mounts the root filesystem with device 0. So
+   read-only file text is *not* shared today — for a DSO or for the same binary — and
+   Phase 5 turns out to be a VM fix rather than measurement + mapping discipline.
+   Residual question, unchanged: is a per-process writable `.data`/`.got` for each DSO
+   acceptable (it is the standard cost, but it caps how much a `.so` actually saves).
 2. **Rust `std` strategy** (Phase 4): dynamic libc + static std, or dynamic `libstd`? Not
    decidable until Phase 3 costs the C ABI surface.
 3. **Main program PIE or not?** Non-PIE is simpler (no `RELATIVE` in the main, fixed
@@ -826,7 +876,9 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
 
 - `README.md` "Project Structure": add `crates/ldso`.
 - `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file.
-- `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**).
+- `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `probe-dso-share-x86`
+  (**done**, Phase 5's measurement — not in `test-arches`, since its first run is a
+  recorded FAIL).
 - `.agents/skills/minix-boot-process`: a note that a dynamic exec enters `ld.so` first —
   a future boot-chain reader will otherwise conclude the wrong process started.
 - Any `.rules` addition (per the hygiene policy, in the PR description, not inline). Two
