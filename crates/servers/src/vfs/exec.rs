@@ -30,7 +30,7 @@ use arch_common::com::VFS_PROC_NR;
 #[cfg(target_os = "minix")]
 use arch_common::com::VM_PROC_NR;
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
-use kernel::elf::{Elf64Ehdr, Elf64Phdr, PT_LOAD};
+use kernel::elf::{Elf64Ehdr, Elf64Phdr, PT_INTERP, PT_LOAD};
 
 /// Size of the VFS Fproc table (`glo::NR_PROCS`).
 #[cfg(target_os = "minix")]
@@ -97,6 +97,11 @@ const EXEC_LOAD_NEWSP_OFF: usize = 24;
 // already name the image.
 #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
 const EXEC_LOAD_PATH_PTR_OFF: usize = 56;
+// The ELF arm's occupant of the same word: the main program's ELF *header page* VA when a
+// `PT_INTERP` loader runs first, 0 for a static image. The loader reads its entry and program
+// headers from that page (see `ldso::rtld`).
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+const EXEC_LOAD_MAIN_HDR_OFF: usize = 56;
 
 // VM_EXEC_NEWMEM: target endpoint in m1i1 (payload bytes 8..12).
 // (The call number comes from arch_common::com::VM_EXEC_NEWMEM.)
@@ -109,7 +114,9 @@ const EXEC_FRAME_MAX: usize = 16384;
 /// the file through file-backed regions, so there is no executable size cap.
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const EXEC_HDR_MAX: usize = 8192;
-/// Maximum PT_LOAD segments mapped per exec (bounds the stack array).
+/// Maximum PT_LOAD segments mapped per image (bounds the stack array). An
+/// image with a `PT_INTERP` is parsed twice — the loader's margins are its
+/// own — so this is a per-image bound, not a per-exec one.
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 const MAX_EXEC_SEGS: usize = 8;
 
@@ -160,6 +167,176 @@ fn err_partial(s: i32) -> ExecResult {
         newsp: 0,
         euid: -1,
         egid: -1,
+    }
+}
+
+/// One ELF image read at exec time: its entry point, its `PT_LOAD` segments,
+/// and where its `PT_INTERP` path lives (0 when it has none).
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+struct ExecImage {
+    entry: u64,
+    /// `(p_vaddr, p_memsz, p_offset, p_filesz, p_flags)`, one per `PT_LOAD`.
+    segs: [(u64, u64, u64, u64, u32); MAX_EXEC_SEGS],
+    nsegs: usize,
+    /// File offset of the `PT_INTERP` string, or 0.
+    interp_off: u64,
+    /// Its length in the file, NUL included, or 0.
+    interp_len: u64,
+}
+
+/// The interpreter a dynamically linked image asks for: its parsed image and
+/// the file it came from. `vmfd` is a VM fd in VFS's own fproc that holds the
+/// interpreter vnode's reference, so closing it releases the vnode.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+struct Interp {
+    img: ExecImage,
+    inode_nr: u32,
+    dev: u32,
+    vmfd: i32,
+}
+
+/// Parse an ELF header + program headers into an [`ExecImage`], validating every
+/// `PT_LOAD` against the file size before the old image is torn down (C
+/// `exec_elf.c`'s sanity check). `None` is `ENOEXEC`.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn parse_exec_image(hdr_buf: &[u8], hdr_len: usize, file_size: u64) -> Option<ExecImage> {
+    let ehdr = hdr_buf.as_ptr() as *const Elf64Ehdr;
+    let e_phoff = unsafe { (*ehdr).e_phoff } as usize;
+    let e_phnum = unsafe { (*ehdr).e_phnum } as usize;
+    let e_phentsize = unsafe { (*ehdr).e_phentsize } as usize;
+    if e_phoff == 0 || e_phentsize == 0 || e_phnum == 0 || e_phoff + e_phnum * e_phentsize > hdr_len
+    {
+        return None;
+    }
+    let mut img = ExecImage {
+        entry: unsafe { (*ehdr).e_entry },
+        segs: [(0, 0, 0, 0, 0); MAX_EXEC_SEGS],
+        nsegs: 0,
+        interp_off: 0,
+        interp_len: 0,
+    };
+    for i in 0..e_phnum {
+        let ph = unsafe { &*(hdr_buf.as_ptr().add(e_phoff + i * e_phentsize) as *const Elf64Phdr) };
+        if ph.p_type == PT_INTERP {
+            img.interp_off = ph.p_offset;
+            img.interp_len = ph.p_filesz;
+            continue;
+        }
+        if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+            continue;
+        }
+        if ph.p_offset + ph.p_filesz > file_size {
+            return None;
+        }
+        if img.nsegs < MAX_EXEC_SEGS {
+            img.segs[img.nsegs] = (ph.p_vaddr, ph.p_memsz, ph.p_offset, ph.p_filesz, ph.p_flags);
+            img.nsegs += 1;
+        }
+    }
+    if img.nsegs == 0 {
+        return None;
+    }
+    Some(img)
+}
+
+/// The page-aligned union of an image's `PT_LOAD` extents — the range the kernel
+/// clears in the fresh page table so the lazy file regions fault on first touch.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn image_range(img: &ExecImage) -> (u64, u64) {
+    let mut start = u64::MAX;
+    let mut end = 0u64;
+    for &(vaddr, memsz, _off, _filesz, _flags) in &img.segs[..img.nsegs] {
+        if vaddr < start {
+            start = vaddr;
+        }
+        if vaddr + memsz > end {
+            end = vaddr + memsz;
+        }
+    }
+    (start & !0xFFF, (end + 0xFFF) & !0xFFF)
+}
+
+/// Map every `PT_LOAD` of `img` as a lazy file-backed region. Returns the first
+/// error (0 on success) and whether any region took `vmfd` — a taken fd belongs
+/// to VM, which closes it when the last region using it dies, so VFS must not
+/// close it a second time.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn map_exec_image(proc_e: i32, img: &ExecImage, dev: u32, inode_nr: u32, vmfd: i32) -> (i32, bool) {
+    let mut mapped_any = false;
+    for &(vaddr, memsz, off, filesz, p_flags) in &img.segs[..img.nsegs] {
+        // ELF p_flags: PF_X=0x1, PF_W=0x2, PF_R=0x4 → PROT_EXEC/WRITE/READ. The
+        // exec bit must reach VM's do_vfs_mmap, which marks the region VR_EXEC;
+        // on RISC-V an executable region without the X PTE bit faults on every
+        // instruction fetch.
+        let mut prot = 0;
+        if p_flags & 0x04 != 0 {
+            prot |= minix_std::vmem::PROT_READ;
+        }
+        if p_flags & 0x02 != 0 {
+            prot |= minix_std::vmem::PROT_WRITE;
+        }
+        if p_flags & 0x01 != 0 {
+            prot |= minix_std::vmem::PROT_EXEC;
+        }
+        let r = crate::vfs::mmap::vfs_memmap(
+            proc_e,
+            off as i64,
+            memsz,
+            dev,
+            inode_nr,
+            vmfd,
+            vaddr,
+            0,
+            prot,
+            off + filesz,
+        );
+        if r != 0 {
+            return (r, mapped_any);
+        }
+        mapped_any = true;
+    }
+    (0, mapped_any)
+}
+
+/// Open a VM fd on `vp` in VFS's own fproc (the `VM_PROC_NR` slot) and return it
+/// (C exec.c: the vmfd lives in `fproc[VM_PROC_NR]`; `VM_VFS_MMAP` stores it in
+/// the region and later FDIO requests read through it). The filp takes the one
+/// vnode reference `vp` carries, so closing the fd is what puts it. Returns -1
+/// when no descriptor could be had, leaving the reference with the caller.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+unsafe fn open_vmfd(vp: *mut crate::vfs::types::Vnode) -> i32 {
+    unsafe {
+        let glob_mut = &mut *vfs_global();
+        let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
+        let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
+        let mut fd = 0i32;
+        if crate::vfs::filedes::get_fd(vmf, 0, &mut fd) != OK {
+            return -1;
+        }
+        let filp_idx = crate::vfs::filedes::alloc_filp();
+        if filp_idx < 0 {
+            return -1;
+        }
+        let filp_arr = core::ptr::addr_of_mut!((*glob_mut).filp) as *mut Filp;
+        let filp = &mut *filp_arr.add(filp_idx as usize);
+        filp.filp_vno = vp;
+        filp.filp_count = 1;
+        filp.filp_mode = 1; // R_BIT
+        vmf.fp_filp[fd as usize] = filp_idx;
+        fd
+    }
+}
+
+/// Close a VM fd opened by [`open_vmfd`], releasing the executable's vnode with
+/// it. A close failure here has no recovery — the descriptor is being torn down
+/// either way — so it is not propagated.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+unsafe fn close_vmfd(fd: i32) {
+    unsafe {
+        let glob_mut = &mut *vfs_global();
+        let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
+        let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
+        let _ = crate::vfs::stadir::close_fd(vmf, fd);
     }
 }
 
@@ -300,51 +477,31 @@ pub unsafe fn pm_exec(
     // *reference* VFS holds on the executable so VM can demand-page it, and on wasm nothing
     // pages anything — the code is the new instance's own memory. Opening one here would
     // hand VM a file it never touches and leak the descriptor.
+    //
+    // A dynamically linked image takes a second one, for the loader: each image is demand-
+    // paged from its own file (see the PT_INTERP branch below).
     #[cfg(not(target_arch = "wasm32"))]
-    let mut vmfd: i32 = -1;
+    let main_vmfd = unsafe { open_vmfd(vp) };
     #[cfg(not(target_arch = "wasm32"))]
-    unsafe {
-        let glob_mut = &mut *vfs_global();
-        let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
-        let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
-        let mut fd = 0i32;
-        if crate::vfs::filedes::get_fd(vmf, 0, &mut fd) == OK {
-            let filp_idx = crate::vfs::filedes::alloc_filp();
-            if filp_idx >= 0 {
-                let filp_arr = core::ptr::addr_of_mut!((*glob_mut).filp) as *mut Filp;
-                let filp = &mut *filp_arr.add(filp_idx as usize);
-                filp.filp_vno = vp;
-                filp.filp_count = 1;
-                filp.filp_mode = 1; // R_BIT
-                vmf.fp_filp[fd as usize] = filp_idx;
-                vmfd = fd;
-            }
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if vmfd < 0 {
+    if main_vmfd < 0 {
         unsafe { put_vnode(vp) };
         return err(ENOMEM);
     }
 
-    // Closing the vmfd is how this arm gives up the executable's vnode: the filp was handed
-    // the one reference `vp` carries, so closing it puts the vnode exactly once. C has
-    // `/* dup_vnode(vp); */` at the same place, which marks that reference as transferred
-    // rather than copied, and its exit path (pm_execfinal) puts the vnode only in the branch
-    // where no filp was ever given one.
+    // Close each fd in `close` that is still open (a negative entry names one that was never
+    // opened). A vmfd a region has taken belongs to VM and must not be closed here; every
+    // caller of `fail` is before the segments are mapped, so none is taken yet.
+    // The module arm has its own cleanup, below: there is no descriptor to close, and a
+    // helper that pretended otherwise would be a lie.
     #[cfg(not(target_arch = "wasm32"))]
-    let close_vmfd = || unsafe {
-        let glob_mut = &mut *vfs_global();
-        let fproc_arr = core::ptr::addr_of_mut!((*glob_mut).fproc) as *mut Fproc;
-        let vmf = &mut *fproc_arr.add((VM_PROC_NR & 0xFF) as usize);
-        let _ = crate::vfs::stadir::close_fd(vmf, vmfd);
-    };
-
-    // Failure cleanup for the ELF arm. The module arm has its own, below: there is no
-    // descriptor to close, and a helper that pretended otherwise would be a lie.
-    #[cfg(not(target_arch = "wasm32"))]
-    let fail = |s: i32| -> ExecResult {
-        close_vmfd();
+    let fail = |s: i32, close: [i32; 2]| -> ExecResult {
+        unsafe {
+            for fd in close {
+                if fd >= 0 {
+                    close_vmfd(fd);
+                }
+            }
+        }
         err(s)
     };
 
@@ -446,7 +603,9 @@ pub unsafe fn pm_exec(
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Read only the ELF headers (ehdr + program headers). The image itself
-        // is never read whole: VM demand-pages the segments from the file.
+        // is never read whole: VM demand-pages the segments from the file. The
+        // interpreter's headers come into the same buffer later — whatever is in it
+        // now has been copied out into `main` — so one buffer serves both images.
         let hdr_len = (file_size as usize).min(EXEC_HDR_MAX);
         let mut hdr_buf = [0u8; EXEC_HDR_MAX];
         let (r, _pos) = unsafe {
@@ -461,109 +620,207 @@ pub unsafe fn pm_exec(
             )
         };
         if r != hdr_len as i32 {
-            return fail(EIO);
+            return fail(EIO, [main_vmfd, -1]);
         }
+        let main = match parse_exec_image(&hdr_buf[..hdr_len], hdr_len, file_size as u64) {
+            Some(img) => img,
+            None => return fail(ENOEXEC, [main_vmfd, -1]),
+        };
 
-        // Parse the ELF header.
-        let ehdr = hdr_buf.as_ptr() as *const Elf64Ehdr;
-        let e_phoff = unsafe { (*ehdr).e_phoff } as usize;
-        let e_phnum = unsafe { (*ehdr).e_phnum } as usize;
-        let e_phentsize = unsafe { (*ehdr).e_phentsize } as usize;
-        let entry = unsafe { (*ehdr).e_entry };
-        if e_phoff == 0
-            || e_phentsize == 0
-            || e_phnum == 0
-            || e_phoff + e_phnum * e_phentsize > hdr_len
-        {
-            return fail(ENOEXEC);
-        }
+        // A `PT_INTERP` makes this a dynamically linked image: what the kernel enters is the
+        // interpreter (the loader), and the loader is handed the main program's ELF header
+        // page so it can find `e_entry`, `PT_DYNAMIC`, and the program headers.
+        let mut interp: Option<Interp> = None;
+        if main.interp_len != 0 {
+            let plen = main.interp_len as usize;
+            if plen >= PATH_MAX {
+                return fail(ENOEXEC, [main_vmfd, -1]);
+            }
+            // The path is a NUL-terminated string in the image, and not necessarily on the
+            // page the headers are on, so read it from the file rather than search the header
+            // buffer. `p_filesz` includes the NUL (ELF says so), and a header that says
+            // otherwise is malformed rather than a path of a different length.
+            let mut interp_path = [0u8; PATH_MAX];
+            let (r, _pos) = unsafe {
+                req_read(
+                    fs_e,
+                    inode_nr,
+                    interp_path.as_mut_ptr(),
+                    main.interp_off as i64,
+                    main.interp_len as u32,
+                    VFS_PROC_NR as i32,
+                    0,
+                )
+            };
+            if r != main.interp_len as i32 || interp_path[plen - 1] != 0 {
+                return fail(ENOEXEC, [main_vmfd, -1]);
+            }
+            let name_len = plen - 1;
+            if name_len == 0 {
+                return fail(ENOEXEC, [main_vmfd, -1]);
+            }
 
-        // Collect PT_LOAD segments, validating each against the file size
-        // before the old image is torn down (C: exec_elf.c sanity check).
-        let mut segs: [(u64, u64, u64, u64, u32); MAX_EXEC_SEGS] = [(0, 0, 0, 0, 0); MAX_EXEC_SEGS];
-        let mut nsegs = 0usize;
-        for i in 0..e_phnum {
-            let ph =
-                unsafe { &*(hdr_buf.as_ptr().add(e_phoff + i * e_phentsize) as *const Elf64Phdr) };
-            if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
-                continue;
+            let mut ireq = Lookup::default();
+            ireq.l_path[..name_len].copy_from_slice(&interp_path[..name_len]);
+            ireq.l_path_len = name_len;
+            let ivp = unsafe { path::eat_path(&ireq, fp) };
+            if ivp.is_null() {
+                return fail(ENOENT, [main_vmfd, -1]);
             }
-            if ph.p_offset + ph.p_filesz > file_size as u64 {
-                return fail(ENOEXEC);
+            let ifs_e = unsafe { (*ivp).v_fs_e };
+            let iino = unsafe { (*ivp).v_inode_nr };
+            let idev = unsafe { (*ivp).v_dev };
+            let isize = unsafe { (*ivp).v_size };
+            if isize <= 0 {
+                unsafe { put_vnode(ivp) };
+                return fail(ENOEXEC, [main_vmfd, -1]);
             }
-            if nsegs < MAX_EXEC_SEGS {
-                segs[nsegs] = (ph.p_vaddr, ph.p_memsz, ph.p_offset, ph.p_filesz, ph.p_flags);
-                nsegs += 1;
+            // From here the loader's vnode reference lives in `ivmfd`'s filp, so it is
+            // released by closing `ivmfd` and not by `put_vnode`.
+            let ivmfd = unsafe { open_vmfd(ivp) };
+            if ivmfd < 0 {
+                unsafe { put_vnode(ivp) };
+                return fail(ENOMEM, [main_vmfd, -1]);
             }
-        }
-        if nsegs == 0 {
-            return fail(ENOEXEC);
-        }
 
-        // Code range = union of PT_LOAD segment extents, page-aligned. The
+            let ihdr_len = (isize as usize).min(EXEC_HDR_MAX);
+            let (r, _pos) = unsafe {
+                req_read(
+                    ifs_e,
+                    iino,
+                    hdr_buf.as_mut_ptr(),
+                    0,
+                    ihdr_len as u32,
+                    VFS_PROC_NR as i32,
+                    0,
+                )
+            };
+            if r != ihdr_len as i32 {
+                return fail(EIO, [main_vmfd, ivmfd]);
+            }
+            let img = match parse_exec_image(&hdr_buf[..ihdr_len], ihdr_len, isize as u64) {
+                Some(img) => img,
+                None => return fail(ENOEXEC, [main_vmfd, ivmfd]),
+            };
+            // A loader that itself asks for a loader would recurse, and the register
+            // convention carries one header page; refuse it rather than run the inner image
+            // with no interpreter of its own.
+            if img.interp_len != 0 {
+                return fail(ENOEXEC, [main_vmfd, ivmfd]);
+            }
+            interp = Some(Interp {
+                img,
+                inode_nr: iino,
+                dev: idev,
+                vmfd: ivmfd,
+            });
+        }
+        let interp_vmfd = interp.as_ref().map_or(-1, |i| i.vmfd);
+
+        // The image the kernel enters is the interpreter when there is one.
+        let entry = match &interp {
+            Some(i) => i.img.entry,
+            None => main.entry,
+        };
+
+        // Code range = union of the images' PT_LOAD extents, page-aligned. The
         // kernel clears this range in the fresh exec'd page table so the lazy
         // file regions fault on first touch instead of aliasing identity RAM.
-        let mut code_start = u64::MAX;
-        let mut code_end = 0u64;
-        for &(vaddr, memsz, _off, _filesz, _p_flags) in &segs[..nsegs] {
-            if vaddr < code_start {
-                code_start = vaddr;
+        let (mut code_start, mut code_end) = image_range(&main);
+        if let Some(i) = &interp {
+            let (s, e) = image_range(&i.img);
+            code_start = code_start.min(s);
+            code_end = code_end.max(e);
+        }
+
+        // The main program's ELF header page: file offset 0 as the image lays it out, which
+        // is the VA the loader reads `e_entry` and the program headers from. A `PT_LOAD`
+        // beginning at file offset 0 already maps it; the usual case has the first segment
+        // at 0x1000, and then the page is mapped separately, read-only. A static image needs
+        // none of this and passes 0.
+        let mut hdr_va = 0u64;
+        let mut hdr_map = false;
+        if interp.is_some() {
+            let mut lowest = u64::MAX;
+            for &(vaddr, _memsz, off, _filesz, _flags) in &main.segs[..main.nsegs] {
+                if let Some(b) = vaddr.checked_sub(off)
+                    && b < lowest
+                {
+                    lowest = b;
+                }
             }
-            let seg_end = vaddr + memsz;
-            if seg_end > code_end {
-                code_end = seg_end;
+            if lowest != u64::MAX {
+                hdr_va = lowest & !0xFFF;
+            }
+            let covered = main.segs[..main.nsegs]
+                .iter()
+                .any(|&(_, _, off, _, _)| off == 0);
+            hdr_map = hdr_va != 0 && !covered;
+            if hdr_map && hdr_va < code_start {
+                code_start = hdr_va;
             }
         }
-        let code_start = code_start & !0xFFF;
-        let code_end = (code_end + 0xFFF) & !0xFFF;
 
         // Fresh address space for the new image: VM clears the old region list
         // (closing file vmfds) and re-establishes the heap; the kernel builds
         // the fresh page table at SYS_EXEC_LOAD time.
         if vm_exec_newmem(proc_e) != 0 {
-            return fail(ENOMEM);
+            return fail(ENOMEM, [main_vmfd, interp_vmfd]);
         }
 
-        // Map each PT_LOAD segment as a lazy file-backed region. Pages are
-        // demand-paged from the file on first touch; pages at or past the
-        // segment's in-file end (bss / partial tails) are zero-filled by VM.
-        let mut mapped_any = false;
-        for &(vaddr, memsz, off, filesz, p_flags) in &segs[..nsegs] {
-            // ELF p_flags: PF_X=0x1, PF_W=0x2, PF_R=0x4 → PROT_READ/WRITE/EXEC.
-            // The exec bit must reach VM's do_vfs_mmap, which marks the region
-            // VR_EXEC; on RISC-V an executable region without the X PTE bit
-            // faults on every instruction fetch.
-            let mut prot = 0;
-            if p_flags & 0x04 != 0 {
-                prot |= minix_std::vmem::PROT_READ;
+        // Map each image's PT_LOAD segments as lazy file-backed regions. Pages are
+        // demand-paged from the file on first touch; pages at or past the segment's
+        // in-file end (bss / partial tails) are zero-filled by VM. A failure here is
+        // after the address space was replaced, so it is `partial`: PM kills the
+        // process rather than reporting the error to a caller that has no image left.
+        let mut interp_taken = false;
+        if let Some(i) = &interp {
+            let (r, taken) = map_exec_image(proc_e, &i.img, i.dev, i.inode_nr, i.vmfd);
+            interp_taken = taken;
+            if r != 0 {
+                if !interp_taken {
+                    unsafe { close_vmfd(i.vmfd) };
+                }
+                unsafe { close_vmfd(main_vmfd) };
+                return err_partial(r);
             }
-            if p_flags & 0x02 != 0 {
-                prot |= minix_std::vmem::PROT_WRITE;
+        }
+        let (r, main_taken) = map_exec_image(proc_e, &main, dev, inode_nr, main_vmfd);
+        if r != 0 {
+            // A vmfd no region took is still VFS's to close; a taken one belongs to VM
+            // (C pm_execfinal closes an unused vmfd; a used one travels into the region VM
+            // tears down).
+            if !main_taken {
+                unsafe { close_vmfd(main_vmfd) };
             }
-            if p_flags & 0x01 != 0 {
-                prot |= minix_std::vmem::PROT_EXEC;
+            if interp_vmfd >= 0 && !interp_taken {
+                unsafe { close_vmfd(interp_vmfd) };
             }
+            return err_partial(r);
+        }
+
+        // The header page, read-only, at the image's base. It is mapped through the main's
+        // vmfd because it is the main's file. At this point the main's own segments have
+        // already taken that fd, so only the loader's can still be VFS's to close.
+        if hdr_map {
             let r = crate::vfs::mmap::vfs_memmap(
                 proc_e,
-                off as i64,
-                memsz,
+                0,
+                0x1000,
                 dev,
                 inode_nr,
-                vmfd,
-                vaddr,
+                main_vmfd,
+                hdr_va,
                 0,
-                prot,
-                off + filesz,
+                minix_std::vmem::PROT_READ,
+                0x1000,
             );
             if r != 0 {
-                // No region took the vmfd, so VFS still owns it (C pm_execfinal closes an
-                // unused vmfd; a used one travels into the region VM tears down).
-                if !mapped_any {
-                    close_vmfd();
+                if interp_vmfd >= 0 && !interp_taken {
+                    unsafe { close_vmfd(interp_vmfd) };
                 }
                 return err_partial(r);
             }
-            mapped_any = true;
         }
 
         // Hand the entry + frame to the kernel, which builds the fresh page
@@ -582,6 +839,10 @@ pub unsafe fn pm_exec(
         );
         kmsg[EXEC_LOAD_FRAME_LEN_OFF..EXEC_LOAD_FRAME_LEN_OFF + 8]
             .copy_from_slice(&(frame_len as u64).to_le_bytes());
+        // The main program's ELF header page, for the loader `entry` names. Zero for a
+        // static image, where no register consumer reads it.
+        kmsg[EXEC_LOAD_MAIN_HDR_OFF..EXEC_LOAD_MAIN_HDR_OFF + 8]
+            .copy_from_slice(&hdr_va.to_le_bytes());
         let kresult = minix_rt::kernel_call(SYS_EXEC_LOAD, &mut kmsg);
         if kresult != 0 {
             return err_partial(kresult);
@@ -598,11 +859,15 @@ pub unsafe fn pm_exec(
                 .unwrap(),
         );
 
-        // VM owns the vmfd now (it sends FDCLOSE when the last region using it dies), and
-        // the vnode reference went with it, so `vp` is not released below. Only a vmfd no
-        // region took is closed here, and closing it is what releases that reference.
-        if !mapped_any {
-            close_vmfd();
+        // VM owns every vmfd a region took now (it sends FDCLOSE when the last region using
+        // it dies), and those vnode references went with them, so `vp` is not released below.
+        // Only a vmfd no region took is closed here, and closing it is what releases its
+        // reference.
+        if !main_taken {
+            unsafe { close_vmfd(main_vmfd) };
+        }
+        if interp_vmfd >= 0 && !interp_taken {
+            unsafe { close_vmfd(interp_vmfd) };
         }
 
         unsafe { finish_exec(fp, vp, false, pc, newsp, new_euid, new_egid) }

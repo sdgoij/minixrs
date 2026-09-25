@@ -108,6 +108,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ldso"
+version = "0.1.0"
+dependencies = [
+ "minix-rt",
+]
+
+[[package]]
 name = "libs"
 version = "0.1.0"
 dependencies = [

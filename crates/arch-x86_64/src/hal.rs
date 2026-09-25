@@ -408,15 +408,29 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
 /// Set up register frame for a new process via exec(2).
 /// Writes entry point, stack pointer, and arch-specific status flags.
 ///
+/// `main_hdr` is the VA of the main program's ELF header page when a
+/// `PT_INTERP` loader runs first, and 0 for a static image. It travels in
+/// `r9`, which `exec_init_regs` would otherwise leave at whatever the
+/// replaced image happened to hold — the loader's `_start` reads it, so it is
+/// always written rather than only on the dynamic path.
+///
 /// # Safety
 ///
 /// `frame` must be a valid, writable `[u8; 256]` trap frame.
-pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _argc: u64, _argv: u64) {
+pub unsafe fn exec_init_regs(
+    frame: &mut [u8; 256],
+    entry: u64,
+    sp: u64,
+    _argc: u64,
+    _argv: u64,
+    main_hdr: u64,
+) {
     unsafe {
         write_frame_field(frame, 0, sp); // rax = 0 (convention)
         write_frame_field(frame, 16, entry); // rcx = entry (syscall convention)
         write_frame_field(frame, 160, entry); // dedicated rip slot = entry
         write_frame_field(frame, 40, sp); // rdi = sp
+        write_frame_field(frame, 56, main_hdr); // r9 = loader's second argument
         write_frame_field(frame, 72, 0x0202); // r11 = user-mode (IF|IOPL=0)
         write_frame_field(frame, 176, 0x0202); // dedicated rflags slot = PSL_USERSET
         write_frame_field(frame, 168, sp); // rsp = sp

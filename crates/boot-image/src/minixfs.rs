@@ -461,8 +461,9 @@ impl MinixFs {
 }
 
 /// Build the standard root filesystem image containing `files` (destination
-/// path → content). The parent directories /bin and /sbin are created
-/// automatically; anything else lands in the root. Sized by
+/// path → content). The parent directories /bin, /sbin and /etc are created
+/// automatically, and /lib and /libexec when a file is going into them;
+/// anything else lands in the root. Sized by
 /// [`DEFAULT_BLOCKS`] unless the `MINIXFS_BLOCKS` env var overrides it
 /// (used by the large-binary verification, which needs a filesystem big
 /// enough for a ≥32 MiB executable).
@@ -482,6 +483,23 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     // Mount point for the devman device tree (VFS mount_devman crosses
     // into devman's VTreeFS here).
     let _devices_zone = fs.add_directory(root_zone, "devices");
+    // `/lib` and `/libexec` exist only when something is going into them, and are
+    // created after every directory above so that nothing is renumbered: both the
+    // layout tests in this file and the boot test's `/devices` inode
+    // (`kernel-boot/src/boot_test.rs`) pin what the directories above are, and an
+    // image with no dynamic-linking artifacts has the same layout it always had.
+    // Zone 0 is the root, which no dest reaches: the match below routes only
+    // `/lib/` and `/libexec/` here, and a dest with neither prefix is unaffected.
+    let lib_zone = if files.iter().any(|(d, _)| d.starts_with("/lib/")) {
+        fs.add_directory(root_zone, "lib")
+    } else {
+        0
+    };
+    let libexec_zone = if files.iter().any(|(d, _)| d.starts_with("/libexec/")) {
+        fs.add_directory(root_zone, "libexec")
+    } else {
+        0
+    };
 
     for (dest, data) in files {
         if data.is_empty() {
@@ -497,6 +515,10 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             sbin_zone
         } else if dest.starts_with("/etc/") {
             etc_zone
+        } else if dest.starts_with("/lib/") {
+            lib_zone
+        } else if dest.starts_with("/libexec/") {
+            libexec_zone
         } else {
             root_zone
         };

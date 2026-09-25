@@ -275,13 +275,17 @@ const EXEC_LOAD_FRAME_PTR_OFF: usize = 40;
 const EXEC_LOAD_FRAME_LEN_OFF: usize = 48;
 const EXEC_LOAD_PC_OFF: usize = 16;
 const EXEC_LOAD_NEWSP_OFF: usize = 24;
-// Read only by the wasm arm, and written only by VFS's module arm — the two go together, and the
-// ELF arm neither sends nor reads it, because on that arm the entry point and code range are what
-// name the image and nothing needs to name it in words. Documented here rather than defined
-// conditionally, because the message layout is one thing and which arch reads which field is
-// another.
+// Offset 56 is the arm-specific extra: one more image fact that the shared fields cannot carry.
+// On wasm it is where the executable's bytes are in the caller's memory (VFS's module arm writes
+// it, the host reads it). On the ELF arm it is the main program's ELF *header page* VA when a
+// `PT_INTERP` loader is to run first, and 0 for a static image — the loader takes its `e_entry`,
+// its `PT_DYNAMIC`, and the program headers from that page. Both are "where the image is", said in
+// the only way the arm in question can say it. Documented here rather than defined conditionally,
+// because the message layout is one thing and which arch reads which field is another.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const EXEC_LOAD_PATH_PTR_OFF: usize = 56;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const EXEC_LOAD_MAIN_HDR_OFF: usize = 56;
 
 // Exec finalization message offsets (SYS_EXEC at call 60)
 //
@@ -3631,6 +3635,10 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         let code_end = msg_read_u64(msg, EXEC_LOAD_CODE_END_OFF);
         let frame_ptr = msg_read_u64(msg, EXEC_LOAD_FRAME_PTR_OFF);
         let frame_len = msg_read_u64(msg, EXEC_LOAD_FRAME_LEN_OFF);
+        // Offset 56: the main program's ELF header page when a `PT_INTERP` loader is to run first
+        // (0 for a static image). Only the ELF arm has a loader to hand it to.
+        #[cfg(not(target_arch = "wasm32"))]
+        let main_hdr = msg_read_u64(msg, EXEC_LOAD_MAIN_HDR_OFF);
 
         // The entry point and the code range describe an ELF image; on wasm there is no
         // such image, because the module the host instantiates supplies its own entry and
@@ -3743,6 +3751,7 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
             code_end,
             &args.argv[..args.argc],
             &args.envp[..args.envc],
+            main_hdr,
         ) {
             Ok(l) => l,
             Err(e) => {

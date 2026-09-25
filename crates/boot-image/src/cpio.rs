@@ -19,8 +19,8 @@ pub struct Entry {
     pub data: Vec<u8>,
 }
 
-/// Build the standard boot initramfs: the four base directories, the
-/// boot binaries, the device nodes, and the trailer.
+/// Build the standard boot initramfs: the base directories, the boot binaries,
+/// the device nodes, and the trailer.
 ///
 /// `bins` maps destination path → file content (already read from the
 /// per-target release directory).
@@ -43,6 +43,20 @@ pub fn standard_initramfs(bins: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
         },
         Entry {
             name: "/dev",
+            mode: 0o040755,
+            data: Vec::new(),
+        },
+        // `/lib` holds shared objects and `/libexec` the dynamic loader, both for
+        // the import of a program that names a `PT_INTERP` — the loader has to be
+        // reachable before the root filesystem is mounted, so the directories are
+        // part of the base layout rather than something the gate adds.
+        Entry {
+            name: "/lib",
+            mode: 0o040755,
+            data: Vec::new(),
+        },
+        Entry {
+            name: "/libexec",
             mode: 0o040755,
             data: Vec::new(),
         },

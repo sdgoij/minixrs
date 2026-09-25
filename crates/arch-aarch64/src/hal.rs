@@ -290,10 +290,22 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 288], offset: usize, val: u64) 
 
 /// Set up register frame for a new process via exec(2).
 ///
+/// `main_hdr` is the main program's ELF header page VA for a `PT_INTERP`
+/// exec and 0 otherwise. It travels in `x3`; no loader is built for this
+/// arch yet, so nothing consumes it, but writing it keeps the register the
+/// loader will read defined by the exec rather than by the replaced image.
+///
 /// # Safety
 ///
 /// `frame` must be a valid, writable raw trap frame.
-pub unsafe fn exec_init_regs(frame: &mut [u8; 288], entry: u64, sp: u64, argc: u64, argv: u64) {
+pub unsafe fn exec_init_regs(
+    frame: &mut [u8; 288],
+    entry: u64,
+    sp: u64,
+    argc: u64,
+    argv: u64,
+    main_hdr: u64,
+) {
     unsafe {
         // ELR_EL1 = entry point (offset 256).
         write_frame_field(frame, 256, entry);
@@ -303,6 +315,8 @@ pub unsafe fn exec_init_regs(frame: &mut [u8; 288], entry: u64, sp: u64, argc: u
         write_frame_field(frame, 0, argc);
         // x1 = argv (offset 8).
         write_frame_field(frame, 8, argv);
+        // x3 = the loader's second argument (offset 24).
+        write_frame_field(frame, 24, main_hdr);
         // SP_EL0 = stack pointer (offset 248). Must match x2 so
         // _start's [sp] references read from the exec'd stack.
         write_frame_field(frame, 248, sp);

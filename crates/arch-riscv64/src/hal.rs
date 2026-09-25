@@ -229,15 +229,28 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
 /// Writes entry point (sepc), stack pointer (sp), argc (a0),
 /// argv (a1), and sstatus.
 ///
+/// `main_hdr` is the main program's ELF header page VA for a `PT_INTERP`
+/// exec and 0 otherwise. It travels in `a2`; no loader is built for this
+/// arch yet, so nothing consumes it, but writing it keeps the register the
+/// loader will read defined by the exec rather than by the replaced image.
+///
 /// # Safety
 ///
 /// `frame` must be a valid, writable `[u8; 256]` trap frame.
-pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, argc: u64, argv: u64) {
+pub unsafe fn exec_init_regs(
+    frame: &mut [u8; 256],
+    entry: u64,
+    sp: u64,
+    argc: u64,
+    argv: u64,
+    main_hdr: u64,
+) {
     unsafe {
         write_frame_field(frame, 0, entry); // sepc in x0 slot
         write_frame_field(frame, 16, sp); // sp (x2)
         write_frame_field(frame, 80, argc); // a0 (x10)
         write_frame_field(frame, 88, argv); // a1 (x11)
+        write_frame_field(frame, 96, main_hdr); // a2 (x12) = loader's second argument
         // `PSL_USERSET`, like the other entry paths: an `exec`ed process differs
         // from a spawned one only in what its registers hold, and the FP unit has
         // to be enabled for both (that constant's comment has the illegal

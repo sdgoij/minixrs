@@ -90,6 +90,46 @@ fn assemble(
         println!("cargo:rerun-if-changed={}", src.display());
     }
 
+    // The Phase 0 dynamic-linking artifacts, when their gate has built them.
+    // `DYNLINK_BINS` is `dest=path;...` like `MINIXFS_EXTRA`, but its entries go into
+    // *both* images: a binary that asks for an interpreter can be exec'd before the
+    // root filesystem is mounted, so the loader has to be reachable then too. Unset
+    // in every other build, so an ordinary image never depends on the toolchain that
+    // produces these.
+    println!("cargo:rerun-if-env-changed=DYNLINK_BINS");
+    if let Ok(list) = std::env::var("DYNLINK_BINS") {
+        for entry in list.split(';').filter(|s| !s.is_empty()) {
+            let (dest, path) = entry
+                .split_once('=')
+                .expect("DYNLINK_BINS entry must be dest=path");
+            if !["/bin/", "/sbin/", "/lib/", "/libexec/"]
+                .iter()
+                .any(|dir| dest.starts_with(dir))
+            {
+                panic!(
+                    "DYNLINK_BINS: {dest:?} is not a /bin/, /sbin/, /lib/ or /libexec/ path. \
+                     A POSIX-style value is converted on the way to a native tool, and a \
+                     converted dest lands the file in the root filesystem. Set \
+                     MSYS2_ENV_CONV_EXCL=DYNLINK_BINS (the Justfile's build recipes do)."
+                );
+            }
+            // The bins list wants &'static str; the env string is transient, so leak
+            // each dest (build scripts run once per build).
+            let dest: &'static str = Box::leak(dest.to_owned().into_boxed_str());
+            let path = Path::new(path);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace.join(path)
+            };
+            let data = std::fs::read(&path).unwrap_or_else(|e| {
+                panic!("DYNLINK_BINS: reading {} failed ({e})", path.display())
+            });
+            println!("cargo:rerun-if-changed={}", path.display());
+            bins.push((dest, data));
+        }
+    }
+
     // Test hook: MINIXFS_EXTRA injects extra "dest=path" binaries into the
     // DISK filesystem image (entries separated by ';') and MINIXFS_BLOCKS
     // overrides its size (see boot-image::minixfs). Both default to nothing —

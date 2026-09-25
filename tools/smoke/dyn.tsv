@@ -1,0 +1,15 @@
+# The Phase 0 dynamic-linking scenario.
+#
+#   FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# Driven by `just test-dynlink-x86`, which builds the loader and the two C artifacts and
+# injects all three into the image (`DYNLINK_BINS`).
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce. `/bin/dynhello` is a classic-dynamic `ET_EXEC`: it
+# carries `PT_INTERP /libexec/ld.so` and `DT_NEEDED libdyn.so`, and its single PLT call
+# (`dyn_message`) is bound by the loader before `main` runs. The string it prints exists
+# only in `/lib/libdyn.so` — the gate fails if the same bytes are in the program — so this
+# line is the loader having run, mapped the object and patched the GOT.
+
+/bin/dynhello	dynlink-ok

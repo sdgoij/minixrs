@@ -1,0 +1,30 @@
+[package]
+name = "ldso"
+version = "0.1.0"
+description = "Dynamic loader (`/libexec/ld.so`) for the minix port"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+
+[lib]
+name = "ldso"
+path = "src/lib.rs"
+
+# The loader binary. Installed as `/libexec/ld.so` (the name is the image's, not
+# cargo's). Built for a minix target only — behind a feature so a host
+# `cargo clippy`/`test` does not try to type-check or link it.
+[[bin]]
+name = "ldso"
+path = "src/bin/ldso.rs"
+test = false
+required-features = ["bin"]
+
+[features]
+# Enables the `ldso` binary. Off for host builds.
+bin = []
+
+[dependencies]
+minix-rt = { path = "../minix-rt", default-features = false }
+
+[lints]
+workspace = true

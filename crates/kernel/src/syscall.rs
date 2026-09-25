@@ -1054,6 +1054,10 @@ pub struct ExecLoadResult {
 /// NOT make the target runnable — the caller decides when the process
 /// resumes at the new entry point.
 ///
+/// `main_hdr` is the main program's ELF header page VA when `entry` is a
+/// `PT_INTERP` loader rather than the program itself, and 0 for a static
+/// image; it is only passed on to `exec_init_regs`.
+///
 /// Returns the entry point and stack pointer on success, or a negative
 /// errno.
 ///
@@ -1068,6 +1072,7 @@ pub unsafe fn exec_elf_for_target(
     code_end: u64,
     argv_strs: &[&str],
     envp_strs: &[&str],
+    main_hdr: u64,
 ) -> Result<ExecLoadResult, i64> {
     unsafe {
         if code_end <= code_start || code_start & 0xFFF != 0 || code_end & 0xFFF != 0 {
@@ -1201,7 +1206,7 @@ pub unsafe fn exec_elf_for_target(
         let argc = argv_strs.len() as u64;
         let argv_ptr = rsp_fb + 8;
 
-        crate::hal::exec_init_regs(&mut (*rp).p_reg, entry, rsp_fb, argc, argv_ptr);
+        crate::hal::exec_init_regs(&mut (*rp).p_reg, entry, rsp_fb, argc, argv_ptr, main_hdr);
         (*rp).p_misc_flags.fetch_or(
             crate::proc::MiscFlags::CONTEXT_SET.bits(),
             core::sync::atomic::Ordering::SeqCst,

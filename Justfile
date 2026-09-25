@@ -47,7 +47,9 @@ export CARGO_TARGET_AARCH64_UNKNOWN_MINIX_LINKER := minix-lld
 # that spawn a native tool: the recipes that re-enter `just` (`run` -> `run-x86`,
 # `image` -> `image-x86`, `build` -> `build-x86`, ...) have the value converted
 # when the inner `just.exe` starts, before any line of the inner recipe runs.
-export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA"
+# The list is semicolon-separated; `DYNLINK_BINS` has the same hazard as
+# `MINIXFS_EXTRA` (`/libexec/ld.so=<path>;...` is a POSIX-style value too).
+export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA;DYNLINK_BINS"
 
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
@@ -340,6 +342,28 @@ test-bash-aarch64 boot-timeout="60":
     FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "bash: every step of tools/smoke/bash.tsv answered (aarch64)"
 
+# Boot the Phase 0 dynamic-linking artifacts and drive `tools/smoke/dyn.tsv` at
+# them. `/bin/dynhello` is an `ET_EXEC` with `PT_INTERP /libexec/ld.so` and
+# `DT_NEEDED libdyn.so`, so printing the string that lives only in the shared
+# object is what proves the loader ran, mapped the object and bound the call.
+#
+# The negative check is the centre of this gate: `dynlink-ok` must *not* be in
+# `/bin/dynhello`. Were it there, the program could print it with no loader at
+# all and the boot below would pass while proving nothing. (The check is against
+# the built program, which is the file `/bin/dynhello` is a copy of.)
+#
+# The injection is what puts the three files in the image: like bash, they are
+# deliberately not `BOOT_BINS`, so an image build never depends on them having
+# been built.
+test-dynlink-x86 boot-timeout="40": dynlink-x86
+    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
+    @if grep -q 'dynlink-ok' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains 'dynlink-ok' - the message cannot have come from the shared object" >&2; exit 1; fi
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "dynlink: /bin/dynhello printed what only libdyn.so contains (x86_64)"
+
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
@@ -578,6 +602,15 @@ build-c-hello arch="x86":
 # `cargo clean`, which takes `target/bash-src` and the build tree with it.
 build-bash arch="x86":
     python tools/build-bash.py {{arch}}
+
+# The Phase 0 dynamic-linking artifacts (x86_64 only): the loader (`/libexec/ld.so`,
+# `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), and, through
+# `tools/build-dynlink.py`, the shared object and the dynamically linked test
+# program. `test-dynlink-x86` puts all three in an image and boots it.
+dynlink-x86:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found - run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target x86_64-pc-minix --release
+    python tools/build-dynlink.py x86
 
 # Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
 # toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.

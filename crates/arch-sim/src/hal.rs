@@ -279,7 +279,18 @@ pub unsafe fn write_frame_field(frame: &mut [u8; 256], offset: usize, val: u64) 
 /// # Safety
 ///
 /// `frame` must be a writable register save area.
-pub unsafe fn exec_init_regs(frame: &mut [u8; 256], entry: u64, sp: u64, _argc: u64, _argv: u64) {
+///
+/// `main_hdr` is the `PT_INTERP` loader's second argument on the hardware
+/// ports. The simulator never runs a loader, so it is accepted to keep the
+/// HAL uniform and dropped.
+pub unsafe fn exec_init_regs(
+    frame: &mut [u8; 256],
+    entry: u64,
+    sp: u64,
+    _argc: u64,
+    _argv: u64,
+    _main_hdr: u64,
+) {
     unsafe {
         write_frame_field(frame, frame::RIP, entry);
         write_frame_field(frame, frame::RSP, sp);

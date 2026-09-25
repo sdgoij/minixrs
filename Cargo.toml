@@ -27,6 +27,7 @@ members = [
     "crates/fs",
     "crates/kernel",
     "crates/kernel-boot",
+    "crates/ldso",
     "crates/libs",
     "crates/minix-libc",
     "crates/minix-rt",
