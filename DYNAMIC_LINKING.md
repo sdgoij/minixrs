@@ -1,6 +1,7 @@
 # Dynamic linking for minixrs — implementation proposal
 
-Status: **proposal — design settled, Phases 0–3 built** (on `feature/ldso`). Every claim
+Status: **proposal — design settled, Phases 0–3 built, Phase 4 decided (dropped)** (on
+`feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
 built* record where the implementation revised the draft.
@@ -84,17 +85,18 @@ add the machinery, change no default.
 
 ### 2.2 What it actually buys the port
 
-- **Shared text between processes.** Today every `userland` binary carries its own copy
-  of `minix-rt`/`minix-std`/`minix-libc`; N processes running the same tool cost N
-  copies in RAM. The mechanism already exists for a DSO: VM's file page cache
-  (`vm/cache.rs`) holds read-only file pages keyed by `(dev, offset)` and
-  `start_file_page` looks a frame up there *before* allocating, so a `.so`'s
-  `.text`/`.rodata` is shared across processes the moment the loader maps those
-  segments **read-only**. What stays private per process is the writable, relocated
-  part (`.data`/`.got`) — correct and expected, but it bounds how much a `.so` saves.
-  See §4 and Phase 5.
-- **Smaller binaries and smaller images** — relevant to the committed wasm demo size and
-  to the per-arch ELF images.
+- **Shared text between processes.** Two processes running the *same* binary already
+  share its text: exec maps read-only `VR_FILE` regions and VM looks its file page cache
+  up before allocating a frame (`crates/servers/src/vm/mod.rs:1251`,
+  `cacheable = (!writable || shared) && …`). So the DSO case is **different** binaries
+  sharing one object's text — which is what a C library buys, and what Phase 3 delivered.
+  What stays private per process either way is the writable, relocated part
+  (`.data`/`.got`) and every monomorphised instantiation (`tools/rc-cost.py`), and that is
+  what bounds the saving. See §2.3, Phase 4's decision and Phase 5.
+- **Smaller C binaries and a smaller image** — for the programs that link `minix-libc`, which
+  is where the copies were: `bash` and `ctest` carry it today and `libc.so` is not carried at
+  all. Phase 3 is the size of it; a Rust binary's library code is largely inlined, so this does
+  not extend to the userland (Phase 4).
 - **A home for a driver/plugin ABI later** (Phase 6), which is what `dlopen` is for.
 - **Fidelity**: it is the one MINIX subsystem the port has no representation of at all.
 
@@ -440,9 +442,9 @@ lookup would bind the object's reference to the program's.)
 
 ## 7. Phased plan
 
-Every phase is independently abandonable and has a gate. Phases 0–2 do not touch the
-toolchain fork; Phases 0 has no Rust at the loaded-program end, which keeps the first
-result cheap to get.
+Every phase is independently abandonable and has a gate. Phases 0–3 do not touch the
+toolchain fork, and Phase 4 turned out not to need building at all; Phase 0 has no Rust at
+the loaded-program end, which keeps the first result cheap to get.
 
 ### Phase 0 — classic non-PIE, end to end, x86_64, C only — **done**
 
@@ -625,16 +627,61 @@ and fails the step — which is how the fix was checked, not just its green resu
   named by the soname the object states, and the loader's search is literal. Nothing needs
   a version yet, so the idea is deferred rather than designed.
 
-### Phase 4 — Rust (deferred; independently skippable)
+### Phase 4 — Rust: decided, and not built — **dropped**
 
-The hard question, and the reason it is last-ish: `std` is statically linked into every
-binary today. Options: (a) a **PIC static `std`** (still static — no win, skip),
-(b) a **dynamic libc with static `std`** (C-level only; the `std` PAL would keep calling
-the dynamic libc via the loader — a large ABI-surface change), or (c) a **dynamic
-`libstd.so`** (the full lift). Recommend deciding only after Phase 3 shows what the C
-ABI surface costs. Nothing before Phase 4 depends on the outcome, and nothing after it
-requires Phase 4 to have happened — it can be deferred or dropped without touching
-Phases 0–3 or 5–7.
+The draft offered three shapes and said to choose after Phase 3 showed what the C ABI
+surface costs. That cost is now known, and so is the benefit — and the benefit is not
+there. **Recommendation: drop the phase.**
+
+The premise was that every `userland` binary carries its own copy of
+`minix-rt`/`minix-std`. It does not, in the way that matters. `tools/rc-cost.py` attributes
+a linked binary's symbols to the crate that defines them (Rust's v0 mangling names it), and
+`llvm-size` gives the total (release, x86_64):
+
+| binary | `.text` | symbols | instantiated generics | layer functions | the program |
+|---|---|---|---|---|---|
+| `echo` | 994 | 957 | 0 | 117 | 840 |
+| `cat` | 8,296 | 7,711 | 0 | 6,272 | 1,439 |
+| `ls` | 21,103 | 19,914 | 7,850 | 7,031 | 5,033 |
+| `sh` | 69,455 | 63,528 | 7,850 | 10,340 | 45,338 |
+| `mfs` | 46,394 | 122,586 | 0 | 8,071 | 114,515 |
+| `vfs` | 103,169 | 710,014 | 789 | 55,586 | 653,639 |
+
+(Symbols include data and bss, which is why `mfs` and `vfs` exceed their `.text` at all — so
+the layer column is an upper bound, not a floor.)
+
+Three things follow, and each is enough on its own:
+
+1. **There is no per-binary layer blob to remove.** `echo` is 994 bytes of `.text`
+   *altogether*; the layer's object code — `minix-std`'s rlib alone is 465 KB — is not
+   carried around, because the linker takes the members a binary references and `-O2`
+   inlines most of those into the caller. What a shared object could share is only the
+   functions that were *not* inlined: the "layer functions" column, a few KB per binary —
+   and much of `vfs`'s 55 KB is the layer's data and bss, which a DSO would not share
+   either.
+2. **Instantiations can never be shared**, whatever the linking scheme: a generic or
+   `#[inline]` body is compiled into every binary that calls it, which is the `_RI...`
+   column.
+3. **The duplication the draft worried about is already gone.** Two processes running the
+   same binary share its text today — exec maps read-only `VR_FILE` regions and VM consults
+   its file page cache before allocating a frame
+   (`crates/servers/src/vm/mod.rs:1251`). "N processes running the same tool cost N copies
+   in RAM" is not true of text (§2.2).
+
+Against that, the cost is exactly what Phases 0–3 avoided. A `dylib` cannot be built for
+the minix target at all — `cannot produce dylib for minix-std as the target
+x86_64-pc-minix does not support these crate types` — so it needs either the fork's target
+spec (`dynamic_linking: true`, `crt_static_allows_dylibs`) or the whole userland build moved
+onto a JSON target with `-Z build-std`, which is every `just build-*`, the image build and
+the stage1-verification flow. Then: the `panic` lang item in the new object (the same
+problem Phase 3's `cdylib` had), `-C prefer-dynamic` plus `PT_INTERP` and the loader on
+*every* userland binary, and the Rust-dylib caveats — the ABI is pinned to one compiler
+build, the symbols are mangled and hashed, and only the non-inlined items are shared at all.
+
+What would change the answer is a Rust userland shaped like a `libstd`: a large binary whose
+program code is a small fraction of it. Nothing in the port is, and `tools/rc-cost.py` is
+the check (give it a binary) — the same instrument Phase 5 needs. If the answer does change,
+option (a) still buys nothing by construction and option (b) is what Phase 3 delivered for C.
 
 ### Phase 5 — sharing: measure, and keep the mapping discipline
 
