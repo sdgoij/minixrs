@@ -47,7 +47,7 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 
 /// Maximum tracked chunks. The VM server caps live regions at
-/// `MAX_REGIONS` (16) per process, so this is generous.
+/// `MAX_REGIONS` per process, so this is generous.
 const MAX_CHUNKS: usize = 16;
 
 /// A live mmap chunk, for returning fully-free chunks to the kernel.

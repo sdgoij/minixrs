@@ -7,15 +7,18 @@
 ///
 /// Measured, not guessed. An address space starts with **8** before any shared object is
 /// mapped: `crates/ldso`'s two images (3 `PT_LOAD` regions each) plus the stack and the
-/// heap. A shared object costs **one region per `PT_LOAD`** — 4 for an LLD `-shared`
-/// object (`R`, `R E`, `RW`, `RW`, each on a page of its own) — so the old 16 held
-/// exactly two objects and refused a third (`DYNAMIC_LINKING.md` §7 Phase 2). This is
-/// twice that: `8 + 4n <= 32` leaves **6** objects, which is the slack a program with a
-/// library of its own needs.
+/// heap. A shared object costs **one region per `PT_LOAD`** — 3 for an object this tree
+/// links, because `tools/lld.py::NO_RELRO` drops the `GNU_RELRO` segment an LLD `-shared`
+/// object otherwise carries and nothing here reads the header — so `8 + 3n <= 64` leaves
+/// **18** objects. That is the number a Wayland session wants (compositor, EGL/GLES,
+/// libdrm/gbm, xkbcommon, libinput), and it is what moved this from 32: 16 held exactly
+/// two objects and refused a third (`DYNAMIC_LINKING.md` §7 Phase 2), and 32 held six.
 ///
-/// Raising it is cheap because [`VirRegion`] carries no per-page state (see there); a
-/// 32-entry table is *smaller* than the 16-entry one was.
-pub const MAX_REGIONS: usize = 32;
+/// Raising it is cheap because [`VirRegion`] carries no per-page state (see there), but it
+/// is not free: the table is `Option<VirRegion>` — 72 bytes, measured — per process
+/// (`Vmproc.vm_regions`, `NR_PROCS = 256`), so 64 is ~576 KiB more BSS than 32. The
+/// `Fault.ranges` array a page fill carries is a local, so it comes out of the stack.
+pub const MAX_REGIONS: usize = 64;
 
 /// A single contiguous virtual memory region with physical backing.
 ///
@@ -202,10 +205,18 @@ impl VirRegion {
 // Region list management
 
 /// A flat array of virtual regions (no AVL tree for Phase 2).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct RegionList {
     pub regions: [Option<VirRegion>; MAX_REGIONS],
+}
+
+impl Default for RegionList {
+    /// An empty list, the same as [`RegionList::new`]. Written out because the derive cannot
+    /// be used: `Default` for `[T; N]` stops at length 32, and [`MAX_REGIONS`] is 64.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RegionList {

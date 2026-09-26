@@ -650,6 +650,21 @@ So the de-duplication is proved by `count=1` (the property as an assertion, whic
 catch a loader that mapped twice on an image with regions to spare), and the *budget* is proved
 by the third object loading at all.
 
+**Later, when the budget had to grow for graphics.** A Wayland compositor wants a dozen objects
+(EGL, GLES, libdrm, gbm, xkbcommon, libinput, …), which is past both ceilings above, so two
+things moved rather than one. First the *per-object* cost: an LLD `-shared` object carries a
+`GNU_RELRO` `PT_LOAD` of its own, and nothing in the OS reads that header — not the loader, not
+VFS's exec, not the kernel — so the segment cost a region per object for a protection never
+applied. `-z norelro` (`tools/lld.py::NO_RELRO`) merges `.data.rel.ro` and `.got` into the
+writable segment they are already writable in, so **4 regions an object became 3** — measured on
+all three arches. `--no-rosegment` would make it 2, by moving the object's read-only data into
+the executable segment; declined for now, because that maps `.rodata` and `.dynstr` executable.
+Second, the cap: `MAX_REGIONS` 32 → **64**, which is `8 + 3n <= 64` — **18** objects — at ~576
+KiB more BSS (`Option<VirRegion>` is 72 bytes, times `NR_PROCS`), plus the loader's
+`MAX_OBJECTS` 8 → 24 so that it is not the binding ceiling instead. The third object below is
+what measures it; the pin for the loader's own table is a `const _: () = assert!(…)` in
+`rtld.rs`.
+
 ### Phase 3 — toolchain, and a dynamic C library — **done, less the soname scheme**
 
 - `minix-libc` builds as `libc.so` with a soname, so **C programs** link dynamically —
@@ -908,16 +923,18 @@ Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch
   reuse `pm_exec`'s header reader to parse a DSO — DSOs are the *loader's* problem and
   should be read/mapped by the loader, not VFS.
 - **The region table, not memory, is what bounds how many objects a program can have.**
-  `MAX_REGIONS` is **32 per process** (`vm/region.rs`) and the loader spends **one region per
-  `PT_LOAD`** — four for each LLD `-shared` object (`R`, `R E`, `RW`, `RW`). The two images'
-  regions plus the stack and the heap take 8 before the loader runs, so a dynamically linked
-  program fits **6** objects (`8 + 4n <= 32`) and the seventh `mmap` is refused (`EAGAIN`).
-  It was **16 when dynamic linking landed**, which is two objects — the number the loader's own
-  two images plus two shared objects consume *exactly*, so a program with a library of its own
-  did not run at all. Two things to remember before raising it again: the cost is a constant
-  times `NR_PROCS`, so it is the *size* of `VirRegion` that matters (a bare count, not a
-  per-page array — see §7 Phase 2), and adding an object needs regions to spare rather than
-  memory.
+  `MAX_REGIONS` is **64 per process** (`vm/region.rs`) and the loader spends **one region per
+  `PT_LOAD`** — **3** for each object this tree links, because `tools/lld.py::NO_RELRO` drops the
+  `GNU_RELRO` segment an LLD `-shared` link otherwise emits and nothing in the OS reads that
+  header. The two images' regions plus the stack and the heap take 8 before the loader runs, so a
+  dynamically linked program fits **18** objects (`8 + 3n <= 64`) and the nineteenth `mmap` is
+  refused (`EAGAIN`). The loader's own `MAX_OBJECTS` (`crates/ldso/src/rtld.rs`) is a *second*
+  ceiling that has to move with it: it counts the main program, so 24 is the 18 objects plus the
+  program and slack. It was **16 when dynamic linking landed** (two objects) and **32** when the
+  Phase 2 gate landed (six). Two things to remember before raising it again: the cost is a
+  constant times `NR_PROCS` (256), so it is the *size* of `Option<VirRegion>` — 72 bytes,
+  measured — that matters rather than a per-page array; and the loader's table is a stack local,
+  so `MAX_OBJECTS` carries its own pin (`rtld.rs`) against the 1 MiB user stack.
 - **An `mmap` failure has to carry VM's reason, or the loader names the wrong thing.**
   `read_and_map` maps each `PT_LOAD` with `MAP_FIXED` and used to turn every refusal into
   `a DT_NEEDED is not a PIC object` — a message about the image for a full region table. That

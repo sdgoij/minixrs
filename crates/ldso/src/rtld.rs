@@ -55,7 +55,18 @@ const NOT_ELF: &[u8] = b"ld.so: the image is not a riscv64 ELF\n";
 const NOT_ELF: &[u8] = b"ld.so: the image is not an aarch64 ELF\n";
 
 const PAGE: u64 = 0x1000;
-const MAX_OBJECTS: usize = 8;
+const MAX_OBJECTS: usize = 24;
+
+/// The object table and the name buffer beside it are both locals in `load_graph`, so
+/// they come out of the loader's stack — the 1 MiB every process's is
+/// (`arch_*/hal.rs::user_stack_size`). Measured at `MAX_OBJECTS = 24`: 9048 bytes, or
+/// under 1% of it. The pin is here because the reason to raise `MAX_OBJECTS` is the
+/// *region* budget, which argues for a larger table every time it moves, and a loader
+/// that runs off its stack dies somewhere that names nothing.
+const _: () = assert!(
+    core::mem::size_of::<[Object; MAX_OBJECTS]>() + core::mem::size_of::<[LibName; MAX_OBJECTS]>()
+        <= 64 * 1024
+);
 
 fn write_bytes(b: &[u8]) {
     unsafe { minix_rt::write(2, b.as_ptr(), b.len()) };
