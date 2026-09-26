@@ -41,7 +41,7 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
 - **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
 - **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
-- **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. Linking dynamically stays opt-in as MINIX's is — the default is still static; a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
+- **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. A program can also `dlopen` one at run time — which is what a driver lookup needs — and linking dynamically stays opt-in as MINIX's is: the default is still static, and a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
 
 ## coreutils
 
@@ -90,14 +90,17 @@ spelling, so a soname and a path to the same object do not become two copies. Th
 new rather than a port of `ld.elf_so`, but the rules are the reference's — `search.c`'s "a name
 containing a slash is a path", and `load.c`'s path-then-inode "already loaded".
 
-What it does not do yet, each a deferral rather than a stub: `dlopen`/`dlsym`,
-`LD_LIBRARY_PATH`, auxv (the loader uses a fixed 4 KiB page), and MINIX's
-soname/versioned-symlink scheme, so the search is literal — `/lib/`, `/usr/lib/`, or the name
-itself when it contains a `/`. A dynamically linked program can carry **six** shared objects:
-an address space holds 32 regions, the two images plus the stack and the heap take 8, and an
-object costs one region per `PT_LOAD` (four for the way LLD links a `-shared` object); the
-seventh fails the load with a message that says so. Thread-local storage is a single module,
-refused by name when a second object asks for it.
+A program can also `dlopen` a shared object at run time and reach its symbols with `dlsym` —
+the loader answers the family for `libc.so`, so a C program links nothing extra for it — and
+`RTLD_LOCAL`/`RTLD_GLOBAL` scope a load, with `dlclose` accepted and nothing unloaded. What it
+does not do yet, each a deferral rather than a stub: unload an object, place a second
+thread-local module (an object carrying `PT_TLS` is refused by name), `LD_LIBRARY_PATH`, auxv
+(the loader uses a fixed 4 KiB page), and MINIX's soname/versioned-symlink scheme, so the search
+is literal — `/lib/`, `/usr/lib/`, or the name itself when it contains a `/`. A dynamically
+linked program can carry **18** shared objects: an address space holds 64 regions, the two
+images plus the stack and the heap take 8, and an object costs one region per `PT_LOAD` — three,
+now that the `GNU_RELRO` segment nothing reads is not linked; the nineteenth fails the load with
+a message that says so.
 
 Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
 `just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them
@@ -117,7 +120,8 @@ nothing is added to the image but the program itself.
   `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
   resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
   `/bin/dynclib`'s line — `errno` read through the loader's thread-local storage, `strerror`'s
-  buffer inside `libc.so`, and the program's own `.init_array`.
+  buffer inside `libc.so`, and the program's own `.init_array` — and five `dlopen` steps: the two
+  scopes, `dlclose`, and the two failures the loader names itself.
 - `just test-cdyn-x86` — the gate on the recipe for a program of your own: it builds
   `tools/cdyn-demo.c` with `just cdyn`, injects the result and boots `tools/smoke/cdyn.tsv`,
   whose line is a string only `libc.so` holds.

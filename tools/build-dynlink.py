@@ -24,6 +24,11 @@ that what the program's three objects exhaust is the *address space* rather than
 the symbol tables — the region budget a dynamically linked program has
 (`tools/libdyn3.c`, `DYNAMIC_LINKING.md` §7 Phase 2).
 
+The `dlopen` pair is what Phase 6 adds: `libdlopen.so` and `libtls1.so` are named by
+*nothing* at link time, and `dynopen` asks the loader for them at run time — one loads
+and is called through the handle it returns, the other has a thread-local and must be
+refused (`tools/libdlopen.c`, `tools/libtls1.c`, `tools/dynopen.c`).
+
 Phase 7 made this three-arch: the C objects and the executable are compiled and
 linked for whichever target is named, and only the loader's own `_start` and TLS
 placement differ between them (`crates/ldso`).
@@ -48,7 +53,12 @@ from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import NO_RELRO, find_lld  # noqa: E402
 
+import cdyn  # noqa: E402
+
 DSOS = ("libdyn2", "libdyn", "libdyn3")
+# The objects nothing links against: `dynopen` asks the loader for these by path at run
+# time, so they are in no `DT_NEEDED` and the executable's link does not mention them.
+DYNOPEN_DSOS = ("libdlopen", "libtls1")
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
 
@@ -155,6 +165,19 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         return 1
     print(f"wrote {dso3}")
 
+    # The `dlopen` objects, built like the others: to the loader an object it is asked for at
+    # run time is no different from one that arrived through `DT_NEEDED`, so it is the same
+    # PIC compile and the same `-shared` link. Nothing installs them as `DT_NEEDED` of
+    # anything — that is the point of the pair.
+    for name in DYNOPEN_DSOS:
+        if run(["clang", *dso_flags, "-o", work / f"{name}.o", ROOT / "tools" / f"{name}.c"]) != 0:
+            return 1
+        so = work / f"{name}.so"
+        if run([lld, "-flavor", "gnu", "-shared", *NO_RELRO, "-soname", f"{name}.so",
+                "-o", so, work / f"{name}.o"]) != 0:
+            return 1
+        print(f"wrote {so}")
+
     # minix-libc for the target: the executable's write/exit come from here.
     env = {**os.environ, "RUSTC": str(rustc)}
     if run(["cargo", "build", "-p", "minix-libc", "--target", arch.triple, "--release"], env=env) != 0:
@@ -207,6 +230,22 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(link) != 0:
         return 1
     print(f"wrote {out}")
+
+    # `dynopen`: the `dlopen` consumer, and the second program that names nothing beyond
+    # libc. Its link is `tools/cdyn.py`'s rather than the one above, and that is not tidiness:
+    # naming `minix_libc` (which `dynhello` does, for `write`/`exit`) puts the *static*
+    # library in the program, and its `dlopen` would then satisfy the reference instead of
+    # the `libc.so` that reaches the loader. A user's own program is linked this way too.
+    if cdyn.link_program(
+        arch,
+        ROOT / "tools" / "dynopen.c",
+        work / "dynopen",
+        rustc,
+        lld,
+        ROOT / "target" / arch.triple / "release",
+        work,
+    ) != 0:
+        return 1
     return 0
 
 

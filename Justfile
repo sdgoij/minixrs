@@ -363,10 +363,19 @@ test-bash-aarch64 boot-timeout="60":
 # does carry, and this gate is where the shipped `/bin/dynclib` is exercised, so a
 # regression in it is caught here rather than only in a gate that had built its own
 # copy.
+#
+# The last five steps are `dlopen` (Phase 6). `tools/dynopen.c` asks the loader for
+# `libdlopen.so` at run time — the object is in nothing's `DT_NEEDED`, which is the case a
+# driver lookup is — and reaches it through the handle, and through `RTLD_DEFAULT` after an
+# `RTLD_GLOBAL` load, and again after a `dlclose`. The two failing steps assert the loader's
+# own message rather than just "it failed": a path that is not there, and `libtls1.so`,
+# whose thread-local the loader cannot place, because the module it lays out is fixed at
+# startup for every thread.
 test-dynlink-x86 boot-timeout="40": dynlink-x86
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libdlopen.so=target/dynlink/x86/libdlopen.so;/lib/libtls1.so=target/dynlink/x86/libtls1.so;/bin/dynopen=target/dynlink/x86/dynopen' just build-x86
     @if grep -q 'dynlink' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/x86_64-pc-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/x86/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
@@ -389,9 +398,10 @@ dynlink-riscv64: dynlib-riscv64
 # objects contain, on an errno read through the loader's TLS, and on the program's
 # own constructor, none of which depends on the instruction set.
 test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libdlopen.so=target/dynlink/riscv64/libdlopen.so;/lib/libtls1.so=target/dynlink/riscv64/libtls1.so;/bin/dynopen=target/dynlink/riscv64/dynopen' just build-riscv64
     @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/riscv64gc-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/riscv64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-riscv64
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (riscv64)"
@@ -405,9 +415,10 @@ dynlink-aarch64: dynlib-aarch64
     python tools/build-dynlink.py aarch64
 
 test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello' just build-aarch64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libdlopen.so=target/dynlink/aarch64/libdlopen.so;/lib/libtls1.so=target/dynlink/aarch64/libtls1.so;/bin/dynopen=target/dynlink/aarch64/dynopen' just build-aarch64
     @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/aarch64-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/aarch64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-aarch64
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
@@ -713,8 +724,9 @@ dynlib-x86:
     python tools/build-dynlibc.py x86
 
 # What the loader's *own* gate needs on top of `dynlib-x86`: `tools/build-dynlink.py`
-# builds `libdyn*.so` and `dynhello`, whose strings live only in the objects and which no
-# image ships. `test-dynlink-x86` injects those four into a standard image
+# builds `libdyn*.so` and `dynhello` (resolution, the region budget), `libdlopen.so`,
+# `libtls1.so` and `dynopen` (the `dlopen` steps), whose strings live only in the objects
+# and which no image ships. `test-dynlink-x86` injects them into a standard image
 # (`DYNLINK_BINS`) and boots it.
 dynlink-x86: dynlib-x86
     python tools/build-dynlink.py x86

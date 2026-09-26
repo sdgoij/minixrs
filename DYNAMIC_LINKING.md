@@ -63,7 +63,6 @@ Concretely, "done" for v1 means:
 
 ### Non-goals for v1
 
-- **`dlopen`/`dlsym`** at runtime (Phase 6; the v1 loader is eager and load-only).
 - **Symbol versioning** — there is no compatibility surface to version.
 - **Lazy binding** — eager binding is simpler, has no PLT trampoline and no
   `_dl_runtime_resolve`, and is the right default for an OS with no ABI promises yet.
@@ -226,8 +225,9 @@ Two options:
 the target today), no `AT_EXECFD`, and it keeps the proven path (`vfs_memmap` per
 segment) as the way images are mapped. The cost: the loader cannot apply per-segment
 protections to the main program differently from the link-time ones, and `AT_PHDR` for
-the main program is not available — neither matters until `dlopen` (Phase 6), which is
-where option A can be revisited.
+the main program is not available — and Phase 6 turned out not to need either, because it
+is the *loader* that answers `dlopen` for a dynamic program rather than a static caller that
+would have needed `AT_PHDR` to describe itself.
 
 ### D5 — Interpreter placement: fixed, non-PIE first
 
@@ -873,11 +873,41 @@ program's `TEXT_BASE`, the process table's symbol and the `Proc` slot stride are
 has no recipe yet — its read-only bit (`AP[2]`) is inverted relative to these two, so it is a
 change to the walk rather than a row in it.
 
-### Phase 6 — `dlopen`/`dlsym` (optional)
+### Phase 6 — `dlopen`/`dlsym` — **done, less unloading and multi-module TLS**
 
-Only if a consumer appears. Needs symbol lookup by name, `.init_array`/`.fini_array`
-running at load, and — for a *static* caller to `dlopen` — either option A (D4) or an
-`AT_PHDR` for the main program.
+Landed when the consumer appeared (§6.9, the C graphics stack): a driver lookup is a
+`dlopen` at run time, which no `DT_NEEDED` can express.
+
+- `rtld.rs` keeps the object list, its length, the base allocator and the program's arguments
+  in a `static` rather than in `run`'s frame, because `run` returns to the main program and a
+  `dlopen` arrives long afterwards. `load_now` does for one object what the startup walk does
+  for the graph: resolve its `DT_NEEDED`, place it, relocate the group (dependencies first)
+  and run the group's initialisers.
+- The loader exports the family without a `.dynsym` of its own. It is a static executable, so
+  exporting would mean self-relocation; instead `loader_defined` answers `__rtld_dlopen`,
+  `__rtld_dlsym`, `__rtld_dlerror` and `__rtld_dlclose` with its own addresses, exactly as it
+  already answered `__tls_get_addr`, and `libc.so` calls through them. So a C program gets
+  `dlopen` from `libc.so`, and a statically linked one gets the honest failure — the split
+  §6.6 describes for the TLS bounds.
+- `RTLD_LOCAL` and `RTLD_GLOBAL` are implemented rather than accepted and ignored: an object
+  carries a group id and whether it is in the global scope, and a lookup is two passes — the
+  owner's own group first, then the global scope — so an object's own definition of a name
+  wins over a global one of the same name, and a local load stays out of
+  `dlsym(RTLD_DEFAULT, …)`. `RTLD_LAZY` and `RTLD_NOW` ask the same thing here, because eager
+  binding (D6) is a superset of what lazy promises.
+- What it does not do: **unload** — `dlclose` is accepted and nothing is unmapped, so a second
+  `dlopen` of the same file returns the same handle — and **multi-module TLS**, because the
+  one module the loader places is laid out at startup for every thread. An object carrying
+  `PT_TLS` is therefore refused by name, and that refusal is the gap §6.9 records for the
+  graphics stack rather than something a caller can work around.
+- The table is not locked: two threads in `dlopen` at once would race it. Nothing so far calls
+  it from more than one.
+
+Gate: `tools/dynopen.c` (`/bin/dynopen`), five steps in `tools/smoke/dyn.tsv` on all three
+arches — a `RTLD_LOCAL` load reached through its handle and *not* through `dlsym(RTLD_DEFAULT,
+…)`, a `RTLD_GLOBAL` one reached through `RTLD_DEFAULT`, `dlclose` leaving the object usable,
+and the two failures (`tools/libtls1.c`'s thread-local, and a path that does not exist)
+asserted on the loader's own message. `just test-dynlink-<arch>`.
 
 ### Phase 7 — riscv64 + aarch64 — **done**
 

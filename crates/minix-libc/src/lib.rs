@@ -1519,32 +1519,82 @@ struct PollFd {
 const POLLIN: i16 = 0x001;
 const POLLOUT: i16 = 0x004;
 
-/// `dlopen(3)`: not supported — the image is statically linked.
-#[cfg(target_os = "minix")]
+// ---- dlfcn.h ----
+//
+// A *dynamic* program loads a shared object through the loader: the functions below call
+// it, and it supplies the four `__rtld_*` names the way it supplies the TLS bounds above —
+// they are in no object's tables, so `loader_defined` in `crates/ldso/src/rtld.rs` answers
+// them with the loader's own `dlopen` and friends. A *static* program has no loader in its
+// address space at all (no `PT_INTERP`, nothing to ask), and says so.
+
+/// The loader's `dlopen` family. Nothing defines these: a `libc.so` is linked with them
+/// undefined, exactly as it is with `__tls_get_addr`.
+#[cfg(all(target_os = "minix", feature = "so"))]
+unsafe extern "C" {
+    fn __rtld_dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
+    fn __rtld_dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn __rtld_dlclose(handle: *mut c_void) -> c_int;
+    fn __rtld_dlerror() -> *mut c_char;
+}
+
+/// `dlopen(3)`: load a shared object now, and return a handle for `dlsym`.
+///
+/// `NULL` for `filename` is the caller's own image, i.e. the global scope.
+#[cfg(all(target_os = "minix", feature = "so"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void {
+    unsafe { __rtld_dlopen(filename, flags) }
+}
+
+/// `dlsym(3)`: the address `symbol` has in the scope `handle` names, or null.
+#[cfg(all(target_os = "minix", feature = "so"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void {
+    unsafe { __rtld_dlsym(handle, symbol) }
+}
+
+/// `dlerror(3)`: the last failure's message, once, or null when there is none.
+#[cfg(all(target_os = "minix", feature = "so"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlerror() -> *mut c_char {
+    unsafe { __rtld_dlerror() }
+}
+
+/// `dlclose(3)`: accepted, and nothing is unloaded — the object stays mapped and in the
+/// loader's table, so a second `dlopen` of it hands back the same handle.
+#[cfg(all(target_os = "minix", feature = "so"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn dlclose(handle: *mut c_void) -> c_int {
+    unsafe { __rtld_dlclose(handle) }
+}
+
+/// `dlopen(3)`: unsupported — a statically linked image has no loader to load one with.
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn dlopen(_filename: *const c_char, _flags: c_int) -> *mut c_void {
     core::ptr::null_mut()
 }
 
-/// `dlsym(3)`: not supported (see `dlopen`).
-#[cfg(target_os = "minix")]
+/// `dlsym(3)`: unsupported (see `dlopen`).
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn dlsym(_handle: *mut c_void, _symbol: *const c_char) -> *mut c_void {
     core::ptr::null_mut()
 }
 
-/// `dlclose(3)`: no-op (see `dlopen`).
-#[cfg(target_os = "minix")]
+/// `dlclose(3)`: unsupported (see `dlopen`).
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn dlclose(_handle: *mut c_void) -> c_int {
-    0
+    -1
 }
 
-/// `dlerror(3)`: a fixed message (see `dlopen`).
-#[cfg(target_os = "minix")]
+/// `dlerror(3)`: why the three above do nothing here.
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn dlerror() -> *mut c_char {
-    b"dlopen() not supported on this platform\0".as_ptr() as *const c_char as *mut c_char
+    b"dlopen: this program is statically linked, so it has no loader\0".as_ptr() as *const c_char
+        as *mut c_char
 }
 
 // Utility

@@ -201,6 +201,27 @@ pub enum Scope {
     ExcludeSelf,
 }
 
+/// Which pass of a lookup an object belongs to, or `None` when it is not visible at all.
+///
+/// A lookup is two passes over the loaded objects: the ones in the asking object's own
+/// `dlopen` group first, and then the global scope. Load order decides within each pass.
+///
+/// That order is what makes an object's own definition of a name win over a global one of
+/// the same name, and it is what keeps a `RTLD_LOCAL` object's symbols out of
+/// `dlsym(RTLD_DEFAULT, …)` — the main program's group is 0 and a locally loaded object's is
+/// not, and being local it is not in the global scope either. Everything mapped before the
+/// program runs is group 0 *and* global, so for a startup load both passes cover the same
+/// objects and the order makes no difference, which is why this changed nothing about it.
+pub const fn lookup_pass(obj_group: u16, obj_global: bool, owner_group: u16) -> Option<u8> {
+    if obj_group == owner_group {
+        Some(0)
+    } else if obj_global {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 /// A symbol's definition, as its defining object states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Def {
@@ -987,5 +1008,21 @@ mod tests {
         assert_eq!(out.as_bytes(), b"");
         assert!(out.set(&[b'y'; SYMNAME_MAX]));
         assert_eq!(out.as_bytes().len(), SYMNAME_MAX);
+    }
+
+    /// The two-pass rule, and the half of it that is a scope rather than an order: an object
+    /// in the asking object's own group is found before the global scope, and one that is
+    /// neither in that group nor global — a `RTLD_LOCAL` load — is not found at all. That is
+    /// the whole of what `RTLD_LOCAL` and `RTLD_GLOBAL` mean here, and it is what makes
+    /// `dlsym(RTLD_DEFAULT, …)` miss a locally loaded object.
+    #[test]
+    fn a_lookup_is_the_group_before_the_global_scope() {
+        // The asking object is in group 2.
+        assert_eq!(lookup_pass(2, false, 2), Some(0));
+        assert_eq!(lookup_pass(0, true, 2), Some(1));
+        assert_eq!(lookup_pass(3, false, 2), None);
+        // The startup graph is group 0 *and* global, so both passes are the same objects for
+        // it and the order cannot matter — which is why adding this changed no startup load.
+        assert_eq!(lookup_pass(0, true, 0), Some(0));
     }
 }

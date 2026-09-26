@@ -1,7 +1,7 @@
 /* The third shared object.
  *
  * Its job is not resolution but *room*. An address space holds `MAX_REGIONS` regions
- * (`crates/servers/src/vm/region.rs`), a shared object costs one per `PT_LOAD` — four for
+ * (`crates/servers/src/vm/region.rs`), a shared object costs one per `PT_LOAD` — three for
  * an object linked the way this one is — and a dynamically linked program has spent 8 on
  * its two images plus the stack and the heap before the loader maps anything. With 16
  * regions the third object was the one that did not fit: the loader's `mmap` of its

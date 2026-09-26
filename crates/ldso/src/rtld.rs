@@ -36,9 +36,11 @@ use crate::layout::{
 };
 use crate::reloc::{
     Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, TLS_MODULE_ID, apply_table,
+    lookup_pass,
 };
 use crate::search::{PATH_MAX, SEARCH_PATH, names_a_path, search_path_join};
 use core::arch::asm;
+use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -72,42 +74,8 @@ fn write_bytes(b: &[u8]) {
     unsafe { minix_rt::write(2, b.as_ptr(), b.len()) };
 }
 
-fn write_dec(mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    write_bytes(&buf[i..]);
-}
-
-fn write_hex(v: u64) {
-    let mut buf = [b'0'; 16];
-    for (i, b) in buf.iter_mut().enumerate() {
-        let nib = ((v >> (4 * (15 - i))) & 0xf) as u8;
-        *b = if nib < 10 {
-            b'0' + nib
-        } else {
-            b'a' + nib - 10
-        };
-    }
-    write_bytes(&buf);
-}
-
 fn die(msg: &[u8]) -> ! {
     write_bytes(msg);
-    minix_rt::exit(1)
-}
-
-fn die_parts(parts: &[&[u8]]) -> ! {
-    for p in parts {
-        write_bytes(p);
-    }
     minix_rt::exit(1)
 }
 
@@ -117,6 +85,10 @@ enum LoadError {
     NotObject,
     NoDynamic,
     TwoTlsModules,
+    /// A `dlopen`'d object brings `PT_TLS`. The one thread-local module the loader places
+    /// is laid out at startup, before any thread exists; a second would leave every
+    /// thread's block sized for one image (`DYNAMIC_LINKING.md` D8).
+    RuntimeTls,
     NoTlsSpace,
     TooManyObjects,
     CannotLoad,
@@ -133,59 +105,181 @@ enum LoadError {
     Reloc(RelocError),
 }
 
-fn die_load(e: LoadError) -> ! {
-    match e {
-        LoadError::NotElf => die(NOT_ELF),
-        LoadError::NotObject => die(b"ld.so: a DT_NEEDED is not a PIC object\n"),
-        LoadError::NoDynamic => die(b"ld.so: no PT_DYNAMIC\n"),
-        LoadError::TwoTlsModules => {
-            die(b"ld.so: more than one loaded object has thread-local storage\n")
+/// Longest message [`set_error`] writes, its NUL included: the longest real one is
+/// `"ld.so: unresolved symbol "` + [`SYMNAME_MAX`] + `'\n'`.
+const ERROR_MAX: usize = SYMNAME_MAX + 64;
+
+/// Where a load failure's message waits, for the console or for `dlerror`.
+///
+/// `len` counts the message *without* the NUL [`set_error`] appends, and 0 means there is
+/// nothing to report — which is what `dlerror` returns null for.
+struct ErrorBuf {
+    buf: [u8; ERROR_MAX],
+    len: usize,
+}
+
+/// [`ErrorBuf`] behind the `UnsafeCell` a `static` needs.
+struct ErrorCell(UnsafeCell<ErrorBuf>);
+
+// SAFETY: the loader is one thread's program - see the note on `State`.
+unsafe impl Sync for ErrorCell {}
+
+static ERROR: ErrorCell = ErrorCell(UnsafeCell::new(ErrorBuf {
+    buf: [0; ERROR_MAX],
+    len: 0,
+}));
+
+/// Writes a message into a fixed buffer, stopping at its end.
+struct Msg<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl Msg<'_> {
+    fn put(&mut self, b: &[u8]) {
+        let n = (self.buf.len() - 1).saturating_sub(self.len).min(b.len());
+        self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
+        self.len += n;
+    }
+
+    fn dec(&mut self, mut v: u64) {
+        let mut tmp = [0u8; 20];
+        let mut i = tmp.len();
+        loop {
+            i -= 1;
+            tmp[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
         }
-        LoadError::NoTlsSpace => die(b"ld.so: no room for a thread-local block\n"),
-        LoadError::TooManyObjects => die(b"ld.so: too many objects\n"),
-        LoadError::CannotLoad => die(b"ld.so: cannot load DT_NEEDED\n"),
-        LoadError::CannotStat => die(b"ld.so: cannot stat a DT_NEEDED\n"),
-        LoadError::Refused(e) if e == minix_std::EAGAIN => {
-            die(b"ld.so: no room in the address space for another object\n")
+        self.put(&tmp[i..]);
+    }
+
+    fn hex(&mut self, mut v: u64) {
+        let mut tmp = [0u8; 16];
+        let mut i = tmp.len();
+        loop {
+            i -= 1;
+            tmp[i] = b"0123456789abcdef"[(v & 0xf) as usize];
+            v >>= 4;
+            if v == 0 {
+                break;
+            }
+        }
+        self.put(&tmp[i..]);
+    }
+}
+
+/// The message a failure is reported with, in the buffer `dlerror` returns.
+///
+/// One formatter for both destinations: [`die_load`] writes what this returns to the
+/// console and stops, and `dlopen` leaves it for `dlerror` to hand back. The wording of a
+/// load failure therefore lives in one place whatever the caller did with it.
+fn set_error(e: &LoadError) -> &'static [u8] {
+    let cell = unsafe { &mut *ERROR.0.get() };
+    let mut w = Msg {
+        buf: &mut cell.buf,
+        len: 0,
+    };
+    match e {
+        LoadError::NotElf => w.put(NOT_ELF),
+        LoadError::NotObject => w.put(b"ld.so: a DT_NEEDED is not a PIC object\n"),
+        LoadError::NoDynamic => w.put(b"ld.so: no PT_DYNAMIC\n"),
+        LoadError::TwoTlsModules => {
+            w.put(b"ld.so: more than one loaded object has thread-local storage\n")
+        }
+        LoadError::RuntimeTls => {
+            w.put(b"ld.so: a dlopen'd object has thread-local storage, and the loader");
+            w.put(b" places one module\n");
+        }
+        LoadError::NoTlsSpace => w.put(b"ld.so: no room for a thread-local block\n"),
+        LoadError::TooManyObjects => w.put(b"ld.so: too many objects\n"),
+        LoadError::CannotLoad => w.put(b"ld.so: cannot load a shared object\n"),
+        LoadError::CannotStat => w.put(b"ld.so: cannot stat a shared object\n"),
+        LoadError::Refused(e) if *e == minix_std::EAGAIN => {
+            w.put(b"ld.so: no room in the address space for another object\n")
         }
         LoadError::Refused(e) => {
-            write_bytes(b"ld.so: VM refused a segment mapping (error ");
-            write_dec(e.unsigned_abs() as u64);
-            die(b")\n")
+            w.put(b"ld.so: VM refused a segment mapping (error ");
+            w.dec(e.unsigned_abs() as u64);
+            w.put(b")\n");
         }
-        LoadError::NoSpace => die(b"ld.so: no room for another object\n"),
-        LoadError::DtRel => die(b"ld.so: PLT relocations are not RELA\n"),
-        LoadError::Reloc(RelocError::BadSize(_)) => die(b"ld.so: malformed RELA table size\n"),
+        LoadError::NoSpace => w.put(b"ld.so: no room for another object\n"),
+        LoadError::DtRel => w.put(b"ld.so: PLT relocations are not RELA\n"),
+        LoadError::Reloc(RelocError::BadSize(_)) => w.put(b"ld.so: malformed RELA table size\n"),
         LoadError::Reloc(RelocError::BadTable(..)) => {
-            die(b"ld.so: a relocation table is not in the image\n")
+            w.put(b"ld.so: a relocation table is not in the image\n")
         }
         LoadError::Reloc(RelocError::Unsupported(t)) => {
-            write_bytes(b"ld.so: unsupported relocation type ");
-            write_dec(t as u64);
-            die(b"\n")
+            w.put(b"ld.so: unsupported relocation type ");
+            w.dec(*t as u64);
+            w.put(b"\n");
         }
         LoadError::Reloc(RelocError::BadSymbol(i, SymError::Missing)) => {
-            write_bytes(b"ld.so: no name for symbol ");
-            write_dec(i as u64);
-            die(b"\n")
+            w.put(b"ld.so: no name for symbol ");
+            w.dec(*i as u64);
+            w.put(b"\n");
         }
         LoadError::Reloc(RelocError::BadSymbol(i, SymError::TooLong)) => {
-            write_bytes(b"ld.so: symbol ");
-            write_dec(i as u64);
-            die(b" has too long a name\n")
+            w.put(b"ld.so: symbol ");
+            w.dec(*i as u64);
+            w.put(b" has too long a name\n");
         }
         LoadError::Reloc(RelocError::Unresolved(n)) => {
-            die_parts(&[b"ld.so: unresolved symbol ", n.as_bytes(), b"\n"])
+            w.put(b"ld.so: unresolved symbol ");
+            w.put(n.as_bytes());
+            w.put(b"\n");
         }
         LoadError::Reloc(RelocError::OutOfRange(a)) => {
-            write_bytes(b"ld.so: relocation target outside the image: 0x");
-            write_hex(a);
-            die(b"\n")
+            w.put(b"ld.so: relocation target outside the image: 0x");
+            w.hex(*a);
+            w.put(b"\n");
         }
         LoadError::Reloc(RelocError::TlsDescForASymbol) => {
-            die(b"ld.so: a TLS descriptor names a symbol another object defines\n")
+            w.put(b"ld.so: a TLS descriptor names a symbol another object defines\n")
         }
     }
+    cell.len = w.len;
+    cell.buf[w.len] = 0;
+    unsafe { core::slice::from_raw_parts(cell.buf.as_ptr(), cell.len) }
+}
+
+/// The message [`set_error`] stored, if any, and clears it: `dlerror`'s contract is to
+/// report each failure once.
+fn take_error() -> Option<&'static [u8]> {
+    let cell = unsafe { &mut *ERROR.0.get() };
+    if cell.len == 0 {
+        return None;
+    }
+    // The message and its NUL, which is what the C caller is handed.
+    let n = cell.len + 1;
+    cell.len = 0;
+    Some(unsafe { core::slice::from_raw_parts(cell.buf.as_ptr(), n) })
+}
+
+/// Forget a failure: a `dlopen` or `dlsym` that worked leaves `dlerror` with nothing to
+/// report.
+fn clear_error() {
+    unsafe { (*ERROR.0.get()).len = 0 };
+}
+
+/// Store `text` as the pending failure. For the failures that are not a load's: a `dlsym`
+/// of a name nothing defines, and a handle that names no object.
+fn set_message(text: &[u8]) -> &'static [u8] {
+    let cell = unsafe { &mut *ERROR.0.get() };
+    let mut w = Msg {
+        buf: &mut cell.buf,
+        len: 0,
+    };
+    w.put(text);
+    cell.len = w.len;
+    cell.buf[w.len] = 0;
+    unsafe { core::slice::from_raw_parts(cell.buf.as_ptr(), cell.len) }
+}
+
+fn die_load(e: LoadError) -> ! {
+    die(set_error(&e))
 }
 
 unsafe fn rd_u8(va: u64) -> u8 {
@@ -302,6 +396,16 @@ struct Object {
     /// The file it was mapped from, `None` for the main program: the loader is given
     /// its header page, not a descriptor, so there is nothing to stat.
     identity: Option<Identity>,
+    /// Whether its symbols are in the global scope, where a later object's relocations and
+    /// a `RTLD_DEFAULT` lookup find them (what `dlopen`'s `RTLD_GLOBAL` asks for).
+    /// Everything mapped before the program runs is global; `RTLD_LOCAL` is what leaves a
+    /// `dlopen`'d object out of it, and then only [`group`](Self::group) sees it.
+    global: bool,
+    /// Which `dlopen` call loaded it, or 0 for the startup graph. A lookup tries the
+    /// object's own group before the global scope, so an object's own definition of a name
+    /// wins over a global one, and a `RTLD_LOCAL` object is reachable by the objects loaded
+    /// with it.
+    group: u16,
 }
 
 impl Object {
@@ -316,6 +420,8 @@ impl Object {
         tls: None,
         name: LibName::EMPTY,
         identity: None,
+        global: false,
+        group: 0,
     };
 
     /// The name of dynamic symbol `idx`, if it is a defined global or weak.
@@ -382,30 +488,42 @@ impl Object {
 /// `owner` is the object being relocated: [`Scope::ExcludeSelf`] skips it, which a
 /// COPY needs — this image's own symbol for the name is the destination it is
 /// about to write, so resolving there would copy the destination onto itself.
+///
+/// A lookup is two passes, load order within each: the objects in `owner`'s own `dlopen`
+/// group first, then the global scope. That is what makes an object's own definition of a
+/// name win over a global one of the same name, and it is why a `RTLD_LOCAL` object's
+/// symbols are reachable by the objects loaded with it and by nothing else.
 unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usize) -> Option<Def> {
     // The loader is linkable to the objects it maps, the way a system `ld.so` is:
     // the names below belong to the loader and are in no object's tables.
     if let Some(def) = loader_defined(objects, owner, name) {
         return Some(def);
     }
-    for (i, o) in objects.iter().enumerate() {
-        if scope == Scope::ExcludeSelf && i == owner {
-            continue;
-        }
-        for idx in 0..o.nsym as u32 {
-            if let Some(n) = unsafe { o.defined_name(idx) }
-                && n == name
-            {
-                let st = o.bias + o.symtab + (idx as u64) * SYM_SIZE as u64;
-                let value = o.bias + unsafe { rd_u64(st + 8) };
-                let size = unsafe { rd_u64(st + 16) };
-                // A definition outside the object that states it is not one to
-                // trust: a value would point out of the object and a COPY would
-                // move bytes from somewhere else.
-                if value < o.img_start || value.checked_add(size).is_none_or(|e| e > o.img_end) {
-                    return None;
+    let group = objects.get(owner).map_or(0, |o| o.group);
+    for pass in 0..2u8 {
+        for (i, o) in objects.iter().enumerate() {
+            if scope == Scope::ExcludeSelf && i == owner {
+                continue;
+            }
+            if lookup_pass(o.group, o.global, group) != Some(pass) {
+                continue;
+            }
+            for idx in 0..o.nsym as u32 {
+                if let Some(n) = unsafe { o.defined_name(idx) }
+                    && n == name
+                {
+                    let st = o.bias + o.symtab + (idx as u64) * SYM_SIZE as u64;
+                    let value = o.bias + unsafe { rd_u64(st + 8) };
+                    let size = unsafe { rd_u64(st + 16) };
+                    // A definition outside the object that states it is not one to
+                    // trust: a value would point out of the object and a COPY would
+                    // move bytes from somewhere else.
+                    if value < o.img_start || value.checked_add(size).is_none_or(|e| e > o.img_end)
+                    {
+                        return None;
+                    }
+                    return Some(Def { addr: value, size });
                 }
-                return Some(Def { addr: value, size });
             }
         }
     }
@@ -426,6 +544,25 @@ fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> 
             addr: __tls_get_addr as *const () as u64,
             size: 0,
         });
+    }
+    // The `dlopen` family, for the same reason: nothing a `cdylib` links against defines
+    // them, so the loader answers — and the loader is the object that can load one.
+    // `minix-libc`'s shared build calls through these names
+    // (`crates/minix-libc/src/lib.rs`), which is how a C program gets `dlopen` without the
+    // loader exporting a `.dynsym` of its own: the loader is static, and a program's
+    // relocations resolve against it by name here rather than against a link map.
+    for (n, f) in [
+        (&b"__rtld_dlopen"[..], dlopen as *const ()),
+        (&b"__rtld_dlsym"[..], dlsym as *const ()),
+        (&b"__rtld_dlerror"[..], dlerror as *const ()),
+        (&b"__rtld_dlclose"[..], dlclose as *const ()),
+    ] {
+        if name == n {
+            return Some(Def {
+                addr: f as u64,
+                size: 0,
+            });
+        }
     }
     let tls = objects.get(owner)?.tls?;
     let addr = if name == b"__tls_start" {
@@ -637,6 +774,11 @@ fn read_and_map(
         tls,
         name: LibName::EMPTY,
         identity: Some(identity),
+        // Both of these are the caller's to set: the startup walk makes every object it
+        // adds global (`load_dependencies`), and a `dlopen` gives the object the scope of
+        // the call that made it (`load_now`).
+        global: false,
+        group: 0,
     };
     if !obj.name.set(path) {
         return Err(LoadError::CannotLoad);
@@ -652,8 +794,11 @@ enum Candidate {
     /// A file none of `objects` was mapped from: the object, mapped and described.
     Fresh(Object),
     /// A file an object in the list already maps, under this path or another spelling
-    /// of it. The descriptor is closed and nothing is mapped.
-    Loaded,
+    /// of it — the index of that object. The descriptor is closed and nothing is mapped.
+    ///
+    /// The index is what `dlopen` needs: a second request for a file that is already
+    /// loaded hands back that object's handle rather than a second mapping.
+    Loaded(usize),
     /// Nothing is at that path, so the next search-path directory may still have the
     /// name.
     Absent,
@@ -673,7 +818,11 @@ fn open_candidate(
     alloc: &mut BaseAlloc,
 ) -> Result<Candidate, LoadError> {
     if objects.iter().any(|o| o.name.as_bytes() == path) {
-        return Ok(Candidate::Loaded);
+        let i = objects
+            .iter()
+            .position(|o| o.name.as_bytes() == path)
+            .ok_or(LoadError::CannotLoad)?;
+        return Ok(Candidate::Loaded(i));
     }
     let fd = minix_rt::open(path, 0);
     if fd < 0 {
@@ -688,13 +837,45 @@ fn open_candidate(
         dev: st.st_dev,
         ino: st.st_ino,
     };
-    if objects.iter().any(|o| o.identity == Some(identity)) {
+    if let Some(i) = objects.iter().position(|o| o.identity == Some(identity)) {
         minix_rt::close(fd);
-        return Ok(Candidate::Loaded);
+        return Ok(Candidate::Loaded(i));
     }
     let obj = read_and_map(fd, path, identity, alloc);
     minix_rt::close(fd);
     Ok(Candidate::Fresh(obj?))
+}
+
+/// The object `name` names, resolved the way a `DT_NEEDED` is: a path is the file, a bare
+/// name is searched for, and either may turn out to be a file already mapped.
+///
+/// One place decides that for both loads — the startup walk and a `dlopen` — because the
+/// rules are the same and the second caller needs the *index* of an object that is already
+/// there, which is what [`Candidate::Loaded`] carries.
+fn find_candidate(
+    name: &[u8],
+    objects: &[Object],
+    alloc: &mut BaseAlloc,
+) -> Result<Candidate, LoadError> {
+    if names_a_path(name) {
+        // A hard-coded pathname is the file, not a name to look for: the search path
+        // is for bare names only (`search.c`).
+        if name.len() > PATH_MAX {
+            return Err(LoadError::CannotLoad);
+        }
+        return open_candidate(name, objects, alloc);
+    }
+    let mut path = [0u8; PATH_MAX];
+    for dir in SEARCH_PATH {
+        let n = search_path_join(dir, name, &mut path).ok_or(LoadError::CannotLoad)?;
+        match open_candidate(&path[..n], objects, alloc)? {
+            Candidate::Absent => continue,
+            // The first directory that has the file decides: a later one would name the
+            // same file, or nothing at all.
+            found => return Ok(found),
+        }
+    }
+    Ok(Candidate::Absent)
 }
 
 /// Open a `DT_NEEDED` name and map the object behind it, unless one is loaded.
@@ -707,31 +888,11 @@ fn load(
     objects: &[Object],
     alloc: &mut BaseAlloc,
 ) -> Result<Option<Object>, LoadError> {
-    if names_a_path(name) {
-        // A hard-coded pathname is the file, not a name to look for: the search path
-        // is for bare names only (`search.c`).
-        if name.len() > PATH_MAX {
-            return Err(LoadError::CannotLoad);
-        }
-        return match open_candidate(name, objects, alloc)? {
-            Candidate::Fresh(obj) => Ok(Some(obj)),
-            Candidate::Loaded => Ok(None),
-            Candidate::Absent => Err(LoadError::CannotLoad),
-        };
+    match find_candidate(name, objects, alloc)? {
+        Candidate::Fresh(obj) => Ok(Some(obj)),
+        Candidate::Loaded(_) => Ok(None),
+        Candidate::Absent => Err(LoadError::CannotLoad),
     }
-
-    let mut path = [0u8; PATH_MAX];
-    for dir in SEARCH_PATH {
-        let n = search_path_join(dir, name, &mut path).ok_or(LoadError::CannotLoad)?;
-        match open_candidate(&path[..n], objects, alloc)? {
-            Candidate::Fresh(obj) => return Ok(Some(obj)),
-            // Loaded through this directory, so the later ones would name the same
-            // file and are not searched.
-            Candidate::Loaded => return Ok(None),
-            Candidate::Absent => continue,
-        }
-    }
-    Err(LoadError::CannotLoad)
 }
 
 /// Relocate one object: its own `RELATIVE`/`R_*_64` tables, then its PLT.
@@ -758,7 +919,7 @@ fn relocate(objects: &[Object], owner_idx: usize) -> Result<(), LoadError> {
 
 /// `obj`'s `DT_NEEDED` names, copied out: the walk that follows them changes the
 /// object list, so they cannot be borrowed from it.
-unsafe fn needed_names(obj: &Object, out: &mut [LibName; MAX_OBJECTS]) -> usize {
+unsafe fn needed_names(obj: &Object, out: &mut [LibName; MAX_OBJECTS]) -> Result<usize, LoadError> {
     let mut n = 0usize;
     let mut p = obj.bias + obj.dynamic;
     for _ in 0..MAX_DYN {
@@ -775,12 +936,12 @@ unsafe fn needed_names(obj: &Object, out: &mut [LibName; MAX_OBJECTS]) -> usize 
                 // object it names would simply never be there, with nothing said about
                 // why. There is no such thing as a partial load — the main program's
                 // relocations against it would fail, or worse, resolve elsewhere.
-                die_load(LoadError::CannotLoad);
+                return Err(LoadError::CannotLoad);
             }
         }
         p += DYN_SIZE as u64;
     }
-    n
+    Ok(n)
 }
 
 /// Load `owner`'s `DT_NEEDED` objects depth-first, appending each one *before*
@@ -799,23 +960,30 @@ unsafe fn load_dependencies(
     count: &mut usize,
     alloc: &mut BaseAlloc,
     owner: usize,
-) {
+    scope: (bool, u16),
+) -> Result<(), LoadError> {
     let mut names = [LibName::EMPTY; MAX_OBJECTS];
-    let n = unsafe { needed_names(&objects[owner], &mut names) };
+    let n = unsafe { needed_names(&objects[owner], &mut names) }?;
     for name in names.iter().take(n) {
         if *count == MAX_OBJECTS {
-            die_load(LoadError::TooManyObjects);
+            return Err(LoadError::TooManyObjects);
         }
-        let obj = match load(name.as_bytes(), &objects[..*count], alloc) {
-            Ok(Some(o)) => o,
-            Ok(None) => continue,
-            Err(e) => die_load(e),
+        let obj = match load(name.as_bytes(), &objects[..*count], alloc)? {
+            Some(o) => o,
+            None => continue,
         };
         let idx = *count;
         objects[idx] = obj;
+        // Everything the startup graph holds is in the global scope: it is what a
+        // `RTLD_LOCAL` object is defined *against*, and the second pass of a lookup. A
+        // `dlopen`'s walk passes its own scope down instead, so a driver's dependencies
+        // land in that call's group.
+        objects[idx].global = scope.0;
+        objects[idx].group = scope.1;
         *count += 1;
-        unsafe { load_dependencies(objects, count, alloc, idx) };
+        unsafe { load_dependencies(objects, count, alloc, idx, scope) }?;
     }
+    Ok(())
 }
 
 /// The arguments an initialiser is called with: the ELF ABI passes a constructor
@@ -1041,6 +1209,269 @@ fn thread_pointer_for(block: u64, size: u64) -> u64 {
 }
 
 /// Load every object the main program needs, relocate everything, run every
+// ---- dlopen ----
+
+/// `dlopen`'s `RTLD_GLOBAL`: the object's symbols join the global scope. Without it a load
+/// is `RTLD_LOCAL`, and only the objects loaded with it and its own handle see them.
+///
+/// `RTLD_LAZY` and `RTLD_NOW` (`tools/c-include/dlfcn.h`) are not read here, because this
+/// loader binds eagerly either way (D6): resolving everything up front is a superset of
+/// what `RTLD_LAZY` promises, so the two ask for the same thing of it.
+const RTLD_GLOBAL: u32 = 0x0100;
+
+/// The loader's memory of what it loaded.
+///
+/// [`run`] returns to the main program, and a `dlopen` from that program arrives here
+/// afterwards, in this same image — so nothing a load needs may be a local of `run`. The
+/// object list, its length, the base allocator and the program's arguments live here
+/// instead.
+///
+/// Not synchronised: two threads in `dlopen` at once would race on the table. The rest of
+/// the loader is the same — `install_tls` writes its statics once, before any object runs —
+/// and the consumer `dlopen` exists for, loading a driver once at startup, is one call on
+/// one thread. A lock belongs here the day something needs one.
+struct State {
+    objects: [Object; MAX_OBJECTS],
+    count: usize,
+    alloc: BaseAlloc,
+    /// The program's own arguments, for the initialisers a `dlopen` runs: an ELF ABI
+    /// constructor is called with the three the program's entry point gets.
+    argc: u64,
+    argv: u64,
+    envp: u64,
+    /// The next `dlopen` group id. 0 is the startup graph; 1 is the first `dlopen`.
+    next_group: u16,
+}
+
+/// [`State`] behind the `UnsafeCell` a `static` needs.
+struct StateCell(UnsafeCell<State>);
+
+// SAFETY: see the note on [`State`].
+unsafe impl Sync for StateCell {}
+
+static STATE: StateCell = StateCell(UnsafeCell::new(State {
+    objects: [Object::EMPTY; MAX_OBJECTS],
+    count: 0,
+    alloc: BaseAlloc::new(),
+    argc: 0,
+    argv: 0,
+    envp: 0,
+    next_group: 1,
+}));
+
+/// The loader's state. Every caller is the loader's own code.
+unsafe fn state() -> &'static mut State {
+    unsafe { &mut *STATE.0.get() }
+}
+
+/// The NUL-terminated string at `p`, as bytes, or `None` when it runs past what a path may
+/// be. Bounded rather than trusting the caller: this reads a string from the program.
+unsafe fn cstr(p: *const u8) -> Option<&'static [u8]> {
+    if p.is_null() {
+        return None;
+    }
+    for i in 0..=PATH_MAX {
+        if unsafe { *p.add(i) } == 0 {
+            return Some(unsafe { core::slice::from_raw_parts(p, i) });
+        }
+    }
+    None
+}
+
+/// The index a `dlopen` handle names: the address of the `Object` it was made from.
+unsafe fn handle_index(handle: *mut u8) -> Option<usize> {
+    let st = unsafe { state() };
+    let h = handle as usize;
+    (0..st.count).find(|&i| ptr::addr_of!(st.objects[i]) as usize == h)
+}
+
+/// Load `name` now, at run time, and add it to the table: what the startup walk does to an
+/// object, for one object, when the program asks.
+///
+/// Returns its index, which is also its handle. `DT_NEEDED` names are followed the same
+/// way, so an object that names a library the program does not have brings it; the whole
+/// group is relocated (dependencies first) and every initialiser in it runs, so the object
+/// is complete when this returns — which is what eager binding means (D6). Nothing about a
+/// load is incremental.
+///
+/// `global` is `RTLD_GLOBAL`. On failure the group is out of the table, so nothing looks it
+/// up afterwards, but its mappings stay: this port has no `munmap` for the loader to give
+/// them back with, and a program that tries one driver, fails, and tries the next relies on
+/// the *failure* being recoverable rather than on the memory being recovered.
+unsafe fn load_now(name: &[u8], global: bool) -> Result<usize, LoadError> {
+    let st = unsafe { state() };
+    let first = match find_candidate(name, &st.objects[..st.count], &mut st.alloc)? {
+        Candidate::Loaded(i) => return Ok(i),
+        Candidate::Absent => return Err(LoadError::CannotLoad),
+        Candidate::Fresh(obj) => {
+            if obj.tls.is_some() {
+                return Err(LoadError::RuntimeTls);
+            }
+            if st.count == MAX_OBJECTS {
+                return Err(LoadError::TooManyObjects);
+            }
+            let i = st.count;
+            st.objects[i] = obj;
+            st.objects[i].global = global;
+            st.objects[i].group = st.next_group;
+            st.next_group = st.next_group.wrapping_add(1);
+            st.count = i + 1;
+            i
+        }
+    };
+
+    // The object's own `DT_NEEDED`, in the same group, before anything is relocated.
+    let group = st.objects[first].group;
+    if let Err(e) = unsafe {
+        load_dependencies(
+            &mut st.objects,
+            &mut st.count,
+            &mut st.alloc,
+            first,
+            (global, group),
+        )
+    } {
+        st.count = first;
+        return Err(e);
+    }
+    // A dependency may be the one that brought thread-local storage, and the loader places
+    // one module for the whole process (`install_tls`): refused before anything runs.
+    if st.objects[first..st.count].iter().any(|o| o.tls.is_some()) {
+        st.count = first;
+        return Err(LoadError::RuntimeTls);
+    }
+
+    // Dependencies first: a `COPY` reads the source object's bytes, and the source has to
+    // have been relocated before there are any. Then the object itself.
+    for i in (first..st.count).rev() {
+        if let Err(e) = relocate(&st.objects[..st.count], i) {
+            st.count = first;
+            return Err(e);
+        }
+    }
+
+    // The group's initialisers, dependencies first: `load_dependencies` appended each
+    // object before the objects it needs, so walking the group backwards is the order a
+    // constructor that may call into a dependency requires.
+    let ctx = InitCtx {
+        argc: st.argc,
+        argv: st.argv,
+        envp: st.envp,
+    };
+    for i in (first..st.count).rev() {
+        unsafe { run_initialisers(&st.objects[i], &ctx) };
+    }
+    Ok(first)
+}
+
+/// `dlopen(3)`: map a shared object now, and return a handle for `dlsym`.
+///
+/// `NULL` for `path` is the main program — the global scope. That is what a caller asking
+/// for its own symbols, or for `dlsym(RTLD_DEFAULT, …)`, means, and it is a handle that is
+/// not null, so success is distinguishable from failure.
+///
+/// `RTLD_LAZY` and `RTLD_NOW` are both accepted and mean the same thing: this loader binds
+/// eagerly (D6), which is a superset of what `RTLD_LAZY` promises. `RTLD_GLOBAL` adds the
+/// object's symbols to the global scope; without it they belong to the object's group.
+///
+/// Null on failure, with the reason left for `dlerror`.
+unsafe extern "C" fn dlopen(path: *const u8, flags: i32) -> *mut u8 {
+    let global = flags as u32 & RTLD_GLOBAL != 0;
+    if path.is_null() {
+        let st = unsafe { state() };
+        clear_error();
+        return if st.count == 0 {
+            ptr::null_mut()
+        } else {
+            (&mut st.objects[0] as *mut Object).cast::<u8>()
+        };
+    }
+    let name = match unsafe { cstr(path) } {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            set_error(&LoadError::CannotLoad);
+            return ptr::null_mut();
+        }
+    };
+    match unsafe { load_now(name, global) } {
+        Ok(i) => {
+            clear_error();
+            let st = unsafe { state() };
+            (&mut st.objects[i] as *mut Object).cast::<u8>()
+        }
+        Err(e) => {
+            set_error(&e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `dlsym(3)`: the address `name` has in the scope `handle` names, or null.
+///
+/// A null handle is `RTLD_DEFAULT`, the global scope. `RTLD_NEXT` — the next definition
+/// after the caller's — is refused rather than answered wrongly: finding the caller's
+/// object means reading a return address, and nothing needs that yet.
+unsafe extern "C" fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8 {
+    if handle as usize == usize::MAX {
+        set_message(
+            b"ld.so: RTLD_NEXT needs the caller's return address, which nothing here reads\n",
+        );
+        return ptr::null_mut();
+    }
+    let Some(name) = (unsafe { cstr(name) }) else {
+        set_message(b"ld.so: dlsym was given no name\n");
+        return ptr::null_mut();
+    };
+    let st = unsafe { state() };
+    let owner = if handle.is_null() {
+        0
+    } else {
+        match unsafe { handle_index(handle) } {
+            Some(i) => i,
+            None => {
+                set_message(b"ld.so: dlsym was given a handle no loaded object has\n");
+                return ptr::null_mut();
+            }
+        }
+    };
+    match unsafe { find_symbol(&st.objects[..st.count], name, Scope::All, owner) } {
+        Some(d) => {
+            clear_error();
+            d.addr as *mut u8
+        }
+        None => {
+            set_message(b"ld.so: no such symbol\n");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `dlclose(3)`: accepted, and nothing is unloaded.
+///
+/// The object stays mapped and in the table — its regions, its relocations and its
+/// initialisers are all still there — so a second `dlopen` of the same file hands back the
+/// same handle and a caller that wanted the memory back has no way to ask for it here.
+/// That is what a caller that checks the return value is told: nothing failed.
+unsafe extern "C" fn dlclose(handle: *mut u8) -> i32 {
+    if handle.is_null() || unsafe { handle_index(handle) }.is_some() {
+        0
+    } else {
+        set_message(b"ld.so: dlclose was given a handle no loaded object has\n");
+        -1
+    }
+}
+
+/// `dlerror(3)`: the last failure's message, once, or null when there is none.
+///
+/// The message is the loader's own — the same one a failed load would have printed and
+/// stopped on — because both come from [`set_error`].
+unsafe extern "C" fn dlerror() -> *mut u8 {
+    match take_error() {
+        Some(t) => t.as_ptr() as *mut u8,
+        None => ptr::null_mut(),
+    }
+}
+
 /// initialiser, and return the main program's entry point.
 ///
 /// # Safety
@@ -1089,11 +1520,15 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         img_end: main_hi,
         tls,
         name: LibName::EMPTY,
-        // The loader has the main program's header page, not a descriptor for it, so
-        // there is nothing to stat. It needs no identity: a `DT_NEEDED` cannot name
+        // The loader has the main program's header page, not a descriptor for it, so there
+        // is nothing to stat. It needs no identity: a `DT_NEEDED` cannot name
         // it, and nothing is ever compared against it — the empty name above is not a
         // path either.
         identity: None,
+        // The main program is the first thing in the global scope, and every lookup's
+        // second pass can reach it.
+        global: true,
+        group: 0,
     };
     main.symtab = match unsafe { main.dyn_tag(DT_SYMTAB) } {
         Some(v) => v,
@@ -1105,15 +1540,28 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
     };
     main.nsym = unsafe { main.sym_count() };
 
-    let mut objects = [Object::EMPTY; MAX_OBJECTS];
-    objects[0] = main;
-    let mut nobj = 1usize;
-    let mut alloc = BaseAlloc::new();
-    unsafe { load_dependencies(&mut objects, &mut nobj, &mut alloc, 0) };
+    // The table is a `static`, not a local: the loader keeps running after it hands the
+    // main program its entry point, and the `dlopen` that program may make later arrives
+    // in this image (`State`).
+    let st = unsafe { state() };
+    st.objects[0] = main;
+    st.count = 1;
+    st.alloc = BaseAlloc::new();
+    st.next_group = 1;
+    // A `dlopen`'d object's initialisers are called with the program's own arguments, so
+    // these outlive this call too.
+    st.argc = argc;
+    st.argv = argv;
+    st.envp = envp;
+    if let Err(e) =
+        unsafe { load_dependencies(&mut st.objects, &mut st.count, &mut st.alloc, 0, (true, 0)) }
+    {
+        die_load(e);
+    }
 
-    let loaded = &objects[..nobj];
+    let loaded = &st.objects[..st.count];
     // Objects first (their own RELATIVE fixups), then the main program's PLT.
-    for i in 1..nobj {
+    for i in 1..st.count {
         if let Err(e) = relocate(loaded, i) {
             die_load(e);
         }

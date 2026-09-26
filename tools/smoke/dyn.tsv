@@ -76,3 +76,27 @@
 # program: the program asks for the error number it just caused, and only the
 # object can name it.
 /bin/dynclib	libc-dyn-ok errno=2 msg=No such file or directory ctor=1
+
+# `/bin/dynopen` is the `dlopen` case (Phase 6): a program that asks the loader for a
+# shared object *at run time*. Its own link names nothing but `libc.so`, and `libc.so`
+# reaches the loader through names the loader answers — so what is under test is
+# `dlopen`/`dlsym`/`dlerror`/`dlclose` and the load behind them, not `DT_NEEDED`.
+#
+# `load` and `global` are the two scopes: the first loads `RTLD_LOCAL` and reaches the
+# object through the handle it was given, and checks the negative half — a global lookup
+# must *not* find it. The second loads `RTLD_GLOBAL` and finds it through
+# `dlsym(RTLD_DEFAULT)` with no handle at all. `close` is this port's `dlclose` contract:
+# accepted, and the object stays usable, because nothing is unloaded.
+#
+# The two failures are asserted on the loader's *own* message, because "it failed" is worth
+# little. `missing` fails at the open. `tls` fails at the limit that is real: the loader
+# places one thread-local module, at startup, so an object carrying `PT_TLS` cannot be
+# `dlopen`'d at all (`DYNAMIC_LINKING.md` D8, `tools/libtls1.c`).
+#
+# `dynopen-text` is `libdlopen.so`'s read-only data and `3` is its code. The gate fails if
+# the program itself contains the text, so the string can only have come from the object.
+/bin/dynopen	dynopen-ok 3 dynopen-text global-miss=1
+/bin/dynopen global	dynopen-global 3 dynopen-text
+/bin/dynopen close	dynopen-close 0 3 dynopen-text
+/bin/dynopen missing	dynopen-missing null=1 msg=ld.so: cannot load a shared object
+/bin/dynopen tls	dynopen-tls null=1 msg=ld.so: a dlopen'd object has thread-local storage, and the loader places one module
