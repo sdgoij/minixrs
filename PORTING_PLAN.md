@@ -119,6 +119,15 @@ restore the caller-saved SIMD/FP registers (kernel IPC message copies were
 clobbering user FP state), and RISC-V context switches preserve `t6`/x31 in
 a dedicated `Proc.p_t6` slot (the old layout lost it to `sstatus`).
 
+**Dynamic linking (opt-in) landed as a self-contained track** — a Rust loader
+(`crates/ldso`, installed as `/libexec/ld.so`) and a `PT_INTERP` branch in VFS's exec, on
+all three arches, gated by `just test-dynlink-{x86,riscv64,aarch64}`. The default build
+stays static and non-PIE, exactly as MINIX's does: nothing in the boot path changes unless
+a binary carries `PT_INTERP`. The design, the phases (0–7, complete; 4 dropped) and the
+measured result that a shared object's read-only pages are one frame set across processes
+live in [`DYNAMIC_LINKING.md`](DYNAMIC_LINKING.md), which builds on the file-backed exec
+substrate in [`FILEMMAP.md`](FILEMMAP.md).
+
 ## Phase 0: Project Structure & Build System
 
 **Goal**: Establish the Rust project scaffolding and build system before touching any code.

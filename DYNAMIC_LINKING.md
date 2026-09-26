@@ -1,7 +1,7 @@
 # Dynamic linking for minixrs — implementation proposal
 
 Status: **proposal — design settled, Phases 0–3 built, Phase 4 decided (dropped), Phase 5
-measured and passing on x86_64** (on
+measured and passing on x86_64 and riscv64, Phase 7 done** (on
 `feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
@@ -22,10 +22,10 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
 - **The payoff is nearly free — now measured, and the one hole closed.** VM's file page cache
   shares a read-only DSO page across processes, as the draft claimed, and Phase 5 also made
   the *simultaneous* case work: two lives that reach a page together become one fill rather
-  than two, so all 13 read-only pages of `libc.so` are one frame set in two processes started
-  as a pipeline (`just probe-dso-share-x86`), with each mapping's writable `.data`/`.got`
-  private. One soundness fix came with the measurement: the cache key did not include the
-  inode. Phase 5 (§7).
+  than two, so every read-only page of `libc.so` is one frame set in two processes started as
+  a pipeline — 13 of 13 on x86_64 (`just probe-dso-share-x86`) and 11 of 11 on riscv64
+  (`just probe-dso-share-riscv64`) — with each mapping's writable `.data`/`.got` private. One
+  soundness fix came with the measurement: the cache key did not include the inode. Phase 5 (§7).
 - The kernel ELF loader needs almost no change: the **exec path never checks `e_type`**
   (`servers/src/vfs/exec.rs::pm_exec` reads `PT_LOAD`s directly), and DSOs are mapped by
   *userland* `mmap`, not by `parse_elf_header`. The one kernel-side edit is a register
@@ -91,8 +91,8 @@ add the machinery, change no default.
 
 - **Shared text between processes.** File-backed read-only pages are shared by VM's file
   page cache (`crates/servers/src/vm/cache.rs`, consulted by `start_file_page` and
-  populated by `finish_page`), which Phase 5 measured on x86_64 for a DSO: all of
-  `libc.so`'s read-only pages are one frame set in two processes. The DSO case is
+  populated by `finish_page`), which Phase 5 measured for a DSO, on x86_64 and riscv64: all
+  of `libc.so`'s read-only pages are one frame set in two processes. The DSO case is
   therefore *different* binaries sharing one object's text — what a C library buys, and
   what Phase 3 delivered; two processes of the *same* binary get it free. What stays
   private per process either way is the writable, relocated part (`.data`/`.got`) and
@@ -697,7 +697,7 @@ program code is a small fraction of it. Nothing in the port is, and `tools/rc-co
 the check (give it a binary) — the same instrument Phase 5 needs. If the answer does change,
 option (a) still buys nothing by construction and option (b) is what Phase 3 delivered for C.
 
-### Phase 5 — sharing: measure, and keep the mapping discipline — **done (x86_64)**
+### Phase 5 — sharing: measure, and keep the mapping discipline — **done**
 
 The phase asked two things: that a read-only DSO page be one physical frame for every
 process mapping the object, and that the loader keep it read-only. The second holds and
@@ -712,14 +712,15 @@ The last partial page of a read-only segment being private
 (`file_off + page_size <= file_size` fails there, one page per segment) is expected, and
 the probe shows exactly that for the main program's own text.
 
-**Sharing works for two lives started together.** `tools/dso_share_probe.py` (recipe
-`just probe-dso-share-x86`) boots the dynamic image, runs
-`/bin/dynclib hold | /bin/dynclib hold` — two lives of the same dynamic image, `libc.so`
-mapped by the loader in each — and walks **both** processes' page tables from *outside* the
-guest (only the kernel knows a virtual address's frame, and the loader is the subject under
-test). Result: **all 13 read-only pages are one physical frame set**, and the 4 writable
-pages are private as designed. A shared object's text is therefore paid for once however
-its users start, which is the point of the whole phase.
+**Sharing works for two lives started together.** `tools/dso_share_probe.py` (recipes
+`just probe-dso-share-x86` and `-riscv64`; `--arch` picks the page-table walk) boots the
+dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` — two lives of the same dynamic
+image, `libc.so` mapped by the loader in each — and walks **both** processes' page tables from
+*outside* the guest (only the kernel knows a virtual address's frame, and the loader is the
+subject under test). Result: **every read-only page is one physical frame set** — 13 of 13 on
+x86_64, 11 of 11 on riscv64 — with the 4 writable pages private on both, as designed. A shared
+object's text is therefore paid for once however its users start, which is the point of the
+whole phase.
 
 **Two fills of one page are one fill.** The first run of that probe, without any change to
 VM, reported every page private: a page's first fault is a *fill*, and nothing joined a
@@ -762,10 +763,13 @@ refusing a device number this port really uses. Nothing sends
 no caller outside the tests.
 
 Gate: a measured assertion that two processes' `.so` text maps to one physical frame set
-(not a comment), on at least two arches. **x86_64 passes** — `just probe-dso-share-x86`,
-13/13 read-only pages, 4 writable ones private, on each of three runs. **The second arch is
-still owed**: Phase 7 built the loader for riscv64 and aarch64, but the probe's page-table
-walk is x86_64's, so the measurement is still x86_64's alone.
+(not a comment), on at least two arches. **Both pass.** x86_64: `just probe-dso-share-x86`,
+13/13 read-only pages, 4 writable ones private, on each of three runs. riscv64:
+`just probe-dso-share-riscv64`, 11/11 read-only pages, 4 writable ones private. The probe
+walks the arch's own tree (`--arch`), and only the walk differs: the loader's `DSO_BASE`, every
+program's `TEXT_BASE`, the process table's symbol and the `Proc` slot stride are shared. aarch64
+has no recipe yet — its read-only bit (`AP[2]`) is inverted relative to these two, so it is a
+change to the walk rather than a row in it.
 
 ### Phase 6 — `dlopen`/`dlsym` (optional)
 
@@ -849,6 +853,13 @@ Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch
   answers a fault quickly, and the same shape already exists within one process
   (`page_pending`), but a hang here would look like a wedged guest rather than a bug in a
   gate — reach for `tools/dso_share_probe.py` and VM's request pool first.
+- **A console write keeps fewer bytes on riscv64 than on x86_64.** The probe's pace is per
+  arch for a measured reason: on the riscv64 image a single write of *two* bytes keeps only
+  its first, and one of six keeps about one in six, so 37 typed bytes have to go one at a
+  time (`ARCHS["pace"]`). Measured with `echo 0123456789abcdefghijklmnopqrst`, every byte
+  distinct; the whole line then arrives and runs, which is what `tools/smoke/dyn.tsv`'s short
+  commands never exposed. A truncated line still *runs*, so a gate that checks only that
+  something happened passes on a mangled command — the echo has to be checked whole.
 - **Doc/skill traps.** `silent-failure-traps` applies to the new gates: a scenario step
   whose input is sent before the prompt is dropped, and an expectation another step
   already printed makes a command that never ran pass.
@@ -869,8 +880,8 @@ Three layers, matching `minix-testing`:
    on `tools/smoke/feed.sh` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
    negative assertion (§7 Phase 0 gate: the string is not in the main binary) is what
    makes the gate meaningful rather than a print that would pass either way.
-4. **QEMU measurement, not a serial-log gate** — `tools/dso_share_probe.py` (recipe
-   `just probe-dso-share-x86`) reads two processes' page tables out of guest physical
+4. **QEMU measurement, not a serial-log gate** — `tools/dso_share_probe.py` (recipes
+   `just probe-dso-share-x86` / `-riscv64`) reads two processes' page tables out of guest physical
    memory, because only the kernel knows a virtual address's frame and the loader is the
    subject under test. It is what makes Phase 5's claim a measurement (§7 Phase 5). It
    drives QEMU itself rather than running a `tools/smoke` scenario, so it is not part of
@@ -892,8 +903,8 @@ Plus the existing suites must stay green on all three arches at every phase
    acceptable (it is the standard cost, and it caps how much a `.so` actually saves); and
    is the first-touch race worth joining in-flight fills to remove? **Done in Phase 5**:
    `park_page`/`release_parked` join a fill already in flight, so two lives started together
-   share. Residual: the joining is x86_64-measured only, and it is a wait C MINIX does not
-   have (§8).
+   share. Residual: the joining is measured on x86_64 and riscv64 only (not aarch64), and it
+   is a wait C MINIX does not have (§8).
 2. **Rust `std` strategy** (Phase 4): dynamic libc + static std, or dynamic `libstd`? Not
    decidable until Phase 3 costs the C ABI surface.
 3. **Main program PIE or not?** Non-PIE is simpler (no `RELATIVE` in the main, fixed
@@ -940,8 +951,9 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
 - `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file.
 - `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `dynlink-riscv64` /
   `dynlink-aarch64` and their `test-` recipes (**done**, Phase 7, on the same
-  `tools/smoke/dyn.tsv`); `probe-dso-share-x86` (**done**, Phase 5's measurement — not in
-  `test-arches`, see §9, and still x86_64-only).
+  `tools/smoke/dyn.tsv`); `probe-dso-share-x86` and `probe-dso-share-riscv64` (**done**,
+  Phase 5's measurement — not in `test-arches`, see §9; `--arch` selects the walk, and
+  aarch64's is still owed, §7 Phase 5).
 - `.agents/skills/minix-boot-process`: a note that a dynamic exec enters `ld.so` first —
   a future boot-chain reader will otherwise conclude the wrong process started.
 - Any `.rules` addition (per the hygiene policy, in the PR description, not inline). Two

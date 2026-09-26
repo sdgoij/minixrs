@@ -109,6 +109,18 @@ VFS's `sef_cb_init_fresh()` (simplified from C):
 
 The full PM↔VFS boot protocol (VFS_PM_INIT handshake) is **not implemented** in the Rust version. See BLOCKERS.md for details.
 
+## Stage 6: `exec` — a dynamic binary enters the loader first
+
+When a program is `exec`'d, `pm_exec` maps it and takes the entry point from `SYS_EXEC_LOAD`.
+A statically linked program runs its own `_start`. A **dynamically linked** one — an ELF with
+`PT_INTERP` naming `/libexec/ld.so` — is left in the *loader* instead: the kernel hands it
+`ldso`'s entry, so the first user-mode code to run is `crates/ldso`, which maps and relocates
+the shared objects its `DT_NEEDED` names and only then jumps to the program's entry. "Which
+process started" is therefore answered by the binary's `PT_INTERP`, not its filename — a
+boot-chain reader looking at a dynamic `/bin/...` will see `ld.so` run first. No *boot*
+process is dynamically linked and the default build stays static, so the boot chain itself is
+unchanged (`DYNAMIC_LINKING.md`).
+
 ## Key Files
 
 | File | Role |
@@ -120,6 +132,7 @@ The full PM↔VFS boot protocol (VFS_PM_INIT handshake) is **not implemented** i
 | `crates/kernel/build.rs` | Boot image assembly (initramfs CPIO + MinixFS) |
 | `tools/mkboot.rs` | x86 post-link: kmain extract, trampoline, kernel.bin |
 | `crates/boot-image/` | CPIO + MinixFS image builders (host lib + CLIs) |
+| `crates/ldso/` | The dynamic loader (`/libexec/ld.so`): maps and relocates `DT_NEEDED` objects after a dynamic `exec` |
 | `tools/minix-raw.ld` | Kernel linker script (link address 0x200000) |
 
 ## Build & Run

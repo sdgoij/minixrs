@@ -81,6 +81,41 @@ pub fn image_extent(elf: &Elf<'_>) -> Option<(u64, u64)> {
     if lo == u64::MAX { None } else { Some((lo, hi)) }
 }
 
+/// The union of the `p_flags` of every `PT_LOAD` whose page range covers the page
+/// segment `i` starts on, or `None` when index `i` is not a loadable segment.
+///
+/// Each segment is mapped over its *page-rounded* extent, and ELF lets adjacent
+/// segments share the page where one ends and the next begins — a `.text` whose end
+/// is not page-aligned runs into the following `.rodata`. A page carries one
+/// protection and VM gives it that of the region that owns it, which is the later
+/// segment's, so the later one has to be mapped with the union or the earlier one's
+/// permissions on that page are lost with it. Where the execute bit is enforced
+/// that is not cosmetic: the shared page holds the tail of `.text` — the `.plt` —
+/// and a fetch from it would fault on every retry. (VM's region carve is the other
+/// half: it keeps an earlier region's own pages rather than dropping it.)
+///
+/// VM's `do_vfs_mmap` path computes the same union for an `exec`ed image
+/// (`crates/servers/src/vfs/exec.rs`), which is also where the pre-fault that its
+/// data regions need is asked for; a DSO's pages are demand-paged here.
+pub fn shared_page_flags(elf: &Elf<'_>, i: usize) -> Option<u32> {
+    let p = elf.phdr(i)?;
+    if p.p_type != PT_LOAD || p.p_memsz == 0 {
+        return None;
+    }
+    let page = page_down(p.p_vaddr);
+    let mut flags = 0;
+    for j in 0..elf.e_phnum() as usize {
+        let q = elf.phdr(j)?;
+        if q.p_type != PT_LOAD || q.p_memsz == 0 {
+            continue;
+        }
+        if page >= page_down(q.p_vaddr) && page < page_up(q.p_vaddr + q.p_memsz) {
+            flags |= q.p_flags;
+        }
+    }
+    Some(flags)
+}
+
 /// The size of thread-local storage block a `PT_TLS` of `memsz` bytes needs.
 ///
 /// x86_64 lays TLS out backwards from the thread pointer: the pointer sits past
@@ -114,7 +149,7 @@ pub const TP_IS_PAST_THE_BLOCK: bool = false;
 mod tests {
     use super::*;
     use crate::elf::{
-        EHDR_SIZE, ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, PF_R, PHDR_SIZE,
+        EHDR_SIZE, ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EM_X86_64, ET_DYN, PF_R, PF_X, PHDR_SIZE,
     };
 
     fn wr16(b: &mut [u8], o: usize, v: u16) {
@@ -229,5 +264,41 @@ mod tests {
         wr64(&mut b, EHDR_SIZE + PHDR_SIZE + 40, 0);
         let e = Elf::new(&b).unwrap();
         assert_eq!(image_extent(&e), None);
+    }
+
+    /// The page a segment starts on can be an earlier segment's too, and the union
+    /// of the two is what it must be mapped with: the loader passes this as the
+    /// segment's protection, so the page keeps every bit either segment asked for.
+    #[test]
+    fn a_shared_page_carries_the_union_of_both_segments_flags() {
+        let mut b = vec![0u8; 0x200];
+        b[0..4].copy_from_slice(&ELF_MAGIC);
+        b[4] = ELFCLASS64;
+        b[5] = ELFDATA2LSB;
+        b[6] = 1;
+        wr16(&mut b, 16, ET_DYN);
+        wr16(&mut b, 18, EM_X86_64);
+        wr64(&mut b, 32, EHDR_SIZE as u64);
+        wr16(&mut b, 54, PHDR_SIZE as u16);
+        wr16(&mut b, 56, 2);
+        // `.text` ending mid-page, then `.rodata` beginning on that same page —
+        // the shape a linker actually emits, and the one the union is for.
+        let segs = [(0x1000u64, 0x700u64, PF_R | PF_X), (0x1700, 0x400, PF_R)];
+        for (i, (vaddr, memsz, flags)) in segs.iter().enumerate() {
+            let p = EHDR_SIZE + i * PHDR_SIZE;
+            wr32(&mut b, p, PT_LOAD);
+            wr32(&mut b, p + 4, *flags);
+            wr64(&mut b, p + 16, *vaddr);
+            wr64(&mut b, p + 40, *memsz);
+        }
+        let e = Elf::new(&b).unwrap();
+        assert_eq!(shared_page_flags(&e, 0), Some(PF_R | PF_X));
+        assert_eq!(
+            shared_page_flags(&e, 1),
+            Some(PF_R | PF_X),
+            "the page holds the tail of the first segment, so it needs its X"
+        );
+        // A segment the flags are not a property of is not a loadable one.
+        assert_eq!(shared_page_flags(&e, 2), None);
     }
 }

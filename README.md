@@ -164,6 +164,7 @@ crates/
 ├── minix-std           # MINIX syscall layer: IPC, endpoints, grants
 ├── minix-libc          # Minimal libc for FFI
 ├── libs                # libc, libm, libutil re-implementation
+├── ldso                # Dynamic loader (/libexec/ld.so): maps and relocates shared objects
 └── minix-util          # Shared utilities
 ```
 

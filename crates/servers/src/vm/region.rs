@@ -285,6 +285,98 @@ impl RegionList {
     pub fn is_full(&self) -> bool {
         self.regions.iter().all(|r| r.is_some())
     }
+
+    /// Move the region in `slot` out of the list and into `carved`.
+    fn take_into(&mut self, carved: &mut Carved, slot: usize) {
+        if let Some(old) = self.regions[slot].take()
+            && carved.n < MAX_REGIONS
+        {
+            carved.removed[carved.n] = Some(old);
+            carved.n += 1;
+        }
+    }
+
+    /// Carve `new_r`'s range out of every region it overlaps, reporting the ones
+    /// that had to go whole so the caller can release the files they held.
+    ///
+    /// This is `MAP_FIXED`'s rule: the new mapping wins over the range it covers,
+    /// and the parts of an older region outside that range survive. Trimming
+    /// rather than dropping is what the loader needs, because it maps each
+    /// `PT_LOAD` of a shared object over its *page-rounded* extent — two segments
+    /// legitimately share the page where one ends and the next begins — so the
+    /// earlier region loses that page to the later one, and dropping it instead
+    /// would leave its remaining pages (its own first page, say) with no region at
+    /// all: the next fault on one of them would have nothing to map it from.
+    ///
+    /// A region lying strictly *inside* `new_r`'s range keeps its head and loses
+    /// its tail; keeping the tail as well would need a second region, which
+    /// `MAX_REGIONS` has no room for.
+    ///
+    /// Every entry is considered, not just the first overlap: one wide `new_r` can
+    /// span several regions.
+    pub fn carve_out(&mut self, new_r: &VirRegion) -> Carved {
+        let mut carved = Carved {
+            removed: [None; MAX_REGIONS],
+            n: 0,
+        };
+        for slot in 0..MAX_REGIONS {
+            let Some(r) = self.regions[slot].as_ref() else {
+                continue;
+            };
+            if !r.overlaps(new_r) {
+                continue;
+            }
+            if new_r.vaddr <= r.vaddr {
+                // `new_r` covers the head of this region.
+                if new_r.end() >= r.end() {
+                    self.take_into(&mut carved, slot);
+                } else {
+                    // Trim the head, and the pages with it: `phys_pages` is indexed
+                    // by the region's own page number, so the survivors move down.
+                    let Some(r) = self.regions[slot].as_mut() else {
+                        continue;
+                    };
+                    let cut = new_r.end() - r.vaddr;
+                    let pages = (cut / 4096) as usize;
+                    r.vaddr = new_r.end();
+                    r.length -= cut;
+                    r.npages = r.npages.saturating_sub(pages as u32);
+                    for j in 0..r.npages as usize {
+                        r.phys_pages[j] = r.phys_pages[j + pages];
+                    }
+                    for j in r.npages as usize..MAX_PHYS_PAGES {
+                        r.phys_pages[j] = 0;
+                    }
+                }
+            } else {
+                // `new_r` starts inside this region: trim the tail.
+                let Some(r) = self.regions[slot].as_mut() else {
+                    continue;
+                };
+                r.length = new_r.vaddr - r.vaddr;
+                if r.length == 0 {
+                    self.take_into(&mut carved, slot);
+                }
+            }
+        }
+        carved
+    }
+}
+
+/// What a [`RegionList::carve_out`] took away, so its caller can release the
+/// files the removed regions held. Bounded by `MAX_REGIONS`, which is as many
+/// regions as one carve can touch.
+pub struct Carved {
+    removed: [Option<VirRegion>; MAX_REGIONS],
+    n: usize,
+}
+
+impl Carved {
+    /// The regions removed whole. A region that was only trimmed keeps its file,
+    /// so it is not here.
+    pub fn removed(&self) -> impl Iterator<Item = &VirRegion> {
+        self.removed[..self.n].iter().flatten()
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +456,68 @@ mod tests {
         assert!(list.is_full());
         let extra = VirRegion::new(0xFFFFFFF000, 0x1000, VR_ANON);
         assert!(list.insert(extra).is_some()); // full
+    }
+
+    /// The loader's case: a later segment's page-rounded mapping reaches back into
+    /// the page the earlier one ends on, and the earlier region keeps its own
+    /// pages — dropping it would leave them with no region.
+    #[test]
+    fn carving_an_overlap_trims_instead_of_dropping() {
+        let mut list = RegionList::new();
+        let first = VirRegion::new(0x1000, 0x2000, VR_FILE);
+        assert!(list.insert(first).is_none());
+
+        let second = VirRegion::new(0x2000, 0x2000, VR_FILE);
+        let carved = list.carve_out(&second);
+        assert_eq!(
+            carved.removed().count(),
+            0,
+            "a trimmed region keeps its file"
+        );
+        assert!(list.insert(second).is_none());
+
+        let kept = list.find(0x1000).expect("the earlier region survives");
+        assert_eq!((kept.vaddr, kept.length), (0x1000, 0x1000));
+        assert_eq!(list.find(0x2000).map(|r| r.length), Some(0x2000));
+    }
+
+    /// A region the new mapping covers completely cannot survive, and it is
+    /// reported so its file reference is released.
+    #[test]
+    fn carving_reports_a_region_it_covers_whole() {
+        let mut list = RegionList::new();
+        assert!(
+            list.insert(VirRegion::new(0x2000, 0x1000, VR_FILE))
+                .is_none()
+        );
+
+        let wider = VirRegion::new(0x1000, 0x3000, VR_FILE);
+        let carved = list.carve_out(&wider);
+        assert_eq!(carved.removed().count(), 1);
+        assert!(list.is_empty());
+    }
+
+    /// Strictly inside: the old region keeps its head and loses its tail. The
+    /// tail is outside the new mapping, and a second region to hold it is what
+    /// `MAX_REGIONS` has no room for.
+    #[test]
+    fn carving_inside_a_region_trims_its_tail() {
+        let mut list = RegionList::new();
+        assert!(
+            list.insert(VirRegion::new(0x1000, 0x4000, VR_FILE))
+                .is_none()
+        );
+
+        let inside = VirRegion::new(0x3000, 0x1000, VR_FILE);
+        assert!(list.carve_out(&inside).removed().count() == 0);
+        assert!(list.insert(inside).is_none());
+
+        assert_eq!(list.find(0x1000).map(|r| r.length), Some(0x2000));
+        assert!(list.find(0x3000).is_some());
+        assert!(
+            list.find(0x4000).is_none(),
+            "the tail is gone, not mis-described"
+        );
     }
 
     #[test]

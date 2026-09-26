@@ -48,6 +48,16 @@ reasoned about; the fix recorded is what the code does now.
   every time when it is the *first* command of a fresh boot. Place the reading after the
   step it is meant to judge, and re-run with the triggering command first, or an empty
   result is a statement about the wrong moment.
+- **How many bytes one write keeps is the arch's, not the pacing's.** The console drops what it is not
+  ready for, and how much survives a *single* write differs per guest. Measured with a 37-byte line of
+  distinct bytes (`echo 0123456789abcdefghijklmnopqrst`): the riscv64 image keeps only the *first* byte
+  of a two-byte write and about one in six of a six-byte one, so its line has to go a byte at a time,
+  while six bytes per write is safe on x86_64. A truncated line still *runs* — as a shorter command —
+  so the symptom is the shell complaining about a command nobody typed, not a send that failed. That
+  changes the retry too: check the echoed line whole, and wait for a prompt printed *after* the send,
+  because a `wait_for` that scans the whole buffer matches the prompt from before it and types the
+  retry into the window while the truncated command is still running (`tools/dso_share_probe.py`,
+  `ARCHS["pace"]` and `wait_for_after`).
 
 ## The kernel's message boundary
 
@@ -114,6 +124,7 @@ working shell).
 | What | Where |
 |------|-------|
 | Host-side driver that gets all of the above right | `tools/smoke/feed.sh`, `tools/smoke/scenario.tsv` |
+| Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `tools/dso_share_probe.py` |
 | The same scenario inside the wasm engine | `tools/wasm-browser/run.js` |
 | A delivery's endpoint | `crates/kernel/src/ipc.rs` (`mini_receive`'s async branch, `try_one`) |
 | The diag channel's two halves | `crates/minix-rt/src/lib.rs` (`diag_message`), `crates/kernel/src/system.rs` (`do_diagctl_handler`) |

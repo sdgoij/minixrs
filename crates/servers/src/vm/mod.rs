@@ -2329,32 +2329,17 @@ pub fn finish_mmap_file(ep: i32, caller_msg: &mut [u8; 64], reply: &[u8; 64]) ->
 
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(ep) {
-            // MAP_FIXED semantics (C mmap_region → map_unmap_range):
-            // existing regions overlapping the new range are replaced, not
-            // rejected, so mmap(MAP_FIXED) over an old mapping works.
-            let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
-                [None; region::MAX_REGIONS];
-            let mut n = 0usize;
-            let mut i = 0usize;
-            while i < region::MAX_REGIONS {
-                let overlaps = vmp.vm_regions.regions[i]
-                    .as_ref()
-                    .is_some_and(|r| r.overlaps(&new_r));
-                if overlaps {
-                    if let Some(r) = vmp.vm_regions.regions[i].take()
-                        && n < region::MAX_REGIONS
-                    {
-                        removed[n] = Some(r);
-                        n += 1;
-                    }
-                    continue;
-                }
-                i += 1;
-            }
+            // MAP_FIXED semantics (C mmap_region → map_unmap_range): a mapping
+            // that overlaps an existing region takes over the range it covers
+            // instead of being refused, and the older region keeps whatever lies
+            // outside it. The loader depends on the keeping: it maps each
+            // `PT_LOAD` over its page-rounded extent, so the page one segment
+            // ends on is the page the next begins on.
+            let carved = vmp.vm_regions.carve_out(&new_r);
             if vmp.vm_regions.insert(new_r).is_some() {
                 return EAGAIN;
             }
-            for r in removed[..n].iter().flatten() {
+            for r in carved.removed() {
                 if r.flags & region::VR_FILE != 0 {
                     fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
                 }
@@ -2824,68 +2809,13 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
 
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(who) {
-            // C's mmap_region with MAP_FIXED calls map_unmap_range first:
-            // carve the new range out of any overlapping region so adjacent
-            // PT_LOAD segments (a tiny segment sharing pages with a larger
-            // one) can map. Trim instead of dropping the whole region:
-            // adjacent segments legitimately share the last partial page (a
-            // data segment whose memsz rounding spans the bss start page),
-            // and removing the whole region would leave its exclusive pages
-            // (the .data first page) with no region — the next fault on them
-            // SIGSEGVs. Fully-covered regions are dropped and their vmfd
-            // released; the trimmed region keeps its fd (same file).
-            let mut removed: [Option<region::VirRegion>; region::MAX_REGIONS] =
-                [None; region::MAX_REGIONS];
-            let mut n = 0usize;
-            let mut i = 0usize;
-            while i < region::MAX_REGIONS {
-                let overlaps = vmp.vm_regions.regions[i]
-                    .as_ref()
-                    .is_some_and(|r| r.overlaps(&new_r));
-                if !overlaps {
-                    i += 1;
-                    continue;
-                }
-                // SAFETY: overlaps() above established the entry is Some.
-                let r = vmp.vm_regions.regions[i].as_mut().unwrap();
-                if new_r.vaddr <= r.vaddr {
-                    // The new region covers the old region's head.
-                    if new_r.end() >= r.end() {
-                        // Fully covered — replace it.
-                        let old = vmp.vm_regions.regions[i].take().unwrap();
-                        if n < region::MAX_REGIONS {
-                            removed[n] = Some(old);
-                            n += 1;
-                        }
-                    } else {
-                        // Trim the head (not exercised by exec's ascending
-                        // segment order; kept for completeness).
-                        let cut = new_r.end() - r.vaddr;
-                        let pages = (cut / 4096) as usize;
-                        r.vaddr = new_r.end();
-                        r.length -= cut;
-                        r.npages = r.npages.saturating_sub(pages as u32);
-                        for j in 0..r.npages as usize {
-                            r.phys_pages[j] = r.phys_pages[j + pages];
-                        }
-                        for j in r.npages as usize..region::MAX_PHYS_PAGES {
-                            r.phys_pages[j] = 0;
-                        }
-                    }
-                } else {
-                    // The new region starts inside the old one — trim the
-                    // old region's tail up to the new region's start.
-                    r.length = new_r.vaddr - r.vaddr;
-                    if r.length == 0 {
-                        let old = vmp.vm_regions.regions[i].take().unwrap();
-                        if n < region::MAX_REGIONS {
-                            removed[n] = Some(old);
-                            n += 1;
-                        }
-                    }
-                }
-                i += 1;
-            }
+            // C's mmap_region with MAP_FIXED calls map_unmap_range first: carve
+            // the new range out of any overlapping region, so adjacent PT_LOAD
+            // segments — a later one whose page-rounded extent reaches back into
+            // the page an earlier one ends on — can both be mapped. The carve
+            // keeps the parts of an older region that lie outside the new one,
+            // which is what leaves the earlier segment its own pages.
+            let carved = vmp.vm_regions.carve_out(&new_r);
             if vmp.vm_regions.insert(new_r).is_some() {
                 return EAGAIN;
             }
@@ -2893,7 +2823,7 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
             // file regions (rodata/data) so VFS's kernel-mode copies of the
             // image (vircopy of user buffers) hit present pages.
             vmp.prefault_exec = true;
-            for r in removed[..n].iter().flatten() {
+            for r in carved.removed() {
                 if r.flags & region::VR_FILE != 0 {
                     fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
                 }

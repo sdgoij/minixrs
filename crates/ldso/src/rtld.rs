@@ -512,10 +512,14 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         let head = p.p_vaddr - page_down(p.p_vaddr);
         let len = page_up(head + p.p_memsz);
         let mut prot = minix_rt::vmem::PROT_READ;
-        if p.p_flags & PF_W != 0 {
+        // The page this segment starts on can also be an earlier segment's, and
+        // then the union of the two is what that page must be mapped with — see
+        // `layout::shared_page_flags`.
+        let flags = crate::layout::shared_page_flags(&elf, i).ok_or(LoadError::NotObject)?;
+        if flags & PF_W != 0 {
             prot |= minix_rt::vmem::PROT_WRITE;
         }
-        if p.p_flags & PF_X != 0 {
+        if flags & PF_X != 0 {
             prot |= minix_rt::vmem::PROT_EXEC;
         }
         let r = unsafe {

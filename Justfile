@@ -413,12 +413,21 @@ test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
 # object's read-only pages. The two lives start together, which is the case that needs
 # VM to join a fill already in flight; it is a probe rather than a smoke gate because it
 # drives QEMU itself, so run it when VM's file fault path or the loader changes.
+#
+# `--arch` picks the page-table walk; Phase 5's gate asks for two arches, and these are
+# the two it has. aarch64 needs its read-only bit (`AP[2]`) handled differently from the
+# other two, so it is not a recipe yet.
 probe-dso-share-x86: dynlink-x86
     DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/dso_share_probe.py
+    python tools/dso_share_probe.py --arch x86
+
+probe-dso-share-riscv64: dynlink-riscv64
+    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    python tools/dso_share_probe.py --arch riscv64
 
 image-riscv64 boot-timeout="15": build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
