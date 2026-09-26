@@ -256,6 +256,50 @@ fn image_range(img: &ExecImage) -> (u64, u64) {
     (start & !0xFFF, (end + 0xFFF) & !0xFFF)
 }
 
+/// The `PROT_*` bits an ELF `p_flags` asks for.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn seg_prot(p_flags: u32) -> i32 {
+    let mut prot = 0;
+    if p_flags & 0x04 != 0 {
+        prot |= minix_std::vmem::PROT_READ;
+    }
+    if p_flags & 0x02 != 0 {
+        prot |= minix_std::vmem::PROT_WRITE;
+    }
+    if p_flags & 0x01 != 0 {
+        prot |= minix_std::vmem::PROT_EXEC;
+    }
+    prot
+}
+
+/// The union of the protections of every `PT_LOAD` whose page range covers the
+/// page segment `i` starts on, this segment's own included.
+///
+/// ELF lets adjacent segments share a partial page — a `.text` whose end is not
+/// page-aligned runs into the following `.rodata` on the same page — while a page
+/// carries one protection and a VM region one flag set. VM maps the segments in
+/// this order and trims the earlier region out of a page the later one claims, so
+/// the shared page ends up with this segment's protection, and the two segments'
+/// protections are not the same: on RISC-V the earlier one's contains the execute
+/// bit (the page holds the tail of `.text`, including the `.plt`) and this one's
+/// does not, so the page would lose `PTE_X` — which makes every fetch from it
+/// fault again on the retry, forever, because each retry reinstalls the same page
+/// table entry. The page needs the union of the two, and the region that owns it
+/// is the only place to put it.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn shared_page_prot(img: &ExecImage, i: usize) -> i32 {
+    let page = img.segs[i].0 & !0xFFF;
+    let mut prot = 0;
+    for &(vaddr, memsz, _off, _filesz, p_flags) in &img.segs[..img.nsegs] {
+        let lo = vaddr & !0xFFF;
+        let hi = (vaddr + memsz + 0xFFF) & !0xFFF;
+        if page >= lo && page < hi {
+            prot |= seg_prot(p_flags);
+        }
+    }
+    prot
+}
+
 /// Map every `PT_LOAD` of `img` as a lazy file-backed region. Returns the first
 /// error (0 on success) and whether any region took `vmfd` — a taken fd belongs
 /// to VM, which closes it when the last region using it dies, so VFS must not
@@ -263,20 +307,23 @@ fn image_range(img: &ExecImage) -> (u64, u64) {
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn map_exec_image(proc_e: i32, img: &ExecImage, dev: u32, inode_nr: u32, vmfd: i32) -> (i32, bool) {
     let mut mapped_any = false;
-    for &(vaddr, memsz, off, filesz, p_flags) in &img.segs[..img.nsegs] {
+    for (i, &(vaddr, memsz, off, filesz, p_flags)) in img.segs[..img.nsegs].iter().enumerate() {
         // ELF p_flags: PF_X=0x1, PF_W=0x2, PF_R=0x4 → PROT_EXEC/WRITE/READ. The
         // exec bit must reach VM's do_vfs_mmap, which marks the region VR_EXEC;
         // on RISC-V an executable region without the X PTE bit faults on every
         // instruction fetch.
-        let mut prot = 0;
-        if p_flags & 0x04 != 0 {
-            prot |= minix_std::vmem::PROT_READ;
-        }
-        if p_flags & 0x02 != 0 {
-            prot |= minix_std::vmem::PROT_WRITE;
-        }
-        if p_flags & 0x01 != 0 {
-            prot |= minix_std::vmem::PROT_EXEC;
+        let own = seg_prot(p_flags);
+        let shared = shared_page_prot(img, i);
+        let mut prot = own | shared;
+        if shared & !own != 0 {
+            // The execute bit here is the shared page's, not this segment's: the
+            // region holds data (`.rodata`, `.dynsym`, a string constant), and
+            // VM's exec pre-fault is what makes a kernel-mode copy of a process's
+            // buffer work at all — a copy cannot fault a page in. A region that
+            // is executable purely for the page it shares is still data, so ask
+            // for its pages to be pre-faulted anyway. (`for_prefault` in
+            // `vm/mod.rs` reads this.)
+            prot |= minix_std::vmem::PROT_PREFAULT;
         }
         let r = crate::vfs::mmap::vfs_memmap(
             proc_e,

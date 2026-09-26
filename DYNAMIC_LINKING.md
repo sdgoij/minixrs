@@ -335,8 +335,8 @@ The exact register is a free choice (the loader is ours); the constraint is only
 does not collide with what the existing `_start` reads (`[sp]` = argc, `[sp+8]` = argv).
 The kernel **always writes** the slot, 0 included: the exec frame (`p_reg`) is not
 guaranteed zeroed, so a stale register must not be what the loader reads as its argument.
-riscv64 and aarch64 write it too although no loader is built for them yet (D1, Phase 7) —
-the plumbing stays uniform and the value is simply never consumed there.
+riscv64 and aarch64 write it too — the plumbing stayed uniform from the start, and since
+Phase 7 built a loader for each, all three consume it.
 
 The loader's own `_start` must also **restore the stack pointer** before entering the main
 program: `crt0` reads `argc`/`argv` from `(%rsp)`, and a call frame of the loader's left on
@@ -445,6 +445,14 @@ second script would be: it is the same fact, stated once, and the loader has to 
 anyway. (It is also why these must be answered *per referencing object*: a non-PIE
 executable exports its own `__tls_start` for its own, unrelated block, and a naive global
 lookup would bind the object's reference to the program's.)
+- On AArch64 a thread-local is reached through a *descriptor* instead, because `TLSDESC` is
+that target's default and the compiler emits it per access. The loader fills each
+`R_AARCH64_TLSDESC`'s two words — its own `__tlsdesc_static`, whose whole answer is the
+descriptor's argument, and the variable's offset from the thread pointer — so an access
+through the descriptor reaches the same block `__tls_get_addr` would. The dialect's other
+resolver, the one that looks a *module* up for a symbol another object defines, is never
+reached: the walk refuses such a descriptor when it has a symbol, for the one-module reason
+the names above are answered per object.
 
 ## 7. Phased plan
 
@@ -755,9 +763,9 @@ no caller outside the tests.
 
 Gate: a measured assertion that two processes' `.so` text maps to one physical frame set
 (not a comment), on at least two arches. **x86_64 passes** — `just probe-dso-share-x86`,
-13/13 read-only pages, 4 writable ones private, on each of three runs. The second arch is
-inherited by Phase 7, because `crates/ldso` has no other arch yet and the probe's page-table
-walk is x86_64's.
+13/13 read-only pages, 4 writable ones private, on each of three runs. **The second arch is
+still owed**: Phase 7 built the loader for riscv64 and aarch64, but the probe's page-table
+walk is x86_64's, so the measurement is still x86_64's alone.
 
 ### Phase 6 — `dlopen`/`dlsym` (optional)
 
@@ -765,11 +773,33 @@ Only if a consumer appears. Needs symbol lookup by name, `.init_array`/`.fini_ar
 running at load, and — for a *static* caller to `dlopen` — either option A (D4) or an
 `AT_PHDR` for the main program.
 
-### Phase 7 — riscv64 + aarch64
+### Phase 7 — riscv64 + aarch64 — **done**
 
 Per-arch reloc sets (Appendix A) and the `exec_init_regs` register choice (§6.2). Prefer
 landing each phase on x86_64 first, then porting, matching how the exec work went
 (`FILEMMAP.md §5` needed three arch-specific fixes after the x86 version was green).
+
+As built — riscv64 first, then aarch64, in that order:
+
+- The relocation tables became data (`reloc.rs`'s `Relocs`): one per target, every number
+  taken from the fork's LLVM psABI headers, and the walk kept out of the per-target code.
+  RISC-V forced the split of `abs64` from `glob_dat` — it has no `GLOB_DAT`, and
+  `R_RISCV_64` fills both roles — which is why `action` compares rather than matches.
+- TLS placement is per target: the thread pointer is past its block on x86_64 and *at* it on
+  the other two (`layout::TP_IS_PAST_THE_BLOCK`, matching the runtime's `tls_block_alloc`),
+  and `read_tp` reads `fs:[0]`, `tpidr_el0` or `tp` accordingly.
+- AArch64 reaches thread-locals through a `TLSDESC` *descriptor*, so the loader fills the
+  pair and supplies the resolver (§6.6).
+- `_start` per arch (§6.2) — `r9`, `a2`, `x3` — with the exec'd stack and the header page
+  parked in callee-saved registers across the call, since the program's entry reads the
+  three arguments back off that stack.
+- Three bugs the x86-only gates could not have shown, all in the *exec* and *DSO-mapping*
+  paths rather than in the loader's own rules, are recorded in §8: the page `.text` shares
+  with `.rodata` losing its execute bit, the pre-fault workaround's dependence on a region
+  *not* being executable, and the loader filling a DSO's `.bss` tail from the file.
+
+Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch-neutral
+`tools/smoke/dyn.tsv` as x86_64 — four steps each, green.
 
 ## 8. Risks and traps
 
@@ -790,6 +820,21 @@ landing each phase on x86_64 first, then porting, matching how the exec work wen
   RISC-V text pages get the X PTE (`FILEMMAP.md §5` Bug 4); `MAX_USER_ADDRESS` on
   aarch64 covers the whole TTBR0 range, so a bad loader base can become an eret-retry
   loop (`FILEMMAP.md §6`).
+- **A page two `PT_LOAD`s share needs their *union*, and the obvious fix is the wrong one.**
+  Phase 7 found `.text`'s last page — the one holding the `.plt` — losing `PTE_X`, because
+  `do_vfs_mmap` trims the earlier region out of a page the later segment claims and the
+  `.rodata` segment does not ask for X. Widening that segment's own protection fixes the
+  fetch and is *still* wrong: a region carrying X is not pre-faulted, and a kernel-mode copy
+  cannot fault a page in (the gap above), so the literal a program writes without reading
+  first goes missing — invisibly, on x86_64 and aarch64, where nothing enforces the bit.
+  The union therefore travels with `PROT_PREFAULT`, which is what lets a data region be
+  executable and eager at once.
+- **A DSO's `.bss` is not past the end of its file.** `mmap` fills a page from the file as
+  far as the *file* goes, and what follows a `PT_LOAD` in a `.so` is LLD's symbol table, its
+  string table and its section headers — so a segment's zero-filled tail has to be cleared
+  explicitly (`rtld.rs::read_and_map`). The exec path gets this from the in-file end VFS
+  sends (`VM_VFS_MMAP`); without it the tail reads as plausible-looking data until something
+  follows it as a pointer, which is how it surfaced: libc's exit-handler list.
 - **TLS silently wrong is worse than absent.** A DSO with `PT_TLS` loaded by a
   single-module TLS runtime would compute plausible-looking wrong offsets (D8). Reject
   it explicitly.
@@ -819,7 +864,8 @@ Three layers, matching `minix-testing`:
 2. **Host `cargo test` for the interfaces** — `pm_exec`'s interpreter branch
    (`servers` crate tests), the `SYS_EXEC_LOAD` layout assertions
    (`arch-common`/`servers` have precedent: `test_vfs_pm_messages`).
-3. **QEMU gates** — `just test-dynlink-x86` (and `-riscv64`/`-aarch64` in Phase 7), built
+3. **QEMU gates** — `just test-dynlink-x86` (and `-riscv64`/`-aarch64`, both green since
+   Phase 7), built
    on `tools/smoke/feed.sh` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
    negative assertion (§7 Phase 0 gate: the string is not in the main binary) is what
    makes the gate meaningful rather than a print that would pass either way.
@@ -880,6 +926,7 @@ from `.refs/minix-3.3.0/sys/sys/exec_elf.h` (e.g. `AT_ENTRY = 9`,
 | TLS module | `R_X86_64_DTPMOD64` | `R_AARCH64_TLS_DTPMOD64` | `R_RISCV_TLS_DTPMOD64` |
 | TLS DSO offset | `R_X86_64_DTPOFF64` | `R_AARCH64_TLS_DTPREL64` | `R_RISCV_TLS_DTPREL64` |
 | TLS TP offset | `R_X86_64_TPOFF64` | `R_AARCH64_TLS_TPREL64` | `R_RISCV_TLS_TPREL64` |
+| TLS descriptor | — | `R_AARCH64_TLSDESC` | — |
 | ifunc | `R_X86_64_IRELATIVE` | `R_AARCH64_IRELATIVE` | `R_RISCV_IRELATIVE` |
 
 Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`,
@@ -891,8 +938,10 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
 
 - `README.md` "Project Structure": add `crates/ldso`.
 - `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file.
-- `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `probe-dso-share-x86`
-  (**done**, Phase 5's measurement — not in `test-arches`, see §9).
+- `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `dynlink-riscv64` /
+  `dynlink-aarch64` and their `test-` recipes (**done**, Phase 7, on the same
+  `tools/smoke/dyn.tsv`); `probe-dso-share-x86` (**done**, Phase 5's measurement — not in
+  `test-arches`, see §9, and still x86_64-only).
 - `.agents/skills/minix-boot-process`: a note that a dynamic exec enters `ld.so` first —
   a future boot-chain reader will otherwise conclude the wrong process started.
 - Any `.rules` addition (per the hygiene policy, in the PR description, not inline). Two

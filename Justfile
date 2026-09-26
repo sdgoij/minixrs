@@ -370,6 +370,41 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (x86_64)"
 
+# The same artifacts for riscv64. `tools/build-dynlink.py` and
+# `tools/build-dynlibc.py` take the target; only the loader's `_start` and its TLS
+# placement differ between them (`crates/ldso`).
+dynlink-riscv64:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target riscv64gc-unknown-minix --release
+    python tools/build-dynlink.py riscv64
+    python tools/build-dynlibc.py riscv64
+
+# The dynamic-linking gate for riscv64: the same `tools/smoke/dyn.tsv` scenario as
+# x86_64, which is deliberately arch-neutral — it asserts on symbols only the shared
+# objects contain, on an errno read through the loader's TLS, and on the program's
+# own constructor, none of which depends on the instruction set.
+test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
+    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/dynlink/riscv64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (riscv64)"
+
+dynlink-aarch64:
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target aarch64-unknown-minix --release
+    python tools/build-dynlink.py aarch64
+    python tools/build-dynlibc.py aarch64
+
+test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
+    DYNLINK_BINS='/libexec/ld.so=target/aarch64-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libc.so=target/dynlink/aarch64/libc.so;/bin/dynclib=target/dynlink/aarch64/dynclib' just build-aarch64
+    @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/dynlink/aarch64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
+
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the

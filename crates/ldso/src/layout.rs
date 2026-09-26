@@ -88,9 +88,27 @@ pub fn image_extent(elf: &Elf<'_>) -> Option<(u64, u64)> {
 /// runtime's `tls_block_alloc` (`crates/minix-libc/src/lib.rs`) rounds the same
 /// way, and the two must agree: a block a `pthread` allocates has to be reachable
 /// through the same `__tls_get_addr` the loader wrote relocations for.
+///
+/// aarch64 and riscv64 use the other variant — the pointer *is* the block's
+/// first byte — so the rounding only matters for the x86_64 placement.
 pub const fn tls_block_size(memsz: u64) -> u64 {
     (memsz + 15) & !15
 }
+
+/// Whether the thread pointer sits past the block (`x86_64`) or at its start
+/// (`aarch64`, `riscv64`).
+///
+/// This is the one part of the TLS ABI the loader has to get right per target,
+/// and the port already has both halves: `minix_libc`'s `tls_block_alloc` picks
+/// the pointer the same way, and its comment says why — "x86_64 uses the
+/// negative-offset TLS layout (TP past the end of the image, 16-aligned,
+/// self-pointer at [TP]); aarch64/riscv64 point at the block start". The loader
+/// and the runtime must agree, or a thread's storage is reached through one
+/// convention and allocated for the other.
+#[cfg(target_arch = "x86_64")]
+pub const TP_IS_PAST_THE_BLOCK: bool = true;
+#[cfg(not(target_arch = "x86_64"))]
+pub const TP_IS_PAST_THE_BLOCK: bool = false;
 
 #[cfg(test)]
 mod tests {

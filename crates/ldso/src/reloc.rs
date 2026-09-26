@@ -8,8 +8,11 @@
 //! idea of "the image".
 
 use crate::elf::{
-    R_X86_64_64, R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
-    R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
+    EM_AARCH64, EM_RISCV, EM_X86_64, R_AARCH64_ABS64, R_AARCH64_COPY, R_AARCH64_GLOB_DAT,
+    R_AARCH64_JUMP_SLOT, R_AARCH64_NONE, R_AARCH64_RELATIVE, R_AARCH64_TLS_DTPMOD64,
+    R_AARCH64_TLSDESC, R_RISCV_64, R_RISCV_COPY, R_RISCV_JUMP_SLOT, R_RISCV_NONE, R_RISCV_RELATIVE,
+    R_RISCV_TLS_DTPMOD64, R_X86_64_64, R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_GLOB_DAT,
+    R_X86_64_JUMP_SLOT, R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
 };
 
 /// The module id the loader fills a shared object's `tls_index` with.
@@ -20,6 +23,92 @@ use crate::elf::{
 /// modules from 1; 0 means "no module".
 pub const TLS_MODULE_ID: u64 = 1;
 
+/// One target's relocation numbering.
+///
+/// ELF gives every machine its own type numbers, so which numbers mean "a
+/// `RELATIVE` fixup" or "a GOT word" is part of the target's ABI and not
+/// something the loader may guess at. Every value here comes from that
+/// target's psABI header — the fork's LLVM carries them under
+/// `ci-llvm/include/llvm/BinaryFormat/ELFRelocs/` — because a wrong number is a
+/// wrong *write* into a loaded image, which surfaces much later as a crash in a
+/// program that was linked correctly.
+///
+/// Only the types this loader implements are named. Anything else in a table is
+/// [`Action::Unsupported`] and fails the load, which is the point: a silently
+/// skipped relocation leaves an image half-built.
+#[derive(Debug, Clone, Copy)]
+pub struct Relocs {
+    /// The machine, as the ELF header carries it (`e_machine`).
+    pub e_machine: u16,
+    /// The machine's name, for the loader's own diagnostics.
+    pub name: &'static str,
+    pub none: u32,
+    /// An absolute address, `S + A`.
+    pub abs64: u32,
+    /// The loader's own fixup, `B + A`.
+    pub relative: u32,
+    /// A GOT/PLT word naming a symbol, `S + A`.
+    pub glob_dat: u32,
+    pub jump_slot: u32,
+    /// Move the definition's bytes into the executable's reservation.
+    pub copy: u32,
+    /// Fill a `tls_index`'s module number (see [`TLS_MODULE_ID`]).
+    pub dtpmod64: u32,
+    /// A `TLSDESC` descriptor: a *pair* of words, the resolver and its argument,
+    /// which a thread-local access calls instead of `__tls_get_addr` (AArch64's
+    /// default dialect). [`Relocs::none`] on a target that has no such relocation.
+    pub tlsdesc: u32,
+}
+
+pub const X86_64: Relocs = Relocs {
+    e_machine: EM_X86_64,
+    name: "x86_64",
+    none: R_X86_64_NONE,
+    abs64: R_X86_64_64,
+    relative: R_X86_64_RELATIVE,
+    glob_dat: R_X86_64_GLOB_DAT,
+    jump_slot: R_X86_64_JUMP_SLOT,
+    copy: R_X86_64_COPY,
+    dtpmod64: R_X86_64_DTPMOD64,
+    tlsdesc: R_X86_64_NONE,
+};
+
+/// RISC-V's own numbering. `abs64` and `glob_dat` are deliberately the same
+/// type: the psABI has no `GLOB_DAT`, and `R_RISCV_64` fills both roles.
+pub const RISCV64: Relocs = Relocs {
+    e_machine: EM_RISCV,
+    name: "riscv64",
+    none: R_RISCV_NONE,
+    abs64: R_RISCV_64,
+    relative: R_RISCV_RELATIVE,
+    glob_dat: R_RISCV_64,
+    jump_slot: R_RISCV_JUMP_SLOT,
+    copy: R_RISCV_COPY,
+    dtpmod64: R_RISCV_TLS_DTPMOD64,
+    tlsdesc: R_RISCV_NONE,
+};
+
+pub const AARCH64: Relocs = Relocs {
+    e_machine: EM_AARCH64,
+    name: "aarch64",
+    none: R_AARCH64_NONE,
+    abs64: R_AARCH64_ABS64,
+    relative: R_AARCH64_RELATIVE,
+    glob_dat: R_AARCH64_GLOB_DAT,
+    jump_slot: R_AARCH64_JUMP_SLOT,
+    copy: R_AARCH64_COPY,
+    dtpmod64: R_AARCH64_TLS_DTPMOD64,
+    tlsdesc: R_AARCH64_TLSDESC,
+};
+
+/// The table for the target this loader was built for.
+#[cfg(target_arch = "x86_64")]
+pub const TARGET: Relocs = X86_64;
+#[cfg(target_arch = "riscv64")]
+pub const TARGET: Relocs = RISCV64;
+#[cfg(target_arch = "aarch64")]
+pub const TARGET: Relocs = AARCH64;
+
 /// What to do with one relocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -27,9 +116,12 @@ pub enum Action {
     Skip,
     /// Store this at `r_offset`.
     Write(u64),
-    /// A byte copy (`R_X86_64_COPY`): the walk resolves the symbol with
+    /// A byte copy (`COPY`): the walk resolves the symbol with
     /// [`Scope::ExcludeSelf`] and moves the definition's bytes to `r_offset`.
     Copy,
+    /// Write a `TLSDESC` descriptor at `r_offset`: its resolver's address, then
+    /// this argument, the variable's offset from the thread pointer.
+    TlsDesc(u64),
     /// A relocation type this loader does not implement; the load must fail
     /// rather than continue with a half-relocated image.
     Unsupported,
@@ -39,30 +131,63 @@ pub enum Action {
 /// a `RELATIVE` fixup adds to); `sym_value` is the resolved symbol's address,
 /// ignored by `RELATIVE` (and by `COPY`, whose bytes the walk moves itself).
 pub fn reloc_action(typ: u32, base: u64, sym_value: u64, addend: i64) -> Action {
-    match typ {
-        R_X86_64_NONE => Action::Skip,
-        R_X86_64_RELATIVE => Action::Write(base.wrapping_add(addend as u64)),
-        R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-            Action::Write(sym_value.wrapping_add(addend as u64))
-        }
-        // A thread-local in the general- or local-dynamic model is reached
-        // through a `tls_index` holding a module id and an offset within it, and
-        // the loader is the only one that can say which module that is. The
-        // symbol's *address* is not what goes here.
-        R_X86_64_DTPMOD64 => Action::Write(TLS_MODULE_ID),
-        // A non-PIE executable's reference to a variable defined in a shared object:
-        // the linker reserved space for the variable in the executable, and the
-        // loader has to move the object's initial value into it.
-        R_X86_64_COPY => Action::Copy,
-        _ => Action::Unsupported,
+    action(TARGET, typ, base, sym_value, addend)
+}
+
+/// The same decision against an explicit table.
+///
+/// Separate from [`reloc_action`] so every target's numbering is testable on the
+/// host: the constants are plain numbers, and a table is data, so one `cargo
+/// test` covers all three machines without building for them.
+///
+/// The tests are comparisons rather than a `match` because RISC-V gives `abs64`
+/// and `glob_dat` the same number, which a `match` would reject as an
+/// unreachable arm.
+pub fn action(r: Relocs, typ: u32, base: u64, sym_value: u64, addend: i64) -> Action {
+    if typ == r.none {
+        return Action::Skip;
     }
+    if typ == r.relative {
+        return Action::Write(base.wrapping_add(addend as u64));
+    }
+    if typ == r.abs64 || typ == r.glob_dat || typ == r.jump_slot {
+        return Action::Write(sym_value.wrapping_add(addend as u64));
+    }
+    // A thread-local in the general- or local-dynamic model is reached through a
+    // `tls_index` holding a module id and an offset within it, and the loader is
+    // the only one that can say which module that is. The symbol's *address* is
+    // not what goes here.
+    if typ == r.dtpmod64 {
+        return Action::Write(TLS_MODULE_ID);
+    }
+    if typ == r.tlsdesc {
+        // A thread-local access in the `TLSDESC` dialect asks a per-descriptor
+        // resolver where its variable is, so the loader writes the descriptor.
+        // For a variable the linker resolved itself the offset is the addend —
+        // which is the form `R_AARCH64_TLSDESC` takes with no symbol, and what
+        // LLD emits for a thread-local the object defines — and the walk refuses
+        // the symbol's form, whose offset is the definition's (`apply_table`).
+        return Action::TlsDesc(addend as u64);
+    }
+    // A non-PIE executable's reference to a variable defined in a shared object:
+    // the linker reserved space for the variable in the executable, and the
+    // loader has to move the object's initial value into it.
+    if typ == r.copy {
+        return Action::Copy;
+    }
+    Action::Unsupported
 }
 
 /// Whether a relocation type's *value* is a symbol's address. `COPY` is not one
 /// of these: its bytes are moved by the walk, and its definition is looked up
 /// with a narrower scope than a value's.
 pub fn uses_symbol(typ: u32) -> bool {
-    matches!(typ, R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT)
+    uses_symbol_in(TARGET, typ)
+}
+
+/// [`uses_symbol`] against an explicit table.
+pub fn uses_symbol_in(r: Relocs, typ: u32) -> bool {
+    typ == r.abs64 || typ == r.glob_dat || typ == r.jump_slot
 }
 
 /// Which loaded objects a symbol lookup may consider.
@@ -163,6 +288,9 @@ pub enum RelocError {
     Unresolved(SymName),
     /// The relocation's target is outside the image it belongs to.
     OutOfRange(u64),
+    /// A `TLSDESC` for a symbol another object defines. The port places one
+    /// object's thread-local storage, so there is no block for the symbol's.
+    TlsDescForASymbol,
 }
 
 /// What a relocation walk needs from a loaded image.
@@ -188,6 +316,10 @@ pub trait RelocImage {
     /// Copy `len` bytes from runtime VA `src` to runtime VA `dst` (a `COPY`
     /// relocation). `false` when `dst .. dst + len` leaves this image.
     fn copy_range(&mut self, dst: u64, src: u64, len: u64) -> bool;
+    /// The runtime address of the loader's `TLSDESC` resolver for a
+    /// thread-local it placed: the "static" one, which returns the descriptor's
+    /// argument — the variable's offset from the thread pointer.
+    fn tlsdesc_static(&self) -> u64;
 }
 
 /// Apply every relocation in the `RELA` table at link-time VA `table_va` spanning
@@ -243,6 +375,21 @@ where
                     return Err(RelocError::OutOfRange(at));
                 }
             }
+            Action::TlsDesc(offset) => {
+                // The symbol's form needs the defining object's thread-local
+                // block to turn the definition into an offset, and the port
+                // places one object's — the same limit `__tls_get_addr` refuses a
+                // second module for. Naming it is the point: a descriptor written
+                // with an offset into the wrong block is a wrong read much later.
+                if r.sym() != 0 {
+                    return Err(RelocError::TlsDescForASymbol);
+                }
+                let resolver = img.tlsdesc_static();
+                let at = base.wrapping_add(r.r_offset);
+                if !img.store(at, resolver) || !img.store(at + 8, offset) {
+                    return Err(RelocError::OutOfRange(at));
+                }
+            }
             Action::Unsupported => return Err(RelocError::Unsupported(typ)),
         }
     }
@@ -285,6 +432,9 @@ mod tests {
 
     const RESOLVED_MESSAGE: u64 = 0x200_1234;
     const RESOLVED_CROSS: u64 = 0x201_5678;
+    /// Where the walk's `TLSDESC` resolver stands in for the loader's: the test
+    /// image has no loader, so this is the address a descriptor must name.
+    const TLS_RESOLVER: u64 = 0x99_0000;
     const SENTINEL: u8 = 0xaa;
 
     fn wr16(b: &mut [u8], o: usize, v: u16) {
@@ -442,6 +592,10 @@ mod tests {
             self.img.copy_within(s..s + len, d);
             true
         }
+
+        fn tlsdesc_static(&self) -> u64 {
+            self.base + TLS_RESOLVER
+        }
     }
 
     fn resolve(name: &[u8], _scope: Scope) -> Option<Def> {
@@ -538,6 +692,113 @@ mod tests {
             reloc_action(R_X86_64_DTPMOD64, BASE, 0x201_0000, 0),
             Action::Write(TLS_MODULE_ID)
         );
+    }
+
+    /// Every target's numbering resolves to the same rules.
+    ///
+    /// The tables are data, so this covers all three machines on the host: a
+    /// wrong number in any of them is a wrong *write* into a loaded image, and
+    /// this is where it has to fail instead.
+    #[test]
+    fn every_target_has_the_same_rules_in_its_own_numbering() {
+        for r in [X86_64, RISCV64, AARCH64] {
+            assert!(r.name == "x86_64" || r.name == "riscv64" || r.name == "aarch64");
+            assert_eq!(
+                action(r, r.none, BASE, 0xdead, 0),
+                Action::Skip,
+                "{}",
+                r.name
+            );
+            assert_eq!(
+                action(r, r.relative, BASE, 0, 0x1234),
+                Action::Write(BASE + 0x1234),
+                "{}",
+                r.name
+            );
+            for t in [r.abs64, r.glob_dat, r.jump_slot] {
+                assert_eq!(
+                    action(r, t, BASE, 0x2004, 8),
+                    Action::Write(0x200c),
+                    "{} type {t:#x}",
+                    r.name
+                );
+                assert!(uses_symbol_in(r, t), "{} type {t:#x}", r.name);
+            }
+            assert_eq!(
+                action(r, r.dtpmod64, BASE, 0x2004, 0),
+                Action::Write(TLS_MODULE_ID),
+                "{}",
+                r.name
+            );
+            assert_eq!(action(r, r.copy, BASE, 0, 0), Action::Copy, "{}", r.name);
+            // Only `abs64`/`glob_dat`/`jump_slot` take a symbol's address, and
+            // only the types above are implemented: anything else fails the load
+            // rather than leaving the image half-built.
+            assert!(!uses_symbol_in(r, r.copy), "{}", r.name);
+            assert!(!uses_symbol_in(r, r.relative), "{}", r.name);
+            assert_eq!(
+                action(r, 0xdead_beef, BASE, 0, 0),
+                Action::Unsupported,
+                "{}",
+                r.name
+            );
+        }
+    }
+
+    /// The `TLSDESC` dialect, which only AArch64's table names: the descriptor's
+    /// argument is the offset the linker resolved into the addend, and the walk
+    /// pairs it with the loader's own resolver — so this type must not be one the
+    /// walk resolves a name for.
+    #[test]
+    fn a_tlsdesc_descriptor_is_the_resolver_and_the_linkers_offset() {
+        assert_eq!(AARCH64.tlsdesc, R_AARCH64_TLSDESC);
+        assert_eq!(
+            action(AARCH64, AARCH64.tlsdesc, BASE, 0xdead, 0x18),
+            Action::TlsDesc(0x18)
+        );
+        assert!(!uses_symbol_in(AARCH64, AARCH64.tlsdesc));
+        // The other two targets have no such relocation, and say so with `none`:
+        // the no-op check comes first, so such a type is skipped rather than
+        // writing a descriptor.
+        assert_eq!(X86_64.tlsdesc, X86_64.none);
+        assert_eq!(RISCV64.tlsdesc, RISCV64.none);
+        assert_eq!(action(X86_64, X86_64.tlsdesc, BASE, 0, 8), Action::Skip);
+    }
+
+    /// The two new tables' numbers, pinned against their psABI headers as the
+    /// fork's LLVM carries them (`ELFRelocs/RISCV.def`, `ELFRelocs/AArch64.def`)
+    /// and against `e_machine` as `elf.h` has it. A drift here would otherwise
+    /// show up as a wrong write in a guest and nowhere else.
+    #[test]
+    fn the_new_targets_numbers_are_the_psabis() {
+        assert_eq!(RISCV64.e_machine, 243);
+        assert_eq!(
+            (
+                RISCV64.none,
+                RISCV64.abs64,
+                RISCV64.glob_dat,
+                RISCV64.relative,
+                RISCV64.copy,
+                RISCV64.jump_slot,
+                RISCV64.dtpmod64
+            ),
+            // RISC-V has no GLOB_DAT; `R_RISCV_64` fills both roles.
+            (0, 2, 2, 3, 4, 5, 7)
+        );
+        assert_eq!(AARCH64.e_machine, 183);
+        assert_eq!(
+            (
+                AARCH64.none,
+                AARCH64.abs64,
+                AARCH64.relative,
+                AARCH64.copy,
+                AARCH64.glob_dat,
+                AARCH64.jump_slot,
+                AARCH64.dtpmod64
+            ),
+            (0, 0x101, 0x403, 0x400, 0x401, 0x402, 0x404)
+        );
+        assert_eq!(AARCH64.tlsdesc, 0x407);
     }
 
     /// Every type this loader claims to handle is applied, at its own offset,

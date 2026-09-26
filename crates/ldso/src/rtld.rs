@@ -28,10 +28,12 @@
 
 use crate::elf::{
     DT_HASH, DT_INIT, DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_JMPREL, DT_NEEDED, DT_NULL, DT_PLTREL,
-    DT_PLTRELSZ, DT_RELA, DT_RELASZ, DT_STRTAB, DT_SYMTAB, DYN_SIZE, EM_X86_64, ET_DYN, Elf,
-    MAX_DYN, PF_W, PF_X, PT_LOAD, RELA_SIZE, Rela, SYM_SIZE, Sym,
+    DT_PLTRELSZ, DT_RELA, DT_RELASZ, DT_STRTAB, DT_SYMTAB, DYN_SIZE, ET_DYN, Elf, MAX_DYN, PF_W,
+    PF_X, PT_LOAD, RELA_SIZE, Rela, SYM_SIZE, Sym,
 };
-use crate::layout::{BaseAlloc, image_extent, page_down, page_up, tls_block_size};
+use crate::layout::{
+    BaseAlloc, TP_IS_PAST_THE_BLOCK, image_extent, page_down, page_up, tls_block_size,
+};
 use crate::reloc::{
     Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, TLS_MODULE_ID, apply_table,
 };
@@ -41,6 +43,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A `DT_NEEDED` name is looked up here, in order.
 const SEARCH_PATH: &[&[u8]] = &[b"/lib/", b"/usr/lib/"];
+
+/// What a header page that is not this loader's machine is reported as.
+///
+/// Per target rather than generic, because the interesting case is a loader and a
+/// program built for different machines: naming the one this loader is for is
+/// what makes that diagnosable.
+#[cfg(target_arch = "x86_64")]
+const NOT_ELF: &[u8] = b"ld.so: the image is not an x86_64 ELF\n";
+#[cfg(target_arch = "riscv64")]
+const NOT_ELF: &[u8] = b"ld.so: the image is not a riscv64 ELF\n";
+#[cfg(target_arch = "aarch64")]
+const NOT_ELF: &[u8] = b"ld.so: the image is not an aarch64 ELF\n";
 
 const PAGE: u64 = 0x1000;
 const MAX_OBJECTS: usize = 8;
@@ -106,7 +120,7 @@ enum LoadError {
 
 fn die_load(e: LoadError) -> ! {
     match e {
-        LoadError::NotElf => die(b"ld.so: main header page is not an x86_64 ELF\n"),
+        LoadError::NotElf => die(NOT_ELF),
         LoadError::NotObject => die(b"ld.so: a DT_NEEDED is not a PIC object\n"),
         LoadError::NoDynamic => die(b"ld.so: no PT_DYNAMIC\n"),
         LoadError::TwoTlsModules => {
@@ -143,6 +157,9 @@ fn die_load(e: LoadError) -> ! {
             write_bytes(b"ld.so: relocation target outside the image: 0x");
             write_hex(a);
             die(b"\n")
+        }
+        LoadError::Reloc(RelocError::TlsDescForASymbol) => {
+            die(b"ld.so: a TLS descriptor names a symbol another object defines\n")
         }
     }
 }
@@ -460,6 +477,10 @@ impl RelocImage for GuestImage {
         unsafe { ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, len as usize) };
         true
     }
+
+    fn tlsdesc_static(&self) -> u64 {
+        __tlsdesc_static as *const () as u64
+    }
 }
 
 /// Map one shared object's segments at `base` and read its dynamic tables.
@@ -470,7 +491,7 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         return Err(LoadError::NotObject);
     }
     let elf = Elf::new(&hdr[..n as usize]).map_err(|_| LoadError::NotObject)?;
-    if elf.e_machine() != EM_X86_64 || elf.e_type() != ET_DYN {
+    if elf.e_machine() != crate::reloc::TARGET.e_machine || elf.e_type() != ET_DYN {
         return Err(LoadError::NotObject);
     }
 
@@ -509,6 +530,23 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         };
         if r.is_null() || r as u64 != va {
             return Err(LoadError::NotObject);
+        }
+        // A `PT_LOAD`'s memory size can exceed its file size: the tail is the
+        // segment's zero-initialised data (`.bss`). `mmap` fills a page from the
+        // file as far as the *file* goes, and the bytes that follow a segment's
+        // data in a `.so` are not padding — LLD puts the symbol table, the string
+        // table and the section headers at the end — so the tail has to be cleared
+        // here. The exec path gets the same result from the in-file end VFS sends
+        // (`VM_VFS_MMAP` in `vm/mod.rs`), which VM zero-fills past; a plain `mmap`
+        // only has POSIX's "past the end of the file", which this tail is not.
+        //
+        // The pages are faulted in and made private by the write, which is what
+        // the exec path does for the image's data regions too. A tail in a segment
+        // that is not writable cannot be cleared from here; the linker does not
+        // make one, because `.bss` is writable by definition.
+        if p.p_memsz > p.p_filesz && p.p_flags & PF_W != 0 {
+            let dst = (base + p.p_vaddr + p.p_filesz) as *mut u8;
+            unsafe { ptr::write_bytes(dst, 0, (p.p_memsz - p.p_filesz) as usize) };
         }
     }
 
@@ -693,14 +731,30 @@ struct TlsIndex {
     offset: u64,
 }
 
-/// The calling thread's thread pointer (the FS base).
+/// A `TLSDESC` descriptor: what a thread-local access in that dialect reads and
+/// calls. AArch64's codegen emits it by default (the linker decides, per
+/// relocation, whether the pair can be resolved statically), and the loader is
+/// what fills both words — [`__tlsdesc_static`] and the variable's offset from the
+/// thread pointer.
+#[repr(C)]
+struct TlsDesc {
+    resolver: u64,
+    arg: u64,
+}
+
+/// The calling thread's thread pointer.
 ///
-/// There is no unprivileged way to read the FS base on this CPU, but the port's
-/// own convention supplies one: the runtime's `tls_block_alloc` writes the
-/// pointer at `[tp]`, and [`install_tls`] does the same, so that word *is* the
-/// pointer. Reading it per call is what lets a thread `pthread_create` started
-/// work — its block is its own, and only the distance from the pointer down to
-/// the storage is fixed.
+/// Each target keeps it somewhere else, and only x86_64's needs a trick: there is
+/// no unprivileged way to read the FS base, but the port's own convention supplies
+/// one — the runtime's `tls_block_alloc` writes the pointer at `[tp]`, and
+/// [`install_tls`] does the same, so that word *is* the pointer. aarch64 reads
+/// `TPIDR_EL0`, which the kernel reloads on every context switch; riscv64 reads
+/// `tp`, which the runtime settles itself once the syscall has told the kernel.
+///
+/// Reading it per call, rather than caching it, is what lets a thread
+/// `pthread_create` started work: its block is its own, and only the distance from
+/// the pointer to the storage is fixed.
+#[cfg(target_arch = "x86_64")]
 fn read_tp() -> u64 {
     let tp: u64;
     unsafe {
@@ -710,6 +764,26 @@ fn read_tp() -> u64 {
             options(nostack, nomem, preserves_flags),
         )
     };
+    tp
+}
+
+#[cfg(target_arch = "aarch64")]
+fn read_tp() -> u64 {
+    let tp: u64;
+    unsafe {
+        asm!(
+            "mrs {tp}, tpidr_el0",
+            tp = out(reg) tp,
+            options(nostack, nomem, preserves_flags),
+        )
+    };
+    tp
+}
+
+#[cfg(target_arch = "riscv64")]
+fn read_tp() -> u64 {
+    let tp: u64;
+    unsafe { asm!("mv {tp}, tp", tp = out(reg) tp, options(nostack, nomem)) };
     tp
 }
 
@@ -733,7 +807,33 @@ unsafe extern "C" fn __tls_get_addr(ti: *const TlsIndex) -> *mut u8 {
     if ti.module != TLS_MODULE_ID {
         die(b"ld.so: __tls_get_addr asked for a module this load did not place\n");
     }
-    read_tp().wrapping_sub(size).wrapping_add(ti.offset) as *mut u8
+    // The storage starts at the thread pointer itself on aarch64/riscv64, and one
+    // block-length below it on x86_64. See `layout::TP_IS_PAST_THE_BLOCK`.
+    let base = if TP_IS_PAST_THE_BLOCK {
+        read_tp().wrapping_sub(size)
+    } else {
+        read_tp()
+    };
+    base.wrapping_add(ti.offset) as *mut u8
+}
+
+/// The `TLSDESC` resolver a descriptor this load wrote points at: the "static"
+/// one, whose whole answer is its argument — the variable's offset from the thread
+/// pointer, which the linker resolved into the relocation's addend because the
+/// variable is the one object's own. The storage is the same single block
+/// [`install_tls`] placed, so an access through this and one through
+/// `__tls_get_addr` reach the same address.
+///
+/// The dialect's other resolver — the one that looks a module up, for a symbol
+/// another object defines — is not reachable: the port places one object's
+/// thread-local storage, and the walk refuses a descriptor that names a symbol
+/// before this can be called with one.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __tlsdesc_static(desc: *const TlsDesc) -> usize {
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return 0;
+    };
+    desc.arg as usize
 }
 
 /// Install the calling thread's storage for the loaded objects' thread-locals.
@@ -780,11 +880,27 @@ unsafe fn install_tls(objects: &[Object]) -> Result<(), LoadError> {
             0,
             (size - tls.init_len) as usize,
         );
-        ptr::write((block + size) as *mut u64, block + size);
     }
     TLS_BLOCK_SIZE.store(size, Ordering::Relaxed);
-    minix_rt::thread_set_tls((block + size) as usize);
+    minix_rt::thread_set_tls(thread_pointer_for(block, size) as usize);
     Ok(())
+}
+
+/// The thread pointer for a block of `size` bytes at `block`.
+///
+/// x86_64's pointer sits past the block, 16-aligned, with the self-pointer
+/// [`read_tp`] reads the FS base back through. aarch64 and riscv64 point at the
+/// block's first byte, so there is nothing to read back and nothing to round.
+fn thread_pointer_for(block: u64, size: u64) -> u64 {
+    if TP_IS_PAST_THE_BLOCK {
+        let tp = (block + size + 15) & !15;
+        unsafe {
+            ptr::write(tp as *mut u64, tp);
+        }
+        tp
+    } else {
+        block
+    }
 }
 
 /// Load every object the main program needs, relocate everything, run every
@@ -801,7 +917,7 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         Ok(e) => e,
         Err(_) => die_load(LoadError::NotElf),
     };
-    if elf.e_machine() != EM_X86_64 {
+    if elf.e_machine() != crate::reloc::TARGET.e_machine {
         die_load(LoadError::NotElf);
     }
     let entry = elf.e_entry();

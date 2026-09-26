@@ -41,17 +41,30 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
+from ccarch import AARCH64, RISCV64, X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import find_lld  # noqa: E402
 
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
-DYN_TARGET = ROOT / "tools" / "minix-dyn-target" / "x86_64-pc-minix-dyn.json"
 # The `cdylib` build gets a cargo target directory of its own: `-Z build-std`
 # builds a whole sysroot, and keeping it here keeps those PIC objects out of
 # `target/<triple>`, which the static userland is built from (D2).
 BUILD_DIR = ROOT / "target" / "dynlibc"
+
+
+def dyn_target(arch: Arch) -> pathlib.Path:
+    """The PIC target spec for `arch`.
+
+    One JSON per target, named after the arch's triple — a JSON spec cannot
+    inherit, so each carries the whole target, and the name is what makes
+    cargo's build directory for it predictable (the object's path below depends
+    on that name).
+    """
+    path = ROOT / "tools" / "minix-dyn-target" / f"{arch.triple}-dyn.json"
+    if not path.is_file():
+        sys.exit(f"error: no PIC target spec for {arch.name} at {path}")
+    return path
 
 # What cargo names the object, before it is given the name its soname declares.
 CRATE_SO = "libminix_libc.so"
@@ -84,6 +97,7 @@ def run(cmd: list[object], env: "dict | None" = None) -> int:
 def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     work = OUT / arch.name
     work.mkdir(parents=True, exist_ok=True)
+    target = dyn_target(arch)
 
     # Cargo drives the object's link so it can find the sysroot it just built
     # (`target/dynlibc/.../build/core/<hash>/out`) instead of the path being
@@ -98,7 +112,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         "--release",
         "-p", "minix-libc",
         "--features", "so",
-        "--target", str(DYN_TARGET),
+        "--target", str(target),
         "--crate-type", "cdylib",
         "--",
         "-C", f"linker={lld}",
@@ -107,7 +121,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(so, env=env) != 0:
         return 1
 
-    built = BUILD_DIR / "x86_64-pc-minix-dyn" / "release" / CRATE_SO
+    built = BUILD_DIR / target.stem / "release" / CRATE_SO
     if not built.is_file():
         print(f"error: {built} was not produced", file=sys.stderr)
         return 1
@@ -175,8 +189,6 @@ def main(argv: list[str]) -> int:
     arch, rest = resolve_argv(argv)
     if rest:
         sys.exit(f"error: unknown argument {rest[0]!r}")
-    if arch is not X86_64:
-        sys.exit("error: Phase 3 is x86_64 only (the loader's _start is x86_64)")
 
     rustc = find_stage1_rustc()
     if rustc is None:

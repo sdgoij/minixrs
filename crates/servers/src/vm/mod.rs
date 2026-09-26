@@ -1107,7 +1107,7 @@ impl Fault {
         let mut fault = Self::for_page(ep, cr3, addr);
         for r in vmp.vm_regions.regions.iter().flatten() {
             if r.flags & region::VR_FILE != 0
-                && r.flags & region::VR_EXEC == 0
+                && (r.flags & region::VR_EXEC == 0 || r.flags & region::VR_PREFAULT != 0)
                 && fault.n < region::MAX_REGIONS
             {
                 fault.ranges[fault.n] = (r.vaddr, r.end());
@@ -2804,6 +2804,12 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
     }
     if protflags & 0x04 != 0 {
         flags |= region::VR_EXEC;
+    }
+    // A data segment that carries the execute bit for a page it shares with the
+    // executable one is still data: keep its pages pre-faulted. See
+    // `minix_rt::vmem::PROT_PREFAULT`.
+    if protflags & 0x08 != 0 {
+        flags |= region::VR_PREFAULT;
     }
     let new_r = region::VirRegion::new_file(
         page_addr,

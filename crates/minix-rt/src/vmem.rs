@@ -14,6 +14,14 @@ pub const PROT_READ: i32 = 0x01;
 pub const PROT_WRITE: i32 = 0x02;
 pub const PROT_EXEC: i32 = 0x04;
 pub const PROT_NONE: i32 = 0x00;
+/// Port-private hint, not a POSIX `PROT_`: fault this region's pages in rather
+/// than demand-page them. The kernel cannot fault a page in on behalf of a copy
+/// out of a process's buffer, so a server reading one needs the page present
+/// already; VM's exec pre-fault is what provides that for the image's data
+/// regions, and this is how VFS says a region is data even though it carries
+/// `PROT_EXEC` (a `PT_LOAD` that shares a page with the executable one gets the
+/// execute bit for that page's sake).
+pub const PROT_PREFAULT: i32 = 0x08;
 
 pub const MAP_SHARED: i32 = 0x01;
 pub const MAP_PRIVATE: i32 = 0x02;
@@ -159,6 +167,7 @@ mod tests {
         assert_eq!(PROT_READ, 0x01);
         assert_eq!(PROT_WRITE, 0x02);
         assert_eq!(PROT_EXEC, 0x04);
+        assert_eq!(PROT_PREFAULT, 0x08);
         assert_eq!(PROT_NONE, 0x00);
     }
 

@@ -71,6 +71,11 @@ pub const VR_FILE: u32 = 0x40;
 /// regions (rodata/data) are pre-faulted at exec so VFS's kernel-mode
 /// copies of the image (vircopy of user buffers) hit present pages.
 pub const VR_EXEC: u32 = 0x80;
+/// Pages are filled in at exec rather than demand-paged. Set for a file region
+/// that is data but carries `VR_EXEC` (see `PROT_PREFAULT`): the kernel cannot
+/// fault a page in during a copy out of a process's buffer, so a page a server
+/// may read has to be present already.
+pub const VR_PREFAULT: u32 = 0x400;
 /// Region maps cached file blocks (do_mapcache): a writable, fully
 /// present window over frames the VM block cache shares with a
 /// filesystem. Not file-backed (no fd, no FDIO) — teardown frees the
@@ -371,6 +376,7 @@ mod tests {
         assert_eq!(VR_DATA, 0x20);
         assert_eq!(VR_FILE, 0x40);
         assert_eq!(VR_EXEC, 0x80);
+        assert_eq!(VR_PREFAULT, 0x400);
         assert_eq!(VR_CACHE, 0x100);
         assert_eq!(VR_SHARED, 0x200);
     }

@@ -67,6 +67,32 @@ pub const R_X86_64_RELATIVE: u32 = 8;
 /// `__tls_get_addr`, and this is the id it is handed.
 pub const R_X86_64_DTPMOD64: u32 = 16;
 
+// The same set for the other two targets, whose numbering is their own. Taken
+// from the psABI headers as the fork's LLVM carries them
+// (`ci-llvm/include/llvm/BinaryFormat/ELFRelocs/RISCV.def` and `AArch64.def`),
+// never from memory: a wrong number is a wrong *write* into a loaded image.
+
+// RISC-V has no `GLOB_DAT`: `R_RISCV_64` serves both the absolute and the GOT
+// word (`reloc.rs`'s table says so by giving them the same number).
+pub const R_RISCV_NONE: u32 = 0;
+pub const R_RISCV_64: u32 = 2;
+pub const R_RISCV_RELATIVE: u32 = 3;
+pub const R_RISCV_COPY: u32 = 4;
+pub const R_RISCV_JUMP_SLOT: u32 = 5;
+pub const R_RISCV_TLS_DTPMOD64: u32 = 7;
+
+pub const R_AARCH64_NONE: u32 = 0;
+pub const R_AARCH64_ABS64: u32 = 0x101;
+pub const R_AARCH64_COPY: u32 = 0x400;
+pub const R_AARCH64_GLOB_DAT: u32 = 0x401;
+pub const R_AARCH64_JUMP_SLOT: u32 = 0x402;
+pub const R_AARCH64_RELATIVE: u32 = 0x403;
+pub const R_AARCH64_TLS_DTPMOD64: u32 = 0x404;
+// AArch64's thread-local accesses go through a *descriptor* (the `TLSDESC`
+// dialect) rather than `__tls_get_addr`: the relocation fills a two-word GOT
+// entry, the resolver and its argument.
+pub const R_AARCH64_TLSDESC: u32 = 0x407;
+
 pub const EHDR_SIZE: usize = 64;
 pub const PHDR_SIZE: usize = 56;
 pub const DYN_SIZE: usize = 16;

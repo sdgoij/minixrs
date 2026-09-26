@@ -17,7 +17,11 @@ is only exercised when a second object has to land somewhere other than the
 first. Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
 dependency of a dependency and of the executable at the same time.
 
-Phase 0 is x86_64-only. Usage: python tools/build-dynlink.py [x86]
+Phase 7 made this three-arch: the C objects and the executable are compiled and
+linked for whichever target is named, and only the loader's own `_start` and TLS
+placement differ between them (`crates/ldso`).
+
+Usage: python tools/build-dynlink.py [x86|riscv64|aarch64]
 
 Prerequisites: the fork's stage1 compiler and an LLD (`just bootstrap`), and
 clang on PATH.
@@ -157,8 +161,6 @@ def main(argv: list[str]) -> int:
     arch, rest = resolve_argv(argv)
     if rest:
         sys.exit(f"error: unknown argument {rest[0]!r}")
-    if arch is not X86_64:
-        sys.exit("error: Phase 0 is x86_64 only (the loader's _start is x86_64)")
 
     rustc = find_stage1_rustc()
     if rustc is None:
