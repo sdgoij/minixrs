@@ -46,7 +46,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
-from lld import find_lld  # noqa: E402
+from lld import NO_RELRO, find_lld  # noqa: E402
 
 DSOS = ("libdyn2", "libdyn", "libdyn3")
 INTERP = "/libexec/ld.so"
@@ -119,7 +119,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     # `libdyn2.so` first: it is the file `dynhello` and `libdyn` both name, and the two
     # aliases are the same object linked again under a path soname.
     dso2 = work / "libdyn2.so"
-    if run([lld, "-flavor", "gnu", "-shared", "-soname", "libdyn2.so",
+    if run([lld, "-flavor", "gnu", "-shared", *NO_RELRO, "-soname", "libdyn2.so",
             "-o", dso2, work / "libdyn2.o"]) != 0:
         return 1
     print(f"wrote {dso2}")
@@ -127,7 +127,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     alias_args = []
     for alias_name, soname in ALIASES:
         alias = work / alias_name
-        if run([lld, "-flavor", "gnu", "-shared", "-soname", soname,
+        if run([lld, "-flavor", "gnu", "-shared", *NO_RELRO, "-soname", soname,
                 "-o", alias, work / "libdyn2.o"]) != 0:
             return 1
         print(f"wrote {alias} (soname {soname})")
@@ -139,7 +139,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     # what keeps the aliases in `DT_NEEDED`: they export exactly the same symbols as
     # `libdyn2.so`, so only the first of them would otherwise be recorded.
     dso1 = work / "libdyn.so"
-    link_so = [lld, "-flavor", "gnu", "-shared", "-soname", "libdyn.so", "-o", dso1,
+    link_so = [lld, "-flavor", "gnu", "-shared", *NO_RELRO, "-soname", "libdyn.so", "-o", dso1,
                work / "libdyn.o", "--no-as-needed",
                "-L" + str(work), "-l:libdyn2.so", *alias_args]
     if run(link_so) != 0:
@@ -150,7 +150,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     # nothing depending on it, so what it exercises is the *address space* rather than
     # resolution — it is the region budget, measured (`tools/libdyn3.c`).
     dso3 = work / "libdyn3.so"
-    if run([lld, "-flavor", "gnu", "-shared", "-soname", "libdyn3.so",
+    if run([lld, "-flavor", "gnu", "-shared", *NO_RELRO, "-soname", "libdyn3.so",
             "-o", dso3, work / "libdyn3.o"]) != 0:
         return 1
     print(f"wrote {dso3}")

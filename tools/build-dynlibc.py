@@ -50,7 +50,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from ccarch import Arch, resolve_argv  # noqa: E402
-from lld import find_lld  # noqa: E402
+from lld import NO_RELRO, as_rustc_link_args, find_lld  # noqa: E402
 
 import cdyn  # noqa: E402
 
@@ -101,6 +101,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         "--",
         "-C", f"linker={lld}",
         "-C", "link-arg=--soname=libc.so",
+        *as_rustc_link_args(NO_RELRO),
     ]
     if cdyn.run(so, env=env) != 0:
         return 1

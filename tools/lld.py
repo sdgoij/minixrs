@@ -21,6 +21,10 @@ Candidates, in order:
 4. `rust/build/<host>/ci-llvm/bin/lld` - LLD out of the downloaded CI LLVM.
 5. `lld` on `PATH` - a system LLVM install.
 
+The flags every link of a shared object takes are here too ([`NO_RELRO`]), because
+there is no one else to own them: one site forgets and the object quietly costs a
+VM region more than it should.
+
 Usage: python tools/lld.py
 Prints the linker path, or nothing when there is none: whether that is fatal
 depends on the caller. `just bootstrap` on a host that has not built LLD yet
@@ -37,6 +41,25 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUILD = ROOT / "rust" / "build"
+
+# Link flags for a shared object, both for LLD's own argv and, through
+# [`as_rustc_link_args`], for a `rustc` driving the same link.
+#
+# `GNU_RELRO` is a `PT_LOAD` of its own in a shared object, and the loader spends one VM
+# region per `PT_LOAD` (`crates/servers/src/vm/region.rs::MAX_REGIONS`). Nothing in
+# `crates/ldso` reads the header - it never makes those pages read-only - so the segment
+# costs a region per object and buys nothing. `-z norelro` merges `.data.rel.ro` and
+# `.got` into the writable `PT_LOAD` they are already writable in, and drops it.
+#
+# Not `--no-rosegment`, which would merge the object's read-only data into the executable
+# segment for one more region: that maps `.rodata` and `.dynstr` executable, which the
+# segment above does not.
+NO_RELRO = ["-z", "norelro"]
+
+
+def as_rustc_link_args(args: "list[str]") -> "list[str]":
+    """`args` as the `-C link-arg=` pairs a `rustc` takes in place of the linker's argv."""
+    return [item for arg in args for item in ("-C", f"link-arg={arg}")]
 
 
 def exe(name: str) -> str:
