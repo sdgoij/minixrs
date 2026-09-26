@@ -9,8 +9,9 @@
 # That region is also why the module's argv area is a reserved static rather than an
 # address picked by hand.
 #
-# Cargo keys a custom target's config by the spec's file stem, so this is `wasm32-minix` for
-# `tools/wasm-target/wasm32-minix.json`.
+# `wasm32-minix` is one of the fork's own targets
+# (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this section is
+# keyed by that name rather than by a spec file's stem.
 
 [target.wasm32-minix]
 rustflags = [

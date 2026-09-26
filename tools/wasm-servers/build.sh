@@ -9,31 +9,47 @@
 # different pipeline from the ones the checks ran would be a page nobody had tested.
 #
 # Unlike the M1/M2 harnesses this builds for `wasm32-minix`, so the servers compile with the real
-# `target_os = "minix"` bodies rather than the host stubs. That target is a JSON spec built with
-# `-Z build-std`, so this needs a nightly toolchain and Binaryen's wasm-opt (installed under
-# tools/fork-spike/.tools). Artifacts land in `$here/build/`.
+# `target_os = "minix"` bodies rather than the host stubs. That target is one of the fork's own
+# (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this needs no nightly and no
+# `-Z build-std`: the stage1 compiler everything else uses has the target built in, and
+# `tools/rust-config.py` lists it with `no-std = true`, so its sysroot holds the `core` and
+# `alloc` a module links. Binaryen's wasm-opt is the one thing still fetched separately
+# (tools/fork-spike/.tools). Artifacts land in `$here/build/`.
 
 set -e
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-target="$root/tools/wasm-target/wasm32-minix.json"
 wasm_opt="$root/tools/fork-spike/.tools/node_modules/binaryen/bin/wasm-opt"
 
-echo "== building the wasm kernel instance =="
-(cd "$root/crates/kernel-wasm" && \
-  cargo +nightly build -Z json-target-spec -Z build-std=core,alloc \
-    --release --target "$target")
+rustc=$(ls "$root"/rust/build/*/stage1/bin/rustc.exe "$root"/rust/build/*/stage1/bin/rustc 2>/dev/null | head -1)
+if [ -z "$rustc" ]; then
+  echo "error: the fork's stage1 compiler was not found - run \`just bootstrap\`" >&2
+  exit 1
+fi
 
-echo "== building the servers as a wasm module =="
-(cd "$root/crates/wasm-servers" && \
-  cargo +nightly build -Z json-target-spec -Z build-std=core,alloc \
-    --release --target "$target")
+# The target asks for `rust-lld`, which a Windows stage1 does not ship, so the linker is passed
+# explicitly. `tools/lld.py` is the same resolver the Justfile uses for the minix triples, and
+# what it finds handles `-flavor wasm`. It goes in through `CARGO_TARGET_WASM32_MINIX_LINKER`
+# rather than `RUSTFLAGS`: rustflags would displace the `--export`/`--import-memory` flags each
+# crate sets in its own `.cargo/config.toml`, and the env key is what cargo reads for exactly
+# this setting.
+lld=$(python "$root/tools/lld.py")
+if [ -z "$lld" ]; then
+  echo "error: no lld to link the wasm modules with - run \`just bootstrap\`" >&2
+  exit 1
+fi
 
-echo "== building a program as a wasm module =="
-(cd "$root/crates/wasm-program" && \
-  cargo +nightly build -Z json-target-spec -Z build-std=core,alloc \
-    --release --target "$target")
+build() {
+  echo "== building $1 =="
+  (cd "$root/crates/$1" && \
+    RUSTC="$rustc" CARGO_TARGET_WASM32_MINIX_LINKER="$lld" \
+      cargo build --release --target wasm32-minix)
+}
+
+build kernel-wasm
+build wasm-servers
+build wasm-program
 
 if [ ! -f "$wasm_opt" ]; then
   echo "error: Binaryen not found at $wasm_opt" >&2

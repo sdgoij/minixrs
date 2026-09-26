@@ -172,10 +172,20 @@ jobs:
   # `wasm32-minix`, then the three harnesses over them. `boot.cjs` runs at quiescence and checks the
   # boot chain and every device; `run.js` runs at a live prompt and checks the same artifacts with a
   # shell that is actually working; `page.test.js` checks the page's own code under a stub DOM.
+  #
+  # `wasm32-minix` is one of the fork's own targets, so these build with the stage1 the arch suites
+  # use: no nightly, no `-Z build-std`, and the target's `core`/`alloc` come from the published
+  # sysroot like any other target's. That is why this job has the pin/stage1 dependency and the
+  # 24.04 image (what the stage1 is built on) where it used to need neither.
   wasm-tests:
     name: wasm system
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: [rust-pin, stage1]
+    if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped')
     steps:
       - uses: actions/checkout@v7
         with:
@@ -198,10 +208,17 @@ jobs:
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init --depth 1 rust
 
-      # `-Z build-std` compiles `core` and `alloc` from source, which is a component rather than
-      # part of the toolchain's default profile.
-      - name: Install a nightly, with the sources build-std compiles
-        run: rustup toolchain install nightly --profile minimal --component rust-src
+      # `build.sh` resolves the linker and this recipe resolves the toolchain, and both call
+      # `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      # The fetcher directly, not `just fetch-stage1`: the recipe's other half brings the *root*
+      # workspace in line with the new sysroot (a `cargo clean`, then the smoke binaries that clean
+      # removed), and this job builds neither - its artifacts come from the three wasm workspaces
+      # and from the host `boot-image` binary, which use the default toolchain.
+      - name: Install the prebuilt stage1
+        run: python tools/fetch-stage1.py
 
       # Binaryen is not in the repository (`tools/fork-spike/.gitignore` keeps `.tools/` out), so
       # the path `build.sh` looks for it at is where this has to put it. The npm package carries the

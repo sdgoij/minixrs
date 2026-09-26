@@ -6,9 +6,10 @@
 # onward; for M1 the module brings its own.
 #
 # Two entries because the same crate is built for two wasm targets: the stock
-# `wasm32-unknown-unknown` (M1/M2) and the `os = "minix"` spec at
-# `tools/wasm-target/wasm32-minix.json` (the server harness), which is what the
-# real servers need. Cargo keys custom-target config by the spec's file stem.
+# `wasm32-unknown-unknown` (M1/M2) and `wasm32-minix` (the server harness), which
+# is what the real servers need. `wasm32-minix` is one of the fork's own targets
+# (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this section is
+# keyed by that name.
 
 [target.wasm32-unknown-unknown]
 rustflags = [

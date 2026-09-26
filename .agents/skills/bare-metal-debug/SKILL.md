@@ -779,9 +779,8 @@ For source-level debugging with line numbers, build the kernel with debug
 symbols:
 
 ```
-# Temporarily edit Justfile or run directly:
-cargo build -p kernel-boot --target x86_64-pc-minix.json \
-    -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+# Temporarily edit Justfile or run directly (the fork's stage1 is what knows the target):
+RUSTC="rust/build/host/stage1/bin/rustc" cargo build -p kernel-boot --target x86_64-pc-minix
 ```
 
 Without debug info, LLDB can still resolve function names from the symbol

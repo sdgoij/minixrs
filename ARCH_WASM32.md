@@ -905,14 +905,17 @@ Verified against the shipping target rather than assumed: a stage1 toolchain is
 present, so `cargo check -p minix-rt -p drivers -p servers -p userland --target
 x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there.
 
-- new target spec `wasm32_unknown_minix.rs` alongside the three existing ones in
-  `rust/compiler/rustc_target/src/spec/targets/` — **done as a JSON spec
-  instead**, `tools/wasm-target/wasm32-minix.json`, built with `-Z
-  json-target-spec -Z build-std=core,alloc`. `os: "minix"` is the whole point
-  and the `std` PAL below is not needed for it: the servers and userland depend
-  on `minix-rt`/`minix-std`, not on `std`. The JSON form needs no fork and no
-  bootstrap, which is why it is the route taken for the moment; moving it into
-  `rust/` later makes it an ordinary `--target` with no `-Z` at all.
+- new target spec `wasm32_minix.rs` alongside the three existing ones in
+  `rust/compiler/rustc_target/src/spec/targets/` — **done, and now built in**. It
+  was a JSON spec first (`tools/wasm-target/wasm32-minix.json`, built with
+  `-Z json-target-spec -Z build-std=core,alloc`) because that needed no fork and
+  no bootstrap; it is now a target of the fork's own, so it is an ordinary
+  `--target wasm32-minix` built by the same stage1 compiler as everything else,
+  with no nightly and no `-Z`. The spec is `base::wasm::options()` plus
+  `os: minix` and `--no-entry`, and `tools/rust-config.py` lists it with
+  `no-std = true`, so its sysroot holds `core` and `alloc`. `os: "minix"` is the
+  whole point and the `std` PAL below is not needed for it: the servers and
+  userland depend on `minix-rt`/`minix-std`, not on `std`.
   **This is load-bearing, not cosmetic** — without `os: "minix"` the build
   compiles the `#[cfg(not(target_os = "minix"))]` host stubs instead of the real
   servers (97 of them return `ENOSYS`). See `PORTING_PLAN.md` finding 5.
@@ -1183,8 +1186,8 @@ servers gate their real bodies on `target_os = "minix"` — **1210 times**. The
 outright. So the earlier "compiles cleanly for wasm32" result was true of the
 stub arms, not of the code that runs on a Minix.
 
-`tools/wasm-target/wasm32-minix.json` (an `os: "minix"` spec built with
-`-Z build-std`) removes the ambiguity: `minix-rt`, `minix-libc`, `libs`, `fs`,
+The fork's `wasm32-minix` target (an `os: "minix"` spec, once a JSON one) removes
+the ambiguity: `minix-rt`, `minix-libc`, `libs`, `fs`,
 `drivers`, `minix-std`, `minix-util`, `servers`, `userland` and the kernel all
 compile with their real bodies selected. Doing so immediately surfaced four
 latent bugs that the stubs had been covering (missing wasm32 arms for
@@ -1317,8 +1320,8 @@ because this port asks nothing of them; extending the table means adding the loo
 branch to that server first, and the period/heartbeat machinery that goes with a
 service that never answers is what a runtime-start path will still need.
 
-Two things to know about the harness: it builds with nightly (`-Z
-json-target-spec -Z build-std=core,alloc`), and per-server modules are not yet
+Two things to know about the harness: it builds for `wasm32-minix` with the
+stage1 compiler, and per-server modules are not yet
 separate images — one module with three exports is instantiated three times, so
 each instance carries all three servers' code. §7.2's "exec becomes
 instantiation" wants one image per process, which `--export` plus `--gc-sections`
@@ -1754,8 +1757,9 @@ the thing M3f routed around rather than solved.
 
 Four facts constrain the shape, all established while landing M3e and M3f:
 
-- **A program module must be a cdylib.** `tools/wasm-target/wasm32-minix.json` is
-  `"only-cdylib": true` and links with `--no-entry`, so `userland`'s `[[bin]]` targets cannot
+- **A program module must be a cdylib.** The `wasm32-minix` target is
+  `only_cdylib: true` (from `base::wasm::options()`, which every wasm target
+  shares) and links with `--no-entry`, so `userland`'s `[[bin]]` targets cannot
   be built for this target at all — which is why `wasm-servers` and `wasm-procs` are cdylibs
   with `#[unsafe(no_mangle)] pub extern "C"` entries. `/bin/sh` as a module therefore means a
   cdylib exporting an entry per program, not a `[[bin]]`.
@@ -2322,12 +2326,12 @@ target does and does not cover is written down.
 - ~~The wasm harness (`boot.cjs`, `run.js`, `page.test.js`) and `just publish-wasm` run by hand: no
   workflow mentions any of them, so the best-tested surface in the project is unguarded while the
   weaker arch gates are watched on every push.~~ **Answered: the harnesses are watched now.** `ci.yml`
-  gained `wasm-tests` (a nightly with `rust-src`, Binaryen where `build.sh` looks for it, the three
+  gained `wasm-tests` (Binaryen where `build.sh` looks for it, and the three
   harnesses) and `wasm-wire-tests` (the network link's two, which need no toolchain at all), and
-  `release` needs both. The nightly is *unpinned* — `build.sh` uses `+nightly` — so a toolchain change
-  under the build is now the way this gate can fail for a reason that is nobody's commit; pinning it
-  is the fix if that ever bites. `publish-wasm` is still manual, and cannot be gated by diffing `docs/`
-  after a rebuild: the artifacts are byte-reproducible only under the same nightly.
+  `release` needs both. The toolchain is no longer an unpinned nightly: `wasm32-minix` is one of the
+  fork's own targets, so the job installs the stage1 `toolchain-release.yml` publishes for the pin,
+  exactly as the arch suites do. `publish-wasm` is still manual, and cannot be gated by diffing `docs/`
+  after a rebuild: the artifacts are byte-reproducible only under the same toolchain.
 - ~~M5c's wake (§11): one input-specific export, or the general host→kernel notify — the
   interrupt-controller role, with `input` as its first user?~~ **Answered: the general one, and M5c is
   its first user.** `minix_kernel_irq(irq)` is the host saying "this line is asserted", the kernel

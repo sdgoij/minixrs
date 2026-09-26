@@ -24,9 +24,8 @@ just debug aarch64                        # QEMU with -s -S, waits for GDB on :1
 Fast kernel-only iteration (embedded initramfs/minixfs are stale unless regenerated):
 
 ```
-cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix.json \
-  --features "embed_initramfs,embed_minixfs,aarch64" -Zunstable-options -Zjson-target-spec \
-  -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem --release
+RUSTC="rust/build/host/stage1/bin/rustc" cargo build -p kernel-boot --bin kernel-boot-aarch64 \
+  --target aarch64-unknown-minix --features "embed_initramfs,embed_minixfs,aarch64" --release
 ```
 
 This embeds the existing `target/initramfs_data.rs`/`minixfs_data.rs`. The embedded binaries are

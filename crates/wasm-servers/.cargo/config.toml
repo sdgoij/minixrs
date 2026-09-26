@@ -7,8 +7,9 @@
 # (2..6 MiB) and declared stack region (14..16 MiB) have to stay clear of the
 # image. The boot log reports where the module itself ends.
 #
-# Cargo keys a custom target's config by the spec's file stem, so this is
-# `wasm32-minix` for `tools/wasm-target/wasm32-minix.json`.
+# `wasm32-minix` is one of the fork's own targets
+# (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this section is
+# keyed by that name rather than by a spec file's stem.
 
 [target.wasm32-minix]
 rustflags = [

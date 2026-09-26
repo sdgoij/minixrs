@@ -93,8 +93,9 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
-      # `all` builds std for the host and all three minix targets, so one asset
-      # serves every arch job.
+      # `all` builds a sysroot for the host, the three minix targets, their
+      # `-elf` (position-independent) forms and `wasm32-minix`, so one asset
+      # serves every arch job and the wasm one.
       - name: Build the stage1 toolchain
         run: just bootstrap all
 
@@ -106,10 +107,13 @@ jobs:
           host="$(rustc -vV | sed -n 's/^host: //p')"
           stage1="rust/build/${host}/stage1"
 
-          # Publish only something that is actually usable: every minix std
-          # present, and a rustc that can report its own version.
-          for t in x86_64-pc-minix riscv64gc-unknown-minix aarch64-unknown-minix; do
-            test -d "${stage1}/lib/rustlib/${t}/lib" || { echo "!! no std for ${t}"; exit 1; }
+          # Publish only something that is actually usable: every sysroot a consumer needs
+          # present (`std` for the three arches, `core`/`alloc` only for the `-elf` and wasm
+          # targets), and a rustc that can report its own version.
+          for t in x86_64-pc-minix riscv64gc-unknown-minix aarch64-unknown-minix \
+                   x86_64-pc-minix-elf riscv64gc-unknown-minix-elf aarch64-unknown-minix-elf \
+                   wasm32-minix; do
+            test -d "${stage1}/lib/rustlib/${t}/lib" || { echo "!! no sysroot for ${t}"; exit 1; }
           done
           "${stage1}/bin/rustc" -vV
 
@@ -141,8 +145,9 @@ jobs:
             "\`rust\` submodule of this repository pins at \`${GITHUB_SHA}\`." \
             "" \
             "- host: \`${host}\`" \
-            "- targets: host plus x86_64-pc-minix, riscv64gc-unknown-minix, aarch64-unknown-minix" \
-            "- llvm: from source, \`targets = \"AArch64;RISCV;X86\"\`, \`download-ci-llvm = false\` (\`tools/rust-config.py\`)" \
+            "- targets: host, the three Minix triples, their \`-elf\` (position-independent)" \
+            "forms, and \`wasm32-minix\`" \
+            "- llvm: from source, \`targets = \"AArch64;RISCV;X86;WebAssembly\"\`, \`download-ci-llvm = false\` (\`tools/rust-config.py\`)" \
             "" \
             "Install it with \`just fetch-stage1\`, which derives this tag from the \`rust\`" \
             "submodule commit and verifies \`SHA256SUMS\`. \`just bootstrap\` remains the" \
